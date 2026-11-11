@@ -6,8 +6,8 @@ Yo, again. End-to-end encrypted with MLS (RFC 9420).
 
 ```
 core/         Rust: MLS client core, shared by iOS and Android
-wire/         Rust: formats and API types shared by clients and server
-server/       Mailbox relay and push (APNs, FCM)
+wire/         Rust: formats and API types shared by core and hub
+hub/          Mailbox relay and push (APNs, FCM)
 app/ios/      Swift + UniFFI
 app/android/  Kotlin + UniFFI
 spec/         Protocol specification
