@@ -1,0 +1,40 @@
+name: Fuzz
+
+on:
+  push:
+    branches: [main]
+  schedule:
+    - cron: "17 3 * * *"
+  workflow_dispatch:
+
+jobs:
+  fuzz:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        target: [wire_envelope, wire_content, wire_cert, wire_api, hub_key_package, hub_routes, core_receive]
+    steps:
+      - uses: actions/checkout@v4
+      - name: Nightly and cargo-fuzz
+        run: |
+          rustup toolchain install nightly-2026-10-20 --profile minimal
+          cargo install cargo-fuzz --version 0.13.1 --locked
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            fuzz/target
+          key: fuzz-${{ matrix.target }}-${{ hashFiles('Cargo.lock', 'fuzz/Cargo.toml') }}
+      - name: Fuzz (1 minute on push, 15 nightly)
+        working-directory: fuzz
+        run: |
+          mkdir -p corpus/${{ matrix.target }}
+          cp seeds/${{ matrix.target }}/* corpus/${{ matrix.target }}/ 2>/dev/null || true
+          seconds=60; [ "${{ github.event_name }}" = schedule ] && seconds=900
+          cargo +nightly-2026-10-20 fuzz run ${{ matrix.target }} -- -max_total_time=$seconds
+      - if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: crash-${{ matrix.target }}
+          path: fuzz/artifacts/

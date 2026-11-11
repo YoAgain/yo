@@ -19,6 +19,24 @@ YO_ENV="YO_SEEDS=27,41" dev/cargo test -p yo-tests --test simulation seeded   # 
 
 A failing simulation names its seed; the run is deterministic in what it does, so the seed reproduces it.
 
+## Fuzzing
+
+```sh
+dev/fuzz all 300          # every target 5 minutes (pinned nightly + cargo-fuzz, in Docker)
+dev/fuzz core_receive 600
+```
+
+| Target | What it checks |
+|---|---|
+| `wire_envelope`, `wire_content`, `wire_cert`, `wire_api` | Never a panic; whatever parses encodes back to the same bytes (one encoding per value) |
+| `hub_key_package` | The hub's KeyPackage check never panics, and accepts only what names the uploader it checks for |
+| `hub_routes` | Every route of the hub in-process: never a panic, never a 5xx |
+| `core_receive` | A real device state, then sequences of envelopes seeded with a real chat (Welcome, profile, Yos, a commit): never a panic, the state can always be saved |
+
+Seeds are in `fuzz/seeds/` (`dev/cargo test -p yo-tests --test fuzz_corpus -- --ignored` writes them anew when a
+format changes); CI fuzzes each target a minute on every push and fifteen minutes nightly, and keeps any crash as an
+artifact. A crash found becomes a regular test.
+
 ## Load
 
 ```sh

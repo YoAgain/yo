@@ -8,10 +8,11 @@ use chacha20poly1305::ChaCha20Poly1305;
 use openmls_basic_credential::SignatureKeyPair;
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, VecDeque};
+use tls_codec::{TlsDeserializeBytes, TlsSerialize, TlsSize, VLBytes};
 use yo_wire::Mailbox;
 use zeroize::Zeroize;
 
-const STATE_VERSION: u8 = 1;
+const STATE_VERSION: u8 = 2;
 const AAD: &[u8] = b"yo state v1";
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -107,27 +108,39 @@ impl Drop for State {
     }
 }
 
-#[derive(Serialize, Deserialize)]
-struct Sealed {
+/// One entry of the MLS store, TLS-encoded: the bulk of the state, kept compact.
+#[derive(Debug, TlsSerialize, TlsDeserializeBytes, TlsSize)]
+struct Entry {
+    key: VLBytes,
+    value: VLBytes,
+}
+
+/// The plaintext: version, the device state as JSON (small), the MLS store as TLS (large).
+#[derive(Debug, TlsSerialize, TlsDeserializeBytes, TlsSize)]
+struct Plain {
     version: u8,
-    state: State,
-    mls: Vec<(Vec<u8>, Vec<u8>)>,
+    state: VLBytes,
+    mls: Vec<Entry>,
 }
 
 pub fn seal(state: &State, mls: Entries, key: &[u8; 32]) -> Vec<u8> {
-    let mut mls: Vec<_> = mls.into_iter().collect();
-    mls.sort();
-    let mut sealed_state = Sealed { version: STATE_VERSION, state: state.clone(), mls };
-    let mut plain = serde_json::to_vec(&sealed_state).expect("state encodes");
-    for (key, value) in sealed_state.mls.iter_mut() {
-        key.zeroize();
-        value.zeroize();
+    let mut entries: Vec<_> = mls.into_iter().collect();
+    entries.sort();
+    let plain = Plain {
+        version: STATE_VERSION,
+        state: serde_json::to_vec(state).expect("state encodes").into(),
+        mls: entries.into_iter().map(|(key, value)| Entry { key: key.into(), value: value.into() }).collect(),
+    };
+    let mut bytes = yo_wire::encode(&plain);
+    wipe(plain.state);
+    for entry in plain.mls {
+        wipe(entry.value);
     }
     let nonce: [u8; 12] = crate::identity::random();
     let sealed = ChaCha20Poly1305::new(key.into())
-        .encrypt(&nonce.into(), Payload { msg: &plain, aad: AAD })
+        .encrypt(&nonce.into(), Payload { msg: &bytes, aad: AAD })
         .expect("encryption");
-    plain.zeroize();
+    bytes.zeroize();
     let mut out = nonce.to_vec();
     out.extend_from_slice(&sealed);
     out
@@ -138,16 +151,25 @@ pub fn open(blob: &[u8], key: &[u8; 32]) -> Result<(State, Entries)> {
         return Err(Error::State);
     }
     let (nonce, sealed) = blob.split_at(12);
-    let mut plain = ChaCha20Poly1305::new(key.into())
+    let mut bytes = ChaCha20Poly1305::new(key.into())
         .decrypt(nonce.into(), Payload { msg: sealed, aad: AAD })
         .map_err(|_| Error::State)?;
-    let opened: std::result::Result<Sealed, _> = serde_json::from_slice(&plain);
-    plain.zeroize();
-    let sealed = opened.map_err(|_| Error::State)?;
-    if sealed.version != STATE_VERSION {
+    let decoded: std::result::Result<Plain, _> = yo_wire::decode(&bytes);
+    bytes.zeroize();
+    let mut plain = decoded.map_err(|_| Error::State)?;
+    if plain.version != STATE_VERSION {
         return Err(Error::State);
     }
-    Ok((sealed.state, sealed.mls.into_iter().collect()))
+    let state: std::result::Result<State, _> = serde_json::from_slice(plain.state.as_slice());
+    let entries =
+        std::mem::take(&mut plain.mls).into_iter().map(|entry| (entry.key.into(), entry.value.into())).collect();
+    wipe(plain.state);
+    Ok((state.map_err(|_| Error::State)?, entries))
+}
+
+fn wipe(bytes: VLBytes) {
+    let mut bytes: Vec<u8> = bytes.into();
+    bytes.zeroize();
 }
 
 pub fn hex(bytes: &[u8]) -> String {

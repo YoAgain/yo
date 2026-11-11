@@ -1,6 +1,8 @@
 [workspace]
 resolver = "2"
 members = ["core/wire", "core/mls", "core/bindings", "hub", "tests"]
+# Fuzz targets build with nightly and cargo-fuzz: dev/fuzz.
+exclude = ["fuzz"]
 
 [workspace.package]
 edition = "2021"

@@ -193,6 +193,12 @@ impl Client {
         }
     }
 
+    /// For fuzzing: processes one envelope as if it came from the inbox (one transaction, like `sync`).
+    #[cfg(feature = "fuzz")]
+    pub fn receive_for_fuzzing(&mut self, sealed: &[u8]) -> Result<()> {
+        self.atomic(|c| c.receive(sealed))
+    }
+
     /// Opens a sealed state.
     pub fn restore(transport: Arc<dyn Transport>, blob: &[u8], key: &[u8; 32]) -> Result<Client> {
         let (state, entries) = state::open(blob, key)?;

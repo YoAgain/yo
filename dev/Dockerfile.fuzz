@@ -1,0 +1,6 @@
+# Fuzzing needs nightly (sanitizers, libFuzzer): a pinned nightly and cargo-fuzz.
+FROM yo-rust:1.99.1
+RUN apt-get update && apt-get install -y --no-install-recommends g++ && rm -rf /var/lib/apt/lists/* \
+ && rustup toolchain install nightly-2026-10-20 --profile minimal \
+ && cargo install cargo-fuzz --version 0.13.1 --locked \
+ && rm -rf /usr/local/cargo/registry

@@ -82,6 +82,8 @@ pub struct Http {
     /// Every signed request, for replay tests.
     pub recorded: Mutex<Vec<Recorded>>,
     pub faults: Mutex<Vec<(String, Fault)>>,
+    /// Every request: method, path, body. Seeds for the fuzzers.
+    pub sent: Mutex<Vec<(String, String, Vec<u8>)>>,
 }
 
 impl Http {
@@ -95,6 +97,7 @@ impl Http {
             base: RwLock::new(base),
             recorded: Mutex::default(),
             faults: Mutex::default(),
+            sent: Mutex::default(),
         })
     }
 
@@ -114,6 +117,7 @@ impl Transport for Http {
                 body.to_vec(),
             ));
         }
+        self.sent.lock().unwrap_or_else(PoisonError::into_inner).push((method.into(), path.into(), body.to_vec()));
         let fault = {
             let mut faults = self.faults.lock().unwrap_or_else(PoisonError::into_inner);
             faults.iter().position(|(pattern, _)| path.contains(pattern.as_str())).map(|i| faults.remove(i).1)

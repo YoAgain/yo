@@ -1,0 +1,21 @@
+#!/bin/sh
+# Fuzzing in the pinned nightly image: dev/fuzz <target> [seconds]   or   dev/fuzz all [seconds per target]
+# Seeds in fuzz/seeds/<target> (written by tests/tests/fuzz_corpus.rs), the growing corpus in fuzz/corpus/<target>,
+# crashes in fuzz/artifacts/<target>.
+set -e
+root=$(cd "$(dirname "$0")/.." && pwd)
+image=yo-fuzz:2026-10-20
+docker image inspect "$image" >/dev/null 2>&1 || docker build -q -t "$image" -f "$root/dev/Dockerfile.fuzz" "$root/dev" >/dev/null
+seconds=${2:-60}
+targets=$1
+[ "$targets" = all ] && targets="wire_envelope wire_content wire_cert wire_api hub_key_package hub_routes core_receive"
+for target in $targets; do
+  echo "== $target ($seconds s)"
+  # The corpus starts from the committed seeds and keeps what the fuzzer finds (not committed).
+  mkdir -p "$root/fuzz/corpus/$target"
+  [ -d "$root/fuzz/seeds/$target" ] && cp -n "$root/fuzz/seeds/$target/"* "$root/fuzz/corpus/$target/" 2>/dev/null || true
+  docker run --rm -i --network host -e CARGO_HOME=/cargo -e CARGO_TERM_COLOR=never \
+    -v "$HOME/.cache/yo-cargo:/cargo" -v "$root:/yo" -w /yo/fuzz "$image" \
+    cargo +nightly-2026-10-20 fuzz run "$target" -- -max_total_time="$seconds" 2>&1 \
+    | grep -E "^#[0-9]+.*(DONE|pulse)|Done [0-9]+ runs|SUMMARY|panicked|ERROR|crash-|cov:" | tail -3
+done

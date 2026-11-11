@@ -1,0 +1,75 @@
+[package]
+name = "yo-fuzz"
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+[package.metadata]
+cargo-fuzz = true
+
+# Not part of the main workspace: built with nightly by dev/fuzz.
+[workspace]
+
+[dependencies]
+libfuzzer-sys = "=0.4.10"
+yo-wire = { path = "../core/wire" }
+yo-core = { path = "../core/mls", features = ["fuzz"] }
+yo-hub = { path = "../hub" }
+openmls = { version = "=0.9.1", default-features = false }
+openmls_rust_crypto = "=0.6.0"
+tls_codec = { version = "=0.5.0", features = ["derive", "mls"] }
+tokio = { version = "=1.53.2", features = ["rt"] }
+axum = "=0.8.4"
+tower = { version = "0.5", features = ["util"] }
+
+[profile.release]
+debug = 1
+
+[[bin]]
+name = "wire_envelope"
+path = "fuzz_targets/wire_envelope.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "wire_content"
+path = "fuzz_targets/wire_content.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "wire_cert"
+path = "fuzz_targets/wire_cert.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "wire_api"
+path = "fuzz_targets/wire_api.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "hub_key_package"
+path = "fuzz_targets/hub_key_package.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "hub_routes"
+path = "fuzz_targets/hub_routes.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "core_receive"
+path = "fuzz_targets/core_receive.rs"
+test = false
+doc = false
+bench = false

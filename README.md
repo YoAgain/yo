@@ -30,6 +30,7 @@ tests/          scenarios, simulation, robustness, load
 ```sh
 dev/cargo test --workspace                                        # needs only Docker
 dev/cargo run --release -p yo-tests --bin yo-load -- --clients 200
+dev/fuzz all 300                                                  # cargo-fuzz, every target 5 minutes
 ```
 
 Tests and measured throughput: [tests/README.md](tests/README.md). Hub configuration: [hub/src/main.rs](hub/src/main.rs).
