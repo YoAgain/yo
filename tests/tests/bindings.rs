@@ -45,7 +45,8 @@ fn the_app_layer_works_end_to_end() {
     assert!(events.iter().any(|e| matches!(e, YoEvent::Message { kind: MessageKind::Yo, .. })));
     assert!(events.iter().any(|e| matches!(e, YoEvent::Profile { name, .. } if name == "ALICE")));
     assert_eq!(b.contacts().len(), 1);
-    assert_eq!(b.safety_number(pa.clone()).unwrap(), a.safety_number(pb.clone()).unwrap());
+    // A knows B by number; B knows A by user id (A wrote first).
+    assert_eq!(b.safety_number(a.user_id()).unwrap(), a.safety_number(pb.clone()).unwrap());
     // The app is killed and started again from what the store saved.
     let saved = file_a.0.lock().unwrap().clone();
     assert!(!saved.is_empty());

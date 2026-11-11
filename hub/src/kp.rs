@@ -16,14 +16,8 @@ pub struct Checked {
 }
 
 /// Checks a KeyPackage: encoding, signature, lifetime, suite, credential, certificate, and that the certificate
-/// is the uploader's: its phone, its account key, its mailbox.
-pub fn check(
-    crypto: &RustCrypto,
-    bytes: &[u8],
-    phone: &[u8],
-    account_key: &[u8; 32],
-    mailbox: &Mailbox,
-) -> Option<Checked> {
+/// is the uploader's: its account key, its mailbox.
+pub fn check(crypto: &RustCrypto, bytes: &[u8], account_key: &[u8; 32], mailbox: &Mailbox) -> Option<Checked> {
     if bytes.len() > MAX_KEY_PACKAGE_LEN {
         return None;
     }
@@ -38,8 +32,7 @@ pub fn check(
     let credential = BasicCredential::try_from(leaf.credential().clone()).ok()?;
     let certificate = DeviceCertificate::verify(credential.identity()).ok()?;
     let body = &certificate.body;
-    let fits = body.phone() == phone
-        && &body.account_key == account_key
+    let fits = &body.account_key == account_key
         && &body.mailbox == mailbox
         && body.device_key.as_slice() == leaf.signature_key().as_slice();
     fits.then(|| Checked { hash: yo_wire::sha256(bytes), last_resort: key_package.last_resort(), certificate })

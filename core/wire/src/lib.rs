@@ -7,6 +7,7 @@ pub mod api;
 pub mod cert;
 pub mod content;
 pub mod envelope;
+pub mod handle;
 pub mod limits;
 pub mod phone;
 pub mod request;
@@ -15,6 +16,8 @@ pub use tls_codec::{self, VLBytes};
 
 /// The protocol version of every versioned structure here.
 pub const VERSION: u8 = 1;
+/// A user id: 16 random bytes the hub gives an account when its first handle is verified. It never changes.
+pub const USER_ID_LEN: usize = 16;
 /// A mailbox id: 16 random bytes chosen by the device.
 pub const MAILBOX_LEN: usize = 16;
 /// A group id: 32 random bytes chosen by the creator.
@@ -29,6 +32,7 @@ pub const TOKEN_LEN: usize = 32;
 pub const EPOCH_TOKEN_LABEL: &str = "yo epoch token";
 
 pub type Mailbox = [u8; MAILBOX_LEN];
+pub type UserId = [u8; USER_ID_LEN];
 pub type GroupId = [u8; GROUP_ID_LEN];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]

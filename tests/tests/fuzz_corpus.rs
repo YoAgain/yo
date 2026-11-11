@@ -54,7 +54,12 @@ fn write_fuzz_corpus() {
             yo_wire::cert::DeviceCertificate::verify(check.certificate.as_slice()).unwrap().body.account_key
         })
         .unwrap();
-    let lookup = api::LookupResult { account_key, key_packages: vec![] };
+    let user_id: [u8; 16] = (0..16)
+        .map(|i| u8::from_str_radix(&a.user_id()[2 * i..2 * i + 2], 16).unwrap())
+        .collect::<Vec<_>>()
+        .try_into()
+        .unwrap();
+    let lookup = api::LookupResult { user_id, account_key, key_packages: vec![] };
     write("seeds", "core_lookup.bin", &yo_wire::encode(&lookup));
     // A chat: Welcome, profile, Yo; an update; more Yos.
     a.send_yo(&pb).unwrap();

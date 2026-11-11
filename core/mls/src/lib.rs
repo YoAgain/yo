@@ -27,6 +27,7 @@ use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 use yo_wire::api::{self, status};
 use yo_wire::content::Message;
+use yo_wire::handle::{Handle, KIND_PHONE, KIND_USER, KIND_USERNAME};
 use yo_wire::limits::{KEY_PACKAGE_REFILL_BELOW, KEY_PACKAGE_TARGET, MAX_INBOX_FETCH};
 use yo_wire::request::{HEADER_DEVICE, HEADER_SIGNATURE, HEADER_TIME};
 use yo_wire::{decode, encode, envelope, phone, sha256, Mailbox, EPOCH_TOKEN_LABEL, TOKEN_LEN};
@@ -64,24 +65,28 @@ fn retryable(error: &Error) -> bool {
     }
 }
 
-/// What happened, for the app to show.
+/// What happened, for the app to show. `user` is the contact's user id (hex): what `contacts()` describes and
+/// what `send` takes to answer.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Event {
     /// Someone started a chat with this device.
-    NewChat { phone: String },
+    NewChat { user: String },
     /// A message: a Yo, or later text, a link, a location.
-    Message { phone: String, sent_at_ms: u64, content: Content },
-    /// One's own other device sent this to `phone`.
-    SentElsewhere { phone: String, sent_at_ms: u64, content: Content },
+    Message { user: String, sent_at_ms: u64, content: Content },
+    /// One's own other device sent this to `user`.
+    SentElsewhere { user: String, sent_at_ms: u64, content: Content },
     /// A contact's name.
-    Profile { phone: String, name: String },
+    Profile { user: String, name: String },
     /// A contact's identity changed: new device without passkey, or something worse. Verification is reset.
-    IdentityChanged { phone: String },
+    IdentityChanged { user: String },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ContactInfo {
-    pub phone: String,
+    /// The user id (hex).
+    pub user: String,
+    /// How this device knows the contact: "+491701234567", "CHRIS".
+    pub handles: Vec<String>,
     pub name: Option<String>,
     pub verified: bool,
     /// Verification is offered only for an identity that survives a device change (spec 3).
@@ -141,8 +146,8 @@ impl Client {
         }
     }
 
-    /// Registers this device with the code from the SMS: a new account key, a new identity. Any device of the
-    /// number registered before is replaced.
+    /// Registers this device with the code from the SMS: a new account key. The number keeps its user id if it
+    /// had one (a new phone); any device of it registered before is replaced.
     pub fn register(
         transport: Arc<dyn Transport>,
         phone_input: &str,
@@ -154,9 +159,11 @@ impl Client {
         let account = SigningKey::from_bytes(&identity::random());
         let signer = SignatureKeyPair::new(SignatureScheme::ED25519).map_err(|_| Error::Internal("key"))?;
         let mailbox: Mailbox = identity::random();
-        let certificate = identity::certify(&account, &digits, signer.public(), &mailbox, 0)?;
+        let certificate = identity::certify(&account, signer.public(), &mailbox, 0)?;
         let state = State {
             phone: digits.clone(),
+            user_id: String::new(),
+            username: None,
             flags: 0,
             account_secret: account.to_bytes(),
             auth_secret: identity::random(),
@@ -187,10 +194,12 @@ impl Client {
         };
         let response =
             client.transport.request("POST", api::VERIFY_CHECK, &[], &encode(&request)).map_err(Error::Network)?;
-        match response.status {
-            status::NO_CONTENT => Ok(client),
-            _ => Err(refused(&response)),
+        if response.status != status::OK {
+            return Err(refused(&response));
         }
+        let registered: api::Registered = decode(&response.body)?;
+        client.state.user_id = hex(&registered.user_id);
+        Ok(client)
     }
 
     /// For fuzzing: processes one envelope as if it came from the inbox (one transaction, like `sync`).
@@ -240,6 +249,15 @@ impl Client {
 
     pub fn phone(&self) -> &str {
         &self.state.phone
+    }
+
+    /// The own user id (hex): stable across new phones.
+    pub fn user_id(&self) -> &str {
+        &self.state.user_id
+    }
+
+    pub fn username(&self) -> Option<&str> {
+        self.state.username.as_deref()
     }
 
     pub fn mailbox(&self) -> Mailbox {
@@ -356,8 +374,8 @@ impl Client {
         }
     }
 
-    fn lookup(&mut self, peer: &str, key_packages: bool) -> Result<api::LookupResult> {
-        let body = encode(&api::Lookup { phone: peer.as_bytes().to_vec().into(), key_packages: key_packages as u8 });
+    fn lookup(&mut self, handle: &Handle, key_packages: bool) -> Result<api::LookupResult> {
+        let body = encode(&api::Lookup { handle: handle.clone(), key_packages: key_packages as u8 });
         let response = self.signed("POST", api::LOOKUP, &body)?;
         match response.status {
             status::OK => Ok(decode(&response.body)?),
@@ -453,26 +471,55 @@ impl Client {
         Ok(())
     }
 
-    /// Pins a contact's account key; a different one than pinned is an identity change.
-    fn pin(&mut self, phone: &str, account_key: [u8; 32], passkey: bool) {
-        match self.state.contacts.get_mut(phone) {
-            Some(contact) if contact.account_key == account_key => {
-                contact.passkey = passkey;
-                contact.stale = false;
+    fn my_account_key(&self) -> [u8; 32] {
+        SigningKey::from_bytes(&self.state.account_secret).verifying_key().to_bytes()
+    }
+
+    /// Pins a contact's account key; a different one than pinned for the same user is an identity change.
+    fn pin(&mut self, user: &str, account_key: [u8; 32], passkey: bool, handle: Option<String>) {
+        let contact = self.state.contacts.entry(user.to_owned()).or_insert(Contact {
+            account_key,
+            passkey,
+            name: None,
+            verified: false,
+            blocked: false,
+            stale: false,
+            handles: Vec::new(),
+        });
+        if contact.account_key != account_key {
+            let known = contact.account_key != [0; 32];
+            contact.account_key = account_key;
+            contact.verified = false;
+            if known {
+                self.events.push(Event::IdentityChanged { user: user.to_owned() });
             }
-            Some(contact) => {
-                contact.account_key = account_key;
-                contact.passkey = passkey;
-                contact.verified = false;
-                contact.stale = false;
-                self.events.push(Event::IdentityChanged { phone: phone.to_owned() });
+        }
+        let contact = self.state.contacts.get_mut(user).expect("inserted");
+        contact.passkey = passkey;
+        contact.stale = false;
+        if let Some(handle) = handle {
+            if !contact.handles.contains(&handle) {
+                contact.handles.push(handle);
             }
-            None => {
-                self.state.contacts.insert(
-                    phone.to_owned(),
-                    Contact { account_key, passkey, name: None, verified: false, blocked: false, stale: false },
-                );
-            }
+        }
+    }
+
+    /// The user a handle names, if this device knows: by its id, or by a handle it found the contact with.
+    fn known_user(&self, handle: &Handle) -> Option<String> {
+        if handle.kind == KIND_USER {
+            return Some(hex(handle.value.as_slice()));
+        }
+        let shown = handle.display();
+        self.state.contacts.iter().find(|(_, c)| c.handles.contains(&shown)).map(|(user, _)| user.clone())
+    }
+
+    /// The own handles: sending to them is sending to oneself.
+    fn is_me(&self, handle: &Handle) -> bool {
+        match handle.kind {
+            KIND_USER => hex(handle.value.as_slice()) == self.state.user_id,
+            KIND_PHONE => handle.value.as_slice() == self.state.phone.as_bytes(),
+            KIND_USERNAME => self.state.username.as_deref().map(str::as_bytes) == Some(handle.value.as_slice()),
+            _ => false,
         }
     }
 
@@ -498,9 +545,13 @@ impl Client {
         }
     }
 
-    /// Creates a chat with `peer` (spec 4.2).
-    fn start_chat(&mut self, peer: &str) -> Result<GroupId> {
-        let found = self.lookup(peer, true)?;
+    /// Creates a chat with whoever `handle` names (spec 4.2); returns the user id and the group.
+    fn start_chat(&mut self, handle: &Handle) -> Result<(String, GroupId)> {
+        let found = self.lookup(handle, true)?;
+        let peer = hex(&found.user_id);
+        if peer == self.state.user_id {
+            return Err(Error::Protocol("sending to oneself"));
+        }
         if found.key_packages.is_empty() {
             return Err(Error::Protocol("no key package"));
         }
@@ -516,13 +567,14 @@ impl Client {
             }
             let leaf = key_package.leaf_node();
             let body = identity::member(leaf.credential(), leaf.signature_key().as_slice())?;
-            if body.phone() != peer.as_bytes() || body.account_key != found.account_key {
+            if body.account_key != found.account_key {
                 return Err(Error::Protocol("key package names someone else"));
             }
             passkey &= body.has_passkey();
             key_packages.push(key_package);
         }
-        self.pin(peer, found.account_key, passkey);
+        let shown = (handle.kind != KIND_USER).then(|| handle.display());
+        self.pin(&peer, found.account_key, passkey, shown);
         let id: [u8; 32] = identity::random();
         let group_id = GroupId::from_slice(&id);
         let mut group = MlsGroup::new_with_group_id(
@@ -546,7 +598,7 @@ impl Client {
         self.state.chats.insert(
             group_key(&group_id),
             Chat {
-                peer: peer.to_owned(),
+                peer: peer.clone(),
                 last_update_ms: (self.clock)(),
                 sent_since_update: 0,
                 needs_update: false,
@@ -558,7 +610,7 @@ impl Client {
         if let Some(name) = self.state.name.clone() {
             self.send_in(&group_id, Content::Profile { name }, false)?;
         }
-        Ok(group_id)
+        Ok((peer, group_id))
     }
 
     fn update_due(&self, group: &GroupId) -> bool {
@@ -831,49 +883,55 @@ impl Client {
         }
         let staged =
             StagedWelcome::new_from_welcome(&self.provider, &profile::join_config(), welcome, None).map_err(mls)?;
-        let mut peer: Option<(Vec<u8>, [u8; 32], bool)> = None;
+        let mut peer: Option<([u8; 32], bool)> = None;
         let mut me = false;
-        let account_key = SigningKey::from_bytes(&self.state.account_secret).verifying_key().to_bytes();
+        let account_key = self.my_account_key();
         for member in staged.members() {
             let body = identity::member(&member.credential, &member.signature_key)?;
-            if body.phone() == self.state.phone.as_bytes() {
-                if body.account_key != account_key {
-                    return Err(Error::Protocol("another account of my number"));
-                }
+            if body.account_key == account_key {
                 me |= body.mailbox == self.state.mailbox;
                 continue;
             }
             match &peer {
-                None => peer = Some((body.phone().to_vec(), body.account_key, body.has_passkey())),
-                Some((phone, key, _)) if phone == body.phone() && *key == body.account_key => {}
+                None => peer = Some((body.account_key, body.has_passkey())),
+                Some((key, _)) if *key == body.account_key => {}
                 // v1: a chat between exactly two accounts.
                 Some(_) => return Err(Error::Protocol("more than two accounts")),
             }
         }
-        let (peer_phone, peer_key, passkey) = peer.ok_or(Error::Protocol("nobody else"))?;
+        let (peer_key, passkey) = peer.ok_or(Error::Protocol("nobody else"))?;
         let sender = staged
             .members()
             .find(|m| m.index == staged.welcome_sender_index())
             .and_then(|m| identity::claimed(&m.credential))
             .ok_or(Error::Protocol("sender"))?;
-        if !me || sender.phone() != peer_phone.as_slice() {
+        if !me || sender.account_key != peer_key {
             return Err(Error::Protocol("welcome"));
         }
-        let peer = String::from_utf8(peer_phone).map_err(|_| Error::Protocol("phone"))?;
-        if self.state.contacts.get(&peer).is_some_and(|c| c.blocked) {
-            return Err(Error::Blocked);
-        }
-        // The hub attests the number's account key: nobody can start a chat in someone else's name. A key the
-        // number no longer has is a replaced device's (or a forger's): either way the chat is not joined.
-        let attested = self.state.contacts.get(&peer).is_some_and(|c| !c.stale && c.account_key == peer_key);
-        if !attested && self.lookup(&peer, false)?.account_key != peer_key {
+        let ignore = |c: &mut Self| -> Result<()> {
             // Kept, not rolled back: the group is remembered as ignored, and what follows in it is discarded.
             let id: [u8; 32] =
                 staged.group_context().group_id().as_slice().try_into().map_err(|_| Error::Protocol("group id"))?;
-            self.ignore(id);
-            return Ok(());
+            c.ignore(id);
+            Ok(())
+        };
+        // Who is it? A contact already pinned to this key, or the hub's answer for the key: nobody can start a chat
+        // in someone else's name. A key that is no user's current key is a replaced device's (or a forger's):
+        // either way the chat is not joined.
+        let known =
+            self.state.contacts.iter().find(|(_, c)| !c.stale && c.account_key == peer_key).map(|(u, _)| u.clone());
+        let peer = match known {
+            Some(user) => user,
+            None => match self.lookup(&Handle::account_key(&peer_key), false) {
+                Ok(found) if found.account_key == peer_key => hex(&found.user_id),
+                Ok(_) | Err(Error::NotOnYo) => return ignore(self),
+                Err(error) => return Err(error),
+            },
+        };
+        if self.state.contacts.get(&peer).is_some_and(|c| c.blocked) {
+            return ignore(self);
         }
-        self.pin(&peer, peer_key, passkey);
+        self.pin(&peer, peer_key, passkey, None);
         let group = staged.into_group(&self.provider).map_err(mls)?;
         if group.ciphersuite() != profile::CIPHERSUITE || group.group_id().as_slice().len() != 32 {
             return Err(Error::Protocol("group"));
@@ -890,7 +948,7 @@ impl Client {
                 no_updates: false,
             },
         );
-        self.events.push(Event::NewChat { phone: peer });
+        self.events.push(Event::NewChat { user: peer });
         Ok(())
     }
 
@@ -908,11 +966,8 @@ impl Client {
         let inflight = chat.inflight.is_some();
         let mut group = self.load(&group_id)?;
         // The accounts in the group, as their certificates were checked when they joined.
-        let accounts: Vec<(Vec<u8>, [u8; 32])> = group
-            .members()
-            .filter_map(|m| identity::claimed(&m.credential))
-            .map(|body| (body.phone().to_vec(), body.account_key))
-            .collect();
+        let accounts: Vec<[u8; 32]> =
+            group.members().filter_map(|m| identity::claimed(&m.credential)).map(|body| body.account_key).collect();
         // A commit from someone else for this epoch means the hub took theirs: ours, still unanswered, lost.
         if message.content_type() == ContentType::Commit && inflight {
             group.clear_pending_commit(self.provider.storage()).map_err(mls)?;
@@ -925,7 +980,7 @@ impl Client {
             .process_message(&self.provider, message)
             .map_err(|e| Error::Mls(format!("{e:?} (message epoch {message_epoch}, group epoch {group_epoch})")))?;
         let sender = identity::claimed(processed.credential()).ok_or(Error::Protocol("sender"))?;
-        let from_me = sender.phone() == self.state.phone.as_bytes();
+        let from_me = sender.account_key == self.my_account_key();
         match processed.into_content() {
             ProcessedMessageContent::ApplicationMessage(application) => {
                 let message = Message::decode(&application.into_bytes())?;
@@ -937,15 +992,13 @@ impl Client {
                         if let Some(contact) = self.state.contacts.get_mut(&peer) {
                             contact.name = Some(name.clone());
                         }
-                        self.events.push(Event::Profile { phone: peer, name });
+                        self.events.push(Event::Profile { user: peer, name });
                     }
                     Content::Profile { .. } => {}
                     content if from_me => {
-                        self.events.push(Event::SentElsewhere { phone: peer, sent_at_ms: message.sent_at_ms, content })
+                        self.events.push(Event::SentElsewhere { user: peer, sent_at_ms: message.sent_at_ms, content })
                     }
-                    content => {
-                        self.events.push(Event::Message { phone: peer, sent_at_ms: message.sent_at_ms, content })
-                    }
+                    content => self.events.push(Event::Message { user: peer, sent_at_ms: message.sent_at_ms, content }),
                 }
                 Ok(())
             }
@@ -966,11 +1019,9 @@ impl Client {
         &self,
         staged: &StagedCommit,
         sender: &yo_wire::cert::CertificateBody,
-        accounts: &[(Vec<u8>, [u8; 32])],
+        accounts: &[[u8; 32]],
     ) -> Result<()> {
-        let allowed = |body: &yo_wire::cert::CertificateBody| {
-            accounts.iter().any(|(phone, key)| phone.as_slice() == body.phone() && *key == body.account_key)
-        };
+        let allowed = |body: &yo_wire::cert::CertificateBody| accounts.contains(&body.account_key);
         // v1 commits change membership and keys, nothing else: no extensions, PSKs, re-inits.
         let allowed_kind =
             |p: &QueuedProposal| matches!(p.proposal(), Proposal::Add(_) | Proposal::Update(_) | Proposal::Remove(_));
@@ -986,7 +1037,7 @@ impl Client {
         }
         if let Some(leaf) = staged.update_path_leaf_node() {
             let body = identity::member(leaf.credential(), leaf.signature_key().as_slice())?;
-            if body.phone() != sender.phone() || body.account_key != sender.account_key || !allowed(&body) {
+            if body.account_key != sender.account_key || !allowed(&body) {
                 return Err(Error::Protocol("leaf of someone else"));
             }
         }
@@ -1018,23 +1069,24 @@ impl Client {
 
     // ---- what the app calls ----
 
-    /// Sends a Yo.
-    pub fn send_yo(&mut self, phone_input: &str) -> Result<Vec<Event>> {
-        self.send(phone_input, Content::Yo)
+    /// Sends a Yo to "+49 170 …", "chris", or a user id from an event.
+    pub fn send_yo(&mut self, to: &str) -> Result<Vec<Event>> {
+        self.send(to, Content::Yo)
     }
 
-    /// Sends a message to a number: starts a chat if there is none, updates it if due (spec 4).
-    pub fn send(&mut self, phone_input: &str, content: Content) -> Result<Vec<Event>> {
-        let result = self.send_inner(phone_input, content);
+    /// Sends a message: starts a chat if there is none, updates it if due (spec 4).
+    pub fn send(&mut self, to: &str, content: Content) -> Result<Vec<Event>> {
+        let result = self.send_inner(to, content);
         self.finish(result)
     }
 
-    fn send_inner(&mut self, phone_input: &str, content: Content) -> Result<()> {
-        let peer = phone::normalize(phone_input)?;
-        if peer == self.state.phone {
+    fn send_inner(&mut self, to: &str, content: Content) -> Result<()> {
+        let handle = Handle::parse(to)?;
+        if self.is_me(&handle) {
             return Err(Error::Protocol("sending to oneself"));
         }
-        if self.state.contacts.get(&peer).is_some_and(|c| c.blocked) {
+        let mut user = self.known_user(&handle);
+        if user.as_ref().and_then(|u| self.state.contacts.get(u)).is_some_and(|c| c.blocked) {
             return Err(Error::Blocked);
         }
         if let Content::Unknown(_) = content {
@@ -1047,11 +1099,33 @@ impl Client {
             Ok(()) | Err(Error::Network(_)) => {}
             Err(error) => return Err(error),
         }
+        // A handle this device does not know may still name a contact (someone who wrote first is known by user
+        // id only): ask who it is, without spending a KeyPackage, so the existing chat is used and not a second one.
+        if user.is_none() && handle.kind != KIND_USER && !self.state.contacts.is_empty() {
+            let found = self.lookup(&handle, false)?;
+            let id = hex(&found.user_id);
+            if id == self.state.user_id {
+                return Err(Error::Protocol("sending to oneself"));
+            }
+            if let Some(contact) = self.state.contacts.get_mut(&id) {
+                let shown = handle.display();
+                if !contact.handles.contains(&shown) {
+                    contact.handles.push(shown);
+                }
+            }
+            user = Some(id);
+        }
+        if user.as_ref().and_then(|u| self.state.contacts.get(u)).is_some_and(|c| c.blocked) {
+            return Err(Error::Blocked);
+        }
         for _ in 0..2 {
-            let group = match self.chat_with(&peer) {
-                Some(group) => group,
-                None => self.atomic(|c| c.start_chat(&peer))?,
+            let (peer, group) = match user.as_ref().and_then(|u| self.chat_with(u).map(|g| (u.clone(), g))) {
+                Some(found) => found,
+                None => self.atomic(|c| c.start_chat(&handle))?,
             };
+            if self.state.contacts.get(&peer).is_some_and(|c| c.blocked) {
+                return Err(Error::Blocked);
+            }
             self.ensure_fresh(&group)?;
             let content = content.clone();
             self.atomic(|c| c.send_in(&group, content, true))?;
@@ -1059,6 +1133,7 @@ impl Client {
             if !self.flush().contains(&peer) {
                 return Ok(());
             }
+            user = Some(peer);
         }
         Ok(())
     }
@@ -1135,8 +1210,9 @@ impl Client {
         self.state
             .contacts
             .iter()
-            .map(|(phone, c)| ContactInfo {
-                phone: phone.clone(),
+            .map(|(user, c)| ContactInfo {
+                user: user.clone(),
+                handles: c.handles.clone(),
                 name: c.name.clone(),
                 verified: c.verified,
                 can_verify: c.passkey,
@@ -1145,18 +1221,25 @@ impl Client {
             .collect()
     }
 
+    /// The contact a handle names, as this device knows it.
+    fn contact_user(&self, who: &str) -> Result<String> {
+        let user = self.known_user(&Handle::parse(who)?).ok_or(Error::NotOnYo)?;
+        Ok(user)
+    }
+
     /// The safety number with a contact (spec 3).
-    pub fn safety_number(&self, phone_input: &str) -> Result<String> {
-        let peer = phone::normalize(phone_input)?;
-        let contact = self.state.contacts.get(&peer).ok_or(Error::NotOnYo)?;
-        let mine = SigningKey::from_bytes(&self.state.account_secret).verifying_key().to_bytes();
-        Ok(identity::safety_number((&self.state.phone, &mine), (&peer, &contact.account_key)))
+    pub fn safety_number(&self, who: &str) -> Result<String> {
+        let user = self.contact_user(who)?;
+        let contact = self.state.contacts.get(&user).ok_or(Error::NotOnYo)?;
+        let mine = state::unhex(&self.state.user_id).unwrap_or_default();
+        let theirs = state::unhex(&user).unwrap_or_default();
+        Ok(identity::safety_number((&mine, &self.my_account_key()), (&theirs, &contact.account_key)))
     }
 
     /// Marks a contact verified after comparing safety numbers; only for identities backed by a passkey.
-    pub fn set_verified(&mut self, phone_input: &str, verified: bool) -> Result<()> {
-        let peer = phone::normalize(phone_input)?;
-        let contact = self.state.contacts.get_mut(&peer).ok_or(Error::NotOnYo)?;
+    pub fn set_verified(&mut self, who: &str, verified: bool) -> Result<()> {
+        let user = self.contact_user(who)?;
+        let contact = self.state.contacts.get_mut(&user).ok_or(Error::NotOnYo)?;
         if verified && !contact.passkey {
             return Err(Error::Protocol("identity not backed by a passkey"));
         }
@@ -1165,17 +1248,42 @@ impl Client {
         Ok(())
     }
 
-    pub fn set_blocked(&mut self, phone_input: &str, blocked: bool) -> Result<()> {
-        let peer = phone::normalize(phone_input)?;
-        let contact = self.state.contacts.entry(peer).or_insert(Contact {
+    /// Blocks a contact (by user id, or a handle this device knows them by): nothing from them is shown, no chat
+    /// with them is joined.
+    pub fn set_blocked(&mut self, who: &str, blocked: bool) -> Result<()> {
+        let user = self.contact_user(who)?;
+        let contact = self.state.contacts.entry(user).or_insert(Contact {
             account_key: [0; 32],
             passkey: false,
             name: None,
             verified: false,
             blocked,
             stale: true,
+            handles: Vec::new(),
         });
         contact.blocked = blocked;
+        self.persist();
+        Ok(())
+    }
+
+    /// Claims a username ("chris": found as CHRIS), or gives it up with `None`.
+    pub fn set_username(&mut self, name: Option<&str>) -> Result<()> {
+        let canonical = match name {
+            Some(name) => {
+                let handle = Handle::parse(name)?;
+                if handle.kind != KIND_USERNAME {
+                    return Err(Error::Protocol("not a username"));
+                }
+                Some(String::from_utf8_lossy(handle.value.as_slice()).into_owned())
+            }
+            None => None,
+        };
+        let body = encode(&api::SetUsername { username: canonical.as_ref().map(|n| n.as_bytes().to_vec().into()) });
+        let response = self.signed("PUT", api::USERNAME, &body)?;
+        if response.status != status::NO_CONTENT {
+            return Err(refused(&response));
+        }
+        self.state.username = canonical;
         self.persist();
         Ok(())
     }

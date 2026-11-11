@@ -1,9 +1,10 @@
 //! The device certificate (spec 3): the account key vouches for a device. It is the `identity` of the device's
-//! MLS `BasicCredential`, so every member of every group carries it.
+//! MLS `BasicCredential`, so every member of every group carries it. It names no person: no phone number, no
+//! username, no user id. Which account key belongs to which user is what the hub attests (spec 3).
 
-use crate::{phone, Error, Mailbox, KEY_LEN, SIGNATURE_LEN, VERSION};
+use crate::{Error, Mailbox, KEY_LEN, SIGNATURE_LEN, VERSION};
 use ed25519_dalek::{Signature, VerifyingKey};
-use tls_codec::{TlsDeserializeBytes, TlsSerialize, TlsSize, VLBytes};
+use tls_codec::{TlsDeserializeBytes, TlsSerialize, TlsSize};
 
 /// The label in front of every signed certificate body.
 pub const LABEL: &[u8] = b"yo device v1";
@@ -15,8 +16,6 @@ const KNOWN_FLAGS: u8 = FLAG_PASSKEY;
 #[derive(Debug, Clone, PartialEq, Eq, TlsSerialize, TlsDeserializeBytes, TlsSize)]
 pub struct CertificateBody {
     pub version: u8,
-    /// E.164 digits.
-    pub phone: VLBytes,
     pub account_key: [u8; KEY_LEN],
     /// The device's MLS signature key: the leaf's `signature_key`.
     pub device_key: [u8; KEY_LEN],
@@ -38,10 +37,6 @@ impl CertificateBody {
         out
     }
 
-    pub fn phone(&self) -> &[u8] {
-        self.phone.as_slice()
-    }
-
     pub fn has_passkey(&self) -> bool {
         self.flags & FLAG_PASSKEY != 0
     }
@@ -56,7 +51,6 @@ impl DeviceCertificate {
         if body.version != VERSION {
             return Err(Error::Unsupported);
         }
-        phone::check(body.phone())?;
         if body.flags & !KNOWN_FLAGS != 0 {
             return Err(Error::Format);
         }
@@ -85,7 +79,6 @@ mod tests {
     fn certificate(account: &SigningKey) -> DeviceCertificate {
         let body = CertificateBody {
             version: VERSION,
-            phone: b"491701234567".to_vec().into(),
             account_key: account.verifying_key().to_bytes(),
             device_key: key().verifying_key().to_bytes(),
             mailbox: [7; 16],

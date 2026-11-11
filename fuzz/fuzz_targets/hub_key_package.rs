@@ -11,12 +11,12 @@ fuzz_target!(|data: &[u8]| {
         let credential = BasicCredential::try_from(kp.unverified_credential().credential).ok()?;
         yo_wire::decode::<yo_wire::cert::DeviceCertificate>(credential.identity()).ok()
     });
-    let (phone, key, mailbox) = match &claimed {
-        Some(c) => (c.body.phone().to_vec(), c.body.account_key, c.body.mailbox),
-        None => (b"491701234567".to_vec(), [0; 32], [0; 16]),
+    let (key, mailbox) = match &claimed {
+        Some(c) => (c.body.account_key, c.body.mailbox),
+        None => ([0; 32], [0; 16]),
     };
-    if let Some(checked) = yo_hub::kp::check(&crypto, data, &phone, &key, &mailbox) {
+    if let Some(checked) = yo_hub::kp::check(&crypto, data, &key, &mailbox) {
         let body = &checked.certificate.body;
-        assert!(body.phone() == phone.as_slice() && body.account_key == key && body.mailbox == mailbox);
+        assert!(body.account_key == key && body.mailbox == mailbox);
     }
 });

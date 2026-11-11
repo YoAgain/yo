@@ -24,13 +24,16 @@ pub struct Contact {
     pub name: Option<String>,
     pub verified: bool,
     pub blocked: bool,
+    /// How this device knows the contact: "+491701234567", "CHRIS". Empty for someone who wrote first.
+    #[serde(default)]
+    pub handles: Vec<String>,
     /// Its device was replaced (410): look it up again before the next send.
     pub stale: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Chat {
-    /// The other account's phone number.
+    /// The other account's user id (hex).
     pub peer: String,
     pub last_update_ms: u64,
     pub sent_since_update: u32,
@@ -77,7 +80,12 @@ pub struct Outgoing {
 
 #[derive(Clone, Serialize, Deserialize)]
 pub struct State {
+    /// The own number, E.164 digits.
     pub phone: String,
+    /// The own user id (hex), as the hub gave it.
+    pub user_id: String,
+    #[serde(default)]
+    pub username: Option<String>,
     pub flags: u8,
     pub account_secret: [u8; 32],
     pub auth_secret: [u8; 32],

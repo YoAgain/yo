@@ -6,7 +6,7 @@ use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use yo_core::{Client, Content, Event};
-use yo_tests::{phone, random_u64, register, Http, Rng, TestHub};
+use yo_tests::{phone, random_u64, register, user_of, Http, Rng, TestHub};
 
 struct Device {
     phone: String,
@@ -19,13 +19,14 @@ fn device(hub: &TestHub, phone: &str) -> Device {
     let clock = Arc::new(AtomicU64::new(yo_hub::now_ms()));
     let read = clock.clone();
     client.set_clock(Arc::new(move || read.load(Ordering::Relaxed)));
-    Device { phone: phone.trim_start_matches('+').to_owned(), client, clock }
+    // Kept by user id: what events name, and the same after a new phone.
+    Device { phone: user_of(phone), client, clock }
 }
 
 fn collect(events: Vec<Event>, received: &mut BTreeMap<String, Vec<(String, String)>>, to: &str) {
     for event in events {
-        if let Event::Message { phone, content: Content::Text(text), .. } = event {
-            received.entry(to.to_owned()).or_default().push((phone, text));
+        if let Event::Message { user, content: Content::Text(text), .. } = event {
+            received.entry(to.to_owned()).or_default().push((user, text));
         }
     }
 }

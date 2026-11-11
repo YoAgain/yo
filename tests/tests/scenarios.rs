@@ -2,7 +2,7 @@
 
 use std::sync::Arc;
 use yo_core::{Client, Content, Error, Event, Push};
-use yo_tests::{phone, random_u64, register, Http, TestHub};
+use yo_tests::{phone, random_u64, register, user_of, Http, TestHub};
 use yo_wire::api;
 
 fn pair(hub: &TestHub) -> (Client, Client, String, String) {
@@ -14,13 +14,13 @@ fn pair(hub: &TestHub) -> (Client, Client, String, String) {
 }
 
 fn digits(p: &str) -> String {
-    p.trim_start_matches('+').to_owned()
+    user_of(p)
 }
 
 fn yos_from(events: &[Event], from: &str) -> usize {
     events
         .iter()
-        .filter(|e| matches!(e, Event::Message { phone, content: Content::Yo, .. } if *phone == digits(from)))
+        .filter(|e| matches!(e, Event::Message { user, content: Content::Yo, .. } if *user == digits(from)))
         .count()
 }
 
@@ -30,12 +30,15 @@ fn a_yo_goes_there_and_back() {
     let (mut a, mut b, pa, pb) = pair(&hub);
     a.send_yo(&pb).unwrap();
     let events = b.sync(0).unwrap();
-    assert!(events.contains(&Event::NewChat { phone: digits(&pa) }), "{events:?}");
-    assert!(events.contains(&Event::Profile { phone: digits(&pa), name: "ALICE".into() }), "{events:?}");
+    assert!(events.contains(&Event::NewChat { user: digits(&pa) }), "{events:?}");
+    assert!(events.contains(&Event::Profile { user: digits(&pa), name: "ALICE".into() }), "{events:?}");
     assert_eq!(yos_from(&events, &pa), 1);
     b.send_yo(&pa).unwrap();
     let events = a.sync(0).unwrap();
     assert_eq!(yos_from(&events, &pb), 1, "{events:?}");
+    // B answered by A's number, which it had not known A by: the same chat, not a second one.
+    assert_eq!((a.chats().len(), b.chats().len()), (1, 1));
+    assert!(b.contacts()[0].handles.contains(&pa));
     // B's first send updated its leaf (it joined by Welcome): the chat moved to epoch 2 on both sides.
     assert_eq!(a.chats()[0].2, 2);
     assert_eq!(b.chats()[0].2, 2);
@@ -72,7 +75,9 @@ fn numbers_not_on_yo_and_sending_to_oneself() {
     let (mut a, _, pa, _) = pair(&hub);
     assert_eq!(a.send_yo(&phone(999_999_999)), Err(Error::NotOnYo));
     assert!(a.send_yo(&pa).is_err());
-    assert_eq!(a.send_yo("0170 123"), Err(Error::Phone));
+    assert_eq!(a.send_yo("+0170 123"), Err(Error::Phone));
+    // Without "+" it is a username, and this is no valid one.
+    assert!(a.send_yo("0170 123").is_err());
 }
 
 #[test]
@@ -190,11 +195,12 @@ fn a_new_phone_without_passkey_is_a_new_identity() {
     b.sync(0).unwrap();
     // B registers again: a new device, a new account key.
     let mut b2 = register(Http::new(hub.url()), &pb, Some("BOB"));
+    assert_eq!(b2.user_id(), b.user_id(), "a new phone keeps the user id");
     assert_eq!(b.sync(0), Err(Error::Replaced));
     let events = a.send_yo(&pb).unwrap();
-    assert!(events.contains(&Event::IdentityChanged { phone: digits(&pb) }), "{events:?}");
+    assert!(events.contains(&Event::IdentityChanged { user: digits(&pb) }), "{events:?}");
     let events = b2.sync(0).unwrap();
-    assert!(events.contains(&Event::NewChat { phone: digits(&pa) }));
+    assert!(events.contains(&Event::NewChat { user: digits(&pa) }));
     assert_eq!(yos_from(&events, &pa), 1);
     b2.send_yo(&pa).unwrap();
     assert_eq!(yos_from(&a.sync(0).unwrap(), &pb), 1);
@@ -299,7 +305,7 @@ fn garbage_in_a_mailbox_is_dropped_and_harms_nothing() {
 fn a_blocked_number_is_not_heard() {
     let hub = TestHub::start();
     let (mut a, mut b, pa, pb) = pair(&hub);
-    b.set_blocked(&pa, true).unwrap();
+    b.set_blocked(&user_of(&pa), true).unwrap();
     a.send_yo(&pb).unwrap();
     let events = b.sync(0).unwrap();
     assert_eq!(yos_from(&events, &pa), 0);
@@ -406,4 +412,26 @@ fn registration_needs_the_code() {
         Client::register(http, &p, "123456", None, Push::none()).err(),
         Some(Error::Refused(api::status::FORBIDDEN))
     );
+}
+
+#[test]
+fn usernames_are_claimed_found_and_given_up() {
+    let hub = TestHub::start();
+    let (mut a, mut b, pa, _) = pair(&hub);
+    let name = format!("ALICE{}", random_u64() % 100_000);
+    a.set_username(Some(&name.to_lowercase())).unwrap();
+    assert_eq!(a.username(), Some(name.as_str()));
+    // B finds A by the username, typed any way.
+    b.send_yo(&format!("@{}", name.to_lowercase())).unwrap();
+    let events = a.sync(0).unwrap();
+    assert_eq!(yos_from(&events, &format!("+{}", b.phone())), 1);
+    assert!(b.contacts().iter().any(|c| c.user == user_of(&pa) && c.handles.contains(&name)));
+    // Taken, reserved, malformed.
+    assert_eq!(b.set_username(Some(&name)), Err(Error::Refused(api::status::CONFLICT)));
+    assert!(b.set_username(Some("admin")).is_err());
+    assert!(b.set_username(Some("x")).is_err());
+    // Given up, it can be someone else's.
+    a.set_username(None).unwrap();
+    b.set_username(Some(&name)).unwrap();
+    assert_eq!(b.username(), Some(name.as_str()));
 }

@@ -3,7 +3,7 @@
 use std::sync::{Arc, Mutex};
 use yo_core::{Client, Content, Event, Store};
 use yo_hub::config::Config;
-use yo_tests::{phone, random_u64, register, Fault, Http, TestHub};
+use yo_tests::{phone, random_u64, register, user_of, Fault, Http, TestHub};
 use yo_wire::api;
 
 fn yos(events: &[Event]) -> usize {
@@ -114,7 +114,7 @@ fn a_passing_refusal_does_not_drop_a_welcome() {
     hb.fault("/v1/lookup", Fault::Answer(429));
     assert!(b.sync(0).is_err());
     let events = b.sync(0).unwrap();
-    assert!(events.contains(&Event::NewChat { phone: pa.trim_start_matches('+').into() }));
+    assert!(events.contains(&Event::NewChat { user: user_of(&pa) }));
     assert_eq!(yos(&events), 1);
     assert_eq!(b.dropped(), 0, "{:?}", b.drop_reasons());
 }

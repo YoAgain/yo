@@ -1,10 +1,12 @@
 //! The hub's routes and their bodies (spec 6.3). Bodies are TLS-encoded, `application/octet-stream`.
 
-use crate::{GroupId, KEY_LEN, TOKEN_LEN};
+use crate::handle::Handle;
+use crate::{GroupId, UserId, KEY_LEN, TOKEN_LEN};
 use tls_codec::{TlsDeserializeBytes, TlsSerialize, TlsSize, VLBytes};
 
 pub const VERIFY_START: &str = "/v1/verify/start";
 pub const VERIFY_CHECK: &str = "/v1/verify/check";
+pub const USERNAME: &str = "/v1/username";
 pub const KEY_PACKAGES: &str = "/v1/keypackages";
 pub const LOOKUP: &str = "/v1/lookup";
 pub const PUSH: &str = "/v1/push";
@@ -50,6 +52,7 @@ pub struct VerifyStart {
     pub phone: VLBytes,
 }
 
+/// Registers a device with the code from the SMS: one request.
 #[derive(Debug, Clone, PartialEq, Eq, TlsSerialize, TlsDeserializeBytes, TlsSize)]
 pub struct VerifyCheck {
     pub phone: VLBytes,
@@ -62,6 +65,19 @@ pub struct VerifyCheck {
     pub last_resort: VLBytes,
 }
 
+/// The answer to a registration: the account's user id. The same as before when the number had one: a new phone
+/// keeps its user id, with a new account key (spec 7).
+#[derive(Debug, Clone, PartialEq, Eq, TlsSerialize, TlsDeserializeBytes, TlsSize)]
+pub struct Registered {
+    pub user_id: UserId,
+}
+
+/// Claims a username for the signing device's account, replacing its old one; `None` gives it up.
+#[derive(Debug, Clone, PartialEq, Eq, TlsSerialize, TlsDeserializeBytes, TlsSize)]
+pub struct SetUsername {
+    pub username: Option<VLBytes>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, TlsSerialize, TlsDeserializeBytes, TlsSize)]
 pub struct KeyPackages {
     pub key_packages: Vec<VLBytes>,
@@ -70,13 +86,14 @@ pub struct KeyPackages {
 
 #[derive(Debug, Clone, PartialEq, Eq, TlsSerialize, TlsDeserializeBytes, TlsSize)]
 pub struct Lookup {
-    pub phone: VLBytes,
+    pub handle: Handle,
     /// 1: hand out one KeyPackage per device (consumes them); 0: only the account key.
     pub key_packages: u8,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, TlsSerialize, TlsDeserializeBytes, TlsSize)]
 pub struct LookupResult {
+    pub user_id: UserId,
     pub account_key: [u8; KEY_LEN],
     pub key_packages: Vec<VLBytes>,
 }
@@ -145,7 +162,7 @@ mod tests {
 
     #[test]
     fn round_trips() {
-        let check = VerifyCheck {
+        let register = VerifyCheck {
             phone: b"491701234567".to_vec().into(),
             code: b"123456".to_vec().into(),
             certificate: vec![1; 200].into(),
@@ -154,7 +171,9 @@ mod tests {
             key_packages: vec![vec![3; 300].into(), vec![4; 300].into()],
             last_resort: vec![5; 300].into(),
         };
-        assert_eq!(crate::decode::<VerifyCheck>(&crate::encode(&check)).unwrap(), check);
+        assert_eq!(crate::decode::<VerifyCheck>(&crate::encode(&register)).unwrap(), register);
+        let lookup = Lookup { handle: Handle::username("CHRIS"), key_packages: 1 };
+        assert_eq!(crate::decode::<Lookup>(&crate::encode(&lookup)).unwrap(), lookup);
         let inbox = Inbox { key_packages_left: 7, items: vec![InboxItem { id: 1, envelope: vec![0; 1024].into() }] };
         assert_eq!(crate::decode::<Inbox>(&crate::encode(&inbox)).unwrap(), inbox);
     }

@@ -147,7 +147,22 @@ pub fn phone(i: u64) -> String {
 
 pub fn register(transport: Arc<Http>, phone: &str, name: Option<&str>) -> Client {
     Client::request_code(transport.as_ref(), phone).unwrap();
-    Client::register(transport, phone, "000000", name.map(str::to_owned), Push::none()).unwrap()
+    let client = Client::register(transport, phone, "000000", name.map(str::to_owned), Push::none()).unwrap();
+    USERS.lock().unwrap_or_else(PoisonError::into_inner).insert(client.phone().to_owned(), client.user_id().to_owned());
+    client
+}
+
+static USERS: Mutex<std::collections::BTreeMap<String, String>> = Mutex::new(std::collections::BTreeMap::new());
+
+/// The user id a number registered with (the same after a new phone).
+pub fn user_of(phone: &str) -> String {
+    let digits = phone.trim_start_matches('+');
+    USERS
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .get(digits)
+        .cloned()
+        .unwrap_or_else(|| panic!("{phone} not registered"))
 }
 
 pub fn random_u64() -> u64 {

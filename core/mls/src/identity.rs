@@ -16,16 +16,9 @@ pub fn random<const N: usize>() -> [u8; N] {
 }
 
 /// Makes the certificate of a device, signed by the account key.
-pub fn certify(
-    account: &SigningKey,
-    phone: &str,
-    device_key: &[u8],
-    mailbox: &Mailbox,
-    flags: u8,
-) -> Result<DeviceCertificate> {
+pub fn certify(account: &SigningKey, device_key: &[u8], mailbox: &Mailbox, flags: u8) -> Result<DeviceCertificate> {
     let body = CertificateBody {
         version: VERSION,
-        phone: phone.as_bytes().to_vec().into(),
         account_key: account.verifying_key().to_bytes(),
         device_key: device_key.try_into().map_err(|_| Error::Internal("device key length"))?,
         mailbox: *mailbox,
@@ -49,17 +42,18 @@ pub fn member(credential: &Credential, signature_key: &[u8]) -> Result<Certifica
     Ok(certificate.body)
 }
 
-/// The phone and account key a certificate names, unchecked: for a sender whose leaf OpenMLS has verified.
+/// The account key and mailbox a certificate names, unchecked: for a sender whose leaf OpenMLS has verified.
 pub fn claimed(credential: &Credential) -> Option<CertificateBody> {
     let basic = BasicCredential::try_from(credential.clone()).ok()?;
     yo_wire::decode::<DeviceCertificate>(basic.identity()).ok().map(|c| c.body)
 }
 
-/// The safety number of two accounts (spec 3): 60 digits, the same on both sides.
-pub fn safety_number(a: (&str, &[u8; 32]), b: (&str, &[u8; 32])) -> String {
-    let part = |(phone, key): (&str, &[u8; 32])| {
-        let mut out = vec![phone.len() as u8];
-        out.extend_from_slice(phone.as_bytes());
+/// The safety number of two users (spec 3): 60 digits, the same on both sides. Each side is its user id and
+/// account key.
+pub fn safety_number(a: (&[u8], &[u8; 32]), b: (&[u8], &[u8; 32])) -> String {
+    let part = |(user, key): (&[u8], &[u8; 32])| {
+        let mut out = vec![user.len() as u8];
+        out.extend_from_slice(user);
         out.extend_from_slice(key);
         out
     };
@@ -87,10 +81,11 @@ mod tests {
     #[test]
     fn safety_number_is_symmetric_and_binds_both() {
         let (ka, kb, kc) = ([1u8; 32], [2u8; 32], [3u8; 32]);
-        let ab = safety_number(("491701234567", &ka), ("14155550100", &kb));
-        assert_eq!(ab, safety_number(("14155550100", &kb), ("491701234567", &ka)));
+        let (ua, ub) = ([1u8; 16], [2u8; 16]);
+        let ab = safety_number((&ua, &ka), (&ub, &kb));
+        assert_eq!(ab, safety_number((&ub, &kb), (&ua, &ka)));
         assert_eq!(ab.replace(' ', "").len(), 60);
-        assert_ne!(ab, safety_number(("491701234567", &ka), ("14155550100", &kc)));
-        assert_ne!(ab, safety_number(("491701234568", &ka), ("14155550100", &kb)));
+        assert_ne!(ab, safety_number((&ua, &ka), (&ub, &kc)));
+        assert_ne!(ab, safety_number((&[3u8; 16], &ka), (&ub, &kb)));
     }
 }

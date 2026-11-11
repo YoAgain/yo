@@ -3,7 +3,8 @@
 
 use rusqlite::{params, Connection, OptionalExtension, TransactionBehavior};
 use std::sync::{Mutex, MutexGuard, PoisonError};
-use yo_wire::{GroupId, Mailbox};
+use yo_wire::handle::{KIND_ACCOUNT_KEY, KIND_USER};
+use yo_wire::{GroupId, Mailbox, UserId};
 
 /// A phone number's HMAC: the only form in which the hub keeps it.
 pub type PhoneHmac = [u8; 32];
@@ -13,7 +14,7 @@ pub struct Db {
 }
 
 pub struct Device {
-    pub phone: PhoneHmac,
+    pub user_id: UserId,
     pub auth_key: [u8; 32],
 }
 
@@ -30,8 +31,8 @@ pub struct StoredKeyPackage {
     pub data: Vec<u8>,
 }
 
-/// A number's account key and the KeyPackages handed out for it.
-pub type Found = ([u8; 32], Vec<Vec<u8>>);
+/// A user: id, current account key, and the KeyPackages handed out for it.
+pub type Found = (UserId, [u8; 32], Vec<Vec<u8>>);
 
 pub enum Mailboxes {
     Live {
@@ -55,6 +56,9 @@ pub enum Commit {
 pub enum Conflict {
     MailboxTaken,
     KeyPackageSeen,
+    /// The account key is another user's.
+    KeyTaken,
+    UsernameTaken,
 }
 
 pub enum Write<T> {
@@ -63,21 +67,29 @@ pub enum Write<T> {
 }
 
 const SCHEMA: &str = "
-CREATE TABLE IF NOT EXISTS accounts (
-    phone BLOB PRIMARY KEY,
-    account_key BLOB NOT NULL,
+CREATE TABLE IF NOT EXISTS users (
+    id BLOB PRIMARY KEY,
+    account_key BLOB NOT NULL UNIQUE,
     created_at INTEGER NOT NULL
 ) WITHOUT ROWID;
+-- How people find a user: a phone number (as its HMAC), a username (upper case). Never in a certificate.
+CREATE TABLE IF NOT EXISTS handles (
+    kind INTEGER NOT NULL,
+    value BLOB NOT NULL,
+    user_id BLOB NOT NULL REFERENCES users(id),
+    PRIMARY KEY (kind, value)
+) WITHOUT ROWID;
+CREATE INDEX IF NOT EXISTS handles_by_user ON handles(user_id, kind);
 CREATE TABLE IF NOT EXISTS devices (
     mailbox BLOB PRIMARY KEY,
-    phone BLOB NOT NULL REFERENCES accounts(phone),
+    user_id BLOB NOT NULL REFERENCES users(id),
     auth_key BLOB NOT NULL,
     push_platform INTEGER NOT NULL,
     push_token BLOB NOT NULL,
     created_at INTEGER NOT NULL,
     last_seen_at INTEGER NOT NULL
 ) WITHOUT ROWID;
-CREATE INDEX IF NOT EXISTS devices_by_phone ON devices(phone);
+CREATE INDEX IF NOT EXISTS devices_by_user ON devices(user_id);
 CREATE TABLE IF NOT EXISTS gone (
     mailbox BLOB PRIMARY KEY,
     gone_at INTEGER NOT NULL
@@ -131,8 +143,8 @@ impl Db {
 
     pub fn device(&self, mailbox: &Mailbox) -> rusqlite::Result<Option<Device>> {
         self.conn()
-            .prepare_cached("SELECT phone, auth_key FROM devices WHERE mailbox = ?1")?
-            .query_row([mailbox], |row| Ok(Device { phone: array(row.get(0)?)?, auth_key: array(row.get(1)?)? }))
+            .prepare_cached("SELECT user_id, auth_key FROM devices WHERE mailbox = ?1")?
+            .query_row([mailbox], |row| Ok(Device { user_id: array(row.get(0)?)?, auth_key: array(row.get(1)?)? }))
             .optional()
     }
 
@@ -147,24 +159,27 @@ impl Db {
         Ok(())
     }
 
-    pub fn account_key(&self, phone: &PhoneHmac) -> rusqlite::Result<Option<[u8; 32]>> {
+    pub fn account_key(&self, user: &UserId) -> rusqlite::Result<Option<[u8; 32]>> {
         self.conn()
-            .prepare_cached("SELECT account_key FROM accounts WHERE phone = ?1")?
-            .query_row([phone], |row| array(row.get(0)?))
+            .prepare_cached("SELECT account_key FROM users WHERE id = ?1")?
+            .query_row([user], |row| array(row.get(0)?))
             .optional()
     }
 
-    /// Registers a device for a number that passed SMS verification. The number's earlier devices are replaced:
-    /// their mailboxes are gone, their KeyPackages and envelopes deleted.
+    /// Registers a device for a number that passed SMS verification. The number keeps its user (a new phone keeps
+    /// its user id) or gets a new one (`fresh`); the user's account key becomes the device's; the user's earlier
+    /// devices are replaced: their mailboxes are gone, their KeyPackages and envelopes deleted.
+    #[allow(clippy::too_many_arguments)]
     pub fn register(
         &self,
         phone: &PhoneHmac,
+        fresh: &UserId,
         account_key: &[u8; 32],
         device: &NewDevice,
         key_packages: &[StoredKeyPackage],
         last_resort: &StoredKeyPackage,
         now: u64,
-    ) -> rusqlite::Result<Write<()>> {
+    ) -> rusqlite::Result<Write<UserId>> {
         let mut conn = self.conn();
         let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
         let taken = tx
@@ -173,9 +188,24 @@ impl Db {
         if taken {
             return Ok(Write::Refused(Conflict::MailboxTaken));
         }
+        let user: UserId = match tx
+            .prepare_cached("SELECT user_id FROM handles WHERE kind = ?1 AND value = ?2")?
+            .query_row(params![yo_wire::handle::KIND_PHONE, phone], |row| array(row.get(0)?))
+            .optional()?
+        {
+            Some(user) => user,
+            None => *fresh,
+        };
+        let key_owner: Option<UserId> = tx
+            .prepare_cached("SELECT id FROM users WHERE account_key = ?1")?
+            .query_row([account_key], |row| array(row.get(0)?))
+            .optional()?;
+        if key_owner.is_some_and(|owner| owner != user) {
+            return Ok(Write::Refused(Conflict::KeyTaken));
+        }
         let old: Vec<Vec<u8>> = tx
-            .prepare_cached("SELECT mailbox FROM devices WHERE phone = ?1")?
-            .query_map([phone], |row| row.get(0))?
+            .prepare_cached("SELECT mailbox FROM devices WHERE user_id = ?1")?
+            .query_map([&user], |row| row.get(0))?
             .collect::<Result<_, _>>()?;
         for mailbox in &old {
             tx.execute("INSERT OR REPLACE INTO gone (mailbox, gone_at) VALUES (?1, ?2)", params![mailbox, now])?;
@@ -184,17 +214,43 @@ impl Db {
             tx.execute("DELETE FROM devices WHERE mailbox = ?1", [mailbox])?;
         }
         tx.execute(
-            "INSERT INTO accounts (phone, account_key, created_at) VALUES (?1, ?2, ?3)
-             ON CONFLICT (phone) DO UPDATE SET account_key = excluded.account_key",
-            params![phone, account_key, now],
+            "INSERT INTO users (id, account_key, created_at) VALUES (?1, ?2, ?3)
+             ON CONFLICT (id) DO UPDATE SET account_key = excluded.account_key",
+            params![user, account_key, now],
         )?;
         tx.execute(
-            "INSERT INTO devices (mailbox, phone, auth_key, push_platform, push_token, created_at, last_seen_at)
+            "INSERT OR REPLACE INTO handles (kind, value, user_id) VALUES (?1, ?2, ?3)",
+            params![yo_wire::handle::KIND_PHONE, phone, user],
+        )?;
+        tx.execute(
+            "INSERT INTO devices (mailbox, user_id, auth_key, push_platform, push_token, created_at, last_seen_at)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?6)",
-            params![device.mailbox, phone, device.auth_key, device.push_platform, device.push_token, now],
+            params![device.mailbox, user, device.auth_key, device.push_platform, device.push_token, now],
         )?;
         if let Some(conflict) = insert_key_packages(&tx, &device.mailbox, key_packages, Some(last_resort))? {
             return Ok(Write::Refused(conflict));
+        }
+        tx.commit()?;
+        Ok(Write::Done(user))
+    }
+
+    /// Claims a username for a user, giving up its old one; `None` only gives it up.
+    pub fn set_username(&self, user: &UserId, name: Option<&[u8]>) -> rusqlite::Result<Write<()>> {
+        let kind = yo_wire::handle::KIND_USERNAME;
+        let mut conn = self.conn();
+        let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        if let Some(name) = name {
+            let owner: Option<UserId> = tx
+                .prepare_cached("SELECT user_id FROM handles WHERE kind = ?1 AND value = ?2")?
+                .query_row(params![kind, name], |row| array(row.get(0)?))
+                .optional()?;
+            if owner.is_some_and(|owner| owner != *user) {
+                return Ok(Write::Refused(Conflict::UsernameTaken));
+            }
+        }
+        tx.execute("DELETE FROM handles WHERE user_id = ?1 AND kind = ?2", params![user, kind])?;
+        if let Some(name) = name {
+            tx.execute("INSERT INTO handles (kind, value, user_id) VALUES (?1, ?2, ?3)", params![kind, name, user])?;
         }
         tx.commit()?;
         Ok(Write::Done(()))
@@ -229,21 +285,35 @@ impl Db {
             .query_row([mailbox], |row| row.get(0))
     }
 
-    /// The account key of a number and, if asked, one KeyPackage per device: a single-use one while there is
-    /// one, else the last resort.
-    pub fn lookup(&self, phone: &PhoneHmac, take: bool) -> rusqlite::Result<Option<Found>> {
+    /// A user by a handle (`value` as stored: a phone number's HMAC, a username in upper case, a user id, an account
+    /// key): its id, account key and, if asked, one KeyPackage per device, a single-use one while there is one,
+    /// else the last resort.
+    pub fn lookup(&self, kind: u8, value: &[u8], take: bool) -> rusqlite::Result<Option<Found>> {
         let mut conn = self.conn();
         let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
-        let Some(account_key) = tx
-            .prepare_cached("SELECT account_key FROM accounts WHERE phone = ?1")?
-            .query_row([phone], |row| array::<32>(row.get(0)?))
-            .optional()?
-        else {
+        let user: Option<(UserId, [u8; 32])> = match kind {
+            KIND_USER => tx
+                .prepare_cached("SELECT id, account_key FROM users WHERE id = ?1")?
+                .query_row([value], |row| Ok((array(row.get(0)?)?, array(row.get(1)?)?)))
+                .optional()?,
+            KIND_ACCOUNT_KEY => tx
+                .prepare_cached("SELECT id, account_key FROM users WHERE account_key = ?1")?
+                .query_row([value], |row| Ok((array(row.get(0)?)?, array(row.get(1)?)?)))
+                .optional()?,
+            _ => tx
+                .prepare_cached(
+                    "SELECT users.id, users.account_key FROM handles JOIN users ON users.id = handles.user_id
+                     WHERE handles.kind = ?1 AND handles.value = ?2",
+                )?
+                .query_row(params![kind, value], |row| Ok((array(row.get(0)?)?, array(row.get(1)?)?)))
+                .optional()?,
+        };
+        let Some((user, account_key)) = user else {
             return Ok(None);
         };
         let mailboxes: Vec<Vec<u8>> = tx
-            .prepare_cached("SELECT mailbox FROM devices WHERE phone = ?1 ORDER BY created_at, mailbox LIMIT 16")?
-            .query_map([phone], |row| row.get(0))?
+            .prepare_cached("SELECT mailbox FROM devices WHERE user_id = ?1 ORDER BY created_at, mailbox LIMIT 16")?
+            .query_map([&user], |row| row.get(0))?
             .collect::<Result<_, _>>()?;
         if mailboxes.is_empty() {
             return Ok(None);
@@ -267,7 +337,7 @@ impl Db {
             }
         }
         tx.commit()?;
-        Ok(Some((account_key, key_packages)))
+        Ok(Some((user, account_key, key_packages)))
     }
 
     pub fn set_push(&self, mailbox: &Mailbox, platform: u8, token: &[u8]) -> rusqlite::Result<()> {

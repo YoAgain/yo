@@ -117,33 +117,35 @@ impl From<Content> for MessageKind {
 }
 
 #[derive(uniffi::Enum)]
+/// `user` is the contact's user id: what `contacts()` describes and `send_yo` takes to answer.
 pub enum YoEvent {
-    NewChat { phone: String },
-    Message { phone: String, sent_at_ms: u64, kind: MessageKind },
-    SentElsewhere { phone: String, sent_at_ms: u64, kind: MessageKind },
-    Profile { phone: String, name: String },
-    IdentityChanged { phone: String },
+    NewChat { user: String },
+    Message { user: String, sent_at_ms: u64, kind: MessageKind },
+    SentElsewhere { user: String, sent_at_ms: u64, kind: MessageKind },
+    Profile { user: String, name: String },
+    IdentityChanged { user: String },
 }
 
 impl From<Event> for YoEvent {
     fn from(event: Event) -> Self {
         match event {
-            Event::NewChat { phone } => YoEvent::NewChat { phone },
-            Event::Message { phone, sent_at_ms, content } => {
-                YoEvent::Message { phone, sent_at_ms, kind: content.into() }
+            Event::NewChat { user } => YoEvent::NewChat { user },
+            Event::Message { user, sent_at_ms, content } => YoEvent::Message { user, sent_at_ms, kind: content.into() },
+            Event::SentElsewhere { user, sent_at_ms, content } => {
+                YoEvent::SentElsewhere { user, sent_at_ms, kind: content.into() }
             }
-            Event::SentElsewhere { phone, sent_at_ms, content } => {
-                YoEvent::SentElsewhere { phone, sent_at_ms, kind: content.into() }
-            }
-            Event::Profile { phone, name } => YoEvent::Profile { phone, name },
-            Event::IdentityChanged { phone } => YoEvent::IdentityChanged { phone },
+            Event::Profile { user, name } => YoEvent::Profile { user, name },
+            Event::IdentityChanged { user } => YoEvent::IdentityChanged { user },
         }
     }
 }
 
 #[derive(uniffi::Record)]
 pub struct YoContact {
-    pub phone: String,
+    /// The user id.
+    pub user: String,
+    /// How this device knows the contact: "+491701234567", "CHRIS".
+    pub handles: Vec<String>,
     pub name: Option<String>,
     pub verified: bool,
     pub can_verify: bool,
@@ -215,8 +217,18 @@ impl YoClient {
         self.with(|c| c.phone().to_owned())
     }
 
-    pub fn send_yo(&self, phone: String) -> Result<Vec<YoEvent>, YoError> {
-        events(self.with(|c| c.send_yo(&phone)))
+    /// To "+49 170 …", "chris", or a user id from an event.
+    pub fn send_yo(&self, to: String) -> Result<Vec<YoEvent>, YoError> {
+        events(self.with(|c| c.send_yo(&to)))
+    }
+
+    pub fn user_id(&self) -> String {
+        self.with(|c| c.user_id().to_owned())
+    }
+
+    /// Claims a username, or gives it up with `None`.
+    pub fn set_username(&self, name: Option<String>) -> Result<(), YoError> {
+        Ok(self.with(|c| c.set_username(name.as_deref()))?)
     }
 
     /// Waits up to `wait_s` seconds for mail and processes it: for the foreground, and the notification extension.
@@ -242,7 +254,8 @@ impl YoClient {
         self.with(|c| c.contacts())
             .into_iter()
             .map(|c| YoContact {
-                phone: c.phone,
+                user: c.user,
+                handles: c.handles,
                 name: c.name,
                 verified: c.verified,
                 can_verify: c.can_verify,
@@ -251,15 +264,15 @@ impl YoClient {
             .collect()
     }
 
-    pub fn safety_number(&self, phone: String) -> Result<String, YoError> {
-        Ok(self.with(|c| c.safety_number(&phone))?)
+    pub fn safety_number(&self, who: String) -> Result<String, YoError> {
+        Ok(self.with(|c| c.safety_number(&who))?)
     }
 
-    pub fn set_verified(&self, phone: String, verified: bool) -> Result<(), YoError> {
-        Ok(self.with(|c| c.set_verified(&phone, verified))?)
+    pub fn set_verified(&self, who: String, verified: bool) -> Result<(), YoError> {
+        Ok(self.with(|c| c.set_verified(&who, verified))?)
     }
 
-    pub fn set_blocked(&self, phone: String, blocked: bool) -> Result<(), YoError> {
-        Ok(self.with(|c| c.set_blocked(&phone, blocked))?)
+    pub fn set_blocked(&self, who: String, blocked: bool) -> Result<(), YoError> {
+        Ok(self.with(|c| c.set_blocked(&who, blocked))?)
     }
 }

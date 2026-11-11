@@ -30,7 +30,7 @@ use yo_wire::api::{self, status};
 use yo_wire::cert::DeviceCertificate;
 use yo_wire::limits::{self, KEY_PACKAGE_TARGET, MAX_DEVICES, MAX_INBOX_FETCH, MAX_KEY_PACKAGES_PER_UPLOAD};
 use yo_wire::request::{HEADER_DEVICE, HEADER_SIGNATURE, HEADER_TIME};
-use yo_wire::{decode, encode, phone, sha256, unb64, GroupId, Mailbox};
+use yo_wire::{decode, encode, phone, sha256, unb64, GroupId, Mailbox, UserId};
 
 pub struct Hub {
     config: Config,
@@ -101,7 +101,7 @@ fn writer(db: Arc<Db>, queue: std::sync::mpsc::Receiver<Delivery>, most: u32) {
 /// A device that signed its request (spec 6.2).
 struct Signed {
     mailbox: Mailbox,
-    phone: PhoneHmac,
+    user_id: UserId,
 }
 
 impl Hub {
@@ -137,6 +137,7 @@ impl Hub {
             .route(api::KEY_PACKAGES, put(key_packages))
             .route(api::LOOKUP, post(lookup))
             .route(api::PUSH, put(set_push))
+            .route(api::USERNAME, put(set_username))
             .route(api::INBOX, get(inbox))
             .route(api::INBOX_ACK, post(ack))
             .route("/v1/inbox/{mailbox}", post(deliver))
@@ -234,7 +235,7 @@ impl Hub {
             return Err(unauthorized());
         }
         self.db.touch(&mailbox, now)?;
-        Ok(Signed { mailbox, phone: device.phone })
+        Ok(Signed { mailbox, user_id: device.user_id })
     }
 
     /// Checks uploaded KeyPackages against the uploader; the last resort must say it is one, the others not.
@@ -242,7 +243,6 @@ impl Hub {
         &self,
         uploads: &[yo_wire::VLBytes],
         last_resort: Option<&yo_wire::VLBytes>,
-        phone: &[u8],
         account_key: &[u8; 32],
         mailbox: &Mailbox,
     ) -> Res<(Vec<StoredKeyPackage>, Option<StoredKeyPackage>)> {
@@ -250,7 +250,7 @@ impl Hub {
             return Err(refuse(StatusCode::PAYLOAD_TOO_LARGE));
         }
         let check = |bytes: &yo_wire::VLBytes, want_last_resort: bool| {
-            kp::check(&self.crypto, bytes.as_slice(), phone, account_key, mailbox)
+            kp::check(&self.crypto, bytes.as_slice(), account_key, mailbox)
                 .filter(|checked| checked.last_resort == want_last_resort)
                 .map(|checked| StoredKeyPackage { hash: checked.hash, data: bytes.as_slice().to_vec() })
                 .ok_or_else(|| refuse(StatusCode::BAD_REQUEST))
@@ -297,7 +297,12 @@ async fn verify_start(State(hub): Hubs, ConnectInfo(peer): Peer, headers: Header
     Ok(StatusCode::NO_CONTENT)
 }
 
-async fn verify_check(State(hub): Hubs, ConnectInfo(peer): Peer, headers: HeaderMap, body: Bytes) -> Res<StatusCode> {
+async fn verify_check(
+    State(hub): Hubs,
+    ConnectInfo(peer): Peer,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Res<(StatusCode, Vec<u8>)> {
     let request: api::VerifyCheck = decode(&body)?;
     let digits = request.phone.as_slice();
     phone::check(digits)?;
@@ -314,17 +319,9 @@ async fn verify_check(State(hub): Hubs, ConnectInfo(peer): Peer, headers: Header
     }
     let certificate = DeviceCertificate::verify(request.certificate.as_slice())?;
     let body = &certificate.body;
-    if body.phone() != digits {
-        return Err(refuse(StatusCode::BAD_REQUEST));
-    }
     // Everything is checked before the code is spent.
-    let (key_packages, last_resort) = hub.check_key_packages(
-        &request.key_packages,
-        Some(&request.last_resort),
-        digits,
-        &body.account_key,
-        &body.mailbox,
-    )?;
+    let (key_packages, last_resort) =
+        hub.check_key_packages(&request.key_packages, Some(&request.last_resort), &body.account_key, &body.mailbox)?;
     let last_resort = last_resort.expect("asked for");
     let approved = hub.sms.check(String::from_utf8_lossy(digits).into_owned(), code).await.map_err(|error| {
         eprintln!("yo-hub: sms: {error}");
@@ -339,8 +336,10 @@ async fn verify_check(State(hub): Hubs, ConnectInfo(peer): Peer, headers: Header
         push_platform: request.push.platform,
         push_token: request.push.token.as_slice().to_vec(),
     };
-    match hub.db.register(&phone, &body.account_key, &device, &key_packages, &last_resort, now_ms())? {
-        Write::Done(()) => Ok(StatusCode::NO_CONTENT),
+    let mut fresh: UserId = [0; 16];
+    getrandom::getrandom(&mut fresh).map_err(|_| refuse(StatusCode::INTERNAL_SERVER_ERROR))?;
+    match hub.db.register(&phone, &fresh, &body.account_key, &device, &key_packages, &last_resort, now_ms())? {
+        Write::Done(user_id) => Ok(ok(encode(&api::Registered { user_id }))),
         Write::Refused(_) => Err(refuse(StatusCode::CONFLICT)),
     }
 }
@@ -348,36 +347,13 @@ async fn verify_check(State(hub): Hubs, ConnectInfo(peer): Peer, headers: Header
 async fn key_packages(State(hub): Hubs, method: Method, uri: Uri, headers: HeaderMap, body: Bytes) -> Res<StatusCode> {
     let device = hub.authenticate(&method, &uri, &headers, &body)?;
     let request: api::KeyPackages = decode(&body)?;
-    let account_key = hub.db.account_key(&device.phone)?.ok_or_else(|| refuse(StatusCode::UNAUTHORIZED))?;
-    // The hub knows the number only as its HMAC: the certificate names it, the HMAC must match.
-    let first =
-        request.key_packages.first().or(request.last_resort.as_ref()).ok_or_else(|| refuse(StatusCode::BAD_REQUEST))?;
-    let digits = phone_of(first.as_slice()).ok_or_else(|| refuse(StatusCode::BAD_REQUEST))?;
-    if hub.phone_hmac(&digits) != device.phone {
-        return Err(refuse(StatusCode::BAD_REQUEST));
-    }
-    let (stored, last) = hub.check_key_packages(
-        &request.key_packages,
-        request.last_resort.as_ref(),
-        &digits,
-        &account_key,
-        &device.mailbox,
-    )?;
+    let account_key = hub.db.account_key(&device.user_id)?.ok_or_else(|| refuse(StatusCode::UNAUTHORIZED))?;
+    let (stored, last) =
+        hub.check_key_packages(&request.key_packages, request.last_resort.as_ref(), &account_key, &device.mailbox)?;
     match hub.db.add_key_packages(&device.mailbox, &stored, last.as_ref(), KEY_PACKAGE_TARGET * 2)? {
         Write::Done(()) => Ok(StatusCode::NO_CONTENT),
         Write::Refused(_) => Err(refuse(StatusCode::CONFLICT)),
     }
-}
-
-/// The phone number a KeyPackage's certificate names, unchecked: the caller checks the whole KeyPackage after.
-fn phone_of(key_package: &[u8]) -> Option<Vec<u8>> {
-    use openmls::prelude::{BasicCredential, KeyPackageIn};
-    use tls_codec::Deserialize as _;
-    let key_package = KeyPackageIn::tls_deserialize_exact(key_package).ok()?;
-    let leaf = key_package.unverified_credential();
-    let credential = BasicCredential::try_from(leaf.credential).ok()?;
-    let certificate: DeviceCertificate = decode(credential.identity()).ok()?;
-    Some(certificate.body.phone().to_vec())
 }
 
 async fn lookup(
@@ -389,18 +365,39 @@ async fn lookup(
 ) -> Res<(StatusCode, Vec<u8>)> {
     let device = hub.authenticate(&method, &uri, &headers, &body)?;
     let request: api::Lookup = decode(&body)?;
-    phone::check(request.phone.as_slice())?;
+    request.handle.check()?;
     let limits = &hub.config.limits;
     let (kind, per_day) = match request.key_packages {
         1 => ("lookup", limits.lookup_per_device_day),
         _ => ("identity", limits.identity_lookup_per_device_day),
     };
     hub.limit(format!("{kind}:{}", yo_wire::b64(&device.mailbox)), per_day, DAY)?;
-    let phone = hub.phone_hmac(request.phone.as_slice());
-    let (account_key, key_packages) =
-        hub.db.lookup(&phone, request.key_packages == 1)?.ok_or_else(|| refuse(StatusCode::NOT_FOUND))?;
+    let handle = &request.handle;
+    // A number is kept as its HMAC only; everything else as it is.
+    let value = match handle.kind {
+        yo_wire::handle::KIND_PHONE => hub.phone_hmac(handle.value.as_slice()).to_vec(),
+        _ => handle.value.as_slice().to_vec(),
+    };
+    let (user_id, account_key, key_packages) =
+        hub.db.lookup(handle.kind, &value, request.key_packages == 1)?.ok_or_else(|| refuse(StatusCode::NOT_FOUND))?;
     let key_packages = key_packages.into_iter().take(MAX_DEVICES).map(Into::into).collect();
-    Ok(ok(encode(&api::LookupResult { account_key, key_packages })))
+    Ok(ok(encode(&api::LookupResult { user_id, account_key, key_packages })))
+}
+
+/// Claims or gives up the signing device's account's username.
+async fn set_username(State(hub): Hubs, method: Method, uri: Uri, headers: HeaderMap, body: Bytes) -> Res<StatusCode> {
+    let device = hub.authenticate(&method, &uri, &headers, &body)?;
+    let request: api::SetUsername = decode(&body)?;
+    if let Some(name) = &request.username {
+        yo_wire::handle::Handle::username(
+            std::str::from_utf8(name.as_slice()).map_err(|_| refuse(StatusCode::BAD_REQUEST))?,
+        )
+        .check()?;
+    }
+    match hub.db.set_username(&device.user_id, request.username.as_ref().map(|n| n.as_slice()))? {
+        Write::Done(()) => Ok(StatusCode::NO_CONTENT),
+        Write::Refused(_) => Err(refuse(StatusCode::CONFLICT)),
+    }
 }
 
 async fn set_push(State(hub): Hubs, method: Method, uri: Uri, headers: HeaderMap, body: Bytes) -> Res<StatusCode> {
