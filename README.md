@@ -6,14 +6,22 @@ Yo, again. One tap, one Yo, end-to-end encrypted.
 
 The protocol: MLS (RFC 9420) for a messenger whose server never learns who sends.
 
-- **Identity:** a stable user id from the hub; an account key certifies each device; phone number (SMS) and
-  username are only handles to find you. Safety numbers; passkey backup later.
-- **Certificate** (the MLS credential, 146 bytes): account key, device key, mailbox, passkey flag, signature. It
-  names no person; who an account key is, the hub attests.
+- **Identity** in four layers:
+
+  | Layer | What | Changes? |
+  |---|---|---|
+  | User id | 16 bytes from the hub | never |
+  | Account key | signs the account's devices | with a new phone, unless a passkey keeps it |
+  | Devices | MLS members, each with its own keys | added and replaced |
+  | Handles | phone number (SMS), username | any time; only to find you |
+
+- **Certificate** (the MLS credential, 96 bytes): account key + its signature over the device key. Names no person;
+  who an account key is, the hub attests. Any contact can be verified (60-digit safety number).
 - **Chats:** MLS groups, one suite (X25519, ChaCha20-Poly1305, Ed25519), typed content (`Yo` now, text later).
-- **Sealed sender:** delivering takes no identity; envelopes padded to fixed sizes; pushes say only "there is mail".
+- **Sealed sender:** delivering takes no identity; addressed to a user, copied to all their devices; envelopes padded
+  to fixed sizes; pushes say only "there is mail".
 - **Healing:** keys renewed weekly or every 100 messages; the hub orders commits by epoch tokens only members hold.
-- **The hub knows** numbers (as HMAC), mailboxes, timing, sizes, IPs, who looks up whom. Not who sends, what, or
+- **The hub knows** numbers (as HMAC), devices, timing, sizes, IPs, who looks up whom. Not who sends, what, or
   who chats with whom.
 
 Full text: [spec/v1.md](spec/v1.md).
