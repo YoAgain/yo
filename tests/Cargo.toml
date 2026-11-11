@@ -1,0 +1,19 @@
+[package]
+name = "yo-tests"
+version = "0.1.0"
+edition.workspace = true
+publish.workspace = true
+description = "Scenario, chaos and load tests: a real hub and real clients over HTTP."
+
+[[bin]]
+name = "yo-load"
+path = "src/load.rs"
+
+[dependencies]
+yo-wire = { path = "../core/wire" }
+yo-core = { path = "../core/mls" }
+yo-hub = { path = "../hub" }
+tokio = { workspace = true }
+reqwest = { workspace = true, features = ["blocking"] }
+serde_json = { workspace = true }
+getrandom = { workspace = true }

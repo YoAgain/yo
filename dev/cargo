@@ -1,0 +1,13 @@
+#!/bin/sh
+# Runs cargo in the pinned Rust image, so nothing but Docker is needed on the machine.
+# Docker runs rootless here: root in the container is the user outside.
+# The registry lives in ~/.cache/yo-cargo, the build output in ./target.
+set -e
+root=$(cd "$(dirname "$0")/.." && pwd)
+mkdir -p "$HOME/.cache/yo-cargo"
+exec docker run --rm -i --network host \
+  -e CARGO_HOME=/cargo -e RUSTUP_AUTO_INSTALL=0 -e CARGO_TERM_COLOR=never \
+  ${YO_ENV:+-e $YO_ENV} \
+  -v "$HOME/.cache/yo-cargo:/cargo" \
+  -v "$root:/yo" -w "/yo${YO_CWD:+/$YO_CWD}" \
+  rust:1.99.1-slim-bookworm cargo "$@"
