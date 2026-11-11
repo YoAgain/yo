@@ -8,6 +8,8 @@ The protocol: MLS (RFC 9420) for a messenger whose server never learns who sends
 
 - **Identity:** a stable user id from the hub; an account key certifies each device; phone number (SMS) and
   username are only handles to find you. Safety numbers; passkey backup later.
+- **Certificate** (the MLS credential, 146 bytes): account key, device key, mailbox, passkey flag, signature. It
+  names no person; who an account key is, the hub attests.
 - **Chats:** MLS groups, one suite (X25519, ChaCha20-Poly1305, Ed25519), typed content (`Yo` now, text later).
 - **Sealed sender:** delivering takes no identity; envelopes padded to fixed sizes; pushes say only "there is mail".
 - **Healing:** keys renewed weekly or every 100 messages; the hub orders commits by epoch tokens only members hold.
