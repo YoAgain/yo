@@ -34,3 +34,7 @@ dev/fuzz all 300                                                  # cargo-fuzz, 
 ```
 
 Tests and measured throughput: [tests/README.md](tests/README.md). Hub configuration: [hub/src/main.rs](hub/src/main.rs).
+
+## License
+
+[O'Saasy](LICENSE.md): use, change and share freely; not as a competing hosted service.

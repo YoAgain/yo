@@ -7,6 +7,7 @@ exclude = ["fuzz"]
 [workspace.package]
 edition = "2021"
 publish = false
+license-file = "LICENSE.md"
 
 [workspace.dependencies]
 # OpenMLS and its providers are pinned exactly: an upgrade is a deliberate change of this file.
