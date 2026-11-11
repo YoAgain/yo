@@ -142,10 +142,13 @@ fn simultaneous_updates_are_ordered_by_the_hub() {
         a.sync(0).unwrap();
         b.sync(0).unwrap();
         assert_eq!(a.chats()[0].2, b.chats()[0].2, "round {round}: both in the same epoch");
-        a.send_yo(&pb).unwrap();
-        b.send_yo(&pa).unwrap();
-        assert_eq!(yos_from(&b.sync(0).unwrap(), &pa), 1, "round {round}");
-        assert_eq!(yos_from(&a.sync(0).unwrap(), &pb), 1, "round {round}");
+        // A send receives first: what arrived meanwhile comes back with it.
+        let mut at_a = a.send_yo(&pb).unwrap();
+        let mut at_b = b.send_yo(&pa).unwrap();
+        at_b.extend(b.sync(0).unwrap());
+        at_a.extend(a.sync(0).unwrap());
+        assert_eq!(yos_from(&at_b, &pa), 1, "round {round}");
+        assert_eq!(yos_from(&at_a, &pb), 1, "round {round}");
     }
     assert_eq!(a.dropped() + b.dropped(), 0);
 }
@@ -157,21 +160,25 @@ fn two_chats_started_at_once_both_work() {
     let (pa2, pb2) = (pa.clone(), pb.clone());
     let ta = std::thread::spawn(move || {
         let mut a = a;
-        a.send_yo(&pb2).unwrap();
-        a
+        let events = a.send_yo(&pb2).unwrap();
+        (a, events)
     });
     let tb = std::thread::spawn(move || {
         let mut b = b;
-        b.send_yo(&pa2).unwrap();
-        b
+        let events = b.send_yo(&pa2).unwrap();
+        (b, events)
     });
-    let (mut a, mut b) = (ta.join().unwrap(), tb.join().unwrap());
-    assert_eq!(yos_from(&a.sync(0).unwrap(), &pb), 1);
-    assert_eq!(yos_from(&b.sync(0).unwrap(), &pa), 1);
-    a.send_yo(&pb).unwrap();
-    b.send_yo(&pa).unwrap();
-    assert_eq!(yos_from(&b.sync(0).unwrap(), &pa), 1);
-    assert_eq!(yos_from(&a.sync(0).unwrap(), &pb), 1);
+    let ((mut a, mut at_a), (mut b, mut at_b)) = (ta.join().unwrap(), tb.join().unwrap());
+    at_a.extend(a.sync(0).unwrap());
+    at_b.extend(b.sync(0).unwrap());
+    assert_eq!(yos_from(&at_a, &pb), 1);
+    assert_eq!(yos_from(&at_b, &pa), 1);
+    let mut at_a = a.send_yo(&pb).unwrap();
+    let mut at_b = b.send_yo(&pa).unwrap();
+    at_b.extend(b.sync(0).unwrap());
+    at_a.extend(a.sync(0).unwrap());
+    assert_eq!(yos_from(&at_b, &pa), 1);
+    assert_eq!(yos_from(&at_a, &pb), 1);
     assert_eq!(a.dropped() + b.dropped(), 0);
 }
 
@@ -191,7 +198,14 @@ fn a_new_phone_without_passkey_is_a_new_identity() {
     assert_eq!(yos_from(&events, &pa), 1);
     b2.send_yo(&pa).unwrap();
     assert_eq!(yos_from(&a.sync(0).unwrap(), &pb), 1);
-    assert_eq!(a.chats().len(), 1, "the old chat is gone");
+    // The old chat is closed: nothing is sent there, what it still holds is read for 31 days, then it goes.
+    assert_eq!(a.chats().len(), 2);
+    let later = yo_hub::now_ms() + 32 * 24 * 3600 * 1000;
+    a.set_clock(Arc::new(move || later));
+    a.maintenance().unwrap();
+    assert_eq!(a.chats().len(), 1, "the closed chat is dropped after the envelope TTL");
+    b2.send_yo(&pa).unwrap();
+    assert_eq!(yos_from(&a.sync(0).unwrap(), &pb), 1);
 }
 
 #[test]

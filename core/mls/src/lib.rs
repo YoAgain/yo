@@ -36,6 +36,8 @@ pub const UPDATE_AFTER_MS: u64 = 7 * 24 * 3600 * 1000;
 pub const UPDATE_AFTER_MESSAGES: u32 = 100;
 /// The last resort KeyPackage is replaced this often.
 const LAST_RESORT_EVERY_MS: u64 = 30 * 24 * 3600 * 1000;
+/// A closed chat is still read this long: the hub keeps envelopes 30 days.
+const CLOSED_CHAT_KEPT_MS: u64 = 31 * 24 * 3600 * 1000;
 /// Envelope hashes remembered against redelivery.
 const SEEN: usize = 2000;
 
@@ -80,14 +82,15 @@ pub struct Client {
     events: Vec<Event>,
     last_request_ms: u64,
     dropped: u64,
+    drop_reasons: Vec<String>,
 }
 
 fn wall_ms() -> u64 {
     SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_millis() as u64
 }
 
-fn mls<E>(_: E) -> Error {
-    Error::Protocol("mls")
+fn mls<E: std::fmt::Debug>(error: E) -> Error {
+    Error::Mls(format!("{error:?}"))
 }
 
 fn group_key(group: &GroupId) -> String {
@@ -144,6 +147,7 @@ impl Client {
             chats: Default::default(),
             outbox: VecDeque::new(),
             seen: VecDeque::new(),
+            ignored: VecDeque::new(),
             key_packages_left: KEY_PACKAGE_TARGET,
             last_resort_at: wall_ms(),
         };
@@ -188,6 +192,7 @@ impl Client {
             events: Vec::new(),
             last_request_ms: 0,
             dropped: 0,
+            drop_reasons: Vec::new(),
         }
     }
 
@@ -218,6 +223,18 @@ impl Client {
     /// Envelopes that could not be processed and were dropped: zero unless someone sends garbage.
     pub fn dropped(&self) -> u64 {
         self.dropped
+    }
+
+    /// Why the last envelopes were dropped: for diagnostics.
+    pub fn drop_reasons(&self) -> &[String] {
+        &self.drop_reasons
+    }
+
+    fn drop_one(&mut self, reason: String) {
+        self.dropped += 1;
+        if self.drop_reasons.len() < 20 {
+            self.drop_reasons.push(reason);
+        }
     }
 
     /// Envelopes waiting to be accepted by the hub.
@@ -396,7 +413,7 @@ impl Client {
         self.state
             .chats
             .iter()
-            .find(|(_, chat)| chat.peer == peer)
+            .find(|(_, chat)| chat.peer == peer && chat.closed_at.is_none())
             .and_then(|(key, _)| state::unhex(key))
             .map(|id| GroupId::from_slice(&id))
     }
@@ -457,7 +474,7 @@ impl Client {
         self.enqueue(&mailboxes, &welcome)?;
         self.state.chats.insert(
             group_key(&group_id),
-            Chat { peer: peer.to_owned(), last_update_ms: (self.clock)(), sent_since_update: 0, needs_update: false },
+            Chat { peer: peer.to_owned(), last_update_ms: (self.clock)(), sent_since_update: 0, needs_update: false, closed_at: None },
         );
         if let Some(name) = self.state.name.clone() {
             self.send_in(&group_id, Content::Profile { name }, false)?;
@@ -467,9 +484,10 @@ impl Client {
 
     fn update_due(&self, group: &GroupId) -> bool {
         self.state.chats.get(&group_key(group)).is_some_and(|chat| {
-            chat.needs_update
+            chat.closed_at.is_none()
+                && (chat.needs_update
                 || (self.clock)().saturating_sub(chat.last_update_ms) >= UPDATE_AFTER_MS
-                || chat.sent_since_update >= UPDATE_AFTER_MESSAGES
+                    || chat.sent_since_update >= UPDATE_AFTER_MESSAGES)
         })
     }
 
@@ -565,7 +583,7 @@ impl Client {
                     gone_peers.extend(self.mailbox_gone(&item.mailbox));
                 }
                 Ok(response) if matches!(response.status, status::NOT_FOUND | status::BAD_REQUEST | status::TOO_LARGE) => {
-                    self.dropped += 1;
+                    self.drop_one(format!("hub refused delivery: {}", response.status));
                 }
                 // Rate limit, hub trouble, no network: later, in the same order.
                 _ => {
@@ -579,7 +597,7 @@ impl Client {
         gone_peers
     }
 
-    /// A member's device was replaced: its chats are over, the contact must be looked up again.
+    /// A member's device was replaced: its chats are closed for sending, the contact must be looked up again.
     fn mailbox_gone(&mut self, mailbox: &Mailbox) -> Vec<String> {
         let mut peers = Vec::new();
         let keys: Vec<String> = self.state.chats.keys().cloned().collect();
@@ -587,10 +605,11 @@ impl Client {
             let Some(id) = state::unhex(&key) else { continue };
             let Ok(group) = self.load(&GroupId::from_slice(&id)) else { continue };
             if self.others(&group).contains(mailbox) {
-                if let Some(chat) = self.state.chats.get(&key) {
+                let now = (self.clock)();
+                if let Some(chat) = self.state.chats.get_mut(&key) {
                     peers.push(chat.peer.clone());
+                    chat.closed_at.get_or_insert(now);
                 }
-                self.drop_chat(&key);
             }
         }
         for peer in &peers {
@@ -625,7 +644,7 @@ impl Client {
                             stopped = Some(error);
                             break;
                         }
-                        Err(_) => self.dropped += 1,
+                        Err(error) => self.drop_one(error.to_string()),
                     }
                     self.state.seen.push_back(hash);
                     if self.state.seen.len() > SEEN {
@@ -657,6 +676,13 @@ impl Client {
             MlsMessageBodyIn::Welcome(welcome) => self.join(welcome),
             MlsMessageBodyIn::PrivateMessage(private) => self.private(private.into()),
             _ => Err(Error::Protocol("wire format")),
+        }
+    }
+
+    fn ignore(&mut self, group: [u8; 32]) {
+        self.state.ignored.push_back(group);
+        if self.state.ignored.len() > 200 {
+            self.state.ignored.pop_front();
         }
     }
 
@@ -699,9 +725,14 @@ impl Client {
         if self.state.contacts.get(&peer).is_some_and(|c| c.blocked) {
             return Err(Error::Blocked);
         }
-        // The hub attests the number's account key: nobody can start a chat in someone else's name.
+        // The hub attests the number's account key: nobody can start a chat in someone else's name. A key the
+        // number no longer has is a replaced device's (or a forger's): either way the chat is not joined.
         if self.lookup(&peer, false)?.account_key != peer_key {
-            return Err(Error::Protocol("account key not the number's"));
+            // Kept, not rolled back: the group is remembered as ignored, and what follows in it is discarded.
+            let id: [u8; 32] =
+                staged.group_context().group_id().as_slice().try_into().map_err(|_| Error::Protocol("group id"))?;
+            self.ignore(id);
+            return Ok(());
         }
         self.pin(&peer, peer_key, passkey);
         let group = staged.into_group(&self.provider).map_err(mls)?;
@@ -710,7 +741,7 @@ impl Client {
         }
         self.state.chats.insert(
             group_key(group.group_id()),
-            Chat { peer: peer.clone(), last_update_ms: (self.clock)(), sent_since_update: 0, needs_update: true },
+            Chat { peer: peer.clone(), last_update_ms: (self.clock)(), sent_since_update: 0, needs_update: true, closed_at: None },
         );
         self.events.push(Event::NewChat { phone: peer });
         Ok(())
@@ -719,9 +750,25 @@ impl Client {
     fn private(&mut self, message: ProtocolMessage) -> Result<()> {
         let group_id = message.group_id().clone();
         let key = group_key(&group_id);
-        let peer = self.state.chats.get(&key).ok_or(Error::Protocol("unknown group"))?.peer.clone();
+        let Some(chat) = self.state.chats.get(&key) else {
+            // A group whose Welcome came from a replaced identity: discarded quietly, as expected.
+            if self.state.ignored.iter().any(|g| g.as_slice() == group_id.as_slice()) {
+                return Ok(());
+            }
+            return Err(Error::Protocol("unknown group"));
+        };
+        let peer = chat.peer.clone();
         let mut group = self.load(&group_id)?;
-        let processed = group.process_message(&self.provider, message).map_err(mls)?;
+        // The accounts in the group, as their certificates were checked when they joined.
+        let accounts: Vec<(Vec<u8>, [u8; 32])> = group
+            .members()
+            .filter_map(|m| identity::claimed(&m.credential))
+            .map(|body| (body.phone().to_vec(), body.account_key))
+            .collect();
+        let (message_epoch, group_epoch) = (message.epoch().as_u64(), group.epoch().as_u64());
+        let processed = group
+            .process_message(&self.provider, message)
+            .map_err(|e| Error::Mls(format!("{e:?} (message epoch {message_epoch}, group epoch {group_epoch})")))?;
         let sender = identity::claimed(processed.credential()).ok_or(Error::Protocol("sender"))?;
         let from_me = sender.phone() == self.state.phone.as_bytes();
         match processed.into_content() {
@@ -748,7 +795,7 @@ impl Client {
                 Ok(())
             }
             ProcessedMessageContent::StagedCommitMessage(staged) => {
-                self.check_commit(&staged, &sender, &peer)?;
+                self.check_commit(&staged, &sender, &accounts)?;
                 group.merge_staged_commit(&self.provider, *staged).map_err(mls)?;
                 if !group.is_active() {
                     self.drop_chat(&key);
@@ -759,18 +806,15 @@ impl Client {
         }
     }
 
-    /// A commit may add devices of the two accounts only, and a new leaf must be its sender's.
+    /// A commit may add devices only of the accounts already in the group, and a new leaf must be its sender's.
     fn check_commit(
         &self,
         staged: &StagedCommit,
         sender: &yo_wire::cert::CertificateBody,
-        peer: &str,
+        accounts: &[(Vec<u8>, [u8; 32])],
     ) -> Result<()> {
-        let my_key = SigningKey::from_bytes(&self.state.account_secret).verifying_key().to_bytes();
-        let peer_key = self.state.contacts.get(peer).map(|c| c.account_key);
         let allowed = |body: &yo_wire::cert::CertificateBody| {
-            (body.phone() == self.state.phone.as_bytes() && body.account_key == my_key)
-                || (body.phone() == peer.as_bytes() && Some(body.account_key) == peer_key)
+            accounts.iter().any(|(phone, key)| phone.as_slice() == body.phone() && *key == body.account_key)
         };
         for add in staged.add_proposals() {
             let leaf = add.add_proposal().key_package().leaf_node();
@@ -835,6 +879,12 @@ impl Client {
             return Err(Error::Protocol("unknown content"));
         }
         self.flush();
+        // Receive first: a commit waiting in the inbox would otherwise leave this message in an epoch the peer
+        // may already have left behind. Offline, the message still goes into the outbox.
+        match self.receive_all(0) {
+            Ok(()) | Err(Error::Network(_)) => {}
+            Err(error) => return Err(error),
+        }
         for _ in 0..2 {
             let group = match self.chat_with(&peer) {
                 Some(group) => group,
@@ -872,6 +922,17 @@ impl Client {
         self.flush();
         self.receive_all(0)?;
         self.refill()?;
+        let now = (self.clock)();
+        let expired: Vec<String> = self
+            .state
+            .chats
+            .iter()
+            .filter(|(_, chat)| chat.closed_at.is_some_and(|at| now.saturating_sub(at) > CLOSED_CHAT_KEPT_MS))
+            .map(|(key, _)| key.clone())
+            .collect();
+        for key in expired {
+            self.drop_chat(&key);
+        }
         let groups: Vec<GroupId> = self
             .state
             .chats
@@ -894,8 +955,9 @@ impl Client {
             let groups: Vec<GroupId> = self
                 .state
                 .chats
-                .keys()
-                .filter_map(|key| state::unhex(key))
+                .iter()
+                .filter(|(_, chat)| chat.closed_at.is_none())
+                .filter_map(|(key, _)| state::unhex(key))
                 .map(|id| GroupId::from_slice(&id))
                 .collect();
             for group in groups {

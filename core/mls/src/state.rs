@@ -35,6 +35,10 @@ pub struct Chat {
     pub sent_since_update: u32,
     /// Joined by Welcome and not updated since.
     pub needs_update: bool,
+    /// The peer's device was replaced: nothing is sent here any more, but what it sent before is still read,
+    /// until the hub would have dropped it anyway.
+    #[serde(default)]
+    pub closed_at: Option<u64>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -60,6 +64,9 @@ pub struct State {
     pub outbox: VecDeque<Outgoing>,
     /// Hashes of envelopes already processed, against redelivery.
     pub seen: VecDeque<[u8; 32]>,
+    /// Groups whose Welcome was discarded as superseded: what follows in them is discarded quietly too.
+    #[serde(default)]
+    pub ignored: VecDeque<[u8; 32]>,
     pub key_packages_left: u32,
     pub last_resort_at: u64,
 }

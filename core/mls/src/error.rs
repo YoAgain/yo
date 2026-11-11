@@ -19,6 +19,9 @@ pub enum Error {
     /// Something the peer or the hub sent breaks the protocol.
     #[error("protocol: {0}")]
     Protocol(&'static str),
+    /// OpenMLS refused: the message or state does not fit the group.
+    #[error("mls: {0}")]
+    Mls(String),
     /// The stored state cannot be opened with this key, or is damaged.
     #[error("state")]
     State,
