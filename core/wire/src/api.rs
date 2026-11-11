@@ -155,10 +155,7 @@ mod tests {
             last_resort: vec![5; 300].into(),
         };
         assert_eq!(crate::decode::<VerifyCheck>(&crate::encode(&check)).unwrap(), check);
-        let inbox = Inbox {
-            key_packages_left: 7,
-            items: vec![InboxItem { id: 1, envelope: vec![0; 1024].into() }],
-        };
+        let inbox = Inbox { key_packages_left: 7, items: vec![InboxItem { id: 1, envelope: vec![0; 1024].into() }] };
         assert_eq!(crate::decode::<Inbox>(&crate::encode(&inbox)).unwrap(), inbox);
     }
 

@@ -40,8 +40,7 @@ pub fn verify(
 ) -> Result<(), Error> {
     let key = VerifyingKey::from_bytes(auth_key).map_err(|_| Error::Signature)?;
     let signature = Signature::from_slice(signature).map_err(|_| Error::Signature)?;
-    key.verify_strict(&to_be_signed(method, path, time_ms, body), &signature)
-        .map_err(|_| Error::Signature)
+    key.verify_strict(&to_be_signed(method, path, time_ms, body), &signature).map_err(|_| Error::Signature)
 }
 
 #[cfg(test)]

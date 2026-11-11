@@ -174,10 +174,7 @@ impl Hub {
 
     fn ip(&self, peer: SocketAddr, headers: &HeaderMap) -> IpAddr {
         if self.config.trust_cloudflare {
-            if let Some(ip) = headers
-                .get("cf-connecting-ip")
-                .and_then(|v| v.to_str().ok())
-                .and_then(|v| v.parse().ok())
+            if let Some(ip) = headers.get("cf-connecting-ip").and_then(|v| v.to_str().ok()).and_then(|v| v.parse().ok())
             {
                 return ip;
             }
@@ -196,15 +193,11 @@ impl Hub {
     fn authenticate(&self, method: &Method, uri: &Uri, headers: &HeaderMap, body: &[u8]) -> Res<Signed> {
         let unauthorized = || refuse(StatusCode::UNAUTHORIZED);
         let header = |name: &str| headers.get(name).and_then(|v| v.to_str().ok()).ok_or_else(unauthorized);
-        let mailbox: Mailbox = unb64(header(HEADER_DEVICE)?)
-            .ok()
-            .and_then(|m| m.try_into().ok())
-            .ok_or_else(unauthorized)?;
+        let mailbox: Mailbox =
+            unb64(header(HEADER_DEVICE)?).ok().and_then(|m| m.try_into().ok()).ok_or_else(unauthorized)?;
         let time: u64 = header(HEADER_TIME)?.parse().map_err(|_| unauthorized())?;
-        let signature: [u8; 64] = unb64(header(HEADER_SIGNATURE)?)
-            .ok()
-            .and_then(|s| s.try_into().ok())
-            .ok_or_else(unauthorized)?;
+        let signature: [u8; 64] =
+            unb64(header(HEADER_SIGNATURE)?).ok().and_then(|s| s.try_into().ok()).ok_or_else(unauthorized)?;
         let now = now_ms();
         if now.abs_diff(time) > limits::MAX_SKEW_MS {
             return Err(unauthorized());
@@ -292,7 +285,10 @@ async fn verify_check(State(hub): Hubs, ConnectInfo(peer): Peer, headers: Header
     hub.limit(format!("check:ip:{}", hub.ip(peer, &headers)), limits.verify_per_ip_hour.saturating_mul(3), HOUR)?;
     hub.limit(format!("check:phone:{}", yo_wire::b64(&phone)), limits.check_per_phone_hour, HOUR)?;
     let code = String::from_utf8(request.code.as_slice().to_vec()).map_err(|_| refuse(StatusCode::BAD_REQUEST))?;
-    if code.is_empty() || code.len() > limits::MAX_CODE_LEN || request.push.token.as_slice().len() > limits::MAX_PUSH_TOKEN_LEN {
+    if code.is_empty()
+        || code.len() > limits::MAX_CODE_LEN
+        || request.push.token.as_slice().len() > limits::MAX_PUSH_TOKEN_LEN
+    {
         return Err(refuse(StatusCode::BAD_REQUEST));
     }
     let certificate = DeviceCertificate::verify(request.certificate.as_slice())?;
@@ -309,14 +305,10 @@ async fn verify_check(State(hub): Hubs, ConnectInfo(peer): Peer, headers: Header
         &body.mailbox,
     )?;
     let last_resort = last_resort.expect("asked for");
-    let approved = hub
-        .sms
-        .check(String::from_utf8_lossy(digits).into_owned(), code)
-        .await
-        .map_err(|error| {
-            eprintln!("yo-hub: sms: {error}");
-            refuse(StatusCode::BAD_GATEWAY)
-        })?;
+    let approved = hub.sms.check(String::from_utf8_lossy(digits).into_owned(), code).await.map_err(|error| {
+        eprintln!("yo-hub: sms: {error}");
+        refuse(StatusCode::BAD_GATEWAY)
+    })?;
     if !approved {
         return Err(refuse(StatusCode::FORBIDDEN));
     }
@@ -337,13 +329,19 @@ async fn key_packages(State(hub): Hubs, method: Method, uri: Uri, headers: Heade
     let request: api::KeyPackages = decode(&body)?;
     let account_key = hub.db.account_key(&device.phone)?.ok_or_else(|| refuse(StatusCode::UNAUTHORIZED))?;
     // The hub knows the number only as its HMAC: the certificate names it, the HMAC must match.
-    let first = request.key_packages.first().or(request.last_resort.as_ref()).ok_or_else(|| refuse(StatusCode::BAD_REQUEST))?;
+    let first =
+        request.key_packages.first().or(request.last_resort.as_ref()).ok_or_else(|| refuse(StatusCode::BAD_REQUEST))?;
     let digits = phone_of(first.as_slice()).ok_or_else(|| refuse(StatusCode::BAD_REQUEST))?;
     if hub.phone_hmac(&digits) != device.phone {
         return Err(refuse(StatusCode::BAD_REQUEST));
     }
-    let (stored, last) =
-        hub.check_key_packages(&request.key_packages, request.last_resort.as_ref(), &digits, &account_key, &device.mailbox)?;
+    let (stored, last) = hub.check_key_packages(
+        &request.key_packages,
+        request.last_resort.as_ref(),
+        &digits,
+        &account_key,
+        &device.mailbox,
+    )?;
     match hub.db.add_key_packages(&device.mailbox, &stored, last.as_ref(), KEY_PACKAGE_TARGET * 2)? {
         Write::Done(()) => Ok(StatusCode::NO_CONTENT),
         Write::Refused(_) => Err(refuse(StatusCode::CONFLICT)),
@@ -361,15 +359,17 @@ fn phone_of(key_package: &[u8]) -> Option<Vec<u8>> {
     Some(certificate.body.phone().to_vec())
 }
 
-async fn lookup(State(hub): Hubs, method: Method, uri: Uri, headers: HeaderMap, body: Bytes) -> Res<(StatusCode, Vec<u8>)> {
+async fn lookup(
+    State(hub): Hubs,
+    method: Method,
+    uri: Uri,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Res<(StatusCode, Vec<u8>)> {
     let device = hub.authenticate(&method, &uri, &headers, &body)?;
     let request: api::Lookup = decode(&body)?;
     phone::check(request.phone.as_slice())?;
-    hub.limit(
-        format!("lookup:{}", yo_wire::b64(&device.mailbox)),
-        hub.config.limits.lookup_per_device_day,
-        DAY,
-    )?;
+    hub.limit(format!("lookup:{}", yo_wire::b64(&device.mailbox)), hub.config.limits.lookup_per_device_day, DAY)?;
     let phone = hub.phone_hmac(request.phone.as_slice());
     let (account_key, key_packages) =
         hub.db.lookup(&phone, request.key_packages == 1)?.ok_or_else(|| refuse(StatusCode::NOT_FOUND))?;

@@ -52,9 +52,10 @@ fn run(seed: u64, clients: usize, steps: usize) {
             let text = format!("{seed}-{step}");
             let to = devices[j].phone.clone();
             let from = devices[i].phone.clone();
-            let events = devices[i].client.send(&phones[j], Content::Text(text.clone())).unwrap_or_else(|e| {
-                panic!("seed {seed} step {step}: {from} -> {to}: {e}")
-            });
+            let events = devices[i]
+                .client
+                .send(&phones[j], Content::Text(text.clone()))
+                .unwrap_or_else(|e| panic!("seed {seed} step {step}: {from} -> {to}: {e}"));
             collect(events, &mut received, &from);
             assert_eq!(devices[i].client.pending(), 0, "seed {seed} step {step}");
             expected.entry(to).or_default().push((from, text));
@@ -177,7 +178,8 @@ fn many_clients_at_once() {
         .drain(..)
         .map(|(i, mut client, events)| {
             std::thread::spawn(move || {
-                let mut yos = events.iter().filter(|e| matches!(e, Event::Message { content: Content::Yo, .. })).count();
+                let mut yos =
+                    events.iter().filter(|e| matches!(e, Event::Message { content: Content::Yo, .. })).count();
                 for _ in 0..3 {
                     yos += client
                         .sync(0)

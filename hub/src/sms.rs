@@ -17,12 +17,9 @@ pub trait Sms: Send + Sync {
 pub fn from_config(config: &SmsConfig) -> Box<dyn Sms> {
     match config.clone() {
         SmsConfig::Dev { code } => Box::new(Dev { code }),
-        SmsConfig::Twilio { account_sid, auth_token, service_sid } => Box::new(Twilio {
-            client: reqwest::Client::new(),
-            account_sid,
-            auth_token,
-            service_sid,
-        }),
+        SmsConfig::Twilio { account_sid, auth_token, service_sid } => {
+            Box::new(Twilio { client: reqwest::Client::new(), account_sid, auth_token, service_sid })
+        }
     }
 }
 

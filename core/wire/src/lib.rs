@@ -76,7 +76,5 @@ pub fn b64(bytes: &[u8]) -> String {
 
 pub fn unb64(text: &str) -> Result<Vec<u8>, Error> {
     use base64::Engine;
-    base64::engine::general_purpose::URL_SAFE_NO_PAD
-        .decode(text)
-        .map_err(|_| Error::Format)
+    base64::engine::general_purpose::URL_SAFE_NO_PAD.decode(text).map_err(|_| Error::Format)
 }

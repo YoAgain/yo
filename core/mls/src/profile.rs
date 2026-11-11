@@ -68,11 +68,8 @@ fn sender_ratchet() -> SenderRatchetConfiguration {
 }
 
 pub fn create_config() -> Result<MlsGroupCreateConfig> {
-    let required = Extension::RequiredCapabilities(RequiredCapabilitiesExtension::new(
-        &[],
-        &[],
-        &[CredentialType::Basic],
-    ));
+    let required =
+        Extension::RequiredCapabilities(RequiredCapabilitiesExtension::new(&[], &[], &[CredentialType::Basic]));
     Ok(MlsGroupCreateConfig::builder()
         .ciphersuite(CIPHERSUITE)
         .wire_format_policy(PURE_CIPHERTEXT_WIRE_FORMAT_POLICY)

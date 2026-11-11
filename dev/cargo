@@ -5,6 +5,8 @@
 set -e
 root=$(cd "$(dirname "$0")/.." && pwd)
 mkdir -p "$HOME/.cache/yo-cargo"
+image=yo-rust:1.99.1
+docker image inspect "$image" >/dev/null 2>&1 || docker build -q -t "$image" "$root/dev" >/dev/null
 # YO_ENV="A=1 B=2" passes variables into the container.
 env_flags=""
 for pair in $YO_ENV; do env_flags="$env_flags -e $pair"; done
@@ -13,4 +15,4 @@ exec docker run --rm -i --network host \
   $env_flags \
   -v "$HOME/.cache/yo-cargo:/cargo" \
   -v "$root:/yo" -w "/yo${YO_CWD:+/$YO_CWD}" \
-  rust:1.99.1-slim-bookworm cargo "$@"
+  "$image" cargo "$@"

@@ -88,8 +88,8 @@ struct Sealed {
 pub fn seal(state: &State, mls: Entries, key: &[u8; 32]) -> Vec<u8> {
     let mut mls: Vec<_> = mls.into_iter().collect();
     mls.sort();
-    let mut plain = serde_json::to_vec(&Sealed { version: STATE_VERSION, state: state.clone(), mls })
-        .expect("state encodes");
+    let mut plain =
+        serde_json::to_vec(&Sealed { version: STATE_VERSION, state: state.clone(), mls }).expect("state encodes");
     let nonce: [u8; 12] = crate::identity::random();
     let sealed = ChaCha20Poly1305::new(key.into())
         .encrypt(&nonce.into(), Payload { msg: &plain, aad: AAD })
@@ -122,8 +122,5 @@ pub fn hex(bytes: &[u8]) -> String {
 }
 
 pub fn unhex(text: &str) -> Option<Vec<u8>> {
-    (0..text.len())
-        .step_by(2)
-        .map(|i| text.get(i..i + 2).and_then(|h| u8::from_str_radix(h, 16).ok()))
-        .collect()
+    (0..text.len()).step_by(2).map(|i| text.get(i..i + 2).and_then(|h| u8::from_str_radix(h, 16).ok())).collect()
 }

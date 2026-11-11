@@ -1,0 +1,45 @@
+name: Test
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Toolchain (rust-toolchain.toml) with clippy and rustfmt
+        run: rustup show active-toolchain && rustup component add clippy rustfmt
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: cargo-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml') }}
+      - run: cargo fmt --all -- --check
+      - run: cargo clippy --workspace --all-targets --locked -- -D warnings
+      - run: cargo test --workspace --locked
+      - name: More seeds
+        run: YO_SEEDS=$(seq -s, 100 130) cargo test --locked -p yo-tests --test simulation seeded
+
+  load:
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    needs: test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: cargo-release-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml') }}
+      - name: Load test
+        run: YO_DATE=$(date +%F)-ci YO_COMMIT=${GITHUB_SHA::7} cargo run --release --locked -p yo-tests --bin yo-load -- --clients 100 --seconds 10 --threads 4 --connections 32 --out load-results
+      - uses: actions/upload-artifact@v4
+        with:
+          name: load-results
+          path: load-results/

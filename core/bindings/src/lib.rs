@@ -129,7 +129,9 @@ impl From<Event> for YoEvent {
     fn from(event: Event) -> Self {
         match event {
             Event::NewChat { phone } => YoEvent::NewChat { phone },
-            Event::Message { phone, sent_at_ms, content } => YoEvent::Message { phone, sent_at_ms, kind: content.into() },
+            Event::Message { phone, sent_at_ms, content } => {
+                YoEvent::Message { phone, sent_at_ms, kind: content.into() }
+            }
             Event::SentElsewhere { phone, sent_at_ms, content } => {
                 YoEvent::SentElsewhere { phone, sent_at_ms, kind: content.into() }
             }
@@ -239,7 +241,13 @@ impl YoClient {
     pub fn contacts(&self) -> Vec<YoContact> {
         self.with(|c| c.contacts())
             .into_iter()
-            .map(|c| YoContact { phone: c.phone, name: c.name, verified: c.verified, can_verify: c.can_verify, blocked: c.blocked })
+            .map(|c| YoContact {
+                phone: c.phone,
+                name: c.name,
+                verified: c.verified,
+                can_verify: c.can_verify,
+                blocked: c.blocked,
+            })
             .collect()
     }
 

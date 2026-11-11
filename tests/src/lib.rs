@@ -27,7 +27,12 @@ impl TestHub {
         let (stop, stopped) = tokio::sync::oneshot::channel::<()>();
         let serving = hub.clone();
         runtime.spawn(async move {
-            serving.serve(listener, async { let _ = stopped.await; }).await.unwrap();
+            serving
+                .serve(listener, async {
+                    let _ = stopped.await;
+                })
+                .await
+                .unwrap();
         });
         TestHub { hub, push, addr, runtime: Some(runtime), stop: Some(stop) }
     }
@@ -58,12 +63,15 @@ impl Drop for TestHub {
     }
 }
 
+/// A signed request as it was sent: method, path, headers, body.
+pub type Recorded = (String, String, Vec<(String, String)>, Vec<u8>);
+
 /// The platform's HTTP, in Rust. The base URL can be moved, to follow a restarted hub.
 pub struct Http {
     client: reqwest::blocking::Client,
     pub base: RwLock<String>,
     /// Every signed request, for replay tests.
-    pub recorded: Mutex<Vec<(String, String, Vec<(String, String)>, Vec<u8>)>>,
+    pub recorded: Mutex<Vec<Recorded>>,
 }
 
 impl Http {
@@ -83,10 +91,12 @@ impl Http {
 impl Transport for Http {
     fn request(&self, method: &str, path: &str, headers: &[(String, String)], body: &[u8]) -> Result<Response, String> {
         if !headers.is_empty() {
-            self.recorded
-                .lock()
-                .unwrap_or_else(PoisonError::into_inner)
-                .push((method.into(), path.into(), headers.to_vec(), body.to_vec()));
+            self.recorded.lock().unwrap_or_else(PoisonError::into_inner).push((
+                method.into(),
+                path.into(),
+                headers.to_vec(),
+                body.to_vec(),
+            ));
         }
         let url = format!("{}{}", self.base.read().unwrap(), path);
         let mut request = self.client.request(method.parse().map_err(|_| "method")?, url).body(body.to_vec());
@@ -120,7 +130,7 @@ pub fn random_u64() -> u64 {
 pub struct Rng(pub u64);
 
 impl Rng {
-    pub fn next(&mut self) -> u64 {
+    pub fn next_u64(&mut self) -> u64 {
         self.0 ^= self.0 >> 12;
         self.0 ^= self.0 << 25;
         self.0 ^= self.0 >> 27;
@@ -128,6 +138,6 @@ impl Rng {
     }
 
     pub fn below(&mut self, n: u64) -> u64 {
-        self.next() % n
+        self.next_u64() % n
     }
 }

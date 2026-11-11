@@ -71,7 +71,10 @@ fn main() {
     let hub = TestHub::start_with(config, "127.0.0.1:0");
     let url = hub.url();
     let cores = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(1);
-    println!("yo-load: {} clients, {} s per phase, {} threads, {} connections, {cores} cores", args.clients, args.seconds, args.threads, args.connections);
+    println!(
+        "yo-load: {} clients, {} s per phase, {} threads, {} connections, {cores} cores",
+        args.clients, args.seconds, args.threads, args.connections
+    );
 
     // ---- registration ----
     let base = random_u64() % 1_000_000_000;
@@ -91,7 +94,11 @@ fn main() {
     clients.retain(|(i, _)| *i < args.clients);
     clients.sort_by_key(|(i, _)| *i);
     let registration_s = started.elapsed().as_secs_f64();
-    println!("registered {} in {registration_s:.1} s ({:.0}/s, each with 51 KeyPackages)", clients.len(), clients.len() as f64 / registration_s);
+    println!(
+        "registered {} in {registration_s:.1} s ({:.0}/s, each with 51 KeyPackages)",
+        clients.len(),
+        clients.len() as f64 / registration_s
+    );
 
     // ---- chats: a ring, each to the next ----
     let n = clients.len();
@@ -117,7 +124,8 @@ fn main() {
     let workers: Vec<_> = groups
         .into_iter()
         .map(|mut mine| {
-            let (stop, sent, received, send_latency) = (stop.clone(), sent.clone(), received.clone(), send_latency.clone());
+            let (stop, sent, received, send_latency) =
+                (stop.clone(), sent.clone(), received.clone(), send_latency.clone());
             std::thread::spawn(move || {
                 let mut latencies = Vec::new();
                 while !stop.load(Ordering::Relaxed) {
@@ -163,7 +171,8 @@ fn main() {
         let deadline = Instant::now() + Duration::from_secs(args.seconds);
         let tasks: Vec<_> = (0..args.connections)
             .map(|c| {
-                let (client, url, envelope, mailboxes) = (client.clone(), url.clone(), envelope.clone(), mailboxes.clone());
+                let (client, url, envelope, mailboxes) =
+                    (client.clone(), url.clone(), envelope.clone(), mailboxes.clone());
                 tokio::spawn(async move {
                     let mut latencies = Vec::new();
                     let mut errors = 0u64;
@@ -215,12 +224,7 @@ fn main() {
     });
     println!("{}", serde_json::to_string_pretty(&result).unwrap());
     std::fs::create_dir_all(&args.out).unwrap();
-    let name = format!(
-        "{}/{}-{}c.json",
-        args.out,
-        std::env::var("YO_DATE").unwrap_or_else(|_| "run".into()),
-        n
-    );
+    let name = format!("{}/{}-{}c.json", args.out, std::env::var("YO_DATE").unwrap_or_else(|_| "run".into()), n);
     std::fs::write(&name, serde_json::to_string_pretty(&result).unwrap() + "\n").unwrap();
     println!("written to {name}");
     drop(hub);

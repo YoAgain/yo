@@ -1,8 +1,6 @@
 //! The hub's check of every KeyPackage it stores (spec 6.5): it hands out only what names the right person.
 
-use openmls::prelude::{
-    BasicCredential, Ciphersuite, CredentialType, KeyPackageIn, ProtocolVersion,
-};
+use openmls::prelude::{BasicCredential, Ciphersuite, CredentialType, KeyPackageIn, ProtocolVersion};
 use openmls_rust_crypto::RustCrypto;
 use tls_codec::Deserialize as _;
 use yo_wire::cert::DeviceCertificate;
@@ -29,10 +27,7 @@ pub fn check(
     if bytes.len() > MAX_KEY_PACKAGE_LEN {
         return None;
     }
-    let key_package = KeyPackageIn::tls_deserialize_exact(bytes)
-        .ok()?
-        .validate(crypto, ProtocolVersion::Mls10)
-        .ok()?;
+    let key_package = KeyPackageIn::tls_deserialize_exact(bytes).ok()?.validate(crypto, ProtocolVersion::Mls10).ok()?;
     if key_package.ciphersuite() != CIPHERSUITE {
         return None;
     }
@@ -47,9 +42,5 @@ pub fn check(
         && &body.account_key == account_key
         && &body.mailbox == mailbox
         && body.device_key.as_slice() == leaf.signature_key().as_slice();
-    fits.then(|| Checked {
-        hash: yo_wire::sha256(bytes),
-        last_resort: key_package.last_resort(),
-        certificate,
-    })
+    fits.then(|| Checked { hash: yo_wire::sha256(bytes), last_resort: key_package.last_resort(), certificate })
 }

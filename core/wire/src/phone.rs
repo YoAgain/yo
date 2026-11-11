@@ -27,9 +27,7 @@ pub fn normalize(input: &str) -> Result<String, Error> {
 
 /// E.164 digits: 6 to 15 ASCII digits, the first not 0.
 pub fn check(digits: &[u8]) -> Result<(), Error> {
-    let ok = (6..=15).contains(&digits.len())
-        && digits.iter().all(u8::is_ascii_digit)
-        && digits[0] != b'0';
+    let ok = (6..=15).contains(&digits.len()) && digits.iter().all(u8::is_ascii_digit) && digits[0] != b'0';
     ok.then_some(()).ok_or(Error::Phone)
 }
 

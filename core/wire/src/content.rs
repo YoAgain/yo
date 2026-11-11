@@ -17,10 +17,15 @@ const CONTENT_VERSION: u16 = 1;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Content {
     Yo,
-    Profile { name: String },
+    Profile {
+        name: String,
+    },
     Text(String),
     Link(String),
-    Location { lat_e7: i32, lon_e7: i32 },
+    Location {
+        lat_e7: i32,
+        lon_e7: i32,
+    },
     /// A type this version does not know: newer apps may send it.
     Unknown(u16),
 }
@@ -73,18 +78,12 @@ impl Message {
             Content::Profile { name } => (TYPE_PROFILE, text(name, MAX_NAME_LEN)?),
             Content::Text(value) => (TYPE_TEXT, text(value, MAX_TEXT_LEN)?),
             Content::Link(url) => (TYPE_LINK, text(url, MAX_URL_LEN)?),
-            Content::Location { lat_e7, lon_e7 } => (
-                TYPE_LOCATION,
-                crate::encode(&Location { lat_e7: *lat_e7 as u32, lon_e7: *lon_e7 as u32 }),
-            ),
+            Content::Location { lat_e7, lon_e7 } => {
+                (TYPE_LOCATION, crate::encode(&Location { lat_e7: *lat_e7 as u32, lon_e7: *lon_e7 as u32 }))
+            }
             Content::Unknown(_) => return Err(Error::Unsupported),
         };
-        Ok(crate::encode(&Wire {
-            version: CONTENT_VERSION,
-            sent_at: self.sent_at_ms,
-            kind,
-            body: body.into(),
-        }))
+        Ok(crate::encode(&Wire { version: CONTENT_VERSION, sent_at: self.sent_at_ms, kind, body: body.into() }))
     }
 
     pub fn decode(bytes: &[u8]) -> Result<Self, Error> {

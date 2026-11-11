@@ -21,9 +21,7 @@ impl Limiter {
         let rate = capacity / window.as_secs_f64();
         let mut buckets = self.buckets.lock().unwrap_or_else(PoisonError::into_inner);
         if buckets.len() > 200_000 {
-            buckets.retain(|_, (tokens, at)| {
-                *tokens + now.duration_since(*at).as_secs_f64() * rate < capacity
-            });
+            buckets.retain(|_, (tokens, at)| *tokens + now.duration_since(*at).as_secs_f64() * rate < capacity);
         }
         let (tokens, at) = buckets.entry(key).or_insert((capacity, now));
         *tokens = (*tokens + now.duration_since(*at).as_secs_f64() * rate).min(capacity);

@@ -111,9 +111,7 @@ impl Client {
     pub fn request_code(transport: &dyn Transport, phone_input: &str) -> Result<String> {
         let digits = phone::normalize(phone_input)?;
         let body = encode(&api::VerifyStart { phone: digits.as_bytes().to_vec().into() });
-        let response = transport
-            .request("POST", api::VERIFY_START, &[], &body)
-            .map_err(Error::Network)?;
+        let response = transport.request("POST", api::VERIFY_START, &[], &body).map_err(Error::Network)?;
         match response.status {
             status::NO_CONTENT => Ok(digits),
             _ => Err(refused(&response)),
@@ -152,9 +150,8 @@ impl Client {
             last_resort_at: wall_ms(),
         };
         let client = Client::with(transport, Provider::default(), state);
-        let key_packages = (0..KEY_PACKAGE_TARGET)
-            .map(|_| client.key_package(false).map(Into::into))
-            .collect::<Result<Vec<_>>>()?;
+        let key_packages =
+            (0..KEY_PACKAGE_TARGET).map(|_| client.key_package(false).map(Into::into)).collect::<Result<Vec<_>>>()?;
         let request = api::VerifyCheck {
             phone: digits.as_bytes().to_vec().into(),
             code: code.as_bytes().to_vec().into(),
@@ -164,10 +161,8 @@ impl Client {
             key_packages,
             last_resort: client.key_package(true)?.into(),
         };
-        let response = client
-            .transport
-            .request("POST", api::VERIFY_CHECK, &[], &encode(&request))
-            .map_err(Error::Network)?;
+        let response =
+            client.transport.request("POST", api::VERIFY_CHECK, &[], &encode(&request)).map_err(Error::Network)?;
         match response.status {
             status::NO_CONTENT => Ok(client),
             _ => Err(refused(&response)),
@@ -351,9 +346,7 @@ impl Client {
     }
 
     fn load(&self, group: &GroupId) -> Result<MlsGroup> {
-        MlsGroup::load(self.provider.storage(), group)
-            .map_err(mls)?
-            .ok_or(Error::Protocol("unknown group"))
+        MlsGroup::load(self.provider.storage(), group).map_err(mls)?.ok_or(Error::Protocol("unknown group"))
     }
 
     fn token(&self, group: &MlsGroup) -> Result<[u8; TOKEN_LEN]> {
@@ -474,7 +467,13 @@ impl Client {
         self.enqueue(&mailboxes, &welcome)?;
         self.state.chats.insert(
             group_key(&group_id),
-            Chat { peer: peer.to_owned(), last_update_ms: (self.clock)(), sent_since_update: 0, needs_update: false, closed_at: None },
+            Chat {
+                peer: peer.to_owned(),
+                last_update_ms: (self.clock)(),
+                sent_since_update: 0,
+                needs_update: false,
+                closed_at: None,
+            },
         );
         if let Some(name) = self.state.name.clone() {
             self.send_in(&group_id, Content::Profile { name }, false)?;
@@ -486,7 +485,7 @@ impl Client {
         self.state.chats.get(&group_key(group)).is_some_and(|chat| {
             chat.closed_at.is_none()
                 && (chat.needs_update
-                || (self.clock)().saturating_sub(chat.last_update_ms) >= UPDATE_AFTER_MS
+                    || (self.clock)().saturating_sub(chat.last_update_ms) >= UPDATE_AFTER_MS
                     || chat.sent_since_update >= UPDATE_AFTER_MESSAGES)
         })
     }
@@ -496,9 +495,7 @@ impl Client {
         let mut group = self.load(group_id)?;
         let epoch = group.epoch().as_u64();
         let token = self.token(&group)?;
-        let bundle = group
-            .self_update(&self.provider, self.signer(), LeafNodeParameters::default())
-            .map_err(mls)?;
+        let bundle = group.self_update(&self.provider, self.signer(), LeafNodeParameters::default()).map_err(mls)?;
         let next = group
             .pending_commit()
             .ok_or(Error::Internal("pending commit"))?
@@ -582,7 +579,9 @@ impl Client {
                     gone.insert(item.mailbox);
                     gone_peers.extend(self.mailbox_gone(&item.mailbox));
                 }
-                Ok(response) if matches!(response.status, status::NOT_FOUND | status::BAD_REQUEST | status::TOO_LARGE) => {
+                Ok(response)
+                    if matches!(response.status, status::NOT_FOUND | status::BAD_REQUEST | status::TOO_LARGE) =>
+                {
                     self.drop_one(format!("hub refused delivery: {}", response.status));
                 }
                 // Rate limit, hub trouble, no network: later, in the same order.
@@ -691,8 +690,8 @@ impl Client {
         if welcome.ciphersuite() != profile::CIPHERSUITE {
             return Err(Error::Protocol("suite"));
         }
-        let staged = StagedWelcome::new_from_welcome(&self.provider, &profile::join_config(), welcome, None)
-            .map_err(mls)?;
+        let staged =
+            StagedWelcome::new_from_welcome(&self.provider, &profile::join_config(), welcome, None).map_err(mls)?;
         let mut peer: Option<(Vec<u8>, [u8; 32], bool)> = None;
         let mut me = false;
         let account_key = SigningKey::from_bytes(&self.state.account_secret).verifying_key().to_bytes();
@@ -741,7 +740,13 @@ impl Client {
         }
         self.state.chats.insert(
             group_key(group.group_id()),
-            Chat { peer: peer.clone(), last_update_ms: (self.clock)(), sent_since_update: 0, needs_update: true, closed_at: None },
+            Chat {
+                peer: peer.clone(),
+                last_update_ms: (self.clock)(),
+                sent_since_update: 0,
+                needs_update: true,
+                closed_at: None,
+            },
         );
         self.events.push(Event::NewChat { phone: peer });
         Ok(())
@@ -785,12 +790,12 @@ impl Client {
                         self.events.push(Event::Profile { phone: peer, name });
                     }
                     Content::Profile { .. } => {}
-                    content if from_me => self.events.push(Event::SentElsewhere {
-                        phone: peer,
-                        sent_at_ms: message.sent_at_ms,
-                        content,
-                    }),
-                    content => self.events.push(Event::Message { phone: peer, sent_at_ms: message.sent_at_ms, content }),
+                    content if from_me => {
+                        self.events.push(Event::SentElsewhere { phone: peer, sent_at_ms: message.sent_at_ms, content })
+                    }
+                    content => {
+                        self.events.push(Event::Message { phone: peer, sent_at_ms: message.sent_at_ms, content })
+                    }
                 }
                 Ok(())
             }
@@ -842,7 +847,8 @@ impl Client {
             let fresh = if left < KEY_PACKAGE_REFILL_BELOW { KEY_PACKAGE_TARGET - left } else { 0 };
             let key_packages = (0..fresh).map(|_| c.key_package(false).map(Into::into)).collect::<Result<Vec<_>>>()?;
             let last_resort = if last_resort_due { Some(c.key_package(true)?.into()) } else { None };
-            let response = c.signed("PUT", api::KEY_PACKAGES, &encode(&api::KeyPackages { key_packages, last_resort }))?;
+            let response =
+                c.signed("PUT", api::KEY_PACKAGES, &encode(&api::KeyPackages { key_packages, last_resort }))?;
             if response.status != status::NO_CONTENT {
                 return Err(refused(&response));
             }
@@ -933,13 +939,8 @@ impl Client {
         for key in expired {
             self.drop_chat(&key);
         }
-        let groups: Vec<GroupId> = self
-            .state
-            .chats
-            .keys()
-            .filter_map(|key| state::unhex(key))
-            .map(|id| GroupId::from_slice(&id))
-            .collect();
+        let groups: Vec<GroupId> =
+            self.state.chats.keys().filter_map(|key| state::unhex(key)).map(|id| GroupId::from_slice(&id)).collect();
         for group in groups {
             self.ensure_fresh(&group)?;
         }

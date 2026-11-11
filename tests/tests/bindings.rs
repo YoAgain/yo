@@ -28,7 +28,8 @@ impl StateStore for File {
 fn client(hub: &TestHub, number: &str, name: &str, file: Arc<File>) -> Arc<YoClient> {
     let app = Arc::new(App(Http::new(hub.url())));
     yo::request_code(app.clone(), number.into()).unwrap();
-    YoClient::register(app, file, vec![7; 32], number.into(), "000000".into(), Some(name.into()), 0, String::new()).unwrap()
+    YoClient::register(app, file, vec![7; 32], number.into(), "000000".into(), Some(name.into()), 0, String::new())
+        .unwrap()
 }
 
 #[test]
@@ -54,5 +55,11 @@ fn the_app_layer_works_end_to_end() {
     b.send_yo(pa.clone()).unwrap();
     let events = a.sync(0).unwrap();
     assert!(events.iter().any(|e| matches!(e, YoEvent::Message { kind: MessageKind::Yo, .. })));
-    assert!(YoClient::restore(Arc::new(App(Http::new(hub.url()))), Arc::new(File::default()), vec![8; 32], vec![1, 2, 3]).is_err());
+    assert!(YoClient::restore(
+        Arc::new(App(Http::new(hub.url()))),
+        Arc::new(File::default()),
+        vec![8; 32],
+        vec![1, 2, 3]
+    )
+    .is_err());
 }

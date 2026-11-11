@@ -30,6 +30,9 @@ pub struct StoredKeyPackage {
     pub data: Vec<u8>,
 }
 
+/// A number's account key and the KeyPackages handed out for it.
+pub type Found = ([u8; 32], Vec<Vec<u8>>);
+
 pub enum Mailboxes {
     Live { push_platform: u8, push_token: Vec<u8> },
     Gone,
@@ -124,17 +127,12 @@ impl Db {
     pub fn device(&self, mailbox: &Mailbox) -> rusqlite::Result<Option<Device>> {
         self.conn()
             .prepare_cached("SELECT phone, auth_key FROM devices WHERE mailbox = ?1")?
-            .query_row([mailbox], |row| {
-                Ok(Device { phone: array(row.get(0)?)?, auth_key: array(row.get(1)?)? })
-            })
+            .query_row([mailbox], |row| Ok(Device { phone: array(row.get(0)?)?, auth_key: array(row.get(1)?)? }))
             .optional()
     }
 
     pub fn is_gone(&self, mailbox: &Mailbox) -> rusqlite::Result<bool> {
-        Ok(self
-            .conn()
-            .prepare_cached("SELECT 1 FROM gone WHERE mailbox = ?1")?
-            .exists([mailbox])?)
+        self.conn().prepare_cached("SELECT 1 FROM gone WHERE mailbox = ?1")?.exists([mailbox])
     }
 
     pub fn touch(&self, mailbox: &Mailbox, now: u64) -> rusqlite::Result<()> {
@@ -228,11 +226,7 @@ impl Db {
 
     /// The account key of a number and, if asked, one KeyPackage per device: a single-use one while there is
     /// one, else the last resort.
-    pub fn lookup(
-        &self,
-        phone: &PhoneHmac,
-        take: bool,
-    ) -> rusqlite::Result<Option<([u8; 32], Vec<Vec<u8>>)>> {
+    pub fn lookup(&self, phone: &PhoneHmac, take: bool) -> rusqlite::Result<Option<Found>> {
         let mut conn = self.conn();
         let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
         let Some(account_key) = tx
@@ -378,14 +372,9 @@ impl Db {
     /// Deletes envelopes older than the TTL and remembers gone mailboxes for a year.
     pub fn prune(&self, now: u64, envelope_ttl_ms: u64) -> rusqlite::Result<usize> {
         let conn = self.conn();
-        let messages = conn.execute(
-            "DELETE FROM messages WHERE received_at < ?1",
-            [now.saturating_sub(envelope_ttl_ms) as i64],
-        )?;
-        conn.execute(
-            "DELETE FROM gone WHERE gone_at < ?1",
-            [now.saturating_sub(365 * 24 * 3600 * 1000) as i64],
-        )?;
+        let messages =
+            conn.execute("DELETE FROM messages WHERE received_at < ?1", [now.saturating_sub(envelope_ttl_ms) as i64])?;
+        conn.execute("DELETE FROM gone WHERE gone_at < ?1", [now.saturating_sub(365 * 24 * 3600 * 1000) as i64])?;
         Ok(messages)
     }
 }
@@ -397,8 +386,7 @@ fn insert_key_packages(
     last_resort: Option<&StoredKeyPackage>,
 ) -> rusqlite::Result<Option<Conflict>> {
     let mut seen = tx.prepare_cached("INSERT INTO seen_key_packages (hash) VALUES (?1) ON CONFLICT DO NOTHING")?;
-    let mut insert =
-        tx.prepare_cached("INSERT INTO key_packages (mailbox, data, last_resort) VALUES (?1, ?2, ?3)")?;
+    let mut insert = tx.prepare_cached("INSERT INTO key_packages (mailbox, data, last_resort) VALUES (?1, ?2, ?3)")?;
     for (key_package, last) in key_packages.iter().map(|k| (k, false)).chain(last_resort.map(|k| (k, true))) {
         if seen.execute([&key_package.hash])? == 0 {
             return Ok(Some(Conflict::KeyPackageSeen));

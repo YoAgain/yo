@@ -11,11 +11,5 @@ pub struct Response {
 /// One HTTP request to the hub, relative to its base URL. Blocking: call the core off the main thread.
 /// An `Err` is a transport failure (no answer); any answer, whatever its status, is `Ok`.
 pub trait Transport: Send + Sync {
-    fn request(
-        &self,
-        method: &str,
-        path: &str,
-        headers: &[(String, String)],
-        body: &[u8],
-    ) -> Result<Response, String>;
+    fn request(&self, method: &str, path: &str, headers: &[(String, String)], body: &[u8]) -> Result<Response, String>;
 }

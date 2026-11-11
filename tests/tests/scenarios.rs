@@ -271,7 +271,13 @@ fn garbage_in_a_mailbox_is_dropped_and_harms_nothing() {
     b.sync(0).unwrap();
     let client = reqwest::blocking::Client::new();
     let deliver = |body: Vec<u8>| {
-        client.post(format!("{}{}", hub.url(), api::deliver_path(&b.mailbox()))).body(body).send().unwrap().status().as_u16()
+        client
+            .post(format!("{}{}", hub.url(), api::deliver_path(&b.mailbox())))
+            .body(body)
+            .send()
+            .unwrap()
+            .status()
+            .as_u16()
     };
     // Anyone may deliver (sealed sender), but only well-formed envelopes.
     assert_eq!(deliver(vec![1, 2, 3]), api::status::BAD_REQUEST);
@@ -281,7 +287,11 @@ fn garbage_in_a_mailbox_is_dropped_and_harms_nothing() {
     assert_eq!(b.dropped(), 1);
     a.send_yo(&pb).unwrap();
     assert_eq!(yos_from(&b.sync(0).unwrap(), &pa), 1);
-    let unknown = client.post(format!("{}{}", hub.url(), api::deliver_path(&[0; 16]))).body(yo_wire::envelope::seal(b"x").unwrap()).send().unwrap();
+    let unknown = client
+        .post(format!("{}{}", hub.url(), api::deliver_path(&[0; 16])))
+        .body(yo_wire::envelope::seal(b"x").unwrap())
+        .send()
+        .unwrap();
     assert_eq!(unknown.status().as_u16(), api::status::NOT_FOUND);
 }
 

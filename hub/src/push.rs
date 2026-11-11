@@ -172,13 +172,15 @@ impl Pusher {
                         return Outcome::Failed("APNs token".into());
                     };
                     // Apple accepts a token for an hour and refuses one renewed more than every 20 minutes.
-                    *cached = Some(Cached { value: value.clone(), until: Instant::now() + Duration::from_secs(40 * 60) });
+                    *cached =
+                        Some(Cached { value: value.clone(), until: Instant::now() + Duration::from_secs(40 * 60) });
                     value
                 }
             }
         };
         let host = if sandbox { "api.sandbox.push.apple.com" } else { "api.push.apple.com" };
-        let body = json!({ "aps": { "alert": { "title": "Yo", "body": "Yo" }, "sound": "default", "mutable-content": 1 } });
+        let body =
+            json!({ "aps": { "alert": { "title": "Yo", "body": "Yo" }, "sound": "default", "mutable-content": 1 } });
         let request = Request {
             url: format!("https://{host}/3/device/{token}"),
             headers: vec![
