@@ -63,6 +63,15 @@ impl Drop for TestHub {
     }
 }
 
+/// A fault the transport injects once, for the first request whose path contains the pattern.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Fault {
+    /// The request reaches the hub, its answer is lost on the way back.
+    LoseAnswer,
+    /// The hub is not asked; this status comes back.
+    Answer(u16),
+}
+
 /// A signed request as it was sent: method, path, headers, body.
 pub type Recorded = (String, String, Vec<(String, String)>, Vec<u8>);
 
@@ -72,6 +81,7 @@ pub struct Http {
     pub base: RwLock<String>,
     /// Every signed request, for replay tests.
     pub recorded: Mutex<Vec<Recorded>>,
+    pub faults: Mutex<Vec<(String, Fault)>>,
 }
 
 impl Http {
@@ -84,7 +94,13 @@ impl Http {
                 .unwrap(),
             base: RwLock::new(base),
             recorded: Mutex::default(),
+            faults: Mutex::default(),
         })
+    }
+
+    /// Injects `fault` into the next request whose path contains `pattern`.
+    pub fn fault(&self, pattern: &str, fault: Fault) {
+        self.faults.lock().unwrap().push((pattern.to_owned(), fault));
     }
 }
 
@@ -98,6 +114,13 @@ impl Transport for Http {
                 body.to_vec(),
             ));
         }
+        let fault = {
+            let mut faults = self.faults.lock().unwrap_or_else(PoisonError::into_inner);
+            faults.iter().position(|(pattern, _)| path.contains(pattern.as_str())).map(|i| faults.remove(i).1)
+        };
+        if let Some(Fault::Answer(status)) = fault {
+            return Ok(Response { status, body: Vec::new() });
+        }
         let url = format!("{}{}", self.base.read().unwrap(), path);
         let mut request = self.client.request(method.parse().map_err(|_| "method")?, url).body(body.to_vec());
         for (name, value) in headers {
@@ -106,6 +129,9 @@ impl Transport for Http {
         let response = request.send().map_err(|e| e.to_string())?;
         let status = response.status().as_u16();
         let body = response.bytes().map_err(|e| e.to_string())?.to_vec();
+        if fault == Some(Fault::LoseAnswer) {
+            return Err("answer lost (injected)".into());
+        }
         Ok(Response { status, body })
     }
 }

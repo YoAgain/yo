@@ -72,7 +72,7 @@ const BATCH: usize = 512;
 
 /// Group commit: takes what has queued up, stores it in one transaction, answers each. Under load the batches
 /// grow by themselves; alone, an envelope is stored at once.
-fn writer(db: Arc<Db>, queue: std::sync::mpsc::Receiver<Delivery>) {
+fn writer(db: Arc<Db>, queue: std::sync::mpsc::Receiver<Delivery>, most: u32) {
     while let Ok(first) = queue.recv() {
         let mut batch = vec![first];
         while batch.len() < BATCH {
@@ -82,7 +82,7 @@ fn writer(db: Arc<Db>, queue: std::sync::mpsc::Receiver<Delivery>) {
             }
         }
         let items: Vec<(Mailbox, &[u8])> = batch.iter().map(|d| (d.mailbox, &d.envelope[..])).collect();
-        match db.deliver(&items, now_ms()) {
+        match db.deliver(&items, now_ms(), most) {
             Ok(outcomes) => {
                 for (delivery, outcome) in batch.into_iter().zip(outcomes) {
                     let _ = delivery.stored.send(Ok(outcome));
@@ -112,7 +112,10 @@ impl Hub {
         let writing = db.clone();
         std::thread::Builder::new()
             .name("yo-hub-writer".into())
-            .spawn(move || writer(writing, queue))
+            .spawn({
+                let most = config.limits.max_pending_per_mailbox;
+                move || writer(writing, queue, most)
+            })
             .map_err(|e| format!("writer: {e}"))?;
         Ok(Arc::new(Hub {
             sms: sms::from_config(&config.sms),
@@ -151,13 +154,19 @@ impl Hub {
     ) -> std::io::Result<()> {
         let pruning = self.clone();
         let pruner = tokio::spawn(async move {
-            let mut every = tokio::time::interval(HOUR);
+            let mut every = tokio::time::interval(MINUTE);
+            let mut minutes = 0u64;
             loop {
                 every.tick().await;
-                let ttl = pruning.config.limits.envelope_ttl_days * 24 * 3600 * 1000;
-                if let Err(error) = pruning.db.prune(now_ms(), ttl) {
-                    eprintln!("yo-hub: prune: {error}");
+                pruning.replay.forget_expired(now_ms());
+                if minutes.is_multiple_of(60) {
+                    pruning.limiter.forget_idle(DAY);
+                    let ttl = pruning.config.limits.envelope_ttl_days * 24 * 3600 * 1000;
+                    if let Err(error) = pruning.db.prune(now_ms(), ttl) {
+                        eprintln!("yo-hub: prune: {error}");
+                    }
                 }
+                minutes += 1;
             }
         });
         let app = self.router().into_make_service_with_connect_info::<SocketAddr>();
@@ -172,14 +181,25 @@ impl Hub {
         mac.finalize().into_bytes().into()
     }
 
+    /// The client's address as rate limits count it: IPv6 by its /64, which one subscriber usually holds whole.
+    /// `CF-Connecting-IP` is believed only when configured: the hub must then be reachable through Cloudflare alone
+    /// (a tunnel, listening on 127.0.0.1), or anyone could name any address.
     fn ip(&self, peer: SocketAddr, headers: &HeaderMap) -> IpAddr {
-        if self.config.trust_cloudflare {
-            if let Some(ip) = headers.get("cf-connecting-ip").and_then(|v| v.to_str().ok()).and_then(|v| v.parse().ok())
-            {
-                return ip;
-            }
+        let forwarded = headers.get("cf-connecting-ip").and_then(|v| v.to_str().ok()).and_then(|v| v.parse().ok());
+        let ip = match forwarded {
+            Some(ip) if self.config.trust_cloudflare => ip,
+            _ => peer.ip(),
+        };
+        match ip {
+            IpAddr::V6(v6) => match v6.to_ipv4_mapped() {
+                Some(v4) => IpAddr::V4(v4),
+                None => {
+                    let s = v6.segments();
+                    IpAddr::V6(std::net::Ipv6Addr::new(s[0], s[1], s[2], s[3], 0, 0, 0, 0))
+                }
+            },
+            v4 => v4,
         }
-        peer.ip()
     }
 
     fn limit(&self, key: String, per: u32, window: Duration) -> Res<()> {
@@ -206,6 +226,7 @@ impl Hub {
             // A replaced device learns that it was replaced.
             return Err(if self.db.is_gone(&mailbox)? { refuse(StatusCode::GONE) } else { unauthorized() });
         };
+        self.limit(format!("signed:{}", yo_wire::b64(&mailbox)), self.config.limits.signed_per_device_minute, MINUTE)?;
         let path = uri.path_and_query().map(|p| p.as_str()).unwrap_or("/");
         yo_wire::request::verify(&device.auth_key, method.as_str(), path, time, body, &signature)
             .map_err(|_| unauthorized())?;
@@ -369,7 +390,12 @@ async fn lookup(
     let device = hub.authenticate(&method, &uri, &headers, &body)?;
     let request: api::Lookup = decode(&body)?;
     phone::check(request.phone.as_slice())?;
-    hub.limit(format!("lookup:{}", yo_wire::b64(&device.mailbox)), hub.config.limits.lookup_per_device_day, DAY)?;
+    let limits = &hub.config.limits;
+    let (kind, per_day) = match request.key_packages {
+        1 => ("lookup", limits.lookup_per_device_day),
+        _ => ("identity", limits.identity_lookup_per_device_day),
+    };
+    hub.limit(format!("{kind}:{}", yo_wire::b64(&device.mailbox)), per_day, DAY)?;
     let phone = hub.phone_hmac(request.phone.as_slice());
     let (account_key, key_packages) =
         hub.db.lookup(&phone, request.key_packages == 1)?.ok_or_else(|| refuse(StatusCode::NOT_FOUND))?;
@@ -442,9 +468,8 @@ async fn deliver(
     let mailbox: Mailbox =
         unb64(&mailbox).ok().and_then(|m| m.try_into().ok()).ok_or_else(|| refuse(StatusCode::NOT_FOUND))?;
     let limits = &hub.config.limits;
-    hub.limit(format!("deliver:ip:{}", hub.ip(peer, &headers)), limits.deliver_per_ip_minute, MINUTE)?;
-    hub.limit(format!("deliver:to:{}", yo_wire::b64(&mailbox)), limits.deliver_per_mailbox_minute, MINUTE)?;
     yo_wire::envelope::check(&body)?;
+    hub.limit(format!("deliver:ip:{}", hub.ip(peer, &headers)), limits.deliver_per_ip_minute, MINUTE)?;
     let (stored, outcome) = tokio::sync::oneshot::channel();
     hub.deliveries
         .send(Delivery { mailbox, envelope: body, stored })
@@ -469,6 +494,7 @@ async fn deliver(
             }
             Ok(StatusCode::ACCEPTED)
         }
+        Mailboxes::Full => Err(refuse(StatusCode::TOO_MANY_REQUESTS)),
         Mailboxes::Gone => Err(refuse(status_code(status::GONE))),
         Mailboxes::Unknown => Err(refuse(StatusCode::NOT_FOUND)),
     }
@@ -487,7 +513,14 @@ async fn create_group(State(hub): Hubs, ConnectInfo(peer): Peer, headers: Header
     }
 }
 
-async fn commit(State(hub): Hubs, Path(group): Path<String>, body: Bytes) -> Res<StatusCode> {
+async fn commit(
+    State(hub): Hubs,
+    ConnectInfo(peer): Peer,
+    headers: HeaderMap,
+    Path(group): Path<String>,
+    body: Bytes,
+) -> Res<StatusCode> {
+    hub.limit(format!("commit:ip:{}", hub.ip(peer, &headers)), hub.config.limits.commit_per_ip_minute, MINUTE)?;
     let group: GroupId =
         unb64(&group).ok().and_then(|g| g.try_into().ok()).ok_or_else(|| refuse(StatusCode::NOT_FOUND))?;
     let request: api::Commit = decode(&body)?;

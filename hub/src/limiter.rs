@@ -11,6 +11,13 @@ pub struct Limiter {
 }
 
 impl Limiter {
+    /// Drops buckets untouched for `idle`: run periodically, never inside a request. The longest window is a day,
+    /// so a bucket idle that long is full again and costs nothing to forget.
+    pub fn forget_idle(&self, idle: Duration) {
+        let now = Instant::now();
+        self.buckets.lock().unwrap_or_else(PoisonError::into_inner).retain(|_, (_, at)| now.duration_since(*at) < idle);
+    }
+
     /// Takes one token from the bucket `key`, which holds `per` and refills `per` every `window`.
     pub fn allow(&self, key: String, per: u32, window: Duration) -> bool {
         if per == u32::MAX {
@@ -20,9 +27,6 @@ impl Limiter {
         let capacity = per as f64;
         let rate = capacity / window.as_secs_f64();
         let mut buckets = self.buckets.lock().unwrap_or_else(PoisonError::into_inner);
-        if buckets.len() > 200_000 {
-            buckets.retain(|_, (tokens, at)| *tokens + now.duration_since(*at).as_secs_f64() * rate < capacity);
-        }
         let (tokens, at) = buckets.entry(key).or_insert((capacity, now));
         *tokens = (*tokens + now.duration_since(*at).as_secs_f64() * rate).min(capacity);
         *at = now;
@@ -42,12 +46,14 @@ pub struct ReplayCache {
 }
 
 impl ReplayCache {
+    /// Drops expired signatures: run periodically.
+    pub fn forget_expired(&self, now_ms: u64) {
+        self.seen.lock().unwrap_or_else(PoisonError::into_inner).retain(|_, expiry| *expiry > now_ms);
+    }
+
     /// Records a signature valid until `expires_ms`; false when it was seen before.
     pub fn first_time(&self, signature: [u8; 64], now_ms: u64, expires_ms: u64) -> bool {
         let mut seen = self.seen.lock().unwrap_or_else(PoisonError::into_inner);
-        if seen.len() > 100_000 {
-            seen.retain(|_, expiry| *expiry > now_ms);
-        }
         match seen.get(&signature) {
             Some(expiry) if *expiry > now_ms => false,
             _ => {

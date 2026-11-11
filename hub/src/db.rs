@@ -34,7 +34,12 @@ pub struct StoredKeyPackage {
 pub type Found = ([u8; 32], Vec<Vec<u8>>);
 
 pub enum Mailboxes {
-    Live { push_platform: u8, push_token: Vec<u8> },
+    Live {
+        push_platform: u8,
+        push_token: Vec<u8>,
+    },
+    /// The mailbox holds as many envelopes as it may: later.
+    Full,
     Gone,
     Unknown,
 }
@@ -283,7 +288,7 @@ impl Db {
     }
 
     /// Stores envelopes for live mailboxes, all in one transaction (group commit); says for each whom to wake.
-    pub fn deliver(&self, items: &[(Mailbox, &[u8])], now: u64) -> rusqlite::Result<Vec<Mailboxes>> {
+    pub fn deliver(&self, items: &[(Mailbox, &[u8])], now: u64, most: u32) -> rusqlite::Result<Vec<Mailboxes>> {
         let mut conn = self.conn();
         let tx = conn.transaction()?;
         let mut outcomes = Vec::with_capacity(items.len());
@@ -292,11 +297,17 @@ impl Db {
             let mut insert =
                 tx.prepare_cached("INSERT INTO messages (mailbox, envelope, received_at) VALUES (?1, ?2, ?3)")?;
             let mut gone = tx.prepare_cached("SELECT 1 FROM gone WHERE mailbox = ?1")?;
+            // Bounded: counts at most `most` rows, so a full mailbox costs no more than that.
+            let mut held =
+                tx.prepare_cached("SELECT count(*) FROM (SELECT 1 FROM messages WHERE mailbox = ?1 LIMIT ?2)")?;
             for (mailbox, envelope) in items {
                 let live = device
                     .query_row([mailbox], |row| Ok((row.get::<_, u8>(0)?, row.get::<_, Vec<u8>>(1)?)))
                     .optional()?;
                 outcomes.push(match live {
+                    Some(_) if held.query_row(params![mailbox, most], |row| row.get::<_, u32>(0))? >= most => {
+                        Mailboxes::Full
+                    }
                     Some((push_platform, push_token)) => {
                         insert.execute(params![mailbox, envelope, now])?;
                         Mailboxes::Live { push_platform, push_token }
@@ -358,6 +369,11 @@ impl Db {
         let Some((current, stored)) = current else {
             return Ok(Commit::Unknown);
         };
+        // The same commit again (its answer was lost on the way): it moved the group to `epoch + 1` and set exactly
+        // this next token hash. Only the committer can produce that hash, so this is not a way in for anyone else.
+        if current as u64 == epoch + 1 && constant_time_eq(&stored, next_token_hash) {
+            return Ok(Commit::Accepted);
+        }
         if current as u64 != epoch {
             return Ok(Commit::Stale(current as u64));
         }

@@ -39,6 +39,33 @@ pub struct Chat {
     /// until the hub would have dropped it anyway.
     #[serde(default)]
     pub closed_at: Option<u64>,
+    /// A commit sent to the hub whose answer never came: it may have been accepted. Retried as it is until the hub
+    /// answers; meanwhile the group holds it as its pending commit and nothing is sent in it.
+    #[serde(default)]
+    pub inflight: Option<Inflight>,
+    /// The hub does not order commits for this group (it never registered it, or the token is not ours): the chat
+    /// works, without updates.
+    #[serde(default)]
+    pub no_updates: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Inflight {
+    /// The request to `POST /v1/groups/{id}/commit`, as sent.
+    pub request: Vec<u8>,
+    /// The commit as an MLSMessage, for the other members once the hub has accepted it.
+    pub commit: Vec<u8>,
+    pub mailboxes: Vec<Mailbox>,
+}
+
+/// A KeyPackage this device made: its private keys stay in the MLS store until they are deleted here.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct OwnKeyPackage {
+    pub hash_ref: Vec<u8>,
+    pub created_at: u64,
+    pub last_resort: bool,
+    /// When a newer last resort replaced this one.
+    pub retired_at: Option<u64>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -68,6 +95,8 @@ pub struct State {
     #[serde(default)]
     pub ignored: VecDeque<[u8; 32]>,
     pub key_packages_left: u32,
+    #[serde(default)]
+    pub key_packages: Vec<OwnKeyPackage>,
     pub last_resort_at: u64,
 }
 
@@ -88,8 +117,12 @@ struct Sealed {
 pub fn seal(state: &State, mls: Entries, key: &[u8; 32]) -> Vec<u8> {
     let mut mls: Vec<_> = mls.into_iter().collect();
     mls.sort();
-    let mut plain =
-        serde_json::to_vec(&Sealed { version: STATE_VERSION, state: state.clone(), mls }).expect("state encodes");
+    let mut sealed_state = Sealed { version: STATE_VERSION, state: state.clone(), mls };
+    let mut plain = serde_json::to_vec(&sealed_state).expect("state encodes");
+    for (key, value) in sealed_state.mls.iter_mut() {
+        key.zeroize();
+        value.zeroize();
+    }
     let nonce: [u8; 12] = crate::identity::random();
     let sealed = ChaCha20Poly1305::new(key.into())
         .encrypt(&nonce.into(), Payload { msg: &plain, aad: AAD })

@@ -43,13 +43,26 @@ impl OpenMlsProvider for Provider {
 
 pub type Entries = HashMap<Vec<u8>, Vec<u8>>;
 
+/// A copy of the MLS store that wipes itself: the copies `atomic` keeps hold private keys too.
+pub struct Snapshot(pub Entries);
+
+impl Drop for Snapshot {
+    fn drop(&mut self) {
+        use zeroize::Zeroize;
+        for value in self.0.values_mut() {
+            value.zeroize();
+        }
+    }
+}
+
 impl Provider {
     pub fn entries(&self) -> Entries {
         self.storage.values.read().unwrap_or_else(PoisonError::into_inner).clone()
     }
 
     pub fn restore(&self, entries: Entries) {
-        *self.storage.values.write().unwrap_or_else(PoisonError::into_inner) = entries;
+        let mut values = self.storage.values.write().unwrap_or_else(PoisonError::into_inner);
+        drop(Snapshot(std::mem::replace(&mut *values, entries)));
     }
 }
 

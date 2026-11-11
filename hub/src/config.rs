@@ -7,10 +7,18 @@ pub struct Limits {
     pub verify_per_ip_hour: u32,
     /// Code attempts, against guessing.
     pub check_per_phone_hour: u32,
+    /// Lookups that hand out KeyPackages: starting chats.
     pub lookup_per_device_day: u32,
-    pub deliver_per_mailbox_minute: u32,
+    /// Lookups of an account key only: checking who started a chat.
+    pub identity_lookup_per_device_day: u32,
+    /// Signed requests of one device, all routes.
+    pub signed_per_device_minute: u32,
     pub deliver_per_ip_minute: u32,
+    /// Envelopes a mailbox holds before deliveries to it are refused. No per-mailbox rate: a stranger who knows the
+    /// mailbox could spend it and shut out everyone else.
+    pub max_pending_per_mailbox: u32,
     pub groups_per_ip_hour: u32,
+    pub commit_per_ip_minute: u32,
     pub envelope_ttl_days: u64,
 }
 
@@ -21,9 +29,12 @@ impl Default for Limits {
             verify_per_ip_hour: 10,
             check_per_phone_hour: 10,
             lookup_per_device_day: 50,
-            deliver_per_mailbox_minute: 600,
+            identity_lookup_per_device_day: 1000,
+            signed_per_device_minute: 1200,
             deliver_per_ip_minute: 1200,
+            max_pending_per_mailbox: 5000,
             groups_per_ip_hour: 60,
+            commit_per_ip_minute: 600,
             envelope_ttl_days: 30,
         }
     }
@@ -37,9 +48,12 @@ impl Limits {
             verify_per_ip_hour: u32::MAX,
             check_per_phone_hour: u32::MAX,
             lookup_per_device_day: u32::MAX,
-            deliver_per_mailbox_minute: u32::MAX,
+            identity_lookup_per_device_day: u32::MAX,
+            signed_per_device_minute: u32::MAX,
             deliver_per_ip_minute: u32::MAX,
+            max_pending_per_mailbox: 5000,
             groups_per_ip_hour: u32::MAX,
+            commit_per_ip_minute: u32::MAX,
             envelope_ttl_days: 30,
         }
     }

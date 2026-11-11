@@ -19,8 +19,9 @@ use ed25519_dalek::{Signer as _, SigningKey};
 use openmls::prelude::tls_codec::{Deserialize as _, Serialize as _};
 use openmls::prelude::*;
 use openmls_basic_credential::SignatureKeyPair;
+use openmls_traits::storage::StorageProvider as _;
 use profile::Provider;
-use state::{hex, Chat, Contact, Outgoing, State};
+use state::{hex, Chat, Contact, Inflight, Outgoing, OwnKeyPackage, State};
 use std::collections::{BTreeSet, VecDeque};
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -40,6 +41,28 @@ const LAST_RESORT_EVERY_MS: u64 = 30 * 24 * 3600 * 1000;
 const CLOSED_CHAT_KEPT_MS: u64 = 31 * 24 * 3600 * 1000;
 /// Envelope hashes remembered against redelivery.
 const SEEN: usize = 2000;
+
+/// What became of a commit.
+enum Committed {
+    /// There was none to send.
+    Nothing,
+    Accepted,
+    /// Another commit took the epoch.
+    Lost,
+    /// The hub does not order this group's commits.
+    Refused,
+    /// No answer: it may have been accepted.
+    Unknown(String),
+}
+
+/// Errors that say "not now", not "never": the envelope or operation is tried again later.
+fn retryable(error: &Error) -> bool {
+    match error {
+        Error::Network(_) => true,
+        Error::Refused(status) => *status == status::RATE_LIMITED || *status >= 500,
+        _ => false,
+    }
+}
 
 /// What happened, for the app to show.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -146,10 +169,11 @@ impl Client {
             outbox: VecDeque::new(),
             seen: VecDeque::new(),
             ignored: VecDeque::new(),
+            key_packages: Vec::new(),
             key_packages_left: KEY_PACKAGE_TARGET,
             last_resort_at: wall_ms(),
         };
-        let client = Client::with(transport, Provider::default(), state);
+        let mut client = Client::with(transport, Provider::default(), state);
         let key_packages =
             (0..KEY_PACKAGE_TARGET).map(|_| client.key_package(false).map(Into::into)).collect::<Result<Vec<_>>>()?;
         let request = api::VerifyCheck {
@@ -199,7 +223,8 @@ impl Client {
 
     /// The state sealed under `key`.
     pub fn export(&self, key: &[u8; 32]) -> Vec<u8> {
-        state::seal(&self.state, self.provider.entries(), key)
+        let mut snapshot = profile::Snapshot(self.provider.entries());
+        state::seal(&self.state, std::mem::take(&mut snapshot.0), key)
     }
 
     /// For tests: the clock that decides when updates are due.
@@ -230,6 +255,11 @@ impl Client {
         if self.drop_reasons.len() < 20 {
             self.drop_reasons.push(reason);
         }
+    }
+
+    /// KeyPackages whose private keys this device still holds.
+    pub fn own_key_packages(&self) -> usize {
+        self.state.key_packages.len()
     }
 
     /// Envelopes waiting to be accepted by the hub.
@@ -263,22 +293,33 @@ impl Client {
     /// Runs `f` as one transaction: on an error, state, MLS store and events are as before.
     fn atomic<T>(&mut self, f: impl FnOnce(&mut Self) -> Result<T>) -> Result<T> {
         let state = self.state.clone();
-        let entries = self.provider.entries();
+        let mut snapshot = profile::Snapshot(self.provider.entries());
         let events = self.events.len();
         let result = f(self);
         if result.is_err() {
             self.state = state;
-            self.provider.restore(entries);
+            self.provider.restore(std::mem::take(&mut snapshot.0));
             self.events.truncate(events);
         }
         result
     }
 
-    /// Ends a public operation: saves, hands out the events.
+    /// Ends a public operation: saves, hands out the events. Events are never lost: after an error they wait
+    /// for the next call that succeeds.
     fn finish<T>(&mut self, result: Result<T>) -> Result<Vec<Event>> {
         self.persist();
-        let events = self.take_events();
-        result.map(|_| events)
+        match result {
+            Ok(_) => Ok(self.take_events()),
+            Err(error) => Err(error),
+        }
+    }
+
+    /// Like `finish`, for receiving: what arrived before a passing trouble ("not now") is handed out now.
+    fn finish_receiving<T>(&mut self, result: Result<T>) -> Result<Vec<Event>> {
+        match result {
+            Err(error) if retryable(&error) && !self.events.is_empty() => self.finish(Ok(())),
+            other => self.finish(other),
+        }
     }
 
     // ---- the hub ----
@@ -332,7 +373,8 @@ impl Client {
         }
     }
 
-    fn key_package(&self, last_resort: bool) -> Result<Vec<u8>> {
+    /// Makes a KeyPackage and remembers it, so its private keys can be deleted when it can no longer be used.
+    fn key_package(&mut self, last_resort: bool) -> Result<Vec<u8>> {
         let mut builder = KeyPackage::builder()
             .leaf_node_capabilities(profile::capabilities())
             .key_package_lifetime(Lifetime::new(profile::KEY_PACKAGE_LIFETIME_S));
@@ -342,7 +384,37 @@ impl Client {
         let bundle = builder
             .build(profile::CIPHERSUITE, &self.provider, self.signer(), self.credential())
             .map_err(|_| Error::Internal("key package"))?;
+        let hash_ref = bundle.key_package().hash_ref(self.provider.crypto()).map_err(mls)?;
+        let now = (self.clock)();
+        if last_resort {
+            for older in self.state.key_packages.iter_mut().filter(|k| k.last_resort && k.retired_at.is_none()) {
+                older.retired_at = Some(now);
+            }
+        }
+        self.state.key_packages.push(OwnKeyPackage {
+            hash_ref: hash_ref.tls_serialize_detached().map_err(mls)?,
+            created_at: now,
+            last_resort,
+            retired_at: None,
+        });
         bundle.key_package().tls_serialize_detached().map_err(|_| Error::Internal("key package"))
+    }
+
+    /// Deletes the private keys of KeyPackages that can no longer arrive in a Welcome: expired ones, and last
+    /// resorts replaced long enough ago that no Welcome made with them can still wait at the hub.
+    fn forget_key_packages(&mut self) {
+        let now = (self.clock)();
+        let lifetime_ms = profile::KEY_PACKAGE_LIFETIME_S * 1000 + 24 * 3600 * 1000;
+        let (dead, alive): (Vec<_>, Vec<_>) = std::mem::take(&mut self.state.key_packages).into_iter().partition(|k| {
+            now.saturating_sub(k.created_at) > lifetime_ms
+                || k.retired_at.is_some_and(|at| now.saturating_sub(at) > CLOSED_CHAT_KEPT_MS)
+        });
+        for key_package in dead {
+            if let Ok(hash_ref) = KeyPackageRef::tls_deserialize_exact(key_package.hash_ref.as_slice()) {
+                let _ = self.provider.storage().delete_key_package(&hash_ref);
+            }
+        }
+        self.state.key_packages = alive;
     }
 
     fn load(&self, group: &GroupId) -> Result<MlsGroup> {
@@ -473,6 +545,8 @@ impl Client {
                 sent_since_update: 0,
                 needs_update: false,
                 closed_at: None,
+                inflight: None,
+                no_updates: false,
             },
         );
         if let Some(name) = self.state.name.clone() {
@@ -484,14 +558,15 @@ impl Client {
     fn update_due(&self, group: &GroupId) -> bool {
         self.state.chats.get(&group_key(group)).is_some_and(|chat| {
             chat.closed_at.is_none()
+                && !chat.no_updates
                 && (chat.needs_update
                     || (self.clock)().saturating_sub(chat.last_update_ms) >= UPDATE_AFTER_MS
                     || chat.sent_since_update >= UPDATE_AFTER_MESSAGES)
         })
     }
 
-    /// Commits an update (spec 4.3, 4.4). `Ok(false)`: the group moved on at the hub; sync and try again.
-    fn update(&mut self, group_id: &GroupId) -> Result<bool> {
+    /// Commits an update (spec 4.3, 4.4).
+    fn update(&mut self, group_id: &GroupId) -> Result<Committed> {
         let mut group = self.load(group_id)?;
         let epoch = group.epoch().as_u64();
         let token = self.token(&group)?;
@@ -501,43 +576,90 @@ impl Client {
             .ok_or(Error::Internal("pending commit"))?
             .export_secret(self.provider.crypto(), EPOCH_TOKEN_LABEL, group_id.as_slice(), TOKEN_LEN)
             .map_err(mls)?;
-        let request = api::Commit { epoch, token, next_token_hash: sha256(&next) };
+        let inflight = Inflight {
+            request: encode(&api::Commit { epoch, token, next_token_hash: sha256(&next) }),
+            commit: bundle.commit().to_bytes().map_err(mls)?,
+            mailboxes: self.others(&group),
+        };
+        // From here the commit may reach the hub: it is kept, whatever happens to the answer.
+        self.state.chats.get_mut(&group_key(group_id)).ok_or(Error::Protocol("unknown group"))?.inflight =
+            Some(inflight);
+        self.resolve(group_id)
+    }
+
+    /// Sends a group's inflight commit (again) and acts on the answer. The hub answers a repeat of an accepted
+    /// commit with 200, so a lost answer costs only the repeat.
+    fn resolve(&mut self, group_id: &GroupId) -> Result<Committed> {
+        let key = group_key(group_id);
+        let Some(inflight) = self.state.chats.get(&key).and_then(|c| c.inflight.clone()) else {
+            return Ok(Committed::Nothing);
+        };
         let id: yo_wire::GroupId = group_id.as_slice().try_into().map_err(|_| Error::Protocol("group id"))?;
-        let response = self.unsigned(&api::commit_path(&id), &encode(&request))?;
-        match response.status {
+        let response = match self.unsigned(&api::commit_path(&id), &inflight.request) {
+            Ok(response) => response,
+            Err(error) => return Ok(Committed::Unknown(error.to_string())),
+        };
+        let mut group = self.load(group_id)?;
+        let outcome = match response.status {
             status::OK => {
-                // Accepted: from here on nothing may fail back to the old epoch.
-                let mailboxes = self.others(&group);
                 group.merge_pending_commit(&self.provider).map_err(mls)?;
-                self.enqueue(&mailboxes, bundle.commit())?;
-                let now = (self.clock)();
-                if let Some(chat) = self.state.chats.get_mut(&group_key(group_id)) {
+                let sealed = envelope::seal(&inflight.commit)?;
+                for mailbox in &inflight.mailboxes {
+                    self.state.outbox.push_back(Outgoing { mailbox: *mailbox, envelope: sealed.clone() });
+                }
+                Committed::Accepted
+            }
+            status::CONFLICT => {
+                group.clear_pending_commit(self.provider.storage()).map_err(mls)?;
+                Committed::Lost
+            }
+            status::FORBIDDEN | status::NOT_FOUND => {
+                group.clear_pending_commit(self.provider.storage()).map_err(mls)?;
+                Committed::Refused
+            }
+            // Rate limit or hub trouble: the answer is still open.
+            other => return Ok(Committed::Unknown(format!("hub answered {other}"))),
+        };
+        let now = (self.clock)();
+        if let Some(chat) = self.state.chats.get_mut(&key) {
+            chat.inflight = None;
+            match outcome {
+                Committed::Accepted => {
                     chat.last_update_ms = now;
                     chat.sent_since_update = 0;
                     chat.needs_update = false;
                 }
-                Ok(true)
+                Committed::Refused => chat.no_updates = true,
+                _ => {}
             }
-            status::CONFLICT => {
-                group.clear_pending_commit(self.provider.storage()).map_err(mls)?;
-                Ok(false)
-            }
-            _ => Err(refused(&response)),
         }
+        Ok(outcome)
     }
 
-    /// Updates the chat if due. A lost race (409) is resolved by receiving the winner's commit; an unreachable
-    /// hub postpones the update, it does not stop the message.
+    /// Settles an inflight commit and updates the chat if due. A lost race (409) is resolved by receiving the
+    /// winner's commit. `Err` only when a commit's answer is still open: the group cannot be used until it is.
     fn ensure_fresh(&mut self, group: &GroupId) -> Result<()> {
+        if let Committed::Unknown(error) = self.resolve(group)? {
+            return Err(Error::Network(error));
+        }
         for _ in 0..4 {
             if !self.update_due(group) {
                 return Ok(());
             }
             match self.atomic(|c| c.update(group)) {
-                Ok(true) => return Ok(()),
-                Ok(false) => self.receive_all(1)?,
-                Err(Error::Network(_)) => return Ok(()),
-                Err(error) => return Err(error),
+                Ok(Committed::Accepted | Committed::Refused | Committed::Nothing) => return Ok(()),
+                Ok(Committed::Unknown(error)) => return Err(Error::Network(error)),
+                Ok(Committed::Lost) => match self.receive_all(1) {
+                    Ok(()) => {}
+                    Err(error) if retryable(&error) => return Ok(()),
+                    Err(error) => return Err(error),
+                },
+                // An update that cannot be made does not stop the chat.
+                Err(error) if retryable(&error) => return Ok(()),
+                Err(error) => {
+                    self.drop_one(format!("update: {error}"));
+                    return Ok(());
+                }
             }
         }
         Ok(())
@@ -561,6 +683,11 @@ impl Client {
 
     /// Sends the outbox in order, per mailbox. Returns the peers whose device is gone (410).
     fn flush(&mut self) -> BTreeSet<String> {
+        // Saved before anything leaves: a crash after the hub took an envelope must not bring back the ratchet
+        // state that made it. A repeat after a crash is harmless, the receiver skips what it has seen.
+        if !self.state.outbox.is_empty() {
+            self.persist();
+        }
         let mut gone_peers = BTreeSet::new();
         let mut gone = BTreeSet::new();
         let mut waiting = BTreeSet::new();
@@ -639,7 +766,8 @@ impl Client {
                 if !self.state.seen.contains(&hash) {
                     match self.atomic(|c| c.receive(item.envelope.as_slice())) {
                         Ok(()) => {}
-                        Err(error @ Error::Network(_)) => {
+                        // Not this envelope's fault: it stays at the hub and is read again next time.
+                        Err(error) if retryable(&error) => {
                             stopped = Some(error);
                             break;
                         }
@@ -653,9 +781,14 @@ impl Client {
                 done.push(item.id);
             }
             if !done.is_empty() {
-                let response = self.signed("POST", api::INBOX_ACK, &encode(&api::Ack { ids: done }))?;
-                if response.status != status::NO_CONTENT {
-                    return Err(refused(&response));
+                // Saved before the hub may forget: what was processed must survive a crash right after the ack.
+                self.persist();
+                // An ack that does not arrive costs only a repeat: the hub sends those envelopes again, and they
+                // are skipped as seen.
+                match self.signed("POST", api::INBOX_ACK, &encode(&api::Ack { ids: done })) {
+                    Ok(response) if response.status == status::NO_CONTENT => {}
+                    Ok(response) if response.status == status::GONE => return Err(Error::Replaced),
+                    _ => return Ok(()),
                 }
             }
             if let Some(error) = stopped {
@@ -726,7 +859,8 @@ impl Client {
         }
         // The hub attests the number's account key: nobody can start a chat in someone else's name. A key the
         // number no longer has is a replaced device's (or a forger's): either way the chat is not joined.
-        if self.lookup(&peer, false)?.account_key != peer_key {
+        let attested = self.state.contacts.get(&peer).is_some_and(|c| !c.stale && c.account_key == peer_key);
+        if !attested && self.lookup(&peer, false)?.account_key != peer_key {
             // Kept, not rolled back: the group is remembered as ignored, and what follows in it is discarded.
             let id: [u8; 32] =
                 staged.group_context().group_id().as_slice().try_into().map_err(|_| Error::Protocol("group id"))?;
@@ -746,6 +880,8 @@ impl Client {
                 sent_since_update: 0,
                 needs_update: true,
                 closed_at: None,
+                inflight: None,
+                no_updates: false,
             },
         );
         self.events.push(Event::NewChat { phone: peer });
@@ -763,6 +899,7 @@ impl Client {
             return Err(Error::Protocol("unknown group"));
         };
         let peer = chat.peer.clone();
+        let inflight = chat.inflight.is_some();
         let mut group = self.load(&group_id)?;
         // The accounts in the group, as their certificates were checked when they joined.
         let accounts: Vec<(Vec<u8>, [u8; 32])> = group
@@ -770,6 +907,13 @@ impl Client {
             .filter_map(|m| identity::claimed(&m.credential))
             .map(|body| (body.phone().to_vec(), body.account_key))
             .collect();
+        // A commit from someone else for this epoch means the hub took theirs: ours, still unanswered, lost.
+        if message.content_type() == ContentType::Commit && inflight {
+            group.clear_pending_commit(self.provider.storage()).map_err(mls)?;
+            if let Some(chat) = self.state.chats.get_mut(&key) {
+                chat.inflight = None;
+            }
+        }
         let (message_epoch, group_epoch) = (message.epoch().as_u64(), group.epoch().as_u64());
         let processed = group
             .process_message(&self.provider, message)
@@ -821,6 +965,12 @@ impl Client {
         let allowed = |body: &yo_wire::cert::CertificateBody| {
             accounts.iter().any(|(phone, key)| phone.as_slice() == body.phone() && *key == body.account_key)
         };
+        // v1 commits change membership and keys, nothing else: no extensions, PSKs, re-inits.
+        let allowed_kind =
+            |p: &QueuedProposal| matches!(p.proposal(), Proposal::Add(_) | Proposal::Update(_) | Proposal::Remove(_));
+        if !staged.queued_proposals().all(allowed_kind) {
+            return Err(Error::Protocol("proposal type not allowed"));
+        }
         for add in staged.add_proposals() {
             let leaf = add.add_proposal().key_package().leaf_node();
             let body = identity::member(leaf.credential(), leaf.signature_key().as_slice())?;
@@ -839,7 +989,7 @@ impl Client {
 
     fn refill(&mut self) -> Result<()> {
         let left = self.state.key_packages_left;
-        let last_resort_due = wall_ms().saturating_sub(self.state.last_resort_at) >= LAST_RESORT_EVERY_MS;
+        let last_resort_due = (self.clock)().saturating_sub(self.state.last_resort_at) >= LAST_RESORT_EVERY_MS;
         if left >= KEY_PACKAGE_REFILL_BELOW && !last_resort_due {
             return Ok(());
         }
@@ -854,7 +1004,7 @@ impl Client {
             }
             c.state.key_packages_left = left + fresh;
             if last_resort_due {
-                c.state.last_resort_at = wall_ms();
+                c.state.last_resort_at = (c.clock)();
             }
             Ok(())
         })
@@ -915,13 +1065,13 @@ impl Client {
             result = self.refill();
         }
         self.flush();
-        self.finish(result)
+        self.finish_receiving(result)
     }
 
     /// What the app runs when it comes to the foreground: receive, refill KeyPackages, update due chats.
     pub fn maintenance(&mut self) -> Result<Vec<Event>> {
         let result = self.maintenance_inner();
-        self.finish(result)
+        self.finish_receiving(result)
     }
 
     fn maintenance_inner(&mut self) -> Result<()> {
@@ -941,11 +1091,16 @@ impl Client {
         }
         let groups: Vec<GroupId> =
             self.state.chats.keys().filter_map(|key| state::unhex(key)).map(|id| GroupId::from_slice(&id)).collect();
+        // One chat's trouble does not keep the others from their updates.
+        let mut first_error = None;
         for group in groups {
-            self.ensure_fresh(&group)?;
+            if let Err(error) = self.ensure_fresh(&group) {
+                first_error.get_or_insert(error);
+            }
         }
+        self.forget_key_packages();
         self.flush();
-        Ok(())
+        first_error.map_or(Ok(()), Err)
     }
 
     /// Sets the name contacts see, and tells every chat.
