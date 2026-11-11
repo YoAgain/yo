@@ -288,24 +288,32 @@ impl Db {
         Ok(())
     }
 
-    /// Stores an envelope for a live mailbox; says whom to wake.
-    pub fn deliver(&self, mailbox: &Mailbox, envelope: &[u8], now: u64) -> rusqlite::Result<Mailboxes> {
-        let conn = self.conn();
-        let live = conn
-            .prepare_cached("SELECT push_platform, push_token FROM devices WHERE mailbox = ?1")?
-            .query_row([mailbox], |row| Ok((row.get::<_, u8>(0)?, row.get::<_, Vec<u8>>(1)?)))
-            .optional()?;
-        match live {
-            Some((push_platform, push_token)) => {
-                conn.prepare_cached("INSERT INTO messages (mailbox, envelope, received_at) VALUES (?1, ?2, ?3)")?
-                    .execute(params![mailbox, envelope, now])?;
-                Ok(Mailboxes::Live { push_platform, push_token })
-            }
-            None => {
-                let gone = conn.prepare_cached("SELECT 1 FROM gone WHERE mailbox = ?1")?.exists([mailbox])?;
-                Ok(if gone { Mailboxes::Gone } else { Mailboxes::Unknown })
+    /// Stores envelopes for live mailboxes, all in one transaction (group commit); says for each whom to wake.
+    pub fn deliver(&self, items: &[(Mailbox, &[u8])], now: u64) -> rusqlite::Result<Vec<Mailboxes>> {
+        let mut conn = self.conn();
+        let tx = conn.transaction()?;
+        let mut outcomes = Vec::with_capacity(items.len());
+        {
+            let mut device = tx.prepare_cached("SELECT push_platform, push_token FROM devices WHERE mailbox = ?1")?;
+            let mut insert =
+                tx.prepare_cached("INSERT INTO messages (mailbox, envelope, received_at) VALUES (?1, ?2, ?3)")?;
+            let mut gone = tx.prepare_cached("SELECT 1 FROM gone WHERE mailbox = ?1")?;
+            for (mailbox, envelope) in items {
+                let live = device
+                    .query_row([mailbox], |row| Ok((row.get::<_, u8>(0)?, row.get::<_, Vec<u8>>(1)?)))
+                    .optional()?;
+                outcomes.push(match live {
+                    Some((push_platform, push_token)) => {
+                        insert.execute(params![mailbox, envelope, now])?;
+                        Mailboxes::Live { push_platform, push_token }
+                    }
+                    None if gone.exists([mailbox])? => Mailboxes::Gone,
+                    None => Mailboxes::Unknown,
+                });
             }
         }
+        tx.commit()?;
+        Ok(outcomes)
     }
 
     pub fn fetch(&self, mailbox: &Mailbox, most: usize) -> rusqlite::Result<Vec<(u64, Vec<u8>)>> {

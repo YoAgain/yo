@@ -1,0 +1,37 @@
+{
+  "clients": 200,
+  "commit": "f255fa7",
+  "cores": 16,
+  "date": "2026-11-11",
+  "end_to_end": {
+    "dropped": 0,
+    "seconds": 15.066838448,
+    "send": {
+      "max_ms": 59.084,
+      "p50_ms": 5.948,
+      "p90_ms": 19.563,
+      "p99_ms": 24.061
+    },
+    "yos_per_s": 2047.476655867041,
+    "yos_received": 30849,
+    "yos_sent": 30849
+  },
+  "hub_alone": {
+    "connections": 64,
+    "delivered": 87078,
+    "errors": 0,
+    "latency": {
+      "max_ms": 45.126,
+      "p50_ms": 6.422,
+      "p90_ms": 27.582,
+      "p99_ms": 33.968
+    },
+    "per_s": 5792.916742978162,
+    "seconds": 15.031805887
+  },
+  "registration": {
+    "per_s": 282.0981712158093,
+    "seconds": 0.708973047
+  },
+  "threads": 16
+}

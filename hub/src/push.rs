@@ -46,21 +46,23 @@ impl Transport for Https {
     }
 }
 
-/// Records every request and answers 200: tests, and a hub without push services.
+/// Records every request and answers like the services would: tests, and a hub without push services.
 #[derive(Default)]
 pub struct Recorder {
     pub sent: Mutex<Vec<Request>>,
+    /// The status pushes to devices are answered with; 200 when unset.
+    pub device_status: Mutex<Option<u16>>,
 }
 
 impl Transport for Recorder {
     fn send(&self, request: Request) -> Fut<Result<(u16, Vec<u8>), String>> {
         let answer = if request.url.contains("oauth2") {
-            br#"{"access_token":"test","expires_in":3600}"#.to_vec()
+            (200, br#"{"access_token":"test","expires_in":3600}"#.to_vec())
         } else {
-            Vec::new()
+            (self.device_status.lock().unwrap_or_else(PoisonError::into_inner).unwrap_or(200), Vec::new())
         };
         self.sent.lock().unwrap_or_else(PoisonError::into_inner).push(request);
-        Box::pin(async move { Ok((200, answer)) })
+        Box::pin(async move { Ok(answer) })
     }
 }
 
@@ -96,7 +98,8 @@ struct Fcm {
     client_email: String,
     token_uri: String,
     key: EncodingKey,
-    access: Mutex<Option<Cached>>,
+    /// Async: concurrent pushes wait for one token exchange instead of each running their own.
+    access: tokio::sync::Mutex<Option<Cached>>,
 }
 
 fn unix_s() -> u64 {
@@ -131,7 +134,7 @@ impl Pusher {
                     token_uri: field("token_uri")?,
                     key: EncodingKey::from_rsa_pem(field("private_key")?.as_bytes())
                         .map_err(|e| format!("FCM key: {e}"))?,
-                    access: Mutex::new(None),
+                    access: tokio::sync::Mutex::new(None),
                 })
             })
             .transpose()?;
@@ -197,10 +200,9 @@ impl Pusher {
     }
 
     async fn fcm_access(&self, fcm: &Fcm) -> Result<String, String> {
-        if let Some(c) = fcm.access.lock().unwrap_or_else(PoisonError::into_inner).as_ref() {
-            if c.until > Instant::now() {
-                return Ok(c.value.clone());
-            }
+        let mut access = fcm.access.lock().await;
+        if let Some(c) = access.as_ref().filter(|c| c.until > Instant::now()) {
+            return Ok(c.value.clone());
         }
         let now = unix_s();
         let claims = json!({
@@ -222,8 +224,7 @@ impl Pusher {
         let answer: serde_json::Value = serde_json::from_slice(&body).map_err(|e| e.to_string())?;
         let token = answer["access_token"].as_str().filter(|_| status == 200).ok_or(format!("FCM OAuth {status}"))?;
         let lifetime = answer["expires_in"].as_u64().unwrap_or(3600).saturating_sub(300);
-        *fcm.access.lock().unwrap_or_else(PoisonError::into_inner) =
-            Some(Cached { value: token.to_owned(), until: Instant::now() + Duration::from_secs(lifetime) });
+        *access = Some(Cached { value: token.to_owned(), until: Instant::now() + Duration::from_secs(lifetime) });
         Ok(token.to_owned())
     }
 

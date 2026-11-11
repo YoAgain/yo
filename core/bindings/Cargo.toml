@@ -6,9 +6,14 @@ publish.workspace = true
 description = "The core for Swift and Kotlin, through UniFFI."
 
 [lib]
+name = "yo"
 crate-type = ["lib", "staticlib", "cdylib"]
+
+[[bin]]
+name = "uniffi-bindgen"
+path = "bindgen.rs"
 
 [dependencies]
 yo-core = { path = "../mls" }
-uniffi = { workspace = true }
+uniffi = { workspace = true, features = ["cli"] }
 thiserror = { workspace = true }

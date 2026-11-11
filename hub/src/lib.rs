@@ -34,7 +34,8 @@ use yo_wire::{decode, encode, phone, sha256, unb64, GroupId, Mailbox};
 
 pub struct Hub {
     config: Config,
-    db: Db,
+    db: Arc<Db>,
+    deliveries: std::sync::mpsc::Sender<Delivery>,
     crypto: RustCrypto,
     limiter: Limiter,
     replay: ReplayCache,
@@ -59,6 +60,44 @@ fn ok(body: Vec<u8>) -> (StatusCode, Vec<u8>) {
     (StatusCode::OK, body)
 }
 
+/// An envelope on its way to the writer, which stores many in one transaction.
+struct Delivery {
+    mailbox: Mailbox,
+    envelope: Bytes,
+    stored: tokio::sync::oneshot::Sender<Result<Mailboxes, ()>>,
+}
+
+/// The most envelopes one transaction stores.
+const BATCH: usize = 512;
+
+/// Group commit: takes what has queued up, stores it in one transaction, answers each. Under load the batches
+/// grow by themselves; alone, an envelope is stored at once.
+fn writer(db: Arc<Db>, queue: std::sync::mpsc::Receiver<Delivery>) {
+    while let Ok(first) = queue.recv() {
+        let mut batch = vec![first];
+        while batch.len() < BATCH {
+            match queue.try_recv() {
+                Ok(next) => batch.push(next),
+                Err(_) => break,
+            }
+        }
+        let items: Vec<(Mailbox, &[u8])> = batch.iter().map(|d| (d.mailbox, &d.envelope[..])).collect();
+        match db.deliver(&items, now_ms()) {
+            Ok(outcomes) => {
+                for (delivery, outcome) in batch.into_iter().zip(outcomes) {
+                    let _ = delivery.stored.send(Ok(outcome));
+                }
+            }
+            Err(error) => {
+                eprintln!("yo-hub: database: {error}");
+                for delivery in batch {
+                    let _ = delivery.stored.send(Err(()));
+                }
+            }
+        }
+    }
+}
+
 /// A device that signed its request (spec 6.2).
 struct Signed {
     mailbox: Mailbox,
@@ -67,11 +106,18 @@ struct Signed {
 
 impl Hub {
     pub fn new(config: Config, push_transport: Arc<dyn push::Transport>) -> Result<Arc<Self>, String> {
-        let db = Db::open(&config.db_path).map_err(|e| format!("database: {e}"))?;
+        let db = Arc::new(Db::open(&config.db_path).map_err(|e| format!("database: {e}"))?);
         let pusher = push::Pusher::new(push_transport, config.apns.as_ref(), config.fcm.as_ref())?;
+        let (deliveries, queue) = std::sync::mpsc::channel();
+        let writing = db.clone();
+        std::thread::Builder::new()
+            .name("yo-hub-writer".into())
+            .spawn(move || writer(writing, queue))
+            .map_err(|e| format!("writer: {e}"))?;
         Ok(Arc::new(Hub {
             sms: sms::from_config(&config.sms),
             db,
+            deliveries,
             crypto: RustCrypto::default(),
             limiter: Limiter::default(),
             replay: ReplayCache::default(),
@@ -399,7 +445,12 @@ async fn deliver(
     hub.limit(format!("deliver:ip:{}", hub.ip(peer, &headers)), limits.deliver_per_ip_minute, MINUTE)?;
     hub.limit(format!("deliver:to:{}", yo_wire::b64(&mailbox)), limits.deliver_per_mailbox_minute, MINUTE)?;
     yo_wire::envelope::check(&body)?;
-    match hub.db.deliver(&mailbox, &body, now_ms())? {
+    let (stored, outcome) = tokio::sync::oneshot::channel();
+    hub.deliveries
+        .send(Delivery { mailbox, envelope: body, stored })
+        .map_err(|_| refuse(StatusCode::SERVICE_UNAVAILABLE))?;
+    let outcome = outcome.await.ok().and_then(Result::ok).ok_or_else(|| refuse(StatusCode::INTERNAL_SERVER_ERROR))?;
+    match outcome {
         Mailboxes::Live { push_platform, push_token } => {
             hub.wake_waiters(&mailbox);
             if !push_token.is_empty() {
