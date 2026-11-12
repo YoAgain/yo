@@ -1,12 +1,14 @@
-//! Identities (spec 3): the account key certifies devices; every member of a group is checked against its
-//! certificate; the safety number is computed from both account keys.
+//! Identities (spec 3): the account key vouches for devices; every member of a group is checked against its
+//! certificate; the safety number is computed from user ids and account keys.
 
 use crate::error::{Error, Result};
 use ed25519_dalek::{Signer as _, SigningKey};
 use openmls::prelude::{BasicCredential, Credential, CredentialType};
 use sha2::{Digest, Sha512};
-use yo_wire::cert::{CertificateBody, DeviceCertificate};
-use yo_wire::{Mailbox, VERSION};
+use yo_wire::cert::{self, DeviceCertificate};
+use yo_wire::KEY_LEN;
+
+pub type Key = [u8; KEY_LEN];
 
 /// Fresh random bytes from the operating system.
 pub fn random<const N: usize>() -> [u8; N] {
@@ -15,43 +17,39 @@ pub fn random<const N: usize>() -> [u8; N] {
     out
 }
 
-/// Makes the certificate of a device, signed by the account key.
-pub fn certify(account: &SigningKey, device_key: &[u8], mailbox: &Mailbox, flags: u8) -> Result<DeviceCertificate> {
-    let body = CertificateBody {
-        version: VERSION,
+/// The certificate of a device: the account key vouching for its MLS signature key.
+pub fn certify(account: &SigningKey, device_key: &[u8]) -> DeviceCertificate {
+    DeviceCertificate {
         account_key: account.verifying_key().to_bytes(),
-        device_key: device_key.try_into().map_err(|_| Error::Internal("device key length"))?,
-        mailbox: *mailbox,
-        flags,
-    };
-    let signature = account.sign(&body.to_be_signed()).to_bytes();
-    Ok(DeviceCertificate { body, signature })
+        signature: account.sign(&cert::to_be_signed(device_key)).to_bytes(),
+    }
 }
 
-/// The certificate of a leaf, checked: basic credential, valid certificate, and its device key is the leaf's
-/// signature key.
-pub fn member(credential: &Credential, signature_key: &[u8]) -> Result<CertificateBody> {
+fn identity(credential: &Credential) -> Result<Vec<u8>> {
     if credential.credential_type() != CredentialType::Basic {
         return Err(Error::Protocol("credential type"));
     }
     let basic = BasicCredential::try_from(credential.clone()).map_err(|_| Error::Protocol("credential"))?;
-    let certificate = DeviceCertificate::verify(basic.identity()).map_err(|_| Error::Protocol("certificate"))?;
-    if certificate.body.device_key.as_slice() != signature_key {
-        return Err(Error::Protocol("certificate names another key"));
-    }
-    Ok(certificate.body)
+    Ok(basic.identity().to_vec())
 }
 
-/// The account key and mailbox a certificate names, unchecked: for a sender whose leaf OpenMLS has verified.
-pub fn claimed(credential: &Credential) -> Option<CertificateBody> {
-    let basic = BasicCredential::try_from(credential.clone()).ok()?;
-    yo_wire::decode::<DeviceCertificate>(basic.identity()).ok().map(|c| c.body)
+/// The account key vouching for a leaf, checked: a basic credential whose certificate verifies against the leaf's
+/// signature key.
+pub fn member(credential: &Credential, signature_key: &[u8]) -> Result<Key> {
+    let certificate =
+        DeviceCertificate::verify(&identity(credential)?, signature_key).map_err(|_| Error::Protocol("certificate"))?;
+    Ok(certificate.account_key)
 }
 
-/// The safety number of two users (spec 3): 60 digits, the same on both sides. Each side is its user id and
+/// The account key a leaf names, unchecked: for members whose certificates were checked when they joined.
+pub fn claimed(credential: &Credential) -> Option<Key> {
+    DeviceCertificate::parse(&identity(credential).ok()?).ok().map(|c| c.account_key)
+}
+
+/// The safety number of two users (spec 3.4): 60 digits, the same on both sides. Each side is its user id and
 /// account key.
-pub fn safety_number(a: (&[u8], &[u8; 32]), b: (&[u8], &[u8; 32])) -> String {
-    let part = |(user, key): (&[u8], &[u8; 32])| {
+pub fn safety_number(a: (&[u8], &Key), b: (&[u8], &Key)) -> String {
+    let part = |(user, key): (&[u8], &Key)| {
         let mut out = vec![user.len() as u8];
         out.extend_from_slice(user);
         out.extend_from_slice(key);
@@ -66,8 +64,7 @@ pub fn safety_number(a: (&[u8], &[u8; 32]), b: (&[u8], &[u8; 32])) -> String {
     let digest = hash.finalize();
     (0..12)
         .map(|i| {
-            let chunk = &digest[5 * i..5 * i + 5];
-            let value = chunk.iter().fold(0u64, |acc, b| (acc << 8) | *b as u64);
+            let value = digest[5 * i..5 * i + 5].iter().fold(0u64, |acc, b| (acc << 8) | *b as u64);
             format!("{:05}", value % 100_000)
         })
         .collect::<Vec<_>>()

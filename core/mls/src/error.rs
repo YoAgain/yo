@@ -13,6 +13,9 @@ pub enum Error {
     NotOnYo,
     #[error("blocked")]
     Blocked,
+    /// The contact was verified and its account key changed: confirm the new key first (spec 3.4).
+    #[error("identity not confirmed")]
+    Unconfirmed,
     /// This device was replaced by another registration of the number.
     #[error("this device was replaced")]
     Replaced,

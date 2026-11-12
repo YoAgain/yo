@@ -11,7 +11,7 @@ path = "src/load.rs"
 
 [dependencies]
 yo-wire = { path = "../core/wire" }
-yo-core = { path = "../core/mls" }
+yo-core = { path = "../core/mls", features = ["testing"] }
 yo-hub = { path = "../hub" }
 yo-bindings = { path = "../core/bindings" }
 tokio = { workspace = true }

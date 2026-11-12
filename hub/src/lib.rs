@@ -1,5 +1,5 @@
-//! The Yo hub (spec 6): mailboxes, KeyPackages, the order of commits, push. It holds no content key, and the
-//! routes that carry messages and commits take no identity: the hub never learns a sender.
+//! The Yo hub (spec 6): users and their devices, KeyPackages, delivery to users, the order of commits, push. It holds
+//! no content key, and the routes that carry messages and commits take no identity: the hub never learns a sender.
 
 pub mod config;
 pub mod db;
@@ -15,7 +15,7 @@ use axum::routing::{get, post, put};
 use axum::Router;
 use bytes::Bytes;
 use config::Config;
-use db::{Commit, Db, Mailboxes, NewDevice, PhoneHmac, StoredKeyPackage, Write};
+use db::{Commit, Db, Delivered, Key, NewDevice, StoredKeyPackage, Write};
 use error::{refuse, Refusal, Res};
 use hmac::{Hmac, Mac};
 use limiter::{Limiter, ReplayCache};
@@ -26,11 +26,12 @@ use std::net::{IpAddr, SocketAddr};
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tokio::sync::Notify;
-use yo_wire::api::{self, status};
+use yo_wire::api::{self, HEADER_DEVICES};
 use yo_wire::cert::DeviceCertificate;
+use yo_wire::handle::{Handle, KIND_PHONE, KIND_USERNAME};
 use yo_wire::limits::{self, KEY_PACKAGE_TARGET, MAX_DEVICES, MAX_INBOX_FETCH, MAX_KEY_PACKAGES_PER_UPLOAD};
 use yo_wire::request::{HEADER_DEVICE, HEADER_SIGNATURE, HEADER_TIME};
-use yo_wire::{decode, encode, phone, sha256, unb64, GroupId, Mailbox, UserId};
+use yo_wire::{decode, encode, phone, sha256, unb64, DeviceId, GroupId, UserId};
 
 pub struct Hub {
     config: Config,
@@ -39,7 +40,7 @@ pub struct Hub {
     crypto: RustCrypto,
     limiter: Limiter,
     replay: ReplayCache,
-    waiting: Mutex<HashMap<Mailbox, Arc<Notify>>>,
+    waiting: Mutex<HashMap<DeviceId, Arc<Notify>>>,
     sms: Box<dyn sms::Sms>,
     pusher: push::Pusher,
 }
@@ -52,26 +53,32 @@ pub fn now_ms() -> u64 {
     SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_millis() as u64
 }
 
-fn status_code(code: u16) -> StatusCode {
-    StatusCode::from_u16(code).expect("a status of yo_wire::api::status")
-}
-
 fn ok(body: Vec<u8>) -> (StatusCode, Vec<u8>) {
     (StatusCode::OK, body)
 }
 
+fn bad() -> Refusal {
+    refuse(StatusCode::BAD_REQUEST)
+}
+
+/// An id in a path: base64url of exactly `N` bytes, or the route does not exist.
+fn path_id<const N: usize>(text: &str) -> Res<[u8; N]> {
+    unb64(text).ok().and_then(|bytes| bytes.try_into().ok()).ok_or_else(|| refuse(StatusCode::NOT_FOUND))
+}
+
 /// An envelope on its way to the writer, which stores many in one transaction.
 struct Delivery {
-    mailbox: Mailbox,
+    user: UserId,
+    devices_hash: [u8; 32],
     envelope: Bytes,
-    stored: tokio::sync::oneshot::Sender<Result<Mailboxes, ()>>,
+    stored: tokio::sync::oneshot::Sender<Result<Delivered, ()>>,
 }
 
 /// The most envelopes one transaction stores.
 const BATCH: usize = 512;
 
-/// Group commit: takes what has queued up, stores it in one transaction, answers each. Under load the batches
-/// grow by themselves; alone, an envelope is stored at once.
+/// Group commit: takes what has queued up, stores it in one transaction, answers each. Under load the batches grow by
+/// themselves; alone, an envelope is stored at once.
 fn writer(db: Arc<Db>, queue: std::sync::mpsc::Receiver<Delivery>, most: u32) {
     while let Ok(first) = queue.recv() {
         let mut batch = vec![first];
@@ -81,7 +88,8 @@ fn writer(db: Arc<Db>, queue: std::sync::mpsc::Receiver<Delivery>, most: u32) {
                 Err(_) => break,
             }
         }
-        let items: Vec<(Mailbox, &[u8])> = batch.iter().map(|d| (d.mailbox, &d.envelope[..])).collect();
+        let items: Vec<(UserId, [u8; 32], &[u8])> =
+            batch.iter().map(|d| (d.user, d.devices_hash, &d.envelope[..])).collect();
         match db.deliver(&items, now_ms(), most) {
             Ok(outcomes) => {
                 for (delivery, outcome) in batch.into_iter().zip(outcomes) {
@@ -100,8 +108,9 @@ fn writer(db: Arc<Db>, queue: std::sync::mpsc::Receiver<Delivery>, most: u32) {
 
 /// A device that signed its request (spec 6.2).
 struct Signed {
-    mailbox: Mailbox,
+    device_id: DeviceId,
     user_id: UserId,
+    device_key: Key,
 }
 
 impl Hub {
@@ -110,12 +119,10 @@ impl Hub {
         let pusher = push::Pusher::new(push_transport, config.apns.as_ref(), config.fcm.as_ref())?;
         let (deliveries, queue) = std::sync::mpsc::channel();
         let writing = db.clone();
+        let most = config.limits.max_pending_per_device;
         std::thread::Builder::new()
             .name("yo-hub-writer".into())
-            .spawn({
-                let most = config.limits.max_pending_per_mailbox;
-                move || writer(writing, queue, most)
-            })
+            .spawn(move || writer(writing, queue, most))
             .map_err(|e| format!("writer: {e}"))?;
         Ok(Arc::new(Hub {
             sms: sms::from_config(&config.sms),
@@ -131,7 +138,7 @@ impl Hub {
     }
 
     pub fn router(self: &Arc<Self>) -> Router {
-        Router::new()
+        let mut router = Router::new()
             .route(api::VERIFY_START, post(verify_start))
             .route(api::VERIFY_CHECK, post(verify_check))
             .route(api::KEY_PACKAGES, put(key_packages))
@@ -140,14 +147,17 @@ impl Hub {
             .route(api::USERNAME, put(set_username))
             .route(api::INBOX, get(inbox))
             .route(api::INBOX_ACK, post(ack))
-            .route("/v1/inbox/{mailbox}", post(deliver))
+            .route("/v1/inbox/{user}", post(deliver))
             .route(api::GROUPS, post(create_group))
             .route("/v1/groups/{group}/commit", post(commit))
-            .layer(DefaultBodyLimit::max(limits::MAX_BODY))
-            .with_state(self.clone())
+            .route("/v1/groups/{group}/commits/{epoch}", get(fetch_commit));
+        if self.config.open_registration {
+            router = router.route(api::REGISTER, post(register));
+        }
+        router.layer(DefaultBodyLimit::max(limits::MAX_BODY)).with_state(self.clone())
     }
 
-    /// Serves until `shutdown` resolves; prunes old envelopes every hour meanwhile.
+    /// Serves until `shutdown` resolves; prunes meanwhile.
     pub async fn serve(
         self: Arc<Self>,
         listener: tokio::net::TcpListener,
@@ -176,10 +186,18 @@ impl Hub {
         served
     }
 
-    fn phone_hmac(&self, digits: &[u8]) -> PhoneHmac {
+    fn phone_hmac(&self, digits: &[u8]) -> [u8; 32] {
         let mut mac = Hmac::<sha2::Sha256>::new_from_slice(&self.config.phone_secret).expect("any key length");
         mac.update(digits);
         mac.finalize().into_bytes().into()
+    }
+
+    /// A handle's value as the hub keeps it: a number as its HMAC only, everything else as it is.
+    fn stored_handle(&self, handle: &Handle) -> Vec<u8> {
+        match handle.kind {
+            KIND_PHONE => self.phone_hmac(handle.value.as_slice()).to_vec(),
+            _ => handle.value.as_slice().to_vec(),
+        }
     }
 
     /// The client's address as rate limits count it: IPv6 by its /64, which one subscriber usually holds whole.
@@ -214,7 +232,7 @@ impl Hub {
     fn authenticate(&self, method: &Method, uri: &Uri, headers: &HeaderMap, body: &[u8]) -> Res<Signed> {
         let unauthorized = || refuse(StatusCode::UNAUTHORIZED);
         let header = |name: &str| headers.get(name).and_then(|v| v.to_str().ok()).ok_or_else(unauthorized);
-        let mailbox: Mailbox =
+        let device_id: DeviceId =
             unb64(header(HEADER_DEVICE)?).ok().and_then(|m| m.try_into().ok()).ok_or_else(unauthorized)?;
         let time: u64 = header(HEADER_TIME)?.parse().map_err(|_| unauthorized())?;
         let signature: [u8; 64] =
@@ -223,64 +241,143 @@ impl Hub {
         if now.abs_diff(time) > limits::MAX_SKEW_MS {
             return Err(unauthorized());
         }
-        let Some(device) = self.db.device(&mailbox)? else {
+        let Some(device) = self.db.device(&device_id)? else {
             // A replaced device learns that it was replaced.
-            return Err(if self.db.is_gone(&mailbox)? { refuse(StatusCode::GONE) } else { unauthorized() });
+            return Err(if self.db.is_gone(&device_id)? { refuse(StatusCode::GONE) } else { unauthorized() });
         };
-        self.limit(format!("signed:{}", yo_wire::b64(&mailbox)), self.config.limits.signed_per_device_minute, MINUTE)?;
+        self.limit(
+            format!("signed:{}", yo_wire::b64(&device_id)),
+            self.config.limits.signed_per_device_minute,
+            MINUTE,
+        )?;
         let path = uri.path_and_query().map(|p| p.as_str()).unwrap_or("/");
         yo_wire::request::verify(&device.auth_key, method.as_str(), path, time, body, &signature)
             .map_err(|_| unauthorized())?;
         if !self.replay.first_time(signature, now, time + limits::MAX_SKEW_MS + 1) {
             return Err(unauthorized());
         }
-        self.db.touch(&mailbox, now)?;
-        Ok(Signed { mailbox, user_id: device.user_id })
+        self.db.touch(&device_id, now)?;
+        Ok(Signed { device_id, user_id: device.user_id, device_key: device.device_key })
     }
 
-    /// Checks uploaded KeyPackages against the uploader; the last resort must say it is one, the others not.
+    /// Checks uploaded KeyPackages against the uploading device and its account; the last resort must say it is one,
+    /// the others not.
     fn check_key_packages(
         &self,
         uploads: &[yo_wire::VLBytes],
         last_resort: Option<&yo_wire::VLBytes>,
-        account_key: &[u8; 32],
-        mailbox: &Mailbox,
+        account_key: &Key,
+        device_key: &Key,
     ) -> Res<(Vec<StoredKeyPackage>, Option<StoredKeyPackage>)> {
         if uploads.len() > MAX_KEY_PACKAGES_PER_UPLOAD {
             return Err(refuse(StatusCode::PAYLOAD_TOO_LARGE));
         }
         let check = |bytes: &yo_wire::VLBytes, want_last_resort: bool| {
-            kp::check(&self.crypto, bytes.as_slice(), account_key, mailbox)
+            kp::check(&self.crypto, bytes.as_slice(), account_key, device_key)
                 .filter(|checked| checked.last_resort == want_last_resort)
                 .map(|checked| StoredKeyPackage { hash: checked.hash, data: bytes.as_slice().to_vec() })
-                .ok_or_else(|| refuse(StatusCode::BAD_REQUEST))
+                .ok_or_else(bad)
         };
         let stored = uploads.iter().map(|k| check(k, false)).collect::<Res<Vec<_>>>()?;
         let last = last_resort.map(|k| check(k, true)).transpose()?;
         Ok((stored, last))
     }
 
-    fn waiter(&self, mailbox: &Mailbox) -> Arc<Notify> {
-        self.waiting.lock().unwrap_or_else(PoisonError::into_inner).entry(*mailbox).or_default().clone()
+    /// Everything about a registering device that can be checked before an SMS code is spent (spec 6.4): its
+    /// certificate, the account key's proof of possession over this handle and device, its KeyPackages.
+    fn check_new_device(
+        &self,
+        handle: &Handle,
+        device: &api::NewDevice,
+    ) -> Res<(Key, NewDevice, Vec<StoredKeyPackage>, StoredKeyPackage)> {
+        if device.push.token.as_slice().len() > limits::MAX_PUSH_TOKEN_LEN {
+            return Err(bad());
+        }
+        let certificate = DeviceCertificate::verify(device.certificate.as_slice(), &device.device_key)?;
+        let account_key = certificate.account_key;
+        let signed = api::registration_to_be_signed(handle, &device.device_id, &device.device_key, &device.auth_key);
+        let key = ed25519_dalek::VerifyingKey::from_bytes(&account_key).map_err(|_| bad())?;
+        key.verify_strict(&signed, &ed25519_dalek::Signature::from_bytes(&device.proof)).map_err(|_| bad())?;
+        let (key_packages, last_resort) =
+            self.check_key_packages(&device.key_packages, Some(&device.last_resort), &account_key, &device.device_key)?;
+        let new = NewDevice {
+            device_id: device.device_id,
+            device_key: device.device_key,
+            auth_key: device.auth_key,
+            push_platform: device.push.platform,
+            push_token: device.push.token.as_slice().to_vec(),
+        };
+        Ok((account_key, new, key_packages, last_resort.expect("asked for")))
     }
 
-    fn wake_waiters(&self, mailbox: &Mailbox) {
-        if let Some(notify) = self.waiting.lock().unwrap_or_else(PoisonError::into_inner).get(mailbox) {
+    /// Stores a checked registration and answers the user id.
+    fn register_checked(
+        &self,
+        handle: &Handle,
+        create_only: bool,
+        checked: (Key, NewDevice, Vec<StoredKeyPackage>, StoredKeyPackage),
+    ) -> Res<(StatusCode, Vec<u8>)> {
+        let (account_key, device, key_packages, last_resort) = checked;
+        let mut fresh: UserId = [0; 16];
+        getrandom::getrandom(&mut fresh).map_err(|_| refuse(StatusCode::INTERNAL_SERVER_ERROR))?;
+        let written = self.db.register(
+            handle.kind,
+            &self.stored_handle(handle),
+            create_only,
+            &fresh,
+            &account_key,
+            &device,
+            &key_packages,
+            &last_resort,
+            now_ms(),
+        )?;
+        match written {
+            Write::Done(user_id) => Ok(ok(encode(&api::Registered { user_id }))),
+            Write::Refused(_) => Err(refuse(StatusCode::CONFLICT)),
+        }
+    }
+
+    fn waiter(&self, device: &DeviceId) -> Arc<Notify> {
+        self.waiting.lock().unwrap_or_else(PoisonError::into_inner).entry(*device).or_default().clone()
+    }
+
+    fn wake_waiters(&self, device: &DeviceId) {
+        if let Some(notify) = self.waiting.lock().unwrap_or_else(PoisonError::into_inner).get(device) {
             notify.notify_waiters();
         }
     }
 
-    fn forget_waiter(&self, mailbox: &Mailbox, notify: Arc<Notify>) {
+    fn forget_waiter(&self, device: &DeviceId, notify: Arc<Notify>) {
         let mut waiting = self.waiting.lock().unwrap_or_else(PoisonError::into_inner);
         // Two references: the map's and ours. Nobody else waits.
         if Arc::strong_count(&notify) == 2 {
-            waiting.remove(mailbox);
+            waiting.remove(device);
         }
+    }
+
+    fn push(self: &Arc<Self>, wake: db::Wake) {
+        if wake.push_token.is_empty() {
+            return;
+        }
+        let hub = self.clone();
+        tokio::spawn(async move {
+            match hub.pusher.wake(wake.push_platform, &wake.push_token).await {
+                push::Outcome::TokenInvalid => {
+                    if let Err(error) = hub.db.clear_push(&wake.device_id, &wake.push_token) {
+                        eprintln!("yo-hub: clear push: {error}");
+                    }
+                }
+                push::Outcome::Failed(error) => eprintln!("yo-hub: push: {error}"),
+                push::Outcome::Sent | push::Outcome::Skipped => {}
+            }
+        });
     }
 }
 
 type Hubs = State<Arc<Hub>>;
 type Peer = ConnectInfo<SocketAddr>;
+
+// ---- registration ----
 
 async fn verify_start(State(hub): Hubs, ConnectInfo(peer): Peer, headers: HeaderMap, body: Bytes) -> Res<StatusCode> {
     let request: api::VerifyStart = decode(&body)?;
@@ -289,7 +386,7 @@ async fn verify_start(State(hub): Hubs, ConnectInfo(peer): Peer, headers: Header
     let phone_key = yo_wire::b64(&hub.phone_hmac(request.phone.as_slice()));
     hub.limit(format!("start:ip:{}", hub.ip(peer, &headers)), limits.verify_per_ip_hour, HOUR)?;
     hub.limit(format!("start:phone:{phone_key}"), limits.verify_per_phone_hour, HOUR)?;
-    let digits = String::from_utf8(request.phone.as_slice().to_vec()).map_err(|_| refuse(StatusCode::BAD_REQUEST))?;
+    let digits = String::from_utf8(request.phone.as_slice().to_vec()).map_err(|_| bad())?;
     hub.sms.start(digits).await.map_err(|error| {
         eprintln!("yo-hub: sms: {error}");
         refuse(StatusCode::BAD_GATEWAY)
@@ -304,53 +401,52 @@ async fn verify_check(
     body: Bytes,
 ) -> Res<(StatusCode, Vec<u8>)> {
     let request: api::VerifyCheck = decode(&body)?;
-    let digits = request.phone.as_slice();
-    phone::check(digits)?;
-    let phone = hub.phone_hmac(digits);
+    let digits = String::from_utf8(request.phone.as_slice().to_vec()).map_err(|_| bad())?;
+    phone::check(digits.as_bytes())?;
+    let handle = Handle::phone(&digits);
     let limits = &hub.config.limits;
     hub.limit(format!("check:ip:{}", hub.ip(peer, &headers)), limits.verify_per_ip_hour.saturating_mul(3), HOUR)?;
-    hub.limit(format!("check:phone:{}", yo_wire::b64(&phone)), limits.check_per_phone_hour, HOUR)?;
-    let code = String::from_utf8(request.code.as_slice().to_vec()).map_err(|_| refuse(StatusCode::BAD_REQUEST))?;
-    if code.is_empty()
-        || code.len() > limits::MAX_CODE_LEN
-        || request.push.token.as_slice().len() > limits::MAX_PUSH_TOKEN_LEN
-    {
-        return Err(refuse(StatusCode::BAD_REQUEST));
+    hub.limit(format!("check:phone:{}", yo_wire::b64(&hub.stored_handle(&handle))), limits.check_per_phone_hour, HOUR)?;
+    let code = String::from_utf8(request.code.as_slice().to_vec()).map_err(|_| bad())?;
+    if code.is_empty() || code.len() > limits::MAX_CODE_LEN {
+        return Err(bad());
     }
-    let certificate = DeviceCertificate::verify(request.certificate.as_slice())?;
-    let body = &certificate.body;
     // Everything is checked before the code is spent.
-    let (key_packages, last_resort) =
-        hub.check_key_packages(&request.key_packages, Some(&request.last_resort), &body.account_key, &body.mailbox)?;
-    let last_resort = last_resort.expect("asked for");
-    let approved = hub.sms.check(String::from_utf8_lossy(digits).into_owned(), code).await.map_err(|error| {
+    let checked = hub.check_new_device(&handle, &request.device)?;
+    let approved = hub.sms.check(digits, code).await.map_err(|error| {
         eprintln!("yo-hub: sms: {error}");
         refuse(StatusCode::BAD_GATEWAY)
     })?;
     if !approved {
         return Err(refuse(StatusCode::FORBIDDEN));
     }
-    let device = NewDevice {
-        mailbox: body.mailbox,
-        auth_key: request.auth_key,
-        push_platform: request.push.platform,
-        push_token: request.push.token.as_slice().to_vec(),
-    };
-    let mut fresh: UserId = [0; 16];
-    getrandom::getrandom(&mut fresh).map_err(|_| refuse(StatusCode::INTERNAL_SERVER_ERROR))?;
-    match hub.db.register(&phone, &fresh, &body.account_key, &device, &key_packages, &last_resort, now_ms())? {
-        Write::Done(user_id) => Ok(ok(encode(&api::Registered { user_id }))),
-        Write::Refused(_) => Err(refuse(StatusCode::CONFLICT)),
-    }
+    hub.register_checked(&handle, false, checked)
 }
+
+/// An account without a number (spec 6.4): routed only where the configuration switches it on.
+async fn register(
+    State(hub): Hubs,
+    ConnectInfo(peer): Peer,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Res<(StatusCode, Vec<u8>)> {
+    hub.limit(format!("register:ip:{}", hub.ip(peer, &headers)), hub.config.limits.register_per_ip_hour, HOUR)?;
+    let request: api::Register = decode(&body)?;
+    let handle = Handle { kind: KIND_USERNAME, value: request.username.clone() };
+    handle.check()?;
+    let checked = hub.check_new_device(&handle, &request.device)?;
+    hub.register_checked(&handle, true, checked)
+}
+
+// ---- what a device asks for itself ----
 
 async fn key_packages(State(hub): Hubs, method: Method, uri: Uri, headers: HeaderMap, body: Bytes) -> Res<StatusCode> {
     let device = hub.authenticate(&method, &uri, &headers, &body)?;
     let request: api::KeyPackages = decode(&body)?;
     let account_key = hub.db.account_key(&device.user_id)?.ok_or_else(|| refuse(StatusCode::UNAUTHORIZED))?;
     let (stored, last) =
-        hub.check_key_packages(&request.key_packages, request.last_resort.as_ref(), &account_key, &device.mailbox)?;
-    match hub.db.add_key_packages(&device.mailbox, &stored, last.as_ref(), KEY_PACKAGE_TARGET * 2)? {
+        hub.check_key_packages(&request.key_packages, request.last_resort.as_ref(), &account_key, &device.device_key)?;
+    match hub.db.add_key_packages(&device.device_id, &stored, last.as_ref(), KEY_PACKAGE_TARGET * 2)? {
         Write::Done(()) => Ok(StatusCode::NO_CONTENT),
         Write::Refused(_) => Err(refuse(StatusCode::CONFLICT)),
     }
@@ -366,22 +462,25 @@ async fn lookup(
     let device = hub.authenticate(&method, &uri, &headers, &body)?;
     let request: api::Lookup = decode(&body)?;
     request.handle.check()?;
+    if request.except.len() > MAX_DEVICES {
+        return Err(bad());
+    }
     let limits = &hub.config.limits;
     let (kind, per_day) = match request.key_packages {
         1 => ("lookup", limits.lookup_per_device_day),
         _ => ("identity", limits.identity_lookup_per_device_day),
     };
-    hub.limit(format!("{kind}:{}", yo_wire::b64(&device.mailbox)), per_day, DAY)?;
-    let handle = &request.handle;
-    // A number is kept as its HMAC only; everything else as it is.
-    let value = match handle.kind {
-        yo_wire::handle::KIND_PHONE => hub.phone_hmac(handle.value.as_slice()).to_vec(),
-        _ => handle.value.as_slice().to_vec(),
-    };
-    let (user_id, account_key, key_packages) =
-        hub.db.lookup(handle.kind, &value, request.key_packages == 1)?.ok_or_else(|| refuse(StatusCode::NOT_FOUND))?;
-    let key_packages = key_packages.into_iter().take(MAX_DEVICES).map(Into::into).collect();
-    Ok(ok(encode(&api::LookupResult { user_id, account_key, key_packages })))
+    hub.limit(format!("{kind}:{}", yo_wire::b64(&device.device_id)), per_day, DAY)?;
+    let found = hub
+        .db
+        .lookup(request.handle.kind, &hub.stored_handle(&request.handle), request.key_packages == 1, &request.except)?
+        .ok_or_else(|| refuse(StatusCode::NOT_FOUND))?;
+    Ok(ok(encode(&api::LookupResult {
+        user_id: found.user_id,
+        account_key: found.account_key,
+        device_keys: found.device_keys.into_iter().take(MAX_DEVICES).collect(),
+        key_packages: found.key_packages.into_iter().take(MAX_DEVICES).map(Into::into).collect(),
+    })))
 }
 
 /// Claims or gives up the signing device's account's username.
@@ -389,10 +488,7 @@ async fn set_username(State(hub): Hubs, method: Method, uri: Uri, headers: Heade
     let device = hub.authenticate(&method, &uri, &headers, &body)?;
     let request: api::SetUsername = decode(&body)?;
     if let Some(name) = &request.username {
-        yo_wire::handle::Handle::username(
-            std::str::from_utf8(name.as_slice()).map_err(|_| refuse(StatusCode::BAD_REQUEST))?,
-        )
-        .check()?;
+        Handle { kind: KIND_USERNAME, value: name.clone() }.check()?;
     }
     match hub.db.set_username(&device.user_id, request.username.as_ref().map(|n| n.as_slice()))? {
         Write::Done(()) => Ok(StatusCode::NO_CONTENT),
@@ -404,9 +500,9 @@ async fn set_push(State(hub): Hubs, method: Method, uri: Uri, headers: HeaderMap
     let device = hub.authenticate(&method, &uri, &headers, &body)?;
     let request: api::Push = decode(&body)?;
     if request.token.as_slice().len() > limits::MAX_PUSH_TOKEN_LEN {
-        return Err(refuse(StatusCode::BAD_REQUEST));
+        return Err(bad());
     }
-    hub.db.set_push(&device.mailbox, request.platform, request.token.as_slice())?;
+    hub.db.set_push(&device.device_id, request.platform, request.token.as_slice())?;
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -418,27 +514,27 @@ async fn inbox(State(hub): Hubs, method: Method, uri: Uri, headers: HeaderMap) -
         .and_then(|v| v.parse::<u64>().ok())
         .unwrap_or(0)
         .min(limits::MAX_WAIT_S);
-    let mut items = hub.db.fetch(&device.mailbox, MAX_INBOX_FETCH)?;
+    let mut items = hub.db.fetch(&device.device_id, MAX_INBOX_FETCH)?;
     if items.is_empty() && wait_s > 0 {
-        let notify = hub.waiter(&device.mailbox);
+        let notify = hub.waiter(&device.device_id);
         let fetched = async {
             let notified = notify.notified();
             tokio::pin!(notified);
             notified.as_mut().enable();
             // Mail that came between the first fetch and `enable` is found here.
-            let items = hub.db.fetch(&device.mailbox, MAX_INBOX_FETCH)?;
+            let items = hub.db.fetch(&device.device_id, MAX_INBOX_FETCH)?;
             if !items.is_empty() {
                 return Ok::<_, Refusal>(items);
             }
             let _ = tokio::time::timeout(Duration::from_secs(wait_s), notified).await;
-            Ok(hub.db.fetch(&device.mailbox, MAX_INBOX_FETCH)?)
+            Ok(hub.db.fetch(&device.device_id, MAX_INBOX_FETCH)?)
         }
         .await;
-        hub.forget_waiter(&device.mailbox, notify);
+        hub.forget_waiter(&device.device_id, notify);
         items = fetched?;
     }
     let inbox = api::Inbox {
-        key_packages_left: hub.db.key_packages_left(&device.mailbox)?,
+        key_packages_left: hub.db.key_packages_left(&device.device_id)?,
         items: items.into_iter().map(|(id, envelope)| api::InboxItem { id, envelope: envelope.into() }).collect(),
     };
     Ok(ok(encode(&inbox)))
@@ -450,50 +546,48 @@ async fn ack(State(hub): Hubs, method: Method, uri: Uri, headers: HeaderMap, bod
     if request.ids.len() > limits::MAX_ACK {
         return Err(refuse(StatusCode::PAYLOAD_TOO_LARGE));
     }
-    hub.db.ack(&device.mailbox, &request.ids)?;
+    hub.db.ack(&device.device_id, &request.ids)?;
     Ok(StatusCode::NO_CONTENT)
 }
 
-/// Sealed sender: no identity, only the envelope and where it goes.
+// ---- sealed sender: no identity on these routes ----
+
+/// Delivers an envelope to every device of a user, if the sender's view of the user's devices is the hub's (4.6).
 async fn deliver(
     State(hub): Hubs,
     ConnectInfo(peer): Peer,
     headers: HeaderMap,
-    Path(mailbox): Path<String>,
+    Path(user): Path<String>,
     body: Bytes,
-) -> Res<StatusCode> {
-    let mailbox: Mailbox =
-        unb64(&mailbox).ok().and_then(|m| m.try_into().ok()).ok_or_else(|| refuse(StatusCode::NOT_FOUND))?;
-    let limits = &hub.config.limits;
+) -> Res<(StatusCode, Vec<u8>)> {
+    let user: UserId = path_id(&user)?;
+    let devices_hash: [u8; 32] = headers
+        .get(HEADER_DEVICES)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| unb64(v).ok())
+        .and_then(|v| v.try_into().ok())
+        .ok_or_else(bad)?;
     yo_wire::envelope::check(&body)?;
-    hub.limit(format!("deliver:ip:{}", hub.ip(peer, &headers)), limits.deliver_per_ip_minute, MINUTE)?;
+    hub.limit(format!("deliver:ip:{}", hub.ip(peer, &headers)), hub.config.limits.deliver_per_ip_minute, MINUTE)?;
     let (stored, outcome) = tokio::sync::oneshot::channel();
     hub.deliveries
-        .send(Delivery { mailbox, envelope: body, stored })
+        .send(Delivery { user, devices_hash, envelope: body, stored })
         .map_err(|_| refuse(StatusCode::SERVICE_UNAVAILABLE))?;
     let outcome = outcome.await.ok().and_then(Result::ok).ok_or_else(|| refuse(StatusCode::INTERNAL_SERVER_ERROR))?;
     match outcome {
-        Mailboxes::Live { push_platform, push_token } => {
-            hub.wake_waiters(&mailbox);
-            if !push_token.is_empty() {
-                let hub = hub.clone();
-                tokio::spawn(async move {
-                    match hub.pusher.wake(push_platform, &push_token).await {
-                        push::Outcome::TokenInvalid => {
-                            if let Err(error) = hub.db.clear_push(&mailbox, &push_token) {
-                                eprintln!("yo-hub: clear push: {error}");
-                            }
-                        }
-                        push::Outcome::Failed(error) => eprintln!("yo-hub: push: {error}"),
-                        push::Outcome::Sent | push::Outcome::Skipped => {}
-                    }
-                });
+        Delivered::Stored(devices) => {
+            for wake in devices {
+                hub.wake_waiters(&wake.device_id);
+                hub.push(wake);
             }
-            Ok(StatusCode::ACCEPTED)
+            Ok((StatusCode::ACCEPTED, Vec::new()))
         }
-        Mailboxes::Full => Err(refuse(StatusCode::TOO_MANY_REQUESTS)),
-        Mailboxes::Gone => Err(refuse(status_code(status::GONE))),
-        Mailboxes::Unknown => Err(refuse(StatusCode::NOT_FOUND)),
+        Delivered::Mismatch(roster) => Err(Refusal(
+            StatusCode::CONFLICT,
+            encode(&api::Devices { account_key: roster.account_key, device_keys: roster.device_keys }),
+        )),
+        Delivered::Full => Err(refuse(StatusCode::TOO_MANY_REQUESTS)),
+        Delivered::Unknown => Err(refuse(StatusCode::NOT_FOUND)),
     }
 }
 
@@ -501,7 +595,7 @@ async fn create_group(State(hub): Hubs, ConnectInfo(peer): Peer, headers: Header
     hub.limit(format!("groups:ip:{}", hub.ip(peer, &headers)), hub.config.limits.groups_per_ip_hour, HOUR)?;
     let request: api::GroupCreate = decode(&body)?;
     if request.epoch == 0 || request.epoch > u32::MAX as u64 {
-        return Err(refuse(StatusCode::BAD_REQUEST));
+        return Err(bad());
     }
     if hub.db.create_group(&request.group_id, request.epoch, &request.token_hash, now_ms())? {
         Ok(StatusCode::CREATED)
@@ -518,13 +612,34 @@ async fn commit(
     body: Bytes,
 ) -> Res<StatusCode> {
     hub.limit(format!("commit:ip:{}", hub.ip(peer, &headers)), hub.config.limits.commit_per_ip_minute, MINUTE)?;
-    let group: GroupId =
-        unb64(&group).ok().and_then(|g| g.try_into().ok()).ok_or_else(|| refuse(StatusCode::NOT_FOUND))?;
+    let group: GroupId = path_id(&group)?;
     let request: api::Commit = decode(&body)?;
-    match hub.db.commit(&group, request.epoch, &sha256(&request.token), &request.next_token_hash, now_ms())? {
+    yo_wire::envelope::check(request.envelope.as_slice())?;
+    let ordered = hub.db.commit(
+        &group,
+        request.epoch,
+        &sha256(&request.token),
+        &request.next_token_hash,
+        request.envelope.as_slice(),
+        now_ms(),
+    )?;
+    match ordered {
         Commit::Accepted => Ok(StatusCode::OK),
         Commit::Stale(epoch) => Err(Refusal(StatusCode::CONFLICT, encode(&api::Epoch { epoch }))),
         Commit::BadToken => Err(refuse(StatusCode::FORBIDDEN)),
         Commit::Unknown => Err(refuse(StatusCode::NOT_FOUND)),
     }
+}
+
+/// The commit accepted on an epoch, for a member that missed it (spec 4.3).
+async fn fetch_commit(
+    State(hub): Hubs,
+    ConnectInfo(peer): Peer,
+    headers: HeaderMap,
+    Path((group, epoch)): Path<(String, u64)>,
+) -> Res<(StatusCode, Vec<u8>)> {
+    hub.limit(format!("commit:ip:{}", hub.ip(peer, &headers)), hub.config.limits.commit_per_ip_minute, MINUTE)?;
+    let group: GroupId = path_id(&group)?;
+    let envelope = hub.db.commit_envelope(&group, epoch)?.ok_or_else(|| refuse(StatusCode::NOT_FOUND))?;
+    Ok(ok(envelope))
 }

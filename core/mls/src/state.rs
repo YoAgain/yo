@@ -9,57 +9,52 @@ use openmls_basic_credential::SignatureKeyPair;
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, VecDeque};
 use tls_codec::{TlsDeserializeBytes, TlsSerialize, TlsSize, VLBytes};
-use yo_wire::Mailbox;
+use yo_wire::DeviceId;
 use zeroize::Zeroize;
 
-const STATE_VERSION: u8 = 2;
+const STATE_VERSION: u8 = 3;
 const AAD: &[u8] = b"yo state v1";
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Contact {
-    /// The account key pinned on first contact.
+    /// The account key pinned on first contact, or the one confirmed after a change.
     pub account_key: [u8; 32],
-    /// The contact's certificate says its identity is backed by a passkey.
-    pub passkey: bool,
     pub name: Option<String>,
     pub verified: bool,
+    /// The key changed after the contact was verified: nothing is sent until the person confirms it (spec 3.4).
+    pub unconfirmed: bool,
     pub blocked: bool,
     /// How this device knows the contact: "+491701234567", "CHRIS". Empty for someone who wrote first.
-    #[serde(default)]
     pub handles: Vec<String>,
-    /// Its device was replaced (410): look it up again before the next send.
-    pub stale: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Chat {
     /// The other account's user id (hex).
     pub peer: String,
+    /// The epoch this device came into the group at: what was sent before is not for it.
+    pub joined_epoch: u64,
     pub last_update_ms: u64,
     pub sent_since_update: u32,
     /// Joined by Welcome and not updated since.
     pub needs_update: bool,
-    /// The peer's device was replaced: nothing is sent here any more, but what it sent before is still read,
-    /// until the hub would have dropped it anyway.
-    #[serde(default)]
-    pub closed_at: Option<u64>,
     /// A commit sent to the hub whose answer never came: it may have been accepted. Retried as it is until the hub
     /// answers; meanwhile the group holds it as its pending commit and nothing is sent in it.
-    #[serde(default)]
     pub inflight: Option<Inflight>,
     /// The hub does not order commits for this group (it never registered it, or the token is not ours): the chat
     /// works, without updates.
-    #[serde(default)]
     pub no_updates: bool,
 }
 
+/// A commit on its way to the hub, with what to deliver once it is accepted.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Inflight {
-    /// The request to `POST /v1/groups/{id}/commit`, as sent.
+    /// The request to `POST /v1/groups/{id}/commit`, as sent (it carries the commit's envelope).
     pub request: Vec<u8>,
-    /// The commit as an MLSMessage, for the other members once the hub has accepted it.
+    /// The commit's envelope, for every account in the group.
     pub commit: Vec<u8>,
-    pub mailboxes: Vec<Mailbox>,
+    /// A repair's Welcome: for the user whose devices it adds (hex user id, envelope).
+    pub welcome: Option<(String, Vec<u8>)>,
 }
 
 /// A KeyPackage this device made: its private keys stay in the MLS store until they are deleted here.
@@ -72,39 +67,74 @@ pub struct OwnKeyPackage {
     pub retired_at: Option<u64>,
 }
 
+/// An envelope for one user, waiting for the hub to take it.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Outgoing {
-    pub mailbox: Mailbox,
+    /// Its place in the order of everything this device sent: kept across repairs and restarts.
+    pub seq: u64,
+    /// The user it goes to (hex).
+    pub user: String,
+    /// The group it belongs to (hex): its device check is computed from the group when it is sent (spec 4.6).
+    pub group: String,
     pub envelope: Vec<u8>,
+    /// The user's devices it was encrypted for. When none of them is in the group any more (a repair replaced them),
+    /// a message is encrypted anew in its place and anything else is of no use (spec 4.6).
+    pub made_for: Vec<[u8; 32]>,
+    /// For an application message: its plaintext, to encrypt it anew.
+    pub plaintext: Option<Vec<u8>>,
+}
+
+/// An event as the state keeps it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum StoredEvent {
+    NewChat { user: String },
+    Message { user: String, sent_at_ms: u64, content: StoredContent, own: bool },
+    Profile { user: String, name: String },
+    IdentityChanged { user: String },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum StoredContent {
+    Yo,
+    Text(String),
+    Link(String),
+    Location { lat_e7: i32, lon_e7: i32 },
+    Profile(String),
+    Unknown(u16),
 }
 
 #[derive(Clone, Serialize, Deserialize)]
 pub struct State {
-    /// The own number, E.164 digits.
+    /// The own number, E.164 digits; empty for an account registered without one.
     pub phone: String,
     /// The own user id (hex), as the hub gave it.
     pub user_id: String,
-    #[serde(default)]
     pub username: Option<String>,
-    pub flags: u8,
     pub account_secret: [u8; 32],
     pub auth_secret: [u8; 32],
-    pub mailbox: Mailbox,
+    /// The hub's name for this device's inbox: never given to other users.
+    pub device_id: DeviceId,
     pub certificate: Vec<u8>,
     pub signer: SignatureKeyPair,
     pub name: Option<String>,
+    /// By hex user id.
     pub contacts: BTreeMap<String, Contact>,
     /// By hex group id.
     pub chats: BTreeMap<String, Chat>,
-    /// Envelopes not yet accepted by the hub, in order.
+    /// Envelopes not yet taken by the hub, in order.
     pub outbox: VecDeque<Outgoing>,
+    pub next_seq: u64,
+    /// What happened and the app has not been handed yet: saved with the state, so nothing received is lost to a
+    /// crash between the hub's ack and the app.
+    pub events: Vec<StoredEvent>,
+    /// Handed to the app by the last call: kept until the next call, which acknowledges them. After a crash they come
+    /// again: once in normal operation, at least once across a crash.
+    pub handed: Vec<StoredEvent>,
     /// Hashes of envelopes already processed, against redelivery.
     pub seen: VecDeque<[u8; 32]>,
-    /// Groups whose Welcome was discarded as superseded: what follows in them is discarded quietly too.
-    #[serde(default)]
+    /// Groups whose Welcome came from a key that is no user's current one: what follows in them is discarded.
     pub ignored: VecDeque<[u8; 32]>,
     pub key_packages_left: u32,
-    #[serde(default)]
     pub key_packages: Vec<OwnKeyPackage>,
     pub last_resort_at: u64,
 }

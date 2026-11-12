@@ -1,4 +1,5 @@
-//! The hub's KeyPackage check: never panic, and what it accepts names exactly the uploader it was checked for.
+//! The hub's KeyPackage check: never panic, and what it accepts is the leaf key vouched for by the account key it was
+//! checked against.
 #![no_main]
 use libfuzzer_sys::fuzz_target;
 use openmls::prelude::{BasicCredential, KeyPackageIn};
@@ -8,15 +9,15 @@ fuzz_target!(|data: &[u8]| {
     let crypto = openmls_rust_crypto::RustCrypto::default();
     // Check it against whoever it claims to be, so the check runs all the way.
     let claimed = KeyPackageIn::tls_deserialize_exact(data).ok().and_then(|kp| {
-        let credential = BasicCredential::try_from(kp.unverified_credential().credential).ok()?;
-        yo_wire::decode::<yo_wire::cert::DeviceCertificate>(credential.identity()).ok()
+        let credential = kp.unverified_credential();
+        let device_key: [u8; 32] = credential.signature_key.as_slice().try_into().ok()?;
+        let basic = BasicCredential::try_from(credential.credential).ok()?;
+        let certificate = yo_wire::cert::DeviceCertificate::parse(basic.identity()).ok()?;
+        Some((certificate.account_key, device_key))
     });
-    let (key, mailbox) = match &claimed {
-        Some(c) => (c.body.account_key, c.body.mailbox),
-        None => ([0; 32], [0; 16]),
-    };
-    if let Some(checked) = yo_hub::kp::check(&crypto, data, &key, &mailbox) {
-        let body = &checked.certificate.body;
-        assert!(body.account_key == key && body.mailbox == mailbox);
+    let (account_key, device_key) = claimed.unwrap_or(([0; 32], [0; 32]));
+    if yo_hub::kp::check(&crypto, data, &account_key, &device_key).is_some() {
+        let key_package = KeyPackageIn::tls_deserialize_exact(data).unwrap();
+        assert_eq!(key_package.unverified_credential().signature_key.as_slice(), device_key);
     }
 });

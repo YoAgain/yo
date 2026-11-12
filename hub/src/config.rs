@@ -14,11 +14,13 @@ pub struct Limits {
     /// Signed requests of one device, all routes.
     pub signed_per_device_minute: u32,
     pub deliver_per_ip_minute: u32,
-    /// Envelopes a mailbox holds before deliveries to it are refused. No per-mailbox rate: a stranger who knows the
-    /// mailbox could spend it and shut out everyone else.
-    pub max_pending_per_mailbox: u32,
+    /// Envelopes a device holds before deliveries to its user are refused. No rate per recipient: a stranger who
+    /// knows a user id could spend it and shut out everyone else.
+    pub max_pending_per_device: u32,
     pub groups_per_ip_hour: u32,
     pub commit_per_ip_minute: u32,
+    /// Registrations without a number, where they are switched on.
+    pub register_per_ip_hour: u32,
     pub envelope_ttl_days: u64,
 }
 
@@ -32,9 +34,10 @@ impl Default for Limits {
             identity_lookup_per_device_day: 1000,
             signed_per_device_minute: 1200,
             deliver_per_ip_minute: 1200,
-            max_pending_per_mailbox: 5000,
+            max_pending_per_device: 5000,
             groups_per_ip_hour: 60,
             commit_per_ip_minute: 600,
+            register_per_ip_hour: 10,
             envelope_ttl_days: 30,
         }
     }
@@ -51,9 +54,10 @@ impl Limits {
             identity_lookup_per_device_day: u32::MAX,
             signed_per_device_minute: u32::MAX,
             deliver_per_ip_minute: u32::MAX,
-            max_pending_per_mailbox: 5000,
+            max_pending_per_device: 5000,
             groups_per_ip_hour: u32::MAX,
             commit_per_ip_minute: u32::MAX,
+            register_per_ip_hour: u32::MAX,
             envelope_ttl_days: 30,
         }
     }
@@ -91,6 +95,8 @@ pub struct Config {
     pub phone_secret: [u8; 32],
     /// Take the client's address from `CF-Connecting-IP`: only behind Cloudflare.
     pub trust_cloudflare: bool,
+    /// `POST /v1/register`: accounts without a number (spec 6.4). Off unless switched on.
+    pub open_registration: bool,
     pub limits: Limits,
     pub sms: SmsConfig,
     pub apns: Option<ApnsConfig>,
@@ -98,12 +104,14 @@ pub struct Config {
 }
 
 impl Config {
-    /// A hub for tests: in memory, dev SMS code "000000", no rate limits, no push services.
+    /// A hub for tests: in memory, dev SMS code "000000", registration without a number on, no rate limits, no push
+    /// services.
     pub fn for_tests() -> Self {
         Config {
             db_path: ":memory:".into(),
             phone_secret: [7; 32],
             trust_cloudflare: false,
+            open_registration: true,
             limits: Limits::unlimited(),
             sms: SmsConfig::Dev { code: "000000".into() },
             apns: None,

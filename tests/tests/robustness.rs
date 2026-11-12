@@ -3,7 +3,7 @@
 use std::sync::{Arc, Mutex};
 use yo_core::{Client, Content, Event, Store};
 use yo_hub::config::Config;
-use yo_tests::{phone, random_u64, register, user_of, Fault, Http, TestHub};
+use yo_tests::{deliver_raw, phone, random_u64, register, user_of, Fault, Http, TestHub};
 use yo_wire::api;
 
 fn yos(events: &[Event]) -> usize {
@@ -89,10 +89,17 @@ fn a_crash_after_processing_loses_nothing_and_repeats_nothing() {
     hb.fault("/v1/inbox/ack", Fault::LoseAnswer);
     let first = b.sync(0).unwrap();
     assert_eq!(yos(&first), 3);
+    // Killed right after the call: the app may not have the events yet, so they come once more after the restart.
+    let blob = saved.0.lock().unwrap().clone();
+    let mut again = Client::restore(Http::new(hub.url()), &blob, &key).unwrap();
+    assert_eq!(yos(&again.sync(0).unwrap()), 3, "not acknowledged: at least once");
+    // The app acknowledged them before it was killed: the hub delivers the envelopes again (the ack never came),
+    // they are recognised, and nothing is shown twice.
+    b.acknowledge_events();
+    drop(again);
     drop(b);
     let blob = saved.0.lock().unwrap().clone();
     let mut b = Client::restore(Http::new(hub.url()), &blob, &key).unwrap();
-    // The hub delivers them again (the ack never came); they are recognised and not shown twice.
     assert_eq!(yos(&b.sync(0).unwrap()), 0);
     a.send_yo(&pb).unwrap();
     assert_eq!(yos(&b.sync(0).unwrap()), 1);
@@ -122,15 +129,12 @@ fn a_passing_refusal_does_not_drop_a_welcome() {
 #[test]
 fn a_full_mailbox_refuses_until_it_is_read_and_strangers_cannot_rate_limit_it() {
     let mut config = Config::for_tests();
-    config.limits.max_pending_per_mailbox = 5;
+    config.limits.max_pending_per_device = 5;
     let hub = TestHub::start_with(config, "127.0.0.1:0");
     let (mut a, mut b, _, _, pa, pb) = chat(&hub);
-    let client = reqwest::blocking::Client::new();
-    let url = format!("{}{}", hub.url(), api::deliver_path(&b.mailbox()));
     let junk = yo_wire::envelope::seal(&[7; 100]).unwrap();
-    // A stranger fills B's mailbox with well-formed junk...
-    let statuses: Vec<u16> =
-        (0..6).map(|_| client.post(&url).body(junk.clone()).send().unwrap().status().as_u16()).collect();
+    // A stranger fills B's inbox with well-formed junk...
+    let statuses: Vec<u16> = (0..6).map(|_| deliver_raw(&hub.url(), b.user_id(), junk.clone())).collect();
     assert_eq!(statuses, vec![202, 202, 202, 202, 202, 429]);
     // ... which holds A's Yo back only until B reads its mailbox.
     a.send_yo(&pb).unwrap();
@@ -161,10 +165,20 @@ fn the_hub_repeats_an_accepted_commit_and_nothing_else() {
             .status()
             .as_u16()
     };
-    let commit = api::Commit { epoch: 1, token, next_token_hash: [9; 32] };
+    let envelope = yo_wire::envelope::seal(b"the commit").unwrap();
+    let commit = api::Commit { epoch: 1, token, next_token_hash: [9; 32], envelope: envelope.clone().into() };
     assert_eq!(post(&commit), 200);
     assert_eq!(post(&commit), 200, "the same commit again");
-    assert_eq!(post(&api::Commit { next_token_hash: [8; 32], ..commit }), 409, "another commit on the old epoch");
+    assert_eq!(
+        post(&api::Commit { next_token_hash: [8; 32], ..commit.clone() }),
+        409,
+        "another commit on the old epoch"
+    );
+    // The hub kept it, for whoever missed it.
+    let kept = client.get(format!("{}{}", hub.url(), api::commit_fetch_path(&group, 1))).send().unwrap();
+    assert_eq!(kept.bytes().unwrap().to_vec(), envelope);
+    let missing = client.get(format!("{}{}", hub.url(), api::commit_fetch_path(&group, 2))).send().unwrap();
+    assert_eq!(missing.status().as_u16(), 404);
 }
 
 #[test]
@@ -186,4 +200,50 @@ fn private_keys_of_dead_key_packages_are_deleted() {
     a.set_clock(Arc::new(move || at));
     a.maintenance().unwrap();
     assert!(a.own_key_packages() <= 2, "{}", a.own_key_packages());
+}
+
+#[test]
+fn a_repair_whose_answer_was_lost_is_settled_by_repeating_it() {
+    let hub = TestHub::start();
+    let (mut a, b, ha, _, pa, pb) = chat(&hub);
+    let chat_id = a.chats()[0].1;
+    // B moves to a new phone; A's repair commit is accepted, its answer lost.
+    let mut b2 = register(Http::new(hub.url()), &pb, None);
+    drop(b);
+    ha.fault("/commit", Fault::LoseAnswer);
+    assert!(a.send_yo(&pb).is_ok() || a.pending() > 0);
+    // The next call repeats the commit, the hub confirms it, the held Yo goes to the new phone.
+    let mut events = a.sync(0).unwrap();
+    events.extend(a.send_yo(&pb).unwrap());
+    let at_b2 = b2.sync(0).unwrap();
+    assert_eq!(yos(&at_b2), 2, "{at_b2:?}");
+    assert_eq!(b2.chats()[0].1, chat_id);
+    b2.send_yo(&pa).unwrap();
+    assert_eq!(yos(&a.sync(0).unwrap()), 1);
+    assert_eq!(a.dropped() + b2.dropped(), 0, "{:?} {:?}", a.drop_reasons(), b2.drop_reasons());
+}
+
+#[test]
+fn key_packages_whose_upload_answer_was_lost_still_open_chats() {
+    let hub = TestHub::start();
+    let base = random_u64() % 1_000_000_000;
+    let target = phone(base);
+    let hc = Http::new(hub.url());
+    let mut c = register(hc.clone(), &target, None);
+    // Senders use up C's KeyPackages.
+    let senders = yo_wire::limits::KEY_PACKAGE_TARGET as u64 - 10;
+    for i in 1..=senders {
+        register(Http::new(hub.url()), &phone(base + i), None).send_yo(&target).unwrap();
+    }
+    // C refills; the hub stores the upload, the answer is lost.
+    hc.fault("/v1/keypackages", Fault::LoseAnswer);
+    let events = c.sync(0).unwrap();
+    assert_eq!(events.iter().filter(|e| matches!(e, Event::NewChat { .. })).count() as u64, senders);
+    // Twenty more senders take the old and the uploaded packages: C keeps the private keys of all of them.
+    for i in senders + 1..=senders + 20 {
+        register(Http::new(hub.url()), &phone(base + i), None).send_yo(&target).unwrap();
+    }
+    let events = c.sync(0).unwrap();
+    assert_eq!(events.iter().filter(|e| matches!(e, Event::NewChat { .. })).count(), 20);
+    assert_eq!(c.dropped(), 0, "{:?}", c.drop_reasons());
 }

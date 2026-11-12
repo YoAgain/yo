@@ -1,63 +1,48 @@
-//! The device certificate (spec 3): the account key vouches for a device. It is the `identity` of the device's
-//! MLS `BasicCredential`, so every member of every group carries it. It names no person: no phone number, no
-//! username, no user id. Which account key belongs to which user is what the hub attests (spec 3).
+//! The device certificate (spec 3.1): the account key vouches for a device, and that is all it says.
+//!
+//! It is the `identity` of the device's MLS `BasicCredential`. The device key is not repeated in it: it is the leaf's
+//! signature key, and the signature covers it. It names no person; who an account key is, the hub attests.
 
-use crate::{Error, Mailbox, KEY_LEN, SIGNATURE_LEN, VERSION};
+use crate::{Error, KEY_LEN, SIGNATURE_LEN};
 use ed25519_dalek::{Signature, VerifyingKey};
 use tls_codec::{TlsDeserializeBytes, TlsSerialize, TlsSize};
 
-/// The label in front of every signed certificate body.
+/// The label in front of the device key the account key signs. A later version has another label.
 pub const LABEL: &[u8] = b"yo device v1";
-/// Flag bit 0: the account key is backed up by a passkey, so the identity survives a device change.
-pub const FLAG_PASSKEY: u8 = 1;
-const KNOWN_FLAGS: u8 = FLAG_PASSKEY;
-
-/// What the account key signs.
-#[derive(Debug, Clone, PartialEq, Eq, TlsSerialize, TlsDeserializeBytes, TlsSize)]
-pub struct CertificateBody {
-    pub version: u8,
-    pub account_key: [u8; KEY_LEN],
-    /// The device's MLS signature key: the leaf's `signature_key`.
-    pub device_key: [u8; KEY_LEN],
-    pub mailbox: Mailbox,
-    pub flags: u8,
-}
+/// The encoded size.
+pub const LEN: usize = KEY_LEN + SIGNATURE_LEN;
 
 #[derive(Debug, Clone, PartialEq, Eq, TlsSerialize, TlsDeserializeBytes, TlsSize)]
 pub struct DeviceCertificate {
-    pub body: CertificateBody,
+    pub account_key: [u8; KEY_LEN],
+    /// Ed25519 by `account_key` over `LABEL || device_key`.
     pub signature: [u8; SIGNATURE_LEN],
 }
 
-impl CertificateBody {
-    /// The bytes the account key signs: the label, then the body.
-    pub fn to_be_signed(&self) -> Vec<u8> {
-        let mut out = LABEL.to_vec();
-        out.extend_from_slice(&crate::encode(self));
-        out
-    }
-
-    pub fn has_passkey(&self) -> bool {
-        self.flags & FLAG_PASSKEY != 0
-    }
+/// What the account key signs for a device.
+pub fn to_be_signed(device_key: &[u8]) -> Vec<u8> {
+    let mut out = LABEL.to_vec();
+    out.extend_from_slice(device_key);
+    out
 }
 
 impl DeviceCertificate {
-    /// Parses and checks a certificate: strict encoding, version, phone, flags, and the account key's signature.
-    /// Whether `device_key` is the leaf's key is for the caller to check: it knows the leaf.
-    pub fn verify(bytes: &[u8]) -> Result<Self, Error> {
-        let cert: Self = crate::decode(bytes)?;
-        let body = &cert.body;
-        if body.version != VERSION {
-            return Err(Error::Unsupported);
+    /// Parses a certificate and checks that its account key vouches for `device_key`: the signature key of the leaf
+    /// that carries it.
+    pub fn verify(bytes: &[u8], device_key: &[u8]) -> Result<Self, Error> {
+        let certificate = Self::parse(bytes)?;
+        if device_key.len() != KEY_LEN {
+            return Err(Error::Signature);
         }
-        if body.flags & !KNOWN_FLAGS != 0 {
-            return Err(Error::Format);
-        }
-        let key = VerifyingKey::from_bytes(&body.account_key).map_err(|_| Error::Signature)?;
-        key.verify_strict(&body.to_be_signed(), &Signature::from_bytes(&cert.signature))
+        let key = VerifyingKey::from_bytes(&certificate.account_key).map_err(|_| Error::Signature)?;
+        key.verify_strict(&to_be_signed(device_key), &Signature::from_bytes(&certificate.signature))
             .map_err(|_| Error::Signature)?;
-        Ok(cert)
+        Ok(certificate)
+    }
+
+    /// Parses without checking the signature: for a member whose certificate was checked when it joined.
+    pub fn parse(bytes: &[u8]) -> Result<Self, Error> {
+        crate::decode(bytes)
     }
 
     pub fn to_bytes(&self) -> Vec<u8> {
@@ -76,42 +61,34 @@ mod tests {
         SigningKey::from_bytes(&seed)
     }
 
-    fn certificate(account: &SigningKey) -> DeviceCertificate {
-        let body = CertificateBody {
-            version: VERSION,
+    fn certificate(account: &SigningKey, device_key: &[u8]) -> DeviceCertificate {
+        DeviceCertificate {
             account_key: account.verifying_key().to_bytes(),
-            device_key: key().verifying_key().to_bytes(),
-            mailbox: [7; 16],
-            flags: 0,
-        };
-        let signature = account.sign(&body.to_be_signed()).to_bytes();
-        DeviceCertificate { body, signature }
+            signature: account.sign(&to_be_signed(device_key)).to_bytes(),
+        }
     }
 
     #[test]
-    fn verifies_and_round_trips() {
-        let cert = certificate(&key());
-        assert_eq!(DeviceCertificate::verify(&cert.to_bytes()).unwrap(), cert);
+    fn verifies_for_its_device_only() {
+        let (account, device) = (key(), key().verifying_key().to_bytes());
+        let cert = certificate(&account, &device);
+        assert_eq!(cert.to_bytes().len(), LEN);
+        assert_eq!(DeviceCertificate::verify(&cert.to_bytes(), &device).unwrap(), cert);
+        let other = key().verifying_key().to_bytes();
+        assert_eq!(DeviceCertificate::verify(&cert.to_bytes(), &other), Err(Error::Signature));
     }
 
     #[test]
-    fn refuses_any_changed_field() {
-        let cert = certificate(&key());
-        let bytes = cert.to_bytes();
+    fn refuses_any_changed_byte() {
+        let device = key().verifying_key().to_bytes();
+        let bytes = certificate(&key(), &device).to_bytes();
         for i in 0..bytes.len() {
             let mut changed = bytes.clone();
             changed[i] ^= 1;
-            assert!(DeviceCertificate::verify(&changed).is_err(), "byte {i}");
+            assert!(DeviceCertificate::verify(&changed, &device).is_err(), "byte {i}");
         }
         let mut longer = bytes.clone();
         longer.push(0);
-        assert!(DeviceCertificate::verify(&longer).is_err());
-    }
-
-    #[test]
-    fn refuses_another_account_key() {
-        let mut cert = certificate(&key());
-        cert.body.account_key = key().verifying_key().to_bytes();
-        assert_eq!(DeviceCertificate::verify(&cert.to_bytes()), Err(Error::Signature));
+        assert!(DeviceCertificate::verify(&longer, &device).is_err());
     }
 }

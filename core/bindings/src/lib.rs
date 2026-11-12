@@ -18,6 +18,9 @@ pub enum YoError {
     NotOnYo,
     #[error("blocked")]
     Blocked,
+    /// A verified contact's key changed: `confirm_identity` first.
+    #[error("identity not confirmed")]
+    Unconfirmed,
     #[error("this device was replaced")]
     Replaced,
     #[error("protocol: {message}")]
@@ -35,6 +38,7 @@ impl From<yo_core::Error> for YoError {
             E::Phone => YoError::Phone,
             E::NotOnYo => YoError::NotOnYo,
             E::Blocked => YoError::Blocked,
+            E::Unconfirmed => YoError::Unconfirmed,
             E::Replaced => YoError::Replaced,
             E::State => YoError::State,
             other => YoError::Protocol { message: other.to_string() },
@@ -148,7 +152,8 @@ pub struct YoContact {
     pub handles: Vec<String>,
     pub name: Option<String>,
     pub verified: bool,
-    pub can_verify: bool,
+    /// The key changed after verification: confirm before sending.
+    pub unconfirmed: bool,
     pub blocked: bool,
 }
 
@@ -199,6 +204,24 @@ impl YoClient {
         Ok(Arc::new(YoClient { client: Mutex::new(client) }))
     }
 
+    /// Registers a new account with only a username: where the hub allows it (test accounts, bots).
+    #[uniffi::constructor]
+    pub fn register_username(
+        transport: Arc<dyn HttpTransport>,
+        store: Arc<dyn StateStore>,
+        state_key: Vec<u8>,
+        username: String,
+        name: Option<String>,
+        push_platform: u8,
+        push_token: String,
+    ) -> Result<Arc<Self>, YoError> {
+        let key = key_of(state_key)?;
+        let push = yo_core::Push { platform: push_platform, token: push_token.into_bytes().into() };
+        let mut client = Client::register_username(Arc::new(Http(transport)), &username, name, push)?;
+        client.persist_to(Arc::new(Store(store)), key);
+        Ok(Arc::new(YoClient { client: Mutex::new(client) }))
+    }
+
     /// Opens the state the store saved last.
     #[uniffi::constructor]
     pub fn restore(
@@ -220,6 +243,11 @@ impl YoClient {
     /// To "+49 170 …", "chris", or a user id from an event.
     pub fn send_yo(&self, to: String) -> Result<Vec<YoEvent>, YoError> {
         events(self.with(|c| c.send_yo(&to)))
+    }
+
+    /// The events the last call returned are shown or stored: they will not come again after a crash.
+    pub fn acknowledge_events(&self) {
+        self.with(|c| c.acknowledge_events())
     }
 
     pub fn user_id(&self) -> String {
@@ -258,7 +286,7 @@ impl YoClient {
                 handles: c.handles,
                 name: c.name,
                 verified: c.verified,
-                can_verify: c.can_verify,
+                unconfirmed: c.unconfirmed,
                 blocked: c.blocked,
             })
             .collect()
@@ -270,6 +298,11 @@ impl YoClient {
 
     pub fn set_verified(&self, who: String, verified: bool) -> Result<(), YoError> {
         Ok(self.with(|c| c.set_verified(&who, verified))?)
+    }
+
+    /// Accepts a verified contact's new key, so sending goes on.
+    pub fn confirm_identity(&self, who: String) -> Result<(), YoError> {
+        Ok(self.with(|c| c.confirm_identity(&who))?)
     }
 
     pub fn set_blocked(&self, who: String, blocked: bool) -> Result<(), YoError> {

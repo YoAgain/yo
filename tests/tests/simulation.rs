@@ -117,7 +117,7 @@ fn run(seed: u64, clients: usize, steps: usize) {
     // Both sides of every chat agree on the epoch.
     let mut epochs: BTreeMap<[u8; 32], Vec<u64>> = BTreeMap::new();
     for d in &devices {
-        for (_, group, epoch) in d.client.chats() {
+        for (_, group, epoch, _) in d.client.chats() {
             epochs.entry(group).or_default().push(epoch);
         }
     }

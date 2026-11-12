@@ -8,6 +8,8 @@ description = "The Yo client core: identities, MLS groups, delivery. One impleme
 [features]
 # Exposes the receive path to the fuzz targets in fuzz/.
 fuzz = []
+# Test hooks: a device under an existing account key (as a passkey's backup will make one).
+testing = []
 
 [dependencies]
 yo-wire = { path = "../wire" }

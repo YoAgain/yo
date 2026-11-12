@@ -186,3 +186,38 @@ impl Rng {
         self.next_u64() % n
     }
 }
+
+/// A user's id from its hex form.
+pub fn user_id(user: &str) -> yo_wire::UserId {
+    (0..16).map(|i| u8::from_str_radix(&user[2 * i..2 * i + 2], 16).unwrap()).collect::<Vec<_>>().try_into().unwrap()
+}
+
+/// The device check for a user, as any stranger can learn it: from the hub's 409 to a delivery with a wrong one.
+/// `None` for a user the hub does not know.
+pub fn devices_hash(url: &str, user: &str) -> Option<[u8; 32]> {
+    let probe = reqwest::blocking::Client::new()
+        .post(format!("{url}{}", yo_wire::api::deliver_path(&user_id(user))))
+        .header(yo_wire::api::HEADER_DEVICES, yo_wire::b64(&[0; 32]))
+        .body(yo_wire::envelope::seal(b"probe").unwrap())
+        .send()
+        .unwrap();
+    if probe.status().as_u16() != 409 {
+        return None;
+    }
+    let devices: yo_wire::api::Devices = yo_wire::decode(&probe.bytes().unwrap()).unwrap();
+    Some(yo_wire::devices::hash(&devices.account_key, &devices.device_keys))
+}
+
+/// Delivers raw bytes to a user as any stranger could (sealed sender), with the device check learned from the hub.
+/// Returns the status.
+pub fn deliver_raw(url: &str, user: &str, body: Vec<u8>) -> u16 {
+    let Some(hash) = devices_hash(url, user) else { return 404 };
+    reqwest::blocking::Client::new()
+        .post(format!("{url}{}", yo_wire::api::deliver_path(&user_id(user))))
+        .header(yo_wire::api::HEADER_DEVICES, yo_wire::b64(&hash))
+        .body(body)
+        .send()
+        .unwrap()
+        .status()
+        .as_u16()
+}

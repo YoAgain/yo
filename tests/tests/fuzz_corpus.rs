@@ -43,7 +43,7 @@ fn write_fuzz_corpus() {
     b.persist_to(saved.clone(), KEY);
     write("seeds", "core_state.bin", &saved.0.lock().unwrap());
     // What B's check of A's identity answers.
-    let account_key = ha
+    let (account_key, device_key) = ha
         .sent
         .lock()
         .unwrap()
@@ -51,15 +51,18 @@ fn write_fuzz_corpus() {
         .find(|(_, path, _)| path == api::VERIFY_CHECK)
         .map(|(_, _, body)| {
             let check: api::VerifyCheck = yo_wire::decode(body).unwrap();
-            yo_wire::cert::DeviceCertificate::verify(check.certificate.as_slice()).unwrap().body.account_key
+            let device = check.device;
+            let certificate =
+                yo_wire::cert::DeviceCertificate::verify(device.certificate.as_slice(), &device.device_key).unwrap();
+            (certificate.account_key, device.device_key)
         })
         .unwrap();
-    let user_id: [u8; 16] = (0..16)
-        .map(|i| u8::from_str_radix(&a.user_id()[2 * i..2 * i + 2], 16).unwrap())
-        .collect::<Vec<_>>()
-        .try_into()
-        .unwrap();
-    let lookup = api::LookupResult { user_id, account_key, key_packages: vec![] };
+    let lookup = api::LookupResult {
+        user_id: yo_tests::user_id(a.user_id()),
+        account_key,
+        device_keys: vec![device_key],
+        key_packages: vec![],
+    };
     write("seeds", "core_lookup.bin", &yo_wire::encode(&lookup));
     // A chat: Welcome, profile, Yo; an update; more Yos.
     a.send_yo(&pb).unwrap();
@@ -68,7 +71,7 @@ fn write_fuzz_corpus() {
     a.maintenance().unwrap();
     a.send_yo(&pb).unwrap();
     a.send(&pb, yo_core::Content::Text("hello".into())).unwrap();
-    let to_b = api::deliver_path(&b.mailbox());
+    let to_b = api::deliver_path(&yo_tests::user_id(b.user_id()));
     let envelopes: Vec<Vec<u8>> = ha
         .sent
         .lock()
@@ -92,11 +95,14 @@ fn write_fuzz_corpus() {
     for (i, (_, path, body)) in ha.sent.lock().unwrap().iter().enumerate().filter(|(_, (_, _, b))| !b.is_empty()) {
         if path == api::VERIFY_CHECK {
             let check: api::VerifyCheck = yo_wire::decode(body).unwrap();
-            write("corpus/wire_cert", "certificate", check.certificate.as_slice());
-            for (k, key_package) in check.key_packages.iter().take(3).enumerate() {
+            let device = check.device;
+            let mut cert_input = device.device_key.to_vec();
+            cert_input.extend_from_slice(device.certificate.as_slice());
+            write("corpus/wire_cert", "certificate", &cert_input);
+            for (k, key_package) in device.key_packages.iter().take(3).enumerate() {
                 write("corpus/hub_key_package", &format!("kp-{k}"), key_package.as_slice());
             }
-            write("corpus/hub_key_package", "last-resort", check.last_resort.as_slice());
+            write("corpus/hub_key_package", "last-resort", device.last_resort.as_slice());
         }
         write("corpus/wire_api", &format!("request-{i}"), body);
         write("corpus/hub_routes", &format!("request-{i}"), &route_input(path, body));

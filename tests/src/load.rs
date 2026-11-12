@@ -163,7 +163,14 @@ fn main() {
     println!("end to end: {sent} Yos sent, {received} received, {dropped} dropped, {:.0} Yos/s", sent as f64 / e2e_s);
 
     // ---- phase 2: the hub alone ----
-    let mailboxes: Vec<_> = clients.iter().map(|(_, c)| c.mailbox()).collect();
+    // Each user with its device check, learned once as any sender would (spec 4.6).
+    let targets: Vec<(String, String)> = clients
+        .iter()
+        .map(|(_, c)| {
+            let hash = yo_tests::devices_hash(&url, c.user_id()).expect("a registered user");
+            (yo_wire::api::deliver_path(&yo_tests::user_id(c.user_id())), yo_wire::b64(&hash))
+        })
+        .collect();
     let envelope = yo_wire::envelope::seal(&[0x5A; 300]).unwrap();
     let runtime = tokio::runtime::Builder::new_multi_thread().enable_all().build().unwrap();
     let raw = runtime.block_on(async {
@@ -171,17 +178,20 @@ fn main() {
         let deadline = Instant::now() + Duration::from_secs(args.seconds);
         let tasks: Vec<_> = (0..args.connections)
             .map(|c| {
-                let (client, url, envelope, mailboxes) =
-                    (client.clone(), url.clone(), envelope.clone(), mailboxes.clone());
+                let (client, url, envelope, targets) = (client.clone(), url.clone(), envelope.clone(), targets.clone());
                 tokio::spawn(async move {
                     let mut latencies = Vec::new();
                     let mut errors = 0u64;
                     let mut k = c;
                     while Instant::now() < deadline {
-                        let target = format!("{url}{}", yo_wire::api::deliver_path(&mailboxes[k % mailboxes.len()]));
+                        let (path, hash) = &targets[k % targets.len()];
                         k += 1;
                         let t = Instant::now();
-                        match client.post(target).body(envelope.clone()).send().await {
+                        let request = client
+                            .post(format!("{url}{path}"))
+                            .header(yo_wire::api::HEADER_DEVICES, hash.as_str())
+                            .body(envelope.clone());
+                        match request.send().await {
                             Ok(r) if r.status().as_u16() == 202 => latencies.push(t.elapsed().as_micros() as u64),
                             _ => errors += 1,
                         }
