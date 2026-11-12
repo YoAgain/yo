@@ -1,0 +1,15 @@
+version: 1
+# xtool prefixes it with XTL-<team> for its development builds.
+bundleID: co.justyo.ios
+product: YoApp
+# Display name, the font (UIAppFonts), export compliance.
+infoPath: Info.plist
+# The original icon of YoApp/yo-ios was a plain purple square; this one follows the brand guide's logo instead:
+# a white "Yo" in Montserrat Bold on Amethyst #9B59B6 (yo-lore/press-kit), 1024 px and opaque, centred by its
+# ink (not the font's metrics), its box a hair above the middle (3 px), where it looks centred.
+iconPath: AppIcon.png
+# At the bundle's root: the font (Info.plist UIAppFonts) and the original Yo sound (a notification sound must be
+# in the main bundle; .caf, from yo-ios's yo.mp3).
+resources:
+  - Resources/Montserrat-Bold.ttf
+  - Resources/yo.caf

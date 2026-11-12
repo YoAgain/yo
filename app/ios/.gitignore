@@ -1,0 +1,13 @@
+# Build output of SwiftPM and xtool, wherever under app/ios/ a build is started.
+.build/
+.swiftpm/
+.bsp/
+xtool/
+*.xcodeproj
+xcuserdata/
+DerivedData/
+*.ipa
+.DS_Store
+build/
+# Settings of one machine (dev/push.sh): phone address, tool paths.
+dev/local.env

@@ -34,6 +34,7 @@ core/mls        client core (Rust, one for iOS and Android)
 core/bindings   Swift and Kotlin via UniFFI
 hub/            mailboxes, KeyPackages, commit order, push, SMS
 tests/          scenarios, simulation, robustness, load
+app/ios/        the iPhone app (SwiftUI; a mockup for now, see app/ios/README.md)
 ```
 
 ## Run
