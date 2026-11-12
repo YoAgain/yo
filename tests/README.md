@@ -44,6 +44,9 @@ YO_ENV="YO_DATE=$(date +%F) YO_COMMIT=$(git rev-parse --short HEAD)" \
   dev/cargo run --release -p yo-tests --bin yo-load -- --clients 200 --seconds 15 --threads 16 --connections 64
 ```
 
+`YO_HUB_CPU=n` (in `YO_ENV`) pins every thread of the hub to CPU n and the load to the other CPUs: the hub's
+throughput on one core. Its one SQLite writer with group commit is what bounds it, not the cores.
+
 Phase 1 is the whole system on one machine (clients with MLS, the hub, fetch, decrypt); phase 2 the hub alone
 (deliveries over many connections). Every run writes `tests/results/<date>-<clients>c.json`; commit the ones worth
 keeping, so a regression shows against them.
@@ -52,3 +55,4 @@ keeping, so a regression shows against them.
 |---|---|---|---|---|
 | 2026-11-11, 16 cores, one transaction per delivery | 5,793/s | 6.4 / 34.0 ms | 2,047 Yos/s | 0 |
 | 2026-11-11, 16 cores, group commit | 16,777/s | 1.7 / 27.7 ms | 2,089 Yos/s | 0 |
+| 2026-11-12, hub on one core (`YO_HUB_CPU=0`), load on 15 | 14,718/s | 3.1 / 19.9 ms | 1,275 Yos/s | 0 |

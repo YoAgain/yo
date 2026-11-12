@@ -3749,6 +3749,7 @@ name = "yo-tests"
 version = "0.1.0"
 dependencies = [
  "getrandom 0.2.17",
+ "libc",
  "reqwest",
  "serde_json",
  "tokio",

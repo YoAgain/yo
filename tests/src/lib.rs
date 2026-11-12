@@ -5,6 +5,18 @@ use yo_core::{Client, Push, Response, Transport};
 use yo_hub::config::Config;
 use yo_hub::{push, Hub};
 
+/// Pins the calling thread to these CPUs (Linux).
+fn set_affinity(cpus: &[usize]) {
+    // SAFETY: a zeroed cpu_set_t is a valid empty set; CPU_SET writes inside it; sched_setaffinity reads it.
+    unsafe {
+        let mut set: libc::cpu_set_t = std::mem::zeroed();
+        for &cpu in cpus {
+            libc::CPU_SET(cpu, &mut set);
+        }
+        libc::sched_setaffinity(0, std::mem::size_of::<libc::cpu_set_t>(), &set);
+    }
+}
+
 pub struct TestHub {
     pub hub: Arc<Hub>,
     pub push: Arc<push::Recorder>,
@@ -18,8 +30,18 @@ impl TestHub {
         Self::start_with(Config::for_tests(), "127.0.0.1:0")
     }
 
+    /// `YO_HUB_CPU=n` (a measurement): every thread of the hub (its runtime and its database writer) runs on CPU n
+    /// alone, and the calling thread (the load) on all the others, so the hub's throughput on one core shows.
     pub fn start_with(config: Config, addr: &str) -> Self {
-        let runtime = tokio::runtime::Builder::new_multi_thread().worker_threads(4).enable_all().build().unwrap();
+        let pinned = std::env::var("YO_HUB_CPU").ok().and_then(|cpu| cpu.parse::<usize>().ok());
+        if let Some(cpu) = pinned {
+            set_affinity(&[cpu]); // threads made from here on inherit it
+        }
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(if pinned.is_some() { 1 } else { 4 })
+            .enable_all()
+            .build()
+            .unwrap();
         let push = Arc::new(push::Recorder::default());
         let hub = Hub::new(config, push.clone()).unwrap();
         let listener = runtime.block_on(tokio::net::TcpListener::bind(addr)).unwrap();
@@ -34,6 +56,11 @@ impl TestHub {
                 .await
                 .unwrap();
         });
+        if let Some(cpu) = pinned {
+            let all = std::thread::available_parallelism().map_or(1, |n| n.get());
+            let others: Vec<usize> = (0..all).filter(|c| *c != cpu).collect();
+            set_affinity(&others);
+        }
         TestHub { hub, push, addr, runtime: Some(runtime), stop: Some(stop) }
     }
 
