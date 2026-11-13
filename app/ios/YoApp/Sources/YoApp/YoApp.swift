@@ -48,6 +48,7 @@ extension YoApp {
   /// `dev/push.sh`), so a new version announces itself. Known by the app's executable changing.
   @MainActor func yoUpdate() async {
     let name = "Yo Update"
+    guard accounts.account != nil else { return }  // the welcome says Yo itself; the update waits for the list
     guard let url = Bundle.main.executableURL,
       let built = (try? FileManager.default.attributesOfItem(atPath: url.path))?[.modificationDate] as? Date
     else { return }

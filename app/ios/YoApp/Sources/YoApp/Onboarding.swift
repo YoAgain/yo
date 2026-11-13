@@ -10,6 +10,7 @@ import SwiftUI
 
 struct Onboarding: View {
   @Environment(AccountStore.self) private var accounts
+  @Environment(Inbox.self) private var inbox
 
   private enum Step: Equatable {
     case welcome, name, code([String]), logIn, logInWithWords
@@ -67,6 +68,8 @@ struct Onboarding: View {
     .task {
       guard !looked else { return }
       looked = true
+      try? await Task.sleep(for: .seconds(0.4))  // the welcome on screen first
+      inbox.playYo()  // the app says what it is: "Yo"
       try? await accounts.restoreWithPasskey(quietly: true)  // a Yo passkey here: the system offers it
     }
   }
@@ -82,11 +85,18 @@ struct Onboarding: View {
     return Page(title: "Choose a Name", back: { go(.welcome) }) {
       NameField(name: $name, mark: trouble == nil ? .available : taken ? .taken : nil,
         onSubmit: { if trouble == nil { Task { await register() } } })
-      Button("This Is My Name") { go(.logIn) }
-        .font(.yo(17))
-        .opacity(mine ? 1 : 0)
-        .disabled(!mine)
-        .animation(.snappy(duration: 0.2), value: mine)
+      // Under the field, one place: three dots that fill as the first letters come (the minimum, shown without
+      // words), until the name is long enough; then "This Is My Name" when it is taken by an account.
+      ZStack {
+        MinimumDots(count: name.count, of: 3)
+          .opacity(name.count < 3 ? 1 : 0)
+        Button("This Is My Name") { go(.logIn) }
+          .font(.yo(17))
+          .opacity(mine ? 1 : 0)
+          .disabled(!mine)
+      }
+      .animation(.snappy(duration: 0.2), value: mine)
+      .animation(.snappy(duration: 0.2), value: name.count)
     } bottom: {
       PrimaryButton("Continue", busy: busy) { Task { await register() } }
         .disabled(trouble != nil || busy)
@@ -315,6 +325,25 @@ private struct NameField: View {
       }
       .onSubmit(onSubmit)
       .onAppear { focused = true }
+  }
+}
+
+/// How many characters a name needs at least: a dot each, filled as they are typed.
+private struct MinimumDots: View {
+  let count: Int
+  let of: Int
+
+  var body: some View {
+    HStack(spacing: 10) {
+      ForEach(0..<of, id: \.self) { i in
+        Circle()
+          .fill(.white.opacity(i < count ? 0.9 : 0.25))
+          .frame(width: 8, height: 8)
+          .scaleEffect(i < count ? 1.15 : 1)
+      }
+    }
+    .accessibilityElement()
+    .accessibilityLabel("At least \(of) characters")
   }
 }
 
