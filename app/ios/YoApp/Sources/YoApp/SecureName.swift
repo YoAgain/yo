@@ -1,99 +1,67 @@
-// "Secure Your Account", from the profile (spec 7): a passkey first, made and then used once (its PRF output comes only
-// when a passkey is used), then the 12 words to keep as well; if the passkey does not work, the words alone. One
-// sheet that changes in place.
+// "Secure Your Account", from the profile (spec 7): one screen, two steps. 1, a passkey: made, then used once for its
+// PRF output (iCloud Keychain gives it at once; 1Password only when used, so it asks once more). 2, the 12 words, to
+// keep. Done once the words are kept; the passkey is optional, the words alone also secure the account.
 import SwiftUI
 
 struct SecureNameSheet: View {
   @Environment(AccountStore.self) private var accounts
   @Environment(\.dismiss) private var dismiss
-  @State private var stage = Stage.passkey
+  @State private var passkey = PasskeyStep.ready
+  @State private var words: [String] = []
+  @State private var kept: Set<String> = []
   @State private var busy = false
   @State private var problem: String?
-  @State private var kept: Set<String> = []
 
-  private enum Stage: Equatable {
-    /// Making the passkey (the system's sheet is up).
-    case passkey
-    /// Made, but its PRF output not given yet (1Password): used once more, said why.
-    case confirm
-    /// The words to keep: with the passkey already saved (`saved`), or alone.
-    case words([String], saved: Bool)
+  private enum PasskeyStep {
+    case ready, confirm, done, failed
   }
 
   var body: some View {
     ZStack {
       Color.amethyst.ignoresSafeArea()
-      Group {
-        switch stage {
-        case .passkey: passkey
-        case .confirm: confirm
-        case .words(let words, let saved): wordsPage(words, saved: saved)
+      Page(title: "Secure Your Account",
+        message: "Keep your name “\(accounts.account?.username ?? "")” forever.") {
+        VStack(alignment: .leading, spacing: 24) {
+          StepRow(number: 1, title: "Passkey") {
+            passkeyControl
+          }
+          StepRow(number: 2, title: "12 Words") {
+            EmptyView()
+          }
+          FrostedKey(words: words, qrSize: 80)
+          HStack(spacing: 12) {
+            KeepButton(title: "Save to Photos", icon: "photo.badge.arrow.down", done: kept.contains("photos")) {
+              Task { await saveToPhotos() }
+            }
+            KeepButton(title: "Copy", icon: "doc.on.doc", done: kept.contains("copied")) {
+              RecoveryWords.copy(words, name: accounts.account?.username ?? "")
+              kept.insert("copied")
+            }
+          }
         }
+      } bottom: {
+        PrimaryButton("Done") { finish() }
+          .disabled(kept.isEmpty || busy)
+        Note(problem)
       }
-      .transition(.opacity)
     }
-    .animation(.smooth(duration: 0.3), value: stage)
     .foregroundStyle(.white)
     .preferredColorScheme(.dark)
+    .onAppear { if words.isEmpty { words = accounts.secureWords() } }
   }
 
-  // MARK: Stages
-
-  private var passkey: some View {
-    // The point, and what it makes; Continue does the rest (Face ID if it works, else the words).
-    Page(title: "Secure Your Account",
-      message: "Secure your account to keep your name “\(accounts.account?.username ?? "")” forever.") {
-      Image(systemName: "lock.shield.fill")
-        .font(.system(size: 64))
-        .padding(.top, 20)
-      Text("Securing creates a passkey and a recovery key.")
-        .font(.system(size: 15))
-        .multilineTextAlignment(.center)
-        .opacity(0.8)
-        .padding(.top, 12)
-    } bottom: {
-      PrimaryButton("Continue", busy: busy) { Task { await makePasskey() } }
-        .disabled(busy)
-      Note(problem)
-    }
-  }
-
-  private var confirm: some View {
-    Page(title: "Secure Your Account", message: "One more Face ID to finish.") {
-      KeyIcon()
-    } bottom: {
-      PrimaryButton("Continue with Face ID", busy: busy) { Task { await confirmPasskey() } }
-        .disabled(busy)
-      Button("Use Recovery Key Instead") { showWords() }
-        .font(.yo(17))
-      Note(problem)
-    }
-  }
-
-  private func wordsPage(_ words: [String], saved: Bool) -> some View {
-    Page(title: "Recovery Key",
-      message: saved
-        ? "Face ID is on. Keep these words too, for when you can’t use it."
-        : "Keep these words somewhere safe. They get your name back on a new iPhone.") {
-      FrostedKey(words: words, qrSize: 96)
-      HStack(spacing: 12) {
-        KeepButton(title: "Save to Photos", icon: "photo.badge.arrow.down", done: kept.contains("photos")) {
-          Task { await saveToPhotos(words) }
-        }
-        KeepButton(title: "Copy", icon: "doc.on.doc", done: kept.contains("copied")) {
-          RecoveryWords.copy(words, name: accounts.account?.username ?? "")
-          kept.insert("copied")
-        }
-      }
-      .padding(.top, 6)
-      .disabled(busy)
-    } bottom: {
-      PrimaryButton("Done") { saved ? done() : keepWords() }
-      if !saved {
-        Button("Try Face ID Again") { stage = .passkey; Task { await makePasskey() } }
-          .font(.yo(17))
-      }
-      Note(problem)
+  /// Step 1's control: a button until the passkey is there, then a checkmark.
+  @ViewBuilder private var passkeyControl: some View {
+    switch passkey {
+    case .done:
+      Image(systemName: "checkmark.circle.fill")
+        .font(.system(size: 26))
+        .foregroundStyle(.white, .green)
+        .accessibilityLabel("Passkey set up")
+    case .ready, .failed:
+      StepButton(title: passkey == .failed ? "Try Again" : "Set Up", busy: busy) { Task { await makePasskey() } }
+    case .confirm:
+      StepButton(title: "Confirm", busy: busy) { Task { await confirmPasskey() } }
     }
   }
 
@@ -103,55 +71,43 @@ struct SecureNameSheet: View {
     busy = true
     defer { busy = false }
     problem = nil
-    let words = accounts.secureWords()  // made now: shown after the passkey, kept with it
     do {
-      if try await accounts.securePasskey() { return stage = .words(words, saved: true) }
-      stage = .confirm
+      passkey = try await accounts.securePasskey() ? .done : .confirm
     } catch {
-      showWords()  // cancelled, or the password manager could not make it
+      passkey = .failed  // cancelled, or the password manager could not make it: the words still secure it
     }
   }
 
+  /// 1Password: the passkey used once more, for its PRF output.
   private func confirmPasskey() async {
     busy = true
     defer { busy = false }
     problem = nil
     do {
-      let words = accounts.secureWords()
       try await accounts.confirmPasskey()
-      stage = .words(words, saved: true)
+      passkey = .done
     } catch let error as AccountError {
       problem = error.errorDescription
     } catch {
-      problem = "Face ID didn’t finish. Try again."
+      problem = "Passkey not confirmed. Try again."
     }
   }
 
-  private func showWords() {
-    problem = nil
-    stage = .words(accounts.secureWords(), saved: false)
-  }
-
-  private func keepWords() {
-    do {
-      try accounts.keepWords()
-      done()
-    } catch {
-      problem = "Couldn’t save your recovery key. Try again."
+  /// With the passkey the backup is saved already; without, the words save it now.
+  private func finish() {
+    if passkey != .done {
+      do { try accounts.keepWords() } catch { return problem = "Couldn’t save. Try again." }
     }
-  }
-
-  private func done() {
     UINotificationFeedbackGenerator().notificationOccurred(.success)
     dismiss()
   }
 
-  private func saveToPhotos(_ words: [String]) async {
+  private func saveToPhotos() async {
     busy = true
     defer { busy = false }
     let renderer = ImageRenderer(content: RecoveryCard(name: accounts.account?.username ?? "", words: words))
     renderer.scale = 3
-    guard let image = renderer.uiImage else { return problem = "Couldn’t create your recovery key image. Try again." }
+    guard let image = renderer.uiImage else { return problem = "Couldn’t create the image. Try again." }
     do {
       try await RecoveryWords.saveToPhotos(image)
       kept.insert("photos")
@@ -161,10 +117,41 @@ struct SecureNameSheet: View {
   }
 }
 
-private struct KeyIcon: View {
+/// A numbered step: the number in a circle, the title, its control at the end.
+private struct StepRow<Control: View>: View {
+  let number: Int
+  let title: String
+  @ViewBuilder let control: Control
+
   var body: some View {
-    Image(systemName: "faceid")
-      .font(.system(size: 64))
-      .padding(.top, 20)
+    HStack(spacing: 14) {
+      Text("\(number)")
+        .font(.system(size: 17, weight: .bold))
+        .frame(width: 30, height: 30)
+        .background(.white.opacity(0.2), in: .circle)
+      Text(title).font(.system(size: 20, weight: .semibold))
+      Spacer()
+      control
+    }
+  }
+}
+
+/// A small glass button at the end of a step.
+private struct StepButton: View {
+  let title: String
+  let busy: Bool
+  let action: () -> Void
+
+  var body: some View {
+    Button(action: action) {
+      Group {
+        if busy { ProgressView().tint(Color.amethyst) } else { Text(title).font(.system(size: 15, weight: .semibold)) }
+      }
+      .frame(minWidth: 70, minHeight: 28)
+    }
+    .buttonStyle(.glassProminent)
+    .tint(.white)
+    .foregroundStyle(Color.amethyst)
+    .disabled(busy)
   }
 }
