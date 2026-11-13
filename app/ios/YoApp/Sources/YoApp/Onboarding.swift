@@ -1,5 +1,6 @@
 // The way in. Start → a name → a passkey saves it (one tap; if it cannot, 12 words, best saved to Photos) → the
-// list. "Sign In" brings an account from before: a passkey, or the name and its 12 words; a passkey on this phone is
+// list. An account in the iCloud Keychain (the app installed again, a new iPhone) comes back before anything, without a
+// word. "Sign In" brings an account from before: a passkey, or the name and its 12 words; a passkey on this phone is
 // offered by the system at once.
 //
 // Every step after the welcome is the same page, as Apple's setup screens are: a title and one line at the top, the
@@ -71,6 +72,11 @@ struct Onboarding: View {
     .task {
       guard !looked else { return }
       looked = true
+      // The account in the iCloud Keychain (the app installed again, a new iPhone): straight back to the list.
+      busy = true
+      let back = await accounts.restoreFromKeychain()
+      busy = false
+      if back { return }
       try? await Task.sleep(for: .seconds(0.4))  // the welcome on screen first
       inbox.playYo()  // the app says what it is: "Yo"
       try? await accounts.restoreWithPasskey(quietly: true)  // a Yo passkey here: the system offers it

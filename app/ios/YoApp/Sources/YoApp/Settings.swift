@@ -82,7 +82,8 @@ struct SettingsView: View {
                 }
               }
             } footer: {
-              Text("Keep your name “\(account.username)” forever.")
+              // Kept in the iCloud Keychain already (SyncedAccount): the passkey and words are for life without it.
+              Text("Saved in iCloud Keychain. Secure it too, in case you leave Apple or lose your Apple Account.")
             }
           }
           // Two groups: Account (security, signing out, deleting) and Blocked; then Statistics and Appearance.
@@ -452,7 +453,7 @@ struct SettingsView: View {
     }
     friends.reset()
     dismiss()
-    accounts.reset()
+    accounts.signOut()  // out of the iCloud Keychain too: the next start does not bring it back
   }
 }
 

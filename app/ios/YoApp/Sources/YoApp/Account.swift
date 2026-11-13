@@ -176,7 +176,11 @@ enum BackupRecord {
 @MainActor @Observable
 final class AccountStore {
   private(set) var account: Account? {
-    didSet { UserDefaults.standard.set(try? JSONEncoder().encode(account), forKey: Self.key) }
+    didSet {
+      UserDefaults.standard.set(try? JSONEncoder().encode(account), forKey: Self.key)
+      // Kept in the iCloud Keychain as it changes (not removed here: an account taken to another phone stays there).
+      if let account { SyncedAccount.save(account) }
+    }
   }
 
   /// The core, opened from its saved state at launch or made at registration: talks to the hub for this device.
@@ -216,6 +220,8 @@ final class AccountStore {
   private var securing: (k: SymmetricKey, code: [String])?
   /// The guide's passkey once made, before it is signed in with.
   private var newPasskey: Data?
+  /// Coming back from the iCloud Keychain, under way.
+  private var restoring = false
 
   init() {
     account = UserDefaults.standard.data(forKey: Self.key).flatMap { try? JSONDecoder().decode(Account.self, from: $0) }
@@ -234,6 +240,10 @@ final class AccountStore {
       self.client = client
       // The user id as the core has it (an earlier build read it wrongly): the passkey's handle and the backup's id.
       if let id = Hub.bytes(client.userId()), account?.userID != id { account?.userID = id }
+      // Into the iCloud Keychain if not there (accounts from before it, one signed out on another phone of the
+      // person's). Only then: opening asks nothing of the hub, so this phone may have been replaced meanwhile, and the
+      // item of the phone that has the account now must not be overwritten by an older one.
+      if let account { SyncedAccount.save(account, onlyIfMissing: true) }
     } catch YoError.Replaced {
       reset()
     } catch {}
@@ -263,6 +273,7 @@ final class AccountStore {
     let client = try await register(username, secret: nil)
     guard let id = Hub.bytes(client.userId()) else { throw AccountError.noBackup }
     self.client = client
+    SyncedAccount.left = nil
     account = Account(
       username: client.username() ?? username, userID: id, accountKey: client.accountSecret(), byPasskey: false)
     SecureReminder.update(secured: false)
@@ -430,8 +441,40 @@ final class AccountStore {
     let sealed = try BackupRecord.open(record.sealed, with: k)
     client = try await register(sealed.account.username, secret: sealed.account.accountKey)
     if let code = sealed.code { RecoveryWords.save(code) }
+    SyncedAccount.left = nil
     account = sealed.account
     SecureReminder.update(secured: true)
+  }
+
+  /// Back without a word, from the iCloud Keychain (`SyncedAccount`): the app deleted and installed again, or a new
+  /// iPhone. Registers this phone with the account's key (spec 6.4), so the phone it was on before is signed out, as
+  /// with a backup. Not an account this phone left (signed out, or taken to another phone). True when back in.
+  func restoreFromKeychain() async -> Bool {
+    guard account == nil, !restoring, let item = SyncedAccount.load(), item.userID != SyncedAccount.left else {
+      return false
+    }
+    restoring = true  // one registration at a time: a second would replace the first
+    defer { restoring = false }
+    let client: YoClient
+    do {
+      client = try await register(item.username, secret: item.accountKey)
+    } catch AccountError.taken {
+      SyncedAccount.delete()  // the name has another key now: this item brings nothing back any more
+      return false
+    } catch {
+      return false  // offline, or the hub busy: the welcome as usual, and another try at the next start
+    }
+    guard account == nil, let id = Hub.bytes(client.userId()) else { return false }
+    self.client = client
+    // The same user, or (its name released after a year away, spec 6.4) a new one with the same key and no backup.
+    let same = id == item.userID
+    if same, let words = item.words { RecoveryWords.save(words) }
+    let restored = Account(
+      username: client.username() ?? item.username, userID: id, accountKey: item.accountKey,
+      byPasskey: same && item.byPasskey, byCode: same && item.byCode == true)
+    account = restored
+    SecureReminder.update(secured: restored.secured)
+    return true
   }
 
   // MARK: Blocking, reporting, deleting
@@ -452,12 +495,23 @@ final class AccountStore {
   func deleteAccount() async throws {
     guard let account else { throw AccountError.noBackup }
     try await hub { try $0.deleteAccount() }
+    SyncedAccount.delete()
     try? await ASCredentialUpdater().reportAllAcceptedPublicKeyCredentials(
       relyingPartyIdentifier: Passkeys.domain, userHandle: account.userID, acceptedCredentialIDs: [])
   }
 
-  /// "Sign Out": this phone forgets the account, as a new phone would (the hub keeps the backup).
+  /// "Sign Out" (and after deleting the account): out of the iCloud Keychain too, so the next start does not bring
+  /// the account back, here or on the person's other devices; then forgotten here (`reset`).
+  func signOut() {
+    SyncedAccount.delete()
+    reset()
+  }
+
+  /// This phone forgets the account, as a new phone would (the hub keeps the backup): signed out, or the account
+  /// taken to another phone (`YoError.Replaced`). The iCloud Keychain keeps it then, for the phone that has it now;
+  /// this one does not take it back without being asked.
   func reset() {
+    if let id = account?.userID { SyncedAccount.left = id }
     account = nil
     client = nil
     securing = nil
@@ -539,6 +593,76 @@ enum RecoveryWords {
   enum PhotosError: LocalizedError {
     case notAllowed
     var errorDescription: String? { "Yo can’t save to Photos. Copy your recovery key instead." }
+  }
+}
+
+/// The account in the iCloud Keychain (spec 7): what brings it back without a word when the app is deleted and
+/// installed again, or on a new iPhone with the same Apple Account. End-to-end encrypted by Apple; on a phone without
+/// iCloud Keychain it stays on the phone, which still covers the app deleted and installed again. One item per hub,
+/// so Yo Dev's account and Yo's never meet. Signing out and deleting the account delete it (`AccountStore.signOut`).
+enum SyncedAccount {
+  struct Item: Codable, Equatable {
+    var username: String
+    var userID: Data
+    /// The account key's secret: whoever has it is the account (spec 3.2), so this item is as precious as the phone.
+    var accountKey: Data
+    /// How the backup opens, and its recovery words (they open nothing the key does not): so a phone brought back
+    /// this way shows the same security as the one before, and can still change its passkey or words.
+    var byPasskey: Bool
+    var byCode: Bool?
+    var words: [String]?
+  }
+
+  private static var query: [String: Any] {
+    [
+      kSecClass as String: kSecClassGenericPassword,
+      kSecAttrService as String: "app.justyo.account",
+      kSecAttrAccount as String: Hub.url.host() ?? Hub.url.absoluteString,
+      kSecAttrSynchronizable as String: kCFBooleanTrue as Any,
+    ]
+  }
+
+  static func save(_ account: Account, onlyIfMissing: Bool = false) {
+    let previous = load()
+    if onlyIfMissing && previous != nil { return }
+    // The words are readable only while the phone is unlocked (a launch in the background may come before): those
+    // already in the item are kept then.
+    let words = RecoveryWords.load() ?? (previous?.userID == account.userID ? previous?.words : nil)
+    let item = Item(
+      username: account.username, userID: account.userID, accountKey: account.accountKey,
+      byPasskey: account.byPasskey, byCode: account.byCode, words: words)
+    guard item != previous, let data = try? JSONEncoder().encode(item) else { return }
+    let attributes: [String: Any] = [
+      kSecValueData as String: data,
+      kSecAttrAccessible as String: kSecAttrAccessibleAfterFirstUnlock,
+      kSecAttrLabel as String: Hub.isDevApp ? "Yo Dev" : "Yo",
+    ]
+    if SecItemUpdate(query as CFDictionary, attributes as CFDictionary) == errSecItemNotFound {
+      SecItemAdd(query.merging(attributes) { $1 } as CFDictionary, nil)
+    }
+  }
+
+  static func load() -> Item? {
+    var find = query
+    find[kSecReturnData as String] = true
+    find[kSecMatchLimit as String] = kSecMatchLimitOne
+    var result: CFTypeRef?
+    guard SecItemCopyMatching(find as CFDictionary, &result) == errSecSuccess, let data = result as? Data else {
+      return nil
+    }
+    return try? JSONDecoder().decode(Item.self, from: data)
+  }
+
+  static func delete() {
+    SecItemDelete(query as CFDictionary)
+  }
+
+  /// The account this phone left, or that was taken to another phone: never brought back here without asking (on
+  /// this phone only, until the app is deleted). Else two phones on one Apple Account would take it from each other
+  /// at every start, and a sign-out would be undone by the item another phone of the same person saves again.
+  static var left: Data? {
+    get { UserDefaults.standard.data(forKey: "account.left") }
+    set { UserDefaults.standard.set(newValue, forKey: "account.left") }
   }
 }
 

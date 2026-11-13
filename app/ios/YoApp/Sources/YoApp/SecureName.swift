@@ -61,7 +61,7 @@ struct SecureNameSheet: View {
 
   private var passkeyPage: some View {
     Page(title: "Secure Your Account",
-      message: "Keep your name “\(accounts.account?.username ?? "")” forever.") {
+      message: "In case you leave Apple or lose your Apple Account.") {
       BigSymbol(name: "faceid")
     } bottom: {
       PrimaryButton("Continue with Face ID", busy: busy) { Task { await createPasskey() } }
