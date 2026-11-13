@@ -4,6 +4,7 @@ import LocalAuthentication
 import Photos
 import SwiftUI
 import UIKit
+import YoCore
 
 /// The iPhone's own appearance, whatever the app's window was set to (the list forces dark): read from the screen.
 @MainActor enum SystemAppearance {
@@ -41,6 +42,7 @@ struct SettingsView: View {
   @State private var deleteTyped = ""
   @State private var deletingAccount = false
   @State private var deleteProblem: String?
+  @State private var sendingFeedback = false
 
   var body: some View {
     NavigationStack {
@@ -134,8 +136,20 @@ struct SettingsView: View {
               }
             }
           }
+          // The very last row: a word to the Yo team.
+          Section {
+            Button { sendingFeedback = true } label: {
+              Label {
+                Text("Send Feedback").foregroundStyle(Color(.label))
+              } icon: {
+                Image(systemName: "envelope.fill")
+              }
+              .labelStyle(Tile(.gray))
+            }
+          }
         }
       }
+      .sheet(isPresented: $sendingFeedback) { FeedbackSheet() }
       .sheet(isPresented: $showingCode) {
         if let account = accounts.account { NameCodeSheet(name: account.username) }
       }
@@ -1003,6 +1017,125 @@ struct NameCodeSheet: View {
       }
     }
     .presentationDetents([.medium, .large])
+  }
+}
+
+/// Send Feedback: a few words to the Yo team, with the app's version. Plain to the hub (spec 1), and the footer says
+/// so. Sent through the core off the main actor; a short "Thanks!" and the sheet closes.
+struct FeedbackSheet: View {
+  @Environment(\.dismiss) private var dismiss
+  @Environment(AccountStore.self) private var accounts
+
+  @State private var text = ""
+  @State private var sending = false
+  @State private var thanked = false
+  @State private var problem: String?
+  @FocusState private var focused: Bool
+
+  /// The hub takes up to this many bytes of UTF-8 (spec 6.3).
+  private static let maxBytes = 2000
+
+  private var trimmed: String { text.trimmingCharacters(in: .whitespacesAndNewlines) }
+
+  /// "1.2 (34)": CFBundleShortVersionString and CFBundleVersion.
+  static var appVersion: String {
+    let info = Bundle.main.infoDictionary
+    let short = info?["CFBundleShortVersionString"] as? String ?? "?"
+    let build = info?["CFBundleVersion"] as? String ?? "?"
+    return String(bytes: "\(short) (\(build))".utf8.prefix(64), encoding: .utf8) ?? "?"
+  }
+
+  var body: some View {
+    NavigationStack {
+      Form {
+        Section {
+          TextEditor(text: $text)
+            .focused($focused)
+            .frame(minHeight: 180)
+            .overlay(alignment: .topLeading) {
+              if text.isEmpty {
+                Text("What should Yo do better?")
+                  .foregroundStyle(Color(.placeholderText))
+                  .padding(.top, 8)
+                  .padding(.leading, 5)
+                  .allowsHitTesting(false)
+              }
+            }
+            .disabled(sending || thanked)
+        } footer: {
+          Text("Goes to the Yo team, not end-to-end encrypted.")
+        }
+      }
+      .overlay {
+        if thanked {
+          Label("Thanks!", systemImage: "checkmark.circle.fill")
+            .font(.yo(22, relativeTo: .title3))
+            .padding(.horizontal, 24)
+            .padding(.vertical, 16)
+            .glassEffect()
+            .transition(.scale.combined(with: .opacity))
+        }
+      }
+      .navigationTitle("Send Feedback")
+      .navigationBarTitleDisplayMode(.inline)
+      .toolbar {
+        ToolbarItem(placement: .cancellationAction) {
+          Button("Cancel", role: .cancel) { dismiss() }
+            .disabled(sending)
+        }
+        ToolbarItem(placement: .confirmationAction) {
+          if sending {
+            ProgressView()
+          } else {
+            Button("Send") { Task { await send() } }
+              .disabled(trimmed.isEmpty || thanked)
+          }
+        }
+      }
+      .onChange(of: text) { _, new in
+        // Within the hub's length, cut at a whole character.
+        if new.utf8.count > Self.maxBytes {
+          var cut = new
+          while cut.utf8.count > Self.maxBytes { cut.removeLast() }
+          text = cut
+        }
+      }
+      .onAppear { focused = true }
+      .alert(
+        "Unable to Send Feedback",
+        isPresented: Binding(get: { problem != nil }, set: { if !$0 { problem = nil } })
+      ) {
+        Button("OK", role: .cancel) {}
+      } message: {
+        Text(problem ?? "")
+      }
+    }
+    .interactiveDismissDisabled(sending || !trimmed.isEmpty)
+    .sensoryFeedback(.success, trigger: thanked) { _, now in now }
+  }
+
+  private func send() async {
+    guard let client = accounts.client, !trimmed.isEmpty, !sending else { return }
+    let words = trimmed
+    let version = Self.appVersion
+    sending = true
+    defer { sending = false }
+    do {
+      try await Hub.run { try client.sendFeedback(text: words, appVersion: version) }
+    } catch YoError.Refused(let status) where status == 429 {
+      problem = "You’ve sent a lot of feedback today. Try again tomorrow."
+      return
+    } catch let error as YoError {
+      problem = AccountError.hub(error).localizedDescription
+      return
+    } catch {
+      problem = error.localizedDescription
+      return
+    }
+    focused = false
+    withAnimation(.snappy) { thanked = true }
+    try? await Task.sleep(for: .seconds(1.2))
+    dismiss()
   }
 }
 
