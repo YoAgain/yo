@@ -1,8 +1,8 @@
 # YoGPT replies
 
-200 pictures YoGPT sends back: one at random in answer to a photo or video (what it received is discarded unseen), and
+250 pictures YoGPT sends back: one at random in answer to a photo or video (what it received is discarded unseen), and
 with a chance of 1 in 5 along with an answer to a plain Yo. Generated with OpenAI `gpt-image-2` (1024x1536, medium),
-cropped to 9:16 and saved as 720x1280 JPEGs of at most 100 KB, without metadata. Photos and videos come with the
+cropped to 9:16 (201–250: movie moments as homages, with 3D stick figures and original fantasy creatures) and saved as 720x1280 JPEGs of at most 100 KB, without metadata. Photos and videos come with the
 attachments of spec 5; until then YoGPT answers Yos with Yos only.
 
 | File | Idea |
@@ -207,3 +207,53 @@ attachments of spec 5; until then YoGPT answers Yos with Yos only.
 | 198.jpg | A clothes peg clipping a tiny paper flag that says "Yo" |
 | 199.jpg | A coat hanger bent into the word "Yo" |
 | 200.jpg | A pickle in a glass jar, the pickle is curved and bumpy in the shape of "Yo" |
+| 201.jpg | Two whimsical original purple fantasy creatures (round fluffy blobs with big eyes, not animals) on the bow of a ship at sunset, one with arms spread wide like flying, a speech bubble "Yo" |
+| 202.jpg | A glossy white 3D stick figure dancing and swinging around a city lamppost in the rain with an umbrella, puddles splashing, a speech bubble "Yo" |
+| 203.jpg | A small whimsical original purple fantasy creature (a round fluffy blob with big eyes, not an animal) in a bike basket flying past a huge full moon, the bike rider silhouette is a whimsical original purple fantasy creature (a round fluffy blob with big eyes, not an animal), the moon shows "Yo" in craters |
+| 204.jpg | A glossy white 3D stick figure in a long black coat and sunglasses leaning far back in slow motion as purple letters "Yo" fly past like bullets, rooftop |
+| 205.jpg | A giant purple whimsical original purple fantasy creature (a round fluffy blob with big eyes, not an animal) on top of a skyscraper swatting at tiny biplanes, holding a sign "Yo" |
+| 206.jpg | A shark fin circling a small boat, the fin has "Yo" painted on it, a nervous glossy white 3D stick figure on the boat |
+| 207.jpg | A friendly whimsical original purple fantasy creature (a round fluffy blob with big eyes, not an animal) in a trench coat holding a boombox over its head outside a window at night, the boombox screen shows "Yo" |
+| 208.jpg | An astronaut glossy white 3D stick figure floating in a white spaceship corridor talking to a glowing red camera eye, speech bubble "Yo" |
+| 209.jpg | A whimsical original purple fantasy creature (a round fluffy blob with big eyes, not an animal) in a fedora running from a giant rolling purple boulder shaped like "Yo" in an ancient temple |
+| 210.jpg | A glossy white 3D stick figure in a white dress standing over a subway grate, the dress billowing, speech bubble "Yo" |
+| 211.jpg | Two whimsical original purple fantasy creatures (round fluffy blobs with big eyes, not animals) looking at a glass of water rippling on a car dashboard, the ripples form "Yo" |
+| 212.jpg | A glossy white 3D stick figure in a tuxedo saying "Yo" with a martini, casino background, suave spy style |
+| 213.jpg | A whimsical original purple fantasy creature (a round fluffy blob with big eyes, not an animal) with a lightsaber-like purple glowing tube shaped like "Yo", desert planet with two suns |
+| 214.jpg | A glossy white 3D stick figure in a time-travel sports car with flames in the tire tracks, license plate reads "YO", night |
+| 215.jpg | A whimsical original purple fantasy creature (a round fluffy blob with big eyes, not an animal) in a trench coat in a rainy neon future city, a giant billboard shows "Yo" |
+| 216.jpg | A glossy white 3D stick figure doing a karate crane kick on a beach post at sunset, a speech bubble "Yo" |
+| 217.jpg | A ghost-busting team of three whimsical original purple fantasy creatures (round fluffy blobs with big eyes, not animals) with backpacks blasting purple beams that spell "Yo" |
+| 218.jpg | A boxing glossy white 3D stick figure running up long museum steps raising its arms in triumph, banner "Yo" at the top |
+| 219.jpg | A whimsical original purple fantasy creature (a round fluffy blob with big eyes, not an animal) wizard on a bridge raising a staff, a glowing "Yo" barrier in front of a fiery shadow monster |
+| 220.jpg | A glossy white 3D stick figure in a cowboy hat riding a bomb falling from a plane waving its hat, the bomb says "Yo" |
+| 221.jpg | A girl-scout whimsical original purple fantasy creature (a round fluffy blob with big eyes, not an animal) walking a yellow brick road with a whimsical original purple fantasy creature (a round fluffy blob with big eyes, not an animal), a robot and a scarecrow made of hay, distant purple city shaped like "Yo" |
+| 222.jpg | A glossy white 3D stick figure in a red jacket dancing on a long stairway in the city at night, speech bubble "Yo" |
+| 223.jpg | Two whimsical original purple fantasy creatures (round fluffy blobs with big eyes, not animals) sharing one long noodle that forms the word "Yo", spaghetti dinner in a back alley |
+| 224.jpg | A glossy white 3D stick figure in a sharp suit sitting on a park bench with a box of chocolates, speech bubble "Yo" |
+| 225.jpg | A glossy white 3D stick figure standing at the edge of a skyscraper roof at night in a long coat, the city lights below spelling "Yo" |
+| 226.jpg | A glossy white 3D stick figure in a spacesuit stepping out onto a red planet planting a flag "Yo", crashed rover behind |
+| 227.jpg | A whimsical original purple fantasy creature (a round fluffy blob with big eyes, not an animal) in a white shirt sliding across a wooden floor in socks with sunglasses, speech bubble "Yo" |
+| 228.jpg | A glossy white 3D stick figure in a tuxedo playing piano in a smoky bar, a speech bubble "Yo" (play it again) |
+| 229.jpg | A whimsical original purple fantasy creature (a round fluffy blob with big eyes, not an animal) swinging from a vine in the jungle shouting a long "Yooooo" like a jungle call |
+| 230.jpg | A glossy white 3D stick figure and a glossy white 3D stick figure in sunglasses driving a convertible off a desert cliff into the sunset, speech bubble "Yo" |
+| 231.jpg | Two space knights with purple glowing swords crossing them, the glow forms "Yo" |
+| 232.jpg | A giant purple glossy white 3D stick figure on a moonlit beach under a ruined statue torch, a glossy white 3D stick figure kneels, sand writing "Yo" |
+| 233.jpg | Two whimsical original purple fantasy creatures (round fluffy blobs with big eyes, not animals) racing chariots in an ancient arena, dust flying, a banner "Yo" |
+| 234.jpg | A glossy white 3D stick figure in an orange prison jumpsuit crawling out of a sewer pipe into the rain, arms raised, speech bubble "Yo" |
+| 235.jpg | A whimsical original purple fantasy creature (a round fluffy blob with big eyes, not an animal) sitting on a bus-stop bench with a box, telling a story, speech bubble "Yo" |
+| 236.jpg | A bunch of colourful helium balloons lifting a small purple house into the sky, balloons spell "Yo" |
+| 237.jpg | A whimsical original purple fantasy creature (a round fluffy blob with big eyes, not an animal) in a red cape flying over a city skyline holding a sign "Yo" |
+| 238.jpg | A spaceship tractor-beaming a glossy white 3D stick figure which shouts "Yo", farmland at night |
+| 239.jpg | Two whimsical original purple fantasy creatures (round fluffy blobs with big eyes, not animals) running toward each other in slow motion on a beach, speech bubbles "Yo" and "Yo" |
+| 240.jpg | A glossy white 3D stick figure in a white captain hat on a tiny boat shouting at a giant wave "Yo" |
+| 241.jpg | A whimsical original purple fantasy creature (a round fluffy blob with big eyes, not an animal) with a typewriter in a snowed-in hotel corridor, the page full of "Yo Yo Yo Yo" |
+| 242.jpg | A purple robot alone on a trash-covered planet holding a small plant, speech bubble "Yo" |
+| 243.jpg | A whimsical original purple fantasy creature (a round fluffy blob with big eyes, not an animal) in a pilot jacket and aviator sunglasses next to a fighter jet giving a thumbs up, speech bubble "Yo" |
+| 244.jpg | A small glossy white 3D stick figure in a raincoat holding a red balloon at a storm drain, speech bubble "Yo" |
+| 245.jpg | A glossy white 3D stick figure surfing a giant wave at sunset, the wave curling into the letters "Yo" |
+| 246.jpg | A glossy white 3D stick figure in a white dress at a fancy breakfast in front of a jewelry shop window, croissant, speech bubble "Yo" |
+| 247.jpg | A whimsical original purple fantasy creature (a round fluffy blob with big eyes, not an animal) explorer with a whip and fedora swapping a golden idol for a bag of sand, the idol shaped like "Yo" |
+| 248.jpg | A tiny glossy white 3D stick figure chef standing on a giant chef hat in a fancy kitchen, steam spelling "Yo" |
+| 249.jpg | Two snowmen as a heist crew walking in slow motion toward the camera, explosion of glitter behind, speech bubble "Yo" |
+| 250.jpg | A glossy white 3D stick figure on a rooftop with a chimney sweep broom dancing with soot-covered birds, chimney smoke spelling "Yo" |
