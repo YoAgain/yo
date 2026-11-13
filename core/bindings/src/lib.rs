@@ -171,6 +171,40 @@ pub fn request_code(transport: Arc<dyn HttpTransport>, phone: String) -> Result<
     Ok(Client::request_code(&Http(transport), &phone)?)
 }
 
+/// The account's backup record (spec 7), as the app makes and opens it: K wrapped by the passkey (empty without one)
+/// and by the recovery code, what K seals, and the code's locator (16 bytes, or empty).
+#[derive(uniffi::Record)]
+pub struct YoBackup {
+    pub by_passkey: Vec<u8>,
+    pub by_code: Vec<u8>,
+    pub sealed: Vec<u8>,
+    pub locator: Vec<u8>,
+}
+
+impl From<YoBackup> for yo_core::Backup {
+    fn from(backup: YoBackup) -> Self {
+        yo_core::Backup::new(backup.by_passkey, backup.by_code, backup.sealed, backup.locator)
+    }
+}
+
+impl From<yo_core::Backup> for YoBackup {
+    fn from(backup: yo_core::Backup) -> Self {
+        YoBackup {
+            by_passkey: backup.by_passkey.into(),
+            by_code: backup.by_code.into(),
+            sealed: backup.sealed.into(),
+            locator: backup.locator.into(),
+        }
+    }
+}
+
+/// The backup record by the user id (a passkey's user handle) or the recovery code's locator, 16 bytes each; `None`
+/// when there is none. Before there is an account on this phone.
+#[uniffi::export]
+pub fn fetch_backup(transport: Arc<dyn HttpTransport>, id: Vec<u8>) -> Result<Option<YoBackup>, YoError> {
+    Ok(Client::fetch_backup(&Http(transport), &id)?.map(Into::into))
+}
+
 #[derive(uniffi::Object)]
 pub struct YoClient {
     client: Mutex<Client>,
@@ -204,20 +238,25 @@ impl YoClient {
         Ok(Arc::new(YoClient { client: Mutex::new(client) }))
     }
 
-    /// Registers a new account with only a username: where the hub allows it (test accounts, bots).
+    /// Registers this device with a username (spec 6.4). Without `account_secret`, a new account: the name must be
+    /// free. With the 32-byte account secret from the backup (spec 7), the name's account again, same user id, its
+    /// other device replaced. `Refused { status: 409 }`: the name is taken.
     #[uniffi::constructor]
+    #[allow(clippy::too_many_arguments)]
     pub fn register_username(
         transport: Arc<dyn HttpTransport>,
         store: Arc<dyn StateStore>,
         state_key: Vec<u8>,
         username: String,
+        account_secret: Option<Vec<u8>>,
         name: Option<String>,
         push_platform: u8,
         push_token: String,
     ) -> Result<Arc<Self>, YoError> {
         let key = key_of(state_key)?;
+        let account = account_secret.map(key_of).transpose()?;
         let push = yo_core::Push { platform: push_platform, token: push_token.into_bytes().into() };
-        let mut client = Client::register_username(Arc::new(Http(transport)), &username, name, push)?;
+        let mut client = Client::register_username(Arc::new(Http(transport)), &username, account, name, push)?;
         client.persist_to(Arc::new(Store(store)), key);
         Ok(Arc::new(YoClient { client: Mutex::new(client) }))
     }
@@ -252,6 +291,21 @@ impl YoClient {
 
     pub fn user_id(&self) -> String {
         self.with(|c| c.user_id().to_owned())
+    }
+
+    /// The username, canonical ("JOSÉ").
+    pub fn username(&self) -> Option<String> {
+        self.with(|c| c.username().map(str::to_owned))
+    }
+
+    /// The account key's 32-byte secret: what the backup seals, for `register_username` on a new phone.
+    pub fn account_secret(&self) -> Vec<u8> {
+        self.with(|c| c.account_secret().to_vec())
+    }
+
+    /// Stores the account's backup record at the hub, replacing the one before (its old locator then finds nothing).
+    pub fn put_backup(&self, backup: YoBackup) -> Result<(), YoError> {
+        Ok(self.with(|c| c.put_backup(&backup.into()))?)
     }
 
     /// Claims a username, or gives it up with `None`.

@@ -14,6 +14,7 @@ pub const PUSH: &str = "/v1/push";
 pub const INBOX: &str = "/v1/inbox";
 pub const INBOX_ACK: &str = "/v1/inbox/ack";
 pub const GROUPS: &str = "/v1/groups";
+pub const BACKUP: &str = "/v1/backup";
 
 /// `POST /v1/inbox/{user_id}`: to every device of a user.
 pub fn deliver_path(user: &UserId) -> String {
@@ -31,6 +32,11 @@ pub fn commit_path(group: &GroupId) -> String {
 /// `GET /v1/groups/{id}/commits/{epoch}`: the commit the hub accepted on that epoch.
 pub fn commit_fetch_path(group: &GroupId, epoch: u64) -> String {
     format!("{GROUPS}/{}/commits/{epoch}", crate::b64(group))
+}
+
+/// `GET /v1/backup/{id}`: by the user id or by the recovery code's locator (spec 7).
+pub fn backup_path(id: &[u8]) -> String {
+    format!("{BACKUP}/{}", crate::b64(id))
 }
 
 /// `GET /v1/inbox?wait={s}`
@@ -69,7 +75,8 @@ pub struct VerifyCheck {
     pub device: NewDevice,
 }
 
-/// Registers a device without a number (spec 6.4): only where the hub switches it on.
+/// Registers a device with a username (spec 6.4): a new user if the name is free, its user again if this is the user's
+/// current account key (a new phone restored from the backup).
 #[derive(Debug, Clone, PartialEq, Eq, TlsSerialize, TlsDeserializeBytes, TlsSize)]
 pub struct Register {
     /// The username, canonical: the account's only handle.
@@ -110,8 +117,8 @@ pub fn registration_to_be_signed(
     out
 }
 
-/// The answer to a registration: the account's user id. The same as before when the number had one: a new phone
-/// keeps its user id, with a new account key (spec 7).
+/// The answer to a registration: the account's user id. The same as before for a number that had one (a new phone
+/// keeps its user id) and for a username registered again with its user's account key (spec 6.4).
 #[derive(Debug, Clone, PartialEq, Eq, TlsSerialize, TlsDeserializeBytes, TlsSize)]
 pub struct Registered {
     pub user_id: UserId,
@@ -184,6 +191,63 @@ pub struct Commit {
     pub envelope: VLBytes,
 }
 
+/// The length of a backup's locator: HKDF(the recovery code, "yo backup v1 locator") (spec 7).
+pub const LOCATOR_LEN: usize = 16;
+
+/// The account's backup record (spec 7): `PUT /v1/backup` stores it, `GET /v1/backup/{id}` hands it out to whoever
+/// names its user id or locator. The hub can open none of it: K is wrapped by the passkey and by the recovery code,
+/// and K seals the rest.
+#[derive(Debug, Clone, PartialEq, Eq, TlsSerialize, TlsDeserializeBytes, TlsSize)]
+pub struct Backup {
+    pub version: u8,
+    /// K under HKDF(the passkey's PRF output, "yo backup v1 passkey"); empty without a passkey.
+    pub by_passkey: VLBytes,
+    /// K under HKDF(the recovery code, "yo backup v1 code"); always there.
+    pub by_code: VLBytes,
+    /// ChaCha20-Poly1305 under K: the account key, the friends, the recovery code.
+    pub sealed: VLBytes,
+    /// Where the recovery code alone finds the record: `LOCATOR_LEN` bytes, or empty (found by the user id only).
+    pub locator: VLBytes,
+}
+
+impl Backup {
+    /// A record of this version.
+    pub fn new(by_passkey: Vec<u8>, by_code: Vec<u8>, sealed: Vec<u8>, locator: Vec<u8>) -> Self {
+        Backup {
+            version: crate::VERSION,
+            by_passkey: by_passkey.into(),
+            by_code: by_code.into(),
+            sealed: sealed.into(),
+            locator: locator.into(),
+        }
+    }
+
+    /// A record as it may be stored: this version, the code's door there, every part within its limit.
+    pub fn check(&self) -> Result<(), crate::Error> {
+        use crate::limits::{MAX_BACKUP_SEALED_LEN, MAX_BACKUP_WRAP_LEN};
+        if self.version != crate::VERSION {
+            return Err(crate::Error::Unsupported);
+        }
+        let (passkey, code, sealed) = (self.by_passkey.as_slice(), self.by_code.as_slice(), self.sealed.as_slice());
+        if passkey.len() > MAX_BACKUP_WRAP_LEN
+            || code.len() > MAX_BACKUP_WRAP_LEN
+            || sealed.len() > MAX_BACKUP_SEALED_LEN
+        {
+            return Err(crate::Error::Size);
+        }
+        let locator = self.locator.as_slice().len();
+        if code.is_empty() || sealed.is_empty() || !(locator == 0 || locator == LOCATOR_LEN) {
+            return Err(crate::Error::Format);
+        }
+        Ok(())
+    }
+
+    /// The locator, if the record has one.
+    pub fn locator(&self) -> Option<[u8; LOCATOR_LEN]> {
+        self.locator.as_slice().try_into().ok()
+    }
+}
+
 /// The body of a `409` to a delivery: the user's current account key and devices (spec 4.6).
 #[derive(Debug, Clone, PartialEq, Eq, TlsSerialize, TlsDeserializeBytes, TlsSize)]
 pub struct Devices {
@@ -240,6 +304,40 @@ mod tests {
         assert_eq!(crate::decode::<Lookup>(&crate::encode(&lookup)).unwrap(), lookup);
         let inbox = Inbox { key_packages_left: 7, items: vec![InboxItem { id: 1, envelope: vec![0; 1024].into() }] };
         assert_eq!(crate::decode::<Inbox>(&crate::encode(&inbox)).unwrap(), inbox);
+        let backup = backup();
+        assert_eq!(crate::decode::<Backup>(&crate::encode(&backup)).unwrap(), backup);
+    }
+
+    fn backup() -> Backup {
+        Backup::new(vec![1; 60], vec![2; 60], vec![3; 1000], vec![4; LOCATOR_LEN])
+    }
+
+    #[test]
+    fn backups_are_checked() {
+        use crate::limits::{MAX_BACKUP_SEALED_LEN, MAX_BACKUP_WRAP_LEN, MAX_BODY};
+        use crate::Error;
+        assert_eq!(backup().check(), Ok(()));
+        assert_eq!(backup().locator(), Some([4; LOCATOR_LEN]));
+        let without = Backup { by_passkey: Vec::new().into(), locator: Vec::new().into(), ..backup() };
+        assert_eq!(without.check(), Ok(()));
+        assert_eq!(without.locator(), None);
+        assert_eq!(Backup { version: 2, ..backup() }.check(), Err(Error::Unsupported));
+        assert_eq!(Backup { by_code: Vec::new().into(), ..backup() }.check(), Err(Error::Format));
+        assert_eq!(Backup { sealed: Vec::new().into(), ..backup() }.check(), Err(Error::Format));
+        assert_eq!(Backup { locator: vec![4; 15].into(), ..backup() }.check(), Err(Error::Format));
+        let wrap = vec![1; MAX_BACKUP_WRAP_LEN + 1];
+        assert_eq!(Backup { by_passkey: wrap.clone().into(), ..backup() }.check(), Err(Error::Size));
+        assert_eq!(Backup { by_code: wrap.into(), ..backup() }.check(), Err(Error::Size));
+        let sealed = vec![3; MAX_BACKUP_SEALED_LEN + 1];
+        assert_eq!(Backup { sealed: sealed.into(), ..backup() }.check(), Err(Error::Size));
+        // The largest record still fits one request.
+        let largest = Backup {
+            by_passkey: vec![1; MAX_BACKUP_WRAP_LEN].into(),
+            by_code: vec![2; MAX_BACKUP_WRAP_LEN].into(),
+            sealed: vec![3; MAX_BACKUP_SEALED_LEN].into(),
+            ..backup()
+        };
+        assert!(largest.check().is_ok() && crate::encode(&largest).len() <= MAX_BODY);
     }
 
     #[test]
@@ -247,5 +345,6 @@ mod tests {
         assert_eq!(inbox_path(30), "/v1/inbox?wait=30");
         assert!(deliver_path(&[0; 16]).starts_with("/v1/inbox/AAAA"));
         assert!(commit_path(&[0; 32]).ends_with("/commit"));
+        assert_eq!(backup_path(&[0; 16]), "/v1/backup/AAAAAAAAAAAAAAAAAAAAAA");
     }
 }

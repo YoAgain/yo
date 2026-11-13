@@ -404,6 +404,10 @@ fn the_hub_survives_garbage_on_every_route() {
         ("POST", api::commit_path(&[1; 32])),
         ("POST", "/v1/inbox/!!".to_owned()),
         ("POST", "/v1/groups/x/commit".to_owned()),
+        ("POST", api::REGISTER.to_owned()),
+        ("PUT", api::BACKUP.to_owned()),
+        ("GET", api::backup_path(&[1; 16])),
+        ("GET", "/v1/backup/!!".to_owned()),
     ];
     let mut seed = 0x9E37_79B9_7F4A_7C15u64;
     for (method, path) in routes {
@@ -466,30 +470,123 @@ fn usernames_are_claimed_found_and_given_up() {
 }
 
 #[test]
-fn accounts_without_a_number_where_the_hub_allows_them() {
+fn a_username_is_all_it_takes() {
     let hub = TestHub::start();
     let (mut a, _, pa, _) = pair(&hub);
-    let name = format!("TESTER{}", random_u64() % 100_000);
-    let mut t = Client::register_username(Http::new(hub.url()), &name, Some("TESTER".into()), Push::none()).unwrap();
+    let name = format!("LEO{}", random_u64() % 100_000);
+    let mut t = by_name(&hub, &name, None).unwrap();
     assert_eq!(t.username(), Some(name.as_str()));
     assert_eq!(t.phone(), "");
     t.send_yo(&pa).unwrap();
     assert_eq!(yos_from_user(&a.sync(0).unwrap(), t.user_id()), 1);
     a.send_yo(&name).unwrap();
     assert_eq!(yos_from_user(&t.sync(0).unwrap(), a.user_id()), 1);
-    // The name is taken now.
-    assert_eq!(
-        Client::register_username(Http::new(hub.url()), &name, None, Push::none()).err(),
-        Some(Error::Refused(api::status::CONFLICT))
-    );
-    // A hub that does not switch it on has no such route.
+    // The name is taken now, also as a name that only looks like it (spec 3.3).
+    assert_eq!(by_name(&hub, &name, None).err(), Some(Error::Refused(api::status::CONFLICT)));
+    let lookalike = name.replacen('O', "0", 1);
+    assert_eq!(by_name(&hub, &lookalike, None).err(), Some(Error::Refused(api::status::CONFLICT)));
+}
+
+/// Registers by username, with a new account key or the given one.
+fn by_name(hub: &TestHub, name: &str, account: Option<[u8; 32]>) -> Result<Client, Error> {
+    Client::register_username(Http::new(hub.url()), name, account, Some("TESTER".into()), Push::none())
+}
+
+fn backup(locator: Vec<u8>) -> api::Backup {
+    api::Backup::new(vec![1; 60], vec![2; 60], vec![3; 500], locator)
+}
+
+#[test]
+fn a_new_phone_restores_a_username_with_its_account_key() {
+    let hub = TestHub::start();
+    let (mut a, _, pa, _) = pair(&hub);
+    let name = format!("MIA{}", random_u64() % 100_000);
+    let mut old = by_name(&hub, &name, None).unwrap();
+    old.send_yo(&pa).unwrap();
+    a.sync(0).unwrap();
+    a.set_verified(old.user_id(), true).unwrap();
+    // A new phone with the account key from the backup: the same user, the old phone replaced.
+    let mut new = by_name(&hub, &name, Some(old.account_secret())).unwrap();
+    assert_eq!(new.user_id(), old.user_id());
+    assert_eq!(new.username(), Some(name.as_str()));
+    assert_eq!(old.sync(0), Err(Error::Replaced));
+    // Its contacts see nothing: the key is the same, the verification holds.
+    let events = a.send_yo(&name).unwrap();
+    assert!(!events.iter().any(|e| matches!(e, Event::IdentityChanged { .. })), "{events:?}");
+    assert!(a.contacts()[0].verified);
+    assert_eq!(yos_from_user(&new.sync(0).unwrap(), a.user_id()), 1);
+    // Any other key: the name is taken.
+    assert_eq!(by_name(&hub, &name, None).err(), Some(Error::Refused(api::status::CONFLICT)));
+    // The key is the user's alone: it takes no other name.
+    let other = format!("NOT{}", random_u64() % 100_000);
+    assert_eq!(by_name(&hub, &other, Some(old.account_secret())).err(), Some(Error::Refused(api::status::CONFLICT)));
+}
+
+#[test]
+fn a_backup_is_found_by_user_id_and_by_locator() {
+    let hub = TestHub::start();
+    let http = Http::new(hub.url());
+    let mut t = by_name(&hub, &format!("SAFE{}", random_u64() % 100_000), None).unwrap();
+    let user = yo_tests::user_id(t.user_id());
+    assert_eq!(Client::fetch_backup(http.as_ref(), &user), Ok(None));
+    let first = backup(vec![9; 16]);
+    t.put_backup(&first).unwrap();
+    assert_eq!(Client::fetch_backup(http.as_ref(), &user), Ok(Some(first.clone())));
+    assert_eq!(Client::fetch_backup(http.as_ref(), &[9; 16]), Ok(Some(first)));
+    // A new recovery code: the old locator finds nothing.
+    let second = backup(vec![8; 16]);
+    t.put_backup(&second).unwrap();
+    assert_eq!(Client::fetch_backup(http.as_ref(), &[9; 16]), Ok(None));
+    assert_eq!(Client::fetch_backup(http.as_ref(), &[8; 16]), Ok(Some(second.clone())));
+    assert_eq!(Client::fetch_backup(http.as_ref(), &user), Ok(Some(second)));
+    // Another account cannot take the locator.
+    let mut u = by_name(&hub, &format!("OTHER{}", random_u64() % 100_000), None).unwrap();
+    assert_eq!(u.put_backup(&backup(vec![8; 16])), Err(Error::Refused(api::status::CONFLICT)));
+    // Malformed records are refused, by the core and by the hub.
+    let bad = api::Backup { version: 2, ..backup(Vec::new()) };
+    assert!(t.put_backup(&bad).is_err());
+    for body in [yo_wire::encode(&bad), yo_wire::encode(&backup(vec![1; 15])), vec![1, 2, 3], Vec::new()] {
+        assert_eq!(t.signed_for_tests("PUT", api::BACKUP, &body).unwrap().status, api::status::BAD_REQUEST);
+    }
+    assert_eq!(Client::fetch_backup(http.as_ref(), &user), Ok(Some(backup(vec![8; 16]))), "nothing changed");
+    assert_eq!(Client::fetch_backup(http.as_ref(), &[1; 15]), Err(Error::Protocol("backup id")));
+}
+
+#[test]
+fn names_not_secured_are_released_after_ninety_days() {
+    const DAY: u64 = 24 * 3600 * 1000;
+    let hub = TestHub::start();
+    let (secured_name, idle_name) =
+        (format!("KEPT{}", random_u64() % 100_000), format!("GONE{}", random_u64() % 100_000));
+    let mut secured = by_name(&hub, &secured_name, None).unwrap();
+    let mut idle = by_name(&hub, &idle_name, None).unwrap();
+    secured.put_backup(&backup(Vec::new())).unwrap();
+    let now = yo_hub::now_ms();
+    hub.hub.prune(now + 89 * DAY).unwrap();
+    idle.sync(0).unwrap();
+    hub.hub.prune(now + 91 * DAY).unwrap();
+    assert_eq!(idle.sync(0), Err(Error::Replaced), "the device learns that its account is gone");
+    secured.sync(0).unwrap();
+    // The name is free again; the secured one is kept.
+    by_name(&hub, &idle_name, None).unwrap();
+    assert_eq!(by_name(&hub, &secured_name, None).err(), Some(Error::Refused(api::status::CONFLICT)));
+}
+
+#[test]
+fn registration_and_backups_are_limited_per_address() {
     let mut config = yo_hub::config::Config::for_tests();
-    config.open_registration = false;
-    let closed = TestHub::start_with(config, "127.0.0.1:0");
-    assert_eq!(
-        Client::register_username(Http::new(closed.url()), "NOBODY", None, Push::none()).err(),
-        Some(Error::Refused(404))
-    );
+    config.limits.register_per_ip_hour = 2;
+    config.limits.backup_per_ip_hour = 2;
+    let hub = TestHub::start_with(config, "127.0.0.1:0");
+    let n = random_u64() % 100_000;
+    by_name(&hub, &format!("ONE{n}"), None).unwrap();
+    by_name(&hub, &format!("TWO{n}"), None).unwrap();
+    assert_eq!(by_name(&hub, &format!("THREE{n}"), None).err(), Some(Error::Refused(api::status::RATE_LIMITED)));
+    let http = Http::new(hub.url());
+    for _ in 0..2 {
+        assert_eq!(Client::fetch_backup(http.as_ref(), &[5; 16]), Ok(None));
+    }
+    assert_eq!(Client::fetch_backup(http.as_ref(), &[5; 16]), Err(Error::Refused(api::status::RATE_LIMITED)));
 }
 
 #[test]

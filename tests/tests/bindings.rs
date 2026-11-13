@@ -33,6 +33,49 @@ fn client(hub: &TestHub, number: &str, name: &str, file: Arc<File>) -> Arc<YoCli
 }
 
 #[test]
+fn the_app_layer_registers_by_username_and_restores_from_the_backup() {
+    let hub = TestHub::start();
+    let app = || Arc::new(App(Http::new(hub.url())));
+    let name = format!("JOSÉ{}", random_u64() % 100_000);
+    let register = |secret: Option<Vec<u8>>| {
+        YoClient::register_username(
+            app(),
+            Arc::new(File::default()),
+            vec![7; 32],
+            name.clone(),
+            secret,
+            None,
+            0,
+            "".into(),
+        )
+    };
+    let old = register(None).unwrap();
+    assert_eq!(old.username(), Some(name.clone()));
+    let secret = old.account_secret();
+    assert_eq!(secret.len(), 32);
+    // What the app makes: K wrapped twice and the account sealed (here stand-in bytes), and the code's locator.
+    let backup =
+        || yo::YoBackup { by_passkey: vec![1; 60], by_code: vec![2; 60], sealed: vec![3; 200], locator: vec![4; 16] };
+    old.put_backup(backup()).unwrap();
+    // A new phone: the record by the locator, then the name registered again with the account key it holds.
+    let found = yo::fetch_backup(app(), vec![4; 16]).unwrap().unwrap();
+    assert_eq!(
+        (found.by_passkey, found.by_code, found.sealed, found.locator),
+        (vec![1; 60], vec![2; 60], vec![3; 200], vec![4; 16])
+    );
+    assert!(yo::fetch_backup(app(), vec![5; 16]).unwrap().is_none());
+    assert!(matches!(register(None), Err(yo::YoError::Refused { status: 409 })));
+    let new = register(Some(secret)).unwrap();
+    assert_eq!(new.user_id(), old.user_id());
+    assert!(matches!(old.sync(0), Err(yo::YoError::Replaced)));
+    assert!(yo::fetch_backup(app(), hex(&new.user_id())).unwrap().is_some(), "by the user id too");
+}
+
+fn hex(text: &str) -> Vec<u8> {
+    (0..text.len() / 2).map(|i| u8::from_str_radix(&text[2 * i..2 * i + 2], 16).unwrap()).collect()
+}
+
+#[test]
 fn the_app_layer_works_end_to_end() {
     let hub = TestHub::start();
     let n = random_u64() % 1_000_000_000;

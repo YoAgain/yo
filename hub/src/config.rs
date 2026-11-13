@@ -19,9 +19,14 @@ pub struct Limits {
     pub max_pending_per_device: u32,
     pub groups_per_ip_hour: u32,
     pub commit_per_ip_minute: u32,
-    /// Registrations without a number, where they are switched on.
+    /// Registrations by username: first come, first served, this many per address (spec 6.4).
     pub register_per_ip_hour: u32,
+    /// Backup records fetched: by the user id or a locator, neither of which can be guessed (spec 7).
+    pub backup_per_ip_hour: u32,
     pub envelope_ttl_days: u64,
+    /// A user without a backup record whose devices made no request for this long is removed with its name
+    /// (spec 6.4).
+    pub unsecured_idle_days: u64,
 }
 
 impl Default for Limits {
@@ -38,7 +43,9 @@ impl Default for Limits {
             groups_per_ip_hour: 60,
             commit_per_ip_minute: 600,
             register_per_ip_hour: 10,
+            backup_per_ip_hour: 10,
             envelope_ttl_days: 30,
+            unsecured_idle_days: 90,
         }
     }
 }
@@ -58,7 +65,9 @@ impl Limits {
             groups_per_ip_hour: u32::MAX,
             commit_per_ip_minute: u32::MAX,
             register_per_ip_hour: u32::MAX,
+            backup_per_ip_hour: u32::MAX,
             envelope_ttl_days: 30,
+            unsecured_idle_days: 90,
         }
     }
 }
@@ -95,8 +104,6 @@ pub struct Config {
     pub phone_secret: [u8; 32],
     /// Take the client's address from `CF-Connecting-IP`: only behind Cloudflare.
     pub trust_cloudflare: bool,
-    /// `POST /v1/register`: accounts without a number (spec 6.4). Off unless switched on.
-    pub open_registration: bool,
     /// Apps allowed to make passkeys for this hub's domain (`TEAMID.bundle.id`), served as
     /// `/.well-known/apple-app-site-association`; none, no such file.
     pub apple_app_ids: Vec<String>,
@@ -107,14 +114,12 @@ pub struct Config {
 }
 
 impl Config {
-    /// A hub for tests: in memory, dev SMS code "000000", registration without a number on, no rate limits, no push
-    /// services.
+    /// A hub for tests: in memory, dev SMS code "000000", no rate limits, no push services.
     pub fn for_tests() -> Self {
         Config {
             db_path: ":memory:".into(),
             phone_secret: [7; 32],
             trust_cloudflare: false,
-            open_registration: true,
             apple_app_ids: Vec::new(),
             limits: Limits::unlimited(),
             sms: SmsConfig::Dev { code: "000000".into() },

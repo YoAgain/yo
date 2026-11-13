@@ -12,7 +12,7 @@ pub mod state;
 
 pub use error::{Error, Result};
 pub use net::{Response, Transport};
-pub use yo_wire::api::Push;
+pub use yo_wire::api::{Backup, Push};
 pub use yo_wire::content::Content;
 
 use ed25519_dalek::{Signer as _, SigningKey};
@@ -241,10 +241,13 @@ impl Client {
         Ok(client)
     }
 
-    /// Registers this device as a new account with only a username (spec 6.4): where the hub switches it on.
+    /// Registers this device with a username (spec 6.4). Without `account_secret`, a new account with a new account
+    /// key: the name must be free. With the account key from the backup (spec 7), the name's user again: the user id
+    /// is the same, its other devices are replaced. `409` when the name is taken (or the key is another's).
     pub fn register_username(
         transport: Arc<dyn Transport>,
         username: &str,
+        account_secret: Option<[u8; 32]>,
         name: Option<String>,
         push: Push,
     ) -> Result<Client> {
@@ -252,7 +255,7 @@ impl Client {
         if handle.kind != KIND_USERNAME {
             return Err(Error::Protocol("not a username"));
         }
-        let account = SigningKey::from_bytes(&identity::random());
+        let account = SigningKey::from_bytes(&account_secret.unwrap_or_else(identity::random));
         let (mut client, device) = Client::new_device(transport, &handle, account, name, push)?;
         let request = api::Register { username: handle.value.clone(), device };
         client.registered(api::REGISTER, &encode(&request))?;
@@ -272,10 +275,44 @@ impl Client {
         Self::register_with_key(transport, phone_input, code, None, Push::none(), account)
     }
 
-    /// For tests: the account key's secret, to make another device under it.
+    /// For tests: any request, signed by this device, as only a broken client would send it.
     #[cfg(feature = "testing")]
+    pub fn signed_for_tests(&mut self, method: &str, path: &str, body: &[u8]) -> Result<Response> {
+        self.signed(method, path, body)
+    }
+
+    /// The account key's secret (Ed25519 seed): what the backup seals (spec 7), so a new phone registers with it.
     pub fn account_secret(&self) -> [u8; 32] {
         self.state.account_secret
+    }
+
+    /// Stores the account's backup record at the hub (spec 7), replacing the one before: its old locator finds
+    /// nothing from then on. `409` when another account's record has this locator.
+    pub fn put_backup(&mut self, backup: &api::Backup) -> Result<()> {
+        backup.check()?;
+        let response = self.signed("PUT", api::BACKUP, &encode(backup))?;
+        match response.status {
+            status::NO_CONTENT => Ok(()),
+            _ => Err(refused(&response)),
+        }
+    }
+
+    /// Fetches a backup record by the user id (a passkey's user handle) or by the recovery code's locator (spec 7),
+    /// before there is an account on this phone; `None` when there is none.
+    pub fn fetch_backup(transport: &dyn Transport, id: &[u8]) -> Result<Option<api::Backup>> {
+        if id.len() != api::LOCATOR_LEN {
+            return Err(Error::Protocol("backup id"));
+        }
+        let response = transport.request("GET", &api::backup_path(id), &[], &[]).map_err(Error::Network)?;
+        match response.status {
+            status::OK => {
+                let backup: api::Backup = decode(&response.body)?;
+                backup.check()?;
+                Ok(Some(backup))
+            }
+            status::NOT_FOUND => Ok(None),
+            _ => Err(refused(&response)),
+        }
     }
 
     /// A device's keys, certificate and first KeyPackages, and the proof of possession over the handle it registers

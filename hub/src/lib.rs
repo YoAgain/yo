@@ -142,6 +142,9 @@ impl Hub {
             .route("/", get(|| async { axum::response::Html(include_str!("index.html")) }))
             .route(api::VERIFY_START, post(verify_start))
             .route(api::VERIFY_CHECK, post(verify_check))
+            .route(api::REGISTER, post(register))
+            .route(api::BACKUP, put(put_backup))
+            .route("/v1/backup/{id}", get(fetch_backup))
             .route(api::KEY_PACKAGES, put(key_packages))
             .route(api::LOOKUP, post(lookup))
             .route(api::PUSH, put(set_push))
@@ -152,9 +155,6 @@ impl Hub {
             .route(api::GROUPS, post(create_group))
             .route("/v1/groups/{group}/commit", post(commit))
             .route("/v1/groups/{group}/commits/{epoch}", get(fetch_commit));
-        if self.config.open_registration {
-            router = router.route(api::REGISTER, post(register));
-        }
         if !self.config.apple_app_ids.is_empty() {
             // Which apps may make passkeys for this domain (Apple reads it through its CDN; spec 7).
             let file = serde_json::json!({ "webcredentials": { "apps": self.config.apple_app_ids } }).to_string();
@@ -167,6 +167,17 @@ impl Hub {
             );
         }
         router.layer(DefaultBodyLimit::max(limits::MAX_BODY)).with_state(self.clone())
+    }
+
+    /// The hourly cleanup at `now`: envelopes and commits past their time (6.6), names not secured past theirs (6.4).
+    pub fn prune(&self, now: u64) -> rusqlite::Result<()> {
+        let limits = &self.config.limits;
+        self.db.prune(now, limits.envelope_ttl_days * DAY.as_millis() as u64)?;
+        let released = self.db.release_unsecured(now, limits.unsecured_idle_days * DAY.as_millis() as u64)?;
+        if released > 0 {
+            eprintln!("yo-hub: {released} names not secured released");
+        }
+        Ok(())
     }
 
     /// Serves until `shutdown` resolves; prunes meanwhile.
@@ -184,8 +195,7 @@ impl Hub {
                 pruning.replay.forget_expired(now_ms());
                 if minutes.is_multiple_of(60) {
                     pruning.limiter.forget_idle(DAY);
-                    let ttl = pruning.config.limits.envelope_ttl_days * 24 * 3600 * 1000;
-                    if let Err(error) = pruning.db.prune(now_ms(), ttl) {
+                    if let Err(error) = pruning.prune(now_ms()) {
                         eprintln!("yo-hub: prune: {error}");
                     }
                 }
@@ -272,7 +282,10 @@ impl Hub {
         if !self.replay.first_time(signature, now, time + limits::MAX_SKEW_MS + 1) {
             return Err(unauthorized());
         }
-        self.db.touch(&device_id, now)?;
+        // When a device was last seen counts only to the day (spec 6.4): one write a day, not one per request.
+        if now.saturating_sub(device.last_seen_at) >= DAY.as_millis() as u64 {
+            self.db.touch(&device_id, now)?;
+        }
         Ok(Signed { device_id, user_id: device.user_id, device_key: device.device_key })
     }
 
@@ -330,7 +343,7 @@ impl Hub {
     fn register_checked(
         &self,
         handle: &Handle,
-        create_only: bool,
+        by_key: bool,
         checked: (Key, NewDevice, Vec<StoredKeyPackage>, StoredKeyPackage),
     ) -> Res<(StatusCode, Vec<u8>)> {
         let (account_key, device, key_packages, last_resort) = checked;
@@ -339,7 +352,7 @@ impl Hub {
         let written = self.db.register(
             handle.kind,
             &self.stored_handle(handle),
-            create_only,
+            by_key,
             &fresh,
             &account_key,
             &device,
@@ -439,7 +452,8 @@ async fn verify_check(
     hub.register_checked(&handle, false, checked)
 }
 
-/// An account without a number (spec 6.4): routed only where the configuration switches it on.
+/// A username is all it takes (spec 6.4): first come, first served, limited per address. The name's user again with
+/// its current account key (a new phone restored from the backup), else `409`.
 async fn register(
     State(hub): Hubs,
     ConnectInfo(peer): Peer,
@@ -452,6 +466,33 @@ async fn register(
     handle.check()?;
     let checked = hub.check_new_device(&handle, &request.device)?;
     hub.register_checked(&handle, true, checked)
+}
+
+// ---- backups (spec 7) ----
+
+/// Stores the signing device's account's backup record, replacing the one before.
+async fn put_backup(State(hub): Hubs, method: Method, uri: Uri, headers: HeaderMap, body: Bytes) -> Res<StatusCode> {
+    let device = hub.authenticate(&method, &uri, &headers, &body)?;
+    let backup: api::Backup = decode(&body)?;
+    backup.check()?;
+    let locator = backup.locator();
+    match hub.db.put_backup(&device.user_id, locator.as_ref().map(|l| &l[..]), &body, now_ms())? {
+        Write::Done(()) => Ok(StatusCode::NO_CONTENT),
+        Write::Refused(_) => Err(refuse(StatusCode::CONFLICT)),
+    }
+}
+
+/// A backup record by its user id or locator, to whoever asks: it opens only with the passkey or the recovery code.
+async fn fetch_backup(
+    State(hub): Hubs,
+    ConnectInfo(peer): Peer,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+) -> Res<(StatusCode, Vec<u8>)> {
+    hub.limit(format!("backup:ip:{}", hub.ip(peer, &headers)), hub.config.limits.backup_per_ip_hour, HOUR)?;
+    let id: [u8; api::LOCATOR_LEN] = path_id(&id)?;
+    let record = hub.db.backup(&id)?.ok_or_else(|| refuse(StatusCode::NOT_FOUND))?;
+    Ok(ok(record))
 }
 
 // ---- what a device asks for itself ----
@@ -506,7 +547,8 @@ async fn set_username(State(hub): Hubs, method: Method, uri: Uri, headers: Heade
     if let Some(name) = &request.username {
         Handle { kind: KIND_USERNAME, value: name.clone() }.check()?;
     }
-    let stored = request.username.as_ref().map(|n| hub.stored_handle(&Handle { kind: KIND_USERNAME, value: n.clone() }));
+    let stored =
+        request.username.as_ref().map(|n| hub.stored_handle(&Handle { kind: KIND_USERNAME, value: n.clone() }));
     match hub.db.set_username(&device.user_id, stored.as_deref())? {
         Write::Done(()) => Ok(StatusCode::NO_CONTENT),
         Write::Refused(_) => Err(refuse(StatusCode::CONFLICT)),

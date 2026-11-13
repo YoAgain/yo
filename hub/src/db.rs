@@ -18,6 +18,8 @@ pub struct Device {
     pub user_id: UserId,
     pub device_key: Key,
     pub auth_key: Key,
+    /// When it last made a request, to the day (`touch`).
+    pub last_seen_at: u64,
 }
 
 pub struct NewDevice {
@@ -79,6 +81,8 @@ pub enum Conflict {
     /// The account key is, or was, another user's.
     KeyTaken,
     UsernameTaken,
+    /// Another user's backup has this locator.
+    LocatorTaken,
 }
 
 pub enum Write<T> {
@@ -157,6 +161,14 @@ CREATE TABLE IF NOT EXISTS commits (
     PRIMARY KEY (group_id, epoch)
 ) WITHOUT ROWID;
 CREATE INDEX IF NOT EXISTS commits_by_age ON commits(accepted_at);
+-- Each user's backup record (spec 7), as the client sent it: found by the user id or by its locator. A user with one
+-- has secured the name, which is then never released (spec 6.4).
+CREATE TABLE IF NOT EXISTS backups (
+    user_id BLOB PRIMARY KEY REFERENCES users(id),
+    locator BLOB UNIQUE,
+    record BLOB NOT NULL,
+    updated_at INTEGER NOT NULL
+) WITHOUT ROWID;
 ";
 
 fn array<const N: usize>(bytes: Vec<u8>) -> rusqlite::Result<[u8; N]> {
@@ -197,6 +209,21 @@ fn insert_key_packages(
         insert.execute(params![device, key_package.data, last])?;
     }
     Ok(None)
+}
+
+/// Removes a user's devices with their KeyPackages and envelopes. Their own requests answer 410 from then on.
+fn retire_devices(tx: &Transaction<'_>, user: &UserId, now: u64) -> rusqlite::Result<()> {
+    let devices: Vec<Vec<u8>> = tx
+        .prepare_cached("SELECT id FROM devices WHERE user_id = ?1")?
+        .query_map([user], |row| row.get(0))?
+        .collect::<Result<_, _>>()?;
+    for id in &devices {
+        tx.execute("INSERT OR REPLACE INTO gone (id, gone_at) VALUES (?1, ?2)", params![id, now])?;
+        tx.execute("DELETE FROM key_packages WHERE device_id = ?1", [id])?;
+        tx.execute("DELETE FROM messages WHERE device_id = ?1", [id])?;
+        tx.execute("DELETE FROM devices WHERE id = ?1", [id])?;
+    }
+    Ok(())
 }
 
 /// The schema this hub writes. A database of another (or a pre-release) schema is refused, never half migrated.
@@ -241,12 +268,13 @@ impl Db {
 
     pub fn device(&self, device: &DeviceId) -> rusqlite::Result<Option<Device>> {
         self.conn()
-            .prepare_cached("SELECT user_id, device_key, auth_key FROM devices WHERE id = ?1")?
+            .prepare_cached("SELECT user_id, device_key, auth_key, last_seen_at FROM devices WHERE id = ?1")?
             .query_row([device], |row| {
                 Ok(Device {
                     user_id: array(row.get(0)?)?,
                     device_key: array(row.get(1)?)?,
                     auth_key: array(row.get(2)?)?,
+                    last_seen_at: row.get::<_, i64>(3)? as u64,
                 })
             })
             .optional()
@@ -270,16 +298,16 @@ impl Db {
             .optional()
     }
 
-    /// Registers a device for the user a handle names (spec 6.4). A phone number keeps its user (a new phone keeps the
-    /// user id) or gets `fresh`; a username registration (`create_only`) always makes a new user and fails if the name
-    /// is taken. The account key becomes the user's current key and stays the user's forever. The user's earlier
-    /// devices are replaced.
+    /// Registers a device for the user a handle names (spec 6.4). A free handle makes a new user, `fresh`. A phone
+    /// number keeps its user (a new phone keeps the user id). A username (`by_key`) is its user's again only with the
+    /// user's current account key (a new phone restored from the backup); with any other it is taken. The account key
+    /// becomes the user's current key and stays the user's forever. The user's earlier devices are replaced.
     #[allow(clippy::too_many_arguments)]
     pub fn register(
         &self,
         handle_kind: u8,
         handle_value: &[u8],
-        create_only: bool,
+        by_key: bool,
         fresh: &UserId,
         account_key: &Key,
         device: &NewDevice,
@@ -302,7 +330,16 @@ impl Db {
             .query_row(params![handle_kind, handle_value], |row| array(row.get(0)?))
             .optional()?;
         let user = match holder {
-            Some(_) if create_only => return Ok(Write::Refused(Conflict::UsernameTaken)),
+            Some(user) if by_key => {
+                let current: Option<Key> = tx
+                    .prepare_cached("SELECT account_key FROM users WHERE id = ?1")?
+                    .query_row([&user], |row| array(row.get(0)?))
+                    .optional()?;
+                if current != Some(*account_key) {
+                    return Ok(Write::Refused(Conflict::UsernameTaken));
+                }
+                user
+            }
             Some(user) => user,
             None => *fresh,
         };
@@ -313,16 +350,7 @@ impl Db {
         if key_owner.is_some_and(|owner| owner != user) {
             return Ok(Write::Refused(Conflict::KeyTaken));
         }
-        let old: Vec<Vec<u8>> = tx
-            .prepare_cached("SELECT id FROM devices WHERE user_id = ?1")?
-            .query_map([&user], |row| row.get(0))?
-            .collect::<Result<_, _>>()?;
-        for id in &old {
-            tx.execute("INSERT OR REPLACE INTO gone (id, gone_at) VALUES (?1, ?2)", params![id, now])?;
-            tx.execute("DELETE FROM key_packages WHERE device_id = ?1", [id])?;
-            tx.execute("DELETE FROM messages WHERE device_id = ?1", [id])?;
-            tx.execute("DELETE FROM devices WHERE id = ?1", [id])?;
-        }
+        retire_devices(&tx, &user, now)?;
         tx.execute(
             "INSERT INTO users (id, account_key, created_at) VALUES (?1, ?2, ?3)
              ON CONFLICT (id) DO UPDATE SET account_key = excluded.account_key",
@@ -424,6 +452,49 @@ impl Db {
         }
         tx.commit()?;
         Ok(Some(Found { user_id: user, account_key, device_keys, key_packages }))
+    }
+
+    // ---- backups ----
+
+    /// Stores a user's backup record, replacing the one before: the old locator finds nothing from then on.
+    pub fn put_backup(
+        &self,
+        user: &UserId,
+        locator: Option<&[u8]>,
+        record: &[u8],
+        now: u64,
+    ) -> rusqlite::Result<Write<()>> {
+        let mut conn = self.conn();
+        let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        if let Some(locator) = locator {
+            let holder: Option<UserId> = tx
+                .prepare_cached("SELECT user_id FROM backups WHERE locator = ?1")?
+                .query_row([locator], |row| array(row.get(0)?))
+                .optional()?;
+            if holder.is_some_and(|holder| holder != *user) {
+                return Ok(Write::Refused(Conflict::LocatorTaken));
+            }
+        }
+        tx.prepare_cached(
+            "INSERT INTO backups (user_id, locator, record, updated_at) VALUES (?1, ?2, ?3, ?4)
+             ON CONFLICT (user_id) DO UPDATE SET
+                 locator = excluded.locator, record = excluded.record, updated_at = excluded.updated_at",
+        )?
+        .execute(params![user, locator, record, now])?;
+        tx.commit()?;
+        Ok(Write::Done(()))
+    }
+
+    /// A backup record by its user id or, failing that, by its locator. The user id comes first: a locator someone
+    /// chose to be another's user id never hides that user's record.
+    pub fn backup(&self, id: &[u8]) -> rusqlite::Result<Option<Vec<u8>>> {
+        self.conn()
+            .prepare_cached(
+                "SELECT record FROM (SELECT record, 0 AS rank FROM backups WHERE user_id = ?1
+                 UNION ALL SELECT record, 1 FROM backups WHERE locator = ?1) ORDER BY rank LIMIT 1",
+            )?
+            .query_row([id], |row| row.get(0))
+            .optional()
     }
 
     // ---- KeyPackages and push ----
@@ -620,5 +691,121 @@ impl Db {
         conn.execute("DELETE FROM commits WHERE accepted_at < ?1", [before])?;
         conn.execute("DELETE FROM gone WHERE gone_at < ?1", [now.saturating_sub(365 * 24 * 3600 * 1000) as i64])?;
         Ok(messages)
+    }
+
+    /// Releases names not secured (spec 6.4): removes every user without a backup record none of whose devices made
+    /// a request for `idle_ms`, with its handles and account keys. Its devices answer 410 from then on. Returns how
+    /// many users were removed.
+    pub fn release_unsecured(&self, now: u64, idle_ms: u64) -> rusqlite::Result<usize> {
+        let mut conn = self.conn();
+        let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let before = now.saturating_sub(idle_ms) as i64;
+        let idle: Vec<UserId> = tx
+            .prepare_cached(
+                "SELECT id FROM users WHERE created_at < ?1
+                 AND NOT EXISTS (SELECT 1 FROM backups WHERE user_id = users.id)
+                 AND NOT EXISTS (SELECT 1 FROM devices WHERE user_id = users.id AND last_seen_at >= ?1)",
+            )?
+            .query_map([before], |row| array(row.get(0)?))?
+            .collect::<Result<_, _>>()?;
+        for user in &idle {
+            retire_devices(&tx, user, now)?;
+            tx.execute("DELETE FROM handles WHERE user_id = ?1", [user])?;
+            tx.execute("DELETE FROM account_keys WHERE user_id = ?1", [user])?;
+            tx.execute("DELETE FROM users WHERE id = ?1", [user])?;
+        }
+        tx.commit()?;
+        Ok(idle.len())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const DAY: u64 = 24 * 3600 * 1000;
+
+    fn device(n: u8) -> NewDevice {
+        NewDevice {
+            device_id: [n; 16],
+            device_key: [n; 32],
+            auth_key: [n; 32],
+            push_platform: 0,
+            push_token: Vec::new(),
+        }
+    }
+
+    /// Registers device `n` for a username with account key `key`.
+    fn register(db: &Db, name: &[u8], key: u8, n: u8, now: u64) -> Write<UserId> {
+        let last_resort = StoredKeyPackage { hash: [n; 32], data: vec![n] };
+        db.register(KIND_USERNAME, name, true, &[n; 16], &[key; 32], &device(n), &[], &last_resort, now).unwrap()
+    }
+
+    fn user(written: Write<UserId>) -> UserId {
+        match written {
+            Write::Done(user) => user,
+            Write::Refused(conflict) => panic!("{conflict:?}"),
+        }
+    }
+
+    #[test]
+    fn a_username_is_its_users_again_only_with_the_current_key() {
+        let db = Db::open(":memory:").unwrap();
+        let first = user(register(&db, b"LEO", 1, 1, 0));
+        assert!(matches!(register(&db, b"LEO", 2, 2, 0), Write::Refused(Conflict::UsernameTaken)));
+        // A new phone with the account key from the backup: the same user, the old device gone.
+        assert_eq!(user(register(&db, b"LEO", 1, 3, 0)), first);
+        assert!(db.device(&[1; 16]).unwrap().is_none());
+        assert!(db.is_gone(&[1; 16]).unwrap());
+        assert_eq!(db.device(&[3; 16]).unwrap().unwrap().user_id, first);
+        // The key cannot take a free name as another user.
+        assert!(matches!(register(&db, b"MIA", 1, 4, 0), Write::Refused(Conflict::KeyTaken)));
+    }
+
+    #[test]
+    fn backups_are_found_by_user_id_or_current_locator() {
+        let db = Db::open(":memory:").unwrap();
+        let a = user(register(&db, b"ANA", 1, 1, 0));
+        let b = user(register(&db, b"BEN", 2, 2, 0));
+        let found = |id: &[u8]| db.backup(id).unwrap();
+        assert!(found(&a).is_none());
+        assert!(matches!(db.put_backup(&a, Some(&[9; 16]), b"one", 0).unwrap(), Write::Done(())));
+        assert_eq!(found(&a).as_deref(), Some(&b"one"[..]));
+        assert_eq!(found(&[9; 16]).as_deref(), Some(&b"one"[..]));
+        // Another user cannot take the locator.
+        let taken = db.put_backup(&b, Some(&[9; 16]), b"two", 0).unwrap();
+        assert!(matches!(taken, Write::Refused(Conflict::LocatorTaken)));
+        // A new record with a new locator: the old one finds nothing.
+        db.put_backup(&a, Some(&[8; 16]), b"three", 0).unwrap();
+        assert!(found(&[9; 16]).is_none());
+        assert_eq!(found(&[8; 16]).as_deref(), Some(&b"three"[..]));
+        // A locator chosen to be another's user id does not hide that user's record.
+        db.put_backup(&b, Some(&a), b"four", 0).unwrap();
+        assert_eq!(found(&a).as_deref(), Some(&b"three"[..]));
+        // Without a locator: by the user id only.
+        db.put_backup(&a, None, b"five", 0).unwrap();
+        assert!(found(&[8; 16]).is_none());
+        assert_eq!(found(&a).as_deref(), Some(&b"five"[..]));
+    }
+
+    #[test]
+    fn names_not_secured_are_released_after_the_idle_time() {
+        let db = Db::open(":memory:").unwrap();
+        let idle = user(register(&db, b"IDLE", 1, 1, 0));
+        let secured = user(register(&db, b"SAFE", 2, 2, 0));
+        let active = user(register(&db, b"BUSY", 3, 3, 0));
+        db.put_backup(&secured, None, b"record", 0).unwrap();
+        db.touch(&[3; 16], 50 * DAY).unwrap();
+        let exists = |user: &UserId| db.lookup(KIND_USER, user, false, &[]).unwrap().is_some();
+        assert_eq!(db.release_unsecured(89 * DAY, 90 * DAY).unwrap(), 0);
+        assert_eq!(db.release_unsecured(91 * DAY, 90 * DAY).unwrap(), 1);
+        assert!(!exists(&idle));
+        assert!(db.is_gone(&[1; 16]).unwrap(), "its device learns that it was removed");
+        assert!(exists(&secured) && exists(&active));
+        // The name is free for anyone now, and so is the key.
+        user(register(&db, b"IDLE", 4, 4, 91 * DAY));
+        user(register(&db, b"OTHER", 1, 5, 91 * DAY));
+        assert_eq!(db.release_unsecured(200 * DAY, 90 * DAY).unwrap(), 3, "BUSY and the two new ones, never SAFE");
+        assert!(exists(&secured));
     }
 }

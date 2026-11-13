@@ -21,4 +21,6 @@ fuzz_target!(|data: &[u8]| {
     canonical::<GroupCreate>(data);
     canonical::<Commit>(data);
     canonical::<Epoch>(data);
+    canonical::<Register>(data);
+    canonical::<Backup>(data);
 });

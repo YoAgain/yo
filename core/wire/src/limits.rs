@@ -24,3 +24,7 @@ pub const MAX_PUSH_TOKEN_LEN: usize = 512;
 pub const MAX_CODE_LEN: usize = 12;
 /// The most devices a lookup answers with.
 pub const MAX_DEVICES: usize = 16;
+/// The largest wrapped K in a backup record: its 32 bytes with ChaCha20-Poly1305's nonce and tag are 60.
+pub const MAX_BACKUP_WRAP_LEN: usize = 256;
+/// The largest sealed part of a backup record: the account and its friends, and the record still one request.
+pub const MAX_BACKUP_SEALED_LEN: usize = 60 * 1024;
