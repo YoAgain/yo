@@ -53,21 +53,26 @@ struct Onboarding: View {
   // MARK: Welcome
 
   /// The logo with the 2014 tagline, then the usual pair at the bottom: "Start" for a new name, "Sign In" under it.
+  /// The logo is the first of the pages swiped through above the pair (Intro.swift), as in the original.
   private var welcome: some View {
     VStack(spacing: 0) {
-      Spacer()
-      Text("Yo")
-        .font(.yo(150))
-      Text("It's that simple.")
-        .font(.yo(20))
-        .opacity(0.85)
-      Spacer()
-      PrimaryButton("Start") { go(.name) }
-      Button("Sign In") { go(.logIn) }
-        .font(.yo(18))
-        .padding(.top, 18)
+      Intro {
+        VStack(spacing: 0) {
+          Text("Yo")
+            .font(.yo(150))
+          Text("It's that simple.")
+            .font(.yo(20))
+            .opacity(0.85)
+        }
+      }
+      VStack(spacing: 0) {
+        PrimaryButton("Start") { go(.name) }
+        Button("Sign In") { go(.logIn) }
+          .font(.yo(18))
+          .padding(.top, 18)
+      }
+      .padding(.horizontal, 28)
     }
-    .padding(.horizontal, 28)
     .padding(.bottom, 16)
     .disabled(busy)
     .task {
