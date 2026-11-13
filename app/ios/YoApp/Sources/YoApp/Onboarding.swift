@@ -1,6 +1,10 @@
-// The way in, as the original's: a name, and you are in. Start → your name → a passkey saves it (one tap; if it
-// cannot, 12 words to write down) → the list. "I have Yo" brings an account back on a new phone: the passkey, or the
-// name and its 12 words.
+// The way in. Start → a name → a passkey saves it (one tap; if it cannot, 12 words, best saved to Photos) → the
+// list. "Log In" brings an account from before: a passkey, or the name and its 12 words; a passkey on this phone is
+// offered by the system at once.
+//
+// Every step after the welcome is the same page, as Apple's setup screens are: a title and one line at the top, the
+// content in the middle, the button at the bottom over the full width, a text button under it if there is a second
+// way, back at the top left.
 import Photos
 import SwiftUI
 
@@ -8,14 +12,13 @@ struct Onboarding: View {
   @Environment(AccountStore.self) private var accounts
 
   private enum Step: Equatable {
-    case welcome, name, code([String]), confirm([String]), restore
+    case welcome, name, code([String]), confirm([String]), logIn
   }
 
   @State private var step = Step.welcome
   @State private var name = ""
   @State private var busy = false
   @State private var problem: String?
-  @FocusState private var typing: Bool
   /// The quiet look for a passkey on this phone happens once, not each time the welcome comes back.
   @State private var looked = false
 
@@ -27,8 +30,8 @@ struct Onboarding: View {
         case .welcome: welcome
         case .name: naming
         case .code(let words): code(words)
-        case .confirm(let words): ConfirmCode(words: words) { accounts.confirm() }
-        case .restore: RestoreWithCode(name: name) { go(.name) }
+        case .confirm(let words): ConfirmCode(words: words, back: { go(.code(words)) }) { accounts.confirm() }
+        case .logIn: LogIn(name: name) { go(.welcome) }
         }
       }
       .transition(.asymmetric(insertion: .move(edge: .trailing).combined(with: .opacity),
@@ -41,31 +44,20 @@ struct Onboarding: View {
 
   // MARK: Welcome
 
-  /// The logo and one button. Someone with a Yo passkey on this phone is asked by the system at once ("Sign in as
-  /// LEO?"); anyone else types a name, and if it is their own (taken), "That's me" brings it back.
+  /// The logo with the 2014 tagline, then the usual pair at the bottom: "Start" for a new name, "Log In" under it.
   private var welcome: some View {
     VStack(spacing: 0) {
       Spacer()
-      // "Just Yo", the 2015 slogan: the "Yo" exactly in the middle, "Just" small before it on its baseline, outside
-      // the layout so it moves nothing.
       Text("Yo")
         .font(.yo(150))
-        .overlay(alignment: Alignment(horizontal: .leading, vertical: .firstTextBaseline)) {
-          Text("Just")
-            .font(.yo(26))
-            .opacity(0.85)
-            .fixedSize()
-            .alignmentGuide(.leading) { $0[.trailing] + 8 }
-        }
-      note
+      Text("It's that simple.")
+        .font(.yo(20))
+        .opacity(0.85)
       Spacer()
-      // As Apple's own welcome screens: the one button at the bottom, the full width.
-      Button { go(.name) } label: {
-        Text("Continue").font(.yo(22)).frame(maxWidth: .infinity, minHeight: 40)
-      }
-      .buttonStyle(.glassProminent)
-      .tint(.white)
-      .foregroundStyle(Color.amethyst)
+      PrimaryButton("Start") { go(.name) }
+      Button("Log In") { Task { await logIn() } }
+        .font(.yo(18))
+        .padding(.top, 18)
     }
     .padding(.horizontal, 28)
     .padding(.bottom, 16)
@@ -81,135 +73,41 @@ struct Onboarding: View {
 
   private var naming: some View {
     let trouble = Username.problem(name) ?? (MockHub.isTaken(name) ? "Taken" : nil)
-    return VStack(spacing: 14) {
-      HStack {
-        Button("Back", systemImage: "chevron.backward") { go(.welcome) }
-          .labelStyle(.iconOnly)
-          .font(.title3.weight(.semibold))
-          .disabled(busy)
-        Spacer()
-      }
-      Spacer()
-      Text("YOUR NAME")
-        .font(.yo(14))
-        .tracking(3)
-        .opacity(0.7)
-      TextField("", text: $name, prompt: Text("LEO").foregroundStyle(.white.opacity(0.3)))
-        .font(.yo(52))
-        .multilineTextAlignment(.center)
-        .textInputAutocapitalization(.characters)
-        .autocorrectionDisabled()
-        .submitLabel(.next)
-        .focused($typing)
-        .onChange(of: name) { _, typed in
-          let clean = Username.clean(typed)
-          if clean != typed { name = clean }
-          problem = nil
-        }
-        .onSubmit { if trouble == nil { Task { await register() } } }
-      Text(name.isEmpty ? "How your friends find you" : (trouble ?? "✓ Yours"))
+    let mine = MockHub.isTaken(name) && !Username.reserved.contains(name)
+    return Page(title: "Choose a Name", back: { go(.welcome) }) {
+      NameField(name: $name, onSubmit: { if trouble == nil { Task { await register() } } })
+      Text(name.isEmpty ? " " : (trouble.map { $0 } ?? "Available"))
         .font(.system(size: 15, weight: .semibold))
-        .opacity(trouble == nil && !name.isEmpty ? 1 : 0.7)
-        .contentTransition(.opacity)
-      // Your own name, from before: the passkey, or else the 12 words.
-      if MockHub.isTaken(name) && !Username.reserved.contains(name) {
-        Button("That's me") { Task { await restoreWithPasskey() } }
-          .font(.yo(17))
-          .padding(.top, 4)
-          .transition(.opacity)
+        .opacity(trouble == nil ? 1 : 0.75)
+      if mine {
+        Button("This is my name") { Task { await logIn() } }.font(.yo(17))
       }
-      Spacer()
-      Button { Task { await register() } } label: {
-        Group {
-          if busy { ProgressView().tint(Color.amethyst) } else { Text("Next").font(.yo(22)) }
-        }
-        .frame(maxWidth: .infinity, minHeight: 34)
-      }
-      .buttonStyle(.glassProminent)
-      .tint(.white)
-      .foregroundStyle(Color.amethyst)
-      .disabled(trouble != nil || busy)
-      note
+    } bottom: {
+      PrimaryButton("Continue", busy: busy) { Task { await register() } }
+        .disabled(trouble != nil || busy)
+      Note(problem)
     }
-    .padding(.horizontal, 28)
-    .padding(.bottom, 12)
-    .onAppear { typing = true }
   }
 
-  // MARK: Recovery code
+  // MARK: Recovery words
 
   private func code(_ words: [String]) -> some View {
-    VStack(spacing: 22) {
-      Spacer(minLength: 12)
-      Text("Write these down")
-        .font(.yo(28))
-      Text("No passkey could keep your Yo. These 12 words bring it back on a new phone, and nothing else can.")
-        .font(.system(size: 16, weight: .medium))
-        .multilineTextAlignment(.center)
-        .opacity(0.85)
-      LazyVGrid(columns: [GridItem(.flexible()), GridItem(.flexible())], spacing: 12) {
-        ForEach(Array(words.enumerated()), id: \.offset) { index, word in
-          HStack(spacing: 8) {
-            Text("\(index + 1)").font(.system(size: 13, weight: .semibold).monospacedDigit()).opacity(0.6)
-              .frame(width: 20, alignment: .trailing)
-            Text(word).font(.yo(19))
-            Spacer(minLength: 0)
-          }
-          .padding(.vertical, 10)
-          .padding(.horizontal, 12)
-          .background(.white.opacity(0.14), in: .rect(cornerRadius: 12))
-        }
-      }
-      Spacer()
-      // The easy way: the words as a picture in Photos, and in. Or written down, and two of them typed again.
-      Button { Task { await saveToPhotos(words) } } label: {
-        Label("Save to Photos", systemImage: "photo.badge.arrow.down").font(.yo(20))
-          .frame(maxWidth: .infinity, minHeight: 34)
-      }
-      .buttonStyle(.glassProminent)
-      .tint(.white)
-      .foregroundStyle(Color.amethyst)
-      .disabled(busy)
-      Button("I wrote them down") { go(.confirm(words)) }
+    Page(title: "Save Your Words", message: "No passkey could keep your Yo. These 12 words bring it back on a new phone.") {
+      WordGrid(words: words)
+    } bottom: {
+      PrimaryButton("Save to Photos", busy: busy) { Task { await saveToPhotos(words) } }
+        .disabled(busy)
+      Button("I Wrote Them Down") { go(.confirm(words)) }
         .font(.yo(17))
-        .opacity(0.9)
-      note
-    }
-    .padding(.horizontal, 24)
-    .padding(.bottom, 12)
-  }
-
-  // MARK: Shared
-
-  @ViewBuilder private var note: some View {
-    if let problem {
-      Text(problem).font(.system(size: 14, weight: .semibold)).padding(.top, 10).transition(.opacity)
+      Note(problem)
     }
   }
+
+  // MARK: Doing
 
   private func go(_ next: Step) {
     problem = nil
     step = next
-  }
-
-  /// The 12 words as a picture in the photo library (asked once, add only); saved, the account is in use.
-  private func saveToPhotos(_ words: [String]) async {
-    busy = true
-    defer { busy = false }
-    let card = RecoveryCard(name: name, words: words)
-    let renderer = ImageRenderer(content: card)
-    renderer.scale = 3
-    guard let image = renderer.uiImage else { return problem = "Could not make the picture" }
-    let status = await PHPhotoLibrary.requestAuthorization(for: .addOnly)
-    guard status == .authorized || status == .limited else {
-      return problem = "Photos is not allowed: write them down instead"
-    }
-    do {
-      try await PHPhotoLibrary.shared().performChanges { PHAssetChangeRequest.creationRequestForAsset(from: image) }
-      accounts.confirm()
-    } catch {
-      problem = "Not saved: \(error.localizedDescription)"
-    }
   }
 
   private func register() async {
@@ -226,14 +124,156 @@ struct Onboarding: View {
     }
   }
 
-  /// "That's me": a passkey first; without one (or cancelled), the name and the 12 words.
-  private func restoreWithPasskey() async {
+  /// A passkey first (any of this domain, also on another device); without one, or cancelled, the name and words.
+  private func logIn() async {
     busy = true
     defer { busy = false }
     do {
       try await accounts.restoreWithPasskey()
     } catch {
-      go(.restore)
+      go(.logIn)
+    }
+  }
+
+  /// The 12 words as a picture in the photo library (asked once, add only); saved, the account is in use.
+  private func saveToPhotos(_ words: [String]) async {
+    busy = true
+    defer { busy = false }
+    let renderer = ImageRenderer(content: RecoveryCard(name: name, words: words))
+    renderer.scale = 3
+    guard let image = renderer.uiImage else { return problem = "Could not make the picture" }
+    let status = await PHPhotoLibrary.requestAuthorization(for: .addOnly)
+    guard status == .authorized || status == .limited else {
+      return problem = "Photos is not allowed: write them down instead"
+    }
+    do {
+      try await PHPhotoLibrary.shared().performChanges { PHAssetChangeRequest.creationRequestForAsset(from: image) }
+      accounts.confirm()
+    } catch {
+      problem = "Not saved: \(error.localizedDescription)"
+    }
+  }
+}
+
+// MARK: - The page every step shares
+
+/// Title and message at the top, the content in the middle, the buttons at the bottom; back at the top left.
+private struct Page<Content: View, Bottom: View>: View {
+  let title: String
+  var message: String?
+  var back: (() -> Void)?
+  @ViewBuilder let content: Content
+  @ViewBuilder let bottom: Bottom
+
+  var body: some View {
+    VStack(spacing: 0) {
+      HStack {
+        if let back {
+          Button("Back", systemImage: "chevron.backward", action: back)
+            .labelStyle(.iconOnly)
+            .font(.title3.weight(.semibold))
+            .frame(width: 44, height: 44, alignment: .leading)
+        }
+        Spacer()
+      }
+      .frame(height: 44)
+      VStack(spacing: 10) {
+        Text(title).font(.yo(30)).multilineTextAlignment(.center)
+        if let message {
+          Text(message).font(.system(size: 17)).multilineTextAlignment(.center).opacity(0.85)
+        }
+      }
+      .padding(.top, 24)
+      VStack(spacing: 12) { content }
+        .padding(.top, 32)
+      Spacer(minLength: 16)
+      VStack(spacing: 18) { bottom }
+    }
+    .padding(.horizontal, 24)
+    .padding(.bottom, 16)
+  }
+}
+
+/// The one button at the bottom: white glass, the full width.
+private struct PrimaryButton: View {
+  let title: String
+  var busy = false
+  let action: () -> Void
+
+  init(_ title: String, busy: Bool = false, action: @escaping () -> Void) {
+    self.title = title
+    self.busy = busy
+    self.action = action
+  }
+
+  var body: some View {
+    Button(action: action) {
+      Group {
+        if busy { ProgressView().tint(Color.amethyst) } else { Text(title).font(.yo(21)) }
+      }
+      .frame(maxWidth: .infinity, minHeight: 40)
+    }
+    .buttonStyle(.glassProminent)
+    .tint(.white)
+    .foregroundStyle(Color.amethyst)
+  }
+}
+
+/// A line for what went wrong, under the buttons; nothing when nothing did.
+private struct Note: View {
+  let text: String?
+
+  init(_ text: String?) { self.text = text }
+
+  var body: some View {
+    if let text {
+      Text(text).font(.system(size: 14, weight: .semibold)).multilineTextAlignment(.center)
+    }
+  }
+}
+
+/// A name as Yo writes them: large, in upper case, only what a username may hold.
+private struct NameField: View {
+  @Binding var name: String
+  var onSubmit: () -> Void = {}
+  @FocusState private var focused: Bool
+
+  var body: some View {
+    TextField("", text: $name, prompt: Text("NAME").foregroundStyle(.white.opacity(0.3)))
+      .font(.yo(34))
+      .multilineTextAlignment(.center)
+      .textInputAutocapitalization(.characters)
+      .autocorrectionDisabled()
+      .submitLabel(.continue)
+      .focused($focused)
+      .padding(.vertical, 14)
+      .background(.white.opacity(0.14), in: .rect(cornerRadius: 16))
+      .onChange(of: name) { _, typed in
+        let clean = Username.clean(typed)
+        if clean != typed { name = clean }
+      }
+      .onSubmit(onSubmit)
+      .onAppear { focused = true }
+  }
+}
+
+/// The 12 words, numbered, in two columns.
+private struct WordGrid: View {
+  let words: [String]
+
+  var body: some View {
+    LazyVGrid(columns: [GridItem(.flexible()), GridItem(.flexible())], spacing: 10) {
+      ForEach(Array(words.enumerated()), id: \.offset) { index, word in
+        HStack(spacing: 8) {
+          Text("\(index + 1)").font(.system(size: 13, weight: .semibold).monospacedDigit()).opacity(0.6)
+            .frame(width: 20, alignment: .trailing)
+          Text(word).font(.yo(18))
+          Spacer(minLength: 0)
+        }
+        .padding(.vertical, 10)
+        .padding(.horizontal, 12)
+        .background(.white.opacity(0.14), in: .rect(cornerRadius: 12))
+      }
     }
   }
 }
@@ -241,6 +281,7 @@ struct Onboarding: View {
 /// Two of the words typed again, so they were really written down.
 private struct ConfirmCode: View {
   let words: [String]
+  let back: () -> Void
   let done: () -> Void
   @State private var asked = Array((0..<12).shuffled().prefix(2)).sorted()
   @State private var typed = ["", ""]
@@ -248,35 +289,23 @@ private struct ConfirmCode: View {
   @FocusState private var field: Int?
 
   var body: some View {
-    VStack(spacing: 18) {
-      Spacer()
-      Text("Check").font(.yo(28))
-      Text("Type two of your words.").font(.system(size: 16, weight: .medium)).opacity(0.85)
+    Page(title: "Check Your Words", message: "Type word \(asked[0] + 1) and word \(asked[1] + 1).", back: back) {
       ForEach(0..<2, id: \.self) { i in
-        HStack {
-          Text("Word \(asked[i] + 1)").font(.system(size: 15, weight: .semibold)).opacity(0.7).frame(width: 74, alignment: .leading)
-          TextField("", text: $typed[i])
-            .font(.yo(24))
-            .textInputAutocapitalization(.never)
-            .autocorrectionDisabled()
-            .focused($field, equals: i)
-            .submitLabel(i == 0 ? .next : .done)
-            .onSubmit { if i == 0 { field = 1 } else { check() } }
-        }
-        .padding(14)
-        .background(.white.opacity(0.14), in: .rect(cornerRadius: 14))
+        TextField("", text: $typed[i], prompt: Text("Word \(asked[i] + 1)").foregroundStyle(.white.opacity(0.35)))
+          .font(.yo(22))
+          .multilineTextAlignment(.center)
+          .textInputAutocapitalization(.never)
+          .autocorrectionDisabled()
+          .focused($field, equals: i)
+          .submitLabel(i == 0 ? .next : .done)
+          .onSubmit { if i == 0 { field = 1 } else { check() } }
+          .padding(.vertical, 14)
+          .background(.white.opacity(0.14), in: .rect(cornerRadius: 16))
       }
-      Text(wrong ? "Not quite: look at your words again" : " ").font(.system(size: 14, weight: .semibold))
-      Spacer()
-      Button(action: check) {
-        Text("Done").font(.yo(22)).frame(maxWidth: .infinity, minHeight: 34)
-      }
-      .buttonStyle(.glassProminent)
-      .tint(.white)
-      .foregroundStyle(Color.amethyst)
+    } bottom: {
+      PrimaryButton("Done", action: check)
+      Note(wrong ? "Not quite: look at your words again" : nil)
     }
-    .padding(.horizontal, 28)
-    .padding(.bottom, 12)
     .onAppear { field = 0 }
     .sensoryFeedback(.error, trigger: wrong) { _, now in now }
   }
@@ -287,8 +316,8 @@ private struct ConfirmCode: View {
   }
 }
 
-/// A new phone without a passkey: the name and the 12 words.
-private struct RestoreWithCode: View {
+/// Logging in without a passkey: the name and its 12 words.
+private struct LogIn: View {
   @State var name: String
   let back: () -> Void
   @Environment(AccountStore.self) private var accounts
@@ -296,44 +325,23 @@ private struct RestoreWithCode: View {
   @State private var problem: String?
 
   var body: some View {
-    VStack(spacing: 16) {
-      HStack {
-        Button("Back", systemImage: "chevron.backward", action: back).labelStyle(.iconOnly).font(.title3.weight(.semibold))
-        Spacer()
-      }
-      Spacer()
-      Text("Welcome back").font(.yo(30))
-      TextField("", text: $name, prompt: Text("YOUR NAME").foregroundStyle(.white.opacity(0.35)))
-        .font(.yo(30))
-        .multilineTextAlignment(.center)
-        .textInputAutocapitalization(.characters)
-        .autocorrectionDisabled()
-        .onChange(of: name) { _, typed in
-          let clean = Username.clean(typed)
-          if clean != typed { name = clean }
-        }
-      TextField("", text: $words, prompt: Text("your 12 words").foregroundStyle(.white.opacity(0.35)), axis: .vertical)
-        .font(.yo(19))
+    Page(title: "Log In", message: "Your name and your 12 words.", back: back) {
+      NameField(name: $name)
+      TextField("", text: $words, prompt: Text("12 words").foregroundStyle(.white.opacity(0.35)), axis: .vertical)
+        .font(.yo(18))
         .lineLimit(3...5)
         .textInputAutocapitalization(.never)
         .autocorrectionDisabled()
         .padding(14)
-        .background(.white.opacity(0.14), in: .rect(cornerRadius: 14))
-      Text(problem ?? " ").font(.system(size: 14, weight: .semibold))
-      Spacer()
-      Button(action: restore) {
-        Text("Bring my Yo back").font(.yo(20)).frame(maxWidth: .infinity, minHeight: 34)
-      }
-      .buttonStyle(.glassProminent)
-      .tint(.white)
-      .foregroundStyle(Color.amethyst)
-      .disabled(name.isEmpty || words.isEmpty)
+        .background(.white.opacity(0.14), in: .rect(cornerRadius: 16))
+    } bottom: {
+      PrimaryButton("Log In", action: logIn)
+        .disabled(name.isEmpty || words.isEmpty)
+      Note(problem)
     }
-    .padding(.horizontal, 28)
-    .padding(.bottom, 12)
   }
 
-  private func restore() {
+  private func logIn() {
     guard let code = RecoveryCode.parse(words) else { return problem = "12 words from your list, please" }
     do {
       try accounts.restore(username: name, code: code)
@@ -343,7 +351,7 @@ private struct RestoreWithCode: View {
   }
 }
 
-/// The recovery code as a picture for Photos: the brand's purple, the name, the 12 words, what they are for.
+/// The recovery words as a picture for Photos: the brand's purple, the name, the 12 words, what they are for.
 private struct RecoveryCard: View {
   let name: String
   let words: [String]
