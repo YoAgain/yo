@@ -47,7 +47,6 @@ struct YoApp: App {
         .environment(accounts)
         .task {
           await inbox.askForNotifications()
-          await yoUpdate()
         }
         // Opening the app: the Yos waiting as notifications come in and show on their bars.
         .onChange(of: phase, initial: true) { _, phase in
@@ -57,25 +56,6 @@ struct YoApp: App {
           if let account = accounts.account { SecureReminder.update(secured: account.secured) }
         }
     }
-  }
-}
-
-extension YoApp {
-  /// "Yo Update", a friend of the mockup: a Yo from it whenever a new build of the app starts (after every
-  /// `dev/push.sh`), so a new version announces itself. Known by the app's executable changing.
-  @MainActor func yoUpdate() async {
-    let name = "Yo Update"
-    guard accounts.account != nil else { return }  // the welcome says Yo itself; the update waits for the list
-    guard let url = Bundle.main.executableURL,
-      let built = (try? FileManager.default.attributesOfItem(atPath: url.path))?[.modificationDate] as? Date
-    else { return }
-    let key = "yoUpdate.built"
-    let stamp = built.timeIntervalSince1970
-    guard UserDefaults.standard.double(forKey: key) != stamp else { return }
-    UserDefaults.standard.set(stamp, forKey: key)
-    if !friends.all.contains(where: { $0.name == name }) { friends.add(name) }
-    try? await Task.sleep(for: .seconds(1))  // the list is on screen
-    await inbox.fakeYo(from: name, after: .zero)
   }
 }
 
@@ -97,13 +77,10 @@ final class NotificationDelegate: NSObject, UNUserNotificationCenterDelegate, Se
     return []
   }
 
-  /// "Yo back" on the notification: the Yo goes without the app opening (in the mockup: that friend's Yo comes
-  /// back after two seconds). A tap on the notification itself opens the app, where the Yo shows on its row.
+  /// A tap on the notification opens the app, where the Yo shows on its row. ("Yo back" right on it comes with push.)
   func userNotificationCenter(_ center: UNUserNotificationCenter, didReceive response: UNNotificationResponse) async {
     let sender = response.notification.request.content.userInfo["from"] as? String ?? "Unknown sender"
     switch response.actionIdentifier {
-    case Inbox.yoBack:
-      await inbox.fakeYo(from: sender, after: .seconds(2))
     case UNNotificationDefaultActionIdentifier:
       await inbox.received(id: response.notification.request.identifier, from: sender)
     default:

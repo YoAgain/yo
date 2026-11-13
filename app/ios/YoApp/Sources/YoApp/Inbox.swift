@@ -1,12 +1,12 @@
-// Yos that arrive. For now the fake ones you send yourself: one without delay shows at once; one with a delay goes
-// out as a local notification, so it comes as a push would (in front the app shows it, locked the system does).
-// A Yo may carry a photo or a video (camera mode). In the app a Yo shows on its sender's bar, not in a banner.
+// Yos, through the hub (Rust core): sent from the list, and received while the list is on screen (the inbox's long
+// wait); a push brings them otherwise (to come). In the app a Yo shows on its sender's bar, not in a banner.
 // A plain Yo is the whole message: it shows for a moment and is gone, as in the original (no unread mark). Only
 // photos and videos wait, until seen once.
 import AVFoundation
 import Observation
 import UIKit
 import UserNotifications
+import YoCore
 
 struct Arrival: Equatable, Identifiable {
   let id: String
@@ -33,8 +33,6 @@ final class Inbox {
   /// Photos and videos not yet seen, by sender, oldest first.
   private(set) var media: [String: [Arrival]] = [:]
 
-  /// Yos with a photo or video still on their way, until their notification arrives.
-  @ObservationIgnored private var onTheirWay: [String: Arrival] = [:]
 
   /// The Yo sound, a few players taking turns: every Yo sounds in full, Yos close together over each other, as the
   /// original's did (none cuts off the one before).
@@ -62,37 +60,74 @@ final class Inbox {
     _ = try? await center.requestAuthorization(options: [.alert, .sound, .badge])
   }
 
-  /// A fake Yo to yourself, as if `sender` had sent it, arriving after `delay`; with a photo (JPEG or any image
-  /// data) or a video file if one is given.
-  func fakeYo(from sender: String, after delay: Duration, photo data: Data? = nil, video: URL? = nil) async {
-    let id = UUID().uuidString
-    var photo = data.flatMap(UIImage.init(data:))?.preparingThumbnail(of: CGSize(width: 900, height: 1200))
-    if let video, photo == nil { photo = await Self.firstFrame(of: video) }
-    let arrival = Arrival(id: id, from: sender, photo: photo, video: video)
-    guard delay > .zero else { return show(arrival) }
+  // MARK: The hub
 
-    onTheirWay[id] = arrival
-    let content = UNMutableNotificationContent()
-    // The original's texts (yo-api, payload.py): "Yo from LEO", "📷 Yo Photo from LEO", "Yo Video from LEO".
-    // No picture in the notification: a photo or video is seen once, in the app.
-    content.body =
-      video != nil ? "🎥 Yo with a video from \(sender)" : photo != nil ? "📷 Yo with a photo from \(sender)" : "Yo from \(sender)"
-    content.sound = UNNotificationSound(named: UNNotificationSoundName("yo.caf"))
-    content.userInfo = ["id": id, "from": sender]
-    content.categoryIdentifier = Self.category
-    content.threadIdentifier = sender  // one stack per friend
-    let seconds = Double(delay.components.seconds) + Double(delay.components.attoseconds) / 1e18
-    let trigger = UNTimeIntervalNotificationTrigger(timeInterval: seconds, repeats: false)
-    let center = UNUserNotificationCenter.current()
-    let allowed = await [.authorized, .provisional, .ephemeral].contains(center.notificationSettings().authorizationStatus)
+  /// A Yo to a friend through the hub (spec 4.7): by user id once known, else by name (the first Yo makes the chat).
+  /// Nil when it went; else what the bar says instead.
+  func send(to friend: Friend, accounts: AccountStore, friends: Friends) async -> String? {
+    guard let client = accounts.client else { return "Not Sent" }
+    let target = friend.user ?? friend.name
     do {
-      guard allowed else { throw CancellationError() }
-      try await center.add(UNNotificationRequest(identifier: id, content: content, trigger: trigger))
+      let events = try await Hub.run { try client.sendYo(to: target) }
+      if friend.user == nil, let contact = client.contacts().first(where: { contact in
+        contact.handles.contains { Username.skeleton($0) == Username.skeleton(friend.name) }
+      }) {
+        _ = friends.friend(user: contact.user, handles: contact.handles)
+      }
+      take(events, client: client, friends: friends)
+      return nil
+    } catch YoError.NotOnYo {
+      return "Not on Yo"
+    } catch YoError.Blocked {
+      return "Blocked"
+    } catch YoError.Replaced {
+      accounts.reset()
+      return "Not Sent"
     } catch {
-      // Notifications off (or refused): the Yo still comes, in the app, after the same delay.
-      try? await Task.sleep(for: delay)
-      received(id: id, from: sender)
+      return "Not Sent"
     }
+  }
+
+  /// While the list is on screen: waits at the hub for Yos (spec 6.3, the inbox's long wait) and shows each on its
+  /// sender's bar. A pause after an error; this phone replaced elsewhere: signed out.
+  func listen(accounts: AccountStore, friends: Friends) async {
+    while !Task.isCancelled {
+      guard let client = accounts.client else {
+        try? await Task.sleep(for: .seconds(1))
+        continue
+      }
+      do {
+        let events = try await Hub.run { try client.sync(waitS: 25) }
+        take(events, client: client, friends: friends)
+      } catch YoError.Replaced {
+        accounts.reset()
+        return
+      } catch {
+        try? await Task.sleep(for: .seconds(5))
+      }
+    }
+  }
+
+  /// What the core handed over: a Yo shows on its sender's bar, a new chat brings its friend into the list. Then the
+  /// core may forget them (they will not come again after a crash).
+  private func take(_ events: [YoEvent], client: YoClient, friends: Friends) {
+    let contacts = client.contacts()
+    func friend(_ user: String) -> Friend {
+      friends.friend(user: user, handles: contacts.first { $0.user == user }?.handles ?? [])
+    }
+    for event in events {
+      switch event {
+      case .message(let user, let sentAtMs, .yo):
+        let sender = friend(user)
+        received(id: "\(user)/\(sentAtMs)", from: sender.name)
+        friends.promote(sender.name)
+      case .newChat(let user):
+        _ = friend(user)
+      default:
+        break
+      }
+    }
+    if !events.isEmpty { client.acknowledgeEvents() }
   }
 
   private static func firstFrame(of video: URL) async -> UIImage? {
@@ -105,7 +140,7 @@ final class Inbox {
   /// A Yo notification that arrived while the app is open, or was tapped.
   func received(id: String, from sender: String) {
     guard taken.insert(id).inserted else { return }
-    show(onTheirWay.removeValue(forKey: id) ?? Arrival(id: id, from: sender))
+    show(Arrival(id: id, from: sender))
   }
 
   /// On opening the app: the Yo notifications waiting in Notification Center come in, oldest first, and leave it.

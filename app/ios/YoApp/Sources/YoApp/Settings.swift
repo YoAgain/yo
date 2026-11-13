@@ -76,19 +76,7 @@ struct SettingsView: View {
           }
         }
 
-        Section {
-          Toggle(
-            isOn: Binding(
-              get: { saveSent },
-              set: { setSaveSent($0) }
-            )
-          ) {
-            Label("Keep Sent Photos", systemImage: "photo.on.rectangle").labelStyle(Tile(.blue))
-          }
-          .disabled(requestingPhotos)
-        } footer: {
-          Text("Saves photos and videos you send to your camera roll.")
-        }
+        // "Keep Sent Photos" comes back with the camera mode, once the core carries photos and videos (spec 5).
 
         // As Settings ends the Apple Account: Sign Out, red, on its own; the dialog says what happens.
         Section {

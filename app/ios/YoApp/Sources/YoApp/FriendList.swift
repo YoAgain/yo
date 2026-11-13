@@ -177,16 +177,7 @@ struct FriendList: View {
           Button("Profile", systemImage: "person.fill") { settings = true }
             .badge(accounts.toDo)
         }
-        // The camera; it turns red (Alizarin, the original's round button) while it is on.
-        ToolbarItem(placement: .topBarTrailing) {
-          if cameraOn {
-            Button("Turn Off Camera", systemImage: "camera.fill") { cameraOn = false }
-              .buttonStyle(.glassProminent)
-              .tint(.alizarin)
-          } else {
-            Button("Camera", systemImage: "camera") { cameraOn = true }
-          }
-        }
+        // The camera mode stays off until the core carries photos and videos (spec 5, a Yo's attachments): no button.
       }
     }
   }
@@ -358,16 +349,18 @@ struct FriendList: View {
     picked = nil
     libraryItem = nil
     guard cameraOn || library != nil else {
-      showSent(to: friend, "Sent Yo", thenOnTop: true) { await inbox.fakeYo(from: friend.name, after: delay) }
+      showSent(to: friend, "Sent Yo", thenOnTop: true)
+      Task {
+        if let problem = await inbox.send(to: friend, accounts: accounts, friends: friends) {
+          showSent(to: friend, problem)
+        }
+      }
       return
     }
     run(friend, "Sent 📷") {
-      if let library { return Prepared { await inbox.fakeYo(from: friend.name, after: delay, photo: library) } }
-      guard let photo = await camera.photo() else { return nil }
-      return Prepared {
-        Library.saveIfWanted(photo: photo)  // only what the camera took, not the library's
-        await inbox.fakeYo(from: friend.name, after: delay, photo: photo)
-      }
+      // Not until the core carries photos (spec 5): nothing goes, the bar says "Not Sent".
+      _ = (library, delay)
+      return nil
     }
   }
 
@@ -382,13 +375,10 @@ struct FriendList: View {
       recordingFor = nil
       sends += 1
       run(friend, "Sent 🎥") {
-        guard let video = await camera.stopVideo() else { return nil }
-        return Prepared {
-          Library.saveIfWanted(video: video)
-          await inbox.fakeYo(from: friend.name, after: delay, video: video)
-        } discard: {
-          try? FileManager.default.removeItem(at: video)
-        }
+        // Not until the core carries videos (spec 5): the recording is thrown away, the bar says "Not Sent".
+        if let video = await camera.stopVideo() { try? FileManager.default.removeItem(at: video) }
+        _ = delay
+        return nil
       }
     }
   }
@@ -504,6 +494,8 @@ extension FriendList {
   private func changes(_ content: some View) -> some View {
     content
       .onChange(of: inbox.arrivals.count) { _, count in arrived(count) }
+      // While the list is on screen: Yos come in from the hub.
+      .task { await inbox.listen(accounts: accounts, friends: friends) }
       .onChange(of: onScreen) { startClocks() }
       .onChange(of: libraryItem) { _, item in load(item) }
       .onChange(of: cameraOn) { _, on in cameraSwitched(on) }
