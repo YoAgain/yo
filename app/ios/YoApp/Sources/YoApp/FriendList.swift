@@ -783,7 +783,7 @@ struct RowButton: View {
           .padding(.leading, 10)
         }
       }
-      mark(touchable: touchable)
+      ZStack { mark(touchable: touchable) }  // always a part, so a missing "!" never takes its place
         .modifier(Knock(trigger: yo?.first))
         .opacity(touchable ? 1 : 0)
     }
@@ -906,9 +906,12 @@ struct BarLine: Layout {
   }
 
   func placeSubviews(in bounds: CGRect, proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) {
-    let words = subviews[0], after = subviews[1], end = subviews[2]
-    let afterSize = after.sizeThatFits(.unspecified)
-    let endSize = end.sizeThatFits(.unspecified)
+    // An empty part (no "!"s, no Yo at the end) is no subview at all: take what is there.
+    guard let words = subviews.first else { return }
+    let after = subviews.count > 1 ? subviews[1] : nil
+    let end = subviews.count > 2 ? subviews[2] : nil
+    let afterSize = after?.sizeThatFits(.unspecified) ?? .zero
+    let endSize = end?.sizeThatFits(.unspecified) ?? .zero
     let endX = bounds.maxX - Self.endPadding - endSize.width
     let limit = endSize.width > 0 ? endX - Self.gap : bounds.maxX - Self.margin
     let room = max(0, limit - bounds.minX - Self.margin - afterSize.width)
@@ -918,8 +921,8 @@ struct BarLine: Layout {
     x = max(bounds.minX + Self.margin, x)
     words.place(
       at: CGPoint(x: x, y: bounds.midY), anchor: .leading, proposal: ProposedViewSize(width: wordsWidth, height: nil))
-    after.place(at: CGPoint(x: x + wordsWidth, y: bounds.midY), anchor: .leading, proposal: .unspecified)
-    end.place(at: CGPoint(x: endX, y: bounds.midY), anchor: .leading, proposal: .unspecified)
+    after?.place(at: CGPoint(x: x + wordsWidth, y: bounds.midY), anchor: .leading, proposal: .unspecified)
+    end?.place(at: CGPoint(x: endX, y: bounds.midY), anchor: .leading, proposal: .unspecified)
   }
 }
 
