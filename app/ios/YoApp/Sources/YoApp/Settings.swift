@@ -73,13 +73,7 @@ struct SettingsView: View {
             }
             // The one open task, in the same group as you (as Settings puts suggestions under the Apple Account),
             // with the badge the profile button has too.
-            if accounts.toDo == 0 {
-              NavigationLink {
-                recoveryPage(account)
-              } label: {
-                Label("Account Secured", systemImage: "checkmark").labelStyle(Tile(.green))
-              }
-            } else {
+            if accounts.toDo > 0 {
               Button { secure(nil) } label: {
                 HStack {
                   Label("Secure Your Account", systemImage: "lock.fill").labelStyle(Tile(.orange))
@@ -123,7 +117,7 @@ struct SettingsView: View {
       .sheet(isPresented: $securing) { SecureNameSheet(start: securingStart) }
       .sheet(isPresented: $showingWords) {
         if let account = accounts.account, let words = RecoveryWords.load() {
-          RecoveryWordsSheet(name: account.username, words: words)
+          RecoveryShowSheet(name: account.username, words: words)
         }
       }
       .alert("Allow Access to Photos", isPresented: $photosDenied) {
@@ -183,7 +177,7 @@ struct SettingsView: View {
           Button("Turn Off Passkey", systemImage: "xmark.circle", role: .destructive) { turningOffPasskey = true }
             .disabled(!wordsDone)
         } label: {
-          SecurityRow(icon: "faceid", color: .green, title: "Passkey", value: "On")
+          SecurityRow(icon: "faceid", color: .green, title: "Passkey", value: "On", done: true)
         }
       } else {
         Button { secure(.passkey) } label: {
@@ -192,10 +186,10 @@ struct SettingsView: View {
       }
       if wordsDone {
         Menu {
-          Button("Show Recovery Key", systemImage: "eye") { showingWords = true }
+          Button("Show Recovery Key", systemImage: "eye") { Task { await showRecoveryKey() } }
           Button("Create New Recovery Key", systemImage: "arrow.triangle.2.circlepath") { renewingWords = true }
         } label: {
-          SecurityRow(icon: "key.fill", color: .green, title: "Recovery Key", value: "Saved")
+          SecurityRow(icon: "key.fill", color: .green, title: "Recovery Key", value: "Saved", done: true)
         }
       } else {
         Button { secure(.words) } label: {
@@ -218,62 +212,15 @@ struct SettingsView: View {
     securing = true
   }
 
-  /// What secures the account, each with what can be done to it: the passkey (Face ID) and the recovery key.
-  private func recoveryPage(_ account: Account) -> some View {
-    let hasWords = RecoveryWords.load() != nil
-    return Form {
-      Section {
-        LabeledContent {
-          Text(account.byPasskey ? "On" : "Off")
-        } label: {
-          Label("Passkey", systemImage: "faceid").labelStyle(Tile(.green))
-        }
-        if account.byPasskey {
-          Button("Replace Passkey") { Task { await replacePasskey() } }
-            .disabled(addingPasskey || !hasWords)
-          Button("Turn Off Passkey", role: .destructive) { turningOffPasskey = true }
-            .disabled(addingPasskey || !hasWords)
-        } else {
-          Button(addingPasskey ? "Turning On…" : "Turn On Passkey") { Task { await addPasskey() } }
-            .disabled(addingPasskey || !hasWords)
-        }
-      } header: {
-        Text("Passkey (Face ID)")
-      } footer: {
-        Text(account.byPasskey ? "Sign back in with Face ID on any iPhone." : "Turn on to sign back in with Face ID.")
-      }
-      Section {
-        LabeledContent {
-          Text(hasWords ? "Created" : "Not on This iPhone")
-        } label: {
-          Label("Recovery Key", systemImage: "key.fill").labelStyle(Tile(.gray))
-        }
-        if hasWords {
-          Button("Show Recovery Key") { showingWords = true }
-          Button("Create New Recovery Key") { renewingWords = true }
-        }
-      } header: {
-        Text("Recovery Key")
-      } footer: {
-        Text("12 words to sign back in without Face ID.")
-      }
-    }
-    .navigationTitle("Account Recovery")
-    .navigationBarTitleDisplayMode(.inline)
-    .disabled(addingPasskey)
-    .confirmationDialog("Turn Off Passkey?", isPresented: $turningOffPasskey, titleVisibility: .visible) {
-      Button("Turn Off Passkey", role: .destructive) { removePasskey() }
-      Button("Cancel", role: .cancel) {}
-    } message: {
-      Text("You’ll sign back in with your recovery key only. Delete the passkey in your password manager too.")
-    }
-    .confirmationDialog("Create New Recovery Key?", isPresented: $renewingWords, titleVisibility: .visible) {
-      Button("Create New Recovery Key", role: .destructive) { newWords() }
-      Button("Cancel", role: .cancel) {}
-    } message: {
-      Text("Your current 12 words will stop working.")
-    }
+  /// The words, after Face ID (or the passcode), straight on screen.
+  private func showRecoveryKey() async {
+    let context = LAContext()
+    guard (try? await context.evaluatePolicy(.deviceOwnerAuthentication, localizedReason: "Show your recovery key."))
+      == true
+    else { return }
+    showingWords = true
   }
+
 
   private func replacePasskey() async {
     addingPasskey = true
@@ -762,11 +709,15 @@ private struct SecurityRow: View {
   let color: Color
   let title: String
   let value: String
+  var done = false
 
   var body: some View {
     HStack {
       Label(title, systemImage: icon).labelStyle(Tile(color)).foregroundStyle(.primary)
       Spacer()
+      if done {
+        Image(systemName: "checkmark.circle.fill").foregroundStyle(.green).accessibilityHidden(true)
+      }
       Text(value).foregroundStyle(.secondary)
       Chevron()
     }

@@ -162,3 +162,36 @@ struct SecureNameSheet: View {
     top?.present(controller, animated: true)
   }
 }
+
+/// The recovery key from Account Security, after Face ID: the words and their QR code on the full-colour card, Save…
+/// to the share sheet, Done to close. No second "show" step.
+struct RecoveryShowSheet: View {
+  let name: String
+  let words: [String]
+  @Environment(\.dismiss) private var dismiss
+  @State private var saved = false
+
+  var body: some View {
+    ZStack {
+      Color.amethyst.ignoresSafeArea()
+      Page(title: "Recovery Key", message: "Anyone with these words can sign in as you.") {
+        RecoveryQRView(words: words, size: 80)
+        WordGrid(words: words).privacySensitive()
+      } bottom: {
+        PrimaryButton(saved ? "Done" : "Save…") {
+          if saved { return dismiss() }
+          let renderer = ImageRenderer(content: RecoveryCard(name: name, words: words))
+          renderer.scale = 3
+          var items: [Any] = ["Yo recovery key for \(name): " + words.joined(separator: " ")]
+          if let image = renderer.uiImage { items.insert(image, at: 0) }
+          Share.present(items) { completed in if completed { saved = true } }
+        }
+        Button("Done") { dismiss() }
+          .font(.yo(17))
+          .opacity(saved ? 0 : 1)
+      }
+    }
+    .foregroundStyle(.white)
+    .preferredColorScheme(.dark)
+  }
+}
