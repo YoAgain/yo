@@ -144,6 +144,31 @@ impl TryFrom<YoMedia> for yo_core::Media {
     }
 }
 
+/// A photo or video sealed under a new key: what its Yo carries, and the ciphertext to upload (spec 6.8).
+#[derive(uniffi::Record)]
+pub struct SealedMedia {
+    pub media: YoMedia,
+    pub ciphertext: Vec<u8>,
+}
+
+/// Seals a photo or video (at most 10 MiB) under a key of its own, with a new id. No client: call it anywhere.
+#[uniffi::export]
+pub fn seal_media(plain: Vec<u8>, width: u16, height: u16) -> Result<SealedMedia, YoError> {
+    let (media, ciphertext) = yo_core::media::seal(&plain, width, height)?;
+    Ok(SealedMedia { media: media.into(), ciphertext })
+}
+
+/// Whether a refusal of `upload_media` means "later" (the account's quota for now, no room at the hub, no network):
+/// keep the photo or video and try again.
+#[uniffi::export]
+pub fn media_retry_later(error: &YoError) -> bool {
+    match error {
+        YoError::Network { .. } => true,
+        YoError::Refused { status } => *status == 429 || *status == 507 || *status >= 500,
+        _ => false,
+    }
+}
+
 #[derive(uniffi::Enum)]
 pub enum MessageKind {
     Yo,
@@ -449,6 +474,42 @@ impl YoClient {
     /// Deletes the account at the hub with everything it holds about it; then forget this client and its state.
     pub fn delete_account(&self) -> Result<(), YoError> {
         Ok(self.with(|c| c.delete_account())?)
+    }
+
+    /// Uploads a sealed photo or video for the chat with `to` (opened first if there is none yet), before its Yo
+    /// (`send_photo`, `send_video`). Signed under the client, sent without it: other calls go on meanwhile.
+    /// `media_retry_later` tells which refusals mean "later". Returns what opening the chat received.
+    pub fn upload_media(&self, to: String, media: YoMedia, ciphertext: Vec<u8>) -> Result<Vec<YoEvent>, YoError> {
+        let media: yo_core::Media = media.try_into()?;
+        let (upload, received) = self.with(|c| {
+            let (fetches, received) = match c.media_fetches(&to) {
+                Some(fetches) => (fetches, Vec::new()),
+                None => c.open_chat(&to)?,
+            };
+            Ok::<_, yo_core::Error>((c.upload(&media, fetches), received))
+        })?;
+        upload.send(&ciphertext)?;
+        Ok(received.into_iter().map(Into::into).collect())
+    }
+
+    /// A Yo with a photo whose blob is uploaded.
+    pub fn send_photo(&self, to: String, media: YoMedia) -> Result<Vec<YoEvent>, YoError> {
+        let media = media.try_into()?;
+        events(self.with(|c| c.send(&to, Content::Photo(media))))
+    }
+
+    /// A Yo with a video whose blob is uploaded.
+    pub fn send_video(&self, to: String, media: YoMedia, duration_ms: u32) -> Result<Vec<YoEvent>, YoError> {
+        let media = media.try_into()?;
+        events(self.with(|c| c.send(&to, Content::Video { media, duration_ms })))
+    }
+
+    /// Fetches a photo or video a Yo carried and opens it, without holding the client; `None` when the hub no longer
+    /// has it (fetched by all its devices, or past its 30 days). Each fetch counts at the hub: keep what comes.
+    pub fn fetch_media(&self, media: YoMedia) -> Result<Option<Vec<u8>>, YoError> {
+        let media: yo_core::Media = media.try_into()?;
+        let transport = self.with(|c| c.transport());
+        Ok(yo_core::media::fetch_open(transport.as_ref(), &media)?)
     }
 }
 

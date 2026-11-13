@@ -185,3 +185,83 @@ fn the_app_layer_runs_other_calls_while_sync_waits() {
     a.send_yo(b.user_id()).unwrap();
     assert!(b.sync(0).unwrap().iter().any(|e| matches!(e, YoEvent::Message { kind: MessageKind::Yo, .. })));
 }
+
+/// The app's transport, holding blob uploads until the test lets them go.
+struct HeldUpload {
+    app: App,
+    waiting: Mutex<std::sync::mpsc::Sender<()>>,
+    release: Mutex<std::sync::mpsc::Receiver<()>>,
+}
+
+impl HttpTransport for HeldUpload {
+    fn request(&self, method: String, path: String, headers: Vec<yo::Header>, body: Vec<u8>) -> HttpResult {
+        if method == "PUT" && path.starts_with("/v1/blobs/") {
+            self.waiting.lock().unwrap().send(()).unwrap();
+            self.release.lock().unwrap().recv().unwrap();
+        }
+        self.app.request(method, path, headers, body)
+    }
+}
+
+#[test]
+fn the_app_layer_sends_a_photo_to_a_new_friend_and_yos_go_while_it_uploads() {
+    use std::sync::mpsc::channel;
+    use std::time::Duration;
+    let hub = TestHub::start();
+    let n = random_u64() % 1_000_000_000;
+    let (pa, pb, pc) = (phone(n), phone(n + 1), phone(n + 2));
+    let (waiting, waited) = channel();
+    let (release, released) = channel();
+    let held = Arc::new(HeldUpload {
+        app: App(Http::new(hub.url())),
+        waiting: Mutex::new(waiting),
+        release: Mutex::new(released),
+    });
+    yo::request_code(held.clone(), pa.clone()).unwrap();
+    let a = YoClient::register(
+        held,
+        Arc::new(File::default()),
+        vec![7; 32],
+        pa.clone(),
+        "000000".into(),
+        Some("ALICE".into()),
+        0,
+        String::new(),
+    )
+    .unwrap();
+    let b = client(&hub, &pb, "BOB", Arc::new(File::default()));
+    let c = client(&hub, &pc, "CAROL", Arc::new(File::default()));
+    // A photo to B, who has no chat with A yet: the upload opens it, and is held on its way.
+    let photo = b"JPEG".repeat(10_000);
+    let sealed = yo::seal_media(photo.clone(), 1600, 1200).unwrap();
+    let uploading = {
+        let (a, pb, media) = (a.clone(), pb.clone(), sealed.media.clone());
+        std::thread::spawn(move || a.upload_media(pb, media, sealed.ciphertext))
+    };
+    waited.recv_timeout(Duration::from_secs(30)).expect("the upload starts");
+    // Meanwhile Yos go: the upload does not hold the client.
+    let (done, finished) = channel();
+    {
+        let (a, pc) = (a.clone(), pc.clone());
+        std::thread::spawn(move || done.send(a.send_yo(pc).is_ok()).unwrap());
+    }
+    assert!(finished.recv_timeout(Duration::from_secs(30)).expect("a Yo does not wait for the upload"));
+    assert!(c.sync(0).unwrap().iter().any(|e| matches!(e, YoEvent::Message { kind: MessageKind::Yo, .. })));
+    release.send(()).unwrap();
+    uploading.join().unwrap().unwrap();
+    a.send_photo(pb.clone(), sealed.media).unwrap();
+    // B: a new chat and a Yo with a photo, opened once.
+    let events = b.sync(0).unwrap();
+    let media = events
+        .iter()
+        .find_map(|e| match e {
+            YoEvent::Message { kind: MessageKind::Photo { media }, .. } => Some(media.clone()),
+            _ => None,
+        })
+        .expect("a photo");
+    assert_eq!((media.width, media.height), (1600, 1200));
+    assert_eq!(b.fetch_media(media.clone()).unwrap(), Some(photo));
+    assert_eq!(b.fetch_media(media).unwrap(), None, "fetched by its one device: gone");
+    assert!(yo::media_retry_later(&yo::YoError::Refused { status: 507 }));
+    assert!(!yo::media_retry_later(&yo::YoError::NotOnYo));
+}

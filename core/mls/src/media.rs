@@ -121,6 +121,60 @@ impl Client {
         self.transport.clone()
     }
 
+    /// Opens the chat with `to` if there is none yet, as the first send would (a lookup, the group, the Welcome), and
+    /// answers how many fetches a photo or video to them is for (`media_fetches`). For the first photo to a new
+    /// friend: the upload needs the chat's devices before the Yo can go.
+    pub fn open_chat(&mut self, to: &str) -> Result<(u32, Vec<crate::Event>)> {
+        let result = self.open_chat_inner(to);
+        let fetches = result.as_ref().ok().copied();
+        let events = self.finish(result)?;
+        Ok((fetches.unwrap_or(1), events))
+    }
+
+    fn open_chat_inner(&mut self, to: &str) -> Result<u32> {
+        if let Some(fetches) = self.media_fetches(to) {
+            return Ok(fetches);
+        }
+        let handle = yo_wire::handle::Handle::parse(to)?;
+        if self.is_me(&handle) {
+            return Err(Error::Protocol("sending to oneself"));
+        }
+        // As a send: what waits is received first; offline, nothing can be opened.
+        self.deliver().and_then(|()| self.receive_all(0))?;
+        let mut user = self.known_user(&handle);
+        if user.is_none() && handle.kind != yo_wire::handle::KIND_USER && !self.state.contacts.is_empty() {
+            let (found, username) = self.lookup_named(&handle, false, Vec::new())?;
+            let id = crate::state::hex(&found.user_id);
+            if id == self.state.user_id {
+                return Err(Error::Protocol("sending to oneself"));
+            }
+            if let Some(contact) = self.state.contacts.get_mut(&id) {
+                crate::note_handle(contact, username.unwrap_or_else(|| handle.display()));
+            }
+            user = Some(id);
+        }
+        if let Some(contact) = user.as_ref().and_then(|u| self.state.contacts.get(u)) {
+            if contact.blocked {
+                return Err(Error::Blocked);
+            }
+            if contact.unconfirmed {
+                return Err(Error::Unconfirmed);
+            }
+        }
+        let user = match user.filter(|u| self.chat_with(u).is_some()) {
+            Some(user) => user,
+            None => self.start_chat(&handle)?.0,
+        };
+        let group = self.chat_with(&user).ok_or(Error::Internal("chat"))?;
+        // The Welcome and the profile on their way; offline, they wait in the outbox.
+        match self.deliver() {
+            Ok(()) | Err(Error::Network(_)) => {}
+            Err(error) => return Err(error),
+        }
+        let members = Self::members(&self.load(&group)?).len();
+        Ok((members.saturating_sub(1) as u32).clamp(1, MAX_BLOB_FETCHES))
+    }
+
     /// How many fetches a photo or video to `to` is for: the devices of the chat with them other than this one (their
     /// devices and the own other ones). `None` while there is no chat yet.
     pub fn media_fetches(&self, to: &str) -> Option<u32> {
