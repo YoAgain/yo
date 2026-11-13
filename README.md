@@ -2,7 +2,7 @@
 
 **One tap, one Yo — end-to-end encrypted, and the server never learns who sent it.**
 
-## Tech
+## Stack
 
 ### YoIP: Yo over IP
 
