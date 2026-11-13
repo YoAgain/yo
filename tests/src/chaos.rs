@@ -411,6 +411,10 @@ fn new_acct(w: &World, idx: usize, rng: &mut Rng) -> Option<Acct> {
 
 /// Takes in what a call returned: every message checked against the ledger, bots answer.
 fn take_events(w: &World, a: &mut Acct, events: Vec<Event>, rng: &mut Rng) {
+    // A process that died during the call never showed what it returned: it comes again after the restart.
+    if a.proc_.crashed.load(Relaxed) {
+        return;
+    }
     let mut answer = Vec::new();
     for event in events {
         let (from, tag, photo) = match event {
@@ -690,7 +694,7 @@ fn op_uploads(w: &World, a: &mut Acct, rng: &mut Rng) {
     let mut keep = Vec::new();
     for (j, m, sealed, tag) in std::mem::take(&mut a.uploads) {
         let peer = w.dir.read().unwrap_or_else(PoisonError::into_inner)[j].clone();
-        if !peer.alive || a.client.is_none() {
+        if !peer.alive || a.client.is_none() || a.blocked.contains(&peer.user) {
             continue;
         }
         let client = a.client.as_mut().unwrap();
@@ -769,6 +773,7 @@ fn op_block(w: &World, a: &mut Acct, rng: &mut Rng) {
     if block {
         match a.client.as_mut().unwrap().send(&who, Content::Text("never".into())) {
             Err(Error::Blocked) => w.stats.count("send to blocked refused"),
+            Err(Error::NotOnYo) => w.stats.count("send to a blocked contact: gone"),
             other => w.stats.violation(format!("send to a blocked contact: {:?}", other.map(|_| ()))),
         }
     }
@@ -868,6 +873,7 @@ fn op_new_phone(w: &World, a: &mut Acct, rng: &mut Rng) {
     client.persist_to(proc_.clone(), STATE_KEY);
     // What the old device had not received, or not sent, is gone with it.
     let mut old = a.client.replace(client).unwrap();
+    let old_proc = a.proc_.clone();
     {
         let me = a.user.clone();
         let pending = old.pending() > 0 || !a.uploads.is_empty();
@@ -876,10 +882,6 @@ fn op_new_phone(w: &World, a: &mut Acct, rng: &mut Rng) {
         let _ = gen;
     }
     a.uploads.clear();
-    // The ledger's view of blocks is the device's: the new one blocks nobody yet.
-    for who in std::mem::take(&mut a.blocked) {
-        w.ledger().blocks.remove(&(a.user.clone(), who));
-    }
     a.proc_ = proc_;
     a.gen += 1;
     w.stats.count("new phone");
@@ -887,6 +889,8 @@ fn op_new_phone(w: &World, a: &mut Acct, rng: &mut Rng) {
     old.stop_persisting();
     match definite(|| old.sync(0)) {
         Err(Error::Replaced) => w.stats.count("old phone: 410"),
+        // Its process died meanwhile: it asks nothing any more.
+        Err(Error::Network(_)) if old_proc.crashed.load(Relaxed) => {}
         other => w.stats.violation(format!("{}: the replaced device: {:?}", a.name, other.map(|_| ()))),
     }
 }
@@ -981,12 +985,35 @@ fn step(w: &World, a: &mut Acct, rng: &mut Rng) {
         op_uploads(w, a, rng);
         op_sync(w, a, rng);
     }
+    sync_blocks(w, a);
     if a.proc_.crashed.load(Relaxed) && a.client.is_some() {
         w.trace(&a.user, "crashed".into());
         // The process died somewhere in that step: started again from what it had saved.
         a.client = None;
         restart(w, a, rng);
     }
+}
+
+/// The blocks as the device has them: a new phone gets them back from the storage (spec 6.9), now or at its first
+/// receive. What comes from someone newly blocked may be dropped from then on.
+fn sync_blocks(w: &World, a: &mut Acct) {
+    let Some(client) = a.client.as_ref() else { return };
+    let now: BTreeSet<String> = client.contacts().into_iter().filter(|c| c.blocked).map(|c| c.user).collect();
+    if now == a.blocked {
+        return;
+    }
+    let mut ledger = w.ledger();
+    for who in a.blocked.difference(&now) {
+        ledger.blocks.remove(&(a.user.clone(), who.clone()));
+    }
+    for who in now.difference(&a.blocked) {
+        ledger.blocks.insert((a.user.clone(), who.clone()));
+        let me = a.user.clone();
+        ledger.relax(|m| m.to == me && m.from == *who);
+    }
+    drop(ledger);
+    w.trace(&a.user, format!("blocks now {now:?}"));
+    a.blocked = now;
 }
 
 // ---- the hub ----
@@ -1044,6 +1071,7 @@ fn quiesce(w: &World, all: &mut [Vec<Acct>]) {
             for a in accts.iter_mut().filter(|a| a.client.is_some()) {
                 op_uploads(w, a, &mut rng);
                 op_sync(w, a, &mut rng);
+                sync_blocks(w, a);
                 if a.proc_.crashed.load(Relaxed) {
                     a.client = None;
                     restart(w, a, &mut rng);

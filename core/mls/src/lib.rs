@@ -2308,6 +2308,12 @@ impl Client {
         if let Some(shown) = shown {
             note_handle(contact, shown);
         }
+        // What came from them before and waits to be handed out (after a restart) is not shown either.
+        if blocked {
+            self.state
+                .events
+                .retain(|e| !matches!(e, StoredEvent::Message { user: from, own: false, .. } if *from == user));
+        }
         // Kept in the storage too, so a new phone has it (spec 6.9).
         self.storage_block(&user, blocked);
         self.persist();

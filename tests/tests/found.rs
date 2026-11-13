@@ -91,3 +91,21 @@ fn a_friend_who_deleted_the_account_is_gone_and_the_name_free() {
     assert_eq!(a.pending(), 0);
     assert_eq!(a.dropped(), 0, "nothing dropped as an error: a gone user is a state");
 }
+
+/// What arrived before a block and waited to be handed out (the app restarted before it had it) was shown after the
+/// block. A block now drops it too.
+#[test]
+fn a_block_also_drops_what_waits_to_be_shown() {
+    let hub = TestHub::start();
+    let n = random_u64() % 100_000;
+    let http = Http::new(hub.url());
+    let mut a = by_name(http.clone(), &format!("Calm{n}"), None).unwrap();
+    let mut b = by_name(Http::new(hub.url()), &format!("Loud{n}"), None).unwrap();
+    b.send(a.user_id(), Content::Text("shout".into())).unwrap();
+    assert_eq!(texts(&a.sync(0).unwrap()), ["shout"]);
+    // The app dies before it showed it: after the restart it comes again, unless blocked meanwhile.
+    let saved = a.export(&[1; 32]);
+    let mut a = Client::restore(http, &saved, &[1; 32]).unwrap();
+    a.set_blocked(b.user_id(), true).unwrap();
+    assert!(texts(&a.sync(0).unwrap()).is_empty());
+}
