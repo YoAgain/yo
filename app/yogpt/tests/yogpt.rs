@@ -57,7 +57,7 @@ fn round_trip(client: &mut Client) -> Vec<String> {
         assert!(start.elapsed() < Duration::from_secs(30), "YOGPT never came");
         std::thread::sleep(Duration::from_millis(200));
     }
-    // It thinks up to 5 seconds, then up to 5 Yos at most a second apart.
+    // It thinks up to 3 seconds, then up to 5 Yos at most a second apart.
     let from = yos_until_quiet(client, Duration::from_secs(8));
     assert!((1..=5).contains(&from.len()), "{} Yos back", from.len());
     from

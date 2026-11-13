@@ -31,7 +31,7 @@ use yo_core::{Client, Content, Error, Event, Push, Response, Store, Transport};
 /// How many Yos an answer has, in percent: one mostly, more ever rarer (a half-normal tail), five at most.
 const YOS: [u32; 5] = [70, 17, 8, 4, 1];
 /// Before an answer, in milliseconds, uniform: it thinks.
-const THINK_MS: (u64, u64) = (1000, 5000);
+const THINK_MS: (u64, u64) = (1000, 3000);
 /// Between the Yos of one answer, in milliseconds, uniform.
 const GAP_MS: (u64, u64) = (300, 1000);
 /// Senders being answered at once, per account (a thread each).
