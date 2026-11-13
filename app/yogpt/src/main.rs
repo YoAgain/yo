@@ -436,6 +436,41 @@ fn main() {
 }
 
 /// Serves one account until it stops.
+/// The operator's mailbox: `NAME.anything.jpg` dropped into the account's `outbox` (root only, on the server) goes
+/// to NAME as a photo with its Yo, then the file is removed; one that could not go is renamed `.failed`.
+fn mailbox(bot: &Bot, dir: &Path, events: &SyncSender<Event>) {
+    let _ = std::fs::create_dir_all(dir);
+    while bot.running() {
+        std::thread::sleep(Duration::from_secs(5));
+        let Ok(entries) = std::fs::read_dir(dir) else { continue };
+        for path in entries.flatten().map(|entry| entry.path()).take(20) {
+            let Some(name) = path.file_name().and_then(|n| n.to_str()).filter(|n| n.ends_with(".jpg")) else {
+                continue;
+            };
+            let to = name.split('.').next().unwrap_or_default().to_owned();
+            let mut bytes = Vec::new();
+            let read = std::fs::File::open(&path).and_then(|f| f.take(MAX_PICTURE + 1).read_to_end(&mut bytes));
+            if to.is_empty() || read.is_err() || bytes.is_empty() || bytes.len() as u64 > MAX_PICTURE {
+                let _ = std::fs::rename(&path, path.with_extension("failed"));
+                continue;
+            }
+            let (width, height) = jpeg_size(&bytes).unwrap_or((720, 1280));
+            match send_this_picture(bot, &to, &bytes, width, height) {
+                Ok((received, sent)) => {
+                    received.into_iter().for_each(|event| bot.queue(events, event));
+                    let _ = std::fs::remove_file(&path);
+                    bot.log(format!("mail to {to}{}", if sent { "" } else { " (as a plain Yo)" }));
+                }
+                Err(error) if gone(&error) => return bot.stop(GONE),
+                Err(error) => {
+                    bot.log(format!("mail to {to}: {}", reason(&error)));
+                    let _ = std::fs::rename(&path, path.with_extension("failed"));
+                }
+            }
+        }
+    }
+}
+
 fn serve(account: &Account, options: Options) {
     let Some(client) = open(account) else { return };
     let (draining, to_drain) = sync_channel(MAX_DRAINING);
@@ -459,6 +494,8 @@ fn serve(account: &Account, options: Options) {
     let (events, received) = sync_channel(MAX_QUEUED);
     let (receiving, to_dispatch) = (bot.clone(), events.clone());
     std::thread::spawn(move || receive(&receiving, &to_dispatch));
+    let (mailing, to_queue, outbox) = (bot.clone(), events.clone(), account.state.join("outbox"));
+    std::thread::spawn(move || mailbox(&mailing, &outbox, &to_queue));
     // Every Yo gets its answer: one sender's in turn, on one thread; senders side by side.
     while bot.running() {
         let event = match received.recv_timeout(Duration::from_secs(1)) {
@@ -581,7 +618,18 @@ fn answer(bot: &Bot, user: &str, events: &SyncSender<Event>, to_picture: bool) {
 fn send_picture(bot: &Bot, user: &str) -> Result<(Vec<Event>, bool), Error> {
     let picked = bot.options.replies.as_deref().and_then(pick_picture);
     let Some((bytes, width, height)) = picked else { return bot.client().send_yo(user).map(|e| (e, false)) };
-    let (media, sealed) = media::seal(&bytes, width, height)?;
+    send_this_picture(bot, user, &bytes, width, height)
+}
+
+/// A Yo with this picture; a plain one when the hub takes no picture now. True when it had the picture.
+fn send_this_picture(
+    bot: &Bot,
+    user: &str,
+    bytes: &[u8],
+    width: u16,
+    height: u16,
+) -> Result<(Vec<Event>, bool), Error> {
+    let (media, sealed) = media::seal(bytes, width, height)?;
     // Signed under the client, sent without it: other answers go on meanwhile.
     let upload = {
         let mut client = bot.client();
