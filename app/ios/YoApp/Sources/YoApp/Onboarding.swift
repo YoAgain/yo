@@ -101,10 +101,12 @@ struct Onboarding: View {
         Text("Use at least 3 characters.")
           .font(.system(size: 15, weight: .semibold))
           .opacity(tooShort ? 1 : 0)
+          .accessibilityHidden(!tooShort)
         Button("This Is My Name") { go(.logIn) }
           .font(.yo(17))
           .opacity(mine ? 1 : 0)
           .disabled(!mine)
+          .accessibilityHidden(!mine)
       }
       .animation(.snappy(duration: 0.2), value: mine)
       .animation(.snappy(duration: 0.2), value: tooShort)
@@ -303,7 +305,8 @@ private struct NameField: View {
 
   var body: some View {
     TextField("", text: $name, prompt: Text("Name").foregroundStyle(.white.opacity(0.3)))
-      .font(.yo(34))
+      .font(.yo(Self.fontSize(name)))
+      .tint(.white)
       .multilineTextAlignment(.center)
       .textInputAutocapitalization(.words)
       .autocorrectionDisabled()
@@ -333,6 +336,14 @@ private struct NameField: View {
       }
       .onSubmit(onSubmit)
       .onAppear { focused = true }
+  }
+
+  /// Large, and smaller as a long name needs, so all 16 characters stay in sight beside the checkmark.
+  private static func fontSize(_ name: String) -> CGFloat {
+    let width = 260.0  // the field's room for text at the narrowest iPhone's width, less the checkmark's
+    guard let font = UIFont(name: "Montserrat-Bold", size: 34) else { return 34 }
+    let needed = (name as NSString).size(withAttributes: [.font: font]).width
+    return needed > width ? max(18, (34 * width / needed).rounded(.down)) : 34
   }
 }
 
@@ -372,6 +383,7 @@ private struct LogIn: View {
       TextField("", text: $words, prompt: Text("12 words").foregroundStyle(.white.opacity(0.35)), axis: .vertical)
         .font(.yo(18))
         .lineLimit(3...5)
+        .tint(.white)
         .textInputAutocapitalization(.never)
         .autocorrectionDisabled()
         .padding(14)

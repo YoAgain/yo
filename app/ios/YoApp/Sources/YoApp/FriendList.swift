@@ -51,6 +51,8 @@ struct FriendList: View {
   @State private var position = ScrollPosition(idType: String.self)
   /// Rows are behind the title: it wears its glass pill.
   @State private var scrolled = false
+  /// The bar swiped open (its Block and Remove showing), by `Friend.key`: one at a time.
+  @State private var swiped: UUID?
 
   // Sending
   /// What each bar says for a moment after a send ("Sent Yo", "Not Sent", "Canceled").
@@ -208,6 +210,9 @@ struct FriendList: View {
       .onScrollGeometryChange(for: Bool.self) { $0.contentOffset.y + $0.contentInsets.top > 4 } action: { _, now in
         withAnimation(.smooth(duration: 0.3)) { scrolled = now }
       }
+      .onScrollPhaseChange { _, phase in
+        if phase != .idle && swiped != nil { withAnimation(.snappy) { swiped = nil } }  // scrolling closes it
+      }
       // Amethyst behind everything; in camera mode the live picture or the picked photo.
       .background { backdrop.ignoresSafeArea() }
       .overlay(alignment: .bottom) {
@@ -280,21 +285,37 @@ struct FriendList: View {
     ) {
       send(to: friend)
     }
-    if cameraOn || !waiting.isEmpty {
-      bar  // holding records a video, or shows the photos: no menu then
-    } else {
-      bar
-        .contextMenu {
-          Menu("Report \(friend.name)", systemImage: "exclamationmark.bubble") {
-            Button("Spam") { report(friend, .spam) }
-            Button("Abuse") { report(friend, .abuse) }
-            Button("Something Else") { report(friend, .other) }
+    // Swiped left (not in camera mode, where the bars take photos): Block and Remove underneath, as in Mail.
+    SwipeActions(
+      open: Binding(
+        get: { swiped == friend.key },
+        set: { open in swiped = open ? friend.key : swiped == friend.key ? nil : swiped }),
+      enabled: !cameraOn,
+      began: { if swiped != friend.key { withAnimation(.snappy) { swiped = nil } } },  // another one closes
+      block: { blocking = (friend, false) },
+      remove: { remove(friend) }
+    ) {
+      if cameraOn || !waiting.isEmpty {
+        bar  // holding records a video, or shows the photos: no menu then
+      } else {
+        bar
+          .contextMenu {
+            Menu("Report \(friend.name)", systemImage: "exclamationmark.bubble") {
+              Button("Spam") { report(friend, .spam) }
+              Button("Abuse") { report(friend, .abuse) }
+              Button("Something Else") { report(friend, .other) }
+            }
+            Button("Block \(friend.name)", systemImage: "hand.raised") { blocking = (friend, false) }
+            Button("Remove \(friend.name)", systemImage: "trash", role: .destructive) { remove(friend) }
           }
-          Button("Block \(friend.name)", systemImage: "hand.raised") { blocking = (friend, false) }
-          Button("Remove \(friend.name)", systemImage: "trash", role: .destructive) {
-            withAnimation(.snappy) { friends.remove(friend) }
-          }
-        }
+      }
+    }
+  }
+
+  private func remove(_ friend: Friend) {
+    withAnimation(.snappy) {
+      swiped = nil
+      friends.remove(friend)
     }
   }
 
@@ -360,8 +381,11 @@ struct FriendList: View {
         }
         .onAppear { typing = true }
     } else {
-      RowButton("+", color: color) { adding = true }
-        .accessibilityLabel("Add Friend")
+      RowButton("+", color: color) {
+        withAnimation(.snappy) { swiped = nil }
+        adding = true
+      }
+      .accessibilityLabel("Add Friend")
     }
   }
 
@@ -402,6 +426,7 @@ struct FriendList: View {
     submitted += 1
     let this = submitted
     hint = text
+    typing = true  // the keyboard stays, to type the name again
     Task {
       try? await Task.sleep(for: .seconds(1.5))
       guard submitted == this else { return }
@@ -461,6 +486,8 @@ struct FriendList: View {
   // MARK: Sending
 
   private func send(to friend: Friend) {
+    // A tap while a bar is swiped open closes it, as in Mail; it sends nothing.
+    guard swiped == nil else { return withAnimation(.snappy) { swiped = nil } }
     sends += 1
     let library = picked
     picked = nil
@@ -927,7 +954,8 @@ struct RowButton: View {
         .contentTransition(.identity)  // other words come at once, never two drawn over each other
         .modifier(Knock(trigger: yo?.first))
         .opacity(touchable ? 0 : 1)
-      Bangs(count: count).opacity(touchable ? 0 : 1)
+        .accessibilityHidden(touchable)
+      Bangs(count: count).opacity(touchable ? 0 : 1).accessibilityHidden(touchable)
       ZStack { mark(touchable: touchable) }  // always a part, so a missing "!" never takes its place
         .modifier(Knock(trigger: yo?.first))
         .opacity(touchable ? 1 : 0)
@@ -1100,6 +1128,116 @@ struct Knock: ViewModifier {
   }
 }
 
+/// A bar that slides left under a horizontal swipe and shows Block and Remove underneath (as Mail's and Signal's
+/// lists do); it snaps open or closed when let go. A vertical move is the list's scroll, a tap or a hold the bar's.
+struct SwipeActions<Content: View>: View {
+  @Binding var open: Bool
+  let enabled: Bool
+  /// A swipe on it began.
+  let began: () -> Void
+  let block: () -> Void
+  let remove: () -> Void
+  @ViewBuilder let content: Content
+  /// How far the finger moved the bar, while it does.
+  @State private var dragged: CGFloat?
+
+  private static var button: CGFloat { 88 }
+  private static var width: CGFloat { 2 * button }
+
+  var body: some View {
+    let resting = open ? -Self.width : 0
+    let moved = resting + (dragged ?? 0)
+    // Past the buttons it follows with resistance; never to the right.
+    let offset = moved < -Self.width ? -Self.width + (moved + Self.width) / 3 : min(0, moved)
+    content
+      .overlay {
+        // Open: a tap on the bar closes it (the bar does nothing else then).
+        if open { Color.clear.contentShape(.rect).onTapGesture { close() } }
+      }
+      .offset(x: offset)
+      .background(alignment: .trailing) {
+        if offset < 0 {
+          HStack(spacing: 0) {
+            action("Block", "hand.raised.fill", Color.row(3)) { close(); block() }
+            action("Remove", "trash.fill", .alizarin) { remove() }
+          }
+          .frame(width: max(Self.width, -offset))
+          .transition(.identity)
+        }
+      }
+      .gesture(
+        HorizontalPan(enabled: enabled) { x in
+          if dragged == nil { began() }
+          dragged = x
+        } ended: { x, velocity in
+          let end = resting + x
+          withAnimation(.snappy(duration: 0.3)) {
+            open = velocity < -400 || (velocity < 400 && end < -Self.width / 2)
+            dragged = nil
+          }
+        }
+      )
+      .onChange(of: enabled) { _, on in
+        if !on { close() }
+      }
+      .accessibilityAction(named: "Block") { block() }
+      .accessibilityAction(named: "Remove") { remove() }
+  }
+
+  private func close() {
+    withAnimation(.snappy(duration: 0.3)) { open = false }
+  }
+
+  private func action(_ title: String, _ icon: String, _ color: Color, _ run: @escaping () -> Void) -> some View {
+    Button(action: run) {
+      VStack(spacing: 4) {
+        Image(systemName: icon).font(.system(size: 20, weight: .semibold))
+        Text(title).font(.system(size: 13, weight: .semibold))
+      }
+      .foregroundStyle(.white)
+      .frame(maxWidth: .infinity, maxHeight: .infinity)
+      .background(color)
+    }
+    .buttonStyle(.plain)
+  }
+}
+
+/// A pan that begins only when it starts sideways: the scroll view keeps vertical moves, and a tap stays a tap.
+struct HorizontalPan: UIGestureRecognizerRepresentable {
+  var enabled = true
+  let changed: (CGFloat) -> Void
+  let ended: (_ translation: CGFloat, _ velocity: CGFloat) -> Void
+
+  func makeUIGestureRecognizer(context: Context) -> UIPanGestureRecognizer {
+    let pan = UIPanGestureRecognizer()
+    pan.delegate = context.coordinator
+    return pan
+  }
+
+  func updateUIGestureRecognizer(_ pan: UIPanGestureRecognizer, context: Context) {
+    pan.isEnabled = enabled
+  }
+
+  func handleUIGestureRecognizerAction(_ pan: UIPanGestureRecognizer, context: Context) {
+    let x = pan.translation(in: pan.view).x
+    switch pan.state {
+    case .began, .changed: changed(x)
+    case .ended, .cancelled, .failed: ended(x, pan.velocity(in: pan.view).x)
+    default: break
+    }
+  }
+
+  func makeCoordinator(converter: CoordinateSpaceConverter) -> Coordinator { Coordinator() }
+
+  final class Coordinator: NSObject, UIGestureRecognizerDelegate {
+    func gestureRecognizerShouldBegin(_ gesture: UIGestureRecognizer) -> Bool {
+      guard let pan = gesture as? UIPanGestureRecognizer else { return false }
+      let velocity = pan.velocity(in: pan.view)
+      return abs(velocity.x) > abs(velocity.y) * 1.5
+    }
+  }
+}
+
 /// The bar under the finger: a quick light-up.
 struct RowPress: ButtonStyle {
   func makeBody(configuration: Configuration) -> some View {
@@ -1170,7 +1308,24 @@ struct HeldMedia: View {
           }
         }
         .ignoresSafeArea()
-        VStack(spacing: 10) {
+        // Who it is from at the top left, how long ago beside it, the lines under them (as stories show it).
+        VStack(alignment: .leading, spacing: 8) {
+          HStack(alignment: .firstTextBaseline, spacing: 8) {
+            Text(current.from)
+              .font(.yo(17, relativeTo: .headline))
+              .lineLimit(1)
+            if let at = current.sentAt {
+              Text(Arrival.age(at))
+                .font(.subheadline.weight(.semibold))
+                .opacity(0.7)
+                .fixedSize()
+            }
+          }
+          .foregroundStyle(.white)
+          .shadow(color: .black.opacity(0.35), radius: 3)
+          .padding(.horizontal, 8)
+          .accessibilityElement(children: .combine)
+          .accessibilityLabel("Yo from \(current.from)")
           TimelineView(.animation(paused: since == nil)) { timeline in
             let running = progress(at: timeline.date)
             HStack(spacing: 3) {
@@ -1186,12 +1341,6 @@ struct HeldMedia: View {
               }
             }
           }
-          Text("Yo from \(current.from)")
-            .font(.yo(17, relativeTo: .headline))
-            .foregroundStyle(.white)
-            .padding(.horizontal, 16)
-            .padding(.vertical, 8)
-            .glassEffect(.regular, in: .capsule)
         }
         .padding(.horizontal, 4)
         .padding(.top, 4)

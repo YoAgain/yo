@@ -15,6 +15,24 @@ struct Arrival: Equatable, Identifiable {
   let photo: UIImage?
   let video: URL?
 
+  /// When it was sent: a photo's or video's id starts with its sender and the time (`Inbox.mediaID`).
+  var sentAt: Date? {
+    let parts = id.split(separator: "/")
+    guard parts.count >= 2, let ms = UInt64(parts[1]) else { return nil }
+    return Date(timeIntervalSince1970: Double(ms) / 1000)
+  }
+
+  /// How long ago, as stories say it: "now", "2m", "3h", "1d".
+  static func age(_ date: Date, now: Date = .now) -> String {
+    let minutes = Int(now.timeIntervalSince(date) / 60)
+    return switch minutes {
+    case ..<1: "now"
+    case ..<60: "\(minutes)m"
+    case ..<1440: "\(minutes / 60)h"
+    default: "\(minutes / 1440)d"
+    }
+  }
+
   init(id: String, from: String, photo: UIImage? = nil, video: URL? = nil) {
     self.id = id
     self.from = from

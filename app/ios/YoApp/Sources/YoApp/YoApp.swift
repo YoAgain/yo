@@ -65,7 +65,9 @@ struct YoApp: App {
         .environment(friends)
         .environment(accounts)
         .environment(outbox)
-        .task {
+        // Notifications are asked for once there is someone to get Yos from: with the list, not over the welcome.
+        .task(id: accounts.account == nil) {
+          guard accounts.account != nil else { return }
           await inbox.askForNotifications()
           Push.shared.register()
         }
