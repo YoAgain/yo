@@ -44,7 +44,7 @@ struct YoApp: App {
         .onChange(of: phase, initial: true) { _, phase in
           guard phase == .active else { return }
           Task { await inbox.collectDelivered() }
-          // Opened: the 90 days start again, and so does the reminder (spec 6.4).
+          // Opened: the 365 days start again, and so does the reminder (spec 6.4).
           if let account = accounts.account { SecureReminder.update(secured: account.secured) }
         }
     }

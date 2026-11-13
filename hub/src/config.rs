@@ -53,7 +53,7 @@ impl Default for Limits {
             backup_per_ip_hour: 10,
             report_per_user_day: 20,
             envelope_ttl_days: 30,
-            unsecured_idle_days: 90,
+            unsecured_idle_days: 365,
         }
     }
 }
@@ -77,7 +77,7 @@ impl Limits {
             backup_per_ip_hour: u32::MAX,
             report_per_user_day: u32::MAX,
             envelope_ttl_days: 30,
-            unsecured_idle_days: 90,
+            unsecured_idle_days: 365,
         }
     }
 }
