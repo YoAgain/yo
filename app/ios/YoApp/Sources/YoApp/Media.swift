@@ -139,8 +139,8 @@ struct StoredMedia: Codable {
 }
 
 /// Photos and videos on their way out, kept on disk (sealed) until the hub has them and their Yo is sent: an app
-/// that quits, a hub that says "not now", no network, none of it loses one. In the order they were taken; one at a
-/// time, while Yos go on beside them (the upload does not hold the core).
+/// that quits, a hub that says "not now", no network, none of it loses one. Their Yos in the order they were taken;
+/// a few uploads side by side, while Yos go on beside them (an upload does not hold the core).
 @MainActor @Observable
 final class MediaOutbox {
   private struct Item: Codable {
@@ -217,8 +217,10 @@ final class MediaOutbox {
     wake?.cancel()
   }
 
-  /// Sends what is due, one after the other; what the hub refuses for now waits its turn again (30 seconds, doubling
-  /// to half an hour). Also when the app comes to the foreground.
+  /// Sends what is due: up to `together` uploads side by side (the hub takes a few of one user at once), each Yo in
+  /// the order taken, as soon as its own upload and the Yos before it are done. A burst of photos then goes about as
+  /// fast as it was taken, not one upload after the other. What the hub refuses for now waits its turn again (30
+  /// seconds, doubling to half an hour). Also when the app comes to the foreground.
   func flush(accounts: AccountStore) {
     self.accounts = accounts
     guard !running else { return }
@@ -226,28 +228,36 @@ final class MediaOutbox {
     let generation = generation
     Task {
       defer { running = false }
-      while let client = accounts.client, let index = items.firstIndex(where: { $0.next <= .now }) {
-        let item = items[index]
-        let outcome = await deliver(item, client: client, generation: generation)
-        guard generation == self.generation else { return }  // signed out meanwhile
-        guard let at = items.firstIndex(where: { $0.id == item.id }) else { continue }
-        switch outcome {
-        case .sent, .dropped:
-          items.remove(at: at)
-          let blob = Self.blob(item.id)
-          Task.detached(priority: .utility) { try? FileManager.default.removeItem(at: blob) }
-        case .later:
-          items[at].tries += 1
-          items[at].next = .now + min(1800, 30 * pow(2, Double(min(items[at].tries - 1, 6))))
-        case .replaced:
-          accounts.reset()  // clears this outbox too
-          return
+      while let client = accounts.client {
+        let due = Array(items.filter { $0.next <= .now }.prefix(Self.together))
+        guard !due.isEmpty else { break }
+        let uploads = due.map { item in Task { await self.upload(item, client: client, generation: generation) } }
+        for (item, upload) in zip(due, uploads) {
+          var outcome = await upload.value
+          if outcome == .uploaded { outcome = await send(item, client: client, generation: generation) }
+          guard generation == self.generation else { return }  // signed out meanwhile
+          guard let at = items.firstIndex(where: { $0.id == item.id }) else { continue }
+          switch outcome {
+          case .sent, .dropped:
+            items.remove(at: at)
+            let blob = Self.blob(item.id)
+            Task.detached(priority: .utility) { try? FileManager.default.removeItem(at: blob) }
+          case .later, .uploaded:
+            items[at].tries += 1
+            items[at].next = .now + min(1800, 30 * pow(2, Double(min(items[at].tries - 1, 6))))
+          case .replaced:
+            accounts.reset()  // clears this outbox too
+            return
+          }
+          save()
         }
-        save()
       }
       scheduleWake()
     }
   }
+
+  /// Uploads under way at once, at most (the hub takes 4 of one user).
+  private static let together = 3
 
   private func scheduleWake() {
     wake?.cancel()
@@ -259,24 +269,32 @@ final class MediaOutbox {
     }
   }
 
-  private enum Outcome { case sent, later, dropped, replaced }
+  private enum Outcome { case uploaded, sent, later, dropped, replaced }
 
-  private func deliver(_ item: Item, client: YoClient, generation: Int) async -> Outcome {
+  /// The chat first (a new friend's opens now), then the upload outside the client's lock: Yos go on meanwhile, and
+  /// so do the other uploads.
+  private func upload(_ item: Item, client: YoClient, generation: Int) async -> Outcome {
     if Date.now.timeIntervalSince(item.created) > Self.givenUpAfter { return .dropped }
     let media = item.media.media
     let blob = Self.blob(item.id)
-    do {
+    return await outcome {
       // Another account's (signed out meanwhile): never sent under this one.
       guard try await Hub.run({ client.userId() }) == item.owner else { return .dropped }
-      // The chat first (a new friend's opens now), then the upload outside the client's lock: Yos go on meanwhile.
-      // The Yo only after the hub has the blob.
       let (chat, contacts) = try await Hub.run { (try client.mediaChat(to: item.to), client.contacts()) }
       await received?(chat.events, contacts, client)
       guard generation == self.generation else { return .dropped }
       try await Hub.run {
         try client.uploadMedia(media: media, ciphertext: try Data(contentsOf: blob), fetches: chat.fetches)
       }
-      guard generation == self.generation else { return .dropped }
+      return .uploaded
+    }
+  }
+
+  /// The Yo, only after the hub has the blob.
+  private func send(_ item: Item, client: YoClient, generation: Int) async -> Outcome {
+    guard generation == self.generation else { return .dropped }
+    let media = item.media.media
+    return await outcome {
       let (events, after) = try await Hub.run {
         switch item.kind {
         case .photo: (try client.sendPhoto(to: item.to, media: media), client.contacts())
@@ -285,6 +303,12 @@ final class MediaOutbox {
       }
       await received?(events, after, client)
       return .sent
+    }
+  }
+
+  private func outcome(_ work: () async throws -> Outcome) async -> Outcome {
+    do {
+      return try await work()
     } catch YoError.Replaced {
       return .replaced
     } catch let error as YoError where mediaRetryLater(error: error) {
@@ -296,9 +320,10 @@ final class MediaOutbox {
 }
 
 /// Photos and videos that came, kept until seen once. Each is noted (with its key) before the core may forget its
-/// Yo, then fetched (each fetch counts at the hub, the last deletes the blob), opened and kept here with complete
-/// file protection; seen, it is deleted. A fetch the network breaks is tried again; one the hub no longer has is
-/// dropped. All of it on the main actor but the reading, writing and fetching.
+/// Yo, then fetched at once, all side by side (each fetch counts at the hub, the last deletes the blob), opened and
+/// kept here with complete file protection; seen, it is deleted. A fetch the network breaks is tried again soon, and
+/// at once when the next Yo comes; one the hub no longer has is dropped. All of it on the main actor but the
+/// reading, writing and fetching.
 @MainActor
 final class ReceivedMedia {
   static let shared = ReceivedMedia()
@@ -319,6 +344,8 @@ final class ReceivedMedia {
   private var pending: [Pending] = []
   private var saved: [Saved] = []
   private var fetching: Set<String> = []
+  /// Fetches the network broke, each waiting for its next try: cancelled, it tries now.
+  private var pauses: [String: Task<Void, Never>] = [:]
   /// Counts sign-outs: a fetch begun before one keeps nothing.
   private var generation = 0
 
@@ -359,19 +386,33 @@ final class ReceivedMedia {
     store()
   }
 
-  /// Fetches what is noted and not under way; each one kept goes to `arrived`.
+  /// Fetches what is noted and not under way, each at once and beside the others; one waiting to try again (the
+  /// network broke it) tries now: the next Yo came, so the network is back. Each one kept goes to `arrived`.
   func fetchWaiting(client: YoClient, arrived: @escaping @MainActor (Arrival) -> Void) {
-    for one in pending where fetching.insert(one.id).inserted {
-      Task { await fetch(one, client: client, arrived: arrived) }
+    for one in pending {
+      if fetching.insert(one.id).inserted {
+        Task { await fetch(one, client: client, arrived: arrived) }
+      } else {
+        pauses[one.id]?.cancel()
+      }
     }
   }
+
+  /// Tries again after 1, 3, 10 and 30 seconds (or sooner, see `fetchWaiting`); then with the next Yo or opening.
+  private static let retries = [0, 1, 3, 10, 30]
 
   private func fetch(_ one: Pending, client: YoClient, arrived: @MainActor (Arrival) -> Void) async {
     defer { fetching.remove(one.id) }
     let generation = generation
     let media = one.media.media
-    for wait in [0, 3, 15, 60] {
-      if wait > 0 { try? await Task.sleep(for: .seconds(wait)) }
+    for wait in Self.retries {
+      if wait > 0 {
+        let pause = Task<Void, Never> { _ = try? await Task.sleep(for: .seconds(wait)) }
+        pauses[one.id] = pause
+        await pause.value
+        pauses[one.id] = nil
+        guard generation == self.generation else { return }
+      }
       let data: Data?
       do {
         data = try await Hub.run { try client.fetchMedia(media: media) }
@@ -426,6 +467,8 @@ final class ReceivedMedia {
     generation += 1
     pending = []
     saved = []
+    pauses.values.forEach { $0.cancel() }
+    pauses = [:]
   }
 
   private func arrival(_ one: Saved) async -> Arrival? {

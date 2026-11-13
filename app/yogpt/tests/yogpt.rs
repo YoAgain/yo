@@ -195,3 +195,48 @@ fn yogpt_answers_a_photo_with_a_picture_and_its_yos_carry_one() {
     let _ = std::fs::remove_dir_all(&state);
     let _ = std::fs::remove_dir_all(&replies);
 }
+
+/// A burst of photos: their pictures come back over HTTP right after the thinking, each fetched as it comes; a picture
+/// adds no seconds of its own (the sender's rhythm is its photos' spacing, here none).
+#[test]
+fn a_burst_of_photos_is_answered_with_its_pictures_at_once() {
+    let hub = TestHub::start();
+    let state = state_dir();
+    let replies = state_dir();
+    std::fs::create_dir_all(&replies).unwrap();
+    // As large as a reply picture may be.
+    let mut picture = reply_picture();
+    picture.resize(500_000, 7);
+    std::fs::write(replies.join("001.jpg"), &picture).unwrap();
+    let mut alice = someone(&hub);
+    let _bot = Bot::start_with(&[(&hub, &state)], &["--replies", replies.to_str().unwrap(), "--picture-every", "0"]);
+    let start = Instant::now();
+    while alice.send_yo("YOGPT").is_err() {
+        assert!(start.elapsed() < Duration::from_secs(30), "YOGPT never came");
+        std::thread::sleep(Duration::from_millis(200));
+    }
+    let _ = yos_until_quiet(&mut alice, Duration::from_secs(5));
+    const N: usize = 10;
+    let sent = Instant::now();
+    for _ in 0..N {
+        let (photo, sealed) = media::seal(b"a photo YoGPT never sees", 4, 3).unwrap();
+        alice.upload(&photo, 1).send(&sealed).unwrap();
+        alice.send("YOGPT", Content::Photo(photo)).unwrap();
+    }
+    let mut arrived = Vec::new();
+    while arrived.len() < N && sent.elapsed() < Duration::from_secs(30) {
+        for event in alice.sync(1).unwrap() {
+            if let Event::Message { content: Content::Photo(m), .. } = event {
+                assert_eq!(media::fetch_open(alice.transport().as_ref(), &m).unwrap().unwrap(), picture);
+                arrived.push(sent.elapsed());
+            }
+        }
+        alice.acknowledge_events();
+    }
+    assert_eq!(arrived.len(), N, "{arrived:?}");
+    // Thinking takes up to 3 s; the ten pictures after it, sealed, uploaded, sent and fetched, well within 2 s more.
+    assert!(arrived[N - 1] < Duration::from_secs(5), "{arrived:?}");
+    assert!(arrived[N - 1] - arrived[0] < Duration::from_secs(2), "{arrived:?}");
+    let _ = std::fs::remove_dir_all(&state);
+    let _ = std::fs::remove_dir_all(&replies);
+}

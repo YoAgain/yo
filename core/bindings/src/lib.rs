@@ -323,9 +323,16 @@ pub fn username_free(transport: Arc<dyn HttpTransport>, username: String) -> Res
 #[derive(uniffi::Object)]
 pub struct YoClient {
     client: Mutex<Client>,
+    /// The client's own transport, for what needs no client (fetching a photo or video): never behind the lock, so a
+    /// fetch does not wait for a call that holds it across the network.
+    transport: Arc<dyn yo_core::Transport>,
 }
 
 impl YoClient {
+    fn new(client: Client) -> Arc<Self> {
+        Arc::new(YoClient { transport: client.transport(), client: Mutex::new(client) })
+    }
+
     fn with<T>(&self, f: impl FnOnce(&mut Client) -> T) -> T {
         f(&mut self.client.lock().unwrap_or_else(PoisonError::into_inner))
     }
@@ -369,7 +376,7 @@ impl YoClient {
         let push = yo_core::Push { platform: push_platform, token: push_token.into_bytes().into() };
         let mut client = Client::register(Arc::new(Http(transport)), &phone, &code, name, push)?;
         client.persist_to(Arc::new(Store(store)), key);
-        Ok(Arc::new(YoClient { client: Mutex::new(client) }))
+        Ok(Self::new(client))
     }
 
     /// Registers this device with a username (spec 6.4). Without `account_secret`, a new account: the name must be
@@ -392,7 +399,7 @@ impl YoClient {
         let push = yo_core::Push { platform: push_platform, token: push_token.into_bytes().into() };
         let mut client = Client::register_username(Arc::new(Http(transport)), &username, account, name, push)?;
         client.persist_to(Arc::new(Store(store)), key);
-        Ok(Arc::new(YoClient { client: Mutex::new(client) }))
+        Ok(Self::new(client))
     }
 
     /// Opens the state the store saved last.
@@ -406,7 +413,7 @@ impl YoClient {
         let key = key_of(state_key)?;
         let mut client = Client::restore(Arc::new(Http(transport)), &blob, &key)?;
         client.persist_to(Arc::new(Store(store)), key);
-        Ok(Arc::new(YoClient { client: Mutex::new(client) }))
+        Ok(Self::new(client))
     }
 
     pub fn phone(&self) -> String {
@@ -564,12 +571,12 @@ impl YoClient {
         self.send_content(to, Content::Video { media: media.try_into()?, duration_ms })
     }
 
-    /// Fetches a photo or video a Yo carried and opens it, without holding the client; `None` when the hub no longer
-    /// has it (fetched by all its devices, or past its 30 days). Each fetch counts at the hub: keep what comes.
+    /// Fetches a photo or video a Yo carried and opens it, without the client (not even waiting for its lock: as soon
+    /// as the Yo is there, beside the inbox's wait and sends); `None` when the hub no longer has it (fetched by all its
+    /// devices, or past its 30 days). Each fetch counts at the hub: keep what comes.
     pub fn fetch_media(&self, media: YoMedia) -> Result<Option<Vec<u8>>, YoError> {
         let media: yo_core::Media = media.try_into()?;
-        let transport = self.with(|c| c.transport());
-        Ok(yo_core::media::fetch_open(transport.as_ref(), &media)?)
+        Ok(yo_core::media::fetch_open(self.transport.as_ref(), &media)?)
     }
 }
 

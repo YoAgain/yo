@@ -489,10 +489,14 @@ fn serve(account: &Account, options: Options) {
         }
         let (answering, events, sender) = (bot.clone(), events.clone(), user.clone());
         let spawned = std::thread::Builder::new().spawn(move || {
-            let (mut picture, mut think, mut last) = (picture, true, sent_at);
+            // It thinks before its first answer only.
+            std::thread::sleep(ms(THINK_MS));
+            let (mut picture, mut last) = (picture, sent_at);
             loop {
-                answer(&answering, &sender, &events, picture, think);
-                think = false;
+                // The rhythm counts from when an answer began: its own time (a picture sealed, uploaded and sent, a
+                // few Yos) is part of the gap, never added to it.
+                let began = Instant::now();
+                answer(&answering, &sender, &events, picture);
                 let next = {
                     let mut pending = answering.pending.lock().unwrap_or_else(PoisonError::into_inner);
                     let Some(owed) = pending.get_mut(&sender) else { break };
@@ -506,7 +510,8 @@ fn serve(account: &Account, options: Options) {
                     }
                 };
                 // As far apart as the sender's Yos were (their clocks' difference, never more than MAX_GAP_MS).
-                std::thread::sleep(Duration::from_millis(next.1.saturating_sub(last).min(MAX_GAP_MS)));
+                let gap = Duration::from_millis(next.1.saturating_sub(last).min(MAX_GAP_MS));
+                std::thread::sleep(gap.saturating_sub(began.elapsed()));
                 (picture, last) = next;
             }
         });
@@ -544,12 +549,9 @@ fn receive(bot: &Bot, events: &SyncSender<Event>) {
     }
 }
 
-/// Thinks, then sends a Yo or a few, one in `picture_every` of them with a picture; to a photo or video, one Yo with a
-/// picture. What sending receives goes to the dispatcher.
-fn answer(bot: &Bot, user: &str, events: &SyncSender<Event>, to_picture: bool, think: bool) {
-    if think {
-        std::thread::sleep(ms(THINK_MS));
-    }
+/// Sends a Yo or a few, one in `picture_every` of them with a picture; to a photo or video, one Yo with a picture.
+/// What sending receives goes to the dispatcher.
+fn answer(bot: &Bot, user: &str, events: &SyncSender<Event>, to_picture: bool) {
     let n = if to_picture { 1 } else { yos(uniform(0, 99) as u32) };
     let every = bot.options.picture_every;
     let with_picture = match to_picture {
