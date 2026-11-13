@@ -31,37 +31,59 @@ struct SettingsView: View {
   @State private var photosDenied = false
   @State private var addingPasskey = false
   @State private var passkeyProblem: String?
+  /// No pages under the profile (as Signal keeps it flat): securing and the words open as sheets.
+  @State private var securing = false
+  @State private var showingWords = false
 
   var body: some View {
     NavigationStack {
       Form {
         if let account = accounts.account {
-          profileHeader(account)
-          accountSection(account)
+          // You, as Settings shows the Apple Account and Signal its profile: one row, tapped for the details.
+          Section {
+            NavigationLink {
+              Form { accountSection(account) }
+                .navigationTitle("Account")
+                .navigationBarTitleDisplayMode(.inline)
+            } label: {
+              profileRow(account)
+            }
+          }
+          // The one open task, right under you, with the badge the profile button has too.
+          if !account.secured {
+            Section {
+              Button { securing = true } label: {
+                Label("Secure Your Account", systemImage: "lock.shield")
+              }
+              .tint(.primary)
+              .badge(1)
+            } footer: {
+              Text("When your account is secured, you keep your name forever.")
+            }
+          }
         }
 
         Section {
           Toggle(
-            "Save Sent Photos and Videos",
             isOn: Binding(
               get: { saveSent },
               set: { setSaveSent($0) }
             )
-          )
+          ) {
+            Label("Save Sent Photos and Videos", systemImage: "photo.on.rectangle")
+          }
           .disabled(requestingPhotos)
-        } header: {
-          Text("Photos and Videos")
         } footer: {
-          Text("Saves what you send from the camera.")
+          Text("Photos and videos you send are also saved to your library.")
         }
 
         Section {
-          Button("Reset Yo", role: .destructive) {
+          // As Settings signs out of an Apple Account: centred, red, no footer; the dialog says what happens.
+          Button("Sign Out", role: .destructive) {
             resetting = true
           }
+          .frame(maxWidth: .infinity)
           .disabled(addingPasskey)
-        } footer: {
-          Text("Removes Yo from this iPhone.")
         }
       }
       .navigationTitle("Profile")
@@ -73,12 +95,18 @@ struct SettingsView: View {
         }
       }
       .interactiveDismissDisabled(addingPasskey)
+      .sheet(isPresented: $securing) { SecureNameSheet() }
+      .sheet(isPresented: $showingWords) {
+        if let account = accounts.account, let words = RecoveryWords.load() {
+          RecoveryWordsSheet(name: account.username, words: words)
+        }
+      }
       .confirmationDialog(
-        "Reset Yo?",
+        "Sign Out?",
         isPresented: $resetting,
         titleVisibility: .visible
       ) {
-        Button("Reset Yo", role: .destructive) { reset() }
+        Button("Sign Out", role: .destructive) { reset() }
         Button("Cancel", role: .cancel) {}
       } message: {
         Text(resetMessage)
@@ -111,20 +139,22 @@ struct SettingsView: View {
     .tint(Color.amethyst)
   }
 
-  /// You, as Settings shows the Apple Account at its top: a small picture and the name on one row.
-  private func profileHeader(_ account: Account) -> some View {
-    Section {
-      HStack(spacing: 14) {
-        Image(systemName: "person.crop.circle.fill")
-          .font(.system(size: 44))
-          .foregroundStyle(.white, Color.amethyst)
-          .accessibilityHidden(true)
+  /// A small picture and the name, with whether the account is secured.
+  private func profileRow(_ account: Account) -> some View {
+    HStack(spacing: 14) {
+      Image(systemName: "person.crop.circle.fill")
+        .font(.system(size: 44))
+        .foregroundStyle(.white, Color.amethyst)
+        .accessibilityHidden(true)
+      VStack(alignment: .leading, spacing: 2) {
         Text(account.username)
           .font(.yo(24, relativeTo: .title3))
-          .textSelection(.enabled)
+        Text(account.secured ? "Account Secured" : "Account Not Secured")
+          .font(.subheadline)
+          .foregroundStyle(.secondary)
       }
-      .padding(.vertical, 2)
     }
+    .padding(.vertical, 2)
   }
 
   /// One section, "Account": whether the name is secured, and what secures it (passkey, recovery key) or the way to.
@@ -151,13 +181,11 @@ struct SettingsView: View {
           }
           .disabled(addingPasskey || RecoveryWords.load() == nil)
         }
-        if let words = RecoveryWords.load() {
-          NavigationLink {
-            RecoveryKeyView(
-              name: account.username, words: words, explanation: SecurityPresentation.recoveryExplanation)
-          } label: {
+        if RecoveryWords.load() != nil {
+          Button { showingWords = true } label: {
             Label("Recovery Key", systemImage: "key")
           }
+          .tint(.primary)
           .disabled(addingPasskey)
         } else {
           LabeledContent {
@@ -167,11 +195,10 @@ struct SettingsView: View {
           }
         }
       } else {
-        NavigationLink {
-          SecureNamePage()
-        } label: {
+        Button { securing = true } label: {
           Label("Secure Your Account", systemImage: "lock.shield")
         }
+        .tint(.primary)
         .badge(1)
       }
     } header: {
@@ -187,28 +214,17 @@ struct SettingsView: View {
     }
   }
 
+  /// What signing out costs, in one or two lines: friends go; the name comes back only if the account is secured.
   private var resetMessage: String {
-    let explanation =
-      "Your account, friends, settings, and saved recovery key will be "
-      + "removed from this iPhone. Photos and videos in Photos won’t be deleted."
-
-    guard let account = accounts.account else { return explanation }
-
-    guard account.secured else {
-      return explanation
-        + "\n\nYour name isn’t secured. You won’t be able to sign in "
-        + "to this account again."
+    guard let account = accounts.account, account.secured else {
+      return "Your account isn’t secured. You won’t be able to sign in as "
+        + "\(accounts.account?.username ?? "this name") again."
     }
-
-    if account.byPasskey {
-      return explanation
-        + "\n\nYou’ll need Face ID or a saved copy of your "
-        + "recovery key to sign in again."
-    }
-
-    return explanation
-      + "\n\nYou’ll need a saved copy of your recovery key to sign in again."
+    return account.byPasskey
+      ? "Sign back in with Face ID or your recovery key. Friends on this iPhone are removed."
+      : "Sign back in with your recovery key. Friends on this iPhone are removed."
   }
+
 
   private func addPasskey() async {
     guard !addingPasskey else { return }
