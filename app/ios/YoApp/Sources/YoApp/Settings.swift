@@ -45,7 +45,7 @@ struct SettingsView: View {
     NavigationStack {
       Form {
         if let account = accounts.account {
-          // You, at the top: the picture and the name; it opens your account (security, sign out, delete), with
+          // You, at the top: the picture and the name; it opens your account (security, deleting it), with
           // the badge while something is left to secure.
           Section {
             NavigationLink {
@@ -76,6 +76,25 @@ struct SettingsView: View {
         }
 
         // "Keep Sent Photos" comes back with the camera mode, once the core carries photos and videos (spec 5).
+
+        // At the end of the list, red, on its own; the dialog says what happens.
+        Section {
+          Button("Sign Out", role: .destructive) { resetting = true }
+            .frame(maxWidth: .infinity)
+            .disabled(addingPasskey || deletingAccount)
+        }
+      }
+      // Not secured all the way: the guide first, signing out anyway second.
+      .confirmationDialog("Sign Out?", isPresented: $resetting, titleVisibility: .visible) {
+        if accounts.toDo > 0 {
+          Button("Secure Your Account") { secure(nil) }
+          Button("Sign Out Anyway", role: .destructive) { reset() }
+        } else {
+          Button("Sign Out", role: .destructive) { reset() }
+        }
+        Button("Cancel", role: .cancel) {}
+      } message: {
+        Text(resetMessage)
       }
       .navigationTitle("Profile")
       .navigationBarTitleDisplayMode(.inline)
@@ -87,11 +106,6 @@ struct SettingsView: View {
       }
       .interactiveDismissDisabled(addingPasskey)
       .sheet(isPresented: $securing) { SecureNameSheet(start: securingStart) }
-      .sheet(isPresented: $showingWords) {
-        if let account = accounts.account, let words = RecoveryWords.load() {
-          RecoveryShowSheet(name: account.username, words: words)
-        }
-      }
       .alert("Allow Access to Photos", isPresented: $photosDenied) {
         Button("Open Settings") { openSystemSettings() }
         Button("Cancel", role: .cancel) {}
@@ -138,16 +152,10 @@ struct SettingsView: View {
     .padding(.vertical, 2)
   }
 
-  /// Your account: its security (passkey and recovery key), then signing out and, below, deleting it (as Settings
-  /// ends the Apple Account; App Review 5.1.1(v)).
+  /// Your account: its security (passkey and recovery key), and below, deleting it (App Review 5.1.1(v)).
   private func accountPage(_ account: Account) -> some View {
     Form {
       securitySection(account)
-      Section {
-        Button("Sign Out", role: .destructive) { resetting = true }
-          .frame(maxWidth: .infinity)
-          .disabled(addingPasskey || deletingAccount)
-      }
       Section {
         Button("Delete Account", role: .destructive) { confirmingDelete = true }
           .frame(maxWidth: .infinity)
@@ -169,18 +177,6 @@ struct SettingsView: View {
       Button("OK", role: .cancel) {}
     } message: {
       Text(deleteProblem ?? "")
-    }
-    // Not secured all the way: the guide first, signing out anyway second.
-    .confirmationDialog("Sign Out?", isPresented: $resetting, titleVisibility: .visible) {
-      if accounts.toDo > 0 {
-        Button("Secure Your Account") { secure(nil) }
-        Button("Sign Out Anyway", role: .destructive) { reset() }
-      } else {
-        Button("Sign Out", role: .destructive) { reset() }
-      }
-      Button("Cancel", role: .cancel) {}
-    } message: {
-      Text(resetMessage)
     }
   }
 
@@ -232,6 +228,12 @@ struct SettingsView: View {
     }
     .navigationTitle(title)
     .navigationBarTitleDisplayMode(.inline)
+    // The words show from here, the page their button is on (a sheet from the list two pages down came up late).
+    .sheet(isPresented: $showingWords) {
+      if let account = accounts.account, let words = RecoveryWords.load() {
+        RecoveryShowSheet(name: account.username, words: words)
+      }
+    }
     .modifier(SecurityDialogs(
       turningOffPasskey: $turningOffPasskey, renewingWords: $renewingWords, turnOff: removePasskey, renew: newWords))
   }
