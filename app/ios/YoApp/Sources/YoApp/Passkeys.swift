@@ -17,15 +17,17 @@ final class Passkeys: NSObject {
 
   private var pending: CheckedContinuation<ASAuthorization, Error>?
 
-  /// A new passkey for `name` (what the password manager shows) and `userID` (its user handle).
-  func make(name: String, userID: Data) async throws -> Data {
+  /// A new passkey for `name` (what the password manager shows) and `userID` (its user handle), asked for its PRF
+  /// output on `salt` right away: iCloud Keychain gives it then, so no second sheet is needed; others (1Password)
+  /// give it only when asked afterwards (`ask`), whatever they say here (spec 7).
+  func make(name: String, userID: Data, salt: Data) async throws -> (credentialID: Data, prf: Data?) {
     let provider = ASAuthorizationPlatformPublicKeyCredentialProvider(relyingPartyIdentifier: Self.domain)
     let request = provider.createCredentialRegistrationRequest(challenge: Self.random(32), name: name, userID: userID)
     request.displayName = name
-    request.prf = .checkForSupport  // what it says here is not trusted (spec 7): only `ask` tells
+    request.prf = .inputValues(.init(saltInput1: salt))
     guard let made = try await perform(request).credential as? ASAuthorizationPlatformPublicKeyCredentialRegistration
     else { throw PasskeyError.unexpected }
-    return made.credentialID
+    return (made.credentialID, made.prf?.first.map { $0.withUnsafeBytes { Data($0) } })
   }
 
   /// Asks a passkey (`only` that one, or any of this domain the person picks) for its PRF output on `salt`. `quietly`:

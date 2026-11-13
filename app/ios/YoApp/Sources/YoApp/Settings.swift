@@ -17,6 +17,8 @@ struct SettingsView: View {
   @State private var resetting = false
   /// The recovery words on screen, after Face ID.
   @State private var words: [String]?
+  @State private var addingPasskey = false
+  @State private var passkeyProblem: String?
 
   var body: some View {
     NavigationStack {
@@ -46,11 +48,21 @@ struct SettingsView: View {
         } footer: {
           Text("What you send from the camera is saved to your photo library. Nothing you receive is saved.")
         }
-        if RecoveryWords.load() != nil {
-          Section {
+        Section {
+          if RecoveryWords.load() != nil {
             Button("Recovery Key", systemImage: "key") { Task { await showWords() } }
-          } footer: {
-            Text("Use your recovery key to sign in to Yo on a new iPhone.")
+          }
+          if accounts.account?.byPasskey == false {
+            Button("Set Up Passkey", systemImage: "person.badge.key") { Task { await addPasskey() } }
+              .disabled(addingPasskey)
+          }
+        } footer: {
+          if let passkeyProblem {
+            Text(passkeyProblem).foregroundStyle(.red)
+          } else if accounts.account?.byPasskey == false {
+            Text("Use your recovery key to sign in to Yo on a new iPhone. Set up a passkey to sign in without it.")
+          } else {
+            Text("Use your passkey or recovery key to sign in to Yo on a new iPhone.")
           }
         }
         PasskeyTestSection()
@@ -95,6 +107,20 @@ extension SettingsView {
       == true
     else { return }
     words = RecoveryWords.load()
+  }
+
+  /// A passkey added to the backup. The system may ask twice: once to create it, once to use it.
+  fileprivate func addPasskey() async {
+    addingPasskey = true
+    defer { addingPasskey = false }
+    passkeyProblem = nil
+    do {
+      try await accounts.addPasskey()
+    } catch let error as AccountError {
+      passkeyProblem = error.errorDescription
+    } catch {
+      passkeyProblem = "Passkey not set up. Try again."
+    }
   }
 
   /// Everything of this app on this phone goes (settings, friends, the account), not the simulated hub's backups.

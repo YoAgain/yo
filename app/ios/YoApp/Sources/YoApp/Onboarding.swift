@@ -77,10 +77,10 @@ struct Onboarding: View {
     let trouble = Username.problem(name) ?? (MockHub.isTaken(name) ? "That name is taken. Try another." : nil)
     let mine = MockHub.isTaken(name) && !Username.reserved.contains(name)
     return Page(title: "Choose a Name", back: { go(.welcome) }) {
-      NameField(name: $name, onSubmit: { if trouble == nil { Task { await register() } } })
-      Text(name.isEmpty ? " " : (trouble.map { $0 } ?? "Available"))
+      NameField(name: $name, available: !name.isEmpty && trouble == nil,
+        onSubmit: { if trouble == nil { Task { await register() } } })
+      Text(name.isEmpty ? " " : (trouble ?? " "))
         .font(.system(size: 15, weight: .semibold))
-        .opacity(trouble == nil ? 1 : 0.75)
       if mine {
         Button("This Is My Name") { go(.logIn) }.font(.yo(17))
       }
@@ -140,10 +140,7 @@ struct Onboarding: View {
     busy = true
     defer { busy = false }
     do {
-      switch try await accounts.register(name) {
-      case .done: break  // the account is there: the list takes over
-      case .code(let words): go(.code(words))
-      }
+      go(.code(try await accounts.register(name)))
     } catch {
       problem = error.localizedDescription
     }
@@ -280,6 +277,8 @@ private struct Note: View {
 /// A name as Yo writes them: large, in upper case, only what a username may hold.
 private struct NameField: View {
   @Binding var name: String
+  /// The name is free: a green checkmark at the end of the field, and no words needed.
+  var available = false
   var onSubmit: () -> Void = {}
   @FocusState private var focused: Bool
 
@@ -292,7 +291,19 @@ private struct NameField: View {
       .submitLabel(.continue)
       .focused($focused)
       .padding(.vertical, 14)
+      .padding(.horizontal, 44)  // room for the checkmark, the name staying in the middle
       .background(.white.opacity(0.14), in: .rect(cornerRadius: 16))
+      .overlay(alignment: .trailing) {
+        if available {
+          Image(systemName: "checkmark.circle.fill")
+            .font(.system(size: 24))
+            .foregroundStyle(.white, .green)
+            .padding(.trailing, 14)
+            .transition(.scale.combined(with: .opacity))
+            .accessibilityLabel("Available")
+        }
+      }
+      .animation(.snappy(duration: 0.2), value: available)
       .onChange(of: name) { _, typed in
         let clean = Username.clean(typed)
         if clean != typed { name = clean }

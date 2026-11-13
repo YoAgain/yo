@@ -103,6 +103,22 @@ struct BackupRecord: Codable {
       info: Data("yo backup v1 code".utf8), outputByteCount: 32)
   }
 
+  /// What K seals: the account, and the recovery words, so a phone restored by passkey has them to show too.
+  struct Sealed: Codable {
+    var account: Account
+    var code: [String]?
+  }
+
+  static func seal(_ account: Account, code: [String], with k: SymmetricKey) throws -> Data {
+    try ChaChaPoly.seal(try JSONEncoder().encode(Sealed(account: account, code: code)), using: k).combined
+  }
+
+  static func open(_ sealed: Data, with k: SymmetricKey) throws -> Sealed {
+    let plain = try ChaChaPoly.open(ChaChaPoly.SealedBox(combined: sealed), using: k)
+    if let both = try? JSONDecoder().decode(Sealed.self, from: plain) { return both }
+    return Sealed(account: try JSONDecoder().decode(Account.self, from: plain))  // older mock backups
+  }
+
   static func wrap(_ k: SymmetricKey, in key: SymmetricKey) throws -> Data {
     try ChaChaPoly.seal(k.withUnsafeBytes { Data($0) }, using: key).combined
   }
@@ -163,39 +179,51 @@ final class AccountStore {
     account = UserDefaults.standard.data(forKey: Self.key).flatMap { try? JSONDecoder().decode(Account.self, from: $0) }
   }
 
-  enum Started {
-    /// Saved with the passkey: in.
-    case done
-    /// The passkey did not work: these words must be written down and confirmed (`confirm`).
-    case code([String])
-  }
-
-  /// Registers `username` (spec 6.4) and backs it up (spec 7): a passkey named with it first; only if that gives no
-  /// PRF output (no support, or cancelled), a recovery code.
-  func register(_ username: String) async throws -> Started {
+  /// Registers `username` (spec 6.4) and backs it up (spec 7). Always with a recovery key, the words returned to be
+  /// kept (`confirm`); with the passkey too when it gives its PRF output as it is made (iCloud Keychain does; others,
+  /// like 1Password, only when used: they can be added later from Settings, `addPasskey`).
+  func register(_ username: String) async throws -> [String] {
     guard !MockHub.isTaken(username) else { throw AccountError.taken }
     let userID = Passkeys.random(16)
-    let accountKey = Curve25519.Signing.PrivateKey().rawRepresentation
+    var account = Account(
+      username: username, userID: userID, accountKey: Curve25519.Signing.PrivateKey().rawRepresentation,
+      byPasskey: false)
     let k = SymmetricKey(size: .bits256)
-    var account = Account(username: username, userID: userID, accountKey: accountKey, byPasskey: false)
-    var record = BackupRecord(userID: userID, sealed: Data())
-
-    if let credential = try? await passkeys.make(name: username, userID: userID),
-      let prf = try? await passkeys.ask(salt: BackupRecord.prfSalt, only: credential).prf
-    {
+    let code = RecoveryCode.make()
+    var record = BackupRecord(userID: userID, byCode: try BackupRecord.wrap(k, in: BackupRecord.key(code: code)),
+      sealed: Data())
+    if let made = try? await passkeys.make(name: username, userID: userID, salt: BackupRecord.prfSalt),
+      let prf = made.prf {
       record.byPasskey = try BackupRecord.wrap(k, in: BackupRecord.key(prf: prf))
       account.byPasskey = true
     }
-    record.sealed = try ChaChaPoly.seal(try JSONEncoder().encode(account), using: k).combined
-    if account.byPasskey {
-      MockHub.save(record, for: username)
-      self.account = account
-      return .done
-    }
-    let code = RecoveryCode.make()
-    record.byCode = try BackupRecord.wrap(k, in: BackupRecord.key(code: code))
+    record.sealed = try BackupRecord.seal(account, code: code, with: k)
     waiting = (account, record, code)
-    return .code(code)
+    return code
+  }
+
+  /// A passkey added to the backup afterwards: a Yo passkey of this account if there is one (the one made at
+  /// registration, say, that gave no PRF output then), else a new one; K comes from the recovery words on this phone.
+  func addPasskey() async throws {
+    guard var account, let code = RecoveryWords.load(), var record = MockHub.record(for: account.username),
+      let byCode = record.byCode
+    else { throw AccountError.noBackup }
+    let k = try BackupRecord.unwrap(byCode, with: BackupRecord.key(code: code))
+    var prf: Data?
+    if let answer = try? await passkeys.ask(salt: BackupRecord.prfSalt, quietly: true), answer.userID == account.userID {
+      prf = answer.prf
+    } else {
+      let made = try await passkeys.make(name: account.username, userID: account.userID, salt: BackupRecord.prfSalt)
+      if let given = made.prf { prf = given } else {
+        prf = try await passkeys.ask(salt: BackupRecord.prfSalt, only: made.credentialID).prf
+      }
+    }
+    guard let prf else { throw AccountError.noPRF }
+    record.byPasskey = try BackupRecord.wrap(k, in: BackupRecord.key(prf: prf))
+    account.byPasskey = true
+    record.sealed = try BackupRecord.seal(account, code: code, with: k)
+    MockHub.save(record, for: account.username)
+    self.account = account
   }
 
   /// Past the recovery words: the account is saved and in use, and the words stay on this phone to look up later.
@@ -227,8 +255,9 @@ final class AccountStore {
   }
 
   private func open(_ record: BackupRecord, with k: SymmetricKey) throws {
-    let plain = try ChaChaPoly.open(ChaChaPoly.SealedBox(combined: record.sealed), using: k)
-    account = try JSONDecoder().decode(Account.self, from: plain)
+    let sealed = try BackupRecord.open(record.sealed, with: k)
+    if let code = sealed.code { RecoveryWords.save(code) }
+    account = sealed.account
   }
 
   /// "Reset Yo": this phone forgets everything, as a new phone would (the simulated hub keeps the backups).
@@ -240,13 +269,14 @@ final class AccountStore {
 }
 
 enum AccountError: LocalizedError {
-  case taken, noBackup, wrongCode
+  case taken, noBackup, wrongCode, noPRF
 
   var errorDescription: String? {
     switch self {
     case .taken: "That name is taken. Try another."
     case .noBackup: "We couldn’t find your account. Try another passkey or recovery key."
     case .wrongCode: "That recovery key couldn’t restore your account. Check the words and try again."
+    case .noPRF: "This passkey can’t be used to sign in to Yo. Try a different password manager."
     }
   }
 }
