@@ -28,25 +28,31 @@ final class Passkeys: NSObject {
     return made.credentialID
   }
 
-  /// Asks a passkey (`only` that one, or any of this domain the person picks) for its PRF output on `salt`.
-  func ask(salt: Data, only: Data? = nil) async throws -> Answer {
+  /// Asks a passkey (`only` that one, or any of this domain the person picks) for its PRF output on `salt`. `quietly`:
+  /// only if one is on this phone already, and with no sheet at all when there is none (it fails at once).
+  func ask(salt: Data, only: Data? = nil, quietly: Bool = false) async throws -> Answer {
     let provider = ASAuthorizationPlatformPublicKeyCredentialProvider(relyingPartyIdentifier: Self.domain)
     let request = provider.createCredentialAssertionRequest(challenge: Self.random(32))
     if let only { request.allowedCredentials = [ASAuthorizationPlatformPublicKeyCredentialDescriptor(credentialID: only)] }
     request.prf = .inputValues(.init(saltInput1: salt))
-    guard let asserted = try await perform(request).credential as? ASAuthorizationPlatformPublicKeyCredentialAssertion
+    guard let asserted = try await perform(request, quietly: quietly).credential
+      as? ASAuthorizationPlatformPublicKeyCredentialAssertion
     else { throw PasskeyError.unexpected }
     let prf = asserted.prf?.first.withUnsafeBytes { Data($0) }
     return Answer(credentialID: asserted.credentialID, userID: asserted.userID, prf: prf)
   }
 
-  private func perform(_ request: ASAuthorizationRequest) async throws -> ASAuthorization {
+  private func perform(_ request: ASAuthorizationRequest, quietly: Bool = false) async throws -> ASAuthorization {
     try await withCheckedThrowingContinuation { continuation in
       pending = continuation
       let controller = ASAuthorizationController(authorizationRequests: [request])
       controller.delegate = self
       controller.presentationContextProvider = self
-      controller.performRequests()
+      if quietly {
+        controller.performRequests(options: .preferImmediatelyAvailableCredentials)
+      } else {
+        controller.performRequests()
+      }
     }
   }
 

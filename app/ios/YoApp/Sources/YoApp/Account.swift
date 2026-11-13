@@ -184,8 +184,8 @@ final class AccountStore {
   }
 
   /// A new phone: any Yo passkey of this person, asked once; its user handle says whose backup to open.
-  func restoreWithPasskey() async throws {
-    let answer = try await passkeys.ask(salt: BackupRecord.prfSalt)
+  func restoreWithPasskey(quietly: Bool = false) async throws {
+    let answer = try await passkeys.ask(salt: BackupRecord.prfSalt, quietly: quietly)
     guard let username = MockHub.username(of: answer.userID), let record = MockHub.record(for: username),
       let wrapped = record.byPasskey, let prf = answer.prf
     else { throw AccountError.noBackup }

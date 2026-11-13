@@ -16,6 +16,8 @@ struct Onboarding: View {
   @State private var busy = false
   @State private var problem: String?
   @FocusState private var typing: Bool
+  /// The quiet look for a passkey on this phone happens once, not each time the welcome comes back.
+  @State private var looked = false
 
   var body: some View {
     ZStack {
@@ -39,25 +41,25 @@ struct Onboarding: View {
 
   // MARK: Welcome
 
-  /// The logo and the line, then the two ways in, one under the other: a new account (the button), or bringing an
-  /// existing one to this phone (the line under it), as Apple's own apps put "Sign In" under "Create".
+  /// The logo, one button for a new name and "Sign In" under it, as Apple's apps do. Someone who has a Yo passkey on
+  /// this phone is asked by the system at once ("Sign in as LEO?"), without choosing anything; "Sign In" is for the
+  /// rest (a passkey on another device, or the 12 words).
   private var welcome: some View {
     VStack(spacing: 0) {
       Spacer()
-      Text("Yo")
-        .font(.yo(150))
-        .padding(.bottom, 4)
-      Text("One tap, one Yo.")
-        .font(.yo(19))
-        .opacity(0.8)
+      // The name of the place, justyo: "Just" small over the "Yo".
+      VStack(spacing: -10) {
+        Text("Just").font(.yo(26)).opacity(0.85)
+        Text("Yo").font(.yo(150))
+      }
       Button { go(.name) } label: {
-        Text("Make my Yo").font(.yo(22)).frame(width: 230, height: 34)
+        Text("Get Yo").font(.yo(22)).frame(width: 200, height: 34)
       }
       .buttonStyle(.glassProminent)
       .tint(.white)
       .foregroundStyle(Color.amethyst)
       .padding(.top, 44)
-      Button("I already have Yo") { Task { await restoreWithPasskey() } }
+      Button("Sign In") { Task { await restoreWithPasskey() } }
         .font(.yo(17))
         .opacity(0.9)
         .padding(.top, 20)
@@ -68,6 +70,11 @@ struct Onboarding: View {
     .padding(.horizontal, 28)
     .padding(.bottom, 12)
     .disabled(busy)
+    .task {
+      guard !looked else { return }
+      looked = true
+      try? await accounts.restoreWithPasskey(quietly: true)  // a Yo passkey here: the system offers it
+    }
   }
 
   // MARK: Name
