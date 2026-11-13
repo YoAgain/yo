@@ -227,6 +227,16 @@ CREATE TABLE IF NOT EXISTS reports (
     PRIMARY KEY (reporter_id, reported_id)
 ) WITHOUT ROWID;
 CREATE INDEX IF NOT EXISTS reports_by_reported ON reports(reported_id);
+-- Feedback on the app (spec 6.3), for the operator to read: who wrote it, the text as written (plain to the hub),
+-- the app's version, when (ms). Gone with the account.
+CREATE TABLE IF NOT EXISTS feedback (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id BLOB NOT NULL,
+    text TEXT NOT NULL,
+    app_version TEXT NOT NULL,
+    created_at INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS feedback_by_user ON feedback(user_id);
 -- Photos and videos (spec 6.8): the file is on disk, by its id; here what the hub needs to hand it out and delete it.
 -- `user_id` is the uploader (for its quota), never a recipient. Gone after the last fetch, or after its time.
 CREATE TABLE IF NOT EXISTS blobs (
@@ -311,13 +321,14 @@ fn user_of_device(tx: &Transaction<'_>, device: &DeviceId) -> rusqlite::Result<O
 }
 
 /// Removes a user and everything about it: its devices (which answer 410 from then on), handles, account keys, backup
-/// record and reports. The name and the key are free again.
+/// record, reports and feedback. The name and the key are free again.
 fn remove_user(tx: &Transaction<'_>, user: &UserId, now: u64) -> rusqlite::Result<()> {
     retire_devices(tx, user, now)?;
     tx.execute("DELETE FROM backups WHERE user_id = ?1", [user])?;
     tx.execute("DELETE FROM handles WHERE user_id = ?1", [user])?;
     tx.execute("DELETE FROM account_keys WHERE user_id = ?1", [user])?;
     tx.execute("DELETE FROM reports WHERE reporter_id = ?1 OR reported_id = ?1", [user])?;
+    tx.execute("DELETE FROM feedback WHERE user_id = ?1", [user])?;
     // Its blobs' files go with the next sweep, or at once where the route knows them (`blobs_of`).
     tx.execute("DELETE FROM blobs WHERE user_id = ?1", [user])?;
     tx.execute("DELETE FROM blob_quota WHERE user_id = ?1", [user])?;
@@ -670,6 +681,18 @@ impl Db {
             .execute(params![reporter, reported, reason, now])?;
         tx.commit()?;
         Ok(Write::Done(stored == 1))
+    }
+
+    /// Stores feedback from a device's user. The device is checked in this transaction: an account deleted meanwhile
+    /// leaves none behind.
+    pub fn feedback(&self, device: &DeviceId, text: &str, app_version: &str, now: u64) -> rusqlite::Result<Write<()>> {
+        let mut conn = self.conn();
+        let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let Some(user) = user_of_device(&tx, device)? else { return Ok(Write::Refused(Conflict::DeviceGone)) };
+        tx.prepare_cached("INSERT INTO feedback (user_id, text, app_version, created_at) VALUES (?1, ?2, ?3, ?4)")?
+            .execute(params![user, text, app_version, now])?;
+        tx.commit()?;
+        Ok(Write::Done(()))
     }
 
     // ---- backups ----
@@ -1287,6 +1310,8 @@ mod tests {
             Write::Refused(_) => None,
         };
         assert_eq!((reported(&leo, &mia), reported(&mia, &leo)), (Some(true), Some(true)));
+        assert!(matches!(db.feedback(&[1; 16], "more colors", "1.0 (1)", 0).unwrap(), Write::Done(())));
+        assert!(matches!(db.feedback(&[2; 16], "fine", "1.0 (1)", 0).unwrap(), Write::Done(())));
         assert!(matches!(db.delete_account(&[1; 16], 1).unwrap(), Write::Done(())));
         assert!(db.is_gone(&[1; 16]).unwrap(), "its device learns that the account is gone");
         assert!(db.lookup(KIND_USER, &leo, false, &[]).unwrap().is_none());
@@ -1296,11 +1321,62 @@ mod tests {
             db.conn().query_row(&format!("SELECT count(*) FROM {table}"), [], |row| row.get(0)).unwrap()
         };
         assert_eq!((left("reports"), left("key_packages"), left("account_keys")), (0, 1, 1), "only MIA's are left");
+        let feedback: Vec<Vec<u8>> = db
+            .conn()
+            .prepare("SELECT user_id FROM feedback")
+            .unwrap()
+            .query_map([], |row| row.get(0))
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap();
+        assert_eq!(feedback, [mia.to_vec()], "MIA's feedback stays, LEO's is gone");
+        assert!(matches!(db.feedback(&[1; 16], "late", "1.0 (1)", 1).unwrap(), Write::Refused(Conflict::DeviceGone)));
         assert!(matches!(db.delete_account(&[1; 16], 1).unwrap(), Write::Refused(Conflict::DeviceGone)));
         // The name and the key are free again.
         user(register(&db, b"LEO", 1, 3, 2));
         assert_eq!(reported(&mia, &leo), Some(false), "no such user any more");
         assert_eq!(reported(&leo, &mia), None, "a deleted account reports nobody");
+    }
+
+    #[test]
+    fn feedback_is_kept_as_written_with_who_and_when() {
+        let db = Db::open(":memory:").unwrap();
+        let leo = user(register(&db, b"LEO", 1, 1, 0));
+        assert!(matches!(db.feedback(&[1; 16], "Mehr Farben, bitte 🎨", "1.2 (34)", 5).unwrap(), Write::Done(())));
+        assert!(matches!(db.feedback(&[1; 16], "again", "1.2 (35)", 6).unwrap(), Write::Done(())));
+        let rows: Vec<(i64, Vec<u8>, String, String, i64)> = db
+            .conn()
+            .prepare("SELECT id, user_id, text, app_version, created_at FROM feedback ORDER BY id")
+            .unwrap()
+            .query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?)))
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap();
+        assert_eq!(
+            rows,
+            [
+                (1, leo.to_vec(), "Mehr Farben, bitte 🎨".to_owned(), "1.2 (34)".to_owned(), 5),
+                (2, leo.to_vec(), "again".to_owned(), "1.2 (35)".to_owned(), 6),
+            ]
+        );
+        assert!(matches!(db.feedback(&[9; 16], "nobody", "1", 7).unwrap(), Write::Refused(Conflict::DeviceGone)));
+    }
+
+    #[test]
+    fn a_database_from_before_feedback_gains_its_table() {
+        let path = std::env::temp_dir().join(format!("yo-hub-feedback-{}.db", std::process::id()));
+        let path = path.to_str().unwrap();
+        {
+            let db = Db::open(path).unwrap();
+            user(register(&db, b"LEO", 1, 1, 0));
+            db.conn().execute_batch("DROP INDEX feedback_by_user; DROP TABLE feedback").unwrap();
+        }
+        let db = Db::open(path).unwrap();
+        assert!(matches!(db.feedback(&[1; 16], "hi", "1", 0).unwrap(), Write::Done(())));
+        drop(db);
+        for suffix in ["", "-wal", "-shm"] {
+            let _ = std::fs::remove_file(format!("{path}{suffix}"));
+        }
     }
 
     #[test]

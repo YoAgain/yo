@@ -155,6 +155,25 @@ impl Whois {
     }
 }
 
+/// The signed feedback of `Client::feedback_begin`, sent without the client.
+pub struct FeedbackRequest {
+    transport: Arc<dyn Transport>,
+    headers: Vec<(String, String)>,
+    body: Vec<u8>,
+}
+
+impl FeedbackRequest {
+    /// Blocks for the round trip. `Refused(429)`: the day's feedback is used up.
+    pub fn send(&self) -> Result<()> {
+        let response =
+            self.transport.request("POST", api::FEEDBACK, &self.headers, &self.body).map_err(Error::Network)?;
+        match response.status {
+            status::NO_CONTENT => Ok(()),
+            _ => Err(refused(&response)),
+        }
+    }
+}
+
 /// What `Client::send_end` leaves to do.
 pub enum Sent {
     /// More of the outbox to send without the client, then to end again.
@@ -2157,6 +2176,22 @@ impl Client {
             status::NOT_FOUND => Err(Error::NotOnYo),
             _ => Err(refused(&response)),
         }
+    }
+
+    /// Signs feedback on the app for the operator (spec 6.3), to send without the client (`FeedbackRequest::send`).
+    /// The text goes as written, readable by the hub: not end-to-end encrypted. Empty text, or text or version too
+    /// long, is refused here.
+    pub fn feedback_begin(&mut self, text: &str, app_version: &str) -> Result<FeedbackRequest> {
+        let feedback = api::Feedback { text: text.as_bytes().into(), app_version: app_version.as_bytes().into() };
+        feedback.check().map_err(|_| Error::Protocol("feedback empty or too long"))?;
+        let body = encode(&feedback);
+        let (headers, _) = self.sign("POST", api::FEEDBACK, &body);
+        Ok(FeedbackRequest { transport: self.transport.clone(), headers, body })
+    }
+
+    /// `feedback_begin` and its send, holding the client throughout.
+    pub fn send_feedback(&mut self, text: &str, app_version: &str) -> Result<()> {
+        self.feedback_begin(text, app_version)?.send()
     }
 
     /// Deletes the account at the hub with everything it holds about it (spec 6.3): the name is free again, the other

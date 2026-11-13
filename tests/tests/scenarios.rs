@@ -444,6 +444,7 @@ fn the_hub_survives_garbage_on_every_route() {
         ("GET", "/v1/username/%FF%00".to_owned()),
         ("DELETE", api::ACCOUNT.to_owned()),
         ("POST", api::REPORT.to_owned()),
+        ("POST", api::FEEDBACK.to_owned()),
     ];
     let mut seed = 0x9E37_79B9_7F4A_7C15u64;
     for (method, path) in routes {
@@ -743,6 +744,40 @@ fn a_report_reaches_the_operator_within_its_limit() {
     assert_eq!(a.signed_for_tests("POST", api::REPORT, &report(9)).unwrap().status, api::status::BAD_REQUEST);
     a.report(&pb, api::REPORT_OTHER).unwrap();
     assert_eq!(a.report(&pb, api::REPORT_OTHER), Err(Error::Refused(api::status::RATE_LIMITED)));
+}
+
+#[test]
+fn feedback_reaches_the_operator_within_its_limit() {
+    let mut config = yo_hub::config::Config::for_tests();
+    config.limits.feedback_per_user_day = 3;
+    let hub = TestHub::start_with(config, "127.0.0.1:0");
+    let (mut a, mut b, _, _) = pair(&hub);
+    a.send_feedback("More colors, please", "1.0 (1)").unwrap();
+    // Without the client: signed under it, sent after.
+    a.feedback_begin(&"ä".repeat(1000), "1.0 (1)").unwrap().send().unwrap();
+    // Too long, empty or not UTF-8: the core does not sign it, and the hub refuses it anyway.
+    let limit = yo_wire::limits::MAX_FEEDBACK_LEN;
+    assert!(a.feedback_begin(&"x".repeat(limit + 1), "1.0 (1)").is_err());
+    assert!(a.feedback_begin("", "1.0 (1)").is_err());
+    let raw = |text: Vec<u8>, version: &str| {
+        yo_wire::encode(&api::Feedback { text: text.into(), app_version: version.as_bytes().to_vec().into() })
+    };
+    for body in [
+        raw(vec![b'x'; limit + 1], "1"),
+        raw(Vec::new(), "1"),
+        raw(vec![0xFF, 0xFE], "1"),
+        raw(b"fine".to_vec(), &"9".repeat(65)),
+    ] {
+        assert_eq!(a.signed_for_tests("POST", api::FEEDBACK, &body).unwrap().status, api::status::BAD_REQUEST);
+    }
+    // The third today is the last.
+    a.send_feedback(&"x".repeat(limit), "1.0 (1)").unwrap();
+    assert_eq!(a.send_feedback("one more", "1.0 (1)"), Err(Error::Refused(api::status::RATE_LIMITED)));
+    // Per user: another one's is still taken.
+    b.send_feedback("hi", "1.0 (1)").unwrap();
+    // A deleted account sends none.
+    b.delete_account().unwrap();
+    assert_eq!(b.send_feedback("hi again", "1.0 (1)"), Err(Error::Replaced));
 }
 
 #[test]

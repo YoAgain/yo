@@ -18,6 +18,8 @@ pub const BACKUP: &str = "/v1/backup";
 /// `DELETE`: the signing device's account, with everything the hub holds about it.
 pub const ACCOUNT: &str = "/v1/account";
 pub const REPORT: &str = "/v1/report";
+/// `POST`: feedback on the app, for the operator (spec 6.3).
+pub const FEEDBACK: &str = "/v1/feedback";
 /// Photos and videos, encrypted (spec 6.8).
 pub const BLOBS: &str = "/v1/blobs";
 
@@ -305,6 +307,31 @@ pub struct Report {
     pub user_id: UserId,
     /// `REPORT_SPAM`, `REPORT_ABUSE` or `REPORT_OTHER`.
     pub reason: u8,
+}
+
+/// `POST /v1/feedback`: what a user writes to the operator about the app, and the app's version. Plain text: the
+/// hub reads it (spec 1).
+#[derive(Debug, Clone, PartialEq, Eq, TlsSerialize, TlsDeserializeBytes, TlsSize)]
+pub struct Feedback {
+    /// UTF-8, 1 to `MAX_FEEDBACK_LEN` bytes.
+    pub text: VLBytes,
+    /// UTF-8, at most `MAX_APP_VERSION_LEN` bytes: "1.0 (42)".
+    pub app_version: VLBytes,
+}
+
+impl Feedback {
+    /// The text and the version, as the hub takes them: UTF-8, within their lengths, the text not empty.
+    pub fn check(&self) -> Result<(&str, &str), crate::Error> {
+        use crate::limits::{MAX_APP_VERSION_LEN, MAX_FEEDBACK_LEN};
+        let (text, version) = (self.text.as_slice(), self.app_version.as_slice());
+        if text.len() > MAX_FEEDBACK_LEN || version.len() > MAX_APP_VERSION_LEN {
+            return Err(crate::Error::Size);
+        }
+        match (std::str::from_utf8(text), std::str::from_utf8(version)) {
+            (Ok(text), Ok(version)) if !text.is_empty() => Ok((text, version)),
+            _ => Err(crate::Error::Format),
+        }
+    }
 }
 
 /// The body of a `409` to a delivery: the user's current account key and devices (spec 4.6).

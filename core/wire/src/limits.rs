@@ -32,3 +32,7 @@ pub const MAX_DEVICES: usize = 16;
 pub const MAX_BACKUP_WRAP_LEN: usize = 256;
 /// The largest sealed part of a backup record: the account and its friends, and the record still one request.
 pub const MAX_BACKUP_SEALED_LEN: usize = 60 * 1024;
+/// The longest feedback text, in bytes of UTF-8 (spec 6.3).
+pub const MAX_FEEDBACK_LEN: usize = 2000;
+/// The longest app version sent with feedback.
+pub const MAX_APP_VERSION_LEN: usize = 64;

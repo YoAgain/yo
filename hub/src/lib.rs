@@ -158,6 +158,7 @@ impl Hub {
             .route(api::USERNAME, put(set_username))
             .route(api::ACCOUNT, delete(delete_account))
             .route(api::REPORT, post(report))
+            .route(api::FEEDBACK, post(feedback))
             .route("/v1/username/{name}", get(username_free))
             .route(api::INBOX, get(inbox))
             .route(api::INBOX_ACK, post(ack))
@@ -653,6 +654,19 @@ async fn report(State(hub): Hubs, method: Method, uri: Uri, headers: HeaderMap, 
     match hub.db.report(&device.device_id, &request.user_id, request.reason, now_ms())? {
         Write::Done(true) => Ok(StatusCode::NO_CONTENT),
         Write::Done(false) => Err(refuse(StatusCode::NOT_FOUND)),
+        Write::Refused(_) => Err(refuse(StatusCode::GONE)),
+    }
+}
+
+/// Feedback on the app from the signing device's user, for the operator to read: the text as written (not end-to-end
+/// encrypted, spec 1), the app's version, who, when.
+async fn feedback(State(hub): Hubs, method: Method, uri: Uri, headers: HeaderMap, body: Bytes) -> Res<StatusCode> {
+    let device = hub.authenticate(&method, &uri, &headers, &body)?;
+    let request: api::Feedback = decode(&body)?;
+    let (text, app_version) = request.check().map_err(|_| bad())?;
+    hub.limit(format!("feedback:{}", yo_wire::b64(&device.user_id)), hub.config.limits.feedback_per_user_day, DAY)?;
+    match hub.db.feedback(&device.device_id, text, app_version, now_ms())? {
+        Write::Done(()) => Ok(StatusCode::NO_CONTENT),
         Write::Refused(_) => Err(refuse(StatusCode::GONE)),
     }
 }

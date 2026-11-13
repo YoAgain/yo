@@ -537,6 +537,13 @@ impl YoClient {
         Ok(self.with(|c| c.report(&who, reason.into()))?)
     }
 
+    /// Sends feedback on the app to the operator: the text (1 to 2000 bytes of UTF-8, not end-to-end encrypted) and
+    /// the app's version ("1.2 (34)"). Signed under the client, sent without it. `Refused(429)`: enough for today.
+    pub fn send_feedback(&self, text: String, app_version: String) -> Result<(), YoError> {
+        let request = self.with(|c| c.feedback_begin(&text, &app_version))?;
+        Ok(request.send()?)
+    }
+
     /// Deletes the account at the hub with everything it holds about it; then forget this client and its state.
     pub fn delete_account(&self) -> Result<(), YoError> {
         Ok(self.with(|c| c.delete_account())?)
