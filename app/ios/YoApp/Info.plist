@@ -33,6 +33,8 @@
 			<string>AppIcon</string>
 		</dict>
 	</dict>
+	<key>ITSAppUsesNonExemptEncryption</key>
+	<false/>
 	<key>NSCameraUsageDescription</key>
 	<string>Yo uses the camera so you can send photos and videos to friends and scan your recovery key to sign in.</string>
 	<key>NSFaceIDUsageDescription</key>
