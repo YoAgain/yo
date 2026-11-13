@@ -175,8 +175,7 @@ struct RecoveryShowSheet: View {
     ZStack {
       Color.amethyst.ignoresSafeArea()
       Page(title: "Recovery Key", message: "Anyone with these words can sign in as you.") {
-        RecoveryQRView(words: words, size: 80)
-        WordGrid(words: words).privacySensitive()
+        FrostedKey(words: words, qrSize: 80)  // milky until tapped, as everywhere the words show
       } bottom: {
         PrimaryButton(saved ? "Done" : "Save…") {
           if saved { return dismiss() }
