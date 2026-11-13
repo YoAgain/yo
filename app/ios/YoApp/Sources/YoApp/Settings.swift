@@ -65,24 +65,52 @@ struct SettingsView: View {
             }
             .padding(.vertical, 4)
           }
-          // Account: its security, signing out, deleting it; the badge while something is left to secure.
+          // While something is left to secure: the guide, right here, with the badge.
+          if accounts.toDo > 0 {
+            Section {
+              Button { secure(nil) } label: {
+                HStack {
+                  Label {
+                    Text("Secure Your Account").foregroundStyle(Color(.label))
+                  } icon: {
+                    Image(systemName: "lock.fill")
+                  }
+                  .labelStyle(Tile(.orange))
+                  Spacer()
+                  CountBadge(count: accounts.toDo)
+                  Chevron()
+                }
+              }
+            } footer: {
+              Text("Keep your name “\(account.username)” forever.")
+            }
+          }
+          // One list: Account (security, signing out, deleting), Statistics, Blocked.
           Section {
             NavigationLink {
               accountPage(account)
             } label: {
               HStack {
                 Label("Account", systemImage: "person.fill")
-                  .labelStyle(Tile(accounts.toDo > 0 ? .orange : .gray))
+                  .labelStyle(Tile(accounts.toDo > 0 ? .orange : .green))
                 Spacer()
-                if accounts.toDo > 0 { CountBadge(count: accounts.toDo) }
+                if accounts.toDo > 0 {
+                  Text("Not Secured").foregroundStyle(Color(.secondaryLabel))
+                } else {
+                  Text("Secured").foregroundStyle(Color(.secondaryLabel))
+                  Image(systemName: "checkmark.circle.fill").foregroundStyle(.green).accessibilityHidden(true)
+                }
               }
             }
-          } footer: {
-            if accounts.toDo > 0 {
-              Text("Secure your account to keep your name “\(account.username)” forever.")
+            NavigationLink {
+              StatsPage()
+            } label: {
+              HStack {
+                Label("Statistics", systemImage: "chart.bar.fill").labelStyle(Tile(.amethyst))
+                Spacer()
+                Text("\(Stats.sent + Stats.received)").foregroundStyle(Color(.secondaryLabel))
+              }
             }
-          }
-          Section {
             NavigationLink {
               BlockedList()
             } label: {
@@ -103,8 +131,9 @@ struct SettingsView: View {
       .navigationTitle("Profile")
       .navigationBarTitleDisplayMode(.inline)
       .toolbar {
-        ToolbarItem(placement: .cancellationAction) {
-          Button("Close") { dismiss() }
+        // As Signal's settings: the system's close button, top right.
+        ToolbarItem(placement: .topBarTrailing) {
+          Button(role: .close) { dismiss() }
             .disabled(addingPasskey)
         }
       }
@@ -418,8 +447,8 @@ struct RecoveryWordsSheet: View {
         explanation: SecurityPresentation.recoveryExplanation
       )
       .toolbar {
-        ToolbarItem(placement: .cancellationAction) {
-          Button("Close") { dismiss() }
+        ToolbarItem(placement: .topBarTrailing) {
+          Button(role: .close) { dismiss() }
         }
       }
     }
@@ -911,7 +940,7 @@ struct NameCodeSheet: View {
       .navigationTitle("Your Code")
       .navigationBarTitleDisplayMode(.inline)
       .toolbar {
-        ToolbarItem(placement: .confirmationAction) { Button("Done") { dismiss() } }
+        ToolbarItem(placement: .topBarTrailing) { Button(role: .close) { dismiss() } }
       }
     }
     .presentationDetents([.medium, .large])

@@ -75,6 +75,7 @@ final class Inbox {
         _ = friends.friend(user: contact.user, handles: contact.handles)
       }
       take(events, client: client, friends: friends)
+      Stats.sentYo(to: friend.name)
       return nil
     } catch YoError.NotOnYo {
       return "Not on Yo"
@@ -120,6 +121,7 @@ final class Inbox {
       case .message(let user, let sentAtMs, .yo):
         let sender = friend(user)
         received(id: "\(user)/\(sentAtMs)", from: sender.name)
+        Stats.receivedYo(from: sender.name)
         friends.promote(sender.name)
       case .newChat(let user):
         _ = friend(user)

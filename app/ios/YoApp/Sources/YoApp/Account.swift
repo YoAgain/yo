@@ -464,6 +464,7 @@ final class AccountStore {
     StateFile.delete()
     SecureReminder.update(secured: true)
     RecoveryWords.delete()
+    Stats.reset()
   }
 }
 
