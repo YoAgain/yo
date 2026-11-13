@@ -47,34 +47,8 @@ struct SettingsView: View {
               Form {
                 Section {
                   LabeledContent("Name") { Text(account.username).font(.yo(17, relativeTo: .body)) }
-                  // Security here too, on or off, so it can be turned on from here as well.
-                  if account.secured {
-                    NavigationLink {
-                      recoveryPage(account)
-                    } label: {
-                      LabeledContent {
-                        Text("On")
-                      } label: {
-                        Label("Account Security", systemImage: "lock.fill").labelStyle(Tile(.green))
-                      }
-                    }
-                  } else {
-                    Button { securing = true } label: {
-                      HStack {
-                        Label("Account Security", systemImage: "lock.fill").labelStyle(Tile(.orange))
-                        Spacer()
-                        Text("Off").foregroundStyle(.secondary)
-                        CountBadge(count: 1)
-                        Chevron()
-                      }
-                    }
-                    .tint(.primary)
-                  }
-                } footer: {
-                  if !account.secured {
-                    Text("Secure your account to keep your name “\(account.username)” forever.")
-                  }
                 }
+                securitySection(account)
                 // As the Apple Account page ends: Sign Out, red, on its own; the dialog says what happens.
                 Section {
                   Button("Sign Out", role: .destructive) { resetting = true }
@@ -90,6 +64,9 @@ struct SettingsView: View {
               } message: {
                 Text(resetMessage)
               }
+              .modifier(SecurityDialogs(
+                turningOffPasskey: $turningOffPasskey, renewingWords: $renewingWords,
+                turnOff: removePasskey, renew: newWords))
             } label: {
               profileRow(account)
             }
@@ -192,6 +169,47 @@ struct SettingsView: View {
       }
     }
     .padding(.vertical, 2)
+  }
+
+  /// "Account Security": the passkey and the recovery key, each a row with its state and what can be done with it.
+  private func securitySection(_ account: Account) -> some View {
+    let hasWords = account.secured && RecoveryWords.load() != nil
+    return Section {
+      if account.secured {
+        Menu {
+          if account.byPasskey {
+            Button("Replace Passkey", systemImage: "arrow.triangle.2.circlepath") { Task { await replacePasskey() } }
+            Button("Turn Off Passkey", systemImage: "xmark.circle", role: .destructive) { turningOffPasskey = true }
+          } else {
+            Button("Turn On Passkey", systemImage: "faceid") { Task { await addPasskey() } }
+          }
+        } label: {
+          SecurityRow(icon: "faceid", color: .green, title: "Passkey", value: account.byPasskey ? "On" : "Off")
+        }
+        .disabled(addingPasskey || !hasWords)
+        Menu {
+          Button("Show Recovery Key", systemImage: "eye") { showingWords = true }
+          Button("Create New Recovery Key", systemImage: "arrow.triangle.2.circlepath") { renewingWords = true }
+        } label: {
+          SecurityRow(icon: "key.fill", color: .gray, title: "Recovery Key",
+            value: hasWords ? "Created" : "Not on This iPhone")
+        }
+        .disabled(addingPasskey || !hasWords)
+      } else {
+        Button { securing = true } label: {
+          SecurityRow(icon: "faceid", color: .orange, title: "Passkey", value: "Off")
+        }
+        Button { securing = true } label: {
+          SecurityRow(icon: "key.fill", color: .orange, title: "Recovery Key", value: "Not Set Up")
+        }
+      }
+    } header: {
+      Text("Account Security")
+    } footer: {
+      Text(account.secured
+        ? "Either one signs you back in on a new iPhone."
+        : "Secure your account to keep your name “\(account.username)” forever.")
+    }
   }
 
   /// What secures the account, each with what can be done to it: the passkey (Face ID) and the recovery key.
@@ -729,5 +747,46 @@ struct Chevron: View {
       .font(.footnote.weight(.semibold))
       .foregroundStyle(.tertiary)
       .accessibilityHidden(true)
+  }
+}
+
+/// A security row: its tile, its title, its state at the end, as Settings lists a setting.
+private struct SecurityRow: View {
+  let icon: String
+  let color: Color
+  let title: String
+  let value: String
+
+  var body: some View {
+    HStack {
+      Label(title, systemImage: icon).labelStyle(Tile(color)).foregroundStyle(.primary)
+      Spacer()
+      Text(value).foregroundStyle(.secondary)
+      Chevron()
+    }
+  }
+}
+
+/// The two confirmations of the security rows, wherever they are shown.
+private struct SecurityDialogs: ViewModifier {
+  @Binding var turningOffPasskey: Bool
+  @Binding var renewingWords: Bool
+  let turnOff: () -> Void
+  let renew: () -> Void
+
+  func body(content: Content) -> some View {
+    content
+      .confirmationDialog("Turn Off Passkey?", isPresented: $turningOffPasskey, titleVisibility: .visible) {
+        Button("Turn Off Passkey", role: .destructive) { turnOff() }
+        Button("Cancel", role: .cancel) {}
+      } message: {
+        Text("You’ll sign back in with your recovery key only. Delete the passkey in your password manager too.")
+      }
+      .confirmationDialog("Create New Recovery Key?", isPresented: $renewingWords, titleVisibility: .visible) {
+        Button("Create New Recovery Key", role: .destructive) { renew() }
+        Button("Cancel", role: .cancel) {}
+      } message: {
+        Text("Your current 12 words will stop working.")
+      }
   }
 }
