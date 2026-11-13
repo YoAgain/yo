@@ -15,9 +15,13 @@
 //!                         skeleton, INSERT OR IGNORE). A name taken off the list stays reserved until deleted by hand:
 //!                         `DELETE FROM reserved WHERE skeleton = 'ADMIN';`. Unset, or no such file: nothing added.
 //!                         Reserving a name takes it from no one who has it already.
+//!   YO_BLOB_DIR           photos and videos (spec 6.8), one file each; default `blobs` beside YO_DB. Not for the
+//!                         database's backup: blobs are fleeting.
+//!   YO_BLOB_BUDGET_MB     all blobs together at most, default 16384 (16 GiB); uploads beyond are refused (507)
+//!   YO_BLOB_MIN_FREE_MB   uploads are refused while the disk has less free, default 4096 (4 GiB)
 
 use std::sync::Arc;
-use yo_hub::config::{read_reserved, ApnsConfig, Config, FcmConfig, Limits, SmsConfig};
+use yo_hub::config::{read_reserved, ApnsConfig, BlobConfig, Config, FcmConfig, Limits, SmsConfig};
 use yo_hub::{push, Hub};
 
 fn var(name: &str) -> Option<String> {
@@ -30,6 +34,13 @@ fn required(name: &str) -> Result<String, String> {
 
 fn file(name: &str) -> Result<Option<String>, String> {
     var(name).map(|path| std::fs::read_to_string(&path).map_err(|e| format!("{name}: {e}"))).transpose()
+}
+
+fn megabytes(name: &str, default: u64) -> Result<u64, String> {
+    match var(name) {
+        Some(value) => value.parse::<u64>().map(|mb| mb * 1024 * 1024).map_err(|_| format!("{name}: a number of MiB")),
+        None => Ok(default),
+    }
 }
 
 fn config() -> Result<(Config, String), String> {
@@ -64,8 +75,17 @@ fn config() -> Result<(Config, String), String> {
         None => None,
     };
     let fcm = file("YO_FCM_SERVICE_ACCOUNT_FILE")?.map(|service_account_json| FcmConfig { service_account_json });
+    let db_path = var("YO_DB").unwrap_or_else(|| "yo-hub.sqlite".into());
+    let blobs = BlobConfig {
+        dir: var("YO_BLOB_DIR").map(Into::into).unwrap_or_else(|| {
+            let db = std::path::Path::new(&db_path);
+            db.parent().unwrap_or(std::path::Path::new(".")).join("blobs")
+        }),
+        budget_bytes: megabytes("YO_BLOB_BUDGET_MB", BlobConfig::DEFAULT_BUDGET_BYTES)?,
+        min_free_bytes: megabytes("YO_BLOB_MIN_FREE_MB", BlobConfig::DEFAULT_MIN_FREE_BYTES)?,
+    };
     let config = Config {
-        db_path: var("YO_DB").unwrap_or_else(|| "yo-hub.sqlite".into()),
+        db_path,
         phone_secret,
         trust_cloudflare: var("YO_TRUST_CLOUDFLARE").as_deref() == Some("1"),
         apple_app_ids: var("YO_APPLE_APP_IDS")
@@ -76,6 +96,7 @@ fn config() -> Result<(Config, String), String> {
         apns,
         fcm,
         reserved: read_reserved(var("YO_RESERVED_FILE").as_deref())?,
+        blobs,
     };
     Ok((config, var("YO_LISTEN").unwrap_or_else(|| "127.0.0.1:8080".into())))
 }

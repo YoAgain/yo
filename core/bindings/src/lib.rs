@@ -99,19 +99,84 @@ impl yo_core::Store for Store {
     }
 }
 
+/// A photo or video a Yo carries (spec 5): where the hub keeps it, encrypted, and what opens and checks it. The key
+/// is the app's to keep until the photo is seen, then to forget.
+#[derive(uniffi::Record, Clone)]
+pub struct YoMedia {
+    /// 16 bytes.
+    pub id: Vec<u8>,
+    /// 32 bytes.
+    pub key: Vec<u8>,
+    /// The ciphertext's SHA-256.
+    pub sha256: Vec<u8>,
+    /// The ciphertext's size.
+    pub size: u32,
+    pub width: u16,
+    pub height: u16,
+}
+
+impl From<yo_core::Media> for YoMedia {
+    fn from(m: yo_core::Media) -> Self {
+        YoMedia {
+            id: m.id.to_vec(),
+            key: m.key.to_vec(),
+            sha256: m.sha256.to_vec(),
+            size: m.size,
+            width: m.width,
+            height: m.height,
+        }
+    }
+}
+
+impl TryFrom<YoMedia> for yo_core::Media {
+    type Error = YoError;
+
+    fn try_from(m: YoMedia) -> Result<Self, YoError> {
+        let bad = || YoError::Protocol { message: "media".into() };
+        Ok(yo_core::Media {
+            id: m.id.try_into().map_err(|_| bad())?,
+            key: m.key.try_into().map_err(|_| bad())?,
+            sha256: m.sha256.try_into().map_err(|_| bad())?,
+            size: m.size,
+            width: m.width,
+            height: m.height,
+        })
+    }
+}
+
 #[derive(uniffi::Enum)]
 pub enum MessageKind {
     Yo,
-    Text { text: String },
-    Link { url: String },
-    Location { lat_e7: i32, lon_e7: i32 },
-    Unsupported { kind: u16 },
+    /// A Yo with a photo (JPEG or HEIC).
+    Photo {
+        media: YoMedia,
+    },
+    /// A Yo with a short video (MP4 or QuickTime).
+    Video {
+        media: YoMedia,
+        duration_ms: u32,
+    },
+    Text {
+        text: String,
+    },
+    Link {
+        url: String,
+    },
+    Location {
+        lat_e7: i32,
+        lon_e7: i32,
+    },
+    Unsupported {
+        kind: u16,
+    },
 }
 
 impl From<Content> for MessageKind {
     fn from(content: Content) -> Self {
         match content {
             Content::Yo | Content::Profile { .. } => MessageKind::Yo,
+            Content::Photo(media) => MessageKind::Photo { media: media.into() },
+            Content::Video { media, duration_ms } => MessageKind::Video { media: media.into(), duration_ms },
             Content::Text(text) => MessageKind::Text { text },
             Content::Link(url) => MessageKind::Link { url },
             Content::Location { lat_e7, lon_e7 } => MessageKind::Location { lat_e7, lon_e7 },

@@ -6,6 +6,7 @@
 
 pub mod error;
 pub mod identity;
+pub mod media;
 pub mod net;
 pub mod profile;
 pub mod state;
@@ -13,7 +14,7 @@ pub mod state;
 pub use error::{Error, Result};
 pub use net::{Response, Transport};
 pub use yo_wire::api::{Backup, Push, REPORT_ABUSE, REPORT_OTHER, REPORT_SPAM};
-pub use yo_wire::content::Content;
+pub use yo_wire::content::{Content, Media};
 
 use ed25519_dalek::{Signer as _, SigningKey};
 use identity::Key;
@@ -180,6 +181,8 @@ fn note_handle(contact: &mut Contact, shown: String) {
 fn stored(event: Event) -> StoredEvent {
     let content = |content: Content| match content {
         Content::Yo => StoredContent::Yo,
+        Content::Photo(media) => StoredContent::Photo(media.into()),
+        Content::Video { media, duration_ms } => StoredContent::Video { media: media.into(), duration_ms },
         Content::Text(text) => StoredContent::Text(text),
         Content::Link(url) => StoredContent::Link(url),
         Content::Location { lat_e7, lon_e7 } => StoredContent::Location { lat_e7, lon_e7 },
@@ -202,6 +205,8 @@ fn stored(event: Event) -> StoredEvent {
 fn unstored(event: StoredEvent) -> Event {
     let content = |content: StoredContent| match content {
         StoredContent::Yo => Content::Yo,
+        StoredContent::Photo(media) => Content::Photo(media.into()),
+        StoredContent::Video { media, duration_ms } => Content::Video { media: media.into(), duration_ms },
         StoredContent::Text(text) => Content::Text(text),
         StoredContent::Link(url) => Content::Link(url),
         StoredContent::Location { lat_e7, lon_e7 } => Content::Location { lat_e7, lon_e7 },
@@ -595,11 +600,16 @@ impl Client {
 
     /// The headers that sign a request, and its time.
     fn sign(&mut self, method: &str, path: &str, body: &[u8]) -> (Vec<(String, String)>, u64) {
+        self.sign_hash(method, path, &sha256(body))
+    }
+
+    /// `sign` by the body's hash.
+    fn sign_hash(&mut self, method: &str, path: &str, body_hash: &[u8; 32]) -> (Vec<(String, String)>, u64) {
         // Each signature once (the hub's replay cache): strictly increasing times.
         let time = wall_ms().max(self.last_request_ms + 1);
         self.last_request_ms = time;
         let key = SigningKey::from_bytes(&self.state.auth_secret);
-        let signature = key.sign(&yo_wire::request::to_be_signed(method, path, time, body));
+        let signature = key.sign(&yo_wire::request::to_be_signed_hash(method, path, time, body_hash));
         let headers = vec![
             (HEADER_DEVICE.to_owned(), yo_wire::b64(&self.state.device_id)),
             (HEADER_TIME.to_owned(), time.to_string()),

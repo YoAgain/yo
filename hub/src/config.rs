@@ -1,6 +1,7 @@
 //! The hub's configuration: everything main.rs reads from the environment, and what tests set directly.
 
-use crate::db::Reserved;
+use crate::db::{BlobQuota, Reserved};
+use std::path::PathBuf;
 
 /// Rate limits (spec 6.6). Each is a token bucket: this many per window, refilled evenly.
 #[derive(Debug, Clone)]
@@ -33,6 +34,29 @@ pub struct Limits {
     /// A user without a backup record whose devices made no request for this long is removed with its name
     /// (spec 6.4).
     pub unsecured_idle_days: u64,
+    /// A blob not fetched by all its devices is deleted after this long (spec 6.8).
+    pub blob_ttl_days: u64,
+    /// Photos and videos one user may upload per day (UTC), and their bytes.
+    pub blobs_per_user_day: u32,
+    pub blob_bytes_per_user_day: u64,
+    /// Bytes of one user's blobs waiting for their fetches, at any time.
+    pub blob_bytes_stored_per_user: u64,
+    pub blob_put_per_ip_minute: u32,
+    /// Fetches, which name no one: by address only.
+    pub blob_get_per_ip_minute: u32,
+}
+
+const MIB: u64 = 1024 * 1024;
+const GIB: u64 = 1024 * MIB;
+
+impl Limits {
+    pub fn blob_quota(&self) -> BlobQuota {
+        BlobQuota {
+            per_day: self.blobs_per_user_day,
+            bytes_per_day: self.blob_bytes_per_user_day,
+            stored: self.blob_bytes_stored_per_user,
+        }
+    }
 }
 
 impl Default for Limits {
@@ -54,6 +78,12 @@ impl Default for Limits {
             report_per_user_day: 20,
             envelope_ttl_days: 30,
             unsecured_idle_days: 365,
+            blob_ttl_days: 30,
+            blobs_per_user_day: 2000,
+            blob_bytes_per_user_day: 2 * GIB,
+            blob_bytes_stored_per_user: GIB,
+            blob_put_per_ip_minute: 120,
+            blob_get_per_ip_minute: 600,
         }
     }
 }
@@ -78,6 +108,37 @@ impl Limits {
             report_per_user_day: u32::MAX,
             envelope_ttl_days: 30,
             unsecured_idle_days: 365,
+            blob_put_per_ip_minute: u32::MAX,
+            blob_get_per_ip_minute: u32::MAX,
+            ..Limits::default()
+        }
+    }
+}
+
+/// Where blobs live and how much room they may take (spec 6.8).
+#[derive(Debug, Clone)]
+pub struct BlobConfig {
+    /// One file per blob, in 256 directories, and `tmp/` for uploads under way. Not in the database's backup:
+    /// blobs are fleeting.
+    pub dir: PathBuf,
+    /// All blobs together, at most; uploads beyond are refused (`507`) until fetches and time have made room.
+    pub budget_bytes: u64,
+    /// Uploads are refused while the disk has less than this free (`507`), whatever the budget says.
+    pub min_free_bytes: u64,
+}
+
+impl BlobConfig {
+    pub const DEFAULT_BUDGET_BYTES: u64 = 16 * GIB;
+    pub const DEFAULT_MIN_FREE_BYTES: u64 = 4 * GIB;
+
+    /// A new directory of its own under the system's temporary one: for tests.
+    pub fn for_tests() -> Self {
+        let mut n = [0u8; 8];
+        getrandom::getrandom(&mut n).expect("random");
+        BlobConfig {
+            dir: std::env::temp_dir().join(format!("yo-hub-blobs-{}-{}", std::process::id(), u64::from_le_bytes(n))),
+            budget_bytes: Self::DEFAULT_BUDGET_BYTES,
+            min_free_bytes: 0,
         }
     }
 }
@@ -124,6 +185,7 @@ pub struct Config {
     /// Usernames nobody may claim (spec 3.3), from the operator's list (`YO_RESERVED_FILE`): added to the database
     /// at every start where it does not hold them yet.
     pub reserved: Vec<Reserved>,
+    pub blobs: BlobConfig,
 }
 
 /// The operator's list of reserved usernames: one per line in its preferred spelling, a note after `#` if any.
@@ -168,6 +230,7 @@ impl Config {
             apns: None,
             fcm: None,
             reserved: Vec::new(),
+            blobs: BlobConfig::for_tests(),
         }
     }
 }

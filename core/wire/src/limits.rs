@@ -14,6 +14,10 @@ pub const MAX_INBOX_FETCH: usize = 100;
 pub const MAX_ACK: usize = 1000;
 /// The longest a fetch waits for mail, in seconds.
 pub const MAX_WAIT_S: u64 = 60;
+/// The largest blob (spec 6.8): a photo or a short video, encrypted.
+pub const MAX_BLOB_LEN: usize = 10 * 1024 * 1024;
+/// The most fetches one blob is stored for: every other device of a chat (spec 6.8).
+pub const MAX_BLOB_FETCHES: u32 = 2 * MAX_DEVICES as u32;
 /// The largest request body: the largest envelope bucket and some room.
 pub const MAX_BODY: usize = 64 * 1024 + 1024;
 /// A signed request's time may differ from the hub's clock by this much.

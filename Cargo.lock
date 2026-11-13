@@ -3758,6 +3758,8 @@ dependencies = [
  "base64 0.22.1",
  "bytes",
  "ed25519-dalek",
+ "futures-core",
+ "futures-util",
  "getrandom 0.2.17",
  "hmac 0.12.1",
  "jsonwebtoken",
@@ -3766,12 +3768,14 @@ dependencies = [
  "openmls_traits",
  "reqwest",
  "rusqlite",
+ "rustix",
  "serde",
  "serde_json",
  "sha2 0.10.9",
  "thiserror",
  "tls_codec",
  "tokio",
+ "tokio-util",
  "yo-wire",
 ]
 

@@ -18,6 +18,22 @@ pub const BACKUP: &str = "/v1/backup";
 /// `DELETE`: the signing device's account, with everything the hub holds about it.
 pub const ACCOUNT: &str = "/v1/account";
 pub const REPORT: &str = "/v1/report";
+/// Photos and videos, encrypted (spec 6.8).
+pub const BLOBS: &str = "/v1/blobs";
+
+/// `GET /v1/blobs/{id}`: a blob, to whoever names its id.
+pub fn blob_path(id: &crate::content::BlobId) -> String {
+    format!("{BLOBS}/{}", crate::b64(id))
+}
+
+/// `PUT /v1/blobs/{id}?fetches={n}`: stores a blob for `n` fetches.
+pub fn blob_put_path(id: &crate::content::BlobId, fetches: u32) -> String {
+    format!("{BLOBS}/{}?fetches={fetches}", crate::b64(id))
+}
+
+/// The header of a blob upload naming the SHA-256 of its body (base64url): what the signature covers, so the hub
+/// checks the request before it takes the body (spec 6.8).
+pub const HEADER_BODY_HASH: &str = "yo-body-sha256";
 
 /// `POST /v1/inbox/{user_id}`: to every device of a user.
 pub fn deliver_path(user: &UserId) -> String {
@@ -318,8 +334,11 @@ pub mod status {
     pub const CONFLICT: u16 = 409;
     /// The mailbox's device was replaced: look the person up again.
     pub const GONE: u16 = 410;
+    pub const LENGTH_REQUIRED: u16 = 411;
     pub const TOO_LARGE: u16 = 413;
     pub const RATE_LIMITED: u16 = 429;
+    /// The hub has no room for blobs now: later.
+    pub const INSUFFICIENT_STORAGE: u16 = 507;
 }
 
 #[cfg(test)]

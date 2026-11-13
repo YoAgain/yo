@@ -1,6 +1,7 @@
 //! The Yo hub (spec 6): users and their devices, KeyPackages, delivery to users, the order of commits, push. It holds
 //! no content key, and the routes that carry messages and commits take no identity: the hub never learns a sender.
 
+pub mod blobs;
 pub mod config;
 pub mod db;
 pub mod error;
@@ -26,8 +27,9 @@ use std::net::{IpAddr, SocketAddr};
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tokio::sync::Notify;
-use yo_wire::api::{self, HEADER_DEVICES};
+use yo_wire::api::{self, HEADER_BODY_HASH, HEADER_DEVICES};
 use yo_wire::cert::DeviceCertificate;
+use yo_wire::content::BlobId;
 use yo_wire::handle::{Handle, KIND_PHONE, KIND_USERNAME};
 use yo_wire::limits::{self, KEY_PACKAGE_TARGET, MAX_DEVICES, MAX_INBOX_FETCH, MAX_KEY_PACKAGES_PER_UPLOAD};
 use yo_wire::request::{HEADER_DEVICE, HEADER_SIGNATURE, HEADER_TIME};
@@ -43,6 +45,7 @@ pub struct Hub {
     waiting: Mutex<HashMap<DeviceId, Arc<Notify>>>,
     sms: Box<dyn sms::Sms>,
     pusher: push::Pusher,
+    blobs: Arc<blobs::Blobs>,
 }
 
 const HOUR: Duration = Duration::from_secs(3600);
@@ -119,6 +122,7 @@ impl Hub {
         let added = db.seed_reserved(&config.reserved, now_ms()).map_err(|e| format!("reserved names: {e}"))?;
         eprintln!("yo-hub: reserved names: {} in the list, {added} new", config.reserved.len());
         let pusher = push::Pusher::new(push_transport, config.apns.as_ref(), config.fcm.as_ref())?;
+        let blobs = blobs::Blobs::open(&config.blobs).map_err(|e| format!("{}: {e}", config.blobs.dir.display()))?;
         let (deliveries, queue) = std::sync::mpsc::channel();
         let writing = db.clone();
         let most = config.limits.max_pending_per_device;
@@ -135,6 +139,7 @@ impl Hub {
             replay: ReplayCache::default(),
             waiting: Mutex::default(),
             pusher,
+            blobs: Arc::new(blobs),
             config,
         }))
     }
@@ -159,7 +164,8 @@ impl Hub {
             .route("/v1/inbox/{user}", post(deliver))
             .route(api::GROUPS, post(create_group))
             .route("/v1/groups/{group}/commit", post(commit))
-            .route("/v1/groups/{group}/commits/{epoch}", get(fetch_commit));
+            .route("/v1/groups/{group}/commits/{epoch}", get(fetch_commit))
+            .route("/v1/blobs/{id}", put(put_blob).get(get_blob));
         if !self.config.apple_app_ids.is_empty() {
             // Which apps may make passkeys for this domain (Apple reads it through its CDN; spec 7).
             let file = serde_json::json!({ "webcredentials": { "apps": self.config.apple_app_ids } }).to_string();
@@ -174,10 +180,19 @@ impl Hub {
         router.layer(DefaultBodyLimit::max(limits::MAX_BODY)).with_state(self.clone())
     }
 
-    /// The hourly cleanup at `now`: envelopes and commits past their time (6.6), names not secured past theirs (6.4).
+    /// The hourly cleanup at `now`: envelopes and commits past their time (6.6), names not secured past theirs (6.4),
+    /// blobs past theirs and files no blob owns (6.8).
     pub fn prune(&self, now: u64) -> rusqlite::Result<()> {
         let limits = &self.config.limits;
         self.db.prune(now, limits.envelope_ttl_days * DAY.as_millis() as u64)?;
+        for id in self.db.prune_blobs(now, limits.blob_ttl_days * DAY.as_millis() as u64)? {
+            self.blobs.remove(&id);
+        }
+        match self.blobs.sweep(&self.db) {
+            Ok(0) => {}
+            Ok(n) => eprintln!("yo-hub: {n} stray blob files removed"),
+            Err(error) => eprintln!("yo-hub: blob sweep in {}: {error}", self.blobs.dir().display()),
+        }
         let released = self.db.release_unsecured(now, limits.unsecured_idle_days * DAY.as_millis() as u64)?;
         if released > 0 {
             eprintln!("yo-hub: {released} names not secured released");
@@ -261,6 +276,11 @@ impl Hub {
     }
 
     fn authenticate(&self, method: &Method, uri: &Uri, headers: &HeaderMap, body: &[u8]) -> Res<Signed> {
+        self.authenticate_hash(method, uri, headers, &sha256(body))
+    }
+
+    /// `authenticate` by the body's hash, before the body is there (a blob, 6.8).
+    fn authenticate_hash(&self, method: &Method, uri: &Uri, headers: &HeaderMap, body_hash: &[u8; 32]) -> Res<Signed> {
         let unauthorized = || refuse(StatusCode::UNAUTHORIZED);
         let header = |name: &str| headers.get(name).and_then(|v| v.to_str().ok()).ok_or_else(unauthorized);
         let device_id: DeviceId =
@@ -282,7 +302,7 @@ impl Hub {
             MINUTE,
         )?;
         let path = uri.path_and_query().map(|p| p.as_str()).unwrap_or("/");
-        yo_wire::request::verify(&device.auth_key, method.as_str(), path, time, body, &signature)
+        yo_wire::request::verify_hash(&device.auth_key, method.as_str(), path, time, body_hash, &signature)
             .map_err(|_| unauthorized())?;
         if !self.replay.first_time(signature, now, time + limits::MAX_SKEW_MS + 1) {
             return Err(unauthorized());
@@ -595,8 +615,15 @@ async fn set_username(State(hub): Hubs, method: Method, uri: Uri, headers: Heade
 /// Deletes the signing device's account with everything the hub holds about it; its other devices answer `410`.
 async fn delete_account(State(hub): Hubs, method: Method, uri: Uri, headers: HeaderMap) -> Res<StatusCode> {
     let device = hub.authenticate(&method, &uri, &headers, &[])?;
+    let blobs = hub.db.blobs_of(&device.device_id)?;
     match hub.db.delete_account(&device.device_id, now_ms())? {
-        Write::Done(()) => Ok(StatusCode::NO_CONTENT),
+        Write::Done(()) => {
+            // Its photos and videos with it, not yet fetched or not. One uploaded meanwhile goes with the sweep.
+            for id in &blobs {
+                hub.blobs.remove(id);
+            }
+            Ok(StatusCode::NO_CONTENT)
+        }
         Write::Refused(_) => Err(refuse(StatusCode::GONE)),
     }
 }
@@ -762,4 +789,128 @@ async fn fetch_commit(
     let group: GroupId = path_id(&group)?;
     let envelope = hub.db.commit_envelope(&group, epoch)?.ok_or_else(|| refuse(StatusCode::NOT_FOUND))?;
     Ok(ok(envelope))
+}
+
+// ---- blobs (spec 6.8) ----
+
+/// The longest an upload may take: a whole blob over a slow line, and no longer.
+const UPLOAD_TIME: Duration = Duration::from_secs(300);
+
+fn query_u32(uri: &Uri, name: &str) -> Option<u32> {
+    uri.query()?.split('&').find_map(|kv| kv.strip_prefix(name)?.strip_prefix('='))?.parse().ok()
+}
+
+/// Stores a photo or video for `fetches` fetches (spec 6.8). Signed by the body's hash, named in a header: the request,
+/// its quota and the room for it are checked before the body is taken; the body goes to disk as it comes and is kept
+/// only if its hash is the signed one. `201` stored, `409` the id is taken, `413` too large, `429` the uploader's
+/// quota or a rate, `507` no room at the hub now.
+#[allow(clippy::too_many_arguments)]
+async fn put_blob(
+    State(hub): Hubs,
+    ConnectInfo(peer): Peer,
+    method: Method,
+    uri: Uri,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+    body: axum::body::Body,
+) -> Res<StatusCode> {
+    use futures_util::StreamExt;
+    use sha2::Digest;
+    use tokio::io::AsyncWriteExt;
+    let id: BlobId = path_id(&id)?;
+    let size: u64 = headers
+        .get(axum::http::header::CONTENT_LENGTH)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.parse().ok())
+        .ok_or_else(|| refuse(StatusCode::LENGTH_REQUIRED))?;
+    if size > limits::MAX_BLOB_LEN as u64 {
+        return Err(refuse(StatusCode::PAYLOAD_TOO_LARGE));
+    }
+    // A ChaCha20-Poly1305 ciphertext has its 16-byte tag at least.
+    if size < 16 {
+        return Err(bad());
+    }
+    let fetches = query_u32(&uri, "fetches").filter(|n| (1..=limits::MAX_BLOB_FETCHES).contains(n)).ok_or_else(bad)?;
+    let body_hash: [u8; 32] = headers
+        .get(HEADER_BODY_HASH)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| unb64(v).ok())
+        .and_then(|v| v.try_into().ok())
+        .ok_or_else(bad)?;
+    let limits = &hub.config.limits;
+    hub.limit(format!("blob:put:ip:{}", hub.ip(peer, &headers)), limits.blob_put_per_ip_minute, MINUTE)?;
+    let device = hub.authenticate_hash(&method, &uri, &headers, &body_hash)?;
+    let quota = limits.blob_quota();
+    let now = now_ms();
+    if hub.db.blob_exists(&id)? {
+        return Err(refuse(StatusCode::CONFLICT));
+    }
+    if !hub.db.blob_quota_left(&device.user_id, size, now, &quota)? {
+        return Err(refuse(StatusCode::TOO_MANY_REQUESTS));
+    }
+    let stored = hub.db.blobs_stored()?;
+    let _room = hub.blobs.reserve(size, stored).map_err(|_| refuse(StatusCode::INSUFFICIENT_STORAGE))?;
+    let failed = |error: std::io::Error| {
+        eprintln!("yo-hub: blob upload: {error}");
+        refuse(StatusCode::INTERNAL_SERVER_ERROR)
+    };
+    let (mut file, incoming) = hub.blobs.incoming().map_err(failed)?;
+    let taken = async {
+        let mut stream = body.into_data_stream();
+        let mut hash = sha2::Sha256::new();
+        let mut got = 0u64;
+        while let Some(chunk) = stream.next().await {
+            // The client went away, or sent something that is no body.
+            let chunk = chunk.map_err(|_| bad())?;
+            got += chunk.len() as u64;
+            if got > size {
+                return Err(refuse(StatusCode::PAYLOAD_TOO_LARGE));
+            }
+            hash.update(&chunk);
+            file.write_all(&chunk).await.map_err(failed)?;
+        }
+        file.flush().await.map_err(failed)?;
+        if got != size || <[u8; 32]>::from(hash.finalize()) != body_hash {
+            return Err(bad());
+        }
+        Ok(())
+    };
+    tokio::time::timeout(UPLOAD_TIME, taken).await.map_err(|_| refuse(StatusCode::REQUEST_TIMEOUT))??;
+    drop(file);
+    let put = hub.db.put_blob(&device.device_id, &id, size, fetches, now_ms(), &quota)?;
+    if let Some(status) = blobs::refused(&put) {
+        return Err(refuse(status));
+    }
+    if let Err(error) = hub.blobs.keep(incoming, &id) {
+        let _ = hub.db.delete_blob(&id);
+        return Err(failed(error));
+    }
+    Ok(StatusCode::CREATED)
+}
+
+/// A blob, to whoever names its id (no identity: the hub does not learn who fetches what), streamed from disk. A fetch
+/// counts when its last byte is handed on; after the last of its fetches the blob is gone. `404`: unknown, fetched by
+/// all, or past its time.
+async fn get_blob(
+    State(hub): Hubs,
+    ConnectInfo(peer): Peer,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+) -> Res<axum::response::Response> {
+    hub.limit(format!("blob:get:ip:{}", hub.ip(peer, &headers)), hub.config.limits.blob_get_per_ip_minute, MINUTE)?;
+    let id: BlobId = path_id(&id)?;
+    let ttl = hub.config.limits.blob_ttl_days * DAY.as_millis() as u64;
+    let size = hub.db.blob(&id, now_ms(), ttl)?.ok_or_else(|| refuse(StatusCode::NOT_FOUND))?;
+    let file = hub.blobs.read(&id, size).await.ok_or_else(|| refuse(StatusCode::NOT_FOUND))?;
+    let (db, store) = (hub.db.clone(), hub.blobs.clone());
+    let stream = blobs::Counted {
+        inner: tokio_util::io::ReaderStream::with_capacity(file, 64 * 1024),
+        left: size,
+        done: Some(Box::new(move || blobs::fetched(&db, &store, id))),
+    };
+    axum::response::Response::builder()
+        .header(axum::http::header::CONTENT_TYPE, "application/octet-stream")
+        .header(axum::http::header::CONTENT_LENGTH, size)
+        .body(axum::body::Body::from_stream(stream))
+        .map_err(|_| refuse(StatusCode::INTERNAL_SERVER_ERROR))
 }

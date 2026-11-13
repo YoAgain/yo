@@ -4,8 +4,11 @@
 
 use rusqlite::{params, Connection, OptionalExtension, Transaction, TransactionBehavior};
 use std::sync::{Mutex, MutexGuard, PoisonError};
+use yo_wire::content::BlobId;
 use yo_wire::handle::{KIND_ACCOUNT_KEY, KIND_USER, KIND_USERNAME};
 use yo_wire::{DeviceId, GroupId, UserId, KEY_LEN};
+
+const DAY_MS: u64 = 24 * 3600 * 1000;
 
 pub type Key = [u8; KEY_LEN];
 
@@ -99,6 +102,28 @@ pub enum Conflict {
 pub enum Write<T> {
     Done(T),
     Refused(Conflict),
+}
+
+/// What one user may store in blobs (spec 6.6).
+#[derive(Debug, Clone, Copy)]
+pub struct BlobQuota {
+    /// Blobs uploaded per day (UTC).
+    pub per_day: u32,
+    /// Their bytes per day.
+    pub bytes_per_day: u64,
+    /// Bytes of the user's blobs not yet fetched by all, at any time.
+    pub stored: u64,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+pub enum BlobPut {
+    Stored,
+    /// A blob with this id is there.
+    Taken,
+    /// The user's quota is used up: later.
+    Quota,
+    /// The device was replaced, or its account removed, since it authenticated.
+    DeviceGone,
 }
 
 const SCHEMA: &str = "
@@ -202,6 +227,25 @@ CREATE TABLE IF NOT EXISTS reports (
     PRIMARY KEY (reporter_id, reported_id)
 ) WITHOUT ROWID;
 CREATE INDEX IF NOT EXISTS reports_by_reported ON reports(reported_id);
+-- Photos and videos (spec 6.8): the file is on disk, by its id; here what the hub needs to hand it out and delete it.
+-- `user_id` is the uploader (for its quota), never a recipient. Gone after the last fetch, or after its time.
+CREATE TABLE IF NOT EXISTS blobs (
+    id BLOB PRIMARY KEY,
+    user_id BLOB NOT NULL,
+    size INTEGER NOT NULL,
+    fetches_left INTEGER NOT NULL,
+    created_at INTEGER NOT NULL
+) WITHOUT ROWID;
+CREATE INDEX IF NOT EXISTS blobs_by_user ON blobs(user_id);
+CREATE INDEX IF NOT EXISTS blobs_by_age ON blobs(created_at);
+-- How many blobs, and bytes, each user uploaded on a day (days since the epoch, UTC); kept two days.
+CREATE TABLE IF NOT EXISTS blob_quota (
+    user_id BLOB NOT NULL,
+    day INTEGER NOT NULL,
+    count INTEGER NOT NULL,
+    bytes INTEGER NOT NULL,
+    PRIMARY KEY (user_id, day)
+) WITHOUT ROWID;
 ";
 
 fn array<const N: usize>(bytes: Vec<u8>) -> rusqlite::Result<[u8; N]> {
@@ -274,6 +318,9 @@ fn remove_user(tx: &Transaction<'_>, user: &UserId, now: u64) -> rusqlite::Resul
     tx.execute("DELETE FROM handles WHERE user_id = ?1", [user])?;
     tx.execute("DELETE FROM account_keys WHERE user_id = ?1", [user])?;
     tx.execute("DELETE FROM reports WHERE reporter_id = ?1 OR reported_id = ?1", [user])?;
+    // Its blobs' files go with the next sweep, or at once where the route knows them (`blobs_of`).
+    tx.execute("DELETE FROM blobs WHERE user_id = ?1", [user])?;
+    tx.execute("DELETE FROM blob_quota WHERE user_id = ?1", [user])?;
     tx.execute("DELETE FROM users WHERE id = ?1", [user])?;
     Ok(())
 }
@@ -311,6 +358,28 @@ fn check_version(conn: &Connection) -> rusqlite::Result<()> {
             "database schema {version}, this hub writes {SCHEMA_VERSION}: start from an empty database"
         ))),
     }
+}
+
+/// Whether a user may store one more blob of `size` bytes on the day of `now`.
+fn blob_quota_left(
+    tx: &Transaction<'_>,
+    user: &UserId,
+    size: u64,
+    now: u64,
+    quota: &BlobQuota,
+) -> rusqlite::Result<bool> {
+    let (count, bytes): (i64, i64) = tx
+        .prepare_cached("SELECT count, bytes FROM blob_quota WHERE user_id = ?1 AND day = ?2")?
+        .query_row(params![user, (now / DAY_MS) as i64], |row| Ok((row.get(0)?, row.get(1)?)))
+        .optional()?
+        .unwrap_or((0, 0));
+    if count as u64 >= quota.per_day as u64 || bytes as u64 + size > quota.bytes_per_day {
+        return Ok(false);
+    }
+    let stored: i64 = tx
+        .prepare_cached("SELECT coalesce(sum(size), 0) FROM blobs WHERE user_id = ?1")?
+        .query_row([user], |row| row.get(0))?;
+    Ok(stored as u64 + size <= quota.stored)
 }
 
 fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
@@ -646,6 +715,119 @@ impl Db {
             )?
             .query_row([id], |row| row.get(0))
             .optional()
+    }
+
+    // ---- blobs (spec 6.8) ----
+
+    /// Whether a user's quota has room for a blob of `size` bytes now: asked before the upload is taken; `put_blob`
+    /// asks again as it stores.
+    pub fn blob_quota_left(&self, user: &UserId, size: u64, now: u64, quota: &BlobQuota) -> rusqlite::Result<bool> {
+        let mut conn = self.conn();
+        let tx = conn.transaction()?;
+        blob_quota_left(&tx, user, size, now, quota)
+    }
+
+    /// The bytes of all blobs stored.
+    pub fn blobs_stored(&self) -> rusqlite::Result<u64> {
+        self.conn()
+            .prepare_cached("SELECT coalesce(sum(size), 0) FROM blobs")?
+            .query_row([], |row| row.get::<_, i64>(0).map(|n| n as u64))
+    }
+
+    pub fn blob_exists(&self, id: &BlobId) -> rusqlite::Result<bool> {
+        self.conn().prepare_cached("SELECT 1 FROM blobs WHERE id = ?1")?.exists([id])
+    }
+
+    /// Stores a blob's row for `fetches` fetches and counts it against its uploader's quota, if the id is free and
+    /// the quota has room. Its file is moved into place after: a row without a file is a blob not there yet.
+    pub fn put_blob(
+        &self,
+        device: &DeviceId,
+        id: &BlobId,
+        size: u64,
+        fetches: u32,
+        now: u64,
+        quota: &BlobQuota,
+    ) -> rusqlite::Result<BlobPut> {
+        let mut conn = self.conn();
+        let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let Some(user) = user_of_device(&tx, device)? else { return Ok(BlobPut::DeviceGone) };
+        if tx.prepare_cached("SELECT 1 FROM blobs WHERE id = ?1")?.exists([id])? {
+            return Ok(BlobPut::Taken);
+        }
+        if !blob_quota_left(&tx, &user, size, now, quota)? {
+            return Ok(BlobPut::Quota);
+        }
+        tx.prepare_cached(
+            "INSERT INTO blobs (id, user_id, size, fetches_left, created_at) VALUES (?1, ?2, ?3, ?4, ?5)",
+        )?
+        .execute(params![id, user, size as i64, fetches, now])?;
+        tx.prepare_cached(
+            "INSERT INTO blob_quota (user_id, day, count, bytes) VALUES (?1, ?2, 1, ?3)
+             ON CONFLICT (user_id, day) DO UPDATE SET count = count + 1, bytes = bytes + excluded.bytes",
+        )?
+        .execute(params![user, (now / DAY_MS) as i64, size as i64])?;
+        tx.commit()?;
+        Ok(BlobPut::Stored)
+    }
+
+    /// A blob's size, if it is there, has fetches left and is within its time.
+    pub fn blob(&self, id: &BlobId, now: u64, ttl_ms: u64) -> rusqlite::Result<Option<u64>> {
+        self.conn()
+            .prepare_cached("SELECT size FROM blobs WHERE id = ?1 AND fetches_left > 0 AND created_at >= ?2")?
+            .query_row(params![id, now.saturating_sub(ttl_ms) as i64], |row| row.get::<_, i64>(0).map(|n| n as u64))
+            .optional()
+    }
+
+    /// Counts a complete fetch; true when it was the last and the row is gone (the file must go too).
+    pub fn blob_fetched(&self, id: &BlobId) -> rusqlite::Result<bool> {
+        let mut conn = self.conn();
+        let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let left: Option<i64> = tx
+            .prepare_cached(
+                "UPDATE blobs SET fetches_left = fetches_left - 1 WHERE id = ?1 AND fetches_left > 0
+                 RETURNING fetches_left",
+            )?
+            .query_row([id], |row| row.get(0))
+            .optional()?;
+        let last = left == Some(0);
+        if last {
+            tx.execute("DELETE FROM blobs WHERE id = ?1", [id])?;
+        }
+        tx.commit()?;
+        Ok(last)
+    }
+
+    pub fn delete_blob(&self, id: &BlobId) -> rusqlite::Result<()> {
+        self.conn().execute("DELETE FROM blobs WHERE id = ?1", [id])?;
+        Ok(())
+    }
+
+    /// Deletes the rows of blobs past their time and returns their ids (their files must go too); forgets quotas of
+    /// days before yesterday.
+    pub fn prune_blobs(&self, now: u64, ttl_ms: u64) -> rusqlite::Result<Vec<BlobId>> {
+        let mut conn = self.conn();
+        let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let ids = tx
+            .prepare_cached("DELETE FROM blobs WHERE created_at < ?1 RETURNING id")?
+            .query_map([now.saturating_sub(ttl_ms) as i64], |row| array(row.get(0)?))?
+            .collect::<Result<_, _>>()?;
+        tx.execute("DELETE FROM blob_quota WHERE day < ?1", [(now / DAY_MS) as i64 - 1])?;
+        tx.commit()?;
+        Ok(ids)
+    }
+
+    /// Every blob's id: what the sweep keeps.
+    pub fn blob_ids(&self) -> rusqlite::Result<Vec<BlobId>> {
+        self.conn().prepare_cached("SELECT id FROM blobs")?.query_map([], |row| array(row.get(0)?))?.collect()
+    }
+
+    /// The blobs a device's user uploaded: whose files go when the account is deleted.
+    pub fn blobs_of(&self, device: &DeviceId) -> rusqlite::Result<Vec<BlobId>> {
+        self.conn()
+            .prepare_cached("SELECT b.id FROM blobs b JOIN devices d ON d.user_id = b.user_id WHERE d.id = ?1")?
+            .query_map([device], |row| array(row.get(0)?))?
+            .collect()
     }
 
     // ---- KeyPackages and push ----

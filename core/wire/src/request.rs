@@ -20,12 +20,17 @@ struct SignedRequest {
 
 /// The bytes a device signs for a request. `path` includes the query.
 pub fn to_be_signed(method: &str, path: &str, time_ms: u64, body: &[u8]) -> Vec<u8> {
+    to_be_signed_hash(method, path, time_ms, &sha256(body))
+}
+
+/// `to_be_signed` by the body's hash: for a body too large to hold (a blob, spec 6.8).
+pub fn to_be_signed_hash(method: &str, path: &str, time_ms: u64, body_hash: &[u8; 32]) -> Vec<u8> {
     crate::encode(&SignedRequest {
         label: LABEL.to_vec().into(),
         method: method.as_bytes().to_vec().into(),
         path: path.as_bytes().to_vec().into(),
         time: time_ms,
-        body_hash: sha256(body),
+        body_hash: *body_hash,
     })
 }
 
@@ -38,9 +43,21 @@ pub fn verify(
     body: &[u8],
     signature: &[u8],
 ) -> Result<(), Error> {
+    verify_hash(auth_key, method, path, time_ms, &sha256(body), signature)
+}
+
+/// `verify` by the body's hash: the body itself is checked against it as it comes.
+pub fn verify_hash(
+    auth_key: &[u8; KEY_LEN],
+    method: &str,
+    path: &str,
+    time_ms: u64,
+    body_hash: &[u8; 32],
+    signature: &[u8],
+) -> Result<(), Error> {
     let key = VerifyingKey::from_bytes(auth_key).map_err(|_| Error::Signature)?;
     let signature = Signature::from_slice(signature).map_err(|_| Error::Signature)?;
-    key.verify_strict(&to_be_signed(method, path, time_ms, body), &signature).map_err(|_| Error::Signature)
+    key.verify_strict(&to_be_signed_hash(method, path, time_ms, body_hash), &signature).map_err(|_| Error::Signature)
 }
 
 #[cfg(test)]

@@ -94,9 +94,47 @@ pub enum StoredEvent {
     IdentityChanged { user: String },
 }
 
+/// A photo or video as the state keeps it until the app has it (spec 5).
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct StoredMedia {
+    pub id: [u8; 16],
+    pub key: [u8; 32],
+    pub sha256: [u8; 32],
+    pub size: u32,
+    pub width: u16,
+    pub height: u16,
+}
+
+impl std::fmt::Debug for StoredMedia {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("StoredMedia").field("size", &self.size).finish_non_exhaustive()
+    }
+}
+
+impl From<yo_wire::content::Media> for StoredMedia {
+    fn from(m: yo_wire::content::Media) -> Self {
+        StoredMedia { id: m.id, key: m.key, sha256: m.sha256, size: m.size, width: m.width, height: m.height }
+    }
+}
+
+impl From<StoredMedia> for yo_wire::content::Media {
+    fn from(m: StoredMedia) -> Self {
+        yo_wire::content::Media {
+            id: m.id,
+            key: m.key,
+            sha256: m.sha256,
+            size: m.size,
+            width: m.width,
+            height: m.height,
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum StoredContent {
     Yo,
+    Photo(StoredMedia),
+    Video { media: StoredMedia, duration_ms: u32 },
     Text(String),
     Link(String),
     Location { lat_e7: i32, lon_e7: i32 },
