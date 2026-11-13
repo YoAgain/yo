@@ -228,7 +228,7 @@ CREATE TABLE IF NOT EXISTS reports (
 ) WITHOUT ROWID;
 CREATE INDEX IF NOT EXISTS reports_by_reported ON reports(reported_id);
 -- Feedback on the app (spec 6.3), for the operator to read: who wrote it, the text as written (plain to the hub),
--- the app's version, when (ms). Gone with the account.
+-- the app's version, when (ms). Kept when the account goes, with an all-zero user id (`NOBODY`).
 CREATE TABLE IF NOT EXISTS feedback (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     user_id BLOB NOT NULL,
@@ -320,15 +320,19 @@ fn user_of_device(tx: &Transaction<'_>, device: &DeviceId) -> rusqlite::Result<O
         .optional()
 }
 
+/// The user id that feedback keeps once its sender's account is gone: no user has it (ids are random, and this one
+/// is refused as a backup locator like any 16 bytes no user has).
+pub const NOBODY: UserId = [0; 16];
+
 /// Removes a user and everything about it: its devices (which answer 410 from then on), handles, account keys, backup
-/// record, reports and feedback. The name and the key are free again.
+/// record and reports. Its feedback stays, without the sender (`NOBODY`). The name and the key are free again.
 fn remove_user(tx: &Transaction<'_>, user: &UserId, now: u64) -> rusqlite::Result<()> {
     retire_devices(tx, user, now)?;
     tx.execute("DELETE FROM backups WHERE user_id = ?1", [user])?;
     tx.execute("DELETE FROM handles WHERE user_id = ?1", [user])?;
     tx.execute("DELETE FROM account_keys WHERE user_id = ?1", [user])?;
     tx.execute("DELETE FROM reports WHERE reporter_id = ?1 OR reported_id = ?1", [user])?;
-    tx.execute("DELETE FROM feedback WHERE user_id = ?1", [user])?;
+    tx.execute("UPDATE feedback SET user_id = ?2 WHERE user_id = ?1", params![user, NOBODY])?;
     // Its blobs' files go with the next sweep, or at once where the route knows them (`blobs_of`).
     tx.execute("DELETE FROM blobs WHERE user_id = ?1", [user])?;
     tx.execute("DELETE FROM blob_quota WHERE user_id = ?1", [user])?;
@@ -1323,13 +1327,13 @@ mod tests {
         assert_eq!((left("reports"), left("key_packages"), left("account_keys")), (0, 1, 1), "only MIA's are left");
         let feedback: Vec<Vec<u8>> = db
             .conn()
-            .prepare("SELECT user_id FROM feedback")
+            .prepare("SELECT user_id FROM feedback ORDER BY id")
             .unwrap()
             .query_map([], |row| row.get(0))
             .unwrap()
             .collect::<Result<_, _>>()
             .unwrap();
-        assert_eq!(feedback, [mia.to_vec()], "MIA's feedback stays, LEO's is gone");
+        assert_eq!(feedback, [NOBODY.to_vec(), mia.to_vec()], "LEO's feedback stays without LEO, MIA's as it was");
         assert!(matches!(db.feedback(&[1; 16], "late", "1.0 (1)", 1).unwrap(), Write::Refused(Conflict::DeviceGone)));
         assert!(matches!(db.delete_account(&[1; 16], 1).unwrap(), Write::Refused(Conflict::DeviceGone)));
         // The name and the key are free again.
@@ -1387,10 +1391,16 @@ mod tests {
         let active = user(register(&db, b"BUSY", 3, 3, 0));
         db.put_backup(&[2; 16], None, b"record", 0).unwrap();
         db.touch(&[3; 16], 50 * DAY).unwrap();
+        assert!(matches!(db.feedback(&[1; 16], "where are my friends", "1.0 (1)", 0).unwrap(), Write::Done(())));
         let exists = |user: &UserId| db.lookup(KIND_USER, user, false, &[]).unwrap().is_some();
         assert_eq!(db.release_unsecured(89 * DAY, 90 * DAY).unwrap(), 0);
         assert_eq!(db.release_unsecured(91 * DAY, 90 * DAY).unwrap(), 1);
         assert!(!exists(&idle));
+        let feedback: (Vec<u8>, String) = db
+            .conn()
+            .query_row("SELECT user_id, text FROM feedback", [], |row| Ok((row.get(0)?, row.get(1)?)))
+            .unwrap();
+        assert_eq!(feedback, (NOBODY.to_vec(), "where are my friends".into()), "the feedback stays, without IDLE");
         assert!(db.is_gone(&[1; 16]).unwrap(), "its device learns that it was removed");
         assert!(exists(&secured) && exists(&active));
         // The name is free for anyone now, and so is the key.
