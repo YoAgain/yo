@@ -10,6 +10,7 @@ pub mod media;
 pub mod net;
 pub mod profile;
 pub mod state;
+pub mod storage;
 
 pub use error::{Error, Result};
 pub use net::{Response, Transport};
@@ -47,6 +48,8 @@ const LAST_RESORT_EVERY_MS: u64 = 30 * 24 * 3600 * 1000;
 const RETIRED_KEY_PACKAGE_KEPT_MS: u64 = 31 * 24 * 3600 * 1000;
 /// Envelope hashes remembered against redelivery.
 const SEEN: usize = 2000;
+/// How often a registration whose answer did not come is tried again, with the same account key.
+const REGISTER_TRIES: usize = 2;
 /// How often a send repairs groups and tries again before it leaves the rest to the next call.
 const REPAIR_ROUNDS: usize = 3;
 
@@ -100,6 +103,8 @@ pub struct ContactInfo {
     /// The key changed after verification: `confirm_identity` before sending.
     pub unconfirmed: bool,
     pub blocked: bool,
+    /// The account is gone (deleted, or its name released): sending to it is `NotOnYo`.
+    pub gone: bool,
 }
 
 /// Where the sealed state goes after every operation.
@@ -195,6 +200,8 @@ fn gone_for_good(status: u16) -> bool {
 pub struct Deliveries {
     transport: Arc<dyn Transport>,
     items: Vec<Delivery>,
+    /// The user `send_begin` sent a message to.
+    to: Option<String>,
 }
 
 struct Delivery {
@@ -417,11 +424,28 @@ impl Client {
         if handle.kind != KIND_USERNAME {
             return Err(Error::Protocol("not a username"));
         }
-        let account = SigningKey::from_bytes(&account_secret.unwrap_or_else(identity::random));
-        let (mut client, device) = Client::new_device(transport, &handle, account, name, push)?;
-        let request = api::Register { username: handle.value.clone(), device };
-        client.registered(api::REGISTER, &encode(&request))?;
+        let secret = account_secret.unwrap_or_else(identity::random);
+        let mut tries = 0;
+        let mut client = loop {
+            let account = SigningKey::from_bytes(&secret);
+            let (mut client, device) =
+                Client::new_device(transport.clone(), &handle, account, name.clone(), push.clone())?;
+            let request = api::Register { username: handle.value.clone(), device };
+            match client.registered(api::REGISTER, &encode(&request)) {
+                Ok(()) => break client,
+                // The answer may be lost after the hub took it: then the name is this key's, and a new device with
+                // the same key takes it again (6.4). Never a new key: that would find the name taken by itself.
+                Err(Error::Network(_)) if tries < REGISTER_TRIES => tries += 1,
+                Err(error) => return Err(error),
+            }
+        };
         client.state.username = Some(String::from_utf8_lossy(handle.value.as_slice()).into_owned());
+        // A new account has nothing stored. A restored one takes its storage in now, so its blocks hold before the
+        // first message; without network, before the first receive (`receive_all`).
+        client.state.storage_fetched = account_secret.is_none();
+        if account_secret.is_some() {
+            let _ = client.sync_storage_quietly();
+        }
         // A name registered again (a new phone) keeps the spelling it had at the hub, whatever was typed now.
         if account_secret.is_some() {
             let me = Handle::user(&user_bytes(&client.state.user_id)?);
@@ -531,6 +555,11 @@ impl Client {
             key_packages_left: KEY_PACKAGE_TARGET,
             key_packages: Vec::new(),
             last_resort_at: wall_ms(),
+            signed_until: 0,
+            storage: Default::default(),
+            storage_version: 0,
+            storage_fetched: false,
+            storage_dirty: false,
         };
         let mut client = Client::with(transport, Provider::default(), state);
         let key_packages =
@@ -780,9 +809,11 @@ impl Client {
 
     /// `sign` by the body's hash.
     fn sign_hash(&mut self, method: &str, path: &str, body_hash: &[u8; 32]) -> (Vec<(String, String)>, u64) {
-        // Each signature once (the hub's replay cache): strictly increasing times.
-        let time = wall_ms().max(self.last_request_ms + 1);
+        // Each signature once (the hub's replay cache): strictly increasing times, also across the processes that
+        // share this state (the app and its extensions) and across a restart (`signed_until` is saved with it).
+        let time = wall_ms().max(self.last_request_ms + 1).max(self.state.signed_until + 1);
         self.last_request_ms = time;
+        self.state.signed_until = time;
         let key = SigningKey::from_bytes(&self.state.auth_secret);
         let signature = key.sign(&yo_wire::request::to_be_signed_hash(method, path, time, body_hash));
         let headers = vec![
@@ -793,7 +824,15 @@ impl Client {
         (headers, time)
     }
 
+    /// A signed request. A `401` is answered once more, signed anew: the same request at the same millisecond from
+    /// another process of this device (or one that crashed before saving the time it signed) is the same signature,
+    /// which the hub takes once. A request refused so was not processed.
     fn signed(&mut self, method: &str, path: &str, body: &[u8]) -> Result<Response> {
+        let (headers, _) = self.sign(method, path, body);
+        let response = self.unsigned(method, path, &headers, body)?;
+        if response.status != status::UNAUTHORIZED {
+            return Ok(response);
+        }
         let (headers, _) = self.sign(method, path, body);
         self.unsigned(method, path, &headers, body)
     }
@@ -1000,6 +1039,7 @@ impl Client {
             unconfirmed: false,
             blocked: false,
             handles: Vec::new(),
+            gone: false,
         });
         if contact.account_key != account_key {
             let known = contact.account_key != [0; 32];
@@ -1430,7 +1470,7 @@ impl Client {
             i += 1;
         }
         self.delivering.extend(items.iter().map(|d| d.user.clone()));
-        Deliveries { transport: self.transport.clone(), items }
+        Deliveries { transport: self.transport.clone(), items, to: None }
     }
 
     /// Takes the hub's answers to `Deliveries::send`: what it took leaves the outbox, what it refused for good is
@@ -1442,6 +1482,7 @@ impl Client {
     ) -> Vec<(String, String, api::Devices)> {
         let mut mismatches: Vec<(String, String, api::Devices)> = Vec::new();
         let mut done = BTreeSet::new();
+        let mut gone = BTreeSet::new();
         for (item, answer) in deliveries.items.iter().zip(answers) {
             self.delivering.remove(&item.user);
             match answer {
@@ -1461,6 +1502,10 @@ impl Client {
                         }
                     }
                 }
+                Some(Ok(response)) if response.status == status::NOT_FOUND && item.user != self.state.user_id => {
+                    done.insert(item.seq);
+                    gone.insert(item.user.clone());
+                }
                 Some(Ok(response)) if gone_for_good(response.status) => {
                     done.insert(item.seq);
                     self.drop_one(format!("hub refused delivery: {}", response.status));
@@ -1470,7 +1515,24 @@ impl Client {
             }
         }
         self.state.outbox.retain(|item| !done.contains(&item.seq));
+        for user in gone {
+            self.user_gone(&user);
+        }
         mismatches
+    }
+
+    /// The hub knows no such user any more (a delivery's `404`): the account was deleted or its name released. Its
+    /// chats and what waits for it go; its handles are forgotten (the name may be someone else's now, a stranger to
+    /// this device); sending to it is `NotOnYo` from now on.
+    fn user_gone(&mut self, user: &str) {
+        let Some(contact) = self.state.contacts.get_mut(user) else { return };
+        contact.gone = true;
+        contact.handles.clear();
+        let chats: Vec<String> =
+            self.state.chats.iter().filter(|(_, chat)| chat.peer == user).map(|(key, _)| key.clone()).collect();
+        for key in chats {
+            self.drop_chat(&key);
+        }
     }
 
     /// Flushes, and repairs every group a delivery found out of line with a user's devices, until the outbox moves.
@@ -1581,16 +1643,39 @@ impl Client {
 
     /// Fetches and processes the inbox until it is empty. Transport failures stop it with nothing lost.
     fn receive_all(&mut self, wait_s: u64) -> Result<()> {
+        self.storage_fetched()?;
         let mut wait = wait_s;
         loop {
             let path = api::inbox_path(wait);
-            let (headers, time) = self.sign("GET", &path, &[]);
-            let response = self.unsigned("GET", &path, &headers, &[])?;
+            let (headers, mut time) = self.sign("GET", &path, &[]);
+            let mut response = self.unsigned("GET", &path, &headers, &[])?;
+            if response.status == status::UNAUTHORIZED {
+                // As `signed`: once more, signed anew.
+                let (headers, again) = self.sign("GET", &path, &[]);
+                (response, time) = (self.unsigned("GET", &path, &headers, &[])?, again);
+            }
             if !self.inbox(response, time)? {
                 self.inbox_fresh_until = (self.clock)() + INBOX_FRESH_MS;
                 return Ok(());
             }
             wait = 0;
+        }
+    }
+
+    /// The storage fetched once on this device before anything is received: its blocks hold from the first message
+    /// on. "Not now" leaves the inbox for later; a hub without storage is left alone.
+    fn storage_fetched(&mut self) -> Result<()> {
+        if self.state.storage_fetched {
+            return Ok(());
+        }
+        match self.sync_storage() {
+            Err(error) if retryable(&error) || error == Error::Replaced => Err(error),
+            Err(error) => {
+                self.drop_one(format!("storage: {error}"));
+                self.state.storage_fetched = true;
+                Ok(())
+            }
+            Ok(()) => Ok(()),
         }
     }
 
@@ -1927,7 +2012,8 @@ impl Client {
         // Receive first: a commit waiting in the inbox would otherwise leave this message in an epoch the peer may
         // already have left. Offline, the message still goes into the outbox.
         match self.deliver().and_then(|()| self.receive_all(0)) {
-            Ok(()) | Err(Error::Network(_)) => {}
+            Ok(()) => {}
+            Err(error) if retryable(&error) => {}
             Err(error) => return Err(error),
         }
         let mut user = self.known_user(&handle);
@@ -1944,23 +2030,28 @@ impl Client {
             }
             user = Some(id);
         }
-        if let Some(contact) = user.as_ref().and_then(|u| self.state.contacts.get(u)) {
-            if contact.blocked {
-                return Err(Error::Blocked);
-            }
-            if contact.unconfirmed {
-                return Err(Error::Unconfirmed);
-            }
-        }
-        let group = match user.as_ref().and_then(|u| self.chat_with(u)) {
-            Some(group) => group,
-            None => self.start_chat(&handle)?.1,
+        self.check_sendable(user.as_deref())?;
+        let (peer, group) = match user.as_ref().and_then(|u| self.chat_with(u).map(|g| (u.clone(), g))) {
+            Some(chat) => chat,
+            None => self.start_chat(&handle)?,
         };
         self.ensure_fresh(&group)?;
         self.atomic(|c| c.send_in(&group, content, true))?;
         match self.deliver() {
-            Ok(()) | Err(Error::Network(_)) => Ok(()),
-            Err(error) => Err(error),
+            Ok(()) | Err(Error::Network(_)) => {}
+            Err(error) => return Err(error),
+        }
+        // The hub knows the user no more: the message went nowhere.
+        self.check_sendable(Some(&peer))
+    }
+
+    /// Whether a message may go to a contact: not blocked, not waiting for a confirmation, not gone.
+    fn check_sendable(&self, user: Option<&str>) -> Result<()> {
+        match user.and_then(|u| self.state.contacts.get(u)) {
+            Some(contact) if contact.gone => Err(Error::NotOnYo),
+            Some(contact) if contact.blocked => Err(Error::Blocked),
+            Some(contact) if contact.unconfirmed => Err(Error::Unconfirmed),
+            _ => Ok(()),
         }
     }
 
@@ -1979,7 +2070,7 @@ impl Client {
         }
         let user = self.known_user(&handle)?;
         let contact = self.state.contacts.get(&user)?;
-        if contact.blocked || contact.unconfirmed {
+        if contact.blocked || contact.unconfirmed || contact.gone {
             return None;
         }
         let group = self.chat_with(&user)?;
@@ -1987,7 +2078,9 @@ impl Client {
             return None;
         }
         self.atomic(|c| c.send_in(&group, content, true)).ok()?;
-        Some(self.deliveries())
+        let mut deliveries = self.deliveries();
+        deliveries.to = Some(user);
+        Some(deliveries)
     }
 
     /// The outbox, without the client, like `send_begin` without a message: for sending again what the hub did not take
@@ -2020,9 +2113,9 @@ impl Client {
             }
             Ok(())
         };
-        // As `send`: offline, the message waits in the outbox.
+        // As `send`: offline, the message waits in the outbox; to a user the hub no longer knows, it went nowhere.
         let result = match result {
-            Ok(()) | Err(Error::Network(_)) => Ok(()),
+            Ok(()) | Err(Error::Network(_)) => self.check_sendable(deliveries.to.as_deref()),
             Err(error) => Err(error),
         };
         Sent::Done(self.finish(result))
@@ -2047,6 +2140,8 @@ impl Client {
                 return Err(error);
             }
         }
+        // The inbox's answer is processed in `sync_end`, without `receive_all`: the storage first.
+        self.storage_fetched()?;
         let path = api::inbox_path(wait_s);
         let (headers, time) = self.sign("GET", &path, &[]);
         // What arrives during the wait comes at once: until it ends, a send need not receive first.
@@ -2063,11 +2158,18 @@ impl Client {
     ) -> Result<Vec<Event>> {
         let received = response
             .map_err(Error::Network)
-            .and_then(|response| self.inbox(response, wait.time))
+            .and_then(|response| match response.status {
+                // As `signed`: the same signature seen before (another process of this device): asked anew.
+                status::UNAUTHORIZED => self.receive_all(0).map(|()| false),
+                _ => self.inbox(response, wait.time),
+            })
             .and_then(|more| if more { self.receive_all(0) } else { Ok(()) });
         // The wait is over: the inbox is up to date only if its answer was taken in.
         self.inbox_fresh_until = if received.is_ok() { (self.clock)() + INBOX_FRESH_MS } else { 0 };
-        let result = received.and_then(|()| self.refill()).and_then(|()| self.deliver());
+        let result = received
+            .and_then(|()| self.refill())
+            .and_then(|()| self.deliver())
+            .and_then(|()| self.sync_storage_quietly());
         self.finish_receiving(result)
     }
 
@@ -2090,7 +2192,7 @@ impl Client {
             }
         }
         self.forget_key_packages();
-        if let Err(error) = self.deliver() {
+        if let Err(error) = self.deliver().and_then(|()| self.sync_storage_quietly()) {
             first_error.get_or_insert(error);
         }
         first_error.map_or(Ok(()), Err)
@@ -2125,6 +2227,7 @@ impl Client {
                 verified: c.verified,
                 unconfirmed: c.unconfirmed,
                 blocked: c.blocked,
+                gone: c.gone,
             })
             .collect()
     }
@@ -2200,20 +2303,28 @@ impl Client {
     /// nothing from them is shown, no chat with them is joined, nothing is sent to them (spec 4.8).
     pub fn set_blocked(&mut self, who: &str, blocked: bool) -> Result<()> {
         let (user, shown) = self.user_named(&Handle::parse(who)?)?;
-        let contact = self.state.contacts.entry(user).or_insert(Contact {
-            account_key: [0; 32],
-            name: None,
-            verified: false,
-            unconfirmed: false,
-            blocked,
-            handles: Vec::new(),
-        });
+        let contact = self.state.contacts.entry(user.clone()).or_insert_with(Client::unknown_contact);
         contact.blocked = blocked;
         if let Some(shown) = shown {
             note_handle(contact, shown);
         }
+        // Kept in the storage too, so a new phone has it (spec 6.9).
+        self.storage_block(&user, blocked);
         self.persist();
         Ok(())
+    }
+
+    /// A contact known by its user id only, no key pinned yet.
+    pub(crate) fn unknown_contact() -> Contact {
+        Contact {
+            account_key: [0; 32],
+            name: None,
+            verified: false,
+            unconfirmed: false,
+            blocked: false,
+            handles: Vec::new(),
+            gone: false,
+        }
     }
 
     /// Reports a user to the operator (by user id or any handle): `reason` is `api::REPORT_SPAM`, `REPORT_ABUSE` or

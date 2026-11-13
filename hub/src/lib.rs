@@ -159,6 +159,7 @@ impl Hub {
             .route(api::ACCOUNT, delete(delete_account))
             .route(api::REPORT, post(report))
             .route(api::FEEDBACK, post(feedback))
+            .route(api::STORAGE, get(get_storage).put(put_storage))
             .route("/v1/username/{name}", get(username_free))
             .route(api::INBOX, get(inbox))
             .route(api::INBOX_ACK, post(ack))
@@ -199,6 +200,17 @@ impl Hub {
             eprintln!("yo-hub: {released} names not secured released");
         }
         Ok(())
+    }
+
+    /// What should never be (`Db::audit`), and blobs whose file is missing: for tests and the operator; reads only.
+    /// Files no blob owns are not counted: the hourly sweep takes them (`prune`).
+    pub fn audit(&self) -> rusqlite::Result<Vec<(&'static str, i64)>> {
+        let mut failed = self.db.audit()?;
+        let missing = self.db.blob_ids()?.into_iter().filter(|blob| !self.blobs.has(blob)).count() as i64;
+        if missing > 0 {
+            failed.push(("blobs without their file", missing));
+        }
+        Ok(failed)
     }
 
     /// Serves until `shutdown` resolves; prunes meanwhile.
@@ -667,6 +679,34 @@ async fn feedback(State(hub): Hubs, method: Method, uri: Uri, headers: HeaderMap
     hub.limit(format!("feedback:{}", yo_wire::b64(&device.user_id)), hub.config.limits.feedback_per_user_day, DAY)?;
     match hub.db.feedback(&device.device_id, text, app_version, now_ms())? {
         Write::Done(()) => Ok(StatusCode::NO_CONTENT),
+        Write::Refused(_) => Err(refuse(StatusCode::GONE)),
+    }
+}
+
+/// The signing device's account's storage (spec 6.9): `404` when there is none yet.
+async fn get_storage(State(hub): Hubs, method: Method, uri: Uri, headers: HeaderMap) -> Res<(StatusCode, Vec<u8>)> {
+    let device = hub.authenticate(&method, &uri, &headers, &[])?;
+    hub.limit(format!("storage:{}", yo_wire::b64(&device.user_id)), hub.config.limits.storage_per_user_hour, HOUR)?;
+    let (version, data) = hub.db.storage(&device.user_id)?.ok_or_else(|| refuse(StatusCode::NOT_FOUND))?;
+    Ok(ok(encode(&api::Storage { version, data: data.into() })))
+}
+
+/// Replaces the storage if the request names the version stored now; else `409` with that one.
+async fn put_storage(State(hub): Hubs, method: Method, uri: Uri, headers: HeaderMap, body: Bytes) -> Res<StatusCode> {
+    let device = hub.authenticate(&method, &uri, &headers, &body)?;
+    let request: api::Storage = decode(&body)?;
+    if request.data.as_slice().len() > limits::MAX_STORAGE_LEN {
+        return Err(refuse(StatusCode::PAYLOAD_TOO_LARGE));
+    }
+    if request.data.as_slice().is_empty() {
+        return Err(bad());
+    }
+    hub.limit(format!("storage:{}", yo_wire::b64(&device.user_id)), hub.config.limits.storage_per_user_hour, HOUR)?;
+    match hub.db.put_storage(&device.device_id, request.version, request.data.as_slice(), now_ms())? {
+        Write::Done(Ok(())) => Ok(StatusCode::NO_CONTENT),
+        Write::Done(Err((version, data))) => {
+            Err(Refusal(StatusCode::CONFLICT, encode(&api::Storage { version, data: data.into() })))
+        }
         Write::Refused(_) => Err(refuse(StatusCode::GONE)),
     }
 }

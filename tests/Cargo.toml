@@ -13,6 +13,10 @@ path = "src/load.rs"
 name = "yo-register"
 path = "src/register.rs"
 
+[[bin]]
+name = "yo-chaos"
+path = "src/chaos.rs"
+
 [dependencies]
 yo-wire = { path = "../core/wire" }
 yo-core = { path = "../core/mls", features = ["testing"] }

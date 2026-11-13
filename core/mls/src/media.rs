@@ -151,7 +151,10 @@ impl Client {
             return Err(Error::Protocol("sending to oneself"));
         }
         // As a send: what waits is received first; offline, nothing can be opened.
-        self.deliver().and_then(|()| self.receive_all(0))?;
+        match self.deliver().and_then(|()| self.receive_all(0)) {
+            Err(error) if !crate::retryable(&error) => return Err(error),
+            _ => {}
+        }
         let mut user = self.known_user(&handle);
         if user.is_none() && handle.kind != yo_wire::handle::KIND_USER && !self.state.contacts.is_empty() {
             let (found, username) = self.lookup_named(&handle, false, Vec::new())?;
@@ -164,14 +167,7 @@ impl Client {
             }
             user = Some(id);
         }
-        if let Some(contact) = user.as_ref().and_then(|u| self.state.contacts.get(u)) {
-            if contact.blocked {
-                return Err(Error::Blocked);
-            }
-            if contact.unconfirmed {
-                return Err(Error::Unconfirmed);
-            }
-        }
+        self.check_sendable(user.as_deref())?;
         let user = match user.filter(|u| self.chat_with(u).is_some()) {
             Some(user) => user,
             None => self.start_chat(&handle)?.0,

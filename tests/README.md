@@ -12,6 +12,8 @@ pinned toolchain (Docker); `cargo` works the same where Rust 1.99.1 is installed
 | `tests/blobs.rs` | Photos and videos at the hub: a blob fetched by each device and gone, file and all, after the last fetch; the largest one there and back, a larger one refused by its length; an upload signed whole and once (unsigned, tampered, replayed, the id taken); quotas per user and day and of bytes waiting; the budget and the disk's free space hold uploads (`507`) until fetches make room; 30 days at most; a deleted account takes its blobs, stray files are swept; limits per address |
 | `tests/media.rs` | A photo and a video with their Yos end to end: uploaded for the chat's other devices before the Yo, fetched and opened once by the receiver, then gone at the hub; a blocked sender's dropped unseen; a hub that says "later" (the uploader's room or day used up) holds the upload and its Yo until a fetch makes room |
 | `tests/push.rs` | APNs and FCM requests exactly as sent, with nothing in them but "there is mail"; dead tokens are forgotten |
+| `tests/storage.rs` | The account's storage (spec 6.9): friends, blocks and the icon back on a new phone before its first message; two writers merge and converge (`409`, merged, written again); the hub reads none of it; too large or empty refused; gone with the account |
+| `tests/found.rs` | What the chaos runs found (`tests/CHAOS.md`), each as its smallest case |
 | `tests/bindings.rs` | The UniFFI layer the apps call, with HTTP and the store as callbacks: calls run while the inbox waits and while a Yo is on its way to one friend (a Yo to another goes past it, one to the same friend queues behind it); bursts to and from 20 friends at once arrive exactly once, in bounded time; a typed name is looked up (who it is, the owner's spelling) before the first Yo |
 
 ```sh
@@ -20,6 +22,11 @@ YO_ENV="YO_SEEDS=27,41" dev/cargo test -p yo-tests --test simulation seeded   # 
 ```
 
 A failing simulation names its seed; the run is deterministic in what it does, so the seed reproduces it.
+
+## Chaos
+
+`yo-chaos`: thousands of accounts with faults, crashes and hub restarts, every message accounted for. How to run it
+and what it found: [CHAOS.md](CHAOS.md).
 
 ## Fuzzing
 

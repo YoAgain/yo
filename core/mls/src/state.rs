@@ -27,6 +27,10 @@ pub struct Contact {
     /// How this device knows the contact: "+491701234567", "Chris". A username as its owner writes it, as the hub
     /// tells (also for someone who wrote first), one per skeleton.
     pub handles: Vec<String>,
+    /// The hub no longer knows the user (the account was deleted, or its name released): nothing more can reach it.
+    /// Its handles are forgotten, so a name it had finds whoever has it now.
+    #[serde(default)]
+    pub gone: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -176,6 +180,21 @@ pub struct State {
     pub key_packages_left: u32,
     pub key_packages: Vec<OwnKeyPackage>,
     pub last_resort_at: u64,
+    /// The time of the last signed request (spec 6.2): the next is signed later, whichever process signs it.
+    #[serde(default)]
+    pub signed_until: u64,
+    /// The account's storage as this device has it (spec 6.9), merged with the hub's.
+    #[serde(default)]
+    pub storage: crate::storage::Storage,
+    /// The hub's version the storage was last written or read as.
+    #[serde(default)]
+    pub storage_version: u64,
+    /// Changed here since it was last written.
+    #[serde(default)]
+    pub storage_dirty: bool,
+    /// Fetched from the hub on this device (once, before the first message is received).
+    #[serde(default)]
+    pub storage_fetched: bool,
 }
 
 impl Drop for State {

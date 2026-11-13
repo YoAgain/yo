@@ -3726,6 +3726,7 @@ dependencies = [
  "chacha20poly1305",
  "ed25519-dalek",
  "getrandom 0.2.17",
+ "hmac 0.12.1",
  "openmls",
  "openmls_basic_credential",
  "openmls_memory_storage",

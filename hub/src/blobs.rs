@@ -210,6 +210,11 @@ impl Blobs {
         (file.metadata().await.ok()?.len() == size).then_some(file)
     }
 
+    /// Whether a blob's file is in place.
+    pub fn has(&self, blob: &Stored) -> bool {
+        self.path(blob).is_file()
+    }
+
     pub fn remove(&self, blob: &Stored) {
         let _ = std::fs::remove_file(self.path(blob));
     }
