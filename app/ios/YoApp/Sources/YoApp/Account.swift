@@ -535,6 +535,13 @@ final class AccountStore {
     reset()
   }
 
+  /// The hub said `client` is no longer the account's device (the account taken to another iPhone): out. Not when
+  /// it is an older client than the one in use (a call still under way while signing out and in again).
+  func replaced(_ client: YoClient) {
+    guard client === self.client else { return }
+    reset()
+  }
+
   /// This phone forgets the account, as a new phone would (the hub keeps the backup): signed out, or the account
   /// taken to another phone (`YoError.Replaced`). The iCloud Keychain keeps it then, for the phone that has it now;
   /// this one does not take it back without being asked.

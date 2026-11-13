@@ -1,148 +1,141 @@
 // The welcome's pages, as the original's welcome screen had them (YoWelcomeController, Login.storyboard, 2015): the
-// logo first, then cards of coloured bars that say in a few words what Yo is ("Jerry's GF / Yo's to say, / "Hi! I'm /
-// thinking / of you." / #shecares"), swiped through above the same buttons, with the dots under them. Here the cards
-// show what this app does: a tap on a name, a Yo back, the camera, a friend by name, nobody else reading along. The
-// buttons stay where they are (Onboarding's welcome); no page has its own. Like the original's banner, the pages turn
-// by themselves (every 4 s, back to the logo after the last) until the user touches them.
+// logo first, then three cards that say in a few words what Yo is, swiped through above the same buttons, with the
+// dots under them. Each card shows the app itself: a picture of the list taken from the app (Resources/Intro*@3x.png,
+// from the Simulator), in a phone's frame, with a title and one line under it. The buttons stay where they are
+// (Onboarding's welcome); no page has its own.
 //
-// Each page: a small card of bars as the list draws them, a title and one line under it. The card is a picture only
-// (VoiceOver reads the title and the line); when the text is large and the room small, the card gives way, then the
-// words scroll.
+// A carousel: past the last card comes the logo again, and before the logo the last card, without a jump back. Like
+// the original's banner, the pages go on by themselves (every 4 s, always forward) until the user touches them. The
+// pictures are pictures only (VoiceOver reads the title and the line); when the text is large and the room small, the
+// picture gives way, then the words scroll.
 import SwiftUI
 
-/// The welcome's swipeable pages: `first` (the logo) and then the intro cards, the system's page dots under them.
-/// They go on by themselves every `advanceSeconds`, from the last back to the logo, until a finger is on them (then
-/// they are the user's, for good); never with Reduce Motion or VoiceOver.
+/// The welcome's swipeable pages: `first` (the logo) and then the intro cards, dots under them. They go on by
+/// themselves every `advanceSeconds` until a finger is on them (then they are the user's, for good); never with
+/// Reduce Motion or VoiceOver.
 struct Intro<First: View>: View {
   static var advanceSeconds: Double { 4 }
 
   @ViewBuilder let first: First
-  @State private var page = 0
-  /// The page the pages went to by themselves; a page other than it is the user's doing.
-  @State private var advanced = 0
+  /// Where the pages stand among the slots: the pages, with the last one again before the first and the first again
+  /// after the last, so a swipe past either end goes on; once there, the real page takes over unseen.
+  @State private var slot: Int? = 1
   /// Touched or swiped once: no more going on by themselves.
   @State private var touched = false
   @Environment(\.accessibilityReduceMotion) private var reduceMotion
   @Environment(\.accessibilityVoiceOverEnabled) private var voiceOver
 
-  private var count: Int { IntroCard.all.count + 1 }
+  private static var count: Int { IntroCard.all.count + 1 }
+  /// The page a slot shows: slot 0 is the last page, slot count + 1 the first.
+  private static func page(_ slot: Int) -> Int { (slot - 1 + count) % count }
 
   var body: some View {
-    TabView(selection: $page) {
+    VStack(spacing: 0) {
+      ScrollView(.horizontal) {
+        LazyHStack(spacing: 0) {
+          ForEach(0..<(Self.count + 2), id: \.self) { slot in
+            content(Self.page(slot)).containerRelativeFrame(.horizontal).id(slot)
+          }
+        }
+        .scrollTargetLayout()
+      }
+      .scrollTargetBehavior(.paging)
+      .scrollIndicators(.hidden)
+      .scrollPosition(id: $slot)
+      // Come to rest on a copy at either end: the real page, unseen (the same picture).
+      .onScrollPhaseChange { _, phase in
+        if phase == .interacting { touched = true }
+        if phase == .idle, let now = slot, now == 0 || now == Self.count + 1 {
+          var quiet = Transaction()
+          quiet.disablesAnimations = true
+          withTransaction(quiet) { slot = Self.page(now) + 1 }
+        }
+      }
+      Dots(count: Self.count, page: Self.page(slot ?? 1)) { page in
+        touched = true
+        withAnimation(.smooth(duration: 0.4)) { slot = page + 1 }
+      }
+      .padding(.bottom, 20)
+    }
+    // A finger down anywhere on the pages (or the dots), before it even swipes.
+    .simultaneousGesture(DragGesture(minimumDistance: 0).onChanged { _ in touched = true })
+    .task(id: touched || reduceMotion || voiceOver) {
+      guard !touched, !reduceMotion, !voiceOver else { return }
+      while (try? await Task.sleep(for: .seconds(Self.advanceSeconds))) != nil, !touched {
+        withAnimation(.smooth(duration: 0.6)) { slot = (slot ?? 1) + 1 }
+      }
+    }
+  }
+
+  @ViewBuilder private func content(_ page: Int) -> some View {
+    if page == 0 {
       // The logo shrinks to the room left over (large text grows the buttons under it), never cut or wrapped.
       first
         .lineLimit(1)
         .minimumScaleFactor(0.3)
         .padding(.horizontal, 28)
-        .padding(.bottom, 36)
         .frame(maxWidth: .infinity, maxHeight: .infinity)
-        .tag(0)
-      ForEach(Array(IntroCard.all.enumerated()), id: \.offset) { index, card in
-        IntroPage(card: card, shown: page == index + 1)
-          .tag(index + 1)
+    } else {
+      IntroPage(card: IntroCard.all[page - 1])
+    }
+  }
+}
+
+/// The pages' dots, as the system's page control: the one showing white, a tap on one goes there.
+private struct Dots: View {
+  let count: Int
+  let page: Int
+  let go: (Int) -> Void
+
+  var body: some View {
+    HStack(spacing: 0) {
+      ForEach(0..<count, id: \.self) { index in
+        Circle()
+          .fill(.white.opacity(index == page ? 1 : 0.4))
+          .frame(width: 8, height: 8)
+          .frame(width: 20, height: 30)
+          .contentShape(.rect)
+          .onTapGesture { go(index) }
       }
     }
-    .tabViewStyle(.page(indexDisplayMode: .always))
-    .indexViewStyle(.page(backgroundDisplayMode: .interactive))
-    // A finger down anywhere on the pages (or the dots), before it even swipes.
-    .simultaneousGesture(DragGesture(minimumDistance: 0).onChanged { _ in touched = true })
-    .onChange(of: page) { _, now in
-      if now != advanced { touched = true }  // swiped, or a dot tapped
-    }
-    .task(id: touched || reduceMotion || voiceOver) {
-      guard !touched, !reduceMotion, !voiceOver else { return }
-      while (try? await Task.sleep(for: .seconds(Self.advanceSeconds))) != nil, !touched {
-        advanced = (page + 1) % count
-        withAnimation(.smooth(duration: 0.6)) { page = advanced }
+    .animation(.smooth(duration: 0.2), value: page)
+    .accessibilityElement()
+    .accessibilityLabel("Page \(page + 1) of \(count)")
+    .accessibilityAdjustableAction { direction in
+      switch direction {
+      case .increment: go((page + 1) % count)
+      case .decrement: go((page - 1 + count) % count)
+      @unknown default: break
       }
     }
   }
 }
 
-/// One page's words and its card.
+/// One page's words and its picture.
 struct IntroCard {
   let title: String
   let line: String
-  let bars: [IntroBar]
-  /// The camera's page: the bars see-through over a picture, as in camera mode.
-  var camera = false
+  /// The app's list as it looks for this (Resources/<name>@3x.png).
+  let picture: String
 
   static let all: [IntroCard] = [
-    IntroCard(
-      title: "Tap a Name",
-      line: "That's a Yo. Nothing to type.",
-      bars: [
-        IntroBar("Marissa", color: 0),
-        IntroBar("Peter", color: 1, then: "Sent Yo!"),
-        IntroBar("Jenny", color: 2),
-      ]),
-    IntroCard(
-      title: "Yo Back",
-      line: "A Yo comes in. Tap their name to answer.",
-      bars: [
-        IntroBar("Peter", color: 3, end: "Yo!"),
-        IntroBar("Marissa", color: 4),
-        IntroBar("Jenny", color: 5),
-      ]),
-    IntroCard(
-      title: "Photo or Video",
-      line: "Camera on: tap a name for a photo, hold it for a video.",
-      bars: [
-        IntroBar("Melanie", color: 6, then: "Sent 📷"),
-        IntroBar("Donald", color: 7, then: "Sent 🎥", offset: 1),
-        IntroBar("Jenny", color: 0),
-      ],
-      camera: true),
-    IntroCard(
-      title: "Add Friends by Name",
-      line: "YoGPT is there from the start. It Yos back.",
-      bars: [
-        IntroBar("YoGPT", color: 1, end: "Yo"),
-        IntroBar("Jenny", color: 2),
-        IntroBar("+", color: 3),
-      ]),
-    IntroCard(
-      title: "Just You Two",
-      line: "End-to-end encrypted. No phone number.",
-      bars: [
-        IntroBar("Just", color: 4),
-        IntroBar("you", color: 5),
-        IntroBar("two. 🔒", color: 6),
-      ]),
+    IntroCard(title: "Tap a Name", line: "That's a Yo. Nothing to type.", picture: "IntroTap"),
+    IntroCard(title: "Yo Back", line: "A Yo comes in. Tap their name to Yo back.", picture: "IntroYoBack"),
+    IntroCard(title: "Add Friends by Name", line: "YoGPT is there from the start. It Yos back.", picture: "IntroAdd"),
   ]
-}
-
-/// A bar on a card: its words, maybe a Yo at its end, maybe words it turns into now and then (as a sent Yo does).
-struct IntroBar {
-  let text: String
-  let color: Int
-  var end: String?
-  var then: String?
-  /// Which beat it turns on (two bars on one card take turns).
-  var offset = 0
-
-  init(_ text: String, color: Int, end: String? = nil, then: String? = nil, offset: Int = 0) {
-    self.text = text
-    self.color = color
-    self.end = end
-    self.then = then
-    self.offset = offset
-  }
 }
 
 private struct IntroPage: View {
   let card: IntroCard
-  /// On screen: only then the card plays.
-  let shown: Bool
 
   var body: some View {
     VStack(spacing: 0) {
       Spacer(minLength: 12)
-      // The card when there is room for it beside the words; with very large text, the words alone; and if even they
-      // do not fit, the words scroll.
+      // The picture when there is room for it beside the words; with very large text, the words alone; and if even
+      // they do not fit, the words scroll.
       ViewThatFits(in: .vertical) {
-        VStack(spacing: 28) {
-          IntroCardView(card: card, playing: shown)
+        VStack(spacing: 24) {
+          PhoneShot(picture: card.picture)
           words
         }
         words
@@ -151,7 +144,6 @@ private struct IntroPage: View {
       Spacer(minLength: 12)
     }
     .padding(.horizontal, 28)
-    .padding(.bottom, 36)  // clear of the page dots
     .frame(maxWidth: .infinity, maxHeight: .infinity)
   }
 
@@ -170,73 +162,23 @@ private struct IntroPage: View {
   }
 }
 
-/// The card: bars from edge to edge in rounded corners, as the original's welcome cards. A bar with `then` turns into
-/// it for a moment every few seconds, while the page is on screen and motion is welcome; else it shows it still.
-private struct IntroCardView: View {
-  let card: IntroCard
-  let playing: Bool
-  @Environment(\.accessibilityReduceMotion) private var reduceMotion
-
-  private static let beat = 1.6
+/// A picture of the app in the top of a phone: a black frame with round corners, fading out below.
+private struct PhoneShot: View {
+  let picture: String
 
   var body: some View {
-    Group {
-      if playing && !reduceMotion {
-        TimelineView(.periodic(from: .now, by: Self.beat)) { context in
-          bars(beat: Int(context.date.timeIntervalSinceReferenceDate / Self.beat))
-        }
-      } else {
-        bars(beat: nil)
-      }
-    }
-    .frame(maxWidth: 300)
-    .background {
-      if card.camera {
-        // A picture behind see-through bars, as camera mode lays the list over the live one.
+    Image(uiImage: UIImage(named: picture) ?? UIImage())
+      .resizable()
+      .scaledToFit()
+      .frame(width: 190)
+      .clipShape(UnevenRoundedRectangle(topLeadingRadius: 26, topTrailingRadius: 26))
+      .padding([.top, .horizontal], 6)
+      .background(.black, in: UnevenRoundedRectangle(topLeadingRadius: 32, topTrailingRadius: 32))
+      .mask {
         LinearGradient(
-          colors: [Color(hex: 0xF39C12), Color(hex: 0xE74C3C), Color(hex: 0x2C3E50)],
-          startPoint: .topLeading, endPoint: .bottomTrailing)
+          stops: [.init(color: .black, location: 0.8), .init(color: .clear, location: 1)],
+          startPoint: .top, endPoint: .bottom)
       }
-    }
-    .clipShape(.rect(cornerRadius: 18))
-    .accessibilityHidden(true)
-  }
-
-  /// `beat` nil: the still picture, every bar with `then` showing it.
-  private func bars(beat: Int?) -> some View {
-    let turned = beat.map { ($0 % 4) } // four beats: 0 and 2 plain, 1 the first bar's turn, 3 the second's
-    return VStack(spacing: 0) {
-      ForEach(Array(card.bars.enumerated()), id: \.offset) { _, bar in
-        let on = bar.then != nil && (turned.map { $0 == 1 + 2 * bar.offset } ?? true)
-        IntroBarView(bar: bar, on: on, seeThrough: card.camera)
-      }
-    }
-    .animation(.smooth(duration: 0.3), value: turned)
-  }
-}
-
-private struct IntroBarView: View {
-  let bar: IntroBar
-  let on: Bool
-  let seeThrough: Bool
-
-  var body: some View {
-    // A fixed size: the card is a picture, not text to read (the page's words grow with Dynamic Type).
-    Text(on ? bar.then ?? bar.text : bar.text)
-      .font(.custom("Montserrat-Bold", fixedSize: 24))
-      .lineLimit(1)
-      .minimumScaleFactor(0.5)
-      .contentTransition(.opacity)
-      .padding(.horizontal, 56)
-      .frame(maxWidth: .infinity)
-      .frame(height: 54)
-      .overlay(alignment: .trailing) {
-        if let end = bar.end {
-          Text(end)
-            .font(.custom("Montserrat-Bold", fixedSize: 20))
-            .padding(.trailing, 18)
-        }
-      }
-      .background(Color.row(bar.color).opacity(seeThrough ? 0.45 : 1))
+      .accessibilityHidden(true)
   }
 }

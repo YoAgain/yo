@@ -351,7 +351,8 @@ struct SettingsView: View {
   /// What signing out costs, in one line: whether, and how, the name comes back.
   private var resetMessage: String {
     guard let account = accounts.account, account.secured else {
-      return "Your account isn’t secured. You won’t be able to sign in as "
+      // The iCloud Keychain keeps it (marked signed out, listed on Sign In); nothing else would bring it back.
+      return "Your account isn’t secured. Without your iCloud Keychain, you won’t be able to sign in as "
         + "\(accounts.account?.username ?? "this name") again."
     }
     if !accounts.wordsSaved && !account.byPasskey {

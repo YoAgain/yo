@@ -176,7 +176,7 @@ final class MediaOutbox {
             items[at].tries += 1
             items[at].next = .now + min(1800, 30 * pow(2, Double(min(items[at].tries - 1, 6))))
           case .replaced:
-            accounts.reset()  // clears this outbox too
+            accounts.replaced(client)  // clears this outbox too
             return
           }
           save()

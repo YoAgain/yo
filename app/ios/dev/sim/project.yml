@@ -34,6 +34,9 @@ targets:
       - {path: ../../YoApp/Resources/IconOriginal@2x.png, buildPhase: resources}
       - {path: ../../YoApp/Resources/IconOriginal@3x.png, buildPhase: resources}
       - {path: ../../YoApp/Resources/IconStandard@3x.png, buildPhase: resources}
+      - {path: ../../YoApp/Resources/IntroTap@3x.png, buildPhase: resources}
+      - {path: ../../YoApp/Resources/IntroYoBack@3x.png, buildPhase: resources}
+      - {path: ../../YoApp/Resources/IntroAdd@3x.png, buildPhase: resources}
     dependencies:
       - target: YoCore
       - {framework: ../../YoApp/build/core/yoFFI.xcframework, embed: false}

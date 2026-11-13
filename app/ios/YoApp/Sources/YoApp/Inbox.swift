@@ -189,7 +189,7 @@ final class Inbox {
     } catch YoError.Blocked {
       return "Blocked"
     } catch YoError.Replaced {
-      accounts.reset()
+      accounts.replaced(client)
       return "Not Sent"
     } catch {
       return "Not Sent"
@@ -245,7 +245,7 @@ final class Inbox {
         await take(events, contacts: contacts, client: client, friends: friends)
         fetchMedia(client: client)  // what a broken network left, also after a start
       } catch YoError.Replaced {
-        accounts.reset()
+        accounts.replaced(client)
         return
       } catch {
         try? await Task.sleep(for: .seconds(5))

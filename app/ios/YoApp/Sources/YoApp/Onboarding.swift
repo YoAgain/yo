@@ -13,7 +13,6 @@ import YoCore
 struct Onboarding: View {
   @Environment(AccountStore.self) private var accounts
   @Environment(Inbox.self) private var inbox
-  @Environment(Friends.self) private var friends
 
   private enum Step: Equatable {
     case welcome, name, logIn, logInWithWords
@@ -154,10 +153,10 @@ struct Onboarding: View {
               .disabled(busy)
               .accessibilityLabel("Sign In as \(item.username)")
             }
+            Text("Saved in your iCloud Keychain.").font(.footnote).opacity(0.75)
           }
         }
         .scrollBounceBehavior(.basedOnSize)
-        Text("Saved in your iCloud Keychain.").font(.footnote).opacity(0.75)
       }
     } bottom: {
       PrimaryButton("Use Passkey", busy: busy) { Task { await logInWithPasskey() } }
@@ -218,9 +217,7 @@ struct Onboarding: View {
     defer { busy = false }
     problem = nil
     do {
-      try await accounts.register(name)  // in: the list takes over; the name is secured later, from the profile
-      // A new account starts with one friend who always answers: YoGPT (the list learns its user id on its own).
-      friends.add("YoGPT")
+      try await accounts.register(name)  // in: the list takes over, YoGPT on it (YoApp); secured later, from the profile
     } catch AccountError.taken {
       checked[Username.skeleton(name)] = false
       UINotificationFeedbackGenerator().notificationOccurred(.error)

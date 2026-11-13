@@ -47,6 +47,10 @@ struct YoApp: App {
           inbox.forgetMedia()
           outbox.clear()
           ShareInbox.clear()
+        } else if friends.all.isEmpty {
+          // In, with nobody on the list (a new account, or one signed in again here): one friend who always
+          // answers, YoGPT (the list learns its user id on its own).
+          friends.add("YoGPT")
         }
       }
       // The share extension shows the list as it is (ShareBridge).
