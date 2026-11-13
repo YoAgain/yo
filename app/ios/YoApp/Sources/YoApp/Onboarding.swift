@@ -13,7 +13,7 @@ struct Onboarding: View {
   @Environment(Inbox.self) private var inbox
 
   private enum Step: Equatable {
-    case welcome, name, code([String]), logIn, logInWithWords
+    case welcome, name, passkey([String]), code([String]), logIn, logInWithWords
   }
 
   @State private var step = Step.welcome
@@ -35,6 +35,7 @@ struct Onboarding: View {
         switch step {
         case .welcome: welcome
         case .name: naming
+        case .passkey(let words): confirmPasskeyPage(then: words)
         case .code(let words): code(words)
         case .logIn: logInChoice
         case .logInWithWords: LogIn { go(.logIn) }
@@ -128,6 +129,39 @@ struct Onboarding: View {
     }
   }
 
+  // MARK: Passkey, once more
+
+  /// Some password managers (1Password) give what the backup needs only when the passkey is used, not when it is
+  /// made: so it is used once, here, said beforehand. Cancelled, the page stays; skipped, Settings can do it later.
+  private func confirmPasskeyPage(then words: [String]) -> some View {
+    Page(title: "Confirm Your Passkey",
+      message: "Your password manager needs you to use the new passkey once to finish setting it up.") {
+      Image(systemName: "person.badge.key.fill")
+        .font(.system(size: 64))
+        .padding(.top, 20)
+    } bottom: {
+      PrimaryButton("Use Passkey", busy: busy) { Task { await confirmPasskey(then: words) } }
+        .disabled(busy)
+      Button("Not Now") { go(.code(words)) }
+        .font(.yo(17))
+      Note(problem)
+    }
+  }
+
+  private func confirmPasskey(then words: [String]) async {
+    busy = true
+    defer { busy = false }
+    problem = nil
+    do {
+      try await accounts.confirmPasskey()
+      go(.code(words))
+    } catch let error as AccountError {
+      problem = error.errorDescription
+    } catch {
+      problem = "Passkey not confirmed. Try again."
+    }
+  }
+
   // MARK: Recovery words
 
   /// The words, and two ways to keep them right under them (Photos, the clipboard); Next at the bottom. They stay on
@@ -169,7 +203,8 @@ struct Onboarding: View {
     busy = true
     defer { busy = false }
     do {
-      go(.code(try await accounts.register(name)))
+      let words = try await accounts.register(name)
+      go(accounts.passkeyToConfirm ? .passkey(words) : .code(words))
     } catch {
       problem = error.localizedDescription
     }

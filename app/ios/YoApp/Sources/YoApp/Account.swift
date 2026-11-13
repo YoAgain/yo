@@ -175,8 +175,12 @@ final class AccountStore {
 
   private static let key = "account"
   private let passkeys = Passkeys()
-  /// A registration waiting for its recovery words to be kept.
-  private var waiting: (account: Account, record: BackupRecord, code: [String])?
+  /// A registration waiting for its recovery words to be kept; `k` and the passkey while it still has to be confirmed.
+  private var waiting: (account: Account, record: BackupRecord, code: [String], k: SymmetricKey, passkey: Data?)?
+
+  /// The passkey was made but gave no PRF output yet (1Password gives it only when the passkey is used): it is asked
+  /// once more (`confirmPasskey`) before the words.
+  var passkeyToConfirm: Bool { waiting?.passkey != nil && waiting?.account.byPasskey == false }
 
   init() {
     account = UserDefaults.standard.data(forKey: Self.key).flatMap { try? JSONDecoder().decode(Account.self, from: $0) }
@@ -195,14 +199,27 @@ final class AccountStore {
     let code = RecoveryCode.make()
     var record = BackupRecord(userID: userID, byCode: try BackupRecord.wrap(k, in: BackupRecord.key(code: code)),
       sealed: Data())
-    if let made = try? await passkeys.make(name: username, userID: userID, salt: BackupRecord.prfSalt),
-      let prf = made.prf {
+    let made = try? await passkeys.make(name: username, userID: userID, salt: BackupRecord.prfSalt)
+    if let prf = made?.prf {
       record.byPasskey = try BackupRecord.wrap(k, in: BackupRecord.key(prf: prf))
       account.byPasskey = true
     }
     record.sealed = try BackupRecord.seal(account, code: code, with: k)
-    waiting = (account, record, code)
+    waiting = (account, record, code, k, made?.credentialID)
     return code
+  }
+
+  /// The passkey just made, asked once more for its PRF output, and added to the backup: then it opens it as the
+  /// words do.
+  func confirmPasskey() async throws {
+    guard var waiting, let credential = waiting.passkey else { throw AccountError.noBackup }
+    guard let prf = try await passkeys.ask(salt: BackupRecord.prfSalt, only: credential).prf else {
+      throw AccountError.noPRF
+    }
+    waiting.record.byPasskey = try BackupRecord.wrap(waiting.k, in: BackupRecord.key(prf: prf))
+    waiting.account.byPasskey = true
+    waiting.record.sealed = try BackupRecord.seal(waiting.account, code: waiting.code, with: waiting.k)
+    self.waiting = waiting
   }
 
   /// A passkey added to the backup afterwards: a Yo passkey of this account if there is one (the one made at
