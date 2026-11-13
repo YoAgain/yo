@@ -37,6 +37,16 @@ tests/          scenarios, simulation, robustness, load
 app/ios/        the iPhone app (SwiftUI; a mockup for now, see app/ios/README.md)
 ```
 
+## Speed
+
+| Hub | KiloYoPS | p99 |
+|---|---|---|
+| one core, as deployed (static musl build) | 18.3 | 6.5 ms |
+| 16 cores, group commit | 16.8 | 27.7 ms |
+
+KiloYoPS: thousands of Yos delivered per second, the only benchmark unit that says what it measures. One SQLite
+writer bounds it, not the cores. All runs: [tests/README.md](tests/README.md#load).
+
 ## Run
 
 ```sh
