@@ -38,8 +38,10 @@ use yo_core::{Client, Content, Error, Event, Push, Response, Store, Transport};
 
 /// How many Yos an answer has, in percent: one mostly, more ever rarer (a half-normal tail), five at most.
 const YOS: [u32; 5] = [70, 17, 8, 4, 1];
-/// Before the first answer to a sender, in milliseconds, uniform: it thinks. Then everything owed goes at once.
+/// Before the first answer to a sender, in milliseconds, uniform: it thinks. The answers after keep the rhythm the
+/// Yos came in (as their senders sent them), each gap at most `MAX_GAP_MS`.
 const THINK_MS: (u64, u64) = (1000, 3000);
+const MAX_GAP_MS: u64 = 5000;
 /// Senders being answered at once, per account (a thread each).
 const MAX_ANSWERING: usize = 32;
 /// Answers owed to one sender at most (a burst of Yos is answered one after the other, up to this many).
@@ -251,7 +253,7 @@ struct Bot {
     stopped: AtomicBool,
     /// Senders being answered, with the answers still owed to each, the one under way first: true for an answer to
     /// a photo or video.
-    pending: Mutex<HashMap<String, VecDeque<bool>>>,
+    pending: Mutex<HashMap<String, VecDeque<(bool, u64)>>>,
     dropped: AtomicU64,
     dropped_logged_s: AtomicU64,
 }
@@ -464,16 +466,16 @@ fn serve(account: &Account, options: Options) {
             Err(RecvTimeoutError::Timeout) => continue,
             Err(RecvTimeoutError::Disconnected) => break,
         };
-        let (user, picture) = match event {
-            Event::Message { user, content: Content::Yo, .. } => (user, false),
-            Event::Message { user, content: Content::Photo(_), .. } => (user, true),
+        let (user, picture, sent_at) = match event {
+            Event::Message { user, sent_at_ms, content: Content::Yo } => (user, false, sent_at_ms),
+            Event::Message { user, sent_at_ms, content: Content::Photo(_) } => (user, true, sent_at_ms),
             _ => continue,
         };
         {
             let mut pending = bot.pending.lock().unwrap_or_else(PoisonError::into_inner);
             if let Some(owed) = pending.get_mut(&user) {
                 if owed.len() < MAX_OWED {
-                    owed.push_back(picture);
+                    owed.push_back((picture, sent_at));
                 } else {
                     bot.dropped();
                 }
@@ -483,24 +485,29 @@ fn serve(account: &Account, options: Options) {
                 bot.dropped();
                 continue;
             }
-            pending.insert(user.clone(), VecDeque::from([picture]));
+            pending.insert(user.clone(), VecDeque::from([(picture, sent_at)]));
         }
         let (answering, events, sender) = (bot.clone(), events.clone(), user.clone());
         let spawned = std::thread::Builder::new().spawn(move || {
-            let (mut picture, mut think) = (picture, true);
+            let (mut picture, mut think, mut last) = (picture, true, sent_at);
             loop {
                 answer(&answering, &sender, &events, picture, think);
                 think = false;
-                let mut pending = answering.pending.lock().unwrap_or_else(PoisonError::into_inner);
-                let Some(owed) = pending.get_mut(&sender) else { break };
-                owed.pop_front();
-                match owed.front() {
-                    Some(next) => picture = *next,
-                    None => {
-                        pending.remove(&sender);
-                        break;
+                let next = {
+                    let mut pending = answering.pending.lock().unwrap_or_else(PoisonError::into_inner);
+                    let Some(owed) = pending.get_mut(&sender) else { break };
+                    owed.pop_front();
+                    match owed.front() {
+                        Some(&next) => next,
+                        None => {
+                            pending.remove(&sender);
+                            break;
+                        }
                     }
-                }
+                };
+                // As far apart as the sender's Yos were (their clocks' difference, never more than MAX_GAP_MS).
+                std::thread::sleep(Duration::from_millis(next.1.saturating_sub(last).min(MAX_GAP_MS)));
+                (picture, last) = next;
             }
         });
         if spawned.is_err() {
