@@ -40,19 +40,20 @@ struct SecureNameSheet: View {
   // MARK: Stages
 
   private var passkey: some View {
-    // First what happens, in two steps; Face ID only when asked for.
+    // The point, and what it makes; Continue does the rest (Face ID if it works, else the words).
     Page(title: "Secure Your Account",
-      message: "Set up account recovery to keep your name “\(accounts.account?.username ?? "")” forever.") {
-      VStack(alignment: .leading, spacing: 22) {
-        Step(icon: "faceid", title: "Face ID", text: "Sign back in on any iPhone.")
-        Step(icon: "list.number", title: "12 Words", text: "For when you can’t use Face ID.")
-      }
-      .padding(.top, 12)
+      message: "Secure your account to keep your name “\(accounts.account?.username ?? "")” forever.") {
+      Image(systemName: "lock.shield.fill")
+        .font(.system(size: 64))
+        .padding(.top, 20)
+      Text("Securing creates a passkey and a recovery key.")
+        .font(.system(size: 15))
+        .multilineTextAlignment(.center)
+        .opacity(0.8)
+        .padding(.top, 12)
     } bottom: {
-      PrimaryButton("Continue with Face ID", busy: busy) { Task { await makePasskey() } }
+      PrimaryButton("Continue", busy: busy) { Task { await makePasskey() } }
         .disabled(busy)
-      Button("Use Recovery Key Instead") { showWords() }
-        .font(.yo(17))
       Note(problem)
     }
   }
@@ -165,25 +166,5 @@ private struct KeyIcon: View {
     Image(systemName: "faceid")
       .font(.system(size: 64))
       .padding(.top, 20)
-  }
-}
-
-/// One step of what securing does: a symbol, and two short lines.
-private struct Step: View {
-  let icon: String
-  let title: String
-  let text: String
-
-  var body: some View {
-    HStack(spacing: 16) {
-      Image(systemName: icon)
-        .font(.system(size: 30, weight: .medium))
-        .frame(width: 44)
-      VStack(alignment: .leading, spacing: 2) {
-        Text(title).font(.system(size: 17, weight: .semibold))
-        Text(text).font(.system(size: 15)).opacity(0.8)
-      }
-    }
-    .accessibilityElement(children: .combine)
   }
 }
