@@ -56,3 +56,4 @@ keeping, so a regression shows against them.
 | 2026-11-11, 16 cores, one transaction per delivery | 5,793/s | 6.4 / 34.0 ms | 2,047 Yos/s | 0 |
 | 2026-11-11, 16 cores, group commit | 16,777/s | 1.7 / 27.7 ms | 2,089 Yos/s | 0 |
 | 2026-11-12, hub on one core (`YO_HUB_CPU=0`), load on 15 | 14,718/s | 3.1 / 19.9 ms | 1,275 Yos/s | 0 |
+| 2026-11-13, one core, static musl build (as deployed) | 18,295/s | 3.4 / 6.5 ms | 1,078 Yos/s | 0 |
