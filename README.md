@@ -2,94 +2,58 @@
 
 **One tap, one Yo — end-to-end encrypted, and the server never learns who sent it.**
 
-In 2014 Yo was an app that did one thing: you tap a friend's name, and their phone says "Yo". This is Yo again,
-built on the protocol a modern messenger would use, so that even a message as small as a Yo stays between the two
-of you.
-
 ## YoIP: Yo over IP
 
-YoIP is how the apps and the server talk. It has three parts: **YoLS** keeps who you are and what you send secret,
-the **hub** delivers, and the **content** says what a message is.
+The protocol between apps and server: **YoLS** for security, the **hub** for delivery, the **content** of a message.
 
 ```mermaid
 flowchart LR
-  A["Your phone<br/>encrypts the Yo"]
-  H["Hub<br/>keeps it in a mailbox"]
-  B["Your friend's phone<br/>decrypts it"]
-  A -- "sealed envelope,<br/>no sender on it" --> H
-  H -- "push: there is mail" --> B
-  B -- "fetches" --> H
+  A["Your phone<br/>encrypts"] -- "envelope, no sender" --> H["Hub"]
+  H -- "push: there is mail" --> B["Friend's phone<br/>fetches, decrypts"]
 ```
 
 ### YoLS: Yo Layer Security
 
-Every chat is an MLS group (RFC 9420), the IETF standard for end-to-end encrypted chats. Only the phones in the chat
-hold its keys, and the keys renew every week or every 100 messages: a key that leaks today stops being useful soon
-after.
-
-Who you are is a user id that never changes, with an account key that signs your devices, so a second device joins
-your chats as you. Your phone number and username are only there so friends can find you, and any
-contact can be checked against a 60-digit safety number, read out or compared on screen.
+Chats are MLS groups (RFC 9420); keys renew every week or 100 messages. An account key signs your devices; any
+contact can be checked with a 60-digit safety number.
 
 ### Hub
 
-The hub is a mailbox. A message reaches it addressed to a person but not signed by anyone (sealed sender), and
-padded to one of four sizes, so a Yo looks like any other message. A push only wakes the phone and says "there is
-mail"; the phone fetches and decrypts by itself, so Apple and Google never see who wrote.
+A mailbox. Messages arrive without a sender and padded to one of four sizes; a push only says "there is mail".
 
 | The hub knows | The hub never learns |
 |---|---|
-| phone numbers (as a keyed hash), devices, IP addresses | who sent a message |
-| when messages arrive, and how big they are | what they say |
-| who looked up whom | who chats with whom |
+| phone numbers (hashed), devices, IPs, timing, sizes | who sent a message, what it says, who chats with whom |
 
 ### Content
 
-What a message says, once decrypted. A Yo is the smallest message there is: 13 bytes.
+A Yo is 13 bytes: `00 01` version · 8 bytes time · `00 01` type Yo · `00` empty body.
 
-<details markdown="1">
-<summary><b>Example</b> · a Yo, byte by byte</summary>
-
-```
-00 01                      version 1
-00 00 01 A1 D3 EB AC 00    sent at 13 Nov 2026, 08:00 UTC (milliseconds)
-00 01                      type 1: Yo
-00                         body: empty
-```
-
-</details>
-
-The full protocol: [spec/v1.md](spec/v1.md).
+Full protocol: [spec/v1.md](spec/v1.md).
 
 ## Speed
 
-The hub, pinned to one CPU core, under load from the others:
-
-| | Yops | p99 |
+| Hub on one core | Yops | p99 |
 |---|---|---|
 | Database on an SSD | 16,000 | 19 ms |
 | Database in RAM | 22,000 | 6 ms |
 
-Yops are Yos delivered per second. One thread writes every delivery, one after the other, so that thread sets the
-pace and more cores do not help; the disk costs about a third. All runs: [tests/README.md](tests/README.md#load).
+Yops: Yos delivered per second. One writer thread sets the pace, not the cores. [All runs](tests/README.md#load).
 
 ## Layout
 
 | | |
 |---|---|
-| [`core/wire`](core/wire) | the formats apps and hub agree on |
-| [`core/mls`](core/mls) | the client core, in Rust, one for iOS and Android |
-| [`core/bindings`](core/bindings) | that core for Swift and Kotlin, via UniFFI |
+| [`core/`](core) | formats, the client core (Rust), Swift and Kotlin bindings |
 | [`hub/`](hub) | the server |
-| [`tests/`](tests) | scenarios, simulation, robustness, fuzzing, load |
-| [`app/ios/`](app/ios) | the iPhone app, a SwiftUI mockup for now |
+| [`tests/`](tests) | scenarios, simulation, fuzzing, load |
+| [`app/ios/`](app/ios) | the iPhone app (mockup) |
 
 ## Run
 
 ```sh
-dev/cargo test --workspace                                        # everything; needs only Docker
-dev/cargo run --release -p yo-tests --bin yo-load -- --clients 200  # the load test
-dev/fuzz all 300                                                  # every fuzz target for 5 minutes
+dev/cargo test --workspace                                          # needs only Docker
+dev/cargo run --release -p yo-tests --bin yo-load -- --clients 200  # load test
 ```
 
 ## License
