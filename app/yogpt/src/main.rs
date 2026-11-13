@@ -1,8 +1,12 @@
 //! YoGPT: an account that answers every Yo, after a moment, with a Yo or a few. One process serves the account on
 //! several hubs, each on its own.
 //!
-//!   yo-gpt --account NAME=HUB,DIR[,USERNAME] [--account …]
-//!   yo-gpt --account dev=https://dev.justyo.app,state/dev,YoGPT
+//!   yo-gpt [--replies DIR] --account NAME=HUB,DIR[,USERNAME] [--account …]
+//!   yo-gpt --replies app/yogpt/replies --account dev=https://dev.justyo.app,state/dev,YoGPT
+//!
+//! Pictures: with `--replies`, a photo or video sent to it is answered with one picture from DIR (files named like
+//! `007.jpg`, read as they are there at the time, at most 512 KB each), and one Yo in five it answers carries one
+//! (`--picture-every N`: one in N; 1 always, 0 never). Without it, Yos only.
 //!
 //! The username defaults to YOGPT; once registered, the account keeps the name it has, whatever is given later.
 //! Each account has its own client, state directory, threads and limits. Its first run registers the username with a
@@ -12,14 +16,16 @@
 //! (replaced by another, the name released, or the hub reset) or cannot be opened; the others go on. The process
 //! exits 1 when none is left.
 //!
-//! Anyone can write to it, so whatever comes is treated as hostile: it acts on a Yo and nothing else, never reads,
-//! logs or runs what a message says (a sender shows in the log as the start of its user id), and holds a bounded
-//! amount of work per account: every Yo answered in turn, up to `MAX_OWED` owed to one sender, `MAX_ANSWERING`
-//! senders at once, `MAX_QUEUED` events waiting; what
-//! does not fit is dropped and counted. A panic anywhere ends the process (systemd starts it again): the state on disk
+//! Anyone can write to it, so whatever comes is treated as hostile: it acts on a Yo, a photo or a video and nothing
+//! else, never reads, logs or runs what a message says (a sender shows in the log as the start of its user id), and
+//! holds a bounded amount of work per account: every Yo answered in turn, up to `MAX_OWED` owed to one sender,
+//! `MAX_ANSWERING` senders at once, `MAX_QUEUED` events waiting; what does not fit is dropped and counted. A photo or
+//! video sent to it is never opened, decoded, stored or logged: its encrypted blob is fetched into nothing (so the hub
+//! can delete it at once), one at a time, at most `MAX_DRAINING` waiting, its key forgotten with the event. A panic
+//! anywhere ends the process (systemd starts it again): the state on disk
 //! is only ever replaced whole, after an operation completed.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::io::{Read, Write};
 use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
@@ -27,6 +33,7 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc::{sync_channel, RecvTimeoutError, SyncSender, TrySendError};
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::{Duration, Instant};
+use yo_core::media::{self, Media};
 use yo_core::{Client, Content, Error, Event, Push, Response, Store, Transport};
 
 /// How many Yos an answer has, in percent: one mostly, more ever rarer (a half-normal tail), five at most.
@@ -38,7 +45,7 @@ const GAP_MS: (u64, u64) = (300, 1000);
 /// Senders being answered at once, per account (a thread each).
 const MAX_ANSWERING: usize = 32;
 /// Answers owed to one sender at most (a burst of Yos is answered one after the other, up to this many).
-const MAX_OWED: u32 = 200;
+const MAX_OWED: usize = 200;
 /// Events waiting for an account's dispatcher.
 const MAX_QUEUED: usize = 1024;
 /// An answer from the hub, at most: a full inbox fetch (100 envelopes of at most 65 KiB) fits.
@@ -47,6 +54,14 @@ const MAX_RESPONSE: u64 = 16 << 20;
 const MAINTENANCE: Duration = Duration::from_secs(3600);
 /// At most this many accounts on the command line.
 const MAX_ACCOUNTS: usize = 8;
+/// One Yo in this many carries a picture, by default.
+const PICTURE_EVERY: u64 = 5;
+/// The largest reply picture read; a larger file is skipped.
+const MAX_PICTURE: u64 = 512 * 1024;
+/// Files looked at in the replies directory, at most.
+const MAX_PICTURES_LISTED: usize = 1000;
+/// Blobs of photos and videos sent to it, waiting to be fetched into nothing.
+const MAX_DRAINING: usize = 64;
 
 struct Http {
     client: reqwest::blocking::Client,
@@ -135,6 +150,65 @@ struct Account {
     username: String,
 }
 
+/// What the whole process answers with.
+#[derive(Clone)]
+struct Options {
+    /// Reply pictures, if any.
+    replies: Option<PathBuf>,
+    /// One Yo in this many carries a picture; 0 never.
+    picture_every: u64,
+}
+
+/// Whether a roll (uniform in `0..every`) gives a picture: one in `every`, none for 0.
+fn picture_due(roll: u64, every: u64) -> bool {
+    every > 0 && roll == 0
+}
+
+/// A reply picture's file name: digits, `.jpg`.
+fn picture_name(name: &str) -> bool {
+    name.strip_suffix(".jpg").is_some_and(|stem| !stem.is_empty() && stem.bytes().all(|b| b.is_ascii_digit()))
+}
+
+/// A JPEG's width and height from its frame header, if it has one where it should.
+fn jpeg_size(bytes: &[u8]) -> Option<(u16, u16)> {
+    let be16 = |i: usize| Some(u16::from_be_bytes([*bytes.get(i)?, *bytes.get(i + 1)?]));
+    if bytes.get(..2)? != [0xFF, 0xD8] {
+        return None;
+    }
+    let mut i = 2;
+    while bytes.get(i) == Some(&0xFF) {
+        let marker = *bytes.get(i + 1)?;
+        // A start of frame (not DHT, JPG, DAC): height, then width.
+        if (0xC0..=0xCF).contains(&marker) && ![0xC4, 0xC8, 0xCC].contains(&marker) {
+            return Some((be16(i + 7)?, be16(i + 5)?));
+        }
+        i += 2 + be16(i + 2)? as usize;
+    }
+    None
+}
+
+/// One reply picture at random from the directory as it is now: its bytes, width and height.
+fn pick_picture(dir: &Path) -> Option<(Vec<u8>, u16, u16)> {
+    let names: Vec<PathBuf> = std::fs::read_dir(dir)
+        .ok()?
+        .take(MAX_PICTURES_LISTED)
+        .filter_map(|entry| entry.ok())
+        .filter(|entry| entry.file_name().to_str().is_some_and(picture_name))
+        .map(|entry| entry.path())
+        .collect();
+    if names.is_empty() {
+        return None;
+    }
+    let path = &names[uniform(0, names.len() as u64 - 1) as usize];
+    let mut bytes = Vec::new();
+    std::fs::File::open(path).ok()?.take(MAX_PICTURE + 1).read_to_end(&mut bytes).ok()?;
+    if bytes.is_empty() || bytes.len() as u64 > MAX_PICTURE {
+        return None;
+    }
+    let (width, height) = jpeg_size(&bytes).unwrap_or((720, 1280));
+    Some((bytes, width, height))
+}
+
 /// `NAME=HUB,DIR[,USERNAME]`.
 fn account(value: &str) -> Result<Account, String> {
     let bad = || format!("--account {value}: NAME=HUB,DIR[,USERNAME]");
@@ -149,30 +223,37 @@ fn account(value: &str) -> Result<Account, String> {
     Ok(Account { name: name.into(), hub, state: state.into(), username: username.into() })
 }
 
-fn args() -> Result<Vec<Account>, String> {
+fn args() -> Result<(Vec<Account>, Options), String> {
     let mut accounts = Vec::new();
+    let mut options = Options { replies: None, picture_every: PICTURE_EVERY };
     let mut it = std::env::args().skip(1);
     while let Some(flag) = it.next() {
         let value = it.next().ok_or(format!("{flag}: a value"))?;
         match flag.as_str() {
             "--account" => accounts.push(account(&value)?),
+            "--replies" => options.replies = Some(value.into()),
+            "--picture-every" => options.picture_every = value.parse().map_err(|_| "--picture-every: a number")?,
             other => return Err(format!("unknown flag {other}")),
         }
     }
     if accounts.is_empty() || accounts.len() > MAX_ACCOUNTS {
         return Err(format!("1 to {MAX_ACCOUNTS} accounts: --account NAME=HUB,DIR[,USERNAME]"));
     }
-    Ok(accounts)
+    Ok((accounts, options))
 }
 
 /// One account on one hub: its client, and what bounds its work.
 struct Bot {
     name: String,
+    options: Options,
+    /// Blob ids of photos and videos sent to it, for the drainer.
+    draining: SyncSender<[u8; 16]>,
     client: Mutex<Client>,
     /// The hub no longer knows the device: everything of this account stops.
     stopped: AtomicBool,
-    /// Senders being answered, with the answers still owed to each.
-    pending: Mutex<HashMap<String, u32>>,
+    /// Senders being answered, with the answers still owed to each, the one under way first: true for an answer to
+    /// a photo or video.
+    pending: Mutex<HashMap<String, VecDeque<bool>>>,
     dropped: AtomicU64,
     dropped_logged_s: AtomicU64,
 }
@@ -208,13 +289,43 @@ impl Bot {
         }
     }
 
-    /// Queues an event for the dispatcher, or drops it when the queue is full; never blocks. Only Yos are worth it.
+    /// Queues an event for the dispatcher, or drops it when the queue is full; never blocks. Only Yos, photos and
+    /// videos are worth it; of a photo or video only that it came (its blob goes to the drainer, its key nowhere).
     fn queue(&self, events: &SyncSender<Event>, event: Event) {
-        if !matches!(event, Event::Message { content: Content::Yo, .. }) {
-            return;
-        }
+        let event = match event {
+            Event::Message { user, sent_at_ms, content: Content::Photo(media) | Content::Video { media, .. } } => {
+                self.drain(&media);
+                Event::Message { user, sent_at_ms, content: Content::Photo(unopened()) }
+            }
+            event @ Event::Message { content: Content::Yo, .. } => event,
+            _ => return,
+        };
         if let Err(TrySendError::Full(_)) = events.try_send(event) {
             self.dropped();
+        }
+    }
+
+    /// Hands a blob's id to the drainer, or drops it when too many wait (the hub deletes it after its time).
+    fn drain(&self, media: &Media) {
+        if let Err(TrySendError::Full(_)) = self.draining.try_send(media.id) {
+            self.dropped();
+        }
+    }
+}
+
+/// What the dispatcher is told of a photo or video: that one came, nothing of it.
+fn unopened() -> Media {
+    Media { id: [0; 16], key: [0; 32], sha256: [0; 32], size: 0, width: 0, height: 0 }
+}
+
+/// Fetches the blobs of photos and videos sent to the account into nothing, one at a time: each fetch counts at the
+/// hub, which deletes a blob after its last. Nothing of them is kept, opened or logged.
+fn drainer(hub: String, ids: std::sync::mpsc::Receiver<[u8; 16]>) {
+    let Ok(http) = reqwest::blocking::Client::builder().timeout(Duration::from_secs(120)).build() else { return };
+    while let Ok(id) = ids.recv() {
+        let url = format!("{hub}{}", yo_core::media::blob_path(&id));
+        if let Ok(response) = http.get(url).send() {
+            let _ = std::io::copy(&mut response.take(media::MAX_MEDIA_LEN as u64 + 64), &mut std::io::sink());
         }
     }
 }
@@ -298,7 +409,7 @@ impl Backoff {
 }
 
 fn main() {
-    let accounts = args().unwrap_or_else(|error| {
+    let (accounts, options) = args().unwrap_or_else(|error| {
         eprintln!("yo-gpt: {error}");
         std::process::exit(2);
     });
@@ -308,7 +419,13 @@ fn main() {
         report(info);
         std::process::exit(101);
     }));
-    let serving: Vec<_> = accounts.into_iter().map(|account| std::thread::spawn(move || serve(&account))).collect();
+    let serving: Vec<_> = accounts
+        .into_iter()
+        .map(|account| {
+            let options = options.clone();
+            std::thread::spawn(move || serve(&account, options))
+        })
+        .collect();
     for thread in serving {
         let _ = thread.join();
     }
@@ -317,10 +434,15 @@ fn main() {
 }
 
 /// Serves one account until it stops.
-fn serve(account: &Account) {
+fn serve(account: &Account, options: Options) {
     let Some(client) = open(account) else { return };
+    let (draining, to_drain) = sync_channel(MAX_DRAINING);
+    let hub = account.hub.clone();
+    std::thread::spawn(move || drainer(hub, to_drain));
     let bot = Arc::new(Bot {
         name: account.name.clone(),
+        options,
+        draining,
         client: Mutex::new(client),
         stopped: AtomicBool::new(false),
         pending: Mutex::default(),
@@ -342,12 +464,16 @@ fn serve(account: &Account) {
             Err(RecvTimeoutError::Timeout) => continue,
             Err(RecvTimeoutError::Disconnected) => break,
         };
-        let Event::Message { user, content: Content::Yo, .. } = event else { continue };
+        let (user, picture) = match event {
+            Event::Message { user, content: Content::Yo, .. } => (user, false),
+            Event::Message { user, content: Content::Photo(_), .. } => (user, true),
+            _ => continue,
+        };
         {
             let mut pending = bot.pending.lock().unwrap_or_else(PoisonError::into_inner);
             if let Some(owed) = pending.get_mut(&user) {
-                if *owed < MAX_OWED {
-                    *owed += 1;
+                if owed.len() < MAX_OWED {
+                    owed.push_back(picture);
                 } else {
                     bot.dropped();
                 }
@@ -357,17 +483,22 @@ fn serve(account: &Account) {
                 bot.dropped();
                 continue;
             }
-            pending.insert(user.clone(), 1);
+            pending.insert(user.clone(), VecDeque::from([picture]));
         }
         let (answering, events, sender) = (bot.clone(), events.clone(), user.clone());
-        let spawned = std::thread::Builder::new().spawn(move || loop {
-            answer(&answering, &sender, &events);
-            let mut pending = answering.pending.lock().unwrap_or_else(PoisonError::into_inner);
-            match pending.get_mut(&sender) {
-                Some(owed) if *owed > 1 => *owed -= 1,
-                _ => {
-                    pending.remove(&sender);
-                    break;
+        let spawned = std::thread::Builder::new().spawn(move || {
+            let mut picture = picture;
+            loop {
+                answer(&answering, &sender, &events, picture);
+                let mut pending = answering.pending.lock().unwrap_or_else(PoisonError::into_inner);
+                let Some(owed) = pending.get_mut(&sender) else { break };
+                owed.pop_front();
+                match owed.front() {
+                    Some(next) => picture = *next,
+                    None => {
+                        pending.remove(&sender);
+                        break;
+                    }
                 }
             }
         });
@@ -405,10 +536,17 @@ fn receive(bot: &Bot, events: &SyncSender<Event>) {
     }
 }
 
-/// Thinks, then sends a Yo or a few. What sending receives goes to the dispatcher.
-fn answer(bot: &Bot, user: &str, events: &SyncSender<Event>) {
+/// Thinks, then sends a Yo or a few, one in `picture_every` of them with a picture; to a photo or video, one Yo with a
+/// picture. What sending receives goes to the dispatcher.
+fn answer(bot: &Bot, user: &str, events: &SyncSender<Event>, to_picture: bool) {
     std::thread::sleep(ms(THINK_MS));
-    let n = yos(uniform(0, 99) as u32);
+    let n = if to_picture { 1 } else { yos(uniform(0, 99) as u32) };
+    let every = bot.options.picture_every;
+    let with_picture = match to_picture {
+        true => Some(0),
+        false => picture_due(uniform(0, every.max(1) - 1), every).then(|| uniform(0, n as u64 - 1) as usize),
+    };
+    let mut pictures = 0;
     for i in 0..n {
         if i > 0 {
             std::thread::sleep(ms(GAP_MS));
@@ -416,14 +554,39 @@ fn answer(bot: &Bot, user: &str, events: &SyncSender<Event>) {
         if !bot.running() {
             return;
         }
-        let sent = bot.client().send_yo(user);
+        let sent = match with_picture == Some(i) {
+            true => send_picture(bot, user).inspect(|(_, sent)| pictures += *sent as usize).map(|(events, _)| events),
+            false => bot.client().send_yo(user),
+        };
         match sent {
             Ok(received) => received.into_iter().for_each(|event| bot.queue(events, event)),
             Err(error) if gone(&error) => return bot.stop(GONE),
             Err(error) => return bot.log(format!("Yo {} of {n} to {}: {}", i + 1, who(user), reason(&error))),
         }
     }
-    bot.log(format!("{n} Yo back to {}", who(user)));
+    let with = if pictures > 0 { " with a picture" } else { "" };
+    bot.log(format!("{n} Yo back to {}{with}", who(user)));
+}
+
+/// A Yo with a reply picture; a plain one when there is none or the hub takes no picture now. True when it had one.
+fn send_picture(bot: &Bot, user: &str) -> Result<(Vec<Event>, bool), Error> {
+    let picked = bot.options.replies.as_deref().and_then(pick_picture);
+    let Some((bytes, width, height)) = picked else { return bot.client().send_yo(user).map(|e| (e, false)) };
+    let (media, sealed) = media::seal(&bytes, width, height)?;
+    // Signed under the client, sent without it: other answers go on meanwhile.
+    let upload = {
+        let mut client = bot.client();
+        let fetches = client.media_fetches(user).unwrap_or(1);
+        client.upload(&media, fetches)
+    };
+    match upload.send(&sealed) {
+        Ok(()) => bot.client().send(user, Content::Photo(media)).map(|e| (e, true)),
+        Err(error) if gone(&error) => Err(error),
+        Err(error) => {
+            bot.log(format!("picture to {}: {}", who(user), reason(&error)));
+            bot.client().send_yo(user).map(|e| (e, false))
+        }
+    }
 }
 
 #[cfg(test)]
@@ -438,6 +601,38 @@ mod tests {
             counts[yos(p) - 1] += 1;
         }
         assert_eq!(counts, YOS);
+    }
+
+    #[test]
+    fn one_yo_in_five_carries_a_picture() {
+        let due = |every: u64| (0..100).filter(|roll| picture_due(roll % every.max(1), every)).count();
+        assert_eq!(due(5), 20);
+        assert_eq!(due(1), 100);
+        assert_eq!(due(0), 0);
+    }
+
+    #[test]
+    fn reply_pictures_are_named_by_number_and_read_bounded() {
+        assert!(picture_name("007.jpg") && picture_name("200.jpg"));
+        for name in ["", ".jpg", "a.jpg", "007.jpeg", "007.jpg.sh", "../1.jpg", "1.JPG"] {
+            assert!(!picture_name(name), "{name}");
+        }
+        // A frame header after an APP0 segment: 720 wide, 1280 high.
+        let jpeg = [
+            0xFF, 0xD8, 0xFF, 0xE0, 0, 4, 0, 0, 0xFF, 0xC0, 0, 17, 8, 0x05, 0x00, 0x02, 0xD0, 3, 0, 0, 0, 0, 0, 0, 0, 0,
+        ];
+        assert_eq!(jpeg_size(&jpeg), Some((720, 1280)));
+        assert_eq!(jpeg_size(&jpeg[..12]), None);
+        assert_eq!(jpeg_size(b"not a jpeg"), None);
+        let dir = std::env::temp_dir().join(format!("yogpt-pick-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        assert!(pick_picture(&dir).is_none(), "nothing there");
+        std::fs::write(dir.join("001.jpg"), vec![0u8; MAX_PICTURE as usize + 1]).unwrap();
+        assert!(pick_picture(&dir).is_none(), "too large");
+        std::fs::write(dir.join("001.jpg"), jpeg).unwrap();
+        std::fs::write(dir.join("notes.txt"), b"x").unwrap();
+        assert_eq!(pick_picture(&dir).map(|(b, w, h)| (b.len(), w, h)), Some((jpeg.len(), 720, 1280)));
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]
