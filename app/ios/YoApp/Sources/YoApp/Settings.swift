@@ -37,6 +37,9 @@ struct SettingsView: View {
   @State private var showingWords = false
   @State private var turningOffPasskey = false
   @State private var renewingWords = false
+  @State private var confirmingDelete = false
+  @State private var deletingAccount = false
+  @State private var deleteProblem: String?
 
   var body: some View {
     NavigationStack {
@@ -74,6 +77,17 @@ struct SettingsView: View {
               Text("Secure your account to keep your name “\(account.username)” forever.")
             }
           }
+          Section {
+            NavigationLink {
+              BlockedList()
+            } label: {
+              HStack {
+                Label("Blocked", systemImage: "hand.raised.fill").labelStyle(Tile(.red))
+                Spacer()
+                Text("\(friends.blocked.count)").foregroundStyle(Color(.secondaryLabel))
+              }
+            }
+          }
         }
 
         // "Keep Sent Photos" comes back with the camera mode, once the core carries photos and videos (spec 5).
@@ -82,8 +96,30 @@ struct SettingsView: View {
         Section {
           Button("Sign Out", role: .destructive) { resetting = true }
             .frame(maxWidth: .infinity)
-            .disabled(addingPasskey)
+            .disabled(addingPasskey || deletingAccount)
         }
+        // Below it, as Apple asks for (App Review 5.1.1(v)): gone for good, with everything the hub holds.
+        if accounts.account != nil {
+          Section {
+            Button("Delete Account", role: .destructive) { confirmingDelete = true }
+              .frame(maxWidth: .infinity)
+              .disabled(addingPasskey || deletingAccount)
+          }
+        }
+      }
+      .confirmationDialog("Delete Account?", isPresented: $confirmingDelete, titleVisibility: .visible) {
+        Button("Delete Account", role: .destructive) { Task { await deleteAccount() } }
+        Button("Cancel", role: .cancel) {}
+      } message: {
+        Text(deleteMessage)
+      }
+      .alert(
+        "Unable to Delete Account",
+        isPresented: Binding(get: { deleteProblem != nil }, set: { if !$0 { deleteProblem = nil } })
+      ) {
+        Button("OK", role: .cancel) {}
+      } message: {
+        Text(deleteProblem ?? "")
       }
       // Not secured all the way: the guide first, signing out anyway second.
       .confirmationDialog("Sign Out?", isPresented: $resetting, titleVisibility: .visible) {
@@ -323,6 +359,25 @@ struct SettingsView: View {
       return
     }
     openURL(url)
+  }
+
+  /// What deleting costs, in one line: everything, and the name for anyone.
+  private var deleteMessage: String {
+    let name = accounts.account?.username ?? "Your name"
+    let passkey = accounts.account?.byPasskey == true ? " Delete the passkey in your password manager too." : ""
+    return "This can’t be undone. “\(name)” becomes free for anyone.\(passkey)"
+  }
+
+  /// Deleted at the hub, then forgotten here as signing out forgets.
+  private func deleteAccount() async {
+    deletingAccount = true
+    defer { deletingAccount = false }
+    do {
+      try await accounts.deleteAccount()
+      reset()
+    } catch {
+      deleteProblem = error.localizedDescription
+    }
   }
 
   private func reset() {
@@ -676,6 +731,53 @@ enum Library {
     } completionHandler: { saved, _ in
       if !saved, let copy {
         try? FileManager.default.removeItem(at: copy)
+      }
+    }
+  }
+}
+
+/// The friends blocked on this phone (spec 4.8), as Settings lists blocked contacts: swipe to unblock, and they are
+/// back on the list.
+@MainActor
+private struct BlockedList: View {
+  @Environment(AccountStore.self) private var accounts
+  @Environment(Friends.self) private var friends
+  @State private var problem: String?
+
+  var body: some View {
+    Form {
+      if friends.blocked.isEmpty {
+        ContentUnavailableView("No Blocked Friends", systemImage: "hand.raised")
+      } else {
+        Section {
+          ForEach(friends.blocked) { friend in
+            Text(friend.name)
+              .font(.yo(17, relativeTo: .body))
+              .swipeActions {
+                Button("Unblock") { unblock(friend) }
+              }
+          }
+        } footer: {
+          Text("Blocked friends can’t send you Yos. Swipe to unblock.")
+        }
+      }
+    }
+    .navigationTitle("Blocked")
+    .navigationBarTitleDisplayMode(.inline)
+    .alert("Unable to Unblock", isPresented: Binding(get: { problem != nil }, set: { if !$0 { problem = nil } })) {
+      Button("OK", role: .cancel) {}
+    } message: {
+      Text(problem ?? "")
+    }
+  }
+
+  private func unblock(_ friend: Friend) {
+    Task {
+      do {
+        try await accounts.setBlocked(friend.user ?? friend.name, false)
+        withAnimation { friends.setBlocked(friend, false) }
+      } catch {
+        problem = error.localizedDescription
       }
     }
   }

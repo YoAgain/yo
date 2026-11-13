@@ -2,6 +2,7 @@
 // new phone, opened by a passkey's PRF output or by a recovery code.
 //
 // The account lives at the hub, through the Rust core (`Hub.swift`); the backup is made and opened here.
+import AuthenticationServices
 import CryptoKit
 import Foundation
 import Observation
@@ -320,9 +321,14 @@ final class AccountStore {
   }
 
   private func put(_ backup: YoBackup) async throws {
+    try await hub { try $0.putBackup(backup: backup) }
+  }
+
+  /// A core call for this account, off the main actor; the core's error as an `AccountError`.
+  private func hub<T: Sendable>(_ work: @escaping @Sendable (YoClient) throws -> T) async throws -> T {
     guard let client else { throw AccountError.noBackup }
     do {
-      try await Hub.run { try client.putBackup(backup: backup) }
+      return try await Hub.run { try work(client) }
     } catch let error as YoError {
       throw AccountError.hub(error)
     }
@@ -432,6 +438,28 @@ final class AccountStore {
     SecureReminder.update(secured: true)
   }
 
+  // MARK: Blocking, reporting, deleting
+
+  /// Blocks a user (spec 4.8), by user id or name: nothing from them is shown, nothing goes to them. Or unblocks.
+  func setBlocked(_ who: String, _ blocked: Bool) async throws {
+    try await hub { try $0.setBlocked(who: who, blocked: blocked) }
+  }
+
+  /// Reports a user to Yo (spec 6.4): who and why, nothing of what they sent.
+  func report(_ who: String, reason: ReportReason) async throws {
+    try await hub { try $0.report(who: who, reason: reason) }
+  }
+
+  /// Deletes the account at the hub with everything it holds (spec 6.4); the name is free again. The password manager
+  /// is told that the account's passkeys are no longer valid (one that does not listen keeps it: deleted by hand).
+  /// Then this phone forgets it (`reset`, by the caller with the rest of the app's data).
+  func deleteAccount() async throws {
+    guard let account else { throw AccountError.noBackup }
+    try await hub { try $0.deleteAccount() }
+    try? await ASCredentialUpdater().reportAllAcceptedPublicKeyCredentials(
+      relyingPartyIdentifier: Passkeys.domain, userHandle: account.userID, acceptedCredentialIDs: [])
+  }
+
   /// "Sign Out": this phone forgets the account, as a new phone would (the hub keeps the backup).
   func reset() {
     account = nil
@@ -454,6 +482,7 @@ enum AccountError: LocalizedError {
     case .noPRF: "This passkey can’t be used to sign in to Yo. Try a different password manager."
     case .tooMany: "Too many tries. Try again later."
     case .hub(.Network): "Yo can’t reach its server. Check your connection and try again."
+    case .hub(.Replaced): "Your account is in use on another iPhone."
     case .hub(let error): "Something went wrong. Try again. (\(error))"  // the core's reason, while in development
     }
   }

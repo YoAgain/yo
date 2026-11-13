@@ -12,6 +12,8 @@ struct Friend: Codable, Hashable, Identifiable {
   var color: Int
   /// Their user id at the hub, once a Yo went or came.
   var user: String?
+  /// Blocked (spec 4.8): off the list, nothing from them shown; Settings lists them to unblock.
+  var blocked = false
   var id: String { name }
 
   init(name: String, color: Int, user: String? = nil) {
@@ -26,6 +28,7 @@ struct Friend: Codable, Hashable, Identifiable {
     name = try c.decode(String.self, forKey: .name)
     color = try c.decodeIfPresent(Int.self, forKey: .color) ?? -1
     user = try c.decodeIfPresent(String.self, forKey: .user)
+    blocked = try c.decodeIfPresent(Bool.self, forKey: .blocked) ?? false
   }
 }
 
@@ -45,6 +48,10 @@ final class Friends {
       return friend
     }
   }
+
+  /// The friends on the list: all but the blocked.
+  var shown: [Friend] { all.filter { !$0.blocked } }
+  var blocked: [Friend] { all.filter(\.blocked) }
 
   /// The colour the next friend gets: the one fewest friends have (the first of those), so the list stays colourful.
   var nextColor: Int {
@@ -86,6 +93,12 @@ final class Friends {
 
   func remove(_ friend: Friend) {
     all.removeAll { $0 == friend }
+  }
+
+  /// Off the list, or back on it (the core blocks them: `AccountStore.setBlocked`).
+  func setBlocked(_ friend: Friend, _ blocked: Bool) {
+    guard let index = all.firstIndex(where: { $0.id == friend.id }) else { return }
+    all[index].blocked = blocked
   }
 
   private func save() {

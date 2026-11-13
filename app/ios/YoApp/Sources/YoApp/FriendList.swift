@@ -2,7 +2,7 @@
 // sends a Yo ("Sent Yo!" on the bar, then it goes on top). The order is the original's: whoever you last sent a Yo to
 // or got one from is on top; each friend keeps their colour as they move (the original's went with the place). In the
 // mockup a tap sends the Yo to yourself, as if that friend had sent it, when the bar goes on top (showSent). Hold a bar
-// to remove the friend; the last bar adds one.
+// to report, block or remove the friend; the last bar adds one.
 //
 // On top, the system's bar: profile (a sheet) on the left, the camera on the right, between them the title "Yo",
 // a heading that becomes a glass pill once rows scroll behind it.
@@ -20,6 +20,7 @@
 import AVFoundation
 import PhotosUI
 import SwiftUI
+import YoCore
 
 struct FriendList: View {
   /// How long a photo stays when its thumbnail is held.
@@ -58,6 +59,12 @@ struct FriendList: View {
   /// Senders waiting to go on top, oldest first: gathered for a moment and moved in one step, so many Yos at once do
   /// not shuffle the list bar by bar.
   @State private var rising: [String] = []
+
+  // Blocking and reporting
+  /// The friend the Block dialog asks about, and whether it follows a report.
+  @State private var blocking: (friend: Friend, reported: Bool)?
+  /// What went wrong reporting or blocking: the alert's title and message.
+  @State private var problem: (title: String, message: String)?
   /// The friends whose bars are on screen now.
   @State private var onScreen: Set<String> = []
   /// Counts sends, for the haptic.
@@ -123,6 +130,26 @@ struct FriendList: View {
       navigation
         // The list is always dark (white on purple); the profile follows the iPhone's own appearance.
         .sheet(isPresented: $settings) { SettingsView().preferredColorScheme(SystemAppearance.scheme) }
+        .confirmationDialog(
+          blocking?.reported == true ? "Thanks for Reporting" : "Block \(blocking?.friend.name ?? "")?",
+          isPresented: Binding(get: { blocking != nil }, set: { if !$0 { blocking = nil } }),
+          titleVisibility: .visible, presenting: blocking
+        ) { blocking in
+          Button("Block \(blocking.friend.name)", role: .destructive) { block(blocking.friend) }
+          Button(blocking.reported ? "Not Now" : "Cancel", role: .cancel) {}
+        } message: { blocking in
+          Text(
+            blocking.reported
+              ? "Block \(blocking.friend.name) too? You won’t get their Yos."
+              : "You won’t get their Yos. Unblock them in your profile.")
+        }
+        .alert(
+          problem?.title ?? "", isPresented: Binding(get: { problem != nil }, set: { if !$0 { problem = nil } })
+        ) {
+          Button("OK", role: .cancel) {}
+        } message: {
+          Text(problem?.message ?? "")
+        }
         .overlay {
           if let viewing {
             HeldMedia(queue: viewing, photoSeconds: Self.photoSeconds) {
@@ -142,7 +169,7 @@ struct FriendList: View {
         LazyVStack(spacing: 0) {
           // Going on top is a delete and an insert (as Signal's chat list does): the gap closes below, the bar comes in
           // from the top; it does not fly across the list.
-          ForEach(friends.all.map { Lifted(friend: $0, lifts: lifts[$0.name] ?? 0) }) { lifted in
+          ForEach(friends.shown.map { Lifted(friend: $0, lifts: lifts[$0.name] ?? 0) }) { lifted in
             row(lifted.friend)
               .transition(.asymmetric(insertion: .move(edge: .top).combined(with: .opacity), removal: .opacity))
           }
@@ -236,10 +263,40 @@ struct FriendList: View {
     } else {
       bar
         .contextMenu {
+          Menu("Report \(friend.name)", systemImage: "exclamationmark.bubble") {
+            Button("Spam") { report(friend, .spam) }
+            Button("Abuse") { report(friend, .abuse) }
+            Button("Something Else") { report(friend, .other) }
+          }
+          Button("Block \(friend.name)", systemImage: "hand.raised") { blocking = (friend, false) }
           Button("Remove \(friend.name)", systemImage: "trash", role: .destructive) {
             withAnimation(.snappy) { friends.remove(friend) }
           }
         }
+    }
+  }
+
+  /// Reports a friend to Yo, then offers to block them.
+  private func report(_ friend: Friend, _ reason: ReportReason) {
+    Task {
+      do {
+        try await accounts.report(friend.user ?? friend.name, reason: reason)
+        blocking = (friend, true)
+      } catch {
+        problem = ("Unable to Report", error.localizedDescription)
+      }
+    }
+  }
+
+  /// Blocks a friend: off the list, their Yos no longer shown (spec 4.8).
+  private func block(_ friend: Friend) {
+    Task {
+      do {
+        try await accounts.setBlocked(friend.user ?? friend.name, true)
+        withAnimation(.snappy) { friends.setBlocked(friend, true) }
+      } catch {
+        problem = ("Unable to Block", error.localizedDescription)
+      }
     }
   }
 
