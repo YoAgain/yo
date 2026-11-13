@@ -26,8 +26,6 @@ struct Onboarding: View {
   /// Continue tapped with a name too short: the minimum shows, the field shakes (once per tap).
   @State private var tooShort = false
   @State private var shakes = 0
-  @AppStorage("hub.dev") private var devHub = false
-  @State private var taps: [Date] = []
   /// What the hub said about names typed, by skeleton: free or taken (the checkmark or the red cross).
   @State private var checked: [String: Bool] = [:]
 
@@ -66,14 +64,6 @@ struct Onboarding: View {
       Button("Sign In") { go(.logIn) }
         .font(.yo(18))
         .padding(.top, 18)
-    }
-    // Hidden, for development: four quick taps in the top right corner switch between the live and the dev hub.
-    .overlay(alignment: .topTrailing) {
-      Color.clear
-        .frame(width: 88, height: 88)
-        .contentShape(.rect)
-        .onTapGesture { secretTap() }
-        .accessibilityHidden(true)
     }
     .padding(.horizontal, 28)
     .padding(.bottom, 16)
@@ -152,17 +142,6 @@ struct Onboarding: View {
     if let free = try? await Hub.run({ try usernameFree(transport: transport, username: typed) }) {
       checked[skeleton] = free
     }
-  }
-
-  /// Four quick taps (within two seconds) switch between the live and the dev hub.
-  private func secretTap() {
-    let now = Date.now
-    taps = taps.filter { now.timeIntervalSince($0) < 2 } + [now]
-    guard taps.count >= 4 else { return }
-    taps = []
-    UINotificationFeedbackGenerator().notificationOccurred(.warning)
-    devHub.toggle()  // straight away; the DEV SERVER label says which
-    Hub.usesDev = devHub
   }
 
   private func go(_ next: Step) {

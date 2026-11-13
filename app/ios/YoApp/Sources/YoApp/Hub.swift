@@ -9,13 +9,11 @@ enum Hub {
   static let live = URL(string: "https://hub.justyo.app")!
   static let dev = URL(string: "https://dev.justyo.app")!
 
-  /// The dev hub instead of the live one: a switch on the welcome screen while Yo is in development.
-  static var usesDev: Bool {
-    get { UserDefaults.standard.bool(forKey: "hub.dev") }
-    set { UserDefaults.standard.set(newValue, forKey: "hub.dev") }
-  }
+  /// "Yo Dev" (app.justyo.ios.dev, what dev/push.sh installs) talks to the dev hub, always; "Yo" (TestFlight, the
+  /// App Store) to the live one. Two apps side by side, each with its own accounts.
+  static let isDevApp = Bundle.main.bundleIdentifier?.hasSuffix(".dev") == true
 
-  static var url: URL { usesDev ? dev : live }
+  static var url: URL { isDevApp ? dev : live }
   static var transport: HubTransport { HubTransport(base: url) }
 
   /// A blocking core call, off the main actor.

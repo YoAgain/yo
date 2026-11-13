@@ -33,7 +33,7 @@ python3 app/ios/dev/wireless.py PHONE --shot s.png   # a screenshot of the phone
 ```
 
 Once before: pair over USB (`tools/tailnet-tunnel.py pair` in omarchy-apple-dev) and make the development identity
-(`tools/provision-dev.py --bundle-id app.justyo.ios`). Keys, profiles and pairing records stay outside the
+(`tools/provision-dev.py --bundle-id app.justyo.ios.dev`). Keys, profiles and pairing records stay outside the
 repository; this machine's phone address and paths go in `dev/local.env` (ignored). The scripts run with
 pymobiledevice3's Python (`PY` in `local.env`).
 

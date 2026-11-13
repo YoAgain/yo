@@ -8,7 +8,6 @@ struct YoApp: App {
   @State private var friends = Friends()
   @State private var accounts = AccountStore()
   @Environment(\.scenePhase) private var phase
-  @AppStorage("hub.dev") private var devHub = false
   private let notifications: NotificationDelegate
 
   init() {
@@ -29,19 +28,6 @@ struct YoApp: App {
         }
       }
       .animation(.smooth(duration: 0.5), value: accounts.account == nil)
-      // The dev hub, unmistakably: a label on top of every screen while it is in use.
-      .overlay(alignment: .top) {
-        if devHub {
-          Text("DEV SERVER")
-            .font(.system(size: 11, weight: .heavy))
-            .foregroundStyle(.white)
-            .padding(.horizontal, 10)
-            .padding(.vertical, 3)
-            .background(.orange, in: .capsule)
-            .allowsHitTesting(false)
-            .accessibilityLabel("Using the dev server")
-        }
-      }
         .environment(inbox)
         .environment(friends)
         .environment(accounts)

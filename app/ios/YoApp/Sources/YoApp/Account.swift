@@ -209,6 +209,11 @@ final class AccountStore {
   }
 
   private static let key = "account"
+
+  /// What the password manager shows for the passkey: the name, and "(Dev)" for Yo Dev's (its accounts are others).
+  private static func passkeyName(_ account: Account) -> String {
+    Hub.isDevApp ? "\(account.username) (Dev)" : account.username
+  }
   private let passkeys = Passkeys()
   /// Securing under way: K and the words, made once per try.
   private var securing: (k: SymmetricKey, code: [String])?
@@ -274,7 +279,7 @@ final class AccountStore {
   func createPasskey() async throws {
     guard let account else { throw AccountError.noBackup }
     if !account.secured, securing == nil { securing = (SymmetricKey(size: .bits256), RecoveryCode.make()) }
-    newPasskey = try await passkeys.make(name: account.username, userID: account.userID).credentialID
+    newPasskey = try await passkeys.make(name: Self.passkeyName(account), userID: account.userID).credentialID
   }
 
   /// …then signed in with once, which checks it works and gives its PRF output: the backup then opens with it too
@@ -350,7 +355,7 @@ final class AccountStore {
   /// A new passkey in place of the one there (made, then used once for its PRF output).
   func replacePasskey() async throws {
     guard let account else { throw AccountError.noBackup }
-    let made = try await passkeys.make(name: account.username, userID: account.userID)
+    let made = try await passkeys.make(name: Self.passkeyName(account), userID: account.userID)
     guard let prf = try await passkeys.ask(salt: BackupRecord.prfSalt, only: made.credentialID).prf else {
       throw AccountError.noPRF
     }
@@ -364,7 +369,7 @@ final class AccountStore {
     if let answer = try? await passkeys.ask(salt: BackupRecord.prfSalt, quietly: true), answer.userID == account.userID {
       prf = answer.prf
     } else {
-      let made = try await passkeys.make(name: account.username, userID: account.userID)
+      let made = try await passkeys.make(name: Self.passkeyName(account), userID: account.userID)
       prf = try await passkeys.ask(salt: BackupRecord.prfSalt, only: made.credentialID).prf
     }
     guard let prf else { throw AccountError.noPRF }
