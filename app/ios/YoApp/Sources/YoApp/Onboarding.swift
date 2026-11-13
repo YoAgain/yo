@@ -28,7 +28,7 @@ struct Onboarding: View {
         case .name: naming
         case .code(let words): code(words)
         case .confirm(let words): ConfirmCode(words: words) { accounts.confirm() }
-        case .restore: RestoreWithCode { go(.welcome) }
+        case .restore: RestoreWithCode(name: name) { go(.name) }
         }
       }
       .transition(.asymmetric(insertion: .move(edge: .trailing).combined(with: .opacity),
@@ -41,14 +41,13 @@ struct Onboarding: View {
 
   // MARK: Welcome
 
-  /// The logo, one button for a new name and "Sign In" under it, as Apple's apps do. Someone who has a Yo passkey on
-  /// this phone is asked by the system at once ("Sign in as LEO?"), without choosing anything; "Sign In" is for the
-  /// rest (a passkey on another device, or the 12 words).
+  /// The logo and one button. Someone with a Yo passkey on this phone is asked by the system at once ("Sign in as
+  /// LEO?"); anyone else types a name, and if it is their own (taken), "That's me" brings it back.
   private var welcome: some View {
     VStack(spacing: 0) {
       Spacer()
-      // The name of the place, justyo: "Just" small over the "Yo".
-      VStack(spacing: -10) {
+      // "Just Yo", the 2015 slogan: "Just" small before the "Yo", on its baseline.
+      HStack(alignment: .firstTextBaseline, spacing: 8) {
         Text("Just").font(.yo(26)).opacity(0.85)
         Text("Yo").font(.yo(150))
       }
@@ -59,10 +58,6 @@ struct Onboarding: View {
       .tint(.white)
       .foregroundStyle(Color.amethyst)
       .padding(.top, 44)
-      Button("Sign In") { Task { await restoreWithPasskey() } }
-        .font(.yo(17))
-        .opacity(0.9)
-        .padding(.top, 20)
       note
       Spacer()
       Spacer()
@@ -111,6 +106,13 @@ struct Onboarding: View {
         .font(.system(size: 15, weight: .semibold))
         .opacity(trouble == nil && !name.isEmpty ? 1 : 0.7)
         .contentTransition(.opacity)
+      // Your own name, from before: the passkey, or else the 12 words.
+      if MockHub.isTaken(name) && !Username.reserved.contains(name) {
+        Button("That's me") { Task { await restoreWithPasskey() } }
+          .font(.yo(17))
+          .padding(.top, 4)
+          .transition(.opacity)
+      }
       Spacer()
       Button { Task { await register() } } label: {
         Group {
@@ -219,7 +221,7 @@ struct Onboarding: View {
     }
   }
 
-  /// "I have Yo": a passkey first; without one (or cancelled), the name and the 12 words.
+  /// "That's me": a passkey first; without one (or cancelled), the name and the 12 words.
   private func restoreWithPasskey() async {
     busy = true
     defer { busy = false }
@@ -282,9 +284,9 @@ private struct ConfirmCode: View {
 
 /// A new phone without a passkey: the name and the 12 words.
 private struct RestoreWithCode: View {
+  @State var name: String
   let back: () -> Void
   @Environment(AccountStore.self) private var accounts
-  @State private var name = ""
   @State private var words = ""
   @State private var problem: String?
 
