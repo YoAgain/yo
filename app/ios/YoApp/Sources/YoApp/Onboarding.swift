@@ -13,6 +13,7 @@ import YoCore
 struct Onboarding: View {
   @Environment(AccountStore.self) private var accounts
   @Environment(Inbox.self) private var inbox
+  @Environment(Friends.self) private var friends
 
   private enum Step: Equatable {
     case welcome, name, logIn, logInWithWords
@@ -169,6 +170,8 @@ struct Onboarding: View {
     problem = nil
     do {
       try await accounts.register(name)  // in: the list takes over; the name is secured later, from the profile
+      // A new account starts with one friend who always answers: YoGPT (the list learns its user id on its own).
+      friends.add("YoGPT")
     } catch AccountError.taken {
       checked[Username.skeleton(name)] = false
       UINotificationFeedbackGenerator().notificationOccurred(.error)
