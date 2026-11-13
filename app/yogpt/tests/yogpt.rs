@@ -72,5 +72,9 @@ fn yogpt_answers_a_yo_and_again_after_a_restart() {
     let _bot = Bot::start(&hub, &state);
     let second = round_trip(&mut alice);
     assert!(first.iter().chain(&second).all(|user| *user == first[0]));
+
+    // Anything but a Yo gets nothing back.
+    alice.send("YOGPT", Content::Text("rm -rf /".into())).unwrap();
+    assert!(yos_until_quiet(&mut alice, Duration::from_secs(7)).is_empty());
     let _ = std::fs::remove_dir_all(&state);
 }

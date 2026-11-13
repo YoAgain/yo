@@ -6,12 +6,19 @@
 //! directory then holds the account secret, the state key and the sealed state (0600), and later runs go on from
 //! there. An account secret without a state registers the name again with it (the same account, a new device).
 //! Exits 1 when the hub no longer knows this device: replaced by another, the name released, or the hub reset.
+//!
+//! Anyone can write to it, so whatever comes is treated as hostile: it acts on a Yo and nothing else, never reads,
+//! logs or runs what a message says (a sender shows in the log as the start of its user id), and holds a bounded
+//! amount of work: one answer per sender, `MAX_ANSWERING` at once, `MAX_QUEUED` events waiting; what does not fit is
+//! dropped and counted. A panic anywhere ends the process (systemd starts it again): the state on disk is only ever
+//! replaced whole, after an operation completed.
 
 use std::collections::HashSet;
-use std::io::Write;
+use std::io::{Read, Write};
 use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
-use std::sync::mpsc::{channel, Sender};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::mpsc::{sync_channel, SyncSender, TrySendError};
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::{Duration, Instant};
 use yo_core::{Client, Content, Error, Event, Push, Response, Store, Transport};
@@ -22,6 +29,12 @@ const YOS: [u32; 5] = [70, 17, 8, 4, 1];
 const THINK_MS: (u64, u64) = (1000, 5000);
 /// Between the Yos of one answer, in milliseconds, uniform.
 const GAP_MS: (u64, u64) = (300, 1000);
+/// Senders being answered at once (a thread each).
+const MAX_ANSWERING: usize = 32;
+/// Events waiting for the dispatcher.
+const MAX_QUEUED: usize = 1024;
+/// An answer from the hub, at most: a full inbox fetch (100 envelopes of at most 65 KiB) fits.
+const MAX_RESPONSE: u64 = 16 << 20;
 /// Chats are kept fresh (spec 4) as the app does when it comes to the foreground.
 const MAINTENANCE: Duration = Duration::from_secs(3600);
 
@@ -39,7 +52,11 @@ impl Transport for Http {
         }
         let response = request.send().map_err(|e| e.to_string())?;
         let status = response.status().as_u16();
-        let body = response.bytes().map_err(|e| e.to_string())?.to_vec();
+        let mut body = Vec::new();
+        response.take(MAX_RESPONSE + 1).read_to_end(&mut body).map_err(|e| e.to_string())?;
+        if body.len() as u64 > MAX_RESPONSE {
+            return Err("answer too large".into());
+        }
         Ok(Response { status, body })
     }
 }
@@ -183,7 +200,7 @@ struct Backoff(u32);
 impl Backoff {
     fn wait(&mut self, error: &Error) {
         let s = (1u64 << self.0.min(6)).min(60);
-        eprintln!("yo-gpt: {error}, again in {s} s");
+        eprintln!("yo-gpt: {}, again in {s} s", reason(error));
         std::thread::sleep(Duration::from_secs(s));
         self.0 += 1;
     }
@@ -195,10 +212,43 @@ fn lock(client: &Shared) -> std::sync::MutexGuard<'_, Client> {
     client.lock().unwrap_or_else(PoisonError::into_inner)
 }
 
-/// How the log names a user: a handle this device knows, else the start of the user id.
-fn who(client: &Client, user: &str) -> String {
-    let contact = client.contacts().into_iter().find(|c| c.user == user);
-    contact.and_then(|c| c.handles.into_iter().next()).unwrap_or_else(|| user.chars().take(8).collect())
+/// How the log names a sender: the start of its user id (hex), nothing it chose itself.
+fn who(user: &str) -> String {
+    user.chars().take(8).filter(char::is_ascii_hexdigit).collect()
+}
+
+/// An error for the log, without text that came from outside (OpenMLS's reasons).
+fn reason(error: &Error) -> String {
+    match error {
+        Error::Mls(_) => "mls".into(),
+        other => other.to_string(),
+    }
+}
+
+/// Events and answers dropped for want of room; logged at most once a minute.
+static DROPPED: AtomicU64 = AtomicU64::new(0);
+static DROPPED_LOGGED_S: AtomicU64 = AtomicU64::new(0);
+
+fn dropped() {
+    let n = DROPPED.fetch_add(1, Ordering::Relaxed) + 1;
+    let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs());
+    let last = DROPPED_LOGGED_S.load(Ordering::Relaxed);
+    if now >= last + 60 && DROPPED_LOGGED_S.compare_exchange(last, now, Ordering::Relaxed, Ordering::Relaxed).is_ok() {
+        eprintln!("yo-gpt: {n} dropped so far (too much at once)");
+    }
+}
+
+/// Queues an event for the dispatcher, or drops it when the queue is full; never blocks.
+fn queue(events: &SyncSender<Event>, event: Event) {
+    // Only Yos are worth the room.
+    if !matches!(event, Event::Message { content: Content::Yo, .. }) {
+        return;
+    }
+    match events.try_send(event) {
+        Ok(()) => {}
+        Err(TrySendError::Full(_)) => dropped(),
+        Err(TrySendError::Disconnected(_)) => fail("dispatcher gone"),
+    }
 }
 
 fn main() {
@@ -206,29 +256,46 @@ fn main() {
         eprintln!("yo-gpt: {error}");
         std::process::exit(2);
     });
+    // A panic in any thread ends the process, after the usual message; systemd starts it again.
+    let report = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        report(info);
+        std::process::exit(101);
+    }));
     let client = open(&args);
     eprintln!("yo-gpt: {} on {}, user {}", client.username().unwrap_or("?"), args.hub, client.user_id());
     let client = Arc::new(Mutex::new(client));
-    let (events, received) = channel();
+    let (events, received) = sync_channel(MAX_QUEUED);
     let (syncing, to_main) = (client.clone(), events.clone());
     std::thread::spawn(move || receive(syncing, to_main));
     // One answer per sender at a time: Yos that come while it is under way get none of their own.
-    let pending = Arc::new(Mutex::new(HashSet::new()));
+    let pending: Arc<Mutex<HashSet<String>>> = Arc::default();
     for event in received {
         let Event::Message { user, content: Content::Yo, .. } = event else { continue };
-        if !pending.lock().unwrap_or_else(PoisonError::into_inner).insert(user.clone()) {
-            continue;
+        {
+            let mut pending = pending.lock().unwrap_or_else(PoisonError::into_inner);
+            if pending.contains(&user) {
+                continue;
+            }
+            if pending.len() >= MAX_ANSWERING {
+                dropped();
+                continue;
+            }
+            pending.insert(user.clone());
         }
         let (client, events, pending) = (client.clone(), events.clone(), pending.clone());
-        std::thread::spawn(move || {
+        let spawned = std::thread::Builder::new().spawn(move || {
             answer(&client, &user, &events);
             pending.lock().unwrap_or_else(PoisonError::into_inner).remove(&user);
         });
+        if spawned.is_err() {
+            fail("cannot start a thread");
+        }
     }
 }
 
 /// The long poll, without holding the client while it waits; every event to `events`.
-fn receive(client: Shared, events: Sender<Event>) -> ! {
+fn receive(client: Shared, events: SyncSender<Event>) -> ! {
     let mut backoff = Backoff::default();
     let mut maintained = Instant::now();
     loop {
@@ -245,7 +312,7 @@ fn receive(client: Shared, events: Sender<Event>) -> ! {
         match result {
             Ok(received) => {
                 backoff = Backoff::default();
-                received.into_iter().for_each(|event| events.send(event).expect("main"));
+                received.into_iter().for_each(|event| queue(&events, event));
                 lock(&client).acknowledge_events();
             }
             Err(error) if gone(&error) => fail(GONE),
@@ -255,24 +322,24 @@ fn receive(client: Shared, events: Sender<Event>) -> ! {
 }
 
 /// Thinks, then sends a Yo or a few. What sending receives goes to `events`.
-fn answer(client: &Shared, user: &str, events: &Sender<Event>) {
+fn answer(client: &Shared, user: &str, events: &SyncSender<Event>) {
     std::thread::sleep(ms(THINK_MS));
     let n = yos(uniform(0, 99) as u32);
     for i in 0..n {
         if i > 0 {
             std::thread::sleep(ms(GAP_MS));
         }
-        let mut client = lock(client);
-        match client.send_yo(user) {
-            Ok(received) => received.into_iter().for_each(|event| events.send(event).expect("main")),
+        let sent = lock(client).send_yo(user);
+        match sent {
+            Ok(received) => received.into_iter().for_each(|event| queue(events, event)),
             Err(error) if gone(&error) => fail(GONE),
             Err(error) => {
-                eprintln!("yo-gpt: Yo {} of {n} to {}: {error}", i + 1, who(&client, user));
+                eprintln!("yo-gpt: Yo {} of {n} to {}: {}", i + 1, who(user), reason(&error));
                 return;
             }
         }
     }
-    eprintln!("yo-gpt: {n} Yo back to {}", who(&lock(client), user));
+    eprintln!("yo-gpt: {n} Yo back to {}", who(user));
 }
 
 #[cfg(test)]
