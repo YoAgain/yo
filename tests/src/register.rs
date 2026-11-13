@@ -27,19 +27,29 @@ struct Args {
 }
 
 fn args() -> Args {
+    parse(std::env::args().skip(1)).unwrap_or_else(|error| {
+        eprintln!("yo-register: {error}");
+        std::process::exit(2);
+    })
+}
+
+fn parse(mut it: impl Iterator<Item = String>) -> Result<Args, String> {
     let mut args = Args { accounts: 200, threads: 16, races: 20, url: None };
-    let mut it = std::env::args().skip(1);
     while let Some(flag) = it.next() {
         let value = it.next().unwrap_or_default();
         match flag.as_str() {
-            "--accounts" => args.accounts = value.parse().expect("--accounts"),
-            "--threads" => args.threads = value.parse().expect("--threads"),
-            "--races" => args.races = value.parse().expect("--races"),
+            "--accounts" => args.accounts = value.parse().map_err(|_| "--accounts: a number")?,
+            "--threads" => args.threads = value.parse().map_err(|_| "--threads: a number")?,
+            "--races" => args.races = value.parse().map_err(|_| "--races: a number")?,
             "--url" => args.url = Some(value),
-            other => panic!("unknown flag {other}"),
+            other => return Err(format!("unknown flag {other}")),
         }
     }
-    args
+    // No threads would do no work and report it as passed.
+    if args.threads == 0 {
+        return Err("--threads: at least 1".into());
+    }
+    Ok(args)
 }
 
 static FAILED: AtomicUsize = AtomicUsize::new(0);
@@ -67,12 +77,14 @@ fn by_name(url: &str, name: &str, account: Option<[u8; 32]>) -> Result<Client, E
     Client::register_username(Http::new(url.to_owned()), name, account, None, Push::none())
 }
 
-/// Runs `f` for every item on `threads` threads; returns the results in order and each one's time.
+/// Runs `f` for every item on `threads` threads; returns the results in order and each one's time. Every item is
+/// done, or it panics: a phase must never pass by doing nothing.
 fn parallel<T: Send + 'static, R: Send + 'static>(
     items: Vec<T>,
     threads: usize,
     f: impl Fn(T) -> R + Send + Sync + 'static,
 ) -> (Vec<R>, Vec<u64>, f64) {
+    let submitted = items.len();
     let queue = Arc::new(Mutex::new(items.into_iter().enumerate().collect::<Vec<_>>()));
     let f = Arc::new(f);
     let started = Instant::now();
@@ -93,6 +105,7 @@ fn parallel<T: Send + 'static, R: Send + 'static>(
         .collect();
     let mut done: Vec<_> = workers.into_iter().flat_map(|w| w.join().unwrap()).collect();
     let seconds = started.elapsed().as_secs_f64();
+    assert_eq!(done.len(), submitted, "every item done");
     done.sort_by_key(|(i, _, _)| *i);
     let micros = done.iter().map(|(_, _, t)| *t).collect();
     (done.into_iter().map(|(_, r, _)| r).collect(), micros, seconds)
@@ -286,4 +299,34 @@ fn main() {
         std::process::exit(1);
     }
     println!("all checks passed");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn parsed(args: &[&str]) -> Result<Args, String> {
+        parse(args.iter().map(|a| a.to_string()))
+    }
+
+    #[test]
+    fn no_threads_is_refused() {
+        assert!(parsed(&["--threads", "0"]).is_err());
+        assert!(parsed(&["--threads", "x"]).is_err());
+        assert!(parsed(&["--nothing", "1"]).is_err());
+        assert_eq!(parsed(&["--threads", "3", "--accounts", "5"]).map(|a| (a.threads, a.accounts)), Ok((3, 5)));
+    }
+
+    #[test]
+    fn every_item_is_done_in_order() {
+        let (results, micros, _) = parallel((0..100).collect(), 7, |i: u32| i * 2);
+        assert_eq!(results, (0..100).map(|i| i * 2).collect::<Vec<_>>());
+        assert_eq!(micros.len(), 100);
+    }
+
+    #[test]
+    #[should_panic(expected = "every item done")]
+    fn doing_nothing_does_not_pass() {
+        parallel(vec![1, 2, 3], 0, |i: u32| i);
+    }
 }
