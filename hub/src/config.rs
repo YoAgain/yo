@@ -16,6 +16,8 @@ pub struct Limits {
     pub identity_lookup_per_device_day: u32,
     /// Signed requests of one device, all routes.
     pub signed_per_device_minute: u32,
+    /// Deliveries of one sender. A delivery is not signed (the hub does not learn who sends), so the sender is its
+    /// address (spec 6.6).
     pub deliver_per_ip_minute: u32,
     /// Envelopes a device holds before deliveries to its user are refused. No rate per recipient: a stranger who
     /// knows a user id could spend it and shut out everyone else.
@@ -68,7 +70,7 @@ impl Default for Limits {
             lookup_per_device_day: 50,
             identity_lookup_per_device_day: 1000,
             signed_per_device_minute: 1200,
-            deliver_per_ip_minute: 1200,
+            deliver_per_ip_minute: 200,
             max_pending_per_device: 5000,
             groups_per_ip_hour: 60,
             commit_per_ip_minute: 600,

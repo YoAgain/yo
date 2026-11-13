@@ -38,6 +38,9 @@ use yo_wire::{decode, encode, envelope, phone, sha256, DeviceId, UserId, EPOCH_T
 pub const UPDATE_AFTER_MS: u64 = 7 * 24 * 3600 * 1000;
 /// ... or after this many messages sent.
 pub const UPDATE_AFTER_MESSAGES: u32 = 100;
+/// A send goes without receiving first (`send_begin`) only while the inbox is up to date: waited on, or processed
+/// this recently.
+const INBOX_FRESH_MS: u64 = 5_000;
 /// The last resort KeyPackage is replaced this often.
 const LAST_RESORT_EVERY_MS: u64 = 30 * 24 * 3600 * 1000;
 /// A replaced last resort's private keys are kept this long: a Welcome made with it may still wait at the hub.
@@ -121,6 +124,99 @@ impl InboxWait {
     }
 }
 
+/// The signed lookup of `Client::whois_begin`, sent without the client.
+pub struct Whois {
+    transport: Arc<dyn Transport>,
+    headers: Vec<(String, String)>,
+    body: Vec<u8>,
+    me: String,
+}
+
+impl Whois {
+    /// The user id and the username as its owner writes it (none from a hub before spellings). `NotOnYo`: nobody by
+    /// that name. Blocks for the round trip.
+    pub fn send(&self) -> Result<(String, Option<String>)> {
+        let response =
+            self.transport.request("POST", api::LOOKUP, &self.headers, &self.body).map_err(Error::Network)?;
+        match response.status {
+            status::OK => {}
+            status::NOT_FOUND => return Err(Error::NotOnYo),
+            _ => return Err(refused(&response)),
+        }
+        let (found, username) = match decode::<api::LookupNamed>(&response.body) {
+            Ok(named) => (named.found, named.username.and_then(|n| String::from_utf8(n.into()).ok())),
+            Err(_) => (decode::<api::LookupResult>(&response.body)?, None),
+        };
+        let user = hex(&found.user_id);
+        if user == self.me {
+            return Err(Error::Protocol("oneself"));
+        }
+        Ok((user, username.filter(|n| yo_wire::handle::check_username_form(n).is_ok())))
+    }
+}
+
+/// What `Client::send_end` leaves to do.
+pub enum Sent {
+    /// More of the outbox to send without the client, then to end again.
+    More(Deliveries),
+    /// Done: the events, as `send` returns them.
+    Done(Result<Vec<Event>>),
+}
+
+/// An answer from the hub, or why there was none.
+pub type Answer = std::result::Result<Response, String>;
+
+/// A delivery the hub refused for good (4.6): the envelope is dropped, the user's next ones go on.
+fn gone_for_good(status: u16) -> bool {
+    matches!(status, status::NOT_FOUND | status::BAD_REQUEST | status::TOO_LARGE)
+}
+
+/// Envelopes of the outbox on their way to the hub, sent without the client: see `Client::send_begin`. Each must
+/// be ended with `Client::send_end`, even unsent: until then its users' next envelopes wait.
+pub struct Deliveries {
+    transport: Arc<dyn Transport>,
+    items: Vec<Delivery>,
+}
+
+struct Delivery {
+    seq: u64,
+    user: String,
+    group: String,
+    path: String,
+    headers: Vec<(String, String)>,
+    envelope: Vec<u8>,
+}
+
+impl Deliveries {
+    /// Posts each envelope, in order. After one to a user that the hub did not take, that user's next ones are held
+    /// (`None`), so they keep their order; after a `429` (the hub's limit per sender, 6.6) all the rest are. Blocks
+    /// for the round trips.
+    pub fn send(&self) -> Vec<Option<Answer>> {
+        let mut held = BTreeSet::new();
+        let mut limited = false;
+        let mut answers = Vec::new();
+        for item in &self.items {
+            if limited || held.contains(&item.user) {
+                answers.push(None);
+                continue;
+            }
+            let answer = self.transport.request("POST", &item.path, &item.headers, &item.envelope);
+            let status = answer.as_ref().map_or(0, |r| r.status);
+            limited = status == status::RATE_LIMITED;
+            if status != status::ACCEPTED && !gone_for_good(status) {
+                held.insert(item.user.clone());
+            }
+            answers.push(Some(answer));
+        }
+        answers
+    }
+
+    /// Nothing to send.
+    pub fn is_empty(&self) -> bool {
+        self.items.is_empty()
+    }
+}
+
 pub struct Client {
     transport: Arc<dyn Transport>,
     store: Option<(Arc<dyn Store>, [u8; 32])>,
@@ -133,6 +229,10 @@ pub struct Client {
     key_packages_known_ms: u64,
     dropped: u64,
     drop_reasons: Vec<String>,
+    /// Users whose envelopes are on their way to the hub (`deliveries`): nothing else to them goes meanwhile.
+    delivering: BTreeSet<String>,
+    /// Until when (clock) the inbox counts as up to date: the end of a long wait under way, or when it was emptied.
+    inbox_fresh_until: u64,
 }
 
 /// A group member as YoLS sees it.
@@ -465,6 +565,8 @@ impl Client {
             key_packages_known_ms: 0,
             dropped: 0,
             drop_reasons: Vec::new(),
+            delivering: BTreeSet::new(),
+            inbox_fresh_until: 0,
         }
     }
 
@@ -1183,76 +1285,118 @@ impl Client {
     /// Sends the outbox in order, per user. Returns the deliveries the hub refused because the user's devices are
     /// other than the group's (4.6): group, user, the user's current devices.
     fn flush(&mut self) -> Vec<(String, String, api::Devices)> {
+        let deliveries = self.deliveries();
+        let answers = deliveries.send();
+        self.delivered(&deliveries, answers)
+    }
+
+    /// What of the outbox can go now, in order per user, each envelope with its device check (4.6); its users are
+    /// marked as on their way, so no other flush sends after them meanwhile. Local work only: `Deliveries::send`
+    /// talks to the hub, `delivered` takes the answers.
+    fn deliveries(&mut self) -> Deliveries {
         // Saved before anything leaves: a crash after the hub took an envelope must not bring back the ratchet state
         // that made it. A repeat after a crash is harmless, the receiver skips what it has seen.
         if !self.state.outbox.is_empty() {
             self.persist();
         }
-        let mut mismatches: Vec<(String, String, api::Devices)> = Vec::new();
-        let mut waiting = BTreeSet::new();
-        let mut kept = VecDeque::new();
-        while let Some(mut item) = self.state.outbox.pop_front() {
+        let mut items = Vec::new();
+        // Users whose envelopes another flush is sending: theirs wait, in their order.
+        let mut waiting = self.delivering.clone();
+        // Walked in place, so every save in between holds the whole outbox.
+        let mut i = 0;
+        while i < self.state.outbox.len() {
+            let item = &self.state.outbox[i];
             if waiting.contains(&item.user) {
-                kept.push_back(item);
+                i += 1;
                 continue;
             }
             let Some((group_id, group)) = group_of(&item.group).and_then(|id| self.load(&id).ok().map(|g| (id, g)))
             else {
+                self.state.outbox.remove(i);
                 self.drop_one("delivery for a group that is gone".into());
                 continue;
             };
             let present: Vec<Key> = self.members_of(&group, &item.user).iter().map(|m| m.device_key).collect();
             if !item.made_for.is_empty() && !item.made_for.iter().any(|key| present.contains(key)) {
+                let mut item = item.clone();
                 match self.renew(&mut item, &group_id) {
                     // Renewed for the devices there now, it goes behind the repair's Welcome and commit, which those
                     // devices need first: in this round still, at the back.
                     Ok(Some(())) => {
+                        self.state.outbox.remove(i);
                         self.state.outbox.push_back(item);
                         // Saved before it leaves, like everything sent: the renewed ratchet must not come back.
                         self.persist();
-                        continue;
                     }
-                    Ok(None) => continue,
+                    Ok(None) => {
+                        self.state.outbox.remove(i);
+                    }
                     // Held for a contact whose new key waits for confirmation: later, in the same order.
                     Err(_) => {
-                        waiting.insert(item.user.clone());
-                        kept.push_back(item);
-                        continue;
+                        waiting.insert(item.user);
+                        i += 1;
                     }
                 }
+                continue;
             }
             // Renewing a message moves its ratchet, not the members: the group's roster as loaded is still the one.
             let target = user_bytes(&item.user).ok().zip(self.devices_hash(&group, &item.user));
             let Some((user, hash)) = target else {
+                self.state.outbox.remove(i);
                 self.drop_one("delivery to nobody in the group".into());
                 continue;
             };
-            let headers = [(api::HEADER_DEVICES.to_owned(), yo_wire::b64(&hash))];
-            match self.unsigned("POST", &api::deliver_path(&user), &headers, &item.envelope) {
-                Ok(response) if response.status == status::ACCEPTED => {}
-                Ok(response) if response.status == status::CONFLICT => match decode::<api::Devices>(&response.body) {
-                    Ok(devices) => {
-                        if !mismatches.iter().any(|(g, u, _)| *g == item.group && *u == item.user) {
-                            mismatches.push((item.group.clone(), item.user.clone(), devices));
+            items.push(Delivery {
+                seq: item.seq,
+                user: item.user.clone(),
+                group: item.group.clone(),
+                path: api::deliver_path(&user),
+                headers: vec![(api::HEADER_DEVICES.to_owned(), yo_wire::b64(&hash))],
+                envelope: item.envelope.clone(),
+            });
+            i += 1;
+        }
+        self.delivering.extend(items.iter().map(|d| d.user.clone()));
+        Deliveries { transport: self.transport.clone(), items }
+    }
+
+    /// Takes the hub's answers to `Deliveries::send`: what it took leaves the outbox, what it refused for good is
+    /// dropped, the rest waits for the next flush. Returns the deliveries refused for other devices (see `flush`).
+    fn delivered(
+        &mut self,
+        deliveries: &Deliveries,
+        answers: Vec<Option<Answer>>,
+    ) -> Vec<(String, String, api::Devices)> {
+        let mut mismatches: Vec<(String, String, api::Devices)> = Vec::new();
+        let mut done = BTreeSet::new();
+        for (item, answer) in deliveries.items.iter().zip(answers) {
+            self.delivering.remove(&item.user);
+            match answer {
+                Some(Ok(response)) if response.status == status::ACCEPTED => {
+                    done.insert(item.seq);
+                }
+                Some(Ok(response)) if response.status == status::CONFLICT => {
+                    match decode::<api::Devices>(&response.body) {
+                        Ok(devices) => {
+                            if !mismatches.iter().any(|(g, u, _)| *g == item.group && *u == item.user) {
+                                mismatches.push((item.group.clone(), item.user.clone(), devices));
+                            }
                         }
-                        waiting.insert(item.user.clone());
-                        kept.push_back(item);
+                        Err(_) => {
+                            done.insert(item.seq);
+                            self.drop_one("hub answered 409 without devices".into());
+                        }
                     }
-                    Err(_) => self.drop_one("hub answered 409 without devices".into()),
-                },
-                Ok(response)
-                    if matches!(response.status, status::NOT_FOUND | status::BAD_REQUEST | status::TOO_LARGE) =>
-                {
+                }
+                Some(Ok(response)) if gone_for_good(response.status) => {
+                    done.insert(item.seq);
                     self.drop_one(format!("hub refused delivery: {}", response.status));
                 }
-                // Rate limit, hub trouble, no network: later, in the same order.
-                _ => {
-                    waiting.insert(item.user.clone());
-                    kept.push_back(item);
-                }
+                // Rate limit, hub trouble, no network, or held behind such an answer: later, in the same order.
+                _ => {}
             }
         }
-        self.state.outbox = kept;
+        self.state.outbox.retain(|item| !done.contains(&item.seq));
         mismatches
     }
 
@@ -1263,12 +1407,18 @@ impl Client {
             if mismatches.is_empty() {
                 return Ok(());
             }
-            for (group, user, devices) in mismatches {
-                match self.repair(&group, &user, &devices) {
-                    Ok(()) => {}
-                    Err(error) if retryable(&error) || error == Error::Unconfirmed => return Err(error),
-                    Err(error) => self.drop_one(format!("repair: {error}")),
-                }
+            self.repair_all(mismatches)?;
+        }
+        Ok(())
+    }
+
+    /// Repairs the groups a delivery found out of line with a user's devices; the outbox is left for the next flush.
+    fn repair_all(&mut self, mismatches: Vec<(String, String, api::Devices)>) -> Result<()> {
+        for (group, user, devices) in mismatches {
+            match self.repair(&group, &user, &devices) {
+                Ok(()) => {}
+                Err(error) if retryable(&error) || error == Error::Unconfirmed => return Err(error),
+                Err(error) => self.drop_one(format!("repair: {error}")),
             }
         }
         Ok(())
@@ -1364,6 +1514,7 @@ impl Client {
             let (headers, time) = self.sign("GET", &path, &[]);
             let response = self.unsigned("GET", &path, &headers, &[])?;
             if !self.inbox(response, time)? {
+                self.inbox_fresh_until = (self.clock)() + INBOX_FRESH_MS;
                 return Ok(());
             }
             wait = 0;
@@ -1733,6 +1884,70 @@ impl Client {
         }
     }
 
+    /// `send` in three steps, so that a caller sharing the client behind a lock need not hold it while the message
+    /// travels (sends to several friends and the inbox's wait then share the network): `send_begin` (locked) encrypts
+    /// the message and takes what of the outbox can go, `Deliveries::send` (unlocked) posts it, `send_end` (locked)
+    /// takes the answers. Only for a chat in use that needs nothing first (no commit open or due, the contact neither
+    /// blocked nor waiting for confirmation), and while the inbox is up to date: a long wait for it is under way
+    /// (`sync_begin`), which brings what arrives at once, or it was emptied a moment ago. Then the send need not
+    /// receive first (spec 4.7): a commit crossing it is what the peer's past epochs are kept for. What the hub refuses
+    /// for other devices is repaired in `send_end`. `None`, with nothing changed: `send` it instead.
+    pub fn send_begin(&mut self, to: &str, content: Content) -> Option<Deliveries> {
+        let handle = Handle::parse(to).ok()?;
+        if self.is_me(&handle) || matches!(content, Content::Unknown(_)) || (self.clock)() > self.inbox_fresh_until {
+            return None;
+        }
+        let user = self.known_user(&handle)?;
+        let contact = self.state.contacts.get(&user)?;
+        if contact.blocked || contact.unconfirmed {
+            return None;
+        }
+        let group = self.chat_with(&user)?;
+        if self.state.chats.get(&group_key(&group))?.inflight.is_some() || self.update_due(&group) {
+            return None;
+        }
+        self.atomic(|c| c.send_in(&group, content, true)).ok()?;
+        Some(self.deliveries())
+    }
+
+    /// The outbox, without the client, like `send_begin` without a message: for sending again what the hub did not take
+    /// yet (its limit per sender, or no network). Ended with `send_end`.
+    pub fn deliver_begin(&mut self) -> Deliveries {
+        self.deliveries()
+    }
+
+    /// Envelopes not yet taken by the hub.
+    pub fn waiting(&self) -> usize {
+        self.state.outbox.len()
+    }
+
+    /// Takes the answers to `send_begin`'s deliveries (or to the ones before): `More` when the hub took them all and
+    /// more of the outbox can go now (a message queued meanwhile behind them), to send and end the same way; else
+    /// what `send` returns. What the hub did not take waits in the outbox for the next call that delivers.
+    pub fn send_end(&mut self, deliveries: &Deliveries, answers: Vec<Option<Answer>>) -> Sent {
+        let all_taken = answers
+            .iter()
+            .all(|answer| matches!(answer, Some(Ok(r)) if r.status == status::ACCEPTED || gone_for_good(r.status)));
+        let mismatches = self.delivered(deliveries, answers);
+        let result = if !mismatches.is_empty() {
+            self.repair_all(mismatches).and_then(|()| self.deliver())
+        } else {
+            if all_taken {
+                let more = self.deliveries();
+                if !more.is_empty() {
+                    return Sent::More(more);
+                }
+            }
+            Ok(())
+        };
+        // As `send`: offline, the message waits in the outbox.
+        let result = match result {
+            Ok(()) | Err(Error::Network(_)) => Ok(()),
+            Err(error) => Err(error),
+        };
+        Sent::Done(self.finish(result))
+    }
+
     /// Receives: waits up to `wait_s` seconds for mail, processes all of it, delivers what is waiting.
     pub fn sync(&mut self, wait_s: u64) -> Result<Vec<Event>> {
         let wait = self.sync_begin(wait_s)?;
@@ -1754,6 +1969,9 @@ impl Client {
         }
         let path = api::inbox_path(wait_s);
         let (headers, time) = self.sign("GET", &path, &[]);
+        // What arrives during the wait comes at once: until it ends, a send need not receive first.
+        let until = (self.clock)() + wait_s * 1000 + INBOX_FRESH_MS;
+        self.inbox_fresh_until = self.inbox_fresh_until.max(until);
         Ok(InboxWait { transport: self.transport.clone(), path, headers, time })
     }
 
@@ -1763,12 +1981,13 @@ impl Client {
         wait: &InboxWait,
         response: std::result::Result<Response, String>,
     ) -> Result<Vec<Event>> {
-        let result = response
+        let received = response
             .map_err(Error::Network)
             .and_then(|response| self.inbox(response, wait.time))
-            .and_then(|more| if more { self.receive_all(0) } else { Ok(()) })
-            .and_then(|()| self.refill())
-            .and_then(|()| self.deliver());
+            .and_then(|more| if more { self.receive_all(0) } else { Ok(()) });
+        // The wait is over: the inbox is up to date only if its answer was taken in.
+        self.inbox_fresh_until = if received.is_ok() { (self.clock)() + INBOX_FRESH_MS } else { 0 };
+        let result = received.and_then(|()| self.refill()).and_then(|()| self.deliver());
         self.finish_receiving(result)
     }
 
@@ -1833,6 +2052,19 @@ impl Client {
     /// The contact a handle names, as this device knows it.
     fn contact_user(&self, who: &str) -> Result<String> {
         self.known_user(&Handle::parse(who)?).ok_or(Error::NotOnYo)
+    }
+
+    /// Who a name is, asked of the hub without the client, so a friend added by a typed name shows as its owner writes
+    /// it before the first Yo: `whois_begin` (locked) signs the lookup (who it is only, no KeyPackage),
+    /// `Whois::send` (unlocked) asks. Nothing is kept: the name is not a contact until a chat.
+    pub fn whois_begin(&mut self, who: &str) -> Result<Whois> {
+        let handle = Handle::parse(who)?;
+        if self.is_me(&handle) {
+            return Err(Error::Protocol("oneself"));
+        }
+        let body = encode(&api::Lookup { handle, key_packages: api::LOOKUP_USERNAME, except: Vec::new() });
+        let (headers, _) = self.sign("POST", api::LOOKUP, &body);
+        Ok(Whois { transport: self.transport.clone(), headers, body, me: self.state.user_id.clone() })
     }
 
     /// The user a handle names: known to this device, else asked of the hub (who it is only, no KeyPackage); with

@@ -118,6 +118,38 @@ fn a_week_heals_the_chat() {
     assert_eq!(yos_from(&a.sync(0).unwrap(), &pb), 1);
 }
 
+/// A send skips receiving first (`send_begin`) only while the inbox is up to date: emptied a moment ago, or a long
+/// wait for it under way. After a while, or a wait that failed, it receives first again.
+#[test]
+fn a_send_skips_receiving_only_while_the_inbox_is_fresh() {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    let hub = TestHub::start();
+    let (mut a, mut b, pa, pb) = pair(&hub);
+    a.send_yo(&pb).unwrap();
+    b.sync(0).unwrap();
+    let now = Arc::new(AtomicU64::new(yo_hub::now_ms()));
+    a.set_clock(Arc::new({
+        let now = now.clone();
+        move || now.load(Ordering::Relaxed)
+    }));
+    a.sync(0).unwrap();
+    let send = |a: &mut Client, deliveries: yo_core::Deliveries| {
+        let answers = deliveries.send();
+        assert!(matches!(a.send_end(&deliveries, answers), yo_core::Sent::Done(Ok(_))));
+    };
+    let deliveries = a.send_begin(&pb, Content::Yo).expect("just emptied");
+    send(&mut a, deliveries);
+    now.fetch_add(6_000, Ordering::Relaxed);
+    assert!(a.send_begin(&pb, Content::Yo).is_none(), "a while ago");
+    let wait = a.sync_begin(25).unwrap();
+    let deliveries = a.send_begin(&pb, Content::Yo).expect("waited on");
+    send(&mut a, deliveries);
+    a.sync_end(&wait, Err("no network".into())).unwrap_err();
+    assert!(a.send_begin(&pb, Content::Yo).is_none(), "the wait failed");
+    a.send_yo(&pb).unwrap();
+    assert_eq!(yos_from(&b.sync(0).unwrap(), &pa), 3, "each once");
+}
+
 #[test]
 fn simultaneous_updates_are_ordered_by_the_hub() {
     let hub = TestHub::start();

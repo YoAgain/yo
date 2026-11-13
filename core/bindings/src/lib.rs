@@ -2,7 +2,7 @@
 //! is `yo-core`. Every call blocks: run it off the main thread.
 
 use std::sync::{Arc, Mutex, PoisonError};
-use yo_core::{Client, Content, Event};
+use yo_core::{Client, Content, Event, Sent};
 
 uniffi::setup_scaffolding!();
 
@@ -248,6 +248,15 @@ pub struct YoContact {
     pub blocked: bool,
 }
 
+/// Who a name is (`YoClient::whois`).
+#[derive(uniffi::Record)]
+pub struct YoWhois {
+    /// The user id.
+    pub user: String,
+    /// The username as its owner writes it ("YoGPT"); none from a hub before spellings.
+    pub username: Option<String>,
+}
+
 fn events(result: yo_core::Result<Vec<Event>>) -> Result<Vec<YoEvent>, YoError> {
     Ok(result?.into_iter().map(Into::into).collect())
 }
@@ -312,6 +321,17 @@ pub struct YoClient {
 impl YoClient {
     fn with<T>(&self, f: impl FnOnce(&mut Client) -> T) -> T {
         f(&mut self.client.lock().unwrap_or_else(PoisonError::into_inner))
+    }
+
+    /// Posts deliveries without holding the client, and what may go after them, until done.
+    fn deliver_from(&self, mut deliveries: yo_core::Deliveries) -> Result<Vec<YoEvent>, YoError> {
+        loop {
+            let answers = deliveries.send();
+            match self.with(|c| c.send_end(&deliveries, answers)) {
+                Sent::More(more) => deliveries = more,
+                Sent::Done(result) => return events(result),
+            }
+        }
     }
 }
 
@@ -378,9 +398,25 @@ impl YoClient {
         self.with(|c| c.phone().to_owned())
     }
 
-    /// To "+49 170 …", "chris", or a user id from an event.
+    /// To "+49 170 …", "chris", or a user id from an event. In a chat in use, the way to the hub does not hold the
+    /// client: other calls run meanwhile, sends to other friends and the inbox's wait among them.
     pub fn send_yo(&self, to: String) -> Result<Vec<YoEvent>, YoError> {
-        events(self.with(|c| c.send_yo(&to)))
+        match self.with(|c| c.send_begin(&to, Content::Yo)) {
+            Some(deliveries) => self.deliver_from(deliveries),
+            None => events(self.with(|c| c.send_yo(&to))),
+        }
+    }
+
+    /// Sends again what the hub did not take yet (`waiting`): its limit per sender (`429`) or no network. Without
+    /// holding the client.
+    pub fn deliver(&self) -> Result<Vec<YoEvent>, YoError> {
+        let deliveries = self.with(|c| c.deliver_begin());
+        self.deliver_from(deliveries)
+    }
+
+    /// Envelopes the hub has not taken yet: `deliver` them again in a while.
+    pub fn waiting(&self) -> u32 {
+        self.with(|c| c.waiting()).try_into().unwrap_or(u32::MAX)
     }
 
     /// The events the last call returned are shown or stored: they will not come again after a crash.
@@ -446,6 +482,17 @@ impl YoClient {
                 blocked: c.blocked,
             })
             .collect()
+    }
+
+    /// Who a name is, as the hub says ("yogpt" is YoGPT's user id and "YoGPT"), without a chat; `None`: nobody by
+    /// that name. The question to the hub does not hold the client.
+    pub fn whois(&self, name: String) -> Result<Option<YoWhois>, YoError> {
+        let whois = self.with(|c| c.whois_begin(&name))?;
+        match whois.send() {
+            Ok((user, username)) => Ok(Some(YoWhois { user, username })),
+            Err(yo_core::Error::NotOnYo) => Ok(None),
+            Err(error) => Err(error.into()),
+        }
     }
 
     pub fn safety_number(&self, who: String) -> Result<String, YoError> {
