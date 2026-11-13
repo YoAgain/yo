@@ -6,6 +6,10 @@
 import CryptoKit
 import Foundation
 import Observation
+import Photos
+import Security
+import UIKit
+import UniformTypeIdentifiers
 
 struct Account: Codable, Equatable {
   var username: String
@@ -133,8 +137,8 @@ final class AccountStore {
 
   private static let key = "account"
   private let passkeys = Passkeys()
-  /// A registration waiting for its recovery code to be confirmed.
-  private var waiting: (account: Account, record: BackupRecord)?
+  /// A registration waiting for its recovery words to be kept.
+  private var waiting: (account: Account, record: BackupRecord, code: [String])?
 
   init() {
     account = UserDefaults.standard.data(forKey: Self.key).flatMap { try? JSONDecoder().decode(Account.self, from: $0) }
@@ -171,13 +175,14 @@ final class AccountStore {
     }
     let code = RecoveryCode.make()
     record.byCode = try BackupRecord.wrap(k, in: BackupRecord.key(code: code))
-    waiting = (account, record)
+    waiting = (account, record, code)
     return .code(code)
   }
 
-  /// The recovery code was written down: the account is saved and in use.
+  /// Past the recovery words: the account is saved and in use, and the words stay on this phone to look up later.
   func confirm() {
     guard let waiting else { return }
+    RecoveryWords.save(waiting.code)
     MockHub.save(waiting.record, for: waiting.account.username)
     account = waiting.account
     self.waiting = nil
@@ -197,6 +202,7 @@ final class AccountStore {
     guard let record = MockHub.record(for: username), let wrapped = record.byCode else { throw AccountError.noBackup }
     guard let k = try? BackupRecord.unwrap(wrapped, with: BackupRecord.key(code: code)) else { throw AccountError.wrongCode }
     try open(record, with: k)
+    RecoveryWords.save(code)
   }
 
   private func open(_ record: BackupRecord, with k: SymmetricKey) throws {
@@ -208,6 +214,7 @@ final class AccountStore {
   func reset() {
     account = nil
     waiting = nil
+    RecoveryWords.delete()
   }
 }
 
@@ -220,5 +227,61 @@ enum AccountError: LocalizedError {
     case .noBackup: "No Yo found for that"
     case .wrongCode: "These words don't open it"
     }
+  }
+}
+
+/// The recovery words on this phone, to look up in the profile: in the keychain, for this device only (not in a
+/// backup, not synced), readable while the phone is unlocked.
+enum RecoveryWords {
+  private static var query: [String: Any] {
+    [
+      kSecClass as String: kSecClassGenericPassword,
+      kSecAttrService as String: "co.justyo.recovery-words",
+      kSecAttrAccount as String: "words",
+    ]
+  }
+
+  static func save(_ words: [String]) {
+    delete()
+    var item = query
+    item[kSecValueData as String] = Data(words.joined(separator: " ").utf8)
+    item[kSecAttrAccessible as String] = kSecAttrAccessibleWhenUnlockedThisDeviceOnly
+    SecItemAdd(item as CFDictionary, nil)
+  }
+
+  static func load() -> [String]? {
+    var item = query
+    item[kSecReturnData as String] = true
+    var result: CFTypeRef?
+    guard SecItemCopyMatching(item as CFDictionary, &result) == errSecSuccess, let data = result as? Data else {
+      return nil
+    }
+    return String(decoding: data, as: UTF8.self).split(separator: " ").map(String.init)
+  }
+
+  static func delete() {
+    SecItemDelete(query as CFDictionary)
+  }
+
+  /// To the clipboard, on this phone only (not to other devices) and for 10 minutes: enough to paste them into a note
+  /// or a password manager, not to lie about.
+  static func copy(_ words: [String], name: String) {
+    let text = words.enumerated().map { "\($0.offset + 1). \($0.element)" }.joined(separator: "\n")
+    UIPasteboard.general.setItems(
+      [[UTType.plainText.identifier: "Yo \(name)\n\(text)"]],
+      options: [.localOnly: true, .expirationDate: Date.now.addingTimeInterval(600)])
+  }
+
+  /// A picture into the photo library, asked once (add only). Not on the main actor: Photos runs the change on a
+  /// queue of its own, and a block made on the main actor would trap there.
+  nonisolated static func saveToPhotos(_ image: UIImage) async throws {
+    let status = await PHPhotoLibrary.requestAuthorization(for: .addOnly)
+    guard status == .authorized || status == .limited else { throw PhotosError.notAllowed }
+    try await PHPhotoLibrary.shared().performChanges { PHAssetChangeRequest.creationRequestForAsset(from: image) }
+  }
+
+  enum PhotosError: LocalizedError {
+    case notAllowed
+    var errorDescription: String? { "Photos is not allowed: copy them instead" }
   }
 }

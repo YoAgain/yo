@@ -5,14 +5,13 @@
 // Every step after the welcome is the same page, as Apple's setup screens are: a title and one line at the top, the
 // content in the middle, the button at the bottom over the full width, a text button under it if there is a second
 // way, back at the top left.
-import Photos
 import SwiftUI
 
 struct Onboarding: View {
   @Environment(AccountStore.self) private var accounts
 
   private enum Step: Equatable {
-    case welcome, name, code([String]), confirm([String]), logIn
+    case welcome, name, code([String]), logIn, logInWithWords
   }
 
   @State private var step = Step.welcome
@@ -21,6 +20,8 @@ struct Onboarding: View {
   @State private var problem: String?
   /// The quiet look for a passkey on this phone happens once, not each time the welcome comes back.
   @State private var looked = false
+  /// Where the recovery words went: "photos", "copied". Kept somewhere, Continue goes straight in.
+  @State private var kept: Set<String> = []
 
   var body: some View {
     ZStack {
@@ -30,8 +31,8 @@ struct Onboarding: View {
         case .welcome: welcome
         case .name: naming
         case .code(let words): code(words)
-        case .confirm(let words): ConfirmCode(words: words, back: { go(.code(words)) }) { accounts.confirm() }
-        case .logIn: LogIn(name: name) { go(.welcome) }
+        case .logIn: logInChoice
+        case .logInWithWords: LogIn(name: name) { go(.logIn) }
         }
       }
       .transition(.asymmetric(insertion: .move(edge: .trailing).combined(with: .opacity),
@@ -55,7 +56,7 @@ struct Onboarding: View {
         .opacity(0.85)
       Spacer()
       PrimaryButton("Start") { go(.name) }
-      Button("Log In") { Task { await logIn() } }
+      Button("Log In") { go(.logIn) }
         .font(.yo(18))
         .padding(.top, 18)
     }
@@ -80,7 +81,7 @@ struct Onboarding: View {
         .font(.system(size: 15, weight: .semibold))
         .opacity(trouble == nil ? 1 : 0.75)
       if mine {
-        Button("This is my name") { Task { await logIn() } }.font(.yo(17))
+        Button("This is my name") { go(.logIn) }.font(.yo(17))
       }
     } bottom: {
       PrimaryButton("Continue", busy: busy) { Task { await register() } }
@@ -89,16 +90,38 @@ struct Onboarding: View {
     }
   }
 
+  // MARK: Log in
+
+  /// Asked for on purpose: the two ways, the passkey first.
+  private var logInChoice: some View {
+    Page(title: "Log In", message: "How did you save your Yo?", back: { go(.welcome) }) {
+      EmptyView()
+    } bottom: {
+      PrimaryButton("Use Passkey", busy: busy) { Task { await logInWithPasskey() } }
+        .disabled(busy)
+      Button("Use 12 Words") { go(.logInWithWords) }
+        .font(.yo(17))
+      Note(problem)
+    }
+  }
+
   // MARK: Recovery words
 
+  /// The words, and two ways to keep them right under them (Photos, the clipboard); Next at the bottom. They stay on
+  /// this phone too, in the profile.
   private func code(_ words: [String]) -> some View {
     Page(title: "Save Your Words", message: "No passkey could keep your Yo. These 12 words bring it back on a new phone.") {
       WordGrid(words: words)
+      HStack(spacing: 12) {
+        KeepButton(title: "Save to Photos", icon: "photo.badge.arrow.down", done: kept.contains("photos")) {
+          Task { await saveToPhotos(words) }
+        }
+        KeepButton(title: "Copy", icon: "doc.on.doc", done: kept.contains("copied")) { copy(words) }
+      }
+      .padding(.top, 6)
+      .disabled(busy)
     } bottom: {
-      PrimaryButton("Save to Photos", busy: busy) { Task { await saveToPhotos(words) } }
-        .disabled(busy)
-      Button("I Wrote Them Down") { go(.confirm(words)) }
-        .font(.yo(17))
+      PrimaryButton("Next") { accounts.confirm() }
       Note(problem)
     }
   }
@@ -124,33 +147,34 @@ struct Onboarding: View {
     }
   }
 
-  /// A passkey first (any of this domain, also on another device); without one, or cancelled, the name and words.
-  private func logIn() async {
+  /// Any Yo passkey, on this phone or another device (the system's sheet offers both).
+  private func logInWithPasskey() async {
     busy = true
     defer { busy = false }
+    problem = nil
     do {
       try await accounts.restoreWithPasskey()
     } catch {
-      go(.logIn)
+      problem = (error as? AccountError)?.errorDescription ?? "No passkey: use your 12 words"
     }
   }
 
-  /// The 12 words as a picture in the photo library (asked once, add only); saved, the account is in use.
+  private func copy(_ words: [String]) {
+    RecoveryWords.copy(words, name: name)
+    kept.insert("copied")
+  }
+
   private func saveToPhotos(_ words: [String]) async {
     busy = true
     defer { busy = false }
     let renderer = ImageRenderer(content: RecoveryCard(name: name, words: words))
     renderer.scale = 3
     guard let image = renderer.uiImage else { return problem = "Could not make the picture" }
-    let status = await PHPhotoLibrary.requestAuthorization(for: .addOnly)
-    guard status == .authorized || status == .limited else {
-      return problem = "Photos is not allowed: write them down instead"
-    }
     do {
-      try await PHPhotoLibrary.shared().performChanges { PHAssetChangeRequest.creationRequestForAsset(from: image) }
-      accounts.confirm()
+      try await RecoveryWords.saveToPhotos(image)
+      kept.insert("photos")
     } catch {
-      problem = "Not saved: \(error.localizedDescription)"
+      problem = error.localizedDescription
     }
   }
 }
@@ -219,6 +243,25 @@ private struct PrimaryButton: View {
   }
 }
 
+/// A way to keep the words: glass, the width of half the page; a checkmark once done.
+struct KeepButton: View {
+  let title: String
+  let icon: String
+  let done: Bool
+  let action: () -> Void
+
+  var body: some View {
+    Button(action: action) {
+      Label(title, systemImage: done ? "checkmark" : icon)
+        .font(.system(size: 15, weight: .semibold))
+        .frame(maxWidth: .infinity, minHeight: 30)
+        .contentTransition(.symbolEffect(.replace))
+    }
+    .buttonStyle(.glass)
+    .sensoryFeedback(.success, trigger: done) { _, now in now }
+  }
+}
+
 /// A line for what went wrong, under the buttons; nothing when nothing did.
 private struct Note: View {
   let text: String?
@@ -258,7 +301,7 @@ private struct NameField: View {
 }
 
 /// The 12 words, numbered, in two columns.
-private struct WordGrid: View {
+struct WordGrid: View {
   let words: [String]
 
   var body: some View {
@@ -275,44 +318,6 @@ private struct WordGrid: View {
         .background(.white.opacity(0.14), in: .rect(cornerRadius: 12))
       }
     }
-  }
-}
-
-/// Two of the words typed again, so they were really written down.
-private struct ConfirmCode: View {
-  let words: [String]
-  let back: () -> Void
-  let done: () -> Void
-  @State private var asked = Array((0..<12).shuffled().prefix(2)).sorted()
-  @State private var typed = ["", ""]
-  @State private var wrong = false
-  @FocusState private var field: Int?
-
-  var body: some View {
-    Page(title: "Check Your Words", message: "Type word \(asked[0] + 1) and word \(asked[1] + 1).", back: back) {
-      ForEach(0..<2, id: \.self) { i in
-        TextField("", text: $typed[i], prompt: Text("Word \(asked[i] + 1)").foregroundStyle(.white.opacity(0.35)))
-          .font(.yo(22))
-          .multilineTextAlignment(.center)
-          .textInputAutocapitalization(.never)
-          .autocorrectionDisabled()
-          .focused($field, equals: i)
-          .submitLabel(i == 0 ? .next : .done)
-          .onSubmit { if i == 0 { field = 1 } else { check() } }
-          .padding(.vertical, 14)
-          .background(.white.opacity(0.14), in: .rect(cornerRadius: 16))
-      }
-    } bottom: {
-      PrimaryButton("Done", action: check)
-      Note(wrong ? "Not quite: look at your words again" : nil)
-    }
-    .onAppear { field = 0 }
-    .sensoryFeedback(.error, trigger: wrong) { _, now in now }
-  }
-
-  private func check() {
-    let right = (0..<2).allSatisfy { typed[$0].trimmingCharacters(in: .whitespaces).lowercased() == words[asked[$0]] }
-    if right { done() } else { wrong = true }
   }
 }
 
@@ -352,7 +357,7 @@ private struct LogIn: View {
 }
 
 /// The recovery words as a picture for Photos: the brand's purple, the name, the 12 words, what they are for.
-private struct RecoveryCard: View {
+struct RecoveryCard: View {
   let name: String
   let words: [String]
 

@@ -1,5 +1,6 @@
 // Profile and settings, from your picture in the bar: the system's form in a sheet (Liquid Glass from iOS 26 on its
 // own), as the App Store and Music open their account.
+import LocalAuthentication
 import Photos
 import SwiftUI
 
@@ -14,6 +15,8 @@ struct SettingsView: View {
   @Environment(AccountStore.self) private var accounts
   @Environment(Friends.self) private var friends
   @State private var resetting = false
+  /// The recovery words on screen, after Face ID.
+  @State private var words: [String]?
 
   var body: some View {
     NavigationStack {
@@ -43,12 +46,22 @@ struct SettingsView: View {
         } footer: {
           Text("What you send from the camera is saved to your photo library. Nothing you receive is saved.")
         }
+        if RecoveryWords.load() != nil {
+          Section {
+            Button("Recovery Words", systemImage: "list.number") { Task { await showWords() } }
+          } footer: {
+            Text("The 12 words that bring your Yo back on a new phone. Face ID first.")
+          }
+        }
         PasskeyTestSection()
         Section {
           Button("Reset Yo", systemImage: "arrow.counterclockwise", role: .destructive) { resetting = true }
         } footer: {
           Text("This phone forgets your Yo, as a new phone would. Your passkey or your 12 words bring it back.")
         }
+      }
+      .sheet(isPresented: Binding(get: { words != nil }, set: { if !$0 { words = nil } })) {
+        if let words { RecoveryWordsSheet(name: accounts.account?.username ?? "", words: words) }
       }
       .confirmationDialog("Reset Yo?", isPresented: $resetting, titleVisibility: .visible) {
         Button("Reset Yo", role: .destructive) { reset() }
@@ -75,6 +88,15 @@ struct SettingsView: View {
 }
 
 extension SettingsView {
+  /// The words, after the owner of the phone proved it (Face ID, else the passcode).
+  fileprivate func showWords() async {
+    let context = LAContext()
+    guard (try? await context.evaluatePolicy(.deviceOwnerAuthentication, localizedReason: "Show your recovery words"))
+      == true
+    else { return }
+    words = RecoveryWords.load()
+  }
+
   /// Everything of this app on this phone goes (settings, friends, the account), not the simulated hub's backups.
   fileprivate func reset() {
     if let domain = Bundle.main.bundleIdentifier { UserDefaults.standard.removePersistentDomain(forName: domain) }
@@ -108,6 +130,58 @@ enum Library {
       }
     } completionHandler: { saved, _ in
       if !saved, let copy { try? FileManager.default.removeItem(at: copy) }
+    }
+  }
+}
+
+/// The recovery words from the profile, in the brand's purple: the words, Save to Photos and Copy.
+struct RecoveryWordsSheet: View {
+  let name: String
+  let words: [String]
+  @Environment(\.dismiss) private var dismiss
+  @State private var kept: Set<String> = []
+  @State private var problem: String?
+
+  var body: some View {
+    NavigationStack {
+      ScrollView {
+        VStack(spacing: 16) {
+          WordGrid(words: words)
+          HStack(spacing: 12) {
+            KeepButton(title: "Save to Photos", icon: "photo.badge.arrow.down", done: kept.contains("photos")) {
+              Task { await save() }
+            }
+            KeepButton(title: "Copy", icon: "doc.on.doc", done: kept.contains("copied")) {
+              RecoveryWords.copy(words, name: name)
+              kept.insert("copied")
+            }
+          }
+          if let problem { Text(problem).font(.footnote.weight(.semibold)) }
+        }
+        .padding(20)
+      }
+      .foregroundStyle(.white)
+      .background(Color.amethyst.ignoresSafeArea())
+      .navigationTitle("Recovery Words")
+      .navigationBarTitleDisplayMode(.inline)
+      .toolbar {
+        ToolbarItem(placement: .confirmationAction) {
+          Button("Done", systemImage: "checkmark") { dismiss() }
+        }
+      }
+    }
+    .preferredColorScheme(.dark)
+  }
+
+  private func save() async {
+    let renderer = ImageRenderer(content: RecoveryCard(name: name, words: words))
+    renderer.scale = 3
+    guard let image = renderer.uiImage else { return problem = "Could not make the picture" }
+    do {
+      try await RecoveryWords.saveToPhotos(image)
+      kept.insert("photos")
+    } catch {
+      problem = error.localizedDescription
     }
   }
 }

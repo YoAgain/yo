@@ -6,8 +6,10 @@
 	<string>Yo</string>
 	<key>NSCameraUsageDescription</key>
 	<string>In camera mode Yo takes a photo when you tap a name and sends it with the Yo.</string>
+	<key>NSFaceIDUsageDescription</key>
+	<string>Face ID shows your recovery words.</string>
 	<key>NSPhotoLibraryAddUsageDescription</key>
-	<string>When you switch it on in Settings, Yo saves the photos and videos you send to your library.</string>
+	<string>Yo saves to your library what you ask it to: your recovery words, and the photos and videos you send when that is on in Settings.</string>
 	<key>ITSAppUsesNonExemptEncryption</key>
 	<false/>
 	<key>UISupportedInterfaceOrientations</key>
