@@ -625,7 +625,7 @@ fn a_backup_is_found_by_user_id_and_by_locator() {
 }
 
 #[test]
-fn names_not_secured_are_released_after_ninety_days() {
+fn names_not_secured_are_released_after_a_year() {
     const DAY: u64 = 24 * 3600 * 1000;
     let hub = TestHub::start();
     let (secured_name, idle_name) =
@@ -634,9 +634,9 @@ fn names_not_secured_are_released_after_ninety_days() {
     let mut idle = by_name(&hub, &idle_name, None).unwrap();
     secured.put_backup(&backup(Vec::new())).unwrap();
     let now = yo_hub::now_ms();
-    hub.hub.prune(now + 89 * DAY).unwrap();
+    hub.hub.prune(now + 364 * DAY).unwrap();
     idle.sync(0).unwrap();
-    hub.hub.prune(now + 91 * DAY).unwrap();
+    hub.hub.prune(now + 366 * DAY).unwrap();
     assert_eq!(idle.sync(0), Err(Error::Replaced), "the device learns that its account is gone");
     secured.sync(0).unwrap();
     // The name is free again; the secured one is kept.
