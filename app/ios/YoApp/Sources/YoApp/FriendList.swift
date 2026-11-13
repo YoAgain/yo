@@ -217,10 +217,9 @@ struct FriendList: View {
       .toolbar {
         ToolbarItem(placement: .principal) { title }
         ToolbarItem(placement: .topBarLeading) {
-          // Your picture opens your profile and settings in a sheet, as Apple's own apps do.
-          // The system's badge while the name is not secured: one thing to do (as Settings badges "Finish Setting Up").
+          // Your picture opens your profile and settings in a sheet, as Apple's own apps do. No badge: the iCloud
+          // Keychain keeps the account; securing it further is offered in the profile itself.
           Button("Profile", systemImage: "person.fill") { settings = true }
-            .badge(accounts.toDo)
         }
         // The camera mode: the live picture behind the list, a tap on a name sends a photo, holding it a video.
         ToolbarItem(placement: .topBarTrailing) {
