@@ -1,7 +1,8 @@
-// "Secure Your Account", from the profile (spec 7): a native setup checklist in a sheet, each row saying what is done.
-// 1, Passkey (optional): made, then used once for its PRF output (iCloud Keychain gives it at once; 1Password only
-// when used, so the row then asks to confirm). 2, Recovery Key: the 12 words, saved through the system's share sheet
-// (Save Image, Notes, Files, a password manager, AirDrop); an eye shows them in place. Done once they are saved.
+// "Secure Your Account", from the profile (spec 7): one full-colour screen like the onboarding, two steps, each with a
+// circle that turns into a green checkmark once done. 1, Passkey (optional): made, then used once for its PRF output
+// (iCloud Keychain gives it at once; 1Password only when used, so the step then asks to confirm). 2, Recovery Key: the
+// 12 words, saved through the system's share sheet (Save Image, Notes, Files, a password manager, AirDrop); the eye
+// shows them in place. Done once they are saved.
 import SwiftUI
 
 struct SecureNameSheet: View {
@@ -19,76 +20,59 @@ struct SecureNameSheet: View {
   }
 
   var body: some View {
-    NavigationStack {
-      Form {
-        Section {
-          SetupRow(
-            icon: "key.fill", color: .blue, title: "Passkey",
-            status: passkey == .done ? "Set up" : passkey == .confirm ? "Confirm to finish" : "Not set up",
+    ZStack {
+      Color.amethyst.ignoresSafeArea()
+      Page(title: "Secure Your Account",
+        message: "Keep your name “\(accounts.account?.username ?? "")” forever.") {
+        VStack(spacing: 12) {
+          StepCard(
+            number: 1, title: "Passkey",
+            detail: passkey == .confirm ? "Confirm once more to finish." : "Sign in with Face ID.",
             done: passkey == .done
           ) {
             passkeyControl
           }
-          SetupRow(
-            icon: "list.number", color: .gray, title: "Recovery Key",
-            status: saved ? "Saved" : "Not saved", done: saved
-          ) {
-            HStack(spacing: 8) {
-              Button { revealed.toggle() } label: {
+          StepCard(number: 2, title: "Recovery Key", detail: "12 words to sign back in.", done: saved) {
+            HStack(spacing: 6) {
+              Button { withAnimation(.snappy) { revealed.toggle() } } label: {
                 Image(systemName: revealed ? "eye.slash" : "eye")
-                  .frame(minWidth: 30, minHeight: 30)
+                  .font(.system(size: 17, weight: .semibold))
+                  .frame(width: 36, height: 36)
               }
-              .buttonStyle(.borderless)
               .accessibilityLabel(revealed ? "Hide Recovery Key" : "Show Recovery Key")
-              if saved {
-                Checkmark(label: "Recovery key saved")
-              } else {
-                Button("Save") { save() }
-                  .buttonStyle(.bordered)
-                  .disabled(busy)
+              if !saved {
+                StepButton(title: "Save", busy: false) { save() }
               }
             }
           }
           if revealed {
-            Words(words: words)
+            WordGrid(words: words)
+              .privacySensitive()
+              .transition(.opacity.combined(with: .move(edge: .top)))
           }
-        } footer: {
-          Text(problem ?? "Keep your name “\(accounts.account?.username ?? "")” forever.")
         }
-      }
-      .navigationTitle("Secure Your Account")
-      .navigationBarTitleDisplayMode(.inline)
-      .toolbar {
-        ToolbarItem(placement: .cancellationAction) {
-          Button("Close") { dismiss() }
-        }
-        ToolbarItem(placement: .confirmationAction) {
-          Button("Done") { finish() }
-            .disabled(!saved || busy)
-        }
+        .padding(.top, 8)
+      } bottom: {
+        PrimaryButton("Done") { finish() }
+          .disabled(!saved || busy)
+        Note(problem)
       }
     }
-    .tint(Color.amethyst)
+    .foregroundStyle(.white)
+    .preferredColorScheme(.dark)
     .interactiveDismissDisabled(busy)
     .onAppear { if words.isEmpty { words = accounts.secureWords() } }
   }
 
-  /// The passkey row's end: Set Up (or Try Again), Confirm for 1Password, a checkmark once it is there.
+  /// Step 1's control: Set Up (or Try Again), Confirm for 1Password; nothing once done (the checkmark says it).
   @ViewBuilder private var passkeyControl: some View {
-    if busy {
-      ProgressView()
-        .accessibilityLabel(passkey == .confirm ? "Confirming passkey" : "Setting up passkey")
-    } else {
-      switch passkey {
-      case .done:
-        Checkmark(label: "Passkey set up")
-      case .ready, .failed:
-        Button(passkey == .failed ? "Try Again" : "Set Up") { Task { await makePasskey() } }
-          .buttonStyle(.bordered)
-      case .confirm:
-        Button("Confirm") { Task { await confirmPasskey() } }
-          .buttonStyle(.borderedProminent)
-      }
+    switch passkey {
+    case .done:
+      EmptyView()
+    case .ready, .failed:
+      StepButton(title: passkey == .failed ? "Try Again" : "Set Up", busy: busy) { Task { await makePasskey() } }
+    case .confirm:
+      StepButton(title: "Confirm", busy: busy) { Task { await confirmPasskey() } }
     }
   }
 
@@ -126,7 +110,9 @@ struct SecureNameSheet: View {
     renderer.scale = 3
     var items: [Any] = ["Yo recovery key for \(name): " + words.joined(separator: " ")]
     if let image = renderer.uiImage { items.insert(image, at: 0) }
-    Share.present(items) { completed in if completed { saved = true } }
+    Share.present(items) { completed in
+      if completed { withAnimation(.snappy) { saved = true } }
+    }
   }
 
   /// With the passkey the backup is saved already; without, the words save it now.
@@ -153,68 +139,64 @@ struct SecureNameSheet: View {
   }
 }
 
-/// One step: a Settings-style icon tile, the title with its state under it, and its control at the end.
-private struct SetupRow<Control: View>: View {
-  let icon: String
-  let color: Color
+/// One step on glass: a circle with its number that becomes a green checkmark when done, the title and one line,
+/// its control at the end.
+private struct StepCard<Control: View>: View {
+  let number: Int
   let title: String
-  let status: String
+  let detail: String
   let done: Bool
   @ViewBuilder let control: Control
 
   var body: some View {
     HStack(spacing: 14) {
-      Image(systemName: icon)
-        .font(.system(size: 15, weight: .semibold))
-        .foregroundStyle(.white)
-        .frame(width: 29, height: 29)
-        .background(color.gradient, in: .rect(cornerRadius: 7))
+      ZStack {
+        if done {
+          Image(systemName: "checkmark.circle.fill")
+            .font(.system(size: 30))
+            .foregroundStyle(.white, .green)
+            .transition(.scale.combined(with: .opacity))
+        } else {
+          Text("\(number)")
+            .font(.system(size: 16, weight: .bold))
+            .frame(width: 30, height: 30)
+            .overlay(Circle().stroke(.white.opacity(0.6), lineWidth: 2))
+        }
+      }
+      .frame(width: 32)
+      .animation(.snappy, value: done)
       VStack(alignment: .leading, spacing: 2) {
-        Text(title)
-        Text(status).font(.footnote).foregroundStyle(done ? .green : .secondary)
+        Text(title).font(.system(size: 18, weight: .semibold))
+        Text(done ? "Done" : detail).font(.system(size: 14)).opacity(0.75)
       }
       .layoutPriority(1)
       Spacer(minLength: 8)
       control
     }
-    .padding(.vertical, 2)
+    .padding(.horizontal, 16)
+    .padding(.vertical, 14)
+    .background(.white.opacity(0.14), in: .rect(cornerRadius: 18))
+    .sensoryFeedback(.success, trigger: done) { _, now in now }
+    .accessibilityElement(children: .contain)
   }
 }
 
-/// The 12 words in place, numbered, in two columns.
-private struct Words: View {
-  let words: [String]
+/// The small white glass button at the end of a step.
+private struct StepButton: View {
+  let title: String
+  let busy: Bool
+  let action: () -> Void
 
   var body: some View {
-    Grid(alignment: .leading, horizontalSpacing: 16, verticalSpacing: 8) {
-      ForEach(0..<(words.count + 1) / 2, id: \.self) { row in
-        GridRow {
-          word(row)
-          word(row + (words.count + 1) / 2)
-        }
+    Button(action: action) {
+      Group {
+        if busy { ProgressView().tint(Color.amethyst) } else { Text(title).font(.system(size: 15, weight: .semibold)) }
       }
+      .frame(minWidth: 64, minHeight: 30)
     }
-    .padding(.vertical, 6)
-    .privacySensitive()
-  }
-
-  @ViewBuilder private func word(_ index: Int) -> some View {
-    if index < words.count {
-      HStack(spacing: 8) {
-        Text("\(index + 1)").font(.footnote.monospacedDigit()).foregroundStyle(.secondary).frame(width: 20, alignment: .trailing)
-        Text(words[index]).font(.body.monospaced())
-      }
-    }
-  }
-}
-
-private struct Checkmark: View {
-  let label: String
-
-  var body: some View {
-    Image(systemName: "checkmark.circle.fill")
-      .font(.title3)
-      .foregroundStyle(.green)
-      .accessibilityLabel(label)
+    .buttonStyle(.glassProminent)
+    .tint(.white)
+    .foregroundStyle(Color.amethyst)
+    .disabled(busy)
   }
 }
