@@ -1,20 +1,21 @@
-//! YoGPT as it runs: its binary against a hub in-process, a client sending it Yos.
+//! YoGPT as it runs: its binary against hubs in-process, clients sending it Yos.
 
+use std::path::{Path, PathBuf};
 use std::process::{Child, Command};
 use std::time::{Duration, Instant};
-use yo_core::{Client, Content, Event};
+use yo_core::{Client, Content, Event, Push};
 use yo_tests::{phone, random_u64, register, Http, TestHub};
 
 struct Bot(Child);
 
 impl Bot {
-    fn start(hub: &TestHub, state: &std::path::Path) -> Bot {
-        let child = Command::new(env!("CARGO_BIN_EXE_yo-gpt"))
-            .args(["--hub", &hub.url(), "--username", "YOGPT", "--state"])
-            .arg(state)
-            .spawn()
-            .unwrap();
-        Bot(child)
+    /// One account per hub, each with its state directory.
+    fn start(accounts: &[(&TestHub, &Path)]) -> Bot {
+        let mut command = Command::new(env!("CARGO_BIN_EXE_yo-gpt"));
+        for (i, (hub, state)) in accounts.iter().enumerate() {
+            command.arg("--account").arg(format!("hub{i}={},{}", hub.url(), state.display()));
+        }
+        Bot(command.spawn().unwrap())
     }
 }
 
@@ -23,6 +24,14 @@ impl Drop for Bot {
         let _ = self.0.kill();
         let _ = self.0.wait();
     }
+}
+
+fn state_dir() -> PathBuf {
+    Path::new(env!("CARGO_TARGET_TMPDIR")).join(format!("yogpt-{}", random_u64()))
+}
+
+fn someone(hub: &TestHub) -> Client {
+    register(Http::new(hub.url()), &phone(random_u64() % 1_000_000_000), None)
 }
 
 /// Yos from anyone until `quiet` passes without one.
@@ -54,13 +63,19 @@ fn round_trip(client: &mut Client) -> Vec<String> {
     from
 }
 
+/// Takes YOGPT over on its hub with the bot's own account secret, as a new phone would: the bot's device is gone.
+fn take_over(hub: &TestHub, state: &Path) {
+    let secret: [u8; 32] = std::fs::read(state.join("account")).unwrap().try_into().unwrap();
+    Client::register_username(Http::new(hub.url()), "YOGPT", Some(secret), None, Push::none()).unwrap();
+}
+
 #[test]
 fn yogpt_answers_a_yo_and_again_after_a_restart() {
     let hub = TestHub::start();
-    let state = std::path::Path::new(env!("CARGO_TARGET_TMPDIR")).join(format!("yogpt-{}", random_u64()));
-    let mut alice = register(Http::new(hub.url()), &phone(random_u64() % 1_000_000_000), None);
+    let state = state_dir();
+    let mut alice = someone(&hub);
 
-    let bot = Bot::start(&hub, &state);
+    let bot = Bot::start(&[(&hub, &state)]);
     let first = round_trip(&mut alice);
     drop(bot);
     for file in ["account", "key", "state"] {
@@ -69,7 +84,7 @@ fn yogpt_answers_a_yo_and_again_after_a_restart() {
     }
 
     // The same account from the saved state: the answer comes from the same user.
-    let _bot = Bot::start(&hub, &state);
+    let _bot = Bot::start(&[(&hub, &state)]);
     let second = round_trip(&mut alice);
     assert!(first.iter().chain(&second).all(|user| *user == first[0]));
 
@@ -77,4 +92,34 @@ fn yogpt_answers_a_yo_and_again_after_a_restart() {
     alice.send("YOGPT", Content::Text("rm -rf /".into())).unwrap();
     assert!(yos_until_quiet(&mut alice, Duration::from_secs(7)).is_empty());
     let _ = std::fs::remove_dir_all(&state);
+}
+
+#[test]
+fn two_accounts_in_one_process_stop_one_by_one() {
+    let (a, b) = (TestHub::start(), TestHub::start());
+    let (state_a, state_b) = (state_dir(), state_dir());
+    let (mut alice, mut bob) = (someone(&a), someone(&b));
+    let mut bot = Bot::start(&[(&a, &state_a), (&b, &state_b)]);
+    round_trip(&mut alice);
+    round_trip(&mut bob);
+
+    // B's device is gone: B stops (after its long poll), A goes on, the process too.
+    take_over(&b, &state_b);
+    std::thread::sleep(Duration::from_secs(30));
+    assert!(bot.0.try_wait().unwrap().is_none(), "the process ended with one account left");
+    round_trip(&mut alice);
+
+    // A's too: none left, the process ends with 1.
+    take_over(&a, &state_a);
+    let start = Instant::now();
+    let status = loop {
+        if let Some(status) = bot.0.try_wait().unwrap() {
+            break status;
+        }
+        assert!(start.elapsed() < Duration::from_secs(40), "still running without accounts");
+        std::thread::sleep(Duration::from_millis(200));
+    };
+    assert_eq!(status.code(), Some(1));
+    let _ = std::fs::remove_dir_all(&state_a);
+    let _ = std::fs::remove_dir_all(&state_b);
 }
