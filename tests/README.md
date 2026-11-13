@@ -51,11 +51,11 @@ Phase 1 is the whole system on one machine (clients with MLS, the hub, fetch, de
 (deliveries over many connections). Every run writes `tests/results/<date>-<clients>c.json`; commit the ones worth
 keeping, so a regression shows against them.
 
-| Run | Hub alone | KiloYoPS | p50 / p99 | End to end | Dropped |
-|---|---|---|---|---|---|
-| 2026-11-11, 16 cores, one transaction per delivery | 5,793/s | 5.8 | 6.4 / 34.0 ms | 2,047 Yos/s | 0 |
-| 2026-11-11, 16 cores, group commit | 16,777/s | 16.8 | 1.7 / 27.7 ms | 2,089 Yos/s | 0 |
-| 2026-11-12, hub on one core (`YO_HUB_CPU=0`), load on 15 | 14,718/s | 14.7 | 3.1 / 19.9 ms | 1,275 Yos/s | 0 |
-| 2026-11-13, one core, static musl build (as deployed) | 18,295/s | 18.3 | 3.4 / 6.5 ms | 1,078 Yos/s | 0 |
+| Run | Yops (hub alone) | p50 / p99 | End to end | Dropped |
+|---|---|---|---|---|
+| 2026-11-11, 16 cores, one transaction per delivery | 5,793 | 6.4 / 34.0 ms | 2,047 Yos/s | 0 |
+| 2026-11-11, 16 cores, group commit | 16,777 | 1.7 / 27.7 ms | 2,089 Yos/s | 0 |
+| 2026-11-12, hub on one core (`YO_HUB_CPU=0`), load on 15 | 14,718 | 3.1 / 19.9 ms | 1,275 Yos/s | 0 |
+| 2026-11-13, one core, static musl build (as deployed) | 18,295 | 3.4 / 6.5 ms | 1,078 Yos/s | 0 |
 
-KiloYoPS: thousands of Yos per second, the unit of the hub alone. The only benchmark whose unit says what it measures.
+Yops: Yos delivered per second, the only benchmark unit that says what it measures.
