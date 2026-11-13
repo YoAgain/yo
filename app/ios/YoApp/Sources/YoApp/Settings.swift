@@ -5,6 +5,14 @@ import Photos
 import SwiftUI
 import UIKit
 
+/// The iPhone's own appearance, whatever the app's window was set to (the list forces dark): read from the screen.
+@MainActor enum SystemAppearance {
+  static var scheme: ColorScheme {
+    let screen = (UIApplication.shared.connectedScenes.first as? UIWindowScene)?.screen
+    return screen?.traitCollection.userInterfaceStyle == .dark ? .dark : .light
+  }
+}
+
 enum SettingKey {
   static let saveSent = "settings.saveSent"
 }
@@ -44,7 +52,7 @@ struct SettingsView: View {
         } header: {
           Text("Photos and Videos")
         } footer: {
-          Text("Save photos and videos you take and send in Yo to Photos.")
+          Text("Saves what you send from the camera.")
         }
 
         Section {
@@ -53,7 +61,7 @@ struct SettingsView: View {
           }
           .disabled(addingPasskey)
         } footer: {
-          Text("Remove your account, friends, and settings from this iPhone.")
+          Text("Removes Yo from this iPhone.")
         }
       }
       .navigationTitle("Profile")
@@ -85,7 +93,7 @@ struct SettingsView: View {
         )
       }
       .alert(
-        "Unable to Set Up Passkey",
+        "Unable to Turn On Face ID",
         isPresented: Binding(
           get: { passkeyProblem != nil },
           set: { if !$0 { passkeyProblem = nil } }
@@ -103,24 +111,19 @@ struct SettingsView: View {
     .tint(Color.amethyst)
   }
 
+  /// You, as Settings shows the Apple Account at its top: a small picture and the name on one row.
   private func profileHeader(_ account: Account) -> some View {
     Section {
-      VStack(spacing: 12) {
+      HStack(spacing: 14) {
         Image(systemName: "person.crop.circle.fill")
-          .font(.system(size: 72))
-          .foregroundStyle(.secondary)
-          .accessibilityLabel("Profile Picture")
-
+          .font(.system(size: 44))
+          .foregroundStyle(.white, Color.amethyst)
+          .accessibilityHidden(true)
         Text(account.username)
-          .font(.yo(28, relativeTo: .title))
-          .foregroundStyle(.primary)
-          .multilineTextAlignment(.center)
-          .fixedSize(horizontal: false, vertical: true)
+          .font(.yo(24, relativeTo: .title3))
           .textSelection(.enabled)
       }
-      .frame(maxWidth: .infinity)
-      .padding(.vertical, 12)
-      .listRowBackground(Color.clear)
+      .padding(.vertical, 2)
     }
   }
 
@@ -128,44 +131,58 @@ struct SettingsView: View {
   private func accountSection(_ account: Account) -> some View {
     Section {
       if account.secured {
-        Label("Name Secured", systemImage: "checkmark.shield")
-        LabeledContent("Passkey", value: account.byPasskey ? "Set Up" : "Not Set Up")
+        Label("Account Secured", systemImage: "checkmark.shield.fill")
+        LabeledContent {
+          Text(account.byPasskey ? "On" : "Off")
+        } label: {
+          Label("Face ID", systemImage: "faceid")
+        }
         if !account.byPasskey {
           Button {
             Task { await addPasskey() }
           } label: {
             HStack {
-              Text(addingPasskey ? "Setting Up…" : "Set Up Passkey")
+              Text(addingPasskey ? "Setting Up…" : "Turn On Face ID")
               Spacer()
               if addingPasskey {
-                ProgressView().accessibilityLabel("Setting Up Passkey")
+                ProgressView().accessibilityLabel("Turning On Face ID")
               }
             }
           }
           .disabled(addingPasskey || RecoveryWords.load() == nil)
         }
         if let words = RecoveryWords.load() {
-          NavigationLink("Recovery Key") {
+          NavigationLink {
             RecoveryKeyView(
               name: account.username, words: words, explanation: SecurityPresentation.recoveryExplanation)
+          } label: {
+            Label("Recovery Key", systemImage: "key")
           }
           .disabled(addingPasskey)
         } else {
-          LabeledContent("Recovery Key", value: "Not on This iPhone")
+          LabeledContent {
+            Text("Not on This iPhone")
+          } label: {
+            Label("Recovery Key", systemImage: "key")
+          }
         }
       } else {
-        Label("Name Not Secured", systemImage: "exclamationmark.circle")
-        NavigationLink("Secure Your Name") { SecureNamePage() }
+        NavigationLink {
+          SecureNamePage()
+        } label: {
+          Label("Secure Your Account", systemImage: "lock.shield")
+        }
+        .badge(1)
       }
     } header: {
       Text("Account")
     } footer: {
       if !account.secured {
-        Text("Your name becomes available to others after 30 days without opening Yo.")
+        Text("When your account is secured, you keep your name forever.")
       } else if account.byPasskey {
-        Text("Your name stays reserved. Use your passkey or recovery key to sign in on a new iPhone.")
+        Text("You keep your name forever, on any iPhone.")
       } else {
-        Text("Your name stays reserved. Use your recovery key to sign in on a new iPhone.")
+        Text("You keep your name forever. Turn on Face ID to sign in without your recovery key.")
       }
     }
   }
@@ -185,7 +202,7 @@ struct SettingsView: View {
 
     if account.byPasskey {
       return explanation
-        + "\n\nYou’ll need your passkey or a saved copy of your "
+        + "\n\nYou’ll need Face ID or a saved copy of your "
         + "recovery key to sign in again."
     }
 
@@ -253,11 +270,10 @@ struct SettingsView: View {
 
 enum SecurityPresentation {
   static let passkeyExplanation =
-    "Sign in with Face ID or your iPhone passcode. Your passkey is "
-    + "saved in iCloud Keychain or another password manager."
+    "Sign in on a new iPhone with Face ID."
 
   static let recoveryExplanation =
-    "Use these 12 words to sign in if you can’t use your passkey."
+    "12 words to sign in without Face ID."
 
   static func isCancellation(_ error: Error) -> Bool {
     if error is CancellationError { return true }
@@ -269,8 +285,7 @@ enum SecurityPresentation {
 
   static func passkeyMessage(_ error: Error, fallback: String) -> String {
     if let error = error as? AccountError, case .noPRF = error {
-      return "This password manager doesn’t support the passkey features "
-        + "Yo needs. Try another password manager."
+      return "Your password manager can’t do this. Try iCloud Keychain."
     }
     return fallback
   }
@@ -381,8 +396,7 @@ struct RecoveryKeyView: View {
         Text("Recovery Key")
       } footer: {
         Text(
-          "Keep a copy in a safe place. Anyone with your recovery key "
-            + "can sign in to your account."
+          "Anyone with these words can sign in as you."
         )
       }
 
@@ -432,14 +446,14 @@ struct RecoveryKeyView: View {
             )
         } footer: {
           if wordsOnly {
-            Text("Save a copy you can access without this iPhone.")
+            Text("Keep a copy outside this iPhone.")
           }
         }
       }
 
       if let onTryPasskey {
         Section {
-          Button("Try Passkey Again", action: onTryPasskey)
+          Button("Try Face ID Again", action: onTryPasskey)
             .disabled(saving || authenticating)
         }
       }

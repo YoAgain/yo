@@ -121,7 +121,8 @@ struct FriendList: View {
   var body: some View {
     reacting(
       navigation
-        .sheet(isPresented: $settings) { SettingsView() }
+        // The list is always dark (white on purple); the profile follows the iPhone's own appearance.
+        .sheet(isPresented: $settings) { SettingsView().preferredColorScheme(SystemAppearance.scheme) }
         .overlay {
           if let viewing {
             HeldMedia(queue: viewing, photoSeconds: Self.photoSeconds) {

@@ -22,7 +22,7 @@ struct Account: Codable, Equatable {
   /// The recovery words open the backup (nil in accounts saved before this was kept: see `AccountStore.init`).
   var byCode: Bool? = false
 
-  /// Backed up (spec 7): the name comes back on a new phone. Not yet, it is released after 30 days away (spec 6.4).
+  /// Backed up (spec 7): the name comes back on a new phone. Not yet, it is released after 90 days away (spec 6.4).
   var secured: Bool { byPasskey || byCode == true }
 }
 
@@ -418,7 +418,7 @@ enum RecoveryWords {
   }
 }
 
-/// The reminder to secure the name (spec 6.4): a name not backed up is released after 30 days away from Yo, so 23
+/// The reminder to secure the name (spec 6.4): a name not backed up is released after 90 days away from Yo, so 83
 /// days after the last time Yo was opened, a notification says so. Set again each time Yo opens; gone once secured.
 enum SecureReminder {
   static let id = "yo.secure"
@@ -428,9 +428,9 @@ enum SecureReminder {
     center.removePendingNotificationRequests(withIdentifiers: [id])
     guard !secured else { return }
     let content = UNMutableNotificationContent()
-    content.title = "Secure Your Name"
-    content.body = "Secure your name, or it becomes available to others in 7 days."
-    let trigger = UNTimeIntervalNotificationTrigger(timeInterval: 23 * 24 * 3600, repeats: false)
+    content.title = "Secure Your Account"
+    content.body = "Secure your account to keep your name. Otherwise it’s freed in 7 days."
+    let trigger = UNTimeIntervalNotificationTrigger(timeInterval: 83 * 24 * 3600, repeats: false)
     center.add(UNNotificationRequest(identifier: id, content: content, trigger: trigger))
   }
 }

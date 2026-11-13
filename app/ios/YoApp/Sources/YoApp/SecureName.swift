@@ -51,12 +51,10 @@ struct SecureNamePage: View {
           name: accounts.account?.username ?? "",
           words: words,
           explanation: hasPasskey
-            ? "Your passkey is set up. Save your recovery key "
-              + "in case you can’t use your passkey."
-            : "Save your recovery key in a safe place. Without a passkey, "
-              + "you’ll need it to sign in on a new iPhone.",
+            ? "Face ID is on. Keep these words too."
+            : "Keep these words somewhere safe.",
           requiresAuthentication: false,
-          finishTitle: hasPasskey ? "Done" : "Secure Your Name",
+          finishTitle: hasPasskey ? "Done" : "Secure Your Account",
           onFinish: { finishRecovery(hasPasskey: hasPasskey) },
           onTryPasskey: hasPasskey ? nil : { tryPasskeyAgain() }
         )
@@ -65,12 +63,11 @@ struct SecureNamePage: View {
     .navigationBarBackButtonHidden(busy)
     .interactiveDismissDisabled(busy)
     .toolbar(busy ? .hidden : .visible, for: .navigationBar)
-    .alert("Unable to Secure Your Name", isPresented: $setupFailed) {
+    .alert("Unable to Secure Your Account", isPresented: $setupFailed) {
       Button("OK", role: .cancel) {}
     } message: {
       Text(
-        "Try again. Keep a copy of your recovery key "
-          + "until setup is complete."
+        "Try again."
       )
     }
   }
@@ -86,23 +83,17 @@ struct SecureNamePage: View {
           Text("Username")
         }
       } footer: {
-        Text(
-          "Set up a passkey and recovery key to keep your name "
-            + "and sign in on a new iPhone."
-        )
+        Text("Keep your name forever, on any iPhone.")
       }
 
       Section {
         Text(SecurityPresentation.passkeyExplanation)
       } header: {
-        Text("Passkey")
+        Text("Face ID")
       }
 
       Section {
-        Text(
-          "A 12-word recovery key lets you sign in "
-            + "if you can’t use your passkey."
-        )
+        Text("12 words, for when you can’t use Face ID.")
       } header: {
         Text("Recovery Key")
       }
@@ -112,11 +103,11 @@ struct SecureNamePage: View {
           Task { await createPasskey() }
         } label: {
           HStack {
-            Text(busy ? "Setting Up…" : "Set Up Passkey")
+            Text(busy ? "Setting Up…" : "Continue with Face ID")
             Spacer()
             if busy {
               ProgressView()
-                .accessibilityLabel("Setting Up Passkey")
+                .accessibilityLabel("Setting Up Face ID")
             }
           }
         }
@@ -132,14 +123,14 @@ struct SecureNamePage: View {
         }
       }
     }
-    .navigationTitle("Secure Your Name")
+    .navigationTitle("Secure Your Account")
     .navigationBarTitleDisplayMode(.inline)
   }
 
   private var confirmation: some View {
     Form {
       Section {
-        Text("Use your passkey to finish setup.")
+        Text("One more Face ID to finish.")
       }
 
       Section {
@@ -147,11 +138,11 @@ struct SecureNamePage: View {
           Task { await confirmPasskey() }
         } label: {
           HStack {
-            Text(busy ? "Confirming…" : "Confirm Passkey")
+            Text(busy ? "Confirming…" : "Continue with Face ID")
             Spacer()
             if busy {
               ProgressView()
-                .accessibilityLabel("Confirming Passkey")
+                .accessibilityLabel("Confirming Face ID")
             }
           }
         }
@@ -165,7 +156,7 @@ struct SecureNamePage: View {
         }
       }
     }
-    .navigationTitle("Confirm Passkey")
+    .navigationTitle("Continue with Face ID")
     .navigationBarTitleDisplayMode(.inline)
   }
 
@@ -194,7 +185,7 @@ struct SecureNamePage: View {
       passkeyProblem = SecurityPresentation.passkeyMessage(
         error,
         fallback:
-          "Your passkey wasn’t set up. Try again or use a recovery key."
+          "Face ID isn’t on yet. Try again, or use the words."
       )
     }
   }
@@ -216,7 +207,7 @@ struct SecureNamePage: View {
       passkeyProblem = SecurityPresentation.passkeyMessage(
         error,
         fallback:
-          "Your passkey wasn’t set up. Try again or use a recovery key."
+          "Face ID isn’t on yet. Try again, or use the words."
       )
     }
   }
