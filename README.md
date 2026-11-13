@@ -6,10 +6,10 @@
 
 The protocol between apps and server: **YoLS** for security, the **hub** for delivery, the **content** of a message.
 
-```mermaid
-flowchart LR
-  A["Your phone<br/>encrypts"] -- "envelope, no sender" --> H["Hub"]
-  H -- "push: there is mail" --> B["Friend's phone<br/>fetches, decrypts"]
+```
+you ──encrypted, no sender──▶ hub ──push: "there is mail"──▶ friend
+                               ▲                               │
+                               └───────── fetches, decrypts ───┘
 ```
 
 ### YoLS: Yo Layer Security
