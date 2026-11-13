@@ -1,6 +1,7 @@
 // The way in, as the original's: a name, and you are in. Start → your name → a passkey saves it (one tap; if it
 // cannot, 12 words to write down) → the list. "I have Yo" brings an account back on a new phone: the passkey, or the
 // name and its 12 words.
+import Photos
 import SwiftUI
 
 struct Onboarding: View {
@@ -38,6 +39,8 @@ struct Onboarding: View {
 
   // MARK: Welcome
 
+  /// The logo and the line, then the two ways in, one under the other: a new account (the button), or bringing an
+  /// existing one to this phone (the line under it), as Apple's own apps put "Sign In" under "Create".
   private var welcome: some View {
     VStack(spacing: 0) {
       Spacer()
@@ -47,18 +50,20 @@ struct Onboarding: View {
       Text("One tap, one Yo.")
         .font(.yo(19))
         .opacity(0.8)
-      Spacer()
       Button { go(.name) } label: {
-        Text("Start").font(.yo(22)).frame(maxWidth: .infinity, minHeight: 34)
+        Text("Make my Yo").font(.yo(22)).frame(width: 230, height: 34)
       }
       .buttonStyle(.glassProminent)
       .tint(.white)
       .foregroundStyle(Color.amethyst)
-      Button("I have Yo") { Task { await restoreWithPasskey() } }
+      .padding(.top, 44)
+      Button("I already have Yo") { Task { await restoreWithPasskey() } }
         .font(.yo(17))
-        .padding(.top, 18)
         .opacity(0.9)
+        .padding(.top, 20)
       note
+      Spacer()
+      Spacer()
     }
     .padding(.horizontal, 28)
     .padding(.bottom, 12)
@@ -70,6 +75,13 @@ struct Onboarding: View {
   private var naming: some View {
     let trouble = Username.problem(name) ?? (MockHub.isTaken(name) ? "Taken" : nil)
     return VStack(spacing: 14) {
+      HStack {
+        Button("Back", systemImage: "chevron.backward") { go(.welcome) }
+          .labelStyle(.iconOnly)
+          .font(.title3.weight(.semibold))
+          .disabled(busy)
+        Spacer()
+      }
       Spacer()
       Text("YOUR NAME")
         .font(.yo(14))
@@ -135,12 +147,19 @@ struct Onboarding: View {
         }
       }
       Spacer()
-      Button { go(.confirm(words)) } label: {
-        Text("I wrote them down").font(.yo(20)).frame(maxWidth: .infinity, minHeight: 34)
+      // The easy way: the words as a picture in Photos, and in. Or written down, and two of them typed again.
+      Button { Task { await saveToPhotos(words) } } label: {
+        Label("Save to Photos", systemImage: "photo.badge.arrow.down").font(.yo(20))
+          .frame(maxWidth: .infinity, minHeight: 34)
       }
       .buttonStyle(.glassProminent)
       .tint(.white)
       .foregroundStyle(Color.amethyst)
+      .disabled(busy)
+      Button("I wrote them down") { go(.confirm(words)) }
+        .font(.yo(17))
+        .opacity(0.9)
+      note
     }
     .padding(.horizontal, 24)
     .padding(.bottom, 12)
@@ -157,6 +176,26 @@ struct Onboarding: View {
   private func go(_ next: Step) {
     problem = nil
     step = next
+  }
+
+  /// The 12 words as a picture in the photo library (asked once, add only); saved, the account is in use.
+  private func saveToPhotos(_ words: [String]) async {
+    busy = true
+    defer { busy = false }
+    let card = RecoveryCard(name: name, words: words)
+    let renderer = ImageRenderer(content: card)
+    renderer.scale = 3
+    guard let image = renderer.uiImage else { return problem = "Could not make the picture" }
+    let status = await PHPhotoLibrary.requestAuthorization(for: .addOnly)
+    guard status == .authorized || status == .limited else {
+      return problem = "Photos is not allowed: write them down instead"
+    }
+    do {
+      try await PHPhotoLibrary.shared().performChanges { PHAssetChangeRequest.creationRequestForAsset(from: image) }
+      accounts.confirm()
+    } catch {
+      problem = "Not saved: \(error.localizedDescription)"
+    }
   }
 
   private func register() async {
@@ -287,5 +326,44 @@ private struct RestoreWithCode: View {
     } catch {
       problem = error.localizedDescription
     }
+  }
+}
+
+/// The recovery code as a picture for Photos: the brand's purple, the name, the 12 words, what they are for.
+private struct RecoveryCard: View {
+  let name: String
+  let words: [String]
+
+  var body: some View {
+    VStack(alignment: .leading, spacing: 18) {
+      HStack(alignment: .firstTextBaseline) {
+        Text("Yo").font(.yo(44))
+        Spacer()
+        Text(name).font(.yo(24))
+      }
+      Text("Your 12 words").font(.yo(22))
+      Grid(horizontalSpacing: 26, verticalSpacing: 10) {
+        ForEach(0..<6, id: \.self) { row in
+          GridRow {
+            ForEach([row, row + 6], id: \.self) { i in
+              HStack(spacing: 8) {
+                Text("\(i + 1)").font(.system(size: 13, weight: .semibold).monospacedDigit()).opacity(0.6)
+                  .frame(width: 20, alignment: .trailing)
+                Text(words[i]).font(.yo(20))
+              }
+              .frame(maxWidth: .infinity, alignment: .leading)
+            }
+          }
+        }
+      }
+      Text("They bring your Yo back on a new phone, and nothing else can. Keep them to yourself.")
+        .font(.system(size: 13, weight: .medium))
+        .opacity(0.85)
+      Text(Date.now.formatted(date: .long, time: .omitted)).font(.system(size: 12, weight: .medium)).opacity(0.6)
+    }
+    .foregroundStyle(.white)
+    .padding(30)
+    .frame(width: 390)
+    .background(Color.amethyst)
   }
 }

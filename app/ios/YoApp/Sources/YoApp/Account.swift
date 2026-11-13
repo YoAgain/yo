@@ -100,8 +100,11 @@ struct BackupRecord: Codable {
 enum MockHub {
   private static var store: UserDefaults { UserDefaults(suiteName: "co.justyo.mockhub") ?? .standard }
 
+  /// Names someone else has, as if they had registered first (to try what "taken" looks like).
+  static let othersHave: Set<String> = ["LEO"]
+
   static func isTaken(_ username: String) -> Bool {
-    store.data(forKey: "name." + username) != nil || Username.reserved.contains(username)
+    store.data(forKey: "name." + username) != nil || Username.reserved.contains(username) || othersHave.contains(username)
   }
 
   static func save(_ record: BackupRecord, for username: String) {
