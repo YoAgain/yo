@@ -1,0 +1,299 @@
+//! YoGPT: an account that answers every Yo, after a moment, with a Yo or a few.
+//!
+//!   yo-gpt [--hub https://dev.justyo.app] [--username YOGPT] [--state DIR]
+//!
+//! Or `YO_HUB`, `YO_USERNAME`, `YO_STATE`. The first run registers the username with a new account key; the state
+//! directory then holds the account secret, the state key and the sealed state (0600), and later runs go on from
+//! there. An account secret without a state registers the name again with it (the same account, a new device).
+//! Exits 1 when the hub no longer knows this device: replaced by another, the name released, or the hub reset.
+
+use std::collections::HashSet;
+use std::io::Write;
+use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+use std::path::{Path, PathBuf};
+use std::sync::mpsc::{channel, Sender};
+use std::sync::{Arc, Mutex, PoisonError};
+use std::time::{Duration, Instant};
+use yo_core::{Client, Content, Error, Event, Push, Response, Store, Transport};
+
+/// How many Yos an answer has, in percent: one mostly, more ever rarer (a half-normal tail), five at most.
+const YOS: [u32; 5] = [70, 17, 8, 4, 1];
+/// Before an answer, in milliseconds, uniform: it thinks.
+const THINK_MS: (u64, u64) = (1000, 5000);
+/// Between the Yos of one answer, in milliseconds, uniform.
+const GAP_MS: (u64, u64) = (300, 1000);
+/// Chats are kept fresh (spec 4) as the app does when it comes to the foreground.
+const MAINTENANCE: Duration = Duration::from_secs(3600);
+
+struct Http {
+    client: reqwest::blocking::Client,
+    base: String,
+}
+
+impl Transport for Http {
+    fn request(&self, method: &str, path: &str, headers: &[(String, String)], body: &[u8]) -> Result<Response, String> {
+        let url = format!("{}{}", self.base, path);
+        let mut request = self.client.request(method.parse().map_err(|_| "method")?, url).body(body.to_vec());
+        for (name, value) in headers {
+            request = request.header(name, value);
+        }
+        let response = request.send().map_err(|e| e.to_string())?;
+        let status = response.status().as_u16();
+        let body = response.bytes().map_err(|e| e.to_string())?.to_vec();
+        Ok(Response { status, body })
+    }
+}
+
+/// The sealed state, replaced whole after every operation.
+struct File(PathBuf);
+
+impl Store for File {
+    fn save(&self, blob: Vec<u8>) {
+        if let Err(error) = write_private(&self.0, &blob) {
+            eprintln!("yo-gpt: saving the state: {error}");
+        }
+    }
+}
+
+/// Writes beside the file, then renames: a crash leaves the old one or the new one.
+fn write_private(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+    let tmp = path.with_extension("tmp");
+    let mut file = std::fs::OpenOptions::new().write(true).create(true).truncate(true).mode(0o600).open(&tmp)?;
+    file.write_all(bytes)?;
+    file.sync_all()?;
+    std::fs::rename(tmp, path)
+}
+
+/// 32 bytes kept in `path`, made at random the first time.
+fn secret(path: &Path) -> std::io::Result<[u8; 32]> {
+    match std::fs::read(path) {
+        Ok(bytes) => bytes.try_into().map_err(|_| std::io::Error::other(format!("{}: not 32 bytes", path.display()))),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            let mut bytes = [0u8; 32];
+            getrandom::getrandom(&mut bytes).map_err(std::io::Error::other)?;
+            write_private(path, &bytes)?;
+            Ok(bytes)
+        }
+        Err(error) => Err(error),
+    }
+}
+
+/// Uniform in `low..=high`, from the system's random source.
+fn uniform(low: u64, high: u64) -> u64 {
+    let mut bytes = [0u8; 8];
+    getrandom::getrandom(&mut bytes).expect("random");
+    low + u64::from_le_bytes(bytes) % (high - low + 1)
+}
+
+/// How many Yos for a percentile `p` in 0..100, by `YOS`.
+fn yos(p: u32) -> usize {
+    let mut sum = 0;
+    YOS.iter()
+        .position(|w| {
+            sum += w;
+            p < sum
+        })
+        .unwrap_or(YOS.len() - 1)
+        + 1
+}
+
+fn ms((low, high): (u64, u64)) -> Duration {
+    Duration::from_millis(uniform(low, high))
+}
+
+struct Args {
+    hub: String,
+    username: String,
+    state: PathBuf,
+}
+
+fn args() -> Result<Args, String> {
+    let env = |name: &str, default: &str| std::env::var(name).unwrap_or_else(|_| default.to_owned());
+    let mut args = Args {
+        hub: env("YO_HUB", "https://dev.justyo.app"),
+        username: env("YO_USERNAME", "YOGPT"),
+        state: env("YO_STATE", "yo-gpt").into(),
+    };
+    let mut it = std::env::args().skip(1);
+    while let Some(flag) = it.next() {
+        let value = it.next().ok_or(format!("{flag}: a value"))?;
+        match flag.as_str() {
+            "--hub" => args.hub = value,
+            "--username" => args.username = value,
+            "--state" => args.state = value.into(),
+            other => return Err(format!("unknown flag {other}")),
+        }
+    }
+    args.hub = args.hub.trim_end_matches('/').to_owned();
+    Ok(args)
+}
+
+fn fail(what: impl std::fmt::Display) -> ! {
+    eprintln!("yo-gpt: {what}");
+    std::process::exit(1);
+}
+
+/// Registers or restores, trying again while the hub cannot be reached.
+fn open(args: &Args) -> Client {
+    std::fs::create_dir_all(&args.state).unwrap_or_else(|e| fail(format!("{}: {e}", args.state.display())));
+    let _ = std::fs::set_permissions(&args.state, std::fs::Permissions::from_mode(0o700));
+    let account = secret(&args.state.join("account")).unwrap_or_else(|e| fail(e));
+    let key = secret(&args.state.join("key")).unwrap_or_else(|e| fail(e));
+    let path = args.state.join("state");
+    let http =
+        reqwest::blocking::Client::builder().timeout(Duration::from_secs(60)).build().unwrap_or_else(|e| fail(e));
+    let transport = Arc::new(Http { client: http, base: args.hub.clone() });
+    let mut backoff = Backoff::default();
+    loop {
+        let opened = match std::fs::read(&path) {
+            Ok(blob) => Client::restore(transport.clone(), &blob, &key),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                Client::register_username(transport.clone(), &args.username, Some(account), None, Push::none())
+                    .inspect(|c| eprintln!("yo-gpt: registered {} on {}", c.username().unwrap_or("?"), args.hub))
+            }
+            Err(error) => fail(format!("{}: {error}", path.display())),
+        };
+        match opened {
+            Ok(mut client) => {
+                client.persist_to(Arc::new(File(path)), key);
+                return client;
+            }
+            Err(error) if retryable(&error) => backoff.wait(&error),
+            Err(error) => fail(format!("{} on {}: {error}", args.username, args.hub)),
+        }
+    }
+}
+
+/// Network trouble, or the hub saying "not now".
+fn retryable(error: &Error) -> bool {
+    matches!(error, Error::Network(_) | Error::Refused(429 | 500..))
+}
+
+const GONE: &str = "the hub no longer knows this device (replaced by another, the name released, or the hub reset)";
+
+/// `410`: replaced, or the name released. `401`: unknown, as after a reset hub (or a clock far off).
+fn gone(error: &Error) -> bool {
+    matches!(error, Error::Replaced | Error::Refused(401))
+}
+
+/// 1, 2, 4 … 60 seconds; back to 1 after a success.
+#[derive(Default)]
+struct Backoff(u32);
+
+impl Backoff {
+    fn wait(&mut self, error: &Error) {
+        let s = (1u64 << self.0.min(6)).min(60);
+        eprintln!("yo-gpt: {error}, again in {s} s");
+        std::thread::sleep(Duration::from_secs(s));
+        self.0 += 1;
+    }
+}
+
+type Shared = Arc<Mutex<Client>>;
+
+fn lock(client: &Shared) -> std::sync::MutexGuard<'_, Client> {
+    client.lock().unwrap_or_else(PoisonError::into_inner)
+}
+
+/// How the log names a user: a handle this device knows, else the start of the user id.
+fn who(client: &Client, user: &str) -> String {
+    let contact = client.contacts().into_iter().find(|c| c.user == user);
+    contact.and_then(|c| c.handles.into_iter().next()).unwrap_or_else(|| user.chars().take(8).collect())
+}
+
+fn main() {
+    let args = args().unwrap_or_else(|error| {
+        eprintln!("yo-gpt: {error}");
+        std::process::exit(2);
+    });
+    let client = open(&args);
+    eprintln!("yo-gpt: {} on {}, user {}", client.username().unwrap_or("?"), args.hub, client.user_id());
+    let client = Arc::new(Mutex::new(client));
+    let (events, received) = channel();
+    let (syncing, to_main) = (client.clone(), events.clone());
+    std::thread::spawn(move || receive(syncing, to_main));
+    // One answer per sender at a time: Yos that come while it is under way get none of their own.
+    let pending = Arc::new(Mutex::new(HashSet::new()));
+    for event in received {
+        let Event::Message { user, content: Content::Yo, .. } = event else { continue };
+        if !pending.lock().unwrap_or_else(PoisonError::into_inner).insert(user.clone()) {
+            continue;
+        }
+        let (client, events, pending) = (client.clone(), events.clone(), pending.clone());
+        std::thread::spawn(move || {
+            answer(&client, &user, &events);
+            pending.lock().unwrap_or_else(PoisonError::into_inner).remove(&user);
+        });
+    }
+}
+
+/// The long poll, without holding the client while it waits; every event to `events`.
+fn receive(client: Shared, events: Sender<Event>) -> ! {
+    let mut backoff = Backoff::default();
+    let mut maintained = Instant::now();
+    loop {
+        let result = if maintained.elapsed() >= MAINTENANCE {
+            maintained = Instant::now();
+            lock(&client).maintenance()
+        } else {
+            let wait = lock(&client).sync_begin(25);
+            wait.and_then(|wait| {
+                let response = wait.send();
+                lock(&client).sync_end(&wait, response)
+            })
+        };
+        match result {
+            Ok(received) => {
+                backoff = Backoff::default();
+                received.into_iter().for_each(|event| events.send(event).expect("main"));
+                lock(&client).acknowledge_events();
+            }
+            Err(error) if gone(&error) => fail(GONE),
+            Err(error) => backoff.wait(&error),
+        }
+    }
+}
+
+/// Thinks, then sends a Yo or a few. What sending receives goes to `events`.
+fn answer(client: &Shared, user: &str, events: &Sender<Event>) {
+    std::thread::sleep(ms(THINK_MS));
+    let n = yos(uniform(0, 99) as u32);
+    for i in 0..n {
+        if i > 0 {
+            std::thread::sleep(ms(GAP_MS));
+        }
+        let mut client = lock(client);
+        match client.send_yo(user) {
+            Ok(received) => received.into_iter().for_each(|event| events.send(event).expect("main")),
+            Err(error) if gone(&error) => fail(GONE),
+            Err(error) => {
+                eprintln!("yo-gpt: Yo {} of {n} to {}: {error}", i + 1, who(&client, user));
+                return;
+            }
+        }
+    }
+    eprintln!("yo-gpt: {n} Yo back to {}", who(&lock(client), user));
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn yos_follow_the_table() {
+        assert_eq!(YOS.iter().sum::<u32>(), 100);
+        let mut counts = [0u32; 5];
+        for p in 0..100 {
+            counts[yos(p) - 1] += 1;
+        }
+        assert_eq!(counts, YOS);
+    }
+
+    #[test]
+    fn uniform_stays_in_its_bounds() {
+        for _ in 0..1000 {
+            assert!((300..=1000).contains(&uniform(300, 1000)));
+        }
+        assert!((0..1000).map(|_| uniform(0, 99)).any(|p| p == 0));
+    }
+}
