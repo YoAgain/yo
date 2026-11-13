@@ -1,9 +1,10 @@
-// The app: one scene, the list of friends. SwiftUI's own lifecycle, no UIKit app delegate.
+// The app: one scene, the list of friends. SwiftUI's own lifecycle; a UIKit app delegate only for the push token.
 import SwiftUI
 import UserNotifications
 
 @main
 struct YoApp: App {
+  @UIApplicationDelegateAdaptor(AppDelegate.self) private var appDelegate
   @State private var inbox: Inbox
   @State private var friends = Friends()
   @State private var accounts = AccountStore()
@@ -33,6 +34,11 @@ struct YoApp: App {
         .environment(accounts)
         .task {
           await inbox.askForNotifications()
+          Push.shared.register()
+        }
+        // The push token to the hub, once there is both a token and an account (and again for a new account).
+        .task(id: "\(Push.shared.token ?? "")/\(accounts.account?.userID.base64EncodedString() ?? "")") {
+          await Push.shared.send(accounts)
         }
         // Opening the app: the Yos waiting as notifications come in and show on their bars.
         .onChange(of: phase, initial: true) { _, phase in
