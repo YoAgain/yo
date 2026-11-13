@@ -39,6 +39,8 @@ struct FriendList: View {
   // The list
   @State private var adding = false
   @State private var newName = ""
+  /// "That’s you", for a moment in the empty field, when the name typed is one's own (a Yo to oneself has no chat).
+  @State private var ownName = false
   @FocusState private var typing: Bool
   @State private var settings = false
   @State private var position = ScrollPosition(idType: String.self)
@@ -320,7 +322,7 @@ struct FriendList: View {
   @ViewBuilder private var addRow: some View {
     let color = Color.row(friends.nextColor).opacity(cameraOn ? 0.45 : 1)  // the colour the new friend will have
     if adding {
-      TextField("", text: $newName, prompt: Text("Name").foregroundStyle(.white.opacity(0.6)))
+      TextField("", text: $newName, prompt: Text(ownName ? "That’s you" : "Name").foregroundStyle(.white.opacity(0.6)))
         .font(.yo(Metrics.rowFont))
         .foregroundStyle(.white)
         .tint(.white)
@@ -344,6 +346,19 @@ struct FriendList: View {
   }
 
   private func add() {
+    if ownName && newName.isEmpty { return }  // the hint stays a moment, then the bar closes
+    if let me = accounts.account?.username, !newName.isEmpty,
+      Username.skeleton(Username.clean(newName)) == Username.skeleton(me)
+    {
+      newName = ""
+      ownName = true
+      Task {
+        try? await Task.sleep(for: .seconds(1.5))
+        ownName = false
+        if newName.isEmpty && !typing { adding = false }
+      }
+      return
+    }
     withAnimation(.snappy) { friends.add(newName) }
     newName = ""
     adding = false

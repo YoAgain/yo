@@ -58,9 +58,6 @@ struct SettingsView: View {
                 Form { securitySection(account) }
                   .navigationTitle("Account Security")
                   .navigationBarTitleDisplayMode(.inline)
-                  .modifier(SecurityDialogs(
-                    turningOffPasskey: $turningOffPasskey, renewingWords: $renewingWords,
-                    turnOff: removePasskey, renew: newWords))
               } label: {
                 securityRowLabel
               }
@@ -213,44 +210,68 @@ struct SettingsView: View {
     .padding(.vertical, 2)
   }
 
-  /// Account Security: two groups, Passkey and Recovery Key, each its state on top (a step not done yet opens the
-  /// guide at it) and below what can be done with it, as plain rows like Settings' Face ID & Passcode.
+  /// Account Security: two groups, Passkey and Recovery Key, each one row with its state. A step not done yet opens
+  /// the guide at it; one done opens its own page with what can be done with it (as Settings' Face ID & Passcode).
   @ViewBuilder private func securitySection(_ account: Account) -> some View {
     let wordsDone = account.secured && accounts.wordsSaved && RecoveryWords.load() != nil
     Section {
       if account.byPasskey {
-        SecurityRow(icon: "faceid", color: .green, title: "Passkey", value: "On", done: true, chevron: false)
-        Button("Replace Passkey") { Task { await replacePasskey() } }
-        if wordsDone {
-          Button("Turn Off Passkey", role: .destructive) { turningOffPasskey = true }
+        NavigationLink {
+          securityPage("Passkey", footer: "Sign back in with Face ID on a new iPhone.") {
+            Button("Replace Passkey") { Task { await replacePasskey() } }
+            if wordsDone {
+              Button("Turn Off Passkey", role: .destructive) { turningOffPasskey = true }
+            }
+          }
+        } label: {
+          SecurityRow(icon: "faceid", color: .green, title: "Passkey", value: "On", done: true, chevron: false)
         }
       } else {
         Button { secure(.passkey) } label: {
           SecurityRow(icon: "faceid", color: .orange, title: "Passkey", value: "Set Up")
         }
       }
-    } header: {
-      Text("Passkey")
     } footer: {
       Text("Sign back in with Face ID on a new iPhone.")
     }
     .disabled(addingPasskey)
     Section {
       if wordsDone {
-        SecurityRow(icon: "key.fill", color: .green, title: "Recovery Key", value: "Saved", done: true, chevron: false)
-        Button("Show Recovery Key") { Task { await showRecoveryKey() } }
-        Button("Create New Recovery Key") { renewingWords = true }
+        NavigationLink {
+          securityPage("Recovery Key", footer: "12 words to sign back in without Face ID.") {
+            Button("Show Recovery Key") { Task { await showRecoveryKey() } }
+            Button("Create New Recovery Key") { renewingWords = true }
+          }
+        } label: {
+          SecurityRow(icon: "key.fill", color: .green, title: "Recovery Key", value: "Saved", done: true, chevron: false)
+        }
       } else {
         Button { secure(.words) } label: {
           SecurityRow(icon: "key.fill", color: .orange, title: "Recovery Key", value: "Save")
         }
       }
-    } header: {
-      Text("Recovery Key")
     } footer: {
       Text("12 words to sign back in without Face ID.")
     }
     .disabled(addingPasskey)
+  }
+
+  /// The page under Passkey or Recovery Key: what can be done with it, and the dialogs those ask.
+  private func securityPage(
+    _ title: String, footer: String, @ViewBuilder actions: () -> some View
+  ) -> some View {
+    Form {
+      Section {
+        actions()
+      } footer: {
+        Text(footer)
+      }
+      .disabled(addingPasskey)
+    }
+    .navigationTitle(title)
+    .navigationBarTitleDisplayMode(.inline)
+    .modifier(SecurityDialogs(
+      turningOffPasskey: $turningOffPasskey, renewingWords: $renewingWords, turnOff: removePasskey, renew: newWords))
   }
 
   /// The guide, at a step or (nil) at the first one left.
