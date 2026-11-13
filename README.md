@@ -4,61 +4,65 @@ Yo, again. One tap, one Yo, end-to-end encrypted.
 
 ## YoIP: Yo over IP
 
-The protocol: MLS (RFC 9420) for a messenger whose server never learns who sends. Its security layer, identities
-and chats, is **YoLS** (Yo Layer Security); YoIP is all of it, with the hub and what a message says.
+The protocol, in three parts:
 
-- **Identity** in four layers:
+```
+YoIP        Yo over IP, the whole protocol
+├─ YoLS     Yo Layer Security: who you are, and chats only their members can read
+├─ Hub      the server: mailboxes, delivery, push
+└─ Content  what a message says: a Yo
+```
 
-  | Layer | What | Changes? |
-  |---|---|---|
-  | User id | 16 bytes from the hub | never |
-  | Account key | signs the account's devices | with a new phone, unless a passkey keeps it |
-  | Devices | MLS members, each with its own keys | added and replaced |
-  | Handles | phone number (SMS), username | any time; only to find you |
+### YoLS: Yo Layer Security
 
-- **Certificate** (the MLS credential, 96 bytes): account key + its signature over the device key. Names no person;
-  who an account key is, the hub attests. Any contact can be verified (60-digit safety number).
-- **Chats:** MLS groups, one suite (X25519, ChaCha20-Poly1305, Ed25519), typed content (`Yo` now, text later).
-- **Sealed sender:** delivering takes no identity; addressed to a user, copied to all their devices; envelopes padded
-  to fixed sizes; pushes say only "there is mail".
-- **Healing:** keys renewed weekly or every 100 messages; the hub orders commits by epoch tokens only members hold.
-- **The hub knows** numbers (as HMAC), devices, timing, sizes, IPs, who looks up whom. Not who sends, what, or
-  who chats with whom.
+- **Chats** are MLS groups (RFC 9420), one suite: X25519, ChaCha20-Poly1305, Ed25519.
+- **You** are a user id (never changes) with an account key that signs your devices. Phone number and username only
+  help others find you.
+- **Trust:** any contact can be checked with a 60-digit safety number.
+- **Healing:** keys are renewed every week or every 100 messages.
+
+### Hub
+
+- **Sealed sender:** a message is delivered without saying who sent it.
+- **All alike:** every message is padded to 1, 4, 16 or 64 KiB; a push says only "there is mail".
+- **Order:** the hub settles which change to a chat comes first, without being able to read it.
+
+| The hub knows | The hub never learns |
+|---|---|
+| phone numbers (as HMAC), devices, IP addresses | who sent a message |
+| when and how much arrives | what it says |
+| who looks up whom | who chats with whom |
 
 Full text: [spec/v1.md](spec/v1.md).
-
-## Layout
-
-```
-core/wire       contract between apps and hub
-core/mls        client core (Rust, one for iOS and Android)
-core/bindings   Swift and Kotlin via UniFFI
-hub/            mailboxes, KeyPackages, commit order, push, SMS
-tests/          scenarios, simulation, robustness, load
-app/ios/        the iPhone app (SwiftUI; a mockup for now, see app/ios/README.md)
-```
 
 ## Speed
 
 | Hub on one core | Yops | p99 |
 |---|---|---|
-| database on an SSD (as on a server) | 16,000 | 19 ms |
-| database in RAM (tmpfs, or SQLite `:memory:`) | 22,000 | 6 ms |
+| database on an SSD | 16,000 | 19 ms |
+| database in RAM | 22,000 | 6 ms |
 
-Yops: Yos delivered per second, the only benchmark unit that says what it measures. The bound is the one writer
-thread (every delivery is a write, one after the other), not SQLite and not the cores: more cores do not help, SQLite
-in memory is no faster than a file in RAM, and a real disk costs about a third. All runs:
+Yops: Yos delivered per second. The one thread that writes them bounds it, not the cores. All runs:
 [tests/README.md](tests/README.md#load).
+
+## Layout
+
+```
+core/wire       the contract between apps and hub
+core/mls        the client core (Rust, one for iOS and Android)
+core/bindings   Swift and Kotlin via UniFFI
+hub/            the server
+tests/          scenarios, simulation, robustness, load
+app/ios/        the iPhone app (SwiftUI, a mockup for now)
+```
 
 ## Run
 
 ```sh
 dev/cargo test --workspace                                        # needs only Docker
 dev/cargo run --release -p yo-tests --bin yo-load -- --clients 200
-dev/fuzz all 300                                                  # cargo-fuzz, every target 5 minutes
+dev/fuzz all 300                                                  # every fuzz target 5 minutes
 ```
-
-Tests and measured throughput: [tests/README.md](tests/README.md). Hub configuration: [hub/src/main.rs](hub/src/main.rs).
 
 ## License
 
