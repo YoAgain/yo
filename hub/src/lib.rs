@@ -271,6 +271,16 @@ impl Hub {
         }
     }
 
+    /// A per-address limit. Not for the server's own services (YoGPT): behind Cloudflare every request carries
+    /// `CF-Connecting-IP`, so one that comes straight from 127.0.0.1 without it is the server itself, which speaks for
+    /// many users at once from one address.
+    fn limit_ip(&self, kind: &str, peer: SocketAddr, headers: &HeaderMap, per: u32, window: Duration) -> Res<()> {
+        if self.config.trust_cloudflare && peer.ip().is_loopback() && !headers.contains_key("cf-connecting-ip") {
+            return Ok(());
+        }
+        self.limit(format!("{kind}:ip:{}", self.ip(peer, headers)), per, window)
+    }
+
     fn limit(&self, key: String, per: u32, window: Duration) -> Res<()> {
         if self.limiter.allow(key, per, window) {
             Ok(())
@@ -447,7 +457,7 @@ async fn verify_start(State(hub): Hubs, ConnectInfo(peer): Peer, headers: Header
     phone::check(request.phone.as_slice())?;
     let limits = &hub.config.limits;
     let phone_key = yo_wire::b64(&hub.phone_hmac(request.phone.as_slice()));
-    hub.limit(format!("start:ip:{}", hub.ip(peer, &headers)), limits.verify_per_ip_hour, HOUR)?;
+    hub.limit_ip("start", peer, &headers, limits.verify_per_ip_hour, HOUR)?;
     hub.limit(format!("start:phone:{phone_key}"), limits.verify_per_phone_hour, HOUR)?;
     let digits = String::from_utf8(request.phone.as_slice().to_vec()).map_err(|_| bad())?;
     hub.sms.start(digits).await.map_err(|error| {
@@ -468,7 +478,7 @@ async fn verify_check(
     phone::check(digits.as_bytes())?;
     let handle = Handle::phone(&digits);
     let limits = &hub.config.limits;
-    hub.limit(format!("check:ip:{}", hub.ip(peer, &headers)), limits.verify_per_ip_hour.saturating_mul(3), HOUR)?;
+    hub.limit_ip("check", peer, &headers, limits.verify_per_ip_hour.saturating_mul(3), HOUR)?;
     hub.limit(format!("check:phone:{}", yo_wire::b64(&hub.stored_handle(&handle))), limits.check_per_phone_hour, HOUR)?;
     let code = String::from_utf8(request.code.as_slice().to_vec()).map_err(|_| bad())?;
     if code.is_empty() || code.len() > limits::MAX_CODE_LEN {
@@ -494,7 +504,7 @@ async fn register(
     headers: HeaderMap,
     body: Bytes,
 ) -> Res<(StatusCode, Vec<u8>)> {
-    hub.limit(format!("register:ip:{}", hub.ip(peer, &headers)), hub.config.limits.register_per_ip_hour, HOUR)?;
+    hub.limit_ip("register", peer, &headers, hub.config.limits.register_per_ip_hour, HOUR)?;
     let request: api::Register = decode(&body)?;
     let handle = Handle { kind: KIND_USERNAME, value: request.username.clone() };
     handle.check()?;
@@ -511,7 +521,7 @@ async fn username_free(
     headers: HeaderMap,
     Path(name): Path<String>,
 ) -> Res<StatusCode> {
-    hub.limit(format!("name:ip:{}", hub.ip(peer, &headers)), hub.config.limits.name_check_per_ip_minute, MINUTE)?;
+    hub.limit_ip("name", peer, &headers, hub.config.limits.name_check_per_ip_minute, MINUTE)?;
     yo_wire::handle::check_username_form(&name)?;
     if hub.db.username_taken(yo_wire::handle::skeleton(&name).as_bytes())? {
         return Err(refuse(StatusCode::CONFLICT));
@@ -542,7 +552,7 @@ async fn fetch_backup(
     headers: HeaderMap,
     Path(id): Path<String>,
 ) -> Res<(StatusCode, Vec<u8>)> {
-    hub.limit(format!("backup:ip:{}", hub.ip(peer, &headers)), hub.config.limits.backup_per_ip_hour, HOUR)?;
+    hub.limit_ip("backup", peer, &headers, hub.config.limits.backup_per_ip_hour, HOUR)?;
     let id: [u8; api::LOCATOR_LEN] = path_id(&id)?;
     let record = hub.db.backup(&id)?.ok_or_else(|| refuse(StatusCode::NOT_FOUND))?;
     Ok(ok(record))
@@ -719,7 +729,7 @@ async fn deliver(
         .and_then(|v| v.try_into().ok())
         .ok_or_else(bad)?;
     yo_wire::envelope::check(&body)?;
-    hub.limit(format!("deliver:ip:{}", hub.ip(peer, &headers)), hub.config.limits.deliver_per_ip_minute, MINUTE)?;
+    hub.limit_ip("deliver", peer, &headers, hub.config.limits.deliver_per_ip_minute, MINUTE)?;
     let (stored, outcome) = tokio::sync::oneshot::channel();
     hub.deliveries
         .send(Delivery { user, devices_hash, envelope: body, stored })
@@ -743,7 +753,7 @@ async fn deliver(
 }
 
 async fn create_group(State(hub): Hubs, ConnectInfo(peer): Peer, headers: HeaderMap, body: Bytes) -> Res<StatusCode> {
-    hub.limit(format!("groups:ip:{}", hub.ip(peer, &headers)), hub.config.limits.groups_per_ip_hour, HOUR)?;
+    hub.limit_ip("groups", peer, &headers, hub.config.limits.groups_per_ip_hour, HOUR)?;
     let request: api::GroupCreate = decode(&body)?;
     if request.epoch == 0 || request.epoch > u32::MAX as u64 {
         return Err(bad());
@@ -762,7 +772,7 @@ async fn commit(
     Path(group): Path<String>,
     body: Bytes,
 ) -> Res<StatusCode> {
-    hub.limit(format!("commit:ip:{}", hub.ip(peer, &headers)), hub.config.limits.commit_per_ip_minute, MINUTE)?;
+    hub.limit_ip("commit", peer, &headers, hub.config.limits.commit_per_ip_minute, MINUTE)?;
     let group: GroupId = path_id(&group)?;
     let request: api::Commit = decode(&body)?;
     yo_wire::envelope::check(request.envelope.as_slice())?;
@@ -789,7 +799,7 @@ async fn fetch_commit(
     headers: HeaderMap,
     Path((group, epoch)): Path<(String, u64)>,
 ) -> Res<(StatusCode, Vec<u8>)> {
-    hub.limit(format!("commit:ip:{}", hub.ip(peer, &headers)), hub.config.limits.commit_per_ip_minute, MINUTE)?;
+    hub.limit_ip("commit", peer, &headers, hub.config.limits.commit_per_ip_minute, MINUTE)?;
     let group: GroupId = path_id(&group)?;
     let envelope = hub.db.commit_envelope(&group, epoch)?.ok_or_else(|| refuse(StatusCode::NOT_FOUND))?;
     Ok(ok(envelope))
@@ -842,7 +852,7 @@ async fn put_blob(
         .and_then(|v| v.try_into().ok())
         .ok_or_else(bad)?;
     let limits = &hub.config.limits;
-    hub.limit(format!("blob:put:ip:{}", hub.ip(peer, &headers)), limits.blob_put_per_ip_minute, MINUTE)?;
+    hub.limit_ip("blob:put", peer, &headers, limits.blob_put_per_ip_minute, MINUTE)?;
     let device = hub.authenticate_hash(&method, &uri, &headers, &body_hash)?;
     let quota = limits.blob_quota();
     let now = now_ms();
@@ -904,7 +914,7 @@ async fn get_blob(
     headers: HeaderMap,
     Path(id): Path<String>,
 ) -> Res<axum::response::Response> {
-    hub.limit(format!("blob:get:ip:{}", hub.ip(peer, &headers)), hub.config.limits.blob_get_per_ip_minute, MINUTE)?;
+    hub.limit_ip("blob:get", peer, &headers, hub.config.limits.blob_get_per_ip_minute, MINUTE)?;
     let id: BlobId = path_id(&id)?;
     let ttl = hub.config.limits.blob_ttl_days * DAY.as_millis() as u64;
     let (size, created_at) = hub.db.blob(&id, now_ms(), ttl)?.ok_or_else(|| refuse(StatusCode::NOT_FOUND))?;
