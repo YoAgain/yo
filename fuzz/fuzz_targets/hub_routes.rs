@@ -9,7 +9,7 @@ use tower::ServiceExt;
 static RUNTIME: OnceLock<tokio::runtime::Runtime> = OnceLock::new();
 static ROUTER: OnceLock<axum::Router> = OnceLock::new();
 
-const ROUTES: [(&str, &str); 21] = [
+const ROUTES: [(&str, &str); 27] = [
     ("POST", "/v1/verify/start"),
     ("POST", "/v1/verify/check"),
     ("PUT", "/v1/keypackages"),
@@ -31,6 +31,13 @@ const ROUTES: [(&str, &str); 21] = [
     ("GET", "/v1/username/%FF%00"),
     ("PUT", "/v1/blobs/AAAAAAAAAAAAAAAAAAAAAA?fetches=1"),
     ("GET", "/v1/blobs/AAAAAAAAAAAAAAAAAAAAAA"),
+    // Appended, so the seeds' route indexes stay theirs.
+    ("POST", "/v1/report"),
+    ("POST", "/v1/feedback"),
+    ("DELETE", "/v1/account"),
+    ("GET", "/v1/inbox?wait=99999999999999999999&wait=1"),
+    ("GET", "/v1/groups/AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA/commits/18446744073709551615"),
+    ("PUT", "/v1/blobs/AAAAAAAAAAAAAAAAAAAAAA?fetches=4294967296"),
 ];
 
 fuzz_target!(|data: &[u8]| {

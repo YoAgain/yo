@@ -17,9 +17,23 @@ pub trait Sms: Send + Sync {
 pub fn from_config(config: &SmsConfig) -> Box<dyn Sms> {
     match config.clone() {
         SmsConfig::Dev { code } => Box::new(Dev { code }),
+        // Never asked: the routes are not served. A code that matches nothing, should one be.
+        SmsConfig::Off => Box::new(Off),
         SmsConfig::Twilio { account_sid, auth_token, service_sid } => {
             Box::new(Twilio { client: reqwest::Client::new(), account_sid, auth_token, service_sid })
         }
+    }
+}
+
+struct Off;
+
+impl Sms for Off {
+    fn start(&self, _: String) -> Fut<Result<(), String>> {
+        Box::pin(async { Err("SMS is off".to_owned()) })
+    }
+
+    fn check(&self, _: String, _: String) -> Fut<Result<bool, String>> {
+        Box::pin(async { Ok(false) })
     }
 }
 

@@ -92,3 +92,20 @@ fn a_dead_token_is_forgotten() {
     assert!(before >= 1 && after <= before + 1, "before {before}, after {after}");
     assert_eq!(hub.push.sent.lock().unwrap().iter().filter(|r| r.url.contains("/device/dead")).count(), after);
 }
+
+#[test]
+fn an_apns_token_that_is_not_hex_never_reaches_a_url() {
+    let hub = hub();
+    let n = random_u64() % 1_000_000_000;
+    let mut a = register(Http::new(hub.url()), &phone(n), None);
+    let _iphone = with_push(&hub, &phone(n + 1), PUSH_APNS, "../../../3/device/a1b2c3?x=");
+    let _android = with_push(&hub, &phone(n + 2), PUSH_FCM, "fcm-token");
+    a.send_yo(&phone(n + 1)).unwrap();
+    a.send_yo(&phone(n + 2)).unwrap();
+    // The Android phone's pushes come (OAuth, Welcome, Yo); the iPhone's token is refused before any request.
+    let sent = wait_for(&hub, 3);
+    std::thread::sleep(Duration::from_millis(200));
+    let sent = sent.len().max(hub.push.sent.lock().unwrap().len());
+    assert_eq!(sent, 3);
+    assert!(!hub.push.sent.lock().unwrap().iter().any(|r| r.url.contains("push.apple.com")));
+}
