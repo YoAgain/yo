@@ -46,24 +46,29 @@ struct Onboarding: View {
   private var welcome: some View {
     VStack(spacing: 0) {
       Spacer()
-      // "Just Yo", the 2015 slogan: "Just" small before the "Yo", on its baseline.
-      HStack(alignment: .firstTextBaseline, spacing: 8) {
-        Text("Just").font(.yo(26)).opacity(0.85)
-        Text("Yo").font(.yo(150))
-      }
+      // "Just Yo", the 2015 slogan: the "Yo" exactly in the middle, "Just" small before it on its baseline, outside
+      // the layout so it moves nothing.
+      Text("Yo")
+        .font(.yo(150))
+        .overlay(alignment: Alignment(horizontal: .leading, vertical: .firstTextBaseline)) {
+          Text("Just")
+            .font(.yo(26))
+            .opacity(0.85)
+            .fixedSize()
+            .alignmentGuide(.leading) { $0[.trailing] + 8 }
+        }
+      note
+      Spacer()
+      // As Apple's own welcome screens: the one button at the bottom, the full width.
       Button { go(.name) } label: {
-        Text("Get Yo").font(.yo(22)).frame(width: 200, height: 34)
+        Text("Continue").font(.yo(22)).frame(maxWidth: .infinity, minHeight: 40)
       }
       .buttonStyle(.glassProminent)
       .tint(.white)
       .foregroundStyle(Color.amethyst)
-      .padding(.top, 44)
-      note
-      Spacer()
-      Spacer()
     }
     .padding(.horizontal, 28)
-    .padding(.bottom, 12)
+    .padding(.bottom, 16)
     .disabled(busy)
     .task {
       guard !looked else { return }
