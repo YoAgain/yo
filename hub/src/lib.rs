@@ -139,6 +139,7 @@ impl Hub {
 
     pub fn router(self: &Arc<Self>) -> Router {
         let mut router = Router::new()
+            .route("/", get(|| async { axum::response::Html(include_str!("index.html")) }))
             .route(api::VERIFY_START, post(verify_start))
             .route(api::VERIFY_CHECK, post(verify_check))
             .route(api::KEY_PACKAGES, put(key_packages))
