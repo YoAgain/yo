@@ -25,9 +25,17 @@ struct Arrival: Equatable, Identifiable {
 
 @MainActor @Observable
 final class Inbox {
-  /// Every Yo that arrived, in order: the list shows each one (several can come at once, e.g. on opening the app). Who
-  /// and which only; the photos stay in `media` and go once seen.
-  private(set) var arrivals: [Arrival] = []
+  /// Counts each time Yos are ready for the list (`takeArrivals`): at most every `batchSeconds`, so a burst (twenty
+  /// Yos in a second) redraws the list ten times, not twenty, and each time with all that came meanwhile.
+  private(set) var arrived = 0
+  /// The Yos that came since the list last took them, in order. Who and which only; the photos stay in `media` and go
+  /// once seen.
+  @ObservationIgnored private var ready: [Arrival] = []
+  /// A batch is being gathered: what comes now waits for its end.
+  @ObservationIgnored private var gathering = false
+  /// Counts Yos as they come, to tell whether more came during a batch.
+  @ObservationIgnored private var came = 0
+  static let batchSeconds = 0.1
   /// Notifications already taken in, so one tapped and one collected on opening count once.
   @ObservationIgnored private var taken: Set<String> = []
   /// Photos and videos not yet seen, by sender, oldest first: kept on this iPhone until then (ReceivedMedia).
@@ -45,9 +53,11 @@ final class Inbox {
     media[arrival.from, default: []].append(arrival)
   }
 
-  /// Signed out: what waited to be seen is gone (MediaStorage.clearAll deleted it).
+  /// Signed out: what waited to be seen is gone (MediaStorage.clearAll deleted it), and Yos not shown yet.
   func forgetMedia() {
     media = [:]
+    ready = []
+    uncounted = [:]
   }
 
 
@@ -63,6 +73,10 @@ final class Inbox {
     }
   }()
   @ObservationIgnored private var nextSound = 0
+  /// When the Yo sound last played for Yos that came: at most `soundsPerSecond` in any second, so a burst sounds like
+  /// many Yos without twenty players fighting over the speaker.
+  @ObservationIgnored private var sounded: [ContinuousClock.Instant] = []
+  static let soundsPerSecond = 10
 
   /// The notification's category: "Yo back" right on it, as the original had, sent without opening the app.
   nonisolated static let category = "yo"
@@ -240,24 +254,22 @@ final class Inbox {
       friends.friend(user: user, handles: contacts.first { $0.user == user }?.handles ?? [])
     }
     for event in events {
+      let media: (YoMedia, MediaFile.Kind)?
       switch event {
-      case .message(let user, let sentAtMs, .yo):
+      case .message(let user, let sentAtMs, let kind):
+        switch kind {
+        case .yo: media = nil
+        case .photo(let photo): media = (photo, .photo)
+        case .video(let video, _): media = (video, .video)
+        default: continue  // text, links, places: not shown in Yo
+        }
         let sender = friend(user)
         received(id: "\(user)/\(sentAtMs)", from: sender.name)
-        Stats.receivedYo(from: sender.name)
-        friends.promote(sender.name)
-      case .message(let user, let sentAtMs, .photo(let media)):
-        let sender = friend(user)
-        received(id: "\(user)/\(sentAtMs)", from: sender.name)
-        Stats.receivedYo(from: sender.name)
-        friends.promote(sender.name)
-        ReceivedMedia.shared.expect(media, id: Self.mediaID(user, sentAtMs, media), from: sender.name, kind: .photo)
-      case .message(let user, let sentAtMs, .video(let media, _)):
-        let sender = friend(user)
-        received(id: "\(user)/\(sentAtMs)", from: sender.name)
-        Stats.receivedYo(from: sender.name)
-        friends.promote(sender.name)
-        ReceivedMedia.shared.expect(media, id: Self.mediaID(user, sentAtMs, media), from: sender.name, kind: .video)
+        // On top it goes by the list, in one step with the others and never under a finger (FriendList.rise).
+        count(from: sender.name)
+        if let (media, kind) = media {
+          ReceivedMedia.shared.expect(media, id: Self.mediaID(user, sentAtMs, media), from: sender.name, kind: kind)
+        }
       case .newChat(let user):
         _ = friend(user)
       default:
@@ -322,11 +334,54 @@ final class Inbox {
     player.play()
   }
 
+  /// Yos received, for the statistics: written a second after the first of them, once per sender (not twice per Yo).
+  private func count(from sender: String) {
+    uncounted[sender, default: 0] += 1
+    guard uncounted.count == 1 && uncounted[sender] == 1 else { return }
+    Task {
+      try? await Task.sleep(for: .seconds(1))
+      for (name, n) in uncounted { Stats.receivedYos(from: name, n) }
+      uncounted = [:]
+    }
+  }
+
+  @ObservationIgnored private var uncounted: [String: Int] = [:]
+
+  /// The Yos that came since the last time, for the list to show (each once).
+  func takeArrivals() -> [Arrival] {
+    defer { ready = [] }
+    return ready
+  }
+
   /// The sound, and the sender's row takes the Yo (as Messages and Signal show a new message in the list: on the
-  /// bar, not in a banner).
+  /// bar, not in a banner). The first Yo after a quiet moment goes to the list at once; what comes within
+  /// `batchSeconds` after it goes together, at the end of them.
   private func show(_ arrival: Arrival) {
-    playYo()  // one sound per Yo
-    arrivals.append(Arrival(id: arrival.id, from: arrival.from))
+    chime()
+    ready.append(Arrival(id: arrival.id, from: arrival.from))
     if arrival.photo != nil { media[arrival.from, default: []].append(arrival) }
+    came += 1
+    guard !gathering else { return }
+    gathering = true
+    arrived += 1
+    Task {
+      var told = came
+      while true {
+        try? await Task.sleep(for: .seconds(Self.batchSeconds))
+        guard came != told else { break }  // a quiet moment: the next Yo goes at once again
+        told = came
+        arrived += 1
+      }
+      gathering = false
+    }
+  }
+
+  /// One sound per Yo, but no more than `soundsPerSecond` in a second (a burst of twenty sounds ten times).
+  private func chime() {
+    let now = ContinuousClock.now
+    sounded.removeAll { now - $0 > .seconds(1) }
+    guard sounded.count < Self.soundsPerSecond else { return }
+    sounded.append(now)
+    playYo()
   }
 }

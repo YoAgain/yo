@@ -13,16 +13,16 @@ enum Stats {
   static var byFriend: [String: Int] { defaults.dictionary(forKey: "stats.friends") as? [String: Int] ?? [:] }
 
   static func sentYo(to friend: String) { count("stats.sent", friend) }
-  static func receivedYo(from friend: String) { count("stats.received", friend) }
+  static func receivedYos(from friend: String, _ n: Int) { count("stats.received", friend, n) }
 
   static func reset() {
     for key in ["stats.sent", "stats.received", "stats.friends"] { defaults.removeObject(forKey: key) }
   }
 
-  private static func count(_ key: String, _ friend: String) {
-    defaults.set(defaults.integer(forKey: key) + 1, forKey: key)
+  private static func count(_ key: String, _ friend: String, _ n: Int = 1) {
+    defaults.set(defaults.integer(forKey: key) + n, forKey: key)
     var friends = byFriend
-    friends[friend, default: 0] += 1
+    friends[friend, default: 0] += n
     defaults.set(friends, forKey: "stats.friends")
   }
 }

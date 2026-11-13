@@ -16,7 +16,14 @@ struct Friend: Codable, Hashable, Identifiable {
   var user: String?
   /// Blocked (spec 4.8): off the list, nothing from them shown; Settings lists them to unblock.
   var blocked = false
-  var id: String { name }
+  /// Who they are on this phone, for good: a new spelling or a user id learned later keeps the bar in its place (a
+  /// name as identity made the bar leave and come in again on top).
+  var key = UUID()
+  var id: UUID { key }
+
+  /// One friend is one friend, whatever was learned about them since: by `key` alone.
+  static func == (a: Friend, b: Friend) -> Bool { a.key == b.key }
+  func hash(into hasher: inout Hasher) { hasher.combine(key) }
 
   init(name: String, color: Int, user: String? = nil) {
     self.name = name
@@ -31,6 +38,7 @@ struct Friend: Codable, Hashable, Identifiable {
     color = try c.decodeIfPresent(Int.self, forKey: .color) ?? -1
     user = try c.decodeIfPresent(String.self, forKey: .user)
     blocked = try c.decodeIfPresent(Bool.self, forKey: .blocked) ?? false
+    key = try c.decodeIfPresent(UUID.self, forKey: .key) ?? UUID()
   }
 }
 
@@ -79,7 +87,8 @@ final class Friends {
       all.firstIndex(where: { $0.user == user })
       ?? all.firstIndex(where: { $0.user == nil && skeletons.contains(Username.skeleton($0.name)) })
     if let index {
-      all[index].user = user
+      // Written only when something changed: each write saves the list and redraws it (once per Yo in a burst).
+      if all[index].user != user { all[index].user = user }
       if let spelled, all[index].name != spelled, Username.skeleton(spelled) == Username.skeleton(all[index].name),
         !all.contains(where: { $0.name == spelled })
       {
@@ -110,13 +119,19 @@ final class Friends {
   }
 
   /// A Yo went to or came from `name`: they go on top (the original's promoteObjectToTop).
-  /// The name in any spelling: the friend may have been renamed to its owner's spelling meanwhile.
+  /// The name in any spelling: the friend may have been renamed to its owner's spelling meanwhile. One already first
+  /// on the list (only blocked ones above) stays as it is: nothing is written, nothing moves.
   func promote(_ name: String) {
     let skeleton = Username.skeleton(name)
     let found =
       all.firstIndex(where: { $0.name == name }) ?? all.firstIndex(where: { Username.skeleton($0.name) == skeleton })
-    guard let index = found, index != 0 else { return }
+    guard let index = found, all[..<index].contains(where: { !$0.blocked }) else { return }
     all.insert(all.remove(at: index), at: 0)
+  }
+
+  /// The friend shown under this name now, if any.
+  func shownFriend(named name: String) -> Friend? {
+    all.first { $0.name == name && !$0.blocked }
   }
 
   /// Signed out: the friends of a new phone, none.

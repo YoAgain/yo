@@ -56,13 +56,14 @@ struct FriendList: View {
   /// What each bar says for a moment after a send ("Sent Yo", "Not Sent", "Canceled").
   @State private var sent: [Friend: String] = [:]
   /// Sends whose 1.5 seconds are still running, by name; each tap starts them again (a bar under taps stays put).
-  @State private var sentRounds: [String: Int] = [:]
+  @State private var sentRounds: [UUID: Int] = [:]
   /// How many sends of the same kind in a row a bar counts ("Sent Yo!!" for three).
-  @State private var sentCounts: [String: (text: String, count: Int)] = [:]
+  @State private var sentCounts: [UUID: (text: String, count: Int)] = [:]
   /// The mockup's Yos back, by name: they come when the bar goes on top, so it comes in carrying them.
-  @State private var replies: [String: [(at: Date, send: @MainActor () async -> Void)]] = [:]
-  /// How often each friend went on top: a new identity each time, so the bar leaves its place and comes in on top.
-  @State private var lifts: [String: Int] = [:]
+  @State private var replies: [UUID: [(at: Date, send: @MainActor () async -> Void)]] = [:]
+  /// How often each friend went on top (by `Friend.key`): a new identity each time, so the bar leaves its place and
+  /// comes in on top. Only here: a new spelling or user id never changes a bar's identity.
+  @State private var lifts: [UUID: Int] = [:]
   /// Senders waiting to go on top, oldest first: gathered for a moment and moved in one step, so many Yos at once do
   /// not shuffle the list bar by bar.
   @State private var rising: [String] = []
@@ -72,7 +73,7 @@ struct FriendList: View {
   @State private var blocking: (friend: Friend, reported: Bool)?
   /// What went wrong reporting or blocking: the alert's title and message.
   @State private var problem: (title: String, message: String)?
-  /// The friends whose bars are on screen now.
+  /// The friends whose bars are on screen now, by `Friend.key` (a new spelling leaves them on screen).
   @State private var onScreen: Set<String> = []
   /// Counts sends, for the haptic.
   @State private var sends = 0
@@ -82,12 +83,12 @@ struct FriendList: View {
   /// Each photo or video of a stack being made ready (taken, or the video ended), by its id.
   @State private var preparing: [UUID: Task<Prepared?, Never>] = [:]
   /// A stack's 1.5 seconds, by name: each new photo starts them again; when they are over, the whole stack goes.
-  @State private var stackRounds: [String: Int] = [:]
+  @State private var stackRounds: [UUID: Int] = [:]
 
   struct Outgoing: Equatable {
     let id = UUID()
     let started = Date.now
-    /// What the bar says meanwhile ("Sent 📷!"), the undo ring right after it.
+    /// What the bar says meanwhile ("Sent 📷!"), the undo ring at the bar's left.
     let text: String
   }
 
@@ -106,8 +107,8 @@ struct FriendList: View {
   @State private var sayYo = 0
   /// The plain Yos on bars now, by sender.
   @State private var landed: [String: Landing] = [:]
-  /// Arrivals already shown.
-  @State private var launched = 0
+  /// The stacks' running clocks, one per sender (a new Yo replaces it): not one waiting task per Yo.
+  @State private var clocks = Clocks()
   /// The photos and videos playing while a thumbnail is held, and those already shown.
   @State private var viewing: [Arrival]?
   @State private var shown: [Arrival] = []
@@ -116,7 +117,15 @@ struct FriendList: View {
   struct Lifted: Identifiable {
     let friend: Friend
     let lifts: Int
-    var id: String { "\(friend.name)#\(lifts)" }
+    var id: String { "\(friend.key)#\(lifts)" }
+  }
+
+  /// Tasks the list keeps for itself, not drawn: replacing one is no change to the view.
+  @MainActor final class Clocks {
+    /// Each stack's clock, by sender: a new Yo cancels it and starts another.
+    var settling: [String: Task<Void, Never>] = [:]
+    /// The stacks' clocks start once the list has laid out where the bars are now (one wait for a whole batch).
+    var starting = false
   }
 
   /// The Yos on a bar now, a stack: each new one adds a "!" and starts the stack's time again. Only when none came for
@@ -159,9 +168,10 @@ struct FriendList: View {
         }
         .overlay {
           if let viewing {
-            HeldMedia(queue: viewing, photoSeconds: Self.photoSeconds) {
-              shown.append($0)
-              inbox.viewed($0)
+            HeldMedia(queue: viewing, photoSeconds: Self.photoSeconds) { arrival in
+              guard !shown.contains(where: { $0.id == arrival.id }) else { return }  // stepped back to: once
+              shown.append(arrival)
+              inbox.viewed(arrival)
             } finished: {
               closeViewer()
             }
@@ -177,7 +187,7 @@ struct FriendList: View {
         LazyVStack(spacing: 0) {
           // Going on top is a delete and an insert (as Signal's chat list does): the gap closes below, the bar comes in
           // from the top; it does not fly across the list.
-          ForEach(friends.shown.map { Lifted(friend: $0, lifts: lifts[$0.name] ?? 0) }) { lifted in
+          ForEach(friends.shown.map { Lifted(friend: $0, lifts: lifts[$0.key] ?? 0) }) { lifted in
             row(lifted.friend)
               .transition(.asymmetric(insertion: .move(edge: .top).combined(with: .opacity), removal: .opacity))
           }
@@ -325,7 +335,7 @@ struct FriendList: View {
   private func rowCount(_ friend: Friend) -> Int {
     if recordingFor == friend { return 1 }
     if let going = outgoing[friend], !going.isEmpty { return going.count }
-    if sent[friend] != nil { return sentCounts[friend.name]?.count ?? 1 }
+    if sent[friend] != nil { return sentCounts[friend.key]?.count ?? 1 }
     return 1
   }
 
@@ -506,13 +516,13 @@ struct FriendList: View {
     let one = Outgoing(text: text)
     outgoing[friend, default: []].append(one)
     preparing[one.id] = Task { await prepare() }
-    let name = friend.name
-    let round = (stackRounds[name] ?? 0) + 1
-    stackRounds[name] = round
+    let key = friend.key
+    let round = (stackRounds[key] ?? 0) + 1
+    stackRounds[key] = round
     Task {
       try? await Task.sleep(for: .seconds(Self.sendDelay))
-      guard stackRounds[name] == round, let stack = outgoing[friend] else { return }  // another came, or undone
-      stackRounds[name] = nil
+      guard stackRounds[key] == round, let stack = outgoing[friend] else { return }  // another came, or undone
+      stackRounds[key] = nil
       outgoing[friend] = nil
       var went = 0
       for one in stack {
@@ -537,7 +547,7 @@ struct FriendList: View {
         Task { await task.value?.discard() }
       }
     }
-    stackRounds[friend.name] = nil
+    stackRounds[friend.key] = nil
     outgoing[friend] = nil
     showSent(to: friend, "Canceled")
   }
@@ -549,25 +559,25 @@ struct FriendList: View {
   private func showSent(
     to friend: Friend, _ text: String, thenOnTop: Bool = false, reply: (@MainActor () async -> Void)? = nil
   ) {
-    let name = friend.name
-    let count = sentCounts[name].map { $0.text == text ? $0.count + 1 : 1 } ?? 1
+    let key = friend.key  // the friend's, also if their spelling changes meanwhile
+    let count = sentCounts[key].map { $0.text == text ? $0.count + 1 : 1 } ?? 1
     withAnimation(.snappy(duration: 0.2)) {  // a "!" comes in, or the number turns
-      sentCounts[name] = (text, count)
+      sentCounts[key] = (text, count)
       sent[friend] = text
     }
-    if let reply { replies[name, default: []].append((.now, reply)) }
-    let round = (sentRounds[name] ?? 0) + 1
-    sentRounds[name] = round
+    if let reply { replies[key, default: []].append((.now, reply)) }
+    let round = (sentRounds[key] ?? 0) + 1
+    sentRounds[key] = round
     Task {
       try? await Task.sleep(for: .seconds(1.5))
-      guard sentRounds[name] == round else { return }  // tapped again meanwhile
-      sentRounds[name] = nil
-      let pending = replies.removeValue(forKey: name) ?? []
+      guard sentRounds[key] == round else { return }  // tapped again meanwhile
+      sentRounds[key] = nil
+      let pending = replies.removeValue(forKey: key) ?? []
       withAnimation(.snappy) {
         sent[friend] = nil
-        sentCounts[name] = nil
+        sentCounts[key] = nil
       }
-      if thenOnTop { rise(name) }
+      if thenOnTop, let now = friends.all.first(where: { $0.key == key }) { rise(now.name) }
       // In the rhythm they were tapped: tapped fast, they come fast and their sounds cut each other off.
       let start = Date.now
       for reply in pending {
@@ -581,7 +591,7 @@ struct FriendList: View {
   // MARK: Seeing
 
   /// A finger on a bar's thumbnail plays its photos and videos, oldest first. Held, letting go closes them; a short
-  /// tap lets them run to the end (a tap on the picture skips). What was shown is gone.
+  /// tap lets them run to the end (held: paused; a tap on the left third: back; elsewhere: on). What was shown is gone.
   private func see(_ friend: Friend, _ touch: ThumbnailTouch) {
     switch touch {
     case .down:
@@ -609,7 +619,7 @@ extension FriendList {
 
   private func changes(_ content: some View) -> some View {
     content
-      .onChange(of: inbox.arrivals.count) { _, count in arrived(count) }
+      .onChange(of: inbox.arrived, initial: true) { arrived() }
       // While the list is on screen: Yos come in from the hub.
       .task { await inbox.listen(accounts: accounts, friends: friends) }
       .onChange(of: onScreen) { startClocks() }
@@ -638,43 +648,56 @@ extension FriendList {
       .preferredColorScheme(.dark)  // white status bar and bar items on purple
   }
 
-  /// New Yos: shown one after the other when several came at once (on opening the app).
-  private func arrived(_ count: Int) {
-    let new = inbox.arrivals.dropFirst(launched)
-    launched = count
-    for (i, arrival) in new.enumerated() {
-      show(arrival, after: Double(i) * 0.35)
+  /// New Yos, as many as came since the last batch (`Inbox.batchSeconds`): one step for all of them, whatever their
+  /// number. One haptic; each sender's bar goes on top once and counts all its Yos at once (one "!" for each); then
+  /// the clocks start once.
+  private func arrived() {
+    let batch = inbox.takeArrivals()
+    guard !batch.isEmpty else { return }
+    var senders: [String] = []  // by their newest Yo, the newest last (it ends on top)
+    var runs: [String: (first: String, count: Int)] = [:]
+    for arrival in batch {
+      if let at = senders.firstIndex(of: arrival.from) { senders.remove(at: at) }
+      senders.append(arrival.from)
+      runs[arrival.from, default: (arrival.id, 0)].count += 1
+    }
+    cheers += 1
+    for name in senders { rise(name) }  // on top as soon as no bar is being tapped, all in one step
+    withAnimation(.snappy(duration: 0.2)) {  // the words make room without a bounce
+      for name in senders {
+        guard let run = runs[name] else { continue }
+        land(name, run.first, count: run.count)
+      }
+    }
+    guard !clocks.starting else { return }
+    clocks.starting = true
+    Task {
+      try? await Task.sleep(for: .milliseconds(150))  // the list has laid out where the bars are now
+      clocks.starting = false
+      startClocks()
     }
   }
 
-  /// One Yo: the title gains a "!" (with the haptic), the sender's bar goes on top (the list scrolls there if it is
-  /// not on screen), and its Yo shows there until `yoSeconds` are over. A photo stays until seen (Inbox.media).
-  private func show(_ arrival: Arrival, after delay: Double) {
-    let name = arrival.from
-    Task {
-      try? await Task.sleep(for: .seconds(delay))
-      cheers += 1
-      rise(name)  // on top as soon as no bar is being tapped
-      withAnimation(.snappy(duration: 0.2)) {  // the words make room without a bounce
-        if var landing = landed[name], landing.fading == nil {
-          landing.count += 1  // one more "!"
-          if landing.seen != nil {
-            landing.seen = .now  // on screen: the stack's time starts again
-            settle(name, landing.seen!)
-          }
-          landed[name] = landing
-        } else {
-          landed[name] = Landing(first: arrival.id, count: 1)  // a new run (also over one fading out): it knocks
-        }
+  /// Yos on a sender's bar: the stack counts them, and one on screen starts its time again. A new run (also over one
+  /// fading out) knocks. A photo stays until seen (Inbox.media).
+  private func land(_ name: String, _ first: String, count: Int) {
+    if var landing = landed[name], landing.fading == nil {
+      landing.count += count  // more "!"s
+      if landing.seen != nil {
+        let now = Date.now
+        landing.seen = now  // on screen: the stack's time starts again
+        settle(name, now)
       }
-      try? await Task.sleep(for: .milliseconds(150))  // the list has laid out where the bar is now
-      startClocks()
+      landed[name] = landing
+    } else {
+      landed[name] = Landing(first: first, count: count)
     }
   }
 
   /// Stacks whose bars are on screen now start their time; one out of sight waits until it is seen.
   private func startClocks() {
-    for (name, landing) in landed where onScreen.contains(name) && landing.seen == nil {
+    let seen = Set(friends.shown.filter { onScreen.contains($0.key.uuidString) }.map(\.name))  // as named now
+    for (name, landing) in landed where seen.contains(name) && landing.seen == nil {
       let now = Date.now
       landed[name]?.seen = now
       settle(name, now)
@@ -684,8 +707,10 @@ extension FriendList {
   /// A stack's time, started at `since`: if no Yo came meanwhile, its "!"s go one by one (quickly; faster the more
   /// there are), then the last Yo fades out (`yoSeconds`). A new Yo starts it again.
   private func settle(_ name: String, _ since: Date) {
-    Task {
+    clocks.settling[name]?.cancel()  // the clock before is over: one per stack, not one per Yo
+    clocks.settling[name] = Task {
       try? await Task.sleep(for: .seconds(Self.yoSolidSeconds))
+      guard !Task.isCancelled else { return }
       let step = min(0.2, 2.0 / Double(max(1, landed[name]?.count ?? 1)))
       while let landing = landed[name], landing.seen == since, landing.count > 1 {
         withAnimation(.easeOut(duration: 0.15)) { landed[name]?.count -= 1 }
@@ -734,7 +759,7 @@ extension FriendList {
     guard !moving.isEmpty else { return }
     withAnimation(.snappy(duration: 0.35)) {
       for name in names {
-        if moving.contains(name) { lifts[name, default: 0] += 1 }
+        if moving.contains(name), let key = friends.shownFriend(named: name)?.key { lifts[key, default: 0] += 1 }
         friends.promote(name)
       }
       if !scrolled { position.scrollTo(edge: .top) }
@@ -860,8 +885,15 @@ struct RowButton: View {
       }
     }
     // What takes its own touches (the undo ring, the photos) lies over the bar, in the same line (Buttons in a Button
-    // do not work).
+    // do not work). The ring stands at the bar's very left, away from where the bar was tapped: a tap more is
+    // another photo, never an undo by mistake.
     .overlay { line(touchable: true) }
+    .overlay(alignment: .leading) {
+      if let outgoing {
+        undoRing(since: outgoing)
+          .padding(.leading, BarLine.margin)
+      }
+    }
     .animation(.snappy, value: outgoing)
     .animation(.spring(duration: 0.4, bounce: 0.35), value: yo)
     .animation(.smooth, value: media)
@@ -876,26 +908,18 @@ struct RowButton: View {
       .contentShape(.rect)
   }
 
-  /// The bar's line, sending and receiving alike (BarLine): the words; their "!"s and the undo ring after them; a Yo
-  /// that came at the end. Laid out twice the same: in the bar the words and their "!"s, over it what takes its own
-  /// touches (the ring, the Yo at the end), so each sits exactly where the other leaves it room.
+  /// The bar's line, sending and receiving alike (BarLine): the words and their "!"s; a Yo that came at the end; room
+  /// at the start for the undo ring while something is on its way out. Laid out twice the same: in the bar the words
+  /// and their "!"s, over it what takes its own touches (the Yo at the end), so each sits exactly where the other
+  /// leaves it room.
   private func line(touchable: Bool) -> some View {
-    BarLine {
+    BarLine(start: outgoing == nil ? BarLine.margin : BarLine.margin + Self.ring + BarLine.gap) {
       Text(title)
         .lineLimit(1)
         .contentTransition(.identity)  // other words come at once, never two drawn over each other
         .modifier(Knock(trigger: yo?.first))
         .opacity(touchable ? 0 : 1)
-      HStack(spacing: 0) {
-        Bangs(count: count).opacity(touchable ? 0 : 1)
-        if let outgoing {
-          Group {
-            if touchable { undoRing(since: outgoing) } else { Color.clear }
-          }
-          .frame(width: Self.ring, height: Self.ring)
-          .padding(.leading, 10)
-        }
-      }
+      Bangs(count: count).opacity(touchable ? 0 : 1)
       ZStack { mark(touchable: touchable) }  // always a part, so a missing "!" never takes its place
         .modifier(Knock(trigger: yo?.first))
         .opacity(touchable ? 1 : 0)
@@ -907,7 +931,7 @@ struct RowButton: View {
 
   private static let ring = 30.0
 
-  /// Something on its way out: a ring after the words closing like an upload; a tap on it undoes the send.
+  /// Something on its way out: a ring at the bar's left closing like an upload; a tap on it undoes the send.
   private func undoRing(since start: Date) -> some View {
     Button(action: stop) {
       TimelineView(.animation) { timeline in
@@ -1005,14 +1029,16 @@ struct Bangs: View {
   }
 }
 
-/// A bar's line, for sending and receiving alike: the words in the middle, what belongs to them (their "!"s, the undo
-/// ring) right after them, a Yo that came at the bar's end. The words stay in the middle until they would run into the
-/// end (or the edge): then they move left as far as needed, never past the margin; a name too long even then is cut
-/// with "…". Nothing shrinks, nothing overlaps.
+/// A bar's line, for sending and receiving alike: the words in the middle, their "!"s right after them, a Yo that came
+/// at the bar's end. The words stay in the middle until they would run into the end (or the edge): then they move left
+/// as far as needed, never past `start` (the margin, or after the undo ring); a name too long even then is cut with
+/// "…". Nothing shrinks, nothing overlaps.
 struct BarLine: Layout {
   static let margin = 20.0
   static let endPadding = 30.0
   static let gap = 14.0
+  /// How far from the bar's left edge the words may go at most.
+  var start = margin
 
   func sizeThatFits(proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) -> CGSize {
     let height = subviews.map { $0.sizeThatFits(.unspecified).height }.max() ?? 0
@@ -1028,11 +1054,11 @@ struct BarLine: Layout {
     let endSize = end?.sizeThatFits(.unspecified) ?? .zero
     let endX = bounds.maxX - Self.endPadding - endSize.width
     let limit = endSize.width > 0 ? endX - Self.gap : bounds.maxX - Self.margin
-    let room = max(0, limit - bounds.minX - Self.margin - afterSize.width)
+    let room = max(0, limit - bounds.minX - start - afterSize.width)
     let wordsWidth = min(words.sizeThatFits(.unspecified).width, room)
     var x = bounds.midX - wordsWidth / 2
     x -= max(0, x + wordsWidth + afterSize.width - limit)
-    x = max(bounds.minX + Self.margin, x)
+    x = max(bounds.minX + start, x)
     words.place(
       at: CGPoint(x: x, y: bounds.midY), anchor: .leading, proposal: ProposedViewSize(width: wordsWidth, height: nil))
     after?.place(at: CGPoint(x: x + wordsWidth, y: bounds.midY), anchor: .leading, proposal: .unspecified)
@@ -1076,20 +1102,41 @@ struct RowPress: ButtonStyle {
   }
 }
 
-/// Photos and videos while their thumbnail is held, as Stories: the whole screen, one after the other (oldest first),
-/// a line for each at the top filling up; a photo at most `photoSeconds`, a video as long as it runs. A tap skips to
-/// the next. Each is reported when it shows; at the end it closes. Held, letting go closes it sooner (FriendList).
+/// Photos and videos, as Stories: the whole screen, one after the other (oldest first), a line for each at the top
+/// filling up; a photo at most `photoSeconds`, a video as long as it runs. A finger held anywhere pauses it (the line
+/// and the video), letting go goes on; a tap on the left third goes back, elsewhere to the next. Back reaches all
+/// shown while the viewer is open (they are gone once it closes). Past the last, or swiped down, it closes. Each is
+/// reported when it shows. Opened by holding the thumbnail, letting go of it closes sooner (FriendList).
 struct HeldMedia: View {
   let queue: [Arrival]
   let photoSeconds: Double
   let shows: (Arrival) -> Void
   let finished: () -> Void
   @State private var index = 0
-  /// When the one showing started, and how long it runs: its line fills from the clock, so skipping never leaves a
-  /// line half way or running on.
-  @State private var started: Date?
-  @State private var seconds = 3.0
+  /// Counts each start (also of the same one again): what the showing one's tasks go by.
+  @State private var round = 0
+  /// How long the one showing runs; nil while it is made ready.
+  @State private var seconds: Double?
+  /// How much of it ran before the current stretch, and when that stretch began (nil while paused): its line fills
+  /// from the clock, so pausing and skipping never leave a line half way or running on.
+  @State private var ran = 0.0
+  @State private var since: Date?
+  /// A finger on the screen: paused until it lets go.
+  @GestureState private var held = false  // also let go when the system takes the touch
+  /// Where and when the finger on the screen came down: a new place is a new touch (one the system took leaves
+  /// nothing behind).
+  @State private var touched: (at: CGPoint, time: Date)?
+  /// How far a swipe down has pulled the picture.
+  @State private var pulled = 0.0
+  @State private var width = 393.0
   @State private var player: AVPlayer?
+
+  /// The showing one's time runs while it is ready and no finger holds it.
+  private struct Run: Equatable {
+    let round: Int
+    let held: Bool
+    let ready: Bool
+  }
 
   init(
     queue: [Arrival], photoSeconds: Double, shows: @escaping (Arrival) -> Void, finished: @escaping () -> Void
@@ -1116,8 +1163,8 @@ struct HeldMedia: View {
         }
         .ignoresSafeArea()
         VStack(spacing: 10) {
-          TimelineView(.animation) { timeline in
-            let running = started.map { min(1, timeline.date.timeIntervalSince($0) / seconds) } ?? 0
+          TimelineView(.animation(paused: since == nil)) { timeline in
+            let running = progress(at: timeline.date)
             HStack(spacing: 3) {
               ForEach(queue.indices, id: \.self) { i in
                 Capsule()
@@ -1143,34 +1190,91 @@ struct HeldMedia: View {
         .frame(maxHeight: .infinity, alignment: .top)
       }
     }
+    .offset(y: pulled)
     .statusBarHidden()
     .persistentSystemOverlays(.hidden)
     .contentShape(.rect)
-    // A tap goes to the next, also with a second finger while the first still holds the thumbnail underneath.
-    .onTapGesture { index += 1 }
-    .task(id: index) { await play(index) }
+    .onGeometryChange(for: Double.self) { $0.size.width } action: { width = $0 }
+    // Any finger, also a second one while the first still holds the thumbnail underneath.
+    .gesture(touches)
+    // A touch the system took (no end): nothing of it stays.
+    .onChange(of: held) { _, holding in
+      if !holding && pulled != 0 { withAnimation(.snappy(duration: 0.25)) { pulled = 0 } }
+    }
+    .task(id: round) { await load() }
+    .task(id: Run(round: round, held: held, ready: seconds != nil)) { await run() }
     .onDisappear { player?.pause() }
+    .accessibilityAction(named: "Previous") { go(to: index - 1) }
+    .accessibilityAction(named: "Next") { go(to: index + 1) }
+    .accessibilityAction(.escape) { finished() }
   }
 
-  private func play(_ index: Int) async {
+  /// Down: paused at once. Up: going on; a quick tap steps (left third back, else on), a swipe down closes.
+  private var touches: some Gesture {
+    DragGesture(minimumDistance: 0)
+      .updating($held) { _, held, _ in held = true }
+      .onChanged { drag in
+        if touched?.at != drag.startLocation { touched = (drag.startLocation, drag.time) }
+        pulled = max(0, drag.translation.height) * 0.5  // the picture follows a swipe down, a little
+      }
+      .onEnded { drag in
+        let quick = (touched.map { drag.time.timeIntervalSince($0.time) } ?? .infinity) < 0.3
+        touched = nil
+        let moved = drag.translation
+        if moved.height > 90 && moved.height > abs(moved.width) { return finished() }
+        withAnimation(.snappy(duration: 0.25)) { pulled = 0 }
+        guard quick, abs(moved.width) < 20, abs(moved.height) < 20 else { return }
+        go(to: drag.startLocation.x < width / 3 ? index - 1 : index + 1)
+      }
+  }
+
+  /// How much of the showing one has run, 0 to 1.
+  private func progress(at date: Date) -> Double {
+    guard let seconds, seconds > 0 else { return 0 }
+    return min(1, (ran + (since.map { date.timeIntervalSince($0) } ?? 0)) / seconds)
+  }
+
+  /// Another one (back before the first: the first again), from its start.
+  private func go(to next: Int) {
+    index = max(0, next)
+    seconds = nil
+    ran = 0
+    since = nil
+    round += 1
+  }
+
+  /// The one to show made ready: reported, a video loaded and its length known. Past the last: closed.
+  private func load() async {
     guard index < queue.count else { return finished() }
     let current = queue[index]
     shows(current)
-    var seconds = photoSeconds
-    if let video = current.video {
-      let player = AVPlayer(url: video)
-      self.player = player
-      player.play()
-      if let length = try? await AVURLAsset(url: video).load(.duration).seconds, length > 0 { seconds = length }
-    } else {
-      player?.pause()
+    player?.pause()
+    guard let video = current.video else {
       player = nil
+      seconds = photoSeconds
+      return
     }
-    self.seconds = seconds
-    started = .now
-    try? await Task.sleep(for: .seconds(seconds))
+    let player = AVPlayer(url: video)
+    self.player = player
+    let length = (try? await AVURLAsset(url: video).load(.duration).seconds) ?? 0
     guard !Task.isCancelled else { return }
-    self.index += 1
+    seconds = length > 0 ? length : photoSeconds
+  }
+
+  /// The showing one's time: running (the video playing) until it is over, then the next; paused while held.
+  private func run() async {
+    guard let seconds else { return }
+    if held {
+      player?.pause()
+      if let since { ran += Date.now.timeIntervalSince(since) }
+      since = nil
+      return
+    }
+    since = .now
+    player?.play()
+    try? await Task.sleep(for: .seconds(max(0, seconds - ran)))
+    guard !Task.isCancelled else { return }
+    go(to: index + 1)
   }
 }
 
