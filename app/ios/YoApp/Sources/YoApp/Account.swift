@@ -85,6 +85,13 @@ struct BackupRecord: Codable {
       outputByteCount: 32)
   }
 
+  /// Where the backup lies, found from the words alone: no name needed (a name can change), not guessable (128 bits).
+  static func locator(code: [String]) -> String {
+    HKDF<SHA256>.deriveKey(inputKeyMaterial: SymmetricKey(data: Data(code.joined(separator: " ").utf8)),
+      info: Data("yo backup v1 locator".utf8), outputByteCount: 16)
+      .withUnsafeBytes { Data($0) }.base64EncodedString()
+  }
+
   static func key(code: [String]) -> SymmetricKey {
     HKDF<SHA256>.deriveKey(inputKeyMaterial: SymmetricKey(data: Data(code.joined(separator: " ").utf8)),
       info: Data("yo backup v1 code".utf8), outputByteCount: 32)
@@ -111,9 +118,15 @@ enum MockHub {
     store.data(forKey: "name." + username) != nil || Username.reserved.contains(username) || othersHave.contains(username)
   }
 
-  static func save(_ record: BackupRecord, for username: String) {
+  static func save(_ record: BackupRecord, for username: String, locator: String? = nil) {
     store.set(try? JSONEncoder().encode(record), forKey: "name." + username)
     store.set(username, forKey: "user." + record.userID.base64EncodedString())
+    if let locator { store.set(username, forKey: "code." + locator) }
+  }
+
+  /// The backup the recovery words point to.
+  static func username(at locator: String) -> String? {
+    store.string(forKey: "code." + locator)
   }
 
   static func record(for username: String) -> BackupRecord? {
@@ -183,7 +196,7 @@ final class AccountStore {
   func confirm() {
     guard let waiting else { return }
     RecoveryWords.save(waiting.code)
-    MockHub.save(waiting.record, for: waiting.account.username)
+    MockHub.save(waiting.record, for: waiting.account.username, locator: BackupRecord.locator(code: waiting.code))
     account = waiting.account
     self.waiting = nil
   }
@@ -197,9 +210,11 @@ final class AccountStore {
     try open(record, with: BackupRecord.unwrap(wrapped, with: BackupRecord.key(prf: prf)))
   }
 
-  /// A new phone, by the name and its recovery code.
-  func restore(username: String, code: [String]) throws {
-    guard let record = MockHub.record(for: username), let wrapped = record.byCode else { throw AccountError.noBackup }
+  /// A new phone, by the recovery words alone: they say where the backup is and open it.
+  func restore(code: [String]) throws {
+    guard let username = MockHub.username(at: BackupRecord.locator(code: code)),
+      let record = MockHub.record(for: username), let wrapped = record.byCode
+    else { throw AccountError.noBackup }
     guard let k = try? BackupRecord.unwrap(wrapped, with: BackupRecord.key(code: code)) else { throw AccountError.wrongCode }
     try open(record, with: k)
     RecoveryWords.save(code)

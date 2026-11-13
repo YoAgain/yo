@@ -32,7 +32,7 @@ struct Onboarding: View {
         case .name: naming
         case .code(let words): code(words)
         case .logIn: logInChoice
-        case .logInWithWords: LogIn(name: name) { go(.logIn) }
+        case .logInWithWords: LogIn { go(.logIn) }
         }
       }
       .transition(.asymmetric(insertion: .move(edge: .trailing).combined(with: .opacity),
@@ -321,17 +321,15 @@ struct WordGrid: View {
   }
 }
 
-/// Logging in without a passkey: the name and its 12 words.
+/// Logging in without a passkey: the 12 words, nothing else (they say whose they are).
 private struct LogIn: View {
-  @State var name: String
   let back: () -> Void
   @Environment(AccountStore.self) private var accounts
   @State private var words = ""
   @State private var problem: String?
 
   var body: some View {
-    Page(title: "Log In", message: "Your name and your 12 words.", back: back) {
-      NameField(name: $name)
+    Page(title: "Log In", message: "Your 12 words.", back: back) {
       TextField("", text: $words, prompt: Text("12 words").foregroundStyle(.white.opacity(0.35)), axis: .vertical)
         .font(.yo(18))
         .lineLimit(3...5)
@@ -341,7 +339,7 @@ private struct LogIn: View {
         .background(.white.opacity(0.14), in: .rect(cornerRadius: 16))
     } bottom: {
       PrimaryButton("Log In", action: logIn)
-        .disabled(name.isEmpty || words.isEmpty)
+        .disabled(words.isEmpty)
       Note(problem)
     }
   }
@@ -349,7 +347,7 @@ private struct LogIn: View {
   private func logIn() {
     guard let code = RecoveryCode.parse(words) else { return problem = "12 words from your list, please" }
     do {
-      try accounts.restore(username: name, code: code)
+      try accounts.restore(code: code)
     } catch {
       problem = error.localizedDescription
     }
