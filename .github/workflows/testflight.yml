@@ -21,7 +21,7 @@ jobs:
   testflight:
     runs-on: macos-26
     environment: testflight
-    timeout-minutes: 60
+    timeout-minutes: 95
     env:
       DEVELOPER_DIR: /Applications/Xcode_26.6.app/Contents/Developer
       OAD_COMMIT: 9af7bca43931552fe94db32f353a5f4e77866cc5
@@ -140,3 +140,12 @@ jobs:
           export ACTOOL=$(xcrun -f actool) DARWIN_SDK=$(dirname "$DEVELOPER_DIR")
           export XCODE_VERSION=$(xcodebuild -version | sed -n 's/^Xcode //p') XCODE_BUILD=$(xcodebuild -version | sed -n 's/^Build version //p')
           "$GITHUB_WORKSPACE/.oad/ship.sh" --upload
+
+      # Outside testers (the public link) get every build too: into the group "Public", submitted to Beta App Review.
+      - name: Public beta
+        timeout-minutes: 35
+        env:
+          ASC_KEY_ID: ${{ secrets.ASC_KEY_ID }}
+          ASC_ISSUER_ID: ${{ secrets.ASC_ISSUER_ID }}
+        run: |
+          ASC_KEY_PATH=$RUNNER_TEMP/asc/AuthKey.p8 ~/pymobile3-venv/bin/python -I app/ios/dev/beta.py "$GITHUB_WORKSPACE/.oad/tools"
