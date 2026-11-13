@@ -32,6 +32,7 @@ struct FriendList: View {
   static let yoSolidSeconds = 3.0
 
   @Environment(Inbox.self) private var inbox
+  @Environment(AccountStore.self) private var accounts
   @Environment(Friends.self) private var friends
 
   // The list
@@ -171,7 +172,17 @@ struct FriendList: View {
         ToolbarItem(placement: .principal) { title }
         ToolbarItem(placement: .topBarLeading) {
           // Your picture opens your profile and settings in a sheet, as Apple's own apps do.
-          Button("Profile", systemImage: "person.fill") { settings = true }
+          // A red dot while the name is not secured (as Settings badges "Finish Setting Up").
+          Button { settings = true } label: {
+            Image(systemName: "person.fill")
+              .overlay(alignment: .topTrailing) {
+                if accounts.account?.secured == false {
+                  Circle().fill(.red).frame(width: 9, height: 9).offset(x: 5, y: -4)
+                }
+              }
+          }
+          .accessibilityLabel("Profile")
+          .accessibilityValue(accounts.account?.secured == false ? "Name not secured" : "")
         }
         // The camera; it turns red (Alizarin, the original's round button) while it is on.
         ToolbarItem(placement: .topBarTrailing) {

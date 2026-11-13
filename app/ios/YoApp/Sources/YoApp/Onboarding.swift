@@ -13,7 +13,7 @@ struct Onboarding: View {
   @Environment(Inbox.self) private var inbox
 
   private enum Step: Equatable {
-    case welcome, name, passkey([String]), code([String]), logIn, logInWithWords
+    case welcome, name, logIn, logInWithWords
   }
 
   @State private var step = Step.welcome
@@ -25,8 +25,6 @@ struct Onboarding: View {
   /// Continue tapped with a name too short: the minimum shows, the field shakes (once per tap).
   @State private var tooShort = false
   @State private var shakes = 0
-  /// Where the recovery words went: "photos", "copied". Kept somewhere, Continue goes straight in.
-  @State private var kept: Set<String> = []
 
   var body: some View {
     ZStack {
@@ -35,8 +33,6 @@ struct Onboarding: View {
         switch step {
         case .welcome: welcome
         case .name: naming
-        case .passkey(let words): confirmPasskeyPage(then: words)
-        case .code(let words): code(words)
         case .logIn: logInChoice
         case .logInWithWords: LogIn { go(.logIn) }
         }
@@ -129,68 +125,7 @@ struct Onboarding: View {
     }
   }
 
-  // MARK: Passkey, once more
-
-  /// Some password managers (1Password) give what the backup needs only when the passkey is used, not when it is
-  /// made: so it is used once, here, said beforehand. Cancelled, the page stays; skipped, Settings can do it later.
-  private func confirmPasskeyPage(then words: [String]) -> some View {
-    Page(title: "Confirm Your Passkey",
-      message: "Use your new passkey once to finish setting it up.", back: backToName) {
-      Image(systemName: "person.badge.key.fill")
-        .font(.system(size: 64))
-        .padding(.top, 20)
-    } bottom: {
-      PrimaryButton("Use Passkey", busy: busy) { Task { await confirmPasskey(then: words) } }
-        .disabled(busy)
-      Button("Not Now") { go(.code(words)) }
-        .font(.yo(17))
-      Note(problem)
-    }
-  }
-
-  private func confirmPasskey(then words: [String]) async {
-    busy = true
-    defer { busy = false }
-    problem = nil
-    do {
-      try await accounts.confirmPasskey()
-      go(.code(words))
-    } catch let error as AccountError {
-      problem = error.errorDescription
-    } catch {
-      problem = "Passkey not confirmed. Try again."
-    }
-  }
-
-  // MARK: Recovery words
-
-  /// The words, and two ways to keep them right under them (Photos, the clipboard); Next at the bottom. They stay on
-  /// this phone too, in the profile.
-  private func code(_ words: [String]) -> some View {
-    Page(title: "Recovery Key", message: "Keep it somewhere safe. It's how you get back into Yo on a new iPhone.",
-      back: backToName) {
-      FrostedKey(words: words, qrSize: 96)
-      HStack(spacing: 12) {
-        KeepButton(title: "Save to Photos", icon: "photo.badge.arrow.down", done: kept.contains("photos")) {
-          Task { await saveToPhotos(words) }
-        }
-        KeepButton(title: "Copy", icon: "doc.on.doc", done: kept.contains("copied")) { copy(words) }
-      }
-      .padding(.top, 6)
-      .disabled(busy)
-    } bottom: {
-      PrimaryButton("Continue") { accounts.confirm() }
-      Note(problem)
-    }
-  }
-
   // MARK: Doing
-
-  /// Back from the passkey or the words: the registration is dropped, the name stays in the field.
-  private func backToName() {
-    accounts.cancelRegistration()
-    go(.name)
-  }
 
   private func go(_ next: Step) {
     problem = nil
@@ -206,11 +141,8 @@ struct Onboarding: View {
       return
     }
     guard Username.problem(name) == nil, !MockHub.isTaken(name) else { return }
-    busy = true
-    defer { busy = false }
     do {
-      let words = try await accounts.register(name)
-      go(accounts.passkeyToConfirm ? .passkey(words) : .code(words))
+      try accounts.register(name)  // in: the list takes over; the name is secured later, from the profile
     } catch {
       problem = error.localizedDescription
     }
@@ -228,30 +160,12 @@ struct Onboarding: View {
     }
   }
 
-  private func copy(_ words: [String]) {
-    RecoveryWords.copy(words, name: name)
-    kept.insert("copied")
-  }
-
-  private func saveToPhotos(_ words: [String]) async {
-    busy = true
-    defer { busy = false }
-    let renderer = ImageRenderer(content: RecoveryCard(name: name, words: words))
-    renderer.scale = 3
-    guard let image = renderer.uiImage else { return problem = "Couldn’t create your recovery key image. Try again." }
-    do {
-      try await RecoveryWords.saveToPhotos(image)
-      kept.insert("photos")
-    } catch {
-      problem = error.localizedDescription
-    }
-  }
 }
 
 // MARK: - The page every step shares
 
 /// Title and message at the top, the content in the middle, the buttons at the bottom; back at the top left.
-private struct Page<Content: View, Bottom: View>: View {
+struct Page<Content: View, Bottom: View>: View {
   let title: String
   var message: String?
   var back: (() -> Void)?
@@ -288,7 +202,7 @@ private struct Page<Content: View, Bottom: View>: View {
 }
 
 /// The one button at the bottom: white glass, the full width.
-private struct PrimaryButton: View {
+struct PrimaryButton: View {
   let title: String
   var busy = false
   let action: () -> Void
@@ -332,7 +246,7 @@ struct KeepButton: View {
 }
 
 /// A line for what went wrong, under the buttons; nothing when nothing did.
-private struct Note: View {
+struct Note: View {
   let text: String?
 
   init(_ text: String?) { self.text = text }

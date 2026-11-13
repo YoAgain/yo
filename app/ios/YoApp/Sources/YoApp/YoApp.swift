@@ -37,7 +37,10 @@ struct YoApp: App {
         }
         // Opening the app: the Yos waiting as notifications come in and show on their bars.
         .onChange(of: phase, initial: true) { _, phase in
-          if phase == .active { Task { await inbox.collectDelivered() } }
+          guard phase == .active else { return }
+          Task { await inbox.collectDelivered() }
+          // Opened: the 30 days start again, and so does the reminder (spec 6.4).
+          if let account = accounts.account { SecureReminder.update(secured: account.secured) }
         }
     }
   }

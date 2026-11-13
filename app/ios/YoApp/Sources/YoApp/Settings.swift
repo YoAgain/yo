@@ -19,6 +19,7 @@ struct SettingsView: View {
   @State private var words: [String]?
   @State private var addingPasskey = false
   @State private var passkeyProblem: String?
+  @State private var securing = false
 
   var body: some View {
     NavigationStack {
@@ -32,14 +33,36 @@ struct SettingsView: View {
             VStack(alignment: .leading, spacing: 2) {
               Text(accounts.account?.username ?? "You").font(.yo(24, relativeTo: .title3))
               Label(
-                accounts.account?.byPasskey == true ? "Saved with a passkey" : "Saved with a recovery key",
-                systemImage: accounts.account?.byPasskey == true ? "person.badge.key.fill" : "list.number"
+                accounts.account?.secured != true
+                  ? "Not secured yet"
+                  : accounts.account?.byPasskey == true ? "Saved with a passkey" : "Saved with a recovery key",
+                systemImage: accounts.account?.secured != true
+                  ? "exclamationmark.circle"
+                  : accounts.account?.byPasskey == true ? "person.badge.key.fill" : "list.number"
               )
               .font(.subheadline)
               .foregroundStyle(.secondary)
             }
           }
           .padding(.vertical, 4)
+        }
+        if accounts.account?.secured == false {
+          // As Settings shows "Finish Setting Up": the one thing left, with the red dot the profile button has too.
+          Section {
+            Button { securing = true } label: {
+              HStack(spacing: 12) {
+                VStack(alignment: .leading, spacing: 2) {
+                  Text("Secure Your Name").foregroundStyle(.primary)
+                  Text("So you can get it back on a new iPhone. Names not secured become available after 30 days "
+                    + "without opening Yo.")
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
+                }
+                Spacer()
+                Circle().fill(.red).frame(width: 10, height: 10)
+              }
+            }
+          }
         }
         Section {
           Toggle("Save Sent Photos and Videos", isOn: $saveSent)
@@ -52,13 +75,15 @@ struct SettingsView: View {
           if RecoveryWords.load() != nil {
             Button("Recovery Key", systemImage: "key") { Task { await showWords() } }
           }
-          if accounts.account?.byPasskey == false {
+          if accounts.account?.secured == true, accounts.account?.byPasskey == false {
             Button("Set Up Passkey", systemImage: "person.badge.key") { Task { await addPasskey() } }
               .disabled(addingPasskey)
           }
         } footer: {
           if let passkeyProblem {
             Text(passkeyProblem).foregroundStyle(.red)
+          } else if accounts.account?.secured != true {
+            Text("Use your passkey or recovery key to sign in to Yo on a new iPhone.")
           } else if accounts.account?.byPasskey == false {
             Text("Use your recovery key to sign in to Yo on a new iPhone. Set up a passkey to sign in without it.")
           } else {
@@ -72,6 +97,7 @@ struct SettingsView: View {
           Text("Resets Yo on this iPhone. Keep your passkey or a copy of your recovery key so you can sign in again.")
         }
       }
+      .sheet(isPresented: $securing) { SecureNameSheet() }
       .sheet(isPresented: Binding(get: { words != nil }, set: { if !$0 { words = nil } })) {
         if let words { RecoveryWordsSheet(name: accounts.account?.username ?? "", words: words) }
       }

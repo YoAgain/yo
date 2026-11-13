@@ -10,14 +10,20 @@ import Photos
 import Security
 import UIKit
 import UniformTypeIdentifiers
+import UserNotifications
 
 struct Account: Codable, Equatable {
   var username: String
   var userID: Data
   /// Ed25519, raw: signs the account's devices (spec 3.1).
   var accountKey: Data
-  /// How the backup opens: by the passkey, or only by the recovery code.
+  /// How the backup opens: by the passkey (and the words), or by the recovery words only.
   var byPasskey: Bool
+  /// The recovery words open the backup (nil in accounts saved before this was kept: see `AccountStore.init`).
+  var byCode: Bool? = false
+
+  /// Backed up (spec 7): the name comes back on a new phone. Not yet, it is released after 30 days away (spec 6.4).
+  var secured: Bool { byPasskey || byCode == true }
 }
 
 enum Username {
@@ -175,54 +181,79 @@ final class AccountStore {
 
   private static let key = "account"
   private let passkeys = Passkeys()
-  /// A registration waiting for its recovery words to be kept; `k` and the passkey while it still has to be confirmed.
-  private var waiting: (account: Account, record: BackupRecord, code: [String], k: SymmetricKey, passkey: Data?)?
-
-  /// The passkey was made; its PRF output comes only when it is used: it is asked once more (`confirmPasskey`) before
-  /// the words.
-  var passkeyToConfirm: Bool { waiting?.passkey != nil && waiting?.account.byPasskey == false }
-
-  /// Back from a registration not finished: nothing kept (the passkey made stays in the password manager, unused).
-  func cancelRegistration() { waiting = nil }
+  /// Securing under way: K and the words, made once per try; the passkey once made.
+  private var securing: (k: SymmetricKey, code: [String], passkey: Data?)?
 
   init() {
     account = UserDefaults.standard.data(forKey: Self.key).flatMap { try? JSONDecoder().decode(Account.self, from: $0) }
+    if account?.byCode == nil, RecoveryWords.load() != nil { account?.byCode = true }  // registered with the words
   }
 
-  /// Registers `username` (spec 6.4) and backs it up (spec 7). Always with a recovery key, the words returned to be
-  /// kept (`confirm`); with the passkey too when it gives its PRF output as it is made (iCloud Keychain does; others,
-  /// like 1Password, only when used: they can be added later from Settings, `addPasskey`).
-  func register(_ username: String) async throws -> [String] {
+  /// Registers `username` (spec 6.4): the name is yours at once, the backup comes later (`secure…`).
+  func register(_ username: String) throws {
     guard !MockHub.isTaken(username) else { throw AccountError.taken }
     let userID = Passkeys.random(16)
-    let account = Account(
+    MockHub.save(BackupRecord(userID: userID, sealed: Data()), for: username)  // the name taken, nothing backed up
+    account = Account(
       username: username, userID: userID, accountKey: Curve25519.Signing.PrivateKey().rawRepresentation,
       byPasskey: false)
-    let k = SymmetricKey(size: .bits256)
-    let code = RecoveryCode.make()
-    var record = BackupRecord(userID: userID, byCode: try BackupRecord.wrap(k, in: BackupRecord.key(code: code)),
-      sealed: Data())
-    let credential = try? await passkeys.make(name: username, userID: userID)
-    record.sealed = try BackupRecord.seal(account, code: code, with: k)
-    waiting = (account, record, code, k, credential)
-    return code
+    SecureReminder.update(secured: false)
   }
 
-  /// The passkey just made, asked once more for its PRF output, and added to the backup: then it opens it as the
-  /// words do.
+  // MARK: Securing the name (spec 7)
+
+  /// A passkey for the name, made and then used, as its PRF output comes only when a passkey is used. Used right away
+  /// when the provider says it supports PRF (iCloud Keychain: one more Face ID); else, or cancelled, the caller explains
+  /// and calls `confirmPasskey`. True when the name is secured.
+  func securePasskey() async throws -> Bool {
+    guard let account else { throw AccountError.noBackup }
+    if securing == nil { securing = (SymmetricKey(size: .bits256), RecoveryCode.make(), nil) }
+    let made = try await passkeys.make(name: account.username, userID: account.userID)
+    securing?.passkey = made.credentialID
+    guard made.prfSupported else { return false }
+    return (try? await confirmPasskey()) != nil
+  }
+
+  /// The passkey just made, used once: its PRF output opens the backup, as the words do.
   func confirmPasskey() async throws {
-    guard var waiting, let credential = waiting.passkey else { throw AccountError.noBackup }
+    guard let credential = securing?.passkey else { throw AccountError.noBackup }
     guard let prf = try await passkeys.ask(salt: BackupRecord.prfSalt, only: credential).prf else {
       throw AccountError.noPRF
     }
-    waiting.record.byPasskey = try BackupRecord.wrap(waiting.k, in: BackupRecord.key(prf: prf))
-    waiting.account.byPasskey = true
-    waiting.record.sealed = try BackupRecord.seal(waiting.account, code: waiting.code, with: waiting.k)
-    self.waiting = waiting
+    try saveBackup(prf: prf)
   }
 
-  /// A passkey added to the backup afterwards: a Yo passkey of this account if there is one (the one made at
-  /// registration, say, that gave no PRF output then), else a new one; K comes from the recovery words on this phone.
+  /// The words, to show when the passkey did not work.
+  func secureWords() -> [String] {
+    if securing == nil { securing = (SymmetricKey(size: .bits256), RecoveryCode.make(), nil) }
+    return securing?.code ?? []
+  }
+
+  /// The words kept: the backup opens with them.
+  func keepWords() throws { try saveBackup(prf: nil) }
+
+  /// The backup: K under the words always (passkey and words are equal doors), under the passkey's PRF output too.
+  private func saveBackup(prf: Data?) throws {
+    guard var account, let securing else { throw AccountError.noBackup }
+    let k = securing.k
+    var record = BackupRecord(
+      userID: account.userID, byCode: try BackupRecord.wrap(k, in: BackupRecord.key(code: securing.code)),
+      sealed: Data())
+    if let prf {
+      record.byPasskey = try BackupRecord.wrap(k, in: BackupRecord.key(prf: prf))
+      account.byPasskey = true
+    }
+    account.byCode = true
+    record.sealed = try BackupRecord.seal(account, code: securing.code, with: k)
+    RecoveryWords.save(securing.code)
+    MockHub.save(record, for: account.username, locator: BackupRecord.locator(code: securing.code))
+    self.account = account
+    self.securing = nil
+    SecureReminder.update(secured: true)
+  }
+
+  /// A passkey added to a backup kept with the words: a Yo passkey of this account if there is one, else a new one;
+  /// K comes from the recovery words on this phone.
   func addPasskey() async throws {
     guard var account, let code = RecoveryWords.load(), var record = MockHub.record(for: account.username),
       let byCode = record.byCode
@@ -232,8 +263,8 @@ final class AccountStore {
     if let answer = try? await passkeys.ask(salt: BackupRecord.prfSalt, quietly: true), answer.userID == account.userID {
       prf = answer.prf
     } else {
-      let credential = try await passkeys.make(name: account.username, userID: account.userID)
-      prf = try await passkeys.ask(salt: BackupRecord.prfSalt, only: credential).prf
+      let made = try await passkeys.make(name: account.username, userID: account.userID)
+      prf = try await passkeys.ask(salt: BackupRecord.prfSalt, only: made.credentialID).prf
     }
     guard let prf else { throw AccountError.noPRF }
     record.byPasskey = try BackupRecord.wrap(k, in: BackupRecord.key(prf: prf))
@@ -241,15 +272,6 @@ final class AccountStore {
     record.sealed = try BackupRecord.seal(account, code: code, with: k)
     MockHub.save(record, for: account.username)
     self.account = account
-  }
-
-  /// Past the recovery words: the account is saved and in use, and the words stay on this phone to look up later.
-  func confirm() {
-    guard let waiting else { return }
-    RecoveryWords.save(waiting.code)
-    MockHub.save(waiting.record, for: waiting.account.username, locator: BackupRecord.locator(code: waiting.code))
-    account = waiting.account
-    self.waiting = nil
   }
 
   /// A new phone: any Yo passkey of this person, asked once; its user handle says whose backup to open.
@@ -280,7 +302,8 @@ final class AccountStore {
   /// "Reset Yo": this phone forgets everything, as a new phone would (the simulated hub keeps the backups).
   func reset() {
     account = nil
-    waiting = nil
+    securing = nil
+    SecureReminder.update(secured: true)
     RecoveryWords.delete()
   }
 }
@@ -351,5 +374,22 @@ enum RecoveryWords {
   enum PhotosError: LocalizedError {
     case notAllowed
     var errorDescription: String? { "Yo can’t save to Photos. Copy your recovery key instead." }
+  }
+}
+
+/// The reminder to secure the name (spec 6.4): a name not backed up is released after 30 days away from Yo, so 23
+/// days after the last time Yo was opened, a notification says so. Set again each time Yo opens; gone once secured.
+enum SecureReminder {
+  static let id = "yo.secure"
+
+  @MainActor static func update(secured: Bool) {
+    let center = UNUserNotificationCenter.current()
+    center.removePendingNotificationRequests(withIdentifiers: [id])
+    guard !secured else { return }
+    let content = UNMutableNotificationContent()
+    content.title = "Secure Your Name"
+    content.body = "Secure your name, or it becomes available to others in 7 days."
+    let trigger = UNTimeIntervalNotificationTrigger(timeInterval: 23 * 24 * 3600, repeats: false)
+    center.add(UNNotificationRequest(identifier: id, content: content, trigger: trigger))
   }
 }

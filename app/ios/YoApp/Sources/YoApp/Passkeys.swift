@@ -20,14 +20,14 @@ final class Passkeys: NSObject {
   /// A new passkey for `name` (what the password manager shows) and `userID` (its user handle). Only asked whether it
   /// supports PRF: asking for an output here (`.inputValues`) makes 1Password fail to save the passkey at all. The
   /// output comes from `ask` afterwards, whatever is said here (spec 7).
-  func make(name: String, userID: Data) async throws -> Data {
+  func make(name: String, userID: Data) async throws -> (credentialID: Data, prfSupported: Bool) {
     let provider = ASAuthorizationPlatformPublicKeyCredentialProvider(relyingPartyIdentifier: Self.domain)
     let request = provider.createCredentialRegistrationRequest(challenge: Self.random(32), name: name, userID: userID)
     request.displayName = name
     request.prf = .checkForSupport
     guard let made = try await perform(request).credential as? ASAuthorizationPlatformPublicKeyCredentialRegistration
     else { throw PasskeyError.unexpected }
-    return made.credentialID
+    return (made.credentialID, made.prf?.isSupported ?? false)
   }
 
   /// Asks a passkey (`only` that one, or any of this domain the person picks) for its PRF output on `salt`. `quietly`:
