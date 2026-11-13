@@ -38,10 +38,8 @@ use yo_core::{Client, Content, Error, Event, Push, Response, Store, Transport};
 
 /// How many Yos an answer has, in percent: one mostly, more ever rarer (a half-normal tail), five at most.
 const YOS: [u32; 5] = [70, 17, 8, 4, 1];
-/// Before an answer, in milliseconds, uniform: it thinks.
+/// Before the first answer to a sender, in milliseconds, uniform: it thinks. Then everything owed goes at once.
 const THINK_MS: (u64, u64) = (1000, 3000);
-/// Between the Yos of one answer, in milliseconds, uniform.
-const GAP_MS: (u64, u64) = (300, 1000);
 /// Senders being answered at once, per account (a thread each).
 const MAX_ANSWERING: usize = 32;
 /// Answers owed to one sender at most (a burst of Yos is answered one after the other, up to this many).
@@ -489,9 +487,10 @@ fn serve(account: &Account, options: Options) {
         }
         let (answering, events, sender) = (bot.clone(), events.clone(), user.clone());
         let spawned = std::thread::Builder::new().spawn(move || {
-            let mut picture = picture;
+            let (mut picture, mut think) = (picture, true);
             loop {
-                answer(&answering, &sender, &events, picture);
+                answer(&answering, &sender, &events, picture, think);
+                think = false;
                 let mut pending = answering.pending.lock().unwrap_or_else(PoisonError::into_inner);
                 let Some(owed) = pending.get_mut(&sender) else { break };
                 owed.pop_front();
@@ -540,8 +539,10 @@ fn receive(bot: &Bot, events: &SyncSender<Event>) {
 
 /// Thinks, then sends a Yo or a few, one in `picture_every` of them with a picture; to a photo or video, one Yo with a
 /// picture. What sending receives goes to the dispatcher.
-fn answer(bot: &Bot, user: &str, events: &SyncSender<Event>, to_picture: bool) {
-    std::thread::sleep(ms(THINK_MS));
+fn answer(bot: &Bot, user: &str, events: &SyncSender<Event>, to_picture: bool, think: bool) {
+    if think {
+        std::thread::sleep(ms(THINK_MS));
+    }
     let n = if to_picture { 1 } else { yos(uniform(0, 99) as u32) };
     let every = bot.options.picture_every;
     let with_picture = match to_picture {
@@ -550,9 +551,6 @@ fn answer(bot: &Bot, user: &str, events: &SyncSender<Event>, to_picture: bool) {
     };
     let mut pictures = 0;
     for i in 0..n {
-        if i > 0 {
-            std::thread::sleep(ms(GAP_MS));
-        }
         if !bot.running() {
             return;
         }
