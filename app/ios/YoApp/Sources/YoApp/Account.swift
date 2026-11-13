@@ -26,24 +26,61 @@ struct Account: Codable, Equatable {
   var secured: Bool { byPasskey || byCode == true }
 }
 
+/// Usernames (spec 3.3): Latin letters (accents and umlauts too), digits, `_` and emoji; shown in upper case. Two
+/// names that look alike are one name: they are compared by their skeleton.
 enum Username {
   static let reserved: Set<String> = ["YO", "ADMIN", "YOAGAIN", "SUPPORT", "HELP", "ROOT", "JUSTYO"]
 
-  /// What is wrong with a name, nil when it is fine (spec 3.3).
+  /// What is wrong with a name, nil when it is fine.
   static func problem(_ name: String) -> String? {
     if name.count < 3 { return "Use at least 3 characters." }
     if name.count > 16 { return "Use no more than 16 characters." }
-    if let first = name.first, !first.isLetter { return "Start with a letter." }
-    if reserved.contains(name) { return "That name is taken. Try another." }
+    if let first = name.first, !isLatinLetter(first), !isEmoji(first) { return "Start with a letter or emoji." }
+    if isReserved(name) { return "That name is taken. Try another." }
     return nil
   }
 
-  /// What may be typed: A–Z, 0–9 and _, in upper case, a letter first, at most 16. So the field itself keeps the
-  /// rules, and only "too short" and "taken" are left to show.
+  static func isReserved(_ name: String) -> Bool { reserved.contains(skeleton(name)) }
+
+  /// What may be typed: the allowed characters, in upper case, a letter or emoji first, at most 16. So the field
+  /// itself keeps the rules, and only "too short" and "taken" are left to show.
   static func clean(_ typed: String) -> String {
-    String(
-      typed.uppercased().filter { ("A"..."Z").contains($0) || ("0"..."9").contains($0) || $0 == "_" }
-        .drop(while: { !("A"..."Z").contains($0) }).prefix(16))
+    let allowed = typed.uppercased().precomposedStringWithCanonicalMapping.filter {
+      isLatinLetter($0) || ("0"..."9").contains($0) || $0 == "_" || isEmoji($0)
+    }
+    return String(allowed.drop(while: { !isLatinLetter($0) && !isEmoji($0) }).prefix(16))
+  }
+
+  /// What a name is compared by (spec 3.3): upper case, compatibility-decomposed, without accents, emoji variation
+  /// selectors and skin tones, and with 0 → O, 1 → I, VV → W. LEO, LE0 and LÉO are one name; so are 👍 and 👍🏿.
+  static func skeleton(_ name: String) -> String {
+    var scalars = String.UnicodeScalarView()
+    for scalar in name.uppercased().decomposedStringWithCompatibilityMapping.unicodeScalars {
+      let v = scalar.value
+      if scalar.properties.generalCategory == .nonspacingMark || v == 0xFE0E || v == 0xFE0F
+        || (0x1F3FB...0x1F3FF).contains(v)
+      { continue }
+      scalars.append(scalar)
+    }
+    return String(scalars)
+      .replacingOccurrences(of: "0", with: "O")
+      .replacingOccurrences(of: "1", with: "I")
+      .replacingOccurrences(of: "VV", with: "W")
+  }
+
+  /// A letter of the Latin script, with its accents (Basic Latin, Latin-1, Extended-A/B, Extended Additional).
+  static func isLatinLetter(_ c: Character) -> Bool {
+    c.isLetter && c.unicodeScalars.allSatisfy { s in
+      let v = s.value
+      return (0x41...0x5A).contains(v) || (0x61...0x7A).contains(v) || (0x300...0x36F).contains(v)
+        || ((0xC0...0x24F).contains(v) && v != 0xD7 && v != 0xF7) || (0x1E00...0x1EFF).contains(v)
+    }
+  }
+
+  /// An emoji as people type it: shown as emoji by default, or a sequence (keycaps, ZWJ, flags, skin tones).
+  static func isEmoji(_ c: Character) -> Bool {
+    guard let first = c.unicodeScalars.first else { return false }
+    return first.properties.isEmojiPresentation || (first.properties.isEmoji && c.unicodeScalars.count > 1)
   }
 }
 
@@ -145,13 +182,17 @@ enum MockHub {
   /// Names someone else has, as if they had registered first (to try what "taken" looks like).
   static let othersHave: Set<String> = ["LEO"]
 
+  /// Taken: by its skeleton, so a name that only looks like one already there is taken too (spec 3.3).
   static func isTaken(_ username: String) -> Bool {
-    store.data(forKey: "name." + username) != nil || Username.reserved.contains(username) || othersHave.contains(username)
+    let skeleton = Username.skeleton(username)
+    return store.string(forKey: "skeleton." + skeleton) != nil || store.data(forKey: "name." + username) != nil
+      || Username.isReserved(username) || othersHave.map(Username.skeleton).contains(skeleton)
   }
 
   static func save(_ record: BackupRecord, for username: String, locator: String? = nil) {
     store.set(try? JSONEncoder().encode(record), forKey: "name." + username)
     store.set(username, forKey: "user." + record.userID.base64EncodedString())
+    store.set(username, forKey: "skeleton." + Username.skeleton(username))
     if let locator { store.set(username, forKey: "code." + locator) }
   }
 

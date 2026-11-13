@@ -81,7 +81,7 @@ struct Onboarding: View {
     // said only after a pause in typing, or when Continue is tapped (the field shakes too), until the next letter.
     let taken = name.count >= 3 && MockHub.isTaken(name)
     let trouble = Username.problem(name) ?? (taken ? "taken" : nil)
-    let mine = taken && !Username.reserved.contains(name)
+    let mine = taken && !Username.isReserved(name)
     return Page(title: "Choose a Name", back: { go(.welcome) }) {
       NameField(name: $name, mark: trouble == nil ? .available : taken ? .taken : nil,
         shakes: shakes, onSubmit: { Task { await register() } })
