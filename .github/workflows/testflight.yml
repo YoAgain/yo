@@ -1,0 +1,142 @@
+# Builds the iPhone app on macOS and uploads it to TestFlight with omarchy-apple-dev's ship.sh, the same path as
+# on Linux. The App Store Connect key and the distribution identity are secrets of the environment `testflight`
+# (main only); never run this on pull requests.
+name: TestFlight
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - app/ios/**
+      - core/**
+      - Cargo.lock
+      - rust-toolchain.toml
+      - .github/workflows/testflight.yml
+  workflow_dispatch:
+
+concurrency:
+  group: testflight
+
+jobs:
+  testflight:
+    runs-on: macos-26
+    environment: testflight
+    timeout-minutes: 60
+    env:
+      DEVELOPER_DIR: /Applications/Xcode_26.6.app/Contents/Developer
+      OAD_COMMIT: 9af7bca43931552fe94db32f353a5f4e77866cc5
+      XTOOL_VERSION: 1.24.0
+      APPLE_CODESIGN_VERSION: 0.29.0   # not RCODESIGN_*: rcodesign reads those as its settings
+      HOMEBREW_NO_AUTO_UPDATE: 1
+      HOMEBREW_NO_INSTALL_CLEANUP: 1
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/checkout@v4
+        with:
+          repository: joshuaswarren/omarchy-apple-dev
+          ref: ${{ env.OAD_COMMIT }}
+          path: .oad
+
+      # Downloaded tools, kept between runs (the versions above are the key).
+      - id: tools
+        uses: actions/cache@v4
+        with:
+          path: ~/ci-tools
+          key: tools-xtool-${{ env.XTOOL_VERSION }}-rcodesign-${{ env.APPLE_CODESIGN_VERSION }}
+      - name: Download tools
+        if: steps.tools.outputs.cache-hit != 'true'
+        run: |
+          mkdir -p ~/ci-tools/bin
+          curl -fsSL "https://github.com/xtool-org/xtool/releases/download/$XTOOL_VERSION/xtool.app.zip" -o "$RUNNER_TEMP/xtool.zip"
+          unzip -q "$RUNNER_TEMP/xtool.zip" -d ~/ci-tools
+          curl -fsSL "https://github.com/indygreg/apple-platform-rs/releases/download/apple-codesign%2F$APPLE_CODESIGN_VERSION/apple-codesign-$APPLE_CODESIGN_VERSION-macos-universal.tar.gz" \
+            | tar -xz -C ~/ci-tools/bin --strip-components 1
+      - name: Tools
+        run: |
+          xcodebuild -version
+          brew install -q bash   # ship.sh wants bash 4 or later
+          # xtool's command line; xtool.app/Contents/MacOS/xtool is the app and waits for its window.
+          echo ~/ci-tools/xtool.app/Contents/Resources/bin >> "$GITHUB_PATH"
+          echo ~/ci-tools/bin >> "$GITHUB_PATH"
+          # ship.sh runs its tools with this Python; asc.py needs cryptography.
+          python3 -m venv ~/pymobile3-venv
+          ~/pymobile3-venv/bin/pip install -q cryptography
+
+      # The Rust core is built only when it changed: the xcframework and bindings are kept under a hash of
+      # everything they are made from, the cargo registry and target dir in case they have to be rebuilt.
+      - id: core
+        uses: actions/cache/restore@v4
+        with:
+          path: app/ios/YoApp/build/core
+          key: core-${{ env.DEVELOPER_DIR }}-${{ hashFiles('core/**', 'Cargo.lock', 'Cargo.toml', 'rust-toolchain.toml', 'app/ios/dev/core.sh') }}
+      - id: cargo
+        if: steps.core.outputs.cache-hit != 'true'
+        uses: actions/cache/restore@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target/ios
+          key: cargo-ios-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml') }}-${{ hashFiles('core/**') }}
+          restore-keys: cargo-ios-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml') }}-
+      - name: Rust core
+        if: steps.core.outputs.cache-hit != 'true'
+        run: |
+          rustup target add aarch64-apple-ios
+          app/ios/dev/core.sh
+      - if: steps.core.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: app/ios/YoApp/build/core
+          key: ${{ steps.core.outputs.cache-primary-key }}
+      - if: steps.core.outputs.cache-hit != 'true' && steps.cargo.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target/ios
+          key: ${{ steps.cargo.outputs.cache-primary-key }}
+
+      # SwiftPM's build directory, for an incremental app build.
+      - uses: actions/cache@v4
+        with:
+          path: app/ios/YoApp/.build
+          key: swiftpm-${{ env.DEVELOPER_DIR }}-${{ hashFiles('app/ios/YoApp/**') }}
+          restore-keys: swiftpm-${{ env.DEVELOPER_DIR }}-
+
+      - name: Credentials
+        env:
+          ASC_KEY_P8: ${{ secrets.ASC_KEY_P8 }}
+          DIST_KEY_PEM: ${{ secrets.DIST_KEY_PEM }}
+          DIST_CERT_DER_B64: ${{ secrets.DIST_CERT_DER_B64 }}
+        run: |
+          umask 077
+          d=$RUNNER_TEMP/asc
+          mkdir -p "$d/distribution"
+          printf '%s\n' "$ASC_KEY_P8" > "$d/AuthKey.p8"
+          printf '%s\n' "$DIST_KEY_PEM" > "$d/distribution/key.pem"
+          printf '%s' "$DIST_CERT_DER_B64" | base64 -d > "$d/distribution/cert.der"
+          # The certificate's names (team, holder) show up in the signing output; keep them out of the public log.
+          ~/pymobile3-venv/bin/python -I - "$d/distribution/cert.der" <<'EOF'
+          import sys
+          from cryptography import x509
+          from cryptography.x509.oid import NameOID
+          cert = x509.load_der_x509_certificate(open(sys.argv[1], "rb").read())
+          for attribute in cert.subject:
+              if attribute.oid != NameOID.COUNTRY_NAME:
+                  print(f"::add-mask::{attribute.value}")
+          EOF
+
+      - name: Build, sign and upload
+        working-directory: app/ios/YoApp
+        timeout-minutes: 30
+        env:
+          ASC_KEY_ID: ${{ secrets.ASC_KEY_ID }}
+          ASC_ISSUER_ID: ${{ secrets.ASC_ISSUER_ID }}
+        run: |
+          export ASC_KEY_PATH=$RUNNER_TEMP/asc/AuthKey.p8 ASC_IDENTITY_DIR=$RUNNER_TEMP/asc/distribution
+          # Xcode in place of the Linux SDK and its stand-ins.
+          export ACTOOL=$(xcrun -f actool) DARWIN_SDK=$(dirname "$DEVELOPER_DIR")
+          export XCODE_VERSION=$(xcodebuild -version | sed -n 's/^Xcode //p') XCODE_BUILD=$(xcodebuild -version | sed -n 's/^Build version //p')
+          "$GITHUB_WORKSPACE/.oad/ship.sh" --upload
