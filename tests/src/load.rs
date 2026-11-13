@@ -67,6 +67,10 @@ fn main() {
     std::fs::create_dir_all(&dir).unwrap();
     let mut config = Config::for_tests();
     config.db_path = dir.join("hub.sqlite").to_string_lossy().into_owned();
+    // YO_LOAD_DB: another place for the hub's database (a file on disk, or ":memory:"); by default the temp dir.
+    if let Ok(path) = std::env::var("YO_LOAD_DB") {
+        config.db_path = path;
+    }
     config.limits = Limits::unlimited();
     let hub = TestHub::start_with(config, "127.0.0.1:0");
     let url = hub.url();

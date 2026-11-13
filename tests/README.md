@@ -45,7 +45,7 @@ YO_ENV="YO_DATE=$(date +%F) YO_COMMIT=$(git rev-parse --short HEAD)" \
 ```
 
 `YO_HUB_CPU=n` (in `YO_ENV`) pins every thread of the hub to CPU n and the load to the other CPUs: the hub's
-throughput on one core. Its one SQLite writer with group commit is what bounds it, not the cores.
+throughput on one core. Its one writer thread with group commit is what bounds it, not the cores.
 
 Phase 1 is the whole system on one machine (clients with MLS, the hub, fetch, decrypt); phase 2 the hub alone
 (deliveries over many connections). Every run writes `tests/results/<date>-<clients>c.json`; commit the ones worth
@@ -57,5 +57,10 @@ keeping, so a regression shows against them.
 | 2026-11-11, 16 cores, group commit | 16,777 | 1.7 / 27.7 ms | 2,089 Yos/s | 0 |
 | 2026-11-12, hub on one core (`YO_HUB_CPU=0`), load on 15 | 14,718 | 3.1 / 19.9 ms | 1,275 Yos/s | 0 |
 | 2026-11-13, one core, static musl build (as deployed) | 18,295 | 3.4 / 6.5 ms | 1,078 Yos/s | 0 |
+| 2026-11-13, one core, database on the SSD (`YO_LOAD_DB`) | 16,038 | 2.7 / 18.8 ms | 1,300 Yos/s | 0 |
+| 2026-11-13, one core, database in tmpfs | 22,536 | 2.7 / 5.7 ms | 1,603 Yos/s | 0 |
+| 2026-11-13, one core, SQLite `:memory:` | 22,147 | 2.8 / 5.8 ms | 1,669 Yos/s | 0 |
 
-Yops: Yos delivered per second, the only benchmark unit that says what it measures.
+Yops: Yos delivered per second, the only benchmark unit that says what it measures. Runs before the last three
+had the database in the temp dir, which is tmpfs here: in RAM. `YO_LOAD_DB` puts it elsewhere (a path, or
+`:memory:`). The bound is the one writer thread; a real disk costs about a third.

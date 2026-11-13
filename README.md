@@ -39,13 +39,15 @@ app/ios/        the iPhone app (SwiftUI; a mockup for now, see app/ios/README.md
 
 ## Speed
 
-| Hub | Yops | p99 |
+| Hub on one core | Yops | p99 |
 |---|---|---|
-| one core, as deployed (static musl build) | 18,295 | 6.5 ms |
-| 16 cores, group commit | 16,777 | 27.7 ms |
+| database on an SSD (as on a server) | 16,000 | 19 ms |
+| database in RAM (tmpfs, or SQLite `:memory:`) | 22,000 | 6 ms |
 
-Yops: Yos delivered per second, the only benchmark unit that says what it measures. One SQLite
-writer bounds it, not the cores. All runs: [tests/README.md](tests/README.md#load).
+Yops: Yos delivered per second, the only benchmark unit that says what it measures. The bound is the one writer
+thread (every delivery is a write, one after the other), not SQLite and not the cores: more cores do not help, SQLite
+in memory is no faster than a file in RAM, and a real disk costs about a third. All runs:
+[tests/README.md](tests/README.md#load).
 
 ## Run
 
