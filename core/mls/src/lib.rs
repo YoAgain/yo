@@ -105,6 +105,21 @@ pub trait Store: Send + Sync {
 
 pub type Clock = Arc<dyn Fn() -> u64 + Send + Sync>;
 
+/// The signed inbox request of a `sync`, sent without the client: see `Client::sync_begin`.
+pub struct InboxWait {
+    transport: Arc<dyn Transport>,
+    path: String,
+    headers: Vec<(String, String)>,
+    time: u64,
+}
+
+impl InboxWait {
+    /// The long poll: blocks up to the wait the request asks for.
+    pub fn send(&self) -> std::result::Result<Response, String> {
+        self.transport.request("GET", &self.path, &self.headers, &[])
+    }
+}
+
 pub struct Client {
     transport: Arc<dyn Transport>,
     store: Option<(Arc<dyn Store>, [u8; 32])>,
@@ -112,6 +127,9 @@ pub struct Client {
     state: State,
     clock: Clock,
     last_request_ms: u64,
+    /// The signing time of the request whose answer set `key_packages_left` last: an older answer, waited for
+    /// outside the app's lock while another call refilled, does not overwrite it.
+    key_packages_known_ms: u64,
     dropped: u64,
     drop_reasons: Vec<String>,
 }
@@ -416,6 +434,7 @@ impl Client {
             state,
             clock: Arc::new(wall_ms),
             last_request_ms: 0,
+            key_packages_known_ms: 0,
             dropped: 0,
             drop_reasons: Vec::new(),
         }
@@ -551,18 +570,24 @@ impl Client {
 
     // ---- the hub ----
 
-    fn signed(&mut self, method: &str, path: &str, body: &[u8]) -> Result<Response> {
+    /// The headers that sign a request, and its time.
+    fn sign(&mut self, method: &str, path: &str, body: &[u8]) -> (Vec<(String, String)>, u64) {
         // Each signature once (the hub's replay cache): strictly increasing times.
         let time = wall_ms().max(self.last_request_ms + 1);
         self.last_request_ms = time;
         let key = SigningKey::from_bytes(&self.state.auth_secret);
         let signature = key.sign(&yo_wire::request::to_be_signed(method, path, time, body));
-        let headers = [
+        let headers = vec![
             (HEADER_DEVICE.to_owned(), yo_wire::b64(&self.state.device_id)),
             (HEADER_TIME.to_owned(), time.to_string()),
             (HEADER_SIGNATURE.to_owned(), yo_wire::b64(&signature.to_bytes())),
         ];
-        self.transport.request(method, path, &headers, body).map_err(Error::Network)
+        (headers, time)
+    }
+
+    fn signed(&mut self, method: &str, path: &str, body: &[u8]) -> Result<Response> {
+        let (headers, _) = self.sign(method, path, body);
+        self.unsigned(method, path, &headers, body)
     }
 
     fn unsigned(&self, method: &str, path: &str, headers: &[(String, String)], body: &[u8]) -> Result<Response> {
@@ -1260,49 +1285,61 @@ impl Client {
     fn receive_all(&mut self, wait_s: u64) -> Result<()> {
         let mut wait = wait_s;
         loop {
-            let response = self.signed("GET", &api::inbox_path(wait), &[])?;
-            if response.status != status::OK {
-                return Err(refused(&response));
-            }
-            let inbox: api::Inbox = decode(&response.body)?;
-            self.state.key_packages_left = inbox.key_packages_left;
-            let full = inbox.items.len() >= MAX_INBOX_FETCH;
-            let mut done = Vec::new();
-            let mut stopped = None;
-            for item in inbox.items {
-                let hash = sha256(item.envelope.as_slice());
-                if !self.state.seen.contains(&hash) {
-                    match self.atomic(|c| c.receive(item.envelope.as_slice())) {
-                        Ok(()) => {}
-                        // Not this envelope's fault: it stays at the hub and is read again next time.
-                        Err(error) if retryable(&error) => {
-                            stopped = Some(error);
-                            break;
-                        }
-                        Err(error) => self.drop_one(error.to_string()),
-                    }
-                    self.remember(item.envelope.as_slice());
-                }
-                done.push(item.id);
-            }
-            if !done.is_empty() {
-                // Saved before the hub may forget: what was processed must survive a crash right after the ack.
-                self.persist();
-                // An ack that does not arrive costs only a repeat: the hub sends those envelopes again, and they are
-                // skipped as seen.
-                match self.signed("POST", api::INBOX_ACK, &encode(&api::Ack { ids: done })) {
-                    Ok(response) if response.status == status::NO_CONTENT => {}
-                    Ok(response) if response.status == status::GONE => return Err(Error::Replaced),
-                    _ => return Ok(()),
-                }
-            }
-            if let Some(error) = stopped {
-                return Err(error);
-            }
-            if !full {
+            let path = api::inbox_path(wait);
+            let (headers, time) = self.sign("GET", &path, &[]);
+            let response = self.unsigned("GET", &path, &headers, &[])?;
+            if !self.inbox(response, time)? {
                 return Ok(());
             }
             wait = 0;
+        }
+    }
+
+    /// Processes one inbox answer to a request signed at `requested_at` and acknowledges it; `true` when the hub has
+    /// more. The answer may be older than the state (`sync` waits for it outside the app's lock while other calls
+    /// run): envelopes already seen are skipped, an older KeyPackage count is ignored.
+    fn inbox(&mut self, response: Response, requested_at: u64) -> Result<bool> {
+        if response.status != status::OK {
+            return Err(refused(&response));
+        }
+        let inbox: api::Inbox = decode(&response.body)?;
+        if requested_at > self.key_packages_known_ms {
+            self.state.key_packages_left = inbox.key_packages_left;
+            self.key_packages_known_ms = requested_at;
+        }
+        let full = inbox.items.len() >= MAX_INBOX_FETCH;
+        let mut done = Vec::new();
+        let mut stopped = None;
+        for item in inbox.items {
+            let hash = sha256(item.envelope.as_slice());
+            if !self.state.seen.contains(&hash) {
+                match self.atomic(|c| c.receive(item.envelope.as_slice())) {
+                    Ok(()) => {}
+                    // Not this envelope's fault: it stays at the hub and is read again next time.
+                    Err(error) if retryable(&error) => {
+                        stopped = Some(error);
+                        break;
+                    }
+                    Err(error) => self.drop_one(error.to_string()),
+                }
+                self.remember(item.envelope.as_slice());
+            }
+            done.push(item.id);
+        }
+        if !done.is_empty() {
+            // Saved before the hub may forget: what was processed must survive a crash right after the ack.
+            self.persist();
+            // An ack that does not arrive costs only a repeat: the hub sends those envelopes again, and they are
+            // skipped as seen.
+            match self.signed("POST", api::INBOX_ACK, &encode(&api::Ack { ids: done })) {
+                Ok(response) if response.status == status::NO_CONTENT => {}
+                Ok(response) if response.status == status::GONE => return Err(Error::Replaced),
+                _ => return Ok(false),
+            }
+        }
+        match stopped {
+            Some(error) => Err(error),
+            None => Ok(full),
         }
     }
 
@@ -1552,6 +1589,7 @@ impl Client {
             return Err(refused(&response));
         }
         self.state.key_packages_left = left + fresh;
+        self.key_packages_known_ms = self.last_request_ms;
         if last_resort_due {
             self.state.last_resort_at = (self.clock)();
         }
@@ -1624,10 +1662,38 @@ impl Client {
 
     /// Receives: waits up to `wait_s` seconds for mail, processes all of it, delivers what is waiting.
     pub fn sync(&mut self, wait_s: u64) -> Result<Vec<Event>> {
-        let result = self
-            .deliver()
-            .or_else(|error| if retryable(&error) { Ok(()) } else { Err(error) })
-            .and_then(|()| self.receive_all(wait_s))
+        let wait = self.sync_begin(wait_s)?;
+        let response = wait.send();
+        self.sync_end(&wait, response)
+    }
+
+    /// `sync` in three steps, so that a caller sharing the client behind a lock need not hold it through the long
+    /// poll: `sync_begin` (locked) delivers what is waiting and signs the inbox request, `InboxWait::send` (unlocked)
+    /// waits for the hub, `sync_end` (locked) processes the answer. Other calls may run in between; the answer is
+    /// processed against the state as it is then. The signature's time is checked when the hub gets the request,
+    /// before the wait, so signing early is fine.
+    pub fn sync_begin(&mut self, wait_s: u64) -> Result<InboxWait> {
+        if let Err(error) = self.deliver() {
+            if !retryable(&error) {
+                self.persist();
+                return Err(error);
+            }
+        }
+        let path = api::inbox_path(wait_s);
+        let (headers, time) = self.sign("GET", &path, &[]);
+        Ok(InboxWait { transport: self.transport.clone(), path, headers, time })
+    }
+
+    /// Processes what `InboxWait::send` brought, fetches the rest, refills KeyPackages, delivers.
+    pub fn sync_end(
+        &mut self,
+        wait: &InboxWait,
+        response: std::result::Result<Response, String>,
+    ) -> Result<Vec<Event>> {
+        let result = response
+            .map_err(Error::Network)
+            .and_then(|response| self.inbox(response, wait.time))
+            .and_then(|more| if more { self.receive_all(0) } else { Ok(()) })
             .and_then(|()| self.refill())
             .and_then(|()| self.deliver());
         self.finish_receiving(result)

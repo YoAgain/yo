@@ -110,3 +110,77 @@ fn the_app_layer_works_end_to_end() {
     )
     .is_err());
 }
+
+/// The app's transport, holding the long poll (`wait` > 0) until the test lets it go.
+struct Held {
+    app: App,
+    waiting: Mutex<std::sync::mpsc::Sender<()>>,
+    release: Mutex<std::sync::mpsc::Receiver<()>>,
+}
+
+impl HttpTransport for Held {
+    fn request(&self, method: String, path: String, headers: Vec<yo::Header>, body: Vec<u8>) -> HttpResult {
+        if path.contains("wait=") && !path.ends_with("wait=0") {
+            self.waiting.lock().unwrap().send(()).unwrap();
+            self.release.lock().unwrap().recv().unwrap();
+        }
+        self.app.request(method, path, headers, body)
+    }
+}
+
+#[test]
+fn the_app_layer_runs_other_calls_while_sync_waits() {
+    use std::sync::mpsc::channel;
+    use std::time::Duration;
+    let hub = TestHub::start();
+    let n = random_u64() % 1_000_000_000;
+    let (pa, pb) = (phone(n), phone(n + 1));
+    let (waiting, waited) = channel();
+    let (release, released) = channel();
+    let held =
+        Arc::new(Held { app: App(Http::new(hub.url())), waiting: Mutex::new(waiting), release: Mutex::new(released) });
+    yo::request_code(held.clone(), pa.clone()).unwrap();
+    let a = YoClient::register(
+        held,
+        Arc::new(File::default()),
+        vec![7; 32],
+        pa.clone(),
+        "000000".into(),
+        Some("ALICE".into()),
+        0,
+        String::new(),
+    )
+    .unwrap();
+    let b = client(&hub, &pb, "BOB", Arc::new(File::default()));
+    let syncing = {
+        let a = a.clone();
+        std::thread::spawn(move || a.sync(25))
+    };
+    waited.recv_timeout(Duration::from_secs(30)).expect("the long poll starts");
+    // While A's sync waits: A sends, stores its backup, reads its contacts; B writes to A.
+    let (done, finished) = channel();
+    {
+        let (a, pb) = (a.clone(), pb.clone());
+        std::thread::spawn(move || {
+            a.send_yo(pb).unwrap();
+            a.put_backup(yo::YoBackup {
+                by_passkey: Vec::new(),
+                by_code: vec![2; 60],
+                sealed: vec![3; 200],
+                locator: vec![4; 16],
+            })
+            .unwrap();
+            done.send(a.contacts().len()).unwrap();
+        });
+    }
+    assert_eq!(finished.recv_timeout(Duration::from_secs(30)).expect("calls do not wait for the sync"), 1);
+    assert!(b.sync(0).unwrap().iter().any(|e| matches!(e, YoEvent::Message { kind: MessageKind::Yo, .. })));
+    b.send_yo(pa).unwrap();
+    // The answer, signed before the send, is processed against the state after it.
+    release.send(()).unwrap();
+    let events = syncing.join().unwrap().unwrap();
+    assert!(events.iter().any(|e| matches!(e, YoEvent::Message { kind: MessageKind::Yo, .. })));
+    assert_eq!(a.contacts().len(), 1);
+    a.send_yo(b.user_id()).unwrap();
+    assert!(b.sync(0).unwrap().iter().any(|e| matches!(e, YoEvent::Message { kind: MessageKind::Yo, .. })));
+}

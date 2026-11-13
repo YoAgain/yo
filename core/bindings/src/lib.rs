@@ -321,8 +321,11 @@ impl YoClient {
     }
 
     /// Waits up to `wait_s` seconds for mail and processes it: for the foreground, and the notification extension.
+    /// The wait does not hold the client: other calls run meanwhile.
     pub fn sync(&self, wait_s: u64) -> Result<Vec<YoEvent>, YoError> {
-        events(self.with(|c| c.sync(wait_s)))
+        let wait = self.with(|c| c.sync_begin(wait_s))?;
+        let response = wait.send();
+        events(self.with(|c| c.sync_end(&wait, response)))
     }
 
     /// When the app comes to the foreground.
