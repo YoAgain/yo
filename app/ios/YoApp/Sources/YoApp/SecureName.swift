@@ -10,7 +10,6 @@ struct SecureNameSheet: View {
   @State private var busy = false
   @State private var problem: String?
   @State private var kept: Set<String> = []
-  @State private var started = false
 
   private enum Stage: Equatable {
     /// Making the passkey (the system's sheet is up).
@@ -36,19 +35,19 @@ struct SecureNameSheet: View {
     .animation(.smooth(duration: 0.3), value: stage)
     .foregroundStyle(.white)
     .preferredColorScheme(.dark)
-    .task {
-      guard !started else { return }
-      started = true
-      await makePasskey()
-    }
   }
 
   // MARK: Stages
 
   private var passkey: some View {
+    // First what happens, in two steps; Face ID only when asked for.
     Page(title: "Secure Your Account",
-      message: "Keep your name “\(accounts.account?.username ?? "")” forever, on any iPhone.") {
-      KeyIcon()
+      message: "Set up account recovery to keep your name “\(accounts.account?.username ?? "")” forever.") {
+      VStack(alignment: .leading, spacing: 22) {
+        Step(icon: "faceid", title: "Face ID", text: "Sign back in on any iPhone.")
+        Step(icon: "list.number", title: "12 Words", text: "For when you can’t use Face ID.")
+      }
+      .padding(.top, 12)
     } bottom: {
       PrimaryButton("Continue with Face ID", busy: busy) { Task { await makePasskey() } }
         .disabled(busy)
@@ -166,5 +165,25 @@ private struct KeyIcon: View {
     Image(systemName: "faceid")
       .font(.system(size: 64))
       .padding(.top, 20)
+  }
+}
+
+/// One step of what securing does: a symbol, and two short lines.
+private struct Step: View {
+  let icon: String
+  let title: String
+  let text: String
+
+  var body: some View {
+    HStack(spacing: 16) {
+      Image(systemName: icon)
+        .font(.system(size: 30, weight: .medium))
+        .frame(width: 44)
+      VStack(alignment: .leading, spacing: 2) {
+        Text(title).font(.system(size: 17, weight: .semibold))
+        Text(text).font(.system(size: 15)).opacity(0.8)
+      }
+    }
+    .accessibilityElement(children: .combine)
   }
 }
