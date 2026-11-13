@@ -53,23 +53,18 @@ struct SettingsView: View {
               }
               .navigationTitle("Account")
               .navigationBarTitleDisplayMode(.inline)
-          .confirmationDialog(
-            "Sign Out?",
-            isPresented: $resetting,
-            titleVisibility: .visible
-          ) {
-            Button("Sign Out", role: .destructive) { reset() }
-            Button("Cancel", role: .cancel) {}
-          } message: {
-            Text(resetMessage)
-          }
+              .confirmationDialog("Sign Out?", isPresented: $resetting, titleVisibility: .visible) {
+                Button("Sign Out", role: .destructive) { reset() }
+                Button("Cancel", role: .cancel) {}
+              } message: {
+                Text(resetMessage)
+              }
             } label: {
               profileRow(account)
             }
-          }
-          // The one open task, right under you, with the badge the profile button has too.
-          if !account.secured {
-            Section {
+            // The one open task, in the same group as you (as Settings puts suggestions under the Apple Account),
+            // with the badge the profile button has too.
+            if !account.secured {
               Button { securing = true } label: {
                 HStack {
                   Label("Secure Your Account", systemImage: "lock.fill").labelStyle(Tile(.orange))
@@ -79,7 +74,9 @@ struct SettingsView: View {
                 }
               }
               .tint(.primary)
-            } footer: {
+            }
+          } footer: {
+            if !account.secured {
               Text("Set up account recovery to keep your name “\(account.username)” forever.")
             }
           }
