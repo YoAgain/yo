@@ -1,6 +1,6 @@
 // The list of friends, as in 2014: one coloured bar per friend from edge to edge, the name large in the middle; a tap
 // sends a Yo ("Sent Yo!" on the bar, then it goes on top). The order is the original's: whoever you last sent a Yo to
-// or got one from is on top; the colours stay with the places. In the mockup a tap sends the Yo to yourself, as if that
+// or got one from is on top; each friend keeps their colour as they move (the original's went with the place). In the mockup a tap sends the Yo to yourself, as if that
 // friend had sent it (Friends.replyDelay). Hold a bar to remove the friend; the last bar adds one.
 //
 // On top, the system's bar: profile (a sheet) on the left, the camera on the right, between them the title "Yo",
@@ -24,7 +24,9 @@ struct FriendList: View {
   /// How long a photo or video waits before it goes, time to undo it.
   static let sendDelay = 1.5
   /// How long a plain Yo shows on its bar.
-  static let yoSeconds = 8.0
+  static let yoSeconds = 5.0
+  /// How long of that it stands fully before it fades.
+  static let yoSolidSeconds = 3.0
 
   @Environment(Inbox.self) private var inbox
   @Environment(Friends.self) private var friends
@@ -35,8 +37,6 @@ struct FriendList: View {
   @FocusState private var typing: Bool
   @State private var settings = false
   @State private var position = ScrollPosition(idType: String.self)
-  /// The bars on screen, to scroll to a sender who is not.
-  @State private var onScreen: Set<String> = []
   /// Rows are behind the title: it wears its glass pill.
   @State private var scrolled = false
 
@@ -103,8 +103,8 @@ struct FriendList: View {
     NavigationStack {
       ScrollView {
         LazyVStack(spacing: 0) {
-          ForEach(Array(friends.all.enumerated()), id: \.element) { index, friend in
-            row(friend, at: index)
+          ForEach(friends.all) { friend in
+            row(friend)
               .id(friend.name)
           }
           addRow
@@ -114,7 +114,6 @@ struct FriendList: View {
       .scrollBounceBehavior(.basedOnSize)
       .scrollDismissesKeyboard(.interactively)
       .scrollPosition($position)
-      .onScrollTargetVisibilityChange(idType: String.self, threshold: 0.8) { onScreen = Set($0) }
       // No bar behind the controls: they float as glass over the list, and at the top the background is the brand's
       // Amethyst exactly. The status bar keeps the system's soft edge, so the clock stays readable over the bars.
       .toolbarBackgroundVisibility(.hidden, for: .navigationBar)
@@ -179,11 +178,11 @@ struct FriendList: View {
 
   // MARK: Bars
 
-  @ViewBuilder private func row(_ friend: Friend, at index: Int) -> some View {
+  @ViewBuilder private func row(_ friend: Friend) -> some View {
     let waiting = inbox.media[friend.name] ?? []
     let bar = RowButton(
       rowTitle(friend),
-      color: .row(index).opacity(cameraOn ? 0.45 : 1),  // see-through over the camera
+      color: .row(friend.color).opacity(cameraOn ? 0.45 : 1),  // see-through over the camera
       recording: recordingFor == friend,
       outgoing: outgoing[friend]?.last?.started,
       stop: { cancelSending(friend) },
@@ -214,7 +213,7 @@ struct FriendList: View {
 
   /// The last bar, as in the original: "+", and the name typed right there once tapped.
   @ViewBuilder private var addRow: some View {
-    let color = Color.row(friends.all.count).opacity(cameraOn ? 0.45 : 1)
+    let color = Color.row(friends.nextColor).opacity(cameraOn ? 0.45 : 1)  // the colour the new friend will have
     if adding {
       TextField("", text: $newName, prompt: Text("Name").foregroundStyle(.white.opacity(0.6)))
         .font(.yo(Metrics.rowFont))
@@ -383,10 +382,8 @@ struct FriendList: View {
     Task {
       try? await Task.sleep(for: .seconds(1.5))
       guard sent[friend] == text else { return }
-      withAnimation(.snappy) {
-        sent[friend] = nil
-        if text.hasPrefix("Sent") { friends.promote(friend.name) }
-      }
+      withAnimation(.snappy) { sent[friend] = nil }
+      if text.hasPrefix("Sent") { toTop(friend.name) }
     }
   }
 
@@ -465,10 +462,7 @@ extension FriendList {
       try? await Task.sleep(for: .seconds(delay))
       cheers += 1
       lastCheer = .now
-      withAnimation(.snappy) { friends.promote(name) }
-      if !onScreen.contains(name) {
-        withAnimation(.smooth(duration: 0.5)) { position.scrollTo(id: name, anchor: .top) }
-      }
+      toTop(name)
       withAnimation(.spring(duration: 0.3, bounce: 0.6)) {
         bangs += 1
         let count = (landed[name]?.count ?? 0) + 1
@@ -483,6 +477,15 @@ extension FriendList {
       if landed[name]?.key == arrival.id {
         withAnimation(.smooth) { _ = landed.removeValue(forKey: name) }
       }
+    }
+  }
+
+  /// A friend goes on top, and the list with them: to its very start, below the title (scrolling to the bar itself
+  /// would leave it behind the bar of buttons).
+  private func toTop(_ name: String) {
+    withAnimation(.snappy) {
+      friends.promote(name)
+      position.scrollTo(edge: .top)
     }
   }
 
@@ -544,6 +547,7 @@ struct RowButton: View {
   /// A Yo on this bar now: the bar knocks and says "Yo" at its end ("3×" before it), fading out within `yoSeconds`.
   var yo: FriendList.Landing?
   var yoSeconds = FriendList.yoSeconds
+  private static let solid = FriendList.yoSolidSeconds
   var hint: String?
   var hold: ((Bool) -> Void)?
   var view: (ThumbnailTouch) -> Void = { _ in }
@@ -599,7 +603,7 @@ struct RowButton: View {
       }
     }
     .overlay(alignment: .trailing) {
-      mark.padding(.trailing, 18)
+      mark.padding(.trailing, 30)
     }
     .overlay(alignment: .leading) {
       if let outgoing { undoRing(since: outgoing) }
@@ -698,7 +702,7 @@ struct RowButton: View {
           if yo.count > 1 { count(yo.count) }
           Text("Yo").font(.yo(Metrics.rowFont)).foregroundStyle(.white)
         }
-        .opacity(age < 1.2 ? 1 : max(0, 1 - (age - 1.2) / (yoSeconds - 1.2)))
+        .opacity(age < Self.solid ? 1 : max(0, 1 - (age - Self.solid) / (yoSeconds - Self.solid)))
       }
       .accessibilityLabel(yo.count == 1 ? "Yo" : "\(yo.count) Yos")
       .transition(.scale(scale: 0.3).combined(with: .opacity))
