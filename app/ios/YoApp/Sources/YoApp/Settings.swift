@@ -147,6 +147,7 @@ struct RecoveryWordsSheet: View {
       ScrollView {
         VStack(spacing: 16) {
           WordGrid(words: words)
+          RecoveryQRView(words: words)
           HStack(spacing: 12) {
             KeepButton(title: "Save to Photos", icon: "photo.badge.arrow.down", done: kept.contains("photos")) {
               Task { await save() }

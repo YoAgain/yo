@@ -5,6 +5,7 @@
 // Every step after the welcome is the same page, as Apple's setup screens are: a title and one line at the top, the
 // content in the middle, the button at the bottom over the full width, a text button under it if there is a second
 // way, back at the top left.
+import PhotosUI
 import SwiftUI
 
 struct Onboarding: View {
@@ -112,6 +113,7 @@ struct Onboarding: View {
   private func code(_ words: [String]) -> some View {
     Page(title: "Save Your Words", message: "No passkey could keep your Yo. These 12 words bring it back on a new phone.") {
       WordGrid(words: words)
+      RecoveryQRView(words: words, size: 96)
       HStack(spacing: 12) {
         KeepButton(title: "Save to Photos", icon: "photo.badge.arrow.down", done: kept.contains("photos")) {
           Task { await saveToPhotos(words) }
@@ -321,12 +323,15 @@ struct WordGrid: View {
   }
 }
 
-/// Logging in without a passkey: the 12 words, nothing else (they say whose they are).
+/// Logging in without a passkey: the 12 words, nothing else (they say whose they are): pasted or typed, or read from
+/// the card's QR code by the camera or from Photos.
 private struct LogIn: View {
   let back: () -> Void
   @Environment(AccountStore.self) private var accounts
   @State private var words = ""
   @State private var problem: String?
+  @State private var scanning = false
+  @State private var picked: PhotosPickerItem?
 
   var body: some View {
     Page(title: "Log In", message: "Your 12 words.", back: back) {
@@ -337,10 +342,38 @@ private struct LogIn: View {
         .autocorrectionDisabled()
         .padding(14)
         .background(.white.opacity(0.14), in: .rect(cornerRadius: 16))
+      HStack(spacing: 12) {
+        if QRScanner.isAvailable {
+          KeepButton(title: "Scan", icon: "qrcode.viewfinder", done: false) { scanning = true }
+        }
+        PhotosPicker(selection: $picked, matching: .images) {
+          Label("Photos", systemImage: "photo").font(.system(size: 15, weight: .semibold))
+            .frame(maxWidth: .infinity, minHeight: 30)
+        }
+        .buttonStyle(.glass)
+      }
     } bottom: {
       PrimaryButton("Log In", action: logIn)
         .disabled(words.isEmpty)
       Note(problem)
+    }
+    .sheet(isPresented: $scanning) {
+      QRScanner { text in
+        scanning = false
+        words = text
+        logIn()
+      }
+      .ignoresSafeArea()
+    }
+    .onChange(of: picked) { _, item in
+      guard let item else { return }
+      Task {
+        guard let data = try? await item.loadTransferable(type: Data.self), let image = UIImage(data: data),
+          let text = RecoveryQR.read(image)
+        else { return problem = "No Yo code in that picture" }
+        words = text
+        logIn()
+      }
     }
   }
 
@@ -366,7 +399,11 @@ struct RecoveryCard: View {
         Spacer()
         Text(name).font(.yo(24))
       }
-      Text("Your 12 words").font(.yo(22))
+      HStack(alignment: .bottom) {
+        Text("Your 12 words").font(.yo(22))
+        Spacer()
+        RecoveryQRView(words: words, size: 110)
+      }
       Grid(horizontalSpacing: 26, verticalSpacing: 10) {
         ForEach(0..<6, id: \.self) { row in
           GridRow {

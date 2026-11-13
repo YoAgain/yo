@@ -57,10 +57,16 @@ enum RecoveryCode {
     }
   }
 
-  /// The words as typed, if they are 12 known words with a matching checksum.
+  /// The 12 words in whatever was pasted, typed or scanned: numbers, a heading ("Yo LEO"), line breaks and other
+  /// words around them do not matter; the first run of 12 list words whose checksum matches counts.
   static func parse(_ typed: String) -> [String]? {
-    let given = typed.lowercased().split(whereSeparator: { !$0.isLetter }).map(String.init)
-    guard given.count == 12 else { return nil }
+    let known = typed.lowercased().split(whereSeparator: { !$0.isLetter }).map(String.init).filter(words.contains)
+    guard known.count >= 12 else { return nil }
+    return (0...(known.count - 12)).lazy.compactMap { check(Array(known[$0..<($0 + 12)])) }.first
+  }
+
+  /// The 12 words if their checksum matches.
+  private static func check(_ given: [String]) -> [String]? {
     let indexes = given.compactMap { words.firstIndex(of: $0) }
     guard indexes.count == 12 else { return nil }
     let bits = indexes.flatMap { index in (0..<11).map { UInt8((index >> (10 - $0)) & 1) } }
