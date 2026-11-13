@@ -164,11 +164,15 @@ struct SecureNameSheet: View {
     if let image = renderer.uiImage { items.insert(image, at: 0) }
     Share.present(items) { completed in
       guard completed else { return }
-      if !secured {
-        do { try accounts.keepWords() } catch { return problem = "Couldn’t save. Try again." }
+      Task {
+        if !secured {
+          busy = true
+          defer { busy = false }
+          do { try await accounts.keepWords() } catch { return problem = error.localizedDescription }
+        }
+        accounts.markWordsSaved(true)
+        next()
       }
-      accounts.markWordsSaved(true)
-      next()
     }
   }
 }

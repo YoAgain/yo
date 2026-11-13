@@ -256,15 +256,19 @@ struct SettingsView: View {
   }
 
   private func removePasskey() {
-    do { try accounts.removePasskey() } catch { passkeyProblem = "Try again." }
+    Task {
+      do { try await accounts.removePasskey() } catch { passkeyProblem = error.localizedDescription }
+    }
   }
 
   private func newWords() {
-    do {
-      _ = try accounts.newRecoveryKey()
-      secure(.words)  // the new words, to save in the guide
-    } catch {
-      passkeyProblem = "Try again."
+    Task {
+      do {
+        _ = try await accounts.newRecoveryKey()
+        secure(.words)  // the new words, to save in the guide
+      } catch {
+        passkeyProblem = error.localizedDescription
+      }
     }
   }
 

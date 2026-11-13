@@ -1,8 +1,7 @@
 // Your account (spec 3, 6.4, 7): a username, a user id, an account key, and the backup that brings them back on a
 // new phone, opened by a passkey's PRF output or by a recovery code.
 //
-// The mockup has no hub yet: `MockHub` stands in for it on the phone, in a store of its own that "Reset Yo" does not
-// touch, so a reset is a new phone and the restore can be tried for real (the cryptography is the real one).
+// The account lives at the hub, through the Rust core (`Hub.swift`); the backup is made and opened here.
 import CryptoKit
 import Foundation
 import Observation
@@ -11,11 +10,12 @@ import Security
 import UIKit
 import UniformTypeIdentifiers
 import UserNotifications
+import YoCore
 
 struct Account: Codable, Equatable {
   var username: String
   var userID: Data
-  /// Ed25519, raw: signs the account's devices (spec 3.1).
+  /// The account key's 32-byte secret (Ed25519; signs the account's devices, spec 3.1), from the core.
   var accountKey: Data
   /// How the backup opens: by the passkey (and the words), or by the recovery words only.
   var byPasskey: Bool
@@ -122,13 +122,9 @@ enum RecoveryCode {
   }
 }
 
-/// The backup (spec 7): the account under a random key K, and K wrapped by the passkey and by the code.
-struct BackupRecord: Codable {
-  var userID: Data
-  var byPasskey: Data?
-  var byCode: Data?
-  var sealed: Data
-
+/// The backup (spec 7): the account under a random key K, and K wrapped by the passkey and by the code. The record
+/// itself (`YoBackup`) lives at the hub; this is how the app makes and opens it.
+enum BackupRecord {
   /// The salt every Yo passkey is asked with: one for all, so a new phone asks once, before it knows who it is.
   static let prfSalt = Data(SHA256.hash(data: Data("yo backup v1".utf8)))
 
@@ -138,10 +134,10 @@ struct BackupRecord: Codable {
   }
 
   /// Where the backup lies, found from the words alone: no name needed (a name can change), not guessable (128 bits).
-  static func locator(code: [String]) -> String {
+  static func locator(code: [String]) -> Data {
     HKDF<SHA256>.deriveKey(inputKeyMaterial: SymmetricKey(data: Data(code.joined(separator: " ").utf8)),
       info: Data("yo backup v1 locator".utf8), outputByteCount: 16)
-      .withUnsafeBytes { Data($0) }.base64EncodedString()
+      .withUnsafeBytes { Data($0) }
   }
 
   static func key(code: [String]) -> SymmetricKey {
@@ -149,20 +145,26 @@ struct BackupRecord: Codable {
       info: Data("yo backup v1 code".utf8), outputByteCount: 32)
   }
 
-  /// What K seals: the account, and the recovery words, so a phone restored by passkey has them to show too.
+  /// What K seals: the account (its key's secret above all), and the recovery words, so a phone restored by passkey
+  /// has them to show too.
   struct Sealed: Codable {
     var account: Account
     var code: [String]?
   }
 
-  static func seal(_ account: Account, code: [String], with k: SymmetricKey) throws -> Data {
-    try ChaChaPoly.seal(try JSONEncoder().encode(Sealed(account: account, code: code)), using: k).combined
+  /// A record for the hub: K under the words always, under the passkey's PRF output too when given.
+  static func make(_ account: Account, code: [String], k: SymmetricKey, prf: Data?, byPasskey: Data? = nil) throws
+    -> YoBackup
+  {
+    YoBackup(
+      byPasskey: try byPasskey ?? prf.map { try wrap(k, in: key(prf: $0)) } ?? Data(),
+      byCode: try wrap(k, in: key(code: code)),
+      sealed: try ChaChaPoly.seal(try JSONEncoder().encode(Sealed(account: account, code: code)), using: k).combined,
+      locator: locator(code: code))
   }
 
   static func open(_ sealed: Data, with k: SymmetricKey) throws -> Sealed {
-    let plain = try ChaChaPoly.open(ChaChaPoly.SealedBox(combined: sealed), using: k)
-    if let both = try? JSONDecoder().decode(Sealed.self, from: plain) { return both }
-    return Sealed(account: try JSONDecoder().decode(Account.self, from: plain))  // older mock backups
+    try JSONDecoder().decode(Sealed.self, from: try ChaChaPoly.open(ChaChaPoly.SealedBox(combined: sealed), using: k))
   }
 
   static func wrap(_ k: SymmetricKey, in key: SymmetricKey) throws -> Data {
@@ -174,56 +176,14 @@ struct BackupRecord: Codable {
   }
 }
 
-/// The hub's part, simulated on the phone until the app talks to the hub: names taken, and backups by name and by
-/// user id. Its own store, which a reset of the app leaves alone.
-enum MockHub {
-  private static var store: UserDefaults { UserDefaults(suiteName: "app.justyo.mockhub") ?? .standard }
-
-  /// Names someone else has, as if they had registered first (to try what "taken" looks like).
-  static let othersHave: Set<String> = ["LEO"]
-
-  /// Taken: by its skeleton, so a name that only looks like one already there is taken too (spec 3.3).
-  static func isTaken(_ username: String) -> Bool {
-    let skeleton = Username.skeleton(username)
-    return store.string(forKey: "skeleton." + skeleton) != nil || store.data(forKey: "name." + username) != nil
-      || Username.isReserved(username) || othersHave.map(Username.skeleton).contains(skeleton)
-  }
-
-  static func save(_ record: BackupRecord, for username: String, locator: String? = nil) {
-    store.set(try? JSONEncoder().encode(record), forKey: "name." + username)
-    store.set(username, forKey: "user." + record.userID.base64EncodedString())
-    store.set(username, forKey: "skeleton." + Username.skeleton(username))
-    if let locator { store.set(username, forKey: "code." + locator) }
-  }
-
-  /// The backup the recovery words point to.
-  static func username(at locator: String) -> String? {
-    store.string(forKey: "code." + locator)
-  }
-
-  static func record(for username: String) -> BackupRecord? {
-    store.data(forKey: "name." + username).flatMap { try? JSONDecoder().decode(BackupRecord.self, from: $0) }
-  }
-
-  static func username(of userID: Data) -> String? {
-    store.string(forKey: "user." + userID.base64EncodedString())
-  }
-
-  /// Old recovery words point nowhere any more.
-  static func forget(locator: String) {
-    store.removeObject(forKey: "code." + locator)
-  }
-
-  static func forgetAll() {
-    store.removePersistentDomain(forName: "app.justyo.mockhub")
-  }
-}
-
 @MainActor @Observable
 final class AccountStore {
   private(set) var account: Account? {
     didSet { UserDefaults.standard.set(try? JSONEncoder().encode(account), forKey: Self.key) }
   }
+
+  /// The core, opened from its saved state at launch or made at registration: talks to the hub for this device.
+  private(set) var client: YoClient?
 
   /// The recovery words were saved somewhere by the person (through the share sheet), not only made. Accounts from
   /// before this was kept count as saved.
@@ -250,167 +210,153 @@ final class AccountStore {
 
   private static let key = "account"
   private let passkeys = Passkeys()
-  /// Securing under way: K and the words, made once per try; the passkey once made.
-  private var securing: (k: SymmetricKey, code: [String], passkey: Data?)?
+  /// Securing under way: K and the words, made once per try.
+  private var securing: (k: SymmetricKey, code: [String])?
+  /// The guide's passkey once made, before it is signed in with.
+  private var newPasskey: Data?
 
   init() {
     account = UserDefaults.standard.data(forKey: Self.key).flatMap { try? JSONDecoder().decode(Account.self, from: $0) }
-    if account?.byCode == nil, RecoveryWords.load() != nil { account?.byCode = true }  // registered with the words
+    if account != nil { Task { await open() } }
   }
 
-  /// Registers `username` (spec 6.4): the name is yours at once, the backup comes later (`secure…`).
-  func register(_ username: String) throws {
-    guard !MockHub.isTaken(username) else { throw AccountError.taken }
-    let userID = Passkeys.random(16)
-    MockHub.save(BackupRecord(userID: userID, sealed: Data()), for: username)  // the name taken, nothing backed up
+  /// The core from the state it saved last. A device replaced since (the account restored on another phone): out.
+  private func open() async {
+    guard client == nil, let blob = StateFile.load() else { return }
+    let transport = Hub.transport
+    let key = StateKey.load()
+    do {
+      client = try await Hub.run {
+        try YoClient.restore(transport: transport, store: StateFile(), stateKey: key, blob: blob)
+      }
+    } catch YoError.Replaced {
+      reset()
+    } catch {}
+  }
+
+  /// Registers `username` at the hub (spec 6.4), or, with `secret`, takes the name's account back (a new phone).
+  private func register(_ username: String, secret: Data?) async throws -> YoClient {
+    let transport = Hub.transport
+    let key = StateKey.load()
+    do {
+      return try await Hub.run {
+        try YoClient.registerUsername(
+          transport: transport, store: StateFile(), stateKey: key, username: username, accountSecret: secret,
+          name: nil, pushPlatform: 0, pushToken: "")
+      }
+    } catch YoError.Refused(let status) where status == 409 {
+      throw AccountError.taken
+    } catch YoError.Refused(let status) where status == 429 {
+      throw AccountError.tooMany
+    } catch let error as YoError {
+      throw AccountError.hub(error)
+    }
+  }
+
+  /// A new account (spec 6.4): the name is yours at once, the backup comes later (`createPasskey`, `keepWords`).
+  func register(_ username: String) async throws {
+    let client = try await register(username, secret: nil)
+    guard let id = Hub.bytes(client.userId()) else { throw AccountError.noBackup }
+    self.client = client
     account = Account(
-      username: username, userID: userID, accountKey: Curve25519.Signing.PrivateKey().rawRepresentation,
-      byPasskey: false)
+      username: client.username() ?? username, userID: id, accountKey: client.accountSecret(), byPasskey: false)
     SecureReminder.update(secured: false)
     wordsSaved = false
+    passkeyTurnedOff = false
   }
 
   // MARK: Securing the name (spec 7)
 
-  /// A passkey for the name, made and then used, as its PRF output comes only when a passkey is used. Used right away
-  /// when the provider says it supports PRF (iCloud Keychain: one more Face ID); else, or cancelled, the caller explains
-  /// and calls `confirmPasskey`. True when the name is secured.
-  func securePasskey() async throws -> Bool {
-    guard let account else { throw AccountError.noBackup }
-    if securing == nil { securing = (SymmetricKey(size: .bits256), RecoveryCode.make(), nil) }
-    let made = try await passkeys.make(name: account.username, userID: account.userID)
-    securing?.passkey = made.credentialID
-    guard made.prfSupported else { return false }
-    return (try? await confirmPasskey()) != nil
-  }
-
-  /// The passkey just made, used once: its PRF output opens the backup, as the words do.
-  func confirmPasskey() async throws {
-    guard let credential = securing?.passkey else { throw AccountError.noBackup }
-    guard let prf = try await passkeys.ask(salt: BackupRecord.prfSalt, only: credential).prf else {
-      throw AccountError.noPRF
-    }
-    try saveBackup(prf: prf)
-  }
-
   /// The guide's passkey, in two steps the person sees: made (saved in the password manager)…
-  private var newPasskey: Data?
-
   func createPasskey() async throws {
     guard let account else { throw AccountError.noBackup }
-    if !account.secured, securing == nil { securing = (SymmetricKey(size: .bits256), RecoveryCode.make(), nil) }
+    if !account.secured, securing == nil { securing = (SymmetricKey(size: .bits256), RecoveryCode.make()) }
     newPasskey = try await passkeys.make(name: account.username, userID: account.userID).credentialID
   }
 
   /// …then signed in with once, which checks it works and gives its PRF output: the backup then opens with it too
   /// (a new backup if there was none, else added to the one the words open).
   func checkPasskey() async throws {
-    guard let credential = newPasskey, var account else { throw AccountError.noBackup }
+    guard let credential = newPasskey else { throw AccountError.noBackup }
     guard let prf = try await passkeys.ask(salt: BackupRecord.prfSalt, only: credential).prf else {
       throw AccountError.noPRF
     }
-    if account.secured {
-      var (opened, record, k, code) = try openBackup()
-      record.byPasskey = try BackupRecord.wrap(k, in: BackupRecord.key(prf: prf))
-      opened.byPasskey = true
-      record.sealed = try BackupRecord.seal(opened, code: code, with: k)
-      MockHub.save(record, for: opened.username)
-      account = opened
-      self.account = account
+    if account?.secured == true {
+      try await rewrap(.set(prf))
     } else {
-      securing?.passkey = credential
-      try saveBackup(prf: prf)
+      try await saveBackup(prf: prf)
     }
-    passkeyTurnedOff = false
     newPasskey = nil
   }
 
   /// The words, to show when the passkey did not work.
   func secureWords() -> [String] {
-    if securing == nil { securing = (SymmetricKey(size: .bits256), RecoveryCode.make(), nil) }
+    if securing == nil { securing = (SymmetricKey(size: .bits256), RecoveryCode.make()) }
     return securing?.code ?? []
   }
 
   /// The words kept: the backup opens with them.
-  func keepWords() throws { try saveBackup(prf: nil) }
+  func keepWords() async throws { try await saveBackup(prf: nil) }
 
-  /// The backup: K under the words always (passkey and words are equal doors), under the passkey's PRF output too.
-  private func saveBackup(prf: Data?) throws {
+  /// The first backup: K under the words always (passkey and words are equal doors), under the passkey's PRF too.
+  private func saveBackup(prf: Data?) async throws {
     guard var account, let securing else { throw AccountError.noBackup }
-    let k = securing.k
-    var record = BackupRecord(
-      userID: account.userID, byCode: try BackupRecord.wrap(k, in: BackupRecord.key(code: securing.code)),
-      sealed: Data())
-    if let prf {
-      record.byPasskey = try BackupRecord.wrap(k, in: BackupRecord.key(prf: prf))
-      account.byPasskey = true
-    }
+    account.byPasskey = prf != nil
     account.byCode = true
-    record.sealed = try BackupRecord.seal(account, code: securing.code, with: k)
+    try await put(BackupRecord.make(account, code: securing.code, k: securing.k, prf: prf))
     RecoveryWords.save(securing.code)
-    MockHub.save(record, for: account.username, locator: BackupRecord.locator(code: securing.code))
     self.account = account
     self.securing = nil
+    if prf != nil { passkeyTurnedOff = false }
     SecureReminder.update(secured: true)
   }
 
-  /// A passkey added to a backup kept with the words: a Yo passkey of this account if there is one, else a new one;
-  /// K comes from the recovery words on this phone.
-  /// The backup opened with the words on this phone: what replacing a passkey or the words needs.
-  private func openBackup() throws -> (account: Account, record: BackupRecord, k: SymmetricKey, code: [String]) {
-    guard let account, let code = RecoveryWords.load(), let record = MockHub.record(for: account.username),
-      let byCode = record.byCode
-    else { throw AccountError.noBackup }
-    return (account, record, try BackupRecord.unwrap(byCode, with: BackupRecord.key(code: code)), code)
+  private func put(_ backup: YoBackup) async throws {
+    guard let client else { throw AccountError.noBackup }
+    do {
+      try await Hub.run { try client.putBackup(backup: backup) }
+    } catch let error as YoError {
+      throw AccountError.hub(error)
+    }
+  }
+
+  private enum Door { case keep, set(Data), remove }
+
+  /// The backup again with the same K (opened by the words on this phone): its passkey door kept, set from a PRF
+  /// output or removed, and optionally under new words (the old locator then finds nothing).
+  private func rewrap(_ passkey: Door, code new: [String]? = nil) async throws {
+    guard var account, let code = RecoveryWords.load() else { throw AccountError.noBackup }
+    let record = try await fetch(account.userID)
+    let k = try BackupRecord.unwrap(record.byCode, with: BackupRecord.key(code: code))
+    let words = new ?? code
+    let byPasskey: Data =
+      switch passkey {
+      case .keep: record.byPasskey
+      case .set(let prf): try BackupRecord.wrap(k, in: BackupRecord.key(prf: prf))
+      case .remove: Data()
+      }
+    account.byPasskey = !byPasskey.isEmpty
+    account.byCode = true
+    try await put(BackupRecord.make(account, code: words, k: k, prf: nil, byPasskey: byPasskey))
+    RecoveryWords.save(words)
+    self.account = account
+    if case .set = passkey { passkeyTurnedOff = false }
+    if case .remove = passkey { passkeyTurnedOff = true }
   }
 
   /// A new passkey in place of the one there (made, then used once for its PRF output).
   func replacePasskey() async throws {
-    var (account, record, k, code) = try openBackup()
+    guard let account else { throw AccountError.noBackup }
     let made = try await passkeys.make(name: account.username, userID: account.userID)
     guard let prf = try await passkeys.ask(salt: BackupRecord.prfSalt, only: made.credentialID).prf else {
       throw AccountError.noPRF
     }
-    record.byPasskey = try BackupRecord.wrap(k, in: BackupRecord.key(prf: prf))
-    account.byPasskey = true
-    record.sealed = try BackupRecord.seal(account, code: code, with: k)
-    MockHub.save(record, for: account.username)
-    self.account = account
-    passkeyTurnedOff = false
+    try await rewrap(.set(prf))
   }
 
-  /// The passkey no longer opens the backup; the words still do. (The passkey itself is deleted in the password
-  /// manager.)
-  func removePasskey() throws {
-    var (account, record, k, code) = try openBackup()
-    record.byPasskey = nil
-    account.byPasskey = false
-    record.sealed = try BackupRecord.seal(account, code: code, with: k)
-    MockHub.save(record, for: account.username)
-    self.account = account
-    passkeyTurnedOff = true
-  }
-
-  /// New recovery words; the old ones stop working.
-  func newRecoveryKey() throws -> [String] {
-    var (account, record, k, old) = try openBackup()
-    let code = RecoveryCode.make()
-    record.byCode = try BackupRecord.wrap(k, in: BackupRecord.key(code: code))
-    account.byCode = true
-    record.sealed = try BackupRecord.seal(account, code: code, with: k)
-    MockHub.forget(locator: BackupRecord.locator(code: old))
-    MockHub.save(record, for: account.username, locator: BackupRecord.locator(code: code))
-    RecoveryWords.save(code)
-    self.account = account
-    wordsSaved = false  // new words, not yet kept anywhere
-    return code
-  }
-
+  /// A passkey to a backup kept with the words: a Yo passkey of this account if there is one, else a new one.
   func addPasskey() async throws {
-    guard var account, let code = RecoveryWords.load(), var record = MockHub.record(for: account.username),
-      let byCode = record.byCode
-    else { throw AccountError.noBackup }
-    let k = try BackupRecord.unwrap(byCode, with: BackupRecord.key(code: code))
+    guard let account else { throw AccountError.noBackup }
     var prf: Data?
     if let answer = try? await passkeys.ask(salt: BackupRecord.prfSalt, quietly: true), answer.userID == account.userID {
       prf = answer.prf
@@ -419,51 +365,78 @@ final class AccountStore {
       prf = try await passkeys.ask(salt: BackupRecord.prfSalt, only: made.credentialID).prf
     }
     guard let prf else { throw AccountError.noPRF }
-    record.byPasskey = try BackupRecord.wrap(k, in: BackupRecord.key(prf: prf))
-    account.byPasskey = true
-    record.sealed = try BackupRecord.seal(account, code: code, with: k)
-    MockHub.save(record, for: account.username)
-    self.account = account
-    passkeyTurnedOff = false
+    try await rewrap(.set(prf))
   }
 
-  /// A new phone: any Yo passkey of this person, asked once; its user handle says whose backup to open.
+  /// The passkey no longer opens the backup; the words still do. (The passkey itself is deleted in the password
+  /// manager.)
+  func removePasskey() async throws { try await rewrap(.remove) }
+
+  /// New recovery words; the old ones stop working (the hub forgets their locator).
+  func newRecoveryKey() async throws -> [String] {
+    let code = RecoveryCode.make()
+    try await rewrap(.keep, code: code)
+    wordsSaved = false
+    return code
+  }
+
+  // MARK: A new phone
+
+  /// Any Yo passkey of this person, asked once; its user handle says whose backup to open.
   func restoreWithPasskey(quietly: Bool = false) async throws {
     let answer = try await passkeys.ask(salt: BackupRecord.prfSalt, quietly: quietly)
-    guard let username = MockHub.username(of: answer.userID), let record = MockHub.record(for: username),
-      let wrapped = record.byPasskey, let prf = answer.prf
-    else { throw AccountError.noBackup }
-    try open(record, with: BackupRecord.unwrap(wrapped, with: BackupRecord.key(prf: prf)))
+    guard let prf = answer.prf else { throw AccountError.noPRF }
+    let record = try await fetch(answer.userID)
+    guard !record.byPasskey.isEmpty else { throw AccountError.noBackup }
+    try await restore(record, k: BackupRecord.unwrap(record.byPasskey, with: BackupRecord.key(prf: prf)))
   }
 
-  /// A new phone, by the recovery words alone: they say where the backup is and open it.
-  func restore(code: [String]) throws {
-    guard let username = MockHub.username(at: BackupRecord.locator(code: code)),
-      let record = MockHub.record(for: username), let wrapped = record.byCode
-    else { throw AccountError.noBackup }
-    guard let k = try? BackupRecord.unwrap(wrapped, with: BackupRecord.key(code: code)) else { throw AccountError.wrongCode }
-    try open(record, with: k)
-    RecoveryWords.save(code)
+  /// By the recovery words alone: they say where the backup is and open it.
+  func restore(code: [String]) async throws {
+    let record = try await fetch(BackupRecord.locator(code: code))
+    guard let k = try? BackupRecord.unwrap(record.byCode, with: BackupRecord.key(code: code)) else {
+      throw AccountError.wrongCode
+    }
+    try await restore(record, k: k)
     wordsSaved = true  // typed in: the person has them
   }
 
-  private func open(_ record: BackupRecord, with k: SymmetricKey) throws {
-    let sealed = try BackupRecord.open(record.sealed, with: k)
-    if let code = sealed.code { RecoveryWords.save(code) }
-    account = sealed.account
+  private func fetch(_ id: Data) async throws -> YoBackup {
+    let transport = Hub.transport
+    do {
+      guard let record = try await Hub.run({ try fetchBackup(transport: transport, id: id) }) else {
+        throw AccountError.noBackup
+      }
+      return record
+    } catch YoError.Refused(let status) where status == 429 {
+      throw AccountError.tooMany
+    } catch let error as YoError {
+      throw AccountError.hub(error)
+    }
   }
 
-  /// "Reset Yo": this phone forgets everything, as a new phone would (the simulated hub keeps the backups).
+  /// The account from its backup, and this phone registered for it with the account's key (spec 6.4).
+  private func restore(_ record: YoBackup, k: SymmetricKey) async throws {
+    let sealed = try BackupRecord.open(record.sealed, with: k)
+    client = try await register(sealed.account.username, secret: sealed.account.accountKey)
+    if let code = sealed.code { RecoveryWords.save(code) }
+    account = sealed.account
+    SecureReminder.update(secured: true)
+  }
+
+  /// "Sign Out": this phone forgets the account, as a new phone would (the hub keeps the backup).
   func reset() {
     account = nil
+    client = nil
     securing = nil
+    StateFile.delete()
     SecureReminder.update(secured: true)
     RecoveryWords.delete()
   }
 }
 
 enum AccountError: LocalizedError {
-  case taken, noBackup, wrongCode, noPRF
+  case taken, noBackup, wrongCode, noPRF, tooMany, hub(YoError)
 
   var errorDescription: String? {
     switch self {
@@ -471,6 +444,9 @@ enum AccountError: LocalizedError {
     case .noBackup: "We couldn’t find your account. Try another passkey or recovery key."
     case .wrongCode: "That recovery key couldn’t restore your account. Check the words and try again."
     case .noPRF: "This passkey can’t be used to sign in to Yo. Try a different password manager."
+    case .tooMany: "Too many tries. Try again later."
+    case .hub(.Network): "Yo can’t reach its server. Check your connection and try again."
+    case .hub: "Something went wrong. Try again."
     }
   }
 }

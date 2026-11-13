@@ -25,6 +25,9 @@ struct Onboarding: View {
   /// Continue tapped with a name too short: the minimum shows, the field shakes (once per tap).
   @State private var tooShort = false
   @State private var shakes = 0
+  @State private var devHub = Hub.usesDev
+  /// The last name the hub said is taken (409): the field shows the red cross while it is typed.
+  @State private var takenName: String?
 
   var body: some View {
     ZStack {
@@ -58,9 +61,17 @@ struct Onboarding: View {
         .opacity(0.85)
       Spacer()
       PrimaryButton("Start") { go(.name) }
-      Button("Sign In") { go(.logIn) }
-        .font(.yo(18))
-        .padding(.top, 18)
+      HStack(spacing: 28) {
+        Button("Sign In") { go(.logIn) }
+        // While Yo is in development: the dev hub instead of the live one, for this phone's next account.
+        Button(devHub ? "Dev Server" : "Switch to Dev Server") {
+          devHub.toggle()
+          Hub.usesDev = devHub
+        }
+        .opacity(devHub ? 1 : 0.6)
+      }
+      .font(.yo(18))
+      .padding(.top, 18)
     }
     .padding(.horizontal, 28)
     .padding(.bottom, 16)
@@ -79,7 +90,7 @@ struct Onboarding: View {
   private var naming: some View {
     // No words while typing: the field keeps the rules, a checkmark says free, a red cross says taken. Too short is
     // said only after a pause in typing, or when Continue is tapped (the field shakes too), until the next letter.
-    let taken = name.count >= 3 && MockHub.isTaken(name)
+    let taken = name.count >= 3 && (takenName.map { Username.skeleton($0) == Username.skeleton(name) } ?? false)
     let trouble = Username.problem(name) ?? (taken ? "taken" : nil)
     let mine = taken && !Username.isReserved(name)
     return Page(title: "Choose a Name", back: { go(.welcome) }) {
@@ -140,9 +151,15 @@ struct Onboarding: View {
       UINotificationFeedbackGenerator().notificationOccurred(.error)
       return
     }
-    guard Username.problem(name) == nil, !MockHub.isTaken(name) else { return }
+    guard Username.problem(name) == nil else { return }
+    busy = true
+    defer { busy = false }
+    problem = nil
     do {
-      try accounts.register(name)  // in: the list takes over; the name is secured later, from the profile
+      try await accounts.register(name)  // in: the list takes over; the name is secured later, from the profile
+    } catch AccountError.taken {
+      takenName = name
+      UINotificationFeedbackGenerator().notificationOccurred(.error)
     } catch {
       problem = error.localizedDescription
     }
@@ -383,10 +400,12 @@ private struct LogIn: View {
     guard let code = RecoveryCode.parse(words) else {
       return problem = "That doesn't match a recovery key. Check the words and try again."
     }
-    do {
-      try accounts.restore(code: code)
-    } catch {
-      problem = error.localizedDescription
+    Task {
+      do {
+        try await accounts.restore(code: code)
+      } catch {
+        problem = error.localizedDescription
+      }
     }
   }
 }
