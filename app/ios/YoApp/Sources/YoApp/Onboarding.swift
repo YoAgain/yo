@@ -26,7 +26,6 @@ struct Onboarding: View {
   @State private var tooShort = false
   @State private var shakes = 0
   @AppStorage("hub.dev") private var devHub = false
-  @State private var switchingHub = false
   @State private var taps: [Date] = []
   /// The last name the hub said is taken (409): the field shows the red cross while it is typed.
   @State private var takenName: String?
@@ -74,16 +73,6 @@ struct Onboarding: View {
         .contentShape(.rect)
         .onTapGesture { secretTap() }
         .accessibilityHidden(true)
-    }
-    .confirmationDialog(devHub ? "Switch to Live Server?" : "Switch to Dev Server?", isPresented: $switchingHub,
-      titleVisibility: .visible) {
-      Button(devHub ? "Switch to Live Server" : "Switch to Dev Server") {
-        devHub.toggle()
-        Hub.usesDev = devHub
-      }
-      Button("Cancel", role: .cancel) {}
-    } message: {
-      Text(devHub ? "New accounts go to hub.justyo.app." : "For development: accounts on dev.justyo.app only.")
     }
     .padding(.horizontal, 28)
     .padding(.bottom, 16)
@@ -150,14 +139,15 @@ struct Onboarding: View {
 
   // MARK: Doing
 
-  /// Four quick taps (within two seconds) ask whether to switch hubs.
+  /// Four quick taps (within two seconds) switch between the live and the dev hub.
   private func secretTap() {
     let now = Date.now
     taps = taps.filter { now.timeIntervalSince($0) < 2 } + [now]
     guard taps.count >= 4 else { return }
     taps = []
     UINotificationFeedbackGenerator().notificationOccurred(.warning)
-    switchingHub = true
+    devHub.toggle()  // straight away; the DEV SERVER label says which
+    Hub.usesDev = devHub
   }
 
   private func go(_ next: Step) {
