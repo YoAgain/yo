@@ -1,5 +1,6 @@
 // "Secure Your Name", from the profile (spec 7): a passkey first, made and then used once (its PRF output comes only
-// when a passkey is used); if that does not work, the 12 words. One sheet that changes in place, no pages.
+// when a passkey is used), then the 12 words to keep as well; if the passkey does not work, the words alone. One
+// sheet that changes in place.
 import SwiftUI
 
 struct SecureNameSheet: View {
@@ -16,8 +17,8 @@ struct SecureNameSheet: View {
     case passkey
     /// Made, but its PRF output not given yet (1Password): used once more, said why.
     case confirm
-    /// No passkey: the words.
-    case words([String])
+    /// The words to keep: with the passkey already saved (`saved`), or alone.
+    case words([String], saved: Bool)
   }
 
   var body: some View {
@@ -27,7 +28,7 @@ struct SecureNameSheet: View {
         switch stage {
         case .passkey: passkey
         case .confirm: confirm
-        case .words(let words): wordsPage(words)
+        case .words(let words, let saved): wordsPage(words, saved: saved)
         }
       }
       .transition(.opacity)
@@ -68,8 +69,11 @@ struct SecureNameSheet: View {
     }
   }
 
-  private func wordsPage(_ words: [String]) -> some View {
-    Page(title: "Recovery Key", message: "Keep it somewhere safe. It's how you get your name back on a new iPhone.") {
+  private func wordsPage(_ words: [String], saved: Bool) -> some View {
+    Page(title: "Recovery Key",
+      message: saved
+        ? "Your passkey is set up. Keep these words too: they get your name back without it."
+        : "Keep it somewhere safe. It's how you get your name back on a new iPhone.") {
       FrostedKey(words: words, qrSize: 96)
       HStack(spacing: 12) {
         KeepButton(title: "Save to Photos", icon: "photo.badge.arrow.down", done: kept.contains("photos")) {
@@ -83,9 +87,11 @@ struct SecureNameSheet: View {
       .padding(.top, 6)
       .disabled(busy)
     } bottom: {
-      PrimaryButton("Done") { keepWords() }
-      Button("Try Passkey Again") { stage = .passkey; Task { await makePasskey() } }
-        .font(.yo(17))
+      PrimaryButton("Done") { saved ? done() : keepWords() }
+      if !saved {
+        Button("Try Passkey Again") { stage = .passkey; Task { await makePasskey() } }
+          .font(.yo(17))
+      }
       Note(problem)
     }
   }
@@ -96,8 +102,9 @@ struct SecureNameSheet: View {
     busy = true
     defer { busy = false }
     problem = nil
+    let words = accounts.secureWords()  // made now: shown after the passkey, kept with it
     do {
-      if try await accounts.securePasskey() { return done() }
+      if try await accounts.securePasskey() { return stage = .words(words, saved: true) }
       stage = .confirm
     } catch {
       showWords()  // cancelled, or the password manager could not make it
@@ -109,8 +116,9 @@ struct SecureNameSheet: View {
     defer { busy = false }
     problem = nil
     do {
+      let words = accounts.secureWords()
       try await accounts.confirmPasskey()
-      done()
+      stage = .words(words, saved: true)
     } catch let error as AccountError {
       problem = error.errorDescription
     } catch {
@@ -120,7 +128,7 @@ struct SecureNameSheet: View {
 
   private func showWords() {
     problem = nil
-    stage = .words(accounts.secureWords())
+    stage = .words(accounts.secureWords(), saved: false)
   }
 
   private func keepWords() {

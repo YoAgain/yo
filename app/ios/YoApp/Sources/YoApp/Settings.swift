@@ -24,46 +24,7 @@ struct SettingsView: View {
   var body: some View {
     NavigationStack {
       Form {
-        Section {
-          // You: your name, and how your Yo comes back on a new phone.
-          HStack(spacing: 14) {
-            Image(systemName: "person.crop.circle.fill")
-              .font(.system(size: 52))
-              .foregroundStyle(.white, Color.amethyst)
-            VStack(alignment: .leading, spacing: 2) {
-              Text(accounts.account?.username ?? "You").font(.yo(24, relativeTo: .title3))
-              Label(
-                accounts.account?.secured != true
-                  ? "Not secured yet"
-                  : accounts.account?.byPasskey == true ? "Saved with a passkey" : "Saved with a recovery key",
-                systemImage: accounts.account?.secured != true
-                  ? "exclamationmark.circle"
-                  : accounts.account?.byPasskey == true ? "person.badge.key.fill" : "list.number"
-              )
-              .font(.subheadline)
-              .foregroundStyle(.secondary)
-            }
-          }
-          .padding(.vertical, 4)
-        }
-        if accounts.account?.secured == false {
-          // As Settings shows "Finish Setting Up": the one thing left, with the red dot the profile button has too.
-          Section {
-            Button { securing = true } label: {
-              HStack(spacing: 12) {
-                VStack(alignment: .leading, spacing: 2) {
-                  Text("Secure Your Name").foregroundStyle(.primary)
-                  Text("So you can get it back on a new iPhone. Names not secured become available after 30 days "
-                    + "without opening Yo.")
-                    .font(.footnote)
-                    .foregroundStyle(.secondary)
-                }
-                Spacer()
-                Circle().fill(.red).frame(width: 10, height: 10)
-              }
-            }
-          }
-        }
+        nameSection
         Section {
           Toggle("Save Sent Photos and Videos", isOn: $saveSent)
         } header: {
@@ -71,26 +32,6 @@ struct SettingsView: View {
         } footer: {
           Text("What you send from the camera is saved to your photo library. Nothing you receive is saved.")
         }
-        Section {
-          if RecoveryWords.load() != nil {
-            Button("Recovery Key", systemImage: "key") { Task { await showWords() } }
-          }
-          if accounts.account?.secured == true, accounts.account?.byPasskey == false {
-            Button("Set Up Passkey", systemImage: "person.badge.key") { Task { await addPasskey() } }
-              .disabled(addingPasskey)
-          }
-        } footer: {
-          if let passkeyProblem {
-            Text(passkeyProblem).foregroundStyle(.red)
-          } else if accounts.account?.secured != true {
-            Text("Use your passkey or recovery key to sign in to Yo on a new iPhone.")
-          } else if accounts.account?.byPasskey == false {
-            Text("Use your recovery key to sign in to Yo on a new iPhone. Set up a passkey to sign in without it.")
-          } else {
-            Text("Use your passkey or recovery key to sign in to Yo on a new iPhone.")
-          }
-        }
-        PasskeyTestSection()
         Section {
           Button("Reset Yo", systemImage: "arrow.counterclockwise", role: .destructive) { resetting = true }
         } footer: {
@@ -126,6 +67,65 @@ struct SettingsView: View {
 }
 
 extension SettingsView {
+  /// Your name, and what gets it back on a new iPhone: secured (passkey and recovery key, or the key alone), or the
+  /// one thing left to do, with the red dot the profile button has too.
+  @ViewBuilder fileprivate var nameSection: some View {
+    let account = accounts.account
+    Section {
+      HStack(spacing: 14) {
+        Image(systemName: "person.crop.circle.fill")
+          .font(.system(size: 52))
+          .foregroundStyle(.white, Color.amethyst)
+        VStack(alignment: .leading, spacing: 2) {
+          Text(account?.username ?? "You").font(.yo(24, relativeTo: .title3))
+          Label(
+            account?.secured != true ? "Not Secured" : "Secured",
+            systemImage: account?.secured != true ? "exclamationmark.circle" : "checkmark.shield.fill"
+          )
+          .font(.subheadline)
+          .foregroundStyle(account?.secured != true ? Color.red : Color.green)
+        }
+      }
+      .padding(.vertical, 4)
+      if account?.secured != true {
+        Button { securing = true } label: {
+          HStack {
+            Label("Secure Your Name", systemImage: "lock.shield")
+            Spacer()
+            Circle().fill(.red).frame(width: 10, height: 10)
+          }
+        }
+      } else {
+        if account?.byPasskey == true {
+          LabeledContent {
+            Text("On")
+          } label: {
+            Label("Passkey", systemImage: "person.badge.key")
+          }
+        } else {
+          Button("Set Up Passkey", systemImage: "person.badge.key") { Task { await addPasskey() } }
+            .disabled(addingPasskey)
+        }
+        if RecoveryWords.load() != nil {
+          Button("Recovery Key", systemImage: "list.number") { Task { await showWords() } }
+        }
+      }
+    } header: {
+      Text("Your Name")
+    } footer: {
+      if let passkeyProblem {
+        Text(passkeyProblem).foregroundStyle(.red)
+      } else if account?.secured != true {
+        Text("Secure your name to get it back on a new iPhone. Names not secured become available to others after "
+          + "30 days without opening Yo.")
+      } else if account?.byPasskey == true {
+        Text("Your passkey or your recovery key gets your name back on a new iPhone.")
+      } else {
+        Text("Your recovery key gets your name back on a new iPhone. A passkey does it with Face ID.")
+      }
+    }
+  }
+
   /// The words, after the owner of the phone proved it (Face ID, else the passcode).
   fileprivate func showWords() async {
     let context = LAContext()
