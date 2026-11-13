@@ -6,12 +6,6 @@
 
 The protocol between apps and server: **YoLS** for security, the **hub** for delivery, the **content** of a message.
 
-```
-you ──encrypted, no sender──▶ hub ──push: "there is mail"──▶ friend
-                               ▲                               │
-                               └───────── fetches, decrypts ───┘
-```
-
 ### YoLS: Yo Layer Security
 
 Chats are MLS groups (RFC 9420); keys renew every week or 100 messages. An account key signs your devices; any
