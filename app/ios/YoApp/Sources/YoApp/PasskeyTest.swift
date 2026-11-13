@@ -23,8 +23,8 @@ final class PasskeyTest {
     defer { busy = false }
     do {
       let salt = Passkeys.random(32)
-      let made = try await passkeys.make(name: "Yo Passkey Test", userID: Passkeys.random(16), salt: salt)
-      defaults.set(made.credentialID, forKey: Key.credential)
+      let credential = try await passkeys.make(name: "Yo Passkey Test", userID: Passkeys.random(16))
+      defaults.set(credential, forKey: Key.credential)
       defaults.set(salt, forKey: Key.salt)
       defaults.removeObject(forKey: Key.fingerprint)
       note("Test passkey created. Choose Check Passkey to continue.")

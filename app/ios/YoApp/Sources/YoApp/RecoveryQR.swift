@@ -80,3 +80,36 @@ struct QRScanner: UIViewControllerRepresentable {
     }
   }
 }
+
+/// The recovery key on screen, frosted until tapped (someone looking over a shoulder sees nothing); tapped again, it
+/// frosts over again.
+struct FrostedKey: View {
+  let words: [String]
+  var qrSize: CGFloat = 140
+  @State private var shown = false
+
+  var body: some View {
+    VStack(spacing: 16) {
+      RecoveryQRView(words: words, size: qrSize)
+      WordGrid(words: words)
+    }
+    .blur(radius: shown ? 0 : 14)
+    .overlay {
+      if !shown {
+        Label("Tap to Show", systemImage: "eye")
+          .font(.system(size: 17, weight: .semibold))
+          .padding(.horizontal, 18)
+          .padding(.vertical, 10)
+          .glassEffect()
+          .transition(.opacity)
+      }
+    }
+    .contentShape(.rect)
+    .onTapGesture { shown.toggle() }
+    .animation(.smooth(duration: 0.25), value: shown)
+    .accessibilityElement(children: shown ? .contain : .ignore)
+    .accessibilityLabel(shown ? "" : "Recovery key, hidden")
+    .accessibilityAddTraits(.isButton)
+    .accessibilityAction { shown.toggle() }
+  }
+}

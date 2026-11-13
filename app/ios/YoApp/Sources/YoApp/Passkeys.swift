@@ -17,17 +17,17 @@ final class Passkeys: NSObject {
 
   private var pending: CheckedContinuation<ASAuthorization, Error>?
 
-  /// A new passkey for `name` (what the password manager shows) and `userID` (its user handle), asked for its PRF
-  /// output on `salt` right away: iCloud Keychain gives it then, so no second sheet is needed; others (1Password)
-  /// give it only when asked afterwards (`ask`), whatever they say here (spec 7).
-  func make(name: String, userID: Data, salt: Data) async throws -> (credentialID: Data, prf: Data?) {
+  /// A new passkey for `name` (what the password manager shows) and `userID` (its user handle). Only asked whether it
+  /// supports PRF: asking for an output here (`.inputValues`) makes 1Password fail to save the passkey at all. The
+  /// output comes from `ask` afterwards, whatever is said here (spec 7).
+  func make(name: String, userID: Data) async throws -> Data {
     let provider = ASAuthorizationPlatformPublicKeyCredentialProvider(relyingPartyIdentifier: Self.domain)
     let request = provider.createCredentialRegistrationRequest(challenge: Self.random(32), name: name, userID: userID)
     request.displayName = name
-    request.prf = .inputValues(.init(saltInput1: salt))
+    request.prf = .checkForSupport
     guard let made = try await perform(request).credential as? ASAuthorizationPlatformPublicKeyCredentialRegistration
     else { throw PasskeyError.unexpected }
-    return (made.credentialID, made.prf?.first.map { $0.withUnsafeBytes { Data($0) } })
+    return made.credentialID
   }
 
   /// Asks a passkey (`only` that one, or any of this domain the person picks) for its PRF output on `salt`. `quietly`:

@@ -178,9 +178,12 @@ final class AccountStore {
   /// A registration waiting for its recovery words to be kept; `k` and the passkey while it still has to be confirmed.
   private var waiting: (account: Account, record: BackupRecord, code: [String], k: SymmetricKey, passkey: Data?)?
 
-  /// The passkey was made but gave no PRF output yet (1Password gives it only when the passkey is used): it is asked
-  /// once more (`confirmPasskey`) before the words.
+  /// The passkey was made; its PRF output comes only when it is used: it is asked once more (`confirmPasskey`) before
+  /// the words.
   var passkeyToConfirm: Bool { waiting?.passkey != nil && waiting?.account.byPasskey == false }
+
+  /// Back from a registration not finished: nothing kept (the passkey made stays in the password manager, unused).
+  func cancelRegistration() { waiting = nil }
 
   init() {
     account = UserDefaults.standard.data(forKey: Self.key).flatMap { try? JSONDecoder().decode(Account.self, from: $0) }
@@ -192,20 +195,16 @@ final class AccountStore {
   func register(_ username: String) async throws -> [String] {
     guard !MockHub.isTaken(username) else { throw AccountError.taken }
     let userID = Passkeys.random(16)
-    var account = Account(
+    let account = Account(
       username: username, userID: userID, accountKey: Curve25519.Signing.PrivateKey().rawRepresentation,
       byPasskey: false)
     let k = SymmetricKey(size: .bits256)
     let code = RecoveryCode.make()
     var record = BackupRecord(userID: userID, byCode: try BackupRecord.wrap(k, in: BackupRecord.key(code: code)),
       sealed: Data())
-    let made = try? await passkeys.make(name: username, userID: userID, salt: BackupRecord.prfSalt)
-    if let prf = made?.prf {
-      record.byPasskey = try BackupRecord.wrap(k, in: BackupRecord.key(prf: prf))
-      account.byPasskey = true
-    }
+    let credential = try? await passkeys.make(name: username, userID: userID)
     record.sealed = try BackupRecord.seal(account, code: code, with: k)
-    waiting = (account, record, code, k, made?.credentialID)
+    waiting = (account, record, code, k, credential)
     return code
   }
 
@@ -233,10 +232,8 @@ final class AccountStore {
     if let answer = try? await passkeys.ask(salt: BackupRecord.prfSalt, quietly: true), answer.userID == account.userID {
       prf = answer.prf
     } else {
-      let made = try await passkeys.make(name: account.username, userID: account.userID, salt: BackupRecord.prfSalt)
-      if let given = made.prf { prf = given } else {
-        prf = try await passkeys.ask(salt: BackupRecord.prfSalt, only: made.credentialID).prf
-      }
+      let credential = try await passkeys.make(name: account.username, userID: account.userID)
+      prf = try await passkeys.ask(salt: BackupRecord.prfSalt, only: credential).prf
     }
     guard let prf else { throw AccountError.noPRF }
     record.byPasskey = try BackupRecord.wrap(k, in: BackupRecord.key(prf: prf))

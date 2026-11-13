@@ -135,7 +135,7 @@ struct Onboarding: View {
   /// made: so it is used once, here, said beforehand. Cancelled, the page stays; skipped, Settings can do it later.
   private func confirmPasskeyPage(then words: [String]) -> some View {
     Page(title: "Confirm Your Passkey",
-      message: "Your password manager needs you to use the new passkey once to finish setting it up.") {
+      message: "Use your new passkey once to finish setting it up.", back: backToName) {
       Image(systemName: "person.badge.key.fill")
         .font(.system(size: 64))
         .padding(.top, 20)
@@ -167,9 +167,9 @@ struct Onboarding: View {
   /// The words, and two ways to keep them right under them (Photos, the clipboard); Next at the bottom. They stay on
   /// this phone too, in the profile.
   private func code(_ words: [String]) -> some View {
-    Page(title: "Recovery Key", message: "Keep it somewhere safe. It's how you get back into Yo on a new iPhone.") {
-      RecoveryQRView(words: words, size: 96)
-      WordGrid(words: words)
+    Page(title: "Recovery Key", message: "Keep it somewhere safe. It's how you get back into Yo on a new iPhone.",
+      back: backToName) {
+      FrostedKey(words: words, qrSize: 96)
       HStack(spacing: 12) {
         KeepButton(title: "Save to Photos", icon: "photo.badge.arrow.down", done: kept.contains("photos")) {
           Task { await saveToPhotos(words) }
@@ -185,6 +185,12 @@ struct Onboarding: View {
   }
 
   // MARK: Doing
+
+  /// Back from the passkey or the words: the registration is dropped, the name stays in the field.
+  private func backToName() {
+    accounts.cancelRegistration()
+    go(.name)
+  }
 
   private func go(_ next: Step) {
     problem = nil
