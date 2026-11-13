@@ -42,9 +42,27 @@ struct SettingsView: View {
           // You, as Settings shows the Apple Account and Signal its profile: one row, tapped for the details.
           Section {
             NavigationLink {
-              Form { accountSection(account) }
-                .navigationTitle("Account")
-                .navigationBarTitleDisplayMode(.inline)
+              Form {
+                accountSection(account)
+                // As the Apple Account page ends: Sign Out, red, on its own; the dialog says what happens.
+                Section {
+                  Button("Sign Out", role: .destructive) { resetting = true }
+                    .frame(maxWidth: .infinity)
+                    .disabled(addingPasskey)
+                }
+              }
+              .navigationTitle("Account")
+              .navigationBarTitleDisplayMode(.inline)
+          .confirmationDialog(
+            "Sign Out?",
+            isPresented: $resetting,
+            titleVisibility: .visible
+          ) {
+            Button("Sign Out", role: .destructive) { reset() }
+            Button("Cancel", role: .cancel) {}
+          } message: {
+            Text(resetMessage)
+          }
             } label: {
               profileRow(account)
             }
@@ -76,15 +94,6 @@ struct SettingsView: View {
         } footer: {
           Text("Photos and videos you send are also saved to your library.")
         }
-
-        Section {
-          // As Settings signs out of an Apple Account: centred, red, no footer; the dialog says what happens.
-          Button("Sign Out", role: .destructive) {
-            resetting = true
-          }
-          .frame(maxWidth: .infinity)
-          .disabled(addingPasskey)
-        }
       }
       .navigationTitle("Profile")
       .navigationBarTitleDisplayMode(.inline)
@@ -100,16 +109,6 @@ struct SettingsView: View {
         if let account = accounts.account, let words = RecoveryWords.load() {
           RecoveryWordsSheet(name: account.username, words: words)
         }
-      }
-      .confirmationDialog(
-        "Sign Out?",
-        isPresented: $resetting,
-        titleVisibility: .visible
-      ) {
-        Button("Sign Out", role: .destructive) { reset() }
-        Button("Cancel", role: .cancel) {}
-      } message: {
-        Text(resetMessage)
       }
       .alert("Allow Access to Photos", isPresented: $photosDenied) {
         Button("Open Settings") { openSystemSettings() }
