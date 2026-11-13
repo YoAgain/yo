@@ -211,6 +211,7 @@ final class Inbox {
       do {
         let (events, contacts) = try await Hub.run { (try client.sync(waitS: 25), client.contacts()) }
         await take(events, contacts: contacts, client: client, friends: friends)
+        fetchMedia(client: client)  // what a broken network left, also after a start
       } catch YoError.Replaced {
         accounts.reset()
         return
@@ -221,9 +222,13 @@ final class Inbox {
   }
 
   /// What the core handed over while sending a photo or video (the outbox): as any.
-  func handle(_ events: [YoEvent], client: YoClient, friends: Friends) async {
-    guard !events.isEmpty, let contacts = try? await Hub.run({ client.contacts() }) else { return }
+  func handle(_ events: [YoEvent], contacts: [YoContact], client: YoClient, friends: Friends) async {
     await take(events, contacts: contacts, client: client, friends: friends)
+  }
+
+  /// A photo or video shown in the viewer: it will not show again.
+  func viewed(_ arrival: Arrival) {
+    ReceivedMedia.shared.consumed(arrival.id)
   }
 
   /// What the core handed over: a Yo shows on its sender's bar, a new chat brings its friend into the list; a photo
@@ -246,13 +251,13 @@ final class Inbox {
         received(id: "\(user)/\(sentAtMs)", from: sender.name)
         Stats.receivedYo(from: sender.name)
         friends.promote(sender.name)
-        ReceivedMedia.shared.expect(media, id: "\(user)/\(sentAtMs)", from: sender.name, kind: .photo)
+        ReceivedMedia.shared.expect(media, id: Self.mediaID(user, sentAtMs, media), from: sender.name, kind: .photo)
       case .message(let user, let sentAtMs, .video(let media, _)):
         let sender = friend(user)
         received(id: "\(user)/\(sentAtMs)", from: sender.name)
         Stats.receivedYo(from: sender.name)
         friends.promote(sender.name)
-        ReceivedMedia.shared.expect(media, id: "\(user)/\(sentAtMs)", from: sender.name, kind: .video)
+        ReceivedMedia.shared.expect(media, id: Self.mediaID(user, sentAtMs, media), from: sender.name, kind: .video)
       case .newChat(let user):
         _ = friend(user)
       default:
@@ -262,6 +267,11 @@ final class Inbox {
     // Photos and videos are noted (above) before the core may forget their Yos; fetched from here on.
     _ = try? await Hub.run { client.acknowledgeEvents() }
     fetchMedia(client: client)
+  }
+
+  /// A photo's or video's own id: who, when, and which blob (two at the same moment are two).
+  private static func mediaID(_ user: String, _ sentAtMs: UInt64, _ media: YoMedia) -> String {
+    "\(user)/\(sentAtMs)/" + media.id.map { String(format: "%02x", $0) }.joined()
   }
 
   /// Fetches the photos and videos noted and not kept yet (also those a broken network left).

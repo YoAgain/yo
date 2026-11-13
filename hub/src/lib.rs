@@ -185,8 +185,8 @@ impl Hub {
     pub fn prune(&self, now: u64) -> rusqlite::Result<()> {
         let limits = &self.config.limits;
         self.db.prune(now, limits.envelope_ttl_days * DAY.as_millis() as u64)?;
-        for id in self.db.prune_blobs(now, limits.blob_ttl_days * DAY.as_millis() as u64)? {
-            self.blobs.remove(&id);
+        for blob in self.db.prune_blobs(now, limits.blob_ttl_days * DAY.as_millis() as u64)? {
+            self.blobs.remove(&blob);
         }
         match self.blobs.sweep(&self.db) {
             Ok(0) => {}
@@ -623,8 +623,8 @@ async fn delete_account(State(hub): Hubs, method: Method, uri: Uri, headers: Hea
     match hub.db.delete_account(&device.device_id, now_ms())? {
         Write::Done(()) => {
             // Its photos and videos with it, not yet fetched or not. One uploaded meanwhile goes with the sweep.
-            for id in &blobs {
-                hub.blobs.remove(id);
+            for blob in &blobs {
+                hub.blobs.remove(blob);
             }
             Ok(StatusCode::NO_CONTENT)
         }
@@ -883,11 +883,12 @@ async fn put_blob(
     };
     tokio::time::timeout(UPLOAD_TIME, taken).await.map_err(|_| refuse(StatusCode::REQUEST_TIMEOUT))??;
     drop(file);
-    let put = hub.db.put_blob(&device.device_id, &id, size, fetches, now_ms(), &quota)?;
+    let stored_at = now_ms();
+    let put = hub.db.put_blob(&device.device_id, &id, size, fetches, stored_at, &quota)?;
     if let Some(status) = blobs::refused(&put) {
         return Err(refuse(status));
     }
-    if let Err(error) = hub.blobs.keep(incoming, &id) {
+    if let Err(error) = hub.blobs.keep(incoming, &(id, stored_at)) {
         let _ = hub.db.delete_blob(&id);
         return Err(failed(error));
     }
@@ -907,7 +908,7 @@ async fn get_blob(
     let id: BlobId = path_id(&id)?;
     let ttl = hub.config.limits.blob_ttl_days * DAY.as_millis() as u64;
     let (size, created_at) = hub.db.blob(&id, now_ms(), ttl)?.ok_or_else(|| refuse(StatusCode::NOT_FOUND))?;
-    let file = hub.blobs.read(&id, size).await.ok_or_else(|| refuse(StatusCode::NOT_FOUND))?;
+    let file = hub.blobs.read(&(id, created_at), size).await.ok_or_else(|| refuse(StatusCode::NOT_FOUND))?;
     let (db, store) = (hub.db.clone(), hub.blobs.clone());
     let stream = blobs::Counted {
         inner: tokio_util::io::ReaderStream::with_capacity(file, 64 * 1024),

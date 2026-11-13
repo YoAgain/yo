@@ -63,6 +63,15 @@ fn hex(bytes: &[u8]) -> String {
     bytes.iter().map(|b| format!("{b:02x}")).collect()
 }
 
+/// A stored blob: its id and when it was stored, which tells one upload under an id from another.
+pub type Stored = (BlobId, u64);
+
+/// A blob file's name back to the blob: `{hex id}.{stored at}`.
+fn stored_of(name: &str) -> Option<Stored> {
+    let (id, at) = name.split_once('.')?;
+    Some((unhex(id)?, at.parse().ok()?))
+}
+
 fn unhex(text: &str) -> Option<BlobId> {
     if text.len() != 2 * BLOB_ID_LEN {
         return None;
@@ -136,9 +145,10 @@ impl Blobs {
         Some(Slot { blobs: self, user })
     }
 
-    /// Where a blob lives: by the first byte of its id in one of 256 directories.
-    fn path(&self, id: &BlobId) -> PathBuf {
-        self.dir.join(hex(&id[..1])).join(hex(id))
+    /// Where a blob lives: by the first byte of its id in one of 256 directories, named with when it was stored, so
+    /// what is done to one upload under an id never touches another's file.
+    fn path(&self, (id, at): &Stored) -> PathBuf {
+        self.dir.join(hex(&id[..1])).join(format!("{}.{at}", hex(id)))
     }
 
     /// The disk's space free for this process.
@@ -184,8 +194,8 @@ impl Blobs {
     }
 
     /// Moves a complete upload into place.
-    pub fn keep(&self, mut incoming: Incoming, id: &BlobId) -> io::Result<()> {
-        let path = self.path(id);
+    pub fn keep(&self, mut incoming: Incoming, blob: &Stored) -> io::Result<()> {
+        let path = self.path(blob);
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)?;
         }
@@ -195,13 +205,13 @@ impl Blobs {
     }
 
     /// Opens a blob of `size` bytes; none when the file is not there or not whole.
-    pub async fn read(&self, id: &BlobId, size: u64) -> Option<tokio::fs::File> {
-        let file = tokio::fs::File::open(self.path(id)).await.ok()?;
+    pub async fn read(&self, blob: &Stored, size: u64) -> Option<tokio::fs::File> {
+        let file = tokio::fs::File::open(self.path(blob)).await.ok()?;
         (file.metadata().await.ok()?.len() == size).then_some(file)
     }
 
-    pub fn remove(&self, id: &BlobId) {
-        let _ = std::fs::remove_file(self.path(id));
+    pub fn remove(&self, blob: &Stored) {
+        let _ = std::fs::remove_file(self.path(blob));
     }
 
     /// Removes files the database does not know (a blob deleted with its account, an upload cut off by a crash) and
@@ -218,11 +228,11 @@ impl Blobs {
                 files.push(file?.path());
             }
         }
-        let known: HashSet<BlobId> = db.blob_ids().map_err(io::Error::other)?.into_iter().collect();
+        let known: HashSet<Stored> = db.blob_ids().map_err(io::Error::other)?.into_iter().collect();
         let mut removed = 0;
         for path in files {
-            let id = path.file_name().and_then(|n| n.to_str()).and_then(unhex);
-            if id.is_none_or(|id| !known.contains(&id)) && std::fs::remove_file(&path).is_ok() {
+            let blob = path.file_name().and_then(|n| n.to_str()).and_then(stored_of);
+            if blob.is_none_or(|blob| !known.contains(&blob)) && std::fs::remove_file(&path).is_ok() {
                 removed += 1;
             }
         }
@@ -269,7 +279,7 @@ impl<S: Stream<Item = io::Result<Bytes>> + Unpin> Stream for Counted<S> {
 /// What a fetch that completed does: one fetch fewer, and the blob gone after the last.
 pub fn fetched(db: &Arc<Db>, blobs: &Arc<Blobs>, id: BlobId, created_at: u64) {
     match db.blob_fetched(&id, created_at) {
-        Ok(true) => blobs.remove(&id),
+        Ok(true) => blobs.remove(&(id, created_at)),
         Ok(false) => {}
         Err(error) => eprintln!("yo-hub: database: {error}"),
     }
@@ -335,5 +345,7 @@ mod tests {
         assert_eq!(unhex(&hex(&id)), Some(id));
         assert_eq!(unhex("ab"), None);
         assert_eq!(unhex(&"zz".repeat(16)), None);
+        assert_eq!(stored_of(&format!("{}.1762000000000", hex(&id))), Some((id, 1_762_000_000_000)));
+        assert_eq!(stored_of(&hex(&id)), None);
     }
 }

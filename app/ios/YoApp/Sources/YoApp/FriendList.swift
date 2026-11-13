@@ -161,6 +161,7 @@ struct FriendList: View {
           if let viewing {
             HeldMedia(queue: viewing, photoSeconds: Self.photoSeconds) {
               shown.append($0)
+              inbox.viewed($0)
             } finished: {
               closeViewer()
             }

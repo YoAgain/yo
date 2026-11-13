@@ -382,6 +382,11 @@ fn blob_quota_left(
     Ok(stored as u64 + size <= quota.stored)
 }
 
+/// A blob's id and when it was stored, from a row of the two.
+fn blob_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<(BlobId, u64)> {
+    Ok((array(row.get(0)?)?, row.get::<_, i64>(1)? as u64))
+}
+
 fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
     a.len() == b.len() && a.iter().zip(b).fold(0u8, |acc, (x, y)| acc | (x ^ y)) == 0
 }
@@ -811,28 +816,30 @@ impl Db {
 
     /// Deletes the rows of blobs past their time and returns their ids (their files must go too); forgets quotas of
     /// days before yesterday.
-    pub fn prune_blobs(&self, now: u64, ttl_ms: u64) -> rusqlite::Result<Vec<BlobId>> {
+    pub fn prune_blobs(&self, now: u64, ttl_ms: u64) -> rusqlite::Result<Vec<(BlobId, u64)>> {
         let mut conn = self.conn();
         let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
         let ids = tx
-            .prepare_cached("DELETE FROM blobs WHERE created_at < ?1 RETURNING id")?
-            .query_map([now.saturating_sub(ttl_ms) as i64], |row| array(row.get(0)?))?
+            .prepare_cached("DELETE FROM blobs WHERE created_at < ?1 RETURNING id, created_at")?
+            .query_map([now.saturating_sub(ttl_ms) as i64], blob_row)?
             .collect::<Result<_, _>>()?;
         tx.execute("DELETE FROM blob_quota WHERE day < ?1", [(now / DAY_MS) as i64 - 1])?;
         tx.commit()?;
         Ok(ids)
     }
 
-    /// Every blob's id: what the sweep keeps.
-    pub fn blob_ids(&self) -> rusqlite::Result<Vec<BlobId>> {
-        self.conn().prepare_cached("SELECT id FROM blobs")?.query_map([], |row| array(row.get(0)?))?.collect()
+    /// Every blob, by id and when it was stored: what the sweep keeps.
+    pub fn blob_ids(&self) -> rusqlite::Result<Vec<(BlobId, u64)>> {
+        self.conn().prepare_cached("SELECT id, created_at FROM blobs")?.query_map([], blob_row)?.collect()
     }
 
     /// The blobs a device's user uploaded: whose files go when the account is deleted.
-    pub fn blobs_of(&self, device: &DeviceId) -> rusqlite::Result<Vec<BlobId>> {
+    pub fn blobs_of(&self, device: &DeviceId) -> rusqlite::Result<Vec<(BlobId, u64)>> {
         self.conn()
-            .prepare_cached("SELECT b.id FROM blobs b JOIN devices d ON d.user_id = b.user_id WHERE d.id = ?1")?
-            .query_map([device], |row| array(row.get(0)?))?
+            .prepare_cached(
+                "SELECT b.id, b.created_at FROM blobs b JOIN devices d ON d.user_id = b.user_id WHERE d.id = ?1",
+            )?
+            .query_map([device], blob_row)?
             .collect()
     }
 
