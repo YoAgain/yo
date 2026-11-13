@@ -7,6 +7,7 @@
 // way, back at the top left.
 import PhotosUI
 import SwiftUI
+import YoCore
 
 struct Onboarding: View {
   @Environment(AccountStore.self) private var accounts
@@ -27,8 +28,8 @@ struct Onboarding: View {
   @State private var shakes = 0
   @AppStorage("hub.dev") private var devHub = false
   @State private var taps: [Date] = []
-  /// The last name the hub said is taken (409): the field shows the red cross while it is typed.
-  @State private var takenName: String?
+  /// What the hub said about names typed, by skeleton: free or taken (the checkmark or the red cross).
+  @State private var checked: [String: Bool] = [:]
 
   var body: some View {
     ZStack {
@@ -91,11 +92,12 @@ struct Onboarding: View {
   private var naming: some View {
     // No words while typing: the field keeps the rules, a checkmark says free, a red cross says taken. Too short is
     // said only after a pause in typing, or when Continue is tapped (the field shakes too), until the next letter.
-    let taken = name.count >= 3 && (takenName.map { Username.skeleton($0) == Username.skeleton(name) } ?? false)
+    let free = checked[Username.skeleton(name)]  // the hub's answer: true free, false taken, nil not yet
+    let taken = name.count >= 3 && free == false
     let trouble = Username.problem(name) ?? (taken ? "taken" : nil)
     let mine = taken && !Username.isReserved(name)
     return Page(title: "Choose a Name", back: { go(.welcome) }) {
-      NameField(name: $name, mark: trouble == nil ? .available : taken ? .taken : nil,
+      NameField(name: $name, mark: trouble == nil && free == true ? .available : taken ? .taken : nil,
         shakes: shakes, onSubmit: { Task { await register() } })
       // Under the field, one place: the minimum after a Continue too soon, or "This Is My Name" when it is taken.
       ZStack {
@@ -110,6 +112,7 @@ struct Onboarding: View {
       .animation(.snappy(duration: 0.2), value: mine)
       .animation(.snappy(duration: 0.2), value: tooShort)
       .onChange(of: name) { tooShort = false }
+      .task(id: name) { await check(name) }
       .task(id: name) {
         // A pause after one or two letters: the minimum shows (someone typing on never sees it).
         guard (1...2).contains(name.count), (try? await Task.sleep(for: .seconds(1.5))) != nil else { return }
@@ -138,6 +141,18 @@ struct Onboarding: View {
   }
 
   // MARK: Doing
+
+  /// Asks the hub whether a name is free, a moment after the typing stops (one question per pause, not per letter).
+  private func check(_ typed: String) async {
+    let skeleton = Username.skeleton(typed)
+    guard Username.problem(typed) == nil, checked[skeleton] == nil,
+      (try? await Task.sleep(for: .milliseconds(350))) != nil
+    else { return }
+    let transport = Hub.transport
+    if let free = try? await Hub.run({ try usernameFree(transport: transport, username: typed) }) {
+      checked[skeleton] = free
+    }
+  }
 
   /// Four quick taps (within two seconds) switch between the live and the dev hub.
   private func secretTap() {
@@ -170,7 +185,7 @@ struct Onboarding: View {
     do {
       try await accounts.register(name)  // in: the list takes over; the name is secured later, from the profile
     } catch AccountError.taken {
-      takenName = name
+      checked[Username.skeleton(name)] = false
       UINotificationFeedbackGenerator().notificationOccurred(.error)
     } catch {
       problem = error.localizedDescription
