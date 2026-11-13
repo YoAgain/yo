@@ -172,6 +172,16 @@ CREATE TABLE IF NOT EXISTS backups (
     record BLOB NOT NULL,
     updated_at INTEGER NOT NULL
 ) WITHOUT ROWID;
+-- Users reported by users (spec 6.3), for the operator to review: who reported whom, why (1 spam, 2 abuse, 3 other),
+-- when. One row per pair, the latest report. No content: the hub has none.
+CREATE TABLE IF NOT EXISTS reports (
+    reporter_id BLOB NOT NULL,
+    reported_id BLOB NOT NULL,
+    reason INTEGER NOT NULL,
+    created_at INTEGER NOT NULL,
+    PRIMARY KEY (reporter_id, reported_id)
+) WITHOUT ROWID;
+CREATE INDEX IF NOT EXISTS reports_by_reported ON reports(reported_id);
 ";
 
 fn array<const N: usize>(bytes: Vec<u8>) -> rusqlite::Result<[u8; N]> {
@@ -226,6 +236,25 @@ fn retire_devices(tx: &Transaction<'_>, user: &UserId, now: u64) -> rusqlite::Re
         tx.execute("DELETE FROM messages WHERE device_id = ?1", [id])?;
         tx.execute("DELETE FROM devices WHERE id = ?1", [id])?;
     }
+    Ok(())
+}
+
+/// The user of a device, in a transaction: none for a device replaced since it authenticated.
+fn user_of_device(tx: &Transaction<'_>, device: &DeviceId) -> rusqlite::Result<Option<UserId>> {
+    tx.prepare_cached("SELECT user_id FROM devices WHERE id = ?1")?
+        .query_row([device], |row| array(row.get(0)?))
+        .optional()
+}
+
+/// Removes a user and everything about it: its devices (which answer 410 from then on), handles, account keys, backup
+/// record and reports. The name and the key are free again.
+fn remove_user(tx: &Transaction<'_>, user: &UserId, now: u64) -> rusqlite::Result<()> {
+    retire_devices(tx, user, now)?;
+    tx.execute("DELETE FROM backups WHERE user_id = ?1", [user])?;
+    tx.execute("DELETE FROM handles WHERE user_id = ?1", [user])?;
+    tx.execute("DELETE FROM account_keys WHERE user_id = ?1", [user])?;
+    tx.execute("DELETE FROM reports WHERE reporter_id = ?1 OR reported_id = ?1", [user])?;
+    tx.execute("DELETE FROM users WHERE id = ?1", [user])?;
     Ok(())
 }
 
@@ -462,6 +491,35 @@ impl Db {
         Ok(Some(Found { user_id: user, account_key, device_keys, key_packages }))
     }
 
+    /// Deletes a device's account (spec 6.3): its user with everything about it (`remove_user`). The device is
+    /// checked in this transaction, as `put_backup` checks it.
+    pub fn delete_account(&self, device: &DeviceId, now: u64) -> rusqlite::Result<Write<()>> {
+        let mut conn = self.conn();
+        let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let Some(user) = user_of_device(&tx, device)? else { return Ok(Write::Refused(Conflict::DeviceGone)) };
+        remove_user(&tx, &user, now)?;
+        tx.commit()?;
+        Ok(Write::Done(()))
+    }
+
+    /// Stores the report of `reported` by a device's user, replacing the pair's earlier one; false when there is no
+    /// such user. The device is checked in this transaction: an account deleted meanwhile reports nobody.
+    pub fn report(&self, device: &DeviceId, reported: &UserId, reason: u8, now: u64) -> rusqlite::Result<Write<bool>> {
+        let mut conn = self.conn();
+        let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let Some(reporter) = user_of_device(&tx, device)? else { return Ok(Write::Refused(Conflict::DeviceGone)) };
+        let stored = tx
+            .prepare_cached(
+                "INSERT INTO reports (reporter_id, reported_id, reason, created_at)
+                 SELECT ?1, ?2, ?3, ?4 WHERE EXISTS (SELECT 1 FROM users WHERE id = ?2)
+                 ON CONFLICT (reporter_id, reported_id) DO UPDATE SET
+                     reason = excluded.reason, created_at = excluded.created_at",
+            )?
+            .execute(params![reporter, reported, reason, now])?;
+        tx.commit()?;
+        Ok(Write::Done(stored == 1))
+    }
+
     // ---- backups ----
 
     /// Stores the backup record of a device's user, replacing the one before: the old locator finds nothing from then
@@ -477,11 +535,7 @@ impl Db {
     ) -> rusqlite::Result<Write<()>> {
         let mut conn = self.conn();
         let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
-        let user: Option<UserId> = tx
-            .prepare_cached("SELECT user_id FROM devices WHERE id = ?1")?
-            .query_row([device], |row| array(row.get(0)?))
-            .optional()?;
-        let Some(user) = user else { return Ok(Write::Refused(Conflict::DeviceGone)) };
+        let Some(user) = user_of_device(&tx, device)? else { return Ok(Write::Refused(Conflict::DeviceGone)) };
         if let Some(locator) = locator {
             let taken = tx
                 .prepare_cached(
@@ -728,10 +782,7 @@ impl Db {
             .query_map([before], |row| array(row.get(0)?))?
             .collect::<Result<_, _>>()?;
         for user in &idle {
-            retire_devices(&tx, user, now)?;
-            tx.execute("DELETE FROM handles WHERE user_id = ?1", [user])?;
-            tx.execute("DELETE FROM account_keys WHERE user_id = ?1", [user])?;
-            tx.execute("DELETE FROM users WHERE id = ?1", [user])?;
+            remove_user(&tx, user, now)?;
         }
         tx.commit()?;
         Ok(idle.len())
@@ -827,6 +878,35 @@ mod tests {
         db.put_backup(&[3; 16], None, b"new", 0).unwrap();
         assert!(matches!(db.put_backup(&[1; 16], None, b"old", 0).unwrap(), Write::Refused(Conflict::DeviceGone)));
         assert_eq!(db.backup(&first).unwrap().as_deref(), Some(&b"new"[..]));
+    }
+
+    #[test]
+    fn a_deleted_account_leaves_nothing_behind() {
+        let db = Db::open(":memory:").unwrap();
+        let leo = user(register(&db, b"LEO", 1, 1, 0));
+        let mia = user(register(&db, b"MIA", 2, 2, 0));
+        db.put_backup(&[1; 16], Some(&[9; 16]), b"record", 0).unwrap();
+        db.deliver(&[(leo, yo_wire::devices::hash(&[1; 32], &[[1; 32]]), b"envelope")], 0, 10).unwrap();
+        // The test's users have the ids of their devices.
+        let reported = |device: &DeviceId, whom: &UserId| match db.report(device, whom, 1, 0).unwrap() {
+            Write::Done(stored) => Some(stored),
+            Write::Refused(_) => None,
+        };
+        assert_eq!((reported(&leo, &mia), reported(&mia, &leo)), (Some(true), Some(true)));
+        assert!(matches!(db.delete_account(&[1; 16], 1).unwrap(), Write::Done(())));
+        assert!(db.is_gone(&[1; 16]).unwrap(), "its device learns that the account is gone");
+        assert!(db.lookup(KIND_USER, &leo, false, &[]).unwrap().is_none());
+        assert!(db.backup(&leo).unwrap().is_none() && db.backup(&[9; 16]).unwrap().is_none());
+        assert!(db.fetch(&[1; 16], 10).unwrap().is_empty());
+        let left = |table: &str| -> i64 {
+            db.conn().query_row(&format!("SELECT count(*) FROM {table}"), [], |row| row.get(0)).unwrap()
+        };
+        assert_eq!((left("reports"), left("key_packages"), left("account_keys")), (0, 1, 1), "only MIA's are left");
+        assert!(matches!(db.delete_account(&[1; 16], 1).unwrap(), Write::Refused(Conflict::DeviceGone)));
+        // The name and the key are free again.
+        user(register(&db, b"LEO", 1, 3, 2));
+        assert_eq!(reported(&mia, &leo), Some(false), "no such user any more");
+        assert_eq!(reported(&leo, &mia), None, "a deleted account reports nobody");
     }
 
     #[test]

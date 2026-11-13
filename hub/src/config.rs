@@ -25,6 +25,8 @@ pub struct Limits {
     pub name_check_per_ip_minute: u32,
     /// Backup records fetched: by the user id or a locator, neither of which can be guessed (spec 7).
     pub backup_per_ip_hour: u32,
+    /// Reports of users, by one user (spec 6.3).
+    pub report_per_user_day: u32,
     pub envelope_ttl_days: u64,
     /// A user without a backup record whose devices made no request for this long is removed with its name
     /// (spec 6.4).
@@ -47,6 +49,7 @@ impl Default for Limits {
             register_per_ip_hour: 10,
             name_check_per_ip_minute: 60,
             backup_per_ip_hour: 10,
+            report_per_user_day: 20,
             envelope_ttl_days: 30,
             unsecured_idle_days: 90,
         }
@@ -70,6 +73,7 @@ impl Limits {
             register_per_ip_hour: u32::MAX,
             name_check_per_ip_minute: u32::MAX,
             backup_per_ip_hour: u32::MAX,
+            report_per_user_day: u32::MAX,
             envelope_ttl_days: 30,
             unsecured_idle_days: 90,
         }

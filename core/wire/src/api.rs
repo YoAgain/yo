@@ -15,6 +15,9 @@ pub const INBOX: &str = "/v1/inbox";
 pub const INBOX_ACK: &str = "/v1/inbox/ack";
 pub const GROUPS: &str = "/v1/groups";
 pub const BACKUP: &str = "/v1/backup";
+/// `DELETE`: the signing device's account, with everything the hub holds about it.
+pub const ACCOUNT: &str = "/v1/account";
+pub const REPORT: &str = "/v1/report";
 
 /// `POST /v1/inbox/{user_id}`: to every device of a user.
 pub fn deliver_path(user: &UserId) -> String {
@@ -260,6 +263,19 @@ impl Backup {
     pub fn locator(&self) -> Option<[u8; LOCATOR_LEN]> {
         self.locator.as_slice().try_into().ok()
     }
+}
+
+/// Why a user is reported (spec 6.3).
+pub const REPORT_SPAM: u8 = 1;
+pub const REPORT_ABUSE: u8 = 2;
+pub const REPORT_OTHER: u8 = 3;
+
+/// `POST /v1/report`: a user reported to the operator. No content: the hub has none (spec 1).
+#[derive(Debug, Clone, PartialEq, Eq, TlsSerialize, TlsDeserializeBytes, TlsSize)]
+pub struct Report {
+    pub user_id: UserId,
+    /// `REPORT_SPAM`, `REPORT_ABUSE` or `REPORT_OTHER`.
+    pub reason: u8,
 }
 
 /// The body of a `409` to a delivery: the user's current account key and devices (spec 4.6).

@@ -369,7 +369,36 @@ impl YoClient {
         Ok(self.with(|c| c.confirm_identity(&who))?)
     }
 
+    /// Blocks (or unblocks) a user by user id or handle: nothing from them is shown, nothing is sent to them.
     pub fn set_blocked(&self, who: String, blocked: bool) -> Result<(), YoError> {
         Ok(self.with(|c| c.set_blocked(&who, blocked))?)
+    }
+
+    /// Reports a user to the operator. `NotOnYo`: no such user.
+    pub fn report(&self, who: String, reason: ReportReason) -> Result<(), YoError> {
+        Ok(self.with(|c| c.report(&who, reason.into()))?)
+    }
+
+    /// Deletes the account at the hub with everything it holds about it; then forget this client and its state.
+    pub fn delete_account(&self) -> Result<(), YoError> {
+        Ok(self.with(|c| c.delete_account())?)
+    }
+}
+
+/// Why a user is reported.
+#[derive(uniffi::Enum)]
+pub enum ReportReason {
+    Spam,
+    Abuse,
+    Other,
+}
+
+impl From<ReportReason> for u8 {
+    fn from(reason: ReportReason) -> Self {
+        match reason {
+            ReportReason::Spam => yo_core::REPORT_SPAM,
+            ReportReason::Abuse => yo_core::REPORT_ABUSE,
+            ReportReason::Other => yo_core::REPORT_OTHER,
+        }
     }
 }

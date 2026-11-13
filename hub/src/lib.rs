@@ -11,7 +11,7 @@ pub mod sms;
 
 use axum::extract::{ConnectInfo, DefaultBodyLimit, Path, State};
 use axum::http::{HeaderMap, Method, StatusCode, Uri};
-use axum::routing::{get, post, put};
+use axum::routing::{delete, get, post, put};
 use axum::Router;
 use bytes::Bytes;
 use config::Config;
@@ -149,6 +149,8 @@ impl Hub {
             .route(api::LOOKUP, post(lookup))
             .route(api::PUSH, put(set_push))
             .route(api::USERNAME, put(set_username))
+            .route(api::ACCOUNT, delete(delete_account))
+            .route(api::REPORT, post(report))
             .route("/v1/username/{name}", get(username_free))
             .route(api::INBOX, get(inbox))
             .route(api::INBOX_ACK, post(ack))
@@ -573,6 +575,30 @@ async fn set_username(State(hub): Hubs, method: Method, uri: Uri, headers: Heade
     match hub.db.set_username(&device.user_id, stored.as_deref())? {
         Write::Done(()) => Ok(StatusCode::NO_CONTENT),
         Write::Refused(_) => Err(refuse(StatusCode::CONFLICT)),
+    }
+}
+
+/// Deletes the signing device's account with everything the hub holds about it; its other devices answer `410`.
+async fn delete_account(State(hub): Hubs, method: Method, uri: Uri, headers: HeaderMap) -> Res<StatusCode> {
+    let device = hub.authenticate(&method, &uri, &headers, &[])?;
+    match hub.db.delete_account(&device.device_id, now_ms())? {
+        Write::Done(()) => Ok(StatusCode::NO_CONTENT),
+        Write::Refused(_) => Err(refuse(StatusCode::GONE)),
+    }
+}
+
+/// A user reported by the signing device's user, for the operator to review: who, whom, why, when.
+async fn report(State(hub): Hubs, method: Method, uri: Uri, headers: HeaderMap, body: Bytes) -> Res<StatusCode> {
+    let device = hub.authenticate(&method, &uri, &headers, &body)?;
+    let request: api::Report = decode(&body)?;
+    if !(api::REPORT_SPAM..=api::REPORT_OTHER).contains(&request.reason) || request.user_id == device.user_id {
+        return Err(bad());
+    }
+    hub.limit(format!("report:{}", yo_wire::b64(&device.user_id)), hub.config.limits.report_per_user_day, DAY)?;
+    match hub.db.report(&device.device_id, &request.user_id, request.reason, now_ms())? {
+        Write::Done(true) => Ok(StatusCode::NO_CONTENT),
+        Write::Done(false) => Err(refuse(StatusCode::NOT_FOUND)),
+        Write::Refused(_) => Err(refuse(StatusCode::GONE)),
     }
 }
 

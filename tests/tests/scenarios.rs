@@ -410,6 +410,8 @@ fn the_hub_survives_garbage_on_every_route() {
         ("GET", "/v1/backup/!!".to_owned()),
         ("GET", api::username_path("LEO")),
         ("GET", "/v1/username/%FF%00".to_owned()),
+        ("DELETE", api::ACCOUNT.to_owned()),
+        ("POST", api::REPORT.to_owned()),
     ];
     let mut seed = 0x9E37_79B9_7F4A_7C15u64;
     for (method, path) in routes {
@@ -597,6 +599,75 @@ fn names_not_secured_are_released_after_ninety_days() {
     // The name is free again; the secured one is kept.
     by_name(&hub, &idle_name, None).unwrap();
     assert_eq!(by_name(&hub, &secured_name, None).err(), Some(Error::Refused(api::status::CONFLICT)));
+}
+
+#[test]
+fn a_deleted_account_is_gone_with_its_name() {
+    let hub = TestHub::start();
+    let http = Http::new(hub.url());
+    let (mut a, _, pa, _) = pair(&hub);
+    let name = format!("BYE{}", random_u64() % 100_000);
+    let mut t = by_name(&hub, &name, None).unwrap();
+    let user = yo_tests::user_id(t.user_id());
+    t.put_backup(&backup(vec![6; 16])).unwrap();
+    t.send_yo(&pa).unwrap();
+    a.sync(0).unwrap();
+    a.send_yo(&name).unwrap(); // waits in T's inbox
+    t.delete_account().unwrap();
+    // The device is out, its backup and inbox gone, nobody finds the account.
+    assert_eq!(t.sync(0), Err(Error::Replaced));
+    assert_eq!(t.delete_account(), Err(Error::Replaced));
+    assert_eq!(Client::fetch_backup(http.as_ref(), &user), Ok(None));
+    assert_eq!(Client::fetch_backup(http.as_ref(), &[6; 16]), Ok(None));
+    let mut c = register(Http::new(hub.url()), &phone(random_u64() % 1_000_000_000), None);
+    assert_eq!(c.send_yo(&name), Err(Error::NotOnYo));
+    // The name is free for anyone, and so is the key: a new account, not the old one.
+    assert_eq!(Client::username_free(http.as_ref(), &name), Ok(true));
+    let mut again = by_name(&hub, &name, Some(t.account_secret())).unwrap();
+    assert_ne!(again.user_id(), t.user_id());
+    assert_eq!(again.sync(0).unwrap(), vec![], "nothing of the old account's comes to the new one");
+}
+
+#[test]
+fn a_blocked_friend_is_not_heard_until_unblocked() {
+    let hub = TestHub::start();
+    let (mut a, mut b, pa, pb) = pair(&hub);
+    a.send_yo(&pb).unwrap();
+    b.sync(0).unwrap();
+    b.set_blocked(&pa, true).unwrap();
+    a.send_yo(&pb).unwrap();
+    assert_eq!(yos_from(&b.sync(0).unwrap(), &pa), 0);
+    assert_eq!(b.send_yo(&pa), Err(Error::Blocked));
+    b.set_blocked(&pa, false).unwrap();
+    a.send_yo(&pb).unwrap();
+    assert_eq!(yos_from(&b.sync(0).unwrap(), &pa), 1);
+    // A name this device never talked to is asked of the hub: blocked before the first Yo.
+    let name = format!("PEST{}", random_u64() % 100_000);
+    let mut pest = by_name(&hub, &name, None).unwrap();
+    b.set_blocked(&name.to_lowercase(), true).unwrap();
+    assert!(b.contacts().iter().any(|c| c.user == pest.user_id() && c.blocked && c.handles == [name.clone()]));
+    pest.send_yo(&pb).unwrap();
+    assert!(b.sync(0).unwrap().is_empty());
+    assert_eq!(b.set_blocked(&format!("NOBODY{}", random_u64() % 100_000), true), Err(Error::NotOnYo));
+    assert!(b.set_blocked(&pb, true).is_err(), "not oneself");
+}
+
+#[test]
+fn a_report_reaches_the_operator_within_its_limit() {
+    let mut config = yo_hub::config::Config::for_tests();
+    config.limits.report_per_user_day = 3;
+    let hub = TestHub::start_with(config, "127.0.0.1:0");
+    let (mut a, b, _, pb) = pair(&hub);
+    a.report(&pb, api::REPORT_SPAM).unwrap();
+    a.report(b.user_id(), api::REPORT_ABUSE).unwrap();
+    assert_eq!(a.report(&format!("NOBODY{}", random_u64() % 100_000), api::REPORT_OTHER), Err(Error::NotOnYo));
+    let me = a.user_id().to_owned();
+    assert!(a.report(&me, api::REPORT_SPAM).is_err(), "not oneself");
+    // Only the reasons there are, nobody's own id; the third report today is the last.
+    let report = |reason| yo_wire::encode(&api::Report { user_id: yo_tests::user_id(b.user_id()), reason });
+    assert_eq!(a.signed_for_tests("POST", api::REPORT, &report(9)).unwrap().status, api::status::BAD_REQUEST);
+    a.report(&pb, api::REPORT_OTHER).unwrap();
+    assert_eq!(a.report(&pb, api::REPORT_OTHER), Err(Error::Refused(api::status::RATE_LIMITED)));
 }
 
 #[test]

@@ -12,7 +12,7 @@ pub mod state;
 
 pub use error::{Error, Result};
 pub use net::{Response, Transport};
-pub use yo_wire::api::{Backup, Push};
+pub use yo_wire::api::{Backup, Push, REPORT_ABUSE, REPORT_OTHER, REPORT_SPAM};
 pub use yo_wire::content::Content;
 
 use ed25519_dalek::{Signer as _, SigningKey};
@@ -1762,6 +1762,21 @@ impl Client {
         self.known_user(&Handle::parse(who)?).ok_or(Error::NotOnYo)
     }
 
+    /// The user a handle names: known to this device, else asked of the hub (who it is only, no KeyPackage).
+    fn user_named(&mut self, handle: &Handle) -> Result<String> {
+        if self.is_me(handle) {
+            return Err(Error::Protocol("oneself"));
+        }
+        let user = match self.known_user(handle) {
+            Some(user) => user,
+            None => hex(&self.lookup(handle, false, Vec::new())?.user_id),
+        };
+        if user == self.state.user_id {
+            return Err(Error::Protocol("oneself"));
+        }
+        Ok(user)
+    }
+
     /// The safety number with a contact (spec 3.4).
     pub fn safety_number(&self, who: &str) -> Result<String> {
         let user = self.contact_user(who)?;
@@ -1791,10 +1806,11 @@ impl Client {
         Ok(())
     }
 
-    /// Blocks a contact (by user id, or a handle this device knows them by): nothing from them is shown, no chat with
-    /// them is joined.
+    /// Blocks a user (by user id or any handle; one this device does not know is asked of the hub), or unblocks:
+    /// nothing from them is shown, no chat with them is joined, nothing is sent to them (spec 4.8).
     pub fn set_blocked(&mut self, who: &str, blocked: bool) -> Result<()> {
-        let user = self.contact_user(who)?;
+        let handle = Handle::parse(who)?;
+        let user = self.user_named(&handle)?;
         let contact = self.state.contacts.entry(user).or_insert(Contact {
             account_key: [0; 32],
             name: None,
@@ -1804,8 +1820,36 @@ impl Client {
             handles: Vec::new(),
         });
         contact.blocked = blocked;
+        let shown = handle.display();
+        if handle.kind != KIND_USER && !contact.handles.contains(&shown) {
+            contact.handles.push(shown);
+        }
         self.persist();
         Ok(())
+    }
+
+    /// Reports a user to the operator (by user id or any handle): `reason` is `api::REPORT_SPAM`, `REPORT_ABUSE` or
+    /// `REPORT_OTHER` (spec 6.3). Nothing of what they sent goes with it.
+    pub fn report(&mut self, who: &str, reason: u8) -> Result<()> {
+        let user = self.user_named(&Handle::parse(who)?)?;
+        let body = encode(&api::Report { user_id: user_bytes(&user)?, reason });
+        let response = self.signed("POST", api::REPORT, &body)?;
+        match response.status {
+            status::NO_CONTENT => Ok(()),
+            status::NOT_FOUND => Err(Error::NotOnYo),
+            _ => Err(refused(&response)),
+        }
+    }
+
+    /// Deletes the account at the hub with everything it holds about it (spec 6.3): the name is free again, the other
+    /// devices are out. This client is of no more use: the app forgets its state. `Replaced` when this device was out
+    /// already (replaced, or its account deleted).
+    pub fn delete_account(&mut self) -> Result<()> {
+        let response = self.signed("DELETE", api::ACCOUNT, &[])?;
+        match response.status {
+            status::NO_CONTENT => Ok(()),
+            _ => Err(refused(&response)),
+        }
     }
 
     /// Claims a username ("chris": found as CHRIS), or gives it up with `None`.
