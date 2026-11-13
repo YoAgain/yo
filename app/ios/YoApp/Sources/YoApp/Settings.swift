@@ -475,9 +475,8 @@ struct SettingsView: View {
     if let domain = Bundle.main.bundleIdentifier {
       UserDefaults.standard.removePersistentDomain(forName: domain)
     }
-    friends.reset()
     dismiss()
-    accounts.signOut()  // out of the iCloud Keychain too: the next start does not bring it back
+    accounts.signOut()  // the friends go with the account (YoApp)
   }
 }
 

@@ -30,6 +30,9 @@ struct Onboarding: View {
   @State private var shakes = 0
   /// What the hub said about names typed, by skeleton: free or taken (the checkmark or the red cross).
   @State private var checked: [String: Bool] = [:]
+  /// The accounts in the iCloud Keychain, for Sign In; the one being signed in with.
+  @State private var synced: [SyncedAccount.Item] = []
+  @State private var signingIn: Data?
 
   var body: some View {
     ZStack {
@@ -52,7 +55,7 @@ struct Onboarding: View {
 
   // MARK: Welcome
 
-  /// The logo with the 2014 tagline, then the usual pair at the bottom: "Start" for a new name, "Sign In" under it.
+  /// The logo with the 2014 tagline, then the usual pair at the bottom: "Sign Up" for a new name, "Sign In" under it.
   /// The logo is the first of the pages swiped through above the pair (Intro.swift), as in the original.
   private var welcome: some View {
     VStack(spacing: 0) {
@@ -66,7 +69,7 @@ struct Onboarding: View {
         }
       }
       VStack(spacing: 0) {
-        PrimaryButton("Start") { go(.name) }
+        PrimaryButton("Sign Up") { go(.name) }
         Button("Sign In") { go(.logIn) }
           .font(.yo(18))
           .padding(.top, 18)
@@ -131,10 +134,31 @@ struct Onboarding: View {
 
   // MARK: Log in
 
-  /// Asked for on purpose: the two ways, the passkey first.
+  /// Asked for on purpose: the accounts in the iCloud Keychain to tap, if any; then the two ways, the passkey first.
   private var logInChoice: some View {
     Page(title: "Sign In", message: "Use your passkey or recovery key.", back: { go(.welcome) }) {
-      EmptyView()
+      if !synced.isEmpty {
+        ScrollView {
+          VStack(spacing: 10) {
+            ForEach(synced) { item in
+              Button { Task { await logIn(item) } } label: {
+                HStack(spacing: 12) {
+                  Avatar(name: item.username, size: 36)
+                  Text(item.username).font(.yo(20)).lineLimit(1)
+                  Spacer(minLength: 0)
+                  if signingIn == item.userID { ProgressView().tint(.white) }
+                }
+                .frame(maxWidth: .infinity, minHeight: 44)
+              }
+              .buttonStyle(.glass)
+              .disabled(busy)
+              .accessibilityLabel("Sign In as \(item.username)")
+            }
+          }
+        }
+        .scrollBounceBehavior(.basedOnSize)
+        Text("Saved in your iCloud Keychain.").font(.footnote).opacity(0.75)
+      }
     } bottom: {
       PrimaryButton("Use Passkey", busy: busy) { Task { await logInWithPasskey() } }
         .disabled(busy)
@@ -160,7 +184,25 @@ struct Onboarding: View {
 
   private func go(_ next: Step) {
     problem = nil
+    if next == .logIn { synced = SyncedAccount.all() }
     step = next
+  }
+
+  /// An account from the iCloud Keychain, tapped.
+  private func logIn(_ item: SyncedAccount.Item) async {
+    busy = true
+    signingIn = item.userID
+    defer {
+      busy = false
+      signingIn = nil
+    }
+    problem = nil
+    do {
+      try await accounts.restore(synced: item)
+    } catch {
+      synced = SyncedAccount.all()  // one whose name has another key now is gone
+      problem = error.localizedDescription
+    }
   }
 
   private func register() async {
