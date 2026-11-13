@@ -21,12 +21,33 @@ struct YoApp: App {
       FriendList()
         .environment(inbox)
         .environment(friends)
-        .task { await inbox.askForNotifications() }
+        .task {
+          await inbox.askForNotifications()
+          await yoUpdate()
+        }
         // Opening the app: the Yos waiting as notifications come in and show on their bars.
         .onChange(of: phase, initial: true) { _, phase in
           if phase == .active { Task { await inbox.collectDelivered() } }
         }
     }
+  }
+}
+
+extension YoApp {
+  /// "Yo Update", a friend of the mockup: a Yo from it whenever a new build of the app starts (after every
+  /// `dev/push.sh`), so a new version announces itself. Known by the app's executable changing.
+  @MainActor func yoUpdate() async {
+    let name = "Yo Update"
+    guard let url = Bundle.main.executableURL,
+      let built = (try? FileManager.default.attributesOfItem(atPath: url.path))?[.modificationDate] as? Date
+    else { return }
+    let key = "yoUpdate.built"
+    let stamp = built.timeIntervalSince1970
+    guard UserDefaults.standard.double(forKey: key) != stamp else { return }
+    UserDefaults.standard.set(stamp, forKey: key)
+    if !friends.all.contains(where: { $0.name == name }) { friends.add(name) }
+    try? await Task.sleep(for: .seconds(1))  // the list is on screen
+    await inbox.fakeYo(from: name, after: .zero)
   }
 }
 

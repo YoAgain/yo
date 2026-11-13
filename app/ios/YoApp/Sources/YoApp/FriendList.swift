@@ -51,9 +51,12 @@ struct FriendList: View {
   /// How many sends of the same kind in a row a bar counts ("Sent Yo!!" for three).
   @State private var sentCounts: [String: (text: String, count: Int)] = [:]
   /// The mockup's Yos back, by name: they come when the bar goes on top, so it comes in carrying them.
-  @State private var replies: [String: [@MainActor () async -> Void]] = [:]
+  @State private var replies: [String: [(at: Date, send: @MainActor () async -> Void)]] = [:]
   /// How often each friend went on top: a new identity each time, so the bar leaves its place and comes in on top.
   @State private var lifts: [String: Int] = [:]
+  /// Senders waiting to go on top, oldest first: gathered for a moment and moved in one step, so many Yos at once do
+  /// not shuffle the list bar by bar.
+  @State private var rising: [String] = []
   /// The friends whose bars are on screen now.
   @State private var onScreen: Set<String> = []
   /// Counts sends, for the haptic.
@@ -61,7 +64,10 @@ struct FriendList: View {
   /// Photos and videos on their way out, per friend, each with when it started; any number at once (a tap on the bar
   /// sends another, the ring at its left undoes them).
   @State private var outgoing: [Friend: [Outgoing]] = [:]
-  @State private var sendTasks: [UUID: Task<Void, Never>] = [:]
+  /// Each photo or video of a stack being made ready (taken, or the video ended), by its id.
+  @State private var preparing: [UUID: Task<Prepared?, Never>] = [:]
+  /// A stack's 1.5 seconds, by name: each new photo starts them again; when they are over, the whole stack goes.
+  @State private var stackRounds: [String: Int] = [:]
 
   struct Outgoing: Equatable {
     let id = UUID()
@@ -81,6 +87,8 @@ struct FriendList: View {
   // Arriving
   /// Counts Yos arriving, for the haptic.
   @State private var cheers = 0
+  /// Taps on the title.
+  @State private var sayYo = 0
   /// The plain Yos on bars now, by sender.
   @State private var landed: [String: Landing] = [:]
   /// Arrivals already shown.
@@ -198,7 +206,14 @@ struct FriendList: View {
     .fixedSize(horizontal: true, vertical: false)
     .frame(height: Metrics.titleHeight)
     .glassEffect(scrolled ? .regular : .identity, in: .capsule)
+    .contentShape(.capsule)
+    .onTapGesture {
+      inbox.playYo()  // a tap on "Yo" says it
+      sayYo += 1
+    }
+    .sensoryFeedback(.impact(weight: .light), trigger: sayYo)
     .accessibilityAddTraits(.isHeader)
+    .accessibilityAction(named: "Say Yo") { inbox.playYo() }
   }
 
   // MARK: Bars
@@ -366,25 +381,28 @@ struct FriendList: View {
     }
   }
 
-  /// A photo or video on its way out: the ring at the bar's left closes in `sendDelay`; meanwhile `prepare` takes the
-  /// photo or ends the video and hands back the send. Then it goes, unless the ring was tapped. Several can run for
-  /// one friend at once.
+  /// A photo or video on its way out joins the friend's stack: every one in it waits until `sendDelay` has passed
+  /// since the newest (each new one starts the time again, the ring after the words showing it); then the stack goes,
+  /// in order. Meanwhile `prepare` takes the photo or ends the video. A tap on the ring keeps the whole stack here.
   private func run(_ friend: Friend, _ text: String, prepare: @escaping @MainActor () async -> Prepared?) {
     let one = Outgoing(text: text)
     outgoing[friend, default: []].append(one)
-    sendTasks[one.id] = Task {
-      async let ready = prepare()
+    preparing[one.id] = Task { await prepare() }
+    let name = friend.name
+    let round = (stackRounds[name] ?? 0) + 1
+    stackRounds[name] = round
+    Task {
       try? await Task.sleep(for: .seconds(Self.sendDelay))
-      let prepared = await ready
-      sendTasks[one.id] = nil
-      guard !Task.isCancelled, outgoing[friend]?.contains(one) == true else {
-        prepared?.discard()  // undone: nothing of it stays behind
-        return
+      guard stackRounds[name] == round, let stack = outgoing[friend] else { return }  // another came, or undone
+      stackRounds[name] = nil
+      outgoing[friend] = nil
+      var went = 0
+      for one in stack {
+        guard let prepared = await preparing.removeValue(forKey: one.id)?.value else { continue }
+        went += 1
+        showSent(to: friend, one.text, thenOnTop: true) { await prepared.send() }
       }
-      outgoing[friend]?.removeAll { $0 == one }
-      if outgoing[friend]?.isEmpty == true { outgoing[friend] = nil }
-      guard let prepared else { return showSent(to: friend, "Not sent") }
-      showSent(to: friend, text, thenOnTop: true) { await prepared.send() }
+      if went == 0 { showSent(to: friend, "Not sent") }
     }
   }
 
@@ -394,12 +412,14 @@ struct FriendList: View {
     var discard: @MainActor () -> Void = {}
   }
 
-  /// The ring tapped: every photo or video still on its way to this friend stays here.
+  /// The ring tapped: the whole stack stays here, and nothing of it stays behind (a video's file is deleted).
   private func cancelSending(_ friend: Friend) {
     for one in outgoing[friend] ?? [] {
-      sendTasks[one.id]?.cancel()
-      sendTasks[one.id] = nil
+      if let task = preparing.removeValue(forKey: one.id) {
+        Task { await task.value?.discard() }
+      }
     }
+    stackRounds[friend.name] = nil
     outgoing[friend] = nil
     showSent(to: friend, "Not sent")
   }
@@ -415,7 +435,7 @@ struct FriendList: View {
     let count = sentCounts[name].map { $0.text == text ? $0.count + 1 : 1 } ?? 1
     sentCounts[name] = (text, count)
     sent[friend] = text + RowButton.bangs(count)
-    if let reply { replies[name, default: []].append(reply) }
+    if let reply { replies[name, default: []].append((.now, reply)) }
     let round = (sentRounds[name] ?? 0) + 1
     sentRounds[name] = round
     Task {
@@ -426,9 +446,12 @@ struct FriendList: View {
       let pending = replies.removeValue(forKey: name) ?? []
       withAnimation(.snappy) { sent[friend] = nil }
       if thenOnTop { toTop(name) }
-      for (i, reply) in pending.enumerated() {
-        if i > 0 { try? await Task.sleep(for: .seconds(0.35)) }  // one after the other, each with its sound
-        await reply()
+      // In the rhythm they were tapped: tapped fast, they come fast and their sounds cut each other off.
+      let start = Date.now
+      for reply in pending {
+        let wait = reply.at.timeIntervalSince(pending[0].at) - Date.now.timeIntervalSince(start)
+        if wait > 0 { try? await Task.sleep(for: .seconds(wait)) }
+        await reply.send()
       }
     }
   }
@@ -507,8 +530,8 @@ extension FriendList {
     Task {
       try? await Task.sleep(for: .seconds(delay))
       cheers += 1
-      if sentRounds[name] == nil { toTop(name) }  // a bar being tapped goes on top when the taps are over
-      withAnimation(.spring(duration: 0.3, bounce: 0.6)) {
+      if sentRounds[name] == nil { rise(name) }  // a bar being tapped goes on top when the taps are over
+      withAnimation(.snappy(duration: 0.2)) {  // the words make room without a bounce
         if var landing = landed[name], landing.fading == nil {
           landing.seen.append(nil)  // one more "!"; its time starts below when the bar is on screen
           landed[name] = landing
@@ -554,13 +577,35 @@ extension FriendList {
     }
   }
 
-  /// A friend goes on top. At the top of the list the list stays at its very start, so the bar is in sight below the
+  /// A sender goes on top with the others arriving within 0.3 seconds, in one step (the newest ends on top).
+  private func rise(_ name: String) {
+    rising.removeAll { $0 == name }
+    rising.append(name)
+    guard rising.count == 1 else { return }  // a step is already on its way
+    Task {
+      try? await Task.sleep(for: .seconds(0.3))
+      let names = rising
+      rising = []
+      toTop(names)
+    }
+  }
+
+  private func toTop(_ name: String) { toTop([name]) }
+
+  /// Friends go on top, the last of `names` uppermost. At the top of the list the list stays at its very start, so the bar is in sight below the
   /// title; scrolled down, the view stays where it is (the title's "!" tells, and the Yo waits until it is seen).
-  private func toTop(_ name: String) {
-    guard let index = friends.all.firstIndex(where: { $0.name == name }), index != 0 else { return }
+  private func toTop(_ names: [String]) {
+    let order = friends.all.map(\.name)
+    let moving = names.filter { name in
+      // Already in place: the top bars are these names in this order, newest first.
+      order.firstIndex(of: name) != names.count - 1 - names.lastIndex(of: name)!
+    }
+    guard !moving.isEmpty else { return }
     withAnimation(.snappy(duration: 0.35)) {
-      lifts[name, default: 0] += 1
-      friends.promote(name)
+      for name in names {
+        if moving.contains(name) { lifts[name, default: 0] += 1 }
+        friends.promote(name)
+      }
       if !scrolled { position.scrollTo(edge: .top) }
     }
   }
@@ -695,12 +740,29 @@ struct RowButton: View {
   /// A bar of the friend's colour from edge to edge, the name large in the middle (the original's), red while
   /// recording.
   private var label: some View {
-    words(Text(title).foregroundStyle(.white).modifier(Knock(trigger: yo?.first))) {
+    words(spoken.foregroundStyle(.white).modifier(Knock(trigger: yo?.first))) {
       Color.clear  // the undo ring's place, drawn over it (Buttons in a Button do not work)
     }
     .frame(maxWidth: .infinity, minHeight: Metrics.rowHeight)
-      .background(recording ? Color.alizarin.opacity(0.85) : color)
-      .contentShape(.rect)
+    .background(recording ? Color.alizarin.opacity(0.85) : color)
+    .contentShape(.rect)
+  }
+
+  /// The words without their "!"s stay in the middle at full size; the "!"s ("Sent Yo!!!") hang on after them, outside
+  /// the layout, so more of them never shrink or move the words. With the undo ring the words stay whole, the ring
+  /// after them.
+  @ViewBuilder private var spoken: some View {
+    let base = String(title.reversed().drop(while: { $0 == "!" }).reversed())
+    let extra = String(title.dropFirst(base.count))
+    if outgoing != nil || extra.isEmpty || base.isEmpty {
+      Text(title)
+    } else {
+      Text(base).overlay(alignment: .trailing) {
+        Bangs(text: extra)
+          .fixedSize()
+          .alignmentGuide(.trailing) { $0[.leading] }
+      }
+    }
   }
 
   /// The bar's words, and while something is on its way out a ring right after them; laid out the same for the label
@@ -745,9 +807,14 @@ struct RowButton: View {
   /// plays them at once), or "Yo" for one that just came; a count before either.
   @ViewBuilder private var mark: some View {
     if let first = media.first {
-      Text((first.video != nil ? "Yo 🎥" : "Yo 📷") + Self.bangs(media.count))
-        .font(.yo(Metrics.rowFont))
-        .foregroundStyle(.white)
+      HStack(spacing: 0) {
+        Text(first.video != nil ? "Yo 🎥" : "Yo 📷")
+        Bangs(text: Self.bangs(media.count))
+      }
+      .font(.yo(Metrics.rowFont))
+      .foregroundStyle(.white)
+      .lineLimit(1)
+      .minimumScaleFactor(0.6)
       .scaleEffect(viewing ? 0.92 : 1)
       .contentShape(.rect.inset(by: -12))  // easy to hit
       // A finger down shows them at once; a short tap lets them run, holding closes on letting go.
@@ -775,10 +842,10 @@ struct RowButton: View {
         let fade = yo.fading.map { timeline.date.timeIntervalSince($0) / (yoSeconds - Self.solid) } ?? 0
         HStack(spacing: 0) {
           Text("Yo")
-          ForEach(1..<max(1, yo.count), id: \.self) { _ in
-            Text("!").transition(.opacity)
-          }
+          Bangs(text: Self.bangs(yo.count))
         }
+        .lineLimit(1)
+        .minimumScaleFactor(0.6)
         .font(.yo(Metrics.rowFont))
         .foregroundStyle(.white)
         .opacity(max(0, 1 - fade))
@@ -788,9 +855,30 @@ struct RowButton: View {
     }
   }
 
-  /// How many, the way Yo says it: one "!" for each after the first ("Yo", "Yo!", "Yo!!").
+  /// How many, the way Yo says it: one "!" for each after the first ("Yo", "Yo!", "Yo!!"), at most ten; beyond, a
+  /// number ("Yo! 12×").
   static func bangs(_ count: Int) -> String {
-    String(repeating: "!", count: max(0, count - 1))
+    count <= maxBangs + 1 ? String(repeating: "!", count: max(0, count - 1)) : "! \(count)×"
+  }
+
+  static let maxBangs = 10
+}
+
+/// The "!"s after a word, each its own: one more comes in on its own, the ones there stay where they are (as text
+/// typed into a field, not the whole word drawn again); beyond ten, "! 12×" with its number counting.
+struct Bangs: View {
+  let text: String
+
+  var body: some View {
+    if text.allSatisfy({ $0 == "!" }) {
+      HStack(spacing: 0) {
+        ForEach(0..<text.count, id: \.self) { _ in
+          Text("!").transition(.opacity.animation(.easeOut(duration: 0.15)))
+        }
+      }
+    } else {
+      Text(text).contentTransition(.numericText())
+    }
   }
 }
 
