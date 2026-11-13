@@ -1,6 +1,6 @@
 version: 1
 # xtool prefixes it with XTL-<team> for its development builds.
-bundleID: co.justyo.ios
+bundleID: app.justyo.ios
 product: YoApp
 # Display name, the font (UIAppFonts), export compliance.
 infoPath: Info.plist

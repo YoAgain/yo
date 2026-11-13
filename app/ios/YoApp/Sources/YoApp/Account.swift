@@ -177,7 +177,7 @@ struct BackupRecord: Codable {
 /// The hub's part, simulated on the phone until the app talks to the hub: names taken, and backups by name and by
 /// user id. Its own store, which a reset of the app leaves alone.
 enum MockHub {
-  private static var store: UserDefaults { UserDefaults(suiteName: "co.justyo.mockhub") ?? .standard }
+  private static var store: UserDefaults { UserDefaults(suiteName: "app.justyo.mockhub") ?? .standard }
 
   /// Names someone else has, as if they had registered first (to try what "taken" looks like).
   static let othersHave: Set<String> = ["LEO"]
@@ -215,7 +215,7 @@ enum MockHub {
   }
 
   static func forgetAll() {
-    store.removePersistentDomain(forName: "co.justyo.mockhub")
+    store.removePersistentDomain(forName: "app.justyo.mockhub")
   }
 }
 
@@ -481,7 +481,7 @@ enum RecoveryWords {
   private static var query: [String: Any] {
     [
       kSecClass as String: kSecClassGenericPassword,
-      kSecAttrService as String: "co.justyo.recovery-words",
+      kSecAttrService as String: "app.justyo.recovery-words",
       kSecAttrAccount as String: "words",
     ]
   }

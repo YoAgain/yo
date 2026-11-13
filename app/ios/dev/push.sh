@@ -3,7 +3,7 @@
 #   app/ios/dev/push.sh PHONE        PHONE: the phone's IP address or tailnet name (or set YO_PHONE)
 # Once before, with omarchy-apple-dev (OAD, default ../omarchy-apple-dev next to this repo or set OAD):
 # pair the phone over USB (tools/tailnet-tunnel.py pair) and make the development identity
-# (tools/provision-dev.py --bundle-id co.justyo.ios). Both stay outside the repository. No sudo: dev/wireless.py
+# (tools/provision-dev.py --bundle-id app.justyo.ios). Both stay outside the repository. No sudo: dev/wireless.py
 # tunnels in userspace. PY (or local.env) names pymobiledevice3's Python, default ~/pymobile3-venv/bin/python.
 set -euo pipefail
 # Settings of this machine (YO_PHONE, OAD) may sit in dev/local.env, which git ignores.
