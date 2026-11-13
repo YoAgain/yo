@@ -1,8 +1,7 @@
-// "Secure Your Account", from the profile (spec 7), built the way iOS shows a short setup checklist (Settings'
-// "Finish Setting Up"): a system sheet with a header, one row per step, a Set Up button or a checkmark at the end.
-// 1, Passkey: made, then used once for its PRF output (iCloud Keychain gives it at once; 1Password only when used,
-// so the row then asks to confirm). 2, Recovery Key: the 12 words, shown and kept. Done once the words are kept;
-// the passkey is optional, the words alone also secure the account.
+// "Secure Your Account", from the profile (spec 7): a native setup checklist in a sheet, each row saying what is done.
+// 1, Passkey (optional): made, then used once for its PRF output (iCloud Keychain gives it at once; 1Password only
+// when used, so the row then asks to confirm). 2, Recovery Key: the 12 words, saved through the system's share sheet
+// (Save Image, Notes, Files, a password manager, AirDrop); an eye shows them in place. Done once they are saved.
 import SwiftUI
 
 struct SecureNameSheet: View {
@@ -10,8 +9,8 @@ struct SecureNameSheet: View {
   @Environment(\.dismiss) private var dismiss
   @State private var passkey = PasskeyStep.ready
   @State private var words: [String] = []
-  @State private var kept = false
-  @State private var showingWords = false
+  @State private var saved = false
+  @State private var revealed = false
   @State private var busy = false
   @State private var problem: String?
 
@@ -23,65 +22,49 @@ struct SecureNameSheet: View {
     NavigationStack {
       Form {
         Section {
-          VStack(spacing: 10) {
-            Image(systemName: "lock.shield.fill")
-              .font(.system(size: 56))
-              .foregroundStyle(Color.amethyst)
-            Text("Secure Your Account")
-              .font(.title2.bold())
-            Text("Keep your name “\(accounts.account?.username ?? "")” forever.")
-              .foregroundStyle(.secondary)
-          }
-          .multilineTextAlignment(.center)
-          .frame(maxWidth: .infinity)
-          .listRowBackground(Color.clear)
-        }
-
-        Section {
-          SetupRow(icon: "faceid", color: .green, title: "Passkey", detail: "Sign in with Face ID.") {
+          SetupRow(
+            icon: "key.fill", color: .blue, title: "Passkey",
+            status: passkey == .done ? "Set up" : passkey == .confirm ? "Confirm to finish" : "Not set up",
+            done: passkey == .done
+          ) {
             passkeyControl
           }
-          SetupRow(icon: "key.fill", color: .gray, title: "Recovery Key", detail: "12 words, for when you can’t use Face ID.") {
-            if kept {
-              Checkmark(label: "Recovery key saved")
-            } else {
-              Button("Show") { showingWords = true }
-                .buttonStyle(.bordered)
-                .buttonBorderShape(.capsule)
-                .controlSize(.small)
+          SetupRow(
+            icon: "list.number", color: .gray, title: "Recovery Key",
+            status: saved ? "Saved" : "Not saved", done: saved
+          ) {
+            HStack(spacing: 8) {
+              Button { revealed.toggle() } label: {
+                Image(systemName: revealed ? "eye.slash" : "eye")
+                  .frame(minWidth: 30, minHeight: 30)
+              }
+              .buttonStyle(.borderless)
+              .accessibilityLabel(revealed ? "Hide Recovery Key" : "Show Recovery Key")
+              if saved {
+                Checkmark(label: "Recovery key saved")
+              } else {
+                Button("Save") { save() }
+                  .buttonStyle(.bordered)
+                  .disabled(busy)
+              }
             }
           }
+          if revealed {
+            Words(words: words)
+          }
         } footer: {
-          if let problem { Text(problem) }
+          Text(problem ?? "Keep your name “\(accounts.account?.username ?? "")” forever.")
         }
       }
+      .navigationTitle("Secure Your Account")
+      .navigationBarTitleDisplayMode(.inline)
       .toolbar {
         ToolbarItem(placement: .cancellationAction) {
-          Button("Cancel") { dismiss() }
+          Button("Close") { dismiss() }
         }
         ToolbarItem(placement: .confirmationAction) {
           Button("Done") { finish() }
-            .disabled(!kept || busy)
-        }
-      }
-      .sheet(isPresented: $showingWords) {
-        NavigationStack {
-          RecoveryKeyView(
-            name: accounts.account?.username ?? "",
-            words: words,
-            explanation: SecurityPresentation.recoveryExplanation,
-            requiresAuthentication: false,
-            finishTitle: "Done",
-            onFinish: {
-              kept = true
-              showingWords = false
-            }
-          )
-          .toolbar {
-            ToolbarItem(placement: .cancellationAction) {
-              Button("Cancel") { showingWords = false }
-            }
-          }
+            .disabled(!saved || busy)
         }
       }
     }
@@ -94,6 +77,7 @@ struct SecureNameSheet: View {
   @ViewBuilder private var passkeyControl: some View {
     if busy {
       ProgressView()
+        .accessibilityLabel(passkey == .confirm ? "Confirming passkey" : "Setting up passkey")
     } else {
       switch passkey {
       case .done:
@@ -101,13 +85,9 @@ struct SecureNameSheet: View {
       case .ready, .failed:
         Button(passkey == .failed ? "Try Again" : "Set Up") { Task { await makePasskey() } }
           .buttonStyle(.bordered)
-          .buttonBorderShape(.capsule)
-          .controlSize(.small)
       case .confirm:
         Button("Confirm") { Task { await confirmPasskey() } }
           .buttonStyle(.borderedProminent)
-          .buttonBorderShape(.capsule)
-          .controlSize(.small)
       }
     }
   }
@@ -120,9 +100,9 @@ struct SecureNameSheet: View {
     problem = nil
     do {
       passkey = try await accounts.securePasskey() ? .done : .confirm
-      if passkey == .confirm { problem = "Confirm with Face ID once more to finish." }
     } catch {
-      passkey = .failed  // cancelled, or the password manager could not make it: the words still secure it
+      passkey = .failed
+      if !SecurityPresentation.isCancellation(error) { problem = "Couldn’t create passkey. Try again." }
     }
   }
 
@@ -134,11 +114,19 @@ struct SecureNameSheet: View {
     do {
       try await accounts.confirmPasskey()
       passkey = .done
-    } catch let error as AccountError {
-      problem = error.errorDescription
     } catch {
-      problem = "Passkey not confirmed. Try again."
+      if !SecurityPresentation.isCancellation(error) { problem = "Couldn’t confirm passkey. Try again." }
     }
+  }
+
+  /// The words as the card (an image) and as text, to the share sheet; saved once something was done with them.
+  private func save() {
+    let name = accounts.account?.username ?? ""
+    let renderer = ImageRenderer(content: RecoveryCard(name: name, words: words))
+    renderer.scale = 3
+    var items: [Any] = ["Yo recovery key for \(name): " + words.joined(separator: " ")]
+    if let image = renderer.uiImage { items.insert(image, at: 0) }
+    Share.present(items) { completed in if completed { saved = true } }
   }
 
   /// With the passkey the backup is saved already; without, the words save it now.
@@ -151,12 +139,27 @@ struct SecureNameSheet: View {
   }
 }
 
-/// One step: a Settings-style icon tile, a title with a short line under it, and its control at the end.
+/// The system's share sheet, from whatever is on top, telling whether something was done with the items.
+@MainActor enum Share {
+  static func present(_ items: [Any], completion: @escaping @MainActor (Bool) -> Void) {
+    let controller = UIActivityViewController(activityItems: items, applicationActivities: nil)
+    controller.completionWithItemsHandler = { _, completed, _, _ in
+      Task { @MainActor in completion(completed) }
+    }
+    let scene = UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }.first
+    var top = scene?.keyWindow?.rootViewController
+    while let presented = top?.presentedViewController { top = presented }
+    top?.present(controller, animated: true)
+  }
+}
+
+/// One step: a Settings-style icon tile, the title with its state under it, and its control at the end.
 private struct SetupRow<Control: View>: View {
   let icon: String
   let color: Color
   let title: String
-  let detail: String
+  let status: String
+  let done: Bool
   @ViewBuilder let control: Control
 
   var body: some View {
@@ -168,12 +171,40 @@ private struct SetupRow<Control: View>: View {
         .background(color.gradient, in: .rect(cornerRadius: 7))
       VStack(alignment: .leading, spacing: 2) {
         Text(title)
-        Text(detail).font(.footnote).foregroundStyle(.secondary)
+        Text(status).font(.footnote).foregroundStyle(done ? .green : .secondary)
       }
+      .layoutPriority(1)
       Spacer(minLength: 8)
       control
     }
     .padding(.vertical, 2)
+  }
+}
+
+/// The 12 words in place, numbered, in two columns.
+private struct Words: View {
+  let words: [String]
+
+  var body: some View {
+    Grid(alignment: .leading, horizontalSpacing: 16, verticalSpacing: 8) {
+      ForEach(0..<(words.count + 1) / 2, id: \.self) { row in
+        GridRow {
+          word(row)
+          word(row + (words.count + 1) / 2)
+        }
+      }
+    }
+    .padding(.vertical, 6)
+    .privacySensitive()
+  }
+
+  @ViewBuilder private func word(_ index: Int) -> some View {
+    if index < words.count {
+      HStack(spacing: 8) {
+        Text("\(index + 1)").font(.footnote.monospacedDigit()).foregroundStyle(.secondary).frame(width: 20, alignment: .trailing)
+        Text(words[index]).font(.body.monospaced())
+      }
+    }
   }
 }
 
