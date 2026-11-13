@@ -1,5 +1,5 @@
-// The friends of the mockup: names you add yourself, in the order you sort them, kept on this phone. A tap on one sends
-// you a Yo from them (delay(for:)).
+// The friends of the mockup: names you add yourself, kept on this phone, in the original's order: whoever you last
+// sent a Yo to or got one from is on top. A tap on one sends you a Yo from them, `replyDelay` later.
 import Foundation
 import Observation
 
@@ -14,14 +14,8 @@ final class Friends {
     didSet { save() }
   }
 
-  /// When a fake Yo from this friend comes, by the bar: the first at once, the last three after five seconds (time to
-  /// lock the phone and see it come as a push), the ones between after two.
-  func delay(for friend: Friend) -> Duration {
-    guard let index = all.firstIndex(of: friend) else { return .seconds(2) }
-    if index == 0 { return .zero }
-    if index >= all.count - 3 { return .seconds(5) }
-    return .seconds(2)
-  }
+  /// When the fake Yo back comes: time to see "Sent Yo!", or to lock the phone and see it come as a push.
+  static let replyDelay = Duration.seconds(3)
 
   private static let key = "friends"
   /// The names of the 2015 press screens, until you change them.
@@ -32,19 +26,18 @@ final class Friends {
     all = saved ?? Self.starting
   }
 
-  /// Adds a name as typed, upper and lower case as "Yo" itself; an empty or known name is ignored.
+  /// Adds a name as typed, upper and lower case as "Yo" itself; an empty or known name is ignored. New friends come on
+  /// top, as in the original.
   func add(_ name: String) {
     let name = name.trimmingCharacters(in: .whitespacesAndNewlines)
     guard !name.isEmpty, !all.contains(where: { $0.name.caseInsensitiveCompare(name) == .orderedSame }) else { return }
-    all.append(Friend(name: name))
+    all.insert(Friend(name: name), at: 0)
   }
 
-  /// Sorting by hand: the friend called `name` goes where `target` is.
-  func move(_ name: String, to target: Friend) {
-    guard let from = all.firstIndex(where: { $0.name == name }), let to = all.firstIndex(of: target), from != to
-    else { return }
-    let friend = all.remove(at: from)
-    all.insert(friend, at: to)
+  /// A Yo went to or came from `name`: they go on top (the original's promoteObjectToTop).
+  func promote(_ name: String) {
+    guard let index = all.firstIndex(where: { $0.name == name }), index != 0 else { return }
+    all.insert(all.remove(at: index), at: 0)
   }
 
   func remove(_ friend: Friend) {

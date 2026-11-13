@@ -1,14 +1,15 @@
 // The list of friends, as in 2014: one coloured bar per friend from edge to edge, the name large in the middle; a tap
-// sends a Yo. In the mockup a tap sends the Yo to yourself, as if that friend had sent it (Friends.delay). Hold a bar
-// to drag it elsewhere or to remove the friend; the last bar adds one.
+// sends a Yo ("Sent Yo!" on the bar, then it goes on top). The order is the original's: whoever you last sent a Yo to
+// or got one from is on top; the colours stay with the places. In the mockup a tap sends the Yo to yourself, as if that
+// friend had sent it (Friends.replyDelay). Hold a bar to remove the friend; the last bar adds one.
 //
 // On top, the system's bar: profile (a sheet) on the left, the camera on the right, between them the title "Yo",
 // a heading that becomes a glass pill once rows scroll behind it.
 //
-// A Yo arriving: the title gains a "!" (one per Yo in a burst) with a haptic; the sender's bar, scrolled to if off
-// screen, knocks and shows an Amethyst disc with "Yo" at its end ("3×" beside it), fading out within `yoSeconds`;
-// then it is gone, as in the original (no unread mark). A photo or video waits in the same place as a round, milky
-// thumbnail: a finger on it plays them (HeldMedia), and what was shown is gone (as Snapchat began).
+// A Yo arriving: the title gains a "!" (one per Yo in a burst) with a haptic; the sender's bar goes on top, knocks and
+// says "Yo" at its end, in the name's own type ("3×" before it), fading out within `yoSeconds`; then it is gone, as in
+// the original (no unread mark). A photo or video waits in the same place as "Yo 📷" or "Yo 🎥": a finger on it plays
+// them (HeldMedia), and what was shown is gone (as Snapchat began).
 //
 // Camera mode, the original's camera "context": the bars turn see-through over the live picture; a tap on a name
 // takes a photo, holding it records a video. Either goes after `sendDelay`, a ring at the bar's left that undoes the
@@ -179,7 +180,6 @@ struct FriendList: View {
   // MARK: Bars
 
   @ViewBuilder private func row(_ friend: Friend, at index: Int) -> some View {
-    let delay = friends.delay(for: friend)
     let waiting = inbox.media[friend.name] ?? []
     let bar = RowButton(
       rowTitle(friend),
@@ -190,31 +190,17 @@ struct FriendList: View {
       media: waiting,
       yo: landed[friend.name],
       hint: cameraOn ? "Tap for a photo, hold for a video" : nil,
-      hold: cameraOn && picked == nil ? { hold(friend, $0, delay: delay) } : nil,
+      hold: cameraOn && picked == nil ? { hold(friend, $0) } : nil,
       view: { see(friend, $0) }
     ) {
-      send(to: friend, delay: delay)
+      send(to: friend)
     }
     if cameraOn || !waiting.isEmpty {
-      bar  // holding records a video, or shows the photos: no menu and no dragging then
+      bar  // holding records a video, or shows the photos: no menu then
     } else {
-      // Hold to lift a bar: drag it to sort the list, or let go for the menu.
       bar
         .contextMenu {
           Button("Remove \(friend.name)", systemImage: "trash", role: .destructive) { friends.remove(friend) }
-        }
-        .draggable(friend.name) {
-          Text(friend.name)
-            .font(.yo(Metrics.rowFont))
-            .foregroundStyle(.white)
-            .padding(.horizontal, 28)
-            .frame(height: Metrics.rowHeight)
-            .background(Color.row(index), in: .capsule)
-        }
-        .dropDestination(for: String.self) { names, _ in
-          guard let name = names.first else { return false }
-          withAnimation(.snappy) { friends.move(name, to: friend) }
-          return true
         }
     }
   }
@@ -309,7 +295,8 @@ struct FriendList: View {
 
   // MARK: Sending
 
-  private func send(to friend: Friend, delay: Duration) {
+  private func send(to friend: Friend) {
+    let delay = Friends.replyDelay
     sends += 1
     let library = picked
     picked = nil
@@ -330,7 +317,8 @@ struct FriendList: View {
   }
 
   /// Holding a name in camera mode: a video from the moment it is held until it is let go.
-  private func hold(_ friend: Friend, _ holding: Bool, delay: Duration) {
+  private func hold(_ friend: Friend, _ holding: Bool) {
+    let delay = Friends.replyDelay
     if holding {
       guard recordingFor == nil else { return }  // one video at a time: a second finger records nothing
       recordingFor = friend
@@ -389,11 +377,16 @@ struct FriendList: View {
     showSent(to: friend, "Not sent")
   }
 
+  /// What the bar says after a send, for 1.5 seconds as in the original; a Yo that went then takes its bar on top.
   private func showSent(to friend: Friend, _ text: String) {
     sent[friend] = text
     Task {
-      try? await Task.sleep(for: .seconds(1.2))
-      if sent[friend] == text { sent[friend] = nil }
+      try? await Task.sleep(for: .seconds(1.5))
+      guard sent[friend] == text else { return }
+      withAnimation(.snappy) {
+        sent[friend] = nil
+        if text.hasPrefix("Sent") { friends.promote(friend.name) }
+      }
     }
   }
 
@@ -464,16 +457,17 @@ extension FriendList {
     }
   }
 
-  /// One Yo: the title gains a "!" (with the haptic), the sender's bar is scrolled to if off screen, and its Yo shows
-  /// there until `yoSeconds` are over. A photo's thumbnail stays until seen (Inbox.media).
+  /// One Yo: the title gains a "!" (with the haptic), the sender's bar goes on top (the list scrolls there if it is
+  /// not on screen), and its Yo shows there until `yoSeconds` are over. A photo stays until seen (Inbox.media).
   private func show(_ arrival: Arrival, after delay: Double) {
     let name = arrival.from
     Task {
       try? await Task.sleep(for: .seconds(delay))
       cheers += 1
       lastCheer = .now
+      withAnimation(.snappy) { friends.promote(name) }
       if !onScreen.contains(name) {
-        withAnimation(.smooth(duration: 0.5)) { position.scrollTo(id: name, anchor: .center) }
+        withAnimation(.smooth(duration: 0.5)) { position.scrollTo(id: name, anchor: .top) }
       }
       withAnimation(.spring(duration: 0.3, bounce: 0.6)) {
         bangs += 1
@@ -547,8 +541,7 @@ struct RowButton: View {
   var sendSeconds = FriendList.sendDelay
   var stop: () -> Void = {}
   var media: [Arrival] = []
-  /// A Yo on this bar now: the bar knocks and an Amethyst disc with "Yo" shows at its end ("3×" beside it), fading
-  /// out within `yoSeconds`.
+  /// A Yo on this bar now: the bar knocks and says "Yo" at its end ("3×" before it), fading out within `yoSeconds`.
   var yo: FriendList.Landing?
   var yoSeconds = FriendList.yoSeconds
   var hint: String?
@@ -638,7 +631,7 @@ struct RowButton: View {
       .lineLimit(1)
       .minimumScaleFactor(0.5)
       .foregroundStyle(.white)
-      .padding(.horizontal, 72)
+      .padding(.horizontal, 104)  // room for the undo ring on the left and "Yo 📷" on the right
       .frame(maxWidth: .infinity, minHeight: Metrics.rowHeight)
       .background(recording ? Color.alizarin.opacity(0.85) : color)
       .contentShape(.rect)
@@ -668,13 +661,13 @@ struct RowButton: View {
     .transition(.scale.combined(with: .opacity))
   }
 
-  /// At the bar's end: photos and videos not yet seen (a finger on them plays them at once), or a Yo that just came;
-  /// a count beside either.
+  /// At the bar's end, in the name's own type: "Yo 📷" or "Yo 🎥" for photos and videos not yet seen (a finger on it
+  /// plays them at once), or "Yo" for one that just came; a count before either.
   @ViewBuilder private var mark: some View {
     if let first = media.first {
-      HStack(spacing: 8) {
+      HStack(alignment: .firstTextBaseline, spacing: 6) {
         if media.count > 1 { count(media.count) }
-        PhotoDisc(photo: first.photo, video: first.video != nil)
+        Text(first.video != nil ? "Yo 🎥" : "Yo 📷").font(.yo(Metrics.rowFont)).foregroundStyle(.white)
       }
       .scaleEffect(viewing ? 0.92 : 1)
       .contentShape(.rect.inset(by: -12))  // easy to hit
@@ -701,9 +694,9 @@ struct RowButton: View {
       // Full for a moment, then slowly fading out.
       TimelineView(.animation) { timeline in
         let age = timeline.date.timeIntervalSince(yo.at)
-        HStack(spacing: 8) {
+        HStack(alignment: .firstTextBaseline, spacing: 6) {
           if yo.count > 1 { count(yo.count) }
-          YoDisc(on: color)
+          Text("Yo").font(.yo(Metrics.rowFont)).foregroundStyle(.white)
         }
         .opacity(age < 1.2 ? 1 : max(0, 1 - (age - 1.2) / (yoSeconds - 1.2)))
       }
@@ -717,71 +710,6 @@ struct RowButton: View {
       .font(.yo(19, relativeTo: .headline))
       .foregroundStyle(.white)
       .contentTransition(.numericText())
-  }
-}
-
-/// Photos and videos waiting: the oldest, a little blurred and milky, as a disc the size of the Yo disc, so both read
-/// alike; "Yo" on it in Amethyst (white on an almost black photo); ▶︎ for a video.
-struct PhotoDisc: View {
-  let photo: UIImage?
-  var video = false
-
-  /// How much milky white lies over the photo: enough for Amethyst to read, little enough to see the photo.
-  private static let milk = 0.4
-
-  var body: some View {
-    let light = (photo.map(Self.brightness) ?? 0) * (1 - Self.milk) + Self.milk
-    ZStack {
-      if let photo {
-        Image(uiImage: photo).resizable().scaledToFill().blur(radius: 2)
-      }
-      Color.white.opacity(Self.milk)
-      HStack(spacing: 2) {
-        if video { Image(systemName: "play.fill").font(.system(size: 9, weight: .bold)) }
-        Text("Yo").font(.yo(15, relativeTo: .headline))
-      }
-      .foregroundStyle(light > 0.45 ? Color.amethyst : .white)
-    }
-    .frame(width: 44, height: 44)
-    .clipShape(.circle)
-    .shadow(color: .black.opacity(0.25), radius: 5, y: 2)
-  }
-
-  /// The photo's mean brightness, 0 to 1: drawn into one pixel.
-  private static func brightness(_ image: UIImage) -> Double {
-    var pixel = [UInt8](repeating: 0, count: 4)
-    guard let cg = image.cgImage,
-      let context = CGContext(
-        data: &pixel, width: 1, height: 1, bitsPerComponent: 8, bytesPerRow: 4,
-        space: CGColorSpaceCreateDeviceRGB(), bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue)
-    else { return 0.5 }
-    context.interpolationQuality = .medium
-    context.draw(cg, in: CGRect(x: 0, y: 0, width: 1, height: 1))
-    return (0.2126 * Double(pixel[0]) + 0.7152 * Double(pixel[1]) + 0.0722 * Double(pixel[2])) / 255
-  }
-}
-
-/// The Yo mark: an Amethyst disc with a white "Yo", the brand's own; on a bar too close to Amethyst (the purple bars)
-/// it turns around, a white disc with an Amethyst "Yo", so it never sits purple on purple.
-struct YoDisc: View {
-  /// The bar's colour under it.
-  let on: Color
-  @Environment(\.self) private var environment
-
-  var body: some View {
-    let turned = Self.close(on.resolve(in: environment), Color.amethyst.resolve(in: environment))
-    Text("Yo")
-      .font(.yo(17, relativeTo: .headline))
-      .foregroundStyle(turned ? Color.amethyst : .white)
-      .frame(width: 44, height: 44)
-      .background(turned ? Color.white : .amethyst, in: .circle)
-      .shadow(color: .black.opacity(0.2), radius: 4, y: 1)
-  }
-
-  /// Two colours too alike to tell apart side by side (a small distance between them).
-  private static func close(_ a: Color.Resolved, _ b: Color.Resolved) -> Bool {
-    let dr = Double(a.red - b.red), dg = Double(a.green - b.green), db = Double(a.blue - b.blue)
-    return (dr * dr + dg * dg + db * db).squareRoot() < 0.25
   }
 }
 
