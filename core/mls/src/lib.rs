@@ -1,4 +1,4 @@
-//! The Yo client core (spec/v1.md): one implementation of YoLS for iOS and Android.
+//! The Yo client core (spec/v1.md): one implementation of YoIP for iOS and Android.
 //!
 //! The platform supplies HTTP (`Transport`) and a place to keep one sealed blob (`Store`); everything else, from the
 //! MLS groups to the order of commits, is here. Every operation either completes or leaves the state as it was,

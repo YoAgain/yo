@@ -2,9 +2,10 @@
 
 Yo, again. One tap, one Yo, end-to-end encrypted.
 
-## YoLS: Yo Layer Security
+## YoIP: Yo over IP
 
-The protocol: MLS (RFC 9420) for a messenger whose server never learns who sends.
+The protocol: MLS (RFC 9420) for a messenger whose server never learns who sends. Its security layer, identities
+and chats, is **YoLS** (Yo Layer Security); YoIP is all of it, with the hub and what a message says.
 
 - **Identity** in four layers:
 
