@@ -30,20 +30,23 @@ final class Inbox {
   private(set) var arrivals: [Arrival] = []
   /// Notifications already taken in, so one tapped and one collected on opening count once.
   @ObservationIgnored private var taken: Set<String> = []
-  @ObservationIgnored private var soundedAt = Date.distantPast
   /// Photos and videos not yet seen, by sender, oldest first.
   private(set) var media: [String: [Arrival]] = [:]
 
   /// Yos with a photo or video still on their way, until their notification arrives.
   @ObservationIgnored private var onTheirWay: [String: Arrival] = [:]
 
-  @ObservationIgnored private let sound: AVAudioPlayer? = {
-    guard let url = Bundle.main.url(forResource: "yo", withExtension: "caf") else { return nil }
+  /// The Yo sound, a few players taking turns: every Yo sounds, even when the next comes before the last has ended.
+  @ObservationIgnored private let sounds: [AVAudioPlayer] = {
+    guard let url = Bundle.main.url(forResource: "yo", withExtension: "caf") else { return [] }
     try? AVAudioSession.sharedInstance().setCategory(.ambient)
-    let player = try? AVAudioPlayer(contentsOf: url)
-    player?.prepareToPlay()  // loaded at launch: the first Yo sounds at once
-    return player
+    return (0..<4).compactMap { _ in
+      let player = try? AVAudioPlayer(contentsOf: url)
+      player?.prepareToPlay()  // loaded at launch: the first Yo sounds at once
+      return player
+    }
   }()
+  @ObservationIgnored private var nextSound = 0
 
   /// The notification's category: "Yo back" right on it, as the original had, sent without opening the app.
   nonisolated static let category = "yo"
@@ -128,11 +131,12 @@ final class Inbox {
   /// The sound, and the sender's row takes the Yo (as Messages and Signal show a new message in the list: on the
   /// bar, not in a banner).
   private func show(_ arrival: Arrival) {
-    // One sound for a burst: several Yos at the same moment sound once.
-    if Date.now.timeIntervalSince(soundedAt) > 0.3 {
-      soundedAt = .now
-      sound?.currentTime = 0
-      sound?.play()
+    // One sound per Yo.
+    if !sounds.isEmpty {
+      let player = sounds[nextSound % sounds.count]
+      nextSound += 1
+      player.currentTime = 0
+      player.play()
     }
     arrivals.append(Arrival(id: arrival.id, from: arrival.from))
     if arrival.photo != nil { media[arrival.from, default: []].append(arrival) }

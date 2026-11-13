@@ -1,6 +1,6 @@
 // The friends of the mockup: names you add yourself, kept on this phone, in the original's order: whoever you last
 // sent a Yo to or got one from is on top. Each keeps a colour of the original's palette wherever they go. A tap on one
-// sends you a Yo from them, `replyDelay` later.
+// sends you a Yo from them when their bar goes on top (FriendList.showSent).
 import Foundation
 import Observation
 import SwiftUI
@@ -29,9 +29,6 @@ final class Friends {
   private(set) var all: [Friend] {
     didSet { save() }
   }
-
-  /// When the fake Yo back comes: time to see "Sent Yo!", or to lock the phone and see it come as a push.
-  static let replyDelay = Duration.seconds(3)
 
   private static let key = "friends"
   /// The names of the 2015 press screens, until you change them.
