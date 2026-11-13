@@ -75,6 +75,7 @@ struct SettingsView: View {
                   Label("Secure Your Account", systemImage: "lock.fill").labelStyle(Tile(.orange))
                   Spacer()
                   CountBadge(count: 1)
+                  Chevron()
                 }
               }
               .tint(.primary)
@@ -202,6 +203,7 @@ struct SettingsView: View {
             Label("Secure Your Account", systemImage: "lock.fill").labelStyle(Tile(.orange))
             Spacer()
             CountBadge(count: 1)
+            Chevron()
           }
         }
         .tint(.primary)
@@ -663,5 +665,15 @@ struct CountBadge: View {
       .frame(minWidth: 23, minHeight: 23)
       .background(.red, in: .capsule)
       .accessibilityLabel("\(count) thing to do")
+  }
+}
+
+/// The disclosure arrow Settings draws after a row's count, so the row reads as tappable.
+struct Chevron: View {
+  var body: some View {
+    Image(systemName: "chevron.right")
+      .font(.footnote.weight(.semibold))
+      .foregroundStyle(.tertiary)
+      .accessibilityHidden(true)
   }
 }

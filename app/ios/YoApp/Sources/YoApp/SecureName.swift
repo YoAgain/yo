@@ -1,246 +1,170 @@
+// "Secure Your Account", from the profile (spec 7): a passkey first, made and then used once (its PRF output comes only
+// when a passkey is used), then the 12 words to keep as well; if the passkey does not work, the words alone. One
+// sheet that changes in place.
 import SwiftUI
 
-// Retained for callers that present setup as a sheet.
-@MainActor
 struct SecureNameSheet: View {
-  @Environment(\.dismiss) private var dismiss
-
-  var body: some View {
-    NavigationStack {
-      SecureNamePage(onFinish: { dismiss() })
-        .toolbar {
-          ToolbarItem(placement: .cancellationAction) {
-            Button("Close") { dismiss() }
-          }
-        }
-    }
-    .tint(Color.amethyst)
-  }
-}
-
-@MainActor
-struct SecureNamePage: View {
-  var onFinish: (() -> Void)? = nil
-
   @Environment(AccountStore.self) private var accounts
   @Environment(\.dismiss) private var dismiss
-
-  @State private var stage = Stage.introduction
+  @State private var stage = Stage.passkey
   @State private var busy = false
-  @State private var passkeyProblem: String?
-  @State private var recoveryAvailable = false
-  @State private var setupFailed = false
+  @State private var problem: String?
+  @State private var kept: Set<String> = []
+  @State private var started = false
 
-  private enum Stage {
-    case introduction
-    case confirmation
-    case recovery(words: [String], hasPasskey: Bool)
+  private enum Stage: Equatable {
+    /// Making the passkey (the system's sheet is up).
+    case passkey
+    /// Made, but its PRF output not given yet (1Password): used once more, said why.
+    case confirm
+    /// The words to keep: with the passkey already saved (`saved`), or alone.
+    case words([String], saved: Bool)
   }
 
   var body: some View {
-    Group {
-      switch stage {
-      case .introduction:
-        introduction
-
-      case .confirmation:
-        confirmation
-
-      case .recovery(let words, let hasPasskey):
-        RecoveryKeyView(
-          name: accounts.account?.username ?? "",
-          words: words,
-          explanation: hasPasskey
-            ? "Face ID is on. Keep these words too."
-            : "Keep these words somewhere safe.",
-          requiresAuthentication: false,
-          finishTitle: hasPasskey ? "Done" : "Secure Your Account",
-          onFinish: { finishRecovery(hasPasskey: hasPasskey) },
-          onTryPasskey: hasPasskey ? nil : { tryPasskeyAgain() }
-        )
+    ZStack {
+      Color.amethyst.ignoresSafeArea()
+      Group {
+        switch stage {
+        case .passkey: passkey
+        case .confirm: confirm
+        case .words(let words, let saved): wordsPage(words, saved: saved)
+        }
       }
+      .transition(.opacity)
     }
-    .navigationBarBackButtonHidden(busy)
-    .interactiveDismissDisabled(busy)
-    .toolbar(busy ? .hidden : .visible, for: .navigationBar)
-    .alert("Unable to Secure Your Account", isPresented: $setupFailed) {
-      Button("OK", role: .cancel) {}
-    } message: {
-      Text(
-        "Try again."
-      )
+    .animation(.smooth(duration: 0.3), value: stage)
+    .foregroundStyle(.white)
+    .preferredColorScheme(.dark)
+    .task {
+      guard !started else { return }
+      started = true
+      await makePasskey()
     }
   }
 
-  private var introduction: some View {
-    Form {
-      Section {
-        LabeledContent {
-          Text(accounts.account?.username ?? "")
-            .font(.yo(17, relativeTo: .body))
-            .fixedSize(horizontal: false, vertical: true)
-        } label: {
-          Text("Username")
-        }
-      } footer: {
-        Text("Keep your name forever, on any iPhone.")
-      }
+  // MARK: Stages
 
-      Section {
-        Text(SecurityPresentation.passkeyExplanation)
-      } header: {
-        Text("Face ID")
-      }
-
-      Section {
-        Text("12 words, for when you can’t use Face ID.")
-      } header: {
-        Text("Recovery Key")
-      }
-
-      Section {
-        Button {
-          Task { await createPasskey() }
-        } label: {
-          HStack {
-            Text(busy ? "Setting Up…" : "Continue with Face ID")
-            Spacer()
-            if busy {
-              ProgressView()
-                .accessibilityLabel("Setting Up Face ID")
-            }
-          }
-        }
+  private var passkey: some View {
+    Page(title: "Secure Your Account",
+      message: "Keep your name “\(accounts.account?.username ?? "")” forever, on any iPhone.") {
+      KeyIcon()
+    } bottom: {
+      PrimaryButton("Continue with Face ID", busy: busy) { Task { await makePasskey() } }
         .disabled(busy)
-
-        if recoveryAvailable {
-          Button("Use Recovery Key Only") { showRecoveryOnly() }
-            .disabled(busy)
-        }
-      } footer: {
-        if let passkeyProblem {
-          Text(passkeyProblem)
-        }
-      }
+      Button("Use Recovery Key Instead") { showWords() }
+        .font(.yo(17))
+      Note(problem)
     }
-    .navigationTitle("Secure Your Account")
-    .navigationBarTitleDisplayMode(.inline)
   }
 
-  private var confirmation: some View {
-    Form {
-      Section {
-        Text("One more Face ID to finish.")
-      }
-
-      Section {
-        Button {
-          Task { await confirmPasskey() }
-        } label: {
-          HStack {
-            Text(busy ? "Confirming…" : "Continue with Face ID")
-            Spacer()
-            if busy {
-              ProgressView()
-                .accessibilityLabel("Confirming Face ID")
-            }
-          }
-        }
+  private var confirm: some View {
+    Page(title: "Secure Your Account", message: "One more Face ID to finish.") {
+      KeyIcon()
+    } bottom: {
+      PrimaryButton("Continue with Face ID", busy: busy) { Task { await confirmPasskey() } }
         .disabled(busy)
-
-        Button("Use Recovery Key Only") { showRecoveryOnly() }
-          .disabled(busy)
-      } footer: {
-        if let passkeyProblem {
-          Text(passkeyProblem)
-        }
-      }
+      Button("Use Recovery Key Instead") { showWords() }
+        .font(.yo(17))
+      Note(problem)
     }
-    .navigationTitle("Continue with Face ID")
-    .navigationBarTitleDisplayMode(.inline)
   }
 
-  private func createPasskey() async {
-    guard !busy else { return }
+  private func wordsPage(_ words: [String], saved: Bool) -> some View {
+    Page(title: "Recovery Key",
+      message: saved
+        ? "Face ID is on. Keep these words too, for when you can’t use it."
+        : "Keep these words somewhere safe. They get your name back on a new iPhone.") {
+      FrostedKey(words: words, qrSize: 96)
+      HStack(spacing: 12) {
+        KeepButton(title: "Save to Photos", icon: "photo.badge.arrow.down", done: kept.contains("photos")) {
+          Task { await saveToPhotos(words) }
+        }
+        KeepButton(title: "Copy", icon: "doc.on.doc", done: kept.contains("copied")) {
+          RecoveryWords.copy(words, name: accounts.account?.username ?? "")
+          kept.insert("copied")
+        }
+      }
+      .padding(.top, 6)
+      .disabled(busy)
+    } bottom: {
+      PrimaryButton("Done") { saved ? done() : keepWords() }
+      if !saved {
+        Button("Try Face ID Again") { stage = .passkey; Task { await makePasskey() } }
+          .font(.yo(17))
+      }
+      Note(problem)
+    }
+  }
+
+  // MARK: Doing
+
+  private func makePasskey() async {
     busy = true
-    passkeyProblem = nil
     defer { busy = false }
-
-    // A successful call clears the store's temporary setup state.
-    let words = accounts.secureWords()
-
+    problem = nil
+    let words = accounts.secureWords()  // made now: shown after the passkey, kept with it
     do {
-      let confirmed = try await accounts.securePasskey()
-      if confirmed {
-        stage = .recovery(words: words, hasPasskey: true)
-      } else {
-        stage = .confirmation
-      }
+      if try await accounts.securePasskey() { return stage = .words(words, saved: true) }
+      stage = .confirm
     } catch {
-      recoveryAvailable = true
-
-      // Cancellation offers the fallback without an error message.
-      if SecurityPresentation.isCancellation(error) { return }
-
-      passkeyProblem = SecurityPresentation.passkeyMessage(
-        error,
-        fallback:
-          "Face ID isn’t on yet. Try again, or use the words."
-      )
+      showWords()  // cancelled, or the password manager could not make it
     }
   }
 
   private func confirmPasskey() async {
-    guard !busy else { return }
     busy = true
-    passkeyProblem = nil
     defer { busy = false }
-
-    let words = accounts.secureWords()
-
+    problem = nil
     do {
+      let words = accounts.secureWords()
       try await accounts.confirmPasskey()
-      stage = .recovery(words: words, hasPasskey: true)
+      stage = .words(words, saved: true)
+    } catch let error as AccountError {
+      problem = error.errorDescription
     } catch {
-      if SecurityPresentation.isCancellation(error) { return }
-
-      passkeyProblem = SecurityPresentation.passkeyMessage(
-        error,
-        fallback:
-          "Face ID isn’t on yet. Try again, or use the words."
-      )
+      problem = "Face ID didn’t finish. Try again."
     }
   }
 
-  private func showRecoveryOnly() {
-    guard !busy else { return }
-    passkeyProblem = nil
-    stage = .recovery(
-      words: accounts.secureWords(),
-      hasPasskey: false
-    )
+  private func showWords() {
+    problem = nil
+    stage = .words(accounts.secureWords(), saved: false)
   }
 
-  private func tryPasskeyAgain() {
-    guard !busy else { return }
-    passkeyProblem = nil
-    stage = .introduction
+  private func keepWords() {
+    do {
+      try accounts.keepWords()
+      done()
+    } catch {
+      problem = "Couldn’t save your recovery key. Try again."
+    }
   }
 
-  private func finishRecovery(hasPasskey: Bool) {
-    if !hasPasskey {
-      do {
-        try accounts.keepWords()
-      } catch {
-        setupFailed = true
-        return
-      }
-    }
+  private func done() {
+    UINotificationFeedbackGenerator().notificationOccurred(.success)
+    dismiss()
+  }
 
-    if let onFinish {
-      onFinish()
-    } else {
-      dismiss()
+  private func saveToPhotos(_ words: [String]) async {
+    busy = true
+    defer { busy = false }
+    let renderer = ImageRenderer(content: RecoveryCard(name: accounts.account?.username ?? "", words: words))
+    renderer.scale = 3
+    guard let image = renderer.uiImage else { return problem = "Couldn’t create your recovery key image. Try again." }
+    do {
+      try await RecoveryWords.saveToPhotos(image)
+      kept.insert("photos")
+    } catch {
+      problem = error.localizedDescription
     }
+  }
+}
+
+private struct KeyIcon: View {
+  var body: some View {
+    Image(systemName: "faceid")
+      .font(.system(size: 64))
+      .padding(.top, 20)
   }
 }
