@@ -116,6 +116,8 @@ struct Signed {
 impl Hub {
     pub fn new(config: Config, push_transport: Arc<dyn push::Transport>) -> Result<Arc<Self>, String> {
         let db = Arc::new(Db::open(&config.db_path).map_err(|e| format!("database: {e}"))?);
+        let added = db.seed_reserved(&config.reserved, now_ms()).map_err(|e| format!("reserved names: {e}"))?;
+        eprintln!("yo-hub: reserved names: {} in the list, {added} new", config.reserved.len());
         let pusher = push::Pusher::new(push_transport, config.apns.as_ref(), config.fcm.as_ref())?;
         let (deliveries, queue) = std::sync::mpsc::channel();
         let writing = db.clone();
@@ -352,9 +354,14 @@ impl Hub {
         let (account_key, device, key_packages, last_resort) = checked;
         let mut fresh: UserId = [0; 16];
         getrandom::getrandom(&mut fresh).map_err(|_| refuse(StatusCode::INTERNAL_SERVER_ERROR))?;
+        let spelling = match handle.kind {
+            KIND_USERNAME => std::str::from_utf8(handle.value.as_slice()).ok(),
+            _ => None,
+        };
         let written = self.db.register(
             handle.kind,
             &self.stored_handle(handle),
+            spelling,
             by_key,
             &fresh,
             &account_key,
@@ -472,8 +479,8 @@ async fn register(
 }
 
 /// Whether a username is free, for the app while it is typed (spec 6.3): `204` free, `409` taken by anyone or
-/// reserved (to the app both are a name it cannot have), `400` not a canonical username. Compared by skeleton, as
-/// registration compares, so a lookalike of a taken name is taken. Nothing about the user is told.
+/// reserved (to the app both are a name it cannot have), `400` no username. Compared by skeleton, as registration
+/// compares, so another spelling or a lookalike of a taken name is taken. Nothing about the user is told.
 async fn username_free(
     State(hub): Hubs,
     ConnectInfo(peer): Peer,
@@ -482,8 +489,7 @@ async fn username_free(
 ) -> Res<StatusCode> {
     hub.limit(format!("name:ip:{}", hub.ip(peer, &headers)), hub.config.limits.name_check_per_ip_minute, MINUTE)?;
     yo_wire::handle::check_username_form(&name)?;
-    let handle = Handle::username(&name);
-    if yo_wire::handle::is_reserved(&name) || hub.db.handle_taken(KIND_USERNAME, &hub.stored_handle(&handle))? {
+    if hub.db.username_taken(yo_wire::handle::skeleton(&name).as_bytes())? {
         return Err(refuse(StatusCode::CONFLICT));
     }
     Ok(StatusCode::NO_CONTENT)
@@ -546,21 +552,28 @@ async fn lookup(
         return Err(bad());
     }
     let limits = &hub.config.limits;
-    let (kind, per_day) = match request.key_packages {
-        1 => ("lookup", limits.lookup_per_device_day),
-        _ => ("identity", limits.identity_lookup_per_device_day),
+    let take = request.key_packages & api::LOOKUP_KEY_PACKAGES != 0;
+    let (kind, per_day) = match take {
+        true => ("lookup", limits.lookup_per_device_day),
+        false => ("identity", limits.identity_lookup_per_device_day),
     };
     hub.limit(format!("{kind}:{}", yo_wire::b64(&device.device_id)), per_day, DAY)?;
     let found = hub
         .db
-        .lookup(request.handle.kind, &hub.stored_handle(&request.handle), request.key_packages == 1, &request.except)?
+        .lookup(request.handle.kind, &hub.stored_handle(&request.handle), take, &request.except)?
         .ok_or_else(|| refuse(StatusCode::NOT_FOUND))?;
-    Ok(ok(encode(&api::LookupResult {
+    let result = api::LookupResult {
         user_id: found.user_id,
         account_key: found.account_key,
         device_keys: found.device_keys.into_iter().take(MAX_DEVICES).collect(),
         key_packages: found.key_packages.into_iter().take(MAX_DEVICES).map(Into::into).collect(),
-    })))
+    };
+    // The username only to who asks for it: an app from before spellings reads a `LookupResult` and nothing after.
+    if request.key_packages & api::LOOKUP_USERNAME == 0 {
+        return Ok(ok(encode(&result)));
+    }
+    let username = found.username.map(|name| name.into_bytes().into());
+    Ok(ok(encode(&api::LookupNamed { found: result, username })))
 }
 
 /// Claims or gives up the signing device's account's username.
@@ -570,9 +583,10 @@ async fn set_username(State(hub): Hubs, method: Method, uri: Uri, headers: Heade
     if let Some(name) = &request.username {
         Handle { kind: KIND_USERNAME, value: name.clone() }.check()?;
     }
-    let stored =
-        request.username.as_ref().map(|n| hub.stored_handle(&Handle { kind: KIND_USERNAME, value: n.clone() }));
-    match hub.db.set_username(&device.user_id, stored.as_deref())? {
+    // Checked above: UTF-8.
+    let spelling = request.username.as_ref().and_then(|n| std::str::from_utf8(n.as_slice()).ok());
+    let skeleton = spelling.map(yo_wire::handle::skeleton);
+    match hub.db.set_username(&device.user_id, skeleton.as_deref().zip(spelling).map(|(s, n)| (s.as_bytes(), n)))? {
         Write::Done(()) => Ok(StatusCode::NO_CONTENT),
         Write::Refused(_) => Err(refuse(StatusCode::CONFLICT)),
     }

@@ -9,9 +9,15 @@
 //!   YO_TWILIO_ACCOUNT_SID, YO_TWILIO_AUTH_TOKEN, YO_TWILIO_SERVICE_SID
 //!   YO_APNS_KEY_FILE, YO_APNS_KEY_ID, YO_APNS_TEAM_ID, YO_APNS_TOPIC
 //!   YO_FCM_SERVICE_ACCOUNT_FILE
+//!   YO_RESERVED_FILE      usernames nobody may claim (spec 3.3), kept by the operator outside this repository: one
+//!                         per line in its preferred spelling, an optional `# note`; blank lines and `#` lines are
+//!                         skipped. Read at every start; names the database does not hold yet are added (by
+//!                         skeleton, INSERT OR IGNORE). A name taken off the list stays reserved until deleted by hand:
+//!                         `DELETE FROM reserved WHERE skeleton = 'ADMIN';`. Unset, or no such file: nothing added.
+//!                         Reserving a name takes it from no one who has it already.
 
 use std::sync::Arc;
-use yo_hub::config::{ApnsConfig, Config, FcmConfig, Limits, SmsConfig};
+use yo_hub::config::{read_reserved, ApnsConfig, Config, FcmConfig, Limits, SmsConfig};
 use yo_hub::{push, Hub};
 
 fn var(name: &str) -> Option<String> {
@@ -69,6 +75,7 @@ fn config() -> Result<(Config, String), String> {
         sms,
         apns,
         fcm,
+        reserved: read_reserved(var("YO_RESERVED_FILE").as_deref())?,
     };
     Ok((config, var("YO_LISTEN").unwrap_or_else(|| "127.0.0.1:8080".into())))
 }

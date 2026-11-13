@@ -13,14 +13,11 @@ pub const KIND_USERNAME: u8 = 2;
 /// An account key: asks the hub whose it is (to learn who started a chat).
 pub const KIND_ACCOUNT_KEY: u8 = 3;
 
-/// Names nobody may claim, compared by skeleton.
-const RESERVED: [&str; 12] =
-    ["YO", "YOAPP", "JUSTYO", "YOAGAIN", "YOLS", "ADMIN", "SUPPORT", "HELP", "ROOT", "SYSTEM", "OFFICIAL", "STAFF"];
-
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, TlsSerialize, TlsDeserializeBytes, TlsSize)]
 pub struct Handle {
     pub kind: u8,
-    /// User id: 16 bytes. Phone: E.164 digits. Username: its canonical form (upper case).
+    /// User id: 16 bytes. Phone: E.164 digits. Username: as written (NFC), "YoGPT"; it names the account whose name
+    /// has the same skeleton ("yogpt", "Y0GPT" find "YoGPT").
     pub value: VLBytes,
 }
 
@@ -53,20 +50,20 @@ impl Handle {
         if trimmed.starts_with('+') || trimmed.starts_with("00") {
             return Ok(Handle::phone(&phone::normalize(trimmed)?));
         }
-        // Upper case and NFC only: what is typed must be a name as it is, never one trimmed into another.
-        let name: String = trimmed.trim_start_matches('@').to_uppercase().nfc().collect();
-        check_username(&name)?;
+        // NFC only: what is typed must be a name as it is, never one trimmed into another.
+        let name: String = trimmed.trim_start_matches('@').nfc().collect();
+        check_username_form(&name)?;
         Ok(Handle::username(&name))
     }
 
-    /// A handle as it may travel: well-formed and canonical.
+    /// A handle as it may travel: well-formed, a username in NFC.
     pub fn check(&self) -> Result<(), Error> {
         let value = self.value.as_slice();
         match self.kind {
             KIND_USER if value.len() == USER_ID_LEN => Ok(()),
             KIND_ACCOUNT_KEY if value.len() == crate::KEY_LEN => Ok(()),
             KIND_PHONE => phone::check(value),
-            KIND_USERNAME => check_username(std::str::from_utf8(value).map_err(|_| Error::Format)?),
+            KIND_USERNAME => check_username_form(std::str::from_utf8(value).map_err(|_| Error::Format)?),
             _ => Err(Error::Format),
         }
     }
@@ -75,7 +72,7 @@ impl Handle {
         (self.kind == KIND_USER).then(|| self.value.as_slice().try_into().ok()).flatten()
     }
 
-    /// For people: "+491701234567", "CHRIS".
+    /// For people: "+491701234567", "Chris".
     pub fn display(&self) -> String {
         let value = String::from_utf8_lossy(self.value.as_slice());
         match self.kind {
@@ -86,39 +83,33 @@ impl Handle {
     }
 }
 
-/// A username (spec 3.3): 3 to 16 characters (grapheme clusters, NFC) of Latin letters with their accents, 0–9, `_`
-/// and emoji, starting with a letter or an emoji, in upper case (the canonical form), not reserved.
-pub fn check_username(name: &str) -> Result<(), Error> {
-    check_username_form(name)?;
-    (!is_reserved(name)).then_some(()).ok_or(Error::Format)
-}
-
-/// A username as it may be written, reserved or not: what the hub's name check refuses with `400` (spec 6.3).
+/// A username as it may be written (spec 3.3): 3 to 16 characters (grapheme clusters, NFC) of Latin letters with their
+/// accents, 0–9, `_` and emoji, starting with a letter or an emoji, in any case ("YoGPT"). What the hub refuses with
+/// `400` (spec 6.3). Which names are reserved only the hub knows.
 pub fn check_username_form(name: &str) -> Result<(), Error> {
     let graphemes: Vec<&str> = name.graphemes(true).collect();
     let ok = (3..=16).contains(&graphemes.len())
         && name.nfc().eq(name.chars())
-        && name.to_uppercase() == name
         && graphemes.iter().all(|g| allowed(g))
         && graphemes.first().is_some_and(|g| is_latin_letter(g) || is_emoji(g));
     ok.then_some(()).ok_or(Error::Format)
 }
 
-/// A name nobody may claim, or one that looks like it.
-pub fn is_reserved(name: &str) -> bool {
-    RESERVED.iter().any(|r| skeleton(r) == skeleton(name))
+/// Whether two usernames are one name: the same skeleton.
+pub fn same_name(a: &str, b: &str) -> bool {
+    skeleton(a) == skeleton(b)
 }
 
-/// What a person typed, as a username can be: upper case, NFC, only the allowed characters, a letter or an emoji
-/// first, at most 16. The apps keep their field to this; the hub accepts only names that are already canonical.
+/// What a person typed, as a username can be written: NFC, only the allowed characters, a letter or an emoji first,
+/// at most 16, the case as typed. The apps keep their field to this; the hub accepts only names already so.
 pub fn canonical(typed: &str) -> String {
-    let upper: String = typed.to_uppercase().nfc().collect();
-    upper.graphemes(true).filter(|g| allowed(g)).skip_while(|g| !is_latin_letter(g) && !is_emoji(g)).take(16).collect()
+    let nfc: String = typed.nfc().collect();
+    nfc.graphemes(true).filter(|g| allowed(g)).skip_while(|g| !is_latin_letter(g) && !is_emoji(g)).take(16).collect()
 }
 
 /// What a username is compared by (spec 3.3): upper case, NFKD, without nonspacing marks, emoji variation selectors
 /// and skin tones, then 0 → O, 1 → I, VV → W. Names that look alike have one skeleton, and the hub keeps one name
-/// per skeleton: LEO, LE0 and LÉO are one name, and so are 👍 and 👍🏿.
+/// per skeleton: Leo, LE0 and LÉO are one name, and so are 👍 and 👍🏿.
 pub fn skeleton(name: &str) -> String {
     let stripped: String = name
         .to_uppercase()
@@ -170,10 +161,12 @@ mod tests {
     #[test]
     fn parses_what_people_type() {
         assert_eq!(Handle::parse("+49 170 1234567").unwrap(), Handle::phone("491701234567"));
-        assert_eq!(Handle::parse("@chris").unwrap(), Handle::username("CHRIS"));
-        assert_eq!(Handle::parse("Yo_Fan99").unwrap(), Handle::username("YO_FAN99"));
-        assert_eq!(Handle::parse("léo").unwrap(), Handle::username("LÉO"));
-        for bad in ["yo", "ab", "this_is_far_too_long_x", "admin", "+0123", "Adm1n"] {
+        assert_eq!(Handle::parse("@chris").unwrap(), Handle::username("chris"));
+        assert_eq!(Handle::parse("Yo_Fan99").unwrap(), Handle::username("Yo_Fan99"));
+        assert_eq!(Handle::parse("le\u{301}o").unwrap(), Handle::username("léo"), "NFC");
+        // Reserved names are the hub's to refuse: here they are names like any.
+        assert_eq!(Handle::parse("admin").unwrap(), Handle::username("admin"));
+        for bad in ["yo", "ab", "this_is_far_too_long_x", "+0123", "1abc"] {
             assert!(Handle::parse(bad).is_err(), "{bad}");
         }
     }
@@ -182,35 +175,45 @@ mod tests {
     #[test]
     fn canonical_and_skeleton() {
         for (typed, name, skel) in [
-            ("leo", "LEO", "LEO"),
+            ("leo", "leo", "LEO"),
             ("LE0", "LE0", "LEO"),
-            ("Léo", "LÉO", "LEO"),
-            ("ärger", "ÄRGER", "ARGER"),
+            ("Léo", "Léo", "LEO"),
+            ("ärger", "ärger", "ARGER"),
             ("👍", "👍", "👍"),
             ("👍🏿", "👍🏿", "👍"),
             ("VVALDO", "VVALDO", "WALDO"),
-            ("Straße", "STRASSE", "STRASSE"),
+            ("vvaldo", "vvaldo", "WALDO"),
+            ("Straße", "Straße", "STRASSE"),
+            ("YoGPT", "YoGPT", "YOGPT"),
+            ("y0gpt", "y0gpt", "YOGPT"),
         ] {
             assert_eq!(canonical(typed), name, "{typed}");
             assert_eq!(skeleton(name), skel, "{typed}");
         }
-        for (typed, name) in [("1abc", "ABC"), ("_x🔥", "X🔥"), ("abcабв", "ABC"), ("x×y", "XY"), ("🧙‍♂️🔥yo", "🧙‍♂️🔥YO")]
+        for (typed, name) in [("1abc", "abc"), ("_x🔥", "x🔥"), ("abcабв", "abc"), ("x×y", "xy"), ("🧙‍♂️🔥yo", "🧙‍♂️🔥yo")]
         {
             assert_eq!(canonical(typed), name, "{typed}");
         }
-        assert!(check_username("🔥🔥🔥").is_ok());
-        assert!(check_username("ÄRGER").is_ok());
-        assert!(check_username("LÉO").is_ok());
-        assert!(check_username("abc").is_err(), "not upper case");
-        assert!(check_username("ABCабв").is_err(), "another script");
-        assert!(check_username("1ABC").is_err(), "starts with a digit");
+        assert!(check_username_form("🔥🔥🔥").is_ok());
+        assert!(check_username_form("ÄRGER").is_ok());
+        assert!(check_username_form("Léo").is_ok());
+        assert!(check_username_form("abc").is_ok(), "lower case is a name");
+        assert!(check_username_form("YoGPT").is_ok());
+        assert!(check_username_form("le\u{301}o").is_err(), "not NFC");
+        assert!(check_username_form("ABCабв").is_err(), "another script");
+        assert!(check_username_form("1ABC").is_err(), "starts with a digit");
+        for (a, b) in [("YoGPT", "yogpt"), ("YoGPT", "YOGPT"), ("YoGPT", "Y0GPT"), ("Christopher", "CHRISTOPHER")] {
+            assert!(same_name(a, b), "{a} {b}");
+        }
+        assert!(!same_name("YoGPT", "YoGPS"));
     }
 
     #[test]
     fn checks_what_travels() {
         assert!(Handle::user(&[1; 16]).check().is_ok());
         assert!(Handle { kind: KIND_USER, value: vec![1; 15].into() }.check().is_err());
-        assert!(Handle::username("chris").check().is_err(), "not canonical");
+        assert!(Handle::username("chris").check().is_ok(), "any case");
+        assert!(Handle::username("le\u{301}o").check().is_err(), "not NFC");
         assert!(Handle { kind: 9, value: vec![].into() }.check().is_err());
     }
 }

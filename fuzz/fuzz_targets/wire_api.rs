@@ -15,6 +15,7 @@ fuzz_target!(|data: &[u8]| {
     canonical::<KeyPackages>(data);
     canonical::<Lookup>(data);
     canonical::<LookupResult>(data);
+    canonical::<LookupNamed>(data);
     canonical::<Push>(data);
     canonical::<Inbox>(data);
     canonical::<Ack>(data);

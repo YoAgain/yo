@@ -96,7 +96,7 @@ pub struct VerifyCheck {
 /// current account key (a new phone restored from the backup).
 #[derive(Debug, Clone, PartialEq, Eq, TlsSerialize, TlsDeserializeBytes, TlsSize)]
 pub struct Register {
-    /// The username, canonical: the account's only handle.
+    /// The username as its owner writes it (NFC): the account's only handle.
     pub username: VLBytes,
     pub device: NewDevice,
 }
@@ -153,10 +153,15 @@ pub struct KeyPackages {
     pub last_resort: Option<VLBytes>,
 }
 
+/// `Lookup::key_packages`, bit 0: hand out one KeyPackage per device (consumes them); without it only who it is.
+pub const LOOKUP_KEY_PACKAGES: u8 = 1;
+/// `Lookup::key_packages`, bit 1: answer `LookupNamed`, with the user's username, instead of `LookupResult`.
+pub const LOOKUP_USERNAME: u8 = 2;
+
 #[derive(Debug, Clone, PartialEq, Eq, TlsSerialize, TlsDeserializeBytes, TlsSize)]
 pub struct Lookup {
     pub handle: Handle,
-    /// 1: hand out one KeyPackage per device (consumes them); 0: only who it is.
+    /// `LOOKUP_KEY_PACKAGES` and `LOOKUP_USERNAME`; 0: only who it is.
     pub key_packages: u8,
     /// Devices whose KeyPackages are not wanted: those already in the group being repaired.
     pub except: Vec<[u8; KEY_LEN]>,
@@ -169,6 +174,14 @@ pub struct LookupResult {
     /// The user's devices (their MLS signature keys).
     pub device_keys: Vec<[u8; KEY_LEN]>,
     pub key_packages: Vec<VLBytes>,
+}
+
+/// The answer to a lookup with `LOOKUP_USERNAME`: the user and its username as its owner writes it ("YoGPT"),
+/// whatever spelling found it; none for an account without one.
+#[derive(Debug, Clone, PartialEq, Eq, TlsSerialize, TlsDeserializeBytes, TlsSize)]
+pub struct LookupNamed {
+    pub found: LookupResult,
+    pub username: Option<VLBytes>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, TlsSerialize, TlsDeserializeBytes, TlsSize)]

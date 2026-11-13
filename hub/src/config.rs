@@ -1,5 +1,7 @@
 //! The hub's configuration: everything main.rs reads from the environment, and what tests set directly.
 
+use crate::db::Reserved;
+
 /// Rate limits (spec 6.6). Each is a token bucket: this many per window, refilled evenly.
 #[derive(Debug, Clone)]
 pub struct Limits {
@@ -119,6 +121,38 @@ pub struct Config {
     pub sms: SmsConfig,
     pub apns: Option<ApnsConfig>,
     pub fcm: Option<FcmConfig>,
+    /// Usernames nobody may claim (spec 3.3), from the operator's list (`YO_RESERVED_FILE`): added to the database
+    /// at every start where it does not hold them yet.
+    pub reserved: Vec<Reserved>,
+}
+
+/// The operator's list of reserved usernames: one per line in its preferred spelling, a note after `#` if any.
+/// Blank lines and lines starting with `#` are skipped; so is nothing else: a name is what stands before the `#`,
+/// trimmed, even one no app could register.
+pub fn parse_reserved(text: &str) -> Vec<Reserved> {
+    text.lines()
+        .filter_map(|line| {
+            let (name, note) = match line.split_once('#') {
+                Some((name, note)) => (name, Some(note.trim()).filter(|n| !n.is_empty())),
+                None => (line, None),
+            };
+            let name = name.trim().to_owned();
+            (!name.is_empty()).then(|| Reserved { spelling: name, note: note.map(str::to_owned) })
+        })
+        .collect()
+}
+
+/// The list in a file, if there is one: none named, or none there, is an empty list (the hub reserves nothing new).
+pub fn read_reserved(path: Option<&str>) -> Result<Vec<Reserved>, String> {
+    let Some(path) = path else { return Ok(Vec::new()) };
+    match std::fs::read_to_string(path) {
+        Ok(text) => Ok(parse_reserved(&text)),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            eprintln!("yo-hub: {path}: not there, no reserved names added");
+            Ok(Vec::new())
+        }
+        Err(error) => Err(format!("{path}: {error}")),
+    }
 }
 
 impl Config {
@@ -133,6 +167,28 @@ impl Config {
             sms: SmsConfig::Dev { code: "000000".into() },
             apns: None,
             fcm: None,
+            reserved: Vec::new(),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_reserved_list_is_read_tolerantly() {
+        let path = std::env::temp_dir().join(format!("yo-hub-reserved-{}.txt", std::process::id()));
+        std::fs::write(&path, "# Reserved\n\nYo\n  Admin   # the operator\nJust Yo#\n#Gone\nLéo # accents too\n\r\n")
+            .unwrap();
+        let read = read_reserved(path.to_str()).unwrap();
+        std::fs::remove_file(&path).unwrap();
+        let spelt: Vec<(&str, Option<&str>)> = read.iter().map(|r| (r.spelling.as_str(), r.note.as_deref())).collect();
+        assert_eq!(
+            spelt,
+            [("Yo", None), ("Admin", Some("the operator")), ("Just Yo", None), ("Léo", Some("accents too"))]
+        );
+        assert!(read_reserved(None).unwrap().is_empty());
+        assert!(read_reserved(path.to_str()).unwrap().is_empty(), "a file not there: nothing");
     }
 }

@@ -42,6 +42,15 @@ pub struct Found {
     pub account_key: Key,
     pub device_keys: Vec<Key>,
     pub key_packages: Vec<Vec<u8>>,
+    /// The user's username as its owner writes it ("YoGPT"), if it has one.
+    pub username: Option<String>,
+}
+
+/// A username nobody may claim (spec 3.3), as the operator's list writes it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Reserved {
+    pub spelling: String,
+    pub note: Option<String>,
 }
 
 /// A user's current account key and devices: what a delivery's device check compares with (spec 4.6).
@@ -104,12 +113,23 @@ CREATE TABLE IF NOT EXISTS account_keys (
     user_id BLOB NOT NULL REFERENCES users(id)
 ) WITHOUT ROWID;
 CREATE INDEX IF NOT EXISTS account_keys_by_user ON account_keys(user_id);
--- How people find a user: a phone number as its HMAC, a username by its skeleton (spec 3.3).
+-- How people find a user: a phone number as its HMAC, a username by its skeleton (spec 3.3). `spelling`: a username
+-- as its owner writes it (\"YoGPT\"); NULL for names from before spellings were kept, shown as their skeleton
+-- (`migrate` adds the column to such a database).
 CREATE TABLE IF NOT EXISTS handles (
     kind INTEGER NOT NULL,
     value BLOB NOT NULL,
     user_id BLOB NOT NULL REFERENCES users(id),
+    spelling TEXT,
     PRIMARY KEY (kind, value)
+) WITHOUT ROWID;
+-- Usernames nobody may claim, by skeleton (spec 3.3): seeded from the operator's list at every start (INSERT OR
+-- IGNORE), never deleted by the hub. A user who has such a name keeps it.
+CREATE TABLE IF NOT EXISTS reserved (
+    skeleton TEXT PRIMARY KEY,
+    spelling TEXT NOT NULL,
+    note TEXT,
+    created_at INTEGER NOT NULL
 ) WITHOUT ROWID;
 CREATE INDEX IF NOT EXISTS handles_by_user ON handles(user_id, kind);
 CREATE TABLE IF NOT EXISTS devices (
@@ -259,7 +279,26 @@ fn remove_user(tx: &Transaction<'_>, user: &UserId, now: u64) -> rusqlite::Resul
 }
 
 /// The schema this hub writes. A database of another (or a pre-release) schema is refused, never half migrated.
+/// Within a version, changes are only additive (`migrate`): a column or table an older hub of the same version
+/// ignores, so going back to it loses nothing that it knew.
 const SCHEMA_VERSION: i64 = 1;
+
+/// Brings a database of this version written by an older hub up to `SCHEMA`, in one transaction: the usernames'
+/// spellings (`handles.spelling`, NULL for the names it holds: shown as their skeleton). The tables `SCHEMA` adds
+/// are made by `CREATE TABLE IF NOT EXISTS` already.
+fn migrate(conn: &mut Connection) -> rusqlite::Result<()> {
+    let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+    let has_spelling = tx.prepare("SELECT 1 FROM pragma_table_info('handles') WHERE name = 'spelling'")?.exists([])?;
+    if !has_spelling {
+        tx.execute_batch("ALTER TABLE handles ADD COLUMN spelling TEXT")?;
+    }
+    tx.commit()
+}
+
+/// Whether a skeleton is reserved, in a transaction.
+fn is_reserved(tx: &Transaction<'_>, skeleton: &[u8]) -> rusqlite::Result<bool> {
+    tx.prepare_cached("SELECT 1 FROM reserved WHERE skeleton = CAST(?1 AS TEXT)")?.exists([skeleton])
+}
 
 fn check_version(conn: &Connection) -> rusqlite::Result<()> {
     let version: i64 = conn.query_row("PRAGMA user_version", [], |row| row.get(0))?;
@@ -280,7 +319,7 @@ fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
 
 impl Db {
     pub fn open(path: &str) -> rusqlite::Result<Self> {
-        let conn = Connection::open(path)?;
+        let mut conn = Connection::open(path)?;
         conn.execute_batch(
             "PRAGMA journal_mode = WAL;
              PRAGMA synchronous = NORMAL;
@@ -289,7 +328,25 @@ impl Db {
         )?;
         check_version(&conn)?;
         conn.execute_batch(SCHEMA)?;
+        migrate(&mut conn)?;
         Ok(Db { conn: Mutex::new(conn) })
+    }
+
+    /// Adds the operator's reserved names (spec 3.3) the table does not hold yet, by skeleton; names it holds stay
+    /// as they are, and a name gone from the list stays reserved until deleted by hand. Returns how many were new.
+    pub fn seed_reserved(&self, names: &[Reserved], now: u64) -> rusqlite::Result<usize> {
+        let mut conn = self.conn();
+        let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let mut added = 0;
+        for name in names {
+            added += tx
+                .prepare_cached(
+                    "INSERT OR IGNORE INTO reserved (skeleton, spelling, note, created_at) VALUES (?1, ?2, ?3, ?4)",
+                )?
+                .execute(params![yo_wire::handle::skeleton(&name.spelling), name.spelling, name.note, now])?;
+        }
+        tx.commit()?;
+        Ok(added)
     }
 
     fn conn(&self) -> MutexGuard<'_, Connection> {
@@ -332,13 +389,15 @@ impl Db {
 
     /// Registers a device for the user a handle names (spec 6.4). A free handle makes a new user, `fresh`. A phone
     /// number keeps its user (a new phone keeps the user id). A username (`by_key`) is its user's again only with the
-    /// user's current account key (a new phone restored from the backup); with any other it is taken. The account key
-    /// becomes the user's current key and stays the user's forever. The user's earlier devices are replaced.
+    /// user's current account key (a new phone restored from the backup); with any other it is taken, and so is a
+    /// reserved one nobody has. The account key becomes the user's current key and stays the user's forever. The
+    /// user's earlier devices are replaced. `spelling`: a new username as written; a name the user has keeps its own.
     #[allow(clippy::too_many_arguments)]
     pub fn register(
         &self,
         handle_kind: u8,
         handle_value: &[u8],
+        spelling: Option<&str>,
         by_key: bool,
         fresh: &UserId,
         account_key: &Key,
@@ -373,6 +432,9 @@ impl Db {
                 user
             }
             Some(user) => user,
+            None if handle_kind == KIND_USERNAME && is_reserved(&tx, handle_value)? => {
+                return Ok(Write::Refused(Conflict::UsernameTaken));
+            }
             None => *fresh,
         };
         let key_owner: Option<UserId> = tx
@@ -390,8 +452,8 @@ impl Db {
         )?;
         tx.execute("INSERT OR IGNORE INTO account_keys (key, user_id) VALUES (?1, ?2)", params![account_key, user])?;
         tx.execute(
-            "INSERT OR IGNORE INTO handles (kind, value, user_id) VALUES (?1, ?2, ?3)",
-            params![handle_kind, handle_value, user],
+            "INSERT OR IGNORE INTO handles (kind, value, user_id, spelling) VALUES (?1, ?2, ?3, ?4)",
+            params![handle_kind, handle_value, user, spelling],
         )?;
         tx.execute(
             "INSERT INTO devices (id, user_id, device_key, auth_key, push_platform, push_token, created_at, last_seen_at)
@@ -413,36 +475,46 @@ impl Db {
         Ok(Write::Done(user))
     }
 
-    /// Claims a username for a user, giving up its old one; `None` only gives it up.
-    pub fn set_username(&self, user: &UserId, name: Option<&[u8]>) -> rusqlite::Result<Write<()>> {
+    /// Claims a username (its skeleton and its spelling) for a user, giving up its old one; `None` only gives it up.
+    /// The user's own name in another spelling is the user's still, also when it has been reserved since.
+    pub fn set_username(&self, user: &UserId, name: Option<(&[u8], &str)>) -> rusqlite::Result<Write<()>> {
         let mut conn = self.conn();
         let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
-        if let Some(name) = name {
+        if let Some((skeleton, _)) = name {
             let owner: Option<UserId> = tx
                 .prepare_cached("SELECT user_id FROM handles WHERE kind = ?1 AND value = ?2")?
-                .query_row(params![KIND_USERNAME, name], |row| array(row.get(0)?))
+                .query_row(params![KIND_USERNAME, skeleton], |row| array(row.get(0)?))
                 .optional()?;
-            if owner.is_some_and(|owner| owner != *user) {
+            let taken = match owner {
+                Some(owner) => owner != *user,
+                None => is_reserved(&tx, skeleton)?,
+            };
+            if taken {
                 return Ok(Write::Refused(Conflict::UsernameTaken));
             }
         }
         tx.execute("DELETE FROM handles WHERE user_id = ?1 AND kind = ?2", params![user, KIND_USERNAME])?;
-        if let Some(name) = name {
+        if let Some((skeleton, spelling)) = name {
             tx.execute(
-                "INSERT INTO handles (kind, value, user_id) VALUES (?1, ?2, ?3)",
-                params![KIND_USERNAME, name, user],
+                "INSERT INTO handles (kind, value, user_id, spelling) VALUES (?1, ?2, ?3, ?4)",
+                params![KIND_USERNAME, skeleton, user, spelling],
             )?;
         }
         tx.commit()?;
         Ok(Write::Done(()))
     }
 
-    /// Whether a handle (`value` as stored) belongs to anyone: what registration would find taken.
-    pub fn handle_taken(&self, kind: u8, value: &[u8]) -> rusqlite::Result<bool> {
-        self.conn().prepare_cached("SELECT 1 FROM handles WHERE kind = ?1 AND value = ?2")?.exists(params![kind, value])
+    /// Whether a username (by its skeleton) belongs to anyone or is reserved: what registration would find taken.
+    pub fn username_taken(&self, skeleton: &[u8]) -> rusqlite::Result<bool> {
+        self.conn()
+            .prepare_cached(
+                "SELECT 1 FROM handles WHERE kind = ?1 AND value = ?2
+                 UNION ALL SELECT 1 FROM reserved WHERE skeleton = CAST(?2 AS TEXT)",
+            )?
+            .exists(params![KIND_USERNAME, skeleton])
     }
 
-    /// A user by a handle (`value` as stored: a phone number's HMAC, a username in upper case, a user id, an account
+    /// A user by a handle (`value` as stored: a phone number's HMAC, a username by its skeleton, a user id, an account
     /// key, which must be the user's current one): id, account key, devices and, if asked, one KeyPackage for each
     /// device not in `except`, a single-use one while there is one, else the last resort.
     pub fn lookup(&self, kind: u8, value: &[u8], take: bool, except: &[Key]) -> rusqlite::Result<Option<Found>> {
@@ -487,8 +559,14 @@ impl Db {
                 }
             }
         }
+        let username: Option<String> = tx
+            .prepare_cached(
+                "SELECT coalesce(spelling, CAST(value AS TEXT)) FROM handles WHERE user_id = ?1 AND kind = ?2",
+            )?
+            .query_row(params![user, KIND_USERNAME], |row| row.get(0))
+            .optional()?;
         tx.commit()?;
-        Ok(Some(Found { user_id: user, account_key, device_keys, key_packages }))
+        Ok(Some(Found { user_id: user, account_key, device_keys, key_packages, username }))
     }
 
     /// Deletes a device's account (spec 6.3): its user with everything about it (`remove_user`). The device is
@@ -808,7 +886,128 @@ mod tests {
     /// Registers device `n` for a username with account key `key`.
     fn register(db: &Db, name: &[u8], key: u8, n: u8, now: u64) -> Write<UserId> {
         let last_resort = StoredKeyPackage { hash: [n; 32], data: vec![n] };
-        db.register(KIND_USERNAME, name, true, &[n; 16], &[key; 32], &device(n), &[], &last_resort, now).unwrap()
+        let spelling = std::str::from_utf8(name).unwrap();
+        let skeleton = yo_wire::handle::skeleton(spelling);
+        db.register(
+            KIND_USERNAME,
+            skeleton.as_bytes(),
+            Some(spelling),
+            true,
+            &[n; 16],
+            &[key; 32],
+            &device(n),
+            &[],
+            &last_resort,
+            now,
+        )
+        .unwrap()
+    }
+
+    fn reserve(db: &Db, names: &[&str]) -> usize {
+        let names: Vec<Reserved> = names.iter().map(|n| Reserved { spelling: n.to_string(), note: None }).collect();
+        db.seed_reserved(&names, 0).unwrap()
+    }
+
+    /// The spelling a lookup by any spelling of the name answers.
+    fn spelling(db: &Db, name: &str) -> Option<String> {
+        let skeleton = yo_wire::handle::skeleton(name);
+        db.lookup(KIND_USERNAME, skeleton.as_bytes(), false, &[]).unwrap().and_then(|found| found.username)
+    }
+
+    #[test]
+    fn a_username_keeps_its_spelling_and_is_one_name_in_any() {
+        let db = Db::open(":memory:").unwrap();
+        let gpt = user(register(&db, b"YoGPT", 1, 1, 0));
+        for other in ["yogpt", "YOGPT", "Y0GPT", "yoGpt"] {
+            assert!(matches!(register(&db, other.as_bytes(), 2, 2, 0), Write::Refused(Conflict::UsernameTaken)));
+            assert_eq!(spelling(&db, other).as_deref(), Some("YoGPT"), "{other}");
+            assert!(db.username_taken(yo_wire::handle::skeleton(other).as_bytes()).unwrap());
+        }
+        assert_eq!(db.lookup(KIND_USER, &gpt, false, &[]).unwrap().unwrap().username.as_deref(), Some("YoGPT"));
+        // A new phone registering the name in another spelling keeps the spelling the user has.
+        assert_eq!(user(register(&db, b"yogpt", 1, 3, 0)), gpt);
+        assert_eq!(spelling(&db, "YoGPT").as_deref(), Some("YoGPT"));
+        // Its owner may write it otherwise; nobody else may take it.
+        assert!(matches!(db.set_username(&gpt, Some((b"YOGPT", "YOgpt"))).unwrap(), Write::Done(())));
+        assert_eq!(spelling(&db, "yogpt").as_deref(), Some("YOgpt"));
+        let mia = user(register(&db, b"Mia", 4, 4, 0));
+        assert!(matches!(db.set_username(&mia, Some((b"YOGPT", "Y0GPT"))).unwrap(), Write::Refused(_)));
+    }
+
+    #[test]
+    fn reserved_names_are_taken_in_any_spelling_but_stay_their_holders() {
+        let db = Db::open(":memory:").unwrap();
+        let mod_user = user(register(&db, b"Moderator", 1, 1, 0));
+        assert_eq!(reserve(&db, &["Admin", "Moderator", "Support"]), 3);
+        assert_eq!(reserve(&db, &["ADMIN", "Admin", "Help"]), 1, "seeding again adds only what is new");
+        let count: i64 = db.conn().query_row("SELECT count(*) FROM reserved", [], |row| row.get(0)).unwrap();
+        assert_eq!(count, 4);
+        for name in ["admin", "ADMIN", "Adm1n", "ÄDMIN", "help"] {
+            assert!(
+                matches!(register(&db, name.as_bytes(), 2, 2, 0), Write::Refused(Conflict::UsernameTaken)),
+                "{name}"
+            );
+            assert!(db.username_taken(yo_wire::handle::skeleton(name).as_bytes()).unwrap(), "{name}");
+        }
+        let mia = user(register(&db, b"Mia", 3, 3, 0));
+        assert!(matches!(db.set_username(&mia, Some((b"SUPPORT", "support"))).unwrap(), Write::Refused(_)));
+        // Who had the name before it was reserved keeps it: found, registered again on a new phone, written anew.
+        assert_eq!(spelling(&db, "moderator").as_deref(), Some("Moderator"));
+        assert_eq!(user(register(&db, b"Moderator", 1, 4, 0)), mod_user);
+        assert!(matches!(db.set_username(&mod_user, Some((b"MODERATOR", "MODERATOR"))).unwrap(), Write::Done(())));
+    }
+
+    /// A database the hub before spellings made (schema 1 without `handles.spelling`): opened, it gets the column,
+    /// its names are found and shown as their skeleton, and nothing in it is refused.
+    #[test]
+    fn a_database_from_before_spellings_is_migrated() {
+        let path = std::env::temp_dir().join(format!("yo-hub-migrate-{}.sqlite", std::process::id()));
+        let path = path.to_str().unwrap().to_owned();
+        let _ = std::fs::remove_file(&path);
+        {
+            let conn = Connection::open(&path).unwrap();
+            conn.execute_batch(&format!("PRAGMA user_version = {SCHEMA_VERSION}")).unwrap();
+            conn.execute_batch(&SCHEMA.replace("    spelling TEXT,\n", "")).unwrap();
+            conn.execute_batch("DROP TABLE reserved").unwrap();
+            conn.execute(
+                "INSERT INTO users (id, account_key, created_at) VALUES (?1, ?2, 0)",
+                params![[1u8; 16], [1u8; 32]],
+            )
+            .unwrap();
+            conn.execute("INSERT INTO account_keys (key, user_id) VALUES (?1, ?2)", params![[1u8; 32], [1u8; 16]])
+                .unwrap();
+            conn.execute(
+                "INSERT INTO handles (kind, value, user_id) VALUES (?1, ?2, ?3)",
+                params![KIND_USERNAME, b"CHRISTOPHER".to_vec(), [1u8; 16]],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO devices (id, user_id, device_key, auth_key, push_platform, push_token, created_at, last_seen_at)
+                 VALUES (?1, ?2, ?3, ?4, 0, x'', 0, 0)",
+                params![[1u8; 16], [1u8; 16], [1u8; 32], [1u8; 32]],
+            )
+            .unwrap();
+        }
+        let db = Db::open(&path).unwrap();
+        assert_eq!(spelling(&db, "Christopher").as_deref(), Some("CHRISTOPHER"));
+        assert!(matches!(register(&db, b"christopher", 2, 2, 0), Write::Refused(Conflict::UsernameTaken)));
+        drop(db);
+        // Opened again: nothing more to migrate. The user's own key registers it again (a new phone).
+        let db = Db::open(&path).unwrap();
+        assert_eq!(user(register(&db, b"Christopher", 1, 9, 0)), [1; 16]);
+        assert_eq!(spelling(&db, "christopher").as_deref(), Some("CHRISTOPHER"));
+        // The operator's one-off: the spelling the user chose.
+        db.conn()
+            .execute(
+                "UPDATE handles SET spelling = 'Christopher' WHERE kind = 2 AND value = CAST('CHRISTOPHER' AS BLOB)",
+                [],
+            )
+            .unwrap();
+        assert_eq!(spelling(&db, "CHRISTOPHER").as_deref(), Some("Christopher"));
+        drop(db);
+        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_file(format!("{path}-wal"));
+        let _ = std::fs::remove_file(format!("{path}-shm"));
     }
 
     fn user(written: Write<UserId>) -> UserId {
