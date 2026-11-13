@@ -67,7 +67,7 @@ struct Onboarding: View {
         .font(.yo(18))
         .padding(.top, 18)
     }
-    // Hidden, for development: ten quick taps in the top right corner switch between the live and the dev hub.
+    // Hidden, for development: four quick taps in the top right corner switch between the live and the dev hub.
     .overlay(alignment: .topTrailing) {
       Color.clear
         .frame(width: 88, height: 88)
@@ -150,11 +150,11 @@ struct Onboarding: View {
 
   // MARK: Doing
 
-  /// Ten taps within three seconds ask whether to switch hubs.
+  /// Four quick taps (within two seconds) ask whether to switch hubs.
   private func secretTap() {
     let now = Date.now
-    taps = taps.filter { now.timeIntervalSince($0) < 3 } + [now]
-    guard taps.count >= 10 else { return }
+    taps = taps.filter { now.timeIntervalSince($0) < 2 } + [now]
+    guard taps.count >= 4 else { return }
     taps = []
     UINotificationFeedbackGenerator().notificationOccurred(.warning)
     switchingHub = true
