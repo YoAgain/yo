@@ -103,12 +103,7 @@ pub fn check_username(name: &str) -> Result<(), Error> {
 /// first, at most 16. The apps keep their field to this; the hub accepts only names that are already canonical.
 pub fn canonical(typed: &str) -> String {
     let upper: String = typed.to_uppercase().nfc().collect();
-    upper
-        .graphemes(true)
-        .filter(|g| allowed(g))
-        .skip_while(|g| !is_latin_letter(g) && !is_emoji(g))
-        .take(16)
-        .collect()
+    upper.graphemes(true).filter(|g| allowed(g)).skip_while(|g| !is_latin_letter(g) && !is_emoji(g)).take(16).collect()
 }
 
 /// What a username is compared by (spec 3.3): upper case, NFKD, without nonspacing marks, emoji variation selectors
@@ -189,7 +184,8 @@ mod tests {
             assert_eq!(canonical(typed), name, "{typed}");
             assert_eq!(skeleton(name), skel, "{typed}");
         }
-        for (typed, name) in [("1abc", "ABC"), ("_x🔥", "X🔥"), ("abcабв", "ABC"), ("x×y", "XY"), ("🧙‍♂️🔥yo", "🧙‍♂️🔥YO")] {
+        for (typed, name) in [("1abc", "ABC"), ("_x🔥", "X🔥"), ("abcабв", "ABC"), ("x×y", "XY"), ("🧙‍♂️🔥yo", "🧙‍♂️🔥YO")]
+        {
             assert_eq!(canonical(typed), name, "{typed}");
         }
         assert!(check_username("🔥🔥🔥").is_ok());
