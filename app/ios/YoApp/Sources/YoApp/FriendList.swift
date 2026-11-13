@@ -474,8 +474,10 @@ struct FriendList: View {
 
   /// A photo or video on its way: into the outbox, which sends it when the hub takes it (also later, by itself).
   private func go(_ file: MediaFile, to friend: Friend) async {
-    file.keepIfWanted()
-    if await !outbox.send(file, to: friend.user ?? friend.name, accounts: accounts) {
+    Task.detached(priority: .utility) { file.keepIfWanted() }
+    if await outbox.send(file, to: friend.user ?? friend.name, accounts: accounts) {
+      Stats.sentYo(to: friend.name)
+    } else {
       showSent(to: friend, "Not Sent")
     }
   }

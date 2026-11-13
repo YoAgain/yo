@@ -330,6 +330,14 @@ impl YoClient {
         f(&mut self.client.lock().unwrap_or_else(PoisonError::into_inner))
     }
 
+    /// A message, its way to the hub without holding the client where it can (`send_yo`).
+    fn send_content(&self, to: String, content: Content) -> Result<Vec<YoEvent>, YoError> {
+        match self.with(|c| c.send_begin(&to, content.clone())) {
+            Some(deliveries) => self.deliver_from(deliveries),
+            None => events(self.with(|c| c.send(&to, content))),
+        }
+    }
+
     /// Posts deliveries without holding the client, and what may go after them, until done.
     fn deliver_from(&self, mut deliveries: yo_core::Deliveries) -> Result<Vec<YoEvent>, YoError> {
         loop {
@@ -408,10 +416,7 @@ impl YoClient {
     /// To "+49 170 …", "chris", or a user id from an event. In a chat in use, the way to the hub does not hold the
     /// client: other calls run meanwhile, sends to other friends and the inbox's wait among them.
     pub fn send_yo(&self, to: String) -> Result<Vec<YoEvent>, YoError> {
-        match self.with(|c| c.send_begin(&to, Content::Yo)) {
-            Some(deliveries) => self.deliver_from(deliveries),
-            None => events(self.with(|c| c.send_yo(&to))),
-        }
+        self.send_content(to, Content::Yo)
     }
 
     /// Sends again what the hub did not take yet (`waiting`): its limit per sender (`429`) or no network. Without
@@ -549,16 +554,14 @@ impl YoClient {
         Ok(upload.send(&ciphertext)?)
     }
 
-    /// A Yo with a photo whose blob is uploaded.
+    /// A Yo with a photo whose blob is uploaded; on its way like `send_yo`.
     pub fn send_photo(&self, to: String, media: YoMedia) -> Result<Vec<YoEvent>, YoError> {
-        let media = media.try_into()?;
-        events(self.with(|c| c.send(&to, Content::Photo(media))))
+        self.send_content(to, Content::Photo(media.try_into()?))
     }
 
-    /// A Yo with a video whose blob is uploaded.
+    /// A Yo with a video whose blob is uploaded; on its way like `send_yo`.
     pub fn send_video(&self, to: String, media: YoMedia, duration_ms: u32) -> Result<Vec<YoEvent>, YoError> {
-        let media = media.try_into()?;
-        events(self.with(|c| c.send(&to, Content::Video { media, duration_ms })))
+        self.send_content(to, Content::Video { media: media.try_into()?, duration_ms })
     }
 
     /// Fetches a photo or video a Yo carried and opens it, without holding the client; `None` when the hub no longer
