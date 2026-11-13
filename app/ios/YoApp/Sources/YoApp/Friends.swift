@@ -65,6 +65,11 @@ final class Friends {
     all.insert(all.remove(at: index), at: 0)
   }
 
+  /// "Reset Yo": the friends of a new phone.
+  func reset() {
+    all = Self.starting
+  }
+
   func remove(_ friend: Friend) {
     all.removeAll { $0 == friend }
   }

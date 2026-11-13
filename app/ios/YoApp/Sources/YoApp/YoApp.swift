@@ -6,6 +6,7 @@ import UserNotifications
 struct YoApp: App {
   @State private var inbox: Inbox
   @State private var friends = Friends()
+  @State private var accounts = AccountStore()
   @Environment(\.scenePhase) private var phase
   private let notifications: NotificationDelegate
 
@@ -18,9 +19,18 @@ struct YoApp: App {
 
   var body: some Scene {
     WindowGroup {
-      FriendList()
+      // No account yet (or after "Reset Yo"): the way in; then the list.
+      Group {
+        if accounts.account == nil {
+          Onboarding().transition(.opacity)
+        } else {
+          FriendList().transition(.opacity)
+        }
+      }
+      .animation(.smooth(duration: 0.5), value: accounts.account == nil)
         .environment(inbox)
         .environment(friends)
+        .environment(accounts)
         .task {
           await inbox.askForNotifications()
           await yoUpdate()

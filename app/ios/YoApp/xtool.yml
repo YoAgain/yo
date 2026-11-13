@@ -13,3 +13,5 @@ iconPath: AppIcon.png
 resources:
   - Resources/Montserrat-Bold.ttf
   - Resources/yo.caf
+  # The BIP-39 English word list, for the recovery code (spec 7).
+  - Resources/bip39-english.txt

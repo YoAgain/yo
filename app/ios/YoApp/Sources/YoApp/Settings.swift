@@ -11,19 +11,27 @@ enum SettingKey {
 struct SettingsView: View {
   @AppStorage(SettingKey.saveSent) private var saveSent = false
   @Environment(\.dismiss) private var dismiss
+  @Environment(AccountStore.self) private var accounts
+  @Environment(Friends.self) private var friends
+  @State private var resetting = false
 
   var body: some View {
     NavigationStack {
       Form {
         Section {
-          // You: a placeholder until accounts come with the hub.
+          // You: your name, and how your Yo comes back on a new phone.
           HStack(spacing: 14) {
             Image(systemName: "person.crop.circle.fill")
               .font(.system(size: 52))
               .foregroundStyle(.white, Color.amethyst)
             VStack(alignment: .leading, spacing: 2) {
-              Text("You").font(.title3.weight(.semibold))
-              Text("No account yet").foregroundStyle(.secondary)
+              Text(accounts.account?.username ?? "You").font(.yo(24, relativeTo: .title3))
+              Label(
+                accounts.account?.byPasskey == true ? "Saved with a passkey" : "Saved with 12 words",
+                systemImage: accounts.account?.byPasskey == true ? "person.badge.key.fill" : "list.number"
+              )
+              .font(.subheadline)
+              .foregroundStyle(.secondary)
             }
           }
           .padding(.vertical, 4)
@@ -36,6 +44,16 @@ struct SettingsView: View {
           Text("What you send from the camera is saved to your photo library. Nothing you receive is saved.")
         }
         PasskeyTestSection()
+        Section {
+          Button("Reset Yo", systemImage: "arrow.counterclockwise", role: .destructive) { resetting = true }
+        } footer: {
+          Text("This phone forgets your Yo, as a new phone would. Your passkey or your 12 words bring it back.")
+        }
+      }
+      .confirmationDialog("Reset Yo?", isPresented: $resetting, titleVisibility: .visible) {
+        Button("Reset Yo", role: .destructive) { reset() }
+      } message: {
+        Text("Everything on this phone goes. Your passkey or your 12 words bring your name back.")
       }
       .navigationTitle("Profile")
       .navigationBarTitleDisplayMode(.inline)
@@ -53,6 +71,16 @@ struct SettingsView: View {
         }
       }
     }
+  }
+}
+
+extension SettingsView {
+  /// Everything of this app on this phone goes (settings, friends, the account), not the simulated hub's backups.
+  fileprivate func reset() {
+    if let domain = Bundle.main.bundleIdentifier { UserDefaults.standard.removePersistentDomain(forName: domain) }
+    friends.reset()
+    dismiss()
+    accounts.reset()
   }
 }
 

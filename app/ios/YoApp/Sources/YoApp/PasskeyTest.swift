@@ -1,15 +1,10 @@
-// A test of passkeys with the PRF extension (spec 7), from the settings: make a passkey for hub.justyo.app, then ask
-// it again and see that its PRF output is the same each time. The account backup will rest on exactly that.
-// Only a fingerprint of the output is shown and kept, never the output itself.
-import AuthenticationServices
+// A test of passkeys with the PRF extension (spec 7), from the settings: make a passkey, then ask it again and see
+// that its PRF output is the same each time. Only a fingerprint of the output is shown and kept, never the output.
 import CryptoKit
 import SwiftUI
 
 @MainActor @Observable
-final class PasskeyTest: NSObject {
-  /// The relying party: the domain whose apple-app-site-association names this app (YoApp/Entitlements.plist).
-  static let domain = "hub.justyo.app"
-
+final class PasskeyTest {
   private(set) var log: [String] = []
   private(set) var busy = false
   var hasPasskey: Bool { defaults.data(forKey: Key.credential) != nil }
@@ -21,49 +16,34 @@ final class PasskeyTest: NSObject {
   }
 
   private let defaults = UserDefaults.standard
-  private var pending: CheckedContinuation<ASAuthorization, Error>?
+  private let passkeys = Passkeys()
 
-  /// A new passkey; asks whether it can do PRF.
   func create() async {
     busy = true
     defer { busy = false }
-    let provider = ASAuthorizationPlatformPublicKeyCredentialProvider(relyingPartyIdentifier: Self.domain)
-    let request = provider.createCredentialRegistrationRequest(
-      challenge: Self.random(32), name: "Yo PRF test", userID: Self.random(16))
-    request.prf = .checkForSupport
     do {
-      let result = try await perform(request)
-      guard let made = result.credential as? ASAuthorizationPlatformPublicKeyCredentialRegistration else {
-        return note("Unexpected answer")
-      }
-      defaults.set(made.credentialID, forKey: Key.credential)
-      defaults.set(Self.random(32), forKey: Key.salt)
+      let credential = try await passkeys.make(name: "Yo PRF test", userID: Passkeys.random(16))
+      defaults.set(credential, forKey: Key.credential)
+      defaults.set(Passkeys.random(32), forKey: Key.salt)
       defaults.removeObject(forKey: Key.fingerprint)
-      note("Passkey made · PRF \(made.prf?.isSupported == true ? "supported ✓" : "not supported ✗")")
+      note("Passkey made · now Check PRF")
     } catch {
       note("Make failed: \(error.localizedDescription)")
     }
   }
 
-  /// Asks the passkey for its PRF output on the same salt; the first time keeps its fingerprint, every later time
-  /// compares.
+  /// The PRF output on the same salt: the first time its fingerprint is kept, every later time compared.
   func check() async {
     guard let credential = defaults.data(forKey: Key.credential), let salt = defaults.data(forKey: Key.salt) else {
       return note("Make a passkey first")
     }
     busy = true
     defer { busy = false }
-    let provider = ASAuthorizationPlatformPublicKeyCredentialProvider(relyingPartyIdentifier: Self.domain)
-    let request = provider.createCredentialAssertionRequest(challenge: Self.random(32))
-    request.allowedCredentials = [ASAuthorizationPlatformPublicKeyCredentialDescriptor(credentialID: credential)]
-    request.prf = .inputValues(.init(saltInput1: salt))
     do {
-      let result = try await perform(request)
-      guard let assertion = result.credential as? ASAuthorizationPlatformPublicKeyCredentialAssertion,
-        let output = assertion.prf?.first
-      else { return note("No PRF output ✗") }
-      let print = output.withUnsafeBytes { SHA256.hash(data: Data($0)) }.prefix(6)
-        .map { String(format: "%02x", $0) }.joined()
+      guard let output = try await passkeys.ask(salt: salt, only: credential).prf else {
+        return note("No PRF output ✗")
+      }
+      let print = SHA256.hash(data: output).prefix(6).map { String(format: "%02x", $0) }.joined()
       switch defaults.string(forKey: Key.fingerprint) {
       case nil:
         defaults.set(print, forKey: Key.fingerprint)
@@ -80,45 +60,11 @@ final class PasskeyTest: NSObject {
 
   func forget() {
     for key in [Key.credential, Key.salt, Key.fingerprint] { defaults.removeObject(forKey: key) }
-    note("Forgotten here (the passkey stays in Passwords)")
+    note("Forgotten here (the passkey stays in your password manager)")
   }
 
   private func note(_ line: String) {
     log.insert("\(Date.now.formatted(date: .omitted, time: .standard))  \(line)", at: 0)
-  }
-
-  private func perform(_ request: ASAuthorizationRequest) async throws -> ASAuthorization {
-    try await withCheckedThrowingContinuation { continuation in
-      pending = continuation
-      let controller = ASAuthorizationController(authorizationRequests: [request])
-      controller.delegate = self
-      controller.presentationContextProvider = self
-      controller.performRequests()
-    }
-  }
-
-  private static func random(_ count: Int) -> Data {
-    Data((0..<count).map { _ in UInt8.random(in: .min ... .max) })
-  }
-}
-
-extension PasskeyTest: ASAuthorizationControllerDelegate, ASAuthorizationControllerPresentationContextProviding {
-  func authorizationController(controller: ASAuthorizationController, didCompleteWithAuthorization authorization: ASAuthorization) {
-    pending?.resume(returning: authorization)
-    pending = nil
-  }
-
-  func authorizationController(controller: ASAuthorizationController, didCompleteWithError error: Error) {
-    pending?.resume(throwing: error)
-    pending = nil
-  }
-
-  func presentationAnchor(for controller: ASAuthorizationController) -> ASPresentationAnchor {
-    let scenes = UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }
-    let windows = scenes.flatMap(\.windows)
-    if let window = windows.first(where: \.isKeyWindow) ?? windows.first { return window }
-    guard let scene = scenes.first else { preconditionFailure("a passkey sheet with no window to show it in") }
-    return ASPresentationAnchor(windowScene: scene)
   }
 }
 
@@ -141,8 +87,9 @@ struct PasskeyTestSection: View {
       Text("Passkey PRF Test")
     } footer: {
       Text(
-        "Makes a passkey for \(PasskeyTest.domain) and checks that its PRF output is the same every time: the account "
-          + "backup will rely on it. Check twice; the second time should say \"the same\"."
+        "Makes a passkey for \(Passkeys.domain) and checks that its PRF output is the same every time. Check twice; "
+          + "the second time should say \"the same\". What a password manager says about PRF when it makes the "
+          + "passkey does not count."
       )
     }
     .disabled(test.busy)
