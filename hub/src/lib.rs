@@ -155,6 +155,17 @@ impl Hub {
         if self.config.open_registration {
             router = router.route(api::REGISTER, post(register));
         }
+        if !self.config.apple_app_ids.is_empty() {
+            // Which apps may make passkeys for this domain (Apple reads it through its CDN; spec 7).
+            let file = serde_json::json!({ "webcredentials": { "apps": self.config.apple_app_ids } }).to_string();
+            router = router.route(
+                "/.well-known/apple-app-site-association",
+                get(move || {
+                    let file = file.clone();
+                    async move { ([(axum::http::header::CONTENT_TYPE, "application/json")], file) }
+                }),
+            );
+        }
         router.layer(DefaultBodyLimit::max(limits::MAX_BODY)).with_state(self.clone())
     }
 

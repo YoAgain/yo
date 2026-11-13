@@ -35,6 +35,7 @@ struct SettingsView: View {
         } footer: {
           Text("What you send from the camera is saved to your photo library. Nothing you receive is saved.")
         }
+        PasskeyTestSection()
       }
       .navigationTitle("Profile")
       .navigationBarTitleDisplayMode(.inline)

@@ -5,6 +5,7 @@
 //!   YO_PHONE_SECRET       64 hex digits: the key of the phone HMAC (required)
 //!   YO_TRUST_CLOUDFLARE   1: take the client address from CF-Connecting-IP
 //!   YO_OPEN_REGISTRATION  1: accounts without a number (POST /v1/register): tests and bots, not a public hub
+//!   YO_APPLE_APP_IDS      TEAMID.bundle.id, comma-separated: apps that may make passkeys for this hub's domain
 //!   YO_SMS                "twilio" or "dev:<code>" (default dev:000000, never in production)
 //!   YO_TWILIO_ACCOUNT_SID, YO_TWILIO_AUTH_TOKEN, YO_TWILIO_SERVICE_SID
 //!   YO_APNS_KEY_FILE, YO_APNS_KEY_ID, YO_APNS_TEAM_ID, YO_APNS_TOPIC
@@ -63,6 +64,9 @@ fn config() -> Result<(Config, String), String> {
         phone_secret,
         trust_cloudflare: var("YO_TRUST_CLOUDFLARE").as_deref() == Some("1"),
         open_registration: var("YO_OPEN_REGISTRATION").as_deref() == Some("1"),
+        apple_app_ids: var("YO_APPLE_APP_IDS")
+            .map(|ids| ids.split(',').map(|id| id.trim().to_string()).filter(|id| !id.is_empty()).collect())
+            .unwrap_or_default(),
         limits: Limits::default(),
         sms,
         apns,

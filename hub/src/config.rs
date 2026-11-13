@@ -97,6 +97,9 @@ pub struct Config {
     pub trust_cloudflare: bool,
     /// `POST /v1/register`: accounts without a number (spec 6.4). Off unless switched on.
     pub open_registration: bool,
+    /// Apps allowed to make passkeys for this hub's domain (`TEAMID.bundle.id`), served as
+    /// `/.well-known/apple-app-site-association`; none, no such file.
+    pub apple_app_ids: Vec<String>,
     pub limits: Limits,
     pub sms: SmsConfig,
     pub apns: Option<ApnsConfig>,
@@ -112,6 +115,7 @@ impl Config {
             phone_secret: [7; 32],
             trust_cloudflare: false,
             open_registration: true,
+            apple_app_ids: Vec::new(),
             limits: Limits::unlimited(),
             sms: SmsConfig::Dev { code: "000000".into() },
             apns: None,

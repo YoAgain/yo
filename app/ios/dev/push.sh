@@ -18,6 +18,6 @@ PATH="$(dirname "$(readlink -f "$(command -v swift)")"):$HOME/.local/bin:$PATH"
 cd "$app"
 xtool dev build --configuration release   # optimised: SwiftUI in debug is noticeably slower
 mkdir -p build
-"$OAD/tools/sign-dev.sh" xtool/YoApp.app build/YoApp.ipa
+"$here/sign.sh" xtool/YoApp.app build/YoApp.ipa   # the app's own entitlements on top of the profile's
 bundle=$(python3 -I -c 'import plistlib,sys; print(plistlib.load(open(sys.argv[1],"rb"))["CFBundleIdentifier"])' xtool/YoApp.app/Info.plist)
 "${PY:-$HOME/pymobile3-venv/bin/python}" -I "$here/wireless.py" "$PHONE" build/YoApp.ipa "$bundle"
