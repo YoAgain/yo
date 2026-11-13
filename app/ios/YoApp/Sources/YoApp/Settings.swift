@@ -85,7 +85,7 @@ struct SettingsView: View {
               }
             } footer: {
               // Kept in the iCloud Keychain already (SyncedAccount): the passkey and words are for life without it.
-              Text("Saved in iCloud Keychain. Secure it too, in case you leave Apple or lose your Apple Account.")
+              Text("Secure your account to keep your name “\(account.username)” forever.")
             }
           }
           // Two groups: Account (security, signing out, deleting) and Blocked; then Statistics and Appearance.
@@ -265,7 +265,7 @@ struct SettingsView: View {
         }
       } else {
         Button { secure(.passkey) } label: {
-          SecurityRow(icon: "faceid", color: .orange, title: "Passkey and Face ID", value: "Set Up")
+          SecurityRow(icon: "faceid", color: .orange, title: "Passkey and Face ID", value: "Off")
         }
       }
       if wordsDone {
@@ -279,7 +279,7 @@ struct SettingsView: View {
         }
       } else {
         Button { secure(.words) } label: {
-          SecurityRow(icon: "key.fill", color: .orange, title: "Recovery Key", value: "Save")
+          SecurityRow(icon: "key.fill", color: .orange, title: "Recovery Key", value: "Not Saved")
         }
       }
     }
@@ -935,9 +935,10 @@ private struct SecurityRow: View {
       .labelStyle(Tile(color))
       Spacer()
       Text(value).foregroundStyle(Color(.secondaryLabel))
-      if done {
-        Image(systemName: "checkmark.circle.fill").foregroundStyle(.green).accessibilityHidden(true)
-      }
+      // Done: a green check; not yet: an empty circle, the step still to take.
+      Image(systemName: done ? "checkmark.circle.fill" : "circle")
+        .foregroundStyle(done ? Color.green : Color(.tertiaryLabel))
+        .accessibilityHidden(true)
       if chevron { Chevron() }
     }
   }
