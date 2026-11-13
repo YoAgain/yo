@@ -85,7 +85,7 @@ struct SettingsView: View {
               Text("Keep your name “\(account.username)” forever.")
             }
           }
-          // One list: Account (security, signing out, deleting), Statistics, Blocked.
+          // Two groups: Account (security, signing out, deleting) and Blocked; then Statistics and Appearance.
           Section {
             NavigationLink {
               accountPage(account)
@@ -103,6 +103,17 @@ struct SettingsView: View {
               }
             }
             NavigationLink {
+              BlockedList()
+            } label: {
+              HStack {
+                Label("Blocked", systemImage: "hand.raised.fill").labelStyle(Tile(.red))
+                Spacer()
+                Text("\(friends.blocked.count)").foregroundStyle(Color(.secondaryLabel))
+              }
+            }
+          }
+          Section {
+            NavigationLink {
               StatsPage()
             } label: {
               HStack {
@@ -112,13 +123,9 @@ struct SettingsView: View {
               }
             }
             NavigationLink {
-              BlockedList()
+              AppearancePage()
             } label: {
-              HStack {
-                Label("Blocked", systemImage: "hand.raised.fill").labelStyle(Tile(.red))
-                Spacer()
-                Text("\(friends.blocked.count)").foregroundStyle(Color(.secondaryLabel))
-              }
+              Label("Appearance", systemImage: "paintbrush.fill").labelStyle(Tile(.blue))
             }
           }
         }
@@ -978,5 +985,51 @@ struct NameCodeSheet: View {
       }
     }
     .presentationDetents([.medium, .large])
+  }
+}
+
+/// Appearance: the app icon, chosen by its picture alone. The default, its negative, and the original Yo's plain
+/// purple square (Info.plist CFBundleAlternateIcons).
+struct AppearancePage: View {
+  @State private var current = UIApplication.shared.alternateIconName
+
+  private let icons: [(name: String?, image: String)] = [
+    (nil, "IconStandard"), ("Negative", "IconNegative"), ("Original", "IconOriginal"),
+  ]
+
+  var body: some View {
+    Form {
+      Section("App Icon") {
+        HStack(spacing: 22) {
+          ForEach(icons, id: \.image) { icon in
+            Button {
+              guard current != icon.name else { return }
+              Task {
+                try? await UIApplication.shared.setAlternateIconName(icon.name)
+                current = UIApplication.shared.alternateIconName
+              }
+            } label: {
+              VStack(spacing: 8) {
+                Image(uiImage: UIImage(named: icon.image) ?? UIImage())
+                  .resizable()
+                  .frame(width: 64, height: 64)
+                  .clipShape(.rect(cornerRadius: 15, style: .continuous))
+                  .overlay(
+                    RoundedRectangle(cornerRadius: 15, style: .continuous).strokeBorder(Color(.separator), lineWidth: 0.5))
+                Image(systemName: current == icon.name ? "checkmark.circle.fill" : "circle")
+                  .foregroundStyle(current == icon.name ? Color.amethyst : Color(.tertiaryLabel))
+              }
+            }
+            .buttonStyle(.plain)
+            .accessibilityLabel(icon.name ?? "Default")
+            .accessibilityAddTraits(current == icon.name ? .isSelected : [])
+          }
+        }
+        .frame(maxWidth: .infinity)
+        .padding(.vertical, 8)
+      }
+    }
+    .navigationTitle("Appearance")
+    .navigationBarTitleDisplayMode(.inline)
   }
 }

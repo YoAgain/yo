@@ -4,21 +4,50 @@
 <dict>
 	<key>CFBundleDisplayName</key>
 	<string>Yo</string>
+	<key>CFBundleIcons</key>
+	<dict>
+		<key>CFBundleAlternateIcons</key>
+		<dict>
+			<key>Negative</key>
+			<dict>
+				<key>CFBundleIconFiles</key>
+				<array>
+					<string>IconNegative</string>
+				</array>
+			</dict>
+			<key>Original</key>
+			<dict>
+				<key>CFBundleIconFiles</key>
+				<array>
+					<string>IconOriginal</string>
+				</array>
+			</dict>
+		</dict>
+		<key>CFBundlePrimaryIcon</key>
+		<dict>
+			<key>CFBundleIconFiles</key>
+			<array>
+				<string>AppIcon</string>
+			</array>
+			<key>CFBundleIconName</key>
+			<string>AppIcon</string>
+		</dict>
+	</dict>
 	<key>NSCameraUsageDescription</key>
 	<string>Yo uses the camera so you can send photos and videos to friends and scan your recovery key to sign in.</string>
 	<key>NSFaceIDUsageDescription</key>
 	<string>Yo uses Face ID to verify your identity before showing your recovery key.</string>
 	<key>NSPhotoLibraryAddUsageDescription</key>
 	<string>Yo saves your recovery key to Photos when you choose, and saves photos and videos you send when Keep Sent Photos is on.</string>
-	<key>UISupportedInterfaceOrientations</key>
-	<array>
-		<string>UIInterfaceOrientationPortrait</string>
-	</array>
 	<key>UIAppFonts</key>
 	<array>
 		<string>Montserrat-Bold.ttf</string>
 	</array>
 	<key>UIStatusBarStyle</key>
 	<string>UIStatusBarStyleLightContent</string>
+	<key>UISupportedInterfaceOrientations</key>
+	<array>
+		<string>UIInterfaceOrientationPortrait</string>
+	</array>
 </dict>
 </plist>
