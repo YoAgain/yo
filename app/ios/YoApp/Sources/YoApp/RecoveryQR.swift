@@ -8,9 +8,12 @@ import VisionKit
 
 enum RecoveryQR {
   /// The words as a QR code: black on white, sharp at any size.
-  static func image(_ words: [String]) -> UIImage? {
+  static func image(_ words: [String]) -> UIImage? { image(text: words.joined(separator: " ")) }
+
+  /// Any text as a QR code: black on white, sharp at any size.
+  static func image(text: String) -> UIImage? {
     let filter = CIFilter.qrCodeGenerator()
-    filter.message = Data(words.joined(separator: " ").utf8)
+    filter.message = Data(text.utf8)
     filter.correctionLevel = "M"
     guard let code = filter.outputImage?.transformed(by: CGAffineTransform(scaleX: 12, y: 12)),
       let cg = CIContext().createCGImage(code, from: code.extent)

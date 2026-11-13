@@ -35,6 +35,7 @@ struct SettingsView: View {
   @State private var securing = false
   @State private var securingStart: SecureStep?
   @State private var showingWords = false
+  @State private var showingCode = false
   @State private var turningOffPasskey = false
   @State private var renewingWords = false
   @State private var confirmingDelete = false
@@ -45,14 +46,33 @@ struct SettingsView: View {
     NavigationStack {
       Form {
         if let account = accounts.account {
-          // You, at the top: the picture and the name; it opens your account (security, deleting it), with
-          // the badge while something is left to secure.
+          // You, at the top: a picture (your initial, as Signal makes one), your name, and your code to show.
+          Section {
+            HStack(spacing: 14) {
+              Avatar(name: account.username, size: 56)
+              Text(account.username)
+                .font(.yo(26, relativeTo: .title2))
+                .lineLimit(1)
+                .minimumScaleFactor(0.6)
+              Spacer()
+              Button { showingCode = true } label: {
+                Image(systemName: "qrcode")
+                  .font(.title2)
+                  .frame(width: 44, height: 44)
+              }
+              .buttonStyle(.borderless)
+              .accessibilityLabel("Show Your Code")
+            }
+            .padding(.vertical, 4)
+          }
+          // Account: its security, signing out, deleting it; the badge while something is left to secure.
           Section {
             NavigationLink {
               accountPage(account)
             } label: {
               HStack {
-                profileRow(account)
+                Label("Account", systemImage: "person.fill")
+                  .labelStyle(Tile(accounts.toDo > 0 ? .orange : .gray))
                 Spacer()
                 if accounts.toDo > 0 { CountBadge(count: accounts.toDo) }
               }
@@ -76,25 +96,9 @@ struct SettingsView: View {
         }
 
         // "Keep Sent Photos" comes back with the camera mode, once the core carries photos and videos (spec 5).
-
-        // At the end of the list, red, on its own; the dialog says what happens.
-        Section {
-          Button("Sign Out", role: .destructive) { resetting = true }
-            .frame(maxWidth: .infinity)
-            .disabled(addingPasskey || deletingAccount)
-        }
       }
-      // Not secured all the way: the guide first, signing out anyway second.
-      .confirmationDialog("Sign Out?", isPresented: $resetting, titleVisibility: .visible) {
-        if accounts.toDo > 0 {
-          Button("Secure Your Account") { secure(nil) }
-          Button("Sign Out Anyway", role: .destructive) { reset() }
-        } else {
-          Button("Sign Out", role: .destructive) { reset() }
-        }
-        Button("Cancel", role: .cancel) {}
-      } message: {
-        Text(resetMessage)
+      .sheet(isPresented: $showingCode) {
+        if let account = accounts.account { NameCodeSheet(name: account.username) }
       }
       .navigationTitle("Profile")
       .navigationBarTitleDisplayMode(.inline)
@@ -134,28 +138,16 @@ struct SettingsView: View {
     .tint(Color.amethyst)
   }
 
-  /// A small picture and the name, with whether the account is secured.
-  private func profileRow(_ account: Account) -> some View {
-    HStack(spacing: 14) {
-      Image(systemName: "person.crop.circle.fill")
-        .font(.system(size: 44))
-        .foregroundStyle(.white, Color.amethyst)
-        .accessibilityHidden(true)
-      VStack(alignment: .leading, spacing: 2) {
-        Text(account.username)
-          .font(.yo(24, relativeTo: .title3))
-        Text(account.secured ? "Account Secured" : "Account Not Secured")
-          .font(.subheadline)
-          .foregroundStyle(.secondary)
-      }
-    }
-    .padding(.vertical, 2)
-  }
-
-  /// Your account: its security (passkey and recovery key), and below, deleting it (App Review 5.1.1(v)).
+  /// Your account: its security (passkey and recovery key), then signing out and, below, deleting it (App Review
+  /// 5.1.1(v)).
   private func accountPage(_ account: Account) -> some View {
     Form {
       securitySection(account)
+      Section {
+        Button("Sign Out", role: .destructive) { resetting = true }
+          .frame(maxWidth: .infinity)
+          .disabled(addingPasskey || deletingAccount)
+      }
       Section {
         Button("Delete Account", role: .destructive) { confirmingDelete = true }
           .frame(maxWidth: .infinity)
@@ -164,6 +156,18 @@ struct SettingsView: View {
     }
     .navigationTitle("Account")
     .navigationBarTitleDisplayMode(.inline)
+    // Not secured all the way: the guide first, signing out anyway second.
+    .confirmationDialog("Sign Out?", isPresented: $resetting, titleVisibility: .visible) {
+      if accounts.toDo > 0 {
+        Button("Secure Your Account") { secure(nil) }
+        Button("Sign Out Anyway", role: .destructive) { reset() }
+      } else {
+        Button("Sign Out", role: .destructive) { reset() }
+      }
+      Button("Cancel", role: .cancel) {}
+    } message: {
+      Text(resetMessage)
+    }
     .confirmationDialog("Delete Account?", isPresented: $confirmingDelete, titleVisibility: .visible) {
       Button("Delete Account", role: .destructive) { Task { await deleteAccount() } }
       Button("Cancel", role: .cancel) {}
@@ -858,5 +862,58 @@ private struct SecurityDialogs: ViewModifier {
       } message: {
         Text("Your current 12 words will stop working.")
       }
+  }
+}
+
+/// A picture for someone without one, as Signal makes it: the first letter of the name on a colour of the list's,
+/// the same for the same name on every phone.
+struct Avatar: View {
+  let name: String
+  var size: CGFloat = 44
+
+  var body: some View {
+    let seed = Username.skeleton(name).unicodeScalars.reduce(0) { $0 &+ Int($1.value) }
+    Circle()
+      .fill(Color.row(seed))
+      .frame(width: size, height: size)
+      .overlay {
+        Text(name.first.map { String($0).uppercased() } ?? "?")
+          .font(.yo(size * 0.45))
+          .foregroundStyle(.white)
+      }
+      .accessibilityHidden(true)
+  }
+}
+
+/// Your code, big: a friend's camera reads it to add you. It holds your link (justyo.co/NAME).
+struct NameCodeSheet: View {
+  let name: String
+  @Environment(\.dismiss) private var dismiss
+
+  var body: some View {
+    NavigationStack {
+      VStack(spacing: 20) {
+        Spacer()
+        if let image = RecoveryQR.image(text: "https://justyo.co/\(name)") {
+          Image(uiImage: image)
+            .interpolation(.none)
+            .resizable()
+            .scaledToFit()
+            .frame(width: 240, height: 240)
+            .padding(16)
+            .background(.white, in: .rect(cornerRadius: 22))
+            .accessibilityLabel("QR code for \(name)")
+        }
+        Text(name).font(.yo(30, relativeTo: .title))
+        Spacer()
+      }
+      .frame(maxWidth: .infinity)
+      .navigationTitle("Your Code")
+      .navigationBarTitleDisplayMode(.inline)
+      .toolbar {
+        ToolbarItem(placement: .confirmationAction) { Button("Done") { dismiss() } }
+      }
+    }
+    .presentationDetents([.medium, .large])
   }
 }
