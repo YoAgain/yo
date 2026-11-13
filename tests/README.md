@@ -6,7 +6,7 @@ pinned toolchain (Docker); `cargo` works the same where Rust 1.99.1 is installed
 | File | What it shows |
 |---|---|
 | `core/wire` unit tests | Formats round-trip; parsers refuse every changed byte and never panic (proptest) |
-| `tests/scenarios.rs` | The protocol end to end: Yo there and back, a new phone in the same chat (with a new key, and with the same key), a verified contact held until confirmed, accounts without a number, account keys bound to their user, a copied registration refused, long poll, updates after 100 messages and after a week, simultaneous commits ordered by the hub, two chats started at once, a new phone (new identity, closed chat dropped after 31 days), KeyPackages running out and the last resort, a replayed signed request, a forged commit, garbage in a mailbox, blocking, app restart from the sealed state, the outbox through a hub outage, garbage on every route (never a 5xx), registration without the right code |
+| `tests/scenarios.rs` | The protocol end to end: Yo there and back, a new phone in the same chat (with a new key, and with the same key), a verified contact held until confirmed, accounts by username (lookalike names taken), a new phone restoring a username with its account key, backups by user id and by locator, names not secured released after 90 days, registration and backup fetches limited per address, account keys bound to their user, a copied registration refused, long poll, updates after 100 messages and after a week, simultaneous commits ordered by the hub, two chats started at once, a new phone (new identity, closed chat dropped after 31 days), KeyPackages running out and the last resort, a replayed signed request, a forged commit, garbage in a mailbox, blocking, app restart from the sealed state, the outbox through a hub outage, garbage on every route (never a 5xx), registration without the right code |
 | `tests/simulation.rs` | Seeded random runs (sends, syncs, clock jumps, re-registrations): every message arrives exactly once, nothing is dropped, both sides of every chat agree on the epoch. And 200 clients at once |
 | `tests/robustness.rs` | A commit, and a repair, whose answer was lost is repeated and settled; KeyPackages whose upload answer was lost still open chats; a commit lost to the peer is dropped cleanly; a crash after processing (lost ack) loses and repeats nothing; a passing 429 does not drop a Welcome; a stranger can fill a mailbox only until it is read and cannot rate-limit it; the hub repeats an accepted commit and nothing else; private keys of dead KeyPackages are deleted |
 | `tests/push.rs` | APNs and FCM requests exactly as sent, with nothing in them but "there is mail"; dead tokens are forgotten |
@@ -64,3 +64,20 @@ keeping, so a regression shows against them.
 Yops: Yos delivered per second, the only benchmark unit that says what it measures. Runs before the last three
 had the database in the temp dir, which is tmpfs here: in RAM. `YO_LOAD_DB` puts it elsewhere (a path, or
 `:memory:`). The bound is the one writer thread; a real disk costs about a third.
+
+### Registration and backups
+
+```sh
+dev/cargo run --release -p yo-tests --bin yo-register -- --accounts 200 --threads 16 --races 20 [--url http://…]
+```
+
+Accounts registered by username at once with the real core (each with 51 KeyPackages); races of four for one name
+(`LEO…` twice, `LE0…`, `LÉO…`: exactly one wins, three get `409`); the per-address limit (`429` on the 11th
+registration and the 11th backup fetch); backups stored and fetched by user id and by locator, a replaced locator
+finding nothing, a taken one `409`; new phones registering again with their account key (the same user id, the old
+phone `410`); malformed bodies `400`, an oversized one `413`. A failed check makes the exit status 1.
+
+| Run | Registered | p50 / p99 | Races | Backups stored / fetched | Again with the key |
+|---|---|---|---|---|---|
+| 2026-11-13, 16 cores, 200 accounts | 390/s | 39 / 63 ms | 20 of 20 one winner | 4,968/s / 30,172/s | 321/s |
+| 2026-11-13, 16 cores, 2000 accounts | 313/s | 47 / 87 ms | 50 of 50 one winner | 6,017/s / 26,548/s | 226/s |

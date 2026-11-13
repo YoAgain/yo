@@ -9,6 +9,10 @@ description = "Scenario, chaos and load tests: a real hub and real clients over 
 name = "yo-load"
 path = "src/load.rs"
 
+[[bin]]
+name = "yo-register"
+path = "src/register.rs"
+
 [dependencies]
 yo-wire = { path = "../core/wire" }
 yo-core = { path = "../core/mls", features = ["testing"] }
