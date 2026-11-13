@@ -85,7 +85,7 @@ struct Onboarding: View {
     let free = checked[Username.skeleton(name)]  // the hub's answer: true free, false taken, nil not yet
     let taken = name.count >= 3 && free == false
     let trouble = Username.problem(name) ?? (taken ? "taken" : nil)
-    let mine = taken && !Username.isReserved(name)
+    let mine = taken  // or reserved: only the hub knows, and signing in with a name not one's own just fails
     return Page(title: "Choose a Name", back: { go(.welcome) }) {
       NameField(name: $name, mark: trouble == nil && free == true ? .available : taken ? .taken : nil,
         shakes: shakes, onSubmit: { Task { await register() } })
@@ -281,7 +281,7 @@ struct Note: View {
   }
 }
 
-/// A name as Yo writes them: large, in upper case, only what a username may hold.
+/// A name as its owner writes it: large, only what a username may hold.
 private struct NameField: View {
   @Binding var name: String
   /// At the end of the field: a green checkmark when the name is free, a red cross when it is taken.
@@ -296,7 +296,7 @@ private struct NameField: View {
     TextField("", text: $name, prompt: Text("Name").foregroundStyle(.white.opacity(0.3)))
       .font(.yo(34))
       .multilineTextAlignment(.center)
-      .textInputAutocapitalization(.characters)
+      .textInputAutocapitalization(.words)
       .autocorrectionDisabled()
       .submitLabel(.continue)
       .focused($focused)

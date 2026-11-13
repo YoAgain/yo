@@ -27,26 +27,22 @@ struct Account: Codable, Equatable {
   var secured: Bool { byPasskey || byCode == true }
 }
 
-/// Usernames (spec 3.3): Latin letters (accents and umlauts too), digits, `_` and emoji; shown in upper case. Two
-/// names that look alike are one name: they are compared by their skeleton.
+/// Usernames (spec 3.3): Latin letters (accents and umlauts too), digits, `_` and emoji; kept and shown as their owner
+/// writes them ("YoGPT"). Two names that look alike are one name: they are compared by their skeleton, so "yogpt" and
+/// "Y0GPT" are "YoGPT". Which names are reserved only the hub knows: to the app they are taken.
 enum Username {
-  static let reserved: Set<String> = ["YO", "ADMIN", "YOAGAIN", "SUPPORT", "HELP", "ROOT", "JUSTYO"]
-
   /// What is wrong with a name, nil when it is fine.
   static func problem(_ name: String) -> String? {
     if name.count < 3 { return "Use at least 3 characters." }
     if name.count > 16 { return "Use no more than 16 characters." }
     if let first = name.first, !isLatinLetter(first), !isEmoji(first) { return "Start with a letter or emoji." }
-    if isReserved(name) { return "That name is taken. Try another." }
     return nil
   }
 
-  static func isReserved(_ name: String) -> Bool { reserved.contains(skeleton(name)) }
-
-  /// What may be typed: the allowed characters, in upper case, a letter or emoji first, at most 16. So the field
+  /// What may be typed: the allowed characters, as typed (NFC), a letter or emoji first, at most 16. So the field
   /// itself keeps the rules, and only "too short" and "taken" are left to show.
   static func clean(_ typed: String) -> String {
-    let allowed = typed.uppercased().precomposedStringWithCanonicalMapping.filter {
+    let allowed = typed.precomposedStringWithCanonicalMapping.filter {
       isLatinLetter($0) || ("0"..."9").contains($0) || $0 == "_" || isEmoji($0)
     }
     return String(allowed.drop(while: { !isLatinLetter($0) && !isEmoji($0) }).prefix(16))
