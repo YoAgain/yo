@@ -25,7 +25,9 @@ struct Onboarding: View {
   /// Continue tapped with a name too short: the minimum shows, the field shakes (once per tap).
   @State private var tooShort = false
   @State private var shakes = 0
-  @State private var devHub = Hub.usesDev
+  @AppStorage("hub.dev") private var devHub = false
+  @State private var switchingHub = false
+  @State private var taps: [Date] = []
   /// The last name the hub said is taken (409): the field shows the red cross while it is typed.
   @State private var takenName: String?
 
@@ -61,17 +63,27 @@ struct Onboarding: View {
         .opacity(0.85)
       Spacer()
       PrimaryButton("Start") { go(.name) }
-      HStack(spacing: 28) {
-        Button("Sign In") { go(.logIn) }
-        // While Yo is in development: the dev hub instead of the live one, for this phone's next account.
-        Button(devHub ? "Dev Server" : "Switch to Dev Server") {
-          devHub.toggle()
-          Hub.usesDev = devHub
-        }
-        .opacity(devHub ? 1 : 0.6)
+      Button("Sign In") { go(.logIn) }
+        .font(.yo(18))
+        .padding(.top, 18)
+    }
+    // Hidden, for development: ten quick taps in the top right corner switch between the live and the dev hub.
+    .overlay(alignment: .topTrailing) {
+      Color.clear
+        .frame(width: 88, height: 88)
+        .contentShape(.rect)
+        .onTapGesture { secretTap() }
+        .accessibilityHidden(true)
+    }
+    .confirmationDialog(devHub ? "Switch to Live Server?" : "Switch to Dev Server?", isPresented: $switchingHub,
+      titleVisibility: .visible) {
+      Button(devHub ? "Switch to Live Server" : "Switch to Dev Server") {
+        devHub.toggle()
+        Hub.usesDev = devHub
       }
-      .font(.yo(18))
-      .padding(.top, 18)
+      Button("Cancel", role: .cancel) {}
+    } message: {
+      Text(devHub ? "New accounts go to hub.justyo.app." : "For development: accounts on dev.justyo.app only.")
     }
     .padding(.horizontal, 28)
     .padding(.bottom, 16)
@@ -137,6 +149,16 @@ struct Onboarding: View {
   }
 
   // MARK: Doing
+
+  /// Ten taps within three seconds ask whether to switch hubs.
+  private func secretTap() {
+    let now = Date.now
+    taps = taps.filter { now.timeIntervalSince($0) < 3 } + [now]
+    guard taps.count >= 10 else { return }
+    taps = []
+    UINotificationFeedbackGenerator().notificationOccurred(.warning)
+    switchingHub = true
+  }
 
   private func go(_ next: Step) {
     problem = nil
