@@ -52,7 +52,8 @@ fn the_app_layer_registers_by_username_and_restores_from_the_backup() {
     assert!(yo::username_free(app(), name.clone()).unwrap());
     let old = register(None).unwrap();
     assert!(!yo::username_free(app(), name.clone()).unwrap(), "taken now");
-    assert!(matches!(yo::username_free(app(), name.to_lowercase()), Err(yo::YoError::Refused { status: 400 })));
+    assert!(!yo::username_free(app(), name.to_lowercase()).unwrap(), "taken in any spelling");
+    assert!(matches!(yo::username_free(app(), "x".into()), Err(yo::YoError::Refused { status: 400 })));
     assert_eq!(old.username(), Some(name.clone()));
     let secret = old.account_secret();
     assert_eq!(secret.len(), 32);

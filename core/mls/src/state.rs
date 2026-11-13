@@ -24,7 +24,8 @@ pub struct Contact {
     /// The key changed after the contact was verified: nothing is sent until the person confirms it (spec 3.4).
     pub unconfirmed: bool,
     pub blocked: bool,
-    /// How this device knows the contact: "+491701234567", "CHRIS". Empty for someone who wrote first.
+    /// How this device knows the contact: "+491701234567", "Chris". A username as its owner writes it, as the hub
+    /// tells (also for someone who wrote first), one per skeleton.
     pub handles: Vec<String>,
 }
 

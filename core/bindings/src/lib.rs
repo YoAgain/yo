@@ -148,7 +148,8 @@ impl From<Event> for YoEvent {
 pub struct YoContact {
     /// The user id.
     pub user: String,
-    /// How this device knows the contact: "+491701234567", "CHRIS".
+    /// How this device knows the contact: "+491701234567", "Chris". A username as its owner writes it, as the hub
+    /// tells, also for someone who wrote first: the first username is the name to show.
     pub handles: Vec<String>,
     pub name: Option<String>,
     pub verified: bool,
@@ -205,8 +206,9 @@ pub fn fetch_backup(transport: Arc<dyn HttpTransport>, id: Vec<u8>) -> Result<Op
     Ok(Client::fetch_backup(&Http(transport), &id)?.map(Into::into))
 }
 
-/// Whether a username is free, asked while it is typed; the name canonical (upper case, NFC). False when it is taken,
-/// also as a name that looks like it, or reserved. `Refused { status: 400 }`: no username; `429`: asked too often.
+/// Whether a username is free, asked while it is typed; the name as written (NFC). False when it is taken, also in
+/// another spelling or as a name that looks like it, or reserved. `Refused { status: 400 }`: no username; `429`: asked
+/// too often.
 #[uniffi::export]
 pub fn username_free(transport: Arc<dyn HttpTransport>, username: String) -> Result<bool, YoError> {
     Ok(Client::username_free(&Http(transport), &username)?)
@@ -300,7 +302,7 @@ impl YoClient {
         self.with(|c| c.user_id().to_owned())
     }
 
-    /// The username, canonical ("JOSÉ").
+    /// The username as its owner writes it ("José").
     pub fn username(&self) -> Option<String> {
         self.with(|c| c.username().map(str::to_owned))
     }

@@ -161,6 +161,21 @@ fn user_bytes(user: &str) -> Result<UserId> {
     unhex(user).and_then(|u| u.try_into().ok()).ok_or(Error::Protocol("user id"))
 }
 
+/// Whether two handles as shown name the same: a phone number as it is, a username by its skeleton (spec 3.3), so
+/// "yogpt" is "YoGPT".
+fn same_handle(a: &str, b: &str) -> bool {
+    a == b || (!a.starts_with('+') && !b.starts_with('+') && yo_wire::handle::same_name(a, b))
+}
+
+/// Remembers how a contact is known. A username in another spelling takes the place of the one before: the newest
+/// is the hub's word for how its owner writes it (or, from a hub that does not tell, what was typed).
+fn note_handle(contact: &mut Contact, shown: String) {
+    match contact.handles.iter().position(|h| same_handle(h, &shown)) {
+        Some(index) => contact.handles[index] = shown,
+        None => contact.handles.push(shown),
+    }
+}
+
 /// An event as the state keeps it, and back: the app-facing types carry no serde.
 fn stored(event: Event) -> StoredEvent {
     let content = |content: Content| match content {
@@ -278,6 +293,13 @@ impl Client {
         let request = api::Register { username: handle.value.clone(), device };
         client.registered(api::REGISTER, &encode(&request))?;
         client.state.username = Some(String::from_utf8_lossy(handle.value.as_slice()).into_owned());
+        // A name registered again (a new phone) keeps the spelling it had at the hub, whatever was typed now.
+        if account_secret.is_some() {
+            let me = Handle::user(&user_bytes(&client.state.user_id)?);
+            if let Ok((_, Some(spelled))) = client.lookup_named(&me, false, Vec::new()) {
+                client.state.username = Some(spelled);
+            }
+        }
         Ok(client)
     }
 
@@ -333,9 +355,10 @@ impl Client {
         }
     }
 
-    /// Whether a username is free (spec 6.3), asked while it is typed, before there is an account. `username` is
-    /// canonical (upper case, NFC; `handle::canonical` keeps a field to that). False when it is taken, also as a name
-    /// that looks like it, or reserved; `Refused(400)` when it is no username, `Refused(429)` when asked too often.
+    /// Whether a username is free (spec 6.3), asked while it is typed, before there is an account. `username` as it
+    /// is written (NFC; `handle::canonical` keeps a field to that). False when it is taken, also in another spelling
+    /// or as a name that looks like it, or reserved; `Refused(400)` when it is no username, `Refused(429)` when asked
+    /// too often.
     pub fn username_free(transport: &dyn Transport, username: &str) -> Result<bool> {
         let response = transport.request("GET", &api::username_path(username), &[], &[]).map_err(Error::Network)?;
         match response.status {
@@ -612,6 +635,45 @@ impl Client {
         }
     }
 
+    /// A lookup that also asks for the user's username as its owner writes it ("YoGPT"), whatever spelling found
+    /// it. A hub from before spellings answers without it (and, asked for KeyPackages, hands out none: then asked
+    /// again the old way).
+    fn lookup_named(
+        &mut self,
+        handle: &Handle,
+        key_packages: bool,
+        except: Vec<Key>,
+    ) -> Result<(api::LookupResult, Option<String>)> {
+        let flags = api::LOOKUP_USERNAME | if key_packages { api::LOOKUP_KEY_PACKAGES } else { 0 };
+        let body = encode(&api::Lookup { handle: handle.clone(), key_packages: flags, except: except.clone() });
+        let response = self.signed("POST", api::LOOKUP, &body)?;
+        match response.status {
+            status::OK => {}
+            status::NOT_FOUND => return Err(Error::NotOnYo),
+            // A hub from before spellings knows usernames in upper case only.
+            status::BAD_REQUEST if handle.kind == KIND_USERNAME => {
+                let upper = handle.display().to_uppercase();
+                if upper == handle.display() {
+                    return Err(refused(&response));
+                }
+                return Ok((self.lookup(&Handle::username(&upper), key_packages, except)?, None));
+            }
+            _ => return Err(refused(&response)),
+        }
+        if let Ok(named) = decode::<api::LookupNamed>(&response.body) {
+            let username = named
+                .username
+                .and_then(|n| String::from_utf8(n.into()).ok())
+                .filter(|n| yo_wire::handle::check_username_form(n).is_ok());
+            return Ok((named.found, username));
+        }
+        let found: api::LookupResult = decode(&response.body)?;
+        if key_packages && found.key_packages.is_empty() {
+            return Ok((self.lookup(handle, true, except)?, None));
+        }
+        Ok((found, None))
+    }
+
     // ---- MLS ----
 
     fn signer(&self) -> &SignatureKeyPair {
@@ -765,20 +827,22 @@ impl Client {
             }
         }
         if let Some(handle) = handle {
-            let contact = self.state.contacts.get_mut(user).expect("inserted");
-            if !contact.handles.contains(&handle) {
-                contact.handles.push(handle);
-            }
+            note_handle(self.state.contacts.get_mut(user).expect("inserted"), handle);
         }
     }
 
-    /// The user a handle names, if this device knows: by its id, or by a handle it found the contact with.
+    /// The user a handle names, if this device knows: by its id, or by a handle it found the contact with (a
+    /// username in any spelling: "yogpt" finds the contact known as "YoGPT").
     fn known_user(&self, handle: &Handle) -> Option<String> {
         if handle.kind == KIND_USER {
             return Some(hex(handle.value.as_slice()));
         }
         let shown = handle.display();
-        self.state.contacts.iter().find(|(_, c)| c.handles.contains(&shown)).map(|(user, _)| user.clone())
+        self.state
+            .contacts
+            .iter()
+            .find(|(_, c)| c.handles.iter().any(|h| same_handle(h, &shown)))
+            .map(|(user, _)| user.clone())
     }
 
     /// The own handles: sending to them is sending to oneself.
@@ -786,7 +850,7 @@ impl Client {
         match handle.kind {
             KIND_USER => hex(handle.value.as_slice()) == self.state.user_id,
             KIND_PHONE => handle.value.as_slice() == self.state.phone.as_bytes(),
-            KIND_USERNAME => self.state.username.as_deref().map(str::as_bytes) == Some(handle.value.as_slice()),
+            KIND_USERNAME => self.state.username.as_deref().is_some_and(|mine| same_handle(mine, &handle.display())),
             _ => false,
         }
     }
@@ -832,7 +896,7 @@ impl Client {
 
     /// Creates a chat with whoever `handle` names (spec 4.2); returns the user id and the group.
     fn start_chat(&mut self, handle: &Handle) -> Result<(String, GroupId)> {
-        let found = self.lookup(handle, true, Vec::new())?;
+        let (found, username) = self.lookup_named(handle, true, Vec::new())?;
         let peer = hex(&found.user_id);
         if peer == self.state.user_id {
             return Err(Error::Protocol("sending to oneself"));
@@ -841,7 +905,8 @@ impl Client {
         if key_packages.is_empty() {
             return Err(Error::Protocol("no key package"));
         }
-        let shown = (handle.kind != KIND_USER).then(|| handle.display());
+        // The name as its owner writes it; from a hub that does not tell, as it was typed.
+        let shown = username.or_else(|| (handle.kind != KIND_USER).then(|| handle.display()));
         // Pinned outside the transaction that makes the chat: a verified contact's new key stays marked.
         self.pin(&peer, found.account_key, shown);
         if self.state.contacts.get(&peer).is_some_and(|c| c.unconfirmed) {
@@ -1407,10 +1472,11 @@ impl Client {
         // else's name. A key that is no user's current key is a replaced device's (or a forger's): not joined, and
         // remembered (not rolled back), so that what follows in that group is discarded too.
         let known = self.state.contacts.iter().find(|(_, c)| c.account_key == peer_key).map(|(u, _)| u.clone());
-        let peer = match known {
-            Some(user) => user,
-            None => match self.lookup(&Handle::account_key(&peer_key), false, Vec::new()) {
-                Ok(found) if found.account_key == peer_key => hex(&found.user_id),
+        // Someone who wrote first: the hub tells their username too, so the app can show who it is.
+        let (peer, username) = match known {
+            Some(user) => (user, None),
+            None => match self.lookup_named(&Handle::account_key(&peer_key), false, Vec::new()) {
+                Ok((found, username)) if found.account_key == peer_key => (hex(&found.user_id), username),
                 Ok(_) | Err(Error::NotOnYo) => {
                     self.ignore(id);
                     return Ok(());
@@ -1422,7 +1488,7 @@ impl Client {
             self.ignore(id);
             return Ok(());
         }
-        self.pin(&peer, peer_key, None);
+        self.pin(&peer, peer_key, username);
         let group = staged.into_group(&self.provider).map_err(mls)?;
         if group.ciphersuite() != profile::CIPHERSUITE {
             return Err(Error::Protocol("group"));
@@ -1627,16 +1693,13 @@ impl Client {
         // A handle this device does not know may still name a contact (someone who wrote first is known by user id
         // only): ask who it is, without spending a KeyPackage, so the existing chat is used and not a second one.
         if user.is_none() && handle.kind != KIND_USER && !self.state.contacts.is_empty() {
-            let found = self.lookup(&handle, false, Vec::new())?;
+            let (found, username) = self.lookup_named(&handle, false, Vec::new())?;
             let id = hex(&found.user_id);
             if id == self.state.user_id {
                 return Err(Error::Protocol("sending to oneself"));
             }
             if let Some(contact) = self.state.contacts.get_mut(&id) {
-                let shown = handle.display();
-                if !contact.handles.contains(&shown) {
-                    contact.handles.push(shown);
-                }
+                note_handle(contact, username.unwrap_or_else(|| handle.display()));
             }
             user = Some(id);
         }
@@ -1762,19 +1825,24 @@ impl Client {
         self.known_user(&Handle::parse(who)?).ok_or(Error::NotOnYo)
     }
 
-    /// The user a handle names: known to this device, else asked of the hub (who it is only, no KeyPackage).
-    fn user_named(&mut self, handle: &Handle) -> Result<String> {
+    /// The user a handle names: known to this device, else asked of the hub (who it is only, no KeyPackage); with
+    /// the handle to remember for it then, the username as its owner writes it if the hub tells.
+    fn user_named(&mut self, handle: &Handle) -> Result<(String, Option<String>)> {
         if self.is_me(handle) {
             return Err(Error::Protocol("oneself"));
         }
-        let user = match self.known_user(handle) {
-            Some(user) => user,
-            None => hex(&self.lookup(handle, false, Vec::new())?.user_id),
+        let (user, shown) = match self.known_user(handle) {
+            Some(user) => (user, None),
+            None => {
+                let (found, username) = self.lookup_named(handle, false, Vec::new())?;
+                let shown = username.or_else(|| (handle.kind != KIND_USER).then(|| handle.display()));
+                (hex(&found.user_id), shown)
+            }
         };
         if user == self.state.user_id {
             return Err(Error::Protocol("oneself"));
         }
-        Ok(user)
+        Ok((user, shown))
     }
 
     /// The safety number with a contact (spec 3.4).
@@ -1809,8 +1877,7 @@ impl Client {
     /// Blocks a user (by user id or any handle; one this device does not know is asked of the hub), or unblocks:
     /// nothing from them is shown, no chat with them is joined, nothing is sent to them (spec 4.8).
     pub fn set_blocked(&mut self, who: &str, blocked: bool) -> Result<()> {
-        let handle = Handle::parse(who)?;
-        let user = self.user_named(&handle)?;
+        let (user, shown) = self.user_named(&Handle::parse(who)?)?;
         let contact = self.state.contacts.entry(user).or_insert(Contact {
             account_key: [0; 32],
             name: None,
@@ -1820,9 +1887,8 @@ impl Client {
             handles: Vec::new(),
         });
         contact.blocked = blocked;
-        let shown = handle.display();
-        if handle.kind != KIND_USER && !contact.handles.contains(&shown) {
-            contact.handles.push(shown);
+        if let Some(shown) = shown {
+            note_handle(contact, shown);
         }
         self.persist();
         Ok(())
@@ -1831,7 +1897,7 @@ impl Client {
     /// Reports a user to the operator (by user id or any handle): `reason` is `api::REPORT_SPAM`, `REPORT_ABUSE` or
     /// `REPORT_OTHER` (spec 6.3). Nothing of what they sent goes with it.
     pub fn report(&mut self, who: &str, reason: u8) -> Result<()> {
-        let user = self.user_named(&Handle::parse(who)?)?;
+        let (user, _) = self.user_named(&Handle::parse(who)?)?;
         let body = encode(&api::Report { user_id: user_bytes(&user)?, reason });
         let response = self.signed("POST", api::REPORT, &body)?;
         match response.status {
@@ -1852,7 +1918,7 @@ impl Client {
         }
     }
 
-    /// Claims a username ("chris": found as CHRIS), or gives it up with `None`.
+    /// Claims a username, kept as written ("Chris": found as "chris" and "CHRIS" too), or gives it up with `None`.
     pub fn set_username(&mut self, name: Option<&str>) -> Result<()> {
         let canonical = match name {
             Some(name) => {

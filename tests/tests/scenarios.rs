@@ -451,21 +451,28 @@ fn registration_needs_the_code() {
     );
 }
 
+/// A hub that reserves "Admin" (the operator's list, `YO_RESERVED_FILE`).
+fn with_reserved(mut config: yo_hub::config::Config) -> TestHub {
+    config.reserved = yo_hub::config::parse_reserved("Admin # the operator\n");
+    TestHub::start_with(config, "127.0.0.1:0")
+}
+
 #[test]
 fn usernames_are_claimed_found_and_given_up() {
-    let hub = TestHub::start();
+    let hub = with_reserved(yo_hub::config::Config::for_tests());
     let (mut a, mut b, pa, _) = pair(&hub);
-    let name = format!("ALICE{}", random_u64() % 100_000);
-    a.set_username(Some(&name.to_lowercase())).unwrap();
-    assert_eq!(a.username(), Some(name.as_str()));
-    // B finds A by the username, typed any way.
-    b.send_yo(&format!("@{}", name.to_lowercase())).unwrap();
+    let name = format!("Alice{}", random_u64() % 100_000);
+    a.set_username(Some(&name)).unwrap();
+    assert_eq!(a.username(), Some(name.as_str()), "kept as written");
+    // B finds A by the username, typed any way, and knows A by A's own spelling.
+    b.send_yo(&format!("@{}", name.to_uppercase())).unwrap();
     let events = a.sync(0).unwrap();
     assert_eq!(yos_from(&events, &format!("+{}", b.phone())), 1);
-    assert!(b.contacts().iter().any(|c| c.user == user_of(&pa) && c.handles.contains(&name)));
-    // Taken, reserved, malformed.
+    assert!(b.contacts().iter().any(|c| c.user == user_of(&pa) && c.handles == [name.clone()]));
+    // Taken in any spelling, reserved in any, malformed.
     assert_eq!(b.set_username(Some(&name)), Err(Error::Refused(api::status::CONFLICT)));
-    assert!(b.set_username(Some("admin")).is_err());
+    assert_eq!(b.set_username(Some(&name.to_lowercase())), Err(Error::Refused(api::status::CONFLICT)));
+    assert_eq!(b.set_username(Some("ADM1N")), Err(Error::Refused(api::status::CONFLICT)));
     assert!(b.set_username(Some("x")).is_err());
     // Given up, it can be someone else's.
     a.set_username(None).unwrap();
@@ -485,17 +492,52 @@ fn a_username_is_all_it_takes() {
     assert_eq!(yos_from_user(&a.sync(0).unwrap(), t.user_id()), 1);
     a.send_yo(&name).unwrap();
     assert_eq!(yos_from_user(&t.sync(0).unwrap(), a.user_id()), 1);
-    // The name is taken now, also as a name that only looks like it (spec 3.3).
+    // The name is taken now, also in another spelling or as a name that only looks like it (spec 3.3).
     assert_eq!(by_name(&hub, &name, None).err(), Some(Error::Refused(api::status::CONFLICT)));
+    assert_eq!(by_name(&hub, &name.to_lowercase(), None).err(), Some(Error::Refused(api::status::CONFLICT)));
     let lookalike = name.replacen('O', "0", 1);
     assert_eq!(by_name(&hub, &lookalike, None).err(), Some(Error::Refused(api::status::CONFLICT)));
+}
+
+/// A name keeps the spelling its owner chose (spec 3.3): "YoGPT" is found as "yogpt" or "Y0GPT", nobody else can
+/// have it in any spelling, and whoever meets the account sees "YoGPT", also when it wrote first.
+#[test]
+fn a_username_keeps_its_spelling_and_reaches_whoever_meets_it() {
+    let hub = TestHub::start();
+    let n = random_u64() % 100_000;
+    let name = format!("YoGPT{n}");
+    let mut gpt = by_name(&hub, &name, None).unwrap();
+    assert_eq!(gpt.username(), Some(name.as_str()));
+    for other in [format!("yogpt{n}"), format!("YOGPT{n}"), format!("Y0GPT{n}")] {
+        assert_eq!(by_name(&hub, &other, None).err(), Some(Error::Refused(api::status::CONFLICT)), "{other}");
+        assert_eq!(Client::username_free(Http::new(hub.url()).as_ref(), &other), Ok(false), "{other}");
+    }
+    // Found by another spelling: the friend is known by the owner's.
+    let mut finder = by_name(&hub, &format!("Finder{n}"), None).unwrap();
+    finder.send_yo(&format!("y0gpt{n}")).unwrap();
+    assert_eq!(yos_from_user(&gpt.sync(0).unwrap(), finder.user_id()), 1);
+    let known = |c: &Client, user: &str| c.contacts().into_iter().find(|c| c.user == user).map(|c| c.handles);
+    assert_eq!(known(&finder, gpt.user_id()), Some(vec![name.clone()]));
+    // Typed again in yet another spelling: the same friend, the same chat, the owner's spelling stays.
+    finder.send_yo(&format!("YOGPT{n}")).unwrap();
+    assert_eq!(yos_from_user(&gpt.sync(0).unwrap(), finder.user_id()), 1);
+    assert_eq!(known(&finder, gpt.user_id()), Some(vec![name.clone()]));
+    // Whoever is written to first learns the writer's name from the hub, as the writer spells it.
+    assert_eq!(known(&gpt, finder.user_id()), Some(vec![format!("Finder{n}")]));
+    let mut quiet = by_name(&hub, &format!("quiet{n}"), None).unwrap();
+    gpt.send_yo(&format!("QUIET{n}")).unwrap();
+    assert_eq!(yos_from_user(&quiet.sync(0).unwrap(), gpt.user_id()), 1);
+    assert_eq!(known(&quiet, gpt.user_id()), Some(vec![name.clone()]));
+    // Blocking and reporting by any spelling find the account.
+    quiet.set_blocked(&format!("yogpt{n}"), true).unwrap();
+    assert!(quiet.contacts().iter().any(|c| c.user == gpt.user_id() && c.blocked));
 }
 
 #[test]
 fn whether_a_name_is_free_is_told_and_nothing_more() {
     let mut config = yo_hub::config::Config::for_tests();
     config.limits.name_check_per_ip_minute = 8;
-    let hub = TestHub::start_with(config, "127.0.0.1:0");
+    let hub = with_reserved(config);
     let http = Http::new(hub.url());
     let free = |name: &str| Client::username_free(http.as_ref(), name);
     let name = format!("LEO{}", random_u64() % 100_000);
@@ -504,11 +546,11 @@ fn whether_a_name_is_free_is_told_and_nothing_more() {
     assert_eq!(free(&emoji), Ok(true), "percent-encoded on the way");
     by_name(&hub, &name, None).unwrap();
     assert_eq!(free(&name), Ok(false));
-    // A name that only looks like it is taken too (spec 3.3), and so is a reserved one.
+    // Another spelling or a name that only looks like it is taken too (spec 3.3), and so is a reserved one.
     assert_eq!(free(&name.replacen('O', "0", 1)), Ok(false));
-    assert_eq!(free("ADMIN"), Ok(false));
-    // Not canonical, not a username: the app keeps its field to `handle::canonical`.
-    assert_eq!(free(&name.to_lowercase()), Err(Error::Refused(api::status::BAD_REQUEST)));
+    assert_eq!(free(&name.to_lowercase()), Ok(false));
+    assert_eq!(free("aDm1n"), Ok(false));
+    // Not a username: the app keeps its field to `handle::canonical`.
     assert_eq!(free("X"), Err(Error::Refused(api::status::BAD_REQUEST)));
     // The empty answer says only that: no user id.
     let raw = yo_core::Transport::request(http.as_ref(), "GET", &api::username_path(&name), &[], &[]).unwrap();
@@ -529,13 +571,14 @@ fn backup(locator: Vec<u8>) -> api::Backup {
 fn a_new_phone_restores_a_username_with_its_account_key() {
     let hub = TestHub::start();
     let (mut a, _, pa, _) = pair(&hub);
-    let name = format!("MIA{}", random_u64() % 100_000);
+    let name = format!("Mia{}", random_u64() % 100_000);
     let mut old = by_name(&hub, &name, None).unwrap();
     old.send_yo(&pa).unwrap();
     a.sync(0).unwrap();
     a.set_verified(old.user_id(), true).unwrap();
-    // A new phone with the account key from the backup: the same user, the old phone replaced.
-    let mut new = by_name(&hub, &name, Some(old.account_secret())).unwrap();
+    // A new phone with the account key from the backup (the name typed in another spelling): the same user, its
+    // spelling, the old phone replaced.
+    let mut new = by_name(&hub, &name.to_lowercase(), Some(old.account_secret())).unwrap();
     assert_eq!(new.user_id(), old.user_id());
     assert_eq!(new.username(), Some(name.as_str()));
     assert_eq!(old.sync(0), Err(Error::Replaced));
