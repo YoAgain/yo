@@ -682,7 +682,7 @@ extension FriendList {
   /// bar is in sight below the title; scrolled down, the view stays where it is (the title's "!" tells, and the Yo
   /// waits until it is seen).
   private func toTop(_ names: [String]) {
-    let order = friends.all.map(\.name)
+    let order = friends.shown.map(\.name)  // as on screen: a blocked friend above would make it "move"
     let moving = names.filter { name in
       // Already in place: the top bars are these names in this order, newest first.
       order.firstIndex(of: name) != names.count - 1 - names.lastIndex(of: name)!

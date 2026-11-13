@@ -18,13 +18,13 @@ PATH="$(dirname "$(readlink -f "$(command -v swift)")"):$HOME/.local/bin:$PATH"
 "$here/core.sh"   # the Rust core and its Swift bindings, into YoApp/build/core
 cd "$app"
 xtool dev build --configuration release   # optimised: SwiftUI in debug is noticeably slower
-# What this script installs is "Yo Dev": its own app id (beside "Yo" from TestFlight or the App Store), its own name,
+# What this script installs is "Yo Dev": its own app id (beside "Yo" from TestFlight or the App Store), named Yo like the other,
 # the icon inverted, and the dev hub (Hub.isDevApp). TestFlight and App Store builds are left as they are.
 python3 -I - xtool/YoApp.app/Info.plist <<'PY'
 import plistlib, sys
 info = plistlib.load(open(sys.argv[1], "rb"))
 info["CFBundleIdentifier"] = info["CFBundleIdentifier"].removesuffix(".dev") + ".dev"
-info["CFBundleDisplayName"] = "Yo Dev"
+info["CFBundleDisplayName"] = "Yo"
 plistlib.dump(info, open(sys.argv[1], "wb"))
 PY
 cp AppIcon-dev.png xtool/YoApp.app/AppIcon.png
