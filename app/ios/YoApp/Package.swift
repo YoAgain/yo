@@ -9,9 +9,13 @@ let package = Package(
   products: [
     // An xtool project's first library product is the app.
     .library(name: "YoApp", targets: ["YoApp"]),
+    // The share extension (xtool.yml extensions): the friends from the app, no core. Brand.swift, MediaFile.swift and
+    // ShareBridge.swift are the app's own files, linked into Sources/YoShare.
+    .library(name: "YoShare", targets: ["YoShare"]),
   ],
   targets: [
     .target(name: "YoApp", dependencies: ["YoCore"]),
+    .target(name: "YoShare"),
     // The Rust core (core/bindings) through UniFFI: `import YoCore`. ../dev/core.sh makes both into build/core
     // (ignored); run it before the first build and after a change in core/ (dev/push.sh does).
     .target(name: "YoCore", dependencies: ["yoFFI"], path: "build/core/swift"),

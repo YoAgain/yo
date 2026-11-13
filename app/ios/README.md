@@ -15,6 +15,10 @@ push).
   photo, hold it for a video; a ring at the bar's left undoes the send for 1.5 s. Photo library and front/back at the
   bottom. Received photos and videos wait as a round thumbnail; hold or tap it to see them once.
 - Profile sheet: save the photos and videos you send to your library.
+- Share sheet (Yo from the App Store and TestFlight): "Yo" for up to ten photos or one video from Photos or any app;
+  the same bars, a tap on a name gives them to that friend. The extension (`Sources/YoShare`) runs no core: it makes
+  them as the camera does (`MediaFile.swift`) and leaves them in the App Group `group.app.justyo.ios`, and the app
+  sends them as soon as it opens (`ShareBridge.swift`, `Share.swift`). Yo Dev (`dev/push.sh`) is built without it.
 
 ## Build and run
 

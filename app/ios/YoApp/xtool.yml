@@ -22,3 +22,11 @@ resources:
   - Resources/IconOriginal@2x.png
   - Resources/IconOriginal@3x.png
   - Resources/IconStandard@3x.png
+# "Yo" in the share sheet (Sources/YoShare, YoShare-Info.plist): photos and videos for a friend, through the App Group
+# group.app.justyo.ios (ShareBridge.swift). App Store and TestFlight only: dev/push.sh drops it from Yo Dev.
+extensions:
+  - product: YoShare
+    bundleID: app.justyo.ios.share
+    infoPath: YoShare-Info.plist
+    resources:
+      - Resources/Montserrat-Bold.ttf

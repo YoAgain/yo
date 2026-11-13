@@ -28,6 +28,9 @@ info["CFBundleDisplayName"] = "Yo"
 plistlib.dump(info, open(sys.argv[1], "wb"))
 PY
 cp AppIcon-dev.png xtool/YoApp.app/AppIcon.png
+# Without the share extension: it shares through the App Group of Yo from the App Store (group.app.justyo.ios), which
+# Yo Dev has not; the app's side of it (ShareBridge) finds no group there and does nothing.
+rm -rf xtool/YoApp.app/PlugIns
 mkdir -p build
 "$here/sign.sh" xtool/YoApp.app build/YoApp.ipa   # the app's own entitlements on top of the profile's
 bundle=$(python3 -I -c 'import plistlib,sys; print(plistlib.load(open(sys.argv[1],"rb"))["CFBundleIdentifier"])' xtool/YoApp.app/Info.plist)

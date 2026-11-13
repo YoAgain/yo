@@ -35,7 +35,12 @@ struct YoApp: App {
         if out {
           inbox.forgetMedia()
           outbox.clear()
+          ShareInbox.clear()
         }
+      }
+      // The share extension shows the list as it is (ShareBridge).
+      .onChange(of: accounts.shareList(friends), initial: true) { _, list in
+        ShareInbox.publish(list)
       }
       // The core opened (after a start or a sign-in): what waits goes.
       .onChange(of: accounts.client == nil, initial: true) { _, none in
@@ -44,6 +49,7 @@ struct YoApp: App {
           await inbox.handle(events, contacts: contacts, client: client, friends: friends)
         }
         outbox.flush(accounts: accounts)
+        ShareInbox.take(outbox: outbox, accounts: accounts)
         inbox.fetchMedia(client: client)
       }
         .environment(inbox)
@@ -64,6 +70,7 @@ struct YoApp: App {
           Task { await inbox.collectDelivered() }
           // What the hub said "later" to goes now (the outbox's events go to the inbox, set when the core opened).
           outbox.flush(accounts: accounts)
+          ShareInbox.take(outbox: outbox, accounts: accounts)  // what was shared meanwhile
           if let client = accounts.client { inbox.fetchMedia(client: client) }
           // Opened: the 365 days start again, and so does the reminder (spec 6.4).
           if let account = accounts.account { SecureReminder.update(secured: account.secured) }
