@@ -115,6 +115,16 @@ struct SettingsView: View {
           }
           Section {
             NavigationLink {
+              mediaPage
+            } label: {
+              Label("Media", systemImage: "photo.on.rectangle").labelStyle(Tile(.green))
+            }
+            NavigationLink {
+              AppearancePage()
+            } label: {
+              Label("Appearance", systemImage: "paintbrush.fill").labelStyle(Tile(.blue))
+            }
+            NavigationLink {
               StatsPage()
             } label: {
               HStack {
@@ -123,21 +133,7 @@ struct SettingsView: View {
                 Text("\(Stats.sent + Stats.received)").foregroundStyle(Color(.secondaryLabel))
               }
             }
-            NavigationLink {
-              AppearancePage()
-            } label: {
-              Label("Appearance", systemImage: "paintbrush.fill").labelStyle(Tile(.blue))
-            }
           }
-        }
-
-        Section {
-          Toggle(isOn: Binding(get: { saveSent }, set: { setSaveSent($0) })) {
-            Label("Keep Sent Photos", systemImage: "photo.on.rectangle").labelStyle(Tile(.green))
-          }
-          .disabled(requestingPhotos)
-        } footer: {
-          Text("Saves photos and videos you send to your camera roll.")
         }
       }
       .sheet(isPresented: $showingCode) {
@@ -180,6 +176,20 @@ struct SettingsView: View {
       }
     }
     .tint(Color.amethyst)
+  }
+
+  /// Media: what happens to the photos and videos you send.
+  private var mediaPage: some View {
+    Form {
+      Section {
+        Toggle("Keep Sent Photos", isOn: Binding(get: { saveSent }, set: { setSaveSent($0) }))
+          .disabled(requestingPhotos)
+      } footer: {
+        Text("Saves photos and videos you send to your camera roll.")
+      }
+    }
+    .navigationTitle("Media")
+    .navigationBarTitleDisplayMode(.inline)
   }
 
   /// Your account: its security (passkey and recovery key), then signing out and, below, deleting it (App Review
