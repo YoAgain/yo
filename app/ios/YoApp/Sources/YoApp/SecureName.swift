@@ -153,7 +153,10 @@ struct SecureNameSheet: View {
     } catch AccountError.noPRF {
       problem = "This password manager can’t be used. Try iCloud Keychain."
     } catch {
-      if !SecurityPresentation.isCancellation(error) { problem = "That didn’t work. Try again." }
+      if !SecurityPresentation.isCancellation(error) {
+        let e = error as NSError  // the reason, while Yo is in development
+        problem = "That didn’t work. Try again. (\(e.domain) \(e.code): \(e.localizedDescription))"
+      }
     }
   }
 

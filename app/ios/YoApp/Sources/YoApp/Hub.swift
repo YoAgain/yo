@@ -23,11 +23,17 @@ enum Hub {
     try await Task.detached(priority: .userInitiated) { try work() }.value
   }
 
-  /// The user id as the core writes it (base64url, no padding) as bytes: a passkey's user handle (spec 7).
+  /// The user id as the core writes it (32 hex digits) as its 16 bytes: a passkey's user handle, the backup's id
+  /// (spec 7).
   static func bytes(_ id: String) -> Data? {
-    var b64 = id.replacingOccurrences(of: "-", with: "+").replacingOccurrences(of: "_", with: "/")
-    b64 += String(repeating: "=", count: (4 - b64.count % 4) % 4)
-    return Data(base64Encoded: b64)
+    let digits = Array(id.utf8)
+    guard digits.count == 32 else { return nil }
+    var bytes = Data()
+    for i in stride(from: 0, to: 32, by: 2) {
+      guard let byte = UInt8(String(decoding: digits[i..<i + 2], as: UTF8.self), radix: 16) else { return nil }
+      bytes.append(byte)
+    }
+    return bytes
   }
 }
 

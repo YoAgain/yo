@@ -226,9 +226,12 @@ final class AccountStore {
     let transport = Hub.transport
     let key = StateKey.load()
     do {
-      client = try await Hub.run {
+      let client = try await Hub.run {
         try YoClient.restore(transport: transport, store: StateFile(), stateKey: key, blob: blob)
       }
+      self.client = client
+      // The user id as the core has it (an earlier build read it wrongly): the passkey's handle and the backup's id.
+      if let id = Hub.bytes(client.userId()), account?.userID != id { account?.userID = id }
     } catch YoError.Replaced {
       reset()
     } catch {}
@@ -446,7 +449,7 @@ enum AccountError: LocalizedError {
     case .noPRF: "This passkey can’t be used to sign in to Yo. Try a different password manager."
     case .tooMany: "Too many tries. Try again later."
     case .hub(.Network): "Yo can’t reach its server. Check your connection and try again."
-    case .hub: "Something went wrong. Try again."
+    case .hub(let error): "Something went wrong. Try again. (\(error))"  // the core's reason, while in development
     }
   }
 }
