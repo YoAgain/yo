@@ -1,178 +1,654 @@
-// Profile and settings, from your picture in the bar: the system's form in a sheet (Liquid Glass from iOS 26 on its
-// own), as the App Store and Music open their account.
+import AuthenticationServices
+import Foundation
 import LocalAuthentication
 import Photos
 import SwiftUI
+import UIKit
 
 enum SettingKey {
-  /// Photos and videos you send go to your photo library as well (only the ones sent, not the cancelled).
   static let saveSent = "settings.saveSent"
 }
 
+@MainActor
 struct SettingsView: View {
   @AppStorage(SettingKey.saveSent) private var saveSent = false
   @Environment(\.dismiss) private var dismiss
+  @Environment(\.openURL) private var openURL
+  @Environment(\.scenePhase) private var scenePhase
   @Environment(AccountStore.self) private var accounts
   @Environment(Friends.self) private var friends
+
   @State private var resetting = false
-  /// The recovery words on screen, after Face ID.
-  @State private var words: [String]?
-  @State private var addingPasskey = false
-  @State private var passkeyProblem: String?
-  @State private var securing = false
+  @State private var requestingPhotos = false
+  @State private var photosDenied = false
 
   var body: some View {
     NavigationStack {
       Form {
-        nameSection
+        if let account = accounts.account {
+          Section {
+            NavigationLink {
+              SignInRecoveryView()
+            } label: {
+              VStack(alignment: .leading, spacing: 4) {
+                Text(account.username)
+                  .font(.yo(24, relativeTo: .title2))
+                  .foregroundStyle(.primary)
+                  .fixedSize(horizontal: false, vertical: true)
+
+                Text("Sign-In & Recovery")
+                  .font(.subheadline)
+                  .foregroundStyle(.secondary)
+              }
+              .padding(.vertical, 4)
+            }
+          } footer: {
+            Text(
+              account.secured
+                ? "Your name is secured. You can sign in on a new iPhone."
+                : "If your name isn’t secured, it becomes available to others "
+                  + "after 30 days without opening Yo."
+            )
+          }
+        }
+
         Section {
-          Toggle("Save Sent Photos and Videos", isOn: $saveSent)
+          Toggle(
+            "Save Sent Photos and Videos",
+            isOn: Binding(
+              get: { saveSent },
+              set: { setSaveSent($0) }
+            )
+          )
+          .disabled(requestingPhotos)
         } header: {
           Text("Photos and Videos")
         } footer: {
-          Text("What you send from the camera is saved to your photo library. Nothing you receive is saved.")
+          Text(
+            "Automatically save photos and videos you send "
+              + "from the camera to Photos."
+          )
         }
+
         Section {
-          Button("Reset Yo", systemImage: "arrow.counterclockwise", role: .destructive) { resetting = true }
+          Button("Reset Yo", role: .destructive) {
+            resetting = true
+          }
         } footer: {
-          Text("Resets Yo on this iPhone. Keep your passkey or a copy of your recovery key so you can sign in again.")
+          Text("Removes Yo data from this iPhone.")
         }
-      }
-      .sheet(isPresented: $securing) { SecureNameSheet() }
-      .sheet(isPresented: Binding(get: { words != nil }, set: { if !$0 { words = nil } })) {
-        if let words { RecoveryWordsSheet(name: accounts.account?.username ?? "", words: words) }
-      }
-      .confirmationDialog("Reset Yo?", isPresented: $resetting, titleVisibility: .visible) {
-        Button("Reset Yo", role: .destructive) { reset() }
-      } message: {
-        Text("This removes your Yo account, friends, settings, and saved recovery key from this iPhone. You’ll need your passkey or a copy of your recovery key to sign in again.")
       }
       .navigationTitle("Profile")
       .navigationBarTitleDisplayMode(.inline)
       .toolbar {
-        ToolbarItem(placement: .confirmationAction) {
-          Button("Done", systemImage: "checkmark") { dismiss() }
+        ToolbarItem(placement: .cancellationAction) {
+          Button("Close") { dismiss() }
         }
       }
-      .onChange(of: saveSent) { _, on in
-        guard on else { return }
-        Task {
-          // Asked once, when switched on; refused, the switch goes back off.
-          let status = await PHPhotoLibrary.requestAuthorization(for: .addOnly)
-          if status != .authorized && status != .limited { saveSent = false }
-        }
+      .confirmationDialog(
+        "Reset Yo?",
+        isPresented: $resetting,
+        titleVisibility: .visible
+      ) {
+        Button("Reset Yo", role: .destructive) { reset() }
+        Button("Cancel", role: .cancel) {}
+      } message: {
+        Text(resetMessage)
+      }
+      .alert("Allow Access to Photos", isPresented: $photosDenied) {
+        Button("Open Settings") { openSystemSettings() }
+        Button("Cancel", role: .cancel) {}
+      } message: {
+        Text(
+          "Allow Yo to add photos in Settings to save "
+            + "photos and videos you send."
+        )
+      }
+      .onAppear { checkPhotosPermission() }
+      .onChange(of: scenePhase) { _, phase in
+        if phase == .active { checkPhotosPermission() }
       }
     }
+    .tint(Color.amethyst)
   }
-}
 
-extension SettingsView {
-  /// Your name, and what gets it back on a new iPhone: secured (passkey and recovery key, or the key alone), or the
-  /// one thing left to do, with the red dot the profile button has too.
-  @ViewBuilder fileprivate var nameSection: some View {
-    let account = accounts.account
-    Section {
-      HStack(spacing: 14) {
-        Image(systemName: "person.crop.circle.fill")
-          .font(.system(size: 52))
-          .foregroundStyle(.white, Color.amethyst)
-        VStack(alignment: .leading, spacing: 2) {
-          Text(account?.username ?? "You").font(.yo(24, relativeTo: .title3))
-          Label(
-            account?.secured != true ? "Not Secured" : "Secured",
-            systemImage: account?.secured != true ? "exclamationmark.circle" : "checkmark.shield.fill"
-          )
-          .font(.subheadline)
-          .foregroundStyle(account?.secured != true ? Color.red : Color.green)
-        }
-      }
-      .padding(.vertical, 4)
-      if account?.secured != true {
-        Button { securing = true } label: {
-          HStack {
-            Label("Secure Your Name", systemImage: "lock.shield")
-            Spacer()
-            Circle().fill(.red).frame(width: 10, height: 10)
-          }
-        }
-      } else {
-        if account?.byPasskey == true {
-          LabeledContent {
-            Text("On")
-          } label: {
-            Label("Passkey", systemImage: "person.badge.key")
-          }
-        } else {
-          Button("Set Up Passkey", systemImage: "person.badge.key") { Task { await addPasskey() } }
-            .disabled(addingPasskey)
-        }
-        if RecoveryWords.load() != nil {
-          Button("Recovery Key", systemImage: "list.number") { Task { await showWords() } }
-        }
-      }
-    } header: {
-      Text("Your Name")
-    } footer: {
-      if let passkeyProblem {
-        Text(passkeyProblem).foregroundStyle(.red)
-      } else if account?.secured != true {
-        Text("Secure your name to get it back on a new iPhone. Names not secured become available to others after "
-          + "30 days without opening Yo.")
-      } else if account?.byPasskey == true {
-        Text("Your passkey or your recovery key gets your name back on a new iPhone.")
-      } else {
-        Text("Your recovery key gets your name back on a new iPhone. A passkey does it with Face ID.")
-      }
+  private var resetMessage: String {
+    let explanation =
+      "This removes your account, friends, settings, and recovery key "
+      + "from this iPhone. Photos saved in Photos are kept."
+
+    guard let account = accounts.account, account.secured else {
+      return explanation
+        + "\n\nYour name isn’t secured. You won’t be able to sign in to it again."
+    }
+
+    if account.byPasskey {
+      return explanation
+        + "\n\nKeep your passkey or a copy of your recovery key to sign in again."
+    }
+
+    return explanation
+      + "\n\nYou’ll need a copy of your recovery key to sign in again."
+  }
+
+  private func setSaveSent(_ enabled: Bool) {
+    guard enabled else {
+      saveSent = false
+      return
+    }
+    guard !requestingPhotos else { return }
+
+    requestingPhotos = true
+
+    Task { @MainActor in
+      defer { requestingPhotos = false }
+
+      let status = await PHPhotoLibrary.requestAuthorization(for: .addOnly)
+      let allowed = status == .authorized || status == .limited
+      saveSent = allowed
+      photosDenied = !allowed
     }
   }
 
-  /// The words, after the owner of the phone proved it (Face ID, else the passcode).
-  fileprivate func showWords() async {
-    let context = LAContext()
-    guard (try? await context.evaluatePolicy(.deviceOwnerAuthentication, localizedReason: "Verify your identity to view your recovery key."))
-      == true
-    else { return }
-    words = RecoveryWords.load()
-  }
-
-  /// A passkey added to the backup. The system may ask twice: once to create it, once to use it.
-  fileprivate func addPasskey() async {
-    addingPasskey = true
-    defer { addingPasskey = false }
-    passkeyProblem = nil
-    do {
-      try await accounts.addPasskey()
-    } catch let error as AccountError {
-      passkeyProblem = error.errorDescription
-    } catch {
-      passkeyProblem = "Passkey not set up. Try again."
+  private func checkPhotosPermission() {
+    let status = PHPhotoLibrary.authorizationStatus(for: .addOnly)
+    if saveSent && (status == .denied || status == .restricted) {
+      saveSent = false
     }
   }
 
-  /// Everything of this app on this phone goes (settings, friends, the account), not the simulated hub's backups.
-  fileprivate func reset() {
-    if let domain = Bundle.main.bundleIdentifier { UserDefaults.standard.removePersistentDomain(forName: domain) }
+  private func openSystemSettings() {
+    guard let url = URL(string: UIApplication.openSettingsURLString) else {
+      return
+    }
+    openURL(url)
+  }
+
+  private func reset() {
+    if let domain = Bundle.main.bundleIdentifier {
+      UserDefaults.standard.removePersistentDomain(forName: domain)
+    }
     friends.reset()
     dismiss()
     accounts.reset()
   }
 }
 
-/// Saving a sent photo or video to the library, when the setting is on.
+@MainActor
+private struct SignInRecoveryView: View {
+  @Environment(AccountStore.self) private var accounts
+  @State private var addingPasskey = false
+  @State private var problem: String?
+
+  var body: some View {
+    Form {
+      if let account = accounts.account {
+        Section {
+          LabeledContent {
+            Text(account.username)
+              .font(.yo(17, relativeTo: .body))
+              .fixedSize(horizontal: false, vertical: true)
+          } label: {
+            Text("Username")
+          }
+
+          LabeledContent(
+            "Status",
+            value: account.secured ? "Secured" : "Not Secured"
+          )
+        } header: {
+          Text("Your Name")
+        } footer: {
+          Text(statusExplanation(account))
+        }
+
+        if account.secured {
+          passkeySection(account)
+          recoverySection
+        } else {
+          Section {
+            NavigationLink("Secure Your Name") {
+              SecureNamePage()
+            }
+          } footer: {
+            Text(
+              "Set up a passkey and a recovery key. "
+                + "Either one can restore your name."
+            )
+          }
+        }
+      }
+    }
+    .navigationTitle("Sign-In & Recovery")
+    .navigationBarTitleDisplayMode(.inline)
+    .alert(
+      "Couldn’t Set Up Passkey",
+      isPresented: Binding(
+        get: { problem != nil },
+        set: { if !$0 { problem = nil } }
+      )
+    ) {
+      Button("OK", role: .cancel) {}
+    } message: {
+      Text(problem ?? "")
+    }
+  }
+
+  private func statusExplanation(_ account: Account) -> String {
+    guard account.secured else {
+      return "Your name becomes available to others after 30 days without "
+        + "opening Yo. Secure it to keep your name and sign in on a new iPhone."
+    }
+
+    let method = account.byPasskey
+      ? "your passkey or recovery key"
+      : "your recovery key"
+
+    return "Your name stays yours, even if you stop opening Yo. "
+      + "Use \(method) to sign in on a new iPhone."
+  }
+
+  private func passkeySection(_ account: Account) -> some View {
+    Section {
+      if account.byPasskey {
+        LabeledContent("Passkey", value: "Set Up")
+      } else {
+        Button {
+          Task { await addPasskey() }
+        } label: {
+          HStack {
+            Text(
+              addingPasskey
+                ? "Setting Up Passkey…"
+                : "Set Up Passkey"
+            )
+            Spacer()
+            if addingPasskey {
+              ProgressView()
+                .accessibilityLabel("Setting Up Passkey")
+            }
+          }
+        }
+        .disabled(addingPasskey || RecoveryWords.load() == nil)
+      }
+    } header: {
+      Text("Passkey")
+    } footer: {
+      VStack(alignment: .leading, spacing: 8) {
+        Text(
+          "A passkey lets you sign in with Face ID or your device passcode. "
+            + "It’s stored in iCloud Keychain or your chosen password manager."
+        )
+
+        if !account.byPasskey && RecoveryWords.load() == nil {
+          Text(
+            "Your recovery key must be on this iPhone "
+              + "before you can add a passkey."
+          )
+        }
+      }
+    }
+  }
+
+  private var recoverySection: some View {
+    Section {
+      if let words = RecoveryWords.load() {
+        NavigationLink("Recovery Key") {
+          RecoveryKeyView(
+            name: accounts.account?.username ?? "",
+            words: words,
+            explanation:
+              "Use these 12 words to sign in on a new iPhone, "
+              + "even without your passkey."
+          )
+        }
+      } else {
+        LabeledContent("Recovery Key", value: "Not on This iPhone")
+      }
+    } header: {
+      Text("Recovery Key")
+    } footer: {
+      if RecoveryWords.load() != nil {
+        Text(
+          "Your recovery key is 12 words. Use it to sign in without a passkey. "
+            + "Anyone with these words can sign in to your account."
+        )
+      } else {
+        Text(
+          "Your recovery key isn’t stored on this iPhone. "
+            + "Keep any copy you already have."
+        )
+      }
+    }
+  }
+
+  private func addPasskey() async {
+    guard !addingPasskey else { return }
+    addingPasskey = true
+    defer { addingPasskey = false }
+
+    do {
+      try await accounts.addPasskey()
+    } catch {
+      if SecurityPresentation.isCancellation(error) { return }
+      problem = SecurityPresentation.passkeyMessage(
+        error,
+        fallback: "Try again. Your recovery key still works."
+      )
+    }
+  }
+}
+
+// Shared presentation helpers; no account or credential state is changed here.
+enum SecurityPresentation {
+  static func isCancellation(_ error: Error) -> Bool {
+    let error = error as NSError
+
+    return error.domain == ASAuthorizationError.errorDomain
+      && error.code == ASAuthorizationError.Code.canceled.rawValue
+  }
+
+  static func passkeyMessage(_ error: Error, fallback: String) -> String {
+    if let error = error as? AccountError, case .noPRF = error {
+      return "This passkey can’t be used with Yo. "
+        + "Try a different password manager."
+    }
+    return fallback
+  }
+}
+
+// Preserves the existing standalone API. Profile uses navigation instead.
+@MainActor
+struct RecoveryWordsSheet: View {
+  let name: String
+  let words: [String]
+
+  @Environment(\.dismiss) private var dismiss
+
+  var body: some View {
+    NavigationStack {
+      RecoveryKeyView(
+        name: name,
+        words: words,
+        explanation:
+          "Use these 12 words to sign in on a new iPhone, "
+          + "even without your passkey."
+      )
+      .toolbar {
+        ToolbarItem(placement: .cancellationAction) {
+          Button("Close") { dismiss() }
+        }
+      }
+    }
+    .tint(Color.amethyst)
+  }
+}
+
+// Shared by existing-key viewing and new-name setup.
+// Existing keys require authentication each time they are revealed.
+@MainActor
+struct RecoveryKeyView: View {
+  let name: String
+  let words: [String]
+  let explanation: String
+
+  var requiresAuthentication = true
+  var finishTitle: String? = nil
+  var onFinish: (() -> Void)? = nil
+  var onTryPasskey: (() -> Void)? = nil
+
+  @Environment(\.scenePhase) private var scenePhase
+  @Environment(\.openURL) private var openURL
+
+  @State private var revealed = false
+  @State private var authenticating = false
+  @State private var saving = false
+  @State private var copied = false
+  @State private var savedToPhotos = false
+  @State private var acknowledged = false
+
+  @State private var authenticationFailed = false
+  @State private var saveProblem: String?
+  @State private var needsPhotosPermission = false
+
+  var body: some View {
+    Form {
+      Section {
+        LabeledContent {
+          Text(name)
+            .font(.yo(17, relativeTo: .body))
+            .fixedSize(horizontal: false, vertical: true)
+        } label: {
+          Text("Username")
+        }
+
+        Text(explanation)
+      }
+
+      Section {
+        Button {
+          Task { await toggleVisibility() }
+        } label: {
+          HStack {
+            Text(revealed ? "Hide Recovery Key" : "Show Recovery Key")
+            Spacer()
+            if authenticating { ProgressView() }
+          }
+        }
+        .disabled(authenticating || saving)
+
+        if revealed {
+          RecoveryQRView(words: words)
+            .frame(maxWidth: .infinity)
+            .padding(.vertical, 8)
+            .accessibilityLabel("QR code containing your recovery key")
+            .privacySensitive()
+            .opacity(scenePhase == .active ? 1 : 0)
+
+          ForEach(Array(words.enumerated()), id: \.offset) { index, word in
+            LabeledContent {
+              Text(word)
+                .font(.yo(17, relativeTo: .body))
+            } label: {
+              Text("\(index + 1)")
+                .monospacedDigit()
+                .foregroundStyle(.secondary)
+            }
+            .accessibilityElement(children: .ignore)
+            .accessibilityLabel("Word \(index + 1), \(word)")
+            .privacySensitive()
+            .opacity(scenePhase == .active ? 1 : 0)
+          }
+        }
+      } header: {
+        Text("Recovery Key")
+      } footer: {
+        Text(
+          "Keep a copy outside Yo. Anyone with these words "
+            + "can sign in to your account."
+        )
+      }
+
+      if revealed {
+        Section {
+          Button {
+            RecoveryWords.copy(words, name: name)
+            copied = true
+          } label: {
+            Label(
+              copied ? "Copied" : "Copy Recovery Key",
+              systemImage: copied ? "checkmark" : "doc.on.doc"
+            )
+          }
+
+          Button {
+            Task { await save() }
+          } label: {
+            HStack {
+              Label(
+                saving
+                  ? "Saving…"
+                  : savedToPhotos ? "Saved to Photos" : "Save to Photos",
+                systemImage:
+                  savedToPhotos ? "checkmark" : "photo.badge.arrow.down"
+              )
+              Spacer()
+              if saving { ProgressView() }
+            }
+          }
+        }
+        .disabled(saving)
+      }
+
+      if let finishTitle, let onFinish {
+        // Asked only when the words are the one way back (no passkey): with a passkey, Done is enough.
+        let wordsOnly = onTryPasskey != nil
+        Section {
+          if wordsOnly {
+            Toggle("I Saved My Recovery Key", isOn: $acknowledged)
+              .disabled(!revealed || saving)
+          }
+
+          Button(finishTitle, action: onFinish)
+            .disabled((wordsOnly && !acknowledged) || saving || authenticating)
+        } footer: {
+          if wordsOnly { Text("Confirm after saving a copy outside Yo.") }
+        }
+      }
+
+      if let onTryPasskey {
+        Section {
+          Button("Try Passkey Again", action: onTryPasskey)
+            .disabled(saving || authenticating)
+        }
+      }
+    }
+    .navigationTitle("Recovery Key")
+    .navigationBarTitleDisplayMode(.inline)
+    .onChange(of: scenePhase) { _, phase in
+      if phase != .active { revealed = false }
+    }
+    .alert(
+      "Couldn’t Show Recovery Key",
+      isPresented: $authenticationFailed
+    ) {
+      Button("OK", role: .cancel) {}
+    } message: {
+      Text("Try again and verify with Face ID or your device passcode.")
+    }
+    .alert(
+      "Couldn’t Save Recovery Key",
+      isPresented: Binding(
+        get: { saveProblem != nil },
+        set: { if !$0 { saveProblem = nil } }
+      )
+    ) {
+      if needsPhotosPermission {
+        Button("Open Settings") {
+          guard let url = URL(
+            string: UIApplication.openSettingsURLString
+          ) else { return }
+          openURL(url)
+        }
+      }
+      Button("OK", role: .cancel) {}
+    } message: {
+      Text(saveProblem ?? "")
+    }
+  }
+
+  private func toggleVisibility() async {
+    guard !authenticating, !saving else { return }
+
+    if revealed {
+      revealed = false
+      return
+    }
+
+    guard requiresAuthentication else {
+      revealed = true
+      return
+    }
+
+    authenticating = true
+    defer { authenticating = false }
+
+    let context = LAContext()
+    do {
+      let allowed = try await context.evaluatePolicy(
+        .deviceOwnerAuthentication,
+        localizedReason: "Show your Yo recovery key."
+      )
+      revealed = allowed
+      if !allowed { authenticationFailed = true }
+    } catch {
+      if let error = error as? LAError {
+        switch error.code {
+        case .userCancel, .appCancel, .systemCancel:
+          return
+        default:
+          break
+        }
+      }
+      authenticationFailed = true
+    }
+  }
+
+  private func save() async {
+    guard !saving, revealed else { return }
+    saving = true
+    needsPhotosPermission = false
+    defer { saving = false }
+
+    let renderer = ImageRenderer(
+      content: RecoveryCard(name: name, words: words)
+    )
+    renderer.scale = 3
+
+    guard let image = renderer.uiImage else {
+      saveProblem = "Try again, or copy your recovery key instead."
+      return
+    }
+
+    do {
+      try await RecoveryWords.saveToPhotos(image)
+      savedToPhotos = true
+    } catch {
+      let status = PHPhotoLibrary.authorizationStatus(for: .addOnly)
+      needsPhotosPermission = status == .denied || status == .restricted
+      saveProblem = needsPhotosPermission
+        ? "Allow Yo to add photos in Settings, or copy your recovery key instead."
+        : "Try again, or copy your recovery key instead."
+    }
+  }
+}
+
+// Existing sent-media behavior is preserved.
 enum Library {
   static func saveIfWanted(photo: Data? = nil, video: URL? = nil) {
-    guard UserDefaults.standard.bool(forKey: SettingKey.saveSent) else { return }
-    // A video goes in as its own copy, which Photos moves in when it is ready: the original may be deleted (seen)
-    // before Photos has read it.
+    guard UserDefaults.standard.bool(forKey: SettingKey.saveSent) else {
+      return
+    }
+
     var file: URL?
     if let video {
-      let to = FileManager.default.temporaryDirectory.appending(path: "library-\(UUID().uuidString).mov")
-      guard (try? FileManager.default.copyItem(at: video, to: to)) != nil else { return }
-      file = to
+      let destination = FileManager.default.temporaryDirectory
+        .appending(path: "library-\(UUID().uuidString).mov")
+
+      guard
+        (try? FileManager.default.copyItem(
+          at: video,
+          to: destination
+        )) != nil
+      else { return }
+
+      file = destination
     }
+
     let copy = file
     PHPhotoLibrary.shared().performChanges {
       let request = PHAssetCreationRequest.forAsset()
+
       if let photo {
         request.addResource(with: .photo, data: photo, options: nil)
       } else if let copy {
@@ -181,59 +657,9 @@ enum Library {
         request.addResource(with: .video, fileURL: copy, options: options)
       }
     } completionHandler: { saved, _ in
-      if !saved, let copy { try? FileManager.default.removeItem(at: copy) }
-    }
-  }
-}
-
-/// The recovery words from the profile, in the brand's purple: the words, Save to Photos and Copy.
-struct RecoveryWordsSheet: View {
-  let name: String
-  let words: [String]
-  @Environment(\.dismiss) private var dismiss
-  @State private var kept: Set<String> = []
-  @State private var problem: String?
-
-  var body: some View {
-    NavigationStack {
-      ScrollView {
-        VStack(spacing: 16) {
-          FrostedKey(words: words)
-          HStack(spacing: 12) {
-            KeepButton(title: "Save to Photos", icon: "photo.badge.arrow.down", done: kept.contains("photos")) {
-              Task { await save() }
-            }
-            KeepButton(title: "Copy", icon: "doc.on.doc", done: kept.contains("copied")) {
-              RecoveryWords.copy(words, name: name)
-              kept.insert("copied")
-            }
-          }
-          if let problem { Text(problem).font(.footnote.weight(.semibold)) }
-        }
-        .padding(20)
+      if !saved, let copy {
+        try? FileManager.default.removeItem(at: copy)
       }
-      .foregroundStyle(.white)
-      .background(Color.amethyst.ignoresSafeArea())
-      .navigationTitle("Recovery Key")
-      .navigationBarTitleDisplayMode(.inline)
-      .toolbar {
-        ToolbarItem(placement: .confirmationAction) {
-          Button("Done", systemImage: "checkmark") { dismiss() }
-        }
-      }
-    }
-    .preferredColorScheme(.dark)
-  }
-
-  private func save() async {
-    let renderer = ImageRenderer(content: RecoveryCard(name: name, words: words))
-    renderer.scale = 3
-    guard let image = renderer.uiImage else { return problem = "Couldn’t create your recovery key image. Try again." }
-    do {
-      try await RecoveryWords.saveToPhotos(image)
-      kept.insert("photos")
-    } catch {
-      problem = error.localizedDescription
     }
   }
 }
