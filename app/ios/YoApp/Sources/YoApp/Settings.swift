@@ -71,12 +71,15 @@ struct SettingsView: View {
           if !account.secured {
             Section {
               Button { securing = true } label: {
-                Label("Secure Your Account", systemImage: "lock.shield")
+                HStack {
+                  Label("Secure Your Account", systemImage: "lock.fill").labelStyle(Tile(.orange))
+                  Spacer()
+                  CountBadge(count: 1)
+                }
               }
               .tint(.primary)
-              .badge(1)
             } footer: {
-              Text("When your account is secured, you keep your name forever.")
+              Text("Set up account recovery to keep your name “\(account.username)” forever.")
             }
           }
         }
@@ -88,11 +91,11 @@ struct SettingsView: View {
               set: { setSaveSent($0) }
             )
           ) {
-            Label("Save Sent Photos and Videos", systemImage: "photo.on.rectangle")
+            Label("Keep Sent Photos", systemImage: "photo.on.rectangle").labelStyle(Tile(.blue))
           }
           .disabled(requestingPhotos)
         } footer: {
-          Text("Photos and videos you send are also saved to your library.")
+          Text("Saves photos and videos you send to your camera roll.")
         }
       }
       .navigationTitle("Profile")
@@ -160,11 +163,11 @@ struct SettingsView: View {
   private func accountSection(_ account: Account) -> some View {
     Section {
       if account.secured {
-        Label("Account Secured", systemImage: "checkmark.shield.fill")
+        Label("Account Secured", systemImage: "checkmark").labelStyle(Tile(.green))
         LabeledContent {
           Text(account.byPasskey ? "On" : "Off")
         } label: {
-          Label("Face ID", systemImage: "faceid")
+          Label("Face ID", systemImage: "faceid").labelStyle(Tile(.green))
         }
         if !account.byPasskey {
           Button {
@@ -182,7 +185,7 @@ struct SettingsView: View {
         }
         if RecoveryWords.load() != nil {
           Button { showingWords = true } label: {
-            Label("Recovery Key", systemImage: "key")
+            Label("Recovery Key", systemImage: "key.fill").labelStyle(Tile(.gray))
           }
           .tint(.primary)
           .disabled(addingPasskey)
@@ -190,21 +193,24 @@ struct SettingsView: View {
           LabeledContent {
             Text("Not on This iPhone")
           } label: {
-            Label("Recovery Key", systemImage: "key")
+            Label("Recovery Key", systemImage: "key.fill").labelStyle(Tile(.gray))
           }
         }
       } else {
         Button { securing = true } label: {
-          Label("Secure Your Account", systemImage: "lock.shield")
+          HStack {
+            Label("Secure Your Account", systemImage: "lock.fill").labelStyle(Tile(.orange))
+            Spacer()
+            CountBadge(count: 1)
+          }
         }
         .tint(.primary)
-        .badge(1)
       }
     } header: {
       Text("Account")
     } footer: {
       if !account.secured {
-        Text("When your account is secured, you keep your name forever.")
+        Text("Set up account recovery to keep your name “\(account.username)” forever.")
       } else if account.byPasskey {
         Text("You keep your name forever, on any iPhone.")
       } else {
@@ -626,5 +632,36 @@ enum Library {
         try? FileManager.default.removeItem(at: copy)
       }
     }
+  }
+}
+
+/// A row's symbol as Settings draws it: white on a small rounded square of colour.
+struct Tile: LabelStyle {
+  let color: Color
+  init(_ color: Color) { self.color = color }
+
+  func makeBody(configuration: Configuration) -> some View {
+    HStack(spacing: 14) {
+      configuration.icon
+        .font(.system(size: 15, weight: .semibold))
+        .foregroundStyle(.white)
+        .frame(width: 29, height: 29)
+        .background(color.gradient, in: .rect(cornerRadius: 7))
+      configuration.title
+    }
+  }
+}
+
+/// The red count Settings shows on a row with something to do ("1" beside Finish Setting Up).
+struct CountBadge: View {
+  let count: Int
+
+  var body: some View {
+    Text("\(count)")
+      .font(.subheadline.weight(.semibold))
+      .foregroundStyle(.white)
+      .frame(minWidth: 23, minHeight: 23)
+      .background(.red, in: .capsule)
+      .accessibilityLabel("\(count) thing to do")
   }
 }

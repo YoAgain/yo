@@ -9,7 +9,7 @@
 	<key>NSFaceIDUsageDescription</key>
 	<string>Yo uses Face ID to verify your identity before showing your recovery key.</string>
 	<key>NSPhotoLibraryAddUsageDescription</key>
-	<string>Yo saves your recovery key to Photos when you choose, and saves photos and videos you send when Save Sent Photos and Videos is on.</string>
+	<string>Yo saves your recovery key to Photos when you choose, and saves photos and videos you send when Keep Sent Photos is on.</string>
 	<key>ITSAppUsesNonExemptEncryption</key>
 	<false/>
 	<key>UISupportedInterfaceOrientations</key>
