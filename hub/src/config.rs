@@ -21,6 +21,8 @@ pub struct Limits {
     pub commit_per_ip_minute: u32,
     /// Registrations by username: first come, first served, this many per address (spec 6.4).
     pub register_per_ip_hour: u32,
+    /// Whether a username is free, asked while it is typed (spec 6.3).
+    pub name_check_per_ip_minute: u32,
     /// Backup records fetched: by the user id or a locator, neither of which can be guessed (spec 7).
     pub backup_per_ip_hour: u32,
     pub envelope_ttl_days: u64,
@@ -43,6 +45,7 @@ impl Default for Limits {
             groups_per_ip_hour: 60,
             commit_per_ip_minute: 600,
             register_per_ip_hour: 10,
+            name_check_per_ip_minute: 60,
             backup_per_ip_hour: 10,
             envelope_ttl_days: 30,
             unsecured_idle_days: 90,
@@ -65,6 +68,7 @@ impl Limits {
             groups_per_ip_hour: u32::MAX,
             commit_per_ip_minute: u32::MAX,
             register_per_ip_hour: u32::MAX,
+            name_check_per_ip_minute: u32::MAX,
             backup_per_ip_hour: u32::MAX,
             envelope_ttl_days: 30,
             unsecured_idle_days: 90,

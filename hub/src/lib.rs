@@ -149,6 +149,7 @@ impl Hub {
             .route(api::LOOKUP, post(lookup))
             .route(api::PUSH, put(set_push))
             .route(api::USERNAME, put(set_username))
+            .route("/v1/username/{name}", get(username_free))
             .route(api::INBOX, get(inbox))
             .route(api::INBOX_ACK, post(ack))
             .route("/v1/inbox/{user}", post(deliver))
@@ -466,6 +467,24 @@ async fn register(
     handle.check()?;
     let checked = hub.check_new_device(&handle, &request.device)?;
     hub.register_checked(&handle, true, checked)
+}
+
+/// Whether a username is free, for the app while it is typed (spec 6.3): `204` free, `409` taken by anyone or
+/// reserved (to the app both are a name it cannot have), `400` not a canonical username. Compared by skeleton, as
+/// registration compares, so a lookalike of a taken name is taken. Nothing about the user is told.
+async fn username_free(
+    State(hub): Hubs,
+    ConnectInfo(peer): Peer,
+    headers: HeaderMap,
+    Path(name): Path<String>,
+) -> Res<StatusCode> {
+    hub.limit(format!("name:ip:{}", hub.ip(peer, &headers)), hub.config.limits.name_check_per_ip_minute, MINUTE)?;
+    yo_wire::handle::check_username_form(&name)?;
+    let handle = Handle::username(&name);
+    if yo_wire::handle::is_reserved(&name) || hub.db.handle_taken(KIND_USERNAME, &hub.stored_handle(&handle))? {
+        return Err(refuse(StatusCode::CONFLICT));
+    }
+    Ok(StatusCode::NO_CONTENT)
 }
 
 // ---- backups (spec 7) ----

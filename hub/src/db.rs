@@ -408,6 +408,11 @@ impl Db {
         Ok(Write::Done(()))
     }
 
+    /// Whether a handle (`value` as stored) belongs to anyone: what registration would find taken.
+    pub fn handle_taken(&self, kind: u8, value: &[u8]) -> rusqlite::Result<bool> {
+        self.conn().prepare_cached("SELECT 1 FROM handles WHERE kind = ?1 AND value = ?2")?.exists(params![kind, value])
+    }
+
     /// A user by a handle (`value` as stored: a phone number's HMAC, a username in upper case, a user id, an account
     /// key, which must be the user's current one): id, account key, devices and, if asked, one KeyPackage for each
     /// device not in `except`, a single-use one while there is one, else the last resort.

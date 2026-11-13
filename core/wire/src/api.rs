@@ -39,6 +39,20 @@ pub fn backup_path(id: &[u8]) -> String {
     format!("{BACKUP}/{}", crate::b64(id))
 }
 
+/// `GET /v1/username/{name}`: whether a username is free (spec 6.3). The name's UTF-8 percent-encoded, every byte
+/// but the unreserved ones of RFC 3986.
+pub fn username_path(name: &str) -> String {
+    let mut path = format!("{USERNAME}/");
+    for &b in name.as_bytes() {
+        if b.is_ascii_alphanumeric() || b"-._~".contains(&b) {
+            path.push(b as char);
+        } else {
+            path.push_str(&format!("%{b:02X}"));
+        }
+    }
+    path
+}
+
 /// `GET /v1/inbox?wait={s}`
 pub fn inbox_path(wait_s: u64) -> String {
     format!("{INBOX}?wait={wait_s}")
@@ -306,6 +320,13 @@ mod tests {
         assert_eq!(crate::decode::<Inbox>(&crate::encode(&inbox)).unwrap(), inbox);
         let backup = backup();
         assert_eq!(crate::decode::<Backup>(&crate::encode(&backup)).unwrap(), backup);
+    }
+
+    #[test]
+    fn usernames_are_percent_encoded_in_paths() {
+        assert_eq!(username_path("LEO_1"), "/v1/username/LEO_1");
+        assert_eq!(username_path("JOSÉ"), "/v1/username/JOS%C3%89");
+        assert_eq!(username_path("🔥/?"), "/v1/username/%F0%9F%94%A5%2F%3F");
     }
 
     fn backup() -> Backup {

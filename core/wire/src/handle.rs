@@ -89,14 +89,24 @@ impl Handle {
 /// A username (spec 3.3): 3 to 16 characters (grapheme clusters, NFC) of Latin letters with their accents, 0–9, `_`
 /// and emoji, starting with a letter or an emoji, in upper case (the canonical form), not reserved.
 pub fn check_username(name: &str) -> Result<(), Error> {
+    check_username_form(name)?;
+    (!is_reserved(name)).then_some(()).ok_or(Error::Format)
+}
+
+/// A username as it may be written, reserved or not: what the hub's name check refuses with `400` (spec 6.3).
+pub fn check_username_form(name: &str) -> Result<(), Error> {
     let graphemes: Vec<&str> = name.graphemes(true).collect();
     let ok = (3..=16).contains(&graphemes.len())
         && name.nfc().eq(name.chars())
         && name.to_uppercase() == name
         && graphemes.iter().all(|g| allowed(g))
-        && graphemes.first().is_some_and(|g| is_latin_letter(g) || is_emoji(g))
-        && !RESERVED.iter().any(|r| skeleton(r) == skeleton(name));
+        && graphemes.first().is_some_and(|g| is_latin_letter(g) || is_emoji(g));
     ok.then_some(()).ok_or(Error::Format)
+}
+
+/// A name nobody may claim, or one that looks like it.
+pub fn is_reserved(name: &str) -> bool {
+    RESERVED.iter().any(|r| skeleton(r) == skeleton(name))
 }
 
 /// What a person typed, as a username can be: upper case, NFC, only the allowed characters, a letter or an emoji

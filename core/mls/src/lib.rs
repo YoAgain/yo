@@ -315,6 +315,18 @@ impl Client {
         }
     }
 
+    /// Whether a username is free (spec 6.3), asked while it is typed, before there is an account. `username` is
+    /// canonical (upper case, NFC; `handle::canonical` keeps a field to that). False when it is taken, also as a name
+    /// that looks like it, or reserved; `Refused(400)` when it is no username, `Refused(429)` when asked too often.
+    pub fn username_free(transport: &dyn Transport, username: &str) -> Result<bool> {
+        let response = transport.request("GET", &api::username_path(username), &[], &[]).map_err(Error::Network)?;
+        match response.status {
+            status::NO_CONTENT => Ok(true),
+            status::CONFLICT => Ok(false),
+            _ => Err(refused(&response)),
+        }
+    }
+
     /// A device's keys, certificate and first KeyPackages, and the proof of possession over the handle it registers
     /// with (spec 6.4).
     fn new_device(

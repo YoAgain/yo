@@ -408,6 +408,8 @@ fn the_hub_survives_garbage_on_every_route() {
         ("PUT", api::BACKUP.to_owned()),
         ("GET", api::backup_path(&[1; 16])),
         ("GET", "/v1/backup/!!".to_owned()),
+        ("GET", api::username_path("LEO")),
+        ("GET", "/v1/username/%FF%00".to_owned()),
     ];
     let mut seed = 0x9E37_79B9_7F4A_7C15u64;
     for (method, path) in routes {
@@ -485,6 +487,31 @@ fn a_username_is_all_it_takes() {
     assert_eq!(by_name(&hub, &name, None).err(), Some(Error::Refused(api::status::CONFLICT)));
     let lookalike = name.replacen('O', "0", 1);
     assert_eq!(by_name(&hub, &lookalike, None).err(), Some(Error::Refused(api::status::CONFLICT)));
+}
+
+#[test]
+fn whether_a_name_is_free_is_told_and_nothing_more() {
+    let mut config = yo_hub::config::Config::for_tests();
+    config.limits.name_check_per_ip_minute = 8;
+    let hub = TestHub::start_with(config, "127.0.0.1:0");
+    let http = Http::new(hub.url());
+    let free = |name: &str| Client::username_free(http.as_ref(), name);
+    let name = format!("LEO{}", random_u64() % 100_000);
+    assert_eq!(free(&name), Ok(true));
+    let emoji = format!("🔥É{}", random_u64() % 100_000);
+    assert_eq!(free(&emoji), Ok(true), "percent-encoded on the way");
+    by_name(&hub, &name, None).unwrap();
+    assert_eq!(free(&name), Ok(false));
+    // A name that only looks like it is taken too (spec 3.3), and so is a reserved one.
+    assert_eq!(free(&name.replacen('O', "0", 1)), Ok(false));
+    assert_eq!(free("ADMIN"), Ok(false));
+    // Not canonical, not a username: the app keeps its field to `handle::canonical`.
+    assert_eq!(free(&name.to_lowercase()), Err(Error::Refused(api::status::BAD_REQUEST)));
+    assert_eq!(free("X"), Err(Error::Refused(api::status::BAD_REQUEST)));
+    // The empty answer says only that: no user id.
+    let raw = yo_core::Transport::request(http.as_ref(), "GET", &api::username_path(&name), &[], &[]).unwrap();
+    assert!(raw.body.is_empty());
+    assert_eq!(free(&name), Err(Error::Refused(api::status::RATE_LIMITED)));
 }
 
 /// Registers by username, with a new account key or the given one.

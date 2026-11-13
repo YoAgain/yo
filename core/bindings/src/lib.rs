@@ -205,6 +205,13 @@ pub fn fetch_backup(transport: Arc<dyn HttpTransport>, id: Vec<u8>) -> Result<Op
     Ok(Client::fetch_backup(&Http(transport), &id)?.map(Into::into))
 }
 
+/// Whether a username is free, asked while it is typed; the name canonical (upper case, NFC). False when it is taken,
+/// also as a name that looks like it, or reserved. `Refused { status: 400 }`: no username; `429`: asked too often.
+#[uniffi::export]
+pub fn username_free(transport: Arc<dyn HttpTransport>, username: String) -> Result<bool, YoError> {
+    Ok(Client::username_free(&Http(transport), &username)?)
+}
+
 #[derive(uniffi::Object)]
 pub struct YoClient {
     client: Mutex<Client>,
