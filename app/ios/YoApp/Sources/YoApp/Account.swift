@@ -233,10 +233,16 @@ final class AccountStore {
 
   func markWordsSaved(_ saved: Bool) { wordsSaved = saved }
 
+  /// The passkey was turned off on purpose: a choice, so it is not asked for again (no badge, no guide for it).
+  private(set) var passkeyTurnedOff: Bool = UserDefaults.standard.bool(forKey: "passkey.turnedOff") {
+    didSet { UserDefaults.standard.set(passkeyTurnedOff, forKey: "passkey.turnedOff") }
+  }
+
   /// What is left to do, for the badges: the passkey, the words saved; 0 once both are done.
   var toDo: Int {
     guard let account else { return 0 }
-    return !account.byPasskey || !account.secured || !wordsSaved ? 1 : 0
+    let passkeyLeft = !account.byPasskey && !passkeyTurnedOff
+    return passkeyLeft || !account.secured || !wordsSaved ? 1 : 0
   }
 
   private static let key = "account"
@@ -335,6 +341,7 @@ final class AccountStore {
     record.sealed = try BackupRecord.seal(account, code: code, with: k)
     MockHub.save(record, for: account.username)
     self.account = account
+    passkeyTurnedOff = false
   }
 
   /// The passkey no longer opens the backup; the words still do. (The passkey itself is deleted in the password
@@ -346,6 +353,7 @@ final class AccountStore {
     record.sealed = try BackupRecord.seal(account, code: code, with: k)
     MockHub.save(record, for: account.username)
     self.account = account
+    passkeyTurnedOff = true
   }
 
   /// New recovery words; the old ones stop working.
@@ -381,6 +389,7 @@ final class AccountStore {
     record.sealed = try BackupRecord.seal(account, code: code, with: k)
     MockHub.save(record, for: account.username)
     self.account = account
+    passkeyTurnedOff = false
   }
 
   /// A new phone: any Yo passkey of this person, asked once; its user handle says whose backup to open.

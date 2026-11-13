@@ -42,7 +42,8 @@ struct SecureNameSheet: View {
     .onAppear {
       guard words.isEmpty else { return }
       words = secured ? RecoveryWords.load() ?? [] : accounts.secureWords()
-      page = start ?? (passkeyDone ? .words : .passkey)
+      skipped = accounts.passkeyTurnedOff && start != .passkey  // turned off on purpose: not asked again
+      page = start ?? (passkeyDone || skipped ? .words : .passkey)
     }
   }
 
