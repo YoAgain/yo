@@ -43,6 +43,12 @@ struct FriendList: View {
   // Sending
   /// What each bar says for a moment after a send ("Sent Yo!", "Not sent").
   @State private var sent: [Friend: String] = [:]
+  /// Sends whose 1.5 seconds are still running, by name; each tap starts them again (a bar under taps stays put).
+  @State private var sentRounds: [String: Int] = [:]
+  /// How often each friend went on top: a new identity each time, so the bar leaves its place and comes in on top.
+  @State private var lifts: [String: Int] = [:]
+  /// The friends whose bars are on screen now.
+  @State private var onScreen: Set<String> = []
   /// Counts sends, for the haptic.
   @State private var sends = 0
   /// Photos and videos on their way out, per friend, each with when it started; any number at once (a tap on the bar
@@ -76,9 +82,17 @@ struct FriendList: View {
   @State private var viewing: [Arrival]?
   @State private var shown: [Arrival] = []
 
+  /// A friend with how often they went on top: their identity in the list.
+  struct Lifted: Identifiable {
+    let friend: Friend
+    let lifts: Int
+    var id: String { "\(friend.name)#\(lifts)" }
+  }
+
   struct Landing: Equatable {
     let key: String
-    let at: Date
+    /// When it was first on screen: its time runs from then (nil while its bar is out of sight).
+    var at: Date?
     var count: Int
   }
 
@@ -103,9 +117,11 @@ struct FriendList: View {
     NavigationStack {
       ScrollView {
         LazyVStack(spacing: 0) {
-          ForEach(friends.all) { friend in
-            row(friend)
-              .id(friend.name)
+          // Going on top is a delete and an insert (as Signal's chat list does): the gap closes below, the bar comes in
+          // from the top; it does not fly across the list.
+          ForEach(friends.all.map { Lifted(friend: $0, lifts: lifts[$0.name] ?? 0) }) { lifted in
+            row(lifted.friend)
+              .transition(.asymmetric(insertion: .move(edge: .top).combined(with: .opacity), removal: .opacity))
           }
           addRow
         }
@@ -114,6 +130,9 @@ struct FriendList: View {
       .scrollBounceBehavior(.basedOnSize)
       .scrollDismissesKeyboard(.interactively)
       .scrollPosition($position)
+      .onScrollTargetVisibilityChange(idType: String.self, threshold: 0.6) { ids in
+        onScreen = Set(ids.map { String($0[..<($0.lastIndex(of: "#") ?? $0.endIndex)]) })
+      }
       // No bar behind the controls: they float as glass over the list, and at the top the background is the brand's
       // Amethyst exactly. The status bar keeps the system's soft edge, so the clock stays readable over the bars.
       .toolbarBackgroundVisibility(.hidden, for: .navigationBar)
@@ -152,10 +171,13 @@ struct FriendList: View {
   /// legible. The pill grows with every "!".
   private var title: some View {
     VStack(spacing: 0) {
-      HStack(spacing: 0) {
-        Text("Yo")
-        ForEach(0..<bangs, id: \.self) { _ in
-          Text("!").transition(.blurReplace(.upUp))
+      // "Yo" and the "!"s, a new line when one is full: the pill grows down, never under the buttons beside it.
+      ForEach(Self.lines(bangs), id: \.lowerBound) { line in
+        HStack(spacing: 0) {
+          if line.lowerBound == 0 { Text("Yo") }
+          ForEach(line, id: \.self) { _ in
+            Text("!").transition(.blurReplace(.upUp))
+          }
         }
       }
       if cameraOn {
@@ -170,10 +192,20 @@ struct FriendList: View {
     .foregroundStyle(.white)
     .lineLimit(1)
     .padding(.horizontal, 16)
-    .fixedSize(horizontal: true, vertical: false)
-    .frame(height: Metrics.titleHeight)
-    .glassEffect(scrolled ? .regular : .identity, in: .capsule)
+    .fixedSize()
+    .frame(minHeight: Metrics.titleHeight)
+    .glassEffect(scrolled ? .regular : .identity, in: .rect(cornerRadius: Metrics.titleHeight / 2))
     .accessibilityAddTraits(.isHeader)
+  }
+
+  /// The "!"s by line: twelve after "Yo", sixteen on each line below.
+  private static func lines(_ bangs: Int) -> [Range<Int>] {
+    var lines = [0..<min(bangs, 12)]
+    while lines.last!.upperBound < bangs {
+      let start = lines.last!.upperBound
+      lines.append(start..<min(bangs, start + 16))
+    }
+    return lines
   }
 
   // MARK: Bars
@@ -199,7 +231,7 @@ struct FriendList: View {
     } else {
       bar
         .contextMenu {
-          Button("Remove \(friend.name)", systemImage: "trash", role: .destructive) { friends.remove(friend) }
+          Button("Remove \(friend.name)", systemImage: "trash", role: .destructive) { withAnimation(.snappy) { friends.remove(friend) } }
         }
     }
   }
@@ -239,7 +271,7 @@ struct FriendList: View {
   }
 
   private func add() {
-    friends.add(newName)
+    withAnimation(.snappy) { friends.add(newName) }
     newName = ""
     adding = false
   }
@@ -301,8 +333,7 @@ struct FriendList: View {
     picked = nil
     libraryItem = nil
     guard cameraOn || library != nil else {
-      toTop(friend.name)  // on top at once, "Sent Yo!" there
-      showSent(to: friend, "Sent Yo!")
+      showSent(to: friend, "Sent Yo!", thenOnTop: true)
       Task { await inbox.fakeYo(from: friend.name, after: delay) }
       return
     }
@@ -356,8 +387,7 @@ struct FriendList: View {
       outgoing[friend]?.removeAll { $0 == one }
       if outgoing[friend]?.isEmpty == true { outgoing[friend] = nil }
       guard let prepared else { return showSent(to: friend, "Not sent") }
-      toTop(friend.name)  // it went: on top now
-      showSent(to: friend, text)
+      showSent(to: friend, text, thenOnTop: true)
       await prepared.send()
     }
   }
@@ -378,13 +408,18 @@ struct FriendList: View {
     showSent(to: friend, "Not sent")
   }
 
-  /// What the bar says after a send, for 1.5 seconds as in the original.
-  private func showSent(to friend: Friend, _ text: String) {
+  /// What the bar says after a send, for 1.5 seconds as in the original; then a bar that sent goes on top. Another tap
+  /// within them starts them again, so the bar never slides away under a finger tapping it again and again.
+  private func showSent(to friend: Friend, _ text: String, thenOnTop: Bool = false) {
     sent[friend] = text
+    let round = (sentRounds[friend.name] ?? 0) + 1
+    sentRounds[friend.name] = round
     Task {
       try? await Task.sleep(for: .seconds(1.5))
-      guard sent[friend] == text else { return }
+      guard sentRounds[friend.name] == round else { return }  // tapped again meanwhile
+      sentRounds[friend.name] = nil
       withAnimation(.snappy) { sent[friend] = nil }
+      if thenOnTop { toTop(friend.name) }
     }
   }
 
@@ -420,6 +455,7 @@ extension FriendList {
   private func changes(_ content: some View) -> some View {
     content
       .onChange(of: inbox.arrivals.count) { _, count in arrived(count) }
+      .onChange(of: onScreen) { startClocks() }
       .onChange(of: libraryItem) { _, item in load(item) }
       .onChange(of: cameraOn) { _, on in cameraSwitched(on) }
       .onDisappear { cameraOn = false }
@@ -462,33 +498,51 @@ extension FriendList {
       try? await Task.sleep(for: .seconds(delay))
       cheers += 1
       lastCheer = .now
-      toTop(name)  // on top at once, the Yo on it in the same moment
+      if sentRounds[name] == nil { toTop(name) }  // a bar being tapped goes on top when the taps are over
       withAnimation(.spring(duration: 0.3, bounce: 0.6)) {
         bangs += 1
         let count = (landed[name]?.count ?? 0) + 1
-        landed[name] = Landing(key: arrival.id, at: .now, count: count)
+        landed[name] = Landing(key: arrival.id, at: nil, count: count)
       }
-      try? await Task.sleep(for: .seconds(1.0))
-      // The burst is over when no Yo came for a second: the "!"s fold away together.
-      if Date.now.timeIntervalSince(lastCheer) >= 0.95 {
-        withAnimation(.spring(duration: 0.35, bounce: 0.2)) { bangs = 0 }
+      try? await Task.sleep(for: .milliseconds(150))  // the list has laid out where the bar is now
+      startClocks()
+      try? await Task.sleep(for: .seconds(0.85))
+      foldBangs()
+    }
+  }
+
+  /// Yos whose bars are on screen now start their time (`yoSeconds`); one out of sight waits, its "!" in the title.
+  private func startClocks() {
+    for (name, landing) in landed where landing.at == nil && onScreen.contains(name) {
+      landed[name]?.at = .now
+      Task {
+        try? await Task.sleep(for: .seconds(Self.yoSeconds))
+        if landed[name]?.key == landing.key {
+          withAnimation(.smooth) { _ = landed.removeValue(forKey: name) }
+        }
       }
-      try? await Task.sleep(for: .seconds(Self.yoSeconds - 1.0))
-      if landed[name]?.key == arrival.id {
-        withAnimation(.smooth) { _ = landed.removeValue(forKey: name) }
+      Task {
+        try? await Task.sleep(for: .seconds(1.0))
+        foldBangs()
       }
     }
   }
 
-  /// A friend goes on top, and the list with them: to its very start, below the title (scrolling to the bar itself
-  /// would leave it behind the bar of buttons). At once, as in the original: a bar sliding up first and its Yo coming
-  /// after reads as two events.
+  /// The "!"s fold away together when the burst is over (no Yo for a second) and every Yo of it has been on screen.
+  private func foldBangs() {
+    guard bangs > 0, Date.now.timeIntervalSince(lastCheer) >= 0.95, !landed.values.contains(where: { $0.at == nil })
+    else { return }
+    withAnimation(.spring(duration: 0.35, bounce: 0.2)) { bangs = 0 }
+  }
+
+  /// A friend goes on top. At the top of the list the list stays at its very start, so the bar is in sight below the
+  /// title; scrolled down, the view stays where it is (the title's "!" tells, and the Yo waits until it is seen).
   private func toTop(_ name: String) {
-    var now = Transaction()
-    now.disablesAnimations = true
-    withTransaction(now) {
+    guard let index = friends.all.firstIndex(where: { $0.name == name }), index != 0 else { return }
+    withAnimation(.snappy(duration: 0.35)) {
+      lifts[name, default: 0] += 1
       friends.promote(name)
-      position.scrollTo(edge: .top)
+      if !scrolled { position.scrollTo(edge: .top) }
     }
   }
 
@@ -687,7 +741,7 @@ struct RowButton: View {
     } else if let yo {
       // Full for a moment, then slowly fading out.
       TimelineView(.animation) { timeline in
-        let age = timeline.date.timeIntervalSince(yo.at)
+        let age = yo.at.map { timeline.date.timeIntervalSince($0) } ?? 0  // full until it is seen
         HStack(alignment: .firstTextBaseline, spacing: 6) {
           if yo.count > 1 { count(yo.count) }
           Text("Yo").font(.yo(Metrics.rowFont)).foregroundStyle(.white)
@@ -711,9 +765,10 @@ struct RowButton: View {
 /// behind it).
 struct Knock: ViewModifier {
   let trigger: String?
+  @State private var knocks = 0
 
   func body(content: Content) -> some View {
-    content.keyframeAnimator(initialValue: 0.0, trigger: trigger) { words, x in
+    content.keyframeAnimator(initialValue: 0.0, trigger: knocks) { words, x in
       words.offset(x: x)
     } keyframes: { _ in
       KeyframeTrack {
@@ -725,6 +780,13 @@ struct Knock: ViewModifier {
         SpringKeyframe(-4, duration: 0.09)
         SpringKeyframe(0, duration: 0.2)
       }
+    }
+    .onChange(of: trigger) { _, new in
+      if new != nil { knocks += 1 }
+    }
+    // A bar that comes in on top already carrying its Yo knocks as it arrives.
+    .onAppear {
+      if trigger != nil { knocks += 1 }
     }
   }
 }
