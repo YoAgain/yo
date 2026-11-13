@@ -1,6 +1,6 @@
 // The hub, through the Rust core (`YoCore`, spec 6): which hub (live, or the dev one while Yo is in development), HTTP
-// for the core, the file its sealed state lives in and the key that seals it. Every core call blocks: `Hub.run` takes
-// it off the main actor.
+// for the core, the file its sealed state lives in and the key that seals it. Every core call blocks, also on another
+// call still at the hub (the core does one at a time): `Hub.run` takes it off the main actor, and none is made there.
 import Foundation
 import Security
 import YoCore
@@ -16,10 +16,16 @@ enum Hub {
   static var url: URL { isDevApp ? dev : live }
   static var transport: HubTransport { HubTransport(base: url) }
 
-  /// A blocking core call, off the main actor.
+  /// A blocking core call, off the main actor: on threads of its own, not Swift's few shared ones. A core call waits
+  /// for the network and for the core (one call at a time); blocked there, a burst of calls would hold every shared
+  /// thread, and everything else async (the inbox's long wait too) would stand still.
   static func run<T: Sendable>(_ work: @escaping @Sendable () throws -> T) async throws -> T {
-    try await Task.detached(priority: .userInitiated) { try work() }.value
+    try await withCheckedThrowingContinuation { done in
+      queue.async { done.resume(with: Result { try work() }) }
+    }
   }
+
+  private static let queue = DispatchQueue(label: "app.justyo.hub", qos: .userInitiated, attributes: .concurrent)
 
   /// The user id as the core writes it (32 hex digits) as its 16 bytes: a passkey's user handle, the backup's id
   /// (spec 7).

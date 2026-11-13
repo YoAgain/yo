@@ -39,8 +39,12 @@ struct FriendList: View {
   // The list
   @State private var adding = false
   @State private var newName = ""
-  /// "That’s you", for a moment in the empty field, when the name typed is one's own (a Yo to oneself has no chat).
-  @State private var ownName = false
+  /// What the empty field says for a moment instead of "Name": "yogpt…" while the hub is asked who it is, "No Such
+  /// User" when nobody has that name (it is not added, as in the original), "That’s you" for one's own (a Yo to
+  /// oneself has no chat).
+  @State private var hint: String?
+  /// Names submitted (and hints shown): only the newest one's answer and hint touch the field.
+  @State private var submitted = 0
   @FocusState private var typing: Bool
   @State private var settings = false
   @State private var position = ScrollPosition(idType: String.self)
@@ -322,7 +326,7 @@ struct FriendList: View {
   @ViewBuilder private var addRow: some View {
     let color = Color.row(friends.nextColor).opacity(cameraOn ? 0.45 : 1)  // the colour the new friend will have
     if adding {
-      TextField("", text: $newName, prompt: Text(ownName ? "That’s you" : "Name").foregroundStyle(.white.opacity(0.6)))
+      TextField("", text: $newName, prompt: Text(hint ?? "Name").foregroundStyle(.white.opacity(0.6)))
         .font(.yo(Metrics.rowFont))
         .foregroundStyle(.white)
         .tint(.white)
@@ -345,23 +349,49 @@ struct FriendList: View {
     }
   }
 
+  /// The name typed, once the hub said who it is: added as its owner writes it ("yogpt" becomes "YoGPT"); nobody by
+  /// that name: not added; no answer (offline): added as typed, looked up again when the list opens.
   private func add() {
-    if ownName && newName.isEmpty { return }  // the hint stays a moment, then the bar closes
-    if let me = accounts.account?.username, !newName.isEmpty,
-      Username.skeleton(Username.clean(newName)) == Username.skeleton(me)
-    {
-      newName = ""
-      ownName = true
-      Task {
-        try? await Task.sleep(for: .seconds(1.5))
-        ownName = false
-        if newName.isEmpty && !typing { adding = false }
-      }
+    if hint != nil && newName.isEmpty { return }  // the hint stays a moment, then the bar closes
+    let name = Username.clean(newName)
+    newName = ""
+    guard !name.isEmpty else {
+      adding = false
       return
     }
-    withAnimation(.snappy) { friends.add(newName) }
-    newName = ""
-    adding = false
+    if let me = accounts.account?.username, Username.skeleton(name) == Username.skeleton(me) {
+      return say("That’s you")
+    }
+    submitted += 1
+    let this = submitted
+    hint = "\(name)…"
+    Task {
+      switch await inbox.lookUp(name, accounts: accounts) {
+      case .noSuchUser:
+        if submitted == this { say("No Such User") }
+        return
+      case .found(let user, let spelled):
+        withAnimation(.snappy) { friends.add(spelled ?? name, user: user) }
+      case .unknown:
+        withAnimation(.snappy) { friends.add(name) }
+      }
+      guard submitted == this else { return }  // another name came meanwhile: the field is its
+      hint = nil
+      if newName.isEmpty && !typing { adding = false }
+    }
+  }
+
+  /// A hint in the empty field for a moment; then the bar closes unless something is typed.
+  private func say(_ text: String) {
+    submitted += 1
+    let this = submitted
+    hint = text
+    Task {
+      try? await Task.sleep(for: .seconds(1.5))
+      guard submitted == this else { return }
+      hint = nil
+      if newName.isEmpty && !typing { adding = false }
+    }
   }
 
   // MARK: Camera mode

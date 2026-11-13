@@ -63,18 +63,76 @@ final class Inbox {
   // MARK: The hub
 
   /// A Yo to a friend through the hub (spec 4.7): by user id once known, else by name (the first Yo makes the chat).
-  /// Nil when it went; else what the bar says instead.
+  /// Nil when it went; else what the bar says instead. A friend's Yos go one after the other, in the order tapped (a
+  /// burst waits here, not in threads blocked on the core); Yos to other friends go meanwhile.
   func send(to friend: Friend, accounts: AccountStore, friends: Friends) async -> String? {
+    let key = Username.skeleton(friend.name)
+    let before = lastSend[key]
+    let this = Task {
+      _ = await before?.value
+      return await sendNow(to: friend, accounts: accounts, friends: friends)
+    }
+    lastSend[key] = this
+    let problem = await this.value
+    if lastSend[key] == this { lastSend[key] = nil }
+    return problem
+  }
+
+  /// Each friend's newest send, which the next one to them waits for.
+  @ObservationIgnored private var lastSend: [String: Task<String?, Never>] = [:]
+
+  /// What the hub says a typed name is.
+  enum Lookup {
+    /// The user id, and the name as its owner writes it ("YoGPT").
+    case found(user: String, name: String?)
+    case noSuchUser
+    /// No answer (offline, the hub's trouble).
+    case unknown
+  }
+
+  /// Who a typed name is, asked of the hub (no chat, no KeyPackage).
+  func lookUp(_ name: String, accounts: AccountStore) async -> Lookup {
+    guard let client = accounts.client else { return .unknown }
+    do {
+      guard let found = try await Hub.run({ try client.whois(name: name) }) else { return .noSuchUser }
+      return .found(user: found.user, name: found.username)
+    } catch {
+      return .unknown
+    }
+  }
+
+  /// Friends added by a typed name while the hub could not be asked: asked now, so each shows as its owner writes it
+  /// ("yogpt" becomes "YoGPT"). One the hub does not know stays as typed (a Yo to it says "Not on Yo").
+  func identify(_ names: [String], accounts: AccountStore, friends: Friends) async {
+    for name in names {
+      if case .found(let user, let spelled) = await lookUp(name, accounts: accounts) {
+        friends.found(name, user: user, spelled: spelled)
+      }
+    }
+  }
+
+  /// When the list opens: friends take the spellings the core knows, and up to 20 still known only by a typed name
+  /// are looked up (once per opening, so the hub is not asked again and again).
+  private func respell(client: YoClient, accounts: AccountStore, friends: Friends) async {
+    if let contacts = try? await Hub.run({ client.contacts() }) { friends.spell(contacts) }
+    let typed = friends.all.filter { $0.user == nil && !$0.blocked }.prefix(20).map(\.name)
+    await identify(Array(typed), accounts: accounts, friends: friends)
+  }
+
+  private func sendNow(to friend: Friend, accounts: AccountStore, friends: Friends) async -> String? {
     guard let client = accounts.client else { return "Not Sent" }
     let target = friend.user ?? friend.name
     do {
-      let events = try await Hub.run { try client.sendYo(to: target) }
-      if friend.user == nil, let contact = client.contacts().first(where: { contact in
+      let (events, contacts, waiting) = try await Hub.run {
+        (try client.sendYo(to: target), client.contacts(), client.waiting())
+      }
+      if waiting > 0 { deliverLater(accounts: accounts, friends: friends) }
+      if friend.user == nil, let contact = contacts.first(where: { contact in
         contact.handles.contains { Username.skeleton($0) == Username.skeleton(friend.name) }
       }) {
         _ = friends.friend(user: contact.user, handles: contact.handles)
       }
-      take(events, client: client, friends: friends)
+      await take(events, contacts: contacts, client: client, friends: friends)
       Stats.sentYo(to: friend.name)
       return nil
     } catch YoError.NotOnYo {
@@ -89,17 +147,53 @@ final class Inbox {
     }
   }
 
+  /// Yos the hub did not take yet (it takes so many a minute from one sender, spec 6.6; or no network): sent again
+  /// from the core's outbox, in their order, after a second, then less and less often (up to half a minute), until
+  /// none waits. Receiving goes on meanwhile; nothing is lost.
+  private func deliverLater(accounts: AccountStore, friends: Friends) {
+    deliverAgain = true
+    guard delivering == nil else { return }
+    delivering = Task {
+      var pause = 1.0
+      var before = UInt32.max
+      while let client = accounts.client, !Task.isCancelled {
+        deliverAgain = false
+        try? await Task.sleep(for: .seconds(pause))
+        guard let (events, contacts, waiting) = try? await Hub.run({
+          (try client.deliver(), client.contacts(), client.waiting())
+        }) else {
+          pause = min(pause * 2, 30)
+          continue
+        }
+        await take(events, contacts: contacts, client: client, friends: friends)
+        if waiting == 0 && !deliverAgain { break }  // none waits, and no send asked meanwhile
+        pause = waiting < before ? 1 : min(pause * 2, 30)  // going out: at the hub's pace; else waiting longer
+        before = waiting
+      }
+      delivering = nil
+    }
+  }
+
+  /// The outbox being sent again (`deliverLater`), and whether a send asked for it since the last look.
+  @ObservationIgnored private var delivering: Task<Void, Never>?
+  @ObservationIgnored private var deliverAgain = false
+
   /// While the list is on screen: waits at the hub for Yos (spec 6.3, the inbox's long wait) and shows each on its
   /// sender's bar. A pause after an error; this phone replaced elsewhere: signed out.
   func listen(accounts: AccountStore, friends: Friends) async {
+    var respelled = false
     while !Task.isCancelled {
       guard let client = accounts.client else {
         try? await Task.sleep(for: .seconds(1))
         continue
       }
+      if !respelled {
+        respelled = true
+        Task { await respell(client: client, accounts: accounts, friends: friends) }
+      }
       do {
-        let events = try await Hub.run { try client.sync(waitS: 25) }
-        take(events, client: client, friends: friends)
+        let (events, contacts) = try await Hub.run { (try client.sync(waitS: 25), client.contacts()) }
+        await take(events, contacts: contacts, client: client, friends: friends)
       } catch YoError.Replaced {
         accounts.reset()
         return
@@ -110,9 +204,9 @@ final class Inbox {
   }
 
   /// What the core handed over: a Yo shows on its sender's bar, a new chat brings its friend into the list. Then the
-  /// core may forget them (they will not come again after a crash).
-  private func take(_ events: [YoEvent], client: YoClient, friends: Friends) {
-    let contacts = client.contacts()
+  /// core may forget them (they will not come again after a crash). `contacts`: the core's, read with the events.
+  private func take(_ events: [YoEvent], contacts: [YoContact], client: YoClient, friends: Friends) async {
+    guard !events.isEmpty else { return }
     func friend(_ user: String) -> Friend {
       friends.friend(user: user, handles: contacts.first { $0.user == user }?.handles ?? [])
     }
@@ -129,7 +223,7 @@ final class Inbox {
         break
       }
     }
-    if !events.isEmpty { client.acknowledgeEvents() }
+    _ = try? await Hub.run { client.acknowledgeEvents() }
   }
 
   private static func firstFrame(of video: URL) async -> UIImage? {

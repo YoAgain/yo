@@ -1,9 +1,11 @@
 // Your friends: usernames you add, and whoever sends you a Yo, kept on this phone in the original's order: whoever you
 // last sent a Yo to or got one from is on top. Each keeps a colour of the original's palette wherever they go. A friend
-// learns its user id (the hub's, spec 3) with the first Yo either way.
+// learns its user id (the hub's, spec 3) and its owner's spelling as soon as the hub is asked who the typed name is, else
+// with the first Yo.
 import Foundation
 import Observation
 import SwiftUI
+import YoCore
 
 struct Friend: Codable, Hashable, Identifiable {
   /// Their username, as they write it ("Leo"); as typed until the hub told their spelling.
@@ -87,6 +89,24 @@ final class Friends {
     }
     add(spelled ?? handles.first ?? "?", user: user)
     return all.first { $0.user == user } ?? Friend(name: spelled ?? handles.first ?? "?", color: 0, user: user)
+  }
+
+  /// What the hub says a typed name is (`Inbox.identify`): the friend added by it learns the user id and takes the
+  /// owner's spelling. A friend removed meanwhile stays removed.
+  func found(_ name: String, user: String, spelled: String?) {
+    let skeleton = Username.skeleton(name)
+    guard all.contains(where: { $0.user == nil && Username.skeleton($0.name) == skeleton }) else { return }
+    _ = friend(user: user, handles: [spelled ?? name])
+  }
+
+  /// The core's contacts: friends already on the list take the spelling it knows now (a friend is never added here).
+  func spell(_ contacts: [YoContact]) {
+    for contact in contacts {
+      let skeletons = Set(contact.handles.map(Username.skeleton))
+      if all.contains(where: { $0.user == contact.user || ($0.user == nil && skeletons.contains(Username.skeleton($0.name))) }) {
+        _ = friend(user: contact.user, handles: contact.handles)
+      }
+    }
   }
 
   /// A Yo went to or came from `name`: they go on top (the original's promoteObjectToTop).
