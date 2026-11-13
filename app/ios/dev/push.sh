@@ -15,6 +15,7 @@ OAD=${OAD:-$(cd "$app/../../../.." && pwd)/omarchy-apple-dev}
 [ -x "$OAD/device-run.sh" ] || { echo "omarchy-apple-dev not found at $OAD (set OAD)" >&2; exit 2; }
 [[ $PHONE =~ ^[0-9.]+$ ]] || PHONE=$(tailscale ip -4 "$PHONE" 2>/dev/null)
 PATH="$(dirname "$(readlink -f "$(command -v swift)")"):$HOME/.local/bin:$PATH"
+"$here/core.sh"   # the Rust core and its Swift bindings, into YoApp/build/core
 cd "$app"
 xtool dev build --configuration release   # optimised: SwiftUI in debug is noticeably slower
 mkdir -p build

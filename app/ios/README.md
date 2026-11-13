@@ -19,6 +19,7 @@ push).
 ## Build and run
 
 ```sh
+app/ios/dev/core.sh   # the Rust core first: YoApp/build/core (ignored), again after a change in core/
 cd app/ios/YoApp
 xtool dev build   # -> xtool/YoApp.app
 xtool dev run     # build, sign with your Apple ID, install and launch on the iPhone over USB
@@ -36,4 +37,16 @@ Once before: pair over USB (`tools/tailnet-tunnel.py pair` in omarchy-apple-dev)
 repository; this machine's phone address and paths go in `dev/local.env` (ignored). The scripts run with
 pymobiledevice3's Python (`PY` in `local.env`).
 
-Later the Rust core comes in as a Swift package (`core/bindings`, UniFFI).
+## The Rust core
+
+`core/bindings` (UniFFI) comes in as the module `YoCore`: `import YoCore`, then `YoClient`, `fetchBackup`,
+`requestCode` and the `HttpTransport` and `StateStore` protocols the app implements. Every call blocks; make it off
+the main thread. `dev/core.sh` builds it on Linux and `dev/push.sh` runs it first:
+
+- `cargo rustc --crate-type staticlib --target aarch64-apple-ios` with the host's rustup (once:
+  `rustup target add aarch64-apple-ios`) against the iPhoneOS SDK of the darwin Swift SDK, small (opt-level s, fat
+  LTO), in `target/ios`;
+- compiler-rt's C members dropped from the archive, which `ld64.lld` would otherwise call duplicates of
+  `libclang_rt.ios.a`;
+- `uniffi-bindgen` in library mode reads the interface from `libyo.a`: `yo.swift` becomes the target `YoCore`,
+  `yoFFI.h` with its module map and the library a hand-made `yoFFI.xcframework` (binary target `yoFFI`).

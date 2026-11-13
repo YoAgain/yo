@@ -11,7 +11,11 @@ let package = Package(
     .library(name: "YoApp", targets: ["YoApp"]),
   ],
   targets: [
-    .target(name: "YoApp"),
+    .target(name: "YoApp", dependencies: ["YoCore"]),
+    // The Rust core (core/bindings) through UniFFI: `import YoCore`. ../dev/core.sh makes both into build/core
+    // (ignored); run it before the first build and after a change in core/ (dev/push.sh does).
+    .target(name: "YoCore", dependencies: ["yoFFI"], path: "build/core/swift"),
+    .binaryTarget(name: "yoFFI", path: "build/core/yoFFI.xcframework"),
   ],
   swiftLanguageModes: [.v6]
 )
