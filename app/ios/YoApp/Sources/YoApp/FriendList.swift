@@ -104,16 +104,17 @@ struct FriendList: View {
     var id: String { "\(friend.name)#\(lifts)" }
   }
 
-  /// The Yos on a bar now, each with its own time: it stands `yoSolidSeconds` from when it is first seen. Then the
-  /// oldest takes its "!" away (the last "!" stands for the oldest); the last Yo of all fades out slowly.
+  /// The Yos on a bar now, a stack: each new one adds a "!" and starts the stack's time again. Only when none came for
+  /// `yoSolidSeconds` (counted while the bar is on screen) do the "!"s go, one quickly after the other, and the last
+  /// Yo fades out slowly.
   struct Landing: Equatable {
     /// The first Yo of this run: it knocks; the ones after only add a "!".
     var first: String
-    /// When each was first on screen, oldest first; nil while its bar is out of sight.
-    var seen: [Date?]
+    var count: Int
+    /// When the stack's time last started; nil while its bar has not been on screen.
+    var seen: Date?
     /// The last one is fading out since then.
     var fading: Date?
-    var count: Int { seen.count }
   }
 
   var body: some View {
@@ -222,6 +223,7 @@ struct FriendList: View {
     let waiting = inbox.media[friend.name] ?? []
     let bar = RowButton(
       rowTitle(friend),
+      count: rowCount(friend),
       color: .row(friend.color).opacity(cameraOn ? 0.45 : 1),  // see-through over the camera
       recording: recordingFor == friend,
       outgoing: outgoing[friend]?.last?.started,
@@ -249,11 +251,17 @@ struct FriendList: View {
   /// The bar's words: what is happening, else the name.
   private func rowTitle(_ friend: Friend) -> String {
     if recordingFor == friend { return "● Rec" }
-    if let going = outgoing[friend], let last = going.last {
-      return last.text + RowButton.bangs(going.count)
-    }
+    if let last = outgoing[friend]?.last { return last.text }
     if let text = sent[friend] { return text }
     return friend.name
+  }
+
+  /// How many the bar's words count ("Sent Yo!!" for three): photos on their way, or sends in a row.
+  private func rowCount(_ friend: Friend) -> Int {
+    if recordingFor == friend { return 1 }
+    if let going = outgoing[friend], !going.isEmpty { return going.count }
+    if sent[friend] != nil { return sentCounts[friend.name]?.count ?? 1 }
+    return 1
   }
 
   /// The last bar, as in the original: "+", and the name typed right there once tapped.
@@ -433,8 +441,10 @@ struct FriendList: View {
   ) {
     let name = friend.name
     let count = sentCounts[name].map { $0.text == text ? $0.count + 1 : 1 } ?? 1
-    sentCounts[name] = (text, count)
-    sent[friend] = text + RowButton.bangs(count)
+    withAnimation(.snappy(duration: 0.2)) {  // a "!" comes in, or the number turns
+      sentCounts[name] = (text, count)
+      sent[friend] = text
+    }
     if let reply { replies[name, default: []].append((.now, reply)) }
     let round = (sentRounds[name] ?? 0) + 1
     sentRounds[name] = round
@@ -442,10 +452,12 @@ struct FriendList: View {
       try? await Task.sleep(for: .seconds(1.5))
       guard sentRounds[name] == round else { return }  // tapped again meanwhile
       sentRounds[name] = nil
-      sentCounts[name] = nil
       let pending = replies.removeValue(forKey: name) ?? []
-      withAnimation(.snappy) { sent[friend] = nil }
-      if thenOnTop { toTop(name) }
+      withAnimation(.snappy) {
+        sent[friend] = nil
+        sentCounts[name] = nil
+      }
+      if thenOnTop { rise(name) }
       // In the rhythm they were tapped: tapped fast, they come fast and their sounds cut each other off.
       let start = Date.now
       for reply in pending {
@@ -530,13 +542,17 @@ extension FriendList {
     Task {
       try? await Task.sleep(for: .seconds(delay))
       cheers += 1
-      if sentRounds[name] == nil { rise(name) }  // a bar being tapped goes on top when the taps are over
+      rise(name)  // on top as soon as no bar is being tapped
       withAnimation(.snappy(duration: 0.2)) {  // the words make room without a bounce
         if var landing = landed[name], landing.fading == nil {
-          landing.seen.append(nil)  // one more "!"; its time starts below when the bar is on screen
+          landing.count += 1  // one more "!"
+          if landing.seen != nil {
+            landing.seen = .now  // on screen: the stack's time starts again
+            settle(name, landing.seen!)
+          }
           landed[name] = landing
         } else {
-          landed[name] = Landing(first: arrival.id, seen: [nil])  // a new run (also over one fading out): it knocks
+          landed[name] = Landing(first: arrival.id, count: 1)  // a new run (also over one fading out): it knocks
         }
       }
       try? await Task.sleep(for: .milliseconds(150))  // the list has laid out where the bar is now
@@ -544,56 +560,59 @@ extension FriendList {
     }
   }
 
-  /// Yos whose bars are on screen now start their time; one out of sight waits until it is seen. Several seen at once
-  /// start a little apart, so their "!"s still go one by one.
+  /// Stacks whose bars are on screen now start their time; one out of sight waits until it is seen.
   private func startClocks() {
-    for (name, landing) in landed where onScreen.contains(name) && landing.seen.contains(nil) {
-      var seen = landing.seen
-      var next = Date.now
-      for i in seen.indices where seen[i] == nil {
-        seen[i] = next
-        expire(name, next)
-        next += 0.35
-      }
-      landed[name]?.seen = seen
+    for (name, landing) in landed where onScreen.contains(name) && landing.seen == nil {
+      let now = Date.now
+      landed[name]?.seen = now
+      settle(name, now)
     }
   }
 
-  /// A Yo's time is over: if more stand on the bar, its "!" goes at once; the last one fades out (`yoSeconds`).
-  private func expire(_ name: String, _ seen: Date) {
+  /// A stack's time, started at `since`: if no Yo came meanwhile, its "!"s go one by one (quickly; faster the more
+  /// there are), then the last Yo fades out (`yoSeconds`). A new Yo starts it again.
+  private func settle(_ name: String, _ since: Date) {
     Task {
-      try? await Task.sleep(for: .seconds(seen.timeIntervalSinceNow + Self.yoSolidSeconds))
-      guard var landing = landed[name], let index = landing.seen.firstIndex(of: seen) else { return }
-      if landing.count > 1 {
-        landing.seen.remove(at: index)
-        withAnimation(.easeOut(duration: 0.25)) { landed[name] = landing }
-      } else {
-        let fading = Date.now
-        landing.fading = fading
-        landed[name] = landing
-        try? await Task.sleep(for: .seconds(Self.yoSeconds - Self.yoSolidSeconds))
-        if landed[name]?.fading == fading { _ = landed.removeValue(forKey: name) }
+      try? await Task.sleep(for: .seconds(Self.yoSolidSeconds))
+      let step = min(0.2, 2.0 / Double(max(1, landed[name]?.count ?? 1)))
+      while let landing = landed[name], landing.seen == since, landing.count > 1 {
+        withAnimation(.easeOut(duration: 0.15)) { landed[name]?.count -= 1 }
+        try? await Task.sleep(for: .seconds(step))
       }
+      guard landed[name]?.seen == since else { return }  // another came
+      let fading = Date.now
+      landed[name]?.fading = fading
+      try? await Task.sleep(for: .seconds(Self.yoSeconds - Self.yoSolidSeconds))
+      if landed[name]?.fading == fading { _ = landed.removeValue(forKey: name) }
     }
   }
 
-  /// A sender goes on top with the others arriving within 0.3 seconds, in one step (the newest ends on top).
+  /// A friend goes on top with the others coming within 0.3 seconds, in one step (the newest ends on top). While you
+  /// are sending (taps or a stack of photos still in their time) the list does not move at all, so no bar slides away
+  /// under your finger; it moves once you are done.
   private func rise(_ name: String) {
     rising.removeAll { $0 == name }
     rising.append(name)
     guard rising.count == 1 else { return }  // a step is already on its way
     Task {
       try? await Task.sleep(for: .seconds(0.3))
+      while sending { try? await Task.sleep(for: .milliseconds(200)) }
       let names = rising
       rising = []
       toTop(names)
     }
   }
 
+  /// A send still in its time: taps on a bar, or photos and videos on their way.
+  private var sending: Bool {
+    !sentRounds.isEmpty || !stackRounds.isEmpty || !outgoing.isEmpty
+  }
+
   private func toTop(_ name: String) { toTop([name]) }
 
-  /// Friends go on top, the last of `names` uppermost. At the top of the list the list stays at its very start, so the bar is in sight below the
-  /// title; scrolled down, the view stays where it is (the title's "!" tells, and the Yo waits until it is seen).
+  /// Friends go on top, the last of `names` uppermost. At the top of the list the list stays at its very start, so the
+  /// bar is in sight below the title; scrolled down, the view stays where it is (the title's "!" tells, and the Yo
+  /// waits until it is seen).
   private func toTop(_ names: [String]) {
     let order = friends.all.map(\.name)
     let moving = names.filter { name in
@@ -658,6 +677,8 @@ enum ThumbnailTouch {
 /// go): camera mode records a video with it. A finger on the photos' thumbnail is reported through `view`.
 struct RowButton: View {
   let title: String
+  /// How many the words count: a "!" for each after the first (Bangs).
+  var count = 1
   let color: Color
   var recording = false
   /// When the newest photo or video on its way out started; its ring closes in `sendSeconds`, a tap on it undoes.
@@ -680,11 +701,13 @@ struct RowButton: View {
   @State private var recordingByAction = false
 
   init(
-    _ title: String, color: Color, recording: Bool = false, outgoing: Date? = nil, stop: @escaping () -> Void = {},
+    _ title: String, count: Int = 1, color: Color, recording: Bool = false, outgoing: Date? = nil,
+    stop: @escaping () -> Void = {},
     media: [Arrival] = [], yo: FriendList.Landing? = nil, hint: String? = nil, hold: ((Bool) -> Void)? = nil,
     view: @escaping (ThumbnailTouch) -> Void = { _ in }, action: @escaping () -> Void
   ) {
     self.title = title
+    self.count = count
     self.color = color
     self.recording = recording
     self.outgoing = outgoing
@@ -724,14 +747,9 @@ struct RowButton: View {
           .disabled(viewing)  // a finger on the photos is not a press on the bar
       }
     }
-    .overlay(alignment: .trailing) {
-      mark.modifier(Knock(trigger: yo?.first)).padding(.trailing, 30)
-    }
-    .overlay {
-      if let outgoing {
-        words(Text(title).hidden()) { undoRing(since: outgoing) }
-      }
-    }
+    // What takes its own touches (the undo ring, the photos) lies over the bar, in the same line (Buttons in a Button
+    // do not work).
+    .overlay { line(touchable: true) }
     .animation(.snappy, value: outgoing)
     .animation(.spring(duration: 0.4, bounce: 0.35), value: yo)
     .animation(.smooth, value: media)
@@ -740,42 +758,37 @@ struct RowButton: View {
   /// A bar of the friend's colour from edge to edge, the name large in the middle (the original's), red while
   /// recording.
   private var label: some View {
-    words(spoken.foregroundStyle(.white).modifier(Knock(trigger: yo?.first))) {
-      Color.clear  // the undo ring's place, drawn over it (Buttons in a Button do not work)
-    }
-    .frame(maxWidth: .infinity, minHeight: Metrics.rowHeight)
-    .background(recording ? Color.alizarin.opacity(0.85) : color)
-    .contentShape(.rect)
+    line(touchable: false)
+      .frame(maxWidth: .infinity, minHeight: Metrics.rowHeight)
+      .background(recording ? Color.alizarin.opacity(0.85) : color)
+      .contentShape(.rect)
   }
 
-  /// The words without their "!"s stay in the middle at full size; the "!"s ("Sent Yo!!!") hang on after them, outside
-  /// the layout, so more of them never shrink or move the words. With the undo ring the words stay whole, the ring
-  /// after them.
-  @ViewBuilder private var spoken: some View {
-    let base = String(title.reversed().drop(while: { $0 == "!" }).reversed())
-    let extra = String(title.dropFirst(base.count))
-    if outgoing != nil || extra.isEmpty || base.isEmpty {
+  /// The bar's line, sending and receiving alike (BarLine): the words; their "!"s and the undo ring after them; a Yo
+  /// that came at the end. Laid out twice the same: in the bar the words and their "!"s, over it what takes its own
+  /// touches (the ring, the Yo at the end), so each sits exactly where the other leaves it room.
+  private func line(touchable: Bool) -> some View {
+    BarLine {
       Text(title)
-    } else {
-      Text(base).overlay(alignment: .trailing) {
-        Bangs(text: extra)
-          .fixedSize()
-          .alignmentGuide(.trailing) { $0[.leading] }
-      }
-    }
-  }
-
-  /// The bar's words, and while something is on its way out a ring right after them; laid out the same for the label
-  /// and for the ring drawn over it, so the ring sits in the words.
-  private func words(_ text: some View, @ViewBuilder ring: () -> some View) -> some View {
-    HStack(spacing: 10) {
-      text
-        .font(.yo(Metrics.rowFont))
         .lineLimit(1)
-        .minimumScaleFactor(0.5)
-      if outgoing != nil { ring().frame(width: Self.ring, height: Self.ring) }
+        .modifier(Knock(trigger: yo?.first))
+        .opacity(touchable ? 0 : 1)
+      HStack(spacing: 0) {
+        Bangs(count: count).opacity(touchable ? 0 : 1)
+        if let outgoing {
+          Group {
+            if touchable { undoRing(since: outgoing) } else { Color.clear }
+          }
+          .frame(width: Self.ring, height: Self.ring)
+          .padding(.leading, 10)
+        }
+      }
+      mark(touchable: touchable)
+        .modifier(Knock(trigger: yo?.first))
+        .opacity(touchable ? 1 : 0)
     }
-    .padding(.horizontal, 104)  // room for "Yo 📷" on the right, the words staying in the middle
+    .font(.yo(Metrics.rowFont))
+    .foregroundStyle(.white)
   }
 
   private static let ring = 30.0
@@ -804,17 +817,14 @@ struct RowButton: View {
   }
 
   /// At the bar's end, in the name's own type: "Yo 📷" or "Yo 🎥" for photos and videos not yet seen (a finger on it
-  /// plays them at once), or "Yo" for one that just came; a count before either.
-  @ViewBuilder private var mark: some View {
+  /// plays them at once), or "Yo" for one that just came; their "!"s after either.
+  @ViewBuilder private func mark(touchable: Bool) -> some View {
     if let first = media.first {
       HStack(spacing: 0) {
         Text(first.video != nil ? "Yo 🎥" : "Yo 📷")
-        Bangs(text: Self.bangs(media.count))
+        Bangs(count: media.count)
       }
-      .font(.yo(Metrics.rowFont))
-      .foregroundStyle(.white)
       .lineLimit(1)
-      .minimumScaleFactor(0.6)
       .scaleEffect(viewing ? 0.92 : 1)
       .contentShape(.rect.inset(by: -12))  // easy to hit
       // A finger down shows them at once; a short tap lets them run, holding closes on letting go.
@@ -835,6 +845,8 @@ struct RowButton: View {
       .accessibilityAddTraits(.isButton)
       .accessibilityLabel(media.count == 1 ? "1 photo or video" : "\(media.count) photos or videos")
       .accessibilityAction { view(.down); view(.tapped) }  // opens them, running to the end
+      .allowsHitTesting(touchable)  // the copy in the bar under it is only for the layout
+      .accessibilityHidden(!touchable)
       .transition(.scale.combined(with: .opacity))
     } else if let yo {
       // "Yo" and a "!" for each Yo after the first: a "!" goes quickly when its Yo is over, the last Yo fades slowly.
@@ -842,43 +854,72 @@ struct RowButton: View {
         let fade = yo.fading.map { timeline.date.timeIntervalSince($0) / (yoSeconds - Self.solid) } ?? 0
         HStack(spacing: 0) {
           Text("Yo")
-          Bangs(text: Self.bangs(yo.count))
+          Bangs(count: yo.count)
         }
         .lineLimit(1)
-        .minimumScaleFactor(0.6)
-        .font(.yo(Metrics.rowFont))
-        .foregroundStyle(.white)
         .opacity(max(0, 1 - fade))
       }
       .accessibilityLabel(yo.count == 1 ? "Yo" : "\(yo.count) Yos")
       .transition(.scale(scale: 0.3).combined(with: .opacity))
     }
   }
-
-  /// How many, the way Yo says it: one "!" for each after the first ("Yo", "Yo!", "Yo!!"), at most ten; beyond, a
-  /// number ("Yo! 12×").
-  static func bangs(_ count: Int) -> String {
-    count <= maxBangs + 1 ? String(repeating: "!", count: max(0, count - 1)) : "! \(count)×"
-  }
-
-  static let maxBangs = 10
 }
 
-/// The "!"s after a word, each its own: one more comes in on its own, the ones there stay where they are (as text
-/// typed into a field, not the whole word drawn again); beyond ten, "! 12×" with its number counting.
+/// How many, the way Yo says it: one "!" for each after the first ("Yo", "Yo!", "Yo!!"), each its own, so one more
+/// comes in on its own and the ones there stay (as text typed into a field, not the whole word drawn again). At most
+/// five; beyond, the "!"s stay and how many more comes after them ("Yo!!!!! +3"), turning as a wheel, its digits all
+/// as wide (nothing shifts).
 struct Bangs: View {
-  let text: String
+  let count: Int
+
+  static let most = 5
 
   var body: some View {
-    if text.allSatisfy({ $0 == "!" }) {
-      HStack(spacing: 0) {
-        ForEach(0..<text.count, id: \.self) { _ in
-          Text("!").transition(.opacity.animation(.easeOut(duration: 0.15)))
-        }
+    let wanted = max(0, count - 1)
+    let bangs = min(wanted, Self.most)
+    HStack(spacing: 0) {
+      ForEach(0..<bangs, id: \.self) { _ in
+        Text("!").transition(.opacity.animation(.easeOut(duration: 0.15)))
       }
-    } else {
-      Text(text).contentTransition(.numericText())
+      if wanted > bangs {
+        Text(" +\(wanted - bangs)")
+          .monospacedDigit()
+          .contentTransition(.numericText(value: Double(wanted - bangs)))
+          .transition(.opacity)
+      }
     }
+  }
+}
+
+/// A bar's line, for sending and receiving alike: the words in the middle, what belongs to them (their "!"s, the undo
+/// ring) right after them, a Yo that came at the bar's end. The words stay in the middle until they would run into the
+/// end (or the edge): then they move left as far as needed, never past the margin; a name too long even then is cut
+/// with "…". Nothing shrinks, nothing overlaps.
+struct BarLine: Layout {
+  static let margin = 20.0
+  static let endPadding = 30.0
+  static let gap = 14.0
+
+  func sizeThatFits(proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) -> CGSize {
+    let height = subviews.map { $0.sizeThatFits(.unspecified).height }.max() ?? 0
+    return CGSize(width: proposal.width ?? 393, height: height)
+  }
+
+  func placeSubviews(in bounds: CGRect, proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) {
+    let words = subviews[0], after = subviews[1], end = subviews[2]
+    let afterSize = after.sizeThatFits(.unspecified)
+    let endSize = end.sizeThatFits(.unspecified)
+    let endX = bounds.maxX - Self.endPadding - endSize.width
+    let limit = endSize.width > 0 ? endX - Self.gap : bounds.maxX - Self.margin
+    let room = max(0, limit - bounds.minX - Self.margin - afterSize.width)
+    let wordsWidth = min(words.sizeThatFits(.unspecified).width, room)
+    var x = bounds.midX - wordsWidth / 2
+    x -= max(0, x + wordsWidth + afterSize.width - limit)
+    x = max(bounds.minX + Self.margin, x)
+    words.place(
+      at: CGPoint(x: x, y: bounds.midY), anchor: .leading, proposal: ProposedViewSize(width: wordsWidth, height: nil))
+    after.place(at: CGPoint(x: x + wordsWidth, y: bounds.midY), anchor: .leading, proposal: .unspecified)
+    end.place(at: CGPoint(x: endX, y: bounds.midY), anchor: .leading, proposal: .unspecified)
   }
 }
 

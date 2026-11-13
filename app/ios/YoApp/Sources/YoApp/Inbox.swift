@@ -36,15 +36,18 @@ final class Inbox {
   /// Yos with a photo or video still on their way, until their notification arrives.
   @ObservationIgnored private var onTheirWay: [String: Arrival] = [:]
 
-  /// The Yo sound: one player, started from the beginning by every Yo, as the original did; two Yos close together
-  /// cut each other off ("Yo-Y-Yo").
-  @ObservationIgnored private let sound: AVAudioPlayer? = {
-    guard let url = Bundle.main.url(forResource: "yo", withExtension: "caf") else { return nil }
+  /// The Yo sound, a few players taking turns: every Yo sounds in full, Yos close together over each other, as the
+  /// original's did (none cuts off the one before).
+  @ObservationIgnored private let sounds: [AVAudioPlayer] = {
+    guard let url = Bundle.main.url(forResource: "yo", withExtension: "caf") else { return [] }
     try? AVAudioSession.sharedInstance().setCategory(.ambient)
-    let player = try? AVAudioPlayer(contentsOf: url)
-    player?.prepareToPlay()  // loaded at launch: the first Yo sounds at once
-    return player
+    return (0..<8).compactMap { _ in
+      let player = try? AVAudioPlayer(contentsOf: url)
+      player?.prepareToPlay()  // loaded at launch: the first Yo sounds at once
+      return player
+    }
   }()
+  @ObservationIgnored private var nextSound = 0
 
   /// The notification's category: "Yo back" right on it, as the original had, sent without opening the app.
   nonisolated static let category = "yo"
@@ -126,10 +129,13 @@ final class Inbox {
     }
   }
 
-  /// The Yo sound, from the beginning (cutting off one still playing).
+  /// The Yo sound, once, on a player not busy if there is one (over the ones still playing).
   func playYo() {
-    sound?.currentTime = 0
-    sound?.play()
+    guard !sounds.isEmpty else { return }
+    let player = sounds.first { !$0.isPlaying } ?? sounds[nextSound % sounds.count]
+    nextSound += 1
+    player.currentTime = 0
+    player.play()
   }
 
   /// The sound, and the sender's row takes the Yo (as Messages and Signal show a new message in the list: on the
