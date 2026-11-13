@@ -35,6 +35,7 @@ struct FriendList: View {
   @Environment(Inbox.self) private var inbox
   @Environment(AccountStore.self) private var accounts
   @Environment(Friends.self) private var friends
+  @Environment(MediaOutbox.self) private var outbox
 
   // The list
   @State private var adding = false
@@ -210,7 +211,12 @@ struct FriendList: View {
           Button("Profile", systemImage: "person.fill") { settings = true }
             .badge(accounts.toDo)
         }
-        // The camera mode stays off until the core carries photos and videos (spec 5, a Yo's attachments): no button.
+        // The camera mode: the live picture behind the list, a tap on a name sends a photo, holding it a video.
+        ToolbarItem(placement: .topBarTrailing) {
+          Button(cameraOn ? "Close Camera" : "Camera", systemImage: cameraOn ? "xmark" : "camera.fill") {
+            cameraOn.toggle()
+          }
+        }
       }
     }
   }
@@ -445,7 +451,6 @@ struct FriendList: View {
   // MARK: Sending
 
   private func send(to friend: Friend) {
-    let delay = Duration.zero  // the Yo back comes with the bar going on top
     sends += 1
     let library = picked
     picked = nil
@@ -460,15 +465,23 @@ struct FriendList: View {
       return
     }
     run(friend, "Sent 📷") {
-      // Not until the core carries photos (spec 5): nothing goes, the bar says "Not Sent".
-      _ = (library, delay)
-      return nil
+      var taken = library
+      if taken == nil { taken = await camera.photo() }
+      guard let taken, let file = await Task.detached(operation: { MediaFile.photo(taken) }).value else { return nil }
+      return Prepared(send: { await go(file, to: friend) })
+    }
+  }
+
+  /// A photo or video on its way: into the outbox, which sends it when the hub takes it (also later, by itself).
+  private func go(_ file: MediaFile, to friend: Friend) async {
+    file.keepIfWanted()
+    if await !outbox.send(file, to: friend.user ?? friend.name, accounts: accounts) {
+      showSent(to: friend, "Not Sent")
     }
   }
 
   /// Holding a name in camera mode: a video from the moment it is held until it is let go.
   private func hold(_ friend: Friend, _ holding: Bool) {
-    let delay = Duration.zero
     if holding {
       guard recordingFor == nil else { return }  // one video at a time: a second finger records nothing
       recordingFor = friend
@@ -477,10 +490,8 @@ struct FriendList: View {
       recordingFor = nil
       sends += 1
       run(friend, "Sent 🎥") {
-        // Not until the core carries videos (spec 5): the recording is thrown away, the bar says "Not Sent".
-        if let video = await camera.stopVideo() { try? FileManager.default.removeItem(at: video) }
-        _ = delay
-        return nil
+        guard let recording = await camera.stopVideo(), let file = await MediaFile.video(recording) else { return nil }
+        return Prepared(send: { await go(file, to: friend) })
       }
     }
   }

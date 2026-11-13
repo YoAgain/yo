@@ -465,6 +465,7 @@ final class AccountStore {
     SecureReminder.update(secured: true)
     RecoveryWords.delete()
     Stats.reset()
+    MediaStorage.clearAll()
   }
 }
 

@@ -130,7 +130,14 @@ struct SettingsView: View {
           }
         }
 
-        // "Keep Sent Photos" comes back with the camera mode, once the core carries photos and videos (spec 5).
+        Section {
+          Toggle(isOn: Binding(get: { saveSent }, set: { setSaveSent($0) })) {
+            Label("Keep Sent Photos", systemImage: "photo.on.rectangle").labelStyle(Tile(.green))
+          }
+          .disabled(requestingPhotos)
+        } footer: {
+          Text("Saves photos and videos you send to your camera roll.")
+        }
       }
       .sheet(isPresented: $showingCode) {
         if let account = accounts.account { NameCodeSheet(name: account.username) }

@@ -30,8 +30,25 @@ final class Inbox {
   private(set) var arrivals: [Arrival] = []
   /// Notifications already taken in, so one tapped and one collected on opening count once.
   @ObservationIgnored private var taken: Set<String> = []
-  /// Photos and videos not yet seen, by sender, oldest first.
+  /// Photos and videos not yet seen, by sender, oldest first: kept on this iPhone until then (ReceivedMedia).
   private(set) var media: [String: [Arrival]] = [:]
+
+  init() {
+    Task { @MainActor in
+      for arrival in await ReceivedMedia.shared.waiting() { add(arrival) }
+    }
+  }
+
+  /// A photo or video kept, on its sender's bar until seen.
+  private func add(_ arrival: Arrival) {
+    guard !(media[arrival.from] ?? []).contains(where: { $0.id == arrival.id }) else { return }
+    media[arrival.from, default: []].append(arrival)
+  }
+
+  /// Signed out: what waited to be seen is gone (MediaStorage.clearAll deleted it).
+  func forgetMedia() {
+    media = [:]
+  }
 
 
   /// The Yo sound, a few players taking turns: every Yo sounds in full, Yos close together over each other, as the
@@ -203,8 +220,15 @@ final class Inbox {
     }
   }
 
-  /// What the core handed over: a Yo shows on its sender's bar, a new chat brings its friend into the list. Then the
-  /// core may forget them (they will not come again after a crash). `contacts`: the core's, read with the events.
+  /// What the core handed over while sending a photo or video (the outbox): as any.
+  func handle(_ events: [YoEvent], client: YoClient, friends: Friends) async {
+    guard !events.isEmpty, let contacts = try? await Hub.run({ client.contacts() }) else { return }
+    await take(events, contacts: contacts, client: client, friends: friends)
+  }
+
+  /// What the core handed over: a Yo shows on its sender's bar, a new chat brings its friend into the list; a photo
+  /// or video is noted, fetched and waits on the bar until seen. Then the core may forget them (they will not come
+  /// again after a crash). `contacts`: the core's, read with the events.
   private func take(_ events: [YoEvent], contacts: [YoContact], client: YoClient, friends: Friends) async {
     guard !events.isEmpty else { return }
     func friend(_ user: String) -> Friend {
@@ -217,13 +241,32 @@ final class Inbox {
         received(id: "\(user)/\(sentAtMs)", from: sender.name)
         Stats.receivedYo(from: sender.name)
         friends.promote(sender.name)
+      case .message(let user, let sentAtMs, .photo(let media)):
+        let sender = friend(user)
+        received(id: "\(user)/\(sentAtMs)", from: sender.name)
+        Stats.receivedYo(from: sender.name)
+        friends.promote(sender.name)
+        ReceivedMedia.shared.expect(media, id: "\(user)/\(sentAtMs)", from: sender.name, kind: .photo)
+      case .message(let user, let sentAtMs, .video(let media, _)):
+        let sender = friend(user)
+        received(id: "\(user)/\(sentAtMs)", from: sender.name)
+        Stats.receivedYo(from: sender.name)
+        friends.promote(sender.name)
+        ReceivedMedia.shared.expect(media, id: "\(user)/\(sentAtMs)", from: sender.name, kind: .video)
       case .newChat(let user):
         _ = friend(user)
       default:
         break
       }
     }
+    // Photos and videos are noted (above) before the core may forget their Yos; fetched from here on.
     _ = try? await Hub.run { client.acknowledgeEvents() }
+    fetchMedia(client: client)
+  }
+
+  /// Fetches the photos and videos noted and not kept yet (also those a broken network left).
+  func fetchMedia(client: YoClient) {
+    ReceivedMedia.shared.fetchWaiting(client: client) { [weak self] arrival in self?.add(arrival) }
   }
 
   private static func firstFrame(of video: URL) async -> UIImage? {
@@ -251,10 +294,10 @@ final class Inbox {
     center.removeDeliveredNotifications(withIdentifiers: waiting.map(\.request.identifier))
   }
 
-  /// Photos and videos seen (each once): they are gone.
+  /// Photos and videos seen (each once): they are gone, from this iPhone too.
   func seen(_ shown: [Arrival]) {
     for arrival in shown {
-      if let video = arrival.video { try? FileManager.default.removeItem(at: video) }
+      ReceivedMedia.shared.forget(arrival.id)
       media[arrival.from]?.removeAll { $0.id == arrival.id }
       if media[arrival.from]?.isEmpty == true { media[arrival.from] = nil }
     }

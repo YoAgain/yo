@@ -8,6 +8,8 @@ struct YoApp: App {
   @State private var inbox: Inbox
   @State private var friends = Friends()
   @State private var accounts = AccountStore()
+  /// Photos and videos on their way out (Media.swift).
+  @State private var outbox = MediaOutbox()
   @Environment(\.scenePhase) private var phase
   private let notifications: NotificationDelegate
 
@@ -29,9 +31,11 @@ struct YoApp: App {
         }
       }
       .animation(.smooth(duration: 0.5), value: accounts.account == nil)
+      .onChange(of: accounts.account == nil) { _, out in if out { inbox.forgetMedia() } }
         .environment(inbox)
         .environment(friends)
         .environment(accounts)
+        .environment(outbox)
         .task {
           await inbox.askForNotifications()
           Push.shared.register()
@@ -44,6 +48,12 @@ struct YoApp: App {
         .onChange(of: phase, initial: true) { _, phase in
           guard phase == .active else { return }
           Task { await inbox.collectDelivered() }
+          // What the hub said "later" to goes now, and Yos that come while it goes show as any.
+          outbox.received = { [inbox, friends] events, client in
+            await inbox.handle(events, client: client, friends: friends)
+          }
+          outbox.flush(accounts: accounts)
+          if let client = accounts.client { inbox.fetchMedia(client: client) }
           // Opened: the 365 days start again, and so does the reminder (spec 6.4).
           if let account = accounts.account { SecureReminder.update(secured: account.secured) }
         }
