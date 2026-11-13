@@ -6,10 +6,10 @@
 // On top, the system's bar: profile (a sheet) on the left, the camera on the right, between them the title "Yo",
 // a heading that becomes a glass pill once rows scroll behind it.
 //
-// A Yo arriving: the title gains a "!" (one per Yo in a burst) with a haptic; the sender's bar goes on top, knocks and
-// says "Yo" at its end, in the name's own type ("3×" before it), fading out within `yoSeconds`; then it is gone, as in
-// the original (no unread mark). A photo or video waits in the same place as "Yo 📷" or "Yo 🎥": a finger on it plays
-// them (HeldMedia), and what was shown is gone (as Snapchat began).
+// A Yo arriving: the title gains a "!" (one per Yo in a burst) with a haptic; the sender's bar is on top at once, its
+// words knock and it says "Yo" at its end, in the name's own type ("3×" before it), fading out within `yoSeconds`; then
+// it is gone, as in the original (no unread mark). A photo or video waits in the same place as "Yo 📷" or "Yo 🎥": a
+// finger on it plays them (HeldMedia), and what was shown is gone (as Snapchat began).
 //
 // Camera mode, the original's camera "context": the bars turn see-through over the live picture; a tap on a name
 // takes a photo, holding it records a video. Either goes after `sendDelay`, a ring at the bar's left that undoes the
@@ -301,6 +301,7 @@ struct FriendList: View {
     picked = nil
     libraryItem = nil
     guard cameraOn || library != nil else {
+      toTop(friend.name)  // on top at once, "Sent Yo!" there
       showSent(to: friend, "Sent Yo!")
       Task { await inbox.fakeYo(from: friend.name, after: delay) }
       return
@@ -355,6 +356,7 @@ struct FriendList: View {
       outgoing[friend]?.removeAll { $0 == one }
       if outgoing[friend]?.isEmpty == true { outgoing[friend] = nil }
       guard let prepared else { return showSent(to: friend, "Not sent") }
+      toTop(friend.name)  // it went: on top now
       showSent(to: friend, text)
       await prepared.send()
     }
@@ -376,14 +378,13 @@ struct FriendList: View {
     showSent(to: friend, "Not sent")
   }
 
-  /// What the bar says after a send, for 1.5 seconds as in the original; a Yo that went then takes its bar on top.
+  /// What the bar says after a send, for 1.5 seconds as in the original.
   private func showSent(to friend: Friend, _ text: String) {
     sent[friend] = text
     Task {
       try? await Task.sleep(for: .seconds(1.5))
       guard sent[friend] == text else { return }
       withAnimation(.snappy) { sent[friend] = nil }
-      if text.hasPrefix("Sent") { toTop(friend.name) }
     }
   }
 
@@ -546,7 +547,7 @@ struct RowButton: View {
   var sendSeconds = FriendList.sendDelay
   var stop: () -> Void = {}
   var media: [Arrival] = []
-  /// A Yo on this bar now: the bar knocks and says "Yo" at its end ("3×" before it), fading out within `yoSeconds`.
+  /// A Yo on this bar now: its words knock and it says "Yo" at its end ("3×" before it), fading out within `yoSeconds`.
   var yo: FriendList.Landing?
   var yoSeconds = FriendList.yoSeconds
   private static let solid = FriendList.yoSolidSeconds
@@ -605,26 +606,12 @@ struct RowButton: View {
       }
     }
     .overlay(alignment: .trailing) {
-      mark.padding(.trailing, 30)
+      mark.modifier(Knock(trigger: yo?.key)).padding(.trailing, 30)
     }
     .overlay(alignment: .leading) {
       if let outgoing { undoRing(since: outgoing) }
     }
     .animation(.snappy, value: outgoing)
-    // A Yo knocks: the bar nudges sideways twice, as a poke.
-    .keyframeAnimator(initialValue: 0.0, trigger: yo?.key) { bar, x in
-      bar.offset(x: x)
-    } keyframes: { _ in
-      KeyframeTrack {
-        SpringKeyframe(10, duration: 0.08)
-        SpringKeyframe(-6, duration: 0.09)
-        SpringKeyframe(5, duration: 0.09)
-        SpringKeyframe(-2, duration: 0.08)
-        SpringKeyframe(8, duration: 0.09)
-        SpringKeyframe(-4, duration: 0.09)
-        SpringKeyframe(0, duration: 0.2)
-      }
-    }
     .animation(.spring(duration: 0.4, bounce: 0.35), value: yo)
     .animation(.smooth, value: media)
   }
@@ -637,6 +624,7 @@ struct RowButton: View {
       .lineLimit(1)
       .minimumScaleFactor(0.5)
       .foregroundStyle(.white)
+      .modifier(Knock(trigger: yo?.key))
       .padding(.horizontal, 104)  // room for the undo ring on the left and "Yo 📷" on the right
       .frame(maxWidth: .infinity, minHeight: Metrics.rowHeight)
       .background(recording ? Color.alizarin.opacity(0.85) : color)
@@ -716,6 +704,28 @@ struct RowButton: View {
       .font(.yo(19, relativeTo: .headline))
       .foregroundStyle(.white)
       .contentTransition(.numericText())
+  }
+}
+
+/// A Yo knocks: the words on a bar nudge sideways twice, as a poke; the bar itself stays (moving it would show what is
+/// behind it).
+struct Knock: ViewModifier {
+  let trigger: String?
+
+  func body(content: Content) -> some View {
+    content.keyframeAnimator(initialValue: 0.0, trigger: trigger) { words, x in
+      words.offset(x: x)
+    } keyframes: { _ in
+      KeyframeTrack {
+        SpringKeyframe(10, duration: 0.08)
+        SpringKeyframe(-6, duration: 0.09)
+        SpringKeyframe(5, duration: 0.09)
+        SpringKeyframe(-2, duration: 0.08)
+        SpringKeyframe(8, duration: 0.09)
+        SpringKeyframe(-4, duration: 0.09)
+        SpringKeyframe(0, duration: 0.2)
+      }
+    }
   }
 }
 
