@@ -11,6 +11,9 @@ sha2 = { workspace = true }
 ed25519-dalek = { workspace = true }
 base64 = { workspace = true }
 thiserror = { workspace = true }
+unicode-normalization = "0.1.26"
+unicode-segmentation = "1.13.3"
+unicode-properties = "0.1.5"
 
 [dev-dependencies]
 proptest = { workspace = true }

@@ -97,7 +97,7 @@ CREATE TABLE IF NOT EXISTS account_keys (
     key BLOB PRIMARY KEY,
     user_id BLOB NOT NULL REFERENCES users(id)
 ) WITHOUT ROWID;
--- How people find a user: a phone number as its HMAC, a username in upper case.
+-- How people find a user: a phone number as its HMAC, a username by its skeleton (spec 3.3).
 CREATE TABLE IF NOT EXISTS handles (
     kind INTEGER NOT NULL,
     value BLOB NOT NULL,

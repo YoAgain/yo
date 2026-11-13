@@ -208,6 +208,10 @@ impl Hub {
     fn stored_handle(&self, handle: &Handle) -> Vec<u8> {
         match handle.kind {
             KIND_PHONE => self.phone_hmac(handle.value.as_slice()).to_vec(),
+            // A username by its skeleton (spec 3.3): one name per look, and LE0 finds LEO.
+            KIND_USERNAME => std::str::from_utf8(handle.value.as_slice())
+                .map(|name| yo_wire::handle::skeleton(name).into_bytes())
+                .unwrap_or_default(),
             _ => handle.value.as_slice().to_vec(),
         }
     }
@@ -502,7 +506,8 @@ async fn set_username(State(hub): Hubs, method: Method, uri: Uri, headers: Heade
     if let Some(name) = &request.username {
         Handle { kind: KIND_USERNAME, value: name.clone() }.check()?;
     }
-    match hub.db.set_username(&device.user_id, request.username.as_ref().map(|n| n.as_slice()))? {
+    let stored = request.username.as_ref().map(|n| hub.stored_handle(&Handle { kind: KIND_USERNAME, value: n.clone() }));
+    match hub.db.set_username(&device.user_id, stored.as_deref())? {
         Write::Done(()) => Ok(StatusCode::NO_CONTENT),
         Write::Refused(_) => Err(refuse(StatusCode::CONFLICT)),
     }

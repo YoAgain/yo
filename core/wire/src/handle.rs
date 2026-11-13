@@ -3,6 +3,9 @@
 
 use crate::{phone, Error, UserId, USER_ID_LEN};
 use tls_codec::{TlsDeserializeBytes, TlsSerialize, TlsSize, VLBytes};
+use unicode_normalization::UnicodeNormalization;
+use unicode_properties::{EmojiStatus, GeneralCategory, UnicodeEmoji, UnicodeGeneralCategory};
+use unicode_segmentation::UnicodeSegmentation;
 
 pub const KIND_USER: u8 = 0;
 pub const KIND_PHONE: u8 = 1;
@@ -10,7 +13,7 @@ pub const KIND_USERNAME: u8 = 2;
 /// An account key: asks the hub whose it is (to learn who started a chat).
 pub const KIND_ACCOUNT_KEY: u8 = 3;
 
-/// Names nobody may claim.
+/// Names nobody may claim, compared by skeleton.
 const RESERVED: [&str; 12] =
     ["YO", "YOAPP", "JUSTYO", "YOAGAIN", "YOLS", "ADMIN", "SUPPORT", "HELP", "ROOT", "SYSTEM", "OFFICIAL", "STAFF"];
 
@@ -50,7 +53,8 @@ impl Handle {
         if trimmed.starts_with('+') || trimmed.starts_with("00") {
             return Ok(Handle::phone(&phone::normalize(trimmed)?));
         }
-        let name = trimmed.trim_start_matches('@').to_ascii_uppercase();
+        // Upper case and NFC only: what is typed must be a name as it is, never one trimmed into another.
+        let name: String = trimmed.trim_start_matches('@').to_uppercase().nfc().collect();
         check_username(&name)?;
         Ok(Handle::username(&name))
     }
@@ -82,13 +86,76 @@ impl Handle {
     }
 }
 
-/// A username: 3 to 16 of A–Z, 0–9 and _, starting with a letter, in upper case (the canonical form), not reserved.
+/// A username (spec 3.3): 3 to 16 characters (grapheme clusters, NFC) of Latin letters with their accents, 0–9, `_`
+/// and emoji, starting with a letter or an emoji, in upper case (the canonical form), not reserved.
 pub fn check_username(name: &str) -> Result<(), Error> {
-    let ok = (3..=16).contains(&name.len())
-        && name.bytes().all(|b| b.is_ascii_uppercase() || b.is_ascii_digit() || b == b'_')
-        && name.as_bytes()[0].is_ascii_uppercase()
-        && !RESERVED.contains(&name);
+    let graphemes: Vec<&str> = name.graphemes(true).collect();
+    let ok = (3..=16).contains(&graphemes.len())
+        && name.nfc().eq(name.chars())
+        && name.to_uppercase() == name
+        && graphemes.iter().all(|g| allowed(g))
+        && graphemes.first().is_some_and(|g| is_latin_letter(g) || is_emoji(g))
+        && !RESERVED.iter().any(|r| skeleton(r) == skeleton(name));
     ok.then_some(()).ok_or(Error::Format)
+}
+
+/// What a person typed, as a username can be: upper case, NFC, only the allowed characters, a letter or an emoji
+/// first, at most 16. The apps keep their field to this; the hub accepts only names that are already canonical.
+pub fn canonical(typed: &str) -> String {
+    let upper: String = typed.to_uppercase().nfc().collect();
+    upper
+        .graphemes(true)
+        .filter(|g| allowed(g))
+        .skip_while(|g| !is_latin_letter(g) && !is_emoji(g))
+        .take(16)
+        .collect()
+}
+
+/// What a username is compared by (spec 3.3): upper case, NFKD, without nonspacing marks, emoji variation selectors
+/// and skin tones, then 0 → O, 1 → I, VV → W. Names that look alike have one skeleton, and the hub keeps one name
+/// per skeleton: LEO, LE0 and LÉO are one name, and so are 👍 and 👍🏿.
+pub fn skeleton(name: &str) -> String {
+    let stripped: String = name
+        .to_uppercase()
+        .nfkd()
+        .filter(|&c| {
+            let v = c as u32;
+            c.general_category() != GeneralCategory::NonspacingMark
+                && v != 0xFE0E
+                && v != 0xFE0F
+                && !(0x1F3FB..=0x1F3FF).contains(&v)
+        })
+        .collect();
+    stripped.replace('0', "O").replace('1', "I").replace("VV", "W")
+}
+
+fn allowed(g: &str) -> bool {
+    is_latin_letter(g) || g == "_" || (g.len() == 1 && g.as_bytes()[0].is_ascii_digit()) || is_emoji(g)
+}
+
+/// A letter of the Latin script with its accents (Basic Latin, Latin-1, Extended-A/B, Extended Additional).
+fn is_latin_letter(g: &str) -> bool {
+    g.chars().next().is_some_and(char::is_alphabetic)
+        && g.chars().all(|c| {
+            let v = c as u32;
+            c.is_ascii_alphabetic()
+                || (0x300..=0x36F).contains(&v)
+                || ((0xC0..=0x24F).contains(&v) && v != 0xD7 && v != 0xF7)
+                || (0x1E00..=0x1EFF).contains(&v)
+        })
+}
+
+/// An emoji as people type it: shown as emoji by default, or a sequence (keycaps, ZWJ, flags, skin tones).
+fn is_emoji(g: &str) -> bool {
+    let Some(first) = g.chars().next() else { return false };
+    let presentation = matches!(
+        first.emoji_status(),
+        EmojiStatus::EmojiPresentation
+            | EmojiStatus::EmojiPresentationAndModifierBase
+            | EmojiStatus::EmojiPresentationAndEmojiComponent
+            | EmojiStatus::EmojiPresentationAndModifierAndEmojiComponent
+    );
+    presentation || (first.is_emoji_char() && g.chars().count() > 1)
 }
 
 #[cfg(test)]
@@ -100,9 +167,37 @@ mod tests {
         assert_eq!(Handle::parse("+49 170 1234567").unwrap(), Handle::phone("491701234567"));
         assert_eq!(Handle::parse("@chris").unwrap(), Handle::username("CHRIS"));
         assert_eq!(Handle::parse("Yo_Fan99").unwrap(), Handle::username("YO_FAN99"));
-        for bad in ["yo", "ab", "9lives", "this_is_far_too_long", "chr is", "admin", "+0123"] {
+        assert_eq!(Handle::parse("léo").unwrap(), Handle::username("LÉO"));
+        for bad in ["yo", "ab", "this_is_far_too_long_x", "admin", "+0123", "Adm1n"] {
             assert!(Handle::parse(bad).is_err(), "{bad}");
         }
+    }
+
+    /// The same vectors as the app's (Username in Account.swift): what typing makes, and what names collide.
+    #[test]
+    fn canonical_and_skeleton() {
+        for (typed, name, skel) in [
+            ("leo", "LEO", "LEO"),
+            ("LE0", "LE0", "LEO"),
+            ("Léo", "LÉO", "LEO"),
+            ("ärger", "ÄRGER", "ARGER"),
+            ("👍", "👍", "👍"),
+            ("👍🏿", "👍🏿", "👍"),
+            ("VVALDO", "VVALDO", "WALDO"),
+            ("Straße", "STRASSE", "STRASSE"),
+        ] {
+            assert_eq!(canonical(typed), name, "{typed}");
+            assert_eq!(skeleton(name), skel, "{typed}");
+        }
+        for (typed, name) in [("1abc", "ABC"), ("_x🔥", "X🔥"), ("abcабв", "ABC"), ("x×y", "XY"), ("🧙‍♂️🔥yo", "🧙‍♂️🔥YO")] {
+            assert_eq!(canonical(typed), name, "{typed}");
+        }
+        assert!(check_username("🔥🔥🔥").is_ok());
+        assert!(check_username("ÄRGER").is_ok());
+        assert!(check_username("LÉO").is_ok());
+        assert!(check_username("abc").is_err(), "not upper case");
+        assert!(check_username("ABCабв").is_err(), "another script");
+        assert!(check_username("1ABC").is_err(), "starts with a digit");
     }
 
     #[test]
