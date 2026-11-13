@@ -254,6 +254,9 @@ pub struct Client {
     inbox_fresh_until: u64,
     /// Keys of photos and videos received are forgotten before anything is kept (a bot that never opens them).
     media_keys_forgotten: bool,
+    /// A guest (`keep_events`): the events it receives stay in the state for the app; how many of them this one has
+    /// returned already.
+    guest_events: Option<usize>,
 }
 
 /// A group member as YoLS sees it.
@@ -589,7 +592,46 @@ impl Client {
             delivering: BTreeSet::new(),
             inbox_fresh_until: 0,
             media_keys_forgotten: false,
+            guest_events: None,
         }
+    }
+
+    /// Opens a sealed state as a guest: another process (a share or notification extension) using the state of the
+    /// app that owns it, in turns (the platform's lock around each use). Unlike `restore`, what the app was handed
+    /// stays handed, and the events this one receives are returned but stay in the state, so the app gets them too;
+    /// a guest never acknowledges.
+    pub fn restore_guest(transport: Arc<dyn Transport>, blob: &[u8], key: &[u8; 32]) -> Result<Client> {
+        let (state, entries) = state::open(blob, key)?;
+        let provider = Provider::default();
+        provider.restore(entries);
+        let mut client = Client::with(transport, provider, state);
+        client.guest_events = Some(client.state.events.len());
+        Ok(client)
+    }
+
+    /// Takes in the state another process saved meanwhile (sharing it in turns, see `restore_guest`), in place of
+    /// this one's: as if this process had stopped and started again from it, which the state is made to survive at
+    /// any point (what leaves is saved first). What lives only in memory stays: the envelopes on their way
+    /// (`delivering`; one the other process sent too goes twice, and is skipped as seen), the inbox's freshness, the
+    /// signing clock. Unlike `restore`, what was handed out stays handed: this process may still be showing it.
+    pub fn reload(&mut self, blob: &[u8]) -> Result<()> {
+        let Some((_, key)) = &self.store else { return Err(Error::State) };
+        let (state, entries) = state::open(blob, key)?;
+        // Another account's or device's (signed out and in again meanwhile, under the same key): not this client's.
+        if state.user_id != self.state.user_id || state.device_id != self.state.device_id {
+            return Err(Error::State);
+        }
+        self.provider.restore(entries);
+        self.state = state;
+        if self.guest_events.is_some() {
+            self.guest_events = Some(self.state.events.len());
+        }
+        Ok(())
+    }
+
+    /// Stops saving: the state is gone or someone else's now (see `reload`).
+    pub fn stop_persisting(&mut self) {
+        self.store = None;
     }
 
     /// Saves the sealed state to `store` after every operation from now on, and now.
@@ -693,7 +735,7 @@ impl Client {
     /// The app has shown or stored the events the last call handed out: they will not come again after a crash. Without
     /// it, the next call that succeeds acknowledges them.
     pub fn acknowledge_events(&mut self) {
-        if !self.state.handed.is_empty() {
+        if self.guest_events.is_none() && !self.state.handed.is_empty() {
             self.state.handed.clear();
             self.persist();
         }
@@ -704,6 +746,15 @@ impl Client {
     fn finish<T>(&mut self, result: Result<T>) -> Result<Vec<Event>> {
         // This call acknowledges what the last one handed out. What it hands out stays saved until the next call, so
         // a crash before the app has it brings it again.
+        if let Some(returned) = self.guest_events {
+            // A guest: the events stay for the app; only those new since the last call are returned.
+            let total = self.state.events.len();
+            let result =
+                result.map(|_| self.state.events[returned.min(total)..].iter().cloned().map(unstored).collect());
+            self.guest_events = Some(total);
+            self.persist();
+            return result;
+        }
         let result = result.map(|_| {
             self.state.handed = std::mem::take(&mut self.state.events);
             self.state.handed.iter().cloned().map(unstored).collect()

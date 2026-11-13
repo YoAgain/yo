@@ -1,7 +1,8 @@
 //! The core for Swift and Kotlin (UniFFI). The apps supply HTTP and a place for one sealed blob; everything else
 //! is `yo-core`. Every call blocks: run it off the main thread.
 
-use std::sync::{Arc, Mutex, PoisonError};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex, OnceLock, PoisonError};
 use yo_core::{Client, Content, Event, Sent};
 
 uniffi::setup_scaffolding!();
@@ -70,6 +71,39 @@ pub trait HttpTransport: Send + Sync {
 #[uniffi::export(with_foreign)]
 pub trait StateStore: Send + Sync {
     fn save(&self, blob: Vec<u8>);
+}
+
+/// The lock around the state when two processes use it: an app and its extensions (a share sheet, a notification
+/// service), implemented by the app (a file lock in their shared folder). Taken around every use of the state, never
+/// across a wait for the hub but where the core asks the hub something within one step; held by one process at a
+/// time.
+#[uniffi::export(with_foreign)]
+pub trait StateLock: Send + Sync {
+    /// Takes the lock, waiting while another process holds it, and says what the state is now (`StateTurn`).
+    fn lock(&self) -> StateTurn;
+    /// Gives it back.
+    fn unlock(&self);
+}
+
+/// The state as `StateLock::lock` finds it.
+#[derive(uniffi::Enum)]
+pub enum StateTurn {
+    /// The lock is held; the state is as this process saved or read it last.
+    Same,
+    /// The lock is held; another process saved this since: taken in before the step.
+    Newer { blob: Vec<u8> },
+    /// The lock is held; the state is gone or does not read (signed out meanwhile): this client is done, it never
+    /// acts or saves again.
+    Gone,
+}
+
+/// The lock held, given back when dropped (also when the step panics).
+struct Turn<'a>(&'a dyn StateLock);
+
+impl Drop for Turn<'_> {
+    fn drop(&mut self) {
+        self.0.unlock();
+    }
 }
 
 struct Http(Arc<dyn HttpTransport>);
@@ -326,22 +360,59 @@ pub struct YoClient {
     /// The client's own transport, for what needs no client (fetching a photo or video): never behind the lock, so a
     /// fetch does not wait for a call that holds it across the network.
     transport: Arc<dyn yo_core::Transport>,
+    /// Shared with other processes (`share_state`): each step takes the lock and the newest state first.
+    shared: OnceLock<Arc<dyn StateLock>>,
+    /// The state went away under this client (`with`).
+    closed: AtomicBool,
 }
 
 impl YoClient {
     fn new(client: Client) -> Arc<Self> {
-        Arc::new(YoClient { transport: client.transport(), client: Mutex::new(client) })
+        Arc::new(YoClient {
+            transport: client.transport(),
+            client: Mutex::new(client),
+            shared: OnceLock::new(),
+            closed: AtomicBool::new(false),
+        })
     }
 
-    fn with<T>(&self, f: impl FnOnce(&mut Client) -> T) -> T {
-        f(&mut self.client.lock().unwrap_or_else(PoisonError::into_inner))
+    /// One step on the state. Shared, under the lock between the processes (inside this one's own, so both are always
+    /// taken in that order), on the newest state: what another process saved since is taken in first, so nothing is
+    /// ever done on an old one, and the step's save is the newest when the lock is given back. A client whose state
+    /// is gone or became another account's or device's (signed out, and in again, meanwhile) is closed: it stops
+    /// saving and every step fails with `State`, so it never acts on a state that is not there any more.
+    fn with<T>(&self, f: impl FnOnce(&mut Client) -> T) -> Result<T, YoError> {
+        let mut client = self.client.lock().unwrap_or_else(PoisonError::into_inner);
+        if self.closed.load(Ordering::Relaxed) {
+            return Err(YoError::State);
+        }
+        let Some(lock) = self.shared.get() else { return Ok(f(&mut client)) };
+        let turn = lock.lock();
+        let _turn = Turn(lock.as_ref());
+        let current = match turn {
+            StateTurn::Same => true,
+            StateTurn::Newer { blob } => client.reload(&blob).is_ok(),
+            StateTurn::Gone => false,
+        };
+        if !current {
+            client.stop_persisting();
+            self.closed.store(true, Ordering::Relaxed);
+            return Err(YoError::State);
+        }
+        Ok(f(&mut client))
+    }
+
+    /// What never changes once registered (the user id, the account key), without the lock between processes: also
+    /// for the main thread.
+    fn read<T>(&self, f: impl FnOnce(&Client) -> T) -> T {
+        f(&self.client.lock().unwrap_or_else(PoisonError::into_inner))
     }
 
     /// A message, its way to the hub without holding the client where it can (`send_yo`).
     fn send_content(&self, to: String, content: Content) -> Result<Vec<YoEvent>, YoError> {
-        match self.with(|c| c.send_begin(&to, content.clone())) {
+        match self.with(|c| c.send_begin(&to, content.clone()))? {
             Some(deliveries) => self.deliver_from(deliveries),
-            None => events(self.with(|c| c.send(&to, content))),
+            None => events(self.with(|c| c.send(&to, content))?),
         }
     }
 
@@ -349,7 +420,7 @@ impl YoClient {
     fn deliver_from(&self, mut deliveries: yo_core::Deliveries) -> Result<Vec<YoEvent>, YoError> {
         loop {
             let answers = deliveries.send();
-            match self.with(|c| c.send_end(&deliveries, answers)) {
+            match self.with(|c| c.send_end(&deliveries, answers))? {
                 Sent::More(more) => deliveries = more,
                 Sent::Done(result) => return events(result),
             }
@@ -416,8 +487,30 @@ impl YoClient {
         Ok(Self::new(client))
     }
 
+    /// Opens the state as a guest (`yo_core::Client::restore_guest`): an extension using the app's state, in turns
+    /// with it. The guest holds the lock (`StateLock`) itself for as long as it uses the client; the events its calls
+    /// return stay for the app, and `acknowledge_events` does nothing.
+    #[uniffi::constructor]
+    pub fn restore_guest(
+        transport: Arc<dyn HttpTransport>,
+        store: Arc<dyn StateStore>,
+        state_key: Vec<u8>,
+        blob: Vec<u8>,
+    ) -> Result<Arc<Self>, YoError> {
+        let key = key_of(state_key)?;
+        let mut client = Client::restore_guest(Arc::new(Http(transport)), &blob, &key)?;
+        client.persist_to(Arc::new(Store(store)), key);
+        Ok(Self::new(client))
+    }
+
+    /// Shares the state with other processes from now on (at most once): each call takes `lock` and the newest state
+    /// first. The app's side; the app takes the lock itself while it opens or makes the client.
+    pub fn share_state(&self, lock: Arc<dyn StateLock>) {
+        _ = self.shared.set(lock);
+    }
+
     pub fn phone(&self) -> String {
-        self.with(|c| c.phone().to_owned())
+        self.read(|c| c.phone().to_owned())
     }
 
     /// To "+49 170 …", "chris", or a user id from an event. In a chat in use, the way to the hub does not hold the
@@ -429,68 +522,69 @@ impl YoClient {
     /// Sends again what the hub did not take yet (`waiting`): its limit per sender (`429`) or no network. Without
     /// holding the client.
     pub fn deliver(&self) -> Result<Vec<YoEvent>, YoError> {
-        let deliveries = self.with(|c| c.deliver_begin());
+        let deliveries = self.with(|c| c.deliver_begin())?;
         self.deliver_from(deliveries)
     }
 
     /// Envelopes the hub has not taken yet: `deliver` them again in a while.
     pub fn waiting(&self) -> u32 {
-        self.with(|c| c.waiting()).try_into().unwrap_or(u32::MAX)
+        self.with(|c| c.waiting()).map_or(0, |n| n.try_into().unwrap_or(u32::MAX))
     }
 
     /// The events the last call returned are shown or stored: they will not come again after a crash.
     pub fn acknowledge_events(&self) {
-        self.with(|c| c.acknowledge_events())
+        _ = self.with(|c| c.acknowledge_events());
     }
 
     pub fn user_id(&self) -> String {
-        self.with(|c| c.user_id().to_owned())
+        self.read(|c| c.user_id().to_owned())
     }
 
     /// The username as its owner writes it ("José").
     pub fn username(&self) -> Option<String> {
-        self.with(|c| c.username().map(str::to_owned))
+        self.read(|c| c.username().map(str::to_owned))
     }
 
     /// The account key's 32-byte secret: what the backup seals, for `register_username` on a new phone.
     pub fn account_secret(&self) -> Vec<u8> {
-        self.with(|c| c.account_secret().to_vec())
+        self.read(|c| c.account_secret().to_vec())
     }
 
     /// Stores the account's backup record at the hub, replacing the one before (its old locator then finds nothing).
     pub fn put_backup(&self, backup: YoBackup) -> Result<(), YoError> {
-        Ok(self.with(|c| c.put_backup(&backup.into()))?)
+        Ok(self.with(|c| c.put_backup(&backup.into()))??)
     }
 
     /// Claims a username, or gives it up with `None`.
     pub fn set_username(&self, name: Option<String>) -> Result<(), YoError> {
-        Ok(self.with(|c| c.set_username(name.as_deref()))?)
+        Ok(self.with(|c| c.set_username(name.as_deref()))??)
     }
 
     /// Waits up to `wait_s` seconds for mail and processes it: for the foreground, and the notification extension.
     /// The wait does not hold the client: other calls run meanwhile.
     pub fn sync(&self, wait_s: u64) -> Result<Vec<YoEvent>, YoError> {
-        let wait = self.with(|c| c.sync_begin(wait_s))?;
+        let wait = self.with(|c| c.sync_begin(wait_s))??;
         let response = wait.send();
-        events(self.with(|c| c.sync_end(&wait, response)))
+        events(self.with(|c| c.sync_end(&wait, response))?)
     }
 
     /// When the app comes to the foreground.
     pub fn maintenance(&self) -> Result<Vec<YoEvent>, YoError> {
-        events(self.with(|c| c.maintenance()))
+        events(self.with(|c| c.maintenance())?)
     }
 
     pub fn set_name(&self, name: String) -> Result<Vec<YoEvent>, YoError> {
-        events(self.with(|c| c.set_name(&name)))
+        events(self.with(|c| c.set_name(&name))?)
     }
 
     pub fn set_push(&self, platform: u8, token: String) -> Result<(), YoError> {
         let push = yo_core::Push { platform, token: token.into_bytes().into() };
-        Ok(self.with(|c| c.set_push(push))?)
+        Ok(self.with(|c| c.set_push(push))??)
     }
 
     pub fn contacts(&self) -> Vec<YoContact> {
         self.with(|c| c.contacts())
+            .unwrap_or_default()
             .into_iter()
             .map(|c| YoContact {
                 user: c.user,
@@ -506,7 +600,7 @@ impl YoClient {
     /// Who a name is, as the hub says ("yogpt" is YoGPT's user id and "YoGPT"), without a chat; `None`: nobody by
     /// that name. The question to the hub does not hold the client.
     pub fn whois(&self, name: String) -> Result<Option<YoWhois>, YoError> {
-        let whois = self.with(|c| c.whois_begin(&name))?;
+        let whois = self.with(|c| c.whois_begin(&name))??;
         match whois.send() {
             Ok((user, username)) => Ok(Some(YoWhois { user, username })),
             Err(yo_core::Error::NotOnYo) => Ok(None),
@@ -515,38 +609,38 @@ impl YoClient {
     }
 
     pub fn safety_number(&self, who: String) -> Result<String, YoError> {
-        Ok(self.with(|c| c.safety_number(&who))?)
+        Ok(self.with(|c| c.safety_number(&who))??)
     }
 
     pub fn set_verified(&self, who: String, verified: bool) -> Result<(), YoError> {
-        Ok(self.with(|c| c.set_verified(&who, verified))?)
+        Ok(self.with(|c| c.set_verified(&who, verified))??)
     }
 
     /// Accepts a verified contact's new key, so sending goes on.
     pub fn confirm_identity(&self, who: String) -> Result<(), YoError> {
-        Ok(self.with(|c| c.confirm_identity(&who))?)
+        Ok(self.with(|c| c.confirm_identity(&who))??)
     }
 
     /// Blocks (or unblocks) a user by user id or handle: nothing from them is shown, nothing is sent to them.
     pub fn set_blocked(&self, who: String, blocked: bool) -> Result<(), YoError> {
-        Ok(self.with(|c| c.set_blocked(&who, blocked))?)
+        Ok(self.with(|c| c.set_blocked(&who, blocked))??)
     }
 
     /// Reports a user to the operator. `NotOnYo`: no such user.
     pub fn report(&self, who: String, reason: ReportReason) -> Result<(), YoError> {
-        Ok(self.with(|c| c.report(&who, reason.into()))?)
+        Ok(self.with(|c| c.report(&who, reason.into()))??)
     }
 
     /// Sends feedback on the app to the operator: the text (1 to 2000 bytes of UTF-8, not end-to-end encrypted) and
     /// the app's version ("1.2 (34)"). Signed under the client, sent without it. `Refused(429)`: enough for today.
     pub fn send_feedback(&self, text: String, app_version: String) -> Result<(), YoError> {
-        let request = self.with(|c| c.feedback_begin(&text, &app_version))?;
+        let request = self.with(|c| c.feedback_begin(&text, &app_version))??;
         Ok(request.send()?)
     }
 
     /// Deletes the account at the hub with everything it holds about it; then forget this client and its state.
     pub fn delete_account(&self) -> Result<(), YoError> {
-        Ok(self.with(|c| c.delete_account())?)
+        Ok(self.with(|c| c.delete_account())??)
     }
 
     /// The chat a photo or video to `to` goes in, opened first if there is none yet (a new friend), with how many
@@ -555,7 +649,7 @@ impl YoClient {
         let (fetches, received) = self.with(|c| match c.media_fetches(&to) {
             Some(fetches) => Ok((fetches, Vec::new())),
             None => c.open_chat(&to),
-        })?;
+        })??;
         Ok(MediaChat { fetches, events: received.into_iter().map(Into::into).collect() })
     }
 
@@ -564,7 +658,7 @@ impl YoClient {
     /// tells which refusals mean "later".
     pub fn upload_media(&self, media: YoMedia, ciphertext: Vec<u8>, fetches: u32) -> Result<(), YoError> {
         let media: yo_core::Media = media.try_into()?;
-        let upload = self.with(|c| c.upload(&media, fetches));
+        let upload = self.with(|c| c.upload(&media, fetches))?;
         Ok(upload.send(&ciphertext)?)
     }
 

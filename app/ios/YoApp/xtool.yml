@@ -22,11 +22,16 @@ resources:
   - Resources/IconOriginal@2x.png
   - Resources/IconOriginal@3x.png
   - Resources/IconStandard@3x.png
-# "Yo" in the share sheet (Sources/YoShare, YoShare-Info.plist): photos and videos for a friend, through the App Group
-# group.app.justyo.ios (ShareBridge.swift). App Store and TestFlight only: dev/push.sh drops it from Yo Dev.
+# "Yo" in the share sheet (Sources/YoShare, YoShare-Info.plist): photos and videos sent to a friend from there; and the
+# notification service (Sources/YoNotify, YoNotify-Info.plist): "Yo from YoGPT" on a push. Both use the app's state in
+# the App Group group.app.justyo.ios (SharedState.swift). App Store and TestFlight only: dev/push.sh drops them from
+# Yo Dev.
 extensions:
   - product: YoShare
     bundleID: app.justyo.ios.share
     infoPath: YoShare-Info.plist
     resources:
       - Resources/Montserrat-Bold.ttf
+  - product: YoNotify
+    bundleID: app.justyo.ios.notify
+    infoPath: YoNotify-Info.plist

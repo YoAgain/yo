@@ -1,9 +1,9 @@
-// What the app and its share extension (YoShare) hand each other, in their App Group (`group`): the
-// friends on the list for the extension to show, and the photos and videos picked there for the app to send. The
-// extension runs no core and no network: two processes must never write the account's state. So a share waits in the
-// group's outbox, made as it goes (MediaFile), and the app sends it as soon as it opens. One writer per file: the app
-// writes the friends, the extension adds shares (the media first, then their note, which makes them whole), the app
-// takes them out. Compiled into both targets (Sources/YoShare links to this file).
+// What the app and its extensions (YoShare, YoNotify) hand each other, in their App Group (`group`) beside the
+// account's state (SharedState.swift): the friends on the list for the extensions to show and name, and the photos and
+// videos the share extension could not send itself (no network, the hub's "not now", no state to send with) for the
+// app to send as soon as it opens. One writer per file: the app writes the friends, the extension adds shares (the
+// media first, then their note, which makes them whole), the app takes them out. Compiled into all three targets
+// (Sources/YoShare and Sources/YoNotify link to this file).
 import Foundation
 
 enum ShareBridge {

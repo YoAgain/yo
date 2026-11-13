@@ -14,6 +14,15 @@ struct YoApp: App {
   private let notifications: NotificationDelegate
 
   init() {
+    // The state's lock in the App Group is held inside a background task: never while suspended (SharedState.swift).
+    // (Begun and ended on any thread: UIKit allows it for these two.)
+    let application = UIApplication.shared
+    SharedStateFile.hold = {
+      // Ended by its step, or by iOS's warning that time is up (the step then ends as it can; see `hold`).
+      let task = Ended()
+      task.id = application.beginBackgroundTask(withName: "yo.state") { task.end(application) }
+      return { task.end(application) }
+    }
     let inbox = Inbox()
     _inbox = State(initialValue: inbox)
     notifications = NotificationDelegate(inbox: inbox)
@@ -79,6 +88,20 @@ struct YoApp: App {
   }
 }
 
+/// A background task, ended once.
+private final class Ended: @unchecked Sendable {
+  private let lock = NSLock()
+  var id = UIBackgroundTaskIdentifier.invalid
+
+  func end(_ application: UIApplication) {
+    let id = lock.withLock {
+      defer { self.id = .invalid }
+      return self.id
+    }
+    if id != .invalid { application.endBackgroundTask(id) }
+  }
+}
+
 /// A Yo notification while the app is in front: the app shows it itself (on the sender's row, with the sound), not
 /// the system. In the background the system shows it, with the Yo sound and "Yo back".
 final class NotificationDelegate: NSObject, UNUserNotificationCenterDelegate, Sendable {
@@ -93,16 +116,18 @@ final class NotificationDelegate: NSObject, UNUserNotificationCenterDelegate, Se
   ) async -> UNNotificationPresentationOptions {
     let info = notification.request.content.userInfo
     let sender = info["from"] as? String ?? "Unknown sender"
-    await inbox.received(id: notification.request.identifier, from: sender)
+    // The Yo's own id when the notification extension (YoNotify) knew it: the same Yo from the core is not shown twice.
+    await inbox.received(id: info["id"] as? String ?? notification.request.identifier, from: sender)
     return []
   }
 
   /// A tap on the notification opens the app, where the Yo shows on its row. ("Yo back" right on it comes with push.)
   func userNotificationCenter(_ center: UNUserNotificationCenter, didReceive response: UNNotificationResponse) async {
-    let sender = response.notification.request.content.userInfo["from"] as? String ?? "Unknown sender"
+    let info = response.notification.request.content.userInfo
+    let sender = info["from"] as? String ?? "Unknown sender"
     switch response.actionIdentifier {
     case UNNotificationDefaultActionIdentifier:
-      await inbox.received(id: response.notification.request.identifier, from: sender)
+      await inbox.received(id: info["id"] as? String ?? response.notification.request.identifier, from: sender)
     default:
       break
     }

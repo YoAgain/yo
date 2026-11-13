@@ -1,5 +1,5 @@
-// The app's side of sharing (ShareBridge): it tells the share extension who is on the list, and sends what was shared
-// there as soon as it opens, through the media outbox as a photo or video taken here.
+// The app's side of sharing (ShareBridge): it tells the extensions who is on the list, and sends what the share
+// extension could not send itself as soon as it opens, through the media outbox as a photo or video taken here.
 import Foundation
 
 @MainActor

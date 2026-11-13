@@ -16,9 +16,16 @@ push).
   bottom. Received photos and videos wait as a round thumbnail; hold or tap it to see them once.
 - Profile sheet: save the photos and videos you send to your library.
 - Share sheet (Yo from the App Store and TestFlight): "Yo" for up to ten photos or one video from Photos or any app;
-  the same bars, a tap on a name gives them to that friend. The extension (`Sources/YoShare`) runs no core: it makes
-  them as the camera does (`MediaFile.swift`) and leaves them in the App Group `group.app.justyo.ios`, and the app
-  sends them as soon as it opens (`ShareBridge.swift`, `Share.swift`). Yo Dev (`dev/push.sh`) is built without it.
+  the same bars, a tap on a name sends them to that friend from there (`Sources/YoShare`), as the app would. Without
+  network (or with the hub's "not now") they wait in the App Group `group.app.justyo.ios` and the app sends them as
+  soon as it opens (`ShareBridge.swift`, `Share.swift`).
+- Notifications (the same builds): "Yo from YoGPT", "📷 from …", "3 Yos from …". The push only says "Yo"; the
+  notification service (`Sources/YoNotify`) receives once and names the sender, without fetching photos or videos.
+- The app and both extensions use one account state, in the App Group, its key in the group's keychain group, in
+  turns under a file lock (`SharedState.swift`, `StateLock` in the core): each step of the core takes the lock and the
+  newest state, so there is one writer and never a write from an old state. The state moves there once, at the
+  first start of a build that has the group. Yo Dev (`dev/push.sh`) is built without the extensions and keeps its
+  state to itself.
 
 ## Build and run
 

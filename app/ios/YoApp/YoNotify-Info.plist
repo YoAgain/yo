@@ -1,0 +1,16 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!-- The notification service extension (Sources/YoNotify): who a push is from ("Yo from YoGPT"). -->
+<plist version="1.0">
+<dict>
+	<key>CFBundleDisplayName</key>
+	<string>Yo</string>
+	<key>NSExtension</key>
+	<dict>
+		<key>NSExtensionPointIdentifier</key>
+		<string>com.apple.usernotifications.service</string>
+		<key>NSExtensionPrincipalClass</key>
+		<string>YoNotificationService</string>
+	</dict>
+</dict>
+</plist>

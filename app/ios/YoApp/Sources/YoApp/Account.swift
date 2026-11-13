@@ -230,13 +230,24 @@ final class AccountStore {
 
   /// The core from the state it saved last. A device replaced since (the account restored on another phone): out.
   private func open() async {
-    guard client == nil, let blob = StateFile.load() else { return }
+    guard client == nil else { return }
     let transport = Hub.transport
-    let key = StateKey.load()
     do {
-      let client = try await Hub.run {
-        try YoClient.restore(transport: transport, store: StateFile(), stateKey: key, blob: blob)
+      let opened = try await Hub.run { () throws -> YoClient? in
+        guard SharedStateFile.app else {
+          guard let blob = StateFile.load() else { return nil }
+          return try YoClient.restore(transport: transport, store: StateFile(), stateKey: StateKey.load(), blob: blob)
+        }
+        // Shared with the extensions: opened under the lock, then each step takes it (SharedState.swift).
+        let file = SharedStateFile(guest: false)
+        let client = try SharedStateFile.locked { () throws -> YoClient? in
+          guard let key = StateKey.shared(), let blob = file.read() else { return nil }
+          return try YoClient.restore(transport: transport, store: file, stateKey: key, blob: blob)
+        }
+        client?.shareState(lock: file)
+        return client
       }
+      guard let client = opened, self.client == nil else { return }
       self.client = client
       // The user id as the core has it (an earlier build read it wrongly): the passkey's handle and the backup's id.
       if let id = Hub.bytes(client.userId()), account?.userID != id { account?.userID = id }
@@ -252,12 +263,22 @@ final class AccountStore {
   /// Registers `username` at the hub (spec 6.4), or, with `secret`, takes the name's account back (a new phone).
   private func register(_ username: String, secret: Data?) async throws -> YoClient {
     let transport = Hub.transport
-    let key = StateKey.load()
     do {
       return try await Hub.run {
-        try YoClient.registerUsername(
-          transport: transport, store: StateFile(), stateKey: key, username: username, accountSecret: secret,
-          name: nil, pushPlatform: 0, pushToken: "")
+        let make = { (store: StateStore, key: Data) in
+          try YoClient.registerUsername(
+            transport: transport, store: store, stateKey: key, username: username, accountSecret: secret,
+            name: nil, pushPlatform: 0, pushToken: "")
+        }
+        guard SharedStateFile.app else { return try make(StateFile(), StateKey.load()) }
+        let file = SharedStateFile(guest: false)
+        let client = try SharedStateFile.locked {
+          guard let key = StateKey.shared() else { throw YoError.State }
+          _ = file.read()  // the state there now (none, or a signed-out one's): this one's to replace
+          return try make(file, key)
+        }
+        client.shareState(lock: file)
+        return client
       }
     } catch YoError.Refused(let status) where status == 409 {
       throw AccountError.taken
@@ -516,6 +537,13 @@ final class AccountStore {
     client = nil
     securing = nil
     StateFile.delete()
+    // The group's too, under the lock, off the main thread (an extension's step under way ends first): the state as
+    // it is now, not one a new sign-in saves meanwhile. Clients still on it are closed by their next step (the core's
+    // `StateTurn.gone`).
+    if SharedStateFile.app {
+      let word = SharedStateFile.word()
+      Task.detached(priority: .userInitiated) { SharedStateFile.locked { SharedStateFile.delete(ifStill: word) } }
+    }
     SecureReminder.update(secured: true)
     RecoveryWords.delete()
     Stats.reset()

@@ -551,3 +551,259 @@ fn the_app_layer_sends_a_burst_over_the_hubs_limit_later_in_order() {
     assert_eq!(sent.len(), BURST, "each once");
     assert!(sent.windows(2).all(|w| w[0] <= w[1]), "in order");
 }
+
+/// The state's file shared by processes (an app and its extensions): the sealed state and how often it was saved,
+/// and the lock between them.
+#[derive(Default)]
+struct Disk {
+    state: Mutex<(u64, Vec<u8>)>,
+    held: Mutex<bool>,
+    free: std::sync::Condvar,
+}
+
+/// One process's view of `Disk`, as the app implements `StateStore` and `StateLock`: which save it read or made last.
+struct Process {
+    disk: Arc<Disk>,
+    known: Mutex<u64>,
+}
+
+impl Process {
+    fn new(disk: &Arc<Disk>) -> Arc<Self> {
+        Arc::new(Process { disk: disk.clone(), known: Mutex::new(0) })
+    }
+
+    fn hold(&self) {
+        let mut held = self.disk.held.lock().unwrap();
+        while *held {
+            held = self.disk.free.wait(held).unwrap();
+        }
+        *held = true;
+    }
+
+    fn release(&self) {
+        *self.disk.held.lock().unwrap() = false;
+        self.disk.free.notify_all();
+    }
+
+    /// Under the lock: the state as saved last, now this process's.
+    fn read(&self) -> Vec<u8> {
+        let state = self.disk.state.lock().unwrap();
+        *self.known.lock().unwrap() = state.0;
+        state.1.clone()
+    }
+}
+
+impl StateStore for Process {
+    fn save(&self, blob: Vec<u8>) {
+        assert!(*self.disk.held.lock().unwrap(), "saved only under the lock");
+        let mut state = self.disk.state.lock().unwrap();
+        *state = (state.0 + 1, blob);
+        *self.known.lock().unwrap() = state.0;
+    }
+}
+
+impl yo::StateLock for Process {
+    fn lock(&self) -> yo::StateTurn {
+        self.hold();
+        let state = self.disk.state.lock().unwrap();
+        let mut known = self.known.lock().unwrap();
+        if *known == state.0 {
+            return yo::StateTurn::Same;
+        }
+        *known = state.0;
+        if state.1.is_empty() {
+            yo::StateTurn::Gone
+        } else {
+            yo::StateTurn::Newer { blob: state.1.clone() }
+        }
+    }
+
+    fn unlock(&self) {
+        self.release();
+    }
+}
+
+#[test]
+fn the_app_layer_shares_its_state_with_an_extension_in_turns() {
+    let hub = TestHub::start();
+    let n = random_u64() % 1_000_000_000;
+    let (pa, pb) = (phone(n), phone(n + 1));
+    let transport = || Arc::new(App(Http::new(hub.url())));
+    let disk = Arc::new(Disk::default());
+    let app = Process::new(&disk);
+    yo::request_code(transport(), pa.clone()).unwrap();
+    app.hold();
+    let a = YoClient::register(
+        transport(),
+        app.clone(),
+        vec![7; 32],
+        pa.clone(),
+        "000000".into(),
+        Some("ALICE".into()),
+        0,
+        String::new(),
+    )
+    .unwrap();
+    app.release();
+    a.share_state(app.clone());
+    let b = client(&hub, &pb, "BOB", Arc::new(File::default()));
+    a.send_yo(pb.clone()).unwrap();
+    assert_eq!(yos(&drain(&b), &a.user_id()), 1);
+    b.send_yo(pa.clone()).unwrap();
+
+    // A share extension, while the app sleeps: it holds the lock, opens the newest state and sends (receiving B's
+    // Yo first); what it receives stays for the app.
+    let guest = |send: &dyn Fn(&YoClient) -> Vec<YoEvent>| {
+        let process = Process::new(&disk);
+        process.hold();
+        let blob = process.read();
+        let g = YoClient::restore_guest(transport(), process.clone(), vec![7; 32], blob).unwrap();
+        let events = send(&g);
+        g.acknowledge_events();
+        drop(g);
+        process.release();
+        events
+    };
+    let photo = yo::seal_media(b"JPEG".repeat(1000), 160, 120).unwrap();
+    let returned = guest(&|g| {
+        let chat = g.media_chat(b.user_id()).unwrap();
+        g.upload_media(photo.media.clone(), photo.ciphertext.clone(), chat.fetches).unwrap();
+        let mut events = chat.events;
+        events.extend(g.send_photo(b.user_id(), photo.media.clone()).unwrap());
+        events.extend(g.sync(0).unwrap());
+        events
+    });
+    assert_eq!(yos(&returned, &b.user_id()), 1, "the guest saw B's Yo");
+    let at_b = drain(&b);
+    assert!(at_b.iter().any(|e| matches!(e, YoEvent::Message { kind: MessageKind::Photo { .. }, .. })));
+
+    // A notification extension: one short sync for B's next Yo, returned once; nothing new on a second sync.
+    b.send_yo(pa.clone()).unwrap();
+    let returned = guest(&|g| {
+        let first = g.sync(0).unwrap();
+        assert!(g.sync(0).unwrap().is_empty(), "returned once");
+        first
+    });
+    assert_eq!(yos(&returned, &b.user_id()), 1);
+
+    // The app, awake again: its next call takes in what the extensions saved, B's two Yos among it, handed to the
+    // app now; then it sends on from the newest state, and B opens all of it.
+    let events = a.sync(0).unwrap();
+    assert_eq!(yos(&events, &b.user_id()), 2, "what the guests received comes to the app");
+    a.acknowledge_events();
+    assert!(a.sync(0).unwrap().is_empty(), "acknowledged");
+    a.send_yo(b.user_id()).unwrap();
+    a.send_yo(b.user_id()).unwrap();
+    assert_eq!(yos(&drain(&b), &a.user_id()), 2);
+    b.send_yo(pa.clone()).unwrap();
+    assert_eq!(yos(&a.sync(0).unwrap(), &b.user_id()), 1);
+    assert!(!*disk.held.lock().unwrap(), "every lock given back");
+}
+
+#[test]
+fn the_app_layer_takes_in_what_an_extension_did_while_its_long_poll_waited() {
+    use std::sync::mpsc::channel;
+    use std::time::Duration;
+    let hub = TestHub::start();
+    let n = random_u64() % 1_000_000_000;
+    let (pa, pb) = (phone(n), phone(n + 1));
+    let disk = Arc::new(Disk::default());
+    let app = Process::new(&disk);
+    let (waiting, waited) = channel();
+    let (release, released) = channel();
+    let held =
+        Arc::new(Held { app: App(Http::new(hub.url())), waiting: Mutex::new(waiting), release: Mutex::new(released) });
+    yo::request_code(held.clone(), pa.clone()).unwrap();
+    app.hold();
+    let a = YoClient::register(
+        held,
+        app.clone(),
+        vec![7; 32],
+        pa.clone(),
+        "000000".into(),
+        Some("ALICE".into()),
+        0,
+        String::new(),
+    )
+    .unwrap();
+    app.release();
+    a.share_state(app.clone());
+    let b = client(&hub, &pb, "BOB", Arc::new(File::default()));
+    a.send_yo(pb.clone()).unwrap();
+    assert_eq!(yos(&drain(&b), &a.user_id()), 1);
+    let syncing = {
+        let a = a.clone();
+        std::thread::spawn(move || a.sync(25))
+    };
+    waited.recv_timeout(Duration::from_secs(30)).expect("the long poll starts");
+    // While it waits (the lock is free then), B writes and the extension sends and receives.
+    b.send_yo(pa.clone()).unwrap();
+    let process = Process::new(&disk);
+    process.hold();
+    let blob = process.read();
+    let g = YoClient::restore_guest(Arc::new(App(Http::new(hub.url()))), process.clone(), vec![7; 32], blob).unwrap();
+    let mut seen = g.send_yo(b.user_id()).unwrap();
+    seen.extend(g.sync(0).unwrap());
+    assert_eq!(yos(&seen, &b.user_id()), 1, "received before its send, once");
+    drop(g);
+    process.release();
+    // The long poll's answer (B's Yo, received by the extension already) is processed against the newest state.
+    release.send(()).unwrap();
+    let events = syncing.join().unwrap().unwrap();
+    assert_eq!(yos(&events, &b.user_id()), 1, "once, from the extension's events");
+    a.acknowledge_events();
+    a.send_yo(b.user_id()).unwrap();
+    assert_eq!(yos(&drain(&b), &a.user_id()), 2);
+    b.send_yo(pa).unwrap();
+    assert_eq!(yos(&a.sync(0).unwrap(), &b.user_id()), 1);
+}
+
+#[test]
+fn the_app_layer_closes_a_client_whose_shared_state_went_away() {
+    let hub = TestHub::start();
+    let n = random_u64() % 1_000_000_000;
+    let (pa, pb) = (phone(n), phone(n + 1));
+    let transport = || Arc::new(App(Http::new(hub.url())));
+    let b = client(&hub, &pb, "BOB", Arc::new(File::default()));
+    let register = |disk: &Arc<Disk>, number: &str| {
+        let process = Process::new(disk);
+        yo::request_code(transport(), number.into()).unwrap();
+        process.hold();
+        let client = YoClient::register(
+            transport(),
+            process.clone(),
+            vec![7; 32],
+            number.into(),
+            "000000".into(),
+            None,
+            0,
+            String::new(),
+        )
+        .unwrap();
+        process.release();
+        client.share_state(process);
+        client
+    };
+    let disk = Arc::new(Disk::default());
+    let a = register(&disk, &pa);
+    a.send_yo(pb.clone()).unwrap();
+    // A guest opened on A's state.
+    let guest = Process::new(&disk);
+    guest.hold();
+    let blob = guest.read();
+    let g = YoClient::restore_guest(transport(), guest.clone(), vec![7; 32], blob).unwrap();
+    guest.release();
+    g.share_state(guest);
+    // Signed out, and in again as another account under the same key: the guest neither acts as it nor saves.
+    *disk.state.lock().unwrap() = (1000, Vec::new());
+    let other = register(&disk, &phone(n + 2));
+    let saved = disk.state.lock().unwrap().clone();
+    assert!(matches!(g.send_yo(pb.clone()), Err(yo::YoError::State)));
+    assert!(matches!(g.sync(0), Err(yo::YoError::State)), "closed for good");
+    assert!(g.contacts().is_empty());
+    assert_eq!(disk.state.lock().unwrap().0, saved.0, "nothing saved over the other account's state");
+    // A client whose state is gone (signed out): closed too.
+    *disk.state.lock().unwrap() = (2000, Vec::new());
+    assert!(matches!(other.send_yo(pb.clone()), Err(yo::YoError::State)));
+    assert!(drain(&b).iter().all(|e| !matches!(e, YoEvent::Message { user, .. } if *user == other.user_id())));
+}

@@ -1,10 +1,13 @@
 // "Yo" in the share sheet: the list of friends as in the app (a coloured bar each, the name large in Montserrat, on
-// Amethyst); a tap on a name gives the photos or the video to that friend, and the sheet closes. The extension runs
-// no core: what was shared waits in the App Group's outbox, made small and plain already (MediaFile), and goes with
-// its Yo as soon as Yo opens (ShareBridge). Up to ten photos or one video (Info: NSExtensionActivationRule).
+// Amethyst); a tap on a name sends the photos or the video to that friend, from here, and the sheet closes. It sends
+// as the app does, with the app's own state (SharedState.swift: in turns with the app, under the lock in the App
+// Group): made small and plain (MediaFile), sealed, uploaded, its Yo sent, one after the other (an extension has
+// little memory). What the hub cannot take now (no network, "not now") waits in the group's outbox instead and goes
+// as soon as Yo opens (ShareBridge). Up to ten photos or one video (Info: NSExtensionActivationRule).
 import SwiftUI
 import UIKit
 import UniformTypeIdentifiers
+import YoCore
 
 @objc(YoShareViewController)
 final class ShareViewController: UIViewController {
@@ -35,7 +38,10 @@ final class ShareModel {
   enum State: Equatable {
     case picking
     case giving(String)
+    /// Sent: how many of them.
     case given(String, Int)
+    /// Waiting for the app (some or all): how many were sent or wait.
+    case queued(String, Int)
     case failed(String)
   }
 
@@ -47,6 +53,8 @@ final class ShareModel {
   private var files: Task<[MediaFile], Never>?
   private var giving: Task<Void, Never>?
   private var cancelled = false
+  /// Cancel, for the sending under way off the main actor: the next photo does not go.
+  private let stop = Stop()
   private let done: @MainActor (Bool) -> Void
 
   init(done: @escaping @MainActor (Bool) -> Void) {
@@ -96,7 +104,9 @@ final class ShareModel {
       case (0, 0): return "Nothing to send."
       default: return "Tap a name to send these \(counts.photos + counts.videos)."
       }
-    case .giving, .given: return "It goes as soon as you open Yo."
+    case .giving: return "Sending…"
+    case .given: return "Sent."
+    case .queued: return "It goes as soon as you open Yo."
     case .failed: return "This could not be sent."
     }
   }
@@ -108,6 +118,7 @@ final class ShareModel {
     switch state {
     case .giving(friend.to): return "Sending \(mark)"
     case .given(friend.to, let put): return put < all ? "Sent \(put) of \(all) \(mark)" : "Sent \(mark)"
+    case .queued(friend.to, let put): return put < all ? "\(put) of \(all) \(mark) Waiting" : "Waiting \(mark)"
     case .failed(friend.to): return "Not Sent"
     default: return friend.name
     }
@@ -118,27 +129,85 @@ final class ShareModel {
     state = .giving(friend.to)
     giving = Task {
       let made = await files.value
-      // Cancelled while they were being made: nothing is left for the app.
+      // Cancelled while they were being made: nothing goes.
       guard !cancelled else { return }
-      let put = await Task.detached(priority: .userInitiated) {
-        made.reduce(into: 0) { count, file in if ShareBridge.put(file, for: friend, of: owner) { count += 1 } }
+      let stop = stop
+      let outcome = await Task.detached(priority: .userInitiated) {
+        Self.send(made, to: friend, owner: owner, stop: stop)
       }.value
-      guard put > 0 else {
+      // Cancelled meanwhile: the sheet is closed already; what went, went.
+      guard !cancelled else { return }
+      switch outcome {
+      case .sent(let sent) where sent > 0:
+        state = .given(friend.to, sent)
+      case .queued(let count) where count > 0:
+        state = .queued(friend.to, count)
+      default:
         state = .failed(friend.to)
         try? await Task.sleep(for: .seconds(1.5))
         done(false)
         return
       }
-      state = .given(friend.to, put)
       try? await Task.sleep(for: .seconds(1.2))
       done(true)
     }
   }
 
+  enum Outcome: Sendable {
+    case sent(Int)
+    /// Some or all left for the app: how many were sent or wait.
+    case queued(Int)
+  }
+
+  /// Sends them from here, one after the other: sealed, uploaded, then its Yo (the core's `media_chat`,
+  /// `upload_media`, `send_photo` or `send_video`, as the app's outbox). Without the app's state here (not moved into
+  /// the group yet, the keychain locked, another account), without the lock within a few seconds, or once the hub
+  /// cannot take one now (no network, "not now"), that one and the rest wait in the group's outbox for the app, as
+  /// before. One the hub refuses for good (blocked, not on Yo) is not sent.
+  nonisolated private static func send(
+    _ made: [MediaFile], to friend: ShareBridge.Friend, owner: String, stop: Stop
+  ) -> Outcome {
+    var sent = 0
+    var left = made[...]
+    let client = Guest.open(within: 5)
+    if let client, ownerOf(client) == owner {
+      while let file = left.first, !stop.isSet {
+        do {
+          let sealed = try sealMedia(
+            plain: file.data, width: UInt16(clamping: file.width), height: UInt16(clamping: file.height))
+          let chat = try client.mediaChat(to: friend.to)
+          try client.uploadMedia(media: sealed.media, ciphertext: sealed.ciphertext, fetches: chat.fetches)
+          // Once the hub has the blob the Yo goes: offline it waits in the core's own outbox, sent by the app later.
+          switch file.kind {
+          case .photo: _ = try client.sendPhoto(to: friend.to, media: sealed.media)
+          case .video: _ = try client.sendVideo(to: friend.to, media: sealed.media, durationMs: file.durationMs)
+          }
+          sent += 1
+        } catch let error as YoError where mediaRetryLater(error: error) {
+          break
+        } catch {
+          // Refused for good (or the state would not do): this one is not sent; the next may be.
+        }
+        left = left.dropFirst()
+      }
+    }
+    // Cancelled: the rest is neither sent nor left for the app.
+    guard !left.isEmpty, !stop.isSet else { return .sent(sent) }
+    let put = left.reduce(into: 0) { count, file in if ShareBridge.put(file, for: friend, of: owner) { count += 1 } }
+    return put > 0 ? .queued(sent + put) : .sent(sent)
+  }
+
+  /// The account the state is of, as the list names it (its user id's bytes in base64).
+  nonisolated private static func ownerOf(_ client: YoClient) -> String? {
+    Hub.bytes(client.userId())?.base64EncodedString()
+  }
+
   /// Cancel: what is being made stops and nothing is given; once given, the sheet only closes.
   func cancel() {
     if case .given = state { return done(true) }
+    if case .queued = state { return done(true) }
     cancelled = true
+    stop.set()
     files?.cancel()
     giving?.cancel()
     done(false)
@@ -168,6 +237,15 @@ final class ShareModel {
       }
     }
   }
+}
+
+/// A flag set once, read from any thread.
+final class Stop: @unchecked Sendable {
+  private let lock = NSLock()
+  private var value = false
+
+  var isSet: Bool { lock.withLock { value } }
+  func set() { lock.withLock { value = true } }
 }
 
 struct ShareView: View {
