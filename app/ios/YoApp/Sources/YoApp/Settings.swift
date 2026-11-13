@@ -33,6 +33,7 @@ struct SettingsView: View {
   @State private var passkeyProblem: String?
   /// No pages under the profile (as Signal keeps it flat): securing and the words open as sheets.
   @State private var securing = false
+  @State private var securingStart: SecureStep?
   @State private var showingWords = false
   @State private var turningOffPasskey = false
   @State private var renewingWords = false
@@ -72,14 +73,14 @@ struct SettingsView: View {
             }
             // The one open task, in the same group as you (as Settings puts suggestions under the Apple Account),
             // with the badge the profile button has too.
-            if account.secured {
+            if accounts.toDo == 0 {
               NavigationLink {
                 recoveryPage(account)
               } label: {
                 Label("Account Secured", systemImage: "checkmark").labelStyle(Tile(.green))
               }
             } else {
-              Button { securing = true } label: {
+              Button { secure(nil) } label: {
                 HStack {
                   Label("Secure Your Account", systemImage: "lock.fill").labelStyle(Tile(.orange))
                   Spacer()
@@ -90,7 +91,7 @@ struct SettingsView: View {
               .tint(.primary)
             }
           } footer: {
-            if !account.secured {
+            if accounts.toDo > 0 {
               Text("Set up account recovery to keep your name “\(account.username)” forever.")
             }
           }
@@ -119,7 +120,7 @@ struct SettingsView: View {
         }
       }
       .interactiveDismissDisabled(addingPasskey)
-      .sheet(isPresented: $securing) { SecureNameSheet() }
+      .sheet(isPresented: $securing) { SecureNameSheet(start: securingStart) }
       .sheet(isPresented: $showingWords) {
         if let account = accounts.account, let words = RecoveryWords.load() {
           RecoveryWordsSheet(name: account.username, words: words)
@@ -171,36 +172,34 @@ struct SettingsView: View {
     .padding(.vertical, 2)
   }
 
-  /// "Account Security": the passkey and the recovery key, each a row with its state and what can be done with it.
+  /// "Account Security": the passkey and the recovery key, always both. A step not done yet says so and opens the
+  /// guide at it; a step done opens its menu.
   private func securitySection(_ account: Account) -> some View {
-    let hasWords = account.secured && RecoveryWords.load() != nil
+    let wordsDone = account.secured && accounts.wordsSaved && RecoveryWords.load() != nil
     return Section {
-      if account.secured {
+      if account.byPasskey {
         Menu {
-          if account.byPasskey {
-            Button("Replace Passkey", systemImage: "arrow.triangle.2.circlepath") { Task { await replacePasskey() } }
-            Button("Turn Off Passkey", systemImage: "xmark.circle", role: .destructive) { turningOffPasskey = true }
-          } else {
-            Button("Turn On Passkey", systemImage: "faceid") { Task { await addPasskey() } }
-          }
+          Button("Replace Passkey", systemImage: "arrow.triangle.2.circlepath") { Task { await replacePasskey() } }
+          Button("Turn Off Passkey", systemImage: "xmark.circle", role: .destructive) { turningOffPasskey = true }
+            .disabled(!wordsDone)
         } label: {
-          SecurityRow(icon: "faceid", color: .green, title: "Passkey", value: account.byPasskey ? "On" : "Off")
+          SecurityRow(icon: "faceid", color: .green, title: "Passkey", value: "On")
         }
-        .disabled(addingPasskey || !hasWords)
+      } else {
+        Button { secure(.passkey) } label: {
+          SecurityRow(icon: "faceid", color: .orange, title: "Passkey", value: "Set Up")
+        }
+      }
+      if wordsDone {
         Menu {
           Button("Show Recovery Key", systemImage: "eye") { showingWords = true }
           Button("Create New Recovery Key", systemImage: "arrow.triangle.2.circlepath") { renewingWords = true }
         } label: {
-          SecurityRow(icon: "key.fill", color: .gray, title: "Recovery Key",
-            value: hasWords ? "Created" : "Not on This iPhone")
+          SecurityRow(icon: "key.fill", color: .green, title: "Recovery Key", value: "Saved")
         }
-        .disabled(addingPasskey || !hasWords)
       } else {
-        Button { securing = true } label: {
-          SecurityRow(icon: "faceid", color: .orange, title: "Passkey", value: "Off")
-        }
-        Button { securing = true } label: {
-          SecurityRow(icon: "key.fill", color: .orange, title: "Recovery Key", value: "Not Set Up")
+        Button { secure(.words) } label: {
+          SecurityRow(icon: "key.fill", color: .orange, title: "Recovery Key", value: "Save")
         }
       }
     } header: {
@@ -210,6 +209,13 @@ struct SettingsView: View {
         ? "Either one signs you back in on a new iPhone."
         : "Secure your account to keep your name “\(account.username)” forever.")
     }
+    .disabled(addingPasskey)
+  }
+
+  /// The guide, at a step or (nil) at the first one left.
+  private func secure(_ step: SecureStep?) {
+    securingStart = step
+    securing = true
   }
 
   /// What secures the account, each with what can be done to it: the passkey (Face ID) and the recovery key.
@@ -286,7 +292,7 @@ struct SettingsView: View {
   private func newWords() {
     do {
       _ = try accounts.newRecoveryKey()
-      showingWords = true  // the new words, to keep
+      secure(.words)  // the new words, to save in the guide
     } catch {
       passkeyProblem = "Try again."
     }

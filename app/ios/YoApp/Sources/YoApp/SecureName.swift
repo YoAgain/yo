@@ -1,22 +1,28 @@
-// "Secure Your Account", from the profile (spec 7): two full-colour pages like the onboarding, one task each, as iOS
-// guides a setup (Face ID, Apple Pay). 1, the passkey: made, then used once for its PRF output (iCloud Keychain gives
-// it at once; 1Password only when used, so the same page asks once more); skippable. 2, the recovery key: the 12
-// words, saved through the system's share sheet (Save Image, Notes, Files, a password manager, AirDrop). Done once
-// they are saved.
+// "Secure Your Account" (spec 7): a guide of two full-colour pages like the onboarding, one task each, as iOS guides a
+// setup. Opened at a step (from its row) or at the first one left; after each step it goes on to the next one left,
+// and closes when none is. 1, the passkey: made, then used once for its PRF output (iCloud Keychain gives it at once;
+// 1Password only when used, so the same page asks once more); skippable. 2, the recovery key: the 12 words, saved
+// through the system's share sheet (Save Image, Notes, Files, a password manager, AirDrop).
 import SwiftUI
 
+enum SecureStep { case passkey, words }
+
 struct SecureNameSheet: View {
+  /// Where to begin; nil, the first step left.
+  var start: SecureStep?
+
   @Environment(AccountStore.self) private var accounts
   @Environment(\.dismiss) private var dismiss
-  @State private var page = Stage.passkey
+  @State private var page = SecureStep.passkey
   @State private var confirming = false
-  @State private var passkeyDone = false
+  @State private var skipped = false
   @State private var words: [String] = []
-  @State private var saved = false
   @State private var busy = false
   @State private var problem: String?
 
-  private enum Stage { case passkey, words }
+  private var secured: Bool { accounts.account?.secured == true }
+  private var passkeyDone: Bool { accounts.account?.byPasskey == true }
+  private var wordsDone: Bool { secured && accounts.wordsSaved }
 
   var body: some View {
     ZStack {
@@ -33,7 +39,11 @@ struct SecureNameSheet: View {
     .foregroundStyle(.white)
     .preferredColorScheme(.dark)
     .interactiveDismissDisabled(busy)
-    .onAppear { if words.isEmpty { words = accounts.secureWords() } }
+    .onAppear {
+      guard words.isEmpty else { return }
+      words = secured ? RecoveryWords.load() ?? [] : accounts.secureWords()
+      page = start ?? (passkeyDone ? .words : .passkey)
+    }
   }
 
   // MARK: Pages
@@ -52,43 +62,54 @@ struct SecureNameSheet: View {
         Task { confirming ? await confirmPasskey() : await makePasskey() }
       }
       .disabled(busy)
-      Button("Skip") { go(.words) }
-        .font(.yo(17))
-        .disabled(busy)
+      Button("Skip") {
+        skipped = true
+        next()
+      }
+      .font(.yo(17))
+      .disabled(busy)
       Note(problem)
     }
   }
 
   private var wordsPage: some View {
     Page(title: "Recovery Key",
-      message: passkeyDone ? "Face ID is on. Save these 12 words too." : "Save these 12 words to sign back in.",
-      back: passkeyDone ? nil : { go(.passkey) }) {
+      message: passkeyDone ? "Face ID is on. Save these 12 words too." : "Save these 12 words to sign back in.") {
       FrostedKey(words: words, qrSize: 80)
     } bottom: {
-      if saved {
-        PrimaryButton("Done") { finish() }
-      } else {
-        PrimaryButton("Save…") { save() }
-      }
+      PrimaryButton("Save…") { save() }
       Note(problem)
     }
   }
 
   // MARK: Doing
 
-  private func go(_ next: Stage) {
+  /// On to the next step left (a skipped passkey is not asked again), or closed when none is.
+  private func next() {
     problem = nil
-    page = next
+    confirming = false
+    if !passkeyDone && !skipped && page != .passkey {
+      page = .passkey
+    } else if !wordsDone && page != .words {
+      page = .words
+    } else {
+      UINotificationFeedbackGenerator().notificationOccurred(.success)
+      dismiss()
+    }
   }
 
+  /// Not secured yet: the passkey starts the backup (and asks once more for 1Password). Secured by the words already:
+  /// the passkey is added to it.
   private func makePasskey() async {
     busy = true
     defer { busy = false }
     problem = nil
     do {
-      if try await accounts.securePasskey() {
-        passkeyDone = true
-        go(.words)
+      if secured {
+        try await accounts.addPasskey()
+        next()
+      } else if try await accounts.securePasskey() {
+        next()
       } else {
         confirming = true  // 1Password: its PRF output only when the passkey is used
       }
@@ -103,14 +124,14 @@ struct SecureNameSheet: View {
     problem = nil
     do {
       try await accounts.confirmPasskey()
-      passkeyDone = true
-      go(.words)
+      next()
     } catch {
       if !SecurityPresentation.isCancellation(error) { problem = "Couldn’t confirm passkey. Try again or skip." }
     }
   }
 
-  /// The words as the card (an image) and as text, to the share sheet; saved once something was done with them.
+  /// The words as the card (an image) and as text, to the share sheet. Once saved somewhere, they also secure the
+  /// account if nothing did yet, and the guide goes on.
   private func save() {
     let name = accounts.account?.username ?? ""
     let renderer = ImageRenderer(content: RecoveryCard(name: name, words: words))
@@ -118,19 +139,13 @@ struct SecureNameSheet: View {
     var items: [Any] = ["Yo recovery key for \(name): " + words.joined(separator: " ")]
     if let image = renderer.uiImage { items.insert(image, at: 0) }
     Share.present(items) { completed in
-      if completed {
-        UINotificationFeedbackGenerator().notificationOccurred(.success)
-        withAnimation(.snappy) { saved = true }
+      guard completed else { return }
+      if !secured {
+        do { try accounts.keepWords() } catch { return problem = "Couldn’t save. Try again." }
       }
+      accounts.markWordsSaved(true)
+      next()
     }
-  }
-
-  /// With the passkey the backup is saved already; without, the words save it now.
-  private func finish() {
-    if !passkeyDone {
-      do { try accounts.keepWords() } catch { return problem = "Couldn’t save. Try again." }
-    }
-    dismiss()
   }
 }
 

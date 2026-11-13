@@ -175,7 +175,7 @@ struct FriendList: View {
           // Your picture opens your profile and settings in a sheet, as Apple's own apps do.
           // The system's badge while the name is not secured: one thing to do (as Settings badges "Finish Setting Up").
           Button("Profile", systemImage: "person.fill") { settings = true }
-            .badge(accounts.account?.secured == false ? 1 : 0)
+            .badge(accounts.toDo)
         }
         // The camera; it turns red (Alizarin, the original's round button) while it is on.
         ToolbarItem(placement: .topBarTrailing) {

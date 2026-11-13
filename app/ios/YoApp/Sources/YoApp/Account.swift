@@ -225,6 +225,20 @@ final class AccountStore {
     didSet { UserDefaults.standard.set(try? JSONEncoder().encode(account), forKey: Self.key) }
   }
 
+  /// The recovery words were saved somewhere by the person (through the share sheet), not only made. Accounts from
+  /// before this was kept count as saved.
+  private(set) var wordsSaved: Bool = UserDefaults.standard.object(forKey: "recovery.saved") as? Bool ?? true {
+    didSet { UserDefaults.standard.set(wordsSaved, forKey: "recovery.saved") }
+  }
+
+  func markWordsSaved(_ saved: Bool) { wordsSaved = saved }
+
+  /// What is left to do, for the badges: the passkey, the words saved; 0 once both are done.
+  var toDo: Int {
+    guard let account else { return 0 }
+    return !account.byPasskey || !account.secured || !wordsSaved ? 1 : 0
+  }
+
   private static let key = "account"
   private let passkeys = Passkeys()
   /// Securing under way: K and the words, made once per try; the passkey once made.
@@ -244,6 +258,7 @@ final class AccountStore {
       username: username, userID: userID, accountKey: Curve25519.Signing.PrivateKey().rawRepresentation,
       byPasskey: false)
     SecureReminder.update(secured: false)
+    wordsSaved = false
   }
 
   // MARK: Securing the name (spec 7)
@@ -344,6 +359,7 @@ final class AccountStore {
     MockHub.save(record, for: account.username, locator: BackupRecord.locator(code: code))
     RecoveryWords.save(code)
     self.account = account
+    wordsSaved = false  // new words, not yet kept anywhere
     return code
   }
 
@@ -384,6 +400,7 @@ final class AccountStore {
     guard let k = try? BackupRecord.unwrap(wrapped, with: BackupRecord.key(code: code)) else { throw AccountError.wrongCode }
     try open(record, with: k)
     RecoveryWords.save(code)
+    wordsSaved = true  // typed in: the person has them
   }
 
   private func open(_ record: BackupRecord, with k: SymmetricKey) throws {
