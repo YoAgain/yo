@@ -47,6 +47,33 @@ struct SettingsView: View {
               Form {
                 Section {
                   LabeledContent("Name") { Text(account.username).font(.yo(17, relativeTo: .body)) }
+                  // Security here too, on or off, so it can be turned on from here as well.
+                  if account.secured {
+                    NavigationLink {
+                      recoveryPage(account)
+                    } label: {
+                      LabeledContent {
+                        Text("On")
+                      } label: {
+                        Label("Account Security", systemImage: "lock.fill").labelStyle(Tile(.green))
+                      }
+                    }
+                  } else {
+                    Button { securing = true } label: {
+                      HStack {
+                        Label("Account Security", systemImage: "lock.fill").labelStyle(Tile(.orange))
+                        Spacer()
+                        Text("Off").foregroundStyle(.secondary)
+                        CountBadge(count: 1)
+                        Chevron()
+                      }
+                    }
+                    .tint(.primary)
+                  }
+                } footer: {
+                  if !account.secured {
+                    Text("Secure your account to keep your name “\(account.username)” forever.")
+                  }
                 }
                 // As the Apple Account page ends: Sign Out, red, on its own; the dialog says what happens.
                 Section {
