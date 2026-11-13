@@ -105,3 +105,18 @@ fn a_full_hub_holds_the_upload_and_the_yo_until_there_is_room() {
     // The day's count is used up: later again (the next day it goes).
     assert_eq!(send_media(&mut a, &pb, &[3; 100], None).unwrap_err(), Error::Refused(429));
 }
+
+#[test]
+fn a_client_that_forgets_media_keys_keeps_only_the_id() {
+    let hub = TestHub::start();
+    let (mut a, mut b, _, pb) = pair(&hub);
+    a.send_yo(&pb).unwrap();
+    b.sync(0).unwrap();
+    b.forget_media_keys();
+    let sent = send_media(&mut a, &pb, b"for a bot", None).unwrap();
+    let got = media_in(&b.sync(0).unwrap());
+    let [(_, Content::Photo(media))] = got.as_slice() else { panic!("{got:?}") };
+    assert_eq!((media.id, media.key), (sent.id, [0; 32]));
+    // The blob can still be fetched into nothing, so the hub deletes it.
+    assert!(media::fetch(b.transport().as_ref(), media).unwrap().is_some());
+}

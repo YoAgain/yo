@@ -234,9 +234,11 @@ fn the_app_layer_sends_a_photo_to_a_new_friend_and_yos_go_while_it_uploads() {
     // A photo to B, who has no chat with A yet: the upload opens it, and is held on its way.
     let photo = b"JPEG".repeat(10_000);
     let sealed = yo::seal_media(photo.clone(), 1600, 1200).unwrap();
+    let chat = a.media_chat(pb.clone()).unwrap();
+    assert_eq!(chat.fetches, 1);
     let uploading = {
-        let (a, pb, media) = (a.clone(), pb.clone(), sealed.media.clone());
-        std::thread::spawn(move || a.upload_media(pb, media, sealed.ciphertext))
+        let (a, media) = (a.clone(), sealed.media.clone());
+        std::thread::spawn(move || a.upload_media(media, sealed.ciphertext, chat.fetches))
     };
     waited.recv_timeout(Duration::from_secs(30)).expect("the upload starts");
     // Meanwhile Yos go: the upload does not hold the client.

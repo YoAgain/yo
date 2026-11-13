@@ -67,6 +67,11 @@ pub fn blob_path(id: &yo_wire::content::BlobId) -> String {
     api::blob_path(id)
 }
 
+/// The same blob without its key: what a client that forgets media keys keeps.
+pub fn without_key(media: Media) -> Media {
+    Media { key: [0; 32], ..media }
+}
+
 /// `fetch` and `open` in one.
 pub fn fetch_open(transport: &dyn Transport, media: &Media) -> Result<Option<Vec<u8>>> {
     fetch(transport, media)?.map(|ciphertext| open(media, &ciphertext)).transpose()
@@ -114,6 +119,12 @@ impl Client {
         let (mut headers, _) = self.sign_hash("PUT", &path, &media.sha256);
         headers.push((HEADER_BODY_HASH.to_owned(), yo_wire::b64(&media.sha256)));
         Upload { transport: self.transport.clone(), path, headers }
+    }
+
+    /// From now on, the keys of photos and videos received are dropped as they are decrypted, before any event is
+    /// kept: for a client that never opens them (YoGPT). The blob's id stays, to fetch it into nothing.
+    pub fn forget_media_keys(&mut self) {
+        self.media_keys_forgotten = true;
     }
 
     /// The transport, for fetches that need no client (`fetch`).

@@ -215,8 +215,12 @@ impl Hub {
                 pruning.replay.forget_expired(now_ms());
                 if minutes.is_multiple_of(60) {
                     pruning.limiter.forget_idle(DAY);
-                    if let Err(error) = pruning.prune(now_ms()) {
-                        eprintln!("yo-hub: prune: {error}");
+                    // Off the request threads: the sweep lists every blob file.
+                    let hub = pruning.clone();
+                    match tokio::task::spawn_blocking(move || hub.prune(now_ms())).await {
+                        Ok(Ok(())) => {}
+                        Ok(Err(error)) => eprintln!("yo-hub: prune: {error}"),
+                        Err(error) => eprintln!("yo-hub: prune: {error}"),
                     }
                 }
                 minutes += 1;
@@ -848,8 +852,10 @@ async fn put_blob(
     if !hub.db.blob_quota_left(&device.user_id, size, now, &quota)? {
         return Err(refuse(StatusCode::TOO_MANY_REQUESTS));
     }
-    let stored = hub.db.blobs_stored()?;
-    let _room = hub.blobs.reserve(size, stored).map_err(|_| refuse(StatusCode::INSUFFICIENT_STORAGE))?;
+    // A few uploads of one user at once, no more: none can hold the room of everyone's.
+    let _slot = hub.blobs.uploading(device.user_id).ok_or_else(|| refuse(StatusCode::TOO_MANY_REQUESTS))?;
+    let _room =
+        hub.blobs.reserve(size, || hub.db.blobs_stored())?.map_err(|_| refuse(StatusCode::INSUFFICIENT_STORAGE))?;
     let failed = |error: std::io::Error| {
         eprintln!("yo-hub: blob upload: {error}");
         refuse(StatusCode::INTERNAL_SERVER_ERROR)
@@ -900,13 +906,13 @@ async fn get_blob(
     hub.limit(format!("blob:get:ip:{}", hub.ip(peer, &headers)), hub.config.limits.blob_get_per_ip_minute, MINUTE)?;
     let id: BlobId = path_id(&id)?;
     let ttl = hub.config.limits.blob_ttl_days * DAY.as_millis() as u64;
-    let size = hub.db.blob(&id, now_ms(), ttl)?.ok_or_else(|| refuse(StatusCode::NOT_FOUND))?;
+    let (size, created_at) = hub.db.blob(&id, now_ms(), ttl)?.ok_or_else(|| refuse(StatusCode::NOT_FOUND))?;
     let file = hub.blobs.read(&id, size).await.ok_or_else(|| refuse(StatusCode::NOT_FOUND))?;
     let (db, store) = (hub.db.clone(), hub.blobs.clone());
     let stream = blobs::Counted {
         inner: tokio_util::io::ReaderStream::with_capacity(file, 64 * 1024),
         left: size,
-        done: Some(Box::new(move || blobs::fetched(&db, &store, id))),
+        done: Some(Box::new(move || blobs::fetched(&db, &store, id, created_at))),
     };
     axum::response::Response::builder()
         .header(axum::http::header::CONTENT_TYPE, "application/octet-stream")

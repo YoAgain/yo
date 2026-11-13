@@ -11,25 +11,52 @@ use crate::config::BlobConfig;
 use crate::db::{BlobPut, Db};
 use bytes::Bytes;
 use futures_core::Stream;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::io;
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, PoisonError};
 use std::task::{Context, Poll};
 use std::time::Duration;
 use yo_wire::content::{BlobId, BLOB_ID_LEN};
+use yo_wire::UserId;
 
 /// A file in `tmp/` older than this belongs to no upload under way.
 const TMP_KEPT: Duration = Duration::from_secs(3600);
+/// Uploads of one user at once.
+pub const UPLOADS_PER_USER: u32 = 4;
+/// Uploads of all users at once.
+pub const UPLOADS: u32 = 256;
 
 pub struct Blobs {
     dir: PathBuf,
     budget: u64,
     min_free: u64,
-    /// Bytes of uploads under way: counted against the budget before they are stored.
+    /// Bytes of uploads under way: counted against the budget before they are stored. Changed only under
+    /// `admission`, so an upload being admitted never misses one that moves from coming in to stored meanwhile.
     incoming: AtomicU64,
+    admission: Mutex<()>,
+    /// Uploads under way, by user, and all.
+    uploads: Mutex<HashMap<UserId, u32>>,
+}
+
+/// An upload under way of a user; its place is given back when it is dropped.
+pub struct Slot<'a> {
+    blobs: &'a Blobs,
+    user: UserId,
+}
+
+impl Drop for Slot<'_> {
+    fn drop(&mut self) {
+        let mut uploads = self.blobs.uploads.lock().unwrap_or_else(PoisonError::into_inner);
+        if let Some(n) = uploads.get_mut(&self.user) {
+            *n -= 1;
+            if *n == 0 {
+                uploads.remove(&self.user);
+            }
+        }
+    }
 }
 
 fn hex(bytes: &[u8]) -> String {
@@ -60,6 +87,8 @@ pub struct Reserved<'a> {
 
 impl Drop for Reserved<'_> {
     fn drop(&mut self) {
+        // After the blob's row (if it was stored): for a moment it counts twice, never not at all.
+        let _admission = self.blobs.admission.lock().unwrap_or_else(PoisonError::into_inner);
         self.blobs.incoming.fetch_sub(self.size, Ordering::Relaxed);
     }
 }
@@ -86,7 +115,25 @@ impl Blobs {
             budget: config.budget_bytes,
             min_free: config.min_free_bytes,
             incoming: AtomicU64::new(0),
+            admission: Mutex::default(),
+            uploads: Mutex::default(),
         })
+    }
+
+    /// A place for one more upload of `user`, if it has fewer than `UPLOADS_PER_USER` under way and all users fewer
+    /// than `UPLOADS`.
+    pub fn uploading(&self, user: UserId) -> Option<Slot<'_>> {
+        let mut uploads = self.uploads.lock().unwrap_or_else(PoisonError::into_inner);
+        let all: u32 = uploads.values().sum();
+        let n = uploads.entry(user).or_default();
+        if *n >= UPLOADS_PER_USER || all >= UPLOADS {
+            if *n == 0 {
+                uploads.remove(&user);
+            }
+            return None;
+        }
+        *n += 1;
+        Some(Slot { blobs: self, user })
     }
 
     /// Where a blob lives: by the first byte of its id in one of 256 directories.
@@ -100,11 +147,22 @@ impl Blobs {
         Ok(stat.f_bavail.saturating_mul(stat.f_frsize))
     }
 
-    /// Holds room for `size` bytes, if the budget and the disk have it with what is stored (`stored`) and what is
-    /// coming in.
-    pub fn reserve(&self, size: u64, stored: u64) -> Result<Reserved<'_>, NoRoom> {
+    /// Holds room for `size` bytes, if the budget and the disk have it with what is stored (`stored()`, asked under
+    /// the admission lock) and what is coming in.
+    pub fn reserve<E>(
+        &self,
+        size: u64,
+        stored: impl FnOnce() -> Result<u64, E>,
+    ) -> Result<Result<Reserved<'_>, NoRoom>, E> {
+        let admission = self.admission.lock().unwrap_or_else(PoisonError::into_inner);
+        let stored = stored()?;
         let incoming = self.incoming.fetch_add(size, Ordering::Relaxed) + size;
+        drop(admission);
         let reserved = Reserved { blobs: self, size };
+        Ok(self.room(reserved, stored, incoming))
+    }
+
+    fn room<'a>(&self, reserved: Reserved<'a>, stored: u64, incoming: u64) -> Result<Reserved<'a>, NoRoom> {
         if stored.saturating_add(incoming) > self.budget {
             return Err(NoRoom::Full);
         }
@@ -209,8 +267,8 @@ impl<S: Stream<Item = io::Result<Bytes>> + Unpin> Stream for Counted<S> {
 }
 
 /// What a fetch that completed does: one fetch fewer, and the blob gone after the last.
-pub fn fetched(db: &Arc<Db>, blobs: &Arc<Blobs>, id: BlobId) {
-    match db.blob_fetched(&id) {
+pub fn fetched(db: &Arc<Db>, blobs: &Arc<Blobs>, id: BlobId, created_at: u64) {
+    match db.blob_fetched(&id, created_at) {
         Ok(true) => blobs.remove(&id),
         Ok(false) => {}
         Err(error) => eprintln!("yo-hub: database: {error}"),
@@ -257,6 +315,18 @@ mod tests {
         let mut stream = counted(3, done.clone());
         while stream.next().await.is_some() {}
         assert!(done.load(Ordering::Relaxed));
+    }
+
+    #[test]
+    fn a_user_has_a_few_uploads_at_once() {
+        let blobs = Blobs::open(&crate::config::BlobConfig::for_tests()).unwrap();
+        let held: Vec<Slot<'_>> = (0..UPLOADS_PER_USER).map(|_| blobs.uploading([1; 16]).unwrap()).collect();
+        assert!(blobs.uploading([1; 16]).is_none());
+        assert!(blobs.uploading([2; 16]).is_some(), "another user's are their own");
+        drop(held);
+        assert!(blobs.uploading([1; 16]).is_some());
+        assert!(blobs.uploads.lock().unwrap().len() <= 1);
+        let _ = std::fs::remove_dir_all(blobs.dir());
     }
 
     #[test]

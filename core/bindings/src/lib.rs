@@ -151,6 +151,13 @@ pub struct SealedMedia {
     pub ciphertext: Vec<u8>,
 }
 
+/// The chat a photo or video goes in: how many fetches its upload is for, and what opening it received.
+#[derive(uniffi::Record)]
+pub struct MediaChat {
+    pub fetches: u32,
+    pub events: Vec<YoEvent>,
+}
+
 /// Seals a photo or video (at most 10 MiB) under a key of its own, with a new id. No client: call it anywhere.
 #[uniffi::export]
 pub fn seal_media(plain: Vec<u8>, width: u16, height: u16) -> Result<SealedMedia, YoError> {
@@ -523,20 +530,23 @@ impl YoClient {
         Ok(self.with(|c| c.delete_account())?)
     }
 
-    /// Uploads a sealed photo or video for the chat with `to` (opened first if there is none yet), before its Yo
-    /// (`send_photo`, `send_video`). Signed under the client, sent without it: other calls go on meanwhile.
-    /// `media_retry_later` tells which refusals mean "later". Returns what opening the chat received.
-    pub fn upload_media(&self, to: String, media: YoMedia, ciphertext: Vec<u8>) -> Result<Vec<YoEvent>, YoError> {
-        let media: yo_core::Media = media.try_into()?;
-        let (upload, received) = self.with(|c| {
-            let (fetches, received) = match c.media_fetches(&to) {
-                Some(fetches) => (fetches, Vec::new()),
-                None => c.open_chat(&to)?,
-            };
-            Ok::<_, yo_core::Error>((c.upload(&media, fetches), received))
+    /// The chat a photo or video to `to` goes in, opened first if there is none yet (a new friend), with how many
+    /// fetches its upload is for, and what opening it received (to be shown like any).
+    pub fn media_chat(&self, to: String) -> Result<MediaChat, YoError> {
+        let (fetches, received) = self.with(|c| match c.media_fetches(&to) {
+            Some(fetches) => Ok((fetches, Vec::new())),
+            None => c.open_chat(&to),
         })?;
-        upload.send(&ciphertext)?;
-        Ok(received.into_iter().map(Into::into).collect())
+        Ok(MediaChat { fetches, events: received.into_iter().map(Into::into).collect() })
+    }
+
+    /// Uploads a sealed photo or video for `fetches` fetches (`media_chat`), before its Yo (`send_photo`,
+    /// `send_video`). Signed under the client, sent without it: other calls go on meanwhile. `media_retry_later`
+    /// tells which refusals mean "later".
+    pub fn upload_media(&self, media: YoMedia, ciphertext: Vec<u8>, fetches: u32) -> Result<(), YoError> {
+        let media: yo_core::Media = media.try_into()?;
+        let upload = self.with(|c| c.upload(&media, fetches));
+        Ok(upload.send(&ciphertext)?)
     }
 
     /// A Yo with a photo whose blob is uploaded.

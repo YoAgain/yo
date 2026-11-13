@@ -233,6 +233,8 @@ pub struct Client {
     delivering: BTreeSet<String>,
     /// Until when (clock) the inbox counts as up to date: the end of a long wait under way, or when it was emptied.
     inbox_fresh_until: u64,
+    /// Keys of photos and videos received are forgotten before anything is kept (a bot that never opens them).
+    media_keys_forgotten: bool,
 }
 
 /// A group member as YoLS sees it.
@@ -567,6 +569,7 @@ impl Client {
             drop_reasons: Vec::new(),
             delivering: BTreeSet::new(),
             inbox_fresh_until: 0,
+            media_keys_forgotten: false,
         }
     }
 
@@ -1702,7 +1705,14 @@ impl Client {
                 if self.state.contacts.get(&peer).is_some_and(|c| c.blocked) {
                     return Ok(());
                 }
-                let event = match message.content {
+                let content = match message.content {
+                    Content::Photo(media) if self.media_keys_forgotten => Content::Photo(media::without_key(media)),
+                    Content::Video { media, duration_ms } if self.media_keys_forgotten => {
+                        Content::Video { media: media::without_key(media), duration_ms }
+                    }
+                    content => content,
+                };
+                let event = match content {
                     Content::Profile { name } if !from_me => {
                         if let Some(contact) = self.state.contacts.get_mut(&peer) {
                             contact.name = Some(name.clone());

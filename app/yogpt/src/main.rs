@@ -358,6 +358,8 @@ fn open(account: &Account) -> Option<Client> {
         };
         match opened {
             Ok(mut client) => {
+                // It never opens a photo or video: their keys are not even kept with the events.
+                client.forget_media_keys();
                 client.persist_to(Arc::new(File(path)), key);
                 return Some(client);
             }

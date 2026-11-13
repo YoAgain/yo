@@ -771,24 +771,30 @@ impl Db {
         Ok(BlobPut::Stored)
     }
 
-    /// A blob's size, if it is there, has fetches left and is within its time.
-    pub fn blob(&self, id: &BlobId, now: u64, ttl_ms: u64) -> rusqlite::Result<Option<u64>> {
+    /// A blob's size and when it was stored (which upload under this id it is), if it is there, has fetches left
+    /// and is within its time.
+    pub fn blob(&self, id: &BlobId, now: u64, ttl_ms: u64) -> rusqlite::Result<Option<(u64, u64)>> {
         self.conn()
-            .prepare_cached("SELECT size FROM blobs WHERE id = ?1 AND fetches_left > 0 AND created_at >= ?2")?
-            .query_row(params![id, now.saturating_sub(ttl_ms) as i64], |row| row.get::<_, i64>(0).map(|n| n as u64))
+            .prepare_cached(
+                "SELECT size, created_at FROM blobs WHERE id = ?1 AND fetches_left > 0 AND created_at >= ?2",
+            )?
+            .query_row(params![id, now.saturating_sub(ttl_ms) as i64], |row| {
+                Ok((row.get::<_, i64>(0)? as u64, row.get::<_, i64>(1)? as u64))
+            })
             .optional()
     }
 
-    /// Counts a complete fetch; true when it was the last and the row is gone (the file must go too).
-    pub fn blob_fetched(&self, id: &BlobId) -> rusqlite::Result<bool> {
+    /// Counts a complete fetch of the blob stored at `created_at`; true when it was the last and the row is gone (the
+    /// file must go too). A fetch of a blob gone meanwhile counts for none stored again under its id.
+    pub fn blob_fetched(&self, id: &BlobId, created_at: u64) -> rusqlite::Result<bool> {
         let mut conn = self.conn();
         let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
         let left: Option<i64> = tx
             .prepare_cached(
-                "UPDATE blobs SET fetches_left = fetches_left - 1 WHERE id = ?1 AND fetches_left > 0
-                 RETURNING fetches_left",
+                "UPDATE blobs SET fetches_left = fetches_left - 1
+                 WHERE id = ?1 AND created_at = ?2 AND fetches_left > 0 RETURNING fetches_left",
             )?
-            .query_row([id], |row| row.get(0))
+            .query_row(params![id, created_at as i64], |row| row.get(0))
             .optional()?;
         let last = left == Some(0);
         if last {
