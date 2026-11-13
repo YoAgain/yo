@@ -698,7 +698,7 @@ struct Chevron: View {
   var body: some View {
     Image(systemName: "chevron.right")
       .font(.footnote.weight(.semibold))
-      .foregroundStyle(.tertiary)
+      .foregroundStyle(Color(.tertiaryLabel))
       .accessibilityHidden(true)
   }
 }
@@ -712,13 +712,19 @@ private struct SecurityRow: View {
   var done = false
 
   var body: some View {
+    // Plain label colours, not the tint a button or menu would give them; the checkmark after the state.
     HStack {
-      Label(title, systemImage: icon).labelStyle(Tile(color)).foregroundStyle(.primary)
+      Label {
+        Text(title).foregroundStyle(Color(.label))
+      } icon: {
+        Image(systemName: icon)
+      }
+      .labelStyle(Tile(color))
       Spacer()
+      Text(value).foregroundStyle(Color(.secondaryLabel))
       if done {
         Image(systemName: "checkmark.circle.fill").foregroundStyle(.green).accessibilityHidden(true)
       }
-      Text(value).foregroundStyle(.secondary)
       Chevron()
     }
   }
