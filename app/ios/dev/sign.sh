@@ -30,6 +30,12 @@ for key, value in own.items():
     if key not in entitlements:
         sys.exit(f"the profile does not allow {key}: enable it for the app id and make the profile again")
     entitlements[key] = value
+# A development build reads its domains' association files straight from the domain, not through Apple's CDN (which
+# keeps an old one up to a day): "?mode=developer", honoured with Settings > Developer > Associated Domains Development.
+domains = entitlements.get("com.apple.developer.associated-domains")
+if isinstance(domains, list):
+    entitlements["com.apple.developer.associated-domains"] = [
+        d if "?mode=" in d else d + "?mode=developer" for d in domains]
 plistlib.dump(entitlements, open(sys.argv[3], "wb"))
 print(profile["TeamIdentifier"][0])
 PY

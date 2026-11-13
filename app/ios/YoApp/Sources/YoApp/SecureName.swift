@@ -135,7 +135,10 @@ struct SecureNameSheet: View {
       UINotificationFeedbackGenerator().notificationOccurred(.success)
       created = true
     } catch {
-      if !SecurityPresentation.isCancellation(error) { problem = "Couldn’t create passkey. Try again or skip." }
+      if !SecurityPresentation.isCancellation(error) {
+        let e = error as NSError  // the system's reason, while Yo is in development
+        problem = "Couldn’t create passkey. Try again or skip. (\(e.domain) \(e.code): \(e.localizedDescription))"
+      }
     }
   }
 
