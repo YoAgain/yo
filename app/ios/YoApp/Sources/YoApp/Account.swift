@@ -32,9 +32,12 @@ enum Username {
     return nil
   }
 
-  /// What may be typed: A–Z, 0–9 and _, in upper case, at most 16.
+  /// What may be typed: A–Z, 0–9 and _, in upper case, a letter first, at most 16. So the field itself keeps the
+  /// rules, and only "too short" and "taken" are left to show.
   static func clean(_ typed: String) -> String {
-    String(typed.uppercased().filter { ("A"..."Z").contains($0) || ("0"..."9").contains($0) || $0 == "_" }.prefix(16))
+    String(
+      typed.uppercased().filter { ("A"..."Z").contains($0) || ("0"..."9").contains($0) || $0 == "_" }
+        .drop(while: { !("A"..."Z").contains($0) }).prefix(16))
   }
 }
 
