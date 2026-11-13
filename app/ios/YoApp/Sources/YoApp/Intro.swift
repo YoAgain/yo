@@ -2,7 +2,8 @@
 // logo first, then cards of coloured bars that say in a few words what Yo is ("Jerry's GF / Yo's to say, / "Hi! I'm /
 // thinking / of you." / #shecares"), swiped through above the same buttons, with the dots under them. Here the cards
 // show what this app does: a tap on a name, a Yo back, the camera, a friend by name, nobody else reading along. The
-// buttons stay where they are (Onboarding's welcome); no page has its own.
+// buttons stay where they are (Onboarding's welcome); no page has its own. Like the original's banner, the pages turn
+// by themselves (every 4 s, back to the logo after the last) until the user touches them.
 //
 // Each page: a small card of bars as the list draws them, a title and one line under it. The card is a picture only
 // (VoiceOver reads the title and the line); when the text is large and the room small, the card gives way, then the
@@ -10,9 +11,21 @@
 import SwiftUI
 
 /// The welcome's swipeable pages: `first` (the logo) and then the intro cards, the system's page dots under them.
+/// They go on by themselves every `advanceSeconds`, from the last back to the logo, until a finger is on them (then
+/// they are the user's, for good); never with Reduce Motion or VoiceOver.
 struct Intro<First: View>: View {
+  static var advanceSeconds: Double { 4 }
+
   @ViewBuilder let first: First
   @State private var page = 0
+  /// The page the pages went to by themselves; a page other than it is the user's doing.
+  @State private var advanced = 0
+  /// Touched or swiped once: no more going on by themselves.
+  @State private var touched = false
+  @Environment(\.accessibilityReduceMotion) private var reduceMotion
+  @Environment(\.accessibilityVoiceOverEnabled) private var voiceOver
+
+  private var count: Int { IntroCard.all.count + 1 }
 
   var body: some View {
     TabView(selection: $page) {
@@ -31,6 +44,18 @@ struct Intro<First: View>: View {
     }
     .tabViewStyle(.page(indexDisplayMode: .always))
     .indexViewStyle(.page(backgroundDisplayMode: .interactive))
+    // A finger down anywhere on the pages (or the dots), before it even swipes.
+    .simultaneousGesture(DragGesture(minimumDistance: 0).onChanged { _ in touched = true })
+    .onChange(of: page) { _, now in
+      if now != advanced { touched = true }  // swiped, or a dot tapped
+    }
+    .task(id: touched || reduceMotion || voiceOver) {
+      guard !touched, !reduceMotion, !voiceOver else { return }
+      while (try? await Task.sleep(for: .seconds(Self.advanceSeconds))) != nil, !touched {
+        advanced = (page + 1) % count
+        withAnimation(.smooth(duration: 0.6)) { page = advanced }
+      }
+    }
   }
 }
 
