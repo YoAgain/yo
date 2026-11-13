@@ -771,6 +771,7 @@ struct RowButton: View {
     BarLine {
       Text(title)
         .lineLimit(1)
+        .contentTransition(.identity)  // other words come at once, never two drawn over each other
         .modifier(Knock(trigger: yo?.first))
         .opacity(touchable ? 0 : 1)
       HStack(spacing: 0) {
@@ -789,6 +790,7 @@ struct RowButton: View {
     }
     .font(.yo(Metrics.rowFont))
     .foregroundStyle(.white)
+    .animation(nil, value: title)  // other words stand in their place at once; only "!"s, numbers and room animate
   }
 
   private static let ring = 30.0
