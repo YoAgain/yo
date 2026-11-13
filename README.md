@@ -12,14 +12,8 @@ messages, and any contact can be checked with a 60-digit safety number. Full tex
 
 ## Hub
 
-The server: a mailbox per device, the order of changes to a chat, and the push that wakes a phone.
-
-| On one core | Yops | p99 |
-|---|---|---|
-| Database on an SSD | 16,000 | 19 ms |
-| Database in RAM | 22,000 | 6 ms |
-
-Yops: Yos delivered per second. One writer thread sets the pace, not the cores. [All runs](tests/README.md#load).
+The server: a mailbox per device, the order of changes to a chat, and the push that wakes a phone. One core
+delivers about 16,000 Yops, Yos per second ([measured](tests/README.md#load)).
 
 ## Dev
 
