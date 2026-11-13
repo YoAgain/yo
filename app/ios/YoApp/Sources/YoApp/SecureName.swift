@@ -13,12 +13,15 @@ struct SecureNameSheet: View {
 
   @Environment(AccountStore.self) private var accounts
   @Environment(\.dismiss) private var dismiss
-  @State private var page = SecureStep.passkey
-  @State private var confirming = false
+  @State private var page = Stage.passkey
+  /// The passkey is saved in the password manager; signing in with it once is left (the check).
+  @State private var created = false
   @State private var skipped = false
   @State private var words: [String] = []
   @State private var busy = false
   @State private var problem: String?
+
+  private enum Stage { case passkey, words, done }
 
   private var secured: Bool { accounts.account?.secured == true }
   private var passkeyDone: Bool { accounts.account?.byPasskey == true }
@@ -29,21 +32,28 @@ struct SecureNameSheet: View {
       Color.amethyst.ignoresSafeArea()
       Group {
         switch page {
-        case .passkey: passkeyPage
+        case .passkey:
+          if created { checkPage } else { passkeyPage }
         case .words: wordsPage
+        case .done: donePage
         }
       }
       .transition(.asymmetric(insertion: .move(edge: .trailing), removal: .move(edge: .leading)))
     }
     .animation(.smooth(duration: 0.35), value: page)
+    .animation(.smooth(duration: 0.35), value: created)
     .foregroundStyle(.white)
     .preferredColorScheme(.dark)
     .interactiveDismissDisabled(busy)
     .onAppear {
       guard words.isEmpty else { return }
       words = secured ? RecoveryWords.load() ?? [] : accounts.secureWords()
-      skipped = accounts.passkeyTurnedOff && start != .passkey  // turned off on purpose: not asked again
-      page = start ?? (passkeyDone || skipped ? .words : .passkey)
+      skipped = accounts.passkeyTurnedOff && start != .passkey  // declined on purpose: not asked again
+      switch start {
+      case .passkey: page = .passkey
+      case .words: page = .words
+      case nil: page = passkeyDone || skipped ? .words : .passkey
+      }
     }
   }
 
@@ -51,20 +61,14 @@ struct SecureNameSheet: View {
 
   private var passkeyPage: some View {
     Page(title: "Secure Your Account",
-      message: confirming
-        ? "One more Face ID to finish."
-        : "Keep your name “\(accounts.account?.username ?? "")” forever.") {
-      Image(systemName: "faceid")
-        .font(.system(size: 80, weight: .light))
-        .padding(.top, 28)
-        .accessibilityHidden(true)
+      message: "Keep your name “\(accounts.account?.username ?? "")” forever.") {
+      BigSymbol(name: "faceid")
     } bottom: {
-      PrimaryButton(confirming ? "Continue" : "Continue with Face ID", busy: busy) {
-        Task { confirming ? await confirmPasskey() : await makePasskey() }
-      }
-      .disabled(busy)
+      PrimaryButton("Continue with Face ID", busy: busy) { Task { await createPasskey() } }
+        .disabled(busy)
       Button("Skip") {
         skipped = true
+        accounts.declinePasskey()  // a choice, as turning it off: not asked again
         next()
       }
       .font(.yo(17))
@@ -73,9 +77,20 @@ struct SecureNameSheet: View {
     }
   }
 
+  /// Saved: a green checkmark, then one sign-in to see that it works.
+  private var checkPage: some View {
+    Page(title: "Passkey Saved", message: "Now sign in once to check it works.") {
+      BigSymbol(name: "checkmark.circle.fill", done: true)
+    } bottom: {
+      PrimaryButton("Sign In", busy: busy) { Task { await checkPasskey() } }
+        .disabled(busy)
+      Note(problem)
+    }
+  }
+
   private var wordsPage: some View {
     Page(title: "Recovery Key",
-      message: passkeyDone ? "Face ID is on. Save these 12 words too." : "Save these 12 words to sign back in.") {
+      message: passkeyDone ? "Your passkey works. Save these 12 words too." : "Save these 12 words to sign back in.") {
       FrostedKey(words: words, qrSize: 80)
     } bottom: {
       PrimaryButton("Save…") { save() }
@@ -83,51 +98,59 @@ struct SecureNameSheet: View {
     }
   }
 
+  /// The end: it worked, and what is set up, each with a clean green checkmark.
+  private var donePage: some View {
+    Page(title: "All Set", message: "“\(accounts.account?.username ?? "")” is yours forever.") {
+      VStack(spacing: 12) {
+        if passkeyDone { DoneRow(title: "Passkey") }
+        if wordsDone { DoneRow(title: "Recovery Key") }
+      }
+      .padding(.top, 20)
+    } bottom: {
+      PrimaryButton("Done") { dismiss() }
+    }
+  }
+
   // MARK: Doing
 
-  /// On to the next step left (a skipped passkey is not asked again), or closed when none is.
+  /// On to the next step left (a skipped passkey is not asked again), or the end.
   private func next() {
     problem = nil
-    confirming = false
     if !passkeyDone && !skipped && page != .passkey {
       page = .passkey
     } else if !wordsDone && page != .words {
       page = .words
     } else {
       UINotificationFeedbackGenerator().notificationOccurred(.success)
-      dismiss()
+      page = .done
     }
   }
 
-  /// Not secured yet: the passkey starts the backup (and asks once more for 1Password). Secured by the words already:
-  /// the passkey is added to it.
-  private func makePasskey() async {
+  private func createPasskey() async {
     busy = true
     defer { busy = false }
     problem = nil
     do {
-      if secured {
-        try await accounts.addPasskey()
-        next()
-      } else if try await accounts.securePasskey() {
-        next()
-      } else {
-        confirming = true  // 1Password: its PRF output only when the passkey is used
-      }
+      try await accounts.createPasskey()
+      UINotificationFeedbackGenerator().notificationOccurred(.success)
+      created = true
     } catch {
       if !SecurityPresentation.isCancellation(error) { problem = "Couldn’t create passkey. Try again or skip." }
     }
   }
 
-  private func confirmPasskey() async {
+  private func checkPasskey() async {
     busy = true
     defer { busy = false }
     problem = nil
     do {
-      try await accounts.confirmPasskey()
+      try await accounts.checkPasskey()
+      created = false
       next()
+    } catch AccountError.noPRF {
+      problem = "This password manager can’t be used. Try iCloud Keychain."
     } catch {
-      if !SecurityPresentation.isCancellation(error) { problem = "Couldn’t confirm passkey. Try again or skip." }
+      if !SecurityPresentation.isCancellation(error) { problem = "That didn’t work. Try again." }
     }
   }
 
@@ -147,6 +170,41 @@ struct SecureNameSheet: View {
       accounts.markWordsSaved(true)
       next()
     }
+  }
+}
+
+/// One thing set up: a green checkmark in a circle and its name, on glass.
+private struct DoneRow: View {
+  let title: String
+
+  var body: some View {
+    HStack(spacing: 14) {
+      Image(systemName: "checkmark.circle.fill")
+        .font(.system(size: 30))
+        .foregroundStyle(.white, .green)
+      Text(title).font(.system(size: 18, weight: .semibold))
+      Spacer()
+    }
+    .padding(.horizontal, 16)
+    .padding(.vertical, 14)
+    .background(.white.opacity(0.14), in: .rect(cornerRadius: 18))
+    .accessibilityElement(children: .combine)
+    .accessibilityLabel("\(title), set up")
+  }
+}
+
+/// A large symbol for a guide page; green and white once something is done.
+private struct BigSymbol: View {
+  let name: String
+  var done = false
+
+  var body: some View {
+    Image(systemName: name)
+      .font(.system(size: 80, weight: done ? .regular : .light))
+      .foregroundStyle(.white, done ? Color.green : .white)
+      .symbolEffect(.bounce, value: done)
+      .padding(.top, 28)
+      .accessibilityHidden(true)
   }
 }
 

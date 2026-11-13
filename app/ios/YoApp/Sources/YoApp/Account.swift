@@ -233,7 +233,10 @@ final class AccountStore {
 
   func markWordsSaved(_ saved: Bool) { wordsSaved = saved }
 
-  /// The passkey was turned off on purpose: a choice, so it is not asked for again (no badge, no guide for it).
+  /// Without a passkey on purpose (skipped in the guide, or turned off).
+  func declinePasskey() { passkeyTurnedOff = true }
+
+  /// The passkey was skipped or turned off on purpose: a choice, so it is not asked for again (no badge, no guide).
   private(set) var passkeyTurnedOff: Bool = UserDefaults.standard.bool(forKey: "passkey.turnedOff") {
     didSet { UserDefaults.standard.set(passkeyTurnedOff, forKey: "passkey.turnedOff") }
   }
@@ -288,6 +291,38 @@ final class AccountStore {
       throw AccountError.noPRF
     }
     try saveBackup(prf: prf)
+  }
+
+  /// The guide's passkey, in two steps the person sees: made (saved in the password manager)…
+  private var newPasskey: Data?
+
+  func createPasskey() async throws {
+    guard let account else { throw AccountError.noBackup }
+    if !account.secured, securing == nil { securing = (SymmetricKey(size: .bits256), RecoveryCode.make(), nil) }
+    newPasskey = try await passkeys.make(name: account.username, userID: account.userID).credentialID
+  }
+
+  /// …then signed in with once, which checks it works and gives its PRF output: the backup then opens with it too
+  /// (a new backup if there was none, else added to the one the words open).
+  func checkPasskey() async throws {
+    guard let credential = newPasskey, var account else { throw AccountError.noBackup }
+    guard let prf = try await passkeys.ask(salt: BackupRecord.prfSalt, only: credential).prf else {
+      throw AccountError.noPRF
+    }
+    if account.secured {
+      var (opened, record, k, code) = try openBackup()
+      record.byPasskey = try BackupRecord.wrap(k, in: BackupRecord.key(prf: prf))
+      opened.byPasskey = true
+      record.sealed = try BackupRecord.seal(opened, code: code, with: k)
+      MockHub.save(record, for: opened.username)
+      account = opened
+      self.account = account
+    } else {
+      securing?.passkey = credential
+      try saveBackup(prf: prf)
+    }
+    passkeyTurnedOff = false
+    newPasskey = nil
   }
 
   /// The words, to show when the passkey did not work.

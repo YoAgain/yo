@@ -42,51 +42,36 @@ struct SettingsView: View {
     NavigationStack {
       Form {
         if let account = accounts.account {
-          // You, as Settings shows the Apple Account and Signal its profile: one row, tapped for the details.
+          // You, at the top: the picture and the name.
           Section {
-            NavigationLink {
-              Form {
-                Section {
-                  LabeledContent("Name") { Text(account.username).font(.yo(17, relativeTo: .body)) }
-                }
-                securitySection(account)
-                // As the Apple Account page ends: Sign Out, red, on its own; the dialog says what happens.
-                Section {
-                  Button("Sign Out", role: .destructive) { resetting = true }
-                    .frame(maxWidth: .infinity)
-                    .disabled(addingPasskey)
-                }
+            profileRow(account)
+          }
+          // Security: one row, with the badge while something is left. Until the passkey or the recovery key is
+          // there, it opens the guide; after, the page with both.
+          Section {
+            let started = account.byPasskey || (account.secured && accounts.wordsSaved)
+            if started {
+              NavigationLink {
+                Form { securitySection(account) }
+                  .navigationTitle("Account Security")
+                  .navigationBarTitleDisplayMode(.inline)
+                  .modifier(SecurityDialogs(
+                    turningOffPasskey: $turningOffPasskey, renewingWords: $renewingWords,
+                    turnOff: removePasskey, renew: newWords))
+              } label: {
+                securityRowLabel
               }
-              .navigationTitle("Account")
-              .navigationBarTitleDisplayMode(.inline)
-              .confirmationDialog("Sign Out?", isPresented: $resetting, titleVisibility: .visible) {
-                Button("Sign Out", role: .destructive) { reset() }
-                Button("Cancel", role: .cancel) {}
-              } message: {
-                Text(resetMessage)
-              }
-              .modifier(SecurityDialogs(
-                turningOffPasskey: $turningOffPasskey, renewingWords: $renewingWords,
-                turnOff: removePasskey, renew: newWords))
-            } label: {
-              profileRow(account)
-            }
-            // The one open task, in the same group as you (as Settings puts suggestions under the Apple Account),
-            // with the badge the profile button has too.
-            if accounts.toDo > 0 {
+            } else {
               Button { secure(nil) } label: {
                 HStack {
-                  Label("Secure Your Account", systemImage: "lock.fill").labelStyle(Tile(.orange))
-                  Spacer()
-                  CountBadge(count: 1)
+                  securityRowLabel
                   Chevron()
                 }
               }
-              .tint(.primary)
             }
           } footer: {
             if accounts.toDo > 0 {
-              Text("Set up account recovery to keep your name “\(account.username)” forever.")
+              Text("Secure your account to keep your name “\(account.username)” forever.")
             }
           }
         }
@@ -104,6 +89,25 @@ struct SettingsView: View {
         } footer: {
           Text("Saves photos and videos you send to your camera roll.")
         }
+
+        // As Settings ends the Apple Account: Sign Out, red, on its own; the dialog says what happens.
+        Section {
+          Button("Sign Out", role: .destructive) { resetting = true }
+            .frame(maxWidth: .infinity)
+            .disabled(addingPasskey)
+        }
+      }
+      // Not secured all the way: the guide first, signing out anyway second.
+      .confirmationDialog("Sign Out?", isPresented: $resetting, titleVisibility: .visible) {
+        if accounts.toDo > 0 {
+          Button("Secure Your Account") { secure(nil) }
+          Button("Sign Out Anyway", role: .destructive) { reset() }
+        } else {
+          Button("Sign Out", role: .destructive) { reset() }
+        }
+        Button("Cancel", role: .cancel) {}
+      } message: {
+        Text(resetMessage)
       }
       .navigationTitle("Profile")
       .navigationBarTitleDisplayMode(.inline)
@@ -148,6 +152,25 @@ struct SettingsView: View {
     .tint(Color.amethyst)
   }
 
+  /// The Account Security row: its tile (orange while something is left), the badge or "On" with a checkmark.
+  private var securityRowLabel: some View {
+    HStack {
+      Label {
+        Text("Account Security").foregroundStyle(Color(.label))
+      } icon: {
+        Image(systemName: "lock.fill")
+      }
+      .labelStyle(Tile(accounts.toDo > 0 ? .orange : .green))
+      Spacer()
+      if accounts.toDo > 0 {
+        CountBadge(count: accounts.toDo)
+      } else {
+        Text("On").foregroundStyle(Color(.secondaryLabel))
+        Image(systemName: "checkmark.circle.fill").foregroundStyle(.green).accessibilityHidden(true)
+      }
+    }
+  }
+
   /// A small picture and the name, with whether the account is secured.
   private func profileRow(_ account: Account) -> some View {
     HStack(spacing: 14) {
@@ -166,42 +189,42 @@ struct SettingsView: View {
     .padding(.vertical, 2)
   }
 
-  /// "Account Security": the passkey and the recovery key, always both. A step not done yet says so and opens the
-  /// guide at it; a step done opens its menu.
-  private func securitySection(_ account: Account) -> some View {
+  /// Account Security: two groups, Passkey and Recovery Key, each its state on top (a step not done yet opens the
+  /// guide at it) and below what can be done with it, as plain rows like Settings' Face ID & Passcode.
+  @ViewBuilder private func securitySection(_ account: Account) -> some View {
     let wordsDone = account.secured && accounts.wordsSaved && RecoveryWords.load() != nil
-    return Section {
+    Section {
       if account.byPasskey {
-        Menu {
-          Button("Replace Passkey", systemImage: "arrow.triangle.2.circlepath") { Task { await replacePasskey() } }
-          Button("Turn Off Passkey", systemImage: "xmark.circle", role: .destructive) { turningOffPasskey = true }
-            .disabled(!wordsDone)
-        } label: {
-          SecurityRow(icon: "faceid", color: .green, title: "Passkey", value: "On", done: true)
+        SecurityRow(icon: "faceid", color: .green, title: "Passkey", value: "On", done: true, chevron: false)
+        Button("Replace Passkey") { Task { await replacePasskey() } }
+        if wordsDone {
+          Button("Turn Off Passkey", role: .destructive) { turningOffPasskey = true }
         }
       } else {
         Button { secure(.passkey) } label: {
           SecurityRow(icon: "faceid", color: .orange, title: "Passkey", value: "Set Up")
         }
       }
+    } header: {
+      Text("Passkey")
+    } footer: {
+      Text("Sign back in with Face ID on a new iPhone.")
+    }
+    .disabled(addingPasskey)
+    Section {
       if wordsDone {
-        Menu {
-          Button("Show Recovery Key", systemImage: "eye") { Task { await showRecoveryKey() } }
-          Button("Create New Recovery Key", systemImage: "arrow.triangle.2.circlepath") { renewingWords = true }
-        } label: {
-          SecurityRow(icon: "key.fill", color: .green, title: "Recovery Key", value: "Saved", done: true)
-        }
+        SecurityRow(icon: "key.fill", color: .green, title: "Recovery Key", value: "Saved", done: true, chevron: false)
+        Button("Show Recovery Key") { Task { await showRecoveryKey() } }
+        Button("Create New Recovery Key") { renewingWords = true }
       } else {
         Button { secure(.words) } label: {
           SecurityRow(icon: "key.fill", color: .orange, title: "Recovery Key", value: "Save")
         }
       }
     } header: {
-      Text("Account Security")
+      Text("Recovery Key")
     } footer: {
-      Text(account.secured
-        ? "Either one signs you back in on a new iPhone."
-        : "Secure your account to keep your name “\(account.username)” forever.")
+      Text("12 words to sign back in without Face ID.")
     }
     .disabled(addingPasskey)
   }
@@ -246,16 +269,20 @@ struct SettingsView: View {
   }
 
 
-  /// What signing out costs, in one or two lines: friends go; the name comes back only if the account is secured.
+  /// What signing out costs, in one line: whether, and how, the name comes back.
   private var resetMessage: String {
     guard let account = accounts.account, account.secured else {
       return "Your account isn’t secured. You won’t be able to sign in as "
         + "\(accounts.account?.username ?? "this name") again."
     }
+    if !accounts.wordsSaved && !account.byPasskey {
+      return "Your recovery key isn’t saved. You may not be able to sign back in."
+    }
     return account.byPasskey
-      ? "Sign back in with Face ID or your recovery key. Friends on this iPhone are removed."
+      ? "Sign back in with your passkey or recovery key. Friends on this iPhone are removed."
       : "Sign back in with your recovery key. Friends on this iPhone are removed."
   }
+
 
 
   private func addPasskey() async {
@@ -710,6 +737,7 @@ private struct SecurityRow: View {
   let title: String
   let value: String
   var done = false
+  var chevron = true
 
   var body: some View {
     // Plain label colours, not the tint a button or menu would give them; the checkmark after the state.
@@ -725,7 +753,7 @@ private struct SecurityRow: View {
       if done {
         Image(systemName: "checkmark.circle.fill").foregroundStyle(.green).accessibilityHidden(true)
       }
-      Chevron()
+      if chevron { Chevron() }
     }
   }
 }
