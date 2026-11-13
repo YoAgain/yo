@@ -55,7 +55,7 @@ final class Inbox {
 
   func askForNotifications() async {
     let center = UNUserNotificationCenter.current()
-    let yoBack = UNNotificationAction(identifier: Self.yoBack, title: "Yo back", options: [])
+    let yoBack = UNNotificationAction(identifier: Self.yoBack, title: "Yo Back", options: [])
     center.setNotificationCategories([
       UNNotificationCategory(identifier: Self.category, actions: [yoBack], intentIdentifiers: [])
     ])
@@ -76,7 +76,7 @@ final class Inbox {
     // The original's texts (yo-api, payload.py): "Yo from LEO", "📷 Yo Photo from LEO", "Yo Video from LEO".
     // No picture in the notification: a photo or video is seen once, in the app.
     content.body =
-      video != nil ? "🎥 Yo Video from \(sender)" : photo != nil ? "📷 Yo Photo from \(sender)" : "Yo from \(sender)"
+      video != nil ? "🎥 Yo with a video from \(sender)" : photo != nil ? "📷 Yo with a photo from \(sender)" : "Yo from \(sender)"
     content.sound = UNNotificationSound(named: UNNotificationSoundName("yo.caf"))
     content.userInfo = ["id": id, "from": sender]
     content.categoryIdentifier = Self.category
@@ -115,7 +115,7 @@ final class Inbox {
       .filter { $0.request.content.categoryIdentifier == Self.category }
       .sorted { $0.date < $1.date }
     for notification in waiting {
-      received(id: notification.request.identifier, from: notification.request.content.userInfo["from"] as? String ?? "?")
+      received(id: notification.request.identifier, from: notification.request.content.userInfo["from"] as? String ?? "Unknown sender")
     }
     center.removeDeliveredNotifications(withIdentifiers: waiting.map(\.request.identifier))
   }

@@ -1,5 +1,5 @@
 // The way in. Start → a name → a passkey saves it (one tap; if it cannot, 12 words, best saved to Photos) → the
-// list. "Log In" brings an account from before: a passkey, or the name and its 12 words; a passkey on this phone is
+// list. "Sign In" brings an account from before: a passkey, or the name and its 12 words; a passkey on this phone is
 // offered by the system at once.
 //
 // Every step after the welcome is the same page, as Apple's setup screens are: a title and one line at the top, the
@@ -46,7 +46,7 @@ struct Onboarding: View {
 
   // MARK: Welcome
 
-  /// The logo with the 2014 tagline, then the usual pair at the bottom: "Start" for a new name, "Log In" under it.
+  /// The logo with the 2014 tagline, then the usual pair at the bottom: "Start" for a new name, "Sign In" under it.
   private var welcome: some View {
     VStack(spacing: 0) {
       Spacer()
@@ -57,7 +57,7 @@ struct Onboarding: View {
         .opacity(0.85)
       Spacer()
       PrimaryButton("Start") { go(.name) }
-      Button("Log In") { go(.logIn) }
+      Button("Sign In") { go(.logIn) }
         .font(.yo(18))
         .padding(.top, 18)
     }
@@ -74,7 +74,7 @@ struct Onboarding: View {
   // MARK: Name
 
   private var naming: some View {
-    let trouble = Username.problem(name) ?? (MockHub.isTaken(name) ? "Taken" : nil)
+    let trouble = Username.problem(name) ?? (MockHub.isTaken(name) ? "That name is taken. Try another." : nil)
     let mine = MockHub.isTaken(name) && !Username.reserved.contains(name)
     return Page(title: "Choose a Name", back: { go(.welcome) }) {
       NameField(name: $name, onSubmit: { if trouble == nil { Task { await register() } } })
@@ -82,7 +82,7 @@ struct Onboarding: View {
         .font(.system(size: 15, weight: .semibold))
         .opacity(trouble == nil ? 1 : 0.75)
       if mine {
-        Button("This is my name") { go(.logIn) }.font(.yo(17))
+        Button("This Is My Name") { go(.logIn) }.font(.yo(17))
       }
     } bottom: {
       PrimaryButton("Continue", busy: busy) { Task { await register() } }
@@ -95,12 +95,12 @@ struct Onboarding: View {
 
   /// Asked for on purpose: the two ways, the passkey first.
   private var logInChoice: some View {
-    Page(title: "Log In", message: "How did you save your Yo?", back: { go(.welcome) }) {
+    Page(title: "Sign In", message: "Use your passkey or recovery key.", back: { go(.welcome) }) {
       EmptyView()
     } bottom: {
       PrimaryButton("Use Passkey", busy: busy) { Task { await logInWithPasskey() } }
         .disabled(busy)
-      Button("Use 12 Words") { go(.logInWithWords) }
+      Button("Use Recovery Key") { go(.logInWithWords) }
         .font(.yo(17))
       Note(problem)
     }
@@ -111,9 +111,9 @@ struct Onboarding: View {
   /// The words, and two ways to keep them right under them (Photos, the clipboard); Next at the bottom. They stay on
   /// this phone too, in the profile.
   private func code(_ words: [String]) -> some View {
-    Page(title: "Save Your Words", message: "No passkey could keep your Yo. These 12 words bring it back on a new phone.") {
-      WordGrid(words: words)
+    Page(title: "Recovery Key", message: "Keep it somewhere safe. It's how you get back into Yo on a new iPhone.") {
       RecoveryQRView(words: words, size: 96)
+      WordGrid(words: words)
       HStack(spacing: 12) {
         KeepButton(title: "Save to Photos", icon: "photo.badge.arrow.down", done: kept.contains("photos")) {
           Task { await saveToPhotos(words) }
@@ -123,7 +123,7 @@ struct Onboarding: View {
       .padding(.top, 6)
       .disabled(busy)
     } bottom: {
-      PrimaryButton("Next") { accounts.confirm() }
+      PrimaryButton("Continue") { accounts.confirm() }
       Note(problem)
     }
   }
@@ -157,7 +157,7 @@ struct Onboarding: View {
     do {
       try await accounts.restoreWithPasskey()
     } catch {
-      problem = (error as? AccountError)?.errorDescription ?? "No passkey: use your 12 words"
+      problem = (error as? AccountError)?.errorDescription ?? "We couldn’t sign you in with a passkey. Try again or use your recovery key."
     }
   }
 
@@ -171,7 +171,7 @@ struct Onboarding: View {
     defer { busy = false }
     let renderer = ImageRenderer(content: RecoveryCard(name: name, words: words))
     renderer.scale = 3
-    guard let image = renderer.uiImage else { return problem = "Could not make the picture" }
+    guard let image = renderer.uiImage else { return problem = "Couldn’t create your recovery key image. Try again." }
     do {
       try await RecoveryWords.saveToPhotos(image)
       kept.insert("photos")
@@ -284,7 +284,7 @@ private struct NameField: View {
   @FocusState private var focused: Bool
 
   var body: some View {
-    TextField("", text: $name, prompt: Text("NAME").foregroundStyle(.white.opacity(0.3)))
+    TextField("", text: $name, prompt: Text("Name").foregroundStyle(.white.opacity(0.3)))
       .font(.yo(34))
       .multilineTextAlignment(.center)
       .textInputAutocapitalization(.characters)
@@ -334,7 +334,7 @@ private struct LogIn: View {
   @State private var picked: PhotosPickerItem?
 
   var body: some View {
-    Page(title: "Log In", message: "Your 12 words.", back: back) {
+    Page(title: "Recovery Key", message: "Paste, type, or scan your recovery key.", back: back) {
       TextField("", text: $words, prompt: Text("12 words").foregroundStyle(.white.opacity(0.35)), axis: .vertical)
         .font(.yo(18))
         .lineLimit(3...5)
@@ -353,7 +353,7 @@ private struct LogIn: View {
         .buttonStyle(.glass)
       }
     } bottom: {
-      PrimaryButton("Log In", action: logIn)
+      PrimaryButton("Sign In", action: logIn)
         .disabled(words.isEmpty)
       Note(problem)
     }
@@ -370,7 +370,7 @@ private struct LogIn: View {
       Task {
         guard let data = try? await item.loadTransferable(type: Data.self), let image = UIImage(data: data),
           let text = RecoveryQR.read(image)
-        else { return problem = "No Yo code in that picture" }
+        else { return problem = "We couldn’t read a recovery key from this photo. Try another photo or enter the 12 words." }
         words = text
         logIn()
       }
@@ -378,7 +378,9 @@ private struct LogIn: View {
   }
 
   private func logIn() {
-    guard let code = RecoveryCode.parse(words) else { return problem = "12 words from your list, please" }
+    guard let code = RecoveryCode.parse(words) else {
+      return problem = "That doesn't match a recovery key. Check the words and try again."
+    }
     do {
       try accounts.restore(code: code)
     } catch {
@@ -400,7 +402,7 @@ struct RecoveryCard: View {
         Text(name).font(.yo(24))
       }
       HStack(alignment: .bottom) {
-        Text("Your 12 words").font(.yo(22))
+        Text("Recovery Key").font(.yo(22))
         Spacer()
         RecoveryQRView(words: words, size: 110)
       }
@@ -418,7 +420,7 @@ struct RecoveryCard: View {
           }
         }
       }
-      Text("They bring your Yo back on a new phone, and nothing else can. Keep them to yourself.")
+      Text("Use this recovery key to sign in to Yo on a new iPhone. Keep it safe and don’t share it.")
         .font(.system(size: 13, weight: .medium))
         .opacity(0.85)
       Text(Date.now.formatted(date: .long, time: .omitted)).font(.system(size: 12, weight: .medium)).opacity(0.6)

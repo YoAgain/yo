@@ -41,7 +41,7 @@ struct RecoveryQRView: View {
         .frame(width: size, height: size)
         .padding(10)
         .background(.white, in: .rect(cornerRadius: 14))
-        .accessibilityLabel("QR code of your recovery words")
+        .accessibilityLabel("QR code for your recovery key")
     }
   }
 }

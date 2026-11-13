@@ -25,10 +25,10 @@ enum Username {
 
   /// What is wrong with a name, nil when it is fine (spec 3.3).
   static func problem(_ name: String) -> String? {
-    if name.count < 3 { return "At least 3 letters" }
-    if name.count > 16 { return "At most 16" }
-    if let first = name.first, !first.isLetter { return "Starts with a letter" }
-    if reserved.contains(name) { return "Taken" }
+    if name.count < 3 { return "Use at least 3 characters." }
+    if name.count > 16 { return "Use no more than 16 characters." }
+    if let first = name.first, !first.isLetter { return "Start with a letter." }
+    if reserved.contains(name) { return "That name is taken. Try another." }
     return nil
   }
 
@@ -244,9 +244,9 @@ enum AccountError: LocalizedError {
 
   var errorDescription: String? {
     switch self {
-    case .taken: "That name is taken"
-    case .noBackup: "No Yo found for that"
-    case .wrongCode: "These words don't open it"
+    case .taken: "That name is taken. Try another."
+    case .noBackup: "We couldn’t find your account. Try another passkey or recovery key."
+    case .wrongCode: "That recovery key couldn’t restore your account. Check the words and try again."
     }
   }
 }
@@ -303,6 +303,6 @@ enum RecoveryWords {
 
   enum PhotosError: LocalizedError {
     case notAllowed
-    var errorDescription: String? { "Photos is not allowed: copy them instead" }
+    var errorDescription: String? { "Yo can’t save to Photos. Copy your recovery key instead." }
   }
 }

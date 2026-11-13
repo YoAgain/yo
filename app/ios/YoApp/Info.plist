@@ -5,11 +5,11 @@
 	<key>CFBundleDisplayName</key>
 	<string>Yo</string>
 	<key>NSCameraUsageDescription</key>
-	<string>In camera mode Yo takes a photo when you tap a name and sends it with the Yo; logging in, it reads the QR code of your recovery words.</string>
+	<string>Yo uses the camera so you can send photos and videos to friends and scan your recovery key to sign in.</string>
 	<key>NSFaceIDUsageDescription</key>
-	<string>Face ID shows your recovery words.</string>
+	<string>Yo uses Face ID to verify your identity before showing your recovery key.</string>
 	<key>NSPhotoLibraryAddUsageDescription</key>
-	<string>Yo saves to your library what you ask it to: your recovery words, and the photos and videos you send when that is on in Settings.</string>
+	<string>Yo saves your recovery key to Photos when you choose, and saves photos and videos you send when Save Sent Photos and Videos is on.</string>
 	<key>ITSAppUsesNonExemptEncryption</key>
 	<false/>
 	<key>UISupportedInterfaceOrientations</key>

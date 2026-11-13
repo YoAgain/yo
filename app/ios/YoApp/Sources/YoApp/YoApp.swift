@@ -74,7 +74,7 @@ final class NotificationDelegate: NSObject, UNUserNotificationCenterDelegate, Se
     _ center: UNUserNotificationCenter, willPresent notification: UNNotification
   ) async -> UNNotificationPresentationOptions {
     let info = notification.request.content.userInfo
-    let sender = info["from"] as? String ?? "?"
+    let sender = info["from"] as? String ?? "Unknown sender"
     await inbox.received(id: notification.request.identifier, from: sender)
     return []
   }
@@ -82,7 +82,7 @@ final class NotificationDelegate: NSObject, UNUserNotificationCenterDelegate, Se
   /// "Yo back" on the notification: the Yo goes without the app opening (in the mockup: that friend's Yo comes
   /// back after two seconds). A tap on the notification itself opens the app, where the Yo shows on its row.
   func userNotificationCenter(_ center: UNUserNotificationCenter, didReceive response: UNNotificationResponse) async {
-    let sender = response.notification.request.content.userInfo["from"] as? String ?? "?"
+    let sender = response.notification.request.content.userInfo["from"] as? String ?? "Unknown sender"
     switch response.actionIdentifier {
     case Inbox.yoBack:
       await inbox.fakeYo(from: sender, after: .seconds(2))

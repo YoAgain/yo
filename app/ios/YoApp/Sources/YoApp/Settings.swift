@@ -30,7 +30,7 @@ struct SettingsView: View {
             VStack(alignment: .leading, spacing: 2) {
               Text(accounts.account?.username ?? "You").font(.yo(24, relativeTo: .title3))
               Label(
-                accounts.account?.byPasskey == true ? "Saved with a passkey" : "Saved with 12 words",
+                accounts.account?.byPasskey == true ? "Saved with a passkey" : "Saved with a recovery key",
                 systemImage: accounts.account?.byPasskey == true ? "person.badge.key.fill" : "list.number"
               )
               .font(.subheadline)
@@ -40,24 +40,24 @@ struct SettingsView: View {
           .padding(.vertical, 4)
         }
         Section {
-          Toggle("Save Sent Photos & Videos", isOn: $saveSent)
+          Toggle("Save Sent Photos and Videos", isOn: $saveSent)
         } header: {
-          Text("Photos & Videos")
+          Text("Photos and Videos")
         } footer: {
           Text("What you send from the camera is saved to your photo library. Nothing you receive is saved.")
         }
         if RecoveryWords.load() != nil {
           Section {
-            Button("Recovery Words", systemImage: "list.number") { Task { await showWords() } }
+            Button("Recovery Key", systemImage: "key") { Task { await showWords() } }
           } footer: {
-            Text("The 12 words that bring your Yo back on a new phone. Face ID first.")
+            Text("Use your recovery key to sign in to Yo on a new iPhone.")
           }
         }
         PasskeyTestSection()
         Section {
           Button("Reset Yo", systemImage: "arrow.counterclockwise", role: .destructive) { resetting = true }
         } footer: {
-          Text("This phone forgets your Yo, as a new phone would. Your passkey or your 12 words bring it back.")
+          Text("Resets Yo on this iPhone. Keep your passkey or a copy of your recovery key so you can sign in again.")
         }
       }
       .sheet(isPresented: Binding(get: { words != nil }, set: { if !$0 { words = nil } })) {
@@ -66,7 +66,7 @@ struct SettingsView: View {
       .confirmationDialog("Reset Yo?", isPresented: $resetting, titleVisibility: .visible) {
         Button("Reset Yo", role: .destructive) { reset() }
       } message: {
-        Text("Everything on this phone goes. Your passkey or your 12 words bring your name back.")
+        Text("This removes your Yo account, friends, settings, and saved recovery key from this iPhone. You’ll need your passkey or a copy of your recovery key to sign in again.")
       }
       .navigationTitle("Profile")
       .navigationBarTitleDisplayMode(.inline)
@@ -91,7 +91,7 @@ extension SettingsView {
   /// The words, after the owner of the phone proved it (Face ID, else the passcode).
   fileprivate func showWords() async {
     let context = LAContext()
-    guard (try? await context.evaluatePolicy(.deviceOwnerAuthentication, localizedReason: "Show your recovery words"))
+    guard (try? await context.evaluatePolicy(.deviceOwnerAuthentication, localizedReason: "Verify your identity to view your recovery key."))
       == true
     else { return }
     words = RecoveryWords.load()
@@ -146,8 +146,8 @@ struct RecoveryWordsSheet: View {
     NavigationStack {
       ScrollView {
         VStack(spacing: 16) {
-          WordGrid(words: words)
           RecoveryQRView(words: words)
+          WordGrid(words: words)
           HStack(spacing: 12) {
             KeepButton(title: "Save to Photos", icon: "photo.badge.arrow.down", done: kept.contains("photos")) {
               Task { await save() }
@@ -163,7 +163,7 @@ struct RecoveryWordsSheet: View {
       }
       .foregroundStyle(.white)
       .background(Color.amethyst.ignoresSafeArea())
-      .navigationTitle("Recovery Words")
+      .navigationTitle("Recovery Key")
       .navigationBarTitleDisplayMode(.inline)
       .toolbar {
         ToolbarItem(placement: .confirmationAction) {
@@ -177,7 +177,7 @@ struct RecoveryWordsSheet: View {
   private func save() async {
     let renderer = ImageRenderer(content: RecoveryCard(name: name, words: words))
     renderer.scale = 3
-    guard let image = renderer.uiImage else { return problem = "Could not make the picture" }
+    guard let image = renderer.uiImage else { return problem = "Couldn’t create your recovery key image. Try again." }
     do {
       try await RecoveryWords.saveToPhotos(image)
       kept.insert("photos")

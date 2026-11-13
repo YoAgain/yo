@@ -44,7 +44,7 @@ struct FriendList: View {
   @State private var scrolled = false
 
   // Sending
-  /// What each bar says for a moment after a send ("Sent Yo!", "Not sent").
+  /// What each bar says for a moment after a send ("Sent Yo", "Not Sent", "Canceled").
   @State private var sent: [Friend: String] = [:]
   /// Sends whose 1.5 seconds are still running, by name; each tap starts them again (a bar under taps stays put).
   @State private var sentRounds: [String: Int] = [:]
@@ -176,7 +176,7 @@ struct FriendList: View {
         // The camera; it turns red (Alizarin, the original's round button) while it is on.
         ToolbarItem(placement: .topBarTrailing) {
           if cameraOn {
-            Button("Camera Off", systemImage: "camera.fill") { cameraOn = false }
+            Button("Turn Off Camera", systemImage: "camera.fill") { cameraOn = false }
               .buttonStyle(.glassProminent)
               .tint(.alizarin)
           } else {
@@ -193,7 +193,7 @@ struct FriendList: View {
     VStack(spacing: 0) {
       Text("Yo")
       if cameraOn {
-        Text(picked == nil ? "Tap: photo · Hold: video" : "Tap a name to send it")
+        Text(picked == nil ? "Tap a name for a photo. Hold for a video." : "Tap a name to send this photo.")
           .font(.system(size: 11, weight: .semibold))
           .opacity(0.85)
           .fixedSize()
@@ -230,7 +230,7 @@ struct FriendList: View {
       stop: { cancelSending(friend) },
       media: waiting,
       yo: landed[friend.name],
-      hint: cameraOn ? "Tap for a photo, hold for a video" : nil,
+      hint: cameraOn ? "Takes and sends a photo. Use Record Video to record a video." : nil,
       hold: cameraOn && picked == nil ? { hold(friend, $0) } : nil,
       view: { see(friend, $0) }
     ) {
@@ -250,7 +250,7 @@ struct FriendList: View {
 
   /// The bar's words: what is happening, else the name.
   private func rowTitle(_ friend: Friend) -> String {
-    if recordingFor == friend { return "● Rec" }
+    if recordingFor == friend { return "● Recording" }
     if let last = outgoing[friend]?.last { return last.text }
     if let text = sent[friend] { return text }
     return friend.name
@@ -287,7 +287,7 @@ struct FriendList: View {
         .onAppear { typing = true }
     } else {
       RowButton("+", color: color) { adding = true }
-        .accessibilityLabel("Add a friend")
+        .accessibilityLabel("Add Friend")
     }
   }
 
@@ -328,7 +328,7 @@ struct FriendList: View {
       }
       .buttonStyle(.plain)
       .glassEffect(.regular.interactive(), in: .circle)
-      .accessibilityLabel("Front or Back Camera")
+      .accessibilityLabel("Switch Camera")
       .frame(maxWidth: .infinity, alignment: .trailing)
     }
     .padding(.horizontal, 20)
@@ -410,7 +410,7 @@ struct FriendList: View {
         went += 1
         showSent(to: friend, one.text, thenOnTop: true) { await prepared.send() }
       }
-      if went == 0 { showSent(to: friend, "Not sent") }
+      if went == 0 { showSent(to: friend, "Not Sent") }
     }
   }
 
@@ -429,7 +429,7 @@ struct FriendList: View {
     }
     stackRounds[friend.name] = nil
     outgoing[friend] = nil
-    showSent(to: friend, "Not sent")
+    showSent(to: friend, "Canceled")
   }
 
   /// What the bar says after a send, for 1.5 seconds as in the original; then a bar that sent goes on top. Another tap
