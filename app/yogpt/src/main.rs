@@ -14,11 +14,12 @@
 //!
 //! Anyone can write to it, so whatever comes is treated as hostile: it acts on a Yo and nothing else, never reads,
 //! logs or runs what a message says (a sender shows in the log as the start of its user id), and holds a bounded
-//! amount of work per account: one answer per sender, `MAX_ANSWERING` at once, `MAX_QUEUED` events waiting; what
+//! amount of work per account: every Yo answered in turn, up to `MAX_OWED` owed to one sender, `MAX_ANSWERING`
+//! senders at once, `MAX_QUEUED` events waiting; what
 //! does not fit is dropped and counted. A panic anywhere ends the process (systemd starts it again): the state on disk
 //! is only ever replaced whole, after an operation completed.
 
-use std::collections::HashSet;
+use std::collections::HashMap;
 use std::io::{Read, Write};
 use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
@@ -36,6 +37,8 @@ const THINK_MS: (u64, u64) = (1000, 3000);
 const GAP_MS: (u64, u64) = (300, 1000);
 /// Senders being answered at once, per account (a thread each).
 const MAX_ANSWERING: usize = 32;
+/// Answers owed to one sender at most (a burst of Yos is answered one after the other, up to this many).
+const MAX_OWED: u32 = 200;
 /// Events waiting for an account's dispatcher.
 const MAX_QUEUED: usize = 1024;
 /// An answer from the hub, at most: a full inbox fetch (100 envelopes of at most 65 KiB) fits.
@@ -168,8 +171,8 @@ struct Bot {
     client: Mutex<Client>,
     /// The hub no longer knows the device: everything of this account stops.
     stopped: AtomicBool,
-    /// Senders being answered.
-    pending: Mutex<HashSet<String>>,
+    /// Senders being answered, with the answers still owed to each.
+    pending: Mutex<HashMap<String, u32>>,
     dropped: AtomicU64,
     dropped_logged_s: AtomicU64,
 }
@@ -332,7 +335,7 @@ fn serve(account: &Account) {
     let (events, received) = sync_channel(MAX_QUEUED);
     let (receiving, to_dispatch) = (bot.clone(), events.clone());
     std::thread::spawn(move || receive(&receiving, &to_dispatch));
-    // One answer per sender at a time: Yos that come while it is under way get none of their own.
+    // Every Yo gets its answer: one sender's in turn, on one thread; senders side by side.
     while bot.running() {
         let event = match received.recv_timeout(Duration::from_secs(1)) {
             Ok(event) => event,
@@ -342,19 +345,31 @@ fn serve(account: &Account) {
         let Event::Message { user, content: Content::Yo, .. } = event else { continue };
         {
             let mut pending = bot.pending.lock().unwrap_or_else(PoisonError::into_inner);
-            if pending.contains(&user) {
+            if let Some(owed) = pending.get_mut(&user) {
+                if *owed < MAX_OWED {
+                    *owed += 1;
+                } else {
+                    bot.dropped();
+                }
                 continue;
             }
             if pending.len() >= MAX_ANSWERING {
                 bot.dropped();
                 continue;
             }
-            pending.insert(user.clone());
+            pending.insert(user.clone(), 1);
         }
         let (answering, events, sender) = (bot.clone(), events.clone(), user.clone());
-        let spawned = std::thread::Builder::new().spawn(move || {
+        let spawned = std::thread::Builder::new().spawn(move || loop {
             answer(&answering, &sender, &events);
-            answering.pending.lock().unwrap_or_else(PoisonError::into_inner).remove(&sender);
+            let mut pending = answering.pending.lock().unwrap_or_else(PoisonError::into_inner);
+            match pending.get_mut(&sender) {
+                Some(owed) if *owed > 1 => *owed -= 1,
+                _ => {
+                    pending.remove(&sender);
+                    break;
+                }
+            }
         });
         if spawned.is_err() {
             bot.pending.lock().unwrap_or_else(PoisonError::into_inner).remove(&user);

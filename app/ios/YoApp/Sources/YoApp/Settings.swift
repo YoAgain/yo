@@ -38,7 +38,7 @@ struct SettingsView: View {
   @State private var showingCode = false
   @State private var turningOffPasskey = false
   @State private var renewingWords = false
-  @State private var confirmingDelete = false
+  @State private var deleteTyped = ""
   @State private var deletingAccount = false
   @State private var deleteProblem: String?
 
@@ -172,44 +172,38 @@ struct SettingsView: View {
   private func accountPage(_ account: Account) -> some View {
     Form {
       securitySection(account)
-      Section {
-        Button("Sign Out", role: .destructive) { resetting = true }
-          .frame(maxWidth: .infinity)
-          .disabled(addingPasskey || deletingAccount)
-      }
-      Section {
-        Button("Delete Account", role: .destructive) { confirmingDelete = true }
-          .frame(maxWidth: .infinity)
-          .disabled(addingPasskey || deletingAccount)
-      }
     }
     .navigationTitle("Account")
     .navigationBarTitleDisplayMode(.inline)
-    // Not secured all the way: the guide first, signing out anyway second.
-    .confirmationDialog("Sign Out?", isPresented: $resetting, titleVisibility: .visible) {
-      if accounts.toDo > 0 {
-        Button("Secure Your Account") { secure(nil) }
-        Button("Sign Out Anyway", role: .destructive) { reset() }
-      } else {
-        Button("Sign Out", role: .destructive) { reset() }
+    // Signing out and deleting: at the very bottom of the screen, however short the list.
+    .safeAreaInset(edge: .bottom) {
+      VStack(spacing: 10) {
+        Button(role: .destructive) { resetting = true } label: {
+          Text("Sign Out").frame(maxWidth: .infinity)
+        }
+        // Not secured all the way: the guide first, signing out anyway second.
+        .confirmationDialog("Sign Out?", isPresented: $resetting, titleVisibility: .visible) {
+          if accounts.toDo > 0 {
+            Button("Secure Your Account") { secure(nil) }
+            Button("Sign Out Anyway", role: .destructive) { reset() }
+          } else {
+            Button("Sign Out", role: .destructive) { reset() }
+          }
+          Button("Cancel", role: .cancel) {}
+        } message: {
+          Text(resetMessage)
+        }
+        NavigationLink {
+          deletePage(account)
+        } label: {
+          Text("Delete Account").foregroundStyle(.red).frame(maxWidth: .infinity)
+        }
       }
-      Button("Cancel", role: .cancel) {}
-    } message: {
-      Text(resetMessage)
-    }
-    .confirmationDialog("Delete Account?", isPresented: $confirmingDelete, titleVisibility: .visible) {
-      Button("Delete Account", role: .destructive) { Task { await deleteAccount() } }
-      Button("Cancel", role: .cancel) {}
-    } message: {
-      Text(deleteMessage)
-    }
-    .alert(
-      "Unable to Delete Account",
-      isPresented: Binding(get: { deleteProblem != nil }, set: { if !$0 { deleteProblem = nil } })
-    ) {
-      Button("OK", role: .cancel) {}
-    } message: {
-      Text(deleteProblem ?? "")
+      .buttonStyle(.glass)
+      .controlSize(.large)
+      .disabled(addingPasskey || deletingAccount)
+      .padding(.horizontal, 20)
+      .padding(.bottom, 8)
     }
   }
 
@@ -379,15 +373,55 @@ struct SettingsView: View {
     openURL(url)
   }
 
-  /// What deleting costs, in one line: everything, and the name for anyone.
-  private var deleteMessage: String {
-    let name = accounts.account?.username ?? "Your name"
-    let passkey = accounts.account?.byPasskey == true ? " Delete the passkey in your password manager too." : ""
-    return "This can’t be undone. “\(name)” becomes free for anyone.\(passkey)"
+  /// Deleting, on a page of its own: what it means, your name typed to confirm, then Face ID (or the passcode).
+  private func deletePage(_ account: Account) -> some View {
+    let confirmed = Username.skeleton(deleteTyped) == Username.skeleton(account.username)
+    return Form {
+      Section {
+        Label("“\(account.username)” becomes free for anyone.", systemImage: "person.crop.circle.badge.xmark")
+        Label("Your friends can’t reach you anymore.", systemImage: "person.2.slash")
+        Label("This can’t be undone.", systemImage: "exclamationmark.triangle")
+        if account.byPasskey {
+          Label("Delete the passkey in your password manager too.", systemImage: "key")
+        }
+      }
+      Section {
+        TextField("Your Name", text: $deleteTyped)
+          .textInputAutocapitalization(.never)
+          .autocorrectionDisabled()
+      } footer: {
+        Text("Type “\(account.username)” to confirm.")
+      }
+      Section {
+        Button(role: .destructive) {
+          Task { await deleteAccount() }
+        } label: {
+          if deletingAccount { ProgressView().frame(maxWidth: .infinity) } else {
+            Text("Delete Account").frame(maxWidth: .infinity)
+          }
+        }
+        .disabled(!confirmed || deletingAccount)
+      }
+    }
+    .navigationTitle("Delete Account")
+    .navigationBarTitleDisplayMode(.inline)
+    .onDisappear { deleteTyped = "" }
+    .alert(
+      "Unable to Delete Account",
+      isPresented: Binding(get: { deleteProblem != nil }, set: { if !$0 { deleteProblem = nil } })
+    ) {
+      Button("OK", role: .cancel) {}
+    } message: {
+      Text(deleteProblem ?? "")
+    }
   }
 
   /// Deleted at the hub, then forgotten here as signing out forgets.
   private func deleteAccount() async {
+    let context = LAContext()
+    guard (try? await context.evaluatePolicy(.deviceOwnerAuthentication, localizedReason: "Delete your account."))
+      == true
+    else { return }
     deletingAccount = true
     defer { deletingAccount = false }
     do {
