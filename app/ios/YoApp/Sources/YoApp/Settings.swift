@@ -34,6 +34,8 @@ struct SettingsView: View {
   /// No pages under the profile (as Signal keeps it flat): securing and the words open as sheets.
   @State private var securing = false
   @State private var showingWords = false
+  @State private var turningOffPasskey = false
+  @State private var renewingWords = false
 
   var body: some View {
     NavigationStack {
@@ -43,7 +45,9 @@ struct SettingsView: View {
           Section {
             NavigationLink {
               Form {
-                accountSection(account)
+                Section {
+                  LabeledContent("Name") { Text(account.username).font(.yo(17, relativeTo: .body)) }
+                }
                 // As the Apple Account page ends: Sign Out, red, on its own; the dialog says what happens.
                 Section {
                   Button("Sign Out", role: .destructive) { resetting = true }
@@ -64,7 +68,13 @@ struct SettingsView: View {
             }
             // The one open task, in the same group as you (as Settings puts suggestions under the Apple Account),
             // with the badge the profile button has too.
-            if !account.secured {
+            if account.secured {
+              NavigationLink {
+                recoveryPage(account)
+              } label: {
+                Label("Account Secured", systemImage: "checkmark").labelStyle(Tile(.green))
+              }
+            } else {
               Button { securing = true } label: {
                 HStack {
                   Label("Secure Your Account", systemImage: "lock.fill").labelStyle(Tile(.orange))
@@ -157,66 +167,86 @@ struct SettingsView: View {
     .padding(.vertical, 2)
   }
 
-  /// One section, "Account": whether the name is secured, and what secures it (passkey, recovery key) or the way to.
-  private func accountSection(_ account: Account) -> some View {
-    Section {
-      if account.secured {
-        Label("Account Secured", systemImage: "checkmark").labelStyle(Tile(.green))
+  /// What secures the account, each with what can be done to it: the passkey (Face ID) and the recovery key.
+  private func recoveryPage(_ account: Account) -> some View {
+    let hasWords = RecoveryWords.load() != nil
+    return Form {
+      Section {
         LabeledContent {
           Text(account.byPasskey ? "On" : "Off")
         } label: {
-          Label("Face ID", systemImage: "faceid").labelStyle(Tile(.green))
+          Label("Passkey", systemImage: "faceid").labelStyle(Tile(.green))
         }
-        if !account.byPasskey {
-          Button {
-            Task { await addPasskey() }
-          } label: {
-            HStack {
-              Text(addingPasskey ? "Setting Up…" : "Turn On Face ID")
-              Spacer()
-              if addingPasskey {
-                ProgressView().accessibilityLabel("Turning On Face ID")
-              }
-            }
-          }
-          .disabled(addingPasskey || RecoveryWords.load() == nil)
-        }
-        if RecoveryWords.load() != nil {
-          Button { showingWords = true } label: {
-            Label("Recovery Key", systemImage: "key.fill").labelStyle(Tile(.gray))
-          }
-          .tint(.primary)
-          .disabled(addingPasskey)
+        if account.byPasskey {
+          Button("Replace Passkey") { Task { await replacePasskey() } }
+            .disabled(addingPasskey || !hasWords)
+          Button("Turn Off Passkey", role: .destructive) { turningOffPasskey = true }
+            .disabled(addingPasskey || !hasWords)
         } else {
-          LabeledContent {
-            Text("Not on This iPhone")
-          } label: {
-            Label("Recovery Key", systemImage: "key.fill").labelStyle(Tile(.gray))
-          }
+          Button(addingPasskey ? "Turning On…" : "Turn On Passkey") { Task { await addPasskey() } }
+            .disabled(addingPasskey || !hasWords)
         }
-      } else {
-        Button { securing = true } label: {
-          HStack {
-            Label("Secure Your Account", systemImage: "lock.fill").labelStyle(Tile(.orange))
-            Spacer()
-            CountBadge(count: 1)
-            Chevron()
-          }
-        }
-        .tint(.primary)
+      } header: {
+        Text("Passkey (Face ID)")
+      } footer: {
+        Text(account.byPasskey ? "Sign back in with Face ID on any iPhone." : "Turn on to sign back in with Face ID.")
       }
-    } header: {
-      Text("Account")
-    } footer: {
-      if !account.secured {
-        Text("Set up account recovery to keep your name “\(account.username)” forever.")
-      } else if account.byPasskey {
-        Text("You keep your name forever, on any iPhone.")
-      } else {
-        Text("You keep your name forever. Turn on Face ID to sign in without your recovery key.")
+      Section {
+        LabeledContent {
+          Text(hasWords ? "Created" : "Not on This iPhone")
+        } label: {
+          Label("Recovery Key", systemImage: "key.fill").labelStyle(Tile(.gray))
+        }
+        if hasWords {
+          Button("Show Recovery Key") { showingWords = true }
+          Button("Create New Recovery Key") { renewingWords = true }
+        }
+      } header: {
+        Text("Recovery Key")
+      } footer: {
+        Text("12 words to sign back in without Face ID.")
+      }
+    }
+    .navigationTitle("Account Recovery")
+    .navigationBarTitleDisplayMode(.inline)
+    .disabled(addingPasskey)
+    .confirmationDialog("Turn Off Passkey?", isPresented: $turningOffPasskey, titleVisibility: .visible) {
+      Button("Turn Off Passkey", role: .destructive) { removePasskey() }
+      Button("Cancel", role: .cancel) {}
+    } message: {
+      Text("You’ll sign back in with your recovery key only. Delete the passkey in your password manager too.")
+    }
+    .confirmationDialog("Create New Recovery Key?", isPresented: $renewingWords, titleVisibility: .visible) {
+      Button("Create New Recovery Key", role: .destructive) { newWords() }
+      Button("Cancel", role: .cancel) {}
+    } message: {
+      Text("Your current 12 words will stop working.")
+    }
+  }
+
+  private func replacePasskey() async {
+    addingPasskey = true
+    defer { addingPasskey = false }
+    do { try await accounts.replacePasskey() } catch {
+      if !SecurityPresentation.isCancellation(error) {
+        passkeyProblem = SecurityPresentation.passkeyMessage(error, fallback: "Try again.")
       }
     }
   }
+
+  private func removePasskey() {
+    do { try accounts.removePasskey() } catch { passkeyProblem = "Try again." }
+  }
+
+  private func newWords() {
+    do {
+      _ = try accounts.newRecoveryKey()
+      showingWords = true  // the new words, to keep
+    } catch {
+      passkeyProblem = "Try again."
+    }
+  }
+
 
   /// What signing out costs, in one or two lines: friends go; the name comes back only if the account is secured.
   private var resetMessage: String {

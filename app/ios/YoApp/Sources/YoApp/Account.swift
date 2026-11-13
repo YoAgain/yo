@@ -209,6 +209,11 @@ enum MockHub {
     store.string(forKey: "user." + userID.base64EncodedString())
   }
 
+  /// Old recovery words point nowhere any more.
+  static func forget(locator: String) {
+    store.removeObject(forKey: "code." + locator)
+  }
+
   static func forgetAll() {
     store.removePersistentDomain(forName: "co.justyo.mockhub")
   }
@@ -295,6 +300,53 @@ final class AccountStore {
 
   /// A passkey added to a backup kept with the words: a Yo passkey of this account if there is one, else a new one;
   /// K comes from the recovery words on this phone.
+  /// The backup opened with the words on this phone: what replacing a passkey or the words needs.
+  private func openBackup() throws -> (account: Account, record: BackupRecord, k: SymmetricKey, code: [String]) {
+    guard let account, let code = RecoveryWords.load(), let record = MockHub.record(for: account.username),
+      let byCode = record.byCode
+    else { throw AccountError.noBackup }
+    return (account, record, try BackupRecord.unwrap(byCode, with: BackupRecord.key(code: code)), code)
+  }
+
+  /// A new passkey in place of the one there (made, then used once for its PRF output).
+  func replacePasskey() async throws {
+    var (account, record, k, code) = try openBackup()
+    let made = try await passkeys.make(name: account.username, userID: account.userID)
+    guard let prf = try await passkeys.ask(salt: BackupRecord.prfSalt, only: made.credentialID).prf else {
+      throw AccountError.noPRF
+    }
+    record.byPasskey = try BackupRecord.wrap(k, in: BackupRecord.key(prf: prf))
+    account.byPasskey = true
+    record.sealed = try BackupRecord.seal(account, code: code, with: k)
+    MockHub.save(record, for: account.username)
+    self.account = account
+  }
+
+  /// The passkey no longer opens the backup; the words still do. (The passkey itself is deleted in the password
+  /// manager.)
+  func removePasskey() throws {
+    var (account, record, k, code) = try openBackup()
+    record.byPasskey = nil
+    account.byPasskey = false
+    record.sealed = try BackupRecord.seal(account, code: code, with: k)
+    MockHub.save(record, for: account.username)
+    self.account = account
+  }
+
+  /// New recovery words; the old ones stop working.
+  func newRecoveryKey() throws -> [String] {
+    var (account, record, k, old) = try openBackup()
+    let code = RecoveryCode.make()
+    record.byCode = try BackupRecord.wrap(k, in: BackupRecord.key(code: code))
+    account.byCode = true
+    record.sealed = try BackupRecord.seal(account, code: code, with: k)
+    MockHub.forget(locator: BackupRecord.locator(code: old))
+    MockHub.save(record, for: account.username, locator: BackupRecord.locator(code: code))
+    RecoveryWords.save(code)
+    self.account = account
+    return code
+  }
+
   func addPasskey() async throws {
     guard var account, let code = RecoveryWords.load(), var record = MockHub.record(for: account.username),
       let byCode = record.byCode
