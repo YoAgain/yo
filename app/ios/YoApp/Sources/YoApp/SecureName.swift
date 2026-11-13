@@ -1,7 +1,6 @@
 import SwiftUI
 
-// Preserves the existing standalone API.
-// Settings pushes SecureNamePage within its existing NavigationStack.
+// Retained for callers that present setup as a sheet.
 @MainActor
 struct SecureNameSheet: View {
   @Environment(\.dismiss) private var dismiss
@@ -52,12 +51,12 @@ struct SecureNamePage: View {
           name: accounts.account?.username ?? "",
           words: words,
           explanation: hasPasskey
-            ? "Your passkey is set up and your name is secured. "
-              + "Save these 12 words so you can also sign in without your passkey."
-            : "Save these 12 words outside Yo. They’ll be your only way "
-              + "to sign in on a new iPhone.",
+            ? "Your passkey is set up. Save your recovery key "
+              + "in case you can’t use your passkey."
+            : "Save your recovery key in a safe place. Without a passkey, "
+              + "you’ll need it to sign in on a new iPhone.",
           requiresAuthentication: false,
-          finishTitle: hasPasskey ? "Done" : "Secure My Name",
+          finishTitle: hasPasskey ? "Done" : "Secure Your Name",
           onFinish: { finishRecovery(hasPasskey: hasPasskey) },
           onTryPasskey: hasPasskey ? nil : { tryPasskeyAgain() }
         )
@@ -65,11 +64,13 @@ struct SecureNamePage: View {
     }
     .navigationBarBackButtonHidden(busy)
     .interactiveDismissDisabled(busy)
-    .alert("Couldn’t Secure Your Name", isPresented: $setupFailed) {
+    .toolbar(busy ? .hidden : .visible, for: .navigationBar)
+    .alert("Unable to Secure Your Name", isPresented: $setupFailed) {
       Button("OK", role: .cancel) {}
     } message: {
       Text(
-        "Try again. Keep this recovery key until setup is complete."
+        "Try again. Keep a copy of your recovery key "
+          + "until setup is complete."
       )
     }
   }
@@ -84,29 +85,23 @@ struct SecureNamePage: View {
         } label: {
           Text("Username")
         }
-
+      } footer: {
         Text(
-          "Keep your name, even if you stop opening Yo, "
+          "Set up a passkey and recovery key to keep your name "
             + "and sign in on a new iPhone."
         )
-      } header: {
-        Text("Your Name")
       }
 
       Section {
-        Text(
-          "Sign in with Face ID or your device passcode. "
-            + "Your passkey is stored in iCloud Keychain "
-            + "or your chosen password manager."
-        )
+        Text(SecurityPresentation.passkeyExplanation)
       } header: {
         Text("Passkey")
       }
 
       Section {
         Text(
-          "You’ll also get 12 recovery words. "
-            + "They let you sign in if you can’t use your passkey."
+          "A 12-word recovery key lets you sign in "
+            + "if you can’t use your passkey."
         )
       } header: {
         Text("Recovery Key")
@@ -117,9 +112,12 @@ struct SecureNamePage: View {
           Task { await createPasskey() }
         } label: {
           HStack {
-            Text(busy ? "Creating Passkey…" : "Create Passkey")
+            Text(busy ? "Setting Up…" : "Set Up Passkey")
             Spacer()
-            if busy { ProgressView() }
+            if busy {
+              ProgressView()
+                .accessibilityLabel("Setting Up Passkey")
+            }
           }
         }
         .disabled(busy)
@@ -141,10 +139,7 @@ struct SecureNamePage: View {
   private var confirmation: some View {
     Form {
       Section {
-        Text(
-          "Your passkey was created. "
-            + "Use it once to finish setting it up for Yo."
-        )
+        Text("Use your passkey to finish setup.")
       }
 
       Section {
@@ -152,9 +147,12 @@ struct SecureNamePage: View {
           Task { await confirmPasskey() }
         } label: {
           HStack {
-            Text(busy ? "Confirming Passkey…" : "Confirm Passkey")
+            Text(busy ? "Confirming…" : "Confirm Passkey")
             Spacer()
-            if busy { ProgressView() }
+            if busy {
+              ProgressView()
+                .accessibilityLabel("Confirming Passkey")
+            }
           }
         }
         .disabled(busy)
@@ -177,24 +175,27 @@ struct SecureNamePage: View {
     passkeyProblem = nil
     defer { busy = false }
 
-    // Keep these words: a successful call clears AccountStore's
-    // temporary setup state after saving the backup.
+    // A successful call clears the store's temporary setup state.
     let words = accounts.secureWords()
 
     do {
       let confirmed = try await accounts.securePasskey()
-
       if confirmed {
         stage = .recovery(words: words, hasPasskey: true)
       } else {
         stage = .confirmation
       }
     } catch {
-      // Cancellation is also a valid reason to offer the fallback.
-      // Keep it inline rather than presenting an error alert.
       recoveryAvailable = true
-      passkeyProblem =
-        "A passkey wasn’t set up. Try again or use a recovery key on its own."
+
+      // Cancellation offers the fallback without an error message.
+      if SecurityPresentation.isCancellation(error) { return }
+
+      passkeyProblem = SecurityPresentation.passkeyMessage(
+        error,
+        fallback:
+          "Your passkey wasn’t set up. Try again or use a recovery key."
+      )
     }
   }
 
@@ -215,7 +216,7 @@ struct SecureNamePage: View {
       passkeyProblem = SecurityPresentation.passkeyMessage(
         error,
         fallback:
-          "A passkey wasn’t set up. Try again or use a recovery key on its own."
+          "Your passkey wasn’t set up. Try again or use a recovery key."
       )
     }
   }

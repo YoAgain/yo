@@ -172,17 +172,9 @@ struct FriendList: View {
         ToolbarItem(placement: .principal) { title }
         ToolbarItem(placement: .topBarLeading) {
           // Your picture opens your profile and settings in a sheet, as Apple's own apps do.
-          // A red dot while the name is not secured (as Settings badges "Finish Setting Up").
-          Button { settings = true } label: {
-            Image(systemName: "person.fill")
-              .overlay(alignment: .topTrailing) {
-                if accounts.account?.secured == false {
-                  Circle().fill(.red).frame(width: 9, height: 9).offset(x: 5, y: -4)
-                }
-              }
-          }
-          .accessibilityLabel("Profile")
-          .accessibilityValue(accounts.account?.secured == false ? "Name not secured" : "")
+          // The system's badge while the name is not secured: one thing to do (as Settings badges "Finish Setting Up").
+          Button("Profile", systemImage: "person.fill") { settings = true }
+            .badge(accounts.account?.secured == false ? 1 : 0)
         }
         // The camera; it turns red (Alizarin, the original's round button) while it is on.
         ToolbarItem(placement: .topBarTrailing) {
