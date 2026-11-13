@@ -81,8 +81,10 @@ pub enum Conflict {
     /// The account key is, or was, another user's.
     KeyTaken,
     UsernameTaken,
-    /// Another user's backup has this locator.
+    /// Another user's backup has this locator, or a user this id.
     LocatorTaken,
+    /// The device was replaced, or its account removed.
+    DeviceGone,
 }
 
 pub enum Write<T> {
@@ -101,6 +103,7 @@ CREATE TABLE IF NOT EXISTS account_keys (
     key BLOB PRIMARY KEY,
     user_id BLOB NOT NULL REFERENCES users(id)
 ) WITHOUT ROWID;
+CREATE INDEX IF NOT EXISTS account_keys_by_user ON account_keys(user_id);
 -- How people find a user: a phone number as its HMAC, a username by its skeleton (spec 3.3).
 CREATE TABLE IF NOT EXISTS handles (
     kind INTEGER NOT NULL,
@@ -456,22 +459,32 @@ impl Db {
 
     // ---- backups ----
 
-    /// Stores a user's backup record, replacing the one before: the old locator finds nothing from then on.
+    /// Stores the backup record of a device's user, replacing the one before: the old locator finds nothing from then
+    /// on. The device is checked in this transaction: one replaced since it authenticated (a new phone restored the
+    /// account) must not overwrite the new phone's record. A locator that is another user's, or any user's id, is
+    /// refused: a locator never stands in for a user id.
     pub fn put_backup(
         &self,
-        user: &UserId,
+        device: &DeviceId,
         locator: Option<&[u8]>,
         record: &[u8],
         now: u64,
     ) -> rusqlite::Result<Write<()>> {
         let mut conn = self.conn();
         let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let user: Option<UserId> = tx
+            .prepare_cached("SELECT user_id FROM devices WHERE id = ?1")?
+            .query_row([device], |row| array(row.get(0)?))
+            .optional()?;
+        let Some(user) = user else { return Ok(Write::Refused(Conflict::DeviceGone)) };
         if let Some(locator) = locator {
-            let holder: Option<UserId> = tx
-                .prepare_cached("SELECT user_id FROM backups WHERE locator = ?1")?
-                .query_row([locator], |row| array(row.get(0)?))
-                .optional()?;
-            if holder.is_some_and(|holder| holder != *user) {
+            let taken = tx
+                .prepare_cached(
+                    "SELECT 1 FROM backups WHERE locator = ?1 AND user_id != ?2
+                     UNION ALL SELECT 1 FROM users WHERE id = ?1",
+                )?
+                .exists(params![locator, user])?;
+            if taken {
                 return Ok(Write::Refused(Conflict::LocatorTaken));
             }
         }
@@ -485,13 +498,14 @@ impl Db {
         Ok(Write::Done(()))
     }
 
-    /// A backup record by its user id or, failing that, by its locator. The user id comes first: a locator someone
-    /// chose to be another's user id never hides that user's record.
+    /// A backup record by its user id or, where no user has that id, by its locator: what is asked for by a user's
+    /// id is that user's record or none, never one whose locator happens to be the same.
     pub fn backup(&self, id: &[u8]) -> rusqlite::Result<Option<Vec<u8>>> {
         self.conn()
             .prepare_cached(
-                "SELECT record FROM (SELECT record, 0 AS rank FROM backups WHERE user_id = ?1
-                 UNION ALL SELECT record, 1 FROM backups WHERE locator = ?1) ORDER BY rank LIMIT 1",
+                "SELECT record FROM backups WHERE user_id = ?1
+                 UNION ALL SELECT record FROM backups WHERE locator = ?1 AND NOT EXISTS (SELECT 1 FROM users WHERE id = ?1)
+                 LIMIT 1",
             )?
             .query_row([id], |row| row.get(0))
             .optional()
@@ -765,27 +779,49 @@ mod tests {
     #[test]
     fn backups_are_found_by_user_id_or_current_locator() {
         let db = Db::open(":memory:").unwrap();
+        // The test's users get the ids of their first devices: ANA [1; 16], device [1; 16]; BEN [2; 16], device [2; 16].
+        let (ana, ben) = (&[1; 16], &[2; 16]);
         let a = user(register(&db, b"ANA", 1, 1, 0));
-        let b = user(register(&db, b"BEN", 2, 2, 0));
+        user(register(&db, b"BEN", 2, 2, 0));
         let found = |id: &[u8]| db.backup(id).unwrap();
+        let refused = |w: Write<()>, want: Conflict| matches!(w, Write::Refused(c) if c == want);
         assert!(found(&a).is_none());
-        assert!(matches!(db.put_backup(&a, Some(&[9; 16]), b"one", 0).unwrap(), Write::Done(())));
+        assert!(matches!(db.put_backup(ana, Some(&[9; 16]), b"one", 0).unwrap(), Write::Done(())));
         assert_eq!(found(&a).as_deref(), Some(&b"one"[..]));
         assert_eq!(found(&[9; 16]).as_deref(), Some(&b"one"[..]));
         // Another user cannot take the locator.
-        let taken = db.put_backup(&b, Some(&[9; 16]), b"two", 0).unwrap();
-        assert!(matches!(taken, Write::Refused(Conflict::LocatorTaken)));
+        assert!(refused(db.put_backup(ben, Some(&[9; 16]), b"two", 0).unwrap(), Conflict::LocatorTaken));
         // A new record with a new locator: the old one finds nothing.
-        db.put_backup(&a, Some(&[8; 16]), b"three", 0).unwrap();
+        db.put_backup(ana, Some(&[8; 16]), b"three", 0).unwrap();
         assert!(found(&[9; 16]).is_none());
         assert_eq!(found(&[8; 16]).as_deref(), Some(&b"three"[..]));
-        // A locator chosen to be another's user id does not hide that user's record.
-        db.put_backup(&b, Some(&a), b"four", 0).unwrap();
-        assert_eq!(found(&a).as_deref(), Some(&b"three"[..]));
+        // No locator may be a user's id.
+        assert!(refused(db.put_backup(ben, Some(&a), b"four", 0).unwrap(), Conflict::LocatorTaken));
         // Without a locator: by the user id only.
-        db.put_backup(&a, None, b"five", 0).unwrap();
+        db.put_backup(ana, None, b"five", 0).unwrap();
         assert!(found(&[8; 16]).is_none());
         assert_eq!(found(&a).as_deref(), Some(&b"five"[..]));
+    }
+
+    #[test]
+    fn a_user_id_never_finds_another_users_record_by_locator() {
+        let db = Db::open(":memory:").unwrap();
+        user(register(&db, b"BEN", 2, 2, 0));
+        // BEN's locator is [7; 16]; then a user comes to have that id. Asked by its id, the hub has no record for it.
+        db.put_backup(&[2; 16], Some(&[7; 16]), b"ben", 0).unwrap();
+        assert_eq!(user(register(&db, b"SEVEN", 7, 7, 0)), [7; 16]);
+        assert!(db.backup(&[7; 16]).unwrap().is_none());
+    }
+
+    #[test]
+    fn a_replaced_device_cannot_store_a_backup() {
+        let db = Db::open(":memory:").unwrap();
+        let first = user(register(&db, b"LEO", 1, 1, 0));
+        // A new phone restores the account and stores its record; the old phone's late request must not replace it.
+        user(register(&db, b"LEO", 1, 3, 0));
+        db.put_backup(&[3; 16], None, b"new", 0).unwrap();
+        assert!(matches!(db.put_backup(&[1; 16], None, b"old", 0).unwrap(), Write::Refused(Conflict::DeviceGone)));
+        assert_eq!(db.backup(&first).unwrap().as_deref(), Some(&b"new"[..]));
     }
 
     #[test]
@@ -794,7 +830,7 @@ mod tests {
         let idle = user(register(&db, b"IDLE", 1, 1, 0));
         let secured = user(register(&db, b"SAFE", 2, 2, 0));
         let active = user(register(&db, b"BUSY", 3, 3, 0));
-        db.put_backup(&secured, None, b"record", 0).unwrap();
+        db.put_backup(&[2; 16], None, b"record", 0).unwrap();
         db.touch(&[3; 16], 50 * DAY).unwrap();
         let exists = |user: &UserId| db.lookup(KIND_USER, user, false, &[]).unwrap().is_some();
         assert_eq!(db.release_unsecured(89 * DAY, 90 * DAY).unwrap(), 0);

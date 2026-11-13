@@ -476,8 +476,10 @@ async fn put_backup(State(hub): Hubs, method: Method, uri: Uri, headers: HeaderM
     let backup: api::Backup = decode(&body)?;
     backup.check()?;
     let locator = backup.locator();
-    match hub.db.put_backup(&device.user_id, locator.as_ref().map(|l| &l[..]), &body, now_ms())? {
+    match hub.db.put_backup(&device.device_id, locator.as_ref().map(|l| &l[..]), &body, now_ms())? {
         Write::Done(()) => Ok(StatusCode::NO_CONTENT),
+        // Replaced between its authentication and now (a new phone restored the account).
+        Write::Refused(db::Conflict::DeviceGone) => Err(refuse(StatusCode::GONE)),
         Write::Refused(_) => Err(refuse(StatusCode::CONFLICT)),
     }
 }
