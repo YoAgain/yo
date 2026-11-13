@@ -22,6 +22,9 @@ struct Onboarding: View {
   @State private var problem: String?
   /// The quiet look for a passkey on this phone happens once, not each time the welcome comes back.
   @State private var looked = false
+  /// Continue tapped with a name too short: the minimum shows, the field shakes (once per tap).
+  @State private var tooShort = false
+  @State private var shakes = 0
   /// Where the recovery words went: "photos", "copied". Kept somewhere, Continue goes straight in.
   @State private var kept: Set<String> = []
 
@@ -77,29 +80,35 @@ struct Onboarding: View {
   // MARK: Name
 
   private var naming: some View {
-    // No words while typing: the field keeps the rules, a checkmark says free, a red cross says taken; too short says
-    // nothing, Continue just waits.
+    // No words while typing: the field keeps the rules, a checkmark says free, a red cross says taken. Too short is
+    // said only after a pause in typing, or when Continue is tapped (the field shakes too), until the next letter.
     let taken = name.count >= 3 && MockHub.isTaken(name)
     let trouble = Username.problem(name) ?? (taken ? "taken" : nil)
     let mine = taken && !Username.reserved.contains(name)
     return Page(title: "Choose a Name", back: { go(.welcome) }) {
       NameField(name: $name, mark: trouble == nil ? .available : taken ? .taken : nil,
-        onSubmit: { if trouble == nil { Task { await register() } } })
-      // Under the field, one place: three dots that fill as the first letters come (the minimum, shown without
-      // words), until the name is long enough; then "This Is My Name" when it is taken by an account.
+        shakes: shakes, onSubmit: { Task { await register() } })
+      // Under the field, one place: the minimum after a Continue too soon, or "This Is My Name" when it is taken.
       ZStack {
-        MinimumDots(count: name.count, of: 3)
-          .opacity(name.count < 3 ? 1 : 0)
+        Text("Use at least 3 characters.")
+          .font(.system(size: 15, weight: .semibold))
+          .opacity(tooShort ? 1 : 0)
         Button("This Is My Name") { go(.logIn) }
           .font(.yo(17))
           .opacity(mine ? 1 : 0)
           .disabled(!mine)
       }
       .animation(.snappy(duration: 0.2), value: mine)
-      .animation(.snappy(duration: 0.2), value: name.count)
+      .animation(.snappy(duration: 0.2), value: tooShort)
+      .onChange(of: name) { tooShort = false }
+      .task(id: name) {
+        // A pause after one or two letters: the minimum shows (someone typing on never sees it).
+        guard (1...2).contains(name.count), (try? await Task.sleep(for: .seconds(1.5))) != nil else { return }
+        tooShort = true
+      }
     } bottom: {
       PrimaryButton("Continue", busy: busy) { Task { await register() } }
-        .disabled(trouble != nil || busy)
+        .disabled(taken || busy)
       Note(problem)
     }
   }
@@ -149,7 +158,14 @@ struct Onboarding: View {
   }
 
   private func register() async {
-    guard Username.problem(name) == nil, !busy else { return }
+    guard !busy else { return }
+    guard name.count >= 3 else {
+      tooShort = true
+      shakes += 1
+      UINotificationFeedbackGenerator().notificationOccurred(.error)
+      return
+    }
+    guard Username.problem(name) == nil, !MockHub.isTaken(name) else { return }
     busy = true
     defer { busy = false }
     do {
@@ -293,6 +309,8 @@ private struct NameField: View {
   /// At the end of the field: a green checkmark when the name is free, a red cross when it is taken.
   var mark: Mark?
   enum Mark { case available, taken }
+  /// Counted up to shake the field (Continue with a name too short).
+  var shakes = 0
   var onSubmit: () -> Void = {}
   @FocusState private var focused: Bool
 
@@ -319,31 +337,15 @@ private struct NameField: View {
         }
       }
       .animation(.snappy(duration: 0.2), value: mark)
+      .keyframeAnimator(initialValue: 0.0, trigger: shakes) { field, x in field.offset(x: x) } keyframes: { _ in
+        for x in [-12.0, 10, -7, 4, 0] { SpringKeyframe(x, duration: 0.07) }
+      }
       .onChange(of: name) { _, typed in
         let clean = Username.clean(typed)
         if clean != typed { name = clean }
       }
       .onSubmit(onSubmit)
       .onAppear { focused = true }
-  }
-}
-
-/// How many characters a name needs at least: a dot each, filled as they are typed.
-private struct MinimumDots: View {
-  let count: Int
-  let of: Int
-
-  var body: some View {
-    HStack(spacing: 10) {
-      ForEach(0..<of, id: \.self) { i in
-        Circle()
-          .fill(.white.opacity(i < count ? 0.9 : 0.25))
-          .frame(width: 8, height: 8)
-          .scaleEffect(i < count ? 1.15 : 1)
-      }
-    }
-    .accessibilityElement()
-    .accessibilityLabel("At least \(of) characters")
   }
 }
 
