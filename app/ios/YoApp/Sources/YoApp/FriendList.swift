@@ -441,7 +441,6 @@ extension FriendList {
       .animation(.easeOut(duration: 0.15), value: viewing)
       .animation(.smooth, value: cameraOn)
       .animation(.smooth, value: picked)
-      .animation(.snappy, value: friends.all)
       .preferredColorScheme(.dark)  // white status bar and bar items on purple
   }
 
@@ -462,7 +461,7 @@ extension FriendList {
       try? await Task.sleep(for: .seconds(delay))
       cheers += 1
       lastCheer = .now
-      toTop(name)
+      toTop(name)  // on top at once, the Yo on it in the same moment
       withAnimation(.spring(duration: 0.3, bounce: 0.6)) {
         bangs += 1
         let count = (landed[name]?.count ?? 0) + 1
@@ -481,9 +480,12 @@ extension FriendList {
   }
 
   /// A friend goes on top, and the list with them: to its very start, below the title (scrolling to the bar itself
-  /// would leave it behind the bar of buttons).
+  /// would leave it behind the bar of buttons). At once, as in the original: a bar sliding up first and its Yo coming
+  /// after reads as two events.
   private func toTop(_ name: String) {
-    withAnimation(.snappy) {
+    var now = Transaction()
+    now.disablesAnimations = true
+    withTransaction(now) {
       friends.promote(name)
       position.scrollTo(edge: .top)
     }
