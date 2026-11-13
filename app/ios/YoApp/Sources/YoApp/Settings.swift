@@ -31,7 +31,7 @@ struct SettingsView: View {
   @State private var photosDenied = false
   @State private var addingPasskey = false
   @State private var passkeyProblem: String?
-  /// No pages under the profile (as Signal keeps it flat): securing and the words open as sheets.
+  /// Securing and the words open as sheets.
   @State private var securing = false
   @State private var securingStart: SecureStep?
   @State private var showingWords = false
@@ -45,28 +45,16 @@ struct SettingsView: View {
     NavigationStack {
       Form {
         if let account = accounts.account {
-          // You, at the top: the picture and the name.
+          // You, at the top: the picture and the name; it opens your account (security, sign out, delete), with
+          // the badge while something is left to secure.
           Section {
-            profileRow(account)
-          }
-          // Security: one row, with the badge while something is left. Until the passkey or the recovery key is
-          // there, it opens the guide; after, the page with both.
-          Section {
-            let started = account.byPasskey || (account.secured && accounts.wordsSaved)
-            if started {
-              NavigationLink {
-                Form { securitySection(account) }
-                  .navigationTitle("Account Security")
-                  .navigationBarTitleDisplayMode(.inline)
-              } label: {
-                securityRowLabel
-              }
-            } else {
-              Button { secure(nil) } label: {
-                HStack {
-                  securityRowLabel
-                  Chevron()
-                }
+            NavigationLink {
+              accountPage(account)
+            } label: {
+              HStack {
+                profileRow(account)
+                Spacer()
+                if accounts.toDo > 0 { CountBadge(count: accounts.toDo) }
               }
             }
           } footer: {
@@ -88,47 +76,6 @@ struct SettingsView: View {
         }
 
         // "Keep Sent Photos" comes back with the camera mode, once the core carries photos and videos (spec 5).
-
-        // As Settings ends the Apple Account: Sign Out, red, on its own; the dialog says what happens.
-        Section {
-          Button("Sign Out", role: .destructive) { resetting = true }
-            .frame(maxWidth: .infinity)
-            .disabled(addingPasskey || deletingAccount)
-        }
-        // Below it, as Apple asks for (App Review 5.1.1(v)): gone for good, with everything the hub holds.
-        if accounts.account != nil {
-          Section {
-            Button("Delete Account", role: .destructive) { confirmingDelete = true }
-              .frame(maxWidth: .infinity)
-              .disabled(addingPasskey || deletingAccount)
-          }
-        }
-      }
-      .confirmationDialog("Delete Account?", isPresented: $confirmingDelete, titleVisibility: .visible) {
-        Button("Delete Account", role: .destructive) { Task { await deleteAccount() } }
-        Button("Cancel", role: .cancel) {}
-      } message: {
-        Text(deleteMessage)
-      }
-      .alert(
-        "Unable to Delete Account",
-        isPresented: Binding(get: { deleteProblem != nil }, set: { if !$0 { deleteProblem = nil } })
-      ) {
-        Button("OK", role: .cancel) {}
-      } message: {
-        Text(deleteProblem ?? "")
-      }
-      // Not secured all the way: the guide first, signing out anyway second.
-      .confirmationDialog("Sign Out?", isPresented: $resetting, titleVisibility: .visible) {
-        if accounts.toDo > 0 {
-          Button("Secure Your Account") { secure(nil) }
-          Button("Sign Out Anyway", role: .destructive) { reset() }
-        } else {
-          Button("Sign Out", role: .destructive) { reset() }
-        }
-        Button("Cancel", role: .cancel) {}
-      } message: {
-        Text(resetMessage)
       }
       .navigationTitle("Profile")
       .navigationBarTitleDisplayMode(.inline)
@@ -173,25 +120,6 @@ struct SettingsView: View {
     .tint(Color.amethyst)
   }
 
-  /// The Account Security row: its tile (orange while something is left), the badge or "On" with a checkmark.
-  private var securityRowLabel: some View {
-    HStack {
-      Label {
-        Text("Account Security").foregroundStyle(Color(.label))
-      } icon: {
-        Image(systemName: "lock.fill")
-      }
-      .labelStyle(Tile(accounts.toDo > 0 ? .orange : .green))
-      Spacer()
-      if accounts.toDo > 0 {
-        CountBadge(count: accounts.toDo)
-      } else {
-        Text("On").foregroundStyle(Color(.secondaryLabel))
-        Image(systemName: "checkmark.circle.fill").foregroundStyle(.green).accessibilityHidden(true)
-      }
-    }
-  }
-
   /// A small picture and the name, with whether the account is secured.
   private func profileRow(_ account: Account) -> some View {
     HStack(spacing: 14) {
@@ -210,35 +138,77 @@ struct SettingsView: View {
     .padding(.vertical, 2)
   }
 
-  /// Account Security: two groups, Passkey and Recovery Key, each one row with its state. A step not done yet opens
-  /// the guide at it; one done opens its own page with what can be done with it (as Settings' Face ID & Passcode).
+  /// Your account: its security (passkey and recovery key), then signing out and, below, deleting it (as Settings
+  /// ends the Apple Account; App Review 5.1.1(v)).
+  private func accountPage(_ account: Account) -> some View {
+    Form {
+      securitySection(account)
+      Section {
+        Button("Sign Out", role: .destructive) { resetting = true }
+          .frame(maxWidth: .infinity)
+          .disabled(addingPasskey || deletingAccount)
+      }
+      Section {
+        Button("Delete Account", role: .destructive) { confirmingDelete = true }
+          .frame(maxWidth: .infinity)
+          .disabled(addingPasskey || deletingAccount)
+      }
+    }
+    .navigationTitle("Account")
+    .navigationBarTitleDisplayMode(.inline)
+    .confirmationDialog("Delete Account?", isPresented: $confirmingDelete, titleVisibility: .visible) {
+      Button("Delete Account", role: .destructive) { Task { await deleteAccount() } }
+      Button("Cancel", role: .cancel) {}
+    } message: {
+      Text(deleteMessage)
+    }
+    .alert(
+      "Unable to Delete Account",
+      isPresented: Binding(get: { deleteProblem != nil }, set: { if !$0 { deleteProblem = nil } })
+    ) {
+      Button("OK", role: .cancel) {}
+    } message: {
+      Text(deleteProblem ?? "")
+    }
+    // Not secured all the way: the guide first, signing out anyway second.
+    .confirmationDialog("Sign Out?", isPresented: $resetting, titleVisibility: .visible) {
+      if accounts.toDo > 0 {
+        Button("Secure Your Account") { secure(nil) }
+        Button("Sign Out Anyway", role: .destructive) { reset() }
+      } else {
+        Button("Sign Out", role: .destructive) { reset() }
+      }
+      Button("Cancel", role: .cancel) {}
+    } message: {
+      Text(resetMessage)
+    }
+  }
+
+  /// Security: Passkey and Face ID, and Recovery Key, one row each with its state. A step not done yet opens the
+  /// guide at it; one done opens its own page with what can be done with it (as Settings' Face ID & Passcode).
   @ViewBuilder private func securitySection(_ account: Account) -> some View {
     let wordsDone = account.secured && accounts.wordsSaved && RecoveryWords.load() != nil
-    Section {
+    Section("Security") {
       if account.byPasskey {
         NavigationLink {
-          securityPage("Passkey", footer: "Sign back in with Face ID on a new iPhone.") {
+          securityPage("Passkey and Face ID") {
             Button("Replace Passkey") { Task { await replacePasskey() } }
             if wordsDone {
               Button("Turn Off Passkey", role: .destructive) { turningOffPasskey = true }
             }
           }
         } label: {
-          SecurityRow(icon: "faceid", color: .green, title: "Passkey", value: "On", done: true, chevron: false)
+          SecurityRow(
+            icon: "faceid", color: .green, title: "Passkey and Face ID", value: "On", done: true, chevron: false)
         }
       } else {
         Button { secure(.passkey) } label: {
-          SecurityRow(icon: "faceid", color: .orange, title: "Passkey", value: "Set Up")
+          SecurityRow(icon: "faceid", color: .orange, title: "Passkey and Face ID", value: "Set Up")
         }
       }
-    } footer: {
-      Text("Sign back in with Face ID on a new iPhone.")
-    }
-    .disabled(addingPasskey)
-    Section {
       if wordsDone {
         NavigationLink {
-          securityPage("Recovery Key", footer: "12 words to sign back in without Face ID.") {
+          securityPage("Recovery Key") {
             Button("Show Recovery Key") { Task { await showRecoveryKey() } }
             Button("Create New Recovery Key") { renewingWords = true }
           }
@@ -250,23 +220,15 @@ struct SettingsView: View {
           SecurityRow(icon: "key.fill", color: .orange, title: "Recovery Key", value: "Save")
         }
       }
-    } footer: {
-      Text("12 words to sign back in without Face ID.")
     }
     .disabled(addingPasskey)
   }
 
-  /// The page under Passkey or Recovery Key: what can be done with it, and the dialogs those ask.
-  private func securityPage(
-    _ title: String, footer: String, @ViewBuilder actions: () -> some View
-  ) -> some View {
+  /// The page under Passkey and Face ID or Recovery Key: what can be done with it, and the dialogs those ask.
+  private func securityPage(_ title: String, @ViewBuilder actions: () -> some View) -> some View {
     Form {
-      Section {
-        actions()
-      } footer: {
-        Text(footer)
-      }
-      .disabled(addingPasskey)
+      Section { actions() }
+        .disabled(addingPasskey)
     }
     .navigationTitle(title)
     .navigationBarTitleDisplayMode(.inline)

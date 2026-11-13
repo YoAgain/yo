@@ -102,7 +102,7 @@ struct SecureNameSheet: View {
   private var donePage: some View {
     Page(title: "All Set", message: "“\(accounts.account?.username ?? "")” is yours forever.") {
       VStack(spacing: 12) {
-        if passkeyDone { DoneRow(title: "Passkey") }
+        if passkeyDone { DoneRow(title: "Passkey and Face ID") }
         if wordsDone { DoneRow(title: "Recovery Key") }
       }
       .padding(.top, 20)
@@ -232,7 +232,7 @@ private struct BigSymbol: View {
   }
 }
 
-/// The recovery key from Account Security, after Face ID: the words and their QR code on the full-colour card, Save…
+/// The recovery key from Security, after Face ID: the words and their QR code on the full-colour card, Save…
 /// to the share sheet, Done to close. No second "show" step.
 struct RecoveryShowSheet: View {
   let name: String
