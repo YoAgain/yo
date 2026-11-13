@@ -91,6 +91,7 @@ fn two_writers_merge_and_converge() {
     theirs.friends.entry("22".repeat(16)).or_default().name = storage::Field { value: Some("Mia".into()), at: later };
     theirs.friends.get_mut(&"11".repeat(16)).unwrap().name = storage::Field { value: Some("Leon".into()), at: later };
     theirs.icon = storage::Field { value: None, at: later };
+    theirs.version = 2; // as the hub will store it
     let body =
         yo_wire::encode(&api::Storage { version: 1, data: storage::seal(&a.account_secret(), &user, &theirs).into() });
     assert_eq!(a.signed_for_tests("PUT", api::STORAGE, &body).unwrap().status, status::NO_CONTENT);
@@ -136,4 +137,21 @@ fn the_storage_goes_with_the_account() {
     let mut b = by_name(&hub, &name, None);
     assert_eq!(b.signed_for_tests("GET", api::STORAGE, &[]).unwrap().status, status::NOT_FOUND);
     assert_eq!(b.app_icon(), None);
+}
+
+#[test]
+fn a_replayed_storage_is_not_taken() {
+    let hub = TestHub::start();
+    let name = format!("Replay{}", random_u64() % 100_000);
+    let mut a = by_name(&hub, &name, None);
+    a.set_app_icon(Some("Negative".into()));
+    a.maintenance().unwrap();
+    // The hub (or someone at it) puts the old blob, sealed as version 1, under version 2.
+    let old = stored(&mut a).data;
+    let body = yo_wire::encode(&api::Storage { version: 1, data: old });
+    assert_eq!(a.signed_for_tests("PUT", api::STORAGE, &body).unwrap().status, status::NO_CONTENT);
+    let new = by_name(&hub, &name, Some(a.account_secret()));
+    assert_eq!(new.app_icon(), None, "not taken: sealed as another version");
+    assert!(new.drop_reasons().iter().any(|r| r.contains("storage version")));
+    assert!(a.set_friend(&"11".repeat(16), Some("x".repeat(65)), None).is_err(), "a name too long");
 }

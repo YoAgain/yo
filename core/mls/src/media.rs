@@ -118,6 +118,7 @@ impl Client {
         let path = api::blob_put_path(&media.id, fetches.clamp(1, MAX_BLOB_FETCHES));
         let (mut headers, _) = self.sign_hash("PUT", &path, &media.sha256);
         headers.push((HEADER_BODY_HASH.to_owned(), yo_wire::b64(&media.sha256)));
+        self.persist();
         Upload { transport: self.transport.clone(), path, headers }
     }
 

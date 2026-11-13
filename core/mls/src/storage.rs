@@ -35,11 +35,31 @@ pub fn key(account_secret: &[u8; 32]) -> [u8; 32] {
     key
 }
 
-/// A value and when it was set (ms, the setting device's clock).
+/// A value and when it was set (ms, the setting device's clock); in JSON `[value, at]`. Never set: `at` 0, left out.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(from = "(T, u64)", into = "(T, u64)")]
+#[serde(bound(serialize = "T: Clone + Serialize", deserialize = "T: Deserialize<'de>"))]
 pub struct Field<T> {
     pub value: T,
     pub at: u64,
+}
+
+impl<T> From<(T, u64)> for Field<T> {
+    fn from((value, at): (T, u64)) -> Self {
+        Field { value, at }
+    }
+}
+
+impl<T> From<Field<T>> for (T, u64) {
+    fn from(field: Field<T>) -> Self {
+        (field.value, field.at)
+    }
+}
+
+impl<T> Field<T> {
+    fn unset(&self) -> bool {
+        self.at == 0
+    }
 }
 
 impl<T: Clone + Serialize> Field<T> {
@@ -57,20 +77,23 @@ impl<T: Clone + Serialize> Field<T> {
     }
 }
 
-/// A friend as the user keeps it.
+/// A friend as the user keeps it. Short keys: a few hundred friends fit.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Friend {
     /// The name the user gave the friend, if any.
-    #[serde(default)]
+    #[serde(default, rename = "n", skip_serializing_if = "Field::unset")]
     pub name: Field<Option<String>>,
     /// The colour the app shows the friend in (an index into its palette).
-    #[serde(default)]
+    #[serde(default, rename = "c", skip_serializing_if = "Field::unset")]
     pub color: Field<Option<u8>>,
-    #[serde(default)]
+    #[serde(default, rename = "b", skip_serializing_if = "Field::unset")]
     pub blocked: Field<bool>,
     /// Taken off the list (kept, so the removal reaches the other side of a merge).
-    #[serde(default)]
+    #[serde(default, rename = "r", skip_serializing_if = "Field::unset")]
     pub removed: Field<bool>,
+    /// What a later version keeps here, carried along unread.
+    #[serde(flatten)]
+    pub extra: BTreeMap<String, serde_json::Value>,
 }
 
 impl Friend {
@@ -79,8 +102,22 @@ impl Friend {
         self.color.merge(&other.color);
         self.blocked.merge(&other.blocked);
         self.removed.merge(&other.removed);
+        merge_extra(&mut self.extra, &other.extra);
     }
 }
+
+/// Fields of a later version: kept; where both sides have one, the same choice on both (the larger value).
+fn merge_extra(mine: &mut BTreeMap<String, serde_json::Value>, theirs: &BTreeMap<String, serde_json::Value>) {
+    for (key, value) in theirs {
+        let entry = mine.entry(key.clone()).or_insert_with(|| value.clone());
+        if serde_json::to_vec(value).ok() > serde_json::to_vec(entry).ok() {
+            *entry = value.clone();
+        }
+    }
+}
+
+/// The longest name kept for a friend, in bytes.
+pub const MAX_FRIEND_NAME: usize = 64;
 
 /// What is sealed: JSON, so a later version adds fields that an older one keeps (`extra`).
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -107,9 +144,7 @@ impl Storage {
             self.friends.entry(user.clone()).or_default().merge(friend);
         }
         self.icon.merge(&other.icon);
-        for (key, value) in &other.extra {
-            self.extra.entry(key.clone()).or_insert_with(|| value.clone());
-        }
+        merge_extra(&mut self.extra, &other.extra);
         self.version = self.version.max(other.version);
     }
 }
@@ -178,6 +213,9 @@ impl Client {
     /// the next `sync` or `maintenance`.
     pub fn set_friend(&mut self, user: &str, name: Option<String>, color: Option<u8>) -> Result<()> {
         crate::user_bytes(user)?;
+        if name.as_ref().is_some_and(|n| n.len() > MAX_FRIEND_NAME) {
+            return Err(Error::Protocol("friend's name too long"));
+        }
         let now = crate::wall_ms();
         let friend = self.state.storage.friends.entry(user.to_owned()).or_default();
         if friend.name.value != name {
@@ -242,13 +280,17 @@ impl Client {
             if user == self.state.user_id {
                 continue;
             }
-            self.state.contacts.entry(user).or_insert_with(crate::Client::unknown_contact).blocked = blocked;
+            self.apply_block(&user, blocked);
         }
     }
 
     /// Takes in a version from the hub: merged with this device's, applied.
     fn take_storage(&mut self, version: u64, sealed: &[u8]) -> Result<()> {
         let theirs = open(&self.state.account_secret, &self.user_id_bytes(), sealed)?;
+        // Sealed with the version it was written as: an older blob under a newer number is a hub replaying it.
+        if theirs.version != version {
+            return Err(Error::Protocol("storage version"));
+        }
         self.state.storage.merge(&theirs);
         self.state.storage_version = self.state.storage_version.max(version);
         // What this device had and the hub's did not (or had older) goes back up.
@@ -268,7 +310,9 @@ impl Client {
             match response.status {
                 status::OK => {
                     let stored: api::Storage = decode(&response.body)?;
-                    // Not ours to open (a hub that mixed it up, or damage): this device's stands.
+                    // Not ours to open, or replayed (a hub that mixed it up, or damage): this device's stands and
+                    // takes its place with the next write. Only this account's devices could read it, so nothing
+                    // readable is lost; the hub could as well have answered that there is none.
                     if let Err(error) = self.take_storage(stored.version, stored.data.as_slice()) {
                         self.drop_one(format!("storage: {error}"));
                         self.state.storage_version = stored.version;
@@ -297,7 +341,7 @@ impl Client {
             }
             let mut next = self.state.storage.clone();
             next.version = self.state.storage_version + 1;
-            let data = seal(&self.state.account_secret, &self.user_id_bytes(), &next);
+            let data = self.sealed_within_limit(&mut next)?;
             let body = encode(&api::Storage { version: self.state.storage_version, data: data.into() });
             let response = self.signed("PUT", api::STORAGE, &body)?;
             match response.status {
@@ -322,6 +366,26 @@ impl Client {
             }
         }
         Ok(())
+    }
+
+    /// The storage sealed, within the hub's limit: friends taken off the list are forgotten first, the longest gone
+    /// first, until it fits (a removal older than the other writers' last read is no longer needed to merge).
+    fn sealed_within_limit(&mut self, next: &mut Storage) -> Result<Vec<u8>> {
+        loop {
+            let data = seal(&self.state.account_secret, &self.user_id_bytes(), next);
+            if data.len() <= yo_wire::limits::MAX_STORAGE_LEN {
+                self.state.storage.friends.clone_from(&next.friends);
+                return Ok(data);
+            }
+            let oldest = next
+                .friends
+                .iter()
+                .filter(|(_, f)| f.removed.value && !f.blocked.value)
+                .min_by_key(|(_, f)| f.removed.at)
+                .map(|(user, _)| user.clone())
+                .ok_or(Error::Protocol("storage full"))?;
+            next.friends.remove(&oldest);
+        }
     }
 
     /// `sync_storage` where it is a side matter: "not now" waits for the next call, a refusal is noted.

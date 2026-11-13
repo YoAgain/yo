@@ -90,6 +90,13 @@ impl Stats {
     }
 
     fn violation(&self, what: String) {
+        // Counted by kind too (words with digits blanked), so what was not printed still shows in the summary.
+        let kind: Vec<&str> = what
+            .split_whitespace()
+            .take(10)
+            .map(|w| if w.chars().any(|c| c.is_ascii_digit()) { "#" } else { w })
+            .collect();
+        self.count(format!("VIOLATION {}", kind.join(" ")));
         if self.violations.fetch_add(1, Relaxed) < 200 {
             println!("VIOLATION: {what}");
         }

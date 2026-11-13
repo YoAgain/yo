@@ -2105,9 +2105,10 @@ impl Client {
         let result = if !mismatches.is_empty() {
             self.repair_all(mismatches).and_then(|()| self.deliver())
         } else {
-            if all_taken {
-                let more = self.deliveries();
+            if all_taken && self.check_sendable(deliveries.to.as_deref()).is_ok() {
+                let mut more = self.deliveries();
                 if !more.is_empty() {
+                    more.to = deliveries.to.clone();
                     return Sent::More(more);
                 }
             }
@@ -2144,6 +2145,7 @@ impl Client {
         self.storage_fetched()?;
         let path = api::inbox_path(wait_s);
         let (headers, time) = self.sign("GET", &path, &[]);
+        self.persist();
         // What arrives during the wait comes at once: until it ends, a send need not receive first.
         let until = (self.clock)() + wait_s * 1000 + INBOX_FRESH_MS;
         self.inbox_fresh_until = self.inbox_fresh_until.max(until);
@@ -2247,6 +2249,8 @@ impl Client {
         }
         let body = encode(&api::Lookup { handle, key_packages: api::LOOKUP_USERNAME, except: Vec::new() });
         let (headers, _) = self.sign("POST", api::LOOKUP, &body);
+        // The time signed saved before the request leaves: another process of this device signs later.
+        self.persist();
         Ok(Whois { transport: self.transport.clone(), headers, body, me: self.state.user_id.clone() })
     }
 
@@ -2303,21 +2307,25 @@ impl Client {
     /// nothing from them is shown, no chat with them is joined, nothing is sent to them (spec 4.8).
     pub fn set_blocked(&mut self, who: &str, blocked: bool) -> Result<()> {
         let (user, shown) = self.user_named(&Handle::parse(who)?)?;
-        let contact = self.state.contacts.entry(user.clone()).or_insert_with(Client::unknown_contact);
-        contact.blocked = blocked;
+        self.apply_block(&user, blocked);
         if let Some(shown) = shown {
-            note_handle(contact, shown);
-        }
-        // What came from them before and waits to be handed out (after a restart) is not shown either.
-        if blocked {
-            self.state
-                .events
-                .retain(|e| !matches!(e, StoredEvent::Message { user: from, own: false, .. } if *from == user));
+            note_handle(self.state.contacts.get_mut(&user).expect("blocked"), shown);
         }
         // Kept in the storage too, so a new phone has it (spec 6.9).
         self.storage_block(&user, blocked);
         self.persist();
         Ok(())
+    }
+
+    /// Blocks or unblocks a user on this device. What came from them before and waits to be handed out (after a
+    /// restart) is not shown either.
+    pub(crate) fn apply_block(&mut self, user: &str, blocked: bool) {
+        self.state.contacts.entry(user.to_owned()).or_insert_with(Client::unknown_contact).blocked = blocked;
+        if blocked {
+            self.state
+                .events
+                .retain(|e| !matches!(e, StoredEvent::Message { user: from, own: false, .. } if from == user));
+        }
     }
 
     /// A contact known by its user id only, no key pinned yet.
@@ -2354,6 +2362,7 @@ impl Client {
         feedback.check().map_err(|_| Error::Protocol("feedback empty or too long"))?;
         let body = encode(&feedback);
         let (headers, _) = self.sign("POST", api::FEEDBACK, &body);
+        self.persist();
         Ok(FeedbackRequest { transport: self.transport.clone(), headers, body })
     }
 
