@@ -1,4 +1,4 @@
-// Passkeys with the PRF extension (spec 7), for hub.justyo.app: make one (named with the username, its user handle
+// Passkeys with the PRF extension (spec 7), for justyo.app: make one (named with the username, its user handle
 // the user id) and ask one, getting back its PRF output on a salt. Used by the onboarding and the PRF test.
 import AuthenticationServices
 import CryptoKit
@@ -6,7 +6,7 @@ import CryptoKit
 @MainActor
 final class Passkeys: NSObject {
   /// The relying party: the domain whose apple-app-site-association names this app (YoApp/Entitlements.plist).
-  static let domain = "hub.justyo.app"
+  static let domain = "justyo.app"
 
   /// What a passkey answered: which one, the user id it holds, and its PRF output (nil if it gave none).
   struct Answer {
