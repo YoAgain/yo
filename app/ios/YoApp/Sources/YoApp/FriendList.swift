@@ -751,16 +751,25 @@ extension FriendList {
   /// bar is in sight below the title; scrolled down, the view stays where it is (the title's "!" tells, and the Yo
   /// waits until it is seen).
   private func toTop(_ names: [String]) {
-    let order = friends.shown.map(\.name)  // as on screen: a blocked friend above would make it "move"
-    let moving = names.filter { name in
-      // Already in place: the top bars are these names in this order, newest first.
-      order.firstIndex(of: name) != names.count - 1 - names.lastIndex(of: name)!
+    // By the friend, not the name: a name can change its spelling between a Yo landing and this step, and a name
+    // not found would count as "moving" and lift a bar that is already on top.
+    let shown = friends.shown
+    let skeleton = { (name: String) in Username.skeleton(name) }
+    var keys: [UUID] = []
+    for name in names {
+      guard let key = (shown.first { $0.name == name } ?? shown.first { skeleton($0.name) == skeleton(name) })?.key
+      else { continue }
+      keys.removeAll { $0 == key }
+      keys.append(key)
     }
+    let order = shown.map(\.key)  // as on screen: a blocked friend above would make it "move"
+    // Already in place: the top bars are these friends in this order, newest first.
+    let moving = keys.enumerated().filter { i, key in order.firstIndex(of: key) != keys.count - 1 - i }.map(\.element)
     guard !moving.isEmpty else { return }
     withAnimation(.snappy(duration: 0.35)) {
-      for name in names {
-        if moving.contains(name), let key = friends.shownFriend(named: name)?.key { lifts[key, default: 0] += 1 }
-        friends.promote(name)
+      for key in keys {
+        if moving.contains(key) { lifts[key, default: 0] += 1 }
+        if let name = friends.all.first(where: { $0.key == key })?.name { friends.promote(name) }
       }
       if !scrolled { position.scrollTo(edge: .top) }
     }
