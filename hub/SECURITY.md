@@ -32,7 +32,7 @@ Every fix is in commit `3d1cb97` on the branch `chaos-security` (with its tests:
 | 5 | Low | **An APNs token went into a URL as it was sent.** `PUT /v1/push` takes any bytes; the APNs request is `https://api.push.apple.com/3/device/{token}` with the hub's credentials, so a device could make the hub send a request to another path on Apple's host. Nothing beyond that host, and nothing a device could not do with its own token. | Fixed: an APNs token that is not hex is treated as invalid and cleared. |
 | 6 | Low | **`YO_TRUST_CLOUDFLARE` with a public listening address.** The container's default `YO_LISTEN` is `0.0.0.0:8080`; published on anything but 127.0.0.1, anyone reaching it could name any address in `CF-Connecting-IP`, or none from a loopback address. | Mitigated: the hub warns at start when the listening address is not a loopback one. **Operator:** check the published port. |
 | 7 | Low | A size in MiB from the environment large enough to overflow made the hub panic (debug) or wrap (release). | Fixed: refused as an error. |
-| 8 | Medium | **A backup record went to anyone who named its user id.** `GET /v1/backup/{id}` took no signature: every contact knows the user id (it is in the MLS credentials), so anyone could learn whether a user has a backup (has secured the name), roughly how large it is, and take the sealed record home to attack offline (128-bit doors, so only in theory). | Fixed: the fetch is signed (spec 6.2) by one of the record's two auth keys, Ed25519 keys derived from the passkey's PRF output and from the 12 words, which the record names; anything else is `404`, the same answer, and the same two signature checks, as for no record. Each signature once, within 5 minutes, as for devices. What K and the storage key seal is padded to 1, 4, 16 or 60 KiB, so the record's size tells little even to a door. Records stored before the auth keys are deleted when the hub starts; the apps make their backups anew (spec 7). Tests: `tests/tests/backup_auth.rs`. |
+| 8 | Medium | **A backup record went to anyone who named its user id.** `GET /v1/backup/{id}` took no signature: every contact knows the user id (from a lookup), so anyone could learn whether a user has a backup (has secured the name), roughly how large it is, and take the sealed record home to attack offline (128-bit doors, so only in theory). | Fixed: the fetch is signed (spec 6.2) by one of the record's two auth keys, Ed25519 keys derived from the passkey's PRF output and from the 12 words, which the record names; anything else is `404`, the same answer, and the same two signature checks, as for no record. Each signature once, within 5 minutes, as for devices. What K and the storage key seal is padded to 1, 4, 16 or 60 KiB, so the record's size tells little even to a door. Records stored before the auth keys are deleted when the hub starts; the apps make their backups anew (spec 7). Tests: `tests/tests/backup_auth.rs`. |
 
 ## Delivery tokens (Privacy Pass)
 
@@ -51,8 +51,8 @@ issuance is kept or logged. Tests: `tests/tests/tokens.rs`.
 |---|---|---|
 | Medium | **Linking by address and time.** A token is unlinkable to its issuance by itself, but a delivery from the address a device signs its requests from, seconds after that device fetched a batch, points at it as before tokens. | Spec 1 says so. Tokens are for the limit, not for hiding the address; Oblivious HTTP is for a later version. The stash and oldest-first spending put time between issuance and use. |
 | Medium | **A hub that tags its users** could serve each device its own key (the directory is not signed, nor checked against other users') and tell senders apart by the key their tokens name. | The operator is outside the threat model (the hub is trusted to route); a key consistency check (RFC 9576, section 6.2) would make it visible. The key id is in every token, so this needs no format change. |
-| Low | **Accounts as a source of tokens.** Each account brings 200 tokens a day: 10 accounts an hour from one address are 48 000 deliveries a day past its limit. | Bounded, and better than an address bound; the byte budget is not applied to tokened deliveries, the disk floor is. Cheaper accounts (or fewer tokens per account) are one number each in `Limits` (`register_per_ip_hour`, `tokens_per_device_day`). |
-| Low | **Verification costs a P-384 evaluation** before the hub knows a token is bad; anyone can send bad ones. | About as much as a signature check; Cloudflare in front; a bad token is counted against the address like any delivery. |
+| Low | **Accounts as a source of tokens.** Each account brings 200 tokens a day (a bucket refilling over the day): 10 accounts an hour from one address are 48 000 deliveries a day past its limit. | Bounded, and better than an address bound; the byte budget is not applied to tokened deliveries, the disk floor is. Cheaper accounts (or fewer tokens per account) are one number each in `Limits` (`register_per_ip_hour`, `tokens_per_device_day`). |
+| Low | **Verification costs a P-384 evaluation** before the hub knows a token is forged; anyone can send forged ones. | About as much as a signature check; Cloudflare in front; a spent nonce is looked up before it, and after 30 bad tokens a minute from one address the hub checks none from there (spec 6.10). |
 | Low | **The issuance budget is in memory**, like every rate limit: a restart gives each device a fresh day. | As for all limits (`hub/src/limiter.rs`). The spent nonces, which matter for double spending, are in the database. |
 | Info | **A token's nonce is kept** until its key is deleted (30 to 60 days). | It is the client's random choice, never seen at issuance; it ties to nothing. |
 
@@ -82,8 +82,9 @@ the content type, and the message's length inside the padding. When A writes to 
 arrives in both inboxes: the hub could read who chats with whom (spec goal 3) and, in a chat of two, who sent each
 message (goal 2), whatever addresses they came from.
 
-**Fixed:** every envelope to an inbox is sealed by HPKE to the recipient's account key (spec 6.1); the hub sees an
-inbox and a bucket. The seal key is the account key's X25519 form, which every member's certificate already names:
+**Fixed:** every envelope to an inbox is padded and then sealed by HPKE to the recipient's account key (spec 6.1),
+the padding inside the seal; the hub checks the size and the version and sees an inbox and a bucket, not even the
+length. The seal key is the account key's X25519 form, which every member's certificate already names:
 nothing to publish, nothing for the hub to swap. A clean break: `YO_MIN_APP` is raised at its deploy. Tests:
 `tests/tests/sealed.rs`, `core/mls/src/seal.rs`. What remains is the address and the time (spec 1).
 
@@ -105,9 +106,8 @@ a repeated commit is answered as accepted), `feedback` (10 a day per user, kept,
 
 ## Rejected
 
-- **The delivery queue is unbounded** (Codex). Each delivery waits for its own answer, so the queue holds at most one
-  envelope (65 KiB at most) per delivery request open: it is bounded by the connections, like every other request
-  body.
+- **The delivery queue is unbounded** (Codex). It holds at most 2048 deliveries (each at most 65 KiB); a full queue
+  answers `503`, which the client tries again (spec 6.6).
 - **The rate limiter's map grows without bound** (Codex). One entry per key used within a day (an address, a device,
   a user), dropped after a day idle; an attacker with very many addresses costs about 100 bytes per address.
 

@@ -166,9 +166,8 @@ api.push.apple.com a request on a new connection took 420 ms, on an open one 138
 
 - (Since fixed with the core's `YoContact.gone`: a friend whose account was deleted shows "Not on Yo" on the bar, and
   the name added again is asked of the hub anew. Not yet tried in the Simulator.)
-- Media sent or received while signing out within the same second may reach the next account's outbox or list.
-
 - Passkeys, push and the share/notification extensions need a device (or TestFlight).
-- Sending a photo while signing out within its 1.5 s, and the shared state's deletion racing an extension's write
-  (App Group builds only), from the Codex review: not changed.
+- Sending a photo while signing out within its 1.5 s, and the shared state's deletion racing an extension's write:
+  guarded since (outgoing media bound to its account, `Media.swift`; received media checked by generation; the old
+  client closed and its state deleted under the shared lock, `Account.swift`), not yet tried on a device.
 - Video recording (no camera in the Simulator).
