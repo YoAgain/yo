@@ -102,8 +102,8 @@ impl Push {
     }
 }
 
-/// Registers a device with a username (spec 6.4): a new user if the name is free, its user again if this is the user's
-/// current account key (a new phone restored from the backup).
+/// Registers a device with a username (spec 6.4): a new user if the name is free; the user whose current account key
+/// this is again, whatever the name (a new phone restored from the backup).
 #[derive(Debug, Clone, PartialEq, Eq, TlsSerialize, TlsDeserializeBytes, TlsSize)]
 pub struct Register {
     /// The username as its owner writes it (NFC): the account's only handle.
@@ -144,11 +144,12 @@ pub fn registration_to_be_signed(
     out
 }
 
-/// The answer to a registration: the account's user id. The same as before for a username registered again with its
-/// user's account key (spec 6.4).
+/// The answer to a registration: the account's user id, the same as before for a user's account key registered
+/// again (spec 6.4), and its username as its owner writes it now (none: given up).
 #[derive(Debug, Clone, PartialEq, Eq, TlsSerialize, TlsDeserializeBytes, TlsSize)]
 pub struct Registered {
     pub user_id: UserId,
+    pub username: Option<VLBytes>,
 }
 
 /// Claims a username for the signing device's account, replacing its old one; `None` gives it up.
