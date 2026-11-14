@@ -277,6 +277,50 @@ fn the_app_layer_sends_a_photo_to_a_new_friend_and_yos_go_while_it_uploads() {
     assert!(!yo::media_retry_later(&yo::YoError::NotOnYo));
 }
 
+#[test]
+fn the_app_layer_acknowledges_each_batch_itself_and_sends_a_photo_once() {
+    let hub = TestHub::start();
+    let n = random_u64() % 1_000_000_000;
+    let (pa, pb) = (username(n), username(n + 1));
+    let a = client(&hub, &pa, "ALICE", Arc::new(File::default()));
+    let file_b = Arc::new(File::default());
+    let b = client(&hub, &pb, "BOB", file_b.clone());
+    b.acknowledge_explicitly();
+    a.send_yo(pb.clone()).unwrap();
+    let first = b.sync(0).unwrap();
+    assert_eq!(yos(&first, &a.user_id()), 1);
+    // Another call ends before the app stored the first batch: it does not acknowledge it. The app stores the second.
+    a.send_yo(pb.clone()).unwrap();
+    let second = b.sync(0).unwrap();
+    assert_eq!(yos(&second, &a.user_id()), 1);
+    b.acknowledge(second);
+    // A crash: the first batch comes again, as it was; the second does not.
+    let restart = || {
+        let saved = file_b.0.lock().unwrap().clone();
+        let app = Arc::new(App(Http::new(hub.url())));
+        let b = YoClient::restore(app, file_b.clone(), vec![7; 32], saved).unwrap();
+        b.acknowledge_explicitly();
+        b
+    };
+    let b = restart();
+    let again = b.sync(0).unwrap();
+    assert!(again == first, "the batch not acknowledged, again");
+    b.acknowledge(again);
+    let b = restart();
+    assert!(b.sync(0).unwrap().is_empty(), "both acknowledged now");
+    // A photo whose Yo the app sends again (its answer lost before it took it off its queue): it goes once.
+    let sealed = yo::seal_media(b"JPEG".repeat(1000), 800, 600).unwrap();
+    let chat = a.media_chat(pb.clone()).unwrap();
+    a.upload_media(sealed.media.clone(), sealed.ciphertext, chat.fetches).unwrap();
+    a.send_photo(pb.clone(), sealed.media.clone()).unwrap();
+    a.send_photo(pb.clone(), sealed.media).unwrap();
+    a.send_yo(pb.clone()).unwrap();
+    let events = drain(&b);
+    let photos =
+        events.iter().filter(|e| matches!(e, YoEvent::Message { kind: MessageKind::Photo { .. }, .. })).count();
+    assert_eq!((photos, yos(&events, &a.user_id())), (1, 1), "the photo once, the Yo after it still");
+}
+
 /// The app's transport, holding deliveries to one user until the test lets each go.
 struct Gate {
     app: App,
