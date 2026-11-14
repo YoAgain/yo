@@ -558,10 +558,14 @@ final class AccountStore {
   private func addAuthKeys() async {
     await backupTurn {
       // As the account is now: a change made meanwhile (a passkey confirmed) may have done it already.
-      guard let account, account.secured, account.codeAuth != true, let words = RecoveryWords.load() else { return }
+      guard let account, account.secured, account.codeAuth != true, let words = RecoveryWords.load(),
+        let client
+      else { return }
       do {
         try await rewrap(.keep)
       } catch AccountError.noBackup {
+        // Still the account the words are of: signed out (or into another) meanwhile, nothing is made.
+        guard client === self.client else { return }
         try? await makeAnew(words: words, prf: nil)
       } catch {}
     }
@@ -637,8 +641,8 @@ final class AccountStore {
 
   /// By the recovery words alone: they say where the backup is and open it.
   func restore(code: [String]) async throws {
-    try await restore(fetchBackup(by: .words(words: code), userID: nil))
-    wordsSaved = true  // typed in: the person has them
+    try await restore(fetchBackup(by: .words(words: code), userID: nil), typed: code)
+    wordsSaved = RecoveryWords.load() != nil  // typed in: the person has them (once they are on this phone too)
   }
 
   /// The backup a door opens, fetched with its auth key (the core derives, signs and opens): by the user id when
@@ -659,7 +663,8 @@ final class AccountStore {
 
   /// The account from its backup, and this phone registered for it with the account's key (spec 6.4): the hub finds
   /// the account by the key, not by the name the backup has (changed since, or taken by someone else).
-  private func restore(_ opened: YoOpenedBackup) async throws {
+  /// `typed`: the words that opened it, kept when the backup does not hold them (one made before it did).
+  private func restore(_ opened: YoOpenedBackup, typed: [String]? = nil) async throws {
     let sealed = try JSONDecoder().decode(BackupRecord.Sealed.self, from: opened.sealed)
     let (client, secret) = try await register(sealed.account.username, secret: sealed.accountKey)
     use(client, secret: secret)
@@ -670,7 +675,8 @@ final class AccountStore {
     let id = Hub.bytes(client.userId()) ?? account.userID
     let same = id == account.userID
     if !same { account = Account(username: account.username, userID: id, byPasskey: false) }
-    if same, let code = sealed.code { try? RecoveryWords.save(code) }  // else none to show: the backup still opens
+    // Else none to show: the backup still opens.
+    if same, let code = sealed.code ?? typed { try? RecoveryWords.save(code) }
     SyncedAccount.left = nil
     restored = same
     friendsSeeded = true
@@ -865,6 +871,8 @@ final class AccountStore {
     RecoveryWords.delete()
     Stats.reset()
     MediaStorage.clearAll()
+    // Its notifications too: one tapped later would show (or Yo back) under the next account.
+    UNUserNotificationCenter.current().removeAllDeliveredNotifications()
   }
 }
 

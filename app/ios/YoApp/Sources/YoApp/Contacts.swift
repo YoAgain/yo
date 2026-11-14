@@ -120,7 +120,8 @@ struct ContactsList: View {
     }
     .navigationTitle("Contacts")
     .navigationBarTitleDisplayMode(.inline)
-    .task { await load() }
+    // Again once the core is open (the page opened before), and when a contact changes (a chat, a new key).
+    .task(id: Reload(accounts.client, friends.all)) { await load() }
   }
 
   private var sorted: [Friend] {
@@ -143,9 +144,10 @@ struct ContactsList: View {
   private func load() async {
     guard let client = accounts.client else { return }
     let users = friends.all.compactMap(\.user)
-    states = (try? await Hub.run {
+    let loaded = (try? await Hub.run {
       Dictionary(users.map { ($0, ContactState.load(client, user: $0)) }, uniquingKeysWith: { a, _ in a })
     }) ?? [:]
+    if client === accounts.client { states = loaded }  // not an account signed out meanwhile
   }
 }
 
@@ -182,7 +184,7 @@ private struct ContactDetail: View {
     }
     .navigationTitle(friend.name)
     .navigationBarTitleDisplayMode(.inline)
-    .task { await load() }
+    .task(id: Reload(accounts.client, friends.all.filter { $0.key == friend.key })) { await load() }
   }
 
   /// One row per thing that should hold, each with its check.
@@ -266,6 +268,19 @@ private struct ContactDetail: View {
   private func load() async {
     friends.keyChangeSeen(friend)  // seen here: the list no longer marks it (this page shows it as it came)
     guard let client = accounts.client, let user = friend.user else { return }
-    state = try? await Hub.run { ContactState.load(client, user: user) }
+    let loaded = try? await Hub.run { ContactState.load(client, user: user) }
+    if client === accounts.client { state = loaded }
+  }
+}
+
+/// When a contacts page loads again: another core (opened since, or another account), or its friends changed (a chat
+/// started, a key changed, one gone or blocked).
+private struct Reload: Equatable {
+  let client: ObjectIdentifier?
+  let friends: [String]
+
+  init(_ client: YoClient?, _ friends: [Friend]) {
+    self.client = client.map(ObjectIdentifier.init)
+    self.friends = friends.map { "\($0.key)/\($0.user ?? "")/\($0.keyChanged)/\($0.gone)/\($0.blocked)" }
   }
 }
