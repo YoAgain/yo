@@ -5,14 +5,13 @@
 // (Onboarding's welcome); no page has its own.
 //
 // A carousel: past the last card comes the logo again, and before the logo the last card, without a jump back. Like
-// the original's banner, the pages go on by themselves (every 4 s, always forward) until the user touches them. The
+// the original's banner, the pages go on by themselves (every 4 s, always forward), paused while the user swipes. The
 // pictures are pictures only (VoiceOver reads the title and the line); when the text is large and the room small, the
 // picture gives way, then the words scroll.
 import SwiftUI
 
 /// The welcome's swipeable pages: `first` (the logo) and then the intro cards, dots under them. They go on by
-/// themselves every `advanceSeconds` until a finger is on them (then they are the user's, for good); never with
-/// Reduce Motion or VoiceOver.
+/// themselves every `advanceSeconds`, a full interval after the user last swiped or tapped a dot; never with VoiceOver.
 struct Intro<First: View>: View {
   static var advanceSeconds: Double { 4 }
 
@@ -20,8 +19,8 @@ struct Intro<First: View>: View {
   /// Where the pages stand among the slots: the pages, with the last one again before the first and the first again
   /// after the last, so a swipe past either end goes on; once there, the real page takes over unseen.
   @State private var slot: Int? = 1
-  /// Touched or swiped once: no more going on by themselves.
-  @State private var touched = false
+  /// When the user last swiped or tapped a dot: the pages wait a full interval after it.
+  @State private var touched = Date.distantPast
   @Environment(\.accessibilityReduceMotion) private var reduceMotion
   @Environment(\.accessibilityVoiceOverEnabled) private var voiceOver
 
@@ -47,7 +46,7 @@ struct Intro<First: View>: View {
       .defaultScrollAnchor(UnitPoint(x: 1 / Double(Self.count + 1), y: 0.5))
       // Come to rest on a copy at either end: the real page, unseen (the same picture).
       .onScrollPhaseChange { _, phase in
-        if phase == .interacting { touched = true }
+        if phase == .interacting { touched = .now }
         if phase == .idle, let now = slot, now == 0 || now == Self.count + 1 {
           var quiet = Transaction()
           quiet.disablesAnimations = true
@@ -55,17 +54,17 @@ struct Intro<First: View>: View {
         }
       }
       Dots(count: Self.count, page: Self.page(slot ?? 1)) { page in
-        touched = true
+        touched = .now
         withAnimation(.smooth(duration: 0.4)) { slot = page + 1 }
       }
       .padding(.bottom, 20)
     }
-    // A finger down anywhere on the pages (or the dots), before it even swipes.
-    .simultaneousGesture(DragGesture(minimumDistance: 0).onChanged { _ in touched = true })
-    .task(id: touched || reduceMotion || voiceOver) {
-      guard !touched, !reduceMotion, !voiceOver else { return }
-      while (try? await Task.sleep(for: .seconds(Self.advanceSeconds))) != nil, !touched {
-        withAnimation(.smooth(duration: 0.6)) { slot = (slot ?? 1) + 1 }
+    // Reduce Motion: the next page fades in rather than sliding.
+    .task(id: voiceOver) {
+      guard !voiceOver else { return }
+      while (try? await Task.sleep(for: .seconds(Self.advanceSeconds))) != nil {
+        guard Date.now.timeIntervalSince(touched) >= Self.advanceSeconds else { continue }
+        withAnimation(reduceMotion ? .easeInOut(duration: 0.3) : .smooth(duration: 0.6)) { slot = (slot ?? 1) + 1 }
       }
     }
   }

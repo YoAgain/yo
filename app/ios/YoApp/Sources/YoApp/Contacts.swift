@@ -1,11 +1,93 @@
-// Contacts in the profile: every friend, and for each what the encryption knows (spec 3, 4): the pinned account key
-// and safety number, sealed sender, and each MLS chat with its epoch, devices and last key update.
+// Contacts in the profile: every friend, and for each whether its encryption is as it should be (spec 3, 4), one
+// check per row as Settings shows a state: green when it is as expected, an empty circle for a step still open, orange
+// for something that waits to sort itself out, red for something to act on. Below the checks, the plain values.
 import SwiftUI
 import YoCore
 
-/// The friends, blocked ones too, each opening its details.
+/// How one check stands.
+enum Check {
+  case ok, open, waiting, problem
+
+  var symbol: String {
+    switch self {
+    case .ok: "checkmark.circle.fill"
+    case .open: "circle"
+    case .waiting: "clock.fill"
+    case .problem: "exclamationmark.triangle.fill"
+    }
+  }
+
+  var color: Color {
+    switch self {
+    case .ok: .green
+    case .open: Color(.tertiaryLabel)
+    case .waiting: .orange
+    case .problem: .red
+    }
+  }
+}
+
+/// What the core knows of one contact, read off the main actor.
+struct ContactState: Sendable {
+  var contact: YoContact?
+  var accountKey: String?
+  var safetyNumber: String?
+  var chats: [YoChat] = []
+
+  /// Keys are updated at least every 7 days (spec 4.4).
+  static let updateDays = 7.0
+
+  /// The chat that carries the Yos: the restarted one if there is one, else the first.
+  var chat: YoChat? { chats.first { $0.restarted && !$0.lost } ?? chats.first }
+
+  func keysFresh(_ chat: YoChat) -> Check {
+    guard chat.updates else { return .open }
+    guard chat.lastUpdateMs > 0 else { return .waiting }
+    let age = Date.now.timeIntervalSince1970 - Double(chat.lastUpdateMs) / 1000
+    return age <= Self.updateDays * 86400 ? .ok : .waiting
+  }
+
+  /// The worst of the checks that matter: what the list shows for the contact.
+  func overall(_ friend: Friend) -> Check {
+    if friend.gone || contact?.gone == true || contact?.unconfirmed == true { return .problem }
+    guard friend.user != nil, let chat else { return .open }
+    if chat.lost { return .waiting }
+    if chat.members != 2 { return .waiting }
+    return keysFresh(chat) == .ok ? .ok : .waiting
+  }
+
+  static func load(_ client: YoClient, user: String) -> ContactState {
+    ContactState(
+      contact: client.contacts().first { $0.user == user },
+      accountKey: client.accountKeyOf(user: user),
+      safetyNumber: try? client.safetyNumber(who: user),
+      chats: client.chatsWith(user: user))
+  }
+}
+
+/// A row with its state at the end: title, a word, the check.
+private struct StatusRow: View {
+  let title: String
+  let value: String
+  let check: Check
+
+  var body: some View {
+    LabeledContent {
+      HStack(spacing: 6) {
+        Text(value)
+        Image(systemName: check.symbol).foregroundStyle(check.color).accessibilityHidden(true)
+      }
+    } label: {
+      Text(title)
+    }
+  }
+}
+
+/// The friends, blocked ones too, each with its overall check, each opening its details.
 struct ContactsList: View {
   @Environment(Friends.self) private var friends
+  @Environment(AccountStore.self) private var accounts
+  @State private var states: [String: ContactState] = [:]
 
   var body: some View {
     Form {
@@ -13,80 +95,83 @@ struct ContactsList: View {
         ContentUnavailableView("No Contacts", systemImage: "person.2")
       } else {
         Section {
-          ForEach(friends.all.sorted { $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending }) {
-            friend in
+          ForEach(sorted) { friend in
+            let state = friend.user.flatMap { states[$0] } ?? ContactState()
+            let check = state.overall(friend)
             NavigationLink {
               ContactDetail(friend: friend)
             } label: {
               LabeledContent {
-                Text(friend.blocked ? "Blocked" : friend.gone ? "Not on Yo" : friend.user == nil ? "No Chat Yet" : "")
+                HStack(spacing: 6) {
+                  Text(summary(friend, check))
+                  Image(systemName: check.symbol).foregroundStyle(check.color).accessibilityHidden(true)
+                }
               } label: {
                 Text(friend.name).font(.yo(17, relativeTo: .body))
               }
             }
           }
         } footer: {
-          Text("How each chat is encrypted.")
+          Text("A green check: the chat is end-to-end encrypted with fresh keys, as it should be.")
         }
       }
     }
     .navigationTitle("Contacts")
     .navigationBarTitleDisplayMode(.inline)
+    .task { await load() }
+  }
+
+  private var sorted: [Friend] {
+    friends.all.sorted { $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending }
+  }
+
+  private func summary(_ friend: Friend, _ check: Check) -> String {
+    if friend.blocked { return "Blocked" }
+    if friend.gone { return "Not on Yo" }
+    if friend.user == nil { return "No Chat Yet" }
+    return switch check {
+    case .ok: "Encrypted"
+    case .open: "No Chat Yet"
+    case .waiting: "Updating"
+    case .problem: "Check"
+    }
+  }
+
+  private func load() async {
+    guard let client = accounts.client else { return }
+    let users = friends.all.compactMap(\.user)
+    states = (try? await Hub.run {
+      Dictionary(users.map { ($0, ContactState.load(client, user: $0)) }, uniquingKeysWith: { a, _ in a })
+    }) ?? [:]
   }
 }
 
-/// One contact: who they are to the hub and to this phone, and their chats as MLS has them.
+/// One contact: the checks first, then who they are and their chats in plain values.
 private struct ContactDetail: View {
   let friend: Friend
   @Environment(AccountStore.self) private var accounts
-  @State private var info: Info?
-
-  /// What the core says, read once the page shows.
-  private struct Info: Sendable {
-    var accountKey: String?
-    var safetyNumber: String?
-    var verified = false
-    var chats: [YoChat] = []
-  }
+  @State private var state: ContactState?
 
   var body: some View {
     Form {
-      Section("Account") {
-        row("Name", friend.name)
-        if let user = friend.user { row("User ID", user, mono: true) }
-        if let key = info?.accountKey { row("Account Key", key, mono: true) }
-        if friend.blocked { row("Blocked", "Yes") }
-        if friend.gone { row("Account", "Deleted") }
-      }
       if friend.user == nil {
         Section {
-          Text("No chat yet. The first Yo starts one.").foregroundStyle(.secondary)
-        }
-      } else {
-        Section {
-          row("Sealed Sender", "On")
-          row("Verified", info?.verified == true ? "Yes" : "No")
-          if let number = info?.safetyNumber { row("Safety Number", grouped(number), mono: true) }
-        } header: {
-          Text("Encryption")
+          StatusRow(title: "Chat", value: "Not Yet", check: .open)
         } footer: {
-          Text("The server delivers your Yos without learning they are from you.")
+          Text("The first Yo starts an end-to-end encrypted chat.")
         }
-        ForEach(Array((info?.chats ?? []).enumerated()), id: \.offset) { index, chat in
-          Section(info?.chats.count == 1 ? "MLS Chat" : "MLS Chat \(index + 1)") {
-            row("State", chat.lost ? "Restarting" : chat.restarted ? "Restarted" : "Active")
-            row("Epoch", "\(chat.epoch)")
-            row("Joined at Epoch", "\(chat.joinedEpoch)")
-            row("Devices", "\(chat.members)")
-            row(
-              "Last Key Update",
-              chat.lastUpdateMs == 0
-                ? "Not yet"
-                : Date(timeIntervalSince1970: Double(chat.lastUpdateMs) / 1000).formatted(.relative(presentation: .named))
-            )
-            row("Key Updates", chat.updates ? "On" : "Off")
-            row("Cipher Suite", chat.ciphersuite, mono: true)
-            row("Group ID", chat.group, mono: true)
+      } else if let state {
+        checks(state)
+        Section("Account") {
+          plain("User ID", friend.user ?? "", mono: true)
+          if let key = state.accountKey { plain("Account Key", key, mono: true) }
+          if let number = state.safetyNumber { plain("Safety Number", grouped(number), mono: true) }
+        }
+        ForEach(Array(state.chats.enumerated()), id: \.offset) { index, chat in
+          Section(state.chats.count == 1 ? "MLS Chat" : "MLS Chat \(index + 1)") {
+            plain("Epoch", "\(chat.epoch) (joined at \(chat.joinedEpoch))")
+            plain("Cipher Suite", chat.ciphersuite, mono: true)
+            plain("Group ID", chat.group, mono: true)
           }
         }
       }
@@ -96,7 +181,57 @@ private struct ContactDetail: View {
     .task { await load() }
   }
 
-  private func row(_ title: String, _ value: String, mono: Bool = false) -> some View {
+  /// One row per thing that should hold, each with its check.
+  @ViewBuilder private func checks(_ state: ContactState) -> some View {
+    let contact = state.contact
+    Section {
+      StatusRow(
+        title: "Account",
+        value: friend.gone || contact?.gone == true ? "Deleted" : "On Yo",
+        check: friend.gone || contact?.gone == true ? .problem : .ok)
+      StatusRow(
+        title: "Identity Key",
+        value: contact?.unconfirmed == true ? "Changed" : "Unchanged",
+        check: contact?.unconfirmed == true ? .problem : .ok)
+      StatusRow(title: "Verified", value: contact?.verified == true ? "Yes" : "No", check: contact?.verified == true ? .ok : .open)
+      StatusRow(title: "Blocked", value: friend.blocked ? "Yes" : "No", check: friend.blocked ? .open : .ok)
+    } header: {
+      Text("Identity")
+    } footer: {
+      if contact?.unconfirmed == true {
+        Text("Their key changed after you verified them. Compare safety numbers again.")
+      }
+    }
+    if let chat = state.chat {
+      Section {
+        StatusRow(title: "End-to-End Encrypted", value: "MLS", check: .ok)
+        StatusRow(title: "Sealed Sender", value: "On", check: .ok)
+        StatusRow(
+          title: "Chat",
+          value: chat.lost ? "Restarting" : chat.restarted ? "Restarted" : "Active",
+          check: chat.lost ? .waiting : .ok)
+        StatusRow(title: "Devices", value: "\(chat.members)", check: chat.members == 2 ? .ok : .waiting)
+        StatusRow(title: "Fresh Keys", value: keysValue(chat, state.keysFresh(chat)), check: state.keysFresh(chat))
+      } header: {
+        Text("Encryption")
+      } footer: {
+        Text("The server delivers your Yos without learning they are from you. Keys are renewed at least weekly.")
+      }
+    } else {
+      Section {
+        StatusRow(title: "Chat", value: "Not Yet", check: .open)
+      }
+    }
+  }
+
+  private func keysValue(_ chat: YoChat, _ check: Check) -> String {
+    if !chat.updates { return "Off" }
+    if chat.lastUpdateMs == 0 { return "At Next Yo" }
+    let when = Date(timeIntervalSince1970: Double(chat.lastUpdateMs) / 1000).formatted(.relative(presentation: .named))
+    return check == .ok ? when : "Due"
+  }
+
+  private func plain(_ title: String, _ value: String, mono: Bool = false) -> some View {
     LabeledContent(title) {
       Text(value)
         .font(mono ? .system(.footnote, design: .monospaced) : .body)
@@ -115,12 +250,6 @@ private struct ContactDetail: View {
 
   private func load() async {
     guard let client = accounts.client, let user = friend.user else { return }
-    info = try? await Hub.run {
-      Info(
-        accountKey: client.accountKeyOf(user: user),
-        safetyNumber: try? client.safetyNumber(who: user),
-        verified: client.contacts().first { $0.user == user }?.verified ?? false,
-        chats: client.chatsWith(user: user))
-    }
+    state = try? await Hub.run { ContactState.load(client, user: user) }
   }
 }
