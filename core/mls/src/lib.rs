@@ -12,6 +12,7 @@ pub mod net;
 pub mod profile;
 pub mod state;
 pub mod storage;
+pub mod tokens;
 
 pub use error::{Error, Result};
 pub use net::{Response, Transport};
@@ -27,13 +28,18 @@ use openmls_traits::storage::StorageProvider as _;
 use profile::Provider;
 use state::{hex, unhex, Chat, Contact, Inflight, Outgoing, OwnKeyPackage, State, StoredContent, StoredEvent};
 use std::collections::{BTreeSet, VecDeque};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 use yo_wire::api::{self, status};
 use yo_wire::content::Message;
 use yo_wire::handle::{Handle, KIND_USER, KIND_USERNAME};
-use yo_wire::limits::{KEY_PACKAGE_REFILL_BELOW, KEY_PACKAGE_TARGET, MAX_INBOX_FETCH};
+use yo_wire::limits::{
+    KEY_PACKAGE_REFILL_BELOW, KEY_PACKAGE_TARGET, MAX_INBOX_FETCH, MAX_TOKENS_PER_REQUEST, TOKEN_REFILL_BELOW,
+    TOKEN_TARGET,
+};
 use yo_wire::request::{HEADER_DEVICE, HEADER_SIGNATURE, HEADER_TIME};
+use yo_wire::token;
 use yo_wire::{decode, encode, envelope, sha256, DeviceId, UserId, EPOCH_TOKEN_LABEL, TOKEN_LEN};
 
 /// An update is due after this long (spec 4.4)...
@@ -57,6 +63,8 @@ const REGISTER_TRIES: usize = 2;
 const MAX_COMMITS_FETCHED: usize = 1000;
 /// How often a send repairs groups and tries again before it leaves the rest to the next call.
 const REPAIR_ROUNDS: usize = 3;
+/// After an issuance of tokens failed, the next is asked for this much later (spec 6.10).
+const TOKENS_RETRY_MS: u64 = 3600 * 1000;
 
 /// What became of a commit.
 enum Committed {
@@ -227,6 +235,8 @@ pub struct Deliveries {
     items: Vec<Delivery>,
     /// The user `send_begin` sent a message to.
     to: Option<String>,
+    /// The hub refused a token of these (`401`): the delivery went again without it.
+    token_refused: AtomicBool,
 }
 
 struct Delivery {
@@ -236,6 +246,8 @@ struct Delivery {
     path: String,
     headers: Vec<(String, String)>,
     envelope: Vec<u8>,
+    /// The token it carries (`tokens::kept`), in `headers` as `Authorization`: back to the stash if it never left.
+    token: Option<String>,
 }
 
 impl Deliveries {
@@ -251,7 +263,15 @@ impl Deliveries {
                 answers.push(None);
                 continue;
             }
-            let answer = self.transport.request("POST", &item.path, &item.headers, &item.envelope);
+            let mut answer = self.transport.request("POST", &item.path, &item.headers, &item.envelope);
+            // A token refused (spent, or of a key the hub no longer has): once more without it, as any delivery
+            // without one. Never anything that would name the sender (spec 6.10).
+            if item.token.is_some() && matches!(&answer, Ok(r) if r.status == status::UNAUTHORIZED) {
+                self.token_refused.store(true, Ordering::Relaxed);
+                let headers: Vec<_> =
+                    item.headers.iter().filter(|(name, _)| name != "authorization").cloned().collect();
+                answer = self.transport.request("POST", &item.path, &headers, &item.envelope);
+            }
             let status = answer.as_ref().map_or(0, |r| r.status);
             limited = status == status::RATE_LIMITED;
             if status != status::ACCEPTED && !gone_for_good(status) {
@@ -528,6 +548,10 @@ impl Client {
             storage_saved_at: 0,
             last_sent_ms: 0,
             received: VecDeque::new(),
+            token_key: None,
+            tokens: VecDeque::new(),
+            tokens_after: 0,
+            tokens_check: false,
         };
         let mut client = Client::with(transport, Provider::default(), state);
         let key_packages =
@@ -1523,6 +1547,9 @@ impl Client {
         let mut items = Vec::new();
         // Users whose envelopes another flush is sending: theirs wait, in their order.
         let mut waiting = self.delivering.clone();
+        // One token per delivery while there are any, the oldest first: the hub counts it instead of the address.
+        let token_key =
+            self.state.token_key.as_deref().and_then(unhex).and_then(|k| <[u8; token::NE]>::try_from(k).ok());
         // Walked in place, so every save in between holds the whole outbox.
         let mut i = 0;
         while i < self.state.outbox.len() {
@@ -1577,18 +1604,29 @@ impl Client {
                 self.drop_one("delivery to nobody in the group".into());
                 continue;
             };
-            items.push(Delivery {
+            let mut delivery = Delivery {
                 seq: item.seq,
                 user: item.user.clone(),
                 group: item.group.clone(),
                 path: api::deliver_path(&user),
                 headers: vec![(api::HEADER_DEVICES.to_owned(), yo_wire::b64(&hash))],
                 envelope: item.envelope.clone(),
-            });
+                token: None,
+            };
+            if let Some(key) = &token_key {
+                while let Some(kept) = self.state.tokens.pop_front() {
+                    if let Some(found) = tokens::unkept(&kept, key) {
+                        delivery.headers.push(("authorization".to_owned(), found.authorization()));
+                        delivery.token = Some(kept);
+                        break;
+                    }
+                }
+            }
+            items.push(delivery);
             i += 1;
         }
         self.delivering.extend(items.iter().map(|d| d.user.clone()));
-        Deliveries { transport: self.transport.clone(), items, to: None }
+        Deliveries { transport: self.transport.clone(), items, to: None, token_refused: Default::default() }
     }
 
     /// Takes the hub's answers to `Deliveries::send`: what it took leaves the outbox, what it refused for good is
@@ -1601,6 +1639,21 @@ impl Client {
         let mut mismatches: Vec<(String, String, api::Devices)> = Vec::new();
         let mut done = BTreeSet::new();
         let mut gone = BTreeSet::new();
+        // Tokens that never reached the hub (held, or no answer) go back to the front of the stash, in their order. A
+        // lost answer may hide a spent one: then the hub refuses it next time, and the delivery goes without.
+        let unsent: Vec<String> = deliveries
+            .items
+            .iter()
+            .zip(&answers)
+            .filter(|(_, answer)| !matches!(answer, Some(Ok(_))))
+            .filter_map(|(item, _)| item.token.clone())
+            .collect();
+        for kept in unsent.into_iter().rev() {
+            self.state.tokens.push_front(kept);
+        }
+        if deliveries.token_refused.load(Ordering::Relaxed) {
+            self.state.tokens_check = true;
+        }
         for (item, answer) in deliveries.items.iter().zip(answers) {
             self.delivering.remove(&item.user);
             match answer {
@@ -2143,6 +2196,47 @@ impl Client {
         Ok(())
     }
 
+    /// Keeps the stash of delivery tokens (spec 6.10): below `TOKEN_REFILL_BELOW`, or after the hub refused one,
+    /// the hub's key is read from its directory (a new key: the stash is dropped) and a batch issued, up to
+    /// `TOKEN_TARGET`. Quietly: whatever fails (a hub without tokens, its daily limit, no network) leaves deliveries
+    /// as they were, counted by address, and the next try is an hour later.
+    fn refill_tokens(&mut self) {
+        let now = (self.clock)();
+        let low = self.state.tokens.len() < TOKEN_REFILL_BELOW;
+        if !(low || self.state.tokens_check) || now < self.state.tokens_after {
+            return;
+        }
+        if self.issue_tokens(now).is_none() {
+            self.state.tokens_after = now + TOKENS_RETRY_MS;
+        }
+        self.persist();
+    }
+
+    fn issue_tokens(&mut self, now: u64) -> Option<()> {
+        let directory = self.unsigned("GET", token::DIRECTORY, &[], &[]).ok().filter(|r| r.status == status::OK)?;
+        let key = tokens::directory_key(&directory.body, now / 1000)?;
+        if self.state.token_key.as_deref() != Some(hex(&key).as_str()) {
+            self.state.tokens.clear();
+            self.state.token_key = Some(hex(&key));
+        }
+        self.state.tokens_check = false;
+        if self.state.tokens.len() >= TOKEN_REFILL_BELOW {
+            return Some(());
+        }
+        let wanted = (TOKEN_TARGET - self.state.tokens.len()).min(MAX_TOKENS_PER_REQUEST);
+        let batch = tokens::request(&key, wanted)?;
+        let response =
+            self.signed("POST", api::TOKENS, &encode(&batch.request)).ok().filter(|r| r.status == status::OK)?;
+        let issued = tokens::finish(&batch, &decode(&response.body).ok()?)?;
+        self.state.tokens.extend(issued.iter().map(tokens::kept));
+        Some(())
+    }
+
+    /// Delivery tokens in the stash (spec 6.10).
+    pub fn tokens_left(&self) -> usize {
+        self.state.tokens.len()
+    }
+
     // ---- what the app calls ----
 
     /// Sends a Yo to "chris", or a user id from an event.
@@ -2335,6 +2429,9 @@ impl Client {
             .and_then(|()| self.refill())
             .and_then(|()| self.deliver())
             .and_then(|()| self.sync_storage_quietly());
+        if result.is_ok() {
+            self.refill_tokens();
+        }
         self.finish_receiving(result)
     }
 
@@ -2349,6 +2446,7 @@ impl Client {
         self.receive_all(0)?;
         self.restart_lost()?;
         self.refill()?;
+        self.refill_tokens();
         // A blocked peer's chats get no update: nothing goes to them (4.8).
         let groups: Vec<GroupId> = self
             .state

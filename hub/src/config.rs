@@ -51,6 +51,12 @@ pub struct Limits {
     pub blob_put_per_ip_minute: u32,
     /// Fetches, which name no one: by address only.
     pub blob_get_per_ip_minute: u32,
+    /// Privacy Pass tokens issued to one device (spec 6.10): each lets one delivery pass the limit by address. 0: no
+    /// tokens, the issuer directory is `404` as on a hub without them.
+    pub tokens_per_device_day: u32,
+    /// The issuer key is replaced this often; the one before still verifies for as long again, so a token is good for
+    /// one to two of these, and the spent tokens the hub keeps are those of two keys at most.
+    pub token_key_days: u64,
 }
 
 const MIB: u64 = 1024 * 1024;
@@ -92,6 +98,8 @@ impl Default for Limits {
             blob_bytes_stored_per_user: GIB,
             blob_put_per_ip_minute: 120,
             blob_get_per_ip_minute: 600,
+            tokens_per_device_day: 200,
+            token_key_days: 30,
         }
     }
 }
@@ -119,6 +127,8 @@ impl Limits {
             unsecured_idle_days: 365,
             blob_put_per_ip_minute: u32::MAX,
             blob_get_per_ip_minute: u32::MAX,
+            // Without a limit by address a token buys nothing, and each client would pay for a batch.
+            tokens_per_device_day: 0,
             ..Limits::default()
         }
     }

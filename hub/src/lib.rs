@@ -8,6 +8,7 @@ pub mod error;
 pub mod kp;
 pub mod limiter;
 pub mod push;
+pub mod tokens;
 
 use axum::extract::{ConnectInfo, DefaultBodyLimit, Path, State};
 use axum::http::{HeaderMap, Method, StatusCode, Uri};
@@ -16,7 +17,7 @@ use axum::routing::{delete, get, post, put};
 use axum::Router;
 use bytes::Bytes;
 use config::Config;
-use db::{Commit, Db, Delivered, Key, NewDevice, StoredKeyPackage, Write};
+use db::{Commit, Db, Delivered, Incoming, Key, NewDevice, StoredKeyPackage, Write};
 use error::{refuse, Refusal, Res};
 use limiter::{Limiter, ReplayCache};
 use openmls_rust_crypto::RustCrypto;
@@ -33,6 +34,7 @@ use yo_wire::content::BlobId;
 use yo_wire::handle::{Handle, KIND_USERNAME};
 use yo_wire::limits::{self, KEY_PACKAGE_TARGET, MAX_DEVICES, MAX_INBOX_FETCH, MAX_KEY_PACKAGES_PER_UPLOAD};
 use yo_wire::request::{HEADER_DEVICE, HEADER_SIGNATURE, HEADER_TIME};
+use yo_wire::token::{BatchTokenRequest, Token};
 use yo_wire::{decode, encode, sha256, unb64, DeviceId, GroupId, UserId};
 
 pub struct Hub {
@@ -50,6 +52,7 @@ pub struct Hub {
     disk_full: AtomicBool,
     pusher: push::Pusher,
     blobs: Arc<blobs::Blobs>,
+    tokens: tokens::Issuer,
 }
 
 const HOUR: Duration = Duration::from_secs(3600);
@@ -112,6 +115,8 @@ struct Delivery {
     user: UserId,
     devices_hash: [u8; 32],
     envelope: Bytes,
+    /// The token it came with: its key's row and nonce, spent in the same transaction.
+    token: Option<(i64, [u8; 32])>,
     stored: tokio::sync::oneshot::Sender<Result<Delivered, ()>>,
 }
 
@@ -129,8 +134,10 @@ fn writer(db: Arc<Db>, queue: std::sync::mpsc::Receiver<Delivery>, most: u32) {
                 Err(_) => break,
             }
         }
-        let items: Vec<(UserId, [u8; 32], &[u8])> =
-            batch.iter().map(|d| (d.user, d.devices_hash, &d.envelope[..])).collect();
+        let items: Vec<Incoming<'_>> = batch
+            .iter()
+            .map(|d| Incoming { user: d.user, devices_hash: d.devices_hash, envelope: &d.envelope, token: d.token })
+            .collect();
         match db.deliver(&items, now_ms(), most) {
             Ok(outcomes) => {
                 for (delivery, outcome) in batch.into_iter().zip(outcomes) {
@@ -177,6 +184,8 @@ impl Hub {
         eprintln!("yo-hub: reserved names: {} in the list, {added} new", config.reserved.len());
         let pusher = push::Pusher::new(push_transport, config.apns.as_ref(), config.fcm.as_ref())?;
         let blobs = blobs::Blobs::open(&config.blobs).map_err(|e| format!("{}: {e}", config.blobs.dir.display()))?;
+        let tokens = tokens::Issuer::open(&db, now_ms(), config.limits.token_key_days * DAY.as_millis() as u64)
+            .map_err(|e| format!("token keys: {e}"))?;
         let (deliveries, queue) = std::sync::mpsc::channel();
         let writing = db.clone();
         let most = config.limits.max_pending_per_device;
@@ -196,6 +205,7 @@ impl Hub {
             disk_full: AtomicBool::new(false),
             pusher,
             blobs: Arc::new(blobs),
+            tokens,
             config,
         }))
     }
@@ -214,6 +224,8 @@ impl Hub {
             .route(api::REPORT, post(report))
             .route(api::FEEDBACK, post(feedback))
             .route(api::STORAGE, get(get_storage).put(put_storage))
+            .route(yo_wire::token::DIRECTORY, get(token_directory))
+            .route(api::TOKENS, post(issue_tokens))
             .route("/v1/username/{name}", get(username_free))
             .route(api::INBOX, get(inbox))
             .route(api::INBOX_ACK, post(ack))
@@ -244,6 +256,7 @@ impl Hub {
     pub fn prune(&self, now: u64) -> rusqlite::Result<()> {
         let limits = &self.config.limits;
         self.db.prune(now, limits.envelope_ttl_days * DAY.as_millis() as u64)?;
+        self.tokens.rotate(&self.db, now, limits.token_key_days * DAY.as_millis() as u64)?;
         for blob in self.db.prune_blobs(now, limits.blob_ttl_days * DAY.as_millis() as u64)? {
             self.blobs.remove(&blob);
         }
@@ -867,6 +880,74 @@ async fn ack(State(hub): Hubs, method: Method, uri: Uri, headers: HeaderMap, bod
     Ok(StatusCode::NO_CONTENT)
 }
 
+// ---- Privacy Pass (spec 6.10) ----
+
+/// The issuer directory (RFC 9578, section 4): the key tokens are issued under now. Public, the same for everyone.
+/// `404` while the operator issues none (`tokens_per_device_day` 0): the apps then ask an hour later.
+async fn token_directory(State(hub): Hubs) -> axum::response::Response {
+    if hub.config.limits.tokens_per_device_day == 0 {
+        return StatusCode::NOT_FOUND.into_response();
+    }
+    (
+        [
+            (axum::http::header::CONTENT_TYPE, "application/private-token-issuer-directory"),
+            (axum::http::header::CACHE_CONTROL, "max-age=3600"),
+        ],
+        hub.tokens.directory(),
+    )
+        .into_response()
+}
+
+/// Evaluates a device's batch of blinded token inputs (the batched-tokens draft, section 5): `200` with the evaluated
+/// elements and their proof, `422` another key or type, no element or too many, `429` the device's tokens for the day
+/// are used up. What the device asked is neither kept nor logged: the hub must not recognise a token when it comes
+/// back.
+async fn issue_tokens(
+    State(hub): Hubs,
+    method: Method,
+    uri: Uri,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Res<(StatusCode, Vec<u8>)> {
+    let device = hub.authenticate(&method, &uri, &headers, &body)?;
+    let request: BatchTokenRequest = decode(&body)?;
+    let n = request.blinded_elements.len();
+    let unprocessable = || refuse(StatusCode::UNPROCESSABLE_ENTITY);
+    if n == 0 || n > limits::MAX_TOKENS_PER_REQUEST {
+        return Err(unprocessable());
+    }
+    let per_day = hub.config.limits.tokens_per_device_day;
+    if !hub.limiter.allow_n(format!("tokens:{}", yo_wire::b64(&device.device_id)), n as u64, per_day as u64, DAY) {
+        return Err(refuse(StatusCode::TOO_MANY_REQUESTS));
+    }
+    // A hundred points times the key and one proof: off the request threads.
+    let issuing = hub.clone();
+    let issued = tokio::task::spawn_blocking(move || issuing.tokens.issue(&request, limits::MAX_TOKENS_PER_REQUEST))
+        .await
+        .map_err(|_| refuse(StatusCode::INTERNAL_SERVER_ERROR))?;
+    let response = issued.map_err(|_| unprocessable())?;
+    Ok(ok(encode(&response)))
+}
+
+/// What a delivery brings in `Authorization: PrivateToken` (RFC 9577).
+enum Brought {
+    Nothing,
+    /// Malformed, not this hub's, or spent.
+    Refused,
+    /// A good token: its key's row and its nonce.
+    Token(i64, [u8; 32]),
+}
+
+fn delivery_token(hub: &Hub, headers: &HeaderMap) -> Res<Brought> {
+    let Some(value) = headers.get(axum::http::header::AUTHORIZATION) else { return Ok(Brought::Nothing) };
+    let Some(token) = value.to_str().ok().and_then(Token::from_authorization) else { return Ok(Brought::Refused) };
+    let Some(key) = hub.tokens.verify(&token) else { return Ok(Brought::Refused) };
+    if hub.db.token_spent(&token.nonce)? {
+        return Ok(Brought::Refused);
+    }
+    Ok(Brought::Token(key, token.nonce))
+}
+
 // ---- sealed sender: no identity on these routes ----
 
 /// Delivers an envelope to every device of a user, if the sender's view of the user's devices is the hub's (4.6).
@@ -885,12 +966,23 @@ async fn deliver(
         .and_then(|v| v.try_into().ok())
         .ok_or_else(bad)?;
     yo_wire::envelope::check(&body)?;
-    hub.limit_ip("deliver", peer, &headers, hub.config.limits.deliver_per_ip_minute, MINUTE)?;
-    hub.limit_ip_bytes(peer, &headers, body.len())?;
+    // A good token instead of the address's limits (spec 6.10). One that is not is counted like a delivery without
+    // and refused, `401`: the client sends again without it.
+    let token = match delivery_token(&hub, &headers)? {
+        Brought::Token(key, nonce) => Some((key, nonce)),
+        brought => {
+            hub.limit_ip("deliver", peer, &headers, hub.config.limits.deliver_per_ip_minute, MINUTE)?;
+            if matches!(brought, Brought::Refused) {
+                return Err(refuse(StatusCode::UNAUTHORIZED));
+            }
+            hub.limit_ip_bytes(peer, &headers, body.len())?;
+            None
+        }
+    };
     hub.db_room()?;
     let (stored, outcome) = tokio::sync::oneshot::channel();
     hub.deliveries
-        .send(Delivery { user, devices_hash, envelope: body, stored })
+        .send(Delivery { user, devices_hash, envelope: body, token, stored })
         .map_err(|_| refuse(StatusCode::SERVICE_UNAVAILABLE))?;
     let outcome = outcome.await.ok().and_then(Result::ok).ok_or_else(|| refuse(StatusCode::INTERNAL_SERVER_ERROR))?;
     match outcome {
@@ -907,6 +999,7 @@ async fn deliver(
         )),
         Delivered::Full => Err(refuse(StatusCode::TOO_MANY_REQUESTS)),
         Delivered::Unknown => Err(refuse(StatusCode::NOT_FOUND)),
+        Delivered::Spent => Err(refuse(StatusCode::UNAUTHORIZED)),
     }
 }
 
