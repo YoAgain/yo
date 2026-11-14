@@ -102,6 +102,11 @@ fn signature_of(headers: &HeaderMap, now: u64) -> Option<(u64, [u8; 64])> {
     (now.abs_diff(time) <= limits::MAX_SKEW_MS).then_some((time, signature))
 }
 
+/// The app a request names (`Yo-App`, spec 6.3), if it is one.
+fn named_app(headers: &HeaderMap) -> Option<&str> {
+    header(headers, api::HEADER_APP).filter(|a| config::app(a).is_some())
+}
+
 /// An id in a path: base64url of exactly `N` bytes, or the route does not exist.
 fn path_id<const N: usize>(text: &str) -> Res<[u8; N]> {
     unb64(text).ok().and_then(|bytes| bytes.try_into().ok()).ok_or_else(|| refuse(StatusCode::NOT_FOUND))
@@ -432,7 +437,7 @@ impl Hub {
         }
         // When a device was last seen counts only to the day (spec 6.4): one write a day, not one per request; the
         // app it names is written when it changes.
-        let app = headers.get(api::HEADER_APP).and_then(|v| v.to_str().ok()).filter(|a| config::app(a).is_some());
+        let app = named_app(headers);
         let new_app = app.is_some_and(|a| device.app.as_deref() != Some(a));
         if new_app || now.saturating_sub(device.last_seen_at) >= DAY.as_millis() as u64 {
             self.db.touch(&device_id, now, app)?;
@@ -474,6 +479,7 @@ impl Hub {
         &self,
         handle: &Handle,
         device: &api::NewDevice,
+        app: Option<&str>,
     ) -> Res<(Key, NewDevice, Vec<StoredKeyPackage>, StoredKeyPackage)> {
         if device.push.token.as_slice().len() > limits::MAX_PUSH_TOKEN_LEN {
             return Err(bad());
@@ -491,6 +497,7 @@ impl Hub {
             auth_key: device.auth_key,
             push_platform: device.push.platform,
             push_token: device.push.token.as_slice().to_vec(),
+            app: app.map(str::to_owned),
         };
         Ok((account_key, new, key_packages, last_resort.expect("asked for")))
     }
@@ -586,7 +593,7 @@ async fn register(
     let request: api::Register = decode(&body)?;
     let handle = Handle { kind: KIND_USERNAME, value: request.username.clone() };
     handle.check()?;
-    let checked = hub.check_new_device(&handle, &request.device)?;
+    let checked = hub.check_new_device(&handle, &request.device, named_app(&headers))?;
     hub.register_checked(&handle, checked)
 }
 
