@@ -4,8 +4,6 @@ use crate::handle::Handle;
 use crate::{DeviceId, GroupId, UserId, KEY_LEN, TOKEN_LEN};
 use tls_codec::{TlsDeserializeBytes, TlsSerialize, TlsSize, VLBytes};
 
-pub const VERIFY_START: &str = "/v1/verify/start";
-pub const VERIFY_CHECK: &str = "/v1/verify/check";
 pub const USERNAME: &str = "/v1/username";
 pub const REGISTER: &str = "/v1/register";
 pub const KEY_PACKAGES: &str = "/v1/keypackages";
@@ -99,19 +97,6 @@ impl Push {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, TlsSerialize, TlsDeserializeBytes, TlsSize)]
-pub struct VerifyStart {
-    pub phone: VLBytes,
-}
-
-/// Registers a device with the code from the SMS: one request.
-#[derive(Debug, Clone, PartialEq, Eq, TlsSerialize, TlsDeserializeBytes, TlsSize)]
-pub struct VerifyCheck {
-    pub phone: VLBytes,
-    pub code: VLBytes,
-    pub device: NewDevice,
-}
-
 /// Registers a device with a username (spec 6.4): a new user if the name is free, its user again if this is the user's
 /// current account key (a new phone restored from the backup).
 #[derive(Debug, Clone, PartialEq, Eq, TlsSerialize, TlsDeserializeBytes, TlsSize)]
@@ -154,8 +139,8 @@ pub fn registration_to_be_signed(
     out
 }
 
-/// The answer to a registration: the account's user id. The same as before for a number that had one (a new phone
-/// keeps its user id) and for a username registered again with its user's account key (spec 6.4).
+/// The answer to a registration: the account's user id. The same as before for a username registered again with its
+/// user's account key (spec 6.4).
 #[derive(Debug, Clone, PartialEq, Eq, TlsSerialize, TlsDeserializeBytes, TlsSize)]
 pub struct Registered {
     pub user_id: UserId,
@@ -386,9 +371,8 @@ mod tests {
 
     #[test]
     fn round_trips() {
-        let register = VerifyCheck {
-            phone: b"491701234567".to_vec().into(),
-            code: b"123456".to_vec().into(),
+        let register = Register {
+            username: b"Chris".to_vec().into(),
             device: NewDevice {
                 device_id: [7; 16],
                 device_key: [8; 32],
@@ -400,7 +384,7 @@ mod tests {
                 proof: [6; 64],
             },
         };
-        assert_eq!(crate::decode::<VerifyCheck>(&crate::encode(&register)).unwrap(), register);
+        assert_eq!(crate::decode::<Register>(&crate::encode(&register)).unwrap(), register);
         let lookup = Lookup { handle: Handle::username("CHRIS"), key_packages: 1, except: vec![[1; 32]] };
         assert_eq!(crate::decode::<Lookup>(&crate::encode(&lookup)).unwrap(), lookup);
         let inbox = Inbox { key_packages_left: 7, items: vec![InboxItem { id: 1, envelope: vec![0; 1024].into() }] };

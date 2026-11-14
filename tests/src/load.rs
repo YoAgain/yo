@@ -12,7 +12,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 use yo_core::{Client, Content, Event};
 use yo_hub::config::{Config, Limits};
-use yo_tests::{phone, random_u64, register, Http, TestHub};
+use yo_tests::{random_u64, register, username, Http, TestHub};
 
 struct Args {
     clients: usize,
@@ -89,7 +89,7 @@ fn main() {
             let url = url.clone();
             std::thread::spawn(move || {
                 (t * per_thread..((t + 1) * per_thread))
-                    .map(|i| (i, register(Http::new(url.clone()), &phone(base + i as u64), None)))
+                    .map(|i| (i, register(Http::new(url.clone()), &username(base + i as u64), None)))
                     .collect::<Vec<_>>()
             })
         })
@@ -108,7 +108,7 @@ fn main() {
     let n = clients.len();
     let started = Instant::now();
     for (i, client) in clients.iter_mut() {
-        client.send_yo(&phone(base + ((*i + 1) % n) as u64)).unwrap();
+        client.send_yo(&username(base + ((*i + 1) % n) as u64)).unwrap();
     }
     for (_, client) in clients.iter_mut() {
         client.sync(0).unwrap();
@@ -135,7 +135,7 @@ fn main() {
                 while !stop.load(Ordering::Relaxed) {
                     for (i, client) in mine.iter_mut() {
                         let t = Instant::now();
-                        let events = client.send_yo(&phone(base + ((*i + 1) % n) as u64)).unwrap();
+                        let events = client.send_yo(&username(base + ((*i + 1) % n) as u64)).unwrap();
                         latencies.push(t.elapsed().as_micros() as u64);
                         sent.fetch_add(1, Ordering::Relaxed);
                         received.fetch_add(yos(&events), Ordering::Relaxed);

@@ -6,10 +6,6 @@ use std::path::PathBuf;
 /// Rate limits (spec 6.6). Each is a token bucket: this many per window, refilled evenly.
 #[derive(Debug, Clone)]
 pub struct Limits {
-    pub verify_per_phone_hour: u32,
-    pub verify_per_ip_hour: u32,
-    /// Code attempts, against guessing.
-    pub check_per_phone_hour: u32,
     /// Lookups that hand out KeyPackages: starting chats.
     pub lookup_per_device_day: u32,
     /// Lookups of an account key only: checking who started a chat.
@@ -73,9 +69,6 @@ impl Limits {
 impl Default for Limits {
     fn default() -> Self {
         Limits {
-            verify_per_phone_hour: 3,
-            verify_per_ip_hour: 10,
-            check_per_phone_hour: 10,
             lookup_per_device_day: 50,
             identity_lookup_per_device_day: 1000,
             signed_per_device_minute: 1200,
@@ -107,9 +100,6 @@ impl Limits {
     /// No rate limit worth the name: for load tests from one address.
     pub fn unlimited() -> Self {
         Limits {
-            verify_per_phone_hour: u32::MAX,
-            verify_per_ip_hour: u32::MAX,
-            check_per_phone_hour: u32::MAX,
             lookup_per_device_day: u32::MAX,
             identity_lookup_per_device_day: u32::MAX,
             signed_per_device_minute: u32::MAX,
@@ -163,16 +153,6 @@ impl BlobConfig {
 }
 
 #[derive(Debug, Clone)]
-pub enum SmsConfig {
-    /// No phone numbers: the `verify` routes are not served (the v1 apps do not use them, spec 6.3).
-    Off,
-    /// Accepts one fixed code and sends nothing: development and tests.
-    Dev { code: String },
-    /// Twilio Verify.
-    Twilio { account_sid: String, auth_token: String, service_sid: String },
-}
-
-#[derive(Debug, Clone)]
 pub struct ApnsConfig {
     /// The .p8 key, PEM.
     pub key_pem: String,
@@ -192,15 +172,12 @@ pub struct FcmConfig {
 pub struct Config {
     /// The SQLite file; ":memory:" for tests.
     pub db_path: String,
-    /// The key of the phone HMAC. Never in the database.
-    pub phone_secret: [u8; 32],
     /// Take the client's address from `CF-Connecting-IP`: only behind Cloudflare.
     pub trust_cloudflare: bool,
     /// Apps allowed to make passkeys for this hub's domain (`TEAMID.bundle.id`), served as
     /// `/.well-known/apple-app-site-association`; none, no such file.
     pub apple_app_ids: Vec<String>,
     pub limits: Limits,
-    pub sms: SmsConfig,
     pub apns: Option<ApnsConfig>,
     pub fcm: Option<FcmConfig>,
     /// Usernames nobody may claim (spec 3.3), from the operator's list (`YO_RESERVED_FILE`): added to the database
@@ -239,15 +216,13 @@ pub fn read_reserved(path: Option<&str>) -> Result<Vec<Reserved>, String> {
 }
 
 impl Config {
-    /// A hub for tests: in memory, dev SMS code "000000", no rate limits, no push services.
+    /// A hub for tests: in memory, no rate limits, no push services.
     pub fn for_tests() -> Self {
         Config {
             db_path: ":memory:".into(),
-            phone_secret: [7; 32],
             trust_cloudflare: false,
             apple_app_ids: Vec::new(),
             limits: Limits::unlimited(),
-            sms: SmsConfig::Dev { code: "000000".into() },
             apns: None,
             fcm: None,
             reserved: Vec::new(),

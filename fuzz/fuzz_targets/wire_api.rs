@@ -10,8 +10,6 @@ fn canonical<T: tls_codec::DeserializeBytes + tls_codec::Serialize>(data: &[u8])
 }
 
 fuzz_target!(|data: &[u8]| {
-    canonical::<VerifyStart>(data);
-    canonical::<VerifyCheck>(data);
     canonical::<KeyPackages>(data);
     canonical::<Lookup>(data);
     canonical::<LookupResult>(data);

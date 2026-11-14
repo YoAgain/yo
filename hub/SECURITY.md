@@ -6,7 +6,7 @@ protections are listed in `hub/README.md`.
 
 ## Threat model, in short
 
-- **What the hub protects:** the availability of the service (its disk, memory, connections, the SMS and push
+- **What the hub protects:** the availability of the service (its disk, memory, connections, the push
   accounts), the integrity of accounts (only the account key registers a device for a username; only a device's
   auth key speaks for it), and what spec 1 says it does not learn (content, senders, the social graph beyond
   lookups).
@@ -26,7 +26,7 @@ Every fix is in commit `3d1cb97` on the branch `chaos-security` (with its tests:
 | # | Severity | Finding | Status |
 |---|---|---|---|
 | 1 | High | **Disk exhaustion without an identity** (also Codex). `POST /v1/groups` then `POST /v1/groups/{id}/commit` with 64 KiB envelopes, 600 a minute: about 50 GiB a day from one address, kept 30 days; deliveries to accounts of one's own (5000 envelopes of 64 KiB per device, 10 accounts an hour) about as much. No budget or floor covered the database's disk. | Fixed: bytes delivered and committed are limited to 64 MiB per address per hour; deliveries, commits and new groups are `507` while the database's disk has less than 1 GiB free (`anonymous_bytes_per_ip_hour`, `db_min_free_bytes`). |
-| 2 | High (configuration) | **SMS in development mode by default** (also Codex). Without `YO_SMS`, every phone number verified with `000000`: anyone could register any number and take over an account registered by phone. The v1 apps do not use phone numbers. | Fixed: `YO_SMS` defaults to `off`, and then the `verify` routes are not served at all. **Operator:** a hub that relied on the default for development needs `YO_SMS=dev:000000` set explicitly. |
+| 2 | High (configuration) | **SMS in development mode by default** (also Codex). Without `YO_SMS`, every phone number verified with `000000`: anyone could register any number and take over an account registered by phone. The v1 apps do not use phone numbers. | Gone: the hub has no phone numbers and no SMS any more. |
 | 3 | Medium | **A stranger could spend a device's requests** (also Codex). The 1200 signed requests per device per minute were counted before the signature was checked: with a device's id and garbage signatures, anyone could keep that device at `429`. Device ids are not published, which made it harder, not impossible. | Fixed: counted once the signature holds. |
 | 4 | Medium | **Inbox answers and waits without a bound per device** (also Codex). An answer holds up to 100 envelopes of 64 KiB (6.4 MiB); one device could ask 1200 times a minute at once, each a wait of a minute or a full answer held in memory. | Fixed: 4 inbox requests of one device under way at once, more are `429`. |
 | 5 | Low | **An APNs token went into a URL as it was sent.** `PUT /v1/push` takes any bytes; the APNs request is `https://api.push.apple.com/3/device/{token}` with the hub's credentials, so a device could make the hub send a request to another path on Apple's host. Nothing beyond that host, and nothing a device could not do with its own token. | Fixed: an APNs token that is not hex is treated as invalid and cleared. |
@@ -45,7 +45,6 @@ Every fix is in commit `3d1cb97` on the branch `chaos-security` (with its tests:
 | Low | **A replay after a restart.** The replay cache is in memory: a signed request captured and sent again after a restart, within its 5 minutes, is accepted again (also Codex). | Needs the request in the clear (TLS) and a restart in that window. Most signed requests are idempotent; the others (a lookup, feedback) do little harm twice. |
 | Low | **What anyone can ask without an account:** whether a username is taken (by design, while it is typed), whether a known user id has a backup record (that is, has secured the name), whether a device id was replaced (`410` against `401`). | Spec 6.3 and 7. The backup itself needs the passkey or the 128-bit recovery code. Device ids are random and not published. |
 | Low | **Unsigned requests to signed routes** cost a database read each, limited by nothing but Cloudflare. | Cheap reads; a limit per address on failed signatures would be the next step if it shows up in the logs. |
-| Low | **A phone number can be locked out of verification** by spending its 10 code checks an hour; **SMS pumping** costs money. | Only with SMS on (off by default, unused by v1); Twilio Verify's fraud guard and the per-number and per-address limits. |
 | Info | **The loopback exemption** (the server's own services, `hub/README.md`) passes to anything on the server that can be made to send requests to the hub. | Nothing on the server may forward user-given URLs to the hub's address. |
 | Info | **The device id is not in the signed bytes** (Codex). | The hub picks the auth key by the device id and verifies with it: a signature by one device's key holds for another device only if both have the same auth key, which only that key's owner can arrange, to no gain. |
 

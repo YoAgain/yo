@@ -183,3 +183,16 @@ fn accounts_restored_forty_times_by_every_way_lose_nothing() {
     assert_eq!(hub.hub.audit().unwrap(), []);
     assert!(sent >= 240);
 }
+
+/// A state saved by an app from before phone numbers were dropped still opens: its `phone` is passed over.
+#[test]
+fn a_state_with_a_phone_number_still_opens() {
+    let hub = TestHub::start();
+    let key = [9; 32];
+    let a = register(&hub, &format!("Old{}", random_u64() % 100_000), None).unwrap();
+    let (state, _) = yo_core::state::open(&a.export(&key), &key).unwrap();
+    let mut json = serde_json::to_value(&state).unwrap();
+    json["phone"] = "491701234567".into();
+    let old: yo_core::state::State = serde_json::from_slice(&serde_json::to_vec(&json).unwrap()).unwrap();
+    assert_eq!(old.user_id, a.user_id());
+}

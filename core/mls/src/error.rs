@@ -6,9 +6,7 @@ pub enum Error {
     /// The hub refused with this status.
     #[error("refused: {0}")]
     Refused(u16),
-    #[error("not a phone number")]
-    Phone,
-    /// The number is not on Yo.
+    /// No one on Yo has this handle.
     #[error("not on Yo")]
     NotOnYo,
     #[error("blocked")]
@@ -16,7 +14,7 @@ pub enum Error {
     /// The contact was verified and its account key changed: confirm the new key first (spec 3.4).
     #[error("identity not confirmed")]
     Unconfirmed,
-    /// This device was replaced by another registration of the number.
+    /// This device was replaced by another registration of the account.
     #[error("this device was replaced")]
     Replaced,
     /// Something the peer or the hub sent breaks the protocol.
@@ -35,10 +33,7 @@ pub enum Error {
 pub type Result<T> = std::result::Result<T, Error>;
 
 impl From<yo_wire::Error> for Error {
-    fn from(error: yo_wire::Error) -> Self {
-        match error {
-            yo_wire::Error::Phone => Error::Phone,
-            _ => Error::Protocol("format"),
-        }
+    fn from(_: yo_wire::Error) -> Self {
+        Error::Protocol("format")
     }
 }

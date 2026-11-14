@@ -169,29 +169,33 @@ impl Transport for Http {
     }
 }
 
-/// A unique test phone number.
-pub fn phone(i: u64) -> String {
-    format!("+4915{:09}", i)
+/// A unique test username: "u" and the number's digits, one skeleton per number.
+pub fn username(i: u64) -> String {
+    format!("u{i:09}")
 }
 
-pub fn register(transport: Arc<Http>, phone: &str, name: Option<&str>) -> Client {
-    Client::request_code(transport.as_ref(), phone).unwrap();
-    let client = Client::register(transport, phone, "000000", name.map(str::to_owned), Push::none()).unwrap();
-    USERS.lock().unwrap_or_else(PoisonError::into_inner).insert(client.phone().to_owned(), client.user_id().to_owned());
+/// Registers a new account with a free username.
+pub fn register(transport: Arc<Http>, username: &str, name: Option<&str>) -> Client {
+    let client = Client::register_username(transport, username, None, name.map(str::to_owned), Push::none()).unwrap();
+    USERS.lock().unwrap_or_else(PoisonError::into_inner).insert(username.to_owned(), client.user_id().to_owned());
     client
+}
+
+/// A new phone of an account: the username registered again with the account key from the backup.
+pub fn new_phone(transport: Arc<Http>, username: &str, account: &Client) -> Client {
+    Client::register_username(transport, username, Some(account.account_secret()), None, Push::none()).unwrap()
 }
 
 static USERS: Mutex<std::collections::BTreeMap<String, String>> = Mutex::new(std::collections::BTreeMap::new());
 
-/// The user id a number registered with (the same after a new phone).
-pub fn user_of(phone: &str) -> String {
-    let digits = phone.trim_start_matches('+');
+/// The user id a username registered with (the same after a new phone).
+pub fn user_of(username: &str) -> String {
     USERS
         .lock()
         .unwrap_or_else(PoisonError::into_inner)
-        .get(digits)
+        .get(username)
         .cloned()
-        .unwrap_or_else(|| panic!("{phone} not registered"))
+        .unwrap_or_else(|| panic!("{username} not registered"))
 }
 
 pub fn random_u64() -> u64 {
@@ -249,4 +253,81 @@ pub fn deliver_raw(url: &str, user: &str, body: Vec<u8>) -> u16 {
         .unwrap()
         .status()
         .as_u16()
+}
+
+/// A hub that lies to one client (spec 3.4), once told to: asked for `user`, it answers with the keys and devices of
+/// another account, the stand-in, under the user's id and name, and hands what is sent to the user to the stand-in.
+/// What a hub that gives out a key not the user's would do; the client must notice.
+pub struct Lying {
+    pub http: Arc<Http>,
+    lie: Mutex<Option<Lie>>,
+}
+
+struct Lie {
+    user: yo_wire::UserId,
+    name: String,
+    stand_in: yo_wire::UserId,
+    stand_in_name: String,
+    /// Another account, whose lookups of the stand-in become the lies.
+    asker: Client,
+}
+
+impl Lying {
+    pub fn new(base: String) -> Arc<Self> {
+        Arc::new(Lying { http: Http::new(base), lie: Mutex::default() })
+    }
+
+    /// From now on, `user` (known by `name`) is `stand_in` (known by `stand_in_name`, as long as `name`).
+    pub fn lie(&self, user: &Client, name: &str, stand_in: &Client, stand_in_name: &str, asker: Client) {
+        assert_eq!(name.len(), stand_in_name.len(), "a lie of the same length keeps the encoding");
+        *self.lie.lock().unwrap() = Some(Lie {
+            user: user_id(user.user_id()),
+            name: name.to_owned(),
+            stand_in: user_id(stand_in.user_id()),
+            stand_in_name: stand_in_name.to_owned(),
+            asker,
+        });
+    }
+}
+
+/// `body` with every `from` replaced by `to`, of the same length.
+fn replaced(body: &[u8], from: &[u8], to: &[u8]) -> Vec<u8> {
+    let mut out = body.to_vec();
+    let mut i = 0;
+    while i + from.len() <= out.len() {
+        if out[i..i + from.len()] == *from {
+            out[i..i + from.len()].copy_from_slice(to);
+            i += from.len();
+        } else {
+            i += 1;
+        }
+    }
+    out
+}
+
+impl Transport for Lying {
+    fn request(&self, method: &str, path: &str, headers: &[(String, String)], body: &[u8]) -> Result<Response, String> {
+        let mut lie = self.lie.lock().unwrap_or_else(PoisonError::into_inner);
+        let Some(lie) = lie.as_mut() else { return self.http.request(method, path, headers, body) };
+        let lookup =
+            (path == yo_wire::api::LOOKUP).then(|| yo_wire::decode::<yo_wire::api::Lookup>(body).ok()).flatten();
+        let response = match lookup {
+            Some(mut lookup)
+                if lookup.handle.user_id() == Some(lie.user)
+                    || (lookup.handle.kind == yo_wire::handle::KIND_USERNAME
+                        && yo_wire::handle::same_name(&lookup.handle.display(), &lie.name)) =>
+            {
+                lookup.handle = yo_wire::handle::Handle::user(&lie.stand_in);
+                let body = yo_wire::encode(&lookup);
+                lie.asker.signed_for_tests("POST", yo_wire::api::LOOKUP, &body).map_err(|e| e.to_string())?
+            }
+            _ if path == yo_wire::api::deliver_path(&lie.user) => {
+                self.http.request(method, &yo_wire::api::deliver_path(&lie.stand_in), headers, body)?
+            }
+            _ => self.http.request(method, path, headers, body)?,
+        };
+        let body = replaced(&response.body, &lie.stand_in, &lie.user);
+        let body = replaced(&body, lie.stand_in_name.as_bytes(), lie.name.as_bytes());
+        Ok(Response { status: response.status, body })
+    }
 }

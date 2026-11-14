@@ -141,9 +141,9 @@ CREATE TABLE IF NOT EXISTS account_keys (
     user_id BLOB NOT NULL REFERENCES users(id)
 ) WITHOUT ROWID;
 CREATE INDEX IF NOT EXISTS account_keys_by_user ON account_keys(user_id);
--- How people find a user: a phone number as its HMAC, a username by its skeleton (spec 3.3). `spelling`: a username
--- as its owner writes it (\"YoGPT\"); NULL for names from before spellings were kept, shown as their skeleton
--- (`migrate` adds the column to such a database).
+-- How people find a user: a username by its skeleton (spec 3.3); kind 1, a phone number as its HMAC, is no longer
+-- made. `spelling`: a username as its owner writes it (\"YoGPT\"); NULL for names from before spellings were kept,
+-- shown as their skeleton (`migrate` adds the column to such a database).
 CREATE TABLE IF NOT EXISTS handles (
     kind INTEGER NOT NULL,
     value BLOB NOT NULL,
@@ -488,18 +488,16 @@ impl Db {
             .optional()
     }
 
-    /// Registers a device for the user a handle names (spec 6.4). A free handle makes a new user, `fresh`. A phone
-    /// number keeps its user (a new phone keeps the user id). A username (`by_key`) is its user's again only with the
-    /// user's current account key (a new phone restored from the backup); with any other it is taken, and so is a
-    /// reserved one nobody has. The account key becomes the user's current key and stays the user's forever. The
-    /// user's earlier devices are replaced. `spelling`: a new username as written; a name the user has keeps its own.
+    /// Registers a device for the user a username (by its skeleton) names (spec 6.4). A free name makes a new user,
+    /// `fresh`. A name is its user's again only with the user's current account key (a new phone restored from the
+    /// backup); with any other it is taken, and so is a reserved one nobody has. The account key becomes the user's
+    /// current key and stays the user's forever. The user's earlier devices are replaced. `spelling`: a new name as
+    /// written; a name the user has keeps its own.
     #[allow(clippy::too_many_arguments)]
     pub fn register(
         &self,
-        handle_kind: u8,
-        handle_value: &[u8],
-        spelling: Option<&str>,
-        by_key: bool,
+        skeleton: &[u8],
+        spelling: &str,
         fresh: &UserId,
         account_key: &Key,
         device: &NewDevice,
@@ -519,10 +517,10 @@ impl Db {
         }
         let holder: Option<UserId> = tx
             .prepare_cached("SELECT user_id FROM handles WHERE kind = ?1 AND value = ?2")?
-            .query_row(params![handle_kind, handle_value], |row| array(row.get(0)?))
+            .query_row(params![KIND_USERNAME, skeleton], |row| array(row.get(0)?))
             .optional()?;
         let user = match holder {
-            Some(user) if by_key => {
+            Some(user) => {
                 let current: Option<Key> = tx
                     .prepare_cached("SELECT account_key FROM users WHERE id = ?1")?
                     .query_row([&user], |row| array(row.get(0)?))
@@ -532,8 +530,7 @@ impl Db {
                 }
                 user
             }
-            Some(user) => user,
-            None if handle_kind == KIND_USERNAME && is_reserved(&tx, handle_value)? => {
+            None if is_reserved(&tx, skeleton)? => {
                 return Ok(Write::Refused(Conflict::UsernameTaken));
             }
             None => *fresh,
@@ -554,7 +551,7 @@ impl Db {
         tx.execute("INSERT OR IGNORE INTO account_keys (key, user_id) VALUES (?1, ?2)", params![account_key, user])?;
         tx.execute(
             "INSERT OR IGNORE INTO handles (kind, value, user_id, spelling) VALUES (?1, ?2, ?3, ?4)",
-            params![handle_kind, handle_value, user, spelling],
+            params![KIND_USERNAME, skeleton, user, spelling],
         )?;
         tx.execute(
             "INSERT INTO devices (id, user_id, device_key, auth_key, push_platform, push_token, created_at, last_seen_at)
@@ -615,9 +612,9 @@ impl Db {
             .exists(params![KIND_USERNAME, skeleton])
     }
 
-    /// A user by a handle (`value` as stored: a phone number's HMAC, a username by its skeleton, a user id, an account
-    /// key, which must be the user's current one): id, account key, devices and, if asked, one KeyPackage for each
-    /// device not in `except`, a single-use one while there is one, else the last resort.
+    /// A user by a handle (`value` as stored: a username by its skeleton, a user id, an account key, which must be
+    /// the user's current one): id, account key, devices and, if asked, one KeyPackage for each device not in
+    /// `except`, a single-use one while there is one, else the last resort.
     pub fn lookup(&self, kind: u8, value: &[u8], take: bool, except: &[Key]) -> rusqlite::Result<Option<Found>> {
         let mut conn = self.conn();
         let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
@@ -1225,19 +1222,7 @@ mod tests {
         let last_resort = StoredKeyPackage { hash: [n; 32], data: vec![n] };
         let spelling = std::str::from_utf8(name).unwrap();
         let skeleton = yo_wire::handle::skeleton(spelling);
-        db.register(
-            KIND_USERNAME,
-            skeleton.as_bytes(),
-            Some(spelling),
-            true,
-            &[n; 16],
-            &[key; 32],
-            &device(n),
-            &[],
-            &last_resort,
-            now,
-        )
-        .unwrap()
+        db.register(skeleton.as_bytes(), spelling, &[n; 16], &[key; 32], &device(n), &[], &last_resort, now).unwrap()
     }
 
     fn reserve(db: &Db, names: &[&str]) -> usize {

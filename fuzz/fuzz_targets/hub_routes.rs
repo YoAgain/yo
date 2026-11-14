@@ -9,9 +9,7 @@ use tower::ServiceExt;
 static RUNTIME: OnceLock<tokio::runtime::Runtime> = OnceLock::new();
 static ROUTER: OnceLock<axum::Router> = OnceLock::new();
 
-const ROUTES: [(&str, &str); 29] = [
-    ("POST", "/v1/verify/start"),
-    ("POST", "/v1/verify/check"),
+const ROUTES: [(&str, &str); 27] = [
     ("PUT", "/v1/keypackages"),
     ("POST", "/v1/lookup"),
     ("PUT", "/v1/push"),

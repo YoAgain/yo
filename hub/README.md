@@ -25,8 +25,6 @@ is at most 65 KiB (`MAX_BODY`) except a blob upload, which is streamed.
 |---|---|---|---|---|---|
 | GET | `/` | a page that says what this is | none | – | nothing |
 | GET | `/.well-known/apple-app-site-association` | apps allowed to make passkeys for the domain (spec 7); only when `YO_APPLE_APP_IDS` is set | none | – | nothing |
-| POST | `/v1/verify/start` | send an SMS code; only when `YO_SMS` is `twilio` or `dev:<code>` (off by default; the v1 apps do not use it) | none | 10/h (IP), 3/h (phone HMAC) | the number (passed to Twilio, not stored) |
-| POST | `/v1/verify/check` | code + new device → registered by phone number; as above | none, SMS code + account-signed proof | 30/h (IP), 10/h (phone HMAC) | the number's HMAC, the device |
 | POST | `/v1/register` | username + certificate + KeyPackages → device registered, user id (spec 6.4) | none, account-signed proof over username, device id, device key, auth key | 10/h (IP) | name, account key, device keys, push token |
 | GET | `/v1/username/{name}` | is the name free: `204`, `409` taken or reserved, `400` no username | none | 60/min (IP) | the name asked |
 | GET | `/v1/backup/{user id or locator}` | the backup record, encrypted (spec 7); `404` none | none | 10/h (IP) | which record is fetched, from where |
@@ -65,8 +63,6 @@ Spec 6.3 lists the same routes, without `/` and the well-known file, which are n
   can be made to send requests to the hub (a proxy, a fetcher of user-given URLs) inherits that exemption.
 - **Disk.** Blobs have a budget (`YO_BLOB_BUDGET_MB`) and a floor of free space (`YO_BLOB_MIN_FREE_MB`); deliveries,
   commits and new groups are refused (`507`) while the database's disk has less than 1 GiB free.
-- **SMS** is off unless `YO_SMS` says otherwise; `dev:<code>` makes every number verify with that code and is for
-  development hubs only.
 - **Cleanup**, hourly: envelopes and commits after 30 days, blobs after their last fetch or 30 days, users without
   a backup idle for 365 days, replaced devices' `410` memory after a year. Rate-limit buckets idle for a day and
   expired replay-cache entries are dropped from memory.

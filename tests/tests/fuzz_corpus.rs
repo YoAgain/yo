@@ -4,7 +4,7 @@
 
 use std::sync::{Arc, Mutex};
 use yo_core::Store;
-use yo_tests::{phone, random_u64, register, Http, TestHub};
+use yo_tests::{random_u64, register, username, Http, TestHub};
 use yo_wire::api;
 
 #[derive(Default)]
@@ -34,7 +34,7 @@ fn write(dir: &str, name: &str, bytes: &[u8]) {
 fn write_fuzz_corpus() {
     let hub = TestHub::start();
     let n = random_u64() % 1_000_000_000;
-    let (pa, pb) = (phone(n), phone(n + 1));
+    let (pa, pb) = (username(n), username(n + 1));
     let ha = Http::new(hub.url());
     let mut a = register(ha.clone(), &pa, Some("ALICE"));
     let mut b = register(Http::new(hub.url()), &pb, Some("BOB"));
@@ -48,10 +48,9 @@ fn write_fuzz_corpus() {
         .lock()
         .unwrap()
         .iter()
-        .find(|(_, path, _)| path == api::VERIFY_CHECK)
+        .find(|(_, path, _)| path == api::REGISTER)
         .map(|(_, _, body)| {
-            let check: api::VerifyCheck = yo_wire::decode(body).unwrap();
-            let device = check.device;
+            let device = yo_wire::decode::<api::Register>(body).unwrap().device;
             let certificate =
                 yo_wire::cert::DeviceCertificate::verify(device.certificate.as_slice(), &device.device_key).unwrap();
             (certificate.account_key, device.device_key)
@@ -93,9 +92,8 @@ fn write_fuzz_corpus() {
     }
     // The other targets: requests as sent, KeyPackages, certificates, contents.
     for (i, (_, path, body)) in ha.sent.lock().unwrap().iter().enumerate().filter(|(_, (_, _, b))| !b.is_empty()) {
-        if path == api::VERIFY_CHECK {
-            let check: api::VerifyCheck = yo_wire::decode(body).unwrap();
-            let device = check.device;
+        if path == api::REGISTER {
+            let device = yo_wire::decode::<api::Register>(body).unwrap().device;
             let mut cert_input = device.device_key.to_vec();
             cert_input.extend_from_slice(device.certificate.as_slice());
             write("corpus/wire_cert", "certificate", &cert_input);
@@ -113,23 +111,28 @@ fn write_fuzz_corpus() {
     }
 }
 
-/// hub_routes input: route index (1 byte), then the body.
+/// hub_routes input: route index (1 byte, the route's place in its `ROUTES`), then the body. Only requests with a
+/// body come here; the first pattern the path contains names the route.
 fn route_input(path: &str, body: &[u8]) -> Vec<u8> {
     let index = [
-        api::VERIFY_START,
-        api::VERIFY_CHECK,
-        api::KEY_PACKAGES,
-        api::LOOKUP,
-        api::PUSH,
-        api::INBOX,
-        api::INBOX_ACK,
-        "/v1/inbox/",
-        api::GROUPS,
-        "/commit",
+        ("/commit", 8),
+        (api::INBOX_ACK, 5),
+        ("/v1/inbox/", 6),
+        (api::KEY_PACKAGES, 0),
+        (api::LOOKUP, 1),
+        (api::PUSH, 2),
+        (api::USERNAME, 3),
+        (api::GROUPS, 7),
+        (api::REGISTER, 10),
+        (api::BACKUP, 13),
+        ("/v1/blobs/", 17),
+        (api::REPORT, 19),
+        (api::FEEDBACK, 20),
+        (api::STORAGE, 26),
     ]
     .iter()
-    .position(|p| path.contains(p))
-    .unwrap_or(0) as u8;
+    .find(|(p, _)| path.contains(p))
+    .map_or(0, |(_, i)| *i);
     let mut out = vec![index];
     out.extend_from_slice(body);
     out

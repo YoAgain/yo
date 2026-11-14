@@ -10,14 +10,13 @@ pub mod devices;
 pub mod envelope;
 pub mod handle;
 pub mod limits;
-pub mod phone;
 pub mod request;
 
 pub use tls_codec::{self, VLBytes};
 
 /// The protocol version of every versioned structure here.
 pub const VERSION: u8 = 1;
-/// A user id: 16 random bytes the hub gives an account when its first handle is verified. It never changes.
+/// A user id: 16 random bytes the hub gives an account when it registers. It never changes.
 pub const USER_ID_LEN: usize = 16;
 /// A device id: 16 random bytes the device chooses; the hub's name for its inbox, never given to other users.
 pub const DEVICE_ID_LEN: usize = 16;
@@ -44,8 +43,6 @@ pub enum Error {
     Size,
     #[error("bad signature")]
     Signature,
-    #[error("bad phone number")]
-    Phone,
     #[error("unsupported version or type")]
     Unsupported,
 }

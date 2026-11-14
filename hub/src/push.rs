@@ -3,12 +3,15 @@
 //! high-priority data message. The requests go through `Transport`, so tests record them.
 
 use crate::config::{ApnsConfig, FcmConfig};
-use crate::sms::Fut;
 use jsonwebtoken::{Algorithm, EncodingKey, Header};
 use serde_json::json;
+use std::future::Future;
+use std::pin::Pin;
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use yo_wire::api::{PUSH_APNS, PUSH_APNS_SANDBOX, PUSH_FCM};
+
+pub type Fut<T> = Pin<Box<dyn Future<Output = T> + Send>>;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Request {

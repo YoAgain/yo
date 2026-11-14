@@ -3,7 +3,7 @@
 use std::sync::{Arc, Mutex};
 use yo_core::{Client, Content, Event, Store};
 use yo_hub::config::Config;
-use yo_tests::{deliver_raw, phone, random_u64, register, user_of, Fault, Http, TestHub};
+use yo_tests::{deliver_raw, new_phone, random_u64, register, user_of, username, Fault, Http, TestHub};
 use yo_wire::api;
 
 fn yos(events: &[Event]) -> usize {
@@ -13,7 +13,7 @@ fn yos(events: &[Event]) -> usize {
 /// A chat where B has joined and both updated once: the steady state.
 fn chat(hub: &TestHub) -> (Client, Client, Arc<Http>, Arc<Http>, String, String) {
     let n = random_u64() % 1_000_000_000;
-    let (pa, pb) = (phone(n), phone(n + 1));
+    let (pa, pb) = (username(n), username(n + 1));
     let (ha, hb) = (Http::new(hub.url()), Http::new(hub.url()));
     let mut a = register(ha.clone(), &pa, None);
     let mut b = register(hb.clone(), &pb, None);
@@ -112,7 +112,7 @@ fn a_crash_after_processing_loses_nothing_and_repeats_nothing() {
 fn a_passing_refusal_does_not_drop_a_welcome() {
     let hub = TestHub::start();
     let n = random_u64() % 1_000_000_000;
-    let (pa, pb) = (phone(n), phone(n + 1));
+    let (pa, pb) = (username(n), username(n + 1));
     let hb = Http::new(hub.url());
     let mut a = register(Http::new(hub.url()), &pa, None);
     let mut b = register(hb.clone(), &pb, None);
@@ -184,7 +184,7 @@ fn the_hub_repeats_an_accepted_commit_and_nothing_else() {
 #[test]
 fn private_keys_of_dead_key_packages_are_deleted() {
     let hub = TestHub::start();
-    let mut a = register(Http::new(hub.url()), &phone(random_u64() % 1_000_000_000), None);
+    let mut a = register(Http::new(hub.url()), &username(random_u64() % 1_000_000_000), None);
     let made = a.own_key_packages();
     assert_eq!(made, yo_wire::limits::KEY_PACKAGE_TARGET as usize + 1);
     let start = yo_hub::now_ms();
@@ -208,7 +208,7 @@ fn a_repair_whose_answer_was_lost_is_settled_by_repeating_it() {
     let (mut a, b, ha, _, pa, pb) = chat(&hub);
     let chat_id = a.chats()[0].1;
     // B moves to a new phone; A's repair commit is accepted, its answer lost.
-    let mut b2 = register(Http::new(hub.url()), &pb, None);
+    let mut b2 = new_phone(Http::new(hub.url()), &pb, &b);
     drop(b);
     ha.fault("/commit", Fault::LoseAnswer);
     assert!(a.send_yo(&pb).is_ok() || a.pending() > 0);
@@ -227,13 +227,13 @@ fn a_repair_whose_answer_was_lost_is_settled_by_repeating_it() {
 fn key_packages_whose_upload_answer_was_lost_still_open_chats() {
     let hub = TestHub::start();
     let base = random_u64() % 1_000_000_000;
-    let target = phone(base);
+    let target = username(base);
     let hc = Http::new(hub.url());
     let mut c = register(hc.clone(), &target, None);
     // Senders use up C's KeyPackages.
     let senders = yo_wire::limits::KEY_PACKAGE_TARGET as u64 - 10;
     for i in 1..=senders {
-        register(Http::new(hub.url()), &phone(base + i), None).send_yo(&target).unwrap();
+        register(Http::new(hub.url()), &username(base + i), None).send_yo(&target).unwrap();
     }
     // C refills; the hub stores the upload, the answer is lost.
     hc.fault("/v1/keypackages", Fault::LoseAnswer);
@@ -241,7 +241,7 @@ fn key_packages_whose_upload_answer_was_lost_still_open_chats() {
     assert_eq!(events.iter().filter(|e| matches!(e, Event::NewChat { .. })).count() as u64, senders);
     // Twenty more senders take the old and the uploaded packages: C keeps the private keys of all of them.
     for i in senders + 1..=senders + 20 {
-        register(Http::new(hub.url()), &phone(base + i), None).send_yo(&target).unwrap();
+        register(Http::new(hub.url()), &username(base + i), None).send_yo(&target).unwrap();
     }
     let events = c.sync(0).unwrap();
     assert_eq!(events.iter().filter(|e| matches!(e, Event::NewChat { .. })).count(), 20);

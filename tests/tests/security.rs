@@ -1,8 +1,8 @@
-//! What a stranger tries at the hub: spending someone else's requests, filling the disk without an identity, the
-//! routes of a service that is off (hub/SECURITY.md).
+//! What a stranger tries at the hub: spending someone else's requests, filling the disk without an identity
+//! (hub/SECURITY.md).
 
-use yo_hub::config::{Config, SmsConfig};
-use yo_tests::{devices_hash, phone, random_u64, register, user_id, Http, TestHub};
+use yo_hub::config::Config;
+use yo_tests::{devices_hash, random_u64, register, user_id, username, Http, TestHub};
 use yo_wire::api;
 
 fn now_ms() -> u64 {
@@ -26,7 +26,7 @@ fn a_stranger_who_knows_a_device_id_cannot_spend_its_requests() {
     let mut config = Config::for_tests();
     config.limits.signed_per_device_minute = 5;
     let hub = TestHub::start_with(config, "127.0.0.1:0");
-    let mut a = register(Http::new(hub.url()), &phone(random_u64() % 1_000_000_000), None);
+    let mut a = register(Http::new(hub.url()), &username(random_u64() % 1_000_000_000), None);
     let device = yo_wire::b64(&a.device_id());
     let client = reqwest::blocking::Client::new();
     for _ in 0..20 {
@@ -51,7 +51,7 @@ fn bytes_stored_without_identity_are_limited_per_address_except_for_the_servers_
     config.limits.anonymous_bytes_per_ip_hour = 3 * 1024;
     config.trust_cloudflare = true;
     let hub = TestHub::start_with(config, "127.0.0.1:0");
-    let b = register(Http::new(hub.url()), &phone(random_u64() % 1_000_000_000), None);
+    let b = register(Http::new(hub.url()), &username(random_u64() % 1_000_000_000), None);
     let url = hub.url();
     let hash = devices_hash(&url, b.user_id()).unwrap();
     // From 127.0.0.1 without CF-Connecting-IP: the server's own service (YoGPT), not limited.
@@ -81,7 +81,7 @@ fn nothing_is_stored_without_identity_while_the_disk_is_nearly_full() {
     config.limits.db_min_free_bytes = u64::MAX;
     let hub = TestHub::start_with(config, "127.0.0.1:0");
     // Registration is signed and small, and goes on: an account can still be made and read its mail.
-    let b = register(Http::new(hub.url()), &phone(random_u64() % 1_000_000_000), None);
+    let b = register(Http::new(hub.url()), &username(random_u64() % 1_000_000_000), None);
     let url = hub.url();
     let probe = reqwest::blocking::Client::new()
         .post(format!("{url}{}", api::deliver_path(&user_id(b.user_id()))))
@@ -95,16 +95,4 @@ fn nothing_is_stored_without_identity_while_the_disk_is_nearly_full() {
     assert_eq!(created.status().as_u16(), 507);
     hub.stop();
     let _ = std::fs::remove_dir_all(&dir);
-}
-
-#[test]
-fn the_phone_routes_are_not_there_while_sms_is_off() {
-    let mut config = Config::for_tests();
-    config.sms = SmsConfig::Off;
-    let hub = TestHub::start_with(config, "127.0.0.1:0");
-    let client = reqwest::blocking::Client::new();
-    for path in [api::VERIFY_START, api::VERIFY_CHECK] {
-        let status = client.post(format!("{}{path}", hub.url())).body(vec![0; 16]).send().unwrap().status();
-        assert_eq!(status.as_u16(), 404, "{path}");
-    }
 }
