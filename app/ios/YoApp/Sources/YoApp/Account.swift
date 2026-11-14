@@ -688,7 +688,7 @@ final class AccountStore {
   // MARK: The account's storage (spec 6.9)
 
   /// Friends known by user id, to the account's storage (`Friends.stored`): changed ones set, removed ones taken off.
-  /// The core keeps them at once and writes them to the hub with its next sync.
+  /// The core keeps them at once and writes them to the hub right after (`toStorage`).
   func store(_ changed: [Friend], removed: [String]) {
     // A friend's name at most 64 bytes in the storage: a longer one (many emoji) is kept by user id alone.
     let set = changed.compactMap { friend in
@@ -707,13 +707,17 @@ final class AccountStore {
     toStorage { $0.setAppIcon(icon: icon) }
   }
 
-  /// A write to this account's storage, after the ones before it.
-  private func toStorage(_ write: @escaping @Sendable (YoClient) -> Void) {
+  /// A write to this account's storage, after the ones before it, and to the hub at once: beside the inbox's long
+  /// wait, not after its answer.
+  private func toStorage(_ write: @escaping @Sendable (YoClient) -> Void = { _ in }) {
     guard let client else { return }
     let before = storing
     storing = Task {
       await before?.value
-      _ = try? await Hub.run { write(client) }
+      _ = try? await Hub.run {
+        write(client)
+        try client.writeStorage()
+      }
     }
   }
 
@@ -753,6 +757,7 @@ final class AccountStore {
   /// Blocks a user (spec 4.8), by user id or name: nothing from them is shown, nothing goes to them. Or unblocks.
   func setBlocked(_ who: String, _ blocked: Bool) async throws {
     try await hub { try $0.setBlocked(who: who, blocked: blocked) }
+    toStorage()  // the block to the account's storage, for its next phone
   }
 
   /// Reports a user to Yo (spec 6.4): who and why, nothing of what they sent.

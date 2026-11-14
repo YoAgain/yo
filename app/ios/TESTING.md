@@ -123,13 +123,13 @@ The touch's own time to the action is the Simulator's event delivery (9–20 ms,
 
 | A Yo arriving (20 at 20 a second) | |
 |---|---|
-| Long wait's answer to the Yos handed to the app | 34–58 ms: the core acknowledges them to the hub first (a round trip), and writes the account's storage when the list changed (another) |
+| Long wait's answer to the Yos handed to the app | 34–58 ms: the core acknowledges them to the hub first (a round trip), and writes the account's storage when the list changed (another). Since branch `fast-receive` both come after the hand-over (`after_sync`, the next wait): `tests/speed.rs` at 40 ms round trip, 62 ms before, 21 ms after (one way back from the hub) |
 | Handed to the app to on screen | 31–53 ms p50, mostly SwiftUI's drawing (the Simulator draws the bars' soft edge and glass on the CPU) |
 
 | Notification service (`YoNotifyProbe`, the dev hub over the internet) | |
 |---|---|
 | App closed: state opened (lock, keychain, 342 KiB) | 8–26 ms |
-| Inbox read (a new TLS connection) and acknowledged | 78–160 ms and 34–57 ms |
+| Inbox read (a new TLS connection) and acknowledged | 78–160 ms and 34–57 ms; since `fast-receive` the ack goes after the notification (`afterSync`) |
 | All, from the push to the notification | 0.14–0.25 s |
 | App just left, its wait at the hub running: the lock | free (opened in 9 ms; the app took the Yo, the push went quiet): the app holds it for a step, never through its wait |
 

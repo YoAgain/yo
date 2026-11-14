@@ -328,6 +328,13 @@ pub struct Client {
     fetching: bool,
     /// Commits fetched at most in one call (`MAX_COMMITS_FETCHED`; fewer in tests).
     fetch_at_most: usize,
+    /// Inbox ids received and saved, not yet acknowledged at the hub: `sync_end` hands its events out first, and
+    /// `after_sync` (or the next call that receives) acknowledges them. Lost with the process, they come again and are
+    /// skipped as seen.
+    unacked: Vec<u64>,
+    /// `sync_end` received: the work after it (KeyPackages, the outbox, the storage, delivery tokens) waits for
+    /// `after_sync`, or the next `sync_begin`.
+    after_due: bool,
 }
 
 /// A group member as YoLS sees it.
@@ -694,6 +701,8 @@ impl Client {
             explicit_ack: false,
             fetching: false,
             fetch_at_most: MAX_COMMITS_FETCHED,
+            unacked: Vec::new(),
+            after_due: false,
         }
     }
 
@@ -724,6 +733,8 @@ impl Client {
         }
         self.provider.restore(entries);
         self.state = state;
+        // Left to the hub's repeat: the state taken in says whether they are seen.
+        self.unacked.clear();
         if self.guest_events.is_some() {
             self.guest_events = Some(self.state.events.len());
         }
@@ -2070,6 +2081,8 @@ impl Client {
     /// Fetches and processes the inbox until it is empty. Transport failures stop it with nothing lost.
     fn receive_all(&mut self, wait_s: u64) -> Result<()> {
         self.storage_fetched()?;
+        // What the hub would send again otherwise.
+        self.acknowledge_inbox()?;
         let mut wait = wait_s;
         loop {
             let path = api::inbox_path(wait);
@@ -2080,7 +2093,7 @@ impl Client {
                 let (headers, again) = self.sign("GET", &path, &[]);
                 (response, time) = (self.unsigned("GET", &path, &headers, &[])?, again);
             }
-            if !self.inbox(response, time)? {
+            if !self.inbox(response, time, false)?.0 {
                 self.inbox_fresh_until = (self.clock)() + INBOX_FRESH_MS;
                 return Ok(());
             }
@@ -2107,8 +2120,10 @@ impl Client {
 
     /// Processes one inbox answer to a request signed at `requested_at` and acknowledges it; `true` when the hub has
     /// more. The answer may be older than the state (`sync` waits for it outside the app's lock while other calls
-    /// run): envelopes already seen are skipped, an older KeyPackage count is ignored.
-    fn inbox(&mut self, response: Response, requested_at: u64) -> Result<bool> {
+    /// run): envelopes already seen are skipped, an older KeyPackage count is ignored. With `later`, an answer that is
+    /// all there is and was all taken in is neither saved nor acknowledged here: its ids are returned, for the caller
+    /// to acknowledge once it saved (`sync_end`).
+    fn inbox(&mut self, response: Response, requested_at: u64, later: bool) -> Result<(bool, Vec<u64>)> {
         if response.status != status::OK {
             return Err(refused(&response));
         }
@@ -2137,21 +2152,39 @@ impl Client {
             }
             done.push(item.id);
         }
+        if later && !full && stopped.is_none() {
+            return Ok((false, done));
+        }
         if !done.is_empty() {
             // Saved before the hub may forget: what was processed must survive a crash right after the ack.
             self.persist()?;
-            // An ack that does not arrive costs only a repeat: the hub sends those envelopes again, and they are
-            // skipped as seen.
-            match self.signed("POST", api::INBOX_ACK, &encode(&api::Ack { ids: done })) {
-                Ok(response) if response.status == status::NO_CONTENT => {}
-                Ok(response) if response.status == status::GONE => return Err(Error::Replaced),
-                _ => return Ok(false),
+            if !self.ack(done)? {
+                return Ok((false, Vec::new()));
             }
         }
         match stopped {
             Some(error) => Err(error),
-            None => Ok(full),
+            None => Ok((full, Vec::new())),
         }
+    }
+
+    /// Acknowledges inbox ids whose envelopes are saved as processed; `false` when the ack did not arrive. That costs
+    /// only a repeat: the hub sends those envelopes again, and they are skipped as seen.
+    fn ack(&mut self, ids: Vec<u64>) -> Result<bool> {
+        match self.signed("POST", api::INBOX_ACK, &encode(&api::Ack { ids })) {
+            Ok(response) if response.status == status::NO_CONTENT => Ok(true),
+            Ok(response) if response.status == status::GONE => Err(Error::Replaced),
+            _ => Ok(false),
+        }
+    }
+
+    /// Acknowledges what `sync_end` received and saved (`unacked`).
+    fn acknowledge_inbox(&mut self) -> Result<()> {
+        if !self.unacked.is_empty() {
+            let ids = std::mem::take(&mut self.unacked);
+            self.ack(ids)?;
+        }
+        Ok(())
     }
 
     fn receive(&mut self, sealed: &[u8]) -> Result<()> {
@@ -2669,7 +2702,8 @@ impl Client {
         Sent::Done(self.finish(result))
     }
 
-    /// Receives: waits up to `wait_s` seconds for mail, processes all of it, delivers what is waiting.
+    /// Receives: waits up to `wait_s` seconds for mail, processes all of it, delivers what is waiting. Returns as soon
+    /// as what arrived is saved; the hub's ack and the work after it wait for `after_sync` or the next call.
     pub fn sync(&mut self, wait_s: u64) -> Result<Vec<Event>> {
         let wait = self.sync_begin(wait_s)?;
         let response = wait.send();
@@ -2682,7 +2716,12 @@ impl Client {
     /// processed against the state as it is then. The signature's time is checked when the hub gets the request,
     /// before the wait, so signing early is fine.
     pub fn sync_begin(&mut self, wait_s: u64) -> Result<InboxWait> {
-        if let Err(error) = self.deliver() {
+        // What the last sync left (`after_sync`), then the outbox; a guest leaves the outbox to the app.
+        let before = self.after_sync_inner().and_then(|()| match self.guest_events {
+            Some(_) => Ok(()),
+            None => self.deliver(),
+        });
+        if let Err(error) = before {
             if !retryable(&error) {
                 self.persist()?;
                 return Err(error);
@@ -2699,31 +2738,70 @@ impl Client {
         Ok(InboxWait { transport: self.transport.clone(), path, headers, time })
     }
 
-    /// Processes what `InboxWait::send` brought, fetches the rest, refills KeyPackages, delivers.
+    /// Processes what `InboxWait::send` brought and fetches the rest; saves and hands out the events. Acknowledging
+    /// them at the hub, refilling KeyPackages, delivering and writing the storage come after, off the way of the
+    /// events: `after_sync`, else the next `sync_begin`. The hub is acknowledged only what was saved first.
     pub fn sync_end(
         &mut self,
         wait: &InboxWait,
         response: std::result::Result<Response, String>,
     ) -> Result<Vec<Event>> {
+        let mut saved_later = Vec::new();
         let received = response
             .map_err(Error::Network)
             .and_then(|response| match response.status {
                 // As `signed`: the same signature seen before (another process of this device): asked anew.
                 status::UNAUTHORIZED => self.receive_all(0).map(|()| false),
-                _ => self.inbox(response, wait.time),
+                _ => self.inbox(response, wait.time, true).map(|(more, ids)| {
+                    saved_later = ids;
+                    more
+                }),
             })
             .and_then(|more| if more { self.receive_all(0) } else { Ok(()) });
         // The wait is over: the inbox is up to date only if its answer was taken in.
         self.inbox_fresh_until = if received.is_ok() { (self.clock)() + INBOX_FRESH_MS } else { 0 };
-        let result = received
-            .and_then(|()| self.restart_lost())
-            .and_then(|()| self.refill())
-            .and_then(|()| self.deliver())
-            .and_then(|()| self.sync_storage_quietly());
-        if result.is_ok() {
-            self.refill_tokens();
+        // A guest does none of the work after (the app does): it only acknowledges.
+        if received.is_ok() && self.guest_events.is_none() {
+            self.after_due = true;
         }
-        self.finish_receiving(result)
+        let events = self.finish_receiving(received);
+        // Handed out only once saved: from now on the hub may forget them.
+        if events.is_ok() {
+            self.unacked.extend(saved_later);
+        }
+        events
+    }
+
+    /// The rest of a `sync`, once its events are handed over: acknowledges at the hub what it received (saved
+    /// before), and for the app (not a guest) restarts lost chats, refills KeyPackages and delivery tokens, delivers
+    /// the outbox, writes the storage. Without it the next `sync_begin` does it first. What it brings (rarely an
+    /// event) is saved and comes with the next call.
+    pub fn after_sync(&mut self) -> Result<()> {
+        let result = self.after_sync_inner();
+        let saved = self.persist();
+        result.and(saved)
+    }
+
+    fn after_sync_inner(&mut self) -> Result<()> {
+        self.acknowledge_inbox()?;
+        if !std::mem::take(&mut self.after_due) {
+            return Ok(());
+        }
+        self.restart_lost()?;
+        self.refill()?;
+        self.deliver()?;
+        self.sync_storage_quietly()?;
+        self.refill_tokens();
+        Ok(())
+    }
+
+    /// Writes a change of the storage (friends, blocks, the icon) to the hub now, rather than with the next
+    /// `sync_begin` or `maintenance`: for the app right after the change, beside the inbox's long wait. Quietly, as
+    /// there ("not now" leaves it for later).
+    pub fn write_storage(&mut self) -> Result<()> {
+        let result = self.sync_storage_quietly();
+        let saved = self.persist();
+        result.and(saved)
     }
 
     /// What the app runs when it comes to the foreground: receive, refill KeyPackages, update due chats.
@@ -2733,6 +2811,8 @@ impl Client {
     }
 
     fn maintenance_inner(&mut self) -> Result<()> {
+        // All of the work after a sync is done here.
+        self.after_due = false;
         self.deliver()?;
         self.receive_all(0)?;
         self.restart_lost()?;

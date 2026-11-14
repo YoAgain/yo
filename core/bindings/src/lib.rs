@@ -706,11 +706,25 @@ impl YoClient {
     }
 
     /// Waits up to `wait_s` seconds for mail and processes it: for the foreground, and the notification extension.
-    /// The wait does not hold the client: other calls run meanwhile.
+    /// The wait does not hold the client: other calls run meanwhile. Returns once what arrived is saved; the hub's
+    /// acknowledgement and the work after it go with `after_sync`, or first thing in the next `sync`.
     pub fn sync(&self, wait_s: u64) -> Result<Vec<YoEvent>, YoError> {
         let wait = self.with(|c| c.sync_begin(wait_s))??;
         let response = wait.send();
         events(self.with(|c| c.sync_end(&wait, response))?)
+    }
+
+    /// The rest of the last `sync`, after its events are handed over: the hub is told what arrived; for the app also
+    /// KeyPackages, the outbox, the storage, delivery tokens. The notification extension calls it once its
+    /// notification is out; the app's next `sync` does it itself.
+    pub fn after_sync(&self) -> Result<(), YoError> {
+        Ok(self.with(|c| c.after_sync())??)
+    }
+
+    /// Writes a change of the friends, blocks or icon to the hub now, not with the inbox's next answer: right after
+    /// `set_friend`, `remove_friend`, `set_blocked`, `set_app_icon`.
+    pub fn write_storage(&self) -> Result<(), YoError> {
+        Ok(self.with(|c| c.write_storage())??)
     }
 
     /// When the app comes to the foreground.
@@ -806,7 +820,7 @@ impl YoClient {
     }
 
     /// Adds a friend (by user id) to the stored list, or changes its name or colour. Kept at once; on its way to the
-    /// hub with the next `sync` or `maintenance`. Blocks go with `set_blocked`.
+    /// hub with `write_storage`, else the next `sync` or `maintenance`. Blocks go with `set_blocked`.
     pub fn set_friend(&self, user: String, name: Option<String>, color: Option<u8>) -> Result<(), YoError> {
         Ok(self.with(|c| c.set_friend(&user, name, color))??)
     }

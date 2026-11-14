@@ -1,6 +1,7 @@
 //! How fast a Yo goes: from the sender's tap (the app layer's `send_yo`, with the inbox's long wait running as in the
-//! app) to the hub's push request, and what the notification service does for one push (requests, time). Prints its
-//! numbers; the bounds are loose (a shared CI machine), the numbers are what the tests/README table shows.
+//! app) to the hub's push request, from the hub to the receiver's events (the app's long wait, the notification
+//! service), and what the notification service does for one push (requests, time). Prints its numbers; the bounds
+//! are loose (a shared CI machine), the numbers are what the tests/README table shows.
 
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
@@ -10,15 +11,21 @@ use yo_hub::config::{ApnsConfig, Config};
 use yo_tests::{random_u64, username, Http, TestHub};
 use yo_wire::api::PUSH_APNS;
 
-/// The app's HTTP: counts the requests and remembers their routes.
+/// The app's HTTP: counts the requests and remembers their routes; with `rtt`, each takes that much longer (half
+/// on the way there, half back), as a phone's.
 struct App {
     http: Arc<Http>,
     routes: Mutex<Vec<String>>,
+    rtt: Duration,
 }
 
 impl App {
     fn new(hub: &TestHub) -> Arc<Self> {
-        Arc::new(App { http: Http::new(hub.url()), routes: Mutex::new(Vec::new()) })
+        App::with_rtt(hub, Duration::ZERO)
+    }
+
+    fn with_rtt(hub: &TestHub, rtt: Duration) -> Arc<Self> {
+        Arc::new(App { http: Http::new(hub.url()), routes: Mutex::new(Vec::new()), rtt })
     }
 
     fn take(&self) -> Vec<String> {
@@ -31,7 +38,10 @@ impl HttpTransport for App {
         let route: String = path.split('/').take(3).collect::<Vec<_>>().join("/");
         self.routes.lock().unwrap().push(format!("{method} {}", route.split('?').next().unwrap_or("")));
         let headers: Vec<(String, String)> = headers.into_iter().map(|h| (h.name, h.value)).collect();
-        match yo_core::Transport::request(self.http.as_ref(), &method, &path, &headers, &body) {
+        std::thread::sleep(self.rtt / 2);
+        let answer = yo_core::Transport::request(self.http.as_ref(), &method, &path, &headers, &body);
+        std::thread::sleep(self.rtt / 2);
+        match answer {
             Ok(r) => HttpResult { status: r.status, body: r.body, error: None },
             Err(e) => HttpResult { status: 0, body: Vec::new(), error: Some(e) },
         }
@@ -180,4 +190,74 @@ fn the_notification_service_reads_a_push_in_few_requests() {
     println!("notification service: {}, requests {requests:?}", percentiles(took));
     let _ = app.take();
     assert!(requests.len() <= 3, "{requests:?}");
+}
+
+/// The time from the hub storing a Yo (the sender's delivery answered, on the same machine) to the receiver's events:
+/// in the app (its long wait, as `Inbox.listen`, each batch acknowledged as stored) and in the notification service
+/// (the state opened as a guest, the inbox read once), without and with 40 ms of round trip for the receiver.
+#[test]
+fn a_yo_reaches_the_receiver_within_one_way_of_the_hub() {
+    let hub = hub();
+    for rtt in [0, 40] {
+        let rtt = Duration::from_millis(rtt);
+        let n = random_u64() % 1_000_000_000;
+        let (name_a, name_b) = (username(n), username(n + 1));
+        let a = client(App::new(&hub), Arc::new(File::default()), &name_a, "");
+        let file = Arc::new(File::default());
+        let b = client(App::with_rtt(&hub, rtt), file.clone(), &name_b, "a1b2c3");
+        b.acknowledge_explicitly();
+        a.send_yo(name_b.clone()).unwrap();
+        b.acknowledge(b.sync(0).unwrap());
+        // The app: its long wait, each batch taken in and acknowledged, then the next wait.
+        let (arrived, arrivals) = std::sync::mpsc::channel();
+        let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let (stopped, waiting) = (stop.clone(), b.clone());
+        let listener = std::thread::spawn(move || {
+            while !stopped.load(Ordering::Relaxed) {
+                let Ok(events) = waiting.sync(1) else { continue };
+                for _ in &events {
+                    let _ = arrived.send(Instant::now());
+                }
+                waiting.acknowledge(events);
+            }
+        });
+        std::thread::sleep(Duration::from_millis(300));
+        let mut app = Vec::new();
+        for _ in 0..20 {
+            a.send_yo(b.user_id()).unwrap();
+            let stored = Instant::now();
+            let at = arrivals.recv_timeout(Duration::from_secs(5)).expect("arrived");
+            app.push(ms(at.saturating_duration_since(stored)));
+            std::thread::sleep(Duration::from_millis(300));
+        }
+        stop.store(true, Ordering::Relaxed);
+        listener.join().unwrap();
+        println!("rtt {} ms, stored to the app's events: {}", rtt.as_millis(), percentiles(app.clone()));
+        // The notification service: a guest of the state the app saved.
+        let mut guest = Vec::new();
+        let mut after = Vec::new();
+        for _ in 0..10 {
+            a.send_yo(b.user_id()).unwrap();
+            let stored = Instant::now();
+            let blob = file.blob.lock().unwrap().clone();
+            let nse = YoClient::restore_guest(App::with_rtt(&hub, rtt), file.clone(), vec![7; 32], blob).unwrap();
+            let events = nse.sync(0).unwrap();
+            guest.push(ms(stored.elapsed()));
+            assert_eq!(events.len(), 1);
+            nse.after_sync().unwrap();
+            after.push(ms(stored.elapsed()));
+            drop(nse);
+            // The app takes it in as ever.
+            let blob = file.blob.lock().unwrap().clone();
+            let again = YoClient::restore(App::new(&hub), file.clone(), vec![7; 32], blob).unwrap();
+            again.acknowledge_events();
+            again.sync(0).unwrap();
+            again.acknowledge_events();
+            again.after_sync().unwrap();
+        }
+        println!("rtt {} ms, stored to the guest's events (opened, read): {}", rtt.as_millis(), percentiles(guest));
+        println!("rtt {} ms, and acknowledged (after_sync): {}", rtt.as_millis(), percentiles(after));
+        app.sort_by(f64::total_cmp);
+        assert!(app[app.len() * 9 / 10] < 250.0 + ms(rtt) * 2.0, "{app:?}");
+    }
 }

@@ -39,6 +39,7 @@ messages a fault allowed to be lost that arrived anyway.
 | 14 | 1500 | 1200 | 426,600 | 294,368 (245/s) | 290,640, **0 lost** | 84,508 (4%), 13,283 (3%) | 5,072, 2,066, 5 | 2, both in the driver (since fixed) | 2.8 GB |
 | 16 | 2500 | 900 | 403,786 | 320,643 (354/s) | 318,247, **0 lost** | 39,795, 7,088 | 3,943, 1,561, 3 | 1: a whois raced a name being taken again (the driver's directory a moment behind) | 4.9 GB |
 | 21 | 400 | 300 | 77,421 | 58,424 (193/s) | 57,550, **0 lost** | 6,506, 1,498 | 823, 337, 2 | 0 (after the core review, finding 12) | 0.9 GB |
+| 31 | 300 | 180 | 43,068 | 34,484 (191/s) | 34,325, **0 lost** | 3,647, 820 | 394, 141, 2 | 0 (events handed over before the ack, `after_sync` half the time) | 0.7 GB |
 
 Against the dev hub (seed 101): 15 of 16 accounts registered over 52 minutes (its limit, 10 per address per hour;
 one real `503` from the hub on a registration), then 492 messages sent and 144 received before the driver stood still:

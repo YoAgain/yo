@@ -141,6 +141,7 @@ fn a_full_mailbox_refuses_until_it_is_read_and_strangers_cannot_rate_limit_it() 
     a.send_yo(&pb).unwrap();
     assert_eq!(a.pending(), 1);
     assert_eq!(yos(&b.sync(0).unwrap()), 0);
+    b.after_sync().unwrap();
     a.sync(0).unwrap();
     assert_eq!(a.pending(), 0);
     assert_eq!(yos(&b.sync(0).unwrap()), 1);
