@@ -16,7 +16,7 @@ extension Color {
     0x3498DB,  // peter river
     0x34495E,  // wet asphalt
     0x16A085,  // green sea
-    0xE67E22,  // carrot: white on sunflower (1.7:1) could not be read
+    0xF1C40F,  // sunflower
     0x2980B9,  // belize hole
     0x8E44AD,  // wisteria
   ].map(Color.init(hex:))
