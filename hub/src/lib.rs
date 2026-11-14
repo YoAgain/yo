@@ -79,6 +79,23 @@ impl Drop for Fetching<'_> {
     }
 }
 
+/// A long poll waiting for mail (`Hub::waiter`).
+struct Waiter<'a> {
+    hub: &'a Hub,
+    device: DeviceId,
+    notify: Arc<Notify>,
+}
+
+impl Drop for Waiter<'_> {
+    fn drop(&mut self) {
+        let mut waiting = self.hub.waiting.lock().unwrap_or_else(PoisonError::into_inner);
+        // Two references: the map's and ours. Nobody else waits.
+        if Arc::strong_count(&self.notify) == 2 {
+            waiting.remove(&self.device);
+        }
+    }
+}
+
 pub fn now_ms() -> u64 {
     SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_millis() as u64
 }
@@ -273,6 +290,12 @@ impl Hub {
             failed.push(("blobs without their file", missing));
         }
         Ok(failed)
+    }
+
+    /// Devices with a long poll waiting, and with inbox requests under way: for tests and the operator.
+    pub fn under_way(&self) -> (usize, usize) {
+        let waiting = self.waiting.lock().unwrap_or_else(PoisonError::into_inner).len();
+        (waiting, self.fetching.lock().unwrap_or_else(PoisonError::into_inner).len())
     }
 
     /// How many devices name each app (`Yo-App`; "" for none): for tests and the operator.
@@ -539,21 +562,16 @@ impl Hub {
         Some(Fetching { hub: self, device })
     }
 
-    fn waiter(&self, device: &DeviceId) -> Arc<Notify> {
-        self.waiting.lock().unwrap_or_else(PoisonError::into_inner).entry(*device).or_default().clone()
+    /// A long poll's wait for mail to `device`; the device's entry goes with its last waiter, also when the request is
+    /// cut off.
+    fn waiter(&self, device: DeviceId) -> Waiter<'_> {
+        let notify = self.waiting.lock().unwrap_or_else(PoisonError::into_inner).entry(device).or_default().clone();
+        Waiter { hub: self, device, notify }
     }
 
     fn wake_waiters(&self, device: &DeviceId) {
         if let Some(notify) = self.waiting.lock().unwrap_or_else(PoisonError::into_inner).get(device) {
             notify.notify_waiters();
-        }
-    }
-
-    fn forget_waiter(&self, device: &DeviceId, notify: Arc<Notify>) {
-        let mut waiting = self.waiting.lock().unwrap_or_else(PoisonError::into_inner);
-        // Two references: the map's and ours. Nobody else waits.
-        if Arc::strong_count(&notify) == 2 {
-            waiting.remove(device);
         }
     }
 
@@ -840,22 +858,16 @@ async fn inbox(State(hub): Hubs, method: Method, uri: Uri, headers: HeaderMap) -
         .min(limits::MAX_WAIT_S);
     let mut items = hub.db.fetch(&device.device_id, MAX_INBOX_FETCH)?;
     if items.is_empty() && wait_s > 0 {
-        let notify = hub.waiter(&device.device_id);
-        let fetched = async {
-            let notified = notify.notified();
-            tokio::pin!(notified);
-            notified.as_mut().enable();
-            // Mail that came between the first fetch and `enable` is found here.
-            let items = hub.db.fetch(&device.device_id, MAX_INBOX_FETCH)?;
-            if !items.is_empty() {
-                return Ok::<_, Refusal>(items);
-            }
+        let waiter = hub.waiter(device.device_id);
+        let notified = waiter.notify.notified();
+        tokio::pin!(notified);
+        notified.as_mut().enable();
+        // Mail that came between the first fetch and `enable` is found here.
+        items = hub.db.fetch(&device.device_id, MAX_INBOX_FETCH)?;
+        if items.is_empty() {
             let _ = tokio::time::timeout(Duration::from_secs(wait_s), notified).await;
-            Ok(hub.db.fetch(&device.device_id, MAX_INBOX_FETCH)?)
+            items = hub.db.fetch(&device.device_id, MAX_INBOX_FETCH)?;
         }
-        .await;
-        hub.forget_waiter(&device.device_id, notify);
-        items = fetched?;
     }
     let inbox = api::Inbox {
         key_packages_left: hub.db.key_packages_left(&device.device_id)?,
