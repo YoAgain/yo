@@ -7,6 +7,7 @@
 // link to this file).
 import Foundation
 import UserNotifications
+import YoCore
 
 enum ShareBridge {
   /// A friend as the extension shows them: the name, the colour, and whom the Yo goes to.
@@ -110,6 +111,37 @@ enum ShareBridge {
       case nil: return "Yo from \(name)"
       }
     }
+  }
+
+  /// The Yos among `events`, one per sender, the newest sender first, as a notification names them. What Yo does not
+  /// show yet (a text, a link, a place) comes as a Yo, as the app shows it (Inbox).
+  static func yos(in events: [YoEvent], client: YoClient) -> [Yos] {
+    var senders: [String: (count: Int, sentAtMs: UInt64, kind: MediaFile.Kind?)] = [:]
+    for event in events {
+      guard case .message(let user, let sentAtMs, let message) = event else { continue }
+      let kind: MediaFile.Kind? =
+        switch message {
+        case .photo: .photo
+        case .video: .video
+        default: nil
+        }
+      let before = senders[user]
+      let newer = before.map { sentAtMs >= $0.sentAtMs } ?? true
+      senders[user] = ((before?.count ?? 0) + 1, newer ? sentAtMs : before!.sentAtMs, newer ? kind : before!.kind)
+    }
+    return senders.sorted { $0.value.sentAtMs > $1.value.sentAtMs }.map { user, yos in
+      Yos(name: name(of: user, client: client), user: user, count: yos.count, kind: yos.kind, id: "\(user)/\(yos.sentAtMs)")
+    }
+  }
+
+  /// The name as the app's list shows it (the friends it published), else as the core knows them.
+  static func name(of user: String, client: YoClient) -> String {
+    let owner = Hub.bytes(client.userId())?.base64EncodedString()
+    if let list = readList(), list.owner == owner, let friend = list.friends.first(where: { $0.to == user }) {
+      return friend.name
+    }
+    let contact = client.contacts().first { $0.user == user }
+    return contact?.handles.first ?? contact?.name ?? "Someone"
   }
 
   /// A Yo notification, written by the notification service (a push) or by the app (Yos it took while in the

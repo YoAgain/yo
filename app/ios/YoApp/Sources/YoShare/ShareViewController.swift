@@ -171,16 +171,21 @@ final class ShareModel {
     var left = made[...]
     let client = Guest.open(within: 5)
     if let client, ownerOf(client) == owner {
+      // Yos that came while sending: saved for the app, which has not seen them, and their push's notification
+      // service will find them read. Their notification is written here (`notify`).
+      var received: [YoEvent] = []
+      defer { notify(received, client: client) }
       while let file = left.first, !stop.isSet {
         do {
           let sealed = try sealMedia(
             plain: file.data, width: UInt16(clamping: file.width), height: UInt16(clamping: file.height))
           let chat = try client.mediaChat(to: friend.to)
+          received += chat.events
           try client.uploadMedia(media: sealed.media, ciphertext: sealed.ciphertext, fetches: chat.fetches)
           // Once the hub has the blob the Yo goes: offline it waits in the core's own outbox, sent by the app later.
           switch file.kind {
-          case .photo: _ = try client.sendPhoto(to: friend.to, media: sealed.media)
-          case .video: _ = try client.sendVideo(to: friend.to, media: sealed.media, durationMs: file.durationMs)
+          case .photo: received += try client.sendPhoto(to: friend.to, media: sealed.media)
+          case .video: received += try client.sendVideo(to: friend.to, media: sealed.media, durationMs: file.durationMs)
           }
           sent += 1
         } catch let error as YoError where mediaRetryLater(error: error) {
@@ -195,6 +200,15 @@ final class ShareModel {
     guard !left.isEmpty, !stop.isSet else { return .sent(sent) }
     let put = left.reduce(into: 0) { count, file in if ShareBridge.put(file, for: friend, of: owner) { count += 1 } }
     return put > 0 ? .queued(sent + put) : .sent(sent)
+  }
+
+  /// A notification for the Yos received while sending, as the notification service writes it.
+  nonisolated private static func notify(_ events: [YoEvent], client: YoClient) {
+    let yos = ShareBridge.yos(in: events, client: client)
+    guard let newest = yos.first else { return }
+    let content = UNMutableNotificationContent()
+    ShareBridge.yo(content, yos)
+    UNUserNotificationCenter.current().add(UNNotificationRequest(identifier: newest.id, content: content, trigger: nil))
   }
 
   /// The account the state is of, as the list names it (its user id's bytes in base64).
