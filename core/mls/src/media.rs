@@ -100,10 +100,10 @@ impl Upload {
     }
 }
 
-/// Whether an upload's refusal means "later": the quota, the hub's room, no network.
+/// Whether an upload's refusal means "later": the quota, the hub's room, no network, a state that did not save.
 pub fn retry_later(error: &Error) -> bool {
     match error {
-        Error::Network(_) => true,
+        Error::Network(_) | Error::Save(_) => true,
         Error::Refused(status) => {
             *status == status::RATE_LIMITED || *status == status::INSUFFICIENT_STORAGE || *status >= 500
         }
