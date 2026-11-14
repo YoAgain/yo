@@ -248,3 +248,21 @@ fn a_restart_brings_back_a_message_lost_before_a_later_one() {
     a.send(b.user_id(), text("on")).unwrap();
     assert_eq!(texts(&b.sync(0).unwrap()), ["on"]);
 }
+
+/// A new last resort retired the one before when it was made, not when the hub took it: an upload that failed
+/// and went a month later deleted the old one's keys at once, though the hub had handed it out until then.
+#[test]
+fn a_last_resort_is_retired_only_once_its_replacement_is_at_the_hub() {
+    const DAY: u64 = 24 * 3600 * 1000;
+    let hub = TestHub::start();
+    let http = Http::new(hub.url());
+    let mut a = by_name(http.clone(), &format!("Last{}", random_u64() % 100_000));
+    let clock = movable_clock(&mut a);
+    clock.store(31 * DAY, Ordering::Relaxed);
+    http.fault("/v1/keypackages", Fault::Answer(503));
+    assert_eq!(a.maintenance(), Err(Error::Refused(503)));
+    let kept = a.own_key_packages();
+    clock.store(63 * DAY, Ordering::Relaxed);
+    a.maintenance().unwrap();
+    assert_eq!(a.own_key_packages(), kept + 1, "the one the hub had until now is kept");
+}
