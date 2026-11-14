@@ -1,24 +1,32 @@
-//! What a device keeps (spec 2): its keys, contacts, chats, the outbox and the MLS store, sealed as one blob under
-//! a key the platform holds in its keychain.
+//! What a device keeps (spec 2): its keys, contacts, the outbox and the session store, sealed as one blob under a
+//! key the platform holds in its keychain.
 
 use crate::error::{Error, Result};
-use crate::profile::Entries;
+use crate::identity::Key;
+use crate::signal::Entries;
 use chacha20poly1305::aead::{Aead, KeyInit, Payload};
 use chacha20poly1305::ChaCha20Poly1305;
-use openmls_basic_credential::SignatureKeyPair;
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, VecDeque};
 use tls_codec::{TlsDeserializeBytes, TlsSerialize, TlsSize, VLBytes};
 use yo_wire::DeviceId;
 use zeroize::Zeroize;
 
-const STATE_VERSION: u8 = 3;
-const AAD: &[u8] = b"yo state v1";
+const STATE_VERSION: u8 = 1;
+const AAD: &[u8] = b"yo state v2";
+
+/// A device of a user as this device knows it: its key, and its number among the user's devices, as the hub gave it
+/// (spec 4.1): the session's address.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Slot {
+    pub key: Key,
+    pub slot: u8,
+}
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Contact {
     /// The account key pinned on first contact, or the one confirmed after a change.
-    pub account_key: [u8; 32],
+    pub account_key: Key,
     pub name: Option<String>,
     pub verified: bool,
     /// The key changed after the contact was verified: nothing is sent until the person confirms it (spec 3.4).
@@ -29,42 +37,50 @@ pub struct Contact {
     pub handles: Vec<String>,
     /// The hub no longer knows the user (the account was deleted, or its name released): nothing more can reach it.
     /// Its handles are forgotten, so a name it had finds whoever has it now.
-    #[serde(default)]
     pub gone: bool,
+    /// The user's devices as the hub named them last (spec 4.4).
+    pub devices: Vec<Slot>,
+    /// Something was sent to the user or came from them: a chat the app shows.
+    pub chat: bool,
+    /// The own name changed and is not told to the user yet (`set_name`): it goes when it can.
+    pub profile_due: bool,
+    /// The plaintexts of the last messages sent to the user: sent again when it asks (spec 4.6).
+    pub sent: VecDeque<Vec<u8>>,
+    /// Something came from the user since the last receipt (spec 4.5).
+    pub receipt_due: bool,
+    /// Its devices whose message did not open here: a new session with each, and a retry (spec 4.6).
+    pub retry: Vec<Key>,
+    /// When a retry was asked of the user last (wall clock, ms).
+    pub retry_at: u64,
+    /// When the user's retry was answered last (wall clock, ms).
+    pub resent_at: u64,
+    /// When the hub last named devices of the user without prekeys (wall clock, ms; 0: never, or they have them
+    /// now): an app too old for sessions, which must be updated. What waits for it stays (spec 4.2).
+    pub outdated_at: u64,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct Chat {
-    /// The other account's user id (hex).
-    pub peer: String,
-    /// The epoch this device came into the group at: what was sent before is not for it.
-    pub joined_epoch: u64,
-    pub last_update_ms: u64,
-    pub sent_since_update: u32,
-    /// Joined by Welcome and not updated since.
-    pub needs_update: bool,
-    /// A commit sent to the hub whose answer never came: it may have been accepted. Retried as it is until the hub
-    /// answers; meanwhile the group holds it as its pending commit and nothing is sent in it.
-    pub inflight: Option<Inflight>,
-    /// The plaintexts of the last messages sent in this chat: sent again in a restarted chat (spec 4.9).
-    #[serde(default)]
-    pub sent: VecDeque<Vec<u8>>,
-    /// The `sent_at` of the last message received from the peer here: what a restart tells it.
-    #[serde(default)]
-    pub last_seen_ms: u64,
-    /// This device can no longer follow the group (a commit it lacks is gone from the hub, or the hub refuses its
-    /// commits): restarted at the next chance (spec 4.9). What waits to go in it goes in the new group.
-    #[serde(default)]
-    pub lost: bool,
-    /// Made, or taken over, by a restart: it replaces the older chats with the peer.
-    #[serde(default)]
-    pub restarted: bool,
-    /// The own name changed and is not told here yet (`set_name`): it goes when the chat can take it.
-    #[serde(default)]
-    pub profile_due: bool,
-    /// Made here and not yet registered at the hub (spec 4.2): its Welcome and messages wait in the outbox.
-    #[serde(default)]
-    pub creating: Option<Creating>,
+impl Contact {
+    /// A contact known by its user id only, no key pinned yet.
+    pub fn unknown() -> Contact {
+        Contact {
+            account_key: [0; 32],
+            name: None,
+            verified: false,
+            unconfirmed: false,
+            blocked: false,
+            handles: Vec::new(),
+            gone: false,
+            devices: Vec::new(),
+            chat: false,
+            profile_due: false,
+            sent: VecDeque::new(),
+            receipt_due: false,
+            retry: Vec::new(),
+            retry_at: 0,
+            resent_at: 0,
+            outdated_at: 0,
+        }
+    }
 }
 
 /// This device's registration (`POST /v1/register`, spec 6.4), saved before it leaves and kept until the hub
@@ -76,51 +92,35 @@ pub struct Registering {
     pub sent: bool,
 }
 
-/// A group's registration at the hub (`POST /v1/groups`), sent again until the hub answers.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct Creating {
-    pub request: Vec<u8>,
-    /// Sent before: a `409` now is that try's answer, lost.
-    pub sent: bool,
-}
-
-/// A commit on its way to the hub, with what to deliver once it is accepted.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct Inflight {
-    /// The request to `POST /v1/groups/{id}/commit`, as sent (it carries the commit's envelope).
-    pub request: Vec<u8>,
-    /// The commit's envelope (padded, not sealed: the hub keeps it for the group), sealed to every account in the
-    /// group when accepted.
-    pub commit: Vec<u8>,
-    /// A repair's Welcome: for the user whose devices it adds (hex user id, the MLS message, sealed when queued).
-    pub welcome: Option<(String, Vec<u8>)>,
-}
-
-/// A KeyPackage this device made: its private keys stay in the MLS store until they are deleted here.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct OwnKeyPackage {
-    pub hash_ref: Vec<u8>,
-    pub created_at: u64,
-    pub last_resort: bool,
-    /// When a newer last resort replaced this one.
-    pub retired_at: Option<u64>,
-}
-
-/// An envelope for one user, waiting for the hub to take it.
+/// A message for one user, waiting for the hub to take it (spec 4.4).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Outgoing {
-    /// Its place in the order of everything this device sent: kept across repairs and restarts.
+    /// Its place in the order of everything this device sent.
     pub seq: u64,
-    /// The user it goes to (hex).
+    /// The user it goes to (hex): a contact, or this account (a copy for its other devices).
     pub user: String,
-    /// The group it belongs to (hex): its device check is computed from the group when it is sent (spec 4.6).
-    pub group: String,
-    pub envelope: Vec<u8>,
-    /// The user's devices it was encrypted for. When none of them is in the group any more (a repair replaced them),
-    /// a message is encrypted anew in its place and anything else is of no use (spec 4.6).
-    pub made_for: Vec<[u8; 32]>,
-    /// For an application message: its plaintext, to encrypt it anew.
-    pub plaintext: Option<Vec<u8>>,
+    /// The session plaintext (`envelope::Plain`), sealed in the state: encrypted for the user's devices as they are
+    /// when it goes.
+    pub plain: Vec<u8>,
+    /// Its envelope once encrypted, with the account key and devices it was made for: made again if they changed.
+    pub envelope: Option<Vec<u8>>,
+    pub made_for: Vec<Key>,
+}
+
+/// This device's prekeys (spec 4.1): the ids handed out so far, when the signed and last resort ones were made, the
+/// hub's count, an upload under way.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Prekeys {
+    pub next_id: u32,
+    pub signed_at: u64,
+    /// One-time prekeys of the scarcer kind the hub still has.
+    pub left: u32,
+    /// Made and not yet taken by the hub: sent again as it is until it answers (`PUT /v1/prekeys`, encoded), and
+    /// how many one-time prekeys of each kind it brings.
+    pub upload: Option<(Vec<u8>, u32)>,
+    /// Signed prekeys (`sp`) and last resorts (`kl`) replaced at the hub, with when (wall clock, ms): their private keys
+    /// go a month later, when no session started with them can still wait there.
+    pub retired: Vec<(String, u32, u64)>,
 }
 
 /// An event as the state keeps it.
@@ -180,14 +180,6 @@ pub enum StoredContent {
     Unknown(u16),
 }
 
-/// A refill's upload (`PUT /v1/key-packages`, encoded) and what it brings.
-#[derive(Clone, Serialize, Deserialize)]
-pub struct Refill {
-    pub body: Vec<u8>,
-    pub fresh: u32,
-    pub last_resort: bool,
-}
-
 #[derive(Clone, Serialize, Deserialize)]
 pub struct State {
     /// The own user id (hex), as the hub gave it.
@@ -197,14 +189,19 @@ pub struct State {
     pub auth_secret: [u8; 32],
     /// The hub's name for this device's inbox: never given to other users.
     pub device_id: DeviceId,
+    /// Its name among the account's devices, which senders encrypt for and the certificate vouches for (spec 3).
+    pub device_key: Key,
+    /// Its number among the account's devices, as the hub gave it at registration: its sessions' address.
+    pub device_number: u8,
     pub certificate: Vec<u8>,
-    pub signer: SignatureKeyPair,
+    /// Its registration id in its sessions.
+    pub registration_id: u32,
     pub name: Option<String>,
     /// By hex user id.
     pub contacts: BTreeMap<String, Contact>,
-    /// By hex group id.
-    pub chats: BTreeMap<String, Chat>,
-    /// Envelopes not yet taken by the hub, in order.
+    /// The account's other devices, as this device knows them (spec 4.4).
+    pub own: Vec<Slot>,
+    /// Messages not yet taken by the hub, in order.
     pub outbox: VecDeque<Outgoing>,
     pub next_seq: u64,
     /// What happened and the app has not been handed yet: saved with the state, so nothing received is lost to a
@@ -213,55 +210,34 @@ pub struct State {
     /// Handed to the app by the last call: kept until the next call, which acknowledges them. After a crash they come
     /// again: once in normal operation, at least once across a crash.
     pub handed: Vec<StoredEvent>,
-    /// Hashes of envelopes already processed, against redelivery.
+    /// Hashes of session messages already processed, against redelivery.
     pub seen: VecDeque<[u8; 32]>,
-    /// Groups whose Welcome came from a key that is no user's current one: what follows in them is discarded.
-    pub ignored: VecDeque<[u8; 32]>,
-    pub key_packages_left: u32,
-    pub key_packages: Vec<OwnKeyPackage>,
-    pub last_resort_at: u64,
-    /// KeyPackages made and not yet taken by the hub: sent again as they are until it answers, never made anew.
-    #[serde(default)]
-    pub refill: Option<Refill>,
+    pub prekeys: Prekeys,
     /// The time of the last signed request (spec 6.2): the next is signed later, whichever process signs it.
-    #[serde(default)]
     pub signed_until: u64,
     /// The account's storage as this device has it (spec 6.9), merged with the hub's.
-    #[serde(default)]
     pub storage: crate::storage::Storage,
     /// The hub's version the storage was last written or read as.
-    #[serde(default)]
     pub storage_version: u64,
     /// Changed here since it was last written.
-    #[serde(default)]
     pub storage_dirty: bool,
     /// When the hub last held all of it (wall clock, ms): written, or fetched with nothing left to write. 0: not yet.
-    #[serde(default)]
     pub storage_saved_at: u64,
     /// Fetched from the hub on this device (once, before the first message is received).
-    #[serde(default)]
     pub storage_fetched: bool,
     /// The time of the last message sent: each later one strictly later.
-    #[serde(default)]
     pub last_sent_ms: u64,
-    /// Hashes of the last messages received (sender and plaintext): a copy sent again after a restart is skipped.
-    #[serde(default)]
+    /// Hashes of the last messages received (sender and plaintext): a copy sent again on a retry is skipped.
     pub received: VecDeque<[u8; 32]>,
     /// Privacy Pass tokens for deliveries (spec 6.10): the hub's key they were made for (hex), and the tokens, the
     /// oldest first (`tokens::kept`).
-    #[serde(default)]
     pub token_key: Option<String>,
-    #[serde(default)]
     pub tokens: VecDeque<String>,
-    /// No issuance is asked for before then (wall clock, ms): after one failed (an old hub without tokens, its limit,
-    /// no network).
-    #[serde(default)]
+    /// No issuance is asked for before then (wall clock, ms): after one failed (its limit, no network).
     pub tokens_after: u64,
     /// The hub refused a token: its key is asked for at the next refill, whatever the stash.
-    #[serde(default)]
     pub tokens_check: bool,
     /// This device's registration while the hub has not answered it: the user id is empty until then.
-    #[serde(default)]
     pub registering: Option<Registering>,
 }
 
@@ -272,32 +248,33 @@ impl Drop for State {
     }
 }
 
-/// One entry of the MLS store, TLS-encoded: the bulk of the state, kept compact.
+/// One record of the session store, TLS-encoded: the bulk of the state, kept compact.
 #[derive(Debug, TlsSerialize, TlsDeserializeBytes, TlsSize)]
 struct Entry {
     key: VLBytes,
     value: VLBytes,
 }
 
-/// The plaintext: version, the device state as JSON (small), the MLS store as TLS (large).
+/// The plaintext: version, the device state as JSON (small), the session store as TLS (large).
 #[derive(Debug, TlsSerialize, TlsDeserializeBytes, TlsSize)]
 struct Plain {
     version: u8,
     state: VLBytes,
-    mls: Vec<Entry>,
+    records: Vec<Entry>,
 }
 
-pub fn seal(state: &State, mls: Entries, key: &[u8; 32]) -> Vec<u8> {
-    let mut entries: Vec<_> = mls.into_iter().collect();
-    entries.sort();
+pub fn seal(state: &State, records: Entries, key: &[u8; 32]) -> Vec<u8> {
     let plain = Plain {
         version: STATE_VERSION,
         state: serde_json::to_vec(state).expect("state encodes").into(),
-        mls: entries.into_iter().map(|(key, value)| Entry { key: key.into(), value: value.into() }).collect(),
+        records: records
+            .into_iter()
+            .map(|(key, value)| Entry { key: key.into_bytes().into(), value: value.into() })
+            .collect(),
     };
     let mut bytes = yo_wire::encode(&plain);
     wipe(plain.state);
-    for entry in plain.mls {
+    for entry in plain.records {
         wipe(entry.value);
     }
     let nonce: [u8; 12] = crate::identity::random();
@@ -325,10 +302,12 @@ pub fn open(blob: &[u8], key: &[u8; 32]) -> Result<(State, Entries)> {
         return Err(Error::State);
     }
     let state: std::result::Result<State, _> = serde_json::from_slice(plain.state.as_slice());
-    let entries =
-        std::mem::take(&mut plain.mls).into_iter().map(|entry| (entry.key.into(), entry.value.into())).collect();
+    let entries = std::mem::take(&mut plain.records)
+        .into_iter()
+        .map(|entry| Ok((String::from_utf8(entry.key.into()).map_err(|_| Error::State)?, entry.value.into())))
+        .collect::<Result<Entries>>();
     wipe(plain.state);
-    Ok((state.map_err(|_| Error::State)?, entries))
+    Ok((state.map_err(|_| Error::State)?, entries?))
 }
 
 fn wipe(bytes: VLBytes) {

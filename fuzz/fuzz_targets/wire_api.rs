@@ -11,16 +11,15 @@ fn canonical<T: tls_codec::DeserializeBytes + tls_codec::Serialize>(data: &[u8])
 }
 
 fuzz_target!(|data: &[u8]| {
-    canonical::<KeyPackages>(data);
+    canonical::<Prekeys>(data);
+    canonical::<Bundle>(data);
     canonical::<Lookup>(data);
     canonical::<LookupResult>(data);
     canonical::<LookupNamed>(data);
     canonical::<Push>(data);
     canonical::<Inbox>(data);
     canonical::<Ack>(data);
-    canonical::<GroupCreate>(data);
-    canonical::<Commit>(data);
-    canonical::<Epoch>(data);
+    canonical::<Devices>(data);
     canonical::<Register>(data);
     canonical::<Backup>(data);
     if let Ok(backup) = yo_wire::decode::<Backup>(data) {

@@ -18,8 +18,10 @@ pub const TYPE_PROFILE: u16 = 2;
 pub const TYPE_TEXT: u16 = 3;
 pub const TYPE_LINK: u16 = 4;
 pub const TYPE_LOCATION: u16 = 5;
-/// Silent: the chat was restarted in this group (spec 4.9).
-pub const TYPE_RESTART: u16 = 6;
+/// Silent: a delivery receipt, the answer that moves the sender's ratchet on (spec 4.5).
+pub const TYPE_RECEIPT: u16 = 6;
+/// Silent: a message from the receiver did not open here; it sends again what it keeps (spec 4.6).
+pub const TYPE_RETRY: u16 = 7;
 
 pub const MAX_NAME_LEN: usize = 32;
 pub const MAX_TEXT_LEN: usize = 4096;
@@ -27,7 +29,7 @@ pub const MAX_URL_LEN: usize = 2048;
 const CONTENT_VERSION: u16 = 1;
 
 /// A photo or video a Yo carries: a blob at the hub (spec 6.8), encrypted under `key` (ChaCha20-Poly1305, nonce
-/// zero: the key is used once); `sha256` and `size` are the ciphertext's. Only the members of the chat learn the key.
+/// zero: the key is used once); `sha256` and `size` are the ciphertext's. Only the receiver's devices learn the key.
 #[derive(Clone, PartialEq, Eq)]
 pub struct Media {
     pub id: BlobId,
@@ -69,11 +71,10 @@ pub enum Content {
         lat_e7: i32,
         lon_e7: i32,
     },
-    /// The sender restarted the chat in this group, its old one lost (spec 4.9): what it saw last of the
-    /// receiver's messages, by their `sent_at`. Never shown.
-    Restart {
-        last_seen_ms: u64,
-    },
+    /// Something from the receiver arrived (spec 4.5). Never shown.
+    Receipt,
+    /// Something from the receiver did not open: send again (spec 4.6). Never shown.
+    Retry,
     /// A type this version does not know: newer apps may send it.
     Unknown(u16),
 }
@@ -167,11 +168,6 @@ struct Text {
 }
 
 #[derive(TlsSerialize, TlsDeserializeBytes, TlsSize)]
-struct Restart {
-    last_seen: u64,
-}
-
-#[derive(TlsSerialize, TlsDeserializeBytes, TlsSize)]
 struct Location {
     lat_e7: u32,
     lon_e7: u32,
@@ -207,7 +203,8 @@ impl Message {
             Content::Location { lat_e7, lon_e7 } => {
                 (TYPE_LOCATION, crate::encode(&Location { lat_e7: *lat_e7 as u32, lon_e7: *lon_e7 as u32 }))
             }
-            Content::Restart { last_seen_ms } => (TYPE_RESTART, crate::encode(&Restart { last_seen: *last_seen_ms })),
+            Content::Receipt => (TYPE_RECEIPT, Vec::new()),
+            Content::Retry => (TYPE_RETRY, Vec::new()),
             Content::Unknown(_) => return Err(Error::Unsupported),
         };
         Ok(crate::encode(&Wire { version: CONTENT_VERSION, sent_at: self.sent_at_ms, kind, body: body.into() }))
@@ -228,7 +225,9 @@ impl Message {
                 let Location { lat_e7, lon_e7 } = crate::decode(body)?;
                 Content::Location { lat_e7: lat_e7 as i32, lon_e7: lon_e7 as i32 }
             }
-            TYPE_RESTART => Content::Restart { last_seen_ms: crate::decode::<Restart>(body)?.last_seen },
+            TYPE_RECEIPT | TYPE_RETRY if !body.is_empty() => return Err(Error::Format),
+            TYPE_RECEIPT => Content::Receipt,
+            TYPE_RETRY => Content::Retry,
             other => Content::Unknown(other),
         };
         Ok(Message { sent_at_ms: wire.sent_at, content })
@@ -248,7 +247,8 @@ mod tests {
             Content::Text("hi there".into()),
             Content::Link("https://justyo.co".into()),
             Content::Location { lat_e7: -338_688_000, lon_e7: 1_512_093_000 },
-            Content::Restart { last_seen_ms: 1_762_000_000_000 },
+            Content::Receipt,
+            Content::Retry,
         ] {
             let message = Message { sent_at_ms: 1_762_000_000_000, content };
             assert_eq!(Message::decode(&message.encode().unwrap()).unwrap(), message);

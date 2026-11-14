@@ -37,19 +37,17 @@ fn a_yo_goes_there_and_back() {
     b.send_yo(&pa).unwrap();
     let events = a.sync(0).unwrap();
     assert_eq!(yos_from(&events, &pb), 1, "{events:?}");
-    // B answered by A's username, which it had not known A by: the same chat, not a second one.
-    assert_eq!((a.chats().len(), b.chats().len()), (1, 1));
+    // B answered by A's username, which it had not known A by: the same contact, not a second one.
+    assert_eq!((a.contacts().len(), b.contacts().len()), (1, 1));
     assert!(b.contacts()[0].handles.contains(&pa));
-    // B's first send updated its leaf (it joined by Welcome): the chat moved to epoch 2 on both sides.
-    assert_eq!(a.chats()[0].2, 2);
-    assert_eq!(b.chats()[0].2, 2);
-    // What the app's contact details show: one chat of two devices, its epoch, the suite, the pinned key.
-    let chats = a.chats_with(&digits(&pb));
-    assert_eq!(chats.len(), 1);
-    assert_eq!((chats[0].epoch, chats[0].members, chats[0].updates), (2, 2, true));
-    assert_eq!(chats[0].ciphersuite, "MLS_128_DHKEMX25519_CHACHA20POLY1305_SHA256_Ed25519");
+    // What the app's contact details show: a session with the one device, good to send, and the pinned key.
+    for (client, other) in [(&a, &pb), (&b, &pa)] {
+        let sessions = client.sessions_with(&digits(other));
+        assert_eq!(sessions.len(), 1);
+        assert!(sessions[0].usable && !sessions[0].retrying);
+    }
     assert_eq!(a.account_key_of(&digits(&pb)).map(|k| k.len()), Some(64));
-    assert!(a.chats_with(&digits(&pa)).is_empty(), "none with oneself");
+    assert!(a.sessions_with(&digits(&pa)).is_empty(), "none with oneself");
     assert_eq!(a.dropped() + b.dropped(), 0);
     assert_eq!(a.pending() + b.pending(), 0);
 }
@@ -60,7 +58,7 @@ fn long_poll_wakes_on_delivery() {
     let (mut a, mut b, pa, pb) = pair(&hub);
     a.send_yo(&pb).unwrap();
     b.sync(0).unwrap();
-    // B's first send is preceded by its update commit: the poll wakes on whichever envelope comes first.
+    // B's first send may be preceded by its receipt: the poll wakes on whichever envelope comes first.
     let from = pb.clone();
     let waiter = std::thread::spawn(move || {
         let started = std::time::Instant::now();
@@ -89,46 +87,6 @@ fn names_not_on_yo_and_sending_to_oneself() {
     }
 }
 
-#[test]
-fn a_hundred_messages_heal_the_chat() {
-    let hub = TestHub::start();
-    let (mut a, mut b, pa, pb) = pair(&hub);
-    a.send_yo(&pb).unwrap();
-    b.sync(0).unwrap();
-    b.send_yo(&pa).unwrap();
-    a.sync(0).unwrap();
-    let before = a.chats()[0].2;
-    for _ in 0..=yo_core::UPDATE_AFTER_MESSAGES {
-        a.send_yo(&pb).unwrap();
-    }
-    let events = b.sync(0).unwrap();
-    assert_eq!(yos_from(&events, &pa), yo_core::UPDATE_AFTER_MESSAGES as usize + 1);
-    assert_eq!(a.chats()[0].2, before + 1, "one update after a hundred messages");
-    assert_eq!(b.chats()[0].2, before + 1);
-    assert_eq!(b.dropped(), 0);
-}
-
-#[test]
-fn a_week_heals_the_chat() {
-    let hub = TestHub::start();
-    let (mut a, mut b, pa, pb) = pair(&hub);
-    a.send_yo(&pb).unwrap();
-    b.sync(0).unwrap();
-    b.send_yo(&pa).unwrap();
-    a.sync(0).unwrap();
-    let before = a.chats()[0].2;
-    let later = yo_hub::now_ms() + yo_core::UPDATE_AFTER_MS + 1;
-    a.set_clock(Arc::new(move || later));
-    a.maintenance().unwrap();
-    b.sync(0).unwrap();
-    assert_eq!(a.chats()[0].2, before + 1);
-    assert_eq!(b.chats()[0].2, before + 1);
-    b.send_yo(&pa).unwrap();
-    assert_eq!(yos_from(&a.sync(0).unwrap(), &pb), 1);
-}
-
-/// A send skips receiving first (`send_begin`) only while the inbox is up to date: emptied a moment ago, or a long
-/// wait for it under way. After a while, or a wait that failed, it receives first again.
 #[test]
 fn a_send_skips_receiving_only_while_the_inbox_is_fresh() {
     use std::sync::atomic::{AtomicU64, Ordering};
@@ -162,46 +120,6 @@ fn a_send_skips_receiving_only_while_the_inbox_is_fresh() {
 }
 
 #[test]
-fn simultaneous_updates_are_ordered_by_the_hub() {
-    let hub = TestHub::start();
-    let (mut a, mut b, pa, pb) = pair(&hub);
-    a.send_yo(&pb).unwrap();
-    b.sync(0).unwrap();
-    b.send_yo(&pa).unwrap();
-    a.sync(0).unwrap();
-    for round in 0..10 {
-        let later = yo_hub::now_ms() + (round + 1) * (yo_core::UPDATE_AFTER_MS + 1);
-        a.set_clock(Arc::new(move || later));
-        b.set_clock(Arc::new(move || later));
-        let barrier = Arc::new(std::sync::Barrier::new(2));
-        let (ba, bb) = (barrier.clone(), barrier);
-        let ta = std::thread::spawn(move || {
-            ba.wait();
-            a.maintenance().unwrap();
-            a
-        });
-        let tb = std::thread::spawn(move || {
-            bb.wait();
-            b.maintenance().unwrap();
-            b
-        });
-        a = ta.join().unwrap();
-        b = tb.join().unwrap();
-        a.sync(0).unwrap();
-        b.sync(0).unwrap();
-        assert_eq!(a.chats()[0].2, b.chats()[0].2, "round {round}: both in the same epoch");
-        // A send receives first: what arrived meanwhile comes back with it.
-        let mut at_a = a.send_yo(&pb).unwrap();
-        let mut at_b = b.send_yo(&pa).unwrap();
-        at_b.extend(b.sync(0).unwrap());
-        at_a.extend(a.sync(0).unwrap());
-        assert_eq!(yos_from(&at_b, &pa), 1, "round {round}");
-        assert_eq!(yos_from(&at_a, &pb), 1, "round {round}");
-    }
-    assert_eq!(a.dropped() + b.dropped(), 0, "{:?} {:?}", a.drop_reasons(), b.drop_reasons());
-}
-
-#[test]
 fn two_chats_started_at_once_both_work() {
     let hub = TestHub::start();
     let (a, b, pa, pb) = pair(&hub);
@@ -230,7 +148,7 @@ fn two_chats_started_at_once_both_work() {
     assert_eq!(a.dropped() + b.dropped(), 0);
 }
 
-/// A and B in a chat, then the hub tells A that B has another account key and device: those of B2, an account of its
+/// A writes to B, then the hub tells A that B has another account key and device: those of B2, an account of its
 /// own (spec 3.4). A, its name, and B2.
 fn a_friend_with_another_key(hub: &TestHub) -> (Client, String, Client) {
     let n = random_u64() % 100_000_000;
@@ -246,25 +164,28 @@ fn a_friend_with_another_key(hub: &TestHub) -> (Client, String, Client) {
     (a, pb, b2)
 }
 
+/// Envelopes the stand-in got and could not open: each session message binds both ends' addresses (user and device
+/// number), so one written to B opens for no other account, whatever key the hub handed out.
+fn unread_by(stand_in: &mut Client) -> u64 {
+    let before = stand_in.dropped();
+    let events = stand_in.sync(0).unwrap();
+    assert!(!events.iter().any(|e| matches!(e, Event::Message { .. })), "{events:?}");
+    stand_in.dropped() - before
+}
+
 #[test]
-fn another_key_for_a_friend_keeps_the_chat_and_is_told() {
+fn another_key_for_a_friend_is_told_and_written_to() {
     let hub = TestHub::start();
     let (mut a, pb, mut b2) = a_friend_with_another_key(&hub);
-    let (me, b) = (a.user_id().to_owned(), user_of(&pb));
-    let chat = a.chats()[0].1;
-    // A's Yo meets the new device at the hub (409): A replaces B's old device by the new one in the same chat.
+    let b = user_of(&pb);
+    // A's Yo meets the new device at the hub (409): A drops B's old session and starts one with the new device.
     let events = a.send_yo(&pb).unwrap();
     assert!(events.contains(&Event::IdentityChanged { user: b.clone() }), "{events:?}");
-    let events = b2.sync(0).unwrap();
-    assert!(events.contains(&Event::NewChat { user: me.clone() }));
-    assert_eq!(yos_from_user(&events, &me), 1, "the held Yo, encrypted anew for the new device");
-    b2.send_yo(&me).unwrap();
-    assert_eq!(yos_from_user(&a.sync(0).unwrap(), &b), 1);
-    assert_eq!(a.chats().len(), 1, "the same chat goes on");
-    assert_eq!(a.chats()[0].1, chat);
-    assert_eq!(b2.chats()[0].1, chat);
-    assert_eq!(a.chats()[0].3, 2, "two members: A and B's new device");
-    assert_eq!(a.dropped() + b2.dropped(), 0, "{:?} {:?}", a.drop_reasons(), b2.drop_reasons());
+    assert_eq!(a.pending(), 0, "taken for the new device");
+    assert_eq!(a.contacts().len(), 1, "the same contact goes on");
+    assert_eq!(a.sessions_with(&b).len(), 1, "a session with the new device only");
+    assert_eq!(unread_by(&mut b2), 1, "written to B, not to the account the hub put in its place");
+    assert_eq!(a.dropped(), 0, "{:?}", a.drop_reasons());
 }
 
 #[test]
@@ -288,33 +209,33 @@ fn a_new_phone_with_the_same_account_key_is_seen_by_nobody() {
 fn a_verified_contact_with_a_new_key_waits_for_confirmation() {
     let hub = TestHub::start();
     let (mut a, pb, mut b2) = a_friend_with_another_key(&hub);
-    let me = a.user_id().to_owned();
     a.set_verified(&pb, true).unwrap();
     // Nothing goes to the new key until A confirms it: the warning before the message.
     assert_eq!(a.send_yo(&pb), Err(Error::Unconfirmed));
     let contact = &a.contacts()[0];
     assert!(contact.unconfirmed && !contact.verified);
-    assert_eq!(yos_from_user(&b2.sync(0).unwrap(), &me), 0);
+    assert_eq!(a.pending(), 1, "held");
+    assert_eq!(unread_by(&mut b2), 0);
     a.confirm_identity(&pb).unwrap();
     a.send_yo(&pb).unwrap();
-    assert_eq!(yos_from_user(&b2.sync(0).unwrap(), &me), 2, "the held Yo and the new one");
+    assert_eq!(a.pending(), 0);
+    assert_eq!(unread_by(&mut b2), 2, "the held Yo and the new one");
 }
 
-/// A name set while a verified contact's new key waited for confirmation was skipped in that chat and never told
-/// later. Now it is due per chat and goes once the chat can take it, before the next message.
+/// A name set while a verified contact's new key waits for confirmation is due to it and goes once it can take it,
+/// before the next message.
 #[test]
 fn a_name_set_while_a_new_key_waits_is_told_after_the_confirmation() {
     let hub = TestHub::start();
     let (mut a, pb, mut b2) = a_friend_with_another_key(&hub);
-    let me = a.user_id().to_owned();
     a.set_verified(&pb, true).unwrap();
     assert_eq!(a.send_yo(&pb), Err(Error::Unconfirmed));
     a.set_name("ALICIA").unwrap();
+    assert_eq!(a.pending(), 1, "the name waits too");
     a.confirm_identity(&pb).unwrap();
     a.send_yo(&pb).unwrap();
-    let events = b2.sync(0).unwrap();
-    assert!(events.contains(&Event::Profile { user: me.clone(), name: "ALICIA".into() }), "{events:?}");
-    assert_eq!(yos_from_user(&events, &me), 2);
+    assert_eq!(a.pending(), 0);
+    assert_eq!(unread_by(&mut b2), 3, "the held Yo, the name, the new Yo");
 }
 
 #[test]
@@ -323,7 +244,7 @@ fn the_last_resort_keeps_a_number_reachable_and_is_refilled() {
     let base = random_u64() % 1_000_000_000;
     let target = username(base);
     let mut c = register(Http::new(hub.url()), &target, None);
-    let senders = yo_wire::limits::KEY_PACKAGE_TARGET as u64 + 5;
+    let senders = yo_wire::limits::PREKEY_TARGET as u64 + 5;
     for i in 1..=senders {
         let mut s = register(Http::new(hub.url()), &username(base + i), None);
         s.send_yo(&target).unwrap();
@@ -331,7 +252,7 @@ fn the_last_resort_keeps_a_number_reachable_and_is_refilled() {
     let events = c.sync(0).unwrap();
     assert_eq!(events.iter().filter(|e| matches!(e, Event::NewChat { .. })).count() as u64, senders);
     assert_eq!(c.dropped(), 0);
-    // The sync refilled: one more round of senders gets single-use KeyPackages again.
+    // The next sync refills: one more round of senders gets one-time prekeys again.
     let mut s = register(Http::new(hub.url()), &username(base + senders + 1), None);
     s.send_yo(&target).unwrap();
     assert_eq!(c.sync(0).unwrap().iter().filter(|e| matches!(e, Event::NewChat { .. })).count(), 1);
@@ -354,26 +275,6 @@ fn a_signed_request_works_once() {
 }
 
 #[test]
-fn a_forged_commit_is_refused_and_the_chat_lives_on() {
-    let hub = TestHub::start();
-    let (mut a, mut b, pa, pb) = pair(&hub);
-    a.send_yo(&pb).unwrap();
-    b.sync(0).unwrap();
-    let (_, group, epoch, _) = a.chats()[0].clone();
-    let client = reqwest::blocking::Client::new();
-    let post = |body: Vec<u8>| {
-        client.post(format!("{}{}", hub.url(), api::commit_path(&group))).body(body).send().unwrap().status().as_u16()
-    };
-    let envelope = yo_wire::envelope::seal(b"forged").unwrap();
-    let forged = api::Commit { epoch, token: [9; 32], next_token_hash: [9; 32], envelope: envelope.clone().into() };
-    assert_eq!(post(yo_wire::encode(&forged)), api::status::FORBIDDEN);
-    let stale = api::Commit { epoch: epoch - 1, token: [9; 32], next_token_hash: [9; 32], envelope: envelope.into() };
-    assert_eq!(post(yo_wire::encode(&stale)), api::status::CONFLICT);
-    b.send_yo(&pa).unwrap();
-    assert_eq!(yos_from(&a.sync(0).unwrap(), &pb), 1);
-}
-
-#[test]
 fn garbage_from_a_stranger_is_dropped_and_harms_nothing() {
     let hub = TestHub::start();
     let (mut a, mut b, pa, pb) = pair(&hub);
@@ -387,7 +288,7 @@ fn garbage_from_a_stranger_is_dropped_and_harms_nothing() {
     assert_eq!(deliver_raw(&hub.url(), b.user_id(), vec![1, 2, 3]), api::status::BAD_REQUEST);
     // Not sealed: refused at the door; sealed to nobody: taken, and dropped by the device that cannot open it.
     assert_eq!(
-        deliver_raw(&hub.url(), b.user_id(), yo_wire::envelope::seal(b"bare").unwrap()),
+        deliver_raw(&hub.url(), b.user_id(), yo_wire::envelope::pad(b"bare", &yo_wire::envelope::BUCKETS).unwrap()),
         api::status::BAD_REQUEST
     );
     assert_eq!(deliver_raw(&hub.url(), b.user_id(), yo_tests::junk(7)), api::status::ACCEPTED);
@@ -461,16 +362,13 @@ fn the_hub_survives_garbage_on_every_route() {
     let hub = TestHub::start();
     let client = reqwest::blocking::Client::new();
     let routes = [
-        ("PUT", api::KEY_PACKAGES.to_owned()),
+        ("PUT", api::PREKEYS.to_owned()),
         ("POST", api::LOOKUP.to_owned()),
         ("PUT", api::PUSH.to_owned()),
         ("GET", api::INBOX.to_owned()),
         ("POST", api::INBOX_ACK.to_owned()),
         ("POST", api::deliver_path(&[1; 16])),
-        ("POST", api::GROUPS.to_owned()),
-        ("POST", api::commit_path(&[1; 32])),
         ("POST", "/v1/inbox/!!".to_owned()),
-        ("POST", "/v1/groups/x/commit".to_owned()),
         ("POST", api::REGISTER.to_owned()),
         ("PUT", api::BACKUP.to_owned()),
         ("GET", api::backup_path(&[1; 16])),
@@ -878,7 +776,7 @@ fn a_copied_registration_registers_no_one() {
     register(http.clone(), &name, None);
     let (_, _, body) = http.sent.lock().unwrap().iter().find(|(_, path, _)| path == api::REGISTER).cloned().unwrap();
     let mut copied: api::Register = yo_wire::decode(&body).unwrap();
-    // Someone copies certificate and KeyPackages and puts in their own auth key: the proof no longer fits. (The
+    // Someone copies certificate and prekeys and puts in their own auth key: the proof no longer fits. (The
     // name is taken too, but the proof is checked first.)
     copied.device.auth_key = [7; 32];
     copied.device.device_id = [7; 16];

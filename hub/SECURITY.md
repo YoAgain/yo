@@ -1,142 +1,44 @@
 # The hub's security
 
-A review of `hub/src` and `core/wire` (request signing, encodings) from an attacker's side, in November 2026, with a
-second, independent review by another model (Codex) whose findings were checked one by one. The routes and their
-protections are listed in `hub/README.md`.
+Routes and their protections: `hub/README.md`. Spec sections: `spec/v1.md`.
 
-## Threat model, in short
+**Protects:** availability (disk, memory, connections, push accounts); account integrity (only the account key
+registers a device, only a device's auth key speaks for it); what spec 1 says it does not learn.
+**Attackers:** anyone through Cloudflare, with as many accounts as registration allows; a user against another; anyone
+who learns a user, device or blob id. **Out of scope:** the operator and the machine, Cloudflare, the app's storage,
+libsignal itself. **Assumed:** reachable only through the Cloudflare Tunnel when `YO_TRUST_CLOUDFLARE=1`.
 
-- **What the hub protects:** the availability of the service (its disk, memory, connections, the push
-  accounts), the integrity of accounts (only the account key registers a device for a username; only a device's
-  auth key speaks for it), and what spec 1 says it does not learn (content, senders, the social graph beyond
-  lookups).
-- **Who attacks:** anyone on the internet, through Cloudflare, without an account or with as many accounts as
-  registration allows (10 per address per hour); a user of the app attacking another user; someone who learns a
-  user id (any account can look one up), a device id, a blob id or a group id.
-- **Not in scope:** the operator and the machine itself (the hub is trusted to route, not to read), Cloudflare (it
-  sees addresses and sizes, as the hub does), the app's own storage, MLS itself.
-- **Assumed:** the hub is reachable only through the Cloudflare Tunnel; `YO_TRUST_CLOUDFLARE=1` only then.
+## Threats
 
-## Findings
-
-Severity is for the hub as deployed (behind Cloudflare). "Codex" marks a finding the second review also made.
-Every fix is in commit `3d1cb97` on the branch `chaos-security` (with its tests: `tests/tests/security.rs`,
-`tests/tests/push.rs`, unit tests in `hub/src/lib.rs` and `hub/src/limiter.rs`).
-
-| # | Severity | Finding | Status |
-|---|---|---|---|
-| 1 | High | **Disk exhaustion without an identity** (also Codex). `POST /v1/groups` then `POST /v1/groups/{id}/commit` with 64 KiB envelopes, 600 a minute: about 50 GiB a day from one address, kept 30 days; deliveries to accounts of one's own (5000 envelopes of 64 KiB per device, 10 accounts an hour) about as much. No budget or floor covered the database's disk. | Fixed: bytes delivered and committed are limited to 64 MiB per address per hour; deliveries, commits and new groups are `507` while the database's disk has less than 1 GiB free (`anonymous_bytes_per_ip_hour`, `db_min_free_bytes`). |
-| 2 | High (configuration) | **SMS in development mode by default** (also Codex). Without `YO_SMS`, every phone number verified with `000000`: anyone could register any number and take over an account registered by phone. The v1 apps do not use phone numbers. | Gone: the hub has no phone numbers and no SMS any more. |
-| 3 | Medium | **A stranger could spend a device's requests** (also Codex). The 1200 signed requests per device per minute were counted before the signature was checked: with a device's id and garbage signatures, anyone could keep that device at `429`. Device ids are not published, which made it harder, not impossible. | Fixed: counted once the signature holds. |
-| 4 | Medium | **Inbox answers and waits without a bound per device** (also Codex). An answer holds up to 100 envelopes of 64 KiB (6.4 MiB); one device could ask 1200 times a minute at once, each a wait of a minute or a full answer held in memory. | Fixed: 4 inbox requests of one device under way at once (each until its answer has been sent), more are `429`. |
-| 5 | Low | **An APNs token went into a URL as it was sent.** `PUT /v1/push` takes any bytes; the APNs request is `https://api.push.apple.com/3/device/{token}` with the hub's credentials, so a device could make the hub send a request to another path on Apple's host. Nothing beyond that host, and nothing a device could not do with its own token. | Fixed: an APNs token that is not hex is treated as invalid and cleared. |
-| 6 | Low | **`YO_TRUST_CLOUDFLARE` with a public listening address.** The container's default `YO_LISTEN` is `0.0.0.0:8080`; published on anything but 127.0.0.1, anyone reaching it could name any address in `CF-Connecting-IP`, or none from a loopback address. | Mitigated: the hub warns at start when the listening address is not a loopback one. **Operator:** check the published port. |
-| 7 | Low | A size in MiB from the environment large enough to overflow made the hub panic (debug) or wrap (release). | Fixed: refused as an error. |
-| 8 | Medium | **A backup record went to anyone who named its user id.** `GET /v1/backup/{id}` took no signature: every contact knows the user id (from a lookup), so anyone could learn whether a user has a backup (has secured the name), roughly how large it is, and take the sealed record home to attack offline (128-bit doors, so only in theory). | Fixed: the fetch is signed (spec 6.2) by one of the record's two auth keys, Ed25519 keys derived from the passkey's PRF output and from the 12 words, which the record names; anything else is `404`, the same answer, and the same two signature checks, as for no record. Each signature once, within 5 minutes, as for devices. What K and the storage key seal is padded to 1, 4, 16 or 60 KiB, so the record's size tells little even to a door. Records stored before the auth keys are deleted when the hub starts; the apps make their backups anew (spec 7). Tests: `tests/tests/backup_auth.rs`. |
-
-## Delivery tokens (Privacy Pass)
-
-Added after the review (spec 6.10). **Threat:** deliveries are unsigned (sealed sender), so the hub limits them by
-address; phones behind one carrier IPv4 address share that limit, and someone with many addresses gets as many. **Mitigation:**
-a delivery may bring a privately verifiable Privacy Pass token (RFC 9578 type 0x0001, VOPRF(P-384, SHA-384)), which
-passes the address's limits; tokens are issued per device (200 a day, signed), so the bound on a sender becomes
-the accounts it has (registration, 10 per address per hour) rather than its addresses. The hub verifies with the RFC's
-own test vectors (`hub/src/tokens.rs`, `core/mls/src/tokens.rs`). A spent nonce is kept with its key, in the
-transaction that stores the envelope; a token that fails is `401` and counted against the address. Nothing of an
-issuance is kept or logged. Tests: `tests/tests/tokens.rs`.
-
-**Residual risks:**
-
-| Severity | What | Why it stays |
+| Attack | Defence | Residual |
 |---|---|---|
-| Medium | **Linking by address and time.** A token is unlinkable to its issuance by itself, but a delivery from the address a device signs its requests from, seconds after that device fetched a batch, points at it as before tokens. | Spec 1 says so. Tokens are for the limit, not for hiding the address; Oblivious HTTP is for a later version. The stash and oldest-first spending put time between issuance and use. |
-| Medium | **A hub that tags its users** could serve each device its own key (the directory is not signed, nor checked against other users') and tell senders apart by the key their tokens name. | The operator is outside the threat model (the hub is trusted to route); a key consistency check (RFC 9576, section 6.2) would make it visible. The key id is in every token, so this needs no format change. |
-| Low | **Accounts as a source of tokens.** Each account brings 200 tokens a day (a bucket refilling over the day): 10 accounts an hour from one address are 48 000 deliveries a day past its limit. | Bounded, and better than an address bound; the byte budget is not applied to tokened deliveries, the disk floor is. Cheaper accounts (or fewer tokens per account) are one number each in `Limits` (`register_per_ip_hour`, `tokens_per_device_day`). |
-| Low | **Verification costs a P-384 evaluation** before the hub knows a token is forged; anyone can send forged ones. | About as much as a signature check; Cloudflare in front; a spent nonce is looked up before it, and past 30 bad tokens a minute from one address the hub checks about one every two seconds from there (spec 6.10). |
-| Low | **The issuance budget is in memory**, like every rate but the blob quotas: a restart gives each device a fresh day. | As for all limits (`hub/src/limiter.rs`). The spent nonces, which matter for double spending, are in the database. |
-| Info | **A token's nonce is kept** until its key is deleted (30 to 60 days). | It is the client's random choice, never seen at issuance; it ties to nothing. |
+| Read who writes to whom from envelopes | Sealed to the recipient's account key, padded inside the seal (6.1); no group or session id anywhere (`tests/tests/sealed.rs`) | address and time (spec 1); Oblivious HTTP later |
+| Learn a sender | Unsigned delivery; the payload's sender only inside the seal | as above |
+| Swap a contact's keys | Session identity = pinned account key's X25519 form (4.1); the hub delivers no key a client trusts by itself | a lying hub's device list (3.2); key transparency later |
+| Fill the disk without identity | 64 MiB/IP/hour of delivered bytes; `507` below 1 GiB free; 30-day TTL | many addresses: the floor holds, deliveries stop until cleanup |
+| Fill one user's inbox | 5000 per device, then `507` for that recipient only | stranger spam until read; contact access keys later (8) |
+| Spend another device's request budget | Counted only after the signature holds | – |
+| Hold memory with inbox waits | 4 inbox requests per device at once | – |
+| Use up a user's one-time prekeys | Lookups 50/device/day; last-resort Kyber prekey keeps sessions possible; replay of a last-resort message refused (4.1); refill below 16 | first messages then use the last resort (weaker forward secrecy for that message) |
+| Forge or replay delivery tokens | Nonce looked up before the P-384 check, spent in the delivery's transaction; bad tokens `401` and counted; > 30/min/IP: no checks | verification cost per forged token (≈ a signature) |
+| Tag users by token key | One directory for all | unsigned directory; a key-consistency check (RFC 9576 §6.2) later |
+| Tokens from many accounts | 200/device/day; registration 10/IP/hour | bounded by accounts, not addresses |
+| Read a backup record | Fetch signed by a door's auth key, else `404` as for none; sealed part padded | – |
+| Push to another path on Apple's host | Non-hex APNs tokens cleared | – |
+| Spoof `CF-Connecting-IP` | Only with `YO_TRUST_CLOUDFLARE`; warning when not listening on loopback | operator: check the published port |
+| Lose an acknowledged delivery to a power cut | SQLite WAL `synchronous = FULL` | – |
+| Act as a replaced device | Every write checks the device in its own transaction (`410`) | – |
+| Replay a signed request | 5-minute window, cache keyed by signature (`verify_strict`) | the cache is in memory: a restart within 5 min |
+| Probe without an account | username taken (by design), device replaced (`410` vs `401`) | device ids are random and unpublished |
+| A delivery's `409` names a user's account and device keys | Needed for sealed delivery (4.4); public keys, user ids come from lookups anyway | – |
+| Panics on input | 6 fuzz targets (`dev/fuzz`), nightly in CI | – |
 
-### A second Codex review: durability and what a cut-off request leaves
+## Checked and sound
 
-Checked one by one against the code, all held; fixed on the branch `hub-hardening`, each with its test.
+- Signatures cover method, path with query as received, time, body hash; paths with `..`, `//`, `/`, `%` find no other route.
+- Every signed route acts on the signer's own user, device or inbox; a blob needs its 128-bit id.
+- SQL: bound parameters only. Bodies: 65 KiB, blobs `Content-Length` ≤ 10 MiB, counted as they come.
+- Refusals carry a status and no text; logs carry no user text and no push token.
+- Growing tables: `spent_tokens` (with their key), `feedback` (10/user/day), `gone` (a year).
 
-| What | Fix | Test |
-|---|---|---|
-| A push error's text named the request's URL, which holds the APNs device token, into the log. | Logged without the URL; a service's answer with the token taken out. | `push::tests` |
-| WAL with `synchronous = NORMAL` could lose an acknowledged delivery or commit to a power cut (spec 4.7). | `FULL`; an ack alone without its own sync (a lost ack is a repeat the device skips). Numbers in `tests/README.md`. | `db::tests` |
-| Registration did not keep the app the request names (`Yo-App`). | Kept from the registration on. | `tests/app_version.rs` |
-| A long poll cut off left its waiter in the map. | Forgotten when dropped. | `tests/robustness.rs` |
-| An inbox request gave its place back before its answer was sent. | Held by the answer's body. | `lib.rs` tests |
-| A device replaced after it authenticated could still set the username, KeyPackages, the push token. | Checked in the write's own transaction, `410`. | `db::tests` |
-| A commit fetched for an epoch the group never had (0, before its first) was `410`, which restarts the chat (4.9). | The group's first epoch is kept; `404` outside first..current. | `tests/robustness.rs`, `db::tests` (migration) |
-| The prune deleted the next-token hash that recognises a repeated commit (4.3). | Kept for good (`accepted`), the envelope 30 days. | `tests/robustness.rs` |
-| Blob fetches at once could pass the blob's count. | A fetch takes its count as it starts, gives it back if cut off. | `tests/blobs.rs`, `db::tests` |
-| A crash between a blob's row and its file left an id `409` to its retry and `404` to every fetch. | Not ready until the file is in place; removed at the next start or within the hour. | `lib.rs` tests, `db::tests` |
-| A delivery's wake and push depended on its request surviving. | Done by the writer once stored. | `lib.rs` tests |
-| SQLite calls blocked the async workers. | On blocking threads (32 at once); see the commit for what stays. | the whole suite, `yo-load` |
-
-## Sealed envelopes (Codex, November 2026)
-
-**Finding (High):** an envelope was the bare MLSMessage, padded. Its header is plain in MLS: the group id, the epoch,
-the content type, and the message's length inside the padding. When A writes to B and B answers, the same group id
-arrives in both inboxes: the hub could read who chats with whom (spec goal 3) and, in a chat of two, who sent each
-message (goal 2), whatever addresses they came from.
-
-**Fixed:** every envelope to an inbox is padded and then sealed by HPKE to the recipient's account key (spec 6.1),
-the padding inside the seal; the hub checks the size and the version and sees an inbox and a bucket, not even the
-length. The seal key is the account key's X25519 form, which every member's certificate already names:
-nothing to publish, nothing for the hub to swap. A clean break: `YO_MIN_APP` is raised at its deploy. Tests:
-`tests/tests/sealed.rs`, `core/mls/src/seal.rs`. What remains is the address and the time (spec 1).
-
-## Accepted risks and open points
-
-| Severity | What | Why it stays |
-|---|---|---|
-| Medium | **A stranger can fill a user's inbox** (5000 envelopes) and make the hub push for each (also Codex). | Spec 6.6: a delivery carries no identity (sealed sender), so there is no rate per recipient; the owner reading the inbox frees it. Access keys (only contacts may deliver) are planned. |
-| Medium | **Anyone with an account can use up a user's single-use KeyPackages** with lookups (50 a day per device; also Codex). | The last resort KeyPackage keeps chats possible; the app refills below 20. A limit per looked-up user would let a stranger block lookups of that user instead. |
-| Low | **Anonymous storage from many addresses.** Finding 1's budget is per address (an IPv6 /64): someone with many addresses still stores 64 MiB an hour from each. | The disk floor keeps the disk from filling; the service then refuses deliveries until the cleanup (30 days) or the operator makes room. A global budget would let one attacker shut everyone out sooner. |
-| Low | **A delivery's `409` names a user's account key and device keys** to anyone who knows the user id, without the signed lookup's limit (also Codex). | Spec 4.6: the sender needs them to repair a group without an identity. User ids are handed out by lookups anyway; the keys are public keys. |
-| Low | **Tables that only grow:** `seen_key_packages` (every KeyPackage hash, forever, also after the account is deleted), `groups` (never pruned) and `accepted` (each accepted commit's epoch and next-token hash, about 80 bytes, kept so
-a repeated commit is answered as accepted), `feedback` (10 a day per user, kept, without the sender once the account goes). Also Codex. | Small rows, each behind a signed or rate-limited route. Pruning needs a time column (a schema change): later. |
-| Low | **A replay after a restart.** The replay cache is in memory: a signed request captured and sent again after a restart, within its 5 minutes, is accepted again (also Codex). | Needs the request in the clear (TLS) and a restart in that window. Most signed requests are idempotent; the others (a lookup, feedback) do little harm twice. |
-| Low | **What anyone can ask without an account:** whether a username is taken (by design, while it is typed), whether a device id was replaced (`410` against `401`). | Spec 6.3. Device ids are random and not published. |
-| Low | **Unsigned requests to signed routes** cost a database read each, limited by nothing but Cloudflare. | Cheap reads; a limit per address on failed signatures would be the next step if it shows up in the logs. |
-| Info | **The loopback exemption** (the server's own services, `hub/README.md`) passes to anything on the server that can be made to send requests to the hub. | Nothing on the server may forward user-given URLs to the hub's address. |
-| Info | **The device id is not in the signed bytes** (Codex). | The hub picks the auth key by the device id and verifies with it: a signature by one device's key holds for another device only if both have the same auth key, which only that key's owner can arrange, to no gain. |
-
-## Rejected
-
-- **The delivery queue is unbounded** (Codex). It holds at most 2048 deliveries (each at most 65 KiB); a full queue
-  answers `503`, which the client tries again (spec 6.6).
-- **The rate limiter's map grows without bound** (Codex). One entry per key used within a day (an address, a device,
-  a user), dropped after a day idle; an attacker with very many addresses costs about 100 bytes per address.
-
-## Checked and found sound
-
-- **Signatures** (`core/wire/src/request.rs`): over the method, the path with the query exactly as sent (the hub
-  takes `path_and_query` as received, before any decoding), the time and the body's hash; `verify_strict` (no
-  malleable signatures, so the replay cache keyed by signature cannot be dodged); the time within 5 minutes; the
-  cache kept until the window has passed. Paths with `..`, `//`, a trailing `/` or percent-encoding find no other
-  route (tried against the dev hub too). The blob upload is signed by the body's hash and the body checked against
-  it as it comes.
-- **Access to other users' things:** every signed route acts on the signing device's own user, device or inbox
-  (an ack deletes only the device's own envelopes); a backup by user id is that user's record, by locator only where
-  no user has that id; a blob or commit needs its random id (128 and 256 bits); a commit needs the epoch's token,
-  compared in constant time.
-- **Registration:** a username is its user's again only with the user's current account key; a replayed
-  registration is refused (its KeyPackages were seen, its device id is taken or remembered as replaced).
-- **SQL:** every value is a bound parameter; the few `format!` in SQL are constants.
-- **Bodies:** 65 KiB on every route but the blob upload, which takes `Content-Length` at most 10 MiB, counts what
-  comes and stops at more. Decoders are bounded by the bytes they are given.
-- **Errors and logs:** refusals carry a status and no text, except axum's own rejections ("Invalid URL: Invalid
-  UTF-8 in `name`", "Failed to buffer the request body: length limit exceeded"), which tell nothing. The logs carry
-  database and APNs/FCM errors, no user-written text and no push token: a failed push is logged without its URL
-  (an APNs request's holds the token), and a service's answer with the token taken out (Codex).
-- **Panics:** all seven fuzz targets (`dev/fuzz all 120`, two minutes each, after the fixes) found nothing:
-  wire_envelope 57 M runs, wire_content 26 M, wire_cert 3.9 M, wire_api 4.0 M, hub_key_package 4.2 M, hub_routes
-  136 k (with report, feedback, account deletion and odd queries added), core_receive 13 k. The CI runs them
-  nightly for 15 minutes each.
-- **Cloudflare:** a `CF-Connecting-IP` sent by a client is refused by Cloudflare (error 1000); rate limits on the dev
-  hub held as configured (the username check `429` after 60 a minute, the backup fetch after 10 an hour).
-
-Not done: `cargo audit` (not available offline on the review machine); run it in CI.
+Open: `cargo audit` in CI.

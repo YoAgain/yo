@@ -8,7 +8,7 @@ image=yo-fuzz:2026-10-20
 docker image inspect "$image" >/dev/null 2>&1 || docker build -q -t "$image" -f "$root/dev/Dockerfile.fuzz" "$root/dev" >/dev/null
 seconds=${2:-60}
 targets=$1
-[ "$targets" = all ] && targets="wire_envelope wire_content wire_cert wire_api hub_key_package hub_routes core_receive"
+[ "$targets" = all ] && targets="wire_envelope wire_content wire_cert wire_api hub_routes core_receive"
 for target in $targets; do
   echo "== $target ($seconds s)"
   # The corpus starts from the committed seeds and keeps what the fuzzer finds (not committed).

@@ -8,8 +8,8 @@
 // limits (about 24 MB, 30 s): the app shows them as it opens, not a fetch later. Once the notification is out, the
 // hub is told it arrived (`afterSync`).
 //
-// The hub pushes once per envelope, and not every envelope is a new Yo: the Welcome before a friend's first Yo, the
-// rest of a burst a push before already took, a commit, a blocked sender's Yo (dropped unseen, spec 4.8), a Yo the app
+// The hub pushes once per envelope, and not every envelope is a new Yo: a receipt or a retry, the rest of a burst a
+// push before already took, a blocked sender's Yo (dropped unseen, spec 4.8), a Yo the app
 // took itself (it was open, or just left: then it writes the notification itself). Such a push, read and found with
 // nothing new, goes out quietly (no sound, no banner) and takes the place of the Yo notifications on the screen,
 // saying what they said, rather than lying on top of them as one more "Yo". It goes out as it came ("Yo", with the sound) when nothing could be read:
@@ -51,7 +51,7 @@ final class NotificationService: UNNotificationServiceExtension {
             let replaced = ShareBridge.write(content, senders, over: delivered)
             if senders.isEmpty {
               (content.sound, content.interruptionLevel) = (nil, .passive)
-              // Nothing on the screen to say again (a Welcome, a commit, after the app was opened): no text, which
+              // Nothing on the screen to say again (a receipt, after the app was opened): no text, which
               // iOS does not show, rather than a bare "Yo" left in Notification Center.
               if replaced.isEmpty { content.body = "" }
             }

@@ -351,6 +351,8 @@ final class MediaOutbox {
       return try await work()
     } catch YoError.Replaced {
       return .replaced
+    } catch YoError.Outdated {
+      return .sent  // the friend's app too old: the Yo waits in the core's outbox until they update
     } catch YoError.Refused(let status) where status == 426 {
       return .stopped  // this build too old: kept, for the build after it
     } catch let error as YoError where mediaRetryLater(error: error) {

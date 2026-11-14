@@ -168,7 +168,7 @@ struct SettingsView: View {
               }
             }
           }
-          // The very last row: a word to the Yo team.
+          // The last rows: a word to the Yo team, and the licences with the source of this build.
           Section {
             Button { sendingFeedback = true } label: {
               Label {
@@ -177,6 +177,11 @@ struct SettingsView: View {
                 Image(systemName: "envelope.fill")
               }
               .labelStyle(Tile(.gray))
+            }
+            NavigationLink {
+              LicensesPage()
+            } label: {
+              Label("Licenses", systemImage: "doc.text.fill").labelStyle(Tile(.gray))
             }
           }
         }

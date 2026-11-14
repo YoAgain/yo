@@ -17,6 +17,9 @@ pub enum YoError {
     NotOnYo,
     #[error("blocked")]
     Blocked,
+    /// The contact's app is too old: the Yo waits in the outbox until it is updated.
+    #[error("the contact must update Yo")]
+    Outdated,
     /// A verified contact's key changed: `confirm_identity` first.
     #[error("identity not confirmed")]
     Unconfirmed,
@@ -46,6 +49,7 @@ impl From<yo_core::Error> for YoError {
             E::Refused(status) => YoError::Refused { status },
             E::NotOnYo => YoError::NotOnYo,
             E::Blocked => YoError::Blocked,
+            E::Outdated => YoError::Outdated,
             E::Unconfirmed => YoError::Unconfirmed,
             E::Replaced => YoError::Replaced,
             E::State => YoError::State,
@@ -197,7 +201,7 @@ pub struct SealedMedia {
     pub ciphertext: Vec<u8>,
 }
 
-/// The chat a photo or video goes in: how many fetches its upload is for, and what opening it received.
+/// Where a photo or video goes: how many fetches its upload is for, and what getting there received.
 #[derive(uniffi::Record)]
 pub struct MediaChat {
     pub fetches: u32,
@@ -259,8 +263,8 @@ impl From<Content> for MessageKind {
             Content::Link(url) => MessageKind::Link { url },
             Content::Location { lat_e7, lon_e7 } => MessageKind::Location { lat_e7, lon_e7 },
             Content::Unknown(kind) => MessageKind::Unsupported { kind },
-            // Never an event (spec 4.9).
-            Content::Restart { .. } => MessageKind::Unsupported { kind: 6 },
+            // Never an event (spec 4.5, 4.6).
+            Content::Receipt | Content::Retry => MessageKind::Unsupported { kind: 0 },
         }
     }
 }
@@ -303,24 +307,19 @@ pub struct YoContact {
     pub blocked: bool,
     /// The account is gone (deleted, or its name released): a Yo to it is `NotOnYo`.
     pub gone: bool,
+    /// Its app is too old: a Yo to it waits until it is updated (`Outdated`).
+    pub outdated: bool,
 }
 
-/// One chat with a contact as MLS has it (spec 4): for the app's contact details.
+/// A session with one device of a contact (spec 4): for the app's contact details.
 #[derive(uniffi::Record)]
-pub struct YoChat {
-    /// The group's id (hex).
-    pub group: String,
-    pub ciphersuite: String,
-    pub epoch: u64,
-    pub joined_epoch: u64,
-    /// Devices in the group (both accounts).
-    pub members: u32,
-    /// When this device last updated its keys here (ms since 1970; 0: not yet).
-    pub last_update_ms: u64,
-    /// The chat takes key updates: not while it is lost and waits for its restart.
-    pub updates: bool,
-    pub restarted: bool,
-    pub lost: bool,
+pub struct YoSession {
+    /// The device's key (hex).
+    pub device: String,
+    /// A message can go to it now: made with PQXDH, its sending chain good.
+    pub usable: bool,
+    /// Its last message did not open here: a new session and a retry are on their way.
+    pub retrying: bool,
 }
 
 /// A friend as the account's storage keeps it (spec 6.9): what a new phone gets back.
@@ -729,7 +728,7 @@ impl YoClient {
     }
 
     /// The rest of the last `sync`, after its events are handed over: the hub is told what arrived; for the app also
-    /// KeyPackages, the outbox, the storage, delivery tokens. The notification extension calls it once its
+    /// receipts and retries, prekeys, the outbox, the storage, delivery tokens. The notification extension calls it once its
     /// notification is out; the app's next `sync` does it itself.
     pub fn after_sync(&self) -> Result<(), YoError> {
         Ok(self.with(|c| c.after_sync())??)
@@ -767,6 +766,7 @@ impl YoClient {
                 unconfirmed: c.unconfirmed,
                 blocked: c.blocked,
                 gone: c.gone,
+                outdated: c.outdated,
             })
             .collect()
     }
@@ -782,22 +782,12 @@ impl YoClient {
         }
     }
 
-    /// The chats with a contact (user id) and what MLS says of each.
-    pub fn chats_with(&self, user: String) -> Vec<YoChat> {
-        self.with(|c| c.chats_with(&user))
+    /// The sessions with a contact's devices (user id).
+    pub fn sessions_with(&self, user: String) -> Vec<YoSession> {
+        self.with(|c| c.sessions_with(&user))
             .unwrap_or_default()
             .into_iter()
-            .map(|c| YoChat {
-                group: c.group,
-                ciphersuite: c.ciphersuite,
-                epoch: c.epoch,
-                joined_epoch: c.joined_epoch,
-                members: c.members,
-                last_update_ms: c.last_update_ms,
-                updates: c.updates,
-                restarted: c.restarted,
-                lost: c.lost,
-            })
+            .map(|s| YoSession { device: s.device, usable: s.usable, retrying: s.retrying })
             .collect()
     }
 

@@ -1,8 +1,8 @@
 //! What a review of the core found (Codex, after the chaos runs), each the smallest case that showed it.
 
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
-use yo_core::{Client, Content, Error, Event, Push, Response, Sent, Store, Transport};
+use yo_core::{Client, Content, Error, Event, Push, Store};
 use yo_tests::{random_u64, Fault, Http, TestHub};
 
 fn by_name(http: Arc<Http>, name: &str) -> Client {
@@ -102,106 +102,8 @@ fn nothing_waiting_goes_to_someone_blocked_meanwhile() {
     assert_eq!(texts(&b.sync(0).unwrap()), ["and on"]);
 }
 
-/// A clock that can be moved on, for updates that are due.
-fn movable_clock(client: &mut Client) -> Arc<AtomicU64> {
-    let offset = Arc::new(AtomicU64::new(0));
-    let moved = offset.clone();
-    client.set_clock(Arc::new(move || {
-        let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_millis() as u64;
-        now + moved.load(Ordering::Relaxed)
-    }));
-    offset
-}
-
-const DAYS_8: u64 = 8 * 24 * 3600 * 1000;
-
 fn to(user: &str) -> String {
     yo_wire::api::deliver_path(&yo_tests::user_id(user))
-}
-
-/// A commit the hub refused (`403`, `404`) turned the chat's updates off for good: no more post-compromise
-/// security, silently. Now the chat is lost and restarted (spec 4.9), and the new one takes updates.
-#[test]
-fn a_refused_commit_restarts_the_chat_instead_of_giving_up_updates() {
-    let hub = TestHub::start();
-    let n = random_u64() % 100_000;
-    let http = Http::new(hub.url());
-    let mut a = by_name(Http::new(hub.url()), &format!("Ref{n}"));
-    let mut b = by_name(http.clone(), &format!("Fer{n}"));
-    a.send(b.user_id(), text("hi")).unwrap();
-    assert_eq!(texts(&b.sync(0).unwrap()), ["hi"]);
-    let joined = b.chats_with(a.user_id())[0].group.clone();
-    http.fault("/commit", Fault::Answer(403));
-    b.send(a.user_id(), text("after a refusal")).unwrap();
-    assert_eq!(texts(&a.sync(0).unwrap()), ["after a refusal"]);
-    let chats = b.chats_with(a.user_id());
-    assert_eq!(chats.len(), 1);
-    assert_ne!(chats[0].group, joined, "a new group");
-    assert!(chats[0].updates && !chats[0].lost);
-    let epoch = chats[0].epoch;
-    let clock = movable_clock(&mut b);
-    clock.store(DAYS_8, Ordering::Relaxed);
-    b.maintenance().unwrap();
-    assert_eq!(b.chats_with(a.user_id())[0].epoch, epoch + 1, "updated");
-    a.send(b.user_id(), text("still fine")).unwrap();
-    assert_eq!(texts(&b.sync(0).unwrap()), ["still fine"]);
-}
-
-/// More commits missing than one call fetches: the error to come back later rolled back everything fetched, so
-/// every call fetched the same ones again, for ever. Now what was fetched stays and the next call goes on.
-#[test]
-fn a_long_way_behind_is_caught_up_over_several_calls() {
-    let hub = TestHub::start();
-    let n = random_u64() % 100_000;
-    let http = Http::new(hub.url());
-    let mut a = by_name(http.clone(), &format!("Far{n}"));
-    let mut b = by_name(Http::new(hub.url()), &format!("Raf{n}"));
-    a.send(b.user_id(), text("hi")).unwrap();
-    assert_eq!(texts(&b.sync(0).unwrap()), ["hi"]);
-    b.fetch_at_most_for_tests(2);
-    let clock = movable_clock(&mut a);
-    for k in 1..=5 {
-        clock.store(k * DAYS_8, Ordering::Relaxed);
-        // The commit never reaches b's inbox: b fetches it from the hub.
-        http.fault(&to(b.user_id()), Fault::Answer(400));
-        a.maintenance().unwrap();
-    }
-    a.send(b.user_id(), text("far ahead")).unwrap();
-    let mut epochs = Vec::new();
-    let got = (0..5).find_map(|_| {
-        let synced = b.sync(0);
-        epochs.push(b.chats()[0].2);
-        synced.ok().map(|events| texts(&events))
-    });
-    assert_eq!(got.unwrap(), ["far ahead"], "epochs on the way: {epochs:?}");
-    assert_eq!(epochs, [3, 5, 6], "two at a time, kept");
-}
-
-/// A lost race whose catch-up met a passing trouble counted as done: the message was encrypted in an epoch the
-/// hub's group had left. Now the send fails for now, and nothing is made in the old epoch.
-#[test]
-fn nothing_is_encrypted_in_an_epoch_already_left() {
-    let hub = TestHub::start();
-    let n = random_u64() % 100_000;
-    let (http_a, http_b) = (Http::new(hub.url()), Http::new(hub.url()));
-    let mut a = by_name(http_a.clone(), &format!("Old{n}"));
-    let mut b = by_name(http_b.clone(), &format!("Dlo{n}"));
-    a.send(b.user_id(), text("hi")).unwrap();
-    assert_eq!(texts(&b.sync(0).unwrap()), ["hi"]);
-    // a's update wins the epoch b's first update (due since it joined) will want; its commit does not reach b.
-    let clock = movable_clock(&mut a);
-    clock.store(DAYS_8, Ordering::Relaxed);
-    http_a.fault(&to(b.user_id()), Fault::Answer(400));
-    a.maintenance().unwrap();
-    // b's receive first, then its catch-up after the lost race: both "not now".
-    http_b.fault("/v1/inbox?", Fault::Answer(503));
-    http_b.fault("/v1/inbox?", Fault::Answer(503));
-    let sent = b.send(a.user_id(), text("not now"));
-    assert_eq!(sent, Err(Error::Refused(503)), "for now");
-    assert_eq!(b.pending(), 0, "not made in the old epoch");
-    b.send(a.user_id(), text("now")).unwrap();
-    assert_eq!(texts(&a.sync(0).unwrap()), ["now"]);
-    assert_eq!(a.chats()[0].2, b.chats()[0].2, "one epoch");
 }
 
 /// A name a contact gave up and someone else took: a send to the name still went to the contact, as this device
@@ -225,52 +127,6 @@ fn a_name_that_changed_hands_goes_to_its_new_owner() {
     assert!(known.iter().any(|k| k.user == a.user_id() && k.handles.is_empty()), "{known:?}");
 }
 
-/// A restart's `last_seen` is the latest message the peer got, not all it got: one lost before a later one that came
-/// was never sent again. Now every message kept is, and the peer skips what it has seen.
-#[test]
-fn a_restart_brings_back_a_message_lost_before_a_later_one() {
-    let hub = TestHub::start();
-    let n = random_u64() % 100_000;
-    let (http_a, http_b) = (Http::new(hub.url()), Http::new(hub.url()));
-    let mut a = by_name(http_a.clone(), &format!("Gap{n}"));
-    let mut b = by_name(http_b.clone(), &format!("Pag{n}"));
-    a.send(b.user_id(), text("first")).unwrap();
-    assert_eq!(texts(&b.sync(0).unwrap()), ["first"]);
-    http_a.fault(&to(b.user_id()), Fault::Answer(400));
-    a.send(b.user_id(), text("lost")).unwrap();
-    a.send(b.user_id(), text("later")).unwrap();
-    assert_eq!(texts(&b.sync(0).unwrap()), ["later"]);
-    // b's chat is lost (the hub refuses its first update) and restarted: "later" is the last it saw.
-    http_b.fault("/commit", Fault::Answer(403));
-    b.send(a.user_id(), text("restarted")).unwrap();
-    assert_eq!(texts(&a.sync(0).unwrap()), ["restarted"]);
-    // What the restart asks for goes with the work after the hand-over.
-    a.after_sync().unwrap();
-    assert_eq!(texts(&b.sync(0).unwrap()), ["lost"], "the gap, once");
-    a.send(b.user_id(), text("on")).unwrap();
-    assert_eq!(texts(&b.sync(0).unwrap()), ["on"]);
-}
-
-/// A new last resort retired the one before when it was made, not when the hub took it: an upload that failed
-/// and went a month later deleted the old one's keys at once, though the hub had handed it out until then.
-#[test]
-fn a_last_resort_is_retired_only_once_its_replacement_is_at_the_hub() {
-    const DAY: u64 = 24 * 3600 * 1000;
-    let hub = TestHub::start();
-    let http = Http::new(hub.url());
-    let mut a = by_name(http.clone(), &format!("Last{}", random_u64() % 100_000));
-    let clock = movable_clock(&mut a);
-    clock.store(31 * DAY, Ordering::Relaxed);
-    http.fault("/v1/keypackages", Fault::Answer(503));
-    assert_eq!(a.maintenance(), Err(Error::Refused(503)));
-    let kept = a.own_key_packages();
-    clock.store(63 * DAY, Ordering::Relaxed);
-    a.maintenance().unwrap();
-    // The upload that failed goes again as it was (no third last resort made): the hub takes it, and the one it had
-    // until now is retired from then, its keys kept, not deleted when its replacement was made.
-    assert_eq!(a.own_key_packages(), kept, "the one the hub had until now is kept");
-}
-
 /// A `409` whose devices could not be read dropped the message, though the hub had not taken it. Now it stays in
 /// the outbox and goes with the next delivery.
 #[test]
@@ -287,42 +143,6 @@ fn an_unreadable_409_keeps_the_message() {
     assert_eq!((a.pending(), a.dropped()), (1, 0));
     a.sync(0).unwrap();
     assert_eq!(texts(&b.sync(0).unwrap()), ["kept"]);
-}
-
-/// A new chat's group was registered at the hub inside the transaction that made it: a lost answer rolled the
-/// group back while the hub kept it, and the send failed. Now the group is saved first and registered outside;
-/// until the hub has it, its Welcome and messages wait, and the same group is registered again.
-#[test]
-fn a_new_chat_whose_registration_did_not_answer_is_the_same_chat_later() {
-    for fault in [Fault::LoseAnswer, Fault::Answer(429), Fault::Answer(503)] {
-        let hub = TestHub::start();
-        let n = random_u64() % 100_000;
-        let http = Http::new(hub.url());
-        let mut a = by_name(http.clone(), &format!("New{n}"));
-        let mut b = by_name(Http::new(hub.url()), &format!("Wen{n}"));
-        http.fault("/v1/groups", fault);
-        // Tried again with the delivery: a 409 to the repeat is the lost answer's.
-        a.send(b.user_id(), text("first")).unwrap();
-        assert_eq!(texts(&b.sync(0).unwrap()), ["first"], "{fault:?}");
-        assert_eq!((a.chats().len(), b.chats().len()), (1, 1));
-        // The hub has the group with its token: b's first update is ordered there.
-        b.send(a.user_id(), text("back")).unwrap();
-        assert_eq!(texts(&a.sync(0).unwrap()), ["back"]);
-        assert_eq!(b.chats()[0].2, 2, "{fault:?}");
-    }
-    // The hub's limit on new groups for a while: the first message waits with its Welcome, and goes after.
-    let hub = TestHub::start();
-    let n = random_u64() % 100_000;
-    let http = Http::new(hub.url());
-    let mut a = by_name(http.clone(), &format!("Lim{n}"));
-    let mut b = by_name(Http::new(hub.url()), &format!("Mil{n}"));
-    http.fault("/v1/groups", Fault::Answer(429));
-    http.fault("/v1/groups", Fault::Answer(429));
-    a.send(b.user_id(), text("waits")).unwrap();
-    assert_eq!(a.pending(), 2, "the Welcome and the message");
-    assert!(b.sync(0).unwrap().is_empty());
-    a.sync(0).unwrap();
-    assert_eq!(texts(&b.sync(0).unwrap()), ["waits"]);
 }
 
 /// The account was registered before its secrets were saved: a crash after the hub took the name lost the key the
@@ -371,102 +191,3 @@ fn a_registration_is_saved_before_it_leaves_and_finished_after_a_restart() {
 }
 
 // The final review (Codex, after the app's version and the saves that fail).
-
-/// A new chat's registration answered `426` (this app too old) counted as the id being someone else's: the chat went,
-/// its Welcome and first message with it. Now `426` is "not now" like a `429`: all of it waits for the updated app.
-#[test]
-fn a_new_chat_refused_as_too_old_waits_for_the_updated_app() {
-    let hub = TestHub::start();
-    let n = random_u64() % 100_000;
-    let http = Http::new(hub.url());
-    let mut a = by_name(http.clone(), &format!("Old{n}"));
-    let mut b = by_name(Http::new(hub.url()), &format!("Dlo{n}"));
-    http.fault("/v1/groups", Fault::Answer(426));
-    http.fault("/v1/groups", Fault::Answer(426));
-    a.send(b.user_id(), text("waits")).unwrap();
-    assert_eq!(a.pending(), 2, "the Welcome and the message");
-    assert!(b.sync(0).unwrap().is_empty());
-    a.sync(0).unwrap();
-    assert_eq!(texts(&b.sync(0).unwrap()), ["waits"]);
-}
-
-/// The outbox sent without the client (`deliver_begin`, the app's `deliver`) never registered a new chat's group
-/// the hub had not answered for: its Welcome and messages waited for some other call. Now it registers first, as
-/// `deliver` does.
-#[test]
-fn the_outbox_sent_apart_registers_a_new_chat_first() {
-    let hub = TestHub::start();
-    let n = random_u64() % 100_000;
-    let http = Http::new(hub.url());
-    let mut a = by_name(http.clone(), &format!("Apart{n}"));
-    let mut b = by_name(Http::new(hub.url()), &format!("Trapa{n}"));
-    http.fault("/v1/groups", Fault::Answer(429));
-    http.fault("/v1/groups", Fault::Answer(429));
-    a.send(b.user_id(), text("waits")).unwrap();
-    assert_eq!(a.pending(), 2);
-    let mut deliveries = a.deliver_begin().unwrap();
-    loop {
-        let answers = deliveries.send();
-        match a.send_end(&deliveries, answers) {
-            Sent::More(more) => deliveries = more,
-            Sent::Done(result) => {
-                result.unwrap();
-                break;
-            }
-        }
-    }
-    assert_eq!(a.pending(), 0);
-    assert_eq!(texts(&b.sync(0).unwrap()), ["waits"]);
-}
-
-/// Its transport fills the disk once a lookup is under way: a restart's new chat is asked for, and cannot be saved.
-struct FillsOnLookup(Arc<Http>, Arc<Disk>, AtomicBool);
-
-impl Transport for FillsOnLookup {
-    fn request(&self, method: &str, path: &str, headers: &[(String, String)], body: &[u8]) -> Result<Response, String> {
-        if path == yo_wire::api::LOOKUP && self.2.load(Ordering::Relaxed) {
-            self.1.full.store(true, Ordering::Relaxed);
-        }
-        self.0.request(method, path, headers, body)
-    }
-}
-
-/// A lost chat whose restart could not save its new chat (a full disk) was dropped as if the peer could not be
-/// restarted with: what waited to go in it went too. Now the old chat and its outbox stay, and the restart goes once
-/// the state saves again.
-#[test]
-fn a_restart_that_cannot_save_keeps_the_lost_chat_and_what_waits() {
-    let hub = TestHub::start();
-    let n = random_u64() % 100_000;
-    let http = Http::new(hub.url());
-    let disk = Arc::new(Disk::default());
-    let fills = Arc::new(FillsOnLookup(http.clone(), disk.clone(), AtomicBool::new(false)));
-    let mut a = by_name(Http::new(hub.url()), &format!("Sav{n}"));
-    let mut b = Client::register_username(fills.clone(), &format!("Vas{n}"), None, None, Push::none()).unwrap();
-    b.persist_to(disk.clone(), KEY).unwrap();
-    a.send(b.user_id(), text("hi")).unwrap();
-    assert_eq!(texts(&b.sync(0).unwrap()), ["hi"]);
-    b.send(a.user_id(), text("first")).unwrap();
-    assert_eq!(texts(&a.sync(0).unwrap()), ["first"]);
-    // A message the hub does not take now, then a commit it refuses: the chat is lost, the message waits in it.
-    http.fault(&to(a.user_id()), Fault::Answer(503));
-    http.fault(&to(a.user_id()), Fault::Answer(503));
-    b.send(a.user_id(), text("waits")).unwrap();
-    assert_eq!(b.pending(), 1);
-    let clock = movable_clock(&mut b);
-    clock.store(DAYS_8, Ordering::Relaxed);
-    http.fault("/commit", Fault::Answer(403));
-    b.maintenance().unwrap();
-    assert!(b.chats_with(a.user_id())[0].lost);
-    fills.2.store(true, Ordering::Relaxed);
-    assert!(matches!(b.maintenance(), Err(Error::Save(_))));
-    let chats = b.chats_with(a.user_id());
-    assert_eq!((chats.len(), chats[0].lost, b.pending()), (1, true, 1), "the lost chat and its message kept");
-    fills.2.store(false, Ordering::Relaxed);
-    disk.full.store(false, Ordering::Relaxed);
-    b.maintenance().unwrap();
-    assert_eq!(texts(&a.sync(0).unwrap()), ["waits"]);
-    let chats = b.chats_with(a.user_id());
-    assert_eq!(chats.len(), 1);
-    assert!(!chats[0].lost);
-}

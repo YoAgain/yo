@@ -1,11 +1,10 @@
-//! The Yo hub (spec 6): users and their devices, KeyPackages, delivery to users, the order of commits, push. It holds
-//! no content key, and the routes that carry messages and commits take no identity: the hub never learns a sender.
+//! The Yo hub (spec 6): users and their devices, their prekeys, delivery to users, push. It holds no content key, and
+//! the route that carries messages takes no identity: the hub never learns a sender.
 
 pub mod blobs;
 pub mod config;
 pub mod db;
 pub mod error;
-pub mod kp;
 pub mod limiter;
 pub mod push;
 pub mod tokens;
@@ -17,10 +16,9 @@ use axum::routing::{delete, get, post, put};
 use axum::Router;
 use bytes::Bytes;
 use config::Config;
-use db::{Commit, Db, Delivered, Incoming, Key, NewDevice, StoredKeyPackage, Write};
+use db::{Db, Delivered, Incoming, Key, NewDevice, Write};
 use error::{refuse, Refusal, Res};
 use limiter::{Limiter, ReplayCache};
-use openmls_rust_crypto::RustCrypto;
 use std::collections::HashMap;
 use std::future::Future;
 use std::net::{IpAddr, SocketAddr};
@@ -32,16 +30,15 @@ use yo_wire::api::{self, HEADER_BODY_HASH, HEADER_DEVICES};
 use yo_wire::cert::DeviceCertificate;
 use yo_wire::content::BlobId;
 use yo_wire::handle::{Handle, KIND_USERNAME};
-use yo_wire::limits::{self, KEY_PACKAGE_TARGET, MAX_DEVICES, MAX_INBOX_FETCH, MAX_KEY_PACKAGES_PER_UPLOAD};
+use yo_wire::limits::{self, MAX_DEVICES, MAX_INBOX_FETCH, MAX_PREKEYS_PER_UPLOAD, PREKEY_TARGET};
 use yo_wire::request::{HEADER_DEVICE, HEADER_SIGNATURE, HEADER_TIME};
 use yo_wire::token::{BatchTokenRequest, Token};
-use yo_wire::{decode, encode, sha256, unb64, DeviceId, GroupId, UserId};
+use yo_wire::{decode, encode, sha256, unb64, DeviceId, UserId};
 
 pub struct Hub {
     config: Config,
     db: Arc<Db>,
     deliveries: std::sync::mpsc::SyncSender<Delivery>,
-    crypto: RustCrypto,
     limiter: Limiter,
     replay: ReplayCache,
     waiting: Mutex<HashMap<DeviceId, Arc<Notify>>>,
@@ -62,7 +59,7 @@ const MINUTE: Duration = Duration::from_secs(60);
 const DAY: Duration = Duration::from_secs(24 * 3600);
 
 /// The hub's work on blocking threads at once (`Hub::blocking`): the database is one connection, so more would only
-/// wait for it; the rest (signatures, KeyPackages) is work for the cores.
+/// wait for it; the rest (signatures, sessions) is work for the cores.
 const BLOCKING_AT_ONCE: usize = 32;
 
 /// Inbox requests of one device at once: the app, its notification extension, a share. One answer holds up to
@@ -214,7 +211,6 @@ fn writer(db: Arc<Db>, queue: std::sync::mpsc::Receiver<Delivery>, most: u32, hu
 struct Signed {
     device_id: DeviceId,
     user_id: UserId,
-    device_key: Key,
 }
 
 /// An app older than the hub's minimum for its platform (`YO_MIN_APP`) gets `426` on every request: it shows that it
@@ -266,7 +262,6 @@ impl Hub {
         let hub = Arc::new(Hub {
             db,
             deliveries,
-            crypto: RustCrypto::default(),
             limiter: Limiter::default(),
             replay: ReplayCache::default(),
             waiting: Mutex::default(),
@@ -294,7 +289,7 @@ impl Hub {
             .route(api::REGISTER, post(register))
             .route(api::BACKUP, put(put_backup))
             .route("/v1/backup/{id}", get(fetch_backup))
-            .route(api::KEY_PACKAGES, put(key_packages))
+            .route(api::PREKEYS, put(prekeys))
             .route(api::LOOKUP, post(lookup))
             .route(api::PUSH, put(set_push))
             .route(api::USERNAME, put(set_username))
@@ -306,9 +301,6 @@ impl Hub {
             .route(api::TOKENS, post(issue_tokens))
             .route("/v1/username/{name}", get(username_free))
             .route(api::INBOX_ACK, post(ack))
-            .route(api::GROUPS, post(create_group))
-            .route("/v1/groups/{group}/commit", post(commit))
-            .route("/v1/groups/{group}/commits/{epoch}", get(fetch_commit))
             .route_layer(axum::middleware::from_fn_with_state(self.clone(), off_workers));
         // These wait (a long poll, the writer, a blob's bytes) and run their database work through `blocking`.
         let mut router = Router::new()
@@ -539,7 +531,7 @@ impl Hub {
         if new_app || now.saturating_sub(device.last_seen_at) >= DAY.as_millis() as u64 {
             self.db.touch(&device_id, now, app)?;
         }
-        Ok(Signed { device_id, user_id: device.user_id, device_key: device.device_key })
+        Ok(Signed { device_id, user_id: device.user_id })
     }
 
     /// Each signature once (the replay cache), for as long as its time is within the window.
@@ -547,41 +539,30 @@ impl Hub {
         self.replay.first_time(*signature, now, time + limits::MAX_SKEW_MS + 1)
     }
 
-    /// Checks uploaded KeyPackages against the uploading device and its account; the last resort must say it is one,
-    /// the others not.
-    fn check_key_packages(
-        &self,
-        uploads: &[yo_wire::VLBytes],
-        last_resort: Option<&yo_wire::VLBytes>,
-        account_key: &Key,
-        device_key: &Key,
-    ) -> Res<(Vec<StoredKeyPackage>, Option<StoredKeyPackage>)> {
-        if uploads.len() > MAX_KEY_PACKAGES_PER_UPLOAD {
+    /// Checks an upload of prekeys (spec 4.1): their number and sizes. What they are, the devices that fetch them
+    /// check (against the account's identity key); the hub stores them as they came.
+    fn check_prekeys(prekeys: &api::Prekeys, first: bool) -> Res<()> {
+        use limits::{MAX_PREKEY_LEN, MAX_PREKEY_SIGNATURE_LEN};
+        if prekeys.one_time.len() > MAX_PREKEYS_PER_UPLOAD || prekeys.kyber.len() > MAX_PREKEYS_PER_UPLOAD {
             return Err(refuse(StatusCode::PAYLOAD_TOO_LARGE));
         }
-        let check = |bytes: &yo_wire::VLBytes, want_last_resort: bool| {
-            kp::check(&self.crypto, bytes.as_slice(), account_key, device_key)
-                .filter(|checked| checked.last_resort == want_last_resort)
-                .map(|checked| StoredKeyPackage {
-                    hash: checked.hash,
-                    data: bytes.as_slice().to_vec(),
-                    not_after: checked.not_after,
-                })
-                .ok_or_else(bad)
+        if first && (prekeys.signed.is_none() || prekeys.last_resort.is_none()) {
+            return Err(bad());
+        }
+        let key = |k: &yo_wire::VLBytes| !k.as_slice().is_empty() && k.as_slice().len() <= MAX_PREKEY_LEN;
+        let signed = |p: &api::SignedPrekey| {
+            key(&p.key)
+                && !p.signature.as_slice().is_empty()
+                && p.signature.as_slice().len() <= MAX_PREKEY_SIGNATURE_LEN
         };
-        let stored = uploads.iter().map(|k| check(k, false)).collect::<Res<Vec<_>>>()?;
-        let last = last_resort.map(|k| check(k, true)).transpose()?;
-        Ok((stored, last))
+        let good = prekeys.signed.iter().chain(&prekeys.last_resort).chain(&prekeys.kyber).all(signed)
+            && prekeys.one_time.iter().all(|p| key(&p.key));
+        good.then_some(()).ok_or_else(bad)
     }
 
     /// Everything about a registering device that is checked before it is stored (spec 6.4): its certificate, the
-    /// account key's proof of possession over this handle and device, its KeyPackages.
-    fn check_new_device(
-        &self,
-        handle: &Handle,
-        device: &api::NewDevice,
-        app: Option<&str>,
-    ) -> Res<(Key, NewDevice, Vec<StoredKeyPackage>, StoredKeyPackage)> {
+    /// account key's proof of possession over this handle and device, its prekeys.
+    fn check_new_device(&self, handle: &Handle, device: &api::NewDevice, app: Option<&str>) -> Res<(Key, NewDevice)> {
         if device.push.token.as_slice().len() > limits::MAX_PUSH_TOKEN_LEN {
             return Err(bad());
         }
@@ -590,26 +571,27 @@ impl Hub {
         let signed = api::registration_to_be_signed(handle, &device.device_id, &device.device_key, &device.auth_key);
         let key = ed25519_dalek::VerifyingKey::from_bytes(&account_key).map_err(|_| bad())?;
         key.verify_strict(&signed, &ed25519_dalek::Signature::from_bytes(&device.proof)).map_err(|_| bad())?;
-        let (key_packages, last_resort) =
-            self.check_key_packages(&device.key_packages, Some(&device.last_resort), &account_key, &device.device_key)?;
+        Self::check_prekeys(&device.prekeys, true)?;
         let new = NewDevice {
             device_id: device.device_id,
             device_key: device.device_key,
             auth_key: device.auth_key,
+            registration_id: device.registration_id,
             push_platform: device.push.platform,
             push_token: device.push.token.as_slice().to_vec(),
             app: app.map(str::to_owned),
         };
-        Ok((account_key, new, key_packages, last_resort.expect("asked for")))
+        Ok((account_key, new))
     }
 
     /// Stores a checked registration for a username and answers the user id.
     fn register_checked(
         &self,
         handle: &Handle,
-        checked: (Key, NewDevice, Vec<StoredKeyPackage>, StoredKeyPackage),
+        checked: (Key, NewDevice),
+        prekeys: &api::Prekeys,
     ) -> Res<(StatusCode, Vec<u8>)> {
-        let (account_key, device, key_packages, last_resort) = checked;
+        let (account_key, device) = checked;
         let mut fresh: UserId = [0; 16];
         getrandom::getrandom(&mut fresh).map_err(|_| refuse(StatusCode::INTERNAL_SERVER_ERROR))?;
         let spelling = std::str::from_utf8(handle.value.as_slice()).map_err(|_| bad())?;
@@ -619,13 +601,14 @@ impl Hub {
             &fresh,
             &account_key,
             &device,
-            &key_packages,
-            &last_resort,
+            prekeys,
+            PREKEY_TARGET * 2,
             now_ms(),
         )?;
         match written {
-            Write::Done((user_id, username)) => {
-                Ok(ok(encode(&api::Registered { user_id, username: username.map(|name| name.into_bytes().into()) })))
+            Write::Done((user_id, username, device_id)) => {
+                let username = username.map(|name| name.into_bytes().into());
+                Ok(ok(encode(&api::Registered { user_id, username, device_id })))
             }
             Write::Refused(_) => Err(refuse(StatusCode::CONFLICT)),
         }
@@ -716,7 +699,7 @@ async fn register(
     let handle = Handle { kind: KIND_USERNAME, value: request.username.clone() };
     handle.check()?;
     let checked = hub.check_new_device(&handle, &request.device, named_app(&headers))?;
-    hub.register_checked(&handle, checked)
+    hub.register_checked(&handle, checked, &request.device.prekeys)
 }
 
 /// Whether a username is free, for the app while it is typed (spec 6.3): `204` free, `409` taken by anyone or
@@ -803,13 +786,11 @@ async fn fetch_backup(
 
 // ---- what a device asks for itself ----
 
-async fn key_packages(State(hub): Hubs, method: Method, uri: Uri, headers: HeaderMap, body: Bytes) -> Res<StatusCode> {
+async fn prekeys(State(hub): Hubs, method: Method, uri: Uri, headers: HeaderMap, body: Bytes) -> Res<StatusCode> {
     let device = hub.authenticate(&method, &uri, &headers, &body)?;
-    let request: api::KeyPackages = decode(&body)?;
-    let account_key = hub.db.account_key(&device.user_id)?.ok_or_else(|| refuse(StatusCode::UNAUTHORIZED))?;
-    let (stored, last) =
-        hub.check_key_packages(&request.key_packages, request.last_resort.as_ref(), &account_key, &device.device_key)?;
-    match hub.db.add_key_packages(&device.device_id, &stored, last.as_ref(), KEY_PACKAGE_TARGET * 2)? {
+    let request: api::Prekeys = decode(&body)?;
+    Hub::check_prekeys(&request, false)?;
+    match hub.db.add_prekeys(&device.device_id, &request, PREKEY_TARGET * 2)? {
         Write::Done(()) => Ok(StatusCode::NO_CONTENT),
         Write::Refused(db::Conflict::DeviceGone) => Err(refuse(StatusCode::GONE)),
         Write::Refused(_) => Err(refuse(StatusCode::CONFLICT)),
@@ -830,7 +811,7 @@ async fn lookup(
         return Err(bad());
     }
     let limits = &hub.config.limits;
-    let take = request.key_packages & api::LOOKUP_KEY_PACKAGES != 0;
+    let take = request.flags & api::LOOKUP_PREKEYS != 0;
     let (kind, per_day) = match take {
         true => ("lookup", limits.lookup_per_device_day),
         false => ("identity", limits.identity_lookup_per_device_day),
@@ -843,11 +824,10 @@ async fn lookup(
     let result = api::LookupResult {
         user_id: found.user_id,
         account_key: found.account_key,
-        device_keys: found.device_keys.into_iter().take(MAX_DEVICES).collect(),
-        key_packages: found.key_packages.into_iter().take(MAX_DEVICES).map(Into::into).collect(),
+        devices: found.devices.into_iter().take(MAX_DEVICES).collect(),
+        bundles: found.bundles.into_iter().take(MAX_DEVICES).collect(),
     };
-    // The username only to who asks for it: an app from before spellings reads a `LookupResult` and nothing after.
-    if request.key_packages & api::LOOKUP_USERNAME == 0 {
+    if request.flags & api::LOOKUP_USERNAME == 0 {
         return Ok(ok(encode(&result)));
     }
     let username = found.username.map(|name| name.into_bytes().into());
@@ -965,24 +945,23 @@ async fn inbox(State(hub): Hubs, method: Method, uri: Uri, headers: HeaderMap) -
     let device = hub.blocking(move |hub| hub.authenticate(&method, &uri, &headers, &[])).await??;
     let fetching = hub.fetching(device.device_id).ok_or_else(|| refuse(StatusCode::TOO_MANY_REQUESTS))?;
     let id = device.device_id;
-    let read = move |hub: &Hub| {
-        Ok::<_, rusqlite::Error>((hub.db.fetch(&id, MAX_INBOX_FETCH)?, hub.db.key_packages_left(&id)?))
-    };
-    let (mut items, mut key_packages_left) = hub.blocking(read).await??;
+    let read =
+        move |hub: &Hub| Ok::<_, rusqlite::Error>((hub.db.fetch(&id, MAX_INBOX_FETCH)?, hub.db.prekeys_left(&id)?));
+    let (mut items, mut prekeys_left) = hub.blocking(read).await??;
     if items.is_empty() && wait_s > 0 {
         let waiter = hub.waiter(id);
         let notified = waiter.notify.notified();
         tokio::pin!(notified);
         notified.as_mut().enable();
         // Mail that came between the first fetch and `enable` is found here.
-        (items, key_packages_left) = hub.blocking(read).await??;
+        (items, prekeys_left) = hub.blocking(read).await??;
         if items.is_empty() {
             let _ = tokio::time::timeout(Duration::from_secs(wait_s), notified).await;
-            (items, key_packages_left) = hub.blocking(read).await??;
+            (items, prekeys_left) = hub.blocking(read).await??;
         }
     }
     let inbox = api::Inbox {
-        key_packages_left,
+        prekeys_left,
         items: items.into_iter().map(|(id, envelope)| api::InboxItem { id, envelope: envelope.into() }).collect(),
     };
     Ok(held(encode(&inbox), fetching))
@@ -1124,73 +1103,13 @@ async fn deliver(
         Delivered::Stored(_) => Ok((StatusCode::ACCEPTED, Vec::new())),
         Delivered::Mismatch(roster) => Err(Refusal(
             StatusCode::CONFLICT,
-            encode(&api::Devices { account_key: roster.account_key, device_keys: roster.device_keys }),
+            encode(&api::Devices { account_key: roster.account_key, devices: roster.devices }),
         )),
         // This recipient has no room now, not the sender too many: `507`, so the sender holds back this one's
         // deliveries only, not everyone's (a `429` stops its whole round).
         Delivered::Full => Err(refuse(StatusCode::INSUFFICIENT_STORAGE)),
         Delivered::Unknown => Err(refuse(StatusCode::NOT_FOUND)),
         Delivered::Spent => Err(refuse(StatusCode::UNAUTHORIZED)),
-    }
-}
-
-async fn create_group(State(hub): Hubs, ConnectInfo(peer): Peer, headers: HeaderMap, body: Bytes) -> Res<StatusCode> {
-    hub.limit_ip("groups", peer, &headers, hub.config.limits.groups_per_ip_hour, HOUR)?;
-    let request: api::GroupCreate = decode(&body)?;
-    if request.epoch == 0 || request.epoch > u32::MAX as u64 {
-        return Err(bad());
-    }
-    hub.db_room()?;
-    if hub.db.create_group(&request.group_id, request.epoch, &request.token_hash, now_ms())? {
-        Ok(StatusCode::CREATED)
-    } else {
-        Err(refuse(StatusCode::CONFLICT))
-    }
-}
-
-async fn commit(
-    State(hub): Hubs,
-    ConnectInfo(peer): Peer,
-    headers: HeaderMap,
-    Path(group): Path<String>,
-    body: Bytes,
-) -> Res<StatusCode> {
-    hub.limit_ip("commit", peer, &headers, hub.config.limits.commit_per_ip_minute, MINUTE)?;
-    let group: GroupId = path_id(&group)?;
-    let request: api::Commit = decode(&body)?;
-    yo_wire::envelope::check(request.envelope.as_slice())?;
-    hub.limit_ip_bytes(peer, &headers, request.envelope.as_slice().len())?;
-    hub.db_room()?;
-    let ordered = hub.db.commit(
-        &group,
-        request.epoch,
-        &sha256(&request.token),
-        &request.next_token_hash,
-        request.envelope.as_slice(),
-        now_ms(),
-    )?;
-    match ordered {
-        Commit::Accepted => Ok(StatusCode::OK),
-        Commit::Stale(epoch) => Err(Refusal(StatusCode::CONFLICT, encode(&api::Epoch { epoch }))),
-        Commit::BadToken => Err(refuse(StatusCode::FORBIDDEN)),
-        Commit::Unknown => Err(refuse(StatusCode::NOT_FOUND)),
-    }
-}
-
-/// The commit accepted on an epoch, for a member that missed it (spec 4.3).
-async fn fetch_commit(
-    State(hub): Hubs,
-    ConnectInfo(peer): Peer,
-    headers: HeaderMap,
-    Path((group, epoch)): Path<(String, u64)>,
-) -> Res<(StatusCode, Vec<u8>)> {
-    hub.limit_ip("commit", peer, &headers, hub.config.limits.commit_per_ip_minute, MINUTE)?;
-    let group: GroupId = path_id(&group)?;
-    match hub.db.commit_envelope(&group, epoch)? {
-        Ok(envelope) => Ok(ok(envelope)),
-        // Accepted once, kept no more (past its 30 days): a member that needs it cannot follow the group (4.9).
-        Err(true) => Err(refuse(StatusCode::GONE)),
-        Err(false) => Err(refuse(StatusCode::NOT_FOUND)),
     }
 }
 
@@ -1370,12 +1289,13 @@ mod tests {
             device_id: [1; 16],
             device_key: [1; 32],
             auth_key: [1; 32],
+            registration_id: 1,
             push_platform: 0,
             push_token: Vec::new(),
             app: None,
         };
-        let last_resort = StoredKeyPackage { hash: [1; 32], data: vec![1], not_after: 0 };
-        hub.db.register(b"LEO", "LEO", &[1; 16], &[1; 32], &device, &[], &last_resort, 0).unwrap();
+        let prekeys = api::Prekeys { signed: None, last_resort: None, one_time: Vec::new(), kyber: Vec::new() };
+        hub.db.register(b"LEO", "LEO", &[1; 16], &[1; 32], &device, &prekeys, 10, 0).unwrap();
         let (quota, blob) = (config.limits.blob_quota(), ([7; 16], 5));
         assert_eq!(hub.db.put_blob(&[1; 16], &blob.0, 16, 1, blob.1, &quota).unwrap(), db::BlobPut::Stored);
         let (file, incoming) = hub.blobs.incoming().unwrap();
@@ -1409,19 +1329,22 @@ mod tests {
             device_id: [1; 16],
             device_key: [1; 32],
             auth_key: [1; 32],
+            registration_id: 1,
             push_platform: api::PUSH_APNS,
             push_token: b"a1b2c3".to_vec(),
             app: None,
         };
-        let last_resort = StoredKeyPackage { hash: [1; 32], data: vec![1], not_after: 0 };
-        hub.db.register(b"LEO", "LEO", &[1; 16], &[1; 32], &device, &[], &last_resort, 0).unwrap();
+        let prekeys = api::Prekeys { signed: None, last_resort: None, one_time: Vec::new(), kyber: Vec::new() };
+        hub.db.register(b"LEO", "LEO", &[1; 16], &[1; 32], &device, &prekeys, 10, 0).unwrap();
         let waiter = hub.waiter([1; 16]);
         let notified = waiter.notify.notified();
         tokio::pin!(notified);
         notified.as_mut().enable();
         let (stored, outcome) = tokio::sync::oneshot::channel();
         drop(outcome);
-        let envelope = Bytes::from(yo_wire::envelope::seal(b"yo").unwrap());
+        let mut sealed = vec![0; 1024];
+        sealed[0] = yo_wire::envelope::SEALED;
+        let envelope = Bytes::from(sealed);
         let devices_hash = yo_wire::devices::hash(&[1; 32], &[[1; 32]]);
         let runtime = tokio::runtime::Handle::current();
         hub.deliveries.send(Delivery { user: [1; 16], devices_hash, envelope, token: None, stored, runtime }).unwrap();

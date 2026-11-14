@@ -1,6 +1,6 @@
 //! The contract between the apps and the hub (spec/v1.md): what both must read the same way, written once.
 //!
-//! Formats are TLS-encoded like MLS itself. This crate verifies signatures but never makes one: it holds no secret
+//! Formats are TLS-encoded (RFC 8446 section 3). This crate verifies signatures but never makes one: it holds no secret
 //! key and does no I/O.
 
 pub mod api;
@@ -21,20 +21,13 @@ pub const VERSION: u8 = 1;
 pub const USER_ID_LEN: usize = 16;
 /// A device id: 16 random bytes the device chooses; the hub's name for its inbox, never given to other users.
 pub const DEVICE_ID_LEN: usize = 16;
-/// A group id: 32 random bytes chosen by the creator.
-pub const GROUP_ID_LEN: usize = 32;
 /// An Ed25519 public key.
 pub const KEY_LEN: usize = 32;
 /// An Ed25519 signature.
 pub const SIGNATURE_LEN: usize = 64;
-/// An epoch token and its hash.
-pub const TOKEN_LEN: usize = 32;
-/// The MLS exporter label of the epoch token (spec 4.1); the context is the group id.
-pub const EPOCH_TOKEN_LABEL: &str = "yo epoch token";
 
 pub type DeviceId = [u8; DEVICE_ID_LEN];
 pub type UserId = [u8; USER_ID_LEN];
-pub type GroupId = [u8; GROUP_ID_LEN];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
 pub enum Error {

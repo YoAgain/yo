@@ -3,6 +3,7 @@ name = "yo-bindings"
 version = "0.1.0"
 edition.workspace = true
 publish.workspace = true
+license.workspace = true
 description = "The core for Swift and Kotlin, through UniFFI."
 
 [lib]
@@ -14,6 +15,6 @@ name = "uniffi-bindgen"
 path = "bindgen.rs"
 
 [dependencies]
-yo-core = { path = "../mls" }
+yo-core = { path = "../client" }
 uniffi = { workspace = true, features = ["cli"] }
 thiserror = { workspace = true }

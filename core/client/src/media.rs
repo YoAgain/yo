@@ -1,4 +1,4 @@
-//! Photos and videos (spec 5, 6.8): each sealed under a key of its own, uploaded as a blob for the chat's other
+//! Photos and videos (spec 5, 6.8): each sealed under a key of its own, uploaded as a blob for the receiving
 //! devices to fetch, the key, hash and size carried in the Yo. The hub never sees the key, the picture, or who fetches.
 //!
 //! Nothing here holds the client while it talks to the hub: `Client::upload` only signs; the upload itself
@@ -112,7 +112,7 @@ pub fn retry_later(error: &Error) -> bool {
 }
 
 impl Client {
-    /// Signs the upload of a sealed blob for `fetches` fetches: the number of the chat's devices other than this one
+    /// Signs the upload of a sealed blob for `fetches` fetches: the number of devices it goes to
     /// (`media_fetches`). Each try needs its own signature (the hub takes each once).
     pub fn upload(&mut self, media: &Media, fetches: u32) -> Result<Upload> {
         let path = api::blob_put_path(&media.id, fetches.clamp(1, MAX_BLOB_FETCHES));
@@ -133,9 +133,9 @@ impl Client {
         self.transport.clone()
     }
 
-    /// Opens the chat with `to` if there is none yet, as the first send would (a lookup, the group, the Welcome), and
-    /// answers how many fetches a photo or video to them is for (`media_fetches`). For the first photo to a new
-    /// friend: the upload needs the chat's devices before the Yo can go.
+    /// Starts writing to `to` if this device has not yet, as the first send would (a lookup, a session with each of
+    /// their devices), and answers how many fetches a photo or video to them is for (`media_fetches`). For the
+    /// first photo to a new friend: the upload needs their devices before the Yo can go.
     pub fn open_chat(&mut self, to: &str) -> Result<(u32, Vec<crate::Event>)> {
         let result = self.open_chat_inner(to);
         let fetches = result.as_ref().ok().copied();
@@ -151,33 +151,29 @@ impl Client {
         if self.is_me(&handle) {
             return Err(Error::Protocol("sending to oneself"));
         }
-        // As a send: what waits is received first; offline, nothing can be opened.
+        // As a send: what waits goes and is received first; offline, nothing can be opened.
         match self.deliver().and_then(|()| self.receive_all(0)) {
             Err(error) if !crate::retryable(&error) => return Err(error),
             _ => {}
         }
         let user = self.send_target(&handle)?;
         self.check_sendable(user.as_deref())?;
-        let user = match user.filter(|u| self.chat_with(u).is_some()) {
+        let user = match user.filter(|u| self.has_chat(u)) {
             Some(user) => user,
-            None => self.start_chat(&handle)?.0,
+            None => self.start_chat(&handle)?,
         };
-        let group = self.chat_with(&user).ok_or(Error::Internal("chat"))?;
-        // The Welcome and the profile on their way; offline, they wait in the outbox.
-        match self.deliver() {
-            Ok(()) | Err(Error::Network(_)) => {}
-            Err(error) => return Err(error),
-        }
-        let members = Self::members(&self.load(&group)?).len();
-        Ok((members.saturating_sub(1) as u32).clamp(1, MAX_BLOB_FETCHES))
+        self.fetches_for(&user).ok_or(Error::Internal("devices"))
     }
 
-    /// How many fetches a photo or video to `to` is for: the devices of the chat with them other than this one (their
-    /// devices and the own other ones). `None` while there is no chat yet.
+    /// How many fetches a photo or video to `to` is for: their devices and this account's other ones. `None` while
+    /// this device does not write to them yet.
     pub fn media_fetches(&self, to: &str) -> Option<u32> {
         let handle = yo_wire::handle::Handle::parse(to).ok()?;
-        let group = self.chat_with(&self.known_user(&handle)?)?;
-        let members = Self::members(&self.load(&group).ok()?).len();
-        Some((members.saturating_sub(1) as u32).clamp(1, MAX_BLOB_FETCHES))
+        self.fetches_for(&self.known_user(&handle)?)
+    }
+
+    fn fetches_for(&self, user: &str) -> Option<u32> {
+        let devices = self.state.contacts.get(user)?.devices.len();
+        (devices > 0).then(|| ((devices + self.state.own.len()) as u32).clamp(1, MAX_BLOB_FETCHES))
     }
 }

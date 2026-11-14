@@ -1,7 +1,7 @@
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 
-/// A refusal: a status and, for some, a TLS-encoded body (a `409` names the epoch).
+/// A refusal: a status and, for some, a TLS-encoded body (a delivery's `409` names the devices).
 #[derive(Debug)]
 pub struct Refusal(pub StatusCode, pub Vec<u8>);
 

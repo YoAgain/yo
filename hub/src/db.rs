@@ -1,12 +1,13 @@
 //! The hub's store: SQLite, one connection, every method one transaction. What it holds is listed in spec 1: users
-//! with their keys, devices and handles; envelopes waiting for devices; the order of each group's commits. No content
-//! key, no sender, no membership.
+//! with their keys, devices and handles; the devices' prekeys; envelopes waiting for devices. No content key, no
+//! sender, no contacts.
 
 use rusqlite::{params, Connection, OptionalExtension, Transaction, TransactionBehavior};
 use std::sync::{Mutex, MutexGuard, PoisonError};
+use yo_wire::api;
 use yo_wire::content::BlobId;
 use yo_wire::handle::{KIND_ACCOUNT_KEY, KIND_USER, KIND_USERNAME};
-use yo_wire::{DeviceId, GroupId, UserId, KEY_LEN};
+use yo_wire::{DeviceId, UserId, KEY_LEN};
 
 const DAY_MS: u64 = 24 * 3600 * 1000;
 /// A blob not ready this long after it was stored belongs to no upload under way: its file never came into place.
@@ -36,6 +37,7 @@ pub struct NewDevice {
     pub device_id: DeviceId,
     pub device_key: Key,
     pub auth_key: Key,
+    pub registration_id: u32,
     pub push_platform: u8,
     pub push_token: Vec<u8>,
     /// The app it names (`Yo-App`), if any.
@@ -50,24 +52,19 @@ pub struct BackupAuth {
     pub code: Option<Key>,
 }
 
-/// A KeyPackage the hub checked: its bytes and the hash it is remembered by.
-pub struct StoredKeyPackage {
-    pub hash: [u8; 32],
-    pub data: Vec<u8>,
-    /// The end of its lifetime, seconds since 1970 (0: not known, kept from before it was).
-    pub not_after: u64,
-}
-
-/// A KeyPackage still good for a day: one older is neither handed out nor counted as left (a client refuses one past
-/// its lifetime, and its device refills by the count).
-const KEY_PACKAGE_GOOD: &str = "(not_after = 0 OR not_after > CAST(strftime('%s', 'now') AS INTEGER) + 86400)";
+/// The kinds of prekey a device keeps here (spec 4.1): its signed prekey and last resort Kyber prekey, one of each,
+/// replaced by an upload; one-time EC and Kyber prekeys, handed out once.
+const SIGNED: i64 = 0;
+const LAST_RESORT: i64 = 1;
+const ONE_TIME: i64 = 2;
+const KYBER: i64 = 3;
 
 /// A user found by a handle.
 pub struct Found {
     pub user_id: UserId,
     pub account_key: Key,
-    pub device_keys: Vec<Key>,
-    pub key_packages: Vec<Vec<u8>>,
+    pub devices: Vec<api::Device>,
+    pub bundles: Vec<api::Bundle>,
     /// The user's username as its owner writes it ("YoGPT"), if it has one.
     pub username: Option<String>,
 }
@@ -79,11 +76,17 @@ pub struct Reserved {
     pub note: Option<String>,
 }
 
-/// A user's current account key and devices: what a delivery's device check compares with (spec 4.6).
+/// A user's current account key and devices: what a delivery's device check compares with (spec 4.4).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Roster {
     pub account_key: Key,
-    pub device_keys: Vec<Key>,
+    pub devices: Vec<api::Device>,
+}
+
+impl Roster {
+    pub fn keys(&self) -> Vec<Key> {
+        self.devices.iter().map(|d| d.key).collect()
+    }
 }
 
 /// A device to wake after a delivery.
@@ -113,17 +116,9 @@ pub enum Delivered {
     Unknown,
 }
 
-pub enum Commit {
-    Accepted,
-    Stale(u64),
-    BadToken,
-    Unknown,
-}
-
 #[derive(Debug, PartialEq, Eq)]
 pub enum Conflict {
     DeviceTaken,
-    KeyPackageSeen,
     /// The account key is, or was, another user's.
     KeyTaken,
     UsernameTaken,
@@ -202,7 +197,12 @@ CREATE TABLE IF NOT EXISTS devices (
     push_token BLOB NOT NULL,
     created_at INTEGER NOT NULL,
     last_seen_at INTEGER NOT NULL,
-    app TEXT
+    app TEXT,
+    registration_id INTEGER NOT NULL DEFAULT 0,
+    number INTEGER NOT NULL DEFAULT 1,
+    -- The highest one-time prekey id it uploaded: one not above it is one it uploaded before (a repeat), never taken
+    -- again, so a key handed out once is not handed out again.
+    prekey_max INTEGER NOT NULL DEFAULT 0
 ) WITHOUT ROWID;
 CREATE INDEX IF NOT EXISTS devices_by_user ON devices(user_id);
 -- Devices that were replaced: their own requests answer 410.
@@ -210,16 +210,15 @@ CREATE TABLE IF NOT EXISTS gone (
     id BLOB PRIMARY KEY,
     gone_at INTEGER NOT NULL
 ) WITHOUT ROWID;
-CREATE TABLE IF NOT EXISTS key_packages (
-    id INTEGER PRIMARY KEY,
+-- Each device's prekeys (spec 4.1), as it uploaded them: kind 0 its signed prekey, 1 its last resort Kyber prekey
+-- (one of each), 2 one-time EC prekeys, 3 one-time Kyber prekeys (each handed out once).
+CREATE TABLE IF NOT EXISTS prekeys (
     device_id BLOB NOT NULL,
-    data BLOB NOT NULL,
-    last_resort INTEGER NOT NULL,
-    not_after INTEGER NOT NULL DEFAULT 0
-);
-CREATE INDEX IF NOT EXISTS key_packages_by_device ON key_packages(device_id, last_resort, id);
-CREATE TABLE IF NOT EXISTS seen_key_packages (
-    hash BLOB PRIMARY KEY
+    kind INTEGER NOT NULL,
+    id INTEGER NOT NULL,
+    key BLOB NOT NULL,
+    signature BLOB NOT NULL,
+    PRIMARY KEY (device_id, kind, id)
 ) WITHOUT ROWID;
 -- AUTOINCREMENT: an id is never handed out twice, so an ack can never delete an envelope it did not see.
 CREATE TABLE IF NOT EXISTS messages (
@@ -230,34 +229,6 @@ CREATE TABLE IF NOT EXISTS messages (
 );
 CREATE INDEX IF NOT EXISTS messages_by_device ON messages(device_id, id);
 CREATE INDEX IF NOT EXISTS messages_by_age ON messages(received_at);
--- `first_epoch`: the epoch the group was registered at. Every epoch from it up to the current one had a commit
--- accepted (an epoch moves on by nothing else); any other never did. 1 for groups from before the column: the apps
--- register every group at epoch 1 (spec 4.2).
-CREATE TABLE IF NOT EXISTS groups (
-    id BLOB PRIMARY KEY,
-    epoch INTEGER NOT NULL,
-    token_hash BLOB NOT NULL,
-    updated_at INTEGER NOT NULL,
-    first_epoch INTEGER NOT NULL DEFAULT 1
-) WITHOUT ROWID;
--- Every accepted commit's next-token hash, by the epoch it built on, kept for good (one small row per epoch): the
--- proof that a repeated commit was accepted (spec 4.3), also after its envelope is gone.
-CREATE TABLE IF NOT EXISTS accepted (
-    group_id BLOB NOT NULL,
-    epoch INTEGER NOT NULL,
-    next_token_hash BLOB NOT NULL,
-    PRIMARY KEY (group_id, epoch)
-) WITHOUT ROWID;
--- Every accepted commit's envelope, by the epoch it built on, for 30 days: handed out to members who missed it.
-CREATE TABLE IF NOT EXISTS commits (
-    group_id BLOB NOT NULL,
-    epoch INTEGER NOT NULL,
-    next_token_hash BLOB NOT NULL,
-    envelope BLOB NOT NULL,
-    accepted_at INTEGER NOT NULL,
-    PRIMARY KEY (group_id, epoch)
-) WITHOUT ROWID;
-CREATE INDEX IF NOT EXISTS commits_by_age ON commits(accepted_at);
 -- Each user's backup record (spec 7), as the client sent it: found by the user id or by its locator, handed out to a
 -- request signed by one of its doors' auth keys (the passkey's NULL without one). A user with one has secured the
 -- name, which is then never released (spec 6.4).
@@ -349,35 +320,63 @@ fn roster(tx: &Transaction<'_>, user: &UserId) -> rusqlite::Result<Option<Roster
     else {
         return Ok(None);
     };
-    let device_keys = tx
-        .prepare_cached("SELECT device_key FROM devices WHERE user_id = ?1 ORDER BY device_key")?
-        .query_map([user], |row| array(row.get(0)?))?
+    let devices = tx
+        .prepare_cached("SELECT device_key, number FROM devices WHERE user_id = ?1 ORDER BY device_key")?
+        .query_map([user], |row| Ok(api::Device { key: array(row.get(0)?)?, id: row.get(1)? }))?
         .collect::<Result<_, _>>()?;
-    Ok(Some(Roster { account_key, device_keys }))
+    Ok(Some(Roster { account_key, devices }))
 }
 
-fn insert_key_packages(
-    tx: &Transaction<'_>,
-    device: &DeviceId,
-    key_packages: &[StoredKeyPackage],
-    last_resort: Option<&StoredKeyPackage>,
-) -> rusqlite::Result<Option<Conflict>> {
-    let mut seen = tx.prepare_cached("INSERT INTO seen_key_packages (hash) VALUES (?1) ON CONFLICT DO NOTHING")?;
-    let mut insert = tx
-        .prepare_cached("INSERT INTO key_packages (device_id, data, last_resort, not_after) VALUES (?1, ?2, ?3, ?4)")?;
-    for (key_package, last) in key_packages.iter().map(|k| (k, false)).chain(last_resort.map(|k| (k, true))) {
-        if seen.execute([&key_package.hash])? == 0 {
-            return Ok(Some(Conflict::KeyPackageSeen));
+/// Stores a device's upload of prekeys: a signed prekey or a last resort replaces the one before; one-time ones are
+/// added, up to `most` of each kind, but none with an id the device used before (a repeated upload, whose keys may
+/// have been handed out since: never twice).
+fn insert_prekeys(tx: &Transaction<'_>, device: &DeviceId, prekeys: &api::Prekeys, most: u32) -> rusqlite::Result<()> {
+    let mut insert = tx.prepare_cached(
+        "INSERT OR IGNORE INTO prekeys (device_id, kind, id, key, signature) VALUES (?1, ?2, ?3, ?4, ?5)",
+    )?;
+    for (kind, signed) in [(SIGNED, &prekeys.signed), (LAST_RESORT, &prekeys.last_resort)] {
+        if let Some(signed) = signed {
+            tx.execute("DELETE FROM prekeys WHERE device_id = ?1 AND kind = ?2", params![device, kind])?;
+            insert.execute(params![device, kind, signed.id, signed.key.as_slice(), signed.signature.as_slice()])?;
         }
-        if last {
-            tx.execute("DELETE FROM key_packages WHERE device_id = ?1 AND last_resort = 1", [device])?;
-        }
-        insert.execute(params![device, key_package.data, last, key_package.not_after as i64])?;
     }
-    Ok(None)
+    let count = |kind: i64| -> rusqlite::Result<u32> {
+        tx.prepare_cached("SELECT count(*) FROM prekeys WHERE device_id = ?1 AND kind = ?2")?
+            .query_row(params![device, kind], |row| row.get(0))
+    };
+    let max: u32 = tx
+        .prepare_cached("SELECT prekey_max FROM devices WHERE id = ?1")?
+        .query_row([device], |row| row.get(0))
+        .optional()?
+        .unwrap_or(0);
+    let room = most.saturating_sub(count(ONE_TIME)?) as usize;
+    for one in prekeys.one_time.iter().filter(|p| p.id > max).take(room) {
+        insert.execute(params![device, ONE_TIME, one.id, one.key.as_slice(), &[] as &[u8]])?;
+    }
+    let room = most.saturating_sub(count(KYBER)?) as usize;
+    for kyber in prekeys.kyber.iter().filter(|p| p.id > max).take(room) {
+        insert.execute(params![device, KYBER, kyber.id, kyber.key.as_slice(), kyber.signature.as_slice()])?;
+    }
+    let newest = prekeys.one_time.iter().map(|p| p.id).chain(prekeys.kyber.iter().map(|p| p.id)).max().unwrap_or(0);
+    tx.execute("UPDATE devices SET prekey_max = max(prekey_max, ?2) WHERE id = ?1", params![device, newest])?;
+    Ok(())
 }
 
-/// Removes a user's devices with their KeyPackages and envelopes. Their own requests answer 410 from then on.
+/// A prekey of a kind for a device, the oldest first; with `take`, gone from here.
+fn prekey(tx: &Transaction<'_>, device: &[u8], kind: i64, take: bool) -> rusqlite::Result<Option<api::SignedPrekey>> {
+    let found: Option<(u32, Vec<u8>, Vec<u8>)> = tx
+        .prepare_cached(
+            "SELECT id, key, signature FROM prekeys WHERE device_id = ?1 AND kind = ?2 ORDER BY id LIMIT 1",
+        )?
+        .query_row(params![device, kind], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))
+        .optional()?;
+    if let (Some((id, _, _)), true) = (&found, take) {
+        tx.execute("DELETE FROM prekeys WHERE device_id = ?1 AND kind = ?2 AND id = ?3", params![device, kind, id])?;
+    }
+    Ok(found.map(|(id, key, signature)| api::SignedPrekey { id, key: key.into(), signature: signature.into() }))
+}
+
+/// Removes a user's devices with their prekeys and envelopes. Their own requests answer 410 from then on.
 fn retire_devices(tx: &Transaction<'_>, user: &UserId, now: u64) -> rusqlite::Result<()> {
     let devices: Vec<Vec<u8>> = tx
         .prepare_cached("SELECT id FROM devices WHERE user_id = ?1")?
@@ -385,7 +384,7 @@ fn retire_devices(tx: &Transaction<'_>, user: &UserId, now: u64) -> rusqlite::Re
         .collect::<Result<_, _>>()?;
     for id in &devices {
         tx.execute("INSERT OR REPLACE INTO gone (id, gone_at) VALUES (?1, ?2)", params![id, now])?;
-        tx.execute("DELETE FROM key_packages WHERE device_id = ?1", [id])?;
+        tx.execute("DELETE FROM prekeys WHERE device_id = ?1", [id])?;
         tx.execute("DELETE FROM messages WHERE device_id = ?1", [id])?;
         tx.execute("DELETE FROM devices WHERE id = ?1", [id])?;
     }
@@ -420,43 +419,45 @@ fn remove_user(tx: &Transaction<'_>, user: &UserId, now: u64) -> rusqlite::Resul
     Ok(())
 }
 
-/// The schema this hub writes. A database of another (or a pre-release) schema is refused, never half migrated.
-/// Within a version, changes are only additive (`migrate`): a column or table an older hub of the same version
-/// ignores, so going back to it loses nothing that it knew.
-const SCHEMA_VERSION: i64 = 1;
+/// The schema this hub writes. A database of another (or a pre-release) schema is refused, never half migrated; one of
+/// schema 1 is brought up to it (`from_1`).
+const SCHEMA_VERSION: i64 = 2;
 
-/// Brings a database of this version written by an older hub up to `SCHEMA`, in one transaction: the usernames'
-/// spellings (`handles.spelling`, NULL for the names it holds: shown as their skeleton), the backups' auth keys and
-/// the groups' first epochs (1, `SCHEMA`). Records from before the auth keys are deleted: no fetch could be signed
-/// for them, and the apps make new ones (spec 7). The commits an older hub kept are proof of their acceptance
-/// (`accepted`), at every start: also those of an older hub run meanwhile. The tables `SCHEMA` adds are made by
-/// `CREATE TABLE IF NOT EXISTS` already.
-fn migrate(conn: &mut Connection) -> rusqlite::Result<()> {
+/// Brings a database of schema 1 (the hubs of MLS chats) to this one, in one transaction: what an account is stays
+/// (users, account keys, handles, devices, backups, storage, blobs, reports, feedback); the MLS tables go, and so do
+/// the envelopes waiting, which no app reads any more. The columns schema 1 gained along the way are added where an
+/// older hub left them out. A device of then has no prekeys: until its app is updated and registers again, it is
+/// one a sender cannot write to (spec 4.2).
+fn from_1(conn: &mut Connection) -> rusqlite::Result<()> {
     let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
     for (table, column, kind) in [
         ("handles", "spelling", "TEXT"),
         ("backups", "auth_passkey", "BLOB"),
         ("backups", "auth_code", "BLOB"),
-        ("groups", "first_epoch", "INTEGER NOT NULL DEFAULT 1"),
         ("blobs", "fetching", "INTEGER NOT NULL DEFAULT 0"),
         ("blobs", "ready", "INTEGER NOT NULL DEFAULT 1"),
-        ("key_packages", "not_after", "INTEGER NOT NULL DEFAULT 0"),
+        ("devices", "app", "TEXT"),
+        ("devices", "registration_id", "INTEGER NOT NULL DEFAULT 0"),
+        ("devices", "number", "INTEGER NOT NULL DEFAULT 1"),
+        ("devices", "prekey_max", "INTEGER NOT NULL DEFAULT 0"),
     ] {
+        // A table schema 1 never had is made whole by `SCHEMA`.
+        let table_there =
+            tx.prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?1")?.exists([table])?;
         let has = tx.prepare("SELECT 1 FROM pragma_table_info(?1) WHERE name = ?2")?.exists([table, column])?;
-        if !has {
+        if table_there && !has {
             tx.execute_batch(&format!("ALTER TABLE {table} ADD COLUMN {column} {kind}"))?;
         }
     }
-    let has_app = tx.prepare("SELECT 1 FROM pragma_table_info('devices') WHERE name = 'app'")?.exists([])?;
-    if !has_app {
-        tx.execute_batch("ALTER TABLE devices ADD COLUMN app TEXT")?;
-    }
-    tx.execute("DELETE FROM backups WHERE auth_code IS NULL", [])?;
-    tx.execute(
-        "INSERT OR IGNORE INTO accepted (group_id, epoch, next_token_hash)
-         SELECT group_id, epoch, next_token_hash FROM commits",
-        [],
+    tx.execute_batch(
+        "DROP TABLE IF EXISTS key_packages;
+         DROP TABLE IF EXISTS seen_key_packages;
+         DROP TABLE IF EXISTS groups;
+         DROP TABLE IF EXISTS accepted;
+         DROP TABLE IF EXISTS commits;
+         DELETE FROM messages;",
     )?;
+    tx.execute_batch(&format!("PRAGMA user_version = {SCHEMA_VERSION}"))?;
     tx.commit()
 }
 
@@ -477,7 +478,7 @@ fn check_version(conn: &Connection) -> rusqlite::Result<()> {
     let tables: i64 =
         conn.query_row("SELECT count(*) FROM sqlite_master WHERE type = 'table'", [], |row| row.get(0))?;
     match version {
-        SCHEMA_VERSION => Ok(()),
+        SCHEMA_VERSION | 1 => Ok(()),
         0 if tables == 0 => conn.execute_batch(&format!("PRAGMA user_version = {SCHEMA_VERSION}")),
         _ => Err(rusqlite::Error::InvalidParameterName(format!(
             "database schema {version}, this hub writes {SCHEMA_VERSION}: start from an empty database"
@@ -512,13 +513,9 @@ fn blob_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<(BlobId, u64)> {
     Ok((array(row.get(0)?)?, row.get::<_, i64>(1)? as u64))
 }
 
-fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
-    a.len() == b.len() && a.iter().zip(b).fold(0u8, |acc, (x, y)| acc | (x ^ y)) == 0
-}
-
 impl Db {
     /// WAL with `synchronous = FULL`: every commit is on the disk before it is answered, so what the hub acknowledged
-    /// (a delivery, a commit's order, spec 4.7) survives a power loss, not only a crash of the process.
+    /// (a delivery, spec 4.7) survives a power loss, not only a crash of the process.
     pub fn open(path: &str) -> rusqlite::Result<Self> {
         let mut conn = Connection::open(path)?;
         conn.execute_batch(
@@ -528,8 +525,11 @@ impl Db {
              PRAGMA busy_timeout = 5000;",
         )?;
         check_version(&conn)?;
+        let version: i64 = conn.query_row("PRAGMA user_version", [], |row| row.get(0))?;
+        if version == 1 {
+            from_1(&mut conn)?;
+        }
         conn.execute_batch(SCHEMA)?;
-        migrate(&mut conn)?;
         Ok(Db { conn: Mutex::new(conn) })
     }
 
@@ -604,10 +604,10 @@ impl Db {
         fresh: &UserId,
         account_key: &Key,
         device: &NewDevice,
-        key_packages: &[StoredKeyPackage],
-        last_resort: &StoredKeyPackage,
+        prekeys: &api::Prekeys,
+        most: u32,
         now: u64,
-    ) -> rusqlite::Result<Write<(UserId, Option<String>)>> {
+    ) -> rusqlite::Result<Write<(UserId, Option<String>, u8)>> {
         let mut conn = self.conn();
         let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
         let taken = tx
@@ -651,10 +651,17 @@ impl Db {
             }
         };
         retire_devices(&tx, &user, now)?;
+        // The lowest number free among the user's devices (all of them replaced: 1).
+        let taken: Vec<u8> = tx
+            .prepare_cached("SELECT number FROM devices WHERE user_id = ?1")?
+            .query_map([&user], |row| row.get(0))?
+            .collect::<Result<_, _>>()?;
+        let number = (1..=127u8).find(|n| !taken.contains(n)).ok_or(rusqlite::Error::InvalidQuery)?;
         tx.execute(
             "INSERT INTO devices
-                 (id, user_id, device_key, auth_key, push_platform, push_token, created_at, last_seen_at, app)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?7, ?8)",
+                 (id, user_id, device_key, auth_key, push_platform, push_token, created_at, last_seen_at, app,
+                  registration_id, number)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?7, ?8, ?9, ?10)",
             params![
                 device.device_id,
                 user,
@@ -663,15 +670,15 @@ impl Db {
                 device.push_platform,
                 device.push_token,
                 now,
-                device.app
+                device.app,
+                device.registration_id,
+                number
             ],
         )?;
-        if let Some(conflict) = insert_key_packages(&tx, &device.device_id, key_packages, Some(last_resort))? {
-            return Ok(Write::Refused(conflict));
-        }
+        insert_prekeys(&tx, &device.device_id, prekeys, most)?;
         let username = username_of(&tx, &user)?;
         tx.commit()?;
-        Ok(Write::Done((user, username)))
+        Ok(Write::Done((user, username, number)))
     }
 
     /// Claims a username (its skeleton and its spelling) for a device's user, giving up its old one; `None` only gives
@@ -717,8 +724,9 @@ impl Db {
     }
 
     /// A user by a handle (`value` as stored: a username by its skeleton, a user id, an account key, which must be
-    /// the user's current one): id, account key, devices and, if asked, one KeyPackage for each device not in
-    /// `except`, a single-use one while there is one, else the last resort.
+    /// the user's current one): id, account key, devices and, if asked, a bundle for each device not in `except`
+    /// that has prekeys (spec 4.1): its signed prekey, a one-time Kyber prekey while there is one (else the last
+    /// resort) and a one-time EC prekey while there is one, the one-time ones gone from here.
     pub fn lookup(&self, kind: u8, value: &[u8], take: bool, except: &[Key]) -> rusqlite::Result<Option<Found>> {
         let mut conn = self.conn();
         let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
@@ -735,40 +743,39 @@ impl Db {
         }
         .optional()?;
         let Some(user) = user else { return Ok(None) };
-        let Some(Roster { account_key, device_keys }) = roster(&tx, &user)? else { return Ok(None) };
-        if device_keys.is_empty() {
+        let Some(Roster { account_key, devices: roster_devices }) = roster(&tx, &user)? else { return Ok(None) };
+        if roster_devices.is_empty() {
             return Ok(None);
         }
-        let mut key_packages = Vec::new();
+        let mut bundles = Vec::new();
         if take {
-            let devices: Vec<(Vec<u8>, Key)> = tx
-                .prepare_cached("SELECT id, device_key FROM devices WHERE user_id = ?1 ORDER BY device_key")?
-                .query_map([&user], |row| Ok((row.get(0)?, array(row.get(1)?)?)))?
+            let devices: Vec<(Vec<u8>, Key, u32)> = tx
+                .prepare_cached(
+                    "SELECT id, device_key, registration_id FROM devices WHERE user_id = ?1 ORDER BY device_key",
+                )?
+                .query_map([&user], |row| Ok((row.get(0)?, array(row.get(1)?)?, row.get(2)?)))?
                 .collect::<Result<_, _>>()?;
-            for (device, _) in devices.iter().filter(|(_, key)| !except.contains(key)) {
-                // Past their lifetime: gone, the last resort then (its device sends a new one each month).
-                tx.prepare_cached(&format!(
-                    "DELETE FROM key_packages WHERE device_id = ?1 AND last_resort = 0 AND NOT {KEY_PACKAGE_GOOD}"
-                ))?
-                .execute([device])?;
-                let found: Option<(i64, Vec<u8>, bool)> = tx
-                    .prepare_cached(&format!(
-                        "SELECT id, data, last_resort FROM key_packages WHERE device_id = ?1 AND {KEY_PACKAGE_GOOD}
-                         ORDER BY last_resort, id LIMIT 1"
-                    ))?
-                    .query_row([device], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))
-                    .optional()?;
-                if let Some((id, data, last_resort)) = found {
-                    if !last_resort {
-                        tx.execute("DELETE FROM key_packages WHERE id = ?1", [id])?;
-                    }
-                    key_packages.push(data);
-                }
+            for (device, device_key, registration_id) in devices.iter().filter(|(_, key, _)| !except.contains(key)) {
+                let (Some(signed), Some(last_resort)) =
+                    (prekey(&tx, device, SIGNED, false)?, prekey(&tx, device, LAST_RESORT, false)?)
+                else {
+                    // A device without prekeys: an app from before sessions.
+                    continue;
+                };
+                let kyber = prekey(&tx, device, KYBER, true)?.unwrap_or(last_resort);
+                let one_time = prekey(&tx, device, ONE_TIME, true)?.map(|p| api::Prekey { id: p.id, key: p.key });
+                bundles.push(api::Bundle {
+                    device_key: *device_key,
+                    registration_id: *registration_id,
+                    signed,
+                    kyber,
+                    one_time,
+                });
             }
         }
         let username = username_of(&tx, &user)?;
         tx.commit()?;
-        Ok(Some(Found { user_id: user, account_key, device_keys, key_packages, username }))
+        Ok(Some(Found { user_id: user, account_key, devices: roster_devices, bundles, username }))
     }
 
     /// Deletes a device's account (spec 6.3): its user with everything about it (`remove_user`). The device is
@@ -1072,47 +1079,31 @@ impl Db {
             .collect()
     }
 
-    // ---- KeyPackages and push ----
+    // ---- prekeys and push ----
 
-    /// Adds a device's KeyPackages, checked against its account key. The device is checked in this transaction: one
+    /// Adds a device's prekeys. The device is checked in this transaction: one
     /// replaced since (its account key may be another now) adds none.
-    pub fn add_key_packages(
-        &self,
-        device: &DeviceId,
-        key_packages: &[StoredKeyPackage],
-        last_resort: Option<&StoredKeyPackage>,
-        most: u32,
-    ) -> rusqlite::Result<Write<()>> {
+    /// Stores a device's upload of prekeys (`insert_prekeys`); refused for a device replaced since it authenticated.
+    pub fn add_prekeys(&self, device: &DeviceId, prekeys: &api::Prekeys, most: u32) -> rusqlite::Result<Write<()>> {
         let mut conn = self.conn();
         let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
         if user_of_device(&tx, device)?.is_none() {
             return Ok(Write::Refused(Conflict::DeviceGone));
         }
-        // Those past their lifetime make no room taken: gone before the count.
-        tx.prepare_cached(&format!(
-            "DELETE FROM key_packages WHERE device_id = ?1 AND last_resort = 0 AND NOT {KEY_PACKAGE_GOOD}"
-        ))?
-        .execute([device])?;
-        let held: u32 = tx
-            .prepare_cached("SELECT count(*) FROM key_packages WHERE device_id = ?1 AND last_resort = 0")?
-            .query_row([device], |row| row.get(0))?;
-        if held as usize + key_packages.len() > most as usize {
-            // More than a device needs: refused rather than stored without end.
-            return Ok(Write::Refused(Conflict::KeyPackageSeen));
-        }
-        if let Some(conflict) = insert_key_packages(&tx, device, key_packages, last_resort)? {
-            return Ok(Write::Refused(conflict));
-        }
+        insert_prekeys(&tx, device, prekeys, most)?;
         tx.commit()?;
         Ok(Write::Done(()))
     }
 
-    pub fn key_packages_left(&self, device: &DeviceId) -> rusqlite::Result<u32> {
+    /// The one-time prekeys a device has left here: of the scarcer kind.
+    pub fn prekeys_left(&self, device: &DeviceId) -> rusqlite::Result<u32> {
         self.conn()
-            .prepare_cached(&format!(
-                "SELECT count(*) FROM key_packages WHERE device_id = ?1 AND last_resort = 0 AND {KEY_PACKAGE_GOOD}"
-            ))?
-            .query_row([device], |row| row.get(0))
+            .prepare_cached(
+                "SELECT min(
+                     (SELECT count(*) FROM prekeys WHERE device_id = ?1 AND kind = ?2),
+                     (SELECT count(*) FROM prekeys WHERE device_id = ?1 AND kind = ?3))",
+            )?
+            .query_row(params![device, ONE_TIME, KYBER], |row| row.get(0))
     }
 
     /// Sets a device's push token; refused for a device replaced since it authenticated.
@@ -1155,11 +1146,11 @@ impl Db {
                 outcomes.push(Delivered::Unknown);
                 continue;
             };
-            if current.device_keys.is_empty() {
+            if current.devices.is_empty() {
                 outcomes.push(Delivered::Unknown);
                 continue;
             }
-            if yo_wire::devices::hash(&current.account_key, &current.device_keys) != *devices_hash {
+            if yo_wire::devices::hash(&current.account_key, &current.keys()) != *devices_hash {
                 outcomes.push(Delivered::Mismatch(current));
                 continue;
             }
@@ -1244,114 +1235,16 @@ impl Db {
         acked
     }
 
-    // ---- groups ----
-
-    /// Registers a group at an epoch; false if the id exists.
-    pub fn create_group(&self, group: &GroupId, epoch: u64, token_hash: &[u8; 32], now: u64) -> rusqlite::Result<bool> {
-        let changed = self
-            .conn()
-            .prepare_cached(
-                "INSERT INTO groups (id, epoch, token_hash, updated_at, first_epoch) VALUES (?1, ?2, ?3, ?4, ?2)
-                 ON CONFLICT (id) DO NOTHING",
-            )?
-            .execute(params![group, epoch as i64, token_hash, now])?;
-        if changed == 1 {
-            return Ok(true);
-        }
-        // The same registration again (its answer was lost): created, as the first time. Only its maker knows the
-        // token, and the group has not moved on since.
-        let same: Option<(i64, i64, Vec<u8>)> = self
-            .conn()
-            .prepare_cached("SELECT epoch, first_epoch, token_hash FROM groups WHERE id = ?1")?
-            .query_row(params![group], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))
-            .optional()?;
-        Ok(same.is_some_and(|(now_at, first, hash)| {
-            now_at == epoch as i64 && first == epoch as i64 && constant_time_eq(&hash, token_hash)
-        }))
-    }
-
-    /// Orders a commit (spec 4.3): accepted only on the group's current epoch with that epoch's token, and kept. A
-    /// commit accepted before is accepted again: the same epoch and next-token hash, which only it can produce, also
-    /// after its envelope is gone.
-    pub fn commit(
-        &self,
-        group: &GroupId,
-        epoch: u64,
-        token_hash: &[u8; 32],
-        next_token_hash: &[u8; 32],
-        envelope: &[u8],
-        now: u64,
-    ) -> rusqlite::Result<Commit> {
-        let mut conn = self.conn();
-        let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
-        let accepted: Option<Vec<u8>> = tx
-            .prepare_cached("SELECT next_token_hash FROM accepted WHERE group_id = ?1 AND epoch = ?2")?
-            .query_row(params![group, epoch as i64], |row| row.get(0))
-            .optional()?;
-        if accepted.as_deref().is_some_and(|hash| constant_time_eq(hash, next_token_hash)) {
-            return Ok(Commit::Accepted);
-        }
-        let current: Option<(i64, Vec<u8>)> = tx
-            .prepare_cached("SELECT epoch, token_hash FROM groups WHERE id = ?1")?
-            .query_row([group], |row| Ok((row.get(0)?, row.get(1)?)))
-            .optional()?;
-        let Some((current, stored)) = current else {
-            return Ok(Commit::Unknown);
-        };
-        if current as u64 != epoch {
-            return Ok(Commit::Stale(current as u64));
-        }
-        if !constant_time_eq(&stored, token_hash) {
-            return Ok(Commit::BadToken);
-        }
-        tx.execute(
-            "UPDATE groups SET epoch = ?2, token_hash = ?3, updated_at = ?4 WHERE id = ?1",
-            params![group, (epoch + 1) as i64, next_token_hash, now],
-        )?;
-        tx.execute(
-            "INSERT INTO accepted (group_id, epoch, next_token_hash) VALUES (?1, ?2, ?3)",
-            params![group, epoch as i64, next_token_hash],
-        )?;
-        tx.execute(
-            "INSERT INTO commits (group_id, epoch, next_token_hash, envelope, accepted_at) VALUES (?1, ?2, ?3, ?4, ?5)",
-            params![group, epoch as i64, next_token_hash, envelope, now],
-        )?;
-        tx.commit()?;
-        Ok(Commit::Accepted)
-    }
-
-    /// The envelope of the commit accepted on `epoch`; else whether one was accepted there and is kept no more: the
-    /// epoch is the group's first or later, and before its current one (`groups.first_epoch`). Read under one lock, so
-    /// a commit accepted meanwhile is never taken for one pruned.
-    pub fn commit_envelope(&self, group: &GroupId, epoch: u64) -> rusqlite::Result<Result<Vec<u8>, bool>> {
-        let conn = self.conn();
-        let envelope: Option<Vec<u8>> = conn
-            .prepare_cached("SELECT envelope FROM commits WHERE group_id = ?1 AND epoch = ?2")?
-            .query_row(params![group, epoch as i64], |row| row.get(0))
-            .optional()?;
-        if let Some(envelope) = envelope {
-            return Ok(Ok(envelope));
-        }
-        let epochs: Option<(i64, i64)> = conn
-            .prepare_cached("SELECT first_epoch, epoch FROM groups WHERE id = ?1")?
-            .query_row([group], |row| Ok((row.get(0)?, row.get(1)?)))
-            .optional()?;
-        Ok(Err(epochs.is_some_and(|(first, current)| (first as u64..current as u64).contains(&epoch))))
-    }
-
-    /// Deletes envelopes and commits' envelopes older than the TTL (their acceptance stays, `accepted`), and forgets
-    /// replaced devices after a year.
+    /// Deletes envelopes older than the TTL, and forgets replaced devices after a year.
     pub fn prune(&self, now: u64, ttl_ms: u64) -> rusqlite::Result<usize> {
         let conn = self.conn();
         let before = now.saturating_sub(ttl_ms) as i64;
         let messages = conn.execute("DELETE FROM messages WHERE received_at < ?1", [before])?;
-        conn.execute("DELETE FROM commits WHERE accepted_at < ?1", [before])?;
         conn.execute("DELETE FROM gone WHERE gone_at < ?1", [now.saturating_sub(365 * 24 * 3600 * 1000) as i64])?;
         Ok(messages)
     }
 
-    /// What should never be: rows that belong to nobody (a user, a device or a blob gone without them), each check
-    /// with how many rows fail it. Empty when the store is consistent. For tests and the operator; reads only.
+    /// The apps the devices named last (`Yo-App`), with how many devices each. For the operator; reads only.
     pub fn apps(&self) -> rusqlite::Result<Vec<(String, i64)>> {
         let conn = self.conn();
         let mut statement = conn.prepare("SELECT coalesce(app, ''), count(*) FROM devices GROUP BY 1 ORDER BY 1")?;
@@ -1359,6 +1252,8 @@ impl Db {
         rows.collect()
     }
 
+    /// What should never be: rows that belong to nobody (a user, a device or a blob gone without them), each check
+    /// with how many rows fail it. Empty when the store is consistent. For tests and the operator; reads only.
     pub fn audit(&self) -> rusqlite::Result<Vec<(&'static str, i64)>> {
         const CHECKS: &[(&str, &str)] = &[
             ("devices without their user", "SELECT count(*) FROM devices WHERE user_id NOT IN (SELECT id FROM users)"),
@@ -1390,8 +1285,8 @@ impl Db {
                 "SELECT count(*) FROM blob_quota WHERE user_id NOT IN (SELECT id FROM users)",
             ),
             (
-                "key packages without their device",
-                "SELECT count(*) FROM key_packages WHERE device_id NOT IN (SELECT id FROM devices)",
+                "prekeys without their device",
+                "SELECT count(*) FROM prekeys WHERE device_id NOT IN (SELECT id FROM devices)",
             ),
             (
                 "envelopes without their device",
@@ -1448,36 +1343,63 @@ mod tests {
             device_id: [n; 16],
             device_key: [n; 32],
             auth_key: [n; 32],
+            registration_id: n as u32,
             push_platform: 0,
             push_token: Vec::new(),
             app: None,
         }
     }
 
-    /// Registers device `n` for a username with account key `key`.
-    fn register(db: &Db, name: &[u8], key: u8, n: u8, now: u64) -> Write<(UserId, Option<String>)> {
-        let last_resort = StoredKeyPackage { hash: [n; 32], data: vec![n], not_after: 0 };
-        let spelling = std::str::from_utf8(name).unwrap();
-        let skeleton = yo_wire::handle::skeleton(spelling);
-        db.register(skeleton.as_bytes(), spelling, &[n; 16], &[key; 32], &device(n), &[], &last_resort, now).unwrap()
+    fn signed(id: u32) -> api::SignedPrekey {
+        api::SignedPrekey { id, key: vec![id as u8; 33].into(), signature: vec![1; 64].into() }
     }
 
-    /// A KeyPackage past its lifetime (or within a day of it) is neither handed out nor counted as left: the last
-    /// resort goes instead, and the device refills.
+    /// A device's first prekeys: its signed prekey and last resort, and `n` one-time ones of each kind.
+    fn prekeys(n: u32) -> api::Prekeys {
+        api::Prekeys {
+            signed: Some(signed(1)),
+            last_resort: Some(signed(2)),
+            one_time: (10..10 + n).map(|id| api::Prekey { id, key: vec![id as u8; 33].into() }).collect(),
+            kyber: (100..100 + n).map(signed).collect(),
+        }
+    }
+
+    /// Registers device `n` for a username with account key `key`.
+    fn register(db: &Db, name: &[u8], key: u8, n: u8, now: u64) -> Write<(UserId, Option<String>, u8)> {
+        let spelling = std::str::from_utf8(name).unwrap();
+        let skeleton = yo_wire::handle::skeleton(spelling);
+        db.register(skeleton.as_bytes(), spelling, &[n; 16], &[key; 32], &device(n), &prekeys(0), 100, now).unwrap()
+    }
+
+    /// A lookup hands out a bundle per device: its one-time prekeys once each, the last resort Kyber prekey when
+    /// none is left; a device without prekeys (an app from before sessions) has no bundle. A repeated upload changes
+    /// nothing, and one-time prekeys beyond the most are not kept.
     #[test]
-    fn an_expired_key_package_is_skipped_for_the_last_resort() {
+    fn prekeys_go_once_and_the_last_resort_after() {
         let db = Db::open(":memory:").unwrap();
         let leo = user(register(&db, b"LEO", 1, 1, 0));
-        let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs();
-        let package = |n: u8, not_after| StoredKeyPackage { hash: [n; 32], data: vec![n], not_after };
-        let packages = [package(10, now + 3600), package(11, now + 365 * 24 * 3600)];
-        assert!(matches!(db.add_key_packages(&[1; 16], &packages[..1], None, 100).unwrap(), Write::Done(())));
-        assert_eq!(db.key_packages_left(&[1; 16]).unwrap(), 0, "an hour left: as good as gone");
-        let taken = |db: &Db| db.lookup(KIND_USER, &leo, true, &[]).unwrap().unwrap().key_packages;
-        assert_eq!(taken(&db), vec![vec![1]], "the last resort, not the one about to expire");
-        assert!(matches!(db.add_key_packages(&[1; 16], &packages[1..], None, 1).unwrap(), Write::Done(())));
-        assert_eq!(db.key_packages_left(&[1; 16]).unwrap(), 1);
-        assert_eq!(taken(&db), vec![vec![11]]);
+        let mut more = prekeys(2);
+        more.signed = None;
+        more.last_resort = None;
+        assert!(matches!(db.add_prekeys(&[1; 16], &more, 3).unwrap(), Write::Done(())));
+        assert!(matches!(db.add_prekeys(&[1; 16], &more, 3).unwrap(), Write::Done(())));
+        assert_eq!(db.prekeys_left(&[1; 16]).unwrap(), 2);
+        let bundle = |db: &Db| db.lookup(KIND_USER, &leo, true, &[]).unwrap().unwrap().bundles.remove(0);
+        let first = bundle(&db);
+        assert_eq!((first.registration_id, first.signed.id, first.kyber.id), (1, 1, 100));
+        assert_eq!(first.one_time.map(|p| p.id), Some(10));
+        let second = bundle(&db);
+        assert_eq!((second.kyber.id, second.one_time.map(|p| p.id)), (101, Some(11)));
+        assert_eq!(db.prekeys_left(&[1; 16]).unwrap(), 0);
+        assert!(matches!(db.add_prekeys(&[1; 16], &more, 3).unwrap(), Write::Done(())));
+        assert_eq!(db.prekeys_left(&[1; 16]).unwrap(), 0, "handed out once: a repeated upload brings none back");
+        let last = bundle(&db);
+        assert_eq!((last.kyber.id, last.one_time), (2, None), "the last resort, no one-time key left");
+        // Of a device asked not to hand out, nothing; and nothing taken by a lookup without prekeys.
+        assert!(db.lookup(KIND_USER, &leo, true, &[[1; 32]]).unwrap().unwrap().bundles.is_empty());
+        db.conn().execute("DELETE FROM prekeys", []).unwrap();
+        let found = db.lookup(KIND_USER, &leo, true, &[]).unwrap().unwrap();
+        assert_eq!((found.devices.len(), found.bundles.len()), (1, 0), "a device without prekeys: no bundle");
     }
 
     fn reserve(db: &Db, names: &[&str]) -> usize {
@@ -1534,19 +1456,28 @@ mod tests {
         assert!(matches!(db.set_username(&[4; 16], Some((b"MODERATOR", "MODERATOR"))).unwrap(), Write::Done(())));
     }
 
-    /// A database the hub before spellings made (schema 1 without `handles.spelling` and the backups' auth keys):
-    /// opened, it gets the columns, its names are found and shown as their skeleton, its backup from before the auth
-    /// keys is gone, and nothing in it is refused.
+    /// A database of schema 1 (the hubs of MLS chats, also one from before spellings and the backups' auth keys):
+    /// opened, its accounts stay (the user, its name shown as its skeleton, its backup, its device without prekeys),
+    /// its MLS tables and the envelopes waiting go, and the user's own key registers it again.
     #[test]
-    fn a_database_from_before_spellings_is_migrated() {
-        let path = std::env::temp_dir().join(format!("yo-hub-migrate-{}.sqlite", std::process::id()));
+    fn a_database_of_schema_1_keeps_its_accounts() {
+        let path = std::env::temp_dir().join(format!("yo-hub-schema-1-{}.sqlite", std::process::id()));
         let path = path.to_str().unwrap().to_owned();
         let _ = std::fs::remove_file(&path);
         {
             let conn = Connection::open(&path).unwrap();
-            conn.execute_batch(&format!("PRAGMA user_version = {SCHEMA_VERSION}")).unwrap();
-            conn.execute_batch(&SCHEMA.replace("    spelling TEXT,\n", "")).unwrap();
-            conn.execute_batch("DROP TABLE reserved").unwrap();
+            conn.execute_batch("PRAGMA user_version = 1").unwrap();
+            let schema = SCHEMA
+                .replace("    spelling TEXT,\n", "")
+                .replace("    app TEXT,\n    registration_id INTEGER NOT NULL DEFAULT 0\n", "    app TEXT\n");
+            conn.execute_batch(&schema).unwrap();
+            conn.execute_batch(
+                "DROP TABLE prekeys;
+                 CREATE TABLE key_packages (id INTEGER PRIMARY KEY, device_id BLOB, data BLOB, last_resort INTEGER);
+                 CREATE TABLE groups (id BLOB PRIMARY KEY, epoch INTEGER, token_hash BLOB, updated_at INTEGER);
+                 CREATE TABLE commits (group_id BLOB, epoch INTEGER, envelope BLOB);",
+            )
+            .unwrap();
             conn.execute(
                 "INSERT INTO users (id, account_key, created_at) VALUES (?1, ?2, 0)",
                 params![[1u8; 16], [1u8; 32]],
@@ -1570,33 +1501,43 @@ mod tests {
                 [[1u8; 16]],
             )
             .unwrap();
+            conn.execute("INSERT INTO messages (device_id, envelope, received_at) VALUES (?1, x'02', 0)", [[1u8; 16]])
+                .unwrap();
+            conn.execute("INSERT INTO key_packages (device_id, data, last_resort) VALUES (?1, x'03', 1)", [[1u8; 16]])
+                .unwrap();
         }
         let db = Db::open(&path).unwrap();
-        assert_eq!(db.backup(&[1; 16]).unwrap(), None);
+        assert_eq!(db.backup(&[1; 16]).unwrap().map(|(record, _)| record), Some(vec![1]), "kept as it was");
         assert_eq!(spelling(&db, "Christopher").as_deref(), Some("CHRISTOPHER"));
-        assert!(matches!(register(&db, b"christopher", 2, 2, 0), Write::Refused(Conflict::UsernameTaken)));
-        drop(db);
-        // Opened again: nothing more to migrate. The user's own key registers it again (a new phone).
-        let db = Db::open(&path).unwrap();
-        assert_eq!(user(register(&db, b"Christopher", 1, 9, 0)), [1; 16]);
-        assert_eq!(spelling(&db, "christopher").as_deref(), Some("CHRISTOPHER"));
-        // The operator's one-off: the spelling the user chose.
-        db.conn()
-            .execute(
-                "UPDATE handles SET spelling = 'Christopher' WHERE kind = 2 AND value = CAST('CHRISTOPHER' AS BLOB)",
+        let found = db.lookup(KIND_USER, &[1; 16], true, &[]).unwrap().unwrap();
+        assert_eq!(found.devices, vec![api::Device { key: [1; 32], id: 1 }], "the device, number 1");
+        assert!(found.bundles.is_empty(), "without prekeys");
+        assert!(db.fetch(&[1; 16], 10).unwrap().is_empty(), "the envelopes of then are gone");
+        let tables: i64 = db
+            .conn()
+            .query_row(
+                "SELECT count(*) FROM sqlite_master WHERE name IN ('key_packages', 'groups', 'commits')",
                 [],
+                |row| row.get(0),
             )
             .unwrap();
-        assert_eq!(spelling(&db, "CHRISTOPHER").as_deref(), Some("Christopher"));
+        assert_eq!(tables, 0);
+        assert!(matches!(register(&db, b"christopher", 2, 2, 0), Write::Refused(Conflict::UsernameTaken)));
         drop(db);
-        let _ = std::fs::remove_file(&path);
-        let _ = std::fs::remove_file(format!("{path}-wal"));
-        let _ = std::fs::remove_file(format!("{path}-shm"));
+        // Opened again: schema 2 now. The user's own key registers it again (an app updated, a new phone).
+        let db = Db::open(&path).unwrap();
+        assert_eq!(user(register(&db, b"Christopher", 1, 9, 0)), [1; 16]);
+        assert_eq!(db.lookup(KIND_USER, &[1; 16], true, &[]).unwrap().unwrap().bundles.len(), 1);
+        assert_eq!(db.audit().unwrap(), []);
+        drop(db);
+        for suffix in ["", "-wal", "-shm"] {
+            let _ = std::fs::remove_file(format!("{path}{suffix}"));
+        }
     }
 
-    fn user(written: Write<(UserId, Option<String>)>) -> UserId {
+    fn user(written: Write<(UserId, Option<String>, u8)>) -> UserId {
         match written {
-            Write::Done((user, _)) => user,
+            Write::Done((user, _, _)) => user,
             Write::Refused(conflict) => panic!("{conflict:?}"),
         }
     }
@@ -1613,7 +1554,7 @@ mod tests {
         assert_eq!(db.device(&[3; 16]).unwrap().unwrap().user_id, first);
         // The key cannot take a free name as another user: it registers its own user, with the name it has.
         assert!(
-            matches!(register(&db, b"MIA", 1, 4, 0), Write::Done((user, Some(name))) if user == first && name == "LEO")
+            matches!(register(&db, b"MIA", 1, 4, 0), Write::Done((user, Some(name), _)) if user == first && name == "LEO")
         );
         assert!(db.username_taken(b"LEO").unwrap() && !db.username_taken(b"MIA").unwrap());
     }
@@ -1627,20 +1568,20 @@ mod tests {
         assert!(matches!(db.set_username(&[1; 16], Some((b"LEON", "Leon"))).unwrap(), Write::Done(())));
         // The old name free: the restore does not take it back.
         assert!(
-            matches!(register(&db, b"LEO", 1, 2, 0), Write::Done((user, Some(name))) if user == leo && name == "Leon")
+            matches!(register(&db, b"LEO", 1, 2, 0), Write::Done((user, Some(name), _)) if user == leo && name == "Leon")
         );
         assert!(!db.username_taken(b"LEO").unwrap());
         // The old name someone else's now: still Leon.
         let mia = user(register(&db, b"LEO", 3, 3, 0));
         assert_ne!(mia, leo);
         assert!(
-            matches!(register(&db, b"LEO", 1, 4, 0), Write::Done((user, Some(name))) if user == leo && name == "Leon")
+            matches!(register(&db, b"LEO", 1, 4, 0), Write::Done((user, Some(name), _)) if user == leo && name == "Leon")
         );
         assert_eq!(db.device(&[3; 16]).unwrap().unwrap().user_id, mia, "the stranger keeps the name and the device");
         assert!(db.is_gone(&[2; 16]).unwrap());
         // No name at all: the same user, without one.
         assert!(matches!(db.set_username(&[4; 16], None).unwrap(), Write::Done(())));
-        assert!(matches!(register(&db, b"LEON", 1, 5, 0), Write::Done((user, None)) if user == leo));
+        assert!(matches!(register(&db, b"LEON", 1, 5, 0), Write::Done((user, None, _)) if user == leo));
     }
 
     #[test]
@@ -1714,48 +1655,15 @@ mod tests {
         let gone = |w: Write<()>| matches!(w, Write::Refused(Conflict::DeviceGone));
         assert!(gone(db.set_username(&[1; 16], Some((b"OLD", "OLD"))).unwrap()));
         assert_eq!(spelling(&db, "LEO").as_deref(), Some("LEO"), "the name stays the new phone's");
-        let key_package = StoredKeyPackage { hash: [7; 32], data: vec![7], not_after: 0 };
-        assert!(gone(db.add_key_packages(&[1; 16], std::slice::from_ref(&key_package), None, 100).unwrap()));
+        assert!(gone(db.add_prekeys(&[1; 16], &prekeys(1), 100).unwrap()));
         assert!(gone(db.set_push(&[1; 16], 1, b"ab").unwrap()));
         // Deleted: nothing is written for a user that is no more.
         assert!(matches!(db.delete_account(&[2; 16], 1).unwrap(), Write::Done(())));
         assert!(gone(db.set_username(&[2; 16], Some((b"LEO", "LEO"))).unwrap()));
-        assert!(gone(db.add_key_packages(&[2; 16], &[key_package], None, 100).unwrap()));
+        assert!(gone(db.add_prekeys(&[2; 16], &prekeys(1), 100).unwrap()));
         assert!(db.lookup(KIND_USER, &leo, false, &[]).unwrap().is_none());
         assert!(!db.username_taken(b"LEO").unwrap());
         assert_eq!(db.audit().unwrap(), []);
-    }
-
-    /// A database from before `groups.first_epoch` and `accepted`, whose older hub pruned a commit: every epoch from 1
-    /// up to the group's current one counts as accepted (`410` once pruned), and the commits it still keeps are
-    /// accepted again when repeated.
-    #[test]
-    fn a_database_from_before_first_epochs_is_migrated() {
-        let path = std::env::temp_dir().join(format!("yo-hub-epochs-{}.db", std::process::id()));
-        let path = path.to_str().unwrap();
-        let (group, token) = ([5; 32], [6; 32]);
-        {
-            let db = Db::open(path).unwrap();
-            assert!(db.create_group(&group, 1, &token, 0).unwrap());
-            assert!(matches!(db.commit(&group, 1, &token, &[1; 32], b"one", 0).unwrap(), Commit::Accepted));
-            assert!(matches!(db.commit(&group, 2, &[1; 32], &[2; 32], b"two", 0).unwrap(), Commit::Accepted));
-            db.conn()
-                .execute_batch(
-                    "ALTER TABLE groups DROP COLUMN first_epoch; DROP TABLE accepted;
-                     DELETE FROM commits WHERE epoch = 1;",
-                )
-                .unwrap();
-        }
-        let db = Db::open(path).unwrap();
-        assert_eq!(db.commit_envelope(&group, 1).unwrap(), Err(true), "accepted, and pruned by the older hub");
-        assert_eq!(db.commit_envelope(&group, 2).unwrap(), Ok(b"two".to_vec()));
-        assert_eq!(db.commit_envelope(&group, 0).unwrap(), Err(false), "never");
-        assert_eq!(db.commit_envelope(&group, 3).unwrap(), Err(false), "not yet");
-        assert!(matches!(db.commit(&group, 2, &[1; 32], &[2; 32], b"two", 0).unwrap(), Commit::Accepted));
-        drop(db);
-        for suffix in ["", "-wal", "-shm"] {
-            let _ = std::fs::remove_file(format!("{path}{suffix}"));
-        }
     }
 
     /// A blob's fetches are taken as they start: fetches at once never pass its count, one cut off gives its fetch
@@ -1835,7 +1743,7 @@ mod tests {
         let left = |table: &str| -> i64 {
             db.conn().query_row(&format!("SELECT count(*) FROM {table}"), [], |row| row.get(0)).unwrap()
         };
-        assert_eq!((left("reports"), left("key_packages"), left("account_keys")), (0, 1, 1), "only MIA's are left");
+        assert_eq!((left("reports"), left("prekeys"), left("account_keys")), (0, 2, 1), "only MIA's are left");
         let feedback: Vec<Vec<u8>> = db
             .conn()
             .prepare("SELECT user_id FROM feedback ORDER BY id")
@@ -1920,16 +1828,5 @@ mod tests {
         user(register(&db, b"OTHER", 1, 5, 91 * DAY));
         assert_eq!(db.release_unsecured(200 * DAY, 90 * DAY).unwrap(), 3, "BUSY and the two new ones, never SAFE");
         assert!(exists(&secured));
-    }
-
-    #[test]
-    fn a_group_registered_again_is_created_again_until_it_moves_on() {
-        let db = Db::open(":memory:").unwrap();
-        let group: GroupId = [7; 32];
-        assert!(db.create_group(&group, 1, &[1; 32], 0).unwrap());
-        assert!(db.create_group(&group, 1, &[1; 32], 0).unwrap(), "the same registration: created");
-        assert!(!db.create_group(&group, 1, &[2; 32], 0).unwrap(), "another token: taken");
-        assert!(matches!(db.commit(&group, 1, &[1; 32], &[3; 32], b"c", 0).unwrap(), Commit::Accepted));
-        assert!(!db.create_group(&group, 1, &[1; 32], 0).unwrap(), "moved on: taken");
     }
 }

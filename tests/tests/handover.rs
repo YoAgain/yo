@@ -1,5 +1,5 @@
 //! Events handed over before the hub hears of them (spec 4.7): `sync` returns once what arrived is saved; the hub's
-//! ack and the work after it (KeyPackages, the outbox, the storage, delivery tokens) come with `after_sync` or the
+//! ack and the work after it (receipts, prekeys, the outbox, the storage, delivery tokens) come with `after_sync` or the
 //! next `sync`. A crash in between loses nothing and shows nothing twice; a guest only reads and acknowledges.
 
 use std::sync::atomic::{AtomicBool, Ordering};

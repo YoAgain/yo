@@ -1,28 +1,23 @@
 [workspace]
 resolver = "2"
-members = ["core/wire", "core/mls", "core/bindings", "hub", "tests", "app/yogpt"]
+members = ["core/wire", "core/client", "core/bindings", "hub", "tests", "app/yogpt"]
 # Fuzz targets build with nightly and cargo-fuzz: dev/fuzz.
 exclude = ["fuzz"]
 
 [workspace.package]
 edition = "2021"
 publish = false
-license-file = "LICENSE.md"
+license = "MIT"
 
 [workspace.dependencies]
-# OpenMLS and its providers are pinned exactly: an upgrade is a deliberate change of this file.
-openmls = { version = "=0.9.1", default-features = false }
-openmls_rust_crypto = "=0.6.0"
-openmls_basic_credential = "=0.6.0"
-openmls_traits = "=0.6.0"
-openmls_memory_storage = "=0.6.0"
-tls_codec = { version = "=0.5.0", features = ["derive", "mls"] }
+# Dependencies are pinned exactly: an upgrade is a deliberate change of this file.
+tls_codec = { version = "=0.5.0", features = ["derive"] }
 ed25519-dalek = { version = "=2.2.0", features = ["rand_core", "zeroize"] }
 sha2 = "=0.10.9"
 hmac = "=0.12.1"
 chacha20poly1305 = "=0.10.1"
 zeroize = "=1.9.1"
-getrandom = "=0.2.17"
+getrandom = { version = "=0.2.17", features = ["std"] }
 base64 = "=0.22.1"
 serde = { version = "1", features = ["derive"] }
 serde_json = "=1.0.151"
@@ -38,12 +33,21 @@ proptest = "=1.12.0"
 voprf = { version = "=0.5.0", default-features = false, features = ["alloc"] }
 p384 = { version = "=0.13.1", default-features = false, features = ["arithmetic", "hash2curve", "voprf"] }
 rand_core = { version = "=0.6.4", features = ["getrandom"] }
+# libsignal (AGPL-3.0) for the sessions: PQXDH, the Double Ratchet with SPQR, pinned to the commit of tag v0.108.0.
+# Only the client core links it, never the hub.
+libsignal-protocol = { git = "https://github.com/signalapp/libsignal", rev = "8be00c282001caa3585d18de0f044c6d500348ab" }
+async-trait = "=0.1.92"
+rand = "=0.9.5"
+# The seal (spec 6.1): HPKE, RFC 9180.
+hpke-rs = "=0.7.0"
+hpke-rs-crypto = "=0.7.0"
+hpke-rs-rust-crypto = "=0.7.0"
 
 [profile.release]
 lto = "thin"
 codegen-units = 1
 
-# Tests: the dependencies optimised (OpenMLS, the ciphers), the workspace's own crates not.
+# Tests: the dependencies optimised (libsignal, the ciphers), the workspace's own crates not.
 [profile.dev.package."*"]
 opt-level = 2
 debug-assertions = false

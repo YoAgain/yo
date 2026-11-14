@@ -21,7 +21,8 @@ fn delivered(http: &Http, to: &str) -> Vec<Vec<u8>> {
     sent.iter().filter(|(m, p, _)| m == "POST" && *p == path).map(|(_, _, b)| b.clone()).collect()
 }
 
-/// Both ways of a chat, Welcome, messages and commits: no envelope carries the group id, and each opens only for the account it went to.
+/// Both ways, the first messages and the rest: no envelope carries anything of the sender (its user id, account key,
+/// device key), and each opens only for the account it went to.
 #[test]
 fn the_hub_cannot_tell_which_envelopes_belong_to_one_chat() {
     let hub = TestHub::start();
@@ -35,11 +36,16 @@ fn the_hub_cannot_tell_which_envelopes_belong_to_one_chat() {
         b.send(a.user_id(), Content::Text(format!("b{i}"))).unwrap();
         assert_eq!(texts(&mut a), [format!("b{i}")]);
     }
-    let group = a.chats()[0].1;
     let (to_b, to_a) = (delivered(&ha, b.user_id()), delivered(&hb, a.user_id()));
-    assert!(to_b.len() >= 4 && to_a.len() >= 3, "{} {}", to_b.len(), to_a.len());
-    for envelope in to_b.iter().chain(&to_a) {
-        assert!(!envelope.windows(group.len()).any(|w| w == group), "the group id is in an envelope");
+    assert!(to_b.len() >= 3 && to_a.len() >= 3, "{} {}", to_b.len(), to_a.len());
+    let account = |c: &Client| SigningKey::from_bytes(&c.account_secret()).verifying_key().to_bytes().to_vec();
+    for (envelopes, sender) in [(&to_b, &a), (&to_a, &b)] {
+        let marks = [yo_tests::user_id(sender.user_id()).to_vec(), account(sender)];
+        for envelope in envelopes.iter() {
+            for mark in &marks {
+                assert!(!envelope.windows(mark.len()).any(|w| w == mark.as_slice()), "the sender is in an envelope");
+            }
+        }
     }
     for envelope in &to_b {
         assert!(yo_core::seal::open(&b.account_secret(), envelope).is_ok());
@@ -48,12 +54,16 @@ fn the_hub_cannot_tell_which_envelopes_belong_to_one_chat() {
     for envelope in &to_a {
         assert!(yo_core::seal::open(&a.account_secret(), envelope).is_ok());
     }
-    // The seal's 48 bytes keep a text in the smallest bucket; only the Welcome is larger.
-    assert!(to_b[1..].iter().chain(&to_a).all(|e| e.len() == 1024));
+    // A session's first message carries its PQXDH (a Kyber ciphertext): 4 KiB. Once answered, a text is 1 KiB.
+    assert_eq!(to_b[0].len(), 4096);
+    assert!(
+        to_b[1..].iter().chain(&to_a[1..]).all(|e| e.len() == 1024),
+        "{:?}",
+        to_b.iter().map(Vec::len).collect::<Vec<_>>()
+    );
 }
 
-/// An envelope not sealed to the account (a bare MLS message, as before, or one sealed to someone else) is dropped,
-/// and the chat goes on.
+/// An envelope not sealed to the account (bare, or sealed to someone else) is dropped, and the chat goes on.
 #[test]
 fn an_envelope_not_sealed_to_the_account_is_dropped() {
     let hub = TestHub::start();
@@ -65,12 +75,13 @@ fn an_envelope_not_sealed_to_the_account_is_dropped() {
     assert_eq!(texts(&mut a), ["1"]);
     b.send(a.user_id(), Content::Text("2".into())).unwrap();
     let last = delivered(&hb, a.user_id()).pop().unwrap();
-    let mls = yo_core::seal::open(&a.account_secret(), &last).unwrap();
+    let payload = yo_core::seal::open(&a.account_secret(), &last).unwrap();
     let stranger = SigningKey::from_bytes(&[9; 32]).verifying_key().to_bytes();
     let dropped = a.dropped();
-    // Bare, as before the seal: the hub refuses it. Sealed to someone else: taken, and dropped by A.
-    assert_eq!(yo_tests::deliver_raw(&hub.url(), a.user_id(), yo_wire::envelope::seal(&mls).unwrap()), 400);
-    assert_eq!(yo_tests::deliver_raw(&hub.url(), a.user_id(), yo_core::seal::to(&stranger, &mls).unwrap()), 202);
+    // Bare: the hub refuses it. Sealed to someone else: taken, and dropped by A.
+    let bare = yo_wire::envelope::pad(&payload, &yo_wire::envelope::BUCKETS).unwrap();
+    assert_eq!(yo_tests::deliver_raw(&hub.url(), a.user_id(), bare), 400);
+    assert_eq!(yo_tests::deliver_raw(&hub.url(), a.user_id(), yo_core::seal::to(&stranger, &payload).unwrap()), 202);
     assert_eq!(texts(&mut a), ["2"], "the real one still comes");
     assert_eq!(a.dropped(), dropped + 1, "{:?}", a.drop_reasons());
     b.send(a.user_id(), Content::Text("3".into())).unwrap();

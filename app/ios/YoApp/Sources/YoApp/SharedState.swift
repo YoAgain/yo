@@ -13,7 +13,7 @@
 // state in one atomic write, so the word and the state never disagree. Each client keeps the word it read or wrote
 // last (`known`); a word that differs means another process saved since. A save that fails (a full disk) changes
 // nothing on disk and throws: the core's step fails before anything that needed the save leaves (no message, commit,
-// KeyPackage or inbox ack), and the others see the state before it, as after a crash of this process.
+// prekey upload or inbox ack), and the others see the state before it, as after a crash of this process.
 //
 // iOS ends a suspended app or extension that holds a file lock in a shared container (0xdead10cc): the app holds the
 // lock only inside a background task (`hold`), and nobody holds it while waiting for anything but the step itself.

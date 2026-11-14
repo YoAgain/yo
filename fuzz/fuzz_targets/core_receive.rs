@@ -1,6 +1,6 @@
-//! The client core's receive path, deep: a device's real state before a chat, then a sequence of envelopes (each a
-//! u32 length and the bytes), seeded with a real chat (Welcome, profile, Yos, a commit). Never a panic; whatever
-//! arrives, the device can still export its state.
+//! The client core's receive path, deep: a device's real state before anyone wrote to it, then a sequence of sealed
+//! envelopes' payloads (each a u32 length and the bytes), seeded with real ones (a session's first message, a profile,
+//! Yos, a text). Never a panic; whatever arrives, the device can still export its state.
 #![no_main]
 use libfuzzer_sys::fuzz_target;
 use std::sync::Arc;
@@ -10,7 +10,7 @@ const STATE: &[u8] = include_bytes!("../seeds/core_state.bin");
 const LOOKUP: &[u8] = include_bytes!("../seeds/core_lookup.bin");
 const KEY: [u8; 32] = [0x42; 32];
 
-/// The hub, as far as receiving asks it: the lookup that attests the Welcome's sender.
+/// The hub, as far as receiving asks it: the lookup that attests a first message's sender.
 struct Hub;
 
 impl Transport for Hub {
@@ -29,8 +29,8 @@ fuzz_target!(|data: &[u8]| {
     for _ in 0..16 {
         let Some((len, tail)) = rest.split_first_chunk::<4>() else { break };
         let len = (u32::from_be_bytes(*len) as usize).min(tail.len());
-        let (envelope, tail) = tail.split_at(len);
-        let _ = client.receive_for_fuzzing(envelope);
+        let (payload, tail) = tail.split_at(len);
+        let _ = client.receive_for_fuzzing(payload);
         rest = tail;
     }
     let _ = client.export(&KEY);

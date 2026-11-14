@@ -99,7 +99,7 @@ fn a_friend_who_deleted_the_account_is_gone_and_the_name_free() {
     assert_eq!(a.send(&old, Content::Text("are you there".into())), Err(Error::NotOnYo));
     assert!(a.contacts().iter().any(|c| c.user == old && c.gone && c.handles.is_empty()));
     assert_eq!(a.send(&old, Content::Yo), Err(Error::NotOnYo), "known gone: no try");
-    assert!(a.chats().is_empty(), "the chat went with it");
+    assert!(a.sessions_with(&old).is_empty(), "its sessions went with it");
     // A stranger takes the name: by the name, it is the stranger now, in a chat of its own.
     let mut c = by_name(Http::new(hub.url()), &name, None).unwrap();
     assert_ne!(c.user_id(), old);

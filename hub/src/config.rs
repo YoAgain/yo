@@ -6,7 +6,7 @@ use std::path::PathBuf;
 /// Rate limits (spec 6.6). Each is a token bucket: this many per window, refilled evenly.
 #[derive(Debug, Clone)]
 pub struct Limits {
-    /// Lookups that hand out KeyPackages: starting chats.
+    /// Lookups that hand out prekeys: starting sessions.
     pub lookup_per_device_day: u32,
     /// Lookups of an account key only: checking who started a chat.
     pub identity_lookup_per_device_day: u32,
@@ -18,12 +18,10 @@ pub struct Limits {
     /// Envelopes a device holds before deliveries to its user are refused. No rate per recipient: a stranger who
     /// knows a user id could spend it and shut out everyone else.
     pub max_pending_per_device: u32,
-    pub groups_per_ip_hour: u32,
-    pub commit_per_ip_minute: u32,
-    /// Bytes stored without identity, by address: delivered envelopes and commits. They stay up to
-    /// `envelope_ttl_days`, so without it one address could fill the disk with commits to a group of its own.
+    /// Bytes stored without identity, by address: delivered envelopes. They stay up to `envelope_ttl_days`, so
+    /// without it one address could fill the disk.
     pub anonymous_bytes_per_ip_hour: u64,
-    /// Deliveries, commits and new groups are refused (`507`) while the database's disk has less than this free:
+    /// Deliveries are refused (`507`) while the database's disk has less than this free:
     /// better a refusal than a full disk.
     pub db_min_free_bytes: u64,
     /// Registrations by username: first come, first served, this many per address (spec 6.4).
@@ -80,8 +78,6 @@ impl Default for Limits {
             signed_per_device_minute: 1200,
             deliver_per_ip_minute: 200,
             max_pending_per_device: 5000,
-            groups_per_ip_hour: 60,
-            commit_per_ip_minute: 600,
             anonymous_bytes_per_ip_hour: 64 * MIB,
             db_min_free_bytes: GIB,
             register_per_ip_hour: 10,
@@ -113,8 +109,6 @@ impl Limits {
             signed_per_device_minute: u32::MAX,
             deliver_per_ip_minute: u32::MAX,
             max_pending_per_device: 5000,
-            groups_per_ip_hour: u32::MAX,
-            commit_per_ip_minute: u32::MAX,
             anonymous_bytes_per_ip_hour: u64::MAX,
             db_min_free_bytes: 0,
             register_per_ip_hour: u32::MAX,

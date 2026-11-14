@@ -237,6 +237,10 @@ final class AccountStore {
         return
       } catch YoError.Replaced {
         return reset()
+      } catch YoError.State where account.flatMap({ SyncedAccount.load($0.userID) }) != nil {
+        // A state that does not open, an older build's among them (before sessions, spec 4): the account comes
+        // back from the iCloud Keychain as a new device of it, with new prekeys; contacts write to it again.
+        return await recover()
       } catch let error as YoError where !Self.notNow(error) {
         broken = true  // does not open (sealed under another key, or damaged)
       } catch Unopened.gone {

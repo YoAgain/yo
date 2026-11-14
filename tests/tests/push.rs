@@ -50,12 +50,12 @@ fn apns_and_fcm_are_woken_without_content() {
     let _android = with_push(&hub, &username(n + 2), PUSH_FCM, "fcm-token");
     a.send_yo(&username(n + 1)).unwrap();
     a.send_yo(&username(n + 2)).unwrap();
-    // The iPhone gets two pushes (Welcome, Yo), the Android phone too, after one OAuth exchange.
-    let sent = wait_for(&hub, 5);
+    // The iPhone gets one push (the Yo, which starts the session), the Android phone too, after one OAuth exchange.
+    let sent = wait_for(&hub, 3);
     let apns: Vec<_> = sent.iter().filter(|r| r.url.contains("push.apple.com")).collect();
     let fcm: Vec<_> = sent.iter().filter(|r| r.url.contains("fcm.googleapis.com")).collect();
     let oauth: Vec<_> = sent.iter().filter(|r| r.url.contains("oauth2")).collect();
-    assert_eq!((apns.len(), fcm.len(), oauth.len()), (2, 2, 1), "{sent:#?}");
+    assert_eq!((apns.len(), fcm.len(), oauth.len()), (1, 1, 1), "{sent:#?}");
     let first = apns[0];
     assert_eq!(first.url, "https://api.push.apple.com/3/device/a1b2c3");
     let header = |name: &str| first.headers.iter().find(|(n, _)| n == name).map(|(_, v)| v.as_str());
@@ -100,10 +100,10 @@ fn an_apns_token_that_is_not_hex_never_reaches_a_url() {
     let _android = with_push(&hub, &username(n + 2), PUSH_FCM, "fcm-token");
     a.send_yo(&username(n + 1)).unwrap();
     a.send_yo(&username(n + 2)).unwrap();
-    // The Android phone's pushes come (OAuth, Welcome, Yo); the iPhone's token is refused before any request.
-    let sent = wait_for(&hub, 3);
+    // The Android phone's pushes come (OAuth, the Yo); the iPhone's token is refused before any request.
+    let sent = wait_for(&hub, 2);
     std::thread::sleep(Duration::from_millis(200));
     let sent = sent.len().max(hub.push.sent.lock().unwrap().len());
-    assert_eq!(sent, 3);
+    assert_eq!(sent, 2);
     assert!(!hub.push.sent.lock().unwrap().iter().any(|r| r.url.contains("push.apple.com")));
 }

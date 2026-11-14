@@ -2,7 +2,7 @@
 //!
 //!   yo-load [--clients 200] [--seconds 15] [--threads 16] [--connections 64] [--out tests/results]
 //!
-//! Phase 1, end to end: real clients (MLS, HTTP, the hub, fetch, decrypt) in a ring, each sending Yos to the next
+//! Phase 1, end to end: real clients (sessions, HTTP, the hub, fetch, decrypt) in a ring, each sending Yos to the next
 //! and receiving its own. Clients and hub share this machine, so this is the whole system on one box.
 //! Phase 2, the hub alone: well-formed envelopes delivered over many connections at once, as fast as it takes them.
 //! The hub runs in-process on a SQLite file (WAL), as in production. Results are printed and written as JSON.
@@ -99,7 +99,7 @@ fn main() {
     clients.sort_by_key(|(i, _)| *i);
     let registration_s = started.elapsed().as_secs_f64();
     println!(
-        "registered {} in {registration_s:.1} s ({:.0}/s, each with 51 KeyPackages)",
+        "registered {} in {registration_s:.1} s ({:.0}/s, each with its prekeys)",
         clients.len(),
         clients.len() as f64 / registration_s
     );
@@ -167,7 +167,7 @@ fn main() {
     println!("end to end: {sent} Yos sent, {received} received, {dropped} dropped, {:.0} Yos/s", sent as f64 / e2e_s);
 
     // ---- phase 2: the hub alone ----
-    // Each user with its device check, learned once as any sender would (spec 4.6).
+    // Each user with its device check, learned once as any sender would (spec 4.4).
     let targets: Vec<(String, String)> = clients
         .iter()
         .map(|(_, c)| {

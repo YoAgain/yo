@@ -15,7 +15,8 @@ OAD=${OAD:-$(cd "$app/../../../.." && pwd)/omarchy-apple-dev}
 [ -x "$OAD/device-run.sh" ] || { echo "omarchy-apple-dev not found at $OAD (set OAD)" >&2; exit 2; }
 [[ $PHONE =~ ^[0-9.]+$ ]] || PHONE=$(tailscale ip -4 "$PHONE" 2>/dev/null)
 PATH="$(dirname "$(readlink -f "$(command -v swift)")"):$HOME/.local/bin:$PATH"
-"$here/core.sh"   # the Rust core and its Swift bindings, into YoApp/build/core
+"$here/core.sh"       # the Rust core and its Swift bindings, into YoApp/build/core
+"$here/licenses.sh"   # Settings › Licenses, with this build's commit
 cd "$app"
 xtool dev build --configuration release   # optimised: SwiftUI in debug is noticeably slower
 # What this script installs is "Yo Dev": its own app id (beside "Yo" from TestFlight or the App Store), named Yo like the other,

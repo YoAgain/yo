@@ -245,7 +245,7 @@ pub fn devices_hash(url: &str, user: &str) -> Option<[u8; 32]> {
         return None;
     }
     let devices: yo_wire::api::Devices = yo_wire::decode(&probe.bytes().unwrap()).unwrap();
-    Some(yo_wire::devices::hash(&devices.account_key, &devices.device_keys))
+    Some(yo_wire::devices::hash(&devices.account_key, &devices.keys()))
 }
 
 /// Delivers raw bytes to a user as any stranger could (sealed sender), with the device check learned from the hub.

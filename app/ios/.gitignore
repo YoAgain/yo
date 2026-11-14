@@ -11,3 +11,5 @@ DerivedData/
 build/
 # Settings of one machine (dev/push.sh): phone address, tool paths.
 dev/local.env
+# Made by dev/licenses.sh before each build: it names the commit.
+YoApp/Resources/Licenses.txt

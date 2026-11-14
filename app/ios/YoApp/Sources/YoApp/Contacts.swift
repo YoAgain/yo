@@ -32,29 +32,23 @@ struct ContactState: Sendable {
   var contact: YoContact?
   var accountKey: String?
   var safetyNumber: String?
-  var chats: [YoChat] = []
+  /// A session with each of the contact's devices this iPhone writes to.
+  var sessions: [YoSession] = []
 
-  /// Keys are updated at least every 7 days (spec 4.4).
-  static let updateDays = 7.0
-
-  /// The chat that carries the Yos: the restarted one if there is one, else the first.
-  var chat: YoChat? { chats.first { $0.restarted && !$0.lost } ?? chats.first }
-
-  func keysFresh(_ chat: YoChat) -> Check {
-    guard chat.updates else { return .open }
-    guard chat.lastUpdateMs > 0 else { return .waiting }
-    let age = Date.now.timeIntervalSince1970 - Double(chat.lastUpdateMs) / 1000
-    return age <= Self.updateDays * 86400 ? .ok : .waiting
+  /// The sessions as one check: good to send to every device, a new one on its way, or none yet.
+  var sessionsCheck: Check {
+    if sessions.isEmpty { return .open }
+    if sessions.contains(where: { $0.retrying || !$0.usable }) { return .waiting }
+    return .ok
   }
 
   /// The worst of the checks that matter: what the list shows for the contact.
   func overall(_ friend: Friend) -> Check {
     if friend.gone || contact?.gone == true || contact?.unconfirmed == true { return .problem }
+    if contact?.outdated == true { return .waiting }
     if friend.keyChanged { return .waiting }
-    guard friend.user != nil, let chat else { return .open }
-    if chat.lost { return .waiting }
-    if chat.members != 2 { return .waiting }
-    return keysFresh(chat) == .ok ? .ok : .waiting
+    guard friend.user != nil else { return .open }
+    return sessionsCheck
   }
 
   static func load(_ client: YoClient, user: String) -> ContactState {
@@ -62,7 +56,7 @@ struct ContactState: Sendable {
       contact: client.contacts().first { $0.user == user },
       accountKey: client.accountKeyOf(user: user),
       safetyNumber: try? client.safetyNumber(who: user),
-      chats: client.chatsWith(user: user))
+      sessions: client.sessionsWith(user: user))
   }
 }
 
@@ -111,7 +105,7 @@ struct ContactsList: View {
             }
           }
         } footer: {
-          Text("A green check: the chat is end-to-end encrypted with fresh keys, as it should be.")
+          Text("A green check: the chat is end-to-end encrypted, as it should be.")
         }
       }
     }
@@ -132,6 +126,7 @@ struct ContactsList: View {
     if friend.blocked { return "Blocked" }
     if friend.gone { return "Not on Yo" }
     if friend.user == nil { return "No Chat Yet" }
+    if states[friend.user ?? ""]?.contact?.outdated == true { return "Needs Update" }
     if friend.keyChanged && check == .waiting { return "New Key" }
     return switch check {
     case .ok: "Encrypted"
@@ -151,7 +146,7 @@ struct ContactsList: View {
   }
 }
 
-/// One contact: the checks first, then who they are and their chats in plain values.
+/// One contact: the checks first, then who they are and their devices in plain values.
 private struct ContactDetail: View {
   let friend: Friend
   @Environment(AccountStore.self) private var accounts
@@ -173,11 +168,11 @@ private struct ContactDetail: View {
           if let key = state.accountKey { plain("Account Key", key, mono: true) }
           if let number = state.safetyNumber { plain("Safety Number", grouped(number), mono: true) }
         }
-        ForEach(Array(state.chats.enumerated()), id: \.offset) { index, chat in
-          Section(state.chats.count == 1 ? "MLS Chat" : "MLS Chat \(index + 1)") {
-            plain("Epoch", "\(chat.epoch) (joined at \(chat.joinedEpoch))")
-            plain("Cipher Suite", chat.ciphersuite, mono: true)
-            plain("Group ID", chat.group, mono: true)
+        if !state.sessions.isEmpty {
+          Section(state.sessions.count == 1 ? "Device" : "Devices") {
+            ForEach(state.sessions, id: \.device) { session in
+              plain("Device Key", session.device, mono: true)
+            }
           }
         }
       }
@@ -210,33 +205,33 @@ private struct ContactDetail: View {
         Text("Their key changed: they may have a new iPhone. To be sure it’s them, compare safety numbers.")
       }
     }
-    if let chat = state.chat {
+    if contact?.outdated == true {
       Section {
-        StatusRow(title: "End-to-End Encrypted", value: "MLS", check: .ok)
-        StatusRow(title: "Sealed Sender", value: "On", check: .ok)
-        StatusRow(
-          title: "Chat",
-          value: chat.lost ? "Restarting" : chat.restarted ? "Restarted" : "Active",
-          check: chat.lost ? .waiting : .ok)
-        StatusRow(title: "Devices", value: "\(chat.members)", check: chat.members == 2 ? .ok : .waiting)
-        StatusRow(title: "Fresh Keys", value: keysValue(chat, state.keysFresh(chat)), check: state.keysFresh(chat))
+        StatusRow(title: "Yo", value: "Needs Update", check: .waiting)
       } header: {
         Text("Encryption")
       } footer: {
-        Text("The server delivers your Yos without learning they are from you. Keys are renewed at least weekly.")
+        Text("\(friend.name) uses an older Yo. Your Yos wait and arrive once they update the app.")
+      }
+    } else if !state.sessions.isEmpty {
+      Section {
+        StatusRow(title: "End-to-End Encrypted", value: "Signal Protocol", check: .ok)
+        StatusRow(title: "Quantum-Safe", value: "PQXDH, SPQR", check: .ok)
+        StatusRow(title: "Sealed Sender", value: "On", check: .ok)
+        StatusRow(
+          title: "Devices",
+          value: "\(state.sessions.count)",
+          check: state.sessionsCheck)
+      } header: {
+        Text("Encryption")
+      } footer: {
+        Text("The server delivers your Yos without learning they are from you.")
       }
     } else {
       Section {
         StatusRow(title: "Chat", value: "Not Yet", check: .open)
       }
     }
-  }
-
-  private func keysValue(_ chat: YoChat, _ check: Check) -> String {
-    if !chat.updates { return "Off" }
-    if chat.lastUpdateMs == 0 { return "At Next Yo" }
-    let when = Date(timeIntervalSince1970: Double(chat.lastUpdateMs) / 1000).formatted(.relative(presentation: .named))
-    return check == .ok ? when : "Due"
   }
 
   /// A short value beside its title; a long one (keys, ids) under it, from the left, as Settings' About shows them:

@@ -15,6 +15,8 @@ resources:
   - Resources/yo.caf
   # The BIP-39 English word list, for the recovery code (spec 7).
   - Resources/bip39-english.txt
+  # Settings › Licenses: the commit of the build and every licence (dev/licenses.sh makes it, ignored).
+  - Resources/Licenses.txt
   # The app icons to choose from in Appearance (Info.plist CFBundleAlternateIcons; loose PNGs at the root, 60 pt):
   # the negative (purple Yo on white) and the original Yo's plain purple square; IconStandard only shows the default.
   - Resources/IconNegative@2x.png

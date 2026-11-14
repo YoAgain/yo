@@ -92,7 +92,7 @@ struct YoApp: App {
         inbox.fetchMedia(client: client)
         // The account's storage: after a restore, the friends and the app icon of the phone before.
         Task { await accounts.takeStorage(into: friends) }
-        // Key updates due (spec 4.4): also for a phone that only receives.
+        // Receipts, retries and prekeys due (spec 4.1, 4.5): also for a phone that only receives.
         Task { await inbox.maintain(accounts: accounts, friends: friends) }
       }
         .environment(inbox)
@@ -113,7 +113,7 @@ struct YoApp: App {
         .onChange(of: phase, initial: true) { _, phase in
           guard phase == .active else { return }
           Task { await inbox.collectDelivered() }
-          // In front again: key updates due (spec 4.4); on the first opening, once the core has opened (above).
+          // In front again: receipts, retries and prekeys due (spec 4.1, 4.5); on the first opening, once the core has opened (above).
           Task { await inbox.maintain(accounts: accounts, friends: friends) }
           // What the hub said "later" to goes now (the outbox's events go to the inbox, set when the core opened).
           outbox.flush(accounts: accounts)

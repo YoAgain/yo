@@ -9,13 +9,13 @@
 YoIP is the protocol between the apps and the hub: who you are, how a Yo is delivered, and what it says. Messages
 reach the hub without a sender, padded to one of four sizes; a push only says "there is mail".
 
-Its security layer is **YoLS**, Yo Layer Security: chats are MLS groups (RFC 9420), keys renew every week or 100
-messages, and any contact can be checked with a 60-digit safety number. Full text: [spec/v1.md](spec/v1.md); every
+Its security layer is Signal's protocol through libsignal: PQXDH and the Double Ratchet with SPQR, quantum-safe, healing
+with every answer, and any contact can be checked with a 60-digit safety number. Full text: [spec/v1.md](spec/v1.md); every
 key, where it lives and what it opens: [spec 7, the keys at a glance](spec/v1.md#7-backup-and-a-new-phone).
 
 ### Hub
 
-The server: a mailbox per device, the order of changes to a chat, and the push that wakes a phone. One core
+The server: a mailbox per device, each device's prekeys, and the push that wakes a phone. One core
 delivers about 16,000 Yops, Yos per second ([measured](tests/README.md#load)).
 
 ### Apps
@@ -53,4 +53,13 @@ dev/fuzz all 300                                                    # every fuzz
 
 ## License
 
-[O'Saasy](LICENSE.md): use, change and share freely, but not as a competing hosted service.
+Yo's own source is [MIT](LICENSE.md), like the original Yo's `yo-ios` and `yo-api`. The name Yo, its logo and its
+sound are not covered by the code license.
+
+**Third-party: libsignal.** The iOS app and its core (`core/`) link [libsignal](https://github.com/signalapp/libsignal)
+(AGPL-3.0, © Signal Messenger, LLC; [text](LICENSES/AGPL-3.0.txt)). Yo's own source is MIT; the built app as a whole
+is distributed under the AGPL-3.0, its complete corresponding source being this repository at the commit the app
+shows under Settings › Licenses. The hub (`hub/`) does not link libsignal and is MIT. Signal has stated it has no
+objection to App Store distribution of GPL-compliant apps ([2016](https://signal.org/blog/license-update/)); an
+explicit App Store additional permission for libsignal is proposed in
+[signalapp/libsignal#705](https://github.com/signalapp/libsignal/pull/705) (see #684).

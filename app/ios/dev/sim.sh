@@ -25,6 +25,7 @@ udid() { xcrun simctl list devices -j | python3 -c 'import json,sys; n=sys.argv[
 case ${1:-} in
   build)
     YO_CORE_TARGET=aarch64-apple-ios-sim "$here/core.sh"
+    "$here/licenses.sh"
     (cd "$here/sim" && "${XCODEGEN:-xcodegen}" generate --quiet)
     xcodebuild build-for-testing -quiet -project "$here/sim/YoSim.xcodeproj" -scheme YoSim -configuration "$config" \
       -destination 'generic/platform=iOS Simulator' -derivedDataPath "$derived"

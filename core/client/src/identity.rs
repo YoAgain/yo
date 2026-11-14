@@ -1,9 +1,7 @@
-//! Identities (spec 3): the account key vouches for devices; every member of a group is checked against its
-//! certificate; the safety number is computed from user ids and account keys.
+//! Identities (spec 3): the account key vouches for devices; the safety number is computed from user ids and account
+//! keys.
 
-use crate::error::{Error, Result};
 use ed25519_dalek::{Signer as _, SigningKey};
-use openmls::prelude::{BasicCredential, Credential, CredentialType};
 use sha2::{Digest, Sha512};
 use yo_wire::cert::{self, DeviceCertificate};
 use yo_wire::KEY_LEN;
@@ -17,33 +15,12 @@ pub fn random<const N: usize>() -> [u8; N] {
     out
 }
 
-/// The certificate of a device: the account key vouching for its MLS signature key.
+/// The certificate of a device: the account key vouching for its device key.
 pub fn certify(account: &SigningKey, device_key: &[u8]) -> DeviceCertificate {
     DeviceCertificate {
         account_key: account.verifying_key().to_bytes(),
         signature: account.sign(&cert::to_be_signed(device_key)).to_bytes(),
     }
-}
-
-fn identity(credential: &Credential) -> Result<Vec<u8>> {
-    if credential.credential_type() != CredentialType::Basic {
-        return Err(Error::Protocol("credential type"));
-    }
-    let basic = BasicCredential::try_from(credential.clone()).map_err(|_| Error::Protocol("credential"))?;
-    Ok(basic.identity().to_vec())
-}
-
-/// The account key vouching for a leaf, checked: a basic credential whose certificate verifies against the leaf's
-/// signature key.
-pub fn member(credential: &Credential, signature_key: &[u8]) -> Result<Key> {
-    let certificate =
-        DeviceCertificate::verify(&identity(credential)?, signature_key).map_err(|_| Error::Protocol("certificate"))?;
-    Ok(certificate.account_key)
-}
-
-/// The account key a leaf names, unchecked: for members whose certificates were checked when they joined.
-pub fn claimed(credential: &Credential) -> Option<Key> {
-    DeviceCertificate::parse(&identity(credential).ok()?).ok().map(|c| c.account_key)
 }
 
 /// The safety number of two users (spec 3.4): 60 digits, the same on both sides. Each side is its user id and

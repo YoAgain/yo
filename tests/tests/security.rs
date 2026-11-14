@@ -90,9 +90,6 @@ fn nothing_is_stored_without_identity_while_the_disk_is_nearly_full() {
         .send()
         .unwrap();
     assert_eq!(probe.status().as_u16(), 507);
-    let group = yo_wire::encode(&api::GroupCreate { group_id: [3; 32], epoch: 1, token_hash: [4; 32] });
-    let created = reqwest::blocking::Client::new().post(format!("{url}{}", api::GROUPS)).body(group).send().unwrap();
-    assert_eq!(created.status().as_u16(), 507);
     hub.stop();
     let _ = std::fs::remove_dir_all(&dir);
 }

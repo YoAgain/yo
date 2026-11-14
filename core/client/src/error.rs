@@ -11,6 +11,10 @@ pub enum Error {
     NotOnYo,
     #[error("blocked")]
     Blocked,
+    /// The contact's app is too old for sessions (no prekeys at the hub): the message waits in the outbox until it is
+    /// updated (spec 4.2).
+    #[error("the contact must update Yo")]
+    Outdated,
     /// The contact was verified and its account key changed: confirm the new key first (spec 3.4).
     #[error("identity not confirmed")]
     Unconfirmed,
@@ -20,9 +24,9 @@ pub enum Error {
     /// Something the peer or the hub sent breaks the protocol.
     #[error("protocol: {0}")]
     Protocol(&'static str),
-    /// OpenMLS refused: the message or state does not fit the group.
-    #[error("mls: {0}")]
-    Mls(String),
+    /// libsignal refused: the message does not fit the session, or a bundle is bad.
+    #[error("session: {0}")]
+    Session(String),
     /// The stored state cannot be opened with this key, or is damaged.
     #[error("state")]
     State,

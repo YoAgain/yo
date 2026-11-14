@@ -3,6 +3,7 @@ name = "yo-tests"
 version = "0.1.0"
 edition.workspace = true
 publish.workspace = true
+license.workspace = true
 description = "Scenario, chaos and load tests: a real hub and real clients over HTTP."
 
 [[bin]]
@@ -23,7 +24,7 @@ path = "src/chaos.rs"
 
 [dependencies]
 yo-wire = { path = "../core/wire" }
-yo-core = { path = "../core/mls", features = ["testing"] }
+yo-core = { path = "../core/client", features = ["testing"] }
 yo-hub = { path = "../hub" }
 yo-bindings = { path = "../core/bindings" }
 tokio = { workspace = true }

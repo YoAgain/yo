@@ -13,7 +13,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        target: [wire_envelope, wire_content, wire_cert, wire_api, hub_key_package, hub_routes, core_receive]
+        target: [wire_envelope, wire_content, wire_cert, wire_api, hub_routes, core_receive]
     steps:
       - uses: actions/checkout@v4
       - name: Nightly and cargo-fuzz

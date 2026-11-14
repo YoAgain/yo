@@ -1,6 +1,6 @@
 //! Seeded random runs: many clients, random sends, syncs, clock jumps and re-registrations. Invariant: every
-//! message a client sent to a device that still exists arrives exactly once, nothing is dropped, and both sides of
-//! every chat are in the same epoch at the end. A failure names its seed; `YO_SEEDS=7,8` reruns those.
+//! message a client sent to a device that still exists arrives exactly once and nothing is dropped. A failure names
+//! its seed; `YO_SEEDS=7,8` reruns those.
 
 use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -117,18 +117,6 @@ fn run(seed: u64, clients: usize, steps: usize) {
         }
         for m in &got {
             assert!(want.contains(m), "seed {seed}: {to} received {m:?}, which nobody sent to it");
-        }
-    }
-    // Both sides of every chat agree on the epoch.
-    let mut epochs: BTreeMap<[u8; 32], Vec<u64>> = BTreeMap::new();
-    for d in &devices {
-        for (_, group, epoch, _) in d.client.chats() {
-            epochs.entry(group).or_default().push(epoch);
-        }
-    }
-    for (group, seen) in epochs {
-        if seen.len() == 2 {
-            assert_eq!(seen[0], seen[1], "seed {seed}: group {:02x?} split", &group[..4]);
         }
     }
 }

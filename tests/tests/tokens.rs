@@ -120,7 +120,7 @@ fn a_delivery_with_a_token_passes_an_address_at_its_limit_and_one_without_waits(
         a.send_yo(&pb).unwrap();
     }
     assert_eq!(a.waiting(), 0, "every delivery taken");
-    assert_eq!(a.tokens_left(), before - 6, "one token each, the Welcome's too");
+    assert_eq!(a.tokens_left(), before - 5, "one token each");
     assert!(deliveries_to(&ha, b.user_id()).iter().all(|headers| has_token(headers)));
     assert_eq!(yos(&b.sync(0).unwrap(), &a), 5);
     // A sender without tokens (none asked for yet) is counted by the address, as before: its Yo waits.
@@ -135,14 +135,15 @@ fn without_a_token_deliveries_are_counted_by_address_as_before() {
     config.limits.deliver_per_ip_minute = 3;
     let hub = TestHub::start_with(config, "127.0.0.1:0");
     let ((mut a, ha, _), (mut b, _, pb)) = pair(&hub);
-    // No sync, no tokens: a Welcome and two Yos are the address's three.
-    a.send_yo(&pb).unwrap();
-    a.send_yo(&pb).unwrap();
+    // No sync, no tokens: three Yos are the address's three.
+    for _ in 0..3 {
+        a.send_yo(&pb).unwrap();
+    }
     assert_eq!(a.waiting(), 0);
     a.send_yo(&pb).unwrap();
     assert_eq!(a.waiting(), 1, "the fourth delivery waits for the address's limit");
     assert!(deliveries_to(&ha, b.user_id()).iter().all(|headers| !has_token(headers)));
-    assert_eq!(yos(&b.sync(0).unwrap(), &a), 2);
+    assert_eq!(yos(&b.sync(0).unwrap(), &a), 3);
     // A token that is no token is counted the same, and refused.
     assert_eq!(probe(&hub.url(), b.user_id(), &[("authorization", "PrivateToken token=\"AAAA\"")]), 429);
 }
@@ -234,7 +235,7 @@ fn the_hub_keeps_nothing_that_ties_a_redeemed_token_to_its_issuance() {
         .unwrap();
     assert_eq!(columns, ["nonce", "key_id"], "a spent token is its nonce and its key, nothing about who");
     let spent: i64 = db.query_row("SELECT count(*) FROM spent_tokens", [], |row| row.get(0)).unwrap();
-    assert_eq!(spent, 4, "the Welcome and three Yos");
+    assert_eq!(spent, 3, "three Yos");
     // Not a byte of what was blinded is anywhere in the database.
     let tables: Vec<String> = db
         .prepare("SELECT name FROM sqlite_master WHERE type = 'table'")

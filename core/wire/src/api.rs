@@ -1,17 +1,16 @@
 //! The hub's routes and their bodies (spec 6.3). Bodies are TLS-encoded, `application/octet-stream`.
 
 use crate::handle::Handle;
-use crate::{DeviceId, GroupId, UserId, KEY_LEN, TOKEN_LEN};
+use crate::{DeviceId, UserId, KEY_LEN};
 use tls_codec::{TlsDeserializeBytes, TlsSerialize, TlsSize, VLBytes};
 
 pub const USERNAME: &str = "/v1/username";
 pub const REGISTER: &str = "/v1/register";
-pub const KEY_PACKAGES: &str = "/v1/keypackages";
+pub const PREKEYS: &str = "/v1/prekeys";
 pub const LOOKUP: &str = "/v1/lookup";
 pub const PUSH: &str = "/v1/push";
 pub const INBOX: &str = "/v1/inbox";
 pub const INBOX_ACK: &str = "/v1/inbox/ack";
-pub const GROUPS: &str = "/v1/groups";
 pub const BACKUP: &str = "/v1/backup";
 /// `DELETE`: the signing device's account, with everything the hub holds about it.
 pub const ACCOUNT: &str = "/v1/account";
@@ -47,18 +46,8 @@ pub fn deliver_path(user: &UserId) -> String {
     format!("{INBOX}/{}", crate::b64(user))
 }
 
-/// The header of a delivery naming the devices it was encrypted for (spec 4.6): base64url of `devices::hash`.
+/// The header of a delivery naming the devices it was encrypted for (spec 4.4): base64url of `devices::hash`.
 pub const HEADER_DEVICES: &str = "yo-devices";
-
-/// `POST /v1/groups/{id}/commit`
-pub fn commit_path(group: &GroupId) -> String {
-    format!("{GROUPS}/{}/commit", crate::b64(group))
-}
-
-/// `GET /v1/groups/{id}/commits/{epoch}`: the commit the hub accepted on that epoch.
-pub fn commit_fetch_path(group: &GroupId, epoch: u64) -> String {
-    format!("{GROUPS}/{}/commits/{epoch}", crate::b64(group))
-}
 
 /// `GET /v1/backup/{id}`: by the user id or by the recovery code's locator (spec 7).
 pub fn backup_path(id: &[u8]) -> String {
@@ -115,21 +104,23 @@ pub struct Register {
 #[derive(Debug, Clone, PartialEq, Eq, TlsSerialize, TlsDeserializeBytes, TlsSize)]
 pub struct NewDevice {
     pub device_id: DeviceId,
-    /// Its MLS signature key: the leaf key of all its KeyPackages.
+    /// Its public name among the account's devices, what senders encrypt for (spec 3).
     pub device_key: [u8; KEY_LEN],
     /// The account key vouching for `device_key`.
     pub certificate: VLBytes,
     pub auth_key: [u8; KEY_LEN],
-    /// Proof of possession: the account key's signature over `registration_to_be_signed` (spec 6.4).
     pub push: Push,
-    pub key_packages: Vec<VLBytes>,
-    pub last_resort: VLBytes,
+    /// The device's registration id in its sessions (spec 4.1).
+    pub registration_id: u32,
+    /// Its first prekeys: the signed prekey and the last resort Kyber prekey are required.
+    pub prekeys: Prekeys,
+    /// Proof of possession: the account key's signature over `registration_to_be_signed` (spec 6.4).
     pub proof: [u8; crate::SIGNATURE_LEN],
 }
 
 pub const REGISTRATION_LABEL: &[u8] = b"yo register v1";
 
-/// What the account key signs to register a device for a handle: copied certificates and KeyPackages register no one.
+/// What the account key signs to register a device for a handle: a copied certificate registers no one.
 pub fn registration_to_be_signed(
     handle: &Handle,
     device_id: &DeviceId,
@@ -150,6 +141,8 @@ pub fn registration_to_be_signed(
 pub struct Registered {
     pub user_id: UserId,
     pub username: Option<VLBytes>,
+    /// The device's number among the user's devices.
+    pub device_id: u8,
 }
 
 /// Claims a username for the signing device's account, replacing its old one; `None` gives it up.
@@ -158,33 +151,73 @@ pub struct SetUsername {
     pub username: Option<VLBytes>,
 }
 
+/// A prekey signed by the account's identity key (spec 4.1): an EC key or a Kyber key, as libsignal serializes it.
 #[derive(Debug, Clone, PartialEq, Eq, TlsSerialize, TlsDeserializeBytes, TlsSize)]
-pub struct KeyPackages {
-    pub key_packages: Vec<VLBytes>,
-    pub last_resort: Option<VLBytes>,
+pub struct SignedPrekey {
+    pub id: u32,
+    pub key: VLBytes,
+    pub signature: VLBytes,
 }
 
-/// `Lookup::key_packages`, bit 0: hand out one KeyPackage per device (consumes them); without it only who it is.
-pub const LOOKUP_KEY_PACKAGES: u8 = 1;
-/// `Lookup::key_packages`, bit 1: answer `LookupNamed`, with the user's username, instead of `LookupResult`.
+/// A one-time EC prekey (spec 4.1): unsigned, as in Signal.
+#[derive(Debug, Clone, PartialEq, Eq, TlsSerialize, TlsDeserializeBytes, TlsSize)]
+pub struct Prekey {
+    pub id: u32,
+    pub key: VLBytes,
+}
+
+/// A device's prekeys, as it uploads them (`PUT /v1/prekeys`, and in its registration).
+#[derive(Debug, Clone, PartialEq, Eq, TlsSerialize, TlsDeserializeBytes, TlsSize)]
+pub struct Prekeys {
+    /// Replaces the device's signed prekey.
+    pub signed: Option<SignedPrekey>,
+    /// Replaces its last resort Kyber prekey: handed out when no one-time one is left.
+    pub last_resort: Option<SignedPrekey>,
+    pub one_time: Vec<Prekey>,
+    /// One-time Kyber prekeys.
+    pub kyber: Vec<SignedPrekey>,
+}
+
+/// What a sender needs to start a session with one device (spec 4.1). Its one-time keys are handed out once.
+#[derive(Debug, Clone, PartialEq, Eq, TlsSerialize, TlsDeserializeBytes, TlsSize)]
+pub struct Bundle {
+    pub device_key: [u8; KEY_LEN],
+    pub registration_id: u32,
+    pub signed: SignedPrekey,
+    /// A one-time Kyber prekey, or the last resort when none is left.
+    pub kyber: SignedPrekey,
+    /// A one-time EC prekey, if one is left.
+    pub one_time: Option<Prekey>,
+}
+
+/// `Lookup::flags`, bit 0: hand out a bundle per device (consumes its one-time keys); without it only who it is.
+pub const LOOKUP_PREKEYS: u8 = 1;
+/// `Lookup::flags`, bit 1: answer `LookupNamed`, with the user's username, instead of `LookupResult`.
 pub const LOOKUP_USERNAME: u8 = 2;
 
 #[derive(Debug, Clone, PartialEq, Eq, TlsSerialize, TlsDeserializeBytes, TlsSize)]
 pub struct Lookup {
     pub handle: Handle,
-    /// `LOOKUP_KEY_PACKAGES` and `LOOKUP_USERNAME`; 0: only who it is.
-    pub key_packages: u8,
-    /// Devices whose KeyPackages are not wanted: those already in the group being repaired.
+    /// `LOOKUP_PREKEYS` and `LOOKUP_USERNAME`; 0: only who it is.
+    pub flags: u8,
+    /// Devices whose bundles are not wanted: those the sender has sessions with.
     pub except: Vec<[u8; KEY_LEN]>,
+}
+
+/// A device of a user as the hub names it: its key, and its number among the user's devices (1 to 127), which both
+/// ends of a session use for its address (spec 4.1).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, TlsSerialize, TlsDeserializeBytes, TlsSize)]
+pub struct Device {
+    pub key: [u8; KEY_LEN],
+    pub id: u8,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, TlsSerialize, TlsDeserializeBytes, TlsSize)]
 pub struct LookupResult {
     pub user_id: UserId,
     pub account_key: [u8; KEY_LEN],
-    /// The user's devices (their MLS signature keys).
-    pub device_keys: Vec<[u8; KEY_LEN]>,
-    pub key_packages: Vec<VLBytes>,
+    pub devices: Vec<Device>,
+    pub bundles: Vec<Bundle>,
 }
 
 /// The answer to a lookup with `LOOKUP_USERNAME`: the user and its username as its owner writes it ("YoGPT"),
@@ -203,33 +236,14 @@ pub struct InboxItem {
 
 #[derive(Debug, Clone, PartialEq, Eq, TlsSerialize, TlsDeserializeBytes, TlsSize)]
 pub struct Inbox {
-    /// Single-use KeyPackages the device still has at the hub.
-    pub key_packages_left: u32,
+    /// One-time prekeys the device still has at the hub: the fewer of its EC and its Kyber ones.
+    pub prekeys_left: u32,
     pub items: Vec<InboxItem>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, TlsSerialize, TlsDeserializeBytes, TlsSize)]
 pub struct Ack {
     pub ids: Vec<u64>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, TlsSerialize, TlsDeserializeBytes, TlsSize)]
-pub struct GroupCreate {
-    pub group_id: GroupId,
-    pub epoch: u64,
-    pub token_hash: [u8; TOKEN_LEN],
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, TlsSerialize, TlsDeserializeBytes, TlsSize)]
-pub struct Commit {
-    /// The epoch the commit builds on.
-    pub epoch: u64,
-    /// That epoch's token.
-    pub token: [u8; TOKEN_LEN],
-    /// The hash of the next epoch's token.
-    pub next_token_hash: [u8; TOKEN_LEN],
-    /// The commit's envelope: the hub keeps it for whoever misses it (spec 4.3).
-    pub envelope: VLBytes,
 }
 
 /// The length of a backup's locator: HKDF(the recovery code, "yo backup v1 locator") (spec 7).
@@ -365,17 +379,17 @@ pub struct Storage {
     pub data: VLBytes,
 }
 
-/// The body of a `409` to a delivery: the user's current account key and devices (spec 4.6).
+/// The body of a `409` to a delivery: the user's current account key and devices (spec 4.4).
 #[derive(Debug, Clone, PartialEq, Eq, TlsSerialize, TlsDeserializeBytes, TlsSize)]
 pub struct Devices {
     pub account_key: [u8; KEY_LEN],
-    pub device_keys: Vec<[u8; KEY_LEN]>,
+    pub devices: Vec<Device>,
 }
 
-/// The body of a `409` to a commit: the hub's epoch of the group.
-#[derive(Debug, Clone, PartialEq, Eq, TlsSerialize, TlsDeserializeBytes, TlsSize)]
-pub struct Epoch {
-    pub epoch: u64,
+impl Devices {
+    pub fn keys(&self) -> Vec<[u8; KEY_LEN]> {
+        self.devices.iter().map(|d| d.key).collect()
+    }
 }
 
 /// The statuses the hub answers with, and what they mean to a client.
@@ -388,7 +402,7 @@ pub mod status {
     pub const UNAUTHORIZED: u16 = 401;
     pub const FORBIDDEN: u16 = 403;
     pub const NOT_FOUND: u16 = 404;
-    /// A commit built on an epoch the group has left.
+    /// Devices changed (a delivery), a name or id taken.
     pub const CONFLICT: u16 = 409;
     /// The mailbox's device was replaced: look the person up again.
     pub const GONE: u16 = 410;
@@ -415,15 +429,20 @@ mod tests {
                 certificate: vec![1; 96].into(),
                 auth_key: [2; 32],
                 push: Push { platform: PUSH_APNS, token: b"abc".to_vec().into() },
-                key_packages: vec![vec![3; 300].into(), vec![4; 300].into()],
-                last_resort: vec![5; 300].into(),
+                registration_id: 77,
+                prekeys: Prekeys {
+                    signed: Some(SignedPrekey { id: 1, key: vec![3; 33].into(), signature: vec![4; 64].into() }),
+                    last_resort: Some(SignedPrekey { id: 2, key: vec![5; 1569].into(), signature: vec![6; 64].into() }),
+                    one_time: vec![Prekey { id: 3, key: vec![7; 33].into() }],
+                    kyber: Vec::new(),
+                },
                 proof: [6; 64],
             },
         };
         assert_eq!(crate::decode::<Register>(&crate::encode(&register)).unwrap(), register);
-        let lookup = Lookup { handle: Handle::username("CHRIS"), key_packages: 1, except: vec![[1; 32]] };
+        let lookup = Lookup { handle: Handle::username("CHRIS"), flags: LOOKUP_PREKEYS, except: vec![[1; 32]] };
         assert_eq!(crate::decode::<Lookup>(&crate::encode(&lookup)).unwrap(), lookup);
-        let inbox = Inbox { key_packages_left: 7, items: vec![InboxItem { id: 1, envelope: vec![0; 1024].into() }] };
+        let inbox = Inbox { prekeys_left: 7, items: vec![InboxItem { id: 1, envelope: vec![0; 1024].into() }] };
         assert_eq!(crate::decode::<Inbox>(&crate::encode(&inbox)).unwrap(), inbox);
         let backup = backup();
         assert_eq!(crate::decode::<Backup>(&crate::encode(&backup)).unwrap(), backup);
@@ -481,7 +500,6 @@ mod tests {
     fn paths() {
         assert_eq!(inbox_path(30), "/v1/inbox?wait=30");
         assert!(deliver_path(&[0; 16]).starts_with("/v1/inbox/AAAA"));
-        assert!(commit_path(&[0; 32]).ends_with("/commit"));
         assert_eq!(backup_path(&[0; 16]), "/v1/backup/AAAAAAAAAAAAAAAAAAAAAA");
     }
 }

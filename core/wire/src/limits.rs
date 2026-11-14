@@ -1,13 +1,16 @@
 //! The numbers both sides rely on (spec 6.5, 6.6). Rate limits live in the hub's configuration.
 
-/// The largest KeyPackage accepted.
-pub const MAX_KEY_PACKAGE_LEN: usize = 4096;
-/// The most KeyPackages in one upload.
-pub const MAX_KEY_PACKAGES_PER_UPLOAD: usize = 100;
-/// How many KeyPackages a device keeps at the hub.
-pub const KEY_PACKAGE_TARGET: u32 = 50;
+/// The largest prekey accepted: a Kyber-1024 public key is 1569 bytes.
+pub const MAX_PREKEY_LEN: usize = 2048;
+/// The largest prekey signature: XEdDSA's 64 bytes.
+pub const MAX_PREKEY_SIGNATURE_LEN: usize = 64;
+/// The most one-time prekeys of each kind in one upload.
+pub const MAX_PREKEYS_PER_UPLOAD: usize = 32;
+/// How many one-time prekeys of each kind a device keeps at the hub: a registration with as many Kyber keys still fits
+/// one request.
+pub const PREKEY_TARGET: u32 = 32;
 /// The core refills below this many.
-pub const KEY_PACKAGE_REFILL_BELOW: u32 = 20;
+pub const PREKEY_REFILL_BELOW: u32 = 16;
 /// The most envelopes one fetch returns.
 pub const MAX_INBOX_FETCH: usize = 100;
 /// The most ids one ack names.
@@ -16,7 +19,7 @@ pub const MAX_ACK: usize = 1000;
 pub const MAX_WAIT_S: u64 = 60;
 /// The largest blob (spec 6.8): a photo or a short video, encrypted.
 pub const MAX_BLOB_LEN: usize = 10 * 1024 * 1024;
-/// The most fetches one blob is stored for: every other device of a chat (spec 6.8).
+/// The most fetches one blob is stored for: every device it goes to (spec 6.8).
 pub const MAX_BLOB_FETCHES: u32 = 2 * MAX_DEVICES as u32;
 /// The largest request body: the largest envelope bucket and some room.
 pub const MAX_BODY: usize = 64 * 1024 + 1024;

@@ -170,7 +170,7 @@ final class Inbox {
     case unknown
   }
 
-  /// Who a typed name is, asked of the hub (no chat, no KeyPackage).
+  /// Who a typed name is, asked of the hub (no session, no prekey).
   func lookUp(_ name: String, accounts: AccountStore) async -> Lookup {
     guard let client = accounts.client else { return .unknown }
     do {
@@ -226,6 +226,10 @@ final class Inbox {
       return "Not on Yo"
     } catch YoError.Blocked {
       return "Blocked"
+    } catch YoError.Outdated {
+      // Their app is too old: the Yo waits in the outbox and goes once they update.
+      deliverLater(accounts: accounts, friends: friends)
+      return "Needs Update"
     } catch YoError.Replaced {
       accounts.replaced(client)
       return "Not Sent"
@@ -366,7 +370,7 @@ final class Inbox {
           }
         }
       case .newChat(let user):
-        _ = friend(user)  // a friend's chat restarted (spec 4.9) is the same friend, by user id
+        _ = friend(user)  // a friend writing first again (a new phone) is the same friend, by user id
       case .identityChanged(let user):
         friends.keyChanged(friend(user))  // spec 3.2: shown in Contacts, and said once
       case .profile, .sentElsewhere:

@@ -10,7 +10,7 @@ fn yos(events: &[Event]) -> usize {
     events.iter().filter(|e| matches!(e, Event::Message { content: Content::Yo, .. })).count()
 }
 
-/// A chat where B has joined and both updated once: the steady state.
+/// A writes to B and B answers: sessions both ways, the steady state.
 fn chat(hub: &TestHub) -> (Client, Client, Arc<Http>, Arc<Http>, String, String) {
     let n = random_u64() % 1_000_000_000;
     let (pa, pb) = (username(n), username(n + 1));
@@ -22,48 +22,6 @@ fn chat(hub: &TestHub) -> (Client, Client, Arc<Http>, Arc<Http>, String, String)
     b.send_yo(&pa).unwrap();
     a.sync(0).unwrap();
     (a, b, ha, hb, pa, pb)
-}
-
-#[test]
-fn a_commit_whose_answer_was_lost_is_settled_by_repeating_it() {
-    let hub = TestHub::start();
-    let (mut a, mut b, ha, _, pa, pb) = chat(&hub);
-    let epoch = a.chats()[0].2;
-    let later = yo_hub::now_ms() + yo_core::UPDATE_AFTER_MS + 1;
-    a.set_clock(Arc::new(move || later));
-    // The hub accepts A's update; A never hears it.
-    ha.fault("/commit", Fault::LoseAnswer);
-    assert!(matches!(a.maintenance(), Err(yo_core::Error::Network(_))));
-    // The next send repeats the commit, the hub confirms it, the group moves on, the Yo follows.
-    a.send_yo(&pb).unwrap();
-    assert_eq!(yos(&b.sync(0).unwrap()), 1);
-    assert_eq!(a.chats()[0].2, epoch + 1);
-    assert_eq!(b.chats()[0].2, epoch + 1);
-    b.send_yo(&pa).unwrap();
-    assert_eq!(yos(&a.sync(0).unwrap()), 1);
-    assert_eq!(a.dropped() + b.dropped(), 0, "{:?} {:?}", a.drop_reasons(), b.drop_reasons());
-}
-
-#[test]
-fn a_commit_lost_while_the_peer_won_is_dropped_cleanly() {
-    let hub = TestHub::start();
-    let (mut a, mut b, ha, _, pa, pb) = chat(&hub);
-    let later = yo_hub::now_ms() + yo_core::UPDATE_AFTER_MS + 1;
-    a.set_clock(Arc::new(move || later));
-    b.set_clock(Arc::new(move || later));
-    // A's commit never reaches the hub (refused before), then B wins the epoch.
-    ha.fault("/commit", Fault::Answer(503));
-    assert!(a.maintenance().is_err());
-    b.maintenance().unwrap();
-    // A learns of B's commit, drops its own, and the chat goes on.
-    let mut events = a.sync(0).unwrap();
-    events.extend(a.send_yo(&pb).unwrap());
-    assert_eq!(yos(&b.sync(0).unwrap()), 1);
-    b.send_yo(&pa).unwrap();
-    events.extend(a.sync(0).unwrap());
-    assert_eq!(yos(&events), 1);
-    assert_eq!(a.chats()[0].2, b.chats()[0].2);
-    assert_eq!(a.dropped() + b.dropped(), 0, "{:?} {:?}", a.drop_reasons(), b.drop_reasons());
 }
 
 #[derive(Default)]
@@ -110,7 +68,7 @@ fn a_crash_after_processing_loses_nothing_and_repeats_nothing() {
 }
 
 #[test]
-fn a_passing_refusal_does_not_drop_a_welcome() {
+fn a_passing_refusal_does_not_drop_a_first_message() {
     let hub = TestHub::start();
     let n = random_u64() % 1_000_000_000;
     let (pa, pb) = (username(n), username(n + 1));
@@ -118,7 +76,7 @@ fn a_passing_refusal_does_not_drop_a_welcome() {
     let mut a = register(Http::new(hub.url()), &pa, None);
     let mut b = register(hb.clone(), &pb, None);
     a.send_yo(&pb).unwrap();
-    // B's check of A's identity hits a rate limit: the Welcome stays at the hub.
+    // B's check of A's identity hits a rate limit: the first message stays at the hub.
     hb.fault("/v1/lookup", Fault::Answer(429));
     assert!(b.sync(0).is_err());
     let events = b.sync(0).unwrap();
@@ -147,84 +105,6 @@ fn a_full_mailbox_refuses_until_it_is_read_and_strangers_cannot_rate_limit_it() 
     assert_eq!(yos(&b.sync(0).unwrap()), 1);
     b.send_yo(&pa).unwrap();
     assert_eq!(yos(&a.sync(0).unwrap()), 1);
-}
-
-#[test]
-fn the_hub_repeats_an_accepted_commit_and_nothing_else() {
-    let hub = TestHub::start();
-    let client = reqwest::blocking::Client::new();
-    let group = [3u8; 32];
-    let token = [1u8; 32];
-    let create = api::GroupCreate { group_id: group, epoch: 1, token_hash: yo_wire::sha256(&token) };
-    let created = client.post(format!("{}{}", hub.url(), api::GROUPS)).body(yo_wire::encode(&create)).send().unwrap();
-    assert_eq!(created.status().as_u16(), 201);
-    let post = |commit: &api::Commit| {
-        client
-            .post(format!("{}{}", hub.url(), api::commit_path(&group)))
-            .body(yo_wire::encode(commit))
-            .send()
-            .unwrap()
-            .status()
-            .as_u16()
-    };
-    let envelope = yo_wire::envelope::seal(b"the commit").unwrap();
-    let commit = api::Commit { epoch: 1, token, next_token_hash: [9; 32], envelope: envelope.clone().into() };
-    assert_eq!(post(&commit), 200);
-    assert_eq!(post(&commit), 200, "the same commit again");
-    assert_eq!(
-        post(&api::Commit { next_token_hash: [8; 32], ..commit.clone() }),
-        409,
-        "another commit on the old epoch"
-    );
-    // The hub kept it, for whoever missed it.
-    let kept = client.get(format!("{}{}", hub.url(), api::commit_fetch_path(&group, 1))).send().unwrap();
-    assert_eq!(kept.bytes().unwrap().to_vec(), envelope);
-    let missing = client.get(format!("{}{}", hub.url(), api::commit_fetch_path(&group, 2))).send().unwrap();
-    assert_eq!(missing.status().as_u16(), 404);
-}
-
-/// A commit fetched is `410` only where the group had one accepted that is kept no more: one never accepted (before
-/// the group, or not yet) is `404`, which drops a made-up epoch and leaves the chat as it is (spec 4.9). A commit
-/// repeated after its envelope is gone is still the one accepted (4.3).
-#[test]
-fn a_pruned_commit_is_gone_one_never_accepted_is_unknown_and_a_repeat_is_still_accepted() {
-    let hub = TestHub::start();
-    let client = reqwest::blocking::Client::new();
-    let group = [4u8; 32];
-    let tokens = [[1u8; 32], [2; 32], [3; 32]];
-    // A group starts at an epoch from 1 to 2³²−1 (spec 6.3).
-    for epoch in [0, u32::MAX as u64 + 1] {
-        let bad = api::GroupCreate { group_id: group, epoch, token_hash: [0; 32] };
-        let refused = client.post(format!("{}{}", hub.url(), api::GROUPS)).body(yo_wire::encode(&bad)).send().unwrap();
-        assert_eq!(refused.status().as_u16(), 400, "epoch {epoch}");
-    }
-    let create = api::GroupCreate { group_id: group, epoch: 5, token_hash: yo_wire::sha256(&tokens[0]) };
-    let created = client.post(format!("{}{}", hub.url(), api::GROUPS)).body(yo_wire::encode(&create)).send().unwrap();
-    assert_eq!(created.status().as_u16(), 201);
-    let commits: Vec<api::Commit> = (0..2)
-        .map(|i| api::Commit {
-            epoch: 5 + i as u64,
-            token: tokens[i],
-            next_token_hash: yo_wire::sha256(&tokens[i + 1]),
-            envelope: yo_wire::envelope::seal(&[i as u8; 10]).unwrap().into(),
-        })
-        .collect();
-    let post = |commit: &api::Commit| {
-        let url = format!("{}{}", hub.url(), api::commit_path(&group));
-        client.post(url).body(yo_wire::encode(commit)).send().unwrap().status().as_u16()
-    };
-    let fetched = |epoch: u64| {
-        let url = format!("{}{}", hub.url(), api::commit_fetch_path(&group, epoch));
-        client.get(url).send().unwrap().status().as_u16()
-    };
-    assert_eq!(commits.iter().map(post).collect::<Vec<_>>(), [200, 200]);
-    assert_eq!([0, 4, 5, 6, 7].map(fetched), [404, 404, 200, 200, 404]);
-    // 31 days on: the envelopes are gone, their acceptance is not.
-    hub.hub.prune(yo_hub::now_ms() + 31 * 24 * 3600 * 1000).unwrap();
-    assert_eq!([0, 4, 5, 6, 7].map(fetched), [404, 404, 410, 410, 404]);
-    assert_eq!(commits.iter().map(post).collect::<Vec<_>>(), [200, 200], "the lost answers, repeated");
-    let other = api::Commit { next_token_hash: [9; 32], ..commits[0].clone() };
-    assert_eq!(post(&other), 409, "another commit on an epoch long gone");
 }
 
 /// Waits up to five seconds for the hub to have nothing under way at its inbox.
@@ -259,132 +139,103 @@ fn a_long_poll_cut_off_leaves_nothing_behind() {
     assert!(nothing_under_way(&hub), "{:?}", hub.hub.under_way());
 }
 
-#[test]
-fn private_keys_of_dead_key_packages_are_deleted() {
-    let hub = TestHub::start();
-    let mut a = register(Http::new(hub.url()), &username(random_u64() % 1_000_000_000), None);
-    let made = a.own_key_packages();
-    assert_eq!(made, yo_wire::limits::KEY_PACKAGE_TARGET as usize + 1);
-    let start = yo_hub::now_ms();
-    // A month: the last resort is replaced. Another month: the replaced one can no longer be in a Welcome.
-    for months in 1..=2u64 {
-        let at = start + months * 32 * 24 * 3600 * 1000;
-        a.set_clock(Arc::new(move || at));
-        a.maintenance().unwrap();
+/// Senders who take a prekey each, until the target's device should refill.
+fn drain(hub: &TestHub, target: &str, base: u64, senders: std::ops::RangeInclusive<u64>) {
+    for i in senders {
+        register(Http::new(hub.url()), &username(base + i), None).send_yo(target).unwrap();
     }
-    assert_eq!(a.own_key_packages(), made + 1, "two replacements made, the first one forgotten");
-    // A year and more: the unused single-use ones expired too.
-    let at = start + 400 * 24 * 3600 * 1000;
-    a.set_clock(Arc::new(move || at));
-    a.maintenance().unwrap();
-    assert!(a.own_key_packages() <= 2, "{}", a.own_key_packages());
 }
 
+fn new_chats(events: &[Event]) -> usize {
+    events.iter().filter(|e| matches!(e, Event::NewChat { .. })).count()
+}
+
+const TARGET: u64 = yo_wire::limits::PREKEY_TARGET as u64;
+
+/// A refill the hub took whose answer was lost is sent again as it was (the hub keeps one of each id once): the
+/// device holds the private keys of every prekey the hub hands out.
 #[test]
-fn a_repair_whose_answer_was_lost_is_settled_by_repeating_it() {
+fn prekeys_whose_upload_answer_was_lost_still_open_sessions() {
+    let hub = TestHub::start();
+    let base = random_u64() % 1_000_000_000;
+    let target = username(base);
+    let hc = Http::new(hub.url());
+    let mut c = register(hc.clone(), &target, None);
+    drain(&hub, &target, base, 1..=TARGET - 10);
+    hc.fault(api::PREKEYS, Fault::LoseAnswer);
+    assert_eq!(new_chats(&c.sync(0).unwrap()) as u64, TARGET - 10);
+    c.after_sync().unwrap_or_default();
+    let _ = c.sync(0);
+    drain(&hub, &target, base, TARGET..=TARGET + 19);
+    assert_eq!(new_chats(&c.sync(0).unwrap()), 20);
+    assert_eq!(c.dropped(), 0, "{:?}", c.drop_reasons());
+}
+
+/// A refill the hub does not take for now is sent again, the same keys, not a new batch per try; one it refuses as
+/// it is (`400`) is made anew.
+#[test]
+fn a_refill_not_taken_is_sent_again_one_refused_made_anew() {
+    let hub = TestHub::start();
+    let base = random_u64() % 1_000_000_000;
+    let target = username(base);
+    let hc = Http::new(hub.url());
+    let mut c = register(hc.clone(), &target, None);
+    drain(&hub, &target, base, 1..=TARGET - 10);
+    c.sync(0).unwrap();
+    let before = c.own_prekeys();
+    for _ in 0..6 {
+        hc.fault(api::PREKEYS, Fault::Answer(503));
+    }
+    for _ in 0..6 {
+        let _ = c.after_sync();
+        let _ = c.sync(0);
+    }
+    let held = c.own_prekeys();
+    assert!(held > before && held <= TARGET as usize + 10, "one batch, sent again: {before} → {held}");
+    hc.fault(api::PREKEYS, Fault::Answer(400));
+    let _ = c.maintenance();
+    c.maintenance().unwrap();
+    assert!(c.own_prekeys() > held, "the refused batch kept, a new one made and taken");
+    drain(&hub, &target, base, TARGET..=TARGET + 19);
+    assert!(new_chats(&c.sync(0).unwrap()) >= 20);
+    assert_eq!(c.dropped(), 0, "{:?}", c.drop_reasons());
+}
+
+/// A week: the signed prekey and the last resort are replaced; the oldest of them go once enough newer ones are at
+/// the hub, and a sender can start a session all along.
+#[test]
+fn signed_prekeys_rotate_weekly_and_sessions_still_start() {
+    let hub = TestHub::start();
+    let base = random_u64() % 1_000_000_000;
+    let target = username(base);
+    let mut c = register(Http::new(hub.url()), &target, None);
+    let start = yo_hub::now_ms();
+    for week in 1..=8u64 {
+        let at = start + week * 8 * 24 * 3600 * 1000;
+        c.set_clock(Arc::new(move || at));
+        c.maintenance().unwrap();
+        drain(&hub, &target, base, week..=week);
+        assert_eq!(new_chats(&c.sync(0).unwrap()), 1, "week {week}");
+    }
+    assert_eq!(c.dropped(), 0, "{:?}", c.drop_reasons());
+}
+
+/// B moves to a new phone while A's Yo waits: the hub names B's devices (`409`), A starts a session with the new one,
+/// and the Yo goes there; nothing is lost on either side.
+#[test]
+fn a_new_phone_gets_what_waits_once_its_device_is_named() {
     let hub = TestHub::start();
     let (mut a, b, ha, _, pa, pb) = chat(&hub);
-    let chat_id = a.chats()[0].1;
-    // B moves to a new phone; A's repair commit is accepted, its answer lost.
     let mut b2 = new_phone(Http::new(hub.url()), &pb, &b);
     drop(b);
-    ha.fault("/commit", Fault::LoseAnswer);
-    assert!(a.send_yo(&pb).is_ok() || a.pending() > 0);
-    // The next call repeats the commit, the hub confirms it, the held Yo goes to the new phone.
-    let mut events = a.sync(0).unwrap();
-    events.extend(a.send_yo(&pb).unwrap());
-    let at_b2 = b2.sync(0).unwrap();
-    assert_eq!(yos(&at_b2), 2, "{at_b2:?}");
-    assert_eq!(b2.chats()[0].1, chat_id);
+    // The lookup for the new device's bundle fails once: the Yo waits for the next delivery.
+    ha.fault(api::LOOKUP, Fault::Answer(503));
+    a.send_yo(&user_of(&pb)).unwrap();
+    assert_eq!(a.pending(), 1, "waits for the new device's session");
+    a.sync(0).unwrap();
+    assert_eq!(a.pending(), 0);
+    assert_eq!(yos(&b2.sync(0).unwrap()), 1);
     b2.send_yo(&pa).unwrap();
     assert_eq!(yos(&a.sync(0).unwrap()), 1);
     assert_eq!(a.dropped() + b2.dropped(), 0, "{:?} {:?}", a.drop_reasons(), b2.drop_reasons());
-}
-
-#[test]
-fn key_packages_whose_upload_answer_was_lost_still_open_chats() {
-    let hub = TestHub::start();
-    let base = random_u64() % 1_000_000_000;
-    let target = username(base);
-    let hc = Http::new(hub.url());
-    let mut c = register(hc.clone(), &target, None);
-    // Senders use up C's KeyPackages.
-    let senders = yo_wire::limits::KEY_PACKAGE_TARGET as u64 - 10;
-    for i in 1..=senders {
-        register(Http::new(hub.url()), &username(base + i), None).send_yo(&target).unwrap();
-    }
-    // C refills; the hub stores the upload, the answer is lost.
-    hc.fault("/v1/keypackages", Fault::LoseAnswer);
-    let events = c.sync(0).unwrap();
-    assert_eq!(events.iter().filter(|e| matches!(e, Event::NewChat { .. })).count() as u64, senders);
-    // Twenty more senders take the old and the uploaded packages: C keeps the private keys of all of them.
-    for i in senders + 1..=senders + 20 {
-        register(Http::new(hub.url()), &username(base + i), None).send_yo(&target).unwrap();
-    }
-    let events = c.sync(0).unwrap();
-    assert_eq!(events.iter().filter(|e| matches!(e, Event::NewChat { .. })).count(), 20);
-    assert_eq!(c.dropped(), 0, "{:?}", c.drop_reasons());
-}
-
-#[test]
-fn a_refill_the_hub_does_not_take_is_sent_again_not_made_anew() {
-    let hub = TestHub::start();
-    let base = random_u64() % 1_000_000_000;
-    let target = username(base);
-    let hc = Http::new(hub.url());
-    let mut c = register(hc.clone(), &target, None);
-    let senders = yo_wire::limits::KEY_PACKAGE_TARGET as u64 - 10;
-    for i in 1..=senders {
-        register(Http::new(hub.url()), &username(base + i), None).send_yo(&target).unwrap();
-    }
-    // The hub refuses the refill for now, try after try: the same packages wait, no new ones pile up.
-    let before = c.own_key_packages();
-    for _ in 0..6 {
-        hc.fault("/v1/keypackages", Fault::Answer(503));
-    }
-    for _ in 0..6 {
-        let _ = c.sync(0);
-    }
-    let held = c.own_key_packages();
-    let one_batch = (yo_wire::limits::KEY_PACKAGE_TARGET as usize - 10) + 1;
-    assert!(held > before && held <= before + one_batch, "one batch, sent again, not made anew: {before} → {held}");
-    // Taken at last (its answer lost once more: the `409` to the repeat counts as taken), then new senders open chats.
-    hc.fault("/v1/keypackages", Fault::LoseAnswer);
-    let _ = c.sync(0);
-    let _ = c.sync(0);
-    assert_eq!(c.own_key_packages(), held);
-    for i in senders + 1..=senders + 20 {
-        register(Http::new(hub.url()), &username(base + i), None).send_yo(&target).unwrap();
-    }
-    let events = c.sync(0).unwrap();
-    assert!(events.iter().filter(|e| matches!(e, Event::NewChat { .. })).count() >= 20);
-    assert_eq!(c.dropped(), 0, "{:?}", c.drop_reasons());
-}
-
-#[test]
-fn a_refill_the_hub_refuses_as_bad_is_made_anew() {
-    let hub = TestHub::start();
-    let base = random_u64() % 1_000_000_000;
-    let target = username(base);
-    let hc = Http::new(hub.url());
-    let mut c = register(hc.clone(), &target, None);
-    let senders = yo_wire::limits::KEY_PACKAGE_TARGET as u64 - 10;
-    for i in 1..=senders {
-        register(Http::new(hub.url()), &username(base + i), None).send_yo(&target).unwrap();
-    }
-    // Refused as it is (its packages expired while the phone was away): not sent again and again, but made anew.
-    let before = c.own_key_packages();
-    hc.fault("/v1/keypackages", Fault::Answer(400));
-    for _ in 0..4 {
-        let _ = c.sync(0);
-    }
-    let one_batch = yo_wire::limits::KEY_PACKAGE_TARGET as usize - 10;
-    let held = c.own_key_packages();
-    assert!(held >= before + 2 * one_batch, "the refused batch kept, a new one made and taken: {before} → {held}");
-    for i in senders + 1..=senders + 20 {
-        register(Http::new(hub.url()), &username(base + i), None).send_yo(&target).unwrap();
-    }
-    let events = c.sync(0).unwrap();
-    assert!(events.iter().filter(|e| matches!(e, Event::NewChat { .. })).count() >= 20);
-    assert_eq!(c.dropped(), 0, "{:?}", c.drop_reasons());
 }

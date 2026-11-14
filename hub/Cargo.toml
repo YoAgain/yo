@@ -3,7 +3,8 @@ name = "yo-hub"
 version = "0.1.0"
 edition.workspace = true
 publish.workspace = true
-description = "The Yo hub: mailboxes, key packages, commit ordering, push. Holds no content key, never learns a sender."
+license.workspace = true
+description = "The Yo hub: mailboxes, prekeys, push. Holds no content key, never learns a sender."
 
 [lib]
 path = "src/lib.rs"
@@ -14,17 +15,10 @@ path = "src/main.rs"
 
 [dependencies]
 yo-wire = { path = "../core/wire" }
-openmls = { workspace = true }
-openmls_rust_crypto = { workspace = true }
-openmls_traits = { workspace = true }
-tls_codec = { workspace = true }
 ed25519-dalek = { workspace = true }
 sha2 = { workspace = true }
 getrandom = { workspace = true }
-base64 = { workspace = true }
-serde = { workspace = true }
 serde_json = { workspace = true }
-thiserror = { workspace = true }
 tokio = { workspace = true, features = ["fs", "io-util"] }
 tokio-util = { version = "0.7", features = ["io"] }
 futures-core = "0.3"

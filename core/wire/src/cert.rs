@@ -1,7 +1,7 @@
 //! The device certificate (spec 3.1): the account key vouches for a device, and that is all it says.
 //!
-//! It is the `identity` of the device's MLS `BasicCredential`. The device key is not repeated in it: it is the leaf's
-//! signature key, and the signature covers it. It names no person; who an account key is, the hub attests.
+//! The device key is not repeated in it: it is registered beside it, and the signature covers it. It names no person;
+//! who an account key is, the hub attests.
 
 use crate::{Error, KEY_LEN, SIGNATURE_LEN};
 use ed25519_dalek::{Signature, VerifyingKey};
@@ -27,8 +27,7 @@ pub fn to_be_signed(device_key: &[u8]) -> Vec<u8> {
 }
 
 impl DeviceCertificate {
-    /// Parses a certificate and checks that its account key vouches for `device_key`: the signature key of the leaf
-    /// that carries it.
+    /// Parses a certificate and checks that its account key vouches for `device_key`.
     pub fn verify(bytes: &[u8], device_key: &[u8]) -> Result<Self, Error> {
         let certificate = Self::parse(bytes)?;
         if device_key.len() != KEY_LEN {

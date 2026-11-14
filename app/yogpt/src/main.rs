@@ -52,7 +52,7 @@ const MAX_OWED: usize = 200;
 const MAX_QUEUED: usize = 1024;
 /// An answer from the hub, at most: a full inbox fetch (100 envelopes of at most 65 KiB) fits.
 const MAX_RESPONSE: u64 = 16 << 20;
-/// Chats are kept fresh (spec 4) as the app does when it comes to the foreground.
+/// What waits is answered and sent (spec 4) as the app does when it comes to the foreground.
 const MAINTENANCE: Duration = Duration::from_secs(3600);
 /// At most this many accounts on the command line.
 const MAX_ACCOUNTS: usize = 8;
@@ -445,10 +445,10 @@ fn gone(error: &Error) -> bool {
     matches!(error, Error::Replaced | Error::Refused(401))
 }
 
-/// An error for the log, without text that came from outside (OpenMLS's reasons).
+/// An error for the log, without text that came from outside (libsignal's reasons).
 fn reason(error: &Error) -> String {
     match error {
-        Error::Mls(_) => "mls".into(),
+        Error::Session(_) => "session".into(),
         other => other.to_string(),
     }
 }

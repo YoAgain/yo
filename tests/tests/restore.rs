@@ -76,9 +76,9 @@ fn accounts_restored_forty_times_by_every_way_lose_nothing() {
             let name = format!("Cycle{run}x{i}");
             let mut client = register(&hub, &name, None).unwrap();
             let (user, secret) = (client.user_id().to_owned(), client.account_secret());
-            friend.send(&user, Content::Text("welcome".into())).unwrap();
+            friend.send(&user, Content::Text("hello".into())).unwrap();
             pest.send(&user, Content::Text("spam".into())).unwrap();
-            assert_eq!(drain(&mut client, &friend_id), ["welcome"]);
+            assert_eq!(drain(&mut client, &friend_id), ["hello"]);
             client.set_friend(&friend_id, Some("My Friend".into()), Some(2)).unwrap();
             client.set_blocked(&pest_id, true).unwrap();
             client.set_app_icon(Some("Negative".into())).unwrap();

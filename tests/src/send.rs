@@ -3,7 +3,7 @@
 //!   yo-send --url https://dev.justyo.app --state FILE --name NAME --to NAME [--count 1] [--every-ms 0] [--sync]
 //!
 //! The account is registered as NAME the first time and kept in FILE (sealed under a fixed key: a test account).
-//! `--sync` first receives (a new chat's Welcome, Yos sent to it). Each Yo is a line: when it was sent (wall clock,
+//! `--sync` first receives (Yos sent to it). Each Yo is a line: when it was sent (wall clock,
 //! ms, to compare with the app's YO_PERF marks) and how long `send_yo` took.
 
 use std::sync::Arc;

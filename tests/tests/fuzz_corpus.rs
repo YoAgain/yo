@@ -1,5 +1,6 @@
-//! Writes the fuzzers' seeds: a device's state before a chat, and the envelopes that make the chat (Welcome,
-//! profile, Yos, commits), framed as the core_receive target reads them. Run when the formats change:
+//! Writes the fuzzers' seeds: a device's state before anyone wrote to it, and the payloads of what arrives (a
+//! session's first message, a profile, Yos, a text), framed as the core_receive target reads them. Run when the
+//! formats change:
 //!   dev/cargo test -p yo-tests --test fuzz_corpus -- --ignored
 
 use std::sync::{Arc, Mutex};
@@ -60,15 +61,13 @@ fn write_fuzz_corpus() {
     let lookup = api::LookupResult {
         user_id: yo_tests::user_id(a.user_id()),
         account_key,
-        device_keys: vec![device_key],
-        key_packages: vec![],
+        devices: vec![api::Device { key: device_key, id: 1 }],
+        bundles: vec![],
     };
-    write("seeds", "core_lookup.bin", &yo_wire::encode(&lookup));
-    // A chat: Welcome, profile, Yo; an update; more Yos.
+    let named = api::LookupNamed { found: lookup, username: Some(pa.as_bytes().to_vec().into()) };
+    write("seeds", "core_lookup.bin", &yo_wire::encode(&named));
+    // A's first message (with its profile), then more.
     a.send_yo(&pb).unwrap();
-    let later = yo_hub::now_ms() + yo_core::UPDATE_AFTER_MS + 1;
-    a.set_clock(Arc::new(move || later));
-    a.maintenance().unwrap();
     a.send_yo(&pb).unwrap();
     a.send(&pb, yo_core::Content::Text("hello".into())).unwrap();
     let to_b = api::deliver_path(&yo_tests::user_id(b.user_id()));
@@ -80,28 +79,25 @@ fn write_fuzz_corpus() {
         .filter(|(method, path, _)| method == "POST" && *path == to_b)
         .map(|(_, _, body)| body.clone())
         .collect();
-    assert!(envelopes.len() >= 5, "{}", envelopes.len());
-    // core_receive: a sequence of envelopes, each as u32 length + bytes.
+    assert!(envelopes.len() >= 3, "{}", envelopes.len());
+    // core_receive: a sequence of payloads, out of their seals, each as u32 length + bytes.
     let mut framed = Vec::new();
     for envelope in &envelopes {
-        framed.extend_from_slice(&(envelope.len() as u32).to_be_bytes());
-        framed.extend_from_slice(envelope);
+        let payload = yo_core::seal::open(&b.account_secret(), envelope).unwrap();
+        framed.extend_from_slice(&(payload.len() as u32).to_be_bytes());
+        framed.extend_from_slice(&payload);
     }
     write("corpus/core_receive", "chat", &framed);
     for (i, envelope) in envelopes.iter().enumerate() {
         write("corpus/wire_envelope", &format!("envelope-{i}"), envelope);
     }
-    // The other targets: requests as sent, KeyPackages, certificates, contents.
+    // The other targets: requests as sent, certificates, contents.
     for (i, (_, path, body)) in ha.sent.lock().unwrap().iter().enumerate().filter(|(_, (_, _, b))| !b.is_empty()) {
         if path == api::REGISTER {
             let device = yo_wire::decode::<api::Register>(body).unwrap().device;
             let mut cert_input = device.device_key.to_vec();
             cert_input.extend_from_slice(device.certificate.as_slice());
             write("corpus/wire_cert", "certificate", &cert_input);
-            for (k, key_package) in device.key_packages.iter().take(3).enumerate() {
-                write("corpus/hub_key_package", &format!("kp-{k}"), key_package.as_slice());
-            }
-            write("corpus/hub_key_package", "last-resort", device.last_resort.as_slice());
         }
         write("corpus/wire_api", &format!("request-{i}"), body);
         write("corpus/hub_routes", &format!("request-{i}"), &route_input(path, body));
@@ -116,14 +112,12 @@ fn write_fuzz_corpus() {
 /// body come here; the first pattern the path contains names the route.
 fn route_input(path: &str, body: &[u8]) -> Vec<u8> {
     let index = [
-        ("/commit", 8),
         (api::INBOX_ACK, 5),
         ("/v1/inbox/", 6),
-        (api::KEY_PACKAGES, 0),
+        (api::PREKEYS, 9),
         (api::LOOKUP, 1),
         (api::PUSH, 2),
         (api::USERNAME, 3),
-        (api::GROUPS, 7),
         (api::REGISTER, 10),
         (api::BACKUP, 13),
         ("/v1/blobs/", 17),

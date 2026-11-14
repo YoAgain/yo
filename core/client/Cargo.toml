@@ -3,7 +3,8 @@ name = "yo-core"
 version = "0.1.0"
 edition.workspace = true
 publish.workspace = true
-description = "The Yo client core: identities, MLS groups, delivery. One implementation for iOS and Android."
+license.workspace = true
+description = "The Yo client core: identities, sessions, delivery. One implementation for iOS and Android."
 
 [features]
 # Exposes the receive path to the fuzz targets in fuzz/.
@@ -13,11 +14,6 @@ testing = []
 
 [dependencies]
 yo-wire = { path = "../wire" }
-openmls = { workspace = true }
-openmls_rust_crypto = { workspace = true }
-openmls_basic_credential = { workspace = true, features = ["clonable"] }
-openmls_traits = { workspace = true }
-openmls_memory_storage = { workspace = true }
 tls_codec = { workspace = true }
 ed25519-dalek = { workspace = true }
 sha2 = { workspace = true }
@@ -31,3 +27,9 @@ thiserror = { workspace = true }
 voprf = { workspace = true }
 p384 = { workspace = true }
 rand_core = { workspace = true }
+libsignal-protocol = { workspace = true }
+async-trait = { workspace = true }
+rand = { workspace = true }
+hpke-rs = { workspace = true }
+hpke-rs-crypto = { workspace = true }
+hpke-rs-rust-crypto = { workspace = true }

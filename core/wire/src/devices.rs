@@ -1,4 +1,4 @@
-//! The device check of a delivery (spec 4.6): which devices of a user a sender encrypted for, as one hash.
+//! The device check of a delivery (spec 4.4): which devices of a user a sender encrypted for, as one hash.
 
 use crate::KEY_LEN;
 use sha2::{Digest, Sha256};
