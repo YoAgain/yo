@@ -50,11 +50,17 @@ pub struct Hub {
     disk_full: AtomicBool,
     pusher: push::Pusher,
     blobs: Arc<blobs::Blobs>,
+    /// Places for work off the async workers (`Hub::blocking`).
+    blocking: Arc<tokio::sync::Semaphore>,
 }
 
 const HOUR: Duration = Duration::from_secs(3600);
 const MINUTE: Duration = Duration::from_secs(60);
 const DAY: Duration = Duration::from_secs(24 * 3600);
+
+/// The hub's work on blocking threads at once (`Hub::blocking`): the database is one connection, so more would only
+/// wait for it; the rest (signatures, KeyPackages) is work for the cores.
+const BLOCKING_AT_ONCE: usize = 32;
 
 /// Inbox requests of one device at once: the app, its notification extension, a share. One answer holds up to
 /// `MAX_INBOX_FETCH` envelopes of 64 KiB, and a wait holds a connection for a minute: a device that asks more often
@@ -216,6 +222,22 @@ async fn too_old(
     next.run(request).await
 }
 
+/// A route that is synchronous through and through (`Hub::router`), run off the async workers: its body is taken
+/// here first, so a slow client holds no blocking thread.
+async fn off_workers(
+    State(hub): State<Arc<Hub>>,
+    request: axum::extract::Request,
+    next: axum::middleware::Next,
+) -> axum::response::Response {
+    let (parts, body) = request.into_parts();
+    let Ok(body) = axum::body::to_bytes(body, limits::MAX_BODY).await else {
+        return StatusCode::PAYLOAD_TOO_LARGE.into_response();
+    };
+    let request = axum::extract::Request::from_parts(parts, axum::body::Body::from(body));
+    let runtime = tokio::runtime::Handle::current();
+    hub.blocking(move |_| runtime.block_on(next.run(request))).await.unwrap_or_else(IntoResponse::into_response)
+}
+
 impl Hub {
     pub fn new(config: Config, push_transport: Arc<dyn push::Transport>) -> Result<Arc<Self>, String> {
         let db = Arc::new(Db::open(&config.db_path).map_err(|e| format!("database: {e}"))?);
@@ -240,6 +262,7 @@ impl Hub {
             disk_full: AtomicBool::new(false),
             pusher,
             blobs: Arc::new(blobs),
+            blocking: Arc::new(tokio::sync::Semaphore::new(BLOCKING_AT_ONCE)),
             config,
         });
         // The writer ends with the hub: when the last sender of its queue goes.
@@ -252,8 +275,8 @@ impl Hub {
     }
 
     pub fn router(self: &Arc<Self>) -> Router {
-        let mut router = Router::new()
-            .route("/", get(|| async { axum::response::Html(include_str!("index.html")) }))
+        // Synchronous through and through: off the async workers (`off_workers`).
+        let synchronous = Router::new()
             .route(api::REGISTER, post(register))
             .route(api::BACKUP, put(put_backup))
             .route("/v1/backup/{id}", get(fetch_backup))
@@ -266,13 +289,18 @@ impl Hub {
             .route(api::FEEDBACK, post(feedback))
             .route(api::STORAGE, get(get_storage).put(put_storage))
             .route("/v1/username/{name}", get(username_free))
-            .route(api::INBOX, get(inbox))
             .route(api::INBOX_ACK, post(ack))
-            .route("/v1/inbox/{user}", post(deliver))
             .route(api::GROUPS, post(create_group))
             .route("/v1/groups/{group}/commit", post(commit))
             .route("/v1/groups/{group}/commits/{epoch}", get(fetch_commit))
-            .route("/v1/blobs/{id}", put(put_blob).get(get_blob));
+            .route_layer(axum::middleware::from_fn_with_state(self.clone(), off_workers));
+        // These wait (a long poll, the writer, a blob's bytes) and run their database work through `blocking`.
+        let mut router = Router::new()
+            .route("/", get(|| async { axum::response::Html(include_str!("index.html")) }))
+            .route(api::INBOX, get(inbox))
+            .route("/v1/inbox/{user}", post(deliver))
+            .route("/v1/blobs/{id}", put(put_blob).get(get_blob))
+            .merge(synchronous);
         if !self.config.apple_app_ids.is_empty() {
             // Which apps may make passkeys for this domain (Apple reads it through its CDN; spec 7).
             let file = serde_json::json!({ "webcredentials": { "apps": self.config.apple_app_ids } }).to_string();
@@ -580,6 +608,20 @@ impl Hub {
         }
     }
 
+    /// Runs `f` on a blocking thread, off the async workers, with at most `BLOCKING_AT_ONCE` of the hub's at once:
+    /// what waits for the database (one connection behind a lock) or works the CPU must not hold a worker. The place
+    /// goes with `f`, which runs to its end even if the request is cut off meanwhile.
+    async fn blocking<T: Send + 'static>(self: &Arc<Self>, f: impl FnOnce(&Hub) -> T + Send + 'static) -> Res<T> {
+        let place = self.blocking.clone().acquire_owned().await.map_err(|_| refuse(StatusCode::SERVICE_UNAVAILABLE))?;
+        let hub = self.clone();
+        tokio::task::spawn_blocking(move || {
+            let _place = place;
+            f(&hub)
+        })
+        .await
+        .map_err(|_| refuse(StatusCode::INTERNAL_SERVER_ERROR))
+    }
+
     /// A place for one more inbox request of a device, if it has fewer than `INBOX_AT_ONCE` under way.
     fn fetching(self: &Arc<Self>, device: DeviceId) -> Option<Fetching> {
         let mut fetching = self.fetching.lock().unwrap_or_else(PoisonError::into_inner);
@@ -620,7 +662,8 @@ impl Hub {
         runtime.spawn(async move {
             match hub.pusher.wake(wake.push_platform, &wake.push_token).await {
                 push::Outcome::TokenInvalid => {
-                    if let Err(error) = hub.db.clear_push(&wake.device_id, &wake.push_token) {
+                    let cleared = hub.blocking(move |hub| hub.db.clear_push(&wake.device_id, &wake.push_token));
+                    if let Ok(Err(error)) = cleared.await {
                         eprintln!("yo-hub: clear push: {error}");
                     }
                 }
@@ -889,29 +932,33 @@ async fn set_push(State(hub): Hubs, method: Method, uri: Uri, headers: HeaderMap
 }
 
 async fn inbox(State(hub): Hubs, method: Method, uri: Uri, headers: HeaderMap) -> Res<axum::response::Response> {
-    let device = hub.authenticate(&method, &uri, &headers, &[])?;
-    let fetching = hub.fetching(device.device_id).ok_or_else(|| refuse(StatusCode::TOO_MANY_REQUESTS))?;
     let wait_s = uri
         .query()
         .and_then(|q| q.split('&').find_map(|kv| kv.strip_prefix("wait=")))
         .and_then(|v| v.parse::<u64>().ok())
         .unwrap_or(0)
         .min(limits::MAX_WAIT_S);
-    let mut items = hub.db.fetch(&device.device_id, MAX_INBOX_FETCH)?;
+    let device = hub.blocking(move |hub| hub.authenticate(&method, &uri, &headers, &[])).await??;
+    let fetching = hub.fetching(device.device_id).ok_or_else(|| refuse(StatusCode::TOO_MANY_REQUESTS))?;
+    let id = device.device_id;
+    let read = move |hub: &Hub| {
+        Ok::<_, rusqlite::Error>((hub.db.fetch(&id, MAX_INBOX_FETCH)?, hub.db.key_packages_left(&id)?))
+    };
+    let (mut items, mut key_packages_left) = hub.blocking(read).await??;
     if items.is_empty() && wait_s > 0 {
-        let waiter = hub.waiter(device.device_id);
+        let waiter = hub.waiter(id);
         let notified = waiter.notify.notified();
         tokio::pin!(notified);
         notified.as_mut().enable();
         // Mail that came between the first fetch and `enable` is found here.
-        items = hub.db.fetch(&device.device_id, MAX_INBOX_FETCH)?;
+        (items, key_packages_left) = hub.blocking(read).await??;
         if items.is_empty() {
             let _ = tokio::time::timeout(Duration::from_secs(wait_s), notified).await;
-            items = hub.db.fetch(&device.device_id, MAX_INBOX_FETCH)?;
+            (items, key_packages_left) = hub.blocking(read).await??;
         }
     }
     let inbox = api::Inbox {
-        key_packages_left: hub.db.key_packages_left(&device.device_id)?,
+        key_packages_left,
         items: items.into_iter().map(|(id, envelope)| api::InboxItem { id, envelope: envelope.into() }).collect(),
     };
     Ok(held(encode(&inbox), fetching))
@@ -1074,24 +1121,33 @@ async fn put_blob(
         .ok_or_else(bad)?;
     let limits = &hub.config.limits;
     hub.limit_ip("blob:put", peer, &headers, limits.blob_put_per_ip_minute, MINUTE)?;
-    let device = hub.authenticate_hash(&method, &uri, &headers, &body_hash)?;
     let quota = limits.blob_quota();
-    let now = now_ms();
-    if hub.db.blob_exists(&id)? {
-        return Err(refuse(StatusCode::CONFLICT));
-    }
-    if !hub.db.blob_quota_left(&device.user_id, size, now, &quota)? {
-        return Err(refuse(StatusCode::TOO_MANY_REQUESTS));
-    }
+    let device = hub
+        .blocking(move |hub| {
+            let device = hub.authenticate_hash(&method, &uri, &headers, &body_hash)?;
+            if hub.db.blob_exists(&id)? {
+                return Err(refuse(StatusCode::CONFLICT));
+            }
+            if !hub.db.blob_quota_left(&device.user_id, size, now_ms(), &quota)? {
+                return Err(refuse(StatusCode::TOO_MANY_REQUESTS));
+            }
+            Ok(device)
+        })
+        .await??;
     // A few uploads of one user at once, no more: none can hold the room of everyone's.
     let _slot = hub.blobs.uploading(device.user_id).ok_or_else(|| refuse(StatusCode::TOO_MANY_REQUESTS))?;
-    let _room =
-        hub.blobs.reserve(size, || hub.db.blobs_stored())?.map_err(|_| refuse(StatusCode::INSUFFICIENT_STORAGE))?;
     let failed = |error: std::io::Error| {
         eprintln!("yo-hub: blob upload: {error}");
         refuse(StatusCode::INTERNAL_SERVER_ERROR)
     };
-    let (mut file, incoming) = hub.blobs.incoming().map_err(failed)?;
+    let (room, mut file, incoming) = hub
+        .blocking(move |hub| {
+            let room = hub.blobs.reserve(size, || hub.db.blobs_stored())?;
+            let room = room.map_err(|_| refuse(StatusCode::INSUFFICIENT_STORAGE))?;
+            let (file, incoming) = hub.blobs.incoming().map_err(failed)?;
+            Ok::<_, Refusal>((room, file, incoming))
+        })
+        .await??;
     let taken = async {
         let mut stream = body.into_data_stream();
         let mut hash = sha2::Sha256::new();
@@ -1114,22 +1170,27 @@ async fn put_blob(
     };
     tokio::time::timeout(UPLOAD_TIME, taken).await.map_err(|_| refuse(StatusCode::REQUEST_TIMEOUT))??;
     drop(file);
-    let stored_at = now_ms();
-    let put = hub.db.put_blob(&device.device_id, &id, size, fetches, stored_at, &quota)?;
-    if let Some(status) = blobs::refused(&put) {
-        return Err(refuse(status));
-    }
-    if let Err(error) = hub.blobs.keep(incoming, &(id, stored_at)) {
-        let _ = hub.db.delete_blob(&id);
-        return Err(failed(error));
-    }
-    // Handed out from now on. Left not ready (a crash just before), it goes at the next start or within the hour.
-    if let Err(error) = hub.db.blob_ready(&id, stored_at) {
-        let _ = hub.db.delete_blob(&id);
-        hub.blobs.remove(&(id, stored_at));
-        return Err(error.into());
-    }
-    Ok(StatusCode::CREATED)
+    hub.blocking(move |hub| {
+        // The room is held until the blob's row counts it.
+        let _room = room;
+        let stored_at = now_ms();
+        let put = hub.db.put_blob(&device.device_id, &id, size, fetches, stored_at, &quota)?;
+        if let Some(status) = blobs::refused(&put) {
+            return Err(refuse(status));
+        }
+        if let Err(error) = hub.blobs.keep(incoming, &(id, stored_at)) {
+            let _ = hub.db.delete_blob(&id);
+            return Err(failed(error));
+        }
+        // Handed out from now on. Left not ready (a crash just before), it goes at the next start or within the hour.
+        if let Err(error) = hub.db.blob_ready(&id, stored_at) {
+            let _ = hub.db.delete_blob(&id);
+            hub.blobs.remove(&(id, stored_at));
+            return Err(error.into());
+        }
+        Ok(StatusCode::CREATED)
+    })
+    .await?
 }
 
 /// A blob, to whoever names its id (no identity: the hub does not learn who fetches what), streamed from disk. A fetch
@@ -1145,12 +1206,12 @@ async fn get_blob(
     let id: BlobId = path_id(&id)?;
     let ttl = hub.config.limits.blob_ttl_days * DAY.as_millis() as u64;
     // One of its fetches is taken now, and given back if this one is cut off before its last byte (`Taken`).
-    let (size, created_at) = hub.db.take_fetch(&id, now_ms(), ttl)?.ok_or_else(|| refuse(StatusCode::NOT_FOUND))?;
+    let taking = hub.blocking(move |hub| hub.db.take_fetch(&id, now_ms(), ttl)).await??;
+    let (size, created_at) = taking.ok_or_else(|| refuse(StatusCode::NOT_FOUND))?;
     let (db, store) = (hub.db.clone(), hub.blobs.clone());
     let taken = blobs::Taken::new(move |complete| blobs::fetched(&db, &store, id, created_at, complete));
     let file = hub.blobs.read(&(id, created_at), size).await.ok_or_else(|| refuse(StatusCode::NOT_FOUND))?;
-    let stream =
-        blobs::Counted { inner: tokio_util::io::ReaderStream::with_capacity(file, 64 * 1024), left: size, taken };
+    let stream = blobs::Counted::new(tokio_util::io::ReaderStream::with_capacity(file, 64 * 1024), size, taken);
     axum::response::Response::builder()
         .header(axum::http::header::CONTENT_TYPE, "application/octet-stream")
         .header(axum::http::header::CONTENT_LENGTH, size)
