@@ -360,16 +360,27 @@ private struct NameField: View {
   var shakes = 0
   var onSubmit: () -> Void = {}
   @FocusState private var focused: Bool
+  /// The name's width at full size, and the field's room for it: a long name gets smaller until all of it fits.
+  @State private var needed = 0.0
+  @State private var room = 0.0
+
+  private static let full = 34.0
 
   var body: some View {
     TextField("", text: $name, prompt: Text("Name").foregroundStyle(.white.opacity(0.3)))
-      .font(.yo(Self.fontSize(name)))
+      .font(.yo(fontSize))
       .tint(.white)
       .multilineTextAlignment(.center)
       .textInputAutocapitalization(.words)
       .autocorrectionDisabled()
       .submitLabel(.continue)
       .focused($focused)
+      .onGeometryChange(for: Double.self) { $0.size.width } action: { room = $0 }
+      // The name as it would be drawn at full size, unseen: how wide it is in this font at this text size.
+      .background {
+        Text(name.isEmpty ? " " : name).font(.yo(Self.full)).fixedSize().hidden()
+          .onGeometryChange(for: Double.self) { $0.size.width } action: { needed = $0 }
+      }
       .padding(.vertical, 14)
       .padding(.horizontal, 44)  // room for the checkmark, the name staying in the middle
       .background(.white.opacity(0.14), in: .rect(cornerRadius: 16))
@@ -396,12 +407,12 @@ private struct NameField: View {
       .onAppear { focused = true }
   }
 
-  /// Large, and smaller as a long name needs, so all 16 characters stay in sight beside the checkmark.
-  private static func fontSize(_ name: String) -> CGFloat {
-    let width = 260.0  // the field's room for text at the narrowest iPhone's width, less the checkmark's
-    guard let font = UIFont(name: "Montserrat-Bold", size: 34) else { return 34 }
-    let needed = (name as NSString).size(withAttributes: [.font: font]).width
-    return needed > width ? max(18, (34 * width / needed).rounded(.down)) : 34
+  /// Full size, and smaller as a long name needs, so all 16 characters stay in sight beside the checkmark (the cursor
+  /// needs a few points too).
+  private var fontSize: Double {
+    let fits = room - 6
+    guard needed > fits, fits > 0 else { return Self.full }
+    return max(14, (Self.full * fits / needed).rounded(.down))
   }
 }
 
