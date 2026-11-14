@@ -16,6 +16,8 @@ import YoCore
 
 enum SettingKey {
   static let saveSent = "settings.saveSent"
+  /// The bars' sides swapped: "Yo!!" at the left end, the photo sign and the undo ring at the right.
+  static let leftHanded = "settings.leftHanded"
 }
 
 @MainActor
@@ -985,11 +987,12 @@ struct FeedbackSheet: View {
   }
 }
 
-/// Appearance: the app icon, chosen by its picture alone. The default, its negative, and the original Yo's plain
+/// Appearance: the app icon, chosen by its picture alone, and the bars' sides for the left hand. The default, its negative, and the original Yo's plain
 /// purple square (Info.plist CFBundleAlternateIcons).
 struct AppearancePage: View {
   @Environment(AccountStore.self) private var accounts
   @State private var current = UIApplication.shared.alternateIconName
+  @AppStorage(SettingKey.leftHanded) private var leftHanded = false
 
   private let icons: [(name: String?, image: String)] = [
     (nil, "IconStandard"), ("Negative", "IconNegative"), ("Original", "IconOriginal"),
@@ -1027,6 +1030,11 @@ struct AppearancePage: View {
         }
         .frame(maxWidth: .infinity)
         .padding(.vertical, 8)
+      }
+      Section {
+        Toggle("Left-Handed", isOn: $leftHanded)
+      } footer: {
+        Text("A Yo shows at the left end of a bar, photos and Undo at the right.")
       }
     }
     .navigationTitle("Appearance")

@@ -1155,10 +1155,12 @@ struct RowButton: View {
   /// The words faded (a friend no longer on Yo).
   var faded = false
   let action: () -> Void
-  @State private var pressed = false
+  /// A hold started a video: letting go stops it, and the bar's tap does not take a photo as well.
+  @State private var holding = false
   @State private var viewing = false
   @State private var touchedAt = Date.distantPast
   @State private var recordingByAction = false
+  @AppStorage(SettingKey.leftHanded) private var leftHanded = false
 
   init(
     _ title: String, count: Int = 1, color: Color, recording: Bool = false, outgoing: Date? = nil,
@@ -1184,27 +1186,31 @@ struct RowButton: View {
   var body: some View {
     Group {
       if let hold {
-        // The camera's shutter: pressed, the bar goes back and darkens; let go, it springs out again. Once a video
-        // records (held), it is out again, red, filling as the video's time runs.
-        let down = pressed && !recording
-        label
-          .brightness(down ? -0.1 : 0)
-          .scaleEffect(down ? 0.94 : 1)
-          .animation(down ? .easeOut(duration: 0.08) : .spring(response: 0.3, dampingFraction: 0.55), value: down)
-          .onTapGesture(perform: action)
-          .onLongPressGesture(minimumDuration: 0.3, maximumDistance: 60) {
-            hold(true)
-          } onPressingChanged: { pressing in
-            pressed = pressing
-            if !pressing { hold(false) }
+        // The camera's shutter: pressed, the bar goes back and darkens at once; let go, it springs out again. Held,
+        // a video records (the bar red, filling as its time runs) and letting go sends it, without a photo as well.
+        Button {
+          if !holding { action() }
+        } label: {
+          label
+        }
+        .buttonStyle(ShutterPress(recording: recording))
+        .onLongPressGesture(minimumDuration: 0.3, maximumDistance: 60) {
+          holding = true
+          hold(true)
+        } onPressingChanged: { pressing in
+          guard !pressing, holding else { return }
+          hold(false)
+          Task {
+            try? await Task.sleep(for: .milliseconds(300))  // the bar's own tap on letting go comes first
+            holding = false
           }
-          .accessibilityAddTraits(.isButton)
-          .accessibilityHint(hint ?? "")
-          // VoiceOver has no hold: recording starts and stops as an action.
-          .accessibilityAction(named: recordingByAction ? "Stop and Send Video" : "Record Video") {
-            recordingByAction.toggle()
-            hold(recordingByAction)
-          }
+        }
+        .accessibilityHint(hint ?? "")
+        // VoiceOver has no hold: recording starts and stops as an action.
+        .accessibilityAction(named: recordingByAction ? "Stop and Send Video" : "Record Video") {
+          recordingByAction.toggle()
+          hold(recordingByAction)
+        }
       } else {
         Button(action: action) { label }
           .buttonStyle(RowPress())
@@ -1214,12 +1220,16 @@ struct RowButton: View {
     // What takes its own touches (the undo ring, the photos) lies over the bar, in the same line (Buttons in a Button
     // do not work). The ring stands at the bar's very left, away from where the bar was tapped: a tap more is
     // another photo, never an undo by mistake.
-    .overlay { line(touchable: true) }
-    .overlay(alignment: .leading) {
-      if let outgoing {
-        undoRing(since: outgoing)
-          .padding(.leading, BarLine.margin)
+    .overlay { line(touchable: true).allowsHitTesting(false) }
+    // At the bar's start (its end for the left hand), away from where it is tapped to send: the undo ring at the
+    // edge, the photo sign beside it.
+    .overlay(alignment: leftHanded ? .trailing : .leading) {
+      HStack(spacing: BarLine.gap) {
+        if let outgoing { undoRing(since: outgoing) }
+        sign
       }
+      .environment(\.layoutDirection, leftHanded ? .rightToLeft : .leftToRight)
+      .padding(leftHanded ? .trailing : .leading, BarLine.margin)
     }
     .animation(.snappy, value: outgoing)
     .animation(.spring(duration: 0.4, bounce: 0.35), value: yo)
@@ -1245,7 +1255,8 @@ struct RowButton: View {
   /// and their "!"s, over it what takes its own touches (the Yo at the end), so each sits exactly where the other
   /// leaves it room.
   private func line(touchable: Bool) -> some View {
-    BarLine(start: outgoing == nil ? BarLine.margin : BarLine.margin + Self.ring + BarLine.gap) {
+    BarLine(start: BarLine.margin + (outgoing == nil ? 0 : Self.ring + BarLine.gap) + (media.isEmpty ? 0 : Self.sign + BarLine.gap),
+      mirrored: leftHanded) {
       Text(title)
         .lineLimit(1)
         .minimumScaleFactor(0.5)  // a long name, or large text, gets smaller before it is cut with "…"
@@ -1265,6 +1276,37 @@ struct RowButton: View {
   }
 
   private static let ring = 30.0
+  private static let sign = 34.0
+
+  /// "📷" or "🎥" while photos and videos wait unseen: a finger on it shows them at once; a short tap lets them run,
+  /// holding closes on letting go. Its own place at the bar's start, so a tap sending Yos never opens them.
+  @ViewBuilder private var sign: some View {
+    if let first = media.first {
+      Text(first.video != nil ? "🎥" : "📷")
+        .font(.system(size: 24))
+        .frame(width: Self.sign, height: Self.sign)
+        .scaleEffect(viewing ? 0.88 : 1)
+        .contentShape(.rect.inset(by: -10))  // easy to hit
+        .highPriorityGesture(
+          DragGesture(minimumDistance: 0)
+            .onChanged { _ in
+              if !viewing {
+                viewing = true
+                touchedAt = .now
+                view(.down)
+              }
+            }
+            .onEnded { _ in
+              viewing = false
+              view(Date.now.timeIntervalSince(touchedAt) < 0.35 ? .tapped : .released)
+            }
+        )
+        .accessibilityAddTraits(.isButton)
+        .accessibilityLabel(media.count == 1 ? "1 photo or video" : "\(media.count) photos or videos")
+        .accessibilityAction { view(.down); view(.tapped) }  // opens them, running to the end
+        .transition(.scale.combined(with: .opacity))
+    }
+  }
 
   /// Something on its way out: a ring at the bar's left closing like an upload; a tap on it undoes the send.
   private func undoRing(since start: Date) -> some View {
@@ -1289,40 +1331,17 @@ struct RowButton: View {
     .transition(.scale.combined(with: .opacity))
   }
 
-  /// At the bar's end, in the name's own type: "Yo" and a "!" for each Yo after the first, then "📷" or "🎥" while
-  /// photos and videos wait unseen (a finger on that sign plays them at once, the rest of the bar sends as ever). The
-  /// "!"s count every Yo of the run, with or without a photo; with only unseen photos left, one for each of them.
+  /// At the bar's end (its start for the left hand), in the name's own type: "Yo" and a "!" for each Yo after the
+  /// first. The "!"s count every Yo of the run, with or without a photo; with only unseen photos left, one for each.
   @ViewBuilder private func mark(touchable: Bool) -> some View {
-    if let first = media.first {
+    if !media.isEmpty {
       let live = yo.flatMap { $0.fading == nil ? $0.count : nil } ?? 0
       HStack(spacing: 0) {
         Text("Yo")
         Bangs(count: max(live, media.count))
-        Text(first.video != nil ? " 🎥" : " 📷")
-          .scaleEffect(viewing ? 0.92 : 1)
-          .contentShape(.rect.inset(by: -12))  // easy to hit
-          // A finger down shows them at once; a short tap lets them run, holding closes on letting go.
-          .highPriorityGesture(
-            DragGesture(minimumDistance: 0)
-              .onChanged { _ in
-                if !viewing {
-                  viewing = true
-                  touchedAt = .now
-                  view(.down)
-                }
-              }
-              .onEnded { _ in
-                viewing = false
-                view(Date.now.timeIntervalSince(touchedAt) < 0.35 ? .tapped : .released)
-              }
-          )
-          .accessibilityAddTraits(.isButton)
-          .accessibilityLabel(media.count == 1 ? "1 photo or video" : "\(media.count) photos or videos")
-          .accessibilityAction { view(.down); view(.tapped) }  // opens them, running to the end
       }
       .lineLimit(1)
-      .allowsHitTesting(touchable)  // the copy in the bar under it is only for the layout
-      .accessibilityHidden(!touchable)
+      .accessibilityLabel(media.count == 1 ? "Yo with a photo or video" : "\(media.count) Yos with photos or videos")
       .transition(.scale.combined(with: .opacity))
     } else if let yo {
       // "Yo" and a "!" for each Yo after the first: a "!" goes quickly when its Yo is over, the last Yo fades slowly.
@@ -1341,12 +1360,8 @@ struct RowButton: View {
   }
 }
 
-/// How many, the way Yo says it: one "!" for each after the first ("Yo", "Yo!", "Yo!!"), each its own, so one more
-/// comes in on its own and the ones there stay (as text typed into a field, not the whole word drawn again). At most
-/// five; beyond, the "!"s stay and how many more comes after them ("Yo!!!!! +3"), turning as a wheel, its digits all
-/// as wide (nothing shifts).
-/// The camera's zoom, as the Camera app has it: its choices as round buttons side by side, no capsule around them ("0.5  1×  2  3"), the chosen one with
-/// its "×"; a tap goes to another. Not there with one choice only (the front camera).
+/// The camera's zoom, as the Camera app has it: its choices as round buttons side by side, no capsule around them
+/// ("0.5  1×  2  3"), the chosen one with its "×"; a tap goes to another. Not there with one choice only (the front camera).
 struct CameraZoom: View {
   let choices: [Double]
   @Binding var chosen: Double
@@ -1382,6 +1397,10 @@ struct CameraZoom: View {
   }
 }
 
+/// How many, the way Yo says it: one "!" for each after the first ("Yo", "Yo!", "Yo!!"), each its own, so one more
+/// comes in on its own and the ones there stay (as text typed into a field, not the whole word drawn again). At most
+/// five; beyond, the "!"s stay and how many more comes after them ("Yo!!!!! +3"), turning as a wheel, its digits all
+/// as wide (nothing shifts).
 struct Bangs: View {
   let count: Int
 
@@ -1409,8 +1428,10 @@ struct BarLine: Layout {
   static let margin = 20.0
   static let endPadding = 30.0
   static let gap = 14.0
-  /// How far from the bar's left edge the words may go at most.
+  /// How far from the bar's start (left; right when mirrored) the words may go at most: room for the ring and sign.
   var start = margin
+  /// For the left hand: the end part ("Yo!!") at the left, the room kept at the right.
+  var mirrored = false
 
   func sizeThatFits(proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) -> CGSize {
     let height = subviews.map { $0.sizeThatFits(.unspecified).height }.max() ?? 0
@@ -1424,13 +1445,16 @@ struct BarLine: Layout {
     let end = subviews.count > 2 ? subviews[2] : nil
     let afterSize = after?.sizeThatFits(.unspecified) ?? .zero
     let endSize = end?.sizeThatFits(.unspecified) ?? .zero
-    let endX = bounds.maxX - Self.endPadding - endSize.width
-    let limit = endSize.width > 0 ? endX - Self.gap : bounds.maxX - Self.margin
-    let room = max(0, limit - bounds.minX - start - afterSize.width)
+    // The words between `low` and `high`, the end part outside them.
+    let endX = mirrored ? bounds.minX + Self.endPadding : bounds.maxX - Self.endPadding - endSize.width
+    let low = mirrored
+      ? (endSize.width > 0 ? endX + endSize.width + Self.gap : bounds.minX + Self.margin) : bounds.minX + start
+    let high = mirrored ? bounds.maxX - start : (endSize.width > 0 ? endX - Self.gap : bounds.maxX - Self.margin)
+    let room = max(0, high - low - afterSize.width)
     let wordsWidth = min(words.sizeThatFits(.unspecified).width, room)
     var x = bounds.midX - wordsWidth / 2
-    x -= max(0, x + wordsWidth + afterSize.width - limit)
-    x = max(bounds.minX + start, x)
+    x -= max(0, x + wordsWidth + afterSize.width - high)
+    x = max(low, x)
     words.place(
       at: CGPoint(x: x, y: bounds.midY), anchor: .leading, proposal: ProposedViewSize(width: wordsWidth, height: nil))
     after?.place(at: CGPoint(x: x + wordsWidth, y: bounds.midY), anchor: .leading, proposal: .unspecified)
@@ -1595,6 +1619,23 @@ struct RecordingFill: View {
   }
 }
 
+/// A bar in camera mode, as the Camera app's shutter: pressed, it goes back and darkens at once; let go, it springs out
+/// again. Recording (held), it stays out.
+struct ShutterPress: ButtonStyle {
+  let recording: Bool
+
+  func makeBody(configuration: Configuration) -> some View {
+    let down = configuration.isPressed && !recording
+    configuration.label
+      .brightness(down ? -0.12 : 0)
+      .scaleEffect(down ? 0.94 : 1)
+      .animation(down ? .easeOut(duration: 0.06) : .spring(response: 0.3, dampingFraction: 0.55), value: down)
+      .onChange(of: configuration.isPressed) { _, pressed in
+        if pressed { Haptic.prepare() }
+      }
+  }
+}
+
 /// The bar under the finger: a quick light-up.
 struct RowPress: ButtonStyle {
   func makeBody(configuration: Configuration) -> some View {
@@ -1655,58 +1696,58 @@ struct HeldMedia: View {
     self.finished = finished
   }
 
-  // As iOS shows media full screen (Photos, Stories): the picture edge to edge, the status bar and the home indicator
-  // out of the way; what is drawn over it (the lines, who it is from) inside the safe area, under the Dynamic Island.
+  // As stories show it: a band at the top under the Dynamic Island with the lines and who it is from, the picture
+  // fitted below it, never under them; the status bar and the home indicator out of the way.
   var body: some View {
     ZStack {
       Color.black.ignoresSafeArea()
       if index < queue.count {
         let current = queue[index]
-        Group {
-          if current.video != nil, let player {
-            PlayerLayer(player: player)
-          } else if let photo = full ?? current.photo {
-            Image(uiImage: photo).resizable().scaledToFit().frame(maxWidth: .infinity, maxHeight: .infinity)
-          }
-        }
-        .ignoresSafeArea()
-        // Who it is from at the top left, how long ago beside it, the lines under them (as stories show it).
-        VStack(alignment: .leading, spacing: 8) {
-          HStack(alignment: .firstTextBaseline, spacing: 8) {
-            Text(current.from)
-              .font(.yo(17, relativeTo: .headline))
-              .lineLimit(1)
-            if let at = current.sentAt {
-              Text(Arrival.age(at))
-                .font(.subheadline.weight(.semibold))
-                .opacity(0.7)
-                .fixedSize()
-            }
-          }
-          .foregroundStyle(.white)
-          .shadow(color: .black.opacity(0.35), radius: 3)
-          .padding(.horizontal, 8)
-          .accessibilityElement(children: .combine)
-          .accessibilityLabel("Yo from \(current.from)")
-          TimelineView(.animation(paused: since == nil)) { timeline in
-            let running = progress(at: timeline.date)
-            HStack(spacing: 3) {
-              ForEach(queue.indices, id: \.self) { i in
-                Capsule()
-                  .fill(.white.opacity(0.35))
-                  .overlay {
-                    Capsule()
-                      .fill(.white)
-                      .scaleEffect(x: i < index ? 1 : i == index ? running : 0, anchor: .leading)
-                  }
-                  .frame(height: 3)
+        VStack(spacing: 10) {
+          VStack(alignment: .leading, spacing: 10) {
+            TimelineView(.animation(paused: since == nil)) { timeline in
+              let running = progress(at: timeline.date)
+              HStack(spacing: 3) {
+                ForEach(queue.indices, id: \.self) { i in
+                  Capsule()
+                    .fill(.white.opacity(0.35))
+                    .overlay {
+                      Capsule()
+                        .fill(.white)
+                        .scaleEffect(x: i < index ? 1 : i == index ? running : 0, anchor: .leading)
+                    }
+                    .frame(height: 3)
+                }
               }
             }
+            HStack(alignment: .firstTextBaseline, spacing: 8) {
+              Text(current.from)
+                .font(.yo(17, relativeTo: .headline))
+                .lineLimit(1)
+              if let at = current.sentAt {
+                Text(Arrival.age(at))
+                  .font(.subheadline.weight(.semibold))
+                  .opacity(0.7)
+                  .fixedSize()
+              }
+            }
+            .foregroundStyle(.white)
+            .padding(.horizontal, 4)
+            .accessibilityElement(children: .combine)
+            .accessibilityLabel("Yo from \(current.from)")
           }
+          .padding(.horizontal, 8)
+          .padding(.top, 4)
+          Group {
+            if current.video != nil, let player {
+              PlayerLayer(player: player)
+            } else if let photo = full ?? current.photo {
+              Image(uiImage: photo).resizable().scaledToFit()
+            }
+          }
+          .frame(maxWidth: .infinity, maxHeight: .infinity)
+          .ignoresSafeArea(edges: .bottom)
         }
-        .padding(.horizontal, 4)
-        .padding(.top, 4)
-        .frame(maxHeight: .infinity, alignment: .top)
       }
     }
     .offset(y: pulled)
