@@ -553,14 +553,16 @@ final class ReceivedMedia {
       // fetched by the service: its file, rather than a second fetch (which would take another device's).
       if data == nil && (Prefetch.has(media) || Prefetch.underWay(media)) { continue }
       if data == nil {
+        // This device's one fetch, claimed against the notification service's: each takes one of the blob's fetches,
+        // and a second would be another device's. Its file may have come just before the claim.
+        guard Prefetch.claim(media) else { continue }
+        defer { Prefetch.unclaim(media) }
+        data = Prefetch.take(media)
         do {
-          data = try await Hub.run { try client.fetchMedia(media: media) }
-          if data == nil {
-            // "No longer there": the notification service may have taken this device's fetch. Its file, else, while
-            // it is still fetching, wait for it rather than give the photo up.
-            data = Prefetch.take(media)
-            if data == nil && (Prefetch.underWay(media) || Prefetch.has(media)) { continue }
-          }
+          if data == nil { data = try await Hub.run { try client.fetchMedia(media: media) } }
+          // "No longer there": the service's file, written meanwhile, else (there, locked) once it reads.
+          if data == nil { data = Prefetch.take(media) }
+          if data == nil && Prefetch.has(media) { continue }
         } catch YoError.Refused(let status) where status == 426 {
           return  // this build too old: noted still, for the build after it
         } catch let error as YoError where mediaRetryLater(error: error) {

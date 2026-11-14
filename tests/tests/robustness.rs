@@ -354,3 +354,31 @@ fn a_refill_the_hub_does_not_take_is_sent_again_not_made_anew() {
     assert!(events.iter().filter(|e| matches!(e, Event::NewChat { .. })).count() >= 20);
     assert_eq!(c.dropped(), 0, "{:?}", c.drop_reasons());
 }
+
+#[test]
+fn a_refill_the_hub_refuses_as_bad_is_made_anew() {
+    let hub = TestHub::start();
+    let base = random_u64() % 1_000_000_000;
+    let target = username(base);
+    let hc = Http::new(hub.url());
+    let mut c = register(hc.clone(), &target, None);
+    let senders = yo_wire::limits::KEY_PACKAGE_TARGET as u64 - 10;
+    for i in 1..=senders {
+        register(Http::new(hub.url()), &username(base + i), None).send_yo(&target).unwrap();
+    }
+    // Refused as it is (its packages expired while the phone was away): not sent again and again, but made anew.
+    let before = c.own_key_packages();
+    hc.fault("/v1/keypackages", Fault::Answer(400));
+    for _ in 0..4 {
+        let _ = c.sync(0);
+    }
+    let one_batch = yo_wire::limits::KEY_PACKAGE_TARGET as usize - 10;
+    let held = c.own_key_packages();
+    assert!(held >= before + 2 * one_batch, "the refused batch kept, a new one made and taken: {before} → {held}");
+    for i in senders + 1..=senders + 20 {
+        register(Http::new(hub.url()), &username(base + i), None).send_yo(&target).unwrap();
+    }
+    let events = c.sync(0).unwrap();
+    assert!(events.iter().filter(|e| matches!(e, Event::NewChat { .. })).count() >= 20);
+    assert_eq!(c.dropped(), 0, "{:?}", c.drop_reasons());
+}

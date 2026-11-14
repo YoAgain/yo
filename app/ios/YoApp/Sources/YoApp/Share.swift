@@ -53,7 +53,10 @@ enum ShareInbox {
           let file = MediaFile(
             kind: share.kind, data: data, width: share.width, height: share.height, durationMs: share.durationMs)
           // By the share's own id: taken in once, also when the app ended before the note below went.
-          guard await outbox.send(file, to: share.to, from: client, accounts: accounts, id: share.id) else { continue }
+          guard
+            await outbox.send(
+              file, to: share.to, from: client, accounts: accounts, id: share.id, at: share.created)
+          else { continue }
           Stats.sentYo(to: share.name)
           Task.detached(priority: .utility) { file.keepIfWanted() }
         }
