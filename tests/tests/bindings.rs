@@ -412,6 +412,7 @@ fn the_app_layer_sends_and_receives_bursts_with_many_friends_at_once() {
         assert_eq!(yos(&drain(friend), &a.user_id()), 1);
     }
     let started = Instant::now();
+    let stop = Arc::new(AtomicBool::new(false));
     let got = Arc::new(Mutex::new(Vec::<YoEvent>::new()));
     // A's inbox, waiting as the app's does (a short wait, so the test ends soon).
     let listening = std::thread::spawn({
@@ -864,7 +865,7 @@ fn the_app_layer_and_its_extensions_take_turns_under_load() {
                             got_by_app.fetch_add(yos(&events, &friend_id), Relaxed);
                             a.acknowledge_events();
                             k += 1;
-                            if k % 3 == 0 {
+                            if k.is_multiple_of(3) {
                                 let events = a.send_yo(friend_id.clone()).unwrap();
                                 sent_by_app.fetch_add(1, Relaxed);
                                 got_by_app.fetch_add(yos(&events, &friend_id), Relaxed);
@@ -881,7 +882,7 @@ fn the_app_layer_and_its_extensions_take_turns_under_load() {
                             let blob = process.read();
                             let g =
                                 YoClient::restore_guest(transport(&hub), process.clone(), vec![7; 32], blob).unwrap();
-                            if k % 2 == 0 {
+                            if k.is_multiple_of(2) {
                                 g.send_yo(friend_id.clone()).unwrap();
                                 sent_by_guest.fetch_add(1, Relaxed);
                             } else {
