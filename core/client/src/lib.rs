@@ -1773,10 +1773,11 @@ impl Client {
         ));
         let plaintext = match decrypted {
             Ok(plaintext) => plaintext,
-            Err(SignalProtocolError::DuplicatedMessage(..)) => return Ok(()),
             Err(error) => {
                 // A session out of step (spec 4.6): a new one with that device, and a retry, so it sends again. Not for
-                // a device known here under another number (made up): taken in is nothing either way.
+                // a device known here under another number (made up): taken in is nothing either way. Also a
+                // "duplicate" whose bytes were not seen (above): made with message keys used before, by a sender whose
+                // state went back; it never opens, and the sender's next ones would not either until its chain passed.
                 let plausible = self.slot_of(&user, &payload.device_key).is_none_or(|n| n == payload.device_id);
                 if !own && plausible {
                     if let Some(contact) = self.state.contacts.get_mut(&user) {

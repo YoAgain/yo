@@ -159,3 +159,28 @@ fn a_forged_payload_changes_nothing() {
     a.send(b.user_id(), text("still here")).unwrap();
     assert_eq!(texts(&b.sync(0).unwrap()), ["still here"]);
 }
+
+/// A's state goes back (its file from before its last Yo, the Yo gone out all the same): its next Yo is made with
+/// message keys B used already, which libsignal calls a duplicate. It is none (its bytes were not seen): a session out
+/// of step, healed by a retry like any; B shows the new Yo once, not the old one again.
+#[test]
+fn a_sender_whose_state_went_back_is_asked_again() {
+    let hub = TestHub::start();
+    let (mut a, mut b, _) = pair(&hub, "Back");
+    let disk = Arc::new(Saved::default());
+    a.persist_to(disk.clone(), [3; 32]).unwrap();
+    let before = disk.0.lock().unwrap().clone();
+    a.send(b.user_id(), text("1")).unwrap();
+    assert_eq!(texts(&b.sync(0).unwrap()), ["1"]);
+    let mut a = Client::restore(Http::new(hub.url()), &before, &[3; 32]).unwrap();
+    a.persist_to(disk, [3; 32]).unwrap();
+    a.send(b.user_id(), text("2")).unwrap();
+    assert!(texts(&b.sync(0).unwrap()).is_empty(), "made with keys used before: it does not open");
+    assert!(b.sessions_with(a.user_id()).iter().any(|s| s.retrying), "a retry is due");
+    b.after_sync().unwrap();
+    a.sync(0).unwrap();
+    a.after_sync().unwrap();
+    assert_eq!(texts(&b.sync(0).unwrap()), ["2"], "sent again, the one seen skipped");
+    b.send(a.user_id(), text("back")).unwrap();
+    assert_eq!(texts(&a.sync(0).unwrap()), ["back"]);
+}
