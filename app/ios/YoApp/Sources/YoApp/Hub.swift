@@ -184,6 +184,17 @@ enum StateKey {
     return key
   }
 
+  /// The group's key for a new state (a registration, which replaces whatever state is there): the one there, else a
+  /// new one. Gone while the group kept a state (the keychain reset, or erased apart from the group's folder), the old
+  /// state opens with no key any more; without this every registration would fail for good. A keychain that does not
+  /// answer now throws, as `shared`.
+  static func makeShared() throws -> Data {
+    if let key = try shared() { return key }
+    let key = random()
+    try Keychain.write(inGroup, key, accessible: kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly)
+    return key
+  }
+
   /// The app, once: the key into the group, the same key (its state opens with no other). A copy first, read back,
   /// then the app's own item deleted; a new key in the group when there was none. False when the keychain will not
   /// (locked, no group in the signature): then the state stays where it is too.

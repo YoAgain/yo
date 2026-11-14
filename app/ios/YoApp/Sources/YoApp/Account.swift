@@ -324,7 +324,7 @@ final class AccountStore {
         }
         let file = SharedStateFile(guest: false)
         let client = try SharedStateFile.locked {
-          guard let key = try StateKey.shared() else { throw YoError.State }
+          let key = try StateKey.makeShared()
           _ = file.read()  // the state there now (none, or a signed-out one's): this one's to replace
           return try make(file, key)
         }
