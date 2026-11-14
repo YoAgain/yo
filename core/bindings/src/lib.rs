@@ -448,6 +448,25 @@ pub fn username_free(transport: Arc<dyn HttpTransport>, username: String) -> Res
     Ok(Client::username_free(&Http(transport), &username)?)
 }
 
+/// What may be typed as a username (spec 3.3): the allowed characters as typed (NFC), a letter or emoji first, at
+/// most 16. The app keeps its field to this, so it can never disagree with the hub.
+#[uniffi::export]
+pub fn username_canonical(typed: String) -> String {
+    yo_core::handle::canonical(&typed)
+}
+
+/// Whether a name is a username as the hub takes it (3 to 16 characters, the rules of spec 3.3).
+#[uniffi::export]
+pub fn username_valid(name: String) -> bool {
+    yo_core::handle::check_username_form(&name).is_ok()
+}
+
+/// What two usernames are compared by (spec 3.3): one skeleton, one name.
+#[uniffi::export]
+pub fn username_skeleton(name: String) -> String {
+    yo_core::handle::skeleton(&name)
+}
+
 #[derive(uniffi::Object)]
 pub struct YoClient {
     client: Mutex<Client>,

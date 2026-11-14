@@ -18,6 +18,8 @@ pub use error::{Error, Result};
 pub use net::{Response, Transport};
 pub use yo_wire::api::{Backup, Push, BACKUP_VERSION, REPORT_ABUSE, REPORT_OTHER, REPORT_SPAM};
 pub use yo_wire::content::{Content, Media};
+/// Usernames as the hub takes and compares them (spec 3.3), for the apps.
+pub use yo_wire::handle;
 
 use ed25519_dalek::{Signer as _, SigningKey};
 use identity::Key;
@@ -868,7 +870,8 @@ impl Client {
         let before = self.state.handed.len();
         self.state.handed.retain(|event| !acked(&unstored(event.clone())));
         if self.state.handed.len() != before {
-            self.persist();
+            // Not saved: they come again after a crash, as without the acknowledgement.
+            let _ = self.persist();
         }
     }
 
