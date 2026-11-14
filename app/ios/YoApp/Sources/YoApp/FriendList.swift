@@ -1165,10 +1165,13 @@ struct RowButton: View {
   var body: some View {
     Group {
       if let hold {
+        // The camera's shutter: pressed, the bar goes back and darkens; let go, it springs out again. Once a video
+        // records (held), it is out again, red, filling as the video's time runs.
+        let down = pressed && !recording
         label
-          .overlay(.white.opacity(pressed ? 0.18 : 0))
-          .scaleEffect(pressed ? 0.985 : 1)
-          .animation(.smooth(duration: 0.15), value: pressed)
+          .brightness(down ? -0.1 : 0)
+          .scaleEffect(down ? 0.94 : 1)
+          .animation(down ? .easeOut(duration: 0.08) : .spring(response: 0.3, dampingFraction: 0.55), value: down)
           .onTapGesture(perform: action)
           .onLongPressGesture(minimumDuration: 0.3, maximumDistance: 60) {
             hold(true)
@@ -1209,7 +1212,12 @@ struct RowButton: View {
   private var label: some View {
     line(touchable: false)
       .frame(maxWidth: .infinity, minHeight: Metrics.rowHeight)
-      .background(recording ? Color.alizarin.opacity(0.85) : color)
+      .background {
+        ZStack(alignment: .leading) {
+          recording ? Color.alizarin.opacity(0.85) : color
+          if recording { RecordingFill(seconds: Camera.longestVideo) }
+        }
+      }
       .contentShape(.rect)
   }
 
@@ -1543,6 +1551,27 @@ struct HorizontalPan: UIGestureRecognizerRepresentable {
       let velocity = pan.velocity(in: pan.view)
       return abs(velocity.x) > abs(velocity.y) * 1.5
     }
+  }
+}
+
+/// A video recording: from the bar's left, darker as its time runs to the longest a video may be, breathing once a
+/// second.
+struct RecordingFill: View {
+  let seconds: Double
+  @State private var start = Date.now
+
+  var body: some View {
+    TimelineView(.animation) { context in
+      let elapsed = context.date.timeIntervalSince(start)
+      let breath = 0.5 + 0.5 * cos(elapsed * 2 * .pi)
+      GeometryReader { size in
+        Rectangle()
+          .fill(.black.opacity(0.16 + 0.08 * breath))
+          .frame(width: size.size.width * min(1, elapsed / seconds))
+      }
+    }
+    .allowsHitTesting(false)
+    .accessibilityHidden(true)
   }
 }
 
