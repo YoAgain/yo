@@ -138,7 +138,8 @@ final class NotificationDelegate: NSObject, UNUserNotificationCenterDelegate, Se
     _ center: UNUserNotificationCenter, willPresent notification: UNNotification
   ) async -> UNNotificationPresentationOptions {
     let info = notification.request.content.userInfo
-    let sender = info["from"] as? String ?? "Unknown sender"
+    // A push that names nobody ("Yo"): the app's own wait at the hub brings the Yo, if there is one.
+    guard let sender = info["from"] as? String else { return [] }
     // The Yo's own id when the notification extension (YoNotify) knew it: the same Yo from the core is not shown twice.
     await inbox.received(id: info["id"] as? String ?? notification.request.identifier, from: sender)
     return []
@@ -148,7 +149,7 @@ final class NotificationDelegate: NSObject, UNUserNotificationCenterDelegate, Se
   /// sender without opening the app (in the background, once the core has opened).
   func userNotificationCenter(_ center: UNUserNotificationCenter, didReceive response: UNNotificationResponse) async {
     let info = response.notification.request.content.userInfo
-    let sender = info["from"] as? String ?? "Unknown sender"
+    guard let sender = info["from"] as? String else { return }  // "Yo": the app opens, the core brings the Yo
     switch response.actionIdentifier {
     case UNNotificationDefaultActionIdentifier:
       await inbox.received(id: info["id"] as? String ?? response.notification.request.identifier, from: sender)

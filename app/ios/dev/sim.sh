@@ -2,9 +2,11 @@
 # Yo Dev in the iOS Simulator, on a Mac with Xcode (and XcodeGen, rustup with aarch64-apple-ios-sim):
 #   dev/sim.sh build              the core for the Simulator, then the app and its driver (dev/sim/project.yml)
 #   dev/sim.sh device NAME        a Simulator of that name (iPhone 17 Pro, iOS 26), made once and booted
-#   dev/sim.sh install NAME       the app built last onto it
+#   dev/sim.sh install NAME       the app built last onto it (with YoNotifyProbe)
 #   dev/sim.sh drive NAME DIR     the driver on it (runs until `drive.py DIR quit`); drive.py sends it commands
 #                                 (started again when XCTest ends it)
+#   dev/sim.sh notify NAME        a push as the hub sends it, through the notification service's code (YoNotifyProbe:
+#                                 the Simulator runs no notification service itself), shown as it made it
 #   dev/sim.sh delete NAME        the Simulator gone again
 # XCODEGEN names XcodeGen when it is not on the PATH; dev/local.env (ignored) may set it, and RUSTUP_TOOLCHAIN when
 # the Mac's rustup has another toolchain than rust-toolchain.toml's. Yo Dev talks to the dev hub. Passkeys do not work
@@ -36,6 +38,14 @@ case ${1:-} in
     ;;
   install)
     xcrun simctl install "$(udid "$2")" "$derived/Build/Products/Debug-iphonesimulator/YoApp.app"
+    xcrun simctl install "$(udid "$2")" "$derived/Build/Products/Debug-iphonesimulator/YoNotifyProbe.app"
+    ;;
+  notify)
+    made=$(xcrun simctl launch --console-pty --terminate-running-process "$(udid "$2")" app.justyo.ios.dev.probe \
+      | tr -d '\r' | grep '^{' | tail -n 1)
+    echo "$made"
+    printf %s "$made" > "$derived/notify.apns"
+    xcrun simctl push "$(udid "$2")" app.justyo.ios.dev "$derived/notify.apns"
     ;;
   drive)
     # A failure XCTest records (an element gone while asked) ends the test, and xcodebuild then does not always exit:
@@ -59,7 +69,7 @@ case ${1:-} in
     xcrun simctl delete "$(udid "$2")"
     ;;
   *)
-    sed -n '2,10p' "$0" >&2
+    sed -n '2,12p' "$0" >&2
     exit 2
     ;;
 esac

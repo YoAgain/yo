@@ -1,6 +1,6 @@
 // The core's state shared by the app and its extensions (YoShare sends what is shared, YoNotify writes who a push is
-// from), in the App Group (ShareBridge.group). Yo from the App Store and TestFlight only; Yo Dev has no group and
-// keeps its state to itself (StateFile, StateKey in Hub.swift).
+// from), in the App Group (ShareBridge.group). A build without the group (Yo Dev from dev/push.sh) keeps its state to
+// itself (StateFile, StateKey in Hub.swift).
 //
 // One state, used in turns. Every step of the core on it (`YoClient.with` in core/bindings) takes a file lock in the
 // group (flock on `yo-state.lock`, inside the process's own lock) and first takes in what another process saved since
@@ -22,8 +22,8 @@ import Foundation
 import YoCore
 
 final class SharedStateFile: StateStore, StateLock, @unchecked Sendable {
-  /// The group's folder; nil without an App Group (Yo Dev).
-  static var container: URL? { Hub.isDevApp ? nil : ShareBridge.container }
+  /// The group's folder; nil without an App Group (Yo Dev from dev/push.sh).
+  static var container: URL? { ShareBridge.container }
 
   static var stateURL: URL? { container?.appending(path: "yo-state") }
   private static var lockURL: URL? { container?.appending(path: "yo-state.lock") }
