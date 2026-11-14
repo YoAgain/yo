@@ -11,9 +11,8 @@ use yo_wire::{decode, encode};
 
 /// A request as anyone can send it: method, path, headers, body; the status and the body of the answer.
 fn raw(hub: &TestHub, method: &str, path: &str, headers: &[(&str, String)], body: Vec<u8>) -> (u16, Vec<u8>) {
-    let mut request = reqwest::blocking::Client::new()
-        .request(method.parse().unwrap(), format!("{}{path}", hub.url()))
-        .body(body);
+    let mut request =
+        reqwest::blocking::Client::new().request(method.parse().unwrap(), format!("{}{path}", hub.url())).body(body);
     for (name, value) in headers {
         request = request.header(*name, value);
     }
@@ -192,7 +191,8 @@ fn a_malformed_body_is_400_on_every_route() {
     }
     // A user id that is not 16 bytes of base64url is no route.
     for user in ["!!", "AAAA", &yo_wire::b64(&[0; 17])] {
-        let (code, _) = raw(&hub, "POST", &format!("/v1/inbox/{user}"), &[(api::HEADER_DEVICES, yo_wire::b64(&hash))], junk(1));
+        let (code, _) =
+            raw(&hub, "POST", &format!("/v1/inbox/{user}"), &[(api::HEADER_DEVICES, yo_wire::b64(&hash))], junk(1));
         assert_eq!(code, status::NOT_FOUND, "{user}");
     }
 }
@@ -334,7 +334,8 @@ fn registration_answers_as_the_spec_says() {
     changed.device.prekeys.one_time.push(api::Prekey { id: 99_999, key: vec![1; 33].into() });
     assert_eq!(raw(&hub, "POST", api::REGISTER, &[], encode(&changed)).0, status::TOO_LARGE, "33 one-time");
     // A name someone has, with another key: 409, also in another spelling.
-    let taken = Client::register_username(Http::new(hub.url()), &name.to_lowercase(), None, None, yo_core::Push::none());
+    let taken =
+        Client::register_username(Http::new(hub.url()), &name.to_lowercase(), None, None, yo_core::Push::none());
     assert_eq!(taken.err(), Some(Error::Refused(status::CONFLICT)));
     // The account key again: the same user, the answer names it; the device before is replaced.
     let mut old = a;
@@ -412,7 +413,8 @@ fn lookups_answer_who_and_are_limited() {
     let (mut a, _, _) = account(&hub);
     let (b, _, b_name) = account(&hub);
     let b_user = user_id(b.user_id());
-    let mut ask = |handle: Handle, flags: u8| signed(&mut a, "POST", api::LOOKUP, &lookup_body(handle, flags, Vec::new()));
+    let mut ask =
+        |handle: Handle, flags: u8| signed(&mut a, "POST", api::LOOKUP, &lookup_body(handle, flags, Vec::new()));
     let (code, body) = ask(Handle::user(&b_user), 0);
     assert_eq!(code, status::OK);
     let found: api::LookupResult = decode(&body).unwrap();
@@ -521,7 +523,10 @@ fn prekeys_are_handed_out_as_the_spec_says() {
     assert_eq!(bundle.kyber, rotated.kyber[0]);
     assert_eq!(bundle.one_time.as_ref(), rotated.one_time.first());
     let bundle = bundles(&mut looker, &mine, Vec::new()).bundles.remove(0);
-    assert_eq!((bundle.signed, bundle.kyber, bundle.one_time), (rotated.signed.unwrap(), rotated.last_resort.unwrap(), None));
+    assert_eq!(
+        (bundle.signed, bundle.kyber, bundle.one_time),
+        (rotated.signed.unwrap(), rotated.last_resort.unwrap(), None)
+    );
 }
 
 /// Spec 4.4: a delivery whose `Yo-Devices` is not the hub's roster stores nothing and is `409` with the roster; with
@@ -555,7 +560,10 @@ fn a_delivery_names_the_devices_or_gets_them() {
     assert_eq!(phone.sync(0).unwrap(), vec![], "junk, dropped");
     phone.delete_account().unwrap();
     assert_eq!(deliver(&hash).0, status::NOT_FOUND);
-    assert_eq!(raw(&hub, "POST", &api::deliver_path(&[0; 16]), &[(api::HEADER_DEVICES, yo_wire::b64(&hash))], junk(1)).0, 404);
+    assert_eq!(
+        raw(&hub, "POST", &api::deliver_path(&[0; 16]), &[(api::HEADER_DEVICES, yo_wire::b64(&hash))], junk(1)).0,
+        404
+    );
 }
 
 /// Spec 6.6: deliveries 200 per address and minute (here 3); a full inbox `507` for that recipient only.
@@ -770,7 +778,11 @@ fn signed_requests_are_limited_per_device() {
     let (mut a, _, _) = account(&hub);
     let device = yo_wire::b64(&a.device_id());
     for _ in 0..10 {
-        let headers = [("yo-device", device.clone()), ("yo-time", yo_hub::now_ms().to_string()), ("yo-signature", yo_wire::b64(&[1; 64]))];
+        let headers = [
+            ("yo-device", device.clone()),
+            ("yo-time", yo_hub::now_ms().to_string()),
+            ("yo-signature", yo_wire::b64(&[1; 64])),
+        ];
         assert_eq!(raw(&hub, "GET", &api::inbox_path(0), &headers, Vec::new()).0, status::UNAUTHORIZED);
     }
     for _ in 0..5 {
