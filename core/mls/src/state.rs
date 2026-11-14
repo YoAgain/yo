@@ -59,6 +59,9 @@ pub struct Chat {
     /// Made, or taken over, by a restart: it replaces the older chats with the peer.
     #[serde(default)]
     pub restarted: bool,
+    /// The own name changed and is not told here yet (`set_name`): it goes when the chat can take it.
+    #[serde(default)]
+    pub profile_due: bool,
 }
 
 /// A commit on its way to the hub, with what to deliver once it is accepted.
