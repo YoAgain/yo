@@ -631,9 +631,17 @@ final class AccountStore {
     SyncedAccount.left = nil
     restored = same
     friendsSeeded = true
+    tookPasskeyChoice(of: account)
     self.account = account
     SecureReminder.update(secured: account.secured)
     Task { await addAuthKeys() }
+  }
+
+  /// An account back on this phone secured by its words alone: its passkey was declined (the guide asks for it
+  /// first), on the phone it came from. Without this the new phone said "Not Secured" and asked to secure an account
+  /// that is, as the old phone did not.
+  private func tookPasskeyChoice(of account: Account) {
+    passkeyTurnedOff = account.secured && !account.byPasskey
   }
 
   /// Back without a word, from the iCloud Keychain (`SyncedAccount`): the app deleted and installed again, or a new
@@ -670,6 +678,7 @@ final class AccountStore {
     if !same { SyncedAccount.delete(item.userID) }  // the old user is gone; the new one gets its own item
     self.restored = same
     friendsSeeded = true
+    tookPasskeyChoice(of: restored)
     account = restored
     SecureReminder.update(secured: restored.secured)
     Task { await addAuthKeys() }
