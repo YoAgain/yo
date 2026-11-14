@@ -76,7 +76,8 @@ Every fix is in commit `3d1cb97` on the branch `chaos-security` (with its tests:
   comes and stops at more. Decoders are bounded by the bytes they are given.
 - **Errors and logs:** refusals carry a status and no text, except axum's own rejections ("Invalid URL: Invalid
   UTF-8 in `name`", "Failed to buffer the request body: length limit exceeded"), which tell nothing. The logs carry
-  database, Twilio and APNs/FCM errors, no user-written text.
+  database and APNs/FCM errors, no user-written text and no push token: a failed push is logged without its URL
+  (an APNs request's holds the token), and a service's answer with the token taken out (Codex).
 - **Panics:** all seven fuzz targets (`dev/fuzz all 120`, two minutes each, after the fixes) found nothing:
   wire_envelope 57 M runs, wire_content 26 M, wire_cert 3.9 M, wire_api 4.0 M, hub_key_package 4.2 M, hub_routes
   136 k (with report, feedback, account deletion and odd queries added), core_receive 13 k. The CI runs them
