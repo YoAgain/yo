@@ -467,6 +467,11 @@ struct FriendList: View {
         .frame(maxWidth: .infinity, minHeight: Metrics.rowHeight)
         .background(color)
         .onSubmit(add)
+        // Only what a name may hold, as the sign-up field keeps it.
+        .onChange(of: newName) { _, typed in
+          let clean = Username.clean(typed)
+          if clean != typed { newName = clean }
+        }
         .onChange(of: typing) { _, focused in
           if !focused { add() }
         }
