@@ -40,7 +40,7 @@ use yo_wire::{decode, encode, sha256, unb64, DeviceId, GroupId, UserId};
 pub struct Hub {
     config: Config,
     db: Arc<Db>,
-    deliveries: std::sync::mpsc::Sender<Delivery>,
+    deliveries: std::sync::mpsc::SyncSender<Delivery>,
     crypto: RustCrypto,
     limiter: Limiter,
     replay: ReplayCache,
@@ -170,6 +170,10 @@ struct Delivery {
 /// The most envelopes one transaction stores.
 const BATCH: usize = 512;
 
+/// The most deliveries waiting for the writer (each holds its envelope, up to 64 KiB): beyond, `503`, sent again
+/// later, rather than the hub's memory growing while the database is slow.
+const QUEUED: usize = 2048;
+
 /// Group commit: takes what has queued up, stores it in one transaction, wakes the devices and answers each. Under
 /// load the batches grow by themselves; alone, an envelope is stored at once.
 fn writer(db: Arc<Db>, queue: std::sync::mpsc::Receiver<Delivery>, most: u32, hub: Weak<Hub>) {
@@ -258,7 +262,7 @@ impl Hub {
         for blob in db.recover_blobs().map_err(|e| format!("database: {e}"))? {
             blobs.remove(&blob);
         }
-        let (deliveries, queue) = std::sync::mpsc::channel();
+        let (deliveries, queue) = std::sync::mpsc::sync_channel(QUEUED);
         let hub = Arc::new(Hub {
             db,
             deliveries,
@@ -1107,8 +1111,9 @@ async fn deliver(
     hub.db_room()?;
     let (stored, outcome) = tokio::sync::oneshot::channel();
     let runtime = tokio::runtime::Handle::current();
+    // Full (the writer behind) or gone: "later", the envelope stays with its sender. Never waits here.
     hub.deliveries
-        .send(Delivery { user, devices_hash, envelope: body, token, stored, runtime })
+        .try_send(Delivery { user, devices_hash, envelope: body, token, stored, runtime })
         .map_err(|_| refuse(StatusCode::SERVICE_UNAVAILABLE))?;
     let outcome = outcome.await.ok().and_then(Result::ok).ok_or_else(|| refuse(StatusCode::INTERNAL_SERVER_ERROR))?;
     match outcome {
