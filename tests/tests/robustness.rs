@@ -181,6 +181,38 @@ fn the_hub_repeats_an_accepted_commit_and_nothing_else() {
     assert_eq!(missing.status().as_u16(), 404);
 }
 
+/// Waits up to five seconds for the hub to have nothing under way at its inbox.
+fn nothing_under_way(hub: &TestHub) -> bool {
+    let until = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    while hub.hub.under_way() != (0, 0) {
+        if std::time::Instant::now() > until {
+            return false;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+    true
+}
+
+#[test]
+fn a_long_poll_cut_off_leaves_nothing_behind() {
+    let hub = TestHub::start();
+    let http = Http::new(hub.url());
+    let mut a = register(http.clone(), &username(random_u64() % 1_000_000_000), None);
+    // A long poll, signed by A, sent as a client that gives up after a moment.
+    let path = api::inbox_path(60);
+    http.fault(&path, Fault::Answer(200));
+    a.signed_for_tests("GET", &path, &[]).unwrap();
+    let (_, _, headers, _) = http.recorded.lock().unwrap().pop().unwrap();
+    let mut request = reqwest::blocking::Client::new()
+        .get(format!("{}{path}", hub.url()))
+        .timeout(std::time::Duration::from_millis(300));
+    for (name, value) in headers {
+        request = request.header(name, value);
+    }
+    assert!(request.send().unwrap_err().is_timeout());
+    assert!(nothing_under_way(&hub), "{:?}", hub.hub.under_way());
+}
+
 #[test]
 fn private_keys_of_dead_key_packages_are_deleted() {
     let hub = TestHub::start();
