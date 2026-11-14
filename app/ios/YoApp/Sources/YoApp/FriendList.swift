@@ -375,7 +375,7 @@ struct FriendList: View {
     if recordingFor == friend { return "● Recording" }
     if let last = bars.outgoing[friend]?.last { return last.text }
     if let text = bars.sent[friend] { return text }
-    return friend.name
+    return friend.gone ? "Not on Yo" : friend.name
   }
 
   /// How many the bar's words count ("Sent Yo!!" for three): photos on their way, or sends in a row.

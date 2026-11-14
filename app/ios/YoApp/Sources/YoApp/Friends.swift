@@ -2,6 +2,10 @@
 // last sent a Yo to or got one from is on top. Each keeps a colour of the original's palette wherever they go. A friend
 // learns its user id (the hub's, spec 3) and its owner's spelling as soon as the hub is asked who the typed name is, else
 // with the first Yo.
+//
+// Friends known by user id are also kept for the account by the core (its storage at the hub, spec 6.9), so a new phone
+// has them back: this list is the phone's cache of it. Friends known only by a typed name stay on this phone until the
+// hub names them.
 import Foundation
 import Observation
 import SwiftUI
@@ -16,6 +20,9 @@ struct Friend: Codable, Hashable, Identifiable {
   var user: String?
   /// Blocked (spec 4.8): off the list, nothing from them shown; Settings lists them to unblock.
   var blocked = false
+  /// Their account is gone (deleted, or the name released after a year away): the bar says "Not on Yo". The name
+  /// added again is asked of the hub anew and may be someone else's now.
+  var gone = false
   /// Who they are on this phone, for good: a new spelling or a user id learned later keeps the bar in its place (a
   /// name as identity made the bar leave and come in again on top).
   var key = UUID()
@@ -38,6 +45,7 @@ struct Friend: Codable, Hashable, Identifiable {
     color = try c.decodeIfPresent(Int.self, forKey: .color) ?? -1
     user = try c.decodeIfPresent(String.self, forKey: .user)
     blocked = try c.decodeIfPresent(Bool.self, forKey: .blocked) ?? false
+    gone = try c.decodeIfPresent(Bool.self, forKey: .gone) ?? false
     key = try c.decodeIfPresent(UUID.self, forKey: .key) ?? UUID()
   }
 }
@@ -45,8 +53,17 @@ struct Friend: Codable, Hashable, Identifiable {
 @MainActor @Observable
 final class Friends {
   private(set) var all: [Friend] {
-    didSet { save() }
+    didSet {
+      save()
+      if !quiet { mirror(oldValue) }
+    }
   }
+
+  /// Where friends known by user id go as they are added, change their spelling or are removed: the account's
+  /// storage (`AccountStore.store`), set by the app. Blocks go there through the core's own `setBlocked`.
+  @ObservationIgnored var stored: (@MainActor (_ changed: [Friend], _ removed: [String]) -> Void)?
+  /// A change that is not this person's (signing out, the storage's own list coming in): not written back.
+  @ObservationIgnored private var quiet = false
 
   private static let key = "friends"
 
@@ -70,11 +87,18 @@ final class Friends {
   }
 
   /// Adds a username as typed (only what a name may hold); an empty or known name (in any spelling) is ignored. New
-  /// friends come on top, as in the original.
+  /// friends come on top, as in the original. A friend whose account is gone gives its place to the name's new owner
+  /// (or to the name as typed, asked of the hub again).
   func add(_ typed: String, user: String? = nil) {
     let name = Username.clean(typed)
-    guard !name.isEmpty, !all.contains(where: { Username.skeleton($0.name) == Username.skeleton(name) }) else { return }
-    all.insert(Friend(name: name, color: nextColor, user: user), at: 0)
+    let skeleton = Username.skeleton(name)
+    func same(_ friend: Friend) -> Bool {
+      Username.skeleton(friend.name) == skeleton || (user != nil && friend.user == user)
+    }
+    guard !name.isEmpty, !all.contains(where: { !$0.gone && same($0) }) else { return }
+    var list = all.filter { !same($0) }  // gone ones only
+    list.insert(Friend(name: name, color: nextColor, user: user), at: 0)
+    all = list
   }
 
   /// The friend a user id belongs to: known by it, or by one of its handles (a name added before its first Yo), or
@@ -129,14 +153,81 @@ final class Friends {
     all.insert(all.remove(at: index), at: 0)
   }
 
+  /// The core's contacts whose account is gone (`YoContact.gone`): their bars say "Not on Yo".
+  func markGone(_ contacts: [YoContact]) {
+    let gone = Set(contacts.filter(\.gone).map(\.user))
+    guard all.contains(where: { $0.user.map(gone.contains) == true && !$0.gone }) else { return }
+    all = all.map { friend in
+      var friend = friend
+      if let user = friend.user, gone.contains(user) { friend.gone = true }
+      return friend
+    }
+  }
+
+  /// The account's storage (spec 6.9) as the core has it, into this list: friends kept there that this phone does not
+  /// have come on the list (after a restore: the whole list), at the end, in their colour and blocked as kept there
+  /// (a friend already here keeps its block: this phone's blocks went through the core). Nothing is written back.
+  /// Then what this phone has and the storage lacks goes up (friends from before the storage, or changed while it
+  /// could not be read).
+  func take(_ kept: [YoFriend]) {
+    var list = all
+    var changed = false
+    for friend in kept {
+      guard let name = friend.name.map(Username.clean), !name.isEmpty else { continue }  // a block alone: the core's
+      let skeleton = Username.skeleton(name)
+      if let index = list.firstIndex(where: { $0.user == friend.user })
+        ?? list.firstIndex(where: { $0.user == nil && Username.skeleton($0.name) == skeleton })
+      {
+        if list[index].user != friend.user {
+          list[index].user = friend.user
+          changed = true
+        }
+      } else if !list.contains(where: { !$0.gone && Username.skeleton($0.name) == skeleton }) {
+        var new = Friend(name: name, color: friend.color.map(Int.init) ?? list.count, user: friend.user)
+        new.blocked = friend.blocked
+        list.append(new)
+        changed = true
+      }
+    }
+    if changed { quietly { all = list } }
+    let keptUsers = Dictionary(kept.map { ($0.user, $0) }, uniquingKeysWith: { a, _ in a })
+    let missing = all.filter { friend in
+      guard let user = friend.user else { return false }
+      return keptUsers[user].map { $0.name != friend.name } ?? true
+    }
+    if !missing.isEmpty { stored?(missing, []) }
+  }
+
   /// The friend shown under this name now, if any.
   func shownFriend(named name: String) -> Friend? {
     all.first { $0.name == name && !$0.blocked }
   }
 
-  /// Signed out: the friends of a new phone, none.
+  /// Signed out: the friends of a new phone, none. (The account's storage keeps them.)
   func reset() {
-    all = []
+    quietly { all = [] }
+  }
+
+  private func quietly(_ change: () -> Void) {
+    quiet = true
+    defer { quiet = false }
+    change()
+  }
+
+  /// Friends known by user id that are new, newly named, respelled or recoloured since `old`, and those removed: to
+  /// the account's storage.
+  private func mirror(_ old: [Friend]) {
+    guard let stored else { return }
+    func byUser(_ list: [Friend]) -> [String: Friend] {
+      Dictionary(list.compactMap { friend in friend.user.map { ($0, friend) } }, uniquingKeysWith: { a, _ in a })
+    }
+    let before = byUser(old)
+    let now = byUser(all)
+    let changed = now.filter { user, friend in
+      before[user].map { $0.name != friend.name || $0.color != friend.color } ?? true
+    }
+    let removed = before.keys.filter { now[$0] == nil }
+    if !changed.isEmpty || !removed.isEmpty { stored(Array(changed.values), removed) }
   }
 
   func remove(_ friend: Friend) {

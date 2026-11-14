@@ -87,8 +87,8 @@ APNs token), the camera (black; photos come from the library).
 
 ## Left
 
-- A friend whose account was deleted keeps the old user id; Yos to them are "Sent" and vanish (the name, registered
-  again by someone, is another user). Core/hub: a Yo to a deleted user could answer "Not on Yo".
+- (Since fixed with the core's `YoContact.gone`: a friend whose account was deleted shows "Not on Yo" on the bar, and
+  the name added again is asked of the hub anew. Not yet tried in the Simulator.)
 - Media sent or received while signing out within the same second may reach the next account's outbox or list.
 
 - Passkeys, push and the share/notification extensions need a device (or TestFlight).

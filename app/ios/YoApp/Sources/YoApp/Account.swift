@@ -7,6 +7,7 @@ import CryptoKit
 import Foundation
 import Observation
 import Security
+import SwiftUI
 import UIKit
 import UserNotifications
 import YoCore
@@ -220,6 +221,9 @@ final class AccountStore {
   private var newPasskey: Data?
   /// A registration under way (`register(_:secret:)`).
   private var registering = false
+  /// Signed in from a backup or the iCloud Keychain, and the account's storage not seen yet: its app icon is this
+  /// phone's to take (`takeStorage`).
+  private var restored = false
 
   init() {
     account = UserDefaults.standard.data(forKey: Self.key).flatMap { try? JSONDecoder().decode(Account.self, from: $0) }
@@ -292,9 +296,18 @@ final class AccountStore {
     }
   }
 
-  /// A new account (spec 6.4): the name is yours at once, the backup comes later (`createPasskey`, `keepWords`).
+  /// A new account (spec 6.4): the name is yours at once, the backup comes later (`createPasskey`, `keepWords`). Its
+  /// key is made here and kept until the hub answered (`NewAccountKey`): trying again after a lost answer keeps the
+  /// name.
   func register(_ username: String) async throws {
-    let client = try await register(username, secret: nil)
+    let client: YoClient
+    do {
+      client = try await register(username, secret: NewAccountKey.secret(for: username))
+    } catch AccountError.taken {
+      NewAccountKey.forget()
+      throw AccountError.taken
+    }
+    NewAccountKey.forget()
     guard let id = Hub.bytes(client.userId()) else { throw AccountError.noBackup }
     self.client = client
     SyncedAccount.left = nil
@@ -470,6 +483,7 @@ final class AccountStore {
     client = try await register(sealed.account.username, secret: sealed.account.accountKey)
     if let code = sealed.code { RecoveryWords.save(code) }
     SyncedAccount.left = nil
+    restored = true
     account = sealed.account
     SecureReminder.update(secured: true)
   }
@@ -505,9 +519,49 @@ final class AccountStore {
       username: client.username() ?? item.username, userID: id, accountKey: item.accountKey,
       byPasskey: same && item.byPasskey, byCode: same && item.byCode == true)
     if !same { SyncedAccount.delete(item.userID) }  // the old user is gone; the new one gets its own item
+    self.restored = same
     account = restored
     SecureReminder.update(secured: restored.secured)
     return true
+  }
+
+  // MARK: The account's storage (spec 6.9)
+
+  /// Friends known by user id, to the account's storage (`Friends.stored`): changed ones set, removed ones taken off.
+  /// The core keeps them at once and writes them to the hub with its next sync.
+  func store(_ changed: [Friend], removed: [String]) {
+    guard let client else { return }
+    // A friend's name at most 64 bytes in the storage: a longer one (many emoji) is kept by user id alone.
+    let set = changed.compactMap { friend in
+      friend.user.map { ($0, friend.name.utf8.count <= 64 ? friend.name : nil, UInt8(friend.color % Color.rows.count)) }
+    }
+    Task {
+      _ = try? await Hub.run {
+        for (user, name, color) in set { try? client.setFriend(user: user, name: name, color: color) }
+        for user in removed { try? client.removeFriend(user: user) }
+      }
+    }
+  }
+
+  /// The app icon chosen in Appearance, for the account's next phone.
+  func storeAppIcon(_ icon: String?) {
+    guard let client else { return }
+    Task { _ = try? await Hub.run { client.setAppIcon(icon: icon) } }
+  }
+
+  /// The storage as the core has it, into the app (when the core opened, and after the first sync, which reads it if
+  /// registering could not): its friends into the list (`Friends.take`); after a restore, its app icon. An icon is
+  /// never written back from here: only Appearance changes it.
+  func takeStorage(into friends: Friends) async {
+    guard let client, let (kept, icon) = try? await Hub.run({ (client.friends(), client.appIcon()) }),
+      client === self.client
+    else { return }
+    friends.take(kept)
+    guard restored, !kept.isEmpty || icon != nil else { return }  // not read yet: the next time
+    restored = false
+    if icon != UIApplication.shared.alternateIconName {
+      try? await UIApplication.shared.setAlternateIconName(icon)
+    }
   }
 
   // MARK: Blocking, reporting, deleting
@@ -554,6 +608,7 @@ final class AccountStore {
     if let id = account?.userID { SyncedAccount.left = id }
     account = nil
     client = nil
+    restored = false
     securing = nil
     newPasskey = nil
     passkeyTurnedOff = false
@@ -589,6 +644,42 @@ enum AccountError: LocalizedError {
     case .hub(let error): "Something went wrong. Try again. (\(error))"  // the core's reason, while in development
     }
   }
+}
+
+/// A new account's key (spec 6.4), made by the app and kept in the keychain (this device only) until the hub answered:
+/// a registration whose answer was lost is tried again with the same key and keeps the name (the hub has it under
+/// that key; a new key would find it taken by the lost try). One per name; forgotten once the hub took the name or
+/// said it is taken.
+enum NewAccountKey {
+  private static func query(_ name: String? = nil) -> [String: Any] {
+    var query: [String: Any] = [
+      kSecClass as String: kSecClassGenericPassword,
+      kSecAttrService as String: "app.justyo.new-account-key",
+    ]
+    if let name { query[kSecAttrAccount as String] = Username.skeleton(name) }
+    return query
+  }
+
+  /// The key kept for this name, else a new one, kept.
+  static func secret(for name: String) -> Data {
+    var item = query(name)
+    item[kSecReturnData as String] = true
+    var result: CFTypeRef?
+    if SecItemCopyMatching(item as CFDictionary, &result) == errSecSuccess, let data = result as? Data,
+      data.count == 32
+    {
+      return data
+    }
+    let secret = Passkeys.random(32)
+    SecItemDelete(query(name) as CFDictionary)
+    var new = query(name)
+    new[kSecValueData as String] = secret
+    new[kSecAttrAccessible as String] = kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly
+    SecItemAdd(new as CFDictionary, nil)
+    return secret
+  }
+
+  static func forget() { SecItemDelete(query() as CFDictionary) }
 }
 
 /// The recovery words on this phone, to look up in the profile: in the keychain, for this device only (not in a

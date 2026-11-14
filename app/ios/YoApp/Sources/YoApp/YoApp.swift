@@ -30,6 +30,8 @@ struct YoApp: App {
     _friends = State(initialValue: friends)
     _accounts = State(initialValue: accounts)
     notifications = NotificationDelegate(inbox: inbox, friends: friends, accounts: accounts)
+    // Friends known by user id are kept for the account too (its storage, spec 6.9).
+    friends.stored = { [weak accounts] changed, removed in accounts?.store(changed, removed: removed) }
     UNUserNotificationCenter.current().delegate = notifications
   }
 
@@ -70,6 +72,8 @@ struct YoApp: App {
         outbox.flush(accounts: accounts)
         ShareInbox.take(outbox: outbox, accounts: accounts)
         inbox.fetchMedia(client: client)
+        // The account's storage: after a restore, the friends and the app icon of the phone before.
+        Task { await accounts.takeStorage(into: friends) }
       }
         .environment(inbox)
         .environment(friends)

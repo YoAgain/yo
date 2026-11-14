@@ -851,6 +851,7 @@ struct FeedbackSheet: View {
 /// Appearance: the app icon, chosen by its picture alone. The default, its negative, and the original Yo's plain
 /// purple square (Info.plist CFBundleAlternateIcons).
 struct AppearancePage: View {
+  @Environment(AccountStore.self) private var accounts
   @State private var current = UIApplication.shared.alternateIconName
 
   private let icons: [(name: String?, image: String)] = [
@@ -867,6 +868,7 @@ struct AppearancePage: View {
               Task {
                 try? await UIApplication.shared.setAlternateIconName(icon.name)
                 current = UIApplication.shared.alternateIconName
+                if current == icon.name { accounts.storeAppIcon(icon.name) }  // for the account's next phone
               }
             } label: {
               VStack(spacing: 8) {
