@@ -25,12 +25,25 @@ pub trait Transport: Send + Sync {
     fn send(&self, request: Request) -> Fut<Result<(u16, Vec<u8>), String>>;
 }
 
-/// Sends over HTTPS (HTTP/2 where the server speaks it, as APNs requires).
+/// Sends over HTTPS (HTTP/2 where the server speaks it, as APNs requires). One connection per service, kept open
+/// as APNs asks: a push after a quiet spell would otherwise wait for a new TCP and TLS connection first, two round
+/// trips more (about 300 ms more to api.push.apple.com than on an open connection, measured from Germany). HTTP/2
+/// pings keep it open while idle and find one that died; a closed one is made again by the next push.
 pub struct Https(reqwest::Client);
 
 impl Default for Https {
     fn default() -> Self {
-        Https(reqwest::Client::builder().timeout(Duration::from_secs(15)).build().expect("HTTP client"))
+        let client = reqwest::Client::builder()
+            .timeout(Duration::from_secs(15))
+            .connect_timeout(Duration::from_secs(5))
+            .pool_idle_timeout(None)
+            .tcp_keepalive(Duration::from_secs(30))
+            .http2_keep_alive_interval(Duration::from_secs(50))
+            .http2_keep_alive_timeout(Duration::from_secs(10))
+            .http2_keep_alive_while_idle(true)
+            .build()
+            .expect("HTTP client");
+        Https(client)
     }
 }
 
