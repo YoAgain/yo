@@ -340,7 +340,7 @@ final class Inbox {
     friends.markGone(contacts)  // a delivery found their account gone (`NotOnYo` from now on)
     guard !events.isEmpty else { return }
     // Per sender: how many Yos, the newest's kind, name and id; for a notification when the app is not in front.
-    var unshown: [String: (count: Int, kind: MediaFile.Kind?, name: String, id: String)] = [:]
+    var unshown: [String: ShareBridge.Yos] = [:]
     func friend(_ user: String) -> Friend {
       friends.friend(user: user, handles: contacts.first { $0.user == user }?.handles ?? [])
     }
@@ -358,7 +358,11 @@ final class Inbox {
           }
         let sender = friend(user)
         received(id: "\(user)/\(sentAtMs)", from: sender.name)
-        unshown[user] = ((unshown[user]?.count ?? 0) + 1, media?.1, sender.name, "\(user)/\(sentAtMs)")
+        let before = unshown[user]
+        unshown[user] = ShareBridge.Yos(
+          name: sender.name, user: user, count: (before?.count ?? 0) + 1,
+          photos: (before?.photos ?? 0) + (media?.1 == .photo ? 1 : 0),
+          videos: (before?.videos ?? 0) + (media?.1 == .video ? 1 : 0), kind: media?.1, id: "\(user)/\(sentAtMs)")
         // On top it goes by the list, in one step with the others and never under a finger (FriendList.rise).
         count(from: sender.name)
         if let (media, kind) = media {
@@ -385,14 +389,20 @@ final class Inbox {
 
   /// Yos the app took itself while not in front (just left, its wait at the hub still running): the notification the
   /// notification service would have written, which finds nothing new then. Not for a Yo it already wrote.
-  private func notify(_ unshown: [String: (count: Int, kind: MediaFile.Kind?, name: String, id: String)]) async {
+  /// Added to those on the screen, as the notification service does (ShareBridge.merged): one for them all.
+  private func notify(_ unshown: [String: ShareBridge.Yos]) async {
     let center = UNUserNotificationCenter.current()
-    let written = Set(await center.deliveredNotifications().compactMap { $0.request.content.userInfo["id"] as? String })
-    for (user, yo) in unshown where !written.contains(yo.id) {
-      let content = UNMutableNotificationContent()
-      ShareBridge.yo(content, [ShareBridge.Yos(name: yo.name, user: user, count: yo.count, kind: yo.kind, id: yo.id)])
-      try? await center.add(UNNotificationRequest(identifier: yo.id, content: content, trigger: nil))
-    }
+    let delivered = await center.deliveredNotifications()
+    let written = Set(delivered.compactMap { $0.request.content.userInfo["id"] as? String })
+    // The newest first, by the time in their ids ("user/sent at").
+    let sent = { (yos: ShareBridge.Yos) in UInt64(yos.id.split(separator: "/").last ?? "") ?? 0 }
+    let new = unshown.values.filter { !written.contains($0.id) }.sorted { sent($0) > sent($1) }
+    guard !new.isEmpty else { return }
+    let (all, replaced) = ShareBridge.merged(new, with: delivered)
+    let content = UNMutableNotificationContent()
+    ShareBridge.yo(content, all)
+    center.removeDeliveredNotifications(withIdentifiers: replaced)
+    try? await center.add(UNNotificationRequest(identifier: all[0].id, content: content, trigger: nil))
   }
 
   /// A photo's or video's own id: who, when, and which blob (two at the same moment are two).

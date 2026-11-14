@@ -1279,19 +1279,16 @@ struct RowButton: View {
 struct Bangs: View {
   let count: Int
 
-  static let most = 5
-
   var body: some View {
-    let wanted = max(0, count - 1)
-    let bangs = min(wanted, Self.most)
+    let (bangs, more) = ShareBridge.bangs(count)  // as a notification says them (ShareBridge.yo)
     HStack(spacing: 0) {
       ForEach(0..<bangs, id: \.self) { _ in
         Text("!").transition(.opacity.animation(.easeOut(duration: 0.15)))
       }
-      if wanted > bangs {
-        Text(" +\(wanted - bangs)")
+      if more > 0 {
+        Text(" +\(more)")
           .monospacedDigit()
-          .contentTransition(.numericText(value: Double(wanted - bangs)))
+          .contentTransition(.numericText(value: Double(more)))
           .transition(.opacity)
       }
     }

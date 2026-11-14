@@ -21,7 +21,7 @@ push).
   the same bars, a tap on a name sends them to that friend from there (`Sources/YoShare`), as the app would. Without
   network (or with the hub's "not now") they wait in the App Group `group.app.justyo.ios` and the app sends them as
   soon as it opens (`ShareBridge.swift`, `Share.swift`).
-- Notifications (the same builds): "Yo from YoGPT", "📷 from …", "3 Yos from …", with the Yo sound and "Yo Back". The
+- Notifications (the same builds): "Yo from YoGPT", "📷 from …", "Yo!!!!! +4 from … · 📷 2" (one notification per run, as the bar says it), with the Yo sound and "Yo Back". The
   push only says "Yo"; the notification service (`Sources/YoNotify`) receives once and names the sender, without
   fetching photos or videos. A push that brings no new Yo (the Welcome before a first Yo, the rest of a burst) goes
   quietly; Yos the app takes itself just after it was left get their notification from the app.
