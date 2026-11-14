@@ -63,7 +63,7 @@ Yo Dev in the Simulator talks to the dev hub; passkeys, push and the iCloud Keyc
 ## The Rust core
 
 `core/bindings` (UniFFI) comes in as the module `YoCore`: `import YoCore`, then `YoClient`, `fetchBackup`,
-`requestCode` and the `HttpTransport` and `StateStore` protocols the app implements. Every call blocks; make it off
+`usernameFree` and the `HttpTransport` and `StateStore` protocols the app implements. Every call blocks; make it off
 the main thread. `dev/core.sh` builds it on Linux and `dev/push.sh` runs it first:
 
 - `cargo rustc --crate-type staticlib --target aarch64-apple-ios` with the host's rustup (once:

@@ -2,7 +2,7 @@
 
 use std::sync::{Arc, Mutex};
 use yo::{HttpResult, HttpTransport, MessageKind, StateStore, YoClient, YoEvent};
-use yo_tests::{phone, random_u64, Http, TestHub};
+use yo_tests::{random_u64, username, Http, TestHub};
 
 struct App(Arc<Http>);
 
@@ -25,10 +25,9 @@ impl StateStore for File {
     }
 }
 
-fn client(hub: &TestHub, number: &str, name: &str, file: Arc<File>) -> Arc<YoClient> {
+fn client(hub: &TestHub, username: &str, name: &str, file: Arc<File>) -> Arc<YoClient> {
     let app = Arc::new(App(Http::new(hub.url())));
-    yo::request_code(app.clone(), number.into()).unwrap();
-    YoClient::register(app, file, vec![7; 32], number.into(), "000000".into(), Some(name.into()), 0, String::new())
+    YoClient::register_username(app, file, vec![7; 32], username.into(), None, Some(name.into()), 0, String::new())
         .unwrap()
 }
 
@@ -83,7 +82,7 @@ fn hex(text: &str) -> Vec<u8> {
 fn the_app_layer_works_end_to_end() {
     let hub = TestHub::start();
     let n = random_u64() % 1_000_000_000;
-    let (pa, pb) = (phone(n), phone(n + 1));
+    let (pa, pb) = (username(n), username(n + 1));
     let file_a = Arc::new(File::default());
     let a = client(&hub, &pa, "ALICE", file_a.clone());
     let b = client(&hub, &pb, "BOB", Arc::new(File::default()));
@@ -92,7 +91,7 @@ fn the_app_layer_works_end_to_end() {
     assert!(events.iter().any(|e| matches!(e, YoEvent::Message { kind: MessageKind::Yo, .. })));
     assert!(events.iter().any(|e| matches!(e, YoEvent::Profile { name, .. } if name == "ALICE")));
     assert_eq!(b.contacts().len(), 1);
-    // A knows B by number; B knows A by user id (A wrote first).
+    // A knows B by username; B knows A by user id (A wrote first).
     assert_eq!(b.safety_number(a.user_id()).unwrap(), a.safety_number(pb.clone()).unwrap());
     // The app is killed and started again from what the store saved.
     let saved = file_a.0.lock().unwrap().clone();
@@ -135,18 +134,17 @@ fn the_app_layer_runs_other_calls_while_sync_waits() {
     use std::time::Duration;
     let hub = TestHub::start();
     let n = random_u64() % 1_000_000_000;
-    let (pa, pb) = (phone(n), phone(n + 1));
+    let (pa, pb) = (username(n), username(n + 1));
     let (waiting, waited) = channel();
     let (release, released) = channel();
     let held =
         Arc::new(Held { app: App(Http::new(hub.url())), waiting: Mutex::new(waiting), release: Mutex::new(released) });
-    yo::request_code(held.clone(), pa.clone()).unwrap();
-    let a = YoClient::register(
+    let a = YoClient::register_username(
         held,
         Arc::new(File::default()),
         vec![7; 32],
         pa.clone(),
-        "000000".into(),
+        None,
         Some("ALICE".into()),
         0,
         String::new(),
@@ -209,7 +207,7 @@ fn the_app_layer_sends_a_photo_to_a_new_friend_and_yos_go_while_it_uploads() {
     use std::time::Duration;
     let hub = TestHub::start();
     let n = random_u64() % 1_000_000_000;
-    let (pa, pb, pc) = (phone(n), phone(n + 1), phone(n + 2));
+    let (pa, pb, pc) = (username(n), username(n + 1), username(n + 2));
     let (waiting, waited) = channel();
     let (release, released) = channel();
     let held = Arc::new(HeldUpload {
@@ -217,13 +215,12 @@ fn the_app_layer_sends_a_photo_to_a_new_friend_and_yos_go_while_it_uploads() {
         waiting: Mutex::new(waiting),
         release: Mutex::new(released),
     });
-    yo::request_code(held.clone(), pa.clone()).unwrap();
-    let a = YoClient::register(
+    let a = YoClient::register_username(
         held,
         Arc::new(File::default()),
         vec![7; 32],
         pa.clone(),
-        "000000".into(),
+        None,
         Some("ALICE".into()),
         0,
         String::new(),
@@ -309,7 +306,7 @@ fn the_app_layer_sends_to_one_friend_while_a_delivery_to_another_waits() {
     use std::time::Duration;
     let hub = TestHub::start();
     let n = random_u64() % 1_000_000_000;
-    let (pa, pb, pc) = (phone(n), phone(n + 1), phone(n + 2));
+    let (pa, pb, pc) = (username(n), username(n + 1), username(n + 2));
     let b = client(&hub, &pb, "BOB", Arc::new(File::default()));
     let c = client(&hub, &pc, "CAROL", Arc::new(File::default()));
     let (held, holding) = channel();
@@ -323,13 +320,12 @@ fn the_app_layer_sends_to_one_friend_while_a_delivery_to_another_waits() {
         held: Mutex::new(held),
         release: Mutex::new(released),
     });
-    yo::request_code(gate.clone(), pa.clone()).unwrap();
-    let a = YoClient::register(
+    let a = YoClient::register_username(
         gate,
         Arc::new(File::default()),
         vec![7; 32],
         pa.clone(),
-        "000000".into(),
+        None,
         Some("ALICE".into()),
         0,
         String::new(),
@@ -385,23 +381,14 @@ fn the_app_layer_sends_and_receives_bursts_with_many_friends_at_once() {
     const BURST: usize = 5;
     let hub = TestHub::start();
     let n = random_u64() % 1_000_000_000;
-    let pa = phone(n);
+    let pa = username(n);
     let slow = Arc::new(Slow(App(Http::new(hub.url()))));
-    yo::request_code(slow.clone(), pa.clone()).unwrap();
-    let a = YoClient::register(
-        slow,
-        Arc::new(File::default()),
-        vec![7; 32],
-        pa.clone(),
-        "000000".into(),
-        None,
-        0,
-        "".into(),
-    )
-    .unwrap();
+    let a =
+        YoClient::register_username(slow, Arc::new(File::default()), vec![7; 32], pa.clone(), None, None, 0, "".into())
+            .unwrap();
     let friends: Vec<(String, Arc<YoClient>)> = (1..=FRIENDS)
         .map(|i| {
-            let p = phone(n + i);
+            let p = username(n + i);
             let friend = client(&hub, &p, "FRIEND", Arc::new(File::default()));
             (p, friend)
         })
@@ -524,7 +511,7 @@ fn the_app_layer_sends_a_burst_over_the_hubs_limit_later_in_order() {
     config.limits.deliver_per_ip_minute = 60;
     let hub = TestHub::start_with(config, "127.0.0.1:0");
     let n = random_u64() % 1_000_000_000;
-    let (pa, pb) = (phone(n), phone(n + 1));
+    let (pa, pb) = (username(n), username(n + 1));
     let a = client(&hub, &pa, "ALICE", Arc::new(File::default()));
     let b = client(&hub, &pb, "BOB", Arc::new(File::default()));
     a.send_yo(pb.clone()).unwrap();
@@ -627,18 +614,17 @@ impl yo::StateLock for Process {
 fn the_app_layer_shares_its_state_with_an_extension_in_turns() {
     let hub = TestHub::start();
     let n = random_u64() % 1_000_000_000;
-    let (pa, pb) = (phone(n), phone(n + 1));
+    let (pa, pb) = (username(n), username(n + 1));
     let transport = || Arc::new(App(Http::new(hub.url())));
     let disk = Arc::new(Disk::default());
     let app = Process::new(&disk);
-    yo::request_code(transport(), pa.clone()).unwrap();
     app.hold();
-    let a = YoClient::register(
+    let a = YoClient::register_username(
         transport(),
         app.clone(),
         vec![7; 32],
         pa.clone(),
-        "000000".into(),
+        None,
         Some("ALICE".into()),
         0,
         String::new(),
@@ -706,21 +692,20 @@ fn the_app_layer_takes_in_what_an_extension_did_while_its_long_poll_waited() {
     use std::time::Duration;
     let hub = TestHub::start();
     let n = random_u64() % 1_000_000_000;
-    let (pa, pb) = (phone(n), phone(n + 1));
+    let (pa, pb) = (username(n), username(n + 1));
     let disk = Arc::new(Disk::default());
     let app = Process::new(&disk);
     let (waiting, waited) = channel();
     let (release, released) = channel();
     let held =
         Arc::new(Held { app: App(Http::new(hub.url())), waiting: Mutex::new(waiting), release: Mutex::new(released) });
-    yo::request_code(held.clone(), pa.clone()).unwrap();
     app.hold();
-    let a = YoClient::register(
+    let a = YoClient::register_username(
         held,
         app.clone(),
         vec![7; 32],
         pa.clone(),
-        "000000".into(),
+        None,
         Some("ALICE".into()),
         0,
         String::new(),
@@ -762,19 +747,18 @@ fn the_app_layer_takes_in_what_an_extension_did_while_its_long_poll_waited() {
 fn the_app_layer_closes_a_client_whose_shared_state_went_away() {
     let hub = TestHub::start();
     let n = random_u64() % 1_000_000_000;
-    let (pa, pb) = (phone(n), phone(n + 1));
+    let (pa, pb) = (username(n), username(n + 1));
     let transport = || Arc::new(App(Http::new(hub.url())));
     let b = client(&hub, &pb, "BOB", Arc::new(File::default()));
-    let register = |disk: &Arc<Disk>, number: &str| {
+    let register = |disk: &Arc<Disk>, username: &str| {
         let process = Process::new(disk);
-        yo::request_code(transport(), number.into()).unwrap();
         process.hold();
-        let client = YoClient::register(
+        let client = YoClient::register_username(
             transport(),
             process.clone(),
             vec![7; 32],
-            number.into(),
-            "000000".into(),
+            username.into(),
+            None,
             None,
             0,
             String::new(),
@@ -796,7 +780,7 @@ fn the_app_layer_closes_a_client_whose_shared_state_went_away() {
     g.share_state(guest);
     // Signed out, and in again as another account under the same key: the guest neither acts as it nor saves.
     *disk.state.lock().unwrap() = (1000, Vec::new());
-    let other = register(&disk, &phone(n + 2));
+    let other = register(&disk, &username(n + 2));
     let saved = disk.state.lock().unwrap().clone();
     assert!(matches!(g.send_yo(pb.clone()), Err(yo::YoError::State)));
     assert!(matches!(g.sync(0), Err(yo::YoError::State)), "closed for good");
@@ -822,15 +806,14 @@ fn the_app_layer_and_its_extensions_take_turns_under_load() {
         .map(|i| {
             let disk = Arc::new(Disk::default());
             let app = Process::new(&disk);
-            let number = phone(n + 2 * i);
-            yo::request_code(transport(&hub), number.clone()).unwrap();
+            let name = username(n + 2 * i);
             app.hold();
-            let a = YoClient::register(
+            let a = YoClient::register_username(
                 transport(&hub),
                 app.clone(),
                 vec![7; 32],
-                number,
-                "000000".into(),
+                name,
+                None,
                 None,
                 0,
                 String::new(),
@@ -838,7 +821,7 @@ fn the_app_layer_and_its_extensions_take_turns_under_load() {
             .unwrap();
             app.release();
             a.share_state(app);
-            let friend = client(&hub, &phone(n + 2 * i + 1), "FRIEND", Arc::new(File::default()));
+            let friend = client(&hub, &username(n + 2 * i + 1), "FRIEND", Arc::new(File::default()));
             a.send_yo(friend.user_id()).unwrap();
             assert_eq!(yos(&drain(&friend), &a.user_id()), 1);
             (disk, a, friend)

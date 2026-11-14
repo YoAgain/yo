@@ -4,11 +4,11 @@
 use yo_core::media::{self, Media};
 use yo_core::{Client, Content, Error, Event};
 use yo_hub::config::Config;
-use yo_tests::{phone, random_u64, register, Http, TestHub};
+use yo_tests::{random_u64, register, username, Http, TestHub};
 
 fn pair(hub: &TestHub) -> (Client, Client, String, String) {
     let n = random_u64() % 1_000_000_000;
-    let (pa, pb) = (phone(n), phone(n + 1));
+    let (pa, pb) = (username(n), username(n + 1));
     let a = register(Http::new(hub.url()), &pa, Some("ALICE"));
     let b = register(Http::new(hub.url()), &pb, Some("BOB"));
     (a, b, pa, pb)

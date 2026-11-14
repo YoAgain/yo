@@ -24,8 +24,8 @@ pub struct Contact {
     /// The key changed after the contact was verified: nothing is sent until the person confirms it (spec 3.4).
     pub unconfirmed: bool,
     pub blocked: bool,
-    /// How this device knows the contact: "+491701234567", "Chris". A username as its owner writes it, as the hub
-    /// tells (also for someone who wrote first), one per skeleton.
+    /// How this device knows the contact: "Chris". A username as its owner writes it, as the hub tells (also for
+    /// someone who wrote first), one per skeleton.
     pub handles: Vec<String>,
     /// The hub no longer knows the user (the account was deleted, or its name released): nothing more can reach it.
     /// Its handles are forgotten, so a name it had finds whoever has it now.
@@ -161,8 +161,6 @@ pub enum StoredContent {
 
 #[derive(Clone, Serialize, Deserialize)]
 pub struct State {
-    /// The own number, E.164 digits; empty for an account registered without one.
-    pub phone: String,
     /// The own user id (hex), as the hub gave it.
     pub user_id: String,
     pub username: Option<String>,

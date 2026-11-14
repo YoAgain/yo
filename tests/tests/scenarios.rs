@@ -2,12 +2,12 @@
 
 use std::sync::Arc;
 use yo_core::{Client, Content, Error, Event, Push};
-use yo_tests::{deliver_raw, phone, random_u64, register, user_of, Http, TestHub};
+use yo_tests::{deliver_raw, new_phone, random_u64, register, user_of, username, Http, Lying, TestHub};
 use yo_wire::api;
 
 fn pair(hub: &TestHub) -> (Client, Client, String, String) {
     let n = random_u64() % 1_000_000_000;
-    let (pa, pb) = (phone(n), phone(n + 1));
+    let (pa, pb) = (username(n), username(n + 1));
     let a = register(Http::new(hub.url()), &pa, Some("ALICE"));
     let b = register(Http::new(hub.url()), &pb, Some("BOB"));
     (a, b, pa, pb)
@@ -36,7 +36,7 @@ fn a_yo_goes_there_and_back() {
     b.send_yo(&pa).unwrap();
     let events = a.sync(0).unwrap();
     assert_eq!(yos_from(&events, &pb), 1, "{events:?}");
-    // B answered by A's number, which it had not known A by: the same chat, not a second one.
+    // B answered by A's username, which it had not known A by: the same chat, not a second one.
     assert_eq!((a.chats().len(), b.chats().len()), (1, 1));
     assert!(b.contacts()[0].handles.contains(&pa));
     // B's first send updated its leaf (it joined by Welcome): the chat moved to epoch 2 on both sides.
@@ -70,14 +70,15 @@ fn long_poll_wakes_on_delivery() {
 }
 
 #[test]
-fn numbers_not_on_yo_and_sending_to_oneself() {
+fn names_not_on_yo_and_sending_to_oneself() {
     let hub = TestHub::start();
     let (mut a, _, pa, _) = pair(&hub);
-    assert_eq!(a.send_yo(&phone(999_999_999)), Err(Error::NotOnYo));
+    assert_eq!(a.send_yo(&username(999_999_999)), Err(Error::NotOnYo));
     assert!(a.send_yo(&pa).is_err());
-    assert_eq!(a.send_yo("+0170 123"), Err(Error::Phone));
-    // Without "+" it is a username, and this is no valid one.
-    assert!(a.send_yo("0170 123").is_err());
+    // No valid username, a phone number neither.
+    for bad in ["+0170 123", "0170 123"] {
+        assert!(a.send_yo(bad).is_err(), "{bad}");
+    }
 }
 
 #[test]
@@ -219,25 +220,36 @@ fn two_chats_started_at_once_both_work() {
     assert_eq!(a.dropped() + b.dropped(), 0);
 }
 
-#[test]
-fn a_new_phone_without_passkey_keeps_the_chat_with_a_new_key() {
-    let hub = TestHub::start();
-    let (mut a, mut b, pa, pb) = pair(&hub);
+/// A and B in a chat, then the hub tells A that B has another account key and device: those of B2, an account of its
+/// own (spec 3.4). A, its name, and B2.
+fn a_friend_with_another_key(hub: &TestHub) -> (Client, String, Client) {
+    let n = random_u64() % 100_000_000;
+    let (pa, pb, pb2) = (username(n), username(n + 1), username(n + 2));
+    let lying = Lying::new(hub.url());
+    let mut a = Client::register_username(lying.clone(), &pa, None, Some("ALICE".into()), Push::none()).unwrap();
+    let mut b = register(Http::new(hub.url()), &pb, Some("BOB"));
     a.send_yo(&pb).unwrap();
     b.sync(0).unwrap();
-    // B registers again: a new device, a new account key.
-    let mut b2 = register(Http::new(hub.url()), &pb, Some("BOB"));
-    assert_eq!(b2.user_id(), b.user_id(), "a new phone keeps the user id");
-    assert_eq!(b.sync(0), Err(Error::Replaced));
+    let b2 = register(Http::new(hub.url()), &pb2, Some("BOB"));
+    let asker = register(Http::new(hub.url()), &username(n + 3), None);
+    lying.lie(&b, &pb, &b2, &pb2, asker);
+    (a, pb, b2)
+}
+
+#[test]
+fn another_key_for_a_friend_keeps_the_chat_and_is_told() {
+    let hub = TestHub::start();
+    let (mut a, pb, mut b2) = a_friend_with_another_key(&hub);
+    let (me, b) = (a.user_id().to_owned(), user_of(&pb));
     let chat = a.chats()[0].1;
-    // A's Yo meets B's new device at the hub (409): A replaces B's old device by the new one in the same chat.
+    // A's Yo meets the new device at the hub (409): A replaces B's old device by the new one in the same chat.
     let events = a.send_yo(&pb).unwrap();
-    assert!(events.contains(&Event::IdentityChanged { user: digits(&pb) }), "{events:?}");
+    assert!(events.contains(&Event::IdentityChanged { user: b.clone() }), "{events:?}");
     let events = b2.sync(0).unwrap();
-    assert!(events.contains(&Event::NewChat { user: digits(&pa) }));
-    assert_eq!(yos_from(&events, &pa), 1, "the held Yo, encrypted anew for the new device");
-    b2.send_yo(&pa).unwrap();
-    assert_eq!(yos_from(&a.sync(0).unwrap(), &pb), 1);
+    assert!(events.contains(&Event::NewChat { user: me.clone() }));
+    assert_eq!(yos_from_user(&events, &me), 1, "the held Yo, encrypted anew for the new device");
+    b2.send_yo(&me).unwrap();
+    assert_eq!(yos_from_user(&a.sync(0).unwrap(), &b), 1);
     assert_eq!(a.chats().len(), 1, "the same chat goes on");
     assert_eq!(a.chats()[0].1, chat);
     assert_eq!(b2.chats()[0].1, chat);
@@ -253,9 +265,7 @@ fn a_new_phone_with_the_same_account_key_is_seen_by_nobody() {
     b.sync(0).unwrap();
     a.set_verified(&pb, true).unwrap();
     // B's account key comes back on a new phone (what a passkey will do).
-    let http = Http::new(hub.url());
-    Client::request_code(http.as_ref(), &pb).unwrap();
-    let mut b2 = Client::register_keeping_key(http, &pb, "000000", b.account_secret()).unwrap();
+    let mut b2 = new_phone(Http::new(hub.url()), &pb, &b);
     let events = a.send_yo(&pb).unwrap();
     assert!(!events.iter().any(|e| matches!(e, Event::IdentityChanged { .. })), "{events:?}");
     assert!(a.contacts()[0].verified, "the verification holds: the key is the same");
@@ -267,37 +277,35 @@ fn a_new_phone_with_the_same_account_key_is_seen_by_nobody() {
 #[test]
 fn a_verified_contact_with_a_new_key_waits_for_confirmation() {
     let hub = TestHub::start();
-    let (mut a, mut b, pa, pb) = pair(&hub);
-    a.send_yo(&pb).unwrap();
-    b.sync(0).unwrap();
+    let (mut a, pb, mut b2) = a_friend_with_another_key(&hub);
+    let me = a.user_id().to_owned();
     a.set_verified(&pb, true).unwrap();
-    let mut b2 = register(Http::new(hub.url()), &pb, Some("BOB"));
     // Nothing goes to the new key until A confirms it: the warning before the message.
     assert_eq!(a.send_yo(&pb), Err(Error::Unconfirmed));
     let contact = &a.contacts()[0];
     assert!(contact.unconfirmed && !contact.verified);
-    assert_eq!(yos_from(&b2.sync(0).unwrap(), &pa), 0);
+    assert_eq!(yos_from_user(&b2.sync(0).unwrap(), &me), 0);
     a.confirm_identity(&pb).unwrap();
     a.send_yo(&pb).unwrap();
-    assert_eq!(yos_from(&b2.sync(0).unwrap(), &pa), 2, "the held Yo and the new one");
+    assert_eq!(yos_from_user(&b2.sync(0).unwrap(), &me), 2, "the held Yo and the new one");
 }
 
 #[test]
 fn the_last_resort_keeps_a_number_reachable_and_is_refilled() {
     let hub = TestHub::start();
     let base = random_u64() % 1_000_000_000;
-    let target = phone(base);
+    let target = username(base);
     let mut c = register(Http::new(hub.url()), &target, None);
     let senders = yo_wire::limits::KEY_PACKAGE_TARGET as u64 + 5;
     for i in 1..=senders {
-        let mut s = register(Http::new(hub.url()), &phone(base + i), None);
+        let mut s = register(Http::new(hub.url()), &username(base + i), None);
         s.send_yo(&target).unwrap();
     }
     let events = c.sync(0).unwrap();
     assert_eq!(events.iter().filter(|e| matches!(e, Event::NewChat { .. })).count() as u64, senders);
     assert_eq!(c.dropped(), 0);
     // The sync refilled: one more round of senders gets single-use KeyPackages again.
-    let mut s = register(Http::new(hub.url()), &phone(base + senders + 1), None);
+    let mut s = register(Http::new(hub.url()), &username(base + senders + 1), None);
     s.send_yo(&target).unwrap();
     assert_eq!(c.sync(0).unwrap().iter().filter(|e| matches!(e, Event::NewChat { .. })).count(), 1);
 }
@@ -307,7 +315,7 @@ fn a_signed_request_works_once() {
     let hub = TestHub::start();
     let http = Http::new(hub.url());
     let n = random_u64() % 1_000_000_000;
-    let mut a = register(http.clone(), &phone(n), None);
+    let mut a = register(http.clone(), &username(n), None);
     a.sync(0).unwrap();
     let (method, path, headers, body) = http.recorded.lock().unwrap().last().cloned().unwrap();
     let client = reqwest::blocking::Client::new();
@@ -401,7 +409,7 @@ fn the_outbox_survives_an_outage_of_the_hub() {
     let addr = hub.addr.to_string();
     let (ha, hb) = (Http::new(hub.url()), Http::new(hub.url()));
     let n = random_u64() % 1_000_000_000;
-    let (pa, pb) = (phone(n), phone(n + 1));
+    let (pa, pb) = (username(n), username(n + 1));
     let mut a = register(ha.clone(), &pa, None);
     let mut b = register(hb.clone(), &pb, None);
     a.send_yo(&pb).unwrap();
@@ -424,8 +432,6 @@ fn the_hub_survives_garbage_on_every_route() {
     let hub = TestHub::start();
     let client = reqwest::blocking::Client::new();
     let routes = [
-        ("POST", api::VERIFY_START.to_owned()),
-        ("POST", api::VERIFY_CHECK.to_owned()),
         ("PUT", api::KEY_PACKAGES.to_owned()),
         ("POST", api::LOOKUP.to_owned()),
         ("PUT", api::PUSH.to_owned()),
@@ -472,18 +478,6 @@ fn the_hub_survives_garbage_on_every_route() {
     }
 }
 
-#[test]
-fn registration_needs_the_code() {
-    let hub = TestHub::start();
-    let http = Http::new(hub.url());
-    let p = phone(random_u64() % 1_000_000_000);
-    Client::request_code(http.as_ref(), &p).unwrap();
-    assert_eq!(
-        Client::register(http, &p, "123456", None, Push::none()).err(),
-        Some(Error::Refused(api::status::FORBIDDEN))
-    );
-}
-
 /// A hub that reserves "Admin" (the operator's list, `YO_RESERVED_FILE`).
 fn with_reserved(mut config: yo_hub::config::Config) -> TestHub {
     config.reserved = yo_hub::config::parse_reserved("Admin # the operator\n");
@@ -500,7 +494,7 @@ fn usernames_are_claimed_found_and_given_up() {
     // B finds A by the username, typed any way, and knows A by A's own spelling.
     b.send_yo(&format!("@{}", name.to_uppercase())).unwrap();
     let events = a.sync(0).unwrap();
-    assert_eq!(yos_from(&events, &format!("+{}", b.phone())), 1);
+    assert_eq!(yos_from_user(&events, b.user_id()), 1);
     assert!(b.contacts().iter().any(|c| c.user == user_of(&pa) && c.handles == [name.clone()]));
     // Taken in any spelling, reserved in any, malformed.
     assert_eq!(b.set_username(Some(&name)), Err(Error::Refused(api::status::CONFLICT)));
@@ -520,7 +514,6 @@ fn a_username_is_all_it_takes() {
     let name = format!("LEO{}", random_u64() % 100_000);
     let mut t = by_name(&hub, &name, None).unwrap();
     assert_eq!(t.username(), Some(name.as_str()));
-    assert_eq!(t.phone(), "");
     t.send_yo(&pa).unwrap();
     assert_eq!(yos_from_user(&a.sync(0).unwrap(), t.user_id()), 1);
     a.send_yo(&name).unwrap();
@@ -695,7 +688,7 @@ fn a_deleted_account_is_gone_with_its_name() {
     assert_eq!(t.delete_account(), Err(Error::Replaced));
     assert_eq!(Client::fetch_backup(http.as_ref(), &user), Ok(None));
     assert_eq!(Client::fetch_backup(http.as_ref(), &[6; 16]), Ok(None));
-    let mut c = register(Http::new(hub.url()), &phone(random_u64() % 1_000_000_000), None);
+    let mut c = register(Http::new(hub.url()), &username(random_u64() % 1_000_000_000), None);
     assert_eq!(c.send_yo(&name), Err(Error::NotOnYo));
     // The name is free for anyone, and so is the key: a new account, not the old one.
     assert_eq!(Client::username_free(http.as_ref(), &name), Ok(true));
@@ -801,12 +794,10 @@ fn registration_and_backups_are_limited_per_address() {
 fn an_account_key_belongs_to_one_user_forever() {
     let hub = TestHub::start();
     let (a, _, _, _) = pair(&hub);
-    // Another number cannot take A's account key, not even after A replaces it.
-    let other = phone(random_u64() % 1_000_000_000);
-    let http = Http::new(hub.url());
-    Client::request_code(http.as_ref(), &other).unwrap();
+    // Another username cannot take A's account key.
+    let other = username(random_u64() % 1_000_000_000);
     assert_eq!(
-        Client::register_keeping_key(http, &other, "000000", a.account_secret()).err(),
+        Client::register_username(Http::new(hub.url()), &other, Some(a.account_secret()), None, Push::none()).err(),
         Some(Error::Refused(api::status::CONFLICT))
     );
 }
@@ -815,17 +806,17 @@ fn an_account_key_belongs_to_one_user_forever() {
 fn a_copied_registration_registers_no_one() {
     let hub = TestHub::start();
     let http = Http::new(hub.url());
-    let number = phone(random_u64() % 1_000_000_000);
-    register(http.clone(), &number, None);
-    let (_, _, body) =
-        http.sent.lock().unwrap().iter().find(|(_, path, _)| path == api::VERIFY_CHECK).cloned().unwrap();
-    let mut check: api::VerifyCheck = yo_wire::decode(&body).unwrap();
-    // Someone copies certificate and KeyPackages and puts in their own auth key: the proof no longer fits.
-    check.device.auth_key = [7; 32];
-    check.device.device_id = [7; 16];
+    let name = username(random_u64() % 1_000_000_000);
+    register(http.clone(), &name, None);
+    let (_, _, body) = http.sent.lock().unwrap().iter().find(|(_, path, _)| path == api::REGISTER).cloned().unwrap();
+    let mut copied: api::Register = yo_wire::decode(&body).unwrap();
+    // Someone copies certificate and KeyPackages and puts in their own auth key: the proof no longer fits. (The
+    // name is taken too, but the proof is checked first.)
+    copied.device.auth_key = [7; 32];
+    copied.device.device_id = [7; 16];
     let replay = reqwest::blocking::Client::new()
-        .post(format!("{}{}", hub.url(), api::VERIFY_CHECK))
-        .body(yo_wire::encode(&check))
+        .post(format!("{}{}", hub.url(), api::REGISTER))
+        .body(yo_wire::encode(&copied))
         .send()
         .unwrap();
     assert_eq!(replay.status().as_u16(), api::status::BAD_REQUEST);

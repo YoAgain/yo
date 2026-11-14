@@ -13,8 +13,6 @@ pub enum YoError {
     Network { message: String },
     #[error("refused: {status}")]
     Refused { status: u16 },
-    #[error("not a phone number")]
-    Phone,
     #[error("not on Yo")]
     NotOnYo,
     #[error("blocked")]
@@ -36,7 +34,6 @@ impl From<yo_core::Error> for YoError {
         match error {
             E::Network(message) => YoError::Network { message },
             E::Refused(status) => YoError::Refused { status },
-            E::Phone => YoError::Phone,
             E::NotOnYo => YoError::NotOnYo,
             E::Blocked => YoError::Blocked,
             E::Unconfirmed => YoError::Unconfirmed,
@@ -281,8 +278,8 @@ impl From<Event> for YoEvent {
 pub struct YoContact {
     /// The user id.
     pub user: String,
-    /// How this device knows the contact: "+491701234567", "Chris". A username as its owner writes it, as the hub
-    /// tells, also for someone who wrote first: the first username is the name to show.
+    /// How this device knows the contact: "Chris". A username as its owner writes it, as the hub tells, also for
+    /// someone who wrote first: the first username is the name to show.
     pub handles: Vec<String>,
     pub name: Option<String>,
     pub verified: bool,
@@ -320,12 +317,6 @@ fn events(result: yo_core::Result<Vec<Event>>) -> Result<Vec<YoEvent>, YoError> 
 
 fn key_of(key: Vec<u8>) -> Result<[u8; 32], YoError> {
     key.try_into().map_err(|_| YoError::State)
-}
-
-/// Sends the SMS code; returns the number in E.164 digits.
-#[uniffi::export]
-pub fn request_code(transport: Arc<dyn HttpTransport>, phone: String) -> Result<String, YoError> {
-    Ok(Client::request_code(&Http(transport), &phone)?)
 }
 
 /// The account's backup record (spec 7), as the app makes and opens it: K wrapped by the passkey (empty without one)
@@ -446,29 +437,10 @@ impl YoClient {
 
 #[uniffi::export]
 impl YoClient {
-    /// Registers this device with the SMS code. `state_key`: 32 bytes the app keeps in its keychain.
-    #[uniffi::constructor]
-    #[allow(clippy::too_many_arguments)]
-    pub fn register(
-        transport: Arc<dyn HttpTransport>,
-        store: Arc<dyn StateStore>,
-        state_key: Vec<u8>,
-        phone: String,
-        code: String,
-        name: Option<String>,
-        push_platform: u8,
-        push_token: String,
-    ) -> Result<Arc<Self>, YoError> {
-        let key = key_of(state_key)?;
-        let push = yo_core::Push { platform: push_platform, token: push_token.into_bytes().into() };
-        let mut client = Client::register(Arc::new(Http(transport)), &phone, &code, name, push)?;
-        client.persist_to(Arc::new(Store(store)), key);
-        Ok(Self::new(client))
-    }
-
-    /// Registers this device with a username (spec 6.4). Without `account_secret`, a new account: the name must be
-    /// free. With the 32-byte account secret from the backup (spec 7), the name's account again, same user id, its
-    /// other device replaced. `Refused { status: 409 }`: the name is taken.
+    /// Registers this device with a username (spec 6.4). `state_key`: 32 bytes the app keeps in its keychain.
+    /// Without `account_secret`, a new account: the name must be free. With the 32-byte account secret from the backup
+    /// (spec 7), the name's account again, same user id, its other device replaced. `Refused { status: 409 }`: the
+    /// name is taken.
     #[uniffi::constructor]
     #[allow(clippy::too_many_arguments)]
     pub fn register_username(
@@ -525,12 +497,8 @@ impl YoClient {
         _ = self.shared.set(lock);
     }
 
-    pub fn phone(&self) -> String {
-        self.read(|c| c.phone().to_owned())
-    }
-
-    /// To "+49 170 …", "chris", or a user id from an event. In a chat in use, the way to the hub does not hold the
-    /// client: other calls run meanwhile, sends to other friends and the inbox's wait among them.
+    /// To "chris", or a user id from an event. In a chat in use, the way to the hub does not hold the client: other
+    /// calls run meanwhile, sends to other friends and the inbox's wait among them.
     pub fn send_yo(&self, to: String) -> Result<Vec<YoEvent>, YoError> {
         self.send_content(to, Content::Yo)
     }

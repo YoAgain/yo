@@ -6,7 +6,7 @@ use std::sync::Arc;
 use yo_core::media::{self, Media};
 use yo_core::{Client, Error};
 use yo_hub::config::Config;
-use yo_tests::{phone, random_u64, register, Http, TestHub};
+use yo_tests::{random_u64, register, username, Http, TestHub};
 use yo_wire::api;
 use yo_wire::limits::MAX_BLOB_LEN;
 
@@ -21,7 +21,7 @@ fn hub_with(change: impl FnOnce(&mut Config)) -> (TestHub, PathBuf) {
 
 fn someone(hub: &TestHub) -> (Client, Arc<Http>) {
     let http = Http::new(hub.url());
-    (register(http.clone(), &phone(random_u64() % 1_000_000_000), None), http)
+    (register(http.clone(), &username(random_u64() % 1_000_000_000), None), http)
 }
 
 fn noise(len: usize) -> Vec<u8> {

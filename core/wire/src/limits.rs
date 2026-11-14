@@ -24,8 +24,6 @@ pub const MAX_BODY: usize = 64 * 1024 + 1024;
 pub const MAX_SKEW_MS: u64 = 5 * 60 * 1000;
 /// The longest a push token may be.
 pub const MAX_PUSH_TOKEN_LEN: usize = 512;
-/// The longest an SMS code may be.
-pub const MAX_CODE_LEN: usize = 12;
 /// The most devices a lookup answers with.
 pub const MAX_DEVICES: usize = 16;
 /// The largest wrapped K in a backup record: its 32 bytes with ChaCha20-Poly1305's nonce and tag are 60.

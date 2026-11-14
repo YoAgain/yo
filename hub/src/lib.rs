@@ -8,7 +8,6 @@ pub mod error;
 pub mod kp;
 pub mod limiter;
 pub mod push;
-pub mod sms;
 
 use axum::extract::{ConnectInfo, DefaultBodyLimit, Path, State};
 use axum::http::{HeaderMap, Method, StatusCode, Uri};
@@ -18,7 +17,6 @@ use bytes::Bytes;
 use config::Config;
 use db::{Commit, Db, Delivered, Key, NewDevice, StoredKeyPackage, Write};
 use error::{refuse, Refusal, Res};
-use hmac::{Hmac, Mac};
 use limiter::{Limiter, ReplayCache};
 use openmls_rust_crypto::RustCrypto;
 use std::collections::HashMap;
@@ -31,10 +29,10 @@ use tokio::sync::Notify;
 use yo_wire::api::{self, HEADER_BODY_HASH, HEADER_DEVICES};
 use yo_wire::cert::DeviceCertificate;
 use yo_wire::content::BlobId;
-use yo_wire::handle::{Handle, KIND_PHONE, KIND_USERNAME};
+use yo_wire::handle::{Handle, KIND_USERNAME};
 use yo_wire::limits::{self, KEY_PACKAGE_TARGET, MAX_DEVICES, MAX_INBOX_FETCH, MAX_KEY_PACKAGES_PER_UPLOAD};
 use yo_wire::request::{HEADER_DEVICE, HEADER_SIGNATURE, HEADER_TIME};
-use yo_wire::{decode, encode, phone, sha256, unb64, DeviceId, GroupId, UserId};
+use yo_wire::{decode, encode, sha256, unb64, DeviceId, GroupId, UserId};
 
 pub struct Hub {
     config: Config,
@@ -49,7 +47,6 @@ pub struct Hub {
     /// The database disk's last answer (`db_room`): when it was asked (ms), and whether it was too full.
     disk_asked: AtomicU64,
     disk_full: AtomicBool,
-    sms: Box<dyn sms::Sms>,
     pusher: push::Pusher,
     blobs: Arc<blobs::Blobs>,
 }
@@ -160,7 +157,6 @@ impl Hub {
             .spawn(move || writer(writing, queue, most))
             .map_err(|e| format!("writer: {e}"))?;
         Ok(Arc::new(Hub {
-            sms: sms::from_config(&config.sms),
             db,
             deliveries,
             crypto: RustCrypto::default(),
@@ -198,10 +194,6 @@ impl Hub {
             .route("/v1/groups/{group}/commit", post(commit))
             .route("/v1/groups/{group}/commits/{epoch}", get(fetch_commit))
             .route("/v1/blobs/{id}", put(put_blob).get(get_blob));
-        // Phone numbers (spec 6.3: kept for later), only where SMS is configured: off, there is no code to guess.
-        if !matches!(self.config.sms, config::SmsConfig::Off) {
-            router = router.route(api::VERIFY_START, post(verify_start)).route(api::VERIFY_CHECK, post(verify_check));
-        }
         if !self.config.apple_app_ids.is_empty() {
             // Which apps may make passkeys for this domain (Apple reads it through its CDN; spec 7).
             let file = serde_json::json!({ "webcredentials": { "apps": self.config.apple_app_ids } }).to_string();
@@ -279,16 +271,9 @@ impl Hub {
         served
     }
 
-    fn phone_hmac(&self, digits: &[u8]) -> [u8; 32] {
-        let mut mac = Hmac::<sha2::Sha256>::new_from_slice(&self.config.phone_secret).expect("any key length");
-        mac.update(digits);
-        mac.finalize().into_bytes().into()
-    }
-
-    /// A handle's value as the hub keeps it: a number as its HMAC only, everything else as it is.
+    /// A handle's value as the hub keeps it.
     fn stored_handle(&self, handle: &Handle) -> Vec<u8> {
         match handle.kind {
-            KIND_PHONE => self.phone_hmac(handle.value.as_slice()).to_vec(),
             // A username by its skeleton (spec 3.3): one name per look, and LE0 finds LEO.
             KIND_USERNAME => std::str::from_utf8(handle.value.as_slice())
                 .map(|name| yo_wire::handle::skeleton(name).into_bytes())
@@ -443,8 +428,8 @@ impl Hub {
         Ok((stored, last))
     }
 
-    /// Everything about a registering device that can be checked before an SMS code is spent (spec 6.4): its
-    /// certificate, the account key's proof of possession over this handle and device, its KeyPackages.
+    /// Everything about a registering device that is checked before it is stored (spec 6.4): its certificate, the
+    /// account key's proof of possession over this handle and device, its KeyPackages.
     fn check_new_device(
         &self,
         handle: &Handle,
@@ -470,25 +455,19 @@ impl Hub {
         Ok((account_key, new, key_packages, last_resort.expect("asked for")))
     }
 
-    /// Stores a checked registration and answers the user id.
+    /// Stores a checked registration for a username and answers the user id.
     fn register_checked(
         &self,
         handle: &Handle,
-        by_key: bool,
         checked: (Key, NewDevice, Vec<StoredKeyPackage>, StoredKeyPackage),
     ) -> Res<(StatusCode, Vec<u8>)> {
         let (account_key, device, key_packages, last_resort) = checked;
         let mut fresh: UserId = [0; 16];
         getrandom::getrandom(&mut fresh).map_err(|_| refuse(StatusCode::INTERNAL_SERVER_ERROR))?;
-        let spelling = match handle.kind {
-            KIND_USERNAME => std::str::from_utf8(handle.value.as_slice()).ok(),
-            _ => None,
-        };
+        let spelling = std::str::from_utf8(handle.value.as_slice()).map_err(|_| bad())?;
         let written = self.db.register(
-            handle.kind,
             &self.stored_handle(handle),
             spelling,
-            by_key,
             &fresh,
             &account_key,
             &device,
@@ -555,50 +534,6 @@ type Peer = ConnectInfo<SocketAddr>;
 
 // ---- registration ----
 
-async fn verify_start(State(hub): Hubs, ConnectInfo(peer): Peer, headers: HeaderMap, body: Bytes) -> Res<StatusCode> {
-    let request: api::VerifyStart = decode(&body)?;
-    phone::check(request.phone.as_slice())?;
-    let limits = &hub.config.limits;
-    let phone_key = yo_wire::b64(&hub.phone_hmac(request.phone.as_slice()));
-    hub.limit_ip("start", peer, &headers, limits.verify_per_ip_hour, HOUR)?;
-    hub.limit(format!("start:phone:{phone_key}"), limits.verify_per_phone_hour, HOUR)?;
-    let digits = String::from_utf8(request.phone.as_slice().to_vec()).map_err(|_| bad())?;
-    hub.sms.start(digits).await.map_err(|error| {
-        eprintln!("yo-hub: sms: {error}");
-        refuse(StatusCode::BAD_GATEWAY)
-    })?;
-    Ok(StatusCode::NO_CONTENT)
-}
-
-async fn verify_check(
-    State(hub): Hubs,
-    ConnectInfo(peer): Peer,
-    headers: HeaderMap,
-    body: Bytes,
-) -> Res<(StatusCode, Vec<u8>)> {
-    let request: api::VerifyCheck = decode(&body)?;
-    let digits = String::from_utf8(request.phone.as_slice().to_vec()).map_err(|_| bad())?;
-    phone::check(digits.as_bytes())?;
-    let handle = Handle::phone(&digits);
-    let limits = &hub.config.limits;
-    hub.limit_ip("check", peer, &headers, limits.verify_per_ip_hour.saturating_mul(3), HOUR)?;
-    hub.limit(format!("check:phone:{}", yo_wire::b64(&hub.stored_handle(&handle))), limits.check_per_phone_hour, HOUR)?;
-    let code = String::from_utf8(request.code.as_slice().to_vec()).map_err(|_| bad())?;
-    if code.is_empty() || code.len() > limits::MAX_CODE_LEN {
-        return Err(bad());
-    }
-    // Everything is checked before the code is spent.
-    let checked = hub.check_new_device(&handle, &request.device)?;
-    let approved = hub.sms.check(digits, code).await.map_err(|error| {
-        eprintln!("yo-hub: sms: {error}");
-        refuse(StatusCode::BAD_GATEWAY)
-    })?;
-    if !approved {
-        return Err(refuse(StatusCode::FORBIDDEN));
-    }
-    hub.register_checked(&handle, false, checked)
-}
-
 /// A username is all it takes (spec 6.4): first come, first served, limited per address. The name's user again with
 /// its current account key (a new phone restored from the backup), else `409`.
 async fn register(
@@ -612,7 +547,7 @@ async fn register(
     let handle = Handle { kind: KIND_USERNAME, value: request.username.clone() };
     handle.check()?;
     let checked = hub.check_new_device(&handle, &request.device)?;
-    hub.register_checked(&handle, true, checked)
+    hub.register_checked(&handle, checked)
 }
 
 /// Whether a username is free, for the app while it is typed (spec 6.3): `204` free, `409` taken by anyone or

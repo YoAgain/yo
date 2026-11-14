@@ -5,7 +5,7 @@ use std::process::{Child, Command};
 use std::time::{Duration, Instant};
 use yo_core::media::{self, Media};
 use yo_core::{Client, Content, Event, Push};
-use yo_tests::{phone, random_u64, register, Http, TestHub};
+use yo_tests::{random_u64, register, username, Http, TestHub};
 
 struct Bot(Child);
 
@@ -37,7 +37,7 @@ fn state_dir() -> PathBuf {
 }
 
 fn someone(hub: &TestHub) -> Client {
-    register(Http::new(hub.url()), &phone(random_u64() % 1_000_000_000), None)
+    register(Http::new(hub.url()), &username(random_u64() % 1_000_000_000), None)
 }
 
 /// Yos from anyone until `quiet` passes without one.

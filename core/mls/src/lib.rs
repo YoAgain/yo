@@ -30,10 +30,10 @@ use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 use yo_wire::api::{self, status};
 use yo_wire::content::Message;
-use yo_wire::handle::{Handle, KIND_PHONE, KIND_USER, KIND_USERNAME};
+use yo_wire::handle::{Handle, KIND_USER, KIND_USERNAME};
 use yo_wire::limits::{KEY_PACKAGE_REFILL_BELOW, KEY_PACKAGE_TARGET, MAX_INBOX_FETCH};
 use yo_wire::request::{HEADER_DEVICE, HEADER_SIGNATURE, HEADER_TIME};
-use yo_wire::{decode, encode, envelope, phone, sha256, DeviceId, UserId, EPOCH_TOKEN_LABEL, TOKEN_LEN};
+use yo_wire::{decode, encode, envelope, sha256, DeviceId, UserId, EPOCH_TOKEN_LABEL, TOKEN_LEN};
 
 /// An update is due after this long (spec 4.4)...
 pub const UPDATE_AFTER_MS: u64 = 7 * 24 * 3600 * 1000;
@@ -100,7 +100,7 @@ pub enum Event {
 pub struct ContactInfo {
     /// The user id (hex).
     pub user: String,
-    /// How this device knows the contact: "+491701234567", "CHRIS".
+    /// How this device knows the contact: "CHRIS".
     pub handles: Vec<String>,
     pub name: Option<String>,
     pub verified: bool,
@@ -299,10 +299,9 @@ fn user_bytes(user: &str) -> Result<UserId> {
     unhex(user).and_then(|u| u.try_into().ok()).ok_or(Error::Protocol("user id"))
 }
 
-/// Whether two handles as shown name the same: a phone number as it is, a username by its skeleton (spec 3.3), so
-/// "yogpt" is "YoGPT".
+/// Whether two handles as shown name the same: a username by its skeleton (spec 3.3), so "yogpt" is "YoGPT".
 fn same_handle(a: &str, b: &str) -> bool {
-    a == b || (!a.starts_with('+') && !b.starts_with('+') && yo_wire::handle::same_name(a, b))
+    yo_wire::handle::same_name(a, b)
 }
 
 /// Remembers how a contact is known. A username in another spelling takes the place of the one before: the newest
@@ -374,49 +373,6 @@ fn refused(response: &Response) -> Error {
 impl Client {
     // ---- registration and state ----
 
-    /// Asks the hub to send a code to the number; returns the number in E.164 digits.
-    pub fn request_code(transport: &dyn Transport, phone_input: &str) -> Result<String> {
-        let digits = phone::normalize(phone_input)?;
-        let body = encode(&api::VerifyStart { phone: digits.as_bytes().to_vec().into() });
-        let response = transport.request("POST", api::VERIFY_START, &[], &body).map_err(Error::Network)?;
-        match response.status {
-            status::NO_CONTENT => Ok(digits),
-            _ => Err(refused(&response)),
-        }
-    }
-
-    /// Registers this device with the code from the SMS and a new account key. The number keeps its user id if it
-    /// had one (a new phone); any device of it registered before is replaced.
-    pub fn register(
-        transport: Arc<dyn Transport>,
-        phone_input: &str,
-        code: &str,
-        name: Option<String>,
-        push: Push,
-    ) -> Result<Client> {
-        Self::register_with_key(transport, phone_input, code, name, push, SigningKey::from_bytes(&identity::random()))
-    }
-
-    fn register_with_key(
-        transport: Arc<dyn Transport>,
-        phone_input: &str,
-        code: &str,
-        name: Option<String>,
-        push: Push,
-        account: SigningKey,
-    ) -> Result<Client> {
-        let digits = phone::normalize(phone_input)?;
-        let (mut client, device) = Client::new_device(transport, &Handle::phone(&digits), account, name, push)?;
-        client.state.phone = digits.clone();
-        let request = api::VerifyCheck {
-            phone: digits.as_bytes().to_vec().into(),
-            code: code.as_bytes().to_vec().into(),
-            device,
-        };
-        client.registered(api::VERIFY_CHECK, &encode(&request))?;
-        Ok(client)
-    }
-
     /// Registers this device with a username (spec 6.4). Without `account_secret`, a new account with a new account
     /// key: the name must be free. With the account key from the backup (spec 7), the name's user again: the user id
     /// is the same, its other devices are replaced. `409` when the name is taken (or the key is another's).
@@ -461,18 +417,6 @@ impl Client {
             }
         }
         Ok(client)
-    }
-
-    /// For tests: a new device under an existing account key, as a passkey's backup will make one.
-    #[cfg(feature = "testing")]
-    pub fn register_keeping_key(
-        transport: Arc<dyn Transport>,
-        phone_input: &str,
-        code: &str,
-        account_secret: [u8; 32],
-    ) -> Result<Client> {
-        let account = SigningKey::from_bytes(&account_secret);
-        Self::register_with_key(transport, phone_input, code, None, Push::none(), account)
     }
 
     /// For tests: any request, signed by this device, as only a broken client would send it.
@@ -542,7 +486,6 @@ impl Client {
         let device_id: DeviceId = identity::random();
         let auth = SigningKey::from_bytes(&identity::random());
         let state = State {
-            phone: String::new(),
             user_id: String::new(),
             username: None,
             account_secret: account.to_bytes(),
@@ -688,11 +631,6 @@ impl Client {
     /// For tests: the clock that decides when updates are due.
     pub fn set_clock(&mut self, clock: Clock) {
         self.clock = clock;
-    }
-
-    /// The own number (E.164 digits); empty for an account without one.
-    pub fn phone(&self) -> &str {
-        &self.state.phone
     }
 
     /// The own user id (hex): stable across new phones.
@@ -1084,7 +1022,6 @@ impl Client {
     fn is_me(&self, handle: &Handle) -> bool {
         match handle.kind {
             KIND_USER => hex(handle.value.as_slice()) == self.state.user_id,
-            KIND_PHONE => handle.value.as_slice() == self.state.phone.as_bytes(),
             KIND_USERNAME => self.state.username.as_deref().is_some_and(|mine| same_handle(mine, &handle.display())),
             _ => false,
         }
@@ -2196,7 +2133,7 @@ impl Client {
 
     // ---- what the app calls ----
 
-    /// Sends a Yo to "+49 170 …", "chris", or a user id from an event.
+    /// Sends a Yo to "chris", or a user id from an event.
     pub fn send_yo(&mut self, to: &str) -> Result<Vec<Event>> {
         self.send(to, Content::Yo)
     }
