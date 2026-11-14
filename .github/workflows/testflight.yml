@@ -141,6 +141,24 @@ jobs:
           export XCODE_VERSION=$(xcodebuild -version | sed -n 's/^Xcode //p') XCODE_BUILD=$(xcodebuild -version | sed -n 's/^Build version //p')
           "$GITHUB_WORKSPACE/.oad/ship.sh" --upload
 
+      # The app and its extensions share the account's state through the App Group (SharedState.swift); without it in
+      # their profiles (the group not attached to their app ids in the developer portal) the notification service
+      # names nobody and every push says only "Yo". Said in the run's summary, not fatal.
+      - name: App Group
+        working-directory: app/ios/YoApp
+        run: |
+          ~/pymobile3-venv/bin/python -I - xtool/YoApp.app <<'EOF'
+          import pathlib, plistlib, sys
+          app = pathlib.Path(sys.argv[1])
+          for bundle in [app, *sorted(app.glob("PlugIns/*.appex"))]:
+              raw = (bundle / "embedded.mobileprovision").read_bytes()
+              profile = plistlib.loads(raw[raw.index(b"<?xml"):raw.rindex(b"</plist>") + 8])
+              groups = profile["Entitlements"].get("com.apple.security.application-groups", [])
+              print(f"{bundle.name}: {groups}")
+              if "group.app.justyo.ios" not in groups:
+                  print(f"::warning::{bundle.name}: no App Group group.app.justyo.ios in its profile")
+          EOF
+
       # Outside testers (the public link) get every build too: into the group "Public", submitted to Beta App Review.
       - name: Public beta
         timeout-minutes: 35

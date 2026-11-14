@@ -21,8 +21,10 @@ push).
   the same bars, a tap on a name sends them to that friend from there (`Sources/YoShare`), as the app would. Without
   network (or with the hub's "not now") they wait in the App Group `group.app.justyo.ios` and the app sends them as
   soon as it opens (`ShareBridge.swift`, `Share.swift`).
-- Notifications (the same builds): "Yo from YoGPT", "📷 from …", "3 Yos from …". The push only says "Yo"; the
-  notification service (`Sources/YoNotify`) receives once and names the sender, without fetching photos or videos.
+- Notifications (the same builds): "Yo from YoGPT", "📷 from …", "3 Yos from …", with the Yo sound and "Yo Back". The
+  push only says "Yo"; the notification service (`Sources/YoNotify`) receives once and names the sender, without
+  fetching photos or videos. A push that brings no new Yo (the Welcome before a first Yo, the rest of a burst) goes
+  quietly; Yos the app takes itself just after it was left get their notification from the app.
 - The app and both extensions use one account state, in the App Group, its key in the group's keychain group, in
   turns under a file lock (`SharedState.swift`, `StateLock` in the core): each step of the core takes the lock and the
   newest state, so there is one writer and never a write from an old state. The state moves there once, at the
@@ -59,7 +61,10 @@ app/ios/dev/sim.sh install "Yo Sim"
 app/ios/dev/sim.sh drive "Yo Sim" DIR &  # YoDriver: tap, type, read the screen, audit, by commands (dev/sim/drive.py)
 ```
 
-Yo Dev in the Simulator talks to the dev hub; passkeys, push and the iCloud Keychain's sync need a device.
+Yo Dev in the Simulator talks to the dev hub, with its notification service and an App Group of its own
+(`group.app.justyo.ios.dev`; the Simulator needs no profile for it). The Simulator runs no notification service for
+`simctl push` and gets no APNs token without the Mac's device identity, so `sim.sh notify` runs the service's code
+(`YoNotifyProbe`) on the hub's push and shows what it made. Passkeys and the iCloud Keychain's sync need a device.
 `TESTING.md` lists what was gone through that way, and how.
 
 ## The Rust core
