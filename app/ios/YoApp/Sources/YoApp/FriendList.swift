@@ -1289,35 +1289,38 @@ struct RowButton: View {
     .transition(.scale.combined(with: .opacity))
   }
 
-  /// At the bar's end, in the name's own type: "Yo 📷" or "Yo 🎥" for photos and videos not yet seen (a finger on it
-  /// plays them at once), or "Yo" for one that just came; their "!"s after either.
+  /// At the bar's end, in the name's own type: "Yo" and a "!" for each Yo after the first, then "📷" or "🎥" while
+  /// photos and videos wait unseen (a finger on that sign plays them at once, the rest of the bar sends as ever). The
+  /// "!"s count every Yo of the run, with or without a photo; with only unseen photos left, one for each of them.
   @ViewBuilder private func mark(touchable: Bool) -> some View {
     if let first = media.first {
+      let live = yo.flatMap { $0.fading == nil ? $0.count : nil } ?? 0
       HStack(spacing: 0) {
-        Text(first.video != nil ? "Yo 🎥" : "Yo 📷")
-        Bangs(count: media.count)
+        Text("Yo")
+        Bangs(count: max(live, media.count))
+        Text(first.video != nil ? " 🎥" : " 📷")
+          .scaleEffect(viewing ? 0.92 : 1)
+          .contentShape(.rect.inset(by: -12))  // easy to hit
+          // A finger down shows them at once; a short tap lets them run, holding closes on letting go.
+          .highPriorityGesture(
+            DragGesture(minimumDistance: 0)
+              .onChanged { _ in
+                if !viewing {
+                  viewing = true
+                  touchedAt = .now
+                  view(.down)
+                }
+              }
+              .onEnded { _ in
+                viewing = false
+                view(Date.now.timeIntervalSince(touchedAt) < 0.35 ? .tapped : .released)
+              }
+          )
+          .accessibilityAddTraits(.isButton)
+          .accessibilityLabel(media.count == 1 ? "1 photo or video" : "\(media.count) photos or videos")
+          .accessibilityAction { view(.down); view(.tapped) }  // opens them, running to the end
       }
       .lineLimit(1)
-      .scaleEffect(viewing ? 0.92 : 1)
-      .contentShape(.rect.inset(by: -12))  // easy to hit
-      // A finger down shows them at once; a short tap lets them run, holding closes on letting go.
-      .highPriorityGesture(
-        DragGesture(minimumDistance: 0)
-          .onChanged { _ in
-            if !viewing {
-              viewing = true
-              touchedAt = .now
-              view(.down)
-            }
-          }
-          .onEnded { _ in
-            viewing = false
-            view(Date.now.timeIntervalSince(touchedAt) < 0.35 ? .tapped : .released)
-          }
-      )
-      .accessibilityAddTraits(.isButton)
-      .accessibilityLabel(media.count == 1 ? "1 photo or video" : "\(media.count) photos or videos")
-      .accessibilityAction { view(.down); view(.tapped) }  // opens them, running to the end
       .allowsHitTesting(touchable)  // the copy in the bar under it is only for the layout
       .accessibilityHidden(!touchable)
       .transition(.scale.combined(with: .opacity))
@@ -1342,7 +1345,7 @@ struct RowButton: View {
 /// comes in on its own and the ones there stay (as text typed into a field, not the whole word drawn again). At most
 /// five; beyond, the "!"s stay and how many more comes after them ("Yo!!!!! +3"), turning as a wheel, its digits all
 /// as wide (nothing shifts).
-/// The camera's zoom, as the Camera app has it: its choices in a glass capsule ("0.5  1×  2  3"), the chosen one with
+/// The camera's zoom, as the Camera app has it: its choices as round buttons side by side, no capsule around them ("0.5  1×  2  3"), the chosen one with
 /// its "×"; a tap goes to another. Not there with one choice only (the front camera).
 struct CameraZoom: View {
   let choices: [Double]
@@ -1369,8 +1372,6 @@ struct CameraZoom: View {
           .accessibilityAddTraits(on ? .isSelected : [])
         }
       }
-      .padding(4)
-      .glassEffect(.regular.interactive(), in: .capsule)
       .transition(.opacity)
     }
   }
