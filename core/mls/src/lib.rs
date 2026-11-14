@@ -714,6 +714,11 @@ impl Client {
 
     fn drop_one(&mut self, reason: String) {
         self.dropped += 1;
+        self.note(reason);
+    }
+
+    /// Something odd that dropped nothing, for diagnostics with the drops.
+    fn note(&mut self, reason: String) {
         if self.drop_reasons.len() < 20 {
             self.drop_reasons.push(reason);
         }
@@ -1749,10 +1754,8 @@ impl Client {
                                 mismatches.push((item.group.clone(), item.user.clone(), devices));
                             }
                         }
-                        Err(_) => {
-                            done.insert(item.seq);
-                            self.drop_one("hub answered 409 without devices".into());
-                        }
+                        // The hub did not take it: kept, and tried again like any "not now".
+                        Err(_) => self.note("hub answered 409 without devices".into()),
                     }
                 }
                 Some(Ok(response)) if response.status == status::NOT_FOUND && item.user != self.state.user_id => {
