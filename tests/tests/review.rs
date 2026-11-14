@@ -2,7 +2,7 @@
 
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
-use yo_core::{Client, Content, Error, Event, Push, Store};
+use yo_core::{Client, Content, Error, Event, Push, Response, Sent, Store, Transport};
 use yo_tests::{random_u64, Fault, Http, TestHub};
 
 fn by_name(http: Arc<Http>, name: &str) -> Client {
@@ -366,4 +366,105 @@ fn a_registration_is_saved_before_it_leaves_and_finished_after_a_restart() {
     let refused = Client::register_username_saved(http.clone(), full, KEY, &free, None, None, Push::none());
     assert!(matches!(refused, Err(Error::Save(_))));
     assert!(Client::username_free(http.as_ref(), &free).unwrap());
+}
+
+// The final review (Codex, after the app's version and the saves that fail).
+
+/// A new chat's registration answered `426` (this app too old) counted as the id being someone else's: the chat went,
+/// its Welcome and first message with it. Now `426` is "not now" like a `429`: all of it waits for the updated app.
+#[test]
+fn a_new_chat_refused_as_too_old_waits_for_the_updated_app() {
+    let hub = TestHub::start();
+    let n = random_u64() % 100_000;
+    let http = Http::new(hub.url());
+    let mut a = by_name(http.clone(), &format!("Old{n}"));
+    let mut b = by_name(Http::new(hub.url()), &format!("Dlo{n}"));
+    http.fault("/v1/groups", Fault::Answer(426));
+    http.fault("/v1/groups", Fault::Answer(426));
+    a.send(b.user_id(), text("waits")).unwrap();
+    assert_eq!(a.pending(), 2, "the Welcome and the message");
+    assert!(b.sync(0).unwrap().is_empty());
+    a.sync(0).unwrap();
+    assert_eq!(texts(&b.sync(0).unwrap()), ["waits"]);
+}
+
+/// The outbox sent without the client (`deliver_begin`, the app's `deliver`) never registered a new chat's group
+/// the hub had not answered for: its Welcome and messages waited for some other call. Now it registers first, as
+/// `deliver` does.
+#[test]
+fn the_outbox_sent_apart_registers_a_new_chat_first() {
+    let hub = TestHub::start();
+    let n = random_u64() % 100_000;
+    let http = Http::new(hub.url());
+    let mut a = by_name(http.clone(), &format!("Apart{n}"));
+    let mut b = by_name(Http::new(hub.url()), &format!("Trapa{n}"));
+    http.fault("/v1/groups", Fault::Answer(429));
+    http.fault("/v1/groups", Fault::Answer(429));
+    a.send(b.user_id(), text("waits")).unwrap();
+    assert_eq!(a.pending(), 2);
+    let mut deliveries = a.deliver_begin().unwrap();
+    loop {
+        let answers = deliveries.send();
+        match a.send_end(&deliveries, answers) {
+            Sent::More(more) => deliveries = more,
+            Sent::Done(result) => {
+                result.unwrap();
+                break;
+            }
+        }
+    }
+    assert_eq!(a.pending(), 0);
+    assert_eq!(texts(&b.sync(0).unwrap()), ["waits"]);
+}
+
+/// Its transport fills the disk once a lookup is under way: a restart's new chat is asked for, and cannot be saved.
+struct FillsOnLookup(Arc<Http>, Arc<Disk>, AtomicBool);
+
+impl Transport for FillsOnLookup {
+    fn request(&self, method: &str, path: &str, headers: &[(String, String)], body: &[u8]) -> Result<Response, String> {
+        if path == yo_wire::api::LOOKUP && self.2.load(Ordering::Relaxed) {
+            self.1.full.store(true, Ordering::Relaxed);
+        }
+        self.0.request(method, path, headers, body)
+    }
+}
+
+/// A lost chat whose restart could not save its new chat (a full disk) was dropped as if the peer could not be
+/// restarted with: what waited to go in it went too. Now the old chat and its outbox stay, and the restart goes once
+/// the state saves again.
+#[test]
+fn a_restart_that_cannot_save_keeps_the_lost_chat_and_what_waits() {
+    let hub = TestHub::start();
+    let n = random_u64() % 100_000;
+    let http = Http::new(hub.url());
+    let disk = Arc::new(Disk::default());
+    let fills = Arc::new(FillsOnLookup(http.clone(), disk.clone(), AtomicBool::new(false)));
+    let mut a = by_name(Http::new(hub.url()), &format!("Sav{n}"));
+    let mut b = Client::register_username(fills.clone(), &format!("Vas{n}"), None, None, Push::none()).unwrap();
+    b.persist_to(disk.clone(), KEY).unwrap();
+    a.send(b.user_id(), text("hi")).unwrap();
+    assert_eq!(texts(&b.sync(0).unwrap()), ["hi"]);
+    b.send(a.user_id(), text("first")).unwrap();
+    assert_eq!(texts(&a.sync(0).unwrap()), ["first"]);
+    // A message the hub does not take now, then a commit it refuses: the chat is lost, the message waits in it.
+    http.fault(&to(a.user_id()), Fault::Answer(503));
+    http.fault(&to(a.user_id()), Fault::Answer(503));
+    b.send(a.user_id(), text("waits")).unwrap();
+    assert_eq!(b.pending(), 1);
+    let clock = movable_clock(&mut b);
+    clock.store(DAYS_8, Ordering::Relaxed);
+    http.fault("/commit", Fault::Answer(403));
+    b.maintenance().unwrap();
+    assert!(b.chats_with(a.user_id())[0].lost);
+    fills.2.store(true, Ordering::Relaxed);
+    assert!(matches!(b.maintenance(), Err(Error::Save(_))));
+    let chats = b.chats_with(a.user_id());
+    assert_eq!((chats.len(), chats[0].lost, b.pending()), (1, true, 1), "the lost chat and its message kept");
+    fills.2.store(false, Ordering::Relaxed);
+    disk.full.store(false, Ordering::Relaxed);
+    b.maintenance().unwrap();
+    assert_eq!(texts(&a.sync(0).unwrap()), ["waits"]);
+    let chats = b.chats_with(a.user_id());
+    assert_eq!(chats.len(), 1);
+    assert!(!chats[0].lost);
 }

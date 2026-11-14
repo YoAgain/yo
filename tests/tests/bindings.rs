@@ -990,3 +990,56 @@ fn the_app_layer_and_its_extensions_take_turns_under_load() {
         handle.join().unwrap();
     }
 }
+
+/// A file that can be full.
+#[derive(Default)]
+struct Full(std::sync::atomic::AtomicBool);
+
+impl StateStore for Full {
+    fn save(&self, _: Vec<u8>) -> Result<(), yo::YoError> {
+        match self.0.load(std::sync::atomic::Ordering::Relaxed) {
+            true => Err(yo::YoError::Save { message: "disk full".into() }),
+            false => Ok(()),
+        }
+    }
+}
+
+/// A full disk made the media outbox's calls throw `Save`, which `media_retry_later` took for a refusal for good: the
+/// app dropped the photo or video with its file. Now it is "later", and the photo goes once the state saves again.
+#[test]
+fn a_photo_whose_state_did_not_save_is_tried_again_later() {
+    let hub = TestHub::start();
+    let n = random_u64() % 1_000_000_000;
+    let (pa, pb) = (username(n), username(n + 1));
+    let disk = Arc::new(Full::default());
+    let app = Arc::new(App(Http::new(hub.url())));
+    let a = YoClient::register_username(app, disk.clone(), vec![7; 32], pa, None, None, 0, String::new()).unwrap();
+    let _b = client(&hub, &pb, "BOB", Arc::new(File::default()));
+    disk.0.store(true, std::sync::atomic::Ordering::Relaxed);
+    let error = a.media_chat(pb.clone()).err().expect("not saved");
+    assert!(matches!(error, yo::YoError::Save { .. }), "{error:?}");
+    assert!(yo::media_retry_later(&error), "kept for later");
+    disk.0.store(false, std::sync::atomic::Ordering::Relaxed);
+    assert_eq!(a.media_chat(pb).unwrap().fetches, 1);
+}
+
+/// A state that opens but could not be saved (a full disk) threw like one that does not open, and the app asked to
+/// sign in again, which replaces the device. Now it is `Save`, which the app tries again; only a state that does not
+/// open is `State`.
+#[test]
+fn a_state_that_opens_but_does_not_save_is_not_a_broken_one() {
+    let hub = TestHub::start();
+    let n = random_u64() % 1_000_000_000;
+    let file = Arc::new(File::default());
+    let a = client(&hub, &username(n), "ANNA", file.clone());
+    let blob = file.0.lock().unwrap().clone();
+    let app = || Arc::new(App(Http::new(hub.url())));
+    let full = Arc::new(Full(true.into()));
+    let error = YoClient::restore(app(), full.clone(), vec![7; 32], blob.clone()).err().expect("not saved");
+    assert!(matches!(error, yo::YoError::Save { .. }), "{error:?}");
+    let error = YoClient::restore(app(), file.clone(), vec![8; 32], blob.clone()).err().expect("another key");
+    assert!(matches!(error, yo::YoError::State), "{error:?}");
+    full.0.store(false, std::sync::atomic::Ordering::Relaxed);
+    let again = YoClient::restore(app(), full, vec![7; 32], blob).unwrap();
+    assert_eq!(again.user_id(), a.user_id());
+}

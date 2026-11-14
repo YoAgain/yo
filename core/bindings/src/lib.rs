@@ -211,12 +211,12 @@ pub fn seal_media(plain: Vec<u8>, width: u16, height: u16) -> Result<SealedMedia
     Ok(SealedMedia { media: media.into(), ciphertext })
 }
 
-/// Whether a refusal of `upload_media` means "later" (the account's quota for now, no room at the hub, no network):
-/// keep the photo or video and try again.
+/// Whether a refusal of `upload_media` means "later" (the account's quota for now, no room at the hub, no network, a
+/// state that did not save): keep the photo or video and try again.
 #[uniffi::export]
 pub fn media_retry_later(error: &YoError) -> bool {
     match error {
-        YoError::Network { .. } => true,
+        YoError::Network { .. } | YoError::Save { .. } => true,
         YoError::Refused { status } => *status == 429 || *status == 507 || *status >= 500,
         _ => false,
     }
