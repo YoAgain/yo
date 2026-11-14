@@ -56,11 +56,18 @@ struct YoApp: App {
           inbox.forgetMedia()
           outbox.clear()
           ShareInbox.clear()
-        } else if friends.all.isEmpty {
+        } else {
           // In, with nobody on the list (a new account, or one signed in again here): one friend who always
           // answers, YoGPT (the list learns its user id on its own).
-          friends.add("YoGPT")
+          if friends.all.isEmpty { friends.add("YoGPT") }
+          // An invite link opened on the way in comes next (FriendList), unless it is one's own name.
+          if let me = accounts.account?.username { Invite.shared.signedIn(as: me) }
         }
+      }
+      // Invite links (justyo.co/NAME, yo://add/NAME): the name waits for the list (Invite.swift).
+      .onOpenURL { Invite.shared.open($0) }
+      .onContinueUserActivity(NSUserActivityTypeBrowsingWeb) { activity in
+        if let url = activity.webpageURL { Invite.shared.open(url) }
       }
       // The share extension shows the list as it is (ShareBridge).
       .onChange(of: accounts.shareList(friends), initial: true) { _, list in

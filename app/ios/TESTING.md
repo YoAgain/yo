@@ -58,8 +58,23 @@ APNs token), the camera (black; photos come from the library).
 | Offline (YO_HUB): Sign Up, Sign In with the recovery key say "Yo can’t reach its server" | ok | 220-221 |
 | Recovery key of a deleted account: "We couldn’t find your account" | ok | – |
 | Swipe a bar, then another: the first closes; Remove | ok | 205-207 |
-| Your Code (QR) sheet | ok; it encodes https://justyo.co/NAME, which nothing in the app opens (left as it is) | 200 |
+| Your Code (QR) sheet | ok; it encodes https://justyo.co/NAME (opened by the app since, see below) | 200 |
 | Accessibility audit (list, profile pages) | contrast of white on the brand's bars (by design), title not Dynamic Type (by design); the audit also flags the profile's black titles in a sheet, a false alarm | – |
+
+## Invite links and the first Yo (2026-11-14)
+
+With `xcrun simctl openurl DEV yo://add/NAME` (the same handler as https://justyo.co/NAME; universal links need the
+app's team in its id, which the Simulator build has not: the https link opens Safari there), against the dev hub.
+
+| Flow | Result |
+|---|---|
+| Signed in, link to someone not on the list: added once, on top; again: "Already Added" on their bar, no second bar | ok |
+| Signed in, link to a name nobody has: "No Such User" in Add Friend's field, nothing added | ok |
+| Signed in, link to one's own name: "That’s you" | ok |
+| Fresh install, link before the welcome ("NAME invited you" over Sign Up), app killed while typing the name, still there after the start; signed up: NAME and YoGPT on the list | ok |
+| Signed out, link, Sign In from the keychain list: NAME added (without a link it is not) | ok |
+| Link to the name then registered: not added, nothing said | ok |
+| First Yo: notifications declined: "First Yo Sent!" with Turn On Notifications (opens Settings) and Not Now; allowed: Awesome; the second Yo: nothing | ok |
 
 ## Bugs found and fixed (branch chaos-ios)
 

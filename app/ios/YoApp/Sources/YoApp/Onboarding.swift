@@ -68,6 +68,16 @@ struct Onboarding: View {
         }
       }
       VStack(spacing: 0) {
+        // An invite link opened before the account: its name comes on the list once there is one (Invite.swift).
+        if let invited = Invite.shared.pending {
+          Text("\(invited) invited you")
+            .font(.yo(17))
+            .opacity(0.85)
+            .lineLimit(1)
+            .minimumScaleFactor(0.7)
+            .padding(.bottom, 16)
+            .transition(.opacity)
+        }
         PrimaryButton("Sign Up") { go(.name) }
         Button("Sign In") { go(.logIn) }
           .font(.yo(18))
