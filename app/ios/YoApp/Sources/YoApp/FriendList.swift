@@ -439,7 +439,11 @@ struct FriendList: View {
       }
       ShareLink(
         item: accounts.account.map { Invite.link(for: $0.username) } ?? URL(string: "https://justyo.co")!,
-        message: Text("Yo! Add me on Yo:")
+        message: Text("Yo! Add me on Yo:"),
+        // What the share sheet shows at its top: whose link, and the app's icon (not a bare "justyo.co").
+        preview: SharePreview(
+          "Add \(accounts.account?.username ?? "Me") on Yo",
+          image: Image(uiImage: UIImage(named: "IconStandard") ?? UIImage()))
       ) {
         Text("Invite")
           .font(.yo(Metrics.rowFont))
