@@ -260,7 +260,7 @@ final class Inbox {
         await take(events, contacts: contacts, client: client, friends: friends)
         if !storageTaken {  // read by the core before its first receive, if registering could not
           storageTaken = true
-          await accounts.takeStorage(into: friends)
+          await accounts.takeStorage(into: friends, read: true)
         }
         fetchMedia(client: client)  // what a broken network left, also after a start
       } catch YoError.Replaced {

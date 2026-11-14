@@ -175,7 +175,8 @@ struct Onboarding: View {
     else { return }
     let transport = Hub.transport
     if let free = try? await Hub.run({ try usernameFree(transport: transport, username: typed) }) {
-      checked[skeleton] = free
+      // Taken by this phone's own try whose answer was lost (its key is kept): Continue takes it (`NewAccountKey`).
+      checked[skeleton] = free || NewAccountKey.has(typed)
     }
   }
 

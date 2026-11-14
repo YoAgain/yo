@@ -224,6 +224,13 @@ final class AccountStore {
   /// Signed in from a backup or the iCloud Keychain, and the account's storage not seen yet: its app icon is this
   /// phone's to take (`takeStorage`).
   private var restored = false
+  /// Writes to the storage, one after the other in the order made (`Hub.run` runs calls side by side).
+  private var storing: Task<Void, Never>?
+  /// This phone's friends from before the storage went up to it once (`takeStorage`); a new or restored account has
+  /// none to bring.
+  private var friendsSeeded: Bool = UserDefaults.standard.object(forKey: "storage.seeded") as? Bool ?? false {
+    didSet { UserDefaults.standard.set(friendsSeeded, forKey: "storage.seeded") }
+  }
 
   init() {
     account = UserDefaults.standard.data(forKey: Self.key).flatMap { try? JSONDecoder().decode(Account.self, from: $0) }
@@ -304,12 +311,13 @@ final class AccountStore {
     do {
       client = try await register(username, secret: NewAccountKey.secret(for: username))
     } catch AccountError.taken {
-      NewAccountKey.forget()
+      NewAccountKey.forget(username)
       throw AccountError.taken
     }
-    NewAccountKey.forget()
+    NewAccountKey.forget(username)
     guard let id = Hub.bytes(client.userId()) else { throw AccountError.noBackup }
     self.client = client
+    friendsSeeded = true
     SyncedAccount.left = nil
     account = Account(
       username: client.username() ?? username, userID: id, accountKey: client.accountSecret(), byPasskey: false)
@@ -484,6 +492,7 @@ final class AccountStore {
     if let code = sealed.code { RecoveryWords.save(code) }
     SyncedAccount.left = nil
     restored = true
+    friendsSeeded = true
     account = sealed.account
     SecureReminder.update(secured: true)
   }
@@ -520,6 +529,7 @@ final class AccountStore {
       byPasskey: same && item.byPasskey, byCode: same && item.byCode == true)
     if !same { SyncedAccount.delete(item.userID) }  // the old user is gone; the new one gets its own item
     self.restored = same
+    friendsSeeded = true
     account = restored
     SecureReminder.update(secured: restored.secured)
     return true
@@ -530,34 +540,45 @@ final class AccountStore {
   /// Friends known by user id, to the account's storage (`Friends.stored`): changed ones set, removed ones taken off.
   /// The core keeps them at once and writes them to the hub with its next sync.
   func store(_ changed: [Friend], removed: [String]) {
-    guard let client else { return }
     // A friend's name at most 64 bytes in the storage: a longer one (many emoji) is kept by user id alone.
     let set = changed.compactMap { friend in
       friend.user.map { ($0, friend.name.utf8.count <= 64 ? friend.name : nil, UInt8(friend.color % Color.rows.count)) }
     }
-    Task {
-      _ = try? await Hub.run {
-        for (user, name, color) in set { try? client.setFriend(user: user, name: name, color: color) }
-        for user in removed { try? client.removeFriend(user: user) }
-      }
+    toStorage { client in
+      for (user, name, color) in set { try? client.setFriend(user: user, name: name, color: color) }
+      for user in removed { try? client.removeFriend(user: user) }
     }
   }
 
-  /// The app icon chosen in Appearance, for the account's next phone.
-  func storeAppIcon(_ icon: String?) {
-    guard let client else { return }
-    Task { _ = try? await Hub.run { client.setAppIcon(icon: icon) } }
+  /// The app icon chosen in Appearance through `client`, for the account's next phone: not if another account is in
+  /// since.
+  func storeAppIcon(_ icon: String?, by client: YoClient?) {
+    guard client === self.client else { return }
+    toStorage { $0.setAppIcon(icon: icon) }
   }
 
-  /// The storage as the core has it, into the app (when the core opened, and after the first sync, which reads it if
-  /// registering could not): its friends into the list (`Friends.take`); after a restore, its app icon. An icon is
-  /// never written back from here: only Appearance changes it.
-  func takeStorage(into friends: Friends) async {
-    guard let client, let (kept, icon) = try? await Hub.run({ (client.friends(), client.appIcon()) }),
-      client === self.client
+  /// A write to this account's storage, after the ones before it.
+  private func toStorage(_ write: @escaping @Sendable (YoClient) -> Void) {
+    guard let client else { return }
+    let before = storing
+    storing = Task {
+      await before?.value
+      _ = try? await Hub.run { write(client) }
+    }
+  }
+
+  /// The storage as the core has it, into the app: when the core opened, and after the first sync (`read`: the core
+  /// has read it by then, if registering could not). Its friends into the list (`Friends.take`; this phone's own go
+  /// up once, for an account from before the storage); after a restore, its app icon. An icon is never written back
+  /// from here: only Appearance changes it.
+  func takeStorage(into friends: Friends, read: Bool = false) async {
+    guard let client else { return }
+    await storing?.value  // this phone's own writes first
+    guard let (kept, icon) = try? await Hub.run({ (client.friends(), client.appIcon()) }), client === self.client
     else { return }
-    friends.take(kept)
-    guard restored, !kept.isEmpty || icon != nil else { return }  // not read yet: the next time
+    friends.take(kept, seed: !friendsSeeded)
+    friendsSeeded = true
+    guard restored, read || !kept.isEmpty || icon != nil else { return }  // maybe not read yet: after the first sync
     restored = false
     if icon != UIApplication.shared.alternateIconName {
       try? await UIApplication.shared.setAlternateIconName(icon)
@@ -609,6 +630,8 @@ final class AccountStore {
     account = nil
     client = nil
     restored = false
+    storing = nil
+    friendsSeeded = false
     securing = nil
     newPasskey = nil
     passkeyTurnedOff = false
@@ -651,13 +674,12 @@ enum AccountError: LocalizedError {
 /// that key; a new key would find it taken by the lost try). One per name; forgotten once the hub took the name or
 /// said it is taken.
 enum NewAccountKey {
-  private static func query(_ name: String? = nil) -> [String: Any] {
-    var query: [String: Any] = [
+  private static func query(_ name: String) -> [String: Any] {
+    [
       kSecClass as String: kSecClassGenericPassword,
       kSecAttrService as String: "app.justyo.new-account-key",
+      kSecAttrAccount as String: Username.skeleton(name),
     ]
-    if let name { query[kSecAttrAccount as String] = Username.skeleton(name) }
-    return query
   }
 
   /// The key kept for this name, else a new one, kept.
@@ -679,7 +701,13 @@ enum NewAccountKey {
     return secret
   }
 
-  static func forget() { SecItemDelete(query() as CFDictionary) }
+  /// Whether a key is kept for this name: a try whose answer was lost, so the name the hub calls taken may be this
+  /// phone's own.
+  static func has(_ name: String) -> Bool {
+    SecItemCopyMatching(query(name) as CFDictionary, nil) == errSecSuccess
+  }
+
+  static func forget(_ name: String) { SecItemDelete(query(name) as CFDictionary) }
 }
 
 /// The recovery words on this phone, to look up in the profile: in the keychain, for this device only (not in a

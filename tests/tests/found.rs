@@ -31,6 +31,24 @@ fn a_registration_whose_answer_was_lost_keeps_the_name() {
     assert_eq!(texts(&me.sync(0).unwrap()), ["found you"], "the name is this device's");
 }
 
+/// Every answer lost, also the core's own tries: the app keeps the account secret it made (iOS: `NewAccountKey`) and
+/// its next try, with the same secret, is the same user with the name.
+#[test]
+fn the_apps_own_try_again_with_its_secret_keeps_the_name() {
+    let hub = TestHub::start();
+    let name = format!("Kept{}", random_u64() % 100_000);
+    let http = Http::new(hub.url());
+    for _ in 0..3 {
+        http.fault("/v1/register", Fault::LoseAnswer);
+    }
+    let secret: [u8; 32] = std::array::from_fn(|_| random_u64() as u8);
+    assert!(matches!(by_name(http.clone(), &name, Some(secret)), Err(Error::Network(_))), "every try lost");
+    let mut me = by_name(http, &name, Some(secret)).expect("the name is this secret's");
+    let mut other = by_name(Http::new(hub.url()), &format!("Tpek{}", random_u64() % 100_000), None).unwrap();
+    other.send(&name, Content::Text("still you".into())).unwrap();
+    assert_eq!(texts(&me.sync(0).unwrap()), ["still you"]);
+}
+
 /// Two processes of one device (the app and an extension, or a process restarted after a crash) signing the same
 /// request in the same millisecond made the same signature, which the hub takes once: the second got `401`. The
 /// time signed is now kept in the state, and a `401` is tried once more, signed anew.

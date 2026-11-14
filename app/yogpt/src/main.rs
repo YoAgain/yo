@@ -680,8 +680,12 @@ fn send_picture(bot: &Bot, user: &str) -> Result<(Vec<Event>, bool), Error> {
     let recent = bot.recent.lock().unwrap_or_else(PoisonError::into_inner).of(user).cloned();
     let picked = bot.options.replies.as_deref().and_then(|dir| pick_picture(dir, recent.as_ref()));
     let Some((name, bytes, width, height)) = picked else { return bot.client().send_yo(user).map(|e| (e, false)) };
-    bot.recent.lock().unwrap_or_else(PoisonError::into_inner).sent(user, name);
-    send_this_picture(bot, user, &bytes, width, height)
+    let sent = send_this_picture(bot, user, &bytes, width, height);
+    // Only a picture that went counts against a repeat: a plain Yo instead keeps the sender's last 50 as they were.
+    if matches!(sent, Ok((_, true))) {
+        bot.recent.lock().unwrap_or_else(PoisonError::into_inner).sent(user, name);
+    }
+    sent
 }
 
 /// A Yo with this picture; a plain one when the hub takes no picture now. True when it had the picture.

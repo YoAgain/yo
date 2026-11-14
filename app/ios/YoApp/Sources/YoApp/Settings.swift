@@ -865,10 +865,11 @@ struct AppearancePage: View {
           ForEach(icons, id: \.image) { icon in
             Button {
               guard current != icon.name else { return }
+              let client = accounts.client  // the account it was chosen in
               Task {
                 try? await UIApplication.shared.setAlternateIconName(icon.name)
                 current = UIApplication.shared.alternateIconName
-                if current == icon.name { accounts.storeAppIcon(icon.name) }  // for the account's next phone
+                if current == icon.name { accounts.storeAppIcon(icon.name, by: client) }  // for its next phone
               }
             } label: {
               VStack(spacing: 8) {

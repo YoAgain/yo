@@ -165,11 +165,10 @@ final class Friends {
   }
 
   /// The account's storage (spec 6.9) as the core has it, into this list: friends kept there that this phone does not
-  /// have come on the list (after a restore: the whole list), at the end, in their colour and blocked as kept there
-  /// (a friend already here keeps its block: this phone's blocks went through the core). Nothing is written back.
-  /// Then what this phone has and the storage lacks goes up (friends from before the storage, or changed while it
-  /// could not be read).
-  func take(_ kept: [YoFriend]) {
+  /// have come on the list (after a restore: the whole list), at the end, in their colour; blocks as kept there (the
+  /// core holds to them too). Nothing is written back, but with `seed` (once, for an account from before the
+  /// storage) the friends this phone has and the storage lacks go up.
+  func take(_ kept: [YoFriend], seed: Bool) {
     var list = all
     var changed = false
     for friend in kept {
@@ -178,8 +177,9 @@ final class Friends {
       if let index = list.firstIndex(where: { $0.user == friend.user })
         ?? list.firstIndex(where: { $0.user == nil && Username.skeleton($0.name) == skeleton })
       {
-        if list[index].user != friend.user {
+        if list[index].user != friend.user || list[index].blocked != friend.blocked {
           list[index].user = friend.user
+          list[index].blocked = friend.blocked
           changed = true
         }
       } else if !list.contains(where: { !$0.gone && Username.skeleton($0.name) == skeleton }) {
@@ -190,6 +190,7 @@ final class Friends {
       }
     }
     if changed { quietly { all = list } }
+    guard seed else { return }
     let keptUsers = Dictionary(kept.map { ($0.user, $0) }, uniquingKeysWith: { a, _ in a })
     let missing = all.filter { friend in
       guard let user = friend.user else { return false }
