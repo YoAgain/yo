@@ -32,10 +32,13 @@ enum Prefetch {
       guard case .message(_, _, let kind) = event else { return nil }
       return kind.media?.media
     }
-    guard !media.isEmpty else { return }
+    guard !media.isEmpty, let owner = Hub.bytes(client.userId())?.base64EncodedString() else { return }
     try? FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
     for one in media where one.size <= largest {
-      guard Date.now < deadline else { return }
+      // Room to write it, with plenty to spare: a fetch whose file then cannot be written has used this device's
+      // fetch at the hub, and the photo would be lost. Without, the app fetches it itself (and keeps it in memory
+      // until it can write).
+      guard Date.now < deadline, room(for: one.size, in: directory) else { return }
       guard let file = file(one), let mark = mark(one), !FileManager.default.fileExists(atPath: file.path) else {
         continue
       }
@@ -44,8 +47,18 @@ enum Prefetch {
         atPath: mark.path, contents: nil, attributes: [.protectionKey: FileProtectionType.completeUnlessOpen]) else { continue }
       defer { try? FileManager.default.removeItem(at: mark) }
       guard let data = try? client.fetchMedia(media: one) else { continue }
+      // Still this account's (the app publishes its friends with its own id; signed out meanwhile, it does not, or
+      // another account's): an old account's photo is not left here.
+      guard ShareBridge.readList()?.owner == owner else { return }
       try? data.write(to: file, options: [.atomic, .completeFileProtectionUnlessOpen])
     }
+  }
+
+  /// Whether the disk has room for `size` bytes and 100 MB more.
+  private static func room(for size: UInt32, in directory: URL) -> Bool {
+    let free = (try? directory.resourceValues(forKeys: [.volumeAvailableCapacityForImportantUsageKey]))?
+      .volumeAvailableCapacityForImportantUsage
+    return (free ?? 0) > Int64(size) + 100 << 20
   }
 
   // MARK: The app

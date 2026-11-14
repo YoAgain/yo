@@ -656,11 +656,12 @@ struct FriendList: View {
       return
     }
     let client = accounts.client  // the account tapped in: a photo waiting its 1.5 seconds never goes from the next one
+    let at = Date.now
     run(friend, "Sent 📷") {
       var taken = library
       if taken == nil { taken = await camera.photo() }
       guard let taken, let file = await Task.detached(operation: { MediaFile.photo(taken) }).value else { return nil }
-      return await stage(file, to: friend, from: client, keep: library == nil)
+      return await stage(file, to: friend, from: client, at: at, keep: library == nil)
     }
   }
 
@@ -690,11 +691,14 @@ struct FriendList: View {
   /// A photo or video taken: into the library at once (`keep`, as Settings want it; not one picked from there), and
   /// into the outbox, whose upload goes during the undo time; its Yo goes when that is over (`Prepared.send`), and an
   /// undone one is taken out again. Only from `client`, the account the gesture began in.
-  private func stage(_ file: MediaFile, to friend: Friend, from client: YoClient?, keep: Bool = true) async -> Prepared? {
+  private func stage(
+    _ file: MediaFile, to friend: Friend, from client: YoClient?, at: Date, keep: Bool = true
+  ) async -> Prepared? {
     if keep { Task.detached(priority: .utility) { file.keepIfWanted() } }
     let id = UUID()
     guard let client, client === accounts.client,
-      await outbox.send(file, to: friend.user ?? friend.name, from: client, accounts: accounts, id: id, held: true)
+      await outbox.send(
+        file, to: friend.user ?? friend.name, from: client, accounts: accounts, id: id, held: true, at: at)
     else { return nil }
     let outbox = outbox
     return Prepared(
@@ -715,9 +719,10 @@ struct FriendList: View {
       recordingFor = nil
       Haptic.tap()
       let client = accounts.client
+      let at = Date.now
       run(friend, "Sent 🎥") {
         guard let recording = await camera.stopVideo(), let file = await MediaFile.video(recording) else { return nil }
-        return await stage(file, to: friend, from: client)
+        return await stage(file, to: friend, from: client, at: at)
       }
     }
   }

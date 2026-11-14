@@ -91,8 +91,8 @@ final class MediaOutbox {
     var next = Date.distantPast
     /// The hub has the blob: only its Yo is left (nil in items saved before this was kept).
     var uploaded: Bool?
-    /// Its Yo waits for the undo time (`release`), its upload goes meanwhile. Read again after a restart, it is
-    /// released: an app ended within the undo time sends what was tapped.
+    /// Its Yo waits for the undo time (`release`), its upload goes meanwhile. Still held when read again after a
+    /// restart (the app ended within the undo time, or an undo that could not be saved): never sent.
     var held: Bool?
   }
 
@@ -129,11 +129,9 @@ final class MediaOutbox {
       guard let read = try? Data(contentsOf: Self.index) else { return false }
       data = read
     }
-    items = (data.flatMap { try? JSONDecoder().decode([Item].self, from: $0) } ?? []).map { item in
-      var item = item
-      item.held = nil
-      return item
-    }
+    let read = data.flatMap { try? JSONDecoder().decode([Item].self, from: $0) } ?? []
+    items = read.filter { $0.held != true }
+    for gone in read where gone.held == true { try? FileManager.default.removeItem(at: Self.blob(gone.id)) }
     loaded = true
     waiting = items.count
     return true
@@ -153,9 +151,10 @@ final class MediaOutbox {
   /// from one signed in since); it goes as soon as the hub takes it. True once it is on disk, its blob and the queue.
   /// `id`: one already in line is not put in again (a share taken in twice, the app ended before its note went).
   /// `held`: its upload goes at once, its Yo only once released (`release`), or never (`discard`): the undo time.
+  /// `at`: when it was taken; to each friend they go in that order, whichever was ready first.
   func send(
     _ file: MediaFile, to friend: String, from client: YoClient?, accounts: AccountStore, id: UUID = UUID(),
-    held: Bool = false
+    held: Bool = false, at: Date = .now
   ) async -> Bool {
     guard let client, client === accounts.client, load() else { return false }
     guard !items.contains(where: { $0.id == id }) else { return true }
@@ -169,7 +168,7 @@ final class MediaOutbox {
     guard !items.contains(where: { $0.id == id }) else { return true }  // taken in meanwhile
     var item = Item(
       id: id, owner: owner, to: friend, kind: file.kind, media: StoredMedia(sealed.media),
-      durationMs: file.durationMs, created: .now)
+      durationMs: file.durationMs, created: at)
     item.held = held ? true : nil
     let blob = Self.blob(item.id)
     guard await MediaStorage.write(sealed.ciphertext, to: blob, .completeFileProtectionUntilFirstUserAuthentication)
@@ -178,7 +177,7 @@ final class MediaOutbox {
       try? FileManager.default.removeItem(at: blob)
       return false
     }
-    items.append(item)
+    items.insert(item, at: items.firstIndex { $0.created > item.created } ?? items.endIndex)
     guard save() else {
       items.removeAll { $0.id == item.id }
       waiting = items.count
@@ -550,8 +549,9 @@ final class ReceivedMedia {
       }
       // Fetched by the notification service as its push came: there at once.
       var data = unwritten[one.id] ?? Prefetch.take(media)
-      // There and locked: it reads once the iPhone is unlocked (the hub's copy is this device's fetch already).
-      if data == nil && Prefetch.has(media) { continue }
+      // There and locked: it reads once the iPhone is unlocked (the hub's copy is this device's fetch already). Being
+      // fetched by the service: its file, rather than a second fetch (which would take another device's).
+      if data == nil && (Prefetch.has(media) || Prefetch.underWay(media)) { continue }
       if data == nil {
         do {
           data = try await Hub.run { try client.fetchMedia(media: media) }
