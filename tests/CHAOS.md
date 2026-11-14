@@ -55,6 +55,7 @@ hub's database audited after every run: no orphan rows, every blob with its file
 | 8 | 12, 1000 accounts: a burst never arrived | A chat started by someone blocked was not joined but ignored for good: after the unblock, everything the sender wrote in it was discarded unseen, without even counting as dropped. | A blocked user's Welcome is joined quietly (no `NewChat`); its messages are dropped while the block holds; after the unblock the chat works (spec 4.8). | `found.rs` `a_chat_started_while_blocked_works_after_the_unblock` |
 | 9 | review of the restart (Codex) | Restart: the hub could name another user for the restarted chat; a made-up later epoch in an unsigned delivery marked a healthy chat lost (the hub's `404`); fetching recursed on what it fetched; two restarts at once lost each other's history; a peer waiting for confirmation lost the waiting messages; more than 64 missing commits counted as lost. A blocked user's quietly joined chat got updates and names. | The hub answers `410` for a commit it no longer keeps, `404` for one it never had, and only `410` loses a chat; a restart only with the hub's answer for that user id; fetched commits must move the group on and fetch nothing themselves; old histories move into the new chat; `Unconfirmed` waits; more commits are fetched next time; strictly increasing `sent_at` and a receiver's memory of 2000 messages make copies harmless; no updates or names to a blocked peer. | `deadchat.rs` `a_made_up_epoch_does_not_restart_a_chat` |
 | 10 | 13, 1200 accounts: #28 after #29 | A message renewed for a user's new devices went to the back of the outbox, behind a later message already made for the new devices (queued while the renewal was held by a `429`): the user got them out of order. | The renewed message takes the later ones of that user and chat behind it again. | the chaos ledger (order is checked per sender and receiver) |
+| 11 | review of the fixes (Codex) | Catching up stopped at 64 commits and rolled back what it fetched, for ever; a commit accepted between two reads of the hub was answered `410`; the messages sent again after a restart were in group order, not sent order. | Up to 1000 commits at once, the target checked after the last; the hub reads the commit and the group's epoch under one lock; the replay sorted by `sent_at`. | deadchat.rs, the hub's tests |
 
 Not bugs, but noted:
 
@@ -70,6 +71,16 @@ Not bugs, but noted:
   could be kept in the database if that matters.
 - A photo whose fetch counted at the hub and whose answer was then lost is gone for that device (spec 6.8: a fetch
   counts when the hub handed on its last byte).
+
+## Left open
+
+- The received-message memory (dedupe after a restart) is keyed by the sender's user and the plaintext, whose time
+  rises per device: two devices of one user sending the same thing in the same millisecond would be one. v1 has one
+  device per account; with more, a message needs an id of its own (device and counter), kept through a restart.
+- A renewed message keeps the later messages of its user *in the same chat* behind it; two chats with the same user
+  (4.5, or a restart at the same time on both sides) are ordered each on its own.
+- `tests/CHAOS.md` runs are on one machine: 1500 accounts at once (2.8 GB for clients with full MLS state, hub and
+  ledger in one process) is where its 15 GB end; more accounts went through in sequence across runs.
 
 ## How a chat can die, besides
 

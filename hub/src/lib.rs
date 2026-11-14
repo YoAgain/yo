@@ -856,10 +856,10 @@ async fn fetch_commit(
     hub.limit_ip("commit", peer, &headers, hub.config.limits.commit_per_ip_minute, MINUTE)?;
     let group: GroupId = path_id(&group)?;
     match hub.db.commit_envelope(&group, epoch)? {
-        Some(envelope) => Ok(ok(envelope)),
+        Ok(envelope) => Ok(ok(envelope)),
         // Accepted once, kept no more (past its 30 days): a member that needs it cannot follow the group (4.9).
-        None if hub.db.group_epoch(&group)?.is_some_and(|current| current > epoch) => Err(refuse(StatusCode::GONE)),
-        None => Err(refuse(StatusCode::NOT_FOUND)),
+        Err(true) => Err(refuse(StatusCode::GONE)),
+        Err(false) => Err(refuse(StatusCode::NOT_FOUND)),
     }
 }
 

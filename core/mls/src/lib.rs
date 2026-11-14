@@ -52,8 +52,8 @@ const SEEN: usize = 2000;
 const KEPT_FOR_RESTART: usize = 64;
 /// How often a registration whose answer did not come is tried again, with the same account key.
 const REGISTER_TRIES: usize = 2;
-/// Commits fetched at most for one message from a later epoch.
-const MAX_COMMITS_FETCHED: usize = 64;
+/// Commits fetched at most at once: more than a month of a busy chat (older ones are gone from the hub anyway).
+const MAX_COMMITS_FETCHED: usize = 1000;
 /// How often a send repairs groups and tries again before it leaves the rest to the next call.
 const REPAIR_ROUNDS: usize = 3;
 
@@ -1334,6 +1334,9 @@ impl Client {
                 return Err(Error::Protocol("a fetched commit did not move the group on"));
             }
         }
+        if self.load(group_id)?.epoch().as_u64() >= epoch {
+            return Ok(());
+        }
         // More than one call fetches: the rest next time, the message waiting at the hub meanwhile.
         Err(Error::Network("more commits to fetch".into()))
     }
@@ -1434,6 +1437,8 @@ impl Client {
         }
         // The older chats go; one this device restarted itself at the same time and the peer has not answered in
         // stays (both are kept, the smaller id used, 4.5).
+        // In the order they were sent, whichever chat they were in.
+        again.sort_by_key(|plaintext| Message::decode(plaintext).map_or(0, |m| m.sent_at_ms));
         let older: Vec<&String> = others.iter().filter(|k| !self.state.chats[*k].restarted).collect();
         for other in older {
             self.drop_chat(other);
