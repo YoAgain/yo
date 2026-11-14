@@ -35,7 +35,7 @@ struct NewGroupSheet: View {
           Text("Groups are coming soon.")
         }
       }
-      .navigationTitle("New Group")
+      .navigationTitle("Add Group")  // as the list's bar that opens it
       .navigationBarTitleDisplayMode(.inline)
       .toolbar {
         ToolbarItem(placement: .cancellationAction) {
