@@ -14,8 +14,8 @@ use yo_tests::Http;
 struct File(String);
 
 impl Store for File {
-    fn save(&self, blob: Vec<u8>) {
-        std::fs::write(&self.0, blob).expect("state file");
+    fn save(&self, blob: Vec<u8>) -> Result<(), String> {
+        std::fs::write(&self.0, blob).map_err(|e| e.to_string())
     }
 }
 
@@ -42,7 +42,7 @@ fn main() {
         Ok(blob) => Client::restore(http, &blob, &KEY).expect("restore"),
         Err(_) => Client::register_username(http, &name, None, None, Push::none()).expect("register"),
     };
-    client.persist_to(Arc::new(File(state)), KEY);
+    client.persist_to(Arc::new(File(state)), KEY).expect("state file");
     if sync {
         let events = client.sync(0).expect("sync");
         println!("synced: {} events", events.len());
