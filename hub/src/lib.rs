@@ -61,13 +61,13 @@ const DAY: Duration = Duration::from_secs(24 * 3600);
 /// at once is refused (`429`) rather than let it hold the hub's memory and connections.
 pub const INBOX_AT_ONCE: u32 = 4;
 
-/// An inbox request under way; its place is given back when dropped.
-struct Fetching<'a> {
-    hub: &'a Hub,
+/// An inbox request under way; its place is given back when dropped (`held`: once its answer has been sent).
+struct Fetching {
+    hub: Arc<Hub>,
     device: DeviceId,
 }
 
-impl Drop for Fetching<'_> {
+impl Drop for Fetching {
     fn drop(&mut self) {
         let mut fetching = self.hub.fetching.lock().unwrap_or_else(PoisonError::into_inner);
         if let Some(n) = fetching.get_mut(&self.device) {
@@ -122,6 +122,23 @@ fn signature_of(headers: &HeaderMap, now: u64) -> Option<(u64, [u8; 64])> {
 /// The app a request names (`Yo-App`, spec 6.3), if it is one.
 fn named_app(headers: &HeaderMap) -> Option<&str> {
     header(headers, api::HEADER_APP).filter(|a| config::app(a).is_some())
+}
+
+/// An answer whose body holds `guard` until it has been sent, or cut off: what it bounds (memory, connections) is
+/// not free before.
+fn held<G: Send + 'static>(body: Vec<u8>, guard: G) -> axum::response::Response {
+    use futures_util::StreamExt;
+    let len = body.len();
+    let chunk = futures_util::stream::iter([Ok::<_, std::convert::Infallible>(Bytes::from(body))]);
+    let body = chunk.map(move |chunk| {
+        let _held = &guard;
+        chunk
+    });
+    axum::response::Response::builder()
+        .header(axum::http::header::CONTENT_TYPE, "application/octet-stream")
+        .header(axum::http::header::CONTENT_LENGTH, len)
+        .body(axum::body::Body::from_stream(body))
+        .unwrap_or_default()
 }
 
 /// An id in a path: base64url of exactly `N` bytes, or the route does not exist.
@@ -552,14 +569,14 @@ impl Hub {
     }
 
     /// A place for one more inbox request of a device, if it has fewer than `INBOX_AT_ONCE` under way.
-    fn fetching(&self, device: DeviceId) -> Option<Fetching<'_>> {
+    fn fetching(self: &Arc<Self>, device: DeviceId) -> Option<Fetching> {
         let mut fetching = self.fetching.lock().unwrap_or_else(PoisonError::into_inner);
         let n = fetching.entry(device).or_default();
         if *n >= INBOX_AT_ONCE {
             return None;
         }
         *n += 1;
-        Some(Fetching { hub: self, device })
+        Some(Fetching { hub: self.clone(), device })
     }
 
     /// A long poll's wait for mail to `device`; the device's entry goes with its last waiter, also when the request is
@@ -847,9 +864,9 @@ async fn set_push(State(hub): Hubs, method: Method, uri: Uri, headers: HeaderMap
     Ok(StatusCode::NO_CONTENT)
 }
 
-async fn inbox(State(hub): Hubs, method: Method, uri: Uri, headers: HeaderMap) -> Res<(StatusCode, Vec<u8>)> {
+async fn inbox(State(hub): Hubs, method: Method, uri: Uri, headers: HeaderMap) -> Res<axum::response::Response> {
     let device = hub.authenticate(&method, &uri, &headers, &[])?;
-    let _fetching = hub.fetching(device.device_id).ok_or_else(|| refuse(StatusCode::TOO_MANY_REQUESTS))?;
+    let fetching = hub.fetching(device.device_id).ok_or_else(|| refuse(StatusCode::TOO_MANY_REQUESTS))?;
     let wait_s = uri
         .query()
         .and_then(|q| q.split('&').find_map(|kv| kv.strip_prefix("wait=")))
@@ -873,7 +890,7 @@ async fn inbox(State(hub): Hubs, method: Method, uri: Uri, headers: HeaderMap) -
         key_packages_left: hub.db.key_packages_left(&device.device_id)?,
         items: items.into_iter().map(|(id, envelope)| api::InboxItem { id, envelope: envelope.into() }).collect(),
     };
-    Ok(ok(encode(&inbox)))
+    Ok(held(encode(&inbox), fetching))
 }
 
 async fn ack(State(hub): Hubs, method: Method, uri: Uri, headers: HeaderMap, body: Bytes) -> Res<StatusCode> {
@@ -1129,5 +1146,15 @@ mod tests {
         drop(held);
         assert!(hub.fetching([1; 16]).is_some(), "places are given back");
         assert!(hub.fetching.lock().unwrap().is_empty(), "and forgotten");
+    }
+
+    #[tokio::test]
+    async fn an_inbox_answer_holds_its_place_until_it_is_sent() {
+        let hub = Hub::new(Config::for_tests(), Arc::new(push::Recorder::default())).unwrap();
+        let answer = held(vec![7; 1000], hub.fetching([1; 16]).unwrap());
+        assert_eq!(hub.under_way(), (0, 1), "made, not sent");
+        let body = axum::body::to_bytes(answer.into_body(), usize::MAX).await.unwrap();
+        assert_eq!(body.len(), 1000);
+        assert_eq!(hub.under_way(), (0, 0), "sent");
     }
 }
