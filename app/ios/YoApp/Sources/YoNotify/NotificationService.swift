@@ -90,38 +90,8 @@ final class NotificationService: UNNotificationServiceExtension {
   private static func newest() -> (Found, YoClient?) {
     guard let client = Perf.timed("nse.open", { Guest.open(within: lockWait, timeout: 10) }) else { return (.unread, nil) }
     guard let events = Perf.timed("nse.sync", { try? client.sync(waitS: 0) }) else { return (.unread, client) }
-    var senders: [String: (count: Int, sentAtMs: UInt64, kind: MediaFile.Kind?)] = [:]
-    for event in events {
-      guard case .message(let user, let sentAtMs, let message) = event else { continue }
-      let kind: MediaFile.Kind?
-      switch message {
-      case .yo: kind = nil
-      case .photo: kind = .photo
-      case .video: kind = .video
-      default: continue  // nothing the app shows
-      }
-      let before = senders[user]
-      let newer = before.map { sentAtMs >= $0.sentAtMs } ?? true
-      senders[user] = ((before?.count ?? 0) + 1, newer ? sentAtMs : before!.sentAtMs, newer ? kind : before!.kind)
-    }
-    guard !senders.isEmpty else { return (.nothingNew, client) }
-    let yos = Found.yos(
-      senders.sorted { $0.value.sentAtMs > $1.value.sentAtMs }.map { user, yos in
-        ShareBridge.Yos(
-          name: name(of: user, client: client), user: user, count: yos.count, kind: yos.kind,
-          id: "\(user)/\(yos.sentAtMs)")
-      })
-    return (yos, client)
-  }
-
-  /// The name as the app's list shows it (ShareBridge: the friends it published), else as the core knows them.
-  private static func name(of user: String, client: YoClient) -> String {
-    let owner = Hub.bytes(client.userId())?.base64EncodedString()
-    if let list = ShareBridge.readList(), list.owner == owner, let friend = list.friends.first(where: { $0.to == user }) {
-      return friend.name
-    }
-    let contact = client.contacts().first { $0.user == user }
-    return contact?.handles.first ?? contact?.name ?? "Someone"
+    let yos = ShareBridge.yos(in: events, client: client)
+    return (yos.isEmpty ? .nothingNew : .yos(yos), client)
   }
 
   /// The content and its handler, delivered once (by the work or by the time running out, whichever first).
