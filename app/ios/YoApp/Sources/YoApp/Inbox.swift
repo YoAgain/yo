@@ -189,7 +189,7 @@ final class Inbox {
     let target = friend.user ?? friend.name
     do {
       let (events, contacts, waiting) = try await Hub.run {
-        (try client.sendYo(to: target), client.contacts(), client.waiting())
+        try Perf.timed("send.core") { (try client.sendYo(to: target), client.contacts(), client.waiting()) }
       }
       guard client === accounts.client else { return nil }  // signed out meanwhile: nothing of it stays
       if waiting > 0 { deliverLater(accounts: accounts, friends: friends) }
@@ -269,6 +269,7 @@ final class Inbox {
       }
       do {
         let (events, contacts) = try await Hub.run { (try client.sync(waitS: 25), client.contacts()) }
+        Perf.mark("listen.events \(events.count)")
         guard client === accounts.client else { continue }  // signed out meanwhile: not for this account
         await take(events, contacts: contacts, client: client, friends: friends)
         if !storageTaken {  // read by the core before its first receive, if registering could not
@@ -317,6 +318,8 @@ final class Inbox {
   /// core may forget this batch, all of it that is kept (another call's batch is its own: the core acknowledges each
   /// as named); what could not be kept comes again after a restart. `contacts`: the core's, read with the events.
   private func take(_ events: [YoEvent], contacts: [YoContact], client: YoClient, friends: Friends) async {
+    let start = Perf.on ? CACurrentMediaTime() : 0
+    defer { if Perf.on { Perf.mark("take \(events.count) " + String(format: "%.1f ms", (CACurrentMediaTime() - start) * 1000)) } }
     friends.markGone(contacts)  // a delivery found their account gone (`NotOnYo` from now on)
     guard !events.isEmpty else { return }
     // Per sender: how many Yos, the newest's kind, name and id; for a notification when the app is not in front.
