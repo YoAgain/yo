@@ -374,7 +374,7 @@ impl Client {
                 }
                 status::NOT_FOUND => {}
                 status::GONE => return Err(Error::Replaced),
-                other if other == status::RATE_LIMITED || other >= 500 => return Err(Error::Refused(other)),
+                other if crate::retryable(&Error::Refused(other)) => return Err(Error::Refused(other)),
                 // An older hub without storage: nothing to fetch.
                 _ => {}
             }
