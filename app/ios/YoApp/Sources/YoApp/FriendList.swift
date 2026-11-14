@@ -618,6 +618,8 @@ struct FriendList: View {
   // MARK: Sending
 
   private func send(to friend: Friend) {
+    Perf.mark("tap.action")
+    defer { PerfProbe.frame("tap") }
     // A tap while a bar is swiped open closes it, as in Mail; it sends nothing.
     guard swiped == nil else { return withAnimation(.snappy) { swiped = nil } }
     sends += 1
@@ -804,6 +806,7 @@ extension FriendList {
   private func changes(_ content: some View) -> some View {
     content
       .onChange(of: inbox.arrived, initial: true) { arrived() }
+      .onAppear { PerfProbe.install() }
       // While the list is on screen: Yos come in from the hub.
       .task { await inbox.listen(accounts: accounts, friends: friends) }
       .onChange(of: onScreen) { startClocks() }
@@ -826,6 +829,7 @@ extension FriendList {
     content
       .sensoryFeedback(.impact(weight: .heavy), trigger: cheers)
       .sensoryFeedback(.impact, trigger: sends)
+      .onChange(of: sends) { Perf.mark("tap.haptic") }
       .sensoryFeedback(.start, trigger: recordingFor) { (_: Friend?, new: Friend?) in new != nil }
       .sensoryFeedback(.selection, trigger: viewing) { (old: [Arrival]?, new: [Arrival]?) in old == nil && new != nil }
   }
@@ -852,6 +856,8 @@ extension FriendList {
       runs[arrival.from, default: (arrival.id, 0)].count += 1
     }
     cheers += 1
+    Perf.mark("arrived \(batch.count)")
+    PerfProbe.frame("arrived")
     for name in senders { rise(name) }  // on top as soon as no bar is being tapped, all in one step
     withAnimation(.snappy(duration: 0.2)) {  // the words make room without a bounce
       for name in senders {

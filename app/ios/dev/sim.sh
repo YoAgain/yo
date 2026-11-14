@@ -16,6 +16,8 @@ set -euo pipefail
 here=$(cd "$(dirname "$0")" && pwd)
 [ -f "$here/local.env" ] && . "$here/local.env"
 derived=${YO_SIM_DERIVED:-$here/sim/build}
+# YO_SIM_CONFIG=Release: the app optimized, as on the iPhone (for measuring, TESTING.md); Debug by default.
+config=${YO_SIM_CONFIG:-Debug}
 PATH="$HOME/.cargo/bin:$PATH"
 
 udid() { xcrun simctl list devices -j | python3 -c 'import json,sys; n=sys.argv[1]; print(next((d["udid"] for r in json.load(sys.stdin)["devices"].values() for d in r if d["name"]==n), ""))' "$1"; }
@@ -24,7 +26,7 @@ case ${1:-} in
   build)
     YO_CORE_TARGET=aarch64-apple-ios-sim "$here/core.sh"
     (cd "$here/sim" && "${XCODEGEN:-xcodegen}" generate --quiet)
-    xcodebuild build-for-testing -quiet -project "$here/sim/YoSim.xcodeproj" -scheme YoSim \
+    xcodebuild build-for-testing -quiet -project "$here/sim/YoSim.xcodeproj" -scheme YoSim -configuration "$config" \
       -destination 'generic/platform=iOS Simulator' -derivedDataPath "$derived"
     ;;
   device)
@@ -37,8 +39,8 @@ case ${1:-} in
     echo "$u"
     ;;
   install)
-    xcrun simctl install "$(udid "$2")" "$derived/Build/Products/Debug-iphonesimulator/YoApp.app"
-    xcrun simctl install "$(udid "$2")" "$derived/Build/Products/Debug-iphonesimulator/YoNotifyProbe.app"
+    xcrun simctl install "$(udid "$2")" "$derived/Build/Products/$config-iphonesimulator/YoApp.app"
+    xcrun simctl install "$(udid "$2")" "$derived/Build/Products/$config-iphonesimulator/YoNotifyProbe.app"
     ;;
   notify)
     made=$(xcrun simctl launch --console-pty --terminate-running-process "$(udid "$2")" app.justyo.ios.dev.probe \
@@ -53,6 +55,7 @@ case ${1:-} in
     rm -f "$3/quit"
     until [ -f "$3/quit" ]; do
       TEST_RUNNER_YO_DRIVER_DIR=$3 xcodebuild test-without-building -project "$here/sim/YoSim.xcodeproj" -scheme YoSim \
+        -configuration "$config" \
         -destination "platform=iOS Simulator,id=$(udid "$2")" -derivedDataPath "$derived" \
         -test-timeouts-enabled NO -only-testing:YoDriver/Driver/testDrive > "$3/xcodebuild.log" 2>&1 &
       pid=$!

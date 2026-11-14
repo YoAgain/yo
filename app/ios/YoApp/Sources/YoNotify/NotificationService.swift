@@ -23,6 +23,7 @@ final class NotificationService: UNNotificationServiceExtension {
   override func didReceive(
     _ request: UNNotificationRequest, withContentHandler contentHandler: @escaping (UNNotificationContent) -> Void
   ) {
+    Perf.mark("nse.start")
     let content = (request.content.mutableCopy() as? UNMutableNotificationContent) ?? UNMutableNotificationContent()
     content.title = ""  // "Yo" once, not as title and text
     pending.set(content: content, handler: contentHandler)
@@ -48,6 +49,7 @@ final class NotificationService: UNNotificationServiceExtension {
         break
       }
       pending.deliver()
+      Perf.mark("nse.delivered")
     }
   }
 
@@ -82,7 +84,9 @@ final class NotificationService: UNNotificationServiceExtension {
   }
 
   private static func newest() -> Found {
-    guard let client = Guest.open(within: lockWait, timeout: 10), let events = try? client.sync(waitS: 0) else {
+    guard let client = Perf.timed("nse.open", { Guest.open(within: lockWait, timeout: 10) }),
+      let events = Perf.timed("nse.sync", { try? client.sync(waitS: 0) })
+    else {
       return .unread
     }
     var senders: [String: (count: Int, sentAtMs: UInt64, kind: MediaFile.Kind?)] = [:]
