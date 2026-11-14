@@ -106,7 +106,7 @@ struct ContactsList: View {
                   Image(systemName: check.symbol).foregroundStyle(check.color).accessibilityHidden(true)
                 }
               } label: {
-                Text(friend.name).font(.yo(17, relativeTo: .body))
+                Text(friend.name).font(.yo(17, relativeTo: .body)).lineLimit(1).minimumScaleFactor(0.5)
               }
             }
           }
