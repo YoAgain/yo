@@ -224,3 +224,27 @@ fn a_name_that_changed_hands_goes_to_its_new_owner() {
     assert!(known.iter().any(|k| k.user == c.user_id() && k.handles == [name.clone()]));
     assert!(known.iter().any(|k| k.user == a.user_id() && k.handles.is_empty()), "{known:?}");
 }
+
+/// A restart's `last_seen` is the latest message the peer got, not all it got: one lost before a later one that came
+/// was never sent again. Now every message kept is, and the peer skips what it has seen.
+#[test]
+fn a_restart_brings_back_a_message_lost_before_a_later_one() {
+    let hub = TestHub::start();
+    let n = random_u64() % 100_000;
+    let (http_a, http_b) = (Http::new(hub.url()), Http::new(hub.url()));
+    let mut a = by_name(http_a.clone(), &format!("Gap{n}"));
+    let mut b = by_name(http_b.clone(), &format!("Pag{n}"));
+    a.send(b.user_id(), text("first")).unwrap();
+    assert_eq!(texts(&b.sync(0).unwrap()), ["first"]);
+    http_a.fault(&to(b.user_id()), Fault::Answer(400));
+    a.send(b.user_id(), text("lost")).unwrap();
+    a.send(b.user_id(), text("later")).unwrap();
+    assert_eq!(texts(&b.sync(0).unwrap()), ["later"]);
+    // b's chat is lost (the hub refuses its first update) and restarted: "later" is the last it saw.
+    http_b.fault("/commit", Fault::Answer(403));
+    b.send(a.user_id(), text("restarted")).unwrap();
+    assert_eq!(texts(&a.sync(0).unwrap()), ["restarted"]);
+    assert_eq!(texts(&b.sync(0).unwrap()), ["lost"], "the gap, once");
+    a.send(b.user_id(), text("on")).unwrap();
+    assert_eq!(texts(&b.sync(0).unwrap()), ["on"]);
+}
