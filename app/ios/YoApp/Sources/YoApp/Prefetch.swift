@@ -13,8 +13,9 @@ import YoCore
 enum Prefetch {
   /// What the service fetches: the 24 MB it has hold the bytes and their opened copy.
   static let largest: UInt32 = 6 << 20
-  /// A fetch marked longer ago is over (the service was ended): the app fetches itself.
-  static let underWaySeconds: TimeInterval = 30
+  /// A fetch marked longer ago is over (its process was ended): the other fetches itself. Longer than a request may
+  /// take (`Hub.timeout`, 70 s), so a slow fetch of the app is not taken over while it runs.
+  static let underWaySeconds: TimeInterval = 90
 
   private static var directory: URL? { ShareBridge.container?.appending(path: "Prefetched") }
 
