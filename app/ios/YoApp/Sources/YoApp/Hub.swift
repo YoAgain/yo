@@ -144,30 +144,28 @@ enum StateKey {
     query.merging([kSecAttrAccessGroup as String: ShareBridge.group]) { $1 }
   }
 
-  /// The app's own key (Yo Dev, or a Yo whose state did not move into the group): any of the app's items.
-  static func load() -> Data {
-    var item: CFTypeRef?
-    var find = query
-    find[kSecReturnData as String] = true
-    if SecItemCopyMatching(find as CFDictionary, &item) == errSecSuccess, let key = item as? Data, key.count == 32 {
-      return key
-    }
-    let key = random()
-    var add = query
-    add[kSecValueData as String] = key
-    add[kSecAttrAccessible as String] = kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly
-    SecItemDelete(query as CFDictionary)
-    SecItemAdd(add as CFDictionary, nil)
+  /// The app's own key (Yo Dev, or a Yo whose state did not move into the group): any of the app's items. Nil when
+  /// there is none; a keychain that does not answer now (locked, a passing error) throws: never a new key for it.
+  static func load() throws -> Data? {
+    guard let key = try Keychain.read(query) else { return nil }
+    guard key.count == 32 else { throw Keychain.Failure(status: errSecDecode) }
     return key
   }
 
-  /// The key in the group (the app and its extensions); nil while the keychain does not give it (locked, no group).
-  static func shared() -> Data? {
-    var item: CFTypeRef?
-    var find = inGroup
-    find[kSecReturnData as String] = true
-    guard SecItemCopyMatching(find as CFDictionary, &item) == errSecSuccess, let key = item as? Data, key.count == 32
-    else { return nil }
+  /// The key for a new state (a registration): the one there, else a new one, used only once it reads back as stored.
+  static func make() throws -> Data {
+    if let key = try Keychain.read(query), key.count == 32 { return key }
+    // None, or not a key (nothing sealed under it opens): a new one in its place.
+    let key = random()
+    try Keychain.write(query, key, accessible: kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly)
+    return key
+  }
+
+  /// The key in the group (the app and its extensions); nil when there is none, a keychain that does not answer now
+  /// (locked, no group) throws.
+  static func shared() throws -> Data? {
+    guard let key = try Keychain.read(inGroup) else { return nil }
+    guard key.count == 32 else { throw Keychain.Failure(status: errSecDecode) }
     return key
   }
 
@@ -175,28 +173,17 @@ enum StateKey {
   /// then the app's own item deleted; a new key in the group when there was none. False when the keychain will not
   /// (locked, no group in the signature): then the state stays where it is too.
   static func moveIn() -> Bool {
-    if shared() != nil {
+    // The keychain does not answer now (locked): not now.
+    guard case .success(let there) = Result(catching: { try shared() }),
+      case .success(let own) = Result(catching: { try load() })
+    else { return false }
+    if there != nil {
       deleteOwn()
       return true
     }
-    var item: CFTypeRef?
-    var find = query
-    find[kSecReturnData as String] = true
-    let found = SecItemCopyMatching(find as CFDictionary, &item)
-    let key: Data
-    switch found {
-    case errSecSuccess:
-      guard let old = item as? Data, old.count == 32 else { return false }
-      key = old
-    case errSecItemNotFound:
-      key = random()
-    default:
-      return false  // locked: not now
-    }
-    var add = inGroup
-    add[kSecValueData as String] = key
-    add[kSecAttrAccessible as String] = kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly
-    guard SecItemAdd(add as CFDictionary, nil) == errSecSuccess, shared() == key else { return false }
+    let key = own ?? random()
+    guard (try? Keychain.write(inGroup, key, accessible: kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly)) != nil
+    else { return false }
     deleteOwn()
     return true
   }
@@ -219,4 +206,41 @@ enum StateKey {
   }
 
   private static func random() -> Data { Data((0..<32).map { _ in UInt8.random(in: .min ... .max) }) }
+}
+
+/// The app's keychain items, read and written so that a keychain that does not answer now (locked, a passing error)
+/// is never taken for one without the item: only `errSecItemNotFound` is "none".
+enum Keychain {
+  struct Failure: Error {
+    let status: OSStatus
+  }
+
+  /// The item's data; nil only when there is none.
+  static func read(_ query: [String: Any]) throws -> Data? {
+    var find = query
+    find[kSecReturnData as String] = true
+    find[kSecMatchLimit as String] = kSecMatchLimitOne
+    var item: CFTypeRef?
+    let status = SecItemCopyMatching(find as CFDictionary, &item)
+    switch status {
+    case errSecSuccess:
+      guard let data = item as? Data else { throw Failure(status: errSecDecode) }
+      return data
+    case errSecItemNotFound:
+      return nil
+    default:
+      throw Failure(status: status)
+    }
+  }
+
+  /// Writes the item: updated in place (never deleted first), added when there is none; then read back.
+  static func write(_ query: [String: Any], _ data: Data, accessible: CFString) throws {
+    let attributes: [String: Any] = [kSecValueData as String: data, kSecAttrAccessible as String: accessible]
+    var status = SecItemUpdate(query as CFDictionary, attributes as CFDictionary)
+    if status == errSecItemNotFound {
+      status = SecItemAdd(query.merging(attributes) { $1 } as CFDictionary, nil)
+    }
+    guard status == errSecSuccess else { throw Failure(status: status) }
+    guard try read(query) == data else { throw Failure(status: errSecDecode) }
+  }
 }

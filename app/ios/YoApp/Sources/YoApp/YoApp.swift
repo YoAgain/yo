@@ -49,6 +49,12 @@ struct YoApp: App {
       .overlay {
         if AppUpdate.shared.needed { UpdateScreen().transition(.opacity) }
       }
+      // The saved state is gone or does not open: the account on this phone is signed in again (AccountStore.recover).
+      .alert("Can’t Open Your Account", isPresented: Binding(get: { accounts.broken }, set: { _ in })) {
+        Button("Sign In Again") { Task { await accounts.recover() } }
+      } message: {
+        Text("Yo can’t open your account on this iPhone. Sign in again to keep using it.")
+      }
       .onChange(of: accounts.account == nil) { _, out in
         // Out, however (signed out, deleted, or the account taken to another iPhone): this phone's friends go too.
         if out {
