@@ -23,6 +23,7 @@ struct NewGroupSheet: View {
               HStack {
                 Circle().fill(Color.row(friend.color)).frame(width: 12, height: 12)
                 Text(friend.name).font(.yo(17, relativeTo: .body)).foregroundStyle(Color(.label))
+                  .lineLimit(1).minimumScaleFactor(0.5)
                 Spacer()
                 Image(systemName: members.contains(friend.key) ? "checkmark.circle.fill" : "circle")
                   .foregroundStyle(members.contains(friend.key) ? Color.amethyst : Color(.tertiaryLabel))
