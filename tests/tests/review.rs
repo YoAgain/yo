@@ -266,7 +266,9 @@ fn a_last_resort_is_retired_only_once_its_replacement_is_at_the_hub() {
     let kept = a.own_key_packages();
     clock.store(63 * DAY, Ordering::Relaxed);
     a.maintenance().unwrap();
-    assert_eq!(a.own_key_packages(), kept + 1, "the one the hub had until now is kept");
+    // The upload that failed goes again as it was (no third last resort made): the hub takes it, and the one it had
+    // until now is retired from then, its keys kept, not deleted when its replacement was made.
+    assert_eq!(a.own_key_packages(), kept, "the one the hub had until now is kept");
 }
 
 /// A `409` whose devices could not be read dropped the message, though the hub had not taken it. Now it stays in

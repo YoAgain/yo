@@ -49,6 +49,7 @@ enum MediaStorage {
       try? FileManager.default.removeItem(at: URL.applicationSupportDirectory.appending(path: name))
     }
     ReceivedMedia.shared.forgetAll()
+    Prefetch.clear()
   }
 }
 
@@ -435,6 +436,7 @@ final class ReceivedMedia {
       return false
     }
     loaded = true
+    Prefetch.sweep()  // once a start: what the service fetched and nothing took
     (pending, saved) = (found.pending, found.saved)
     let written = pending.filter { FileManager.default.fileExists(atPath: file($0.id, $0.kind).path) }
     pending.removeAll { one in written.contains { $0.id == one.id } }
@@ -517,10 +519,19 @@ final class ReceivedMedia {
         pauses[one.id] = nil
         guard generation == self.generation else { return }
       }
-      var data = unwritten[one.id]
+      // Fetched by the notification service as its push came: there at once.
+      var data = unwritten[one.id] ?? Prefetch.take(media)
+      // There and locked: it reads once the iPhone is unlocked (the hub's copy is this device's fetch already).
+      if data == nil && Prefetch.has(media) { continue }
       if data == nil {
         do {
           data = try await Hub.run { try client.fetchMedia(media: media) }
+          if data == nil {
+            // "No longer there": the notification service may have taken this device's fetch. Its file, else, while
+            // it is still fetching, wait for it rather than give the photo up.
+            data = Prefetch.take(media)
+            if data == nil && (Prefetch.underWay(media) || Prefetch.has(media)) { continue }
+          }
         } catch YoError.Refused(let status) where status == 426 {
           return  // this build too old: noted still, for the build after it
         } catch let error as YoError where mediaRetryLater(error: error) {
@@ -532,6 +543,7 @@ final class ReceivedMedia {
       }
       guard let data else {
         // The hub no longer has it, or it does not open: its Yo came without it.
+        Prefetch.done(media)
         pending.removeAll { $0.id == one.id }
         resting[one.id] = nil
         _ = store()
@@ -560,6 +572,7 @@ final class ReceivedMedia {
       }
       unwritten[one.id] = nil
       resting[one.id] = nil
+      Prefetch.done(media)  // kept in the app's own media now
       let arrival = await arrival(kept)
       // Signed out while the thumbnail was made: not for the account after it.
       if let arrival, generation == self.generation { arrived(arrival) }
