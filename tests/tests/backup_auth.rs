@@ -1,14 +1,13 @@
 //! Who may fetch a backup record (spec 7): only a request signed by one of its doors' auth keys, fresh and once; any
-//! other answer is the `404` of no record. Records from before the auth keys are handed out without a signature until
-//! the cutoff, to no one after, and the core rewrites them with the keys. What K and the storage key seal lands on
-//! the sizes the hub may see.
+//! other answer is the `404` of no record, also for a record without the keys (from before them), which the app makes
+//! anew. What K and the storage key seal lands on the sizes the hub may see.
 
 use ed25519_dalek::{Signer as _, SigningKey};
 use yo_core::backup::{self, Door, PasskeyDoor};
 use yo_core::{Backup, Client, Push};
 use yo_hub::db::{BackupAuth, Db};
 use yo_tests::{random_u64, Http, TestHub};
-use yo_wire::api::{self, LegacyBackup};
+use yo_wire::api;
 use yo_wire::limits::SEALED_SIZES;
 use yo_wire::request::{to_be_signed, HEADER_SIGNATURE, HEADER_TIME};
 
@@ -84,65 +83,45 @@ fn only_a_door_fetches_a_record() {
     assert_eq!(t.signed_for_tests("PUT", api::BACKUP, &yo_wire::encode(&bad)).unwrap().status, 400);
 }
 
-/// A hub on a database file, and that file opened beside it: the test's way to store a record as an older hub did.
-fn hub_on_file(legacy_until: u64) -> (TestHub, Db) {
-    let path = std::env::temp_dir().join(format!("yo-legacy-{}-{}.sqlite", std::process::id(), random_u64()));
+/// A hub on a database file, and that file opened beside it: the test's way to store a record as an older hub did,
+/// without the auth keys.
+fn hub_on_file() -> (TestHub, Db) {
+    let path = std::env::temp_dir().join(format!("yo-keyless-{}-{}.sqlite", std::process::id(), random_u64()));
     let mut config = yo_hub::config::Config::for_tests();
     config.db_path = path.to_str().unwrap().to_owned();
-    config.limits.legacy_backups_until_ms = legacy_until;
     let hub = TestHub::start_with(config, "127.0.0.1:0");
     let db = Db::open(path.to_str().unwrap()).unwrap();
     (hub, db)
 }
 
-/// A record as the app made it before the auth keys: version 1, the sealed part not padded.
-fn legacy(k: &[u8; 32], prf: &[u8], code: &[String]) -> Vec<u8> {
-    let made = backup::make(k, b"{}", code, PasskeyDoor::New(prf)).unwrap();
-    yo_wire::encode(&LegacyBackup {
-        version: 1,
-        by_passkey: made.by_passkey,
-        by_code: made.by_code,
-        sealed: made.sealed,
-        locator: made.locator,
-    })
-}
-
 #[test]
-fn a_record_from_before_the_auth_keys_is_served_until_the_cutoff_and_rewritten() {
-    let (k, prf, code) = ([1; 32], [2; 32], words(7));
-    let (hub, db) = hub_on_file(yo_hub::config::LEGACY_BACKUPS_UNTIL_MS);
-    assert!(yo_hub::now_ms() < yo_hub::config::LEGACY_BACKUPS_UNTIL_MS, "the cutoff is ahead");
+fn a_record_without_auth_keys_is_never_served_and_the_app_makes_a_new_one() {
+    let (old_k, k, prf, code) = ([1; 32], [4; 32], [2; 32], words(7));
+    let (hub, db) = hub_on_file();
     let mut t = register(&hub);
-    let user = yo_tests::user_id(t.user_id());
-    let old = legacy(&k, &prf, &code);
+    let (user, secret) = (yo_tests::user_id(t.user_id()), t.account_secret());
+    let old = yo_wire::encode(&backup::make(&old_k, b"{}", &code, PasskeyDoor::New(&prf)).unwrap());
     db.put_backup(&t.device_id(), Some(&backup::locator(&code)), &old, &BackupAuth::default(), 0).unwrap();
-    // Before the cutoff: to anyone, unsigned, as before.
-    assert_eq!(get(&hub, &user, None), (200, old.clone()));
-    // The core reads it, by either door, and rewrites it with the words' auth key; the passkey's wrap is kept.
+    // To no one: unsigned, or signed by either door.
     let http = Http::new(hub.url());
-    let opened = Client::open_backup(&*http, Some(&user), &Door::Passkey(&prf)).unwrap().unwrap();
-    assert_eq!((opened.k, opened.record.version), (k, 1));
-    let opened = Client::open_backup(&*http, None, &Door::Code(&code)).unwrap().unwrap();
-    t.put_backup(&backup::make(&k, &opened.plain, &code, PasskeyDoor::Keep(&opened.record)).unwrap()).unwrap();
-    assert_eq!(get(&hub, &user, None).0, 404, "no longer to anyone");
-    assert!(Client::open_backup(&*http, None, &Door::Code(&code)).unwrap().is_some());
-    // The passkey still opens K, but signs nothing until it is confirmed (a passkey asked once).
-    let rewritten = Client::fetch_backup(&*http, &user, &Door::Code(&code)).unwrap().unwrap();
-    assert!(rewritten.auth_passkey.as_slice().is_empty() && !rewritten.by_passkey.as_slice().is_empty());
-    assert_eq!(Client::open_backup(&*http, Some(&user), &Door::Passkey(&prf)), Ok(None));
-    assert!(backup::make(&k, b"{}", &code, PasskeyDoor::Confirm(&rewritten, &[9; 32])).is_err(), "another passkey");
-    t.put_backup(&backup::make(&k, b"{}", &code, PasskeyDoor::Confirm(&rewritten, &prf)).unwrap()).unwrap();
-    assert_eq!(Client::open_backup(&*http, Some(&user), &Door::Passkey(&prf)).unwrap().unwrap().k, k);
-
-    // After the cutoff: a record without the auth keys goes to no one, signed or not.
-    let (hub, db) = hub_on_file(0);
-    let t = register(&hub);
-    let user = yo_tests::user_id(t.user_id());
-    db.put_backup(&t.device_id(), Some(&backup::locator(&code)), &old, &BackupAuth::default(), 0).unwrap();
     assert_eq!(get(&hub, &user, None).0, 404);
-    let http = Http::new(hub.url());
     assert_eq!(Client::open_backup(&*http, None, &Door::Code(&code)), Ok(None));
     assert_eq!(Client::open_backup(&*http, Some(&user), &Door::Passkey(&prf)), Ok(None));
+    // The app makes a new one from the words on the phone: a new K, the words' door only.
+    t.put_backup(&backup::make(&k, b"{\"new\":1}", &code, PasskeyDoor::None).unwrap()).unwrap();
+    let opened = Client::open_backup(&*http, None, &Door::Code(&code)).unwrap().unwrap();
+    assert_eq!((opened.k, opened.plain.as_slice()), (k, &b"{\"new\":1}"[..]));
+    assert_eq!(Client::open_backup(&*http, Some(&user), &Door::Passkey(&prf)), Ok(None), "no passkey yet");
+    // Confirmed: the passkey asked once, its door added to the record as it is (the same K).
+    let record = backup::make(&opened.k, &opened.plain, &code, PasskeyDoor::New(&prf)).unwrap();
+    t.put_backup(&record).unwrap();
+    // A new phone, by the passkey: the record, K, and the account registered again with its key.
+    let by_passkey = Client::open_backup(&*http, Some(&user), &Door::Passkey(&prf)).unwrap().unwrap();
+    assert_eq!(by_passkey.k, k);
+    let name = t.username().unwrap().to_owned();
+    let new = Client::register_username(Http::new(hub.url()), &name, Some(secret), None, Push::none()).unwrap();
+    assert_eq!(new.user_id(), t.user_id());
+    assert!(Client::open_backup(&*http, None, &Door::Code(&code)).unwrap().is_some(), "and by the words");
 }
 
 #[test]

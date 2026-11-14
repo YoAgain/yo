@@ -232,8 +232,8 @@ pub struct Commit {
 /// The length of a backup's locator: HKDF(the recovery code, "yo backup v1 locator") (spec 7).
 pub const LOCATOR_LEN: usize = 16;
 
-/// The backup record's version: 2 carries the doors' auth keys. A record of version 1 (`LegacyBackup`) was stored
-/// before them; the hub hands it out without a signature until 2026-11-28 (spec 7).
+/// The backup record's version: 2 carries the doors' auth keys. Version 1 had none; the hub keeps no such record
+/// (spec 7).
 pub const BACKUP_VERSION: u8 = 2;
 
 /// The account's backup record (spec 7): `PUT /v1/backup` stores it, `GET /v1/backup/{id}` hands it out to whoever
@@ -250,21 +250,11 @@ pub struct Backup {
     pub sealed: VLBytes,
     /// Where the recovery code alone finds the record: `LOCATOR_LEN` bytes, or empty (found by the user id only).
     pub locator: VLBytes,
-    /// The Ed25519 key from HKDF(the passkey's PRF output, "yo backup v1 auth passkey"), which signs a fetch: empty
-    /// without a passkey, or while it has not been used for it yet (a record rewritten from version 1).
+    /// The Ed25519 key from HKDF(the passkey's PRF output, "yo backup v1 auth passkey"), which signs a fetch: 32
+    /// bytes, or empty without a passkey.
     pub auth_passkey: VLBytes,
-    /// The Ed25519 key from HKDF(the recovery code, "yo backup v1 auth code"); empty only in a version 1 record.
+    /// The Ed25519 key from HKDF(the recovery code, "yo backup v1 auth code"): 32 bytes, always there.
     pub auth_code: VLBytes,
-}
-
-/// A backup record as version 1 had it, before the auth keys: how the hub may still hold one.
-#[derive(Debug, Clone, PartialEq, Eq, TlsSerialize, TlsDeserializeBytes, TlsSize)]
-pub struct LegacyBackup {
-    pub version: u8,
-    pub by_passkey: VLBytes,
-    pub by_code: VLBytes,
-    pub sealed: VLBytes,
-    pub locator: VLBytes,
 }
 
 impl Backup {
@@ -288,42 +278,11 @@ impl Backup {
         }
     }
 
-    /// A record as the hub hands it out: this version, or version 1 (read with empty auth keys).
-    pub fn decode(bytes: &[u8]) -> Result<Self, crate::Error> {
-        if bytes.first() == Some(&crate::VERSION) {
-            let old: LegacyBackup = crate::decode(bytes)?;
-            let backup = Backup {
-                version: old.version,
-                by_passkey: old.by_passkey,
-                by_code: old.by_code,
-                sealed: old.sealed,
-                locator: old.locator,
-                auth_passkey: Vec::new().into(),
-                auth_code: Vec::new().into(),
-            };
-            backup.check_parts()?;
-            return Ok(backup);
-        }
-        let backup: Backup = crate::decode(bytes)?;
-        backup.check()?;
-        Ok(backup)
-    }
-
     /// A record as it may be stored: this version, the code's door and auth key there, every part within its limit.
     pub fn check(&self) -> Result<(), crate::Error> {
         if self.version != BACKUP_VERSION {
             return Err(crate::Error::Unsupported);
         }
-        self.check_parts()?;
-        let passkey = self.auth_passkey.as_slice().len();
-        if self.auth_code.as_slice().len() != KEY_LEN || !(passkey == 0 || passkey == KEY_LEN) {
-            return Err(crate::Error::Format);
-        }
-        Ok(())
-    }
-
-    /// The parts both versions have.
-    fn check_parts(&self) -> Result<(), crate::Error> {
         use crate::limits::{MAX_BACKUP_SEALED_LEN, MAX_BACKUP_WRAP_LEN};
         let (passkey, code, sealed) = (self.by_passkey.as_slice(), self.by_code.as_slice(), self.sealed.as_slice());
         if passkey.len() > MAX_BACKUP_WRAP_LEN
@@ -332,8 +291,13 @@ impl Backup {
         {
             return Err(crate::Error::Size);
         }
-        let locator = self.locator.as_slice().len();
-        if code.is_empty() || sealed.is_empty() || !(locator == 0 || locator == LOCATOR_LEN) {
+        let (locator, auth_passkey) = (self.locator.as_slice().len(), self.auth_passkey.as_slice().len());
+        if code.is_empty()
+            || sealed.is_empty()
+            || !(locator == 0 || locator == LOCATOR_LEN)
+            || self.auth_code.as_slice().len() != KEY_LEN
+            || !(auth_passkey == 0 || auth_passkey == KEY_LEN)
+        {
             return Err(crate::Error::Format);
         }
         Ok(())
@@ -508,24 +472,6 @@ mod tests {
             ..backup()
         };
         assert!(largest.check().is_ok() && crate::encode(&largest).len() <= MAX_BODY);
-    }
-
-    #[test]
-    fn a_record_from_before_the_auth_keys_still_reads() {
-        let b = backup();
-        let old = LegacyBackup {
-            version: 1,
-            by_passkey: b.by_passkey.clone(),
-            by_code: b.by_code.clone(),
-            sealed: b.sealed.clone(),
-            locator: b.locator.clone(),
-        };
-        let read = Backup::decode(&crate::encode(&old)).unwrap();
-        assert_eq!(read.version, 1);
-        assert_eq!(read.auth_keys(), (None, None));
-        assert_eq!(read.sealed, b.sealed);
-        assert_eq!(Backup::decode(&crate::encode(&b)).unwrap(), b);
-        assert!(Backup::decode(&crate::encode(&LegacyBackup { by_code: Vec::new().into(), ..old })).is_err());
     }
 
     #[test]

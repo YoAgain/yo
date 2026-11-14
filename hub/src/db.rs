@@ -224,9 +224,8 @@ CREATE TABLE IF NOT EXISTS commits (
 ) WITHOUT ROWID;
 CREATE INDEX IF NOT EXISTS commits_by_age ON commits(accepted_at);
 -- Each user's backup record (spec 7), as the client sent it: found by the user id or by its locator, handed out to a
--- request signed by one of its doors' auth keys (the passkey's NULL without one). Both NULL: a record stored before
--- them, handed out without a signature until the legacy cutoff. A user with one has secured the name, which is then
--- never released (spec 6.4).
+-- request signed by one of its doors' auth keys (the passkey's NULL without one). A user with one has secured the
+-- name, which is then never released (spec 6.4).
 CREATE TABLE IF NOT EXISTS backups (
     user_id BLOB PRIMARY KEY REFERENCES users(id),
     locator BLOB UNIQUE,
@@ -373,9 +372,9 @@ fn remove_user(tx: &Transaction<'_>, user: &UserId, now: u64) -> rusqlite::Resul
 const SCHEMA_VERSION: i64 = 1;
 
 /// Brings a database of this version written by an older hub up to `SCHEMA`, in one transaction: the usernames'
-/// spellings (`handles.spelling`, NULL for the names it holds: shown as their skeleton) and the backups' auth keys
-/// (NULL for the records it holds: stored before them). The tables `SCHEMA` adds are made by
-/// `CREATE TABLE IF NOT EXISTS` already.
+/// spellings (`handles.spelling`, NULL for the names it holds: shown as their skeleton) and the backups' auth keys.
+/// Records from before the auth keys are deleted: no fetch could be signed for them, and the apps make new ones
+/// (spec 7). The tables `SCHEMA` adds are made by `CREATE TABLE IF NOT EXISTS` already.
 fn migrate(conn: &mut Connection) -> rusqlite::Result<()> {
     let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
     for (table, column, kind) in
@@ -390,6 +389,7 @@ fn migrate(conn: &mut Connection) -> rusqlite::Result<()> {
     if !has_app {
         tx.execute_batch("ALTER TABLE devices ADD COLUMN app TEXT")?;
     }
+    tx.execute("DELETE FROM backups WHERE auth_code IS NULL", [])?;
     tx.commit()
 }
 
@@ -1318,8 +1318,8 @@ mod tests {
     }
 
     /// A database the hub before spellings made (schema 1 without `handles.spelling` and the backups' auth keys):
-    /// opened, it gets the columns, its names are found and shown as their skeleton, its backup is one from before
-    /// the auth keys, and nothing in it is refused.
+    /// opened, it gets the columns, its names are found and shown as their skeleton, its backup from before the auth
+    /// keys is gone, and nothing in it is refused.
     #[test]
     fn a_database_from_before_spellings_is_migrated() {
         let path = std::env::temp_dir().join(format!("yo-hub-migrate-{}.sqlite", std::process::id()));
@@ -1355,7 +1355,7 @@ mod tests {
             .unwrap();
         }
         let db = Db::open(&path).unwrap();
-        assert_eq!(db.backup(&[1; 16]).unwrap(), Some((vec![1], BackupAuth::default())));
+        assert_eq!(db.backup(&[1; 16]).unwrap(), None);
         assert_eq!(spelling(&db, "Christopher").as_deref(), Some("CHRISTOPHER"));
         assert!(matches!(register(&db, b"christopher", 2, 2, 0), Write::Refused(Conflict::UsernameTaken)));
         drop(db);

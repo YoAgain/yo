@@ -635,8 +635,7 @@ static NO_KEY: std::sync::LazyLock<Key> =
     std::sync::LazyLock::new(|| ed25519_dalek::SigningKey::from_bytes(&[0; 32]).verifying_key().to_bytes());
 
 /// A backup record by its user id or locator, to a request signed by one of its doors' auth keys (spec 7): only who
-/// holds a door learns that there is one. Anything else is `404`, as for no record. A record stored before the auth
-/// keys is handed out without a signature until `legacy_backups_until_ms`, to no one after.
+/// holds a door learns that there is one. Anything else is `404`, as for no record.
 async fn fetch_backup(
     State(hub): Hubs,
     ConnectInfo(peer): Peer,
@@ -649,11 +648,6 @@ async fn fetch_backup(
     let id: [u8; api::LOCATOR_LEN] = path_id(&id)?;
     let now = now_ms();
     let found = hub.db.backup(&id)?;
-    if let Some((record, auth)) = &found {
-        if auth.code.is_none() && now < hub.config.limits.legacy_backups_until_ms {
-            return Ok(ok(record.clone()));
-        }
-    }
     let not_found = || refuse(StatusCode::NOT_FOUND);
     let (time, signature) = signature_of(&headers, now).ok_or_else(not_found)?;
     let auth = found.as_ref().map(|(_, auth)| auth.clone()).unwrap_or_default();

@@ -267,8 +267,8 @@ struct SettingsView: View {
     let wordsDone = account.secured && accounts.wordsSaved && RecoveryWords.load() != nil
     Section("Security") {
       if account.byPasskey && account.passkeyAuth != true {
-        // A record from before the auth keys (spec 7): the passkey opens it, but a new phone finds it by the passkey
-        // only once Face ID has been asked here.
+        // A backup made anew (spec 7) without the passkey's door: a new phone finds it by the passkey only once Face
+        // ID has been asked here.
         Button { Task { await confirmPasskey() } } label: {
           SecurityRow(icon: "faceid", color: .orange, title: "Passkey and Face ID", value: "Confirm")
         }
@@ -365,7 +365,9 @@ struct SettingsView: View {
     guard !addingPasskey else { return }
     addingPasskey = true
     defer { addingPasskey = false }
-    do { try await accounts.confirmPasskey() } catch {
+    do {
+      if try await accounts.confirmPasskey() { secure(.words) }  // new words, to save in the guide
+    } catch {
       if !SecurityPresentation.isCancellation(error) {
         confirmProblem = SecurityPresentation.passkeyMessage(error, fallback: "Try again.")
       }

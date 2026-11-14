@@ -21,10 +21,10 @@ struct Account: Codable, Equatable {
   var byPasskey: Bool
   /// The recovery words open the backup (nil in accounts saved before this was kept: see `AccountStore.init`).
   var byCode: Bool? = false
-  /// The backup's fetch may be signed by the words' auth key (spec 7): nil in a record from before the auth keys, until
-  /// it is written again (`addAuthKeys`).
+  /// The backup's fetch may be signed by the words' auth key (spec 7): nil in an account whose record is from before
+  /// the auth keys, until the backup is made anew (`addAuthKeys`).
   var codeAuth: Bool? = nil
-  /// And by the passkey's: false until the passkey was asked once for it (a record from before, `confirmPasskey`).
+  /// And by the passkey's: false while the record made anew has no passkey door yet (`confirmPasskey`).
   var passkeyAuth: Bool? = nil
 
   /// Backed up (spec 7): the name comes back on a new phone. Not yet, it is released after 365 days away (spec 6.4).
@@ -379,12 +379,11 @@ final class AccountStore {
     }
   }
 
-  /// What a rewrap does with the passkey's door: keeps it as it is, sets it from a new passkey's PRF output, removes
-  /// it, or adds its auth key from the PRF output of the passkey there (`confirmPasskey`).
-  private enum Door { case keep, set(Data), remove, confirm(Data) }
+  /// What a rewrap does with the passkey's door: keeps it as it is, sets it from a passkey's PRF output, or removes it.
+  private enum Door { case keep, set(Data), remove }
 
-  /// The backup again with the same K (opened by the words on this phone): its passkey door kept, set, removed or
-  /// confirmed, and optionally under new words (the old locator then finds nothing). Always with the doors' auth keys.
+  /// The backup again with the same K (opened by the words on this phone): its passkey door kept, set or removed, and
+  /// optionally under new words (the old locator then finds nothing). Always with the doors' auth keys.
   private func rewrap(_ passkey: Door, code new: [String]? = nil) async throws {
     guard var account, let code = RecoveryWords.load(), let client else { throw AccountError.noBackup }
     let opened = try await fetchBackup(by: .words(words: code), userID: account.userID)
@@ -395,13 +394,12 @@ final class AccountStore {
       case .keep: .keep(record: record)
       case .set(let prf): .new(prf: prf)
       case .remove: .none
-      case .confirm(let prf): .confirm(record: record, prf: prf)
       }
     switch passkey {
     case .keep:
       account.byPasskey = !record.byPasskey.isEmpty
       account.passkeyAuth = !record.authPasskey.isEmpty
-    case .set, .confirm:
+    case .set:
       account.byPasskey = true
       account.passkeyAuth = true
     case .remove:
@@ -417,22 +415,49 @@ final class AccountStore {
     if case .remove = passkey { passkeyTurnedOff = true }
   }
 
-  /// A record from before the doors' auth keys (spec 7), written again with them, once, by the words on this phone
-  /// (no step for the person); kept as it is, also the passkey's door. The passkey's auth key waits for the passkey
-  /// (`confirmPasskey`). Tried again at the next start until it went.
+  /// An account whose record may be from before the doors' auth keys (spec 7), which the hub hands out to no one: once,
+  /// with no step for the person, by the words on this phone. A record the words fetch (one made since, the account
+  /// back from the iCloud Keychain) only tells how it opens; else the backup is made anew, the passkey's door left for
+  /// the passkey (`confirmPasskey`). Tried again at the next start until it went.
   private func addAuthKeys() async {
-    guard let account, account.secured, account.codeAuth != true, RecoveryWords.load() != nil else { return }
-    try? await rewrap(.keep)
+    guard let account, account.secured, account.codeAuth != true, let words = RecoveryWords.load() else { return }
+    do {
+      try await rewrap(.keep)
+    } catch AccountError.noBackup {
+      try? await makeAnew(words: words, prf: nil)
+    } catch {}
   }
 
-  /// The passkey asked once (Face ID) for a record rewritten from before the auth keys: its PRF output gives the key
-  /// that signs the record's fetch, so a new phone finds it by the passkey again. It must open the record's K.
-  func confirmPasskey() async throws {
+  /// A new backup with a new K: the words' door, and the passkey's when its PRF output is given. Without it, a passkey
+  /// the account had shows "Confirm" until it is asked once.
+  private func makeAnew(words: [String], prf: Data?) async throws {
+    guard var account, let client else { throw AccountError.noBackup }
+    account.byCode = true
+    account.codeAuth = true
+    account.passkeyAuth = prf != nil
+    if prf != nil { account.byPasskey = true }
+    let passkey: YoPasskeyDoor = prf.map { .new(prf: $0) } ?? .none
+    try await put(account, code: words, k: BackupRecord.newKey(), passkey: passkey, by: client)
+    RecoveryWords.save(words)
+    self.account = account
+  }
+
+  /// The passkey asked once (Face ID), any Yo passkey of this account, for a backup made anew without its door: the
+  /// door added, under the record's K as it is now. Without words on this phone (never made anew), a new backup with
+  /// new words, which the person then saves: true then.
+  func confirmPasskey() async throws -> Bool {
     guard let account, let client else { throw AccountError.noBackup }
     let answer = try await passkeys.ask(salt: BackupRecord.prfSalt)
     guard answer.userID == account.userID, let prf = answer.prf else { throw AccountError.noPRF }
     try still(client)
-    try await rewrap(.confirm(prf))
+    if account.codeAuth == true {
+      try await rewrap(.set(prf))
+      return false
+    }
+    let words = RecoveryWords.load()
+    try await makeAnew(words: words ?? RecoveryCode.make(), prf: prf)
+    if words == nil { wordsSaved = false }
+    return words == nil
   }
 
   /// A new passkey in place of the one there (made, then used once for its PRF output).

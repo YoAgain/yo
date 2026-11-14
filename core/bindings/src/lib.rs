@@ -408,10 +408,8 @@ pub enum YoPasskeyDoor {
     None,
     /// A passkey, by its PRF output.
     New { prf: Vec<u8> },
-    /// As in this record (opened with the same K): its wrap and its auth key, which may be none yet.
+    /// As in this record (opened with the same K): its wrap and its auth key, or none.
     Keep { record: YoBackup },
-    /// As in this record, with the passkey's auth key added: its PRF output must open the record.
-    Confirm { record: YoBackup, prf: Vec<u8> },
 }
 
 /// Fetches the backup record a door opens and opens it: by the user id when given (a passkey's user handle; needed
@@ -620,15 +618,11 @@ impl YoClient {
     ) -> Result<(), YoError> {
         use yo_core::backup::PasskeyDoor;
         let k = key_of(k)?;
-        let kept = |record: YoBackup| yo_core::Backup::from(record);
         let record = match passkey {
             YoPasskeyDoor::None => yo_core::backup::make(&k, &sealed, &words, PasskeyDoor::None),
             YoPasskeyDoor::New { prf } => yo_core::backup::make(&k, &sealed, &words, PasskeyDoor::New(&prf)),
             YoPasskeyDoor::Keep { record } => {
-                yo_core::backup::make(&k, &sealed, &words, PasskeyDoor::Keep(&kept(record)))
-            }
-            YoPasskeyDoor::Confirm { record, prf } => {
-                yo_core::backup::make(&k, &sealed, &words, PasskeyDoor::Confirm(&kept(record), &prf))
+                yo_core::backup::make(&k, &sealed, &words, PasskeyDoor::Keep(&record.into()))
             }
         }?;
         Ok(self.with(|c| c.put_backup(&record))??)

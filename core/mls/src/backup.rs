@@ -72,10 +72,8 @@ pub enum PasskeyDoor<'a> {
     None,
     /// A passkey's PRF output: K wrapped under it, and its auth key.
     New(&'a [u8]),
-    /// As in this record (K the same): its wrap and its auth key, which may be none yet.
+    /// As in this record (K the same): its wrap and its auth key, or none.
     Keep(&'a Backup),
-    /// As in this record, with its auth key added from the PRF output, which must open the record's wrap.
-    Confirm(&'a Backup, &'a [u8]),
 }
 
 fn seal(key: &[u8; 32], plain: &[u8]) -> Vec<u8> {
@@ -85,7 +83,7 @@ fn seal(key: &[u8; 32], plain: &[u8]) -> Vec<u8> {
 }
 
 /// K from its wrap under a door.
-fn unwrap(wrapped: &[u8], door: &Door) -> Option<[u8; 32]> {
+fn unwrap_k(wrapped: &[u8], door: &Door) -> Option<[u8; 32]> {
     let (nonce, sealed) = wrapped.split_at_checked(12)?;
     ChaCha20Poly1305::new(&door.wrap_key().into()).decrypt(nonce.into(), sealed).ok()?.try_into().ok()
 }
@@ -97,12 +95,6 @@ pub fn make(k: &[u8; 32], plain: &[u8], words: &[String], passkey: PasskeyDoor) 
         PasskeyDoor::None => (Vec::new(), None),
         PasskeyDoor::New(prf) => (seal(&Door::Passkey(prf).wrap_key(), k), Some(Door::Passkey(prf).auth_public())),
         PasskeyDoor::Keep(record) => (record.by_passkey.as_slice().to_vec(), record.auth_keys().0),
-        PasskeyDoor::Confirm(record, prf) => {
-            if unwrap(record.by_passkey.as_slice(), &Door::Passkey(prf)) != Some(*k) {
-                return Err(Error::Protocol("not this backup's passkey"));
-            }
-            (record.by_passkey.as_slice().to_vec(), Some(Door::Passkey(prf).auth_public()))
-        }
     };
     let code = Door::Code(words);
     let backup = Backup::new(
@@ -129,7 +121,7 @@ pub struct Opened {
 
 /// Opens a record with a door; `None` when the door does not open it.
 pub fn open(record: Backup, door: &Door) -> Option<Opened> {
-    let k = unwrap(door.wrapped(&record), door)?;
+    let k = unwrap_k(door.wrapped(&record), door)?;
     let plain = open_padded(&k, &[], record.sealed.as_slice())?;
     Some(Opened { k, plain, record })
 }
@@ -154,7 +146,11 @@ impl Client {
         let headers = crate::signature_headers(&door.auth_key(), "GET", &path, time, &yo_wire::sha256(&[]));
         let response = transport.request("GET", &path, &headers, &[]).map_err(Error::Network)?;
         match response.status {
-            status::OK => Ok(Some(Backup::decode(&response.body)?)),
+            status::OK => {
+                let backup: Backup = yo_wire::decode(&response.body)?;
+                backup.check()?;
+                Ok(Some(backup))
+            }
             status::NOT_FOUND => Ok(None),
             _ => Err(crate::refused(&response)),
         }
@@ -204,24 +200,13 @@ mod tests {
     }
 
     #[test]
-    fn a_kept_door_stays_and_a_confirmed_one_gains_its_key() {
+    fn a_kept_door_stays_under_new_words() {
         let (k, prf, words) = ([1; 32], [2; 32], words());
         let first = make(&k, b"{}", &words, PasskeyDoor::New(&prf)).unwrap();
-        // A record rewritten from version 1: the passkey's wrap, no auth key for it yet.
-        let migrated = Backup { auth_passkey: Vec::new().into(), ..first.clone() };
-        let kept = make(&k, b"{}", &words, PasskeyDoor::Keep(&migrated)).unwrap();
-        assert_eq!(kept.by_passkey, first.by_passkey);
-        assert!(kept.auth_keys().0.is_none());
-        assert!(make(&k, b"{}", &words, PasskeyDoor::Confirm(&kept, &[3; 32])).is_err(), "another passkey");
-        let confirmed = make(&k, b"{}", &words, PasskeyDoor::Confirm(&kept, &prf)).unwrap();
-        assert_eq!(confirmed.auth_keys().0, first.auth_keys().0);
-    }
-
-    #[test]
-    fn a_record_sealed_before_the_padding_still_opens() {
-        let (k, words) = ([1; 32], words());
-        let mut record = make(&k, b"{}", &words, PasskeyDoor::None).unwrap();
-        record.sealed = seal(&k, b"{\"account\":\"old\"}").into();
-        assert_eq!(open(record, &Door::Code(&words)).unwrap().plain, b"{\"account\":\"old\"}");
+        let renewed: Vec<String> = words.iter().rev().cloned().collect();
+        let kept = make(&k, b"{}", &renewed, PasskeyDoor::Keep(&first)).unwrap();
+        assert_eq!((&kept.by_passkey, kept.auth_keys().0), (&first.by_passkey, first.auth_keys().0));
+        assert!(open(kept.clone(), &Door::Passkey(&prf)).is_some());
+        assert!(open(kept, &Door::Code(&words)).is_none());
     }
 }
