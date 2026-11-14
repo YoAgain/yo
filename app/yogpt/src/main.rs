@@ -495,12 +495,28 @@ fn main() {
     std::process::exit(1);
 }
 
+/// `stats.json` beside the outbox: `{"contacts":N}`, written whole.
+fn write_stats(bot: &Bot, outbox: &Path) {
+    let Some(dir) = outbox.parent() else { return };
+    let contacts = bot.client().contacts().len();
+    let tmp = dir.join("stats.json.new");
+    if std::fs::write(&tmp, format!("{{\"contacts\":{contacts}}}")).is_ok() {
+        let _ = std::fs::rename(&tmp, dir.join("stats.json"));
+    }
+}
+
 /// The operator's mailbox: `NAME.anything.jpg` dropped into the account's `outbox` (root only, on the server) goes
 /// to NAME as a photo with its Yo, then the file is removed; one that could not go is renamed `.failed`.
 fn mailbox(bot: &Bot, dir: &Path, events: &SyncSender<Event>) {
     let _ = std::fs::create_dir_all(dir);
+    let mut ticks = 0u32;
     while bot.running() {
         std::thread::sleep(Duration::from_secs(5));
+        // For the admin page, once a minute: how many people YoGPT knows (it is a client: it has their chats).
+        if ticks.is_multiple_of(12) {
+            write_stats(bot, dir);
+        }
+        ticks = ticks.wrapping_add(1);
         let Ok(entries) = std::fs::read_dir(dir) else { continue };
         for path in entries.flatten().map(|entry| entry.path()).take(20) {
             let Some(name) = path.file_name().and_then(|n| n.to_str()).filter(|n| n.ends_with(".jpg")) else {
