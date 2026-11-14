@@ -46,26 +46,43 @@ struct SettingsView: View {
   @State private var deleteProblem: String?
   @State private var sendingFeedback = false
 
+  @Environment(\.dynamicTypeSize) private var typeSize
+
+  private var codeButton: some View {
+    Button { showingCode = true } label: {
+      Image(systemName: "qrcode")
+        .font(.title2)
+        .frame(width: 44, height: 44)
+    }
+    .buttonStyle(.borderless)
+    .accessibilityLabel("Show Your Code")
+  }
+
   var body: some View {
     NavigationStack {
       Form {
         if let account = accounts.account {
           // You, at the top: a picture (your initial, as Signal makes one), your name, and your code to show.
           Section {
-            HStack(spacing: 14) {
-              Avatar(name: account.username, size: 56)
+            // Very large text: the name on a line of its own under the picture and the code, not cut to "Sim…".
+            let layout = typeSize.isAccessibilitySize
+              ? AnyLayout(VStackLayout(alignment: .leading, spacing: 10)) : AnyLayout(HStackLayout(spacing: 14))
+            layout {
+              HStack {
+                Avatar(name: account.username, size: 56)
+                if typeSize.isAccessibilitySize {
+                  Spacer()
+                  codeButton
+                }
+              }
               Text(account.username)
                 .font(.yo(26, relativeTo: .title2))
                 .lineLimit(1)
-                .minimumScaleFactor(0.6)
-              Spacer()
-              Button { showingCode = true } label: {
-                Image(systemName: "qrcode")
-                  .font(.title2)
-                  .frame(width: 44, height: 44)
+                .minimumScaleFactor(0.5)
+              if !typeSize.isAccessibilitySize {
+                Spacer()
+                codeButton
               }
-              .buttonStyle(.borderless)
-              .accessibilityLabel("Show Your Code")
             }
             .padding(.vertical, 4)
           }
@@ -218,6 +235,12 @@ struct SettingsView: View {
       } footer: {
         Text("Backup of your friend list and blocks.")
       }
+      // Very large text: under the list, scrolled with it (pinned to the bottom they covered half the page).
+      if typeSize.isAccessibilitySize {
+        Section { leaving(account) }
+          .listRowBackground(Color.clear)
+          .listRowInsets(EdgeInsets())
+      }
     }
     .navigationTitle("Account")
     .navigationBarTitleDisplayMode(.inline)
@@ -231,34 +254,41 @@ struct SettingsView: View {
     }
     // Signing out and deleting: at the very bottom of the screen, however short the list.
     .safeAreaInset(edge: .bottom) {
-      VStack(spacing: 10) {
-        Button(role: .destructive) { resetting = true } label: {
-          Text("Sign Out").frame(maxWidth: .infinity)
-        }
-        // Not secured all the way: the guide first, signing out anyway second.
-        .confirmationDialog("Sign Out?", isPresented: $resetting, titleVisibility: .visible) {
-          if accounts.toDo > 0 {
-            Button("Secure Your Account") { secure(nil) }
-            Button("Sign Out Anyway", role: .destructive) { reset() }
-          } else {
-            Button("Sign Out", role: .destructive) { reset() }
-          }
-          Button("Cancel", role: .cancel) {}
-        } message: {
-          Text(resetMessage)
-        }
-        NavigationLink {
-          deletePage(account)
-        } label: {
-          Text("Delete Account").foregroundStyle(.red).frame(maxWidth: .infinity)
-        }
+      if !typeSize.isAccessibilitySize {
+        leaving(account)
+          .padding(.horizontal, 20)
+          .padding(.bottom, 8)
       }
-      .buttonStyle(.glass)
-      .controlSize(.large)
-      .disabled(addingPasskey || deletingAccount)
-      .padding(.horizontal, 20)
-      .padding(.bottom, 8)
     }
+  }
+
+  /// Sign Out and Delete Account, glass buttons over the full width.
+  private func leaving(_ account: Account) -> some View {
+    VStack(spacing: 10) {
+      Button(role: .destructive) { resetting = true } label: {
+        Text("Sign Out").frame(maxWidth: .infinity)
+      }
+      // Not secured all the way: the guide first, signing out anyway second.
+      .confirmationDialog("Sign Out?", isPresented: $resetting, titleVisibility: .visible) {
+        if accounts.toDo > 0 {
+          Button("Secure Your Account") { secure(nil) }
+          Button("Sign Out Anyway", role: .destructive) { reset() }
+        } else {
+          Button("Sign Out", role: .destructive) { reset() }
+        }
+        Button("Cancel", role: .cancel) {}
+      } message: {
+        Text(resetMessage)
+      }
+      NavigationLink {
+        deletePage(account)
+      } label: {
+        Text("Delete Account").foregroundStyle(.red).frame(maxWidth: .infinity)
+      }
+    }
+    .buttonStyle(.glass)
+    .controlSize(.large)
+    .disabled(addingPasskey || deletingAccount)
   }
 
   /// Security: Passkey and Face ID, and Recovery Key, one row each with its state. A step not done yet opens the
@@ -594,6 +624,8 @@ private struct BlockedList: View {
           ForEach(friends.blocked) { friend in
             Text(friend.name)
               .font(.yo(17, relativeTo: .body))
+              .lineLimit(1)
+              .minimumScaleFactor(0.5)
               .swipeActions {
                 Button("Unblock") { unblock(friend) }
               }
@@ -677,18 +709,23 @@ private struct SecurityRow: View {
   let value: String
   var done = false
   var chevron = true
+  @Environment(\.dynamicTypeSize) private var typeSize
 
   var body: some View {
-    // Plain label colours, not the tint a button or menu would give them; the checkmark after the state.
+    // Plain label colours, not the tint a button or menu would give them; the checkmark after the state. Very large
+    // text: the state under the title (as LabeledContent does), not the title broken letter by letter beside it.
     HStack {
       Label {
-        Text(title).foregroundStyle(Color(.label))
+        VStack(alignment: .leading) {
+          Text(title).foregroundStyle(Color(.label))
+          if typeSize.isAccessibilitySize { Text(value).foregroundStyle(Color(.secondaryLabel)) }
+        }
       } icon: {
         Image(systemName: icon)
       }
       .labelStyle(Tile(color))
       Spacer()
-      Text(value).foregroundStyle(Color(.secondaryLabel))
+      if !typeSize.isAccessibilitySize { Text(value).foregroundStyle(Color(.secondaryLabel)) }
       // Done: a green check; not yet: an empty circle, the step still to take.
       Image(systemName: done ? "checkmark.circle.fill" : "circle")
         .foregroundStyle(done ? Color.green : Color(.tertiaryLabel))
@@ -803,7 +840,7 @@ struct NameCodeSheet: View {
             .background(.white, in: .rect(cornerRadius: 22))
             .accessibilityLabel("QR code for \(name)")
         }
-        Text(name).font(.yo(30, relativeTo: .title))
+        Text(name).font(.yo(30, relativeTo: .title)).lineLimit(1).minimumScaleFactor(0.5).padding(.horizontal)
         Spacer()
       }
       .frame(maxWidth: .infinity)
