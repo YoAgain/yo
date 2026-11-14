@@ -1221,8 +1221,11 @@ async fn put_blob(
     let device = hub
         .blocking(move |hub| {
             let device = hub.authenticate_hash(&method, &uri, &headers, &body_hash)?;
-            if hub.db.blob_exists(&id)? {
-                return Err(refuse(StatusCode::CONFLICT));
+            match hub.db.blob_ready_state(&id)? {
+                Some(true) => return Err(refuse(StatusCode::CONFLICT)),
+                // Another upload of it is not done: "later", not "there" (spec 6.6).
+                Some(false) => return Err(refuse(StatusCode::SERVICE_UNAVAILABLE)),
+                None => {}
             }
             if !hub.db.blob_quota_left(&device.user_id, size, now_ms(), &quota)? {
                 return Err(refuse(StatusCode::TOO_MANY_REQUESTS));
