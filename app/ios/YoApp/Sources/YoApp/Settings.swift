@@ -204,7 +204,7 @@ struct SettingsView: View {
       Section {
         StorageRow(client: accounts.client)
       } footer: {
-        Text("Encrypted with your account's key. A new iPhone gets them back.")
+        Text("Backup of your friend list and blocks.")
       }
     }
     .navigationTitle("Account")
@@ -657,8 +657,8 @@ private struct SecurityRow: View {
   }
 }
 
-/// Friends, blocks and the app icon in the account's storage on the hub (spec 6.9): saved, and when; or still to go
-/// up. A tap writes now.
+/// Friends, blocks and the app icon in the account's storage on the hub (spec 6.9): saved, or still to go up. A tap
+/// writes now.
 private struct StorageRow: View {
   let client: YoClient?
   @State private var savedAt: Date?
@@ -667,13 +667,12 @@ private struct StorageRow: View {
   var body: some View {
     Button { Task { await save() } } label: {
       SecurityRow(
-        icon: "person.2.fill", color: savedAt == nil ? .orange : .green, title: "Friends & Blocks",
-        value: savedAt.map { "Saved " + $0.formatted(.relative(presentation: .named)) }
-          ?? (saving ? "Saving…" : "Not Saved Yet"),
+        icon: "person.2.fill", color: savedAt == nil ? .orange : .green, title: "Contacts",
+        value: savedAt != nil ? "Saved" : saving ? "Saving…" : "Not Saved",
         done: savedAt != nil, chevron: false)
     }
     .disabled(saving)
-    // The time in the row stays current, and a write from elsewhere (the inbox's sync) shows up.
+    // A write from elsewhere (the inbox's sync) shows up.
     .task {
       while !Task.isCancelled {
         await load()
