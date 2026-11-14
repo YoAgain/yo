@@ -1221,7 +1221,19 @@ impl Db {
                  ON CONFLICT (id) DO NOTHING",
             )?
             .execute(params![group, epoch as i64, token_hash, now])?;
-        Ok(changed == 1)
+        if changed == 1 {
+            return Ok(true);
+        }
+        // The same registration again (its answer was lost): created, as the first time. Only its maker knows the
+        // token, and the group has not moved on since.
+        let same: Option<(i64, i64, Vec<u8>)> = self
+            .conn()
+            .prepare_cached("SELECT epoch, first_epoch, token_hash FROM groups WHERE id = ?1")?
+            .query_row(params![group], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))
+            .optional()?;
+        Ok(same.is_some_and(|(now_at, first, hash)| {
+            now_at == epoch as i64 && first == epoch as i64 && constant_time_eq(&hash, token_hash)
+        }))
     }
 
     /// Orders a commit (spec 4.3): accepted only on the group's current epoch with that epoch's token, and kept. A
@@ -1825,5 +1837,16 @@ mod tests {
         user(register(&db, b"OTHER", 1, 5, 91 * DAY));
         assert_eq!(db.release_unsecured(200 * DAY, 90 * DAY).unwrap(), 3, "BUSY and the two new ones, never SAFE");
         assert!(exists(&secured));
+    }
+
+    #[test]
+    fn a_group_registered_again_is_created_again_until_it_moves_on() {
+        let db = Db::open(":memory:").unwrap();
+        let group: GroupId = [7; 32];
+        assert!(db.create_group(&group, 1, &[1; 32], 0).unwrap());
+        assert!(db.create_group(&group, 1, &[1; 32], 0).unwrap(), "the same registration: created");
+        assert!(!db.create_group(&group, 1, &[2; 32], 0).unwrap(), "another token: taken");
+        assert!(matches!(db.commit(&group, 1, &[1; 32], &[3; 32], b"c", 0).unwrap(), Commit::Accepted));
+        assert!(!db.create_group(&group, 1, &[1; 32], 0).unwrap(), "moved on: taken");
     }
 }
