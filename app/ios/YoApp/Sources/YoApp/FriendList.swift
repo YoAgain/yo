@@ -58,12 +58,6 @@ struct FriendList: View {
   /// tasks that run the 1.5 seconds. Kept in plain @State, those tasks read the values from before a tap once a
   /// photo had been picked from the library, and a stack of photos never went (its undo ring stayed).
   @State private var bars = Bars()
-  /// How often each friend went on top (by `Friend.key`): a new identity each time, so the bar leaves its place and
-  /// comes in on top. Only here: a new spelling or user id never changes a bar's identity.
-  @State private var lifts: [UUID: Int] = [:]
-  /// Senders waiting to go on top, oldest first: gathered for a moment and moved in one step, so many Yos at once do
-  /// not shuffle the list bar by bar.
-  @State private var rising: [String] = []
 
   // Blocking and reporting
   /// The friend the Block dialog asks about, and whether it follows a report.
@@ -93,6 +87,12 @@ struct FriendList: View {
     @ObservationIgnored var preparing: [UUID: Task<Prepared?, Never>] = [:]
     /// A stack's 1.5 seconds: each new photo starts them again; when they are over, the whole stack goes.
     @ObservationIgnored var stackRounds: [UUID: Int] = [:]
+    /// How often each friend went on top (by `Friend.key`): a new identity each time, so the bar leaves its place and
+    /// comes in on top. Only here: a new spelling or user id never changes a bar's identity.
+    var lifts: [UUID: Int] = [:]
+    /// Senders waiting to go on top, oldest first: gathered for a moment and moved in one step, so many Yos at once
+    /// do not shuffle the list bar by bar.
+    @ObservationIgnored var rising: [String] = []
   }
 
   struct Outgoing: Equatable {
@@ -216,7 +216,7 @@ struct FriendList: View {
         LazyVStack(spacing: 0) {
           // Going on top is a delete and an insert (as Signal's chat list does): the gap closes below, the bar comes in
           // from the top; it does not fly across the list.
-          ForEach(friends.shown.map { Lifted(friend: $0, lifts: lifts[$0.key] ?? 0) }) { lifted in
+          ForEach(friends.shown.map { Lifted(friend: $0, lifts: bars.lifts[$0.key] ?? 0) }) { lifted in
             row(lifted.friend)
               .transition(.asymmetric(insertion: .move(edge: .top).combined(with: .opacity), removal: .opacity))
           }
@@ -778,14 +778,15 @@ extension FriendList {
   /// are sending (taps or a stack of photos still in their time) the list does not move at all, so no bar slides away
   /// under your finger; it moves once you are done.
   private func rise(_ name: String) {
-    rising.removeAll { $0 == name }
-    rising.append(name)
-    guard rising.count == 1 else { return }  // a step is already on its way
+    let bars = bars  // the object itself into the task, not this view's copy of the state
+    bars.rising.removeAll { $0 == name }
+    bars.rising.append(name)
+    guard bars.rising.count == 1 else { return }  // a step is already on its way
     Task {
       try? await Task.sleep(for: .seconds(0.3))
       while sending { try? await Task.sleep(for: .milliseconds(200)) }
-      let names = rising
-      rising = []
+      let names = bars.rising
+      bars.rising = []
       toTop(names)
     }
   }
@@ -816,7 +817,7 @@ extension FriendList {
     guard !moving.isEmpty else { return }
     withAnimation(.snappy(duration: 0.35)) {
       for key in keys {
-        if moving.contains(key) { lifts[key, default: 0] += 1 }
+        if moving.contains(key) { bars.lifts[key, default: 0] += 1 }
         if let name = friends.all.first(where: { $0.key == key })?.name { friends.promote(name) }
       }
       if !scrolled { position.scrollTo(edge: .top) }
