@@ -84,3 +84,37 @@ fn a_made_up_epoch_does_not_restart_a_chat() {
     b.send(a.user_id(), Content::Text("2".into())).unwrap();
     assert_eq!(drain(&mut a), ["2"]);
 }
+
+/// A blocked peer's chat lost meanwhile kept nothing: what was held for them (spec 4.8) went with the dropped chat.
+/// Now the lost chat waits with it, and after the unblock it is restarted and what was held goes there.
+#[test]
+fn a_blocked_peers_lost_chat_keeps_what_is_held_until_the_unblock() {
+    let hub = TestHub::start();
+    let n = random_u64() % 100_000;
+    let http_a = Http::new(hub.url());
+    let mut a = Client::register_username(http_a.clone(), &format!("Held{n}"), None, None, Push::none()).unwrap();
+    let mut b = Client::register_username(Http::new(hub.url()), &format!("Peer{n}"), None, None, Push::none()).unwrap();
+    a.send(b.user_id(), Content::Text("1".into())).unwrap();
+    assert_eq!(drain(&mut b), ["1"]);
+    b.send(a.user_id(), Content::Text("2".into())).unwrap();
+    assert_eq!(drain(&mut a), ["2"]);
+    // A writes while the hub cannot take it, then blocks B: the message is held.
+    http_a.fault(&yo_wire::api::deliver_path(&yo_tests::user_id(b.user_id())), yo_tests::Fault::Answer(503));
+    a.send(b.user_id(), Content::Text("held".into())).unwrap();
+    a.set_blocked(b.user_id(), true).unwrap();
+    // B's chat moves on while the hub forgets the commit A needs: A's chat is lost.
+    let later = yo_hub::now_ms() + day(8);
+    b.set_clock(Arc::new(move || later));
+    b.send(a.user_id(), Content::Text("3".into())).unwrap();
+    hub.hub.prune(yo_hub::now_ms() + day(31)).unwrap();
+    b.send(a.user_id(), Content::Text("4".into())).unwrap();
+    assert!(drain(&mut a).is_empty());
+    a.maintenance().unwrap();
+    assert!(a.chats_with(b.user_id()).iter().any(|c| c.lost), "lost, and kept: {:?}", a.drop_reasons());
+    assert!(drain(&mut b).is_empty(), "nothing goes to a blocked peer");
+    // Unblocked: the chat is restarted, what was held goes first.
+    a.set_blocked(b.user_id(), false).unwrap();
+    a.maintenance().unwrap();
+    assert_eq!(drain(&mut b), ["held"]);
+    assert_eq!(a.pending(), 0);
+}
