@@ -46,17 +46,14 @@ pub struct Chat {
     /// A commit sent to the hub whose answer never came: it may have been accepted. Retried as it is until the hub
     /// answers; meanwhile the group holds it as its pending commit and nothing is sent in it.
     pub inflight: Option<Inflight>,
-    /// The hub does not order commits for this group (it never registered it, or the token is not ours): the chat
-    /// works, without updates.
-    pub no_updates: bool,
     /// The plaintexts of the last messages sent in this chat: sent again in a restarted chat (spec 4.9).
     #[serde(default)]
     pub sent: VecDeque<Vec<u8>>,
     /// The `sent_at` of the last message received from the peer here: what a restart tells it.
     #[serde(default)]
     pub last_seen_ms: u64,
-    /// This device can no longer follow the group (a commit it lacks is gone from the hub): restarted at the next
-    /// chance (spec 4.9).
+    /// This device can no longer follow the group (a commit it lacks is gone from the hub, or the hub refuses its
+    /// commits): restarted at the next chance (spec 4.9). What waits to go in it goes in the new group.
     #[serde(default)]
     pub lost: bool,
     /// Made, or taken over, by a restart: it replaces the older chats with the peer.

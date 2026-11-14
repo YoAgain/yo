@@ -317,7 +317,7 @@ pub struct YoChat {
     pub members: u32,
     /// When this device last updated its keys here (ms since 1970; 0: not yet).
     pub last_update_ms: u64,
-    /// The hub orders its commits; if not, the chat works without key updates.
+    /// The chat takes key updates: not while it is lost and waits for its restart.
     pub updates: bool,
     pub restarted: bool,
     pub lost: bool,

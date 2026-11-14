@@ -1,6 +1,6 @@
 //! What a review of the core found (Codex, after the chaos runs), each the smallest case that showed it.
 
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use yo_core::{Client, Content, Error, Event, Push, Store};
 use yo_tests::{random_u64, Fault, Http, TestHub};
@@ -100,4 +100,106 @@ fn nothing_waiting_goes_to_someone_blocked_meanwhile() {
     assert_eq!(texts(&b.sync(0).unwrap()), ["made offline"], "after the unblock, in order");
     a.send(b.user_id(), text("and on")).unwrap();
     assert_eq!(texts(&b.sync(0).unwrap()), ["and on"]);
+}
+
+/// A clock that can be moved on, for updates that are due.
+fn movable_clock(client: &mut Client) -> Arc<AtomicU64> {
+    let offset = Arc::new(AtomicU64::new(0));
+    let moved = offset.clone();
+    client.set_clock(Arc::new(move || {
+        let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_millis() as u64;
+        now + moved.load(Ordering::Relaxed)
+    }));
+    offset
+}
+
+const DAYS_8: u64 = 8 * 24 * 3600 * 1000;
+
+fn to(user: &str) -> String {
+    yo_wire::api::deliver_path(&yo_tests::user_id(user))
+}
+
+/// A commit the hub refused (`403`, `404`) turned the chat's updates off for good: no more post-compromise
+/// security, silently. Now the chat is lost and restarted (spec 4.9), and the new one takes updates.
+#[test]
+fn a_refused_commit_restarts_the_chat_instead_of_giving_up_updates() {
+    let hub = TestHub::start();
+    let n = random_u64() % 100_000;
+    let http = Http::new(hub.url());
+    let mut a = by_name(Http::new(hub.url()), &format!("Ref{n}"));
+    let mut b = by_name(http.clone(), &format!("Fer{n}"));
+    a.send(b.user_id(), text("hi")).unwrap();
+    assert_eq!(texts(&b.sync(0).unwrap()), ["hi"]);
+    let joined = b.chats_with(a.user_id())[0].group.clone();
+    http.fault("/commit", Fault::Answer(403));
+    b.send(a.user_id(), text("after a refusal")).unwrap();
+    assert_eq!(texts(&a.sync(0).unwrap()), ["after a refusal"]);
+    let chats = b.chats_with(a.user_id());
+    assert_eq!(chats.len(), 1);
+    assert_ne!(chats[0].group, joined, "a new group");
+    assert!(chats[0].updates && !chats[0].lost);
+    let epoch = chats[0].epoch;
+    let clock = movable_clock(&mut b);
+    clock.store(DAYS_8, Ordering::Relaxed);
+    b.maintenance().unwrap();
+    assert_eq!(b.chats_with(a.user_id())[0].epoch, epoch + 1, "updated");
+    a.send(b.user_id(), text("still fine")).unwrap();
+    assert_eq!(texts(&b.sync(0).unwrap()), ["still fine"]);
+}
+
+/// More commits missing than one call fetches: the error to come back later rolled back everything fetched, so
+/// every call fetched the same ones again, for ever. Now what was fetched stays and the next call goes on.
+#[test]
+fn a_long_way_behind_is_caught_up_over_several_calls() {
+    let hub = TestHub::start();
+    let n = random_u64() % 100_000;
+    let http = Http::new(hub.url());
+    let mut a = by_name(http.clone(), &format!("Far{n}"));
+    let mut b = by_name(Http::new(hub.url()), &format!("Raf{n}"));
+    a.send(b.user_id(), text("hi")).unwrap();
+    assert_eq!(texts(&b.sync(0).unwrap()), ["hi"]);
+    b.fetch_at_most_for_tests(2);
+    let clock = movable_clock(&mut a);
+    for k in 1..=5 {
+        clock.store(k * DAYS_8, Ordering::Relaxed);
+        // The commit never reaches b's inbox: b fetches it from the hub.
+        http.fault(&to(b.user_id()), Fault::Answer(400));
+        a.maintenance().unwrap();
+    }
+    a.send(b.user_id(), text("far ahead")).unwrap();
+    let mut epochs = Vec::new();
+    let got = (0..5).find_map(|_| {
+        let synced = b.sync(0);
+        epochs.push(b.chats()[0].2);
+        synced.ok().map(|events| texts(&events))
+    });
+    assert_eq!(got.unwrap(), ["far ahead"], "epochs on the way: {epochs:?}");
+    assert_eq!(epochs, [3, 5, 6], "two at a time, kept");
+}
+
+/// A lost race whose catch-up met a passing trouble counted as done: the message was encrypted in an epoch the
+/// hub's group had left. Now the send fails for now, and nothing is made in the old epoch.
+#[test]
+fn nothing_is_encrypted_in_an_epoch_already_left() {
+    let hub = TestHub::start();
+    let n = random_u64() % 100_000;
+    let (http_a, http_b) = (Http::new(hub.url()), Http::new(hub.url()));
+    let mut a = by_name(http_a.clone(), &format!("Old{n}"));
+    let mut b = by_name(http_b.clone(), &format!("Dlo{n}"));
+    a.send(b.user_id(), text("hi")).unwrap();
+    assert_eq!(texts(&b.sync(0).unwrap()), ["hi"]);
+    // a's update wins the epoch b's first update (due since it joined) will want; its commit does not reach b.
+    let clock = movable_clock(&mut a);
+    clock.store(DAYS_8, Ordering::Relaxed);
+    http_a.fault(&to(b.user_id()), Fault::Answer(400));
+    a.maintenance().unwrap();
+    // b's receive first, then its catch-up after the lost race: both "not now".
+    http_b.fault("/v1/inbox?", Fault::Answer(503));
+    http_b.fault("/v1/inbox?", Fault::Answer(503));
+    let sent = b.send(a.user_id(), text("not now"));
+    assert_eq!(sent, Err(Error::Refused(503)), "for now");
+    assert_eq!(b.pending(), 0, "not made in the old epoch");
+    b.send(a.user_id(), text("now")).unwrap();
+    assert_eq!(texts(&a.sync(0).unwrap()), ["now"]);
+    assert_eq!(a.chats()[0].2, b.chats()[0].2, "one epoch");
 }

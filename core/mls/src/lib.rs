@@ -73,7 +73,8 @@ enum Committed {
     Accepted,
     /// Another commit took the epoch, which the hub has now.
     Lost(u64),
-    /// The hub does not order this group's commits.
+    /// The hub does not order this group's commits, or not with this device's token: the chat is lost to this
+    /// device and restarted (4.9).
     Refused,
     /// No answer: it may have been accepted.
     Unknown(String),
@@ -86,6 +87,11 @@ fn retryable(error: &Error) -> bool {
         Error::Refused(status) => *status == status::RATE_LIMITED || *status >= 500,
         _ => false,
     }
+}
+
+/// A group further behind the hub than one call fetches: "not now", what was fetched is kept.
+fn more_commits() -> Error {
+    Error::Network("more commits to fetch".into())
 }
 
 /// What happened, for the app to show. `user` is the contact's user id (hex): what `contacts()` describes and what
@@ -133,7 +139,7 @@ pub struct ChatInfo {
     pub members: u32,
     /// When this device last updated its keys here (ms; 0: not yet), post-compromise security (4.4).
     pub last_update_ms: u64,
-    /// The hub orders this group's commits (4.3); if not, the chat works without updates.
+    /// The chat takes updates (4.4): not while it is lost and waits for its restart.
     pub updates: bool,
     /// Taken over by a restart (4.9), or lost and waiting for one.
     pub restarted: bool,
@@ -312,6 +318,8 @@ pub struct Client {
     guest_events: Option<usize>,
     /// Commits are being fetched (`fetch_commits`): what they bring is not fetched for again.
     fetching: bool,
+    /// Commits fetched at most in one call (`MAX_COMMITS_FETCHED`; fewer in tests).
+    fetch_at_most: usize,
 }
 
 /// A group member as YoLS sees it.
@@ -616,6 +624,7 @@ impl Client {
             media_keys_forgotten: false,
             guest_events: None,
             fetching: false,
+            fetch_at_most: MAX_COMMITS_FETCHED,
         }
     }
 
@@ -667,6 +676,12 @@ impl Client {
     pub fn export(&self, key: &[u8; 32]) -> Vec<u8> {
         let mut snapshot = profile::Snapshot(self.provider.entries());
         state::seal(&self.state, std::mem::take(&mut snapshot.0), key)
+    }
+
+    /// For tests: fewer commits fetched in one call than `MAX_COMMITS_FETCHED`.
+    #[cfg(feature = "testing")]
+    pub fn fetch_at_most_for_tests(&mut self, commits: usize) {
+        self.fetch_at_most = commits;
     }
 
     /// For tests: the clock that decides when updates are due.
@@ -1175,7 +1190,6 @@ impl Client {
                 sent_since_update: 0,
                 needs_update: false,
                 inflight: None,
-                no_updates: false,
                 sent: VecDeque::new(),
                 last_seen_ms: 0,
                 lost: false,
@@ -1193,7 +1207,7 @@ impl Client {
 
     fn update_due(&self, group: &GroupId) -> bool {
         self.state.chats.get(&group_key(group)).is_some_and(|chat| {
-            !chat.no_updates
+            !chat.lost
                 && (chat.needs_update
                     || (self.clock)().saturating_sub(chat.last_update_ms) >= UPDATE_AFTER_MS
                     || chat.sent_since_update >= UPDATE_AFTER_MESSAGES)
@@ -1278,7 +1292,8 @@ impl Client {
                     chat.sent_since_update = 0;
                     chat.needs_update = false;
                 }
-                Committed::Refused => chat.no_updates = true,
+                // Its updates are not given up: a new group takes its place (4.9).
+                Committed::Refused => chat.lost = true,
                 _ => {}
             }
         }
@@ -1286,22 +1301,24 @@ impl Client {
     }
 
     /// After a lost race: receives the winning commit, and fetches it from the hub (spec 4.3) when it is not in the
-    /// inbox, until the group stands at `epoch`.
+    /// inbox, until the group stands at `epoch` (or is lost). More commits than one call fetches are "not now": what
+    /// was fetched is kept, the rest comes with the next call.
     fn catch_up(&mut self, group_id: &GroupId, epoch: u64) -> Result<()> {
         self.receive_all(0)?;
-        self.atomic(|c| c.fetch_commits(group_id, epoch))
+        self.fetch_commits(group_id, epoch)?.then_some(()).ok_or_else(more_commits)
     }
 
     /// Fetches and processes the commits of a group from its epoch up to `epoch` (spec 4.3): after a lost race, or
     /// for a message from an epoch this device has not reached. A commit the hub had and no longer has (`410`, past
     /// its 30 days) marks the chat lost (4.9); one it never had (`404`: the message's epoch was made up) is a refusal.
-    /// Each fetched envelope must move the group on, and is processed without fetching again.
-    fn fetch_commits(&mut self, group_id: &GroupId, epoch: u64) -> Result<()> {
+    /// Each fetched envelope must move the group on, and is processed (each in a transaction of its own, so what was
+    /// fetched stays) without fetching again. False when more remain than one call fetches.
+    fn fetch_commits(&mut self, group_id: &GroupId, epoch: u64) -> Result<bool> {
         let id: yo_wire::GroupId = group_id.as_slice().try_into().map_err(|_| Error::Protocol("group id"))?;
-        for _ in 0..MAX_COMMITS_FETCHED {
+        for _ in 0..self.fetch_at_most {
             let current = self.load(group_id)?.epoch().as_u64();
             if current >= epoch {
-                return Ok(());
+                return Ok(true);
             }
             let response = self.unsigned("GET", &api::commit_fetch_path(&id, current), &[], &[])?;
             match response.status {
@@ -1310,25 +1327,48 @@ impl Client {
                     if let Some(chat) = self.state.chats.get_mut(&group_key(group_id)) {
                         chat.lost = true;
                     }
-                    return Ok(());
+                    return Ok(true);
                 }
                 _ => return Err(refused(&response)),
             }
-            self.fetching = true;
-            let received = self.receive(&response.body);
-            self.fetching = false;
-            received?;
-            // The same commit also comes through the inbox: then it is skipped as seen.
-            self.remember(&response.body);
-            if self.load(group_id)?.epoch().as_u64() <= current {
-                return Err(Error::Protocol("a fetched commit did not move the group on"));
-            }
+            self.atomic(|c| {
+                c.fetching = true;
+                let received = c.receive(&response.body);
+                c.fetching = false;
+                received?;
+                if c.load(group_id)?.epoch().as_u64() <= current {
+                    return Err(Error::Protocol("a fetched commit did not move the group on"));
+                }
+                // The same commit also comes through the inbox: then it is skipped as seen.
+                c.remember(&response.body);
+                Ok(())
+            })?;
         }
-        if self.load(group_id)?.epoch().as_u64() >= epoch {
+        Ok(self.load(group_id)?.epoch().as_u64() >= epoch)
+    }
+
+    /// Before an envelope is processed: a message from an epoch of a group this device has not reached makes it fetch
+    /// the commits it lacks (4.3), outside the envelope's transaction, so they stay whatever becomes of it.
+    fn fetch_before(&mut self, sealed: &[u8]) -> Result<()> {
+        let Some((group_id, epoch)) = Self::private_epoch(sealed) else { return Ok(()) };
+        let Some(chat) = self.state.chats.get(&group_key(&group_id)) else { return Ok(()) };
+        if chat.lost || epoch <= self.load(&group_id)?.epoch().as_u64() {
             return Ok(());
         }
-        // More than one call fetches: the rest next time, the message waiting at the hub meanwhile.
-        Err(Error::Network("more commits to fetch".into()))
+        // Gone from the hub (past their 30 days): the chat is lost to this device and restarted (4.9).
+        self.fetch_commits(&group_id, epoch)?.then_some(()).ok_or_else(more_commits)
+    }
+
+    /// The group and epoch of a private message, read without opening it.
+    fn private_epoch(sealed: &[u8]) -> Option<(GroupId, u64)> {
+        let message = MlsMessageIn::tls_deserialize_exact(envelope::open(sealed).ok()?).ok()?;
+        match message.extract() {
+            MlsMessageBodyIn::PrivateMessage(private) => {
+                let message: ProtocolMessage = private.into();
+                Some((message.group_id().clone(), message.epoch().as_u64()))
+            }
+            _ => None,
+        }
     }
 
     /// Restarts every chat lost to this device (spec 4.9): a new group with the peer, the old one dropped; what was
@@ -1453,11 +1493,14 @@ impl Client {
         self.prepare(&group, &bundle, None)
     }
 
-    /// Settles an inflight commit and updates the chat if due. `Err` only when a commit's answer is still open: the
-    /// group cannot be used until it is.
+    /// Settles an inflight commit and updates the chat if due. `Err` when a commit's answer is still open, or the
+    /// group is behind the hub's and could not catch up: it cannot be used until then, nothing is encrypted in an
+    /// epoch already left.
     fn ensure_fresh(&mut self, group: &GroupId) -> Result<()> {
-        if let Committed::Unknown(error) = self.resolve(group)? {
-            return Err(Error::Network(error));
+        match self.resolve(group)? {
+            Committed::Unknown(error) => return Err(Error::Network(error)),
+            Committed::Lost(epoch) => self.catch_up(group, epoch)?,
+            _ => {}
         }
         for _ in 0..4 {
             if !self.update_due(group) {
@@ -1468,11 +1511,7 @@ impl Client {
             match committed {
                 Ok(Committed::Accepted | Committed::Refused | Committed::Nothing) => return Ok(()),
                 Ok(Committed::Unknown(error)) => return Err(Error::Network(error)),
-                Ok(Committed::Lost(epoch)) => match self.catch_up(group, epoch) {
-                    Ok(()) => {}
-                    Err(error) if retryable(&error) => return Ok(()),
-                    Err(error) => return Err(error),
-                },
+                Ok(Committed::Lost(epoch)) => self.catch_up(group, epoch)?,
                 // An update that cannot be made does not stop the chat.
                 Err(error) if retryable(&error) => return Ok(()),
                 Err(error) => {
@@ -1573,6 +1612,12 @@ impl Client {
             let item = &self.state.outbox[i];
             // Nothing goes to a blocked user (4.8): what waits for them stays, in its order, until an unblock.
             if waiting.contains(&item.user) || self.blocked(&item.user) {
+                i += 1;
+                continue;
+            }
+            // A lost chat's envelopes wait for its restart, which sends its messages in the new group (4.9).
+            if self.state.chats.get(&item.group).is_some_and(|c| c.lost) {
+                waiting.insert(item.user.clone());
                 i += 1;
                 continue;
             }
@@ -1793,10 +1838,11 @@ impl Client {
                 return Ok(());
             }
             match self.resolve(group_id)? {
-                Committed::Accepted => return Ok(()),
+                // Refused: the chat is lost and restarted with the user's devices as they are (4.9).
+                Committed::Accepted | Committed::Refused => return Ok(()),
                 Committed::Lost(epoch) => self.catch_up(group_id, epoch)?,
                 Committed::Unknown(error) => return Err(Error::Network(error)),
-                Committed::Refused | Committed::Nothing => return Err(Error::Protocol("repair refused")),
+                Committed::Nothing => return Err(Error::Protocol("repair refused")),
             }
         }
         Err(Error::Network("a repair kept losing to other commits".into()))
@@ -1900,7 +1946,8 @@ impl Client {
         for item in inbox.items {
             let hash = sha256(item.envelope.as_slice());
             if !self.state.seen.contains(&hash) {
-                match self.atomic(|c| c.receive(item.envelope.as_slice())) {
+                let envelope = item.envelope.as_slice();
+                match self.fetch_before(envelope).and_then(|()| self.atomic(|c| c.receive(envelope))) {
                     Ok(()) => {}
                     // Not this envelope's fault: it stays at the hub and is read again next time.
                     Err(error) if retryable(&error) => {
@@ -2023,7 +2070,6 @@ impl Client {
                 sent_since_update: 0,
                 needs_update: true,
                 inflight: None,
-                no_updates: false,
                 sent: VecDeque::new(),
                 last_seen_ms: 0,
                 lost: false,
@@ -2052,10 +2098,12 @@ impl Client {
         if message_epoch < joined {
             return Ok(());
         }
-        // From an epoch this device has not reached: the commits it lacks are fetched from the hub (4.3); gone
-        // from there (past their 30 days), the chat is lost to this device and restarted (4.9).
-        if !self.fetching && message_epoch > self.load(&group_id)?.epoch().as_u64() {
-            self.fetch_commits(&group_id, message_epoch)?;
+        // From an epoch this device has not reached: its commits were fetched before (`fetch_before`), unless the
+        // chat is lost (restarted, 4.9). A fetched envelope does not fetch again.
+        if message_epoch > self.load(&group_id)?.epoch().as_u64() {
+            if self.fetching {
+                return Err(Error::Protocol("a fetched envelope from a later epoch"));
+            }
             if self.state.chats.get(&key).is_some_and(|c| c.lost) {
                 return Ok(());
             }
@@ -2563,7 +2611,7 @@ impl Client {
                     joined_epoch: chat.joined_epoch,
                     members: group.as_ref().map_or(0, |g| g.members().count() as u32),
                     last_update_ms: chat.last_update_ms,
-                    updates: !chat.no_updates,
+                    updates: !chat.lost,
                     restarted: chat.restarted,
                     lost: chat.lost,
                 }
