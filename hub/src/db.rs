@@ -208,14 +208,25 @@ CREATE TABLE IF NOT EXISTS messages (
 );
 CREATE INDEX IF NOT EXISTS messages_by_device ON messages(device_id, id);
 CREATE INDEX IF NOT EXISTS messages_by_age ON messages(received_at);
+-- `first_epoch`: the epoch the group was registered at. Every epoch from it up to the current one had a commit
+-- accepted (an epoch moves on by nothing else); any other never did. 1 for groups from before the column: the apps
+-- register every group at epoch 1 (spec 4.2).
 CREATE TABLE IF NOT EXISTS groups (
     id BLOB PRIMARY KEY,
     epoch INTEGER NOT NULL,
     token_hash BLOB NOT NULL,
-    updated_at INTEGER NOT NULL
+    updated_at INTEGER NOT NULL,
+    first_epoch INTEGER NOT NULL DEFAULT 1
 ) WITHOUT ROWID;
--- Every accepted commit, by the epoch it built on: handed out to members who missed it, and the proof that a
--- repeated commit was accepted.
+-- Every accepted commit's next-token hash, by the epoch it built on, kept for good (one small row per epoch): the
+-- proof that a repeated commit was accepted (spec 4.3), also after its envelope is gone.
+CREATE TABLE IF NOT EXISTS accepted (
+    group_id BLOB NOT NULL,
+    epoch INTEGER NOT NULL,
+    next_token_hash BLOB NOT NULL,
+    PRIMARY KEY (group_id, epoch)
+) WITHOUT ROWID;
+-- Every accepted commit's envelope, by the epoch it built on, for 30 days: handed out to members who missed it.
 CREATE TABLE IF NOT EXISTS commits (
     group_id BLOB NOT NULL,
     epoch INTEGER NOT NULL,
@@ -374,14 +385,19 @@ fn remove_user(tx: &Transaction<'_>, user: &UserId, now: u64) -> rusqlite::Resul
 const SCHEMA_VERSION: i64 = 1;
 
 /// Brings a database of this version written by an older hub up to `SCHEMA`, in one transaction: the usernames'
-/// spellings (`handles.spelling`, NULL for the names it holds: shown as their skeleton) and the backups' auth keys.
-/// Records from before the auth keys are deleted: no fetch could be signed for them, and the apps make new ones
-/// (spec 7). The tables `SCHEMA` adds are made by `CREATE TABLE IF NOT EXISTS` already.
+/// spellings (`handles.spelling`, NULL for the names it holds: shown as their skeleton), the backups' auth keys and
+/// the groups' first epochs (1, `SCHEMA`). Records from before the auth keys are deleted: no fetch could be signed
+/// for them, and the apps make new ones (spec 7). The commits an older hub kept are proof of their acceptance
+/// (`accepted`), at every start: also those of an older hub run meanwhile. The tables `SCHEMA` adds are made by
+/// `CREATE TABLE IF NOT EXISTS` already.
 fn migrate(conn: &mut Connection) -> rusqlite::Result<()> {
     let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
-    for (table, column, kind) in
-        [("handles", "spelling", "TEXT"), ("backups", "auth_passkey", "BLOB"), ("backups", "auth_code", "BLOB")]
-    {
+    for (table, column, kind) in [
+        ("handles", "spelling", "TEXT"),
+        ("backups", "auth_passkey", "BLOB"),
+        ("backups", "auth_code", "BLOB"),
+        ("groups", "first_epoch", "INTEGER NOT NULL DEFAULT 1"),
+    ] {
         let has = tx.prepare("SELECT 1 FROM pragma_table_info(?1) WHERE name = ?2")?.exists([table, column])?;
         if !has {
             tx.execute_batch(&format!("ALTER TABLE {table} ADD COLUMN {column} {kind}"))?;
@@ -392,6 +408,11 @@ fn migrate(conn: &mut Connection) -> rusqlite::Result<()> {
         tx.execute_batch("ALTER TABLE devices ADD COLUMN app TEXT")?;
     }
     tx.execute("DELETE FROM backups WHERE auth_code IS NULL", [])?;
+    tx.execute(
+        "INSERT OR IGNORE INTO accepted (group_id, epoch, next_token_hash)
+         SELECT group_id, epoch, next_token_hash FROM commits",
+        [],
+    )?;
     tx.commit()
 }
 
@@ -1092,7 +1113,7 @@ impl Db {
         let changed = self
             .conn()
             .prepare_cached(
-                "INSERT INTO groups (id, epoch, token_hash, updated_at) VALUES (?1, ?2, ?3, ?4)
+                "INSERT INTO groups (id, epoch, token_hash, updated_at, first_epoch) VALUES (?1, ?2, ?3, ?4, ?2)
                  ON CONFLICT (id) DO NOTHING",
             )?
             .execute(params![group, epoch as i64, token_hash, now])?;
@@ -1100,7 +1121,8 @@ impl Db {
     }
 
     /// Orders a commit (spec 4.3): accepted only on the group's current epoch with that epoch's token, and kept. A
-    /// commit accepted before is accepted again: the same epoch and next-token hash, which only it can produce.
+    /// commit accepted before is accepted again: the same epoch and next-token hash, which only it can produce, also
+    /// after its envelope is gone.
     pub fn commit(
         &self,
         group: &GroupId,
@@ -1113,7 +1135,7 @@ impl Db {
         let mut conn = self.conn();
         let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
         let accepted: Option<Vec<u8>> = tx
-            .prepare_cached("SELECT next_token_hash FROM commits WHERE group_id = ?1 AND epoch = ?2")?
+            .prepare_cached("SELECT next_token_hash FROM accepted WHERE group_id = ?1 AND epoch = ?2")?
             .query_row(params![group, epoch as i64], |row| row.get(0))
             .optional()?;
         if accepted.as_deref().is_some_and(|hash| constant_time_eq(hash, next_token_hash)) {
@@ -1137,6 +1159,10 @@ impl Db {
             params![group, (epoch + 1) as i64, next_token_hash, now],
         )?;
         tx.execute(
+            "INSERT INTO accepted (group_id, epoch, next_token_hash) VALUES (?1, ?2, ?3)",
+            params![group, epoch as i64, next_token_hash],
+        )?;
+        tx.execute(
             "INSERT INTO commits (group_id, epoch, next_token_hash, envelope, accepted_at) VALUES (?1, ?2, ?3, ?4, ?5)",
             params![group, epoch as i64, next_token_hash, envelope, now],
         )?;
@@ -1144,8 +1170,9 @@ impl Db {
         Ok(Commit::Accepted)
     }
 
-    /// The envelope of the commit accepted on `epoch`; else whether one was accepted there and is kept no more (the
-    /// group is past it). Read under one lock, so a commit accepted meanwhile is never taken for one pruned.
+    /// The envelope of the commit accepted on `epoch`; else whether one was accepted there and is kept no more: the
+    /// epoch is the group's first or later, and before its current one (`groups.first_epoch`). Read under one lock, so
+    /// a commit accepted meanwhile is never taken for one pruned.
     pub fn commit_envelope(&self, group: &GroupId, epoch: u64) -> rusqlite::Result<Result<Vec<u8>, bool>> {
         let conn = self.conn();
         let envelope: Option<Vec<u8>> = conn
@@ -1155,14 +1182,15 @@ impl Db {
         if let Some(envelope) = envelope {
             return Ok(Ok(envelope));
         }
-        let current: Option<i64> = conn
-            .prepare_cached("SELECT epoch FROM groups WHERE id = ?1")?
-            .query_row([group], |row| row.get(0))
+        let epochs: Option<(i64, i64)> = conn
+            .prepare_cached("SELECT first_epoch, epoch FROM groups WHERE id = ?1")?
+            .query_row([group], |row| Ok((row.get(0)?, row.get(1)?)))
             .optional()?;
-        Ok(Err(current.is_some_and(|current| current as u64 > epoch)))
+        Ok(Err(epochs.is_some_and(|(first, current)| (first as u64..current as u64).contains(&epoch))))
     }
 
-    /// Deletes envelopes and kept commits older than the TTL, and forgets replaced devices after a year.
+    /// Deletes envelopes and commits' envelopes older than the TTL (their acceptance stays, `accepted`), and forgets
+    /// replaced devices after a year.
     pub fn prune(&self, now: u64, ttl_ms: u64) -> rusqlite::Result<usize> {
         let conn = self.conn();
         let before = now.saturating_sub(ttl_ms) as i64;
@@ -1496,6 +1524,38 @@ mod tests {
         assert!(db.lookup(KIND_USER, &leo, false, &[]).unwrap().is_none());
         assert!(!db.username_taken(b"LEO").unwrap());
         assert_eq!(db.audit().unwrap(), []);
+    }
+
+    /// A database from before `groups.first_epoch` and `accepted`, whose older hub pruned a commit: every epoch from 1
+    /// up to the group's current one counts as accepted (`410` once pruned), and the commits it still keeps are
+    /// accepted again when repeated.
+    #[test]
+    fn a_database_from_before_first_epochs_is_migrated() {
+        let path = std::env::temp_dir().join(format!("yo-hub-epochs-{}.db", std::process::id()));
+        let path = path.to_str().unwrap();
+        let (group, token) = ([5; 32], [6; 32]);
+        {
+            let db = Db::open(path).unwrap();
+            assert!(db.create_group(&group, 1, &token, 0).unwrap());
+            assert!(matches!(db.commit(&group, 1, &token, &[1; 32], b"one", 0).unwrap(), Commit::Accepted));
+            assert!(matches!(db.commit(&group, 2, &[1; 32], &[2; 32], b"two", 0).unwrap(), Commit::Accepted));
+            db.conn()
+                .execute_batch(
+                    "ALTER TABLE groups DROP COLUMN first_epoch; DROP TABLE accepted;
+                     DELETE FROM commits WHERE epoch = 1;",
+                )
+                .unwrap();
+        }
+        let db = Db::open(path).unwrap();
+        assert_eq!(db.commit_envelope(&group, 1).unwrap(), Err(true), "accepted, and pruned by the older hub");
+        assert_eq!(db.commit_envelope(&group, 2).unwrap(), Ok(b"two".to_vec()));
+        assert_eq!(db.commit_envelope(&group, 0).unwrap(), Err(false), "never");
+        assert_eq!(db.commit_envelope(&group, 3).unwrap(), Err(false), "not yet");
+        assert!(matches!(db.commit(&group, 2, &[1; 32], &[2; 32], b"two", 0).unwrap(), Commit::Accepted));
+        drop(db);
+        for suffix in ["", "-wal", "-shm"] {
+            let _ = std::fs::remove_file(format!("{path}{suffix}"));
+        }
     }
 
     #[test]

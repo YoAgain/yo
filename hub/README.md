@@ -67,6 +67,7 @@ Spec 6.3 lists the same routes, without `/` and the well-known file, which are n
   can be made to send requests to the hub (a proxy, a fetcher of user-given URLs) inherits that exemption.
 - **Disk.** Blobs have a budget (`YO_BLOB_BUDGET_MB`) and a floor of free space (`YO_BLOB_MIN_FREE_MB`); deliveries,
   commits and new groups are refused (`507`) while the database's disk has less than 1 GiB free.
-- **Cleanup**, hourly: envelopes and commits after 30 days, blobs after their last fetch or 30 days, users without
+- **Cleanup**, hourly: envelopes and commits' envelopes after 30 days (a commit's next-token hash stays, so a
+  repeated commit is still answered `200`, spec 4.3), blobs after their last fetch or 30 days, users without
   a backup idle for 365 days, replaced devices' `410` memory after a year. Rate-limit buckets idle for a day and
   expired replay-cache entries are dropped from memory.
