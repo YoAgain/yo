@@ -35,3 +35,6 @@ bytes = "1"
 rusqlite = { workspace = true }
 reqwest = { workspace = true }
 jsonwebtoken = { workspace = true }
+voprf = { workspace = true }
+p384 = { workspace = true }
+rand_core = { workspace = true }

@@ -9,7 +9,7 @@ use tower::ServiceExt;
 static RUNTIME: OnceLock<tokio::runtime::Runtime> = OnceLock::new();
 static ROUTER: OnceLock<axum::Router> = OnceLock::new();
 
-const ROUTES: [(&str, &str); 28] = [
+const ROUTES: [(&str, &str); 30] = [
     ("PUT", "/v1/keypackages"),
     ("POST", "/v1/lookup"),
     ("PUT", "/v1/push"),
@@ -40,6 +40,9 @@ const ROUTES: [(&str, &str); 28] = [
     ("PUT", "/v1/storage"),
     // Odd: signed, a fetch only a backup door's key may make.
     ("GET", "/v1/backup/AAAAAAAAAAAAAAAAAAAAAA"),
+    // Privacy Pass (spec 6.10): the issuer directory unsigned (even), an issuance signed (odd).
+    ("GET", "/.well-known/private-token-issuer-directory"),
+    ("POST", "/v1/tokens"),
 ];
 
 fuzz_target!(|data: &[u8]| {
