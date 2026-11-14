@@ -164,17 +164,6 @@ struct SettingsView: View {
       }
       .interactiveDismissDisabled(addingPasskey)
       .sheet(isPresented: $securing) { SecureNameSheet(start: securingStart) }
-      .alert(
-        "Unable to Turn On Face ID",
-        isPresented: Binding(
-          get: { passkeyProblem != nil },
-          set: { if !$0 { passkeyProblem = nil } }
-        )
-      ) {
-        Button("OK", role: .cancel) {}
-      } message: {
-        Text(passkeyProblem ?? "")
-      }
       .onAppear { checkPhotosPermission() }
       .onChange(of: scenePhase) { _, phase in
         if phase == .active { checkPhotosPermission() }
@@ -300,6 +289,15 @@ struct SettingsView: View {
     }
     .modifier(SecurityDialogs(
       turningOffPasskey: $turningOffPasskey, renewingWords: $renewingWords, turnOff: removePasskey, renew: newWords))
+    // Here, where the actions are (an alert of the profile's root does not show over a pushed page).
+    .alert(
+      "Something Went Wrong",
+      isPresented: Binding(get: { passkeyProblem != nil }, set: { if !$0 { passkeyProblem = nil } })
+    ) {
+      Button("OK", role: .cancel) {}
+    } message: {
+      Text(passkeyProblem ?? "")
+    }
   }
 
   /// The guide, at a step or (nil) at the first one left.
@@ -319,6 +317,7 @@ struct SettingsView: View {
 
 
   private func replacePasskey() async {
+    guard !addingPasskey else { return }
     addingPasskey = true
     defer { addingPasskey = false }
     do { try await accounts.replacePasskey() } catch {
@@ -328,21 +327,33 @@ struct SettingsView: View {
     }
   }
 
+  /// One change of the backup at a time (`addingPasskey` disables the security rows and pages meanwhile).
   private func removePasskey() {
+    guard !addingPasskey else { return }
+    addingPasskey = true
     Task {
-      do { try await accounts.removePasskey() } catch { passkeyProblem = error.localizedDescription }
+      defer { addingPasskey = false }
+      do { try await accounts.removePasskey() } catch { show(error) }
     }
   }
 
   private func newWords() {
+    guard !addingPasskey else { return }
+    addingPasskey = true
     Task {
+      defer { addingPasskey = false }
       do {
         _ = try await accounts.newRecoveryKey()
         secure(.words)  // the new words, to save in the guide
       } catch {
-        passkeyProblem = error.localizedDescription
+        show(error)
       }
     }
+  }
+
+  /// A security change failed (not a cancellation, nor a sign-out meanwhile).
+  private func show(_ error: Error) {
+    if !SecurityPresentation.isCancellation(error) { passkeyProblem = error.localizedDescription }
   }
 
 

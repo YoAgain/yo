@@ -117,9 +117,11 @@ final class Inbox {
   func send(to friend: Friend, accounts: AccountStore, friends: Friends) async -> String? {
     let key = Username.skeleton(friend.name)
     let before = lastSend[key]
-    let this = Task {
+    let client = accounts.client  // the account tapped in: a Yo waiting here never goes from the next one
+    let this = Task { () async -> String? in
       _ = await before?.value
-      return await sendNow(to: friend, accounts: accounts, friends: friends)
+      guard let client, client === accounts.client else { return "Not Sent" }
+      return await sendNow(to: friend, client: client, accounts: accounts, friends: friends)
     }
     lastSend[key] = this
     let problem = await this.value
@@ -168,13 +170,13 @@ final class Inbox {
     await identify(Array(typed), accounts: accounts, friends: friends)
   }
 
-  private func sendNow(to friend: Friend, accounts: AccountStore, friends: Friends) async -> String? {
-    guard let client = accounts.client else { return "Not Sent" }
+  private func sendNow(to friend: Friend, client: YoClient, accounts: AccountStore, friends: Friends) async -> String? {
     let target = friend.user ?? friend.name
     do {
       let (events, contacts, waiting) = try await Hub.run {
         (try client.sendYo(to: target), client.contacts(), client.waiting())
       }
+      guard client === accounts.client else { return nil }  // signed out meanwhile: nothing of it stays
       if waiting > 0 { deliverLater(accounts: accounts, friends: friends) }
       if friend.user == nil, let contact = contacts.first(where: { contact in
         contact.handles.contains { Username.skeleton($0) == Username.skeleton(friend.name) }

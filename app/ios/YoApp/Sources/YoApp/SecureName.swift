@@ -84,6 +84,14 @@ struct SecureNameSheet: View {
     } bottom: {
       PrimaryButton("Sign In", busy: busy) { Task { await checkPasskey() } }
         .disabled(busy)
+      // A password manager that cannot do it (no PRF): on without the passkey, to the recovery key.
+      Button("Skip") {
+        skipped = true
+        created = false
+        next()
+      }
+      .font(.yo(17))
+      .disabled(busy)
       Note(problem)
     }
   }

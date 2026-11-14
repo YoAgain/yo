@@ -90,6 +90,7 @@ struct FrostedKey: View {
   let words: [String]
   var qrSize: CGFloat = 140
   @State private var shown = false
+  @Environment(\.scenePhase) private var phase
 
   var body: some View {
     VStack(spacing: 16) {
@@ -114,5 +115,9 @@ struct FrostedKey: View {
     .accessibilityLabel(shown ? "" : "Recovery key, hidden")
     .accessibilityAddTraits(.isButton)
     .accessibilityAction { shown.toggle() }
+    // Hidden again when Yo leaves the screen: not in the app switcher's picture, not open on coming back.
+    .onChange(of: phase) { _, now in
+      if now != .active { shown = false }
+    }
   }
 }

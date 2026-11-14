@@ -6,10 +6,8 @@ import AuthenticationServices
 import CryptoKit
 import Foundation
 import Observation
-import Photos
 import Security
 import UIKit
-import UniformTypeIdentifiers
 import UserNotifications
 import YoCore
 
@@ -220,8 +218,8 @@ final class AccountStore {
   private var securing: (k: SymmetricKey, code: [String])?
   /// The guide's passkey once made, before it is signed in with.
   private var newPasskey: Data?
-  /// Coming back from the iCloud Keychain, under way.
-  private var restoring = false
+  /// A registration under way (`register(_:secret:)`).
+  private var registering = false
 
   init() {
     account = UserDefaults.standard.data(forKey: Self.key).flatMap { try? JSONDecoder().decode(Account.self, from: $0) }
@@ -260,8 +258,12 @@ final class AccountStore {
     } catch {}
   }
 
-  /// Registers `username` at the hub (spec 6.4), or, with `secret`, takes the name's account back (a new phone).
+  /// Registers `username` at the hub (spec 6.4), or, with `secret`, takes the name's account back (a new phone). One at
+  /// a time, whichever way in (a second registration would replace the first).
   private func register(_ username: String, secret: Data?) async throws -> YoClient {
+    guard !registering else { throw AccountError.busy }
+    registering = true
+    defer { registering = false }
     let transport = Hub.transport
     do {
       return try await Hub.run {
@@ -340,8 +342,7 @@ final class AccountStore {
     guard var account, let securing, let client else { throw AccountError.noBackup }
     account.byPasskey = prf != nil
     account.byCode = true
-    try await put(BackupRecord.make(account, code: securing.code, k: securing.k, prf: prf))
-    guard client === self.client else { throw CancellationError() }  // signed out meanwhile
+    try await put(BackupRecord.make(account, code: securing.code, k: securing.k, prf: prf), by: client)
     RecoveryWords.save(securing.code)
     self.account = account
     self.securing = nil
@@ -349,8 +350,16 @@ final class AccountStore {
     SecureReminder.update(secured: true)
   }
 
-  private func put(_ backup: YoBackup) async throws {
-    try await hub { try $0.putBackup(backup: backup) }
+  /// The backup to the hub through `client`, the one the change began with: never another account's after a sign-out
+  /// and sign-in meanwhile.
+  private func put(_ backup: YoBackup, by client: YoClient) async throws {
+    guard client === self.client else { throw CancellationError() }  // signed out meanwhile
+    do {
+      try await Hub.run { try client.putBackup(backup: backup) }
+    } catch let error as YoError {
+      throw AccountError.hub(error)
+    }
+    guard client === self.client else { throw CancellationError() }
   }
 
   /// A core call for this account, off the main actor; the core's error as an `AccountError`.
@@ -380,8 +389,7 @@ final class AccountStore {
       }
     account.byPasskey = !byPasskey.isEmpty
     account.byCode = true
-    try await put(BackupRecord.make(account, code: words, k: k, prf: nil, byPasskey: byPasskey))
-    guard client === self.client else { throw CancellationError() }  // signed out meanwhile
+    try await put(BackupRecord.make(account, code: words, k: k, prf: nil, byPasskey: byPasskey), by: client)
     RecoveryWords.save(words)
     self.account = account
     if case .set = passkey { passkeyTurnedOff = false }
@@ -468,9 +476,7 @@ final class AccountStore {
   /// An account tapped on Sign In, from the iCloud Keychain: signed in with its key, also one signed out before.
   @discardableResult
   func restore(synced item: SyncedAccount.Item) async throws -> Bool {
-    guard account == nil, !restoring else { return false }
-    restoring = true  // one registration at a time: a second would replace the first
-    defer { restoring = false }
+    guard account == nil else { return false }
     let client: YoClient
     do {
       client = try await register(item.username, secret: item.accountKey)
@@ -557,7 +563,7 @@ final class AccountStore {
 }
 
 enum AccountError: LocalizedError {
-  case taken, noBackup, wrongCode, noPRF, tooMany, hub(YoError)
+  case taken, noBackup, wrongCode, noPRF, tooMany, busy, hub(YoError)
 
   var errorDescription: String? {
     switch self {
@@ -566,6 +572,7 @@ enum AccountError: LocalizedError {
     case .wrongCode: "That recovery key couldn’t restore your account. Check the words and try again."
     case .noPRF: "This passkey can’t be used to sign in to Yo. Try a different password manager."
     case .tooMany: "Too many tries. Try again later."
+    case .busy: "Signing in already. Wait a moment."
     case .hub(.Network): "Yo can’t reach its server. Check your connection and try again."
     case .hub(.Replaced): "Your account is in use on another iPhone."
     case .hub(let error): "Something went wrong. Try again. (\(error))"  // the core's reason, while in development
@@ -604,28 +611,6 @@ enum RecoveryWords {
 
   static func delete() {
     SecItemDelete(query as CFDictionary)
-  }
-
-  /// To the clipboard, on this phone only (not to other devices) and for 10 minutes: enough to paste them into a note
-  /// or a password manager, not to lie about.
-  static func copy(_ words: [String], name: String) {
-    let text = words.enumerated().map { "\($0.offset + 1). \($0.element)" }.joined(separator: "\n")
-    UIPasteboard.general.setItems(
-      [[UTType.plainText.identifier: "Yo \(name)\n\(text)"]],
-      options: [.localOnly: true, .expirationDate: Date.now.addingTimeInterval(600)])
-  }
-
-  /// A picture into the photo library, asked once (add only). Not on the main actor: Photos runs the change on a
-  /// queue of its own, and a block made on the main actor would trap there.
-  nonisolated static func saveToPhotos(_ image: UIImage) async throws {
-    let status = await PHPhotoLibrary.requestAuthorization(for: .addOnly)
-    guard status == .authorized || status == .limited else { throw PhotosError.notAllowed }
-    try await PHPhotoLibrary.shared().performChanges { PHAssetChangeRequest.creationRequestForAsset(from: image) }
-  }
-
-  enum PhotosError: LocalizedError {
-    case notAllowed
-    var errorDescription: String? { "Yo can’t save to Photos. Copy your recovery key instead." }
   }
 }
 
@@ -680,16 +665,18 @@ enum SyncedAccount {
     write(item, previous: previous)
   }
 
-  private static func write(_ item: Item, previous: Item?) {
-    guard item != previous, let data = try? JSONEncoder().encode(item) else { return }
+  @discardableResult
+  private static func write(_ item: Item, previous: Item?) -> Bool {
+    guard item != previous else { return true }
+    guard let data = try? JSONEncoder().encode(item) else { return false }
     let attributes: [String: Any] = [
       kSecValueData as String: data,
       kSecAttrAccessible as String: kSecAttrAccessibleAfterFirstUnlock,
       kSecAttrLabel as String: "\(Hub.isDevApp ? "Yo Dev" : "Yo") – \(item.username)",
     ]
-    if SecItemUpdate(query(item.userID) as CFDictionary, attributes as CFDictionary) == errSecItemNotFound {
-      SecItemAdd(query(item.userID).merging(attributes) { $1 } as CFDictionary, nil)
-    }
+    let updated = SecItemUpdate(query(item.userID) as CFDictionary, attributes as CFDictionary)
+    guard updated == errSecItemNotFound else { return updated == errSecSuccess }
+    return SecItemAdd(query(item.userID).merging(attributes) { $1 } as CFDictionary, nil) == errSecSuccess
   }
 
   static func load(_ userID: Data) -> Item? {
@@ -741,9 +728,9 @@ enum SyncedAccount {
     var result: CFTypeRef?
     guard SecItemCopyMatching(find as CFDictionary, &result) == errSecSuccess else { return }
     if let data = result as? Data, let item = try? JSONDecoder().decode(Item.self, from: data),
-      load(item.userID) == nil
+      load(item.userID) == nil, !write(item, previous: nil)
     {
-      write(item, previous: nil)
+      return  // not moved (the keychain would not): the old item stays, to be moved next time
     }
     SecItemDelete(old as CFDictionary)
   }

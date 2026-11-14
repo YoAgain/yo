@@ -138,26 +138,23 @@ struct Onboarding: View {
   private var logInChoice: some View {
     Page(title: "Sign In", message: "Use your passkey or recovery key.", back: { go(.welcome) }) {
       if !synced.isEmpty {
-        ScrollView {
-          VStack(spacing: 10) {
-            ForEach(synced) { item in
-              Button { Task { await logIn(item) } } label: {
-                HStack(spacing: 12) {
-                  Avatar(name: item.username, size: 36)
-                  Text(item.username).font(.yo(20)).lineLimit(1)
-                  Spacer(minLength: 0)
-                  if signingIn == item.userID { ProgressView().tint(.white) }
-                }
-                .frame(maxWidth: .infinity, minHeight: 44)
+        VStack(spacing: 10) {
+          ForEach(synced) { item in
+            Button { Task { await logIn(item) } } label: {
+              HStack(spacing: 12) {
+                Avatar(name: item.username, size: 36)
+                Text(item.username).font(.yo(20)).lineLimit(1)
+                Spacer(minLength: 0)
+                if signingIn == item.userID { ProgressView().tint(.white) }
               }
-              .buttonStyle(.glass)
-              .disabled(busy)
-              .accessibilityLabel("Sign In as \(item.username)")
+              .frame(maxWidth: .infinity, minHeight: 44)
             }
-            Text("Saved in your iCloud Keychain.").font(.footnote).opacity(0.75)
+            .buttonStyle(.glass)
+            .disabled(busy)
+            .accessibilityLabel("Sign In as \(item.username)")
           }
+          Text("Saved in your iCloud Keychain.").font(.footnote).opacity(0.75)
         }
-        .scrollBounceBehavior(.basedOnSize)
       }
     } bottom: {
       PrimaryButton("Use Passkey", busy: busy) { Task { await logInWithPasskey() } }
@@ -263,16 +260,21 @@ struct Page<Content: View, Bottom: View>: View {
         Spacer()
       }
       .frame(height: 44)
-      VStack(spacing: 10) {
-        Text(title).font(.yo(30)).multilineTextAlignment(.center)
-        if let message {
-          Text(message).font(.system(size: 17)).multilineTextAlignment(.center).opacity(0.85)
+      // Title, message and content scroll when large text needs more room than there is; the buttons stay.
+      ScrollView {
+        VStack(spacing: 10) {
+          Text(title).font(.yo(30)).multilineTextAlignment(.center)
+          if let message {
+            Text(message).font(.system(size: 17)).multilineTextAlignment(.center).opacity(0.85)
+          }
         }
+        .padding(.top, 24)
+        VStack(spacing: 12) { content }
+          .padding(.top, 32)
+          .padding(.bottom, 16)
       }
-      .padding(.top, 24)
-      VStack(spacing: 12) { content }
-        .padding(.top, 32)
-      Spacer(minLength: 16)
+      .scrollBounceBehavior(.basedOnSize)
+      .scrollIndicators(.hidden)
       VStack(spacing: 18) { bottom }
     }
     .padding(.horizontal, 24)
