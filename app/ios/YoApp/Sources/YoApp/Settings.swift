@@ -655,7 +655,7 @@ struct CountBadge: View {
       .foregroundStyle(.white)
       .frame(minWidth: 23, minHeight: 23)
       .background(.red, in: .capsule)
-      .accessibilityLabel("\(count) thing to do")
+      .accessibilityLabel(count == 1 ? "1 thing to do" : "\(count) things to do")
   }
 }
 
