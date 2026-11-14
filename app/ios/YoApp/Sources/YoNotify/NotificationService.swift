@@ -1,5 +1,6 @@
 // The notification service extension: a push says only "Yo" (the hub knows nothing more, spec 6.3); this one makes
-// it "Yo from YoGPT" ("📷 from …", "🎥 from …", "3 Yos from …", ShareBridge.yo). It opens the app's state as a guest
+// it "Yo from YoGPT" ("📷 from …", "🎥 from …", ShareBridge.yo). More Yos read as on the bar and go into one
+// notification with those still on the screen ("Yo!!!!! +4 from YoGPT · 📷 2", ShareBridge.merged). It opens the app's state as a guest
 // (SharedState.swift: in turns with the app, under the lock in the App Group), receives once without waiting, and
 // names who the new Yos are from (a line per sender, the newest first). What it receives stays in the state for the
 // app (never acknowledged here), which shows it as ever; once the notification is out, the hub is told it arrived
@@ -33,7 +34,10 @@ final class NotificationService: UNNotificationServiceExtension {
       let (found, client, events) = Self.newest()
       switch found {
       case .yos(let senders):
-        pending.update { ShareBridge.yo($0, senders) }
+        // With the Yos the notifications on the screen already name: one notification for all of them.
+        let (all, replaced) = ShareBridge.merged(senders, with: Self.delivered())
+        pending.update { ShareBridge.yo($0, all) }
+        UNUserNotificationCenter.current().removeDeliveredNotifications(withIdentifiers: replaced)
       case .nothingNew:
         let last = Self.lastYo()
         pending.update { content in
@@ -77,15 +81,20 @@ final class NotificationService: UNNotificationServiceExtension {
 
   /// The Yo notification shown last and not seen yet (the app takes them all in when it opens).
   private static func lastYo() -> UNNotificationRequest? {
-    final class Last: @unchecked Sendable { var request: UNNotificationRequest? }
-    let last = Last()
+    delivered().filter { $0.request.content.categoryIdentifier == ShareBridge.yoCategory }.max { $0.date < $1.date }?
+      .request
+  }
+
+  /// The notifications on the screen (none if the system does not say within two seconds).
+  private static func delivered() -> [UNNotification] {
+    final class Found: @unchecked Sendable { var notifications: [UNNotification] = [] }
+    let found = Found()
     let done = DispatchSemaphore(value: 0)
     UNUserNotificationCenter.current().getDeliveredNotifications { delivered in
-      last.request = delivered.filter { $0.request.content.categoryIdentifier == ShareBridge.yoCategory }
-        .max { $0.date < $1.date }?.request
+      found.notifications = delivered
       done.signal()
     }
-    return done.wait(timeout: .now() + 2) == .success ? last.request : nil
+    return done.wait(timeout: .now() + 2) == .success ? found.notifications : []
   }
 
   private static func newest() -> (Found, YoClient?, [YoEvent]) {

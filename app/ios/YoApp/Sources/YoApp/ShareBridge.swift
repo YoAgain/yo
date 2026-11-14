@@ -92,31 +92,107 @@ enum ShareBridge {
   /// A Yo notification's category: "Yo Back" right on it (`Inbox.askForNotifications`).
   static let yoCategory = "yo"
 
+  /// How a run of Yos reads, on the app's bar and in a notification alike: "Yo", one "!" for each Yo after the
+  /// first, at most `mostBangs`, then " +n" for the rest ("Yo!!!!! +4" for ten).
+  static let mostBangs = 5
+
+  /// The "!"s of `count` Yos and how many more there are than "!"s.
+  static func bangs(_ count: Int) -> (bangs: Int, more: Int) {
+    let wanted = max(0, count - 1)
+    let bangs = min(wanted, mostBangs)
+    return (bangs, wanted - bangs)
+  }
+
+  /// "Yo", "Yo!!", "Yo!!!!! +4".
+  static func yo(_ count: Int) -> String {
+    let (bangs, more) = bangs(count)
+    return "Yo" + String(repeating: "!", count: bangs) + (more > 0 ? " +\(more)" : "")
+  }
+
   /// Yos from one sender, for a notification.
   struct Yos: Sendable {
     let name: String
     let user: String
-    let count: Int
+    var count: Int
+    /// Of them, photos and videos: always named, never lost among the Yos.
+    var photos = 0
+    var videos = 0
     /// The newest one's: a photo, a video, or nil for a Yo.
     let kind: MediaFile.Kind?
     /// The newest one as the app's inbox calls it ("user/sent at"): shown once, from the notification or the core.
     let id: String
 
-    /// The original's words, the name as its owner writes it: "Yo from LEO", "📷 from LEO", "🎥 from LEO", "3 Yos from LEO".
+    /// The original's words, the name as its owner writes it: "Yo from LEO", "📷 from LEO", "🎥 from LEO"; more read
+    /// as on the bar, with the photos and videos among them: "Yo!!!!! +4 from LEO · 📷 2".
     var line: String {
-      if count > 1 { return "\(count) Yos from \(name)" }
-      switch kind {
-      case .photo: return "📷 from \(name)"
-      case .video: return "🎥 from \(name)"
-      case nil: return "Yo from \(name)"
+      if count == 1 {
+        switch kind {
+        case .photo: return "📷 from \(name)"
+        case .video: return "🎥 from \(name)"
+        case nil: return "Yo from \(name)"
+        }
+      }
+      var line = "\(ShareBridge.yo(count)) from \(name)"
+      if photos > 0 { line += photos > 1 ? " · 📷 \(photos)" : " · 📷" }
+      if videos > 0 { line += videos > 1 ? " · 🎥 \(videos)" : " · 🎥" }
+      return line
+    }
+
+    /// As a notification keeps it (`userInfo["yos"]`), for the next one to add to.
+    var info: [String: Any] {
+      ["name": name, "user": user, "count": count, "photos": photos, "videos": videos, "id": id,
+       "kind": kind.map { $0 == .photo ? "photo" : "video" } ?? "yo"]
+    }
+
+    init(
+      name: String, user: String, count: Int, photos: Int = 0, videos: Int = 0, kind: MediaFile.Kind?, id: String
+    ) {
+      (self.name, self.user, self.count, self.photos, self.videos, self.kind, self.id) =
+        (name, user, count, photos, videos, kind, id)
+    }
+
+    init?(info: [String: Any]) {
+      guard let name = info["name"] as? String, let user = info["user"] as? String, let count = info["count"] as? Int,
+        let id = info["id"] as? String
+      else { return nil }
+      let kind: MediaFile.Kind? =
+        switch info["kind"] as? String {
+        case "photo": .photo
+        case "video": .video
+        default: nil
+        }
+      self.init(
+        name: name, user: user, count: count, photos: info["photos"] as? Int ?? 0, videos: info["videos"] as? Int ?? 0,
+        kind: kind, id: id)
+    }
+  }
+
+  /// `new` (the newest first) with the Yos the Yo notifications still on the screen name, per sender: one
+  /// notification says them all ("Yo!!!!! +4 from LEO · 📷 2"), and those before it go (`replaced`).
+  static func merged(_ new: [Yos], with delivered: [UNNotification]) -> (yos: [Yos], replaced: [String]) {
+    var all = new
+    var replaced: [String] = []
+    for note in delivered.sorted(by: { $0.date > $1.date })
+    where note.request.content.categoryIdentifier == yoCategory {
+      guard let kept = note.request.content.userInfo["yos"] as? [[String: Any]] else { continue }
+      replaced.append(note.request.identifier)
+      for earlier in kept.compactMap(Yos.init(info:)) {
+        if let at = all.firstIndex(where: { $0.user == earlier.user }) {
+          all[at].count += earlier.count
+          all[at].photos += earlier.photos
+          all[at].videos += earlier.videos
+        } else {
+          all.append(earlier)
+        }
       }
     }
+    return (all, replaced)
   }
 
   /// The Yos among `events`, one per sender, the newest sender first, as a notification names them. What Yo does not
   /// show yet (a text, a link, a place) comes as a Yo, as the app shows it (Inbox).
   static func yos(in events: [YoEvent], client: YoClient) -> [Yos] {
-    var senders: [String: (count: Int, sentAtMs: UInt64, kind: MediaFile.Kind?)] = [:]
+    var senders: [String: (count: Int, sentAtMs: UInt64, kind: MediaFile.Kind?, photos: Int, videos: Int)] = [:]
     for event in events {
       guard case .message(let user, let sentAtMs, let message) = event else { continue }
       let kind: MediaFile.Kind? =
@@ -127,10 +203,15 @@ enum ShareBridge {
         }
       let before = senders[user]
       let newer = before.map { sentAtMs >= $0.sentAtMs } ?? true
-      senders[user] = ((before?.count ?? 0) + 1, newer ? sentAtMs : before!.sentAtMs, newer ? kind : before!.kind)
+      senders[user] = (
+        (before?.count ?? 0) + 1, newer ? sentAtMs : before!.sentAtMs, newer ? kind : before!.kind,
+        (before?.photos ?? 0) + (kind == .photo ? 1 : 0), (before?.videos ?? 0) + (kind == .video ? 1 : 0)
+      )
     }
     return senders.sorted { $0.value.sentAtMs > $1.value.sentAtMs }.map { user, yos in
-      Yos(name: name(of: user, client: client), user: user, count: yos.count, kind: yos.kind, id: "\(user)/\(yos.sentAtMs)")
+      Yos(
+        name: name(of: user, client: client), user: user, count: yos.count, photos: yos.photos, videos: yos.videos,
+        kind: yos.kind, id: "\(user)/\(yos.sentAtMs)")
     }
   }
 
@@ -155,6 +236,6 @@ enum ShareBridge {
     content.threadIdentifier = newest.user
     content.interruptionLevel = .active
     // `user` for Yo Back, also to someone not on the list yet; `id` so the app shows the Yo once.
-    content.userInfo = ["from": newest.name, "user": newest.user, "id": newest.id]
+    content.userInfo = ["from": newest.name, "user": newest.user, "id": newest.id, "yos": senders.map(\.info)]
   }
 }
