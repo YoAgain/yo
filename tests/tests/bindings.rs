@@ -859,7 +859,7 @@ fn the_app_layer_and_its_extensions_take_turns_under_load() {
                 std::thread::scope(|s| {
                     // The app: its long poll, and now and then a Yo of its own.
                     s.spawn(|| {
-                        let mut k = 0;
+                        let mut k = 0u32;
                         while Instant::now() < until {
                             let events = a.sync(1).unwrap();
                             got_by_app.fetch_add(yos(&events, &friend_id), Relaxed);
