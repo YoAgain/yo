@@ -305,44 +305,8 @@ struct FriendList: View {
       }
       // Amethyst behind everything; in camera mode the live picture or the picked photo.
       .background { backdrop.ignoresSafeArea() }
-      .overlay(alignment: .bottom) {
-        if cameraOn { cameraControls }
-      }
-      // The camera at the bottom corner, under the thumb (the left one for the left hand): the same button opens and
-      // closes it; in camera mode the switch to the other camera above it.
-      .overlay(alignment: leftHanded ? .bottomLeading : .bottomTrailing) {
-        VStack(spacing: 14) {
-          if cameraOn {
-            Button {
-              camera.flip()
-              Task { await readZooms() }
-            } label: {
-              Image(systemName: "arrow.triangle.2.circlepath")
-                .font(.body.weight(.medium))
-                .foregroundStyle(.white)
-                .frame(width: 44, height: 44)
-            }
-            .buttonStyle(.plain)
-            .glassEffect(.regular.interactive(), in: .circle)
-            .accessibilityLabel("Switch Camera")
-            .transition(.scale.combined(with: .opacity))
-          }
-          Button {
-            withAnimation(.snappy) { cameraOn.toggle() }
-          } label: {
-            Image(systemName: cameraOn ? "xmark" : "camera.fill")
-              .font(.system(size: 22, weight: .semibold))
-              .foregroundStyle(.white)
-              .contentTransition(.symbolEffect(.replace))
-              .frame(width: 60, height: 60)
-          }
-          .buttonStyle(.plain)
-          .glassEffect(.regular.interactive(), in: .circle)
-          .accessibilityLabel(cameraOn ? "Close Camera" : "Camera")
-        }
-        .padding(.horizontal, 16)
-        .padding(.bottom, 2)
-      }
+      // The camera's controls in one row at the bottom, its button in the corner opening and closing it.
+      .overlay(alignment: .bottom) { cameraControls }
       .navigationBarTitleDisplayMode(.inline)
       .toolbarVisibility(cameraOn ? .visible : .hidden, for: .navigationBar)  // the list from the top, no heading
       .toolbar {
@@ -598,23 +562,60 @@ struct FriendList: View {
   }
 
   /// The photo library at the bottom left, front/back at the bottom right, as in the Camera app.
+  /// One row at the bottom, under the thumb: the camera's button at the corner (it opens the camera, and closes it as
+  /// "✕" in the same place), the library right beside it, the zoom in the middle, the switch to the selfie camera
+  /// at the other corner. Mirrored for the left hand.
   private var cameraControls: some View {
     ZStack {
-      let thumbnail = picked?.thumbnail  // the picker's label closure is Sendable: take the value here
-      PhotosPicker(selection: $libraryItem, matching: .images) {
-        LibraryLabel(thumbnail: thumbnail)
-      }
-      .buttonStyle(.plain)
-      .glassEffect(.regular.interactive(), in: .circle)
-      .accessibilityLabel("Photo Library")
-      .frame(maxWidth: .infinity, alignment: leftHanded ? .trailing : .leading)  // away from the camera button
-      if picked == nil {  // a picked photo goes as it is
+      if cameraOn && picked == nil {  // a picked photo goes as it is
         CameraZoom(choices: zooms, chosen: $zoom).onChange(of: zoom) { camera.zoom(to: zoom) }
       }
+      HStack(spacing: 12) {
+        if cameraOn {
+          Button {
+            camera.flip()
+            Task { await readZooms() }
+          } label: {
+            Image(systemName: "arrow.triangle.2.circlepath")
+              .font(.body.weight(.medium))
+              .foregroundStyle(.white)
+              .frame(width: 48, height: 48)
+              .contentShape(.circle)
+          }
+          .buttonStyle(.plain)
+          .glassEffect(.regular.interactive(), in: .circle)
+          .accessibilityLabel("Switch Camera")
+          .transition(.scale.combined(with: .opacity))
+        }
+        Spacer(minLength: 0)
+        if cameraOn {
+          let thumbnail = picked?.thumbnail  // the picker's label closure is Sendable: take the value here
+          PhotosPicker(selection: $libraryItem, matching: .images) {
+            LibraryLabel(thumbnail: thumbnail)
+          }
+          .buttonStyle(.plain)
+          .glassEffect(.regular.interactive(), in: .circle)
+          .accessibilityLabel("Photo Library")
+          .transition(.scale.combined(with: .opacity))
+        }
+        Button {
+          withAnimation(.snappy) { cameraOn.toggle() }
+        } label: {
+          Image(systemName: cameraOn ? "xmark" : "camera.fill")
+            .font(.system(size: 22, weight: .semibold))
+            .foregroundStyle(.white)
+            .contentTransition(.symbolEffect(.replace))
+            .frame(width: 60, height: 60)
+            .contentShape(.circle)  // the whole circle, not only the thin "✕"
+        }
+        .buttonStyle(.plain)
+        .glassEffect(.regular.interactive(), in: .circle)
+        .accessibilityLabel(cameraOn ? "Close Camera" : "Camera")
+      }
+      .environment(\.layoutDirection, leftHanded ? .rightToLeft : .leftToRight)
     }
-    .padding(.horizontal, 20)
-    .padding(.bottom, 8)
-    .transition(.move(edge: .bottom).combined(with: .opacity))
+    .padding(.horizontal, 16)
+    .padding(.bottom, 2)
   }
 
   private func switchCamera(_ on: Bool) async {
