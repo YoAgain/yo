@@ -24,7 +24,7 @@ use std::collections::HashMap;
 use std::future::Future;
 use std::net::{IpAddr, SocketAddr};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::{Arc, Mutex, PoisonError};
+use std::sync::{Arc, Mutex, PoisonError, Weak};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tokio::sync::Notify;
 use yo_wire::api::{self, HEADER_BODY_HASH, HEADER_DEVICES};
@@ -152,14 +152,16 @@ struct Delivery {
     devices_hash: [u8; 32],
     envelope: Bytes,
     stored: tokio::sync::oneshot::Sender<Result<Delivered, ()>>,
+    /// Where its pushes are sent from.
+    runtime: tokio::runtime::Handle,
 }
 
 /// The most envelopes one transaction stores.
 const BATCH: usize = 512;
 
-/// Group commit: takes what has queued up, stores it in one transaction, answers each. Under load the batches grow by
-/// themselves; alone, an envelope is stored at once.
-fn writer(db: Arc<Db>, queue: std::sync::mpsc::Receiver<Delivery>, most: u32) {
+/// Group commit: takes what has queued up, stores it in one transaction, wakes the devices and answers each. Under
+/// load the batches grow by themselves; alone, an envelope is stored at once.
+fn writer(db: Arc<Db>, queue: std::sync::mpsc::Receiver<Delivery>, most: u32, hub: Weak<Hub>) {
     while let Ok(first) = queue.recv() {
         let mut batch = vec![first];
         while batch.len() < BATCH {
@@ -172,7 +174,12 @@ fn writer(db: Arc<Db>, queue: std::sync::mpsc::Receiver<Delivery>, most: u32) {
             batch.iter().map(|d| (d.user, d.devices_hash, &d.envelope[..])).collect();
         match db.deliver(&items, now_ms(), most) {
             Ok(outcomes) => {
-                for (delivery, outcome) in batch.into_iter().zip(outcomes) {
+                let hub = hub.upgrade();
+                for (delivery, mut outcome) in batch.into_iter().zip(outcomes) {
+                    // Here, not in the request: one cut off after its envelope was stored still wakes and pushes.
+                    if let (Delivered::Stored(devices), Some(hub)) = (&mut outcome, &hub) {
+                        hub.woken(std::mem::take(devices), &delivery.runtime);
+                    }
                     let _ = delivery.stored.send(Ok(outcome));
                 }
             }
@@ -221,13 +228,7 @@ impl Hub {
             blobs.remove(&blob);
         }
         let (deliveries, queue) = std::sync::mpsc::channel();
-        let writing = db.clone();
-        let most = config.limits.max_pending_per_device;
-        std::thread::Builder::new()
-            .name("yo-hub-writer".into())
-            .spawn(move || writer(writing, queue, most))
-            .map_err(|e| format!("writer: {e}"))?;
-        Ok(Arc::new(Hub {
+        let hub = Arc::new(Hub {
             db,
             deliveries,
             crypto: RustCrypto::default(),
@@ -240,7 +241,14 @@ impl Hub {
             pusher,
             blobs: Arc::new(blobs),
             config,
-        }))
+        });
+        // The writer ends with the hub: when the last sender of its queue goes.
+        let (writing, woken, most) = (hub.db.clone(), Arc::downgrade(&hub), hub.config.limits.max_pending_per_device);
+        std::thread::Builder::new()
+            .name("yo-hub-writer".into())
+            .spawn(move || writer(writing, queue, most, woken))
+            .map_err(|e| format!("writer: {e}"))?;
+        Ok(hub)
     }
 
     pub fn router(self: &Arc<Self>) -> Router {
@@ -596,12 +604,20 @@ impl Hub {
         }
     }
 
-    fn push(self: &Arc<Self>, wake: db::Wake) {
+    /// What follows a stored delivery: its devices' long polls answer, the others are pushed.
+    fn woken(self: &Arc<Self>, devices: Vec<db::Wake>, runtime: &tokio::runtime::Handle) {
+        for wake in devices {
+            self.wake_waiters(&wake.device_id);
+            self.push(wake, runtime);
+        }
+    }
+
+    fn push(self: &Arc<Self>, wake: db::Wake, runtime: &tokio::runtime::Handle) {
         if wake.push_token.is_empty() {
             return;
         }
         let hub = self.clone();
-        tokio::spawn(async move {
+        runtime.spawn(async move {
             match hub.pusher.wake(wake.push_platform, &wake.push_token).await {
                 push::Outcome::TokenInvalid => {
                     if let Err(error) = hub.db.clear_push(&wake.device_id, &wake.push_token) {
@@ -933,18 +949,14 @@ async fn deliver(
     hub.limit_ip_bytes(peer, &headers, body.len())?;
     hub.db_room()?;
     let (stored, outcome) = tokio::sync::oneshot::channel();
+    let runtime = tokio::runtime::Handle::current();
     hub.deliveries
-        .send(Delivery { user, devices_hash, envelope: body, stored })
+        .send(Delivery { user, devices_hash, envelope: body, stored, runtime })
         .map_err(|_| refuse(StatusCode::SERVICE_UNAVAILABLE))?;
     let outcome = outcome.await.ok().and_then(Result::ok).ok_or_else(|| refuse(StatusCode::INTERNAL_SERVER_ERROR))?;
     match outcome {
-        Delivered::Stored(devices) => {
-            for wake in devices {
-                hub.wake_waiters(&wake.device_id);
-                hub.push(wake);
-            }
-            Ok((StatusCode::ACCEPTED, Vec::new()))
-        }
+        // Its devices are woken by the writer (`writer`).
+        Delivered::Stored(_) => Ok((StatusCode::ACCEPTED, Vec::new())),
         Delivered::Mismatch(roster) => Err(Refusal(
             StatusCode::CONFLICT,
             encode(&api::Devices { account_key: roster.account_key, device_keys: roster.device_keys }),
@@ -1194,6 +1206,48 @@ mod tests {
         drop(hub);
         let _ = std::fs::remove_dir_all(&dir);
         let _ = std::fs::remove_dir_all(&config.blobs.dir);
+    }
+
+    /// The request is cut off once its envelope is queued (nobody waits for the writer's answer): the envelope is
+    /// stored, and its device is woken and pushed all the same.
+    #[tokio::test]
+    async fn a_delivery_whose_request_is_gone_still_wakes_and_pushes() {
+        let apns = config::ApnsConfig {
+            key_pem: include_str!("../../tests/fixtures/test-apns.p8").into(),
+            key_id: "KEYID12345".into(),
+            team_id: "TEAMID1234".into(),
+            topic: "co.justyo.app".into(),
+        };
+        let recorder = Arc::new(push::Recorder::default());
+        let hub = Hub::new(Config { apns: Some(apns), ..Config::for_tests() }, recorder.clone()).unwrap();
+        let device = NewDevice {
+            device_id: [1; 16],
+            device_key: [1; 32],
+            auth_key: [1; 32],
+            push_platform: api::PUSH_APNS,
+            push_token: b"a1b2c3".to_vec(),
+            app: None,
+        };
+        let last_resort = StoredKeyPackage { hash: [1; 32], data: vec![1] };
+        hub.db.register(b"LEO", "LEO", &[1; 16], &[1; 32], &device, &[], &last_resort, 0).unwrap();
+        let waiter = hub.waiter([1; 16]);
+        let notified = waiter.notify.notified();
+        tokio::pin!(notified);
+        notified.as_mut().enable();
+        let (stored, outcome) = tokio::sync::oneshot::channel();
+        drop(outcome);
+        let envelope = Bytes::from(yo_wire::envelope::seal(b"yo").unwrap());
+        let devices_hash = yo_wire::devices::hash(&[1; 32], &[[1; 32]]);
+        let runtime = tokio::runtime::Handle::current();
+        hub.deliveries.send(Delivery { user: [1; 16], devices_hash, envelope, stored, runtime }).unwrap();
+        tokio::time::timeout(Duration::from_secs(5), notified).await.expect("its long poll answers");
+        assert_eq!(hub.db.fetch(&[1; 16], 10).unwrap().len(), 1);
+        let until = std::time::Instant::now() + Duration::from_secs(5);
+        while recorder.sent.lock().unwrap().is_empty() {
+            assert!(std::time::Instant::now() < until, "pushed");
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        assert!(recorder.sent.lock().unwrap()[0].url.ends_with("/3/device/a1b2c3"));
     }
 
     #[tokio::test]
