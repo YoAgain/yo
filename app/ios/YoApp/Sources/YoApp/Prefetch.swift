@@ -30,11 +30,7 @@ enum Prefetch {
     guard let directory else { return }
     let media: [YoMedia] = events.compactMap { event in
       guard case .message(_, _, let kind) = event else { return nil }
-      switch kind {
-      case .photo(let photo): return photo
-      case .video(let video, _): return video
-      default: return nil
-      }
+      return kind.media?.media
     }
     guard !media.isEmpty else { return }
     try? FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)

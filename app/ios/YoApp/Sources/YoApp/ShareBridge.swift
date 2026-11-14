@@ -138,10 +138,13 @@ enum ShareBridge {
       return line
     }
 
+    /// When the newest was sent, from its id ("user/sent at").
+    var sentAtMs: UInt64 { UInt64(id.split(separator: "/").last ?? "") ?? 0 }
+
     /// As a notification keeps it (`userInfo["yos"]`), for the next one to add to.
     var info: [String: Any] {
       ["name": name, "user": user, "count": count, "photos": photos, "videos": videos, "id": id,
-       "kind": kind.map { $0 == .photo ? "photo" : "video" } ?? "yo"]
+       "kind": kind?.rawValue ?? "yo"]
     }
 
     init(
@@ -155,12 +158,7 @@ enum ShareBridge {
       guard let name = info["name"] as? String, let user = info["user"] as? String, let count = info["count"] as? Int,
         let id = info["id"] as? String
       else { return nil }
-      let kind: MediaFile.Kind? =
-        switch info["kind"] as? String {
-        case "photo": .photo
-        case "video": .video
-        default: nil
-        }
+      let kind = (info["kind"] as? String).flatMap(MediaFile.Kind.init(rawValue:))
       self.init(
         name: name, user: user, count: count, photos: info["photos"] as? Int ?? 0, videos: info["videos"] as? Int ?? 0,
         kind: kind, id: id)
@@ -169,7 +167,7 @@ enum ShareBridge {
 
   /// `new` (the newest first) with the Yos the Yo notifications still on the screen name, per sender: one
   /// notification says them all ("Yo!!!!! +4 from LEO · 📷 2"), and those before it go (`replaced`).
-  static func merged(_ new: [Yos], with delivered: [UNNotification]) -> (yos: [Yos], replaced: [String]) {
+  private static func merged(_ new: [Yos], with delivered: [UNNotification]) -> (yos: [Yos], replaced: [String]) {
     var all = new
     var replaced: [String] = []
     for note in delivered.sorted(by: { $0.date > $1.date })
@@ -189,30 +187,22 @@ enum ShareBridge {
     return (all, replaced)
   }
 
-  /// The Yos among `events`, one per sender, the newest sender first, as a notification names them. What Yo does not
-  /// show yet (a text, a link, a place) comes as a Yo, as the app shows it (Inbox).
-  static func yos(in events: [YoEvent], client: YoClient) -> [Yos] {
-    var senders: [String: (count: Int, sentAtMs: UInt64, kind: MediaFile.Kind?, photos: Int, videos: Int)] = [:]
+  /// The Yos among `events`, one per sender, the newest sender first, as a notification names them; `name` names a
+  /// sender by user id. What Yo does not show yet (a text, a link, a place) comes as a Yo, as the app shows it.
+  static func yos(in events: [YoEvent], name: (String) -> String) -> [Yos] {
+    var senders: [String: Yos] = [:]
     for event in events {
       guard case .message(let user, let sentAtMs, let message) = event else { continue }
-      let kind: MediaFile.Kind? =
-        switch message {
-        case .photo: .photo
-        case .video: .video
-        default: nil
-        }
+      let kind = message.media?.kind
       let before = senders[user]
       let newer = before.map { sentAtMs >= $0.sentAtMs } ?? true
-      senders[user] = (
-        (before?.count ?? 0) + 1, newer ? sentAtMs : before!.sentAtMs, newer ? kind : before!.kind,
-        (before?.photos ?? 0) + (kind == .photo ? 1 : 0), (before?.videos ?? 0) + (kind == .video ? 1 : 0)
-      )
+      senders[user] = Yos(
+        name: before?.name ?? name(user), user: user, count: (before?.count ?? 0) + 1,
+        photos: (before?.photos ?? 0) + (kind == .photo ? 1 : 0),
+        videos: (before?.videos ?? 0) + (kind == .video ? 1 : 0),
+        kind: newer ? kind : before!.kind, id: newer ? "\(user)/\(sentAtMs)" : before!.id)
     }
-    return senders.sorted { $0.value.sentAtMs > $1.value.sentAtMs }.map { user, yos in
-      Yos(
-        name: name(of: user, client: client), user: user, count: yos.count, photos: yos.photos, videos: yos.videos,
-        kind: yos.kind, id: "\(user)/\(yos.sentAtMs)")
-    }
+    return senders.values.sorted { $0.sentAtMs > $1.sentAtMs }
   }
 
   /// The name as the app's list shows it (the friends it published), else as the core knows them.
@@ -237,5 +227,37 @@ enum ShareBridge {
     content.interruptionLevel = .active
     // `user` for Yo Back, also to someone not on the list yet; `id` so the app shows the Yo once.
     content.userInfo = ["from": newest.name, "user": newest.user, "id": newest.id, "yos": senders.map(\.info)]
+  }
+
+  /// The Yo notification for `new` Yos (none: a push that brought nothing new), added to those the Yo notifications on
+  /// the screen name, written into `content`; the identifiers of the notifications it takes the place of.
+  static func write(_ content: UNMutableNotificationContent, _ new: [Yos], over delivered: [UNNotification]) -> [String] {
+    let (all, replaced) = merged(new, with: delivered)
+    yo(content, all)
+    return replaced
+  }
+
+  /// A Yo notification from the app or the share extension (Yos they took themselves, which the notification service
+  /// then finds read): one with those on the screen. Not for a Yo a notification already names.
+  static func post(_ yos: [Yos]) async {
+    let center = UNUserNotificationCenter.current()
+    let delivered = await center.deliveredNotifications()
+    let written = Set(delivered.compactMap { $0.request.content.userInfo["id"] as? String })
+    let new = yos.filter { !written.contains($0.id) }.sorted { $0.sentAtMs > $1.sentAtMs }
+    guard let newest = new.first else { return }
+    let content = UNMutableNotificationContent()
+    center.removeDeliveredNotifications(withIdentifiers: write(content, new, over: delivered))
+    try? await center.add(UNNotificationRequest(identifier: newest.id, content: content, trigger: nil))
+  }
+}
+
+extension MessageKind {
+  /// The photo or video a Yo carries, and which it is; nil for a Yo (or what Yo does not show yet).
+  var media: (media: YoMedia, kind: MediaFile.Kind)? {
+    switch self {
+    case .photo(let photo): (photo, .photo)
+    case .video(let video, _): (video, .video)
+    default: nil
+    }
   }
 }

@@ -345,8 +345,6 @@ final class Inbox {
     defer { if Perf.on { Perf.mark("take \(events.count) " + String(format: "%.1f ms", (CACurrentMediaTime() - start) * 1000)) } }
     friends.markGone(contacts)  // a delivery found their account gone (`NotOnYo` from now on)
     guard !events.isEmpty else { return }
-    // Per sender: how many Yos, the newest's kind, name and id; for a notification when the app is not in front.
-    var unshown: [String: ShareBridge.Yos] = [:]
     func friend(_ user: String) -> Friend {
       friends.friend(user: user, handles: contacts.first { $0.user == user }?.handles ?? [])
     }
@@ -356,22 +354,11 @@ final class Inbox {
       case .message(let user, let sentAtMs, let kind):
         // What Yo does not show yet (a text, a link, a place, a kind it does not know) hangs on a Yo: shown as one
         // (spec 5).
-        let media: (YoMedia, MediaFile.Kind)? =
-          switch kind {
-          case .photo(let photo): (photo, .photo)
-          case .video(let video, _): (video, .video)
-          default: nil
-          }
         let sender = friend(user)
         received(id: "\(user)/\(sentAtMs)", from: sender.name)
-        let before = unshown[user]
-        unshown[user] = ShareBridge.Yos(
-          name: sender.name, user: user, count: (before?.count ?? 0) + 1,
-          photos: (before?.photos ?? 0) + (media?.1 == .photo ? 1 : 0),
-          videos: (before?.videos ?? 0) + (media?.1 == .video ? 1 : 0), kind: media?.1, id: "\(user)/\(sentAtMs)")
         // On top it goes by the list, in one step with the others and never under a finger (FriendList.rise).
         count(from: sender.name)
-        if let (media, kind) = media {
+        if let (media, kind) = kind.media {
           let id = Self.mediaID(user, sentAtMs, media)
           // Not noted (the disk full): the core keeps the Yo, which comes again after a restart.
           guard ReceivedMedia.shared.expect(media, id: id, from: sender.name, kind: kind) else {
@@ -387,28 +374,14 @@ final class Inbox {
       }
       kept.append(event)
     }
-    if UIApplication.shared.applicationState == .background { await notify(unshown) }
+    // Taken while not in front (just left, its wait at the hub still running): the notification the notification
+    // service would have written, which finds them read then.
+    if UIApplication.shared.applicationState == .background {
+      await ShareBridge.post(ShareBridge.yos(in: kept) { friend($0).name })
+    }
     // Photos and videos are noted (above) before the core may forget their Yos; fetched from here on.
     _ = try? await Hub.run { [kept] in client.acknowledge(events: kept) }
     fetchMedia(client: client)
-  }
-
-  /// Yos the app took itself while not in front (just left, its wait at the hub still running): the notification the
-  /// notification service would have written, which finds nothing new then. Not for a Yo it already wrote.
-  /// Added to those on the screen, as the notification service does (ShareBridge.merged): one for them all.
-  private func notify(_ unshown: [String: ShareBridge.Yos]) async {
-    let center = UNUserNotificationCenter.current()
-    let delivered = await center.deliveredNotifications()
-    let written = Set(delivered.compactMap { $0.request.content.userInfo["id"] as? String })
-    // The newest first, by the time in their ids ("user/sent at").
-    let sent = { (yos: ShareBridge.Yos) in UInt64(yos.id.split(separator: "/").last ?? "") ?? 0 }
-    let new = unshown.values.filter { !written.contains($0.id) }.sorted { sent($0) > sent($1) }
-    guard !new.isEmpty else { return }
-    let (all, replaced) = ShareBridge.merged(new, with: delivered)
-    let content = UNMutableNotificationContent()
-    ShareBridge.yo(content, all)
-    center.removeDeliveredNotifications(withIdentifiers: replaced)
-    try? await center.add(UNNotificationRequest(identifier: all[0].id, content: content, trigger: nil))
   }
 
   /// A photo's or video's own id: who, when, and which blob (two at the same moment are two).
