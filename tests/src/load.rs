@@ -175,7 +175,7 @@ fn main() {
             (yo_wire::api::deliver_path(&yo_tests::user_id(c.user_id())), yo_wire::b64(&hash))
         })
         .collect();
-    let envelope = yo_wire::envelope::seal(&[0x5A; 300]).unwrap();
+    let envelope = yo_tests::junk(0x5A);
     let runtime = tokio::runtime::Builder::new_multi_thread().enable_all().build().unwrap();
     let raw = runtime.block_on(async {
         let client = reqwest::Client::builder().pool_max_idle_per_host(args.connections).build().unwrap();

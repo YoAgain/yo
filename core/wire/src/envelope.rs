@@ -1,10 +1,32 @@
-//! The envelope (spec 6.1): an MLSMessage padded to a fixed bucket, so the hub sees a size class, not a kind.
+//! The envelope (spec 6.1): what the hub stores is a fixed bucket, so it sees a size class, not a kind or a length.
+//!
+//! Two forms. **Sealed**, what goes to an inbox: the version `SEALED` and an HPKE seal of the padded MLS message, the
+//! padding inside, so nothing but the bucket shows. **Padded**, what a commit route takes (its path names the group
+//! anyway): version, length, the message, zeros.
 
 use crate::{Error, VERSION};
 
 /// The sizes an envelope can have.
 pub const BUCKETS: [usize; 4] = [1024, 4096, 16 * 1024, 64 * 1024];
 const HEADER: usize = 1 + 4;
+/// The version of a sealed envelope.
+pub const SEALED: u8 = 2;
+/// What a seal adds to its plaintext: the version, the KEM output (an X25519 key) and the AEAD tag.
+pub const SEAL_OVERHEAD: usize = 1 + 32 + 16;
+/// The sizes of a seal's plaintext: each a bucket once sealed.
+pub const SEALED_PLAIN: [usize; 4] =
+    [BUCKETS[0] - SEAL_OVERHEAD, BUCKETS[1] - SEAL_OVERHEAD, BUCKETS[2] - SEAL_OVERHEAD, BUCKETS[3] - SEAL_OVERHEAD];
+
+/// What the hub checks of a delivery: a bucket, sealed. The rest only the recipient can read.
+pub fn check_sealed(envelope: &[u8]) -> Result<(), Error> {
+    if !BUCKETS.contains(&envelope.len()) {
+        return Err(Error::Size);
+    }
+    if envelope[0] != SEALED {
+        return Err(Error::Unsupported);
+    }
+    Ok(())
+}
 
 /// Wraps an MLSMessage: version, length, the message, zeros up to the smallest bucket that fits.
 pub fn seal(message: &[u8]) -> Result<Vec<u8>, Error> {
@@ -16,7 +38,7 @@ pub fn open(envelope: &[u8]) -> Result<&[u8], Error> {
     unpad(envelope, &BUCKETS)
 }
 
-/// What the hub checks before it stores an envelope: everything but the MLS message itself.
+/// What the hub checks before it stores a padded envelope: everything but the MLS message itself.
 pub fn check(envelope: &[u8]) -> Result<(), Error> {
     unpad(envelope, &BUCKETS).map(|_| ())
 }
@@ -96,6 +118,24 @@ mod tests {
         assert_eq!(pad(&[1; 96], &sizes).unwrap().len(), 1000);
         assert_eq!(pad(&[1; 996], &sizes), Err(Error::Size));
         assert_eq!(unpad(&pad(b"hi", &sizes).unwrap(), &BUCKETS), Err(Error::Size));
+    }
+
+    #[test]
+    fn a_sealed_envelope_is_a_bucket_with_its_version() {
+        assert_eq!(
+            check_sealed(&{
+                let mut e = vec![0; 1024];
+                e[0] = SEALED;
+                e
+            }),
+            Ok(())
+        );
+        assert_eq!(check_sealed(&seal(b"bare").unwrap()), Err(Error::Unsupported));
+        assert_eq!(check_sealed(&[SEALED; 1000]), Err(Error::Size));
+        assert_eq!(check_sealed(&[]), Err(Error::Size));
+        // A message as large as a seal takes still fits the largest bucket, sealed.
+        let largest = SEALED_PLAIN[3] - HEADER;
+        assert_eq!(pad(&vec![1; largest], &SEALED_PLAIN).unwrap().len() + SEAL_OVERHEAD, BUCKETS[3]);
     }
 
     proptest! {

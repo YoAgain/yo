@@ -14,7 +14,7 @@ fn post_envelope(url: &str, user: &str, hash: &[u8; 32], extra: &[(&str, &str)])
     let mut request = reqwest::blocking::Client::new()
         .post(format!("{url}{}", api::deliver_path(&user_id(user))))
         .header(api::HEADER_DEVICES, yo_wire::b64(hash))
-        .body(yo_wire::envelope::seal(&[7; 100]).unwrap());
+        .body(yo_tests::junk(7));
     for (name, value) in extra {
         request = request.header(*name, *value);
     }
@@ -86,7 +86,7 @@ fn nothing_is_stored_without_identity_while_the_disk_is_nearly_full() {
     let probe = reqwest::blocking::Client::new()
         .post(format!("{url}{}", api::deliver_path(&user_id(b.user_id()))))
         .header(api::HEADER_DEVICES, yo_wire::b64(&[0; 32]))
-        .body(yo_wire::envelope::seal(b"probe").unwrap())
+        .body(yo_tests::junk(0))
         .send()
         .unwrap();
     assert_eq!(probe.status().as_u16(), 507);

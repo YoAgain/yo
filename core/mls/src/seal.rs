@@ -1,5 +1,5 @@
-//! Sealed sender (spec 6.1): every envelope a user receives is the MLS message sealed by HPKE to the user's account
-//! key, then padded. The hub sees a size class and the inbox it goes to; group, epoch and kind are inside, readable
+//! Sealed sender (spec 6.1): every envelope a user receives is the MLS message, padded, sealed by HPKE to the user's
+//! account key. The hub sees a bucket and the inbox it goes to; group, epoch, kind and length are inside, readable
 //! only by the recipient's devices. The account key is the Ed25519 key every member's certificate is checked against
 //! and every contact pinned, its X25519 form the seal key: nothing to publish, nothing the hub could swap.
 
@@ -17,29 +17,31 @@ const INFO: &[u8] = b"yo sealed envelope v1";
 /// The KEM output that leads the sealed message: an X25519 public key.
 const KEM_OUTPUT: usize = 32;
 
-/// Seals an MLS message to the account with `account_key` and pads it into an envelope.
+/// Pads an MLS message and seals it to the account with `account_key`: an envelope of exactly one bucket.
 pub fn to(account_key: &Key, message: &[u8]) -> Result<Vec<u8>> {
     let public = VerifyingKey::from_bytes(account_key).map_err(|_| Error::Protocol("account key"))?.to_montgomery();
+    let plain = envelope::pad(message, &envelope::SEALED_PLAIN)?;
     let sealed = RustCrypto::default()
-        .hpke_seal(CONFIG, public.as_bytes(), INFO, &[], message)
+        .hpke_seal(CONFIG, public.as_bytes(), INFO, &[], &plain)
         .map_err(|_| Error::Internal("seal"))?;
-    let mut out = sealed.kem_output.as_slice().to_vec();
+    let mut out = Vec::with_capacity(plain.len() + envelope::SEAL_OVERHEAD);
+    out.push(envelope::SEALED);
+    out.extend_from_slice(sealed.kem_output.as_slice());
     out.extend_from_slice(sealed.ciphertext.as_slice());
-    Ok(envelope::seal(&out)?)
+    debug_assert!(envelope::BUCKETS.contains(&out.len()));
+    Ok(out)
 }
 
 /// The MLS message in an envelope sealed to the account whose secret is `account_secret`.
 pub fn open(account_secret: &[u8; 32], sealed: &[u8]) -> Result<Vec<u8>> {
-    let inner = envelope::open(sealed)?;
-    if inner.len() < KEM_OUTPUT {
-        return Err(Error::Protocol("sealed envelope"));
-    }
-    let (kem_output, ciphertext) = inner.split_at(KEM_OUTPUT);
+    envelope::check_sealed(sealed)?;
+    let (kem_output, ciphertext) = sealed[1..].split_at(KEM_OUTPUT);
     let input = HpkeCiphertext { kem_output: kem_output.to_vec().into(), ciphertext: ciphertext.to_vec().into() };
     let mut secret = SigningKey::from_bytes(account_secret).to_scalar_bytes();
     let opened = RustCrypto::default().hpke_open(CONFIG, &input, &secret, INFO, &[]);
     secret.zeroize();
-    opened.map_err(|_| Error::Protocol("not sealed to this account"))
+    let plain = opened.map_err(|_| Error::Protocol("not sealed to this account"))?;
+    Ok(envelope::unpad(&plain, &envelope::SEALED_PLAIN)?.to_vec())
 }
 
 #[cfg(test)]
@@ -59,5 +61,9 @@ mod tests {
         assert_ne!(to(&key, &message).unwrap(), sealed);
         // Not sealed (a bare padded message, as before): refused.
         assert!(open(&secret, &envelope::seal(&message).unwrap()).is_err());
+        // The length is inside: messages of any size within a bucket are the same size sealed.
+        assert!([1, 500, 900].iter().all(|n| to(&key, &vec![1; *n]).unwrap().len() == 1024));
+        assert_eq!(open(&secret, &to(&key, &vec![1; 900]).unwrap()).unwrap(), vec![1; 900]);
+        assert_eq!(to(&key, &vec![1; 1024 - envelope::SEAL_OVERHEAD - 4]).unwrap().len(), 4096);
     }
 }

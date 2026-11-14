@@ -68,11 +68,11 @@ fn an_envelope_not_sealed_to_the_account_is_dropped() {
     let mls = yo_core::seal::open(&a.account_secret(), &last).unwrap();
     let stranger = SigningKey::from_bytes(&[9; 32]).verifying_key().to_bytes();
     let dropped = a.dropped();
-    for forged in [yo_wire::envelope::seal(&mls).unwrap(), yo_core::seal::to(&stranger, &mls).unwrap()] {
-        assert_eq!(yo_tests::deliver_raw(&hub.url(), a.user_id(), forged), 202);
-    }
+    // Bare, as before the seal: the hub refuses it. Sealed to someone else: taken, and dropped by A.
+    assert_eq!(yo_tests::deliver_raw(&hub.url(), a.user_id(), yo_wire::envelope::seal(&mls).unwrap()), 400);
+    assert_eq!(yo_tests::deliver_raw(&hub.url(), a.user_id(), yo_core::seal::to(&stranger, &mls).unwrap()), 202);
     assert_eq!(texts(&mut a), ["2"], "the real one still comes");
-    assert_eq!(a.dropped(), dropped + 2, "{:?}", a.drop_reasons());
+    assert_eq!(a.dropped(), dropped + 1, "{:?}", a.drop_reasons());
     b.send(a.user_id(), Content::Text("3".into())).unwrap();
     assert_eq!(texts(&mut a), ["3"]);
 }

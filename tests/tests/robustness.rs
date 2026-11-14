@@ -133,7 +133,7 @@ fn a_full_mailbox_refuses_until_it_is_read_and_strangers_cannot_rate_limit_it() 
     config.limits.max_pending_per_device = 5;
     let hub = TestHub::start_with(config, "127.0.0.1:0");
     let (mut a, mut b, _, _, pa, pb) = chat(&hub);
-    let junk = yo_wire::envelope::seal(&[7; 100]).unwrap();
+    let junk = yo_tests::junk(7);
     // A stranger fills B's inbox with well-formed junk...
     let statuses: Vec<u16> = (0..6).map(|_| deliver_raw(&hub.url(), b.user_id(), junk.clone())).collect();
     assert_eq!(statuses, vec![202, 202, 202, 202, 202, 507]);
