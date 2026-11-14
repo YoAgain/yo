@@ -43,7 +43,8 @@ APNs token), the camera (black; photos come from the library).
 | Swipe a bar: Block and Remove, one open at a time, a tap closes without sending, not in camera mode | new, ok | 21-23 |
 | Long press: Report (Spam, Abuse, Something Else), Thanks for Reporting with Block, Block, Remove | ok | 103-106 |
 | Blocked: B gets nothing from A; Blocked list, swipe to Unblock | ok | 107-111 |
-| Camera mode: permission, photo from the library, undo ring at the bar's left, sent, B gets "Yo 📷" | ok (a stuck "Sent 📷" once while the library photo was decoded on every redraw: fixed) | 120-134 |
+| Camera mode: permission, photo from the library, undo ring at the bar's left, sent, B gets "Yo 📷" | a photo from the library often never went: "Sent 📷" and its undo ring stayed (the 1.5-second task read the list's state from before the tap); fixed with the sending state in an object of its own (`FriendList.Bars`); also decoded at every redraw: fixed | 120-134, 260-269 |
+| Notifications (simctl push): banner "Yo from YoGPT", Yo Back from the banner sends one (YoGPT answers with a photo) | ok after Yo Back was implemented | 230-236 |
 | Viewer: sender and "now" at the top left over the lines (no pill), next, back, hold to pause, swipe down closes, seen once; largest Dynamic Type truncates the name | ok | 141-153 |
 | Offline (YO_HUB): a Yo waits in the core's outbox and arrives when back online (B: 8 → 9) | ok | 160-164 |
 | Profile: Statistics, Appearance (Negative, Default icons), Media (Keep Sent Photos: permission, denied alert) | denied alert never showed: fixed | 50-51, 170-176 |
@@ -68,7 +69,10 @@ APNs token), the camera (black; photos come from the library).
 - Friends stayed after the account was taken to another iPhone; an empty list after signing in (YoGPT now).
 - The Media page's "Allow Access to Photos" alert never showed (it was on the profile's root).
 - The recovery-key sign-in could run twice; its field was not focused.
-- A picked photo was decoded at every redraw (the list stopped answering for a while).
+- A photo picked from the library was often never sent: the task that ends its 1.5 seconds read the list's @State
+  as it was before the tap, found nothing, and the bar kept "Sent 📷" with its undo ring for good. The bars' sending
+  state is now an @Observable object (`FriendList.Bars`), captured by those tasks.
+- A picked photo was decoded at every redraw.
 - No photo or video capture without a camera (AVFoundation raises); the camera no longer starts after it was closed.
 - Statistics did not follow Yos while open, and counted blocked friends.
 - From the second Codex review: a backup change could be written through the next account's client; registrations

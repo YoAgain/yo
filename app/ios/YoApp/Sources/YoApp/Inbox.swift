@@ -216,7 +216,10 @@ final class Inbox {
           pause = min(pause * 2, 30)
           continue
         }
-        guard client === accounts.client else { break }  // signed out meanwhile
+        guard client === accounts.client else {  // signed out meanwhile: on with the account in now, if any
+          pause = 1
+          continue
+        }
         await take(events, contacts: contacts, client: client, friends: friends)
         if waiting == 0 && !deliverAgain { break }  // none waits, and no send asked meanwhile
         pause = waiting < before ? 1 : min(pause * 2, 30)  // going out: at the hub's pace; else waiting longer

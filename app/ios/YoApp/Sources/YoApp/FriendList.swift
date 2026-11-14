@@ -54,15 +54,10 @@ struct FriendList: View {
   @State private var swiped: UUID?
 
   // Sending
-  /// What each bar says for a moment after a send ("Sent Yo", "Not Sent", "Canceled").
-  @State private var sent: [Friend: String] = [:]
-  /// Sends whose 1.5 seconds are still running, by name; each tap starts them again (a bar under taps stays put).
-  @State private var sentRounds: [UUID: Int] = [:]
-  /// How many sends of the same kind in a row a bar counts ("Sent Yo!!" for three).
-  @State private var sentCounts: [UUID: (text: String, count: Int)] = [:]
-  /// Photos and videos whose time is over, by friend: they go when the bar's words are over, in the rhythm they were
-  /// taken.
-  @State private var queued: [UUID: [(at: Date, send: @MainActor () async -> Void)]] = [:]
+  /// What the bars say while sending and what is on its way out: in an object of its own, read and written by the
+  /// tasks that run the 1.5 seconds. Kept in plain @State, those tasks read the values from before a tap once a
+  /// photo had been picked from the library, and a stack of photos never went (its undo ring stayed).
+  @State private var bars = Bars()
   /// How often each friend went on top (by `Friend.key`): a new identity each time, so the bar leaves its place and
   /// comes in on top. Only here: a new spelling or user id never changes a bar's identity.
   @State private var lifts: [UUID: Int] = [:]
@@ -79,13 +74,26 @@ struct FriendList: View {
   @State private var onScreen: Set<String> = []
   /// Counts sends, for the haptic.
   @State private var sends = 0
-  /// Photos and videos on their way out, per friend, each with when it started; any number at once (a tap on the bar
-  /// sends another, the ring at its left undoes them).
-  @State private var outgoing: [Friend: [Outgoing]] = [:]
-  /// Each photo or video of a stack being made ready (taken, or the video ended), by its id.
-  @State private var preparing: [UUID: Task<Prepared?, Never>] = [:]
-  /// A stack's 1.5 seconds, by name: each new photo starts them again; when they are over, the whole stack goes.
-  @State private var stackRounds: [UUID: Int] = [:]
+
+  /// The bars' sending: what each says after a send, and the photos and videos on their way out.
+  @MainActor @Observable final class Bars {
+    /// What each bar says for a moment after a send ("Sent Yo", "Not Sent", "Canceled").
+    var sent: [Friend: String] = [:]
+    /// Sends whose 1.5 seconds are still running; each tap starts them again (a bar under taps stays put).
+    var sentRounds: [UUID: Int] = [:]
+    /// How many sends of the same kind in a row a bar counts ("Sent Yo!!" for three).
+    var sentCounts: [UUID: (text: String, count: Int)] = [:]
+    /// Photos and videos whose time is over, by friend: they go when the bar's words are over, in the rhythm they
+    /// were taken.
+    @ObservationIgnored var queued: [UUID: [(at: Date, send: @MainActor () async -> Void)]] = [:]
+    /// Photos and videos on their way out, per friend, each with when it started; any number at once (a tap on the
+    /// bar sends another, the ring at its left undoes them).
+    var outgoing: [Friend: [Outgoing]] = [:]
+    /// Each photo or video of a stack being made ready (taken, or the video ended), by its id.
+    @ObservationIgnored var preparing: [UUID: Task<Prepared?, Never>] = [:]
+    /// A stack's 1.5 seconds: each new photo starts them again; when they are over, the whole stack goes.
+    @ObservationIgnored var stackRounds: [UUID: Int] = [:]
+  }
 
   struct Outgoing: Equatable {
     let id = UUID()
@@ -294,7 +302,7 @@ struct FriendList: View {
       count: rowCount(friend),
       color: .row(friend.color).opacity(cameraOn ? 0.45 : 1),  // see-through over the camera
       recording: recordingFor == friend,
-      outgoing: outgoing[friend]?.last?.started,
+      outgoing: bars.outgoing[friend]?.last?.started,
       stop: { cancelSending(friend) },
       media: waiting,
       yo: landed[friend.name],
@@ -365,16 +373,16 @@ struct FriendList: View {
   /// The bar's words: what is happening, else the name.
   private func rowTitle(_ friend: Friend) -> String {
     if recordingFor == friend { return "● Recording" }
-    if let last = outgoing[friend]?.last { return last.text }
-    if let text = sent[friend] { return text }
+    if let last = bars.outgoing[friend]?.last { return last.text }
+    if let text = bars.sent[friend] { return text }
     return friend.name
   }
 
   /// How many the bar's words count ("Sent Yo!!" for three): photos on their way, or sends in a row.
   private func rowCount(_ friend: Friend) -> Int {
     if recordingFor == friend { return 1 }
-    if let going = outgoing[friend], !going.isEmpty { return going.count }
-    if sent[friend] != nil { return sentCounts[friend.key]?.count ?? 1 }
+    if let going = bars.outgoing[friend], !going.isEmpty { return going.count }
+    if bars.sent[friend] != nil { return bars.sentCounts[friend.key]?.count ?? 1 }
     return 1
   }
 
@@ -558,20 +566,21 @@ struct FriendList: View {
   /// since the newest (each new one starts the time again, the ring after the words showing it); then the stack goes,
   /// in order. Meanwhile `prepare` takes the photo or ends the video. A tap on the ring keeps the whole stack here.
   private func run(_ friend: Friend, _ text: String, prepare: @escaping @MainActor () async -> Prepared?) {
+    let bars = bars  // the object itself into the task, not this view's copy of the state
     let one = Outgoing(text: text)
-    outgoing[friend, default: []].append(one)
-    preparing[one.id] = Task { await prepare() }
+    bars.outgoing[friend, default: []].append(one)
+    bars.preparing[one.id] = Task { await prepare() }
     let key = friend.key
-    let round = (stackRounds[key] ?? 0) + 1
-    stackRounds[key] = round
+    let round = (bars.stackRounds[key] ?? 0) + 1
+    bars.stackRounds[key] = round
     Task {
       try? await Task.sleep(for: .seconds(Self.sendDelay))
-      guard stackRounds[key] == round, let stack = outgoing[friend] else { return }  // another came, or undone
-      stackRounds[key] = nil
-      outgoing[friend] = nil
+      guard bars.stackRounds[key] == round, let stack = bars.outgoing[friend] else { return }  // another came, or undone
+      bars.stackRounds[key] = nil
+      bars.outgoing[friend] = nil
       var went = 0
       for one in stack {
-        guard let prepared = await preparing.removeValue(forKey: one.id)?.value else { continue }
+        guard let prepared = await bars.preparing.removeValue(forKey: one.id)?.value else { continue }
         went += 1
         showSent(to: friend, one.text, thenOnTop: true) { await prepared.send() }
       }
@@ -586,9 +595,9 @@ struct FriendList: View {
 
   /// The ring tapped: the whole stack stays here.
   private func cancelSending(_ friend: Friend) {
-    for one in outgoing[friend] ?? [] { preparing[one.id] = nil }
-    stackRounds[friend.key] = nil
-    outgoing[friend] = nil
+    for one in bars.outgoing[friend] ?? [] { bars.preparing[one.id] = nil }
+    bars.stackRounds[friend.key] = nil
+    bars.outgoing[friend] = nil
     showSent(to: friend, "Canceled")
   }
 
@@ -599,23 +608,24 @@ struct FriendList: View {
   private func showSent(
     to friend: Friend, _ text: String, thenOnTop: Bool = false, then: (@MainActor () async -> Void)? = nil
   ) {
+    let bars = bars  // the object itself into the task, not this view's copy of the state
     let key = friend.key  // the friend's, also if their spelling changes meanwhile
-    let count = sentCounts[key].map { $0.text == text ? $0.count + 1 : 1 } ?? 1
+    let count = bars.sentCounts[key].map { $0.text == text ? $0.count + 1 : 1 } ?? 1
     withAnimation(.snappy(duration: 0.2)) {  // a "!" comes in, or the number turns
-      sentCounts[key] = (text, count)
-      sent[friend] = text
+      bars.sentCounts[key] = (text, count)
+      bars.sent[friend] = text
     }
-    if let then { queued[key, default: []].append((.now, then)) }
-    let round = (sentRounds[key] ?? 0) + 1
-    sentRounds[key] = round
+    if let then { bars.queued[key, default: []].append((.now, then)) }
+    let round = (bars.sentRounds[key] ?? 0) + 1
+    bars.sentRounds[key] = round
     Task {
       try? await Task.sleep(for: .seconds(1.5))
-      guard sentRounds[key] == round else { return }  // tapped again meanwhile
-      sentRounds[key] = nil
-      let pending = queued.removeValue(forKey: key) ?? []
+      guard bars.sentRounds[key] == round else { return }  // tapped again meanwhile
+      bars.sentRounds[key] = nil
+      let pending = bars.queued.removeValue(forKey: key) ?? []
       withAnimation(.snappy) {
-        sent[friend] = nil
-        sentCounts[key] = nil
+        bars.sent[friend] = nil
+        bars.sentCounts[key] = nil
       }
       if thenOnTop, let now = friends.all.first(where: { $0.key == key }) { rise(now.name) }
       // In the rhythm they were tapped: tapped fast, they come fast and their sounds cut each other off.
@@ -782,7 +792,7 @@ extension FriendList {
 
   /// A send still in its time: taps on a bar, or photos and videos on their way.
   private var sending: Bool {
-    !sentRounds.isEmpty || !stackRounds.isEmpty || !outgoing.isEmpty
+    !bars.sentRounds.isEmpty || !bars.stackRounds.isEmpty || !bars.outgoing.isEmpty
   }
 
   /// Friends go on top, the last of `names` uppermost. At the top of the list the list stays at its very start, so the
