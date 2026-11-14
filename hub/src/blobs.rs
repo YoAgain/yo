@@ -12,6 +12,7 @@ use crate::db::{BlobPut, Db};
 use bytes::Bytes;
 use futures_core::Stream;
 use std::collections::{HashMap, HashSet};
+use std::future::Future;
 use std::io;
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
@@ -89,12 +90,12 @@ pub enum NoRoom {
 }
 
 /// Room held for an upload under way; given back when it is dropped.
-pub struct Reserved<'a> {
-    blobs: &'a Blobs,
+pub struct Reserved {
+    blobs: Arc<Blobs>,
     size: u64,
 }
 
-impl Drop for Reserved<'_> {
+impl Drop for Reserved {
     fn drop(&mut self) {
         // After the blob's row (if it was stored): for a moment it counts twice, never not at all.
         let _admission = self.blobs.admission.lock().unwrap_or_else(PoisonError::into_inner);
@@ -160,19 +161,19 @@ impl Blobs {
     /// Holds room for `size` bytes, if the budget and the disk have it with what is stored (`stored()`, asked under
     /// the admission lock) and what is coming in.
     pub fn reserve<E>(
-        &self,
+        self: &Arc<Self>,
         size: u64,
         stored: impl FnOnce() -> Result<u64, E>,
-    ) -> Result<Result<Reserved<'_>, NoRoom>, E> {
+    ) -> Result<Result<Reserved, NoRoom>, E> {
         let admission = self.admission.lock().unwrap_or_else(PoisonError::into_inner);
         let stored = stored()?;
         let incoming = self.incoming.fetch_add(size, Ordering::Relaxed) + size;
         drop(admission);
-        let reserved = Reserved { blobs: self, size };
+        let reserved = Reserved { blobs: self.clone(), size };
         Ok(self.room(reserved, stored, incoming))
     }
 
-    fn room<'a>(&self, reserved: Reserved<'a>, stored: u64, incoming: u64) -> Result<Reserved<'a>, NoRoom> {
+    fn room(&self, reserved: Reserved, stored: u64, incoming: u64) -> Result<Reserved, NoRoom> {
         if stored.saturating_add(incoming) > self.budget {
             return Err(NoRoom::Full);
         }
@@ -256,7 +257,8 @@ impl Blobs {
     }
 }
 
-/// A fetch taken (`Db::take_fetch`): `done(true)` once complete, `done(false)` when dropped before.
+/// A fetch taken (`Db::take_fetch`): `done(true)` once complete, `done(false)` when dropped before. Both on a
+/// blocking thread (they write to the database), never on the async workers.
 pub struct Taken(Option<Box<dyn FnOnce(bool) + Send>>);
 
 impl Taken {
@@ -264,41 +266,59 @@ impl Taken {
         Taken(Some(Box::new(done)))
     }
 
-    fn complete(&mut self) {
-        if let Some(done) = self.0.take() {
-            done(true);
-        }
+    /// Counts the fetch; done when the task is.
+    fn complete(&mut self) -> Option<tokio::task::JoinHandle<()>> {
+        let done = self.0.take()?;
+        Some(tokio::task::spawn_blocking(move || done(true)))
     }
 }
 
 impl Drop for Taken {
     fn drop(&mut self) {
         if let Some(done) = self.0.take() {
-            done(false);
+            match tokio::runtime::Handle::try_current() {
+                Ok(runtime) => drop(runtime.spawn_blocking(move || done(false))),
+                Err(_) => done(false),
+            }
         }
     }
 }
 
-/// A blob's bytes as they are read, counting: when the last byte is handed on, the fetch counts. A fetch cut off
-/// before gives it back.
+/// A blob's bytes as they are read, counting: the last chunk is handed on once the fetch is counted, so whoever has
+/// the whole blob finds it counted. A fetch cut off before gives it back.
 pub struct Counted<S> {
-    pub inner: S,
-    pub left: u64,
-    pub taken: Taken,
+    inner: S,
+    left: u64,
+    taken: Taken,
+    /// The last chunk, while its fetch is being counted.
+    last: Option<(Bytes, tokio::task::JoinHandle<()>)>,
+}
+
+impl<S> Counted<S> {
+    pub fn new(inner: S, size: u64, taken: Taken) -> Self {
+        Counted { inner, left: size, taken, last: None }
+    }
 }
 
 impl<S: Stream<Item = io::Result<Bytes>> + Unpin> Stream for Counted<S> {
     type Item = io::Result<Bytes>;
 
     fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
-        let polled = Pin::new(&mut self.inner).poll_next(cx);
-        if let Poll::Ready(Some(Ok(chunk))) = &polled {
+        if let Some((_, counting)) = &mut self.last {
+            let _ = std::task::ready!(Pin::new(counting).poll(cx));
+            return Poll::Ready(self.last.take().map(|(chunk, _)| Ok(chunk)));
+        }
+        let polled = std::task::ready!(Pin::new(&mut self.inner).poll_next(cx));
+        if let Some(Ok(chunk)) = &polled {
             self.left = self.left.saturating_sub(chunk.len() as u64);
             if self.left == 0 {
-                self.taken.complete();
+                if let Some(counting) = self.taken.complete() {
+                    self.last = Some((chunk.clone(), counting));
+                    return self.poll_next(cx);
+                }
             }
         }
-        polled
+        Poll::Ready(polled)
     }
 }
 
@@ -332,25 +352,32 @@ mod tests {
         ended: Arc<Mutex<Vec<bool>>>,
     ) -> Counted<futures_util::stream::Iter<std::vec::IntoIter<io::Result<Bytes>>>> {
         let items: Vec<io::Result<Bytes>> = (0..3).map(|_| Ok(Bytes::from(vec![0u8; 1000]))).collect();
-        Counted {
-            inner: futures_util::stream::iter(items),
-            left: 3000,
-            taken: Taken::new(move |complete| ended.lock().unwrap().push(complete)),
-        }
+        Counted::new(
+            futures_util::stream::iter(items),
+            3000,
+            Taken::new(move |complete| ended.lock().unwrap().push(complete)),
+        )
     }
 
     #[tokio::test]
-    async fn a_fetch_counts_only_when_its_last_byte_is_handed_on() {
+    async fn a_fetch_counts_before_its_last_byte_is_handed_on() {
         let ended = Arc::new(Mutex::new(Vec::new()));
         let mut stream = counted(ended.clone());
         stream.next().await.unwrap().unwrap();
         stream.next().await.unwrap().unwrap();
         drop(stream); // cut off
+        while ended.lock().unwrap().is_empty() {
+            tokio::task::yield_now().await;
+        }
         assert_eq!(*ended.lock().unwrap(), [false], "given back");
         let mut stream = counted(ended.clone());
-        while stream.next().await.is_some() {}
+        stream.next().await.unwrap().unwrap();
+        stream.next().await.unwrap().unwrap();
+        stream.next().await.unwrap().unwrap();
+        assert_eq!(*ended.lock().unwrap(), [false, true], "counted, before the last chunk came");
+        assert!(stream.next().await.is_none());
         drop(stream);
-        assert_eq!(*ended.lock().unwrap(), [false, true], "counted, once");
+        assert_eq!(*ended.lock().unwrap(), [false, true], "once");
     }
 
     #[test]
