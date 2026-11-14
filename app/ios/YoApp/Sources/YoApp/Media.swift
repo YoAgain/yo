@@ -108,16 +108,33 @@ final class MediaOutbox {
   private static func blob(_ id: UUID) -> URL { directory.appending(path: "\(id.uuidString).blob") }
   private static var index: URL { directory.appending(path: "outbox.json") }
 
+  /// Whether the queue on disk was read: until then nothing writes over it.
+  @ObservationIgnored private var loaded = false
+
   init() {
-    if let data = try? Data(contentsOf: Self.index), let saved = try? JSONDecoder().decode([Item].self, from: data) {
-      items = saved
+    load()
+  }
+
+  /// Reads the queue, once; false while one is there and does not read now (before the first unlock after a restart).
+  /// Read as empty then, the next photo's save would write the waiting ones out of it.
+  @discardableResult
+  private func load() -> Bool {
+    if loaded { return true }
+    var data: Data?
+    if FileManager.default.fileExists(atPath: Self.index.path) {
+      guard let read = try? Data(contentsOf: Self.index) else { return false }
+      data = read
     }
+    items = data.flatMap { try? JSONDecoder().decode([Item].self, from: $0) } ?? []
+    loaded = true
     waiting = items.count
+    return true
   }
 
   /// The queue to disk; false when it did not write (it stays in memory, written with the next change).
   @discardableResult
   private func save() -> Bool {
+    guard loaded else { return false }
     waiting = items.count
     guard let data = try? JSONEncoder().encode(items) else { return false }
     return (try? data.write(to: Self.index, options: [.atomic, .completeFileProtectionUntilFirstUserAuthentication]))
@@ -130,7 +147,7 @@ final class MediaOutbox {
   func send(
     _ file: MediaFile, to friend: String, from client: YoClient?, accounts: AccountStore, id: UUID = UUID()
   ) async -> Bool {
-    guard let client, client === accounts.client else { return false }
+    guard let client, client === accounts.client, load() else { return false }
     guard !items.contains(where: { $0.id == id }) else { return true }
     let width = UInt16(clamping: file.width)
     let height = UInt16(clamping: file.height)
@@ -165,6 +182,7 @@ final class MediaOutbox {
   func clear() {
     generation += 1
     items = []
+    loaded = false  // the next account's queue is read anew (none: the files went)
     waiting = 0
     wake?.cancel()
   }
@@ -175,7 +193,7 @@ final class MediaOutbox {
   /// Also when the app comes to the foreground. A build the hub calls too old (426) sends nothing more.
   func flush(accounts: AccountStore) {
     self.accounts = accounts
-    guard !running else { return }
+    guard !running, load() else { return }
     running = true
     let generation = generation
     Task {
@@ -521,13 +539,15 @@ final class ReceivedMedia {
       }
       // The file, then the manifest: kept once both are written (a start finds a written file that is only noted).
       let url = file(one.id, one.kind)
-      guard await MediaStorage.write(data, to: url, .completeFileProtection) else {
+      let written = await MediaStorage.write(data, to: url, .completeFileProtection)
+      // Signed out meanwhile: nothing of it kept, not even in memory (it would hold the next account's downloads).
+      guard generation == self.generation else {
+        if written { try? FileManager.default.removeItem(at: url) }
+        return
+      }
+      guard written else {
         unwritten[one.id] = data
         continue
-      }
-      guard generation == self.generation else {
-        try? FileManager.default.removeItem(at: url)
-        return
       }
       let kept = Saved(id: one.id, from: one.from, kind: one.kind)
       saved.append(kept)
