@@ -12,7 +12,6 @@ use crate::db::{BlobPut, Db};
 use bytes::Bytes;
 use futures_core::Stream;
 use std::collections::{HashMap, HashSet};
-use std::future::Future;
 use std::io;
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
@@ -257,46 +256,42 @@ impl Blobs {
     }
 }
 
-/// A fetch taken (`Db::take_fetch`): `done(true)` once complete, `done(false)` when dropped before. Both on a
-/// blocking thread (they write to the database), never on the async workers.
-pub struct Taken(Option<Box<dyn FnOnce(bool) + Send>>);
+/// A fetch taken (`Db::take_fetch`), over when dropped: `done(true)` if its last chunk was handed on, else
+/// `done(false)`. On a blocking thread (it writes to the database), never on the async workers.
+pub struct Taken {
+    done: Option<Box<dyn FnOnce(bool) + Send>>,
+    complete: bool,
+}
 
 impl Taken {
     pub fn new(done: impl FnOnce(bool) + Send + 'static) -> Self {
-        Taken(Some(Box::new(done)))
-    }
-
-    /// Counts the fetch; done when the task is.
-    fn complete(&mut self) -> Option<tokio::task::JoinHandle<()>> {
-        let done = self.0.take()?;
-        Some(tokio::task::spawn_blocking(move || done(true)))
+        Taken { done: Some(Box::new(done)), complete: false }
     }
 }
 
 impl Drop for Taken {
     fn drop(&mut self) {
-        if let Some(done) = self.0.take() {
+        if let Some(done) = self.done.take() {
+            let complete = self.complete;
             match tokio::runtime::Handle::try_current() {
-                Ok(runtime) => drop(runtime.spawn_blocking(move || done(false))),
-                Err(_) => done(false),
+                Ok(runtime) => drop(runtime.spawn_blocking(move || done(complete))),
+                Err(_) => done(complete),
             }
         }
     }
 }
 
-/// A blob's bytes as they are read, counting: the last chunk is handed on once the fetch is counted, so whoever has
-/// the whole blob finds it counted. A fetch cut off before gives it back.
+/// A blob's bytes as they are read, counting: a fetch counts once its last chunk is handed on (the server drops the
+/// body right after it), one cut off before gives it back. Nothing is counted while a chunk still waits to go.
 pub struct Counted<S> {
     inner: S,
     left: u64,
     taken: Taken,
-    /// The last chunk, while its fetch is being counted.
-    last: Option<(Bytes, tokio::task::JoinHandle<()>)>,
 }
 
 impl<S> Counted<S> {
     pub fn new(inner: S, size: u64, taken: Taken) -> Self {
-        Counted { inner, left: size, taken, last: None }
+        Counted { inner, left: size, taken }
     }
 }
 
@@ -304,19 +299,11 @@ impl<S: Stream<Item = io::Result<Bytes>> + Unpin> Stream for Counted<S> {
     type Item = io::Result<Bytes>;
 
     fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
-        if let Some((_, counting)) = &mut self.last {
-            let _ = std::task::ready!(Pin::new(counting).poll(cx));
-            return Poll::Ready(self.last.take().map(|(chunk, _)| Ok(chunk)));
-        }
         let polled = std::task::ready!(Pin::new(&mut self.inner).poll_next(cx));
         if let Some(Ok(chunk)) = &polled {
             self.left = self.left.saturating_sub(chunk.len() as u64);
-            if self.left == 0 {
-                if let Some(counting) = self.taken.complete() {
-                    self.last = Some((chunk.clone(), counting));
-                    return self.poll_next(cx);
-                }
-            }
+            // Handed on as it is returned: from here the fetch is complete.
+            self.taken.complete = self.left == 0;
         }
         Poll::Ready(polled)
     }
@@ -359,25 +346,62 @@ mod tests {
         )
     }
 
+    async fn poll_once<S: Stream + Unpin>(stream: &mut S) -> Poll<Option<S::Item>> {
+        std::future::poll_fn(|cx| Poll::Ready(Pin::new(&mut *stream).poll_next(cx))).await
+    }
+
+    async fn ended_as(ended: &Mutex<Vec<bool>>, count: usize) -> Vec<bool> {
+        while ended.lock().unwrap().len() < count {
+            tokio::task::yield_now().await;
+        }
+        ended.lock().unwrap().clone()
+    }
+
     #[tokio::test]
-    async fn a_fetch_counts_before_its_last_byte_is_handed_on() {
+    async fn a_fetch_counts_once_its_last_chunk_is_handed_on() {
         let ended = Arc::new(Mutex::new(Vec::new()));
         let mut stream = counted(ended.clone());
         stream.next().await.unwrap().unwrap();
         stream.next().await.unwrap().unwrap();
         drop(stream); // cut off
-        while ended.lock().unwrap().is_empty() {
-            tokio::task::yield_now().await;
+        assert_eq!(ended_as(&ended, 1).await, [false], "given back");
+        let mut stream = counted(ended.clone());
+        for _ in 0..3 {
+            stream.next().await.unwrap().unwrap();
         }
-        assert_eq!(*ended.lock().unwrap(), [false], "given back");
+        drop(stream); // as the server does after the last byte
+        assert_eq!(ended_as(&ended, 2).await, [false, true], "counted");
+        let mut stream = counted(ended.clone());
+        for _ in 0..3 {
+            stream.next().await.unwrap().unwrap();
+        }
+        assert!(stream.next().await.is_none());
+        drop(stream);
+        assert_eq!(ended_as(&ended, 3).await, [false, true, true], "once");
+    }
+
+    /// The last chunk was held back while the fetch was counted: cut off then, it counted (the blob deleted after its
+    /// last fetch) though the last chunk never went. Now a fetch counts only once its last chunk is handed on.
+    #[tokio::test]
+    async fn a_fetch_cut_off_at_its_last_chunk_is_given_back() {
+        let ended = Arc::new(Mutex::new(Vec::new()));
         let mut stream = counted(ended.clone());
         stream.next().await.unwrap().unwrap();
         stream.next().await.unwrap().unwrap();
+        let handed = matches!(poll_once(&mut stream).await, Poll::Ready(Some(Ok(_))));
+        drop(stream); // cut off right after the last chunk was asked for
+        assert_eq!(ended_as(&ended, 1).await, [handed], "counted only if it was handed on");
+        // A last chunk not read yet when cut off: given back.
+        let first: Vec<io::Result<Bytes>> = vec![Ok(Bytes::from(vec![0u8; 1000]))];
+        let inner = futures_util::stream::iter(first).chain(futures_util::stream::pending());
+        let mut stream = Counted::new(inner, 2000, {
+            let ended = ended.clone();
+            Taken::new(move |complete| ended.lock().unwrap().push(complete))
+        });
         stream.next().await.unwrap().unwrap();
-        assert_eq!(*ended.lock().unwrap(), [false, true], "counted, before the last chunk came");
-        assert!(stream.next().await.is_none());
+        assert!(poll_once(&mut stream).await.is_pending());
         drop(stream);
-        assert_eq!(*ended.lock().unwrap(), [false, true], "once");
+        assert_eq!(ended_as(&ended, 2).await, [handed, false]);
     }
 
     #[test]

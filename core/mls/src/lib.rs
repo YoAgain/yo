@@ -85,11 +85,14 @@ enum Committed {
     Unknown(String),
 }
 
-/// Errors that say "not now", not "never": the envelope or operation is tried again later.
+/// Errors that say "not now", not "never": the envelope or operation is tried again later. A `426` (this app too old,
+/// spec 6.3) too: nothing goes until the app is updated, and the update sends what waits.
 fn retryable(error: &Error) -> bool {
     match error {
         Error::Network(_) => true,
-        Error::Refused(status) => *status == status::RATE_LIMITED || *status >= 500,
+        Error::Refused(status) => {
+            *status == status::RATE_LIMITED || *status == status::UPGRADE_REQUIRED || *status >= 500
+        }
         _ => false,
     }
 }
@@ -1277,8 +1280,9 @@ impl Client {
         // Made and saved first, registered outside the transaction: what the hub took is never rolled back (4.7).
         let group_id = self.atomic(|c| c.create_chat(&peer, &key_packages).and_then(|g| c.persist().map(|()| g)))?;
         match self.register_group(&group_id) {
-            // Not now: the chat waits, its Welcome and messages with it, for the next delivery.
-            Err(error) if !retryable(&error) => return Err(error),
+            // Not now, or not saved before it left (so it did not): the chat waits, its Welcome and messages with it,
+            // for the next delivery.
+            Err(error) if !retryable(&error) && !matches!(error, Error::Save(_)) => return Err(error),
             _ => {}
         }
         Ok((peer, group_id))
@@ -1560,7 +1564,10 @@ impl Client {
             let restarted = self.start_chat(&Handle::user(&user_bytes(&peer)?)).map(|(_, group)| group);
             let group = match restarted {
                 Ok(group) => group,
-                Err(error) if retryable(&error) => return Err(error),
+                // Not now, or not saved (a full disk): the old chat and what waits in it stay for the next call.
+                Err(error) if retryable(&error) || matches!(error, Error::Save(_) | Error::Replaced) => {
+                    return Err(error)
+                }
                 // Restarted once the person confirmed the new key; what waits is kept until then.
                 Err(Error::Unconfirmed) => continue,
                 Err(error) => {
@@ -2662,6 +2669,8 @@ impl Client {
     /// The outbox, without the client, like `send_begin` without a message: for sending again what the hub did not take
     /// yet (its limit per sender, or no network). Ended with `send_end`.
     pub fn deliver_begin(&mut self) -> Result<Deliveries> {
+        // As `deliver`: a new chat's group the hub has not answered for yet first, so its Welcome can go.
+        self.register_pending()?;
         self.deliveries()
     }
 
