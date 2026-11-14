@@ -5,7 +5,7 @@
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
-use yo::{HttpResult, HttpTransport, StateStore, YoClient};
+use yo::{HttpResult, HttpTransport, StateStore, YoClient, YoError};
 use yo_hub::config::{ApnsConfig, Config};
 use yo_tests::{random_u64, username, Http, TestHub};
 use yo_wire::api::PUSH_APNS;
@@ -45,9 +45,10 @@ struct File {
 }
 
 impl StateStore for File {
-    fn save(&self, blob: Vec<u8>) {
+    fn save(&self, blob: Vec<u8>) -> Result<(), YoError> {
         self.saves.fetch_add(1, Ordering::Relaxed);
         *self.blob.lock().unwrap() = blob;
+        Ok(())
     }
 }
 
