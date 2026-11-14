@@ -263,10 +263,14 @@ struct Page<Content: View, Bottom: View>: View {
     VStack(spacing: 0) {
       HStack {
         if let back {
-          Button("Back", systemImage: "chevron.backward", action: back)
-            .labelStyle(.iconOnly)
-            .font(.title3.weight(.semibold))
-            .frame(width: 44, height: 44, alignment: .leading)
+          // The whole 44 points take the tap, not only the chevron.
+          Button(action: back) {
+            Image(systemName: "chevron.backward")
+              .font(.title3.weight(.semibold))
+              .frame(width: 44, height: 44, alignment: .leading)
+              .contentShape(.rect)
+          }
+          .accessibilityLabel("Back")
         }
         Spacer()
       }
