@@ -179,6 +179,14 @@ pub enum StoredContent {
     Unknown(u16),
 }
 
+/// A refill's upload (`PUT /v1/key-packages`, encoded) and what it brings.
+#[derive(Clone, Serialize, Deserialize)]
+pub struct Refill {
+    pub body: Vec<u8>,
+    pub fresh: u32,
+    pub last_resort: bool,
+}
+
 #[derive(Clone, Serialize, Deserialize)]
 pub struct State {
     /// The own user id (hex), as the hub gave it.
@@ -211,6 +219,9 @@ pub struct State {
     pub key_packages_left: u32,
     pub key_packages: Vec<OwnKeyPackage>,
     pub last_resort_at: u64,
+    /// KeyPackages made and not yet taken by the hub: sent again as they are until it answers, never made anew.
+    #[serde(default)]
+    pub refill: Option<Refill>,
     /// The time of the last signed request (spec 6.2): the next is signed later, whichever process signs it.
     #[serde(default)]
     pub signed_until: u64,
