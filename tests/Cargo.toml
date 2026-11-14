@@ -30,7 +30,7 @@ path = "src/chaos.rs"
 yo-wire = { path = "../core/wire" }
 yo-core = { path = "../core/client", features = ["testing"] }
 yo-hub = { path = "../hub" }
-yo-bindings = { path = "../core/bindings" }
+yo-bindings = { path = "../core/bindings", features = ["testing"] }
 tokio = { workspace = true }
 reqwest = { workspace = true, features = ["blocking"] }
 serde_json = { workspace = true }

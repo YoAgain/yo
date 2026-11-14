@@ -1,6 +1,6 @@
 //! Seeded random runs: many clients, random sends, syncs, clock jumps and re-registrations. Invariant: every
 //! message a client sent to a device that still exists arrives exactly once and nothing is dropped. A failure names
-//! its seed; `YO_SEEDS=7,8` reruns those.
+//! its seed; `YO_SEEDS=7,8` reruns those, `YO_CLIENTS` and `YO_STEPS` make them larger.
 
 use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -128,10 +128,15 @@ fn seeds() -> Vec<u64> {
     }
 }
 
+/// A number from the environment (`YO_CLIENTS`, `YO_STEPS`: longer runs), else `default`.
+fn env_or(name: &str, default: usize) -> usize {
+    std::env::var(name).ok().and_then(|n| n.parse().ok()).unwrap_or(default)
+}
+
 #[test]
 fn seeded_runs() {
     for seed in seeds() {
-        run(seed, 6, 400);
+        run(seed, env_or("YO_CLIENTS", 6), env_or("YO_STEPS", 400));
     }
 }
 

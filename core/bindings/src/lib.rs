@@ -1017,6 +1017,14 @@ impl YoClient {
     }
 }
 
+#[cfg(feature = "testing")]
+impl YoClient {
+    /// For tests: the core client itself (its clock, what it dropped), under this client's lock.
+    pub fn core_for_tests<T>(&self, f: impl FnOnce(&mut Client) -> T) -> T {
+        f(&mut self.client.lock().unwrap_or_else(PoisonError::into_inner))
+    }
+}
+
 /// Why a user is reported.
 #[derive(uniffi::Enum)]
 pub enum ReportReason {

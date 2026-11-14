@@ -14,6 +14,10 @@ crate-type = ["lib", "staticlib", "cdylib"]
 name = "uniffi-bindgen"
 path = "bindgen.rs"
 
+[features]
+# Test hooks: the core client under the binding (its clock, its counters).
+testing = ["yo-core/testing"]
+
 [dependencies]
 yo-core = { path = "../client" }
 uniffi = { workspace = true, features = ["cli"] }
