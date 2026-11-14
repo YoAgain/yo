@@ -266,3 +266,21 @@ fn a_last_resort_is_retired_only_once_its_replacement_is_at_the_hub() {
     a.maintenance().unwrap();
     assert_eq!(a.own_key_packages(), kept + 1, "the one the hub had until now is kept");
 }
+
+/// A `409` whose devices could not be read dropped the message, though the hub had not taken it. Now it stays in
+/// the outbox and goes with the next delivery.
+#[test]
+fn an_unreadable_409_keeps_the_message() {
+    let hub = TestHub::start();
+    let n = random_u64() % 100_000;
+    let http = Http::new(hub.url());
+    let mut a = by_name(http.clone(), &format!("Odd{n}"));
+    let mut b = by_name(Http::new(hub.url()), &format!("Ddo{n}"));
+    a.send(b.user_id(), text("hi")).unwrap();
+    assert_eq!(texts(&b.sync(0).unwrap()), ["hi"]);
+    http.fault(&to(b.user_id()), Fault::Answer(409));
+    a.send(b.user_id(), text("kept")).unwrap();
+    assert_eq!((a.pending(), a.dropped()), (1, 0));
+    a.sync(0).unwrap();
+    assert_eq!(texts(&b.sync(0).unwrap()), ["kept"]);
+}
