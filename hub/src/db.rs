@@ -443,11 +443,13 @@ fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
 }
 
 impl Db {
+    /// WAL with `synchronous = FULL`: every commit is on the disk before it is answered, so what the hub acknowledged
+    /// (a delivery, a commit's order, spec 4.7) survives a power loss, not only a crash of the process.
     pub fn open(path: &str) -> rusqlite::Result<Self> {
         let mut conn = Connection::open(path)?;
         conn.execute_batch(
             "PRAGMA journal_mode = WAL;
-             PRAGMA synchronous = NORMAL;
+             PRAGMA synchronous = FULL;
              PRAGMA foreign_keys = ON;
              PRAGMA busy_timeout = 5000;",
         )?;
