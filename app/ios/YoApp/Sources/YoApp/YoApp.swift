@@ -161,6 +161,11 @@ final class NotificationDelegate: NSObject, UNUserNotificationCenterDelegate, Se
     guard let sender = info["from"] as? String else { return [] }
     // The Yo's own id when the notification extension (YoNotify) knew it: the same Yo from the core is not shown twice.
     await inbox.received(id: info["id"] as? String ?? notification.request.identifier, from: sender)
+    // Nor left in Notification Center, seen here already (a moment later: it is listed only after this answer).
+    Task { @MainActor [inbox] in
+      try? await Task.sleep(for: .seconds(0.5))
+      await inbox.collectDelivered()
+    }
     return []
   }
 

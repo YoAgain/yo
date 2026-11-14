@@ -375,9 +375,12 @@ final class Inbox {
       kept.append(event)
     }
     // Taken while not in front (just left, its wait at the hub still running): the notification the notification
-    // service would have written, which finds them read then.
-    if UIApplication.shared.applicationState == .background {
-      await ShareBridge.post(ShareBridge.yos(in: kept) { friend($0).name })
+    // service would have written, which finds them read then. In front: shown on the bars, so a notification of
+    // theirs (the service's, written just as the app opened) goes from Notification Center.
+    switch UIApplication.shared.applicationState {
+    case .background: await ShareBridge.post(ShareBridge.yos(in: kept) { friend($0).name })
+    case .active: Task { await collectDelivered() }
+    default: break
     }
     // Photos and videos are noted (above) before the core may forget their Yos; fetched from here on.
     _ = try? await Hub.run { [kept] in client.acknowledge(events: kept) }
