@@ -639,7 +639,8 @@ struct FriendList: View {
     defer { PerfProbe.frame("tap") }
     // A tap while a bar is swiped open closes it, as in Mail; it sends nothing.
     guard swiped == nil else { return withAnimation(.snappy) { swiped = nil } }
-    Haptic.tap()  // here, as the finger lifts: not after the list has drawn the change
+    // Here, as the finger lifts: not after the list has drawn the change. A photo: the shutter's click.
+    if cameraOn && picked == nil { Haptic.shutter() } else { Haptic.tap() }
     let library = picked?.data
     picked = nil
     libraryItem = nil
@@ -659,7 +660,7 @@ struct FriendList: View {
       var taken = library
       if taken == nil { taken = await camera.photo() }
       guard let taken, let file = await Task.detached(operation: { MediaFile.photo(taken) }).value else { return nil }
-      return Prepared(send: { await go(file, to: friend, from: client) })
+      return await stage(file, to: friend, from: client, keep: library == nil)
     }
   }
 
@@ -686,16 +687,22 @@ struct FriendList: View {
     }
   }
 
-  /// A photo or video on its way: into the outbox, which sends it when the hub takes it (also later, by itself). Only
-  /// from `client`, the account the gesture began in: signed out (or into another) meanwhile, it is not sent.
-  private func go(_ file: MediaFile, to friend: Friend, from client: YoClient?) async {
-    guard let client, client === accounts.client else { return showSent(to: friend, "Not Sent") }
-    Task.detached(priority: .utility) { file.keepIfWanted() }
-    if await outbox.send(file, to: friend.user ?? friend.name, from: client, accounts: accounts) {
-      Stats.sentYo(to: friend.name)
-    } else {
-      showSent(to: friend, "Not Sent")
-    }
+  /// A photo or video taken: into the library at once (`keep`, as Settings want it; not one picked from there), and
+  /// into the outbox, whose upload goes during the undo time; its Yo goes when that is over (`Prepared.send`), and an
+  /// undone one is taken out again. Only from `client`, the account the gesture began in.
+  private func stage(_ file: MediaFile, to friend: Friend, from client: YoClient?, keep: Bool = true) async -> Prepared? {
+    if keep { Task.detached(priority: .utility) { file.keepIfWanted() } }
+    let id = UUID()
+    guard let client, client === accounts.client,
+      await outbox.send(file, to: friend.user ?? friend.name, from: client, accounts: accounts, id: id, held: true)
+    else { return nil }
+    let outbox = outbox
+    return Prepared(
+      send: {
+        outbox.release(id)
+        Stats.sentYo(to: friend.name)
+      },
+      undo: { outbox.discard(id) })
   }
 
   /// Holding a name in camera mode: a video from the moment it is held until it is let go.
@@ -710,7 +717,7 @@ struct FriendList: View {
       let client = accounts.client
       run(friend, "Sent 🎥") {
         guard let recording = await camera.stopVideo(), let file = await MediaFile.video(recording) else { return nil }
-        return Prepared(send: { await go(file, to: friend, from: client) })
+        return await stage(file, to: friend, from: client)
       }
     }
   }
@@ -737,21 +744,26 @@ struct FriendList: View {
       for one in stack {
         guard let prepared = await bars.preparing.removeValue(forKey: one.id)?.value else { continue }
         went += 1
-        showSent(to: friend, one.text, thenOnTop: true) { await prepared.send() }
+        prepared.send()  // uploaded meanwhile (or uploading): its Yo goes now
+        showSent(to: friend, one.text, thenOnTop: true)
       }
       if went == 0 { showSent(to: friend, "Not Sent") }
     }
   }
 
-  /// A photo or video ready to go: what sends it (made in memory: an undone one leaves no file behind).
+  /// A photo or video in the outbox, held: `send` lets its Yo go, `undo` takes it out again.
   struct Prepared {
-    let send: @MainActor () async -> Void
+    let send: @MainActor () -> Void
+    let undo: @MainActor () -> Void
   }
 
   /// The ring tapped: the whole stack stays here.
   private func cancelSending(_ friend: Friend) {
     let bar = bars.of(friend)
-    for one in bar.outgoing { bars.preparing[one.id] = nil }
+    for one in bar.outgoing {
+      // Taken out of the outbox once it is in (still being taken or sealed: as soon as it is).
+      if let preparing = bars.preparing.removeValue(forKey: one.id) { Task { await preparing.value?.undo() } }
+    }
     bars.stackRounds[friend.key] = nil
     bar.outgoing = []
     showSent(to: friend, "Canceled")
@@ -1077,6 +1089,14 @@ struct LiveBar: View {
 @MainActor enum Haptic {
   private static let medium = UIImpactFeedbackGenerator(style: .medium)
   private static let light = UIImpactFeedbackGenerator(style: .light)
+  private static let rigid = UIImpactFeedbackGenerator(style: .rigid)
+
+  /// A photo taken: short and hard, as the Camera app's shutter.
+  static func shutter() {
+    rigid.impactOccurred(intensity: 1)
+    Perf.mark("tap.haptic")
+    rigid.prepare()
+  }
 
   static func tap(_ style: UIImpactFeedbackGenerator.FeedbackStyle = .medium) {
     let generator = style == .light ? light : medium
@@ -1086,7 +1106,10 @@ struct LiveBar: View {
   }
 
   /// A finger is down: the next `tap` plays without the engine's start.
-  static func prepare() { medium.prepare() }
+  static func prepare() {
+    medium.prepare()
+    rigid.prepare()
+  }
 }
 
 /// One friend's bar: tap to send. With `hold`, holding is reported as well (true when held long enough, false when let

@@ -91,6 +91,9 @@ final class MediaOutbox {
     var next = Date.distantPast
     /// The hub has the blob: only its Yo is left (nil in items saved before this was kept).
     var uploaded: Bool?
+    /// Its Yo waits for the undo time (`release`), its upload goes meanwhile. Read again after a restart, it is
+    /// released: an app ended within the undo time sends what was tapped.
+    var held: Bool?
   }
 
   /// How many wait.
@@ -126,7 +129,11 @@ final class MediaOutbox {
       guard let read = try? Data(contentsOf: Self.index) else { return false }
       data = read
     }
-    items = data.flatMap { try? JSONDecoder().decode([Item].self, from: $0) } ?? []
+    items = (data.flatMap { try? JSONDecoder().decode([Item].self, from: $0) } ?? []).map { item in
+      var item = item
+      item.held = nil
+      return item
+    }
     loaded = true
     waiting = items.count
     return true
@@ -145,8 +152,10 @@ final class MediaOutbox {
   /// Seals a photo or video for a friend and puts it in line, from `client`, the account the gesture began in (never
   /// from one signed in since); it goes as soon as the hub takes it. True once it is on disk, its blob and the queue.
   /// `id`: one already in line is not put in again (a share taken in twice, the app ended before its note went).
+  /// `held`: its upload goes at once, its Yo only once released (`release`), or never (`discard`): the undo time.
   func send(
-    _ file: MediaFile, to friend: String, from client: YoClient?, accounts: AccountStore, id: UUID = UUID()
+    _ file: MediaFile, to friend: String, from client: YoClient?, accounts: AccountStore, id: UUID = UUID(),
+    held: Bool = false
   ) async -> Bool {
     guard let client, client === accounts.client, load() else { return false }
     guard !items.contains(where: { $0.id == id }) else { return true }
@@ -158,9 +167,10 @@ final class MediaOutbox {
       })
     else { return false }
     guard !items.contains(where: { $0.id == id }) else { return true }  // taken in meanwhile
-    let item = Item(
+    var item = Item(
       id: id, owner: owner, to: friend, kind: file.kind, media: StoredMedia(sealed.media),
       durationMs: file.durationMs, created: .now)
+    item.held = held ? true : nil
     let blob = Self.blob(item.id)
     guard await MediaStorage.write(sealed.ciphertext, to: blob, .completeFileProtectionUntilFirstUserAuthentication)
     else { return false }
@@ -177,6 +187,24 @@ final class MediaOutbox {
     }
     flush(accounts: accounts)
     return true
+  }
+
+  /// The undo time is over: its Yo goes as soon as its upload is done.
+  func release(_ id: UUID) {
+    guard let at = items.firstIndex(where: { $0.id == id }) else { return }
+    items[at].held = nil
+    save()
+    if let accounts { flush(accounts: accounts) }
+  }
+
+  /// Undone: out of the queue, its Yo never sent (a blob the hub took already is never named, and goes after its
+  /// time there).
+  func discard(_ id: UUID) {
+    guard let at = items.firstIndex(where: { $0.id == id }) else { return }
+    items.remove(at: at)
+    save()
+    let blob = Self.blob(id)
+    Task.detached(priority: .utility) { try? FileManager.default.removeItem(at: blob) }
   }
 
   /// Signed out: nothing waits any more, nothing under way goes on (the files went with MediaStorage.clearAll).
@@ -236,7 +264,8 @@ final class MediaOutbox {
     var blocked: Set<String> = []
     return items.filter { item in
       guard !blocked.contains(item.to) else { return false }
-      guard item.uploaded == true, item.next <= .now else {
+      // Held (its undo time running) holds the friend's after it too: they go in the order taken.
+      guard item.uploaded == true, item.held != true, item.next <= .now else {
         blocked.insert(item.to)
         return false
       }
