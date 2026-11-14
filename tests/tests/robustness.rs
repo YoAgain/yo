@@ -192,6 +192,12 @@ fn a_pruned_commit_is_gone_one_never_accepted_is_unknown_and_a_repeat_is_still_a
     let client = reqwest::blocking::Client::new();
     let group = [4u8; 32];
     let tokens = [[1u8; 32], [2; 32], [3; 32]];
+    // A group starts at an epoch from 1 to 2³²−1 (spec 6.3).
+    for epoch in [0, u32::MAX as u64 + 1] {
+        let bad = api::GroupCreate { group_id: group, epoch, token_hash: [0; 32] };
+        let refused = client.post(format!("{}{}", hub.url(), api::GROUPS)).body(yo_wire::encode(&bad)).send().unwrap();
+        assert_eq!(refused.status().as_u16(), 400, "epoch {epoch}");
+    }
     let create = api::GroupCreate { group_id: group, epoch: 5, token_hash: yo_wire::sha256(&tokens[0]) };
     let created = client.post(format!("{}{}", hub.url(), api::GROUPS)).body(yo_wire::encode(&create)).send().unwrap();
     assert_eq!(created.status().as_u16(), 201);
