@@ -363,8 +363,8 @@ fn insert_key_packages(
     last_resort: Option<&StoredKeyPackage>,
 ) -> rusqlite::Result<Option<Conflict>> {
     let mut seen = tx.prepare_cached("INSERT INTO seen_key_packages (hash) VALUES (?1) ON CONFLICT DO NOTHING")?;
-    let mut insert =
-        tx.prepare_cached("INSERT INTO key_packages (device_id, data, last_resort, not_after) VALUES (?1, ?2, ?3, ?4)")?;
+    let mut insert = tx
+        .prepare_cached("INSERT INTO key_packages (device_id, data, last_resort, not_after) VALUES (?1, ?2, ?3, ?4)")?;
     for (key_package, last) in key_packages.iter().map(|k| (k, false)).chain(last_resort.map(|k| (k, true))) {
         if seen.execute([&key_package.hash])? == 0 {
             return Ok(Some(Conflict::KeyPackageSeen));

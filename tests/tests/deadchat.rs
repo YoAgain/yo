@@ -70,14 +70,16 @@ fn a_made_up_epoch_does_not_restart_a_chat() {
     b.send(a.user_id(), Content::Text("1".into())).unwrap();
     assert_eq!(drain(&mut a), ["1"]);
     let group = a.chats()[0].1;
-    // B's last delivery to A, its epoch moved far ahead (MLSMessage: version, wire format, group id<V>, epoch).
+    // B's last delivery to A, opened as only A can (sealed sender, 6.1), its epoch moved far ahead and sealed to A
+    // again (MLSMessage: version, wire format, group id<V>, epoch).
     let sent = hb.sent.lock().unwrap();
     let (_, _, body) = sent.iter().rev().find(|(m, p, _)| m == "POST" && p.starts_with("/v1/inbox/")).unwrap().clone();
     drop(sent);
-    let mut mls = yo_wire::envelope::open(&body).unwrap().to_vec();
+    let mut mls = yo_core::seal::open(&a.account_secret(), &body).unwrap();
     assert_eq!(&mls[5..37], &group);
     mls[37..45].copy_from_slice(&9u64.to_be_bytes());
-    let forged = yo_wire::envelope::seal(&mls).unwrap();
+    let a_key = ed25519_dalek::SigningKey::from_bytes(&a.account_secret()).verifying_key().to_bytes();
+    let forged = yo_core::seal::to(&a_key, &mls).unwrap();
     assert_eq!(yo_tests::deliver_raw(&hub.url(), a.user_id(), forged), 202);
     assert!(drain(&mut a).is_empty());
     assert_eq!(a.chats()[0].1, group, "the chat stands");

@@ -89,9 +89,10 @@ pub struct Creating {
 pub struct Inflight {
     /// The request to `POST /v1/groups/{id}/commit`, as sent (it carries the commit's envelope).
     pub request: Vec<u8>,
-    /// The commit's envelope, for every account in the group.
+    /// The commit's envelope (padded, not sealed: the hub keeps it for the group), sealed to every account in the
+    /// group when accepted.
     pub commit: Vec<u8>,
-    /// A repair's Welcome: for the user whose devices it adds (hex user id, envelope).
+    /// A repair's Welcome: for the user whose devices it adds (hex user id, the MLS message, sealed when queued).
     pub welcome: Option<(String, Vec<u8>)>,
 }
 
