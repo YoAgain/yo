@@ -1182,6 +1182,7 @@ struct RowButton: View {
     BarLine(start: outgoing == nil ? BarLine.margin : BarLine.margin + Self.ring + BarLine.gap) {
       Text(title)
         .lineLimit(1)
+        .minimumScaleFactor(0.5)  // a long name, or large text, gets smaller before it is cut with "…"
         .contentTransition(.identity)  // other words come at once, never two drawn over each other
         .modifier(Knock(trigger: yo?.first))
         .opacity(touchable ? 0 : faded ? 0.55 : 1)
@@ -1299,8 +1300,8 @@ struct Bangs: View {
 
 /// A bar's line, for sending and receiving alike: the words in the middle, their "!"s right after them, a Yo that came
 /// at the bar's end. The words stay in the middle until they would run into the end (or the edge): then they move left
-/// as far as needed, never past `start` (the margin, or after the undo ring); a name too long even then is cut with
-/// "…". Nothing shrinks, nothing overlaps.
+/// as far as needed, never past `start` (the margin, or after the undo ring); a name too long even then gets smaller
+/// (to half), then is cut with "…". Nothing overlaps.
 struct BarLine: Layout {
   static let margin = 20.0
   static let endPadding = 30.0
