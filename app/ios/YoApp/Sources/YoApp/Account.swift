@@ -878,7 +878,8 @@ enum AccountError: LocalizedError {
     case .keychain: "Yo can’t use the keychain right now. Unlock your iPhone and try again."
     case .hub(.Network): "Yo can’t reach its server. Check your connection and try again."
     case .hub(.Replaced): "Your account is in use on another iPhone."
-    case .hub(let error): "Something went wrong. Try again. (\(error))"  // the core's reason, while in development
+    // The core's reason in Yo Dev only (for development); never in Yo itself.
+    case .hub(let error): "Something went wrong. Try again." + (Hub.isDevApp ? " (\(error))" : "")
     }
   }
 }
