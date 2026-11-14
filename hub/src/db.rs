@@ -36,6 +36,8 @@ pub struct NewDevice {
     pub auth_key: Key,
     pub push_platform: u8,
     pub push_token: Vec<u8>,
+    /// The app it names (`Yo-App`), if any.
+    pub app: Option<String>,
 }
 
 /// The keys that may sign a backup record's fetch (spec 7): the passkey's, if it has one, and the code's. Neither: a
@@ -582,8 +584,9 @@ impl Db {
             params![KIND_USERNAME, skeleton, user, spelling],
         )?;
         tx.execute(
-            "INSERT INTO devices (id, user_id, device_key, auth_key, push_platform, push_token, created_at, last_seen_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?7)",
+            "INSERT INTO devices
+                 (id, user_id, device_key, auth_key, push_platform, push_token, created_at, last_seen_at, app)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?7, ?8)",
             params![
                 device.device_id,
                 user,
@@ -591,7 +594,8 @@ impl Db {
                 device.auth_key,
                 device.push_platform,
                 device.push_token,
-                now
+                now,
+                device.app
             ],
         )?;
         if let Some(conflict) = insert_key_packages(&tx, &device.device_id, key_packages, Some(last_resort))? {
@@ -1254,6 +1258,7 @@ mod tests {
             auth_key: [n; 32],
             push_platform: 0,
             push_token: Vec::new(),
+            app: None,
         }
     }
 

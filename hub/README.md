@@ -21,9 +21,9 @@ Limits are token buckets (refilled evenly) in memory, per the key named; **IP** 
 (`CF-Connecting-IP` when `YO_TRUST_CLOUDFLARE=1`, else the socket's peer), an IPv6 address by its /64. Every body
 is at most 65 KiB (`MAX_BODY`) except a blob upload, which is streamed.
 
-Every request may name its app in `Yo-App: PLATFORM/BUILD` (spec 6.3): the hub keeps it per device (written when it
-changes) and answers `426` to every request of a build older than `YO_MIN_APP` (`ios/202611140619,android/12`) for
-its platform.
+Every request may name its app in `Yo-App: PLATFORM/BUILD` (spec 6.3): the hub keeps it per device (from the
+registration on, written when it changes) and answers `426` to every request of a build older than `YO_MIN_APP`
+(`ios/202611140619,android/12`) for its platform.
 
 | Method | Path | Purpose | Auth | Limits (key) | Hub learns |
 |---|---|---|---|---|---|
