@@ -1134,16 +1134,24 @@ impl Db {
             .collect()
     }
 
+    /// Deletes a device's envelopes by id. Committed without waiting for the disk (`synchronous = NORMAL` for this
+    /// transaction alone; the next commit's sync takes it along): an ack lost to a power cut costs a repeat, which the
+    /// device skips (spec 4.7), and an ack of its own `fsync` would cost one per inbox read.
     pub fn ack(&self, device: &DeviceId, ids: &[u64]) -> rusqlite::Result<()> {
         let mut conn = self.conn();
-        let tx = conn.transaction()?;
-        {
-            let mut delete = tx.prepare_cached("DELETE FROM messages WHERE device_id = ?1 AND id = ?2")?;
-            for id in ids {
-                delete.execute(params![device, *id as i64])?;
+        conn.execute_batch("PRAGMA synchronous = NORMAL")?;
+        let acked = (|| {
+            let tx = conn.transaction()?;
+            {
+                let mut delete = tx.prepare_cached("DELETE FROM messages WHERE device_id = ?1 AND id = ?2")?;
+                for id in ids {
+                    delete.execute(params![device, *id as i64])?;
+                }
             }
-        }
-        tx.commit()
+            tx.commit()
+        })();
+        conn.execute_batch("PRAGMA synchronous = FULL")?;
+        acked
     }
 
     // ---- groups ----
@@ -1626,6 +1634,20 @@ mod tests {
         // Or within the hour, without a restart.
         assert!(db.prune_blobs(7 + NOT_READY_KEPT_MS - 1, ttl).unwrap().is_empty());
         assert_eq!(db.prune_blobs(7 + NOT_READY_KEPT_MS + 1, ttl).unwrap(), [(id, 7)]);
+    }
+
+    /// Commits wait for the disk (`FULL`, 2); an ack alone does not, and leaves the connection as it was.
+    #[test]
+    fn only_an_ack_commits_without_waiting_for_the_disk() {
+        let db = Db::open(":memory:").unwrap();
+        let leo = user(register(&db, b"LEO", 1, 1, 0));
+        db.deliver(&[(leo, yo_wire::devices::hash(&[1; 32], &[[1; 32]]), b"envelope")], 0, 10).unwrap();
+        let synchronous = || -> i64 { db.conn().query_row("PRAGMA synchronous", [], |row| row.get(0)).unwrap() };
+        assert_eq!(synchronous(), 2);
+        let (id, _) = db.fetch(&[1; 16], 10).unwrap().remove(0);
+        db.ack(&[1; 16], &[id]).unwrap();
+        assert!(db.fetch(&[1; 16], 10).unwrap().is_empty());
+        assert_eq!(synchronous(), 2);
     }
 
     #[test]
