@@ -17,6 +17,7 @@ pinned toolchain (Docker); `cargo` works the same where Rust 1.99.1 is installed
 | `tests/deadchat.rs` | A device away longer than the hub keeps a commit (30 days) restarts the chat (spec 4.9): the peer sends again what it missed, once, in order; one chat each afterwards |
 | `tests/found.rs` | What the chaos runs found (`tests/CHAOS.md`), each as its smallest case |
 | `tests/bindings.rs` | The UniFFI layer the apps call, with HTTP and the store as callbacks: calls run while the inbox waits and while a Yo is on its way to one friend (a Yo to another goes past it, one to the same friend queues behind it); bursts to and from 20 friends at once arrive exactly once, in bounded time; a typed name is looked up (who it is, the owner's spelling) before the first Yo; six accounts whose app long-polls while an extension opens the state as a guest again and again (sends, syncs) and the friend writes: every Yo once both ways, every lock given back |
+| `tests/speed.rs` | How fast a Yo goes, through the app layer with the inbox's long wait running as in the app: `send_yo` to the hub's push request (60 Yos, alone and ten a second), and the notification service's work for one push (the state opened as a guest, the inbox read without waiting: two requests). Prints its numbers: on a 16-core x86 machine, release, send_yo to push request p50 1.6 ms, p90 1.7 ms; the service 4.6 ms; a state of 20 chats 342 KiB, opened in 1.2 ms |
 
 ```sh
 dev/cargo test --workspace                                  # everything
