@@ -788,7 +788,7 @@ struct NameCodeSheet: View {
     NavigationStack {
       VStack(spacing: 20) {
         Spacer()
-        if let image = RecoveryQR.image(text: "https://justyo.co/\(name)") {
+        if let image = RecoveryQR.image(text: Invite.link(for: name).absoluteString) {
           Image(uiImage: image)
             .interpolation(.none)
             .resizable()

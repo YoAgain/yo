@@ -33,6 +33,17 @@
 			<string>AppIcon</string>
 		</dict>
 	</dict>
+	<key>CFBundleURLTypes</key>
+	<array>
+		<dict>
+			<key>CFBundleURLName</key>
+			<string>app.justyo.ios.invite</string>
+			<key>CFBundleURLSchemes</key>
+			<array>
+				<string>yo</string>
+			</array>
+		</dict>
+	</array>
 	<key>ITSAppUsesNonExemptEncryption</key>
 	<false/>
 	<key>NSCameraUsageDescription</key>

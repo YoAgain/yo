@@ -14,6 +14,8 @@ push).
 - Camera mode (the original's camera context): the bars turn see-through over the live picture; tap a name for a
   photo, hold it for a video; a ring at the bar's left undoes the send for 1.5 s. Photo library and front/back at the
   bottom. Received photos and videos wait as a round thumbnail; hold or tap it to see them once.
+- Invite links: https://justyo.co/NAME (your code, Invite on the list) and yo://add/NAME open Yo and add NAME as a
+  friend; before an account the name waits through the way in (`Invite.swift`). The first Yo sent says what it does.
 - Profile sheet: save the photos and videos you send to your library.
 - Share sheet (Yo from the App Store and TestFlight): "Yo" for up to ten photos or one video from Photos or any app;
   the same bars, a tap on a name sends them to that friend from there (`Sources/YoShare`), as the app would. Without

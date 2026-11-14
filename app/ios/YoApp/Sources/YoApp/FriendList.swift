@@ -16,9 +16,13 @@
 // Camera mode, the original's camera "context": the bars turn see-through over the live picture; a tap on a name
 // takes a photo, holding it records a video. Either goes after `sendDelay`, a ring at the bar's left that undoes the
 // send when tapped. The bottom has the photo library (left) and front/back (right), as the Camera app.
+//
+// An invite link (justyo.co/NAME, Invite.swift) adds its name as if typed in Add Friend; one already on the list says
+// so on its bar. The first Yo ever sent from this phone says what it does, as the original's did (2015).
 import AVFoundation
 import PhotosUI
 import SwiftUI
+import UserNotifications
 import YoCore
 
 struct FriendList: View {
@@ -71,6 +75,10 @@ struct FriendList: View {
   @State private var onScreen: Set<String> = []
   /// Counts sends, for the haptic.
   @State private var sends = 0
+  /// The first Yo sent: its alert, by whether notifications are allowed.
+  @State private var firstYo: Notifications?
+  enum Notifications { case allowed, notAsked, denied }
+  private static let firstYoKey = "firstYo.shown"
 
   /// The bars' sending: what each says after a send, and the photos and videos on their way out.
   @MainActor @Observable final class Bars {
@@ -198,6 +206,22 @@ struct FriendList: View {
           Button("OK", role: .cancel) {}
         } message: {
           Text(problem?.message ?? "")
+        }
+        .alert(
+          "First Yo Sent!", isPresented: Binding(get: { firstYo != nil }, set: { if !$0 { firstYo = nil } }),
+          presenting: firstYo
+        ) { notifications in
+          if notifications == .allowed {
+            Button("Awesome", role: .cancel) {}
+          } else {
+            Button("Turn On Notifications") { Task { await turnOnNotifications(notifications) } }
+            Button("Not Now", role: .cancel) {}
+          }
+        } message: { notifications in
+          let me = accounts.account?.username ?? "you"
+          Text(
+            "They’ll get “Yo from \(me)” with a sound that says Yo."
+              + (notifications == .allowed ? "" : " To get a Yo back, turn on notifications."))
         }
         .overlay {
           if let viewing {
@@ -404,8 +428,8 @@ struct FriendList: View {
         newGroup = true
       }
       ShareLink(
-        item: URL(string: "https://justyo.co")!,
-        message: Text(accounts.account.map { "Yo! Add me on Yo: \($0.username)" } ?? "Yo! Get Yo.")
+        item: accounts.account.map { Invite.link(for: $0.username) } ?? URL(string: "https://justyo.co")!,
+        message: Text("Yo! Add me on Yo:")
       ) {
         Text("Invite")
           .font(.yo(Metrics.rowFont))
@@ -448,8 +472,7 @@ struct FriendList: View {
     }
   }
 
-  /// The name typed, once the hub said who it is: added as its owner writes it ("yogpt" becomes "YoGPT"); nobody by
-  /// that name: not added; no answer (offline): added as typed, looked up again when the list opens.
+  /// The name typed in Add Friend.
   private func add() {
     if hint != nil && newName.isEmpty { return }  // the hint stays a moment, then the bar closes
     let name = Username.clean(newName)
@@ -458,29 +481,61 @@ struct FriendList: View {
       adding = false
       return
     }
-    if let me = accounts.account?.username, Username.skeleton(name) == Username.skeleton(me) {
-      return say("That’s you")
-    }
     submitted += 1
     let this = submitted
     hint = "\(name)…"
-    let client = accounts.client
     Task {
-      let answer = await inbox.lookUp(name, accounts: accounts)
-      guard client === accounts.client else { return }  // signed out meanwhile: not this account's friend
-      switch answer {
-      case .noSuchUser:
-        if submitted == this { say("No Such User") }
-        return
-      case .found(let user, let spelled):
-        withAnimation(.snappy) { friends.add(spelled ?? name, user: user) }
-      case .unknown:
-        withAnimation(.snappy) { friends.add(name) }
-      }
+      let problem = await addFriend(name)
       guard submitted == this else { return }  // another name came meanwhile: the field is its
+      if let problem { return say(problem) }
       hint = nil
       if newName.isEmpty && !typing { adding = false }
     }
+  }
+
+  /// The name of an invite link: added the same way; what is wrong shows in Add Friend's field.
+  private func invited(_ name: String) async {
+    guard let problem = await addFriend(name) else { return }
+    withAnimation(.snappy) {
+      addMenu = false
+      adding = true
+    }
+    say(problem)
+  }
+
+  /// A name to add, typed or from a link, once the hub said who it is: added as its owner writes it ("yogpt" becomes
+  /// "YoGPT"), on top; nobody by that name: not added; no answer (offline): added as typed, looked up again when the
+  /// list opens. One already on the list is not added again: its bar says so. What to say instead ("That’s you",
+  /// "No Such User"), or nil.
+  private func addFriend(_ name: String) async -> String? {
+    if let me = accounts.account?.username, Username.skeleton(name) == Username.skeleton(me) { return "That’s you" }
+    let client = accounts.client
+    let answer = await inbox.lookUp(name, accounts: accounts)
+    guard client === accounts.client else { return nil }  // signed out meanwhile: not this account's friend
+    var user: String?
+    var spelled = name
+    switch answer {
+    case .noSuchUser: return "No Such User"
+    case .found(let found, let owners):
+      user = found
+      spelled = owners ?? spelled
+    case .unknown: break
+    }
+    let skeleton = Username.skeleton(spelled)
+    if let known = friends.shown.first(where: {
+      !$0.gone && (Username.skeleton($0.name) == skeleton || (user != nil && $0.user == user))
+    }) {
+      withAnimation(.snappy) {
+        position.scrollTo(id: Lifted(friend: known, lifts: bars.lifts[known.key] ?? 0).id, anchor: .center)
+      }
+      showSent(to: known, "Already Added")
+      return nil
+    }
+    withAnimation(.snappy) {
+      friends.add(spelled, user: user)
+      if !scrolled { position.scrollTo(edge: .top) }
+    }
+    return nil
   }
 
   /// A hint in the empty field for a moment; then the bar closes unless something is typed.
@@ -556,6 +611,8 @@ struct FriendList: View {
       Task {
         if let problem = await inbox.send(to: friend, accounts: accounts, friends: friends) {
           showSent(to: friend, problem)
+        } else {
+          await sentYo()
         }
       }
       return
@@ -565,6 +622,29 @@ struct FriendList: View {
       if taken == nil { taken = await camera.photo() }
       guard let taken, let file = await Task.detached(operation: { MediaFile.photo(taken) }).value else { return nil }
       return Prepared(send: { await go(file, to: friend) })
+    }
+  }
+
+  /// The first Yo ever sent from this phone: what the friend gets, once "Sent Yo" was seen; and the way to get a Yo
+  /// back while notifications are off (asked for with the list already: here only when the answer was no).
+  private func sentYo() async {
+    guard !UserDefaults.standard.bool(forKey: Self.firstYoKey) else { return }
+    UserDefaults.standard.set(true, forKey: Self.firstYoKey)
+    let status = await UNUserNotificationCenter.current().notificationSettings().authorizationStatus
+    try? await Task.sleep(for: .seconds(1))
+    firstYo =
+      switch status {
+      case .authorized, .provisional, .ephemeral: .allowed
+      case .notDetermined: .notAsked
+      default: .denied
+      }
+  }
+
+  private func turnOnNotifications(_ notifications: Notifications) async {
+    if notifications == .notAsked {
+      await inbox.askForNotifications()
+    } else if let url = URL(string: UIApplication.openNotificationSettingsURLString) {
+      await UIApplication.shared.open(url)
     }
   }
 
@@ -708,6 +788,12 @@ extension FriendList {
       .onChange(of: libraryItem) { _, item in load(item) }
       .onChange(of: cameraOn) { _, on in cameraSwitched(on) }
       .onDisappear { cameraOn = false }
+      // An invite link's name, once the hub can be asked: added once (Invite.swift).
+      .task(id: "\(Invite.shared.pending ?? "")/\(accounts.client != nil)") {
+        guard let name = Invite.shared.pending, accounts.client != nil else { return }
+        Invite.shared.pending = nil
+        await invited(name)
+      }
   }
 
   private func feedback(_ content: some View) -> some View {
