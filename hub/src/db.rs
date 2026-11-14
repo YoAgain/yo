@@ -54,7 +54,13 @@ pub struct BackupAuth {
 pub struct StoredKeyPackage {
     pub hash: [u8; 32],
     pub data: Vec<u8>,
+    /// The end of its lifetime, seconds since 1970 (0: not known, kept from before it was).
+    pub not_after: u64,
 }
+
+/// A KeyPackage still good for a day: one older is neither handed out nor counted as left (a client refuses one past
+/// its lifetime, and its device refills by the count).
+const KEY_PACKAGE_GOOD: &str = "(not_after = 0 OR not_after > CAST(strftime('%s', 'now') AS INTEGER) + 86400)";
 
 /// A user found by a handle.
 pub struct Found {
@@ -208,7 +214,8 @@ CREATE TABLE IF NOT EXISTS key_packages (
     id INTEGER PRIMARY KEY,
     device_id BLOB NOT NULL,
     data BLOB NOT NULL,
-    last_resort INTEGER NOT NULL
+    last_resort INTEGER NOT NULL,
+    not_after INTEGER NOT NULL DEFAULT 0
 );
 CREATE INDEX IF NOT EXISTS key_packages_by_device ON key_packages(device_id, last_resort, id);
 CREATE TABLE IF NOT EXISTS seen_key_packages (
@@ -357,7 +364,7 @@ fn insert_key_packages(
 ) -> rusqlite::Result<Option<Conflict>> {
     let mut seen = tx.prepare_cached("INSERT INTO seen_key_packages (hash) VALUES (?1) ON CONFLICT DO NOTHING")?;
     let mut insert =
-        tx.prepare_cached("INSERT INTO key_packages (device_id, data, last_resort) VALUES (?1, ?2, ?3)")?;
+        tx.prepare_cached("INSERT INTO key_packages (device_id, data, last_resort, not_after) VALUES (?1, ?2, ?3, ?4)")?;
     for (key_package, last) in key_packages.iter().map(|k| (k, false)).chain(last_resort.map(|k| (k, true))) {
         if seen.execute([&key_package.hash])? == 0 {
             return Ok(Some(Conflict::KeyPackageSeen));
@@ -365,7 +372,7 @@ fn insert_key_packages(
         if last {
             tx.execute("DELETE FROM key_packages WHERE device_id = ?1 AND last_resort = 1", [device])?;
         }
-        insert.execute(params![device, key_package.data, last])?;
+        insert.execute(params![device, key_package.data, last, key_package.not_after as i64])?;
     }
     Ok(None)
 }
@@ -433,6 +440,7 @@ fn migrate(conn: &mut Connection) -> rusqlite::Result<()> {
         ("groups", "first_epoch", "INTEGER NOT NULL DEFAULT 1"),
         ("blobs", "fetching", "INTEGER NOT NULL DEFAULT 0"),
         ("blobs", "ready", "INTEGER NOT NULL DEFAULT 1"),
+        ("key_packages", "not_after", "INTEGER NOT NULL DEFAULT 0"),
     ] {
         let has = tx.prepare("SELECT 1 FROM pragma_table_info(?1) WHERE name = ?2")?.exists([table, column])?;
         if !has {
@@ -738,11 +746,16 @@ impl Db {
                 .query_map([&user], |row| Ok((row.get(0)?, array(row.get(1)?)?)))?
                 .collect::<Result<_, _>>()?;
             for (device, _) in devices.iter().filter(|(_, key)| !except.contains(key)) {
+                // Past their lifetime: gone, the last resort then (its device sends a new one each month).
+                tx.prepare_cached(&format!(
+                    "DELETE FROM key_packages WHERE device_id = ?1 AND last_resort = 0 AND NOT {KEY_PACKAGE_GOOD}"
+                ))?
+                .execute([device])?;
                 let found: Option<(i64, Vec<u8>, bool)> = tx
-                    .prepare_cached(
-                        "SELECT id, data, last_resort FROM key_packages WHERE device_id = ?1
-                         ORDER BY last_resort, id LIMIT 1",
-                    )?
+                    .prepare_cached(&format!(
+                        "SELECT id, data, last_resort FROM key_packages WHERE device_id = ?1 AND {KEY_PACKAGE_GOOD}
+                         ORDER BY last_resort, id LIMIT 1"
+                    ))?
                     .query_row([device], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))
                     .optional()?;
                 if let Some((id, data, last_resort)) = found {
@@ -1075,6 +1088,11 @@ impl Db {
         if user_of_device(&tx, device)?.is_none() {
             return Ok(Write::Refused(Conflict::DeviceGone));
         }
+        // Those past their lifetime make no room taken: gone before the count.
+        tx.prepare_cached(&format!(
+            "DELETE FROM key_packages WHERE device_id = ?1 AND last_resort = 0 AND NOT {KEY_PACKAGE_GOOD}"
+        ))?
+        .execute([device])?;
         let held: u32 = tx
             .prepare_cached("SELECT count(*) FROM key_packages WHERE device_id = ?1 AND last_resort = 0")?
             .query_row([device], |row| row.get(0))?;
@@ -1091,7 +1109,9 @@ impl Db {
 
     pub fn key_packages_left(&self, device: &DeviceId) -> rusqlite::Result<u32> {
         self.conn()
-            .prepare_cached("SELECT count(*) FROM key_packages WHERE device_id = ?1 AND last_resort = 0")?
+            .prepare_cached(&format!(
+                "SELECT count(*) FROM key_packages WHERE device_id = ?1 AND last_resort = 0 AND {KEY_PACKAGE_GOOD}"
+            ))?
             .query_row([device], |row| row.get(0))
     }
 
@@ -1436,10 +1456,28 @@ mod tests {
 
     /// Registers device `n` for a username with account key `key`.
     fn register(db: &Db, name: &[u8], key: u8, n: u8, now: u64) -> Write<(UserId, Option<String>)> {
-        let last_resort = StoredKeyPackage { hash: [n; 32], data: vec![n] };
+        let last_resort = StoredKeyPackage { hash: [n; 32], data: vec![n], not_after: 0 };
         let spelling = std::str::from_utf8(name).unwrap();
         let skeleton = yo_wire::handle::skeleton(spelling);
         db.register(skeleton.as_bytes(), spelling, &[n; 16], &[key; 32], &device(n), &[], &last_resort, now).unwrap()
+    }
+
+    /// A KeyPackage past its lifetime (or within a day of it) is neither handed out nor counted as left: the last
+    /// resort goes instead, and the device refills.
+    #[test]
+    fn an_expired_key_package_is_skipped_for_the_last_resort() {
+        let db = Db::open(":memory:").unwrap();
+        let leo = user(register(&db, b"LEO", 1, 1, 0));
+        let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs();
+        let package = |n: u8, not_after| StoredKeyPackage { hash: [n; 32], data: vec![n], not_after };
+        let packages = [package(10, now + 3600), package(11, now + 365 * 24 * 3600)];
+        assert!(matches!(db.add_key_packages(&[1; 16], &packages[..1], None, 100).unwrap(), Write::Done(())));
+        assert_eq!(db.key_packages_left(&[1; 16]).unwrap(), 0, "an hour left: as good as gone");
+        let taken = |db: &Db| db.lookup(KIND_USER, &leo, true, &[]).unwrap().unwrap().key_packages;
+        assert_eq!(taken(&db), vec![vec![1]], "the last resort, not the one about to expire");
+        assert!(matches!(db.add_key_packages(&[1; 16], &packages[1..], None, 1).unwrap(), Write::Done(())));
+        assert_eq!(db.key_packages_left(&[1; 16]).unwrap(), 1);
+        assert_eq!(taken(&db), vec![vec![11]]);
     }
 
     fn reserve(db: &Db, names: &[&str]) -> usize {
@@ -1676,7 +1714,7 @@ mod tests {
         let gone = |w: Write<()>| matches!(w, Write::Refused(Conflict::DeviceGone));
         assert!(gone(db.set_username(&[1; 16], Some((b"OLD", "OLD"))).unwrap()));
         assert_eq!(spelling(&db, "LEO").as_deref(), Some("LEO"), "the name stays the new phone's");
-        let key_package = StoredKeyPackage { hash: [7; 32], data: vec![7] };
+        let key_package = StoredKeyPackage { hash: [7; 32], data: vec![7], not_after: 0 };
         assert!(gone(db.add_key_packages(&[1; 16], std::slice::from_ref(&key_package), None, 100).unwrap()));
         assert!(gone(db.set_push(&[1; 16], 1, b"ab").unwrap()));
         // Deleted: nothing is written for a user that is no more.

@@ -558,7 +558,11 @@ impl Hub {
         let check = |bytes: &yo_wire::VLBytes, want_last_resort: bool| {
             kp::check(&self.crypto, bytes.as_slice(), account_key, device_key)
                 .filter(|checked| checked.last_resort == want_last_resort)
-                .map(|checked| StoredKeyPackage { hash: checked.hash, data: bytes.as_slice().to_vec() })
+                .map(|checked| StoredKeyPackage {
+                    hash: checked.hash,
+                    data: bytes.as_slice().to_vec(),
+                    not_after: checked.not_after,
+                })
                 .ok_or_else(bad)
         };
         let stored = uploads.iter().map(|k| check(k, false)).collect::<Res<Vec<_>>>()?;
@@ -1362,7 +1366,7 @@ mod tests {
             push_token: Vec::new(),
             app: None,
         };
-        let last_resort = StoredKeyPackage { hash: [1; 32], data: vec![1] };
+        let last_resort = StoredKeyPackage { hash: [1; 32], data: vec![1], not_after: 0 };
         hub.db.register(b"LEO", "LEO", &[1; 16], &[1; 32], &device, &[], &last_resort, 0).unwrap();
         let (quota, blob) = (config.limits.blob_quota(), ([7; 16], 5));
         assert_eq!(hub.db.put_blob(&[1; 16], &blob.0, 16, 1, blob.1, &quota).unwrap(), db::BlobPut::Stored);
@@ -1401,7 +1405,7 @@ mod tests {
             push_token: b"a1b2c3".to_vec(),
             app: None,
         };
-        let last_resort = StoredKeyPackage { hash: [1; 32], data: vec![1] };
+        let last_resort = StoredKeyPackage { hash: [1; 32], data: vec![1], not_after: 0 };
         hub.db.register(b"LEO", "LEO", &[1; 16], &[1; 32], &device, &[], &last_resort, 0).unwrap();
         let waiter = hub.waiter([1; 16]);
         let notified = waiter.notify.notified();
