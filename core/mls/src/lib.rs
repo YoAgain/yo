@@ -1451,9 +1451,10 @@ impl Client {
             .collect()
     }
 
-    /// The peer restarted the chat in `group` (spec 4.9): the older chats with it go, and what was sent in them after
-    /// the last message the peer saw is sent again here, with what was still waiting to go.
-    fn restarted_by_peer(&mut self, group: &GroupId, peer: &str, last_seen_ms: u64) -> Result<()> {
+    /// The peer restarted the chat in `group` (spec 4.9): the older chats with it go, and what was sent in them is
+    /// sent again here, with what was still waiting to go. All of it: the peer's `last_seen` is the latest it got,
+    /// not all it got (one may have come after a later one, or never); it skips what it has seen.
+    fn restarted_by_peer(&mut self, group: &GroupId, peer: &str) -> Result<()> {
         let key = group_key(group);
         let others: Vec<String> = self
             .state
@@ -1462,16 +1463,13 @@ impl Client {
             .filter(|(k, chat)| chat.peer == peer && **k != key)
             .map(|(k, _)| k.clone())
             .collect();
-        // Sent in any other chat with the peer after what it saw last (the receiver skips what it has seen).
         let mut again: Vec<Vec<u8>> = Vec::new();
         for other in &others {
-            let unseen = self.state.chats[other].sent.iter().filter(|plaintext| {
-                Message::decode(plaintext).is_ok_and(|m| {
-                    m.sent_at_ms > last_seen_ms
-                        && !matches!(m.content, Content::Profile { .. } | Content::Restart { .. })
-                })
+            let sent = self.state.chats[other].sent.iter().filter(|plaintext| {
+                Message::decode(plaintext)
+                    .is_ok_and(|m| !matches!(m.content, Content::Profile { .. } | Content::Restart { .. }))
             });
-            for plaintext in unseen.cloned().chain(self.waiting_plaintexts(other)) {
+            for plaintext in sent.cloned().chain(self.waiting_plaintexts(other)) {
                 if !again.contains(&plaintext) {
                     again.push(plaintext);
                 }
@@ -2154,9 +2152,9 @@ impl Client {
                         chat.restarted = false;
                     }
                 }
-                if let Content::Restart { last_seen_ms } = message.content {
+                if let Content::Restart { .. } = message.content {
                     if !from_me {
-                        self.restarted_by_peer(&group_id, &peer, last_seen_ms)?;
+                        self.restarted_by_peer(&group_id, &peer)?;
                     }
                     return Ok(());
                 }
