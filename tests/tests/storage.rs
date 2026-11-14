@@ -158,6 +158,26 @@ fn a_replayed_storage_is_not_taken() {
     assert!(a.set_friend(&"11".repeat(16), Some("x".repeat(65)), None).is_err(), "a name too long");
 }
 
+/// A blob that did not open (or was replayed) was left at the hub when this device had nothing to change: "saved",
+/// though no device could read what the hub held. Now the device's own takes its place with the next write.
+#[test]
+fn a_storage_that_does_not_open_is_written_over() {
+    let hub = TestHub::start();
+    let name = format!("Junk{}", random_u64() % 100_000);
+    let mut a = by_name(&hub, &name, None);
+    a.set_app_icon(Some("Negative".into())).unwrap();
+    a.maintenance().unwrap();
+    let body = yo_wire::encode(&api::Storage { version: 1, data: vec![7; 1024].into() });
+    assert_eq!(a.signed_for_tests("PUT", api::STORAGE, &body).unwrap().status, status::NO_CONTENT);
+    let mut new = by_name(&hub, &name, Some(a.account_secret()));
+    assert!(new.drop_reasons().iter().any(|r| r.contains("storage")));
+    new.maintenance().unwrap();
+    assert!(new.storage_saved_at().is_some());
+    assert_eq!(stored(&mut new).version, 3, "written over");
+    let third = by_name(&hub, &name, Some(a.account_secret()));
+    assert!(third.drop_reasons().is_empty(), "{:?}", third.drop_reasons());
+}
+
 #[test]
 fn saved_says_whether_the_hub_holds_it_all() {
     let hub = TestHub::start();
