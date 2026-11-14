@@ -201,7 +201,7 @@ struct FriendList: View {
       navigation
         // The list is always dark (white on purple); the profile follows the iPhone's own appearance.
         .sheet(isPresented: $settings) { SettingsView().preferredColorScheme(SystemAppearance.scheme) }
-        .sheet(isPresented: $newGroup) { NewGroupSheet() }
+        .sheet(isPresented: $newGroup) { NewGroupSheet().preferredColorScheme(SystemAppearance.scheme) }
         .confirmationDialog(
           blocking?.reported == true ? "Thanks for Reporting" : "Block \(blocking?.friend.name ?? "")?",
           isPresented: Binding(get: { blocking != nil }, set: { if !$0 { blocking = nil } }),
