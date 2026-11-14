@@ -54,10 +54,10 @@ struct StatsPage: View {
   }
 
   private func row(_ title: String, _ value: String, icon: String, color: Color) -> some View {
-    HStack {
+    LabeledContent {
+      Text(value).monospacedDigit()
+    } label: {
       Label(title, systemImage: icon).labelStyle(Tile(color))
-      Spacer()
-      Text(value).foregroundStyle(Color(.secondaryLabel)).monospacedDigit()
     }
   }
 }

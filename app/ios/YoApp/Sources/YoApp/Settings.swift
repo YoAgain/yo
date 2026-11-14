@@ -93,25 +93,28 @@ struct SettingsView: View {
             NavigationLink {
               accountPage(account)
             } label: {
-              HStack {
+              // LabeledContent, as Settings' rows: the value goes under the name when the text is very large.
+              LabeledContent {
+                if accounts.toDo > 0 {
+                  Text("Not Secured")
+                } else {
+                  HStack(spacing: 6) {
+                    Text("Secured")
+                    Image(systemName: "checkmark.circle.fill").foregroundStyle(.green).accessibilityHidden(true)
+                  }
+                }
+              } label: {
                 Label("Account", systemImage: "person.fill")
                   .labelStyle(Tile(accounts.toDo > 0 ? .orange : .green))
-                Spacer()
-                if accounts.toDo > 0 {
-                  Text("Not Secured").foregroundStyle(Color(.secondaryLabel))
-                } else {
-                  Text("Secured").foregroundStyle(Color(.secondaryLabel))
-                  Image(systemName: "checkmark.circle.fill").foregroundStyle(.green).accessibilityHidden(true)
-                }
               }
             }
             NavigationLink {
               BlockedList()
             } label: {
-              HStack {
+              LabeledContent {
+                Text("\(friends.blocked.count)")
+              } label: {
                 Label("Blocked", systemImage: "hand.raised.fill").labelStyle(Tile(.red))
-                Spacer()
-                Text("\(friends.blocked.count)").foregroundStyle(Color(.secondaryLabel))
               }
             }
           }
@@ -129,10 +132,10 @@ struct SettingsView: View {
             NavigationLink {
               StatsPage()
             } label: {
-              HStack {
+              LabeledContent {
+                Text("\(Stats.sent + Stats.received)")
+              } label: {
                 Label("Statistics", systemImage: "chart.bar.fill").labelStyle(Tile(.amethyst))
-                Spacer()
-                Text("\(Stats.sent + Stats.received)").foregroundStyle(Color(.secondaryLabel))
               }
             }
           }
