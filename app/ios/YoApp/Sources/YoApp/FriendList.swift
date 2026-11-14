@@ -128,6 +128,9 @@ struct FriendList: View {
   // Camera mode
   @State private var cameraOn = false
   @State private var camera = Camera()
+  /// The camera's zooms (CameraZoom) and the one chosen.
+  @State private var zooms: [Double] = []
+  @State private var zoom = 1.0
   @State private var recordingFor: Friend?
   @State private var libraryItem: PhotosPickerItem?
   /// A photo from the library, waiting to be sent: it stands in for the live picture.
@@ -594,7 +597,13 @@ struct FriendList: View {
       .glassEffect(.regular.interactive(), in: .circle)
       .accessibilityLabel("Photo Library")
       .frame(maxWidth: .infinity, alignment: .leading)
-      Button { camera.flip() } label: {
+      if picked == nil {  // a picked photo goes as it is
+        CameraZoom(choices: zooms, chosen: $zoom).onChange(of: zoom) { camera.zoom(to: zoom) }
+      }
+      Button {
+        camera.flip()
+        Task { await readZooms() }
+      } label: {
         Image(systemName: "arrow.triangle.2.circlepath")
           .font(.body.weight(.medium))
           .foregroundStyle(.white)
@@ -614,6 +623,13 @@ struct FriendList: View {
     guard on else { return camera.stop() }
     // Asked first: closed meanwhile, it stays closed.
     if await Camera.allowed() { if cameraOn { camera.start() } } else { cameraOn = false }
+    await readZooms()
+  }
+
+  /// The zooms of the camera now in use, at "1" (as it starts, and after a flip).
+  private func readZooms() async {
+    zooms = await camera.zoomChoices()
+    zoom = 1
   }
 
   // MARK: Sending
@@ -1276,6 +1292,45 @@ struct RowButton: View {
 /// comes in on its own and the ones there stay (as text typed into a field, not the whole word drawn again). At most
 /// five; beyond, the "!"s stay and how many more comes after them ("Yo!!!!! +3"), turning as a wheel, its digits all
 /// as wide (nothing shifts).
+/// The camera's zoom, as the Camera app has it: its choices in a glass capsule ("0.5  1×  2  3"), the chosen one with
+/// its "×"; a tap goes to another. Not there with one choice only (the front camera).
+struct CameraZoom: View {
+  let choices: [Double]
+  @Binding var chosen: Double
+
+  var body: some View {
+    if choices.count > 1 {
+      HStack(spacing: 2) {
+        ForEach(choices, id: \.self) { choice in
+          let on = choice == chosen
+          Button {
+            Haptic.tap(.light)
+            withAnimation(.snappy(duration: 0.2)) { chosen = choice }
+          } label: {
+            Text(Self.label(choice) + (on ? "×" : ""))
+              .font(.system(size: on ? 13 : 11, weight: .bold).monospacedDigit())
+              .foregroundStyle(on ? Color.yellow : .white)
+              .frame(width: 36, height: 36)
+              .background(.black.opacity(on ? 0.35 : 0.2), in: .circle)
+              .contentShape(.circle)
+          }
+          .buttonStyle(.plain)
+          .accessibilityLabel("Zoom \(Self.label(choice))×")
+          .accessibilityAddTraits(on ? .isSelected : [])
+        }
+      }
+      .padding(4)
+      .glassEffect(.regular.interactive(), in: .capsule)
+      .transition(.opacity)
+    }
+  }
+
+  /// "0.5", "1", "2", "2.5": no ".0".
+  static func label(_ choice: Double) -> String {
+    choice == choice.rounded() ? String(Int(choice)) : String(format: "%.1f", choice)
+  }
+}
+
 struct Bangs: View {
   let count: Int
 

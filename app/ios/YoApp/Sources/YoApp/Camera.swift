@@ -23,6 +23,17 @@ final class Camera: NSObject, @unchecked Sendable {
   /// A video was started and not yet handed over: while true, `stopVideo()` waits for its file, even when the length
   /// limit stopped it and AVFoundation is still finishing the file.
   private var videoActive = false
+  /// The zooms the camera in use offers, as the Camera app names them (0.5, 1, 2, 3); and the device's factor that
+  /// is "1" (the wide camera's, behind the ultra wide one of a multi-camera device).
+  private var zooms: [Double] = [1]
+  private var wide: CGFloat = 1
+
+  /// The back cameras, all lenses as one device where the iPhone has several (it switches between them as it zooms),
+  /// else the wide one.
+  private static func back() -> AVCaptureDevice? {
+    [.builtInTripleCamera, .builtInDualWideCamera, .builtInDualCamera, .builtInWideAngleCamera].lazy
+      .compactMap { AVCaptureDevice.default($0, for: .video, position: .back) }.first
+  }
 
   /// Asks for the camera once; false when it is refused.
   static func allowed() async -> Bool {
@@ -51,8 +62,9 @@ final class Camera: NSObject, @unchecked Sendable {
   func flip() {
     queue.async { [self] in
       let next: AVCaptureDevice.Position = input?.device.position == .back ? .front : .back
-      guard let device = AVCaptureDevice.default(.builtInWideAngleCamera, for: .video, position: next),
-        let new = try? AVCaptureDeviceInput(device: device)
+      let device =
+        next == .back ? Self.back() : AVCaptureDevice.default(.builtInWideAngleCamera, for: .video, position: .front)
+      guard let device, let new = try? AVCaptureDeviceInput(device: device)
       else { return }
       session.beginConfiguration()
       if let input { session.removeInput(input) }
@@ -64,6 +76,41 @@ final class Camera: NSObject, @unchecked Sendable {
       }
       mirrorFrontCamera()
       session.commitConfiguration()
+      readZooms()
+    }
+  }
+
+  /// The zooms the camera in use offers (the Camera app's 0.5, 1, 2, 3; one only: no choice, as the front camera).
+  func zoomChoices() async -> [Double] {
+    await withCheckedContinuation { continuation in queue.async { [self] in continuation.resume(returning: zooms) } }
+  }
+
+  /// To one of `zoomChoices`, quickly, as the Camera app goes.
+  func zoom(to choice: Double) {
+    queue.async { [self] in
+      guard let device = input?.device, (try? device.lockForConfiguration()) != nil else { return }
+      let factor = min(max(CGFloat(choice) * wide, device.minAvailableVideoZoomFactor), device.maxAvailableVideoZoomFactor)
+      device.ramp(toVideoZoomFactor: factor, withRate: 32)
+      device.unlockForConfiguration()
+    }
+  }
+
+  /// The choices of the camera now in use, and its zoom back at "1".
+  private func readZooms() {
+    guard let device = input?.device, device.position == .back else {
+      (zooms, wide) = ([1], 1)
+      return
+    }
+    let switches = device.virtualDeviceSwitchOverVideoZoomFactors.map { CGFloat(truncating: $0) }
+    let ultraWide = device.constituentDevices.contains { $0.deviceType == .builtInUltraWideCamera }
+    wide = ultraWide ? (switches.first ?? 1) : 1
+    // Each lens, and 2 on the wide one where no lens is 2 (as the Camera app offers it).
+    var factors = Set([1] + switches + [2 * wide])
+    factors = factors.filter { $0 >= device.minAvailableVideoZoomFactor && $0 <= device.maxAvailableVideoZoomFactor }
+    zooms = factors.sorted().map { (Double($0 / wide) * 10).rounded() / 10 }
+    if (try? device.lockForConfiguration()) != nil {
+      device.videoZoomFactor = max(wide, device.minAvailableVideoZoomFactor)
+      device.unlockForConfiguration()
     }
   }
 
@@ -119,8 +166,7 @@ final class Camera: NSObject, @unchecked Sendable {
     configured = true
     session.beginConfiguration()
     session.sessionPreset = .high  // photo and video from one session
-    if let device = AVCaptureDevice.default(.builtInWideAngleCamera, for: .video, position: .back),
-      let new = try? AVCaptureDeviceInput(device: device), session.canAddInput(new)
+    if let device = Self.back(), let new = try? AVCaptureDeviceInput(device: device), session.canAddInput(new)
     {
       session.addInput(new)
       input = new
@@ -132,6 +178,7 @@ final class Camera: NSObject, @unchecked Sendable {
     movieOutput.maxRecordedDuration = CMTime(seconds: Self.longestVideo, preferredTimescale: 600)
     mirrorFrontCamera()
     session.commitConfiguration()
+    readZooms()
   }
 
   /// Photos and videos come out upright in portrait (the app is portrait only), and from the front camera mirrored,
