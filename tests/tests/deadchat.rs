@@ -57,3 +57,30 @@ fn a_chat_lost_after_a_month_away_is_restarted_and_nothing_after_is_lost() {
     assert_eq!((a.pending(), b.pending()), (0, 0));
     assert_eq!(b.dropped(), 0, "{:?}", b.drop_reasons());
 }
+
+/// A message with a made-up later epoch (anyone may deliver to anyone, sealed sender) must not kill a chat: the hub
+/// never had such a commit (`404`, not `410`), so the message is dropped and the chat goes on.
+#[test]
+fn a_made_up_epoch_does_not_restart_a_chat() {
+    let hub = TestHub::start();
+    let n = random_u64() % 100_000;
+    let hb = Http::new(hub.url());
+    let mut a = Client::register_username(Http::new(hub.url()), &format!("Calm{n}"), None, None, Push::none()).unwrap();
+    let mut b = Client::register_username(hb.clone(), &format!("Real{n}"), None, None, Push::none()).unwrap();
+    b.send(a.user_id(), Content::Text("1".into())).unwrap();
+    assert_eq!(drain(&mut a), ["1"]);
+    let group = a.chats()[0].1;
+    // B's last delivery to A, its epoch moved far ahead (MLSMessage: version, wire format, group id<V>, epoch).
+    let sent = hb.sent.lock().unwrap();
+    let (_, _, body) = sent.iter().rev().find(|(m, p, _)| m == "POST" && p.starts_with("/v1/inbox/")).unwrap().clone();
+    drop(sent);
+    let mut mls = yo_wire::envelope::open(&body).unwrap().to_vec();
+    assert_eq!(&mls[5..37], &group);
+    mls[37..45].copy_from_slice(&9u64.to_be_bytes());
+    let forged = yo_wire::envelope::seal(&mls).unwrap();
+    assert_eq!(yo_tests::deliver_raw(&hub.url(), a.user_id(), forged), 202);
+    assert!(drain(&mut a).is_empty());
+    assert_eq!(a.chats()[0].1, group, "the chat stands");
+    b.send(a.user_id(), Content::Text("2".into())).unwrap();
+    assert_eq!(drain(&mut a), ["2"]);
+}

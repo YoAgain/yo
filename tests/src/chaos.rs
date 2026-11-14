@@ -504,6 +504,8 @@ fn take_events(w: &World, a: &mut Acct, events: Vec<Event>, rng: &mut Rng) {
             let was = *last;
             drop(ledger);
             w.stats.violation(format!("{} received {tag} (#{seq}) after #{was} from {from}", a.user));
+            w.dump(&a.user);
+            w.dump(&from);
         } else {
             *last = seq;
             drop(ledger);

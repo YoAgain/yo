@@ -855,8 +855,12 @@ async fn fetch_commit(
 ) -> Res<(StatusCode, Vec<u8>)> {
     hub.limit_ip("commit", peer, &headers, hub.config.limits.commit_per_ip_minute, MINUTE)?;
     let group: GroupId = path_id(&group)?;
-    let envelope = hub.db.commit_envelope(&group, epoch)?.ok_or_else(|| refuse(StatusCode::NOT_FOUND))?;
-    Ok(ok(envelope))
+    match hub.db.commit_envelope(&group, epoch)? {
+        Some(envelope) => Ok(ok(envelope)),
+        // Accepted once, kept no more (past its 30 days): a member that needs it cannot follow the group (4.9).
+        None if hub.db.group_epoch(&group)?.is_some_and(|current| current > epoch) => Err(refuse(StatusCode::GONE)),
+        None => Err(refuse(StatusCode::NOT_FOUND)),
+    }
 }
 
 // ---- blobs (spec 6.8) ----

@@ -1100,6 +1100,14 @@ impl Db {
         Ok(Commit::Accepted)
     }
 
+    /// A group's current epoch at the hub.
+    pub fn group_epoch(&self, group: &GroupId) -> rusqlite::Result<Option<u64>> {
+        self.conn()
+            .prepare_cached("SELECT epoch FROM groups WHERE id = ?1")?
+            .query_row([group], |row| Ok(row.get::<_, i64>(0)? as u64))
+            .optional()
+    }
+
     /// The envelope of the commit accepted on `epoch`.
     pub fn commit_envelope(&self, group: &GroupId, epoch: u64) -> rusqlite::Result<Option<Vec<u8>>> {
         self.conn()

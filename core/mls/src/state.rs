@@ -208,6 +208,12 @@ pub struct State {
     /// Fetched from the hub on this device (once, before the first message is received).
     #[serde(default)]
     pub storage_fetched: bool,
+    /// The time of the last message sent: each later one strictly later.
+    #[serde(default)]
+    pub last_sent_ms: u64,
+    /// Hashes of the last messages received (sender and plaintext): a copy sent again after a restart is skipped.
+    #[serde(default)]
+    pub received: VecDeque<[u8; 32]>,
 }
 
 impl Drop for State {
