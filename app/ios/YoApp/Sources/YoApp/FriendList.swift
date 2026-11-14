@@ -351,7 +351,7 @@ struct FriendList: View {
   // MARK: Bars
 
   @ViewBuilder private func row(_ friend: Friend) -> some View {
-    let waiting = inbox.media[friend.name] ?? []
+    let waiting = inbox.media(from: friend.name) ?? []
     let bar = LiveBar(
       friend: friend,
       bar: bars.of(friend),
@@ -783,7 +783,7 @@ struct FriendList: View {
     switch touch {
     case .down:
       shown = []
-      viewing = inbox.media[friend.name]
+      viewing = inbox.media(from: friend.name)
     case .tapped:
       break  // it runs on by itself
     case .released:
@@ -874,7 +874,7 @@ extension FriendList {
   }
 
   /// Yos on a sender's bar: the stack counts them, and one on screen starts its time again. A new run (also over one
-  /// fading out) knocks. A photo stays until seen (Inbox.media).
+  /// fading out) knocks. A photo stays until seen (Inbox.media(from:)).
   private func land(_ name: String, _ first: String, count: Int) {
     if var landing = landed[name], landing.fading == nil {
       landing.count += count  // more "!"s

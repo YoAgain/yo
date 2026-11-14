@@ -66,8 +66,12 @@ final class Inbox {
   static let batchSeconds = 0.1
   /// Notifications already taken in, so one tapped and one collected on opening count once.
   @ObservationIgnored private var taken: Set<String> = []
-  /// Photos and videos not yet seen, by sender, oldest first: kept on this iPhone until then (ReceivedMedia).
-  private(set) var media: [String: [Arrival]] = [:]
+  /// Photos and videos not yet seen, by sender, oldest first: kept on this iPhone until then (ReceivedMedia). By the
+  /// sender name's skeleton: a friend whose spelling changed since ("LEO", then "Leo") still finds theirs.
+  private var unseenMedia: [String: [Arrival]] = [:]
+
+  /// A friend's photos and videos not yet seen, oldest first; nil when none wait.
+  func media(from name: String) -> [Arrival]? { unseenMedia[Username.skeleton(name)] }
 
   init() {
     Task { @MainActor in
@@ -78,15 +82,16 @@ final class Inbox {
 
   /// A photo or video kept, on its sender's bar until seen, in the order sent.
   private func add(_ arrival: Arrival) {
-    var waiting = media[arrival.from] ?? []
+    let key = Username.skeleton(arrival.from)
+    var waiting = unseenMedia[key] ?? []
     guard !waiting.contains(where: { $0.id == arrival.id }) else { return }
     waiting.insert(arrival, at: waiting.firstIndex { Arrival.older(arrival, $0) } ?? waiting.endIndex)
-    media[arrival.from] = waiting
+    unseenMedia[key] = waiting
   }
 
   /// Signed out: what waited to be seen is gone (MediaStorage.clearAll deleted it), and Yos not shown yet.
   func forgetMedia() {
-    media = [:]
+    unseenMedia = [:]
     ready = []
     uncounted = [:]
   }
@@ -426,8 +431,9 @@ final class Inbox {
   func seen(_ shown: [Arrival]) {
     for arrival in shown {
       ReceivedMedia.shared.forget(arrival.id)
-      media[arrival.from]?.removeAll { $0.id == arrival.id }
-      if media[arrival.from]?.isEmpty == true { media[arrival.from] = nil }
+      let key = Username.skeleton(arrival.from)
+      unseenMedia[key]?.removeAll { $0.id == arrival.id }
+      if unseenMedia[key]?.isEmpty == true { unseenMedia[key] = nil }
     }
   }
 
@@ -465,7 +471,7 @@ final class Inbox {
   private func show(_ arrival: Arrival) {
     chime()
     ready.append(Arrival(id: arrival.id, from: arrival.from))
-    if arrival.photo != nil { media[arrival.from, default: []].append(arrival) }
+    if arrival.photo != nil { unseenMedia[Username.skeleton(arrival.from), default: []].append(arrival) }
     came += 1
     guard !gathering else { return }
     gathering = true
