@@ -9,23 +9,29 @@ enum ShareInbox {
   private static var generation = 0
 
   /// The list the extension shows: the friends on it (the blocked are not), nil when signed out. A few kilobytes,
-  /// written in order on the main actor: an older list never lands after a newer one or after a sign-out.
+  /// encoded here and written off the main thread (a file write is no work for a tap), in order on one queue: an older
+  /// list never lands after a newer one or after a sign-out.
   static func publish(_ list: ShareBridge.List?) {
     guard let file = ShareBridge.friendsFile else { return }
-    if let list, let data = try? JSONEncoder().encode(list) {
-      try? data.write(to: file, options: [.atomic, .completeFileProtectionUntilFirstUserAuthentication])
-    } else {
-      try? FileManager.default.removeItem(at: file)
+    let data = list.flatMap { try? JSONEncoder().encode($0) }
+    writing.async {
+      if let data {
+        try? data.write(to: file, options: [.atomic, .completeFileProtectionUntilFirstUserAuthentication])
+      } else {
+        try? FileManager.default.removeItem(at: file)
+      }
     }
   }
+
+  private static let writing = DispatchQueue(label: "app.justyo.share-list", qos: .utility)
 
   /// Signed out: nothing shared waits to go, nobody is shown.
   static func clear() {
     generation += 1
     guard let container = ShareBridge.container else { return }
-    for name in ["friends.json", "Outbox"] {
-      try? FileManager.default.removeItem(at: container.appending(path: name))
-    }
+    try? FileManager.default.removeItem(at: container.appending(path: "Outbox"))
+    let list = container.appending(path: "friends.json")
+    writing.async { try? FileManager.default.removeItem(at: list) }  // after any list still being written
   }
 
   /// What waits in the extension's outbox goes into the media outbox, oldest first; each leaves the group once the

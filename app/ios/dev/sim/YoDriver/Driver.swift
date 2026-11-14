@@ -116,6 +116,16 @@ import XCTest
       guard app.keyboards.count > 0 else { throw Failure(description: "no keyboard") }
       app.typeText(String(repeating: XCUIKeyboardKey.delete.rawValue, count: c["n"] as? Int ?? 30))
       return [:]
+    case "burst":
+      // Fast taps as a finger makes them, without XCTest waiting for the app to be still between them: `n` taps,
+      // one every `interval` seconds, at `points` (screen points, taken in turn).
+      let points = (c["points"] as? [[Double]] ?? [[c["x"] as? Double ?? 0, c["y"] as? Double ?? 0]])
+        .map { CGPoint(x: $0[0], y: $0[1]) }
+      let n = c["n"] as? Int ?? 10
+      let interval = c["interval"] as? Double ?? 0.1
+      let away = (c["away"] as? [Double]).map { CGPoint(x: $0[0], y: $0[1]) }
+      try Burst.tap(points, n: n, interval: interval, hold: c["hold"] as? Double ?? 1, away: away)
+      return ["taps": n, "seconds": Double(n) * interval]
     case "sleep":
       Thread.sleep(forTimeInterval: c["seconds"] as? Double ?? 1)
       return [:]
@@ -203,5 +213,73 @@ import XCTest
     }
     walk(try target.snapshot(), 0)
     return lines.joined(separator: "\n")
+  }
+}
+
+/// Taps by XCTest's own event synthesis (XCSynthesizedEventRecord: one record, many touches at their offsets), which
+/// `XCUIElement.tap` uses too, minus its wait for the app to be idle before and after each tap.
+@MainActor enum Burst {
+  static func tap(_ points: [CGPoint], n: Int, interval: Double, hold: Double, away: CGPoint?) throws {
+    guard let pathClass = NSClassFromString("XCPointerEventPath"),
+      let recordClass = NSClassFromString("XCSynthesizedEventRecord"),
+      !points.isEmpty
+    else { throw Driver.Failure(description: "no event synthesis in this XCTest") }
+    typealias InitPath = @convention(c) (AnyObject, Selector, CGPoint, Double) -> Unmanaged<AnyObject>
+    typealias Lift = @convention(c) (AnyObject, Selector, Double) -> Void
+    typealias InitRecord = @convention(c) (AnyObject, Selector, NSString, Int) -> Unmanaged<AnyObject>
+    typealias Add = @convention(c) (AnyObject, Selector, AnyObject) -> Void
+    typealias Synthesize =
+      @convention(c) (AnyObject, Selector, AnyObject, @escaping @convention(block) (Bool, NSError?) -> Void) -> Void
+    func imp<T>(_ object: AnyObject, _ name: String, _: T.Type) throws -> (Selector, T) {
+      let selector = NSSelectorFromString(name)
+      guard object.responds(to: selector), let method = class_getMethodImplementation(object_getClass(object), selector)
+      else { throw Driver.Failure(description: "no \(name)") }
+      return (selector, unsafeBitCast(method, to: T.self))
+    }
+    func alloc(_ cls: AnyClass) -> AnyObject {
+      (cls as! NSObject.Type).perform(NSSelectorFromString("alloc"))!.takeUnretainedValue()
+    }
+    guard let synthesizer = XCUIDevice.shared.perform(NSSelectorFromString("eventSynthesizer"))?.takeUnretainedValue()
+    else { throw Driver.Failure(description: "no event synthesizer") }
+    let (synthesizeSelector, synthesize) = try imp(synthesizer, "synthesizeEvent:completion:", Synthesize.self)
+    final class Done: @unchecked Sendable {
+      var done = false
+      var error: NSError?
+    }
+    let done = Done()
+    // One record (XCTest performs one gesture at a time, each taking about 0.3 s to start). It leaves out the time
+    // when no finger is down: the next tap comes down as the one before lifts, so a tap is held the whole interval
+    // (`hold`: a part of it, for faster taps).
+    let first = alloc(recordClass)
+    let (initRecord, makeRecord) = try imp(first, "initWithName:interfaceOrientation:", InitRecord.self)
+    let record = makeRecord(first, initRecord, "burst" as NSString, UIInterfaceOrientation.portrait.rawValue)
+      .takeUnretainedValue()
+    let (addSelector, add) = try imp(record, "addPointerEventPath:", Add.self)
+    for i in 0..<n {
+      let raw = alloc(pathClass)
+      let (initPath, makePath) = try imp(raw, "initForTouchAtPoint:offset:", InitPath.self)
+      let point = points[i % points.count]
+      let path = makePath(raw, initPath, point, Double(i) * interval).takeUnretainedValue()
+      let (liftSelector, lift) = try imp(path, "liftUpAtOffset:", Lift.self)
+      lift(path, liftSelector, Double(i) * interval + hold * interval)
+      add(record, addSelector, path)
+      // The finger away until the next tap: a touch beyond the screen's edge meanwhile, which nothing gets, keeps
+      // that time from being left out.
+      if let away, hold < 1 {
+        let raw = alloc(pathClass)
+        let path = makePath(raw, initPath, away, Double(i) * interval + hold * interval + 0.004).takeUnretainedValue()
+        lift(path, liftSelector, Double(i + 1) * interval - 0.004)
+        add(record, addSelector, path)
+      }
+    }
+    synthesize(synthesizer, synthesizeSelector, record) { _, error in
+      DispatchQueue.main.async {
+        done.error = error
+        done.done = true
+      }
+    }
+    let end = Date.now.addingTimeInterval(Double(n) * interval + 30)
+    while !done.done && Date.now < end { RunLoop.current.run(until: .now + 0.02) }
+    if let error = done.error { throw Driver.Failure(description: "\(error)") }
   }
 }

@@ -73,6 +73,7 @@ final class Inbox {
     Task { @MainActor in
       for arrival in await ReceivedMedia.shared.waiting() { add(arrival) }
     }
+    Task { @MainActor in sounds = await Self.makeSounds() }
   }
 
   /// A photo or video kept, on its sender's bar until seen, in the order sent.
@@ -92,16 +93,27 @@ final class Inbox {
 
 
   /// The Yo sound, a few players taking turns: every Yo sounds in full, Yos close together over each other, as the
-  /// original's did (none cuts off the one before).
-  @ObservationIgnored private let sounds: [AVAudioPlayer] = {
-    guard let url = Bundle.main.url(forResource: "yo", withExtension: "caf") else { return [] }
-    try? AVAudioSession.sharedInstance().setCategory(.ambient)
-    return (0..<8).compactMap { _ in
-      let player = try? AVAudioPlayer(contentsOf: url)
-      player?.prepareToPlay()  // loaded at launch: the first Yo sounds at once
-      return player
+  /// original's did (none cuts off the one before). Made at launch off the main thread (eight players and the audio
+  /// session took 60 ms of the launch there), ready long before the first Yo.
+  @ObservationIgnored private var sounds: [AVAudioPlayer] = []
+
+  private static func makeSounds() async -> [AVAudioPlayer] {
+    final class Players: @unchecked Sendable {
+      let players: [AVAudioPlayer]
+      init(_ players: [AVAudioPlayer]) { self.players = players }
     }
-  }()
+    let made = await Task.detached(priority: .utility) { () -> Players in
+      guard let url = Bundle.main.url(forResource: "yo", withExtension: "caf") else { return Players([]) }
+      try? AVAudioSession.sharedInstance().setCategory(.ambient)
+      return Players(
+        (0..<8).compactMap { _ in
+          let player = try? AVAudioPlayer(contentsOf: url)
+          player?.prepareToPlay()  // loaded now: the first Yo sounds at once
+          return player
+        })
+    }.value
+    return made.players
+  }
   @ObservationIgnored private var nextSound = 0
   /// When the Yo sound last played for Yos that came: at most `soundsPerSecond` in any second, so a burst sounds like
   /// many Yos without twenty players fighting over the speaker.
@@ -189,7 +201,7 @@ final class Inbox {
     let target = friend.user ?? friend.name
     do {
       let (events, contacts, waiting) = try await Hub.run {
-        (try client.sendYo(to: target), client.contacts(), client.waiting())
+        try Perf.timed("send.core") { (try client.sendYo(to: target), client.contacts(), client.waiting()) }
       }
       guard client === accounts.client else { return nil }  // signed out meanwhile: nothing of it stays
       if waiting > 0 { deliverLater(accounts: accounts, friends: friends) }
@@ -269,6 +281,7 @@ final class Inbox {
       }
       do {
         let (events, contacts) = try await Hub.run { (try client.sync(waitS: 25), client.contacts()) }
+        Perf.mark("listen.events \(events.count)")
         guard client === accounts.client else { continue }  // signed out meanwhile: not for this account
         await take(events, contacts: contacts, client: client, friends: friends)
         if !storageTaken {  // read by the core before its first receive, if registering could not
@@ -317,6 +330,8 @@ final class Inbox {
   /// core may forget this batch, all of it that is kept (another call's batch is its own: the core acknowledges each
   /// as named); what could not be kept comes again after a restart. `contacts`: the core's, read with the events.
   private func take(_ events: [YoEvent], contacts: [YoContact], client: YoClient, friends: Friends) async {
+    let start = Perf.on ? CACurrentMediaTime() : 0
+    defer { if Perf.on { Perf.mark("take \(events.count) " + String(format: "%.1f ms", (CACurrentMediaTime() - start) * 1000)) } }
     friends.markGone(contacts)  // a delivery found their account gone (`NotOnYo` from now on)
     guard !events.isEmpty else { return }
     // Per sender: how many Yos, the newest's kind, name and id; for a notification when the app is not in front.

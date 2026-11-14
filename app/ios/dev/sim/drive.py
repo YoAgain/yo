@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Sends one command to the driver (dev/sim.sh drive) and prints its answer.
   drive.py DIR OP [key=value ...]    e.g. drive.py /tmp/d tap label=Start   drive.py /tmp/d tree
-Values that look like numbers or true/false are sent as such; args=a,b and env=K:V,K2:V2 for launch."""
+Values that look like numbers or true/false are sent as such, [..] as JSON; args=a,b and env=K:V,K2:V2 for launch."""
 import json, os, sys, time
 
 d, op, *rest = sys.argv[1:]
@@ -11,6 +11,7 @@ for kv in rest:
     if k == "args": cmd[k] = v.split(",") if v else []
     elif k == "env": cmd[k] = dict(p.split(":", 1) for p in v.split(",") if p)
     elif v in ("true", "false"): cmd[k] = v == "true"
+    elif v.startswith("["): cmd[k] = json.loads(v)
     else:
         try: cmd[k] = int(v) if v.lstrip("-").isdigit() else float(v) if v.replace(".", "", 1).lstrip("-").isdigit() else v
         except ValueError: cmd[k] = v

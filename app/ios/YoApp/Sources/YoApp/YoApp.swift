@@ -14,6 +14,7 @@ struct YoApp: App {
   private let notifications: NotificationDelegate
 
   init() {
+    Perf.mark("launch.init")
     // The state's lock in the App Group is held inside a background task: never while suspended (SharedState.swift).
     // (Begun and ended on any thread: UIKit allows it for these two.)
     let application = UIApplication.shared
