@@ -201,6 +201,11 @@ struct SettingsView: View {
   private func accountPage(_ account: Account) -> some View {
     Form {
       securitySection(account)
+      Section {
+        StorageRow(client: accounts.client)
+      } footer: {
+        Text("Encrypted with your account's key. A new iPhone gets them back.")
+      }
     }
     .navigationTitle("Account")
     .navigationBarTitleDisplayMode(.inline)
@@ -649,6 +654,46 @@ private struct SecurityRow: View {
         .accessibilityHidden(true)
       if chevron { Chevron() }
     }
+  }
+}
+
+/// Friends, blocks and the app icon in the account's storage on the hub (spec 6.9): saved, and when; or still to go
+/// up. A tap writes now.
+private struct StorageRow: View {
+  let client: YoClient?
+  @State private var savedAt: Date?
+  @State private var saving = false
+
+  var body: some View {
+    Button { Task { await save() } } label: {
+      SecurityRow(
+        icon: "person.2.fill", color: savedAt == nil ? .orange : .green, title: "Friends & Blocks",
+        value: savedAt.map { "Saved " + $0.formatted(.relative(presentation: .named)) }
+          ?? (saving ? "Saving…" : "Not Saved Yet"),
+        done: savedAt != nil, chevron: false)
+    }
+    .disabled(saving)
+    // The time in the row stays current, and a write from elsewhere (the inbox's sync) shows up.
+    .task {
+      while !Task.isCancelled {
+        await load()
+        try? await Task.sleep(for: .seconds(5))
+      }
+    }
+  }
+
+  private func load() async {
+    guard let client else { return savedAt = nil }
+    let ms = try? await Hub.run { client.storageSavedAt() }
+    savedAt = (ms ?? nil).map { Date(timeIntervalSince1970: Double($0) / 1000) }
+  }
+
+  private func save() async {
+    guard let client else { return }
+    saving = true
+    _ = try? await Hub.run { try client.maintenance() }
+    await load()
+    saving = false
   }
 }
 

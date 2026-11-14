@@ -205,6 +205,9 @@ pub struct State {
     /// Changed here since it was last written.
     #[serde(default)]
     pub storage_dirty: bool,
+    /// When the hub last held all of it (wall clock, ms): written, or fetched with nothing left to write. 0: not yet.
+    #[serde(default)]
+    pub storage_saved_at: u64,
     /// Fetched from the hub on this device (once, before the first message is received).
     #[serde(default)]
     pub storage_fetched: bool,

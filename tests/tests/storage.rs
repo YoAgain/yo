@@ -155,3 +155,15 @@ fn a_replayed_storage_is_not_taken() {
     assert!(new.drop_reasons().iter().any(|r| r.contains("storage version")));
     assert!(a.set_friend(&"11".repeat(16), Some("x".repeat(65)), None).is_err(), "a name too long");
 }
+
+#[test]
+fn saved_says_whether_the_hub_holds_it_all() {
+    let hub = TestHub::start();
+    let mut a = by_name(&hub, &format!("Saved{}", random_u64() % 100_000), None);
+    a.maintenance().unwrap();
+    let first = a.storage_saved_at().expect("a new account's empty storage is saved");
+    a.set_friend(&"11".repeat(16), Some("Leo".into()), None).unwrap();
+    assert_eq!(a.storage_saved_at(), None, "a change waits to go up");
+    a.maintenance().unwrap();
+    assert!(a.storage_saved_at().unwrap() >= first, "written");
+}

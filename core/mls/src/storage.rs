@@ -245,6 +245,13 @@ impl Client {
         self.state.storage.icon.value.clone()
     }
 
+    /// When the hub last held all of the storage (wall clock, ms); none while a change waits to go up, or before
+    /// the first sync.
+    pub fn storage_saved_at(&self) -> Option<u64> {
+        (self.state.storage_fetched && !self.state.storage_dirty && self.state.storage_saved_at > 0)
+            .then_some(self.state.storage_saved_at)
+    }
+
     pub fn set_app_icon(&mut self, icon: Option<String>) {
         if self.state.storage.icon.value != icon {
             self.state.storage.icon.set(icon, crate::wall_ms());
@@ -337,6 +344,11 @@ impl Client {
         }
         for _ in 0..WRITE_TRIES {
             if !self.state.storage_dirty {
+                // Nothing to write: the hub holds it all (a new account's empty storage too).
+                if self.state.storage_saved_at == 0 {
+                    self.state.storage_saved_at = crate::wall_ms();
+                    self.persist();
+                }
                 return Ok(());
             }
             let mut next = self.state.storage.clone();
@@ -349,6 +361,7 @@ impl Client {
                     self.state.storage_version = next.version;
                     self.state.storage.version = next.version;
                     self.state.storage_dirty = false;
+                    self.state.storage_saved_at = crate::wall_ms();
                     self.persist();
                 }
                 // Another writer was first: its version, merged, goes up again.

@@ -663,6 +663,12 @@ impl YoClient {
         Ok(self.with(|c| c.remove_friend(&user))??)
     }
 
+    /// When the hub last held all of the stored friends, blocks and icon (ms since 1970); none while a change waits
+    /// to go up (it goes with the next `sync` or `maintenance`).
+    pub fn storage_saved_at(&self) -> Option<u64> {
+        self.with(|c| c.storage_saved_at()).ok().flatten()
+    }
+
     /// The app's icon as stored ("Negative", "Original"); none for the default.
     pub fn app_icon(&self) -> Option<String> {
         self.with(|c| c.app_icon()).ok().flatten()
