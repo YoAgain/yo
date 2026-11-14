@@ -42,8 +42,6 @@ struct FriendList: View {
 
   // The list
   @State private var adding = false
-  /// "+" tapped: it opens into Add Friend, Add Group and Invite.
-  @State private var addMenu = false
   @State private var newGroup = false
   @State private var newName = ""
   /// What the empty field says for a moment instead of "Name": "yogpt…" while the hub is asked who it is, "No Such
@@ -434,40 +432,11 @@ struct FriendList: View {
     }
   }
 
-  /// The last bar, as in the original: "+". Tapped, it opens into three: Add Friend (the name typed right there),
-  /// Add Group and Invite; untouched for a while, it closes again.
+  /// The last bars: "+", as in the original (tapped, the name is typed right there), "+ Group" and "Invite" with the
+  /// share sign, each in the colour the next friend would have.
   @ViewBuilder private var addRow: some View {
     let color = Color.row(friends.nextColor).opacity(cameraOn ? 0.45 : 1)  // the colour the new friend will have
-    if addMenu && !adding {
-      RowButton("Add Friend", color: color) {
-        addMenu = false
-        adding = true
-      }
-      RowButton("Add Group", color: Color.row(friends.nextColor + 1).opacity(cameraOn ? 0.45 : 1)) {
-        addMenu = false
-        newGroup = true
-      }
-      ShareLink(
-        item: accounts.account.map { Invite.link(for: $0.username) } ?? URL(string: "https://justyo.co")!,
-        message: Text("Yo! Add me on Yo:"),
-        // What the share sheet shows at its top: whose link, and the app's icon (not a bare "justyo.co").
-        preview: SharePreview(
-          "Add \(accounts.account?.username ?? "Me") on Yo",
-          image: Image(uiImage: UIImage(named: "IconStandard") ?? UIImage()))
-      ) {
-        Text("Invite")
-          .font(.yo(Metrics.rowFont))
-          .foregroundStyle(.white)
-          .frame(maxWidth: .infinity, minHeight: Metrics.rowHeight)
-          .background(Color.row(friends.nextColor + 2).opacity(cameraOn ? 0.45 : 1))
-      }
-      .buttonStyle(.plain)
-      .simultaneousGesture(TapGesture().onEnded { addMenu = false })
-      .task {
-        try? await Task.sleep(for: .seconds(8))
-        withAnimation(.snappy) { addMenu = false }
-      }
-    } else if adding {
+    if adding {
       TextField("", text: $newName, prompt: Text(hint ?? "Name").foregroundStyle(.white.opacity(0.6)))
         .font(.yo(Metrics.rowFont))
         .foregroundStyle(.white)
@@ -494,11 +463,33 @@ struct FriendList: View {
       RowButton("+", color: color) {
         withAnimation(.snappy) {
           swiped = nil
-          addMenu = true
+          adding = true
         }
       }
-      .accessibilityLabel("Add")
+      .accessibilityLabel("Add Friend")
     }
+    RowButton("+ Group", color: Color.row(friends.nextColor + 1).opacity(cameraOn ? 0.45 : 1)) {
+      newGroup = true
+    }
+    .accessibilityLabel("Add Group")
+    ShareLink(
+      item: accounts.account.map { Invite.link(for: $0.username) } ?? URL(string: "https://justyo.co")!,
+      message: Text("Yo! Add me on Yo:"),
+      // What the share sheet shows at its top: whose link, and the app's icon (not a bare "justyo.co").
+      preview: SharePreview(
+        "Add \(accounts.account?.username ?? "Me") on Yo",
+        image: Image(uiImage: UIImage(named: "IconStandard") ?? UIImage()))
+    ) {
+      HStack(spacing: 10) {
+        Image(systemName: "square.and.arrow.up").font(.system(size: 22, weight: .bold))
+        Text("Invite")
+      }
+      .font(.yo(Metrics.rowFont))
+      .foregroundStyle(.white)
+      .frame(maxWidth: .infinity, minHeight: Metrics.rowHeight)
+      .background(Color.row(friends.nextColor + 2).opacity(cameraOn ? 0.45 : 1))
+    }
+    .buttonStyle(.plain)
   }
 
   /// The name typed in Add Friend.
@@ -525,10 +516,7 @@ struct FriendList: View {
   /// The name of an invite link: added the same way; what is wrong shows in Add Friend's field.
   private func invited(_ name: String) async {
     guard let problem = await addFriend(name) else { return }
-    withAnimation(.snappy) {
-      addMenu = false
-      adding = true
-    }
+    withAnimation(.snappy) { adding = true }
     say(problem)
   }
 
