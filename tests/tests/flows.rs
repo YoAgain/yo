@@ -964,3 +964,20 @@ fn a_friend_who_updated_and_writes_first_is_no_longer_outdated() {
     drop(hub);
     let _ = std::fs::remove_dir_all(dir);
 }
+
+/// A Yo the old phone sent before the account moved, taken by the hub, still in the friend's inbox when the friend
+/// writes to the account and learns of the new phone (the hub's `409`): it arrives, once. Its device is gone by then,
+/// but was not when it sent.
+#[test]
+fn a_yo_the_old_phone_sent_before_the_move_arrives_after_the_friend_learned_of_it() {
+    let hub = TestHub::start();
+    let (a, b) = friends(&hub);
+    a.send_yo(b.user()).unwrap();
+    let a2 = Phone::register(&hub, &a.name, None, Some(a.account_secret()));
+    let mut events = b.send_yo(a.user()).unwrap();
+    assert_eq!(yos(&a2.drain(), &b.user()), 1);
+    events.extend(b.drain());
+    assert_eq!(yos(&events, &a.user()), 1, "{}", describe(&events));
+    a2.send_yo(b.user()).unwrap();
+    assert_eq!(yos(&b.drain(), &a.user()), 1);
+}

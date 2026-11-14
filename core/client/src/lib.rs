@@ -1060,6 +1060,24 @@ impl Client {
         Ok(())
     }
 
+    /// Whether a roster the hub names for a user leaves out a device this one knows (a new phone in its place): what
+    /// that device sent before is read first (`read_before_roster`), while its session is still here.
+    fn drops_a_device(&self, user: &str, roster: &[api::Device]) -> bool {
+        self.roster(user).is_some_and(|(_, devices)| devices.iter().any(|d| !roster.iter().any(|r| r.key == d.key)))
+    }
+
+    /// Reads the inbox before a roster that drops a device is taken in: an envelope its device sent before it was
+    /// replaced, waiting there, opens only in its session, which the roster deletes. "Not now" leaves it to chance.
+    fn read_before_roster(&mut self, user: &str, roster: &[api::Device]) -> Result<()> {
+        if !self.drops_a_device(user, roster) {
+            return Ok(());
+        }
+        match self.receive_all(0) {
+            Err(error) if !retryable(&error) => Err(error),
+            _ => Ok(()),
+        }
+    }
+
     /// Starts a session with each device of a bundle (spec 4.1): PQXDH, against the identity of the account key.
     fn take_bundles(&mut self, user: &str, account_key: Key, bundles: &[api::Bundle]) -> Result<()> {
         let identity = signal::identity_of(&account_key)?;
@@ -1142,6 +1160,7 @@ impl Client {
         if hex(&found.user_id) != user {
             return Err(Error::Protocol("the hub answered for another user"));
         }
+        self.read_before_roster(user, &found.devices)?;
         self.take_devices(user, found.account_key, &found.devices)?;
         if let Some(contact) = self.state.contacts.get(user) {
             if contact.unconfirmed {
@@ -1543,7 +1562,10 @@ impl Client {
                 }
                 Some(Ok(response)) if response.status == status::CONFLICT => {
                     match decode::<api::Devices>(&response.body) {
-                        Ok(devices) => match self.take_devices(&item.user, devices.account_key, &devices.devices) {
+                        Ok(devices) => match self
+                            .read_before_roster(&item.user, &devices.devices)
+                            .and_then(|()| self.take_devices(&item.user, devices.account_key, &devices.devices))
+                        {
                             Ok(()) => changed = true,
                             Err(error) => result = Err(error),
                         },
