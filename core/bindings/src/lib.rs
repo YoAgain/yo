@@ -556,12 +556,13 @@ impl YoClient {
         let key = key_of(state_key)?;
         let account = account_secret.map(key_of).transpose()?;
         let push = yo_core::Push { platform: push_platform, token: push_token.into_bytes().into() };
-        let mut client = Client::register_username(Arc::new(Http(transport)), &username, account, name, push)?;
-        client.persist_to(Arc::new(Store(store)), key)?;
+        // Saved before the request leaves: a crash after the hub took it is finished by `restore`.
+        let (http, store) = (Arc::new(Http(transport)), Arc::new(Store(store)));
+        let client = Client::register_username_saved(http, store, key, &username, account, name, push)?;
         Ok(Self::new(client))
     }
 
-    /// Opens the state the store saved last.
+    /// Opens the state the store saved last; a registration saved before its answer came is finished first.
     #[uniffi::constructor]
     pub fn restore(
         transport: Arc<dyn HttpTransport>,
@@ -572,6 +573,7 @@ impl YoClient {
         let key = key_of(state_key)?;
         let mut client = Client::restore(Arc::new(Http(transport)), &blob, &key)?;
         client.persist_to(Arc::new(Store(store)), key)?;
+        client.finish_registration()?;
         Ok(Self::new(client))
     }
 
@@ -587,6 +589,10 @@ impl YoClient {
     ) -> Result<Arc<Self>, YoError> {
         let key = key_of(state_key)?;
         let mut client = Client::restore_guest(Arc::new(Http(transport)), &blob, &key)?;
+        // Not registered yet: the app's to finish.
+        if client.is_registering() {
+            return Err(YoError::State);
+        }
         client.persist_to(Arc::new(Store(store)), key)?;
         Ok(Self::new(client))
     }
