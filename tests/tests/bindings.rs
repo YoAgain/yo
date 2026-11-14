@@ -1043,3 +1043,15 @@ fn a_state_that_opens_but_does_not_save_is_not_a_broken_one() {
     let again = YoClient::restore(app(), full, vec![7; 32], blob).unwrap();
     assert_eq!(again.user_id(), a.user_id());
 }
+
+#[test]
+fn a_closed_client_saves_nothing_and_does_nothing() {
+    let hub = TestHub::start();
+    let file = Arc::new(File::default());
+    let a = client(&hub, &username(random_u64() % 1_000_000_000), "A", file.clone());
+    let saved = file.0.lock().unwrap().clone();
+    a.close();
+    assert!(matches!(a.sync(0), Err(yo::YoError::State)), "every step fails");
+    assert!(matches!(a.send_yo("yogpt".into()), Err(yo::YoError::State)));
+    assert_eq!(*file.0.lock().unwrap(), saved, "and nothing is written over the state");
+}

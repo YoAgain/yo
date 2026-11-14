@@ -556,6 +556,14 @@ impl YoClient {
 
 #[uniffi::export]
 impl YoClient {
+    /// Signed out: this client stops, after the step under way (if any) has ended; from then on it saves nothing and
+    /// every step fails with `State`. So a call still on its way cannot write over the next account's state.
+    pub fn close(&self) {
+        let mut client = self.client.lock().unwrap_or_else(PoisonError::into_inner);
+        client.stop_persisting();
+        self.closed.store(true, Ordering::Relaxed);
+    }
+
     /// Registers this device with a username (spec 6.4). `state_key`: 32 bytes the app keeps in its keychain.
     /// Without `account_secret`, a new account: the name must be free. With the 32-byte account secret from the backup
     /// (spec 7), the key's account again, whatever the name: same user id, the name it has now (`username`), its

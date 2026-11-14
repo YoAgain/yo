@@ -835,6 +835,7 @@ final class AccountStore {
   /// this one does not take it back without being asked.
   func reset() {
     if let id = account?.userID { SyncedAccount.left = id }
+    let old = client
     account = nil
     client = nil
     secret = nil
@@ -846,16 +847,16 @@ final class AccountStore {
     newPasskey = nil
     passkeyTurnedOff = false
     wordsSaved = true
-    StateFile.delete()
-    // The group's too, under the lock, off the main thread (a step under way, the app's or an extension's, ends first
-    // and saves; then it goes, whatever that step saved). The next registration waits for it (`register`), so it never
-    // deletes a new account's. Clients still on it are closed by their next step (the core's `StateTurn.gone`).
-    if SharedStateFile.app {
-      let before = deleting
-      deleting = Task.detached(priority: .userInitiated) {
-        await before?.value
-        SharedStateFile.locked { SharedStateFile.delete() }
-      }
+    // The state goes off the main thread: the old client is closed first (a step under way ends and saves; after it,
+    // it saves nothing), then its file is deleted, whatever that step saved. The group's under the lock, too, for the
+    // extensions' clients (closed by their next step, the core's `StateTurn.gone`). The next registration waits for
+    // this (`register`), so it never deletes a new account's state, and no old call writes over it.
+    let before = deleting
+    deleting = Task.detached(priority: .userInitiated) {
+      await before?.value
+      old?.close()
+      StateFile.delete()
+      if SharedStateFile.app { SharedStateFile.locked { SharedStateFile.delete() } }
     }
     SecureReminder.update(secured: true)
     RecoveryWords.delete()
