@@ -26,7 +26,7 @@ enum Prefetch {
 
   /// Fetches the photos and videos of `events` one after the other (small enough ones only), each to its file.
   /// Best effort: what is not here when the app opens, the app fetches itself.
-  static func fetch(_ events: [YoEvent], client: YoClient) {
+  static func fetch(_ events: [YoEvent], client: YoClient, startingBefore deadline: Date = .distantFuture) {
     guard let directory else { return }
     let media: [YoMedia] = events.compactMap { event in
       guard case .message(_, _, let kind) = event else { return nil }
@@ -39,6 +39,7 @@ enum Prefetch {
     guard !media.isEmpty else { return }
     try? FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
     for one in media where one.size <= largest {
+      guard Date.now < deadline else { return }
       guard let file = file(one), let mark = mark(one), !FileManager.default.fileExists(atPath: file.path) else {
         continue
       }
@@ -77,6 +78,7 @@ enum Prefetch {
   static func done(_ media: YoMedia) {
     guard let file = file(media) else { return }
     try? FileManager.default.removeItem(at: file)
+    if let mark = mark(media) { try? FileManager.default.removeItem(at: mark) }  // left by a service that was ended
   }
 
   /// Signed out: none of them stays.
