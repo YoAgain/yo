@@ -319,3 +319,38 @@ fn key_packages_whose_upload_answer_was_lost_still_open_chats() {
     assert_eq!(events.iter().filter(|e| matches!(e, Event::NewChat { .. })).count(), 20);
     assert_eq!(c.dropped(), 0, "{:?}", c.drop_reasons());
 }
+
+#[test]
+fn a_refill_the_hub_does_not_take_is_sent_again_not_made_anew() {
+    let hub = TestHub::start();
+    let base = random_u64() % 1_000_000_000;
+    let target = username(base);
+    let hc = Http::new(hub.url());
+    let mut c = register(hc.clone(), &target, None);
+    let senders = yo_wire::limits::KEY_PACKAGE_TARGET as u64 - 10;
+    for i in 1..=senders {
+        register(Http::new(hub.url()), &username(base + i), None).send_yo(&target).unwrap();
+    }
+    // The hub refuses the refill for now, try after try: the same packages wait, no new ones pile up.
+    let before = c.own_key_packages();
+    for _ in 0..6 {
+        hc.fault("/v1/keypackages", Fault::Answer(503));
+    }
+    for _ in 0..6 {
+        let _ = c.sync(0);
+    }
+    let held = c.own_key_packages();
+    let one_batch = (yo_wire::limits::KEY_PACKAGE_TARGET as usize - 10) + 1;
+    assert!(held > before && held <= before + one_batch, "one batch, sent again, not made anew: {before} → {held}");
+    // Taken at last (its answer lost once more: the `409` to the repeat counts as taken), then new senders open chats.
+    hc.fault("/v1/keypackages", Fault::LoseAnswer);
+    let _ = c.sync(0);
+    let _ = c.sync(0);
+    assert_eq!(c.own_key_packages(), held);
+    for i in senders + 1..=senders + 20 {
+        register(Http::new(hub.url()), &username(base + i), None).send_yo(&target).unwrap();
+    }
+    let events = c.sync(0).unwrap();
+    assert!(events.iter().filter(|e| matches!(e, Event::NewChat { .. })).count() >= 20);
+    assert_eq!(c.dropped(), 0, "{:?}", c.drop_reasons());
+}

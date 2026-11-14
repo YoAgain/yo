@@ -631,6 +631,7 @@ impl Client {
             key_packages_left: KEY_PACKAGE_TARGET,
             key_packages: Vec::new(),
             last_resort_at: wall_ms(),
+            refill: None,
             signed_until: 0,
             storage: Default::default(),
             storage_version: 0,
@@ -2483,26 +2484,41 @@ impl Client {
     }
 
     fn refill(&mut self) -> Result<()> {
-        let left = self.state.key_packages_left;
-        let last_resort_due = (self.clock)().saturating_sub(self.state.last_resort_at) >= LAST_RESORT_EVERY_MS;
-        if left >= KEY_PACKAGE_REFILL_BELOW && !last_resort_due {
-            return Ok(());
-        }
-        let fresh = if left < KEY_PACKAGE_REFILL_BELOW { KEY_PACKAGE_TARGET - left } else { 0 };
-        // Made and saved before they leave: a lost answer must not cost the private keys of packages the hub took.
-        let request = self.atomic(|c| {
-            let key_packages = (0..fresh).map(|_| c.key_package(false).map(Into::into)).collect::<Result<Vec<_>>>()?;
-            let last_resort = if last_resort_due { Some(c.key_package(true)?.into()) } else { None };
-            Ok(api::KeyPackages { key_packages, last_resort })
-        })?;
-        self.persist()?;
-        let response = self.signed("PUT", api::KEY_PACKAGES, &encode(&request))?;
-        if response.status != status::NO_CONTENT {
+        let refill = match self.state.refill.clone() {
+            // One made before whose upload failed: the same again, not another batch of private keys per try.
+            Some(refill) => refill,
+            None => {
+                let left = self.state.key_packages_left;
+                let last_resort = (self.clock)().saturating_sub(self.state.last_resort_at) >= LAST_RESORT_EVERY_MS;
+                if left >= KEY_PACKAGE_REFILL_BELOW && !last_resort {
+                    return Ok(());
+                }
+                let fresh = if left < KEY_PACKAGE_REFILL_BELOW { KEY_PACKAGE_TARGET - left } else { 0 };
+                // Made and saved before they leave: a lost answer must not cost the private keys of packages the hub
+                // took.
+                let refill = self.atomic(|c| {
+                    let key_packages =
+                        (0..fresh).map(|_| c.key_package(false).map(Into::into)).collect::<Result<Vec<_>>>()?;
+                    let last_resort_package = if last_resort { Some(c.key_package(true)?.into()) } else { None };
+                    let body = encode(&api::KeyPackages { key_packages, last_resort: last_resort_package });
+                    let refill = state::Refill { body, fresh, last_resort };
+                    c.state.refill = Some(refill.clone());
+                    Ok(refill)
+                })?;
+                self.persist()?;
+                refill
+            }
+        };
+        let response = self.signed("PUT", api::KEY_PACKAGES, &refill.body)?;
+        // `409` to the same upload again: the hub took it before and its answer was lost (it refuses a KeyPackage it
+        // has seen), or it holds as many as it keeps. Either way this one is done.
+        if response.status != status::NO_CONTENT && response.status != status::CONFLICT {
             return Err(refused(&response));
         }
-        self.state.key_packages_left = left + fresh;
+        self.state.refill = None;
+        self.state.key_packages_left = self.state.key_packages_left.saturating_add(refill.fresh);
         self.key_packages_known_ms = self.last_request_ms;
-        if last_resort_due {
+        if refill.last_resort {
             // The hub hands out the new one from now on: the ones before (also one made for an upload that failed)
             // are retired now, not when they were replaced here, and kept while a Welcome made with them may wait.
             let now = (self.clock)();
