@@ -55,7 +55,13 @@ pub struct Limits {
     pub blob_put_per_ip_minute: u32,
     /// Fetches, which name no one: by address only.
     pub blob_get_per_ip_minute: u32,
+    /// Backup records stored before the doors' auth keys (version 1) are handed out without a signature until then
+    /// (ms since the epoch), and to no one after (spec 7). `LEGACY_BACKUPS_UNTIL_MS`; tests move it.
+    pub legacy_backups_until_ms: u64,
 }
+
+/// 2026-11-28 00:00 UTC: two weeks for the apps to rewrite their records with the auth keys (spec 7).
+pub const LEGACY_BACKUPS_UNTIL_MS: u64 = 1_795_824_000_000;
 
 const MIB: u64 = 1024 * 1024;
 const GIB: u64 = 1024 * MIB;
@@ -99,6 +105,7 @@ impl Default for Limits {
             blob_bytes_stored_per_user: GIB,
             blob_put_per_ip_minute: 120,
             blob_get_per_ip_minute: 600,
+            legacy_backups_until_ms: LEGACY_BACKUPS_UNTIL_MS,
         }
     }
 }

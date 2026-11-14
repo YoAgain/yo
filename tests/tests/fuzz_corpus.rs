@@ -134,3 +134,25 @@ fn route_input(path: &str, body: &[u8]) -> Vec<u8> {
     out.extend_from_slice(body);
     out
 }
+
+/// Backup records of both versions, for wire_api, and as bodies of `PUT /v1/backup` and the signed `GET`, for
+/// hub_routes. Run when the formats change, as the one above.
+#[test]
+#[ignore]
+fn write_backup_seeds() {
+    use yo_core::backup::{self, PasskeyDoor};
+    let code = yo_tests::backup::words([1; 16]);
+    let record = backup::make(&[2; 32], b"{}", &code, PasskeyDoor::New(&[3; 32])).unwrap();
+    let old = api::LegacyBackup {
+        version: 1,
+        by_passkey: record.by_passkey.clone(),
+        by_code: record.by_code.clone(),
+        sealed: record.sealed.clone(),
+        locator: record.locator.clone(),
+    };
+    write("corpus/wire_api", "backup-2", &yo_wire::encode(&record));
+    write("corpus/wire_api", "backup-1", &yo_wire::encode(&old));
+    // Route 15 is `PUT /v1/backup`, 29 the signed `GET /v1/backup/{id}` (fuzz_targets/hub_routes.rs).
+    write("corpus/hub_routes", "backup-put", &[&[15u8][..], &yo_wire::encode(&record)].concat());
+    write("corpus/hub_routes", "backup-get", &[29]);
+}

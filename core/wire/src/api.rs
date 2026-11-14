@@ -244,9 +244,13 @@ pub struct Commit {
 /// The length of a backup's locator: HKDF(the recovery code, "yo backup v1 locator") (spec 7).
 pub const LOCATOR_LEN: usize = 16;
 
+/// The backup record's version: 2 carries the doors' auth keys. A record of version 1 (`LegacyBackup`) was stored
+/// before them; the hub hands it out without a signature until 2026-11-28 (spec 7).
+pub const BACKUP_VERSION: u8 = 2;
+
 /// The account's backup record (spec 7): `PUT /v1/backup` stores it, `GET /v1/backup/{id}` hands it out to whoever
-/// names its user id or locator. The hub can open none of it: K is wrapped by the passkey and by the recovery code,
-/// and K seals the rest.
+/// names its user id or locator and signs the request with one of its auth keys, which only a door gives. The hub can
+/// open none of it: K is wrapped by the passkey and by the recovery code, and K seals the rest.
 #[derive(Debug, Clone, PartialEq, Eq, TlsSerialize, TlsDeserializeBytes, TlsSize)]
 pub struct Backup {
     pub version: u8,
@@ -258,26 +262,81 @@ pub struct Backup {
     pub sealed: VLBytes,
     /// Where the recovery code alone finds the record: `LOCATOR_LEN` bytes, or empty (found by the user id only).
     pub locator: VLBytes,
+    /// The Ed25519 key from HKDF(the passkey's PRF output, "yo backup v1 auth passkey"), which signs a fetch: empty
+    /// without a passkey, or while it has not been used for it yet (a record rewritten from version 1).
+    pub auth_passkey: VLBytes,
+    /// The Ed25519 key from HKDF(the recovery code, "yo backup v1 auth code"); empty only in a version 1 record.
+    pub auth_code: VLBytes,
+}
+
+/// A backup record as version 1 had it, before the auth keys: how the hub may still hold one.
+#[derive(Debug, Clone, PartialEq, Eq, TlsSerialize, TlsDeserializeBytes, TlsSize)]
+pub struct LegacyBackup {
+    pub version: u8,
+    pub by_passkey: VLBytes,
+    pub by_code: VLBytes,
+    pub sealed: VLBytes,
+    pub locator: VLBytes,
 }
 
 impl Backup {
     /// A record of this version.
-    pub fn new(by_passkey: Vec<u8>, by_code: Vec<u8>, sealed: Vec<u8>, locator: Vec<u8>) -> Self {
+    pub fn new(
+        by_passkey: Vec<u8>,
+        by_code: Vec<u8>,
+        sealed: Vec<u8>,
+        locator: Vec<u8>,
+        auth_passkey: Option<[u8; KEY_LEN]>,
+        auth_code: [u8; KEY_LEN],
+    ) -> Self {
         Backup {
-            version: crate::VERSION,
+            version: BACKUP_VERSION,
             by_passkey: by_passkey.into(),
             by_code: by_code.into(),
             sealed: sealed.into(),
             locator: locator.into(),
+            auth_passkey: auth_passkey.map(|k| k.to_vec()).unwrap_or_default().into(),
+            auth_code: auth_code.to_vec().into(),
         }
     }
 
-    /// A record as it may be stored: this version, the code's door there, every part within its limit.
+    /// A record as the hub hands it out: this version, or version 1 (read with empty auth keys).
+    pub fn decode(bytes: &[u8]) -> Result<Self, crate::Error> {
+        if bytes.first() == Some(&crate::VERSION) {
+            let old: LegacyBackup = crate::decode(bytes)?;
+            let backup = Backup {
+                version: old.version,
+                by_passkey: old.by_passkey,
+                by_code: old.by_code,
+                sealed: old.sealed,
+                locator: old.locator,
+                auth_passkey: Vec::new().into(),
+                auth_code: Vec::new().into(),
+            };
+            backup.check_parts()?;
+            return Ok(backup);
+        }
+        let backup: Backup = crate::decode(bytes)?;
+        backup.check()?;
+        Ok(backup)
+    }
+
+    /// A record as it may be stored: this version, the code's door and auth key there, every part within its limit.
     pub fn check(&self) -> Result<(), crate::Error> {
-        use crate::limits::{MAX_BACKUP_SEALED_LEN, MAX_BACKUP_WRAP_LEN};
-        if self.version != crate::VERSION {
+        if self.version != BACKUP_VERSION {
             return Err(crate::Error::Unsupported);
         }
+        self.check_parts()?;
+        let passkey = self.auth_passkey.as_slice().len();
+        if self.auth_code.as_slice().len() != KEY_LEN || !(passkey == 0 || passkey == KEY_LEN) {
+            return Err(crate::Error::Format);
+        }
+        Ok(())
+    }
+
+    /// The parts both versions have.
+    fn check_parts(&self) -> Result<(), crate::Error> {
+        use crate::limits::{MAX_BACKUP_SEALED_LEN, MAX_BACKUP_WRAP_LEN};
         let (passkey, code, sealed) = (self.by_passkey.as_slice(), self.by_code.as_slice(), self.sealed.as_slice());
         if passkey.len() > MAX_BACKUP_WRAP_LEN
             || code.len() > MAX_BACKUP_WRAP_LEN
@@ -290,6 +349,11 @@ impl Backup {
             return Err(crate::Error::Format);
         }
         Ok(())
+    }
+
+    /// The auth keys that may sign this record's fetch: the passkey's (if there) and the code's.
+    pub fn auth_keys(&self) -> (Option<[u8; KEY_LEN]>, Option<[u8; KEY_LEN]>) {
+        (self.auth_passkey.as_slice().try_into().ok(), self.auth_code.as_slice().try_into().ok())
     }
 
     /// The locator, if the record has one.
@@ -417,7 +481,7 @@ mod tests {
     }
 
     fn backup() -> Backup {
-        Backup::new(vec![1; 60], vec![2; 60], vec![3; 1000], vec![4; LOCATOR_LEN])
+        Backup::new(vec![1; 60], vec![2; 60], vec![3; 1000], vec![4; LOCATOR_LEN], Some([5; 32]), [6; 32])
     }
 
     #[test]
@@ -426,10 +490,19 @@ mod tests {
         use crate::Error;
         assert_eq!(backup().check(), Ok(()));
         assert_eq!(backup().locator(), Some([4; LOCATOR_LEN]));
-        let without = Backup { by_passkey: Vec::new().into(), locator: Vec::new().into(), ..backup() };
+        assert_eq!(backup().auth_keys(), (Some([5; 32]), Some([6; 32])));
+        let without = Backup {
+            by_passkey: Vec::new().into(),
+            locator: Vec::new().into(),
+            auth_passkey: Vec::new().into(),
+            ..backup()
+        };
         assert_eq!(without.check(), Ok(()));
         assert_eq!(without.locator(), None);
-        assert_eq!(Backup { version: 2, ..backup() }.check(), Err(Error::Unsupported));
+        assert_eq!(Backup { version: 1, ..backup() }.check(), Err(Error::Unsupported));
+        assert_eq!(Backup { version: 3, ..backup() }.check(), Err(Error::Unsupported));
+        assert_eq!(Backup { auth_code: Vec::new().into(), ..backup() }.check(), Err(Error::Format));
+        assert_eq!(Backup { auth_passkey: vec![5; 31].into(), ..backup() }.check(), Err(Error::Format));
         assert_eq!(Backup { by_code: Vec::new().into(), ..backup() }.check(), Err(Error::Format));
         assert_eq!(Backup { sealed: Vec::new().into(), ..backup() }.check(), Err(Error::Format));
         assert_eq!(Backup { locator: vec![4; 15].into(), ..backup() }.check(), Err(Error::Format));
@@ -446,6 +519,24 @@ mod tests {
             ..backup()
         };
         assert!(largest.check().is_ok() && crate::encode(&largest).len() <= MAX_BODY);
+    }
+
+    #[test]
+    fn a_record_from_before_the_auth_keys_still_reads() {
+        let b = backup();
+        let old = LegacyBackup {
+            version: 1,
+            by_passkey: b.by_passkey.clone(),
+            by_code: b.by_code.clone(),
+            sealed: b.sealed.clone(),
+            locator: b.locator.clone(),
+        };
+        let read = Backup::decode(&crate::encode(&old)).unwrap();
+        assert_eq!(read.version, 1);
+        assert_eq!(read.auth_keys(), (None, None));
+        assert_eq!(read.sealed, b.sealed);
+        assert_eq!(Backup::decode(&crate::encode(&b)).unwrap(), b);
+        assert!(Backup::decode(&crate::encode(&LegacyBackup { by_code: Vec::new().into(), ..old })).is_err());
     }
 
     #[test]

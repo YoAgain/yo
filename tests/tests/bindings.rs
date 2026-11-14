@@ -57,22 +57,39 @@ fn the_app_layer_registers_by_username_and_restores_from_the_backup() {
     assert_eq!(old.username(), Some(name.clone()));
     let secret = old.account_secret();
     assert_eq!(secret.len(), 32);
-    // What the app makes: K wrapped twice and the account sealed (here stand-in bytes), and the code's locator.
-    let backup =
-        || yo::YoBackup { by_passkey: vec![1; 60], by_code: vec![2; 60], sealed: vec![3; 200], locator: vec![4; 16] };
-    old.put_backup(backup()).unwrap();
-    // A new phone: the record by the locator, then the name registered again with the account key it holds.
-    let found = yo::fetch_backup(app(), vec![4; 16]).unwrap().unwrap();
-    assert_eq!(
-        (found.by_passkey, found.by_code, found.sealed, found.locator),
-        (vec![1; 60], vec![2; 60], vec![3; 200], vec![4; 16])
-    );
-    assert!(yo::fetch_backup(app(), vec![5; 16]).unwrap().is_none());
+    // What the app makes: its JSON under K, K wrapped by the words and the passkey, their auth keys.
+    let (k, prf, words) = (vec![1; 32], vec![2; 32], yo_tests::backup::words([3; 16]));
+    let passkey = yo::YoDoor::Passkey { prf: prf.clone() };
+    let by_words = || yo::YoDoor::Words { words: words.clone() };
+    old.put_backup(k.clone(), b"{\"account\":1}".to_vec(), words.clone(), yo::YoPasskeyDoor::New { prf: prf.clone() })
+        .unwrap();
+    // A new phone: the record by the words alone, or by the passkey's user handle and PRF output; either opens it.
+    let user = hex(&old.user_id());
+    let found = yo::open_backup(app(), None, by_words()).unwrap().unwrap();
+    assert_eq!((found.k.clone(), found.sealed.clone()), (k.clone(), b"{\"account\":1}".to_vec()));
+    assert!(found.record.sealed.len() == 1024 && found.record.auth_passkey.len() == 32, "padded, both keys");
+    let by_passkey = yo::open_backup(app(), Some(user.clone()), passkey).unwrap().unwrap();
+    assert_eq!((by_passkey.k, by_passkey.sealed), (k.clone(), found.sealed.clone()));
+    // Another passkey or other words fetch nothing: the hub answers as if there were no record.
+    let other = yo::YoDoor::Passkey { prf: vec![9; 32] };
+    assert!(yo::open_backup(app(), Some(user.clone()), other).unwrap().is_none());
+    let other = yo::YoDoor::Words { words: yo_tests::backup::words([4; 16]) };
+    assert!(yo::open_backup(app(), None, other).unwrap().is_none());
+    assert!(yo::open_backup(app(), None, yo::YoDoor::Passkey { prf: prf.clone() }).is_err(), "a passkey needs the id");
+    // The name registered again with the account key it holds.
     assert!(matches!(register(None), Err(yo::YoError::Refused { status: 409 })));
     let new = register(Some(secret)).unwrap();
     assert_eq!(new.user_id(), old.user_id());
     assert!(matches!(old.sync(0), Err(yo::YoError::Replaced)));
-    assert!(yo::fetch_backup(app(), hex(&new.user_id())).unwrap().is_some(), "by the user id too");
+    // New words, the passkey kept: the old words open nothing, the passkey still does.
+    let renewed = yo_tests::backup::words([5; 16]);
+    let keep = yo::YoPasskeyDoor::Keep { record: found.record };
+    new.put_backup(k.clone(), b"{}".to_vec(), renewed.clone(), keep).unwrap();
+    assert!(yo::open_backup(app(), None, by_words()).unwrap().is_none());
+    let found = yo::open_backup(app(), None, yo::YoDoor::Words { words: renewed }).unwrap().unwrap();
+    let passkey = yo::YoDoor::Passkey { prf };
+    assert_eq!(yo::open_backup(app(), Some(user), passkey).unwrap().unwrap().sealed, b"{}");
+    assert_eq!(found.k, k);
 }
 
 fn hex(text: &str) -> Vec<u8> {
@@ -164,13 +181,8 @@ fn the_app_layer_runs_other_calls_while_sync_waits() {
         let (a, pb) = (a.clone(), pb.clone());
         std::thread::spawn(move || {
             a.send_yo(pb).unwrap();
-            a.put_backup(yo::YoBackup {
-                by_passkey: Vec::new(),
-                by_code: vec![2; 60],
-                sealed: vec![3; 200],
-                locator: vec![4; 16],
-            })
-            .unwrap();
+            a.put_backup(vec![1; 32], b"{}".to_vec(), yo_tests::backup::words([2; 16]), yo::YoPasskeyDoor::None)
+                .unwrap();
             done.send(a.contacts().len()).unwrap();
         });
     }

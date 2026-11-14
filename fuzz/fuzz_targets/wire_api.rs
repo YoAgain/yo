@@ -24,4 +24,6 @@ fuzz_target!(|data: &[u8]| {
     canonical::<Epoch>(data);
     canonical::<Register>(data);
     canonical::<Backup>(data);
+    canonical::<LegacyBackup>(data);
+    let _ = Backup::decode(data);
 });

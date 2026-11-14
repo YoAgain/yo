@@ -93,6 +93,17 @@ fn bad() -> Refusal {
     refuse(StatusCode::BAD_REQUEST)
 }
 
+fn header<'a>(headers: &'a HeaderMap, name: &str) -> Option<&'a str> {
+    headers.get(name).and_then(|v| v.to_str().ok())
+}
+
+/// The time and signature of a signed request (spec 6.2): both there, and the time within the window of `now`.
+fn signature_of(headers: &HeaderMap, now: u64) -> Option<(u64, [u8; 64])> {
+    let time: u64 = header(headers, HEADER_TIME)?.parse().ok()?;
+    let signature = unb64(header(headers, HEADER_SIGNATURE)?).ok()?.try_into().ok()?;
+    (now.abs_diff(time) <= limits::MAX_SKEW_MS).then_some((time, signature))
+}
+
 /// An id in a path: base64url of exactly `N` bytes, or the route does not exist.
 fn path_id<const N: usize>(text: &str) -> Res<[u8; N]> {
     unb64(text).ok().and_then(|bytes| bytes.try_into().ok()).ok_or_else(|| refuse(StatusCode::NOT_FOUND))
@@ -387,16 +398,12 @@ impl Hub {
     /// `authenticate` by the body's hash, before the body is there (a blob, 6.8).
     fn authenticate_hash(&self, method: &Method, uri: &Uri, headers: &HeaderMap, body_hash: &[u8; 32]) -> Res<Signed> {
         let unauthorized = || refuse(StatusCode::UNAUTHORIZED);
-        let header = |name: &str| headers.get(name).and_then(|v| v.to_str().ok()).ok_or_else(unauthorized);
-        let device_id: DeviceId =
-            unb64(header(HEADER_DEVICE)?).ok().and_then(|m| m.try_into().ok()).ok_or_else(unauthorized)?;
-        let time: u64 = header(HEADER_TIME)?.parse().map_err(|_| unauthorized())?;
-        let signature: [u8; 64] =
-            unb64(header(HEADER_SIGNATURE)?).ok().and_then(|s| s.try_into().ok()).ok_or_else(unauthorized)?;
+        let device_id: DeviceId = header(headers, HEADER_DEVICE)
+            .and_then(|d| unb64(d).ok())
+            .and_then(|d| d.try_into().ok())
+            .ok_or_else(unauthorized)?;
         let now = now_ms();
-        if now.abs_diff(time) > limits::MAX_SKEW_MS {
-            return Err(unauthorized());
-        }
+        let (time, signature) = signature_of(headers, now).ok_or_else(unauthorized)?;
         let Some(device) = self.db.device(&device_id)? else {
             // A replaced device learns that it was replaced.
             return Err(if self.db.is_gone(&device_id)? { refuse(StatusCode::GONE) } else { unauthorized() });
@@ -410,7 +417,7 @@ impl Hub {
             self.config.limits.signed_per_device_minute,
             MINUTE,
         )?;
-        if !self.replay.first_time(signature, now, time + limits::MAX_SKEW_MS + 1) {
+        if !self.first_time(&signature, time, now) {
             return Err(unauthorized());
         }
         // When a device was last seen counts only to the day (spec 6.4): one write a day, not one per request.
@@ -418,6 +425,11 @@ impl Hub {
             self.db.touch(&device_id, now)?;
         }
         Ok(Signed { device_id, user_id: device.user_id, device_key: device.device_key })
+    }
+
+    /// Each signature once (the replay cache), for as long as its time is within the window.
+    fn first_time(&self, signature: &[u8; 64], time: u64, now: u64) -> bool {
+        self.replay.first_time(*signature, now, time + limits::MAX_SKEW_MS + 1)
     }
 
     /// Checks uploaded KeyPackages against the uploading device and its account; the last resort must say it is one,
@@ -639,8 +651,14 @@ async fn put_backup(State(hub): Hubs, method: Method, uri: Uri, headers: HeaderM
     let device = hub.authenticate(&method, &uri, &headers, &body)?;
     let backup: api::Backup = decode(&body)?;
     backup.check()?;
+    // Keys a signature can be checked against: a key that is no point is refused here, not at every fetch.
+    let (passkey, code) = backup.auth_keys();
+    if passkey.into_iter().chain(code).any(|key| ed25519_dalek::VerifyingKey::from_bytes(&key).is_err()) {
+        return Err(bad());
+    }
+    let auth = db::BackupAuth { passkey, code };
     let locator = backup.locator();
-    match hub.db.put_backup(&device.device_id, locator.as_ref().map(|l| &l[..]), &body, now_ms())? {
+    match hub.db.put_backup(&device.device_id, locator.as_ref().map(|l| &l[..]), &body, &auth, now_ms())? {
         Write::Done(()) => Ok(StatusCode::NO_CONTENT),
         // Replaced between its authentication and now (a new phone restored the account).
         Write::Refused(db::Conflict::DeviceGone) => Err(refuse(StatusCode::GONE)),
@@ -648,17 +666,53 @@ async fn put_backup(State(hub): Hubs, method: Method, uri: Uri, headers: HeaderM
     }
 }
 
-/// A backup record by its user id or locator, to whoever asks: it opens only with the passkey or the recovery code.
+/// What a signature is checked against where a record has no key (and never counts): every fetch checks its
+/// signature twice, so the time does not tell whether there is a record, or a passkey.
+static NO_KEY: std::sync::LazyLock<Key> =
+    std::sync::LazyLock::new(|| ed25519_dalek::SigningKey::from_bytes(&[0; 32]).verifying_key().to_bytes());
+
+/// A backup record by its user id or locator, to a request signed by one of its doors' auth keys (spec 7): only who
+/// holds a door learns that there is one. Anything else is `404`, as for no record. A record stored before the auth
+/// keys is handed out without a signature until `legacy_backups_until_ms`, to no one after.
 async fn fetch_backup(
     State(hub): Hubs,
     ConnectInfo(peer): Peer,
+    method: Method,
+    uri: Uri,
     headers: HeaderMap,
     Path(id): Path<String>,
 ) -> Res<(StatusCode, Vec<u8>)> {
     hub.limit_ip("backup", peer, &headers, hub.config.limits.backup_per_ip_hour, HOUR)?;
     let id: [u8; api::LOCATOR_LEN] = path_id(&id)?;
-    let record = hub.db.backup(&id)?.ok_or_else(|| refuse(StatusCode::NOT_FOUND))?;
-    Ok(ok(record))
+    let now = now_ms();
+    let found = hub.db.backup(&id)?;
+    if let Some((record, auth)) = &found {
+        if auth.code.is_none() && now < hub.config.limits.legacy_backups_until_ms {
+            return Ok(ok(record.clone()));
+        }
+    }
+    let not_found = || refuse(StatusCode::NOT_FOUND);
+    let (time, signature) = signature_of(&headers, now).ok_or_else(not_found)?;
+    let auth = found.as_ref().map(|(_, auth)| auth.clone()).unwrap_or_default();
+    let path = uri.path_and_query().map(|p| p.as_str()).unwrap_or("/");
+    let empty = sha256(&[]);
+    let signed = [auth.passkey, auth.code]
+        .map(|key| {
+            let verified = yo_wire::request::verify_hash(
+                key.as_ref().unwrap_or(&NO_KEY),
+                method.as_str(),
+                path,
+                time,
+                &empty,
+                &signature,
+            );
+            key.is_some() && verified.is_ok()
+        })
+        .contains(&true);
+    match found {
+        Some((record, _)) if signed && hub.first_time(&signature, time, now) => Ok(ok(record)),
+        _ => Err(not_found()),
+    }
 }
 
 // ---- what a device asks for itself ----

@@ -32,6 +32,8 @@ struct SettingsView: View {
   @State private var photosDenied = false
   @State private var addingPasskey = false
   @State private var passkeyProblem: String?
+  /// Confirming the passkey went wrong: shown on the account page, where its row is.
+  @State private var confirmProblem: String?
   /// Securing and the words open as sheets.
   @State private var securing = false
   @State private var securingStart: SecureStep?
@@ -209,6 +211,14 @@ struct SettingsView: View {
     }
     .navigationTitle("Account")
     .navigationBarTitleDisplayMode(.inline)
+    .alert(
+      "Something Went Wrong",
+      isPresented: Binding(get: { confirmProblem != nil }, set: { if !$0 { confirmProblem = nil } })
+    ) {
+      Button("OK", role: .cancel) {}
+    } message: {
+      Text(confirmProblem ?? "")
+    }
     // Signing out and deleting: at the very bottom of the screen, however short the list.
     .safeAreaInset(edge: .bottom) {
       VStack(spacing: 10) {
@@ -246,7 +256,13 @@ struct SettingsView: View {
   @ViewBuilder private func securitySection(_ account: Account) -> some View {
     let wordsDone = account.secured && accounts.wordsSaved && RecoveryWords.load() != nil
     Section("Security") {
-      if account.byPasskey {
+      if account.byPasskey && account.passkeyAuth != true {
+        // A record from before the auth keys (spec 7): the passkey opens it, but a new phone finds it by the passkey
+        // only once Face ID has been asked here.
+        Button { Task { await confirmPasskey() } } label: {
+          SecurityRow(icon: "faceid", color: .orange, title: "Passkey and Face ID", value: "Confirm")
+        }
+      } else if account.byPasskey {
         NavigationLink {
           securityPage("Passkey and Face ID") {
             Button("Replace Passkey") { Task { await replacePasskey() } }
@@ -331,6 +347,17 @@ struct SettingsView: View {
     do { try await accounts.replacePasskey() } catch {
       if !SecurityPresentation.isCancellation(error) {
         passkeyProblem = SecurityPresentation.passkeyMessage(error, fallback: "Try again.")
+      }
+    }
+  }
+
+  private func confirmPasskey() async {
+    guard !addingPasskey else { return }
+    addingPasskey = true
+    defer { addingPasskey = false }
+    do { try await accounts.confirmPasskey() } catch {
+      if !SecurityPresentation.isCancellation(error) {
+        confirmProblem = SecurityPresentation.passkeyMessage(error, fallback: "Try again.")
       }
     }
   }

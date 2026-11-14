@@ -8,8 +8,24 @@ const HEADER: usize = 1 + 4;
 
 /// Wraps an MLSMessage: version, length, the message, zeros up to the smallest bucket that fits.
 pub fn seal(message: &[u8]) -> Result<Vec<u8>, Error> {
+    pad(message, &BUCKETS)
+}
+
+/// Unwraps an envelope: its size must be a bucket, the padding zeros, the version known.
+pub fn open(envelope: &[u8]) -> Result<&[u8], Error> {
+    unpad(envelope, &BUCKETS)
+}
+
+/// What the hub checks before it stores an envelope: everything but the MLS message itself.
+pub fn check(envelope: &[u8]) -> Result<(), Error> {
+    unpad(envelope, &BUCKETS).map(|_| ())
+}
+
+/// The envelope's padding to other sizes (ascending): version, length, the message, zeros up to the smallest that
+/// fits. Also what the storage key and a backup's K seal (spec 6.9, 7).
+pub fn pad(message: &[u8], sizes: &[usize]) -> Result<Vec<u8>, Error> {
     let needed = HEADER + message.len();
-    let size = *BUCKETS.iter().find(|b| **b >= needed).ok_or(Error::Size)?;
+    let size = *sizes.iter().find(|s| **s >= needed).ok_or(Error::Size)?;
     let mut out = Vec::with_capacity(size);
     out.push(VERSION);
     out.extend_from_slice(&(message.len() as u32).to_be_bytes());
@@ -18,31 +34,24 @@ pub fn seal(message: &[u8]) -> Result<Vec<u8>, Error> {
     Ok(out)
 }
 
-/// Unwraps an envelope: its size must be a bucket, the padding zeros, the version known.
-pub fn open(envelope: &[u8]) -> Result<&[u8], Error> {
-    check(envelope)?;
-    let len = u32::from_be_bytes(envelope[1..5].try_into().unwrap()) as usize;
-    Ok(&envelope[HEADER..HEADER + len])
-}
-
-/// What the hub checks before it stores an envelope: everything but the MLS message itself.
-pub fn check(envelope: &[u8]) -> Result<(), Error> {
-    if !BUCKETS.contains(&envelope.len()) {
+/// The message in what `pad` made: its size one of `sizes`, the smallest that fits, the padding zeros.
+pub fn unpad<'a>(padded: &'a [u8], sizes: &[usize]) -> Result<&'a [u8], Error> {
+    if !sizes.contains(&padded.len()) || padded.len() < HEADER {
         return Err(Error::Size);
     }
-    if envelope[0] != VERSION {
+    if padded[0] != VERSION {
         return Err(Error::Unsupported);
     }
-    let len = u32::from_be_bytes(envelope[1..5].try_into().unwrap()) as usize;
-    let end = HEADER.checked_add(len).filter(|end| *end <= envelope.len()).ok_or(Error::Format)?;
-    if len == 0 || envelope[end..].iter().any(|b| *b != 0) {
+    let len = u32::from_be_bytes(padded[1..5].try_into().unwrap()) as usize;
+    let end = HEADER.checked_add(len).filter(|end| *end <= padded.len()).ok_or(Error::Format)?;
+    if len == 0 || padded[end..].iter().any(|b| *b != 0) {
         return Err(Error::Format);
     }
-    // The smallest bucket that fits: a larger one would be a second way to say the same.
-    if BUCKETS.iter().find(|b| **b >= end) != Some(&envelope.len()) {
+    // The smallest size that fits: a larger one would be a second way to say the same.
+    if sizes.iter().find(|s| **s >= end) != Some(&padded.len()) {
         return Err(Error::Format);
     }
-    Ok(())
+    Ok(&padded[HEADER..end])
 }
 
 #[cfg(test)]
@@ -77,6 +86,16 @@ mod tests {
         big[0] = VERSION;
         big[4] = 3;
         assert_eq!(open(&big), Err(Error::Format));
+    }
+
+    #[test]
+    fn pads_to_other_sizes() {
+        let sizes = [100, 1000];
+        assert_eq!(pad(b"hi", &sizes).unwrap().len(), 100);
+        assert_eq!(unpad(&pad(b"hi", &sizes).unwrap(), &sizes).unwrap(), b"hi");
+        assert_eq!(pad(&[1; 96], &sizes).unwrap().len(), 1000);
+        assert_eq!(pad(&[1; 996], &sizes), Err(Error::Size));
+        assert_eq!(unpad(&pad(b"hi", &sizes).unwrap(), &BUCKETS), Err(Error::Size));
     }
 
     proptest! {

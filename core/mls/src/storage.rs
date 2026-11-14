@@ -149,30 +149,41 @@ impl Storage {
     }
 }
 
-/// Plaintexts are padded to a multiple of this (JSON allows trailing spaces): the hub sees roughly how large.
-const PAD: usize = 1024;
+/// A nonce and a tag: what sealing adds.
+const SEAL_OVERHEAD: usize = 12 + 16;
 
-/// Seals the storage for a user: nonce || ChaCha20-Poly1305 (associated data: "yo storage v1" || user id).
-pub fn seal(account_secret: &[u8; 32], user_id: &[u8], storage: &Storage) -> Vec<u8> {
-    let mut plain = serde_json::to_vec(storage).expect("storage encodes");
-    plain.resize(plain.len().div_ceil(PAD) * PAD, b' ');
+/// Pads `plain` like an envelope (spec 6.1) and seals it: nonce || ChaCha20-Poly1305 || tag, 1, 4, 16 or 60 KiB in
+/// all (`SEALED_SIZES`), so the hub sees a size class. How the storage and a backup's sealed part are made (spec 6.9,
+/// 7). `Error::Protocol("too large")` past the largest.
+pub fn seal_padded(key: &[u8; 32], aad: &[u8], plain: &[u8]) -> Result<Vec<u8>> {
+    let sizes = yo_wire::limits::SEALED_SIZES.map(|size| size - SEAL_OVERHEAD);
+    let padded = yo_wire::envelope::pad(plain, &sizes).map_err(|_| Error::Protocol("too large"))?;
     let nonce: [u8; 12] = crate::identity::random();
-    let aad = [&b"yo storage v1"[..], user_id].concat();
-    let sealed = ChaCha20Poly1305::new(&key(account_secret).into())
-        .encrypt(&nonce.into(), Payload { msg: &plain, aad: &aad })
-        .expect("encryption");
-    [nonce.to_vec(), sealed].concat()
+    let sealed =
+        ChaCha20Poly1305::new(key.into()).encrypt(&nonce.into(), Payload { msg: &padded, aad }).expect("encryption");
+    Ok([nonce.to_vec(), sealed].concat())
+}
+
+/// Opens what `seal_padded` sealed. Also what was sealed before the padding: JSON (spaces after it, or nothing),
+/// which starts with `{` where the padded starts with its version, 1.
+pub fn open_padded(key: &[u8; 32], aad: &[u8], sealed: &[u8]) -> Option<Vec<u8>> {
+    let (nonce, sealed) = sealed.split_at_checked(12)?;
+    let plain = ChaCha20Poly1305::new(key.into()).decrypt(nonce.into(), Payload { msg: sealed, aad }).ok()?;
+    if plain.first() != Some(&yo_wire::VERSION) {
+        return Some(plain);
+    }
+    yo_wire::envelope::unpad(&plain, &[plain.len()]).ok().map(<[u8]>::to_vec)
+}
+
+/// Seals the storage for a user (associated data: "yo storage v1" || user id), padded (`seal_padded`).
+pub fn seal(account_secret: &[u8; 32], user_id: &[u8], storage: &Storage) -> Result<Vec<u8>> {
+    let plain = serde_json::to_vec(storage).expect("storage encodes");
+    seal_padded(&key(account_secret), &[&b"yo storage v1"[..], user_id].concat(), &plain)
 }
 
 pub fn open(account_secret: &[u8; 32], user_id: &[u8], sealed: &[u8]) -> Result<Storage> {
-    if sealed.len() < 12 {
-        return Err(Error::Protocol("storage"));
-    }
-    let (nonce, sealed) = sealed.split_at(12);
-    let aad = [&b"yo storage v1"[..], user_id].concat();
-    let plain = ChaCha20Poly1305::new(&key(account_secret).into())
-        .decrypt(nonce.into(), Payload { msg: sealed, aad: &aad })
-        .map_err(|_| Error::Protocol("storage"))?;
+    let plain = open_padded(&key(account_secret), &[&b"yo storage v1"[..], user_id].concat(), sealed)
+        .ok_or(Error::Protocol("storage"))?;
     serde_json::from_slice(&plain).map_err(|_| Error::Protocol("storage"))
 }
 
@@ -385,8 +396,7 @@ impl Client {
     /// first, until it fits (a removal older than the other writers' last read is no longer needed to merge).
     fn sealed_within_limit(&mut self, next: &mut Storage) -> Result<Vec<u8>> {
         loop {
-            let data = seal(&self.state.account_secret, &self.user_id_bytes(), next);
-            if data.len() <= yo_wire::limits::MAX_STORAGE_LEN {
+            if let Ok(data) = seal(&self.state.account_secret, &self.user_id_bytes(), next) {
                 self.state.storage.friends.clone_from(&next.friends);
                 return Ok(data);
             }
@@ -448,12 +458,31 @@ mod tests {
         let mut s = Storage::default();
         s.friends.insert("aa".into(), friend("Secret Friend", 1));
         s.extra.insert("later".into(), serde_json::json!({"kept": true}));
-        let sealed = seal(&[1; 32], b"user", &s);
-        assert_eq!(sealed.len(), 12 + 1024 + 16, "padded");
+        let sealed = seal(&[1; 32], b"user", &s).unwrap();
+        assert_eq!(sealed.len(), 1024, "padded");
         assert!(!sealed.windows(6).any(|w| w == b"Secret"));
         assert_eq!(open(&[1; 32], b"user", &sealed).unwrap(), s, "unknown fields carried along");
         assert!(open(&[2; 32], b"user", &sealed).is_err());
         assert!(open(&[1; 32], b"other", &sealed).is_err());
+    }
+
+    #[test]
+    fn sealed_sizes_are_buckets_and_old_blobs_still_open() {
+        let key = [3; 32];
+        for (len, size) in [(1, 1024), (991, 1024), (992, 4096), (4063, 4096), (16000, 16384), (61407, 61440)] {
+            let sealed = seal_padded(&key, b"ad", &vec![b'x'; len]).unwrap();
+            assert_eq!(sealed.len(), size, "{len} bytes");
+            assert_eq!(open_padded(&key, b"ad", &sealed).unwrap(), vec![b'x'; len]);
+        }
+        assert!(seal_padded(&key, b"ad", &[b'x'; 61408]).is_err(), "past the largest");
+        assert!(open_padded(&key, b"other", &seal_padded(&key, b"ad", b"x").unwrap()).is_none());
+        // Sealed before the padding: JSON with spaces after it.
+        let nonce = [7; 12];
+        let old = ChaCha20Poly1305::new(&key.into())
+            .encrypt(&nonce.into(), Payload { msg: b"{\"version\":3}   ", aad: b"ad" })
+            .unwrap();
+        let old = [nonce.to_vec(), old].concat();
+        assert_eq!(open_padded(&key, b"ad", &old).unwrap(), b"{\"version\":3}   ");
     }
 
     #[test]

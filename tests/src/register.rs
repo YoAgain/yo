@@ -26,6 +26,15 @@ struct Args {
     url: Option<String>,
 }
 
+/// The words whose auth key signs the fetch of every record here.
+fn door() -> Vec<String> {
+    yo_tests::backup::words([7; 16])
+}
+
+fn fetch_backup(http: &Http, id: &[u8]) -> Result<Option<Backup>, Error> {
+    Client::fetch_backup(http, id, &yo_core::backup::Door::Code(&door()))
+}
+
 fn args() -> Args {
     parse(std::env::args().skip(1)).unwrap_or_else(|error| {
         eprintln!("yo-register: {error}");
@@ -197,7 +206,7 @@ fn main() {
         None => println!("limit: first 429 at registration {first_429:?}"),
     }
     let fetch = Http::new(limited_url.clone());
-    let fetched: Vec<_> = (0..allowed + 1).map(|_| Client::fetch_backup(fetch.as_ref(), &[0; 16])).collect();
+    let fetched: Vec<_> = (0..allowed + 1).map(|_| fetch_backup(&fetch, &[0; 16])).collect();
     if local.is_some() {
         check(fetched[..allowed].iter().all(|r| *r == Ok(None)), "backup fetches within the limit");
         check(fetched[allowed] == Err(Error::Refused(status::RATE_LIMITED)), "backup fetch over the limit is 429");
@@ -211,7 +220,8 @@ fn main() {
         l
     };
     let record = move |i: usize, round: u8| {
-        Backup::new(vec![1; 60], vec![2; 60], vec![round; 1000 + i % 500], locator(i, round).to_vec())
+        let auth = yo_core::backup::Door::Code(&door()).auth_key().verifying_key().to_bytes();
+        Backup::new(vec![1; 60], vec![2; 60], vec![round; 1000 + i % 500], locator(i, round).to_vec(), None, auth)
     };
     let items: Vec<(usize, Client)> = clients.drain(..).enumerate().collect();
     let (stored, mut micros, s) = parallel(items, args.threads, move |(i, mut c)| {
@@ -225,8 +235,8 @@ fn main() {
     let u = url.clone();
     let (found, mut micros, s) = parallel(ids.clone(), args.threads, move |(i, user)| {
         let http = Http::new(u.clone());
-        let by_user = Client::fetch_backup(http.as_ref(), &user);
-        let by_locator = Client::fetch_backup(http.as_ref(), &locator(i, 1));
+        let by_user = fetch_backup(&http, &user);
+        let by_locator = fetch_backup(&http, &locator(i, 1));
         by_user == Ok(Some(record(i, 1))) && by_locator == Ok(Some(record(i, 1)))
     });
     check(found.iter().all(|ok| *ok), "every backup found by user id and by locator");
@@ -235,8 +245,8 @@ fn main() {
     let http = Http::new(url.clone());
     for (i, client) in clients.iter_mut().take(20) {
         check(client.put_backup(&record(*i, 2)).is_ok(), "backup replaced");
-        check(Client::fetch_backup(http.as_ref(), &locator(*i, 1)) == Ok(None), "old locator finds nothing");
-        check(Client::fetch_backup(http.as_ref(), &locator(*i, 2)) == Ok(Some(record(*i, 2))), "new locator");
+        check(fetch_backup(&http, &locator(*i, 1)) == Ok(None), "old locator finds nothing");
+        check(fetch_backup(&http, &locator(*i, 2)) == Ok(Some(record(*i, 2))), "new locator");
     }
     // Another account cannot take a locator.
     if let Some((_, other)) = clients.get_mut(20) {
@@ -268,7 +278,7 @@ fn main() {
     }
     if let Some((_, client)) = clients.iter_mut().skip(n_again).last() {
         let bad_version = yo_wire::encode(&Backup { version: 9, ..record(0, 3) });
-        let short_locator = yo_wire::encode(&Backup::new(vec![1], vec![2], vec![3], vec![4; 15]));
+        let short_locator = yo_wire::encode(&Backup { locator: vec![4; 15].into(), ..record(0, 3) });
         for body in garbage.iter().cloned().chain([bad_version, short_locator]) {
             let status = client.signed_for_tests("PUT", api::BACKUP, &body).unwrap().status;
             statuses.push(status);

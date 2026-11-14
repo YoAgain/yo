@@ -4,6 +4,7 @@
 //! MLS groups to the order of commits, is here. Every operation either completes or leaves the state as it was,
 //! except what the hub has already accepted, which is kept.
 
+pub mod backup;
 pub mod error;
 pub mod identity;
 pub mod media;
@@ -14,7 +15,7 @@ pub mod storage;
 
 pub use error::{Error, Result};
 pub use net::{Response, Transport};
-pub use yo_wire::api::{Backup, Push, REPORT_ABUSE, REPORT_OTHER, REPORT_SPAM};
+pub use yo_wire::api::{Backup, Push, BACKUP_VERSION, REPORT_ABUSE, REPORT_OTHER, REPORT_SPAM};
 pub use yo_wire::content::{Content, Media};
 
 use ed25519_dalek::{Signer as _, SigningKey};
@@ -283,6 +284,18 @@ fn wall_ms() -> u64 {
     SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_millis() as u64
 }
 
+/// The time and signature headers of a signed request (spec 6.2), by `key`: a device's auth key, or a backup door's.
+fn signature_headers(
+    key: &SigningKey,
+    method: &str,
+    path: &str,
+    time: u64,
+    body_hash: &[u8; 32],
+) -> Vec<(String, String)> {
+    let signature = key.sign(&yo_wire::request::to_be_signed_hash(method, path, time, body_hash));
+    vec![(HEADER_TIME.to_owned(), time.to_string()), (HEADER_SIGNATURE.to_owned(), yo_wire::b64(&signature.to_bytes()))]
+}
+
 fn mls<E: std::fmt::Debug>(error: E) -> Error {
     Error::Mls(format!("{error:?}"))
 }
@@ -493,24 +506,6 @@ impl Client {
         let response = self.signed("PUT", api::BACKUP, &encode(backup))?;
         match response.status {
             status::NO_CONTENT => Ok(()),
-            _ => Err(refused(&response)),
-        }
-    }
-
-    /// Fetches a backup record by the user id (a passkey's user handle) or by the recovery code's locator (spec 7),
-    /// before there is an account on this phone; `None` when there is none.
-    pub fn fetch_backup(transport: &dyn Transport, id: &[u8]) -> Result<Option<api::Backup>> {
-        if id.len() != api::LOCATOR_LEN {
-            return Err(Error::Protocol("backup id"));
-        }
-        let response = transport.request("GET", &api::backup_path(id), &[], &[]).map_err(Error::Network)?;
-        match response.status {
-            status::OK => {
-                let backup: api::Backup = decode(&response.body)?;
-                backup.check()?;
-                Ok(Some(backup))
-            }
-            status::NOT_FOUND => Ok(None),
             _ => Err(refused(&response)),
         }
     }
@@ -826,12 +821,8 @@ impl Client {
         self.last_request_ms = time;
         self.state.signed_until = time;
         let key = SigningKey::from_bytes(&self.state.auth_secret);
-        let signature = key.sign(&yo_wire::request::to_be_signed_hash(method, path, time, body_hash));
-        let headers = vec![
-            (HEADER_DEVICE.to_owned(), yo_wire::b64(&self.state.device_id)),
-            (HEADER_TIME.to_owned(), time.to_string()),
-            (HEADER_SIGNATURE.to_owned(), yo_wire::b64(&signature.to_bytes())),
-        ];
+        let mut headers = vec![(HEADER_DEVICE.to_owned(), yo_wire::b64(&self.state.device_id))];
+        headers.extend(signature_headers(&key, method, path, time, body_hash));
         (headers, time)
     }
 

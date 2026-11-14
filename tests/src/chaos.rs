@@ -869,7 +869,8 @@ fn op_misc(w: &World, a: &mut Acct, rng: &mut Rng) {
                 let mut locator = [0u8; 16];
                 locator[..8].copy_from_slice(&rng.next_u64().to_le_bytes());
                 locator[8..].copy_from_slice(&rng.next_u64().to_le_bytes());
-                let backup = Backup::new(vec![1; 60], vec![2; 60], vec![3; 300], locator.to_vec());
+                let auth = yo_core::backup::Door::Passkey(&[9; 32]).auth_key().verifying_key().to_bytes();
+                let backup = Backup::new(vec![1; 60], vec![2; 60], vec![3; 300], locator.to_vec(), None, auth);
                 match client.put_backup(&backup) {
                     Ok(()) => a.backed_up = Some(true),
                     Err(error) => {
