@@ -39,17 +39,18 @@ struct YoApp: App {
   var body: some Scene {
     WindowGroup {
       // No account yet (or after "Reset Yo"): the way in; then the list.
+      // A build the hub no longer takes (426): only the update screen, nothing behind it (VoiceOver included).
       Group {
-        if accounts.account == nil {
+        if AppUpdate.shared.needed {
+          UpdateScreen().transition(.opacity)
+        } else if accounts.account == nil {
           Onboarding().transition(.opacity)
         } else {
           FriendList().transition(.opacity)
         }
       }
       .animation(.smooth(duration: 0.5), value: accounts.account == nil)
-      .overlay {
-        if AppUpdate.shared.needed { UpdateScreen().transition(.opacity) }
-      }
+      .animation(.smooth(duration: 0.5), value: AppUpdate.shared.needed)
       // The saved state is gone or does not open: the account on this phone is signed in again (AccountStore.recover).
       .alert("Can’t Open Your Account", isPresented: Binding(get: { accounts.broken }, set: { _ in })) {
         Button("Sign In Again") { Task { await accounts.recover() } }
