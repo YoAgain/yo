@@ -31,9 +31,9 @@ enum Perf {
   private static func write(_ line: String) {
     if toStderr { return FileHandle.standardError.write(Data(line.utf8)) }
     if file == nil {
-      if !FileManager.default.fileExists(atPath: url.path) { FileManager.default.createFile(atPath: url.path, contents: nil) }
-      file = try? FileHandle(forWritingTo: url)
-      _ = try? file?.seekToEnd()
+      // Appending: the file may be emptied between measurements.
+      let fd = open(url.path, O_WRONLY | O_APPEND | O_CREAT, 0o644)
+      if fd >= 0 { file = FileHandle(fileDescriptor: fd, closeOnDealloc: true) }
     }
     file?.write(Data(line.utf8))
   }
