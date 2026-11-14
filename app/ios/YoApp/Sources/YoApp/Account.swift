@@ -503,7 +503,7 @@ final class AccountStore {
   /// optionally under new words (the old locator then finds nothing). Always with the doors' auth keys.
   private func rewrap(_ passkey: Door, code new: [String]? = nil) async throws {
     guard var account, let client else { throw AccountError.noBackup }
-    let (opened, code) = try await ownBackup(account)
+    let (opened, code) = try await ownBackup(account, by: client)
     let record = opened.record
     let words = new ?? code
     let door: YoPasskeyDoor =
@@ -533,15 +533,18 @@ final class AccountStore {
 
   /// The backup, by the words on this phone: new ones staged and not settled first (the hub may have taken them and its
   /// answer been lost), else the ones there; whichever open it are the words from then on.
-  private func ownBackup(_ account: Account) async throws -> (YoOpenedBackup, [String]) {
+  /// Signed out (or out and in again) during a fetch: the words on this phone are the next account's, left alone.
+  private func ownBackup(_ account: Account, by client: YoClient) async throws -> (YoOpenedBackup, [String]) {
     var tries = [RecoveryWords.pending(), RecoveryWords.load()].compactMap { $0 }
     if tries.count == 2 && tries[0] == tries[1] { tries.removeLast() }
     for (index, words) in tries.enumerated() {
       do {
         let opened = try await fetchBackup(by: .words(words: words), userID: account.userID)
+        try still(client)
         try? RecoveryWords.settle(words)
         return (opened, words)
       } catch AccountError.noBackup where index < tries.count - 1 {
+        try still(client)
         continue  // not these: the others
       }
     }
