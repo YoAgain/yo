@@ -1,9 +1,16 @@
 // The notification service extension: a push says only "Yo" (the hub knows nothing more, spec 6.3); this one makes
-// it "Yo from YoGPT" ("📷 from …", "🎥 from …", "3 Yos from …"). It opens the app's state as a guest (SharedState.swift:
-// in turns with the app, under the lock in the App Group), receives once without waiting, and names the sender of
-// the newest Yo. What it receives stays in the state for the app (never acknowledged here), which shows it as ever.
-// Within the extension's limits (about 24 MB, 30 s): no photo or video is fetched here, and the push goes out as it
-// came ("Yo") when the app holds the lock (it is in front then and shows Yos itself), there is no state, the hub
+// it "Yo from YoGPT" ("📷 from …", "🎥 from …", "3 Yos from …", ShareBridge.yo). It opens the app's state as a guest
+// (SharedState.swift: in turns with the app, under the lock in the App Group), receives once without waiting, and
+// names who the new Yos are from (a line per sender, the newest first). What it receives stays in the state for the
+// app (never acknowledged here), which shows it as ever. Within the extension's limits (about 24 MB, 30 s): no photo
+// or video is fetched here.
+//
+// The hub pushes once per envelope, and not every envelope is a new Yo: the Welcome before a friend's first Yo, the
+// rest of a burst a push before already took, a commit, a blocked sender's Yo (dropped unseen, spec 4.8), a Yo the app
+// took itself (it was open, or just left: then it writes the notification itself). Such a push, read and found with
+// nothing new, goes out quietly (no sound, no banner) and takes the place of the Yo notification shown last, rather
+// than lying on top of it as one more "Yo". It goes out as it came ("Yo", with the sound) when nothing could be read:
+// the app holds the lock longer than `lockWait` (it is in front then and shows Yos itself), there is no state, the hub
 // does not answer in time, or the time is up.
 import Foundation
 import UserNotifications
@@ -17,18 +24,28 @@ final class NotificationService: UNNotificationServiceExtension {
     _ request: UNNotificationRequest, withContentHandler contentHandler: @escaping (UNNotificationContent) -> Void
   ) {
     let content = (request.content.mutableCopy() as? UNMutableNotificationContent) ?? UNMutableNotificationContent()
+    content.title = ""  // "Yo" once, not as title and text
     pending.set(content: content, handler: contentHandler)
     let pending = pending
     DispatchQueue.global(qos: .userInitiated).async {
-      if let line = Self.line() {
+      switch Self.newest() {
+      case .yos(let senders):
+        pending.update { ShareBridge.yo($0, senders) }
+      case .nothingNew:
+        let last = Self.lastYo()
         pending.update { content in
-          content.title = ""
-          content.body = line.text
-          content.threadIdentifier = line.user
-          content.userInfo["from"] = line.name
-          content.userInfo["user"] = line.user  // for Yo Back, also to someone not on the list yet
-          content.userInfo["id"] = line.id
+          if let last {
+            content.body = last.content.body
+            content.threadIdentifier = last.content.threadIdentifier
+            content.categoryIdentifier = last.content.categoryIdentifier
+            content.userInfo = last.content.userInfo
+          }
+          content.sound = nil
+          content.interruptionLevel = .passive
         }
+        if let last { UNUserNotificationCenter.current().removeDeliveredNotifications(withIdentifiers: [last.identifier]) }
+      case .unread:
+        break
       }
       pending.deliver()
     }
@@ -39,43 +56,56 @@ final class NotificationService: UNNotificationServiceExtension {
     pending.deliver()
   }
 
-  struct Line: Sendable {
-    let text: String
-    let name: String
-    let user: String
-    /// The Yo as the app's inbox calls it ("user/sent at"): shown once, from here or from the core.
-    let id: String
+  enum Found: Sendable {
+    /// New Yos, by sender, the newest first.
+    case yos([ShareBridge.Yos])
+    /// Read: nothing new to show.
+    case nothingNew
+    /// Nothing could be read.
+    case unread
   }
 
-  /// What the newest Yo says, nil when nothing new came (or nothing could be read).
-  private static func line() -> Line? {
-    guard let client = Guest.open(within: 3, timeout: 10) else { return nil }
-    guard let events = try? client.sync(waitS: 0) else { return nil }
-    var newest: (user: String, sentAtMs: UInt64, kind: MessageKind)?
-    var count: [String: Int] = [:]
+  /// How long the app may hold the state before the push goes out as it came.
+  static let lockWait = 10.0
+
+  /// The Yo notification shown last and not seen yet (the app takes them all in when it opens).
+  private static func lastYo() -> UNNotificationRequest? {
+    final class Last: @unchecked Sendable { var request: UNNotificationRequest? }
+    let last = Last()
+    let done = DispatchSemaphore(value: 0)
+    UNUserNotificationCenter.current().getDeliveredNotifications { delivered in
+      last.request = delivered.filter { $0.request.content.categoryIdentifier == ShareBridge.yoCategory }
+        .max { $0.date < $1.date }?.request
+      done.signal()
+    }
+    return done.wait(timeout: .now() + 2) == .success ? last.request : nil
+  }
+
+  private static func newest() -> Found {
+    guard let client = Guest.open(within: lockWait, timeout: 10), let events = try? client.sync(waitS: 0) else {
+      return .unread
+    }
+    var senders: [String: (count: Int, sentAtMs: UInt64, kind: MediaFile.Kind?)] = [:]
     for event in events {
-      guard case .message(let user, let sentAtMs, let kind) = event else { continue }
-      switch kind {
-      case .yo, .photo, .video: break
+      guard case .message(let user, let sentAtMs, let message) = event else { continue }
+      let kind: MediaFile.Kind?
+      switch message {
+      case .yo: kind = nil
+      case .photo: kind = .photo
+      case .video: kind = .video
       default: continue  // nothing the app shows
       }
-      count[user, default: 0] += 1
-      if newest == nil || sentAtMs >= newest!.sentAtMs { newest = (user, sentAtMs, kind) }
+      let before = senders[user]
+      let newer = before.map { sentAtMs >= $0.sentAtMs } ?? true
+      senders[user] = ((before?.count ?? 0) + 1, newer ? sentAtMs : before!.sentAtMs, newer ? kind : before!.kind)
     }
-    guard let newest else { return nil }
-    let name = name(of: newest.user, client: client)
-    let several = count[newest.user] ?? 1
-    let text: String =
-      if several > 1 {
-        "\(several) Yos from \(name)"
-      } else {
-        switch newest.kind {
-        case .photo: "📷 from \(name)"
-        case .video: "🎥 from \(name)"
-        default: "Yo from \(name)"
-        }
-      }
-    return Line(text: text, name: name, user: newest.user, id: "\(newest.user)/\(newest.sentAtMs)")
+    guard !senders.isEmpty else { return .nothingNew }
+    return .yos(
+      senders.sorted { $0.value.sentAtMs > $1.value.sentAtMs }.map { user, yos in
+        ShareBridge.Yos(
+          name: name(of: user, client: client), user: user, count: yos.count, kind: yos.kind,
+          id: "\(user)/\(yos.sentAtMs)")
+      })
   }
 
   /// The name as the app's list shows it (ShareBridge: the friends it published), else as the core knows them.

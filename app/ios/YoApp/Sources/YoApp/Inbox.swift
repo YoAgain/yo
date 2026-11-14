@@ -97,7 +97,7 @@ final class Inbox {
   static let soundsPerSecond = 10
 
   /// The notification's category: "Yo back" right on it, as the original had, sent without opening the app.
-  nonisolated static let category = "yo"
+  nonisolated static let category = ShareBridge.yoCategory
   nonisolated static let yoBack = "yo.back"
 
   func askForNotifications() async {
@@ -288,6 +288,8 @@ final class Inbox {
   private func take(_ events: [YoEvent], contacts: [YoContact], client: YoClient, friends: Friends) async {
     friends.markGone(contacts)  // a delivery found their account gone (`NotOnYo` from now on)
     guard !events.isEmpty else { return }
+    // Per sender: how many Yos, the newest's kind, name and id; for a notification when the app is not in front.
+    var unshown: [String: (count: Int, kind: MediaFile.Kind?, name: String, id: String)] = [:]
     func friend(_ user: String) -> Friend {
       friends.friend(user: user, handles: contacts.first { $0.user == user }?.handles ?? [])
     }
@@ -303,6 +305,7 @@ final class Inbox {
         }
         let sender = friend(user)
         received(id: "\(user)/\(sentAtMs)", from: sender.name)
+        unshown[user] = ((unshown[user]?.count ?? 0) + 1, media?.1, sender.name, "\(user)/\(sentAtMs)")
         // On top it goes by the list, in one step with the others and never under a finger (FriendList.rise).
         count(from: sender.name)
         if let (media, kind) = media {
@@ -314,9 +317,22 @@ final class Inbox {
         break
       }
     }
+    if UIApplication.shared.applicationState == .background { await notify(unshown) }
     // Photos and videos are noted (above) before the core may forget their Yos; fetched from here on.
     _ = try? await Hub.run { client.acknowledgeEvents() }
     fetchMedia(client: client)
+  }
+
+  /// Yos the app took itself while not in front (just left, its wait at the hub still running): the notification the
+  /// notification service would have written, which finds nothing new then. Not for a Yo it already wrote.
+  private func notify(_ unshown: [String: (count: Int, kind: MediaFile.Kind?, name: String, id: String)]) async {
+    let center = UNUserNotificationCenter.current()
+    let written = Set(await center.deliveredNotifications().compactMap { $0.request.content.userInfo["id"] as? String })
+    for (user, yo) in unshown where !written.contains(yo.id) {
+      let content = UNMutableNotificationContent()
+      ShareBridge.yo(content, [ShareBridge.Yos(name: yo.name, user: user, count: yo.count, kind: yo.kind, id: yo.id)])
+      try? await center.add(UNNotificationRequest(identifier: yo.id, content: content, trigger: nil))
+    }
   }
 
   /// A photo's or video's own id: who, when, and which blob (two at the same moment are two).
@@ -335,18 +351,20 @@ final class Inbox {
     show(Arrival(id: id, from: sender))
   }
 
-  /// On opening the app: the Yo notifications waiting in Notification Center come in, oldest first, and leave it.
+  /// On opening the app: the Yo notifications waiting in Notification Center come in, oldest first, and leave it, with
+  /// the pushes that named nobody ("Yo": the core brings their Yos, if any).
   func collectDelivered() async {
     let center = UNUserNotificationCenter.current()
-    let waiting = await center.deliveredNotifications()
-      .filter { $0.request.content.categoryIdentifier == Self.category }
-      .sorted { $0.date < $1.date }
+    let delivered = await center.deliveredNotifications()
+    let waiting = delivered.filter { $0.request.content.categoryIdentifier == Self.category }.sorted { $0.date < $1.date }
     for notification in waiting {
       let info = notification.request.content.userInfo
+      guard let sender = info["from"] as? String else { continue }
       // The Yo's own id when the notification service knew it, as when one is tapped: the core's Yo is not shown again.
-      received(id: info["id"] as? String ?? notification.request.identifier, from: info["from"] as? String ?? "Unknown sender")
+      received(id: info["id"] as? String ?? notification.request.identifier, from: sender)
     }
-    center.removeDeliveredNotifications(withIdentifiers: waiting.map(\.request.identifier))
+    center.removeDeliveredNotifications(
+      withIdentifiers: delivered.filter { $0.request.identifier != SecureReminder.id }.map(\.request.identifier))
   }
 
   /// Photos and videos seen (each once): they are gone, from this iPhone too.

@@ -28,8 +28,9 @@ info["CFBundleDisplayName"] = "Yo"
 plistlib.dump(info, open(sys.argv[1], "wb"))
 PY
 cp AppIcon-dev.png xtool/YoApp.app/AppIcon.png
-# Without the extensions (share sheet, notification service): they share the state through the App Group of Yo from the
-# App Store (group.app.justyo.ios), which Yo Dev has not; Yo Dev finds no group and keeps its state to itself.
+# Without the extensions (share sheet, notification service): they share the state through an App Group (Yo Dev's
+# would be group.app.justyo.ios.dev, ShareBridge.group), which Yo Dev's development profiles do not grant; Yo Dev finds
+# no group and keeps its state to itself, and its pushes say only "Yo".
 rm -rf xtool/YoApp.app/PlugIns
 mkdir -p build
 "$here/sign.sh" xtool/YoApp.app build/YoApp.ipa   # the app's own entitlements on top of the profile's
