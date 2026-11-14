@@ -140,9 +140,10 @@ final class SharedStateFile: StateStore, StateLock, @unchecked Sendable {
     Self.excludeFromBackup(stateURL)
   }
 
-  /// Signed out: the state goes (under the lock), unless it is not the one signed out of any more (`word`).
-  static func delete(ifStill word: String?) {
-    guard let stateURL, Self.word() == word else { return }
+  /// Signed out: the state goes (under the lock), whatever a step saved last; the next account's is made only after
+  /// (`AccountStore.register` waits for it).
+  static func delete() {
+    guard let stateURL else { return }
     try? FileManager.default.removeItem(at: stateURL)
   }
 
@@ -206,7 +207,7 @@ final class SharedStateFile: StateStore, StateLock, @unchecked Sendable {
 /// moved in, the keychain locked) or the app does not give the lock within `seconds`.
 enum Guest {
   static func open(within seconds: Double, timeout: TimeInterval = 70) -> YoClient? {
-    guard SharedStateFile.available, let key = StateKey.shared(),
+    guard SharedStateFile.available, let key = try? StateKey.shared(),
       SharedStateFile.take(within: seconds)
     else { return nil }
     defer { SharedStateFile.give() }

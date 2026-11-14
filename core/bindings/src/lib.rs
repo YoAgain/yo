@@ -132,7 +132,7 @@ impl yo_core::Store for Store {
 
 /// A photo or video a Yo carries (spec 5): where the hub keeps it, encrypted, and what opens and checks it. The key
 /// is the app's to keep until the photo is seen, then to forget.
-#[derive(uniffi::Record, Clone)]
+#[derive(uniffi::Record, Clone, PartialEq)]
 pub struct YoMedia {
     /// 16 bytes.
     pub id: Vec<u8>,
@@ -207,7 +207,7 @@ pub fn media_retry_later(error: &YoError) -> bool {
     }
 }
 
-#[derive(uniffi::Enum)]
+#[derive(uniffi::Enum, PartialEq)]
 pub enum MessageKind {
     Yo,
     /// A Yo with a photo (JPEG or HEIC).
@@ -250,7 +250,7 @@ impl From<Content> for MessageKind {
     }
 }
 
-#[derive(uniffi::Enum)]
+#[derive(uniffi::Enum, PartialEq)]
 /// `user` is the contact's user id: what `contacts()` describes and `send_yo` takes to answer.
 pub enum YoEvent {
     NewChat { user: String },
@@ -590,6 +590,25 @@ impl YoClient {
     /// The events the last call returned are shown or stored: they will not come again after a crash.
     pub fn acknowledge_events(&self) {
         _ = self.with(|c| c.acknowledge_events());
+    }
+
+    /// From now on, each call's events stay until `acknowledge` names them: for an app making calls side by side,
+    /// where one call must not acknowledge what another handed out and the app has not stored yet.
+    pub fn acknowledge_explicitly(&self) {
+        _ = self.with(|c| c.acknowledge_explicitly());
+    }
+
+    /// These events (a batch a call returned, or some of it) are shown or stored: they will not come again after a
+    /// crash. Others handed out stay.
+    pub fn acknowledge(&self, events: Vec<YoEvent>) {
+        let mut left = events;
+        _ = self.with(|c| {
+            c.acknowledge_only(|handed| {
+                let handed = YoEvent::from(handed.clone());
+                let found = left.iter().position(|event| *event == handed);
+                found.map(|at| left.swap_remove(at)).is_some()
+            })
+        });
     }
 
     pub fn user_id(&self) -> String {

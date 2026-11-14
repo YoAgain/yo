@@ -49,6 +49,12 @@ struct YoApp: App {
       .overlay {
         if AppUpdate.shared.needed { UpdateScreen().transition(.opacity) }
       }
+      // The saved state is gone or does not open: the account on this phone is signed in again (AccountStore.recover).
+      .alert("Can’t Open Your Account", isPresented: Binding(get: { accounts.broken }, set: { _ in })) {
+        Button("Sign In Again") { Task { await accounts.recover() } }
+      } message: {
+        Text("Yo can’t open your account on this iPhone. Sign in again to keep using it.")
+      }
       .onChange(of: accounts.account == nil) { _, out in
         // Out, however (signed out, deleted, or the account taken to another iPhone): this phone's friends go too.
         if out {
@@ -76,14 +82,16 @@ struct YoApp: App {
       // The core opened (after a start or a sign-in): what waits goes.
       .onChange(of: accounts.client == nil, initial: true) { _, none in
         guard !none, let client = accounts.client else { return }
-        outbox.received = { [inbox, friends] events, contacts, client in
-          await inbox.handle(events, contacts: contacts, client: client, friends: friends)
+        outbox.received = { [inbox, friends, accounts] events, contacts, client in
+          await inbox.handle(events, contacts: contacts, client: client, accounts: accounts, friends: friends)
         }
         outbox.flush(accounts: accounts)
         ShareInbox.take(outbox: outbox, accounts: accounts)
         inbox.fetchMedia(client: client)
         // The account's storage: after a restore, the friends and the app icon of the phone before.
         Task { await accounts.takeStorage(into: friends) }
+        // Key updates due (spec 4.4): also for a phone that only receives.
+        Task { await inbox.maintain(accounts: accounts, friends: friends) }
       }
         .environment(inbox)
         .environment(friends)
@@ -103,6 +111,8 @@ struct YoApp: App {
         .onChange(of: phase, initial: true) { _, phase in
           guard phase == .active else { return }
           Task { await inbox.collectDelivered() }
+          // In front again: key updates due (spec 4.4); on the first opening, once the core has opened (above).
+          Task { await inbox.maintain(accounts: accounts, friends: friends) }
           // What the hub said "later" to goes now (the outbox's events go to the inbox, set when the core opened).
           outbox.flush(accounts: accounts)
           ShareInbox.take(outbox: outbox, accounts: accounts)  // what was shared meanwhile
