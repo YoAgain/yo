@@ -469,8 +469,13 @@ final class ReceivedMedia {
 
   private func startMore() {
     guard let client, let arrived, !HubTransport.unsupported, load() else { return }
+    // While a download is not written (a full disk), nothing new is fetched: only what is held in memory is tried
+    // again, so the memory held stays bounded and nothing fetched for the last time is lost to a kill.
+    let holding = !unwritten.isEmpty
     for one in pending
-    where !fetching.contains(one.id) && fetching.count < Self.together && (resting[one.id]?.until ?? .distantPast) <= .now {
+    where !fetching.contains(one.id) && fetching.count < Self.together && (resting[one.id]?.until ?? .distantPast) <= .now
+      && (!holding || unwritten[one.id] != nil)
+    {
       fetching.insert(one.id)
       Task { await fetch(one, client: client, arrived: arrived) }
     }
