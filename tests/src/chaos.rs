@@ -634,6 +634,8 @@ fn note_error(w: &World, a: &Acct, what: &str, error: &Error) {
         Error::Network(_) => w.stats.count(format!("{what}: network")),
         Error::Refused(status) if *status == 429 || *status >= 500 => w.stats.count(format!("{what}: {status}")),
         _ if a.proc_.crashed.load(Relaxed) => w.stats.count(format!("{what}: during a crash")),
+        // A block the device took in from the storage during the call.
+        Error::Blocked => w.stats.count(format!("{what}: blocked")),
         _ => {
             w.stats.violation(format!("{} ({}) {what}: {error}", a.name, a.user));
             w.dump(&a.user);
@@ -657,7 +659,8 @@ fn pick_peer(w: &World, a: &mut Acct, rng: &mut Rng) -> Option<(usize, Entry)> {
     } else {
         rng.below(dir.len() as u64) as usize
     };
-    (j != a.idx).then(|| (j, dir[j].clone()))
+    // Not oneself, not an account that never registered.
+    (j != a.idx && dir[j].user.len() == 32).then(|| (j, dir[j].clone()))
 }
 
 fn op_send(w: &World, a: &mut Acct, rng: &mut Rng) {
@@ -923,8 +926,18 @@ fn restart(w: &World, a: &mut Acct, rng: &mut Rng) {
 /// A new phone with the same account key (restored from the backup): the old device answers 410 from then on.
 fn op_new_phone(w: &World, a: &mut Acct, rng: &mut Rng) {
     let proc_ = Proc::new(&w.net, &w.stats, w.args.faults, rng.next_u64());
-    let mut client = match register(w, &a.name, Some(a.secret), &proc_) {
+    // On a hub with its limits, one try: the address's registrations are few, the phone waits for another day.
+    let tried = if w.args.url.is_some() {
+        Client::register_username(proc_.clone(), &a.name, Some(a.secret), None, Push::none())
+    } else {
+        register(w, &a.name, Some(a.secret), &proc_)
+    };
+    let mut client = match tried {
         Ok(client) => client,
+        Err(Error::Refused(429)) => {
+            w.stats.count("new phone: 429, not now");
+            return;
+        }
         Err(error) => {
             w.stats.violation(format!("{}: a new phone with the account key: {error}", a.name));
             return;
