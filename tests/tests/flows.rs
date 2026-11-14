@@ -731,19 +731,14 @@ fn later(phone: &Phone, ms: u64) {
 const HOUR: u64 = 3600 * 1000;
 const DAY: u64 = 24 * HOUR;
 
-/// A friend whose app is too old for sessions (its device has no prekeys at the hub): the Yo waits, `Outdated`, the
-/// friend shows "needs update"; once its prekeys are there, the outbox goes, each Yo once, in order.
-#[test]
-fn a_friend_who_must_update_gets_what_waited_once_prekeys_appear() {
-    let (config, dir) = hub_on_file();
-    let hub = TestHub::start_with(config.clone(), "127.0.0.1:0");
-    let (a, b) = pair(&hub);
+/// B's device as an app from before sessions has it at the hub: without prekeys. The closure brings them back, as
+/// the update uploads them.
+fn old_app(config: &yo_hub::config::Config, b: &Phone) -> impl FnOnce() {
     let db = rusqlite::Connection::open(&config.db_path).unwrap();
     db.busy_timeout(std::time::Duration::from_secs(10)).unwrap();
     let device: Vec<u8> = db
         .query_row("SELECT id FROM devices WHERE user_id = ?1", [yo_tests::user_id(&b.user()).to_vec()], |r| r.get(0))
         .unwrap();
-    // The old app: its device without prekeys (kept aside, to bring back as the update would upload them).
     let rows: Vec<(i64, i64, Vec<u8>, Vec<u8>)> = db
         .prepare("SELECT kind, id, key, signature FROM prekeys WHERE device_id = ?1")
         .unwrap()
@@ -752,19 +747,32 @@ fn a_friend_who_must_update_gets_what_waited_once_prekeys_appear() {
         .collect::<Result<_, _>>()
         .unwrap();
     db.execute("DELETE FROM prekeys WHERE device_id = ?1", [&device]).unwrap();
+    move || {
+        for (kind, id, key, signature) in &rows {
+            db.execute(
+                "INSERT INTO prekeys (device_id, kind, id, key, signature) VALUES (?1, ?2, ?3, ?4, ?5)",
+                rusqlite::params![&device, kind, id, key, signature],
+            )
+            .unwrap();
+        }
+    }
+}
+
+/// A friend whose app is too old for sessions (its device has no prekeys at the hub): the Yo waits, `Outdated`, the
+/// friend shows "needs update"; once its prekeys are there, the outbox goes, each Yo once, in order.
+#[test]
+fn a_friend_who_must_update_gets_what_waited_once_prekeys_appear() {
+    let (config, dir) = hub_on_file();
+    let hub = TestHub::start_with(config.clone(), "127.0.0.1:0");
+    let (a, b) = pair(&hub);
+    let updated = old_app(&config, &b);
     assert!(matches!(a.send_yo(b.name.clone()), Err(YoError::Outdated)));
     assert!(matches!(a.send_yo(b.user()), Err(YoError::Outdated)));
     assert!(a.contacts().iter().any(|c| c.user == b.user() && c.outdated));
     assert_eq!(a.waiting(), 3, "the name and both Yos wait");
     assert_eq!(yos(&b.drain(), &a.user()), 0);
     // Updated: its prekeys are there. Asked again at most hourly.
-    for (kind, id, key, signature) in &rows {
-        db.execute(
-            "INSERT INTO prekeys (device_id, kind, id, key, signature) VALUES (?1, ?2, ?3, ?4, ?5)",
-            rusqlite::params![&device, kind, id, key, signature],
-        )
-        .unwrap();
-    }
+    updated();
     later(&a, HOUR + 1000);
     a.deliver().unwrap();
     assert_eq!(a.waiting(), 0, "the outbox went");
@@ -935,4 +943,24 @@ fn the_notification_service_decrypts_while_the_app_holds_the_state() {
     }
     assert_eq!(a.core_for_tests(|c| c.dropped()), 0);
     assert_eq!(b.core_for_tests(|c| c.dropped()), 0);
+}
+
+/// The friend who had to update writes first once it has: its session is there, so what waited goes with the next
+/// delivery, and the friend is no longer "needs update", nor is a Yo to it `Outdated`.
+#[test]
+fn a_friend_who_updated_and_writes_first_is_no_longer_outdated() {
+    let (config, dir) = hub_on_file();
+    let hub = TestHub::start_with(config.clone(), "127.0.0.1:0");
+    let (a, b) = pair(&hub);
+    let updated = old_app(&config, &b);
+    assert!(matches!(a.send_yo(b.user()), Err(YoError::Outdated)));
+    updated();
+    b.send_yo(a.user()).unwrap();
+    assert_eq!(yos(&a.drain(), &b.user()), 1);
+    assert_eq!(a.waiting(), 0, "what waited went with the session B's Yo made");
+    assert!(a.contacts().iter().all(|c| !c.outdated), "no longer needs an update");
+    a.send_yo(b.user()).unwrap();
+    assert_eq!(yos(&b.drain(), &a.user()), 2);
+    drop(hub);
+    let _ = std::fs::remove_dir_all(dir);
 }

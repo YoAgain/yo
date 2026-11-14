@@ -1162,6 +1162,16 @@ impl Client {
         }
     }
 
+    /// A contact noted as too old whose devices all have a session now (made by its own first message, after its
+    /// update): it is not any more, without waiting for the hourly lookup.
+    fn note_updated(&mut self, user: &str) {
+        if self.state.contacts.get(user).is_some_and(|c| c.outdated_at > 0) && self.without_session(user).is_empty() {
+            if let Some(contact) = self.state.contacts.get_mut(user) {
+                contact.outdated_at = 0;
+            }
+        }
+    }
+
     /// Encrypts a message for every device of a user (spec 4.4) and seals it to the user's account (6.1): one
     /// envelope, a copy per device.
     fn encrypt_for(&mut self, user: &str, plain: &[u8]) -> Result<(Vec<u8>, Vec<Key>)> {
@@ -1377,6 +1387,11 @@ impl Client {
     /// The sessions the outbox needs, from the hub. A user it cannot get them for now waits.
     fn prepare(&mut self) -> Result<()> {
         let now = (self.clock)();
+        let outdated: Vec<String> =
+            self.state.contacts.iter().filter(|(_, c)| c.outdated_at > 0).map(|(user, _)| user.clone()).collect();
+        for user in outdated {
+            self.note_updated(&user);
+        }
         let users: BTreeSet<String> = self
             .state
             .outbox
@@ -1792,6 +1807,7 @@ impl Client {
         };
         // It opened: from that device of the account.
         self.note_device(&user, payload.device_key, payload.device_id)?;
+        self.note_updated(&user);
         let plain: Plain = decode(&plaintext)?;
         let message = Message::decode(plain.content.as_slice())?;
         if own {
