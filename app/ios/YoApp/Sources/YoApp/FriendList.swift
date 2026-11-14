@@ -408,8 +408,8 @@ struct FriendList: View {
     }
   }
 
-  /// The last bar: "+", as in the original. Tapped, it opens into bars of their own: Add Friend (the name typed right
-  /// there), Add Group, Invite, and Settings in red; a tap anywhere else, a scroll, or a while untouched closes it.
+  /// The last bar: "+", as in the original. Tapped, it opens into bars of their own: "+ Friend" (the name typed right
+  /// there), "+ Group", Invite, and Settings in red; a tap anywhere else, a scroll, or a while untouched closes it.
   @ViewBuilder private var addRow: some View {
     let color = Color.row(friends.nextColor).opacity(cameraOn ? 0.45 : 1)  // the colour the new friend will have
     if adding {
@@ -436,16 +436,18 @@ struct FriendList: View {
         }
         .onAppear { typing = true }
     } else if addMenu {
-      RowButton("Add Friend", color: Color.row(friends.nextColor).opacity(cameraOn ? 0.45 : 1)) {
+      RowButton("+ Friend", color: Color.row(friends.nextColor).opacity(cameraOn ? 0.45 : 1)) {
         withAnimation(.snappy) {
           addMenu = false
           adding = true
         }
       }
-      RowButton("Add Group", color: Color.row(friends.nextColor + 1).opacity(cameraOn ? 0.45 : 1)) {
+      .accessibilityLabel("Add Friend")
+      RowButton("+ Group", color: Color.row(friends.nextColor + 1).opacity(cameraOn ? 0.45 : 1)) {
         withAnimation(.snappy) { addMenu = false }
         newGroup = true
       }
+      .accessibilityLabel("Add Group")
       ShareLink(
         item: accounts.account.map { Invite.link(for: $0.username) } ?? URL(string: "https://justyo.co")!,
         message: Text("Yo! Add me on Yo:"),
