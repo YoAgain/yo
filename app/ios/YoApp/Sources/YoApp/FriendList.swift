@@ -432,8 +432,8 @@ struct FriendList: View {
     }
   }
 
-  /// The last bars: "+", as in the original (tapped, the name is typed right there), "+ Group" and "Invite" with the
-  /// share sign, each in the colour the next friend would have.
+  /// The last bar, in three parts: "+", as in the original (tapped, the name is typed right there in the whole bar),
+  /// "+ Group" and the share sign for an invite, each in the colour of a next friend.
   @ViewBuilder private var addRow: some View {
     let color = Color.row(friends.nextColor).opacity(cameraOn ? 0.45 : 1)  // the colour the new friend will have
     if adding {
@@ -460,36 +460,53 @@ struct FriendList: View {
         }
         .onAppear { typing = true }
     } else {
-      RowButton("+", color: color) {
-        withAnimation(.snappy) {
-          swiped = nil
-          adding = true
+      // One bar, three parts: "+" a friend (the most room), "+ Group", and the invite to share.
+      HStack(spacing: 0) {
+        Button {
+          withAnimation(.snappy) {
+            swiped = nil
+            adding = true
+          }
+        } label: {
+          addPart("+", color: color)
         }
+        .frame(maxWidth: .infinity)
+        .layoutPriority(1)
+        .accessibilityLabel("Add Friend")
+        Button { newGroup = true } label: {
+          addPart("+ Group", color: Color.row(friends.nextColor + 1).opacity(cameraOn ? 0.45 : 1))
+        }
+        .accessibilityLabel("Add Group")
+        ShareLink(
+          item: accounts.account.map { Invite.link(for: $0.username) } ?? URL(string: "https://justyo.co")!,
+          message: Text("Yo! Add me on Yo:"),
+          // What the share sheet shows at its top: whose link, and the app's icon (not a bare "justyo.co").
+          preview: SharePreview(
+            "Add \(accounts.account?.username ?? "Me") on Yo",
+            image: Image(uiImage: UIImage(named: "IconStandard") ?? UIImage()))
+        ) {
+          Image(systemName: "square.and.arrow.up")
+            .font(.system(size: 24, weight: .bold))
+            .foregroundStyle(.white)
+            .frame(width: Metrics.rowHeight, height: Metrics.rowHeight)
+            .background(Color.row(friends.nextColor + 2).opacity(cameraOn ? 0.45 : 1))
+        }
+        .accessibilityLabel("Invite")
       }
-      .accessibilityLabel("Add Friend")
+      .buttonStyle(.plain)
     }
-    RowButton("+ Group", color: Color.row(friends.nextColor + 1).opacity(cameraOn ? 0.45 : 1)) {
-      newGroup = true
-    }
-    .accessibilityLabel("Add Group")
-    ShareLink(
-      item: accounts.account.map { Invite.link(for: $0.username) } ?? URL(string: "https://justyo.co")!,
-      message: Text("Yo! Add me on Yo:"),
-      // What the share sheet shows at its top: whose link, and the app's icon (not a bare "justyo.co").
-      preview: SharePreview(
-        "Add \(accounts.account?.username ?? "Me") on Yo",
-        image: Image(uiImage: UIImage(named: "IconStandard") ?? UIImage()))
-    ) {
-      HStack(spacing: 10) {
-        Image(systemName: "square.and.arrow.up").font(.system(size: 22, weight: .bold))
-        Text("Invite")
-      }
+  }
+
+  /// A part of the last bar: its words white on its colour, as tall as a bar.
+  private func addPart(_ title: String, color: Color) -> some View {
+    Text(title)
       .font(.yo(Metrics.rowFont))
+      .lineLimit(1)
+      .minimumScaleFactor(0.5)
       .foregroundStyle(.white)
+      .padding(.horizontal, 12)
       .frame(maxWidth: .infinity, minHeight: Metrics.rowHeight)
-      .background(Color.row(friends.nextColor + 2).opacity(cameraOn ? 0.45 : 1))
-    }
-    .buttonStyle(.plain)
+      .background(color)
   }
 
   /// The name typed in Add Friend.
