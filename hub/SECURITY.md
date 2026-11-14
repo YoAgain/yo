@@ -28,7 +28,7 @@ Every fix is in commit `3d1cb97` on the branch `chaos-security` (with its tests:
 | 1 | High | **Disk exhaustion without an identity** (also Codex). `POST /v1/groups` then `POST /v1/groups/{id}/commit` with 64 KiB envelopes, 600 a minute: about 50 GiB a day from one address, kept 30 days; deliveries to accounts of one's own (5000 envelopes of 64 KiB per device, 10 accounts an hour) about as much. No budget or floor covered the database's disk. | Fixed: bytes delivered and committed are limited to 64 MiB per address per hour; deliveries, commits and new groups are `507` while the database's disk has less than 1 GiB free (`anonymous_bytes_per_ip_hour`, `db_min_free_bytes`). |
 | 2 | High (configuration) | **SMS in development mode by default** (also Codex). Without `YO_SMS`, every phone number verified with `000000`: anyone could register any number and take over an account registered by phone. The v1 apps do not use phone numbers. | Gone: the hub has no phone numbers and no SMS any more. |
 | 3 | Medium | **A stranger could spend a device's requests** (also Codex). The 1200 signed requests per device per minute were counted before the signature was checked: with a device's id and garbage signatures, anyone could keep that device at `429`. Device ids are not published, which made it harder, not impossible. | Fixed: counted once the signature holds. |
-| 4 | Medium | **Inbox answers and waits without a bound per device** (also Codex). An answer holds up to 100 envelopes of 64 KiB (6.4 MiB); one device could ask 1200 times a minute at once, each a wait of a minute or a full answer held in memory. | Fixed: 4 inbox requests of one device under way at once, more are `429`. |
+| 4 | Medium | **Inbox answers and waits without a bound per device** (also Codex). An answer holds up to 100 envelopes of 64 KiB (6.4 MiB); one device could ask 1200 times a minute at once, each a wait of a minute or a full answer held in memory. | Fixed: 4 inbox requests of one device under way at once (each until its answer has been sent), more are `429`. |
 | 5 | Low | **An APNs token went into a URL as it was sent.** `PUT /v1/push` takes any bytes; the APNs request is `https://api.push.apple.com/3/device/{token}` with the hub's credentials, so a device could make the hub send a request to another path on Apple's host. Nothing beyond that host, and nothing a device could not do with its own token. | Fixed: an APNs token that is not hex is treated as invalid and cleared. |
 | 6 | Low | **`YO_TRUST_CLOUDFLARE` with a public listening address.** The container's default `YO_LISTEN` is `0.0.0.0:8080`; published on anything but 127.0.0.1, anyone reaching it could name any address in `CF-Connecting-IP`, or none from a loopback address. | Mitigated: the hub warns at start when the listening address is not a loopback one. **Operator:** check the published port. |
 | 7 | Low | A size in MiB from the environment large enough to overflow made the hub panic (debug) or wrap (release). | Fixed: refused as an error. |
@@ -56,6 +56,25 @@ issuance is kept or logged. Tests: `tests/tests/tokens.rs`.
 | Low | **The issuance budget is in memory**, like every rate limit: a restart gives each device a fresh day. | As for all limits (`hub/src/limiter.rs`). The spent nonces, which matter for double spending, are in the database. |
 | Info | **A token's nonce is kept** until its key is deleted (30 to 60 days). | It is the client's random choice, never seen at issuance; it ties to nothing. |
 
+### A second Codex review: durability and what a cut-off request leaves
+
+Checked one by one against the code, all held; fixed on the branch `hub-hardening`, each with its test.
+
+| What | Fix | Test |
+|---|---|---|
+| A push error's text named the request's URL, which holds the APNs device token, into the log. | Logged without the URL; a service's answer with the token taken out. | `push::tests` |
+| WAL with `synchronous = NORMAL` could lose an acknowledged delivery or commit to a power cut (spec 4.7). | `FULL`; an ack alone without its own sync (a lost ack is a repeat the device skips). Numbers in `tests/README.md`. | `db::tests` |
+| Registration did not keep the app the request names (`Yo-App`). | Kept from the registration on. | `tests/app_version.rs` |
+| A long poll cut off left its waiter in the map. | Forgotten when dropped. | `tests/robustness.rs` |
+| An inbox request gave its place back before its answer was sent. | Held by the answer's body. | `lib.rs` tests |
+| A device replaced after it authenticated could still set the username, KeyPackages, the push token. | Checked in the write's own transaction, `410`. | `db::tests` |
+| A commit fetched for an epoch the group never had (0, before its first) was `410`, which restarts the chat (4.9). | The group's first epoch is kept; `404` outside first..current. | `tests/robustness.rs`, `db::tests` (migration) |
+| The prune deleted the next-token hash that recognises a repeated commit (4.3). | Kept for good (`accepted`), the envelope 30 days. | `tests/robustness.rs` |
+| Blob fetches at once could pass the blob's count. | A fetch takes its count as it starts, gives it back if cut off. | `tests/blobs.rs`, `db::tests` |
+| A crash between a blob's row and its file left an id `409` to its retry and `404` to every fetch. | Not ready until the file is in place; removed at the next start or within the hour. | `lib.rs` tests, `db::tests` |
+| A delivery's wake and push depended on its request surviving. | Done by the writer once stored. | `lib.rs` tests |
+| SQLite calls blocked the async workers. | On blocking threads (32 at once); see the commit for what stays. | the whole suite, `yo-load` |
+
 ## Accepted risks and open points
 
 | Severity | What | Why it stays |
@@ -64,7 +83,8 @@ issuance is kept or logged. Tests: `tests/tests/tokens.rs`.
 | Medium | **Anyone with an account can use up a user's single-use KeyPackages** with lookups (50 a day per device; also Codex). | The last resort KeyPackage keeps chats possible; the app refills below 20. A limit per looked-up user would let a stranger block lookups of that user instead. |
 | Low | **Anonymous storage from many addresses.** Finding 1's budget is per address (an IPv6 /64): someone with many addresses still stores 64 MiB an hour from each. | The disk floor keeps the disk from filling; the service then refuses deliveries until the cleanup (30 days) or the operator makes room. A global budget would let one attacker shut everyone out sooner. |
 | Low | **A delivery's `409` names a user's account key and device keys** to anyone who knows the user id, without the signed lookup's limit (also Codex). | Spec 4.6: the sender needs them to repair a group without an identity. User ids are handed out by lookups anyway; the keys are public keys. |
-| Low | **Tables that only grow:** `seen_key_packages` (every KeyPackage hash, forever, also after the account is deleted), `groups` (never pruned), `feedback` (10 a day per user, kept, without the sender once the account goes). Also Codex. | Small rows, each behind a signed or rate-limited route. Pruning needs a time column (a schema change): later. |
+| Low | **Tables that only grow:** `seen_key_packages` (every KeyPackage hash, forever, also after the account is deleted), `groups` (never pruned) and `accepted` (each accepted commit's epoch and next-token hash, about 80 bytes, kept so
+a repeated commit is answered as accepted), `feedback` (10 a day per user, kept, without the sender once the account goes). Also Codex. | Small rows, each behind a signed or rate-limited route. Pruning needs a time column (a schema change): later. |
 | Low | **A replay after a restart.** The replay cache is in memory: a signed request captured and sent again after a restart, within its 5 minutes, is accepted again (also Codex). | Needs the request in the clear (TLS) and a restart in that window. Most signed requests are idempotent; the others (a lookup, feedback) do little harm twice. |
 | Low | **What anyone can ask without an account:** whether a username is taken (by design, while it is typed), whether a device id was replaced (`410` against `401`). | Spec 6.3. Device ids are random and not published. |
 | Low | **Unsigned requests to signed routes** cost a database read each, limited by nothing but Cloudflare. | Cheap reads; a limit per address on failed signatures would be the next step if it shows up in the logs. |
@@ -98,7 +118,8 @@ issuance is kept or logged. Tests: `tests/tests/tokens.rs`.
   comes and stops at more. Decoders are bounded by the bytes they are given.
 - **Errors and logs:** refusals carry a status and no text, except axum's own rejections ("Invalid URL: Invalid
   UTF-8 in `name`", "Failed to buffer the request body: length limit exceeded"), which tell nothing. The logs carry
-  database, Twilio and APNs/FCM errors, no user-written text.
+  database and APNs/FCM errors, no user-written text and no push token: a failed push is logged without its URL
+  (an APNs request's holds the token), and a service's answer with the token taken out (Codex).
 - **Panics:** all seven fuzz targets (`dev/fuzz all 120`, two minutes each, after the fixes) found nothing:
   wire_envelope 57 M runs, wire_content 26 M, wire_cert 3.9 M, wire_api 4.0 M, hub_key_package 4.2 M, hub_routes
   136 k (with report, feedback, account deletion and odd queries added), core_receive 13 k. The CI runs them

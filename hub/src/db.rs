@@ -9,6 +9,8 @@ use yo_wire::handle::{KIND_ACCOUNT_KEY, KIND_USER, KIND_USERNAME};
 use yo_wire::{DeviceId, GroupId, UserId, KEY_LEN};
 
 const DAY_MS: u64 = 24 * 3600 * 1000;
+/// A blob not ready this long after it was stored belongs to no upload under way: its file never came into place.
+const NOT_READY_KEPT_MS: u64 = 3600 * 1000;
 
 pub type Key = [u8; KEY_LEN];
 
@@ -36,6 +38,8 @@ pub struct NewDevice {
     pub auth_key: Key,
     pub push_platform: u8,
     pub push_token: Vec<u8>,
+    /// The app it names (`Yo-App`), if any.
+    pub app: Option<String>,
 }
 
 /// The keys that may sign a backup record's fetch (spec 7): the passkey's, if it has one, and the code's. Neither: a
@@ -217,14 +221,25 @@ CREATE TABLE IF NOT EXISTS messages (
 );
 CREATE INDEX IF NOT EXISTS messages_by_device ON messages(device_id, id);
 CREATE INDEX IF NOT EXISTS messages_by_age ON messages(received_at);
+-- `first_epoch`: the epoch the group was registered at. Every epoch from it up to the current one had a commit
+-- accepted (an epoch moves on by nothing else); any other never did. 1 for groups from before the column: the apps
+-- register every group at epoch 1 (spec 4.2).
 CREATE TABLE IF NOT EXISTS groups (
     id BLOB PRIMARY KEY,
     epoch INTEGER NOT NULL,
     token_hash BLOB NOT NULL,
-    updated_at INTEGER NOT NULL
+    updated_at INTEGER NOT NULL,
+    first_epoch INTEGER NOT NULL DEFAULT 1
 ) WITHOUT ROWID;
--- Every accepted commit, by the epoch it built on: handed out to members who missed it, and the proof that a
--- repeated commit was accepted.
+-- Every accepted commit's next-token hash, by the epoch it built on, kept for good (one small row per epoch): the
+-- proof that a repeated commit was accepted (spec 4.3), also after its envelope is gone.
+CREATE TABLE IF NOT EXISTS accepted (
+    group_id BLOB NOT NULL,
+    epoch INTEGER NOT NULL,
+    next_token_hash BLOB NOT NULL,
+    PRIMARY KEY (group_id, epoch)
+) WITHOUT ROWID;
+-- Every accepted commit's envelope, by the epoch it built on, for 30 days: handed out to members who missed it.
 CREATE TABLE IF NOT EXISTS commits (
     group_id BLOB NOT NULL,
     epoch INTEGER NOT NULL,
@@ -275,12 +290,17 @@ CREATE TABLE IF NOT EXISTS storage (
 ) WITHOUT ROWID;
 -- Photos and videos (spec 6.8): the file is on disk, by its id; here what the hub needs to hand it out and delete it.
 -- `user_id` is the uploader (for its quota), never a recipient. Gone after the last fetch, or after its time.
+-- `fetching`: fetches under way, each taken from `fetches_left` as it starts and given back if it is cut off (all of
+-- them at a start: none completed). `ready`: 0 until the file is in place; such a blob is not handed out, and one left
+-- so (a crash in between) is removed at the next start, or within the hour.
 CREATE TABLE IF NOT EXISTS blobs (
     id BLOB PRIMARY KEY,
     user_id BLOB NOT NULL,
     size INTEGER NOT NULL,
     fetches_left INTEGER NOT NULL,
-    created_at INTEGER NOT NULL
+    created_at INTEGER NOT NULL,
+    fetching INTEGER NOT NULL DEFAULT 0,
+    ready INTEGER NOT NULL DEFAULT 1
 ) WITHOUT ROWID;
 CREATE INDEX IF NOT EXISTS blobs_by_user ON blobs(user_id);
 CREATE INDEX IF NOT EXISTS blobs_by_age ON blobs(created_at);
@@ -397,14 +417,21 @@ fn remove_user(tx: &Transaction<'_>, user: &UserId, now: u64) -> rusqlite::Resul
 const SCHEMA_VERSION: i64 = 1;
 
 /// Brings a database of this version written by an older hub up to `SCHEMA`, in one transaction: the usernames'
-/// spellings (`handles.spelling`, NULL for the names it holds: shown as their skeleton) and the backups' auth keys.
-/// Records from before the auth keys are deleted: no fetch could be signed for them, and the apps make new ones
-/// (spec 7). The tables `SCHEMA` adds are made by `CREATE TABLE IF NOT EXISTS` already.
+/// spellings (`handles.spelling`, NULL for the names it holds: shown as their skeleton), the backups' auth keys and
+/// the groups' first epochs (1, `SCHEMA`). Records from before the auth keys are deleted: no fetch could be signed
+/// for them, and the apps make new ones (spec 7). The commits an older hub kept are proof of their acceptance
+/// (`accepted`), at every start: also those of an older hub run meanwhile. The tables `SCHEMA` adds are made by
+/// `CREATE TABLE IF NOT EXISTS` already.
 fn migrate(conn: &mut Connection) -> rusqlite::Result<()> {
     let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
-    for (table, column, kind) in
-        [("handles", "spelling", "TEXT"), ("backups", "auth_passkey", "BLOB"), ("backups", "auth_code", "BLOB")]
-    {
+    for (table, column, kind) in [
+        ("handles", "spelling", "TEXT"),
+        ("backups", "auth_passkey", "BLOB"),
+        ("backups", "auth_code", "BLOB"),
+        ("groups", "first_epoch", "INTEGER NOT NULL DEFAULT 1"),
+        ("blobs", "fetching", "INTEGER NOT NULL DEFAULT 0"),
+        ("blobs", "ready", "INTEGER NOT NULL DEFAULT 1"),
+    ] {
         let has = tx.prepare("SELECT 1 FROM pragma_table_info(?1) WHERE name = ?2")?.exists([table, column])?;
         if !has {
             tx.execute_batch(&format!("ALTER TABLE {table} ADD COLUMN {column} {kind}"))?;
@@ -415,6 +442,11 @@ fn migrate(conn: &mut Connection) -> rusqlite::Result<()> {
         tx.execute_batch("ALTER TABLE devices ADD COLUMN app TEXT")?;
     }
     tx.execute("DELETE FROM backups WHERE auth_code IS NULL", [])?;
+    tx.execute(
+        "INSERT OR IGNORE INTO accepted (group_id, epoch, next_token_hash)
+         SELECT group_id, epoch, next_token_hash FROM commits",
+        [],
+    )?;
     tx.commit()
 }
 
@@ -468,11 +500,13 @@ fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
 }
 
 impl Db {
+    /// WAL with `synchronous = FULL`: every commit is on the disk before it is answered, so what the hub acknowledged
+    /// (a delivery, a commit's order, spec 4.7) survives a power loss, not only a crash of the process.
     pub fn open(path: &str) -> rusqlite::Result<Self> {
         let mut conn = Connection::open(path)?;
         conn.execute_batch(
             "PRAGMA journal_mode = WAL;
-             PRAGMA synchronous = NORMAL;
+             PRAGMA synchronous = FULL;
              PRAGMA foreign_keys = ON;
              PRAGMA busy_timeout = 5000;",
         )?;
@@ -605,8 +639,9 @@ impl Db {
             params![KIND_USERNAME, skeleton, user, spelling],
         )?;
         tx.execute(
-            "INSERT INTO devices (id, user_id, device_key, auth_key, push_platform, push_token, created_at, last_seen_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?7)",
+            "INSERT INTO devices
+                 (id, user_id, device_key, auth_key, push_platform, push_token, created_at, last_seen_at, app)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?7, ?8)",
             params![
                 device.device_id,
                 user,
@@ -614,7 +649,8 @@ impl Db {
                 device.auth_key,
                 device.push_platform,
                 device.push_token,
-                now
+                now,
+                device.app
             ],
         )?;
         if let Some(conflict) = insert_key_packages(&tx, &device.device_id, key_packages, Some(last_resort))? {
@@ -624,11 +660,14 @@ impl Db {
         Ok(Write::Done(user))
     }
 
-    /// Claims a username (its skeleton and its spelling) for a user, giving up its old one; `None` only gives it up.
-    /// The user's own name in another spelling is the user's still, also when it has been reserved since.
-    pub fn set_username(&self, user: &UserId, name: Option<(&[u8], &str)>) -> rusqlite::Result<Write<()>> {
+    /// Claims a username (its skeleton and its spelling) for a device's user, giving up its old one; `None` only gives
+    /// it up. The user's own name in another spelling is the user's still, also when it has been reserved since. The
+    /// device is checked in this transaction, as `put_backup` checks it.
+    pub fn set_username(&self, device: &DeviceId, name: Option<(&[u8], &str)>) -> rusqlite::Result<Write<()>> {
         let mut conn = self.conn();
         let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let Some(user) = user_of_device(&tx, device)? else { return Ok(Write::Refused(Conflict::DeviceGone)) };
+        let user = &user;
         if let Some((skeleton, _)) = name {
             let owner: Option<UserId> = tx
                 .prepare_cached("SELECT user_id FROM handles WHERE kind = ?1 AND value = ?2")?
@@ -876,7 +915,7 @@ impl Db {
     }
 
     /// Stores a blob's row for `fetches` fetches and counts it against its uploader's quota, if the id is free and
-    /// the quota has room. Its file is moved into place after: a row without a file is a blob not there yet.
+    /// the quota has room. Not ready: its file is moved into place after, then `blob_ready`.
     pub fn put_blob(
         &self,
         device: &DeviceId,
@@ -896,7 +935,7 @@ impl Db {
             return Ok(BlobPut::Quota);
         }
         tx.prepare_cached(
-            "INSERT INTO blobs (id, user_id, size, fetches_left, created_at) VALUES (?1, ?2, ?3, ?4, ?5)",
+            "INSERT INTO blobs (id, user_id, size, fetches_left, created_at, ready) VALUES (?1, ?2, ?3, ?4, ?5, 0)",
         )?
         .execute(params![id, user, size as i64, fetches, now])?;
         tx.prepare_cached(
@@ -908,12 +947,23 @@ impl Db {
         Ok(BlobPut::Stored)
     }
 
-    /// A blob's size and when it was stored (which upload under this id it is), if it is there, has fetches left
-    /// and is within its time.
-    pub fn blob(&self, id: &BlobId, now: u64, ttl_ms: u64) -> rusqlite::Result<Option<(u64, u64)>> {
+    /// A blob's file is in place: it is handed out from now on.
+    pub fn blob_ready(&self, id: &BlobId, created_at: u64) -> rusqlite::Result<()> {
+        self.conn()
+            .prepare_cached("UPDATE blobs SET ready = 1 WHERE id = ?1 AND created_at = ?2")?
+            .execute(params![id, created_at as i64])?;
+        Ok(())
+    }
+
+    /// Takes one of a blob's fetches as a fetch starts, if it is ready, has one left and is within its time: its size
+    /// and when it was stored (which upload under this id it is). In one statement, so fetches at once never pass
+    /// the blob's count; given back if the fetch is cut off (`blob_fetched`).
+    pub fn take_fetch(&self, id: &BlobId, now: u64, ttl_ms: u64) -> rusqlite::Result<Option<(u64, u64)>> {
         self.conn()
             .prepare_cached(
-                "SELECT size, created_at FROM blobs WHERE id = ?1 AND fetches_left > 0 AND created_at >= ?2",
+                "UPDATE blobs SET fetches_left = fetches_left - 1, fetching = fetching + 1
+                 WHERE id = ?1 AND ready = 1 AND fetches_left > 0 AND created_at >= ?2
+                 RETURNING size, created_at",
             )?
             .query_row(params![id, now.saturating_sub(ttl_ms) as i64], |row| {
                 Ok((row.get::<_, i64>(0)? as u64, row.get::<_, i64>(1)? as u64))
@@ -921,19 +971,20 @@ impl Db {
             .optional()
     }
 
-    /// Counts a complete fetch of the blob stored at `created_at`; true when it was the last and the row is gone (the
-    /// file must go too). A fetch of a blob gone meanwhile counts for none stored again under its id.
-    pub fn blob_fetched(&self, id: &BlobId, created_at: u64) -> rusqlite::Result<bool> {
+    /// A fetch taken of the blob stored at `created_at` is over: counted if `complete`, else given back. True when it
+    /// was the last and the row is gone (the file must go too). A fetch of a blob gone meanwhile counts for none
+    /// stored again under its id.
+    pub fn blob_fetched(&self, id: &BlobId, created_at: u64, complete: bool) -> rusqlite::Result<bool> {
         let mut conn = self.conn();
         let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
-        let left: Option<i64> = tx
+        let left: Option<(i64, i64)> = tx
             .prepare_cached(
-                "UPDATE blobs SET fetches_left = fetches_left - 1
-                 WHERE id = ?1 AND created_at = ?2 AND fetches_left > 0 RETURNING fetches_left",
+                "UPDATE blobs SET fetching = fetching - 1, fetches_left = fetches_left + ?3
+                 WHERE id = ?1 AND created_at = ?2 AND fetching > 0 RETURNING fetches_left, fetching",
             )?
-            .query_row(params![id, created_at as i64], |row| row.get(0))
+            .query_row(params![id, created_at as i64, !complete as i64], |row| Ok((row.get(0)?, row.get(1)?)))
             .optional()?;
-        let last = left == Some(0);
+        let last = left == Some((0, 0));
         if last {
             tx.execute("DELETE FROM blobs WHERE id = ?1", [id])?;
         }
@@ -946,16 +997,35 @@ impl Db {
         Ok(())
     }
 
-    /// Deletes the rows of blobs past their time and returns their ids (their files must go too); forgets quotas of
-    /// days before yesterday.
+    /// Deletes the rows of blobs past their time, and of those not ready for an hour, and returns their ids (their
+    /// files must go too); forgets quotas of days before yesterday.
     pub fn prune_blobs(&self, now: u64, ttl_ms: u64) -> rusqlite::Result<Vec<(BlobId, u64)>> {
         let mut conn = self.conn();
         let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
         let ids = tx
-            .prepare_cached("DELETE FROM blobs WHERE created_at < ?1 RETURNING id, created_at")?
-            .query_map([now.saturating_sub(ttl_ms) as i64], blob_row)?
+            .prepare_cached(
+                "DELETE FROM blobs WHERE created_at < ?1 OR (ready = 0 AND created_at < ?2) RETURNING id, created_at",
+            )?
+            .query_map(
+                params![now.saturating_sub(ttl_ms) as i64, now.saturating_sub(NOT_READY_KEPT_MS) as i64],
+                blob_row,
+            )?
             .collect::<Result<_, _>>()?;
         tx.execute("DELETE FROM blob_quota WHERE day < ?1", [(now / DAY_MS) as i64 - 1])?;
+        tx.commit()?;
+        Ok(ids)
+    }
+
+    /// At a start: the fetches under way before are given back (none completed), and blobs not ready (a crash while
+    /// the file was moved into place) are deleted; their ids, whose files must go too.
+    pub fn recover_blobs(&self) -> rusqlite::Result<Vec<(BlobId, u64)>> {
+        let mut conn = self.conn();
+        let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        tx.execute("UPDATE blobs SET fetches_left = fetches_left + fetching, fetching = 0 WHERE fetching > 0", [])?;
+        let ids = tx
+            .prepare_cached("DELETE FROM blobs WHERE ready = 0 RETURNING id, created_at")?
+            .query_map([], blob_row)?
+            .collect::<Result<_, _>>()?;
         tx.commit()?;
         Ok(ids)
     }
@@ -977,6 +1047,8 @@ impl Db {
 
     // ---- KeyPackages and push ----
 
+    /// Adds a device's KeyPackages, checked against its account key. The device is checked in this transaction: one
+    /// replaced since (its account key may be another now) adds none.
     pub fn add_key_packages(
         &self,
         device: &DeviceId,
@@ -986,6 +1058,9 @@ impl Db {
     ) -> rusqlite::Result<Write<()>> {
         let mut conn = self.conn();
         let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        if user_of_device(&tx, device)?.is_none() {
+            return Ok(Write::Refused(Conflict::DeviceGone));
+        }
         let held: u32 = tx
             .prepare_cached("SELECT count(*) FROM key_packages WHERE device_id = ?1 AND last_resort = 0")?
             .query_row([device], |row| row.get(0))?;
@@ -1006,11 +1081,13 @@ impl Db {
             .query_row([device], |row| row.get(0))
     }
 
-    pub fn set_push(&self, device: &DeviceId, platform: u8, token: &[u8]) -> rusqlite::Result<()> {
-        self.conn()
+    /// Sets a device's push token; refused for a device replaced since it authenticated.
+    pub fn set_push(&self, device: &DeviceId, platform: u8, token: &[u8]) -> rusqlite::Result<Write<()>> {
+        let changed = self
+            .conn()
             .prepare_cached("UPDATE devices SET push_platform = ?2, push_token = ?3 WHERE id = ?1")?
             .execute(params![device, platform, token])?;
-        Ok(())
+        Ok(if changed == 1 { Write::Done(()) } else { Write::Refused(Conflict::DeviceGone) })
     }
 
     /// Clears a push token the push service refused, unless the device set another meanwhile.
@@ -1113,16 +1190,24 @@ impl Db {
             .collect()
     }
 
+    /// Deletes a device's envelopes by id. Committed without waiting for the disk (`synchronous = NORMAL` for this
+    /// transaction alone; the next commit's sync takes it along): an ack lost to a power cut costs a repeat, which the
+    /// device skips (spec 4.7), and an ack of its own `fsync` would cost one per inbox read.
     pub fn ack(&self, device: &DeviceId, ids: &[u64]) -> rusqlite::Result<()> {
         let mut conn = self.conn();
-        let tx = conn.transaction()?;
-        {
-            let mut delete = tx.prepare_cached("DELETE FROM messages WHERE device_id = ?1 AND id = ?2")?;
-            for id in ids {
-                delete.execute(params![device, *id as i64])?;
+        conn.execute_batch("PRAGMA synchronous = NORMAL")?;
+        let acked = (|| {
+            let tx = conn.transaction()?;
+            {
+                let mut delete = tx.prepare_cached("DELETE FROM messages WHERE device_id = ?1 AND id = ?2")?;
+                for id in ids {
+                    delete.execute(params![device, *id as i64])?;
+                }
             }
-        }
-        tx.commit()
+            tx.commit()
+        })();
+        conn.execute_batch("PRAGMA synchronous = FULL")?;
+        acked
     }
 
     // ---- groups ----
@@ -1132,7 +1217,7 @@ impl Db {
         let changed = self
             .conn()
             .prepare_cached(
-                "INSERT INTO groups (id, epoch, token_hash, updated_at) VALUES (?1, ?2, ?3, ?4)
+                "INSERT INTO groups (id, epoch, token_hash, updated_at, first_epoch) VALUES (?1, ?2, ?3, ?4, ?2)
                  ON CONFLICT (id) DO NOTHING",
             )?
             .execute(params![group, epoch as i64, token_hash, now])?;
@@ -1140,7 +1225,8 @@ impl Db {
     }
 
     /// Orders a commit (spec 4.3): accepted only on the group's current epoch with that epoch's token, and kept. A
-    /// commit accepted before is accepted again: the same epoch and next-token hash, which only it can produce.
+    /// commit accepted before is accepted again: the same epoch and next-token hash, which only it can produce, also
+    /// after its envelope is gone.
     pub fn commit(
         &self,
         group: &GroupId,
@@ -1153,7 +1239,7 @@ impl Db {
         let mut conn = self.conn();
         let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
         let accepted: Option<Vec<u8>> = tx
-            .prepare_cached("SELECT next_token_hash FROM commits WHERE group_id = ?1 AND epoch = ?2")?
+            .prepare_cached("SELECT next_token_hash FROM accepted WHERE group_id = ?1 AND epoch = ?2")?
             .query_row(params![group, epoch as i64], |row| row.get(0))
             .optional()?;
         if accepted.as_deref().is_some_and(|hash| constant_time_eq(hash, next_token_hash)) {
@@ -1177,6 +1263,10 @@ impl Db {
             params![group, (epoch + 1) as i64, next_token_hash, now],
         )?;
         tx.execute(
+            "INSERT INTO accepted (group_id, epoch, next_token_hash) VALUES (?1, ?2, ?3)",
+            params![group, epoch as i64, next_token_hash],
+        )?;
+        tx.execute(
             "INSERT INTO commits (group_id, epoch, next_token_hash, envelope, accepted_at) VALUES (?1, ?2, ?3, ?4, ?5)",
             params![group, epoch as i64, next_token_hash, envelope, now],
         )?;
@@ -1184,8 +1274,9 @@ impl Db {
         Ok(Commit::Accepted)
     }
 
-    /// The envelope of the commit accepted on `epoch`; else whether one was accepted there and is kept no more (the
-    /// group is past it). Read under one lock, so a commit accepted meanwhile is never taken for one pruned.
+    /// The envelope of the commit accepted on `epoch`; else whether one was accepted there and is kept no more: the
+    /// epoch is the group's first or later, and before its current one (`groups.first_epoch`). Read under one lock, so
+    /// a commit accepted meanwhile is never taken for one pruned.
     pub fn commit_envelope(&self, group: &GroupId, epoch: u64) -> rusqlite::Result<Result<Vec<u8>, bool>> {
         let conn = self.conn();
         let envelope: Option<Vec<u8>> = conn
@@ -1195,14 +1286,15 @@ impl Db {
         if let Some(envelope) = envelope {
             return Ok(Ok(envelope));
         }
-        let current: Option<i64> = conn
-            .prepare_cached("SELECT epoch FROM groups WHERE id = ?1")?
-            .query_row([group], |row| row.get(0))
+        let epochs: Option<(i64, i64)> = conn
+            .prepare_cached("SELECT first_epoch, epoch FROM groups WHERE id = ?1")?
+            .query_row([group], |row| Ok((row.get(0)?, row.get(1)?)))
             .optional()?;
-        Ok(Err(current.is_some_and(|current| current as u64 > epoch)))
+        Ok(Err(epochs.is_some_and(|(first, current)| (first as u64..current as u64).contains(&epoch))))
     }
 
-    /// Deletes envelopes and kept commits older than the TTL, and forgets replaced devices after a year.
+    /// Deletes envelopes and commits' envelopes older than the TTL (their acceptance stays, `accepted`), and forgets
+    /// replaced devices after a year.
     pub fn prune(&self, now: u64, ttl_ms: u64) -> rusqlite::Result<usize> {
         let conn = self.conn();
         let before = now.saturating_sub(ttl_ms) as i64;
@@ -1312,6 +1404,7 @@ mod tests {
             auth_key: [n; 32],
             push_platform: 0,
             push_token: Vec::new(),
+            app: None,
         }
     }
 
@@ -1348,7 +1441,7 @@ mod tests {
         assert_eq!(user(register(&db, b"yogpt", 1, 3, 0)), gpt);
         assert_eq!(spelling(&db, "YoGPT").as_deref(), Some("YoGPT"));
         // Its owner may write it otherwise; nobody else may take it.
-        assert!(matches!(db.set_username(&gpt, Some((b"YOGPT", "YOgpt"))).unwrap(), Write::Done(())));
+        assert!(matches!(db.set_username(&[3; 16], Some((b"YOGPT", "YOgpt"))).unwrap(), Write::Done(())));
         assert_eq!(spelling(&db, "yogpt").as_deref(), Some("YOgpt"));
         let mia = user(register(&db, b"Mia", 4, 4, 0));
         assert!(matches!(db.set_username(&mia, Some((b"YOGPT", "Y0GPT"))).unwrap(), Write::Refused(_)));
@@ -1374,7 +1467,7 @@ mod tests {
         // Who had the name before it was reserved keeps it: found, registered again on a new phone, written anew.
         assert_eq!(spelling(&db, "moderator").as_deref(), Some("Moderator"));
         assert_eq!(user(register(&db, b"Moderator", 1, 4, 0)), mod_user);
-        assert!(matches!(db.set_username(&mod_user, Some((b"MODERATOR", "MODERATOR"))).unwrap(), Write::Done(())));
+        assert!(matches!(db.set_username(&[4; 16], Some((b"MODERATOR", "MODERATOR"))).unwrap(), Write::Done(())));
     }
 
     /// A database the hub before spellings made (schema 1 without `handles.spelling` and the backups' auth keys):
@@ -1517,6 +1610,105 @@ mod tests {
             Write::Refused(Conflict::DeviceGone)
         ));
         assert_eq!(db.backup(&first).unwrap().map(|f| f.0).as_deref(), Some(&b"new"[..]));
+    }
+
+    /// What a device writes for its user is checked against the device in the write's own transaction: one replaced
+    /// after it authenticated (a new phone restored the account, or the account was deleted) changes nothing.
+    #[test]
+    fn a_replaced_device_writes_nothing_for_its_user() {
+        let db = Db::open(":memory:").unwrap();
+        let leo = user(register(&db, b"LEO", 1, 1, 0));
+        user(register(&db, b"LEO", 1, 2, 0));
+        let gone = |w: Write<()>| matches!(w, Write::Refused(Conflict::DeviceGone));
+        assert!(gone(db.set_username(&[1; 16], Some((b"OLD", "OLD"))).unwrap()));
+        assert_eq!(spelling(&db, "LEO").as_deref(), Some("LEO"), "the name stays the new phone's");
+        let key_package = StoredKeyPackage { hash: [7; 32], data: vec![7] };
+        assert!(gone(db.add_key_packages(&[1; 16], std::slice::from_ref(&key_package), None, 100).unwrap()));
+        assert!(gone(db.set_push(&[1; 16], 1, b"ab").unwrap()));
+        // Deleted: nothing is written for a user that is no more.
+        assert!(matches!(db.delete_account(&[2; 16], 1).unwrap(), Write::Done(())));
+        assert!(gone(db.set_username(&[2; 16], Some((b"LEO", "LEO"))).unwrap()));
+        assert!(gone(db.add_key_packages(&[2; 16], &[key_package], None, 100).unwrap()));
+        assert!(db.lookup(KIND_USER, &leo, false, &[]).unwrap().is_none());
+        assert!(!db.username_taken(b"LEO").unwrap());
+        assert_eq!(db.audit().unwrap(), []);
+    }
+
+    /// A database from before `groups.first_epoch` and `accepted`, whose older hub pruned a commit: every epoch from 1
+    /// up to the group's current one counts as accepted (`410` once pruned), and the commits it still keeps are
+    /// accepted again when repeated.
+    #[test]
+    fn a_database_from_before_first_epochs_is_migrated() {
+        let path = std::env::temp_dir().join(format!("yo-hub-epochs-{}.db", std::process::id()));
+        let path = path.to_str().unwrap();
+        let (group, token) = ([5; 32], [6; 32]);
+        {
+            let db = Db::open(path).unwrap();
+            assert!(db.create_group(&group, 1, &token, 0).unwrap());
+            assert!(matches!(db.commit(&group, 1, &token, &[1; 32], b"one", 0).unwrap(), Commit::Accepted));
+            assert!(matches!(db.commit(&group, 2, &[1; 32], &[2; 32], b"two", 0).unwrap(), Commit::Accepted));
+            db.conn()
+                .execute_batch(
+                    "ALTER TABLE groups DROP COLUMN first_epoch; DROP TABLE accepted;
+                     DELETE FROM commits WHERE epoch = 1;",
+                )
+                .unwrap();
+        }
+        let db = Db::open(path).unwrap();
+        assert_eq!(db.commit_envelope(&group, 1).unwrap(), Err(true), "accepted, and pruned by the older hub");
+        assert_eq!(db.commit_envelope(&group, 2).unwrap(), Ok(b"two".to_vec()));
+        assert_eq!(db.commit_envelope(&group, 0).unwrap(), Err(false), "never");
+        assert_eq!(db.commit_envelope(&group, 3).unwrap(), Err(false), "not yet");
+        assert!(matches!(db.commit(&group, 2, &[1; 32], &[2; 32], b"two", 0).unwrap(), Commit::Accepted));
+        drop(db);
+        for suffix in ["", "-wal", "-shm"] {
+            let _ = std::fs::remove_file(format!("{path}{suffix}"));
+        }
+    }
+
+    /// A blob's fetches are taken as they start: fetches at once never pass its count, one cut off gives its fetch
+    /// back, and so does a restart. A blob is handed out only once it is ready; one never ready goes at the next start.
+    #[test]
+    fn blob_fetches_are_taken_as_they_start_and_given_back_when_cut_off() {
+        let db = Db::open(":memory:").unwrap();
+        user(register(&db, b"LEO", 1, 1, 0));
+        let quota = BlobQuota { per_day: 10, bytes_per_day: 1 << 20, stored: 1 << 20 };
+        let (id, ttl) = ([9; 16], 30 * DAY);
+        assert_eq!(db.put_blob(&[1; 16], &id, 100, 2, 5, &quota).unwrap(), BlobPut::Stored);
+        assert_eq!(db.take_fetch(&id, 5, ttl).unwrap(), None, "not ready: its file is not in place");
+        db.blob_ready(&id, 5).unwrap();
+        assert_eq!(db.take_fetch(&id, 5, ttl).unwrap(), Some((100, 5)));
+        assert_eq!(db.take_fetch(&id, 5, ttl).unwrap(), Some((100, 5)));
+        assert_eq!(db.take_fetch(&id, 5, ttl).unwrap(), None, "two fetches under way, none left");
+        assert!(!db.blob_fetched(&id, 5, false).unwrap(), "one cut off");
+        assert!(!db.blob_fetched(&id, 5, true).unwrap(), "one complete, the other given back");
+        assert_eq!(db.take_fetch(&id, 5, ttl).unwrap(), Some((100, 5)));
+        assert!(db.recover_blobs().unwrap().is_empty(), "a restart: the fetch under way given back");
+        assert_eq!(db.take_fetch(&id, 5, ttl).unwrap(), Some((100, 5)));
+        assert!(db.blob_fetched(&id, 5, true).unwrap(), "the last: the blob goes");
+        assert!(!db.blob_exists(&id).unwrap());
+        // Stored, never ready (a crash before its file was in place): gone at the next start, its id free again.
+        assert_eq!(db.put_blob(&[1; 16], &id, 100, 1, 6, &quota).unwrap(), BlobPut::Stored);
+        assert_eq!(db.recover_blobs().unwrap(), [(id, 6)]);
+        assert_eq!(db.put_blob(&[1; 16], &id, 100, 1, 7, &quota).unwrap(), BlobPut::Stored);
+        // Or within the hour, without a restart.
+        assert!(db.prune_blobs(7 + NOT_READY_KEPT_MS - 1, ttl).unwrap().is_empty());
+        assert_eq!(db.prune_blobs(7 + NOT_READY_KEPT_MS + 1, ttl).unwrap(), [(id, 7)]);
+    }
+
+    /// Commits wait for the disk (`FULL`, 2); an ack alone does not, and leaves the connection as it was.
+    #[test]
+    fn only_an_ack_commits_without_waiting_for_the_disk() {
+        let db = Db::open(":memory:").unwrap();
+        let leo = user(register(&db, b"LEO", 1, 1, 0));
+        let devices_hash = yo_wire::devices::hash(&[1; 32], &[[1; 32]]);
+        db.deliver(&[Incoming { user: leo, devices_hash, envelope: b"envelope", token: None }], 0, 10).unwrap();
+        let synchronous = || -> i64 { db.conn().query_row("PRAGMA synchronous", [], |row| row.get(0)).unwrap() };
+        assert_eq!(synchronous(), 2);
+        let (id, _) = db.fetch(&[1; 16], 10).unwrap().remove(0);
+        db.ack(&[1; 16], &[id]).unwrap();
+        assert!(db.fetch(&[1; 16], 10).unwrap().is_empty());
+        assert_eq!(synchronous(), 2);
     }
 
     #[test]

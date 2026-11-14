@@ -181,6 +181,76 @@ fn the_hub_repeats_an_accepted_commit_and_nothing_else() {
     assert_eq!(missing.status().as_u16(), 404);
 }
 
+/// A commit fetched is `410` only where the group had one accepted that is kept no more: one never accepted (before
+/// the group, or not yet) is `404`, which drops a made-up epoch and leaves the chat as it is (spec 4.9). A commit
+/// repeated after its envelope is gone is still the one accepted (4.3).
+#[test]
+fn a_pruned_commit_is_gone_one_never_accepted_is_unknown_and_a_repeat_is_still_accepted() {
+    let hub = TestHub::start();
+    let client = reqwest::blocking::Client::new();
+    let group = [4u8; 32];
+    let tokens = [[1u8; 32], [2; 32], [3; 32]];
+    let create = api::GroupCreate { group_id: group, epoch: 5, token_hash: yo_wire::sha256(&tokens[0]) };
+    let created = client.post(format!("{}{}", hub.url(), api::GROUPS)).body(yo_wire::encode(&create)).send().unwrap();
+    assert_eq!(created.status().as_u16(), 201);
+    let commits: Vec<api::Commit> = (0..2)
+        .map(|i| api::Commit {
+            epoch: 5 + i as u64,
+            token: tokens[i],
+            next_token_hash: yo_wire::sha256(&tokens[i + 1]),
+            envelope: yo_wire::envelope::seal(&[i as u8; 10]).unwrap().into(),
+        })
+        .collect();
+    let post = |commit: &api::Commit| {
+        let url = format!("{}{}", hub.url(), api::commit_path(&group));
+        client.post(url).body(yo_wire::encode(commit)).send().unwrap().status().as_u16()
+    };
+    let fetched = |epoch: u64| {
+        let url = format!("{}{}", hub.url(), api::commit_fetch_path(&group, epoch));
+        client.get(url).send().unwrap().status().as_u16()
+    };
+    assert_eq!(commits.iter().map(post).collect::<Vec<_>>(), [200, 200]);
+    assert_eq!([0, 4, 5, 6, 7].map(fetched), [404, 404, 200, 200, 404]);
+    // 31 days on: the envelopes are gone, their acceptance is not.
+    hub.hub.prune(yo_hub::now_ms() + 31 * 24 * 3600 * 1000).unwrap();
+    assert_eq!([0, 4, 5, 6, 7].map(fetched), [404, 404, 410, 410, 404]);
+    assert_eq!(commits.iter().map(post).collect::<Vec<_>>(), [200, 200], "the lost answers, repeated");
+    let other = api::Commit { next_token_hash: [9; 32], ..commits[0].clone() };
+    assert_eq!(post(&other), 409, "another commit on an epoch long gone");
+}
+
+/// Waits up to five seconds for the hub to have nothing under way at its inbox.
+fn nothing_under_way(hub: &TestHub) -> bool {
+    let until = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    while hub.hub.under_way() != (0, 0) {
+        if std::time::Instant::now() > until {
+            return false;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+    true
+}
+
+#[test]
+fn a_long_poll_cut_off_leaves_nothing_behind() {
+    let hub = TestHub::start();
+    let http = Http::new(hub.url());
+    let mut a = register(http.clone(), &username(random_u64() % 1_000_000_000), None);
+    // A long poll, signed by A, sent as a client that gives up after a moment.
+    let path = api::inbox_path(60);
+    http.fault(&path, Fault::Answer(200));
+    a.signed_for_tests("GET", &path, &[]).unwrap();
+    let (_, _, headers, _) = http.recorded.lock().unwrap().pop().unwrap();
+    let mut request = reqwest::blocking::Client::new()
+        .get(format!("{}{path}", hub.url()))
+        .timeout(std::time::Duration::from_millis(300));
+    for (name, value) in headers {
+        request = request.header(name, value);
+    }
+    assert!(request.send().unwrap_err().is_timeout());
+    assert!(nothing_under_way(&hub), "{:?}", hub.hub.under_way());
+}
+
 #[test]
 fn private_keys_of_dead_key_packages_are_deleted() {
     let hub = TestHub::start();

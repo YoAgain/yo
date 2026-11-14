@@ -101,6 +101,33 @@ fn the_largest_blob_goes_and_comes_and_a_larger_one_is_refused() {
     assert_eq!(files(&dir), (0, 0));
 }
 
+/// Fetches at once never pass a blob's count: each takes its fetch as it starts. One cut off gives it back.
+#[test]
+fn fetches_at_once_take_no_more_than_the_blob_has_and_one_cut_off_gives_its_fetch_back() {
+    let (hub, dir) = hub_with(|_| {});
+    let (mut alice, _) = someone(&hub);
+    // The largest blob: more than the sockets hold, so a fetch not read is not complete.
+    let (media, plain, sent) = upload(&mut alice, media::MAX_MEDIA_LEN, 1);
+    sent.unwrap();
+    let url = format!("{}{}", hub.url(), api::blob_path(&media.id));
+    let started = reqwest::blocking::get(&url).unwrap();
+    assert_eq!(started.status().as_u16(), 200);
+    assert_eq!(status(reqwest::blocking::Client::new().get(&url)), 404, "its one fetch is under way");
+    drop(started);
+    let until = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    let stranger = Http::new(hub.url());
+    let opened = loop {
+        if let Some(opened) = media::fetch_open(stranger.as_ref(), &media).unwrap() {
+            break opened;
+        }
+        assert!(std::time::Instant::now() < until, "the fetch cut off was given back");
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    };
+    assert_eq!(opened, plain);
+    assert_eq!(media::fetch(stranger.as_ref(), &media).unwrap(), None);
+    assert_eq!(files(&dir), (0, 0));
+}
+
 #[test]
 fn an_upload_must_be_signed_whole_and_once() {
     let (hub, dir) = hub_with(|_| {});

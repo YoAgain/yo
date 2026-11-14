@@ -40,10 +40,12 @@ impl Transport for Https {
         for (name, value) in request.headers {
             builder = builder.header(name, value);
         }
+        // Without the URL: an APNs request's holds the device's token, which must not reach the log.
+        let error = |e: reqwest::Error| e.without_url().to_string();
         Box::pin(async move {
-            let response = builder.send().await.map_err(|e| e.to_string())?;
+            let response = builder.send().await.map_err(error)?;
             let status = response.status().as_u16();
-            let body = response.bytes().await.map_err(|e| e.to_string())?.to_vec();
+            let body = response.bytes().await.map_err(error)?.to_vec();
             Ok((status, body))
         })
     }
@@ -103,6 +105,11 @@ struct Fcm {
     key: EncodingKey,
     /// Async: concurrent pushes wait for one token exchange instead of each running their own.
     access: tokio::sync::Mutex<Option<Cached>>,
+}
+
+/// A push service's answer as logged: without the token, should it name it.
+fn told(body: &[u8], token: &str) -> String {
+    String::from_utf8_lossy(body).replace(token, "(token)")
 }
 
 fn unix_s() -> u64 {
@@ -201,7 +208,7 @@ impl Pusher {
             Ok((200, _)) => Outcome::Sent,
             Ok((410, _)) => Outcome::TokenInvalid,
             Ok((400, body)) if String::from_utf8_lossy(&body).contains("BadDeviceToken") => Outcome::TokenInvalid,
-            Ok((status, body)) => Outcome::Failed(format!("APNs {status} {}", String::from_utf8_lossy(&body))),
+            Ok((status, body)) => Outcome::Failed(format!("APNs {status} {}", told(&body, token))),
             Err(error) => Outcome::Failed(error),
         }
     }
@@ -253,8 +260,23 @@ impl Pusher {
             Ok((200, _)) => Outcome::Sent,
             Ok((404, _)) => Outcome::TokenInvalid,
             Ok((400, body)) if String::from_utf8_lossy(&body).contains("INVALID_ARGUMENT") => Outcome::TokenInvalid,
-            Ok((status, body)) => Outcome::Failed(format!("FCM {status} {}", String::from_utf8_lossy(&body))),
+            Ok((status, body)) => Outcome::Failed(format!("FCM {status} {}", told(&body, token))),
             Err(error) => Outcome::Failed(error),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn a_failed_push_does_not_name_the_device_token() {
+        let token = "ab".repeat(32);
+        // Nothing listens on port 1: the request fails before any answer.
+        let request = Request { url: format!("http://127.0.0.1:1/3/device/{token}"), headers: vec![], body: vec![] };
+        let error = Https::default().send(request).await.unwrap_err();
+        assert!(!error.contains(&token), "{error}");
+        assert_eq!(told(format!(r#"{{"token":"{token}"}}"#).as_bytes(), &token), r#"{"token":"(token)"}"#);
     }
 }
