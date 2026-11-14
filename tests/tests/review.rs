@@ -284,3 +284,84 @@ fn an_unreadable_409_keeps_the_message() {
     a.sync(0).unwrap();
     assert_eq!(texts(&b.sync(0).unwrap()), ["kept"]);
 }
+
+/// A new chat's group was registered at the hub inside the transaction that made it: a lost answer rolled the
+/// group back while the hub kept it, and the send failed. Now the group is saved first and registered outside;
+/// until the hub has it, its Welcome and messages wait, and the same group is registered again.
+#[test]
+fn a_new_chat_whose_registration_did_not_answer_is_the_same_chat_later() {
+    for fault in [Fault::LoseAnswer, Fault::Answer(429), Fault::Answer(503)] {
+        let hub = TestHub::start();
+        let n = random_u64() % 100_000;
+        let http = Http::new(hub.url());
+        let mut a = by_name(http.clone(), &format!("New{n}"));
+        let mut b = by_name(Http::new(hub.url()), &format!("Wen{n}"));
+        http.fault("/v1/groups", fault);
+        // Tried again with the delivery: a 409 to the repeat is the lost answer's.
+        a.send(b.user_id(), text("first")).unwrap();
+        assert_eq!(texts(&b.sync(0).unwrap()), ["first"], "{fault:?}");
+        assert_eq!((a.chats().len(), b.chats().len()), (1, 1));
+        // The hub has the group with its token: b's first update is ordered there.
+        b.send(a.user_id(), text("back")).unwrap();
+        assert_eq!(texts(&a.sync(0).unwrap()), ["back"]);
+        assert_eq!(b.chats()[0].2, 2, "{fault:?}");
+    }
+    // The hub's limit on new groups for a while: the first message waits with its Welcome, and goes after.
+    let hub = TestHub::start();
+    let n = random_u64() % 100_000;
+    let http = Http::new(hub.url());
+    let mut a = by_name(http.clone(), &format!("Lim{n}"));
+    let mut b = by_name(Http::new(hub.url()), &format!("Mil{n}"));
+    http.fault("/v1/groups", Fault::Answer(429));
+    http.fault("/v1/groups", Fault::Answer(429));
+    a.send(b.user_id(), text("waits")).unwrap();
+    assert_eq!(a.pending(), 2, "the Welcome and the message");
+    assert!(b.sync(0).unwrap().is_empty());
+    a.sync(0).unwrap();
+    assert_eq!(texts(&b.sync(0).unwrap()), ["waits"]);
+}
+
+/// The account was registered before its secrets were saved: a crash after the hub took the name lost the key the
+/// name was registered with. Now the device and its request are saved before the request leaves, and a restart
+/// finishes the registration from the state, the same device, whether the hub had taken it or not.
+#[test]
+fn a_registration_is_saved_before_it_leaves_and_finished_after_a_restart() {
+    let hub = TestHub::start();
+    let n = random_u64() % 100_000;
+    // Taken by the hub, its answer lost, and the process gone before it learnt so (the question fails too).
+    let taken = format!("Crash{n}");
+    let http = Http::new(hub.url());
+    http.fault("/v1/register", Fault::LoseAnswer);
+    http.fault("/v1/lookup", Fault::Answer(503));
+    let disk = Arc::new(Disk::default());
+    let gone = Client::register_username_saved(http, disk.clone(), KEY, &taken, None, None, Push::none());
+    assert_eq!(gone.err(), Some(Error::Refused(503)));
+    // Never at the hub: the same device registers when started again.
+    let lost = format!("Never{n}");
+    let http = Http::new(hub.url());
+    http.fault("/v1/register", Fault::Answer(503));
+    let other_disk = Arc::new(Disk::default());
+    assert!(Client::register_username_saved(http, other_disk.clone(), KEY, &lost, None, None, Push::none()).is_err());
+    let mut sender = by_name(Http::new(hub.url()), &format!("Hello{n}"));
+    for (disk, name) in [(disk, &taken), (other_disk, &lost)] {
+        let blob = disk.saved.lock().unwrap().clone();
+        let mut me = Client::restore(Http::new(hub.url()), &blob, &KEY).unwrap();
+        assert!(me.is_registering());
+        me.persist_to(disk.clone(), KEY).unwrap();
+        me.finish_registration().unwrap();
+        assert!(!me.is_registering());
+        assert_eq!(me.username(), Some(name.as_str()));
+        sender.send(name, text("found you")).unwrap();
+        assert_eq!(texts(&me.sync(0).unwrap()), ["found you"], "{name}");
+        let blob = disk.saved.lock().unwrap().clone();
+        assert!(!Client::restore(Http::new(hub.url()), &blob, &KEY).unwrap().is_registering(), "saved");
+    }
+    // A save that fails: nothing leaves, the name stays free.
+    let full = Arc::new(Disk::default());
+    full.full.store(true, Ordering::Relaxed);
+    let free = format!("Free{n}");
+    let http = Http::new(hub.url());
+    let refused = Client::register_username_saved(http.clone(), full, KEY, &free, None, None, Push::none());
+    assert!(matches!(refused, Err(Error::Save(_))));
+    assert!(Client::username_free(http.as_ref(), &free).unwrap());
+}

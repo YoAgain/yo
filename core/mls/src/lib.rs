@@ -26,7 +26,10 @@ use openmls::prelude::*;
 use openmls_basic_credential::SignatureKeyPair;
 use openmls_traits::storage::StorageProvider as _;
 use profile::Provider;
-use state::{hex, unhex, Chat, Contact, Inflight, Outgoing, OwnKeyPackage, State, StoredContent, StoredEvent};
+use state::{
+    hex, unhex, Chat, Contact, Creating, Inflight, Outgoing, OwnKeyPackage, Registering, State, StoredContent,
+    StoredEvent,
+};
 use std::collections::{BTreeSet, VecDeque};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -445,40 +448,99 @@ impl Client {
         name: Option<String>,
         push: Push,
     ) -> Result<Client> {
+        let mut client = Client::registering(transport, username, account_secret, name, push)?;
+        client.finish_registration()?;
+        Ok(client)
+    }
+
+    /// `register_username`, saved to `store` from the start: the account and device secrets and the request are saved
+    /// before the request leaves, so a crash after the hub took it loses neither the account nor its device. A state
+    /// saved so is finished by `finish_registration` after `restore` (`registering`).
+    pub fn register_username_saved(
+        transport: Arc<dyn Transport>,
+        store: Arc<dyn Store>,
+        key: [u8; 32],
+        username: &str,
+        account_secret: Option<[u8; 32]>,
+        name: Option<String>,
+        push: Push,
+    ) -> Result<Client> {
+        let mut client = Client::registering(transport, username, account_secret, name, push)?;
+        client.persist_to(store, key)?;
+        client.finish_registration()?;
+        Ok(client)
+    }
+
+    /// A device with its keys and its registration (spec 6.4) made, not yet sent.
+    fn registering(
+        transport: Arc<dyn Transport>,
+        username: &str,
+        account_secret: Option<[u8; 32]>,
+        name: Option<String>,
+        push: Push,
+    ) -> Result<Client> {
         let handle = Handle::parse(username)?;
         if handle.kind != KIND_USERNAME {
             return Err(Error::Protocol("not a username"));
         }
-        let secret = account_secret.unwrap_or_else(identity::random);
+        let account = SigningKey::from_bytes(&account_secret.unwrap_or_else(identity::random));
+        let (mut client, device) = Client::new_device(transport, &handle, account, name, push)?;
+        let request = api::Register { username: handle.value.clone(), device };
+        client.state.registering = Some(Registering { request: encode(&request), sent: false });
+        client.state.username = Some(String::from_utf8_lossy(handle.value.as_slice()).into_owned());
+        // A new account has nothing stored. A restored one takes its storage in once registered, so its blocks hold
+        // before the first message; without network, before the first receive (`receive_all`).
+        client.state.storage_fetched = account_secret.is_none();
+        Ok(client)
+    }
+
+    /// Whether this device's registration has not been answered yet (a state saved before it, then restored):
+    /// `finish_registration` before anything else.
+    pub fn is_registering(&self) -> bool {
+        self.state.registering.is_some()
+    }
+
+    /// Sends the registration (spec 6.4), again after a lost answer or a restart. A try sent before may have arrived:
+    /// then this device is registered, and the hub says so to a lookup it signs (else `401`), so the same request
+    /// is sent again only if it did not. Never a new key: that would find the name taken by itself.
+    pub fn finish_registration(&mut self) -> Result<()> {
+        if !self.is_registering() {
+            return Ok(());
+        }
         let mut tries = 0;
-        let mut client = loop {
-            let account = SigningKey::from_bytes(&secret);
-            let (mut client, device) =
-                Client::new_device(transport.clone(), &handle, account, name.clone(), push.clone())?;
-            let request = api::Register { username: handle.value.clone(), device };
-            match client.registered(api::REGISTER, &encode(&request)) {
-                Ok(()) => break client,
-                // The answer may be lost after the hub took it: then the name is this key's, and a new device with
-                // the same key takes it again (6.4). Never a new key: that would find the name taken by itself.
+        while let Some(registering) = self.state.registering.clone() {
+            if registering.sent {
+                let mine = Handle::account_key(&self.my_account_key());
+                match self.lookup(&mine, false, Vec::new()) {
+                    Ok(found) if found.device_keys.iter().any(|k| k.as_slice() == self.own_device_key()) => {
+                        self.state.user_id = hex(&found.user_id);
+                        self.state.registering = None;
+                        break;
+                    }
+                    Ok(_) | Err(Error::Refused(status::UNAUTHORIZED)) | Err(Error::NotOnYo) => {}
+                    Err(error) => return Err(error),
+                }
+            } else if let Some(pending) = self.state.registering.as_mut() {
+                pending.sent = true;
+                self.persist()?;
+            }
+            match self.registered(api::REGISTER, &registering.request) {
+                Ok(()) => self.state.registering = None,
+                // The answer may be lost after the hub took it: asked first, next round.
                 Err(Error::Network(_)) if tries < REGISTER_TRIES => tries += 1,
                 Err(error) => return Err(error),
             }
-        };
-        client.state.username = Some(String::from_utf8_lossy(handle.value.as_slice()).into_owned());
-        // A new account has nothing stored. A restored one takes its storage in now, so its blocks hold before the
-        // first message; without network, before the first receive (`receive_all`).
-        client.state.storage_fetched = account_secret.is_none();
-        if account_secret.is_some() {
-            let _ = client.sync_storage_quietly();
         }
-        // A name registered again (a new phone) keeps the spelling it had at the hub, whatever was typed now.
-        if account_secret.is_some() {
-            let me = Handle::user(&user_bytes(&client.state.user_id)?);
-            if let Ok((_, Some(spelled))) = client.lookup_named(&me, false, Vec::new()) {
-                client.state.username = Some(spelled);
+        let restored = !self.state.storage_fetched;
+        if restored {
+            let _ = self.sync_storage_quietly();
+            // A name registered again (a new phone) keeps the spelling it had at the hub, whatever was typed now.
+            let me = Handle::user(&user_bytes(&self.state.user_id)?);
+            if let Ok((_, Some(spelled))) = self.lookup_named(&me, false, Vec::new()) {
+                self.state.username = Some(spelled);
             }
         }
-        Ok(client)
+        self.persist()
     }
 
     /// For tests: any request, signed by this device, as only a broken client would send it.
@@ -561,6 +623,7 @@ impl Client {
             tokens: VecDeque::new(),
             tokens_after: 0,
             tokens_check: false,
+            registering: None,
         };
         let mut client = Client::with(transport, Provider::default(), state);
         let key_packages =
@@ -1168,11 +1231,18 @@ impl Client {
         if self.state.contacts.get(&peer).is_some_and(|c| c.unconfirmed) {
             return Err(Error::Unconfirmed);
         }
-        let group_id = self.atomic(|c| c.create_chat(&peer, &key_packages))?;
+        // Made and saved first, registered outside the transaction: what the hub took is never rolled back (4.7).
+        let group_id = self.atomic(|c| c.create_chat(&peer, &key_packages).and_then(|g| c.persist().map(|()| g)))?;
+        match self.register_group(&group_id) {
+            // Not now: the chat waits, its Welcome and messages with it, for the next delivery.
+            Err(error) if !retryable(&error) => return Err(error),
+            _ => {}
+        }
         Ok((peer, group_id))
     }
 
-    /// Creates the group for a chat with `peer`, registers it at the hub and queues the Welcome (spec 4.2).
+    /// Creates the group for a chat with `peer` and queues its Welcome and profile (spec 4.2), all held until the
+    /// group is registered at the hub (`register_group`).
     fn create_chat(&mut self, peer: &str, key_packages: &[KeyPackage]) -> Result<GroupId> {
         let id: [u8; 32] = identity::random();
         let group_id = GroupId::from_slice(&id);
@@ -1188,10 +1258,6 @@ impl Client {
         group.merge_pending_commit(&self.provider).map_err(mls)?;
         let token = self.token(&group)?;
         let create = api::GroupCreate { group_id: id, epoch: group.epoch().as_u64(), token_hash: sha256(&token) };
-        let response = self.unsigned("POST", api::GROUPS, &[], &encode(&create))?;
-        if response.status != status::CREATED {
-            return Err(refused(&response));
-        }
         let sealed = envelope::seal(&welcome.to_bytes().map_err(mls)?)?;
         self.state.chats.insert(
             group_key(&group_id),
@@ -1207,6 +1273,7 @@ impl Client {
                 lost: false,
                 restarted: false,
                 profile_due: false,
+                creating: Some(Creating { request: encode(&create), sent: false }),
             },
         );
         self.enqueue(&group, &[peer.to_owned()], &sealed, None);
@@ -1216,11 +1283,61 @@ impl Client {
         Ok(group_id)
     }
 
+    /// Registers a group made here at the hub (spec 4.2) with the request it was made with, again until the hub
+    /// answers. A `409` to a request sent before is the answer to that one, lost; to the first, the id is someone
+    /// else's and the chat goes, with what waits in it.
+    fn register_group(&mut self, group_id: &GroupId) -> Result<()> {
+        let key = group_key(group_id);
+        let Some(creating) = self.state.chats.get(&key).and_then(|c| c.creating.clone()) else { return Ok(()) };
+        if !creating.sent {
+            if let Some(pending) = self.state.chats.get_mut(&key).and_then(|c| c.creating.as_mut()) {
+                pending.sent = true;
+            }
+            self.persist()?;
+        }
+        let response = self.unsigned("POST", api::GROUPS, &[], &creating.request)?;
+        let error = refused(&response);
+        match response.status {
+            status::CREATED => {}
+            status::CONFLICT if creating.sent => {}
+            _ if retryable(&error) => return Err(error),
+            _ => {
+                self.drop_chat(&key);
+                return Err(error);
+            }
+        }
+        if let Some(chat) = self.state.chats.get_mut(&key) {
+            chat.creating = None;
+        }
+        Ok(())
+    }
+
+    /// Registers the groups made here that the hub has not answered for yet, before a delivery.
+    fn register_pending(&mut self) -> Result<()> {
+        let pending: Vec<GroupId> = self
+            .state
+            .chats
+            .iter()
+            .filter(|(_, chat)| chat.creating.is_some())
+            .filter_map(|(key, _)| group_of(key))
+            .collect();
+        for group in pending {
+            match self.register_group(&group) {
+                Ok(()) => {}
+                Err(error) if retryable(&error) => {}
+                Err(error @ Error::Save(_)) => return Err(error),
+                Err(error) => self.drop_one(format!("group: {error}")),
+            }
+        }
+        Ok(())
+    }
+
     // ---- commits ----
 
     fn update_due(&self, group: &GroupId) -> bool {
         self.state.chats.get(&group_key(group)).is_some_and(|chat| {
             !chat.lost
+                && chat.creating.is_none()
                 && (chat.needs_update
                     || (self.clock)().saturating_sub(chat.last_update_ms) >= UPDATE_AFTER_MS
                     || chat.sent_since_update >= UPDATE_AFTER_MESSAGES)
@@ -1626,8 +1743,9 @@ impl Client {
                 i += 1;
                 continue;
             }
-            // A lost chat's envelopes wait for its restart, which sends its messages in the new group (4.9).
-            if self.state.chats.get(&item.group).is_some_and(|c| c.lost) {
+            // A lost chat's envelopes wait for its restart, which sends its messages in the new group (4.9); a new
+            // chat's wait until the hub has its group (4.2).
+            if self.state.chats.get(&item.group).is_some_and(|c| c.lost || c.creating.is_some()) {
                 waiting.insert(item.user.clone());
                 i += 1;
                 continue;
@@ -1794,6 +1912,7 @@ impl Client {
 
     /// Flushes, and repairs every group a delivery found out of line with a user's devices, until the outbox moves.
     fn deliver(&mut self) -> Result<()> {
+        self.register_pending()?;
         for _ in 0..REPAIR_ROUNDS {
             let mismatches = self.flush()?;
             if mismatches.is_empty() {
@@ -2084,6 +2203,7 @@ impl Client {
                 lost: false,
                 restarted: false,
                 profile_due: false,
+                creating: None,
             },
         );
         if !blocked {
