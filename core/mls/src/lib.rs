@@ -709,9 +709,10 @@ impl Client {
         self.state.key_packages.len()
     }
 
-    /// Envelopes waiting to be taken by the hub.
+    /// Envelopes waiting to be taken by the hub; not those held for a blocked user (spec 4.8), which go only after
+    /// an unblock.
     pub fn pending(&self) -> usize {
-        self.state.outbox.len()
+        self.state.outbox.iter().filter(|item| !self.blocked(&item.user)).count()
     }
 
     fn blocked(&self, user: &str) -> bool {
@@ -1570,7 +1571,8 @@ impl Client {
         let mut i = 0;
         while i < self.state.outbox.len() {
             let item = &self.state.outbox[i];
-            if waiting.contains(&item.user) {
+            // Nothing goes to a blocked user (4.8): what waits for them stays, in its order, until an unblock.
+            if waiting.contains(&item.user) || self.blocked(&item.user) {
                 i += 1;
                 continue;
             }
@@ -2378,9 +2380,9 @@ impl Client {
         self.deliveries()
     }
 
-    /// Envelopes not yet taken by the hub.
+    /// Envelopes not yet taken by the hub (`pending`).
     pub fn waiting(&self) -> usize {
-        self.state.outbox.len()
+        self.pending()
     }
 
     /// Takes the answers to `send_begin`'s deliveries (or to the ones before): `More` when the hub took them all and

@@ -813,7 +813,8 @@ fn op_block(w: &World, a: &mut Acct, rng: &mut Rng) {
         let mut ledger = w.ledger();
         ledger.blocks.insert((a.user.clone(), who.clone()));
         let me = a.user.clone();
-        ledger.relax(|m| m.to == me && m.from == who);
+        // And what waits for them in the outbox stays there until an unblock (spec 4.8).
+        ledger.relax(|m| (m.to == me && m.from == who) || (m.from == me && m.to == who));
     }
     match client.set_blocked(&who, block) {
         Ok(()) => {
@@ -1094,7 +1095,7 @@ fn sync_blocks(w: &World, a: &mut Acct) {
     for who in now.difference(&a.blocked) {
         ledger.blocks.insert((a.user.clone(), who.clone()));
         let me = a.user.clone();
-        ledger.relax(|m| m.to == me && m.from == *who);
+        ledger.relax(|m| (m.to == me && m.from == *who) || (m.from == me && m.to == *who));
     }
     drop(ledger);
     w.trace(&a.user, format!("blocks now {now:?}"));

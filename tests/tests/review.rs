@@ -3,7 +3,7 @@
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use yo_core::{Client, Content, Error, Event, Push, Store};
-use yo_tests::{random_u64, Http, TestHub};
+use yo_tests::{random_u64, Fault, Http, TestHub};
 
 fn by_name(http: Arc<Http>, name: &str) -> Client {
     Client::register_username(http, name, None, None, Push::none()).unwrap()
@@ -73,4 +73,31 @@ fn a_save_that_fails_stops_the_send_and_the_ack() {
     let blob = disk.saved.lock().unwrap().clone();
     let mut again = Client::restore(Http::new(hub.url()), &blob, &KEY).unwrap();
     assert_eq!(texts(&again.sync(0).unwrap()), ["for a"], "still at the hub");
+}
+
+/// A message made offline to someone then blocked still left with the next delivery. Now what waits for a blocked
+/// user stays (not counted as waiting) and goes only after an unblock.
+#[test]
+fn nothing_waiting_goes_to_someone_blocked_meanwhile() {
+    let hub = TestHub::start();
+    let n = random_u64() % 100_000;
+    let http = Http::new(hub.url());
+    let mut a = by_name(http.clone(), &format!("Shy{n}"));
+    let mut b = by_name(Http::new(hub.url()), &format!("Yhs{n}"));
+    a.send(b.user_id(), text("hello")).unwrap();
+    assert_eq!(texts(&b.sync(0).unwrap()), ["hello"]);
+    let to_b = yo_wire::api::deliver_path(&yo_tests::user_id(b.user_id()));
+    http.fault(&to_b, Fault::Answer(503));
+    a.send(b.user_id(), text("made offline")).unwrap();
+    assert_eq!(a.pending(), 1);
+    a.set_blocked(b.user_id(), true).unwrap();
+    assert_eq!(a.pending(), 0, "held, not waiting");
+    a.sync(0).unwrap();
+    a.maintenance().unwrap();
+    assert!(texts(&b.sync(0).unwrap()).is_empty(), "nothing went to b");
+    a.set_blocked(b.user_id(), false).unwrap();
+    a.sync(0).unwrap();
+    assert_eq!(texts(&b.sync(0).unwrap()), ["made offline"], "after the unblock, in order");
+    a.send(b.user_id(), text("and on")).unwrap();
+    assert_eq!(texts(&b.sync(0).unwrap()), ["and on"]);
 }
