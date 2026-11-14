@@ -12,8 +12,8 @@
 // Which save a process has: the file starts with a new random word (36 characters) for each save, written with the
 // state in one atomic write, so the word and the state never disagree. Each client keeps the word it read or wrote
 // last (`known`); a word that differs means another process saved since. A save that fails (a full disk) changes
-// nothing on disk, and this client keeps its newer state in memory and saves it with its next step; until then the
-// others see the state before it, as after a crash of this process (the core saves before anything leaves).
+// nothing on disk and throws: the core's step fails before anything that needed the save leaves (no message, commit,
+// KeyPackage or inbox ack), and the others see the state before it, as after a crash of this process.
 //
 // iOS ends a suspended app or extension that holds a file lock in a shared container (0xdead10cc): the app holds the
 // lock only inside a background task (`hold`), and nobody holds it while waiting for anything but the step itself.
@@ -128,14 +128,18 @@ final class SharedStateFile: StateStore, StateLock, @unchecked Sendable {
     return blob
   }
 
-  func save(blob: Data) {
-    guard let stateURL = Self.stateURL else { return }
+  func save(blob: Data) throws {
+    guard let stateURL = Self.stateURL else { throw YoError.Save(message: "no App Group") }
     // Another save since this client's last one (or the state gone, signed out): this one is old and never written
     // over it. Under the lock that is only a client already closed or replaced.
-    guard Self.word() == known, !(guest && known == nil) else { return }
+    guard Self.word() == known, !(guest && known == nil) else { throw YoError.Save(message: "an older state") }
     let gen = UUID().uuidString
-    guard (try? (Data(gen.utf8) + blob).write(to: stateURL, options: [.atomic, .completeFileProtectionUntilFirstUserAuthentication])) != nil
-    else { return }  // not saved: kept in memory, saved with the next step (see the top)
+    do {
+      try (Data(gen.utf8) + blob).write(
+        to: stateURL, options: [.atomic, .completeFileProtectionUntilFirstUserAuthentication])
+    } catch {
+      throw YoError.Save(message: error.localizedDescription)  // not saved: the step fails (see the top)
+    }
     known = gen
     Self.excludeFromBackup(stateURL)
   }

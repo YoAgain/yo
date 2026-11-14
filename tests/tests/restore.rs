@@ -81,7 +81,7 @@ fn accounts_restored_forty_times_by_every_way_lose_nothing() {
             assert_eq!(drain(&mut client, &friend_id), ["welcome"]);
             client.set_friend(&friend_id, Some("My Friend".into()), Some(2)).unwrap();
             client.set_blocked(&pest_id, true).unwrap();
-            client.set_app_icon(Some("Negative".into()));
+            client.set_app_icon(Some("Negative".into())).unwrap();
             client.maintenance().unwrap();
             let mut person = Person {
                 name,
@@ -104,7 +104,7 @@ fn accounts_restored_forty_times_by_every_way_lose_nothing() {
             let ctx = format!("seed {seed}, cycle {cycle}, {} by way {way}", p.name);
             // Every cycle changes the storage a little, so each restore has something new to bring back.
             p.client.set_friend(&friend_id, Some(format!("Friend {cycle}")), Some((cycle % 7) as u8)).unwrap();
-            p.client.set_app_icon(if cycle % 2 == 0 { Some("Original".into()) } else { None });
+            p.client.set_app_icon(if cycle % 2 == 0 { Some("Original".into()) } else { None }).unwrap();
             p.client.maintenance().unwrap();
             // (d): the passkey replaced and the words renewed first; the old ones must open nothing any more.
             if way == 3 {

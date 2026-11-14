@@ -46,22 +46,42 @@ pub struct Chat {
     /// A commit sent to the hub whose answer never came: it may have been accepted. Retried as it is until the hub
     /// answers; meanwhile the group holds it as its pending commit and nothing is sent in it.
     pub inflight: Option<Inflight>,
-    /// The hub does not order commits for this group (it never registered it, or the token is not ours): the chat
-    /// works, without updates.
-    pub no_updates: bool,
     /// The plaintexts of the last messages sent in this chat: sent again in a restarted chat (spec 4.9).
     #[serde(default)]
     pub sent: VecDeque<Vec<u8>>,
     /// The `sent_at` of the last message received from the peer here: what a restart tells it.
     #[serde(default)]
     pub last_seen_ms: u64,
-    /// This device can no longer follow the group (a commit it lacks is gone from the hub): restarted at the next
-    /// chance (spec 4.9).
+    /// This device can no longer follow the group (a commit it lacks is gone from the hub, or the hub refuses its
+    /// commits): restarted at the next chance (spec 4.9). What waits to go in it goes in the new group.
     #[serde(default)]
     pub lost: bool,
     /// Made, or taken over, by a restart: it replaces the older chats with the peer.
     #[serde(default)]
     pub restarted: bool,
+    /// The own name changed and is not told here yet (`set_name`): it goes when the chat can take it.
+    #[serde(default)]
+    pub profile_due: bool,
+    /// Made here and not yet registered at the hub (spec 4.2): its Welcome and messages wait in the outbox.
+    #[serde(default)]
+    pub creating: Option<Creating>,
+}
+
+/// This device's registration (`POST /v1/register`, spec 6.4), saved before it leaves and kept until the hub
+/// answered: after a crash it is finished from the state.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Registering {
+    pub request: Vec<u8>,
+    /// Sent before: the hub may have taken it (then this device can sign, and is asked about first).
+    pub sent: bool,
+}
+
+/// A group's registration at the hub (`POST /v1/groups`), sent again until the hub answers.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Creating {
+    pub request: Vec<u8>,
+    /// Sent before: a `409` now is that try's answer, lost.
+    pub sent: bool,
 }
 
 /// A commit on its way to the hub, with what to deliver once it is accepted.
@@ -228,6 +248,9 @@ pub struct State {
     /// The hub refused a token: its key is asked for at the next refill, whatever the stash.
     #[serde(default)]
     pub tokens_check: bool,
+    /// This device's registration while the hub has not answered it: the user id is empty until then.
+    #[serde(default)]
+    pub registering: Option<Registering>,
 }
 
 impl Drop for State {

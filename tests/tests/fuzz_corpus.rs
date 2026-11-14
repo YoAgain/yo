@@ -11,8 +11,9 @@ use yo_wire::api;
 struct Saved(Mutex<Vec<u8>>);
 
 impl Store for Saved {
-    fn save(&self, blob: Vec<u8>) {
+    fn save(&self, blob: Vec<u8>) -> Result<(), String> {
         *self.0.lock().unwrap() = blob;
+        Ok(())
     }
 }
 
@@ -40,7 +41,7 @@ fn write_fuzz_corpus() {
     let mut b = register(Http::new(hub.url()), &pb, Some("BOB"));
     // B's state before anything arrives.
     let saved = Arc::new(Saved::default());
-    b.persist_to(saved.clone(), KEY);
+    b.persist_to(saved.clone(), KEY).unwrap();
     write("seeds", "core_state.bin", &saved.0.lock().unwrap());
     // What B's check of A's identity answers.
     let (account_key, device_key) = ha
