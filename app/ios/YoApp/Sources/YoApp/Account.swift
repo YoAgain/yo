@@ -763,7 +763,7 @@ final class AccountStore {
         return (kept, client.appIcon(), names)
       }), client === self.client
     else { return }
-    friends.take(kept, names: names, seed: !friendsSeeded)
+    friends.take(kept, names: names, seed: !friendsSeeded, prune: !restored)
     friendsSeeded = true
     guard restored, read || !kept.isEmpty || icon != nil else { return }  // maybe not read yet: after the first sync
     restored = false
