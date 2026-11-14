@@ -1024,7 +1024,10 @@ struct LiveBar: View {
   var body: some View {
     RowButton(
       title, count: count, color: color, recording: recording, outgoing: bar.outgoing.last?.started, stop: stop,
-      media: media, yo: yo, hint: hint, hold: hold, view: view, action: action)
+      media: media, yo: yo, hint: hint, hold: hold, view: view, faded: friend.gone && bar.sent == nil,
+      action: action)
+      // Gone: still their name (whose bar it is), faded; a tap says "Not on Yo".
+      .accessibilityValue(friend.gone ? "Not on Yo" : "")
   }
 
   /// The bar's words: what is happening, else the name.
@@ -1032,7 +1035,7 @@ struct LiveBar: View {
     if recording { return "● Recording" }
     if let last = bar.outgoing.last { return last.text }
     if let sent = bar.sent { return sent.text }
-    return friend.gone ? "Not on Yo" : friend.name
+    return friend.name
   }
 
   /// How many the words count ("Sent Yo!!" for three): photos on their way, or sends in a row.
@@ -1082,6 +1085,8 @@ struct RowButton: View {
   var hint: String?
   var hold: ((Bool) -> Void)?
   var view: (ThumbnailTouch) -> Void = { _ in }
+  /// The words faded (a friend no longer on Yo).
+  var faded = false
   let action: () -> Void
   @State private var pressed = false
   @State private var viewing = false
@@ -1092,7 +1097,7 @@ struct RowButton: View {
     _ title: String, count: Int = 1, color: Color, recording: Bool = false, outgoing: Date? = nil,
     stop: @escaping () -> Void = {},
     media: [Arrival] = [], yo: FriendList.Landing? = nil, hint: String? = nil, hold: ((Bool) -> Void)? = nil,
-    view: @escaping (ThumbnailTouch) -> Void = { _ in }, action: @escaping () -> Void
+    view: @escaping (ThumbnailTouch) -> Void = { _ in }, faded: Bool = false, action: @escaping () -> Void
   ) {
     self.title = title
     self.count = count
@@ -1105,6 +1110,7 @@ struct RowButton: View {
     self.hint = hint
     self.hold = hold
     self.view = view
+    self.faded = faded
     self.action = action
   }
 
@@ -1169,7 +1175,7 @@ struct RowButton: View {
         .lineLimit(1)
         .contentTransition(.identity)  // other words come at once, never two drawn over each other
         .modifier(Knock(trigger: yo?.first))
-        .opacity(touchable ? 0 : 1)
+        .opacity(touchable ? 0 : faded ? 0.55 : 1)
         .accessibilityHidden(touchable)
       Bangs(count: count).opacity(touchable ? 0 : 1).accessibilityHidden(touchable)
       ZStack { mark(touchable: touchable) }  // always a part, so a missing "!" never takes its place
