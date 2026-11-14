@@ -324,7 +324,7 @@ final class AccountStore {
         }
         let file = SharedStateFile(guest: false)
         let client = try SharedStateFile.locked {
-          guard let key = try StateKey.shared() else { throw YoError.State }
+          let key = try StateKey.makeShared()
           _ = file.read()  // the state there now (none, or a signed-out one's): this one's to replace
           return try make(file, key)
         }
@@ -631,9 +631,17 @@ final class AccountStore {
     SyncedAccount.left = nil
     restored = same
     friendsSeeded = true
+    tookPasskeyChoice(of: account)
     self.account = account
     SecureReminder.update(secured: account.secured)
     Task { await addAuthKeys() }
+  }
+
+  /// An account back on this phone secured by its words alone: its passkey was declined (the guide asks for it
+  /// first), on the phone it came from. Without this the new phone said "Not Secured" and asked to secure an account
+  /// that is, as the old phone did not.
+  private func tookPasskeyChoice(of account: Account) {
+    passkeyTurnedOff = account.secured && !account.byPasskey
   }
 
   /// Back without a word, from the iCloud Keychain (`SyncedAccount`): the app deleted and installed again, or a new
@@ -670,6 +678,7 @@ final class AccountStore {
     if !same { SyncedAccount.delete(item.userID) }  // the old user is gone; the new one gets its own item
     self.restored = same
     friendsSeeded = true
+    tookPasskeyChoice(of: restored)
     account = restored
     SecureReminder.update(secured: restored.secured)
     Task { await addAuthKeys() }
