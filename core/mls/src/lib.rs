@@ -1206,6 +1206,7 @@ impl Client {
                 last_seen_ms: 0,
                 lost: false,
                 restarted: false,
+                profile_due: false,
             },
         );
         self.enqueue(&group, &[peer.to_owned()], &sealed, None);
@@ -2082,6 +2083,7 @@ impl Client {
                 last_seen_ms: 0,
                 lost: false,
                 restarted: false,
+                profile_due: false,
             },
         );
         if !blocked {
@@ -2377,6 +2379,8 @@ impl Client {
         } else {
             group
         };
+        // A name not yet told goes first.
+        self.send_profiles();
         // Saved with the message in it, or not made at all (spec 4.7).
         self.atomic(|c| c.send_in(&group, content, true).and_then(|()| c.persist()))?;
         match self.deliver() {
@@ -2580,6 +2584,7 @@ impl Client {
                 first_error.get_or_insert(error);
             }
         }
+        self.send_profiles();
         self.forget_key_packages();
         if let Err(error) = self.deliver().and_then(|()| self.sync_storage_quietly()) {
             first_error.get_or_insert(error);
@@ -2592,23 +2597,44 @@ impl Client {
         let result = (|| {
             Message { sent_at_ms: 0, content: Content::Profile { name: name.to_owned() } }.encode()?;
             self.state.name = Some(name.to_owned());
-            let groups: Vec<GroupId> = self
-                .state
-                .chats
-                .iter()
-                .filter(|(_, chat)| !self.blocked(&chat.peer))
-                .filter_map(|(key, _)| group_of(key))
-                .collect();
-            for group in groups {
-                match self.atomic(|c| c.send_in(&group, Content::Profile { name: name.to_owned() }, false)) {
-                    // The name reaches a contact whose new key waits for confirmation with the next message.
-                    Ok(()) | Err(Error::Unconfirmed) => {}
-                    Err(error) => return Err(error),
-                }
+            for chat in self.state.chats.values_mut() {
+                chat.profile_due = true;
             }
-            self.deliver()
+            self.send_profiles();
+            match self.deliver() {
+                // The name is set; that contact has it once the new key is confirmed.
+                Err(Error::Unconfirmed) => Ok(()),
+                other => other,
+            }
         })();
         self.finish(result)
+    }
+
+    /// Tells the name to every chat it is due in that can take a message now: not to a blocked peer (4.8), nor one
+    /// whose new key waits for confirmation (3.4), nor in a group whose commit waits for its answer or that is lost.
+    /// The others keep it due, for the next send or `maintenance`.
+    fn send_profiles(&mut self) {
+        let Some(name) = self.state.name.clone() else { return };
+        let due: Vec<String> = self
+            .state
+            .chats
+            .iter()
+            .filter(|(_, chat)| chat.profile_due && chat.inflight.is_none() && !chat.lost && !self.blocked(&chat.peer))
+            .map(|(key, _)| key.clone())
+            .collect();
+        for key in due {
+            let Some(group) = group_of(&key) else { continue };
+            let sent = self.atomic(|c| {
+                c.send_in(&group, Content::Profile { name: name.clone() }, false)?;
+                c.state.chats.get_mut(&key).ok_or(Error::Protocol("unknown group"))?.profile_due = false;
+                Ok(())
+            });
+            if let Err(error) = sent {
+                if error != Error::Unconfirmed {
+                    self.note(format!("name: {error}"));
+                }
+            }
+        }
     }
 
     pub fn contacts(&self) -> Vec<ContactInfo> {
