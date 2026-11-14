@@ -3938,6 +3938,8 @@ dependencies = [
  "ed25519-dalek",
  "getrandom 0.2.17",
  "libc",
+ "libsignal-protocol",
+ "rand 0.9.5",
  "reqwest",
  "rusqlite",
  "serde_json",

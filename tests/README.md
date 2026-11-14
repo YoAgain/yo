@@ -23,6 +23,7 @@ pinned toolchain (Docker); `cargo` works the same where Rust 1.99.1 is installed
 ```sh
 dev/cargo test --workspace                                  # everything
 YO_ENV="YO_SEEDS=27,41" dev/cargo test -p yo-tests --test simulation seeded   # replay seeds
+dev/cargo run --release -p yo-tests --bin yo-yops           # Yos per second of one core, no hub (send, receive, fan-out, first Yo with PQXDH; state saved or not; MLS 930e34e beside)
 ```
 
 A failing simulation names its seed; the run is deterministic in what it does, so the seed reproduces it.
