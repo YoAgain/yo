@@ -46,7 +46,7 @@ push through APNs (see above), the camera (black; photos come from the library).
 | Name: too short (after a pause, and on Continue with a shake), taken (YoGPT), reserved (Apple), lookalike (Y0GPT), digits first stripped, 16 characters, emoji, accents | ok; 16 characters overflowed the field: fixed | 02-11 |
 | Register, YoGPT on the list as "YoGPT" | ok | 12 |
 | Yo to YoGPT, its answer ("Yo!") | ok | 13, 14-* |
-| Add friend: own name "That’s you", unknown "No Such User" (keyboard stays now), other spelling "chaosben1" becomes "ChaosBen1", offline added as typed | ok | 15-16, 40-41, 162-163 |
+| Add friend: own name "That’s You", unknown "No Such User" (keyboard stays now), other spelling "chaosben1" becomes "ChaosBen1", offline added as typed | ok | 15-16, 40-41, 162-163 |
 | A to B: one Yo, a burst of 10: B counted exactly 11 received | ok | 42-45, 51 |
 | Swipe a bar: Block and Remove, one open at a time, a tap closes without sending, not in camera mode | new, ok | 21-23 |
 | Long press: Report (Spam, Abuse, Something Else), Thanks for Reporting with Block, Block, Remove | ok | 103-106 |
@@ -82,7 +82,7 @@ app's team in its id, which the Simulator build has not: the https link opens Sa
 |---|---|
 | Signed in, link to someone not on the list: added once, on top; again: "Already Added" on their bar, no second bar | ok |
 | Signed in, link to a name nobody has: "No Such User" in Add Friend's field, nothing added | ok |
-| Signed in, link to one's own name: "That’s you" | ok |
+| Signed in, link to one's own name: "That’s You" | ok |
 | Fresh install, link before the welcome ("NAME invited you" over Sign Up), app killed while typing the name, still there after the start; signed up: NAME and YoGPT on the list | ok |
 | Signed out, link, Sign In from the keychain list: NAME added (without a link it is not) | ok |
 | Link to the name then registered: not added, nothing said | ok |
