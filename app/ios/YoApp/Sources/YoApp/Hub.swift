@@ -3,6 +3,7 @@
 // call still at the hub (the core does one at a time): `Hub.run` takes it off the main actor, and none is made there.
 import Foundation
 import Observation
+import QuartzCore
 import Security
 import Synchronization
 import YoCore
@@ -97,6 +98,7 @@ final class HubTransport: HttpTransport {
     if !body.isEmpty || method != "GET" { request.httpBody = body }
     let done = DispatchSemaphore(value: 0)
     let answer = Answer()
+    let start = Perf.on ? CACurrentMediaTime() : 0
     URLSession.shared.dataTask(with: request) { data, response, error in
       answer.result =
         if let error {
@@ -111,6 +113,11 @@ final class HubTransport: HttpTransport {
       done.signal()
     }.resume()
     done.wait()
+    if Perf.on {
+      let ms = (CACurrentMediaTime() - start) * 1000
+      let route = path.split(separator: "/").prefix(2).joined(separator: "/")  // not the ids after it
+      Perf.mark("http \(method) \(route) \(answer.result.status) " + String(format: "%.1f ms", ms))
+    }
     return answer.result
   }
 
