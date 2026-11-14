@@ -1942,10 +1942,9 @@ impl Client {
                 Err(error) => return Err(error),
             },
         };
-        if self.state.contacts.get(&peer).is_some_and(|c| c.blocked) {
-            self.ignore(id);
-            return Ok(());
-        }
+        // A blocked user's chat is joined quietly: nothing of it is shown while the block holds, and it works again
+        // after an unblock (ignored, it would stay dead for good: the sender keeps writing in it).
+        let blocked = self.state.contacts.get(&peer).is_some_and(|c| c.blocked);
         self.pin(&peer, peer_key, username);
         let group = staged.into_group(&self.provider).map_err(mls)?;
         if group.ciphersuite() != profile::CIPHERSUITE {
@@ -1967,7 +1966,9 @@ impl Client {
                 restarted: false,
             },
         );
-        self.push_event(Event::NewChat { user: peer });
+        if !blocked {
+            self.push_event(Event::NewChat { user: peer });
+        }
         Ok(())
     }
 

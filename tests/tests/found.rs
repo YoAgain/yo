@@ -109,3 +109,23 @@ fn a_block_also_drops_what_waits_to_be_shown() {
     a.set_blocked(b.user_id(), true).unwrap();
     assert!(texts(&a.sync(0).unwrap()).is_empty());
 }
+
+/// A chat started by someone blocked was ignored, and stayed ignored after the unblock: every later message in it
+/// was discarded unseen, for good.
+#[test]
+fn a_chat_started_while_blocked_works_after_the_unblock() {
+    let hub = TestHub::start();
+    let n = random_u64() % 100_000;
+    let mut r = by_name(Http::new(hub.url()), &format!("Picky{n}"), None).unwrap();
+    let mut s = by_name(Http::new(hub.url()), &format!("Eager{n}"), None).unwrap();
+    r.set_blocked(s.user_id(), true).unwrap();
+    s.send(r.user_id(), Content::Text("let me in".into())).unwrap();
+    assert!(texts(&r.sync(0).unwrap()).is_empty(), "blocked: not shown");
+    r.set_blocked(s.user_id(), false).unwrap();
+    s.send(r.user_id(), Content::Text("now?".into())).unwrap();
+    let mut got = texts(&r.sync(0).unwrap());
+    got.extend(texts(&r.sync(0).unwrap()));
+    assert_eq!(got, ["now?"], "dropped: {:?}", r.drop_reasons());
+    r.send(s.user_id(), Content::Text("hi".into())).unwrap();
+    assert_eq!(texts(&s.sync(0).unwrap()), ["hi"]);
+}

@@ -871,8 +871,17 @@ fn definite<T>(mut f: impl FnMut() -> Result<T, Error>) -> Result<T, Error> {
     f()
 }
 
+/// What a client dropped (its count lives in memory only): counted before it goes.
+fn harvest_drops(w: &World, client: Option<&Client>) {
+    for reason in client.map(|c| c.drop_reasons()).unwrap_or_default() {
+        let kind: String = reason.chars().take(60).collect();
+        w.stats.count(format!("dropped: {kind}"));
+    }
+}
+
 /// The app killed and started again from what it saved.
 fn restart(w: &World, a: &mut Acct, rng: &mut Rng) {
+    harvest_drops(w, a.client.as_ref());
     let saved = a.proc_.saved();
     let proc_ = Proc::new(&w.net, &w.stats, w.args.faults, rng.next_u64());
     match Client::restore(proc_.clone(), &saved, &STATE_KEY) {
@@ -902,6 +911,7 @@ fn op_new_phone(w: &World, a: &mut Acct, rng: &mut Rng) {
     }
     client.persist_to(proc_.clone(), STATE_KEY);
     // What the old device had not received, or not sent, is gone with it.
+    harvest_drops(w, a.client.as_ref());
     let mut old = a.client.replace(client).unwrap();
     let old_proc = a.proc_.clone();
     {
@@ -1341,9 +1351,7 @@ fn check_ledger(w: &World, all: &[Vec<Acct>]) {
             if c.pending() > 0 {
                 w.stats.violation(format!("{} still has {} envelopes in its outbox", a.name, c.pending()));
             }
-            for reason in c.drop_reasons() {
-                w.stats.count(format!("dropped: {reason}"));
-            }
+            harvest_drops(w, Some(c));
             // The saved state opens.
             if Client::restore(a.proc_.clone(), &a.proc_.saved(), &STATE_KEY).is_err() {
                 w.stats.violation(format!("{}: the saved state does not open", a.name));
