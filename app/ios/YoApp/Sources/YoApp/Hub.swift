@@ -4,6 +4,7 @@
 import Foundation
 import Observation
 import Security
+import Synchronization
 import YoCore
 
 enum Hub {
@@ -70,6 +71,11 @@ final class AppUpdate {
 
 /// HTTP for the core: a blocking request with URLSession (the core runs off the main actor, `Hub.run`).
 final class HubTransport: HttpTransport {
+  /// The hub answered 426 (this build is too old, spec 6.3): from then on nothing more is sent, by any transport of
+  /// this process; every request is answered 426 here, and the loops that send again stop (`unsupported`).
+  private static let tooOld = Atomic<Bool>(false)
+  static var unsupported: Bool { tooOld.load(ordering: .relaxed) }
+
   let base: URL
   /// Seconds a request may take: the inbox waits up to a minute; the notification extension has 30 s in all.
   let timeout: TimeInterval
@@ -80,6 +86,7 @@ final class HubTransport: HttpTransport {
   }
 
   func request(method: String, path: String, headers: [Header], body: Data) -> HttpResult {
+    guard !Self.unsupported else { return HttpResult(status: 426, body: Data(), error: nil) }
     guard let url = URL(string: path, relativeTo: base) else {
       return HttpResult(status: 0, body: Data(), error: "bad path")
     }
@@ -97,7 +104,10 @@ final class HubTransport: HttpTransport {
         } else {
           HttpResult(status: UInt16((response as? HTTPURLResponse)?.statusCode ?? 0), body: data ?? Data(), error: nil)
         }
-      if answer.result.status == 426 { AppUpdate.tooOld() }
+      if answer.result.status == 426 {
+        Self.tooOld.store(true, ordering: .relaxed)
+        AppUpdate.tooOld()
+      }
       done.signal()
     }.resume()
     done.wait()
