@@ -101,7 +101,7 @@ struct FrostedKey: View {
     .overlay {
       if !shown {
         Label("Tap to Show", systemImage: "eye")
-          .font(.system(size: 17, weight: .semibold))
+          .font(.headline)
           .padding(.horizontal, 18)
           .padding(.vertical, 10)
           .glassEffect()

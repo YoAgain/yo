@@ -212,7 +212,7 @@ private struct DoneRow: View {
       Image(systemName: "checkmark.circle.fill")
         .font(.system(size: 30))
         .foregroundStyle(.white, .green)
-      Text(title).font(.system(size: 18, weight: .semibold))
+      Text(title).font(.body.weight(.semibold))
       Spacer()
     }
     .padding(.horizontal, 16)
