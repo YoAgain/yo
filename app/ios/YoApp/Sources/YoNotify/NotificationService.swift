@@ -3,9 +3,10 @@
 // notification with those still on the screen ("Yo!!!!! +4 from YoGPT · 📷 2", ShareBridge.merged). It opens the app's state as a guest
 // (SharedState.swift: in turns with the app, under the lock in the App Group), receives once without waiting, and
 // names who the new Yos are from (a line per sender, the newest first). What it receives stays in the state for the
-// app (never acknowledged here), which shows it as ever; once the notification is out, the hub is told it arrived
-// (`afterSync`). Then the photos and videos those Yos carry are fetched to the App Group (Prefetch), within the
-// extension's limits (about 24 MB, 30 s): the app shows them as it opens, not a fetch later.
+// app (never acknowledged here), which shows it as ever. The photos and videos those Yos carry are fetched to the App
+// Group (Prefetch) before the notification goes (after it, iOS may end the process mid-fetch), within the extension's
+// limits (about 24 MB, 30 s): the app shows them as it opens, not a fetch later. Once the notification is out, the
+// hub is told it arrived (`afterSync`).
 //
 // The hub pushes once per envelope, and not every envelope is a new Yo: the Welcome before a friend's first Yo, the
 // rest of a burst a push before already took, a commit, a blocked sender's Yo (dropped unseen, spec 4.8), a Yo the app
@@ -30,6 +31,7 @@ final class NotificationService: UNNotificationServiceExtension {
     content.title = ""  // "Yo" once, not as title and text
     pending.set(content: content, handler: contentHandler)
     let pending = pending
+    let start = Date.now
     DispatchQueue.global(qos: .userInitiated).async {
       let (found, client, events) = Self.newest()
       switch found {
@@ -54,11 +56,15 @@ final class NotificationService: UNNotificationServiceExtension {
       case .unread:
         break
       }
+      // The photos and videos before the notification goes: once it is delivered, iOS may end or freeze this process
+      // at any moment, and a fetch cut off there has used this device's fetch at the hub with nothing written (the
+      // app then finds the blob gone and gives the photo up). A new fetch starts only within 5 seconds of the push,
+      // so a slow network delays the notification little.
+      if let client, case .yos = found { Prefetch.fetch(events, client: client, startingBefore: start + 5) }
       pending.deliver()
       Perf.mark("nse.delivered")
       // Not before: a lost acknowledgement costs only a repeat, which the app skips as seen.
       _ = try? client?.afterSync()
-      if let client { Prefetch.fetch(events, client: client) }
     }
   }
 
