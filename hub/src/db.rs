@@ -605,11 +605,14 @@ impl Db {
         Ok(Write::Done(user))
     }
 
-    /// Claims a username (its skeleton and its spelling) for a user, giving up its old one; `None` only gives it up.
-    /// The user's own name in another spelling is the user's still, also when it has been reserved since.
-    pub fn set_username(&self, user: &UserId, name: Option<(&[u8], &str)>) -> rusqlite::Result<Write<()>> {
+    /// Claims a username (its skeleton and its spelling) for a device's user, giving up its old one; `None` only gives
+    /// it up. The user's own name in another spelling is the user's still, also when it has been reserved since. The
+    /// device is checked in this transaction, as `put_backup` checks it.
+    pub fn set_username(&self, device: &DeviceId, name: Option<(&[u8], &str)>) -> rusqlite::Result<Write<()>> {
         let mut conn = self.conn();
         let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let Some(user) = user_of_device(&tx, device)? else { return Ok(Write::Refused(Conflict::DeviceGone)) };
+        let user = &user;
         if let Some((skeleton, _)) = name {
             let owner: Option<UserId> = tx
                 .prepare_cached("SELECT user_id FROM handles WHERE kind = ?1 AND value = ?2")?
@@ -958,6 +961,8 @@ impl Db {
 
     // ---- KeyPackages and push ----
 
+    /// Adds a device's KeyPackages, checked against its account key. The device is checked in this transaction: one
+    /// replaced since (its account key may be another now) adds none.
     pub fn add_key_packages(
         &self,
         device: &DeviceId,
@@ -967,6 +972,9 @@ impl Db {
     ) -> rusqlite::Result<Write<()>> {
         let mut conn = self.conn();
         let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        if user_of_device(&tx, device)?.is_none() {
+            return Ok(Write::Refused(Conflict::DeviceGone));
+        }
         let held: u32 = tx
             .prepare_cached("SELECT count(*) FROM key_packages WHERE device_id = ?1 AND last_resort = 0")?
             .query_row([device], |row| row.get(0))?;
@@ -987,11 +995,13 @@ impl Db {
             .query_row([device], |row| row.get(0))
     }
 
-    pub fn set_push(&self, device: &DeviceId, platform: u8, token: &[u8]) -> rusqlite::Result<()> {
-        self.conn()
+    /// Sets a device's push token; refused for a device replaced since it authenticated.
+    pub fn set_push(&self, device: &DeviceId, platform: u8, token: &[u8]) -> rusqlite::Result<Write<()>> {
+        let changed = self
+            .conn()
             .prepare_cached("UPDATE devices SET push_platform = ?2, push_token = ?3 WHERE id = ?1")?
             .execute(params![device, platform, token])?;
-        Ok(())
+        Ok(if changed == 1 { Write::Done(()) } else { Write::Refused(Conflict::DeviceGone) })
     }
 
     /// Clears a push token the push service refused, unless the device set another meanwhile.
@@ -1295,7 +1305,7 @@ mod tests {
         assert_eq!(user(register(&db, b"yogpt", 1, 3, 0)), gpt);
         assert_eq!(spelling(&db, "YoGPT").as_deref(), Some("YoGPT"));
         // Its owner may write it otherwise; nobody else may take it.
-        assert!(matches!(db.set_username(&gpt, Some((b"YOGPT", "YOgpt"))).unwrap(), Write::Done(())));
+        assert!(matches!(db.set_username(&[3; 16], Some((b"YOGPT", "YOgpt"))).unwrap(), Write::Done(())));
         assert_eq!(spelling(&db, "yogpt").as_deref(), Some("YOgpt"));
         let mia = user(register(&db, b"Mia", 4, 4, 0));
         assert!(matches!(db.set_username(&mia, Some((b"YOGPT", "Y0GPT"))).unwrap(), Write::Refused(_)));
@@ -1321,7 +1331,7 @@ mod tests {
         // Who had the name before it was reserved keeps it: found, registered again on a new phone, written anew.
         assert_eq!(spelling(&db, "moderator").as_deref(), Some("Moderator"));
         assert_eq!(user(register(&db, b"Moderator", 1, 4, 0)), mod_user);
-        assert!(matches!(db.set_username(&mod_user, Some((b"MODERATOR", "MODERATOR"))).unwrap(), Write::Done(())));
+        assert!(matches!(db.set_username(&[4; 16], Some((b"MODERATOR", "MODERATOR"))).unwrap(), Write::Done(())));
     }
 
     /// A database the hub before spellings made (schema 1 without `handles.spelling` and the backups' auth keys):
@@ -1464,6 +1474,28 @@ mod tests {
             Write::Refused(Conflict::DeviceGone)
         ));
         assert_eq!(db.backup(&first).unwrap().map(|f| f.0).as_deref(), Some(&b"new"[..]));
+    }
+
+    /// What a device writes for its user is checked against the device in the write's own transaction: one replaced
+    /// after it authenticated (a new phone restored the account, or the account was deleted) changes nothing.
+    #[test]
+    fn a_replaced_device_writes_nothing_for_its_user() {
+        let db = Db::open(":memory:").unwrap();
+        let leo = user(register(&db, b"LEO", 1, 1, 0));
+        user(register(&db, b"LEO", 1, 2, 0));
+        let gone = |w: Write<()>| matches!(w, Write::Refused(Conflict::DeviceGone));
+        assert!(gone(db.set_username(&[1; 16], Some((b"OLD", "OLD"))).unwrap()));
+        assert_eq!(spelling(&db, "LEO").as_deref(), Some("LEO"), "the name stays the new phone's");
+        let key_package = StoredKeyPackage { hash: [7; 32], data: vec![7] };
+        assert!(gone(db.add_key_packages(&[1; 16], std::slice::from_ref(&key_package), None, 100).unwrap()));
+        assert!(gone(db.set_push(&[1; 16], 1, b"ab").unwrap()));
+        // Deleted: nothing is written for a user that is no more.
+        assert!(matches!(db.delete_account(&[2; 16], 1).unwrap(), Write::Done(())));
+        assert!(gone(db.set_username(&[2; 16], Some((b"LEO", "LEO"))).unwrap()));
+        assert!(gone(db.add_key_packages(&[2; 16], &[key_package], None, 100).unwrap()));
+        assert!(db.lookup(KIND_USER, &leo, false, &[]).unwrap().is_none());
+        assert!(!db.username_taken(b"LEO").unwrap());
+        assert_eq!(db.audit().unwrap(), []);
     }
 
     #[test]

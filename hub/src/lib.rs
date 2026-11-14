@@ -724,6 +724,7 @@ async fn key_packages(State(hub): Hubs, method: Method, uri: Uri, headers: Heade
         hub.check_key_packages(&request.key_packages, request.last_resort.as_ref(), &account_key, &device.device_key)?;
     match hub.db.add_key_packages(&device.device_id, &stored, last.as_ref(), KEY_PACKAGE_TARGET * 2)? {
         Write::Done(()) => Ok(StatusCode::NO_CONTENT),
+        Write::Refused(db::Conflict::DeviceGone) => Err(refuse(StatusCode::GONE)),
         Write::Refused(_) => Err(refuse(StatusCode::CONFLICT)),
     }
 }
@@ -776,8 +777,9 @@ async fn set_username(State(hub): Hubs, method: Method, uri: Uri, headers: Heade
     // Checked above: UTF-8.
     let spelling = request.username.as_ref().and_then(|n| std::str::from_utf8(n.as_slice()).ok());
     let skeleton = spelling.map(yo_wire::handle::skeleton);
-    match hub.db.set_username(&device.user_id, skeleton.as_deref().zip(spelling).map(|(s, n)| (s.as_bytes(), n)))? {
+    match hub.db.set_username(&device.device_id, skeleton.as_deref().zip(spelling).map(|(s, n)| (s.as_bytes(), n)))? {
         Write::Done(()) => Ok(StatusCode::NO_CONTENT),
+        Write::Refused(db::Conflict::DeviceGone) => Err(refuse(StatusCode::GONE)),
         Write::Refused(_) => Err(refuse(StatusCode::CONFLICT)),
     }
 }
@@ -860,8 +862,10 @@ async fn set_push(State(hub): Hubs, method: Method, uri: Uri, headers: HeaderMap
     if request.token.as_slice().len() > limits::MAX_PUSH_TOKEN_LEN {
         return Err(bad());
     }
-    hub.db.set_push(&device.device_id, request.platform, request.token.as_slice())?;
-    Ok(StatusCode::NO_CONTENT)
+    match hub.db.set_push(&device.device_id, request.platform, request.token.as_slice())? {
+        Write::Done(()) => Ok(StatusCode::NO_CONTENT),
+        Write::Refused(_) => Err(refuse(StatusCode::GONE)),
+    }
 }
 
 async fn inbox(State(hub): Hubs, method: Method, uri: Uri, headers: HeaderMap) -> Res<axum::response::Response> {
