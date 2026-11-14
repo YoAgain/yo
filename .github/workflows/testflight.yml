@@ -82,6 +82,7 @@ jobs:
       - name: Rust core
         if: steps.core.outputs.cache-hit != 'true'
         run: |
+          brew list protobuf >/dev/null 2>&1 || brew install protobuf  # libsignal builds its protobufs
           rustup target add aarch64-apple-ios
           app/ios/dev/core.sh
       - if: steps.core.outputs.cache-hit != 'true'

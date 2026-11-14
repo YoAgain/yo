@@ -16,6 +16,8 @@ jobs:
         target: [wire_envelope, wire_content, wire_cert, wire_api, hub_routes, core_receive]
     steps:
       - uses: actions/checkout@v4
+      - name: protoc (libsignal builds its protobufs)
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq protobuf-compiler
       - name: Nightly and cargo-fuzz
         run: |
           rustup toolchain install nightly-2026-10-20 --profile minimal
