@@ -149,6 +149,11 @@ struct FriendList: View {
   @State private var landed: [String: Landing] = [:]
   /// The stacks' running clocks, one per sender (a new Yo replaces it): not one waiting task per Yo.
   @State private var clocks = Clocks()
+  /// The first friend whose new key is still to be said (Friends.keyAlerts).
+  private var keyChanged: Friend? {
+    friends.keyAlerts.lazy.compactMap { key in friends.all.first { $0.key == key } }.first
+  }
+
   /// The photos and videos playing while a thumbnail is held, and those already shown.
   @State private var viewing: [Arrival]?
   @State private var shown: [Arrival] = []
@@ -222,6 +227,19 @@ struct FriendList: View {
           Text(
             "They’ll get “Yo from \(me)” with a sound that says Yo."
               + (notifications == .allowed ? "" : " To get a Yo back, turn on notifications."))
+        }
+        // A contact's account key changed (spec 3.2): said once; Contacts shows it until their details are opened.
+        .alert(
+          "\(keyChanged?.name ?? "") Has a New Key",
+          isPresented: Binding(
+            get: { keyChanged != nil }, set: { if !$0, let friend = keyChanged { friends.keyAlertShown(friend) } }),
+          presenting: keyChanged
+        ) { _ in
+          Button("OK", role: .cancel) {}
+        } message: { friend in
+          Text(
+            "\(friend.name) may have a new iPhone. If you didn’t expect this, compare safety numbers in Profile > "
+              + "Contacts.")
         }
         .overlay {
           if let viewing {
@@ -617,11 +635,12 @@ struct FriendList: View {
       }
       return
     }
+    let client = accounts.client  // the account tapped in: a photo waiting its 1.5 seconds never goes from the next one
     run(friend, "Sent 📷") {
       var taken = library
       if taken == nil { taken = await camera.photo() }
       guard let taken, let file = await Task.detached(operation: { MediaFile.photo(taken) }).value else { return nil }
-      return Prepared(send: { await go(file, to: friend) })
+      return Prepared(send: { await go(file, to: friend, from: client) })
     }
   }
 
@@ -648,10 +667,12 @@ struct FriendList: View {
     }
   }
 
-  /// A photo or video on its way: into the outbox, which sends it when the hub takes it (also later, by itself).
-  private func go(_ file: MediaFile, to friend: Friend) async {
+  /// A photo or video on its way: into the outbox, which sends it when the hub takes it (also later, by itself). Only
+  /// from `client`, the account the gesture began in: signed out (or into another) meanwhile, it is not sent.
+  private func go(_ file: MediaFile, to friend: Friend, from client: YoClient?) async {
+    guard let client, client === accounts.client else { return showSent(to: friend, "Not Sent") }
     Task.detached(priority: .utility) { file.keepIfWanted() }
-    if await outbox.send(file, to: friend.user ?? friend.name, accounts: accounts) {
+    if await outbox.send(file, to: friend.user ?? friend.name, from: client, accounts: accounts) {
       Stats.sentYo(to: friend.name)
     } else {
       showSent(to: friend, "Not Sent")
@@ -667,9 +688,10 @@ struct FriendList: View {
     } else if recordingFor == friend {
       recordingFor = nil
       sends += 1
+      let client = accounts.client
       run(friend, "Sent 🎥") {
         guard let recording = await camera.stopVideo(), let file = await MediaFile.video(recording) else { return nil }
-        return Prepared(send: { await go(file, to: friend) })
+        return Prepared(send: { await go(file, to: friend, from: client) })
       }
     }
   }
@@ -1420,6 +1442,8 @@ struct HeldMedia: View {
   @State private var pulled = 0.0
   @State private var width = 393.0
   @State private var player: AVPlayer?
+  /// The showing photo in full, read from its file when it shows (the list keeps only a small thumbnail).
+  @State private var full: UIImage?
 
   /// The showing one's time runs while it is ready and no finger holds it.
   private struct Run: Equatable {
@@ -1447,7 +1471,7 @@ struct HeldMedia: View {
         Group {
           if current.video != nil, let player {
             PlayerLayer(player: player)
-          } else if let photo = current.photo {
+          } else if let photo = full ?? current.photo {
             Image(uiImage: photo).resizable().scaledToFit().frame(maxWidth: .infinity, maxHeight: .infinity)
           }
         }
@@ -1552,6 +1576,11 @@ struct HeldMedia: View {
     player?.pause()
     guard let video = current.video else {
       player = nil
+      full = nil
+      if let file = current.file {
+        full = await Task.detached(priority: .userInitiated) { UIImage(contentsOfFile: file.path) }.value
+      }
+      guard !Task.isCancelled else { return }
       seconds = photoSeconds
       return
     }

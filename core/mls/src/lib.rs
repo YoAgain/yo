@@ -309,6 +309,9 @@ pub struct Client {
     /// A guest (`keep_events`): the events it receives stay in the state for the app; how many of them this one has
     /// returned already.
     guest_events: Option<usize>,
+    /// The app acknowledges each batch it was handed itself (`acknowledge_only`): a call no longer acknowledges what
+    /// the one before handed out, which another call running beside it may not have consumed yet.
+    explicit_ack: bool,
     /// Commits are being fetched (`fetch_commits`): what they bring is not fetched for again.
     fetching: bool,
 }
@@ -614,6 +617,7 @@ impl Client {
             inbox_fresh_until: 0,
             media_keys_forgotten: false,
             guest_events: None,
+            explicit_ack: false,
             fetching: false,
         }
     }
@@ -758,6 +762,25 @@ impl Client {
         }
     }
 
+    /// From now on each call's events stay handed until the app acknowledges them (`acknowledge_only`), not only until
+    /// the next call: for an app that makes calls side by side and consumes their events in its own time.
+    pub fn acknowledge_explicitly(&mut self) {
+        self.explicit_ack = true;
+    }
+
+    /// The app has shown or stored the events handed out that `acked` names (each named once, as handed): they will not
+    /// come again after a crash. The others stay handed.
+    pub fn acknowledge_only(&mut self, mut acked: impl FnMut(&Event) -> bool) {
+        if self.guest_events.is_some() {
+            return;
+        }
+        let before = self.state.handed.len();
+        self.state.handed.retain(|event| !acked(&unstored(event.clone())));
+        if self.state.handed.len() != before {
+            self.persist();
+        }
+    }
+
     /// Ends a public operation: saves, hands out the events. Events are never lost: after an error they wait for the
     /// next call that succeeds.
     fn finish<T>(&mut self, result: Result<T>) -> Result<Vec<Event>> {
@@ -773,8 +796,14 @@ impl Client {
             return result;
         }
         let result = result.map(|_| {
-            self.state.handed = std::mem::take(&mut self.state.events);
-            self.state.handed.iter().cloned().map(unstored).collect()
+            let new = std::mem::take(&mut self.state.events);
+            let returned = new.iter().cloned().map(unstored).collect();
+            if self.explicit_ack {
+                self.state.handed.extend(new);
+            } else {
+                self.state.handed = new;
+            }
+            returned
         });
         self.persist();
         result
@@ -1468,6 +1497,13 @@ impl Client {
     }
 
     fn send_in(&mut self, group_id: &GroupId, content: Content, count: bool) -> Result<()> {
+        // A photo or video already sent to this peer: its blob id is random, so a message with it is this one, sent
+        // again by an app that lost its answer (a crash before it took it off its queue). It goes once.
+        if let Content::Photo(media) | Content::Video { media, .. } = &content {
+            if self.sent_media(group_id, &media.id) {
+                return Ok(());
+            }
+        }
         // Strictly increasing: no two messages of a device are the same plaintext, and a restart's `last_seen` (4.9)
         // tells them apart.
         let sent_at_ms = wall_ms().max(self.state.last_sent_ms + 1);
@@ -1480,6 +1516,16 @@ impl Client {
             }
         }
         Ok(())
+    }
+
+    /// Whether a message with this photo's or video's blob went to the group's peer already, in any chat with them
+    /// (among the last `KEPT_FOR_RESTART` sent in each).
+    fn sent_media(&self, group_id: &GroupId, id: &[u8; 16]) -> bool {
+        let Some(peer) = self.state.chats.get(&group_key(group_id)).map(|c| &c.peer) else { return false };
+        self.state.chats.values().filter(|chat| &chat.peer == peer).flat_map(|chat| &chat.sent).any(|plaintext| {
+            matches!(Message::decode(plaintext).map(|m| m.content),
+                Ok(Content::Photo(media) | Content::Video { media, .. }) if &media.id == id)
+        })
     }
 
     /// Encrypts a message in a group. The one place messages are made, so the one place a verified contact's
