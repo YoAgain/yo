@@ -115,9 +115,14 @@ final class HubTransport: HttpTransport {
 final class StateFile: StateStore {
   static let url = URL.applicationSupportDirectory.appending(path: "yo-state")
 
-  func save(blob: Data) {
+  /// Throws when it is not written (a full disk): the core's call fails, and nothing that needed the save leaves.
+  func save(blob: Data) throws {
     try? FileManager.default.createDirectory(at: URL.applicationSupportDirectory, withIntermediateDirectories: true)
-    try? blob.write(to: Self.url, options: [.atomic, .completeFileProtectionUntilFirstUserAuthentication])
+    do {
+      try blob.write(to: Self.url, options: [.atomic, .completeFileProtectionUntilFirstUserAuthentication])
+    } catch {
+      throw YoError.Save(message: error.localizedDescription)
+    }
     var url = Self.url
     var values = URLResourceValues()
     values.isExcludedFromBackup = true

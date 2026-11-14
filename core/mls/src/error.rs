@@ -26,6 +26,9 @@ pub enum Error {
     /// The stored state cannot be opened with this key, or is damaged.
     #[error("state")]
     State,
+    /// The state could not be saved (`Store::save`): nothing that needed it left (spec 4.7).
+    #[error("save: {0}")]
+    Save(String),
     #[error("internal: {0}")]
     Internal(&'static str),
 }

@@ -215,10 +215,11 @@ impl Transport for Proc {
 }
 
 impl Store for Proc {
-    fn save(&self, blob: Vec<u8>) {
+    fn save(&self, blob: Vec<u8>) -> Result<(), String> {
         if !self.crashed.load(Relaxed) {
             *self.saved.lock().unwrap_or_else(PoisonError::into_inner) = blob;
         }
+        Ok(())
     }
 }
 
@@ -386,7 +387,7 @@ fn new_acct(w: &World, idx: usize, rng: &mut Rng) -> Option<Acct> {
             return None;
         }
     };
-    client.persist_to(proc_.clone(), STATE_KEY);
+    client.persist_to(proc_.clone(), STATE_KEY).unwrap();
     w.stats.count("registered");
     let user = client.user_id().to_owned();
     // The same name in another look is taken (only now and then: each try spends the address's registrations).
@@ -767,7 +768,7 @@ fn op_uploads(w: &World, a: &mut Acct, rng: &mut Rng) {
             },
         };
         let Some(client) = a.client.as_mut() else { continue };
-        match client.upload(&m, fetches).send(&sealed) {
+        match client.upload(&m, fetches).unwrap().send(&sealed) {
             Ok(()) => {}
             Err(error) if media::retry_later(&error) => {
                 w.stats.count(format!("upload later: {}", short(&error)));
@@ -915,7 +916,7 @@ fn restart(w: &World, a: &mut Acct, rng: &mut Rng) {
     let proc_ = Proc::new(&w.net, &w.stats, w.args.faults, rng.next_u64());
     match Client::restore(proc_.clone(), &saved, &STATE_KEY) {
         Ok(mut client) => {
-            client.persist_to(proc_.clone(), STATE_KEY);
+            client.persist_to(proc_.clone(), STATE_KEY).unwrap();
             a.client = Some(client);
             a.proc_ = proc_;
             w.stats.count("restarted");
@@ -948,7 +949,7 @@ fn op_new_phone(w: &World, a: &mut Acct, rng: &mut Rng) {
     if client.user_id() != a.user {
         w.stats.violation(format!("{}: a new phone got another user id", a.name));
     }
-    client.persist_to(proc_.clone(), STATE_KEY);
+    client.persist_to(proc_.clone(), STATE_KEY).unwrap();
     // What the old device had not received, or not sent, is gone with it.
     harvest_drops(w, a.client.as_ref());
     let mut old = a.client.replace(client).unwrap();
@@ -1016,7 +1017,7 @@ fn op_delete(w: &World, a: &mut Acct, rng: &mut Rng) {
     let proc_ = Proc::new(&w.net, &w.stats, w.args.faults, rng.next_u64());
     match register(w, &a.name, None, &proc_) {
         Ok(mut client) => {
-            client.persist_to(proc_.clone(), STATE_KEY);
+            client.persist_to(proc_.clone(), STATE_KEY).unwrap();
             if client.user_id() == me {
                 w.stats.violation(format!("{}: the freed name kept the deleted user id", a.name));
             }

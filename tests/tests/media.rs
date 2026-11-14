@@ -31,7 +31,7 @@ fn media_in(events: &[Event]) -> Vec<(String, Content)> {
 fn send_media(from: &mut Client, to: &str, plain: &[u8], video: Option<u32>) -> Result<Media, Error> {
     let (media, sealed) = media::seal(plain, 1080, 1920)?;
     let fetches = from.media_fetches(to).expect("a chat");
-    from.upload(&media, fetches).send(&sealed)?;
+    from.upload(&media, fetches)?.send(&sealed)?;
     let content = match video {
         None => Content::Photo(media.clone()),
         Some(duration_ms) => Content::Video { media: media.clone(), duration_ms },

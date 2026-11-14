@@ -96,10 +96,8 @@ impl Transport for Http {
 struct File(PathBuf);
 
 impl Store for File {
-    fn save(&self, blob: Vec<u8>) {
-        if let Err(error) = write_private(&self.0, &blob) {
-            eprintln!("yo-gpt: saving {}: {error}", self.0.display());
-        }
+    fn save(&self, blob: Vec<u8>) -> Result<(), String> {
+        write_private(&self.0, &blob).map_err(|error| format!("saving {}: {error}", self.0.display()))
     }
 }
 
@@ -420,7 +418,10 @@ fn open(account: &Account) -> Option<Client> {
             Ok(mut client) => {
                 // It never opens a photo or video: their keys are not even kept with the events.
                 client.forget_media_keys();
-                client.persist_to(Arc::new(File(path)), key);
+                if let Err(error) = client.persist_to(Arc::new(File(path)), key) {
+                    log(format!("stopped: {username}: {error}"));
+                    return None;
+                }
                 return Some(client);
             }
             Err(error) if retryable(&error) => backoff.wait(&error, &account.name),
@@ -717,7 +718,7 @@ fn send_this_picture(
     let upload = {
         let mut client = bot.client();
         let fetches = client.media_fetches(user).unwrap_or(1);
-        client.upload(&media, fetches)
+        client.upload(&media, fetches)?
     };
     match upload.send(&sealed) {
         Ok(()) => bot.client().send(user, Content::Photo(media)).map(|e| (e, true)),

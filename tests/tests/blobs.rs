@@ -40,7 +40,7 @@ fn noise(len: usize) -> Vec<u8> {
 fn upload(client: &mut Client, len: usize, fetches: u32) -> (Media, Vec<u8>, Result<(), Error>) {
     let plain = noise(len);
     let (media, sealed) = media::seal(&plain, 1200, 1600).unwrap();
-    let sent = client.upload(&media, fetches).send(&sealed);
+    let sent = client.upload(&media, fetches).unwrap().send(&sealed);
     (media, plain, sent)
 }
 
@@ -118,7 +118,7 @@ fn an_upload_must_be_signed_whole_and_once() {
         bytes[100] ^= 1;
         bytes
     };
-    assert_eq!(alice.upload(&media, 1).send(&tampered), Err(Error::Refused(400)));
+    assert_eq!(alice.upload(&media, 1).unwrap().send(&tampered), Err(Error::Refused(400)));
     assert_eq!(files(&dir), (0, 0));
     // Fetches 1 to 32, checked first.
     for (n, refused) in [(0, 400), (33, 400), (32, 401)] {
@@ -126,7 +126,7 @@ fn an_upload_must_be_signed_whole_and_once() {
         assert_eq!(status(client.put(format!("{url}{path}")).header(hash.0, &hash.1).body(sealed.clone())), refused);
     }
     // Stored once; the same signed request again is a replay.
-    alice.upload(&media, 1).send(&sealed).unwrap();
+    alice.upload(&media, 1).unwrap().send(&sealed).unwrap();
     let (method, path, headers, body) = http.recorded.lock().unwrap().last().cloned().unwrap();
     let mut replay = client.request(method.parse().unwrap(), format!("{url}{path}")).body(body);
     for (name, value) in headers {
@@ -136,7 +136,7 @@ fn an_upload_must_be_signed_whole_and_once() {
     // The same id again, signed anew: taken (the core takes that for its own lost answer).
     let again = media::seal(&noise(10), 1, 1).unwrap();
     let same_id = Media { id: media.id, ..again.0 };
-    assert_eq!(alice.upload(&same_id, 1).send(&again.1), Ok(()));
+    assert_eq!(alice.upload(&same_id, 1).unwrap().send(&again.1), Ok(()));
     assert_eq!(files(&dir), (1, 0));
     // Not a blob id: no such route.
     assert_eq!(status(client.get(format!("{url}/v1/blobs/AAAA"))), 404);
