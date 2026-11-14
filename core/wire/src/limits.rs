@@ -39,3 +39,9 @@ pub const MAX_FEEDBACK_LEN: usize = 2000;
 pub const MAX_STORAGE_LEN: usize = 60 * 1024;
 /// The longest app version sent with feedback.
 pub const MAX_APP_VERSION_LEN: usize = 64;
+/// The most tokens one issuance request asks for (spec 6.10).
+pub const MAX_TOKENS_PER_REQUEST: usize = 100;
+/// How many tokens a device keeps for its deliveries...
+pub const TOKEN_TARGET: usize = 100;
+/// ... refilled below this many.
+pub const TOKEN_REFILL_BELOW: usize = 20;

@@ -215,6 +215,19 @@ pub struct State {
     /// Hashes of the last messages received (sender and plaintext): a copy sent again after a restart is skipped.
     #[serde(default)]
     pub received: VecDeque<[u8; 32]>,
+    /// Privacy Pass tokens for deliveries (spec 6.10): the hub's key they were made for (hex), and the tokens, the
+    /// oldest first (`tokens::kept`).
+    #[serde(default)]
+    pub token_key: Option<String>,
+    #[serde(default)]
+    pub tokens: VecDeque<String>,
+    /// No issuance is asked for before then (wall clock, ms): after one failed (an old hub without tokens, its limit,
+    /// no network).
+    #[serde(default)]
+    pub tokens_after: u64,
+    /// The hub refused a token: its key is asked for at the next refill, whatever the stash.
+    #[serde(default)]
+    pub tokens_check: bool,
 }
 
 impl Drop for State {

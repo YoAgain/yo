@@ -34,6 +34,28 @@ Every fix is in commit `3d1cb97` on the branch `chaos-security` (with its tests:
 | 7 | Low | A size in MiB from the environment large enough to overflow made the hub panic (debug) or wrap (release). | Fixed: refused as an error. |
 | 8 | Medium | **A backup record went to anyone who named its user id.** `GET /v1/backup/{id}` took no signature: every contact knows the user id (it is in the MLS credentials), so anyone could learn whether a user has a backup (has secured the name), roughly how large it is, and take the sealed record home to attack offline (128-bit doors, so only in theory). | Fixed: the fetch is signed (spec 6.2) by one of the record's two auth keys, Ed25519 keys derived from the passkey's PRF output and from the 12 words, which the record names; anything else is `404`, the same answer, and the same two signature checks, as for no record. Each signature once, within 5 minutes, as for devices. What K and the storage key seal is padded to 1, 4, 16 or 60 KiB, so the record's size tells little even to a door. Tests: `tests/tests/backup_auth.rs`. |
 
+## Delivery tokens (Privacy Pass)
+
+Added after the review (spec 6.10). **Threat:** deliveries are unsigned (sealed sender), so the hub limits them by
+address; phones behind one carrier IPv4 address share that limit, and someone with many addresses gets as many. **Mitigation:**
+a delivery may bring a privately verifiable Privacy Pass token (RFC 9578 type 0x0001, VOPRF(P-384, SHA-384)), which
+passes the address's limits; tokens are issued per device (200 a day, signed), so the bound on a sender becomes
+the accounts it has (registration, 10 per address per hour) rather than its addresses. The hub verifies with the RFC's
+own test vectors (`hub/src/tokens.rs`, `core/mls/src/tokens.rs`). A spent nonce is kept with its key, in the
+transaction that stores the envelope; a token that fails is `401` and counted against the address. Nothing of an
+issuance is kept or logged. Tests: `tests/tests/tokens.rs`.
+
+**Residual risks:**
+
+| Severity | What | Why it stays |
+|---|---|---|
+| Medium | **Linking by address and time.** A token is unlinkable to its issuance by itself, but a delivery from the address a device signs its requests from, seconds after that device fetched a batch, points at it as before tokens. | Spec 1 says so. Tokens are for the limit, not for hiding the address; Oblivious HTTP is for a later version. The stash and oldest-first spending put time between issuance and use. |
+| Medium | **A hub that tags its users** could serve each device its own key (the directory is not signed, nor checked against other users') and tell senders apart by the key their tokens name. | The operator is outside the threat model (the hub is trusted to route); a key consistency check (RFC 9576, section 6.2) would make it visible. The key id is in every token, so this needs no format change. |
+| Low | **Accounts as a source of tokens.** Each account brings 200 tokens a day: 10 accounts an hour from one address are 48 000 deliveries a day past its limit. | Bounded, and better than an address bound; the byte budget is not applied to tokened deliveries, the disk floor is. Cheaper accounts (or fewer tokens per account) are one number each in `Limits` (`register_per_ip_hour`, `tokens_per_device_day`). |
+| Low | **Verification costs a P-384 evaluation** before the hub knows a token is bad; anyone can send bad ones. | About as much as a signature check; Cloudflare in front; a bad token is counted against the address like any delivery. |
+| Low | **The issuance budget is in memory**, like every rate limit: a restart gives each device a fresh day. | As for all limits (`hub/src/limiter.rs`). The spent nonces, which matter for double spending, are in the database. |
+| Info | **A token's nonce is kept** until its key is deleted (30 to 60 days). | It is the client's random choice, never seen at issuance; it ties to nothing. |
+
 ## Accepted risks and open points
 
 | Severity | What | Why it stays |

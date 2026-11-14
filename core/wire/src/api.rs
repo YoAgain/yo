@@ -22,6 +22,8 @@ pub const FEEDBACK: &str = "/v1/feedback";
 pub const STORAGE: &str = "/v1/storage";
 /// Photos and videos, encrypted (spec 6.8).
 pub const BLOBS: &str = "/v1/blobs";
+/// `POST`: Privacy Pass tokens for deliveries, issued in a batch (spec 6.10, `token`).
+pub const TOKENS: &str = "/v1/tokens";
 
 /// `GET /v1/blobs/{id}`: a blob, to whoever names its id.
 pub fn blob_path(id: &crate::content::BlobId) -> String {

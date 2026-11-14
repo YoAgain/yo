@@ -11,6 +11,7 @@ pub mod envelope;
 pub mod handle;
 pub mod limits;
 pub mod request;
+pub mod token;
 
 pub use tls_codec::{self, VLBytes};
 
