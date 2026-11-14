@@ -242,7 +242,12 @@ enum ShareBridge {
   static func post(_ yos: [Yos]) async {
     let center = UNUserNotificationCenter.current()
     let delivered = await center.deliveredNotifications()
-    let written = Set(delivered.compactMap { $0.request.content.userInfo["id"] as? String })
+    // Every Yo a notification already names, by each sender's newest id in it: none is counted twice.
+    let written = Set(
+      delivered.flatMap { note in
+        ((note.request.content.userInfo["yos"] as? [[String: Any]]) ?? []).compactMap { $0["id"] as? String }
+          + [note.request.content.userInfo["id"] as? String].compactMap { $0 }
+      })
     let new = yos.filter { !written.contains($0.id) }.sorted { $0.sentAtMs > $1.sentAtMs }
     guard let newest = new.first else { return }
     let content = UNMutableNotificationContent()
