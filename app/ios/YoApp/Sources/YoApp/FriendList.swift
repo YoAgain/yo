@@ -42,6 +42,8 @@ struct FriendList: View {
 
   // The list
   @State private var adding = false
+  /// "+" tapped: it opens into Add Friend, Add Group, Invite and Settings; a tap anywhere else closes it again.
+  @State private var addMenu = false
   @State private var newGroup = false
   @State private var newName = ""
   /// What the empty field says for a moment instead of "Name": "yogpt…" while the hub is asked who it is, "No Such
@@ -302,6 +304,7 @@ struct FriendList: View {
       }
       .onScrollPhaseChange { _, phase in
         if phase != .idle && swiped != nil { withAnimation(.snappy) { swiped = nil } }  // scrolling closes it
+        if phase == .interacting && addMenu { withAnimation(.snappy) { addMenu = false } }  // and "+" open
       }
       // Amethyst behind everything; in camera mode the live picture or the picked photo.
       .background { backdrop.ignoresSafeArea() }
@@ -405,8 +408,8 @@ struct FriendList: View {
     }
   }
 
-  /// The last bar: "+", as in the original. It opens a menu (Add Friend, typed right there in the bar; Add Group;
-  /// Invite; Settings).
+  /// The last bar: "+", as in the original. Tapped, it opens into bars of their own: Add Friend (the name typed right
+  /// there), Add Group, Invite, and Settings in red; a tap anywhere else, a scroll, or a while untouched closes it.
   @ViewBuilder private var addRow: some View {
     let color = Color.row(friends.nextColor).opacity(cameraOn ? 0.45 : 1)  // the colour the new friend will have
     if adding {
@@ -432,44 +435,54 @@ struct FriendList: View {
           if !focused { add() }
         }
         .onAppear { typing = true }
+    } else if addMenu {
+      RowButton("Add Friend", color: Color.row(friends.nextColor).opacity(cameraOn ? 0.45 : 1)) {
+        withAnimation(.snappy) {
+          addMenu = false
+          adding = true
+        }
+      }
+      RowButton("Add Group", color: Color.row(friends.nextColor + 1).opacity(cameraOn ? 0.45 : 1)) {
+        withAnimation(.snappy) { addMenu = false }
+        newGroup = true
+      }
+      ShareLink(
+        item: accounts.account.map { Invite.link(for: $0.username) } ?? URL(string: "https://justyo.co")!,
+        message: Text("Yo! Add me on Yo:"),
+        // What the share sheet shows at its top: whose link, and the app's icon (not a bare "justyo.co").
+        preview: SharePreview(
+          "Add \(accounts.account?.username ?? "Me") on Yo",
+          image: Image(uiImage: UIImage(named: "IconStandard") ?? UIImage()))
+      ) {
+        HStack(spacing: 12) {
+          Image(systemName: "square.and.arrow.up").font(.system(size: 24, weight: .bold))
+          Text("Invite")
+        }
+        .font(.yo(Metrics.rowFont))
+        .foregroundStyle(.white)
+        .frame(maxWidth: .infinity, minHeight: Metrics.rowHeight)
+        .background(Color.row(friends.nextColor + 2).opacity(cameraOn ? 0.45 : 1))
+      }
+      .buttonStyle(.plain)
+      .simultaneousGesture(TapGesture().onEnded { withAnimation(.snappy) { addMenu = false } })
+      // Settings in the original's red, as its round menu button was.
+      RowButton("Settings", color: Color.alizarin.opacity(cameraOn ? 0.45 : 1)) {
+        withAnimation(.snappy) { addMenu = false }
+        settings = true
+      }
+      .task {
+        try? await Task.sleep(for: .seconds(10))  // untouched for a while, it closes again
+        withAnimation(.snappy) { addMenu = false }
+      }
     } else {
-      // "+" opens a menu: a friend (typed right here), a group, an invite to share, and the settings.
-      Menu {
-        Button("Add Friend", systemImage: "person.badge.plus") {
-          withAnimation(.snappy) {
-            swiped = nil
-            adding = true
-          }
+      RowButton("+", color: Color.row(friends.nextColor).opacity(cameraOn ? 0.45 : 1)) {
+        withAnimation(.snappy) {
+          swiped = nil
+          addMenu = true
         }
-        Button("Add Group", systemImage: "person.3") { newGroup = true }
-        ShareLink(
-          item: accounts.account.map { Invite.link(for: $0.username) } ?? URL(string: "https://justyo.co")!,
-          message: Text("Yo! Add me on Yo:"),
-          preview: SharePreview(
-            "Add \(accounts.account?.username ?? "Me") on Yo",
-            image: Image(uiImage: UIImage(named: "IconStandard") ?? UIImage()))
-        ) {
-          Label("Invite", systemImage: "square.and.arrow.up")
-        }
-        Divider()
-        Button("Settings", systemImage: "gearshape") { settings = true }
-      } label: {
-        addPart("+", color: Color.row(friends.nextColor).opacity(cameraOn ? 0.45 : 1))
       }
       .accessibilityLabel("Add and Settings")
     }
-  }
-
-  /// A part of the last bar: its words white on its colour, as tall as a bar.
-  private func addPart(_ title: String, color: Color) -> some View {
-    Text(title)
-      .font(.yo(Metrics.rowFont))
-      .lineLimit(1)
-      .minimumScaleFactor(0.5)
-      .foregroundStyle(.white)
-      .padding(.horizontal, 12)
-      .frame(maxWidth: .infinity, minHeight: Metrics.rowHeight)
-      .background(color)
   }
 
   /// The name typed in Add Friend.
@@ -599,7 +612,10 @@ struct FriendList: View {
           .transition(.scale.combined(with: .opacity))
         }
         Button {
-          withAnimation(.snappy) { cameraOn.toggle() }
+          withAnimation(.snappy) {
+            addMenu = false
+            cameraOn.toggle()
+          }
         } label: {
           Image(systemName: cameraOn ? "xmark" : "camera.fill")
             .font(.system(size: 22, weight: .semibold))
@@ -636,8 +652,9 @@ struct FriendList: View {
   private func send(to friend: Friend) {
     Perf.mark("tap.action")
     defer { PerfProbe.frame("tap") }
-    // A tap while a bar is swiped open closes it, as in Mail; it sends nothing.
+    // A tap while a bar is swiped open closes it, as in Mail; it sends nothing. So does one while "+" is open.
     guard swiped == nil else { return withAnimation(.snappy) { swiped = nil } }
+    guard !addMenu else { return withAnimation(.snappy) { addMenu = false } }
     // Here, as the finger lifts: not after the list has drawn the change. A photo: the shutter's click.
     if cameraOn && picked == nil { Haptic.shutter() } else { Haptic.tap() }
     let library = picked?.data
