@@ -652,7 +652,7 @@ enum SyncedAccount {
     var id: Data { userID }
   }
 
-  private static var host: String { Hub.url.host() ?? Hub.url.absoluteString }
+  private static var host: String { Hub.home.host() ?? Hub.home.absoluteString }
 
   private static var base: [String: Any] {
     [

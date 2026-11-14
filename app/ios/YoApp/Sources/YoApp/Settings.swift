@@ -164,15 +164,6 @@ struct SettingsView: View {
       }
       .interactiveDismissDisabled(addingPasskey)
       .sheet(isPresented: $securing) { SecureNameSheet(start: securingStart) }
-      .alert("Allow Access to Photos", isPresented: $photosDenied) {
-        Button("Open Settings") { openSystemSettings() }
-        Button("Cancel", role: .cancel) {}
-      } message: {
-        Text(
-          "To save photos and videos, allow Yo to add to your "
-            + "photo library in Settings."
-        )
-      }
       .alert(
         "Unable to Turn On Face ID",
         isPresented: Binding(
@@ -204,6 +195,13 @@ struct SettingsView: View {
     }
     .navigationTitle("Media")
     .navigationBarTitleDisplayMode(.inline)
+    // On this page, where the switch is (an alert of the profile's root does not show over a page pushed on it).
+    .alert("Allow Access to Photos", isPresented: $photosDenied) {
+      Button("Open Settings") { openSystemSettings() }
+      Button("Cancel", role: .cancel) {}
+    } message: {
+      Text("To save photos and videos, allow Yo to add to your photo library in Settings.")
+    }
   }
 
   /// Your account: its security (passkey and recovery key), then signing out and, below, deleting it (App Review

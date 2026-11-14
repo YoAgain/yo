@@ -123,6 +123,15 @@ import XCTest
       let path = c["path"] as? String ?? "/tmp/yo-driver.png"
       try XCUIScreen.main.screenshot().pngRepresentation.write(to: URL(fileURLWithPath: path))
       return ["path": path]
+    case "audit":
+      // Xcode's accessibility audit of the screen as it is; every issue reported, none failing the test.
+      var issues: [String] = []
+      try app.performAccessibilityAudit { issue in
+        let element = issue.element.map { "\($0.elementType.rawValue) '\($0.label)'" } ?? "-"
+        issues.append("\(issue.auditType.rawValue) \(issue.compactDescription) [\(element)]")
+        return true
+      }
+      return ["issues": issues]
     case "quit":
       return [:]
     default:

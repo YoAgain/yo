@@ -13,7 +13,16 @@ enum Hub {
   /// App Store) to the live one. Two apps side by side, each with its own accounts.
   static let isDevApp = Bundle.main.bundleIdentifier?.hasSuffix(".dev") == true
 
-  static var url: URL { isDevApp ? dev : live }
+  /// The hub this app belongs to; its accounts are kept under its name (SyncedAccount).
+  static var home: URL { isDevApp ? dev : live }
+  /// Yo Dev only: another address for its requests (YO_HUB in the environment, as dev/sim's driver launches it), so a
+  /// test can take the hub away (an address nothing answers on) while the accounts stay the dev hub's.
+  static var url: URL {
+    guard isDevApp, let other = ProcessInfo.processInfo.environment["YO_HUB"].flatMap(URL.init(string:)) else {
+      return home
+    }
+    return other
+  }
   static var transport: HubTransport { HubTransport(base: url) }
 
   /// A blocking core call, off the main actor: on threads of its own, not Swift's few shared ones. A core call waits

@@ -42,6 +42,9 @@ struct Intro<First: View>: View {
       .scrollTargetBehavior(.paging)
       .scrollIndicators(.hidden)
       .scrollPosition(id: $slot)
+      // Starting on the logo (slot 1 of count + 2), also when the position is not applied at the first layout: the
+      // anchor 1 / (count + 1) of the content is the same point of the view.
+      .defaultScrollAnchor(UnitPoint(x: 1 / Double(Self.count + 1), y: 0.5))
       // Come to rest on a copy at either end: the real page, unseen (the same picture).
       .onScrollPhaseChange { _, phase in
         if phase == .interacting { touched = true }

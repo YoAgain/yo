@@ -35,12 +35,21 @@ case ${1:-} in
     xcrun simctl install "$(udid "$2")" "$derived/Build/Products/Debug-iphonesimulator/YoApp.app"
     ;;
   drive)
-    # A failure XCTest records (an element gone while asked) ends the test: it starts again until told to quit.
+    # A failure XCTest records (an element gone while asked) ends the test, and xcodebuild then does not always exit:
+    # it is ended once the test is over, and the test starts again until told to quit. Its output: DIR/xcodebuild.log.
     rm -f "$3/quit"
     until [ -f "$3/quit" ]; do
       TEST_RUNNER_YO_DRIVER_DIR=$3 xcodebuild test-without-building -project "$here/sim/YoSim.xcodeproj" -scheme YoSim \
         -destination "platform=iOS Simulator,id=$(udid "$2")" -derivedDataPath "$derived" \
-        -test-timeouts-enabled NO -only-testing:YoDriver/Driver/testDrive || true
+        -test-timeouts-enabled NO -only-testing:YoDriver/Driver/testDrive > "$3/xcodebuild.log" 2>&1 &
+      pid=$!
+      while kill -0 "$pid" 2>/dev/null; do
+        if grep -qE "Test Suite 'Selected tests' (passed|failed)" "$3/xcodebuild.log"; then
+          sleep 3
+          kill "$pid" 2>/dev/null
+        fi
+        sleep 1
+      done
     done
     ;;
   delete)
