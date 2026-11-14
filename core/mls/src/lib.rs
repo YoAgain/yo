@@ -1588,8 +1588,8 @@ impl Client {
                 let mut item = item.clone();
                 match self.renew(&mut item, &group_id) {
                     // Renewed for the devices there now, it goes behind the repair's Welcome and commit, which those
-                    // devices need first: in this round still, at the back, and what was queued for that user after
-                    // it goes behind it again, so the user gets everything in the order sent.
+                    // devices need first: in this round still, at the back, and the messages queued for that user
+                    // after it go behind it again, so the user gets them in the order sent.
                     Ok(Some(())) => {
                         self.state.outbox.remove(i);
                         let (user, group) = (item.user.clone(), item.group.clone());
@@ -1598,7 +1598,7 @@ impl Client {
                             .outbox
                             .split_off(i)
                             .into_iter()
-                            .partition(|o| o.user == user && o.group == group);
+                            .partition(|o| o.user == user && o.group == group && o.plaintext.is_some());
                         self.state.outbox.extend(rest);
                         self.state.outbox.push_back(item);
                         self.state.outbox.extend(later);
