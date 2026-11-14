@@ -244,6 +244,8 @@ fn a_restart_brings_back_a_message_lost_before_a_later_one() {
     http_b.fault("/commit", Fault::Answer(403));
     b.send(a.user_id(), text("restarted")).unwrap();
     assert_eq!(texts(&a.sync(0).unwrap()), ["restarted"]);
+    // What the restart asks for goes with the work after the hand-over.
+    a.after_sync().unwrap();
     assert_eq!(texts(&b.sync(0).unwrap()), ["lost"], "the gap, once");
     a.send(b.user_id(), text("on")).unwrap();
     assert_eq!(texts(&b.sync(0).unwrap()), ["on"]);

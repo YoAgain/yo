@@ -2,7 +2,8 @@
 // it "Yo from YoGPT" ("📷 from …", "🎥 from …", "3 Yos from …", ShareBridge.yo). It opens the app's state as a guest
 // (SharedState.swift: in turns with the app, under the lock in the App Group), receives once without waiting, and
 // names who the new Yos are from (a line per sender, the newest first). What it receives stays in the state for the
-// app (never acknowledged here), which shows it as ever. Within the extension's limits (about 24 MB, 30 s): no photo
+// app (never acknowledged here), which shows it as ever; once the notification is out, the hub is told it arrived
+// (`afterSync`). Within the extension's limits (about 24 MB, 30 s): no photo
 // or video is fetched here.
 //
 // The hub pushes once per envelope, and not every envelope is a new Yo: the Welcome before a friend's first Yo, the
@@ -29,7 +30,8 @@ final class NotificationService: UNNotificationServiceExtension {
     pending.set(content: content, handler: contentHandler)
     let pending = pending
     DispatchQueue.global(qos: .userInitiated).async {
-      switch Self.newest() {
+      let (found, client) = Self.newest()
+      switch found {
       case .yos(let senders):
         pending.update { ShareBridge.yo($0, senders) }
       case .nothingNew:
@@ -50,6 +52,8 @@ final class NotificationService: UNNotificationServiceExtension {
       }
       pending.deliver()
       Perf.mark("nse.delivered")
+      // Not before: a lost acknowledgement costs only a repeat, which the app skips as seen.
+      _ = try? client?.afterSync()
     }
   }
 
@@ -83,12 +87,9 @@ final class NotificationService: UNNotificationServiceExtension {
     return done.wait(timeout: .now() + 2) == .success ? last.request : nil
   }
 
-  private static func newest() -> Found {
-    guard let client = Perf.timed("nse.open", { Guest.open(within: lockWait, timeout: 10) }),
-      let events = Perf.timed("nse.sync", { try? client.sync(waitS: 0) })
-    else {
-      return .unread
-    }
+  private static func newest() -> (Found, YoClient?) {
+    guard let client = Perf.timed("nse.open", { Guest.open(within: lockWait, timeout: 10) }) else { return (.unread, nil) }
+    guard let events = Perf.timed("nse.sync", { try? client.sync(waitS: 0) }) else { return (.unread, client) }
     var senders: [String: (count: Int, sentAtMs: UInt64, kind: MediaFile.Kind?)] = [:]
     for event in events {
       guard case .message(let user, let sentAtMs, let message) = event else { continue }
@@ -103,13 +104,14 @@ final class NotificationService: UNNotificationServiceExtension {
       let newer = before.map { sentAtMs >= $0.sentAtMs } ?? true
       senders[user] = ((before?.count ?? 0) + 1, newer ? sentAtMs : before!.sentAtMs, newer ? kind : before!.kind)
     }
-    guard !senders.isEmpty else { return .nothingNew }
-    return .yos(
+    guard !senders.isEmpty else { return (.nothingNew, client) }
+    let yos = Found.yos(
       senders.sorted { $0.value.sentAtMs > $1.value.sentAtMs }.map { user, yos in
         ShareBridge.Yos(
           name: name(of: user, client: client), user: user, count: yos.count, kind: yos.kind,
           id: "\(user)/\(yos.sentAtMs)")
       })
+    return (yos, client)
   }
 
   /// The name as the app's list shows it (ShareBridge: the friends it published), else as the core knows them.

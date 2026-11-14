@@ -83,6 +83,7 @@ fn tokens_are_issued_per_device_and_day() {
     let hub = TestHub::start_with(config, "127.0.0.1:0");
     let ((mut a, _, _), (mut b, _, _)) = pair(&hub);
     a.sync(0).unwrap();
+    a.after_sync().unwrap();
     assert_eq!(a.tokens_left(), 100, "a stash at the first sync");
     let key = issuer_key(&hub.url());
     assert_eq!(ask(&mut a, &key, 51), 429, "50 left of the day's 150");
@@ -90,6 +91,7 @@ fn tokens_are_issued_per_device_and_day() {
     assert_eq!(ask(&mut a, &key, 1), 429);
     assert_eq!(ask(&mut b, &key, 101), 422, "at most 100 at once");
     b.sync(0).unwrap();
+    b.after_sync().unwrap();
     assert_eq!(b.tokens_left(), 100, "another device has its own");
     let mut other = yo_core::tokens::request(&key, 1).unwrap();
     other.request.truncated_token_key_id ^= 1;
@@ -110,6 +112,7 @@ fn a_delivery_with_a_token_passes_an_address_at_its_limit_and_one_without_waits(
     let hub = TestHub::start_with(config, "127.0.0.1:0");
     let ((mut a, ha, _), (mut b, _, pb)) = pair(&hub);
     a.sync(0).unwrap();
+    a.after_sync().unwrap();
     let before = a.tokens_left();
     exhaust(&hub.url(), b.user_id());
     // Many phones behind one address: the others have used it up, A's tokens go past it.
@@ -149,6 +152,7 @@ fn a_spent_token_is_refused_and_the_delivery_goes_again_without() {
     let hub = TestHub::start_with(with_tokens(), "127.0.0.1:0");
     let ((mut a, ha, _), (mut b, _, pb)) = pair(&hub);
     a.sync(0).unwrap();
+    a.after_sync().unwrap();
     a.send_yo(&pb).unwrap();
     let left = a.tokens_left();
     // The hub takes the Yo and spends its token; its answer is lost: the token goes back to the stash.
@@ -158,6 +162,7 @@ fn a_spent_token_is_refused_and_the_delivery_goes_again_without() {
     let spent = deliveries_to(&ha, b.user_id()).last().unwrap().clone();
     // Sent again with that token: refused, and at once again without it, which the hub takes.
     a.sync(0).unwrap();
+    a.after_sync().unwrap();
     assert_eq!(a.waiting(), 0);
     let sent = deliveries_to(&ha, b.user_id());
     let (again, without) = (&sent[sent.len() - 2], &sent[sent.len() - 1]);
@@ -178,9 +183,11 @@ fn a_hub_without_tokens_gets_every_delivery_as_before() {
     // A hub from before tokens has no issuer directory.
     ha.fault(token::DIRECTORY, Fault::Answer(404));
     a.sync(0).unwrap();
+    a.after_sync().unwrap();
     assert_eq!(a.tokens_left(), 0);
     a.send_yo(&pb).unwrap();
     a.sync(0).unwrap();
+    a.after_sync().unwrap();
     assert_eq!(a.waiting(), 0);
     assert_eq!(yos(&b.sync(0).unwrap(), &a), 1);
     let sent = ha.sent.lock().unwrap();
@@ -201,10 +208,12 @@ fn the_hub_keeps_nothing_that_ties_a_redeemed_token_to_its_issuance() {
     let hub = TestHub::start_with(config, "127.0.0.1:0");
     let ((mut a, ha, _), (mut b, _, pb)) = pair(&hub);
     a.sync(0).unwrap();
+    a.after_sync().unwrap();
     for _ in 0..3 {
         a.send_yo(&pb).unwrap();
     }
     b.sync(0).unwrap();
+    b.after_sync().unwrap();
     // What the device sent to be issued: its blinded elements.
     let blinded: Vec<[u8; token::NE]> = ha
         .sent

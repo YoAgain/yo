@@ -729,6 +729,14 @@ fn op_sync(w: &World, a: &mut Acct, rng: &mut Rng) {
         Ok(_) => {}
         Err(error) => note_error(w, a, "sync", &error),
     }
+    // The ack and the work after it: now, as the notification service does, or with the next sync, as the app.
+    if rng.below(2) == 0 && !a.proc_.crashed.load(Relaxed) {
+        let result = a.client.as_mut().unwrap().after_sync();
+        w.trace(&a.user, format!("after_sync: {result:?}"));
+        if let Err(error) = result {
+            note_error(w, a, "after_sync", &error);
+        }
+    }
 }
 
 fn op_photo(w: &World, a: &mut Acct, rng: &mut Rng) {
