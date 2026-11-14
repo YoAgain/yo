@@ -36,16 +36,20 @@ final class NotificationService: UNNotificationServiceExtension {
       // Read: the new Yos with those on the screen, in one notification; none new, the same quietly. Else, unread,
       // the push goes as it came.
       let read = Self.newest()
+      var replaced: [String] = []
       if let (client, events) = read {
         let senders = ShareBridge.yos(in: events) { ShareBridge.name(of: $0, client: client) }
         let delivered = Self.delivered()
-        let replaced = pending.update { content in
-          defer {
-            if senders.isEmpty { (content.sound, content.interruptionLevel) = (nil, .passive) }
+        replaced = pending.update { content in
+          let replaced = ShareBridge.write(content, senders, over: delivered)
+          if senders.isEmpty {
+            (content.sound, content.interruptionLevel) = (nil, .passive)
+            // Nothing on the screen to say again (a Welcome, a commit, after the app was opened): no text, which iOS
+            // does not show, rather than a bare "Yo" left in Notification Center.
+            if replaced.isEmpty { content.body = "" }
           }
-          return ShareBridge.write(content, senders, over: delivered)
-        }
-        UNUserNotificationCenter.current().removeDeliveredNotifications(withIdentifiers: replaced ?? [])
+          return replaced
+        } ?? []
         // The photos and videos before the notification goes: once it is delivered, iOS may end or freeze this
         // process at any moment, and a fetch cut off there has used this device's fetch at the hub with nothing
         // written (the app then finds the blob gone and gives the photo up). A new fetch starts only within 5 seconds
@@ -54,6 +58,9 @@ final class NotificationService: UNNotificationServiceExtension {
       }
       pending.deliver()
       Perf.mark("nse.delivered")
+      // Those it takes the place of only now, after the photo fetches: never a moment with none on the screen, in which
+      // the app (taking the saved Yos) would write one more.
+      UNUserNotificationCenter.current().removeDeliveredNotifications(withIdentifiers: replaced)
       // Not before: a lost acknowledgement costs only a repeat, which the app skips as seen.
       _ = try? read?.0.afterSync()
     }

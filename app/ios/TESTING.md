@@ -31,7 +31,9 @@ is (no notification service runs), and APNs gives the Simulator no token on the 
 from simulator", MobileActivation). So `sim.sh notify "Yo Push"` runs YoNotify's own code in a process of its own
 (`YoNotifyProbe`, the same App Group and lock) on the hub's push (`{"aps":{"alert":{"title":"Yo","body":"Yo"},
 "sound":"yo.caf","mutable-content":1}}`), prints what it made and pushes that. The sender is a second account driven
-by the core over HTTP against the dev hub.
+by the core over HTTP against the dev hub (`yo-send`, also `--photo FILE` and `--delete`). `YO_PROBE_POST=1` posts
+what the probe made into its own Notification Center, so its next run finds it there and merges it, as the service
+and the app share one center on an iPhone; `YO_PROBE_LINGER=S` keeps it S seconds after delivering.
 
 Not in the Simulator: passkeys (the app id has no team, so `justyo.app` is not associated: error 1004, shown in the
 guide), the iCloud Keychain's sync (its items stay on the Simulator, which is enough for the Sign In list), a real
