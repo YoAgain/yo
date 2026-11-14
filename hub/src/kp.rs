@@ -13,6 +13,8 @@ pub const CIPHERSUITE: Ciphersuite = Ciphersuite::MLS_128_DHKEMX25519_CHACHA20PO
 pub struct Checked {
     pub hash: [u8; 32],
     pub last_resort: bool,
+    /// The end of its lifetime, seconds since 1970: not handed out after (the creator would refuse it).
+    pub not_after: u64,
 }
 
 /// Checks a KeyPackage: encoding, signature, lifetime, suite, credential type; that its leaf key is `device_key`; and
@@ -37,5 +39,9 @@ pub fn check(
     let credential = BasicCredential::try_from(leaf.credential().clone()).ok()?;
     let certificate = DeviceCertificate::verify(credential.identity(), device_key).ok()?;
     (&certificate.account_key == account_key)
-        .then(|| Checked { hash: yo_wire::sha256(bytes), last_resort: key_package.last_resort() })
+        .then(|| Checked {
+            hash: yo_wire::sha256(bytes),
+            last_resort: key_package.last_resort(),
+            not_after: key_package.life_time().not_after(),
+        })
 }
