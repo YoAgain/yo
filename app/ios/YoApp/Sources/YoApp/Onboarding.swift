@@ -433,7 +433,7 @@ private struct NameField: View {
   private var fontSize: Double {
     let fits = room - 6
     guard needed > fits, fits > 0 else { return Self.full }
-    return max(14, (Self.full * fits / needed).rounded(.down))
+    return max(8, (Self.full * fits / needed).rounded(.down))
   }
 }
 
