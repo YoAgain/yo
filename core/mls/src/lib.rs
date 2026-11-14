@@ -51,6 +51,8 @@ use yo_wire::{decode, encode, envelope, sha256, DeviceId, UserId, EPOCH_TOKEN_LA
 pub const UPDATE_AFTER_MS: u64 = 7 * 24 * 3600 * 1000;
 /// ... or after this many messages sent.
 pub const UPDATE_AFTER_MESSAGES: u32 = 100;
+/// The most chats kept with one peer (spec 4.9): a Welcome beyond it pushes out the oldest.
+const CHATS_PER_PEER: usize = 4;
 /// A send goes without receiving first (`send_begin`) only while the inbox is up to date: waited on, or processed
 /// this recently.
 const INBOX_FRESH_MS: u64 = 5_000;
@@ -2309,6 +2311,21 @@ impl Client {
                 creating: None,
             },
         );
+        // A peer has a few chats at most (a restart, two started at once). More are Welcomes made again and again with
+        // this device's last resort KeyPackage, each a group kept for good: beyond `CHATS_PER_PEER`, the oldest go.
+        let mut older: Vec<(u64, String)> = self
+            .state
+            .chats
+            .iter()
+            .filter(|(k, c)| c.peer == peer && **k != hex(&id))
+            .map(|(k, c)| (c.last_update_ms, k.clone()))
+            .collect();
+        if older.len() >= CHATS_PER_PEER {
+            older.sort();
+            for (_, key) in &older[..older.len() + 1 - CHATS_PER_PEER] {
+                self.drop_chat(key);
+            }
+        }
         if !blocked {
             self.push_event(Event::NewChat { user: peer });
         }

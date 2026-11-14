@@ -1067,13 +1067,16 @@ fn delivery_token(hub: &Hub, peer: SocketAddr, headers: &HeaderMap) -> Res<Broug
     if !hub.own_service(peer, headers) && hub.limiter.spent(&bad, BAD_TOKENS_PER_IP_MINUTE, MINUTE) {
         return Ok(Brought::Refused);
     }
+    // Spent already (one look in the database) before the costly check, and counted like a forged one: a token sent
+    // again and again costs the hub no more than a forged one.
+    if hub.db.token_spent(&token.nonce)? {
+        hub.limiter.allow(bad, BAD_TOKENS_PER_IP_MINUTE, MINUTE);
+        return Ok(Brought::Refused);
+    }
     let Some(key) = hub.tokens.verify(&token) else {
         hub.limiter.allow(bad, BAD_TOKENS_PER_IP_MINUTE, MINUTE);
         return Ok(Brought::Refused);
     };
-    if hub.db.token_spent(&token.nonce)? {
-        return Ok(Brought::Refused);
-    }
     Ok(Brought::Token(key, token.nonce))
 }
 
