@@ -176,8 +176,8 @@ final class Friends {
   /// longer has (taken off on another phone) go. Friends known only by a typed name stay. A friend kept without a name
   /// (a block alone, a name over 64 bytes) takes `names` (the hub's, by user id), else "Yo User". Nothing is written
   /// back, but with `seed` (once, for an account from before the storage) the friends this phone has and the storage
-  /// lacks go up, and none go.
-  func take(_ kept: [YoFriend], names: [String: String] = [:], seed: Bool) {
+  /// lacks go up, and none go; nor without `prune` (a restored phone whose storage the core may not have read yet).
+  func take(_ kept: [YoFriend], names: [String: String] = [:], seed: Bool, prune: Bool) {
     var list = all
     for friend in kept {
       let stored = friend.name.flatMap(Self.storedName)
@@ -195,7 +195,7 @@ final class Friends {
         list.append(new)
       }
     }
-    if !seed {
+    if prune && !seed {
       let users = Set(kept.map(\.user))
       list.removeAll { $0.user.map { !users.contains($0) } ?? false }
     }
