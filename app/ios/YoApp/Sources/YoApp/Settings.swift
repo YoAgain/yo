@@ -835,12 +835,13 @@ struct NameCodeSheet: View {
             .interpolation(.none)
             .resizable()
             .scaledToFit()
-            .frame(width: 240, height: 240)
+            .frame(maxWidth: 240, maxHeight: 240)  // smaller where the half-height sheet has less room (iPhone SE)
             .padding(16)
             .background(.white, in: .rect(cornerRadius: 22))
             .accessibilityLabel("QR code for \(name)")
         }
         Text(name).font(.yo(30, relativeTo: .title)).lineLimit(1).minimumScaleFactor(0.5).padding(.horizontal)
+          .layoutPriority(1)
         Spacer()
       }
       .frame(maxWidth: .infinity)
