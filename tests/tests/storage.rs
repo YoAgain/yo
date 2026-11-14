@@ -92,8 +92,10 @@ fn two_writers_merge_and_converge() {
     theirs.friends.get_mut(&"11".repeat(16)).unwrap().name = storage::Field { value: Some("Leon".into()), at: later };
     theirs.icon = storage::Field { value: None, at: later };
     theirs.version = 2; // as the hub will store it
-    let body =
-        yo_wire::encode(&api::Storage { version: 1, data: storage::seal(&a.account_secret(), &user, &theirs).into() });
+    let body = yo_wire::encode(&api::Storage {
+        version: 1,
+        data: storage::seal(&a.account_secret(), &user, &theirs).unwrap().into(),
+    });
     assert_eq!(a.signed_for_tests("PUT", api::STORAGE, &body).unwrap().status, status::NO_CONTENT);
     // A writes on its old version: 409, merged, written again.
     a.set_friend(&"33".repeat(16), Some("Zoë".into()), None).unwrap();

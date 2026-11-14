@@ -1,7 +1,7 @@
 // Your account (spec 3, 6.4, 7): a username, a user id, an account key, and the backup that brings them back on a
 // new phone, opened by a passkey's PRF output or by a recovery code.
 //
-// The account lives at the hub, through the Rust core (`Hub.swift`); the backup is made and opened here.
+// The account lives at the hub, through the Rust core (`Hub.swift`), which also makes, fetches and opens the backup.
 import AuthenticationServices
 import CryptoKit
 import Foundation
@@ -21,6 +21,11 @@ struct Account: Codable, Equatable {
   var byPasskey: Bool
   /// The recovery words open the backup (nil in accounts saved before this was kept: see `AccountStore.init`).
   var byCode: Bool? = false
+  /// The backup's fetch may be signed by the words' auth key (spec 7): nil in a record from before the auth keys, until
+  /// it is written again (`addAuthKeys`).
+  var codeAuth: Bool? = nil
+  /// And by the passkey's: false until the passkey was asked once for it (a record from before, `confirmPasskey`).
+  var passkeyAuth: Bool? = nil
 
   /// Backed up (spec 7): the name comes back on a new phone. Not yet, it is released after 365 days away (spec 6.4).
   var secured: Bool { byPasskey || byCode == true }
@@ -119,56 +124,20 @@ enum RecoveryCode {
 }
 
 /// The backup (spec 7): the account under a random key K, and K wrapped by the passkey and by the code. The record
-/// itself (`YoBackup`) lives at the hub; this is how the app makes and opens it.
+/// itself (`YoBackup`) lives at the hub; the core makes, signs for and opens it (`openBackup`, `putBackup`), and this
+/// is what K seals.
 enum BackupRecord {
   /// The salt every Yo passkey is asked with: one for all, so a new phone asks once, before it knows who it is.
   static let prfSalt = Data(SHA256.hash(data: Data("yo backup v1".utf8)))
 
-  static func key(prf: Data) -> SymmetricKey {
-    HKDF<SHA256>.deriveKey(inputKeyMaterial: SymmetricKey(data: prf), info: Data("yo backup v1 passkey".utf8),
-      outputByteCount: 32)
-  }
-
-  /// Where the backup lies, found from the words alone: no name needed (a name can change), not guessable (128 bits).
-  static func locator(code: [String]) -> Data {
-    HKDF<SHA256>.deriveKey(inputKeyMaterial: SymmetricKey(data: Data(code.joined(separator: " ").utf8)),
-      info: Data("yo backup v1 locator".utf8), outputByteCount: 16)
-      .withUnsafeBytes { Data($0) }
-  }
-
-  static func key(code: [String]) -> SymmetricKey {
-    HKDF<SHA256>.deriveKey(inputKeyMaterial: SymmetricKey(data: Data(code.joined(separator: " ").utf8)),
-      info: Data("yo backup v1 code".utf8), outputByteCount: 32)
-  }
+  /// A new K: 32 random bytes.
+  static func newKey() -> Data { SymmetricKey(size: .bits256).withUnsafeBytes { Data($0) } }
 
   /// What K seals: the account (its key's secret above all), and the recovery words, so a phone restored by passkey
   /// has them to show too.
   struct Sealed: Codable {
     var account: Account
     var code: [String]?
-  }
-
-  /// A record for the hub: K under the words always, under the passkey's PRF output too when given.
-  static func make(_ account: Account, code: [String], k: SymmetricKey, prf: Data?, byPasskey: Data? = nil) throws
-    -> YoBackup
-  {
-    YoBackup(
-      byPasskey: try byPasskey ?? prf.map { try wrap(k, in: key(prf: $0)) } ?? Data(),
-      byCode: try wrap(k, in: key(code: code)),
-      sealed: try ChaChaPoly.seal(try JSONEncoder().encode(Sealed(account: account, code: code)), using: k).combined,
-      locator: locator(code: code))
-  }
-
-  static func open(_ sealed: Data, with k: SymmetricKey) throws -> Sealed {
-    try JSONDecoder().decode(Sealed.self, from: try ChaChaPoly.open(ChaChaPoly.SealedBox(combined: sealed), using: k))
-  }
-
-  static func wrap(_ k: SymmetricKey, in key: SymmetricKey) throws -> Data {
-    try ChaChaPoly.seal(k.withUnsafeBytes { Data($0) }, using: key).combined
-  }
-
-  static func unwrap(_ wrapped: Data, with key: SymmetricKey) throws -> SymmetricKey {
-    SymmetricKey(data: try ChaChaPoly.open(ChaChaPoly.SealedBox(combined: wrapped), using: key))
   }
 }
 
@@ -216,7 +185,7 @@ final class AccountStore {
   }
   private let passkeys = Passkeys()
   /// Securing under way: K and the words, made once per try.
-  private var securing: (k: SymmetricKey, code: [String])?
+  private var securing: (k: Data, code: [String])?
   /// The guide's passkey once made, before it is signed in with.
   private var newPasskey: Data?
   /// A registration under way (`register(_:secret:)`).
@@ -264,6 +233,7 @@ final class AccountStore {
       // person's). Only then: opening asks nothing of the hub, so this phone may have been replaced meanwhile, and the
       // item of the phone that has the account now must not be overwritten by an older one.
       if let account { SyncedAccount.save(account, onlyIfMissing: true) }
+      Task { await addAuthKeys() }
     } catch YoError.Replaced {
       reset()
     } catch {}
@@ -331,7 +301,7 @@ final class AccountStore {
   /// The guide's passkey, in two steps the person sees: made (saved in the password manager)…
   func createPasskey() async throws {
     guard let account, let client else { throw AccountError.noBackup }
-    if !account.secured, securing == nil { securing = (SymmetricKey(size: .bits256), RecoveryCode.make()) }
+    if !account.secured, securing == nil { securing = (BackupRecord.newKey(), RecoveryCode.make()) }
     let made = try await passkeys.make(name: Self.passkeyName(account), userID: account.userID).credentialID
     try still(client)
     newPasskey = made
@@ -361,19 +331,22 @@ final class AccountStore {
 
   /// The words, to show when the passkey did not work.
   func secureWords() -> [String] {
-    if securing == nil { securing = (SymmetricKey(size: .bits256), RecoveryCode.make()) }
+    if securing == nil { securing = (BackupRecord.newKey(), RecoveryCode.make()) }
     return securing?.code ?? []
   }
 
   /// The words kept: the backup opens with them.
   func keepWords() async throws { try await saveBackup(prf: nil) }
 
-  /// The first backup: K under the words always (passkey and words are equal doors), under the passkey's PRF too.
+  /// The first backup: K under the words always (passkey and words are equal doors), under the passkey's PRF too;
+  /// both doors' auth keys.
   private func saveBackup(prf: Data?) async throws {
     guard var account, let securing, let client else { throw AccountError.noBackup }
     account.byPasskey = prf != nil
     account.byCode = true
-    try await put(BackupRecord.make(account, code: securing.code, k: securing.k, prf: prf), by: client)
+    account.codeAuth = true
+    account.passkeyAuth = prf != nil
+    try await put(account, code: securing.code, k: securing.k, passkey: prf.map { .new(prf: $0) } ?? .none, by: client)
     RecoveryWords.save(securing.code)
     self.account = account
     self.securing = nil
@@ -382,11 +355,14 @@ final class AccountStore {
   }
 
   /// The backup to the hub through `client`, the one the change began with: never another account's after a sign-out
-  /// and sign-in meanwhile.
-  private func put(_ backup: YoBackup, by client: YoClient) async throws {
+  /// and sign-in meanwhile. The core seals the account and the words under K and wraps K (spec 7).
+  private func put(_ account: Account, code: [String], k: Data, passkey: YoPasskeyDoor, by client: YoClient)
+    async throws
+  {
     try still(client)
+    let sealed = try JSONEncoder().encode(BackupRecord.Sealed(account: account, code: code))
     do {
-      try await Hub.run { try client.putBackup(backup: backup) }
+      try await Hub.run { try client.putBackup(k: k, sealed: sealed, words: code, passkey: passkey) }
     } catch let error as YoError {
       throw AccountError.hub(error)
     }
@@ -403,28 +379,60 @@ final class AccountStore {
     }
   }
 
-  private enum Door { case keep, set(Data), remove }
+  /// What a rewrap does with the passkey's door: keeps it as it is, sets it from a new passkey's PRF output, removes
+  /// it, or adds its auth key from the PRF output of the passkey there (`confirmPasskey`).
+  private enum Door { case keep, set(Data), remove, confirm(Data) }
 
-  /// The backup again with the same K (opened by the words on this phone): its passkey door kept, set from a PRF
-  /// output or removed, and optionally under new words (the old locator then finds nothing).
+  /// The backup again with the same K (opened by the words on this phone): its passkey door kept, set, removed or
+  /// confirmed, and optionally under new words (the old locator then finds nothing). Always with the doors' auth keys.
   private func rewrap(_ passkey: Door, code new: [String]? = nil) async throws {
     guard var account, let code = RecoveryWords.load(), let client else { throw AccountError.noBackup }
-    let record = try await fetch(account.userID)
-    let k = try BackupRecord.unwrap(record.byCode, with: BackupRecord.key(code: code))
+    let opened = try await fetchBackup(by: .words(words: code), userID: account.userID)
+    let record = opened.record
     let words = new ?? code
-    let byPasskey: Data =
+    let door: YoPasskeyDoor =
       switch passkey {
-      case .keep: record.byPasskey
-      case .set(let prf): try BackupRecord.wrap(k, in: BackupRecord.key(prf: prf))
-      case .remove: Data()
+      case .keep: .keep(record: record)
+      case .set(let prf): .new(prf: prf)
+      case .remove: .none
+      case .confirm(let prf): .confirm(record: record, prf: prf)
       }
-    account.byPasskey = !byPasskey.isEmpty
+    switch passkey {
+    case .keep:
+      account.byPasskey = !record.byPasskey.isEmpty
+      account.passkeyAuth = !record.authPasskey.isEmpty
+    case .set, .confirm:
+      account.byPasskey = true
+      account.passkeyAuth = true
+    case .remove:
+      account.byPasskey = false
+      account.passkeyAuth = false
+    }
     account.byCode = true
-    try await put(BackupRecord.make(account, code: words, k: k, prf: nil, byPasskey: byPasskey), by: client)
+    account.codeAuth = true
+    try await put(account, code: words, k: opened.k, passkey: door, by: client)
     RecoveryWords.save(words)
     self.account = account
     if case .set = passkey { passkeyTurnedOff = false }
     if case .remove = passkey { passkeyTurnedOff = true }
+  }
+
+  /// A record from before the doors' auth keys (spec 7), written again with them, once, by the words on this phone
+  /// (no step for the person); kept as it is, also the passkey's door. The passkey's auth key waits for the passkey
+  /// (`confirmPasskey`). Tried again at the next start until it went.
+  private func addAuthKeys() async {
+    guard let account, account.secured, account.codeAuth != true, RecoveryWords.load() != nil else { return }
+    try? await rewrap(.keep)
+  }
+
+  /// The passkey asked once (Face ID) for a record rewritten from before the auth keys: its PRF output gives the key
+  /// that signs the record's fetch, so a new phone finds it by the passkey again. It must open the record's K.
+  func confirmPasskey() async throws {
+    guard let account, let client else { throw AccountError.noBackup }
+    let answer = try await passkeys.ask(salt: BackupRecord.prfSalt)
+    guard answer.userID == account.userID, let prf = answer.prf else { throw AccountError.noPRF }
+    try still(client)
+    try await rewrap(.confirm(prf))
   }
 
   /// A new passkey in place of the one there (made, then used once for its PRF output).
@@ -456,28 +464,24 @@ final class AccountStore {
   func restoreWithPasskey(quietly: Bool = false) async throws {
     let answer = try await passkeys.ask(salt: BackupRecord.prfSalt, quietly: quietly)
     guard let prf = answer.prf else { throw AccountError.noPRF }
-    let record = try await fetch(answer.userID)
-    guard !record.byPasskey.isEmpty else { throw AccountError.noBackup }
-    try await restore(record, k: BackupRecord.unwrap(record.byPasskey, with: BackupRecord.key(prf: prf)))
+    try await restore(fetchBackup(by: .passkey(prf: prf), userID: answer.userID))
   }
 
   /// By the recovery words alone: they say where the backup is and open it.
   func restore(code: [String]) async throws {
-    let record = try await fetch(BackupRecord.locator(code: code))
-    guard let k = try? BackupRecord.unwrap(record.byCode, with: BackupRecord.key(code: code)) else {
-      throw AccountError.wrongCode
-    }
-    try await restore(record, k: k)
+    try await restore(fetchBackup(by: .words(words: code), userID: nil))
     wordsSaved = true  // typed in: the person has them
   }
 
-  private func fetch(_ id: Data) async throws -> YoBackup {
+  /// The backup a door opens, fetched with its auth key (the core derives, signs and opens): by the user id when
+  /// given (a passkey's user handle), else by the words' locator. None it opens: `noBackup` (the hub tells no more).
+  private func fetchBackup(by door: YoDoor, userID: Data?) async throws -> YoOpenedBackup {
     let transport = Hub.transport
     do {
-      guard let record = try await Hub.run({ try fetchBackup(transport: transport, id: id) }) else {
+      guard let opened = try await Hub.run({ try openBackup(transport: transport, userId: userID, door: door) }) else {
         throw AccountError.noBackup
       }
-      return record
+      return opened
     } catch YoError.Refused(let status) where status == 429 {
       throw AccountError.tooMany
     } catch let error as YoError {
@@ -486,8 +490,8 @@ final class AccountStore {
   }
 
   /// The account from its backup, and this phone registered for it with the account's key (spec 6.4).
-  private func restore(_ record: YoBackup, k: SymmetricKey) async throws {
-    let sealed = try BackupRecord.open(record.sealed, with: k)
+  private func restore(_ opened: YoOpenedBackup) async throws {
+    let sealed = try JSONDecoder().decode(BackupRecord.Sealed.self, from: opened.sealed)
     client = try await register(sealed.account.username, secret: sealed.account.accountKey)
     if let code = sealed.code { RecoveryWords.save(code) }
     SyncedAccount.left = nil
@@ -495,6 +499,7 @@ final class AccountStore {
     friendsSeeded = true
     account = sealed.account
     SecureReminder.update(secured: true)
+    Task { await addAuthKeys() }
   }
 
   /// Back without a word, from the iCloud Keychain (`SyncedAccount`): the app deleted and installed again, or a new
@@ -532,6 +537,7 @@ final class AccountStore {
     friendsSeeded = true
     account = restored
     SecureReminder.update(secured: restored.secured)
+    Task { await addAuthKeys() }
     return true
   }
 
@@ -652,13 +658,12 @@ final class AccountStore {
 }
 
 enum AccountError: LocalizedError {
-  case taken, noBackup, wrongCode, noPRF, tooMany, busy, hub(YoError)
+  case taken, noBackup, noPRF, tooMany, busy, hub(YoError)
 
   var errorDescription: String? {
     switch self {
     case .taken: "That name is taken. Try another."
     case .noBackup: "We couldn’t find your account. Try another passkey or recovery key."
-    case .wrongCode: "That recovery key couldn’t restore your account. Check the words and try again."
     case .noPRF: "This passkey can’t be used to sign in to Yo. Try a different password manager."
     case .tooMany: "Too many tries. Try again later."
     case .busy: "Signing in already. Wait a moment."

@@ -9,7 +9,7 @@ use tower::ServiceExt;
 static RUNTIME: OnceLock<tokio::runtime::Runtime> = OnceLock::new();
 static ROUTER: OnceLock<axum::Router> = OnceLock::new();
 
-const ROUTES: [(&str, &str); 27] = [
+const ROUTES: [(&str, &str); 28] = [
     ("PUT", "/v1/keypackages"),
     ("POST", "/v1/lookup"),
     ("PUT", "/v1/push"),
@@ -38,6 +38,8 @@ const ROUTES: [(&str, &str); 27] = [
     ("PUT", "/v1/blobs/AAAAAAAAAAAAAAAAAAAAAA?fetches=4294967296"),
     ("GET", "/v1/storage"),
     ("PUT", "/v1/storage"),
+    // Odd: signed, a fetch only a backup door's key may make.
+    ("GET", "/v1/backup/AAAAAAAAAAAAAAAAAAAAAA"),
 ];
 
 fuzz_target!(|data: &[u8]| {

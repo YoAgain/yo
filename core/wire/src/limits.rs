@@ -30,6 +30,9 @@ pub const MAX_DEVICES: usize = 16;
 pub const MAX_BACKUP_WRAP_LEN: usize = 256;
 /// The largest sealed part of a backup record: the account and its friends, and the record still one request.
 pub const MAX_BACKUP_SEALED_LEN: usize = 60 * 1024;
+/// The sizes a sealed storage blob and a backup's sealed part can have (spec 6.9, 7): padded like an envelope, then
+/// sealed, so the hub sees a size class. The largest is both limits.
+pub const SEALED_SIZES: [usize; 4] = [1024, 4096, 16 * 1024, 60 * 1024];
 /// The longest feedback text, in bytes of UTF-8 (spec 6.3).
 pub const MAX_FEEDBACK_LEN: usize = 2000;
 /// The account's sealed storage (spec 6.9).

@@ -2,6 +2,7 @@
 //! friends writing all along. After every cycle: the same user id, messages both ways exactly once, the block holding,
 //! the storage (6.9) intact and converged, nothing left behind at the hub.
 
+use yo_core::backup::Door;
 use yo_core::{Client, Content, Error, Event, Push};
 use yo_tests::backup::{self, Account};
 use yo_tests::{random_u64, Http, Rng, TestHub};
@@ -111,12 +112,16 @@ fn accounts_restored_forty_times_by_every_way_lose_nothing() {
                 p.code = backup::words(random(&mut rng));
                 p.prf = random(&mut rng);
                 p.put_backup();
-                let record = Client::fetch_backup(&*Http::new(hub.url()), &backup::locator(&old_code)).unwrap();
+                let http = Http::new(hub.url());
+                let record = Client::open_backup(&*http, None, &Door::Code(&old_code)).unwrap();
                 assert!(record.is_none(), "{ctx}: the old words still find a record");
-                let current = Client::fetch_backup(&*Http::new(hub.url()), &backup::locator(&p.code)).unwrap().unwrap();
+                let id = yo_core::state::unhex(&p.user).unwrap();
+                let record = Client::fetch_backup(&*http, &id, &Door::Passkey(&old_prf)).unwrap();
+                assert!(record.is_none(), "{ctx}: the old passkey still fetches it");
+                let current = Client::fetch_backup(&*http, &id, &Door::Code(&p.code)).unwrap().unwrap();
                 assert!(
-                    backup::unwrap(current.by_passkey.as_slice(), &backup::key_from_prf(&old_prf)).is_none(),
-                    "{ctx}: the old passkey still opens it"
+                    backup::open_sealed(&current, &Door::Passkey(&old_prf)).is_none(),
+                    "{ctx}: the old passkey opens it"
                 );
             }
             // (e): the old phone is still running and sends meanwhile.
@@ -128,18 +133,17 @@ fn accounts_restored_forty_times_by_every_way_lose_nothing() {
                 // (a) The passkey: the record by the user id (its user handle), K by the PRF output.
                 0 => {
                     let id = yo_core::state::unhex(&p.user).unwrap();
-                    let record = Client::fetch_backup(&*Http::new(hub.url()), &id).unwrap().expect(&ctx);
-                    let k = backup::unwrap(record.by_passkey.as_slice(), &backup::key_from_prf(&p.prf)).expect(&ctx);
-                    let (account, code) = backup::open_sealed(&record, &k).expect(&ctx);
+                    let door = Door::Passkey(&p.prf);
+                    let opened = Client::open_backup(&*Http::new(hub.url()), Some(&id), &door).unwrap().expect(&ctx);
+                    let (account, code) = backup::parse_sealed(&opened.plain).expect(&ctx);
                     assert_eq!((account.username.as_str(), &code), (p.name.as_str(), &p.code), "{ctx}");
                     account.account_key
                 }
                 // (b), (d) The 12 words: the record by their locator, K by them.
                 1 | 3 => {
-                    let record =
-                        Client::fetch_backup(&*Http::new(hub.url()), &backup::locator(&p.code)).unwrap().expect(&ctx);
-                    let k = backup::unwrap(record.by_code.as_slice(), &backup::key_from_code(&p.code)).expect(&ctx);
-                    backup::open_sealed(&record, &k).expect(&ctx).0.account_key
+                    let door = Door::Code(&p.code);
+                    let opened = Client::open_backup(&*Http::new(hub.url()), None, &door).unwrap().expect(&ctx);
+                    backup::parse_sealed(&opened.plain).expect(&ctx).0.account_key
                 }
                 // (c), (e) The iCloud Keychain: the name and the secret on a fresh machine, nothing else.
                 _ => p.secret,
@@ -174,7 +178,7 @@ fn accounts_restored_forty_times_by_every_way_lose_nothing() {
     // (f) Deleted: the backup goes with it; the name is anyone's, and the old secret takes nothing back.
     let p = &mut people[0];
     p.client.delete_account().unwrap();
-    let record = Client::fetch_backup(&*Http::new(hub.url()), &backup::locator(&p.code)).unwrap();
+    let record = Client::open_backup(&*Http::new(hub.url()), None, &Door::Code(&p.code)).unwrap();
     assert!(record.is_none(), "the deleted account's backup is gone");
     let stranger = register(&hub, &p.name, None).unwrap();
     assert_ne!(stranger.user_id(), p.user);

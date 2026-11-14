@@ -1,6 +1,7 @@
 //! Scenarios: a real hub, real clients over HTTP, the protocol end to end (spec/v1.md).
 
 use std::sync::Arc;
+use yo_core::backup::Door;
 use yo_core::{Client, Content, Error, Event, Push};
 use yo_tests::{deliver_raw, new_phone, random_u64, register, user_of, username, Http, Lying, TestHub};
 use yo_wire::api;
@@ -596,8 +597,18 @@ fn by_name(hub: &TestHub, name: &str, account: Option<[u8; 32]>) -> Result<Clien
     Client::register_username(Http::new(hub.url()), name, account, Some("TESTER".into()), Push::none())
 }
 
+/// The words whose auth key signs the fetch of the test records.
+fn words() -> Vec<String> {
+    yo_tests::backup::words([1; 16])
+}
+
 fn backup(locator: Vec<u8>) -> api::Backup {
-    api::Backup::new(vec![1; 60], vec![2; 60], vec![3; 500], locator)
+    let auth = Door::Code(&words()).auth_key().verifying_key().to_bytes();
+    api::Backup::new(vec![1; 60], vec![2; 60], vec![3; 500], locator, None, auth)
+}
+
+fn fetch(http: &Http, id: &[u8]) -> Result<Option<api::Backup>, Error> {
+    Client::fetch_backup(http, id, &Door::Code(&words()))
 }
 
 #[test]
@@ -633,28 +644,28 @@ fn a_backup_is_found_by_user_id_and_by_locator() {
     let http = Http::new(hub.url());
     let mut t = by_name(&hub, &format!("SAFE{}", random_u64() % 100_000), None).unwrap();
     let user = yo_tests::user_id(t.user_id());
-    assert_eq!(Client::fetch_backup(http.as_ref(), &user), Ok(None));
+    assert_eq!(fetch(&http, &user), Ok(None));
     let first = backup(vec![9; 16]);
     t.put_backup(&first).unwrap();
-    assert_eq!(Client::fetch_backup(http.as_ref(), &user), Ok(Some(first.clone())));
-    assert_eq!(Client::fetch_backup(http.as_ref(), &[9; 16]), Ok(Some(first)));
+    assert_eq!(fetch(&http, &user), Ok(Some(first.clone())));
+    assert_eq!(fetch(&http, &[9; 16]), Ok(Some(first)));
     // A new recovery code: the old locator finds nothing.
     let second = backup(vec![8; 16]);
     t.put_backup(&second).unwrap();
-    assert_eq!(Client::fetch_backup(http.as_ref(), &[9; 16]), Ok(None));
-    assert_eq!(Client::fetch_backup(http.as_ref(), &[8; 16]), Ok(Some(second.clone())));
-    assert_eq!(Client::fetch_backup(http.as_ref(), &user), Ok(Some(second)));
+    assert_eq!(fetch(&http, &[9; 16]), Ok(None));
+    assert_eq!(fetch(&http, &[8; 16]), Ok(Some(second.clone())));
+    assert_eq!(fetch(&http, &user), Ok(Some(second)));
     // Another account cannot take the locator.
     let mut u = by_name(&hub, &format!("OTHER{}", random_u64() % 100_000), None).unwrap();
     assert_eq!(u.put_backup(&backup(vec![8; 16])), Err(Error::Refused(api::status::CONFLICT)));
     // Malformed records are refused, by the core and by the hub.
-    let bad = api::Backup { version: 2, ..backup(Vec::new()) };
+    let bad = api::Backup { version: 3, ..backup(Vec::new()) };
     assert!(t.put_backup(&bad).is_err());
     for body in [yo_wire::encode(&bad), yo_wire::encode(&backup(vec![1; 15])), vec![1, 2, 3], Vec::new()] {
         assert_eq!(t.signed_for_tests("PUT", api::BACKUP, &body).unwrap().status, api::status::BAD_REQUEST);
     }
-    assert_eq!(Client::fetch_backup(http.as_ref(), &user), Ok(Some(backup(vec![8; 16]))), "nothing changed");
-    assert_eq!(Client::fetch_backup(http.as_ref(), &[1; 15]), Err(Error::Protocol("backup id")));
+    assert_eq!(fetch(&http, &user), Ok(Some(backup(vec![8; 16]))), "nothing changed");
+    assert_eq!(fetch(&http, &[1; 15]), Err(Error::Protocol("backup id")));
 }
 
 #[test]
@@ -693,8 +704,8 @@ fn a_deleted_account_is_gone_with_its_name() {
     // The device is out, its backup and inbox gone, nobody finds the account.
     assert_eq!(t.sync(0), Err(Error::Replaced));
     assert_eq!(t.delete_account(), Err(Error::Replaced));
-    assert_eq!(Client::fetch_backup(http.as_ref(), &user), Ok(None));
-    assert_eq!(Client::fetch_backup(http.as_ref(), &[6; 16]), Ok(None));
+    assert_eq!(fetch(&http, &user), Ok(None));
+    assert_eq!(fetch(&http, &[6; 16]), Ok(None));
     let mut c = register(Http::new(hub.url()), &username(random_u64() % 1_000_000_000), None);
     assert_eq!(c.send_yo(&name), Err(Error::NotOnYo));
     // The name is free for anyone, and so is the key: a new account, not the old one.
@@ -792,9 +803,9 @@ fn registration_and_backups_are_limited_per_address() {
     assert_eq!(by_name(&hub, &format!("THREE{n}"), None).err(), Some(Error::Refused(api::status::RATE_LIMITED)));
     let http = Http::new(hub.url());
     for _ in 0..2 {
-        assert_eq!(Client::fetch_backup(http.as_ref(), &[5; 16]), Ok(None));
+        assert_eq!(fetch(&http, &[5; 16]), Ok(None));
     }
-    assert_eq!(Client::fetch_backup(http.as_ref(), &[5; 16]), Err(Error::Refused(api::status::RATE_LIMITED)));
+    assert_eq!(fetch(&http, &[5; 16]), Err(Error::Refused(api::status::RATE_LIMITED)));
 }
 
 #[test]

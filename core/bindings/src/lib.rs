@@ -337,19 +337,30 @@ fn key_of(key: Vec<u8>) -> Result<[u8; 32], YoError> {
     key.try_into().map_err(|_| YoError::State)
 }
 
-/// The account's backup record (spec 7), as the app makes and opens it: K wrapped by the passkey (empty without one)
-/// and by the recovery code, what K seals, and the code's locator (16 bytes, or empty).
-#[derive(uniffi::Record)]
+/// The account's backup record (spec 7) as the hub has it: K wrapped by the passkey (empty without one) and by the
+/// words, what K seals, the words' locator (16 bytes, or empty), and the doors' auth keys, which sign its fetch: the
+/// passkey's empty without one or before it was confirmed, both empty in a record from before them.
+#[derive(uniffi::Record, Clone)]
 pub struct YoBackup {
     pub by_passkey: Vec<u8>,
     pub by_code: Vec<u8>,
     pub sealed: Vec<u8>,
     pub locator: Vec<u8>,
+    pub auth_passkey: Vec<u8>,
+    pub auth_code: Vec<u8>,
 }
 
 impl From<YoBackup> for yo_core::Backup {
     fn from(backup: YoBackup) -> Self {
-        yo_core::Backup::new(backup.by_passkey, backup.by_code, backup.sealed, backup.locator)
+        yo_core::Backup {
+            version: yo_core::BACKUP_VERSION,
+            by_passkey: backup.by_passkey.into(),
+            by_code: backup.by_code.into(),
+            sealed: backup.sealed.into(),
+            locator: backup.locator.into(),
+            auth_passkey: backup.auth_passkey.into(),
+            auth_code: backup.auth_code.into(),
+        }
     }
 }
 
@@ -360,15 +371,60 @@ impl From<yo_core::Backup> for YoBackup {
             by_code: backup.by_code.into(),
             sealed: backup.sealed.into(),
             locator: backup.locator.into(),
+            auth_passkey: backup.auth_passkey.into(),
+            auth_code: backup.auth_code.into(),
         }
     }
 }
 
-/// The backup record by the user id (a passkey's user handle) or the recovery code's locator, 16 bytes each; `None`
-/// when there is none. Before there is an account on this phone.
+/// What opens the backup: the passkey's PRF output, or the 12 recovery words.
+#[derive(uniffi::Enum)]
+pub enum YoDoor {
+    Passkey { prf: Vec<u8> },
+    Words { words: Vec<String> },
+}
+
+impl YoDoor {
+    fn core(&self) -> yo_core::backup::Door<'_> {
+        match self {
+            YoDoor::Passkey { prf } => yo_core::backup::Door::Passkey(prf),
+            YoDoor::Words { words } => yo_core::backup::Door::Code(words),
+        }
+    }
+}
+
+/// A backup opened by a door: K, what K sealed (the app's JSON), and the record as the hub has it.
+#[derive(uniffi::Record)]
+pub struct YoOpenedBackup {
+    pub k: Vec<u8>,
+    pub sealed: Vec<u8>,
+    pub record: YoBackup,
+}
+
+/// The passkey's door in a record being made (`YoClient::put_backup`).
+#[derive(uniffi::Enum)]
+pub enum YoPasskeyDoor {
+    /// None: the words alone open it.
+    None,
+    /// A passkey, by its PRF output.
+    New { prf: Vec<u8> },
+    /// As in this record (opened with the same K): its wrap and its auth key, which may be none yet.
+    Keep { record: YoBackup },
+    /// As in this record, with the passkey's auth key added: its PRF output must open the record.
+    Confirm { record: YoBackup, prf: Vec<u8> },
+}
+
+/// Fetches the backup record a door opens and opens it: by the user id when given (a passkey's user handle; needed
+/// with a passkey), else by the words' locator. The fetch is signed with the door's auth key. `None` when there is
+/// none it opens. Before there is an account on this phone.
 #[uniffi::export]
-pub fn fetch_backup(transport: Arc<dyn HttpTransport>, id: Vec<u8>) -> Result<Option<YoBackup>, YoError> {
-    Ok(Client::fetch_backup(&Http(transport), &id)?.map(Into::into))
+pub fn open_backup(
+    transport: Arc<dyn HttpTransport>,
+    user_id: Option<Vec<u8>>,
+    door: YoDoor,
+) -> Result<Option<YoOpenedBackup>, YoError> {
+    let opened = Client::open_backup(&Http(transport), user_id.as_deref(), &door.core())?;
+    Ok(opened.map(|o| YoOpenedBackup { k: o.k.to_vec(), sealed: o.plain, record: o.record.into() }))
 }
 
 /// Whether a username is free, asked while it is typed; the name as written (NFC). False when it is taken, also in
@@ -552,9 +608,30 @@ impl YoClient {
         self.read(|c| c.account_secret().to_vec())
     }
 
-    /// Stores the account's backup record at the hub, replacing the one before (its old locator then finds nothing).
-    pub fn put_backup(&self, backup: YoBackup) -> Result<(), YoError> {
-        Ok(self.with(|c| c.put_backup(&backup.into()))??)
+    /// Stores the account's backup record at the hub, replacing the one before (its old locator then finds nothing):
+    /// `sealed` (the app's JSON) padded and sealed under K (32 bytes), K wrapped by the words and as `passkey` says,
+    /// with the doors' auth keys.
+    pub fn put_backup(
+        &self,
+        k: Vec<u8>,
+        sealed: Vec<u8>,
+        words: Vec<String>,
+        passkey: YoPasskeyDoor,
+    ) -> Result<(), YoError> {
+        use yo_core::backup::PasskeyDoor;
+        let k = key_of(k)?;
+        let kept = |record: YoBackup| yo_core::Backup::from(record);
+        let record = match passkey {
+            YoPasskeyDoor::None => yo_core::backup::make(&k, &sealed, &words, PasskeyDoor::None),
+            YoPasskeyDoor::New { prf } => yo_core::backup::make(&k, &sealed, &words, PasskeyDoor::New(&prf)),
+            YoPasskeyDoor::Keep { record } => {
+                yo_core::backup::make(&k, &sealed, &words, PasskeyDoor::Keep(&kept(record)))
+            }
+            YoPasskeyDoor::Confirm { record, prf } => {
+                yo_core::backup::make(&k, &sealed, &words, PasskeyDoor::Confirm(&kept(record), &prf))
+            }
+        }?;
+        Ok(self.with(|c| c.put_backup(&record))??)
     }
 
     /// Claims a username, or gives it up with `None`.

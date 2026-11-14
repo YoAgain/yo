@@ -38,6 +38,14 @@ pub struct NewDevice {
     pub push_token: Vec<u8>,
 }
 
+/// The keys that may sign a backup record's fetch (spec 7): the passkey's, if it has one, and the code's. Neither: a
+/// record stored before them.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct BackupAuth {
+    pub passkey: Option<Key>,
+    pub code: Option<Key>,
+}
+
 /// A KeyPackage the hub checked: its bytes and the hash it is remembered by.
 pub struct StoredKeyPackage {
     pub hash: [u8; 32],
@@ -215,13 +223,17 @@ CREATE TABLE IF NOT EXISTS commits (
     PRIMARY KEY (group_id, epoch)
 ) WITHOUT ROWID;
 CREATE INDEX IF NOT EXISTS commits_by_age ON commits(accepted_at);
--- Each user's backup record (spec 7), as the client sent it: found by the user id or by its locator. A user with one
--- has secured the name, which is then never released (spec 6.4).
+-- Each user's backup record (spec 7), as the client sent it: found by the user id or by its locator, handed out to a
+-- request signed by one of its doors' auth keys (the passkey's NULL without one). Both NULL: a record stored before
+-- them, handed out without a signature until the legacy cutoff. A user with one has secured the name, which is then
+-- never released (spec 6.4).
 CREATE TABLE IF NOT EXISTS backups (
     user_id BLOB PRIMARY KEY REFERENCES users(id),
     locator BLOB UNIQUE,
     record BLOB NOT NULL,
-    updated_at INTEGER NOT NULL
+    updated_at INTEGER NOT NULL,
+    auth_passkey BLOB,
+    auth_code BLOB
 ) WITHOUT ROWID;
 -- Users reported by users (spec 6.3), for the operator to review: who reported whom, why (1 spam, 2 abuse, 3 other),
 -- when. One row per pair, the latest report. No content: the hub has none.
@@ -361,13 +373,18 @@ fn remove_user(tx: &Transaction<'_>, user: &UserId, now: u64) -> rusqlite::Resul
 const SCHEMA_VERSION: i64 = 1;
 
 /// Brings a database of this version written by an older hub up to `SCHEMA`, in one transaction: the usernames'
-/// spellings (`handles.spelling`, NULL for the names it holds: shown as their skeleton). The tables `SCHEMA` adds
-/// are made by `CREATE TABLE IF NOT EXISTS` already.
+/// spellings (`handles.spelling`, NULL for the names it holds: shown as their skeleton) and the backups' auth keys
+/// (NULL for the records it holds: stored before them). The tables `SCHEMA` adds are made by
+/// `CREATE TABLE IF NOT EXISTS` already.
 fn migrate(conn: &mut Connection) -> rusqlite::Result<()> {
     let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
-    let has_spelling = tx.prepare("SELECT 1 FROM pragma_table_info('handles') WHERE name = 'spelling'")?.exists([])?;
-    if !has_spelling {
-        tx.execute_batch("ALTER TABLE handles ADD COLUMN spelling TEXT")?;
+    for (table, column, kind) in
+        [("handles", "spelling", "TEXT"), ("backups", "auth_passkey", "BLOB"), ("backups", "auth_code", "BLOB")]
+    {
+        let has = tx.prepare("SELECT 1 FROM pragma_table_info(?1) WHERE name = ?2")?.exists([table, column])?;
+        if !has {
+            tx.execute_batch(&format!("ALTER TABLE {table} ADD COLUMN {column} {kind}"))?;
+        }
     }
     let has_app = tx.prepare("SELECT 1 FROM pragma_table_info('devices') WHERE name = 'app'")?.exists([])?;
     if !has_app {
@@ -768,6 +785,7 @@ impl Db {
         device: &DeviceId,
         locator: Option<&[u8]>,
         record: &[u8],
+        auth: &BackupAuth,
         now: u64,
     ) -> rusqlite::Result<Write<()>> {
         let mut conn = self.conn();
@@ -785,25 +803,29 @@ impl Db {
             }
         }
         tx.prepare_cached(
-            "INSERT INTO backups (user_id, locator, record, updated_at) VALUES (?1, ?2, ?3, ?4)
+            "INSERT INTO backups (user_id, locator, record, updated_at, auth_passkey, auth_code)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)
              ON CONFLICT (user_id) DO UPDATE SET
-                 locator = excluded.locator, record = excluded.record, updated_at = excluded.updated_at",
+                 locator = excluded.locator, record = excluded.record, updated_at = excluded.updated_at,
+                 auth_passkey = excluded.auth_passkey, auth_code = excluded.auth_code",
         )?
-        .execute(params![user, locator, record, now])?;
+        .execute(params![user, locator, record, now, auth.passkey, auth.code])?;
         tx.commit()?;
         Ok(Write::Done(()))
     }
 
     /// A backup record by its user id or, where no user has that id, by its locator: what is asked for by a user's
     /// id is that user's record or none, never one whose locator happens to be the same.
-    pub fn backup(&self, id: &[u8]) -> rusqlite::Result<Option<Vec<u8>>> {
+    pub fn backup(&self, id: &[u8]) -> rusqlite::Result<Option<(Vec<u8>, BackupAuth)>> {
+        let key = |value: Option<Vec<u8>>| value.and_then(|v| v.try_into().ok());
         self.conn()
             .prepare_cached(
-                "SELECT record FROM backups WHERE user_id = ?1
-                 UNION ALL SELECT record FROM backups WHERE locator = ?1 AND NOT EXISTS (SELECT 1 FROM users WHERE id = ?1)
+                "SELECT record, auth_passkey, auth_code FROM backups WHERE user_id = ?1
+                 UNION ALL SELECT record, auth_passkey, auth_code FROM backups
+                     WHERE locator = ?1 AND NOT EXISTS (SELECT 1 FROM users WHERE id = ?1)
                  LIMIT 1",
             )?
-            .query_row([id], |row| row.get(0))
+            .query_row([id], |row| Ok((row.get(0)?, BackupAuth { passkey: key(row.get(1)?), code: key(row.get(2)?) })))
             .optional()
     }
 
@@ -1295,8 +1317,9 @@ mod tests {
         assert!(matches!(db.set_username(&mod_user, Some((b"MODERATOR", "MODERATOR"))).unwrap(), Write::Done(())));
     }
 
-    /// A database the hub before spellings made (schema 1 without `handles.spelling`): opened, it gets the column,
-    /// its names are found and shown as their skeleton, and nothing in it is refused.
+    /// A database the hub before spellings made (schema 1 without `handles.spelling` and the backups' auth keys):
+    /// opened, it gets the columns, its names are found and shown as their skeleton, its backup is one from before
+    /// the auth keys, and nothing in it is refused.
     #[test]
     fn a_database_from_before_spellings_is_migrated() {
         let path = std::env::temp_dir().join(format!("yo-hub-migrate-{}.sqlite", std::process::id()));
@@ -1325,8 +1348,14 @@ mod tests {
                 params![[1u8; 16], [1u8; 16], [1u8; 32], [1u8; 32]],
             )
             .unwrap();
+            conn.execute(
+                "INSERT INTO backups (user_id, locator, record, updated_at) VALUES (?1, NULL, x'01', 0)",
+                [[1u8; 16]],
+            )
+            .unwrap();
         }
         let db = Db::open(&path).unwrap();
+        assert_eq!(db.backup(&[1; 16]).unwrap(), Some((vec![1], BackupAuth::default())));
         assert_eq!(spelling(&db, "Christopher").as_deref(), Some("CHRISTOPHER"));
         assert!(matches!(register(&db, b"christopher", 2, 2, 0), Write::Refused(Conflict::UsernameTaken)));
         drop(db);
@@ -1379,21 +1408,31 @@ mod tests {
         let found = |id: &[u8]| db.backup(id).unwrap();
         let refused = |w: Write<()>, want: Conflict| matches!(w, Write::Refused(c) if c == want);
         assert!(found(&a).is_none());
-        assert!(matches!(db.put_backup(ana, Some(&[9; 16]), b"one", 0).unwrap(), Write::Done(())));
-        assert_eq!(found(&a).as_deref(), Some(&b"one"[..]));
-        assert_eq!(found(&[9; 16]).as_deref(), Some(&b"one"[..]));
+        assert!(matches!(
+            db.put_backup(ana, Some(&[9; 16]), b"one", &BackupAuth::default(), 0).unwrap(),
+            Write::Done(())
+        ));
+        assert_eq!(found(&a).map(|f| f.0).as_deref(), Some(&b"one"[..]));
+        assert_eq!(found(&[9; 16]).map(|f| f.0).as_deref(), Some(&b"one"[..]));
         // Another user cannot take the locator.
-        assert!(refused(db.put_backup(ben, Some(&[9; 16]), b"two", 0).unwrap(), Conflict::LocatorTaken));
+        assert!(refused(
+            db.put_backup(ben, Some(&[9; 16]), b"two", &BackupAuth::default(), 0).unwrap(),
+            Conflict::LocatorTaken
+        ));
         // A new record with a new locator: the old one finds nothing.
-        db.put_backup(ana, Some(&[8; 16]), b"three", 0).unwrap();
+        db.put_backup(ana, Some(&[8; 16]), b"three", &BackupAuth::default(), 0).unwrap();
         assert!(found(&[9; 16]).is_none());
-        assert_eq!(found(&[8; 16]).as_deref(), Some(&b"three"[..]));
+        assert_eq!(found(&[8; 16]).map(|f| f.0).as_deref(), Some(&b"three"[..]));
         // No locator may be a user's id.
-        assert!(refused(db.put_backup(ben, Some(&a), b"four", 0).unwrap(), Conflict::LocatorTaken));
-        // Without a locator: by the user id only.
-        db.put_backup(ana, None, b"five", 0).unwrap();
+        assert!(refused(
+            db.put_backup(ben, Some(&a), b"four", &BackupAuth::default(), 0).unwrap(),
+            Conflict::LocatorTaken
+        ));
+        // Without a locator: by the user id only. With its auth keys.
+        let auth = BackupAuth { passkey: None, code: Some([5; 32]) };
+        db.put_backup(ana, None, b"five", &auth, 0).unwrap();
         assert!(found(&[8; 16]).is_none());
-        assert_eq!(found(&a).as_deref(), Some(&b"five"[..]));
+        assert_eq!(found(&a), Some((b"five".to_vec(), auth)));
     }
 
     #[test]
@@ -1401,7 +1440,7 @@ mod tests {
         let db = Db::open(":memory:").unwrap();
         user(register(&db, b"BEN", 2, 2, 0));
         // BEN's locator is [7; 16]; then a user comes to have that id. Asked by its id, the hub has no record for it.
-        db.put_backup(&[2; 16], Some(&[7; 16]), b"ben", 0).unwrap();
+        db.put_backup(&[2; 16], Some(&[7; 16]), b"ben", &BackupAuth::default(), 0).unwrap();
         assert_eq!(user(register(&db, b"SEVEN", 7, 7, 0)), [7; 16]);
         assert!(db.backup(&[7; 16]).unwrap().is_none());
     }
@@ -1412,9 +1451,12 @@ mod tests {
         let first = user(register(&db, b"LEO", 1, 1, 0));
         // A new phone restores the account and stores its record; the old phone's late request must not replace it.
         user(register(&db, b"LEO", 1, 3, 0));
-        db.put_backup(&[3; 16], None, b"new", 0).unwrap();
-        assert!(matches!(db.put_backup(&[1; 16], None, b"old", 0).unwrap(), Write::Refused(Conflict::DeviceGone)));
-        assert_eq!(db.backup(&first).unwrap().as_deref(), Some(&b"new"[..]));
+        db.put_backup(&[3; 16], None, b"new", &BackupAuth::default(), 0).unwrap();
+        assert!(matches!(
+            db.put_backup(&[1; 16], None, b"old", &BackupAuth::default(), 0).unwrap(),
+            Write::Refused(Conflict::DeviceGone)
+        ));
+        assert_eq!(db.backup(&first).unwrap().map(|f| f.0).as_deref(), Some(&b"new"[..]));
     }
 
     #[test]
@@ -1422,7 +1464,7 @@ mod tests {
         let db = Db::open(":memory:").unwrap();
         let leo = user(register(&db, b"LEO", 1, 1, 0));
         let mia = user(register(&db, b"MIA", 2, 2, 0));
-        db.put_backup(&[1; 16], Some(&[9; 16]), b"record", 0).unwrap();
+        db.put_backup(&[1; 16], Some(&[9; 16]), b"record", &BackupAuth::default(), 0).unwrap();
         db.deliver(&[(leo, yo_wire::devices::hash(&[1; 32], &[[1; 32]]), b"envelope")], 0, 10).unwrap();
         // The test's users have the ids of their devices.
         let reported = |device: &DeviceId, whom: &UserId| match db.report(device, whom, 1, 0).unwrap() {
@@ -1506,7 +1548,7 @@ mod tests {
         let idle = user(register(&db, b"IDLE", 1, 1, 0));
         let secured = user(register(&db, b"SAFE", 2, 2, 0));
         let active = user(register(&db, b"BUSY", 3, 3, 0));
-        db.put_backup(&[2; 16], None, b"record", 0).unwrap();
+        db.put_backup(&[2; 16], None, b"record", &BackupAuth::default(), 0).unwrap();
         db.touch(&[3; 16], 50 * DAY, None).unwrap();
         assert!(matches!(db.feedback(&[1; 16], "where are my friends", "1.0 (1)", 0).unwrap(), Write::Done(())));
         let exists = |user: &UserId| db.lookup(KIND_USER, user, false, &[]).unwrap().is_some();

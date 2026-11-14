@@ -31,8 +31,8 @@ its platform.
 | GET | `/.well-known/apple-app-site-association` | apps allowed to make passkeys for the domain (spec 7); only when `YO_APPLE_APP_IDS` is set | none | – | nothing |
 | POST | `/v1/register` | username + certificate + KeyPackages → device registered, user id (spec 6.4) | none, account-signed proof over username, device id, device key, auth key | 10/h (IP) | name, account key, device keys, push token |
 | GET | `/v1/username/{name}` | is the name free: `204`, `409` taken or reserved, `400` no username | none | 60/min (IP) | the name asked |
-| GET | `/v1/backup/{user id or locator}` | the backup record, encrypted (spec 7); `404` none | none | 10/h (IP) | which record is fetched, from where |
-| PUT | `/v1/backup` | store the account's backup record | signed | signed | the record (opaque), its locator |
+| GET | `/v1/backup/{user id or locator}` | the backup record, encrypted (spec 7); `404` none, and to any request not signed by one of its doors' auth keys; a record from before the auth keys unsigned until 2026-11-28 | signed by a door's key (`Yo-Time`, `Yo-Signature`) | 10/h (IP) | which record is fetched, from where, by which door |
+| PUT | `/v1/backup` | store the account's backup record with its doors' auth keys | signed | signed | the record (opaque, its sealed part padded to 1, 4, 16 or 60 KiB), its locator, the doors' public auth keys |
 | PUT | `/v1/keypackages` | add KeyPackages (each checked, spec 6.5) | signed | signed; ≤ 100 per upload, ≤ 100 held | – |
 | POST | `/v1/lookup` | handle → user id, account key, device keys, KeyPackages if asked, username if asked | signed | 50/day with KeyPackages, 1000/day without (device) | who looks up whom |
 | PUT | `/v1/push` | set the device's push token (≤ 512 bytes) | signed | signed | the token |
