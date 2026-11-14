@@ -31,7 +31,7 @@ enum ShareInbox {
   /// What waits in the extension's outbox goes into the media outbox, oldest first; each leaves the group once the
   /// outbox has it. With no core yet (or one that will not take it now) it stays for the next opening.
   static func take(outbox: MediaOutbox, accounts: AccountStore) {
-    guard !taking, accounts.client != nil, let dir = ShareBridge.outbox else { return }
+    guard !taking, let client = accounts.client, let dir = ShareBridge.outbox else { return }
     taking = true
     let generation = generation
     Task {
@@ -42,11 +42,11 @@ enum ShareInbox {
         let note = ShareBridge.note(share.id, in: dir)
         let data = await Task.detached(priority: .utility) { try? Data(contentsOf: media) }.value
         // Checked after the read: signed out (or into another account) meanwhile, nothing goes under the new one.
-        guard generation == self.generation, accounts.client != nil, let owner = accounts.shareOwner else { return }
-        if let data, share.owner == owner, Date.now.timeIntervalSince(share.created) < MediaOutbox.givenUpAfter {
+        guard generation == self.generation, client === accounts.client, let owner = accounts.shareOwner else { return }
+        if let data, share.owner == owner {
           let file = MediaFile(
             kind: share.kind, data: data, width: share.width, height: share.height, durationMs: share.durationMs)
-          guard await outbox.send(file, to: share.to, accounts: accounts) else { continue }
+          guard await outbox.send(file, to: share.to, from: client, accounts: accounts) else { continue }
           Stats.sentYo(to: share.name)
           Task.detached(priority: .utility) { file.keepIfWanted() }
         }

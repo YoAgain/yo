@@ -300,11 +300,13 @@ final class AccountStore {
           return try YoClient.restore(transport: transport, store: file, stateKey: key, blob: blob)
         }
         client.shareState(lock: file)
+        client.acknowledgeExplicitly()  // each batch as the app has stored it (Inbox.take)
         return (client, client.accountSecret())
       }
       guard let blob = StateFile.load() else { throw Self.unread(StateFile.url) }
       guard let key = try StateKey.load() else { throw Unopened.gone }
       let client = try YoClient.restore(transport: transport, store: StateFile(), stateKey: key, blob: blob)
+      client.acknowledgeExplicitly()  // each batch as the app has stored it (Inbox.take)
       return (client, client.accountSecret())
     }
     guard self.client == nil, account != nil else { return }  // signed out meanwhile
@@ -350,6 +352,7 @@ final class AccountStore {
         }
         guard SharedStateFile.app else {
           let client = try make(StateFile(), StateKey.make())
+          client.acknowledgeExplicitly()  // each batch as the app has stored it (Inbox.take)
           return (client, client.accountSecret())
         }
         let file = SharedStateFile(guest: false)
@@ -359,6 +362,7 @@ final class AccountStore {
           return try make(file, key)
         }
         client.shareState(lock: file)
+        client.acknowledgeExplicitly()  // each batch as the app has stored it (Inbox.take)
         return (client, client.accountSecret())
       }
     } catch YoError.Refused(let status) where status == 409 {
@@ -744,9 +748,22 @@ final class AccountStore {
   func takeStorage(into friends: Friends, read: Bool = false) async {
     guard let client else { return }
     await storing?.value  // this phone's own writes first
-    guard let (kept, icon) = try? await Hub.run({ (client.friends(), client.appIcon()) }), client === self.client
+    let known = Set(friends.all.compactMap(\.user))
+    guard
+      let (kept, icon, names) = try? await Hub.run({ () -> ([YoFriend], String?, [String: String]) in
+        let kept = client.friends()
+        // A friend kept without a name (a block alone, a name over 64 bytes) and new here: the core's name for them,
+        // else the hub's.
+        let contacts = client.contacts()
+        var names: [String: String] = [:]
+        for friend in kept where friend.name == nil && !known.contains(friend.user) {
+          names[friend.user] =
+            contacts.first { $0.user == friend.user }?.handles.first ?? (try? client.whois(name: friend.user))?.username
+        }
+        return (kept, client.appIcon(), names)
+      }), client === self.client
     else { return }
-    friends.take(kept, seed: !friendsSeeded)
+    friends.take(kept, names: names, seed: !friendsSeeded)
     friendsSeeded = true
     guard restored, read || !kept.isEmpty || icon != nil else { return }  // maybe not read yet: after the first sync
     restored = false
