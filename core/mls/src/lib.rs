@@ -2740,6 +2740,15 @@ impl Client {
         Sent::Done(self.finish(result))
     }
 
+    /// What another process of this device received and saved for the app (the notification service, as its push
+    /// came): handed out now, from the state, without asking the hub. Nothing waiting: nothing changes.
+    pub fn saved_for_app(&mut self) -> Result<Vec<Event>> {
+        if self.state.events.is_empty() {
+            return Ok(Vec::new());
+        }
+        self.finish(Ok(()))
+    }
+
     /// Receives: waits up to `wait_s` seconds for mail, processes all of it, delivers what is waiting. Returns as soon
     /// as what arrived is saved; the hub's ack and the work after it wait for `after_sync` or the next call.
     pub fn sync(&mut self, wait_s: u64) -> Result<Vec<Event>> {

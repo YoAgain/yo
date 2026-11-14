@@ -285,6 +285,12 @@ final class Inbox {
         Task { await respell(client: client, accounts: accounts, friends: friends) }
       }
       do {
+        // What the notification service saved as its push came: on the bars at once, before the hub is asked.
+        let (saved, known) = try await Hub.run { (try client.savedEvents(), client.contacts()) }
+        if !saved.isEmpty, client === accounts.client {
+          await take(saved, contacts: known, client: client, friends: friends)
+          fetchMedia(client: client)
+        }
         let (events, contacts) = try await Hub.run { (try client.sync(waitS: 25), client.contacts()) }
         Perf.mark("listen.events \(events.count)")
         guard client === accounts.client else { continue }  // signed out meanwhile: not for this account

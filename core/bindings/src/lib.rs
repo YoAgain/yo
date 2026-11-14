@@ -713,6 +713,12 @@ impl YoClient {
         Ok(self.with(|c| c.set_username(name.as_deref()))??)
     }
 
+    /// What the notification service (or the share extension) received and saved for the app: at once, without the
+    /// hub, before the next `sync` asks it. Empty when nothing waits.
+    pub fn saved_events(&self) -> Result<Vec<YoEvent>, YoError> {
+        events(self.with(|c| c.saved_for_app())?)
+    }
+
     /// Waits up to `wait_s` seconds for mail and processes it: for the foreground, and the notification extension.
     /// The wait does not hold the client: other calls run meanwhile. Returns once what arrived is saved; the hub's
     /// acknowledgement and the work after it go with `after_sync`, or first thing in the next `sync`.

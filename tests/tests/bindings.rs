@@ -749,11 +749,12 @@ fn the_app_layer_shares_its_state_with_an_extension_in_turns() {
     });
     assert_eq!(yos(&returned, &b.user_id()), 1);
 
-    // The app, awake again: its next call takes in what the extensions saved, B's two Yos among it, handed to the
-    // app now; then it sends on from the newest state, and B opens all of it.
-    let events = a.sync(0).unwrap();
+    // The app, awake again: what the extensions saved, B's two Yos among it, handed to it at once from the state
+    // (`saved_events`, no request to the hub); then it sends on from the newest state, and B opens all of it.
+    let events = a.saved_events().unwrap();
     assert_eq!(yos(&events, &b.user_id()), 2, "what the guests received comes to the app");
     a.acknowledge_events();
+    assert!(a.saved_events().unwrap().is_empty(), "handed once");
     assert!(a.sync(0).unwrap().is_empty(), "acknowledged");
     a.send_yo(b.user_id()).unwrap();
     a.send_yo(b.user_id()).unwrap();
