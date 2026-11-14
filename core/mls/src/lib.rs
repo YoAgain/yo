@@ -2512,6 +2512,12 @@ impl Client {
         let response = self.signed("PUT", api::KEY_PACKAGES, &refill.body)?;
         // `409` to the same upload again: the hub took it before and its answer was lost (it refuses a KeyPackage it
         // has seen), or it holds as many as it keeps. Either way this one is done.
+        if response.status == status::BAD_REQUEST {
+            // Refused as it is (its packages past their lifetime, after a long time offline): made anew next time.
+            // Their keys stay, for a Welcome made with one the hub had already handed out.
+            self.state.refill = None;
+            return Err(refused(&response));
+        }
         if response.status != status::NO_CONTENT && response.status != status::CONFLICT {
             return Err(refused(&response));
         }

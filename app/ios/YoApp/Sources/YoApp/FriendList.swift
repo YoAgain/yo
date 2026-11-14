@@ -110,6 +110,8 @@ struct FriendList: View {
     @ObservationIgnored var preparing: [UUID: Task<Prepared?, Never>] = [:]
     /// A stack's 1.5 seconds: each new photo starts them again; when they are over, the whole stack goes.
     @ObservationIgnored var stackRounds: [UUID: Int] = [:]
+    /// Per friend, the last stack letting its Yos go: the next waits for it, so they go in the order taken.
+    @ObservationIgnored var releasing: [UUID: Task<Void, Never>] = [:]
     /// How often each friend went on top (by `Friend.key`): a new identity each time, so the bar leaves its place and
     /// comes in on top. Only here: a new spelling or user id never changes a bar's identity.
     var lifts: [UUID: Int] = [:]
@@ -745,14 +747,22 @@ struct FriendList: View {
       let stack = bar.outgoing
       bars.stackRounds[key] = nil
       bar.outgoing = []
-      var went = 0
-      for one in stack {
-        guard let prepared = await bars.preparing.removeValue(forKey: one.id)?.value else { continue }
-        went += 1
-        prepared.send()  // uploaded meanwhile (or uploading): its Yo goes now
-        showSent(to: friend, one.text, thenOnTop: true)
+      // After the stack before (a video still being finished): the friend gets them in the order taken.
+      let before = bars.releasing[key]
+      let releasing = Task {
+        await before?.value
+        var went = 0
+        for one in stack {
+          guard let prepared = await bars.preparing.removeValue(forKey: one.id)?.value else { continue }
+          went += 1
+          prepared.send()  // uploaded meanwhile (or uploading): its Yo goes now
+          showSent(to: friend, one.text, thenOnTop: true)
+        }
+        if went == 0 { showSent(to: friend, "Not Sent") }
       }
-      if went == 0 { showSent(to: friend, "Not Sent") }
+      bars.releasing[key] = releasing
+      await releasing.value
+      if bars.releasing[key] == releasing { bars.releasing[key] = nil }
     }
   }
 

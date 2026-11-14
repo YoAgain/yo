@@ -42,9 +42,8 @@ enum Prefetch {
       guard let file = file(one), let mark = mark(one), !FileManager.default.fileExists(atPath: file.path) else {
         continue
       }
-      // The mark first: from here on the app does not give the photo up when the hub says it is gone.
-      guard FileManager.default.createFile(
-        atPath: mark.path, contents: nil, attributes: [.protectionKey: FileProtectionType.completeUnlessOpen]) else { continue }
+      // The claim first: the app fetching it now, this one does not (and the app does not give the photo up).
+      guard claim(one) else { continue }
       defer { try? FileManager.default.removeItem(at: mark) }
       guard let data = try? client.fetchMedia(media: one) else { continue }
       // Still this account's (the app publishes its friends with its own id; signed out meanwhile, it does not, or
@@ -73,6 +72,27 @@ enum Prefetch {
   static func has(_ media: YoMedia) -> Bool {
     guard let file = file(media) else { return false }
     return FileManager.default.fileExists(atPath: file.path)
+  }
+
+  /// Claims this device's fetch of `media`, for the service or the app, atomically (a file only one can make): false
+  /// while the other has it. A claim older than `underWaySeconds` was left by a process that ended: taken over. No
+  /// App Group (Yo Dev): nothing to share it with, true.
+  static func claim(_ media: YoMedia) -> Bool {
+    guard let directory, let mark = mark(media) else { return true }
+    try? FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+    if FileManager.default.fileExists(atPath: mark.path) && !underWay(media) {
+      try? FileManager.default.removeItem(at: mark)
+    }
+    let fd = open(mark.path, O_CREAT | O_EXCL | O_WRONLY | O_CLOEXEC, 0o600)
+    guard fd >= 0 else { return false }
+    close(fd)
+    return true
+  }
+
+  /// The claim given back (fetched, or not).
+  static func unclaim(_ media: YoMedia) {
+    guard let mark = mark(media) else { return }
+    try? FileManager.default.removeItem(at: mark)
   }
 
   /// Whether the service is fetching it now: the app waits for its file rather than giving the photo up.
