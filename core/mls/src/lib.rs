@@ -948,15 +948,10 @@ impl Client {
             .build(profile::CIPHERSUITE, &self.provider, self.signer(), self.credential())
             .map_err(|_| Error::Internal("key package"))?;
         let hash_ref = bundle.key_package().hash_ref(self.provider.crypto()).map_err(mls)?;
-        let now = (self.clock)();
-        if last_resort {
-            for older in self.state.key_packages.iter_mut().filter(|k| k.last_resort && k.retired_at.is_none()) {
-                older.retired_at = Some(now);
-            }
-        }
+        // A new last resort retires the one before only once the hub has it (`refill`).
         self.state.key_packages.push(OwnKeyPackage {
             hash_ref: hash_ref.tls_serialize_detached().map_err(mls)?,
-            created_at: now,
+            created_at: (self.clock)(),
             last_resort,
             retired_at: None,
         });
@@ -2281,7 +2276,16 @@ impl Client {
         self.state.key_packages_left = left + fresh;
         self.key_packages_known_ms = self.last_request_ms;
         if last_resort_due {
-            self.state.last_resort_at = (self.clock)();
+            // The hub hands out the new one from now on: the ones before (also one made for an upload that failed)
+            // are retired now, not when they were replaced here, and kept while a Welcome made with them may wait.
+            let now = (self.clock)();
+            self.state.last_resort_at = now;
+            let newest = self.state.key_packages.iter().rposition(|k| k.last_resort);
+            for (i, older) in self.state.key_packages.iter_mut().enumerate() {
+                if older.last_resort && older.retired_at.is_none() && Some(i) != newest {
+                    older.retired_at = Some(now);
+                }
+            }
         }
         Ok(())
     }
