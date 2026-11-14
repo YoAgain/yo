@@ -256,12 +256,35 @@ impl Blobs {
     }
 }
 
-/// A blob's bytes as they are read, counting: when the last byte is handed on, the fetch counts (`done`). A fetch cut
-/// off before does not.
+/// A fetch taken (`Db::take_fetch`): `done(true)` once complete, `done(false)` when dropped before.
+pub struct Taken(Option<Box<dyn FnOnce(bool) + Send>>);
+
+impl Taken {
+    pub fn new(done: impl FnOnce(bool) + Send + 'static) -> Self {
+        Taken(Some(Box::new(done)))
+    }
+
+    fn complete(&mut self) {
+        if let Some(done) = self.0.take() {
+            done(true);
+        }
+    }
+}
+
+impl Drop for Taken {
+    fn drop(&mut self) {
+        if let Some(done) = self.0.take() {
+            done(false);
+        }
+    }
+}
+
+/// A blob's bytes as they are read, counting: when the last byte is handed on, the fetch counts. A fetch cut off
+/// before gives it back.
 pub struct Counted<S> {
     pub inner: S,
     pub left: u64,
-    pub done: Option<Box<dyn FnOnce() + Send>>,
+    pub taken: Taken,
 }
 
 impl<S: Stream<Item = io::Result<Bytes>> + Unpin> Stream for Counted<S> {
@@ -272,18 +295,16 @@ impl<S: Stream<Item = io::Result<Bytes>> + Unpin> Stream for Counted<S> {
         if let Poll::Ready(Some(Ok(chunk))) = &polled {
             self.left = self.left.saturating_sub(chunk.len() as u64);
             if self.left == 0 {
-                if let Some(done) = self.done.take() {
-                    done();
-                }
+                self.taken.complete();
             }
         }
         polled
     }
 }
 
-/// What a fetch that completed does: one fetch fewer, and the blob gone after the last.
-pub fn fetched(db: &Arc<Db>, blobs: &Arc<Blobs>, id: BlobId, created_at: u64) {
-    match db.blob_fetched(&id, created_at) {
+/// What a fetch taken does when it is over: counted if complete (the blob gone after the last), else given back.
+pub fn fetched(db: &Arc<Db>, blobs: &Arc<Blobs>, id: BlobId, created_at: u64, complete: bool) {
+    match db.blob_fetched(&id, created_at, complete) {
         Ok(true) => blobs.remove(&(id, created_at)),
         Ok(false) => {}
         Err(error) => eprintln!("yo-hub: database: {error}"),
@@ -305,31 +326,31 @@ pub fn refused(put: &BlobPut) -> Option<axum::http::StatusCode> {
 mod tests {
     use super::*;
     use futures_util::StreamExt;
-    use std::sync::atomic::AtomicBool;
 
+    /// A fetch of three chunks, which records how it ended.
     fn counted(
-        chunks: usize,
-        done: Arc<AtomicBool>,
+        ended: Arc<Mutex<Vec<bool>>>,
     ) -> Counted<futures_util::stream::Iter<std::vec::IntoIter<io::Result<Bytes>>>> {
-        let items: Vec<io::Result<Bytes>> = (0..chunks).map(|_| Ok(Bytes::from(vec![0u8; 1000]))).collect();
+        let items: Vec<io::Result<Bytes>> = (0..3).map(|_| Ok(Bytes::from(vec![0u8; 1000]))).collect();
         Counted {
             inner: futures_util::stream::iter(items),
-            left: (chunks * 1000) as u64,
-            done: Some(Box::new(move || done.store(true, Ordering::Relaxed))),
+            left: 3000,
+            taken: Taken::new(move |complete| ended.lock().unwrap().push(complete)),
         }
     }
 
     #[tokio::test]
     async fn a_fetch_counts_only_when_its_last_byte_is_handed_on() {
-        let done = Arc::new(AtomicBool::new(false));
-        let mut stream = counted(3, done.clone());
+        let ended = Arc::new(Mutex::new(Vec::new()));
+        let mut stream = counted(ended.clone());
         stream.next().await.unwrap().unwrap();
         stream.next().await.unwrap().unwrap();
         drop(stream); // cut off
-        assert!(!done.load(Ordering::Relaxed));
-        let mut stream = counted(3, done.clone());
+        assert_eq!(*ended.lock().unwrap(), [false], "given back");
+        let mut stream = counted(ended.clone());
         while stream.next().await.is_some() {}
-        assert!(done.load(Ordering::Relaxed));
+        drop(stream);
+        assert_eq!(*ended.lock().unwrap(), [false, true], "counted, once");
     }
 
     #[test]

@@ -9,6 +9,8 @@ use yo_wire::handle::{KIND_ACCOUNT_KEY, KIND_USER, KIND_USERNAME};
 use yo_wire::{DeviceId, GroupId, UserId, KEY_LEN};
 
 const DAY_MS: u64 = 24 * 3600 * 1000;
+/// A blob not ready this long after it was stored belongs to no upload under way: its file never came into place.
+const NOT_READY_KEPT_MS: u64 = 3600 * 1000;
 
 pub type Key = [u8; KEY_LEN];
 
@@ -277,12 +279,17 @@ CREATE TABLE IF NOT EXISTS storage (
 ) WITHOUT ROWID;
 -- Photos and videos (spec 6.8): the file is on disk, by its id; here what the hub needs to hand it out and delete it.
 -- `user_id` is the uploader (for its quota), never a recipient. Gone after the last fetch, or after its time.
+-- `fetching`: fetches under way, each taken from `fetches_left` as it starts and given back if it is cut off (all of
+-- them at a start: none completed). `ready`: 0 until the file is in place; such a blob is not handed out, and one left
+-- so (a crash in between) is removed at the next start, or within the hour.
 CREATE TABLE IF NOT EXISTS blobs (
     id BLOB PRIMARY KEY,
     user_id BLOB NOT NULL,
     size INTEGER NOT NULL,
     fetches_left INTEGER NOT NULL,
-    created_at INTEGER NOT NULL
+    created_at INTEGER NOT NULL,
+    fetching INTEGER NOT NULL DEFAULT 0,
+    ready INTEGER NOT NULL DEFAULT 1
 ) WITHOUT ROWID;
 CREATE INDEX IF NOT EXISTS blobs_by_user ON blobs(user_id);
 CREATE INDEX IF NOT EXISTS blobs_by_age ON blobs(created_at);
@@ -397,6 +404,8 @@ fn migrate(conn: &mut Connection) -> rusqlite::Result<()> {
         ("backups", "auth_passkey", "BLOB"),
         ("backups", "auth_code", "BLOB"),
         ("groups", "first_epoch", "INTEGER NOT NULL DEFAULT 1"),
+        ("blobs", "fetching", "INTEGER NOT NULL DEFAULT 0"),
+        ("blobs", "ready", "INTEGER NOT NULL DEFAULT 1"),
     ] {
         let has = tx.prepare("SELECT 1 FROM pragma_table_info(?1) WHERE name = ?2")?.exists([table, column])?;
         if !has {
@@ -881,7 +890,7 @@ impl Db {
     }
 
     /// Stores a blob's row for `fetches` fetches and counts it against its uploader's quota, if the id is free and
-    /// the quota has room. Its file is moved into place after: a row without a file is a blob not there yet.
+    /// the quota has room. Not ready: its file is moved into place after, then `blob_ready`.
     pub fn put_blob(
         &self,
         device: &DeviceId,
@@ -901,7 +910,7 @@ impl Db {
             return Ok(BlobPut::Quota);
         }
         tx.prepare_cached(
-            "INSERT INTO blobs (id, user_id, size, fetches_left, created_at) VALUES (?1, ?2, ?3, ?4, ?5)",
+            "INSERT INTO blobs (id, user_id, size, fetches_left, created_at, ready) VALUES (?1, ?2, ?3, ?4, ?5, 0)",
         )?
         .execute(params![id, user, size as i64, fetches, now])?;
         tx.prepare_cached(
@@ -913,12 +922,23 @@ impl Db {
         Ok(BlobPut::Stored)
     }
 
-    /// A blob's size and when it was stored (which upload under this id it is), if it is there, has fetches left
-    /// and is within its time.
-    pub fn blob(&self, id: &BlobId, now: u64, ttl_ms: u64) -> rusqlite::Result<Option<(u64, u64)>> {
+    /// A blob's file is in place: it is handed out from now on.
+    pub fn blob_ready(&self, id: &BlobId, created_at: u64) -> rusqlite::Result<()> {
+        self.conn()
+            .prepare_cached("UPDATE blobs SET ready = 1 WHERE id = ?1 AND created_at = ?2")?
+            .execute(params![id, created_at as i64])?;
+        Ok(())
+    }
+
+    /// Takes one of a blob's fetches as a fetch starts, if it is ready, has one left and is within its time: its size
+    /// and when it was stored (which upload under this id it is). In one statement, so fetches at once never pass
+    /// the blob's count; given back if the fetch is cut off (`blob_fetched`).
+    pub fn take_fetch(&self, id: &BlobId, now: u64, ttl_ms: u64) -> rusqlite::Result<Option<(u64, u64)>> {
         self.conn()
             .prepare_cached(
-                "SELECT size, created_at FROM blobs WHERE id = ?1 AND fetches_left > 0 AND created_at >= ?2",
+                "UPDATE blobs SET fetches_left = fetches_left - 1, fetching = fetching + 1
+                 WHERE id = ?1 AND ready = 1 AND fetches_left > 0 AND created_at >= ?2
+                 RETURNING size, created_at",
             )?
             .query_row(params![id, now.saturating_sub(ttl_ms) as i64], |row| {
                 Ok((row.get::<_, i64>(0)? as u64, row.get::<_, i64>(1)? as u64))
@@ -926,19 +946,20 @@ impl Db {
             .optional()
     }
 
-    /// Counts a complete fetch of the blob stored at `created_at`; true when it was the last and the row is gone (the
-    /// file must go too). A fetch of a blob gone meanwhile counts for none stored again under its id.
-    pub fn blob_fetched(&self, id: &BlobId, created_at: u64) -> rusqlite::Result<bool> {
+    /// A fetch taken of the blob stored at `created_at` is over: counted if `complete`, else given back. True when it
+    /// was the last and the row is gone (the file must go too). A fetch of a blob gone meanwhile counts for none
+    /// stored again under its id.
+    pub fn blob_fetched(&self, id: &BlobId, created_at: u64, complete: bool) -> rusqlite::Result<bool> {
         let mut conn = self.conn();
         let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
-        let left: Option<i64> = tx
+        let left: Option<(i64, i64)> = tx
             .prepare_cached(
-                "UPDATE blobs SET fetches_left = fetches_left - 1
-                 WHERE id = ?1 AND created_at = ?2 AND fetches_left > 0 RETURNING fetches_left",
+                "UPDATE blobs SET fetching = fetching - 1, fetches_left = fetches_left + ?3
+                 WHERE id = ?1 AND created_at = ?2 AND fetching > 0 RETURNING fetches_left, fetching",
             )?
-            .query_row(params![id, created_at as i64], |row| row.get(0))
+            .query_row(params![id, created_at as i64, !complete as i64], |row| Ok((row.get(0)?, row.get(1)?)))
             .optional()?;
-        let last = left == Some(0);
+        let last = left == Some((0, 0));
         if last {
             tx.execute("DELETE FROM blobs WHERE id = ?1", [id])?;
         }
@@ -951,16 +972,35 @@ impl Db {
         Ok(())
     }
 
-    /// Deletes the rows of blobs past their time and returns their ids (their files must go too); forgets quotas of
-    /// days before yesterday.
+    /// Deletes the rows of blobs past their time, and of those not ready for an hour, and returns their ids (their
+    /// files must go too); forgets quotas of days before yesterday.
     pub fn prune_blobs(&self, now: u64, ttl_ms: u64) -> rusqlite::Result<Vec<(BlobId, u64)>> {
         let mut conn = self.conn();
         let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
         let ids = tx
-            .prepare_cached("DELETE FROM blobs WHERE created_at < ?1 RETURNING id, created_at")?
-            .query_map([now.saturating_sub(ttl_ms) as i64], blob_row)?
+            .prepare_cached(
+                "DELETE FROM blobs WHERE created_at < ?1 OR (ready = 0 AND created_at < ?2) RETURNING id, created_at",
+            )?
+            .query_map(
+                params![now.saturating_sub(ttl_ms) as i64, now.saturating_sub(NOT_READY_KEPT_MS) as i64],
+                blob_row,
+            )?
             .collect::<Result<_, _>>()?;
         tx.execute("DELETE FROM blob_quota WHERE day < ?1", [(now / DAY_MS) as i64 - 1])?;
+        tx.commit()?;
+        Ok(ids)
+    }
+
+    /// At a start: the fetches under way before are given back (none completed), and blobs not ready (a crash while
+    /// the file was moved into place) are deleted; their ids, whose files must go too.
+    pub fn recover_blobs(&self) -> rusqlite::Result<Vec<(BlobId, u64)>> {
+        let mut conn = self.conn();
+        let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        tx.execute("UPDATE blobs SET fetches_left = fetches_left + fetching, fetching = 0 WHERE fetching > 0", [])?;
+        let ids = tx
+            .prepare_cached("DELETE FROM blobs WHERE ready = 0 RETURNING id, created_at")?
+            .query_map([], blob_row)?
+            .collect::<Result<_, _>>()?;
         tx.commit()?;
         Ok(ids)
     }
@@ -1556,6 +1596,36 @@ mod tests {
         for suffix in ["", "-wal", "-shm"] {
             let _ = std::fs::remove_file(format!("{path}{suffix}"));
         }
+    }
+
+    /// A blob's fetches are taken as they start: fetches at once never pass its count, one cut off gives its fetch
+    /// back, and so does a restart. A blob is handed out only once it is ready; one never ready goes at the next start.
+    #[test]
+    fn blob_fetches_are_taken_as_they_start_and_given_back_when_cut_off() {
+        let db = Db::open(":memory:").unwrap();
+        user(register(&db, b"LEO", 1, 1, 0));
+        let quota = BlobQuota { per_day: 10, bytes_per_day: 1 << 20, stored: 1 << 20 };
+        let (id, ttl) = ([9; 16], 30 * DAY);
+        assert_eq!(db.put_blob(&[1; 16], &id, 100, 2, 5, &quota).unwrap(), BlobPut::Stored);
+        assert_eq!(db.take_fetch(&id, 5, ttl).unwrap(), None, "not ready: its file is not in place");
+        db.blob_ready(&id, 5).unwrap();
+        assert_eq!(db.take_fetch(&id, 5, ttl).unwrap(), Some((100, 5)));
+        assert_eq!(db.take_fetch(&id, 5, ttl).unwrap(), Some((100, 5)));
+        assert_eq!(db.take_fetch(&id, 5, ttl).unwrap(), None, "two fetches under way, none left");
+        assert!(!db.blob_fetched(&id, 5, false).unwrap(), "one cut off");
+        assert!(!db.blob_fetched(&id, 5, true).unwrap(), "one complete, the other given back");
+        assert_eq!(db.take_fetch(&id, 5, ttl).unwrap(), Some((100, 5)));
+        assert!(db.recover_blobs().unwrap().is_empty(), "a restart: the fetch under way given back");
+        assert_eq!(db.take_fetch(&id, 5, ttl).unwrap(), Some((100, 5)));
+        assert!(db.blob_fetched(&id, 5, true).unwrap(), "the last: the blob goes");
+        assert!(!db.blob_exists(&id).unwrap());
+        // Stored, never ready (a crash before its file was in place): gone at the next start, its id free again.
+        assert_eq!(db.put_blob(&[1; 16], &id, 100, 1, 6, &quota).unwrap(), BlobPut::Stored);
+        assert_eq!(db.recover_blobs().unwrap(), [(id, 6)]);
+        assert_eq!(db.put_blob(&[1; 16], &id, 100, 1, 7, &quota).unwrap(), BlobPut::Stored);
+        // Or within the hour, without a restart.
+        assert!(db.prune_blobs(7 + NOT_READY_KEPT_MS - 1, ttl).unwrap().is_empty());
+        assert_eq!(db.prune_blobs(7 + NOT_READY_KEPT_MS + 1, ttl).unwrap(), [(id, 7)]);
     }
 
     #[test]
