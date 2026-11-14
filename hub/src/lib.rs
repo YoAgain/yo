@@ -216,6 +216,10 @@ impl Hub {
         eprintln!("yo-hub: reserved names: {} in the list, {added} new", config.reserved.len());
         let pusher = push::Pusher::new(push_transport, config.apns.as_ref(), config.fcm.as_ref())?;
         let blobs = blobs::Blobs::open(&config.blobs).map_err(|e| format!("{}: {e}", config.blobs.dir.display()))?;
+        // What a crash left under way: fetches (given back) and blobs whose file was being moved into place.
+        for blob in db.recover_blobs().map_err(|e| format!("database: {e}"))? {
+            blobs.remove(&blob);
+        }
         let (deliveries, queue) = std::sync::mpsc::channel();
         let writing = db.clone();
         let most = config.limits.max_pending_per_device;
@@ -1107,6 +1111,12 @@ async fn put_blob(
         let _ = hub.db.delete_blob(&id);
         return Err(failed(error));
     }
+    // Handed out from now on. Left not ready (a crash just before), it goes at the next start or within the hour.
+    if let Err(error) = hub.db.blob_ready(&id, stored_at) {
+        let _ = hub.db.delete_blob(&id);
+        hub.blobs.remove(&(id, stored_at));
+        return Err(error.into());
+    }
     Ok(StatusCode::CREATED)
 }
 
@@ -1122,14 +1132,13 @@ async fn get_blob(
     hub.limit_ip("blob:get", peer, &headers, hub.config.limits.blob_get_per_ip_minute, MINUTE)?;
     let id: BlobId = path_id(&id)?;
     let ttl = hub.config.limits.blob_ttl_days * DAY.as_millis() as u64;
-    let (size, created_at) = hub.db.blob(&id, now_ms(), ttl)?.ok_or_else(|| refuse(StatusCode::NOT_FOUND))?;
-    let file = hub.blobs.read(&(id, created_at), size).await.ok_or_else(|| refuse(StatusCode::NOT_FOUND))?;
+    // One of its fetches is taken now, and given back if this one is cut off before its last byte (`Taken`).
+    let (size, created_at) = hub.db.take_fetch(&id, now_ms(), ttl)?.ok_or_else(|| refuse(StatusCode::NOT_FOUND))?;
     let (db, store) = (hub.db.clone(), hub.blobs.clone());
-    let stream = blobs::Counted {
-        inner: tokio_util::io::ReaderStream::with_capacity(file, 64 * 1024),
-        left: size,
-        done: Some(Box::new(move || blobs::fetched(&db, &store, id, created_at))),
-    };
+    let taken = blobs::Taken::new(move |complete| blobs::fetched(&db, &store, id, created_at, complete));
+    let file = hub.blobs.read(&(id, created_at), size).await.ok_or_else(|| refuse(StatusCode::NOT_FOUND))?;
+    let stream =
+        blobs::Counted { inner: tokio_util::io::ReaderStream::with_capacity(file, 64 * 1024), left: size, taken };
     axum::response::Response::builder()
         .header(axum::http::header::CONTENT_TYPE, "application/octet-stream")
         .header(axum::http::header::CONTENT_LENGTH, size)
@@ -1150,6 +1159,41 @@ mod tests {
         drop(held);
         assert!(hub.fetching([1; 16]).is_some(), "places are given back");
         assert!(hub.fetching.lock().unwrap().is_empty(), "and forgotten");
+    }
+
+    /// A crash between a blob's row and its being ready (the upload's last steps, done here by hand): the next start
+    /// removes it, row and file, and the upload's retry stores it anew instead of finding its id taken.
+    #[test]
+    fn a_blob_left_not_ready_by_a_crash_is_gone_at_the_next_start() {
+        let dir = std::env::temp_dir().join(format!("yo-hub-crash-{}-{}", std::process::id(), now_ms()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let config = Config { db_path: dir.join("hub.sqlite").to_string_lossy().into(), ..Config::for_tests() };
+        let hub = Hub::new(config.clone(), Arc::new(push::Recorder::default())).unwrap();
+        let device = NewDevice {
+            device_id: [1; 16],
+            device_key: [1; 32],
+            auth_key: [1; 32],
+            push_platform: 0,
+            push_token: Vec::new(),
+            app: None,
+        };
+        let last_resort = StoredKeyPackage { hash: [1; 32], data: vec![1] };
+        hub.db.register(b"LEO", "LEO", &[1; 16], &[1; 32], &device, &[], &last_resort, 0).unwrap();
+        let (quota, blob) = (config.limits.blob_quota(), ([7; 16], 5));
+        assert_eq!(hub.db.put_blob(&[1; 16], &blob.0, 16, 1, blob.1, &quota).unwrap(), db::BlobPut::Stored);
+        let (file, incoming) = hub.blobs.incoming().unwrap();
+        drop(file);
+        std::fs::write(&incoming.path, [0; 16]).unwrap();
+        hub.blobs.keep(incoming, &blob).unwrap();
+        assert!(hub.db.take_fetch(&blob.0, 5, u64::MAX).unwrap().is_none(), "not handed out before it is ready");
+        drop(hub);
+        let hub = Hub::new(config.clone(), Arc::new(push::Recorder::default())).unwrap();
+        assert!(!hub.db.blob_exists(&blob.0).unwrap() && !hub.blobs.has(&blob));
+        assert_eq!(hub.audit().unwrap(), []);
+        assert_eq!(hub.db.put_blob(&[1; 16], &blob.0, 16, 1, 6, &quota).unwrap(), db::BlobPut::Stored);
+        drop(hub);
+        let _ = std::fs::remove_dir_all(&dir);
+        let _ = std::fs::remove_dir_all(&config.blobs.dir);
     }
 
     #[tokio::test]
