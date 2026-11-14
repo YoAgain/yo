@@ -15,7 +15,9 @@ final class Passkeys: NSObject {
     let prf: Data?
   }
 
-  private var pending: CheckedContinuation<ASAuthorization, Error>?
+  /// The request under way and who waits for it. A new one cancels it (its caller gets a cancellation), so an
+  /// answer never reaches the wrong caller and no caller waits forever.
+  private var pending: (controller: ASAuthorizationController, continuation: CheckedContinuation<ASAuthorization, Error>)?
 
   /// A new passkey for `name` (what the password manager shows) and `userID` (its user handle). Only asked whether it
   /// supports PRF: asking for an output here (`.inputValues`) makes 1Password fail to save the passkey at all. The
@@ -45,9 +47,14 @@ final class Passkeys: NSObject {
   }
 
   private func perform(_ request: ASAuthorizationRequest, quietly: Bool = false) async throws -> ASAuthorization {
-    try await withCheckedThrowingContinuation { continuation in
-      pending = continuation
+    if let old = pending {
+      pending = nil
+      old.controller.cancel()
+      old.continuation.resume(throwing: CancellationError())
+    }
+    return try await withCheckedThrowingContinuation { continuation in
       let controller = ASAuthorizationController(authorizationRequests: [request])
+      pending = (controller, continuation)
       controller.delegate = self
       controller.presentationContextProvider = self
       if quietly {
@@ -69,13 +76,18 @@ enum PasskeyError: Error {
 
 extension Passkeys: ASAuthorizationControllerDelegate, ASAuthorizationControllerPresentationContextProviding {
   func authorizationController(controller: ASAuthorizationController, didCompleteWithAuthorization authorization: ASAuthorization) {
-    pending?.resume(returning: authorization)
-    pending = nil
+    finish(controller) { $0.resume(returning: authorization) }
   }
 
   func authorizationController(controller: ASAuthorizationController, didCompleteWithError error: Error) {
-    pending?.resume(throwing: error)
+    finish(controller) { $0.resume(throwing: error) }
+  }
+
+  /// The answer to the request under way only (a cancelled one's comes late, to no one).
+  private func finish(_ controller: ASAuthorizationController, _ resume: (CheckedContinuation<ASAuthorization, Error>) -> Void) {
+    guard let current = pending, current.controller === controller else { return }
     pending = nil
+    resume(current.continuation)
   }
 
   func presentationAnchor(for controller: ASAuthorizationController) -> ASPresentationAnchor {

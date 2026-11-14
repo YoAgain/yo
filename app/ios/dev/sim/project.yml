@@ -1,0 +1,68 @@
+# The Simulator build of Yo Dev (dev/sim.sh, on a Mac): XcodeGen makes YoSim.xcodeproj (ignored) from this.
+# The app's own sources and resources, the core built for the Simulator (YO_CORE_TARGET=aarch64-apple-ios-sim
+# dev/core.sh), and YoDriver: a UI test that drives the app by commands from a folder (drive.py).
+name: YoSim
+options:
+  deploymentTarget: {iOS: "26.0"}
+settings:
+  base:
+    SWIFT_VERSION: "6.0"
+    CODE_SIGN_IDENTITY: "-"
+    CODE_SIGN_STYLE: Manual
+    DEVELOPMENT_TEAM: ""
+    TARGETED_DEVICE_FAMILY: "1"
+    SUPPORTED_PLATFORMS: iphonesimulator
+    ARCHS: arm64
+targets:
+  YoCore:
+    type: library.static
+    platform: iOS
+    sources: [../../YoApp/build/core/swift]
+    dependencies:
+      - {framework: ../../YoApp/build/core/yoFFI.xcframework, embed: false}
+  YoApp:
+    type: application
+    platform: iOS
+    sources:
+      - ../../YoApp/Sources/YoApp
+      - {path: ../../YoApp/Resources/Assets.xcassets, buildPhase: resources}
+      - {path: ../../YoApp/Resources/Montserrat-Bold.ttf, buildPhase: resources}
+      - {path: ../../YoApp/Resources/yo.caf, buildPhase: resources}
+      - {path: ../../YoApp/Resources/bip39-english.txt, buildPhase: resources}
+      - {path: ../../YoApp/Resources/IconNegative@2x.png, buildPhase: resources}
+      - {path: ../../YoApp/Resources/IconNegative@3x.png, buildPhase: resources}
+      - {path: ../../YoApp/Resources/IconOriginal@2x.png, buildPhase: resources}
+      - {path: ../../YoApp/Resources/IconOriginal@3x.png, buildPhase: resources}
+      - {path: ../../YoApp/Resources/IconStandard@3x.png, buildPhase: resources}
+      - {path: ../../YoApp/Resources/IntroTap@3x.png, buildPhase: resources}
+      - {path: ../../YoApp/Resources/IntroYoBack@3x.png, buildPhase: resources}
+      - {path: ../../YoApp/Resources/IntroAdd@3x.png, buildPhase: resources}
+    dependencies:
+      - target: YoCore
+      - {framework: ../../YoApp/build/core/yoFFI.xcframework, embed: false}
+    settings:
+      base:
+        # Yo Dev: the dev hub (Hub.isDevApp), no App Group (its state to itself).
+        PRODUCT_BUNDLE_IDENTIFIER: app.justyo.ios.dev
+        PRODUCT_NAME: YoApp
+        INFOPLIST_FILE: ../../YoApp/Info.plist
+        GENERATE_INFOPLIST_FILE: YES
+        INFOPLIST_KEY_UILaunchScreen_Generation: YES
+        ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
+        CODE_SIGN_ENTITLEMENTS: ../../YoApp/Entitlements.plist
+  YoDriver:
+    type: bundle.ui-testing
+    platform: iOS
+    sources: [YoDriver]
+    dependencies: [{target: YoApp}]
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: app.justyo.ios.driver
+        GENERATE_INFOPLIST_FILE: YES
+        TEST_TARGET_NAME: YoApp
+schemes:
+  YoSim:
+    build:
+      targets: {YoApp: all, YoDriver: [test]}
+    test:
+      targets: [YoDriver]

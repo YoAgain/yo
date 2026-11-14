@@ -1,5 +1,7 @@
 //! The harness: a hub in-process on a real socket, clients over real HTTP.
 
+pub mod backup;
+
 use std::sync::{Arc, Mutex, PoisonError, RwLock};
 use yo_core::{Client, Push, Response, Transport};
 use yo_hub::config::Config;

@@ -1,8 +1,7 @@
 // The list of friends, as in 2014: one coloured bar per friend from edge to edge, the name large in the middle; a tap
 // sends a Yo ("Sent Yo!" on the bar, then it goes on top). The order is the original's: whoever you last sent a Yo to
-// or got one from is on top; each friend keeps their colour as they move (the original's went with the place). In the
-// mockup a tap sends the Yo to yourself, as if that friend had sent it, when the bar goes on top (showSent). Hold a bar
-// to report, block or remove the friend; the last bar adds one.
+// or got one from is on top; each friend keeps their colour as they move (the original's went with the place). Hold a
+// bar to report, block or remove the friend, or swipe it left for Block and Remove; the last bar adds one.
 //
 // On top, the system's bar: profile (a sheet) on the left, the camera on the right, between them the title "Yo",
 // a heading that becomes a glass pill once rows scroll behind it.
@@ -51,22 +50,14 @@ struct FriendList: View {
   @State private var position = ScrollPosition(idType: String.self)
   /// Rows are behind the title: it wears its glass pill.
   @State private var scrolled = false
+  /// The bar swiped open (its Block and Remove showing), by `Friend.key`: one at a time.
+  @State private var swiped: UUID?
 
   // Sending
-  /// What each bar says for a moment after a send ("Sent Yo", "Not Sent", "Canceled").
-  @State private var sent: [Friend: String] = [:]
-  /// Sends whose 1.5 seconds are still running, by name; each tap starts them again (a bar under taps stays put).
-  @State private var sentRounds: [UUID: Int] = [:]
-  /// How many sends of the same kind in a row a bar counts ("Sent Yo!!" for three).
-  @State private var sentCounts: [UUID: (text: String, count: Int)] = [:]
-  /// The mockup's Yos back, by name: they come when the bar goes on top, so it comes in carrying them.
-  @State private var replies: [UUID: [(at: Date, send: @MainActor () async -> Void)]] = [:]
-  /// How often each friend went on top (by `Friend.key`): a new identity each time, so the bar leaves its place and
-  /// comes in on top. Only here: a new spelling or user id never changes a bar's identity.
-  @State private var lifts: [UUID: Int] = [:]
-  /// Senders waiting to go on top, oldest first: gathered for a moment and moved in one step, so many Yos at once do
-  /// not shuffle the list bar by bar.
-  @State private var rising: [String] = []
+  /// What the bars say while sending and what is on its way out: in an object of its own, read and written by the
+  /// tasks that run the 1.5 seconds. Kept in plain @State, those tasks read the values from before a tap once a
+  /// photo had been picked from the library, and a stack of photos never went (its undo ring stayed).
+  @State private var bars = Bars()
 
   // Blocking and reporting
   /// The friend the Block dialog asks about, and whether it follows a report.
@@ -77,13 +68,32 @@ struct FriendList: View {
   @State private var onScreen: Set<String> = []
   /// Counts sends, for the haptic.
   @State private var sends = 0
-  /// Photos and videos on their way out, per friend, each with when it started; any number at once (a tap on the bar
-  /// sends another, the ring at its left undoes them).
-  @State private var outgoing: [Friend: [Outgoing]] = [:]
-  /// Each photo or video of a stack being made ready (taken, or the video ended), by its id.
-  @State private var preparing: [UUID: Task<Prepared?, Never>] = [:]
-  /// A stack's 1.5 seconds, by name: each new photo starts them again; when they are over, the whole stack goes.
-  @State private var stackRounds: [UUID: Int] = [:]
+
+  /// The bars' sending: what each says after a send, and the photos and videos on their way out.
+  @MainActor @Observable final class Bars {
+    /// What each bar says for a moment after a send ("Sent Yo", "Not Sent", "Canceled").
+    var sent: [Friend: String] = [:]
+    /// Sends whose 1.5 seconds are still running; each tap starts them again (a bar under taps stays put).
+    @ObservationIgnored var sentRounds: [UUID: Int] = [:]
+    /// How many sends of the same kind in a row a bar counts ("Sent Yo!!" for three).
+    var sentCounts: [UUID: (text: String, count: Int)] = [:]
+    /// Photos and videos whose time is over, by friend: they go when the bar's words are over, in the rhythm they
+    /// were taken.
+    @ObservationIgnored var queued: [UUID: [(at: Date, send: @MainActor () async -> Void)]] = [:]
+    /// Photos and videos on their way out, per friend, each with when it started; any number at once (a tap on the
+    /// bar sends another, the ring at its left undoes them).
+    var outgoing: [Friend: [Outgoing]] = [:]
+    /// Each photo or video of a stack being made ready (taken, or the video ended), by its id.
+    @ObservationIgnored var preparing: [UUID: Task<Prepared?, Never>] = [:]
+    /// A stack's 1.5 seconds: each new photo starts them again; when they are over, the whole stack goes.
+    @ObservationIgnored var stackRounds: [UUID: Int] = [:]
+    /// How often each friend went on top (by `Friend.key`): a new identity each time, so the bar leaves its place and
+    /// comes in on top. Only here: a new spelling or user id never changes a bar's identity.
+    var lifts: [UUID: Int] = [:]
+    /// Senders waiting to go on top, oldest first: gathered for a moment and moved in one step, so many Yos at once
+    /// do not shuffle the list bar by bar.
+    @ObservationIgnored var rising: [String] = []
+  }
 
   struct Outgoing: Equatable {
     let id = UUID()
@@ -98,7 +108,26 @@ struct FriendList: View {
   @State private var recordingFor: Friend?
   @State private var libraryItem: PhotosPickerItem?
   /// A photo from the library, waiting to be sent: it stands in for the live picture.
-  @State private var picked: Data?
+  @State private var picked: Picked?
+
+  /// A photo from the library: what is sent, and its pictures for the screen, made once (a 48-megapixel photo decoded
+  /// at each redraw kept the list from answering).
+  struct Picked: Equatable {
+    let data: Data
+    let image: UIImage
+    let thumbnail: UIImage?
+
+    /// Off the main actor: decoded and scaled down for the screen and the library button.
+    static func make(_ data: Data) async -> Picked? {
+      await Task.detached(priority: .userInitiated) {
+        guard let full = UIImage(data: data) else { return nil }
+        let screen = CGSize(width: 1320, height: 2868)  // the largest iPhone's screen in pixels
+        let image = full.size.width * full.size.height > screen.width * screen.height
+          ? full.preparingThumbnail(of: screen) ?? full : full
+        return Picked(data: data, image: image, thumbnail: full.preparingThumbnail(of: CGSize(width: 120, height: 120)))
+      }.value
+    }
+  }
 
   // Arriving
   /// Counts Yos arriving, for the haptic.
@@ -187,7 +216,7 @@ struct FriendList: View {
         LazyVStack(spacing: 0) {
           // Going on top is a delete and an insert (as Signal's chat list does): the gap closes below, the bar comes in
           // from the top; it does not fly across the list.
-          ForEach(friends.shown.map { Lifted(friend: $0, lifts: lifts[$0.key] ?? 0) }) { lifted in
+          ForEach(friends.shown.map { Lifted(friend: $0, lifts: bars.lifts[$0.key] ?? 0) }) { lifted in
             row(lifted.friend)
               .transition(.asymmetric(insertion: .move(edge: .top).combined(with: .opacity), removal: .opacity))
           }
@@ -207,6 +236,9 @@ struct FriendList: View {
       .scrollEdgeEffectStyle(.soft, for: .top)
       .onScrollGeometryChange(for: Bool.self) { $0.contentOffset.y + $0.contentInsets.top > 4 } action: { _, now in
         withAnimation(.smooth(duration: 0.3)) { scrolled = now }
+      }
+      .onScrollPhaseChange { _, phase in
+        if phase != .idle && swiped != nil { withAnimation(.snappy) { swiped = nil } }  // scrolling closes it
       }
       // Amethyst behind everything; in camera mode the live picture or the picked photo.
       .background { backdrop.ignoresSafeArea() }
@@ -270,7 +302,7 @@ struct FriendList: View {
       count: rowCount(friend),
       color: .row(friend.color).opacity(cameraOn ? 0.45 : 1),  // see-through over the camera
       recording: recordingFor == friend,
-      outgoing: outgoing[friend]?.last?.started,
+      outgoing: bars.outgoing[friend]?.last?.started,
       stop: { cancelSending(friend) },
       media: waiting,
       yo: landed[friend.name],
@@ -280,21 +312,37 @@ struct FriendList: View {
     ) {
       send(to: friend)
     }
-    if cameraOn || !waiting.isEmpty {
-      bar  // holding records a video, or shows the photos: no menu then
-    } else {
-      bar
-        .contextMenu {
-          Menu("Report \(friend.name)", systemImage: "exclamationmark.bubble") {
-            Button("Spam") { report(friend, .spam) }
-            Button("Abuse") { report(friend, .abuse) }
-            Button("Something Else") { report(friend, .other) }
+    // Swiped left (not in camera mode, where the bars take photos): Block and Remove underneath, as in Mail.
+    SwipeActions(
+      open: Binding(
+        get: { swiped == friend.key },
+        set: { open in swiped = open ? friend.key : swiped == friend.key ? nil : swiped }),
+      enabled: !cameraOn,
+      began: { if swiped != friend.key { withAnimation(.snappy) { swiped = nil } } },  // another one closes
+      block: { blocking = (friend, false) },
+      remove: { remove(friend) }
+    ) {
+      if cameraOn || !waiting.isEmpty {
+        bar  // holding records a video, or shows the photos: no menu then
+      } else {
+        bar
+          .contextMenu {
+            Menu("Report \(friend.name)", systemImage: "exclamationmark.bubble") {
+              Button("Spam") { report(friend, .spam) }
+              Button("Abuse") { report(friend, .abuse) }
+              Button("Something Else") { report(friend, .other) }
+            }
+            Button("Block \(friend.name)", systemImage: "hand.raised") { blocking = (friend, false) }
+            Button("Remove \(friend.name)", systemImage: "trash", role: .destructive) { remove(friend) }
           }
-          Button("Block \(friend.name)", systemImage: "hand.raised") { blocking = (friend, false) }
-          Button("Remove \(friend.name)", systemImage: "trash", role: .destructive) {
-            withAnimation(.snappy) { friends.remove(friend) }
-          }
-        }
+      }
+    }
+  }
+
+  private func remove(_ friend: Friend) {
+    withAnimation(.snappy) {
+      swiped = nil
+      friends.remove(friend)
     }
   }
 
@@ -325,16 +373,16 @@ struct FriendList: View {
   /// The bar's words: what is happening, else the name.
   private func rowTitle(_ friend: Friend) -> String {
     if recordingFor == friend { return "● Recording" }
-    if let last = outgoing[friend]?.last { return last.text }
-    if let text = sent[friend] { return text }
-    return friend.name
+    if let last = bars.outgoing[friend]?.last { return last.text }
+    if let text = bars.sent[friend] { return text }
+    return friend.gone ? "Not on Yo" : friend.name
   }
 
   /// How many the bar's words count ("Sent Yo!!" for three): photos on their way, or sends in a row.
   private func rowCount(_ friend: Friend) -> Int {
     if recordingFor == friend { return 1 }
-    if let going = outgoing[friend], !going.isEmpty { return going.count }
-    if sent[friend] != nil { return sentCounts[friend.key]?.count ?? 1 }
+    if let going = bars.outgoing[friend], !going.isEmpty { return going.count }
+    if bars.sent[friend] != nil { return bars.sentCounts[friend.key]?.count ?? 1 }
     return 1
   }
 
@@ -360,8 +408,11 @@ struct FriendList: View {
         }
         .onAppear { typing = true }
     } else {
-      RowButton("+", color: color) { adding = true }
-        .accessibilityLabel("Add Friend")
+      RowButton("+", color: color) {
+        withAnimation(.snappy) { swiped = nil }
+        adding = true
+      }
+      .accessibilityLabel("Add Friend")
     }
   }
 
@@ -381,8 +432,11 @@ struct FriendList: View {
     submitted += 1
     let this = submitted
     hint = "\(name)…"
+    let client = accounts.client
     Task {
-      switch await inbox.lookUp(name, accounts: accounts) {
+      let answer = await inbox.lookUp(name, accounts: accounts)
+      guard client === accounts.client else { return }  // signed out meanwhile: not this account's friend
+      switch answer {
       case .noSuchUser:
         if submitted == this { say("No Such User") }
         return
@@ -402,6 +456,7 @@ struct FriendList: View {
     submitted += 1
     let this = submitted
     hint = text
+    typing = true  // the keyboard stays, to type the name again
     Task {
       try? await Task.sleep(for: .seconds(1.5))
       guard submitted == this else { return }
@@ -413,8 +468,8 @@ struct FriendList: View {
   // MARK: Camera mode
 
   @ViewBuilder private var backdrop: some View {
-    if cameraOn, let picked, let image = UIImage(data: picked) {
-      Image(uiImage: image).resizable().scaledToFill()
+    if cameraOn, let picked {
+      Image(uiImage: picked.image).resizable().scaledToFill()
     } else if cameraOn {
       CameraPreview(session: camera.session)
     } else {
@@ -425,7 +480,7 @@ struct FriendList: View {
   /// The photo library at the bottom left, front/back at the bottom right, as in the Camera app.
   private var cameraControls: some View {
     ZStack {
-      let thumbnail = pickedThumbnail  // the picker's label closure is Sendable: take the value here
+      let thumbnail = picked?.thumbnail  // the picker's label closure is Sendable: take the value here
       PhotosPicker(selection: $libraryItem, matching: .images) {
         LibraryLabel(thumbnail: thumbnail)
       }
@@ -449,20 +504,19 @@ struct FriendList: View {
     .transition(.move(edge: .bottom).combined(with: .opacity))
   }
 
-  private var pickedThumbnail: UIImage? {
-    picked.flatMap(UIImage.init(data:))?.preparingThumbnail(of: CGSize(width: 120, height: 120))
-  }
-
   private func switchCamera(_ on: Bool) async {
     guard on else { return camera.stop() }
-    if await Camera.allowed() { camera.start() } else { cameraOn = false }
+    // Asked first: closed meanwhile, it stays closed.
+    if await Camera.allowed() { if cameraOn { camera.start() } } else { cameraOn = false }
   }
 
   // MARK: Sending
 
   private func send(to friend: Friend) {
+    // A tap while a bar is swiped open closes it, as in Mail; it sends nothing.
+    guard swiped == nil else { return withAnimation(.snappy) { swiped = nil } }
     sends += 1
-    let library = picked
+    let library = picked?.data
     picked = nil
     libraryItem = nil
     guard cameraOn || library != nil else {
@@ -512,20 +566,21 @@ struct FriendList: View {
   /// since the newest (each new one starts the time again, the ring after the words showing it); then the stack goes,
   /// in order. Meanwhile `prepare` takes the photo or ends the video. A tap on the ring keeps the whole stack here.
   private func run(_ friend: Friend, _ text: String, prepare: @escaping @MainActor () async -> Prepared?) {
+    let bars = bars  // the object itself into the task, not this view's copy of the state
     let one = Outgoing(text: text)
-    outgoing[friend, default: []].append(one)
-    preparing[one.id] = Task { await prepare() }
+    bars.outgoing[friend, default: []].append(one)
+    bars.preparing[one.id] = Task { await prepare() }
     let key = friend.key
-    let round = (stackRounds[key] ?? 0) + 1
-    stackRounds[key] = round
+    let round = (bars.stackRounds[key] ?? 0) + 1
+    bars.stackRounds[key] = round
     Task {
       try? await Task.sleep(for: .seconds(Self.sendDelay))
-      guard stackRounds[key] == round, let stack = outgoing[friend] else { return }  // another came, or undone
-      stackRounds[key] = nil
-      outgoing[friend] = nil
+      guard bars.stackRounds[key] == round, let stack = bars.outgoing[friend] else { return }  // another came, or undone
+      bars.stackRounds[key] = nil
+      bars.outgoing[friend] = nil
       var went = 0
       for one in stack {
-        guard let prepared = await preparing.removeValue(forKey: one.id)?.value else { continue }
+        guard let prepared = await bars.preparing.removeValue(forKey: one.id)?.value else { continue }
         went += 1
         showSent(to: friend, one.text, thenOnTop: true) { await prepared.send() }
       }
@@ -533,56 +588,52 @@ struct FriendList: View {
     }
   }
 
-  /// A photo or video ready to go: what sends it, and what throws it away when the send is undone.
+  /// A photo or video ready to go: what sends it (made in memory: an undone one leaves no file behind).
   struct Prepared {
     let send: @MainActor () async -> Void
-    var discard: @MainActor () -> Void = {}
   }
 
-  /// The ring tapped: the whole stack stays here, and nothing of it stays behind (a video's file is deleted).
+  /// The ring tapped: the whole stack stays here.
   private func cancelSending(_ friend: Friend) {
-    for one in outgoing[friend] ?? [] {
-      if let task = preparing.removeValue(forKey: one.id) {
-        Task { await task.value?.discard() }
-      }
-    }
-    stackRounds[friend.key] = nil
-    outgoing[friend] = nil
+    for one in bars.outgoing[friend] ?? [] { bars.preparing[one.id] = nil }
+    bars.stackRounds[friend.key] = nil
+    bars.outgoing[friend] = nil
     showSent(to: friend, "Canceled")
   }
 
   /// What the bar says after a send, for 1.5 seconds as in the original; then a bar that sent goes on top. Another tap
   /// within them starts them again, so the bar never slides away under a finger tapping it again and again. Sends of
-  /// the same kind in a row are counted, one "!" for each after the first ("Sent Yo", "Sent Yo!", …). `reply` is the
-  /// mockup's Yo back, held until then.
+  /// the same kind in a row are counted, one "!" for each after the first ("Sent Yo", "Sent Yo!", …). `then` is what
+  /// goes once they are over (a photo or video).
   private func showSent(
-    to friend: Friend, _ text: String, thenOnTop: Bool = false, reply: (@MainActor () async -> Void)? = nil
+    to friend: Friend, _ text: String, thenOnTop: Bool = false, then: (@MainActor () async -> Void)? = nil
   ) {
+    let bars = bars  // the object itself into the task, not this view's copy of the state
     let key = friend.key  // the friend's, also if their spelling changes meanwhile
-    let count = sentCounts[key].map { $0.text == text ? $0.count + 1 : 1 } ?? 1
+    let count = bars.sentCounts[key].map { $0.text == text ? $0.count + 1 : 1 } ?? 1
     withAnimation(.snappy(duration: 0.2)) {  // a "!" comes in, or the number turns
-      sentCounts[key] = (text, count)
-      sent[friend] = text
+      bars.sentCounts[key] = (text, count)
+      bars.sent[friend] = text
     }
-    if let reply { replies[key, default: []].append((.now, reply)) }
-    let round = (sentRounds[key] ?? 0) + 1
-    sentRounds[key] = round
+    if let then { bars.queued[key, default: []].append((.now, then)) }
+    let round = (bars.sentRounds[key] ?? 0) + 1
+    bars.sentRounds[key] = round
     Task {
       try? await Task.sleep(for: .seconds(1.5))
-      guard sentRounds[key] == round else { return }  // tapped again meanwhile
-      sentRounds[key] = nil
-      let pending = replies.removeValue(forKey: key) ?? []
+      guard bars.sentRounds[key] == round else { return }  // tapped again meanwhile
+      bars.sentRounds[key] = nil
+      let pending = bars.queued.removeValue(forKey: key) ?? []
       withAnimation(.snappy) {
-        sent[friend] = nil
-        sentCounts[key] = nil
+        bars.sent[friend] = nil
+        bars.sentCounts[key] = nil
       }
       if thenOnTop, let now = friends.all.first(where: { $0.key == key }) { rise(now.name) }
       // In the rhythm they were tapped: tapped fast, they come fast and their sounds cut each other off.
       let start = Date.now
-      for reply in pending {
-        let wait = reply.at.timeIntervalSince(pending[0].at) - Date.now.timeIntervalSince(start)
+      for one in pending {
+        let wait = one.at.timeIntervalSince(pending[0].at) - Date.now.timeIntervalSince(start)
         if wait > 0 { try? await Task.sleep(for: .seconds(wait)) }
-        await reply.send()
+        await one.send()
       }
     }
   }
@@ -727,28 +778,27 @@ extension FriendList {
   /// are sending (taps or a stack of photos still in their time) the list does not move at all, so no bar slides away
   /// under your finger; it moves once you are done.
   private func rise(_ name: String) {
-    rising.removeAll { $0 == name }
-    rising.append(name)
-    guard rising.count == 1 else { return }  // a step is already on its way
+    let bars = bars  // the object itself into the task, not this view's copy of the state
+    bars.rising.removeAll { $0 == name }
+    bars.rising.append(name)
+    guard bars.rising.count == 1 else { return }  // a step is already on its way
     Task {
       try? await Task.sleep(for: .seconds(0.3))
       while sending { try? await Task.sleep(for: .milliseconds(200)) }
-      let names = rising
-      rising = []
+      let names = bars.rising
+      bars.rising = []
       toTop(names)
     }
   }
 
   /// A send still in its time: taps on a bar, or photos and videos on their way.
   private var sending: Bool {
-    !sentRounds.isEmpty || !stackRounds.isEmpty || !outgoing.isEmpty
+    !bars.sentRounds.isEmpty || !bars.stackRounds.isEmpty || !bars.outgoing.isEmpty
   }
 
-  private func toTop(_ name: String) { toTop([name]) }
-
   /// Friends go on top, the last of `names` uppermost. At the top of the list the list stays at its very start, so the
-  /// bar is in sight below the title; scrolled down, the view stays where it is (the title's "!" tells, and the Yo
-  /// waits until it is seen).
+  /// bar is in sight below the title; scrolled down, the view stays where it is (the Yo waits on its bar until it is
+  /// seen).
   private func toTop(_ names: [String]) {
     // By the friend, not the name: a name can change its spelling between a Yo landing and this step, and a name
     // not found would count as "moving" and lift a bar that is already on top.
@@ -767,7 +817,7 @@ extension FriendList {
     guard !moving.isEmpty else { return }
     withAnimation(.snappy(duration: 0.35)) {
       for key in keys {
-        if moving.contains(key) { lifts[key, default: 0] += 1 }
+        if moving.contains(key) { bars.lifts[key, default: 0] += 1 }
         if let name = friends.all.first(where: { $0.key == key })?.name { friends.promote(name) }
       }
       if !scrolled { position.scrollTo(edge: .top) }
@@ -780,7 +830,9 @@ extension FriendList {
     guard let item else { return picked = nil }
     Task {
       let data = try? await item.loadTransferable(type: Data.self)
-      if libraryItem == item { picked = data }
+      var made: Picked?
+      if let data { made = await Picked.make(data) }
+      if libraryItem == item { picked = made }
     }
   }
 
@@ -927,10 +979,12 @@ struct RowButton: View {
         .contentTransition(.identity)  // other words come at once, never two drawn over each other
         .modifier(Knock(trigger: yo?.first))
         .opacity(touchable ? 0 : 1)
-      Bangs(count: count).opacity(touchable ? 0 : 1)
+        .accessibilityHidden(touchable)
+      Bangs(count: count).opacity(touchable ? 0 : 1).accessibilityHidden(touchable)
       ZStack { mark(touchable: touchable) }  // always a part, so a missing "!" never takes its place
         .modifier(Knock(trigger: yo?.first))
         .opacity(touchable ? 1 : 0)
+        .accessibilityHidden(!touchable)
     }
     .font(.yo(Metrics.rowFont))
     .foregroundStyle(.white)
@@ -1100,6 +1154,116 @@ struct Knock: ViewModifier {
   }
 }
 
+/// A bar that slides left under a horizontal swipe and shows Block and Remove underneath (as Mail's and Signal's
+/// lists do); it snaps open or closed when let go. A vertical move is the list's scroll, a tap or a hold the bar's.
+struct SwipeActions<Content: View>: View {
+  @Binding var open: Bool
+  let enabled: Bool
+  /// A swipe on it began.
+  let began: () -> Void
+  let block: () -> Void
+  let remove: () -> Void
+  @ViewBuilder let content: Content
+  /// How far the finger moved the bar, while it does.
+  @State private var dragged: CGFloat?
+
+  private static var button: CGFloat { 88 }
+  private static var width: CGFloat { 2 * button }
+
+  var body: some View {
+    let resting = open ? -Self.width : 0
+    let moved = resting + (dragged ?? 0)
+    // Past the buttons it follows with resistance; never to the right.
+    let offset = moved < -Self.width ? -Self.width + (moved + Self.width) / 3 : min(0, moved)
+    content
+      .overlay {
+        // Open: a tap on the bar closes it (the bar does nothing else then).
+        if open { Color.clear.contentShape(.rect).onTapGesture { close() } }
+      }
+      .offset(x: offset)
+      .background(alignment: .trailing) {
+        if offset < 0 {
+          HStack(spacing: 0) {
+            action("Block", "hand.raised.fill", Color.row(3)) { close(); block() }
+            action("Remove", "trash.fill", .alizarin) { remove() }
+          }
+          .frame(width: max(Self.width, -offset))
+          .transition(.identity)
+        }
+      }
+      .gesture(
+        HorizontalPan(enabled: enabled) { x in
+          if dragged == nil { began() }
+          dragged = x
+        } ended: { x, velocity in
+          let end = resting + x
+          withAnimation(.snappy(duration: 0.3)) {
+            open = velocity < -400 || (velocity < 400 && end < -Self.width / 2)
+            dragged = nil
+          }
+        }
+      )
+      .onChange(of: enabled) { _, on in
+        if !on { close() }
+      }
+      .accessibilityAction(named: "Block") { block() }
+      .accessibilityAction(named: "Remove") { remove() }
+  }
+
+  private func close() {
+    withAnimation(.snappy(duration: 0.3)) { open = false }
+  }
+
+  private func action(_ title: String, _ icon: String, _ color: Color, _ run: @escaping () -> Void) -> some View {
+    Button(action: run) {
+      VStack(spacing: 4) {
+        Image(systemName: icon).font(.system(size: 20, weight: .semibold))
+        Text(title).font(.system(size: 13, weight: .semibold))
+      }
+      .foregroundStyle(.white)
+      .frame(maxWidth: .infinity, maxHeight: .infinity)
+      .background(color)
+    }
+    .buttonStyle(.plain)
+  }
+}
+
+/// A pan that begins only when it starts sideways: the scroll view keeps vertical moves, and a tap stays a tap.
+struct HorizontalPan: UIGestureRecognizerRepresentable {
+  var enabled = true
+  let changed: (CGFloat) -> Void
+  let ended: (_ translation: CGFloat, _ velocity: CGFloat) -> Void
+
+  func makeUIGestureRecognizer(context: Context) -> UIPanGestureRecognizer {
+    let pan = UIPanGestureRecognizer()
+    pan.delegate = context.coordinator
+    return pan
+  }
+
+  func updateUIGestureRecognizer(_ pan: UIPanGestureRecognizer, context: Context) {
+    pan.isEnabled = enabled
+  }
+
+  func handleUIGestureRecognizerAction(_ pan: UIPanGestureRecognizer, context: Context) {
+    let x = pan.translation(in: pan.view).x
+    switch pan.state {
+    case .began, .changed: changed(x)
+    case .ended, .cancelled, .failed: ended(x, pan.velocity(in: pan.view).x)
+    default: break
+    }
+  }
+
+  func makeCoordinator(converter: CoordinateSpaceConverter) -> Coordinator { Coordinator() }
+
+  final class Coordinator: NSObject, UIGestureRecognizerDelegate {
+    func gestureRecognizerShouldBegin(_ gesture: UIGestureRecognizer) -> Bool {
+      guard let pan = gesture as? UIPanGestureRecognizer else { return false }
+      let velocity = pan.velocity(in: pan.view)
+      return abs(velocity.x) > abs(velocity.y) * 1.5
+    }
+  }
+}
+
 /// The bar under the finger: a quick light-up.
 struct RowPress: ButtonStyle {
   func makeBody(configuration: Configuration) -> some View {
@@ -1170,7 +1334,24 @@ struct HeldMedia: View {
           }
         }
         .ignoresSafeArea()
-        VStack(spacing: 10) {
+        // Who it is from at the top left, how long ago beside it, the lines under them (as stories show it).
+        VStack(alignment: .leading, spacing: 8) {
+          HStack(alignment: .firstTextBaseline, spacing: 8) {
+            Text(current.from)
+              .font(.yo(17, relativeTo: .headline))
+              .lineLimit(1)
+            if let at = current.sentAt {
+              Text(Arrival.age(at))
+                .font(.subheadline.weight(.semibold))
+                .opacity(0.7)
+                .fixedSize()
+            }
+          }
+          .foregroundStyle(.white)
+          .shadow(color: .black.opacity(0.35), radius: 3)
+          .padding(.horizontal, 8)
+          .accessibilityElement(children: .combine)
+          .accessibilityLabel("Yo from \(current.from)")
           TimelineView(.animation(paused: since == nil)) { timeline in
             let running = progress(at: timeline.date)
             HStack(spacing: 3) {
@@ -1186,12 +1367,6 @@ struct HeldMedia: View {
               }
             }
           }
-          Text("Yo from \(current.from)")
-            .font(.yo(17, relativeTo: .headline))
-            .foregroundStyle(.white)
-            .padding(.horizontal, 16)
-            .padding(.vertical, 8)
-            .glassEffect(.regular, in: .capsule)
         }
         .padding(.horizontal, 4)
         .padding(.top, 4)

@@ -24,6 +24,12 @@ pub struct Limits {
     pub max_pending_per_device: u32,
     pub groups_per_ip_hour: u32,
     pub commit_per_ip_minute: u32,
+    /// Bytes stored without identity, by address: delivered envelopes and commits. They stay up to
+    /// `envelope_ttl_days`, so without it one address could fill the disk with commits to a group of its own.
+    pub anonymous_bytes_per_ip_hour: u64,
+    /// Deliveries, commits and new groups are refused (`507`) while the database's disk has less than this free:
+    /// better a refusal than a full disk.
+    pub db_min_free_bytes: u64,
     /// Registrations by username: first come, first served, this many per address (spec 6.4).
     pub register_per_ip_hour: u32,
     /// Whether a username is free, asked while it is typed (spec 6.3).
@@ -34,6 +40,7 @@ pub struct Limits {
     pub report_per_user_day: u32,
     /// Feedback on the app, by one user (spec 6.3).
     pub feedback_per_user_day: u32,
+    pub storage_per_user_hour: u32,
     pub envelope_ttl_days: u64,
     /// A user without a backup record whose devices made no request for this long is removed with its name
     /// (spec 6.4).
@@ -76,11 +83,14 @@ impl Default for Limits {
             max_pending_per_device: 5000,
             groups_per_ip_hour: 60,
             commit_per_ip_minute: 600,
+            anonymous_bytes_per_ip_hour: 64 * MIB,
+            db_min_free_bytes: GIB,
             register_per_ip_hour: 10,
             name_check_per_ip_minute: 60,
             backup_per_ip_hour: 10,
             report_per_user_day: 20,
             feedback_per_user_day: 10,
+            storage_per_user_hour: 120,
             envelope_ttl_days: 30,
             unsecured_idle_days: 365,
             blob_ttl_days: 30,
@@ -107,11 +117,14 @@ impl Limits {
             max_pending_per_device: 5000,
             groups_per_ip_hour: u32::MAX,
             commit_per_ip_minute: u32::MAX,
+            anonymous_bytes_per_ip_hour: u64::MAX,
+            db_min_free_bytes: 0,
             register_per_ip_hour: u32::MAX,
             name_check_per_ip_minute: u32::MAX,
             backup_per_ip_hour: u32::MAX,
             report_per_user_day: u32::MAX,
             feedback_per_user_day: u32::MAX,
+            storage_per_user_hour: u32::MAX,
             envelope_ttl_days: 30,
             unsecured_idle_days: 365,
             blob_put_per_ip_minute: u32::MAX,
@@ -151,6 +164,8 @@ impl BlobConfig {
 
 #[derive(Debug, Clone)]
 pub enum SmsConfig {
+    /// No phone numbers: the `verify` routes are not served (the v1 apps do not use them, spec 6.3).
+    Off,
     /// Accepts one fixed code and sends nothing: development and tests.
     Dev { code: String },
     /// Twilio Verify.

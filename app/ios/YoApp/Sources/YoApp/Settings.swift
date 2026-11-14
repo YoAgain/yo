@@ -93,25 +93,28 @@ struct SettingsView: View {
             NavigationLink {
               accountPage(account)
             } label: {
-              HStack {
+              // LabeledContent, as Settings' rows: the value goes under the name when the text is very large.
+              LabeledContent {
+                if accounts.toDo > 0 {
+                  Text("Not Secured")
+                } else {
+                  HStack(spacing: 6) {
+                    Text("Secured")
+                    Image(systemName: "checkmark.circle.fill").foregroundStyle(.green).accessibilityHidden(true)
+                  }
+                }
+              } label: {
                 Label("Account", systemImage: "person.fill")
                   .labelStyle(Tile(accounts.toDo > 0 ? .orange : .green))
-                Spacer()
-                if accounts.toDo > 0 {
-                  Text("Not Secured").foregroundStyle(Color(.secondaryLabel))
-                } else {
-                  Text("Secured").foregroundStyle(Color(.secondaryLabel))
-                  Image(systemName: "checkmark.circle.fill").foregroundStyle(.green).accessibilityHidden(true)
-                }
               }
             }
             NavigationLink {
               BlockedList()
             } label: {
-              HStack {
+              LabeledContent {
+                Text("\(friends.blocked.count)")
+              } label: {
                 Label("Blocked", systemImage: "hand.raised.fill").labelStyle(Tile(.red))
-                Spacer()
-                Text("\(friends.blocked.count)").foregroundStyle(Color(.secondaryLabel))
               }
             }
           }
@@ -129,10 +132,10 @@ struct SettingsView: View {
             NavigationLink {
               StatsPage()
             } label: {
-              HStack {
+              LabeledContent {
+                Text("\(Stats.sent + Stats.received)")
+              } label: {
                 Label("Statistics", systemImage: "chart.bar.fill").labelStyle(Tile(.amethyst))
-                Spacer()
-                Text("\(Stats.sent + Stats.received)").foregroundStyle(Color(.secondaryLabel))
               }
             }
           }
@@ -164,26 +167,6 @@ struct SettingsView: View {
       }
       .interactiveDismissDisabled(addingPasskey)
       .sheet(isPresented: $securing) { SecureNameSheet(start: securingStart) }
-      .alert("Allow Access to Photos", isPresented: $photosDenied) {
-        Button("Open Settings") { openSystemSettings() }
-        Button("Cancel", role: .cancel) {}
-      } message: {
-        Text(
-          "To save photos and videos, allow Yo to add to your "
-            + "photo library in Settings."
-        )
-      }
-      .alert(
-        "Unable to Turn On Face ID",
-        isPresented: Binding(
-          get: { passkeyProblem != nil },
-          set: { if !$0 { passkeyProblem = nil } }
-        )
-      ) {
-        Button("OK", role: .cancel) {}
-      } message: {
-        Text(passkeyProblem ?? "")
-      }
       .onAppear { checkPhotosPermission() }
       .onChange(of: scenePhase) { _, phase in
         if phase == .active { checkPhotosPermission() }
@@ -204,6 +187,13 @@ struct SettingsView: View {
     }
     .navigationTitle("Media")
     .navigationBarTitleDisplayMode(.inline)
+    // On this page, where the switch is (an alert of the profile's root does not show over a page pushed on it).
+    .alert("Allow Access to Photos", isPresented: $photosDenied) {
+      Button("Open Settings") { openSystemSettings() }
+      Button("Cancel", role: .cancel) {}
+    } message: {
+      Text("To save photos and videos, allow Yo to add to your photo library in Settings.")
+    }
   }
 
   /// Your account: its security (passkey and recovery key), then signing out and, below, deleting it (App Review
@@ -302,6 +292,15 @@ struct SettingsView: View {
     }
     .modifier(SecurityDialogs(
       turningOffPasskey: $turningOffPasskey, renewingWords: $renewingWords, turnOff: removePasskey, renew: newWords))
+    // Here, where the actions are (an alert of the profile's root does not show over a pushed page).
+    .alert(
+      "Something Went Wrong",
+      isPresented: Binding(get: { passkeyProblem != nil }, set: { if !$0 { passkeyProblem = nil } })
+    ) {
+      Button("OK", role: .cancel) {}
+    } message: {
+      Text(passkeyProblem ?? "")
+    }
   }
 
   /// The guide, at a step or (nil) at the first one left.
@@ -321,6 +320,7 @@ struct SettingsView: View {
 
 
   private func replacePasskey() async {
+    guard !addingPasskey else { return }
     addingPasskey = true
     defer { addingPasskey = false }
     do { try await accounts.replacePasskey() } catch {
@@ -330,28 +330,41 @@ struct SettingsView: View {
     }
   }
 
+  /// One change of the backup at a time (`addingPasskey` disables the security rows and pages meanwhile).
   private func removePasskey() {
+    guard !addingPasskey else { return }
+    addingPasskey = true
     Task {
-      do { try await accounts.removePasskey() } catch { passkeyProblem = error.localizedDescription }
+      defer { addingPasskey = false }
+      do { try await accounts.removePasskey() } catch { show(error) }
     }
   }
 
   private func newWords() {
+    guard !addingPasskey else { return }
+    addingPasskey = true
     Task {
+      defer { addingPasskey = false }
       do {
         _ = try await accounts.newRecoveryKey()
         secure(.words)  // the new words, to save in the guide
       } catch {
-        passkeyProblem = error.localizedDescription
+        show(error)
       }
     }
+  }
+
+  /// A security change failed (not a cancellation, nor a sign-out meanwhile).
+  private func show(_ error: Error) {
+    if !SecurityPresentation.isCancellation(error) { passkeyProblem = error.localizedDescription }
   }
 
 
   /// What signing out costs, in one line: whether, and how, the name comes back.
   private var resetMessage: String {
     guard let account = accounts.account, account.secured else {
-      return "Your account isn’t secured. You won’t be able to sign in as "
+      // The iCloud Keychain keeps it (marked signed out, listed on Sign In); nothing else would bring it back.
+      return "Your account isn’t secured. Without your iCloud Keychain, you won’t be able to sign in as "
         + "\(accounts.account?.username ?? "this name") again."
     }
     if !accounts.wordsSaved && !account.byPasskey {
@@ -363,22 +376,6 @@ struct SettingsView: View {
   }
 
 
-
-  private func addPasskey() async {
-    guard !addingPasskey else { return }
-    addingPasskey = true
-    defer { addingPasskey = false }
-
-    do {
-      try await accounts.addPasskey()
-    } catch {
-      if SecurityPresentation.isCancellation(error) { return }
-      passkeyProblem = SecurityPresentation.passkeyMessage(
-        error,
-        fallback: "Try again or sign in with your recovery key."
-      )
-    }
-  }
 
   private func setSaveSent(_ enabled: Bool) {
     guard enabled else {
@@ -475,19 +472,12 @@ struct SettingsView: View {
     if let domain = Bundle.main.bundleIdentifier {
       UserDefaults.standard.removePersistentDomain(forName: domain)
     }
-    friends.reset()
     dismiss()
-    accounts.signOut()  // out of the iCloud Keychain too: the next start does not bring it back
+    accounts.signOut()  // the friends go with the account (YoApp)
   }
 }
 
 enum SecurityPresentation {
-  static let passkeyExplanation =
-    "Sign in on a new iPhone with Face ID."
-
-  static let recoveryExplanation =
-    "12 words to sign in without Face ID."
-
   static func isCancellation(_ error: Error) -> Bool {
     if error is CancellationError { return true }
 
@@ -501,288 +491,6 @@ enum SecurityPresentation {
       return "Your password manager can’t do this. Try iCloud Keychain."
     }
     return fallback
-  }
-}
-
-// Retained for callers that present recovery words as a sheet.
-@MainActor
-struct RecoveryWordsSheet: View {
-  let name: String
-  let words: [String]
-
-  @Environment(\.dismiss) private var dismiss
-
-  var body: some View {
-    NavigationStack {
-      RecoveryKeyView(
-        name: name,
-        words: words,
-        explanation: SecurityPresentation.recoveryExplanation
-      )
-      .toolbar {
-        ToolbarItem(placement: .topBarTrailing) {
-          Button(role: .close) { dismiss() }
-        }
-      }
-    }
-    .tint(Color.amethyst)
-  }
-}
-
-@MainActor
-struct RecoveryKeyView: View {
-  let name: String
-  let words: [String]
-  let explanation: String
-
-  var requiresAuthentication = true
-  var finishTitle: String? = nil
-  var onFinish: (() -> Void)? = nil
-  var onTryPasskey: (() -> Void)? = nil
-
-  @Environment(\.scenePhase) private var scenePhase
-  @Environment(\.openURL) private var openURL
-
-  @State private var revealed = false
-  @State private var authenticating = false
-  @State private var saving = false
-  @State private var copied = false
-  @State private var savedToPhotos = false
-  @State private var acknowledged = false
-  @State private var visible = false
-
-  @State private var authenticationFailed = false
-  @State private var saveProblem: String?
-  @State private var needsPhotosPermission = false
-
-  var body: some View {
-    Form {
-      Section {
-        LabeledContent {
-          Text(name)
-            .font(.yo(17, relativeTo: .body))
-            .fixedSize(horizontal: false, vertical: true)
-        } label: {
-          Text("Username")
-        }
-      } footer: {
-        Text(explanation)
-      }
-
-      Section {
-        Button {
-          Task { await toggleVisibility() }
-        } label: {
-          HStack {
-            Text(revealed ? "Hide Recovery Key" : "Show Recovery Key")
-            Spacer()
-            if authenticating {
-              ProgressView()
-                .accessibilityLabel("Showing Recovery Key")
-            }
-          }
-        }
-        .disabled(authenticating || saving)
-
-        if revealed && scenePhase == .active {
-          RecoveryQRView(words: words)
-            .frame(maxWidth: .infinity)
-            .padding(.vertical, 8)
-            .accessibilityLabel("Recovery key QR code")
-            .privacySensitive()
-
-          ForEach(Array(words.enumerated()), id: \.offset) { index, word in
-            LabeledContent {
-              Text(word)
-                .font(.system(.body, design: .monospaced))
-            } label: {
-              Text("\(index + 1)")
-                .monospacedDigit()
-                .foregroundStyle(.secondary)
-            }
-            .accessibilityElement(children: .ignore)
-            .accessibilityLabel("Word \(index + 1), \(word)")
-            .privacySensitive()
-          }
-        }
-      } header: {
-        Text("Recovery Key")
-      } footer: {
-        Text(
-          "Anyone with these words can sign in as you."
-        )
-      }
-
-      if revealed && scenePhase == .active {
-        Section {
-          Button {
-            RecoveryWords.copy(words, name: name)
-            copied = true
-          } label: {
-            Label(
-              copied ? "Copied" : "Copy Recovery Key",
-              systemImage: copied ? "checkmark" : "doc.on.doc"
-            )
-          }
-
-          Button {
-            Task { await save() }
-          } label: {
-            HStack {
-              Label(
-                saving
-                  ? "Saving…"
-                  : savedToPhotos ? "Saved to Photos" : "Save to Photos",
-                systemImage:
-                  savedToPhotos ? "checkmark" : "photo.badge.arrow.down"
-              )
-              Spacer()
-              if saving { ProgressView() }
-            }
-          }
-        }
-        .disabled(saving)
-      }
-
-      if let finishTitle, let onFinish {
-        let wordsOnly = onTryPasskey != nil
-
-        Section {
-          if wordsOnly {
-            Toggle("I Saved My Recovery Key", isOn: $acknowledged)
-              .disabled(!revealed || saving)
-          }
-
-          Button(finishTitle, action: onFinish)
-            .disabled(
-              (wordsOnly && !acknowledged) || saving || authenticating
-            )
-        } footer: {
-          if wordsOnly {
-            Text("Keep a copy outside this iPhone.")
-          }
-        }
-      }
-
-      if let onTryPasskey {
-        Section {
-          Button("Try Face ID Again", action: onTryPasskey)
-            .disabled(saving || authenticating)
-        }
-      }
-    }
-    .navigationTitle("Recovery Key")
-    .navigationBarTitleDisplayMode(.inline)
-    .onAppear {
-      visible = true
-      if !requiresAuthentication && scenePhase == .active {
-        revealed = true
-      }
-    }
-    .onDisappear {
-      visible = false
-      revealed = false
-    }
-    .onChange(of: scenePhase) { _, phase in
-      if phase != .active { revealed = false }
-    }
-    .alert(
-      "Unable to Show Recovery Key",
-      isPresented: $authenticationFailed
-    ) {
-      Button("OK", role: .cancel) {}
-    } message: {
-      Text("Try again using Face ID or your iPhone passcode.")
-    }
-    .alert(
-      "Unable to Save Recovery Key",
-      isPresented: Binding(
-        get: { saveProblem != nil },
-        set: { if !$0 { saveProblem = nil } }
-      )
-    ) {
-      if needsPhotosPermission {
-        Button("Open Settings") {
-          guard let url = URL(
-            string: UIApplication.openSettingsURLString
-          ) else { return }
-          openURL(url)
-        }
-      }
-      Button("OK", role: .cancel) {}
-    } message: {
-      Text(saveProblem ?? "")
-    }
-  }
-
-  private func toggleVisibility() async {
-    guard !authenticating, !saving else { return }
-
-    if revealed {
-      revealed = false
-      return
-    }
-
-    guard requiresAuthentication else {
-      revealed = scenePhase == .active
-      return
-    }
-
-    authenticating = true
-    defer { authenticating = false }
-
-    let context = LAContext()
-    do {
-      let allowed = try await context.evaluatePolicy(
-        .deviceOwnerAuthentication,
-        localizedReason: "Show your recovery key."
-      )
-      guard visible else { return }
-
-      revealed = allowed && scenePhase == .active
-      if !allowed { authenticationFailed = true }
-    } catch {
-      guard visible else { return }
-
-      if let error = error as? LAError {
-        switch error.code {
-        case .userCancel, .appCancel, .systemCancel:
-          return
-        default:
-          break
-        }
-      }
-      authenticationFailed = true
-    }
-  }
-
-  private func save() async {
-    guard !saving, revealed, scenePhase == .active else { return }
-    saving = true
-    needsPhotosPermission = false
-    defer { saving = false }
-
-    let renderer = ImageRenderer(
-      content: RecoveryCard(name: name, words: words)
-    )
-    renderer.scale = 3
-
-    guard let image = renderer.uiImage else {
-      saveProblem = "Try again or copy your recovery key."
-      return
-    }
-
-    do {
-      try await RecoveryWords.saveToPhotos(image)
-      savedToPhotos = true
-    } catch {
-      let status = PHPhotoLibrary.authorizationStatus(for: .addOnly)
-      needsPhotosPermission = status == .denied || status == .restricted
-      saveProblem = needsPhotosPermission
-        ? "Allow Yo to add to your photo library in Settings, "
-          + "or copy your recovery key."
-        : "Try again or copy your recovery key."
-    }
   }
 }
 
@@ -1143,6 +851,7 @@ struct FeedbackSheet: View {
 /// Appearance: the app icon, chosen by its picture alone. The default, its negative, and the original Yo's plain
 /// purple square (Info.plist CFBundleAlternateIcons).
 struct AppearancePage: View {
+  @Environment(AccountStore.self) private var accounts
   @State private var current = UIApplication.shared.alternateIconName
 
   private let icons: [(name: String?, image: String)] = [
@@ -1156,9 +865,11 @@ struct AppearancePage: View {
           ForEach(icons, id: \.image) { icon in
             Button {
               guard current != icon.name else { return }
+              let client = accounts.client  // the account it was chosen in
               Task {
                 try? await UIApplication.shared.setAlternateIconName(icon.name)
                 current = UIApplication.shared.alternateIconName
+                if current == icon.name { accounts.storeAppIcon(icon.name, by: client) }  // for its next phone
               }
             } label: {
               VStack(spacing: 8) {

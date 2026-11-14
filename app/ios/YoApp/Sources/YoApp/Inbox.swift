@@ -15,6 +15,24 @@ struct Arrival: Equatable, Identifiable {
   let photo: UIImage?
   let video: URL?
 
+  /// When it was sent: a photo's or video's id starts with its sender and the time (`Inbox.mediaID`).
+  var sentAt: Date? {
+    let parts = id.split(separator: "/")
+    guard parts.count >= 2, let ms = UInt64(parts[1]) else { return nil }
+    return Date(timeIntervalSince1970: Double(ms) / 1000)
+  }
+
+  /// How long ago, as stories say it: "now", "2m", "3h", "1d".
+  static func age(_ date: Date, now: Date = .now) -> String {
+    let minutes = Int(now.timeIntervalSince(date) / 60)
+    return switch minutes {
+    case ..<1: "now"
+    case ..<60: "\(minutes)m"
+    case ..<1440: "\(minutes / 60)h"
+    default: "\(minutes / 1440)d"
+    }
+  }
+
   init(id: String, from: String, photo: UIImage? = nil, video: URL? = nil) {
     self.id = id
     self.from = from
@@ -99,9 +117,11 @@ final class Inbox {
   func send(to friend: Friend, accounts: AccountStore, friends: Friends) async -> String? {
     let key = Username.skeleton(friend.name)
     let before = lastSend[key]
-    let this = Task {
+    let client = accounts.client  // the account tapped in: a Yo waiting here never goes from the next one
+    let this = Task { () async -> String? in
       _ = await before?.value
-      return await sendNow(to: friend, accounts: accounts, friends: friends)
+      guard let client, client === accounts.client else { return "Not Sent" }
+      return await sendNow(to: friend, client: client, accounts: accounts, friends: friends)
     }
     lastSend[key] = this
     let problem = await this.value
@@ -145,18 +165,21 @@ final class Inbox {
   /// When the list opens: friends take the spellings the core knows, and up to 20 still known only by a typed name
   /// are looked up (once per opening, so the hub is not asked again and again).
   private func respell(client: YoClient, accounts: AccountStore, friends: Friends) async {
-    if let contacts = try? await Hub.run({ client.contacts() }) { friends.spell(contacts) }
+    if let contacts = try? await Hub.run({ client.contacts() }), client === accounts.client {
+      friends.spell(contacts)
+      friends.markGone(contacts)
+    }
     let typed = friends.all.filter { $0.user == nil && !$0.blocked }.prefix(20).map(\.name)
     await identify(Array(typed), accounts: accounts, friends: friends)
   }
 
-  private func sendNow(to friend: Friend, accounts: AccountStore, friends: Friends) async -> String? {
-    guard let client = accounts.client else { return "Not Sent" }
+  private func sendNow(to friend: Friend, client: YoClient, accounts: AccountStore, friends: Friends) async -> String? {
     let target = friend.user ?? friend.name
     do {
       let (events, contacts, waiting) = try await Hub.run {
         (try client.sendYo(to: target), client.contacts(), client.waiting())
       }
+      guard client === accounts.client else { return nil }  // signed out meanwhile: nothing of it stays
       if waiting > 0 { deliverLater(accounts: accounts, friends: friends) }
       if friend.user == nil, let contact = contacts.first(where: { contact in
         contact.handles.contains { Username.skeleton($0) == Username.skeleton(friend.name) }
@@ -167,11 +190,15 @@ final class Inbox {
       Stats.sentYo(to: friend.name)
       return nil
     } catch YoError.NotOnYo {
+      // Gone (deleted, or the name released): the bar says so from now on.
+      if let contacts = try? await Hub.run({ client.contacts() }), client === accounts.client {
+        friends.markGone(contacts)
+      }
       return "Not on Yo"
     } catch YoError.Blocked {
       return "Blocked"
     } catch YoError.Replaced {
-      accounts.reset()
+      accounts.replaced(client)
       return "Not Sent"
     } catch {
       return "Not Sent"
@@ -196,6 +223,10 @@ final class Inbox {
           pause = min(pause * 2, 30)
           continue
         }
+        guard client === accounts.client else {  // signed out meanwhile: on with the account in now, if any
+          pause = 1
+          continue
+        }
         await take(events, contacts: contacts, client: client, friends: friends)
         if waiting == 0 && !deliverAgain { break }  // none waits, and no send asked meanwhile
         pause = waiting < before ? 1 : min(pause * 2, 30)  // going out: at the hub's pace; else waiting longer
@@ -213,6 +244,7 @@ final class Inbox {
   /// sender's bar. A pause after an error; this phone replaced elsewhere: signed out.
   func listen(accounts: AccountStore, friends: Friends) async {
     var respelled = false
+    var storageTaken = false
     while !Task.isCancelled {
       guard let client = accounts.client else {
         try? await Task.sleep(for: .seconds(1))
@@ -224,10 +256,15 @@ final class Inbox {
       }
       do {
         let (events, contacts) = try await Hub.run { (try client.sync(waitS: 25), client.contacts()) }
+        guard client === accounts.client else { continue }  // signed out meanwhile: not for this account
         await take(events, contacts: contacts, client: client, friends: friends)
+        if !storageTaken {  // read by the core before its first receive, if registering could not
+          storageTaken = true
+          await accounts.takeStorage(into: friends, read: true)
+        }
         fetchMedia(client: client)  // what a broken network left, also after a start
       } catch YoError.Replaced {
-        accounts.reset()
+        accounts.replaced(client)
         return
       } catch {
         try? await Task.sleep(for: .seconds(5))
@@ -249,6 +286,7 @@ final class Inbox {
   /// or video is noted, fetched and waits on the bar until seen. Then the core may forget them (they will not come
   /// again after a crash). `contacts`: the core's, read with the events.
   private func take(_ events: [YoEvent], contacts: [YoContact], client: YoClient, friends: Friends) async {
+    friends.markGone(contacts)  // a delivery found their account gone (`NotOnYo` from now on)
     guard !events.isEmpty else { return }
     func friend(_ user: String) -> Friend {
       friends.friend(user: user, handles: contacts.first { $0.user == user }?.handles ?? [])
@@ -271,7 +309,7 @@ final class Inbox {
           ReceivedMedia.shared.expect(media, id: Self.mediaID(user, sentAtMs, media), from: sender.name, kind: kind)
         }
       case .newChat(let user):
-        _ = friend(user)
+        _ = friend(user)  // a friend's chat restarted (spec 4.9) is the same friend, by user id
       default:
         break
       }
@@ -291,13 +329,6 @@ final class Inbox {
     ReceivedMedia.shared.fetchWaiting(client: client) { [weak self] arrival in self?.add(arrival) }
   }
 
-  private static func firstFrame(of video: URL) async -> UIImage? {
-    let generator = AVAssetImageGenerator(asset: AVURLAsset(url: video))
-    generator.appliesPreferredTrackTransform = true
-    guard let (image, _) = try? await generator.image(at: .zero) else { return nil }
-    return UIImage(cgImage: image)
-  }
-
   /// A Yo notification that arrived while the app is open, or was tapped.
   func received(id: String, from sender: String) {
     guard taken.insert(id).inserted else { return }
@@ -311,7 +342,9 @@ final class Inbox {
       .filter { $0.request.content.categoryIdentifier == Self.category }
       .sorted { $0.date < $1.date }
     for notification in waiting {
-      received(id: notification.request.identifier, from: notification.request.content.userInfo["from"] as? String ?? "Unknown sender")
+      let info = notification.request.content.userInfo
+      // The Yo's own id when the notification service knew it, as when one is tapped: the core's Yo is not shown again.
+      received(id: info["id"] as? String ?? notification.request.identifier, from: info["from"] as? String ?? "Unknown sender")
     }
     center.removeDeliveredNotifications(withIdentifiers: waiting.map(\.request.identifier))
   }

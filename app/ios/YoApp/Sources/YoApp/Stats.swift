@@ -30,14 +30,18 @@ enum Stats {
 /// The numbers, as a plain list.
 struct StatsPage: View {
   @Environment(Friends.self) private var friends
+  // Read through AppStorage, so the page follows Yos sent and received while it is open (and the friend with the
+  // most with them).
+  @AppStorage("stats.sent") private var sent = 0
+  @AppStorage("stats.received") private var received = 0
 
   var body: some View {
     let top = Stats.byFriend.max { $0.value < $1.value }
     Form {
       Section {
-        row("Yos Sent", "\(Stats.sent)", icon: "arrow.up.circle.fill", color: .amethyst)
-        row("Yos Received", "\(Stats.received)", icon: "arrow.down.circle.fill", color: .blue)
-        row("Friends", "\(friends.all.count)", icon: "person.2.fill", color: .green)
+        row("Yos Sent", "\(sent)", icon: "arrow.up.circle.fill", color: .amethyst)
+        row("Yos Received", "\(received)", icon: "arrow.down.circle.fill", color: .blue)
+        row("Friends", "\(friends.shown.count)", icon: "person.2.fill", color: .green)  // the blocked are not
         if let top {
           row("Most Yos With", "\(top.key) · \(top.value)", icon: "star.fill", color: .orange)
         }
@@ -50,10 +54,10 @@ struct StatsPage: View {
   }
 
   private func row(_ title: String, _ value: String, icon: String, color: Color) -> some View {
-    HStack {
+    LabeledContent {
+      Text(value).monospacedDigit()
+    } label: {
       Label(title, systemImage: icon).labelStyle(Tile(color))
-      Spacer()
-      Text(value).foregroundStyle(Color(.secondaryLabel)).monospacedDigit()
     }
   }
 }

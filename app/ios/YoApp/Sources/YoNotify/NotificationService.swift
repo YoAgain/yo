@@ -26,6 +26,7 @@ final class NotificationService: UNNotificationServiceExtension {
           content.body = line.text
           content.threadIdentifier = line.user
           content.userInfo["from"] = line.name
+          content.userInfo["user"] = line.user  // for Yo Back, also to someone not on the list yet
           content.userInfo["id"] = line.id
         }
       }

@@ -247,6 +247,8 @@ impl From<Content> for MessageKind {
             Content::Link(url) => MessageKind::Link { url },
             Content::Location { lat_e7, lon_e7 } => MessageKind::Location { lat_e7, lon_e7 },
             Content::Unknown(kind) => MessageKind::Unsupported { kind },
+            // Never an event (spec 4.9).
+            Content::Restart { .. } => MessageKind::Unsupported { kind: 6 },
         }
     }
 }
@@ -286,6 +288,20 @@ pub struct YoContact {
     pub verified: bool,
     /// The key changed after verification: confirm before sending.
     pub unconfirmed: bool,
+    pub blocked: bool,
+    /// The account is gone (deleted, or its name released): a Yo to it is `NotOnYo`.
+    pub gone: bool,
+}
+
+/// A friend as the account's storage keeps it (spec 6.9): what a new phone gets back.
+#[derive(uniffi::Record)]
+pub struct YoFriend {
+    /// The user id.
+    pub user: String,
+    /// The name the user gave the friend, if any.
+    pub name: Option<String>,
+    /// The colour the app shows the friend in: an index into its palette.
+    pub color: Option<u8>,
     pub blocked: bool,
 }
 
@@ -593,6 +609,7 @@ impl YoClient {
                 verified: c.verified,
                 unconfirmed: c.unconfirmed,
                 blocked: c.blocked,
+                gone: c.gone,
             })
             .collect()
     }
@@ -624,6 +641,36 @@ impl YoClient {
     /// Blocks (or unblocks) a user by user id or handle: nothing from them is shown, nothing is sent to them.
     pub fn set_blocked(&self, who: String, blocked: bool) -> Result<(), YoError> {
         Ok(self.with(|c| c.set_blocked(&who, blocked))??)
+    }
+
+    /// The friends the account's storage keeps (spec 6.9), by user id: after a restore, the list to show.
+    pub fn friends(&self) -> Vec<YoFriend> {
+        self.with(|c| c.friends())
+            .unwrap_or_default()
+            .into_iter()
+            .map(|f| YoFriend { user: f.user, name: f.name, color: f.color, blocked: f.blocked })
+            .collect()
+    }
+
+    /// Adds a friend (by user id) to the stored list, or changes its name or colour. Kept at once; on its way to the
+    /// hub with the next `sync` or `maintenance`. Blocks go with `set_blocked`.
+    pub fn set_friend(&self, user: String, name: Option<String>, color: Option<u8>) -> Result<(), YoError> {
+        Ok(self.with(|c| c.set_friend(&user, name, color))??)
+    }
+
+    /// Takes a friend off the stored list.
+    pub fn remove_friend(&self, user: String) -> Result<(), YoError> {
+        Ok(self.with(|c| c.remove_friend(&user))??)
+    }
+
+    /// The app's icon as stored ("Negative", "Original"); none for the default.
+    pub fn app_icon(&self) -> Option<String> {
+        self.with(|c| c.app_icon()).ok().flatten()
+    }
+
+    /// Stores the app's icon (none: the default), for the account's other and next phones.
+    pub fn set_app_icon(&self, icon: Option<String>) {
+        _ = self.with(|c| c.set_app_icon(icon));
     }
 
     /// Reports a user to the operator. `NotOnYo`: no such user.

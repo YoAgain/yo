@@ -10,7 +10,8 @@ YoIP is the protocol between the apps and the hub: who you are, how a Yo is deli
 reach the hub without a sender, padded to one of four sizes; a push only says "there is mail".
 
 Its security layer is **YoLS**, Yo Layer Security: chats are MLS groups (RFC 9420), keys renew every week or 100
-messages, and any contact can be checked with a 60-digit safety number. Full text: [spec/v1.md](spec/v1.md).
+messages, and any contact can be checked with a 60-digit safety number. Full text: [spec/v1.md](spec/v1.md); every
+key, where it lives and what it opens: [spec 7, the keys at a glance](spec/v1.md#7-backup-and-a-new-phone).
 
 ### Hub
 

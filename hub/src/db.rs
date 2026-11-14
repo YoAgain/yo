@@ -12,6 +12,9 @@ const DAY_MS: u64 = 24 * 3600 * 1000;
 
 pub type Key = [u8; KEY_LEN];
 
+/// A user's storage (spec 6.9): its version and its sealed bytes.
+pub type Sealed = (u64, Vec<u8>);
+
 pub struct Db {
     conn: Mutex<Connection>,
 }
@@ -228,7 +231,7 @@ CREATE TABLE IF NOT EXISTS reports (
 ) WITHOUT ROWID;
 CREATE INDEX IF NOT EXISTS reports_by_reported ON reports(reported_id);
 -- Feedback on the app (spec 6.3), for the operator to read: who wrote it, the text as written (plain to the hub),
--- the app's version, when (ms). Gone with the account.
+-- the app's version, when (ms). Kept when the account goes, with an all-zero user id (`NOBODY`).
 CREATE TABLE IF NOT EXISTS feedback (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     user_id BLOB NOT NULL,
@@ -237,6 +240,14 @@ CREATE TABLE IF NOT EXISTS feedback (
     created_at INTEGER NOT NULL
 );
 CREATE INDEX IF NOT EXISTS feedback_by_user ON feedback(user_id);
+-- Each user's storage (spec 6.9), sealed by its devices under a key the hub never has; `version` counts its writes,
+-- so one writer never overwrites another's unseen. Gone with the account.
+CREATE TABLE IF NOT EXISTS storage (
+    user_id BLOB PRIMARY KEY,
+    version INTEGER NOT NULL,
+    data BLOB NOT NULL,
+    updated_at INTEGER NOT NULL
+) WITHOUT ROWID;
 -- Photos and videos (spec 6.8): the file is on disk, by its id; here what the hub needs to hand it out and delete it.
 -- `user_id` is the uploader (for its quota), never a recipient. Gone after the last fetch, or after its time.
 CREATE TABLE IF NOT EXISTS blobs (
@@ -320,15 +331,20 @@ fn user_of_device(tx: &Transaction<'_>, device: &DeviceId) -> rusqlite::Result<O
         .optional()
 }
 
+/// The user id that feedback keeps once its sender's account is gone: no user has it (ids are random, and this one
+/// is refused as a backup locator like any 16 bytes no user has).
+pub const NOBODY: UserId = [0; 16];
+
 /// Removes a user and everything about it: its devices (which answer 410 from then on), handles, account keys, backup
-/// record, reports and feedback. The name and the key are free again.
+/// record, reports and storage. Its feedback stays, without the sender (`NOBODY`). The name and the key are free again.
 fn remove_user(tx: &Transaction<'_>, user: &UserId, now: u64) -> rusqlite::Result<()> {
     retire_devices(tx, user, now)?;
     tx.execute("DELETE FROM backups WHERE user_id = ?1", [user])?;
     tx.execute("DELETE FROM handles WHERE user_id = ?1", [user])?;
     tx.execute("DELETE FROM account_keys WHERE user_id = ?1", [user])?;
     tx.execute("DELETE FROM reports WHERE reporter_id = ?1 OR reported_id = ?1", [user])?;
-    tx.execute("DELETE FROM feedback WHERE user_id = ?1", [user])?;
+    tx.execute("DELETE FROM storage WHERE user_id = ?1", [user])?;
+    tx.execute("UPDATE feedback SET user_id = ?2 WHERE user_id = ?1", params![user, NOBODY])?;
     // Its blobs' files go with the next sweep, or at once where the route knows them (`blobs_of`).
     tx.execute("DELETE FROM blobs WHERE user_id = ?1", [user])?;
     tx.execute("DELETE FROM blob_quota WHERE user_id = ?1", [user])?;
@@ -695,6 +711,46 @@ impl Db {
         Ok(Write::Done(()))
     }
 
+    // ---- storage (spec 6.9) ----
+
+    /// The storage of a user: its version and sealed bytes.
+    pub fn storage(&self, user: &UserId) -> rusqlite::Result<Option<Sealed>> {
+        self.conn()
+            .prepare_cached("SELECT version, data FROM storage WHERE user_id = ?1")?
+            .query_row([user], |row| Ok((row.get::<_, i64>(0)? as u64, row.get(1)?)))
+            .optional()
+    }
+
+    /// Replaces a device's user's storage if it is at version `replaces` (0: there is none), as version `replaces + 1`.
+    /// Otherwise `Err` with the current one (none: version 0, empty). The device is checked in this transaction.
+    pub fn put_storage(
+        &self,
+        device: &DeviceId,
+        replaces: u64,
+        data: &[u8],
+        now: u64,
+    ) -> rusqlite::Result<Write<Result<(), Sealed>>> {
+        let mut conn = self.conn();
+        let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let Some(user) = user_of_device(&tx, device)? else { return Ok(Write::Refused(Conflict::DeviceGone)) };
+        let current: Sealed = tx
+            .prepare_cached("SELECT version, data FROM storage WHERE user_id = ?1")?
+            .query_row([&user], |row| Ok((row.get::<_, i64>(0)? as u64, row.get(1)?)))
+            .optional()?
+            .unwrap_or_default();
+        if current.0 != replaces {
+            return Ok(Write::Done(Err(current)));
+        }
+        tx.prepare_cached(
+            "INSERT INTO storage (user_id, version, data, updated_at) VALUES (?1, ?2, ?3, ?4)
+             ON CONFLICT (user_id) DO UPDATE SET
+                 version = excluded.version, data = excluded.data, updated_at = excluded.updated_at",
+        )?
+        .execute(params![user, (replaces + 1) as i64, data, now])?;
+        tx.commit()?;
+        Ok(Write::Done(Ok(())))
+    }
+
     // ---- backups ----
 
     /// Stores the backup record of a device's user, replacing the one before: the old locator finds nothing from then
@@ -1044,12 +1100,22 @@ impl Db {
         Ok(Commit::Accepted)
     }
 
-    /// The envelope of the commit accepted on `epoch`.
-    pub fn commit_envelope(&self, group: &GroupId, epoch: u64) -> rusqlite::Result<Option<Vec<u8>>> {
-        self.conn()
+    /// The envelope of the commit accepted on `epoch`; else whether one was accepted there and is kept no more (the
+    /// group is past it). Read under one lock, so a commit accepted meanwhile is never taken for one pruned.
+    pub fn commit_envelope(&self, group: &GroupId, epoch: u64) -> rusqlite::Result<Result<Vec<u8>, bool>> {
+        let conn = self.conn();
+        let envelope: Option<Vec<u8>> = conn
             .prepare_cached("SELECT envelope FROM commits WHERE group_id = ?1 AND epoch = ?2")?
             .query_row(params![group, epoch as i64], |row| row.get(0))
-            .optional()
+            .optional()?;
+        if let Some(envelope) = envelope {
+            return Ok(Ok(envelope));
+        }
+        let current: Option<i64> = conn
+            .prepare_cached("SELECT epoch FROM groups WHERE id = ?1")?
+            .query_row([group], |row| row.get(0))
+            .optional()?;
+        Ok(Err(current.is_some_and(|current| current as u64 > epoch)))
     }
 
     /// Deletes envelopes and kept commits older than the TTL, and forgets replaced devices after a year.
@@ -1060,6 +1126,59 @@ impl Db {
         conn.execute("DELETE FROM commits WHERE accepted_at < ?1", [before])?;
         conn.execute("DELETE FROM gone WHERE gone_at < ?1", [now.saturating_sub(365 * 24 * 3600 * 1000) as i64])?;
         Ok(messages)
+    }
+
+    /// What should never be: rows that belong to nobody (a user, a device or a blob gone without them), each check
+    /// with how many rows fail it. Empty when the store is consistent. For tests and the operator; reads only.
+    pub fn audit(&self) -> rusqlite::Result<Vec<(&'static str, i64)>> {
+        const CHECKS: &[(&str, &str)] = &[
+            ("devices without their user", "SELECT count(*) FROM devices WHERE user_id NOT IN (SELECT id FROM users)"),
+            ("users without a device", "SELECT count(*) FROM users WHERE id NOT IN (SELECT user_id FROM devices)"),
+            (
+                "users whose key is not theirs",
+                "SELECT count(*) FROM users u WHERE NOT EXISTS
+                 (SELECT 1 FROM account_keys k WHERE k.key = u.account_key AND k.user_id = u.id)",
+            ),
+            (
+                "account keys without their user",
+                "SELECT count(*) FROM account_keys WHERE user_id NOT IN (SELECT id FROM users)",
+            ),
+            ("handles without their user", "SELECT count(*) FROM handles WHERE user_id NOT IN (SELECT id FROM users)"),
+            ("backups without their user", "SELECT count(*) FROM backups WHERE user_id NOT IN (SELECT id FROM users)"),
+            (
+                "reports by or about nobody",
+                "SELECT count(*) FROM reports WHERE reporter_id NOT IN (SELECT id FROM users)
+                 OR reported_id NOT IN (SELECT id FROM users)",
+            ),
+            (
+                "feedback of a user gone, not anonymised",
+                "SELECT count(*) FROM feedback WHERE user_id != zeroblob(16) AND user_id NOT IN (SELECT id FROM users)",
+            ),
+            ("storage without its user", "SELECT count(*) FROM storage WHERE user_id NOT IN (SELECT id FROM users)"),
+            ("blobs without their user", "SELECT count(*) FROM blobs WHERE user_id NOT IN (SELECT id FROM users)"),
+            (
+                "blob quotas without their user",
+                "SELECT count(*) FROM blob_quota WHERE user_id NOT IN (SELECT id FROM users)",
+            ),
+            (
+                "key packages without their device",
+                "SELECT count(*) FROM key_packages WHERE device_id NOT IN (SELECT id FROM devices)",
+            ),
+            (
+                "envelopes without their device",
+                "SELECT count(*) FROM messages WHERE device_id NOT IN (SELECT id FROM devices)",
+            ),
+            ("devices both there and gone", "SELECT count(*) FROM devices WHERE id IN (SELECT id FROM gone)"),
+        ];
+        let conn = self.conn();
+        let mut failed = Vec::new();
+        for (what, sql) in CHECKS {
+            let n: i64 = conn.query_row(sql, [], |row| row.get(0))?;
+            if n > 0 {
+                failed.push((*what, n));
+            }
+        }
+        Ok(failed)
     }
 
     /// Releases names not secured (spec 6.4): removes every user without a backup record none of whose devices made
@@ -1323,13 +1442,14 @@ mod tests {
         assert_eq!((left("reports"), left("key_packages"), left("account_keys")), (0, 1, 1), "only MIA's are left");
         let feedback: Vec<Vec<u8>> = db
             .conn()
-            .prepare("SELECT user_id FROM feedback")
+            .prepare("SELECT user_id FROM feedback ORDER BY id")
             .unwrap()
             .query_map([], |row| row.get(0))
             .unwrap()
             .collect::<Result<_, _>>()
             .unwrap();
-        assert_eq!(feedback, [mia.to_vec()], "MIA's feedback stays, LEO's is gone");
+        assert_eq!(feedback, [NOBODY.to_vec(), mia.to_vec()], "LEO's feedback stays without LEO, MIA's as it was");
+        assert_eq!(db.audit().unwrap(), [], "nothing of LEO's is left behind");
         assert!(matches!(db.feedback(&[1; 16], "late", "1.0 (1)", 1).unwrap(), Write::Refused(Conflict::DeviceGone)));
         assert!(matches!(db.delete_account(&[1; 16], 1).unwrap(), Write::Refused(Conflict::DeviceGone)));
         // The name and the key are free again.
@@ -1387,10 +1507,16 @@ mod tests {
         let active = user(register(&db, b"BUSY", 3, 3, 0));
         db.put_backup(&[2; 16], None, b"record", 0).unwrap();
         db.touch(&[3; 16], 50 * DAY).unwrap();
+        assert!(matches!(db.feedback(&[1; 16], "where are my friends", "1.0 (1)", 0).unwrap(), Write::Done(())));
         let exists = |user: &UserId| db.lookup(KIND_USER, user, false, &[]).unwrap().is_some();
         assert_eq!(db.release_unsecured(89 * DAY, 90 * DAY).unwrap(), 0);
         assert_eq!(db.release_unsecured(91 * DAY, 90 * DAY).unwrap(), 1);
         assert!(!exists(&idle));
+        let feedback: (Vec<u8>, String) = db
+            .conn()
+            .query_row("SELECT user_id, text FROM feedback", [], |row| Ok((row.get(0)?, row.get(1)?)))
+            .unwrap();
+        assert_eq!(feedback, (NOBODY.to_vec(), "where are my friends".into()), "the feedback stays, without IDLE");
         assert!(db.is_gone(&[1; 16]).unwrap(), "its device learns that it was removed");
         assert!(exists(&secured) && exists(&active));
         // The name is free for anyone now, and so is the key.

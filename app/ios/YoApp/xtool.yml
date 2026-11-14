@@ -22,6 +22,10 @@ resources:
   - Resources/IconOriginal@2x.png
   - Resources/IconOriginal@3x.png
   - Resources/IconStandard@3x.png
+  # The welcome's pictures of the app (Intro.swift), taken in the Simulator.
+  - Resources/IntroTap@3x.png
+  - Resources/IntroYoBack@3x.png
+  - Resources/IntroAdd@3x.png
 # "Yo" in the share sheet (Sources/YoShare, YoShare-Info.plist): photos and videos sent to a friend from there; and the
 # notification service (Sources/YoNotify, YoNotify-Info.plist): "Yo from YoGPT" on a push. Both use the app's state in
 # the App Group group.app.justyo.ios (SharedState.swift). App Store and TestFlight only: dev/push.sh drops them from

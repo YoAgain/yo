@@ -27,6 +27,10 @@ pub struct Contact {
     /// How this device knows the contact: "+491701234567", "Chris". A username as its owner writes it, as the hub
     /// tells (also for someone who wrote first), one per skeleton.
     pub handles: Vec<String>,
+    /// The hub no longer knows the user (the account was deleted, or its name released): nothing more can reach it.
+    /// Its handles are forgotten, so a name it had finds whoever has it now.
+    #[serde(default)]
+    pub gone: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -45,6 +49,19 @@ pub struct Chat {
     /// The hub does not order commits for this group (it never registered it, or the token is not ours): the chat
     /// works, without updates.
     pub no_updates: bool,
+    /// The plaintexts of the last messages sent in this chat: sent again in a restarted chat (spec 4.9).
+    #[serde(default)]
+    pub sent: VecDeque<Vec<u8>>,
+    /// The `sent_at` of the last message received from the peer here: what a restart tells it.
+    #[serde(default)]
+    pub last_seen_ms: u64,
+    /// This device can no longer follow the group (a commit it lacks is gone from the hub): restarted at the next
+    /// chance (spec 4.9).
+    #[serde(default)]
+    pub lost: bool,
+    /// Made, or taken over, by a restart: it replaces the older chats with the peer.
+    #[serde(default)]
+    pub restarted: bool,
 }
 
 /// A commit on its way to the hub, with what to deliver once it is accepted.
@@ -176,6 +193,27 @@ pub struct State {
     pub key_packages_left: u32,
     pub key_packages: Vec<OwnKeyPackage>,
     pub last_resort_at: u64,
+    /// The time of the last signed request (spec 6.2): the next is signed later, whichever process signs it.
+    #[serde(default)]
+    pub signed_until: u64,
+    /// The account's storage as this device has it (spec 6.9), merged with the hub's.
+    #[serde(default)]
+    pub storage: crate::storage::Storage,
+    /// The hub's version the storage was last written or read as.
+    #[serde(default)]
+    pub storage_version: u64,
+    /// Changed here since it was last written.
+    #[serde(default)]
+    pub storage_dirty: bool,
+    /// Fetched from the hub on this device (once, before the first message is received).
+    #[serde(default)]
+    pub storage_fetched: bool,
+    /// The time of the last message sent: each later one strictly later.
+    #[serde(default)]
+    pub last_sent_ms: u64,
+    /// Hashes of the last messages received (sender and plaintext): a copy sent again after a restart is skipped.
+    #[serde(default)]
+    pub received: VecDeque<[u8; 32]>,
 }
 
 impl Drop for State {

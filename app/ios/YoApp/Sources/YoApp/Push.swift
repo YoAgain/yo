@@ -3,6 +3,7 @@
 // the platform the app names.
 import SwiftUI
 import UIKit
+import YoCore
 
 @MainActor @Observable
 final class Push {
@@ -10,8 +11,9 @@ final class Push {
 
   /// The device token as hex, once APNs gave it.
   private(set) var token: String?
-  /// What the hub has, so a token goes there once (per account).
-  private var sent: (token: String, user: Data)?
+  /// What the hub has, so a token goes there once per device registration (a sign-in again is a new one).
+  private var sentToken: String?
+  private weak var sentTo: YoClient?
 
   private static let production: UInt8 = 1
   private static let sandbox: UInt8 = 2
@@ -27,13 +29,14 @@ final class Push {
 
   /// Tells the hub this device's token, when there is an account and the hub does not have it yet.
   func send(_ accounts: AccountStore) async {
-    guard let token, let client = accounts.client, let user = accounts.account?.userID,
-      sent?.token != token || sent?.user != user
+    guard let token, let client = accounts.client, accounts.account != nil,
+      sentToken != token || sentTo !== client
     else { return }
     let platform = Hub.isDevApp ? Self.sandbox : Self.production
     do {
       try await Hub.run { try client.setPush(platform: platform, token: token) }
-      sent = (token, user)
+      sentToken = token
+      sentTo = client
     } catch {
       // Not now (offline): the next launch or token tries again.
     }

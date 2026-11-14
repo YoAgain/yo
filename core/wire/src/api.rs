@@ -20,6 +20,8 @@ pub const ACCOUNT: &str = "/v1/account";
 pub const REPORT: &str = "/v1/report";
 /// `POST`: feedback on the app, for the operator (spec 6.3).
 pub const FEEDBACK: &str = "/v1/feedback";
+/// The account's storage, sealed (spec 6.9).
+pub const STORAGE: &str = "/v1/storage";
 /// Photos and videos, encrypted (spec 6.8).
 pub const BLOBS: &str = "/v1/blobs";
 
@@ -332,6 +334,16 @@ impl Feedback {
             _ => Err(crate::Error::Format),
         }
     }
+}
+
+/// The account's storage (spec 6.9): `GET /v1/storage` answers it, `PUT /v1/storage` replaces it. Sealed by the
+/// client under a key the hub never has. `version` is the hub's: in a `PUT` the version it replaces (0: none yet),
+/// which must be the hub's current one, else `409` with the current one; in an answer, the one stored.
+#[derive(Debug, Clone, PartialEq, Eq, TlsSerialize, TlsDeserializeBytes, TlsSize)]
+pub struct Storage {
+    pub version: u64,
+    /// At most `MAX_STORAGE_LEN` bytes.
+    pub data: VLBytes,
 }
 
 /// The body of a `409` to a delivery: the user's current account key and devices (spec 4.6).

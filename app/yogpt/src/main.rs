@@ -6,7 +6,9 @@
 //!
 //! Pictures: with `--replies`, a photo or video sent to it is answered with one picture from DIR (files named like
 //! `007.jpg`, read as they are there at the time, at most 512 KB each), and one Yo in five it answers carries one
-//! (`--picture-every N`: one in N; 1 always, 0 never). Without it, Yos only.
+//! (`--picture-every N`: one in N; 1 always, 0 never). Without it, Yos only. Each picture is drawn uniformly at random,
+//! leaving out the last `RECENT_PICTURES` that sender got (remembered in memory only, for at most `MAX_REMEMBERED`
+//! senders) while others are left.
 //!
 //! The username defaults to YOGPT; once registered, the account keeps the name it has, whatever is given later.
 //! Each account has its own client, state directory, threads and limits. Its first run registers the username with a
@@ -60,6 +62,10 @@ const PICTURE_EVERY: u64 = 5;
 const MAX_PICTURE: u64 = 512 * 1024;
 /// Files looked at in the replies directory, at most.
 const MAX_PICTURES_LISTED: usize = 1000;
+/// Pictures sent to one sender that are not sent to them again while others are left.
+const RECENT_PICTURES: usize = 50;
+/// Senders whose recent pictures are remembered, at most; the one remembered longest is forgotten first.
+const MAX_REMEMBERED: usize = 1000;
 /// Blobs of photos and videos sent to it, waiting to be fetched into nothing.
 const MAX_DRAINING: usize = 64;
 
@@ -120,11 +126,19 @@ fn secret(path: &Path) -> std::io::Result<[u8; 32]> {
     }
 }
 
-/// Uniform in `low..=high`, from the system's random source.
+/// Uniform in `low..=high`, from the system's random source (without modulo bias: draws past the last whole multiple
+/// of the span are drawn again).
 fn uniform(low: u64, high: u64) -> u64 {
-    let mut bytes = [0u8; 8];
-    getrandom::getrandom(&mut bytes).expect("random");
-    low + u64::from_le_bytes(bytes) % (high - low + 1)
+    let span = high - low + 1;
+    let zone = u64::MAX - u64::MAX % span;
+    loop {
+        let mut bytes = [0u8; 8];
+        getrandom::getrandom(&mut bytes).expect("random");
+        let draw = u64::from_le_bytes(bytes);
+        if draw < zone {
+            return low + draw % span;
+        }
+    }
 }
 
 /// How many Yos for a percentile `p` in 0..100, by `YOS`.
@@ -187,26 +201,70 @@ fn jpeg_size(bytes: &[u8]) -> Option<(u16, u16)> {
     None
 }
 
-/// One reply picture at random from the directory as it is now: its bytes, width and height.
-fn pick_picture(dir: &Path) -> Option<(Vec<u8>, u16, u16)> {
-    let names: Vec<PathBuf> = std::fs::read_dir(dir)
+/// The reply pictures each sender got last (file names), bounded: `RECENT_PICTURES` per sender, `MAX_REMEMBERED`
+/// senders.
+#[derive(Default)]
+struct Recent {
+    by_sender: HashMap<String, VecDeque<String>>,
+    /// Senders in the order they were first remembered.
+    order: VecDeque<String>,
+}
+
+impl Recent {
+    fn of(&self, user: &str) -> Option<&VecDeque<String>> {
+        self.by_sender.get(user)
+    }
+
+    fn sent(&mut self, user: &str, name: String) {
+        if !self.by_sender.contains_key(user) {
+            if self.order.len() >= MAX_REMEMBERED {
+                if let Some(oldest) = self.order.pop_front() {
+                    self.by_sender.remove(&oldest);
+                }
+            }
+            self.order.push_back(user.to_owned());
+        }
+        let list = self.by_sender.entry(user.to_owned()).or_default();
+        list.push_back(name);
+        while list.len() > RECENT_PICTURES {
+            list.pop_front();
+        }
+    }
+}
+
+/// Which of `names` to send, uniform among those not in `recent`; when every one is (fewer pictures than
+/// `RECENT_PICTURES`), among all but the last one sent.
+fn choose(names: &[String], recent: Option<&VecDeque<String>>) -> Option<usize> {
+    let seen = |name: &String| recent.is_some_and(|r| r.contains(name));
+    let mut pool: Vec<usize> = (0..names.len()).filter(|&i| !seen(&names[i])).collect();
+    if pool.is_empty() {
+        let last = recent.and_then(|r| r.back());
+        pool = (0..names.len()).filter(|&i| Some(&names[i]) != last).collect();
+    }
+    if pool.is_empty() {
+        pool = (0..names.len()).collect();
+    }
+    let last = pool.len().checked_sub(1)? as u64;
+    Some(pool[uniform(0, last) as usize])
+}
+
+/// One reply picture at random from the directory as it is now, not one of `recent` while others are left: its file
+/// name, bytes, width and height.
+fn pick_picture(dir: &Path, recent: Option<&VecDeque<String>>) -> Option<(String, Vec<u8>, u16, u16)> {
+    let names: Vec<String> = std::fs::read_dir(dir)
         .ok()?
         .take(MAX_PICTURES_LISTED)
-        .filter_map(|entry| entry.ok())
-        .filter(|entry| entry.file_name().to_str().is_some_and(picture_name))
-        .map(|entry| entry.path())
+        .filter_map(|entry| entry.ok()?.file_name().into_string().ok())
+        .filter(|name| picture_name(name))
         .collect();
-    if names.is_empty() {
-        return None;
-    }
-    let path = &names[uniform(0, names.len() as u64 - 1) as usize];
+    let name = names.get(choose(&names, recent)?)?;
     let mut bytes = Vec::new();
-    std::fs::File::open(path).ok()?.take(MAX_PICTURE + 1).read_to_end(&mut bytes).ok()?;
+    std::fs::File::open(dir.join(name)).ok()?.take(MAX_PICTURE + 1).read_to_end(&mut bytes).ok()?;
     if bytes.is_empty() || bytes.len() as u64 > MAX_PICTURE {
         return None;
     }
     let (width, height) = jpeg_size(&bytes).unwrap_or((720, 1280));
-    Some((bytes, width, height))
+    Some((name.clone(), bytes, width, height))
 }
 
 /// `NAME=HUB,DIR[,USERNAME]`.
@@ -254,6 +312,8 @@ struct Bot {
     /// Senders being answered, with the answers still owed to each, the one under way first: true for an answer to
     /// a photo or video.
     pending: Mutex<HashMap<String, VecDeque<(bool, u64)>>>,
+    /// The pictures each sender got last, not sent to them again soon.
+    recent: Mutex<Recent>,
     dropped: AtomicU64,
     dropped_logged_s: AtomicU64,
 }
@@ -435,7 +495,6 @@ fn main() {
     std::process::exit(1);
 }
 
-/// Serves one account until it stops.
 /// The operator's mailbox: `NAME.anything.jpg` dropped into the account's `outbox` (root only, on the server) goes
 /// to NAME as a photo with its Yo, then the file is removed; one that could not go is renamed `.failed`.
 fn mailbox(bot: &Bot, dir: &Path, events: &SyncSender<Event>) {
@@ -471,6 +530,7 @@ fn mailbox(bot: &Bot, dir: &Path, events: &SyncSender<Event>) {
     }
 }
 
+/// Serves one account until it stops.
 fn serve(account: &Account, options: Options) {
     let Some(client) = open(account) else { return };
     let (draining, to_drain) = sync_channel(MAX_DRAINING);
@@ -483,6 +543,7 @@ fn serve(account: &Account, options: Options) {
         client: Mutex::new(client),
         stopped: AtomicBool::new(false),
         pending: Mutex::default(),
+        recent: Mutex::default(),
         dropped: AtomicU64::new(0),
         dropped_logged_s: AtomicU64::new(0),
     });
@@ -616,9 +677,15 @@ fn answer(bot: &Bot, user: &str, events: &SyncSender<Event>, to_picture: bool) {
 
 /// A Yo with a reply picture; a plain one when there is none or the hub takes no picture now. True when it had one.
 fn send_picture(bot: &Bot, user: &str) -> Result<(Vec<Event>, bool), Error> {
-    let picked = bot.options.replies.as_deref().and_then(pick_picture);
-    let Some((bytes, width, height)) = picked else { return bot.client().send_yo(user).map(|e| (e, false)) };
-    send_this_picture(bot, user, &bytes, width, height)
+    let recent = bot.recent.lock().unwrap_or_else(PoisonError::into_inner).of(user).cloned();
+    let picked = bot.options.replies.as_deref().and_then(|dir| pick_picture(dir, recent.as_ref()));
+    let Some((name, bytes, width, height)) = picked else { return bot.client().send_yo(user).map(|e| (e, false)) };
+    let sent = send_this_picture(bot, user, &bytes, width, height);
+    // Only a picture that went counts against a repeat: a plain Yo instead keeps the sender's last 50 as they were.
+    if matches!(sent, Ok((_, true))) {
+        bot.recent.lock().unwrap_or_else(PoisonError::into_inner).sent(user, name);
+    }
+    sent
 }
 
 /// A Yo with this picture; a plain one when the hub takes no picture now. True when it had the picture.
@@ -683,12 +750,13 @@ mod tests {
         assert_eq!(jpeg_size(b"not a jpeg"), None);
         let dir = std::env::temp_dir().join(format!("yogpt-pick-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
-        assert!(pick_picture(&dir).is_none(), "nothing there");
+        assert!(pick_picture(&dir, None).is_none(), "nothing there");
         std::fs::write(dir.join("001.jpg"), vec![0u8; MAX_PICTURE as usize + 1]).unwrap();
-        assert!(pick_picture(&dir).is_none(), "too large");
+        assert!(pick_picture(&dir, None).is_none(), "too large");
         std::fs::write(dir.join("001.jpg"), jpeg).unwrap();
         std::fs::write(dir.join("notes.txt"), b"x").unwrap();
-        assert_eq!(pick_picture(&dir).map(|(b, w, h)| (b.len(), w, h)), Some((jpeg.len(), 720, 1280)));
+        let picked = pick_picture(&dir, None).map(|(n, b, w, h)| (n, b.len(), w, h));
+        assert_eq!(picked, Some(("001.jpg".to_owned(), jpeg.len(), 720, 1280)));
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
@@ -698,5 +766,66 @@ mod tests {
             assert!((300..=1000).contains(&uniform(300, 1000)));
         }
         assert!((0..1000).map(|_| uniform(0, 99)).any(|p| p == 0));
+    }
+
+    #[test]
+    fn every_picture_comes_up_about_equally_often() {
+        let names: Vec<String> = (1..=20).map(|i| format!("{i:03}.jpg")).collect();
+        let mut counts = [0u32; 20];
+        for _ in 0..20_000 {
+            counts[choose(&names, None).unwrap()] += 1;
+        }
+        // 1000 expected each, a standard deviation of about 31.
+        assert!(counts.iter().all(|&c| (850..=1150).contains(&c)), "{counts:?}");
+        assert_eq!(choose(&[], None), None);
+    }
+
+    #[test]
+    fn no_picture_again_to_the_same_sender_within_the_last_fifty() {
+        let names: Vec<String> = (1..=200).map(|i| format!("{i:03}.jpg")).collect();
+        let mut recent = Recent::default();
+        let mut sent: Vec<usize> = Vec::new();
+        let mut counts = [0u32; 200];
+        for _ in 0..20_000 {
+            let i = choose(&names, recent.of("a")).unwrap();
+            assert!(!sent.iter().rev().take(RECENT_PICTURES).any(|&j| j == i), "{} again within 50", names[i]);
+            recent.sent("a", names[i].clone());
+            sent.push(i);
+            counts[i] += 1;
+        }
+        // Still uniform overall: 100 expected each.
+        assert!(counts.iter().all(|&c| (60..=140).contains(&c)), "{counts:?}");
+        // Another sender is not held back by what "a" got.
+        assert!(recent.of("b").is_none());
+
+        // Fewer pictures than the window: never the same twice in a row, and every one comes up.
+        let few = &names[..5];
+        let mut recent = Recent::default();
+        let (mut last, mut seen) = (None, [false; 5]);
+        for _ in 0..1000 {
+            let i = choose(few, recent.of("a")).unwrap();
+            assert_ne!(Some(i), last);
+            recent.sent("a", few[i].clone());
+            (last, seen[i]) = (Some(i), true);
+        }
+        assert!(seen.iter().all(|&s| s));
+        let one = &names[..1];
+        assert_eq!(choose(one, recent.of("a")), Some(0), "a single picture is still sent");
+    }
+
+    #[test]
+    fn recent_pictures_stay_bounded() {
+        let mut recent = Recent::default();
+        for i in 0..MAX_REMEMBERED + 10 {
+            for j in 0..RECENT_PICTURES + 5 {
+                recent.sent(&format!("user{i}"), format!("{j:03}.jpg"));
+            }
+        }
+        assert_eq!(recent.by_sender.len(), MAX_REMEMBERED);
+        assert_eq!(recent.order.len(), MAX_REMEMBERED);
+        assert!(recent.of("user0").is_none(), "the oldest sender forgotten");
+        let last = recent.of(&format!("user{}", MAX_REMEMBERED + 9)).unwrap();
+        assert_eq!(last.len(), RECENT_PICTURES);
+        assert_eq!(last.front().map(String::as_str), Some("005.jpg"));
     }
 }

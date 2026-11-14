@@ -84,6 +84,15 @@ struct SecureNameSheet: View {
     } bottom: {
       PrimaryButton("Sign In", busy: busy) { Task { await checkPasskey() } }
         .disabled(busy)
+      // A password manager that cannot do it (no PRF): on without the passkey, to the recovery key.
+      Button("Skip") {
+        skipped = true
+        created = false
+        accounts.declinePasskey()  // as the first page's Skip: not asked again
+        next()
+      }
+      .font(.yo(17))
+      .disabled(busy)
       Note(problem)
     }
   }
@@ -163,6 +172,10 @@ struct SecureNameSheet: View {
   /// The words as the card (an image) and as text, to the share sheet. Once saved somewhere, they also secure the
   /// account if nothing did yet, and the guide goes on.
   private func save() {
+    // Words missing here (a secured account brought back without them): nothing to draw.
+    guard words.count == 12 else {
+      return problem = "Your recovery key isn’t on this iPhone."
+    }
     let name = accounts.account?.username ?? ""
     let renderer = ImageRenderer(content: RecoveryCard(name: name, words: words))
     renderer.scale = 3

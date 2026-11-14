@@ -5,17 +5,18 @@
 # Runs with the host's rustup (the toolchain of rust-toolchain.toml, plus `rustup target add aarch64-apple-ios`):
 # on Linux against the darwin Swift SDK of omarchy-apple-dev, on macOS (CI) against Xcode's iPhoneOS SDK. No C
 # compiler is needed: the core has no C dependencies. dev/push.sh calls it before the app's build.
+# YO_CORE_TARGET=aarch64-apple-ios-sim builds it for the Simulator on a Mac instead (dev/sim.sh).
 set -euo pipefail
 here=$(cd "$(dirname "$0")" && pwd)
 [ -f "$here/local.env" ] && . "$here/local.env"
 root=$(cd "$here/../../.." && pwd)
 app="$root/app/ios/YoApp"
 out="$app/build/core"
-target=aarch64-apple-ios
+target=${YO_CORE_TARGET:-aarch64-apple-ios}
 PATH="$HOME/.cargo/bin:$PATH"
 
 if [ "$(uname)" = Darwin ]; then
-  sdk=$(xcrun --sdk iphoneos --show-sdk-path)
+  sdk=$(xcrun --sdk "$([ "$target" = aarch64-apple-ios-sim ] && echo iphonesimulator || echo iphoneos)" --show-sdk-path)
 else
   sdk=$(swift sdk configure --show-configuration darwin arm64-apple-ios | sed -n 's/^sdkRootPath: //p')
 fi
@@ -43,7 +44,9 @@ mv "$out/gen/yo.swift" "$out/swift/"
 
 # The xcframework by hand (no xcodebuild here): one static library for arm64 iOS, its header and module map.
 fw="$out/yoFFI.xcframework"
-lib_dir="$fw/ios-arm64"
+slice=ios-arm64
+[ "$target" = aarch64-apple-ios-sim ] && slice=ios-arm64-simulator
+lib_dir="$fw/$slice"
 mkdir -p "$lib_dir/Headers"
 cp "$lib" "$lib_dir/libyo.a"
 # Rust's compiler_builtins brings compiler-rt's C members (atomics, __muldc3 ...), which the app's link also takes
@@ -71,7 +74,9 @@ cp "$out/gen/yoFFI.h" "$lib_dir/Headers/"
 # SwiftPM looks for module.modulemap; UniFFI names it after the module.
 cp "$out/gen/yoFFI.modulemap" "$lib_dir/Headers/module.modulemap"
 rm -r "$out/gen"
-cat > "$fw/Info.plist" <<'EOF'
+variant=
+[ "$slice" = ios-arm64-simulator ] && variant='<key>SupportedPlatformVariant</key><string>simulator</string>'
+cat > "$fw/Info.plist" <<EOF
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
@@ -84,7 +89,7 @@ cat > "$fw/Info.plist" <<'EOF'
 			<key>HeadersPath</key>
 			<string>Headers</string>
 			<key>LibraryIdentifier</key>
-			<string>ios-arm64</string>
+			<string>$slice</string>
 			<key>LibraryPath</key>
 			<string>libyo.a</string>
 			<key>SupportedArchitectures</key>
@@ -93,6 +98,7 @@ cat > "$fw/Info.plist" <<'EOF'
 			</array>
 			<key>SupportedPlatform</key>
 			<string>ios</string>
+			$variant
 		</dict>
 	</array>
 	<key>CFBundlePackageType</key>
