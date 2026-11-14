@@ -504,10 +504,23 @@ impl YoClient {
 
     /// A message, its way to the hub without holding the client where it can (`send_yo`).
     fn send_content(&self, to: String, content: Content) -> Result<Vec<YoEvent>, YoError> {
+        let to = self.user_for(to)?;
         match self.with(|c| c.send_begin(&to, content.clone()))? {
             Some(deliveries) => self.deliver_from(deliveries),
             None => events(self.with(|c| c.send(&to, content))?),
         }
+    }
+
+    /// The user id a send goes to: a name is asked of the hub, never taken as this device knew it (it may have
+    /// changed hands, spec 4.2), without holding the client. `NotOnYo`: nobody by that name.
+    fn user_for(&self, to: String) -> Result<String, YoError> {
+        if Client::is_user_id(&to) {
+            return Ok(to);
+        }
+        let whois = self.with(|c| c.whois_begin(&to))??;
+        let (user, username) = whois.send()?;
+        self.with(|c| c.whois_end(&to, &user, username))??;
+        Ok(user)
     }
 
     /// Posts deliveries without holding the client, and what may go after them, until done.

@@ -1069,7 +1069,19 @@ impl Client {
             }
         }
         if let Some(handle) = handle {
-            note_handle(self.state.contacts.get_mut(user).expect("inserted"), handle);
+            self.take_handle(user, handle);
+        }
+    }
+
+    /// A handle the hub says is this user's now: no other contact is known by it any more (it was theirs once).
+    fn take_handle(&mut self, user: &str, shown: String) {
+        for (other, contact) in self.state.contacts.iter_mut() {
+            if other != user {
+                contact.handles.retain(|h| !same_handle(h, &shown));
+            }
+        }
+        if let Some(contact) = self.state.contacts.get_mut(user) {
+            note_handle(contact, shown);
         }
     }
 
@@ -2346,20 +2358,7 @@ impl Client {
             Err(error) if retryable(&error) => {}
             Err(error) => return Err(error),
         }
-        let mut user = self.known_user(&handle);
-        // A handle this device does not know may still name a contact (someone who wrote first is known by user id
-        // only): ask who it is, without spending a KeyPackage, so the existing chat is used and not a second one.
-        if user.is_none() && handle.kind != KIND_USER && !self.state.contacts.is_empty() {
-            let (found, username) = self.lookup_named(&handle, false, Vec::new())?;
-            let id = hex(&found.user_id);
-            if id == self.state.user_id {
-                return Err(Error::Protocol("sending to oneself"));
-            }
-            if let Some(contact) = self.state.contacts.get_mut(&id) {
-                note_handle(contact, username.unwrap_or_else(|| handle.display()));
-            }
-            user = Some(id);
-        }
+        let user = self.send_target(&handle)?;
         self.check_sendable(user.as_deref())?;
         let (peer, group) = match user.as_ref().and_then(|u| self.chat_with(u).map(|g| (u.clone(), g))) {
             Some(chat) => chat,
@@ -2383,6 +2382,28 @@ impl Client {
         self.check_sendable(Some(&peer))
     }
 
+    /// The user a send to `handle` goes to: a user id as it is; a username as the hub says now (who it is only,
+    /// without spending a KeyPackage), never as this device knew it, since a name may have changed hands since (3.3).
+    /// So someone who wrote first, known by user id only, is found by name too, in the chat there is. `None`: no
+    /// contacts yet, the new chat's lookup asks.
+    pub(crate) fn send_target(&mut self, handle: &Handle) -> Result<Option<String>> {
+        if handle.kind == KIND_USER {
+            return Ok(Some(hex(handle.value.as_slice())));
+        }
+        if self.state.contacts.is_empty() {
+            return Ok(None);
+        }
+        let (found, username) = self.lookup_named(handle, false, Vec::new())?;
+        let id = hex(&found.user_id);
+        if id == self.state.user_id {
+            return Err(Error::Protocol("sending to oneself"));
+        }
+        if self.state.contacts.contains_key(&id) {
+            self.take_handle(&id, username.unwrap_or_else(|| handle.display()));
+        }
+        Ok(Some(id))
+    }
+
     /// Whether a message may go to a contact: not blocked, not waiting for a confirmation, not gone.
     fn check_sendable(&self, user: Option<&str>) -> Result<()> {
         match user.and_then(|u| self.state.contacts.get(u)) {
@@ -2403,7 +2424,12 @@ impl Client {
     /// for other devices is repaired in `send_end`. `None`, with nothing changed: `send` it instead.
     pub fn send_begin(&mut self, to: &str, content: Content) -> Option<Deliveries> {
         let handle = Handle::parse(to).ok()?;
-        if self.is_me(&handle) || matches!(content, Content::Unknown(_)) || (self.clock)() > self.inbox_fresh_until {
+        // By user id only: a name is asked of the hub (`send_target`).
+        if handle.kind != KIND_USER
+            || self.is_me(&handle)
+            || matches!(content, Content::Unknown(_))
+            || (self.clock)() > self.inbox_fresh_until
+        {
             return None;
         }
         let user = self.known_user(&handle)?;
@@ -2642,6 +2668,23 @@ impl Client {
         // The time signed saved before the request leaves: another process of this device signs later.
         self.persist()?;
         Ok(Whois { transport: self.transport.clone(), headers, body, me: self.state.user_id.clone() })
+    }
+
+    /// Takes in what `Whois::send` said a name is before a send to it by user id (the app's way to send to a name
+    /// without holding the client, spec 4.2): a contact is known by the name from now on, and no other contact any
+    /// more.
+    pub fn whois_end(&mut self, name: &str, user: &str, username: Option<String>) -> Result<()> {
+        let Ok(handle) = Handle::parse(name) else { return Ok(()) };
+        if !self.state.contacts.contains_key(user) {
+            return Ok(());
+        }
+        self.take_handle(user, username.unwrap_or_else(|| handle.display()));
+        self.persist()
+    }
+
+    /// Whether `to` names a user by its id (hex), not by a name.
+    pub fn is_user_id(to: &str) -> bool {
+        Handle::parse(to).is_ok_and(|handle| handle.kind == KIND_USER)
     }
 
     /// The user a handle names: known to this device, else asked of the hub (who it is only, no KeyPackage); with

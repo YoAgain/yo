@@ -156,18 +156,7 @@ impl Client {
             Err(error) if !crate::retryable(&error) => return Err(error),
             _ => {}
         }
-        let mut user = self.known_user(&handle);
-        if user.is_none() && handle.kind != yo_wire::handle::KIND_USER && !self.state.contacts.is_empty() {
-            let (found, username) = self.lookup_named(&handle, false, Vec::new())?;
-            let id = crate::state::hex(&found.user_id);
-            if id == self.state.user_id {
-                return Err(Error::Protocol("sending to oneself"));
-            }
-            if let Some(contact) = self.state.contacts.get_mut(&id) {
-                crate::note_handle(contact, username.unwrap_or_else(|| handle.display()));
-            }
-            user = Some(id);
-        }
+        let user = self.send_target(&handle)?;
         self.check_sendable(user.as_deref())?;
         let user = match user.filter(|u| self.chat_with(u).is_some()) {
             Some(user) => user,
