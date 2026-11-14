@@ -48,8 +48,12 @@ const LAST_RESORT_EVERY_MS: u64 = 30 * 24 * 3600 * 1000;
 const RETIRED_KEY_PACKAGE_KEPT_MS: u64 = 31 * 24 * 3600 * 1000;
 /// Envelope hashes remembered against redelivery.
 const SEEN: usize = 2000;
+/// Messages sent in a chat kept to send again if the peer restarts it (spec 4.9).
+const KEPT_FOR_RESTART: usize = 64;
 /// How often a registration whose answer did not come is tried again, with the same account key.
 const REGISTER_TRIES: usize = 2;
+/// Commits fetched at most for one message from a later epoch.
+const MAX_COMMITS_FETCHED: usize = 64;
 /// How often a send repairs groups and tries again before it leaves the rest to the next call.
 const REPAIR_ROUNDS: usize = 3;
 
@@ -319,6 +323,7 @@ fn stored(event: Event) -> StoredEvent {
         Content::Location { lat_e7, lon_e7 } => StoredContent::Location { lat_e7, lon_e7 },
         Content::Profile { name } => StoredContent::Profile(name),
         Content::Unknown(kind) => StoredContent::Unknown(kind),
+        Content::Restart { .. } => StoredContent::Unknown(yo_wire::content::TYPE_RESTART),
     };
     match event {
         Event::NewChat { user } => StoredEvent::NewChat { user },
@@ -1172,6 +1177,10 @@ impl Client {
                 needs_update: false,
                 inflight: None,
                 no_updates: false,
+                sent: VecDeque::new(),
+                last_seen_ms: 0,
+                lost: false,
+                restarted: false,
             },
         );
         self.enqueue(&group, &[peer.to_owned()], &sealed, None);
@@ -1289,6 +1298,13 @@ impl Client {
                 return Ok(());
             }
             let response = self.unsigned("GET", &api::commit_fetch_path(&id, current), &[], &[])?;
+            if response.status == status::NOT_FOUND {
+                // The commit is gone from the hub: this device cannot follow the group any more (4.9).
+                if let Some(chat) = self.state.chats.get_mut(&group_key(group_id)) {
+                    chat.lost = true;
+                }
+                return Ok(());
+            }
             if response.status != status::OK {
                 return Err(refused(&response));
             }
@@ -1296,6 +1312,123 @@ impl Client {
             self.atomic(|c| c.receive(&sealed))?;
             // The same commit also comes through the inbox: then it is skipped as seen.
             self.remember(&sealed);
+        }
+        Ok(())
+    }
+
+    /// Fetches and processes the commits of a group from its epoch up to `epoch` (spec 4.3), for a message from an
+    /// epoch this device has not reached. False when one is gone from the hub: the group cannot be followed.
+    fn fetch_commits(&mut self, group_id: &GroupId, epoch: u64) -> Result<bool> {
+        let id: yo_wire::GroupId = group_id.as_slice().try_into().map_err(|_| Error::Protocol("group id"))?;
+        for _ in 0..MAX_COMMITS_FETCHED {
+            let current = self.load(group_id)?.epoch().as_u64();
+            if current >= epoch {
+                return Ok(true);
+            }
+            let response = self.unsigned("GET", &api::commit_fetch_path(&id, current), &[], &[])?;
+            match response.status {
+                status::OK => {}
+                status::NOT_FOUND => return Ok(false),
+                _ => return Err(refused(&response)),
+            }
+            self.receive(&response.body)?;
+            self.remember(&response.body);
+        }
+        Ok(self.load(group_id)?.epoch().as_u64() >= epoch)
+    }
+
+    /// Restarts every chat lost to this device (spec 4.9): a new group with the peer, the old one dropped; what was
+    /// waiting to go is sent there, and a `Restart` tells the peer what of theirs arrived last, so it sends the rest
+    /// again. "Not now" leaves it for the next call.
+    fn restart_lost(&mut self) -> Result<()> {
+        let lost: Vec<String> =
+            self.state.chats.iter().filter(|(_, chat)| chat.lost).map(|(key, _)| key.clone()).collect();
+        for key in lost {
+            let Some(old) = self.state.chats.get(&key).cloned() else { continue };
+            let peer = old.peer.clone();
+            if self.state.contacts.get(&peer).is_some_and(|c| c.blocked || c.gone) {
+                self.drop_chat(&key);
+                continue;
+            }
+            let restarted = self.start_chat(&Handle::user(&user_bytes(&peer)?)).map(|(_, group)| group);
+            let group = match restarted {
+                Ok(group) => group,
+                Err(error) if retryable(&error) => return Err(error),
+                Err(error) => {
+                    self.drop_one(format!("restart: {error}"));
+                    self.drop_chat(&key);
+                    continue;
+                }
+            };
+            let waiting = self.waiting_plaintexts(&key);
+            self.atomic(|c| {
+                let restart =
+                    Message { sent_at_ms: wall_ms(), content: Content::Restart { last_seen_ms: old.last_seen_ms } };
+                c.send_plaintext(&group, &restart.encode()?)?;
+                for plaintext in &waiting {
+                    c.send_plaintext(&group, plaintext)?;
+                }
+                if let Some(chat) = c.state.chats.get_mut(&group_key(&group)) {
+                    chat.restarted = true;
+                    chat.last_seen_ms = old.last_seen_ms;
+                }
+                Ok(())
+            })?;
+            self.drop_chat(&key);
+            // What the peer still sends there, before it takes in the restart, comes again in the new chat.
+            if let Some(id) = unhex(&key).and_then(|id| <[u8; 32]>::try_from(id).ok()) {
+                self.ignore(id);
+            }
+        }
+        Ok(())
+    }
+
+    /// The messages of a chat still in the outbox, in order, once each (one envelope per recipient).
+    fn waiting_plaintexts(&self, key: &str) -> Vec<Vec<u8>> {
+        let mut seen = BTreeSet::new();
+        self.state
+            .outbox
+            .iter()
+            .filter(|item| item.group == key)
+            .filter_map(|item| item.plaintext.clone())
+            .filter(|plaintext| seen.insert(plaintext.clone()))
+            .collect()
+    }
+
+    /// The peer restarted the chat in `group` (spec 4.9): the older chats with it go, and what was sent in them after
+    /// the last message the peer saw is sent again here, with what was still waiting to go.
+    fn restarted_by_peer(&mut self, group: &GroupId, peer: &str, last_seen_ms: u64) -> Result<()> {
+        let key = group_key(group);
+        let older: Vec<String> = self
+            .state
+            .chats
+            .iter()
+            .filter(|(k, chat)| chat.peer == peer && **k != key && !chat.restarted)
+            .map(|(k, _)| k.clone())
+            .collect();
+        let mut again = Vec::new();
+        for old in &older {
+            let unseen = self.state.chats[old].sent.iter().filter(|plaintext| {
+                Message::decode(plaintext).is_ok_and(|m| {
+                    m.sent_at_ms > last_seen_ms
+                        && !matches!(m.content, Content::Profile { .. } | Content::Restart { .. })
+                })
+            });
+            again.extend(unseen.cloned());
+            for plaintext in self.waiting_plaintexts(old) {
+                if !again.contains(&plaintext) {
+                    again.push(plaintext);
+                }
+            }
+        }
+        if let Some(chat) = self.state.chats.get_mut(&key) {
+            chat.restarted = true;
+        }
+        for old in older {
+            self.drop_chat(&old);
+        }
+        for plaintext in again {
+            self.send_plaintext(group, &plaintext)?;
         }
         Ok(())
     }
@@ -1375,6 +1508,12 @@ impl Client {
         let peer = self.state.chats.get(&group_key(group_id)).ok_or(Error::Protocol("unknown group"))?.peer.clone();
         let users = self.recipients(&group, &peer);
         self.enqueue(&group, &users, &sealed, Some(plaintext));
+        if let Some(chat) = self.state.chats.get_mut(&group_key(group_id)) {
+            chat.sent.push_back(plaintext.to_vec());
+            if chat.sent.len() > KEPT_FOR_RESTART {
+                chat.sent.pop_front();
+            }
+        }
         Ok(())
     }
 
@@ -1822,6 +1961,10 @@ impl Client {
                 needs_update: true,
                 inflight: None,
                 no_updates: false,
+                sent: VecDeque::new(),
+                last_seen_ms: 0,
+                lost: false,
+                restarted: false,
             },
         );
         self.push_event(Event::NewChat { user: peer });
@@ -1844,6 +1987,14 @@ impl Client {
         if message_epoch < joined {
             return Ok(());
         }
+        // From an epoch this device has not reached: the commits it lacks are fetched from the hub (4.3); gone
+        // from there (past their 30 days), the chat is lost to this device and restarted (4.9).
+        if message_epoch > self.load(&group_id)?.epoch().as_u64() && !self.fetch_commits(&group_id, message_epoch)? {
+            if let Some(chat) = self.state.chats.get_mut(&key) {
+                chat.lost = true;
+            }
+            return Ok(());
+        }
         let mut group = self.load(&group_id)?;
         let before = Self::members(&group);
         let group_epoch = group.epoch().as_u64();
@@ -1858,6 +2009,17 @@ impl Client {
             ProcessedMessageContent::ApplicationMessage(application) => {
                 let message = Message::decode(&application.into_bytes())?;
                 if self.state.contacts.get(&peer).is_some_and(|c| c.blocked) {
+                    return Ok(());
+                }
+                if !from_me {
+                    if let Some(chat) = self.state.chats.get_mut(&key) {
+                        chat.last_seen_ms = chat.last_seen_ms.max(message.sent_at_ms);
+                    }
+                }
+                if let Content::Restart { last_seen_ms } = message.content {
+                    if !from_me {
+                        self.restarted_by_peer(&group_id, &peer, last_seen_ms)?;
+                    }
                     return Ok(());
                 }
                 let content = match message.content {
@@ -2011,7 +2173,7 @@ impl Client {
         }
         // Receive first: a commit waiting in the inbox would otherwise leave this message in an epoch the peer may
         // already have left. Offline, the message still goes into the outbox.
-        match self.deliver().and_then(|()| self.receive_all(0)) {
+        match self.deliver().and_then(|()| self.receive_all(0)).and_then(|()| self.restart_lost()) {
             Ok(()) => {}
             Err(error) if retryable(&error) => {}
             Err(error) => return Err(error),
@@ -2036,6 +2198,13 @@ impl Client {
             None => self.start_chat(&handle)?,
         };
         self.ensure_fresh(&group)?;
+        // Lost while it was brought up to date (a commit gone from the hub): restarted, the message goes there.
+        let group = if self.state.chats.get(&group_key(&group)).is_some_and(|c| c.lost) {
+            self.restart_lost()?;
+            self.chat_with(&peer).ok_or(Error::Internal("restarted chat"))?
+        } else {
+            group
+        };
         self.atomic(|c| c.send_in(&group, content, true))?;
         match self.deliver() {
             Ok(()) | Err(Error::Network(_)) => {}
@@ -2169,6 +2338,7 @@ impl Client {
         // The wait is over: the inbox is up to date only if its answer was taken in.
         self.inbox_fresh_until = if received.is_ok() { (self.clock)() + INBOX_FRESH_MS } else { 0 };
         let result = received
+            .and_then(|()| self.restart_lost())
             .and_then(|()| self.refill())
             .and_then(|()| self.deliver())
             .and_then(|()| self.sync_storage_quietly());
@@ -2184,6 +2354,7 @@ impl Client {
     fn maintenance_inner(&mut self) -> Result<()> {
         self.deliver()?;
         self.receive_all(0)?;
+        self.restart_lost()?;
         self.refill()?;
         let groups: Vec<GroupId> = self.state.chats.keys().filter_map(|key| group_of(key)).collect();
         // One chat's trouble does not keep the others from their updates.

@@ -230,6 +230,8 @@ struct Msg {
     seq: u64,
     must: bool,
     got: u32,
+    /// The receiver's device that got it (its generation): another device of the user may show it again.
+    got_by: u32,
 }
 
 #[derive(Default)]
@@ -480,7 +482,15 @@ fn take_events(w: &World, a: &mut Acct, events: Vec<Event>, rng: &mut Rng) {
             w.stats.violation(format!("{tag}: from {sender} to {to}, received by {} from {from}", a.user));
             continue;
         }
+        if msg.got > 0 && msg.got_by != a.gen {
+            // Shown on the old phone, its answer lost to the sender, sent again to the new one: once per device.
+            msg.got_by = a.gen;
+            drop(ledger);
+            w.stats.count("received again on a new phone");
+            continue;
+        }
         msg.got += 1;
+        msg.got_by = a.gen;
         let (got, seq) = (msg.got, msg.seq);
         w.trace(&a.user, format!("got {tag} from {from} (#{seq})"));
         if got > 1 {
@@ -534,7 +544,7 @@ fn send_text(w: &World, a: &mut Acct, to: &str, by_name: Option<&str>, _rng: &mu
         let mut ledger = w.ledger();
         let blocked = ledger.blocks.contains(&(to.to_owned(), a.user.clone()));
         let must = alive && !blocked;
-        ledger.msgs.insert(tag.clone(), Msg { from: a.user.clone(), to: to.to_owned(), seq, must, got: 0 });
+        ledger.msgs.insert(tag.clone(), Msg { from: a.user.clone(), to: to.to_owned(), seq, must, got: 0, got_by: 0 });
     }
     let target = by_name.unwrap_or(to).to_owned();
     let result = a.client.as_mut().unwrap().send(&target, Content::Text(tag.clone()));
@@ -566,8 +576,16 @@ fn after_send(w: &World, a: &mut Acct, tag: &str, result: Result<Vec<Event>, Err
                 msg.must = false;
             }
             let to = w.ledger().msgs.get(tag).map(|m| m.to.clone());
-            let blocked = to.is_some_and(|to| a.blocked.contains(&to));
-            let expected = matches!(error, Error::NotOnYo) && !alive
+            // Blocked here, or by the storage just taken in (a new phone): the device's word counts.
+            let blocked = to.as_ref().is_some_and(|to| {
+                a.blocked.contains(to)
+                    || a.client.as_ref().is_some_and(|c| c.contacts().iter().any(|k| k.user == *to && k.blocked))
+            });
+            // Deleted meanwhile, by another thread: gone by now.
+            let gone_now = to.is_some_and(|to| {
+                idx_of(w, &to).is_none_or(|i| !w.dir.read().unwrap_or_else(PoisonError::into_inner)[i].alive)
+            });
+            let expected = matches!(error, Error::NotOnYo) && (!alive || gone_now)
                 || matches!(error, Error::Blocked) && blocked
                 || matches!(error, Error::Network(_))
                 || a.proc_.crashed.load(Relaxed);
@@ -593,7 +611,10 @@ fn note_error(w: &World, a: &Acct, what: &str, error: &Error) {
         Error::Network(_) => w.stats.count(format!("{what}: network")),
         Error::Refused(status) if *status == 429 || *status >= 500 => w.stats.count(format!("{what}: {status}")),
         _ if a.proc_.crashed.load(Relaxed) => w.stats.count(format!("{what}: during a crash")),
-        _ => w.stats.violation(format!("{} ({}) {what}: {error}", a.name, a.user)),
+        _ => {
+            w.stats.violation(format!("{} ({}) {what}: {error}", a.name, a.user));
+            w.dump(&a.user);
+        }
     }
 }
 
@@ -737,7 +758,9 @@ fn op_uploads(w: &World, a: &mut Acct, rng: &mut Rng) {
         {
             let mut ledger = w.ledger();
             let must = !ledger.blocks.contains(&(peer.user.clone(), a.user.clone()));
-            ledger.msgs.insert(tag.clone(), Msg { from: a.user.clone(), to: peer.user.clone(), seq, must, got: 0 });
+            ledger
+                .msgs
+                .insert(tag.clone(), Msg { from: a.user.clone(), to: peer.user.clone(), seq, must, got: 0, got_by: 0 });
         }
         let content =
             if rng.below(3) == 0 { Content::Video { media: m, duration_ms: 9_000 } } else { Content::Photo(m) };
@@ -892,9 +915,12 @@ fn op_new_phone(w: &World, a: &mut Acct, rng: &mut Rng) {
     a.proc_ = proc_;
     a.gen += 1;
     w.stats.count("new phone");
+    // The new phone's order starts anew: what was sent again to it may be older than what the old one saw.
+    w.ledger().last.retain(|(to, _), _| *to != a.user);
     w.trace(&a.user, "new phone".into());
     old.stop_persisting();
-    match definite(|| old.sync(0)) {
+    let answer = (0..10).map(|_| definite(|| old.sync(0))).find(|r| r.is_err()).unwrap_or(Ok(Vec::new()));
+    match answer {
         Err(Error::Replaced) => w.stats.count("old phone: 410"),
         // Its process died meanwhile: it asks nothing any more.
         Err(Error::Network(_)) if old_proc.crashed.load(Relaxed) => {}
@@ -925,7 +951,9 @@ fn op_delete(w: &World, a: &mut Acct, rng: &mut Rng) {
     }
     let mut old = a.client.take().unwrap();
     old.stop_persisting();
-    match definite(|| old.sync(0)) {
+    // Until the hub answers: a sync hands out what waited even when its request found no hub (finish_receiving).
+    let answer = (0..10).map(|_| definite(|| old.sync(0))).find(|r| r.is_err()).unwrap_or(Ok(Vec::new()));
+    match answer {
         Err(Error::Replaced) => {}
         other => w.stats.violation(format!("{}: a deleted account's device: {:?}", a.name, other.map(|_| ()))),
     }

@@ -49,6 +49,19 @@ pub struct Chat {
     /// The hub does not order commits for this group (it never registered it, or the token is not ours): the chat
     /// works, without updates.
     pub no_updates: bool,
+    /// The plaintexts of the last messages sent in this chat: sent again in a restarted chat (spec 4.9).
+    #[serde(default)]
+    pub sent: VecDeque<Vec<u8>>,
+    /// The `sent_at` of the last message received from the peer here: what a restart tells it.
+    #[serde(default)]
+    pub last_seen_ms: u64,
+    /// This device can no longer follow the group (a commit it lacks is gone from the hub): restarted at the next
+    /// chance (spec 4.9).
+    #[serde(default)]
+    pub lost: bool,
+    /// Made, or taken over, by a restart: it replaces the older chats with the peer.
+    #[serde(default)]
+    pub restarted: bool,
 }
 
 /// A commit on its way to the hub, with what to deliver once it is accepted.

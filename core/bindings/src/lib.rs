@@ -247,6 +247,8 @@ impl From<Content> for MessageKind {
             Content::Link(url) => MessageKind::Link { url },
             Content::Location { lat_e7, lon_e7 } => MessageKind::Location { lat_e7, lon_e7 },
             Content::Unknown(kind) => MessageKind::Unsupported { kind },
+            // Never an event (spec 4.9).
+            Content::Restart { .. } => MessageKind::Unsupported { kind: 6 },
         }
     }
 }
