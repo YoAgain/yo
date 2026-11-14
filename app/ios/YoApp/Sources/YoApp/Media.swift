@@ -126,8 +126,12 @@ final class MediaOutbox {
 
   /// Seals a photo or video for a friend and puts it in line, from `client`, the account the gesture began in (never
   /// from one signed in since); it goes as soon as the hub takes it. True once it is on disk, its blob and the queue.
-  func send(_ file: MediaFile, to friend: String, from client: YoClient?, accounts: AccountStore) async -> Bool {
+  /// `id`: one already in line is not put in again (a share taken in twice, the app ended before its note went).
+  func send(
+    _ file: MediaFile, to friend: String, from client: YoClient?, accounts: AccountStore, id: UUID = UUID()
+  ) async -> Bool {
     guard let client, client === accounts.client else { return false }
+    guard !items.contains(where: { $0.id == id }) else { return true }
     let width = UInt16(clamping: file.width)
     let height = UInt16(clamping: file.height)
     guard
@@ -135,8 +139,9 @@ final class MediaOutbox {
         (try sealMedia(plain: file.data, width: width, height: height), client.userId())
       })
     else { return false }
+    guard !items.contains(where: { $0.id == id }) else { return true }  // taken in meanwhile
     let item = Item(
-      id: UUID(), owner: owner, to: friend, kind: file.kind, media: StoredMedia(sealed.media),
+      id: id, owner: owner, to: friend, kind: file.kind, media: StoredMedia(sealed.media),
       durationMs: file.durationMs, created: .now)
     let blob = Self.blob(item.id)
     guard await MediaStorage.write(sealed.ciphertext, to: blob, .completeFileProtectionUntilFirstUserAuthentication)
@@ -312,8 +317,12 @@ final class MediaOutbox {
 /// Photos and videos that came, kept until seen once. Each is noted (with its key) before the core may forget its
 /// Yo, then fetched, a few at a time (each fetch counts at the hub, the last deletes the blob), opened and kept here
 /// with complete file protection; seen, it is deleted. A fetch the network breaks is tried again soon, and at once
-/// when the next Yo comes; one the hub no longer has is dropped. A download whose file does not write stays in memory
-/// and is written again, never fetched again. All of it on the main actor but the reading, writing and fetching.
+/// when the next Yo comes; after the last try it rests a while (a minute, doubling to half an hour) and the others go
+/// first. One the hub no longer has is dropped. A download whose file does not write stays in memory and is written
+/// again, never fetched again. What is noted and kept is one file (`media.json`), written whole: an item is noted
+/// or kept, never neither. It is read before anything else is done here; while it cannot be read (the iPhone locked
+/// since it started), nothing is written or deleted, and a note waits (the core keeps its Yo). All of it on the main
+/// actor but the reading, writing and fetching.
 @MainActor
 final class ReceivedMedia {
   static let shared = ReceivedMedia()
@@ -331,11 +340,21 @@ final class ReceivedMedia {
     let kind: MediaFile.Kind
   }
 
+  /// Noted and kept, in one file.
+  private struct Manifest: Codable {
+    var pending: [Pending] = []
+    var saved: [Saved] = []
+  }
+
   private var pending: [Pending] = []
   private var saved: [Saved] = []
+  /// The manifest has been read (or is not there): until then nothing here is written or deleted.
+  private var loaded = false
   private var fetching: Set<String> = []
   /// Fetches the network broke, each waiting for its next try: cancelled, it tries now.
   private var pauses: [String: Task<Void, Never>] = [:]
+  /// Fetches that used up their tries: not tried again before then, so they do not hold the others' turns.
+  private var resting: [String: (until: Date, rests: Int)] = [:]
   /// Downloads not written yet (the disk full): the hub may have deleted the blob with that fetch.
   private var unwritten: [String: Data] = [:]
   /// What fetches go by, as `fetchWaiting` was last given it: more start as others end.
@@ -350,19 +369,67 @@ final class ReceivedMedia {
   nonisolated private static let thumbnailPixels = 300
 
   private var directory: URL { MediaStorage.directory("Received") }
-  private var pendingIndex: URL { directory.appending(path: "pending.json") }
-  private var savedIndex: URL { directory.appending(path: "received.json") }
+  private var manifest: URL { directory.appending(path: "media.json") }
+  /// The two indexes of the builds before, read once into the manifest.
+  private var oldIndexes: [URL] { [directory.appending(path: "pending.json"), directory.appending(path: "received.json")] }
 
   private init() {
-    pending = (try? Data(contentsOf: pendingIndex)).flatMap { try? JSONDecoder().decode([Pending].self, from: $0) } ?? []
-    saved = (try? Data(contentsOf: savedIndex)).flatMap { try? JSONDecoder().decode([Saved].self, from: $0) } ?? []
-    // Seen but not deleted (the app ended while it showed), or written and never noted: gone now.
-    // A few files, once, before any fetch can write one.
-    let keep = Set(saved.map { file($0.id, $0.kind).lastPathComponent } + ["pending.json", "received.json"])
+    load()
+    // In front again, or unlocked: what rests, or waited for the files to open, is tried now.
+    for name in [UIApplication.didBecomeActiveNotification, UIApplication.protectedDataDidBecomeAvailableNotification] {
+      _ = NotificationCenter.default.addObserver(forName: name, object: nil, queue: .main) { _ in
+        MainActor.assumeIsolated { ReceivedMedia.shared.wake() }
+      }
+    }
+  }
+
+  private func wake() {
+    resting = [:]
+    startMore()
+  }
+
+  /// A file's bytes; nil when it is not there. Throws when it is there and does not read now (locked).
+  nonisolated private static func contents(_ url: URL) throws -> Data? {
+    guard FileManager.default.fileExists(atPath: url.path) else { return nil }
+    return try Data(contentsOf: url)
+  }
+
+  /// Reads the manifest, once; false while it cannot be read. Then a download whose file was written and not yet
+  /// noted as kept (the app ended in between) is kept, and what no note names (seen but not deleted, or a write cut
+  /// off) is deleted. A few files, once, before any fetch can write one.
+  @discardableResult
+  private func load() -> Bool {
+    if loaded { return true }
+    let decoder = JSONDecoder()
+    let found: Manifest
+    var migrated = false
+    do {
+      if let data = try Self.contents(manifest) {
+        found = (try? decoder.decode(Manifest.self, from: data)) ?? Manifest()
+      } else {
+        let (old, kept) = (try Self.contents(oldIndexes[0]), try Self.contents(oldIndexes[1]))
+        found = Manifest(
+          pending: old.flatMap { try? decoder.decode([Pending].self, from: $0) } ?? [],
+          saved: kept.flatMap { try? decoder.decode([Saved].self, from: $0) } ?? [])
+        migrated = old != nil || kept != nil
+      }
+    } catch {
+      return false
+    }
+    loaded = true
+    (pending, saved) = (found.pending, found.saved)
+    let written = pending.filter { FileManager.default.fileExists(atPath: file($0.id, $0.kind).path) }
+    pending.removeAll { one in written.contains { $0.id == one.id } }
+    saved += written.map { Saved(id: $0.id, from: $0.from, kind: $0.kind) }
+    if (migrated || !written.isEmpty) && store() {
+      oldIndexes.forEach { try? FileManager.default.removeItem(at: $0) }
+    }
+    let keep = Set(saved.map { file($0.id, $0.kind).lastPathComponent } + ([manifest] + oldIndexes).map(\.lastPathComponent))
     for url in (try? FileManager.default.contentsOfDirectory(at: directory, includingPropertiesForKeys: nil)) ?? []
     where !keep.contains(url.lastPathComponent) {
       try? FileManager.default.removeItem(at: url)
     }
+    return true
   }
 
   private func file(_ id: String, _ kind: MediaFile.Kind) -> URL {
@@ -370,19 +437,18 @@ final class ReceivedMedia {
     return directory.appending(path: safe + (kind == .photo ? ".jpg" : ".mp4"))
   }
 
-  /// Both indexes to disk; false when either did not write.
+  /// The manifest to disk, whole; false when it did not write (or was never read). Readable while the iPhone is
+  /// locked once it was unlocked after starting, so a Yo that comes then is noted (the photos and videos themselves
+  /// have complete protection).
   private func store() -> Bool {
-    guard let waiting = try? JSONEncoder().encode(pending), let kept = try? JSONEncoder().encode(saved) else {
-      return false
-    }
-    let first = (try? waiting.write(to: pendingIndex, options: [.atomic, .completeFileProtectionUntilFirstUserAuthentication])) != nil
-    let second = (try? kept.write(to: savedIndex, options: [.atomic, .completeFileProtection])) != nil
-    return first && second
+    guard loaded, let data = try? JSONEncoder().encode(Manifest(pending: pending, saved: saved)) else { return false }
+    return (try? data.write(to: manifest, options: [.atomic, .completeFileProtectionUntilFirstUserAuthentication])) != nil
   }
 
   /// A photo or video came: noted before the core may forget its Yo. False when the note did not write: the core then
   /// keeps the Yo (`Inbox.take`).
   func expect(_ media: YoMedia, id: String, from: String, kind: MediaFile.Kind) -> Bool {
+    guard load() else { return false }
     guard !pending.contains(where: { $0.id == id }), !saved.contains(where: { $0.id == id }) else { return true }
     pending.append(Pending(id: id, from: from, kind: kind, media: StoredMedia(media)))
     guard store() else {
@@ -402,14 +468,15 @@ final class ReceivedMedia {
   }
 
   private func startMore() {
-    guard let client, let arrived, !HubTransport.unsupported else { return }
-    for one in pending where !fetching.contains(one.id) && fetching.count < Self.together {
+    guard let client, let arrived, !HubTransport.unsupported, load() else { return }
+    for one in pending
+    where !fetching.contains(one.id) && fetching.count < Self.together && (resting[one.id]?.until ?? .distantPast) <= .now {
       fetching.insert(one.id)
       Task { await fetch(one, client: client, arrived: arrived) }
     }
   }
 
-  /// Tries again after 1, 3, 10 and 30 seconds (or sooner, see `fetchWaiting`); then with the next Yo or opening.
+  /// Tries again after 1, 3, 10 and 30 seconds (or sooner, see `fetchWaiting`); then it rests (`rest`).
   private static let retries = [0, 1, 3, 10, 30]
 
   private func fetch(_ one: Pending, client: YoClient, arrived: @MainActor (Arrival) -> Void) async {
@@ -443,10 +510,11 @@ final class ReceivedMedia {
       guard let data else {
         // The hub no longer has it, or it does not open: its Yo came without it.
         pending.removeAll { $0.id == one.id }
+        resting[one.id] = nil
         _ = store()
         return
       }
-      // The file, then the indexes; the note goes only once both are written.
+      // The file, then the manifest: kept once both are written (a start finds a written file that is only noted).
       let url = file(one.id, one.kind)
       guard await MediaStorage.write(data, to: url, .completeFileProtection) else {
         unwritten[one.id] = data
@@ -466,16 +534,39 @@ final class ReceivedMedia {
         continue
       }
       unwritten[one.id] = nil
-      if let arrival = await arrival(kept) { arrived(arrival) }
+      resting[one.id] = nil
+      let arrival = await arrival(kept)
+      // Signed out while the thumbnail was made: not for the account after it.
+      if let arrival, generation == self.generation { arrived(arrival) }
       return
+    }
+    rest(one.id)
+  }
+
+  /// Every try used up: the item rests a minute, then two, doubling to half an hour, and the others go meanwhile.
+  private func rest(_ id: String) {
+    let rests = (resting[id]?.rests ?? 0) + 1
+    let seconds = min(1800, 60 * pow(2, Double(min(rests - 1, 5))))
+    resting[id] = (Date.now + seconds, rests)
+    let generation = generation
+    Task { [weak self] in
+      try? await Task.sleep(for: .seconds(seconds))
+      guard let self, generation == self.generation else { return }
+      self.startMore()
     }
   }
 
-  /// What waits to be seen, after a restart, oldest sent first.
+  /// What waits to be seen, after a restart, oldest sent first. Once the files can be read: a start while the iPhone
+  /// is locked waits for it to be unlocked.
   func waiting() async -> [Arrival] {
+    while !(UIApplication.shared.isProtectedDataAvailable && load()) {
+      try? await Task.sleep(for: .seconds(5))
+    }
+    let generation = generation
     var arrivals: [Arrival] = []
     for one in saved {
       if let arrival = await arrival(one) { arrivals.append(arrival) }
+      guard generation == self.generation else { return [] }  // signed out meanwhile: not for the next account
     }
     return arrivals.sorted(by: Arrival.older)
   }
@@ -497,11 +588,13 @@ final class ReceivedMedia {
     _ = store()
   }
 
-  /// Signed out: nothing kept, nothing noted.
+  /// Signed out: nothing kept, nothing noted (the files went with MediaStorage.clearAll).
   func forgetAll() {
     generation += 1
     pending = []
     saved = []
+    loaded = true
+    resting = [:]
     unwritten = [:]
     client = nil
     arrived = nil
