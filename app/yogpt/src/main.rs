@@ -425,6 +425,16 @@ fn open(account: &Account) -> Option<Client> {
                 return Some(client);
             }
             Err(error) if retryable(&error) => backoff.wait(&error, &account.name),
+            // A state it cannot open (one from before the sessions, or damaged) is set aside as `state.old`; the account
+            // secret registers the account again as a new device, as the app does from the keychain.
+            Err(Error::State) if path.exists() => {
+                let old = account.state.join("state.old");
+                if let Err(error) = std::fs::rename(&path, &old) {
+                    log(format!("stopped: {}: {error}", path.display()));
+                    return None;
+                }
+                log(format!("{username}: state set aside as {}, registering again", old.display()));
+            }
             Err(error) => {
                 log(format!("stopped: {username} on {}: {}", account.hub, reason(&error)));
                 return None;
