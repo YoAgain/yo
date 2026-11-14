@@ -34,6 +34,25 @@ Every fix is in commit `3d1cb97` on the branch `chaos-security` (with its tests:
 | 7 | Low | A size in MiB from the environment large enough to overflow made the hub panic (debug) or wrap (release). | Fixed: refused as an error. |
 | 8 | Medium | **A backup record went to anyone who named its user id.** `GET /v1/backup/{id}` took no signature: every contact knows the user id (it is in the MLS credentials), so anyone could learn whether a user has a backup (has secured the name), roughly how large it is, and take the sealed record home to attack offline (128-bit doors, so only in theory). | Fixed: the fetch is signed (spec 6.2) by one of the record's two auth keys, Ed25519 keys derived from the passkey's PRF output and from the 12 words, which the record names; anything else is `404`, the same answer, and the same two signature checks, as for no record. Each signature once, within 5 minutes, as for devices. What K and the storage key seal is padded to 1, 4, 16 or 60 KiB, so the record's size tells little even to a door. Records stored before the auth keys are deleted when the hub starts; the apps make their backups anew (spec 7). Tests: `tests/tests/backup_auth.rs`. |
 
+### A second Codex review: durability and what a cut-off request leaves
+
+Checked one by one against the code, all held; fixed on the branch `hub-hardening`, each with its test.
+
+| What | Fix | Test |
+|---|---|---|
+| A push error's text named the request's URL, which holds the APNs device token, into the log. | Logged without the URL; a service's answer with the token taken out. | `push::tests` |
+| WAL with `synchronous = NORMAL` could lose an acknowledged delivery or commit to a power cut (spec 4.7). | `FULL`; an ack alone without its own sync (a lost ack is a repeat the device skips). Numbers in `tests/README.md`. | `db::tests` |
+| Registration did not keep the app the request names (`Yo-App`). | Kept from the registration on. | `tests/app_version.rs` |
+| A long poll cut off left its waiter in the map. | Forgotten when dropped. | `tests/robustness.rs` |
+| An inbox request gave its place back before its answer was sent. | Held by the answer's body. | `lib.rs` tests |
+| A device replaced after it authenticated could still set the username, KeyPackages, the push token. | Checked in the write's own transaction, `410`. | `db::tests` |
+| A commit fetched for an epoch the group never had (0, before its first) was `410`, which restarts the chat (4.9). | The group's first epoch is kept; `404` outside first..current. | `tests/robustness.rs`, `db::tests` (migration) |
+| The prune deleted the next-token hash that recognises a repeated commit (4.3). | Kept for good (`accepted`), the envelope 30 days. | `tests/robustness.rs` |
+| Blob fetches at once could pass the blob's count. | A fetch takes its count as it starts, gives it back if cut off. | `tests/blobs.rs`, `db::tests` |
+| A crash between a blob's row and its file left an id `409` to its retry and `404` to every fetch. | Not ready until the file is in place; removed at the next start or within the hour. | `lib.rs` tests, `db::tests` |
+| A delivery's wake and push depended on its request surviving. | Done by the writer once stored. | `lib.rs` tests |
+| SQLite calls blocked the async workers. | On blocking threads (32 at once); see the commit for what stays. | the whole suite, `yo-load` |
+
 ## Accepted risks and open points
 
 | Severity | What | Why it stays |
