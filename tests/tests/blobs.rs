@@ -147,6 +147,10 @@ fn an_upload_must_be_signed_whole_and_once() {
     let (media, sealed) = media::seal(&noise(5000), 10, 10).unwrap();
     let path = api::blob_put_path(&media.id, 1);
     let hash = (api::HEADER_BODY_HASH, yo_wire::b64(&media.sha256));
+    // Checked before anything else: a length (`411` without, sent chunked) of a tag at least (`400`).
+    let chunked = reqwest::blocking::Body::new(std::io::Cursor::new(sealed.clone()));
+    assert_eq!(status(client.put(format!("{url}{path}")).header(hash.0, &hash.1).body(chunked)), 411);
+    assert_eq!(status(client.put(format!("{url}{path}")).header(hash.0, &hash.1).body(vec![0; 15])), 400);
     // Unsigned.
     assert_eq!(status(client.put(format!("{url}{path}")).header(hash.0, &hash.1).body(sealed.clone())), 401);
     // A body that is not the signed one: refused, nothing kept.
