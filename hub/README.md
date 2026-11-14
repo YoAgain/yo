@@ -38,12 +38,14 @@ is at most 65 KiB (`MAX_BODY`) except a blob upload, which is streamed.
 | DELETE | `/v1/account` | delete the account and everything about it (spec 6.4) | signed | signed | – |
 | POST | `/v1/report` | report a user (reason 1–3); `404` no such user | signed | 20/day (user) | who reports whom, why |
 | POST | `/v1/feedback` | feedback text (1–2000 bytes) and app version for the operator | signed | 10/day (user) | the text, plain |
+| GET | `/v1/storage` | the account's storage, sealed by its devices (spec 6.9); `404` none yet | signed | 120/h (user, shared with the next row) | when it is read |
+| PUT | `/v1/storage` | replace it if the request names the version stored now, else `409` with the current one; ≤ 60 KiB, not empty | signed | 120/h (user, shared) | its size (opaque, padded to 1 KiB), when it changes |
 | GET | `/v1/inbox?wait=s` | up to 100 waiting envelopes, oldest first; waits up to 60 s if none | signed | signed; 4 under way at once (device) | when a device reads |
 | POST | `/v1/inbox/ack` | delete envelopes by id (≤ 1000), only the device's own | signed | signed | – |
 | POST | `/v1/inbox/{user id}` | deliver an envelope to every device of a user, `Yo-Devices` checked; `409` with the current account key and device keys | **none** (sealed sender) | 200/min and 64 MiB/h (IP); 5000 waiting per device; `507` disk floor | the recipient, the bucket size, the address |
 | POST | `/v1/groups` | register a group: id, epoch, token hash | **none** | 60/h (IP); `507` disk floor | a random group id |
 | POST | `/v1/groups/{id}/commit` | order a commit and keep its envelope (spec 4.3) | **none**, the epoch's token | 600/min (IP, shared with the next row) and 64 MiB/h (IP, shared with deliveries); `507` disk floor | that a group moved on |
-| GET | `/v1/groups/{id}/commits/{e}` | the commit accepted on epoch `e` | **none** | 600/min (IP, shared) | – |
+| GET | `/v1/groups/{id}/commits/{e}` | the commit accepted on epoch `e`; `410` accepted once and no longer kept (30 days), `404` never (spec 4.9) | **none** | 600/min (IP, shared) | that a member catches up |
 | PUT | `/v1/blobs/{id}?fetches=n` | store a photo or video, encrypted, for `n` (1–32) fetches (spec 6.8) | signed, by the body's hash (`Yo-Body-SHA256`) | 120/min (IP); 4 at once (user), 256 at once (all); 2000 and 2 GiB/day, 1 GiB waiting (user); 10 MiB; 300 s; budget and disk floor (`507`) | uploader, size, fetch count |
 | GET | `/v1/blobs/{id}` | the blob, streamed; a complete fetch counts, the last deletes it | **none**, the 128-bit id | 600/min (IP) | which blob, from where |
 
