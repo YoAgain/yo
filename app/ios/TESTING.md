@@ -53,7 +53,8 @@ APNs token), the camera (black; photos come from the library).
 | Account: Show Recovery Key (passcode), Create New Recovery Key | ok | 86-92, 177-179 |
 | Sign Out unsecured / secured, Sign In list of keychain accounts, sign in from it | new; a stale call signed the new session out: fixed | 56-64 |
 | Sign In with the recovery key: wrong word, wrong checksum, numbered and capitalised words | ok; double submission possible: fixed | 94-98 |
-| Delete Account: name typed (any case), passcode, deleted; the name free again | ok; re-registering hit the hub's registration limit ("Too many tries") | 180-190 |
+| Delete Account: name typed (any case), passcode, deleted; the name free again (checkmark) | ok; registering it again was refused by the hub's limit of 10 registrations an hour per address, shared with other tests on the dev hub that night ("Too many tries"), from 01:16 to past 02:10 | 180-190 |
+| Hold a name in camera mode (no camera): "● Recording", nothing sent, no crash | ok | 274-275 |
 | Offline (YO_HUB): Sign Up, Sign In with the recovery key say "Yo can’t reach its server" | ok | 220-221 |
 | Recovery key of a deleted account: "We couldn’t find your account" | ok | – |
 | Swipe a bar, then another: the first closes; Remove | ok | 205-207 |

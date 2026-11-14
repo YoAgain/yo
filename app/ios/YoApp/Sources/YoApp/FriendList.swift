@@ -74,7 +74,7 @@ struct FriendList: View {
     /// What each bar says for a moment after a send ("Sent Yo", "Not Sent", "Canceled").
     var sent: [Friend: String] = [:]
     /// Sends whose 1.5 seconds are still running; each tap starts them again (a bar under taps stays put).
-    var sentRounds: [UUID: Int] = [:]
+    @ObservationIgnored var sentRounds: [UUID: Int] = [:]
     /// How many sends of the same kind in a row a bar counts ("Sent Yo!!" for three).
     var sentCounts: [UUID: (text: String, count: Int)] = [:]
     /// Photos and videos whose time is over, by friend: they go when the bar's words are over, in the rhythm they
