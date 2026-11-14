@@ -56,6 +56,16 @@ fn files(dir: &Path) -> (usize, usize) {
     (stored, std::fs::read_dir(dir.join("tmp")).unwrap().count())
 }
 
+/// No blob files left: the last fetch deletes its blob once its last byte is handed on, a moment after the client may
+/// have it.
+fn all_gone(dir: &Path) {
+    let until = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    while files(dir) != (0, 0) {
+        assert!(std::time::Instant::now() < until, "{:?}", files(dir));
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+}
+
 fn status(request: reqwest::blocking::RequestBuilder) -> u16 {
     request.send().unwrap().status().as_u16()
 }
@@ -72,7 +82,7 @@ fn a_blob_is_fetched_by_each_device_and_gone_after_the_last() {
     assert_eq!(media::fetch_open(stranger.as_ref(), &media).unwrap().unwrap(), plain);
     assert_eq!(media::fetch_open(stranger.as_ref(), &media).unwrap().unwrap(), plain);
     assert_eq!(media::fetch(stranger.as_ref(), &media).unwrap(), None);
-    assert_eq!(files(&dir), (0, 0));
+    all_gone(&dir);
     // A wrong key or hash opens nothing.
     let (other, _, sent) = upload(&mut alice, 1000, 2);
     sent.unwrap();
@@ -98,7 +108,7 @@ fn the_largest_blob_goes_and_comes_and_a_larger_one_is_refused() {
     let mut answer = [0u8; 12];
     socket.read_exact(&mut answer).unwrap();
     assert_eq!(&answer, b"HTTP/1.1 413");
-    assert_eq!(files(&dir), (0, 0));
+    all_gone(&dir);
 }
 
 /// Fetches at once never pass a blob's count: each takes its fetch as it starts. One cut off gives it back.
@@ -125,7 +135,7 @@ fn fetches_at_once_take_no_more_than_the_blob_has_and_one_cut_off_gives_its_fetc
     };
     assert_eq!(opened, plain);
     assert_eq!(media::fetch(stranger.as_ref(), &media).unwrap(), None);
-    assert_eq!(files(&dir), (0, 0));
+    all_gone(&dir);
 }
 
 #[test]
