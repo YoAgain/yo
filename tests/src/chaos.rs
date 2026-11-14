@@ -232,6 +232,8 @@ struct Msg {
     got: u32,
     /// The receiver's device that got it (its generation): another device of the user may show it again.
     got_by: u32,
+    /// Sent by this name: whoever has it when the hub is asked is the one it goes to.
+    name: Option<String>,
 }
 
 #[derive(Default)]
@@ -476,6 +478,14 @@ fn take_events(w: &World, a: &mut Acct, events: Vec<Event>, rng: &mut Rng) {
             }
             continue;
         };
+        // Sent by a name that changed hands in between (deleted, taken again): the new owner has it.
+        if msg.to != a.user && msg.from == from && msg.name.as_deref() == Some(a.name.as_str()) && msg.got == 0 {
+            msg.must = false;
+            msg.got = 1;
+            drop(ledger);
+            w.stats.count("received by the name's new owner");
+            continue;
+        }
         if msg.to != a.user || msg.from != from {
             let (to, sender) = (msg.to.clone(), msg.from.clone());
             drop(ledger);
@@ -546,7 +556,18 @@ fn send_text(w: &World, a: &mut Acct, to: &str, by_name: Option<&str>, _rng: &mu
         let mut ledger = w.ledger();
         let blocked = ledger.blocks.contains(&(to.to_owned(), a.user.clone()));
         let must = alive && !blocked;
-        ledger.msgs.insert(tag.clone(), Msg { from: a.user.clone(), to: to.to_owned(), seq, must, got: 0, got_by: 0 });
+        ledger.msgs.insert(
+            tag.clone(),
+            Msg {
+                from: a.user.clone(),
+                to: to.to_owned(),
+                seq,
+                must,
+                got: 0,
+                got_by: 0,
+                name: by_name.map(str::to_owned),
+            },
+        );
     }
     let target = by_name.unwrap_or(to).to_owned();
     let result = a.client.as_mut().unwrap().send(&target, Content::Text(tag.clone()));
@@ -760,9 +781,10 @@ fn op_uploads(w: &World, a: &mut Acct, rng: &mut Rng) {
         {
             let mut ledger = w.ledger();
             let must = !ledger.blocks.contains(&(peer.user.clone(), a.user.clone()));
-            ledger
-                .msgs
-                .insert(tag.clone(), Msg { from: a.user.clone(), to: peer.user.clone(), seq, must, got: 0, got_by: 0 });
+            ledger.msgs.insert(
+                tag.clone(),
+                Msg { from: a.user.clone(), to: peer.user.clone(), seq, must, got: 0, got_by: 0, name: None },
+            );
         }
         let content =
             if rng.below(3) == 0 { Content::Video { media: m, duration_ms: 9_000 } } else { Content::Photo(m) };
