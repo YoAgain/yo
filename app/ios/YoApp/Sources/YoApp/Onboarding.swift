@@ -297,6 +297,23 @@ struct Page<Content: View, Bottom: View>: View {
   }
 }
 
+/// Close for a guide shown as a sheet (Secure Your Account, the recovery key): at the top right, in the row of the
+/// pages' back button and as large, so the sheet says how it goes away, not only by a swipe down.
+struct SheetClose: View {
+  @Environment(\.dismiss) private var dismiss
+
+  var body: some View {
+    Button { dismiss() } label: {
+      Image(systemName: "xmark")
+        .font(.title3.weight(.semibold))
+        .frame(width: 44, height: 44, alignment: .trailing)
+        .contentShape(.rect)
+    }
+    .accessibilityLabel("Close")
+    .padding(.trailing, 24)
+  }
+}
+
 /// The one button at the bottom: white glass, the full width.
 struct PrimaryButton: View {
   let title: String
