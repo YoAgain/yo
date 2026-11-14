@@ -136,6 +136,8 @@ fn a_send_skips_receiving_only_while_the_inbox_is_fresh() {
     let (mut a, mut b, pa, pb) = pair(&hub);
     a.send_yo(&pb).unwrap();
     b.sync(0).unwrap();
+    // By user id, as the app sends: a name is asked of the hub first (spec 4.2).
+    let b_id = b.user_id().to_owned();
     let now = Arc::new(AtomicU64::new(yo_hub::now_ms()));
     a.set_clock(Arc::new({
         let now = now.clone();
@@ -146,15 +148,15 @@ fn a_send_skips_receiving_only_while_the_inbox_is_fresh() {
         let answers = deliveries.send();
         assert!(matches!(a.send_end(&deliveries, answers), yo_core::Sent::Done(Ok(_))));
     };
-    let deliveries = a.send_begin(&pb, Content::Yo).expect("just emptied");
+    let deliveries = a.send_begin(&b_id, Content::Yo).expect("just emptied");
     send(&mut a, deliveries);
     now.fetch_add(6_000, Ordering::Relaxed);
-    assert!(a.send_begin(&pb, Content::Yo).is_none(), "a while ago");
+    assert!(a.send_begin(&b_id, Content::Yo).is_none(), "a while ago");
     let wait = a.sync_begin(25).unwrap();
-    let deliveries = a.send_begin(&pb, Content::Yo).expect("waited on");
+    let deliveries = a.send_begin(&b_id, Content::Yo).expect("waited on");
     send(&mut a, deliveries);
     a.sync_end(&wait, Err("no network".into())).unwrap_err();
-    assert!(a.send_begin(&pb, Content::Yo).is_none(), "the wait failed");
+    assert!(a.send_begin(&b_id, Content::Yo).is_none(), "the wait failed");
     a.send_yo(&pb).unwrap();
     assert_eq!(yos_from(&b.sync(0).unwrap(), &pa), 3, "each once");
 }
@@ -423,8 +425,9 @@ fn the_outbox_survives_an_outage_of_the_hub() {
     a.send_yo(&pb).unwrap();
     b.sync(0).unwrap();
     hub.stop();
-    // The hub is down: the message waits in the outbox, nothing is lost.
-    a.send_yo(&pb).unwrap();
+    // The hub is down: the message waits in the outbox, nothing is lost. By user id: a name needs the hub (4.2).
+    assert!(matches!(a.send_yo(&pb), Err(Error::Network(_))));
+    a.send_yo(b.user_id()).unwrap();
     assert_eq!(a.pending(), 1);
     assert!(matches!(b.sync(0), Err(Error::Network(_))));
     let hub = TestHub::start_with(config, &addr);

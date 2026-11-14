@@ -203,3 +203,24 @@ fn nothing_is_encrypted_in_an_epoch_already_left() {
     assert_eq!(texts(&a.sync(0).unwrap()), ["now"]);
     assert_eq!(a.chats()[0].2, b.chats()[0].2, "one epoch");
 }
+
+/// A name a contact gave up and someone else took: a send to the name still went to the contact, as this device
+/// had learnt it. Now a name is asked of the hub, and the old contact loses it.
+#[test]
+fn a_name_that_changed_hands_goes_to_its_new_owner() {
+    let hub = TestHub::start();
+    let n = random_u64() % 100_000;
+    let name = format!("Taken{n}");
+    let mut a = by_name(Http::new(hub.url()), &name);
+    let mut b = by_name(Http::new(hub.url()), &format!("Sender{n}"));
+    b.send(&name, text("hi a")).unwrap();
+    assert_eq!(texts(&a.sync(0).unwrap()), ["hi a"]);
+    a.set_username(Some(&format!("Moved{n}"))).unwrap();
+    let mut c = by_name(Http::new(hub.url()), &name);
+    b.send(&name, text("hi whoever")).unwrap();
+    assert_eq!(texts(&c.sync(0).unwrap()), ["hi whoever"]);
+    assert!(texts(&a.sync(0).unwrap()).is_empty());
+    let known = b.contacts();
+    assert!(known.iter().any(|k| k.user == c.user_id() && k.handles == [name.clone()]));
+    assert!(known.iter().any(|k| k.user == a.user_id() && k.handles.is_empty()), "{known:?}");
+}
