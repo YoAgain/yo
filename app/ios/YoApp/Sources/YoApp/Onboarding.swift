@@ -117,7 +117,7 @@ struct Onboarding: View {
       // Under the field, one place: the minimum after a Continue too soon, or "This Is My Name" when it is taken.
       ZStack {
         Text("Use at least 3 characters.")
-          .font(.system(size: 15, weight: .semibold))
+          .font(.subheadline.weight(.semibold))
           .opacity(tooShort ? 1 : 0)
           .accessibilityHidden(!tooShort)
         Button("This Is My Name") { go(.logIn) }
@@ -280,7 +280,7 @@ struct Page<Content: View, Bottom: View>: View {
         VStack(spacing: 10) {
           Text(title).font(.yo(30)).multilineTextAlignment(.center)
           if let message {
-            Text(message).font(.system(size: 17)).multilineTextAlignment(.center).opacity(0.85)
+            Text(message).font(.body).multilineTextAlignment(.center).opacity(0.85)
           }
         }
         .padding(.top, 24)
@@ -349,7 +349,7 @@ struct KeepButton: View {
   var body: some View {
     Button(action: action) {
       Label(title, systemImage: done ? "checkmark" : icon)
-        .font(.system(size: 15, weight: .semibold))
+        .font(.subheadline.weight(.semibold))
         .frame(maxWidth: .infinity, minHeight: 30)
         .contentTransition(.symbolEffect(.replace))
     }
@@ -366,7 +366,7 @@ struct Note: View {
 
   var body: some View {
     if let text {
-      Text(text).font(.system(size: 14, weight: .semibold)).multilineTextAlignment(.center)
+      Text(text).font(.footnote.weight(.semibold)).multilineTextAlignment(.center)
     }
   }
 }
@@ -445,9 +445,9 @@ struct WordGrid: View {
     LazyVGrid(columns: [GridItem(.flexible()), GridItem(.flexible())], spacing: 10) {
       ForEach(Array(words.enumerated()), id: \.offset) { index, word in
         HStack(spacing: 8) {
-          Text("\(index + 1)").font(.system(size: 13, weight: .semibold).monospacedDigit()).opacity(0.6)
-            .frame(width: 20, alignment: .trailing)
-          Text(word).font(.yo(18))
+          Text("\(index + 1)").font(.caption.weight(.semibold).monospacedDigit()).opacity(0.6)
+            .frame(minWidth: 20, alignment: .trailing)
+          Text(word).font(.yo(18)).lineLimit(1).minimumScaleFactor(0.6)
           Spacer(minLength: 0)
         }
         .padding(.vertical, 10)
@@ -488,7 +488,7 @@ private struct LogIn: View {
           KeepButton(title: "Scan", icon: "qrcode.viewfinder", done: false) { scanning = true }
         }
         PhotosPicker(selection: $picked, matching: .images) {
-          Label("Photos", systemImage: "photo").font(.system(size: 15, weight: .semibold))
+          Label("Photos", systemImage: "photo").font(.subheadline.weight(.semibold))
             .frame(maxWidth: .infinity, minHeight: 30)
         }
         .buttonStyle(.glass)
