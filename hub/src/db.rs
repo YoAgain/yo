@@ -148,6 +148,8 @@ pub enum BlobPut {
     Stored,
     /// A blob with this id is there.
     Taken,
+    /// A blob with this id is on its way (another upload of it is not done): later.
+    Unfinished,
     /// The user's quota is used up: later.
     Quota,
     /// The device was replaced, or its account removed, since it authenticated.
@@ -913,6 +915,15 @@ impl Db {
         self.conn().prepare_cached("SELECT 1 FROM blobs WHERE id = ?1")?.exists([id])
     }
 
+    /// Whether a blob with this id is there and ready (`Some(true)`), there with its file still on its way
+    /// (`Some(false)`), or not there.
+    pub fn blob_ready_state(&self, id: &BlobId) -> rusqlite::Result<Option<bool>> {
+        self.conn()
+            .prepare_cached("SELECT ready FROM blobs WHERE id = ?1")?
+            .query_row([id], |row| row.get(0))
+            .optional()
+    }
+
     /// Stores a blob's row for `fetches` fetches and counts it against its uploader's quota, if the id is free and
     /// the quota has room. Not ready: its file is moved into place after, then `blob_ready`.
     pub fn put_blob(
@@ -927,8 +938,12 @@ impl Db {
         let mut conn = self.conn();
         let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
         let Some(user) = user_of_device(&tx, device)? else { return Ok(BlobPut::DeviceGone) };
-        if tx.prepare_cached("SELECT 1 FROM blobs WHERE id = ?1")?.exists([id])? {
-            return Ok(BlobPut::Taken);
+        let ready: Option<bool> =
+            tx.prepare_cached("SELECT ready FROM blobs WHERE id = ?1")?.query_row([id], |row| row.get(0)).optional()?;
+        match ready {
+            Some(true) => return Ok(BlobPut::Taken),
+            Some(false) => return Ok(BlobPut::Unfinished),
+            None => {}
         }
         if !blob_quota_left(&tx, &user, size, now, quota)? {
             return Ok(BlobPut::Quota);
@@ -1715,7 +1730,10 @@ mod tests {
         let (id, ttl) = ([9; 16], 30 * DAY);
         assert_eq!(db.put_blob(&[1; 16], &id, 100, 2, 5, &quota).unwrap(), BlobPut::Stored);
         assert_eq!(db.take_fetch(&id, 5, ttl).unwrap(), None, "not ready: its file is not in place");
+        assert_eq!(db.put_blob(&[1; 16], &id, 100, 2, 5, &quota).unwrap(), BlobPut::Unfinished, "another try: later");
+        assert_eq!(db.blob_ready_state(&id).unwrap(), Some(false));
         db.blob_ready(&id, 5).unwrap();
+        assert_eq!(db.put_blob(&[1; 16], &id, 100, 2, 5, &quota).unwrap(), BlobPut::Taken, "done: it is there");
         assert_eq!(db.take_fetch(&id, 5, ttl).unwrap(), Some((100, 5)));
         assert_eq!(db.take_fetch(&id, 5, ttl).unwrap(), Some((100, 5)));
         assert_eq!(db.take_fetch(&id, 5, ttl).unwrap(), None, "two fetches under way, none left");

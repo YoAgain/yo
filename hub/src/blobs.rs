@@ -330,6 +330,8 @@ pub fn refused(put: &BlobPut) -> Option<axum::http::StatusCode> {
     match put {
         BlobPut::Stored => None,
         BlobPut::Taken => Some(StatusCode::CONFLICT),
+        // Not "there" yet: a 409 would tell the uploader it is, and its message would name a blob nobody can fetch.
+        BlobPut::Unfinished => Some(StatusCode::SERVICE_UNAVAILABLE),
         BlobPut::Quota => Some(StatusCode::TOO_MANY_REQUESTS),
         BlobPut::DeviceGone => Some(StatusCode::GONE),
     }
