@@ -38,6 +38,7 @@ messages a fault allowed to be lost that arrived anyway.
 | 13 | 1200 | 900 | 358,653 | 254,492 (282/s) | 252,296, **0 lost** | 30,264, 7,468 | 4,003, 1,685, 4 | 4: finding 10 (order), a driver issue | 2.4 GB |
 | 14 | 1500 | 1200 | 426,600 | 294,368 (245/s) | 290,640, **0 lost** | 84,508 (4%), 13,283 (3%) | 5,072, 2,066, 5 | 2, both in the driver (since fixed) | 2.8 GB |
 | 16 | 2500 | 900 | 403,786 | 320,643 (354/s) | 318,247, **0 lost** | 39,795, 7,088 | 3,943, 1,561, 3 | 1: a whois raced a name being taken again (the driver's directory a moment behind) | 4.9 GB |
+| 21 | 400 | 300 | 77,421 | 58,424 (193/s) | 57,550, **0 lost** | 6,506, 1,498 | 823, 337, 2 | 0 (after the core review, finding 12) | 0.9 GB |
 
 Against the dev hub (seed 101): 15 of 16 accounts registered over 52 minutes (its limit, 10 per address per hour;
 one real `503` from the hub on a registration), then 492 messages sent and 144 received before the driver stood still:
@@ -64,6 +65,7 @@ hub's database audited after every run: no orphan rows, every blob with its file
 | 9 | review of the restart (Codex) | Restart: the hub could name another user for the restarted chat; a made-up later epoch in an unsigned delivery marked a healthy chat lost (the hub's `404`); fetching recursed on what it fetched; two restarts at once lost each other's history; a peer waiting for confirmation lost the waiting messages; more than 64 missing commits counted as lost. A blocked user's quietly joined chat got updates and names. | The hub answers `410` for a commit it no longer keeps, `404` for one it never had, and only `410` loses a chat; a restart only with the hub's answer for that user id; fetched commits must move the group on and fetch nothing themselves; old histories move into the new chat; `Unconfirmed` waits; more commits are fetched next time; strictly increasing `sent_at` and a receiver's memory of 2000 messages make copies harmless; no updates or names to a blocked peer. | `deadchat.rs` `a_made_up_epoch_does_not_restart_a_chat` |
 | 10 | 13, 1200 accounts: #28 after #29 | A message renewed for a user's new devices went to the back of the outbox, behind a later message already made for the new devices (queued while the renewal was held by a `429`): the user got them out of order. | The renewed message takes the later ones of that user and chat behind it again. | the chaos ledger (order is checked per sender and receiver) |
 | 11 | review of the fixes (Codex) | Catching up stopped at 64 commits and rolled back what it fetched, for ever; a commit accepted between two reads of the hub was answered `410`; the messages sent again after a restart were in group order, not sent order. | Up to 1000 commits at once, the target checked after the last; the hub reads the commit and the group's epoch under one lock; the replay sorted by `sent_at`. | deadchat.rs, the hub's tests |
+| 12 | review of the core (Codex) | Fifteen: what waited for someone blocked still left; a refused commit turned updates off for good; a name that changed hands went to its old owner; a failed save stopped nothing; catching up past 1000 commits rolled back; a lost race could encrypt in an old epoch; registrations and new groups went to the hub before they were saved; a restart replayed only after `last_seen`; a last resort was retired too early; storage merged unknown fields by value and left a blob nobody could open; an unreadable `409` dropped the message; a name skipped while a key waited was never told; a digit with an accent was an emoji. | Each fixed as spec/v1.md now says (4.2, 4.6–4.9, 6.4, 6.5, 6.9, 3.3). | `review.rs`, and tests in storage.rs, scenarios.rs, bindings.rs, handle.rs |
 
 Not bugs, but noted:
 
@@ -72,7 +74,7 @@ Not bugs, but noted:
   cannot wait: its `POST /v1/groups` is limited to 60 per address per hour, and the send fails with `429` (4,352 of
   8,620 sends in that run). Phones behind one carrier address (CGNAT) share that budget: at scale, new chats would
   fail for everyone behind a busy address. The limit (and `lookup` with KeyPackages, 50 per device per day) is the
-  operator's to weigh; a client could also queue a first message until the chat can be made.
+  operator's to weigh; since finding 12 a first message waits in the outbox, with its Welcome, until the hub takes the new group.
 
 - A restarted hub forgets its replay cache: a signed request captured within the last 5 minutes could be replayed once
   after a restart. Only someone who sees the requests in the clear (the hub's operator, Cloudflare) could; the cache
