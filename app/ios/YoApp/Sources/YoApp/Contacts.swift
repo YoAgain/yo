@@ -92,9 +92,7 @@ struct ContactsList: View {
 
   var body: some View {
     Form {
-      if friends.all.isEmpty {
-        ContentUnavailableView("No Contacts", systemImage: "person.2")
-      } else {
+      if !friends.all.isEmpty {
         Section {
           ForEach(sorted) { friend in
             let state = friend.user.flatMap { states[$0] } ?? ContactState()
@@ -116,6 +114,9 @@ struct ContactsList: View {
           Text("A green check: the chat is end-to-end encrypted with fresh keys, as it should be.")
         }
       }
+    }
+    .overlay {
+      if friends.all.isEmpty { ContentUnavailableView("No Contacts", systemImage: "person.2") }
     }
     .navigationTitle("Contacts")
     .navigationBarTitleDisplayMode(.inline)
