@@ -193,14 +193,20 @@ impl Blobs {
         Ok((tokio::fs::File::from_std(file), Incoming { path, kept: false }))
     }
 
-    /// Moves a complete upload into place.
+    /// Moves a complete upload into place, durably: its bytes, its name and a new shard directory are on the disk
+    /// before the blob is marked ready and its upload answered (a power cut must not keep the row without the file).
     pub fn keep(&self, mut incoming: Incoming, blob: &Stored) -> io::Result<()> {
+        std::fs::File::open(&incoming.path)?.sync_all()?;
         let path = self.path(blob);
-        if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent)?;
-        }
+        let shard = path.parent().unwrap_or(&self.dir);
+        let new_shard = !shard.exists();
+        std::fs::create_dir_all(shard)?;
         std::fs::rename(&incoming.path, &path)?;
         incoming.kept = true;
+        sync_dir(shard)?;
+        if new_shard {
+            sync_dir(&self.dir)?;
+        }
         Ok(())
     }
 
@@ -327,6 +333,11 @@ pub fn refused(put: &BlobPut) -> Option<axum::http::StatusCode> {
         BlobPut::Quota => Some(StatusCode::TOO_MANY_REQUESTS),
         BlobPut::DeviceGone => Some(StatusCode::GONE),
     }
+}
+
+/// A directory's entries on the disk (a file moved or made in it).
+fn sync_dir(dir: &std::path::Path) -> io::Result<()> {
+    std::fs::File::open(dir)?.sync_all()
 }
 
 #[cfg(test)]
