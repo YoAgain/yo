@@ -171,9 +171,9 @@ struct SecureNameSheet: View {
   /// The words as the card (an image) and as text, to the share sheet. Once saved somewhere, they also secure the
   /// account if nothing did yet, and the guide goes on.
   private func save() {
-    // Words missing here (a secured account brought back without them): Create New Recovery Key makes new ones.
+    // Words missing here (a secured account brought back without them): nothing to draw.
     guard words.count == 12 else {
-      return problem = "Your recovery key isn’t on this iPhone. Create a new one in Account."
+      return problem = "Your recovery key isn’t on this iPhone."
     }
     let name = accounts.account?.username ?? ""
     let renderer = ImageRenderer(content: RecoveryCard(name: name, words: words))
