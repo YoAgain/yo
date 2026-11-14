@@ -20,8 +20,9 @@ impl HttpTransport for App {
 struct File(Mutex<Vec<u8>>);
 
 impl StateStore for File {
-    fn save(&self, blob: Vec<u8>) {
+    fn save(&self, blob: Vec<u8>) -> Result<(), yo::YoError> {
         *self.0.lock().unwrap() = blob;
+        Ok(())
     }
 }
 
@@ -593,11 +594,12 @@ impl Process {
 }
 
 impl StateStore for Process {
-    fn save(&self, blob: Vec<u8>) {
+    fn save(&self, blob: Vec<u8>) -> Result<(), yo::YoError> {
         assert!(*self.disk.held.lock().unwrap(), "saved only under the lock");
         let mut state = self.disk.state.lock().unwrap();
         *state = (state.0 + 1, blob);
         *self.known.lock().unwrap() = state.0;
+        Ok(())
     }
 }
 

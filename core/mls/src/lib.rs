@@ -140,9 +140,10 @@ pub struct ChatInfo {
     pub lost: bool,
 }
 
-/// Where the sealed state goes after every operation.
+/// Where the sealed state goes after every operation. A save that fails stops the operation before anything that
+/// needed it leaves (spec 4.7): `Error::Save`.
 pub trait Store: Send + Sync {
-    fn save(&self, blob: Vec<u8>);
+    fn save(&self, blob: Vec<u8>) -> std::result::Result<(), String>;
 }
 
 pub type Clock = Arc<dyn Fn() -> u64 + Send + Sync>;
@@ -657,9 +658,9 @@ impl Client {
     }
 
     /// Saves the sealed state to `store` after every operation from now on, and now.
-    pub fn persist_to(&mut self, store: Arc<dyn Store>, key: [u8; 32]) {
+    pub fn persist_to(&mut self, store: Arc<dyn Store>, key: [u8; 32]) -> Result<()> {
         self.store = Some((store, key));
-        self.persist();
+        self.persist()
     }
 
     /// The state sealed under `key`.
@@ -713,6 +714,10 @@ impl Client {
         self.state.outbox.len()
     }
 
+    fn blocked(&self, user: &str) -> bool {
+        self.state.contacts.get(user).is_some_and(|c| c.blocked)
+    }
+
     /// Every chat: peer, group id, epoch, members. For tests and diagnostics.
     pub fn chats(&self) -> Vec<(String, [u8; 32], u64, usize)> {
         self.state
@@ -726,9 +731,10 @@ impl Client {
             .collect()
     }
 
-    fn persist(&self) {
-        if let Some((store, key)) = &self.store {
-            store.save(self.export(key));
+    fn persist(&self) -> Result<()> {
+        match &self.store {
+            Some((store, key)) => store.save(self.export(key)).map_err(Error::Save),
+            None => Ok(()),
         }
     }
 
@@ -754,7 +760,8 @@ impl Client {
     pub fn acknowledge_events(&mut self) {
         if self.guest_events.is_none() && !self.state.handed.is_empty() {
             self.state.handed.clear();
-            self.persist();
+            // Not saved: they come again after a crash, as without the acknowledgement.
+            let _ = self.persist();
         }
     }
 
@@ -768,16 +775,26 @@ impl Client {
             let total = self.state.events.len();
             let result =
                 result.map(|_| self.state.events[returned.min(total)..].iter().cloned().map(unstored).collect());
+            let saved = self.persist();
+            if result.is_ok() && saved.is_err() {
+                return saved.map(|()| Vec::new());
+            }
             self.guest_events = Some(total);
-            self.persist();
             return result;
         }
         let result = result.map(|_| {
             self.state.handed = std::mem::take(&mut self.state.events);
             self.state.handed.iter().cloned().map(unstored).collect()
         });
-        self.persist();
-        result
+        match self.persist() {
+            // Not saved: nothing is handed out, it waits for the next call.
+            Err(error) if result.is_ok() => {
+                let handed = std::mem::take(&mut self.state.handed);
+                self.state.events.splice(0..0, handed);
+                Err(error)
+            }
+            _ => result,
+        }
     }
 
     /// Like `finish`, for receiving: what arrived before a passing trouble ("not now") is handed out now.
@@ -1206,8 +1223,7 @@ impl Client {
         self.state.chats.get_mut(&group_key(&group_id)).ok_or(Error::Protocol("unknown group"))?.inflight =
             Some(Inflight { request, commit, welcome });
         // Saved before it leaves: after a crash the commit is still there to be repeated (spec 4.3).
-        self.persist();
-        Ok(())
+        self.persist()
     }
 
     /// Sends a group's inflight commit (again) and acts on the answer. The hub answers a repeat of an accepted commit
@@ -1529,20 +1545,20 @@ impl Client {
 
     /// Sends the outbox in order, per user. Returns the deliveries the hub refused because the user's devices are
     /// other than the group's (4.6): group, user, the user's current devices.
-    fn flush(&mut self) -> Vec<(String, String, api::Devices)> {
-        let deliveries = self.deliveries();
+    fn flush(&mut self) -> Result<Vec<(String, String, api::Devices)>> {
+        let deliveries = self.deliveries()?;
         let answers = deliveries.send();
-        self.delivered(&deliveries, answers)
+        Ok(self.delivered(&deliveries, answers))
     }
 
     /// What of the outbox can go now, in order per user, each envelope with its device check (4.6); its users are
     /// marked as on their way, so no other flush sends after them meanwhile. Local work only: `Deliveries::send`
     /// talks to the hub, `delivered` takes the answers.
-    fn deliveries(&mut self) -> Deliveries {
+    fn deliveries(&mut self) -> Result<Deliveries> {
         // Saved before anything leaves: a crash after the hub took an envelope must not bring back the ratchet state
         // that made it. A repeat after a crash is harmless, the receiver skips what it has seen.
         if !self.state.outbox.is_empty() {
-            self.persist();
+            self.persist()?;
         }
         let mut items = Vec::new();
         // Users whose envelopes another flush is sending: theirs wait, in their order.
@@ -1584,7 +1600,10 @@ impl Client {
                         self.state.outbox.push_back(item);
                         self.state.outbox.extend(later);
                         // Saved before it leaves, like everything sent: the renewed ratchet must not come back.
-                        self.persist();
+                        if let Err(error) = self.persist() {
+                            self.restore_tokens(&items);
+                            return Err(error);
+                        }
                     }
                     Ok(None) => {
                         self.state.outbox.remove(i);
@@ -1626,7 +1645,18 @@ impl Client {
             i += 1;
         }
         self.delivering.extend(items.iter().map(|d| d.user.clone()));
-        Deliveries { transport: self.transport.clone(), items, to: None, token_refused: Default::default() }
+        Ok(Deliveries { transport: self.transport.clone(), items, to: None, token_refused: Default::default() })
+    }
+
+    fn no_deliveries(&self) -> Deliveries {
+        Deliveries { transport: self.transport.clone(), items: Vec::new(), to: None, token_refused: Default::default() }
+    }
+
+    /// Tokens taken for deliveries that never left go back to the front of the stash, in their order.
+    fn restore_tokens(&mut self, items: &[Delivery]) {
+        for kept in items.iter().rev().filter_map(|item| item.token.clone()) {
+            self.state.tokens.push_front(kept);
+        }
     }
 
     /// Takes the hub's answers to `Deliveries::send`: what it took leaves the outbox, what it refused for good is
@@ -1709,7 +1739,7 @@ impl Client {
     /// Flushes, and repairs every group a delivery found out of line with a user's devices, until the outbox moves.
     fn deliver(&mut self) -> Result<()> {
         for _ in 0..REPAIR_ROUNDS {
-            let mismatches = self.flush();
+            let mismatches = self.flush()?;
             if mismatches.is_empty() {
                 return Ok(());
             }
@@ -1883,7 +1913,7 @@ impl Client {
         }
         if !done.is_empty() {
             // Saved before the hub may forget: what was processed must survive a crash right after the ack.
-            self.persist();
+            self.persist()?;
             // An ack that does not arrive costs only a repeat: the hub sends those envelopes again, and they are
             // skipped as seen.
             match self.signed("POST", api::INBOX_ACK, &encode(&api::Ack { ids: done })) {
@@ -1976,7 +2006,7 @@ impl Client {
         };
         // A blocked user's chat is joined quietly: nothing of it is shown while the block holds, and it works again
         // after an unblock (ignored, it would stay dead for good: the sender keeps writing in it).
-        let blocked = self.state.contacts.get(&peer).is_some_and(|c| c.blocked);
+        let blocked = self.blocked(&peer);
         self.pin(&peer, peer_key, username);
         let group = staged.into_group(&self.provider).map_err(mls)?;
         if group.ciphersuite() != profile::CIPHERSUITE {
@@ -2042,7 +2072,7 @@ impl Client {
             ProcessedMessageContent::ApplicationMessage(application) => {
                 let bytes = application.into_bytes();
                 let message = Message::decode(&bytes)?;
-                if self.state.contacts.get(&peer).is_some_and(|c| c.blocked) {
+                if self.blocked(&peer) {
                     return Ok(());
                 }
                 if !from_me {
@@ -2183,7 +2213,7 @@ impl Client {
             let last_resort = if last_resort_due { Some(c.key_package(true)?.into()) } else { None };
             Ok(api::KeyPackages { key_packages, last_resort })
         })?;
-        self.persist();
+        self.persist()?;
         let response = self.signed("PUT", api::KEY_PACKAGES, &encode(&request))?;
         if response.status != status::NO_CONTENT {
             return Err(refused(&response));
@@ -2209,7 +2239,8 @@ impl Client {
         if self.issue_tokens(now).is_none() {
             self.state.tokens_after = now + TOKENS_RETRY_MS;
         }
-        self.persist();
+        // Not saved: tokens lost to a crash are only tokens.
+        let _ = self.persist();
     }
 
     fn issue_tokens(&mut self, now: u64) -> Option<()> {
@@ -2292,7 +2323,8 @@ impl Client {
         } else {
             group
         };
-        self.atomic(|c| c.send_in(&group, content, true))?;
+        // Saved with the message in it, or not made at all (spec 4.7).
+        self.atomic(|c| c.send_in(&group, content, true).and_then(|()| c.persist()))?;
         match self.deliver() {
             Ok(()) | Err(Error::Network(_)) => {}
             Err(error) => return Err(error),
@@ -2333,15 +2365,16 @@ impl Client {
         if self.state.chats.get(&group_key(&group))?.inflight.is_some() || self.update_due(&group) {
             return None;
         }
-        self.atomic(|c| c.send_in(&group, content, true)).ok()?;
-        let mut deliveries = self.deliveries();
+        // Saved with the message in it, or not made at all: `send` then fails on the save the same way.
+        self.atomic(|c| c.send_in(&group, content, true).and_then(|()| c.persist())).ok()?;
+        let mut deliveries = self.deliveries().unwrap_or_else(|_| self.no_deliveries());
         deliveries.to = Some(user);
         Some(deliveries)
     }
 
     /// The outbox, without the client, like `send_begin` without a message: for sending again what the hub did not take
     /// yet (its limit per sender, or no network). Ended with `send_end`.
-    pub fn deliver_begin(&mut self) -> Deliveries {
+    pub fn deliver_begin(&mut self) -> Result<Deliveries> {
         self.deliveries()
     }
 
@@ -2362,13 +2395,17 @@ impl Client {
             self.repair_all(mismatches).and_then(|()| self.deliver())
         } else {
             if all_taken && self.check_sendable(deliveries.to.as_deref()).is_ok() {
-                let mut more = self.deliveries();
-                if !more.is_empty() {
-                    more.to = deliveries.to.clone();
-                    return Sent::More(more);
+                match self.deliveries() {
+                    Ok(mut more) if !more.is_empty() => {
+                        more.to = deliveries.to.clone();
+                        return Sent::More(more);
+                    }
+                    Ok(_) => Ok(()),
+                    Err(error) => Err(error),
                 }
+            } else {
+                Ok(())
             }
-            Ok(())
         };
         // As `send`: offline, the message waits in the outbox; to a user the hub no longer knows, it went nowhere.
         let result = match result {
@@ -2393,7 +2430,7 @@ impl Client {
     pub fn sync_begin(&mut self, wait_s: u64) -> Result<InboxWait> {
         if let Err(error) = self.deliver() {
             if !retryable(&error) {
-                self.persist();
+                self.persist()?;
                 return Err(error);
             }
         }
@@ -2401,7 +2438,7 @@ impl Client {
         self.storage_fetched()?;
         let path = api::inbox_path(wait_s);
         let (headers, time) = self.sign("GET", &path, &[]);
-        self.persist();
+        self.persist()?;
         // What arrives during the wait comes at once: until it ends, a send need not receive first.
         let until = (self.clock)() + wait_s * 1000 + INBOX_FRESH_MS;
         self.inbox_fresh_until = self.inbox_fresh_until.max(until);
@@ -2452,7 +2489,7 @@ impl Client {
             .state
             .chats
             .iter()
-            .filter(|(_, chat)| !self.state.contacts.get(&chat.peer).is_some_and(|c| c.blocked))
+            .filter(|(_, chat)| !self.blocked(&chat.peer))
             .filter_map(|(key, _)| group_of(key))
             .collect();
         // One chat's trouble does not keep the others from their updates.
@@ -2478,7 +2515,7 @@ impl Client {
                 .state
                 .chats
                 .iter()
-                .filter(|(_, chat)| !self.state.contacts.get(&chat.peer).is_some_and(|c| c.blocked))
+                .filter(|(_, chat)| !self.blocked(&chat.peer))
                 .filter_map(|(key, _)| group_of(key))
                 .collect();
             for group in groups {
@@ -2553,7 +2590,7 @@ impl Client {
         let body = encode(&api::Lookup { handle, key_packages: api::LOOKUP_USERNAME, except: Vec::new() });
         let (headers, _) = self.sign("POST", api::LOOKUP, &body);
         // The time signed saved before the request leaves: another process of this device signs later.
-        self.persist();
+        self.persist()?;
         Ok(Whois { transport: self.transport.clone(), headers, body, me: self.state.user_id.clone() })
     }
 
@@ -2594,16 +2631,14 @@ impl Client {
         if verified {
             contact.unconfirmed = false;
         }
-        self.persist();
-        Ok(())
+        self.persist()
     }
 
     /// Accepts a verified contact's new account key: sending to it goes on (unverified until compared again).
     pub fn confirm_identity(&mut self, who: &str) -> Result<()> {
         let user = self.contact_user(who)?;
         self.state.contacts.get_mut(&user).ok_or(Error::NotOnYo)?.unconfirmed = false;
-        self.persist();
-        Ok(())
+        self.persist()
     }
 
     /// Blocks a user (by user id or any handle; one this device does not know is asked of the hub), or unblocks:
@@ -2616,8 +2651,7 @@ impl Client {
         }
         // Kept in the storage too, so a new phone has it (spec 6.9).
         self.storage_block(&user, blocked);
-        self.persist();
-        Ok(())
+        self.persist()
     }
 
     /// Blocks or unblocks a user on this device. What came from them before and waits to be handed out (after a
@@ -2665,7 +2699,7 @@ impl Client {
         feedback.check().map_err(|_| Error::Protocol("feedback empty or too long"))?;
         let body = encode(&feedback);
         let (headers, _) = self.sign("POST", api::FEEDBACK, &body);
-        self.persist();
+        self.persist()?;
         Ok(FeedbackRequest { transport: self.transport.clone(), headers, body })
     }
 
@@ -2703,7 +2737,6 @@ impl Client {
             return Err(refused(&response));
         }
         self.state.username = canonical;
-        self.persist();
-        Ok(())
+        self.persist()
     }
 }

@@ -114,12 +114,12 @@ pub fn retry_later(error: &Error) -> bool {
 impl Client {
     /// Signs the upload of a sealed blob for `fetches` fetches: the number of the chat's devices other than this one
     /// (`media_fetches`). Each try needs its own signature (the hub takes each once).
-    pub fn upload(&mut self, media: &Media, fetches: u32) -> Upload {
+    pub fn upload(&mut self, media: &Media, fetches: u32) -> Result<Upload> {
         let path = api::blob_put_path(&media.id, fetches.clamp(1, MAX_BLOB_FETCHES));
         let (mut headers, _) = self.sign_hash("PUT", &path, &media.sha256);
         headers.push((HEADER_BODY_HASH.to_owned(), yo_wire::b64(&media.sha256)));
-        self.persist();
-        Upload { transport: self.transport.clone(), path, headers }
+        self.persist()?;
+        Ok(Upload { transport: self.transport.clone(), path, headers })
     }
 
     /// From now on, the keys of photos and videos received are dropped as they are decrypted, before any event is

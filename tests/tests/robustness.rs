@@ -70,8 +70,9 @@ fn a_commit_lost_while_the_peer_won_is_dropped_cleanly() {
 struct Saved(Mutex<Vec<u8>>);
 
 impl Store for Saved {
-    fn save(&self, blob: Vec<u8>) {
+    fn save(&self, blob: Vec<u8>) -> Result<(), String> {
         *self.0.lock().unwrap() = blob;
+        Ok(())
     }
 }
 
@@ -81,7 +82,7 @@ fn a_crash_after_processing_loses_nothing_and_repeats_nothing() {
     let (mut a, mut b, _, hb, pa, pb) = chat(&hub);
     let saved = Arc::new(Saved::default());
     let key = [5u8; 32];
-    b.persist_to(saved.clone(), key);
+    b.persist_to(saved.clone(), key).unwrap();
     for _ in 0..3 {
         a.send_yo(&pb).unwrap();
     }

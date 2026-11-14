@@ -238,8 +238,7 @@ impl Client {
         if friend.removed.value {
             friend.removed.set(false, now);
         }
-        self.storage_changed();
-        Ok(())
+        self.storage_changed()
     }
 
     /// Takes a friend off the list (a block stays as it is).
@@ -247,8 +246,7 @@ impl Client {
         let now = crate::wall_ms();
         let Some(friend) = self.state.storage.friends.get_mut(user) else { return Ok(()) };
         friend.removed.set(true, now);
-        self.storage_changed();
-        Ok(())
+        self.storage_changed()
     }
 
     /// The app's icon as kept in the storage: none for the default.
@@ -263,11 +261,12 @@ impl Client {
             .then_some(self.state.storage_saved_at)
     }
 
-    pub fn set_app_icon(&mut self, icon: Option<String>) {
+    pub fn set_app_icon(&mut self, icon: Option<String>) -> Result<()> {
         if self.state.storage.icon.value != icon {
             self.state.storage.icon.set(icon, crate::wall_ms());
-            self.storage_changed();
+            return self.storage_changed();
         }
+        Ok(())
     }
 
     /// A block or unblock, kept in the storage too (`set_blocked`).
@@ -275,13 +274,13 @@ impl Client {
         let friend = self.state.storage.friends.entry(user.to_owned()).or_default();
         if friend.blocked.value != blocked || friend.blocked.at == 0 {
             friend.blocked.set(blocked, crate::wall_ms());
-            self.storage_changed();
+            self.state.storage_dirty = true;
         }
     }
 
-    fn storage_changed(&mut self) {
+    fn storage_changed(&mut self) -> Result<()> {
         self.state.storage_dirty = true;
-        self.persist();
+        self.persist()
     }
 
     /// The storage's blocks, applied to the contacts: what the merged storage says is what holds.
@@ -351,14 +350,14 @@ impl Client {
                 }
             }
             self.state.storage_fetched = true;
-            self.persist();
+            self.persist()?;
         }
         for _ in 0..WRITE_TRIES {
             if !self.state.storage_dirty {
                 // Nothing to write: the hub holds it all (a new account's empty storage too).
                 if self.state.storage_saved_at == 0 {
                     self.state.storage_saved_at = crate::wall_ms();
-                    self.persist();
+                    self.persist()?;
                 }
                 return Ok(());
             }
@@ -373,7 +372,7 @@ impl Client {
                     self.state.storage.version = next.version;
                     self.state.storage_dirty = false;
                     self.state.storage_saved_at = crate::wall_ms();
-                    self.persist();
+                    self.persist()?;
                 }
                 // Another writer was first: its version, merged, goes up again.
                 status::CONFLICT => {
@@ -383,7 +382,7 @@ impl Client {
                         self.drop_one(format!("storage: {error}"));
                     }
                     self.state.storage_dirty = true;
-                    self.persist();
+                    self.persist()?;
                 }
                 status::GONE => return Err(Error::Replaced),
                 other => return Err(Error::Refused(other)),
