@@ -36,6 +36,8 @@ its platform.
 | PUT | `/v1/keypackages` | add KeyPackages (each checked, spec 6.5) | signed | signed; ≤ 100 per upload, ≤ 100 held | – |
 | POST | `/v1/lookup` | handle → user id, account key, device keys, KeyPackages if asked, username if asked | signed | 50/day with KeyPackages, 1000/day without (device) | who looks up whom |
 | PUT | `/v1/push` | set the device's push token (≤ 512 bytes) | signed | signed | the token |
+| GET | `/.well-known/private-token-issuer-directory` | the Privacy Pass issuer directory: the key delivery tokens are issued under now (spec 6.10) | none | – | nothing |
+| POST | `/v1/tokens` | evaluate a batch of 1–100 blinded token inputs with one proof (spec 6.10); `422` other key or type, `429` the day's used | signed | 200 tokens/day (device) | how many tokens a device asks for, when |
 | PUT | `/v1/username` | change or give up the account's username | signed | signed | the name |
 | DELETE | `/v1/account` | delete the account and everything about it (spec 6.4) | signed | signed | – |
 | POST | `/v1/report` | report a user (reason 1–3); `404` no such user | signed | 20/day (user) | who reports whom, why |
@@ -44,14 +46,14 @@ its platform.
 | PUT | `/v1/storage` | replace it if the request names the version stored now, else `409` with the current one; ≤ 60 KiB, not empty | signed | 120/h (user, shared) | its size (opaque, padded to 1 KiB), when it changes |
 | GET | `/v1/inbox?wait=s` | up to 100 waiting envelopes, oldest first; waits up to 60 s if none | signed | signed; 4 under way at once (device) | when a device reads |
 | POST | `/v1/inbox/ack` | delete envelopes by id (≤ 1000), only the device's own | signed | signed | – |
-| POST | `/v1/inbox/{user id}` | deliver an envelope to every device of a user, `Yo-Devices` checked; `409` with the current account key and device keys | **none** (sealed sender) | 200/min and 64 MiB/h (IP); 5000 waiting per device; `507` disk floor | the recipient, the bucket size, the address |
+| POST | `/v1/inbox/{user id}` | deliver an envelope to every device of a user, `Yo-Devices` checked; `409` with the current account key and device keys; `401` a token refused | **none** (sealed sender); a Privacy Pass token if it has one (`Authorization: PrivateToken`) | without a token 200/min and 64 MiB/h (IP); with one neither; 5000 waiting per device; `507` disk floor | the recipient, the bucket size, the address; that a token was good, not whose |
 | POST | `/v1/groups` | register a group: id, epoch, token hash | **none** | 60/h (IP); `507` disk floor | a random group id |
 | POST | `/v1/groups/{id}/commit` | order a commit and keep its envelope (spec 4.3) | **none**, the epoch's token | 600/min (IP, shared with the next row) and 64 MiB/h (IP, shared with deliveries); `507` disk floor | that a group moved on |
 | GET | `/v1/groups/{id}/commits/{e}` | the commit accepted on epoch `e`; `410` accepted once and no longer kept (30 days), `404` never (spec 4.9) | **none** | 600/min (IP, shared) | that a member catches up |
 | PUT | `/v1/blobs/{id}?fetches=n` | store a photo or video, encrypted, for `n` (1–32) fetches (spec 6.8) | signed, by the body's hash (`Yo-Body-SHA256`) | 120/min (IP); 4 at once (user), 256 at once (all); 2000 and 2 GiB/day, 1 GiB waiting (user); 10 MiB; 300 s; budget and disk floor (`507`) | uploader, size, fetch count |
 | GET | `/v1/blobs/{id}` | the blob, streamed; a complete fetch counts, the last deletes it | **none**, the 128-bit id | 600/min (IP) | which blob, from where |
 
-Spec 6.3 lists the same routes, without `/` and the well-known file, which are not part of the protocol.
+Spec 6.3 lists the same routes, without `/` and the apple-app-site-association file, which are not part of the protocol.
 
 ## Protections outside the routes
 
@@ -67,6 +69,11 @@ Spec 6.3 lists the same routes, without `/` and the well-known file, which are n
   can be made to send requests to the hub (a proxy, a fetcher of user-given URLs) inherits that exemption.
 - **Disk.** Blobs have a budget (`YO_BLOB_BUDGET_MB`) and a floor of free space (`YO_BLOB_MIN_FREE_MB`); deliveries,
   commits and new groups are refused (`507`) while the database's disk has less than 1 GiB free.
+- **Token keys.** The Privacy Pass key is derived from a seed in the database (`token_keys`) and replaced every 30
+  days (`token_key_days`); the one before still verifies, older ones go with their spent nonces (`spent_tokens`).
+  Back up the database with its seeds: a hub restored without them issues under a new key, and every stash is
+  dropped and fetched again. `tokens_per_device_day` 0 turns tokens off: the directory is `404`, as on a hub
+  without them, and deliveries are limited by address alone.
 - **Cleanup**, hourly: envelopes and commits after 30 days, blobs after their last fetch or 30 days, users without
   a backup idle for 365 days, replaced devices' `410` memory after a year. Rate-limit buckets idle for a day and
   expired replay-cache entries are dropped from memory.
