@@ -225,10 +225,11 @@ struct Onboarding: View {
     busy = true
     defer { busy = false }
     problem = nil
+    let asked = name  // the field may change while the hub answers: "taken" is about this one
     do {
-      try await accounts.register(name)  // in: the list takes over, YoGPT on it (YoApp); secured later, from the profile
+      try await accounts.register(asked)  // in: the list takes over, YoGPT on it (YoApp); secured later, from the profile
     } catch AccountError.taken {
-      checked[Username.skeleton(name)] = false
+      checked[Username.skeleton(asked)] = false
       UINotificationFeedbackGenerator().notificationOccurred(.error)
     } catch {
       problem = error.localizedDescription
