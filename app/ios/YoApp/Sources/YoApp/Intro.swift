@@ -93,7 +93,7 @@ private struct Dots: View {
         Circle()
           .fill(.white.opacity(index == page ? 1 : 0.4))
           .frame(width: 8, height: 8)
-          .frame(width: 20, height: 30)
+          .frame(width: 24, height: 44)
           .contentShape(.rect)
           .onTapGesture { go(index) }
       }
@@ -119,7 +119,7 @@ struct IntroCard {
   let picture: String
 
   static let all: [IntroCard] = [
-    IntroCard(title: "Tap a Name", line: "That's a Yo. Nothing to type.", picture: "IntroTap"),
+    IntroCard(title: "Tap a Name", line: "That’s a Yo. Nothing to type.", picture: "IntroTap"),
     IntroCard(title: "Yo Back", line: "A Yo comes in. Tap their name to Yo back.", picture: "IntroYoBack"),
     IntroCard(title: "Add Friends by Name", line: "YoGPT is there from the start. It Yos back.", picture: "IntroAdd"),
   ]

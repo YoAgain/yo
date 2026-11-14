@@ -242,6 +242,7 @@ final class Inbox {
       }
       do {
         let (events, contacts) = try await Hub.run { (try client.sync(waitS: 25), client.contacts()) }
+        guard client === accounts.client else { continue }  // signed out meanwhile: not for this account
         await take(events, contacts: contacts, client: client, friends: friends)
         fetchMedia(client: client)  // what a broken network left, also after a start
       } catch YoError.Replaced {
@@ -309,13 +310,6 @@ final class Inbox {
     ReceivedMedia.shared.fetchWaiting(client: client) { [weak self] arrival in self?.add(arrival) }
   }
 
-  private static func firstFrame(of video: URL) async -> UIImage? {
-    let generator = AVAssetImageGenerator(asset: AVURLAsset(url: video))
-    generator.appliesPreferredTrackTransform = true
-    guard let (image, _) = try? await generator.image(at: .zero) else { return nil }
-    return UIImage(cgImage: image)
-  }
-
   /// A Yo notification that arrived while the app is open, or was tapped.
   func received(id: String, from sender: String) {
     guard taken.insert(id).inserted else { return }
@@ -329,7 +323,9 @@ final class Inbox {
       .filter { $0.request.content.categoryIdentifier == Self.category }
       .sorted { $0.date < $1.date }
     for notification in waiting {
-      received(id: notification.request.identifier, from: notification.request.content.userInfo["from"] as? String ?? "Unknown sender")
+      let info = notification.request.content.userInfo
+      // The Yo's own id when the notification service knew it, as when one is tapped: the core's Yo is not shown again.
+      received(id: info["id"] as? String ?? notification.request.identifier, from: info["from"] as? String ?? "Unknown sender")
     }
     center.removeDeliveredNotifications(withIdentifiers: waiting.map(\.request.identifier))
   }

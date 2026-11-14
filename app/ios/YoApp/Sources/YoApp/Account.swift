@@ -337,10 +337,11 @@ final class AccountStore {
 
   /// The first backup: K under the words always (passkey and words are equal doors), under the passkey's PRF too.
   private func saveBackup(prf: Data?) async throws {
-    guard var account, let securing else { throw AccountError.noBackup }
+    guard var account, let securing, let client else { throw AccountError.noBackup }
     account.byPasskey = prf != nil
     account.byCode = true
     try await put(BackupRecord.make(account, code: securing.code, k: securing.k, prf: prf))
+    guard client === self.client else { throw CancellationError() }  // signed out meanwhile
     RecoveryWords.save(securing.code)
     self.account = account
     self.securing = nil
@@ -367,7 +368,7 @@ final class AccountStore {
   /// The backup again with the same K (opened by the words on this phone): its passkey door kept, set from a PRF
   /// output or removed, and optionally under new words (the old locator then finds nothing).
   private func rewrap(_ passkey: Door, code new: [String]? = nil) async throws {
-    guard var account, let code = RecoveryWords.load() else { throw AccountError.noBackup }
+    guard var account, let code = RecoveryWords.load(), let client else { throw AccountError.noBackup }
     let record = try await fetch(account.userID)
     let k = try BackupRecord.unwrap(record.byCode, with: BackupRecord.key(code: code))
     let words = new ?? code
@@ -380,6 +381,7 @@ final class AccountStore {
     account.byPasskey = !byPasskey.isEmpty
     account.byCode = true
     try await put(BackupRecord.make(account, code: words, k: k, prf: nil, byPasskey: byPasskey))
+    guard client === self.client else { throw CancellationError() }  // signed out meanwhile
     RecoveryWords.save(words)
     self.account = account
     if case .set = passkey { passkeyTurnedOff = false }
@@ -393,20 +395,6 @@ final class AccountStore {
     guard let prf = try await passkeys.ask(salt: BackupRecord.prfSalt, only: made.credentialID).prf else {
       throw AccountError.noPRF
     }
-    try await rewrap(.set(prf))
-  }
-
-  /// A passkey to a backup kept with the words: a Yo passkey of this account if there is one, else a new one.
-  func addPasskey() async throws {
-    guard let account else { throw AccountError.noBackup }
-    var prf: Data?
-    if let answer = try? await passkeys.ask(salt: BackupRecord.prfSalt, quietly: true), answer.userID == account.userID {
-      prf = answer.prf
-    } else {
-      let made = try await passkeys.make(name: Self.passkeyName(account), userID: account.userID)
-      prf = try await passkeys.ask(salt: BackupRecord.prfSalt, only: made.credentialID).prf
-    }
-    guard let prf else { throw AccountError.noPRF }
     try await rewrap(.set(prf))
   }
 
@@ -550,6 +538,9 @@ final class AccountStore {
     account = nil
     client = nil
     securing = nil
+    newPasskey = nil
+    passkeyTurnedOff = false
+    wordsSaved = true
     StateFile.delete()
     // The group's too, under the lock, off the main thread (an extension's step under way ends first): the state as
     // it is now, not one a new sign-in saves meanwhile. Clients still on it are closed by their next step (the core's

@@ -6,8 +6,8 @@ import UserNotifications
 struct YoApp: App {
   @UIApplicationDelegateAdaptor(AppDelegate.self) private var appDelegate
   @State private var inbox: Inbox
-  @State private var friends = Friends()
-  @State private var accounts = AccountStore()
+  @State private var friends: Friends
+  @State private var accounts: AccountStore
   /// Photos and videos on their way out (Media.swift).
   @State private var outbox = MediaOutbox()
   @Environment(\.scenePhase) private var phase
@@ -24,8 +24,12 @@ struct YoApp: App {
       return { task.end(application) }
     }
     let inbox = Inbox()
+    let friends = Friends()
+    let accounts = AccountStore()
     _inbox = State(initialValue: inbox)
-    notifications = NotificationDelegate(inbox: inbox)
+    _friends = State(initialValue: friends)
+    _accounts = State(initialValue: accounts)
+    notifications = NotificationDelegate(inbox: inbox, friends: friends, accounts: accounts)
     UNUserNotificationCenter.current().delegate = notifications
   }
 
@@ -78,7 +82,7 @@ struct YoApp: App {
           Push.shared.register()
         }
         // The push token to the hub, once there is both a token and an account (and again for a new account).
-        .task(id: "\(Push.shared.token ?? "")/\(accounts.account?.userID.base64EncodedString() ?? "")") {
+        .task(id: "\(Push.shared.token ?? "")/\(accounts.account?.userID.base64EncodedString() ?? "")/\(accounts.client != nil)") {
           await Push.shared.send(accounts)
         }
         // Opening the app: the Yos waiting as notifications come in and show on their bars.
@@ -114,9 +118,13 @@ private final class Ended: @unchecked Sendable {
 /// the system. In the background the system shows it, with the Yo sound and "Yo back".
 final class NotificationDelegate: NSObject, UNUserNotificationCenterDelegate, Sendable {
   let inbox: Inbox
+  let friends: Friends
+  let accounts: AccountStore
 
-  init(inbox: Inbox) {
+  init(inbox: Inbox, friends: Friends, accounts: AccountStore) {
     self.inbox = inbox
+    self.friends = friends
+    self.accounts = accounts
   }
 
   func userNotificationCenter(
@@ -129,15 +137,24 @@ final class NotificationDelegate: NSObject, UNUserNotificationCenterDelegate, Se
     return []
   }
 
-  /// A tap on the notification opens the app, where the Yo shows on its row. ("Yo back" right on it comes with push.)
+  /// A tap on the notification opens the app, where the Yo shows on its row. "Yo Back" right on it sends one to the
+  /// sender without opening the app (in the background, once the core has opened).
   func userNotificationCenter(_ center: UNUserNotificationCenter, didReceive response: UNNotificationResponse) async {
     let info = response.notification.request.content.userInfo
     let sender = info["from"] as? String ?? "Unknown sender"
     switch response.actionIdentifier {
     case UNNotificationDefaultActionIdentifier:
       await inbox.received(id: info["id"] as? String ?? response.notification.request.identifier, from: sender)
+    case Inbox.yoBack:
+      await yoBack(to: sender)
     default:
       break
     }
+  }
+
+  @MainActor private func yoBack(to sender: String) async {
+    guard accounts.account != nil, let friend = friends.shownFriend(named: sender) else { return }
+    for _ in 0..<50 where accounts.client == nil { try? await Task.sleep(for: .milliseconds(100)) }  // opening
+    _ = await inbox.send(to: friend, accounts: accounts, friends: friends)
   }
 }

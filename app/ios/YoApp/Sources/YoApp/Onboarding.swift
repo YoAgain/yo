@@ -62,7 +62,7 @@ struct Onboarding: View {
         VStack(spacing: 0) {
           Text("Yo")
             .font(.yo(150))
-          Text("It's that simple.")
+          Text("It’s that simple.")
             .font(.yo(20))
             .opacity(0.85)
         }
@@ -85,7 +85,8 @@ struct Onboarding: View {
       let back = await accounts.restoreFromKeychain()
       busy = false
       if back { return }
-      try? await Task.sleep(for: .seconds(0.4))  // the welcome on screen first
+      // The welcome on screen first; gone meanwhile (Sign Up or Sign In tapped): no quiet passkey look over it.
+      guard (try? await Task.sleep(for: .seconds(0.4))) != nil else { return }
       inbox.playYo()  // the app says what it is: "Yo"
       try? await accounts.restoreWithPasskey(quietly: true)  // a Yo passkey here: the system offers it
     }
@@ -421,6 +422,9 @@ private struct LogIn: View {
   @State private var problem: String?
   @State private var scanning = false
   @State private var picked: PhotosPickerItem?
+  /// Signing in: one at a time (a second registration would replace the first).
+  @State private var busy = false
+  @FocusState private var focused: Bool
 
   var body: some View {
     Page(title: "Recovery Key", message: "Paste, type, or scan your recovery key.", back: back) {
@@ -432,6 +436,8 @@ private struct LogIn: View {
         .autocorrectionDisabled()
         .padding(14)
         .background(.white.opacity(0.14), in: .rect(cornerRadius: 16))
+        .focused($focused)
+        .onAppear { focused = true }
       HStack(spacing: 12) {
         if QRScanner.isAvailable {
           KeepButton(title: "Scan", icon: "qrcode.viewfinder", done: false) { scanning = true }
@@ -443,8 +449,8 @@ private struct LogIn: View {
         .buttonStyle(.glass)
       }
     } bottom: {
-      PrimaryButton("Sign In", action: logIn)
-        .disabled(words.isEmpty)
+      PrimaryButton("Sign In", busy: busy, action: logIn)
+        .disabled(words.isEmpty || busy)
       Note(problem)
     }
     .sheet(isPresented: $scanning) {
@@ -469,9 +475,13 @@ private struct LogIn: View {
 
   private func logIn() {
     guard let code = RecoveryCode.parse(words) else {
-      return problem = "That doesn't match a recovery key. Check the words and try again."
+      return problem = "That doesn’t match a recovery key. Check the words and try again."
     }
+    guard !busy else { return }
+    busy = true
+    problem = nil
     Task {
+      defer { busy = false }
       do {
         try await accounts.restore(code: code)
       } catch {

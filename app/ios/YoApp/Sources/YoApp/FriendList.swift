@@ -100,7 +100,26 @@ struct FriendList: View {
   @State private var recordingFor: Friend?
   @State private var libraryItem: PhotosPickerItem?
   /// A photo from the library, waiting to be sent: it stands in for the live picture.
-  @State private var picked: Data?
+  @State private var picked: Picked?
+
+  /// A photo from the library: what is sent, and its pictures for the screen, made once (a 48-megapixel photo decoded
+  /// at each redraw kept the list from answering).
+  struct Picked: Equatable {
+    let data: Data
+    let image: UIImage
+    let thumbnail: UIImage?
+
+    /// Off the main actor: decoded and scaled down for the screen and the library button.
+    static func make(_ data: Data) async -> Picked? {
+      await Task.detached(priority: .userInitiated) {
+        guard let full = UIImage(data: data) else { return nil }
+        let screen = CGSize(width: 1320, height: 2868)  // the largest iPhone's screen in pixels
+        let image = full.size.width * full.size.height > screen.width * screen.height
+          ? full.preparingThumbnail(of: screen) ?? full : full
+        return Picked(data: data, image: image, thumbnail: full.preparingThumbnail(of: CGSize(width: 120, height: 120)))
+      }.value
+    }
+  }
 
   // Arriving
   /// Counts Yos arriving, for the haptic.
@@ -405,8 +424,11 @@ struct FriendList: View {
     submitted += 1
     let this = submitted
     hint = "\(name)…"
+    let client = accounts.client
     Task {
-      switch await inbox.lookUp(name, accounts: accounts) {
+      let answer = await inbox.lookUp(name, accounts: accounts)
+      guard client === accounts.client else { return }  // signed out meanwhile: not this account's friend
+      switch answer {
       case .noSuchUser:
         if submitted == this { say("No Such User") }
         return
@@ -438,8 +460,8 @@ struct FriendList: View {
   // MARK: Camera mode
 
   @ViewBuilder private var backdrop: some View {
-    if cameraOn, let picked, let image = UIImage(data: picked) {
-      Image(uiImage: image).resizable().scaledToFill()
+    if cameraOn, let picked {
+      Image(uiImage: picked.image).resizable().scaledToFill()
     } else if cameraOn {
       CameraPreview(session: camera.session)
     } else {
@@ -450,7 +472,7 @@ struct FriendList: View {
   /// The photo library at the bottom left, front/back at the bottom right, as in the Camera app.
   private var cameraControls: some View {
     ZStack {
-      let thumbnail = pickedThumbnail  // the picker's label closure is Sendable: take the value here
+      let thumbnail = picked?.thumbnail  // the picker's label closure is Sendable: take the value here
       PhotosPicker(selection: $libraryItem, matching: .images) {
         LibraryLabel(thumbnail: thumbnail)
       }
@@ -474,13 +496,10 @@ struct FriendList: View {
     .transition(.move(edge: .bottom).combined(with: .opacity))
   }
 
-  private var pickedThumbnail: UIImage? {
-    picked.flatMap(UIImage.init(data:))?.preparingThumbnail(of: CGSize(width: 120, height: 120))
-  }
-
   private func switchCamera(_ on: Bool) async {
     guard on else { return camera.stop() }
-    if await Camera.allowed() { camera.start() } else { cameraOn = false }
+    // Asked first: closed meanwhile, it stays closed.
+    if await Camera.allowed() { if cameraOn { camera.start() } } else { cameraOn = false }
   }
 
   // MARK: Sending
@@ -489,7 +508,7 @@ struct FriendList: View {
     // A tap while a bar is swiped open closes it, as in Mail; it sends nothing.
     guard swiped == nil else { return withAnimation(.snappy) { swiped = nil } }
     sends += 1
-    let library = picked
+    let library = picked?.data
     picked = nil
     libraryItem = nil
     guard cameraOn || library != nil else {
@@ -771,8 +790,6 @@ extension FriendList {
     !sentRounds.isEmpty || !stackRounds.isEmpty || !outgoing.isEmpty
   }
 
-  private func toTop(_ name: String) { toTop([name]) }
-
   /// Friends go on top, the last of `names` uppermost. At the top of the list the list stays at its very start, so the
   /// bar is in sight below the title; scrolled down, the view stays where it is (the title's "!" tells, and the Yo
   /// waits until it is seen).
@@ -807,7 +824,9 @@ extension FriendList {
     guard let item else { return picked = nil }
     Task {
       let data = try? await item.loadTransferable(type: Data.self)
-      if libraryItem == item { picked = data }
+      var made: Picked?
+      if let data { made = await Picked.make(data) }
+      if libraryItem == item { picked = made }
     }
   }
 
@@ -959,6 +978,7 @@ struct RowButton: View {
       ZStack { mark(touchable: touchable) }  // always a part, so a missing "!" never takes its place
         .modifier(Knock(trigger: yo?.first))
         .opacity(touchable ? 1 : 0)
+        .accessibilityHidden(!touchable)
     }
     .font(.yo(Metrics.rowFont))
     .foregroundStyle(.white)
