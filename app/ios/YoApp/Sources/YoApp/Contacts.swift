@@ -236,21 +236,30 @@ private struct ContactDetail: View {
     return check == .ok ? when : "Due"
   }
 
-  private func plain(_ title: String, _ value: String, mono: Bool = false) -> some View {
-    LabeledContent(title) {
-      Text(value)
-        .font(mono ? .system(.footnote, design: .monospaced) : .body)
-        .multilineTextAlignment(.trailing)
-        .textSelection(.enabled)
+  /// A short value beside its title; a long one (keys, ids) under it, from the left, as Settings' About shows them:
+  /// beside the title it was right-aligned in a narrow column and broke at odd places.
+  @ViewBuilder private func plain(_ title: String, _ value: String, mono: Bool = false) -> some View {
+    if mono {
+      VStack(alignment: .leading, spacing: 4) {
+        Text(title)
+        Text(value)
+          .font(.system(.footnote, design: .monospaced))
+          .foregroundStyle(.secondary)
+          .textSelection(.enabled)
+      }
+      .accessibilityElement(children: .combine)
+    } else {
+      LabeledContent(title, value: value)
     }
   }
 
-  /// "12345 67890 …": the safety number in fives, as it is read aloud.
-  private func grouped(_ digits: String) -> String {
-    stride(from: 0, to: digits.count, by: 5).map { start in
-      let from = digits.index(digits.startIndex, offsetBy: start)
-      return String(digits[from..<(digits.index(from, offsetBy: 5, limitedBy: digits.endIndex) ?? digits.endIndex)])
-    }.joined(separator: " ")
+  /// The safety number in fives, three to a line, as it is read aloud ("12345 67890 12345"): only its digits, however
+  /// the core spaced them (its own spaces cut the fives in the wrong places).
+  private func grouped(_ number: String) -> String {
+    let digits = Array(number.filter(\.isNumber))
+    let fives = stride(from: 0, to: digits.count, by: 5).map { String(digits[$0..<min($0 + 5, digits.count)]) }
+    return stride(from: 0, to: fives.count, by: 3).map { fives[$0..<min($0 + 3, fives.count)].joined(separator: " ") }
+      .joined(separator: "\n")
   }
 
   private func load() async {
