@@ -357,6 +357,23 @@ fn drain(client: &YoClient) -> Vec<YoEvent> {
     }
 }
 
+/// An answer by the way that holds no client (`send_begin`, the inbox just read) carries the name not yet told, as
+/// `send` does: it went only with the next `maintenance` before.
+#[test]
+fn the_app_layer_tells_its_name_with_the_first_answer() {
+    let hub = TestHub::start();
+    let n = random_u64() % 1_000_000_000;
+    let (pa, pb) = (username(n), username(n + 1));
+    let a = client(&hub, &pa, "ALICE", Arc::new(File::default()));
+    let b = client(&hub, &pb, "BOB", Arc::new(File::default()));
+    a.send_yo(pb).unwrap();
+    assert_eq!(yos(&drain(&b), &a.user_id()), 1);
+    b.send_yo(a.user_id()).unwrap();
+    let events = drain(&a);
+    assert_eq!(yos(&events, &b.user_id()), 1);
+    assert!(events.contains(&YoEvent::Profile { user: b.user_id(), name: "BOB".into() }), "the name with the answer");
+}
+
 #[test]
 fn the_app_layer_sends_to_one_friend_while_a_delivery_to_another_waits() {
     use std::sync::mpsc::channel;

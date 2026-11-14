@@ -2189,8 +2189,14 @@ impl Client {
         if !self.without_session(&user).is_empty() {
             return None;
         }
-        // Saved with the message in it, or not made at all: `send` then fails on the save the same way.
-        self.atomic(|c| c.send_message(&user, content).and_then(|()| c.persist())).ok()?;
+        // A name not yet told goes first, as in `send`. Saved with the message in it, or not made at all: `send` then
+        // fails on the save the same way.
+        self.atomic(|c| {
+            c.send_profiles();
+            c.send_message(&user, content)?;
+            c.persist()
+        })
+        .ok()?;
         let mut deliveries = self.deliveries().unwrap_or_else(|_| self.no_deliveries());
         deliveries.to = Some(user);
         Some(deliveries)
