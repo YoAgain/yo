@@ -412,8 +412,8 @@ fn the_app_layer_sends_and_receives_bursts_with_many_friends_at_once() {
         assert_eq!(yos(&drain(friend), &a.user_id()), 1);
     }
     let started = Instant::now();
-    let got = Arc::new(Mutex::new(Vec::<YoEvent>::new()));
     let stop = Arc::new(AtomicBool::new(false));
+    let got = Arc::new(Mutex::new(Vec::<YoEvent>::new()));
     // A's inbox, waiting as the app's does (a short wait, so the test ends soon).
     let listening = std::thread::spawn({
         let (a, got, stop) = (a.clone(), got.clone(), stop.clone());
@@ -806,4 +806,127 @@ fn the_app_layer_closes_a_client_whose_shared_state_went_away() {
     *disk.state.lock().unwrap() = (2000, Vec::new());
     assert!(matches!(other.send_yo(pb.clone()), Err(yo::YoError::State)));
     assert!(drain(&b).iter().all(|e| !matches!(e, YoEvent::Message { user, .. } if *user == other.user_id())));
+}
+
+/// Chaos of two processes on one account, many accounts at once: the app's long poll runs all the time, an
+/// extension opens the state as a guest again and again (sends Yos, syncs like the notification service), the friend
+/// writes meanwhile. Every Yo arrives exactly once, both ways; every lock is given back; the state stays loadable.
+#[test]
+fn the_app_layer_and_its_extensions_take_turns_under_load() {
+    use std::sync::atomic::{AtomicUsize, Ordering::Relaxed};
+    use std::time::{Duration, Instant};
+    let hub = Arc::new(TestHub::start());
+    let n = random_u64() % 1_000_000_000;
+    let transport = |hub: &TestHub| Arc::new(App(Http::new(hub.url())));
+    let accounts: Vec<_> = (0..6u64)
+        .map(|i| {
+            let disk = Arc::new(Disk::default());
+            let app = Process::new(&disk);
+            let number = phone(n + 2 * i);
+            yo::request_code(transport(&hub), number.clone()).unwrap();
+            app.hold();
+            let a = YoClient::register(
+                transport(&hub),
+                app.clone(),
+                vec![7; 32],
+                number,
+                "000000".into(),
+                None,
+                0,
+                String::new(),
+            )
+            .unwrap();
+            app.release();
+            a.share_state(app);
+            let friend = client(&hub, &phone(n + 2 * i + 1), "FRIEND", Arc::new(File::default()));
+            a.send_yo(friend.user_id()).unwrap();
+            assert_eq!(yos(&drain(&friend), &a.user_id()), 1);
+            (disk, a, friend)
+        })
+        .collect();
+    let until = Instant::now() + Duration::from_secs(20);
+    let handles: Vec<_> = accounts
+        .into_iter()
+        .enumerate()
+        .map(|(i, (disk, a, friend))| {
+            let hub = hub.clone();
+            std::thread::spawn(move || {
+                let me = a.user_id();
+                let (friend_id, sent_by_app, sent_by_guest, sent_by_friend) =
+                    (friend.user_id(), AtomicUsize::new(1), AtomicUsize::new(0), AtomicUsize::new(0));
+                let got_by_app = AtomicUsize::new(0);
+                let got_by_friend = AtomicUsize::new(0);
+                std::thread::scope(|s| {
+                    // The app: its long poll, and now and then a Yo of its own.
+                    s.spawn(|| {
+                        let mut k = 0u32;
+                        while Instant::now() < until {
+                            let events = a.sync(1).unwrap();
+                            got_by_app.fetch_add(yos(&events, &friend_id), Relaxed);
+                            a.acknowledge_events();
+                            k += 1;
+                            if k.is_multiple_of(3) {
+                                let events = a.send_yo(friend_id.clone()).unwrap();
+                                sent_by_app.fetch_add(1, Relaxed);
+                                got_by_app.fetch_add(yos(&events, &friend_id), Relaxed);
+                                a.acknowledge_events();
+                            }
+                        }
+                    });
+                    // The extensions: a share sheet that sends, a notification service that syncs, each a guest.
+                    s.spawn(|| {
+                        let mut k = 0u64;
+                        while Instant::now() < until {
+                            let process = Process::new(&disk);
+                            process.hold();
+                            let blob = process.read();
+                            let g =
+                                YoClient::restore_guest(transport(&hub), process.clone(), vec![7; 32], blob).unwrap();
+                            if k.is_multiple_of(2) {
+                                g.send_yo(friend_id.clone()).unwrap();
+                                sent_by_guest.fetch_add(1, Relaxed);
+                            } else {
+                                g.sync(0).unwrap();
+                            }
+                            drop(g);
+                            process.release();
+                            k += 1;
+                            std::thread::sleep(Duration::from_millis(30 + (k * 7 + i as u64) % 50));
+                        }
+                    });
+                    // The friend writes and reads.
+                    s.spawn(|| {
+                        while Instant::now() < until {
+                            // A send receives first: what came with it counts too.
+                            got_by_friend.fetch_add(yos(&friend.send_yo(me.clone()).unwrap(), &me), Relaxed);
+                            sent_by_friend.fetch_add(1, Relaxed);
+                            got_by_friend.fetch_add(yos(&friend.sync(0).unwrap(), &me), Relaxed);
+                            std::thread::sleep(Duration::from_millis(40));
+                        }
+                    });
+                });
+                // Quiet: everything still on its way arrives.
+                for _ in 0..5 {
+                    got_by_app.fetch_add(yos(&a.sync(0).unwrap(), &friend_id), Relaxed);
+                    a.acknowledge_events();
+                    got_by_friend.fetch_add(yos(&drain(&friend), &me), Relaxed);
+                }
+                let sent = sent_by_app.load(Relaxed) + sent_by_guest.load(Relaxed);
+                // The first Yo was counted before the run.
+                assert_eq!(got_by_friend.load(Relaxed) + 1, sent, "account {i}: the friend got every Yo once");
+                assert_eq!(
+                    got_by_app.load(Relaxed),
+                    sent_by_friend.load(Relaxed),
+                    "account {i}: the app got every Yo once"
+                );
+                assert!(sent_by_guest.load(Relaxed) > 10, "account {i}: the extension had turns");
+                assert!(!*disk.held.lock().unwrap(), "account {i}: every lock given back");
+                let blob = disk.state.lock().unwrap().1.clone();
+                assert!(yo_core::Client::restore(Http::new(hub.url()), &blob, &[7; 32]).is_ok());
+            })
+        })
+        .collect();
+    for handle in handles {
+        handle.join().unwrap();
+    }
 }
