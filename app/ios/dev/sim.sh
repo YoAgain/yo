@@ -6,10 +6,13 @@
 #   dev/sim.sh drive NAME DIR     the driver on it (runs until `drive.py DIR quit`); drive.py sends it commands
 #                                 (started again when XCTest ends it)
 #   dev/sim.sh delete NAME        the Simulator gone again
-# Yo Dev talks to the dev hub. Passkeys do not work in the Simulator (no team in the app's id for the passkey
-# domain), nor does the iCloud Keychain sync; Face ID does (Features ▸ Face ID, or `simctl spawn … notifyutil`).
+# XCODEGEN names XcodeGen when it is not on the PATH; dev/local.env (ignored) may set it, and RUSTUP_TOOLCHAIN when
+# the Mac's rustup has another toolchain than rust-toolchain.toml's. Yo Dev talks to the dev hub. Passkeys do not work
+# in the Simulator (no team in the app's id for the passkey domain), nor does the iCloud Keychain sync; Face ID does
+# (Features ▸ Face ID, or `simctl spawn … notifyutil`). See ../TESTING.md.
 set -euo pipefail
 here=$(cd "$(dirname "$0")" && pwd)
+[ -f "$here/local.env" ] && . "$here/local.env"
 derived=${YO_SIM_DERIVED:-$here/sim/build}
 PATH="$HOME/.cargo/bin:$PATH"
 
@@ -18,7 +21,7 @@ udid() { xcrun simctl list devices -j | python3 -c 'import json,sys; n=sys.argv[
 case ${1:-} in
   build)
     YO_CORE_TARGET=aarch64-apple-ios-sim "$here/core.sh"
-    (cd "$here/sim" && xcodegen generate --quiet)
+    (cd "$here/sim" && "${XCODEGEN:-xcodegen}" generate --quiet)
     xcodebuild build-for-testing -quiet -project "$here/sim/YoSim.xcodeproj" -scheme YoSim \
       -destination 'generic/platform=iOS Simulator' -derivedDataPath "$derived"
     ;;

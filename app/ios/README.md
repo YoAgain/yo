@@ -48,6 +48,18 @@ Once before: pair over USB (`tools/tailnet-tunnel.py pair` in omarchy-apple-dev)
 repository; this machine's phone address and paths go in `dev/local.env` (ignored). The scripts run with
 pymobiledevice3's Python (`PY` in `local.env`).
 
+## In the Simulator (on a Mac)
+
+```sh
+app/ios/dev/sim.sh build                 # the core for aarch64-apple-ios-sim, then app and UI driver (XcodeGen, xcodebuild)
+app/ios/dev/sim.sh device "Yo Sim"       # a Simulator of its own, booted
+app/ios/dev/sim.sh install "Yo Sim"
+app/ios/dev/sim.sh drive "Yo Sim" DIR &  # YoDriver: tap, type, read the screen, audit, by commands (dev/sim/drive.py)
+```
+
+Yo Dev in the Simulator talks to the dev hub; passkeys, push and the iCloud Keychain's sync need a device.
+`TESTING.md` lists what was gone through that way, and how.
+
 ## The Rust core
 
 `core/bindings` (UniFFI) comes in as the module `YoCore`: `import YoCore`, then `YoClient`, `fetchBackup`,
