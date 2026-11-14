@@ -131,17 +131,46 @@ fn is_latin_letter(g: &str) -> bool {
         })
 }
 
-/// An emoji as people type it: shown as emoji by default, or a sequence (keycaps, ZWJ, flags, skin tones).
+/// An emoji as people type it (UTS #51), checked as a whole sequence: a keycap (`1️⃣`), a flag (two regional
+/// indicators), a tag sequence (🏴 and tags), or emoji joined by U+200D (`🧙‍♂️`), each one shown as emoji by default
+/// or made one by U+FE0F, with a skin tone on those that take one. Never a letter or digit with marks after it.
 fn is_emoji(g: &str) -> bool {
-    let Some(first) = g.chars().next() else { return false };
+    let chars: Vec<char> = g.chars().collect();
+    let regional = |c: &char| ('\u{1F1E6}'..='\u{1F1FF}').contains(c);
+    let tag = |c: &char| ('\u{E0020}'..='\u{E007E}').contains(c);
+    match chars.as_slice() {
+        [a, b] if regional(a) && regional(b) => true,
+        [k, '\u{FE0F}', '\u{20E3}'] | [k, '\u{20E3}'] => matches!(k, '0'..='9' | '#' | '*'),
+        ['\u{1F3F4}', tags @ .., '\u{E007F}'] if !tags.is_empty() => tags.iter().all(tag),
+        _ => {
+            let parts: Vec<&[char]> = chars.split(|&c| c == '\u{200D}').collect();
+            parts.iter().all(|part| is_emoji_element(part, parts.len() > 1))
+        }
+    }
+}
+
+/// One emoji of a sequence: an emoji character (not ASCII: digits, `#` and `*` are emoji only in a keycap), then
+/// U+FE0F, or a skin tone if it takes one, or nothing if it is shown as emoji by default or stands in a ZWJ sequence.
+fn is_emoji_element(part: &[char], joined: bool) -> bool {
+    let Some((first, rest)) = part.split_first() else { return false };
+    if first.is_ascii() || !first.is_emoji_char() {
+        return false;
+    }
+    let status = first.emoji_status();
     let presentation = matches!(
-        first.emoji_status(),
+        status,
         EmojiStatus::EmojiPresentation
             | EmojiStatus::EmojiPresentationAndModifierBase
             | EmojiStatus::EmojiPresentationAndEmojiComponent
             | EmojiStatus::EmojiPresentationAndModifierAndEmojiComponent
     );
-    presentation || (first.is_emoji_char() && g.chars().count() > 1)
+    let takes_tone = matches!(status, EmojiStatus::EmojiModifierBase | EmojiStatus::EmojiPresentationAndModifierBase);
+    match rest {
+        [] => presentation || joined,
+        ['\u{FE0F}'] => true,
+        [tone] => takes_tone && ('\u{1F3FB}'..='\u{1F3FF}').contains(tone),
+        _ => false,
+    }
 }
 
 #[cfg(test)]
@@ -195,6 +224,49 @@ mod tests {
             assert!(same_name(a, b), "{a} {b}");
         }
         assert!(!same_name("YoGPT", "YoGPS"));
+    }
+
+    /// Any grapheme that began with a character of the Emoji property passed, and digits have it (for keycaps): a
+    /// digit with an accent was a name's first "emoji". Now the whole sequence is checked.
+    #[test]
+    fn emoji_are_whole_sequences() {
+        for good in [
+            "🔥🔥🔥",
+            "👍🏿yo",
+            "🧙‍♂️Yo",
+            "❤️abc",
+            "❤️‍🔥ab",
+            "🏳️‍🌈ab",
+            "🧑🏽‍💻ab",
+            "👨‍👩‍👧ab",
+            "🇩🇪ab",
+            "1️⃣ab",
+            "#️⃣ab",
+            "🏴\u{E0067}\u{E0062}\u{E0073}\u{E0063}\u{E0074}\u{E007F}ab",
+            "👁️‍🗨️ab",
+            "⌚ab",
+            "☝🏻ab",
+        ] {
+            assert!(check_username_form(good).is_ok(), "{good:?}");
+            assert_eq!(canonical(good), good, "{good:?}");
+        }
+        for bad in [
+            "1\u{301}ab",
+            "#\u{301}ab",
+            "1\u{FE0F}ab",
+            "a\u{20E3}bc",
+            "☺ab",
+            "☺\u{301}ab",
+            "🔥\u{301}ab",
+            "🔥\u{200D}ab",
+            "👍\u{1F3FF}\u{1F3FF}ab",
+            "🔥\u{1F3FF}ab",
+            "\u{1F3F4}\u{E0067}ab",
+            "\u{200D}🔥ab",
+        ] {
+            assert!(check_username_form(bad).is_err(), "{bad:?}");
+        }
+        assert_eq!(canonical("1\u{301}ab"), "ab", "skipped as typed");
     }
 
     #[test]

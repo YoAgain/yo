@@ -20,8 +20,9 @@ impl HttpTransport for App {
 struct File(Mutex<Vec<u8>>);
 
 impl StateStore for File {
-    fn save(&self, blob: Vec<u8>) {
+    fn save(&self, blob: Vec<u8>) -> Result<(), yo::YoError> {
         *self.0.lock().unwrap() = blob;
+        Ok(())
     }
 }
 
@@ -416,6 +417,25 @@ fn the_app_layer_sends_to_one_friend_while_a_delivery_to_another_waits() {
     assert_eq!(yos(&drain(&b), &a.user_id()), 3);
 }
 
+/// A name that changed hands: the app's Yo to it goes to whoever has it now (asked of the hub, spec 4.2), not to the
+/// contact that had it.
+#[test]
+fn the_app_layer_sends_a_name_to_whoever_has_it_now() {
+    let hub = TestHub::start();
+    let n = random_u64() % 1_000_000_000;
+    let (pa, pb) = (username(n), username(n + 1));
+    let a = client(&hub, &pa, "ALICE", Arc::new(File::default()));
+    let b = client(&hub, &pb, "BOB", Arc::new(File::default()));
+    b.send_yo(pa.clone()).unwrap();
+    assert_eq!(yos(&drain(&a), &b.user_id()), 1);
+    a.set_username(Some(username(n + 2))).unwrap();
+    let c = client(&hub, &pa, "CAROL", Arc::new(File::default()));
+    b.send_yo(pa.clone()).unwrap();
+    assert_eq!(yos(&drain(&c), &b.user_id()), 1);
+    assert_eq!(yos(&drain(&a), &b.user_id()), 0);
+    assert!(b.contacts().iter().all(|k| k.user == c.user_id() || k.handles.is_empty()));
+}
+
 /// The app's transport over a phone's network: every request takes a round trip.
 struct Slow(App);
 
@@ -637,11 +657,12 @@ impl Process {
 }
 
 impl StateStore for Process {
-    fn save(&self, blob: Vec<u8>) {
+    fn save(&self, blob: Vec<u8>) -> Result<(), yo::YoError> {
         assert!(*self.disk.held.lock().unwrap(), "saved only under the lock");
         let mut state = self.disk.state.lock().unwrap();
         *state = (state.0 + 1, blob);
         *self.known.lock().unwrap() = state.0;
+        Ok(())
     }
 }
 

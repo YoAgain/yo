@@ -39,7 +39,7 @@ fn a_new_phone_gets_friends_blocks_and_icon_back_before_the_first_message() {
     me.set_friend(pal.user_id(), Some("Best Pal".into()), Some(3)).unwrap();
     me.set_friend(pest.user_id(), None, Some(1)).unwrap();
     me.set_blocked(pest.user_id(), true).unwrap();
-    me.set_app_icon(Some("Negative".into()));
+    me.set_app_icon(Some("Negative".into())).unwrap();
     me.maintenance().unwrap();
     // The hub has it, sealed: not a name in it.
     let sealed = stored(&mut me);
@@ -69,7 +69,7 @@ fn a_new_phone_gets_friends_blocks_and_icon_back_before_the_first_message() {
     assert_eq!(seen, ["hello new phone"], "{seen:?}");
     assert_eq!(new.send(pest.user_id(), Content::Yo), Err(Error::Blocked));
     // The old phone is out: its storage writes are refused.
-    me.set_app_icon(Some("Original".into()));
+    me.set_app_icon(Some("Original".into())).unwrap();
     assert_eq!(me.maintenance(), Err(Error::Replaced));
     assert_eq!(new.app_icon().as_deref(), Some("Negative"));
 }
@@ -81,7 +81,7 @@ fn two_writers_merge_and_converge() {
     let name = format!("Two{n}");
     let mut a = by_name(&hub, &name, None);
     a.set_friend(&"11".repeat(16), Some("Leo".into()), Some(1)).unwrap();
-    a.set_app_icon(Some("Original".into()));
+    a.set_app_icon(Some("Original".into())).unwrap();
     a.maintenance().unwrap();
     // Another writer of the account (a second device, later; here by hand, with the same key) writes on top of the
     // hub's version: a friend of its own, Leo renamed, the icon back to the default.
@@ -131,7 +131,7 @@ fn the_storage_goes_with_the_account() {
     let n = random_u64() % 100_000;
     let name = format!("Gone{n}");
     let mut a = by_name(&hub, &name, None);
-    a.set_app_icon(Some("Negative".into()));
+    a.set_app_icon(Some("Negative".into())).unwrap();
     a.maintenance().unwrap();
     a.delete_account().unwrap();
     assert_eq!(hub.hub.audit().unwrap(), [], "nothing left behind");
@@ -146,7 +146,7 @@ fn a_replayed_storage_is_not_taken() {
     let hub = TestHub::start();
     let name = format!("Replay{}", random_u64() % 100_000);
     let mut a = by_name(&hub, &name, None);
-    a.set_app_icon(Some("Negative".into()));
+    a.set_app_icon(Some("Negative".into())).unwrap();
     a.maintenance().unwrap();
     // The hub (or someone at it) puts the old blob, sealed as version 1, under version 2.
     let old = stored(&mut a).data;
@@ -156,6 +156,26 @@ fn a_replayed_storage_is_not_taken() {
     assert_eq!(new.app_icon(), None, "not taken: sealed as another version");
     assert!(new.drop_reasons().iter().any(|r| r.contains("storage version")));
     assert!(a.set_friend(&"11".repeat(16), Some("x".repeat(65)), None).is_err(), "a name too long");
+}
+
+/// A blob that did not open (or was replayed) was left at the hub when this device had nothing to change: "saved",
+/// though no device could read what the hub held. Now the device's own takes its place with the next write.
+#[test]
+fn a_storage_that_does_not_open_is_written_over() {
+    let hub = TestHub::start();
+    let name = format!("Junk{}", random_u64() % 100_000);
+    let mut a = by_name(&hub, &name, None);
+    a.set_app_icon(Some("Negative".into())).unwrap();
+    a.maintenance().unwrap();
+    let body = yo_wire::encode(&api::Storage { version: 1, data: vec![7; 1024].into() });
+    assert_eq!(a.signed_for_tests("PUT", api::STORAGE, &body).unwrap().status, status::NO_CONTENT);
+    let mut new = by_name(&hub, &name, Some(a.account_secret()));
+    assert!(new.drop_reasons().iter().any(|r| r.contains("storage")));
+    new.maintenance().unwrap();
+    assert!(new.storage_saved_at().is_some());
+    assert_eq!(stored(&mut new).version, 3, "written over");
+    let third = by_name(&hub, &name, Some(a.account_secret()));
+    assert!(third.drop_reasons().is_empty(), "{:?}", third.drop_reasons());
 }
 
 #[test]

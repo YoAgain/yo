@@ -106,12 +106,47 @@ impl Friend {
     }
 }
 
-/// Fields of a later version: kept; where both sides have one, the same choice on both (the larger value).
+/// Fields of a later version: kept, merged as the known ones (spec 6.9) without knowing them: a field
+/// (`[value, at]`) by its time, then its value; an object field by field, on every level. Anything else, where both
+/// sides have it, the same choice on both (the larger value).
 fn merge_extra(mine: &mut BTreeMap<String, serde_json::Value>, theirs: &BTreeMap<String, serde_json::Value>) {
     for (key, value) in theirs {
-        let entry = mine.entry(key.clone()).or_insert_with(|| value.clone());
-        if serde_json::to_vec(value).ok() > serde_json::to_vec(entry).ok() {
-            *entry = value.clone();
+        match mine.get_mut(key) {
+            Some(entry) => merge_value(entry, value),
+            None => {
+                mine.insert(key.clone(), value.clone());
+            }
+        }
+    }
+}
+
+fn merge_value(mine: &mut serde_json::Value, theirs: &serde_json::Value) {
+    use serde_json::Value;
+    // A field: (true, its time, its value); anything else: (false, 0, itself). So a field wins over what is none.
+    let key = |v: &Value| {
+        let bytes = |v: &Value| serde_json::to_vec(v).unwrap_or_default();
+        match v {
+            Value::Array(pair) if pair.len() == 2 && pair[1].is_u64() => {
+                (true, pair[1].as_u64().unwrap_or(0), bytes(&pair[0]))
+            }
+            other => (false, 0, bytes(other)),
+        }
+    };
+    match (&mut *mine, theirs) {
+        (Value::Object(ours), Value::Object(other)) => {
+            for (key, value) in other {
+                match ours.get_mut(key) {
+                    Some(entry) => merge_value(entry, value),
+                    None => {
+                        ours.insert(key.clone(), value.clone());
+                    }
+                }
+            }
+        }
+        _ => {
+            if key(theirs) > key(mine) {
+                *mine = theirs.clone();
+            }
         }
     }
 }
@@ -238,8 +273,7 @@ impl Client {
         if friend.removed.value {
             friend.removed.set(false, now);
         }
-        self.storage_changed();
-        Ok(())
+        self.storage_changed()
     }
 
     /// Takes a friend off the list (a block stays as it is).
@@ -247,8 +281,7 @@ impl Client {
         let now = crate::wall_ms();
         let Some(friend) = self.state.storage.friends.get_mut(user) else { return Ok(()) };
         friend.removed.set(true, now);
-        self.storage_changed();
-        Ok(())
+        self.storage_changed()
     }
 
     /// The app's icon as kept in the storage: none for the default.
@@ -263,11 +296,12 @@ impl Client {
             .then_some(self.state.storage_saved_at)
     }
 
-    pub fn set_app_icon(&mut self, icon: Option<String>) {
+    pub fn set_app_icon(&mut self, icon: Option<String>) -> Result<()> {
         if self.state.storage.icon.value != icon {
             self.state.storage.icon.set(icon, crate::wall_ms());
-            self.storage_changed();
+            return self.storage_changed();
         }
+        Ok(())
     }
 
     /// A block or unblock, kept in the storage too (`set_blocked`).
@@ -275,13 +309,13 @@ impl Client {
         let friend = self.state.storage.friends.entry(user.to_owned()).or_default();
         if friend.blocked.value != blocked || friend.blocked.at == 0 {
             friend.blocked.set(blocked, crate::wall_ms());
-            self.storage_changed();
+            self.state.storage_dirty = true;
         }
     }
 
-    fn storage_changed(&mut self) {
+    fn storage_changed(&mut self) -> Result<()> {
         self.state.storage_dirty = true;
-        self.persist();
+        self.persist()
     }
 
     /// The storage's blocks, applied to the contacts: what the merged storage says is what holds.
@@ -334,6 +368,8 @@ impl Client {
                     if let Err(error) = self.take_storage(stored.version, stored.data.as_slice()) {
                         self.drop_one(format!("storage: {error}"));
                         self.state.storage_version = stored.version;
+                        // Written over, also with nothing changed here: never left there as if it were saved.
+                        self.state.storage_dirty = true;
                     }
                 }
                 status::NOT_FOUND => {}
@@ -351,14 +387,14 @@ impl Client {
                 }
             }
             self.state.storage_fetched = true;
-            self.persist();
+            self.persist()?;
         }
         for _ in 0..WRITE_TRIES {
             if !self.state.storage_dirty {
                 // Nothing to write: the hub holds it all (a new account's empty storage too).
                 if self.state.storage_saved_at == 0 {
                     self.state.storage_saved_at = crate::wall_ms();
-                    self.persist();
+                    self.persist()?;
                 }
                 return Ok(());
             }
@@ -373,7 +409,7 @@ impl Client {
                     self.state.storage.version = next.version;
                     self.state.storage_dirty = false;
                     self.state.storage_saved_at = crate::wall_ms();
-                    self.persist();
+                    self.persist()?;
                 }
                 // Another writer was first: its version, merged, goes up again.
                 status::CONFLICT => {
@@ -383,7 +419,7 @@ impl Client {
                         self.drop_one(format!("storage: {error}"));
                     }
                     self.state.storage_dirty = true;
-                    self.persist();
+                    self.persist()?;
                 }
                 status::GONE => return Err(Error::Replaced),
                 other => return Err(Error::Refused(other)),
@@ -451,6 +487,28 @@ mod tests {
         assert_eq!(ab.friends["aa"].name.value.as_deref(), Some("Leo"), "the later name");
         assert!(ab.friends["aa"].blocked.value, "the block from the other side");
         assert_eq!(ab.icon.value.as_deref(), Some("Negative"));
+    }
+
+    /// Fields of a later version merged by their value: `["z", 1]` beat `["a", 2]`, and an object of them was taken
+    /// whole from one side. Now they merge as the known fields do, by time, on every level.
+    #[test]
+    fn unknown_fields_merge_by_time_on_every_level() {
+        let parse = |json: &str| -> Storage { serde_json::from_str(json).unwrap() };
+        let a = parse(r#"{"later":["z",1],"deep":{"p":["old",1],"q":["mine",4]},"friends":{"aa":{"x":["a",9]}}}"#);
+        let b = parse(r#"{"later":["a",2],"deep":{"p":["new",3],"r":["theirs",2]},"friends":{"aa":{"x":["b",8]}}}"#);
+        let mut ab = a.clone();
+        ab.merge(&b);
+        let mut ba = b.clone();
+        ba.merge(&a);
+        assert_eq!(ab, ba, "the same either way");
+        let json = serde_json::to_value(&ab).unwrap();
+        assert_eq!(json["later"], serde_json::json!(["a", 2]), "the later");
+        assert_eq!(json["deep"], serde_json::json!({"p": ["new", 3], "q": ["mine", 4], "r": ["theirs", 2]}));
+        assert_eq!(json["friends"]["aa"]["x"], serde_json::json!(["a", 9]));
+        // Equal times: by the value, the same on both sides.
+        let (mut c, d) = (parse(r#"{"t":["a",5]}"#), parse(r#"{"t":["b",5]}"#));
+        c.merge(&d);
+        assert_eq!(serde_json::to_value(&c).unwrap()["t"], serde_json::json!(["b", 5]));
     }
 
     #[test]

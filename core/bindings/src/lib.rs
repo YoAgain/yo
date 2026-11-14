@@ -26,6 +26,16 @@ pub enum YoError {
     Protocol { message: String },
     #[error("state")]
     State,
+    /// The state could not be saved (`StateStore::save` threw): nothing that needed it left.
+    #[error("save: {message}")]
+    Save { message: String },
+}
+
+/// What `StateStore::save` threw, if it was no `YoError`.
+impl From<uniffi::UnexpectedUniFFICallbackError> for YoError {
+    fn from(error: uniffi::UnexpectedUniFFICallbackError) -> Self {
+        YoError::Save { message: error.reason }
+    }
 }
 
 impl From<yo_core::Error> for YoError {
@@ -39,6 +49,7 @@ impl From<yo_core::Error> for YoError {
             E::Unconfirmed => YoError::Unconfirmed,
             E::Replaced => YoError::Replaced,
             E::State => YoError::State,
+            E::Save(message) => YoError::Save { message },
             other => YoError::Protocol { message: other.to_string() },
         }
     }
@@ -64,10 +75,11 @@ pub trait HttpTransport: Send + Sync {
     fn request(&self, method: String, path: String, headers: Vec<Header>, body: Vec<u8>) -> HttpResult;
 }
 
-/// Keeps the sealed state, implemented by the app (a file; the key lives in the Keychain or Keystore).
+/// Keeps the sealed state, implemented by the app (a file; the key lives in the Keychain or Keystore). A save that
+/// cannot be written throws (any error, `Save` best): the call fails, and nothing that needed the save leaves.
 #[uniffi::export(with_foreign)]
 pub trait StateStore: Send + Sync {
-    fn save(&self, blob: Vec<u8>);
+    fn save(&self, blob: Vec<u8>) -> Result<(), YoError>;
 }
 
 /// The lock around the state when two processes use it: an app and its extensions (a share sheet, a notification
@@ -125,8 +137,11 @@ impl yo_core::Transport for Http {
 struct Store(Arc<dyn StateStore>);
 
 impl yo_core::Store for Store {
-    fn save(&self, blob: Vec<u8>) {
-        self.0.save(blob)
+    fn save(&self, blob: Vec<u8>) -> Result<(), String> {
+        self.0.save(blob).map_err(|error| match error {
+            YoError::Save { message } => message,
+            other => other.to_string(),
+        })
     }
 }
 
@@ -302,7 +317,7 @@ pub struct YoChat {
     pub members: u32,
     /// When this device last updated its keys here (ms since 1970; 0: not yet).
     pub last_update_ms: u64,
-    /// The hub orders its commits; if not, the chat works without key updates.
+    /// The chat takes key updates: not while it is lost and waits for its restart.
     pub updates: bool,
     pub restarted: bool,
     pub lost: bool,
@@ -489,10 +504,23 @@ impl YoClient {
 
     /// A message, its way to the hub without holding the client where it can (`send_yo`).
     fn send_content(&self, to: String, content: Content) -> Result<Vec<YoEvent>, YoError> {
+        let to = self.user_for(to)?;
         match self.with(|c| c.send_begin(&to, content.clone()))? {
             Some(deliveries) => self.deliver_from(deliveries),
             None => events(self.with(|c| c.send(&to, content))?),
         }
+    }
+
+    /// The user id a send goes to: a name is asked of the hub, never taken as this device knew it (it may have
+    /// changed hands, spec 4.2), without holding the client. `NotOnYo`: nobody by that name.
+    fn user_for(&self, to: String) -> Result<String, YoError> {
+        if Client::is_user_id(&to) {
+            return Ok(to);
+        }
+        let whois = self.with(|c| c.whois_begin(&to))??;
+        let (user, username) = whois.send()?;
+        self.with(|c| c.whois_end(&to, &user, username))??;
+        Ok(user)
     }
 
     /// Posts deliveries without holding the client, and what may go after them, until done.
@@ -528,12 +556,13 @@ impl YoClient {
         let key = key_of(state_key)?;
         let account = account_secret.map(key_of).transpose()?;
         let push = yo_core::Push { platform: push_platform, token: push_token.into_bytes().into() };
-        let mut client = Client::register_username(Arc::new(Http(transport)), &username, account, name, push)?;
-        client.persist_to(Arc::new(Store(store)), key);
+        // Saved before the request leaves: a crash after the hub took it is finished by `restore`.
+        let (http, store) = (Arc::new(Http(transport)), Arc::new(Store(store)));
+        let client = Client::register_username_saved(http, store, key, &username, account, name, push)?;
         Ok(Self::new(client))
     }
 
-    /// Opens the state the store saved last.
+    /// Opens the state the store saved last; a registration saved before its answer came is finished first.
     #[uniffi::constructor]
     pub fn restore(
         transport: Arc<dyn HttpTransport>,
@@ -543,7 +572,8 @@ impl YoClient {
     ) -> Result<Arc<Self>, YoError> {
         let key = key_of(state_key)?;
         let mut client = Client::restore(Arc::new(Http(transport)), &blob, &key)?;
-        client.persist_to(Arc::new(Store(store)), key);
+        client.persist_to(Arc::new(Store(store)), key)?;
+        client.finish_registration()?;
         Ok(Self::new(client))
     }
 
@@ -559,7 +589,11 @@ impl YoClient {
     ) -> Result<Arc<Self>, YoError> {
         let key = key_of(state_key)?;
         let mut client = Client::restore_guest(Arc::new(Http(transport)), &blob, &key)?;
-        client.persist_to(Arc::new(Store(store)), key);
+        // Not registered yet: the app's to finish.
+        if client.is_registering() {
+            return Err(YoError::State);
+        }
+        client.persist_to(Arc::new(Store(store)), key)?;
         Ok(Self::new(client))
     }
 
@@ -578,7 +612,7 @@ impl YoClient {
     /// Sends again what the hub did not take yet (`waiting`): its limit per sender (`429`) or no network. Without
     /// holding the client.
     pub fn deliver(&self) -> Result<Vec<YoEvent>, YoError> {
-        let deliveries = self.with(|c| c.deliver_begin())?;
+        let deliveries = self.with(|c| c.deliver_begin())??;
         self.deliver_from(deliveries)
     }
 
@@ -776,6 +810,7 @@ impl YoClient {
 
     /// Stores the app's icon (none: the default), for the account's other and next phones.
     pub fn set_app_icon(&self, icon: Option<String>) {
+        // Kept in memory if not saved: it goes with the next save.
         _ = self.with(|c| c.set_app_icon(icon));
     }
 
@@ -811,7 +846,7 @@ impl YoClient {
     /// tells which refusals mean "later".
     pub fn upload_media(&self, media: YoMedia, ciphertext: Vec<u8>, fetches: u32) -> Result<(), YoError> {
         let media: yo_core::Media = media.try_into()?;
-        let upload = self.with(|c| c.upload(&media, fetches))?;
+        let upload = self.with(|c| c.upload(&media, fetches))??;
         Ok(upload.send(&ciphertext)?)
     }
 

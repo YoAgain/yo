@@ -31,16 +31,15 @@ fn a_registration_whose_answer_was_lost_keeps_the_name() {
     assert_eq!(texts(&me.sync(0).unwrap()), ["found you"], "the name is this device's");
 }
 
-/// Every answer lost, also the core's own tries: the app keeps the account secret it made (iOS: `NewAccountKey`) and
-/// its next try, with the same secret, is the same user with the name.
+/// Every answer lost, also the core's own question whether it is registered: the app keeps the account secret it made
+/// (iOS: `NewAccountKey`) and its next try, with the same secret, is the same user with the name.
 #[test]
 fn the_apps_own_try_again_with_its_secret_keeps_the_name() {
     let hub = TestHub::start();
     let name = format!("Kept{}", random_u64() % 100_000);
     let http = Http::new(hub.url());
-    for _ in 0..3 {
-        http.fault("/v1/register", Fault::LoseAnswer);
-    }
+    http.fault("/v1/register", Fault::LoseAnswer);
+    http.fault("/v1/lookup", Fault::LoseAnswer);
     let secret: [u8; 32] = std::array::from_fn(|_| random_u64() as u8);
     assert!(matches!(by_name(http.clone(), &name, Some(secret)), Err(Error::Network(_))), "every try lost");
     let mut me = by_name(http, &name, Some(secret)).expect("the name is this secret's");

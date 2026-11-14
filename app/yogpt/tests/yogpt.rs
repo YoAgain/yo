@@ -186,7 +186,7 @@ fn yogpt_answers_a_photo_with_a_picture_and_its_yos_carry_one() {
     let (photo, sealed) = media::seal(b"a photo YoGPT never sees", 4, 3).unwrap();
     let fetches = alice.media_fetches("YOGPT").unwrap();
     assert_eq!(fetches, 1);
-    alice.upload(&photo, fetches).send(&sealed).unwrap();
+    alice.upload(&photo, fetches).unwrap().send(&sealed).unwrap();
     alice.send("YOGPT", Content::Photo(photo.clone())).unwrap();
     let (yos, pictures) = answers_until_quiet(&mut alice, Duration::from_secs(6));
     assert_eq!((yos, pictures.len()), (0, 1));
@@ -220,7 +220,7 @@ fn a_burst_of_photos_is_answered_with_its_pictures_at_once() {
     let sent = Instant::now();
     for _ in 0..N {
         let (photo, sealed) = media::seal(b"a photo YoGPT never sees", 4, 3).unwrap();
-        alice.upload(&photo, 1).send(&sealed).unwrap();
+        alice.upload(&photo, 1).unwrap().send(&sealed).unwrap();
         alice.send("YOGPT", Content::Photo(photo)).unwrap();
     }
     let mut arrived = Vec::new();
