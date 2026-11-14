@@ -718,19 +718,25 @@ private struct SecurityRow: View {
       Label {
         VStack(alignment: .leading) {
           Text(title).foregroundStyle(Color(.label))
-          if typeSize.isAccessibilitySize { Text(value).foregroundStyle(Color(.secondaryLabel)) }
+          if typeSize.isAccessibilitySize { state }
         }
       } icon: {
         Image(systemName: icon)
       }
       .labelStyle(Tile(color))
-      Spacer()
-      if !typeSize.isAccessibilitySize { Text(value).foregroundStyle(Color(.secondaryLabel)) }
-      // Done: a green check; not yet: an empty circle, the step still to take.
+      Spacer(minLength: 0)
+      if !typeSize.isAccessibilitySize { state }
+      if chevron { Chevron() }
+    }
+  }
+
+  /// The state and its mark. Done: a green check; not yet: an empty circle, the step still to take.
+  private var state: some View {
+    HStack(spacing: 6) {
+      Text(value).foregroundStyle(Color(.secondaryLabel))
       Image(systemName: done ? "checkmark.circle.fill" : "circle")
         .foregroundStyle(done ? Color.green : Color(.tertiaryLabel))
         .accessibilityHidden(true)
-      if chevron { Chevron() }
     }
   }
 }
