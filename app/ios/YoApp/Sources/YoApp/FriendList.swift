@@ -47,7 +47,7 @@ struct FriendList: View {
   @State private var newGroup = false
   @State private var newName = ""
   /// What the empty field says for a moment instead of "Name": "yogpt…" while the hub is asked who it is, "No Such
-  /// User" when nobody has that name (it is not added, as in the original), "That’s you" for one's own (a Yo to
+  /// User" when nobody has that name (it is not added, as in the original), "That’s You" for one's own (a Yo to
   /// oneself has no chat).
   @State private var hint: String?
   /// Names submitted (and hints shown): only the newest one's answer and hint touch the field.
@@ -515,10 +515,10 @@ struct FriendList: View {
 
   /// A name to add, typed or from a link, once the hub said who it is: added as its owner writes it ("yogpt" becomes
   /// "YoGPT"), on top; nobody by that name: not added; no answer (offline): added as typed, looked up again when the
-  /// list opens. One already on the list is not added again: its bar says so. What to say instead ("That’s you",
+  /// list opens. One already on the list is not added again: its bar says so. What to say instead ("That’s You",
   /// "No Such User"), or nil.
   private func addFriend(_ name: String) async -> String? {
-    if let me = accounts.account?.username, Username.skeleton(name) == Username.skeleton(me) { return "That’s you" }
+    if let me = accounts.account?.username, Username.skeleton(name) == Username.skeleton(me) { return "That’s You" }
     let client = accounts.client
     let answer = await inbox.lookUp(name, accounts: accounts)
     guard client === accounts.client else { return nil }  // signed out meanwhile: not this account's friend
