@@ -3,8 +3,8 @@
 // (SharedState.swift: in turns with the app, under the lock in the App Group), receives once without waiting, and
 // names who the new Yos are from (a line per sender, the newest first). What it receives stays in the state for the
 // app (never acknowledged here), which shows it as ever; once the notification is out, the hub is told it arrived
-// (`afterSync`). Within the extension's limits (about 24 MB, 30 s): no photo
-// or video is fetched here.
+// (`afterSync`). Then the photos and videos those Yos carry are fetched to the App Group (Prefetch), within the
+// extension's limits (about 24 MB, 30 s): the app shows them as it opens, not a fetch later.
 //
 // The hub pushes once per envelope, and not every envelope is a new Yo: the Welcome before a friend's first Yo, the
 // rest of a burst a push before already took, a commit, a blocked sender's Yo (dropped unseen, spec 4.8), a Yo the app
@@ -30,7 +30,7 @@ final class NotificationService: UNNotificationServiceExtension {
     pending.set(content: content, handler: contentHandler)
     let pending = pending
     DispatchQueue.global(qos: .userInitiated).async {
-      let (found, client) = Self.newest()
+      let (found, client, events) = Self.newest()
       switch found {
       case .yos(let senders):
         pending.update { ShareBridge.yo($0, senders) }
@@ -54,6 +54,7 @@ final class NotificationService: UNNotificationServiceExtension {
       Perf.mark("nse.delivered")
       // Not before: a lost acknowledgement costs only a repeat, which the app skips as seen.
       _ = try? client?.afterSync()
+      if let client { Prefetch.fetch(events, client: client) }
     }
   }
 
@@ -87,11 +88,13 @@ final class NotificationService: UNNotificationServiceExtension {
     return done.wait(timeout: .now() + 2) == .success ? last.request : nil
   }
 
-  private static func newest() -> (Found, YoClient?) {
-    guard let client = Perf.timed("nse.open", { Guest.open(within: lockWait, timeout: 10) }) else { return (.unread, nil) }
-    guard let events = Perf.timed("nse.sync", { try? client.sync(waitS: 0) }) else { return (.unread, client) }
+  private static func newest() -> (Found, YoClient?, [YoEvent]) {
+    guard let client = Perf.timed("nse.open", { Guest.open(within: lockWait, timeout: 10) }) else {
+      return (.unread, nil, [])
+    }
+    guard let events = Perf.timed("nse.sync", { try? client.sync(waitS: 0) }) else { return (.unread, client, []) }
     let yos = ShareBridge.yos(in: events, client: client)
-    return (yos.isEmpty ? .nothingNew : .yos(yos), client)
+    return (yos.isEmpty ? .nothingNew : .yos(yos), client, events)
   }
 
   /// The content and its handler, delivered once (by the work or by the time running out, whichever first).
