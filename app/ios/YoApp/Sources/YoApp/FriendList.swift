@@ -129,6 +129,7 @@ struct FriendList: View {
 
   // Camera mode
   @State private var cameraOn = false
+  @AppStorage(SettingKey.leftHanded) private var leftHanded = false
   @State private var camera = Camera()
   /// The camera's zooms (CameraZoom) and the one chosen.
   @State private var zooms: [Double] = []
@@ -312,13 +313,14 @@ struct FriendList: View {
       .navigationBarTitleDisplayMode(.inline)
       .toolbar {
         ToolbarItem(placement: .principal) { title }
-        ToolbarItem(placement: .topBarLeading) {
+        // For the left hand the two swap sides: the camera under the left thumb.
+        ToolbarItem(placement: leftHanded ? .topBarTrailing : .topBarLeading) {
           // Your picture opens your profile and settings in a sheet, as Apple's own apps do. No badge: the iCloud
           // Keychain keeps the account; securing it further is offered in the profile itself.
           Button("Profile", systemImage: "person.fill") { settings = true }
         }
         // The camera mode: the live picture behind the list, a tap on a name sends a photo, holding it a video.
-        ToolbarItem(placement: .topBarTrailing) {
+        ToolbarItem(placement: leftHanded ? .topBarLeading : .topBarTrailing) {
           Button(cameraOn ? "Close Camera" : "Camera", systemImage: cameraOn ? "xmark" : "camera.fill") {
             cameraOn.toggle()
           }
@@ -1220,16 +1222,13 @@ struct RowButton: View {
     // What takes its own touches (the undo ring, the photos) lies over the bar, in the same line (Buttons in a Button
     // do not work). The ring stands at the bar's very left, away from where the bar was tapped: a tap more is
     // another photo, never an undo by mistake.
-    .overlay { line(touchable: true).allowsHitTesting(false) }
-    // At the bar's start (its end for the left hand), away from where it is tapped to send: the undo ring at the
-    // edge, the photo sign beside it.
+    .overlay { line(touchable: true) }
+    // At the bar's start (its end for the left hand), away from where it is tapped: the undo ring.
     .overlay(alignment: leftHanded ? .trailing : .leading) {
-      HStack(spacing: BarLine.gap) {
-        if let outgoing { undoRing(since: outgoing) }
-        sign
+      if let outgoing {
+        undoRing(since: outgoing)
+          .padding(leftHanded ? .trailing : .leading, BarLine.margin)
       }
-      .environment(\.layoutDirection, leftHanded ? .rightToLeft : .leftToRight)
-      .padding(leftHanded ? .trailing : .leading, BarLine.margin)
     }
     .animation(.snappy, value: outgoing)
     .animation(.spring(duration: 0.4, bounce: 0.35), value: yo)
@@ -1255,8 +1254,7 @@ struct RowButton: View {
   /// and their "!"s, over it what takes its own touches (the Yo at the end), so each sits exactly where the other
   /// leaves it room.
   private func line(touchable: Bool) -> some View {
-    BarLine(start: BarLine.margin + (outgoing == nil ? 0 : Self.ring + BarLine.gap) + (media.isEmpty ? 0 : Self.sign + BarLine.gap),
-      mirrored: leftHanded) {
+    BarLine(start: outgoing == nil ? BarLine.margin : BarLine.margin + Self.ring + BarLine.gap, mirrored: leftHanded) {
       Text(title)
         .lineLimit(1)
         .minimumScaleFactor(0.5)  // a long name, or large text, gets smaller before it is cut with "…"
@@ -1279,7 +1277,7 @@ struct RowButton: View {
   private static let sign = 34.0
 
   /// "📷" or "🎥" while photos and videos wait unseen: a finger on it shows them at once; a short tap lets them run,
-  /// holding closes on letting go. Its own place at the bar's start, so a tap sending Yos never opens them.
+  /// holding closes on letting go. Only the sign takes the touch: the rest of the bar sends Yos as ever.
   @ViewBuilder private var sign: some View {
     if let first = media.first {
       Text(first.video != nil ? "🎥" : "📷")
@@ -1332,16 +1330,23 @@ struct RowButton: View {
   }
 
   /// At the bar's end (its start for the left hand), in the name's own type: "Yo" and a "!" for each Yo after the
-  /// first. The "!"s count every Yo of the run, with or without a photo; with only unseen photos left, one for each.
+  /// first, then the photo sign while photos or videos wait ("Yo!! 📷"; "📷 Yo!!" for the left hand). The "!"s count
+  /// every Yo of the run, with or without a photo; with only unseen photos left, one for each.
   @ViewBuilder private func mark(touchable: Bool) -> some View {
     if !media.isEmpty {
       let live = yo.flatMap { $0.fading == nil ? $0.count : nil } ?? 0
-      HStack(spacing: 0) {
-        Text("Yo")
-        Bangs(count: max(live, media.count))
+      HStack(spacing: 4) {
+        if leftHanded { sign }
+        HStack(spacing: 0) {
+          Text("Yo")
+          Bangs(count: max(live, media.count))
+        }
+        .allowsHitTesting(false)  // a tap there sends a Yo
+        .accessibilityLabel(media.count == 1 ? "Yo with a photo or video" : "\(media.count) Yos with photos or videos")
+        if !leftHanded { sign }
       }
       .lineLimit(1)
-      .accessibilityLabel(media.count == 1 ? "Yo with a photo or video" : "\(media.count) Yos with photos or videos")
+      .allowsHitTesting(touchable)  // the copy in the bar under it is only for the layout
       .transition(.scale.combined(with: .opacity))
     } else if let yo {
       // "Yo" and a "!" for each Yo after the first: a "!" goes quickly when its Yo is over, the last Yo fades slowly.
