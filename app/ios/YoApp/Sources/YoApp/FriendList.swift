@@ -43,8 +43,10 @@ struct FriendList: View {
   // The list
   @State private var adding = false
   @State private var newGroup = false
-  /// The second screen, under the list: pulled up past its end (Add Friend, Add Group, Invite, Settings).
+  /// The second screen, under the list: pulled up past its end (Add Group, Invite, Settings).
   @State private var more = false
+  /// A finger is on the list: a pull past its end opens the second screen only then (not a bounce or a fling).
+  @State private var dragging = false
   @State private var newName = ""
   /// What the empty field says for a moment instead of "Name": "yogpt…" while the hub is asked who it is, "No Such
   /// User" when nobody has that name (it is not added, as in the original), "That’s You" for one's own (a Yo to
@@ -304,13 +306,17 @@ struct FriendList: View {
       }
       .onScrollPhaseChange { _, phase in
         if phase != .idle && swiped != nil { withAnimation(.snappy) { swiped = nil } }  // scrolling closes it
+        dragging = phase == .interacting
       }
       // Pulled well past the list's end, as a pull to refresh the other way: the second screen comes up.
       .onScrollGeometryChange(for: Bool.self) { geometry in
-        geometry.contentOffset.y + geometry.containerSize.height - geometry.contentSize.height
-          - geometry.contentInsets.bottom > Self.pullForMore
+        // How far past the end: the furthest a scroll goes at rest, a short list's being its top.
+        let end = max(
+          -geometry.contentInsets.top,
+          geometry.contentSize.height + geometry.contentInsets.bottom - geometry.containerSize.height)
+        return geometry.contentOffset.y - end > Self.pullForMore
       } action: { _, pulled in
-        guard pulled, !more, !adding, !cameraOn else { return }
+        guard pulled, dragging, !more, !adding, !cameraOn else { return }
         Haptic.tap()
         more = true
       }
@@ -332,14 +338,16 @@ struct FriendList: View {
           }
           .glassEffect(.regular.interactive(), in: .circle)
           .accessibilityLabel("Camera")
-          .padding(20)
+          .padding(.horizontal, 16)
+          .padding(.bottom, 2)
           .transition(.scale.combined(with: .opacity))
         }
       }
       .sheet(isPresented: $more) { moreScreen }
       .navigationBarTitleDisplayMode(.inline)
+      .toolbarVisibility(cameraOn ? .visible : .hidden, for: .navigationBar)  // the list from the top, no heading
       .toolbar {
-        ToolbarItem(placement: .principal) { title }
+        if cameraOn { ToolbarItem(placement: .principal) { title } }
         // The camera mode: the live picture behind the list, a tap on a name sends a photo, holding it a video. It
         // opens from the button at the bottom corner, and closes here.
         if cameraOn {
@@ -351,33 +359,17 @@ struct FriendList: View {
     }
   }
 
-  /// "Yo", nothing more (a Yo shows on its bar); in camera mode what to do under it. A heading at the top of the list;
-  /// once rows pass behind it, a glass pill as the buttons beside it.
+  /// No heading over the list (the bars are the app); in camera mode what to do, as a line at the top.
   private var title: some View {
-    VStack(spacing: 0) {
-      Text("Yo")
-      if cameraOn {
-        Text(picked == nil ? "Tap a name for a photo. Hold for a video." : "Tap a name to send this photo.")
-          .font(.system(size: 11, weight: .semibold))
-          .opacity(0.85)
-          .fixedSize()
-          .transition(.blurReplace)
-      }
-    }
-    .font(.yo(Metrics.titleFont, relativeTo: .largeTitle))
-    .foregroundStyle(.white)
-    .lineLimit(1)
-    .padding(.horizontal, 16)
-    .fixedSize(horizontal: true, vertical: false)
-    .frame(height: Metrics.titleHeight)
-    .glassEffect(scrolled ? .regular : .identity, in: .capsule)
-    .contentShape(.capsule)
-    .onTapGesture {
-      Haptic.tap(.light)
-      inbox.playYo()  // a tap on "Yo" says it
-    }
-    .accessibilityAddTraits(.isHeader)
-    .accessibilityAction(named: "Say Yo") { inbox.playYo() }
+    Text(picked == nil ? "Tap a name for a photo. Hold for a video." : "Tap a name to send this photo.")
+      .font(.system(size: 13, weight: .semibold))
+      .foregroundStyle(.white)
+      .lineLimit(1)
+      .fixedSize()
+      .padding(.horizontal, 16)
+      .frame(height: Metrics.titleHeight)
+      .glassEffect(scrolled ? .regular : .identity, in: .capsule)
+      .transition(.blurReplace)
   }
 
   // MARK: Bars
@@ -456,8 +448,8 @@ struct FriendList: View {
     }
   }
 
-  /// Under the last friend: the name being typed (Add Friend), else the hint that pulling up brings the second
-  /// screen (moreScreen).
+  /// Under the last friend: "+" (tapped, the name is typed right there), then "More", which a pull up past the end
+  /// opens too (moreScreen).
   @ViewBuilder private var addRow: some View {
     let color = Color.row(friends.nextColor).opacity(cameraOn ? 0.45 : 1)  // the colour the new friend will have
     if adding {
@@ -484,27 +476,35 @@ struct FriendList: View {
         }
         .onAppear { typing = true }
     } else {
-      // Under the last friend: what pulling up brings.
-      Label("Pull up for more", systemImage: "chevron.up")
-        .font(.footnote.weight(.semibold))
-        .foregroundStyle(.white.opacity(0.55))
-        .frame(maxWidth: .infinity, minHeight: 56)
-        .accessibilityAction(named: "More") { more = true }
+      RowButton("+", color: Color.row(friends.nextColor).opacity(cameraOn ? 0.45 : 1)) {
+        withAnimation(.snappy) {
+          swiped = nil
+          adding = true
+        }
+      }
+      .accessibilityLabel("Add Friend")
+    }
+    // Under the bars: the second screen, pulled up (or tapped).
+    if !cameraOn {
+      Button { more = true } label: {
+        VStack(spacing: 2) {
+          Image(systemName: "chevron.compact.up").font(.system(size: 30, weight: .bold))
+          Text("More").font(.yo(17, relativeTo: .headline))
+        }
+        .foregroundStyle(.white.opacity(0.85))
+        .frame(maxWidth: .infinity, minHeight: 90)
+        .contentShape(.rect)
+      }
+      .buttonStyle(.plain)
+      .accessibilityHint("Add Group, Invite and Settings")
     }
   }
 
   static let pullForMore = 90.0
 
-  /// The second screen: big bars as the list's, Add Friend, Add Group, Invite and Settings.
+  /// The second screen: big bars as the list's, Add Group, Invite and Settings.
   private var moreScreen: some View {
     VStack(spacing: 0) {
-      Button {
-        more = false
-        withAnimation(.snappy) { adding = true }
-      } label: {
-        addPart("+", color: .row(friends.nextColor))
-      }
-      .accessibilityLabel("Add Friend")
       Button {
         more = false
         Task {  // once this sheet is down: one sheet at a time
@@ -552,7 +552,7 @@ struct FriendList: View {
     }
     .buttonStyle(.plain)
     .background(Color.amethyst)
-    .presentationDetents([.height(Metrics.rowHeight * 4 + 24)])
+    .presentationDetents([.height(Metrics.rowHeight * 3 + 24)])
     .presentationDragIndicator(.visible)
     .presentationCornerRadius(28)
   }
