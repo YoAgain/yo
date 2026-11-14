@@ -43,6 +43,8 @@ struct FriendList: View {
   // The list
   @State private var adding = false
   @State private var newGroup = false
+  /// The second screen, under the list: pulled up past its end (Add Friend, Add Group, Invite, Settings).
+  @State private var more = false
   @State private var newName = ""
   /// What the empty field says for a moment instead of "Name": "yogpt…" while the hub is asked who it is, "No Such
   /// User" when nobody has that name (it is not added, as in the original), "That’s You" for one's own (a Yo to
@@ -287,7 +289,7 @@ struct FriendList: View {
         }
         .scrollTargetLayout()
       }
-      .scrollBounceBehavior(.basedOnSize)
+      .scrollBounceBehavior(.always)  // a short list too can be pulled up past its end, to the second screen
       .scrollDismissesKeyboard(.interactively)
       .scrollPosition($position)
       .onScrollTargetVisibilityChange(idType: String.self, threshold: 0.6) { ids in
@@ -303,24 +305,46 @@ struct FriendList: View {
       .onScrollPhaseChange { _, phase in
         if phase != .idle && swiped != nil { withAnimation(.snappy) { swiped = nil } }  // scrolling closes it
       }
+      // Pulled well past the list's end, as a pull to refresh the other way: the second screen comes up.
+      .onScrollGeometryChange(for: Bool.self) { geometry in
+        geometry.contentOffset.y + geometry.containerSize.height - geometry.contentSize.height
+          - geometry.contentInsets.bottom > Self.pullForMore
+      } action: { _, pulled in
+        guard pulled, !more, !adding, !cameraOn else { return }
+        Haptic.tap()
+        more = true
+      }
       // Amethyst behind everything; in camera mode the live picture or the picked photo.
       .background { backdrop.ignoresSafeArea() }
       .overlay(alignment: .bottom) {
         if cameraOn { cameraControls }
       }
+      // The camera at the bottom corner, under the thumb (the left one for the left hand).
+      .overlay(alignment: leftHanded ? .bottomLeading : .bottomTrailing) {
+        if !cameraOn {
+          Button {
+            cameraOn = true
+          } label: {
+            Image(systemName: "camera.fill")
+              .font(.system(size: 22, weight: .semibold))
+              .foregroundStyle(.white)
+              .frame(width: 60, height: 60)
+          }
+          .glassEffect(.regular.interactive(), in: .circle)
+          .accessibilityLabel("Camera")
+          .padding(20)
+          .transition(.scale.combined(with: .opacity))
+        }
+      }
+      .sheet(isPresented: $more) { moreScreen }
       .navigationBarTitleDisplayMode(.inline)
       .toolbar {
         ToolbarItem(placement: .principal) { title }
-        // For the left hand the two swap sides: the camera under the left thumb.
-        ToolbarItem(placement: leftHanded ? .topBarTrailing : .topBarLeading) {
-          // Your picture opens your profile and settings in a sheet, as Apple's own apps do. No badge: the iCloud
-          // Keychain keeps the account; securing it further is offered in the profile itself.
-          Button("Profile", systemImage: "person.fill") { settings = true }
-        }
-        // The camera mode: the live picture behind the list, a tap on a name sends a photo, holding it a video.
-        ToolbarItem(placement: leftHanded ? .topBarLeading : .topBarTrailing) {
-          Button(cameraOn ? "Close Camera" : "Camera", systemImage: cameraOn ? "xmark" : "camera.fill") {
-            cameraOn.toggle()
+        // The camera mode: the live picture behind the list, a tap on a name sends a photo, holding it a video. It
+        // opens from the button at the bottom corner, and closes here.
+        if cameraOn {
+          ToolbarItem(placement: leftHanded ? .topBarLeading : .topBarTrailing) {
+            Button("Close Camera", systemImage: "xmark") { cameraOn = false }
           }
         }
       }
@@ -432,8 +456,8 @@ struct FriendList: View {
     }
   }
 
-  /// The last bar, in three parts: "+", as in the original (tapped, the name is typed right there in the whole bar),
-  /// "+ Group" and the share sign for an invite, each in the colour of a next friend.
+  /// Under the last friend: the name being typed (Add Friend), else the hint that pulling up brings the second
+  /// screen (moreScreen).
   @ViewBuilder private var addRow: some View {
     let color = Color.row(friends.nextColor).opacity(cameraOn ? 0.45 : 1)  // the colour the new friend will have
     if adding {
@@ -460,41 +484,77 @@ struct FriendList: View {
         }
         .onAppear { typing = true }
     } else {
-      // One bar, three parts: "+" a friend (the most room), "+ Group", and the invite to share.
-      HStack(spacing: 0) {
-        Button {
-          withAnimation(.snappy) {
-            swiped = nil
-            adding = true
-          }
-        } label: {
-          addPart("+", color: color)
-        }
-        .frame(maxWidth: .infinity)
-        .layoutPriority(1)
-        .accessibilityLabel("Add Friend")
-        Button { newGroup = true } label: {
-          addPart("+ Group", color: Color.row(friends.nextColor + 1).opacity(cameraOn ? 0.45 : 1))
-        }
-        .accessibilityLabel("Add Group")
-        ShareLink(
-          item: accounts.account.map { Invite.link(for: $0.username) } ?? URL(string: "https://justyo.co")!,
-          message: Text("Yo! Add me on Yo:"),
-          // What the share sheet shows at its top: whose link, and the app's icon (not a bare "justyo.co").
-          preview: SharePreview(
-            "Add \(accounts.account?.username ?? "Me") on Yo",
-            image: Image(uiImage: UIImage(named: "IconStandard") ?? UIImage()))
-        ) {
-          Image(systemName: "square.and.arrow.up")
-            .font(.system(size: 24, weight: .bold))
-            .foregroundStyle(.white)
-            .frame(width: Metrics.rowHeight, height: Metrics.rowHeight)
-            .background(Color.row(friends.nextColor + 2).opacity(cameraOn ? 0.45 : 1))
-        }
-        .accessibilityLabel("Invite")
-      }
-      .buttonStyle(.plain)
+      // Under the last friend: what pulling up brings.
+      Label("Pull up for more", systemImage: "chevron.up")
+        .font(.footnote.weight(.semibold))
+        .foregroundStyle(.white.opacity(0.55))
+        .frame(maxWidth: .infinity, minHeight: 56)
+        .accessibilityAction(named: "More") { more = true }
     }
+  }
+
+  static let pullForMore = 90.0
+
+  /// The second screen: big bars as the list's, Add Friend, Add Group, Invite and Settings.
+  private var moreScreen: some View {
+    VStack(spacing: 0) {
+      Button {
+        more = false
+        withAnimation(.snappy) { adding = true }
+      } label: {
+        addPart("+", color: .row(friends.nextColor))
+      }
+      .accessibilityLabel("Add Friend")
+      Button {
+        more = false
+        Task {  // once this sheet is down: one sheet at a time
+          try? await Task.sleep(for: .milliseconds(450))
+          newGroup = true
+        }
+      } label: {
+        addPart("+ Group", color: .row(friends.nextColor + 1))
+      }
+      .accessibilityLabel("Add Group")
+      ShareLink(
+        item: accounts.account.map { Invite.link(for: $0.username) } ?? URL(string: "https://justyo.co")!,
+        message: Text("Yo! Add me on Yo:"),
+        // What the share sheet shows at its top: whose link, and the app's icon (not a bare "justyo.co").
+        preview: SharePreview(
+          "Add \(accounts.account?.username ?? "Me") on Yo",
+          image: Image(uiImage: UIImage(named: "IconStandard") ?? UIImage()))
+      ) {
+        HStack(spacing: 12) {
+          Image(systemName: "square.and.arrow.up").font(.system(size: 24, weight: .bold))
+          Text("Invite")
+        }
+        .font(.yo(Metrics.rowFont))
+        .foregroundStyle(.white)
+        .frame(maxWidth: .infinity, minHeight: Metrics.rowHeight)
+        .background(Color.row(friends.nextColor + 2))
+      }
+      Button {
+        more = false
+        Task {  // once this sheet is down: one sheet at a time
+          try? await Task.sleep(for: .milliseconds(450))
+          settings = true
+        }
+      } label: {
+        HStack(spacing: 12) {
+          Image(systemName: "gearshape.fill").font(.system(size: 24, weight: .bold))
+          Text("Settings")
+        }
+        .font(.yo(Metrics.rowFont))
+        .foregroundStyle(.white)
+        .frame(maxWidth: .infinity, minHeight: Metrics.rowHeight)
+        .background(Color.row(friends.nextColor + 3))
+      }
+      Spacer(minLength: 0)
+    }
+    .buttonStyle(.plain)
+    .background(Color.amethyst)
+    .presentationDetents([.height(Metrics.rowHeight * 4 + 24)])
+    .presentationDragIndicator(.visible)
+    .presentationCornerRadius(28)
   }
 
   /// A part of the last bar: its words white on its colour, as tall as a bar.
