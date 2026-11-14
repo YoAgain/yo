@@ -35,6 +35,7 @@ messages a fault allowed to be lost that arrived anyway.
 |---|---|---|---|---|---|---|---|---|---|
 | 12 | 1000 | 600 | 247,671 | 173,503 (288/s) | 171,751, 32 lost | 20,795, 5,029 | 2,689, 1,095, 3 | 46: finding 8 (the lost burst), driver issues since fixed | 1.9 GB |
 | 13 | 1200 | 900 | 358,653 | 254,492 (282/s) | 252,296, **0 lost** | 30,264, 7,468 | 4,003, 1,685, 4 | 4: finding 10 (order), a driver issue | 2.4 GB |
+| 14 | 1500 | 1200 | 426,600 | 294,368 (245/s) | 290,640, **0 lost** | 84,508 (4%), 13,283 (3%) | 5,072, 2,066, 5 | 2, both in the driver (since fixed) | 2.8 GB |
 
 Registration: 1000 accounts in 8.1 s (124/s), 1200 in 9.4 s, every lookalike (3,181) and reserved spelling refused.
 A year later (prune at +366 days): every name without a backup released and free, every secured one kept. The
