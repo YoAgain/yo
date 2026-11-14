@@ -1097,7 +1097,7 @@ async fn deliver(
         .and_then(|v| unb64(v).ok())
         .and_then(|v| v.try_into().ok())
         .ok_or_else(bad)?;
-    yo_wire::envelope::check(&body)?;
+    yo_wire::envelope::check_sealed(&body)?;
     // A good token instead of the address's limits (spec 6.10). One that is not is counted like a delivery without
     // and refused, `401`: the client sends again without it.
     let token = match delivery_token(&hub, peer, &headers)? {

@@ -225,13 +225,20 @@ pub fn user_id(user: &str) -> yo_wire::UserId {
     (0..16).map(|i| u8::from_str_radix(&user[2 * i..2 * i + 2], 16).unwrap()).collect::<Vec<_>>().try_into().unwrap()
 }
 
+/// A well-formed envelope as a stranger can make one: a bucket, sealed to nobody (spec 6.1).
+pub fn junk(fill: u8) -> Vec<u8> {
+    let mut envelope = vec![fill; yo_wire::envelope::BUCKETS[0]];
+    envelope[0] = yo_wire::envelope::SEALED;
+    envelope
+}
+
 /// The device check for a user, as any stranger can learn it: from the hub's 409 to a delivery with a wrong one.
 /// `None` for a user the hub does not know.
 pub fn devices_hash(url: &str, user: &str) -> Option<[u8; 32]> {
     let probe = reqwest::blocking::Client::new()
         .post(format!("{url}{}", yo_wire::api::deliver_path(&user_id(user))))
         .header(yo_wire::api::HEADER_DEVICES, yo_wire::b64(&[0; 32]))
-        .body(yo_wire::envelope::seal(b"probe").unwrap())
+        .body(junk(0))
         .send()
         .unwrap();
     if probe.status().as_u16() != 409 {

@@ -385,16 +385,17 @@ fn garbage_from_a_stranger_is_dropped_and_harms_nothing() {
         client.post(format!("{}{}", hub.url(), api::deliver_path(&[1; 16]))).body(vec![1, 2, 3]).send().unwrap();
     assert_eq!(without_devices.status().as_u16(), api::status::BAD_REQUEST);
     assert_eq!(deliver_raw(&hub.url(), b.user_id(), vec![1, 2, 3]), api::status::BAD_REQUEST);
-    let garbage: Vec<u8> = (0..300).map(|i| (i * 7) as u8).collect();
-    assert_eq!(deliver_raw(&hub.url(), b.user_id(), yo_wire::envelope::seal(&garbage).unwrap()), api::status::ACCEPTED);
+    // Not sealed: refused at the door; sealed to nobody: taken, and dropped by the device that cannot open it.
+    assert_eq!(
+        deliver_raw(&hub.url(), b.user_id(), yo_wire::envelope::seal(b"bare").unwrap()),
+        api::status::BAD_REQUEST
+    );
+    assert_eq!(deliver_raw(&hub.url(), b.user_id(), yo_tests::junk(7)), api::status::ACCEPTED);
     assert_eq!(b.sync(0).unwrap(), vec![]);
     assert_eq!(b.dropped(), 1);
     a.send_yo(&pb).unwrap();
     assert_eq!(yos_from(&b.sync(0).unwrap(), &pa), 1);
-    assert_eq!(
-        deliver_raw(&hub.url(), &"00".repeat(16), yo_wire::envelope::seal(b"x").unwrap()),
-        api::status::NOT_FOUND
-    );
+    assert_eq!(deliver_raw(&hub.url(), &"00".repeat(16), yo_tests::junk(1)), api::status::NOT_FOUND);
 }
 
 #[test]

@@ -37,7 +37,7 @@ fn probe(url: &str, user: &str, extra: &[(&str, &str)]) -> u16 {
     let mut request = reqwest::blocking::Client::new()
         .post(format!("{url}{}", api::deliver_path(&user_id(user))))
         .header(api::HEADER_DEVICES, yo_wire::b64(&[0; 32]))
-        .body(yo_wire::envelope::seal(b"probe").unwrap());
+        .body(yo_tests::junk(0));
     for (name, value) in extra {
         request = request.header(*name, *value);
     }
