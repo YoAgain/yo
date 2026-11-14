@@ -111,6 +111,26 @@ pub struct ContactInfo {
     pub gone: bool,
 }
 
+/// One chat with a contact as MLS has it, for the app to show (spec 4).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ChatInfo {
+    /// The group's id (hex).
+    pub group: String,
+    pub ciphersuite: String,
+    /// The group's epoch now, and the one this device joined at.
+    pub epoch: u64,
+    pub joined_epoch: u64,
+    /// Devices in the group (both accounts).
+    pub members: u32,
+    /// When this device last updated its keys here (ms; 0: not yet), post-compromise security (4.4).
+    pub last_update_ms: u64,
+    /// The hub orders this group's commits (4.3); if not, the chat works without updates.
+    pub updates: bool,
+    /// Taken over by a restart (4.9), or lost and waiting for one.
+    pub restarted: bool,
+    pub lost: bool,
+}
+
 /// Where the sealed state goes after every operation.
 pub trait Store: Send + Sync {
     fn save(&self, blob: Vec<u8>);
@@ -2398,6 +2418,34 @@ impl Client {
                 gone: c.gone,
             })
             .collect()
+    }
+
+    /// The chats with a contact (user id), newest restart first as they are kept; with what MLS says of each.
+    pub fn chats_with(&self, user: &str) -> Vec<ChatInfo> {
+        self.state
+            .chats
+            .iter()
+            .filter(|(_, chat)| chat.peer == user)
+            .map(|(id, chat)| {
+                let group = group_of(id).and_then(|id| self.load(&id).ok());
+                ChatInfo {
+                    group: id.clone(),
+                    ciphersuite: format!("{:?}", profile::CIPHERSUITE),
+                    epoch: group.as_ref().map_or(0, |g| g.epoch().as_u64()),
+                    joined_epoch: chat.joined_epoch,
+                    members: group.as_ref().map_or(0, |g| g.members().count() as u32),
+                    last_update_ms: chat.last_update_ms,
+                    updates: !chat.no_updates,
+                    restarted: chat.restarted,
+                    lost: chat.lost,
+                }
+            })
+            .collect()
+    }
+
+    /// The account key a contact is pinned to (hex): what the safety number is made of (3.4).
+    pub fn account_key_of(&self, user: &str) -> Option<String> {
+        self.state.contacts.get(user).map(|c| hex(&c.account_key))
     }
 
     /// The contact a handle names, as this device knows it.

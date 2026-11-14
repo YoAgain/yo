@@ -42,6 +42,13 @@ fn a_yo_goes_there_and_back() {
     // B's first send updated its leaf (it joined by Welcome): the chat moved to epoch 2 on both sides.
     assert_eq!(a.chats()[0].2, 2);
     assert_eq!(b.chats()[0].2, 2);
+    // What the app's contact details show: one chat of two devices, its epoch, the suite, the pinned key.
+    let chats = a.chats_with(&digits(&pb));
+    assert_eq!(chats.len(), 1);
+    assert_eq!((chats[0].epoch, chats[0].members, chats[0].updates), (2, 2, true));
+    assert_eq!(chats[0].ciphersuite, "MLS_128_DHKEMX25519_CHACHA20POLY1305_SHA256_Ed25519");
+    assert_eq!(a.account_key_of(&digits(&pb)).map(|k| k.len()), Some(64));
+    assert!(a.chats_with(&digits(&pa)).is_empty(), "none with oneself");
     assert_eq!(a.dropped() + b.dropped(), 0);
     assert_eq!(a.pending() + b.pending(), 0);
 }

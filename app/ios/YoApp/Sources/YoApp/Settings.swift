@@ -88,7 +88,8 @@ struct SettingsView: View {
               Text("Secure your account to keep your name “\(account.username)” forever.")
             }
           }
-          // Two groups: Account (security, signing out, deleting) and Blocked; then Statistics and Appearance.
+          // Two groups: Account (security, signing out, deleting), Contacts and Blocked; then Media, Appearance and
+          // Statistics.
           Section {
             NavigationLink {
               accountPage(account)
@@ -106,6 +107,15 @@ struct SettingsView: View {
               } label: {
                 Label("Account", systemImage: "person.fill")
                   .labelStyle(Tile(accounts.toDo > 0 ? .orange : .green))
+              }
+            }
+            NavigationLink {
+              ContactsList()
+            } label: {
+              LabeledContent {
+                Text("\(friends.all.count)")
+              } label: {
+                Label("Contacts", systemImage: "person.2.fill").labelStyle(Tile(.blue))
               }
             }
             NavigationLink {

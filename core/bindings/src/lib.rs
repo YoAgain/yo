@@ -290,6 +290,24 @@ pub struct YoContact {
     pub gone: bool,
 }
 
+/// One chat with a contact as MLS has it (spec 4): for the app's contact details.
+#[derive(uniffi::Record)]
+pub struct YoChat {
+    /// The group's id (hex).
+    pub group: String,
+    pub ciphersuite: String,
+    pub epoch: u64,
+    pub joined_epoch: u64,
+    /// Devices in the group (both accounts).
+    pub members: u32,
+    /// When this device last updated its keys here (ms since 1970; 0: not yet).
+    pub last_update_ms: u64,
+    /// The hub orders its commits; if not, the chat works without key updates.
+    pub updates: bool,
+    pub restarted: bool,
+    pub lost: bool,
+}
+
 /// A friend as the account's storage keeps it (spec 6.9): what a new phone gets back.
 #[derive(uniffi::Record)]
 pub struct YoFriend {
@@ -591,6 +609,30 @@ impl YoClient {
             Err(yo_core::Error::NotOnYo) => Ok(None),
             Err(error) => Err(error.into()),
         }
+    }
+
+    /// The chats with a contact (user id) and what MLS says of each.
+    pub fn chats_with(&self, user: String) -> Vec<YoChat> {
+        self.with(|c| c.chats_with(&user))
+            .unwrap_or_default()
+            .into_iter()
+            .map(|c| YoChat {
+                group: c.group,
+                ciphersuite: c.ciphersuite,
+                epoch: c.epoch,
+                joined_epoch: c.joined_epoch,
+                members: c.members,
+                last_update_ms: c.last_update_ms,
+                updates: c.updates,
+                restarted: c.restarted,
+                lost: c.lost,
+            })
+            .collect()
+    }
+
+    /// The account key a contact is pinned to (hex), as it was first seen or last confirmed.
+    pub fn account_key_of(&self, user: String) -> Option<String> {
+        self.with(|c| c.account_key_of(&user)).ok().flatten()
     }
 
     pub fn safety_number(&self, who: String) -> Result<String, YoError> {
