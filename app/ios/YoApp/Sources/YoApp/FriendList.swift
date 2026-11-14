@@ -38,6 +38,9 @@ struct FriendList: View {
 
   // The list
   @State private var adding = false
+  /// "+" tapped: it opens into Add Friend, Add Group and Invite.
+  @State private var addMenu = false
+  @State private var newGroup = false
   @State private var newName = ""
   /// What the empty field says for a moment instead of "Name": "yogpt…" while the hub is asked who it is, "No Such
   /// User" when nobody has that name (it is not added, as in the original), "That’s you" for one's own (a Yo to
@@ -175,6 +178,7 @@ struct FriendList: View {
       navigation
         // The list is always dark (white on purple); the profile follows the iPhone's own appearance.
         .sheet(isPresented: $settings) { SettingsView().preferredColorScheme(SystemAppearance.scheme) }
+        .sheet(isPresented: $newGroup) { NewGroupSheet() }
         .confirmationDialog(
           blocking?.reported == true ? "Thanks for Reporting" : "Block \(blocking?.friend.name ?? "")?",
           isPresented: Binding(get: { blocking != nil }, set: { if !$0 { blocking = nil } }),
@@ -386,10 +390,36 @@ struct FriendList: View {
     return 1
   }
 
-  /// The last bar, as in the original: "+", and the name typed right there once tapped.
+  /// The last bar, as in the original: "+". Tapped, it opens into three: Add Friend (the name typed right there),
+  /// Add Group and Invite; untouched for a while, it closes again.
   @ViewBuilder private var addRow: some View {
     let color = Color.row(friends.nextColor).opacity(cameraOn ? 0.45 : 1)  // the colour the new friend will have
-    if adding {
+    if addMenu && !adding {
+      RowButton("Add Friend", color: color) {
+        addMenu = false
+        adding = true
+      }
+      RowButton("Add Group", color: Color.row(friends.nextColor + 1).opacity(cameraOn ? 0.45 : 1)) {
+        addMenu = false
+        newGroup = true
+      }
+      ShareLink(
+        item: URL(string: "https://justyo.co")!,
+        message: Text(accounts.account.map { "Yo! Add me on Yo: \($0.username)" } ?? "Yo! Get Yo.")
+      ) {
+        Text("Invite")
+          .font(.yo(Metrics.rowFont))
+          .foregroundStyle(.white)
+          .frame(maxWidth: .infinity, minHeight: Metrics.rowHeight)
+          .background(Color.row(friends.nextColor + 2).opacity(cameraOn ? 0.45 : 1))
+      }
+      .buttonStyle(.plain)
+      .simultaneousGesture(TapGesture().onEnded { addMenu = false })
+      .task {
+        try? await Task.sleep(for: .seconds(8))
+        withAnimation(.snappy) { addMenu = false }
+      }
+    } else if adding {
       TextField("", text: $newName, prompt: Text(hint ?? "Name").foregroundStyle(.white.opacity(0.6)))
         .font(.yo(Metrics.rowFont))
         .foregroundStyle(.white)
@@ -409,10 +439,12 @@ struct FriendList: View {
         .onAppear { typing = true }
     } else {
       RowButton("+", color: color) {
-        withAnimation(.snappy) { swiped = nil }
-        adding = true
+        withAnimation(.snappy) {
+          swiped = nil
+          addMenu = true
+        }
       }
-      .accessibilityLabel("Add Friend")
+      .accessibilityLabel("Add")
     }
   }
 
