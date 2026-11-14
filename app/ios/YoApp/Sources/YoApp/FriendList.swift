@@ -194,7 +194,10 @@ struct FriendList: View {
   struct Landing: Equatable {
     /// The first Yo of this run: it knocks; the ones after only add a "!".
     var first: String
+    /// The "!"s shown now: all of the run's Yos, fewer while its time counts them down.
     var count: Int
+    /// All Yos of this run: a Yo coming while the "!"s go down shows them all again, and one more.
+    var total: Int
     /// When the stack's time last started; nil while its bar has not been on screen.
     var seen: Date?
     /// The last one is fading out since then.
@@ -920,7 +923,8 @@ extension FriendList {
   /// fading out) knocks. A photo stays until seen (Inbox.media(from:)).
   private func land(_ name: String, _ first: String, count: Int) {
     if var landing = landed[name], landing.fading == nil {
-      landing.count += count  // more "!"s
+      landing.total += count
+      landing.count = landing.total  // all of the run again, also halfway down its "!"s
       if landing.seen != nil {
         let now = Date.now
         landing.seen = now  // on screen: the stack's time starts again
@@ -928,7 +932,7 @@ extension FriendList {
       }
       landed[name] = landing
     } else {
-      landed[name] = Landing(first: first, count: count)
+      landed[name] = Landing(first: first, count: count, total: count)
     }
   }
 
