@@ -136,7 +136,7 @@ fn a_full_mailbox_refuses_until_it_is_read_and_strangers_cannot_rate_limit_it() 
     let junk = yo_wire::envelope::seal(&[7; 100]).unwrap();
     // A stranger fills B's inbox with well-formed junk...
     let statuses: Vec<u16> = (0..6).map(|_| deliver_raw(&hub.url(), b.user_id(), junk.clone())).collect();
-    assert_eq!(statuses, vec![202, 202, 202, 202, 202, 429]);
+    assert_eq!(statuses, vec![202, 202, 202, 202, 202, 507]);
     // ... which holds A's Yo back only until B reads its mailbox.
     a.send_yo(&pb).unwrap();
     assert_eq!(a.pending(), 1);

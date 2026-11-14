@@ -26,6 +26,17 @@ impl Limiter {
         self.allow_n(key, 1, per as u64, window)
     }
 
+    /// Whether the bucket `key` is used up now, taking nothing from it.
+    pub fn spent(&self, key: &str, per: u32, window: Duration) -> bool {
+        if per == u32::MAX {
+            return false;
+        }
+        let buckets = self.buckets.lock().unwrap_or_else(PoisonError::into_inner);
+        let Some((tokens, at)) = buckets.get(key) else { return false };
+        let rate = per as f64 / window.as_secs_f64();
+        (tokens + at.elapsed().as_secs_f64() * rate).min(per as f64) < 1.0
+    }
+
     /// Takes `cost` tokens (bytes, say) from the bucket `key`, which holds `per` and refills `per` every `window`;
     /// none when it holds fewer. `u64::MAX` is no limit.
     pub fn allow_n(&self, key: String, cost: u64, per: u64, window: Duration) -> bool {
@@ -86,6 +97,17 @@ mod tests {
         }
         assert!(!limiter.allow("k".into(), 3, Duration::from_secs(3600)));
         assert!(limiter.allow("other".into(), 3, Duration::from_secs(3600)));
+    }
+
+    #[test]
+    fn spent_looks_without_taking() {
+        let (limiter, hour) = (Limiter::default(), Duration::from_secs(3600));
+        assert!(!limiter.spent("k", 2, hour), "untouched: full");
+        assert!(limiter.allow("k".into(), 2, hour));
+        assert!(!limiter.spent("k", 2, hour));
+        assert!(!limiter.spent("k", 2, hour), "looking took nothing");
+        assert!(limiter.allow("k".into(), 2, hour));
+        assert!(limiter.spent("k", 2, hour));
     }
 
     #[test]

@@ -1048,10 +1048,21 @@ enum Brought {
     Token(i64, [u8; 32]),
 }
 
-fn delivery_token(hub: &Hub, headers: &HeaderMap) -> Res<Brought> {
+/// Tokens that fail its check, per address and minute, before the hub checks no more from there (each check costs a
+/// VOPRF evaluation; a forged token is free to make). A good token never counts: its holder is not limited.
+const BAD_TOKENS_PER_IP_MINUTE: u32 = 30;
+
+fn delivery_token(hub: &Hub, peer: SocketAddr, headers: &HeaderMap) -> Res<Brought> {
     let Some(value) = headers.get(axum::http::header::AUTHORIZATION) else { return Ok(Brought::Nothing) };
     let Some(token) = value.to_str().ok().and_then(Token::from_authorization) else { return Ok(Brought::Refused) };
-    let Some(key) = hub.tokens.verify(&token) else { return Ok(Brought::Refused) };
+    let bad = format!("badtoken:ip:{}", hub.ip(peer, headers));
+    if !hub.own_service(peer, headers) && hub.limiter.spent(&bad, BAD_TOKENS_PER_IP_MINUTE, MINUTE) {
+        return Ok(Brought::Refused);
+    }
+    let Some(key) = hub.tokens.verify(&token) else {
+        hub.limiter.allow(bad, BAD_TOKENS_PER_IP_MINUTE, MINUTE);
+        return Ok(Brought::Refused);
+    };
     if hub.db.token_spent(&token.nonce)? {
         return Ok(Brought::Refused);
     }
@@ -1078,7 +1089,7 @@ async fn deliver(
     yo_wire::envelope::check(&body)?;
     // A good token instead of the address's limits (spec 6.10). One that is not is counted like a delivery without
     // and refused, `401`: the client sends again without it.
-    let token = match delivery_token(&hub, &headers)? {
+    let token = match delivery_token(&hub, peer, &headers)? {
         Brought::Token(key, nonce) => Some((key, nonce)),
         brought => {
             hub.limit_ip("deliver", peer, &headers, hub.config.limits.deliver_per_ip_minute, MINUTE)?;
@@ -1103,7 +1114,9 @@ async fn deliver(
             StatusCode::CONFLICT,
             encode(&api::Devices { account_key: roster.account_key, device_keys: roster.device_keys }),
         )),
-        Delivered::Full => Err(refuse(StatusCode::TOO_MANY_REQUESTS)),
+        // This recipient has no room now, not the sender too many: `507`, so the sender holds back this one's
+        // deliveries only, not everyone's (a `429` stops its whole round).
+        Delivered::Full => Err(refuse(StatusCode::INSUFFICIENT_STORAGE)),
         Delivered::Unknown => Err(refuse(StatusCode::NOT_FOUND)),
         Delivered::Spent => Err(refuse(StatusCode::UNAUTHORIZED)),
     }
