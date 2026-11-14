@@ -10,6 +10,7 @@ pub mod identity;
 pub mod media;
 pub mod net;
 pub mod profile;
+pub mod seal;
 pub mod state;
 pub mod storage;
 pub mod tokens;
@@ -681,8 +682,9 @@ impl Client {
 
     /// For fuzzing: processes one envelope as if it came from the inbox (one transaction, like `sync`).
     #[cfg(feature = "fuzz")]
-    pub fn receive_for_fuzzing(&mut self, sealed: &[u8]) -> Result<()> {
-        self.atomic(|c| c.receive(sealed))
+    pub fn receive_for_fuzzing(&mut self, padded: &[u8]) -> Result<()> {
+        let message = envelope::open(padded)?;
+        self.atomic(|c| c.receive(message))
     }
 
     /// Opens a sealed state.
@@ -1149,21 +1151,33 @@ impl Client {
         Some(yo_wire::devices::hash(&account_key, &keys))
     }
 
-    /// Queues an envelope for users, each with the devices it is encrypted for: their members in `group`, the group
-    /// state the envelope was made in.
-    fn enqueue(&mut self, group: &MlsGroup, users: &[String], sealed: &[u8], plaintext: Option<&[u8]>) {
+    /// Queues an MLS message for users, each sealed to the user (spec 6.1) and with the devices it is encrypted for:
+    /// their members in `group`, the group state the message was made in.
+    fn enqueue(&mut self, group: &MlsGroup, users: &[String], message: &[u8], plaintext: Option<&[u8]>) -> Result<()> {
         for user in users {
+            let Some(envelope) = self.seal_for(group, user, message)? else {
+                self.drop_one("delivery to nobody in the group".into());
+                continue;
+            };
             let made_for = self.members_of(group, user).iter().map(|m| m.device_key).collect();
             self.state.next_seq += 1;
             self.state.outbox.push_back(Outgoing {
                 seq: self.state.next_seq,
                 user: user.clone(),
                 group: group_key(group.group_id()),
-                envelope: sealed.to_vec(),
+                envelope,
                 made_for,
                 plaintext: plaintext.map(<[u8]>::to_vec),
             });
         }
+        Ok(())
+    }
+
+    /// An MLS message sealed to a user of `group` (spec 6.1): to the account key its members there are certified by,
+    /// so the hub cannot put another key in. `None` when the user has no members in the group.
+    fn seal_for(&self, group: &MlsGroup, user: &str, message: &[u8]) -> Result<Option<Vec<u8>>> {
+        let Some(account_key) = self.members_of(group, user).first().map(|m| m.account_key) else { return Ok(None) };
+        seal::to(&account_key, message).map(Some)
     }
 
     /// Pins a contact's account key; another key than pinned for the same user is an identity change.
@@ -1315,7 +1329,7 @@ impl Client {
         group.merge_pending_commit(&self.provider).map_err(mls)?;
         let token = self.token(&group)?;
         let create = api::GroupCreate { group_id: id, epoch: group.epoch().as_u64(), token_hash: sha256(&token) };
-        let sealed = envelope::seal(&welcome.to_bytes().map_err(mls)?)?;
+        let welcome = welcome.to_bytes().map_err(mls)?;
         self.state.chats.insert(
             group_key(&group_id),
             Chat {
@@ -1333,7 +1347,7 @@ impl Client {
                 creating: Some(Creating { request: encode(&create), sent: false }),
             },
         );
-        self.enqueue(&group, &[peer.to_owned()], &sealed, None);
+        self.enqueue(&group, &[peer.to_owned()], &welcome, None)?;
         if let Some(name) = self.state.name.clone() {
             self.send_in(&group_id, Content::Profile { name }, false)?;
         }
@@ -1416,7 +1430,7 @@ impl Client {
         let welcome = match (welcome_for, bundle.welcome()) {
             (Some(user), Some(welcome)) => {
                 let message = MlsMessageOut::from_welcome(welcome.clone(), ProtocolVersion::Mls10);
-                Some((user.to_owned(), envelope::seal(&message.to_bytes().map_err(mls)?)?))
+                Some((user.to_owned(), message.to_bytes().map_err(mls)?))
             }
             _ => None,
         };
@@ -1450,9 +1464,9 @@ impl Client {
                 let before = self.load(group_id)?;
                 group.merge_pending_commit(&self.provider).map_err(mls)?;
                 if let Some((user, welcome)) = &inflight.welcome {
-                    self.enqueue(&group, std::slice::from_ref(user), welcome, None);
+                    self.enqueue(&group, std::slice::from_ref(user), welcome, None)?;
                 }
-                self.enqueue(&before, &recipients, &inflight.commit, None);
+                self.enqueue(&before, &recipients, envelope::open(&inflight.commit)?, None)?;
                 Committed::Accepted
             }
             status::CONFLICT => {
@@ -1519,15 +1533,16 @@ impl Client {
                 _ => return Err(refused(&response)),
             }
             self.atomic(|c| {
+                let message = envelope::open(&response.body)?;
                 c.fetching = true;
-                let received = c.receive(&response.body);
+                let received = c.receive(message);
                 c.fetching = false;
                 received?;
                 if c.load(group_id)?.epoch().as_u64() <= current {
                     return Err(Error::Protocol("a fetched commit did not move the group on"));
                 }
                 // The same commit also comes through the inbox: then it is skipped as seen.
-                c.remember(&response.body);
+                c.remember(message);
                 Ok(())
             })?;
         }
@@ -1536,8 +1551,8 @@ impl Client {
 
     /// Before an envelope is processed: a message from an epoch of a group this device has not reached makes it fetch
     /// the commits it lacks (4.3), outside the envelope's transaction, so they stay whatever becomes of it.
-    fn fetch_before(&mut self, sealed: &[u8]) -> Result<()> {
-        let Some((group_id, epoch)) = Self::private_epoch(sealed) else { return Ok(()) };
+    fn fetch_before(&mut self, message: &[u8]) -> Result<()> {
+        let Some((group_id, epoch)) = Self::private_epoch(message) else { return Ok(()) };
         let Some(chat) = self.state.chats.get(&group_key(&group_id)) else { return Ok(()) };
         if chat.lost || epoch <= self.load(&group_id)?.epoch().as_u64() {
             return Ok(());
@@ -1547,8 +1562,8 @@ impl Client {
     }
 
     /// The group and epoch of a private message, read without opening it.
-    fn private_epoch(sealed: &[u8]) -> Option<(GroupId, u64)> {
-        let message = MlsMessageIn::tls_deserialize_exact(envelope::open(sealed).ok()?).ok()?;
+    fn private_epoch(message: &[u8]) -> Option<(GroupId, u64)> {
+        let message = MlsMessageIn::tls_deserialize_exact(message).ok()?;
         match message.extract() {
             MlsMessageBodyIn::PrivateMessage(private) => {
                 let message: ProtocolMessage = private.into();
@@ -1673,8 +1688,9 @@ impl Client {
         Ok(())
     }
 
-    fn remember(&mut self, sealed: &[u8]) {
-        self.state.seen.push_back(sha256(sealed));
+    /// Marks an MLS message as processed: its hash, whatever envelope it came in.
+    fn remember(&mut self, message: &[u8]) {
+        self.state.seen.push_back(sha256(message));
         if self.state.seen.len() > SEEN {
             self.state.seen.pop_front();
         }
@@ -1758,16 +1774,16 @@ impl Client {
             return Err(Error::Unconfirmed);
         }
         let message = group.create_message(&self.provider, self.signer(), plaintext).map_err(mls)?;
-        Ok(envelope::seal(&message.to_bytes().map_err(mls)?)?)
+        message.to_bytes().map_err(mls)
     }
 
     /// Encrypts a message in a group and queues it for every recipient.
     fn send_plaintext(&mut self, group_id: &GroupId, plaintext: &[u8]) -> Result<()> {
         let mut group = self.load(group_id)?;
-        let sealed = self.encrypt(&mut group, plaintext)?;
+        let message = self.encrypt(&mut group, plaintext)?;
         let peer = self.state.chats.get(&group_key(group_id)).ok_or(Error::Protocol("unknown group"))?.peer.clone();
         let users = self.recipients(&group, &peer);
-        self.enqueue(&group, &users, &sealed, Some(plaintext));
+        self.enqueue(&group, &users, &message, Some(plaintext))?;
         if let Some(chat) = self.state.chats.get_mut(&group_key(group_id)) {
             chat.sent.push_back(plaintext.to_vec());
             if chat.sent.len() > KEPT_FOR_RESTART {
@@ -1781,12 +1797,15 @@ impl Client {
     /// the devices there now; anything else is of use to nobody. `Ok(None)`: drop it.
     fn renew(&mut self, item: &mut Outgoing, group_id: &GroupId) -> Result<Option<()>> {
         let Some(plaintext) = item.plaintext.clone() else { return Ok(None) };
-        let (sealed, made_for) = self.atomic(|c| {
+        let Some((sealed, made_for)) = self.atomic(|c| {
             let mut group = c.load(group_id)?;
-            let sealed = c.encrypt(&mut group, &plaintext)?;
+            let message = c.encrypt(&mut group, &plaintext)?;
             let made_for = c.members_of(&group, &item.user).iter().map(|m| m.device_key).collect::<Vec<_>>();
-            Ok((sealed, made_for))
-        })?;
+            Ok(c.seal_for(&group, &item.user, &message)?.map(|sealed| (sealed, made_for)))
+        })?
+        else {
+            return Ok(None);
+        };
         item.envelope = sealed;
         item.made_for = made_for;
         Ok(Some(()))
@@ -2159,10 +2178,18 @@ impl Client {
         let mut done = Vec::new();
         let mut stopped = None;
         for item in inbox.items {
-            let hash = sha256(item.envelope.as_slice());
-            if !self.state.seen.contains(&hash) {
-                let envelope = item.envelope.as_slice();
-                match self.fetch_before(envelope).and_then(|()| self.atomic(|c| c.receive(envelope))) {
+            // Not sealed to this account (spec 6.1): of use to nobody here.
+            let message = match seal::open(&self.state.account_secret, item.envelope.as_slice()) {
+                Ok(message) => message,
+                Err(error) => {
+                    self.drop_one(error.to_string());
+                    done.push(item.id);
+                    continue;
+                }
+            };
+            if !self.state.seen.contains(&sha256(&message)) {
+                let message = message.as_slice();
+                match self.fetch_before(message).and_then(|()| self.atomic(|c| c.receive(message))) {
                     Ok(()) => {}
                     // Not this envelope's fault: it stays at the hub and is read again next time.
                     Err(error) if retryable(&error) => {
@@ -2171,7 +2198,7 @@ impl Client {
                     }
                     Err(error) => self.drop_one(error.to_string()),
                 }
-                self.remember(item.envelope.as_slice());
+                self.remember(message);
             }
             done.push(item.id);
         }
@@ -2210,9 +2237,9 @@ impl Client {
         Ok(())
     }
 
-    fn receive(&mut self, sealed: &[u8]) -> Result<()> {
-        let bytes = envelope::open(sealed)?;
-        let message = MlsMessageIn::tls_deserialize_exact(bytes).map_err(mls)?;
+    /// Processes one MLS message, out of its envelope.
+    fn receive(&mut self, message: &[u8]) -> Result<()> {
+        let message = MlsMessageIn::tls_deserialize_exact(message).map_err(mls)?;
         match message.extract() {
             MlsMessageBodyIn::Welcome(welcome) => self.join(welcome),
             MlsMessageBodyIn::PrivateMessage(private) => self.private(private.into()),

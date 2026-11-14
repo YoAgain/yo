@@ -38,10 +38,9 @@ pub fn check(
     }
     let credential = BasicCredential::try_from(leaf.credential().clone()).ok()?;
     let certificate = DeviceCertificate::verify(credential.identity(), device_key).ok()?;
-    (&certificate.account_key == account_key)
-        .then(|| Checked {
-            hash: yo_wire::sha256(bytes),
-            last_resort: key_package.last_resort(),
-            not_after: key_package.life_time().not_after(),
-        })
+    (&certificate.account_key == account_key).then(|| Checked {
+        hash: yo_wire::sha256(bytes),
+        last_resort: key_package.last_resort(),
+        not_after: key_package.life_time().not_after(),
+    })
 }

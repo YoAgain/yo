@@ -75,6 +75,18 @@ Checked one by one against the code, all held; fixed on the branch `hub-hardenin
 | A delivery's wake and push depended on its request surviving. | Done by the writer once stored. | `lib.rs` tests |
 | SQLite calls blocked the async workers. | On blocking threads (32 at once); see the commit for what stays. | the whole suite, `yo-load` |
 
+## Sealed envelopes (Codex, November 2026)
+
+**Finding (High):** an envelope was the bare MLSMessage, padded. Its header is plain in MLS: the group id, the epoch,
+the content type, and the message's length inside the padding. When A writes to B and B answers, the same group id
+arrives in both inboxes: the hub could read who chats with whom (spec goal 3) and, in a chat of two, who sent each
+message (goal 2), whatever addresses they came from.
+
+**Fixed:** every envelope to an inbox is sealed by HPKE to the recipient's account key (spec 6.1); the hub sees an
+inbox and a bucket. The seal key is the account key's X25519 form, which every member's certificate already names:
+nothing to publish, nothing for the hub to swap. A clean break: `YO_MIN_APP` is raised at its deploy. Tests:
+`tests/tests/sealed.rs`, `core/mls/src/seal.rs`. What remains is the address and the time (spec 1).
+
 ## Accepted risks and open points
 
 | Severity | What | Why it stays |
