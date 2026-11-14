@@ -19,7 +19,7 @@ app/ios/dev/sim/drive.py ~/yo-chaos/dA audit                # Xcode's accessibil
 xcrun simctl io "Yo Chaos A" screenshot shot.png
 ```
 
-`drive.py` ops: `launch` (`env=YO_HUB:https://127.0.0.1:9` takes the hub away: "offline"), `activate`, `terminate`,
+`drive.py` ops: `burst` (fast taps, see Speed), `launch` (`env=YO_HUB:https://127.0.0.1:9` takes the hub away: "offline"), `activate`, `terminate`,
 `home`, `tap`/`press`/`doubletap`/`exists`/`wait`/`gone`/`swipe` by `label`, `contains`, `id`, `type`, `index` (`sb=true`
 for the system's alerts and Notification Center), `tapxy`/`pressxy`/`drag` by points (`drag sb=true x=100 y=1 x2=100
 y2=700 velocity=600` pulls down Notification Center), `type`, `clear`, `tree`, `audit`, `shot`, `quit`.
@@ -87,6 +87,54 @@ app's team in its id, which the Simulator build has not: the https link opens Sa
 | Signed out, link, Sign In from the keychain list: NAME added (without a link it is not) | ok |
 | Link to the name then registered: not added, nothing said | ok |
 | First Yo: notifications declined: "First Yo Sent!" with Turn On Notifications (opens Settings) and Not Now; allowed: Awesome; the second Yo: nothing | ok |
+
+## Speed (2026-11-14)
+
+How fast a tap answers and a Yo arrives, measured in the Simulator (iPhone 17 Pro, iOS 26.4, on a Mac mini; the app
+built Release: `YO_SIM_CONFIG=Release dev/sim.sh build`) with ten friends on the list, against the dev hub, before and
+after the changes of branch `perf`.
+
+- `YO_PERF=1` in the app's environment (`drive.py DIR launch env=YO_PERF:1`) writes timings to `perf.log` in its
+  temporary folder (`Perf.swift`, `PerfProbe.swift`): when a finger lifts (the touch's own time), the tap's action and
+  haptic, when the change was committed and the frame that shows it, each frame that came late (a hitch), each HTTP
+  request, the long wait's answer, the notification service's steps (`YO_PERF=stderr` for `YoNotifyProbe`).
+- `drive.py DIR burst` taps fast without XCTest's wait for an idle app: `burst n=50 interval=0.1 hold=0.6
+  away=[600,1200] points=[[201,154]]` is 50 taps at 10 a second on the first bar, each held 60 ms, the finger lifted
+  for 40 ms (XCTest leaves out time when no finger is down: a touch beyond the screen's edge fills it; without it each
+  tap comes down as the one before lifts, and SwiftUI drops some of them).
+- `yo-send` (tests) is a second account sending Yos (`--count 20 --every-ms 50`); Time Profiler by `xcrun xctrace record
+  --template "Time Profiler" --device UDID --attach PID`.
+
+| Tap, 50 at 10/s | Before | After |
+|---|---|---|
+| Haptic after the tap's action | 8–9 ms (`.sensoryFeedback`, in SwiftUI's next update) | 0 ms (in the action) |
+| Main thread per tap (action to committed) | 11 ms | 5 ms |
+| Tap to the frame showing "Sent Yo" (p50) | 30 ms | 28 ms |
+| SwiftUI's graph update, all 50 taps (Time Profiler) | 141 ms, the whole list each tap | 9–14 ms, the tapped bar |
+| Frames lost, one bar / across five bars | 8 / 5 | 4 / 2 |
+| Taps lost (finger lifted between taps) | 1 of 50 | 0 of 50 |
+
+The touch's own time to the action is the Simulator's event delivery (9–20 ms, the same before and after).
+
+| Launch, 5 cold starts | Before | After |
+|---|---|---|
+| `YoApp.init` to the list on screen | 529–666 ms | 381–449 ms (the Yo sound's eight players made off the main thread: 58 ms of it) |
+| Process start to the list's first frame | 1381–1574 ms | 1243–1474 ms |
+
+| A Yo arriving (20 at 20 a second) | |
+|---|---|
+| Long wait's answer to the Yos handed to the app | 34–58 ms: the core acknowledges them to the hub first (a round trip), and writes the account's storage when the list changed (another) |
+| Handed to the app to on screen | 31–53 ms p50, mostly SwiftUI's drawing (the Simulator draws the bars' soft edge and glass on the CPU) |
+
+| Notification service (`YoNotifyProbe`, the dev hub over the internet) | |
+|---|---|
+| App closed: state opened (lock, keychain, 342 KiB) | 8–26 ms |
+| Inbox read (a new TLS connection) and acknowledged | 78–160 ms and 34–57 ms |
+| All, from the push to the notification | 0.14–0.25 s |
+| App just left, its wait at the hub running: the lock | free (opened in 9 ms; the app took the Yo, the push went quiet): the app holds it for a step, never through its wait |
+
+The hub: `send_yo` to the push request 1.6 ms p50 (`tests/speed.rs`); its APNs connection is kept open now (to
+api.push.apple.com a request on a new connection took 420 ms, on an open one 138 ms).
 
 ## Bugs found and fixed (branch chaos-ios)
 
