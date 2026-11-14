@@ -36,6 +36,9 @@ pub fn blob_put_path(id: &crate::content::BlobId, fetches: u32) -> String {
 /// The header of a blob upload naming the SHA-256 of its body (base64url): what the signature covers, so the hub
 /// checks the request before it takes the body (spec 6.8).
 pub const HEADER_BODY_HASH: &str = "yo-body-sha256";
+/// The app making a request, `PLATFORM/BUILD` ("ios/202611140619"): kept per device, and a build older than the
+/// hub's minimum for its platform is answered `426` (spec 6.3). Not signed; any request may carry it.
+pub const HEADER_APP: &str = "yo-app";
 
 /// `POST /v1/inbox/{user_id}`: to every device of a user.
 pub fn deliver_path(user: &UserId) -> String {
@@ -360,6 +363,8 @@ pub mod status {
     pub const GONE: u16 = 410;
     pub const LENGTH_REQUIRED: u16 = 411;
     pub const TOO_LARGE: u16 = 413;
+    /// The app is older than the hub's minimum for its platform (`Yo-App`): it must be updated.
+    pub const UPGRADE_REQUIRED: u16 = 426;
     pub const RATE_LIMITED: u16 = 429;
     /// The hub has no room for blobs now: later.
     pub const INSUFFICIENT_STORAGE: u16 = 507;

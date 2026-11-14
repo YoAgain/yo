@@ -18,7 +18,7 @@
 //!   YO_BLOB_MIN_FREE_MB   uploads are refused while the disk has less free, default 4096 (4 GiB)
 
 use std::sync::Arc;
-use yo_hub::config::{read_reserved, ApnsConfig, BlobConfig, Config, FcmConfig, Limits};
+use yo_hub::config::{parse_min_app, read_reserved, ApnsConfig, BlobConfig, Config, FcmConfig, Limits};
 use yo_hub::{push, Hub};
 
 fn var(name: &str) -> Option<String> {
@@ -75,6 +75,7 @@ fn config() -> Result<(Config, String), String> {
         fcm,
         reserved: read_reserved(var("YO_RESERVED_FILE").as_deref())?,
         blobs,
+        min_app: var("YO_MIN_APP").map(|text| parse_min_app(&text)).transpose()?.unwrap_or_default(),
     };
     Ok((config, var("YO_LISTEN").unwrap_or_else(|| "127.0.0.1:8080".into())))
 }

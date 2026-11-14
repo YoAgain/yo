@@ -46,6 +46,9 @@ struct YoApp: App {
         }
       }
       .animation(.smooth(duration: 0.5), value: accounts.account == nil)
+      .overlay {
+        if AppUpdate.shared.needed { UpdateScreen().transition(.opacity) }
+      }
       .onChange(of: accounts.account == nil) { _, out in
         // Out, however (signed out, deleted, or the account taken to another iPhone): this phone's friends go too.
         if out {

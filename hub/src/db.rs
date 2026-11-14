@@ -26,6 +26,8 @@ pub struct Device {
     pub auth_key: Key,
     /// When it last made a request, to the day (`touch`).
     pub last_seen_at: u64,
+    /// The app it last named (`Yo-App`, "ios/202611140619"), if any.
+    pub app: Option<String>,
 }
 
 pub struct NewDevice {
@@ -168,7 +170,8 @@ CREATE TABLE IF NOT EXISTS devices (
     push_platform INTEGER NOT NULL,
     push_token BLOB NOT NULL,
     created_at INTEGER NOT NULL,
-    last_seen_at INTEGER NOT NULL
+    last_seen_at INTEGER NOT NULL,
+    app TEXT
 ) WITHOUT ROWID;
 CREATE INDEX IF NOT EXISTS devices_by_user ON devices(user_id);
 -- Devices that were replaced: their own requests answer 410.
@@ -366,6 +369,10 @@ fn migrate(conn: &mut Connection) -> rusqlite::Result<()> {
     if !has_spelling {
         tx.execute_batch("ALTER TABLE handles ADD COLUMN spelling TEXT")?;
     }
+    let has_app = tx.prepare("SELECT 1 FROM pragma_table_info('devices') WHERE name = 'app'")?.exists([])?;
+    if !has_app {
+        tx.execute_batch("ALTER TABLE devices ADD COLUMN app TEXT")?;
+    }
     tx.commit()
 }
 
@@ -458,13 +465,14 @@ impl Db {
 
     pub fn device(&self, device: &DeviceId) -> rusqlite::Result<Option<Device>> {
         self.conn()
-            .prepare_cached("SELECT user_id, device_key, auth_key, last_seen_at FROM devices WHERE id = ?1")?
+            .prepare_cached("SELECT user_id, device_key, auth_key, last_seen_at, app FROM devices WHERE id = ?1")?
             .query_row([device], |row| {
                 Ok(Device {
                     user_id: array(row.get(0)?)?,
                     device_key: array(row.get(1)?)?,
                     auth_key: array(row.get(2)?)?,
                     last_seen_at: row.get::<_, i64>(3)? as u64,
+                    app: row.get(4)?,
                 })
             })
             .optional()
@@ -474,10 +482,11 @@ impl Db {
         self.conn().prepare_cached("SELECT 1 FROM gone WHERE id = ?1")?.exists([device])
     }
 
-    pub fn touch(&self, device: &DeviceId, now: u64) -> rusqlite::Result<()> {
+    /// Seen at `now`, with the app it names (none: the one it had stays).
+    pub fn touch(&self, device: &DeviceId, now: u64, app: Option<&str>) -> rusqlite::Result<()> {
         self.conn()
-            .prepare_cached("UPDATE devices SET last_seen_at = ?2 WHERE id = ?1")?
-            .execute(params![device, now])?;
+            .prepare_cached("UPDATE devices SET last_seen_at = ?2, app = coalesce(?3, app) WHERE id = ?1")?
+            .execute(params![device, now, app])?;
         Ok(())
     }
 
@@ -1127,6 +1136,13 @@ impl Db {
 
     /// What should never be: rows that belong to nobody (a user, a device or a blob gone without them), each check
     /// with how many rows fail it. Empty when the store is consistent. For tests and the operator; reads only.
+    pub fn apps(&self) -> rusqlite::Result<Vec<(String, i64)>> {
+        let conn = self.conn();
+        let mut statement = conn.prepare("SELECT coalesce(app, ''), count(*) FROM devices GROUP BY 1 ORDER BY 1")?;
+        let rows = statement.query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?;
+        rows.collect()
+    }
+
     pub fn audit(&self) -> rusqlite::Result<Vec<(&'static str, i64)>> {
         const CHECKS: &[(&str, &str)] = &[
             ("devices without their user", "SELECT count(*) FROM devices WHERE user_id NOT IN (SELECT id FROM users)"),
@@ -1491,7 +1507,7 @@ mod tests {
         let secured = user(register(&db, b"SAFE", 2, 2, 0));
         let active = user(register(&db, b"BUSY", 3, 3, 0));
         db.put_backup(&[2; 16], None, b"record", 0).unwrap();
-        db.touch(&[3; 16], 50 * DAY).unwrap();
+        db.touch(&[3; 16], 50 * DAY, None).unwrap();
         assert!(matches!(db.feedback(&[1; 16], "where are my friends", "1.0 (1)", 0).unwrap(), Write::Done(())));
         let exists = |user: &UserId| db.lookup(KIND_USER, user, false, &[]).unwrap().is_some();
         assert_eq!(db.release_unsecured(89 * DAY, 90 * DAY).unwrap(), 0);

@@ -11,6 +11,7 @@ pub mod push;
 
 use axum::extract::{ConnectInfo, DefaultBodyLimit, Path, State};
 use axum::http::{HeaderMap, Method, StatusCode, Uri};
+use axum::response::IntoResponse;
 use axum::routing::{delete, get, post, put};
 use axum::Router;
 use bytes::Bytes;
@@ -142,6 +143,22 @@ struct Signed {
     device_key: Key,
 }
 
+/// An app older than the hub's minimum for its platform (`YO_MIN_APP`) gets `426` on every request: it shows that it
+/// must be updated (spec 6.3). Without `Yo-App`, or with a platform the hub has no minimum for, it passes.
+async fn too_old(
+    State(hub): State<Arc<Hub>>,
+    request: axum::extract::Request,
+    next: axum::middleware::Next,
+) -> axum::response::Response {
+    let app = request.headers().get(api::HEADER_APP).and_then(|v| v.to_str().ok()).and_then(config::app);
+    if let Some((platform, build)) = app {
+        if hub.config.min_app.iter().any(|(p, min)| *p == platform && build < *min) {
+            return StatusCode::UPGRADE_REQUIRED.into_response();
+        }
+    }
+    next.run(request).await
+}
+
 impl Hub {
     pub fn new(config: Config, push_transport: Arc<dyn push::Transport>) -> Result<Arc<Self>, String> {
         let db = Arc::new(Db::open(&config.db_path).map_err(|e| format!("database: {e}"))?);
@@ -205,7 +222,10 @@ impl Hub {
                 }),
             );
         }
-        router.layer(DefaultBodyLimit::max(limits::MAX_BODY)).with_state(self.clone())
+        router
+            .layer(axum::middleware::from_fn_with_state(self.clone(), too_old))
+            .layer(DefaultBodyLimit::max(limits::MAX_BODY))
+            .with_state(self.clone())
     }
 
     /// The hourly cleanup at `now`: envelopes and commits past their time (6.6), names not secured past theirs (6.4),
@@ -237,6 +257,11 @@ impl Hub {
             failed.push(("blobs without their file", missing));
         }
         Ok(failed)
+    }
+
+    /// How many devices name each app (`Yo-App`; "" for none): for tests and the operator.
+    pub fn apps(&self) -> rusqlite::Result<Vec<(String, i64)>> {
+        self.db.apps()
     }
 
     /// Serves until `shutdown` resolves; prunes meanwhile.
@@ -398,9 +423,12 @@ impl Hub {
         if !self.replay.first_time(signature, now, time + limits::MAX_SKEW_MS + 1) {
             return Err(unauthorized());
         }
-        // When a device was last seen counts only to the day (spec 6.4): one write a day, not one per request.
-        if now.saturating_sub(device.last_seen_at) >= DAY.as_millis() as u64 {
-            self.db.touch(&device_id, now)?;
+        // When a device was last seen counts only to the day (spec 6.4): one write a day, not one per request; the
+        // app it names is written when it changes.
+        let app = headers.get(api::HEADER_APP).and_then(|v| v.to_str().ok()).filter(|a| config::app(a).is_some());
+        let new_app = app.is_some_and(|a| device.app.as_deref() != Some(a));
+        if new_app || now.saturating_sub(device.last_seen_at) >= DAY.as_millis() as u64 {
+            self.db.touch(&device_id, now, app)?;
         }
         Ok(Signed { device_id, user_id: device.user_id, device_key: device.device_key })
     }

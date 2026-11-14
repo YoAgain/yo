@@ -184,6 +184,29 @@ pub struct Config {
     /// at every start where it does not hold them yet.
     pub reserved: Vec<Reserved>,
     pub blobs: BlobConfig,
+    /// The oldest build each platform may still use ("ios" → 202611140619), from `YO_MIN_APP`
+    /// ("ios/202611140619,android/12"): an older one gets `426` and asks to be updated. A request without `Yo-App`
+    /// passes (apps from before it, tools).
+    pub min_app: Vec<(String, u64)>,
+}
+
+/// `YO_MIN_APP`: comma separated `PLATFORM/BUILD`.
+pub fn parse_min_app(text: &str) -> Result<Vec<(String, u64)>, String> {
+    text.split(',')
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(|s| app(s).ok_or_else(|| format!("YO_MIN_APP: {s:?} is not PLATFORM/BUILD")))
+        .collect()
+}
+
+/// `PLATFORM/BUILD` (a `Yo-App` header): the platform in lower case letters (at most 16), the build a number.
+pub fn app(text: &str) -> Option<(String, u64)> {
+    let (platform, build) = text.split_once('/')?;
+    let platform_ok = (1..=16).contains(&platform.len()) && platform.bytes().all(|b| b.is_ascii_lowercase());
+    if !platform_ok || build.is_empty() || !build.bytes().all(|b| b.is_ascii_digit()) {
+        return None;
+    }
+    Some((platform.to_owned(), build.parse().ok()?))
 }
 
 /// The operator's list of reserved usernames: one per line in its preferred spelling, a note after `#` if any.
@@ -227,6 +250,7 @@ impl Config {
             fcm: None,
             reserved: Vec::new(),
             blobs: BlobConfig::for_tests(),
+            min_app: Vec::new(),
         }
     }
 }
@@ -249,5 +273,15 @@ mod tests {
         );
         assert!(read_reserved(None).unwrap().is_empty());
         assert!(read_reserved(path.to_str()).unwrap().is_empty(), "a file not there: nothing");
+    }
+
+    #[test]
+    fn apps_are_platform_and_build() {
+        assert_eq!(app("ios/202611140619"), Some(("ios".into(), 202611140619)));
+        for bad in ["", "ios", "ios/", "/1", "iOS/1", "ios/1a", "ios/-1", "a b/1", "ios/99999999999999999999"] {
+            assert_eq!(app(bad), None, "{bad:?}");
+        }
+        assert_eq!(parse_min_app(" ios/5, android/7 ,").unwrap(), [("ios".into(), 5), ("android".into(), 7)]);
+        assert!(parse_min_app("ios").is_err());
     }
 }

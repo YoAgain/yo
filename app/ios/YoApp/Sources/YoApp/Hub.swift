@@ -2,6 +2,7 @@
 // for the core, the file its sealed state lives in and the key that seals it. Every core call blocks, also on another
 // call still at the hub (the core does one at a time): `Hub.run` takes it off the main actor, and none is made there.
 import Foundation
+import Observation
 import Security
 import YoCore
 
@@ -50,6 +51,22 @@ enum Hub {
   }
 }
 
+/// The app's version for the hub (`Yo-App`, spec 6.3), and whether the hub said it is too old (426).
+@MainActor @Observable
+final class AppUpdate {
+  static let shared = AppUpdate()
+  /// The hub answered 426 once: this build must be updated; everything else waits behind the screen.
+  private(set) var needed = false
+
+  /// "ios/202611140619": the platform and this build, on every request.
+  nonisolated static let header = "ios/" + (Bundle.main.object(forInfoDictionaryKey: "CFBundleVersion") as? String ?? "0")
+
+  /// From any thread: the hub's answer to some request was 426.
+  nonisolated static func tooOld() {
+    Task { @MainActor in shared.needed = true }
+  }
+}
+
 /// HTTP for the core: a blocking request with URLSession (the core runs off the main actor, `Hub.run`).
 final class HubTransport: HttpTransport {
   let base: URL
@@ -68,6 +85,7 @@ final class HubTransport: HttpTransport {
     var request = URLRequest(url: url, timeoutInterval: timeout)
     request.httpMethod = method
     for header in headers { request.setValue(header.value, forHTTPHeaderField: header.name) }
+    request.setValue(AppUpdate.header, forHTTPHeaderField: "Yo-App")
     if !body.isEmpty || method != "GET" { request.httpBody = body }
     let done = DispatchSemaphore(value: 0)
     let answer = Answer()
@@ -78,6 +96,7 @@ final class HubTransport: HttpTransport {
         } else {
           HttpResult(status: UInt16((response as? HTTPURLResponse)?.statusCode ?? 0), body: data ?? Data(), error: nil)
         }
+      if answer.result.status == 426 { AppUpdate.tooOld() }
       done.signal()
     }.resume()
     done.wait()
