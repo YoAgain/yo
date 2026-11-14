@@ -40,9 +40,11 @@ struct SecureNameSheet: View {
       }
       .transition(.asymmetric(insertion: .move(edge: .trailing), removal: .move(edge: .leading)))
     }
+    .overlay(alignment: .topTrailing) { SheetClose().disabled(busy) }
     .animation(.smooth(duration: 0.35), value: page)
     .animation(.smooth(duration: 0.35), value: created)
     .foregroundStyle(.white)
+    .presentationDragIndicator(.visible)
     .preferredColorScheme(.dark)
     .interactiveDismissDisabled(busy)
     .onAppear {
@@ -122,6 +124,13 @@ struct SecureNameSheet: View {
 
   // MARK: Doing
 
+  /// The system's reason after the words, in Yo Dev only (for development); never in Yo itself.
+  private static func detail(_ error: Error) -> String {
+    guard Hub.isDevApp else { return "" }
+    let e = error as NSError
+    return " (\(e.domain) \(e.code): \(e.localizedDescription))"
+  }
+
   /// On to the next step left (a skipped passkey is not asked again), or the end.
   private func next() {
     problem = nil
@@ -145,8 +154,7 @@ struct SecureNameSheet: View {
       created = true
     } catch {
       if !SecurityPresentation.isCancellation(error) {
-        let e = error as NSError  // the system's reason, while Yo is in development
-        problem = "Couldn’t create passkey. Try again or skip. (\(e.domain) \(e.code): \(e.localizedDescription))"
+        problem = "Couldn’t create passkey. Try again or skip." + Self.detail(error)
       }
     }
   }
@@ -163,8 +171,7 @@ struct SecureNameSheet: View {
       problem = "This password manager can’t be used. Try iCloud Keychain."
     } catch {
       if !SecurityPresentation.isCancellation(error) {
-        let e = error as NSError  // the reason, while Yo is in development
-        problem = "That didn’t work. Try again. (\(e.domain) \(e.code): \(e.localizedDescription))"
+        problem = "That didn’t work. Try again." + Self.detail(error)
       }
     }
   }
@@ -272,7 +279,9 @@ struct RecoveryShowSheet: View {
           .opacity(saved ? 0 : 1)
       }
     }
+    .overlay(alignment: .topTrailing) { SheetClose() }
     .foregroundStyle(.white)
     .preferredColorScheme(.dark)
+    .presentationDragIndicator(.visible)
   }
 }
