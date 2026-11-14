@@ -24,7 +24,7 @@ The app talks to the live hub (TestFlight and App Store) or the dev hub (Yo Dev)
 - Notifications (the same builds): "Yo from YoGPT", "📷 from …", "Yo!!!!! +4 from … · 📷 2" (one notification per run, as the bar says it), with the Yo sound and "Yo Back". The
   push only says "Yo"; the notification service (`Sources/YoNotify`) receives once, names the sender and fetches a
   photo or video of up to 6 MiB into the App Group first (`Prefetch.swift`; the app and the service claim a blob
-  before either fetches it, spec 6.7), so the app shows it at once. A push that brings no new Yo (the Welcome before
+  before either fetches it, so one fetch is under way at a time, spec 6.7), so the app shows it at once. A push that brings no new Yo (the Welcome before
   a first Yo, the rest of a burst) goes quietly; Yos the app takes itself just after it was left get their
   notification from the app; Yos read in the app take theirs out of Notification Center.
 - The app and both extensions use one account state, in the App Group, its key in the group's keychain group, in
