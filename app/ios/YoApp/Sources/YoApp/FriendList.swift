@@ -1390,7 +1390,7 @@ struct SwipeActions<Content: View>: View {
       .background(alignment: .trailing) {
         if offset < 0 {
           HStack(spacing: 0) {
-            action("Block", "hand.raised.fill", Color.row(3)) { close(); block() }
+            action("Block", "hand.raised.fill", Color(.systemGray)) { close(); block() }  // not a bar's own colour
             action("Remove", "trash.fill", .alizarin) { remove() }
           }
           .frame(width: max(Self.width, -offset))
