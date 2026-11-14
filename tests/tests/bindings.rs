@@ -582,9 +582,9 @@ fn the_app_layer_asks_who_a_typed_name_is_before_the_first_yo() {
 #[test]
 fn the_app_layer_sends_a_burst_over_the_hubs_limit_later_in_order() {
     use std::time::{Duration, Instant};
-    const BURST: usize = 70;
+    const BURST: usize = 60; // twice the limit: over it also on a slow machine, whose burst takes a while
     let mut config = yo_hub::config::Config::for_tests();
-    config.limits.deliver_per_ip_minute = 60;
+    config.limits.deliver_per_ip_minute = 30;
     let hub = TestHub::start_with(config, "127.0.0.1:0");
     let n = random_u64() % 1_000_000_000;
     let (pa, pb) = (username(n), username(n + 1));
@@ -599,7 +599,7 @@ fn the_app_layer_sends_a_burst_over_the_hubs_limit_later_in_order() {
     assert!(a.waiting() > 0, "over the limit");
     let started = Instant::now();
     while a.waiting() > 0 {
-        assert!(started.elapsed() < Duration::from_secs(90), "the outbox empties at the hub's pace");
+        assert!(started.elapsed() < Duration::from_secs(180), "the outbox empties at the hub's pace");
         std::thread::sleep(Duration::from_secs(1));
         a.deliver().unwrap();
     }

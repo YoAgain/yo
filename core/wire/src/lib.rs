@@ -59,9 +59,14 @@ pub fn encode<T: tls_codec::Serialize>(value: &T) -> Vec<u8> {
     value.tls_serialize_detached().expect("TLS encoding of a bounded structure")
 }
 
-/// Decodes a TLS structure strictly: every byte must be used.
-pub fn decode<T: tls_codec::DeserializeBytes>(bytes: &[u8]) -> Result<T, Error> {
-    Ok(T::tls_deserialize_exact_bytes(bytes)?)
+/// Decodes a TLS structure strictly: every byte must be used, and the bytes must be the one encoding of what they
+/// say (a length in more bytes than it needs is refused): one message, one form.
+pub fn decode<T: tls_codec::DeserializeBytes + tls_codec::Serialize>(bytes: &[u8]) -> Result<T, Error> {
+    let value = T::tls_deserialize_exact_bytes(bytes)?;
+    if value.tls_serialize_detached().ok().as_deref() != Some(bytes) {
+        return Err(Error::Format);
+    }
+    Ok(value)
 }
 
 /// base64url without padding, as the request headers carry bytes.
