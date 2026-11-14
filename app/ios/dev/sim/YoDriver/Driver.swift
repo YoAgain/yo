@@ -99,7 +99,7 @@ import XCTest
       if op == "tapxy" { point.tap() } else { point.press(forDuration: c["seconds"] as? Double ?? 1) }
       return [:]
     case "drag":
-      let o = origin(app)
+      let o = origin(c["sb"] as? Bool == true ? springboard : app)
       let from = o.withOffset(CGVector(dx: c["x"] as? Double ?? 0, dy: c["y"] as? Double ?? 0))
       let to = o.withOffset(CGVector(dx: c["x2"] as? Double ?? 0, dy: c["y2"] as? Double ?? 0))
       from.press(

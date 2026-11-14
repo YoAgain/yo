@@ -10,9 +10,10 @@ enum Hub {
   static let live = URL(string: "https://hub.justyo.app")!
   static let dev = URL(string: "https://dev.justyo.app")!
 
-  /// "Yo Dev" (app.justyo.ios.dev, what dev/push.sh installs) talks to the dev hub, always; "Yo" (TestFlight, the
-  /// App Store) to the live one. Two apps side by side, each with its own accounts.
-  static let isDevApp = Bundle.main.bundleIdentifier?.hasSuffix(".dev") == true
+  /// "Yo Dev" (app.justyo.ios.dev, what dev/push.sh installs, and its extensions app.justyo.ios.dev.notify, …) talks
+  /// to the dev hub, always; "Yo" (TestFlight, the App Store) to the live one. Two apps side by side, each with its
+  /// own accounts.
+  static let isDevApp = Bundle.main.bundleIdentifier?.split(separator: ".").contains("dev") == true
 
   /// The hub this app belongs to; its accounts are kept under its name (SyncedAccount).
   static var home: URL { isDevApp ? dev : live }

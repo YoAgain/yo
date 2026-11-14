@@ -21,13 +21,21 @@ xcrun simctl io "Yo Chaos A" screenshot shot.png
 
 `drive.py` ops: `launch` (`env=YO_HUB:https://127.0.0.1:9` takes the hub away: "offline"), `activate`, `terminate`,
 `home`, `tap`/`press`/`doubletap`/`exists`/`wait`/`gone`/`swipe` by `label`, `contains`, `id`, `type`, `index` (`sb=true`
-for the system's alerts), `tapxy`/`pressxy`/`drag` by points, `type`, `clear`, `tree`, `audit`, `shot`, `quit`.
+for the system's alerts and Notification Center), `tapxy`/`pressxy`/`drag` by points (`drag sb=true x=100 y=1 x2=100
+y2=700 velocity=600` pulls down Notification Center), `type`, `clear`, `tree`, `audit`, `shot`, `quit`.
 Face ID: `xcrun simctl spawn DEV notifyutil -s com.apple.BiometricKit.enrollmentChanged 1` (and `-p` it), then
 `notifyutil -p com.apple.BiometricKit_Sim.pearl.match`; without it iOS asks for the passcode, and any is taken.
 
+Push: the Simulator build has the notification service and Yo Dev's App Group. `simctl push` shows the payload as it
+is (no notification service runs), and APNs gives the Simulator no token on the Mac mini ("Could not get certificate
+from simulator", MobileActivation). So `sim.sh notify "Yo Push"` runs YoNotify's own code in a process of its own
+(`YoNotifyProbe`, the same App Group and lock) on the hub's push (`{"aps":{"alert":{"title":"Yo","body":"Yo"},
+"sound":"yo.caf","mutable-content":1}}`), prints what it made and pushes that. The sender is a second account driven
+by the core over HTTP against the dev hub.
+
 Not in the Simulator: passkeys (the app id has no team, so `justyo.app` is not associated: error 1004, shown in the
-guide), the iCloud Keychain's sync (its items stay on the Simulator, which is enough for the Sign In list), push (no
-APNs token), the camera (black; photos come from the library).
+guide), the iCloud Keychain's sync (its items stay on the Simulator, which is enough for the Sign In list), a real
+push through APNs (see above), the camera (black; photos come from the library).
 
 ## Flows (2026-11-14 night)
 
@@ -45,6 +53,10 @@ APNs token), the camera (black; photos come from the library).
 | Blocked: B gets nothing from A; Blocked list, swipe to Unblock | ok | 107-111 |
 | Camera mode: permission, photo from the library, undo ring at the bar's left, sent, B gets "Yo 📷" | a photo from the library often never went: "Sent 📷" and its undo ring stayed (the 1.5-second task read the list's state from before the tap); fixed with the sending state in an object of its own (`FriendList.Bars`); also decoded at every redraw: fixed | 120-134, 260-269 |
 | Notifications (simctl push): banner "Yo from YoGPT", Yo Back from the banner sends one (YoGPT answers with a photo) | ok after Yo Back was implemented | 230-236 |
+| Push through the notification service (`sim.sh notify`, 2026-11-14): app closed, a stranger's first Yo "Yo from LeoPush71"; a friend's Yo; three in a row "3 Yos from …"; two senders, a line each; a photo "📷 from …"; Yo Back from Notification Center sends one | ok after fixes: the service's notification had no category (no Yo Back, never taken in on opening) and "Yo" as title and text | push-03, 05, 07-09, 15-17 |
+| Push with nothing new (the rest of a burst, a blocked sender's Yo): quiet, no banner, no sound | was one more "Yo" with the sound: fixed | push-06, 11 |
+| Yo just after leaving the app (its wait at the hub still running takes it, the service finds nothing) | was "Yo" with no name: the app writes "Yo from …" itself now | push-02, 13 |
+| The app holds the state's lock past the wait (10 s): "Yo" with the sound, no crash | ok | push-12 |
 | Viewer: sender and "now" at the top left over the lines (no pill), next, back, hold to pause, swipe down closes, seen once; largest Dynamic Type truncates the name | ok | 141-153 |
 | Offline (YO_HUB): a Yo waits in the core's outbox and arrives when back online (B: 8 → 9) | ok | 160-164 |
 | Profile: Statistics, Appearance (Negative, Default icons), Media (Keep Sent Photos: permission, denied alert) | denied alert never showed: fixed | 50-51, 170-176 |
