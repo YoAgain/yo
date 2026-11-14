@@ -11,15 +11,24 @@ import YoCore
 struct Arrival: Equatable, Identifiable {
   let id: String
   let from: String
-  /// The photo, or the first frame of the video.
+  /// A small picture of the photo, or of the video's first frame (the viewer reads the photo itself from `file`).
   let photo: UIImage?
   let video: URL?
+  /// The photo's file.
+  var file: URL? = nil
 
   /// When it was sent: a photo's or video's id starts with its sender and the time (`Inbox.mediaID`).
-  var sentAt: Date? {
+  var sentAt: Date? { Self.sentAtMs(id).map { Date(timeIntervalSince1970: Double($0) / 1000) } }
+
+  /// The time in an id ("user/ms/…").
+  static func sentAtMs(_ id: String) -> UInt64? {
     let parts = id.split(separator: "/")
-    guard parts.count >= 2, let ms = UInt64(parts[1]) else { return nil }
-    return Date(timeIntervalSince1970: Double(ms) / 1000)
+    return parts.count >= 2 ? UInt64(parts[1]) : nil
+  }
+
+  /// Oldest sent first, then by id: the order on a bar, whichever download finished first.
+  static func older(_ a: Arrival, _ b: Arrival) -> Bool {
+    (sentAtMs(a.id) ?? 0, a.id) < (sentAtMs(b.id) ?? 0, b.id)
   }
 
   /// How long ago, as stories say it: "now", "2m", "3h", "1d".
@@ -33,11 +42,12 @@ struct Arrival: Equatable, Identifiable {
     }
   }
 
-  init(id: String, from: String, photo: UIImage? = nil, video: URL? = nil) {
+  init(id: String, from: String, photo: UIImage? = nil, video: URL? = nil, file: URL? = nil) {
     self.id = id
     self.from = from
     self.photo = photo
     self.video = video
+    self.file = file
   }
 }
 
@@ -65,10 +75,12 @@ final class Inbox {
     }
   }
 
-  /// A photo or video kept, on its sender's bar until seen.
+  /// A photo or video kept, on its sender's bar until seen, in the order sent.
   private func add(_ arrival: Arrival) {
-    guard !(media[arrival.from] ?? []).contains(where: { $0.id == arrival.id }) else { return }
-    media[arrival.from, default: []].append(arrival)
+    var waiting = media[arrival.from] ?? []
+    guard !waiting.contains(where: { $0.id == arrival.id }) else { return }
+    waiting.insert(arrival, at: waiting.firstIndex { Arrival.older(arrival, $0) } ?? waiting.endIndex)
+    media[arrival.from] = waiting
   }
 
   /// Signed out: what waited to be seen is gone (MediaStorage.clearAll deleted it), and Yos not shown yet.
@@ -214,7 +226,7 @@ final class Inbox {
     delivering = Task {
       var pause = 1.0
       var before = UInt32.max
-      while let client = accounts.client, !Task.isCancelled {
+      while let client = accounts.client, !Task.isCancelled, !HubTransport.unsupported {  // too old: nothing goes
         deliverAgain = false
         try? await Task.sleep(for: .seconds(pause))
         guard let (events, contacts, waiting) = try? await Hub.run({
@@ -241,11 +253,12 @@ final class Inbox {
   @ObservationIgnored private var deliverAgain = false
 
   /// While the list is on screen: waits at the hub for Yos (spec 6.3, the inbox's long wait) and shows each on its
-  /// sender's bar. A pause after an error; this phone replaced elsewhere: signed out.
+  /// sender's bar. A pause after an error; this phone replaced elsewhere: signed out; this build too old (426): no
+  /// more waits.
   func listen(accounts: AccountStore, friends: Friends) async {
     var respelled = false
     var storageTaken = false
-    while !Task.isCancelled {
+    while !Task.isCancelled && !HubTransport.unsupported {
       guard let client = accounts.client else {
         try? await Task.sleep(for: .seconds(1))
         continue
@@ -272,9 +285,26 @@ final class Inbox {
     }
   }
 
-  /// What the core handed over while sending a photo or video (the outbox): as any.
-  func handle(_ events: [YoEvent], contacts: [YoContact], client: YoClient, friends: Friends) async {
+  /// What the core handed over while sending a photo or video (the outbox): as any, if `client` is still the
+  /// account's (not signed out, or out and in again, meanwhile).
+  func handle(
+    _ events: [YoEvent], contacts: [YoContact], client: YoClient, accounts: AccountStore, friends: Friends
+  ) async {
+    guard client === accounts.client else { return }
     await take(events, contacts: contacts, client: client, friends: friends)
+  }
+
+  /// When the core opens and each time the app comes to the foreground (spec 4.4): key updates that are due, the
+  /// storage's write; what it received on the way, as any.
+  func maintain(accounts: AccountStore, friends: Friends) async {
+    guard let client = accounts.client, !HubTransport.unsupported else { return }
+    do {
+      let (events, contacts) = try await Hub.run { (try client.maintenance(), client.contacts()) }
+      guard client === accounts.client else { return }  // signed out meanwhile: not for this account
+      await take(events, contacts: contacts, client: client, friends: friends)
+    } catch YoError.Replaced {
+      accounts.replaced(client)
+    } catch {}
   }
 
   /// A photo or video shown in the viewer: it will not show again.
@@ -283,8 +313,9 @@ final class Inbox {
   }
 
   /// What the core handed over: a Yo shows on its sender's bar, a new chat brings its friend into the list; a photo
-  /// or video is noted, fetched and waits on the bar until seen. Then the core may forget them (they will not come
-  /// again after a crash). `contacts`: the core's, read with the events.
+  /// or video is noted, fetched and waits on the bar until seen; a contact's new key is noted for Contacts. Then the
+  /// core may forget this batch, all of it that is kept (another call's batch is its own: the core acknowledges each
+  /// as named); what could not be kept comes again after a restart. `contacts`: the core's, read with the events.
   private func take(_ events: [YoEvent], contacts: [YoContact], client: YoClient, friends: Friends) async {
     friends.markGone(contacts)  // a delivery found their account gone (`NotOnYo` from now on)
     guard !events.isEmpty else { return }
@@ -293,33 +324,42 @@ final class Inbox {
     func friend(_ user: String) -> Friend {
       friends.friend(user: user, handles: contacts.first { $0.user == user }?.handles ?? [])
     }
+    var kept: [YoEvent] = []
     for event in events {
-      let media: (YoMedia, MediaFile.Kind)?
       switch event {
       case .message(let user, let sentAtMs, let kind):
-        switch kind {
-        case .yo: media = nil
-        case .photo(let photo): media = (photo, .photo)
-        case .video(let video, _): media = (video, .video)
-        default: continue  // text, links, places: not shown in Yo
-        }
+        // What Yo does not show yet (a text, a link, a place, a kind it does not know) hangs on a Yo: shown as one
+        // (spec 5).
+        let media: (YoMedia, MediaFile.Kind)? =
+          switch kind {
+          case .photo(let photo): (photo, .photo)
+          case .video(let video, _): (video, .video)
+          default: nil
+          }
         let sender = friend(user)
         received(id: "\(user)/\(sentAtMs)", from: sender.name)
         unshown[user] = ((unshown[user]?.count ?? 0) + 1, media?.1, sender.name, "\(user)/\(sentAtMs)")
         // On top it goes by the list, in one step with the others and never under a finger (FriendList.rise).
         count(from: sender.name)
         if let (media, kind) = media {
-          ReceivedMedia.shared.expect(media, id: Self.mediaID(user, sentAtMs, media), from: sender.name, kind: kind)
+          let id = Self.mediaID(user, sentAtMs, media)
+          // Not noted (the disk full): the core keeps the Yo, which comes again after a restart.
+          guard ReceivedMedia.shared.expect(media, id: id, from: sender.name, kind: kind) else {
+            continue
+          }
         }
       case .newChat(let user):
         _ = friend(user)  // a friend's chat restarted (spec 4.9) is the same friend, by user id
-      default:
+      case .identityChanged(let user):
+        friends.keyChanged(friend(user))  // spec 3.2: shown in Contacts, and said once
+      case .profile, .sentElsewhere:
         break
       }
+      kept.append(event)
     }
     if UIApplication.shared.applicationState == .background { await notify(unshown) }
     // Photos and videos are noted (above) before the core may forget their Yos; fetched from here on.
-    _ = try? await Hub.run { client.acknowledgeEvents() }
+    _ = try? await Hub.run { [kept] in client.acknowledge(events: kept) }
     fetchMedia(client: client)
   }
 

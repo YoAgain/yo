@@ -69,8 +69,11 @@ struct StoredMedia: Codable {
 }
 
 /// Photos and videos on their way out, kept on disk (sealed) until the hub has them and their Yo is sent: an app
-/// that quits, a hub that says "not now", no network, none of it loses one. Their Yos in the order they were taken;
-/// a few uploads side by side, while Yos go on beside them (an upload does not hold the core).
+/// that quits, a hub that says "not now", no network, none of it loses one, and none is given up. A few uploads side by
+/// side, while Yos go on beside them (an upload does not hold the core); the Yos to each friend in the order taken,
+/// each once its upload and those before it to that friend are done (one the hub holds back holds back only that
+/// friend's after it). A Yo sent again after a crash (before its item left the queue) goes once: the core knows its
+/// blob's id.
 @MainActor @Observable
 final class MediaOutbox {
   private struct Item: Codable {
@@ -85,12 +88,14 @@ final class MediaOutbox {
     let created: Date
     var tries = 0
     var next = Date.distantPast
+    /// The hub has the blob: only its Yo is left (nil in items saved before this was kept).
+    var uploaded: Bool?
   }
 
   /// How many wait.
   private(set) var waiting = 0
   /// Where what the core received while sending goes (the inbox): Yos that came meanwhile are not lost.
-  /// Awaited before the next core call, which lets the core forget them; with the core's contacts, read with them.
+  /// Awaited before the next core call; with the core's contacts, read with them, and the client they came from.
   @ObservationIgnored var received: (@MainActor ([YoEvent], [YoContact], YoClient) async -> Void)?
   /// Counts sign-outs: what began before one ends without a trace.
   @ObservationIgnored private var generation = 0
@@ -98,8 +103,6 @@ final class MediaOutbox {
   @ObservationIgnored private var running = false
   @ObservationIgnored private var wake: Task<Void, Never>?
   @ObservationIgnored private weak var accounts: AccountStore?
-  /// One left this long is given up.
-  static let givenUpAfter: TimeInterval = 3 * 24 * 3600
 
   private static var directory: URL { MediaStorage.directory("Outbox") }
   private static func blob(_ id: UUID) -> URL { directory.appending(path: "\(id.uuidString).blob") }
@@ -112,15 +115,19 @@ final class MediaOutbox {
     waiting = items.count
   }
 
-  private func save() {
+  /// The queue to disk; false when it did not write (it stays in memory, written with the next change).
+  @discardableResult
+  private func save() -> Bool {
     waiting = items.count
-    guard let data = try? JSONEncoder().encode(items) else { return }
-    try? data.write(to: Self.index, options: [.atomic, .completeFileProtectionUntilFirstUserAuthentication])
+    guard let data = try? JSONEncoder().encode(items) else { return false }
+    return (try? data.write(to: Self.index, options: [.atomic, .completeFileProtectionUntilFirstUserAuthentication]))
+      != nil
   }
 
-  /// Seals a photo or video for a friend and puts it in line; it goes as soon as the hub takes it.
-  func send(_ file: MediaFile, to friend: String, accounts: AccountStore) async -> Bool {
-    guard let client = accounts.client else { return false }
+  /// Seals a photo or video for a friend and puts it in line, from `client`, the account the gesture began in (never
+  /// from one signed in since); it goes as soon as the hub takes it. True once it is on disk, its blob and the queue.
+  func send(_ file: MediaFile, to friend: String, from client: YoClient?, accounts: AccountStore) async -> Bool {
+    guard let client, client === accounts.client else { return false }
     let width = UInt16(clamping: file.width)
     let height = UInt16(clamping: file.height)
     guard
@@ -131,10 +138,20 @@ final class MediaOutbox {
     let item = Item(
       id: UUID(), owner: owner, to: friend, kind: file.kind, media: StoredMedia(sealed.media),
       durationMs: file.durationMs, created: .now)
-    guard await MediaStorage.write(sealed.ciphertext, to: Self.blob(item.id), .completeFileProtectionUntilFirstUserAuthentication)
+    let blob = Self.blob(item.id)
+    guard await MediaStorage.write(sealed.ciphertext, to: blob, .completeFileProtectionUntilFirstUserAuthentication)
     else { return false }
+    guard client === accounts.client else {  // signed out meanwhile
+      try? FileManager.default.removeItem(at: blob)
+      return false
+    }
     items.append(item)
-    save()
+    guard save() else {
+      items.removeAll { $0.id == item.id }
+      waiting = items.count
+      try? FileManager.default.removeItem(at: blob)
+      return false
+    }
     flush(accounts: accounts)
     return true
   }
@@ -147,10 +164,10 @@ final class MediaOutbox {
     wake?.cancel()
   }
 
-  /// Sends what is due: up to `together` uploads side by side (the hub takes a few of one user at once), each Yo in
-  /// the order taken, as soon as its own upload and the Yos before it are done. A burst of photos then goes about as
-  /// fast as it was taken, not one upload after the other. What the hub refuses for now waits its turn again (30
-  /// seconds, doubling to half an hour). Also when the app comes to the foreground.
+  /// Sends what is due: up to `together` uploads side by side (the hub takes a few of one user at once), then the Yos
+  /// each friend's queue lets go (`releasable`). A burst of photos then goes about as fast as it was taken, not one
+  /// upload after the other. What the hub refuses for now waits its turn again (30 seconds, doubling to half an hour).
+  /// Also when the app comes to the foreground. A build the hub calls too old (426) sends nothing more.
   func flush(accounts: AccountStore) {
     self.accounts = accounts
     guard !running else { return }
@@ -163,28 +180,23 @@ final class MediaOutbox {
         // next opening.
         if generation != self.generation && !items.isEmpty { flush(accounts: accounts) }
       }
-      while let client = accounts.client {
-        let due = Array(items.filter { $0.next <= .now }.prefix(Self.together))
-        guard !due.isEmpty else { break }
-        let uploads = due.map { item in Task { await self.upload(item, client: client, generation: generation) } }
-        for (item, upload) in zip(due, uploads) {
-          var outcome = await upload.value
-          if outcome == .uploaded { outcome = await send(item, client: client, generation: generation) }
-          guard generation == self.generation else { return }  // signed out meanwhile
-          guard let at = items.firstIndex(where: { $0.id == item.id }) else { continue }
-          switch outcome {
-          case .sent, .dropped:
-            items.remove(at: at)
-            let blob = Self.blob(item.id)
-            Task.detached(priority: .utility) { try? FileManager.default.removeItem(at: blob) }
-          case .later, .uploaded:
-            items[at].tries += 1
-            items[at].next = .now + min(1800, 30 * pow(2, Double(min(items[at].tries - 1, 6))))
-          case .replaced:
-            accounts.replaced(client)  // clears this outbox too
+      while let client = accounts.client, !HubTransport.unsupported {
+        let uploads = Array(items.filter { $0.uploaded != true && $0.next <= .now }.prefix(Self.together))
+        guard !uploads.isEmpty || !releasable().isEmpty else { break }
+        let tasks = uploads.map { item in Task { await self.upload(item, client: client, generation: generation) } }
+        for (item, task) in zip(uploads, tasks) {
+          let outcome = await task.value
+          guard generation == self.generation, settle(item, outcome, client: client, accounts: accounts) else {
             return
           }
-          save()
+        }
+        var held: Set<String> = []  // a friend whose Yo the hub did not take: their next ones wait behind it
+        for item in releasable() where !held.contains(item.to) {
+          let outcome = await send(item, client: client, generation: generation)
+          guard generation == self.generation, settle(item, outcome, client: client, accounts: accounts) else {
+            return
+          }
+          if outcome != .sent && outcome != .dropped { held.insert(item.to) }
         }
       }
       scheduleWake()
@@ -194,9 +206,50 @@ final class MediaOutbox {
   /// Uploads under way at once, at most (the hub takes 4 of one user).
   private static let together = 3
 
+  /// The Yos that may go now: per friend in the order taken, those whose uploads are done, up to the first that is
+  /// not (or that waits its turn).
+  private func releasable() -> [Item] {
+    var blocked: Set<String> = []
+    return items.filter { item in
+      guard !blocked.contains(item.to) else { return false }
+      guard item.uploaded == true, item.next <= .now else {
+        blocked.insert(item.to)
+        return false
+      }
+      return true
+    }
+  }
+
+  /// What an outcome leaves of an item: gone (sent, or refused for good), uploaded, or waiting its turn again. False:
+  /// stop (the hub says this phone was replaced, or this build is too old).
+  private func settle(_ item: Item, _ outcome: Outcome, client: YoClient, accounts: AccountStore) -> Bool {
+    guard let at = items.firstIndex(where: { $0.id == item.id }) else { return true }
+    switch outcome {
+    case .sent, .dropped:
+      items.remove(at: at)
+      let blob = Self.blob(item.id)
+      Task.detached(priority: .utility) { try? FileManager.default.removeItem(at: blob) }
+    case .uploaded:
+      items[at].uploaded = true
+      items[at].tries = 0
+      items[at].next = .distantPast
+    case .later:
+      items[at].tries += 1
+      items[at].next = .now + min(1800, 30 * pow(2, Double(min(items[at].tries - 1, 6))))
+    case .replaced:
+      accounts.replaced(client)  // clears this outbox too
+      return false
+    case .stopped:
+      return false
+    }
+    save()
+    return true
+  }
+
+  /// Wakes for the next item whose turn comes (one held behind another goes with that one).
   private func scheduleWake() {
     wake?.cancel()
-    guard let next = items.map(\.next).min() else { return }
+    guard let next = items.map(\.next).filter({ $0 > .now }).min() else { return }
     wake = Task { [weak self] in
       try? await Task.sleep(for: .seconds(max(1, next.timeIntervalSinceNow)))
       guard !Task.isCancelled, let self, let accounts = self.accounts else { return }
@@ -204,12 +257,11 @@ final class MediaOutbox {
     }
   }
 
-  private enum Outcome { case uploaded, sent, later, dropped, replaced }
+  private enum Outcome { case uploaded, sent, later, dropped, replaced, stopped }
 
   /// The chat first (a new friend's opens now), then the upload outside the client's lock: Yos go on meanwhile, and
   /// so do the other uploads.
   private func upload(_ item: Item, client: YoClient, generation: Int) async -> Outcome {
-    if Date.now.timeIntervalSince(item.created) > Self.givenUpAfter { return .dropped }
     let media = item.media.media
     let blob = Self.blob(item.id)
     return await outcome {
@@ -230,6 +282,7 @@ final class MediaOutbox {
     guard generation == self.generation else { return .dropped }
     let media = item.media.media
     return await outcome {
+      guard try await Hub.run({ client.userId() }) == item.owner else { return .dropped }
       let (events, after) = try await Hub.run {
         switch item.kind {
         case .photo: (try client.sendPhoto(to: item.to, media: media), client.contacts())
@@ -246,6 +299,8 @@ final class MediaOutbox {
       return try await work()
     } catch YoError.Replaced {
       return .replaced
+    } catch YoError.Refused(let status) where status == 426 {
+      return .stopped  // this build too old: kept, for the build after it
     } catch let error as YoError where mediaRetryLater(error: error) {
       return .later
     } catch {
@@ -255,10 +310,10 @@ final class MediaOutbox {
 }
 
 /// Photos and videos that came, kept until seen once. Each is noted (with its key) before the core may forget its
-/// Yo, then fetched at once, all side by side (each fetch counts at the hub, the last deletes the blob), opened and
-/// kept here with complete file protection; seen, it is deleted. A fetch the network breaks is tried again soon, and
-/// at once when the next Yo comes; one the hub no longer has is dropped. All of it on the main actor but the
-/// reading, writing and fetching.
+/// Yo, then fetched, a few at a time (each fetch counts at the hub, the last deletes the blob), opened and kept here
+/// with complete file protection; seen, it is deleted. A fetch the network breaks is tried again soon, and at once
+/// when the next Yo comes; one the hub no longer has is dropped. A download whose file does not write stays in memory
+/// and is written again, never fetched again. All of it on the main actor but the reading, writing and fetching.
 @MainActor
 final class ReceivedMedia {
   static let shared = ReceivedMedia()
@@ -281,8 +336,18 @@ final class ReceivedMedia {
   private var fetching: Set<String> = []
   /// Fetches the network broke, each waiting for its next try: cancelled, it tries now.
   private var pauses: [String: Task<Void, Never>] = [:]
+  /// Downloads not written yet (the disk full): the hub may have deleted the blob with that fetch.
+  private var unwritten: [String: Data] = [:]
+  /// What fetches go by, as `fetchWaiting` was last given it: more start as others end.
+  private var client: YoClient?
+  private var arrived: (@MainActor (Arrival) -> Void)?
   /// Counts sign-outs: a fetch begun before one keeps nothing.
   private var generation = 0
+
+  /// Fetches at once, at most: a backlog never holds every thread and all the memory.
+  private static let together = 3
+  /// The longest side of a bar's thumbnail, in pixels.
+  nonisolated private static let thumbnailPixels = 300
 
   private var directory: URL { MediaStorage.directory("Received") }
   private var pendingIndex: URL { directory.appending(path: "pending.json") }
@@ -305,31 +370,42 @@ final class ReceivedMedia {
     return directory.appending(path: safe + (kind == .photo ? ".jpg" : ".mp4"))
   }
 
-  private func store() {
-    if let data = try? JSONEncoder().encode(pending) {
-      try? data.write(to: pendingIndex, options: [.atomic, .completeFileProtectionUntilFirstUserAuthentication])
+  /// Both indexes to disk; false when either did not write.
+  private func store() -> Bool {
+    guard let waiting = try? JSONEncoder().encode(pending), let kept = try? JSONEncoder().encode(saved) else {
+      return false
     }
-    if let data = try? JSONEncoder().encode(saved) {
-      try? data.write(to: savedIndex, options: [.atomic, .completeFileProtection])
-    }
+    let first = (try? waiting.write(to: pendingIndex, options: [.atomic, .completeFileProtectionUntilFirstUserAuthentication])) != nil
+    let second = (try? kept.write(to: savedIndex, options: [.atomic, .completeFileProtection])) != nil
+    return first && second
   }
 
-  /// A photo or video came: noted before the core may forget its Yo.
-  func expect(_ media: YoMedia, id: String, from: String, kind: MediaFile.Kind) {
-    guard !pending.contains(where: { $0.id == id }), !saved.contains(where: { $0.id == id }) else { return }
+  /// A photo or video came: noted before the core may forget its Yo. False when the note did not write: the core then
+  /// keeps the Yo (`Inbox.take`).
+  func expect(_ media: YoMedia, id: String, from: String, kind: MediaFile.Kind) -> Bool {
+    guard !pending.contains(where: { $0.id == id }), !saved.contains(where: { $0.id == id }) else { return true }
     pending.append(Pending(id: id, from: from, kind: kind, media: StoredMedia(media)))
-    store()
+    guard store() else {
+      pending.removeAll { $0.id == id }
+      return false
+    }
+    return true
   }
 
-  /// Fetches what is noted and not under way, each at once and beside the others; one waiting to try again (the
-  /// network broke it) tries now: the next Yo came, so the network is back. Each one kept goes to `arrived`.
+  /// Fetches what is noted and not under way, a few at a time, oldest first; one waiting to try again (the network
+  /// broke it) tries now: the next Yo came, so the network is back. Each one kept goes to `arrived`.
   func fetchWaiting(client: YoClient, arrived: @escaping @MainActor (Arrival) -> Void) {
-    for one in pending {
-      if fetching.insert(one.id).inserted {
-        Task { await fetch(one, client: client, arrived: arrived) }
-      } else {
-        pauses[one.id]?.cancel()
-      }
+    self.client = client
+    self.arrived = arrived
+    for one in pending where fetching.contains(one.id) { pauses[one.id]?.cancel() }
+    startMore()
+  }
+
+  private func startMore() {
+    guard let client, let arrived, !HubTransport.unsupported else { return }
+    for one in pending where !fetching.contains(one.id) && fetching.count < Self.together {
+      fetching.insert(one.id)
+      Task { await fetch(one, client: client, arrived: arrived) }
     }
   }
 
@@ -337,7 +413,10 @@ final class ReceivedMedia {
   private static let retries = [0, 1, 3, 10, 30]
 
   private func fetch(_ one: Pending, client: YoClient, arrived: @MainActor (Arrival) -> Void) async {
-    defer { fetching.remove(one.id) }
+    defer {
+      fetching.remove(one.id)
+      startMore()
+    }
     let generation = generation
     let media = one.media.media
     for wait in Self.retries {
@@ -348,43 +427,64 @@ final class ReceivedMedia {
         pauses[one.id] = nil
         guard generation == self.generation else { return }
       }
-      let data: Data?
-      do {
-        data = try await Hub.run { try client.fetchMedia(media: media) }
-      } catch let error as YoError where mediaRetryLater(error: error) {
-        continue  // noted still: tried again now, or with the next Yo or opening
-      } catch {
-        data = nil  // does not open: nothing to keep
-      }
-      guard generation == self.generation else { return }  // signed out meanwhile: nothing kept
-      if let data, await MediaStorage.write(data, to: file(one.id, one.kind), .completeFileProtection) {
-        guard generation == self.generation else {
-          try? FileManager.default.removeItem(at: file(one.id, one.kind))
-          return
+      var data = unwritten[one.id]
+      if data == nil {
+        do {
+          data = try await Hub.run { try client.fetchMedia(media: media) }
+        } catch YoError.Refused(let status) where status == 426 {
+          return  // this build too old: noted still, for the build after it
+        } catch let error as YoError where mediaRetryLater(error: error) {
+          continue  // noted still: tried again now, or with the next Yo or opening
+        } catch {
+          data = nil  // does not open: nothing to keep
         }
-        saved.append(Saved(id: one.id, from: one.from, kind: one.kind))
+        guard generation == self.generation else { return }  // signed out meanwhile: nothing kept
       }
+      guard let data else {
+        // The hub no longer has it, or it does not open: its Yo came without it.
+        pending.removeAll { $0.id == one.id }
+        _ = store()
+        return
+      }
+      // The file, then the indexes; the note goes only once both are written.
+      let url = file(one.id, one.kind)
+      guard await MediaStorage.write(data, to: url, .completeFileProtection) else {
+        unwritten[one.id] = data
+        continue
+      }
+      guard generation == self.generation else {
+        try? FileManager.default.removeItem(at: url)
+        return
+      }
+      let kept = Saved(id: one.id, from: one.from, kind: one.kind)
+      saved.append(kept)
       pending.removeAll { $0.id == one.id }
-      store()
-      if let kept = saved.last, kept.id == one.id, let arrival = await arrival(kept) { arrived(arrival) }
+      guard store() else {
+        saved.removeAll { $0.id == one.id }
+        pending.append(one)
+        unwritten[one.id] = data
+        continue
+      }
+      unwritten[one.id] = nil
+      if let arrival = await arrival(kept) { arrived(arrival) }
       return
     }
   }
 
-  /// What waits to be seen, after a restart.
+  /// What waits to be seen, after a restart, oldest sent first.
   func waiting() async -> [Arrival] {
     var arrivals: [Arrival] = []
     for one in saved {
       if let arrival = await arrival(one) { arrivals.append(arrival) }
     }
-    return arrivals
+    return arrivals.sorted(by: Arrival.older)
   }
 
   /// Shown: it will not show again, even if the app ends before the viewer closes (its file goes then, or at the
   /// next start).
   func consumed(_ id: String) {
     saved.removeAll { $0.id == id }
-    store()
+    _ = store()
   }
 
   /// Seen: gone from this iPhone.
@@ -394,7 +494,7 @@ final class ReceivedMedia {
       Task.detached(priority: .utility) { try? FileManager.default.removeItem(at: url) }
     }
     saved.removeAll { $0.id == id }
-    store()
+    _ = store()
   }
 
   /// Signed out: nothing kept, nothing noted.
@@ -402,22 +502,40 @@ final class ReceivedMedia {
     generation += 1
     pending = []
     saved = []
+    unwritten = [:]
+    client = nil
+    arrived = nil
     pauses.values.forEach { $0.cancel() }
     pauses = [:]
   }
 
+  /// For the bar: a small picture (the viewer reads the photo itself from its file when it shows it).
   private func arrival(_ one: Saved) async -> Arrival? {
     let url = file(one.id, one.kind)
     switch one.kind {
     case .photo:
-      let image = await Task.detached(priority: .userInitiated) { UIImage(contentsOfFile: url.path) }.value
-      return image.map { Arrival(id: one.id, from: one.from, photo: $0) }
+      let image = await Task.detached(priority: .userInitiated) { Self.thumbnail(url) }.value
+      return image.map { Arrival(id: one.id, from: one.from, photo: $0, file: url) }
     case .video:
       guard FileManager.default.fileExists(atPath: url.path) else { return nil }
       let generator = AVAssetImageGenerator(asset: AVURLAsset(url: url))
       generator.appliesPreferredTrackTransform = true
+      let side = CGFloat(Self.thumbnailPixels)
+      generator.maximumSize = CGSize(width: side, height: side)
       let frame = (try? await generator.image(at: .zero)).map { UIImage(cgImage: $0.image) }
       return Arrival(id: one.id, from: one.from, photo: frame ?? UIImage(), video: url)
     }
+  }
+
+  /// A photo's file made small, read without the whole image in memory.
+  nonisolated private static func thumbnail(_ url: URL) -> UIImage? {
+    guard let source = CGImageSourceCreateWithURL(url as CFURL, nil) else { return nil }
+    let options: [CFString: Any] = [
+      kCGImageSourceCreateThumbnailFromImageAlways: true,
+      kCGImageSourceCreateThumbnailWithTransform: true,
+      kCGImageSourceShouldCacheImmediately: true,
+      kCGImageSourceThumbnailMaxPixelSize: thumbnailPixels,
+    ]
+    return CGImageSourceCreateThumbnailAtIndex(source, 0, options as CFDictionary).map { UIImage(cgImage: $0) }
   }
 }

@@ -700,6 +700,9 @@ private struct SecurityRow: View {
 /// writes now.
 private struct StorageRow: View {
   let client: YoClient?
+  @Environment(Inbox.self) private var inbox
+  @Environment(AccountStore.self) private var accounts
+  @Environment(Friends.self) private var friends
   @State private var savedAt: Date?
   @State private var saving = false
 
@@ -727,9 +730,9 @@ private struct StorageRow: View {
   }
 
   private func save() async {
-    guard let client else { return }
+    guard client != nil else { return }
     saving = true
-    _ = try? await Hub.run { try client.maintenance() }
+    await inbox.maintain(accounts: accounts, friends: friends)  // what it received too, as any
     await load()
     saving = false
   }
