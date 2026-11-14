@@ -589,9 +589,7 @@ private struct BlockedList: View {
 
   var body: some View {
     Form {
-      if friends.blocked.isEmpty {
-        ContentUnavailableView("No Blocked Friends", systemImage: "hand.raised")
-      } else {
+      if !friends.blocked.isEmpty {
         Section {
           ForEach(friends.blocked) { friend in
             Text(friend.name)
@@ -604,6 +602,10 @@ private struct BlockedList: View {
           Text("Blocked friends can’t send you Yos. Swipe to unblock.")
         }
       }
+    }
+    // Empty: in the middle of the page, as Settings shows it, not in a cell.
+    .overlay {
+      if friends.blocked.isEmpty { ContentUnavailableView("No Blocked Friends", systemImage: "hand.raised") }
     }
     .navigationTitle("Blocked")
     .navigationBarTitleDisplayMode(.inline)
