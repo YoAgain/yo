@@ -1557,9 +1557,15 @@ impl Client {
         for key in lost {
             let Some(old) = self.state.chats.get(&key).cloned() else { continue };
             let peer = old.peer.clone();
-            if self.state.contacts.get(&peer).is_some_and(|c| c.blocked || c.gone) {
-                self.drop_chat(&key);
-                continue;
+            // A blocked peer's lost chat waits, with what is held for it, and is restarted after the unblock (4.8);
+            // only a gone peer's is dropped.
+            match self.state.contacts.get(&peer) {
+                Some(contact) if contact.gone => {
+                    self.drop_chat(&key);
+                    continue;
+                }
+                Some(contact) if contact.blocked => continue,
+                _ => {}
             }
             let restarted = self.start_chat(&Handle::user(&user_bytes(&peer)?)).map(|(_, group)| group);
             let group = match restarted {
