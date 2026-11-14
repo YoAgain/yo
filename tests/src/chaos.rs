@@ -1394,6 +1394,13 @@ fn release(w: &World, all: &mut [Vec<Acct>]) {
     let mut rng = Rng(w.args.seed ^ 0x365);
     let (mut released, mut kept) = (0, 0);
     for a in all.iter_mut().flatten() {
+        if a.client.is_none() {
+            continue;
+        }
+        if a.proc_.crashed.load(Relaxed) {
+            restart(w, a, &mut rng);
+        }
+        a.proc_.crash_in.store(0, Relaxed);
         let Some(client) = a.client.as_mut() else { continue };
         let result = definite(|| client.sync(0));
         match (a.backed_up, result) {
