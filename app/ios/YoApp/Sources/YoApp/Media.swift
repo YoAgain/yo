@@ -157,7 +157,12 @@ final class MediaOutbox {
     running = true
     let generation = generation
     Task {
-      defer { running = false }
+      defer {
+        running = false
+        // Signed out and in meanwhile: this round was the old account's; the new one's photos go now, not at the
+        // next opening.
+        if generation != self.generation && !items.isEmpty { flush(accounts: accounts) }
+      }
       while let client = accounts.client {
         let due = Array(items.filter { $0.next <= .now }.prefix(Self.together))
         guard !due.isEmpty else { break }
@@ -176,7 +181,7 @@ final class MediaOutbox {
             items[at].tries += 1
             items[at].next = .now + min(1800, 30 * pow(2, Double(min(items[at].tries - 1, 6))))
           case .replaced:
-            accounts.reset()  // clears this outbox too
+            accounts.replaced(client)  // clears this outbox too
             return
           }
           save()

@@ -6,10 +6,8 @@ import AuthenticationServices
 import CryptoKit
 import Foundation
 import Observation
-import Photos
 import Security
 import UIKit
-import UniformTypeIdentifiers
 import UserNotifications
 import YoCore
 
@@ -220,8 +218,8 @@ final class AccountStore {
   private var securing: (k: SymmetricKey, code: [String])?
   /// The guide's passkey once made, before it is signed in with.
   private var newPasskey: Data?
-  /// Coming back from the iCloud Keychain, under way.
-  private var restoring = false
+  /// A registration under way (`register(_:secret:)`).
+  private var registering = false
 
   init() {
     account = UserDefaults.standard.data(forKey: Self.key).flatMap { try? JSONDecoder().decode(Account.self, from: $0) }
@@ -247,7 +245,7 @@ final class AccountStore {
         client?.shareState(lock: file)
         return client
       }
-      guard let client = opened, self.client == nil else { return }
+      guard let client = opened, self.client == nil, account != nil else { return }  // signed out meanwhile
       self.client = client
       // The user id as the core has it (an earlier build read it wrongly): the passkey's handle and the backup's id.
       if let id = Hub.bytes(client.userId()), account?.userID != id { account?.userID = id }
@@ -260,8 +258,13 @@ final class AccountStore {
     } catch {}
   }
 
-  /// Registers `username` at the hub (spec 6.4), or, with `secret`, takes the name's account back (a new phone).
+  /// Registers `username` at the hub (spec 6.4), or, with `secret`, takes the name's account back (a new phone). One at
+  /// a time, whichever way in (a second registration would replace the first).
   private func register(_ username: String, secret: Data?) async throws -> YoClient {
+    // One at a time, and never over an account signed in meanwhile (another way in finished first).
+    guard !registering, account == nil else { throw AccountError.busy }
+    registering = true
+    defer { registering = false }
     let transport = Hub.transport
     do {
       return try await Hub.run {
@@ -306,18 +309,27 @@ final class AccountStore {
 
   /// The guide's passkey, in two steps the person sees: made (saved in the password manager)…
   func createPasskey() async throws {
-    guard let account else { throw AccountError.noBackup }
+    guard let account, let client else { throw AccountError.noBackup }
     if !account.secured, securing == nil { securing = (SymmetricKey(size: .bits256), RecoveryCode.make()) }
-    newPasskey = try await passkeys.make(name: Self.passkeyName(account), userID: account.userID).credentialID
+    let made = try await passkeys.make(name: Self.passkeyName(account), userID: account.userID).credentialID
+    try still(client)
+    newPasskey = made
+  }
+
+  /// After waiting for the person or the hub: still the account the step began with (not signed out, or out and in
+  /// again meanwhile), else the step ends here.
+  private func still(_ client: YoClient) throws {
+    guard client === self.client else { throw CancellationError() }
   }
 
   /// …then signed in with once, which checks it works and gives its PRF output: the backup then opens with it too
   /// (a new backup if there was none, else added to the one the words open).
   func checkPasskey() async throws {
-    guard let credential = newPasskey else { throw AccountError.noBackup }
+    guard let credential = newPasskey, let client else { throw AccountError.noBackup }
     guard let prf = try await passkeys.ask(salt: BackupRecord.prfSalt, only: credential).prf else {
       throw AccountError.noPRF
     }
+    try still(client)
     if account?.secured == true {
       try await rewrap(.set(prf))
     } else {
@@ -337,10 +349,10 @@ final class AccountStore {
 
   /// The first backup: K under the words always (passkey and words are equal doors), under the passkey's PRF too.
   private func saveBackup(prf: Data?) async throws {
-    guard var account, let securing else { throw AccountError.noBackup }
+    guard var account, let securing, let client else { throw AccountError.noBackup }
     account.byPasskey = prf != nil
     account.byCode = true
-    try await put(BackupRecord.make(account, code: securing.code, k: securing.k, prf: prf))
+    try await put(BackupRecord.make(account, code: securing.code, k: securing.k, prf: prf), by: client)
     RecoveryWords.save(securing.code)
     self.account = account
     self.securing = nil
@@ -348,8 +360,16 @@ final class AccountStore {
     SecureReminder.update(secured: true)
   }
 
-  private func put(_ backup: YoBackup) async throws {
-    try await hub { try $0.putBackup(backup: backup) }
+  /// The backup to the hub through `client`, the one the change began with: never another account's after a sign-out
+  /// and sign-in meanwhile.
+  private func put(_ backup: YoBackup, by client: YoClient) async throws {
+    try still(client)
+    do {
+      try await Hub.run { try client.putBackup(backup: backup) }
+    } catch let error as YoError {
+      throw AccountError.hub(error)
+    }
+    try still(client)
   }
 
   /// A core call for this account, off the main actor; the core's error as an `AccountError`.
@@ -367,7 +387,7 @@ final class AccountStore {
   /// The backup again with the same K (opened by the words on this phone): its passkey door kept, set from a PRF
   /// output or removed, and optionally under new words (the old locator then finds nothing).
   private func rewrap(_ passkey: Door, code new: [String]? = nil) async throws {
-    guard var account, let code = RecoveryWords.load() else { throw AccountError.noBackup }
+    guard var account, let code = RecoveryWords.load(), let client else { throw AccountError.noBackup }
     let record = try await fetch(account.userID)
     let k = try BackupRecord.unwrap(record.byCode, with: BackupRecord.key(code: code))
     let words = new ?? code
@@ -379,7 +399,7 @@ final class AccountStore {
       }
     account.byPasskey = !byPasskey.isEmpty
     account.byCode = true
-    try await put(BackupRecord.make(account, code: words, k: k, prf: nil, byPasskey: byPasskey))
+    try await put(BackupRecord.make(account, code: words, k: k, prf: nil, byPasskey: byPasskey), by: client)
     RecoveryWords.save(words)
     self.account = account
     if case .set = passkey { passkeyTurnedOff = false }
@@ -388,25 +408,12 @@ final class AccountStore {
 
   /// A new passkey in place of the one there (made, then used once for its PRF output).
   func replacePasskey() async throws {
-    guard let account else { throw AccountError.noBackup }
+    guard let account, let client else { throw AccountError.noBackup }
     let made = try await passkeys.make(name: Self.passkeyName(account), userID: account.userID)
     guard let prf = try await passkeys.ask(salt: BackupRecord.prfSalt, only: made.credentialID).prf else {
       throw AccountError.noPRF
     }
-    try await rewrap(.set(prf))
-  }
-
-  /// A passkey to a backup kept with the words: a Yo passkey of this account if there is one, else a new one.
-  func addPasskey() async throws {
-    guard let account else { throw AccountError.noBackup }
-    var prf: Data?
-    if let answer = try? await passkeys.ask(salt: BackupRecord.prfSalt, quietly: true), answer.userID == account.userID {
-      prf = answer.prf
-    } else {
-      let made = try await passkeys.make(name: Self.passkeyName(account), userID: account.userID)
-      prf = try await passkeys.ask(salt: BackupRecord.prfSalt, only: made.credentialID).prf
-    }
-    guard let prf else { throw AccountError.noPRF }
+    try still(client)
     try await rewrap(.set(prf))
   }
 
@@ -469,23 +476,27 @@ final class AccountStore {
 
   /// Back without a word, from the iCloud Keychain (`SyncedAccount`): the app deleted and installed again, or a new
   /// iPhone. Registers this phone with the account's key (spec 6.4), so the phone it was on before is signed out, as
-  /// with a backup. Not an account this phone left (signed out, or taken to another phone). True when back in.
+  /// with a backup. Only when exactly one account is there not signed out, and not one this phone left (taken to
+  /// another phone); several are listed on Sign In instead. True when back in.
   func restoreFromKeychain() async -> Bool {
-    guard account == nil, !restoring, let item = SyncedAccount.load(), item.userID != SyncedAccount.left else {
-      return false
-    }
-    restoring = true  // one registration at a time: a second would replace the first
-    defer { restoring = false }
+    let candidates = SyncedAccount.all().filter { $0.signedOut != true && $0.userID != SyncedAccount.left }
+    guard candidates.count == 1 else { return false }
+    return (try? await restore(synced: candidates[0])) == true
+  }
+
+  /// An account tapped on Sign In, from the iCloud Keychain: signed in with its key, also one signed out before.
+  @discardableResult
+  func restore(synced item: SyncedAccount.Item) async throws -> Bool {
+    guard account == nil else { return false }
     let client: YoClient
     do {
       client = try await register(item.username, secret: item.accountKey)
     } catch AccountError.taken {
-      SyncedAccount.delete()  // the name has another key now: this item brings nothing back any more
-      return false
-    } catch {
-      return false  // offline, or the hub busy: the welcome as usual, and another try at the next start
+      SyncedAccount.delete(item.userID)  // the name has another key now: this item brings nothing back any more
+      throw AccountError.noBackup
     }
     guard account == nil, let id = Hub.bytes(client.userId()) else { return false }
+    SyncedAccount.left = nil
     self.client = client
     // The same user, or (its name released after a year away, spec 6.4) a new one with the same key and no backup.
     let same = id == item.userID
@@ -493,6 +504,7 @@ final class AccountStore {
     let restored = Account(
       username: client.username() ?? item.username, userID: id, accountKey: item.accountKey,
       byPasskey: same && item.byPasskey, byCode: same && item.byCode == true)
+    if !same { SyncedAccount.delete(item.userID) }  // the old user is gone; the new one gets its own item
     account = restored
     SecureReminder.update(secured: restored.secured)
     return true
@@ -516,15 +528,22 @@ final class AccountStore {
   func deleteAccount() async throws {
     guard let account else { throw AccountError.noBackup }
     try await hub { try $0.deleteAccount() }
-    SyncedAccount.delete()
+    SyncedAccount.delete(account.userID)
     try? await ASCredentialUpdater().reportAllAcceptedPublicKeyCredentials(
       relyingPartyIdentifier: Passkeys.domain, userHandle: account.userID, acceptedCredentialIDs: [])
   }
 
-  /// "Sign Out" (and after deleting the account): out of the iCloud Keychain too, so the next start does not bring
-  /// the account back, here or on the person's other devices; then forgotten here (`reset`).
+  /// "Sign Out" (and after deleting the account): marked signed out in the iCloud Keychain, so no start brings the
+  /// account back by itself, here or on the person's other devices (Sign In lists it); then forgotten here (`reset`).
   func signOut() {
-    SyncedAccount.delete()
+    if let id = account?.userID { SyncedAccount.markSignedOut(id) }
+    reset()
+  }
+
+  /// The hub said `client` is no longer the account's device (the account taken to another iPhone): out. Not when
+  /// it is an older client than the one in use (a call still under way while signing out and in again).
+  func replaced(_ client: YoClient) {
+    guard client === self.client else { return }
     reset()
   }
 
@@ -536,6 +555,9 @@ final class AccountStore {
     account = nil
     client = nil
     securing = nil
+    newPasskey = nil
+    passkeyTurnedOff = false
+    wordsSaved = true
     StateFile.delete()
     // The group's too, under the lock, off the main thread (an extension's step under way ends first): the state as
     // it is now, not one a new sign-in saves meanwhile. Clients still on it are closed by their next step (the core's
@@ -552,7 +574,7 @@ final class AccountStore {
 }
 
 enum AccountError: LocalizedError {
-  case taken, noBackup, wrongCode, noPRF, tooMany, hub(YoError)
+  case taken, noBackup, wrongCode, noPRF, tooMany, busy, hub(YoError)
 
   var errorDescription: String? {
     switch self {
@@ -561,6 +583,7 @@ enum AccountError: LocalizedError {
     case .wrongCode: "That recovery key couldn’t restore your account. Check the words and try again."
     case .noPRF: "This passkey can’t be used to sign in to Yo. Try a different password manager."
     case .tooMany: "Too many tries. Try again later."
+    case .busy: "Signing in already. Wait a moment."
     case .hub(.Network): "Yo can’t reach its server. Check your connection and try again."
     case .hub(.Replaced): "Your account is in use on another iPhone."
     case .hub(let error): "Something went wrong. Try again. (\(error))"  // the core's reason, while in development
@@ -600,36 +623,16 @@ enum RecoveryWords {
   static func delete() {
     SecItemDelete(query as CFDictionary)
   }
-
-  /// To the clipboard, on this phone only (not to other devices) and for 10 minutes: enough to paste them into a note
-  /// or a password manager, not to lie about.
-  static func copy(_ words: [String], name: String) {
-    let text = words.enumerated().map { "\($0.offset + 1). \($0.element)" }.joined(separator: "\n")
-    UIPasteboard.general.setItems(
-      [[UTType.plainText.identifier: "Yo \(name)\n\(text)"]],
-      options: [.localOnly: true, .expirationDate: Date.now.addingTimeInterval(600)])
-  }
-
-  /// A picture into the photo library, asked once (add only). Not on the main actor: Photos runs the change on a
-  /// queue of its own, and a block made on the main actor would trap there.
-  nonisolated static func saveToPhotos(_ image: UIImage) async throws {
-    let status = await PHPhotoLibrary.requestAuthorization(for: .addOnly)
-    guard status == .authorized || status == .limited else { throw PhotosError.notAllowed }
-    try await PHPhotoLibrary.shared().performChanges { PHAssetChangeRequest.creationRequestForAsset(from: image) }
-  }
-
-  enum PhotosError: LocalizedError {
-    case notAllowed
-    var errorDescription: String? { "Yo can’t save to Photos. Copy your recovery key instead." }
-  }
 }
 
-/// The account in the iCloud Keychain (spec 7): what brings it back without a word when the app is deleted and
-/// installed again, or on a new iPhone with the same Apple Account. End-to-end encrypted by Apple; on a phone without
-/// iCloud Keychain it stays on the phone, which still covers the app deleted and installed again. One item per hub,
-/// so Yo Dev's account and Yo's never meet. Signing out and deleting the account delete it (`AccountStore.signOut`).
+/// The accounts in the iCloud Keychain (spec 7): what brings one back without a word when the app is deleted and
+/// installed again, or on a new iPhone with the same Apple Account, and what Sign In lists to tap. End-to-end encrypted
+/// by Apple; on a phone without iCloud Keychain they stay on the phone, which still covers the app deleted and installed
+/// again. One item per account and hub ("hub host/user id"), so Yo Dev's accounts and Yo's never meet. Signing out
+/// keeps the item, marked signed out: it is listed on Sign In, never brought back silently. Deleting the account
+/// deletes it.
 enum SyncedAccount {
-  struct Item: Codable, Equatable {
+  struct Item: Codable, Equatable, Identifiable {
     var username: String
     var userID: Data
     /// The account key's secret: whoever has it is the account (spec 3.2), so this item is as precious as the phone.
@@ -639,39 +642,56 @@ enum SyncedAccount {
     var byPasskey: Bool
     var byCode: Bool?
     var words: [String]?
+    /// Signed out (on any of the person's devices): only signed in again by a tap on Sign In.
+    var signedOut: Bool?
+
+    var id: Data { userID }
   }
 
-  private static var query: [String: Any] {
+  private static var host: String { Hub.home.host() ?? Hub.home.absoluteString }
+
+  private static var base: [String: Any] {
     [
       kSecClass as String: kSecClassGenericPassword,
       kSecAttrService as String: "app.justyo.account",
-      kSecAttrAccount as String: Hub.url.host() ?? Hub.url.absoluteString,
       kSecAttrSynchronizable as String: kCFBooleanTrue as Any,
     ]
   }
 
+  private static func query(_ userID: Data) -> [String: Any] {
+    base.merging([kSecAttrAccount as String: "\(host)/\(userID.map { String(format: "%02x", $0) }.joined())"]) { $1 }
+  }
+
+  /// The account in use here, written as it changes (signed in, so not signed out).
   static func save(_ account: Account, onlyIfMissing: Bool = false) {
-    let previous = load()
+    migrate()
+    let previous = load(account.userID)
     if onlyIfMissing && previous != nil { return }
     // The words are readable only while the phone is unlocked (a launch in the background may come before): those
     // already in the item are kept then.
-    let words = RecoveryWords.load() ?? (previous?.userID == account.userID ? previous?.words : nil)
     let item = Item(
       username: account.username, userID: account.userID, accountKey: account.accountKey,
-      byPasskey: account.byPasskey, byCode: account.byCode, words: words)
-    guard item != previous, let data = try? JSONEncoder().encode(item) else { return }
+      byPasskey: account.byPasskey, byCode: account.byCode, words: RecoveryWords.load() ?? previous?.words,
+      signedOut: false)
+    write(item, previous: previous)
+  }
+
+  @discardableResult
+  private static func write(_ item: Item, previous: Item?) -> Bool {
+    guard item != previous else { return true }
+    guard let data = try? JSONEncoder().encode(item) else { return false }
     let attributes: [String: Any] = [
       kSecValueData as String: data,
       kSecAttrAccessible as String: kSecAttrAccessibleAfterFirstUnlock,
-      kSecAttrLabel as String: Hub.isDevApp ? "Yo Dev" : "Yo",
+      kSecAttrLabel as String: "\(Hub.isDevApp ? "Yo Dev" : "Yo") – \(item.username)",
     ]
-    if SecItemUpdate(query as CFDictionary, attributes as CFDictionary) == errSecItemNotFound {
-      SecItemAdd(query.merging(attributes) { $1 } as CFDictionary, nil)
-    }
+    let updated = SecItemUpdate(query(item.userID) as CFDictionary, attributes as CFDictionary)
+    guard updated == errSecItemNotFound else { return updated == errSecSuccess }
+    return SecItemAdd(query(item.userID).merging(attributes) { $1 } as CFDictionary, nil) == errSecSuccess
   }
 
-  static func load() -> Item? {
-    var find = query
+  static func load(_ userID: Data) -> Item? {
+    var find = query(userID)
     find[kSecReturnData as String] = true
     find[kSecMatchLimit as String] = kSecMatchLimitOne
     var result: CFTypeRef?
@@ -681,13 +701,54 @@ enum SyncedAccount {
     return try? JSONDecoder().decode(Item.self, from: data)
   }
 
-  static func delete() {
-    SecItemDelete(query as CFDictionary)
+  /// Every account of this hub in the keychain, by name.
+  static func all() -> [Item] {
+    migrate()
+    var find = base
+    find[kSecReturnAttributes as String] = true
+    find[kSecReturnData as String] = true
+    find[kSecMatchLimit as String] = kSecMatchLimitAll
+    var result: CFTypeRef?
+    guard SecItemCopyMatching(find as CFDictionary, &result) == errSecSuccess, let found = result as? [[String: Any]]
+    else { return [] }
+    return found
+      .filter { ($0[kSecAttrAccount as String] as? String)?.hasPrefix("\(host)/") == true }
+      .compactMap { ($0[kSecValueData as String] as? Data).flatMap { try? JSONDecoder().decode(Item.self, from: $0) } }
+      .sorted { $0.username.localizedCaseInsensitiveCompare($1.username) == .orderedAscending }
   }
 
-  /// The account this phone left, or that was taken to another phone: never brought back here without asking (on
-  /// this phone only, until the app is deleted). Else two phones on one Apple Account would take it from each other
-  /// at every start, and a sign-out would be undone by the item another phone of the same person saves again.
+  /// Signed out: kept, to be tapped on Sign In, never brought back silently.
+  static func markSignedOut(_ userID: Data) {
+    guard var item = load(userID), item.signedOut != true else { return }
+    let previous = item
+    item.signedOut = true
+    write(item, previous: previous)
+  }
+
+  /// The account deleted, or its name gone to another key: the item brings nothing back any more.
+  static func delete(_ userID: Data) {
+    SecItemDelete(query(userID) as CFDictionary)
+  }
+
+  /// Builds before one item per account kept one per hub (its host as the item's account): moved to the account's own.
+  private static func migrate() {
+    let old = base.merging([kSecAttrAccount as String: host]) { $1 }
+    var find = old
+    find[kSecReturnData as String] = true
+    find[kSecMatchLimit as String] = kSecMatchLimitOne
+    var result: CFTypeRef?
+    guard SecItemCopyMatching(find as CFDictionary, &result) == errSecSuccess else { return }
+    if let data = result as? Data, let item = try? JSONDecoder().decode(Item.self, from: data),
+      load(item.userID) == nil, !write(item, previous: nil)
+    {
+      return  // not moved (the keychain would not): the old item stays, to be moved next time
+    }
+    SecItemDelete(old as CFDictionary)
+  }
+
+  /// The account this phone left, or that was taken to another phone: never brought back here silently (on this
+  /// phone only, until the app is deleted). Else two phones on one Apple Account would take it from each other at
+  /// every start.
   static var left: Data? {
     get { UserDefaults.standard.data(forKey: "account.left") }
     set { UserDefaults.standard.set(newValue, forKey: "account.left") }

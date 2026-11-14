@@ -1,7 +1,7 @@
-// The way in. Start → a name → a passkey saves it (one tap; if it cannot, 12 words, best saved to Photos) → the
-// list. An account in the iCloud Keychain (the app installed again, a new iPhone) comes back before anything, without a
-// word. "Sign In" brings an account from before: a passkey, or the name and its 12 words; a passkey on this phone is
-// offered by the system at once.
+// The way in. Sign Up → a name → the list (the name is secured later, from the profile: Secure Your Account). The one
+// account in the iCloud Keychain not signed out (the app installed again, a new iPhone) comes back before anything,
+// without a word. "Sign In" brings an account from before: one of the iCloud Keychain's, tapped; a passkey; or the 12
+// words, which say whose they are. A passkey on this phone is offered by the system at once.
 //
 // Every step after the welcome is the same page, as Apple's setup screens are: a title and one line at the top, the
 // content in the middle, the button at the bottom over the full width, a text button under it if there is a second
@@ -13,7 +13,6 @@ import YoCore
 struct Onboarding: View {
   @Environment(AccountStore.self) private var accounts
   @Environment(Inbox.self) private var inbox
-  @Environment(Friends.self) private var friends
 
   private enum Step: Equatable {
     case welcome, name, logIn, logInWithWords
@@ -30,6 +29,9 @@ struct Onboarding: View {
   @State private var shakes = 0
   /// What the hub said about names typed, by skeleton: free or taken (the checkmark or the red cross).
   @State private var checked: [String: Bool] = [:]
+  /// The accounts in the iCloud Keychain, for Sign In; the one being signed in with.
+  @State private var synced: [SyncedAccount.Item] = []
+  @State private var signingIn: Data?
 
   var body: some View {
     ZStack {
@@ -52,22 +54,27 @@ struct Onboarding: View {
 
   // MARK: Welcome
 
-  /// The logo with the 2014 tagline, then the usual pair at the bottom: "Start" for a new name, "Sign In" under it.
+  /// The logo with the 2014 tagline, then the usual pair at the bottom: "Sign Up" for a new name, "Sign In" under it.
+  /// The logo is the first of the pages swiped through above the pair (Intro.swift), as in the original.
   private var welcome: some View {
     VStack(spacing: 0) {
-      Spacer()
-      Text("Yo")
-        .font(.yo(150))
-      Text("It's that simple.")
-        .font(.yo(20))
-        .opacity(0.85)
-      Spacer()
-      PrimaryButton("Start") { go(.name) }
-      Button("Sign In") { go(.logIn) }
-        .font(.yo(18))
-        .padding(.top, 18)
+      Intro {
+        VStack(spacing: 0) {
+          Text("Yo")
+            .font(.yo(150))
+          Text("It’s that simple.")
+            .font(.yo(20))
+            .opacity(0.85)
+        }
+      }
+      VStack(spacing: 0) {
+        PrimaryButton("Sign Up") { go(.name) }
+        Button("Sign In") { go(.logIn) }
+          .font(.yo(18))
+          .padding(.top, 18)
+      }
+      .padding(.horizontal, 28)
     }
-    .padding(.horizontal, 28)
     .padding(.bottom, 16)
     .disabled(busy)
     .task {
@@ -78,7 +85,8 @@ struct Onboarding: View {
       let back = await accounts.restoreFromKeychain()
       busy = false
       if back { return }
-      try? await Task.sleep(for: .seconds(0.4))  // the welcome on screen first
+      // The welcome on screen first; gone meanwhile (Sign Up or Sign In tapped): no quiet passkey look over it.
+      guard (try? await Task.sleep(for: .seconds(0.4))) != nil else { return }
       inbox.playYo()  // the app says what it is: "Yo"
       try? await accounts.restoreWithPasskey(quietly: true)  // a Yo passkey here: the system offers it
     }
@@ -101,10 +109,12 @@ struct Onboarding: View {
         Text("Use at least 3 characters.")
           .font(.system(size: 15, weight: .semibold))
           .opacity(tooShort ? 1 : 0)
+          .accessibilityHidden(!tooShort)
         Button("This Is My Name") { go(.logIn) }
           .font(.yo(17))
           .opacity(mine ? 1 : 0)
           .disabled(!mine)
+          .accessibilityHidden(!mine)
       }
       .animation(.snappy(duration: 0.2), value: mine)
       .animation(.snappy(duration: 0.2), value: tooShort)
@@ -124,10 +134,28 @@ struct Onboarding: View {
 
   // MARK: Log in
 
-  /// Asked for on purpose: the two ways, the passkey first.
+  /// Asked for on purpose: the accounts in the iCloud Keychain to tap, if any; then the two ways, the passkey first.
   private var logInChoice: some View {
     Page(title: "Sign In", message: "Use your passkey or recovery key.", back: { go(.welcome) }) {
-      EmptyView()
+      if !synced.isEmpty {
+        VStack(spacing: 10) {
+          ForEach(synced) { item in
+            Button { Task { await logIn(item) } } label: {
+              HStack(spacing: 12) {
+                Avatar(name: item.username, size: 36)
+                Text(item.username).font(.yo(20)).lineLimit(1)
+                Spacer(minLength: 0)
+                if signingIn == item.userID { ProgressView().tint(.white) }
+              }
+              .frame(maxWidth: .infinity, minHeight: 44)
+            }
+            .buttonStyle(.glass)
+            .disabled(busy)
+            .accessibilityLabel("Sign In as \(item.username)")
+          }
+          Text("Saved in your iCloud Keychain.").font(.footnote).opacity(0.75)
+        }
+      }
     } bottom: {
       PrimaryButton("Use Passkey", busy: busy) { Task { await logInWithPasskey() } }
         .disabled(busy)
@@ -153,7 +181,25 @@ struct Onboarding: View {
 
   private func go(_ next: Step) {
     problem = nil
+    if next == .logIn { synced = SyncedAccount.all() }
     step = next
+  }
+
+  /// An account from the iCloud Keychain, tapped.
+  private func logIn(_ item: SyncedAccount.Item) async {
+    busy = true
+    signingIn = item.userID
+    defer {
+      busy = false
+      signingIn = nil
+    }
+    problem = nil
+    do {
+      try await accounts.restore(synced: item)
+    } catch {
+      synced = SyncedAccount.all()  // one whose name has another key now is gone
+      problem = error.localizedDescription
+    }
   }
 
   private func register() async {
@@ -169,9 +215,7 @@ struct Onboarding: View {
     defer { busy = false }
     problem = nil
     do {
-      try await accounts.register(name)  // in: the list takes over; the name is secured later, from the profile
-      // A new account starts with one friend who always answers: YoGPT (the list learns its user id on its own).
-      friends.add("YoGPT")
+      try await accounts.register(name)  // in: the list takes over, YoGPT on it (YoApp); secured later, from the profile
     } catch AccountError.taken {
       checked[Username.skeleton(name)] = false
       UINotificationFeedbackGenerator().notificationOccurred(.error)
@@ -216,16 +260,21 @@ struct Page<Content: View, Bottom: View>: View {
         Spacer()
       }
       .frame(height: 44)
-      VStack(spacing: 10) {
-        Text(title).font(.yo(30)).multilineTextAlignment(.center)
-        if let message {
-          Text(message).font(.system(size: 17)).multilineTextAlignment(.center).opacity(0.85)
+      // Title, message and content scroll when large text needs more room than there is; the buttons stay.
+      ScrollView {
+        VStack(spacing: 10) {
+          Text(title).font(.yo(30)).multilineTextAlignment(.center)
+          if let message {
+            Text(message).font(.system(size: 17)).multilineTextAlignment(.center).opacity(0.85)
+          }
         }
+        .padding(.top, 24)
+        VStack(spacing: 12) { content }
+          .padding(.top, 32)
+          .padding(.bottom, 16)
       }
-      .padding(.top, 24)
-      VStack(spacing: 12) { content }
-        .padding(.top, 32)
-      Spacer(minLength: 16)
+      .scrollBounceBehavior(.basedOnSize)
+      .scrollIndicators(.hidden)
       VStack(spacing: 18) { bottom }
     }
     .padding(.horizontal, 24)
@@ -303,7 +352,8 @@ private struct NameField: View {
 
   var body: some View {
     TextField("", text: $name, prompt: Text("Name").foregroundStyle(.white.opacity(0.3)))
-      .font(.yo(34))
+      .font(.yo(Self.fontSize(name)))
+      .tint(.white)
       .multilineTextAlignment(.center)
       .textInputAutocapitalization(.words)
       .autocorrectionDisabled()
@@ -333,6 +383,14 @@ private struct NameField: View {
       }
       .onSubmit(onSubmit)
       .onAppear { focused = true }
+  }
+
+  /// Large, and smaller as a long name needs, so all 16 characters stay in sight beside the checkmark.
+  private static func fontSize(_ name: String) -> CGFloat {
+    let width = 260.0  // the field's room for text at the narrowest iPhone's width, less the checkmark's
+    guard let font = UIFont(name: "Montserrat-Bold", size: 34) else { return 34 }
+    let needed = (name as NSString).size(withAttributes: [.font: font]).width
+    return needed > width ? max(18, (34 * width / needed).rounded(.down)) : 34
   }
 }
 
@@ -366,16 +424,22 @@ private struct LogIn: View {
   @State private var problem: String?
   @State private var scanning = false
   @State private var picked: PhotosPickerItem?
+  /// Signing in: one at a time (a second registration would replace the first).
+  @State private var busy = false
+  @FocusState private var focused: Bool
 
   var body: some View {
     Page(title: "Recovery Key", message: "Paste, type, or scan your recovery key.", back: back) {
       TextField("", text: $words, prompt: Text("12 words").foregroundStyle(.white.opacity(0.35)), axis: .vertical)
         .font(.yo(18))
         .lineLimit(3...5)
+        .tint(.white)
         .textInputAutocapitalization(.never)
         .autocorrectionDisabled()
         .padding(14)
         .background(.white.opacity(0.14), in: .rect(cornerRadius: 16))
+        .focused($focused)
+        .onAppear { focused = true }
       HStack(spacing: 12) {
         if QRScanner.isAvailable {
           KeepButton(title: "Scan", icon: "qrcode.viewfinder", done: false) { scanning = true }
@@ -387,8 +451,8 @@ private struct LogIn: View {
         .buttonStyle(.glass)
       }
     } bottom: {
-      PrimaryButton("Sign In", action: logIn)
-        .disabled(words.isEmpty)
+      PrimaryButton("Sign In", busy: busy, action: logIn)
+        .disabled(words.isEmpty || busy)
       Note(problem)
     }
     .sheet(isPresented: $scanning) {
@@ -413,9 +477,13 @@ private struct LogIn: View {
 
   private func logIn() {
     guard let code = RecoveryCode.parse(words) else {
-      return problem = "That doesn't match a recovery key. Check the words and try again."
+      return problem = "That doesn’t match a recovery key. Check the words and try again."
     }
+    guard !busy else { return }
+    busy = true
+    problem = nil
     Task {
+      defer { busy = false }
       do {
         try await accounts.restore(code: code)
       } catch {

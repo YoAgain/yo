@@ -71,7 +71,10 @@ final class Camera: NSObject, @unchecked Sendable {
   func photo() async -> Data? {
     await withCheckedContinuation { continuation in
       queue.async { [self] in
-        guard session.isRunning else { return continuation.resume(returning: nil) }
+        // Running with a camera (none in the Simulator: capturing without one raises).
+        guard session.isRunning, photoOutput.connection(with: .video) != nil else {
+          return continuation.resume(returning: nil)
+        }
         let settings = AVCapturePhotoSettings(format: [AVVideoCodecKey: AVVideoCodecType.jpeg])
         settings.photoQualityPrioritization = .speed  // the shutter at once: a Yo is a snapshot
         photos[settings.uniqueID] = continuation
@@ -83,7 +86,8 @@ final class Camera: NSObject, @unchecked Sendable {
   /// Starts a video; `stopVideo()` ends it and hands over the file. It ends by itself at `longestVideo`.
   func startVideo() {
     queue.async { [self] in
-      guard session.isRunning, !movieOutput.isRecording, !videoActive else { return }
+      guard session.isRunning, movieOutput.connection(with: .video) != nil, !movieOutput.isRecording, !videoActive
+      else { return }
       finishedAlone = nil
       videoActive = true
       let file = FileManager.default.temporaryDirectory.appending(path: "\(UUID().uuidString).mov")
