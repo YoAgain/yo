@@ -43,10 +43,6 @@ struct FriendList: View {
   // The list
   @State private var adding = false
   @State private var newGroup = false
-  /// The second screen, under the list: pulled up past its end (Add Group, Invite, Settings).
-  @State private var more = false
-  /// A finger is on the list: a pull past its end opens the second screen only then (not a bounce or a fling).
-  @State private var dragging = false
   @State private var newName = ""
   /// What the empty field says for a moment instead of "Name": "yogpt…" while the hub is asked who it is, "No Such
   /// User" when nobody has that name (it is not added, as in the original), "That’s You" for one's own (a Yo to
@@ -291,7 +287,7 @@ struct FriendList: View {
         }
         .scrollTargetLayout()
       }
-      .scrollBounceBehavior(.always)  // a short list too can be pulled up past its end, to the second screen
+      .scrollBounceBehavior(.basedOnSize)
       .scrollDismissesKeyboard(.interactively)
       .scrollPosition($position)
       .onScrollTargetVisibilityChange(idType: String.self, threshold: 0.6) { ids in
@@ -306,55 +302,52 @@ struct FriendList: View {
       }
       .onScrollPhaseChange { _, phase in
         if phase != .idle && swiped != nil { withAnimation(.snappy) { swiped = nil } }  // scrolling closes it
-        dragging = phase == .interacting
-      }
-      // Pulled well past the list's end, as a pull to refresh the other way: the second screen comes up.
-      .onScrollGeometryChange(for: Bool.self) { geometry in
-        // How far past the end: the furthest a scroll goes at rest, a short list's being its top.
-        let end = max(
-          -geometry.contentInsets.top,
-          geometry.contentSize.height + geometry.contentInsets.bottom - geometry.containerSize.height)
-        return geometry.contentOffset.y - end > Self.pullForMore
-      } action: { _, pulled in
-        guard pulled, dragging, !more, !adding, !cameraOn else { return }
-        Haptic.tap()
-        more = true
       }
       // Amethyst behind everything; in camera mode the live picture or the picked photo.
       .background { backdrop.ignoresSafeArea() }
       .overlay(alignment: .bottom) {
         if cameraOn { cameraControls }
       }
-      // The camera at the bottom corner, under the thumb (the left one for the left hand).
+      // The camera at the bottom corner, under the thumb (the left one for the left hand): the same button opens and
+      // closes it; in camera mode the switch to the other camera above it.
       .overlay(alignment: leftHanded ? .bottomLeading : .bottomTrailing) {
-        if !cameraOn {
+        VStack(spacing: 14) {
+          if cameraOn {
+            Button {
+              camera.flip()
+              Task { await readZooms() }
+            } label: {
+              Image(systemName: "arrow.triangle.2.circlepath")
+                .font(.body.weight(.medium))
+                .foregroundStyle(.white)
+                .frame(width: 44, height: 44)
+            }
+            .buttonStyle(.plain)
+            .glassEffect(.regular.interactive(), in: .circle)
+            .accessibilityLabel("Switch Camera")
+            .transition(.scale.combined(with: .opacity))
+          }
           Button {
-            cameraOn = true
+            withAnimation(.snappy) { cameraOn.toggle() }
           } label: {
-            Image(systemName: "camera.fill")
+            Image(systemName: cameraOn ? "xmark" : "camera.fill")
               .font(.system(size: 22, weight: .semibold))
               .foregroundStyle(.white)
+              .contentTransition(.symbolEffect(.replace))
               .frame(width: 60, height: 60)
           }
+          .buttonStyle(.plain)
           .glassEffect(.regular.interactive(), in: .circle)
-          .accessibilityLabel("Camera")
-          .padding(.horizontal, 16)
-          .padding(.bottom, 2)
-          .transition(.scale.combined(with: .opacity))
+          .accessibilityLabel(cameraOn ? "Close Camera" : "Camera")
         }
+        .padding(.horizontal, 16)
+        .padding(.bottom, 2)
       }
-      .sheet(isPresented: $more) { moreScreen }
       .navigationBarTitleDisplayMode(.inline)
       .toolbarVisibility(cameraOn ? .visible : .hidden, for: .navigationBar)  // the list from the top, no heading
       .toolbar {
+        // The camera mode (opened and closed at the bottom corner): what to do, at the top.
         if cameraOn { ToolbarItem(placement: .principal) { title } }
-        // The camera mode: the live picture behind the list, a tap on a name sends a photo, holding it a video. It
-        // opens from the button at the bottom corner, and closes here.
-        if cameraOn {
-          ToolbarItem(placement: leftHanded ? .topBarLeading : .topBarTrailing) {
-            Button("Close Camera", systemImage: "xmark") { cameraOn = false }
-          }
-        }
       }
     }
   }
@@ -448,8 +441,8 @@ struct FriendList: View {
     }
   }
 
-  /// Under the last friend: "+" (tapped, the name is typed right there), then "More", which a pull up past the end
-  /// opens too (moreScreen).
+  /// The last bar: "+", as in the original. It opens a menu (Add Friend, typed right there in the bar; Add Group;
+  /// Invite; Settings).
   @ViewBuilder private var addRow: some View {
     let color = Color.row(friends.nextColor).opacity(cameraOn ? 0.45 : 1)  // the colour the new friend will have
     if adding {
@@ -476,85 +469,31 @@ struct FriendList: View {
         }
         .onAppear { typing = true }
     } else {
-      RowButton("+", color: Color.row(friends.nextColor).opacity(cameraOn ? 0.45 : 1)) {
-        withAnimation(.snappy) {
-          swiped = nil
-          adding = true
+      // "+" opens a menu: a friend (typed right here), a group, an invite to share, and the settings.
+      Menu {
+        Button("Add Friend", systemImage: "person.badge.plus") {
+          withAnimation(.snappy) {
+            swiped = nil
+            adding = true
+          }
         }
-      }
-      .accessibilityLabel("Add Friend")
-    }
-    // Under the bars: the second screen, pulled up (or tapped).
-    if !cameraOn {
-      Button { more = true } label: {
-        VStack(spacing: 2) {
-          Image(systemName: "chevron.compact.up").font(.system(size: 30, weight: .bold))
-          Text("More").font(.yo(17, relativeTo: .headline))
+        Button("Add Group", systemImage: "person.3") { newGroup = true }
+        ShareLink(
+          item: accounts.account.map { Invite.link(for: $0.username) } ?? URL(string: "https://justyo.co")!,
+          message: Text("Yo! Add me on Yo:"),
+          preview: SharePreview(
+            "Add \(accounts.account?.username ?? "Me") on Yo",
+            image: Image(uiImage: UIImage(named: "IconStandard") ?? UIImage()))
+        ) {
+          Label("Invite", systemImage: "square.and.arrow.up")
         }
-        .foregroundStyle(.white.opacity(0.85))
-        .frame(maxWidth: .infinity, minHeight: 90)
-        .contentShape(.rect)
-      }
-      .buttonStyle(.plain)
-      .accessibilityHint("Add Group, Invite and Settings")
-    }
-  }
-
-  static let pullForMore = 90.0
-
-  /// The second screen: big bars as the list's, Add Group, Invite and Settings.
-  private var moreScreen: some View {
-    VStack(spacing: 0) {
-      Button {
-        more = false
-        Task {  // once this sheet is down: one sheet at a time
-          try? await Task.sleep(for: .milliseconds(450))
-          newGroup = true
-        }
+        Divider()
+        Button("Settings", systemImage: "gearshape") { settings = true }
       } label: {
-        addPart("+ Group", color: .row(friends.nextColor + 1))
+        addPart("+", color: Color.row(friends.nextColor).opacity(cameraOn ? 0.45 : 1))
       }
-      .accessibilityLabel("Add Group")
-      ShareLink(
-        item: accounts.account.map { Invite.link(for: $0.username) } ?? URL(string: "https://justyo.co")!,
-        message: Text("Yo! Add me on Yo:"),
-        // What the share sheet shows at its top: whose link, and the app's icon (not a bare "justyo.co").
-        preview: SharePreview(
-          "Add \(accounts.account?.username ?? "Me") on Yo",
-          image: Image(uiImage: UIImage(named: "IconStandard") ?? UIImage()))
-      ) {
-        HStack(spacing: 12) {
-          Image(systemName: "square.and.arrow.up").font(.system(size: 24, weight: .bold))
-          Text("Invite")
-        }
-        .font(.yo(Metrics.rowFont))
-        .foregroundStyle(.white)
-        .frame(maxWidth: .infinity, minHeight: Metrics.rowHeight)
-        .background(Color.row(friends.nextColor + 2))
-      }
-      Button {
-        more = false
-        Task {  // once this sheet is down: one sheet at a time
-          try? await Task.sleep(for: .milliseconds(450))
-          settings = true
-        }
-      } label: {
-        HStack(spacing: 12) {
-          Image(systemName: "gearshape.fill").font(.system(size: 24, weight: .bold))
-          Text("Settings")
-        }
-        .font(.yo(Metrics.rowFont))
-        .foregroundStyle(.white)
-        .frame(maxWidth: .infinity, minHeight: Metrics.rowHeight)
-        .background(Color.row(friends.nextColor + 3))
-      }
-      Spacer(minLength: 0)
+      .accessibilityLabel("Add and Settings")
     }
-    .buttonStyle(.plain)
-    .background(Color.amethyst)
-    .presentationDetents([.height(Metrics.rowHeight * 3 + 24)])
-    .presentationDragIndicator(.visible)
-    .presentationCornerRadius(28)
   }
 
   /// A part of the last bar: its words white on its colour, as tall as a bar.
@@ -668,23 +607,10 @@ struct FriendList: View {
       .buttonStyle(.plain)
       .glassEffect(.regular.interactive(), in: .circle)
       .accessibilityLabel("Photo Library")
-      .frame(maxWidth: .infinity, alignment: .leading)
+      .frame(maxWidth: .infinity, alignment: leftHanded ? .trailing : .leading)  // away from the camera button
       if picked == nil {  // a picked photo goes as it is
         CameraZoom(choices: zooms, chosen: $zoom).onChange(of: zoom) { camera.zoom(to: zoom) }
       }
-      Button {
-        camera.flip()
-        Task { await readZooms() }
-      } label: {
-        Image(systemName: "arrow.triangle.2.circlepath")
-          .font(.body.weight(.medium))
-          .foregroundStyle(.white)
-          .frame(width: 44, height: 44)
-      }
-      .buttonStyle(.plain)
-      .glassEffect(.regular.interactive(), in: .circle)
-      .accessibilityLabel("Switch Camera")
-      .frame(maxWidth: .infinity, alignment: .trailing)
     }
     .padding(.horizontal, 20)
     .padding(.bottom, 8)
