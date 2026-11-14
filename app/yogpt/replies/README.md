@@ -1,6 +1,6 @@
 # YoGPT replies
 
-475 pictures YoGPT sends back: one at random in answer to a photo or video (what it received is discarded unseen), and
+350 pictures YoGPT sends back: one at random in answer to a photo or video (what it received is discarded unseen), and
 with a chance of 1 in 5 along with an answer to a plain Yo; never one of the last 50 the same sender got. Generated with
 OpenAI `gpt-image-2` (1024x1536, medium or low), cropped to 9:16 and saved as 720x1280 JPEGs of at most 100 KB, without
 metadata. Photos and videos come with the attachments of spec 5; until then YoGPT answers Yos with Yos only.
@@ -9,8 +9,6 @@ metadata. Photos and videos come with the attachments of spec 5; until then YoGP
 - 051–100: characters saying Yo to each other, art homages
 - 101–200: deadpan studio photos of everyday objects on plain purple
 - 201–350: the same, crazier: objects doing absurd things with "Yo"
-- 351–375: movie moments as homages, with 3D stick figures and original fantasy creatures
-- 376–475: flat Yo graphics: the app's Flat UI colours, a bold white "Yo", clean vector shapes
 
 | File | Idea |
 |---|---|
@@ -364,128 +362,3 @@ metadata. Photos and videos come with the attachments of spec 5; until then YoGP
 | 348.jpg | A spatula flipping a burger patty shaped like "Yo" in mid-air |
 | 349.jpg | A tiny shopping bag with a giant baguette sticking out, the baguette crust scored "Yo" |
 | 350.jpg | A paper lantern glowing with "Yo" cut out of its paper |
-| 351.jpg | Two whimsical original purple fantasy creatures (round fluffy blobs with big eyes, not animals) on the bow of a ship at sunset, one with arms spread wide like flying, a speech bubble "Yo" |
-| 352.jpg | A glossy white 3D stick figure dancing and swinging around a city lamppost in the rain with an umbrella, puddles splashing, a speech bubble "Yo" |
-| 353.jpg | A small whimsical original purple fantasy creature (a round fluffy blob with big eyes, not an animal) in a bike basket flying past a huge full moon, the bike rider silhouette is a whimsical original purple fantasy creature (a round fluffy blob with big eyes, not an animal), the moon shows "Yo" in craters |
-| 354.jpg | A glossy white 3D stick figure in a long black coat and sunglasses leaning far back in slow motion as purple letters "Yo" fly past like bullets, rooftop |
-| 355.jpg | A shark fin circling a small boat, the fin has "Yo" painted on it, a nervous glossy white 3D stick figure on the boat |
-| 356.jpg | A friendly whimsical original purple fantasy creature (a round fluffy blob with big eyes, not an animal) in a trench coat holding a boombox over its head outside a window at night, the boombox screen shows "Yo" |
-| 357.jpg | An astronaut glossy white 3D stick figure floating in a white spaceship corridor talking to a glowing red camera eye, speech bubble "Yo" |
-| 358.jpg | A whimsical original purple fantasy creature (a round fluffy blob with big eyes, not an animal) in a fedora running from a giant rolling purple boulder shaped like "Yo" in an ancient temple |
-| 359.jpg | A glossy white 3D stick figure in a time-travel sports car with flames in the tire tracks, license plate reads "YO", night |
-| 360.jpg | A glossy white 3D stick figure doing a karate crane kick on a beach post at sunset, a speech bubble "Yo" |
-| 361.jpg | A ghost-busting team of three whimsical original purple fantasy creatures (round fluffy blobs with big eyes, not animals) with backpacks blasting purple beams that spell "Yo" |
-| 362.jpg | A boxing glossy white 3D stick figure running up long museum steps raising its arms in triumph, banner "Yo" at the top |
-| 363.jpg | A whimsical original purple fantasy creature (a round fluffy blob with big eyes, not an animal) wizard on a bridge raising a staff, a glowing "Yo" barrier in front of a fiery shadow monster |
-| 364.jpg | A glossy white 3D stick figure in a cowboy hat riding a bomb falling from a plane waving its hat, the bomb says "Yo" |
-| 365.jpg | A glossy white 3D stick figure in a red jacket dancing on a long stairway in the city at night, speech bubble "Yo" |
-| 366.jpg | Two whimsical original purple fantasy creatures (round fluffy blobs with big eyes, not animals) sharing one long noodle that forms the word "Yo", spaghetti dinner in a back alley |
-| 367.jpg | A glossy white 3D stick figure in a sharp suit sitting on a park bench with a box of chocolates, speech bubble "Yo" |
-| 368.jpg | A glossy white 3D stick figure and a glossy white 3D stick figure in sunglasses driving a convertible off a desert cliff into the sunset, speech bubble "Yo" |
-| 369.jpg | A giant purple glossy white 3D stick figure on a moonlit beach under a ruined statue torch, a glossy white 3D stick figure kneels, sand writing "Yo" |
-| 370.jpg | A glossy white 3D stick figure in an orange prison jumpsuit crawling out of a sewer pipe into the rain, arms raised, speech bubble "Yo" |
-| 371.jpg | A bunch of colourful helium balloons lifting a small purple house into the sky, balloons spell "Yo" |
-| 372.jpg | A whimsical original purple fantasy creature (a round fluffy blob with big eyes, not an animal) with a typewriter in a snowed-in hotel corridor, the page full of "Yo Yo Yo Yo" |
-| 373.jpg | A whimsical original purple fantasy creature (a round fluffy blob with big eyes, not an animal) in a pilot jacket and aviator sunglasses next to a fighter jet giving a thumbs up, speech bubble "Yo" |
-| 374.jpg | A glossy white 3D stick figure in a white dress at a fancy breakfast in front of a jewelry shop window, croissant, speech bubble "Yo" |
-| 375.jpg | A glossy white 3D stick figure on a rooftop with a chimney sweep broom dancing with soot-covered birds, chimney smoke spelling "Yo" |
-| 376.jpg | Eight horizontal colour bars stacked like a list, the top turquoise bar slides out to the right with a big white "Yo" on it |
-| 377.jpg | A single amethyst bar with a white "Yo" being dropped into a tall stack of other coloured bars like a falling block puzzle piece |
-| 378.jpg | A huge white "Yo" made of two flat shapes, the o is rolling away like a ball leaving a short motion trail, on a sunflower yellow field |
-| 379.jpg | A giant white speech bubble saying "Yo" on a peter river blue field, three tiny speech bubbles below it all saying "Yo" too, getting smaller |
-| 380.jpg | A carrot orange field with a flat white paper plane flying away from a big white "Yo", a short dashed flight trail |
-| 381.jpg | A midnight blue night sky in flat shapes, a white crescent moon and stars, the stars connect into the word "Yo" with thin lines |
-| 382.jpg | Two flat colour bars, emerald and alizarin, shaking hands with tiny white flat hands, a white "Yo" between them |
-| 383.jpg | A flat mountain range in turquoise, emerald and peter river layers, a tiny flag on the top peak reading "Yo" |
-| 384.jpg | A flat geometric rocket made of colour bars launching from the bottom, its white exhaust cloud forming "Yo" |
-| 385.jpg | An alizarin red field with a huge white "Yo" whose o is a donut with a bite taken out, crumbs as small white dots |
-| 386.jpg | A flat sunflower yellow sun rising over a midnight blue horizon line, the sun rays are short white bars, a white "Yo" in the sun |
-| 387.jpg | A white "Yo" sitting on a flat purple sofa reading a tiny newspaper, minimal room in two colour blocks |
-| 388.jpg | A peter river blue field with a flat white "Yo" diving into a turquoise swimming pool shape, splash made of white circles |
-| 389.jpg | Eight Flat UI colour bars arranged as a rainbow arch over a white "Yo" |
-| 390.jpg | A flat white "Yo" stretching on a sunflower yellow yoga mat, the Y leaning sideways, on a carrot orange field |
-| 391.jpg | A white "Yo" wearing a tiny flat party hat, confetti of small colour bars falling, on an amethyst field |
-| 392.jpg | A flat ice cream cone with three scoops in turquoise, alizarin and sunflower, a white "Yo" melting on top |
-| 393.jpg | A big white "Yo" balancing on a seesaw against a tiny dot, on an emerald field, playful physics joke |
-| 394.jpg | A flat traffic light where the lights are amethyst, sunflower and emerald and each shows a white "Yo" |
-| 395.jpg | A flat white "Yo" peeking out from behind a midnight blue wall, only the top half showing, on a turquoise field |
-| 396.jpg | A stack of flat colour bars forming a tall skyscraper, one window lit sunflower yellow with a white "Yo" |
-| 397.jpg | A flat white "Yo" on a skateboard made of a carrot orange bar, speed lines behind it, on a peter river blue field |
-| 398.jpg | A flat game controller in amethyst, its screen-shaped center showing a white "Yo" |
-| 399.jpg | A flat white "Yo" in a hot air balloon basket, the balloon striped in eight Flat UI colours |
-| 400.jpg | A carrot orange field, a white "Yo" fishing with a flat rod from a small turquoise boat, a hooked white "Yo" bubble |
-| 401.jpg | A flat smartphone on an amethyst field, its screen full of stacked colour bars each reading "Yo" |
-| 402.jpg | A white "Yo" sliding down a long emerald slide into a sunflower yellow sandbox, minimal geometric playground |
-| 403.jpg | A flat white paper boat floating on midnight blue water, its sail reading "Yo", small white wave lines |
-| 404.jpg | A flat white "Yo" made of two balloons, tied with strings to a small alizarin weight |
-| 405.jpg | A big flat magnet in alizarin red pulling many small white "Yo" letters toward it, on a peter river blue field |
-| 406.jpg | A flat cactus in emerald on a sunflower field, its arms shaped like the letter Y, a white flower o next to it reading "Yo" |
-| 407.jpg | A white "Yo" doing a cannonball jump off a turquoise diving board, motion arcs, on a midnight blue field |
-| 408.jpg | A flat clock face where the hour and minute hands spell a white "Yo", on a carrot orange field |
-| 409.jpg | A turquoise bar wearing white headphones, music notes in Flat UI colours, a white "Yo" bubble |
-| 410.jpg | A flat pizza seen from above with toppings arranged to spell a white "Yo", on an alizarin red field |
-| 411.jpg | A white "Yo" as a tiny flat character with legs running across a row of colour bars like a platform game |
-| 412.jpg | A flat sailboat with an amethyst sail reading "Yo", sailing on stacked turquoise and peter river wave bars |
-| 413.jpg | A white "Yo" stamped hundreds of times in a neat grid, one of them is upside down, on an emerald field |
-| 414.jpg | A flat white cloud raining small colour bars, a white "Yo" under a sunflower umbrella |
-| 415.jpg | A flat birthday cake made of stacked colour bars, the candles spell "Yo" |
-| 416.jpg | A flat lightbulb in sunflower yellow glowing, the filament shaped as "Yo", on a midnight blue field |
-| 417.jpg | A big white "Yo" casting a long flat shadow that also reads "Yo", on a carrot orange field |
-| 418.jpg | A white "Yo" being typed on a flat amethyst keyboard by two simple white flat hands |
-| 419.jpg | A flat envelope opening on a peter river blue field, a white "Yo" card popping out with small sparkles |
-| 420.jpg | A flat white "Yo" climbing a ladder made of colour bars toward a sunflower star |
-| 421.jpg | A flat spaceship in turquoise beaming down a light cone onto a white "Yo", on a midnight blue field |
-| 422.jpg | A flat white "Yo" in a bathtub full of colour bar bubbles, on an emerald field |
-| 423.jpg | A white "Yo" lifting a flat dumbbell made of two amethyst circles, sweat drops as white dots |
-| 424.jpg | A flat tennis court in emerald, a white "Yo" as the ball flying over the net |
-| 425.jpg | A flat white "Yo" inside a magnifying glass lens, the rest of the alizarin red field is empty |
-| 426.jpg | A white "Yo" on a flat podium in first place, second and third places empty, confetti bars |
-| 427.jpg | A flat white "Yo" sleeping in a midnight blue hammock between two turquoise bars, small Z shapes |
-| 428.jpg | A flat volcano made of carrot orange and alizarin bars erupting white "Yo" letters |
-| 429.jpg | A flat white "Yo" made of neon-like tube lines on a midnight blue field, clean vector, no glow texture |
-| 430.jpg | A flat bus in sunflower yellow, all its windows show tiny white "Yo" passengers |
-| 431.jpg | A white "Yo" wearing flat sunglasses lying on a turquoise beach towel, a peter river sea bar and a sunflower sun |
-| 432.jpg | A flat white "Yo" juggling three small colour circles, on an amethyst field |
-| 433.jpg | A huge white "Yo" made of stacked flat colour bars in all eight Flat UI colours like a striped font |
-| 434.jpg | A flat elevator with two doors opening, a white "Yo" standing inside, on a peter river blue field |
-| 435.jpg | A flat white "Yo" on a surfboard riding a wave made of turquoise and peter river bars |
-| 436.jpg | A flat calendar page on an alizarin field where every day square is filled with a tiny "Yo" |
-| 437.jpg | A white "Yo" with a flat tiny cape flying over a city of colour bar buildings |
-| 438.jpg | A flat white "Yo" and a flat white "Yo" high-fiving, a small burst of colour bars between them, on a sunflower field |
-| 439.jpg | A flat gift box in amethyst with a turquoise ribbon, the lid flying off and a white "Yo" springing out |
-| 440.jpg | A flat white "Yo" sitting at the end of a long turquoise dock fishing, midnight blue water |
-| 441.jpg | A flat camera in midnight blue with its flash bursting into a white "Yo" |
-| 442.jpg | A flat white "Yo" on a tiny unicycle balancing on a sunflower rope line |
-| 443.jpg | A flat vending machine of colour bars, every slot holds a white "Yo" |
-| 444.jpg | A flat white "Yo" made of a garden hose spraying peter river water drops, on an emerald lawn field |
-| 445.jpg | A flat bowling scene: a white "Yo" ball knocking down eight pins coloured in Flat UI colours |
-| 446.jpg | A flat ferris wheel whose cabins are the eight Flat UI colours, the center hub reads "Yo" |
-| 447.jpg | A flat white "Yo" standing under a single spotlight cone on a midnight blue stage |
-| 448.jpg | A flat paint roller painting an amethyst stripe across the canvas, revealing a white "Yo" |
-| 449.jpg | A flat white "Yo" as a kite, the tail made of small colour bars, on a peter river sky |
-| 450.jpg | A flat sandwich made of stacked colour bars as bread, lettuce, cheese, the top bun reads "Yo" |
-| 451.jpg | A flat white "Yo" on a sled sliding down a turquoise snowy hill bar |
-| 452.jpg | A flat chess board in midnight blue and white, the king piece is a white "Yo" |
-| 453.jpg | A flat white "Yo" built from simple flat toy blocks in Flat UI colours |
-| 454.jpg | A flat lighthouse in alizarin and white stripes beaming a white "Yo" across a midnight blue sea |
-| 455.jpg | A flat white "Yo" in a race car made of a carrot orange bar, checkered flag, speed lines on a peter river blue field |
-| 456.jpg | A flat white "Yo" inside a flat purple soap bubble floating up, on a turquoise field |
-| 457.jpg | A flat ticket stub in sunflower yellow with a big white "Yo" on it, perforated edge |
-| 458.jpg | A flat bridge made of colour bars connecting two cliffs, a white "Yo" crossing in the middle |
-| 459.jpg | A flat white "Yo" hanging from a parachute in amethyst and white stripes, on a peter river sky |
-| 460.jpg | A flat stopwatch in emerald, its display reading "Yo", motion lines |
-| 461.jpg | A flat white "Yo" made of two pieces of a jigsaw puzzle clicking together, on an alizarin field |
-| 462.jpg | A flat glass of turquoise lemonade with a straw and an ice cube shaped "Yo" |
-| 463.jpg | A flat white "Yo" in a tiny flat rowing boat on a sunflower field like a sea, minimal |
-| 464.jpg | A flat billboard on two legs showing a white "Yo" on an amethyst background |
-| 465.jpg | A flat white "Yo" playing a flat guitar made of colour bars, music notes floating on a peter river blue field |
-| 466.jpg | A flat stack of pancakes in carrot orange with butter and syrup, the top pancake reads "Yo" |
-| 467.jpg | A flat white "Yo" making a snow angel on a midnight blue field with white dots of snow |
-| 468.jpg | A flat white "Yo" bouncing on a trampoline made of an emerald bar, motion arcs |
-| 469.jpg | A flat drum set in alizarin and white, the bass drum reads "Yo" |
-| 470.jpg | A flat white "Yo" made of two clouds on a peter river sky, a sunflower sun peeking |
-| 471.jpg | A flat open laptop in midnight blue, a white "Yo" jumping out of the screen |
-| 472.jpg | A flat white "Yo" on a merry-go-round of colour bars spinning |
-| 473.jpg | A flat compass in turquoise whose needle points to a white "Yo" on the edge |
-| 474.jpg | A flat white "Yo" as two balloons in a flat bouquet with other colour balloons |
-| 475.jpg | A flat loading bar made of the eight Flat UI colours, almost full, the label above it simply reads "Yo" |
