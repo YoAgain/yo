@@ -23,6 +23,9 @@ struct Friend: Codable, Hashable, Identifiable {
   /// Their account is gone (deleted, or the name released after a year away): the bar says "Not on Yo". The name
   /// added again is asked of the hub anew and may be someone else's now.
   var gone = false
+  /// Their account key changed (spec 3.2: a new phone without its backup, or someone else): Contacts says so until
+  /// their details are opened.
+  var keyChanged = false
   /// Who they are on this phone, for good: a new spelling or a user id learned later keeps the bar in its place (a
   /// name as identity made the bar leave and come in again on top).
   var key = UUID()
@@ -46,6 +49,7 @@ struct Friend: Codable, Hashable, Identifiable {
     user = try c.decodeIfPresent(String.self, forKey: .user)
     blocked = try c.decodeIfPresent(Bool.self, forKey: .blocked) ?? false
     gone = try c.decodeIfPresent(Bool.self, forKey: .gone) ?? false
+    keyChanged = try c.decodeIfPresent(Bool.self, forKey: .keyChanged) ?? false
     key = try c.decodeIfPresent(UUID.self, forKey: .key) ?? UUID()
   }
 }
@@ -88,12 +92,14 @@ final class Friends {
 
   /// Adds a username as typed (only what a name may hold); an empty or known name (in any spelling) is ignored. New
   /// friends come on top, as in the original. A friend whose account is gone gives its place to the name's new owner
-  /// (or to the name as typed, asked of the hub again).
+  /// (or to the name as typed, asked of the hub again). Where both user ids are known, they decide: a name another
+  /// user had before is that other user's bar, not this one's.
   func add(_ typed: String, user: String? = nil) {
     let name = Username.clean(typed)
     let skeleton = Username.skeleton(name)
     func same(_ friend: Friend) -> Bool {
-      Username.skeleton(friend.name) == skeleton || (user != nil && friend.user == user)
+      if let user, let known = friend.user, !friend.gone { return known == user }
+      return Username.skeleton(friend.name) == skeleton || (user != nil && friend.user == user)
     }
     guard !name.isEmpty, !all.contains(where: { !$0.gone && same($0) }) else { return }
     var list = all.filter { !same($0) }  // gone ones only
@@ -164,32 +170,36 @@ final class Friends {
     }
   }
 
-  /// The account's storage (spec 6.9) as the core has it, into this list: friends kept there that this phone does not
-  /// have come on the list (after a restore: the whole list), at the end, in their colour; blocks as kept there (the
-  /// core holds to them too). Nothing is written back, but with `seed` (once, for an account from before the
-  /// storage) the friends this phone has and the storage lacks go up.
-  func take(_ kept: [YoFriend], seed: Bool) {
+  /// The account's storage (spec 6.9) as the core has it, into this list, which mirrors it: friends kept there that
+  /// this phone does not have come on the list (after a restore: the whole list), at the end, in their colour; those
+  /// here take its name, colour and block (the core holds to the blocks too); friends known by user id that it no
+  /// longer has (taken off on another phone) go. Friends known only by a typed name stay. A friend kept without a name
+  /// (a block alone, a name over 64 bytes) takes `names` (the hub's, by user id), else "Yo User". Nothing is written
+  /// back, but with `seed` (once, for an account from before the storage) the friends this phone has and the storage
+  /// lacks go up, and none go.
+  func take(_ kept: [YoFriend], names: [String: String] = [:], seed: Bool) {
     var list = all
-    var changed = false
     for friend in kept {
-      guard let name = friend.name.map(Username.clean), !name.isEmpty else { continue }  // a block alone: the core's
-      let skeleton = Username.skeleton(name)
-      if let index = list.firstIndex(where: { $0.user == friend.user })
-        ?? list.firstIndex(where: { $0.user == nil && Username.skeleton($0.name) == skeleton })
-      {
-        if list[index].user != friend.user || list[index].blocked != friend.blocked {
-          list[index].user = friend.user
-          list[index].blocked = friend.blocked
-          changed = true
-        }
-      } else if !list.contains(where: { !$0.gone && Username.skeleton($0.name) == skeleton }) {
+      let stored = friend.name.flatMap(Self.storedName)
+      if let index = list.firstIndex(where: { $0.user == friend.user }) ?? stored.flatMap({ name in
+        list.firstIndex { $0.user == nil && Username.skeleton($0.name) == Username.skeleton(name) }
+      }) {
+        list[index].user = friend.user
+        list[index].blocked = friend.blocked
+        if let stored { list[index].name = stored }
+        if let color = friend.color, list[index].color % Color.rows.count != Int(color) { list[index].color = Int(color) }
+      } else {
+        let name = stored ?? names[friend.user].flatMap(Self.storedName) ?? "Yo User"
         var new = Friend(name: name, color: friend.color.map(Int.init) ?? list.count, user: friend.user)
         new.blocked = friend.blocked
         list.append(new)
-        changed = true
       }
     }
-    if changed { quietly { all = list } }
+    if !seed {
+      let users = Set(kept.map(\.user))
+      list.removeAll { $0.user.map { !users.contains($0) } ?? false }
+    }
+    if list.map(Self.mirrored) != all.map(Self.mirrored) { quietly { all = list } }
     guard seed else { return }
     let keptUsers = Dictionary(kept.map { ($0.user, $0) }, uniquingKeysWith: { a, _ in a })
     let missing = all.filter { friend in
@@ -197,6 +207,41 @@ final class Friends {
       return keptUsers[user].map { $0.name != friend.name } ?? true
     }
     if !missing.isEmpty { stored?(missing, []) }
+  }
+
+  /// A name as the storage keeps it (spec 6.9): kept as it is (a name the user gave is no username: spaces and all),
+  /// 1 to 64 bytes of UTF-8 without control characters; else none.
+  static func storedName(_ name: String) -> String? {
+    let name = name.precomposedStringWithCanonicalMapping
+    guard !name.isEmpty, name.utf8.count <= 64, !name.unicodeScalars.contains(where: { $0.properties.generalCategory == .control })
+    else { return nil }
+    return name
+  }
+
+  /// What the storage mirrors of a friend, to tell whether taking it changed anything.
+  private static func mirrored(_ friend: Friend) -> [String] {
+    [friend.key.uuidString, friend.name, "\(friend.color)", friend.user ?? "", "\(friend.blocked)"]
+  }
+
+  /// A contact's account key changed (spec 3.2): marked for Contacts, and said once (`keyAlerts`).
+  func keyChanged(_ friend: Friend) {
+    guard let index = all.firstIndex(where: { $0.key == friend.key }) else { return }
+    if !all[index].keyChanged { all[index].keyChanged = true }
+    if !keyAlerts.contains(friend.key) { keyAlerts.append(friend.key) }
+  }
+
+  /// Their details were opened: Contacts no longer marks the change.
+  func keyChangeSeen(_ friend: Friend) {
+    guard let index = all.firstIndex(where: { $0.key == friend.key }), all[index].keyChanged else { return }
+    all[index].keyChanged = false
+  }
+
+  /// Friends whose new key is still to be said (an alert, once each), oldest first.
+  private(set) var keyAlerts: [UUID] = []
+
+  /// The friend's new key was said.
+  func keyAlertShown(_ friend: Friend) {
+    keyAlerts.removeAll { $0 == friend.key }
   }
 
   /// The friend shown under this name now, if any.
@@ -207,6 +252,7 @@ final class Friends {
   /// Signed out: the friends of a new phone, none. (The account's storage keeps them.)
   func reset() {
     quietly { all = [] }
+    keyAlerts = []
   }
 
   private func quietly(_ change: () -> Void) {

@@ -50,6 +50,7 @@ struct ContactState: Sendable {
   /// The worst of the checks that matter: what the list shows for the contact.
   func overall(_ friend: Friend) -> Check {
     if friend.gone || contact?.gone == true || contact?.unconfirmed == true { return .problem }
+    if friend.keyChanged { return .waiting }
     guard friend.user != nil, let chat else { return .open }
     if chat.lost { return .waiting }
     if chat.members != 2 { return .waiting }
@@ -129,6 +130,7 @@ struct ContactsList: View {
     if friend.blocked { return "Blocked" }
     if friend.gone { return "Not on Yo" }
     if friend.user == nil { return "No Chat Yet" }
+    if friend.keyChanged && check == .waiting { return "New Key" }
     return switch check {
     case .ok: "Encrypted"
     case .open: "No Chat Yet"
@@ -150,6 +152,7 @@ struct ContactsList: View {
 private struct ContactDetail: View {
   let friend: Friend
   @Environment(AccountStore.self) private var accounts
+  @Environment(Friends.self) private var friends
   @State private var state: ContactState?
 
   var body: some View {
@@ -191,8 +194,8 @@ private struct ContactDetail: View {
         check: friend.gone || contact?.gone == true ? .problem : .ok)
       StatusRow(
         title: "Identity Key",
-        value: contact?.unconfirmed == true ? "Changed" : "Unchanged",
-        check: contact?.unconfirmed == true ? .problem : .ok)
+        value: contact?.unconfirmed == true || friend.keyChanged ? "Changed" : "Unchanged",
+        check: contact?.unconfirmed == true ? .problem : friend.keyChanged ? .waiting : .ok)
       StatusRow(title: "Verified", value: contact?.verified == true ? "Yes" : "No", check: contact?.verified == true ? .ok : .open)
       StatusRow(title: "Blocked", value: friend.blocked ? "Yes" : "No", check: friend.blocked ? .open : .ok)
     } header: {
@@ -200,6 +203,8 @@ private struct ContactDetail: View {
     } footer: {
       if contact?.unconfirmed == true {
         Text("Their key changed after you verified them. Compare safety numbers again.")
+      } else if friend.keyChanged {
+        Text("Their key changed: they may have a new iPhone. To be sure it’s them, compare safety numbers.")
       }
     }
     if let chat = state.chat {
@@ -249,6 +254,7 @@ private struct ContactDetail: View {
   }
 
   private func load() async {
+    friends.keyChangeSeen(friend)  // seen here: the list no longer marks it (this page shows it as it came)
     guard let client = accounts.client, let user = friend.user else { return }
     state = try? await Hub.run { ContactState.load(client, user: user) }
   }
