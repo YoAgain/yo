@@ -204,16 +204,9 @@ final class ShareModel {
 
   /// A notification for the Yos received while sending, as the notification service writes it.
   nonisolated private static func notify(_ events: [YoEvent], client: YoClient) {
-    let yos = ShareBridge.yos(in: events, client: client)
+    let yos = ShareBridge.yos(in: events) { ShareBridge.name(of: $0, client: client) }
     guard !yos.isEmpty else { return }
-    let center = UNUserNotificationCenter.current()
-    center.getDeliveredNotifications { delivered in
-      let (all, replaced) = ShareBridge.merged(yos, with: delivered)
-      let content = UNMutableNotificationContent()
-      ShareBridge.yo(content, all)
-      center.removeDeliveredNotifications(withIdentifiers: replaced)
-      center.add(UNNotificationRequest(identifier: all[0].id, content: content, trigger: nil))
-    }
+    Task { await ShareBridge.post(yos) }
   }
 
   /// The account the state is of, as the list names it (its user id's bytes in base64).

@@ -1,6 +1,6 @@
 // The notification service extension: a push says only "Yo" (the hub knows nothing more, spec 6.3); this one makes
-// it "Yo from YoGPT" ("📷 from …", "🎥 from …", ShareBridge.yo). More Yos read as on the bar and go into one
-// notification with those still on the screen ("Yo!!!!! +4 from YoGPT · 📷 2", ShareBridge.merged). It opens the app's state as a guest
+// it "Yo from YoGPT" ("📷 from …", "🎥 from …"; more read as on the bar, "Yo!!!!! +4 from YoGPT · 📷 2"), one
+// notification with the Yos those still on the screen name (ShareBridge.write). It opens the app's state as a guest
 // (SharedState.swift: in turns with the app, under the lock in the App Group), receives once without waiting, and
 // names who the new Yos are from (a line per sender, the newest first). What it receives stays in the state for the
 // app (never acknowledged here), which shows it as ever. The photos and videos those Yos carry are fetched to the App
@@ -11,8 +11,8 @@
 // The hub pushes once per envelope, and not every envelope is a new Yo: the Welcome before a friend's first Yo, the
 // rest of a burst a push before already took, a commit, a blocked sender's Yo (dropped unseen, spec 4.8), a Yo the app
 // took itself (it was open, or just left: then it writes the notification itself). Such a push, read and found with
-// nothing new, goes out quietly (no sound, no banner) and takes the place of the Yo notification shown last, rather
-// than lying on top of it as one more "Yo". It goes out as it came ("Yo", with the sound) when nothing could be read:
+// nothing new, goes out quietly (no sound, no banner) and takes the place of the Yo notifications on the screen,
+// saying what they said, rather than lying on top of them as one more "Yo". It goes out as it came ("Yo", with the sound) when nothing could be read:
 // the app holds the lock longer than `lockWait` (it is in front then and shows Yos itself), there is no state, the hub
 // does not answer in time, or the time is up.
 import Foundation
@@ -33,38 +33,29 @@ final class NotificationService: UNNotificationServiceExtension {
     let pending = pending
     let start = Date.now
     DispatchQueue.global(qos: .userInitiated).async {
-      let (found, client, events) = Self.newest()
-      switch found {
-      case .yos(let senders):
-        // With the Yos the notifications on the screen already name: one notification for all of them.
-        let (all, replaced) = ShareBridge.merged(senders, with: Self.delivered())
-        pending.update { ShareBridge.yo($0, all) }
-        UNUserNotificationCenter.current().removeDeliveredNotifications(withIdentifiers: replaced)
-      case .nothingNew:
-        let last = Self.lastYo()
-        pending.update { content in
-          if let last {
-            content.body = last.content.body
-            content.threadIdentifier = last.content.threadIdentifier
-            content.categoryIdentifier = last.content.categoryIdentifier
-            content.userInfo = last.content.userInfo
+      // Read: the new Yos with those on the screen, in one notification; none new, the same quietly. Else, unread,
+      // the push goes as it came.
+      let read = Self.newest()
+      if let (client, events) = read {
+        let senders = ShareBridge.yos(in: events) { ShareBridge.name(of: $0, client: client) }
+        let delivered = Self.delivered()
+        let replaced = pending.update { content in
+          defer {
+            if senders.isEmpty { (content.sound, content.interruptionLevel) = (nil, .passive) }
           }
-          content.sound = nil
-          content.interruptionLevel = .passive
+          return ShareBridge.write(content, senders, over: delivered)
         }
-        if let last { UNUserNotificationCenter.current().removeDeliveredNotifications(withIdentifiers: [last.identifier]) }
-      case .unread:
-        break
+        UNUserNotificationCenter.current().removeDeliveredNotifications(withIdentifiers: replaced ?? [])
+        // The photos and videos before the notification goes: once it is delivered, iOS may end or freeze this
+        // process at any moment, and a fetch cut off there has used this device's fetch at the hub with nothing
+        // written (the app then finds the blob gone and gives the photo up). A new fetch starts only within 5 seconds
+        // of the push, so a slow network delays the notification little.
+        Prefetch.fetch(events, client: client, startingBefore: start + 5)
       }
-      // The photos and videos before the notification goes: once it is delivered, iOS may end or freeze this process
-      // at any moment, and a fetch cut off there has used this device's fetch at the hub with nothing written (the
-      // app then finds the blob gone and gives the photo up). A new fetch starts only within 5 seconds of the push,
-      // so a slow network delays the notification little.
-      if let client, case .yos = found { Prefetch.fetch(events, client: client, startingBefore: start + 5) }
       pending.deliver()
       Perf.mark("nse.delivered")
       // Not before: a lost acknowledgement costs only a repeat, which the app skips as seen.
-      _ = try? client?.afterSync()
+      _ = try? read?.0.afterSync()
     }
   }
 
@@ -73,23 +64,8 @@ final class NotificationService: UNNotificationServiceExtension {
     pending.deliver()
   }
 
-  enum Found: Sendable {
-    /// New Yos, by sender, the newest first.
-    case yos([ShareBridge.Yos])
-    /// Read: nothing new to show.
-    case nothingNew
-    /// Nothing could be read.
-    case unread
-  }
-
   /// How long the app may hold the state before the push goes out as it came.
   static let lockWait = 10.0
-
-  /// The Yo notification shown last and not seen yet (the app takes them all in when it opens).
-  private static func lastYo() -> UNNotificationRequest? {
-    delivered().filter { $0.request.content.categoryIdentifier == ShareBridge.yoCategory }.max { $0.date < $1.date }?
-      .request
-  }
 
   /// The notifications on the screen (none if the system does not say within two seconds).
   private static func delivered() -> [UNNotification] {
@@ -103,13 +79,12 @@ final class NotificationService: UNNotificationServiceExtension {
     return done.wait(timeout: .now() + 2) == .success ? found.notifications : []
   }
 
-  private static func newest() -> (Found, YoClient?, [YoEvent]) {
-    guard let client = Perf.timed("nse.open", { Guest.open(within: lockWait, timeout: 10) }) else {
-      return (.unread, nil, [])
-    }
-    guard let events = Perf.timed("nse.sync", { try? client.sync(waitS: 0) }) else { return (.unread, client, []) }
-    let yos = ShareBridge.yos(in: events, client: client)
-    return (yos.isEmpty ? .nothingNew : .yos(yos), client, events)
+  /// What one receive without waiting brings, as a guest on the app's state; nil when nothing could be read.
+  private static func newest() -> (YoClient, [YoEvent])? {
+    guard let client = Perf.timed("nse.open", { Guest.open(within: lockWait, timeout: 10) }),
+      let events = Perf.timed("nse.sync", { try? client.sync(waitS: 0) })
+    else { return nil }
+    return (client, events)
   }
 
   /// The content and its handler, delivered once (by the work or by the time running out, whichever first).
@@ -122,9 +97,9 @@ final class NotificationService: UNNotificationServiceExtension {
       lock.withLock { (self.content, self.handler) = (content, handler) }
     }
 
-    /// Changes the content while it is not delivered yet.
-    func update(_ change: (UNMutableNotificationContent) -> Void) {
-      lock.withLock { if let content { change(content) } }
+    /// Changes the content while it is not delivered yet (nil once it is).
+    func update<T>(_ change: (UNMutableNotificationContent) -> T) -> T? {
+      lock.withLock { content.map(change) }
     }
 
     func deliver() {
