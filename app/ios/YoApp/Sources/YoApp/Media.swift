@@ -157,7 +157,12 @@ final class MediaOutbox {
     running = true
     let generation = generation
     Task {
-      defer { running = false }
+      defer {
+        running = false
+        // Signed out and in meanwhile: this round was the old account's; the new one's photos go now, not at the
+        // next opening.
+        if generation != self.generation && !items.isEmpty { flush(accounts: accounts) }
+      }
       while let client = accounts.client {
         let due = Array(items.filter { $0.next <= .now }.prefix(Self.together))
         guard !due.isEmpty else { break }

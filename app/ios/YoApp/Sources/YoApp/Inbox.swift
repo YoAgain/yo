@@ -165,7 +165,7 @@ final class Inbox {
   /// When the list opens: friends take the spellings the core knows, and up to 20 still known only by a typed name
   /// are looked up (once per opening, so the hub is not asked again and again).
   private func respell(client: YoClient, accounts: AccountStore, friends: Friends) async {
-    if let contacts = try? await Hub.run({ client.contacts() }) { friends.spell(contacts) }
+    if let contacts = try? await Hub.run({ client.contacts() }), client === accounts.client { friends.spell(contacts) }
     let typed = friends.all.filter { $0.user == nil && !$0.blocked }.prefix(20).map(\.name)
     await identify(Array(typed), accounts: accounts, friends: friends)
   }
@@ -216,6 +216,7 @@ final class Inbox {
           pause = min(pause * 2, 30)
           continue
         }
+        guard client === accounts.client else { break }  // signed out meanwhile
         await take(events, contacts: contacts, client: client, friends: friends)
         if waiting == 0 && !deliverAgain { break }  // none waits, and no send asked meanwhile
         pause = waiting < before ? 1 : min(pause * 2, 30)  // going out: at the hub's pace; else waiting longer

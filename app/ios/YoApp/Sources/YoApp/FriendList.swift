@@ -1,8 +1,7 @@
 // The list of friends, as in 2014: one coloured bar per friend from edge to edge, the name large in the middle; a tap
 // sends a Yo ("Sent Yo!" on the bar, then it goes on top). The order is the original's: whoever you last sent a Yo to
-// or got one from is on top; each friend keeps their colour as they move (the original's went with the place). In the
-// mockup a tap sends the Yo to yourself, as if that friend had sent it, when the bar goes on top (showSent). Hold a bar
-// to report, block or remove the friend; the last bar adds one.
+// or got one from is on top; each friend keeps their colour as they move (the original's went with the place). Hold a
+// bar to report, block or remove the friend, or swipe it left for Block and Remove; the last bar adds one.
 //
 // On top, the system's bar: profile (a sheet) on the left, the camera on the right, between them the title "Yo",
 // a heading that becomes a glass pill once rows scroll behind it.
@@ -61,8 +60,9 @@ struct FriendList: View {
   @State private var sentRounds: [UUID: Int] = [:]
   /// How many sends of the same kind in a row a bar counts ("Sent Yo!!" for three).
   @State private var sentCounts: [UUID: (text: String, count: Int)] = [:]
-  /// The mockup's Yos back, by name: they come when the bar goes on top, so it comes in carrying them.
-  @State private var replies: [UUID: [(at: Date, send: @MainActor () async -> Void)]] = [:]
+  /// Photos and videos whose time is over, by friend: they go when the bar's words are over, in the rhythm they were
+  /// taken.
+  @State private var queued: [UUID: [(at: Date, send: @MainActor () async -> Void)]] = [:]
   /// How often each friend went on top (by `Friend.key`): a new identity each time, so the bar leaves its place and
   /// comes in on top. Only here: a new spelling or user id never changes a bar's identity.
   @State private var lifts: [UUID: Int] = [:]
@@ -579,19 +579,14 @@ struct FriendList: View {
     }
   }
 
-  /// A photo or video ready to go: what sends it, and what throws it away when the send is undone.
+  /// A photo or video ready to go: what sends it (made in memory: an undone one leaves no file behind).
   struct Prepared {
     let send: @MainActor () async -> Void
-    var discard: @MainActor () -> Void = {}
   }
 
-  /// The ring tapped: the whole stack stays here, and nothing of it stays behind (a video's file is deleted).
+  /// The ring tapped: the whole stack stays here.
   private func cancelSending(_ friend: Friend) {
-    for one in outgoing[friend] ?? [] {
-      if let task = preparing.removeValue(forKey: one.id) {
-        Task { await task.value?.discard() }
-      }
-    }
+    for one in outgoing[friend] ?? [] { preparing[one.id] = nil }
     stackRounds[friend.key] = nil
     outgoing[friend] = nil
     showSent(to: friend, "Canceled")
@@ -599,10 +594,10 @@ struct FriendList: View {
 
   /// What the bar says after a send, for 1.5 seconds as in the original; then a bar that sent goes on top. Another tap
   /// within them starts them again, so the bar never slides away under a finger tapping it again and again. Sends of
-  /// the same kind in a row are counted, one "!" for each after the first ("Sent Yo", "Sent Yo!", …). `reply` is the
-  /// mockup's Yo back, held until then.
+  /// the same kind in a row are counted, one "!" for each after the first ("Sent Yo", "Sent Yo!", …). `then` is what
+  /// goes once they are over (a photo or video).
   private func showSent(
-    to friend: Friend, _ text: String, thenOnTop: Bool = false, reply: (@MainActor () async -> Void)? = nil
+    to friend: Friend, _ text: String, thenOnTop: Bool = false, then: (@MainActor () async -> Void)? = nil
   ) {
     let key = friend.key  // the friend's, also if their spelling changes meanwhile
     let count = sentCounts[key].map { $0.text == text ? $0.count + 1 : 1 } ?? 1
@@ -610,14 +605,14 @@ struct FriendList: View {
       sentCounts[key] = (text, count)
       sent[friend] = text
     }
-    if let reply { replies[key, default: []].append((.now, reply)) }
+    if let then { queued[key, default: []].append((.now, then)) }
     let round = (sentRounds[key] ?? 0) + 1
     sentRounds[key] = round
     Task {
       try? await Task.sleep(for: .seconds(1.5))
       guard sentRounds[key] == round else { return }  // tapped again meanwhile
       sentRounds[key] = nil
-      let pending = replies.removeValue(forKey: key) ?? []
+      let pending = queued.removeValue(forKey: key) ?? []
       withAnimation(.snappy) {
         sent[friend] = nil
         sentCounts[key] = nil
@@ -625,10 +620,10 @@ struct FriendList: View {
       if thenOnTop, let now = friends.all.first(where: { $0.key == key }) { rise(now.name) }
       // In the rhythm they were tapped: tapped fast, they come fast and their sounds cut each other off.
       let start = Date.now
-      for reply in pending {
-        let wait = reply.at.timeIntervalSince(pending[0].at) - Date.now.timeIntervalSince(start)
+      for one in pending {
+        let wait = one.at.timeIntervalSince(pending[0].at) - Date.now.timeIntervalSince(start)
         if wait > 0 { try? await Task.sleep(for: .seconds(wait)) }
-        await reply.send()
+        await one.send()
       }
     }
   }
@@ -791,8 +786,8 @@ extension FriendList {
   }
 
   /// Friends go on top, the last of `names` uppermost. At the top of the list the list stays at its very start, so the
-  /// bar is in sight below the title; scrolled down, the view stays where it is (the title's "!" tells, and the Yo
-  /// waits until it is seen).
+  /// bar is in sight below the title; scrolled down, the view stays where it is (the Yo waits on its bar until it is
+  /// seen).
   private func toTop(_ names: [String]) {
     // By the friend, not the name: a name can change its spelling between a Yo landing and this step, and a name
     // not found would count as "moving" and lift a bar that is already on top.

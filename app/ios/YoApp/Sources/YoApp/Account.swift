@@ -245,7 +245,7 @@ final class AccountStore {
         client?.shareState(lock: file)
         return client
       }
-      guard let client = opened, self.client == nil else { return }
+      guard let client = opened, self.client == nil, account != nil else { return }  // signed out meanwhile
       self.client = client
       // The user id as the core has it (an earlier build read it wrongly): the passkey's handle and the backup's id.
       if let id = Hub.bytes(client.userId()), account?.userID != id { account?.userID = id }
@@ -261,7 +261,8 @@ final class AccountStore {
   /// Registers `username` at the hub (spec 6.4), or, with `secret`, takes the name's account back (a new phone). One at
   /// a time, whichever way in (a second registration would replace the first).
   private func register(_ username: String, secret: Data?) async throws -> YoClient {
-    guard !registering else { throw AccountError.busy }
+    // One at a time, and never over an account signed in meanwhile (another way in finished first).
+    guard !registering, account == nil else { throw AccountError.busy }
     registering = true
     defer { registering = false }
     let transport = Hub.transport
@@ -308,18 +309,27 @@ final class AccountStore {
 
   /// The guide's passkey, in two steps the person sees: made (saved in the password manager)…
   func createPasskey() async throws {
-    guard let account else { throw AccountError.noBackup }
+    guard let account, let client else { throw AccountError.noBackup }
     if !account.secured, securing == nil { securing = (SymmetricKey(size: .bits256), RecoveryCode.make()) }
-    newPasskey = try await passkeys.make(name: Self.passkeyName(account), userID: account.userID).credentialID
+    let made = try await passkeys.make(name: Self.passkeyName(account), userID: account.userID).credentialID
+    try still(client)
+    newPasskey = made
+  }
+
+  /// After waiting for the person or the hub: still the account the step began with (not signed out, or out and in
+  /// again meanwhile), else the step ends here.
+  private func still(_ client: YoClient) throws {
+    guard client === self.client else { throw CancellationError() }
   }
 
   /// …then signed in with once, which checks it works and gives its PRF output: the backup then opens with it too
   /// (a new backup if there was none, else added to the one the words open).
   func checkPasskey() async throws {
-    guard let credential = newPasskey else { throw AccountError.noBackup }
+    guard let credential = newPasskey, let client else { throw AccountError.noBackup }
     guard let prf = try await passkeys.ask(salt: BackupRecord.prfSalt, only: credential).prf else {
       throw AccountError.noPRF
     }
+    try still(client)
     if account?.secured == true {
       try await rewrap(.set(prf))
     } else {
@@ -353,13 +363,13 @@ final class AccountStore {
   /// The backup to the hub through `client`, the one the change began with: never another account's after a sign-out
   /// and sign-in meanwhile.
   private func put(_ backup: YoBackup, by client: YoClient) async throws {
-    guard client === self.client else { throw CancellationError() }  // signed out meanwhile
+    try still(client)
     do {
       try await Hub.run { try client.putBackup(backup: backup) }
     } catch let error as YoError {
       throw AccountError.hub(error)
     }
-    guard client === self.client else { throw CancellationError() }
+    try still(client)
   }
 
   /// A core call for this account, off the main actor; the core's error as an `AccountError`.
@@ -398,11 +408,12 @@ final class AccountStore {
 
   /// A new passkey in place of the one there (made, then used once for its PRF output).
   func replacePasskey() async throws {
-    guard let account else { throw AccountError.noBackup }
+    guard let account, let client else { throw AccountError.noBackup }
     let made = try await passkeys.make(name: Self.passkeyName(account), userID: account.userID)
     guard let prf = try await passkeys.ask(salt: BackupRecord.prfSalt, only: made.credentialID).prf else {
       throw AccountError.noPRF
     }
+    try still(client)
     try await rewrap(.set(prf))
   }
 

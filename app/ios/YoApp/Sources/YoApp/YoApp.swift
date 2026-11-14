@@ -146,14 +146,18 @@ final class NotificationDelegate: NSObject, UNUserNotificationCenterDelegate, Se
     case UNNotificationDefaultActionIdentifier:
       await inbox.received(id: info["id"] as? String ?? response.notification.request.identifier, from: sender)
     case Inbox.yoBack:
-      await yoBack(to: sender)
+      await yoBack(to: sender, user: info["user"] as? String)
     default:
       break
     }
   }
 
-  @MainActor private func yoBack(to sender: String) async {
-    guard accounts.account != nil, let friend = friends.shownFriend(named: sender) else { return }
+  /// The sender by user id when the notification service knew it (also someone not on the list yet), else by name.
+  @MainActor private func yoBack(to sender: String, user: String?) async {
+    guard accounts.account != nil,
+      let friend = user.map({ friends.friend(user: $0, handles: [sender]) }) ?? friends.shownFriend(named: sender),
+      !friend.blocked
+    else { return }
     for _ in 0..<50 where accounts.client == nil { try? await Task.sleep(for: .milliseconds(100)) }  // opening
     _ = await inbox.send(to: friend, accounts: accounts, friends: friends)
   }

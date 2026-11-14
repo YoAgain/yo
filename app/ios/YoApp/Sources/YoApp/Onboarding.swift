@@ -1,7 +1,7 @@
-// The way in. Start → a name → a passkey saves it (one tap; if it cannot, 12 words, best saved to Photos) → the
-// list. An account in the iCloud Keychain (the app installed again, a new iPhone) comes back before anything, without a
-// word. "Sign In" brings an account from before: a passkey, or the name and its 12 words; a passkey on this phone is
-// offered by the system at once.
+// The way in. Sign Up → a name → the list (the name is secured later, from the profile: Secure Your Account). The one
+// account in the iCloud Keychain not signed out (the app installed again, a new iPhone) comes back before anything,
+// without a word. "Sign In" brings an account from before: one of the iCloud Keychain's, tapped; a passkey; or the 12
+// words, which say whose they are. A passkey on this phone is offered by the system at once.
 //
 // Every step after the welcome is the same page, as Apple's setup screens are: a title and one line at the top, the
 // content in the middle, the button at the bottom over the full width, a text button under it if there is a second

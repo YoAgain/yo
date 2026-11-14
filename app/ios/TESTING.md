@@ -53,7 +53,11 @@ APNs token), the camera (black; photos come from the library).
 | Sign Out unsecured / secured, Sign In list of keychain accounts, sign in from it | new; a stale call signed the new session out: fixed | 56-64 |
 | Sign In with the recovery key: wrong word, wrong checksum, numbered and capitalised words | ok; double submission possible: fixed | 94-98 |
 | Delete Account: name typed (any case), passcode, deleted; the name free again | ok; re-registering hit the hub's registration limit ("Too many tries") | 180-190 |
-| Accessibility audit (list) | contrast of white on the brand's bars (by design), title not Dynamic Type (by design) | – |
+| Offline (YO_HUB): Sign Up, Sign In with the recovery key say "Yo can’t reach its server" | ok | 220-221 |
+| Recovery key of a deleted account: "We couldn’t find your account" | ok | – |
+| Swipe a bar, then another: the first closes; Remove | ok | 205-207 |
+| Your Code (QR) sheet | ok; it encodes https://justyo.co/NAME, which nothing in the app opens (left as it is) | 200 |
+| Accessibility audit (list, profile pages) | contrast of white on the brand's bars (by design), title not Dynamic Type (by design); the audit also flags the profile's black titles in a sheet, a false alarm | – |
 
 ## Bugs found and fixed (branch chaos-ios)
 
@@ -66,11 +70,21 @@ APNs token), the camera (black; photos come from the library).
 - The recovery-key sign-in could run twice; its field was not focused.
 - A picked photo was decoded at every redraw (the list stopped answering for a while).
 - No photo or video capture without a camera (AVFoundation raises); the camera no longer starts after it was closed.
-- From the Codex review: Yo Back on a notification did nothing; a collected notification showed twice; the push token
+- Statistics did not follow Yos while open, and counted blocked friends.
+- From the second Codex review: a backup change could be written through the next account's client; registrations
+  were not one at a time across ways in; a queued Yo could go from the next account; overlapping passkey requests
+  lost a caller; the old keychain item was deleted even when moving it failed; backup changes could overlap and their
+  errors showed nowhere; no way on from the passkey check with a password manager without PRF; revealed words stayed
+  revealed in the app switcher; onboarding pages did not scroll at the largest text sizes.
+- From the first Codex review: Yo Back on a notification did nothing; a collected notification showed twice; the push token
   was not sent again for a new device registration of the same account; answers for a signed-out client changed the
   new account's state; the quiet passkey request after leaving the welcome; dead code.
 
 ## Left
+
+- A friend whose account was deleted keeps the old user id; Yos to them are "Sent" and vanish (the name, registered
+  again by someone, is another user). Core/hub: a Yo to a deleted user could answer "Not on Yo".
+- Media sent or received while signing out within the same second may reach the next account's outbox or list.
 
 - Passkeys, push and the share/notification extensions need a device (or TestFlight).
 - Sending a photo while signing out within its 1.5 s, and the shared state's deletion racing an extension's write

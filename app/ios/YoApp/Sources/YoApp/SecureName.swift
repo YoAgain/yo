@@ -88,6 +88,7 @@ struct SecureNameSheet: View {
       Button("Skip") {
         skipped = true
         created = false
+        accounts.declinePasskey()  // as the first page's Skip: not asked again
         next()
       }
       .font(.yo(17))
