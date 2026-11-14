@@ -25,9 +25,12 @@ fn main() {
     let mut args = std::env::args().skip(1);
     let (mut url, mut state, mut name, mut to) = (String::new(), String::new(), String::new(), String::new());
     let (mut count, mut every_ms, mut sync) = (1u32, 0u64, false);
+    let (mut photo, mut delete) = (None::<String>, false);
     while let Some(flag) = args.next() {
         match flag.as_str() {
             "--sync" => sync = true,
+            "--photo" => photo = Some(args.next().expect("--photo")),
+            "--delete" => delete = true,
             "--url" => url = args.next().expect("--url"),
             "--state" => state = args.next().expect("--state"),
             "--name" => name = args.next().expect("--name"),
@@ -46,6 +49,22 @@ fn main() {
     if sync {
         let events = client.sync(0).expect("sync");
         println!("synced: {} events", events.len());
+    }
+    if delete {
+        client.delete_account().expect("delete");
+        println!("deleted");
+        return;
+    }
+    if let Some(photo) = photo {
+        // What the app does: seal, upload for the chat's other devices, then the Yo that carries it.
+        let plain = std::fs::read(&photo).expect("photo");
+        let (media, sealed) = yo_core::media::seal(&plain, 1080, 1920).expect("seal");
+        let fetches = client.media_fetches(&to).expect("a chat (send a Yo first)");
+        let wall = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_secs_f64() * 1000.0;
+        client.upload(&media, fetches).expect("upload").send(&sealed).expect("upload send");
+        let result = client.send(&to, yo_core::Content::Photo(media));
+        println!("photo at {wall:.3} fetches {fetches} {} bytes {}", plain.len(), result.is_ok());
+        return;
     }
     let start = Instant::now();
     for i in 0..count {
