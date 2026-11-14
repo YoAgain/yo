@@ -5,7 +5,8 @@
 //!   YO_PHONE_SECRET       64 hex digits: the key of the phone HMAC (required)
 //!   YO_TRUST_CLOUDFLARE   1: take the client address from CF-Connecting-IP
 //!   YO_APPLE_APP_IDS      TEAMID.bundle.id, comma-separated: apps that may make passkeys for this hub's domain
-//!   YO_SMS                "twilio" or "dev:<code>" (default dev:000000, never in production)
+//!   YO_SMS                "twilio", "dev:<code>" (every number verifies with that code: never in production) or
+//!                         "off" (the default): no phone numbers, the verify routes are not served
 //!   YO_TWILIO_ACCOUNT_SID, YO_TWILIO_AUTH_TOKEN, YO_TWILIO_SERVICE_SID
 //!   YO_APNS_KEY_FILE, YO_APNS_KEY_ID, YO_APNS_TEAM_ID, YO_APNS_TOPIC
 //!   YO_FCM_SERVICE_ACCOUNT_FILE
@@ -38,7 +39,11 @@ fn file(name: &str) -> Result<Option<String>, String> {
 
 fn megabytes(name: &str, default: u64) -> Result<u64, String> {
     match var(name) {
-        Some(value) => value.parse::<u64>().map(|mb| mb * 1024 * 1024).map_err(|_| format!("{name}: a number of MiB")),
+        Some(value) => value
+            .parse::<u64>()
+            .ok()
+            .and_then(|mb| mb.checked_mul(1024 * 1024))
+            .ok_or_else(|| format!("{name}: a number of MiB")),
         None => Ok(default),
     }
 }
@@ -51,7 +56,8 @@ fn config() -> Result<(Config, String), String> {
         .filter(|_| secret.len() == 64)
         .and_then(|v| v.try_into().ok())
         .ok_or("YO_PHONE_SECRET must be 64 hex digits")?;
-    let sms = match var("YO_SMS").as_deref().unwrap_or("dev:000000") {
+    let sms = match var("YO_SMS").as_deref().unwrap_or("off") {
+        "off" => SmsConfig::Off,
         "twilio" => SmsConfig::Twilio {
             account_sid: required("YO_TWILIO_ACCOUNT_SID")?,
             auth_token: required("YO_TWILIO_AUTH_TOKEN")?,
@@ -62,7 +68,7 @@ fn config() -> Result<(Config, String), String> {
                 eprintln!("yo-hub: SMS in development mode: every number verifies with the code {code}");
                 SmsConfig::Dev { code: code.to_owned() }
             }
-            _ => return Err("YO_SMS must be \"twilio\" or \"dev:<code>\"".into()),
+            _ => return Err("YO_SMS must be \"twilio\", \"dev:<code>\" or \"off\"".into()),
         },
     };
     let apns = match file("YO_APNS_KEY_FILE")? {
@@ -107,6 +113,7 @@ async fn main() {
         eprintln!("yo-hub: {error}");
         std::process::exit(2);
     });
+    let trust_cloudflare = config.trust_cloudflare;
     let hub = Hub::new(config, Arc::new(push::Https::default())).unwrap_or_else(|error| {
         eprintln!("yo-hub: {error}");
         std::process::exit(2);
@@ -116,6 +123,12 @@ async fn main() {
         std::process::exit(2);
     });
     eprintln!("yo-hub: listening on {listen}");
+    if trust_cloudflare && !listener.local_addr().is_ok_and(|a| a.ip().is_loopback()) {
+        // CF-Connecting-IP is believed: whoever reaches this address without Cloudflare names any address it likes
+        // and passes every per-address limit. Fine only where nothing but cloudflared can reach it (a container
+        // whose port is published on 127.0.0.1 alone).
+        eprintln!("yo-hub: YO_TRUST_CLOUDFLARE with {listen}, not a loopback address: only cloudflared may reach it");
+    }
     let shutdown = async {
         let _ = tokio::signal::ctrl_c().await;
     };

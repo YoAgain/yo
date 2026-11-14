@@ -24,6 +24,7 @@ use openmls_rust_crypto::RustCrypto;
 use std::collections::HashMap;
 use std::future::Future;
 use std::net::{IpAddr, SocketAddr};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tokio::sync::Notify;
@@ -43,6 +44,11 @@ pub struct Hub {
     limiter: Limiter,
     replay: ReplayCache,
     waiting: Mutex<HashMap<DeviceId, Arc<Notify>>>,
+    /// Inbox requests under way, by device (`INBOX_AT_ONCE`).
+    fetching: Mutex<HashMap<DeviceId, u32>>,
+    /// The database disk's last answer (`db_room`): when it was asked (ms), and whether it was too full.
+    disk_asked: AtomicU64,
+    disk_full: AtomicBool,
     sms: Box<dyn sms::Sms>,
     pusher: push::Pusher,
     blobs: Arc<blobs::Blobs>,
@@ -51,6 +57,29 @@ pub struct Hub {
 const HOUR: Duration = Duration::from_secs(3600);
 const MINUTE: Duration = Duration::from_secs(60);
 const DAY: Duration = Duration::from_secs(24 * 3600);
+
+/// Inbox requests of one device at once: the app, its notification extension, a share. One answer holds up to
+/// `MAX_INBOX_FETCH` envelopes of 64 KiB, and a wait holds a connection for a minute: a device that asks more often
+/// at once is refused (`429`) rather than let it hold the hub's memory and connections.
+pub const INBOX_AT_ONCE: u32 = 4;
+
+/// An inbox request under way; its place is given back when dropped.
+struct Fetching<'a> {
+    hub: &'a Hub,
+    device: DeviceId,
+}
+
+impl Drop for Fetching<'_> {
+    fn drop(&mut self) {
+        let mut fetching = self.hub.fetching.lock().unwrap_or_else(PoisonError::into_inner);
+        if let Some(n) = fetching.get_mut(&self.device) {
+            *n -= 1;
+            if *n == 0 {
+                fetching.remove(&self.device);
+            }
+        }
+    }
+}
 
 pub fn now_ms() -> u64 {
     SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_millis() as u64
@@ -138,6 +167,9 @@ impl Hub {
             limiter: Limiter::default(),
             replay: ReplayCache::default(),
             waiting: Mutex::default(),
+            fetching: Mutex::default(),
+            disk_asked: AtomicU64::new(0),
+            disk_full: AtomicBool::new(false),
             pusher,
             blobs: Arc::new(blobs),
             config,
@@ -147,8 +179,6 @@ impl Hub {
     pub fn router(self: &Arc<Self>) -> Router {
         let mut router = Router::new()
             .route("/", get(|| async { axum::response::Html(include_str!("index.html")) }))
-            .route(api::VERIFY_START, post(verify_start))
-            .route(api::VERIFY_CHECK, post(verify_check))
             .route(api::REGISTER, post(register))
             .route(api::BACKUP, put(put_backup))
             .route("/v1/backup/{id}", get(fetch_backup))
@@ -168,6 +198,10 @@ impl Hub {
             .route("/v1/groups/{group}/commit", post(commit))
             .route("/v1/groups/{group}/commits/{epoch}", get(fetch_commit))
             .route("/v1/blobs/{id}", put(put_blob).get(get_blob));
+        // Phone numbers (spec 6.3: kept for later), only where SMS is configured: off, there is no code to guess.
+        if !matches!(self.config.sms, config::SmsConfig::Off) {
+            router = router.route(api::VERIFY_START, post(verify_start)).route(api::VERIFY_CHECK, post(verify_check));
+        }
         if !self.config.apple_app_ids.is_empty() {
             // Which apps may make passkeys for this domain (Apple reads it through its CDN; spec 7).
             let file = serde_json::json!({ "webcredentials": { "apps": self.config.apple_app_ids } }).to_string();
@@ -288,10 +322,54 @@ impl Hub {
     /// `CF-Connecting-IP`, so one that comes straight from 127.0.0.1 without it is the server itself, which speaks for
     /// many users at once from one address.
     fn limit_ip(&self, kind: &str, peer: SocketAddr, headers: &HeaderMap, per: u32, window: Duration) -> Res<()> {
-        if self.config.trust_cloudflare && peer.ip().is_loopback() && !headers.contains_key("cf-connecting-ip") {
+        if self.own_service(peer, headers) {
             return Ok(());
         }
         self.limit(format!("{kind}:ip:{}", self.ip(peer, headers)), per, window)
+    }
+
+    /// Whether a request comes from the server's own services (`limit_ip`).
+    fn own_service(&self, peer: SocketAddr, headers: &HeaderMap) -> bool {
+        self.config.trust_cloudflare && peer.ip().is_loopback() && !headers.contains_key("cf-connecting-ip")
+    }
+
+    /// Bytes stored without identity (deliveries, commits), counted per address like `limit_ip`: they stay for
+    /// `envelope_ttl_days`, so what one address may store is bounded by bytes, not by requests alone.
+    fn limit_ip_bytes(&self, peer: SocketAddr, headers: &HeaderMap, bytes: usize) -> Res<()> {
+        if self.own_service(peer, headers) {
+            return Ok(());
+        }
+        let key = format!("bytes:ip:{}", self.ip(peer, headers));
+        if self.limiter.allow_n(key, bytes as u64, self.config.limits.anonymous_bytes_per_ip_hour, HOUR) {
+            Ok(())
+        } else {
+            Err(refuse(StatusCode::TOO_MANY_REQUESTS))
+        }
+    }
+
+    /// `507` while the database's disk has less than `db_min_free_bytes` free: deliveries, commits and new groups
+    /// wait (the apps try again) rather than fill it. The disk is asked at most once a second; an error asking
+    /// counts as room (the database itself fails then, as it would anyway).
+    fn db_room(&self) -> Res<()> {
+        let floor = self.config.limits.db_min_free_bytes;
+        if floor == 0 || self.config.db_path == ":memory:" {
+            return Ok(());
+        }
+        let now = now_ms();
+        if now.saturating_sub(self.disk_asked.load(Ordering::Relaxed)) >= 1000 {
+            self.disk_asked.store(now, Ordering::Relaxed);
+            let path = std::path::Path::new(&self.config.db_path);
+            let dir = match path.parent() {
+                Some(dir) if !dir.as_os_str().is_empty() => dir,
+                _ => std::path::Path::new("."),
+            };
+            let full = rustix::fs::statvfs(dir).is_ok_and(|stat| stat.f_bavail.saturating_mul(stat.f_frsize) < floor);
+            self.disk_full.store(full, Ordering::Relaxed);
+        }
+        if self.disk_full.load(Ordering::Relaxed) {
+            return Err(refuse(StatusCode::INSUFFICIENT_STORAGE));
+        }
+        Ok(())
     }
 
     fn limit(&self, key: String, per: u32, window: Duration) -> Res<()> {
@@ -323,14 +401,15 @@ impl Hub {
             // A replaced device learns that it was replaced.
             return Err(if self.db.is_gone(&device_id)? { refuse(StatusCode::GONE) } else { unauthorized() });
         };
+        let path = uri.path_and_query().map(|p| p.as_str()).unwrap_or("/");
+        yo_wire::request::verify_hash(&device.auth_key, method.as_str(), path, time, body_hash, &signature)
+            .map_err(|_| unauthorized())?;
+        // Counted only once the signature holds: a stranger who knows a device id must not spend its requests.
         self.limit(
             format!("signed:{}", yo_wire::b64(&device_id)),
             self.config.limits.signed_per_device_minute,
             MINUTE,
         )?;
-        let path = uri.path_and_query().map(|p| p.as_str()).unwrap_or("/");
-        yo_wire::request::verify_hash(&device.auth_key, method.as_str(), path, time, body_hash, &signature)
-            .map_err(|_| unauthorized())?;
         if !self.replay.first_time(signature, now, time + limits::MAX_SKEW_MS + 1) {
             return Err(unauthorized());
         }
@@ -421,6 +500,17 @@ impl Hub {
             Write::Done(user_id) => Ok(ok(encode(&api::Registered { user_id }))),
             Write::Refused(_) => Err(refuse(StatusCode::CONFLICT)),
         }
+    }
+
+    /// A place for one more inbox request of a device, if it has fewer than `INBOX_AT_ONCE` under way.
+    fn fetching(&self, device: DeviceId) -> Option<Fetching<'_>> {
+        let mut fetching = self.fetching.lock().unwrap_or_else(PoisonError::into_inner);
+        let n = fetching.entry(device).or_default();
+        if *n >= INBOX_AT_ONCE {
+            return None;
+        }
+        *n += 1;
+        Some(Fetching { hub: self, device })
     }
 
     fn waiter(&self, device: &DeviceId) -> Arc<Notify> {
@@ -723,6 +813,7 @@ async fn set_push(State(hub): Hubs, method: Method, uri: Uri, headers: HeaderMap
 
 async fn inbox(State(hub): Hubs, method: Method, uri: Uri, headers: HeaderMap) -> Res<(StatusCode, Vec<u8>)> {
     let device = hub.authenticate(&method, &uri, &headers, &[])?;
+    let _fetching = hub.fetching(device.device_id).ok_or_else(|| refuse(StatusCode::TOO_MANY_REQUESTS))?;
     let wait_s = uri
         .query()
         .and_then(|q| q.split('&').find_map(|kv| kv.strip_prefix("wait=")))
@@ -784,6 +875,8 @@ async fn deliver(
         .ok_or_else(bad)?;
     yo_wire::envelope::check(&body)?;
     hub.limit_ip("deliver", peer, &headers, hub.config.limits.deliver_per_ip_minute, MINUTE)?;
+    hub.limit_ip_bytes(peer, &headers, body.len())?;
+    hub.db_room()?;
     let (stored, outcome) = tokio::sync::oneshot::channel();
     hub.deliveries
         .send(Delivery { user, devices_hash, envelope: body, stored })
@@ -812,6 +905,7 @@ async fn create_group(State(hub): Hubs, ConnectInfo(peer): Peer, headers: Header
     if request.epoch == 0 || request.epoch > u32::MAX as u64 {
         return Err(bad());
     }
+    hub.db_room()?;
     if hub.db.create_group(&request.group_id, request.epoch, &request.token_hash, now_ms())? {
         Ok(StatusCode::CREATED)
     } else {
@@ -830,6 +924,8 @@ async fn commit(
     let group: GroupId = path_id(&group)?;
     let request: api::Commit = decode(&body)?;
     yo_wire::envelope::check(request.envelope.as_slice())?;
+    hub.limit_ip_bytes(peer, &headers, request.envelope.as_slice().len())?;
+    hub.db_room()?;
     let ordered = hub.db.commit(
         &group,
         request.epoch,
@@ -988,4 +1084,20 @@ async fn get_blob(
         .header(axum::http::header::CONTENT_LENGTH, size)
         .body(axum::body::Body::from_stream(stream))
         .map_err(|_| refuse(StatusCode::INTERNAL_SERVER_ERROR))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_device_has_a_few_inbox_requests_under_way_at_most() {
+        let hub = Hub::new(Config::for_tests(), Arc::new(push::Recorder::default())).unwrap();
+        let held: Vec<_> = (0..INBOX_AT_ONCE).map(|_| hub.fetching([1; 16]).expect("a place")).collect();
+        assert!(hub.fetching([1; 16]).is_none(), "one more is refused");
+        assert!(hub.fetching([2; 16]).is_some(), "another device has its own");
+        drop(held);
+        assert!(hub.fetching([1; 16]).is_some(), "places are given back");
+        assert!(hub.fetching.lock().unwrap().is_empty(), "and forgotten");
+    }
 }

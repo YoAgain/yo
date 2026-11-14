@@ -23,15 +23,25 @@ impl Limiter {
         if per == u32::MAX {
             return true;
         }
+        self.allow_n(key, 1, per as u64, window)
+    }
+
+    /// Takes `cost` tokens (bytes, say) from the bucket `key`, which holds `per` and refills `per` every `window`;
+    /// none when it holds fewer. `u64::MAX` is no limit.
+    pub fn allow_n(&self, key: String, cost: u64, per: u64, window: Duration) -> bool {
+        if per == u64::MAX {
+            return true;
+        }
         let now = Instant::now();
         let capacity = per as f64;
         let rate = capacity / window.as_secs_f64();
+        let cost = cost as f64;
         let mut buckets = self.buckets.lock().unwrap_or_else(PoisonError::into_inner);
         let (tokens, at) = buckets.entry(key).or_insert((capacity, now));
         *tokens = (*tokens + now.duration_since(*at).as_secs_f64() * rate).min(capacity);
         *at = now;
-        if *tokens >= 1.0 {
-            *tokens -= 1.0;
+        if *tokens >= cost {
+            *tokens -= cost;
             true
         } else {
             false
@@ -76,6 +86,15 @@ mod tests {
         }
         assert!(!limiter.allow("k".into(), 3, Duration::from_secs(3600)));
         assert!(limiter.allow("other".into(), 3, Duration::from_secs(3600)));
+    }
+
+    #[test]
+    fn a_byte_bucket_runs_dry_by_size() {
+        let limiter = Limiter::default();
+        assert!(limiter.allow_n("b".into(), 60, 100, Duration::from_secs(3600)));
+        assert!(!limiter.allow_n("b".into(), 60, 100, Duration::from_secs(3600)), "40 left");
+        assert!(limiter.allow_n("b".into(), 40, 100, Duration::from_secs(3600)));
+        assert!(limiter.allow_n("b".into(), u64::MAX - 1, u64::MAX, Duration::from_secs(1)), "no limit");
     }
 
     #[test]

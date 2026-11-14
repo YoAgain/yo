@@ -147,6 +147,8 @@ impl Pusher {
             return Outcome::Skipped;
         }
         match platform {
+            // An APNs device token is hex; anything else would go into the request's path (`apns`).
+            PUSH_APNS | PUSH_APNS_SANDBOX if !token.bytes().all(|b| b.is_ascii_hexdigit()) => Outcome::TokenInvalid,
             PUSH_APNS | PUSH_APNS_SANDBOX => match &self.apns {
                 Some(apns) => self.apns(apns, platform == PUSH_APNS_SANDBOX, token).await,
                 None => Outcome::Skipped,
