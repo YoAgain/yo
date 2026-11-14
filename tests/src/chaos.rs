@@ -1111,7 +1111,7 @@ fn worker(w: Arc<World>, t: usize, mut accts: Vec<Acct>, deadline: Instant) -> V
 /// Everyone receives and sends what waits, until nothing moves.
 fn quiesce(w: &World, all: &mut [Vec<Acct>]) {
     let mut rng = Rng(w.args.seed ^ 0xABCD);
-    for round in 0..40 {
+    for round in 0..120 {
         let before = w.stats.get("received");
         let mut waiting = 0;
         for accts in all.iter_mut() {
@@ -1131,7 +1131,8 @@ fn quiesce(w: &World, all: &mut [Vec<Acct>]) {
         if moved == 0 && waiting == 0 && round >= 2 {
             return;
         }
-        if w.args.url.is_some() && waiting > 0 {
+        // A hub with its limits takes the backlog at its pace (deliveries per address per minute).
+        if (w.args.url.is_some() || w.args.limits) && waiting > 0 {
             std::thread::sleep(Duration::from_secs(20));
         }
     }

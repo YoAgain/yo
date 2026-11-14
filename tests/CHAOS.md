@@ -25,6 +25,21 @@ YO_ENV="CARGO_TARGET_DIR=…" dev/cargo run --release -p yo-tests --bin yo-chaos
 With `--threads 1` a seed replays the same operations; with more, threads interleave as they will. Every violation is
 printed with the last things the users involved did.
 
+## Runs
+
+In-process hub on one machine (16 cores; clients, hub and SQLite in one process), 2% of requests faulted, 2% of
+operations crashing, unless said otherwise. "Must" are the messages that had to arrive; "received" includes
+messages a fault allowed to be lost that arrived anyway.
+
+| Seed | Accounts | Seconds | Sent | Received (per s) | Must, lost | Faults, crashes | New phones, deleted, hub restarts | Violations | RSS |
+|---|---|---|---|---|---|---|---|---|---|
+| 12 | 1000 | 600 | 247,671 | 173,503 (288/s) | 171,751, 32 lost | 20,795, 5,029 | 2,689, 1,095, 3 | 46: finding 8 (the lost burst), driver issues since fixed | 1.9 GB |
+| 13 | 1200 | 900 | 358,653 | 254,492 (282/s) | 252,296, **0 lost** | 30,264, 7,468 | 4,003, 1,685, 4 | 4: finding 10 (order), a driver issue | 2.4 GB |
+
+Registration: 1000 accounts in 8.1 s (124/s), 1200 in 9.4 s, every lookalike (3,181) and reserved spelling refused.
+A year later (prune at +366 days): every name without a backup released and free, every secured one kept. The
+hub's database audited after every run: no orphan rows, every blob with its file.
+
 ## Findings
 
 | # | Seed, scenario | What broke | Fix | Test |
@@ -41,6 +56,13 @@ printed with the last things the users involved did.
 | 10 | 13, 1200 accounts: #28 after #29 | A message renewed for a user's new devices went to the back of the outbox, behind a later message already made for the new devices (queued while the renewal was held by a `429`): the user got them out of order. | The renewed message takes the later ones of that user and chat behind it again. | the chaos ledger (order is checked per sender and receiver) |
 
 Not bugs, but noted:
+
+- With the hub's own limits (`--limits`, seed 15: 30 accounts on one address, 2 minutes): every delivery refused
+  with `429` waited in its outbox and arrived (399 that had to, 0 lost, outboxes empty at the end). But a *new* chat
+  cannot wait: its `POST /v1/groups` is limited to 60 per address per hour, and the send fails with `429` (4,352 of
+  8,620 sends in that run). Phones behind one carrier address (CGNAT) share that budget: at scale, new chats would
+  fail for everyone behind a busy address. The limit (and `lookup` with KeyPackages, 50 per device per day) is the
+  operator's to weigh; a client could also queue a first message until the chat can be made.
 
 - A restarted hub forgets its replay cache: a signed request captured within the last 5 minutes could be replayed once
   after a restart. Only someone who sees the requests in the clear (the hub's operator, Cloudflare) could; the cache
