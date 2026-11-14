@@ -653,9 +653,38 @@ fn a_new_phone_restores_a_username_with_its_account_key() {
     assert_eq!(yos_from_user(&new.sync(0).unwrap(), a.user_id()), 1);
     // Any other key: the name is taken.
     assert_eq!(by_name(&hub, &name, None).err(), Some(Error::Refused(api::status::CONFLICT)));
-    // The key is the user's alone: it takes no other name.
+    // The key is the user's alone: with another name it is still that user, with its own name; the other is not taken.
     let other = format!("NOT{}", random_u64() % 100_000);
-    assert_eq!(by_name(&hub, &other, Some(old.account_secret())).err(), Some(Error::Refused(api::status::CONFLICT)));
+    let again = by_name(&hub, &other, Some(old.account_secret())).unwrap();
+    assert_eq!((again.user_id(), again.username()), (old.user_id(), Some(name.as_str())));
+    assert!(Client::username_free(&*Http::new(hub.url()), &other).unwrap());
+}
+
+/// A backup has the name the account had when it was made. Renamed since, and the old name taken by someone else:
+/// the account key from the backup still brings back the same user, with the name it has now (spec 6.4, 7).
+#[test]
+fn a_restore_after_a_rename_brings_back_the_same_user_with_its_new_name() {
+    let hub = TestHub::start();
+    let n = random_u64() % 100_000;
+    let (first, renamed) = (format!("Old{n}"), format!("New{n}"));
+    let mut old = by_name(&hub, &first, None).unwrap();
+    let secret = old.account_secret();
+    old.set_username(Some(&renamed)).unwrap();
+    // The old name free again: the restore with it is the same user, renamed, and does not take the old name back.
+    let mut phone = by_name(&hub, &first, Some(secret)).unwrap();
+    assert_eq!((phone.user_id(), phone.username()), (old.user_id(), Some(renamed.as_str())));
+    assert!(Client::username_free(&*Http::new(hub.url()), &first).unwrap());
+    assert_eq!(old.sync(0), Err(Error::Replaced));
+    // Someone else takes the old name; the next restore from the same backup still finds the account.
+    let mut stranger = by_name(&hub, &first, None).unwrap();
+    assert_ne!(stranger.user_id(), old.user_id());
+    let mut again = by_name(&hub, &first, Some(secret)).unwrap();
+    assert_eq!((again.user_id(), again.username()), (old.user_id(), Some(renamed.as_str())));
+    assert_eq!(phone.sync(0), Err(Error::Replaced));
+    stranger.sync(0).unwrap();
+    // Friends reach it by its new name.
+    stranger.send_yo(&renamed).unwrap();
+    assert_eq!(yos_from_user(&again.sync(0).unwrap(), stranger.user_id()), 1);
 }
 
 #[test]
@@ -832,12 +861,12 @@ fn registration_and_backups_are_limited_per_address() {
 fn an_account_key_belongs_to_one_user_forever() {
     let hub = TestHub::start();
     let (a, _, _, _) = pair(&hub);
-    // Another username cannot take A's account key.
+    // Another username cannot take A's account key: with it, it is A again, with A's name, and the other stays free.
     let other = username(random_u64() % 1_000_000_000);
-    assert_eq!(
-        Client::register_username(Http::new(hub.url()), &other, Some(a.account_secret()), None, Push::none()).err(),
-        Some(Error::Refused(api::status::CONFLICT))
-    );
+    let again =
+        Client::register_username(Http::new(hub.url()), &other, Some(a.account_secret()), None, Push::none()).unwrap();
+    assert_eq!((again.user_id(), again.username()), (a.user_id(), a.username()));
+    assert!(Client::username_free(&*Http::new(hub.url()), &other).unwrap());
 }
 
 #[test]

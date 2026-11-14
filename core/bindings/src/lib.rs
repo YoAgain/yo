@@ -558,8 +558,8 @@ impl YoClient {
 impl YoClient {
     /// Registers this device with a username (spec 6.4). `state_key`: 32 bytes the app keeps in its keychain.
     /// Without `account_secret`, a new account: the name must be free. With the 32-byte account secret from the backup
-    /// (spec 7), the name's account again, same user id, its other device replaced. `Refused { status: 409 }`: the
-    /// name is taken.
+    /// (spec 7), the key's account again, whatever the name: same user id, the name it has now (`username`), its
+    /// other device replaced. `Refused { status: 409 }`: the name is taken.
     #[uniffi::constructor]
     #[allow(clippy::too_many_arguments)]
     pub fn register_username(

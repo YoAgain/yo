@@ -450,6 +450,13 @@ fn migrate(conn: &mut Connection) -> rusqlite::Result<()> {
     tx.commit()
 }
 
+/// A user's username as it writes it (a name from before spellings: its skeleton), in a transaction.
+fn username_of(tx: &Transaction<'_>, user: &UserId) -> rusqlite::Result<Option<String>> {
+    tx.prepare_cached("SELECT coalesce(spelling, CAST(value AS TEXT)) FROM handles WHERE user_id = ?1 AND kind = ?2")?
+        .query_row(params![user, KIND_USERNAME], |row| row.get(0))
+        .optional()
+}
+
 /// Whether a skeleton is reserved, in a transaction.
 fn is_reserved(tx: &Transaction<'_>, skeleton: &[u8]) -> rusqlite::Result<bool> {
     tx.prepare_cached("SELECT 1 FROM reserved WHERE skeleton = CAST(?1 AS TEXT)")?.exists([skeleton])
@@ -573,11 +580,12 @@ impl Db {
             .optional()
     }
 
-    /// Registers a device for the user a username (by its skeleton) names (spec 6.4). A free name makes a new user,
-    /// `fresh`. A name is its user's again only with the user's current account key (a new phone restored from the
-    /// backup); with any other it is taken, and so is a reserved one nobody has. The account key becomes the user's
-    /// current key and stays the user's forever. The user's earlier devices are replaced. `spelling`: a new name as
-    /// written; a name the user has keeps its own.
+    /// Registers a device (spec 6.4). An account key that is a user's current key registers that user again (a new
+    /// phone restored from the backup), whatever name the request has: the user keeps the name it has now. Any other
+    /// key takes the name the request has (by its skeleton): a free name makes a new user, `fresh`; a name someone
+    /// has, or a reserved one nobody has, is taken; and a key once another user's stays that user's forever. The
+    /// user's earlier devices are replaced. `spelling`: a new name as written. Answers the user and its username as
+    /// it writes it.
     #[allow(clippy::too_many_arguments)]
     pub fn register(
         &self,
@@ -589,7 +597,7 @@ impl Db {
         key_packages: &[StoredKeyPackage],
         last_resort: &StoredKeyPackage,
         now: u64,
-    ) -> rusqlite::Result<Write<UserId>> {
+    ) -> rusqlite::Result<Write<(UserId, Option<String>)>> {
         let mut conn = self.conn();
         let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
         let taken = tx
@@ -600,44 +608,39 @@ impl Db {
         if taken {
             return Ok(Write::Refused(Conflict::DeviceTaken));
         }
-        let holder: Option<UserId> = tx
-            .prepare_cached("SELECT user_id FROM handles WHERE kind = ?1 AND value = ?2")?
-            .query_row(params![KIND_USERNAME, skeleton], |row| array(row.get(0)?))
-            .optional()?;
-        let user = match holder {
-            Some(user) => {
-                let current: Option<Key> = tx
-                    .prepare_cached("SELECT account_key FROM users WHERE id = ?1")?
-                    .query_row([&user], |row| array(row.get(0)?))
-                    .optional()?;
-                if current != Some(*account_key) {
-                    return Ok(Write::Refused(Conflict::UsernameTaken));
-                }
-                user
-            }
-            None if is_reserved(&tx, skeleton)? => {
-                return Ok(Write::Refused(Conflict::UsernameTaken));
-            }
-            None => *fresh,
-        };
-        let key_owner: Option<UserId> = tx
-            .prepare_cached("SELECT user_id FROM account_keys WHERE key = ?1")?
+        let restored: Option<UserId> = tx
+            .prepare_cached("SELECT id FROM users WHERE account_key = ?1")?
             .query_row([account_key], |row| array(row.get(0)?))
             .optional()?;
-        if key_owner.is_some_and(|owner| owner != user) {
-            return Ok(Write::Refused(Conflict::KeyTaken));
-        }
+        let user = match restored {
+            Some(user) => user,
+            None => {
+                let key_owner: Option<UserId> = tx
+                    .prepare_cached("SELECT user_id FROM account_keys WHERE key = ?1")?
+                    .query_row([account_key], |row| array(row.get(0)?))
+                    .optional()?;
+                if key_owner.is_some() {
+                    return Ok(Write::Refused(Conflict::KeyTaken));
+                }
+                let holder = tx
+                    .prepare_cached("SELECT 1 FROM handles WHERE kind = ?1 AND value = ?2")?
+                    .exists(params![KIND_USERNAME, skeleton])?;
+                if holder || is_reserved(&tx, skeleton)? {
+                    return Ok(Write::Refused(Conflict::UsernameTaken));
+                }
+                tx.execute(
+                    "INSERT INTO users (id, account_key, created_at) VALUES (?1, ?2, ?3)",
+                    params![fresh, account_key, now],
+                )?;
+                tx.execute("INSERT INTO account_keys (key, user_id) VALUES (?1, ?2)", params![account_key, fresh])?;
+                tx.execute(
+                    "INSERT INTO handles (kind, value, user_id, spelling) VALUES (?1, ?2, ?3, ?4)",
+                    params![KIND_USERNAME, skeleton, fresh, spelling],
+                )?;
+                *fresh
+            }
+        };
         retire_devices(&tx, &user, now)?;
-        tx.execute(
-            "INSERT INTO users (id, account_key, created_at) VALUES (?1, ?2, ?3)
-             ON CONFLICT (id) DO UPDATE SET account_key = excluded.account_key",
-            params![user, account_key, now],
-        )?;
-        tx.execute("INSERT OR IGNORE INTO account_keys (key, user_id) VALUES (?1, ?2)", params![account_key, user])?;
-        tx.execute(
-            "INSERT OR IGNORE INTO handles (kind, value, user_id, spelling) VALUES (?1, ?2, ?3, ?4)",
-            params![KIND_USERNAME, skeleton, user, spelling],
-        )?;
         tx.execute(
             "INSERT INTO devices
                  (id, user_id, device_key, auth_key, push_platform, push_token, created_at, last_seen_at, app)
@@ -656,8 +659,9 @@ impl Db {
         if let Some(conflict) = insert_key_packages(&tx, &device.device_id, key_packages, Some(last_resort))? {
             return Ok(Write::Refused(conflict));
         }
+        let username = username_of(&tx, &user)?;
         tx.commit()?;
-        Ok(Write::Done(user))
+        Ok(Write::Done((user, username)))
     }
 
     /// Claims a username (its skeleton and its spelling) for a device's user, giving up its old one; `None` only gives
@@ -747,12 +751,7 @@ impl Db {
                 }
             }
         }
-        let username: Option<String> = tx
-            .prepare_cached(
-                "SELECT coalesce(spelling, CAST(value AS TEXT)) FROM handles WHERE user_id = ?1 AND kind = ?2",
-            )?
-            .query_row(params![user, KIND_USERNAME], |row| row.get(0))
-            .optional()?;
+        let username = username_of(&tx, &user)?;
         tx.commit()?;
         Ok(Some(Found { user_id: user, account_key, device_keys, key_packages, username }))
     }
@@ -1421,7 +1420,7 @@ mod tests {
     }
 
     /// Registers device `n` for a username with account key `key`.
-    fn register(db: &Db, name: &[u8], key: u8, n: u8, now: u64) -> Write<UserId> {
+    fn register(db: &Db, name: &[u8], key: u8, n: u8, now: u64) -> Write<(UserId, Option<String>)> {
         let last_resort = StoredKeyPackage { hash: [n; 32], data: vec![n] };
         let spelling = std::str::from_utf8(name).unwrap();
         let skeleton = yo_wire::handle::skeleton(spelling);
@@ -1542,9 +1541,9 @@ mod tests {
         let _ = std::fs::remove_file(format!("{path}-shm"));
     }
 
-    fn user(written: Write<UserId>) -> UserId {
+    fn user(written: Write<(UserId, Option<String>)>) -> UserId {
         match written {
-            Write::Done(user) => user,
+            Write::Done((user, _)) => user,
             Write::Refused(conflict) => panic!("{conflict:?}"),
         }
     }
@@ -1559,8 +1558,36 @@ mod tests {
         assert!(db.device(&[1; 16]).unwrap().is_none());
         assert!(db.is_gone(&[1; 16]).unwrap());
         assert_eq!(db.device(&[3; 16]).unwrap().unwrap().user_id, first);
-        // The key cannot take a free name as another user.
-        assert!(matches!(register(&db, b"MIA", 1, 4, 0), Write::Refused(Conflict::KeyTaken)));
+        // The key cannot take a free name as another user: it registers its own user, with the name it has.
+        assert!(
+            matches!(register(&db, b"MIA", 1, 4, 0), Write::Done((user, Some(name))) if user == first && name == "LEO")
+        );
+        assert!(db.username_taken(b"LEO").unwrap() && !db.username_taken(b"MIA").unwrap());
+    }
+
+    /// A backup knows the name the account had when it was made. Renamed since, its name taken by someone else or
+    /// free again: the account key brings back the same user, with the name it has now (spec 6.4, 7).
+    #[test]
+    fn a_restore_finds_its_user_by_the_account_key_whatever_name_it_had() {
+        let db = Db::open(":memory:").unwrap();
+        let leo = user(register(&db, b"LEO", 1, 1, 0));
+        assert!(matches!(db.set_username(&[1; 16], Some((b"LEON", "Leon"))).unwrap(), Write::Done(())));
+        // The old name free: the restore does not take it back.
+        assert!(
+            matches!(register(&db, b"LEO", 1, 2, 0), Write::Done((user, Some(name))) if user == leo && name == "Leon")
+        );
+        assert!(!db.username_taken(b"LEO").unwrap());
+        // The old name someone else's now: still Leon.
+        let mia = user(register(&db, b"LEO", 3, 3, 0));
+        assert_ne!(mia, leo);
+        assert!(
+            matches!(register(&db, b"LEO", 1, 4, 0), Write::Done((user, Some(name))) if user == leo && name == "Leon")
+        );
+        assert_eq!(db.device(&[3; 16]).unwrap().unwrap().user_id, mia, "the stranger keeps the name and the device");
+        assert!(db.is_gone(&[2; 16]).unwrap());
+        // No name at all: the same user, without one.
+        assert!(matches!(db.set_username(&[4; 16], None).unwrap(), Write::Done(())));
+        assert!(matches!(register(&db, b"LEON", 1, 5, 0), Write::Done((user, None)) if user == leo));
     }
 
     #[test]

@@ -454,8 +454,9 @@ impl Client {
     // ---- registration and state ----
 
     /// Registers this device with a username (spec 6.4). Without `account_secret`, a new account with a new account
-    /// key: the name must be free. With the account key from the backup (spec 7), the name's user again: the user id
-    /// is the same, its other devices are replaced. `409` when the name is taken (or the key is another's).
+    /// key: the name must be free. With the account key from the backup (spec 7), its user again, whatever the name:
+    /// the user id is the same, the name the one it has now (`username`), its other devices are replaced. `409` when
+    /// the name is taken by another key.
     pub fn register_username(
         transport: Arc<dyn Transport>,
         username: &str,
@@ -523,6 +524,7 @@ impl Client {
             return Ok(());
         }
         let mut tries = 0;
+        let mut answered = true;
         while let Some(registering) = self.state.registering.clone() {
             if registering.sent {
                 let mine = Handle::account_key(&self.my_account_key());
@@ -530,6 +532,7 @@ impl Client {
                     Ok(found) if found.device_keys.iter().any(|k| k.as_slice() == self.own_device_key()) => {
                         self.state.user_id = hex(&found.user_id);
                         self.state.registering = None;
+                        answered = false;
                         break;
                     }
                     Ok(_) | Err(Error::Refused(status::UNAUTHORIZED)) | Err(Error::NotOnYo) => {}
@@ -549,10 +552,12 @@ impl Client {
         let restored = !self.state.storage_fetched;
         if restored {
             let _ = self.sync_storage_quietly();
-            // A name registered again (a new phone) keeps the spelling it had at the hub, whatever was typed now.
-            let me = Handle::user(&user_bytes(&self.state.user_id)?);
-            if let Ok((_, Some(spelled))) = self.lookup_named(&me, false, Vec::new()) {
-                self.state.username = Some(spelled);
+            // Registered without the hub's answer (it was lost): the name the user has now is asked for.
+            if !answered {
+                let me = Handle::user(&user_bytes(&self.state.user_id)?);
+                if let Ok((_, spelled)) = self.lookup_named(&me, false, Vec::new()) {
+                    self.state.username = spelled;
+                }
             }
         }
         self.persist()
@@ -666,6 +671,8 @@ impl Client {
         }
         let registered: api::Registered = decode(&response.body)?;
         self.state.user_id = hex(&registered.user_id);
+        // A restored account keeps the name it has at the hub now, whatever the backup had (spec 6.4).
+        self.state.username = registered.username.map(|name| String::from_utf8_lossy(name.as_slice()).into_owned());
         Ok(())
     }
 

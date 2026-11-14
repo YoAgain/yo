@@ -312,8 +312,9 @@ final class AccountStore {
     if let item { _ = try? await restore(synced: item) }
   }
 
-  /// Registers `username` at the hub (spec 6.4), or, with `secret`, takes the name's account back (a new phone). One at
-  /// a time, whichever way in (a second registration would replace the first).
+  /// Registers `username` at the hub (spec 6.4), or, with `secret`, takes the key's account back (a new phone), with
+  /// the name it has now: `username` then only counts if the key's account is gone. One at a time, whichever way in (a
+  /// second registration would replace the first).
   private func register(_ username: String, secret: Data?) async throws -> (client: YoClient, secret: Data) {
     // One at a time, and never over an account signed in meanwhile (another way in finished first).
     guard !registering, account == nil else { throw AccountError.busy }
@@ -653,12 +654,13 @@ final class AccountStore {
     }
   }
 
-  /// The account from its backup, and this phone registered for it with the account's key (spec 6.4).
+  /// The account from its backup, and this phone registered for it with the account's key (spec 6.4): the hub finds
+  /// the account by the key, not by the name the backup has (changed since, or taken by someone else).
   private func restore(_ opened: YoOpenedBackup) async throws {
     let sealed = try JSONDecoder().decode(BackupRecord.Sealed.self, from: opened.sealed)
     let (client, secret) = try await register(sealed.account.username, secret: sealed.accountKey)
     use(client, secret: secret)
-    // The name as the hub has it now (changed since the backup was made), the user id as registered. Another user id
+    // The name as the hub answered it (changed since the backup was made), the user id as registered. Another user id
     // (the name released after a year away, spec 6.4, and taken again with the same key) has no backup yet.
     var account = sealed.account
     account.username = client.username() ?? account.username
@@ -701,7 +703,7 @@ final class AccountStore {
     do {
       (client, secret) = try await register(item.username, secret: item.accountKey)
     } catch AccountError.taken {
-      SyncedAccount.delete(item.userID)  // the name has another key now: this item brings nothing back any more
+      SyncedAccount.delete(item.userID)  // its account is gone, the name another key's: nothing to bring back
       throw AccountError.noBackup
     }
     guard account == nil, let id = Hub.bytes(client.userId()) else { return false }

@@ -616,7 +616,9 @@ impl Hub {
             now_ms(),
         )?;
         match written {
-            Write::Done(user_id) => Ok(ok(encode(&api::Registered { user_id }))),
+            Write::Done((user_id, username)) => {
+                Ok(ok(encode(&api::Registered { user_id, username: username.map(|name| name.into_bytes().into()) })))
+            }
             Write::Refused(_) => Err(refuse(StatusCode::CONFLICT)),
         }
     }
@@ -692,8 +694,9 @@ type Peer = ConnectInfo<SocketAddr>;
 
 // ---- registration ----
 
-/// A username is all it takes (spec 6.4): first come, first served, limited per address. The name's user again with
-/// its current account key (a new phone restored from the backup), else `409`.
+/// A username is all it takes (spec 6.4): first come, first served, limited per address. A user's current account
+/// key registers that user again, with the name it has now (a new phone restored from the backup); a name taken is
+/// `409`.
 async fn register(
     State(hub): Hubs,
     ConnectInfo(peer): Peer,
