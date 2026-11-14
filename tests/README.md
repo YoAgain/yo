@@ -73,12 +73,15 @@ keeping, so a regression shows against them.
 | 2026-11-13, one core, SQLite `:memory:` | 22,147 | 2.8 / 5.8 ms | 1,669 Yos/s | 0 |
 | 2026-11-14, one core, SSD, `synchronous = NORMAL` (before) | 15,297 | 3.0 / 18.1 ms | 1,250 Yos/s | 0 |
 | 2026-11-14, one core, SSD, `synchronous = FULL` | 8,085 | 7.7 / 18.4 ms | 198 Yos/s | 0 |
+| 2026-11-14, one core, SSD, FULL, database work off the async workers | 8,086 | 7.6 / 18.8 ms | 235 Yos/s | 0 |
+| 2026-11-14, one core, SSD, FULL, acks without their own `fsync` | 7,935 | 7.7 / 20.4 ms | 705 Yos/s | 0 |
 
 Yops: Yos delivered per second, the only benchmark unit that says what it measures. Runs before the last three
 had the database in the temp dir, which is tmpfs here: in RAM. `YO_LOAD_DB` puts it elsewhere (a path, or
 `:memory:`). The bound is the one writer thread; a real disk costs about a third. With `synchronous = FULL` (since
 2026-11-14: an acknowledged write survives a power loss) every transaction waits for its `fsync`: group commit
-shares one among a batch of deliveries, a transaction of its own (an ack) pays one alone.
+shares one among a batch of deliveries, a transaction of its own pays one alone. An ack commits without one (the
+next commit's takes it along): lost to a power cut, it costs a repeat the device skips.
 
 ### Registration and backups
 
