@@ -223,8 +223,9 @@ final class AccountStore {
   private struct LegacySecret: Decodable { var accountKey: Data? }
 
   /// The core from the state it saved last, tried again while it cannot be read yet (the keychain or the file before
-  /// the first unlock, a passing error), a little later each time. A state that is gone or does not open: `broken`,
-  /// and the person signs in again (`recover`). A device replaced since (the account restored on another phone): out.
+  /// the first unlock, a passing error, a save that failed, a registration to finish without the hub), a little later
+  /// each time. A state that is gone or does not open: `broken`, and the person signs in again (`recover`). A device
+  /// replaced since (the account restored on another phone): out.
   private func open() async {
     guard !opening else { return }
     opening = true
@@ -236,7 +237,7 @@ final class AccountStore {
         return
       } catch YoError.Replaced {
         return reset()
-      } catch is YoError {
+      } catch let error as YoError where !Self.notNow(error) {
         broken = true  // does not open (sealed under another key, or damaged)
       } catch Unopened.gone {
         broken = true
@@ -244,6 +245,16 @@ final class AccountStore {
         try? await Task.sleep(for: .seconds(pause))  // not now
         pause = min(pause * 2, 30)
       }
+    }
+  }
+
+  /// An error opening a state that is there and reads: not saved (a full disk), or a registration to finish that did
+  /// not reach the hub now. Never a reason to sign in again, which would replace this device.
+  nonisolated private static func notNow(_ error: YoError) -> Bool {
+    switch error {
+    case .Save, .Network: true
+    case .Refused(let status): status == 426 || status == 429 || status >= 500
+    default: false
     }
   }
 
@@ -379,6 +390,23 @@ final class AccountStore {
     newPasskey = made
   }
 
+  /// A change of the backup (fetched, rewrapped, put) once the one before has ended: two at once would each put a
+  /// record over the other's (the start's `addAuthKeys` over a passkey just confirmed). `work` decides on the account
+  /// as it is then.
+  private func backupTurn<T>(_ work: @MainActor () async throws -> T) async rethrows -> T {
+    while backupBusy { await withCheckedContinuation { backupWaiting.append($0) } }
+    backupBusy = true
+    defer {
+      backupBusy = false
+      if !backupWaiting.isEmpty { backupWaiting.removeFirst().resume() }
+    }
+    return try await work()
+  }
+
+  /// A backup change under way (`backupTurn`), and those waiting for it.
+  private var backupBusy = false
+  private var backupWaiting: [CheckedContinuation<Void, Never>] = []
+
   /// After waiting for the person or the hub: still the account the step began with (not signed out, or out and in
   /// again meanwhile), else the step ends here.
   private func still(_ client: YoClient) throws {
@@ -392,11 +420,13 @@ final class AccountStore {
     guard let prf = try await passkeys.ask(salt: BackupRecord.prfSalt, only: credential).prf else {
       throw AccountError.noPRF
     }
-    try still(client)
-    if account?.secured == true {
-      try await rewrap(.set(prf))
-    } else {
-      try await saveBackup(prf: prf)
+    try await backupTurn {
+      try still(client)
+      if account?.secured == true {
+        try await rewrap(.set(prf))
+      } else {
+        try await saveBackup(prf: prf)
+      }
     }
     newPasskey = nil
   }
@@ -408,7 +438,7 @@ final class AccountStore {
   }
 
   /// The words kept: the backup opens with them.
-  func keepWords() async throws { try await saveBackup(prf: nil) }
+  func keepWords() async throws { try await backupTurn { try await saveBackup(prf: nil) } }
 
   /// The first backup: K under the words always (passkey and words are equal doors), under the passkey's PRF too;
   /// both doors' auth keys.
@@ -522,12 +552,15 @@ final class AccountStore {
   /// back from the iCloud Keychain) only tells how it opens; else the backup is made anew, the passkey's door left for
   /// the passkey (`confirmPasskey`). Tried again at the next start until it went.
   private func addAuthKeys() async {
-    guard let account, account.secured, account.codeAuth != true, let words = RecoveryWords.load() else { return }
-    do {
-      try await rewrap(.keep)
-    } catch AccountError.noBackup {
-      try? await makeAnew(words: words, prf: nil)
-    } catch {}
+    await backupTurn {
+      // As the account is now: a change made meanwhile (a passkey confirmed) may have done it already.
+      guard let account, account.secured, account.codeAuth != true, let words = RecoveryWords.load() else { return }
+      do {
+        try await rewrap(.keep)
+      } catch AccountError.noBackup {
+        try? await makeAnew(words: words, prf: nil)
+      } catch {}
+    }
   }
 
   /// A new backup with a new K: the words' door, and the passkey's when its PRF output is given. Without it, a passkey
@@ -550,15 +583,18 @@ final class AccountStore {
     guard let account, let client else { throw AccountError.noBackup }
     let answer = try await passkeys.ask(salt: BackupRecord.prfSalt)
     guard answer.userID == account.userID, let prf = answer.prf else { throw AccountError.noPRF }
-    try still(client)
-    if account.codeAuth == true {
-      try await rewrap(.set(prf))
-      return false
+    return try await backupTurn {
+      try still(client)
+      // As the backup is now: made anew meanwhile (at the start), the door goes under its K.
+      if self.account?.codeAuth == true {
+        try await rewrap(.set(prf))
+        return false
+      }
+      let words = RecoveryWords.load()
+      try await makeAnew(words: words ?? RecoveryCode.make(), prf: prf)
+      if words == nil { wordsSaved = false }
+      return words == nil
     }
-    let words = RecoveryWords.load()
-    try await makeAnew(words: words ?? RecoveryCode.make(), prf: prf)
-    if words == nil { wordsSaved = false }
-    return words == nil
   }
 
   /// A new passkey in place of the one there (made, then used once for its PRF output).
@@ -568,18 +604,20 @@ final class AccountStore {
     guard let prf = try await passkeys.ask(salt: BackupRecord.prfSalt, only: made.credentialID).prf else {
       throw AccountError.noPRF
     }
-    try still(client)
-    try await rewrap(.set(prf))
+    try await backupTurn {
+      try still(client)
+      try await rewrap(.set(prf))
+    }
   }
 
   /// The passkey no longer opens the backup; the words still do. (The passkey itself is deleted in the password
   /// manager.)
-  func removePasskey() async throws { try await rewrap(.remove) }
+  func removePasskey() async throws { try await backupTurn { try await rewrap(.remove) } }
 
   /// New recovery words; the old ones stop working (the hub forgets their locator).
   func newRecoveryKey() async throws -> [String] {
     let code = RecoveryCode.make()
-    try await rewrap(.keep, code: code)
+    try await backupTurn { try await rewrap(.keep, code: code) }
     wordsSaved = false
     return code
   }
