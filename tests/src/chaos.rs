@@ -390,7 +390,8 @@ fn new_acct(w: &World, idx: usize, rng: &mut Rng) -> Option<Acct> {
     w.stats.count("registered");
     let user = client.user_id().to_owned();
     // The same name in another look is taken (only now and then: each try spends the address's registrations).
-    if w.args.url.is_none() || rng.below(20) == 0 {
+    // Not on a shared hub: each try spends registrations other testers need (10 per address per hour).
+    if w.args.url.is_none() {
         for other in lookalikes(&name) {
             let probe = Proc::new(&w.net, &w.stats, 0, rng.next_u64());
             match Client::register_username(probe, &other, None, None, Push::none()) {

@@ -18,8 +18,9 @@ outboxes, every saved state opens, the hub's database has no orphan rows and eve
 ```sh
 YO_ENV="CARGO_TARGET_DIR=…" dev/cargo run --release -p yo-tests --bin yo-chaos -- \
   --seed 7 --accounts 2000 --threads 16 --seconds 600 --faults 20 --crashes 20 --restarts 3
-# against a hub by URL (its limits: few accounts, long):
-  … -- --url https://dev.justyo.app --accounts 100 --threads 4 --seconds 3600
+# against a hub by URL: a handful of accounts at most. Registrations are 10 per address per hour and shared with
+# everyone else testing from this address; lookalike probes are skipped there, a new phone tries once.
+  … -- --url https://dev.justyo.app --accounts 4 --threads 2 --seconds 3600
 ```
 
 With `--threads 1` a seed replays the same operations; with more, threads interleave as they will. Every violation is
@@ -36,8 +37,15 @@ messages a fault allowed to be lost that arrived anyway.
 | 12 | 1000 | 600 | 247,671 | 173,503 (288/s) | 171,751, 32 lost | 20,795, 5,029 | 2,689, 1,095, 3 | 46: finding 8 (the lost burst), driver issues since fixed | 1.9 GB |
 | 13 | 1200 | 900 | 358,653 | 254,492 (282/s) | 252,296, **0 lost** | 30,264, 7,468 | 4,003, 1,685, 4 | 4: finding 10 (order), a driver issue | 2.4 GB |
 | 14 | 1500 | 1200 | 426,600 | 294,368 (245/s) | 290,640, **0 lost** | 84,508 (4%), 13,283 (3%) | 5,072, 2,066, 5 | 2, both in the driver (since fixed) | 2.8 GB |
+| 16 | 2500 | 900 | 403,786 | 320,643 (354/s) | 318,247, **0 lost** | 39,795, 7,088 | 3,943, 1,561, 3 | 1: a whois raced a name being taken again (the driver's directory a moment behind) | 4.9 GB |
 
-Registration: 1000 accounts in 8.1 s (124/s), 1200 in 9.4 s, every lookalike (3,181) and reserved spelling refused.
+Against the dev hub (seed 101): 15 of 16 accounts registered over 52 minutes (its limit, 10 per address per hour;
+one real `503` from the hub on a registration), then 492 messages sent and 144 received before the driver stood still:
+a new phone waited for the next hour's registrations (since then it tries once on a shared hub). A second run was
+stopped to give the address's registrations back to the app testers. The accounts it left (names with `bpc`, `qwt`)
+have no backup and are released after 365 days.
+
+Registration: 1000 accounts in 8.1 s (124/s), 2500 in 20.2 s, every lookalike (3,181) and reserved spelling refused.
 A year later (prune at +366 days): every name without a backup released and free, every secured one kept. The
 hub's database audited after every run: no orphan rows, every blob with its file.
 
@@ -79,8 +87,8 @@ Not bugs, but noted:
   device per account; with more, a message needs an id of its own (device and counter), kept through a restart.
 - A renewed message keeps the later messages of its user *in the same chat* behind it; two chats with the same user
   (4.5, or a restart at the same time on both sides) are ordered each on its own.
-- `tests/CHAOS.md` runs are on one machine: 1500 accounts at once (2.8 GB for clients with full MLS state, hub and
-  ledger in one process) is where its 15 GB end; more accounts went through in sequence across runs.
+- The runs are on one machine: 2500 accounts at once (4.9 GB for clients with full MLS state, hub and ledger in one
+  process) is about where its 15 GB end.
 
 ## How a chat can die, besides
 
