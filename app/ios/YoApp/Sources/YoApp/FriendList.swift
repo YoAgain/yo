@@ -268,7 +268,7 @@ struct FriendList: View {
       }
   }
 
-  /// A request answered: yes makes a contact (or joins the group); no takes the bar off the list, blocked or not.
+  /// A request answered: yes makes a contact (or joins the group); no takes the bar off the list, a block into Blocked.
   private func answer(_ bar: Friend, yes: Bool, block: Bool = false) {
     guard let client = accounts.client else { return }
     Task {
@@ -287,11 +287,13 @@ struct FriendList: View {
         if let groups = try? await Hub.run({ client.groups() }) { withAnimation(.snappy) { friends.takeGroups(groups) } }
       } else {
         if block {
+          // Off the list and into Settings › Blocked, as any block (unblocked there, it is a request again).
           try? await Hub.run { try client.setBlocked(who: bar.target, blocked: true) }
+          withAnimation(.snappy) { friends.setBlocked(bar, true) }
         } else {
           try? await Hub.run { try client.decline(who: bar.target) }
+          withAnimation(.snappy) { friends.remove(bar) }
         }
-        withAnimation(.snappy) { friends.remove(bar) }
       }
     }
   }
