@@ -38,6 +38,20 @@ enum MediaStorage {
     return dir
   }
 
+  /// A manifest that is there and does not decode (damaged): kept aside under another name, never read as empty and
+  /// written over; what it named stays on disk (`isQuarantined`). Only a person can tell what it was. False when it
+  /// could not be moved: then nothing is read, nor written over it.
+  static func quarantine(_ url: URL) -> Bool {
+    let aside = url.deletingLastPathComponent().appending(
+      path: url.lastPathComponent + ".unreadable-\(Int(Date.now.timeIntervalSince1970))")
+    guard (try? FileManager.default.moveItem(at: url, to: aside)) != nil else { return false }
+    Perf.mark("media manifest unreadable: \(url.lastPathComponent) kept as \(aside.lastPathComponent)")
+    return true
+  }
+
+  /// A manifest kept aside (`quarantine`): whatever it named.
+  static func isQuarantined(_ name: String) -> Bool { name.contains(".unreadable-") }
+
   /// Writes off the main actor.
   static func write(_ data: Data, to url: URL, _ protection: Data.WritingOptions) async -> Bool {
     await Task.detached(priority: .utility) { (try? data.write(to: url, options: [.atomic, protection])) != nil }.value
@@ -129,7 +143,15 @@ final class MediaOutbox {
       guard let read = try? Data(contentsOf: Self.index) else { return false }
       data = read
     }
-    let read = data.flatMap { try? JSONDecoder().decode([Item].self, from: $0) } ?? []
+    var read: [Item] = []
+    if let data {
+      if let decoded = try? JSONDecoder().decode([Item].self, from: data) {
+        read = decoded
+      } else {
+        // Its blobs stay (nothing here deletes one it does not name).
+        guard MediaStorage.quarantine(Self.index) else { return false }
+      }
+    }
     items = read.filter { $0.held != true }
     for gone in read where gone.held == true { try? FileManager.default.removeItem(at: Self.blob(gone.id)) }
     loaded = true
@@ -470,7 +492,13 @@ final class ReceivedMedia {
     var migrated = false
     do {
       if let data = try Self.contents(manifest) {
-        found = (try? decoder.decode(Manifest.self, from: data)) ?? Manifest()
+        if let decoded = try? decoder.decode(Manifest.self, from: data) {
+          found = decoded
+        } else {
+          // Kept aside with all it named, never read as empty.
+          guard MediaStorage.quarantine(manifest) else { return false }
+          found = Manifest()
+        }
       } else {
         let (old, kept) = (try Self.contents(oldIndexes[0]), try Self.contents(oldIndexes[1]))
         found = Manifest(
@@ -493,10 +521,13 @@ final class ReceivedMedia {
     if (migrated || !written.isEmpty || !seen.isEmpty) && store() {
       oldIndexes.forEach { try? FileManager.default.removeItem(at: $0) }
     }
+    // What no note names goes, unless a damaged manifest was kept aside: then it may be what that one named.
     let keep = Set(saved.map { file($0.id, $0.kind).lastPathComponent } + ([manifest] + oldIndexes).map(\.lastPathComponent))
-    for url in (try? FileManager.default.contentsOfDirectory(at: directory, includingPropertiesForKeys: nil)) ?? []
-    where !keep.contains(url.lastPathComponent) {
-      try? FileManager.default.removeItem(at: url)
+    let files = (try? FileManager.default.contentsOfDirectory(at: directory, includingPropertiesForKeys: nil)) ?? []
+    if !files.contains(where: { MediaStorage.isQuarantined($0.lastPathComponent) }) {
+      for url in files where !keep.contains(url.lastPathComponent) {
+        try? FileManager.default.removeItem(at: url)
+      }
     }
     return true
   }
