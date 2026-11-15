@@ -1016,6 +1016,7 @@ enum SyncedAccount {
   /// The account in use here, written as it changes (signed in, so not signed out).
   static func save(_ account: Account, secret: Data, onlyIfMissing: Bool = false) {
     migrate()
+    pendingSignOut.remove(account.userID)  // in use here again: not signed out
     let previous = load(account.userID)
     if onlyIfMissing && previous != nil { return }
     // The words are readable only while the phone is unlocked (a launch in the background may come before): those
@@ -1052,9 +1053,20 @@ enum SyncedAccount {
     return try? JSONDecoder().decode(Item.self, from: data)
   }
 
-  /// Every account of this hub in the keychain, by name.
+  /// Every account of this hub in the keychain, by name; one whose sign-out or deletion the keychain has not taken yet
+  /// counts as signed out, or gone.
   static func all() -> [Item] {
     migrate()
+    retryPending()
+    let (signedOut, deleted) = (pendingSignOut, pendingDelete)
+    return stored().filter { !deleted.contains($0.userID) }.map { item in
+      var item = item
+      if signedOut.contains(item.userID) { item.signedOut = true }
+      return item
+    }
+  }
+
+  private static func stored() -> [Item] {
     var find = base
     find[kSecReturnAttributes as String] = true
     find[kSecReturnData as String] = true
@@ -1068,17 +1080,51 @@ enum SyncedAccount {
       .sorted { $0.username.localizedCaseInsensitiveCompare($1.username) == .orderedAscending }
   }
 
-  /// Signed out: kept, to be tapped on Sign In, never brought back silently.
+  /// Signed out: kept, to be tapped on Sign In, never brought back silently. One the keychain does not take now
+  /// (locked, a passing error) is noted on this phone, counted as signed out meanwhile, and marked at the next look
+  /// (`retryPending`).
   static func markSignedOut(_ userID: Data) {
-    guard var item = load(userID), item.signedOut != true else { return }
-    let previous = item
-    item.signedOut = true
-    write(item, previous: previous)
+    if !signOut(userID) { pendingSignOut.insert(userID) }
   }
 
-  /// The account deleted, or its name gone to another key: the item brings nothing back any more.
+  /// True once marked (or there is no item to mark).
+  private static func signOut(_ userID: Data) -> Bool {
+    let found: Data?
+    do { found = try Keychain.read(query(userID)) } catch { return false }
+    guard let found else { return true }
+    guard var item = try? JSONDecoder().decode(Item.self, from: found) else { return false }
+    guard item.signedOut != true else { return true }
+    let previous = item
+    item.signedOut = true
+    return write(item, previous: previous)
+  }
+
+  /// The account deleted, or its name gone to another key: the item brings nothing back any more. One the keychain
+  /// does not delete now is noted, never offered meanwhile, and deleted at the next look (`retryPending`).
   static func delete(_ userID: Data) {
-    SecItemDelete(query(userID) as CFDictionary)
+    let status = SecItemDelete(query(userID) as CFDictionary)
+    if status == errSecSuccess || status == errSecItemNotFound {
+      pendingDelete.remove(userID)
+    } else {
+      pendingDelete.insert(userID)
+    }
+  }
+
+  /// What the keychain did not take before, tried again.
+  static func retryPending() {
+    for id in pendingDelete { delete(id) }
+    for id in pendingSignOut where signOut(id) { pendingSignOut.remove(id) }
+  }
+
+  /// Sign-outs and deletions the keychain has not taken yet (this phone's preferences).
+  private static var pendingSignOut: Set<Data> {
+    get { Set(UserDefaults.standard.array(forKey: "account.pendingSignOut") as? [Data] ?? []) }
+    set { UserDefaults.standard.set(Array(newValue), forKey: "account.pendingSignOut") }
+  }
+
+  private static var pendingDelete: Set<Data> {
+    get { Set(UserDefaults.standard.array(forKey: "account.pendingDelete") as? [Data] ?? []) }
+    set { UserDefaults.standard.set(Array(newValue), forKey: "account.pendingDelete") }
   }
 
   /// Builds before one item per account kept one per hub (its host as the item's account): moved to the account's own.
