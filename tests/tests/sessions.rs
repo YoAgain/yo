@@ -59,8 +59,8 @@ fn lost_late_and_doubled_messages() {
     let sent = posted(&ha, b.user_id());
     let (late, next) = (sent[sent.len() - 2].clone(), sent[sent.len() - 1].clone());
     assert_eq!(texts(&b.sync(0).unwrap()), ["next"]);
-    assert_eq!(deliver_raw_with(&hub.url(), b.user_id(), b.contact_key_for_tests().as_deref(), late), 202);
-    assert_eq!(deliver_raw_with(&hub.url(), b.user_id(), b.contact_key_for_tests().as_deref(), next), 202);
+    assert_eq!(deliver_raw_with(&hub.url(), b.user_id(), b.access_key_for_tests().as_deref(), late), 202);
+    assert_eq!(deliver_raw_with(&hub.url(), b.user_id(), b.access_key_for_tests().as_deref(), next), 202);
     assert_eq!(texts(&b.sync(0).unwrap()), ["late"], "the late one once, the copy skipped");
     assert_eq!(b.dropped(), 0, "{:?}", b.drop_reasons());
     b.send(a.user_id(), text("all good")).unwrap();
@@ -126,7 +126,7 @@ fn a_first_message_opens_after_four_weeks_away() {
         b.set_clock(Arc::new(move || at));
         b.maintenance().unwrap();
     }
-    assert_eq!(deliver_raw_with(&hub.url(), b.user_id(), b.contact_key_for_tests().as_deref(), first), 202);
+    assert_eq!(deliver_raw_with(&hub.url(), b.user_id(), b.access_key_for_tests().as_deref(), first), 202);
     assert_eq!(texts(&b.sync(0).unwrap()), ["waiting"]);
     b.send(a.user_id(), text("back")).unwrap();
     assert_eq!(texts(&a.sync(0).unwrap()), ["back"]);
@@ -151,7 +151,7 @@ fn a_forged_payload_changes_nothing() {
     let forged =
         yo_core::sealed::testing::seal(&a.account_secret(), &certificate, &account, &yo_wire::encode(&payload))
             .unwrap();
-    assert_eq!(deliver_raw_with(&hub.url(), b.user_id(), b.contact_key_for_tests().as_deref(), forged), 202);
+    assert_eq!(deliver_raw_with(&hub.url(), b.user_id(), b.access_key_for_tests().as_deref(), forged), 202);
     assert!(texts(&b.sync(0).unwrap()).is_empty());
     assert_eq!(b.dropped(), 1);
     assert!(
@@ -205,7 +205,7 @@ fn a_device_key_the_hub_does_not_name_is_not_taken_in() {
     let forged =
         yo_core::sealed::testing::seal(&a.account_secret(), &certificate, &account, &yo_wire::encode(&payload))
             .unwrap();
-    assert_eq!(deliver_raw_with(&hub.url(), b.user_id(), b.contact_key_for_tests().as_deref(), forged), 202);
+    assert_eq!(deliver_raw_with(&hub.url(), b.user_id(), b.access_key_for_tests().as_deref(), forged), 202);
     // Another key at A's number: the hub's roster says it is not A's device there, so it is not even opened.
     assert!(texts(&b.sync(0).unwrap()).is_empty());
     let sessions = b.sessions_with(a.user_id());
@@ -233,7 +233,7 @@ fn a_stranger_named_by_a_payload_that_does_not_open_is_not_pinned() {
     let forged =
         yo_core::sealed::testing::seal(&a.account_secret(), &certificate, &account, &yo_wire::encode(&payload))
             .unwrap();
-    assert_eq!(deliver_raw_with(&hub.url(), b.user_id(), b.contact_key_for_tests().as_deref(), forged), 202);
+    assert_eq!(deliver_raw_with(&hub.url(), b.user_id(), b.access_key_for_tests().as_deref(), forged), 202);
     assert!(texts(&b.sync(0).unwrap()).is_empty());
     assert!(b.contacts().iter().all(|k| k.user != c.user_id()), "not pinned by a message that did not open");
 }
@@ -272,7 +272,7 @@ fn forgeries_cannot_use_up_the_lookups() {
         let forged =
             yo_core::sealed::testing::seal(&a.account_secret(), &certificate, &account, &yo_wire::encode(&payload))
                 .unwrap();
-        assert_eq!(deliver_raw_with(&hub.url(), b.user_id(), b.contact_key_for_tests().as_deref(), forged), 202);
+        assert_eq!(deliver_raw_with(&hub.url(), b.user_id(), b.access_key_for_tests().as_deref(), forged), 202);
         b.sync(0).unwrap();
         let _ = b.after_sync();
     }
@@ -316,7 +316,7 @@ fn a_new_phones_message_right_after_a_forgery_is_kept_not_lost() {
         let forged =
             yo_core::sealed::testing::seal(&a.account_secret(), &certificate, &account, &yo_wire::encode(&payload))
                 .unwrap();
-        assert_eq!(deliver_raw_with(&hub.url(), b.user_id(), b.contact_key_for_tests().as_deref(), forged), 202);
+        assert_eq!(deliver_raw_with(&hub.url(), b.user_id(), b.access_key_for_tests().as_deref(), forged), 202);
         b.sync(0).unwrap();
     }
     // Within the minute, A's new phone: the same account, a new device at A's number. Its message names a key B's

@@ -71,6 +71,18 @@ const KEPT_FOR_RETRY: usize = 64;
 /// from when it came (whatever time the clock shows), and fetches the next `sealed::REFRESH_MS` before.
 const CERTIFICATE_USED_MS: u64 = 23 * 3600 * 1000;
 
+/// A new profile key (Signal's, zkgroup): 32 bytes, sent to contacts (spec 4.10).
+fn new_profile_key() -> [u8; 32] {
+    let mut randomness = [0u8; 32];
+    rand::fill(&mut randomness);
+    zkgroup::profiles::ProfileKey::generate(randomness).get_bytes()
+}
+
+/// The access key a profile key gives (Signal's unidentified access key): what a delivery shows in `Yo-Access`.
+fn access_key(profile_key: &[u8; 32]) -> [u8; api::ACCESS_KEY_LEN] {
+    zkgroup::profiles::ProfileKey::create(*profile_key).derive_access_key()
+}
+
 /// The trust roots a client starts with: none (an app pins its hub's, `set_trust_roots`); under tests, the test hubs'.
 fn test_trust_roots() -> Vec<Key> {
     #[cfg(feature = "testing")]
@@ -289,7 +301,8 @@ pub struct Deliveries {
 }
 
 struct Delivery {
-    /// The recipient's contact key it shows: sealed sender; none, a request signed by this device (spec 4.10).
+    /// The recipient's profile key whose access key it shows: a contact's; none, a request signed by this device
+    /// (spec 4.10).
     access: Option<[u8; 32]>,
     /// Sealed with this device's sender certificate; else identified (none to hand), signed (spec 6.1).
     sealed: bool,
@@ -471,7 +484,7 @@ pub(crate) fn stored(event: Event) -> StoredEvent {
         Content::Retry => StoredContent::Unknown(yo_wire::content::TYPE_RETRY),
         Content::Group(_) => StoredContent::Unknown(yo_wire::content::TYPE_GROUP),
         Content::GroupAsk { .. } => StoredContent::Unknown(yo_wire::content::TYPE_GROUP_ASK),
-        Content::ContactKey(_) => StoredContent::Unknown(yo_wire::content::TYPE_CONTACT_KEY),
+        Content::ProfileKey(_) => StoredContent::Unknown(yo_wire::content::TYPE_PROFILE_KEY),
     };
     match event {
         Event::NewChat { user } => StoredEvent::NewChat { user },
@@ -545,7 +558,7 @@ fn shown(content: &Content) -> bool {
             | Content::Receipt
             | Content::Retry
             | Content::GroupAsk { .. }
-            | Content::ContactKey(_)
+            | Content::ProfileKey(_)
             | Content::Unknown(_)
     )
 }
@@ -696,10 +709,10 @@ impl Client {
         self.signed(method, path, body)
     }
 
-    /// For tests: this account's contact key as a delivery shows it (`Yo-Access`), once made.
+    /// For tests: this account's access key as a delivery shows it (`Yo-Access`), once its profile key is made.
     #[cfg(feature = "testing")]
-    pub fn contact_key_for_tests(&self) -> Option<String> {
-        self.state.contact_key.map(|key| yo_wire::b64(&key))
+    pub fn access_key_for_tests(&self) -> Option<String> {
+        self.state.profile_key.map(|key| yo_wire::b64(&access_key(&key)))
     }
 
     /// The account key's secret (Ed25519 seed): what the backup seals (spec 7), so a new phone registers with it.
@@ -787,9 +800,9 @@ impl Client {
             tokens: VecDeque::new(),
             tokens_after: 0,
             tokens_check: false,
-            contact_key: None,
+            profile_key: None,
             requests_open: true,
-            contact_key_told: false,
+            access_key_told: false,
             sender_certificate: None,
             certificate_clock: 0,
             registering: None,
@@ -1635,7 +1648,7 @@ impl Client {
             let contact = c.state.contacts.get_mut(&peer).ok_or(Error::Internal("contact"))?;
             contact.chat = true;
             contact.profile_due = c.state.name.is_some();
-            // Added from here: accepted, and told this account's contact key (spec 4.10).
+            // Added from here: accepted, and told this account's profile key (spec 4.10).
             if !contact.accepted {
                 contact.accepted = true;
                 contact.key_due = true;
@@ -1662,7 +1675,7 @@ impl Client {
         Ok(())
     }
 
-    /// Writing to someone accepts them (spec 4.10): they get this account's contact key and its name.
+    /// Writing to someone accepts them (spec 4.10): they get this account's profile key and its name.
     fn accept_writing(&mut self, user: &str) {
         let name = self.state.name.is_some();
         if let Some(contact) = self.state.contacts.get_mut(user).filter(|c| !c.accepted) {
@@ -1903,15 +1916,15 @@ impl Client {
             }
             let hash = yo_wire::devices::hash(&account_key, &named);
             let nonce = self.hub_nonce();
-            // The recipient's contact key, if they gave it (own copies: this account's): a contact's delivery, sealed
+            // The recipient's profile key, if they gave it (own copies: this account's): a contact's delivery, sealed
             // sender. Without it a request, signed by this device (spec 4.10).
             let access = match item.user == self.state.user_id {
-                true => self.state.contact_key,
-                false => self.state.contacts.get(&item.user).and_then(|c| c.their_key),
+                true => self.state.profile_key,
+                false => self.state.contacts.get(&item.user).and_then(|c| c.profile_key),
             };
             let mut headers = vec![(api::HEADER_DEVICES.to_owned(), yo_wire::b64(&hash))];
             if let Some(key) = access {
-                headers.push((api::HEADER_ACCESS.to_owned(), yo_wire::b64(&key)));
+                headers.push((api::HEADER_ACCESS.to_owned(), yo_wire::b64(&access_key(&key))));
             }
             // Identified only for want of a certificate: a payload too large to seal is dropped, never sent so.
             let envelope = match &certificate {
@@ -2023,9 +2036,9 @@ impl Client {
                     // A contact's key that changed (a block of someone else, a restored phone): forgotten, the new one
                     // may be in the inbox. Once more after the next receive, with the new key or as a request.
                     if let Some(contact) =
-                        self.state.contacts.get_mut(&item.user).filter(|c| c.their_key == item.access)
+                        self.state.contacts.get_mut(&item.user).filter(|c| c.profile_key == item.access)
                     {
-                        contact.their_key = None;
+                        contact.profile_key = None;
                     }
                     match self.state.outbox.iter_mut().find(|o| o.seq == item.seq) {
                         Some(kept) if item.access.is_some() && !kept.refused => {
@@ -2553,9 +2566,9 @@ impl Client {
         }
         match message.content {
             Content::Receipt => Ok(()),
-            Content::ContactKey(key) => {
+            Content::ProfileKey(key) => {
                 if let Some(contact) = self.state.contacts.get_mut(user) {
-                    contact.their_key = Some(key);
+                    contact.profile_key = Some(key);
                 }
                 Ok(())
             }
@@ -3078,7 +3091,7 @@ impl Client {
         self.answer_due()?;
         self.reapply_groups()?;
         self.refill()?;
-        self.contact_keys()?;
+        self.profile_keys()?;
         self.deliver()?;
         // After what waits went (identified, if the certificate is out of date): never a send held for it.
         self.refresh_certificate()?;
@@ -3114,25 +3127,23 @@ impl Client {
         self.refill()?;
         self.refill_tokens();
         self.send_profiles();
-        self.contact_keys()?;
+        self.profile_keys()?;
         self.deliver()?;
         self.sync_storage_quietly()
     }
 
     // ---- contacts and requests (spec 4.10) ----
 
-    /// This account's contact key: made once, its check told to the hub, and sent to every contact due it. A hub
+    /// This account's profile key: made once, its check told to the hub, and sent to every contact due it. A hub
     /// that cannot be reached now leaves the telling for later.
-    fn contact_keys(&mut self) -> Result<()> {
-        if self.state.contact_key.is_none() {
-            let mut key = [0u8; 32];
-            rand::fill(&mut key);
-            self.state.contact_key = Some(key);
-            // Contacts from before contact keys (or a phone restored): each gets it, else theirs come as requests.
+    fn profile_keys(&mut self) -> Result<()> {
+        if self.state.profile_key.is_none() {
+            self.state.profile_key = Some(new_profile_key());
+            // Contacts from before profile keys (or a phone restored): each gets it, else theirs come as requests.
             self.key_due_to_all();
             self.persist()?;
         }
-        let key = self.state.contact_key.expect("made above");
+        let key = self.state.profile_key.expect("made above");
         let me = self.state.user_id.clone();
         let due: Vec<String> = self
             .state
@@ -3142,12 +3153,12 @@ impl Client {
             .map(|(user, _)| user.clone())
             .collect();
         for user in &due {
-            self.queue(std::slice::from_ref(user), None, Content::ContactKey(key))?;
+            self.queue(std::slice::from_ref(user), None, Content::ProfileKey(key))?;
             if let Some(contact) = self.state.contacts.get_mut(user) {
                 (contact.key_due, contact.key_given) = (false, true);
             }
         }
-        if !self.state.contact_key_told {
+        if !self.state.access_key_told {
             // A new key goes to the contacts before the hub takes it (the old one counts no more from then on): the
             // contacts online have it in their inbox when their next delivery with the old one is refused.
             if !due.is_empty() {
@@ -3156,16 +3167,16 @@ impl Client {
                     other => other?,
                 }
             }
-            let body = encode(&api::ContactKey {
-                check: api::contact_check(&key),
+            let body = encode(&api::AccessKey {
+                check: api::access_check(&access_key(&key)),
                 requests_open: self.state.requests_open as u8,
             });
-            match self.signed("PUT", api::CONTACT_KEY, &body) {
+            match self.signed("PUT", api::ACCESS_KEY, &body) {
                 Ok(response) if response.status == status::NO_CONTENT => {
-                    self.state.contact_key_told = true;
+                    self.state.access_key_told = true;
                     self.persist()?;
                 }
-                Ok(response) => self.note(format!("contact key: {}", response.status)),
+                Ok(response) => self.note(format!("profile key: {}", response.status)),
                 Err(error) if retryable(&error) => {}
                 Err(error) => return Err(error),
             }
@@ -3201,7 +3212,7 @@ impl Client {
     }
 
     /// Says yes to a request (spec 4.10): from now on a contact; what waits for it goes, and it gets this account's
-    /// contact key, its name and a receipt.
+    /// profile key, its name and a receipt.
     pub fn accept(&mut self, who: &str) -> Result<Vec<Event>> {
         let result = (|| {
             let user = self.user_named(&Handle::parse(who)?)?.0;
@@ -3212,7 +3223,7 @@ impl Client {
             contact.receipt_due = contact.chat;
             contact.profile_due = name;
             self.persist()?;
-            self.contact_keys()?;
+            self.profile_keys()?;
             self.send_profiles();
             self.deliver()
         })();
@@ -3233,7 +3244,7 @@ impl Client {
         })
     }
 
-    /// Says yes to a group someone else added this account to: joined, and its members get the contact key.
+    /// Says yes to a group someone else added this account to: joined, and its members get the profile key.
     pub fn accept_group(&mut self, id: &str) -> Result<Vec<Event>> {
         let result = (|| {
             let group = self.state.groups.get_mut(id).ok_or(Error::Protocol("no such group"))?;
@@ -3243,7 +3254,7 @@ impl Client {
                 self.state.contacts.entry(member.clone()).or_insert_with(Contact::unknown).key_due = true;
             }
             self.persist()?;
-            self.contact_keys()?;
+            self.profile_keys()?;
             self.deliver()
         })();
         self.finish(result)
@@ -3252,22 +3263,20 @@ impl Client {
     /// Whether strangers may send requests (spec 4.10); off, the hub refuses them, and only contacts reach this account.
     pub fn set_requests_open(&mut self, open: bool) -> Result<()> {
         self.state.requests_open = open;
-        self.state.contact_key_told = false;
+        self.state.access_key_told = false;
         self.persist()?;
-        self.contact_keys()
+        self.profile_keys()
     }
 
     pub fn requests_open(&self) -> bool {
         self.state.requests_open
     }
 
-    /// A new contact key after a block: the blocked one's deliveries are requests from then on (refused while the
+    /// A new profile key after a block: the blocked one's deliveries are requests from then on (refused while the
     /// account takes none), every other contact gets the new key; the old one counts no more once the hub has it.
-    fn rotate_contact_key(&mut self) {
-        let mut key = [0u8; 32];
-        rand::fill(&mut key);
-        self.state.contact_key = Some(key);
-        self.state.contact_key_told = false;
+    fn rotate_profile_key(&mut self) {
+        self.state.profile_key = Some(new_profile_key());
+        self.state.access_key_told = false;
         self.key_due_to_all();
     }
 
@@ -3454,8 +3463,8 @@ impl Client {
         // brought back the state without it, and with it what they sent meanwhile.
         self.atomic(|c| {
             c.apply_block(&user, blocked);
-            if blocked && c.state.contact_key.is_some() {
-                c.rotate_contact_key();
+            if blocked && c.state.profile_key.is_some() {
+                c.rotate_profile_key();
             }
             if let Some(shown) = shown {
                 note_handle(c.state.contacts.get_mut(&user).expect("blocked"), shown);
@@ -3466,7 +3475,7 @@ impl Client {
         })?;
         // The new key out and told now: the blocked one's next delivery is a request (spec 4.10). "Not now": later.
         if blocked {
-            match self.contact_keys() {
+            match self.profile_keys() {
                 Err(error) if retryable(&error) => {}
                 other => other?,
             }

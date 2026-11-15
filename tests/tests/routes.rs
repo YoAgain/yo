@@ -618,7 +618,7 @@ fn deliveries_are_limited_per_address_and_per_inbox() {
     assert_eq!(yo_tests::deliver_raw(&hub.url(), b.user_id(), junk(3)), status::ACCEPTED, "another inbox has room");
     assert_eq!(a.sync(0).unwrap(), vec![]);
     a.after_sync().unwrap();
-    let key = a.contact_key_for_tests();
+    let key = a.access_key_for_tests();
     assert_eq!(
         yo_tests::deliver_raw_with(&hub.url(), a.user_id(), key.as_deref(), junk(4)),
         status::ACCEPTED,
@@ -857,7 +857,7 @@ fn a_yo_to_an_account_without_prekeys_is_outdated_and_waits() {
     let before = lookups();
     a.maintenance().unwrap();
     assert_eq!(lookups(), before, "not asked again within the hour");
-    assert_eq!(a.pending(), 2, "the Yo, and now the contact key behind it");
+    assert_eq!(a.pending(), 2, "the Yo, and now the profile key behind it");
     // The app updated: the account registers again with its key, a new device with prekeys.
     let mut phone = new_phone(Http::new(hub.url()), &b_name, &b);
     let later = yo_hub::now_ms() + 3600 * 1000 + 1;

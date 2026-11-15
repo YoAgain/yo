@@ -131,13 +131,14 @@ pub struct Contact {
     /// comes from them is a request: no receipt, no name goes to them. Contacts from before requests are accepted.
     #[serde(default = "yes")]
     pub accepted: bool,
-    /// Their contact key, as they sent it: shown on deliveries to them, so they come as a contact's.
-    #[serde(default)]
-    pub their_key: Option<[u8; 32]>,
-    /// This account's contact key is still to go to them (accepted, a group's member, or a new key after a block).
+    /// Their profile key, as they sent it: its access key shown on deliveries to them, so they come as a contact's.
+    /// A contact key from before is taken as their profile key, as they take theirs (32 bytes either way).
+    #[serde(default, alias = "their_key")]
+    pub profile_key: Option<[u8; 32]>,
+    /// This account's profile key is still to go to them (accepted, a group's member, or a new key after a block).
     #[serde(default)]
     pub key_due: bool,
-    /// The current contact key went to them (queued): not again until a new key.
+    /// The current profile key went to them (queued): not again until a new key.
     #[serde(default)]
     pub key_given: bool,
 }
@@ -168,7 +169,7 @@ impl Contact {
             resent_at: 0,
             outdated_at: 0,
             accepted: false,
-            their_key: None,
+            profile_key: None,
             key_due: false,
             key_given: false,
         }
@@ -382,15 +383,17 @@ pub struct State {
     pub tokens_after: u64,
     /// The hub refused a token: its key is asked for at the next refill, whatever the stash.
     pub tokens_check: bool,
-    /// This account's contact key (spec 4.10): its contacts show it on deliveries; none yet before the first sync.
-    #[serde(default)]
-    pub contact_key: Option<[u8; 32]>,
+    /// This account's profile key (spec 4.10): its contacts show its access key on deliveries; none yet before the
+    /// first sync. The contact key from before is kept as it (the contacts have it already); only its check is told
+    /// anew (`access_key_told` starts false).
+    #[serde(default, alias = "contact_key")]
+    pub profile_key: Option<[u8; 32]>,
     /// Whether strangers may send requests at all.
     #[serde(default = "yes")]
     pub requests_open: bool,
-    /// The hub has the check of `contact_key` and `requests_open` as they are.
+    /// The hub has the check of `profile_key`'s access key and `requests_open` as they are.
     #[serde(default)]
-    pub contact_key_told: bool,
+    pub access_key_told: bool,
     /// This device's sender certificate from the hub (spec 6.1), and when (this clock, ms) it came: used for a day
     /// less `sealed::REFRESH_MS` of this clock from then, whatever time the clock shows.
     #[serde(default)]
@@ -510,6 +513,15 @@ pub fn unhex(text: &str) -> Option<Vec<u8>> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_contact_key_from_before_is_the_profile_key() {
+        use super::Contact;
+        let contact = Contact { profile_key: Some([7; 32]), ..Contact::unknown() };
+        let json = serde_json::to_string(&contact).unwrap().replace("\"profile_key\"", "\"their_key\"");
+        assert!(json.contains("their_key"));
+        assert_eq!(serde_json::from_str::<Contact>(&json).unwrap().profile_key, Some([7; 32]));
+    }
+
     use super::compact;
     use std::collections::VecDeque;
 

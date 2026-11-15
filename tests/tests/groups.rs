@@ -141,11 +141,11 @@ fn two_changes_at_once_end_the_same_everywhere() {
             .unwrap()
     };
     assert_eq!(
-        deliver_raw_with(&hub.url(), c.user_id(), c.contact_key_for_tests().as_deref(), held(&transports[1], &to_c)),
+        deliver_raw_with(&hub.url(), c.user_id(), c.access_key_for_tests().as_deref(), held(&transports[1], &to_c)),
         202
     );
     assert_eq!(
-        deliver_raw_with(&hub.url(), b.user_id(), b.contact_key_for_tests().as_deref(), held(&transports[2], &to_b)),
+        deliver_raw_with(&hub.url(), b.user_id(), b.access_key_for_tests().as_deref(), held(&transports[2], &to_b)),
         202
     );
     for _ in 0..3 {
@@ -297,11 +297,11 @@ fn two_removing_each_other_at_once_end_the_same() {
             .unwrap()
     };
     assert_eq!(
-        deliver_raw_with(&hub.url(), c.user_id(), c.contact_key_for_tests().as_deref(), held(&transports[1], &to_c)),
+        deliver_raw_with(&hub.url(), c.user_id(), c.access_key_for_tests().as_deref(), held(&transports[1], &to_c)),
         202
     );
     assert_eq!(
-        deliver_raw_with(&hub.url(), b.user_id(), b.contact_key_for_tests().as_deref(), held(&transports[2], &to_b)),
+        deliver_raw_with(&hub.url(), b.user_id(), b.access_key_for_tests().as_deref(), held(&transports[2], &to_b)),
         202
     );
     for _ in 0..3 {
@@ -698,8 +698,8 @@ fn a_lost_change_is_made_again_on_the_winner() {
             .unwrap()
     };
     let (to_z, to_l) = (held(leo_t, &to_zoe), held(zoe_t, &to_leo));
-    assert_eq!(deliver_raw_with(&hub.url(), zoe.user_id(), zoe.contact_key_for_tests().as_deref(), to_z), 202);
-    assert_eq!(deliver_raw_with(&hub.url(), leo.user_id(), leo.contact_key_for_tests().as_deref(), to_l), 202);
+    assert_eq!(deliver_raw_with(&hub.url(), zoe.user_id(), zoe.access_key_for_tests().as_deref(), to_z), 202);
+    assert_eq!(deliver_raw_with(&hub.url(), leo.user_id(), leo.access_key_for_tests().as_deref(), to_l), 202);
     for _ in 0..3 {
         for x in [&mut *zoe, &mut *leo, &mut *mia, &mut *ben, &mut *noah] {
             take(x);

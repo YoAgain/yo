@@ -145,7 +145,7 @@ fn friends(hub: &TestHub) -> (Phone, Phone) {
     assert_eq!(yos(&b.drain(), &a.user()), 1);
     b.send_yo(a.user()).unwrap();
     assert_eq!(yos(&a.drain(), &b.user()), 1);
-    // Each has the other's contact key (spec 4.10).
+    // Each has the other's profile key (spec 4.10).
     b.drain();
     a.drain();
     (a, b)
@@ -660,7 +660,7 @@ fn silent_receipts_heal_a_one_way_stream() {
         a.send_yo(b.user()).unwrap();
         assert_eq!(yos(&b.drain(), &a.user()), 1, "round {round}");
         a.drain();
-        // Each round's Yo, the last one sent: the contact key may go in a round's chain too.
+        // Each round's Yo, the last one sent: the profile key may go in a round's chain too.
         keys.push(ratchets(&a, &b).pop().unwrap());
     }
     assert_eq!(*kinds(&a, &b).last().unwrap(), 0, "acknowledged: plain session messages");

@@ -1,5 +1,5 @@
 //! Contact requests (spec 4.10): what comes from someone not yet a contact waits as a request, signed by its sender;
-//! a contact shows the account's contact key to the hub instead (sealed sender). The hub takes requests only as the
+//! a contact shows the account's profile key to the hub instead (sealed sender). The hub takes requests only as the
 //! account allows and only so many a day per sender.
 
 use std::sync::Arc;
@@ -38,7 +38,7 @@ fn accepted(of: &Client, who: &Client) -> Option<bool> {
     of.contacts().iter().find(|c| c.user == who.user_id()).map(|c| c.accepted)
 }
 
-/// Everything waiting either way taken in: each has the other's contact key.
+/// Everything waiting either way taken in: each has the other's profile key.
 fn settle(clients: &mut [&mut Client]) {
     for _ in 0..2 {
         for c in clients.iter_mut() {
@@ -137,7 +137,7 @@ fn with_requests_off_only_contacts_reach_the_account() {
     assert_eq!(accepted(&b, &c), Some(false));
 }
 
-/// What `of` sent to `to`'s inbox signed by its device (a request) and showing a contact key (sealed sender).
+/// What `of` sent to `to`'s inbox signed by its device (a request) and showing a profile key (sealed sender).
 fn kinds(of: &Http, to: &Client) -> (usize, usize) {
     let path = api::deliver_path(&user_id(to.user_id()));
     let recorded = of.recorded.lock().unwrap();
@@ -307,4 +307,25 @@ fn an_invite_to_a_group_from_a_stranger_is_a_request() {
     settle(&mut [&mut c]);
     c.send_yo(b.user_id()).unwrap();
     assert_eq!((c.waiting(), c.dropped()), (0, 0), "{:?}", c.drop_reasons());
+}
+
+/// Spec 4.10: what a contact shows the hub is Signal's access key (16 bytes), derived from the recipient's profile key;
+/// a block makes a new profile key, so a new access key, and the old one makes a delivery no contact's any more.
+#[test]
+fn the_access_key_comes_from_the_profile_key_and_a_block_replaces_it() {
+    let hub = TestHub::start();
+    let (mut a, ha, _) = account(&hub, "Ann");
+    let (mut b, _, b_name) = account(&hub, "Ben");
+    friends(&mut a, &mut b, &b_name);
+    let shown = yo_tests::access_shown(&ha, b.user_id()).expect("a contact's delivery");
+    assert_eq!(Some(shown.clone()), b.access_key_for_tests());
+    assert_eq!(yo_wire::unb64(&shown).unwrap().len(), api::ACCESS_KEY_LEN);
+    // B blocks someone else: a new profile key, a new access key; unsigned with the old one, nothing is taken.
+    let (c, _, _) = account(&hub, "Cleo");
+    b.set_blocked(c.user_id(), true).unwrap();
+    let new = b.access_key_for_tests().unwrap();
+    assert_ne!(new, shown);
+    let envelope = yo_tests::junk(1);
+    assert_ne!(yo_tests::deliver_raw_with(&hub.url(), b.user_id(), Some(&shown), envelope.clone()), 202);
+    assert_eq!(yo_tests::deliver_raw_with(&hub.url(), b.user_id(), Some(&new), envelope), 202);
 }

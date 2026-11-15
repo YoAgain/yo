@@ -34,8 +34,10 @@ voprf = { version = "=0.5.0", default-features = false, features = ["alloc"] }
 p384 = { version = "=0.13.1", default-features = false, features = ["arithmetic", "hash2curve", "voprf"] }
 rand_core = { version = "=0.6.4", features = ["getrandom"] }
 # libsignal (AGPL-3.0) for the sessions: PQXDH, the Double Ratchet with SPQR. Its tag here, its commit in Cargo.lock (--locked).
-# Only the client core links it, never the hub.
+# The client core links it, and the hub for its sender certificates (spec 6.1).
 libsignal-protocol = { git = "https://github.com/signalapp/libsignal", tag = "v0.108.0" }
+# Its profile key and the access key derived from it (spec 4.10), from the same tag (AGPL-3.0 too).
+zkgroup = { git = "https://github.com/signalapp/libsignal", tag = "v0.108.0" }
 async-trait = "=0.1.92"
 rand = "=0.9.5"
 

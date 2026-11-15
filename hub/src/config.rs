@@ -28,7 +28,7 @@ pub struct Limits {
     pub register_per_ip_hour: u32,
     /// Whether a username is free, asked while it is typed (spec 6.3).
     pub name_check_per_ip_minute: u32,
-    /// Requests (signed deliveries without the recipient's contact key) one sender sends one recipient a day
+    /// Requests (signed deliveries without the recipient's profile key) one sender sends one recipient a day
     /// (spec 4.10).
     pub requests_per_pair_day: u64,
     /// Recipients one sender sends requests to a day (spec 4.10).

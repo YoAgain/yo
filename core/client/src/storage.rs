@@ -335,7 +335,7 @@ impl Client {
             self.apply_block(&user, blocked);
         }
         // Friends kept there that this device does not know (a restored phone): contacts, accepted (spec 4.10), and
-        // due the contact key. One it knows keeps its own say: a request stays one.
+        // due the profile key. One it knows keeps its own say: a request stays one.
         let friends: Vec<String> = self
             .state
             .storage

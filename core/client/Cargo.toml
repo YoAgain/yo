@@ -28,5 +28,6 @@ voprf = { workspace = true }
 p384 = { workspace = true }
 rand_core = { workspace = true }
 libsignal-protocol = { workspace = true }
+zkgroup = { workspace = true }
 async-trait = { workspace = true }
 rand = { workspace = true }

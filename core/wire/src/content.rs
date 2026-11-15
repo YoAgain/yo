@@ -28,9 +28,9 @@ pub const TYPE_RETRY: u16 = 7;
 pub const TYPE_GROUP: u16 = 8;
 /// Silent: the sender knows a newer revision of a group than this: it is asked for (spec 4.9).
 pub const TYPE_GROUP_ASK: u16 = 9;
-/// The sender's contact key (spec 4.10): with it, the receiver's deliveries to the sender are a contact's, not a
+/// The sender's profile key (spec 4.10): with it, the receiver's deliveries to the sender are a contact's, not a
 /// request. Never shown.
-pub const TYPE_CONTACT_KEY: u16 = 10;
+pub const TYPE_PROFILE_KEY: u16 = 10;
 
 /// A group's id: 16 random bytes its creator chooses.
 pub const GROUP_ID_LEN: usize = 16;
@@ -133,9 +133,9 @@ pub enum Content {
     GroupAsk {
         id: GroupId,
     },
-    /// The sender's contact key: what the receiver shows the hub so that its deliveries to the sender are a contact's
+    /// The sender's profile key: what the receiver shows the hub so that its deliveries to the sender are a contact's
     /// (spec 4.10). Never shown.
-    ContactKey([u8; 32]),
+    ProfileKey([u8; 32]),
     /// A type this version does not know: newer apps may send it.
     Unknown(u16),
 }
@@ -215,7 +215,7 @@ struct Group {
 }
 
 #[derive(TlsSerialize, TlsDeserializeBytes, TlsSize)]
-struct ContactKeyBody {
+struct ProfileKeyBody {
     key: [u8; 32],
 }
 
@@ -318,7 +318,7 @@ impl Message {
                 (TYPE_GROUP, crate::encode(&group))
             }
             Content::GroupAsk { id } => (TYPE_GROUP_ASK, crate::encode(&GroupAsk { id: *id })),
-            Content::ContactKey(key) => (TYPE_CONTACT_KEY, crate::encode(&ContactKeyBody { key: *key })),
+            Content::ProfileKey(key) => (TYPE_PROFILE_KEY, crate::encode(&ProfileKeyBody { key: *key })),
             Content::Unknown(_) => return Err(Error::Unsupported),
         };
         Ok(crate::encode(&Wire { version: CONTENT_VERSION, sent_at: self.sent_at_ms, kind, body: body.into() }))
@@ -356,7 +356,7 @@ impl Message {
                 Content::Group(GroupInfo { id, revision, by, name, members })
             }
             TYPE_GROUP_ASK => Content::GroupAsk { id: crate::decode::<GroupAsk>(body)?.id },
-            TYPE_CONTACT_KEY => Content::ContactKey(crate::decode::<ContactKeyBody>(body)?.key),
+            TYPE_PROFILE_KEY => Content::ProfileKey(crate::decode::<ProfileKeyBody>(body)?.key),
             other => Content::Unknown(other),
         };
         Ok(Message { sent_at_ms: wire.sent_at, group, content })

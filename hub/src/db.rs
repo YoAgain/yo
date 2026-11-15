@@ -262,8 +262,10 @@ CREATE TABLE IF NOT EXISTS feedback (
     auto INTEGER NOT NULL DEFAULT 0
 );
 CREATE INDEX IF NOT EXISTS feedback_by_user ON feedback(user_id);
--- Each user's contact key as a check, never the key (spec 4.10): a delivery that shows it is a contact's; else it
--- is a request, signed by its sender, taken only while `requests_open`. Gone with the account.
+-- Each user's access key as a check, never the key (spec 4.10): a delivery that shows it is a contact's; else it
+-- is a request, signed by its sender, taken only while `requests_open`. Gone with the account. (The table keeps its
+-- name from the contact keys before Signal's access keys: a check of the old kind matches no delivery, and every
+-- client tells its new one.)
 CREATE TABLE IF NOT EXISTS contact_keys (
     user_id BLOB PRIMARY KEY REFERENCES users(id),
     current BLOB NOT NULL,
@@ -446,7 +448,7 @@ const SCHEMA_VERSION: i64 = 2;
 /// What a delivery is to its recipient (spec 4.10, `Db::admit`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Admission {
-    /// It shows the recipient's contact key, or the recipient has none.
+    /// It shows the recipient's profile key, or the recipient has none.
     Contact,
     /// A request of this sender, taken.
     Request,
@@ -506,7 +508,7 @@ fn is_reserved(tx: &Transaction<'_>, skeleton: &[u8]) -> rusqlite::Result<bool> 
     tx.prepare_cached("SELECT 1 FROM reserved WHERE skeleton = CAST(?1 AS TEXT)")?.exists([skeleton])
 }
 
-/// The contact keys of before requests were signed (spec 4.10): the check before a change and the count per
+/// The profile keys of before requests were signed (spec 4.10): the check before a change and the count per
 /// recipient go.
 fn without_grace(conn: &Connection) -> rusqlite::Result<()> {
     let has = conn.prepare("SELECT 1 FROM pragma_table_info('contact_keys') WHERE name = 'previous'")?.exists([])?;
@@ -770,9 +772,9 @@ impl Db {
         Ok(Write::Done(()))
     }
 
-    /// A user's contact key check and whether it takes requests (spec 4.10). A changed check counts at once: the
+    /// A user's profile key check and whether it takes requests (spec 4.10). A changed check counts at once: the
     /// one before does no more.
-    pub fn set_contact_key(&self, user: &UserId, check: &[u8; 32], requests_open: bool) -> rusqlite::Result<()> {
+    pub fn set_access_key(&self, user: &UserId, check: &[u8; 32], requests_open: bool) -> rusqlite::Result<()> {
         self.conn()
             .prepare_cached(
                 "INSERT INTO contact_keys (user_id, current, requests_open) VALUES (?1, ?2, ?3)
@@ -782,8 +784,8 @@ impl Db {
         Ok(())
     }
 
-    /// What a delivery to `user` is (spec 4.10): a contact's when it shows the contact key (`check` of what it shows),
-    /// or when the user has none yet (an app from before contact keys); else a request of `sender` (who signed it),
+    /// What a delivery to `user` is (spec 4.10): a contact's when it shows the profile key (`check` of what it shows),
+    /// or when the user has none yet (an app from before profile keys); else a request of `sender` (who signed it),
     /// unless the user takes none, it is unsigned, or the sender's are taken today: `per_pair` to this user,
     /// `recipients` other users. Only reads: a request is counted once stored (`count_request`), so refused
     /// deliveries spend no allowance.
@@ -801,7 +803,8 @@ impl Db {
             .query_row([user], |row| Ok((row.get(0)?, row.get(1)?)))
             .optional()?;
         let Some((current, open)) = row else { return Ok(Admission::Contact) };
-        if shown.is_some_and(|shown| current == shown) {
+        // In constant time, as Signal compares an access key.
+        if shown.is_some_and(|shown| same(&current, &shown)) {
             return Ok(Admission::Contact);
         }
         let Some(sender) = sender.filter(|_| open) else { return Ok(Admission::Closed) };
@@ -1490,6 +1493,11 @@ impl Db {
     }
 }
 
+/// Two byte strings equal, in constant time for their length.
+fn same(a: &[u8], b: &[u8]) -> bool {
+    a.len() == b.len() && std::hint::black_box(a.iter().zip(b).fold(0u8, |d, (x, y)| d | (x ^ y))) == 0
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1972,7 +1980,7 @@ mod tests {
         }
     }
 
-    /// Contact keys of before signed requests (spec 4.10): the check before a change and the count per recipient go;
+    /// Profile keys of before signed requests (spec 4.10): the check before a change and the count per recipient go;
     /// the current check stays and counts alone.
     #[test]
     fn a_database_with_the_old_contact_keys_loses_the_grace() {
@@ -2021,7 +2029,7 @@ mod tests {
         let db = Db::open(":memory:").unwrap();
         let users: Vec<UserId> = (1..=4u8).map(|i| user(register(&db, &[b'A' + i; 3], i, i, 0))).collect();
         for to in &users[1..] {
-            db.set_contact_key(to, &[9; 32], true).unwrap();
+            db.set_access_key(to, &[9; 32], true).unwrap();
         }
         let (spam, leo, mia, ben) = (&users[0], &users[1], &users[2], &users[3]);
         let limits = (3, 2, 4);
@@ -2037,7 +2045,7 @@ mod tests {
         db.count_request(spam, mia, 0).unwrap();
         assert_eq!(db.admit(ben, None, Some(spam), 0, limits).unwrap(), Admission::Full, "a third recipient");
         assert_eq!(db.admit(leo, None, Some(spam), DAY_MS, limits).unwrap(), Admission::Request, "the next day");
-        db.set_contact_key(leo, &[9; 32], false).unwrap();
+        db.set_access_key(leo, &[9; 32], false).unwrap();
         assert_eq!(db.admit(leo, None, Some(mia), 0, limits).unwrap(), Admission::Closed, "takes none");
     }
 

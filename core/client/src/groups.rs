@@ -405,7 +405,7 @@ impl Client {
             };
             // Left (a request said no to among them): its members get nothing more, the key neither.
             if !left {
-                c.contact_key_due(&group.members);
+                c.profile_key_due(&group.members);
             }
             c.state.groups.insert(id.to_owned(), group);
             c.push_event(Event::GroupChanged { group: id.to_owned() });
@@ -549,9 +549,9 @@ impl Client {
         let members = group.members.clone();
         let joined = group.accepted && !group.left;
         self.state.groups.insert(id.clone(), group);
-        // Its members get this account's contact key, so their Yos to the group come as a contact's (spec 4.10).
+        // Its members get this account's profile key, so their Yos to the group come as a contact's (spec 4.10).
         if joined {
-            self.contact_key_due(&members);
+            self.profile_key_due(&members);
         }
         self.push_event(Event::GroupChanged { group: id.clone() });
         // Yos held from one not in the group then: shown if this change has them in it, else dropped; never one of a
@@ -689,8 +689,8 @@ impl Client {
 }
 
 impl Client {
-    /// This account's contact key is to go to these users (all but itself), as members of a group it is in.
-    pub(crate) fn contact_key_due(&mut self, users: &[String]) {
+    /// This account's profile key is to go to these users (all but itself), as members of a group it is in.
+    pub(crate) fn profile_key_due(&mut self, users: &[String]) {
         for user in users.iter().filter(|u| **u != self.state.user_id) {
             let contact = self.state.contacts.entry(user.clone()).or_insert_with(crate::state::Contact::unknown);
             // Once per key: a group's every change need not send it again.

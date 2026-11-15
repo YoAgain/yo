@@ -25,8 +25,8 @@ pub const STORAGE: &str = "/v1/storage";
 pub const BLOBS: &str = "/v1/blobs";
 /// `POST`: Privacy Pass tokens for deliveries, issued in a batch (spec 6.10, `token`).
 pub const TOKENS: &str = "/v1/tokens";
-/// `PUT`, signed: the check of the account's contact key and whether strangers may send requests (spec 4.10).
-pub const CONTACT_KEY: &str = "/v1/contact-key";
+/// `PUT`, signed: the check of the account's access key and whether strangers may send requests (spec 4.10).
+pub const ACCESS_KEY: &str = "/v1/access-key";
 /// `GET`, signed: a sender certificate for the signing device (spec 6.1), libsignal's `SenderCertificate`.
 pub const CERTIFICATE: &str = "/v1/certificate";
 /// The public key of the hub's sender-certificate trust root, 32 bytes (spec 6.1): for tools; apps pin their own copy.
@@ -67,8 +67,9 @@ pub fn deliver_path(user: &UserId) -> String {
 
 /// The header of a delivery naming the devices it was encrypted for (spec 4.4): base64url of `devices::hash`.
 pub const HEADER_DEVICES: &str = "yo-devices";
-/// On a delivery: the recipient's contact key (base64url, 32 bytes), as its contacts have it; without it, or with
-/// another, the delivery is a request (spec 4.10). It names no sender: every contact has the same key.
+/// On a delivery: the recipient's access key (base64url, 16 bytes: Signal's unidentified access key, derived from its
+/// profile key), as its contacts have it; without it, or with another, the delivery is a request (spec 4.10). It
+/// names no sender: every contact has the same key.
 pub const HEADER_ACCESS: &str = "yo-access";
 
 /// `GET /v1/backup/{id}`: by the user id or by the recovery code's locator (spec 7).
@@ -167,20 +168,23 @@ pub struct Registered {
     pub device_id: u8,
 }
 
-/// The account's contact key as the hub keeps it: `SHA-256("yo contact key" || key)`, never the key; and whether
-/// deliveries without it (requests from strangers) are taken at all (spec 4.10).
+/// The account's access key as the hub keeps it: `access_check`, never the key; and whether deliveries without it
+/// (requests from strangers) are taken at all (spec 4.10).
 #[derive(Debug, Clone, PartialEq, Eq, TlsSerialize, TlsDeserializeBytes, TlsSize)]
-pub struct ContactKey {
+pub struct AccessKey {
     pub check: [u8; 32],
     pub requests_open: u8,
 }
 
-/// The check the hub keeps of a contact key (`ContactKey::check`).
-pub fn contact_check(key: &[u8; 32]) -> [u8; 32] {
+/// The length of an access key (Signal's unidentified access key).
+pub const ACCESS_KEY_LEN: usize = 16;
+
+/// The check the hub keeps of an access key (`AccessKey::check`): `SHA-256("yo access key" || access key)`.
+pub fn access_check(access_key: &[u8; ACCESS_KEY_LEN]) -> [u8; 32] {
     use sha2::{Digest, Sha256};
     let mut hash = Sha256::new();
-    hash.update(b"yo contact key");
-    hash.update(key);
+    hash.update(b"yo access key");
+    hash.update(access_key);
     hash.finalize().into()
 }
 

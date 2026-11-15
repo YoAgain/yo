@@ -261,12 +261,12 @@ pub fn junk(fill: u8) -> Vec<u8> {
 }
 
 /// The device check for a user, as any stranger can learn it: from the hub's 409 to a delivery with a wrong one.
-/// `None` for a user the hub does not know, or one that takes no delivery without its contact key (spec 4.10).
+/// `None` for a user the hub does not know, or one that takes no delivery without its profile key (spec 4.10).
 pub fn devices_hash(url: &str, user: &str) -> Option<[u8; 32]> {
     devices_hash_with(url, user, None)
 }
 
-/// `devices_hash` showing a contact key (`Yo-Access`, as sent).
+/// `devices_hash` showing a profile key (`Yo-Access`, as sent).
 pub fn devices_hash_with(url: &str, user: &str, access: Option<&str>) -> Option<[u8; 32]> {
     let mut probe = reqwest::blocking::Client::new()
         .post(format!("{url}{}", yo_wire::api::deliver_path(&user_id(user))))
@@ -288,7 +288,7 @@ pub fn deliver_raw(url: &str, user: &str, body: Vec<u8>) -> u16 {
     deliver_raw_with(url, user, None, body)
 }
 
-/// `deliver_raw` as a contact: showing the recipient's contact key as a contact's delivery did (`access`).
+/// `deliver_raw` as a contact: showing the recipient's profile key as a contact's delivery did (`access`).
 pub fn deliver_raw_with(url: &str, user: &str, access: Option<&str>, body: Vec<u8>) -> u16 {
     let Some(hash) = devices_hash_with(url, user, access) else { return 404 };
     let mut request = reqwest::blocking::Client::new()
@@ -300,7 +300,7 @@ pub fn deliver_raw_with(url: &str, user: &str, access: Option<&str>, body: Vec<u
     request.body(body).send().unwrap().status().as_u16()
 }
 
-/// The contact key `http`'s client showed in its last delivery to `to` (`Yo-Access`), if it did.
+/// The profile key `http`'s client showed in its last delivery to `to` (`Yo-Access`), if it did.
 pub fn access_shown(http: &Http, to: &str) -> Option<String> {
     let path = yo_wire::api::deliver_path(&user_id(to));
     let recorded = http.recorded.lock().unwrap();
@@ -322,7 +322,7 @@ struct Lie {
     name: String,
     stand_in: yo_wire::UserId,
     stand_in_name: String,
-    /// The stand-in's contact key, if it made one: the hub takes what goes to it as a contact's.
+    /// The stand-in's profile key, if it made one: the hub takes what goes to it as a contact's.
     stand_in_key: Option<String>,
     /// Another account, whose lookups of the stand-in become the lies.
     asker: Client,
@@ -341,7 +341,7 @@ impl Lying {
             name: name.to_owned(),
             stand_in: user_id(stand_in.user_id()),
             stand_in_name: stand_in_name.to_owned(),
-            stand_in_key: stand_in.contact_key_for_tests(),
+            stand_in_key: stand_in.access_key_for_tests(),
             asker,
         });
     }

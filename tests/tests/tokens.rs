@@ -32,7 +32,7 @@ fn pair(hub: &TestHub) -> (Account, Account) {
     ((register(ha.clone(), &pa, None), ha, pa), (register(hb.clone(), &pb, None), hb, pb))
 }
 
-/// Two accounts as contacts: each has the other's contact key, so their deliveries are sealed (a request is signed
+/// Two accounts as contacts: each has the other's profile key, so their deliveries are sealed (a request is signed
 /// and carries no token, spec 4.10).
 fn contacts(hub: &TestHub) -> (Account, Account) {
     let ((mut a, ha, pa), (mut b, hb, pb)) = pair(hub);
@@ -190,7 +190,7 @@ fn a_spent_token_is_refused_and_the_delivery_goes_again_without() {
     a.after_sync().unwrap();
     assert_eq!(a.waiting(), 0);
     let sent = deliveries_to(&ha, b.user_id());
-    // The contact key may follow them (its own delivery, after the sync).
+    // The profile key may follow them (its own delivery, after the sync).
     let (again, without) = (&sent[n], &sent[n + 1]);
     // Each attempt asks the hub's signature with a fresh nonce (spec 6.11); all else is the same.
     let fresh = |headers: &[(String, String)]| -> Vec<(String, String)> {

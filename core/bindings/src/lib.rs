@@ -279,7 +279,7 @@ impl From<Content> for MessageKind {
             | Content::Retry
             | Content::Group(_)
             | Content::GroupAsk { .. }
-            | Content::ContactKey(_) => MessageKind::Unsupported { kind: 0 },
+            | Content::ProfileKey(_) => MessageKind::Unsupported { kind: 0 },
         }
     }
 }

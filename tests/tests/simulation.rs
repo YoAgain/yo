@@ -64,7 +64,7 @@ fn run(seed: u64, clients: usize, steps: usize) {
                 .unwrap_or_else(|e| panic!("seed {seed} step {step}: {from} -> {to}: {e}"));
             collect(events, &mut received, &from);
             // Not asserted taken: one to a contact on a new phone waits for the next inbox read, where its new
-            // contact key is (spec 4.10); the quiet-down below checks that all went.
+            // profile key is (spec 4.10); the quiet-down below checks that all went.
             expected.entry(to).or_default().push((from, text));
         } else if roll < 85 {
             let to = devices[i].user.clone();

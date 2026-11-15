@@ -385,7 +385,7 @@ impl Hub {
             .route(api::LOOKUP, post(lookup))
             .route(api::PUSH, put(set_push))
             .route(api::USERNAME, put(set_username))
-            .route(api::CONTACT_KEY, put(set_contact_key))
+            .route(api::ACCESS_KEY, put(set_access_key))
             .route(api::ACCOUNT, delete(delete_account))
             .route(api::REPORT, post(report))
             .route(api::FEEDBACK, post(feedback))
@@ -998,8 +998,8 @@ async fn set_username(State(hub): Hubs, method: Method, uri: Uri, headers: Heade
     }
 }
 
-/// Sets the signing device's account's contact key check and whether it takes requests (spec 4.10).
-async fn set_contact_key(
+/// Sets the signing device's account's profile key check and whether it takes requests (spec 4.10).
+async fn set_access_key(
     State(hub): Hubs,
     method: Method,
     uri: Uri,
@@ -1007,11 +1007,11 @@ async fn set_contact_key(
     body: Bytes,
 ) -> Res<StatusCode> {
     let device = hub.authenticate(&method, &uri, &headers, &body)?;
-    let request: api::ContactKey = decode(&body)?;
+    let request: api::AccessKey = decode(&body)?;
     if request.requests_open > 1 {
         return Err(refuse(StatusCode::BAD_REQUEST));
     }
-    hub.db.set_contact_key(&device.user_id, &request.check, request.requests_open == 1)?;
+    hub.db.set_access_key(&device.user_id, &request.check, request.requests_open == 1)?;
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -1280,7 +1280,7 @@ async fn deliver(
             None
         }
     };
-    // A contact's, or a request (spec 4.10): the recipient's contact key shown names no sender, every contact has the
+    // A contact's, or a request (spec 4.10): the recipient's profile key shown names no sender, every contact has the
     // same. A request is signed by its sending device, so the hub knows whose it is and counts it per sender: past
     // the sender's of today it waits with the sender (`507`, as a full inbox, this recipient only); unsigned, or to
     // one who takes none, it is `403`. Past the limits above; counted only once stored.
@@ -1295,8 +1295,8 @@ async fn deliver(
         .get(api::HEADER_ACCESS)
         .and_then(|v| v.to_str().ok())
         .and_then(|v| unb64(v).ok())
-        .and_then(|v| <[u8; 32]>::try_from(v).ok())
-        .map(|key| api::contact_check(&key));
+        .and_then(|v| <[u8; api::ACCESS_KEY_LEN]>::try_from(v).ok())
+        .map(|key| api::access_check(&key));
     let limits = &hub.config.limits;
     let per =
         (limits.requests_per_pair_day, limits.request_recipients_per_sender_day, limits.requests_per_recipient_day);
