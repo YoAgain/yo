@@ -30,7 +30,7 @@ struct FriendList: View {
   /// How long a photo stays when its thumbnail is held.
   static let photoSeconds = 3.0  // Snapchat's first default
   /// How long a photo or video waits before it goes, time to undo it.
-  static let sendDelay = 1.5
+  static let sendDelay = 2.5
   /// How long a plain Yo shows on its bar.
   static let yoSeconds = 5.0
   /// How long of that it stands fully before it fades.
