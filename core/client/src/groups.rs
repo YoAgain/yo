@@ -470,12 +470,14 @@ impl Client {
                 Some(g) if g.revision > 0 => g.members.iter().filter(|m| **m != me).min().cloned(),
                 _ => Some(from.to_owned()),
             };
+            // Asked once while unanswered: the outbox brings the ask there; every further Yo naming the revision
+            // asks nothing more.
             if let Some(asked) = asked {
-                if self.state.group_asks.len() < MAX_GROUPS {
-                    self.state.group_asks.insert((id.clone(), asked.clone()));
-                }
-                if let Err(error) = self.queue(&[asked], None, Content::GroupAsk { id: tag.id }) {
-                    self.note(format!("group: {error}"));
+                if self.state.group_asks.len() < MAX_GROUPS && self.state.group_asks.insert((id.clone(), asked.clone()))
+                {
+                    if let Err(error) = self.queue(&[asked], None, Content::GroupAsk { id: tag.id }) {
+                        self.note(format!("group: {error}"));
+                    }
                 }
             }
         }

@@ -547,3 +547,50 @@ fn a_held_yo_of_one_blocked_meanwhile_is_not_shown() {
     assert!(view(b, &id).members.contains(&c.user_id().to_owned()), "the change counts");
     assert!(group_yos(&events).is_empty(), "the blocked newcomer's held Yo stays hidden");
 }
+
+/// A Yo naming a newer revision makes the group asked of a member as it is here; that member need not be anyone this
+/// device has written to: its sessions are looked up, the ask goes out and waits in no outbox (spec 4.9).
+#[test]
+fn a_group_is_asked_of_a_member_never_written_to() {
+    let hub = TestHub::start();
+    let mut p = people(&hub, 3);
+    p.sort_by(|x, y| x.user_id().cmp(y.user_id()));
+    // The lowest member but the asker is one the asker has no session with: Cleo (lowest), not Ann (who wrote).
+    let [c, b, a] = p.as_mut_slice() else { unreachable!() };
+    let (id, _) = a.create_group("FAMILY", &[b.user_id().to_owned(), c.user_id().to_owned()]).unwrap();
+    take(b);
+    take(c);
+    let mut d = people(&hub, 1).remove(0);
+    let b_name = b.username().unwrap().to_owned();
+    d.send_yo(&b_name).unwrap();
+    take(b);
+    d.send_group_tagged_for_tests(b.user_id(), &id, 2, Content::Yo).unwrap();
+    take(b);
+    b.after_sync().unwrap();
+    assert_eq!(b.pending(), 0, "the ask went out");
+}
+
+/// Many Yos naming the same newer revision ask for the group once while the ask is unanswered, not once each: the
+/// outbox does not grow with them when the asked member cannot be reached.
+#[test]
+fn a_newer_revision_is_asked_for_once() {
+    let hub = TestHub::start();
+    let base = random_u64() % 1_000_000_000;
+    let hb = Http::new(hub.url());
+    let mut b = register(hb.clone(), &username(base), None);
+    let mut a = register(Http::new(hub.url()), &username(base + 1), None);
+    let mut d = register(Http::new(hub.url()), &username(base + 2), None);
+    let (id, _) = a.create_group("FAMILY", &[b.user_id().to_owned()]).unwrap();
+    take(&mut b);
+    d.send_yo(&username(base)).unwrap();
+    take(&mut b);
+    // Ann cannot be reached from here now: the ask waits.
+    for _ in 0..20 {
+        hb.fault(&yo_wire::api::deliver_path(&yo_tests::user_id(a.user_id())), Fault::Answer(503));
+    }
+    for _ in 0..5 {
+        d.send_group_tagged_for_tests(b.user_id(), &id, 2, Content::Yo).unwrap();
+    }
+    take(&mut b);
+    assert_eq!(b.pending(), 1, "one ask");
+}

@@ -1190,6 +1190,10 @@ impl Client {
     /// Gets the sessions a user's waiting messages need (spec 4.1): bundles for its devices without one, from the
     /// hub. "Not now" leaves it for the next delivery.
     fn ensure_sessions(&mut self, user: &str) -> Result<()> {
+        // Someone this device never wrote to (a group's member it asks for the group): its devices first.
+        if self.roster(user).is_none() {
+            return self.fetch_bundles(user, &[]);
+        }
         let missing = self.without_session(user);
         if missing.is_empty() {
             return Ok(());
