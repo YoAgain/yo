@@ -425,7 +425,9 @@ struct FriendList: View {
   private func menu(for friend: Friend) -> ContextMenu<TupleView<(AnyView, AnyView, AnyView)>> {
     // When the last Yo went and came, as a heading over the choices ("Sent 7m ago · Received 1d ago").
     func when(_ date: Date?) -> String { date.map { let a = Arrival.age($0); return a == "now" ? "just now" : "\(a) ago" } ?? "never" }
-    let times = "Sent \(when(Stats.lastSent(to: friend.name))) · Received \(when(Stats.lastReceived(from: friend.name)))"
+    // The newest Yo either way: "Last Yo 7m ago" (the menu shows it greyed at its top; a bare section title it drops).
+    let last = [Stats.lastSent(to: friend.name), Stats.lastReceived(from: friend.name)].compactMap { $0 }.max()
+    let times = "Last Yo \(when(last))"
     if friend.group != nil {
       return ContextMenu {
         AnyView(Button("Members", systemImage: "person.3") { showMembers(friend) })
@@ -439,7 +441,7 @@ struct FriendList: View {
       }
     }
     return ContextMenu {
-      AnyView(Section(times) {})
+      AnyView(Button(times) {}.disabled(true))
       AnyView(Menu("Block & Report", systemImage: "hand.raised") {
         Button("Block", systemImage: "hand.raised") { blocking = (friend, false) }
         Section("Report") {
