@@ -242,3 +242,31 @@ fn a_guest_acknowledges_nothing_it_could_not_save() {
     b.reload(&disk.blob()).unwrap();
     assert_eq!(texts(&b.sync(0).unwrap()), ["keep me"]);
 }
+
+/// A guest keeps at most `GUEST_EVENTS` events for the app (an app not opened for long, the notification service
+/// woken again and again): the rest stays at the hub, and the app gets all of it.
+#[test]
+fn a_guest_keeps_a_bounded_backlog_for_the_app() {
+    let hub = TestHub::start();
+    let (mut a, mut b, _, disk) = chat(&hub);
+    let n = yo_core::GUEST_EVENTS + 40;
+    for i in 0..n {
+        a.send(b.user_id(), text(&format!("{i}"))).unwrap();
+    }
+    let mut guest = Client::restore_guest(Http::new(hub.url()), &disk.blob(), &KEY).unwrap();
+    guest.persist_to(disk.clone(), KEY).unwrap();
+    let mut kept = 0;
+    for _ in 0..10 {
+        kept += texts(&guest.sync(0).unwrap()).len();
+        guest.after_sync().unwrap();
+    }
+    assert!(kept <= yo_core::GUEST_EVENTS, "{kept} kept by the guest");
+    drop(guest);
+    b.reload(&disk.blob()).unwrap();
+    let mut all = Vec::new();
+    for _ in 0..10 {
+        all.extend(texts(&b.sync(0).unwrap()));
+        b.acknowledge_events();
+    }
+    assert_eq!(all.len(), n, "the app gets every one, once");
+}

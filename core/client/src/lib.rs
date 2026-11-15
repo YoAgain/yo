@@ -72,6 +72,9 @@ const ROSTER_ASK_EVERY_MS: u64 = 60 * 1000;
 const RECOVERY_LOOKUPS_PER_DAY: u32 = 10;
 /// Payloads kept for a roster that could not be asked yet (`State::deferred`).
 const DEFERRED: usize = 64;
+/// Events a guest (the notification service) keeps for the app at most: past them it takes nothing more from the
+/// hub, which keeps it for the app. Bounds a guest's state while the app stays unopened.
+pub const GUEST_EVENTS: usize = 256;
 /// How often a registration whose answer did not come is tried again, with the same account key.
 const REGISTER_TRIES: usize = 2;
 /// How often a send updates its view of a user's devices and tries again before it leaves the rest to the next call.
@@ -1788,7 +1791,13 @@ impl Client {
                 Err(error) => self.drop_one(error.to_string()),
             }
         }
+        let mut backlogged = false;
         for item in inbox.items {
+            // A guest stops where the app's events reach their bound: the rest stays at the hub, unacknowledged.
+            if self.guest_events.is_some() && self.state.events.len() >= GUEST_EVENTS {
+                backlogged = true;
+                break;
+            }
             // Not sealed to this account (spec 6.1): of use to nobody here.
             let payload = match seal::open(&self.state.account_secret, item.envelope.as_slice()) {
                 Ok(payload) => payload,
@@ -1809,6 +1818,7 @@ impl Client {
             }
             done.push(item.id);
         }
+        let full = full && !backlogged;
         if later && !full && stopped.is_none() {
             return Ok((false, done));
         }
