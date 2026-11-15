@@ -71,7 +71,7 @@ fn one_time(from: u32, n: u32) -> api::Prekeys {
 }
 
 fn backup_record(locator: Vec<u8>) -> api::Backup {
-    let auth = ed25519_dalek::SigningKey::from_bytes(&[9; 32]).verifying_key().to_bytes();
+    let auth = yo_tests::account_key(&[9; 32]); // a door's Curve25519 key
     api::Backup::new(Vec::new(), vec![2; 60], vec![3; 1024], locator, None, auth)
 }
 
@@ -720,15 +720,12 @@ fn backups_are_stored_once_per_locator() {
     let theirs = encode(&backup_record(user_id(a.user_id()).to_vec()));
     assert_eq!(signed(&mut b, "PUT", api::BACKUP, &theirs).0, status::CONFLICT, "a user id as locator");
     let mut bad = backup_record(Vec::new());
-    // Not a point on the curve.
+    // Not a canonical Curve25519 key (its top bit set).
     bad.auth_code = {
-        let mut key = [0u8; 32];
-        (2..=255u8).find_map(|y| {
-            key[0] = y;
-            ed25519_dalek::VerifyingKey::from_bytes(&key).is_err().then_some(key.to_vec())
-        })
+        let mut key = yo_tests::account_key(&[9; 32]);
+        key[31] |= 0x80;
+        key.to_vec()
     }
-    .unwrap()
     .into();
     assert_eq!(signed(&mut b, "PUT", api::BACKUP, &encode(&bad)).0, status::BAD_REQUEST);
     // A fetch unsigned, signed by the wrong key, or of nothing: 404 alike.
@@ -737,19 +734,21 @@ fn backups_are_stored_once_per_locator() {
     let time = yo_hub::now_ms();
     let path = api::backup_path(&[4; 16]);
     let sign = |seed: [u8; 32], time: u64| {
-        let key = ed25519_dalek::SigningKey::from_bytes(&seed);
-        use ed25519_dalek::Signer;
-        key.sign(&yo_wire::request::to_be_signed("GET", &path, time, &[])).to_bytes()
+        let key = libsignal_protocol::PrivateKey::deserialize(&seed).unwrap();
+        key.calculate_signature(&yo_wire::request::to_be_signed("GET", &path, time, &[]), &mut rand::rng()).unwrap()
     };
-    let fetch = |seed: [u8; 32], time: u64| {
-        let headers = [("yo-time", time.to_string()), ("yo-signature", yo_wire::b64(&sign(seed, time)))];
+    // XEdDSA signs anew each time: a replay sends the same signature again.
+    let fetch = |signature: &[u8], time: u64| {
+        let headers = [("yo-time", time.to_string()), ("yo-signature", yo_wire::b64(signature))];
         raw(&hub, "GET", &path, &headers, Vec::new())
     };
-    assert_eq!(fetch([8; 32], time).0, status::NOT_FOUND);
-    let (code, body) = fetch([9; 32], time);
+    assert_eq!(fetch(&sign([8; 32], time), time).0, status::NOT_FOUND);
+    let signature = sign([9; 32], time);
+    let (code, body) = fetch(&signature, time);
     assert_eq!((code, body), (status::OK, record));
-    assert_eq!(fetch([9; 32], time).0, status::NOT_FOUND, "a replay");
-    assert_eq!(fetch([9; 32], time - 6 * 60 * 1000).0, status::NOT_FOUND, "out of the window");
+    assert_eq!(fetch(&signature, time).0, status::NOT_FOUND, "a replay");
+    let old = time - 6 * 60 * 1000;
+    assert_eq!(fetch(&sign([9; 32], old), old).0, status::NOT_FOUND, "out of the window");
 }
 
 /// Spec 6.3: a report `204` (again: the latest kept), `404` for no such user; feedback `204`; deleting the account

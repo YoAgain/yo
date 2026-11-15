@@ -1,10 +1,9 @@
-//! Identities (spec 3): the account key vouches for devices; the safety number is computed from user ids and account
-//! keys.
+//! Identities (spec 3): the account key, a libsignal identity key pair (Curve25519), vouches for devices by XEdDSA; the
+//! safety number is libsignal's fingerprint of user ids and account keys.
 
 use crate::error::{Error, Result};
 use crate::signal::identity_of;
-use ed25519_dalek::{Signer as _, SigningKey};
-use libsignal_protocol::Fingerprint;
+use libsignal_protocol::{Fingerprint, IdentityKey, IdentityKeyPair, PrivateKey};
 use yo_wire::cert::{self, DeviceCertificate};
 use yo_wire::KEY_LEN;
 
@@ -17,12 +16,45 @@ pub fn random<const N: usize>() -> [u8; N] {
     out
 }
 
+/// A new account's secret: a libsignal identity key pair's private key (32 bytes).
+pub fn new_account_secret() -> Key {
+    let pair = IdentityKeyPair::generate(&mut rand::rng());
+    pair.private_key().serialize().try_into().expect("a Curve25519 private key is 32 bytes")
+}
+
+/// The account's identity key pair from its secret (spec 3, 4.1): the session identity and the sealed sender's.
+pub fn account_pair(secret: &Key) -> Result<IdentityKeyPair> {
+    let private = PrivateKey::deserialize(secret).map_err(|_| Error::Internal("account key"))?;
+    let public = private.public_key().map_err(|_| Error::Internal("account key"))?;
+    Ok(IdentityKeyPair::new(IdentityKey::new(public), private))
+}
+
+/// The account key: its identity key's 32 bytes (libsignal's `public_key_bytes`), as the hub and contacts know it.
+pub fn account_key(pair: &IdentityKeyPair) -> Key {
+    pair.public_key().public_key_bytes().try_into().expect("a Curve25519 public key is 32 bytes")
+}
+
+/// The account key's XEdDSA signature over `message` (libsignal's `calculate_signature`).
+pub fn sign(pair: &IdentityKeyPair, message: &[u8]) -> [u8; yo_wire::SIGNATURE_LEN] {
+    let signature = pair.private_key().calculate_signature(message, &mut rand::rng()).expect("a Curve25519 key signs");
+    (*signature).try_into().expect("an XEdDSA signature is 64 bytes")
+}
+
 /// The certificate of a device: the account key vouching for its device key.
-pub fn certify(account: &SigningKey, device_key: &[u8]) -> DeviceCertificate {
-    DeviceCertificate {
-        account_key: account.verifying_key().to_bytes(),
-        signature: account.sign(&cert::to_be_signed(device_key)).to_bytes(),
-    }
+pub fn certify(account: &IdentityKeyPair, device_key: &[u8]) -> DeviceCertificate {
+    DeviceCertificate { account_key: account_key(account), signature: sign(account, &cert::to_be_signed(device_key)) }
+}
+
+/// The account secret of a state from before the account key was libsignal's (an Ed25519 seed): the clamped scalar
+/// its X25519 form was, so the identity contacts' sessions know stays the account's.
+pub fn legacy_account_secret(seed: &Key) -> Key {
+    ed25519_dalek::SigningKey::from_bytes(seed).to_scalar_bytes()
+}
+
+/// A contact's account key as states from before pinned it (Ed25519) in its Curve25519 form, as the hub has it now;
+/// none for bytes that are no Ed25519 point (an unknown key, all zeros).
+pub fn legacy_account_key(key: &Key) -> Option<Key> {
+    ed25519_dalek::VerifyingKey::from_bytes(key).ok().map(|key| key.to_montgomery().to_bytes())
 }
 
 /// Signal's safety number: its fingerprint version and hash iterations (spec 3.4).
@@ -60,8 +92,21 @@ mod tests {
     use super::*;
 
     #[test]
+    fn a_certificate_verifies_and_a_legacy_secret_keeps_its_identity() {
+        let pair = account_pair(&new_account_secret()).unwrap();
+        let device = [5u8; 32];
+        let certificate = certify(&pair, &device);
+        assert!(DeviceCertificate::verify(&certificate.to_bytes(), &device).is_ok());
+        // An Ed25519 seed of before: its X25519 form's identity, the account key as the hub converted it.
+        let seed = [7u8; 32];
+        let ed = ed25519_dalek::SigningKey::from_bytes(&seed).verifying_key().to_bytes();
+        let migrated = account_pair(&legacy_account_secret(&seed)).unwrap();
+        assert_eq!(Some(account_key(&migrated)), legacy_account_key(&ed));
+    }
+
+    #[test]
     fn safety_number_is_symmetric_and_binds_both() {
-        let key = |seed: u8| SigningKey::from_bytes(&[seed; 32]).verifying_key().to_bytes();
+        let key = |seed: u8| account_key(&account_pair(&[seed; 32]).unwrap());
         let (ka, kb, kc) = (key(1), key(2), key(3));
         let (ua, ub) = ([1u8; 16], [2u8; 16]);
         let ab = safety_number((&ua, &ka), (&ub, &kb)).unwrap();

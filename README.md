@@ -23,7 +23,7 @@ flowchart LR
   end
   subgraph phone["iPhone"]
     icloud["iCloud Keychain item"]
-    account["Account key<br/>Ed25519 · its X25519 form is the Signal identity"]
+    account["Account key<br/>libsignal identity key (Curve25519, XEdDSA)"]
     device["Device key + auth key"]
     prekeys["Prekeys<br/>signed · one-time · Kyber"]
     sessions["Signal sessions<br/>Double Ratchet + SPQR"]
@@ -74,7 +74,7 @@ delivers about 8,000 Yops, Yos per second, with every Yo on disk before it is an
   gone at the hub once fetched.
 - **Push:** a Yo wakes the phone through APNs; the push carries nothing but "there is mail".
 - **Your account comes back:** its key is kept in the iCloud Keychain (end-to-end encrypted by Apple), so a new
-  iPhone or a reinstall signs straight back in. A passkey (Face ID) and a recovery key (12 words) bring it back
+  iPhone or a reinstall signs straight back in. A passkey (Face ID) and a recovery key (64 characters, Signal's) bring it back
   beyond Apple.
 - **Safety:** report and block on a friend's bar, delete your account (and everything the hub holds) in the app.
 - **Profile:** your code (QR), statistics counted on the phone, the app icon (Appearance).

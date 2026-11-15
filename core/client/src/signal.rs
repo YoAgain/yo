@@ -1,17 +1,16 @@
 //! The sessions (spec 4): libsignal's PQXDH and Double Ratchet with SPQR, over a store the client seals with its state.
 //!
-//! An account's devices share one identity key: the account key's X25519 form, as Signal's linked devices share
+//! An account's devices share one identity key: the account key, as Signal's linked devices share
 //! theirs. So every contact checks a session against the account key it pinned, and the hub has nothing to swap. A
 //! peer device is a `ProtocolAddress`: the user id as an ACI and a number this device gives it (`Slot`), local only.
 
 use crate::error::{Error, Result};
 use crate::identity::Key;
-use ed25519_dalek::{SigningKey, VerifyingKey};
 use libsignal_protocol::{
     kem, Aci, DeviceId, Direction, GenericSignedPreKey as _, IdentityChange, IdentityKey, IdentityKeyPair,
     IdentityKeyStore, KeyPair, KyberPreKeyId, KyberPreKeyRecord, KyberPreKeyStore, PreKeyId, PreKeyRecord, PreKeyStore,
-    PrivateKey, ProtocolAddress, PublicKey, SessionRecord, SessionStore, SignalProtocolError, SignedPreKeyId,
-    SignedPreKeyRecord, SignedPreKeyStore, Timestamp,
+    ProtocolAddress, PublicKey, SessionRecord, SessionStore, SignalProtocolError, SignedPreKeyId, SignedPreKeyRecord,
+    SignedPreKeyStore, Timestamp,
 };
 use std::collections::{BTreeMap, VecDeque};
 use std::future::Future;
@@ -134,22 +133,14 @@ pub fn signal(error: SignalProtocolError) -> Error {
     Error::Session(error.to_string())
 }
 
-/// The account's identity key pair: its key's X25519 form (spec 4.1). The private key is the account secret's
-/// clamped scalar, as the seal's (6.1).
+/// The account's identity key pair, the account key itself (spec 4.1): the sessions' and the seal's (6.1).
 pub fn identity_pair(account_secret: &[u8; 32]) -> Result<IdentityKeyPair> {
-    let mut scalar = SigningKey::from_bytes(account_secret).to_scalar_bytes();
-    let private = PrivateKey::deserialize(&scalar).map_err(|_| Error::Internal("identity key"));
-    scalar.zeroize();
-    let private = private?;
-    let public = private.public_key().map_err(|_| Error::Internal("identity key"))?;
-    Ok(IdentityKeyPair::new(IdentityKey::new(public), private))
+    crate::identity::account_pair(account_secret)
 }
 
 /// The identity key of the account with this key: what its sessions must show.
 pub fn identity_of(account_key: &Key) -> Result<IdentityKey> {
-    let montgomery = VerifyingKey::from_bytes(account_key).map_err(|_| Error::Protocol("account key"))?.to_montgomery();
-    let public =
-        PublicKey::from_djb_public_key_bytes(montgomery.as_bytes()).map_err(|_| Error::Protocol("identity"))?;
+    let public = PublicKey::from_djb_public_key_bytes(account_key).map_err(|_| Error::Protocol("identity"))?;
     Ok(IdentityKey::new(public))
 }
 
@@ -591,11 +582,12 @@ mod tests {
     }
 
     #[test]
-    fn the_identity_key_is_the_account_keys_x25519_form() {
-        let secret = [7u8; 32];
-        let account_key = SigningKey::from_bytes(&secret).verifying_key().to_bytes();
+    fn the_identity_key_is_the_account_key() {
+        let secret = crate::identity::new_account_secret();
+        let account_key = crate::identity::account_key(&identity_pair(&secret).unwrap());
         assert_eq!(*identity_pair(&secret).unwrap().identity_key(), identity_of(&account_key).unwrap());
-        assert_ne!(*identity_pair(&[8; 32]).unwrap().identity_key(), identity_of(&account_key).unwrap());
+        let other = crate::identity::new_account_secret();
+        assert_ne!(*identity_pair(&other).unwrap().identity_key(), identity_of(&account_key).unwrap());
     }
 
     #[test]

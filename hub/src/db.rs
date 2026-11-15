@@ -431,8 +431,8 @@ fn remove_user(tx: &Transaction<'_>, user: &UserId, now: u64) -> rusqlite::Resul
 }
 
 /// The schema this hub writes. A database of another (or a pre-release) schema is refused, never half migrated; one of
-/// schema 1 is brought up to it (`from_1`).
-const SCHEMA_VERSION: i64 = 2;
+/// schema 1 or 2 is brought up to it (`from_1`, `from_2`).
+const SCHEMA_VERSION: i64 = 3;
 
 /// What a delivery is to its recipient (spec 4.10, `Db::admit`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -479,6 +479,35 @@ fn from_1(conn: &mut Connection) -> rusqlite::Result<()> {
          DROP TABLE IF EXISTS commits;
          DELETE FROM messages;",
     )?;
+    tx.execute_batch("PRAGMA user_version = 2")?;
+    tx.commit()
+}
+
+/// Brings a database of schema 2 (Ed25519 account keys, backups opened by 12 words) to this one, in one transaction:
+/// every account key, the current ones and those a user had, in its Curve25519 form (what its sessions already used,
+/// spec 4.1), and the backups gone: they open with words no app takes any more, so their accounts are not secured
+/// until made anew (spec 7).
+fn from_2(conn: &mut Connection) -> rusqlite::Result<()> {
+    let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+    let curve = |key: &[u8]| -> Option<Vec<u8>> {
+        let key: [u8; KEY_LEN] = key.try_into().ok()?;
+        Some(ed25519_dalek::VerifyingKey::from_bytes(&key).ok()?.to_montgomery().to_bytes().to_vec())
+    };
+    for (table, column) in [("users", "account_key"), ("account_keys", "key")] {
+        let keys: Vec<Vec<u8>> = tx
+            .prepare(&format!("SELECT {column} FROM {table}"))?
+            .query_map([], |row| row.get(0))?
+            .collect::<rusqlite::Result<_>>()?;
+        for key in keys {
+            if let Some(new) = curve(&key) {
+                tx.execute(&format!("UPDATE {table} SET {column} = ?1 WHERE {column} = ?2"), params![new, key])?;
+            }
+        }
+    }
+    let backups = tx.prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'backups'")?.exists([])?;
+    if backups {
+        tx.execute_batch("DELETE FROM backups")?;
+    }
     tx.execute_batch(&format!("PRAGMA user_version = {SCHEMA_VERSION}"))?;
     tx.commit()
 }
@@ -527,7 +556,7 @@ fn check_version(conn: &Connection) -> rusqlite::Result<()> {
     let tables: i64 =
         conn.query_row("SELECT count(*) FROM sqlite_master WHERE type = 'table'", [], |row| row.get(0))?;
     match version {
-        SCHEMA_VERSION | 1 => Ok(()),
+        SCHEMA_VERSION | 1 | 2 => Ok(()),
         0 if tables == 0 => conn.execute_batch(&format!("PRAGMA user_version = {SCHEMA_VERSION}")),
         _ => Err(rusqlite::Error::InvalidParameterName(format!(
             "database schema {version}, this hub writes {SCHEMA_VERSION}: start from an empty database"
@@ -577,6 +606,10 @@ impl Db {
         let version: i64 = conn.query_row("PRAGMA user_version", [], |row| row.get(0))?;
         if version == 1 {
             from_1(&mut conn)?;
+        }
+        let version: i64 = conn.query_row("PRAGMA user_version", [], |row| row.get(0))?;
+        if version == 2 {
+            from_2(&mut conn)?;
         }
         without_grace(&conn)?;
         conn.execute_batch(SCHEMA)?;
@@ -1605,13 +1638,16 @@ mod tests {
     }
 
     /// A database of schema 1 (the hubs of MLS chats, also one from before spellings and the backups' auth keys):
-    /// opened, its accounts stay (the user, its name shown as its skeleton, its backup, its device without prekeys),
-    /// its MLS tables and the envelopes waiting go, and the user's own key registers it again.
+    /// opened, its accounts stay (the user, its name shown as its skeleton, its device without prekeys), its MLS tables,
+    /// the envelopes waiting and the backups of then go, the account key is its Curve25519 form (schema 3), and the
+    /// user's own key registers it again.
     #[test]
     fn a_database_of_schema_1_keeps_its_accounts() {
         let path = std::env::temp_dir().join(format!("yo-hub-schema-1-{}.sqlite", std::process::id()));
         let path = path.to_str().unwrap().to_owned();
         let _ = std::fs::remove_file(&path);
+        let ed = ed25519_dalek::SigningKey::from_bytes(&[1; 32]).verifying_key();
+        let curve = ed.to_montgomery().to_bytes();
         {
             let conn = Connection::open(&path).unwrap();
             conn.execute_batch("PRAGMA user_version = 1").unwrap();
@@ -1628,10 +1664,10 @@ mod tests {
             .unwrap();
             conn.execute(
                 "INSERT INTO users (id, account_key, created_at) VALUES (?1, ?2, 0)",
-                params![[1u8; 16], [1u8; 32]],
+                params![[1u8; 16], ed.to_bytes()],
             )
             .unwrap();
-            conn.execute("INSERT INTO account_keys (key, user_id) VALUES (?1, ?2)", params![[1u8; 32], [1u8; 16]])
+            conn.execute("INSERT INTO account_keys (key, user_id) VALUES (?1, ?2)", params![ed.to_bytes(), [1u8; 16]])
                 .unwrap();
             conn.execute(
                 "INSERT INTO handles (kind, value, user_id) VALUES (?1, ?2, ?3)",
@@ -1655,7 +1691,8 @@ mod tests {
                 .unwrap();
         }
         let db = Db::open(&path).unwrap();
-        assert_eq!(db.backup(&[1; 16]).unwrap().map(|(record, _)| record), Some(vec![1]), "kept as it was");
+        assert!(db.backup(&[1; 16]).unwrap().is_none(), "the words' backups are gone");
+        assert_eq!(db.account_key(&[1; 16]).unwrap(), Some(curve), "its Curve25519 form");
         assert_eq!(spelling(&db, "Christopher").as_deref(), Some("CHRISTOPHER"));
         let found = db.lookup(KIND_USER, &[1; 16], true, &[]).unwrap().unwrap();
         assert_eq!(found.devices, vec![api::Device { key: [1; 32], id: 1 }], "the device, number 1");
@@ -1672,9 +1709,11 @@ mod tests {
         assert_eq!(tables, 0);
         assert!(matches!(register(&db, b"christopher", 2, 2, 0), Write::Refused(Conflict::UsernameTaken)));
         drop(db);
-        // Opened again: schema 2 now. The user's own key registers it again (an app updated, a new phone).
+        // Opened again: schema 3 now. The user's own key registers it again (an app updated, a new phone).
         let db = Db::open(&path).unwrap();
-        assert_eq!(user(register(&db, b"Christopher", 1, 9, 0)), [1; 16]);
+        let skeleton = yo_wire::handle::skeleton("Christopher");
+        let again = db.register(skeleton.as_bytes(), "Christopher", &[9; 16], &curve, &device(9), &prekeys(0), 100, 0);
+        assert_eq!(user(again.unwrap()), [1; 16]);
         assert_eq!(db.lookup(KIND_USER, &[1; 16], true, &[]).unwrap().unwrap().bundles.len(), 1);
         assert_eq!(db.audit().unwrap(), []);
         drop(db);

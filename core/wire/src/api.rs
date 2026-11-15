@@ -291,31 +291,31 @@ pub struct Ack {
     pub ids: Vec<u64>,
 }
 
-/// The length of a backup's locator: HKDF(the recovery code, "yo backup v1 locator") (spec 7).
+/// The length of a backup's locator: HKDF(the recovery key's backup key, "yo backup v3 locator") (spec 7).
 pub const LOCATOR_LEN: usize = 16;
 
-/// The backup record's version: 2 carries the doors' auth keys. Version 1 had none; the hub keeps no such record
-/// (spec 7).
-pub const BACKUP_VERSION: u8 = 2;
+/// The backup record's version: 3 is opened by the recovery key (libsignal's account entropy pool), its doors' auth
+/// keys Curve25519. Records of before (12 words, Ed25519) are gone from the hub (spec 7).
+pub const BACKUP_VERSION: u8 = 3;
 
 /// The account's backup record (spec 7): `PUT /v1/backup` stores it, `GET /v1/backup/{id}` hands it out to whoever
 /// names its user id or locator and signs the request with one of its auth keys, which only a door gives. The hub can
-/// open none of it: K is wrapped by the passkey and by the recovery code, and K seals the rest.
+/// open none of it: K is wrapped by the passkey and by the recovery key, and K seals the rest.
 #[derive(Debug, Clone, PartialEq, Eq, TlsSerialize, TlsDeserializeBytes, TlsSize)]
 pub struct Backup {
     pub version: u8,
-    /// K under HKDF(the passkey's PRF output, "yo backup v1 passkey"); empty without a passkey.
+    /// K under HKDF(the passkey's PRF output, "yo backup v3 passkey"); empty without a passkey.
     pub by_passkey: VLBytes,
-    /// K under HKDF(the recovery code, "yo backup v1 code"); always there.
+    /// K under HKDF(the recovery key's backup key, "yo backup v3 code"); always there.
     pub by_code: VLBytes,
-    /// ChaCha20-Poly1305 under K: the account key, the friends, the recovery code.
+    /// ChaCha20-Poly1305 under K: the account key, the recovery key.
     pub sealed: VLBytes,
-    /// Where the recovery code alone finds the record: `LOCATOR_LEN` bytes, or empty (found by the user id only).
+    /// Where the recovery key alone finds the record: `LOCATOR_LEN` bytes, or empty (found by the user id only).
     pub locator: VLBytes,
-    /// The Ed25519 key from HKDF(the passkey's PRF output, "yo backup v1 auth passkey"), which signs a fetch: 32
-    /// bytes, or empty without a passkey.
+    /// The Curve25519 key from HKDF(the passkey's PRF output, "yo backup v3 auth passkey"), which signs a fetch
+    /// (XEdDSA): 32 bytes, or empty without a passkey.
     pub auth_passkey: VLBytes,
-    /// The Ed25519 key from HKDF(the recovery code, "yo backup v1 auth code"): 32 bytes, always there.
+    /// The Curve25519 key from HKDF(the recovery key's backup key, "yo backup v3 auth code"): 32 bytes, always there.
     pub auth_code: VLBytes,
 }
 
@@ -631,8 +631,8 @@ mod tests {
         };
         assert_eq!(without.check(), Ok(()));
         assert_eq!(without.locator(), None);
-        assert_eq!(Backup { version: 1, ..backup() }.check(), Err(Error::Unsupported));
-        assert_eq!(Backup { version: 3, ..backup() }.check(), Err(Error::Unsupported));
+        assert_eq!(Backup { version: 2, ..backup() }.check(), Err(Error::Unsupported));
+        assert_eq!(Backup { version: 4, ..backup() }.check(), Err(Error::Unsupported));
         assert_eq!(Backup { auth_code: Vec::new().into(), ..backup() }.check(), Err(Error::Format));
         assert_eq!(Backup { auth_passkey: vec![5; 31].into(), ..backup() }.check(), Err(Error::Format));
         assert_eq!(Backup { by_code: Vec::new().into(), ..backup() }.check(), Err(Error::Format));

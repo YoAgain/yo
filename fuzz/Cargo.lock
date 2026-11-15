@@ -3364,6 +3364,7 @@ dependencies = [
  "ed25519-dalek",
  "getrandom 0.2.17",
  "hmac 0.12.1",
+ "libsignal-account-keys",
  "libsignal-protocol",
  "rand 0.9.5",
  "rand_core 0.6.4",
@@ -3421,6 +3422,7 @@ version = "0.1.0"
 dependencies = [
  "base64 0.22.1",
  "ed25519-dalek",
+ "libsignal-core",
  "sha2 0.10.9",
  "thiserror 2.0.21",
  "tls_codec",

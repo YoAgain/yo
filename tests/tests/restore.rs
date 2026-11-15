@@ -42,7 +42,7 @@ struct Person {
     user: String,
     secret: [u8; 32],
     k: [u8; 32],
-    code: Vec<String>,
+    code: String,
     prf: [u8; 32],
 }
 
@@ -89,7 +89,7 @@ fn accounts_restored_forty_times_by_every_way_lose_nothing() {
                 user,
                 secret,
                 k: random(&mut rng),
-                code: backup::words(random(&mut rng)),
+                code: backup::recovery_key(random(&mut rng)),
                 prf: random(&mut rng),
             };
             person.put_backup();
@@ -109,16 +109,18 @@ fn accounts_restored_forty_times_by_every_way_lose_nothing() {
             // (d): the passkey replaced and the words renewed first; the old ones must open nothing any more.
             if way == 3 {
                 let (old_code, old_prf) = (p.code.clone(), p.prf);
-                p.code = backup::words(random(&mut rng));
+                p.code = backup::recovery_key(random(&mut rng));
                 p.prf = random(&mut rng);
                 p.put_backup();
                 let http = Http::new(hub.url());
-                let record = Client::open_backup(&*http, None, &Door::Code(&old_code)).unwrap();
+                let record =
+                    Client::open_backup(&*http, None, &Door::Code(&yo_tests::backup::pool(&old_code))).unwrap();
                 assert!(record.is_none(), "{ctx}: the old words still find a record");
                 let id = yo_core::state::unhex(&p.user).unwrap();
                 let record = Client::fetch_backup(&*http, &id, &Door::Passkey(&old_prf)).unwrap();
                 assert!(record.is_none(), "{ctx}: the old passkey still fetches it");
-                let current = Client::fetch_backup(&*http, &id, &Door::Code(&p.code)).unwrap().unwrap();
+                let current =
+                    Client::fetch_backup(&*http, &id, &Door::Code(&yo_tests::backup::pool(&p.code))).unwrap().unwrap();
                 assert!(
                     backup::open_sealed(&current, &Door::Passkey(&old_prf)).is_none(),
                     "{ctx}: the old passkey opens it"
@@ -141,7 +143,7 @@ fn accounts_restored_forty_times_by_every_way_lose_nothing() {
                 }
                 // (b), (d) The 12 words: the record by their locator, K by them.
                 1 | 3 => {
-                    let door = Door::Code(&p.code);
+                    let door = Door::Code(&yo_tests::backup::pool(&p.code));
                     let opened = Client::open_backup(&*Http::new(hub.url()), None, &door).unwrap().expect(&ctx);
                     backup::parse_sealed(&opened.plain).expect(&ctx).0.account_key
                 }
@@ -178,7 +180,8 @@ fn accounts_restored_forty_times_by_every_way_lose_nothing() {
     // (f) Deleted: the backup goes with it; the name is anyone's, and the old secret takes nothing back.
     let p = &mut people[0];
     p.client.delete_account().unwrap();
-    let record = Client::open_backup(&*Http::new(hub.url()), None, &Door::Code(&p.code)).unwrap();
+    let record =
+        Client::open_backup(&*Http::new(hub.url()), None, &Door::Code(&yo_tests::backup::pool(&p.code))).unwrap();
     assert!(record.is_none(), "the deleted account's backup is gone");
     let stranger = register(&hub, &p.name, None).unwrap();
     assert_ne!(stranger.user_id(), p.user);

@@ -43,8 +43,8 @@ impl Signer {
         self.root
     }
 
-    /// A sender certificate for a user's device: its user id as an ACI, its number, the account key's X25519 form as
-    /// its identity (spec 4.1), good until a day from `now_ms`.
+    /// A sender certificate for a user's device: its user id as an ACI, its number, the account key as its identity
+    /// (spec 4.1), good until a day from `now_ms`.
     pub fn issue(
         &self,
         user: &UserId,
@@ -52,10 +52,7 @@ impl Signer {
         account_key: &[u8; KEY_LEN],
         now_ms: u64,
     ) -> Result<Vec<u8>, String> {
-        let montgomery = ed25519_dalek::VerifyingKey::from_bytes(account_key)
-            .map_err(|_| "account key".to_string())?
-            .to_montgomery();
-        let identity = PublicKey::from_djb_public_key_bytes(montgomery.as_bytes()).map_err(|e| e.to_string())?;
+        let identity = PublicKey::from_djb_public_key_bytes(account_key).map_err(|e| e.to_string())?;
         let device = DeviceId::new(device).map_err(|_| "device number".to_string())?;
         let certificate = SenderCertificate::new(
             Aci::from_uuid_bytes(*user).service_id_string(),
@@ -105,7 +102,7 @@ mod tests {
     fn a_signer_issues_what_its_root_vouches_for() {
         let signer = Signer::from_bytes(&test_file()).unwrap();
         let root = PublicKey::from_djb_public_key_bytes(&signer.root()).unwrap();
-        let account = ed25519_dalek::SigningKey::from_bytes(&[3; 32]).verifying_key().to_bytes();
+        let account = KeyPair::generate(&mut rand::rng()).public_key.public_key_bytes().try_into().unwrap();
         let bytes = signer.issue(&[7; 16], 2, &account, 1_000).unwrap();
         let certificate = SenderCertificate::deserialize(&bytes).unwrap();
         assert!(certificate.validate(&root, Timestamp::from_epoch_millis(1_000 + LIFETIME_MS)).unwrap());

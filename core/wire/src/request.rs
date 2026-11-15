@@ -1,4 +1,5 @@
-//! Signed requests (spec 6.2): a device proves itself with its auth key, per request, without a session.
+//! Signed requests (spec 6.2): a device proves itself with its auth key (Ed25519), per request, without a session; a
+//! backup's fetch (spec 7) is signed the same way by a door's auth key (Curve25519, XEdDSA).
 
 use crate::{sha256, Error, KEY_LEN};
 use ed25519_dalek::{Signature, VerifyingKey};
@@ -58,6 +59,20 @@ pub fn verify_hash(
     let key = VerifyingKey::from_bytes(auth_key).map_err(|_| Error::Signature)?;
     let signature = Signature::from_slice(signature).map_err(|_| Error::Signature)?;
     key.verify_strict(&to_be_signed_hash(method, path, time_ms, body_hash), &signature).map_err(|_| Error::Signature)
+}
+
+/// `verify_hash` for a backup door's auth key: XEdDSA by a Curve25519 key (spec 7).
+pub fn verify_door_hash(
+    door_key: &[u8; KEY_LEN],
+    method: &str,
+    path: &str,
+    time_ms: u64,
+    body_hash: &[u8; 32],
+    signature: &[u8],
+) -> Result<(), Error> {
+    crate::xeddsa_verify(door_key, &to_be_signed_hash(method, path, time_ms, body_hash), signature)
+        .then_some(())
+        .ok_or(Error::Signature)
 }
 
 #[cfg(test)]

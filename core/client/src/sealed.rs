@@ -1,5 +1,5 @@
 //! Sealed sender (spec 6.1), libsignal's: every envelope is a sealed sender v1 message to the recipient account's
-//! identity key (the account key's X25519 form, which all its devices hold), carrying the sender's certificate from
+//! identity key (the account key, which all its devices hold), carrying the sender's certificate from
 //! the hub and the payload (who sends, a session message per device), padded inside so the whole message is exactly
 //! one bucket. The hub sees a bucket and an inbox; the recipient checks the certificate against the trust roots it
 //! pins, at the time the hub took the envelope.

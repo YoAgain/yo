@@ -27,12 +27,12 @@ struct Args {
 }
 
 /// The words whose auth key signs the fetch of every record here.
-fn door() -> Vec<String> {
-    yo_tests::backup::words([7; 16])
+fn door() -> String {
+    yo_tests::backup::recovery_key([7; 16])
 }
 
 fn fetch_backup(http: &Http, id: &[u8]) -> Result<Option<Backup>, Error> {
-    Client::fetch_backup(http, id, &yo_core::backup::Door::Code(&door()))
+    Client::fetch_backup(http, id, &yo_core::backup::Door::Code(&yo_tests::backup::pool(&door())))
 }
 
 fn args() -> Args {
@@ -220,7 +220,7 @@ fn main() {
         l
     };
     let record = move |i: usize, round: u8| {
-        let auth = yo_core::backup::Door::Code(&door()).auth_key().verifying_key().to_bytes();
+        let auth = yo_core::backup::Door::Code(&yo_tests::backup::pool(&door())).auth_public();
         Backup::new(vec![1; 60], vec![2; 60], vec![round; 1000 + i % 500], locator(i, round).to_vec(), None, auth)
     };
     let items: Vec<(usize, Client)> = clients.drain(..).enumerate().collect();

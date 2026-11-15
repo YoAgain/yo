@@ -1,6 +1,5 @@
 //! Sealed sender (spec 6.1): what the hub sees of a chat is envelopes to inboxes, nothing that ties them together.
 
-use ed25519_dalek::SigningKey;
 use yo_core::{Client, Content, Event, Push};
 use yo_tests::{random_u64, Http, TestHub};
 
@@ -38,7 +37,7 @@ fn the_hub_cannot_tell_which_envelopes_belong_to_one_chat() {
     }
     let (to_b, to_a) = (delivered(&ha, b.user_id()), delivered(&hb, a.user_id()));
     assert!(to_b.len() >= 3 && to_a.len() >= 3, "{} {}", to_b.len(), to_a.len());
-    let account = |c: &Client| SigningKey::from_bytes(&c.account_secret()).verifying_key().to_bytes().to_vec();
+    let account = |c: &Client| yo_tests::account_key(&c.account_secret()).to_vec();
     for (envelopes, sender) in [(&to_b, &a), (&to_a, &b)] {
         let marks = [yo_tests::user_id(sender.user_id()).to_vec(), account(sender)];
         for envelope in envelopes.iter() {
@@ -77,7 +76,7 @@ fn an_envelope_not_sealed_to_the_account_is_dropped() {
     b.send(a.user_id(), Content::Text("2".into())).unwrap();
     let last = delivered(&hb, a.user_id()).pop().unwrap();
     let (payload, certificate) = yo_core::sealed::testing::open(&a.account_secret(), &last).unwrap();
-    let stranger = SigningKey::from_bytes(&[9; 32]).verifying_key().to_bytes();
+    let stranger = yo_tests::account_key(&[9; 32]);
     let dropped = a.dropped();
     let key = a.access_key_for_tests();
     // Bare: the hub refuses it. Sealed to someone else: taken, and dropped by A.
@@ -123,7 +122,7 @@ fn pair(hub: &TestHub, tag: &str) -> (Client, Client, std::sync::Arc<Http>, std:
 }
 
 fn account_key(c: &Client) -> [u8; 32] {
-    SigningKey::from_bytes(&c.account_secret()).verifying_key().to_bytes()
+    yo_tests::account_key(&c.account_secret())
 }
 
 /// A's next text to B goes with `certificate` in place of its own: dropped by B (not shown), the chat goes on once A
@@ -173,7 +172,7 @@ fn a_certificate_of_another_trust_root_is_refused() {
 fn a_certificate_for_another_identity_is_refused() {
     let hub = TestHub::start();
     let (mut a, mut b, _, _) = pair(&hub, "Idn");
-    let other = SigningKey::from_bytes(&[5; 32]).verifying_key().to_bytes();
+    let other = yo_tests::account_key(&[5; 32]);
     let wrong = yo_tests::sender_certificate(&yo_tests::user_id(a.user_id()), 1, &other, wall());
     refused_with(&mut a, &mut b, wrong);
     // And one naming another user (B's) with A's own identity: refused too.

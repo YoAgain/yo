@@ -58,9 +58,9 @@ fn the_app_layer_registers_by_username_and_restores_from_the_backup() {
     let secret = old.account_secret();
     assert_eq!(secret.len(), 32);
     // What the app makes: its JSON under K, K wrapped by the words and the passkey, their auth keys.
-    let (k, prf, words) = (vec![1; 32], vec![2; 32], yo_tests::backup::words([3; 16]));
+    let (k, prf, words) = (vec![1; 32], vec![2; 32], yo_tests::backup::recovery_key([3; 16]));
     let passkey = yo::YoDoor::Passkey { prf: prf.clone() };
-    let by_words = || yo::YoDoor::Words { words: words.clone() };
+    let by_words = || yo::YoDoor::RecoveryKey { key: words.clone() };
     old.put_backup(k.clone(), b"{\"account\":1}".to_vec(), words.clone(), yo::YoPasskeyDoor::New { prf: prf.clone() })
         .unwrap();
     // A new phone: the record by the words alone, or by the passkey's user handle and PRF output; either opens it.
@@ -73,7 +73,7 @@ fn the_app_layer_registers_by_username_and_restores_from_the_backup() {
     // Another passkey or other words fetch nothing: the hub answers as if there were no record.
     let other = yo::YoDoor::Passkey { prf: vec![9; 32] };
     assert!(yo::open_backup(app(), Some(user.clone()), other).unwrap().is_none());
-    let other = yo::YoDoor::Words { words: yo_tests::backup::words([4; 16]) };
+    let other = yo::YoDoor::RecoveryKey { key: yo_tests::backup::recovery_key([4; 16]) };
     assert!(yo::open_backup(app(), None, other).unwrap().is_none());
     assert!(yo::open_backup(app(), None, yo::YoDoor::Passkey { prf: prf.clone() }).is_err(), "a passkey needs the id");
     // The name registered again with the account key it holds.
@@ -82,11 +82,11 @@ fn the_app_layer_registers_by_username_and_restores_from_the_backup() {
     assert_eq!(new.user_id(), old.user_id());
     assert!(matches!(old.sync(0), Err(yo::YoError::Replaced)));
     // New words, the passkey kept: the old words open nothing, the passkey still does.
-    let renewed = yo_tests::backup::words([5; 16]);
+    let renewed = yo_tests::backup::recovery_key([5; 16]);
     let keep = yo::YoPasskeyDoor::Keep { record: found.record };
     new.put_backup(k.clone(), b"{}".to_vec(), renewed.clone(), keep).unwrap();
     assert!(yo::open_backup(app(), None, by_words()).unwrap().is_none());
-    let found = yo::open_backup(app(), None, yo::YoDoor::Words { words: renewed }).unwrap().unwrap();
+    let found = yo::open_backup(app(), None, yo::YoDoor::RecoveryKey { key: renewed }).unwrap().unwrap();
     let passkey = yo::YoDoor::Passkey { prf };
     assert_eq!(yo::open_backup(app(), Some(user), passkey).unwrap().unwrap().sealed, b"{}");
     assert_eq!(found.k, k);
@@ -180,7 +180,7 @@ fn the_app_layer_runs_other_calls_while_sync_waits() {
         let (a, pb) = (a.clone(), pb.clone());
         std::thread::spawn(move || {
             a.send_yo(pb).unwrap();
-            a.put_backup(vec![1; 32], b"{}".to_vec(), yo_tests::backup::words([2; 16]), yo::YoPasskeyDoor::None)
+            a.put_backup(vec![1; 32], b"{}".to_vec(), yo_tests::backup::recovery_key([2; 16]), yo::YoPasskeyDoor::None)
                 .unwrap();
             done.send(a.contacts().len()).unwrap();
         });

@@ -81,7 +81,8 @@ use tls_codec::{TlsDeserializeBytes, TlsSerialize, TlsSize, VLBytes};
 use yo_wire::DeviceId;
 use zeroize::Zeroize;
 
-const STATE_VERSION: u8 = 1;
+/// 2: the account key is libsignal's (Curve25519). A state of 1 (an Ed25519 account key) is brought up (`from_1`).
+const STATE_VERSION: u8 = 2;
 const AAD: &[u8] = b"yo state v2";
 
 /// A device of a user as this device knows it: its key, and its number among the user's devices, as the hub gave it
@@ -485,16 +486,40 @@ pub fn open(blob: &[u8], key: &[u8; 32]) -> Result<(State, Entries)> {
     let decoded: std::result::Result<Plain, _> = yo_wire::decode(&bytes);
     bytes.zeroize();
     let mut plain = decoded.map_err(|_| Error::State)?;
-    if plain.version != STATE_VERSION {
+    if plain.version != STATE_VERSION && plain.version != 1 {
         return Err(Error::State);
     }
     let state: std::result::Result<State, _> = serde_json::from_slice(plain.state.as_slice());
+    let state = match (state, plain.version) {
+        (Ok(state), 1) => from_1(state),
+        (state, _) => state.map_err(|_| Error::State),
+    };
     let entries = std::mem::take(&mut plain.records)
         .into_iter()
         .map(|entry| Ok((String::from_utf8(entry.key.into()).map_err(|_| Error::State)?, entry.value.into())))
         .collect::<Result<Entries>>();
     wipe(plain.state);
-    Ok((state.map_err(|_| Error::State)?, entries?))
+    Ok((state?, entries?))
+}
+
+/// A state from before the account key was libsignal's: its Ed25519 seed becomes the clamped scalar its X25519 form
+/// was (the identity its sessions have), the contacts' pinned keys their Curve25519 form (as the hub converted them),
+/// the device certificate signed anew, and the storage written again under the key the new secret gives. A
+/// registration still unanswered (signed by the old key) does not come over: the app signs in again.
+fn from_1(mut state: State) -> Result<State> {
+    if state.registering.is_some() {
+        return Err(Error::State);
+    }
+    state.account_secret = crate::identity::legacy_account_secret(&state.account_secret);
+    for contact in state.contacts.values_mut() {
+        if contact.account_key != [0; 32] {
+            contact.account_key = crate::identity::legacy_account_key(&contact.account_key).unwrap_or([0; 32]);
+        }
+    }
+    let pair = crate::identity::account_pair(&state.account_secret)?;
+    state.certificate = crate::identity::certify(&pair, &state.device_key).to_bytes();
+    state.storage_dirty = true;
+    Ok(state)
 }
 
 fn wipe(bytes: VLBytes) {

@@ -446,12 +446,12 @@ fn a_new_phone_from_the_words_gets_its_friends_back_and_sessions_form_again() {
     let (a, b) = friends(&hub);
     a.set_friend(b.user(), Some("Bob".into()), Some(2)).unwrap();
     a.write_storage().unwrap();
-    let (k, words) = (vec![1; 32], yo_tests::backup::words([9; 16]));
+    let (k, words) = (vec![1; 32], yo_tests::backup::recovery_key([9; 16]));
     let json = format!("{{\"secret\":{:?}}}", a.account_secret());
     a.put_backup(k.clone(), json.clone().into_bytes(), words.clone(), yo::YoPasskeyDoor::None).unwrap();
     // The new phone: nothing but the words.
     let app = App::new(Http::new(hub.url()));
-    let opened = yo::open_backup(app, None, yo::YoDoor::Words { words }).unwrap().expect("the record");
+    let opened = yo::open_backup(app, None, yo::YoDoor::RecoveryKey { key: words }).unwrap().expect("the record");
     assert_eq!((opened.k, String::from_utf8(opened.sealed).unwrap()), (k, json));
     let a2 = Phone::register(&hub, &a.name, None, Some(a.account_secret()));
     assert_eq!(a2.user(), a.user());
@@ -698,10 +698,8 @@ fn sealed_bytes_reveal_nothing() {
     assert_eq!(envelopes.len(), 3);
     let sizes: std::collections::BTreeSet<usize> = envelopes.iter().map(Vec::len).collect();
     assert_eq!(sizes.len(), 1, "one bucket for a Yo and a photo: {sizes:?}");
-    let a_account =
-        ed25519_dalek::SigningKey::from_bytes(&a.account_secret().try_into().unwrap()).verifying_key().to_bytes();
-    let b_account =
-        ed25519_dalek::SigningKey::from_bytes(&b.account_secret().try_into().unwrap()).verifying_key().to_bytes();
+    let a_account = yo_tests::account_key(&a.account_secret().try_into().unwrap());
+    let b_account = yo_tests::account_key(&b.account_secret().try_into().unwrap());
     let a_payload = payload(&b, &envelopes[0]);
     let secrets: Vec<(&str, Vec<u8>)> = vec![
         ("A's user id", yo_tests::user_id(&a.user()).to_vec()),

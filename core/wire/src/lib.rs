@@ -21,9 +21,9 @@ pub const VERSION: u8 = 1;
 pub const USER_ID_LEN: usize = 16;
 /// A device id: 16 random bytes the device chooses; the hub's name for its inbox, never given to other users.
 pub const DEVICE_ID_LEN: usize = 16;
-/// An Ed25519 public key.
+/// A public key: Curve25519 (the account key, a backup door's auth key) or Ed25519 (a device's auth key, the hub's).
 pub const KEY_LEN: usize = 32;
-/// An Ed25519 signature.
+/// A signature: XEdDSA by a Curve25519 key, or Ed25519.
 pub const SIGNATURE_LEN: usize = 64;
 
 pub type DeviceId = [u8; DEVICE_ID_LEN];
@@ -45,6 +45,19 @@ impl From<tls_codec::Error> for Error {
     fn from(_: tls_codec::Error) -> Self {
         Error::Format
     }
+}
+
+/// Whether `signature` is the XEdDSA signature of the Curve25519 key `key` (its 32 bytes) over `message`, as libsignal
+/// makes and checks it: the account key's (spec 3.1, 6.4), a backup door's (spec 7).
+pub fn xeddsa_verify(key: &[u8; KEY_LEN], message: &[u8], signature: &[u8]) -> bool {
+    libsignal_core::curve::PublicKey::from_djb_public_key_bytes(key)
+        .is_ok_and(|key| key.verify_signature(message, signature))
+}
+
+/// Whether 32 bytes are a Curve25519 public key a signature can be checked against: canonical, in the prime-order
+/// subgroup.
+pub fn curve_key_usable(key: &[u8; KEY_LEN]) -> bool {
+    libsignal_core::curve::PublicKey::from_djb_public_key_bytes(key).is_ok_and(|key| key.is_canonical())
 }
 
 /// SHA-256.

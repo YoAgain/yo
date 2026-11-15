@@ -522,17 +522,17 @@ fn by_name(hub: &TestHub, name: &str, account: Option<[u8; 32]>) -> Result<Clien
 }
 
 /// The words whose auth key signs the fetch of the test records.
-fn words() -> Vec<String> {
-    yo_tests::backup::words([1; 16])
+fn words() -> String {
+    yo_tests::backup::recovery_key([1; 16])
 }
 
 fn backup(locator: Vec<u8>) -> api::Backup {
-    let auth = Door::Code(&words()).auth_key().verifying_key().to_bytes();
+    let auth = Door::Code(&yo_tests::backup::pool(&words())).auth_public();
     api::Backup::new(vec![1; 60], vec![2; 60], vec![3; 500], locator, None, auth)
 }
 
 fn fetch(http: &Http, id: &[u8]) -> Result<Option<api::Backup>, Error> {
-    Client::fetch_backup(http, id, &Door::Code(&words()))
+    Client::fetch_backup(http, id, &Door::Code(&yo_tests::backup::pool(&words())))
 }
 
 #[test]
@@ -602,7 +602,7 @@ fn a_backup_is_found_by_user_id_and_by_locator() {
     t.put_backup(&first).unwrap();
     assert_eq!(fetch(&http, &user), Ok(Some(first.clone())));
     assert_eq!(fetch(&http, &[9; 16]), Ok(Some(first)));
-    // A new recovery code: the old locator finds nothing.
+    // A new recovery key: the old locator finds nothing.
     let second = backup(vec![8; 16]);
     t.put_backup(&second).unwrap();
     assert_eq!(fetch(&http, &[9; 16]), Ok(None));
@@ -612,7 +612,7 @@ fn a_backup_is_found_by_user_id_and_by_locator() {
     let mut u = by_name(&hub, &format!("OTHER{}", random_u64() % 100_000), None).unwrap();
     assert_eq!(u.put_backup(&backup(vec![8; 16])), Err(Error::Refused(api::status::CONFLICT)));
     // Malformed records are refused, by the core and by the hub.
-    let bad = api::Backup { version: 3, ..backup(Vec::new()) };
+    let bad = api::Backup { version: 2, ..backup(Vec::new()) };
     assert!(t.put_backup(&bad).is_err());
     for body in [yo_wire::encode(&bad), yo_wire::encode(&backup(vec![1; 15])), vec![1, 2, 3], Vec::new()] {
         assert_eq!(t.signed_for_tests("PUT", api::BACKUP, &body).unwrap().status, api::status::BAD_REQUEST);

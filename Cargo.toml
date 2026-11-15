@@ -35,6 +35,10 @@ rand_core = { version = "=0.6.4", features = ["getrandom"] }
 libsignal-protocol = { git = "https://github.com/signalapp/libsignal", tag = "v0.108.0" }
 # Its profile key and the access key derived from it (spec 4.10), from the same tag (AGPL-3.0 too).
 zkgroup = { git = "https://github.com/signalapp/libsignal", tag = "v0.108.0" }
+# Its curve (Curve25519 keys, XEdDSA signatures) for the account key: what yo-wire checks (spec 3.1, 6.4).
+libsignal-core = { git = "https://github.com/signalapp/libsignal", tag = "v0.108.0" }
+# Its account entropy pool, the recovery key, and the backup key derived from it (spec 7).
+libsignal-account-keys = { git = "https://github.com/signalapp/libsignal", tag = "v0.108.0" }
 async-trait = "=0.1.92"
 rand = "=0.9.5"
 

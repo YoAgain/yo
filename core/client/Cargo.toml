@@ -26,6 +26,7 @@ serde_json = { workspace = true }
 thiserror = { workspace = true }
 rand_core = { workspace = true }
 libsignal-protocol = { workspace = true }
+libsignal-account-keys = { workspace = true }
 zkgroup = { workspace = true }
 async-trait = { workspace = true }
 rand = { workspace = true }

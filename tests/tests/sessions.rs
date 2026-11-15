@@ -189,7 +189,7 @@ fn a_forged_payload_changes_nothing() {
     let last = message.len() - 1;
     message[last] ^= 1;
     payload.copies[0].message = message.into();
-    let account = ed25519_dalek::SigningKey::from_bytes(&b.account_secret()).verifying_key().to_bytes();
+    let account = yo_tests::account_key(&b.account_secret());
     let forged =
         yo_core::sealed::testing::seal(&a.account_secret(), &certificate, &account, &yo_wire::encode(&payload))
             .unwrap();
@@ -243,7 +243,7 @@ fn a_device_key_the_hub_does_not_name_is_not_taken_in() {
     let (opened, certificate) = yo_core::sealed::testing::open(&b.account_secret(), &real).unwrap();
     let mut payload: yo_wire::envelope::Payload = yo_wire::decode(&opened).unwrap();
     payload.device_key = [9; 32];
-    let account = ed25519_dalek::SigningKey::from_bytes(&b.account_secret()).verifying_key().to_bytes();
+    let account = yo_tests::account_key(&b.account_secret());
     let forged =
         yo_core::sealed::testing::seal(&a.account_secret(), &certificate, &account, &yo_wire::encode(&payload))
             .unwrap();
@@ -266,12 +266,12 @@ fn a_stranger_named_by_a_payload_that_does_not_open_is_not_pinned() {
     let real = posted(&ha, b.user_id()).pop().unwrap();
     let (opened, certificate) = yo_core::sealed::testing::open(&b.account_secret(), &real).unwrap();
     let mut payload: yo_wire::envelope::Payload = yo_wire::decode(&opened).unwrap();
-    payload.account_key = ed25519_dalek::SigningKey::from_bytes(&c.account_secret()).verifying_key().to_bytes();
+    payload.account_key = yo_tests::account_key(&c.account_secret());
     let mut message = payload.copies[0].message.as_slice().to_vec();
     let last = message.len() - 1;
     message[last] ^= 1;
     payload.copies[0].message = message.into();
-    let account = ed25519_dalek::SigningKey::from_bytes(&b.account_secret()).verifying_key().to_bytes();
+    let account = yo_tests::account_key(&b.account_secret());
     let forged =
         yo_core::sealed::testing::seal(&a.account_secret(), &certificate, &account, &yo_wire::encode(&payload))
             .unwrap();
@@ -301,7 +301,7 @@ fn forgeries_cannot_use_up_the_lookups() {
     let real = posted(&ha, b.user_id()).pop().unwrap();
     let (opened, certificate) = yo_core::sealed::testing::open(&b.account_secret(), &real).unwrap();
     let mut payload: yo_wire::envelope::Payload = yo_wire::decode(&opened).unwrap();
-    let account = ed25519_dalek::SigningKey::from_bytes(&b.account_secret()).verifying_key().to_bytes();
+    let account = yo_tests::account_key(&b.account_secret());
     let clock = Arc::new(AtomicU64::new(
         std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_millis() as u64,
     ));
@@ -361,7 +361,7 @@ fn a_new_phones_message_right_after_a_forgery_is_kept_not_lost() {
         let (opened, certificate) = yo_core::sealed::testing::open(&b.account_secret(), &real).unwrap();
         let mut payload: yo_wire::envelope::Payload = yo_wire::decode(&opened).unwrap();
         payload.device_key = [8; 32];
-        let account = ed25519_dalek::SigningKey::from_bytes(&b.account_secret()).verifying_key().to_bytes();
+        let account = yo_tests::account_key(&b.account_secret());
         let forged =
             yo_core::sealed::testing::seal(&a.account_secret(), &certificate, &account, &yo_wire::encode(&payload))
                 .unwrap();

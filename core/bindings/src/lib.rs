@@ -3,6 +3,7 @@
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, OnceLock, PoisonError};
+use yo_core::backup::Door;
 use yo_core::{Client, Content, Event, Sent};
 
 uniffi::setup_scaffolding!();
@@ -438,8 +439,8 @@ fn key_of(key: Vec<u8>) -> Result<[u8; 32], YoError> {
 }
 
 /// The account's backup record (spec 7) as the hub has it: K wrapped by the passkey (empty without one) and by the
-/// words, what K seals, the words' locator (16 bytes, or empty), and the doors' auth keys, which sign its fetch: the
-/// passkey's empty without one or before it was confirmed, both empty in a record from before them.
+/// recovery key, what K seals, the recovery key's locator (16 bytes, or empty), and the doors' auth keys, which sign
+/// its fetch: the passkey's empty without one or before it was confirmed.
 #[derive(uniffi::Record, Clone)]
 pub struct YoBackup {
     pub by_passkey: Vec<u8>,
@@ -477,20 +478,36 @@ impl From<yo_core::Backup> for YoBackup {
     }
 }
 
-/// What opens the backup: the passkey's PRF output, or the 12 recovery words.
+/// What opens the backup: the passkey's PRF output, or the recovery key (64 characters, `recovery_key_parse`).
 #[derive(uniffi::Enum)]
 pub enum YoDoor {
     Passkey { prf: Vec<u8> },
-    Words { words: Vec<String> },
+    RecoveryKey { key: String },
 }
 
-impl YoDoor {
-    fn core(&self) -> yo_core::backup::Door<'_> {
-        match self {
-            YoDoor::Passkey { prf } => yo_core::backup::Door::Passkey(prf),
-            YoDoor::Words { words } => yo_core::backup::Door::Code(words),
-        }
-    }
+/// The recovery key of a door's text; `State` when it is none (the app parses it first).
+fn recovery_key(key: &str) -> Result<yo_core::backup::AccountEntropyPool, YoError> {
+    yo_core::backup::parse_recovery_key(key).ok_or(YoError::State)
+}
+
+/// A new recovery key (spec 7): libsignal's account entropy pool, 64 characters a–z and 0–9.
+#[uniffi::export]
+pub fn new_recovery_key() -> String {
+    yo_core::backup::new_recovery_key().to_string()
+}
+
+/// The recovery key in what was pasted, typed or scanned (case, spaces, dashes and line breaks do not matter), as
+/// its 64 characters; `None` when it is none.
+#[uniffi::export]
+pub fn recovery_key_parse(typed: String) -> Option<String> {
+    yo_core::backup::parse_recovery_key(&typed).map(|key| key.to_string())
+}
+
+/// An account secret kept from before the account key was libsignal's (an Ed25519 seed, in an iCloud Keychain item of
+/// then) as the account's secret now: the same account, the same identity.
+#[uniffi::export]
+pub fn legacy_account_secret(seed: Vec<u8>) -> Result<Vec<u8>, YoError> {
+    Ok(yo_core::identity::legacy_account_secret(&key_of(seed)?).to_vec())
 }
 
 /// A backup opened by a door: K, what K sealed (the app's JSON), and the record as the hub has it.
@@ -504,7 +521,7 @@ pub struct YoOpenedBackup {
 /// The passkey's door in a record being made (`YoClient::put_backup`).
 #[derive(uniffi::Enum)]
 pub enum YoPasskeyDoor {
-    /// None: the words alone open it.
+    /// None: the recovery key alone opens it.
     None,
     /// A passkey, by its PRF output.
     New { prf: Vec<u8> },
@@ -513,7 +530,7 @@ pub enum YoPasskeyDoor {
 }
 
 /// Fetches the backup record a door opens and opens it: by the user id when given (a passkey's user handle; needed
-/// with a passkey), else by the words' locator. The fetch is signed with the door's auth key. `None` when there is
+/// with a passkey), else by the recovery key's locator. The fetch is signed with the door's auth key. `None` when there is
 /// none it opens. Before there is an account on this phone.
 #[uniffi::export]
 pub fn open_backup(
@@ -521,7 +538,12 @@ pub fn open_backup(
     user_id: Option<Vec<u8>>,
     door: YoDoor,
 ) -> Result<Option<YoOpenedBackup>, YoError> {
-    let opened = Client::open_backup(&Http(transport), user_id.as_deref(), &door.core())?;
+    let opened = match &door {
+        YoDoor::Passkey { prf } => Client::open_backup(&Http(transport), user_id.as_deref(), &Door::Passkey(prf))?,
+        YoDoor::RecoveryKey { key } => {
+            Client::open_backup(&Http(transport), user_id.as_deref(), &Door::Code(&recovery_key(key)?))?
+        }
+    };
     Ok(opened.map(|o| YoOpenedBackup { k: o.k.to_vec(), sealed: o.plain, record: o.record.into() }))
 }
 
@@ -778,22 +800,23 @@ impl YoClient {
     }
 
     /// Stores the account's backup record at the hub, replacing the one before (its old locator then finds nothing):
-    /// `sealed` (the app's JSON) padded and sealed under K (32 bytes), K wrapped by the words and as `passkey` says,
-    /// with the doors' auth keys.
+    /// `sealed` (the app's JSON) padded and sealed under K (32 bytes), K wrapped by the recovery key and as `passkey`
+    /// says, with the doors' auth keys.
     pub fn put_backup(
         &self,
         k: Vec<u8>,
         sealed: Vec<u8>,
-        words: Vec<String>,
+        recovery_key: String,
         passkey: YoPasskeyDoor,
     ) -> Result<(), YoError> {
         use yo_core::backup::PasskeyDoor;
         let k = key_of(k)?;
+        let code = self::recovery_key(&recovery_key)?;
         let record = match passkey {
-            YoPasskeyDoor::None => yo_core::backup::make(&k, &sealed, &words, PasskeyDoor::None),
-            YoPasskeyDoor::New { prf } => yo_core::backup::make(&k, &sealed, &words, PasskeyDoor::New(&prf)),
+            YoPasskeyDoor::None => yo_core::backup::make(&k, &sealed, &code, PasskeyDoor::None),
+            YoPasskeyDoor::New { prf } => yo_core::backup::make(&k, &sealed, &code, PasskeyDoor::New(&prf)),
             YoPasskeyDoor::Keep { record } => {
-                yo_core::backup::make(&k, &sealed, &words, PasskeyDoor::Keep(&record.into()))
+                yo_core::backup::make(&k, &sealed, &code, PasskeyDoor::Keep(&record.into()))
             }
         }?;
         Ok(self.with(|c| c.put_backup(&record))??)

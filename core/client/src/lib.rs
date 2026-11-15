@@ -27,8 +27,8 @@ use ed25519_dalek::{Signer as _, SigningKey};
 use identity::Key;
 use libsignal_protocol::{
     extract_decryption_error_message_from_serialized_content, message_decrypt, message_encrypt, process_prekey_bundle,
-    CiphertextMessage, CiphertextMessageType, DecryptionErrorMessage, DeviceId, PlaintextContent, PreKeyBundle,
-    PreKeySignalMessage, ProtocolAddress, SignalMessage, SignalProtocolError, Timestamp,
+    CiphertextMessage, CiphertextMessageType, DecryptionErrorMessage, DeviceId, IdentityKeyPair, PlaintextContent,
+    PreKeyBundle, PreKeySignalMessage, ProtocolAddress, SignalMessage, SignalProtocolError, Timestamp,
 };
 use signal::Records;
 use state::{hex, unhex, Contact, DecryptionError, Outgoing, Registering, Slot, State, StoredContent, StoredEvent};
@@ -524,16 +524,17 @@ fn wall_ms() -> u64 {
     SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_millis() as u64
 }
 
-/// The time and signature headers of a signed request (spec 6.2), by `key`: a device's auth key, or a backup door's.
+/// The time and signature headers of a signed request (spec 6.2), by `sign`: a device's auth key (Ed25519), or a
+/// backup door's (XEdDSA).
 fn signature_headers(
-    key: &SigningKey,
+    sign: impl FnOnce(&[u8]) -> [u8; yo_wire::SIGNATURE_LEN],
     method: &str,
     path: &str,
     time: u64,
     body_hash: &[u8; 32],
 ) -> Vec<(String, String)> {
-    let signature = key.sign(&yo_wire::request::to_be_signed_hash(method, path, time, body_hash));
-    vec![(HEADER_TIME.to_owned(), time.to_string()), (HEADER_SIGNATURE.to_owned(), yo_wire::b64(&signature.to_bytes()))]
+    let signature = sign(&yo_wire::request::to_be_signed_hash(method, path, time, body_hash));
+    vec![(HEADER_TIME.to_owned(), time.to_string()), (HEADER_SIGNATURE.to_owned(), yo_wire::b64(&signature))]
 }
 
 fn user_bytes(user: &str) -> Result<UserId> {
@@ -692,7 +693,7 @@ impl Client {
         if handle.kind != KIND_USERNAME {
             return Err(Error::Protocol("not a username"));
         }
-        let account = SigningKey::from_bytes(&account_secret.unwrap_or_else(identity::random));
+        let account = identity::account_pair(&account_secret.unwrap_or_else(identity::new_account_secret))?;
         let (mut client, device) = Client::new_device(transport, &handle, account, name, push)?;
         let request = api::Register { username: handle.value.clone(), device };
         client.state.registering = Some(Registering { request: encode(&request), sent: false });
@@ -795,7 +796,8 @@ impl Client {
         self.state.profile_key.map(|key| yo_wire::b64(&access_key(&key)))
     }
 
-    /// The account key's secret (Ed25519 seed): what the backup seals (spec 7), so a new phone registers with it.
+    /// The account key's secret (its Curve25519 private key): what the backup seals (spec 7), so a new phone registers
+    /// with it.
     pub fn account_secret(&self) -> [u8; 32] {
         self.state.account_secret
     }
@@ -840,7 +842,7 @@ impl Client {
     fn new_device(
         transport: Arc<dyn Transport>,
         handle: &Handle,
-        account: SigningKey,
+        account: IdentityKeyPair,
         name: Option<String>,
         push: Push,
     ) -> Result<(Client, api::NewDevice)> {
@@ -852,7 +854,7 @@ impl Client {
         let state = State {
             user_id: String::new(),
             username: None,
-            account_secret: account.to_bytes(),
+            account_secret: account.private_key().serialize().try_into().map_err(|_| Error::Internal("account key"))?,
             auth_secret: auth.to_bytes(),
             device_id,
             device_key,
@@ -895,7 +897,7 @@ impl Client {
         client.state.prekeys.left = PREKEY_TARGET;
         let auth_key = auth.verifying_key().to_bytes();
         let proof =
-            account.sign(&api::registration_to_be_signed(handle, &device_id, &device_key, &auth_key)).to_bytes();
+            identity::sign(&account, &api::registration_to_be_signed(handle, &device_id, &device_key, &auth_key));
         let device = api::NewDevice {
             device_id,
             device_key,
@@ -1379,7 +1381,7 @@ impl Client {
         self.state.signed_until = time;
         let key = SigningKey::from_bytes(&self.state.auth_secret);
         let mut headers = vec![(HEADER_DEVICE.to_owned(), yo_wire::b64(&self.state.device_id))];
-        headers.extend(signature_headers(&key, method, path, time, body_hash));
+        headers.extend(signature_headers(|m| key.sign(m).to_bytes(), method, path, time, body_hash));
         (headers, time)
     }
 
@@ -1437,7 +1439,7 @@ impl Client {
     // ---- sessions ----
 
     fn my_account_key(&self) -> Key {
-        SigningKey::from_bytes(&self.state.account_secret).verifying_key().to_bytes()
+        identity::account_pair(&self.state.account_secret).map(|pair| identity::account_key(&pair)).unwrap_or_default()
     }
 
     /// A user's account key and devices as this device knows them: a contact's, or this account's other devices.

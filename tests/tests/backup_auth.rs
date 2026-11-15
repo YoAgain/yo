@@ -2,8 +2,8 @@
 //! other answer is the `404` of no record, also for a record without the keys (from before them), which the app makes
 //! anew. What K and the storage key seal lands on the sizes the hub may see.
 
-use ed25519_dalek::{Signer as _, SigningKey};
-use yo_core::backup::{self, Door, PasskeyDoor};
+use libsignal_protocol::PrivateKey;
+use yo_core::backup::{self, AccountEntropyPool, Door, PasskeyDoor};
 use yo_core::{Backup, Client, Push};
 use yo_hub::db::{BackupAuth, Db};
 use yo_tests::{random_u64, Http, TestHub};
@@ -17,20 +17,29 @@ fn register(hub: &TestHub) -> Client {
 }
 
 /// A GET of the record by `id` as anyone could send it: signed with `key` at `time` (none: unsigned). The status.
-fn get(hub: &TestHub, id: &[u8], signed: Option<(&SigningKey, u64)>) -> (u16, Vec<u8>) {
+fn get(hub: &TestHub, id: &[u8], signed: Option<(&PrivateKey, u64)>) -> (u16, Vec<u8>) {
+    let path = api::backup_path(id);
+    get_as(hub, id, signed.map(|(key, time)| (sign(key, &to_be_signed("GET", &path, time, b"")), time)))
+}
+
+/// `get` with a signature as given (XEdDSA signs each time anew: a replay sends the same one again).
+fn get_as(hub: &TestHub, id: &[u8], signed: Option<(Vec<u8>, u64)>) -> (u16, Vec<u8>) {
     let path = api::backup_path(id);
     let mut request = reqwest::blocking::Client::new().get(format!("{}{path}", hub.url()));
-    if let Some((key, time)) = signed {
-        let signature = key.sign(&to_be_signed("GET", &path, time, b""));
-        request =
-            request.header(HEADER_TIME, time.to_string()).header(HEADER_SIGNATURE, yo_wire::b64(&signature.to_bytes()));
+    if let Some((signature, time)) = signed {
+        request = request.header(HEADER_TIME, time.to_string()).header(HEADER_SIGNATURE, yo_wire::b64(&signature));
     }
     let response = request.send().unwrap();
     (response.status().as_u16(), response.bytes().unwrap().to_vec())
 }
 
-fn words(seed: u8) -> Vec<String> {
-    yo_tests::backup::words([seed; 16])
+/// A door's XEdDSA signature (spec 7).
+fn sign(key: &PrivateKey, message: &[u8]) -> Vec<u8> {
+    key.calculate_signature(message, &mut rand::rng()).unwrap().to_vec()
+}
+
+fn words(seed: u8) -> AccountEntropyPool {
+    yo_tests::backup::pool(&yo_tests::backup::recovery_key([seed; 16]))
 }
 
 #[test]
@@ -48,22 +57,23 @@ fn only_a_door_fetches_a_record() {
     // No signature, a stranger's key, or the device's own: as if there were no record.
     assert_eq!(get(&hub, &user, None), not_found);
     assert_eq!(get(&hub, &locator, None), not_found);
-    assert_eq!(get(&hub, &user, Some((&SigningKey::from_bytes(&[4; 32]), now))), not_found);
+    assert_eq!(get(&hub, &user, Some((&PrivateKey::deserialize(&[4; 32]).unwrap(), now))), not_found);
     assert_eq!(get(&hub, &user, Some((&Door::Code(&words(5)).auth_key(), now))), not_found);
     // The same as for no record at all, also signed.
     assert_eq!(get(&hub, &[6; 16], Some((&by_code, now))), not_found);
     // Either door's key, by the user id or by the locator.
     let body = yo_wire::encode(&record);
-    assert_eq!(get(&hub, &user, Some((&by_code, now))), (200, body.clone()));
+    let first = sign(&by_code, &to_be_signed("GET", &api::backup_path(&user), now, b""));
+    assert_eq!(get_as(&hub, &user, Some((first.clone(), now))), (200, body.clone()));
     assert_eq!(get(&hub, &locator, Some((&by_code, now + 1))), (200, body.clone()));
     assert_eq!(get(&hub, &user, Some((&by_passkey, now + 2))), (200, body.clone()));
     // Each signature once; none out of the window; none for another path.
-    assert_eq!(get(&hub, &user, Some((&by_code, now))), not_found, "replayed");
+    assert_eq!(get_as(&hub, &user, Some((first, now))), not_found, "replayed");
     let stale = now - yo_wire::limits::MAX_SKEW_MS - 1000;
     assert_eq!(get(&hub, &user, Some((&by_code, stale))), not_found, "stale");
     assert_eq!(get(&hub, &user, Some((&by_code, now + yo_wire::limits::MAX_SKEW_MS + 60_000))), not_found, "ahead");
     let path = api::backup_path(&locator);
-    let signature = by_code.sign(&to_be_signed("GET", &path, now + 3, b"")).to_bytes();
+    let signature = sign(&by_code, &to_be_signed("GET", &path, now + 3, b""));
     let wrong_path = reqwest::blocking::Client::new()
         .get(format!("{}{}", hub.url(), api::backup_path(&user)))
         .header(HEADER_TIME, (now + 3).to_string())
@@ -71,15 +81,15 @@ fn only_a_door_fetches_a_record() {
         .send()
         .unwrap();
     assert_eq!(wrong_path.status().as_u16(), 404, "signed for the locator, sent for the user id");
-    // The core signs: by the words, by the passkey; a door the record lacks finds nothing.
+    // The core signs: by the recovery key, by the passkey; a door the record lacks finds nothing.
     let http = Http::new(hub.url());
     assert_eq!(Client::fetch_backup(&*http, &user, &Door::Passkey(&prf)), Ok(Some(record.clone())));
     let without = backup::make(&k, b"{}", &code, PasskeyDoor::None).unwrap();
     t.put_backup(&without).unwrap();
     assert_eq!(Client::fetch_backup(&*http, &user, &Door::Passkey(&prf)), Ok(None));
     assert_eq!(Client::open_backup(&*http, None, &Door::Code(&code)).unwrap().unwrap().k, k);
-    // A record whose auth key is no Ed25519 point is refused.
-    let bad = Backup { auth_code: vec![2; 32].into(), ..without };
+    // A record whose auth key is no canonical Curve25519 key is refused.
+    let bad = Backup { auth_code: vec![0xff; 32].into(), ..without };
     assert_eq!(t.signed_for_tests("PUT", api::BACKUP, &yo_wire::encode(&bad)).unwrap().status, 400);
 }
 
@@ -107,7 +117,7 @@ fn a_record_without_auth_keys_is_never_served_and_the_app_makes_a_new_one() {
     assert_eq!(get(&hub, &user, None).0, 404);
     assert_eq!(Client::open_backup(&*http, None, &Door::Code(&code)), Ok(None));
     assert_eq!(Client::open_backup(&*http, Some(&user), &Door::Passkey(&prf)), Ok(None));
-    // The app makes a new one from the words on the phone: a new K, the words' door only.
+    // The app makes a new one from the recovery key on the phone: a new K, the recovery key's door only.
     t.put_backup(&backup::make(&k, b"{\"new\":1}", &code, PasskeyDoor::None).unwrap()).unwrap();
     let opened = Client::open_backup(&*http, None, &Door::Code(&code)).unwrap().unwrap();
     assert_eq!((opened.k, opened.plain.as_slice()), (k, &b"{\"new\":1}"[..]));
@@ -121,7 +131,7 @@ fn a_record_without_auth_keys_is_never_served_and_the_app_makes_a_new_one() {
     let name = t.username().unwrap().to_owned();
     let new = Client::register_username(Http::new(hub.url()), &name, Some(secret), None, Push::none()).unwrap();
     assert_eq!(new.user_id(), t.user_id());
-    assert!(Client::open_backup(&*http, None, &Door::Code(&code)).unwrap().is_some(), "and by the words");
+    assert!(Client::open_backup(&*http, None, &Door::Code(&code)).unwrap().is_some(), "and by the recovery key");
 }
 
 #[test]

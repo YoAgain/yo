@@ -9,7 +9,6 @@
 //! client state sealed after every Yo, as the app saves it. One thread; the numbers depend on the machine. The last
 //! column is the same case on the MLS core (commit 930e34e), measured once on the same machine.
 
-use ed25519_dalek::SigningKey;
 use libsignal_protocol::{
     kem, message_decrypt, message_encrypt, process_prekey_bundle, CiphertextMessage, CiphertextMessageType, DeviceId,
     PreKeyBundle, PreKeySignalMessage, ProtocolAddress, PublicKey, SignalMessage,
@@ -29,7 +28,8 @@ const MLS: [(f64, f64); 6] =
     [(263.7, 261.9), (260.8, 282.8), (492.3, 544.3), (405.1, 429.1), (892.2, 934.9), (2036.9, 2085.5)];
 
 struct Device {
-    account: SigningKey,
+    /// The account secret.
+    account: Key,
     user: [u8; 16],
     state: State,
     records: Records,
@@ -37,18 +37,18 @@ struct Device {
 }
 
 impl Device {
-    fn new(account: &SigningKey, user: [u8; 16], number: u8) -> Device {
+    fn new(account: &Key, user: [u8; 16], number: u8) -> Device {
         let device_key: Key = identity::random();
         let registration_id = 1 + u32::from(number);
         let state = State {
             user_id: state::hex(&user),
             username: None,
-            account_secret: account.to_bytes(),
+            account_secret: *account,
             auth_secret: identity::random(),
             device_id: identity::random(),
             device_key,
             device_number: number,
-            certificate: identity::certify(account, &device_key).to_bytes(),
+            certificate: identity::certify(&identity::account_pair(account).unwrap(), &device_key).to_bytes(),
             registration_id,
             name: None,
             contacts: Default::default(),
@@ -81,18 +81,18 @@ impl Device {
             deferred: Default::default(),
         };
         let records = Records::new(&Default::default(), &state.account_secret, registration_id).unwrap();
-        Device { account: account.clone(), user, state, records, state_key: identity::random() }
+        Device { account: *account, user, state, records, state_key: identity::random() }
     }
 
     /// A new account with `devices` devices, numbered from 1.
     fn account(devices: u8) -> Vec<Device> {
-        let account = SigningKey::from_bytes(&identity::random());
+        let account = identity::new_account_secret();
         let user: [u8; 16] = identity::random();
         (1..=devices).map(|n| Device::new(&account, user, n)).collect()
     }
 
     fn account_key(&self) -> Key {
-        self.account.verifying_key().to_bytes()
+        yo_tests::account_key(&self.account)
     }
 
     fn address(&self) -> ProtocolAddress {
@@ -181,7 +181,7 @@ impl Device {
         };
         let now = SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_millis() as u64;
         let certificate = yo_tests::sender_certificate(&self.user, self.state.device_number, &self.account_key(), now);
-        sealed::testing::seal(&self.account.to_bytes(), &certificate, &to[0].account_key(), &encode(&payload)).unwrap()
+        sealed::testing::seal(&self.account, &certificate, &to[0].account_key(), &encode(&payload)).unwrap()
     }
 
     fn receive(&mut self, from: &Device, sealed: &[u8]) {

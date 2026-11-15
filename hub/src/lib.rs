@@ -687,8 +687,9 @@ impl Hub {
         let certificate = DeviceCertificate::verify(device.certificate.as_slice(), &device.device_key)?;
         let account_key = certificate.account_key;
         let signed = api::registration_to_be_signed(handle, &device.device_id, &device.device_key, &device.auth_key);
-        let key = ed25519_dalek::VerifyingKey::from_bytes(&account_key).map_err(|_| bad())?;
-        key.verify_strict(&signed, &ed25519_dalek::Signature::from_bytes(&device.proof)).map_err(|_| bad())?;
+        if !yo_wire::xeddsa_verify(&account_key, &signed, &device.proof) {
+            return Err(bad());
+        }
         Self::check_prekeys(&device.prekeys, true)?;
         let new = NewDevice {
             device_id: device.device_id,
@@ -846,9 +847,9 @@ async fn put_backup(State(hub): Hubs, method: Method, uri: Uri, headers: HeaderM
     let device = hub.authenticate(&method, &uri, &headers, &body)?;
     let backup: api::Backup = decode(&body)?;
     backup.check()?;
-    // Keys a signature can be checked against: a key that is no point is refused here, not at every fetch.
+    // Keys a signature can be checked against (Curve25519, canonical): any other is refused here, not at every fetch.
     let (passkey, code) = backup.auth_keys();
-    if passkey.into_iter().chain(code).any(|key| ed25519_dalek::VerifyingKey::from_bytes(&key).is_err()) {
+    if passkey.into_iter().chain(code).any(|key| !yo_wire::curve_key_usable(&key)) {
         return Err(bad());
     }
     let auth = db::BackupAuth { passkey, code };
@@ -863,8 +864,11 @@ async fn put_backup(State(hub): Hubs, method: Method, uri: Uri, headers: HeaderM
 
 /// What a signature is checked against where a record has no key (and never counts): every fetch checks its
 /// signature twice, so the time does not tell whether there is a record, or a passkey.
-static NO_KEY: std::sync::LazyLock<Key> =
-    std::sync::LazyLock::new(|| ed25519_dalek::SigningKey::from_bytes(&[0; 32]).verifying_key().to_bytes());
+static NO_KEY: std::sync::LazyLock<Key> = std::sync::LazyLock::new(|| {
+    let mut key = [0; 32];
+    key[0] = 9; // Curve25519's base point
+    key
+});
 
 /// A backup record by its user id or locator, to a request signed by one of its doors' auth keys (spec 7): only who
 /// holds a door learns that there is one. Anything else is `404`, as for no record.
@@ -887,7 +891,7 @@ async fn fetch_backup(
     let empty = sha256(&[]);
     let signed = [auth.passkey, auth.code]
         .map(|key| {
-            let verified = yo_wire::request::verify_hash(
+            let verified = yo_wire::request::verify_door_hash(
                 key.as_ref().unwrap_or(&NO_KEY),
                 method.as_str(),
                 path,

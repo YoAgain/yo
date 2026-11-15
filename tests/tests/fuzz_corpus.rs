@@ -139,8 +139,8 @@ fn route_input(path: &str, body: &[u8]) -> Vec<u8> {
 #[ignore]
 fn write_backup_seeds() {
     use yo_core::backup::{self, PasskeyDoor};
-    let code = yo_tests::backup::words([1; 16]);
-    let record = backup::make(&[2; 32], b"{}", &code, PasskeyDoor::New(&[3; 32])).unwrap();
+    let code = yo_tests::backup::recovery_key([1; 16]);
+    let record = backup::make(&[2; 32], b"{}", &yo_tests::backup::pool(&code), PasskeyDoor::New(&[3; 32])).unwrap();
     write("corpus/wire_api", "backup-2", &yo_wire::encode(&record));
     // Route 13 is `PUT /v1/backup`, 27 the signed `GET /v1/backup/{id}` (fuzz_targets/hub_routes.rs).
     write("corpus/hub_routes", "backup-put", &[&[13u8][..], &yo_wire::encode(&record)].concat());
