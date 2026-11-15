@@ -56,12 +56,15 @@ enum Prefetch {
       }
       // The claim first: the app fetching it now, this one does not (and the app does not give the photo up).
       guard claim(one) else { continue }
-      defer { try? FileManager.default.removeItem(at: mark) }
+      defer { unclaim(one) }
       guard let data = try? client.fetchMedia(media: one) else { continue }
       // Still this account's (the app publishes its friends with its own id; signed out meanwhile, it does not, or
       // another account's): an old account's photo is not left here.
       guard ShareBridge.readList()?.owner == owner else { return }
-      try? data.write(to: file, options: [.atomic, .completeFileProtectionUnlessOpen])
+      // Written, or tried again once: the hub's copy for this device is spent, these bytes are the photo.
+      if (try? data.write(to: file, options: [.atomic, .completeFileProtectionUnlessOpen])) == nil {
+        try? data.write(to: file, options: [.atomic, .completeFileProtectionUnlessOpen])
+      }
     }
   }
 
@@ -92,19 +95,33 @@ enum Prefetch {
   static func claim(_ media: YoMedia) -> Bool {
     guard let directory, let mark = mark(media) else { return true }
     make(directory)
-    if FileManager.default.fileExists(atPath: mark.path) && !underWay(media) {
-      try? FileManager.default.removeItem(at: mark)
+    // Under one lock for both processes: two finding the same stale claim cannot both take it over.
+    return locked(directory) {
+      if FileManager.default.fileExists(atPath: mark.path) && !underWay(media) {
+        try? FileManager.default.removeItem(at: mark)
+      }
+      let fd = open(mark.path, O_CREAT | O_EXCL | O_WRONLY | O_CLOEXEC, 0o600)
+      guard fd >= 0 else { return false }
+      close(fd)
+      return true
     }
-    let fd = open(mark.path, O_CREAT | O_EXCL | O_WRONLY | O_CLOEXEC, 0o600)
-    guard fd >= 0 else { return false }
-    close(fd)
-    return true
   }
 
   /// The claim given back (fetched, or not).
   static func unclaim(_ media: YoMedia) {
-    guard let mark = mark(media) else { return }
-    try? FileManager.default.removeItem(at: mark)
+    guard let directory, let mark = mark(media) else { return }
+    locked(directory) { try? FileManager.default.removeItem(at: mark) }
+  }
+
+  /// `work` with the claims' lock held (flock on a file beside them, across the app and its extensions).
+  @discardableResult
+  private static func locked<T>(_ directory: URL, _ work: () -> T) -> T {
+    let fd = open(directory.appendingPathComponent(".claims.lock").path, O_CREAT | O_RDWR | O_CLOEXEC, 0o600)
+    guard fd >= 0 else { return work() }
+    defer { close(fd) }
+    flock(fd, LOCK_EX)
+    defer { flock(fd, LOCK_UN) }
+    return work()
   }
 
   /// Whether the service is fetching it now: the app waits for its file rather than giving the photo up.

@@ -108,13 +108,20 @@ enum ManifestSeal {
   /// Nil when there is no key now: the manifest is not written.
   static func seal(_ json: Data) -> Data? {
     guard let key = try? key(), let box = try? ChaChaPoly.seal(json, using: key) else { return nil }
+    UserDefaults.standard.set(true, forKey: Self.sealedOnce)
     return magic + box.combined
   }
 
+  /// Set once a manifest was written sealed: from then on a plain one is no build's before but put there by someone
+  /// else (who could name media keys of their choice), and is not taken.
+  private static let sealedOnce = "manifests.sealed"
+
   static func open(_ data: Data) -> Opened {
     guard data.starts(with: magic) else {
-      // Builds before wrote plain JSON ("[" or "{"); anything else is damaged.
-      return data.first == UInt8(ascii: "[") || data.first == UInt8(ascii: "{") ? .json(data, legacy: true) : .unreadable
+      // Builds before wrote plain JSON ("[" or "{"), taken once, before the first sealed write; anything else is
+      // damaged.
+      let plain = data.first == UInt8(ascii: "[") || data.first == UInt8(ascii: "{")
+      return plain && !UserDefaults.standard.bool(forKey: Self.sealedOnce) ? .json(data, legacy: true) : .unreadable
     }
     let key: SymmetricKey?
     do { key = try Self.key() } catch { return .notNow }
@@ -678,11 +685,15 @@ final class ReceivedMedia {
       // There and locked: it reads once the iPhone is unlocked (the hub's copy is this device's fetch already). Being
       // fetched by the service: its file, rather than a second fetch (which would take another device's).
       if data == nil && (Prefetch.has(media) || Prefetch.underWay(media)) { continue }
+      // The claim is held until the photo is written and noted (or given up): given back before, the service could
+      // fetch it again meanwhile, and take another device's fetch.
+      var claimed = false
+      defer { if claimed { Prefetch.unclaim(media) } }
       if data == nil {
         // This device's one fetch, claimed against the notification service's: each takes one of the blob's fetches,
         // and a second would be another device's. Its file may have come just before the claim.
         guard Prefetch.claim(media) else { continue }
-        defer { Prefetch.unclaim(media) }
+        claimed = true
         data = Prefetch.take(media)
         do {
           if data == nil { data = try await Hub.run { try client.fetchMedia(media: media) } }
