@@ -292,8 +292,20 @@ final class MediaOutbox {
   func release(_ id: UUID) {
     guard let at = items.firstIndex(where: { $0.id == id }) else { return }
     items[at].held = nil
-    save()
+    // Released only once that is saved: a held item a start finds is an undo never ended, and goes. Not saved now (a
+    // full disk), it is tried again until it is, or until the item has gone out and left the queue.
+    if !save() { saveRelease(id) }
     if let accounts { flush(accounts: accounts) }
+  }
+
+  private func saveRelease(_ id: UUID, after seconds: Double = 2) {
+    let generation = generation
+    Task { [weak self] in
+      try? await Task.sleep(for: .seconds(seconds))
+      guard let self, generation == self.generation, self.items.contains(where: { $0.id == id && $0.held == nil })
+      else { return }
+      if !self.save() { self.saveRelease(id, after: min(seconds * 2, 60)) }
+    }
   }
 
   /// Undone: out of the queue, its Yo never sent (a blob the hub took already is never named, and goes after its
@@ -700,7 +712,7 @@ final class ReceivedMedia {
       if data == nil {
         // This device's one fetch, claimed against the notification service's: each takes one of the blob's fetches,
         // and a second would be another device's. Its file may have come just before the claim.
-        guard Prefetch.claim(media) else { continue }
+        guard Prefetch.claim(media, again: true) else { continue }
         claimed = true
         data = Prefetch.take(media)
         do {
@@ -725,6 +737,8 @@ final class ReceivedMedia {
         _ = store()
         return
       }
+      // Kept meanwhile from the same blob in another conversation (below): done.
+      guard !saved.contains(where: { $0.id == one.id }) else { return }
       // The file, then the manifest: kept once both are written (a start finds a written file that is only noted).
       let url = file(one.id, one.kind)
       let written = await MediaStorage.write(data, to: url, .completeFileProtection)
@@ -752,6 +766,23 @@ final class ReceivedMedia {
       let arrival = await arrival(kept)
       // Signed out while the thumbnail was made: not for the account after it.
       if let arrival, generation == self.generation { arrived(arrival) }
+      // The same blob in other conversations waiting too (a photo to two groups): theirs from this one fetch, not
+      // one more each (the notification service's file is gone, and its claim would not be given again).
+      for other in pending where other.id != one.id && other.media.media.id == media.id {
+        let url = file(other.id, other.kind)
+        guard await MediaStorage.write(data, to: url, .completeFileProtection), generation == self.generation else {
+          continue
+        }
+        let also = Saved(id: other.id, from: other.from, kind: other.kind)
+        saved.append(also)
+        pending.removeAll { $0.id == other.id }
+        guard store() else {
+          saved.removeAll { $0.id == other.id }
+          pending.append(other)
+          continue
+        }
+        if let shown = await self.arrival(also), generation == self.generation { arrived(shown) }
+      }
       return
     }
     rest(one.id)

@@ -95,13 +95,14 @@ enum Prefetch {
   /// Claims this device's fetch of `media`, for the service or the app, atomically (a file only one can make): false
   /// while the other has it. A claim older than `underWaySeconds` was left by a process that ended: taken over. No
   /// App Group (Yo Dev): nothing to share it with, true.
-  static func claim(_ media: YoMedia) -> Bool {
+  static func claim(_ media: YoMedia, again: Bool = false) -> Bool {
     guard let directory, let mark = mark(media) else { return true }
     make(directory)
     // Under one lock for both processes: two finding the same stale claim cannot both take it over.
     return locked(directory) {
-      // The app has it already: nothing to fetch, by anyone here.
-      if let taken = taken(media), FileManager.default.fileExists(atPath: taken.path) { return false }
+      // The app has it already: the notification service fetches it no more. The app may (`again`): the same blob in
+      // another conversation is another message, with fetches of its own at the hub.
+      if !again, let taken = taken(media), FileManager.default.fileExists(atPath: taken.path) { return false }
       if FileManager.default.fileExists(atPath: mark.path) && !underWay(media) {
         try? FileManager.default.removeItem(at: mark)
       }
