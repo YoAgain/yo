@@ -174,19 +174,21 @@ enum ShareBridge {
   /// `new` (the newest first) with the Yos the Yo notifications still on the screen name, per sender: one
   /// notification says them all ("Yo!!!!! +4 from LEO · 📷 2"), and those before it go (`replaced`).
   private static func merged(_ new: [Yos], with delivered: [UNNotification]) -> (yos: [Yos], replaced: [String]) {
+    // One notification per sender (or group): a sender's earlier notification is taken into its new one; the others
+    // stay as they are.
     var all = new
     var replaced: [String] = []
     for note in delivered.sorted(by: { $0.date > $1.date })
     where note.request.content.categoryIdentifier == yoCategory {
       guard let kept = note.request.content.userInfo["yos"] as? [[String: Any]] else { continue }
+      let earlier = kept.compactMap(Yos.init(info:))
+      guard earlier.contains(where: { e in all.contains { $0.user == e.user } }) else { continue }
       replaced.append(note.request.identifier)
-      for earlier in kept.compactMap(Yos.init(info:)) {
-        if let at = all.firstIndex(where: { $0.user == earlier.user }) {
-          all[at].count += earlier.count
-          all[at].photos += earlier.photos
-          all[at].videos += earlier.videos
-        } else {
-          all.append(earlier)
+      for e in earlier {
+        if let at = all.firstIndex(where: { $0.user == e.user }) {
+          all[at].count += e.count
+          all[at].photos += e.photos
+          all[at].videos += e.videos
         }
       }
     }
@@ -266,7 +268,14 @@ enum ShareBridge {
   /// the screen name, written into `content`; the identifiers of the notifications it takes the place of.
   static func write(_ content: UNMutableNotificationContent, _ new: [Yos], over delivered: [UNNotification]) -> [String] {
     let (all, replaced) = merged(new, with: delivered)
-    yo(content, all)
+    // The newest sender in this notification; every other sender gets a notification of its own.
+    guard let newest = all.first else { return replaced }
+    yo(content, [newest])
+    for other in all.dropFirst() {
+      let own = UNMutableNotificationContent()
+      yo(own, [other])
+      UNUserNotificationCenter.current().add(UNNotificationRequest(identifier: other.id, content: own, trigger: nil))
+    }
     return replaced
   }
 
