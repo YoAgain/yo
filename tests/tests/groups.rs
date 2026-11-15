@@ -329,3 +329,60 @@ fn a_new_members_yo_before_the_change_is_shown() {
     }
     assert!(view(b, &id).members.contains(&c.user_id().to_owned()), "the group came from Cleo when asked");
 }
+
+/// The same photo to two groups and 1:1 to a member of both: three conversations, three messages; once-only holds
+/// within each, not across them.
+#[test]
+fn the_same_photo_to_two_groups_and_one_to_one_goes_to_each() {
+    use yo_core::media;
+    let hub = TestHub::start();
+    let mut p = people(&hub, 2);
+    let [a, b] = p.as_mut_slice() else { unreachable!() };
+    let (one, _) = a.create_group("ONE", &[b.user_id().to_owned()]).unwrap();
+    let (two, _) = a.create_group("TWO", &[b.user_id().to_owned()]).unwrap();
+    take(b);
+    let (photo, sealed) = media::seal(b"one photo", 4, 3).unwrap();
+    a.upload(&photo, 3).unwrap().send(&sealed).unwrap();
+    a.send_group(&one, Content::Photo(photo.clone())).unwrap();
+    a.send_group(&two, Content::Photo(photo.clone())).unwrap();
+    a.send(b.user_id(), Content::Photo(photo.clone())).unwrap();
+    let events = take(b);
+    let in_group = |id: &str| {
+        events
+            .iter()
+            .filter(|e| matches!(e, Event::GroupMessage { group, content: Content::Photo(_), .. } if group == id))
+            .count()
+    };
+    let direct = events.iter().filter(|e| matches!(e, Event::Message { content: Content::Photo(_), .. })).count();
+    assert_eq!((in_group(&one), in_group(&two), direct), (1, 1, 1));
+}
+
+/// A retry sends again what was sent to that contact, but no Yo of a group the sender has left since.
+#[test]
+fn a_retry_sends_no_yo_of_a_group_left() {
+    let hub = TestHub::start();
+    let mut p = people(&hub, 3);
+    let [a, b, c] = p.as_mut_slice() else { unreachable!() };
+    let (id, _) = a.create_group("ONE", &[b.user_id().to_owned(), c.user_id().to_owned()]).unwrap();
+    take(b);
+    take(c);
+    // Sessions both ways first, then B's state from that moment.
+    b.send(a.user_id(), Content::Yo).unwrap();
+    take(a);
+    a.send(b.user_id(), Content::Yo).unwrap();
+    take(b);
+    let early = b.export(&[3; 32]);
+    a.send_group(&id, Content::Yo).unwrap();
+    assert_eq!(group_yos(&take(b)).len(), 1);
+    a.leave_group(&id).unwrap();
+    take(b);
+    // B's state goes back: A's next message does not open, B asks for a retry, A sends again what it keeps.
+    let mut b = Client::restore(Http::new(hub.url()), &early, &[3; 32]).unwrap();
+    a.send(b.user_id(), Content::Yo).unwrap();
+    take(&mut b);
+    b.after_sync().unwrap();
+    take(a);
+    a.after_sync().unwrap();
+    let again = take(&mut b);
+    assert!(group_yos(&again).is_empty(), "no Yo of a group A has left: {again:?}");
+}

@@ -1361,7 +1361,7 @@ impl Client {
         // A photo or video already sent to this user: its blob id is random, so a message with it is this one, sent
         // again by an app that lost its answer (a crash before it took it off its queue). It goes once.
         if let Content::Photo(media) | Content::Video { media, .. } = &content {
-            if self.sent_media(user, &media.id) {
+            if self.sent_media(user, &media.id, None) {
                 return Ok(());
             }
         }
@@ -1404,12 +1404,16 @@ impl Client {
         });
     }
 
-    /// Whether a message with this photo's or video's blob went to the user already (among the last kept).
-    pub(crate) fn sent_media(&self, user: &str, id: &[u8; 16]) -> bool {
+    /// Whether a message with this photo's or video's blob went to the user already in the same conversation (1:1:
+    /// `group` none; else that group), among the last kept: the same blob sent to another group, or 1:1, is another
+    /// message.
+    pub(crate) fn sent_media(&self, user: &str, id: &[u8; 16], group: Option<&yo_wire::content::GroupId>) -> bool {
         self.state.contacts.get(user).is_some_and(|c| {
             c.sent.iter().any(|plaintext| {
-                matches!(Message::decode(plaintext).map(|m| m.content),
-                    Ok(Content::Photo(media) | Content::Video { media, .. }) if &media.id == id)
+                Message::decode(plaintext).is_ok_and(|m| {
+                    m.group.as_ref().map(|g| &g.id) == group
+                        && matches!(m.content, Content::Photo(media) | Content::Video { media, .. } if &media.id == id)
+                })
             })
         })
     }
@@ -2106,7 +2110,13 @@ impl Client {
     fn send_again(&mut self, user: &str) {
         let Some(sent) = self.state.contacts.get(user).map(|c| c.sent.clone()) else { return };
         for message in sent {
-            self.enqueue(user, encode(&Plain { to: None, content: message.into() }));
+            // A group's message only while both are still in it (left, or the user removed: not again).
+            let in_group = Message::decode(&message).ok().and_then(|m| m.group).is_none_or(|tag| {
+                self.state.groups.get(&hex(&tag.id)).is_some_and(|g| !g.left && g.members.iter().any(|m| m == user))
+            });
+            if in_group {
+                self.enqueue(user, encode(&Plain { to: None, content: message.into() }));
+            }
         }
     }
 

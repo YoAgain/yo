@@ -186,7 +186,8 @@ impl Client {
         // members it did not reach yet; to none, if it reached them all (spec 4.7, 5).
         let users: Vec<String> = match &content {
             Content::Photo(media) | Content::Video { media, .. } => {
-                users.iter().filter(|user| !self.sent_media(user, &media.id)).cloned().collect()
+                let in_group = group.as_ref().map(|g| &g.id);
+                users.iter().filter(|user| !self.sent_media(user, &media.id, in_group)).cloned().collect()
             }
             _ => users.to_vec(),
         };
