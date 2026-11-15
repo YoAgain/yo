@@ -68,6 +68,8 @@ struct FriendList: View {
   // Blocking and reporting
   /// The friend the Block dialog asks about, and whether it follows a report.
   @State private var blocking: (friend: Friend, reported: Bool)?
+  /// A group to leave, asked first: its Yos stop for good (nobody can bring one back but a member adding again).
+  @State private var leaving: Friend?
   /// The camera's hint is showing; counted on by each photo or video taken, which hides it for 3 s more.
   @State private var hintShown = false
   /// Contacts whose new key waits for a confirmation (verified before): only they get "Confirm New Key".
@@ -213,9 +215,22 @@ struct FriendList: View {
     var fading: Date?
   }
 
+  /// The list, and the question before leaving a group (on its own: one chain of modifiers less to type-check).
+  private var asking: some View {
+    navigation.alert(
+      "Leave \(leaving?.name ?? "")?",
+      isPresented: Binding(get: { leaving != nil }, set: { if !$0 { leaving = nil } }), presenting: leaving
+    ) { bar in
+      Button("Leave", role: .destructive) { leave(bar) }
+      Button("Cancel", role: .cancel) {}
+    } message: { _ in
+      Text("You won’t get its Yos any more. A member can add you again.")
+    }
+  }
+
   var body: some View {
     reacting(
-      navigation
+      asking
         // The list is always dark (white on purple); the profile follows the iPhone's own appearance.
         .sheet(isPresented: $settings) { SettingsView().preferredColorScheme(SystemAppearance.scheme) }
         .sheet(isPresented: $newGroup) { NewGroupSheet().preferredColorScheme(SystemAppearance.scheme) }
@@ -422,7 +437,7 @@ struct FriendList: View {
           renaming = friend
         })
         AnyView(Button("Leave \(friend.name)", systemImage: "rectangle.portrait.and.arrow.right", role: .destructive) {
-          leave(friend)
+          leaving = friend
         })
       }
     }
@@ -980,8 +995,12 @@ struct FriendList: View {
     case .down:
       shown = []
       // Shown under the bar's name (a group's photos are kept by its id).
+      // A group's as "LEO in FAMILY": who sent it, and where.
       viewing = inbox.media(for: friend)?.map {
-        Arrival(id: $0.id, from: friend.name, photo: $0.photo, video: $0.video, file: $0.file)
+        let user = Inbox.sender(of: $0)
+        let name = user.flatMap { u in inbox.memberNames[u] ?? friends.all.first { $0.user == u }?.name }
+        let from = friend.group == nil ? friend.name : "\(name ?? "Someone") in \(friend.name)"
+        return Arrival(id: $0.id, from: from, photo: $0.photo, video: $0.video, file: $0.file)
       }
     case .tapped:
       break  // it runs on by itself
