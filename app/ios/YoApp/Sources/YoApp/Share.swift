@@ -84,8 +84,12 @@ enum ShareInbox {
         try? manager.moveItem(at: file, to: file.appendingPathExtension("unreadable"))
       }
     }
-    let noted = Set(shares.map(\.id.uuidString))
-    for file in files where file.pathExtension != "json" && !noted.contains(file.deletingPathExtension().lastPathComponent) {
+    // Every note there protects its media, read or not (one not readable now, one set aside): by the id its name
+    // starts with ("<id>.json", "<id>.json.unreadable", "<id>.jpg").
+    let id = { (file: URL) in String(file.lastPathComponent.prefix { $0 != "." }) }
+    let notes = files.filter { $0.lastPathComponent.contains(".json") }
+    let noted = Set(notes.map(id))
+    for file in files where !file.lastPathComponent.contains(".json") && !noted.contains(id(file)) {
       let created = (try? file.resourceValues(forKeys: [.creationDateKey]))?.creationDate ?? .distantPast
       if Date.now.timeIntervalSince(created) > 3600 { try? manager.removeItem(at: file) }
     }

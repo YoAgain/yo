@@ -108,20 +108,23 @@ enum ManifestSeal {
   /// Nil when there is no key now: the manifest is not written.
   static func seal(_ json: Data) -> Data? {
     guard let key = try? key(), let box = try? ChaChaPoly.seal(json, using: key) else { return nil }
-    UserDefaults.standard.set(true, forKey: Self.sealedOnce)
     return magic + box.combined
   }
 
-  /// Set once a manifest was written sealed: from then on a plain one is no build's before but put there by someone
-  /// else (who could name media keys of their choice), and is not taken.
-  private static let sealedOnce = "manifests.sealed"
+  /// Notes that `file` was written sealed (after the write went): from then on a plain one there is no build's
+  /// before but put there by someone else (who could name media keys of their choice), and is not taken. Per file:
+  /// one migrated does not close the other's way.
+  static func wrote(_ file: URL) {
+    UserDefaults.standard.set(true, forKey: "manifests.sealed." + file.lastPathComponent)
+  }
 
-  static func open(_ data: Data) -> Opened {
+  static func open(_ data: Data, of file: URL) -> Opened {
     guard data.starts(with: magic) else {
-      // Builds before wrote plain JSON ("[" or "{"), taken once, before the first sealed write; anything else is
-      // damaged.
+      // Builds before wrote plain JSON ("[" or "{"), taken until this file was first written sealed; anything else
+      // is damaged.
       let plain = data.first == UInt8(ascii: "[") || data.first == UInt8(ascii: "{")
-      return plain && !UserDefaults.standard.bool(forKey: Self.sealedOnce) ? .json(data, legacy: true) : .unreadable
+      let migrated = UserDefaults.standard.bool(forKey: "manifests.sealed." + file.lastPathComponent)
+      return plain && !migrated ? .json(data, legacy: true) : .unreadable
     }
     let key: SymmetricKey?
     do { key = try Self.key() } catch { return .notNow }
@@ -212,7 +215,7 @@ final class MediaOutbox {
     var legacy = false
     if let data {
       var json: Data?
-      switch ManifestSeal.open(data) {
+      switch ManifestSeal.open(data, of: Self.index) {
       case .notNow: return false
       case .unreadable: break
       case .json(let opened, let plain): (json, legacy) = (opened, plain)
@@ -238,8 +241,10 @@ final class MediaOutbox {
     guard loaded else { return false }
     waiting = items.count
     guard let json = try? JSONEncoder().encode(items), let data = ManifestSeal.seal(json) else { return false }
-    return (try? data.write(to: Self.index, options: [.atomic, .completeFileProtectionUntilFirstUserAuthentication]))
-      != nil
+    guard (try? data.write(to: Self.index, options: [.atomic, .completeFileProtectionUntilFirstUserAuthentication])) != nil
+    else { return false }
+    ManifestSeal.wrote(Self.index)
+    return true
   }
 
   /// Seals a photo or video for a friend and puts it in line, from `client`, the account the gesture began in (never
@@ -566,7 +571,7 @@ final class ReceivedMedia {
     do {
       if let data = try Self.contents(manifest) {
         var json: Data?
-        switch ManifestSeal.open(data) {
+        switch ManifestSeal.open(data, of: manifest) {
         case .notNow: return false
         case .unreadable: break
         case .json(let opened, let plain): (json, migrated) = (opened, plain)  // a plain one is written again sealed
@@ -623,7 +628,10 @@ final class ReceivedMedia {
     guard loaded, let json = try? JSONEncoder().encode(Manifest(pending: pending, saved: saved)),
       let data = ManifestSeal.seal(json)
     else { return false }
-    return (try? data.write(to: manifest, options: [.atomic, .completeFileProtectionUntilFirstUserAuthentication])) != nil
+    guard (try? data.write(to: manifest, options: [.atomic, .completeFileProtectionUntilFirstUserAuthentication])) != nil
+    else { return false }
+    ManifestSeal.wrote(manifest)
+    return true
   }
 
   /// A photo or video came: noted before the core may forget its Yo. False when the note did not write: the core then
