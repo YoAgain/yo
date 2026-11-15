@@ -369,7 +369,7 @@ fn whether_a_username_is_free() {
     assert_eq!(check(&name), status::CONFLICT);
     assert_eq!(check(&name.replace('0', "O")), status::CONFLICT, "a lookalike");
     assert_eq!(check("ADM1N"), status::CONFLICT, "reserved");
-    for bad in ["ab", "_abc", "a b c", "seventeen_letters"] {
+    for bad in ["a", "_abc", "a b c", "seventeen_letters"] {
         assert_eq!(check(bad), status::BAD_REQUEST, "{bad}");
     }
     assert_eq!(raw(&hub, "GET", "/v1/username/%FF%FE%FD", &[], Vec::new()).0, status::BAD_REQUEST);

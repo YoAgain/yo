@@ -38,7 +38,7 @@ struct Account: Codable, Equatable {
 enum Username {
   /// What is wrong with a name, nil when it is fine.
   static func problem(_ name: String) -> String? {
-    if name.count < 3 { return "Use at least 3 characters." }
+    if name.count < 2 { return "Use at least 2 characters." }
     if name.count > 16 { return "Use no more than 16 characters." }
     if !usernameValid(name: name) { return "Start with a letter or emoji." }
     return nil

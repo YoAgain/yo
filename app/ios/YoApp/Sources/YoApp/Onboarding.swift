@@ -108,7 +108,7 @@ struct Onboarding: View {
     // No words while typing: the field keeps the rules, a checkmark says free, a red cross says taken. Too short is
     // said only after a pause in typing, or when Continue is tapped (the field shakes too), until the next letter.
     let free = checked[Username.skeleton(name)]  // the hub's answer: true free, false taken, nil not yet
-    let taken = name.count >= 3 && free == false
+    let taken = name.count >= 2 && free == false
     let trouble = Username.problem(name) ?? (taken ? "taken" : nil)
     let mine = taken  // or reserved: only the hub knows, and signing in with a name not one's own just fails
     return Page(title: "Choose a Name", back: { go(.welcome) }) {
@@ -116,7 +116,7 @@ struct Onboarding: View {
         shakes: shakes, onSubmit: { Task { await register() } })
       // Under the field, one place: the minimum after a Continue too soon, or "This Is My Name" when it is taken.
       ZStack {
-        Text("Use at least 3 characters.")
+        Text("Use at least 2 characters.")
           .font(.subheadline.weight(.semibold))
           .opacity(tooShort ? 1 : 0)
           .accessibilityHidden(!tooShort)
@@ -215,7 +215,7 @@ struct Onboarding: View {
 
   private func register() async {
     guard !busy else { return }
-    guard name.count >= 3 else {
+    guard name.count >= 2 else {
       tooShort = true
       shakes += 1
       UINotificationFeedbackGenerator().notificationOccurred(.error)
