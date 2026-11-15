@@ -1944,11 +1944,11 @@ struct HeldMedia: View {
     round += 1
   }
 
-  /// The one to show made ready: reported, a video loaded and its length known. Past the last: closed.
+  /// The one to show made ready: a video loaded and its length known, then reported (seen only once it shows: one
+  /// closed while loading stays). Past the last: closed.
   private func load() async {
     guard index < queue.count else { return finished() }
     let current = queue[index]
-    shows(current)
     player?.pause()
     guard let video = current.video else {
       player = nil
@@ -1957,6 +1957,7 @@ struct HeldMedia: View {
         full = await Task.detached(priority: .userInitiated) { UIImage(contentsOfFile: file.path) }.value
       }
       guard !Task.isCancelled else { return }
+      shows(current)
       seconds = photoSeconds
       return
     }
@@ -1964,6 +1965,7 @@ struct HeldMedia: View {
     self.player = player
     let length = (try? await AVURLAsset(url: video).load(.duration).seconds) ?? 0
     guard !Task.isCancelled else { return }
+    shows(current)
     seconds = length > 0 ? length : photoSeconds
   }
 
