@@ -75,7 +75,7 @@ fn a_burst_with_200_contacts() {
     }
     let save = started.elapsed().as_secs_f64() * 1e6 / 50.0;
     println!("one save (export and seal): {save:.0} µs");
-        let per = |d: std::time::Duration| d.as_secs_f64() * 1e6 / BURST as f64;
+    let per = |d: std::time::Duration| d.as_secs_f64() * 1e6 / BURST as f64;
     println!(
         "state {} KiB, {CONTACTS} contacts: receive {:.0} µs/Yo ({:.0}/s), send {:.0} µs/Yo ({:.0}/s), {} saves",
         state / 1024,
