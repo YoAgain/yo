@@ -302,8 +302,15 @@ impl Client {
             self.note("a group change at no revision".into());
             return;
         }
-        // The tie-break is by the revision's author, whoever passes it on (an answer to an ask).
+        // The tie-break is by the revision's author, whoever passes it on (an answer to an ask). The author is someone
+        // of the group: of this revision, or of the one it was made from as known here; a made-up author is refused.
         let author = hex(&info.by);
+        let of_group = members.contains(&author)
+            || self.state.groups.get(&id).is_some_and(|g| g.members.contains(&author) || g.before.contains(&author));
+        if !of_group {
+            self.note("a group change by someone not of the group".into());
+            return;
+        }
         let newer = match self.state.groups.get(&id) {
             // New here, or known only by its Yos: from a member of it as it is now.
             None => own || members.iter().any(|m| m == from),

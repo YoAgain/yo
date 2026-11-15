@@ -413,3 +413,34 @@ fn a_new_members_answer_is_taken_after_a_restart() {
     }
     assert!(view(&b, &id).members.contains(&c.user_id().to_owned()), "the ask outlived the restart");
 }
+
+/// A change names its author; one naming someone who is not of the group (neither of this revision nor of the one it
+/// was made from) is refused, even from a member. One naming a member is taken.
+#[test]
+fn a_change_by_an_author_not_of_the_group_is_refused() {
+    let hub = TestHub::start();
+    let mut p = people(&hub, 4);
+    let [a, b, c, outsider] = p.as_mut_slice() else { unreachable!() };
+    let (id, _) = a.create_group("TRIO", &[b.user_id().to_owned(), c.user_id().to_owned()]).unwrap();
+    take(b);
+    take(c);
+    let (ua, ub, uc, ux) =
+        (a.user_id().to_owned(), b.user_id().to_owned(), c.user_id().to_owned(), outsider.user_id().to_owned());
+    let group = |by: &str, name: &str| {
+        let mut members: Vec<_> = [&ua, &ub, &uc].into_iter().map(|u| yo_tests::user_id(u)).collect();
+        members.sort();
+        Content::Group(yo_wire::content::GroupInfo {
+            id: yo_tests::user_id(&id),
+            revision: 2,
+            by: yo_tests::user_id(by),
+            name: name.to_owned(),
+            members,
+        })
+    };
+    b.send(&uc, group(&ux, "FORGED")).unwrap();
+    take(c);
+    assert_eq!(view(c, &id).name, "TRIO", "a made-up author is refused");
+    b.send(&uc, group(&ub, "RENAMED")).unwrap();
+    take(c);
+    assert_eq!(view(c, &id).name, "RENAMED", "a member's own change is taken");
+}

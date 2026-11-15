@@ -271,9 +271,9 @@ fn forgeries_cannot_use_up_the_lookups() {
     assert!(lookups() - before <= 10, "{} lookups for 30 forgeries", lookups() - before);
 }
 
-/// A contact's new phone writes just after a forgery made this device ask the hub for the contact's devices: its
-/// message names another device at the old number, the roster cannot be asked again within the minute; it is kept
-/// and received once it can, not lost.
+/// A forgery makes this device ask the hub for a contact's devices; within the minute the contact's new phone writes:
+/// its message names another device at the old number, the roster cannot be asked again yet; it is kept and received
+/// once it can, not lost.
 #[test]
 fn a_new_phones_message_right_after_a_forgery_is_kept_not_lost() {
     use std::sync::atomic::{AtomicU64, Ordering};
@@ -289,17 +289,18 @@ fn a_new_phones_message_right_after_a_forgery_is_kept_not_lost() {
     ));
     let read = clock.clone();
     b.set_clock(Arc::new(move || read.load(Ordering::Relaxed)));
-    // A's new phone: the same account, a new device at A's number.
-    let mut a2 =
-        Client::register_username(Http::new(hub.url()), &name, Some(a.account_secret()), None, Push::none()).unwrap();
-    // A forgery first: A's account, a made-up key at that number; B asks the hub's roster for it (and takes it in).
+    // A forgery first, while A's old phone is still the device at A's number: a made-up key at that number makes B ask
+    // the hub's roster (which names the old phone: the forgery is dropped).
     let real = {
         let ha = Http::new(hub.url());
         let mut a3 = Client::restore(ha.clone(), &a.export(&[1; 32]), &[1; 32]).unwrap();
+        // The model of the forgery is not delivered itself (its bytes would be seen, the forgery skipped unasked).
+        ha.fault(&yo_wire::api::deliver_path(&yo_tests::user_id(b.user_id())), Fault::Answer(202));
         let _ = a3.send(b.user_id(), text("forged"));
         posted(&ha, b.user_id()).pop()
     };
-    if let Some(real) = real {
+    let real = real.expect("the forgery's model was sent");
+    {
         let mut payload: yo_wire::envelope::Payload =
             yo_wire::decode(&yo_core::seal::open(&b.account_secret(), &real).unwrap()).unwrap();
         payload.device_key = [8; 32];
@@ -308,8 +309,13 @@ fn a_new_phones_message_right_after_a_forgery_is_kept_not_lost() {
         assert_eq!(deliver_raw(&hub.url(), b.user_id(), forged), 202);
         b.sync(0).unwrap();
     }
+    // Within the minute, A's new phone: the same account, a new device at A's number. Its message names a key B's
+    // roster does not have, and the roster may not be asked again yet: kept, not dropped.
+    let mut a2 =
+        Client::register_username(Http::new(hub.url()), &name, Some(a.account_secret()), None, Push::none()).unwrap();
     a2.send(b.user_id(), text("new phone")).unwrap();
     let first = texts(&b.sync(0).unwrap());
+    assert!(!first.contains(&"new phone".to_owned()), "kept for the roster, not received yet: {first:?}");
     clock.fetch_add(61_000, Ordering::Relaxed);
     let later = texts(&b.sync(0).unwrap());
     let all: Vec<String> = first.into_iter().chain(later).collect();
