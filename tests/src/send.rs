@@ -1,6 +1,9 @@
 //! yo-send: an account that sends Yos, for timing the apps against a hub (app/ios/TESTING.md, "Speed").
 //!
 //!   yo-send --url https://dev.justyo.app --state FILE --name NAME --to NAME [--count 1] [--every-ms 0] [--sync]
+//!           [--photo FILE | --video FILE] [--group] [--delete]
+//!
+//! `--group`: `--to` names a group this account is in (after a sync); the Yos and the photo or video go there.
 //!
 //! The account is registered as NAME the first time and kept in FILE (sealed under a fixed key: a test account).
 //! `--sync` first receives (Yos sent to it). Each Yo is a line: when it was sent (wall clock,
@@ -25,11 +28,13 @@ fn main() {
     let mut args = std::env::args().skip(1);
     let (mut url, mut state, mut name, mut to) = (String::new(), String::new(), String::new(), String::new());
     let (mut count, mut every_ms, mut sync) = (1u32, 0u64, false);
-    let (mut photo, mut delete) = (None::<String>, false);
+    let (mut photo, mut video, mut group, mut delete) = (None::<String>, None::<String>, false, false);
     while let Some(flag) = args.next() {
         match flag.as_str() {
             "--sync" => sync = true,
             "--photo" => photo = Some(args.next().expect("--photo")),
+            "--video" => video = Some(args.next().expect("--video")),
+            "--group" => group = true,
             "--delete" => delete = true,
             "--url" => url = args.next().expect("--url"),
             "--state" => state = args.next().expect("--state"),
@@ -55,22 +60,32 @@ fn main() {
         println!("deleted");
         return;
     }
-    if let Some(photo) = photo {
+    if group {
+        let found = client.groups().into_iter().find(|g| !g.left && g.name.eq_ignore_ascii_case(&to));
+        to = found.expect("a group of that name (--sync first)").id;
+    }
+    let send = |client: &mut Client, content| if group { client.send_group(&to, content) } else { client.send(&to, content) };
+    if let Some(file) = photo.or(video.clone()) {
         // What the app does: seal, upload for the chat's other devices, then the Yo that carries it.
-        let plain = std::fs::read(&photo).expect("photo");
+        let plain = std::fs::read(&file).expect("photo or video");
         let (media, sealed) = yo_core::media::seal(&plain, 1080, 1920).expect("seal");
-        let fetches = client.media_fetches(&to).expect("a chat (send a Yo first)");
+        let fetches = if group { client.group_media_fetches(&to) } else { client.media_fetches(&to) };
+        let fetches = fetches.expect("a chat (send a Yo first)");
         let wall = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_secs_f64() * 1000.0;
         client.upload(&media, fetches).expect("upload").send(&sealed).expect("upload send");
-        let result = client.send(&to, yo_core::Content::Photo(media));
-        println!("photo at {wall:.3} fetches {fetches} {} bytes {}", plain.len(), result.is_ok());
+        let content = match video {
+            Some(_) => yo_core::Content::Video { media, duration_ms: 5000 },
+            None => yo_core::Content::Photo(media),
+        };
+        let result = send(&mut client, content);
+        println!("media at {wall:.3} fetches {fetches} {} bytes {}", plain.len(), result.is_ok());
         return;
     }
     let start = Instant::now();
     for i in 0..count {
         let at = Instant::now();
         let wall = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_secs_f64() * 1000.0;
-        let result = client.send_yo(&to);
+        let result = send(&mut client, yo_core::Content::Yo);
         println!("yo {i} at {wall:.3} took {:.1} ms {}", at.elapsed().as_secs_f64() * 1000.0, result.is_ok());
         let next = start + Duration::from_millis(every_ms * u64::from(i + 1));
         std::thread::sleep(next.saturating_duration_since(Instant::now()));

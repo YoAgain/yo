@@ -7,7 +7,12 @@ use yo_core::{Client, Push, Response, Transport};
 use yo_hub::config::Config;
 use yo_hub::{push, Hub};
 
+/// Pins the calling thread to these CPUs (Linux; elsewhere it stays as it is).
+#[cfg(not(target_os = "linux"))]
+fn set_affinity(_cpus: &[usize]) {}
+
 /// Pins the calling thread to these CPUs (Linux).
+#[cfg(target_os = "linux")]
 fn set_affinity(cpus: &[usize]) {
     // SAFETY: a zeroed cpu_set_t is a valid empty set; CPU_SET writes inside it; sched_setaffinity reads it.
     unsafe {
