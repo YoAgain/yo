@@ -231,3 +231,42 @@ fn a_stranger_named_by_a_payload_that_does_not_open_is_not_pinned() {
     assert!(texts(&b.sync(0).unwrap()).is_empty());
     assert!(b.contacts().iter().all(|k| k.user != c.user_id()), "not pinned by a message that did not open");
 }
+
+/// Copies that do not open, claiming a contact's real device, once a minute all day (anyone can seal them): the
+/// retries' lookups stay within the day's budget for recovery, the rest of the hub's allowance is left for real
+/// sessions (6.6).
+#[test]
+fn forgeries_cannot_use_up_the_lookups() {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    let hub = TestHub::start();
+    let n = random_u64() % 100_000;
+    let (ha, hb) = (Http::new(hub.url()), Http::new(hub.url()));
+    let mut a = by_name(ha.clone(), &format!("Ab{n}"));
+    let mut b = by_name(hb.clone(), &format!("Bb{n}"));
+    a.send(b.user_id(), text("hi")).unwrap();
+    assert_eq!(texts(&b.sync(0).unwrap()), ["hi"]);
+    let real = posted(&ha, b.user_id()).pop().unwrap();
+    let mut payload: yo_wire::envelope::Payload =
+        yo_wire::decode(&yo_core::seal::open(&b.account_secret(), &real).unwrap()).unwrap();
+    let account = ed25519_dalek::SigningKey::from_bytes(&b.account_secret()).verifying_key().to_bytes();
+    let clock = Arc::new(AtomicU64::new(
+        std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_millis() as u64,
+    ));
+    let read = clock.clone();
+    b.set_clock(Arc::new(move || read.load(Ordering::Relaxed)));
+    let lookups =
+        || hb.sent.lock().unwrap().iter().filter(|(m, p, _)| m == "POST" && p == yo_wire::api::LOOKUP).count();
+    let before = lookups();
+    for i in 0..30u8 {
+        clock.fetch_add(61_000, Ordering::Relaxed);
+        let mut message = payload.copies[0].message.as_slice().to_vec();
+        let last = message.len() - 1;
+        message[last] ^= i.wrapping_add(1);
+        payload.copies[0].message = message.into();
+        let forged = yo_core::seal::to(&account, &yo_wire::encode(&payload)).unwrap();
+        assert_eq!(deliver_raw(&hub.url(), b.user_id(), forged), 202);
+        b.sync(0).unwrap();
+        let _ = b.after_sync();
+    }
+    assert!(lookups() - before <= 10, "{} lookups for 30 forgeries", lookups() - before);
+}

@@ -67,6 +67,9 @@ const KEPT_FOR_RETRY: usize = 64;
 const RETRY_EVERY_MS: u64 = 60 * 1000;
 /// How often a payload may make this device ask the hub for a user's devices (spec 4.4).
 const ROSTER_ASK_EVERY_MS: u64 = 60 * 1000;
+/// Lookups a day that payloads which did not open may make (roster checks and retries' bundles together): what is left
+/// of the hub's allowance (6.6) stays for sessions the app starts, however many forgeries come.
+const RECOVERY_LOOKUPS_PER_DAY: u32 = 10;
 /// How often a registration whose answer did not come is tried again, with the same account key.
 const REGISTER_TRIES: usize = 2;
 /// How often a send updates its view of a user's devices and tries again before it leaves the rest to the next call.
@@ -330,6 +333,8 @@ pub struct Client {
     /// When (clock) a user's devices were last asked of the hub because a payload named one this device does not know
     /// (spec 4.4): at most once a minute a user, whatever payloads anyone seals.
     roster_asked: HashMap<String, u64>,
+    /// The day (since the epoch) and how many lookups for recovery were made on it (`RECOVERY_LOOKUPS_PER_DAY`).
+    recovery_lookups: (u64, u32),
 }
 
 fn wall_ms() -> u64 {
@@ -722,6 +727,7 @@ impl Client {
             unacked: Vec::new(),
             after_due: false,
             roster_asked: HashMap::new(),
+            recovery_lookups: (0, 0),
         }
     }
 
@@ -1790,14 +1796,31 @@ impl Client {
         }
     }
 
-    /// Whether a payload may make this device ask the hub for `user`'s devices now (once a minute a user).
+    /// Whether a payload may make this device ask the hub for `user`'s devices now (once a minute a user, and within
+    /// the day's lookups for recovery).
     fn may_ask_roster(&mut self, user: &str) -> bool {
         let now = (self.clock)();
         let last = self.roster_asked.get(user).copied().unwrap_or(0);
         if last != 0 && now < last + ROSTER_ASK_EVERY_MS {
             return false;
         }
+        if !self.recovery_lookup() {
+            return false;
+        }
         self.roster_asked.insert(user.to_owned(), now);
+        true
+    }
+
+    /// Takes one of the day's lookups for recovery, if one is left.
+    fn recovery_lookup(&mut self) -> bool {
+        let day = (self.clock)() / (24 * 3600 * 1000);
+        if self.recovery_lookups.0 != day {
+            self.recovery_lookups = (day, 0);
+        }
+        if self.recovery_lookups.1 >= RECOVERY_LOOKUPS_PER_DAY {
+            return false;
+        }
+        self.recovery_lookups.1 += 1;
         true
     }
 
@@ -2102,6 +2125,12 @@ impl Client {
         for (user, receipt, retry) in due {
             let content = if retry.is_empty() {
                 Content::Receipt
+            } else if !self.recovery_lookup() {
+                // The day's lookups for recovery are used up (forgeries, perhaps): the retry waits for the next day.
+                if !receipt {
+                    continue;
+                }
+                Content::Receipt
             } else {
                 match self.fetch_bundles(&user, &retry) {
                     Ok(()) => {}
@@ -2110,11 +2139,12 @@ impl Client {
                 }
                 Content::Retry
             };
+            let content_was_retry = content == Content::Retry;
             self.atomic(|c| {
                 c.send_message(&user, content)?;
                 let contact = c.state.contacts.get_mut(&user).ok_or(Error::Internal("contact"))?;
                 contact.receipt_due = false;
-                if !retry.is_empty() {
+                if content_was_retry {
                     contact.retry.clear();
                     contact.retry_at = now;
                 }
