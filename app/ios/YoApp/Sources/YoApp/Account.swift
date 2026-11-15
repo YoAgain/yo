@@ -872,6 +872,7 @@ final class AccountStore {
       if SharedStateFile.app { SharedStateFile.locked { SharedStateFile.delete() } }
     }
     SecureReminder.update(secured: true)
+    SignedAt.forget()
     RecoveryWords.delete()
     Stats.reset()
     MediaStorage.clearAll()
@@ -1105,8 +1106,9 @@ enum SyncedAccount {
   }
 }
 
-/// The reminder to secure the name (spec 6.4): a name not backed up is released after 365 days away from Yo, so 358
-/// days after the last time Yo was opened, a notification says so. Set again each time Yo opens; gone once secured.
+/// The reminder to secure the name (spec 6.4): a name not backed up is released 365 days after the hub last took a
+/// signed request of it, so 358 days after that (`SignedAt`; now, if none is known yet) a notification says so. Set
+/// again each time Yo opens; gone once secured.
 enum SecureReminder {
   static let id = "yo.secure"
 
@@ -1117,7 +1119,8 @@ enum SecureReminder {
     let content = UNMutableNotificationContent()
     content.title = "Secure Your Account"
     content.body = "Secure your account to keep your name. Otherwise it’s freed in 7 days."
-    let trigger = UNTimeIntervalNotificationTrigger(timeInterval: 358 * 24 * 3600, repeats: false)
+    let due = (SignedAt.last ?? .now).addingTimeInterval(358 * 24 * 3600)
+    let trigger = UNTimeIntervalNotificationTrigger(timeInterval: max(60, due.timeIntervalSinceNow), repeats: false)
     center.add(UNNotificationRequest(identifier: id, content: content, trigger: trigger))
   }
 }

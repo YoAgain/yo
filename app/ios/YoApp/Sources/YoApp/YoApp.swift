@@ -119,7 +119,7 @@ struct YoApp: App {
           outbox.flush(accounts: accounts)
           ShareInbox.take(outbox: outbox, accounts: accounts)  // what was shared meanwhile
           if let client = accounts.client { inbox.fetchMedia(client: client) }
-          // Opened: the 365 days start again, and so does the reminder (spec 6.4).
+          // Opened: the reminder set again, from the hub's last signed request (spec 6.4), extensions' too.
           if let account = accounts.account { SecureReminder.update(secured: account.secured) }
         }
     }
