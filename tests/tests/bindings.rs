@@ -1056,3 +1056,33 @@ fn a_closed_client_saves_nothing_and_does_nothing() {
     assert!(matches!(a.send_yo("yogpt".into()), Err(yo::YoError::State)));
     assert_eq!(*file.0.lock().unwrap(), saved, "and nothing is written over the state");
 }
+
+/// Groups through the app's layer (spec 4.9): made, a Yo to it arriving as a group Yo, the group the same everywhere.
+#[test]
+fn the_app_layer_makes_a_group_and_yos_it() {
+    let hub = TestHub::start();
+    let n = random_u64() % 1_000_000_000;
+    let (pa, pb, pc) = (username(n), username(n + 1), username(n + 2));
+    let a = client(&hub, &pa, "ALICE", Arc::new(File::default()));
+    let b = client(&hub, &pb, "BOB", Arc::new(File::default()));
+    let c = client(&hub, &pc, "CARL", Arc::new(File::default()));
+    let id = a.create_group("FAMILY".into(), vec![b.user_id(), c.user_id()]).unwrap();
+    for x in [&b, &c] {
+        let events = drain(x);
+        assert!(events.iter().any(|e| matches!(e, YoEvent::GroupChanged { group } if *group == id)));
+        let group = x.groups().into_iter().find(|g| g.id == id).unwrap();
+        assert_eq!((group.name.as_str(), group.members.len(), group.left), ("FAMILY", 3, false));
+    }
+    a.send_group_yo(id.clone()).unwrap();
+    for x in [&b, &c] {
+        let got = drain(x);
+        let from_a = got.iter().filter(|e| {
+            matches!(e, YoEvent::GroupMessage { group, user, kind: MessageKind::Yo, .. } if *group == id && *user == a.user_id())
+        });
+        assert_eq!(from_a.count(), 1);
+    }
+    c.leave_group(id.clone()).unwrap();
+    drain(&a);
+    assert_eq!(a.groups()[0].members.len(), 2);
+    assert!(c.groups()[0].left);
+}

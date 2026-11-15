@@ -161,8 +161,8 @@ fn an_upload_must_be_signed_whole_and_once() {
     };
     assert_eq!(alice.upload(&media, 1).unwrap().send(&tampered), Err(Error::Refused(400)));
     assert_eq!(files(&dir), (0, 0));
-    // Fetches 1 to 32, checked first.
-    for (n, refused) in [(0, 400), (33, 400), (32, 401)] {
+    // Fetches 1 to 64 (a group's members), checked first.
+    for (n, refused) in [(0, 400), (65, 400), (64, 401)] {
         let path = api::blob_put_path(&media.id, n);
         assert_eq!(status(client.put(format!("{url}{path}")).header(hash.0, &hash.1).body(sealed.clone())), refused);
     }

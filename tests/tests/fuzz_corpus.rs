@@ -103,7 +103,7 @@ fn write_fuzz_corpus() {
         write("corpus/hub_routes", &format!("request-{i}"), &route_input(path, body));
     }
     for content in [yo_core::Content::Yo, yo_core::Content::Text("hi".into())] {
-        let bytes = yo_wire::content::Message { sent_at_ms: 1, content }.encode().unwrap();
+        let bytes = yo_wire::content::Message { sent_at_ms: 1, group: None, content }.encode().unwrap();
         write("corpus/wire_content", &format!("content-{}", bytes.len()), &bytes);
     }
 }

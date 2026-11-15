@@ -72,6 +72,7 @@ impl Device {
             tokens_after: 0,
             tokens_check: false,
             registering: None,
+            groups: Default::default(),
         };
         let records = Records::new(&Default::default(), &state.account_secret, registration_id).unwrap();
         Device { account: account.clone(), user, state, records, state_key: identity::random() }
@@ -140,7 +141,7 @@ impl Device {
 
     /// A Yo for every device of `to` (one account), sealed to it: one envelope.
     fn send(&mut self, to: &[Device]) -> Vec<u8> {
-        let content = Message { sent_at_ms: 1, content: Content::Yo }.encode().unwrap();
+        let content = Message { sent_at_ms: 1, group: None, content: Content::Yo }.encode().unwrap();
         let plain = encode(&Plain { to: None, content: content.into() });
         let identity = signal::identity_of(&to[0].account_key()).unwrap();
         let local = self.address();

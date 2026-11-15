@@ -9,6 +9,8 @@ pub const WITH_LINK: u16 = 2;
 pub const WITH_LOCATION: u16 = 3;
 pub const WITH_PHOTO: u16 = 4;
 pub const WITH_VIDEO: u16 = 5;
+/// The group a Yo goes to (spec 5): its id and the revision the sender has.
+pub const WITH_GROUP: u16 = 6;
 /// The id of a blob at the hub (spec 6.8): 16 random bytes the uploader chooses.
 pub const BLOB_ID_LEN: usize = 16;
 pub type BlobId = [u8; BLOB_ID_LEN];
@@ -22,6 +24,16 @@ pub const TYPE_LOCATION: u16 = 5;
 pub const TYPE_RECEIPT: u16 = 6;
 /// Silent: a message from the receiver did not open here; it sends again what it keeps (spec 4.6).
 pub const TYPE_RETRY: u16 = 7;
+/// A group as its sender has it now: id, revision, name, members (spec 4.9).
+pub const TYPE_GROUP: u16 = 8;
+/// Silent: the sender knows a newer revision of a group than this: it is asked for (spec 4.9).
+pub const TYPE_GROUP_ASK: u16 = 9;
+
+/// A group's id: 16 random bytes its creator chooses.
+pub const GROUP_ID_LEN: usize = 16;
+pub type GroupId = [u8; GROUP_ID_LEN];
+/// The most accounts in a group, its creator among them.
+pub const MAX_GROUP: usize = 20;
 
 pub const MAX_NAME_LEN: usize = 32;
 pub const MAX_TEXT_LEN: usize = 4096;
@@ -51,6 +63,22 @@ impl std::fmt::Debug for Media {
     }
 }
 
+/// What a group Yo names: the group, and its revision as the sender has it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, TlsSerialize, TlsDeserializeBytes, TlsSize)]
+pub struct GroupTag {
+    pub id: GroupId,
+    pub revision: u32,
+}
+
+/// A group as one member has it: who is in it (user ids, sorted, each once, 1 to `MAX_GROUP`) and what it is called.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GroupInfo {
+    pub id: GroupId,
+    pub revision: u32,
+    pub name: String,
+    pub members: Vec<crate::UserId>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Content {
     /// A Yo with nothing.
@@ -75,6 +103,12 @@ pub enum Content {
     Receipt,
     /// Something from the receiver did not open: send again (spec 4.6). Never shown.
     Retry,
+    /// A group made or changed: the whole group as the sender has it now.
+    Group(GroupInfo),
+    /// Send this group as you have it: the asker knows of a newer revision than its own. Never shown.
+    GroupAsk {
+        id: GroupId,
+    },
     /// A type this version does not know: newer apps may send it.
     Unknown(u16),
 }
@@ -82,6 +116,8 @@ pub enum Content {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Message {
     pub sent_at_ms: u64,
+    /// A Yo (with a photo or video or not) to a group; never on other kinds.
+    pub group: Option<GroupTag>,
     pub content: Content,
 }
 
@@ -133,33 +169,56 @@ impl From<Photo> for Media {
     }
 }
 
-/// A Yo's body with one thing.
-fn with(kind: u16, data: Vec<u8>) -> Vec<u8> {
-    crate::encode(&WithList { with: vec![With { kind, data: data.into() }] })
+/// A Yo's body: what it carries, by kind (ascending), empty for a plain Yo.
+fn yo_body(items: Vec<(u16, Vec<u8>)>) -> Vec<u8> {
+    if items.is_empty() {
+        return Vec::new();
+    }
+    crate::encode(&WithList { with: items.into_iter().map(|(kind, data)| With { kind, data: data.into() }).collect() })
+}
+
+#[derive(TlsSerialize, TlsDeserializeBytes, TlsSize)]
+struct Group {
+    id: GroupId,
+    revision: u32,
+    name: VLBytes,
+    members: Vec<crate::UserId>,
+}
+
+#[derive(TlsSerialize, TlsDeserializeBytes, TlsSize)]
+struct GroupAsk {
+    id: GroupId,
+}
+
+/// A group's members as they may be: 1 to `MAX_GROUP`, sorted, each once.
+fn members_ok(members: &[crate::UserId]) -> bool {
+    !members.is_empty() && members.len() <= MAX_GROUP && members.windows(2).all(|pair| pair[0] < pair[1])
 }
 
 /// A Yo's body: empty, or what it carries, sorted by kind, each kind once, at least one. Kinds this version does not
-/// know are skipped (the Yo still shows); of a photo and a video, the photo.
-fn read_yo(body: &[u8]) -> Result<Content, Error> {
+/// know are skipped (the Yo still shows); of a photo and a video, the photo; and the group it goes to, if any.
+fn read_yo(body: &[u8]) -> Result<(Content, Option<GroupTag>), Error> {
     if body.is_empty() {
-        return Ok(Content::Yo);
+        return Ok((Content::Yo, None));
     }
     let WithList { with } = crate::decode(body)?;
     if with.is_empty() || with.windows(2).any(|pair| pair[0].kind >= pair[1].kind) {
         return Err(Error::Format);
     }
+    let (mut content, mut group) = (None, None);
     for item in with {
         let data = item.data.as_slice();
         match item.kind {
-            WITH_PHOTO => return Ok(Content::Photo(crate::decode::<Photo>(data)?.into())),
+            WITH_PHOTO => content = content.or(Some(Content::Photo(crate::decode::<Photo>(data)?.into()))),
             WITH_VIDEO => {
                 let Video { photo, duration_ms } = crate::decode(data)?;
-                return Ok(Content::Video { media: photo.into(), duration_ms });
+                content = content.or(Some(Content::Video { media: photo.into(), duration_ms }));
             }
+            WITH_GROUP => group = Some(crate::decode::<GroupTag>(data)?),
             _ => {}
         }
     }
-    Ok(Content::Yo)
+    Ok((content.unwrap_or(Content::Yo), group))
 }
 
 #[derive(TlsSerialize, TlsDeserializeBytes, TlsSize)]
@@ -191,11 +250,19 @@ fn read_text(body: &[u8], max: usize) -> Result<String, Error> {
 
 impl Message {
     pub fn encode(&self) -> Result<Vec<u8>, Error> {
+        let group = self.group.map(|tag| (WITH_GROUP, crate::encode(&tag)));
+        if group.is_some() && !matches!(self.content, Content::Yo | Content::Photo(_) | Content::Video { .. }) {
+            return Err(Error::Format);
+        }
         let (kind, body) = match &self.content {
-            Content::Yo => (TYPE_YO, Vec::new()),
-            Content::Photo(media) => (TYPE_YO, with(WITH_PHOTO, crate::encode(&Photo::from(media)))),
+            Content::Yo => (TYPE_YO, yo_body(group.into_iter().collect())),
+            Content::Photo(media) => {
+                let photo = (WITH_PHOTO, crate::encode(&Photo::from(media)));
+                (TYPE_YO, yo_body([Some(photo), group].into_iter().flatten().collect()))
+            }
             Content::Video { media, duration_ms } => {
-                (TYPE_YO, with(WITH_VIDEO, crate::encode(&Video { photo: media.into(), duration_ms: *duration_ms })))
+                let video = (WITH_VIDEO, crate::encode(&Video { photo: media.into(), duration_ms: *duration_ms }));
+                (TYPE_YO, yo_body([Some(video), group].into_iter().flatten().collect()))
             }
             Content::Profile { name } => (TYPE_PROFILE, text(name, MAX_NAME_LEN)?),
             Content::Text(value) => (TYPE_TEXT, text(value, MAX_TEXT_LEN)?),
@@ -205,6 +272,16 @@ impl Message {
             }
             Content::Receipt => (TYPE_RECEIPT, Vec::new()),
             Content::Retry => (TYPE_RETRY, Vec::new()),
+            Content::Group(info) => {
+                if !members_ok(&info.members) {
+                    return Err(Error::Format);
+                }
+                let name = text(&info.name, MAX_NAME_LEN)?;
+                let Text { text: name } = crate::decode(&name)?;
+                let group = Group { id: info.id, revision: info.revision, name, members: info.members.clone() };
+                (TYPE_GROUP, crate::encode(&group))
+            }
+            Content::GroupAsk { id } => (TYPE_GROUP_ASK, crate::encode(&GroupAsk { id: *id })),
             Content::Unknown(_) => return Err(Error::Unsupported),
         };
         Ok(crate::encode(&Wire { version: CONTENT_VERSION, sent_at: self.sent_at_ms, kind, body: body.into() }))
@@ -216,8 +293,13 @@ impl Message {
             return Err(Error::Unsupported);
         }
         let body = wire.body.as_slice();
+        let mut group = None;
         let content = match wire.kind {
-            TYPE_YO => read_yo(body)?,
+            TYPE_YO => {
+                let (content, tag) = read_yo(body)?;
+                group = tag;
+                content
+            }
             TYPE_PROFILE => Content::Profile { name: read_text(body, MAX_NAME_LEN)? },
             TYPE_TEXT => Content::Text(read_text(body, MAX_TEXT_LEN)?),
             TYPE_LINK => Content::Link(read_text(body, MAX_URL_LEN)?),
@@ -228,9 +310,18 @@ impl Message {
             TYPE_RECEIPT | TYPE_RETRY if !body.is_empty() => return Err(Error::Format),
             TYPE_RECEIPT => Content::Receipt,
             TYPE_RETRY => Content::Retry,
+            TYPE_GROUP => {
+                let Group { id, revision, name, members } = crate::decode(body)?;
+                let name = read_text(&crate::encode(&Text { text: name }), MAX_NAME_LEN)?;
+                if !members_ok(&members) {
+                    return Err(Error::Format);
+                }
+                Content::Group(GroupInfo { id, revision, name, members })
+            }
+            TYPE_GROUP_ASK => Content::GroupAsk { id: crate::decode::<GroupAsk>(body)?.id },
             other => Content::Unknown(other),
         };
-        Ok(Message { sent_at_ms: wire.sent_at, content })
+        Ok(Message { sent_at_ms: wire.sent_at, group, content })
     }
 }
 
@@ -250,7 +341,7 @@ mod tests {
             Content::Receipt,
             Content::Retry,
         ] {
-            let message = Message { sent_at_ms: 1_762_000_000_000, content };
+            let message = Message { sent_at_ms: 1_762_000_000_000, group: None, content };
             assert_eq!(Message::decode(&message.encode().unwrap()).unwrap(), message);
         }
     }
@@ -264,7 +355,7 @@ mod tests {
         for (content, len) in
             [(Content::Photo(media(1)), 108), (Content::Video { media: media(2), duration_ms: 9_500 }, 112)]
         {
-            let message = Message { sent_at_ms: 7, content };
+            let message = Message { sent_at_ms: 7, group: None, content };
             let bytes = message.encode().unwrap();
             assert_eq!(Message::decode(&bytes).unwrap(), message);
             assert_eq!(bytes.len(), len, "spec 5; in the smallest envelope");
@@ -294,8 +385,29 @@ mod tests {
     }
 
     #[test]
+    fn a_group_yo_and_a_group_round_trip() {
+        let tag = GroupTag { id: [9; 16], revision: 3 };
+        for content in [Content::Yo, Content::Photo(media(1)), Content::Video { media: media(2), duration_ms: 1 }] {
+            let message = Message { sent_at_ms: 9, group: Some(tag), content };
+            assert_eq!(Message::decode(&message.encode().unwrap()).unwrap(), message);
+        }
+        let group = GroupInfo { id: [7; 16], revision: 1, name: "FAMILY".into(), members: vec![[1; 16], [2; 16]] };
+        let message = Message { sent_at_ms: 9, group: None, content: Content::Group(group.clone()) };
+        assert_eq!(Message::decode(&message.encode().unwrap()).unwrap(), message);
+        let ask = Message { sent_at_ms: 9, group: None, content: Content::GroupAsk { id: [7; 16] } };
+        assert_eq!(Message::decode(&ask.encode().unwrap()).unwrap(), ask);
+        // Members unsorted, twice, none or too many: refused; a group on a profile: refused.
+        for members in [vec![[2; 16], [1; 16]], vec![[1; 16], [1; 16]], vec![], (0..21u8).map(|i| [i; 16]).collect()] {
+            let bad = Content::Group(GroupInfo { members, ..group.clone() });
+            assert_eq!(Message { sent_at_ms: 9, group: None, content: bad }.encode(), Err(Error::Format));
+        }
+        let profile = Content::Profile { name: "A".into() };
+        assert_eq!(Message { sent_at_ms: 9, group: Some(tag), content: profile }.encode(), Err(Error::Format));
+    }
+
+    #[test]
     fn a_yo_is_tiny() {
-        let bytes = Message { sent_at_ms: 1, content: Content::Yo }.encode().unwrap();
+        let bytes = Message { sent_at_ms: 1, group: None, content: Content::Yo }.encode().unwrap();
         assert_eq!(bytes.len(), 2 + 8 + 2 + 1);
     }
 
@@ -308,7 +420,7 @@ mod tests {
     #[test]
     fn refuses_bad_names() {
         for name in ["", "THIS NAME IS FAR TOO LONG FOR A YO NAME", "a\nb"] {
-            let message = Message { sent_at_ms: 0, content: Content::Profile { name: name.into() } };
+            let message = Message { sent_at_ms: 0, group: None, content: Content::Profile { name: name.into() } };
             assert_eq!(message.encode(), Err(Error::Format));
         }
     }

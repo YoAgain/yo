@@ -123,11 +123,26 @@ pub struct Prekeys {
     pub retired: Vec<(String, u32, u64)>,
 }
 
+/// A group as this device has it (spec 4.7): kept for good, also once left (it shows as left).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Group {
+    pub name: String,
+    /// Its members by user id (hex), sorted, this account among them while it is in.
+    pub members: Vec<String>,
+    pub revision: u32,
+    /// Who made this revision (hex): of two at the same revision, the lower one's stands.
+    pub by: String,
+    /// This account is no member of it (left, or removed).
+    pub left: bool,
+}
+
 /// An event as the state keeps it.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum StoredEvent {
     NewChat { user: String },
     Message { user: String, sent_at_ms: u64, content: StoredContent, own: bool },
+    GroupMessage { group: String, user: String, sent_at_ms: u64, content: StoredContent, own: bool },
+    GroupChanged { group: String },
     Profile { user: String, name: String },
     IdentityChanged { user: String },
 }
@@ -239,6 +254,9 @@ pub struct State {
     pub tokens_check: bool,
     /// This device's registration while the hub has not answered it: the user id is empty until then.
     pub registering: Option<Registering>,
+    /// The groups this account is or was in, by id (hex).
+    #[serde(default)]
+    pub groups: BTreeMap<String, Group>,
 }
 
 impl Drop for State {

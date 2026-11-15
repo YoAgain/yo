@@ -6,6 +6,7 @@
 
 pub mod backup;
 pub mod error;
+pub mod groups;
 pub mod identity;
 pub mod media;
 pub mod net;
@@ -99,6 +100,12 @@ pub enum Event {
     /// A contact's account key changed (a new phone without passkey, or something worse). A verification is reset; a
     /// verified contact must be confirmed before anything more is sent to it.
     IdentityChanged { user: String },
+    /// A Yo (with a photo or video or not) from `user` to a group (id, hex): `groups()` describes it.
+    GroupMessage { group: String, user: String, sent_at_ms: u64, content: Content },
+    /// One's own other device sent this to the group.
+    GroupSentElsewhere { group: String, sent_at_ms: u64, content: Content },
+    /// A group came, changed (name, members) or was left: `groups()` has it as it is now.
+    GroupChanged { group: String },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -359,6 +366,8 @@ fn stored(event: Event) -> StoredEvent {
         Content::Unknown(kind) => StoredContent::Unknown(kind),
         Content::Receipt => StoredContent::Unknown(yo_wire::content::TYPE_RECEIPT),
         Content::Retry => StoredContent::Unknown(yo_wire::content::TYPE_RETRY),
+        Content::Group(_) => StoredContent::Unknown(yo_wire::content::TYPE_GROUP),
+        Content::GroupAsk { .. } => StoredContent::Unknown(yo_wire::content::TYPE_GROUP_ASK),
     };
     match event {
         Event::NewChat { user } => StoredEvent::NewChat { user },
@@ -370,6 +379,13 @@ fn stored(event: Event) -> StoredEvent {
         }
         Event::Profile { user, name } => StoredEvent::Profile { user, name },
         Event::IdentityChanged { user } => StoredEvent::IdentityChanged { user },
+        Event::GroupMessage { group, user, sent_at_ms, content: c } => {
+            StoredEvent::GroupMessage { group, user, sent_at_ms, content: content(c), own: false }
+        }
+        Event::GroupSentElsewhere { group, sent_at_ms, content: c } => {
+            StoredEvent::GroupMessage { group, user: String::new(), sent_at_ms, content: content(c), own: true }
+        }
+        Event::GroupChanged { group } => StoredEvent::GroupChanged { group },
     }
 }
 
@@ -394,6 +410,13 @@ fn unstored(event: StoredEvent) -> Event {
         }
         StoredEvent::Profile { user, name } => Event::Profile { user, name },
         StoredEvent::IdentityChanged { user } => Event::IdentityChanged { user },
+        StoredEvent::GroupMessage { group, user, sent_at_ms, content: c, own: false } => {
+            Event::GroupMessage { group, user, sent_at_ms, content: content(c) }
+        }
+        StoredEvent::GroupMessage { group, sent_at_ms, content: c, own: true, .. } => {
+            Event::GroupSentElsewhere { group, sent_at_ms, content: content(c) }
+        }
+        StoredEvent::GroupChanged { group } => Event::GroupChanged { group },
     }
 }
 
@@ -406,7 +429,10 @@ fn refused(response: &Response) -> Error {
 
 /// Content worth keeping to send again, and a receipt for: what a person sent, not the protocol's own.
 fn shown(content: &Content) -> bool {
-    !matches!(content, Content::Profile { .. } | Content::Receipt | Content::Retry | Content::Unknown(_))
+    !matches!(
+        content,
+        Content::Profile { .. } | Content::Receipt | Content::Retry | Content::GroupAsk { .. } | Content::Unknown(_)
+    )
 }
 
 impl Client {
@@ -606,6 +632,7 @@ impl Client {
             tokens_after: 0,
             tokens_check: false,
             registering: None,
+            groups: Default::default(),
         };
         let records = Records::new(&Default::default(), &state.account_secret, registration_id)?;
         let mut client = Client::with(transport, records, state);
@@ -1289,7 +1316,7 @@ impl Client {
         let sent_at_ms = wall_ms().max(self.state.last_sent_ms + 1);
         self.state.last_sent_ms = sent_at_ms;
         let keep = shown(&content);
-        let message = Message { sent_at_ms, content }.encode()?;
+        let message = Message { sent_at_ms, group: None, content }.encode()?;
         self.enqueue(user, encode(&Plain { to: None, content: message.clone().into() }));
         if keep {
             if !self.state.own.is_empty() {
@@ -1777,6 +1804,20 @@ impl Client {
 
     /// A message from one of this account's other devices: what it sent to `to`.
     fn received_from_own(&mut self, to: Option<UserId>, message: Message) -> Result<()> {
+        // Groups: one copy for this account's other devices, naming no one (spec 4.7).
+        if to.is_none() {
+            let me = self.state.user_id.clone();
+            match (message.group, message.content) {
+                (_, Content::Group(info)) => self.group_update(&me, info, true),
+                (Some(tag), content) if shown(&content) => {
+                    let group = state::hex(&tag.id);
+                    let content = self.forget_keys(content);
+                    self.push_event(Event::GroupSentElsewhere { group, sent_at_ms: message.sent_at_ms, content });
+                }
+                _ => {}
+            }
+            return Ok(());
+        }
         let Some(to) = to else { return Ok(()) };
         if !shown(&message.content) {
             return Ok(());
@@ -1805,8 +1846,9 @@ impl Client {
 
     /// A message from a contact.
     fn received(&mut self, user: &str, plaintext: &[u8], message: Message) -> Result<()> {
-        // A blocked user's messages are opened (their sessions go on) and dropped unseen (4.8).
-        if self.blocked(user) {
+        // A blocked user's messages are opened (their sessions go on) and dropped unseen (4.8); what they change of a
+        // group still counts, so the group stays one.
+        if self.blocked(user) && !matches!(message.content, Content::Group(_) | Content::GroupAsk { .. }) {
             return Ok(());
         }
         // Sent again on a retry (4.6) and seen already: once is enough. A sender's messages differ in their time at
@@ -1821,6 +1863,19 @@ impl Client {
         }
         match message.content {
             Content::Receipt => Ok(()),
+            Content::Group(info) => {
+                self.group_update(user, info, false);
+                Ok(())
+            }
+            Content::GroupAsk { id } => {
+                self.group_asked(user, &state::hex(&id));
+                Ok(())
+            }
+            content if message.group.is_some() => {
+                let tag = message.group.expect("a group");
+                self.group_yo(user, tag, message.sent_at_ms, content);
+                Ok(())
+            }
             Content::Retry => {
                 let now = (self.clock)();
                 let contact = self.state.contacts.get_mut(user).ok_or(Error::Internal("contact"))?;
@@ -2319,7 +2374,7 @@ impl Client {
     /// Sets the name contacts see, and tells every contact this device writes to.
     pub fn set_name(&mut self, name: &str) -> Result<Vec<Event>> {
         let result = (|| {
-            Message { sent_at_ms: 0, content: Content::Profile { name: name.to_owned() } }.encode()?;
+            Message { sent_at_ms: 0, group: None, content: Content::Profile { name: name.to_owned() } }.encode()?;
             self.state.name = Some(name.to_owned());
             for contact in self.state.contacts.values_mut().filter(|c| c.chat) {
                 contact.profile_due = true;
@@ -2492,9 +2547,10 @@ impl Client {
     pub(crate) fn apply_block(&mut self, user: &str, blocked: bool) {
         self.state.contacts.entry(user.to_owned()).or_insert_with(Contact::unknown).blocked = blocked;
         if blocked {
-            self.state
-                .events
-                .retain(|e| !matches!(e, StoredEvent::Message { user: from, own: false, .. } if from == user));
+            self.state.events.retain(|e| {
+                !matches!(e, StoredEvent::Message { user: from, own: false, .. }
+                    | StoredEvent::GroupMessage { user: from, own: false, .. } if from == user)
+            });
         }
     }
 

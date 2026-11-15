@@ -264,7 +264,9 @@ impl From<Content> for MessageKind {
             Content::Location { lat_e7, lon_e7 } => MessageKind::Location { lat_e7, lon_e7 },
             Content::Unknown(kind) => MessageKind::Unsupported { kind },
             // Never an event (spec 4.5, 4.6).
-            Content::Receipt | Content::Retry => MessageKind::Unsupported { kind: 0 },
+            Content::Receipt | Content::Retry | Content::Group(_) | Content::GroupAsk { .. } => {
+                MessageKind::Unsupported { kind: 0 }
+            }
         }
     }
 }
@@ -272,11 +274,43 @@ impl From<Content> for MessageKind {
 #[derive(uniffi::Enum, PartialEq)]
 /// `user` is the contact's user id: what `contacts()` describes and `send_yo` takes to answer.
 pub enum YoEvent {
-    NewChat { user: String },
-    Message { user: String, sent_at_ms: u64, kind: MessageKind },
-    SentElsewhere { user: String, sent_at_ms: u64, kind: MessageKind },
-    Profile { user: String, name: String },
-    IdentityChanged { user: String },
+    NewChat {
+        user: String,
+    },
+    Message {
+        user: String,
+        sent_at_ms: u64,
+        kind: MessageKind,
+    },
+    SentElsewhere {
+        user: String,
+        sent_at_ms: u64,
+        kind: MessageKind,
+    },
+    Profile {
+        user: String,
+        name: String,
+    },
+    IdentityChanged {
+        user: String,
+    },
+    /// A Yo from `user` to a group (id): `groups()` describes it.
+    GroupMessage {
+        group: String,
+        user: String,
+        sent_at_ms: u64,
+        kind: MessageKind,
+    },
+    /// One's own other device sent this to the group.
+    GroupSentElsewhere {
+        group: String,
+        sent_at_ms: u64,
+        kind: MessageKind,
+    },
+    /// A group came, changed or was left: read `groups()` again.
+    GroupChanged {
+        group: String,
+    },
 }
 
 impl From<Event> for YoEvent {
@@ -289,6 +323,13 @@ impl From<Event> for YoEvent {
             }
             Event::Profile { user, name } => YoEvent::Profile { user, name },
             Event::IdentityChanged { user } => YoEvent::IdentityChanged { user },
+            Event::GroupMessage { group, user, sent_at_ms, content } => {
+                YoEvent::GroupMessage { group, user, sent_at_ms, kind: content.into() }
+            }
+            Event::GroupSentElsewhere { group, sent_at_ms, content } => {
+                YoEvent::GroupSentElsewhere { group, sent_at_ms, kind: content.into() }
+            }
+            Event::GroupChanged { group } => YoEvent::GroupChanged { group },
         }
     }
 }
@@ -309,6 +350,19 @@ pub struct YoContact {
     pub gone: bool,
     /// Its app is too old: a Yo to it waits until it is updated (`Outdated`).
     pub outdated: bool,
+}
+
+/// A group this account is or was in (spec 4.7).
+#[derive(uniffi::Record)]
+pub struct YoGroup {
+    /// Its id (hex).
+    pub id: String,
+    /// Empty while only its Yos are known, not yet the group itself.
+    pub name: String,
+    /// Its members by user id, this account among them while it is in.
+    pub members: Vec<String>,
+    /// This account is not in it (any more).
+    pub left: bool,
 }
 
 /// A session with one device of a contact (spec 4): for the app's contact details.
@@ -885,6 +939,63 @@ impl YoClient {
         let media: yo_core::Media = media.try_into()?;
         let upload = self.with(|c| c.upload(&media, fetches))??;
         Ok(upload.send(&ciphertext)?)
+    }
+
+    /// The groups this account is or was in.
+    pub fn groups(&self) -> Vec<YoGroup> {
+        self.with(|c| c.groups())
+            .unwrap_or_default()
+            .into_iter()
+            .map(|g| YoGroup { id: g.id, name: g.name, members: g.members, left: g.left })
+            .collect()
+    }
+
+    /// Makes a group of this account and `members` (user ids, at most 19), and tells them: its id.
+    pub fn create_group(&self, name: String, members: Vec<String>) -> Result<String, YoError> {
+        let (id, _events) = self.with(|c| c.create_group(&name, &members))??;
+        Ok(id)
+    }
+
+    pub fn rename_group(&self, group: String, name: String) -> Result<Vec<YoEvent>, YoError> {
+        events(self.with(|c| c.rename_group(&group, &name))?)
+    }
+
+    pub fn add_to_group(&self, group: String, users: Vec<String>) -> Result<Vec<YoEvent>, YoError> {
+        events(self.with(|c| c.add_to_group(&group, &users))?)
+    }
+
+    pub fn remove_from_group(&self, group: String, users: Vec<String>) -> Result<Vec<YoEvent>, YoError> {
+        events(self.with(|c| c.remove_from_group(&group, &users))?)
+    }
+
+    pub fn leave_group(&self, group: String) -> Result<Vec<YoEvent>, YoError> {
+        events(self.with(|c| c.leave_group(&group))?)
+    }
+
+    /// A Yo to a group.
+    pub fn send_group_yo(&self, group: String) -> Result<Vec<YoEvent>, YoError> {
+        events(self.with(|c| c.send_group(&group, Content::Yo))?)
+    }
+
+    /// How many fetches a photo or video to the group is uploaded for, sessions with its members opened first.
+    pub fn group_media_chat(&self, group: String) -> Result<MediaChat, YoError> {
+        let (fetches, received) = self.with(|c| match c.group_media_fetches(&group) {
+            Some(fetches) if c.groups().iter().any(|g| g.id == group) => Ok((fetches, Vec::new())),
+            _ => c.open_group(&group),
+        })??;
+        Ok(MediaChat { fetches, events: received.into_iter().map(Into::into).collect() })
+    }
+
+    /// A Yo with a photo to a group, its blob uploaded (`group_media_chat`, `upload_media`).
+    pub fn send_group_photo(&self, group: String, media: YoMedia) -> Result<Vec<YoEvent>, YoError> {
+        let content = Content::Photo(media.try_into()?);
+        events(self.with(|c| c.send_group(&group, content))?)
+    }
+
+    /// A Yo with a video to a group, its blob uploaded.
+    pub fn send_group_video(&self, group: String, media: YoMedia, duration_ms: u32) -> Result<Vec<YoEvent>, YoError> {
+        let content = Content::Video { media: media.try_into()?, duration_ms };
+        events(self.with(|c| c.send_group(&group, content))?)
     }
 
     /// A Yo with a photo whose blob is uploaded; on its way like `send_yo`.
