@@ -49,6 +49,9 @@ enum ShareInbox {
         let data = await Task.detached(priority: .utility) { try? Data(contentsOf: media) }.value
         // Checked after the read: signed out (or into another account) meanwhile, nothing goes under the new one.
         guard generation == self.generation, client === accounts.client, let owner = accounts.shareOwner else { return }
+        // There and not readable now (protected until the iPhone is unlocked, a passing error): tried again later, not
+        // thrown away.
+        if data == nil && FileManager.default.fileExists(atPath: media.path) { continue }
         if let data, share.owner == owner {
           let file = MediaFile(
             kind: share.kind, data: data, width: share.width, height: share.height, durationMs: share.durationMs)
@@ -67,16 +70,18 @@ enum ShareInbox {
   }
 
   /// The shares whose note is written, oldest first. Media an hour old without a note (the extension ended between
-  /// the two) and notes that do not read go.
+  /// the two) go; a note that reads but is no note is set aside, one not readable now waits.
   nonisolated private static func waiting(in dir: URL) -> [ShareBridge.Share] {
     let manager = FileManager.default
     let files = (try? manager.contentsOfDirectory(at: dir, includingPropertiesForKeys: [.creationDateKey])) ?? []
     var shares: [ShareBridge.Share] = []
     for file in files where file.pathExtension == "json" {
-      if let data = try? Data(contentsOf: file), let share = try? JSONDecoder().decode(ShareBridge.Share.self, from: data) {
+      // Not readable now: left for later. Read and not a note: set aside (`.unreadable`), never deleted unseen.
+      guard let data = try? Data(contentsOf: file) else { continue }
+      if let share = try? JSONDecoder().decode(ShareBridge.Share.self, from: data) {
         shares.append(share)
       } else {
-        try? manager.removeItem(at: file)
+        try? manager.moveItem(at: file, to: file.appendingPathExtension("unreadable"))
       }
     }
     let noted = Set(shares.map(\.id.uuidString))
