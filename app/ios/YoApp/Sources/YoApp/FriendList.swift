@@ -580,7 +580,7 @@ struct FriendList: View {
   }
 
   /// "•••" at the bottom corner opposite the camera, as large as the floating buttons of Apple's own apps: Invite, Add Group and Settings
-  /// (a red "1" on Settings while the account is not yet secured, AccountStore.toDo).
+  /// (a red "1" for Settings' icon while the account is not yet secured, AccountStore.toDo).
   private var moreMenu: some View {
     Menu {
       ShareLink(
@@ -594,9 +594,20 @@ struct FriendList: View {
       }
       Button("Add Group", systemImage: "person.3") { newGroup = true }
       Divider()
-      // A red "1" after it while the account is not yet secured (AccountStore.toDo), as iOS badges.
-      Button("Settings", systemImage: "gearshape") { settings = true }
-        .badge(accounts.toDo)
+      // A red "1" while the account is not yet secured (AccountStore.toDo), as iOS badges. A menu shows no
+      // `.badge` and keeps only an item's icon in colour (drawn as it is): the red "1" stands in the gear's place.
+      Button { settings = true } label: {
+        Label {
+          Text("Settings")
+        } icon: {
+          if accounts.toDo > 0, let one = UIImage(systemName: "\(min(accounts.toDo, 50)).circle.fill") {
+            Image(uiImage: one.withTintColor(.systemRed, renderingMode: .alwaysOriginal))
+          } else {
+            Image(systemName: "gearshape")
+          }
+        }
+      }
+      .accessibilityValue(accounts.toDo > 0 ? "\(accounts.toDo) to do" : "")
     } label: {
       Image(systemName: "ellipsis")
         .font(.system(size: 20, weight: .semibold))
