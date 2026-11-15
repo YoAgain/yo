@@ -193,9 +193,8 @@ fn main() {
                         let (path, hash, access) = &targets[k % targets.len()];
                         k += 1;
                         let t = Instant::now();
-                        let mut request = client
-                            .post(format!("{url}{path}"))
-                            .header(yo_wire::api::HEADER_DEVICES, hash.as_str());
+                        let mut request =
+                            client.post(format!("{url}{path}")).header(yo_wire::api::HEADER_DEVICES, hash.as_str());
                         if let Some(access) = access {
                             request = request.header(yo_wire::api::HEADER_ACCESS, access.as_str());
                         }
