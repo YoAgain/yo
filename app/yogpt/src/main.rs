@@ -211,11 +211,14 @@ fn jpeg_clean(bytes: &[u8]) -> Option<(Vec<u8>, u16, u16)> {
     let be16 = |i: usize| Some(u16::from_be_bytes([*bytes.get(i)?, *bytes.get(i + 1)?]));
     let mut out = bytes[..2].to_vec();
     let mut i = 2;
-    while bytes.get(i) == Some(&0xFF) {
+    loop {
+        if *bytes.get(i)? != 0xFF {
+            return None;
+        }
         let marker = *bytes.get(i + 1)?;
-        // The image data from the start of scan on, as it is.
-        if marker == 0xDA {
-            out.extend_from_slice(&bytes[i..]);
+        if marker == 0xD9 {
+            // The end of the image: nothing after it goes along.
+            out.extend_from_slice(&[0xFF, 0xD9]);
             return Some((out, width, height));
         }
         let end = i + 2 + be16(i + 2)? as usize;
@@ -224,8 +227,21 @@ fn jpeg_clean(bytes: &[u8]) -> Option<(Vec<u8>, u16, u16)> {
             out.extend_from_slice(segment);
         }
         i = end;
+        if marker == 0xDA {
+            // A scan's data, as it is, up to the next marker (0xFF then neither 0 nor a restart): progressive JPEGs
+            // have several scans, with segments between them.
+            let start = i;
+            while i + 1 < bytes.len()
+                && !(bytes[i] == 0xFF && bytes[i + 1] != 0 && !(0xD0..=0xD7).contains(&bytes[i + 1]))
+            {
+                i += 1;
+            }
+            out.extend_from_slice(bytes.get(start..i)?);
+            if i + 1 >= bytes.len() {
+                return None; // no end of image
+            }
+        }
     }
-    None
 }
 
 /// The reply pictures each sender got last (file names), bounded: `RECENT_PICTURES` per sender, `MAX_REMEMBERED`
@@ -828,6 +844,14 @@ mod tests {
         with_exif.extend_from_slice(&jpeg[2..]);
         let (clean, w, h) = jpeg_clean(&with_exif).unwrap();
         assert_eq!((clean.as_slice(), w, h), (&jpeg[..], 720, 1280));
+        // A comment after the first scan, a second scan, and bytes after the end: the comment and the tail go.
+        let end = jpeg.len() - 2;
+        let mut progressive = jpeg[..end].to_vec();
+        progressive.extend_from_slice(&[0xFF, 0xFE, 0, 4, b'h', b'i', 0xFF, 0xDA, 0, 2, 9, 0xFF, 0x00, 9, 0xFF, 0xD9]);
+        progressive.extend_from_slice(b"trailing");
+        let mut expected = jpeg[..end].to_vec();
+        expected.extend_from_slice(&[0xFF, 0xDA, 0, 2, 9, 0xFF, 0x00, 9, 0xFF, 0xD9]);
+        assert_eq!(jpeg_clean(&progressive).unwrap().0, expected);
         let dir = std::env::temp_dir().join(format!("yogpt-pick-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         assert!(pick_picture(&dir, None).is_none(), "nothing there");

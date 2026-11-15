@@ -152,10 +152,16 @@ fn answers_until_quiet(client: &mut Client, quiet: Duration) -> (usize, Vec<Vec<
 
 /// A JPEG's start, 720 by 1280, and noise: what YoGPT sends is these bytes as they are.
 fn reply_picture() -> Vec<u8> {
-    // A start, a frame header (720 × 1280), a scan: what YoGPT takes as a JPEG; then the scan's bytes.
+    reply_picture_of(5000)
+}
+
+/// A start, a frame header (720 × 1280), a scan of `len` bytes (no 0xFF in them), the end: what YoGPT takes as a JPEG
+/// and sends as it is.
+fn reply_picture_of(len: usize) -> Vec<u8> {
     let mut bytes = vec![0xFF, 0xD8, 0xFF, 0xC0, 0, 17, 8, 0x05, 0x00, 0x02, 0xD0, 3, 0, 0, 0, 0, 0, 0, 0, 0, 0];
     bytes.extend_from_slice(&[0xFF, 0xDA, 0, 2]);
-    bytes.extend((0..5000).map(|_| random_u64() as u8));
+    bytes.extend((0..len).map(|_| random_u64() as u8 & 0x7F));
+    bytes.extend_from_slice(&[0xFF, 0xD9]);
     bytes
 }
 
@@ -207,8 +213,7 @@ fn a_burst_of_photos_is_answered_with_its_pictures_at_once() {
     let replies = state_dir();
     std::fs::create_dir_all(&replies).unwrap();
     // As large as a reply picture may be.
-    let mut picture = reply_picture();
-    picture.resize(500_000, 7);
+    let picture = reply_picture_of(500_000);
     std::fs::write(replies.join("001.jpg"), &picture).unwrap();
     let mut alice = someone(&hub);
     let _bot = Bot::start_with(&[(&hub, &state)], &["--replies", replies.to_str().unwrap(), "--picture-every", "0"]);
