@@ -1036,7 +1036,7 @@ struct AppearancePage: View {
       Section {
         Toggle("Left-Handed", isOn: $leftHanded)
       } footer: {
-        Text("Yo and photos at the left end of a bar, Undo at the right; the camera at the top left.")
+        Text("Yo and photos at the left end of a bar, Undo at the right; the camera at the bottom left, the menu at the bottom right.")
       }
     }
     .navigationTitle("Appearance")
