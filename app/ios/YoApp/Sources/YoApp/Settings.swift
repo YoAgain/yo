@@ -622,6 +622,7 @@ enum Library {
 private struct BlockedList: View {
   @Environment(AccountStore.self) private var accounts
   @Environment(Friends.self) private var friends
+  @Environment(MediaOutbox.self) private var outbox
   @State private var problem: String?
 
   var body: some View {
@@ -660,6 +661,7 @@ private struct BlockedList: View {
       do {
         try await accounts.setBlocked(friend.user ?? friend.name, false)
         withAnimation { friends.setBlocked(friend, false) }
+        outbox.retryNow()  // photos taken for them while blocked go now
       } catch {
         problem = error.localizedDescription
       }

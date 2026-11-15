@@ -288,6 +288,8 @@ final class MediaOutbox {
     case .later:
       items[at].tries += 1
       items[at].next = .now + min(1800, 30 * pow(2, Double(min(items[at].tries - 1, 6))))
+    case .held:
+      items[at].next = .now + Self.heldSeconds  // looked at again soon, without a hub: it goes once they may get it
     case .replaced:
       accounts.replaced(client)  // clears this outbox too
       return false
@@ -309,7 +311,19 @@ final class MediaOutbox {
     }
   }
 
-  private enum Outcome { case uploaded, sent, later, dropped, replaced, stopped }
+  /// Outcomes: `held`, the friend blocked or their new key not confirmed (spec 4.8, 3.4): kept, and goes after an
+  /// unblock or a confirmation (`retryNow`), as the core's own outbox does.
+  private enum Outcome { case uploaded, sent, later, held, dropped, replaced, stopped }
+
+  /// How long one held for a blocked or unconfirmed friend waits before it is looked at again (a check on this
+  /// iPhone, nothing goes to the hub).
+  private static let heldSeconds: TimeInterval = 60
+
+  /// A friend unblocked or their new key confirmed: what waits goes now.
+  func retryNow() {
+    for at in items.indices { items[at].next = .distantPast }
+    if let accounts { flush(accounts: accounts) }
+  }
 
   /// The chat first (a new friend's opens now), then the upload outside the client's lock: Yos go on meanwhile, and
   /// so do the other uploads.
@@ -355,10 +369,12 @@ final class MediaOutbox {
       return .sent  // the friend's app too old: the Yo waits in the core's outbox until they update
     } catch YoError.Refused(let status) where status == 426 {
       return .stopped  // this build too old: kept, for the build after it
+    } catch YoError.Blocked, YoError.Unconfirmed {
+      return .held  // kept until they are unblocked or their key confirmed, never dropped
     } catch let error as YoError where mediaRetryLater(error: error) {
       return .later
     } catch {
-      return .dropped  // not on Yo, blocked, or refused for good
+      return .dropped  // not on Yo, or refused for good
     }
   }
 }
