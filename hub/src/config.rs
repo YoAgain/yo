@@ -28,13 +28,16 @@ pub struct Limits {
     pub register_per_ip_hour: u32,
     /// Whether a username is free, asked while it is typed (spec 6.3).
     pub name_check_per_ip_minute: u32,
-    /// Requests (signed deliveries without the recipient's profile key) one sender sends one recipient a day
-    /// (spec 4.10).
-    pub requests_per_pair_day: u64,
-    /// Recipients one sender sends requests to a day (spec 4.10).
-    pub request_recipients_per_sender_day: u64,
-    /// Requests one recipient takes a day from everyone (spec 4.10): against many accounts made to flood one.
-    pub requests_per_recipient_day: u64,
+    /// Requests (signed deliveries without the recipient's profile key) one sender sends one recipient at once,
+    /// one more an hour (spec 4.10).
+    pub requests_per_pair: u64,
+    /// Recipients new to one sender's requests at once, one more an hour (spec 4.10).
+    pub request_recipients_per_sender: u64,
+    /// Requests one recipient takes from everyone at once, as many again a day (spec 4.10): against many accounts
+    /// made to flood one.
+    pub requests_per_recipient: u64,
+    /// The hour those refill by, ms: an hour; a load test that runs days of use in minutes makes it shorter.
+    pub request_hour_ms: u64,
     /// Backup records fetched: by the user id or a locator, neither of which can be guessed (spec 7).
     pub backup_per_ip_hour: u32,
     /// Reports of users, by one user (spec 6.3).
@@ -91,9 +94,10 @@ impl Default for Limits {
             db_min_free_bytes: GIB,
             register_per_ip_hour: 10,
             name_check_per_ip_minute: 60,
-            requests_per_pair_day: 10,
-            request_recipients_per_sender_day: 20,
-            requests_per_recipient_day: 1000,
+            requests_per_pair: 10,
+            request_recipients_per_sender: 20,
+            requests_per_recipient: 1000,
+            request_hour_ms: 3_600_000,
             backup_per_ip_hour: 10,
             report_per_user_day: 20,
             feedback_per_user_day: 10,
@@ -126,9 +130,10 @@ impl Limits {
             db_min_free_bytes: 0,
             register_per_ip_hour: u32::MAX,
             name_check_per_ip_minute: u32::MAX,
-            requests_per_pair_day: u64::MAX,
-            request_recipients_per_sender_day: u64::MAX,
-            requests_per_recipient_day: u64::MAX,
+            requests_per_pair: u64::MAX,
+            request_recipients_per_sender: u64::MAX,
+            requests_per_recipient: u64::MAX,
+            request_hour_ms: 3_600_000,
             backup_per_ip_hour: u32::MAX,
             report_per_user_day: u32::MAX,
             feedback_per_user_day: u32::MAX,

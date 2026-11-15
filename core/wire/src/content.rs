@@ -11,6 +11,13 @@ pub const WITH_PHOTO: u16 = 4;
 pub const WITH_VIDEO: u16 = 5;
 /// The group a Yo goes to (spec 5): its id and the revision the sender has.
 pub const WITH_GROUP: u16 = 6;
+/// The sender's profile key and its generation (spec 4.10: `opaque key[32]; uint32 generation`), on every content
+/// message to an accepted contact or a joined group's members, as Signal's `DataMessage.profileKey`: a key missed or
+/// forgotten comes back with the next one. Apps before it skip the kind.
+pub const WITH_PROFILE_KEY: u16 = 7;
+
+/// A profile key and its generation (the account's count of its keys, 1 the first): which of two is the later.
+pub type KeyedBy = ([u8; 32], u32);
 /// The id of a blob at the hub (spec 6.8): 16 random bytes the uploader chooses.
 pub const BLOB_ID_LEN: usize = 16;
 pub type BlobId = [u8; BLOB_ID_LEN];
@@ -267,6 +274,22 @@ struct Location {
     lon_e7: u32,
 }
 
+/// A body and what follows it: a `With` list, if anything (spec 5); none if the body does not parse.
+fn split<T: tls_codec::DeserializeBytes>(body: &[u8]) -> Option<(&[u8], Option<&[u8]>)> {
+    let (_, rest) = T::tls_deserialize_bytes(body).ok()?;
+    let own = &body[..body.len() - rest.len()];
+    Some((own, (!rest.is_empty()).then_some(rest)))
+}
+
+/// The body without what follows it, which must be a `With` list.
+fn own_part<T: tls_codec::DeserializeBytes>(body: &[u8]) -> Result<&[u8], Error> {
+    let (own, rest) = split::<T>(body).ok_or(Error::Format)?;
+    if let Some(rest) = rest {
+        crate::decode::<WithList>(rest)?;
+    }
+    Ok(own)
+}
+
 fn text(value: &str, max: usize) -> Result<Vec<u8>, Error> {
     if value.is_empty() || value.len() > max || value.chars().any(char::is_control) {
         return Err(Error::Format);
@@ -285,25 +308,39 @@ fn read_text(body: &[u8], max: usize) -> Result<String, Error> {
 
 impl Message {
     pub fn encode(&self) -> Result<Vec<u8>, Error> {
+        self.encode_with_key(None)
+    }
+
+    /// As `encode`, a content message carrying the sender's profile key too (`WITH_PROFILE_KEY`): a Yo in its `With`
+    /// list, a text, link or location in a `With` list after its body (spec 5). Others (receipts, names, groups' and
+    /// keys' messages) carry none.
+    pub fn encode_with_key(&self, profile_key: Option<KeyedBy>) -> Result<Vec<u8>, Error> {
+        let key =
+            profile_key.map(|(key, generation)| (WITH_PROFILE_KEY, [&key[..], &generation.to_be_bytes()].concat()));
+        let trailer = |body: Vec<u8>| match &key {
+            Some(key) => [body, yo_body(vec![key.clone()])].concat(),
+            None => body,
+        };
         let group = self.group.map(|tag| (WITH_GROUP, crate::encode(&tag)));
         if group.is_some() && !matches!(self.content, Content::Yo | Content::Photo(_) | Content::Video { .. }) {
             return Err(Error::Format);
         }
         let (kind, body) = match &self.content {
-            Content::Yo => (TYPE_YO, yo_body(group.into_iter().collect())),
+            Content::Yo => (TYPE_YO, yo_body([group, key].into_iter().flatten().collect())),
             Content::Photo(media) => {
                 let photo = (WITH_PHOTO, crate::encode(&Photo::from(media)));
-                (TYPE_YO, yo_body([Some(photo), group].into_iter().flatten().collect()))
+                (TYPE_YO, yo_body([Some(photo), group, key].into_iter().flatten().collect()))
             }
             Content::Video { media, duration_ms } => {
                 let video = (WITH_VIDEO, crate::encode(&Video { photo: media.into(), duration_ms: *duration_ms }));
-                (TYPE_YO, yo_body([Some(video), group].into_iter().flatten().collect()))
+                (TYPE_YO, yo_body([Some(video), group, key].into_iter().flatten().collect()))
             }
             Content::Profile { name } => (TYPE_PROFILE, text(name, MAX_NAME_LEN)?),
-            Content::Text(value) => (TYPE_TEXT, text(value, MAX_TEXT_LEN)?),
-            Content::Link(url) => (TYPE_LINK, text(url, MAX_URL_LEN)?),
+            Content::Text(value) => (TYPE_TEXT, trailer(text(value, MAX_TEXT_LEN)?)),
+            Content::Link(url) => (TYPE_LINK, trailer(text(url, MAX_URL_LEN)?)),
             Content::Location { lat_e7, lon_e7 } => {
-                (TYPE_LOCATION, crate::encode(&Location { lat_e7: *lat_e7 as u32, lon_e7: *lon_e7 as u32 }))
+                let location = crate::encode(&Location { lat_e7: *lat_e7 as u32, lon_e7: *lon_e7 as u32 });
+                (TYPE_LOCATION, trailer(location))
             }
             Content::Receipt => (TYPE_RECEIPT, Vec::new()),
             Content::Retry => (TYPE_RETRY, Vec::new()),
@@ -324,6 +361,26 @@ impl Message {
         Ok(crate::encode(&Wire { version: CONTENT_VERSION, sent_at: self.sent_at_ms, kind, body: body.into() }))
     }
 
+    /// The sender's profile key a message carries (`encode_with_key`), with its generation, if it does.
+    pub fn profile_key_of(bytes: &[u8]) -> Option<KeyedBy> {
+        let wire: Wire = crate::decode(bytes).ok()?;
+        let body = wire.body.as_slice();
+        if wire.version != CONTENT_VERSION {
+            return None;
+        }
+        let list = match wire.kind {
+            TYPE_YO if !body.is_empty() => body,
+            TYPE_TEXT | TYPE_LINK => split::<Text>(body)?.1?,
+            TYPE_LOCATION => split::<Location>(body)?.1?,
+            _ => return None,
+        };
+        let WithList { with } = crate::decode(list).ok()?;
+        let data = with.into_iter().find(|w| w.kind == WITH_PROFILE_KEY)?.data;
+        let data = data.as_slice();
+        (data.len() == 36)
+            .then(|| (data[..32].try_into().expect("32"), u32::from_be_bytes(data[32..].try_into().expect("4"))))
+    }
+
     pub fn decode(bytes: &[u8]) -> Result<Self, Error> {
         let wire: Wire = crate::decode(bytes)?;
         if wire.version != CONTENT_VERSION {
@@ -338,10 +395,11 @@ impl Message {
                 content
             }
             TYPE_PROFILE => Content::Profile { name: read_text(body, MAX_NAME_LEN)? },
-            TYPE_TEXT => Content::Text(read_text(body, MAX_TEXT_LEN)?),
-            TYPE_LINK => Content::Link(read_text(body, MAX_URL_LEN)?),
+            // What follows the body, if anything, is a `With` list (spec 5): read beside it (`profile_key_of`).
+            TYPE_TEXT => Content::Text(read_text(own_part::<Text>(body)?, MAX_TEXT_LEN)?),
+            TYPE_LINK => Content::Link(read_text(own_part::<Text>(body)?, MAX_URL_LEN)?),
             TYPE_LOCATION => {
-                let Location { lat_e7, lon_e7 } = crate::decode(body)?;
+                let Location { lat_e7, lon_e7 } = crate::decode(own_part::<Location>(body)?)?;
                 Content::Location { lat_e7: lat_e7 as i32, lon_e7: lon_e7 as i32 }
             }
             TYPE_RECEIPT | TYPE_RETRY if !body.is_empty() => return Err(Error::Format),
@@ -428,6 +486,36 @@ mod tests {
         assert_eq!(decoded.content, Content::Photo(media(3)));
         // Nothing known: a plain Yo.
         assert_eq!(Message::decode(&yo(vec![other(99)])).unwrap().content, Content::Yo);
+        // The sender's profile key on a Yo: read beside it, skipped by `decode` (and so by apps before it).
+        let group = GroupTag { id: [3; 16], revision: 2, hash: [4; 8] };
+        let keyed = Message { sent_at_ms: 5, group: Some(group), content: Content::Photo(media(3)) };
+        let bytes = keyed.encode_with_key(Some(([7; 32], 3))).unwrap();
+        assert_eq!(Message::decode(&bytes).unwrap(), keyed);
+        assert_eq!(Message::profile_key_of(&bytes), Some(([7; 32], 3)));
+        assert_eq!(Message::profile_key_of(&keyed.encode().unwrap()), None);
+        let plain = Message { sent_at_ms: 5, group: None, content: Content::Yo };
+        let bytes = plain.encode_with_key(Some(([8; 32], 1))).unwrap();
+        assert_eq!(Message::decode(&bytes).unwrap(), plain, "a plain Yo with only the key is a plain Yo");
+        assert_eq!(Message::profile_key_of(&bytes), Some(([8; 32], 1)));
+        assert_eq!(bytes.len(), 53, "spec 5: 13 bytes, 53 with the key");
+        // A text, a link, a location: after the body.
+        for content in [
+            Content::Text("hi".into()),
+            Content::Link("https://justyo.co".into()),
+            Content::Location { lat_e7: 1, lon_e7: -2 },
+        ] {
+            let m = Message { sent_at_ms: 5, group: None, content };
+            let bytes = m.encode_with_key(Some(([9; 32], 2))).unwrap();
+            assert_eq!(Message::decode(&bytes).unwrap(), m);
+            assert_eq!(Message::profile_key_of(&bytes), Some(([9; 32], 2)));
+            assert_eq!(Message::profile_key_of(&m.encode().unwrap()), None);
+        }
+        let receipt = Message { sent_at_ms: 5, group: None, content: Content::Receipt };
+        assert_eq!(
+            receipt.encode_with_key(Some(([8; 32], 1))).unwrap(),
+            receipt.encode().unwrap(),
+            "no key on a receipt"
+        );
         // An empty list, a kind twice, out of order, a short photo: refused.
         assert!(Message::decode(&yo(vec![])).is_err());
         assert!(Message::decode(&yo(vec![photo(), photo()])).is_err());

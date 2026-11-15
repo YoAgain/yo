@@ -274,7 +274,13 @@ impl Client {
         let sent_at_ms = self.wall().max(self.state.last_sent_ms + 1);
         self.state.last_sent_ms = sent_at_ms;
         let keep = shown(&content);
-        let message = Message { sent_at_ms, group, content }.encode()?;
+        // A Yo to accepted contacts (or a joined group's members) carries this account's profile key (spec 4.10), as
+        // Signal's every message: a key they missed comes with the next one. Never to a request not said yes to.
+        let accepted = users.iter().all(|user| {
+            self.in_joined_group(user) || self.state.contacts.get(user).is_some_and(|c| c.accepted && !c.blocked)
+        });
+        let key = self.state.profile_key.filter(|_| accepted).map(|key| (key, self.state.profile_key_gen.max(1)));
+        let message = Message { sent_at_ms, group, content }.encode_with_key(key)?;
         for user in &users {
             self.enqueue(user, encode(&Plain { to: None, content: message.clone().into() }));
             if keep {

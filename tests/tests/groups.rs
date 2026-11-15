@@ -2,7 +2,7 @@
 //! of a group at the hub.
 
 use yo_core::{Client, Content, Event};
-use yo_tests::{deliver_raw_with, random_u64, register, username, Fault, Http, TestHub};
+use yo_tests::{deliver_held, random_u64, register, username, Fault, Http, TestHub};
 
 fn people(hub: &TestHub, n: usize) -> Vec<Client> {
     let base = random_u64() % 1_000_000_000;
@@ -130,24 +130,8 @@ fn two_changes_at_once_end_the_same_everywhere() {
     b.rename_group(&id, "BEN").unwrap();
     c.rename_group(&id, "CLEO").unwrap();
     assert_eq!((view(b, &id).name.as_str(), view(c, &id).name.as_str()), ("BEN", "CLEO"));
-    let held = |t: &Http, path: &str| {
-        t.sent
-            .lock()
-            .unwrap()
-            .iter()
-            .filter(|(m, p, _)| m == "POST" && p == path)
-            .map(|(_, _, b)| b.clone())
-            .next_back()
-            .unwrap()
-    };
-    assert_eq!(
-        deliver_raw_with(&hub.url(), c.user_id(), c.access_key_for_tests().as_deref(), held(&transports[1], &to_c)),
-        202
-    );
-    assert_eq!(
-        deliver_raw_with(&hub.url(), b.user_id(), b.access_key_for_tests().as_deref(), held(&transports[2], &to_b)),
-        202
-    );
+    assert_eq!(deliver_held(&hub.url(), &transports[1], &to_c), 202);
+    assert_eq!(deliver_held(&hub.url(), &transports[2], &to_b), 202);
     for _ in 0..3 {
         for x in [&mut *b, &mut *c, &mut *a] {
             if let Ok(d) = x.deliver_begin() {
@@ -286,24 +270,8 @@ fn two_removing_each_other_at_once_end_the_same() {
     let (bid, cid) = (b.user_id().to_owned(), c.user_id().to_owned());
     b.remove_from_group(&id, std::slice::from_ref(&cid)).unwrap();
     c.remove_from_group(&id, std::slice::from_ref(&bid)).unwrap();
-    let held = |t: &Http, path: &str| {
-        t.sent
-            .lock()
-            .unwrap()
-            .iter()
-            .filter(|(m, p, _)| m == "POST" && p == path)
-            .map(|(_, _, b)| b.clone())
-            .next_back()
-            .unwrap()
-    };
-    assert_eq!(
-        deliver_raw_with(&hub.url(), c.user_id(), c.access_key_for_tests().as_deref(), held(&transports[1], &to_c)),
-        202
-    );
-    assert_eq!(
-        deliver_raw_with(&hub.url(), b.user_id(), b.access_key_for_tests().as_deref(), held(&transports[2], &to_b)),
-        202
-    );
+    assert_eq!(deliver_held(&hub.url(), &transports[1], &to_c), 202);
+    assert_eq!(deliver_held(&hub.url(), &transports[2], &to_b), 202);
     for _ in 0..3 {
         for x in [&mut *b, &mut *c, &mut *a] {
             take(x);
@@ -687,19 +655,8 @@ fn a_lost_change_is_made_again_on_the_winner() {
     zoe_t.fault(&to_leo, Fault::Answer(202));
     leo.remove_from_group(&id, &[noah.user_id().to_owned()]).unwrap();
     zoe.add_to_group(&id, &[ben.user_id().to_owned()]).unwrap();
-    let held = |t: &Http, path: &str| {
-        t.sent
-            .lock()
-            .unwrap()
-            .iter()
-            .filter(|(m, p, _)| m == "POST" && p == path)
-            .map(|(_, _, b)| b.clone())
-            .next_back()
-            .unwrap()
-    };
-    let (to_z, to_l) = (held(leo_t, &to_zoe), held(zoe_t, &to_leo));
-    assert_eq!(deliver_raw_with(&hub.url(), zoe.user_id(), zoe.access_key_for_tests().as_deref(), to_z), 202);
-    assert_eq!(deliver_raw_with(&hub.url(), leo.user_id(), leo.access_key_for_tests().as_deref(), to_l), 202);
+    assert_eq!(deliver_held(&hub.url(), leo_t, &to_zoe), 202);
+    assert_eq!(deliver_held(&hub.url(), zoe_t, &to_leo), 202);
     for _ in 0..3 {
         for x in [&mut *zoe, &mut *leo, &mut *mia, &mut *ben, &mut *noah] {
             take(x);

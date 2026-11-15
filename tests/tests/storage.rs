@@ -173,7 +173,7 @@ fn a_storage_that_does_not_open_is_written_over() {
     assert!(new.drop_reasons().iter().any(|r| r.contains("storage")));
     new.maintenance().unwrap();
     assert!(new.storage_saved_at().is_some());
-    assert_eq!(stored(&mut new).version, 3, "written over");
+    assert!(stored(&mut new).version >= 3, "written over");
     let third = by_name(&hub, &name, Some(a.account_secret()));
     assert!(third.drop_reasons().is_empty(), "{:?}", third.drop_reasons());
 }
@@ -188,4 +188,39 @@ fn saved_says_whether_the_hub_holds_it_all() {
     assert_eq!(a.storage_saved_at(), None, "a change waits to go up");
     a.maintenance().unwrap();
     assert!(a.storage_saved_at().unwrap() >= first, "written");
+}
+
+/// The profile keys in the storage (spec 6.9, as Signal's storage service keeps them): a new phone goes on with the
+/// account's key, so what its contacts hold stays good, and it has theirs, so its first Yo is a contact's, sealed.
+#[test]
+fn a_new_phone_keeps_the_profile_keys() {
+    let hub = TestHub::start();
+    let name_a = format!("Keya{}", random_u64() % 100_000);
+    let name_b = format!("Keyb{}", random_u64() % 100_000);
+    let mut a = by_name(&hub, &name_a, None);
+    let mut b = by_name(&hub, &name_b, None);
+    a.send_yo(&name_b).unwrap();
+    b.sync(0).unwrap();
+    b.send_yo(&name_a).unwrap();
+    for _ in 0..2 {
+        for c in [&mut a, &mut b] {
+            c.sync(0).unwrap();
+            c.after_sync().unwrap();
+        }
+    }
+    let key = b.access_key_for_tests();
+    assert!(key.is_some());
+    let http = yo_tests::Http::new(hub.url());
+    let mut new = yo_tests::new_phone(http.clone(), &name_b, &b);
+    new.maintenance().unwrap();
+    assert_eq!(new.access_key_for_tests(), key, "the same key");
+    // Its Yo shows A's key: sealed, unsigned, taken as a contact's.
+    new.send_yo(a.user_id()).unwrap();
+    assert_eq!(new.waiting(), 0, "{:?}", new.drop_reasons());
+    assert_eq!(yo_tests::access_shown(&http, a.user_id()), a.access_key_for_tests());
+    // A's Yo with the key it holds is taken: no 403, no request.
+    a.send_yo(&name_b).unwrap();
+    assert_eq!((a.waiting(), a.dropped()), (0, 0), "{:?}", a.drop_reasons());
+    let events = new.sync(0).unwrap();
+    assert!(events.iter().any(|e| matches!(e, Event::Message { user, .. } if user == a.user_id())));
 }

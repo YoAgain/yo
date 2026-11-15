@@ -32,7 +32,7 @@ use libsignal_protocol::{
 };
 use signal::Records;
 use state::{hex, unhex, Contact, Outgoing, Registering, Slot, State, StoredContent, StoredEvent};
-use std::collections::{BTreeSet, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -157,6 +157,48 @@ pub enum Event {
     GroupSentElsewhere { group: String, sent_at_ms: u64, content: Content },
     /// A group came, changed (name, members) or was left: `groups()` has it as it is now.
     GroupChanged { group: String },
+}
+
+/// What waits in the outbox for one recipient in one conversation (`Client::outbox_view`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OutboxEntry {
+    /// The user id (hex); this account's own for the copies to its other devices.
+    pub user: String,
+    /// The group (id, hex) its messages are of; none: 1:1 (and keys, receipts, names).
+    pub group: Option<String>,
+    pub count: usize,
+    pub reason: OutboxReason,
+    /// Until when (this clock, ms) the hub holds it back (`RateLimited`), if it said.
+    pub retry_at_ms: Option<u64>,
+    /// It goes sealed (their key and a sender certificate here); else identified.
+    pub sealed: bool,
+    /// It goes as a request: their profile key is not here (spec 4.10).
+    pub request: bool,
+}
+
+/// Why something waits in the outbox.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OutboxReason {
+    /// On its way to the hub now.
+    Sending,
+    /// It goes with the next delivery.
+    Next,
+    /// A request past its limit (`429`): until `retry_at_ms`, or until their key comes.
+    RateLimited,
+    /// Refused with their old key (`403`): after the next inbox read, with the new one.
+    TheirKey,
+    /// Their devices are being asked of the hub (a new phone).
+    Roster,
+    /// Their inbox is full (`507`).
+    InboxFull,
+    /// No network, or the hub did not answer.
+    Offline,
+    /// Blocked here: it goes after an unblock.
+    Blocked,
+    /// Their key changed after a verification: it goes once confirmed.
+    Unconfirmed,
+    /// Their app is too old for sessions: it goes once updated.
+    Outdated,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -317,16 +359,64 @@ struct Delivery {
     nonce: Option<[u8; hubsig::NONCE_LEN]>,
 }
 
+/// Whether a key a content message carried, of `generation`, replaces the one held (spec 4.10): the same key tells
+/// its generation; another one only if later than the generation known (one that came as type 10 since keeps the
+/// one before as its bound).
+fn carried_key_taken(contact: &Contact, key: &[u8; 32], generation: u32) -> bool {
+    match contact.profile_key {
+        Some(held) if held == *key => true,
+        Some(_) => generation > contact.key_gen,
+        None => generation >= contact.key_gen,
+    }
+}
+
+/// Whether a queued message is this account's profile key (type 10).
+fn is_key(item: &state::Outgoing) -> bool {
+    decode::<yo_wire::envelope::Plain>(&item.plain)
+        .ok()
+        .and_then(|plain| Message::decode(plain.content.as_slice()).ok())
+        .is_some_and(|m| matches!(m.content, Content::ProfileKey(_)))
+}
+
+/// What a `429` holds back (spec 6.6), by the limit the hub names in its body.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Limit {
+    /// A request's bucket (4.10): this recipient only, for the ms named.
+    Recipient(u64),
+    /// The sender's address (or bytes): what goes without a token.
+    Address,
+    /// This device's signed requests: what goes signed.
+    Device,
+    /// Not named (an older hub): everything, this round.
+    All,
+}
+
+fn limit_of(response: &Response) -> Option<Limit> {
+    if response.status != status::RATE_LIMITED {
+        return None;
+    }
+    let body = std::str::from_utf8(&response.body).unwrap_or("");
+    let mut words = body.split_whitespace();
+    let seconds = |w: Option<&str>| w.and_then(|s| s.parse::<u64>().ok()).unwrap_or(60).clamp(1, 24 * 3600) * 1000;
+    Some(match words.next() {
+        Some("pair" | "new" | "recipient") => Limit::Recipient(seconds(words.next())),
+        Some("ip" | "bytes") => Limit::Address,
+        Some("device") => Limit::Device,
+        _ => Limit::All,
+    })
+}
+
 impl Deliveries {
     /// Posts each envelope, in order. After one to a user that the hub did not take, that user's next ones are held
-    /// (`None`), so they keep their order; after a `429` (the hub's limit per sender, 6.6) all the rest are. Blocks
-    /// for the round trips.
+    /// (`None`), so they keep their order; after a `429` the rest that share its limit are (6.6). Blocks for the round
+    /// trips.
     pub fn send(&self) -> Vec<Option<Answer>> {
         let mut held = BTreeSet::new();
-        let mut limited = false;
+        let (mut all, mut address, mut device) = (false, false, false);
         let mut answers = Vec::new();
         for item in &self.items {
-            if limited || held.contains(&item.user) {
+            let signed = item.access.is_none() || !item.sealed;
+            if all || held.contains(&item.user) || (address && item.token.is_none()) || (device && signed) {
                 answers.push(None);
                 continue;
             }
@@ -340,7 +430,13 @@ impl Deliveries {
                 answer = self.transport.request("POST", &item.path, &headers, &item.envelope);
             }
             let status = answer.as_ref().map_or(0, |r| r.status);
-            limited = status == status::RATE_LIMITED;
+            // A `429` holds back only what shares its limit (spec 6.6): a request's this recipient alone.
+            match answer.as_ref().ok().and_then(limit_of) {
+                Some(Limit::All) => all = true,
+                Some(Limit::Address) => address = true,
+                Some(Limit::Device) => device = true,
+                Some(Limit::Recipient(_)) | None => {}
+            }
             if !settled(status) {
                 held.insert(item.user.clone());
             }
@@ -372,6 +468,12 @@ pub struct Client {
     /// Users a delivery to was refused as a request though it showed their key (spec 4.10): nothing more to them
     /// until the inbox was read, where their new key may wait.
     refused_until_read: BTreeSet<String>,
+    /// The hub's last answer to a delivery to each user (0: none came, no network): why theirs wait (`outbox_view`).
+    last_answer: BTreeMap<String, u16>,
+    /// Users whose requests the hub limits now (`429`, spec 4.10), until when (clock): theirs wait till then, or
+    /// until their profile key comes (then they go as a contact's at once). Not saved: after a restart, tried again.
+    /// With it, whether their key went ahead meanwhile and was refused too: then it waits as well.
+    request_wait: BTreeMap<String, (u64, bool)>,
     /// An envelope was made (and its ratchet moved) since the state was last saved: saved before anything leaves.
     envelopes_unsaved: std::cell::Cell<bool>,
     /// Until when (clock) the inbox counts as up to date: the end of a long wait under way, or when it was emptied.
@@ -429,6 +531,8 @@ fn hub_signed<'a>(
         .find_map(|key| hubsig::open(key, nonce, path, request, body).ok())
         .ok_or(Error::Protocol("answer not signed by the hub"))
 }
+
+const HOUR_MS: u64 = 3_600_000;
 
 fn wall_ms() -> u64 {
     SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_millis() as u64
@@ -801,6 +905,7 @@ impl Client {
             tokens_after: 0,
             tokens_check: false,
             profile_key: None,
+            profile_key_gen: 0,
             requests_open: true,
             access_key_told: false,
             sender_certificate: None,
@@ -877,6 +982,8 @@ impl Client {
             drop_reasons: Vec::new(),
             delivering: BTreeSet::new(),
             refused_until_read: BTreeSet::new(),
+            last_answer: BTreeMap::new(),
+            request_wait: BTreeMap::new(),
             envelopes_unsaved: std::cell::Cell::new(false),
             inbox_fresh_until: 0,
             media_keys_forgotten: false,
@@ -1065,6 +1172,71 @@ impl Client {
     fn note(&mut self, reason: String) {
         if self.drop_reasons.len() < 20 {
             self.drop_reasons.push(reason);
+        }
+    }
+
+    /// What waits in the outbox, per recipient and conversation (a group's or 1:1), and why: for the curious
+    /// (Settings › Encryption). Reads only.
+    pub fn outbox_view(&self) -> Vec<OutboxEntry> {
+        let now = (self.clock)();
+        let mut entries: Vec<OutboxEntry> = Vec::new();
+        for item in &self.state.outbox {
+            let group = decode::<yo_wire::envelope::Plain>(&item.plain)
+                .ok()
+                .and_then(|plain| Message::decode(plain.content.as_slice()).ok())
+                .and_then(|m| m.group)
+                .map(|tag| hex(&tag.id));
+            match entries.iter_mut().find(|e| e.user == item.user && e.group == group) {
+                Some(entry) => entry.count += 1,
+                None => {
+                    let (reason, retry_at_ms) = self.waits_for(&item.user, now);
+                    let sealed = item.user == self.state.user_id
+                        || self.state.contacts.get(&item.user).is_some_and(|c| c.profile_key.is_some());
+                    entries.push(OutboxEntry {
+                        user: item.user.clone(),
+                        group,
+                        count: 1,
+                        reason,
+                        retry_at_ms,
+                        sealed: sealed && self.state.sender_certificate.is_some(),
+                        request: !sealed,
+                    });
+                }
+            }
+        }
+        entries
+    }
+
+    /// Why what waits for `user` waits now (`outbox_view`), and until when if the hub said.
+    fn waits_for(&self, user: &str, now: u64) -> (OutboxReason, Option<u64>) {
+        let contact = self.state.contacts.get(user);
+        if self.delivering.contains(user) {
+            return (OutboxReason::Sending, None);
+        }
+        if let Some((until, _)) = self.request_wait.get(user).filter(|(until, _)| *until > now) {
+            return (OutboxReason::RateLimited, Some(*until));
+        }
+        if contact.is_some_and(|c| c.blocked) {
+            return (OutboxReason::Blocked, None);
+        }
+        if contact.is_some_and(|c| c.unconfirmed) {
+            return (OutboxReason::Unconfirmed, None);
+        }
+        if contact.is_some_and(|c| c.outdated_at > 0) {
+            return (OutboxReason::Outdated, None);
+        }
+        if self.refused_until_read.contains(user) {
+            return (OutboxReason::TheirKey, None);
+        }
+        if self.roster_unknown(user) || !self.without_session(user).is_empty() {
+            return (OutboxReason::Roster, None);
+        }
+        match self.last_answer.get(user) {
+            Some(&status::INSUFFICIENT_STORAGE) => (OutboxReason::InboxFull, None),
+            Some(&status::RATE_LIMITED) => (OutboxReason::RateLimited, None),
+            Some(0) => (OutboxReason::Offline, None),
+            Some(status) if *status >= 500 => (OutboxReason::Offline, None),
+            _ => (OutboxReason::Next, None),
         }
     }
 
@@ -1767,7 +1939,7 @@ impl Client {
         for _ in 0..DEVICE_ROUNDS {
             self.prepare()?;
             let deliveries = self.deliveries()?;
-            identified |= deliveries.items.iter().any(|d| !d.sealed);
+            identified |= deliveries.items.iter().any(|d| !d.sealed && d.access.is_some());
             let answers = deliveries.send();
             match self.delivered(&deliveries, answers) {
                 Ok(true) => {}
@@ -1833,6 +2005,8 @@ impl Client {
     fn deliveries(&mut self) -> Result<Deliveries> {
         // Users whose envelopes another flush is sending, or that cannot be written to now: theirs wait, in order.
         let mut waiting = self.delivering.clone();
+        let now = (self.clock)();
+        self.request_wait.retain(|_, (until, _)| *until > now);
         let mut encrypted = false;
         let mut i = 0;
         while i < self.state.outbox.len() {
@@ -1902,9 +2076,16 @@ impl Client {
         let certificate = self.certificate();
         let own = signal::identity_pair(&self.state.account_secret)?;
         let mut too_large = Vec::new();
+        let mut first = BTreeSet::new();
         for item in &self.state.outbox {
             let Some(payload) = &item.payload else { continue };
             if waiting.contains(&item.user) || self.refused_until_read.contains(&item.user) {
+                continue;
+            }
+            // A request held back by the hub's limit (`429`) waits, all but the key ahead of it: keys first (4.10).
+            let leading = first.insert(item.user.clone());
+            let key_may = leading && is_key(item);
+            if self.request_wait.get(&item.user).is_some_and(|(_, key_refused)| *key_refused || !key_may) {
                 continue;
             }
             let Some((account_key, _)) = self.roster(&item.user) else { continue };
@@ -1926,10 +2107,14 @@ impl Client {
             if let Some(key) = access {
                 headers.push((api::HEADER_ACCESS.to_owned(), yo_wire::b64(&access_key(&key))));
             }
-            // Identified only for want of a certificate: a payload too large to seal is dropped, never sent so.
-            let envelope = match &certificate {
-                Some(certificate) => sealed::seal(certificate, &own, &signal::identity_of(&account_key)?, payload),
-                None => yo_wire::envelope::pad(payload, &yo_wire::envelope::BUCKETS).map_err(Error::from),
+            // Identified for want of a certificate, or as a request (no access key: the hub knows the sender anyway,
+            // and the recipient sees that its key is missing, spec 4.10). A payload too large to seal is dropped,
+            // never sent so.
+            let envelope = match (&certificate, access) {
+                (Some(certificate), Some(_)) => {
+                    sealed::seal(certificate, &own, &signal::identity_of(&account_key)?, payload)
+                }
+                _ => yo_wire::envelope::pad(payload, &yo_wire::envelope::BUCKETS).map_err(Error::from),
             };
             let envelope = match envelope {
                 Ok(envelope) => envelope,
@@ -1950,7 +2135,7 @@ impl Client {
                 nonce,
             });
         }
-        if items.iter().any(|d| !d.sealed) {
+        if items.iter().any(|d| !d.sealed && d.access.is_some()) {
             self.note("sent identified: no sender certificate in date".into());
         }
         if !too_large.is_empty() {
@@ -2005,6 +2190,9 @@ impl Client {
         let mut result = Ok(());
         for (item, answer) in deliveries.items.iter().zip(answers) {
             self.delivering.remove(&item.user);
+            if let Some(answer) = &answer {
+                self.last_answer.insert(item.user.clone(), answer.as_ref().map_or(0, |r| r.status));
+            }
             match answer {
                 Some(Ok(response)) if response.status == status::ACCEPTED => {
                     done.insert(item.seq);
@@ -2033,26 +2221,36 @@ impl Client {
                 // The key it showed is not the recipient's (any more), or the recipient takes no requests and this
                 // account is no contact of theirs (spec 4.10).
                 Some(Ok(response)) if response.status == status::FORBIDDEN => {
-                    // A contact's key that changed (a block of someone else, a restored phone): forgotten, the new one
-                    // may be in the inbox. Once more after the next receive, with the new key or as a request.
+                    // A contact's key that changed (a block of someone else): forgotten, the new one may be in the
+                    // inbox. Again after the next receive, with the new key or as a request; only a request's `403`
+                    // (the recipient takes none) drops it. A key forgotten is never a message lost.
                     if let Some(contact) =
                         self.state.contacts.get_mut(&item.user).filter(|c| c.profile_key == item.access)
                     {
                         contact.profile_key = None;
+                        self.forget_key_stored(&item.user);
                     }
                     match self.state.outbox.iter_mut().find(|o| o.seq == item.seq) {
-                        Some(kept) if item.access.is_some() && !kept.refused => {
+                        Some(kept) if item.access.is_some() => {
                             kept.refused = true;
                             self.refused_until_read.insert(item.user.clone());
                         }
                         _ => {
                             done.insert(item.seq);
+                            self.key_lost(item.seq, &item.user);
                             self.drop_one("the recipient takes no requests".into());
                         }
                     }
                 }
+                Some(Ok(response)) if matches!(limit_of(&response), Some(Limit::Recipient(_))) => {
+                    if let Some(Limit::Recipient(wait)) = limit_of(&response) {
+                        let key_refused = self.request_wait.contains_key(&item.user);
+                        self.request_wait.insert(item.user.clone(), ((self.clock)() + wait, key_refused));
+                    }
+                }
                 Some(Ok(response)) if gone_for_good(response.status) => {
                     done.insert(item.seq);
+                    self.key_lost(item.seq, &item.user);
                     self.drop_one(format!("hub refused delivery: {}", response.status));
                 }
                 // Rate limit, hub trouble, no network, or held behind such an answer: later, in the same order.
@@ -2064,6 +2262,16 @@ impl Client {
             self.user_gone(&user);
         }
         result.map(|()| changed)
+    }
+
+    /// A key's envelope the hub would not take (dropped): not given after all, so it goes again with the next
+    /// occasion (a new message, their identified one, spec 4.10).
+    fn key_lost(&mut self, seq: u64, user: &str) {
+        if self.state.outbox.iter().any(|o| o.seq == seq && is_key(o)) {
+            if let Some(contact) = self.state.contacts.get_mut(user) {
+                (contact.key_given, contact.key_resent_at) = (false, 0);
+            }
+        }
     }
 
     /// The hub knows no such user any more (a delivery's `404`): the account was deleted or its name released. Its
@@ -2145,11 +2353,22 @@ impl Client {
         let full = inbox.items.len() >= MAX_INBOX_FETCH;
         let mut done = Vec::new();
         let mut stopped = None;
-        // Payloads kept for a roster that could not be asked: received again first (each may be kept again).
+        // Payloads kept for later (a roster that could not be asked, a lookup the hub limited): received again first,
+        // each may be kept again; after one kept, its sender's next ones too, so they keep their order.
+        let sender_of = |opened: &[u8]| opened.get(16..).and_then(|p| decode::<Payload>(p).ok()).map(|p| p.account_key);
+        let mut kept: BTreeSet<Key> = BTreeSet::new();
         for payload in std::mem::take(&mut self.state.deferred) {
+            let sender = sender_of(&payload);
+            if sender.is_some_and(|s| kept.contains(&s)) {
+                self.state.deferred.push_back(payload);
+                continue;
+            }
             match self.atomic(|c| c.receive(&payload)) {
                 Ok(()) => {}
-                Err(error) if retryable(&error) => self.state.deferred.push_back(payload),
+                Err(error) if retryable(&error) => {
+                    kept.extend(sender);
+                    self.state.deferred.push_back(payload)
+                }
                 Err(error) => self.drop_one(error.to_string()),
             }
         }
@@ -2170,8 +2389,21 @@ impl Client {
                     continue;
                 }
             };
+            let sender = sender_of(&payload);
+            let room = self.state.deferred.len() < DEFERRED;
+            if room && sender.is_some_and(|s| kept.contains(&s)) {
+                self.state.deferred.push_back(payload);
+                done.push(item.id);
+                continue;
+            }
             match self.atomic(|c| c.receive(&payload)) {
                 Ok(()) => {}
+                // A limit of the hub's for this one sender (a lookup of its devices): kept here for later, the others
+                // go on. Within `DEFERRED`; past it, as any "not now".
+                Err(Error::Refused(status::RATE_LIMITED)) if room => {
+                    kept.extend(sender);
+                    self.state.deferred.push_back(payload);
+                }
                 // Not this envelope's fault: it stays at the hub and is read again next time.
                 Err(error) if retryable(&error) => {
                     stopped = Some(error);
@@ -2481,6 +2713,9 @@ impl Client {
         if plain.to.is_some() {
             return Err(Error::Protocol("a copy for another"));
         }
+        if certified.is_none() {
+            self.identified_from(&user)?;
+        }
         self.received(&user, plain.content.as_slice(), message)
     }
 
@@ -2544,11 +2779,71 @@ impl Client {
         }
     }
 
+    /// A contact's profile key as type 10 brought it (spec 4.10): taken. Its generation is not told; the one held
+    /// stays as the bound below it (a type 10 is never sent again on a retry: its key is the newest), until a content
+    /// message with it tells it.
+    fn take_key_message(&mut self, user: &str, key: [u8; 32]) {
+        self.adopt_key(user, key);
+    }
+
+    /// A contact's profile key a content message carried, with its generation: taken unless it is older than the one
+    /// held (a message sent again on a retry, one held back on the way), or one held came as type 10 since.
+    fn take_key_carried(&mut self, user: &str, key: [u8; 32], generation: u32) {
+        let Some(contact) = self.state.contacts.get_mut(user) else { return };
+        if carried_key_taken(contact, &key, generation) {
+            contact.key_gen = contact.key_gen.max(generation);
+            self.adopt_key(user, key);
+        }
+    }
+
+    /// The one way a contact's key is taken (a message, the storage): kept, in the storage too (a new phone of this
+    /// account has it, spec 6.9), and what waits for them goes now as a contact's, not after a request's wait or a
+    /// `403`.
+    pub(crate) fn adopt_key(&mut self, user: &str, key: [u8; 32]) {
+        let Some(contact) = self.state.contacts.get_mut(user) else { return };
+        if contact.profile_key != Some(key) {
+            contact.profile_key = Some(key);
+            self.store_key(user, Some(key));
+        }
+        self.request_wait.remove(user);
+        self.refused_until_read.remove(user);
+    }
+
+    /// A message from `user` came identified (spec 4.10): without this account's access key, or without a sender
+    /// certificate. From an accepted contact (or a member of a joined group) the current key goes back to them at once,
+    /// ahead of what waits for them, at most once an hour per key: then a contact that missed a new key heals with its first
+    /// identified message, and the request limits bind strangers only.
+    fn identified_from(&mut self, user: &str) -> Result<()> {
+        let now = (self.clock)();
+        let in_group = self.in_joined_group(user);
+        let Some(contact) = self.state.contacts.get_mut(user) else { return Ok(()) };
+        if !(contact.accepted || in_group) || contact.blocked || contact.gone || now < contact.key_resent_at + HOUR_MS {
+            return Ok(());
+        }
+        contact.key_resent_at = now;
+        contact.key_due = true;
+        self.queue_key(user)
+    }
+
     /// A message from a contact.
     fn received(&mut self, user: &str, plaintext: &[u8], message: Message) -> Result<()> {
+        // The key a Yo carries (spec 4.10, `WITH_PROFILE_KEY`), also a blocked user's: theirs is a contact's again
+        // after an unblock.
+        if let Some((key, generation)) = Message::profile_key_of(plaintext) {
+            self.take_key_carried(user, key, generation);
+        }
         // A blocked user's messages are opened (their sessions go on) and dropped unseen (4.8); what they change of a
-        // group still counts, so the group stays one.
-        if self.blocked(user) && !matches!(message.content, Content::Group(_) | Content::GroupAsk { .. }) {
+        // group still counts, so the group stays one, and their profile key is kept: after an unblock what goes to
+        // them is a contact's again, not a request.
+        if self.blocked(user)
+            && !matches!(message.content, Content::Group(_) | Content::GroupAsk { .. } | Content::ProfileKey(_))
+        {
+            return Ok(());
+        }
+        // "Requests from Strangers" off (spec 4.10): what a stranger shows is dropped here, unseen and unanswered; the
+        // hub takes every signed delivery, so contacts without each other's key still reach each other.
+        let stranger = !self.in_joined_group(user) && self.state.contacts.get(user).is_none_or(|c| !c.accepted);
+        if !self.state.requests_open && stranger && message.group.is_none() && shown(&message.content) {
             return Ok(());
         }
         // Sent again on a retry (4.6) and seen already: once is enough. A sender's messages differ in their time at
@@ -2560,16 +2855,14 @@ impl Client {
         // of changes or names one way (spec 4.5).
         // Not to a request yet (spec 4.10): nothing goes back until it is said yes to.
         if !matches!(message.content, Content::Receipt | Content::Retry | Content::GroupAsk { .. }) {
-            if let Some(contact) = self.state.contacts.get_mut(user).filter(|c| c.accepted) {
+            if let Some(contact) = self.state.contacts.get_mut(user).filter(|c| c.accepted && !c.blocked) {
                 contact.receipt_due = true;
             }
         }
         match message.content {
             Content::Receipt => Ok(()),
             Content::ProfileKey(key) => {
-                if let Some(contact) = self.state.contacts.get_mut(user) {
-                    contact.profile_key = Some(key);
-                }
+                self.take_key_message(user, key);
                 Ok(())
             }
             Content::Group(info) => {
@@ -2590,7 +2883,12 @@ impl Client {
                 let contact = self.state.contacts.get_mut(user).ok_or(Error::Internal("contact"))?;
                 if now >= contact.resent_at + RESEND_EVERY_MS {
                     contact.resent_at = now;
+                    // The key first, as on a first message: what was sent again comes as a contact's.
+                    if contact.accepted && !contact.blocked {
+                        contact.key_due = true;
+                    }
                     self.send_again(user);
+                    self.queue_key(user)?;
                 }
                 Ok(())
             }
@@ -2662,7 +2960,8 @@ impl Client {
             } else {
                 match self.fetch_bundles(&user, &retry) {
                     Ok(()) => {}
-                    Err(error) if retryable(&error) => return Err(error),
+                    // Not now (the hub's lookup limit, no network): this one's retry waits, the others' go on.
+                    Err(error) if retryable(&error) => continue,
                     Err(error) => self.note(format!("retry: {error}")),
                 }
                 Content::Retry
@@ -2860,9 +3159,10 @@ impl Client {
         // Writing back accepts a request: its name goes first, as one not yet told does.
         self.accept_writing(&peer);
         self.send_profiles();
-        // Saved with the message in it, or not made at all (spec 4.7).
+        // Saved with the message in it, or not made at all (spec 4.7); the profile key ahead of it, if due.
         // Its envelope made in the same step when the sessions are there: one save before it leaves, not two.
         self.atomic(|c| {
+            c.queue_key(&peer)?;
             c.send_message(&peer, content)?;
             c.encrypt_waiting(&peer);
             c.persist()
@@ -2938,6 +3238,7 @@ impl Client {
         self.atomic(|c| {
             c.accept_writing(&user);
             c.send_profiles();
+            c.queue_key(&user)?;
             c.send_message(&user, content)?;
             c.encrypt_waiting(&user); // its envelope in the same save
             c.persist()
@@ -3138,12 +3439,23 @@ impl Client {
     /// that cannot be reached now leaves the telling for later.
     fn profile_keys(&mut self) -> Result<()> {
         if self.state.profile_key.is_none() {
+            // A new phone goes on with the key in the storage (spec 6.9): fetched first. Not now: later.
+            match self.storage_fetched() {
+                Err(error) if retryable(&error) => return Ok(()),
+                other => other?,
+            }
+        }
+        if self.state.profile_key.is_none() {
             self.state.profile_key = Some(new_profile_key());
-            // Contacts from before profile keys (or a phone restored): each gets it, else theirs come as requests.
+            self.state.profile_key_gen += 1;
+            self.store_own_key();
+            // Contacts from before profile keys: each gets it, else theirs come as requests.
             self.key_due_to_all();
             self.persist()?;
+        } else if self.state.storage.profile_key.unset() && self.state.storage_fetched {
+            // A key from before the storage kept it.
+            self.store_own_key();
         }
-        let key = self.state.profile_key.expect("made above");
         let me = self.state.user_id.clone();
         let due: Vec<String> = self
             .state
@@ -3153,10 +3465,7 @@ impl Client {
             .map(|(user, _)| user.clone())
             .collect();
         for user in &due {
-            self.queue(std::slice::from_ref(user), None, Content::ProfileKey(key))?;
-            if let Some(contact) = self.state.contacts.get_mut(user) {
-                (contact.key_due, contact.key_given) = (false, true);
-            }
+            self.queue_key(user)?;
         }
         if !self.state.access_key_told {
             // A new key goes to the contacts before the hub takes it (the old one counts no more from then on): the
@@ -3167,6 +3476,7 @@ impl Client {
                     other => other?,
                 }
             }
+            let key = self.state.profile_key.expect("made above");
             let body = encode(&api::AccessKey {
                 check: api::access_check(&access_key(&key)),
                 requests_open: self.state.requests_open as u8,
@@ -3184,6 +3494,29 @@ impl Client {
         Ok(())
     }
 
+    /// This account's profile key to `user` now, if it is due them: queued, in the outbox ahead of what is queued
+    /// after it. So a first message to someone carries the key before it, and their answer can come as a contact's,
+    /// not as a request (spec 4.10). Without a key yet (the storage not fetched), `profile_keys` sends it later.
+    fn queue_key(&mut self, user: &str) -> Result<()> {
+        let Some(key) = self.state.profile_key else { return Ok(()) };
+        if user == self.state.user_id
+            || !self.state.contacts.get(user).is_some_and(|c| c.key_due && !c.blocked && !c.gone)
+        {
+            return Ok(());
+        }
+        self.queue(&[user.to_owned()], None, Content::ProfileKey(key))?;
+        // Ahead of what waits for them: a key never waits behind a request's limit.
+        if let Some(first) = self.state.outbox.iter().position(|item| item.user == user) {
+            if let Some(item) = self.state.outbox.pop_back() {
+                self.state.outbox.insert(first, item);
+            }
+        }
+        if let Some(contact) = self.state.contacts.get_mut(user) {
+            (contact.key_due, contact.key_given) = (false, true);
+        }
+        Ok(())
+    }
+
     /// A member of a group this account is in and said yes to: no request, though perhaps no contact.
     pub(crate) fn in_joined_group(&self, user: &str) -> bool {
         self.state.groups.values().any(|g| g.accepted && !g.left && g.members.iter().any(|m| m == user))
@@ -3194,6 +3527,8 @@ impl Client {
         for (user, contact) in self.state.contacts.iter_mut() {
             let friend = self.state.storage.friends.get(user).is_some_and(|f| !f.removed.value);
             contact.key_given = false;
+            // Once an hour per key: a new key goes back at once to a contact that writes identified.
+            contact.key_resent_at = 0;
             contact.key_due =
                 (contact.key_due || contact.accepted && (contact.chat || friend)) && !contact.blocked && !contact.gone;
         }
@@ -3276,6 +3611,8 @@ impl Client {
     /// account takes none), every other contact gets the new key; the old one counts no more once the hub has it.
     fn rotate_profile_key(&mut self) {
         self.state.profile_key = Some(new_profile_key());
+        self.state.profile_key_gen = self.state.profile_key_gen.max(1) + 1;
+        self.store_own_key();
         self.state.access_key_told = false;
         self.key_due_to_all();
     }
@@ -3473,21 +3810,27 @@ impl Client {
             c.storage_block(&user, blocked);
             c.persist()
         })?;
-        // The new key out and told now: the blocked one's next delivery is a request (spec 4.10). "Not now": later.
-        if blocked {
-            match self.profile_keys() {
-                Err(error) if retryable(&error) => {}
-                other => other?,
-            }
-            self.persist()?;
+        // The new key out and told now: the blocked one's next delivery is a request (spec 4.10); unblocked, the key
+        // goes to them. "Not now": later.
+        match self.profile_keys() {
+            Err(error) if retryable(&error) => {}
+            other => other?,
         }
+        self.persist()?;
         Ok(())
     }
 
     /// Blocks or unblocks a user on this device. What came from them before and waits to be handed out (after a
     /// restart of the app) is not shown either.
     pub(crate) fn apply_block(&mut self, user: &str, blocked: bool) {
-        self.state.contacts.entry(user.to_owned()).or_insert_with(Contact::unknown).blocked = blocked;
+        let in_group = self.in_joined_group(user);
+        let contact = self.state.contacts.entry(user.to_owned()).or_insert_with(Contact::unknown);
+        // Unblocked: the key made at the block (or since) goes to them, as to every contact; else what they send
+        // comes as a request, held past the hub's limits (spec 4.10).
+        if contact.blocked && !blocked && !contact.key_given && (contact.accepted || in_group) {
+            contact.key_due = true;
+        }
+        contact.blocked = blocked;
         if blocked {
             // From the events not handed out yet and from those handed out and not acknowledged, which a restart
             // hands out again: nothing of theirs comes after the block.
@@ -3577,5 +3920,21 @@ mod handle_tests {
         assert_eq!(contact.handles, ["NAME16", "NAME17", "NAME18", "NAME19"]);
         note_handle(&mut contact, "name19".into());
         assert_eq!(contact.handles.last().map(String::as_str), Some("name19"), "a spelling replaces its name");
+    }
+
+    /// Keys are ordered by their generation, never by a message's time (spec 4.10).
+    #[test]
+    fn a_carried_key_replaces_only_an_older_one() {
+        let mut contact = Contact { profile_key: Some([2; 32]), key_gen: 2, ..Contact::unknown() };
+        assert!(!carried_key_taken(&contact, &[1; 32], 1), "a Yo sent again on a retry, with the key before");
+        assert!(carried_key_taken(&contact, &[3; 32], 3), "the next key");
+        assert!(carried_key_taken(&contact, &[2; 32], 2), "the same");
+        contact.profile_key = Some([3; 32]);
+        assert!(!carried_key_taken(&contact, &[2; 32], 2), "a type 10's key since: the one before is its bound");
+        contact.profile_key = None;
+        assert!(!carried_key_taken(&contact, &[1; 32], 1), "forgotten (a 403): still not an older one");
+        assert!(carried_key_taken(&contact, &[4; 32], 2), "a key of its generation or later");
+        let unknown = Contact { profile_key: None, ..Contact::unknown() };
+        assert!(carried_key_taken(&unknown, &[5; 32], 1));
     }
 }

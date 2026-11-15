@@ -72,6 +72,7 @@ impl Device {
             tokens_after: 0,
             tokens_check: false,
             profile_key: None,
+            profile_key_gen: 0,
             requests_open: true,
             access_key_told: false,
             sender_certificate: None,

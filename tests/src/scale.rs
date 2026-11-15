@@ -39,7 +39,7 @@ use std::io::{Read as _, Write as _};
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering::Relaxed};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError, RwLock};
 use std::time::{Duration, Instant};
-use yo_core::{media, Backup, Client, Content, Error, Event, Push, Response, Store, Transport};
+use yo_core::{media, Backup, Client, Content, Error, Event, OutboxReason, Push, Response, Store, Transport};
 use yo_hub::config::{BlobConfig, Config, Limits};
 use yo_tests::{Rng, TestHub};
 
@@ -538,6 +538,8 @@ struct Msg {
     got_by: u16,
     got: u8,
     must: bool,
+    /// Why it need not arrive (`WHY`), once it need not.
+    why: u8,
     /// The receiver was running when it was sent: its latency is the system's, not the receiver's absence.
     hot: bool,
 }
@@ -550,6 +552,19 @@ struct MediaInfo {
     uploaded: bool,
     from: u32,
 }
+
+/// Why a message need not arrive (`Msg::why`), for the run's account of what may be lost.
+const WHY: [&str; 9] = [
+    "",
+    "the send failed (not queued, or not for sure)",
+    "the sender crashed in the send",
+    "the recipient was gone or blocked the sender at the send",
+    "a block between the two",
+    "a new phone of either",
+    "an account deleted",
+    "the name's new owner got it",
+    "an answer lost, the send tried again (probe)",
+];
 
 #[derive(Default)]
 struct Ledger {
@@ -581,10 +596,10 @@ impl Ledger {
         }
     }
 
-    fn relax_keys(&mut self, keys: Vec<u64>) {
+    fn relax_keys(&mut self, keys: Vec<u64>, why: u8) {
         for k in keys {
             if let Some(m) = self.msgs.get_mut(&k) {
-                m.must = false;
+                excuse(m, why);
             }
         }
     }
@@ -597,17 +612,24 @@ impl Ledger {
                 keys.extend(open.iter().filter(|k| self.msgs.get(k).is_some_and(|m| m.from == other)));
             }
         }
-        self.relax_keys(keys);
+        self.relax_keys(keys, 4);
     }
 
-    fn relax_to(&mut self, user: u32) {
+    fn relax_to(&mut self, user: u32, why: u8) {
         let keys = self.open_to.get(&user).map(|s| s.iter().copied().collect()).unwrap_or_default();
-        self.relax_keys(keys);
+        self.relax_keys(keys, why);
     }
 
-    fn relax_from(&mut self, user: u32) {
+    fn relax_from(&mut self, user: u32, why: u8) {
         let keys = self.open_from.get(&user).map(|s| s.iter().copied().collect()).unwrap_or_default();
-        self.relax_keys(keys);
+        self.relax_keys(keys, why);
+    }
+}
+
+fn excuse(m: &mut Msg, why: u8) {
+    if m.must {
+        m.must = false;
+        m.why = why;
     }
 }
 
@@ -825,6 +847,9 @@ fn hub_config(args: &Args) -> Config {
         backup_per_ip_hour: u32::MAX,
         max_pending_per_device: args.inbox,
         blob_bytes_stored_per_user: args.blob_quota_mb * MIB,
+        // The request limits as they are (spec 4.10), their hour 10 s: the run is days of use in minutes (accounts
+        // away for long stretches), and a stranger's requests held past the burst go on within it, as they would.
+        request_hour_ms: 10_000,
         ..Limits::default()
     };
     config.blobs = BlobConfig {
@@ -1195,6 +1220,19 @@ fn take_events(w: &World, a: &mut Acct, events: Vec<Event>, rng: &mut Rng) {
         return;
     }
     let mut answer = Vec::new();
+    // Who and which groups showed something: a request among them is said yes to (`say_yes`).
+    let mut shown: (BTreeSet<String>, BTreeSet<String>) = Default::default();
+    for event in &events {
+        match event {
+            Event::Message { user, .. } => {
+                shown.0.insert(user.clone());
+            }
+            Event::GroupMessage { group, .. } | Event::GroupChanged { group } => {
+                shown.1.insert(group.clone());
+            }
+            _ => {}
+        }
+    }
     for event in events {
         let (from, tag, photo) = match event {
             Event::Message { user, content: Content::Text(tag), .. } => (user, Some(tag), None),
@@ -1242,7 +1280,7 @@ fn take_events(w: &World, a: &mut Acct, events: Vec<Event>, rng: &mut Rng) {
         let a_name = w.name_id(&a.name);
         if msg.to != a.uid && msg.from == from_uid && msg.name == a_name && msg.got == 0 {
             let m = ledger.msgs.get_mut(&key).unwrap();
-            m.must = false;
+            excuse(m, 7);
             m.got = 1;
             ledger.arrived(key);
             drop(ledger);
@@ -1301,9 +1339,49 @@ fn take_events(w: &World, a: &mut Acct, events: Vec<Event>, rng: &mut Rng) {
     if let Some(client) = a.client.as_mut() {
         client.acknowledge_events();
     }
+    say_yes(w, a, shown, rng);
     for user in answer {
         for _ in 0..1 + rng.below(3) {
             send_text(w, a, &user, None, rng);
+        }
+    }
+}
+
+/// The user says yes to every request, a person's or a group's, once it is shown (spec 4.10): they are all people
+/// it knows. Until then what it got from them is shown, nothing goes back, and past the hub's limits what they send
+/// waits with them; after it they are contacts and hold its profile key.
+fn say_yes(w: &World, a: &mut Acct, (people, groups): (BTreeSet<String>, BTreeSet<String>), rng: &mut Rng) {
+    let Some(client) = a.client.as_mut() else { return };
+    let people: Vec<String> = client
+        .contacts()
+        .into_iter()
+        .filter(|c| !c.accepted && !c.blocked && !c.gone && people.contains(&c.user))
+        .map(|c| c.user)
+        .collect();
+    let groups: Vec<String> = client
+        .groups()
+        .into_iter()
+        .filter(|g| !g.accepted && !g.left && groups.contains(&g.id))
+        .map(|g| g.id)
+        .collect();
+    for user in people {
+        let Some(client) = a.client.as_mut() else { return };
+        let result = client.accept(&user);
+        w.trace(a.uid, format!("yes to {user}: {:?}", result.as_ref().map(|e| e.len())));
+        match result {
+            Ok(events) if !a.proc_.crashed.load(Relaxed) => take_events(w, a, events, rng),
+            Ok(_) => {}
+            Err(error) => note_error(w, a, "accept", &error),
+        }
+    }
+    for group in groups {
+        let Some(client) = a.client.as_mut() else { return };
+        let result = client.accept_group(&group);
+        w.trace(a.uid, format!("yes to group {group}: {:?}", result.as_ref().map(|e| e.len())));
+        match result {
+            Ok(events) if !a.proc_.crashed.load(Relaxed) => take_events(w, a, events, rng),
+            Ok(_) => {}
+            Err(error) => note_error(w, a, "accept group", &error),
         }
     }
 }
@@ -1339,7 +1417,8 @@ fn new_msg(w: &World, a: &mut Acct, to: &str, by_name: Option<&str>) -> (u64, St
     let blocked = ledger.blocks.contains(&(to_uid, a.uid));
     let must = alive && !blocked;
     let sent_ms = w.now_ms();
-    ledger.insert(key, Msg { from: a.uid, to: to_uid, seq, sent_ms, name, got_by: 0, got: 0, must, hot });
+    let why = if must { 0 } else { 3 };
+    ledger.insert(key, Msg { from: a.uid, to: to_uid, seq, sent_ms, name, got_by: 0, got: 0, must, why, hot });
     drop(ledger);
     w.sent.fetch_add(1, Relaxed);
     (key, tag, alive)
@@ -1372,13 +1451,14 @@ fn after_send(
         Ok(events) if !a.proc_.crashed.load(Relaxed) => take_events(w, a, events, rng),
         Ok(_) => {
             if let Some(m) = w.ledger().msgs.get_mut(&key) {
-                m.must = false;
+                excuse(m, 2);
             }
         }
         Err(error) => {
             // Not sent, or not for sure: it may still go from the outbox, or never.
+            let crashed = a.proc_.crashed.load(Relaxed);
             if let Some(m) = w.ledger().msgs.get_mut(&key) {
-                m.must = false;
+                excuse(m, if crashed { 2 } else { 1 });
             }
             let blocked = a.blocked.contains(to)
                 || a.client.as_ref().is_some_and(|c| c.contacts().iter().any(|k| k.user == to && k.blocked));
@@ -1467,6 +1547,10 @@ fn op_sync(w: &World, a: &mut Acct, rng: &mut Rng) {
     let Some(client) = a.client.as_mut() else { return };
     let result = client.sync(if rng.below(100) == 0 { 1 } else { 0 });
     w.trace(a.uid, format!("sync: {:?}", result.as_ref().map(|e| e.len())));
+    if client.pending() > 0 && w.trace_file.is_some() {
+        let view = client.outbox_view();
+        w.trace(a.uid, format!("outbox: {view:?}"));
+    }
     match result {
         Ok(events) if !a.proc_.crashed.load(Relaxed) => take_events(w, a, events, rng),
         Ok(_) => {}
@@ -1529,7 +1613,21 @@ fn send_media(w: &World, a: &mut Acct, p: Pending, rng: &mut Rng) {
         let mut ledger = w.ledger();
         let must = peer.alive && !ledger.blocks.contains(&(to_uid, a.uid));
         let sent_ms = w.now_ms();
-        ledger.insert(p.key, Msg { from: a.uid, to: to_uid, seq, sent_ms, name: 0, got_by: 0, got: 0, must, hot });
+        ledger.insert(
+            p.key,
+            Msg {
+                from: a.uid,
+                to: to_uid,
+                seq,
+                sent_ms,
+                name: 0,
+                got_by: 0,
+                got: 0,
+                must,
+                why: if must { 0 } else { 3 },
+                hot,
+            },
+        );
     }
     w.sent.fetch_add(1, Relaxed);
     let content = if p.video { Content::Video { media: p.media, duration_ms: 9_000 } } else { Content::Photo(p.media) };
@@ -1702,8 +1800,8 @@ fn op_new_phone(w: &World, a: &mut Acct, rng: &mut Rng) {
         // What the old phone had not received is gone with it, and so is what it sent that was not received yet: a
         // message from a replaced device is not opened (spec 4.6), though the hub took it.
         let mut ledger = w.ledger();
-        ledger.relax_to(a.uid);
-        ledger.relax_from(a.uid);
+        ledger.relax_to(a.uid, 5);
+        ledger.relax_from(a.uid, 5);
         let me = a.uid;
         ledger.last.retain(|(to, _), _| *to != me);
         drop(ledger);
@@ -1745,8 +1843,8 @@ fn op_delete(w: &World, a: &mut Acct, rng: &mut Rng) {
     w.dir.write().unwrap_or_else(PoisonError::into_inner)[a.idx].alive = false;
     {
         let mut ledger = w.ledger();
-        ledger.relax_to(me);
-        ledger.relax_from(me);
+        ledger.relax_to(me, 6);
+        ledger.relax_from(me, 6);
     }
     let client = a.client.as_mut().unwrap();
     match definite(|| client.delete_account()) {
@@ -1978,15 +2076,16 @@ fn quiesce(w: &Arc<World>, all: Vec<Vec<Acct>>, what: &str) -> Vec<Vec<Acct>> {
                                 a.client = None;
                                 restart(&w, a, &mut rng);
                             }
-                            if a.client.as_ref().is_none_or(|c| c.pending() == 0)
+                            if a.client.as_ref().is_none_or(|c| owed(&w, a.uid, c).0 == 0)
                                 && a.uploads.is_empty()
                                 && a.group_uploads.is_empty()
                             {
                                 break;
                             }
                         }
-                        let left =
-                            a.client.as_ref().map_or(0, |c| c.pending()) + a.uploads.len() + a.group_uploads.len();
+                        let left = a.client.as_ref().map_or(0, |c| owed(&w, a.uid, c).0)
+                            + a.uploads.len()
+                            + a.group_uploads.len();
                         waiting.fetch_add(left, Relaxed);
                         // Uploads cannot wait on disk: what is left goes now or not at all.
                         if a.uploads.is_empty() && a.group_uploads.is_empty() {
@@ -2050,6 +2149,7 @@ fn probe(w: &Arc<World>, all: Vec<Vec<Acct>>) -> Vec<Vec<Acct>> {
                         // The probe must arrive whatever the first try said: it waits in the outbox otherwise.
                         if let Some(m) = w.ledger().msgs.get_mut(&key) {
                             m.must = alive;
+                            m.why = if alive { 0 } else { 3 };
                         }
                         match result {
                             Ok(events) => take_events(&w, a, events, &mut rng),
@@ -2068,10 +2168,27 @@ fn probe(w: &Arc<World>, all: Vec<Vec<Acct>>) -> Vec<Vec<Acct>> {
         .collect()
 }
 
+/// What an account's outbox still owes: all but what waits for someone who blocks it (it does not know: those go as
+/// requests, one an hour past the burst, spec 4.10, and are dropped unseen there), and those apart.
+fn owed(w: &World, me: u32, client: &Client) -> (usize, usize) {
+    let ledger = w.ledger();
+    let (mut owed, mut to_blockers) = (0, 0);
+    // What it holds for someone it blocks goes only after an unblock (spec 4.8): owed to nobody.
+    for entry in client.outbox_view().into_iter().filter(|e| e.reason != OutboxReason::Blocked) {
+        let blocker = w.idx_of(&entry.user).is_some() && ledger.blocks.contains(&(w.uid(&entry.user), me));
+        match blocker {
+            true => to_blockers += entry.count,
+            false => owed += entry.count,
+        }
+    }
+    (owed, to_blockers)
+}
+
 fn check_ledger(w: &World, all: &[Vec<Acct>]) -> serde_json::Value {
     let mut rng = Rng(w.args.seed ^ 0x77);
     let mut outbox = 0;
     let mut opened = 0;
+    let mut held_for_blockers = 0;
     for a in all.iter().flatten().filter(|a| a.alive) {
         let Ok(blob) = std::fs::read(state_path(w, a.idx)) else {
             w.stats.violation(format!("{}: no state on disk at the end", a.name));
@@ -2081,10 +2198,16 @@ fn check_ledger(w: &World, all: &[Vec<Acct>]) -> serde_json::Value {
         match Client::restore(proc_, &blob, &STATE_KEY) {
             Ok(c) => {
                 opened += 1;
-                if c.pending() > 0 {
+                let (left, to_blockers) = owed(w, a.uid, &c);
+                held_for_blockers += to_blockers;
+                if left > 0 {
                     outbox += 1;
                     if outbox <= 20 {
-                        w.stats.violation(format!("{} still has {} envelopes in its outbox", a.name, c.pending()));
+                        w.stats.violation(format!(
+                            "{} still has {left} envelopes in its outbox: {:?}",
+                            a.name,
+                            c.outbox_view()
+                        ));
                         w.dump(a.uid);
                     }
                 }
@@ -2094,6 +2217,7 @@ fn check_ledger(w: &World, all: &[Vec<Acct>]) -> serde_json::Value {
     }
     let ledger = w.ledger();
     let (mut must, mut lost, mut may, mut may_got, mut dup) = (0u64, 0u64, 0u64, 0u64, 0u64);
+    let mut may_by = [(0u64, 0u64); WHY.len()];
     for (key, m) in &ledger.msgs {
         if m.got > 1 {
             dup += 1;
@@ -2121,8 +2245,11 @@ fn check_ledger(w: &World, all: &[Vec<Acct>]) -> serde_json::Value {
             }
         } else {
             may += 1;
+            let why = &mut may_by[m.why as usize % WHY.len()];
+            why.0 += 1;
             if m.got > 0 {
                 may_got += 1;
+                why.1 += 1;
             }
         }
     }
@@ -2130,12 +2257,17 @@ fn check_ledger(w: &World, all: &[Vec<Acct>]) -> serde_json::Value {
     println!(
         "ledger: {must} must arrive ({lost} lost), {may} may be lost ({may_got} arrived anyway), {dup} shown twice"
     );
+    for (why, (n, got)) in WHY.iter().zip(may_by) {
+        if n > 0 {
+            println!("  may be lost: {n} ({got} arrived anyway): {why}");
+        }
+    }
     if lost > 0 {
         w.stats.violations.fetch_add(lost as usize, Relaxed);
     }
     serde_json::json!({
         "must_arrive": must, "lost": lost, "may_be_lost": may, "arrived_anyway": may_got, "shown_twice": dup,
-        "states_opened": opened, "outboxes_not_empty": outbox,
+        "states_opened": opened, "outboxes_not_empty": outbox, "held_for_blockers": held_for_blockers,
     })
 }
 

@@ -141,6 +141,14 @@ pub struct Contact {
     /// The current profile key went to them (queued): not again until a new key.
     #[serde(default)]
     pub key_given: bool,
+    /// When this account's key last went back to them for a message of theirs that came identified (wall clock, ms):
+    /// once an hour at most (spec 4.10).
+    #[serde(default)]
+    pub key_resent_at: u64,
+    /// The latest generation of their profile key seen (0: none told): a carried key of no later one, other than the
+    /// one held, is not taken.
+    #[serde(default)]
+    pub key_gen: u32,
 }
 
 /// What a field from before it was there is: true.
@@ -172,6 +180,8 @@ impl Contact {
             profile_key: None,
             key_due: false,
             key_given: false,
+            key_resent_at: 0,
+            key_gen: 0,
         }
     }
 }
@@ -202,8 +212,8 @@ pub struct Outgoing {
     #[serde(default, with = "compact::optional")]
     pub payload: Option<Vec<u8>>,
     pub made_for: Vec<Key>,
-    /// Refused once as a request (`403`, spec 4.10) though sent with the recipient's key: their new key may wait in
-    /// the inbox, so it goes once more after the next receive; a second `403` drops it.
+    /// Refused (`403`, spec 4.10) though sent with the recipient's key: their new key may wait in the inbox, so it
+    /// goes again after the next receive, with it or as a request. Only a request's `403` drops it.
     #[serde(default)]
     pub refused: bool,
 }
@@ -388,6 +398,10 @@ pub struct State {
     /// anew (`access_key_told` starts false).
     #[serde(default, alias = "contact_key")]
     pub profile_key: Option<[u8; 32]>,
+    /// Its generation: the account's count of its profile keys (1 the first), on every content message with it, so a
+    /// contact knows which of two is the later (spec 4.10). Kept in the storage with the key.
+    #[serde(default)]
+    pub profile_key_gen: u32,
     /// Whether strangers may send requests at all.
     #[serde(default = "yes")]
     pub requests_open: bool,

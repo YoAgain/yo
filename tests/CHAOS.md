@@ -59,6 +59,12 @@ minutes or by hours for a while, photo Yos whose blob never came, real sizes of 
 everyone catches up, then a message each way between friends (no session wedged), the ledger, the groups' counts,
 every saved state, the hub's audit, a month later no blob left.
 
+Requests (spec 4.10) as the app has them: a phone says yes to every request and group invite once it is shown (its
+friends' and strangers' alike), the request limits are the hub's own with their hour 10 s (the run is days of use in
+minutes). Envelopes that wait for someone who blocked the sender (it does not know: they go as requests, one an hour,
+and are dropped there unseen) are counted apart (`held_for_blockers`), not as an outbox left. What may be lost is
+counted by why (a send that failed before it was queued, a crash in it, a block, a new phone, a deletion).
+
 ```sh
 cargo build --release -p yo-tests --bin yo-scale
 target/release/yo-scale --accounts 10000 --messages 5000000 --seed 21 --kills 10 --hot 16 --inbox 100 \

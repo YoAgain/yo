@@ -76,9 +76,10 @@ fn a_passing_refusal_does_not_drop_a_first_message() {
     let mut a = register(Http::new(hub.url()), &pa, None);
     let mut b = register(hb.clone(), &pb, None);
     a.send_yo(&pb).unwrap();
-    // B's check of A's identity hits a rate limit: the first message stays at the hub.
+    // B's check of A's identity hits a rate limit: the first message is kept on B's device for later (spec 4.7),
+    // the inbox goes on.
     hb.fault("/v1/lookup", Fault::Answer(429));
-    assert!(b.sync(0).is_err());
+    assert_eq!(yos(&b.sync(0).unwrap()), 0);
     let events = b.sync(0).unwrap();
     assert!(events.contains(&Event::NewChat { user: user_of(&pa) }));
     assert_eq!(yos(&events), 1);
@@ -100,7 +101,9 @@ fn a_full_mailbox_refuses_until_it_is_read_and_strangers_cannot_rate_limit_it() 
     assert_eq!(a.pending(), 1);
     assert_eq!(yos(&b.sync(0).unwrap()), 0);
     b.after_sync().unwrap();
+    // A's sync takes B's identified answer in; its key goes back to B with the work after it (spec 4.10).
     a.sync(0).unwrap();
+    a.after_sync().unwrap();
     assert_eq!(a.pending(), 0);
     assert_eq!(yos(&b.sync(0).unwrap()), 1);
     b.send_yo(&pa).unwrap();

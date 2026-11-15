@@ -57,7 +57,7 @@ impl<T> From<Field<T>> for (T, u64) {
 }
 
 impl<T> Field<T> {
-    fn unset(&self) -> bool {
+    pub(crate) fn unset(&self) -> bool {
         self.at == 0
     }
 }
@@ -167,6 +167,17 @@ pub struct Storage {
     /// The app's icon: none (the default) or its name ("Negative", "Original").
     #[serde(default)]
     pub icon: Field<Option<String>>,
+    /// This account's profile key (base64url), as Signal keeps it in its storage: a new phone goes on with it, so
+    /// what its contacts hold stays good and nothing of theirs becomes a request (spec 4.10).
+    #[serde(default, rename = "pk", skip_serializing_if = "Field::unset")]
+    pub profile_key: Field<Option<String>>,
+    /// Its generation (spec 4.10), set with it.
+    #[serde(default, rename = "pg", skip_serializing_if = "Field::unset")]
+    pub profile_key_gen: Field<u32>,
+    /// The contacts' profile keys (base64url) by user id (hex), none once forgotten: a new phone delivers to them as
+    /// their contact at once. The first to go when the storage would not fit.
+    #[serde(default, rename = "k", skip_serializing_if = "BTreeMap::is_empty")]
+    pub keys: BTreeMap<String, Field<Option<String>>>,
     /// What a later version keeps here, carried along unread.
     #[serde(flatten)]
     pub extra: BTreeMap<String, serde_json::Value>,
@@ -179,6 +190,11 @@ impl Storage {
             self.friends.entry(user.clone()).or_default().merge(friend);
         }
         self.icon.merge(&other.icon);
+        self.profile_key.merge(&other.profile_key);
+        self.profile_key_gen.merge(&other.profile_key_gen);
+        for (user, key) in &other.keys {
+            self.keys.entry(user.clone()).or_default().merge(key);
+        }
         merge_extra(&mut self.extra, &other.extra);
         self.version = self.version.max(other.version);
     }
@@ -220,6 +236,10 @@ pub fn open(account_secret: &[u8; 32], user_id: &[u8], sealed: &[u8]) -> Result<
     let plain = open_padded(&key(account_secret), &[&b"yo storage v1"[..], user_id].concat(), sealed)
         .ok_or(Error::Protocol("storage"))?;
     serde_json::from_slice(&plain).map_err(|_| Error::Protocol("storage"))
+}
+
+fn decode_key(text: &str) -> Option<[u8; 32]> {
+    yo_wire::unb64(text).ok()?.try_into().ok()
 }
 
 /// A friend as the app shows it.
@@ -313,6 +333,80 @@ impl Client {
         }
     }
 
+    /// This account's profile key as it is now, into the storage: a time after the one there, whatever this
+    /// device's clock says, so a key made later wins a merge.
+    pub(crate) fn store_own_key(&mut self) {
+        let value = self.state.profile_key.map(|key| yo_wire::b64(&key));
+        let generation = self.state.profile_key_gen;
+        let storage = &mut self.state.storage;
+        if storage.profile_key.value != value
+            || storage.profile_key.unset()
+            || storage.profile_key_gen.value != generation
+        {
+            let at = crate::wall_ms().max(storage.profile_key.at + 1).max(storage.profile_key_gen.at + 1);
+            storage.profile_key.set(value, at);
+            storage.profile_key_gen.set(generation, at);
+            self.state.storage_dirty = true;
+        }
+    }
+
+    /// A contact's profile key as this device has it now (none: forgotten), into the storage.
+    pub(crate) fn store_key(&mut self, user: &str, key: Option<[u8; 32]>) {
+        let value = key.map(|key| yo_wire::b64(&key));
+        let field = self.state.storage.keys.entry(user.to_owned()).or_default();
+        if field.value != value || field.unset() {
+            let at = crate::wall_ms().max(field.at + 1);
+            field.set(value, at);
+            self.state.storage_dirty = true;
+        }
+    }
+
+    /// A contact's key forgotten (refused by the hub): not taken back from the storage.
+    pub(crate) fn forget_key_stored(&mut self, user: &str) {
+        if self.state.storage.keys.get(user).is_some_and(|f| f.value.is_some()) {
+            self.store_key(user, None);
+        }
+    }
+
+    /// The profile keys the storage holds, applied: this account's (a new phone's, or one made on another device of
+    /// it), and the contacts' this device does not know (a new phone).
+    fn apply_keys(&mut self) {
+        let own = self.state.storage.profile_key.value.as_deref().and_then(decode_key);
+        match own {
+            Some(key) if self.state.profile_key != Some(key) => {
+                let new = self.state.profile_key.is_some();
+                self.state.profile_key = Some(key);
+                self.state.profile_key_gen = self.state.storage.profile_key_gen.value;
+                // The hub's check is told again; it may be this key's already.
+                self.state.access_key_told = false;
+                // Made on another device of this account while this one had its own: every contact gets it (they
+                // may hold this one's). A new phone's first key needs that not: they have it.
+                if new {
+                    self.key_due_to_all();
+                }
+            }
+            Some(_) => {}
+            None if self.state.profile_key.is_some() => self.store_own_key(),
+            None => {}
+        }
+        let keys: Vec<(String, [u8; 32])> = self
+            .state
+            .storage
+            .keys
+            .iter()
+            .filter_map(|(user, f)| Some((user.clone(), f.value.as_deref().and_then(decode_key)?)))
+            .collect();
+        for (user, key) in keys {
+            if user == self.state.user_id {
+                continue;
+            }
+            let contact = self.state.contacts.entry(user.clone()).or_insert_with(crate::state::Contact::unknown);
+            if contact.profile_key.is_none() {
+                self.adopt_key(&user, key);
+            }
+        }
+    }
+
     fn storage_changed(&mut self) -> Result<()> {
         self.state.storage_dirty = true;
         self.persist()
@@ -351,6 +445,7 @@ impl Client {
                 ..crate::state::Contact::unknown()
             });
         }
+        self.apply_keys();
     }
 
     /// Takes in a version from the hub: merged with this device's, applied.
@@ -445,13 +540,24 @@ impl Client {
         Ok(())
     }
 
-    /// The storage sealed, within the hub's limit: friends taken off the list are forgotten first, the longest gone
-    /// first, until it fits (a removal older than the other writers' last read is no longer needed to merge).
+    /// The storage sealed, within the hub's limit: the contacts' profile keys go first, the oldest first (they come
+    /// again with their next message), then friends taken off the list, the longest gone first, until it fits (a
+    /// removal older than the other writers' last read is no longer needed to merge).
     fn sealed_within_limit(&mut self, next: &mut Storage) -> Result<Vec<u8>> {
         loop {
             if let Ok(data) = seal(&self.state.account_secret, &self.user_id_bytes(), next) {
                 self.state.storage.friends.clone_from(&next.friends);
+                self.state.storage.keys.clone_from(&next.keys);
                 return Ok(data);
+            }
+            if !next.keys.is_empty() {
+                let drop = (next.keys.len() / 8).max(1);
+                let mut by_age: Vec<(u64, String)> = next.keys.iter().map(|(u, f)| (f.at, u.clone())).collect();
+                by_age.sort_unstable();
+                for (_, user) in by_age.into_iter().take(drop) {
+                    next.keys.remove(&user);
+                }
+                continue;
             }
             let oldest = next
                 .friends

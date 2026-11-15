@@ -300,6 +300,18 @@ pub fn deliver_raw_with(url: &str, user: &str, access: Option<&str>, body: Vec<u
     request.body(body).send().unwrap().status().as_u16()
 }
 
+/// The last delivery `http`'s client posted to `path`, posted again as it was (its headers too: a request's signature,
+/// a contact's key): one a fault held on its way. Returns the status.
+pub fn deliver_held(url: &str, http: &Http, path: &str) -> u16 {
+    let (_, _, headers, body) =
+        http.recorded.lock().unwrap().iter().rev().find(|(m, p, _, _)| m == "POST" && p == path).cloned().unwrap();
+    let mut request = reqwest::blocking::Client::new().post(format!("{url}{path}"));
+    for (name, value) in headers {
+        request = request.header(name, value);
+    }
+    request.body(body).send().unwrap().status().as_u16()
+}
+
 /// The profile key `http`'s client showed in its last delivery to `to` (`Yo-Access`), if it did.
 pub fn access_shown(http: &Http, to: &str) -> Option<String> {
     let path = yo_wire::api::deliver_path(&user_id(to));

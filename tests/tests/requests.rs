@@ -1,6 +1,6 @@
 //! Contact requests (spec 4.10): what comes from someone not yet a contact waits as a request, signed by its sender;
 //! a contact shows the account's profile key to the hub instead (sealed sender). The hub takes requests only as the
-//! account allows and only so many a day per sender.
+//! account allows and only so many per sender, in buckets that refill evenly.
 
 use std::sync::Arc;
 use yo_core::{Client, Content, Event};
@@ -124,12 +124,13 @@ fn with_requests_off_only_contacts_reach_the_account() {
     friends(&mut a, &mut b, &pb);
     b.set_requests_open(false).unwrap();
     assert!(!b.requests_open());
+    // The hub takes the stranger's request (the switch is B's device's); B drops it unseen, and answers nothing.
     c.send_yo(&pb).unwrap();
-    assert_eq!(c.waiting(), 0);
-    assert!(c.drop_reasons().iter().any(|r| r.contains("no requests")), "{:?}", c.drop_reasons());
+    assert_eq!((c.waiting(), c.dropped()), (0, 0));
     a.send_yo(&pb).unwrap();
     let events = b.sync(0).unwrap();
     assert_eq!((yos(&events, &a), yos(&events, &c)), (1, 0));
+    assert!(!events.iter().any(|e| matches!(e, Event::NewChat { user } if user == c.user_id())));
     // On again: the stranger gets through as a request.
     b.set_requests_open(true).unwrap();
     c.send_yo(&pb).unwrap();
@@ -168,12 +169,12 @@ fn a_request_is_signed_a_contacts_delivery_is_sealed() {
 
 #[test]
 fn requests_are_limited_per_sender_and_a_blocked_stranger_takes_nobody_elses() {
-    let limits = |c: &mut Config| (c.limits.requests_per_pair_day, c.limits.request_recipients_per_sender_day) = (3, 2);
+    let limits = |c: &mut Config| (c.limits.requests_per_pair, c.limits.request_recipients_per_sender) = (3, 2);
     let hub = TestHub::start_with(config(limits), "127.0.0.1:0");
     let (mut a, _, _) = account(&hub, "ALICE");
     let (mut b, _, pb) = account(&hub, "BOB");
     friends(&mut a, &mut b, &pb);
-    // A spammer: 3 deliveries a day to B (its first is its name and a Yo), the rest waits with it.
+    // A spammer: 3 requests at once to B (its key, then a Yo each), the rest waits with it.
     let (mut s, _, _) = account(&hub, "SPAM");
     for _ in 0..4 {
         s.send_yo(&pb).unwrap();
@@ -190,7 +191,7 @@ fn requests_are_limited_per_sender_and_a_blocked_stranger_takes_nobody_elses() {
     assert_eq!(a.waiting(), 0);
     let events = b.sync(0).unwrap();
     assert_eq!((yos(&events, &t), yos(&events, &a), yos(&events, &s)), (1, 1, 0));
-    // The spammer may start 2 requests a day: to a third account its requests wait.
+    // The spammer may start 2 requests at once: to a third account its requests wait.
     let (mut c, _, pc) = account(&hub, "CAROL");
     let (mut d, _, pd) = account(&hub, "DAVE");
     settle(&mut [&mut c, &mut d]);
@@ -198,8 +199,48 @@ fn requests_are_limited_per_sender_and_a_blocked_stranger_takes_nobody_elses() {
     assert_eq!(yos(&c.sync(0).unwrap(), &s), 1);
     let before = s.waiting();
     s.send_yo(&pd).unwrap();
-    assert!(s.waiting() > before, "the third recipient of the day waits");
+    assert!(s.waiting() > before, "the third new recipient waits");
     assert_eq!(yos(&d.sync(0).unwrap(), &s), 0);
+}
+
+/// The request limits are buckets that refill evenly (spec 4.10): past them `429` with `Retry-After`, for that
+/// recipient only; after the wait the rest goes, and a key that comes lets it all go at once, as a contact's.
+#[test]
+fn a_request_past_its_bucket_waits_its_retry_after_and_holds_no_one_else() {
+    let limits = |c: &mut Config| c.limits.requests_per_pair = 3;
+    let hub = TestHub::start_with(config(limits), "127.0.0.1:0");
+    let (mut b, _, pb) = account(&hub, "BOB");
+    let (mut c, _, pc) = account(&hub, "CAROL");
+    let (mut s, hs, _) = account(&hub, "SAM");
+    settle(&mut [&mut b, &mut c]);
+    // Its key and 2 Yos: 3 requests; the next 2 Yos wait.
+    for _ in 0..4 {
+        s.send_yo(&pb).unwrap();
+    }
+    assert_eq!(s.waiting(), 2);
+    let refused = hs.recorded.lock().unwrap().len();
+    // Another recipient is not held; nor is B tried again before its time.
+    s.send_yo(&pc).unwrap();
+    assert_eq!(yos(&c.sync(0).unwrap(), &s), 1);
+    assert_eq!(s.waiting(), 2);
+    let to_b = |h: &Http| {
+        let path = api::deliver_path(&user_id(b.user_id()));
+        h.recorded.lock().unwrap().iter().skip(refused).filter(|(_, p, _, _)| *p == path).count()
+    };
+    assert_eq!(to_b(&hs), 0, "held till its Retry-After");
+    // An hour later (both clocks): one more token, one more Yo.
+    hub.hub.shift_clock(3_600_000);
+    let later = || std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_millis() as u64;
+    s.set_clock(Arc::new(move || later() + 3_600_000));
+    s.maintenance().unwrap();
+    assert!(to_b(&hs) >= 1, "tried again after its wait");
+    assert_eq!(yos(&b.sync(0).unwrap(), &s), 3);
+    // B says yes: its key comes, and the last one goes at once, sealed, without waiting for a token.
+    b.accept(s.user_id()).unwrap();
+    s.sync(0).unwrap();
+    s.after_sync().unwrap();
+    assert_eq!(s.waiting(), 0, "{:?}", s.drop_reasons());
+    assert_eq!(yos(&b.sync(0).unwrap(), &s), 1, "the fourth");
 }
 
 #[test]
@@ -215,13 +256,14 @@ fn a_blocked_contact_loses_sealed_delivery_at_once_the_others_keep_it() {
     hc.fault(&api::deliver_path(&user_id(b.user_id())), Fault::Answer(503));
     c.send_yo(&pb).unwrap();
     assert_eq!(c.waiting(), 1);
-    // The block takes the old key at once: the blocked one is refused, once more after its inbox, then dropped.
+    // The block takes the old key at once: the blocked one is refused, then goes as a request, taken by the hub and
+    // dropped unseen by B's device.
     b.set_blocked(a.user_id(), true).unwrap();
     a.send_yo(&pb).unwrap();
     a.sync(0).unwrap();
     a.after_sync().unwrap();
     assert_eq!(a.waiting(), 0);
-    assert!(a.drop_reasons().iter().any(|r| r.contains("no requests")), "{:?}", a.drop_reasons());
+    assert_eq!(yos(&b.sync(0).unwrap(), &a), 0);
     // C back: the waiting Yo goes first with the old key, refused, kept; the inbox brings the new key, and it goes
     // again, sealed.
     let (_, sealed) = kinds(&hc, &b);
@@ -280,10 +322,12 @@ fn declining_a_strangers_group_sends_its_members_no_key() {
     b.set_requests_open(false).unwrap();
     b.maintenance().unwrap();
     assert_eq!(deliveries(&hb, &c), told, "nothing after the leave: no key, no name");
+    // The hub takes C's Yo as a request; B, its switch off, drops it unseen.
     c.send_yo(b.user_id()).unwrap();
     c.sync(0).unwrap();
     c.after_sync().unwrap();
-    assert!(c.drop_reasons().iter().any(|r| r.contains("no requests")), "{:?}", c.drop_reasons());
+    assert_eq!(c.dropped(), 0, "{:?}", c.drop_reasons());
+    assert_eq!(yos(&b.sync(0).unwrap(), &c), 0);
 }
 
 #[test]
@@ -328,4 +372,109 @@ fn the_access_key_comes_from_the_profile_key_and_a_block_replaces_it() {
     let envelope = yo_tests::junk(1);
     assert_ne!(yo_tests::deliver_raw_with(&hub.url(), b.user_id(), Some(&shown), envelope.clone()), 202);
     assert_eq!(yo_tests::deliver_raw_with(&hub.url(), b.user_id(), Some(&new), envelope), 202);
+}
+
+/// A contact that missed a new key heals with its first identified Yo (spec 4.10): A blocks C, its new key never
+/// reaches B, B sends A 15 Yos with a request bucket of 3: the first goes identified (a request), A sends its key
+/// back at once, the rest go sealed. All arrive.
+#[test]
+fn a_contact_that_missed_the_new_key_heals_with_its_first_identified_yo() {
+    let limits = |c: &mut Config| c.limits.requests_per_pair = 3;
+    let hub = TestHub::start_with(config(limits), "127.0.0.1:0");
+    let (mut a, ha, pa) = account(&hub, "ALICE");
+    let (mut b, hb, pb) = account(&hub, "BOB");
+    let (mut c, _, pc) = account(&hub, "CAROL");
+    friends(&mut a, &mut b, &pb);
+    friends(&mut a, &mut c, &pc);
+    // The key's envelope to B is refused for good: gone, as if lost.
+    ha.fault(&api::deliver_path(&user_id(b.user_id())), Fault::Answer(400));
+    a.set_blocked(c.user_id(), true).unwrap();
+    a.sync(0).unwrap();
+    a.after_sync().unwrap();
+    let (signed, sealed) = kinds(&hb, &a);
+    let mut shown = 0;
+    for i in 0..15 {
+        b.send_yo(&pa).unwrap();
+        if i % 3 == 2 {
+            shown += yos(&a.sync(0).unwrap(), &b);
+            a.after_sync().unwrap();
+            b.sync(0).unwrap();
+            b.after_sync().unwrap();
+        }
+    }
+    for _ in 0..2 {
+        b.sync(0).unwrap();
+        b.after_sync().unwrap();
+        shown += yos(&a.sync(0).unwrap(), &b);
+        a.after_sync().unwrap();
+    }
+    assert_eq!((b.waiting(), b.dropped()), (0, 0), "{:?}", b.drop_reasons());
+    assert_eq!(shown, 15);
+    let (signed_now, sealed_now) = kinds(&hb, &a);
+    assert!(signed_now - signed <= 3, "{} identified", signed_now - signed);
+    assert!(sealed_now - sealed >= 12, "the rest sealed: {}", sealed_now - sealed);
+}
+
+/// A key missed comes with the next Yo too (spec 4.10, as Signal's every message carries it).
+#[test]
+fn a_yo_carries_the_profile_key() {
+    let hub = TestHub::start();
+    let (mut a, ha, pa) = account(&hub, "ALICE");
+    let (mut b, hb, pb) = account(&hub, "BOB");
+    let (c, _, _) = account(&hub, "CAROL");
+    friends(&mut a, &mut b, &pb);
+    ha.fault(&api::deliver_path(&user_id(b.user_id())), Fault::Answer(400));
+    a.set_blocked(c.user_id(), true).unwrap();
+    a.send_yo(&pb).unwrap();
+    assert_eq!(yos(&b.sync(0).unwrap(), &a), 1);
+    let (signed, sealed) = kinds(&hb, &a);
+    b.send_yo(&pa).unwrap();
+    assert_eq!(kinds(&hb, &a), (signed, sealed + 1), "with the new key: sealed at once");
+    assert_eq!(yos(&a.sync(0).unwrap(), &b), 1);
+}
+
+/// An unblock gives the key made at the block (spec 4.10): what the unblocked one sends is a contact's again.
+#[test]
+fn an_unblocked_contact_gets_the_current_key() {
+    let hub = TestHub::start();
+    let (mut a, _, pa) = account(&hub, "ALICE");
+    let (mut b, hb, pb) = account(&hub, "BOB");
+    friends(&mut a, &mut b, &pb);
+    a.set_blocked(b.user_id(), true).unwrap();
+    a.set_blocked(b.user_id(), false).unwrap();
+    a.sync(0).unwrap();
+    a.after_sync().unwrap();
+    settle(&mut [&mut b]);
+    let (signed, sealed) = kinds(&hb, &a);
+    b.send_yo(&pa).unwrap();
+    assert_eq!(kinds(&hb, &a), (signed, sealed + 1));
+    assert_eq!(yos(&a.sync(0).unwrap(), &b), 1);
+}
+
+/// A `403` to a delivery that showed a key never drops it, also a second time (two new keys one after the other):
+/// only a request's `403` does.
+#[test]
+fn a_second_stale_key_drops_nothing() {
+    let hub = TestHub::start();
+    let (mut a, ha, pa) = account(&hub, "ALICE");
+    let (mut b, _, pb) = account(&hub, "BOB");
+    let (c, _, _) = account(&hub, "CAROL");
+    let (d, _, _) = account(&hub, "DAVE");
+    friends(&mut a, &mut b, &pb);
+    // Two new keys; neither reaches B.
+    ha.fault(&api::deliver_path(&user_id(b.user_id())), Fault::Answer(400));
+    a.set_blocked(c.user_id(), true).unwrap();
+    b.send_yo(&pa).unwrap();
+    ha.fault(&api::deliver_path(&user_id(b.user_id())), Fault::Answer(400));
+    a.set_blocked(d.user_id(), true).unwrap();
+    b.send_yo(&pa).unwrap();
+    let mut shown = 0;
+    for _ in 0..3 {
+        b.sync(0).unwrap();
+        b.after_sync().unwrap();
+        shown += yos(&a.sync(0).unwrap(), &b);
+        a.after_sync().unwrap();
+    }
+    assert_eq!((b.waiting(), b.dropped()), (0, 0), "{:?}", b.drop_reasons());
+    assert_eq!(shown, 2);
 }

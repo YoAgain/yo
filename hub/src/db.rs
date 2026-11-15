@@ -263,7 +263,8 @@ CREATE TABLE IF NOT EXISTS feedback (
 );
 CREATE INDEX IF NOT EXISTS feedback_by_user ON feedback(user_id);
 -- Each user's access key as a check, never the key (spec 4.10): a delivery that shows it is a contact's; else it
--- is a request, signed by its sender, taken only while `requests_open`. Gone with the account. (The table keeps its
+-- is a request, signed by its sender (`requests_open` is kept, unused: the switch is the device's). Gone with the
+-- account. (The table keeps its
 -- name from the contact keys before Signal's access keys: a check of the old kind matches no delivery, and every
 -- client tells its new one.)
 CREATE TABLE IF NOT EXISTS contact_keys (
@@ -271,15 +272,6 @@ CREATE TABLE IF NOT EXISTS contact_keys (
     current BLOB NOT NULL,
     requests_open INTEGER NOT NULL DEFAULT 1
 ) WITHOUT ROWID;
--- Requests stored today, per sender and recipient (spec 4.10); the days before are forgotten.
-CREATE TABLE IF NOT EXISTS requests (
-    sender BLOB NOT NULL,
-    recipient BLOB NOT NULL,
-    day INTEGER NOT NULL,
-    n INTEGER NOT NULL,
-    PRIMARY KEY (sender, day, recipient)
-) WITHOUT ROWID;
-CREATE INDEX IF NOT EXISTS requests_by_recipient ON requests(recipient, day);
 -- Each user's storage (spec 6.9), sealed by its devices under a key the hub never has; `version` counts its writes,
 -- so one writer never overwrites another's unseen. Gone with the account.
 CREATE TABLE IF NOT EXISTS storage (
@@ -432,7 +424,6 @@ fn remove_user(tx: &Transaction<'_>, user: &UserId, now: u64) -> rusqlite::Resul
     tx.execute("DELETE FROM reports WHERE reporter_id = ?1 OR reported_id = ?1", [user])?;
     tx.execute("DELETE FROM storage WHERE user_id = ?1", [user])?;
     tx.execute("DELETE FROM contact_keys WHERE user_id = ?1", [user])?;
-    tx.execute("DELETE FROM requests WHERE sender = ?1 OR recipient = ?1", [user])?;
     tx.execute("UPDATE feedback SET user_id = ?2 WHERE user_id = ?1", params![user, NOBODY])?;
     // Its blobs' files go with the next sweep, or at once where the route knows them (`blobs_of`).
     tx.execute("DELETE FROM blobs WHERE user_id = ?1", [user])?;
@@ -452,10 +443,8 @@ pub enum Admission {
     Contact,
     /// A request of this sender, taken.
     Request,
-    /// The recipient takes no requests, or it is no contact's and unsigned.
+    /// No contact's (no key, or not the current one) and unsigned.
     Closed,
-    /// The sender's requests of the day (to this recipient, or to new ones) are taken.
-    Full,
 }
 
 /// Brings a database of schema 1 (the hubs of MLS chats) to this one, in one transaction: what an account is stays
@@ -518,7 +507,8 @@ fn without_grace(conn: &Connection) -> rusqlite::Result<()> {
              ALTER TABLE contact_keys DROP COLUMN previous_until;",
         )?;
     }
-    conn.execute_batch("DROP TABLE IF EXISTS requests_day")
+    // The day counters of requests went for buckets in memory (`limiter::Requests`).
+    conn.execute_batch("DROP TABLE IF EXISTS requests_day; DROP TABLE IF EXISTS requests")
 }
 
 /// Feedback of before crash reports: the `auto` column comes (0 for all of it).
@@ -786,67 +776,27 @@ impl Db {
 
     /// What a delivery to `user` is (spec 4.10): a contact's when it shows the profile key (`check` of what it shows),
     /// or when the user has none yet (an app from before profile keys); else a request of `sender` (who signed it),
-    /// unless the user takes none, it is unsigned, or the sender's are taken today: `per_pair` to this user,
-    /// `recipients` other users. Only reads: a request is counted once stored (`count_request`), so refused
-    /// deliveries spend no allowance.
+    /// unless it is unsigned. Only reads.
     pub fn admit(
         &self,
         user: &UserId,
         shown: Option<[u8; 32]>,
         sender: Option<&UserId>,
-        now: u64,
-        (per_pair, recipients, per_recipient): (u64, u64, u64),
     ) -> rusqlite::Result<Admission> {
         let conn = self.conn();
-        let row: Option<(Vec<u8>, bool)> = conn
-            .prepare_cached("SELECT current, requests_open FROM contact_keys WHERE user_id = ?1")?
-            .query_row([user], |row| Ok((row.get(0)?, row.get(1)?)))
+        let current: Option<Vec<u8>> = conn
+            .prepare_cached("SELECT current FROM contact_keys WHERE user_id = ?1")?
+            .query_row([user], |row| row.get(0))
             .optional()?;
-        let Some((current, open)) = row else { return Ok(Admission::Contact) };
+        let Some(current) = current else { return Ok(Admission::Contact) };
         // In constant time, as Signal compares an access key.
         if shown.is_some_and(|shown| same(&current, &shown)) {
             return Ok(Admission::Contact);
         }
-        let Some(sender) = sender.filter(|_| open) else { return Ok(Admission::Closed) };
-        let day = now / DAY_MS;
-        let n: i64 = conn
-            .prepare_cached("SELECT n FROM requests WHERE sender = ?1 AND day = ?2 AND recipient = ?3")?
-            .query_row(params![sender, day, user], |r| r.get(0))
-            .optional()?
-            .unwrap_or(0);
-        if n as u64 >= per_pair {
-            return Ok(Admission::Full);
-        }
-        // A backstop against many accounts made to flood one: the recipient's requests of the day, from everyone.
-        let all: i64 = conn
-            .prepare_cached("SELECT coalesce(sum(n), 0) FROM requests WHERE recipient = ?1 AND day = ?2")?
-            .query_row(params![user, day], |r| r.get(0))?;
-        if all as u64 >= per_recipient {
-            return Ok(Admission::Full);
-        }
-        if n == 0 {
-            let others: i64 = conn
-                .prepare_cached("SELECT count(*) FROM requests WHERE sender = ?1 AND day = ?2")?
-                .query_row(params![sender, day], |r| r.get(0))?;
-            if others as u64 >= recipients {
-                return Ok(Admission::Full);
-            }
-        }
-        Ok(Admission::Request)
-    }
-
-    /// A request of `sender` stored for `user`: counted against the day (spec 4.10); the days before are forgotten.
-    pub fn count_request(&self, sender: &UserId, user: &UserId, now: u64) -> rusqlite::Result<()> {
-        let mut conn = self.conn();
-        let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
-        let day = now / DAY_MS;
-        tx.prepare_cached(
-            "INSERT INTO requests (sender, day, recipient, n) VALUES (?1, ?2, ?3, 1)
-             ON CONFLICT(sender, day, recipient) DO UPDATE SET n = n + 1",
-        )?
-        .execute(params![sender, day, user])?;
-        tx.execute("DELETE FROM requests WHERE day < ?1", [day])?;
-        tx.commit()
+        // Signed: a request, whatever the recipient's switch (its device drops strangers' requests when off, as
+        // Signal's): never refused for being one, so accepted contacts without each other's key still reach each other.
+        // Its limits are the hub's buckets (`limiter::Requests`), in memory as every rate.
+        Ok(if sender.is_some() { Admission::Request } else { Admission::Closed })
     }
 
     /// Whether a username (by its skeleton) belongs to anyone or is reserved: what registration would find taken.
@@ -1991,7 +1941,8 @@ mod tests {
             let leo = user(register(&db, b"LEO", 1, 1, 0));
             db.conn()
                 .execute_batch(
-                    "DROP TABLE contact_keys; DROP TABLE requests;
+                    "DROP TABLE contact_keys;
+                     CREATE TABLE requests (sender BLOB, recipient BLOB, day INTEGER, n INTEGER);
                      CREATE TABLE contact_keys (user_id BLOB PRIMARY KEY REFERENCES users(id), current BLOB NOT NULL,
                        previous BLOB, previous_until INTEGER NOT NULL DEFAULT 0,
                        requests_open INTEGER NOT NULL DEFAULT 1) WITHOUT ROWID;
@@ -2008,12 +1959,13 @@ mod tests {
             leo
         };
         let db = Db::open(path).unwrap();
-        let limits = (3, 20, 1000);
-        assert_eq!(db.admit(&leo, Some([2; 32]), None, 0, limits).unwrap(), Admission::Contact);
-        assert_eq!(db.admit(&leo, Some([1; 32]), None, 0, limits).unwrap(), Admission::Closed, "no grace");
+        assert_eq!(db.admit(&leo, Some([2; 32]), None).unwrap(), Admission::Contact);
+        assert_eq!(db.admit(&leo, Some([1; 32]), None).unwrap(), Admission::Closed, "no grace");
         let gone: i64 = db
             .conn()
-            .query_row("SELECT count(*) FROM sqlite_master WHERE name = 'requests_day'", [], |r| r.get(0))
+            .query_row("SELECT count(*) FROM sqlite_master WHERE name IN ('requests_day', 'requests')", [], |r| {
+                r.get(0)
+            })
             .unwrap();
         assert_eq!(gone, 0);
         drop(db);
@@ -2022,31 +1974,18 @@ mod tests {
         }
     }
 
-    /// Requests counted per sender (spec 4.10): 3 a day to one recipient, 20 recipients a day; another sender's
-    /// count is its own.
+    /// A delivery without the key is a request when signed, whatever the recipient's switch (its limits are the
+    /// hub's buckets, `limiter::Requests`); unsigned, closed.
     #[test]
-    fn requests_are_counted_per_sender() {
+    fn a_signed_delivery_without_the_key_is_a_request() {
         let db = Db::open(":memory:").unwrap();
-        let users: Vec<UserId> = (1..=4u8).map(|i| user(register(&db, &[b'A' + i; 3], i, i, 0))).collect();
-        for to in &users[1..] {
-            db.set_access_key(to, &[9; 32], true).unwrap();
-        }
-        let (spam, leo, mia, ben) = (&users[0], &users[1], &users[2], &users[3]);
-        let limits = (3, 2, 4);
-        for _ in 0..3 {
-            assert_eq!(db.admit(leo, None, Some(spam), 0, limits).unwrap(), Admission::Request);
-            db.count_request(spam, leo, 0).unwrap();
-        }
-        assert_eq!(db.admit(leo, None, Some(spam), 0, limits).unwrap(), Admission::Full, "3 a day to LEO");
-        assert_eq!(db.admit(leo, None, Some(mia), 0, limits).unwrap(), Admission::Request, "MIA's are her own");
-        assert_eq!(db.admit(leo, None, None, 0, limits).unwrap(), Admission::Closed, "unsigned");
-        db.count_request(mia, leo, 0).unwrap();
-        assert_eq!(db.admit(leo, None, Some(ben), 0, limits).unwrap(), Admission::Full, "LEO's 4 of the day, from all");
-        db.count_request(spam, mia, 0).unwrap();
-        assert_eq!(db.admit(ben, None, Some(spam), 0, limits).unwrap(), Admission::Full, "a third recipient");
-        assert_eq!(db.admit(leo, None, Some(spam), DAY_MS, limits).unwrap(), Admission::Request, "the next day");
+        let users: Vec<UserId> = (1..=2u8).map(|i| user(register(&db, &[b'A' + i; 3], i, i, 0))).collect();
+        let (spam, leo) = (&users[0], &users[1]);
+        db.set_access_key(leo, &[9; 32], true).unwrap();
+        assert_eq!(db.admit(leo, None, Some(spam)).unwrap(), Admission::Request);
+        assert_eq!(db.admit(leo, None, None).unwrap(), Admission::Closed, "unsigned");
         db.set_access_key(leo, &[9; 32], false).unwrap();
-        assert_eq!(db.admit(leo, None, Some(mia), 0, limits).unwrap(), Admission::Closed, "takes none");
+        assert_eq!(db.admit(leo, None, Some(spam)).unwrap(), Admission::Request, "the switch is the device's");
     }
 
     /// An upload whose row went while it came (its account deleted meanwhile) is not marked done: its file is removed

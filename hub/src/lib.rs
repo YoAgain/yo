@@ -19,7 +19,7 @@ use bytes::Bytes;
 use config::Config;
 use db::{Db, Delivered, Incoming, Key, NewDevice, Write};
 use error::{refuse, Refusal, Res};
-use limiter::{Limiter, ReplayCache};
+use limiter::{Limiter, ReplayCache, Requests};
 use std::collections::HashMap;
 use std::future::Future;
 use std::net::{IpAddr, SocketAddr};
@@ -42,6 +42,8 @@ pub struct Hub {
     db: Arc<Db>,
     deliveries: std::sync::mpsc::SyncSender<Delivery>,
     limiter: Limiter,
+    /// Requests' buckets (spec 4.10), by the hub's clock as tests move it.
+    requests: Requests,
     replay: ReplayCache,
     waiting: Mutex<HashMap<DeviceId, Arc<Notify>>>,
     /// Inbox requests under way, by device (`INBOX_AT_ONCE`).
@@ -121,6 +123,11 @@ impl Hub {
     /// For tests: the clock of sender certificates and of envelopes' arrival moved by `ms` (days gone by, or back).
     pub fn shift_clock(&self, ms: i64) {
         self.shifted_ms.store(ms, Ordering::Relaxed);
+    }
+
+    /// The hub's clock as tests move it (`shift_clock`), ms.
+    fn clock_ms(&self) -> u64 {
+        now_ms().saturating_add_signed(self.shifted_ms.load(Ordering::Relaxed))
     }
 }
 
@@ -354,6 +361,12 @@ impl Hub {
             db,
             deliveries,
             limiter: Limiter::default(),
+            requests: Requests::new(
+                config.limits.requests_per_pair,
+                config.limits.request_recipients_per_sender,
+                config.limits.requests_per_recipient,
+                config.limits.request_hour_ms,
+            ),
             replay: ReplayCache::default(),
             waiting: Mutex::default(),
             fetching: Mutex::default(),
@@ -485,6 +498,7 @@ impl Hub {
                 pruning.replay.forget_expired(now_ms());
                 if minutes.is_multiple_of(60) {
                     pruning.limiter.forget_idle(DAY);
+                    pruning.requests.forget_full(pruning.clock_ms());
                     // Off the request threads: the sweep lists every blob file.
                     let hub = pruning.clone();
                     match tokio::task::spawn_blocking(move || hub.prune(now_ms())).await {
@@ -617,11 +631,8 @@ impl Hub {
         yo_wire::request::verify_hash(&device.auth_key, method.as_str(), path, time, body_hash, &signature)
             .map_err(|_| unauthorized())?;
         // Counted only once the signature holds: a stranger who knows a device id must not spend its requests.
-        self.limit(
-            format!("signed:{}", yo_wire::b64(&device_id)),
-            self.config.limits.signed_per_device_minute,
-            MINUTE,
-        )?;
+        self.limit(format!("signed:{}", yo_wire::b64(&device_id)), self.config.limits.signed_per_device_minute, MINUTE)
+            .map_err(|_| error::limited("device", None))?;
         if !self.first_time(&signature, time, now) {
             return Err(unauthorized());
         }
@@ -998,7 +1009,8 @@ async fn set_username(State(hub): Hubs, method: Method, uri: Uri, headers: Heade
     }
 }
 
-/// Sets the signing device's account's profile key check and whether it takes requests (spec 4.10).
+/// Sets the signing device's account's profile key check (spec 4.10); whether it takes requests is kept as told, and
+/// decides nothing here: the device drops strangers' requests itself.
 async fn set_access_key(
     State(hub): Hubs,
     method: Method,
@@ -1272,18 +1284,19 @@ async fn deliver(
     let token = match brought {
         Brought::Token(key, nonce) => Some((key, nonce)),
         brought => {
-            hub.limit_ip("deliver", peer, &headers, hub.config.limits.deliver_per_ip_minute, MINUTE)?;
+            hub.limit_ip("deliver", peer, &headers, hub.config.limits.deliver_per_ip_minute, MINUTE)
+                .map_err(|_| error::limited("ip", None))?;
             if matches!(brought, Brought::Refused) {
                 return Err(refuse(StatusCode::UNAUTHORIZED));
             }
-            hub.limit_ip_bytes(peer, &headers, body.len())?;
+            hub.limit_ip_bytes(peer, &headers, body.len()).map_err(|_| error::limited("bytes", None))?;
             None
         }
     };
     // A contact's, or a request (spec 4.10): the recipient's profile key shown names no sender, every contact has the
-    // same. A request is signed by its sending device, so the hub knows whose it is and counts it per sender: past
-    // the sender's of today it waits with the sender (`507`, as a full inbox, this recipient only); unsigned, or to
-    // one who takes none, it is `403`. Past the limits above; counted only once stored.
+    // same. A request is signed by its sending device, so the hub knows whose it is and counts it in its buckets: past
+    // them it waits with the sender (`429`, this recipient only, `Retry-After`); unsigned it is `403`. Past the
+    // limits above; counted only once stored.
     let sender = match headers.contains_key(HEADER_DEVICE) {
         true => {
             let (uri, headers, body) = (uri.clone(), headers.clone(), body.clone());
@@ -1297,16 +1310,16 @@ async fn deliver(
         .and_then(|v| unb64(v).ok())
         .and_then(|v| <[u8; api::ACCESS_KEY_LEN]>::try_from(v).ok())
         .map(|key| api::access_check(&key));
-    let limits = &hub.config.limits;
-    let per =
-        (limits.requests_per_pair_day, limits.request_recipients_per_sender_day, limits.requests_per_recipient_day);
     let by = sender;
-    let request = match hub.blocking(move |hub| hub.db.admit(&user, shown, by.as_ref(), now_ms(), per)).await?? {
+    let request = match hub.blocking(move |hub| hub.db.admit(&user, shown, by.as_ref())).await?? {
         db::Admission::Contact => None,
         db::Admission::Request => sender,
         db::Admission::Closed => return Err(refuse(StatusCode::FORBIDDEN)),
-        db::Admission::Full => return Err(refuse(StatusCode::INSUFFICIENT_STORAGE)),
     };
+    // Past its buckets: `429` with the time until a token, for this recipient only; the sender holds it till then.
+    if let Some(sender) = &request {
+        hub.requests.check(sender, &user, hub.clock_ms()).map_err(|(scope, ms)| error::limited(scope, Some(ms)))?;
+    }
     hub.db_room()?;
     let (stored, outcome) = tokio::sync::oneshot::channel();
     let runtime = tokio::runtime::Handle::current();
@@ -1319,7 +1332,7 @@ async fn deliver(
         // Its devices are woken by the writer (`writer`).
         Delivered::Stored(_) => {
             if let Some(sender) = request {
-                hub.blocking(move |hub| hub.db.count_request(&sender, &user, now_ms())).await??;
+                hub.requests.take(&sender, &user, hub.clock_ms());
             }
             Ok((StatusCode::ACCEPTED, Vec::new()))
         }

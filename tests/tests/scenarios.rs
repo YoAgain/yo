@@ -158,6 +158,11 @@ fn a_friend_with_another_key(hub: &TestHub) -> (Client, String, Client) {
     let mut b = register(Http::new(hub.url()), &pb, Some("BOB"));
     a.send_yo(&pb).unwrap();
     b.sync(0).unwrap();
+    // B says yes: A holds B's key, its deliveries go sealed (a lying hub could not hand on a request, signed over
+    // B's path).
+    b.accept(a.user_id()).unwrap();
+    a.sync(0).unwrap();
+    a.after_sync().unwrap();
     let b2 = register(Http::new(hub.url()), &pb2, Some("BOB"));
     let asker = register(Http::new(hub.url()), &username(n + 3), None);
     lying.lie(&b, &pb, &b2, &pb2, asker);

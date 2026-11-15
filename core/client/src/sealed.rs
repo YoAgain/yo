@@ -172,6 +172,10 @@ pub mod testing {
 
     /// The payload and the sender certificate of an envelope sealed to the account with `account_secret`.
     pub fn open(account_secret: &[u8; 32], sealed: &[u8]) -> Result<(Vec<u8>, Vec<u8>)> {
+        // Identified (a request, or none in date): the payload padded, no certificate.
+        if sealed.first() == Some(&yo_wire::VERSION) {
+            return Ok((envelope::unpad(sealed, &BUCKETS)?.to_vec(), Vec::new()));
+        }
         let own = signal::identity_pair(account_secret)?;
         let store = Between { own, them: *own.identity_key() };
         let usmc = signal::now(sealed_sender_decrypt_to_usmc(sealed, &store)).map_err(signal::signal)?;
