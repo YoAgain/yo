@@ -448,25 +448,8 @@ struct FriendList: View {
         newGroup = true
       }
       .accessibilityLabel("Add Group")
-      ShareLink(
-        item: accounts.account.map { Invite.link(for: $0.username) } ?? URL(string: "https://justyo.co")!,
-        message: Text("Yo! Add me on Yo:"),
-        // What the share sheet shows at its top: whose link, and the app's icon (not a bare "justyo.co").
-        preview: SharePreview(
-          "Add \(accounts.account?.username ?? "Me") on Yo",
-          image: Image(uiImage: UIImage(named: "IconStandard") ?? UIImage()))
-      ) {
-        HStack(spacing: 12) {
-          Image(systemName: "square.and.arrow.up").font(.system(size: 24, weight: .bold))
-          Text("Invite")
-        }
-        .font(.yo(Metrics.rowFont))
-        .foregroundStyle(.white)
-        .frame(maxWidth: .infinity, minHeight: Metrics.rowHeight)
-        .background(Color.row(friends.nextColor + 2).opacity(cameraOn ? 0.45 : 1))
-      }
-      .buttonStyle(.plain)
-      .simultaneousGesture(TapGesture().onEnded { withAnimation(.snappy) { addMenu = false } })
+      inviteBar
+        .simultaneousGesture(TapGesture().onEnded { withAnimation(.snappy) { addMenu = false } })
       // A red "1" while something is left to secure (Secure Your Account), as an app's badge.
       RowButton("Settings", color: Color.row(friends.nextColor + 3).opacity(cameraOn ? 0.45 : 1)) {
         withAnimation(.snappy) { addMenu = false }
@@ -484,9 +467,34 @@ struct FriendList: View {
           addMenu = true
         }
       }
-      .overlay(alignment: .trailing) { toDoBadge }  // closed, "+" carries it: Settings is behind it
       .accessibilityLabel("Add and Settings")
     }
+    // Until the first friend of one's own (YoGPT is there from the start): Invite always under "+".
+    if !addMenu && friends.shown.allSatisfy({ Username.skeleton($0.name) == Username.skeleton("YoGPT") }) {
+      inviteBar
+    }
+  }
+
+  /// Invite, with the share sign: one's invite link (justyo.co/NAME) to send any way the iPhone has.
+  private var inviteBar: some View {
+    ShareLink(
+      item: accounts.account.map { Invite.link(for: $0.username) } ?? URL(string: "https://justyo.co")!,
+      message: Text("Yo! Add me on Yo:"),
+      // What the share sheet shows at its top: whose link, and the app's icon (not a bare "justyo.co").
+      preview: SharePreview(
+        "Add \(accounts.account?.username ?? "Me") on Yo",
+        image: Image(uiImage: UIImage(named: "IconStandard") ?? UIImage()))
+    ) {
+      HStack(spacing: 12) {
+        Image(systemName: "square.and.arrow.up").font(.system(size: 24, weight: .bold))
+        Text("Invite")
+      }
+      .font(.yo(Metrics.rowFont))
+      .foregroundStyle(.white)
+      .frame(maxWidth: .infinity, minHeight: Metrics.rowHeight)
+      .background(Color.row(friends.nextColor + 2).opacity(cameraOn ? 0.45 : 1))
+    }
+    .buttonStyle(.plain)
   }
 
   /// A red "1" at a bar's end while the account is not yet secured (AccountStore.toDo), as iOS badges an app.
@@ -593,15 +601,17 @@ struct FriendList: View {
   }
 
   /// The photo library at the bottom left, front/back at the bottom right, as in the Camera app.
-  /// One row at the bottom, under the thumb: the camera's button at the corner (it opens the camera, and closes it as
-  /// "✕" in the same place), the library right beside it, the zoom in the middle, the switch to the selfie camera
-  /// at the other corner. Mirrored for the left hand.
+  /// At the bottom, under the thumb: the camera's button at the corner (it opens the camera, and closes it as "✕" in
+  /// the same place), the library right above it, the zoom in the middle, the switch to the selfie camera at the
+  /// other corner, all as large. Mirrored for the left hand.
   private var cameraControls: some View {
     ZStack {
       if cameraOn && picked == nil {  // a picked photo goes as it is
         CameraZoom(choices: zooms, chosen: $zoom).onChange(of: zoom) { camera.zoom(to: zoom) }
+          .frame(maxHeight: .infinity, alignment: .bottom)
+          .padding(.bottom, 6)  // centred on the bottom buttons' line
       }
-      HStack(spacing: 12) {
+      HStack(alignment: .bottom, spacing: 12) {
         if cameraOn {
           Button {
             camera.flip()
@@ -619,32 +629,34 @@ struct FriendList: View {
           .transition(.scale.combined(with: .opacity))
         }
         Spacer(minLength: 0)
-        if cameraOn {
-          let thumbnail = picked?.thumbnail  // the picker's label closure is Sendable: take the value here
-          PhotosPicker(selection: $libraryItem, matching: .images) {
-            LibraryLabel(thumbnail: thumbnail)
+        VStack(spacing: 14) {
+          if cameraOn {
+            let thumbnail = picked?.thumbnail  // the picker's label closure is Sendable: take the value here
+            PhotosPicker(selection: $libraryItem, matching: .images) {
+              LibraryLabel(thumbnail: thumbnail)
+            }
+            .buttonStyle(.plain)
+            .glassEffect(.regular.interactive(), in: .circle)
+            .accessibilityLabel("Photo Library")
+            .transition(.scale.combined(with: .opacity))
+          }
+          Button {
+            withAnimation(.snappy) {
+              addMenu = false
+              cameraOn.toggle()
+            }
+          } label: {
+            Image(systemName: cameraOn ? "xmark" : "camera.fill")
+              .font(.system(size: 22, weight: .semibold))
+              .foregroundStyle(.white)
+              .contentTransition(.symbolEffect(.replace))
+              .frame(width: 60, height: 60)
+              .contentShape(.circle)  // the whole circle, not only the thin "✕"
           }
           .buttonStyle(.plain)
           .glassEffect(.regular.interactive(), in: .circle)
-          .accessibilityLabel("Photo Library")
-          .transition(.scale.combined(with: .opacity))
+          .accessibilityLabel(cameraOn ? "Close Camera" : "Camera")
         }
-        Button {
-          withAnimation(.snappy) {
-            addMenu = false
-            cameraOn.toggle()
-          }
-        } label: {
-          Image(systemName: cameraOn ? "xmark" : "camera.fill")
-            .font(.system(size: 22, weight: .semibold))
-            .foregroundStyle(.white)
-            .contentTransition(.symbolEffect(.replace))
-            .frame(width: 60, height: 60)
-            .contentShape(.circle)  // the whole circle, not only the thin "✕"
-        }
-        .buttonStyle(.plain)
-        .glassEffect(.regular.interactive(), in: .circle)
-        .accessibilityLabel(cameraOn ? "Close Camera" : "Camera")
       }
       .environment(\.layoutDirection, leftHanded ? .rightToLeft : .leftToRight)
     }
@@ -1409,9 +1421,9 @@ struct CameraZoom: View {
             withAnimation(.snappy(duration: 0.2)) { chosen = choice }
           } label: {
             Text(Self.label(choice) + (on ? "×" : ""))
-              .font(.system(size: on ? 13 : 11, weight: .bold).monospacedDigit())
+              .font(.system(size: on ? 17 : 14, weight: .bold).monospacedDigit())
               .foregroundStyle(on ? Color.yellow : .white)
-              .frame(width: 36, height: 36)
+              .frame(width: 48, height: 48)
               .background(.black.opacity(on ? 0.35 : 0.2), in: .circle)
               .contentShape(.circle)
           }
