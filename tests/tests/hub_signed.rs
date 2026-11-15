@@ -71,7 +71,7 @@ fn a_pinned_client_takes_keys_the_hub_signed() {
 #[test]
 fn keys_signed_by_another_key_or_not_at_all_are_not_taken() {
     let hub = TestHub::start();
-    let stranger = ed25519_dalek::SigningKey::from_bytes(&[9; 32]).verifying_key().to_bytes();
+    let stranger = yo_hub::config::hub_public_key(&[9; 32]);
     let b = client(&hub, "SigB", Tamper::None, None);
     for (tamper, key) in [(Tamper::None, stranger), (Tamper::Unsigned, hub_key())] {
         let mut a = client(&hub, "SigA", tamper, Some(key));

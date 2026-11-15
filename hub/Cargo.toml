@@ -15,7 +15,7 @@ path = "src/main.rs"
 
 [dependencies]
 yo-wire = { path = "../core/wire" }
-ed25519-dalek = { workspace = true }
+curve25519-dalek = { workspace = true }
 sha2 = { workspace = true }
 getrandom = { workspace = true }
 serde_json = { workspace = true }

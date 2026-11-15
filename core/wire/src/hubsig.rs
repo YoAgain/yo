@@ -1,10 +1,9 @@
 //! The hub's signature on the answers that hand out keys (spec 6.10): a lookup's `200` (account key, devices,
 //! bundles) and a delivery's `409` (the roster). A client that pins the hub's key sends a fresh `Yo-Nonce` with such a
-//! request; the answer then ends in the hub's Ed25519 signature over what was asked and what is answered, so a party
+//! request; the answer then ends in the hub's XEdDSA signature (Curve25519, libsignal) over what was asked and what is answered, so a party
 //! between them (or an old answer played back) cannot hand out other keys. Without the header the answer is as before.
 
 use crate::{sha256, Error, KEY_LEN, SIGNATURE_LEN};
-use ed25519_dalek::{Signature, VerifyingKey};
 
 /// The request header with the client's nonce, base64url of `NONCE_LEN` random bytes.
 pub const NONCE_HEADER: &str = "Yo-Nonce";
@@ -42,24 +41,29 @@ pub fn open<'a>(
 ) -> Result<&'a [u8], Error> {
     let at = signed.len().checked_sub(SIGNATURE_LEN).ok_or(Error::Signature)?;
     let (answer, signature) = signed.split_at(at);
-    let key = VerifyingKey::from_bytes(key).map_err(|_| Error::Signature)?;
-    let signature = Signature::from_slice(signature).map_err(|_| Error::Signature)?;
-    key.verify_strict(&message(nonce, path, request, answer), &signature).map_err(|_| Error::Signature)?;
+    if !crate::xeddsa_verify(key, &message(nonce, path, request, answer), signature) {
+        return Err(Error::Signature);
+    }
     Ok(answer)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ed25519_dalek::{Signer, SigningKey};
+    use libsignal_core::curve::KeyPair;
+
+    fn public(pair: &KeyPair) -> [u8; KEY_LEN] {
+        pair.public_key.public_key_bytes().try_into().unwrap()
+    }
 
     #[test]
     fn opens_only_what_the_hub_signed_for_this_question() {
-        let hub = SigningKey::from_bytes(&[7; 32]);
-        let key = hub.verifying_key().to_bytes();
+        let hub = KeyPair::generate(&mut rand::rng());
+        let key = public(&hub);
         let (nonce, path, request, answer) = ([1; NONCE_LEN], "/v1/lookup", b"who".as_slice(), b"keys".as_slice());
         let mut signed = answer.to_vec();
-        signed.extend_from_slice(&hub.sign(&message(&nonce, path, request, answer)).to_bytes());
+        let message = message(&nonce, path, request, answer);
+        signed.extend_from_slice(&hub.private_key.calculate_signature(&message, &mut rand::rng()).unwrap());
         assert_eq!(open(&key, &nonce, path, request, &signed), Ok(answer));
         // Another question, another nonce (an old answer played back), other keys, another hub, nothing signed.
         assert_eq!(open(&key, &nonce, path, b"whom", &signed), Err(Error::Signature));
@@ -68,7 +72,7 @@ mod tests {
         let mut other = signed.clone();
         other[0] ^= 1;
         assert_eq!(open(&key, &nonce, path, request, &other), Err(Error::Signature));
-        let stranger = SigningKey::from_bytes(&[8; 32]).verifying_key().to_bytes();
+        let stranger = public(&KeyPair::generate(&mut rand::rng()));
         assert_eq!(open(&stranger, &nonce, path, request, &signed), Err(Error::Signature));
         assert_eq!(open(&key, &nonce, path, request, answer), Err(Error::Signature));
         assert_eq!(nonce_of(&crate::b64(&[3; NONCE_LEN])), Some([3; NONCE_LEN]));

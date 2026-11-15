@@ -16,8 +16,8 @@
 //!                         database's backup: blobs are fleeting.
 //!   YO_BLOB_BUDGET_MB     all blobs together at most, default 16384 (16 GiB); uploads beyond are refused (507)
 //!   YO_BLOB_MIN_FREE_MB   uploads are refused while the disk has less free, default 4096 (4 GiB)
-//!   YO_HUB_KEY_FILE       required: the 32-byte seed of the hub's Ed25519 key, which signs answers handing out keys
-//!                         (spec 6.10); its public half is pinned in the apps
+//!   YO_HUB_KEY_FILE       required: the hub's Curve25519 private key (32 bytes, `yo-hub hub-key new`), which signs
+//!                         answers handing out keys (spec 6.10, XEdDSA); its public half is pinned in the apps
 //!   YO_SERVER_CERT_FILE   required: the server key and its certificate by the trust root (spec 6.1), which sign the
 //!                         devices' sender certificates; the trust root's public key is pinned in the apps
 //!   YO_ZK_PARAMS_FILE     required: the zkgroup ServerSecretParams of its groups (spec 4.9); their public half is
@@ -28,6 +28,11 @@
 //!                                                       its public key, base64url, for the apps
 //!   yo-hub trust-root server ROOT_FILE KEY_ID OUT_FILE  a new server key with its certificate by that root: the hub's
 //!                                                       YO_SERVER_CERT_FILE (0600)
+//!
+//! The hub key (signed answers, spec 6.10):
+//!   yo-hub hub-key new FILE                             a new hub key (its private key, 32 bytes, 0600): the hub's
+//!                                                       YO_HUB_KEY_FILE; prints its public key, base64url, for the apps
+//!   yo-hub hub-key public FILE                          prints it again
 //!
 //! Group keys (Signal's zkgroup server params, spec 4.9):
 //!   yo-hub zk new FILE                                  new ServerSecretParams (0600), the hub's YO_ZK_PARAMS_FILE;
@@ -141,6 +146,23 @@ fn trust_root(args: &[String]) -> Result<(), String> {
     }
 }
 
+/// `yo-hub hub-key …` (see above).
+fn hub_key(args: &[String]) -> Result<(), String> {
+    match args {
+        [new, file] if new == "new" => {
+            let (private, public) = yo_hub::config::new_hub_key();
+            write_new(file, &private)?;
+            println!("{}", yo_wire::b64(&public));
+            Ok(())
+        }
+        [public, file] if public == "public" => {
+            println!("{}", yo_wire::b64(&yo_hub::config::hub_public_key(&read_hub_key(file)?)));
+            Ok(())
+        }
+        _ => Err("usage: yo-hub hub-key new FILE | yo-hub hub-key public FILE".into()),
+    }
+}
+
 /// `yo-hub zk …` (see above).
 fn zk(args: &[String]) -> Result<(), String> {
     match args {
@@ -162,6 +184,13 @@ fn zk(args: &[String]) -> Result<(), String> {
 #[tokio::main]
 async fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
+    if args.first().map(String::as_str) == Some("hub-key") {
+        if let Err(error) = hub_key(&args[1..]) {
+            eprintln!("yo-hub: {error}");
+            std::process::exit(2);
+        }
+        return;
+    }
     if args.first().map(String::as_str) == Some("zk") {
         if let Err(error) = zk(&args[1..]) {
             eprintln!("yo-hub: {error}");

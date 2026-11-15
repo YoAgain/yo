@@ -81,7 +81,7 @@ use tls_codec::{TlsDeserializeBytes, TlsSerialize, TlsSize, VLBytes};
 use yo_wire::DeviceId;
 use zeroize::Zeroize;
 
-/// 2: the account key is libsignal's (Curve25519). A state of 1 (an Ed25519 account key) is brought up (`from_1`).
+/// 2: the account and auth keys are libsignal's (Curve25519). A state of 1 (Ed25519 keys) is brought up (`from_1`).
 const STATE_VERSION: u8 = 2;
 const AAD: &[u8] = b"yo state v2";
 
@@ -502,8 +502,9 @@ pub fn open(blob: &[u8], key: &[u8; 32]) -> Result<(State, Entries)> {
     Ok((state?, entries?))
 }
 
-/// A state from before the account key was libsignal's: its Ed25519 seed becomes the clamped scalar its X25519 form
-/// was (the identity its sessions have), the contacts' pinned keys their Curve25519 form (as the hub converted them),
+/// A state from before the keys were libsignal's: the Ed25519 seeds of the account key and the auth key become the
+/// clamped scalars their X25519 forms were (the identity its sessions have), the contacts' pinned keys their
+/// Curve25519 form (as the hub converted them),
 /// the device certificate signed anew, and the storage written again under the key the new secret gives. A
 /// registration still unanswered (signed by the old key) does not come over: the app signs in again.
 fn from_1(mut state: State) -> Result<State> {
@@ -511,6 +512,8 @@ fn from_1(mut state: State) -> Result<State> {
         return Err(Error::State);
     }
     state.account_secret = crate::identity::legacy_account_secret(&state.account_secret);
+    // The auth key the same way: the hub converted its public half (schema 3).
+    state.auth_secret = crate::identity::legacy_account_secret(&state.auth_secret);
     for contact in state.contacts.values_mut() {
         if contact.account_key != [0; 32] {
             contact.account_key = crate::identity::legacy_account_key(&contact.account_key).unwrap_or([0; 32]);

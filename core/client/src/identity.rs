@@ -45,16 +45,33 @@ pub fn certify(account: &IdentityKeyPair, device_key: &[u8]) -> DeviceCertificat
     DeviceCertificate { account_key: account_key(account), signature: sign(account, &cert::to_be_signed(device_key)) }
 }
 
-/// The account secret of a state from before the account key was libsignal's (an Ed25519 seed): the clamped scalar
-/// its X25519 form was, so the identity contacts' sessions know stays the account's.
-pub fn legacy_account_secret(seed: &Key) -> Key {
-    ed25519_dalek::SigningKey::from_bytes(seed).to_scalar_bytes()
+/// An XEdDSA signature by the Curve25519 private key `secret` (a device's auth key, spec 6.2).
+pub fn sign_with(secret: &Key, message: &[u8]) -> [u8; yo_wire::SIGNATURE_LEN] {
+    let private = PrivateKey::deserialize(secret).expect("32 bytes are a Curve25519 private key");
+    let signature = private.calculate_signature(message, &mut rand::rng()).expect("a Curve25519 key signs");
+    (*signature).try_into().expect("an XEdDSA signature is 64 bytes")
 }
 
-/// A contact's account key as states from before pinned it (Ed25519) in its Curve25519 form, as the hub has it now;
-/// none for bytes that are no Ed25519 point (an unknown key, all zeros).
+/// The public key of the Curve25519 private key `secret`.
+pub fn public_of(secret: &Key) -> Key {
+    let private = PrivateKey::deserialize(secret).expect("32 bytes are a Curve25519 private key");
+    private.public_key().expect("a public key").public_key_bytes().try_into().expect("32 bytes")
+}
+
+/// A secret of a state from before the keys were libsignal's (an Ed25519 seed, of the account key or the auth key):
+/// the clamped scalar its X25519 form was (SHA-512 of the seed, its lower half clamped), so the account keeps the
+/// identity contacts' sessions know, and the hub's converted keys match.
+pub fn legacy_account_secret(seed: &Key) -> Key {
+    let hash = <sha2::Sha512 as sha2::Digest>::digest(seed);
+    let lower: [u8; 32] = hash[..32].try_into().expect("32 bytes");
+    PrivateKey::deserialize(&lower).expect("32 bytes").serialize().try_into().expect("32 bytes")
+}
+
+/// A public key as states from before had it (Ed25519) in its Curve25519 (Montgomery) form, as the hub has it now;
+/// none for bytes that are no Ed25519 point (an unknown key).
 pub fn legacy_account_key(key: &Key) -> Option<Key> {
-    ed25519_dalek::VerifyingKey::from_bytes(key).ok().map(|key| key.to_montgomery().to_bytes())
+    let point = curve25519_dalek::edwards::CompressedEdwardsY(*key).decompress()?;
+    Some(point.to_montgomery().to_bytes())
 }
 
 /// Signal's safety number: its fingerprint version and hash iterations (spec 3.4).
@@ -98,10 +115,15 @@ mod tests {
         let certificate = certify(&pair, &device);
         assert!(DeviceCertificate::verify(&certificate.to_bytes(), &device).is_ok());
         // An Ed25519 seed of before: its X25519 form's identity, the account key as the hub converted it.
-        let seed = [7u8; 32];
-        let ed = ed25519_dalek::SigningKey::from_bytes(&seed).verifying_key().to_bytes();
+        // RFC 8032 test vector 1: its seed and its Ed25519 public key.
+        let seed: [u8; 32] = hex32("9d61b19deffd5a60ba844af492ec2cc44449c5697b326919703bac031cae7f60");
+        let ed = hex32("d75a980182b10ab7d54bfed3c964073a0ee172f3daa62325af021a68f707511a");
         let migrated = account_pair(&legacy_account_secret(&seed)).unwrap();
         assert_eq!(Some(account_key(&migrated)), legacy_account_key(&ed));
+    }
+
+    fn hex32(text: &str) -> [u8; 32] {
+        crate::state::unhex(text).unwrap().try_into().unwrap()
     }
 
     #[test]

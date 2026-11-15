@@ -15,7 +15,7 @@ testing = []
 [dependencies]
 yo-wire = { path = "../wire" }
 tls_codec = { workspace = true }
-ed25519-dalek = { workspace = true }
+curve25519-dalek = { workspace = true }
 sha2 = { workspace = true }
 hmac = { workspace = true }
 chacha20poly1305 = { workspace = true }

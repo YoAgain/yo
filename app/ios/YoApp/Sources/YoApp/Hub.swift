@@ -29,13 +29,16 @@ enum Hub {
   }
   static var transport: HubTransport { HubTransport(base: url) }
 
-  /// The public keys each hub may sign its answers that hand out keys with (spec 6.10), base64url as the operator's
-  /// `hub-key` printed them: the one in use and a spare kept offline, so a lost or replaced hub key needs no app
-  /// update first. A hub not listed (none yet, or another address for tests) is not checked: its answers are taken as
-  /// they come, as before the hubs signed.
+  /// The public keys each hub may sign its answers that hand out keys with (spec 6.10, Curve25519 and XEdDSA),
+  /// base64url as `yo-hub hub-key new` printed them: the one in use and a spare kept offline, so a lost or replaced
+  /// hub key needs no app update first. A hub not listed or with none here (a placeholder left empty) is not checked:
+  /// its answers are taken as they come, as before the hubs signed.
   static let keys: [String: [String]] = [
-    "hub.justyo.app": ["FLTC2hPhb2K2oAFe3dI2K1f9oebLemczKp9aWfvoGcQ", "-Ndnkf6v5B1HNQbkx4JfhDMTN-4vxa6NeIpJSMlpT6c"],
-    "dev.justyo.app": ["J9PZz9y9AD-7Ypf1wrfZmjA6-1NhsTEbREab-Pnq51w", "JuJhUXy5ToOZWspdAZiQm2ppfYXp-dlTNSrvpn9M5Ko"],
+    // PLACEHOLDER: the Curve25519 hub keys are not made yet (the Ed25519 ones of before no longer verify). Pin the
+    // live key in use and its spare here.
+    "hub.justyo.app": [],
+    // PLACEHOLDER: the dev hub's key in use and its spare.
+    "dev.justyo.app": [],
   ]
 
   /// The sender-certificate trust roots of each hub (spec 6.1), base64url as `yo-hub trust-root new` printed them:
@@ -78,7 +81,7 @@ enum Hub {
       print("Yo: no group params pinned for \(host): no groups (Hub.zkParams)")
     }
     guard let texts = keys[host] else { return }
-    let pinned = texts.compactMap { Data(base64URL: $0) }
+    let pinned = texts.compactMap { Data(base64URL: $0) }.filter { $0.count == 32 }
     guard !pinned.isEmpty else { return }
     try? client.setHubKeys(keys: pinned)
   }

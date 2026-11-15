@@ -483,17 +483,19 @@ fn from_1(conn: &mut Connection) -> rusqlite::Result<()> {
     tx.commit()
 }
 
-/// Brings a database of schema 2 (Ed25519 account keys, backups opened by 12 words) to this one, in one transaction:
-/// every account key, the current ones and those a user had, in its Curve25519 form (what its sessions already used,
-/// spec 4.1), and the backups gone: they open with words no app takes any more, so their accounts are not secured
+/// Brings a database of schema 2 (Ed25519 account and auth keys, backups opened by 12 words) to this one, in one
+/// transaction: every account key, the current ones and those a user had, and every device's auth key in its
+/// Curve25519 form (the account key's is what its sessions already used, spec 4.1; the apps convert their secrets the
+/// same way), and the backups gone: they open with words no app takes any more, so their accounts are not secured
 /// until made anew (spec 7).
 fn from_2(conn: &mut Connection) -> rusqlite::Result<()> {
     let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
     let curve = |key: &[u8]| -> Option<Vec<u8>> {
         let key: [u8; KEY_LEN] = key.try_into().ok()?;
-        Some(ed25519_dalek::VerifyingKey::from_bytes(&key).ok()?.to_montgomery().to_bytes().to_vec())
+        let point = curve25519_dalek::edwards::CompressedEdwardsY(key).decompress()?;
+        Some(point.to_montgomery().to_bytes().to_vec())
     };
-    for (table, column) in [("users", "account_key"), ("account_keys", "key")] {
+    for (table, column) in [("users", "account_key"), ("account_keys", "key"), ("devices", "auth_key")] {
         let keys: Vec<Vec<u8>> = tx
             .prepare(&format!("SELECT {column} FROM {table}"))?
             .query_map([], |row| row.get(0))?
@@ -1646,8 +1648,8 @@ mod tests {
         let path = std::env::temp_dir().join(format!("yo-hub-schema-1-{}.sqlite", std::process::id()));
         let path = path.to_str().unwrap().to_owned();
         let _ = std::fs::remove_file(&path);
-        let ed = ed25519_dalek::SigningKey::from_bytes(&[1; 32]).verifying_key();
-        let curve = ed.to_montgomery().to_bytes();
+        let point = curve25519_dalek::constants::ED25519_BASEPOINT_POINT * curve25519_dalek::Scalar::from(7u64);
+        let (ed, curve) = (point.compress(), point.to_montgomery().to_bytes());
         {
             let conn = Connection::open(&path).unwrap();
             conn.execute_batch("PRAGMA user_version = 1").unwrap();

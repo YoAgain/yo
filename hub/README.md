@@ -10,7 +10,7 @@ Every route the hub serves, from `Hub::router` in `src/lib.rs`. Anything else is
 (known path, other method), with an empty body. Bodies are TLS-encoded structs (`core/wire/src/api.rs`).
 
 **Signed** means a device's request signature (spec 6.2): headers `Yo-Device`, `Yo-Time`, `Yo-Signature`, an
-Ed25519 signature by the device's auth key over `"yo request v1"`, the method, the path **with its query, exactly as
+XEdDSA signature (Curve25519, libsignal) by the device's auth key over `"yo request v1"`, the method, the path **with its query, exactly as
 sent**, the time and the SHA-256 of the body. The hub accepts a time within 5 minutes of its clock and each
 signature once (an in-memory replay cache over that window). A signature that holds then costs one of the device's
 1200 signed requests per minute; one that does not costs nothing of the device's. An unknown device is `401`, a

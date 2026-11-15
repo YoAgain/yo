@@ -207,8 +207,8 @@ pub struct Config {
     /// The fewest characters (grapheme clusters) a username may have on this hub, from `YO_NAME_MIN` (default 2): a
     /// switch the operator can lower to 1, or raise, without an app update (spec 3.3).
     pub name_min: usize,
-    /// The seed of the hub's Ed25519 key (`YO_HUB_KEY_FILE`, 32 bytes, the operator's): it signs the answers that hand
-    /// out keys for a client that asks so (spec 6.10). Apps ship its public half.
+    /// The hub's Curve25519 private key (`YO_HUB_KEY_FILE`, 32 bytes, the operator's; `yo-hub hub-key new`): it signs
+    /// the answers that hand out keys for a client that asks so (spec 6.10), XEdDSA. Apps ship its public half.
     pub hub_key: [u8; 32],
     /// The server key and its certificate by the operator's trust root (`YO_SERVER_CERT_FILE`, made by
     /// `yo-hub trust-root server`): it signs the devices' sender certificates (spec 6.1). The hub does not start
@@ -270,7 +270,20 @@ pub fn read_reserved(path: Option<&str>) -> Result<Vec<Reserved>, String> {
 /// The hub key of `Config::for_tests`: tests pin its public half.
 pub const TEST_HUB_KEY: [u8; 32] = [0x48; 32];
 
-/// The hub key in a file: exactly 32 bytes (the seed).
+/// The public half of a hub key (32 bytes, as `/.well-known/yo-hub-key` serves it and the apps pin it).
+pub fn hub_public_key(private: &[u8; 32]) -> [u8; 32] {
+    let key = libsignal_protocol::PrivateKey::deserialize(private).expect("32 bytes are a Curve25519 private key");
+    key.public_key().expect("a public key").public_key_bytes().try_into().expect("32 bytes")
+}
+
+/// A new hub key: its private key (32 bytes) and its public key.
+pub fn new_hub_key() -> ([u8; 32], [u8; 32]) {
+    let pair = libsignal_protocol::KeyPair::generate(&mut rand::rng());
+    let private: [u8; 32] = pair.private_key.serialize().try_into().expect("32 bytes");
+    (private, hub_public_key(&private))
+}
+
+/// The hub key in a file: exactly 32 bytes (the Curve25519 private key).
 pub fn read_hub_key(path: &str) -> Result<[u8; 32], String> {
     let bytes = std::fs::read(path).map_err(|e| format!("{path}: {e}"))?;
     bytes.try_into().map_err(|_| format!("{path}: not 32 bytes"))

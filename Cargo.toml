@@ -12,7 +12,8 @@ license = "MIT"
 [workspace.dependencies]
 # Dependencies are pinned exactly: an upgrade is a deliberate change of this file.
 tls_codec = { version = "=0.5.0", features = ["derive"] }
-ed25519-dalek = { version = "=2.2.0", features = ["rand_core", "zeroize"] }
+# The one migration from the Ed25519 keys of before (an Edwards point to its Montgomery form): libsignal's version.
+curve25519-dalek = "=5.0.0"
 sha2 = "=0.10.9"
 hmac = "=0.12.1"
 chacha20poly1305 = "=0.10.1"

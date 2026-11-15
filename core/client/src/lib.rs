@@ -23,7 +23,6 @@ pub use yo_wire::content::{Content, Media};
 /// Usernames as the hub takes and compares them (spec 3.3), for the apps.
 pub use yo_wire::handle;
 
-use ed25519_dalek::{Signer as _, SigningKey};
 use identity::Key;
 use libsignal_protocol::{
     extract_decryption_error_message_from_serialized_content, message_decrypt, message_encrypt, process_prekey_bundle,
@@ -524,8 +523,8 @@ fn wall_ms() -> u64 {
     SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_millis() as u64
 }
 
-/// The time and signature headers of a signed request (spec 6.2), by `sign`: a device's auth key (Ed25519), or a
-/// backup door's (XEdDSA).
+/// The time and signature headers of a signed request (spec 6.2), by `sign`: a device's auth key, or a backup
+/// door's (XEdDSA both).
 fn signature_headers(
     sign: impl FnOnce(&[u8]) -> [u8; yo_wire::SIGNATURE_LEN],
     method: &str,
@@ -848,14 +847,14 @@ impl Client {
     ) -> Result<(Client, api::NewDevice)> {
         let device_key: Key = identity::random();
         let device_id: HubDeviceId = identity::random();
-        let auth = SigningKey::from_bytes(&identity::random());
-        // A registration id as Signal's: 14 bits, never 0.
+        let auth_secret = identity::new_account_secret(); // a Curve25519 private key, as the account's
+                                                          // A registration id as Signal's: 14 bits, never 0.
         let registration_id = u32::from(u16::from_be_bytes(identity::random()) & 0x3fff).max(1);
         let state = State {
             user_id: String::new(),
             username: None,
             account_secret: account.private_key().serialize().try_into().map_err(|_| Error::Internal("account key"))?,
-            auth_secret: auth.to_bytes(),
+            auth_secret,
             device_id,
             device_key,
             device_number: 0,
@@ -895,7 +894,7 @@ impl Client {
         let mut client = Client::with(transport, records, state);
         let prekeys = client.make_prekeys(PREKEY_TARGET, true)?;
         client.state.prekeys.left = PREKEY_TARGET;
-        let auth_key = auth.verifying_key().to_bytes();
+        let auth_key = identity::public_of(&auth_secret);
         let proof =
             identity::sign(&account, &api::registration_to_be_signed(handle, &device_id, &device_key, &auth_key));
         let device = api::NewDevice {
@@ -1379,9 +1378,9 @@ impl Client {
         let time = if floor >= wall + SIGN_AHEAD_MS { wall } else { wall.max(floor + 1) };
         self.last_request_ms = time;
         self.state.signed_until = time;
-        let key = SigningKey::from_bytes(&self.state.auth_secret);
+        let secret = self.state.auth_secret;
         let mut headers = vec![(HEADER_DEVICE.to_owned(), yo_wire::b64(&self.state.device_id))];
-        headers.extend(signature_headers(|m| key.sign(m).to_bytes(), method, path, time, body_hash));
+        headers.extend(signature_headers(|m| identity::sign_with(&secret, m), method, path, time, body_hash));
         (headers, time)
     }
 

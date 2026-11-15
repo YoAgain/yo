@@ -1,8 +1,7 @@
-//! Signed requests (spec 6.2): a device proves itself with its auth key (Ed25519), per request, without a session; a
-//! backup's fetch (spec 7) is signed the same way by a door's auth key (Curve25519, XEdDSA).
+//! Signed requests (spec 6.2): a device proves itself with its auth key, per request, without a session; a backup's
+//! fetch (spec 7) is signed the same way by a door's auth key. Both Curve25519, XEdDSA (libsignal).
 
 use crate::{sha256, Error, KEY_LEN};
-use ed25519_dalek::{Signature, VerifyingKey};
 use tls_codec::{TlsSerialize, TlsSize, VLBytes};
 
 pub const HEADER_DEVICE: &str = "yo-device";
@@ -56,21 +55,7 @@ pub fn verify_hash(
     body_hash: &[u8; 32],
     signature: &[u8],
 ) -> Result<(), Error> {
-    let key = VerifyingKey::from_bytes(auth_key).map_err(|_| Error::Signature)?;
-    let signature = Signature::from_slice(signature).map_err(|_| Error::Signature)?;
-    key.verify_strict(&to_be_signed_hash(method, path, time_ms, body_hash), &signature).map_err(|_| Error::Signature)
-}
-
-/// `verify_hash` for a backup door's auth key: XEdDSA by a Curve25519 key (spec 7).
-pub fn verify_door_hash(
-    door_key: &[u8; KEY_LEN],
-    method: &str,
-    path: &str,
-    time_ms: u64,
-    body_hash: &[u8; 32],
-    signature: &[u8],
-) -> Result<(), Error> {
-    crate::xeddsa_verify(door_key, &to_be_signed_hash(method, path, time_ms, body_hash), signature)
+    crate::xeddsa_verify(auth_key, &to_be_signed_hash(method, path, time_ms, body_hash), signature)
         .then_some(())
         .ok_or(Error::Signature)
 }
@@ -78,13 +63,14 @@ pub fn verify_door_hash(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ed25519_dalek::{Signer, SigningKey};
+    use libsignal_core::curve::KeyPair;
 
     #[test]
     fn binds_every_part() {
-        let key = SigningKey::from_bytes(&[9; 32]);
-        let public = key.verifying_key().to_bytes();
-        let sig = key.sign(&to_be_signed("GET", "/v1/inbox?wait=5", 1000, b"")).to_bytes();
+        let key = KeyPair::generate(&mut rand::rng());
+        let public: [u8; KEY_LEN] = key.public_key.public_key_bytes().try_into().unwrap();
+        let message = to_be_signed("GET", "/v1/inbox?wait=5", 1000, b"");
+        let sig = key.private_key.calculate_signature(&message, &mut rand::rng()).unwrap();
         assert!(verify(&public, "GET", "/v1/inbox?wait=5", 1000, b"", &sig).is_ok());
         assert!(verify(&public, "POST", "/v1/inbox?wait=5", 1000, b"", &sig).is_err());
         assert!(verify(&public, "GET", "/v1/inbox?wait=6", 1000, b"", &sig).is_err());

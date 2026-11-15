@@ -320,9 +320,10 @@ impl Hub {
     fn signed_answer(&self, headers: &HeaderMap, path: &str, request: &[u8], mut answer: Vec<u8>) -> Vec<u8> {
         let nonce = headers.get(hubsig::NONCE_HEADER).and_then(|v| v.to_str().ok()).and_then(hubsig::nonce);
         if let Some(nonce) = nonce {
-            let key = ed25519_dalek::SigningKey::from_bytes(&self.config.hub_key);
-            let signature = ed25519_dalek::Signer::sign(&key, &hubsig::message(&nonce, path, request, &answer));
-            answer.extend_from_slice(&signature.to_bytes());
+            let key = libsignal_protocol::PrivateKey::deserialize(&self.config.hub_key).expect("32 bytes");
+            let message = hubsig::message(&nonce, path, request, &answer);
+            let signature = key.calculate_signature(&message, &mut rand::rng()).expect("a Curve25519 key signs");
+            answer.extend_from_slice(&signature);
         }
         answer
     }
@@ -670,10 +671,10 @@ impl Hub {
         good.then_some(()).ok_or_else(bad)
     }
 
-    /// A registration id in libsignal's range (14 bits, not 0) and an auth key that is an Ed25519 point (spec 4.1,
-    /// 6.2): else the device's bundles and signed requests could never work.
+    /// A registration id in libsignal's range (14 bits, not 0) and an auth key that is a canonical Curve25519 key
+    /// (spec 4.1, 6.2): else the device's bundles and signed requests could never work.
     fn device_keys_usable(registration_id: u32, auth_key: &Key) -> bool {
-        (1..=0x3fff).contains(&registration_id) && ed25519_dalek::VerifyingKey::from_bytes(auth_key).is_ok()
+        (1..=0x3fff).contains(&registration_id) && yo_wire::curve_key_usable(auth_key)
     }
 
     /// Everything about a registering device that is checked before it is stored (spec 6.4): its certificate, the
@@ -891,7 +892,7 @@ async fn fetch_backup(
     let empty = sha256(&[]);
     let signed = [auth.passkey, auth.code]
         .map(|key| {
-            let verified = yo_wire::request::verify_door_hash(
+            let verified = yo_wire::request::verify_hash(
                 key.as_ref().unwrap_or(&NO_KEY),
                 method.as_str(),
                 path,
@@ -947,7 +948,7 @@ async fn sender_certificate(
 }
 
 async fn hub_key(State(hub): Hubs) -> Vec<u8> {
-    ed25519_dalek::SigningKey::from_bytes(&hub.config.hub_key).verifying_key().to_bytes().to_vec()
+    config::hub_public_key(&hub.config.hub_key).to_vec()
 }
 
 async fn lookup(
@@ -1471,15 +1472,13 @@ mod tests {
 
     #[test]
     fn a_registration_id_out_of_range_or_an_auth_key_off_the_curve_is_refused() {
-        let good = ed25519_dalek::SigningKey::from_bytes(&[3; 32]).verifying_key().to_bytes();
+        let good = config::hub_public_key(&[3; 32]);
         assert!(Hub::device_keys_usable(1, &good) && Hub::device_keys_usable(0x3fff, &good));
         assert!(!Hub::device_keys_usable(0, &good) && !Hub::device_keys_usable(0x4000, &good));
-        // About half of all y have no x on the curve.
-        let off = (2u8..=255)
-            .map(|y| [&[y][..], &[0; 31]].concat().try_into().unwrap())
-            .find(|key: &Key| ed25519_dalek::VerifyingKey::from_bytes(key).is_err())
-            .unwrap();
-        assert!(!Hub::device_keys_usable(1, &off), "no point");
+        // Not canonical: its top bit set.
+        let mut off = good;
+        off[31] |= 0x80;
+        assert!(!Hub::device_keys_usable(1, &off), "not canonical");
     }
 
     #[test]
