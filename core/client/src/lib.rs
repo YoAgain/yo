@@ -2970,32 +2970,41 @@ impl Client {
     /// Marks a contact verified (or not) after comparing safety numbers. Any contact can be verified (spec 3.4).
     pub fn set_verified(&mut self, who: &str, verified: bool) -> Result<()> {
         let user = self.contact_user(who)?;
-        let contact = self.state.contacts.get_mut(&user).ok_or(Error::NotOnYo)?;
-        contact.verified = verified;
-        if verified {
-            contact.unconfirmed = false;
-        }
-        self.persist()
+        // Saved, or not made at all: a change kept only in memory would hold until a restart undid it.
+        self.atomic(|c| {
+            let contact = c.state.contacts.get_mut(&user).ok_or(Error::NotOnYo)?;
+            contact.verified = verified;
+            if verified {
+                contact.unconfirmed = false;
+            }
+            c.persist()
+        })
     }
 
     /// Accepts a verified contact's new account key: sending to it goes on (unverified until compared again).
     pub fn confirm_identity(&mut self, who: &str) -> Result<()> {
         let user = self.contact_user(who)?;
-        self.state.contacts.get_mut(&user).ok_or(Error::NotOnYo)?.unconfirmed = false;
-        self.persist()
+        self.atomic(|c| {
+            c.state.contacts.get_mut(&user).ok_or(Error::NotOnYo)?.unconfirmed = false;
+            c.persist()
+        })
     }
 
     /// Blocks a user (by user id or any handle; one this device does not know is asked of the hub), or unblocks:
     /// nothing from them is shown, nothing is sent to them (spec 4.8).
     pub fn set_blocked(&mut self, who: &str, blocked: bool) -> Result<()> {
         let (user, shown) = self.user_named(&Handle::parse(who)?)?;
-        self.apply_block(&user, blocked);
-        if let Some(shown) = shown {
-            note_handle(self.state.contacts.get_mut(&user).expect("blocked"), shown);
-        }
-        // Kept in the storage too, so a new phone has it (spec 6.9).
-        self.storage_block(&user, blocked);
-        self.persist()
+        // Saved, or not made at all: a block kept only in memory (the disk full) would hide them until a restart
+        // brought back the state without it, and with it what they sent meanwhile.
+        self.atomic(|c| {
+            c.apply_block(&user, blocked);
+            if let Some(shown) = shown {
+                note_handle(c.state.contacts.get_mut(&user).expect("blocked"), shown);
+            }
+            // Kept in the storage too, so a new phone has it (spec 6.9).
+            c.storage_block(&user, blocked);
+            c.persist()
+        })
     }
 
     /// Blocks or unblocks a user on this device. What came from them before and waits to be handed out (after a

@@ -184,3 +184,43 @@ fn a_clock_set_right_again_reaches_the_hub_at_once() {
     b.send(a.user_id(), Content::Text("back".into())).unwrap();
     assert_eq!(texts(&a.sync(0).unwrap()), ["back"]);
 }
+
+/// A disk that is full for a while: every save fails.
+#[derive(Default)]
+struct Disk(std::sync::atomic::AtomicBool);
+
+impl yo_core::Store for Disk {
+    fn save(&self, _blob: Vec<u8>) -> Result<(), String> {
+        if self.0.load(std::sync::atomic::Ordering::Relaxed) {
+            Err("no space left on device".into())
+        } else {
+            Ok(())
+        }
+    }
+}
+
+/// A block whose save failed (the disk full) stayed in memory: the contact was hidden until the app was restarted
+/// from the state without the block, which then showed what they had sent meanwhile (yo-scale). A failed save now
+/// leaves the block as it was, as every operation (also verifying and confirming a key).
+#[test]
+fn a_block_that_could_not_be_saved_is_not_made() {
+    let hub = TestHub::start();
+    let n = random_u64() % 100_000;
+    let mut a = by_name(Http::new(hub.url()), &format!("Full{n}"), None).unwrap();
+    let mut b = by_name(Http::new(hub.url()), &format!("Pest{n}"), None).unwrap();
+    b.send(a.user_id(), Content::Text("hi".into())).unwrap();
+    assert_eq!(texts(&a.sync(0).unwrap()), ["hi"]);
+    let disk = std::sync::Arc::new(Disk::default());
+    a.persist_to(disk.clone(), [1; 32]).unwrap();
+    disk.0.store(true, std::sync::atomic::Ordering::Relaxed);
+    assert!(matches!(a.set_blocked(b.user_id(), true), Err(Error::Save(_))));
+    assert!(matches!(a.set_verified(b.user_id(), true), Err(Error::Save(_))));
+    let contact = a.contacts().into_iter().find(|c| c.user == b.user_id()).unwrap();
+    assert!(!contact.blocked && !contact.verified, "not saved, not made: {contact:?}");
+    disk.0.store(false, std::sync::atomic::Ordering::Relaxed);
+    b.send(a.user_id(), Content::Text("still here".into())).unwrap();
+    assert_eq!(texts(&a.sync(0).unwrap()), ["still here"], "not blocked, as on the disk");
+    a.set_blocked(b.user_id(), true).unwrap();
+    b.send(a.user_id(), Content::Text("hidden".into())).unwrap();
+    assert!(texts(&a.sync(0).unwrap()).is_empty());
+}
