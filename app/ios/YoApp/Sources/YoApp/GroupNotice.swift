@@ -1,6 +1,6 @@
 // What happened in a group, as a picture sent to it: "LEO added MIA to FAMILY", "LEO removed NOAH from FAMILY", "LEO
-// renamed the group to FAMILY", "LEO made FAMILY", "LEO left FAMILY". Every member sees it as a photo on the group's bar, as Signal shows such
-// changes in the chat. Made on the phone that made the change (YoCard), sent as any group photo (MediaOutbox).
+// renamed the group to FAMILY", "LEO made FAMILY with MIA and NOAH", "LEO left FAMILY". Every member sees it as a
+// photo on the group's bar, as Signal shows such changes in the chat. Made on the phone that made the change (YoCard), sent as any group photo (MediaOutbox).
 import SwiftUI
 import YoCore
 
@@ -16,6 +16,19 @@ enum GroupNotice {
     let id = UUID()
     let queued = await outbox.send(file, to: bar.target, from: client, accounts: accounts, id: id)
     return queued ? id : nil
+  }
+
+  /// Who else is in it, for "LEO made FAMILY with MIA, NOAH and ZOE": at most four by name, then "and 3 more".
+  static func with(_ names: [String]) -> [YoCard.Piece] {
+    guard !names.isEmpty else { return [] }
+    let shown = names.count > 4 ? Array(names.prefix(3)) : names
+    var pieces: [YoCard.Piece] = [" with "]
+    for (i, name) in shown.enumerated() {
+      if i > 0 { pieces.append(i == shown.count - 1 && shown.count == names.count ? " and " : ", ") }
+      pieces.append(.user(name))
+    }
+    if shown.count < names.count { pieces.append(" and \(names.count - shown.count) more") }
+    return pieces
   }
 
   /// This account's name, as the pictures say who did it.

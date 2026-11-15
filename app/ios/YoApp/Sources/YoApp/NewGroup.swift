@@ -80,7 +80,10 @@ struct NewGroupSheet: View {
         await inbox.absorb(made.events, client: client, friends: friends)
         if let groups = try? await Hub.run({ client.groups() }) { friends.takeGroups(groups) }
         if let bar = friends.all.first(where: { $0.group == made.id }) {
-          await GroupNotice.send([.user(GroupNotice.me(accounts)), " made ", .group(bar.name)], to: bar, accounts: accounts, outbox: outbox)
+          let names = members.compactMap { id in friends.all.first { $0.user == id }?.name }.sorted()
+          await GroupNotice.send(
+            [.user(GroupNotice.me(accounts)), " made ", .group(bar.name)] + GroupNotice.with(names), to: bar,
+            accounts: accounts, outbox: outbox)
         }
         dismiss()
       } catch {
