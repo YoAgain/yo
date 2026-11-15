@@ -409,7 +409,7 @@ struct FriendList: View {
   }
 
   /// The last bar: "+", as in the original. Tapped, it opens into bars of their own: "+ Friend" (the name typed right
-  /// there), "+ Group", Invite, and Settings in red; a tap anywhere else, a scroll, or a while untouched closes it.
+  /// there), "+ Group", Invite, and Settings (a red "1" while the account is not secured); a tap anywhere else, a scroll, or a while untouched closes it.
   @ViewBuilder private var addRow: some View {
     let color = Color.row(friends.nextColor).opacity(cameraOn ? 0.45 : 1)  // the colour the new friend will have
     if adding {
@@ -467,11 +467,12 @@ struct FriendList: View {
       }
       .buttonStyle(.plain)
       .simultaneousGesture(TapGesture().onEnded { withAnimation(.snappy) { addMenu = false } })
-      // Settings in the original's red, as its round menu button was.
-      RowButton("Settings", color: Color.alizarin.opacity(cameraOn ? 0.45 : 1)) {
+      // A red "1" while something is left to secure (Secure Your Account), as an app's badge.
+      RowButton("Settings", color: Color.row(friends.nextColor + 3).opacity(cameraOn ? 0.45 : 1)) {
         withAnimation(.snappy) { addMenu = false }
         settings = true
       }
+      .overlay(alignment: .trailing) { toDoBadge }
       .task {
         try? await Task.sleep(for: .seconds(10))  // untouched for a while, it closes again
         withAnimation(.snappy) { addMenu = false }
@@ -483,7 +484,22 @@ struct FriendList: View {
           addMenu = true
         }
       }
+      .overlay(alignment: .trailing) { toDoBadge }  // closed, "+" carries it: Settings is behind it
       .accessibilityLabel("Add and Settings")
+    }
+  }
+
+  /// A red "1" at a bar's end while the account is not yet secured (AccountStore.toDo), as iOS badges an app.
+  @ViewBuilder private var toDoBadge: some View {
+    if accounts.toDo > 0 {
+      Text("\(accounts.toDo)")
+        .font(.system(size: 15, weight: .bold).monospacedDigit())
+        .foregroundStyle(.white)
+        .frame(minWidth: 26, minHeight: 26)
+        .background(Color.alizarin, in: .circle)
+        .padding(.trailing, BarLine.endPadding)
+        .allowsHitTesting(false)
+        .accessibilityLabel("Something to do in Settings")
     }
   }
 
@@ -592,9 +608,9 @@ struct FriendList: View {
             Task { await readZooms() }
           } label: {
             Image(systemName: "arrow.triangle.2.circlepath")
-              .font(.body.weight(.medium))
+              .font(.system(size: 22, weight: .semibold))
               .foregroundStyle(.white)
-              .frame(width: 48, height: 48)
+              .frame(width: 60, height: 60)
               .contentShape(.circle)
           }
           .buttonStyle(.plain)
@@ -1059,13 +1075,14 @@ struct LibraryLabel: View {
       Image(uiImage: thumbnail)
         .resizable()
         .scaledToFill()
-        .frame(width: 44, height: 44)
+        .frame(width: 60, height: 60)
         .clipShape(.circle)
     } else {
       Image(systemName: "photo.on.rectangle")
-        .font(.body.weight(.medium))
+        .font(.system(size: 22, weight: .semibold))
         .foregroundStyle(.white)
-        .frame(width: 44, height: 44)
+        .frame(width: 60, height: 60)
+        .contentShape(.circle)
     }
   }
 }
