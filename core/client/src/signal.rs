@@ -27,6 +27,98 @@ const LAST_RESORT_SEEN: usize = 20_000;
 
 pub type Entries = BTreeMap<String, Vec<u8>>;
 
+/// Entries that can undo what an operation changed (`Records::begin` … `rollback`, nested as the client's
+/// transactions are): each key's value before its first change in the operation is kept, not the whole map, so a
+/// transaction costs what it touches.
+#[derive(Default)]
+pub struct Journaled {
+    entries: Entries,
+    undo: Vec<BTreeMap<String, Option<Vec<u8>>>>,
+}
+
+impl std::ops::Deref for Journaled {
+    type Target = Entries;
+    fn deref(&self) -> &Entries {
+        &self.entries
+    }
+}
+
+impl From<Entries> for Journaled {
+    fn from(entries: Entries) -> Self {
+        Journaled { entries, undo: Vec::new() }
+    }
+}
+
+impl Journaled {
+    fn note(&mut self, key: &str) {
+        if let Some(undo) = self.undo.last_mut() {
+            if !undo.contains_key(key) {
+                undo.insert(key.to_owned(), self.entries.get(key).cloned());
+            }
+        }
+    }
+
+    pub fn insert(&mut self, key: String, value: Vec<u8>) -> Option<Vec<u8>> {
+        self.note(&key);
+        self.entries.insert(key, value)
+    }
+
+    pub fn remove(&mut self, key: &str) -> Option<Vec<u8>> {
+        self.note(key);
+        self.entries.remove(key)
+    }
+
+    fn begin(&mut self) {
+        self.undo.push(BTreeMap::new());
+    }
+
+    /// The operation stands: what it kept aside goes to the one around it (whose older value wins), or away.
+    fn commit(&mut self) {
+        let Some(undo) = self.undo.pop() else { return };
+        match self.undo.last_mut() {
+            Some(outer) => {
+                for (key, old) in undo {
+                    if outer.contains_key(&key) {
+                        if let Some(mut old) = old {
+                            old.zeroize();
+                        }
+                    } else {
+                        outer.insert(key, old);
+                    }
+                }
+            }
+            None => {
+                for (_, old) in undo {
+                    if let Some(mut old) = old {
+                        old.zeroize();
+                    }
+                }
+            }
+        }
+    }
+
+    fn rollback(&mut self) {
+        for (key, old) in self.undo.pop().unwrap_or_default() {
+            let now = match old {
+                Some(old) => self.entries.insert(key, old),
+                None => self.entries.remove(&key),
+            };
+            if let Some(mut now) = now {
+                now.zeroize();
+            }
+        }
+    }
+}
+
+impl Drop for Journaled {
+    fn drop(&mut self) {
+        wipe(&mut self.entries);
+        while !self.undo.is_empty() {
+            self.commit();
+        }
+    }
+}
+
 /// Runs one of libsignal's store operations: they are `async`, but the store is in memory and never waits.
 pub fn now<F: Future>(future: F) -> F::Output {
     match pin!(future).as_mut().poll(&mut Context::from_waker(Waker::noop())) {
@@ -75,8 +167,8 @@ pub struct Records {
     pub kyber: Kyber,
 }
 
-pub struct Sessions(Entries);
-pub struct OneTime(Entries);
+pub struct Sessions(Journaled);
+pub struct OneTime(Journaled);
 
 impl OneTime {
     /// One-time EC prekeys whose private keys this device holds.
@@ -84,10 +176,10 @@ impl OneTime {
         self.0.len()
     }
 }
-pub struct Signed(Entries);
+pub struct Signed(Journaled);
 
 pub struct Identities {
-    seen: Entries,
+    seen: Journaled,
     pair: IdentityKeyPair,
     registration_id: u32,
     /// The identity the next operation must see at an address (by name, the user): the pinned account key's.
@@ -96,12 +188,21 @@ pub struct Identities {
 
 pub struct Kyber {
     /// One-time ones by `k/id`, last resorts by `kl/id`.
-    keys: Entries,
+    keys: Journaled,
     /// Base keys seen with each last resort (its id, the key): a message made with one again is a replay.
     seen: VecDeque<(u32, Vec<u8>)>,
+    /// `seen` as it was when each open operation began, kept at its first change in it (`Records::begin`).
+    seen_before: Vec<Option<VecDeque<(u32, Vec<u8>)>>>,
 }
 
 impl Kyber {
+    /// Keeps `seen` aside before its first change in an operation (`Records::begin`).
+    fn keep_seen(&mut self) {
+        if let Some(before @ None) = self.seen_before.last_mut() {
+            *before = Some(self.seen.clone());
+        }
+    }
+
     /// One-time Kyber prekeys whose private keys this device holds.
     pub fn one_time(&self) -> usize {
         self.keys.keys().filter(|k| k.starts_with("k/")).count()
@@ -127,17 +228,18 @@ fn wipe(entries: &mut Entries) {
 impl Records {
     pub fn new(entries: &Entries, account_secret: &[u8; 32], registration_id: u32) -> Result<Self> {
         Ok(Records {
-            sessions: Sessions(part(entries, "s")),
+            sessions: Sessions(part(entries, "s").into()),
             identities: Identities {
-                seen: part(entries, "i"),
+                seen: part(entries, "i").into(),
                 pair: identity_pair(account_secret)?,
                 registration_id,
                 trusted: None,
             },
-            prekeys: OneTime(part(entries, "p")),
-            signed: Signed(part(entries, "sp")),
+            prekeys: OneTime(part(entries, "p").into()),
+            signed: Signed(part(entries, "sp").into()),
             kyber: Kyber {
-                keys: part(entries, "k"),
+                seen_before: Vec::new(),
+                keys: part(entries, "k").into(),
                 seen: entries
                     .get("seen")
                     .map(|seen| {
@@ -155,17 +257,52 @@ impl Records {
     pub fn export(&self) -> Entries {
         let mut out = Entries::new();
         for (prefix, entries) in [
-            ("s", &self.sessions.0),
-            ("i", &self.identities.seen),
-            ("p", &self.prekeys.0),
-            ("sp", &self.signed.0),
-            ("k", &self.kyber.keys),
+            ("s", &*self.sessions.0),
+            ("i", &*self.identities.seen),
+            ("p", &*self.prekeys.0),
+            ("sp", &*self.signed.0),
+            ("k", &*self.kyber.keys),
         ] {
             out.extend(entries.iter().map(|(k, v)| (format!("{prefix}/{k}"), v.clone())));
         }
         let seen = self.kyber.seen.iter().flat_map(|(id, key)| id.to_be_bytes().into_iter().chain(key.iter().copied()));
         out.insert("seen".into(), seen.collect());
         out
+    }
+
+    /// Starts an operation that `rollback` can undo (`commit` ends it; operations nest): only what it changes is
+    /// kept aside.
+    pub fn begin(&mut self) {
+        for journaled in self.journals() {
+            journaled.begin();
+        }
+        self.kyber.seen_before.push(None);
+    }
+
+    pub fn commit(&mut self) {
+        for journaled in self.journals() {
+            journaled.commit();
+        }
+        if let Some(before) = self.kyber.seen_before.pop() {
+            // The one around it keeps its own older copy, if it made one.
+            if let (Some(seen), Some(outer @ None)) = (before, self.kyber.seen_before.last_mut()) {
+                *outer = Some(seen);
+            }
+        }
+    }
+
+    /// The records as when the operation began.
+    pub fn rollback(&mut self) {
+        for journaled in self.journals() {
+            journaled.rollback();
+        }
+        if let Some(Some(seen)) = self.kyber.seen_before.pop() {
+            self.kyber.seen = seen;
+        }
+    }
+
+    fn journals(&mut self) -> [&mut Journaled; 5] {
+        [&mut self.sessions.0, &mut self.identities.seen, &mut self.prekeys.0, &mut self.signed.0, &mut self.kyber.keys]
     }
 
     /// Trusts `identity` at the addresses of `address`'s user for the next operation, and nothing else.
@@ -207,6 +344,7 @@ impl Records {
             self.signed.0.remove(&id.to_string());
         } else {
             self.kyber.keys.remove(&format!("{kind}/{id}"));
+            self.kyber.keep_seen();
             self.kyber.seen.retain(|(of, _)| *of != id);
         }
     }
@@ -262,15 +400,6 @@ impl Records {
         let prefix = if last_resort { "kl" } else { "k" };
         self.kyber.keys.insert(format!("{prefix}/{id}"), record.serialize().map_err(signal)?);
         Ok(yo_wire::api::SignedPrekey { id, key: public.to_vec().into(), signature: signature.into() })
-    }
-}
-
-impl Drop for Records {
-    fn drop(&mut self) {
-        wipe(&mut self.sessions.0);
-        wipe(&mut self.prekeys.0);
-        wipe(&mut self.signed.0);
-        wipe(&mut self.kyber.keys);
     }
 }
 
@@ -379,6 +508,7 @@ impl KyberPreKeyStore for Kyber {
                 "a last resort prekey message again".into(),
             ));
         }
+        self.keep_seen();
         self.seen.push_back(seen);
         // A marker goes with its prekey; only past the bound (20,000 sessions started on last resorts within a
         // prekey's month) the oldest go before it.
@@ -397,7 +527,7 @@ mod tests {
 
     #[test]
     fn a_last_resort_replay_is_refused_while_its_prekey_is_kept_and_its_markers_go_with_it() {
-        let mut kyber = Kyber { keys: Entries::new(), seen: VecDeque::new() };
+        let mut kyber = Kyber { keys: Entries::new().into(), seen: VecDeque::new(), seen_before: Vec::new() };
         kyber.keys.insert("kl/1".into(), vec![1]);
         kyber.keys.insert("kl/2".into(), vec![2]);
         let base = KeyPair::generate(&mut rand::rng()).public_key;
@@ -408,6 +538,29 @@ mod tests {
         kyber.keys.remove("kl/1");
         now(kyber.mark_kyber_pre_key_used(two, signed, &base)).unwrap();
         assert!(kyber.seen.iter().all(|(id, _)| *id == 2), "the gone prekey's markers went");
+    }
+
+    #[test]
+    fn an_operation_undoes_what_it_changed_also_nested() {
+        let mut j = Journaled::from(Entries::from([("a".into(), vec![1]), ("b".into(), vec![2])]));
+        j.begin();
+        j.insert("a".into(), vec![10]);
+        j.begin();
+        j.remove("b");
+        j.insert("c".into(), vec![3]);
+        j.rollback(); // the inner one: b back, c gone, a as the outer one left it
+        assert_eq!(*j, Entries::from([("a".into(), vec![10]), ("b".into(), vec![2])]));
+        j.begin();
+        j.insert("a".into(), vec![11]);
+        j.remove("b");
+        j.commit(); // into the outer one, whose older values win
+        j.rollback();
+        assert_eq!(*j, Entries::from([("a".into(), vec![1]), ("b".into(), vec![2])]));
+        j.begin();
+        j.insert("d".into(), vec![4]);
+        j.commit();
+        assert_eq!(j.get("d"), Some(&vec![4]));
+        assert!(j.undo.is_empty());
     }
 
     #[test]

@@ -315,6 +315,8 @@ pub struct Client {
     drop_reasons: Vec<String>,
     /// Users whose envelopes are on their way to the hub (`deliveries`): nothing else to them goes meanwhile.
     delivering: BTreeSet<String>,
+    /// An envelope was made (and its ratchet moved) since the state was last saved: saved before anything leaves.
+    envelopes_unsaved: std::cell::Cell<bool>,
     /// Until when (clock) the inbox counts as up to date: the end of a long wait under way, or when it was emptied.
     inbox_fresh_until: u64,
     /// Keys of photos and videos received are forgotten before anything is kept (a bot that never opens them).
@@ -726,6 +728,7 @@ impl Client {
             dropped: 0,
             drop_reasons: Vec::new(),
             delivering: BTreeSet::new(),
+            envelopes_unsaved: std::cell::Cell::new(false),
             inbox_fresh_until: 0,
             media_keys_forgotten: false,
             guest_events: None,
@@ -844,9 +847,11 @@ impl Client {
 
     fn persist(&self) -> Result<()> {
         match &self.store {
-            Some((store, key)) => store.save(self.export(key)).map_err(Error::Save),
-            None => Ok(()),
+            Some((store, key)) => store.save(self.export(key)).map_err(Error::Save)?,
+            None => {}
         }
+        self.envelopes_unsaved.set(false);
+        Ok(())
     }
 
     fn push_event(&mut self, event: Event) {
@@ -857,11 +862,13 @@ impl Client {
     /// talks to the hub in a way the hub remembers may run inside: what it accepted cannot be rolled back.
     fn atomic<T>(&mut self, f: impl FnOnce(&mut Self) -> Result<T>) -> Result<T> {
         let state = self.state.clone();
-        let entries = self.records.export();
+        // The records keep aside only what the operation changes (they nest as these transactions do).
+        self.records.begin();
         let result = f(self);
-        if result.is_err() {
-            self.records = Records::new(&entries, &state.account_secret, state.registration_id)
-                .expect("the records it was made from");
+        if result.is_ok() {
+            self.records.commit();
+        } else {
+            self.records.rollback();
             // What the hub was asked stays asked: the limits on recovery lookups (spec 4.6) hold though the payload
             // that made them failed after.
             let (asked, lookups) = (std::mem::take(&mut self.state.roster_asked), self.state.recovery_lookups);
@@ -1411,6 +1418,31 @@ impl Client {
         }
     }
 
+    /// Makes the envelopes of what waits for `user` now, where its sessions are there and nothing of it waits on
+    /// another flush (local work; what cannot be made now is made when it is sent, `deliveries`).
+    fn encrypt_waiting(&mut self, user: &str) {
+        if self.delivering.contains(user) || !self.without_session(user).is_empty() || self.blocked(user) {
+            return;
+        }
+        let current: Vec<Key> = self.roster(user).map(|(_, d)| d.iter().map(|d| d.key).collect()).unwrap_or_default();
+        if current.is_empty() {
+            return;
+        }
+        for i in 0..self.state.outbox.len() {
+            let item = &self.state.outbox[i];
+            if item.user != user || item.envelope.is_some() || !self.still_in_group(item) {
+                continue;
+            }
+            let plain = item.plain.clone();
+            if let Ok((envelope, made_for)) = self.atomic(|c| c.encrypt_for(user, &plain)) {
+                let item = &mut self.state.outbox[i];
+                item.envelope = Some(envelope);
+                item.made_for = made_for;
+                self.envelopes_unsaved.set(true);
+            }
+        }
+    }
+
     fn enqueue(&mut self, user: &str, plain: Vec<u8>) {
         self.state.next_seq += 1;
         self.state.outbox.push_back(Outgoing {
@@ -1547,6 +1579,7 @@ impl Client {
                         item.envelope = Some(envelope);
                         item.made_for = made_for;
                         encrypted = true;
+                        self.envelopes_unsaved.set(true);
                     }
                     Err(error) => {
                         self.note(format!("encrypt: {error}"));
@@ -1558,7 +1591,7 @@ impl Client {
         }
         // Saved before anything leaves: a crash after the hub took an envelope must not bring back the ratchet state
         // that made it. A repeat after a crash is harmless, the receiver skips what it has seen.
-        if encrypted || !self.state.outbox.is_empty() {
+        if encrypted || self.envelopes_unsaved.get() {
             self.persist()?;
         }
         let token_key =
@@ -2412,7 +2445,12 @@ impl Client {
         // A name not yet told goes first.
         self.send_profiles();
         // Saved with the message in it, or not made at all (spec 4.7).
-        self.atomic(|c| c.send_message(&peer, content).and_then(|()| c.persist()))?;
+        // Its envelope made in the same step when the sessions are there: one save before it leaves, not two.
+        self.atomic(|c| {
+            c.send_message(&peer, content)?;
+            c.encrypt_waiting(&peer);
+            c.persist()
+        })?;
         self.deliver_now()?;
         // The hub knows the user no more: the message went nowhere. Its app too old: the message waits for it.
         self.check_sendable(Some(&peer))?;

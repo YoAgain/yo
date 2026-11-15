@@ -7,6 +7,75 @@ use crate::signal::Entries;
 use chacha20poly1305::aead::{Aead, KeyInit, Payload};
 use chacha20poly1305::ChaCha20Poly1305;
 use serde::{Deserialize, Serialize};
+
+/// Bytes in the sealed JSON as base64url text, not as an array of numbers (a third of the size, less to seal on every
+/// save); the arrays of states saved before are read too.
+mod compact {
+    use serde::{de::Error as _, Deserialize, Deserializer, Serializer};
+    use std::collections::VecDeque;
+
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum Bytes {
+        Text(String),
+        Numbers(Vec<u8>),
+    }
+
+    impl Bytes {
+        fn bytes<E: serde::de::Error>(self) -> Result<Vec<u8>, E> {
+            match self {
+                Bytes::Text(text) => yo_wire::unb64(&text).map_err(|_| E::custom("base64")),
+                Bytes::Numbers(bytes) => Ok(bytes),
+            }
+        }
+    }
+
+    pub mod bytes {
+        use super::*;
+        pub fn serialize<S: Serializer>(value: &[u8], s: S) -> Result<S::Ok, S::Error> {
+            s.serialize_str(&yo_wire::b64(value))
+        }
+        pub fn deserialize<'de, D: Deserializer<'de>>(d: D) -> Result<Vec<u8>, D::Error> {
+            Bytes::deserialize(d)?.bytes()
+        }
+    }
+
+    pub mod optional {
+        use super::*;
+        pub fn serialize<S: Serializer>(value: &Option<Vec<u8>>, s: S) -> Result<S::Ok, S::Error> {
+            match value {
+                Some(value) => s.serialize_some(&yo_wire::b64(value)),
+                None => s.serialize_none(),
+            }
+        }
+        pub fn deserialize<'de, D: Deserializer<'de>>(d: D) -> Result<Option<Vec<u8>>, D::Error> {
+            Option::<Bytes>::deserialize(d)?.map(Bytes::bytes).transpose()
+        }
+    }
+
+    pub mod list {
+        use super::*;
+        pub fn serialize<S: Serializer>(value: &VecDeque<Vec<u8>>, s: S) -> Result<S::Ok, S::Error> {
+            s.collect_seq(value.iter().map(|v| yo_wire::b64(v)))
+        }
+        pub fn deserialize<'de, D: Deserializer<'de>>(d: D) -> Result<VecDeque<Vec<u8>>, D::Error> {
+            Vec::<Bytes>::deserialize(d)?.into_iter().map(Bytes::bytes).collect()
+        }
+    }
+
+    pub mod hashes {
+        use super::*;
+        pub fn serialize<S: Serializer>(value: &VecDeque<[u8; 32]>, s: S) -> Result<S::Ok, S::Error> {
+            s.collect_seq(value.iter().map(|v| yo_wire::b64(v)))
+        }
+        pub fn deserialize<'de, D: Deserializer<'de>>(d: D) -> Result<VecDeque<[u8; 32]>, D::Error> {
+            Vec::<Bytes>::deserialize(d)?
+                .into_iter()
+                .map(|b| b.bytes().and_then(|v: Vec<u8>| <[u8; 32]>::try_from(v).map_err(|_| D::Error::custom("hash"))))
+                .collect()
+        }
+    }
+}
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use tls_codec::{TlsDeserializeBytes, TlsSerialize, TlsSize, VLBytes};
 use yo_wire::DeviceId;
@@ -45,6 +114,7 @@ pub struct Contact {
     /// The own name changed and is not told to the user yet (`set_name`): it goes when it can.
     pub profile_due: bool,
     /// The plaintexts of the last messages sent to the user: sent again when it asks (spec 4.6).
+    #[serde(with = "compact::list")]
     pub sent: VecDeque<Vec<u8>>,
     /// Something came from the user since the last receipt (spec 4.5).
     pub receipt_due: bool,
@@ -87,6 +157,7 @@ impl Contact {
 /// answered: after a crash it is finished from the state.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Registering {
+    #[serde(with = "compact::bytes")]
     pub request: Vec<u8>,
     /// Sent before: the hub may have taken it (then this device can sign, and is asked about first).
     pub sent: bool,
@@ -101,8 +172,10 @@ pub struct Outgoing {
     pub user: String,
     /// The session plaintext (`envelope::Plain`), sealed in the state: encrypted for the user's devices as they are
     /// when it goes.
+    #[serde(with = "compact::bytes")]
     pub plain: Vec<u8>,
     /// Its envelope once encrypted, with the account key and devices it was made for: made again if they changed.
+    #[serde(default, with = "compact::optional")]
     pub envelope: Option<Vec<u8>>,
     pub made_for: Vec<Key>,
 }
@@ -212,6 +285,7 @@ pub struct State {
     pub device_key: Key,
     /// Its number among the account's devices, as the hub gave it at registration: its sessions' address.
     pub device_number: u8,
+    #[serde(with = "compact::bytes")]
     pub certificate: Vec<u8>,
     /// Its registration id in its sessions.
     pub registration_id: u32,
@@ -230,6 +304,7 @@ pub struct State {
     /// again: once in normal operation, at least once across a crash.
     pub handed: Vec<StoredEvent>,
     /// Hashes of session messages already processed, against redelivery.
+    #[serde(with = "compact::hashes")]
     pub seen: VecDeque<[u8; 32]>,
     pub prekeys: Prekeys,
     /// The time of the last signed request (spec 6.2): the next is signed later, whichever process signs it.
@@ -247,6 +322,7 @@ pub struct State {
     /// The time of the last message sent: each later one strictly later.
     pub last_sent_ms: u64,
     /// Hashes of the last messages received (sender and plaintext): a copy sent again on a retry is skipped.
+    #[serde(with = "compact::hashes")]
     pub received: VecDeque<[u8; 32]>,
     /// Privacy Pass tokens for deliveries (spec 6.10): the hub's key they were made for (hex), and the tokens, the
     /// oldest first (`tokens::kept`).
@@ -279,6 +355,7 @@ pub struct State {
     /// Payloads from a device under another's number whose roster could not be asked now: received again later,
     /// not dropped (at most `DEFERRED`).
     #[serde(default)]
+    #[serde(with = "compact::list")]
     pub deferred: VecDeque<Vec<u8>>,
 }
 
@@ -362,4 +439,31 @@ pub fn hex(bytes: &[u8]) -> String {
 
 pub fn unhex(text: &str) -> Option<Vec<u8>> {
     (0..text.len()).step_by(2).map(|i| text.get(i..i + 2).and_then(|h| u8::from_str_radix(h, 16).ok())).collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::compact;
+    use std::collections::VecDeque;
+
+    #[derive(serde::Serialize, serde::Deserialize, PartialEq, Debug)]
+    struct T {
+        #[serde(with = "compact::list")]
+        sent: VecDeque<Vec<u8>>,
+        #[serde(with = "compact::hashes")]
+        seen: VecDeque<[u8; 32]>,
+        #[serde(default, with = "compact::optional")]
+        envelope: Option<Vec<u8>>,
+    }
+
+    #[test]
+    fn bytes_are_saved_as_text_and_read_as_numbers_too() {
+        let t = T { sent: [vec![1, 2, 3]].into(), seen: [[7; 32]].into(), envelope: Some(vec![9]) };
+        let json = serde_json::to_string(&t).unwrap();
+        assert!(!json.contains("[1,2,3]") && json.contains("\"AQID\""), "{json}");
+        assert_eq!(serde_json::from_str::<T>(&json).unwrap(), t);
+        let old = format!(r#"{{"sent":[[1,2,3]],"seen":[{:?}],"envelope":[9]}}"#, [7u8; 32]);
+        assert_eq!(serde_json::from_str::<T>(&old).unwrap(), t, "a state saved before");
+        assert_eq!(serde_json::from_str::<T>(r#"{"sent":[],"seen":[]}"#).unwrap().envelope, None);
+    }
 }
