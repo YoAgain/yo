@@ -64,16 +64,20 @@ final class Inbox {
   /// Counts Yos as they come, to tell whether more came during a batch.
   @ObservationIgnored private var came = 0
   static let batchSeconds = 0.1
-  /// Who sent the last Yo on a group's bar (by the bar's name): shown small beside its "Yo!!".
+  /// Who sent the last Yo on a group's bar (by its `Friend.mediaKey`): shown small beside its "Yo!!".
   var groupSenders: [String: String] = [:]
   /// Notifications already taken in, so one tapped and one collected on opening count once.
   @ObservationIgnored private var taken: Set<String> = []
   /// Photos and videos not yet seen, by sender, oldest first: kept on this iPhone until then (ReceivedMedia). By the
-  /// sender name's skeleton: a friend whose spelling changed since ("LEO", then "Leo") still finds theirs.
+  /// sender name's skeleton: a friend whose spelling changed since ("LEO", then "Leo") still finds theirs. A group's by
+  /// its id (an arrival `from` "group:" and the id), whatever it is called now.
   private var unseenMedia: [String: [Arrival]] = [:]
 
-  /// A friend's photos and videos not yet seen, oldest first; nil when none wait.
-  func media(from name: String) -> [Arrival]? { unseenMedia[Username.skeleton(name)] }
+  /// A bar's photos and videos not yet seen, oldest first; nil when none wait.
+  func media(for friend: Friend) -> [Arrival]? { unseenMedia[friend.mediaKey] }
+
+  /// The key an arrival's `from` is kept under: a group's as it is, a friend's name by its skeleton.
+  private static func mediaKey(_ from: String) -> String { from.hasPrefix("group:") ? from : Username.skeleton(from) }
 
   init() {
     Task { @MainActor in
@@ -84,7 +88,7 @@ final class Inbox {
 
   /// A photo or video kept, on its sender's bar until seen, in the order sent.
   private func add(_ arrival: Arrival) {
-    let key = Username.skeleton(arrival.from)
+    let key = Self.mediaKey(arrival.from)
     var waiting = unseenMedia[key] ?? []
     guard !waiting.contains(where: { $0.id == arrival.id }) else { return }
     waiting.insert(arrival, at: waiting.firstIndex { Arrival.older(arrival, $0) } ?? waiting.endIndex)
@@ -404,12 +408,13 @@ final class Inbox {
         }
         guard let bar = friends.groupBar(group) else { break }
         let from = contacts.first { $0.user == user }
-        groupSenders[bar.name] = friends.all.first { $0.user == user }?.name ?? from?.handles.first ?? from?.name ?? "?"
+        groupSenders[bar.mediaKey] = friends.all.first { $0.user == user }?.name ?? from?.handles.first ?? from?.name ?? "?"
         received(id: "\(group)/\(user)/\(sentAtMs)", from: bar.name)
         count(from: bar.name)
         if let (media, kind) = kind.media {
           let id = Self.mediaID(group + user, sentAtMs, media)
-          guard ReceivedMedia.shared.expect(media, id: id, from: bar.name, kind: kind) else { continue }
+          // Kept by the group's id: a rename or a bar of the same name never takes it (Friend.mediaKey).
+          guard ReceivedMedia.shared.expect(media, id: id, from: bar.mediaKey, kind: kind) else { continue }
         }
       case .groupChanged:
         if let groups = try? await Hub.run({ client.groups() }) {
@@ -478,9 +483,11 @@ final class Inbox {
   func seen(_ shown: [Arrival]) {
     for arrival in shown {
       ReceivedMedia.shared.forget(arrival.id)
-      let key = Username.skeleton(arrival.from)
-      unseenMedia[key]?.removeAll { $0.id == arrival.id }
-      if unseenMedia[key]?.isEmpty == true { unseenMedia[key] = nil }
+      // By id wherever it is kept: the viewer shows it under the bar's name, not under the key it is kept by.
+      unseenMedia = unseenMedia.compactMapValues { kept in
+        let rest = kept.filter { $0.id != arrival.id }
+        return rest.isEmpty ? nil : rest
+      }
     }
   }
 
@@ -518,7 +525,7 @@ final class Inbox {
   private func show(_ arrival: Arrival) {
     chime()
     ready.append(Arrival(id: arrival.id, from: arrival.from))
-    if arrival.photo != nil { unseenMedia[Username.skeleton(arrival.from), default: []].append(arrival) }
+    if arrival.photo != nil { unseenMedia[Self.mediaKey(arrival.from), default: []].append(arrival) }
     came += 1
     guard !gathering else { return }
     gathering = true

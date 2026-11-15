@@ -380,10 +380,10 @@ struct FriendList: View {
   // MARK: Bars
 
   @ViewBuilder private func row(_ friend: Friend) -> some View {
-    let waiting = inbox.media(from: friend.name) ?? []
+    let waiting = inbox.media(for: friend) ?? []
     let bar = LiveBar(
       friend: friend,
-      from: inbox.groupSenders[friend.name],
+      from: inbox.groupSenders[friend.mediaKey],
       bar: bars.of(friend),
       color: .row(friend.color).opacity(cameraOn ? 0.45 : 1),  // see-through over the camera
       recording: recordingFor == friend,
@@ -968,7 +968,10 @@ struct FriendList: View {
     switch touch {
     case .down:
       shown = []
-      viewing = inbox.media(from: friend.name)
+      // Shown under the bar's name (a group's photos are kept by its id).
+      viewing = inbox.media(for: friend)?.map {
+        Arrival(id: $0.id, from: friend.name, photo: $0.photo, video: $0.video, file: $0.file)
+      }
     case .tapped:
       break  // it runs on by itself
     case .released:
@@ -1059,7 +1062,7 @@ extension FriendList {
   }
 
   /// Yos on a sender's bar: the stack counts them, and one on screen starts its time again. A new run (also over one
-  /// fading out) knocks. A photo stays until seen (Inbox.media(from:)).
+  /// fading out) knocks. A photo stays until seen (Inbox.media(for:)).
   private func land(_ name: String, _ first: String, count: Int) {
     if var landing = landed[name], landing.fading == nil {
       landing.total += count
