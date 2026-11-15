@@ -800,11 +800,13 @@ fn a_group_change_for_an_unconfirmed_member_waits_for_the_confirmation() {
     let (mut a, pb, mut b2) = a_friend_with_another_key(&hub);
     a.set_verified(&pb, true).unwrap();
     let b = user_of(&pb);
+    // The new key is met first (a held Yo), then the group is made.
+    assert_eq!(a.send_yo(&pb), Err(Error::Unconfirmed));
     let _ = a.create_group("PAIR", std::slice::from_ref(&b));
-    assert!(a.pending() >= 1, "held for the confirmation");
+    assert_eq!(a.pending(), 2, "the Yo and the group's change held for the confirmation");
     assert_eq!(unread_by(&mut b2), 0);
     a.confirm_identity(&pb).unwrap();
     a.send_yo(&pb).unwrap();
     assert_eq!(a.pending(), 0);
-    assert!(unread_by(&mut b2) >= 2, "the group and the Yo went");
+    assert_eq!(unread_by(&mut b2), 3, "the held Yo, the group's change and the new Yo");
 }
