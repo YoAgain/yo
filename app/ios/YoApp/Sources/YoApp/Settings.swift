@@ -93,6 +93,22 @@ struct SettingsView: View {
             }
             .padding(.vertical, 4)
           }
+          // Friends to Yo with: the invite link, as the list's ••• menu has it.
+          Section {
+            ShareLink(
+              item: Invite.link(for: account.username),
+              message: Text("Yo! Add me on Yo:"),
+              preview: SharePreview(
+                "Add \(account.username) on Yo", image: Image(uiImage: UIImage(named: "IconStandard") ?? UIImage()))
+            ) {
+              Label {
+                Text("Invite Friends").foregroundStyle(Color(.label))
+              } icon: {
+                Image(systemName: "square.and.arrow.up")
+              }
+              .labelStyle(Tile(.amethyst))
+            }
+          }
           // While something is left to secure: the guide, right here, with the badge.
           if accounts.toDo > 0 {
             Section {
