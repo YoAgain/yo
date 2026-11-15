@@ -1,8 +1,8 @@
-//! Contact requests (spec 4.10): what comes from someone not yet a contact waits as a request; a contact shows the
-//! account's contact key to the hub, which takes requests only as the account allows and only so many a day.
+//! Contact requests (spec 4.10): what comes from someone not yet a contact waits as a request, signed by its sender;
+//! a contact shows the account's contact key to the hub instead (sealed sender). The hub takes requests only as the
+//! account allows and only so many a day per sender.
 
 use std::sync::Arc;
-use std::time::Duration;
 use yo_core::{Client, Content, Event};
 use yo_hub::config::Config;
 use yo_tests::{random_u64, register, user_id, username, Fault, Http, TestHub};
@@ -137,30 +137,74 @@ fn with_requests_off_only_contacts_reach_the_account() {
     assert_eq!(accepted(&b, &c), Some(false));
 }
 
-#[test]
-fn requests_past_the_daily_cap_wait_while_contacts_go_on() {
-    // Deliveries are counted, not senders (the hub cannot tell them apart): each stranger's first is its name and a Yo.
-    let hub = TestHub::start_with(config(|c| c.limits.requests_per_user_day = 4), "127.0.0.1:0");
-    let (mut a, _, _) = account(&hub, "ALICE");
-    let (mut b, _, pb) = account(&hub, "BOB");
-    friends(&mut a, &mut b, &pb);
-    let mut strangers: Vec<Account> = (0..3).map(|_| account(&hub, "STRANGER")).collect();
-    for (s, _, _) in strangers.iter_mut() {
-        s.send_yo(&pb).unwrap();
-    }
-    let waiting: Vec<usize> = strangers.iter().map(|(s, _, _)| s.waiting()).collect();
-    assert_eq!(waiting, [0, 0, 2], "the third's wait: no room for requests today");
-    a.send_yo(&pb).unwrap();
-    assert_eq!(a.waiting(), 0, "a contact is no request");
-    let events = b.sync(0).unwrap();
-    assert_eq!(yos(&events, &a), 1);
-    assert_eq!(strangers.iter().map(|(s, _, _)| yos(&events, s)).sum::<usize>(), 2);
+/// What `of` sent to `to`'s inbox signed by its device (a request) and showing a contact key (sealed sender).
+fn kinds(of: &Http, to: &Client) -> (usize, usize) {
+    let path = api::deliver_path(&user_id(to.user_id()));
+    let recorded = of.recorded.lock().unwrap();
+    let to_them = || recorded.iter().filter(|(_, p, _, _)| *p == path);
+    let has = |h: &[(String, String)], name: &str| h.iter().any(|(n, _)| n == name);
+    (
+        to_them().filter(|(_, _, h, _)| has(h, yo_wire::request::HEADER_DEVICE) && !has(h, api::HEADER_ACCESS)).count(),
+        to_them().filter(|(_, _, h, _)| has(h, api::HEADER_ACCESS) && !has(h, yo_wire::request::HEADER_DEVICE)).count(),
+    )
 }
 
 #[test]
-fn a_block_rotates_the_key_the_others_get_it_and_the_old_one_lapses() {
-    let grace = 1500;
-    let hub = TestHub::start_with(config(|c| c.limits.contact_key_grace_ms = grace), "127.0.0.1:0");
+fn a_request_is_signed_a_contacts_delivery_is_sealed() {
+    let hub = TestHub::start();
+    let (mut a, ha, _) = account(&hub, "ALICE");
+    let (mut b, _, pb) = account(&hub, "BOB");
+    a.send_yo(&pb).unwrap();
+    let (signed, sealed) = kinds(&ha, &b);
+    assert!(signed > 0 && sealed == 0, "{signed} {sealed}");
+    b.sync(0).unwrap();
+    b.accept(a.user_id()).unwrap();
+    settle(&mut [&mut a, &mut b]);
+    let (signed, sealed) = kinds(&ha, &b);
+    a.send_yo(&pb).unwrap();
+    assert_eq!(kinds(&ha, &b), (signed, sealed + 1), "with B's key: sealed, unsigned");
+    assert_eq!(yos(&b.sync(0).unwrap(), &a), 1);
+}
+
+#[test]
+fn requests_are_limited_per_sender_and_a_blocked_stranger_takes_nobody_elses() {
+    let limits = |c: &mut Config| (c.limits.requests_per_pair_day, c.limits.request_recipients_per_sender_day) = (3, 2);
+    let hub = TestHub::start_with(config(limits), "127.0.0.1:0");
+    let (mut a, _, _) = account(&hub, "ALICE");
+    let (mut b, _, pb) = account(&hub, "BOB");
+    friends(&mut a, &mut b, &pb);
+    // A spammer: 3 deliveries a day to B (its first is its name and a Yo), the rest waits with it.
+    let (mut s, _, _) = account(&hub, "SPAM");
+    for _ in 0..4 {
+        s.send_yo(&pb).unwrap();
+    }
+    assert_eq!(s.waiting(), 2);
+    assert_eq!(yos(&b.sync(0).unwrap(), &s), 2);
+    b.set_blocked(s.user_id(), true).unwrap();
+    s.maintenance().unwrap();
+    // Another stranger and the contact still get through.
+    let (mut t, _, _) = account(&hub, "TOM");
+    t.send_yo(&pb).unwrap();
+    assert_eq!(t.waiting(), 0, "{:?}", t.drop_reasons());
+    a.send_yo(&pb).unwrap();
+    assert_eq!(a.waiting(), 0);
+    let events = b.sync(0).unwrap();
+    assert_eq!((yos(&events, &t), yos(&events, &a), yos(&events, &s)), (1, 1, 0));
+    // The spammer may start 2 requests a day: to a third account its requests wait.
+    let (mut c, _, pc) = account(&hub, "CAROL");
+    let (mut d, _, pd) = account(&hub, "DAVE");
+    settle(&mut [&mut c, &mut d]);
+    s.send_yo(&pc).unwrap();
+    assert_eq!(yos(&c.sync(0).unwrap(), &s), 1);
+    let before = s.waiting();
+    s.send_yo(&pd).unwrap();
+    assert!(s.waiting() > before, "the third recipient of the day waits");
+    assert_eq!(yos(&d.sync(0).unwrap(), &s), 0);
+}
+
+#[test]
+fn a_blocked_contact_loses_sealed_delivery_at_once_the_others_keep_it() {
+    let hub = TestHub::start();
     let (mut a, _, _) = account(&hub, "ALICE");
     let (mut b, _, pb) = account(&hub, "BOB");
     let (mut c, hc, _) = account(&hub, "CAROL");
@@ -171,28 +215,52 @@ fn a_block_rotates_the_key_the_others_get_it_and_the_old_one_lapses() {
     hc.fault(&api::deliver_path(&user_id(b.user_id())), Fault::Answer(503));
     c.send_yo(&pb).unwrap();
     assert_eq!(c.waiting(), 1);
+    // The block takes the old key at once: the blocked one is refused, once more after its inbox, then dropped.
     b.set_blocked(a.user_id(), true).unwrap();
-    b.maintenance().unwrap();
-    // Within the grace the old key still counts: the hub takes the blocked one's Yo (B's device drops it, 4.8).
-    a.send_yo(&pb).unwrap();
-    assert_eq!((a.waiting(), a.dropped()), (0, 0), "{:?}", a.drop_reasons());
-    assert_eq!(yos(&b.sync(0).unwrap(), &a), 0);
-    std::thread::sleep(Duration::from_millis(grace + 200));
-    // Past it, C back: the waiting Yo goes first with the old key, refused, kept; the inbox brings the new key, and
-    // it goes again.
-    let before = deliveries(&hc, &b);
-    c.maintenance().unwrap();
-    assert_eq!((c.waiting(), c.dropped()), (0, 0), "{:?}", c.drop_reasons());
-    assert!(deliveries(&hc, &b) >= before + 2, "refused once, then taken");
-    assert_eq!(yos(&b.sync(0).unwrap(), &c), 1);
-    c.send_yo(&pb).unwrap();
-    assert_eq!(yos(&b.sync(0).unwrap(), &c), 1);
-    // The blocked one is a stranger now: refused by the hub, once more after its inbox, then dropped.
     a.send_yo(&pb).unwrap();
     a.sync(0).unwrap();
     a.after_sync().unwrap();
     assert_eq!(a.waiting(), 0);
     assert!(a.drop_reasons().iter().any(|r| r.contains("no requests")), "{:?}", a.drop_reasons());
+    // C back: the waiting Yo goes first with the old key, refused, kept; the inbox brings the new key, and it goes
+    // again, sealed.
+    let (_, sealed) = kinds(&hc, &b);
+    c.maintenance().unwrap();
+    assert_eq!((c.waiting(), c.dropped()), (0, 0), "{:?}", c.drop_reasons());
+    assert!(kinds(&hc, &b).1 >= sealed + 2, "refused once, then taken");
+    assert_eq!(yos(&b.sync(0).unwrap(), &c), 1);
+    c.send_yo(&pb).unwrap();
+    assert_eq!(yos(&b.sync(0).unwrap(), &c), 1);
+}
+
+#[test]
+fn a_contact_without_the_new_key_goes_as_a_request_and_is_no_request_to_the_recipient() {
+    let hub = TestHub::start();
+    let (mut a, _, _) = account(&hub, "ALICE");
+    let (mut b, hb, pb) = account(&hub, "BOB");
+    let (mut c, hc, _) = account(&hub, "CAROL");
+    friends(&mut a, &mut b, &pb);
+    friends(&mut c, &mut b, &pb);
+    // The new key does not reach C (its inbox full for a while): C's Yo with the old one is refused, then it goes
+    // signed, the requests' way.
+    hb.fault(&api::deliver_path(&user_id(c.user_id())), Fault::Answer(507));
+    b.set_blocked(a.user_id(), true).unwrap();
+    let (signed, _) = kinds(&hc, &b);
+    c.send_yo(&pb).unwrap();
+    c.sync(0).unwrap();
+    c.after_sync().unwrap();
+    assert_eq!((c.waiting(), c.dropped()), (0, 0), "{:?}", c.drop_reasons());
+    assert!(kinds(&hc, &b).0 > signed, "sent as a request");
+    // B knows C as a contact: shown as a Yo of a contact, not a request.
+    assert_eq!(yos(&b.sync(0).unwrap(), &c), 1);
+    assert_eq!(accepted(&b, &c), Some(true));
+    // The key comes later; from then on sealed again.
+    b.after_sync().unwrap();
+    settle(&mut [&mut c]);
+    let (_, sealed) = kinds(&hc, &b);
+    c.send_yo(&pb).unwrap();
+    assert_eq!(kinds(&hc, &b).1, sealed + 1);
+    assert_eq!(yos(&b.sync(0).unwrap(), &c), 1);
 }
 
 #[test]

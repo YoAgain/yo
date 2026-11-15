@@ -960,8 +960,7 @@ async fn set_contact_key(
     if request.requests_open > 1 {
         return Err(refuse(StatusCode::BAD_REQUEST));
     }
-    let (open, grace) = (request.requests_open == 1, hub.config.limits.contact_key_grace_ms);
-    hub.db.set_contact_key(&device.user_id, &request.check, open, now_ms(), grace)?;
+    hub.db.set_contact_key(&device.user_id, &request.check, request.requests_open == 1)?;
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -1177,12 +1176,13 @@ fn delivery_token(hub: &Hub, peer: SocketAddr, headers: &HeaderMap) -> Res<Broug
     Ok(Brought::Token(key, token.nonce))
 }
 
-// ---- sealed sender: no identity on these routes ----
+// ---- sealed sender: no identity on these routes, but for a request (spec 4.10) ----
 
 /// Delivers an envelope to every device of a user, if the sender's view of the user's devices is the hub's (4.6).
 async fn deliver(
     State(hub): Hubs,
     ConnectInfo(peer): Peer,
+    method: Method,
     uri: Uri,
     headers: HeaderMap,
     Path(user): Path<String>,
@@ -1217,19 +1217,28 @@ async fn deliver(
             None
         }
     };
-    // A contact's, or a stranger's request (spec 4.10): the recipient's contact key shown names no sender, every
-    // contact has the same. A request the recipient takes no more of today waits with its sender (`507`, as a full
-    // inbox); one it takes none of at all is `403`. Past the limits above; counted only once stored.
+    // A contact's, or a request (spec 4.10): the recipient's contact key shown names no sender, every contact has the
+    // same. A request is signed by its sending device, so the hub knows whose it is and counts it per sender: past
+    // the sender's of today it waits with the sender (`507`, as a full inbox, this recipient only); unsigned, or to
+    // one who takes none, it is `403`. Past the limits above; counted only once stored.
+    let sender = match headers.contains_key(HEADER_DEVICE) {
+        true => {
+            let (uri, headers, body) = (uri.clone(), headers.clone(), body.clone());
+            Some(hub.blocking(move |hub| hub.authenticate(&method, &uri, &headers, &body)).await??.user_id)
+        }
+        false => None,
+    };
     let shown: Option<[u8; 32]> = headers
         .get(api::HEADER_ACCESS)
         .and_then(|v| v.to_str().ok())
         .and_then(|v| unb64(v).ok())
         .and_then(|v| <[u8; 32]>::try_from(v).ok())
         .map(|key| api::contact_check(&key));
-    let per_day = hub.config.limits.requests_per_user_day;
-    let request = match hub.blocking(move |hub| hub.db.admit(&user, shown, now_ms(), per_day)).await?? {
-        db::Admission::Contact => false,
-        db::Admission::Request => true,
+    let per = (hub.config.limits.requests_per_pair_day, hub.config.limits.request_recipients_per_sender_day);
+    let by = sender;
+    let request = match hub.blocking(move |hub| hub.db.admit(&user, shown, by.as_ref(), now_ms(), per)).await?? {
+        db::Admission::Contact => None,
+        db::Admission::Request => sender,
         db::Admission::Closed => return Err(refuse(StatusCode::FORBIDDEN)),
         db::Admission::Full => return Err(refuse(StatusCode::INSUFFICIENT_STORAGE)),
     };
@@ -1244,8 +1253,8 @@ async fn deliver(
     match outcome {
         // Its devices are woken by the writer (`writer`).
         Delivered::Stored(_) => {
-            if request {
-                hub.blocking(move |hub| hub.db.count_request(&user, now_ms())).await??;
+            if let Some(sender) = request {
+                hub.blocking(move |hub| hub.db.count_request(&sender, &user, now_ms())).await??;
             }
             Ok((StatusCode::ACCEPTED, Vec::new()))
         }

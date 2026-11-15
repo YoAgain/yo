@@ -248,14 +248,20 @@ pub fn junk(fill: u8) -> Vec<u8> {
 }
 
 /// The device check for a user, as any stranger can learn it: from the hub's 409 to a delivery with a wrong one.
-/// `None` for a user the hub does not know.
+/// `None` for a user the hub does not know, or one that takes no delivery without its contact key (spec 4.10).
 pub fn devices_hash(url: &str, user: &str) -> Option<[u8; 32]> {
-    let probe = reqwest::blocking::Client::new()
+    devices_hash_with(url, user, None)
+}
+
+/// `devices_hash` showing a contact key (`Yo-Access`, as sent).
+pub fn devices_hash_with(url: &str, user: &str, access: Option<&str>) -> Option<[u8; 32]> {
+    let mut probe = reqwest::blocking::Client::new()
         .post(format!("{url}{}", yo_wire::api::deliver_path(&user_id(user))))
-        .header(yo_wire::api::HEADER_DEVICES, yo_wire::b64(&[0; 32]))
-        .body(junk(0))
-        .send()
-        .unwrap();
+        .header(yo_wire::api::HEADER_DEVICES, yo_wire::b64(&[0; 32]));
+    if let Some(access) = access {
+        probe = probe.header(yo_wire::api::HEADER_ACCESS, access);
+    }
+    let probe = probe.body(junk(0)).send().unwrap();
     if probe.status().as_u16() != 409 {
         return None;
     }
@@ -266,15 +272,28 @@ pub fn devices_hash(url: &str, user: &str) -> Option<[u8; 32]> {
 /// Delivers raw bytes to a user as any stranger could (sealed sender), with the device check learned from the hub.
 /// Returns the status.
 pub fn deliver_raw(url: &str, user: &str, body: Vec<u8>) -> u16 {
-    let Some(hash) = devices_hash(url, user) else { return 404 };
-    reqwest::blocking::Client::new()
+    deliver_raw_with(url, user, None, body)
+}
+
+/// `deliver_raw` as a contact: showing the recipient's contact key as a contact's delivery did (`access`).
+pub fn deliver_raw_with(url: &str, user: &str, access: Option<&str>, body: Vec<u8>) -> u16 {
+    let Some(hash) = devices_hash_with(url, user, access) else { return 404 };
+    let mut request = reqwest::blocking::Client::new()
         .post(format!("{url}{}", yo_wire::api::deliver_path(&user_id(user))))
-        .header(yo_wire::api::HEADER_DEVICES, yo_wire::b64(&hash))
-        .body(body)
-        .send()
-        .unwrap()
-        .status()
-        .as_u16()
+        .header(yo_wire::api::HEADER_DEVICES, yo_wire::b64(&hash));
+    if let Some(access) = access {
+        request = request.header(yo_wire::api::HEADER_ACCESS, access);
+    }
+    request.body(body).send().unwrap().status().as_u16()
+}
+
+/// The contact key `http`'s client showed in its last delivery to `to` (`Yo-Access`), if it did.
+pub fn access_shown(http: &Http, to: &str) -> Option<String> {
+    let path = yo_wire::api::deliver_path(&user_id(to));
+    let recorded = http.recorded.lock().unwrap();
+    recorded.iter().rev().filter(|(_, p, _, _)| *p == path).find_map(|(_, _, headers, _)| {
+        headers.iter().find(|(n, _)| n == yo_wire::api::HEADER_ACCESS).map(|(_, v)| v.clone())
+    })
 }
 
 /// A hub that lies to one client (spec 3.4), once told to: asked for `user`, it answers with the keys and devices of
@@ -290,6 +309,8 @@ struct Lie {
     name: String,
     stand_in: yo_wire::UserId,
     stand_in_name: String,
+    /// The stand-in's contact key, if it made one: the hub takes what goes to it as a contact's.
+    stand_in_key: Option<String>,
     /// Another account, whose lookups of the stand-in become the lies.
     asker: Client,
 }
@@ -307,6 +328,7 @@ impl Lying {
             name: name.to_owned(),
             stand_in: user_id(stand_in.user_id()),
             stand_in_name: stand_in_name.to_owned(),
+            stand_in_key: stand_in.contact_key_for_tests(),
             asker,
         });
     }
@@ -343,8 +365,25 @@ impl Transport for Lying {
                 let body = yo_wire::encode(&lookup);
                 lie.asker.signed_for_tests("POST", yo_wire::api::LOOKUP, &body).map_err(|e| e.to_string())?
             }
+            // The hub itself hands it on: a request's signature (over the user's path) and a key are no check of it.
             _ if path == yo_wire::api::deliver_path(&lie.user) => {
-                self.http.request(method, &yo_wire::api::deliver_path(&lie.stand_in), headers, body)?
+                let mut headers: Vec<_> = headers
+                    .iter()
+                    .filter(|(n, _)| {
+                        ![
+                            yo_wire::request::HEADER_DEVICE,
+                            yo_wire::request::HEADER_TIME,
+                            yo_wire::request::HEADER_SIGNATURE,
+                            yo_wire::api::HEADER_ACCESS,
+                        ]
+                        .contains(&n.as_str())
+                    })
+                    .cloned()
+                    .collect();
+                if let Some(key) = &lie.stand_in_key {
+                    headers.push((yo_wire::api::HEADER_ACCESS.to_owned(), key.clone()));
+                }
+                self.http.request(method, &yo_wire::api::deliver_path(&lie.stand_in), &headers, body)?
             }
             _ => self.http.request(method, path, headers, body)?,
         };

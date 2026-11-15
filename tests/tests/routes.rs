@@ -615,7 +615,12 @@ fn deliveries_are_limited_per_address_and_per_inbox() {
     assert_eq!(yo_tests::deliver_raw(&hub.url(), b.user_id(), junk(3)), status::ACCEPTED, "another inbox has room");
     assert_eq!(a.sync(0).unwrap(), vec![]);
     a.after_sync().unwrap();
-    assert_eq!(yo_tests::deliver_raw(&hub.url(), a.user_id(), junk(4)), status::ACCEPTED, "read: room again");
+    let key = a.contact_key_for_tests();
+    assert_eq!(
+        yo_tests::deliver_raw_with(&hub.url(), a.user_id(), key.as_deref(), junk(4)),
+        status::ACCEPTED,
+        "read: room again"
+    );
 }
 
 /// Spec 6.3, 6.6: the inbox answers oldest first, 100 at most, with the prekeys left; an ack deletes what it names

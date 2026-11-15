@@ -32,6 +32,28 @@ fn pair(hub: &TestHub) -> (Account, Account) {
     ((register(ha.clone(), &pa, None), ha, pa), (register(hb.clone(), &pb, None), hb, pb))
 }
 
+/// Two accounts as contacts: each has the other's contact key, so their deliveries are sealed (a request is signed
+/// and carries no token, spec 4.10).
+fn contacts(hub: &TestHub) -> (Account, Account) {
+    let ((mut a, ha, pa), (mut b, hb, pb)) = pair(hub);
+    a.send_yo(&pb).unwrap();
+    b.sync(0).unwrap();
+    b.accept(a.user_id()).unwrap();
+    for _ in 0..2 {
+        for c in [&mut a, &mut b] {
+            c.sync(0).unwrap();
+            c.after_sync().unwrap();
+        }
+    }
+    ((a, ha, pa), (b, hb, pb))
+}
+
+/// How many tokens the hub at `path` has taken.
+fn hub_spent(path: &std::path::Path) -> i64 {
+    let db = rusqlite::Connection::open(path).unwrap();
+    db.query_row("SELECT count(*) FROM spent_tokens", [], |row| row.get(0)).unwrap()
+}
+
 /// A delivery as a stranger with a wrong device check: counted by the address like any, answered `409` (or `429`).
 fn probe(url: &str, user: &str, extra: &[(&str, &str)]) -> u16 {
     let mut request = reqwest::blocking::Client::new()
@@ -110,10 +132,11 @@ fn a_delivery_with_a_token_passes_an_address_at_its_limit_and_one_without_waits(
     let mut config = with_tokens();
     config.limits.deliver_per_ip_minute = 3;
     let hub = TestHub::start_with(config, "127.0.0.1:0");
-    let ((mut a, ha, _), (mut b, _, pb)) = pair(&hub);
+    let ((mut a, ha, _), (mut b, _, pb)) = contacts(&hub);
     a.sync(0).unwrap();
     a.after_sync().unwrap();
     let before = a.tokens_left();
+    let n = deliveries_to(&ha, b.user_id()).len();
     exhaust(&hub.url(), b.user_id());
     // Many phones behind one address: the others have used it up, A's tokens go past it.
     for _ in 0..5 {
@@ -121,7 +144,7 @@ fn a_delivery_with_a_token_passes_an_address_at_its_limit_and_one_without_waits(
     }
     assert_eq!(a.waiting(), 0, "every delivery taken");
     assert_eq!(a.tokens_left(), before - 5, "one token each");
-    assert!(deliveries_to(&ha, b.user_id()).iter().all(|headers| has_token(headers)));
+    assert!(deliveries_to(&ha, b.user_id())[n..].iter().all(|headers| has_token(headers)));
     assert_eq!(yos(&b.sync(0).unwrap(), &a), 5);
     // A sender without tokens (none asked for yet) is counted by the address, as before: its Yo waits.
     let mut c = register(Http::new(hub.url()), &username(random_u64() % 1_000_000_000), None);
@@ -151,7 +174,7 @@ fn without_a_token_deliveries_are_counted_by_address_as_before() {
 #[test]
 fn a_spent_token_is_refused_and_the_delivery_goes_again_without() {
     let hub = TestHub::start_with(with_tokens(), "127.0.0.1:0");
-    let ((mut a, ha, _), (mut b, _, pb)) = pair(&hub);
+    let ((mut a, ha, _), (mut b, _, pb)) = contacts(&hub);
     a.sync(0).unwrap();
     a.after_sync().unwrap();
     a.send_yo(&pb).unwrap();
@@ -213,9 +236,10 @@ fn the_hub_keeps_nothing_that_ties_a_redeemed_token_to_its_issuance() {
     let mut config = with_tokens();
     config.db_path = path.to_string_lossy().into_owned();
     let hub = TestHub::start_with(config, "127.0.0.1:0");
-    let ((mut a, ha, _), (mut b, _, pb)) = pair(&hub);
+    let ((mut a, ha, _), (mut b, _, pb)) = contacts(&hub);
     a.sync(0).unwrap();
     a.after_sync().unwrap();
+    let spent_before = hub_spent(&path);
     for _ in 0..3 {
         a.send_yo(&pb).unwrap();
     }
@@ -241,7 +265,7 @@ fn the_hub_keeps_nothing_that_ties_a_redeemed_token_to_its_issuance() {
         .unwrap();
     assert_eq!(columns, ["nonce", "key_id"], "a spent token is its nonce and its key, nothing about who");
     let spent: i64 = db.query_row("SELECT count(*) FROM spent_tokens", [], |row| row.get(0)).unwrap();
-    assert_eq!(spent, 3, "three Yos");
+    assert!(spent - spent_before >= 3, "three Yos (and B's receipt)");
     // Not a byte of what was blinded is anywhere in the database.
     let tables: Vec<String> = db
         .prepare("SELECT name FROM sqlite_master WHERE type = 'table'")

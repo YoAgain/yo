@@ -274,6 +274,8 @@ pub struct Deliveries {
 }
 
 struct Delivery {
+    /// The recipient's contact key it shows: sealed sender; none, a request signed by this device (spec 4.10).
+    access: Option<[u8; 32]>,
     seq: u64,
     user: String,
     path: String,
@@ -652,6 +654,12 @@ impl Client {
     #[cfg(feature = "testing")]
     pub fn signed_for_tests(&mut self, method: &str, path: &str, body: &[u8]) -> Result<Response> {
         self.signed(method, path, body)
+    }
+
+    /// For tests: this account's contact key as a delivery shows it (`Yo-Access`), once made.
+    #[cfg(feature = "testing")]
+    pub fn contact_key_for_tests(&self) -> Option<String> {
+        self.state.contact_key.map(|key| yo_wire::b64(&key))
     }
 
     /// The account key's secret (Ed25519 seed): what the backup seals (spec 7), so a new phone registers with it.
@@ -1756,8 +1764,8 @@ impl Client {
             }
             let hash = yo_wire::devices::hash(&account_key, &named);
             let nonce = self.hub_nonce();
-            // The recipient's contact key, if they gave it (own copies: this account's): a contact's delivery, not a
-            // request (spec 4.10).
+            // The recipient's contact key, if they gave it (own copies: this account's): a contact's delivery, sealed
+            // sender. Without it a request, signed by this device (spec 4.10).
             let access = match item.user == self.state.user_id {
                 true => self.state.contact_key,
                 false => self.state.contacts.get(&item.user).and_then(|c| c.their_key),
@@ -1767,6 +1775,7 @@ impl Client {
                 headers.push((api::HEADER_ACCESS.to_owned(), yo_wire::b64(&key)));
             }
             items.push(Delivery {
+                access,
                 seq: item.seq,
                 user: item.user.clone(),
                 path: api::deliver_path(&user),
@@ -1776,9 +1785,14 @@ impl Client {
                 nonce,
             });
         }
-        // One token per delivery while there are any, the oldest first: the hub counts it instead of the address.
+        for delivery in items.iter_mut().filter(|d| d.access.is_none()) {
+            let (signed, _) = self.sign("POST", &delivery.path, &delivery.envelope);
+            delivery.headers.extend(signed);
+        }
+        // One token per sealed delivery while there are any, the oldest first: the hub counts it instead of the
+        // address. A request names its sender anyway.
         if let Some(key) = &token_key {
-            for delivery in &mut items {
+            for delivery in items.iter_mut().filter(|d| d.access.is_some()) {
                 while let Some(kept) = self.state.tokens.pop_front() {
                     if let Some(found) = tokens::unkept(&kept, key) {
                         delivery.headers.push(("authorization".to_owned(), found.authorization()));
@@ -1842,13 +1856,18 @@ impl Client {
                     done.insert(item.seq);
                     gone.insert(item.user.clone());
                 }
-                // The recipient takes no requests and this account is no contact of theirs (spec 4.10).
+                // The key it showed is not the recipient's (any more), or the recipient takes no requests and this
+                // account is no contact of theirs (spec 4.10).
                 Some(Ok(response)) if response.status == status::FORBIDDEN => {
-                    // A contact's key that changed (a block of someone else, a restored phone) while this device
-                    // was away: the new one may be in the inbox. Once more after the next receive.
-                    let keyed = self.state.contacts.get(&item.user).is_some_and(|c| c.their_key.is_some());
+                    // A contact's key that changed (a block of someone else, a restored phone): forgotten, the new one
+                    // may be in the inbox. Once more after the next receive, with the new key or as a request.
+                    if let Some(contact) =
+                        self.state.contacts.get_mut(&item.user).filter(|c| c.their_key == item.access)
+                    {
+                        contact.their_key = None;
+                    }
                     match self.state.outbox.iter_mut().find(|o| o.seq == item.seq) {
-                        Some(kept) if keyed && !kept.refused => {
+                        Some(kept) if item.access.is_some() && !kept.refused => {
                             kept.refused = true;
                             self.refused_until_read.insert(item.user.clone());
                         }
@@ -2923,7 +2942,29 @@ impl Client {
             self.persist()?;
         }
         let key = self.state.contact_key.expect("made above");
+        let me = self.state.user_id.clone();
+        let due: Vec<String> = self
+            .state
+            .contacts
+            .iter()
+            .filter(|(user, c)| c.key_due && !c.blocked && !c.gone && **user != me)
+            .map(|(user, _)| user.clone())
+            .collect();
+        for user in &due {
+            self.queue(std::slice::from_ref(user), None, Content::ContactKey(key))?;
+            if let Some(contact) = self.state.contacts.get_mut(user) {
+                (contact.key_due, contact.key_given) = (false, true);
+            }
+        }
         if !self.state.contact_key_told {
+            // A new key goes to the contacts before the hub takes it (the old one counts no more from then on): the
+            // contacts online have it in their inbox when their next delivery with the old one is refused.
+            if !due.is_empty() {
+                match self.deliver() {
+                    Err(error) if retryable(&error) => return Ok(()),
+                    other => other?,
+                }
+            }
             let body = encode(&api::ContactKey {
                 check: api::contact_check(&key),
                 requests_open: self.state.requests_open as u8,
@@ -2936,20 +2977,6 @@ impl Client {
                 Ok(response) => self.note(format!("contact key: {}", response.status)),
                 Err(error) if retryable(&error) => {}
                 Err(error) => return Err(error),
-            }
-        }
-        let me = self.state.user_id.clone();
-        let due: Vec<String> = self
-            .state
-            .contacts
-            .iter()
-            .filter(|(user, c)| c.key_due && !c.blocked && !c.gone && **user != me)
-            .map(|(user, _)| user.clone())
-            .collect();
-        for user in due {
-            self.queue(std::slice::from_ref(&user), None, Content::ContactKey(key))?;
-            if let Some(contact) = self.state.contacts.get_mut(&user) {
-                (contact.key_due, contact.key_given) = (false, true);
             }
         }
         Ok(())
@@ -3043,8 +3070,8 @@ impl Client {
         self.state.requests_open
     }
 
-    /// A new contact key after a block: the blocked one's deliveries come as requests from then on (refused while
-    /// the account takes none), every other contact gets the new key; the old one counts a few days more at the hub.
+    /// A new contact key after a block: the blocked one's deliveries are requests from then on (refused while the
+    /// account takes none), every other contact gets the new key; the old one counts no more once the hub has it.
     fn rotate_contact_key(&mut self) {
         let mut key = [0u8; 32];
         rand::fill(&mut key);
@@ -3245,7 +3272,16 @@ impl Client {
             // Kept in the storage too, so a new phone has it (spec 6.9).
             c.storage_block(&user, blocked);
             c.persist()
-        })
+        })?;
+        // The new key out and told now: the blocked one's next delivery is a request (spec 4.10). "Not now": later.
+        if blocked {
+            match self.contact_keys() {
+                Err(error) if retryable(&error) => {}
+                other => other?,
+            }
+            self.persist()?;
+        }
+        Ok(())
     }
 
     /// Blocks or unblocks a user on this device. What came from them before and waits to be handed out (after a

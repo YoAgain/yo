@@ -63,7 +63,8 @@ fn run(seed: u64, clients: usize, steps: usize) {
                 .send(&names[j], Content::Text(text.clone()))
                 .unwrap_or_else(|e| panic!("seed {seed} step {step}: {from} -> {to}: {e}"));
             collect(events, &mut received, &from);
-            assert_eq!(devices[i].client.pending(), 0, "seed {seed} step {step}");
+            // Not asserted taken: one to a contact on a new phone waits for the next inbox read, where its new
+            // contact key is (spec 4.10); the quiet-down below checks that all went.
             expected.entry(to).or_default().push((from, text));
         } else if roll < 85 {
             let to = devices[i].user.clone();
@@ -89,8 +90,13 @@ fn run(seed: u64, clients: usize, steps: usize) {
                     }
                 }
             }
-            received.insert(to.clone(), Vec::new());
-            expected.insert(to, Vec::new());
+            // What the old one had not received yet may still wait in a sender's outbox (one kept for the next
+            // inbox read, spec 4.10): it may come to the new one, or not.
+            let got = received.insert(to.clone(), Vec::new()).unwrap_or_default();
+            let unseen: Vec<_> =
+                expected.remove(&to).unwrap_or_default().into_iter().filter(|m| !got.contains(m)).collect();
+            may_be_lost.extend(unseen.iter().cloned());
+            expected.insert(to, unseen);
         }
     }
     // Quiet down: everybody receives until nothing moves, a couple of minutes apart, as an app's syncs come: a roster

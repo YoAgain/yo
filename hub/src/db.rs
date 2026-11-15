@@ -260,21 +260,20 @@ CREATE TABLE IF NOT EXISTS feedback (
     created_at INTEGER NOT NULL
 );
 CREATE INDEX IF NOT EXISTS feedback_by_user ON feedback(user_id);
--- Each user's contact key as a check, never the key (spec 4.10): a delivery that shows it is a contact's; one
--- without is a request, taken only while `requests_open` and up to `REQUESTS_PER_DAY` a day. The check before a
--- change still counts until `previous_until`, for contacts that have not heard of the new key yet. Gone with the account.
+-- Each user's contact key as a check, never the key (spec 4.10): a delivery that shows it is a contact's; else it
+-- is a request, signed by its sender, taken only while `requests_open`. Gone with the account.
 CREATE TABLE IF NOT EXISTS contact_keys (
     user_id BLOB PRIMARY KEY REFERENCES users(id),
     current BLOB NOT NULL,
-    previous BLOB,
-    previous_until INTEGER NOT NULL DEFAULT 0,
     requests_open INTEGER NOT NULL DEFAULT 1
 ) WITHOUT ROWID;
-CREATE TABLE IF NOT EXISTS requests_day (
-    user_id BLOB NOT NULL,
+-- Requests stored today, per sender and recipient (spec 4.10); the days before are forgotten.
+CREATE TABLE IF NOT EXISTS requests (
+    sender BLOB NOT NULL,
+    recipient BLOB NOT NULL,
     day INTEGER NOT NULL,
     n INTEGER NOT NULL,
-    PRIMARY KEY (user_id, day)
+    PRIMARY KEY (sender, day, recipient)
 ) WITHOUT ROWID;
 -- Each user's storage (spec 6.9), sealed by its devices under a key the hub never has; `version` counts its writes,
 -- so one writer never overwrites another's unseen. Gone with the account.
@@ -428,7 +427,7 @@ fn remove_user(tx: &Transaction<'_>, user: &UserId, now: u64) -> rusqlite::Resul
     tx.execute("DELETE FROM reports WHERE reporter_id = ?1 OR reported_id = ?1", [user])?;
     tx.execute("DELETE FROM storage WHERE user_id = ?1", [user])?;
     tx.execute("DELETE FROM contact_keys WHERE user_id = ?1", [user])?;
-    tx.execute("DELETE FROM requests_day WHERE user_id = ?1", [user])?;
+    tx.execute("DELETE FROM requests WHERE sender = ?1 OR recipient = ?1", [user])?;
     tx.execute("UPDATE feedback SET user_id = ?2 WHERE user_id = ?1", params![user, NOBODY])?;
     // Its blobs' files go with the next sweep, or at once where the route knows them (`blobs_of`).
     tx.execute("DELETE FROM blobs WHERE user_id = ?1", [user])?;
@@ -441,19 +440,16 @@ fn remove_user(tx: &Transaction<'_>, user: &UserId, now: u64) -> rusqlite::Resul
 /// schema 1 is brought up to it (`from_1`).
 const SCHEMA_VERSION: i64 = 2;
 
-/// A user's contact key row: the current check, the one before, until when that counts, whether requests are open.
-type ContactKeyRow = (Vec<u8>, Option<Vec<u8>>, i64, bool);
-
 /// What a delivery is to its recipient (spec 4.10, `Db::admit`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Admission {
     /// It shows the recipient's contact key, or the recipient has none.
     Contact,
-    /// A stranger's, taken.
+    /// A request of this sender, taken.
     Request,
-    /// The recipient takes no requests.
+    /// The recipient takes no requests, or it is no contact's and unsigned.
     Closed,
-    /// The recipient's requests of the day are taken.
+    /// The sender's requests of the day (to this recipient, or to new ones) are taken.
     Full,
 }
 
@@ -505,6 +501,19 @@ fn username_of(tx: &Transaction<'_>, user: &UserId) -> rusqlite::Result<Option<S
 /// Whether a skeleton is reserved, in a transaction.
 fn is_reserved(tx: &Transaction<'_>, skeleton: &[u8]) -> rusqlite::Result<bool> {
     tx.prepare_cached("SELECT 1 FROM reserved WHERE skeleton = CAST(?1 AS TEXT)")?.exists([skeleton])
+}
+
+/// The contact keys of before requests were signed (spec 4.10): the check before a change and the count per
+/// recipient go.
+fn without_grace(conn: &Connection) -> rusqlite::Result<()> {
+    let has = conn.prepare("SELECT 1 FROM pragma_table_info('contact_keys') WHERE name = 'previous'")?.exists([])?;
+    if has {
+        conn.execute_batch(
+            "ALTER TABLE contact_keys DROP COLUMN previous;
+             ALTER TABLE contact_keys DROP COLUMN previous_until;",
+        )?;
+    }
+    conn.execute_batch("DROP TABLE IF EXISTS requests_day")
 }
 
 fn check_version(conn: &Connection) -> rusqlite::Result<()> {
@@ -563,6 +572,7 @@ impl Db {
         if version == 1 {
             from_1(&mut conn)?;
         }
+        without_grace(&conn)?;
         conn.execute_batch(SCHEMA)?;
         Ok(Db { conn: Mutex::new(conn) })
     }
@@ -747,72 +757,76 @@ impl Db {
         Ok(Write::Done(()))
     }
 
-    /// Whether a username (by its skeleton) belongs to anyone or is reserved: what registration would find taken.
-    /// A user's contact key check and whether it takes requests (spec 4.10). A changed check keeps the one before
-    /// for `grace_ms`.
-    pub fn set_contact_key(
-        &self,
-        user: &UserId,
-        check: &[u8; 32],
-        requests_open: bool,
-        now: u64,
-        grace_ms: u64,
-    ) -> rusqlite::Result<()> {
+    /// A user's contact key check and whether it takes requests (spec 4.10). A changed check counts at once: the
+    /// one before does no more.
+    pub fn set_contact_key(&self, user: &UserId, check: &[u8; 32], requests_open: bool) -> rusqlite::Result<()> {
         self.conn()
             .prepare_cached(
                 "INSERT INTO contact_keys (user_id, current, requests_open) VALUES (?1, ?2, ?3)
-                 ON CONFLICT(user_id) DO UPDATE SET
-                   previous = CASE WHEN current = ?2 THEN previous ELSE current END,
-                   previous_until = CASE WHEN current = ?2 THEN previous_until ELSE ?4 END,
-                   current = ?2, requests_open = ?3",
+                 ON CONFLICT(user_id) DO UPDATE SET current = ?2, requests_open = ?3",
             )?
-            .execute(params![user, check.as_slice(), requests_open, now + grace_ms])?;
+            .execute(params![user, check.as_slice(), requests_open])?;
         Ok(())
     }
 
     /// What a delivery to `user` is (spec 4.10): a contact's when it shows the contact key (`check` of what it shows),
-    /// or when the user has none yet (an app from before contact keys); else a request, unless the user takes none or
-    /// the day's are taken. Only reads: a request is counted once stored (`count_request`), so refused deliveries
-    /// spend nobody's allowance.
-    pub fn admit(&self, user: &UserId, shown: Option<[u8; 32]>, now: u64, per_day: u64) -> rusqlite::Result<Admission> {
+    /// or when the user has none yet (an app from before contact keys); else a request of `sender` (who signed it),
+    /// unless the user takes none, it is unsigned, or the sender's are taken today: `per_pair` to this user,
+    /// `recipients` other users. Only reads: a request is counted once stored (`count_request`), so refused
+    /// deliveries spend no allowance.
+    pub fn admit(
+        &self,
+        user: &UserId,
+        shown: Option<[u8; 32]>,
+        sender: Option<&UserId>,
+        now: u64,
+        (per_pair, recipients): (u64, u64),
+    ) -> rusqlite::Result<Admission> {
         let conn = self.conn();
-        let row: Option<ContactKeyRow> = conn
-            .prepare_cached(
-                "SELECT current, previous, previous_until, requests_open FROM contact_keys WHERE user_id = ?1",
-            )?
-            .query_row([user], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)))
+        let row: Option<(Vec<u8>, bool)> = conn
+            .prepare_cached("SELECT current, requests_open FROM contact_keys WHERE user_id = ?1")?
+            .query_row([user], |row| Ok((row.get(0)?, row.get(1)?)))
             .optional()?;
-        let Some((current, previous, until, open)) = row else { return Ok(Admission::Contact) };
-        if let Some(shown) = shown {
-            if current == shown || (previous.as_deref() == Some(&shown[..]) && now < until as u64) {
-                return Ok(Admission::Contact);
-            }
+        let Some((current, open)) = row else { return Ok(Admission::Contact) };
+        if shown.is_some_and(|shown| current == shown) {
+            return Ok(Admission::Contact);
         }
-        if !open {
-            return Ok(Admission::Closed);
-        }
+        let Some(sender) = sender.filter(|_| open) else { return Ok(Admission::Closed) };
+        let day = now / DAY_MS;
         let n: i64 = conn
-            .prepare_cached("SELECT n FROM requests_day WHERE user_id = ?1 AND day = ?2")?
-            .query_row(params![user, now / DAY_MS], |r| r.get(0))
+            .prepare_cached("SELECT n FROM requests WHERE sender = ?1 AND day = ?2 AND recipient = ?3")?
+            .query_row(params![sender, day, user], |r| r.get(0))
             .optional()?
             .unwrap_or(0);
-        Ok(if n as u64 >= per_day { Admission::Full } else { Admission::Request })
+        if n as u64 >= per_pair {
+            return Ok(Admission::Full);
+        }
+        if n == 0 {
+            let others: i64 = conn
+                .prepare_cached("SELECT count(*) FROM requests WHERE sender = ?1 AND day = ?2")?
+                .query_row(params![sender, day], |r| r.get(0))?;
+            if others as u64 >= recipients {
+                return Ok(Admission::Full);
+            }
+        }
+        Ok(Admission::Request)
     }
 
-    /// A request stored for `user`: counted against the day (spec 4.10); the days before are forgotten.
-    pub fn count_request(&self, user: &UserId, now: u64) -> rusqlite::Result<()> {
+    /// A request of `sender` stored for `user`: counted against the day (spec 4.10); the days before are forgotten.
+    pub fn count_request(&self, sender: &UserId, user: &UserId, now: u64) -> rusqlite::Result<()> {
         let mut conn = self.conn();
         let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
         let day = now / DAY_MS;
         tx.prepare_cached(
-            "INSERT INTO requests_day (user_id, day, n) VALUES (?1, ?2, 1)
-             ON CONFLICT(user_id, day) DO UPDATE SET n = n + 1",
+            "INSERT INTO requests (sender, day, recipient, n) VALUES (?1, ?2, ?3, 1)
+             ON CONFLICT(sender, day, recipient) DO UPDATE SET n = n + 1",
         )?
-        .execute(params![user, day])?;
-        tx.execute("DELETE FROM requests_day WHERE user_id = ?1 AND day < ?2", params![user, day])?;
+        .execute(params![sender, day, user])?;
+        tx.execute("DELETE FROM requests WHERE day < ?1", [day])?;
         tx.commit()
     }
 
+    /// Whether a username (by its skeleton) belongs to anyone or is reserved: what registration would find taken.
     pub fn username_taken(&self, skeleton: &[u8]) -> rusqlite::Result<bool> {
         self.conn()
             .prepare_cached(
@@ -1915,6 +1929,73 @@ mod tests {
         for suffix in ["", "-wal", "-shm"] {
             let _ = std::fs::remove_file(format!("{path}{suffix}"));
         }
+    }
+
+    /// Contact keys of before signed requests (spec 4.10): the check before a change and the count per recipient go;
+    /// the current check stays and counts alone.
+    #[test]
+    fn a_database_with_the_old_contact_keys_loses_the_grace() {
+        let path = std::env::temp_dir().join(format!("yo-hub-grace-{}.db", std::process::id()));
+        let path = path.to_str().unwrap();
+        let leo = {
+            let db = Db::open(path).unwrap();
+            let leo = user(register(&db, b"LEO", 1, 1, 0));
+            db.conn()
+                .execute_batch(
+                    "DROP TABLE contact_keys; DROP TABLE requests;
+                     CREATE TABLE contact_keys (user_id BLOB PRIMARY KEY REFERENCES users(id), current BLOB NOT NULL,
+                       previous BLOB, previous_until INTEGER NOT NULL DEFAULT 0,
+                       requests_open INTEGER NOT NULL DEFAULT 1) WITHOUT ROWID;
+                     CREATE TABLE requests_day (user_id BLOB NOT NULL, day INTEGER NOT NULL, n INTEGER NOT NULL,
+                       PRIMARY KEY (user_id, day)) WITHOUT ROWID;",
+                )
+                .unwrap();
+            db.conn()
+                .execute(
+                    "INSERT INTO contact_keys VALUES (?1, ?2, ?3, ?4, 1)",
+                    params![leo, [2u8; 32].as_slice(), [1u8; 32].as_slice(), i64::MAX],
+                )
+                .unwrap();
+            leo
+        };
+        let db = Db::open(path).unwrap();
+        let limits = (3, 20);
+        assert_eq!(db.admit(&leo, Some([2; 32]), None, 0, limits).unwrap(), Admission::Contact);
+        assert_eq!(db.admit(&leo, Some([1; 32]), None, 0, limits).unwrap(), Admission::Closed, "no grace");
+        let gone: i64 = db
+            .conn()
+            .query_row("SELECT count(*) FROM sqlite_master WHERE name = 'requests_day'", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(gone, 0);
+        drop(db);
+        for suffix in ["", "-wal", "-shm"] {
+            let _ = std::fs::remove_file(format!("{path}{suffix}"));
+        }
+    }
+
+    /// Requests counted per sender (spec 4.10): 3 a day to one recipient, 20 recipients a day; another sender's
+    /// count is its own.
+    #[test]
+    fn requests_are_counted_per_sender() {
+        let db = Db::open(":memory:").unwrap();
+        let users: Vec<UserId> = (1..=4u8).map(|i| user(register(&db, &[b'A' + i; 3], i, i, 0))).collect();
+        for to in &users[1..] {
+            db.set_contact_key(to, &[9; 32], true).unwrap();
+        }
+        let (spam, leo, mia, ben) = (&users[0], &users[1], &users[2], &users[3]);
+        let limits = (3, 2);
+        for _ in 0..3 {
+            assert_eq!(db.admit(leo, None, Some(spam), 0, limits).unwrap(), Admission::Request);
+            db.count_request(spam, leo, 0).unwrap();
+        }
+        assert_eq!(db.admit(leo, None, Some(spam), 0, limits).unwrap(), Admission::Full, "3 a day to LEO");
+        assert_eq!(db.admit(leo, None, Some(mia), 0, limits).unwrap(), Admission::Request, "MIA's are her own");
+        assert_eq!(db.admit(leo, None, None, 0, limits).unwrap(), Admission::Closed, "unsigned");
+        db.count_request(spam, mia, 0).unwrap();
+        assert_eq!(db.admit(ben, None, Some(spam), 0, limits).unwrap(), Admission::Full, "a third recipient");
+        assert_eq!(db.admit(leo, None, Some(spam), DAY_MS, limits).unwrap(), Admission::Request, "the next day");
+        db.set_contact_key(leo, &[9; 32], false).unwrap();
+        assert_eq!(db.admit(leo, None, Some(mia), 0, limits).unwrap(), Admission::Closed, "takes none");
     }
 
     /// An upload whose row went while it came (its account deleted meanwhile) is not marked done: its file is removed

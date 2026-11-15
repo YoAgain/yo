@@ -4,7 +4,7 @@
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use yo::{HttpResult, HttpTransport, MessageKind, StateStore, YoClient, YoError, YoEvent};
-use yo_tests::{deliver_raw, random_u64, username, Fault, Http, TestHub};
+use yo_tests::{access_shown, deliver_raw_with, random_u64, username, Fault, Http, TestHub};
 
 const KEY: [u8; 32] = [7; 32];
 
@@ -145,6 +145,9 @@ fn friends(hub: &TestHub) -> (Phone, Phone) {
     assert_eq!(yos(&b.drain(), &a.user()), 1);
     b.send_yo(a.user()).unwrap();
     assert_eq!(yos(&a.drain(), &b.user()), 1);
+    // Each has the other's contact key (spec 4.10).
+    b.drain();
+    a.drain();
     (a, b)
 }
 
@@ -335,8 +338,8 @@ fn lost_duplicated_and_reordered_envelopes() {
     let sent = posted(&a.http, &b.user());
     let (late, next) = (sent[sent.len() - 2].clone(), sent[sent.len() - 1].clone());
     assert_eq!(yos(&b.drain(), &a.user()), 2, "the doubled one once, and the next");
-    assert_eq!(deliver_raw(&hub.url(), &b.user(), late), 202);
-    assert_eq!(deliver_raw(&hub.url(), &b.user(), next), 202);
+    assert_eq!(deliver_raw_with(&hub.url(), &b.user(), access_shown(&a.http, &b.user()).as_deref(), late), 202);
+    assert_eq!(deliver_raw_with(&hub.url(), &b.user(), access_shown(&a.http, &b.user()).as_deref(), next), 202);
     assert_eq!(yos(&b.drain(), &a.user()), 1, "the late one, the copy skipped");
     // Both ways still.
     b.send_yo(a.user()).unwrap();
@@ -503,7 +506,7 @@ fn a_replaced_device_still_sending_is_not_heard() {
     let _ = a.deliver();
     assert!(matches!(a.sync(0), Err(YoError::Replaced)));
     assert!(matches!(a.send_yo(b.user()), Err(YoError::Replaced)));
-    assert_eq!(deliver_raw(&hub.url(), &b.user(), held), 202);
+    assert_eq!(deliver_raw_with(&hub.url(), &b.user(), access_shown(&a.http, &b.user()).as_deref(), held), 202);
     let events = b.drain();
     assert_eq!(yos(&events, &a.user()), 0, "nothing of the replaced device: {}", describe(&events));
     // B and the new phone go on.
@@ -589,6 +592,8 @@ fn a_blocked_friend_is_not_heard_and_not_written_to() {
     assert_eq!(yos(&b.drain(), &a.user()), 0, "not heard");
     assert!(matches!(b.send_yo(a.user()), Err(YoError::Blocked)));
     assert_eq!(yos(&a.drain(), &b.user()), 0);
+    // B's old key refused, A's Yo went again as a request: not heard either.
+    assert_eq!(yos(&b.drain(), &a.user()), 0, "not heard as a request");
     assert!(b.contacts().iter().any(|c| c.user == a.user() && c.blocked));
     assert!(b.friends().iter().any(|f| f.user == a.user() && f.blocked), "kept in the storage");
     b.set_blocked(a.user(), false).unwrap();

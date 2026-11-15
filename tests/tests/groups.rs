@@ -2,7 +2,7 @@
 //! of a group at the hub.
 
 use yo_core::{Client, Content, Event};
-use yo_tests::{deliver_raw, random_u64, register, username, Fault, Http, TestHub};
+use yo_tests::{deliver_raw_with, random_u64, register, username, Fault, Http, TestHub};
 
 fn people(hub: &TestHub, n: usize) -> Vec<Client> {
     let base = random_u64() % 1_000_000_000;
@@ -139,8 +139,14 @@ fn two_changes_at_once_end_the_same_everywhere() {
             .next_back()
             .unwrap()
     };
-    assert_eq!(deliver_raw(&hub.url(), c.user_id(), held(&transports[1], &to_c)), 202);
-    assert_eq!(deliver_raw(&hub.url(), b.user_id(), held(&transports[2], &to_b)), 202);
+    assert_eq!(
+        deliver_raw_with(&hub.url(), c.user_id(), c.contact_key_for_tests().as_deref(), held(&transports[1], &to_c)),
+        202
+    );
+    assert_eq!(
+        deliver_raw_with(&hub.url(), b.user_id(), b.contact_key_for_tests().as_deref(), held(&transports[2], &to_b)),
+        202
+    );
     for _ in 0..3 {
         for x in [&mut *b, &mut *c, &mut *a] {
             if let Ok(d) = x.deliver_begin() {
@@ -288,8 +294,14 @@ fn two_removing_each_other_at_once_end_the_same() {
             .next_back()
             .unwrap()
     };
-    assert_eq!(deliver_raw(&hub.url(), c.user_id(), held(&transports[1], &to_c)), 202);
-    assert_eq!(deliver_raw(&hub.url(), b.user_id(), held(&transports[2], &to_b)), 202);
+    assert_eq!(
+        deliver_raw_with(&hub.url(), c.user_id(), c.contact_key_for_tests().as_deref(), held(&transports[1], &to_c)),
+        202
+    );
+    assert_eq!(
+        deliver_raw_with(&hub.url(), b.user_id(), b.contact_key_for_tests().as_deref(), held(&transports[2], &to_b)),
+        202
+    );
     for _ in 0..3 {
         for x in [&mut *b, &mut *c, &mut *a] {
             take(x);
