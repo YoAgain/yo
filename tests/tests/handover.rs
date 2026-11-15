@@ -219,3 +219,26 @@ fn a_guest_only_reads_and_acknowledges() {
     assert!(b.storage_saved_at().is_some());
     assert_eq!(texts(&a.sync(0).unwrap()), ["waited"]);
 }
+
+/// A guest whose call fails after it received, with a save failing too (a full disk): what it received was not saved,
+/// so the hub is not told to forget it; after a crash the app still gets it.
+#[test]
+fn a_guest_acknowledges_nothing_it_could_not_save() {
+    let hub = TestHub::start();
+    let (mut a, mut b, _, disk) = chat(&hub);
+    a.send(b.user_id(), text("keep me")).unwrap();
+    let guest_http = Http::new(hub.url());
+    let mut guest = Client::restore_guest(guest_http.clone(), &disk.blob(), &KEY).unwrap();
+    guest.persist_to(disk.clone(), KEY).unwrap();
+    disk.full.store(true, Ordering::Relaxed);
+    // The send takes the inbox in first, then its lookup is refused: the call fails, and its save too.
+    guest_http.fault(yo_wire::api::LOOKUP, Fault::Answer(400));
+    assert!(guest.send_yo(&username(random_u64() % 1_000_000_000)).is_err());
+    requests(&guest_http);
+    let _ = guest.after_sync();
+    assert!(!acked(&requests(&guest_http)), "nothing saved, nothing acknowledged");
+    drop(guest);
+    disk.full.store(false, Ordering::Relaxed);
+    b.reload(&disk.blob()).unwrap();
+    assert_eq!(texts(&b.sync(0).unwrap()), ["keep me"]);
+}

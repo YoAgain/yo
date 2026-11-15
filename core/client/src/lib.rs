@@ -917,9 +917,10 @@ impl Client {
             let result =
                 result.map(|_| self.state.events[returned.min(total)..].iter().cloned().map(unstored).collect());
             let saved = self.persist();
-            if result.is_ok() && saved.is_err() {
-                self.received_ids.clear(); // not saved: the hub sends them again
-                return saved.map(|()| Vec::new());
+            if saved.is_err() {
+                // Not saved, whether the call went or not: the hub sends them again, nothing of it is acknowledged.
+                self.received_ids.clear();
+                return result.and(saved.map(|()| Vec::new()));
             }
             self.guest_events = Some(total);
             let received = std::mem::take(&mut self.received_ids);
