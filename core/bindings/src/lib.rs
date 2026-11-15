@@ -201,6 +201,13 @@ pub struct SealedMedia {
     pub ciphertext: Vec<u8>,
 }
 
+/// A group made: its id, and what the inbox brought while making it.
+#[derive(uniffi::Record)]
+pub struct CreatedGroup {
+    pub id: String,
+    pub events: Vec<YoEvent>,
+}
+
 /// Where a photo or video goes: how many fetches its upload is for, and what getting there received.
 #[derive(uniffi::Record)]
 pub struct MediaChat {
@@ -950,10 +957,11 @@ impl YoClient {
             .collect()
     }
 
-    /// Makes a group of this account and `members` (user ids, at most 19), and tells them: its id.
-    pub fn create_group(&self, name: String, members: Vec<String>) -> Result<String, YoError> {
-        let (id, _events) = self.with(|c| c.create_group(&name, &members))??;
-        Ok(id)
+    /// Makes a group of this account and `members` (user ids, at most 19), and tells them: its id, and what the
+    /// inbox brought meanwhile (for the app, as from a sync).
+    pub fn create_group(&self, name: String, members: Vec<String>) -> Result<CreatedGroup, YoError> {
+        let (id, received) = self.with(|c| c.create_group(&name, &members))??;
+        Ok(CreatedGroup { id, events: received.into_iter().map(Into::into).collect() })
     }
 
     pub fn rename_group(&self, group: String, name: String) -> Result<Vec<YoEvent>, YoError> {

@@ -75,6 +75,8 @@ pub struct GroupTag {
 pub struct GroupInfo {
     pub id: GroupId,
     pub revision: u32,
+    /// Who made this revision (not who passes it on).
+    pub by: crate::UserId,
     pub name: String,
     pub members: Vec<crate::UserId>,
 }
@@ -181,6 +183,8 @@ fn yo_body(items: Vec<(u16, Vec<u8>)>) -> Vec<u8> {
 struct Group {
     id: GroupId,
     revision: u32,
+    /// Who made this revision: the tie-break of two at the same revision, also when another member passes it on.
+    by: crate::UserId,
     name: VLBytes,
     members: Vec<crate::UserId>,
 }
@@ -210,9 +214,10 @@ fn read_yo(body: &[u8]) -> Result<(Content, Option<GroupTag>), Error> {
         let data = item.data.as_slice();
         match item.kind {
             WITH_PHOTO => content = content.or(Some(Content::Photo(crate::decode::<Photo>(data)?.into()))),
-            WITH_VIDEO => {
+            // A video after a photo is not read (spec 5): the photo wins.
+            WITH_VIDEO if content.is_none() => {
                 let Video { photo, duration_ms } = crate::decode(data)?;
-                content = content.or(Some(Content::Video { media: photo.into(), duration_ms }));
+                content = Some(Content::Video { media: photo.into(), duration_ms });
             }
             WITH_GROUP => group = Some(crate::decode::<GroupTag>(data)?),
             _ => {}
@@ -278,7 +283,8 @@ impl Message {
                 }
                 let name = text(&info.name, MAX_NAME_LEN)?;
                 let Text { text: name } = crate::decode(&name)?;
-                let group = Group { id: info.id, revision: info.revision, name, members: info.members.clone() };
+                let group =
+                    Group { id: info.id, revision: info.revision, by: info.by, name, members: info.members.clone() };
                 (TYPE_GROUP, crate::encode(&group))
             }
             Content::GroupAsk { id } => (TYPE_GROUP_ASK, crate::encode(&GroupAsk { id: *id })),
@@ -311,12 +317,12 @@ impl Message {
             TYPE_RECEIPT => Content::Receipt,
             TYPE_RETRY => Content::Retry,
             TYPE_GROUP => {
-                let Group { id, revision, name, members } = crate::decode(body)?;
+                let Group { id, revision, by, name, members } = crate::decode(body)?;
                 let name = read_text(&crate::encode(&Text { text: name }), MAX_NAME_LEN)?;
                 if !members_ok(&members) {
                     return Err(Error::Format);
                 }
-                Content::Group(GroupInfo { id, revision, name, members })
+                Content::Group(GroupInfo { id, revision, by, name, members })
             }
             TYPE_GROUP_ASK => Content::GroupAsk { id: crate::decode::<GroupAsk>(body)?.id },
             other => Content::Unknown(other),
@@ -328,6 +334,19 @@ impl Message {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_video_after_a_photo_is_not_read() {
+        let photo = Photo { id: [1; 16], key: [2; 32], sha256: [3; 32], size: 9, width: 1, height: 1 };
+        let with = WithList {
+            with: vec![
+                With { kind: WITH_PHOTO, data: crate::encode(&photo).into() },
+                With { kind: WITH_VIDEO, data: vec![0xff; 3].into() },
+            ],
+        };
+        let (content, _) = read_yo(&crate::encode(&with)).unwrap();
+        assert!(matches!(content, Content::Photo(_)));
+    }
     use proptest::prelude::*;
 
     #[test]
@@ -391,7 +410,8 @@ mod tests {
             let message = Message { sent_at_ms: 9, group: Some(tag), content };
             assert_eq!(Message::decode(&message.encode().unwrap()).unwrap(), message);
         }
-        let group = GroupInfo { id: [7; 16], revision: 1, name: "FAMILY".into(), members: vec![[1; 16], [2; 16]] };
+        let group =
+            GroupInfo { id: [7; 16], revision: 1, by: [1; 16], name: "FAMILY".into(), members: vec![[1; 16], [2; 16]] };
         let message = Message { sent_at_ms: 9, group: None, content: Content::Group(group.clone()) };
         assert_eq!(Message::decode(&message.encode().unwrap()).unwrap(), message);
         let ask = Message { sent_at_ms: 9, group: None, content: Content::GroupAsk { id: [7; 16] } };

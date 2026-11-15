@@ -1083,7 +1083,7 @@ fn the_app_layer_makes_a_group_and_yos_it() {
     let a = client(&hub, &pa, "ALICE", Arc::new(File::default()));
     let b = client(&hub, &pb, "BOB", Arc::new(File::default()));
     let c = client(&hub, &pc, "CARL", Arc::new(File::default()));
-    let id = a.create_group("FAMILY".into(), vec![b.user_id(), c.user_id()]).unwrap();
+    let id = a.create_group("FAMILY".into(), vec![b.user_id(), c.user_id()]).unwrap().id;
     for x in [&b, &c] {
         let events = drain(x);
         assert!(events.iter().any(|e| matches!(e, YoEvent::GroupChanged { group } if *group == id)));

@@ -53,27 +53,29 @@ impl Client {
         let me = self.state.user_id.clone();
         let mut all: Vec<String> = members.iter().map(|m| m.to_ascii_lowercase()).collect();
         all.push(me.clone());
-        let result = self.change_group(&id, all, name, Some(&me));
+        let name = name.to_owned();
+        let result = self.change_group(&id, true, move |_| Ok((all, name)));
         self.finish(result).map(|events| (id, events))
     }
 
     pub fn rename_group(&mut self, id: &str, name: &str) -> Result<Vec<Event>> {
-        let result = self.group(id).and_then(|g| self.change_group(id, g.members, name, None));
+        let name = name.to_owned();
+        let result = self.change_group(id, false, move |g| Ok((g.members.clone(), name)));
         self.finish(result)
     }
 
     pub fn add_to_group(&mut self, id: &str, users: &[String]) -> Result<Vec<Event>> {
-        let result = self.group(id).and_then(|g| {
-            let members = g.members.into_iter().chain(users.iter().map(|u| u.to_ascii_lowercase())).collect();
-            self.change_group(id, members, &g.name, None)
-        });
+        let users: Vec<String> = users.iter().map(|u| u.to_ascii_lowercase()).collect();
+        let result = self
+            .change_group(id, false, move |g| Ok((g.members.iter().cloned().chain(users).collect(), g.name.clone())));
         self.finish(result)
     }
 
     pub fn remove_from_group(&mut self, id: &str, users: &[String]) -> Result<Vec<Event>> {
-        let result = self.group(id).and_then(|g| {
-            let members = g.members.into_iter().filter(|m| !users.iter().any(|u| u.eq_ignore_ascii_case(m))).collect();
-            self.change_group(id, members, &g.name, None)
+        let users = users.to_vec();
+        let result = self.change_group(id, false, move |g| {
+            let members = g.members.iter().filter(|m| !users.iter().any(|u| u.eq_ignore_ascii_case(m))).cloned();
+            Ok((members.collect(), g.name.clone()))
         });
         self.finish(result)
     }
@@ -81,9 +83,8 @@ impl Client {
     /// Leaves a group: the others are told, this account gets nothing of it any more.
     pub fn leave_group(&mut self, id: &str) -> Result<Vec<Event>> {
         let me = self.state.user_id.clone();
-        let result = self.group(id).and_then(|g| {
-            let members = g.members.into_iter().filter(|m| *m != me).collect();
-            self.change_group(id, members, &g.name, None)
+        let result = self.change_group(id, false, move |g| {
+            Ok((g.members.iter().filter(|m| **m != me).cloned().collect(), g.name.clone()))
         });
         self.finish(result)
     }
@@ -102,8 +103,8 @@ impl Client {
             .members
             .iter()
             .filter(|m| **m != self.state.user_id)
-            .filter_map(|m| self.state.contacts.get(m))
-            .map(|c| c.devices.len().max(1))
+            // A member not known here yet has one device at least (its session is made as the Yo goes).
+            .map(|m| self.state.contacts.get(m).map_or(1, |c| c.devices.len().max(1)))
             .sum();
         Some(((devices + self.state.own.len()) as u32).clamp(1, MAX_BLOB_FETCHES))
     }
@@ -203,42 +204,56 @@ impl Client {
         Ok(())
     }
 
-    /// Makes revision + 1 of a group with these members and name, tells everyone in it before and after, and keeps it.
-    /// `creating`: a new group (by this account), revision 1.
-    fn change_group(&mut self, id: &str, members: Vec<String>, name: &str, creating: Option<&str>) -> Result<()> {
+    /// Makes revision + 1 of a group, as `edit` makes it of the group as it is once the inbox is taken in (a change
+    /// that came meanwhile is built on, not overwritten), tells everyone in it before and after, and keeps it.
+    /// `creating`: a new group (by this account), revision 1. The last member leaving keeps it to itself.
+    fn change_group(
+        &mut self,
+        id: &str,
+        creating: bool,
+        edit: impl FnOnce(&Group) -> Result<(Vec<String>, String)>,
+    ) -> Result<()> {
         let me = self.state.user_id.clone();
-        let mut members = members;
-        members.sort();
-        members.dedup();
-        if members.len() > MAX_GROUP {
-            return Err(Error::Protocol("a group has 20 members at most"));
-        }
-        let ids: Vec<UserId> = members.iter().map(|m| user_bytes(m)).collect::<Result<_>>()?;
-        let before = match creating {
-            Some(_) => Vec::new(),
-            None => self.group(id)?.members,
-        };
-        let revision = match creating {
-            Some(_) => 1,
-            None => self.state.groups.get(id).map_or(1, |g| g.revision + 1),
-        };
-        let info = GroupInfo { id: group_id(id)?, revision, name: name.to_owned(), members: ids };
-        // Checked as it goes on the wire: the name and the members as they may be.
-        Message { sent_at_ms: 0, group: None, content: Content::Group(info.clone()) }.encode()?;
         match self.deliver().and_then(|()| self.receive_all(0)) {
             Ok(()) => {}
             Err(error) if retryable(&error) => {}
             Err(error) => return Err(error),
         }
-        let mut told: Vec<String> = before.into_iter().chain(members.iter().cloned()).collect();
+        let current = match creating {
+            true => Group { name: String::new(), members: Vec::new(), revision: 0, by: me.clone(), left: false },
+            false => self.group(id)?,
+        };
+        let (mut members, name) = edit(&current)?;
+        members.sort();
+        members.dedup();
+        if members.len() > MAX_GROUP {
+            return Err(Error::Protocol("a group has 20 members at most"));
+        }
+        let revision = current.revision.checked_add(1).ok_or(Error::Protocol("a group's last revision"))?;
+        let left = !members.contains(&me);
+        if left && members.is_empty() {
+            // The last one out: nobody to tell, the group simply ends here.
+            self.atomic(|c| {
+                if let Some(g) = c.state.groups.get_mut(id) {
+                    g.left = true;
+                }
+                c.push_event(Event::GroupChanged { group: id.to_owned() });
+                c.persist()
+            })?;
+            return Ok(());
+        }
+        let ids: Vec<UserId> = members.iter().map(|m| user_bytes(m)).collect::<Result<_>>()?;
+        let info = GroupInfo { id: group_id(id)?, revision, by: user_bytes(&me)?, name: name.clone(), members: ids };
+        // Checked as it goes on the wire: the name and the members as they may be.
+        Message { sent_at_ms: 0, group: None, content: Content::Group(info.clone()) }.encode()?;
+        let mut told: Vec<String> = current.members.into_iter().chain(members.iter().cloned()).collect();
         told.sort();
         told.dedup();
         let reached = self.reach_all(&told)?;
         self.send_profiles();
-        let left = !members.contains(&me);
         self.atomic(|c| {
             c.enqueue_group(&reached, None, Content::Group(info))?;
-            let group = Group { name: name.to_owned(), members, revision, by: me.clone(), left };
+            let group = Group { name, members, revision, by: me.clone(), left };
             c.state.groups.insert(id.to_owned(), group);
             c.push_event(Event::GroupChanged { group: id.to_owned() });
             c.persist()
@@ -254,13 +269,20 @@ impl Client {
         let id = hex(&info.id);
         let me = self.state.user_id.clone();
         let members: Vec<String> = info.members.iter().map(|m| hex(m)).collect();
+        // The last revision there is would leave no room for a change after it.
+        if info.revision == u32::MAX {
+            self.note("a group change at the last revision".into());
+            return;
+        }
+        // The tie-break is by the revision's author, whoever passes it on (an answer to an ask).
+        let author = hex(&info.by);
         let newer = match self.state.groups.get(&id) {
             // New here, or known only by its Yos: from a member of it as it is now.
             None => own || members.iter().any(|m| m == from),
             Some(g) if g.revision == 0 => own || members.iter().any(|m| m == from),
             Some(g) => {
                 (own || g.members.iter().any(|m| m == from))
-                    && (info.revision > g.revision || (info.revision == g.revision && from < g.by.as_str()))
+                    && (info.revision > g.revision || (info.revision == g.revision && author < g.by))
             }
         };
         if !newer {
@@ -277,7 +299,7 @@ impl Client {
             return;
         }
         let left = !members.contains(&me);
-        let group = Group { name: info.name, members, revision: info.revision, by: from.to_owned(), left };
+        let group = Group { name: info.name, members, revision: info.revision, by: author, left };
         self.state.groups.insert(id.clone(), group);
         self.push_event(Event::GroupChanged { group: id });
     }
@@ -293,7 +315,8 @@ impl Client {
         else {
             return;
         };
-        let info = GroupInfo { id: gid, revision: group.revision, name: group.name, members: ids };
+        let Ok(by) = user_bytes(&group.by) else { return };
+        let info = GroupInfo { id: gid, revision: group.revision, by, name: group.name, members: ids };
         if let Err(error) = self.enqueue_group(&[from.to_owned()], None, Content::Group(info)) {
             self.note(format!("group: {error}"));
         }
@@ -318,7 +341,14 @@ impl Client {
                 self.note("a Yo to a group from no member".into());
                 return;
             }
-            Some(g) => tag.revision > g.revision,
+            Some(g) => {
+                let (behind, ask) = (tag.revision < g.revision, tag.revision > g.revision);
+                // A member behind (its Yo names an older revision): it gets the group as it is here.
+                if behind {
+                    self.group_asked(from, &id);
+                }
+                ask
+            }
         };
         if ask {
             if let Err(error) = self.enqueue_group(&[from.to_owned()], None, Content::GroupAsk { id: tag.id }) {

@@ -173,3 +173,36 @@ fn a_group_has_twenty_members_at_most() {
     assert!(a.create_group("TOO MANY", &others).is_err());
     assert!(a.groups().is_empty());
 }
+
+/// Ann removes Cleo; Ben, who has not read that yet, renames the group: his change is built on the removal (read as
+/// it is made), so Cleo stays out and the revision goes on, not back.
+#[test]
+fn a_change_is_built_on_what_came_meanwhile() {
+    let hub = TestHub::start();
+    let mut p = people(&hub, 3);
+    let [a, b, c] = p.as_mut_slice() else { unreachable!() };
+    let (id, _) = a.create_group("TRIO", &[b.user_id().to_owned(), c.user_id().to_owned()]).unwrap();
+    take(b);
+    take(c);
+    a.remove_from_group(&id, &[c.user_id().to_owned()]).unwrap();
+    b.rename_group(&id, "DUO").unwrap();
+    let g = view(b, &id);
+    assert_eq!((g.name.as_str(), g.revision), ("DUO", 3));
+    assert!(!g.members.contains(&c.user_id().to_owned()), "the removal stands");
+    take(a);
+    assert_eq!(view(a, &id).name, "DUO");
+}
+
+/// The last member leaving: nobody to tell, the group simply ends for it, without an error.
+#[test]
+fn the_last_member_can_leave() {
+    let hub = TestHub::start();
+    let mut p = people(&hub, 2);
+    let [a, b] = p.as_mut_slice() else { unreachable!() };
+    let (id, _) = a.create_group("PAIR", &[b.user_id().to_owned()]).unwrap();
+    take(b);
+    b.leave_group(&id).unwrap();
+    take(a);
+    a.leave_group(&id).unwrap();
+    assert!(view(a, &id).left);
+}
