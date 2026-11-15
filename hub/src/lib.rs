@@ -1244,7 +1244,9 @@ async fn deliver(
         .and_then(|v| unb64(v).ok())
         .and_then(|v| <[u8; 32]>::try_from(v).ok())
         .map(|key| api::contact_check(&key));
-    let per = (hub.config.limits.requests_per_pair_day, hub.config.limits.request_recipients_per_sender_day);
+    let limits = &hub.config.limits;
+    let per =
+        (limits.requests_per_pair_day, limits.request_recipients_per_sender_day, limits.requests_per_recipient_day);
     let by = sender;
     let request = match hub.blocking(move |hub| hub.db.admit(&user, shown, by.as_ref(), now_ms(), per)).await?? {
         db::Admission::Contact => None,

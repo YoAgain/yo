@@ -277,6 +277,7 @@ CREATE TABLE IF NOT EXISTS requests (
     n INTEGER NOT NULL,
     PRIMARY KEY (sender, day, recipient)
 ) WITHOUT ROWID;
+CREATE INDEX IF NOT EXISTS requests_by_recipient ON requests(recipient, day);
 -- Each user's storage (spec 6.9), sealed by its devices under a key the hub never has; `version` counts its writes,
 -- so one writer never overwrites another's unseen. Gone with the account.
 CREATE TABLE IF NOT EXISTS storage (
@@ -792,7 +793,7 @@ impl Db {
         shown: Option<[u8; 32]>,
         sender: Option<&UserId>,
         now: u64,
-        (per_pair, recipients): (u64, u64),
+        (per_pair, recipients, per_recipient): (u64, u64, u64),
     ) -> rusqlite::Result<Admission> {
         let conn = self.conn();
         let row: Option<(Vec<u8>, bool)> = conn
@@ -811,6 +812,13 @@ impl Db {
             .optional()?
             .unwrap_or(0);
         if n as u64 >= per_pair {
+            return Ok(Admission::Full);
+        }
+        // A backstop against many accounts made to flood one: the recipient's requests of the day, from everyone.
+        let all: i64 = conn
+            .prepare_cached("SELECT coalesce(sum(n), 0) FROM requests WHERE recipient = ?1 AND day = ?2")?
+            .query_row(params![user, day], |r| r.get(0))?;
+        if all as u64 >= per_recipient {
             return Ok(Admission::Full);
         }
         if n == 0 {
@@ -1981,7 +1989,7 @@ mod tests {
             leo
         };
         let db = Db::open(path).unwrap();
-        let limits = (3, 20);
+        let limits = (3, 20, 1000);
         assert_eq!(db.admit(&leo, Some([2; 32]), None, 0, limits).unwrap(), Admission::Contact);
         assert_eq!(db.admit(&leo, Some([1; 32]), None, 0, limits).unwrap(), Admission::Closed, "no grace");
         let gone: i64 = db
@@ -2005,7 +2013,7 @@ mod tests {
             db.set_contact_key(to, &[9; 32], true).unwrap();
         }
         let (spam, leo, mia, ben) = (&users[0], &users[1], &users[2], &users[3]);
-        let limits = (3, 2);
+        let limits = (3, 2, 4);
         for _ in 0..3 {
             assert_eq!(db.admit(leo, None, Some(spam), 0, limits).unwrap(), Admission::Request);
             db.count_request(spam, leo, 0).unwrap();
@@ -2013,6 +2021,8 @@ mod tests {
         assert_eq!(db.admit(leo, None, Some(spam), 0, limits).unwrap(), Admission::Full, "3 a day to LEO");
         assert_eq!(db.admit(leo, None, Some(mia), 0, limits).unwrap(), Admission::Request, "MIA's are her own");
         assert_eq!(db.admit(leo, None, None, 0, limits).unwrap(), Admission::Closed, "unsigned");
+        db.count_request(mia, leo, 0).unwrap();
+        assert_eq!(db.admit(leo, None, Some(ben), 0, limits).unwrap(), Admission::Full, "LEO's 4 of the day, from all");
         db.count_request(spam, mia, 0).unwrap();
         assert_eq!(db.admit(ben, None, Some(spam), 0, limits).unwrap(), Admission::Full, "a third recipient");
         assert_eq!(db.admit(leo, None, Some(spam), DAY_MS, limits).unwrap(), Admission::Request, "the next day");

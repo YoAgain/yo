@@ -33,6 +33,8 @@ pub struct Limits {
     pub requests_per_pair_day: u64,
     /// Recipients one sender sends requests to a day (spec 4.10).
     pub request_recipients_per_sender_day: u64,
+    /// Requests one recipient takes a day from everyone (spec 4.10): against many accounts made to flood one.
+    pub requests_per_recipient_day: u64,
     /// Backup records fetched: by the user id or a locator, neither of which can be guessed (spec 7).
     pub backup_per_ip_hour: u32,
     /// Reports of users, by one user (spec 6.3).
@@ -91,6 +93,7 @@ impl Default for Limits {
             name_check_per_ip_minute: 60,
             requests_per_pair_day: 10,
             request_recipients_per_sender_day: 20,
+            requests_per_recipient_day: 1000,
             backup_per_ip_hour: 10,
             report_per_user_day: 20,
             feedback_per_user_day: 10,
@@ -125,6 +128,7 @@ impl Limits {
             name_check_per_ip_minute: u32::MAX,
             requests_per_pair_day: u64::MAX,
             request_recipients_per_sender_day: u64::MAX,
+            requests_per_recipient_day: u64::MAX,
             backup_per_ip_hour: u32::MAX,
             report_per_user_day: u32::MAX,
             feedback_per_user_day: u32::MAX,
