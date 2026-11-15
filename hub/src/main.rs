@@ -92,7 +92,14 @@ fn config() -> Result<(Config, String), String> {
         apple_app_ids: var("YO_APPLE_APP_IDS")
             .map(|ids| ids.split(',').map(|id| id.trim().to_string()).filter(|id| !id.is_empty()).collect())
             .unwrap_or_default(),
-        limits: Limits::default(),
+        limits: Limits {
+            // A test hub takes more sign-ups from one address (scripts making accounts); the default is production's.
+            register_per_ip_hour: var("YO_REGISTER_PER_IP_HOUR")
+                .map(|text| text.parse::<u32>().map_err(|_| "YO_REGISTER_PER_IP_HOUR: a number"))
+                .transpose()?
+                .unwrap_or(Limits::default().register_per_ip_hour),
+            ..Limits::default()
+        },
         apns,
         fcm,
         reserved: read_reserved(var("YO_RESERVED_FILE").as_deref())?,
