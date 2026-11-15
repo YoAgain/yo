@@ -608,3 +608,15 @@ fn a_newer_revision_is_asked_for_once() {
     take(&mut b);
     assert_eq!(b.pending(), 1, "one ask");
 }
+
+/// A group this account is alone in takes no Yo: `GroupEmpty`, so the app offers to delete it.
+#[test]
+fn a_group_left_alone_takes_no_yo() {
+    let hub = TestHub::start();
+    let mut p = people(&hub, 2);
+    let (a, rest) = p.split_first_mut().unwrap();
+    let b = &mut rest[0];
+    let (id, _) = a.create_group("JUST ME", &[b.user_id().to_owned()]).unwrap();
+    a.remove_from_group(&id, &[b.user_id().to_owned()]).unwrap();
+    assert!(matches!(a.send_group(&id, Content::Yo), Err(yo_core::Error::GroupEmpty)));
+}

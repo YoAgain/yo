@@ -17,6 +17,9 @@ pub enum YoError {
     NotOnYo,
     #[error("blocked")]
     Blocked,
+    /// A Yo to a group with no other member left: nobody to send it to (leave it instead).
+    #[error("the group is empty")]
+    GroupEmpty,
     /// The contact's app is too old: the Yo waits in the outbox until it is updated.
     #[error("the contact must update Yo")]
     Outdated,
@@ -49,6 +52,7 @@ impl From<yo_core::Error> for YoError {
             E::Refused(status) => YoError::Refused { status },
             E::NotOnYo => YoError::NotOnYo,
             E::Blocked => YoError::Blocked,
+            E::GroupEmpty => YoError::GroupEmpty,
             E::Outdated => YoError::Outdated,
             E::Unconfirmed => YoError::Unconfirmed,
             E::Replaced => YoError::Replaced,

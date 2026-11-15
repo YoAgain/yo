@@ -230,6 +230,9 @@ final class Inbox {
     await identify(Array(typed), accounts: accounts, friends: friends)
   }
 
+  /// What a send to a group of this account alone says (`YoError.GroupEmpty`).
+  static let groupEmpty = "Group Is Empty"
+
   private func sendNow(to friend: Friend, client: YoClient, accounts: AccountStore, friends: Friends) async -> String? {
     if let group = friend.group {
       do {
@@ -241,6 +244,8 @@ final class Inbox {
       } catch YoError.Replaced {
         accounts.replaced(client)
         return "Not Sent"
+      } catch YoError.GroupEmpty {
+        return Self.groupEmpty  // nobody left in it: the list offers to delete it
       } catch {
         return "Not Sent"
       }

@@ -152,6 +152,7 @@ impl Client {
     /// fetches to upload it.
     pub fn open_group(&mut self, id: &str) -> Result<(u32, Vec<Event>)> {
         let result = self.group(id).and_then(|g| {
+            self.not_empty(&g)?;
             self.reach_all(&g.members)?;
             Ok(self.group_media_fetches(id).unwrap_or(1))
         });
@@ -173,6 +174,7 @@ impl Client {
         // As a send to one: what waits goes, the inbox is taken in (a change of the group among it).
         self.catch_up()?;
         let group = self.group(id)?;
+        self.not_empty(&group)?;
         let others = self.reach_all(&group.members)?;
         self.send_profiles();
         let tag = GroupTag { id: group_id(id)?, revision: group.revision };
@@ -181,6 +183,14 @@ impl Client {
             c.persist()
         })?;
         self.deliver_now()
+    }
+
+    /// A group of this account alone takes no Yo (`GroupEmpty`): the app offers to delete it.
+    fn not_empty(&self, group: &Group) -> Result<()> {
+        match group.members.iter().any(|m| *m != self.state.user_id) {
+            true => Ok(()),
+            false => Err(Error::GroupEmpty),
+        }
     }
 
     /// A session with each other member this device can write to (spec 4.2), without making them a chat of their own:

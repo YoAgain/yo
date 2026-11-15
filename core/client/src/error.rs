@@ -11,6 +11,9 @@ pub enum Error {
     NotOnYo,
     #[error("blocked")]
     Blocked,
+    /// A Yo to a group with no other member left: nobody to send it to (leave it instead).
+    #[error("the group is empty")]
+    GroupEmpty,
     /// The contact's app is too old for sessions (no prekeys at the hub): the message waits in the outbox until it is
     /// updated (spec 4.2).
     #[error("the contact must update Yo")]

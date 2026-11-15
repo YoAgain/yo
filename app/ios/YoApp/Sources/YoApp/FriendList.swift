@@ -70,6 +70,8 @@ struct FriendList: View {
   @State private var blocking: (friend: Friend, reported: Bool)?
   /// A group to leave, asked first: its Yos stop for good (nobody can bring one back but a member adding again).
   @State private var leaving: Friend?
+  /// A group with nobody else left, tapped: "Group Is Empty", delete it?
+  @State private var emptyGroup: Friend?
   /// A request tapped (spec 4.10): "Yo X?", then on No "Block X?".
   @State private var requesting: Friend?
   @State private var blockingRequest: Friend?
@@ -231,6 +233,15 @@ struct FriendList: View {
       Button("Cancel", role: .cancel) {}
     } message: { _ in
       Text("You won’t get its Yos any more. A member can add you again.")
+    }
+    .alert(
+      "Group Is Empty",
+      isPresented: Binding(get: { emptyGroup != nil }, set: { if !$0 { emptyGroup = nil } }), presenting: emptyGroup
+    ) { bar in
+      Button("Delete Group", role: .destructive) { deleteEmpty(bar) }
+      Button("Cancel", role: .cancel) {}
+    } message: { bar in
+      Text("Nobody else is in \(bar.name) any more. Delete it?")
     }
   }
 
@@ -549,6 +560,17 @@ struct FriendList: View {
       if let notice = await GroupNotice.send([.user(GroupNotice.me(accounts)), " left ", .group(bar.name)], to: bar, accounts: accounts, outbox: outbox) {
         for _ in 0..<60 where outbox.isWaiting(notice) { try? await Task.sleep(for: .milliseconds(500)) }
       }
+      if let events = try? await Hub.run({ try client.leaveGroup(group: id) }) {
+        await inbox.absorb(events, client: client, friends: friends)
+      }
+      if let groups = try? await Hub.run({ client.groups() }) { withAnimation(.snappy) { friends.takeGroups(groups) } }
+    }
+  }
+
+  /// A group of this account alone, deleted: left without a picture (nobody would see it), its bar gone.
+  private func deleteEmpty(_ bar: Friend) {
+    guard let id = bar.group, let client = accounts.client else { return }
+    Task {
       if let events = try? await Hub.run({ try client.leaveGroup(group: id) }) {
         await inbox.absorb(events, client: client, friends: friends)
       }
@@ -876,6 +898,7 @@ struct FriendList: View {
           send: {
             Task {
               if let problem = await inbox.send(to: friend, accounts: accounts, friends: friends) {
+                if problem == Inbox.groupEmpty { emptyGroup = friend }
                 showSent(to: friend, problem)
               }
             }
@@ -888,6 +911,7 @@ struct FriendList: View {
       showSent(to: friend, "Sent Yo", thenOnTop: true)
       Task {
         if let problem = await inbox.send(to: friend, accounts: accounts, friends: friends) {
+          if problem == Inbox.groupEmpty { emptyGroup = friend }
           showSent(to: friend, problem)
         } else {
           await sentYo()
