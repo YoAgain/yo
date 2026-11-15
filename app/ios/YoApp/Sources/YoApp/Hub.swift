@@ -113,7 +113,7 @@ final class HubTransport: HttpTransport {
       done.signal()
     }.resume()
     done.wait()
-    if (200..<300).contains(answer.result.status), headers.contains(where: { $0.name == "Yo-Device" }) {
+    if (200..<300).contains(answer.result.status), headers.contains(where: { $0.name.lowercased() == "yo-device" }) {  // the core sends it lowercase
       SignedAt.note()
     }
     if Perf.on {
