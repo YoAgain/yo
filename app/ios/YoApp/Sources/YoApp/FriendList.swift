@@ -1426,7 +1426,7 @@ struct RowButton: View {
 
   init(
     _ title: String, count: Int = 1, color: Color, recording: Bool = false, outgoing: Date? = nil,
-    stop: @escaping () -> Void = {},
+    sendSeconds: Double = FriendList.sendDelay, stop: @escaping () -> Void = {},
     media: [Arrival] = [], yo: FriendList.Landing? = nil, hint: String? = nil, hold: ((Bool) -> Void)? = nil,
     view: @escaping (ThumbnailTouch) -> Void = { _ in }, faded: Bool = false, icon: String? = nil, from: String? = nil,
     flies: Bool = false, action: @escaping () -> Void
@@ -1439,6 +1439,7 @@ struct RowButton: View {
     self.color = color
     self.recording = recording
     self.outgoing = outgoing
+    self.sendSeconds = sendSeconds
     self.stop = stop
     self.media = media
     self.yo = yo

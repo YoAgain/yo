@@ -35,7 +35,7 @@ struct Friend: Codable, Hashable, Identifiable {
   /// under the undo ring, as a photo does, so one sent by mistake can be taken back. Kept on this phone.
   var undoFirst = false
   /// How long that Yo waits: 2 to 10 seconds, set beside the switch.
-  var undoSeconds = FriendList.sendDelay
+  var undoSeconds: Double = 2  // FriendList.sendDelay
   /// Who they are on this phone, for good: a new spelling or a user id learned later keeps the bar in its place (a
   /// name as identity made the bar leave and come in again on top).
   var key = UUID()
@@ -68,7 +68,7 @@ struct Friend: Codable, Hashable, Identifiable {
     keyChanged = try c.decodeIfPresent(Bool.self, forKey: .keyChanged) ?? false
     request = try c.decodeIfPresent(Bool.self, forKey: .request) ?? false
     undoFirst = try c.decodeIfPresent(Bool.self, forKey: .undoFirst) ?? false
-    undoSeconds = try c.decodeIfPresent(Double.self, forKey: .undoSeconds) ?? FriendList.sendDelay
+    undoSeconds = try c.decodeIfPresent(Double.self, forKey: .undoSeconds) ?? 2
     group = try c.decodeIfPresent(String.self, forKey: .group)
     key = try c.decodeIfPresent(UUID.self, forKey: .key) ?? UUID()
   }

@@ -27,7 +27,7 @@ enum GroupNotice {
       if i > 0 { pieces.append(i == shown.count - 1 && shown.count == names.count ? " and " : ", ") }
       pieces.append(.user(name))
     }
-    if shown.count < names.count { pieces.append(" and \(names.count - shown.count) more") }
+    if shown.count < names.count { pieces.append(.text(" and \(names.count - shown.count) more")) }
     return pieces
   }
 
