@@ -160,6 +160,11 @@ fn describe(events: &[YoEvent]) -> String {
         YoEvent::SentElsewhere { user, .. } => format!("sent elsewhere {}", &user[..8]),
         YoEvent::Profile { user, name } => format!("profile {} {name}", &user[..8]),
         YoEvent::IdentityChanged { user } => format!("identity {}", &user[..8]),
+        YoEvent::GroupMessage { group, user, kind, .. } => {
+            format!("group {} message {} {}", &group[..8], &user[..8], kind_name(kind))
+        }
+        YoEvent::GroupSentElsewhere { group, .. } => format!("group {} sent elsewhere", &group[..8]),
+        YoEvent::GroupChanged { group } => format!("group {} changed", &group[..8]),
     };
     events.iter().map(one).collect::<Vec<_>>().join(", ")
 }
