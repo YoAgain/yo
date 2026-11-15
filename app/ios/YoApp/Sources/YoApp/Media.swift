@@ -487,7 +487,10 @@ final class ReceivedMedia {
     let written = pending.filter { FileManager.default.fileExists(atPath: file($0.id, $0.kind).path) }
     pending.removeAll { one in written.contains { $0.id == one.id } }
     saved += written.map { Saved(id: $0.id, from: $0.from, kind: $0.kind) }
-    if (migrated || !written.isEmpty) && store() {
+    // Kept, and its file gone: seen, and the manifest that said so did not write before the app ended. Never again.
+    let seen = saved.filter { !FileManager.default.fileExists(atPath: file($0.id, $0.kind).path) }
+    saved.removeAll { one in seen.contains { $0.id == one.id } }
+    if (migrated || !written.isEmpty || !seen.isEmpty) && store() {
       oldIndexes.forEach { try? FileManager.default.removeItem(at: $0) }
     }
     let keep = Set(saved.map { file($0.id, $0.kind).lastPathComponent } + ([manifest] + oldIndexes).map(\.lastPathComponent))
@@ -659,20 +662,38 @@ final class ReceivedMedia {
   }
 
   /// Shown: it will not show again, even if the app ends before the viewer closes (its file goes then, or at the
-  /// next start).
+  /// next start). A manifest that does not write now is written again until it does (`storeUntilWritten`); its file
+  /// goes when the viewer closes all the same, and a start drops a kept one without its file (`load`).
   func consumed(_ id: String) {
     saved.removeAll { $0.id == id }
-    _ = store()
+    storeUntilWritten()
   }
 
-  /// Seen: gone from this iPhone.
+  /// Seen: gone from this iPhone, the file first (what makes it seen for good, see `load`), then the manifest.
   func forget(_ id: String) {
     for kind in [MediaFile.Kind.photo, .video] {
-      let url = file(id, kind)
-      Task.detached(priority: .utility) { try? FileManager.default.removeItem(at: url) }
+      try? FileManager.default.removeItem(at: file(id, kind))
     }
     saved.removeAll { $0.id == id }
-    _ = store()
+    storeUntilWritten()
+  }
+
+  /// Written again while it fails, a second, then longer, up to half a minute apart, until it writes (any later
+  /// write of it counts too) or the account signs out.
+  private var rewriting: Task<Void, Never>?
+
+  private func storeUntilWritten() {
+    guard !store(), rewriting == nil else { return }
+    let generation = generation
+    rewriting = Task {
+      var pause = 1.0
+      while generation == self.generation {
+        try? await Task.sleep(for: .seconds(pause))
+        if generation != self.generation || store() { break }
+        pause = min(pause * 2, 30)
+      }
+      if generation == self.generation { rewriting = nil }
+    }
   }
 
   /// Signed out: nothing kept, nothing noted (the files went with MediaStorage.clearAll).
@@ -687,6 +708,8 @@ final class ReceivedMedia {
     arrived = nil
     pauses.values.forEach { $0.cancel() }
     pauses = [:]
+    rewriting?.cancel()
+    rewriting = nil
   }
 
   /// For the bar: a small picture (the viewer reads the photo itself from its file when it shows it).
