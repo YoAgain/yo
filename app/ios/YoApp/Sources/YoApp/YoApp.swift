@@ -153,35 +153,50 @@ final class NotificationDelegate: NSObject, UNUserNotificationCenterDelegate, Se
     self.accounts = accounts
   }
 
+  // The completion handlers, not the async forms: UIKit takes the answer only on the main thread, and an async
+  // form answered from the thread its task ended on (a tap on a notification stopped the app, in UIKit's snapshot
+  // update). What the answers need is taken out of the notification first, here.
   func userNotificationCenter(
-    _ center: UNUserNotificationCenter, willPresent notification: UNNotification
-  ) async -> UNNotificationPresentationOptions {
+    _ center: UNUserNotificationCenter, willPresent notification: UNNotification,
+    withCompletionHandler completionHandler: @escaping @Sendable (UNNotificationPresentationOptions) -> Void
+  ) {
     let info = notification.request.content.userInfo
     // A push that names nobody ("Yo"): the app's own wait at the hub brings the Yo, if there is one.
-    guard let sender = info["from"] as? String else { return [] }
+    guard let sender = info["from"] as? String else { return DispatchQueue.main.async { completionHandler([]) } }
     // The Yo's own id when the notification extension (YoNotify) knew it: the same Yo from the core is not shown twice.
-    await inbox.received(id: info["id"] as? String ?? notification.request.identifier, from: sender)
-    // Nor left in Notification Center, seen here already (a moment later: it is listed only after this answer). The
-    // app shows it itself, on its bar ("Yo!!" at its end): no banner.
+    let id = info["id"] as? String ?? notification.request.identifier
     Task { @MainActor [inbox] in
+      inbox.received(id: id, from: sender)
+      // The app shows it itself, on its bar ("Yo!!" at its end): no banner.
+      completionHandler([])
+      // Nor left in Notification Center, seen here already (a moment later: it is listed only after this answer).
       try? await Task.sleep(for: .seconds(0.5))
       await inbox.collectDelivered()
     }
-    return []
   }
 
   /// A tap on the notification opens the app, where the Yo shows on its row. "Yo Back" right on it sends one to the
   /// sender without opening the app (in the background, once the core has opened).
-  func userNotificationCenter(_ center: UNUserNotificationCenter, didReceive response: UNNotificationResponse) async {
+  func userNotificationCenter(
+    _ center: UNUserNotificationCenter, didReceive response: UNNotificationResponse,
+    withCompletionHandler completionHandler: @escaping @Sendable () -> Void
+  ) {
     let info = response.notification.request.content.userInfo
-    guard let sender = info["from"] as? String else { return }  // "Yo": the app opens, the core brings the Yo
-    switch response.actionIdentifier {
-    case UNNotificationDefaultActionIdentifier:
-      await inbox.received(id: info["id"] as? String ?? response.notification.request.identifier, from: sender)
-    case Inbox.yoBack:
-      await yoBack(to: sender, user: info["user"] as? String)
-    default:
-      break
+    // "Yo": the app opens, the core brings the Yo
+    guard let sender = info["from"] as? String else { return DispatchQueue.main.async { completionHandler() } }
+    let id = info["id"] as? String ?? response.notification.request.identifier
+    let user = info["user"] as? String
+    let action = response.actionIdentifier
+    Task { @MainActor [inbox] in
+      switch action {
+      case UNNotificationDefaultActionIdentifier:
+        inbox.received(id: id, from: sender)
+      case Inbox.yoBack:
+        await yoBack(to: sender, user: user)
+      default:
+        break
+      }
+      completionHandler()
     }
   }
 
