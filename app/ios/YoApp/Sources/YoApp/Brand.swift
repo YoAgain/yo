@@ -41,7 +41,7 @@ extension Font {
 
 enum Metrics {
   /// The friends: one unbroken list of coloured bars from edge to edge, as the original's.
-  static let rowHeight: CGFloat = 76
+  static let rowHeight: CGFloat = 90
   static let rowFont: CGFloat = 30
   /// The title: as tall as the glass buttons beside it, its "Yo" as large as fits.
   static let titleHeight: CGFloat = 44

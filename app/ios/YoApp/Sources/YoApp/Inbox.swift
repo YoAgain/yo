@@ -4,6 +4,7 @@
 // photos and videos wait, until seen once.
 import AVFoundation
 import Observation
+import SwiftUI
 import UIKit
 import UserNotifications
 import YoCore
@@ -66,8 +67,22 @@ final class Inbox {
   /// Counts Yos as they come, to tell whether more came during a batch.
   @ObservationIgnored private var came = 0
   static let batchSeconds = 0.1
-  /// Who sent the last Yo on a group's bar (by its `Friend.mediaKey`): shown small beside its "Yo!!".
-  var groupSenders: [String: String] = [:]
+  /// One who sent Yos standing on a group's bar, and how many.
+  struct GroupSender: Equatable {
+    var name: String
+    var count: Int
+    /// Their last Yo came then: their line fades on its own, as a bar's Yo does (`SenderBlocks`).
+    var at = Date.now
+  }
+  /// Who sent the Yos standing on a group's bar (by its `Friend.mediaKey`), in the order they first came, each once
+  /// with their count: a line each under the bar's name, "Kai: Yo!!" (`SenderBlocks`). Gone with the Yos (`endRun`).
+  var groupSenders: [String: [GroupSender]] = [:]
+
+  /// A group bar's Yos are over (its senders' lines have faded): the bar is one line again, a photo still waiting
+  /// with its sign at the end as on any bar; the next Yo starts its senders anew.
+  func endRun(_ key: String) {
+    groupSenders[key] = nil
+  }
   /// Group members' names by user id (hex), as their Yos came: who a group's photo is from in the viewer.
   @ObservationIgnored var memberNames: [String: String] = [:]
 
@@ -472,7 +487,18 @@ final class Inbox {
         guard let bar = friends.groupBar(group) else { break }
         let from = contacts.first { $0.user == user }
         let senderName = friends.all.first { $0.user == user }?.name ?? from?.handles.first ?? from?.name ?? "?"
-        groupSenders[bar.mediaKey] = senderName
+        // In the order they first came, for the whole run: one who writes again stays in their place (and shows
+        // again there if faded), a new one comes in under the others.
+        var senders = groupSenders[bar.mediaKey] ?? []
+        if let index = senders.firstIndex(where: { $0.name == senderName }) {
+          senders[index].count += 1
+          senders[index].at = .now
+        } else {
+          senders.append(GroupSender(name: senderName, count: 1))
+        }
+        withAnimation(.snappy) {  // a new line slides in, a "!" more comes in, as on any bar
+          groupSenders[bar.mediaKey] = senders
+        }
         memberNames[user] = senderName
         received(id: "\(group)/\(user)/\(sentAtMs)", from: bar.name)
         count(from: bar.name)
@@ -551,6 +577,8 @@ final class Inbox {
     }
     center.removeDeliveredNotifications(
       withIdentifiers: delivered.filter { $0.request.identifier != SecureReminder.id }.map(\.request.identifier))
+    // Seen, all of them: the red badge goes with the notifications.
+    try? await center.setBadgeCount(0)
   }
 
   /// Photos and videos seen (each once): they are gone, from this iPhone too.

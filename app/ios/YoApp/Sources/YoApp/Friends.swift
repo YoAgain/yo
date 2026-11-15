@@ -127,7 +127,8 @@ final class Friends {
     }
     let known = Set(groups.filter { !$0.left }.map(\.id))
     list.removeAll { $0.group.map { !known.contains($0) } ?? false }
-    if list != all || zip(list, all).contains(where: { $0.name != $1.name }) { all = list }
+    // Friends compare by `key` alone: a new name or a request answered is a change too.
+    if list != all || zip(list, all).contains(where: { $0.name != $1.name || $0.request != $1.request }) { all = list }
   }
 
   /// The bar of a group, by its id.

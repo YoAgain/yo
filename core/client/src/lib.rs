@@ -469,6 +469,8 @@ pub struct Client {
     /// `after_sync` (or the next call that receives) acknowledges them. Lost with the process, they come again and are
     /// skipped as seen.
     unacked: Vec<u64>,
+    /// Users this process asked the hub the name of (a contact known without one: a group's member), once each.
+    names_asked: BTreeSet<String>,
     /// Inbox ids a call received (its last batch, not full) and has not handed out yet: `finish` moves them to
     /// `unacked` once their events are saved and handed over, so no call acknowledges before the app has its events.
     received_ids: Vec<u64>,
@@ -969,6 +971,7 @@ impl Client {
             guest_events: None,
             explicit_ack: false,
             unacked: Vec::new(),
+            names_asked: BTreeSet::new(),
             received_ids: Vec::new(),
             after_due: false,
             hub_keys: Vec::new(),
@@ -1501,14 +1504,21 @@ impl Client {
     /// Takes in a user's devices as the hub names them (a lookup, or a delivery's `409`, spec 4.4): sessions with
     /// devices it no longer has go, new ones get a slot (and a session with the next delivery). A new account key is
     /// an identity change for a contact (3.2), for this account a replacement of this device.
-    fn take_devices(&mut self, user: &str, account_key: Key, roster: &[api::Device]) -> Result<()> {
+    /// `username`: as the lookup named it (a group's member known by its id alone gets its name so).
+    fn take_devices(
+        &mut self,
+        user: &str,
+        account_key: Key,
+        roster: &[api::Device],
+        username: Option<String>,
+    ) -> Result<()> {
         let keys: Vec<Key> = roster.iter().map(|d| d.key).collect();
         if user == self.state.user_id {
             if account_key != self.my_account_key() || !keys.contains(&self.state.device_key) {
                 return Err(Error::Replaced);
             }
         } else {
-            self.pin(user, account_key, None);
+            self.pin(user, account_key, username);
         }
         let mine = self.state.device_key;
         let gone: Vec<Slot> = self
@@ -1635,12 +1645,12 @@ impl Client {
         if user == self.state.user_id {
             except.push(self.state.device_key);
         }
-        let (found, _) = self.lookup(&Handle::user(&user_bytes(user)?), api::LOOKUP_PREKEYS, except)?;
+        let (found, username) = self.lookup(&Handle::user(&user_bytes(user)?), api::LOOKUP_PREKEYS, except)?;
         if hex(&found.user_id) != user {
             return Err(Error::Protocol("the hub answered for another user"));
         }
         self.read_before_roster(user, &found.devices)?;
-        self.take_devices(user, found.account_key, &found.devices)?;
+        self.take_devices(user, found.account_key, &found.devices, username)?;
         if let Some(contact) = self.state.contacts.get(user) {
             if contact.unconfirmed {
                 return Err(Error::Unconfirmed);
@@ -1809,7 +1819,7 @@ impl Client {
             return Err(Error::Unconfirmed);
         }
         self.atomic(|c| {
-            c.take_devices(&peer, found.account_key, &found.devices)?;
+            c.take_devices(&peer, found.account_key, &found.devices, None)?;
             c.take_bundles(&peer, found.account_key, &found.bundles)?;
             c.note_outdated(&peer);
             let contact = c.state.contacts.get_mut(&peer).ok_or(Error::Internal("contact"))?;
@@ -2190,7 +2200,7 @@ impl Client {
                     match answer.and_then(|answer| Ok(decode::<api::Devices>(answer)?)) {
                         Ok(devices) => match self
                             .read_before_roster(&item.user, &devices.devices)
-                            .and_then(|()| self.take_devices(&item.user, devices.account_key, &devices.devices))
+                            .and_then(|()| self.take_devices(&item.user, devices.account_key, &devices.devices, None))
                         {
                             Ok(()) => changed = true,
                             // The inbox could not be read first: the envelope waits like any "not now".
@@ -2455,10 +2465,10 @@ impl Client {
     /// does.
     fn hub_names(&mut self, user: &str, account_key: &Key, device_key: &Key, id: u8) -> Result<bool> {
         match self.lookup(&Handle::user(&user_bytes(user)?), 0, Vec::new()) {
-            Ok((found, _)) if found.account_key == *account_key => {
+            Ok((found, username)) if found.account_key == *account_key => {
                 let named = found.devices.iter().any(|d| d.key == *device_key && d.id == id);
                 if named {
-                    self.take_devices(user, found.account_key, &found.devices)?;
+                    self.take_devices(user, found.account_key, &found.devices, username)?;
                 }
                 Ok(named)
             }
@@ -2483,7 +2493,7 @@ impl Client {
                     && found.devices.iter().any(|d| d.key == device_key && d.id == id) =>
             {
                 self.pin(user, account_key, username);
-                self.take_devices(user, found.account_key, &found.devices)?;
+                self.take_devices(user, found.account_key, &found.devices, None)?;
                 Ok(true)
             }
             Ok(_) | Err(Error::NotOnYo) => Ok(false),
@@ -2508,6 +2518,21 @@ impl Client {
         true
     }
 
+    /// A contact known without a name (a group's member, whose keys came by its id): the hub asked once in this process
+    /// who it is, as Signal fetches a member's profile, so its Yos say who they are from. Not answered now: asked again
+    /// in a later process.
+    fn learn_name(&mut self, user: &str, account_key: Key) {
+        if !self.names_asked.insert(user.to_owned()) {
+            return;
+        }
+        let Ok(id) = user_bytes(user) else { return };
+        match self.lookup(&Handle::user(&id), 0, Vec::new()) {
+            Ok((found, Some(username))) if found.account_key == account_key => self.take_handle(user, username),
+            Ok(_) => {}
+            Err(error) => self.note(format!("name of a member: {error}")),
+        }
+    }
+
     /// Takes one of the day's lookups for recovery, if one is left.
     fn recovery_lookup(&mut self) -> bool {
         let day = (self.clock)() / (24 * 3600 * 1000);
@@ -2529,8 +2554,12 @@ impl Client {
         if account_key == self.my_account_key() {
             return Ok(Some((self.state.user_id.clone(), None)));
         }
-        if let Some((user, _)) = self.state.contacts.iter().find(|(_, c)| c.account_key == account_key && !c.gone) {
-            return Ok(Some((user.clone(), None)));
+        if let Some((user, c)) = self.state.contacts.iter().find(|(_, c)| c.account_key == account_key && !c.gone) {
+            let (user, unnamed) = (user.clone(), c.handles.is_empty());
+            if unnamed {
+                self.learn_name(&user, account_key);
+            }
+            return Ok(Some((user, None)));
         }
         // Someone writing first, or a contact this state forgot (a state rolled back). A forger's payloads cost it a
         // delivery each (the hub's limits, 6.6); the lookup is the hub's (counted there too).
@@ -2605,9 +2634,9 @@ impl Client {
                 }
                 return Ok(());
             }
-            let (found, _) = self.lookup(&Handle::user(&user_bytes(&user)?), 0, Vec::new())?;
+            let (found, username) = self.lookup(&Handle::user(&user_bytes(&user)?), 0, Vec::new())?;
             if found.account_key == payload.account_key {
-                self.take_devices(&user, found.account_key, &found.devices)?;
+                self.take_devices(&user, found.account_key, &found.devices, username)?;
             }
             let current = found.devices.iter().any(|d| d.key == payload.device_key && d.id == payload.device_id);
             if found.account_key != payload.account_key || !current {

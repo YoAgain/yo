@@ -23,6 +23,7 @@ import AVFoundation
 import ImageIO
 import PhotosUI
 import SwiftUI
+import os
 import UserNotifications
 import YoCore
 
@@ -147,6 +148,8 @@ struct FriendList: View {
 
   // Camera mode
   @State private var cameraOn = false
+  /// A group's bar that shrank back, and until when the bars under it (which moved up) take no taps (`send`).
+  @State private var tapLock: (bar: UUID, until: Date)?
   @AppStorage(SettingKey.leftHanded) private var leftHanded = false
   @State private var camera = Camera()
   /// The camera's zooms (CameraZoom) and the one chosen.
@@ -245,18 +248,16 @@ struct FriendList: View {
     }
   }
 
-  /// The two questions of a request: "Yo X?" (Yo: a contact from now on; No: asked "Block X?", Yo: blocked, No: the
+  /// The two questions of a request: "Accept Yo from X?" (Yo: a contact from now on; No: asked "Block X?", Yo: blocked, No: the
   /// request is gone).
   private var requests: some View {
     navigation
       .alert(
-        "Yo \(requesting?.name ?? "")?",
+        "Accept Yo from \(requesting?.name ?? "")?",  // one line, nothing under it
         isPresented: Binding(get: { requesting != nil }, set: { if !$0 { requesting = nil } }), presenting: requesting
       ) { bar in
-        Button("Yo") { answer(bar, yes: true) }
         Button("No", role: .cancel) { blockingRequest = bar }
-      } message: { bar in
-        Text(bar.group == nil ? "\(bar.name) wants to Yo you." : "You were added to \(bar.name).")
+        Button("Yo") { answer(bar, yes: true) }
       }
       .alert(
         "Block \(blockingRequest?.name ?? "")?",
@@ -273,9 +274,16 @@ struct FriendList: View {
     guard let client = accounts.client else { return }
     Task {
       if yes {
-        let events = try? await Hub.run {
-          if let group = bar.group { return try client.acceptGroup(group: group) }
-          return try client.accept(who: bar.target)
+        let events: [YoEvent]?
+        do {
+          events = try await Hub.run {
+            if let group = bar.group { return try client.acceptGroup(group: group) }
+            return try client.accept(who: bar.target)
+          }
+        } catch {
+          events = nil
+          Logger(subsystem: "app.justyo", category: "requests").error(
+            "accept \(bar.group == nil ? "contact" : "group", privacy: .public): \(String(describing: error), privacy: .public)")
         }
         if let events { await inbox.absorb(events, client: client, friends: friends) }
         if let contacts = try? await Hub.run({ client.contacts() }) { friends.markRequests(contacts) }
@@ -400,10 +408,13 @@ struct FriendList: View {
             row(lifted.friend)
               .transition(.asymmetric(insertion: .move(edge: .top).combined(with: .opacity), removal: .opacity))
           }
-          addRow
+          // In camera mode no "+" (nothing to add there): the list ends a bar sooner, clear of the camera's controls.
+          if !cameraOn { addRow }
         }
         .scrollTargetLayout()
       }
+      // In camera mode the last bar scrolls up out from under the controls (their row and its margin).
+      .contentMargins(.bottom, cameraOn ? 84 : 0, for: .scrollContent)
       .scrollBounceBehavior(.basedOnSize)
       .scrollDismissesKeyboard(.interactively)
       .scrollPosition($position)
@@ -423,8 +434,8 @@ struct FriendList: View {
       // Amethyst behind everything; in camera mode the live picture or the picked photo.
       .background { backdrop.ignoresSafeArea() }
       // The camera's controls in one row at the bottom, its button in the corner opening and closing it.
+      // In camera mode what to do, in glass just over the controls (at the top it would cover a bar's name).
       .overlay(alignment: .bottom) {
-        // In camera mode what to do, just over its controls: at the top it would push the list down.
         VStack(spacing: 10) {
           if cameraOn && hintShown { title }
           cameraControls
@@ -443,16 +454,18 @@ struct FriendList: View {
     }
   }
 
-  /// No heading over the list (the bars are the app); in camera mode what to do, as a line over the camera's controls.
+  /// No heading over the list (the bars are the app); in camera mode what to do, in a glass capsule over the controls.
   private var title: some View {
-    Text(picked == nil ? "Tap a name for a photo. Hold for a video." : "Tap a name to send this photo.")
-      .font(.system(size: 13, weight: .semibold))
+    Text(picked == nil ? "Tap a name · Hold for video" : "Tap a name to send this photo")
+      .font(.system(size: 15, weight: .semibold))
       .foregroundStyle(.white)
       .lineLimit(1)
       .fixedSize()
-      .shadow(color: .black.opacity(0.6), radius: 3, y: 1)  // readable over any picture, no glass
+      .padding(.horizontal, 18)
       .frame(height: Metrics.titleHeight)
-      .transition(.opacity)
+      .glassEffect(.regular, in: .capsule)
+      .allowsHitTesting(false)  // the bars under it still take photos
+      .transition(.opacity.combined(with: .scale(scale: 0.9)))
   }
 
   // MARK: Bars
@@ -461,7 +474,7 @@ struct FriendList: View {
     let waiting = inbox.media(for: friend) ?? []
     let bar = LiveBar(
       friend: friend,
-      from: inbox.groupSenders[friend.mediaKey],
+      senders: inbox.groupSenders[friend.mediaKey] ?? [],
       bar: bars.of(friend),
       color: .row(friend.color).opacity(cameraOn ? 0.45 : 1),  // see-through over the camera
       recording: recordingFor == friend,
@@ -877,10 +890,27 @@ struct FriendList: View {
   // MARK: Sending
 
   private func send(to friend: Friend) {
+    // A group's bar just shrank back (its senders' lines went): the bars under it moved up under the finger, so a tap
+    // on one of them in the first half second goes nowhere rather than to whoever slid there. The group's own bar
+    // and those above it stay where they were: they take taps (to fire on).
+    if let lock = tapLock, Date.now < lock.until, let group = friends.shown.firstIndex(where: { $0.key == lock.bar }),
+      let tapped = friends.shown.firstIndex(where: { $0.key == friend.key }), tapped > group
+    {
+      return
+    }
     // A request asks first (spec 4.10): nothing goes to them before a yes.
     if friend.request {
       requesting = friend
       return
+    }
+    // Firing back into a group whose senders' lines stand: they stay a while longer (its time starts again), so the
+    // bar does not shrink under the finger.
+    if friend.group != nil, var landing = landed[friend.name], landing.seen != nil {
+      let now = Date.now
+      landing.fading = nil
+      landing.seen = now
+      landed[friend.name] = landing
+      settle(friend.name, now)
     }
     hintEpoch += 1  // the camera's hint goes, and waits again
     Perf.mark("tap.action")
@@ -1235,7 +1265,14 @@ extension FriendList {
       let fading = Date.now
       landed[name]?.fading = fading
       try? await Task.sleep(for: .seconds(Self.yoSeconds - Self.yoSolidSeconds))
-      if landed[name]?.fading == fading { _ = landed.removeValue(forKey: name) }
+      if landed[name]?.fading == fading {
+        _ = landed.removeValue(forKey: name)
+        if let bar = friends.shown.first(where: { $0.name == name }) {
+          // Its senders' lines go and the bar shrinks: no taps for a moment (`send`).
+          if bar.group != nil, inbox.groupSenders[bar.mediaKey] != nil { tapLock = (bar.key, .now + 0.5) }
+          inbox.endRun(bar.mediaKey)
+        }
+      }
     }
   }
 
@@ -1340,8 +1377,8 @@ enum ThumbnailTouch {
 /// read here, so a tap redraws this bar alone and not the whole list.
 struct LiveBar: View {
   let friend: Friend
-  /// A group's: who sent its last Yo.
-  var from: String? = nil
+  /// A group's: who sent the Yos on it now, the newest first, with their counts.
+  var senders: [Inbox.GroupSender] = []
   let bar: FriendList.Bars.Bar
   let color: Color
   let recording: Bool
@@ -1360,7 +1397,7 @@ struct LiveBar: View {
       title, count: friend.request ? 0 : count, color: color, recording: recording,
       outgoing: bar.outgoing.last?.started, sendSeconds: bar.seconds, stop: stop,
       media: friend.request ? [] : media, yo: friend.request ? nil : yo, hint: hint, hold: hold, view: view, faded: friend.gone && bar.sent == nil,
-      icon: friend.group == nil ? nil : "person.3.fill", from: friend.group == nil ? nil : from, flies: true,
+      icon: friend.group == nil ? nil : "person.3.fill", senders: friend.group == nil ? [] : senders, flies: true,
       action: action)
       // Gone: still their name (whose bar it is), faded; a tap says "Not on Yo".
       .accessibilityValue(friend.gone ? "Not on Yo" : "")
@@ -1435,9 +1472,10 @@ struct RowButton: View {
   var view: (ThumbnailTouch) -> Void = { _ in }
   /// The words faded (a friend no longer on Yo).
   var faded = false
-  /// A group's bar: its sign before the name (SF Symbol), and who sent its last Yo, small over the "Yo!!".
+  /// A group's bar: its sign before the name (SF Symbol), and who sent the Yos on it, a line each under the name
+  /// (`SenderBlocks`).
   var icon: String?
-  var from: String?
+  var senders: [Inbox.GroupSender] = []
   let action: () -> Void
   /// A hold started a video: letting go stops it, and the bar's tap does not take a photo as well.
   @State private var holding = false
@@ -1454,12 +1492,12 @@ struct RowButton: View {
     _ title: String, count: Int = 1, color: Color, recording: Bool = false, outgoing: Date? = nil,
     sendSeconds: Double = FriendList.sendDelay, stop: @escaping () -> Void = {},
     media: [Arrival] = [], yo: FriendList.Landing? = nil, hint: String? = nil, hold: ((Bool) -> Void)? = nil,
-    view: @escaping (ThumbnailTouch) -> Void = { _ in }, faded: Bool = false, icon: String? = nil, from: String? = nil,
+    view: @escaping (ThumbnailTouch) -> Void = { _ in }, faded: Bool = false, icon: String? = nil, senders: [Inbox.GroupSender] = [],
     flies: Bool = false, action: @escaping () -> Void
   ) {
     self.flies = flies
     self.icon = icon
-    self.from = from
+    self.senders = senders
     self.title = title
     self.count = count
     self.color = color
@@ -1553,14 +1591,11 @@ struct RowButton: View {
   /// and their "!"s, over it what takes its own touches (the Yo at the end), so each sits exactly where the other
   /// leaves it room.
   private func line(touchable: Bool) -> some View {
-    BarLine(start: outgoing == nil ? BarLine.margin : BarLine.margin + Self.ring + BarLine.gap, mirrored: leftHanded) {
-      HStack(spacing: 8) {
-        // A group: its sign at the start, before its name.
-        if let icon {
-          Image(systemName: icon)
-            .font(.system(size: Metrics.rowFont * 0.62, weight: .bold))
-            .accessibilityLabel("Group")
-        }
+    BarLine(
+      start: (outgoing == nil ? BarLine.margin : BarLine.margin + Self.ring + BarLine.gap) + (icon == nil ? 0 : Self.iconRoom),
+      mirrored: leftHanded,
+      below: !senders.isEmpty && (yo != nil || !media.isEmpty)  // a group's senders: under the name, "Kai: Yo!!"
+    ) {
         Group {
           if title == "Sent Yo" && !touchable {
             // A Yo sent rises out of the very "Yo" of "Sent Yo" (FlyingYo), whatever stands around it.
@@ -1579,7 +1614,17 @@ struct RowButton: View {
           .lineLimit(1)
           .minimumScaleFactor(0.5)  // a long name, or large text, gets smaller before it is cut with "…"
           .contentTransition(.identity)  // other words come at once, never two drawn over each other
-      }
+        // A group: its sign before its name, outside it: the name alone stands in the middle (`iconRoom` keeps the
+        // sign on the bar when a long name moves to the start).
+        .overlay(alignment: .leading) {
+          if let icon {
+            Image(systemName: icon)
+              .font(.system(size: Metrics.rowFont * 0.62, weight: .bold))
+              .frame(width: Self.iconRoom - 8, alignment: .trailing)
+              .offset(x: -Self.iconRoom)  // wholly before the name, 8 apart
+              .accessibilityLabel("Group")
+          }
+        }
         .modifier(Knock(trigger: yo?.first))
         .opacity(touchable ? 0 : faded ? 0.55 : 1)
         .accessibilityHidden(touchable)
@@ -1595,6 +1640,8 @@ struct RowButton: View {
   }
 
   private static let ring = 30.0
+  /// Room before a group's name for its sign (`icon`, at most 28 wide) and the gap of 8 after it.
+  private static let iconRoom = 36.0
   private static let sign = 34.0
 
   /// "📷" or "🎥" while photos and videos wait unseen: a finger on it shows them at once; a short tap lets them run,
@@ -1654,28 +1701,30 @@ struct RowButton: View {
   /// first, then the photo sign while photos or videos wait ("Yo!! 📷"; "📷 Yo!!" for the left hand). The "!"s count
   /// every Yo of the run, with or without a photo; with only unseen photos left, one for each.
   @ViewBuilder private func mark(touchable: Bool) -> some View {
-    if !media.isEmpty {
+    if !media.isEmpty, !senders.isEmpty {
+      // A group's: the photo sign on the name's line at the bar's end, as on any bar; the senders' lines under it.
+      VStack(spacing: 0) {
+        HStack(spacing: 0) {
+          if leftHanded { sign }
+          Spacer(minLength: 0)
+          if !leftHanded { sign }
+        }
+        .frame(height: Metrics.rowHeight)
+        SenderBlocks(senders: senders, mirrored: leftHanded)
+      }
+      .allowsHitTesting(touchable)  // the copy in the bar under it is only for the layout
+      .transition(.opacity)
+    } else if !media.isEmpty {
       let live = yo.flatMap { $0.fading == nil ? $0.count : nil } ?? 0
       HStack(spacing: 4) {
         if leftHanded { sign }
-        VStack(alignment: leftHanded ? .leading : .trailing, spacing: -4) {
-          // In a group, who it is from, small over it, as over a plain Yo.
-          if let from {
-            Text(from)
-              .font(.system(size: 12, weight: .heavy))
-              .lineLimit(1)
-              .opacity(0.85)
-          }
-          HStack(spacing: 0) {
-            Text("Yo")
-            Bangs(count: max(live, media.count))
-          }
+        HStack(spacing: 0) {
+          Text("Yo")
+          Bangs(count: max(live, media.count))
         }
         .allowsHitTesting(false)  // a tap there sends a Yo
         .accessibilityElement(children: .ignore)
-        .accessibilityLabel(
-          (media.count == 1 ? "Yo with a photo or video" : "\(media.count) Yos with photos or videos")
-            + (from.map { ", last from \($0)" } ?? ""))
+        .accessibilityLabel(media.count == 1 ? "Yo with a photo or video" : "\(media.count) Yos with photos or videos")
         if !leftHanded { sign }
       }
       .lineLimit(1)
@@ -1685,24 +1734,26 @@ struct RowButton: View {
       // "Yo" and a "!" for each Yo after the first: a "!" goes quickly when its Yo is over, the last Yo fades slowly.
       TimelineView(.animation(paused: yo.fading == nil)) { timeline in
         let fade = yo.fading.map { timeline.date.timeIntervalSince($0) / (yoSeconds - Self.solid) } ?? 0
-        VStack(alignment: leftHanded ? .leading : .trailing, spacing: -4) {
-          // In a group, who it is from, small over it.
-          if let from {
-            Text(from)
-              .font(.system(size: 12, weight: .heavy))
-              .lineLimit(1)
-              .opacity(0.85)
+        if !senders.isEmpty {
+          VStack(spacing: 0) {
+            Color.clear.frame(height: Metrics.rowHeight)  // the name's line, as with a photo sign
+            SenderBlocks(senders: senders, mirrored: leftHanded)
           }
+          .opacity(max(0, 1 - fade))
+        } else {
           HStack(spacing: 0) {
             Text("Yo")
             Bangs(count: yo.count)
           }
+          .lineLimit(1)
+          .opacity(max(0, 1 - fade))
         }
-        .lineLimit(1)
-        .opacity(max(0, 1 - fade))
       }
       .accessibilityElement(children: .ignore)
-      .accessibilityLabel((yo.count == 1 ? "Yo" : "\(yo.count) Yos") + (from.map { ", last from \($0)" } ?? ""))
+      .accessibilityLabel(
+        senders.isEmpty
+          ? (yo.count == 1 ? "Yo" : "\(yo.count) Yos")
+          : senders.map { "\($0.count == 1 ? "Yo" : "\($0.count) Yos") from \($0.name)" }.joined(separator: ", "))
       // It comes in from the bar's outer edge, sliding to its place; it goes by fading.
       .transition(.asymmetric(
         insertion: .move(edge: leftHanded ? .leading : .trailing).combined(with: .opacity),
@@ -1730,10 +1781,10 @@ struct CameraZoom: View {
           .foregroundStyle(.white)
           .contentTransition(.numericText())
           .frame(width: 38, height: 38)
-          .background(.black.opacity(0.35), in: .circle)
           .contentShape(.circle.inset(by: -6))
       }
       .buttonStyle(.plain)
+      .glassEffect(.regular.interactive(), in: .circle)  // glass, as the camera's other buttons
       .accessibilityLabel("Zoom \(Self.label(chosen))×")
       .accessibilityHint("Changes the zoom")
       .transition(.opacity)
@@ -1743,6 +1794,42 @@ struct CameraZoom: View {
   /// "0.5", "1", "2", "2.5": no ".0".
   static func label(_ choice: Double) -> String {
     choice == choice.rounded() ? String(Int(choice)) : String(format: "%.1f", choice)
+  }
+}
+
+/// A group's Yos, by whom: a line each, "Kai: Yo!!" in the middle as a bar's name, as tall as a bar, in the order they
+/// came, all under the bar's name (`BarLine.below`), which stays as on any bar. One sender, one line: the bar grows by
+/// a bar's height with each.
+struct SenderBlocks: View {
+  let senders: [Inbox.GroupSender]
+  var mirrored = false
+
+  var body: some View {
+    // Each line fades on its own once its sender stops, as a bar's Yo: solid `yoSolidSeconds`, then gone by
+    // `yoSeconds`. Its place stays (empty) until the whole bar's Yos are over and it shrinks.
+    TimelineView(.animation) { timeline in
+      VStack(spacing: 0) {
+        ForEach(senders, id: \.name) { sender in  // in the order they first came
+          let since = timeline.date.timeIntervalSince(sender.at)
+          let fade = max(0, since - FriendList.yoSolidSeconds) / (FriendList.yoSeconds - FriendList.yoSolidSeconds)
+          HStack(spacing: 0) {
+            Text("\(sender.name): ")
+            Text("Yo")
+            Bangs(count: sender.count)
+          }
+          .lineLimit(1)
+          .minimumScaleFactor(0.5)  // only a name too long for the bar
+          .frame(maxWidth: .infinity, minHeight: Metrics.rowHeight)
+          .opacity(max(0, 1 - fade))
+          // A new sender's line comes in from the bar's outer edge, as a Yo does.
+          .transition(.move(edge: mirrored ? .leading : .trailing).combined(with: .opacity))
+        }
+      }
+    }
+    .font(.yo(Metrics.rowFont))  // as a bar's name
+    .allowsHitTesting(false)  // a tap there sends a Yo
+    .accessibilityElement(children: .ignore)
+    .accessibilityLabel(senders.map { "\($0.count == 1 ? "Yo" : "\($0.count) Yos") from \($0.name)" }.joined(separator: ", "))
   }
 }
 
@@ -1783,19 +1870,34 @@ struct BarLine: Layout {
   var start = margin
   /// For the left hand: the end part ("Yo!!") at the left, the room kept at the right.
   var mirrored = false
+  /// The end part from the bar's top, as wide as the bar (a group's senders, `SenderBlocks`): its first line is the
+  /// words' (a photo sign at its end), the senders' lines under it; the words stand in the middle of the bar's first
+  /// `rowHeight`, as on any bar; the bar grows with the end part.
+  var below = false
 
   func sizeThatFits(proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) -> CGSize {
-    let height = subviews.map { $0.sizeThatFits(.unspecified).height }.max() ?? 0
-    return CGSize(width: proposal.width ?? 393, height: height)
+    let heights = subviews.map { $0.sizeThatFits(.unspecified).height }
+    if below, heights.count > 2 {
+      return CGSize(width: proposal.width ?? 393, height: max(Metrics.rowHeight, heights[2]))
+    }
+    return CGSize(width: proposal.width ?? 393, height: heights.max() ?? 0)
   }
 
   func placeSubviews(in bounds: CGRect, proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) {
     // An empty part (no "!"s, no Yo at the end) is no subview at all: take what is there.
     guard let words = subviews.first else { return }
     let after = subviews.count > 1 ? subviews[1] : nil
-    let end = subviews.count > 2 ? subviews[2] : nil
+    let last: LayoutSubview? = subviews.count > 2 ? subviews[2] : nil
     let afterSize = after?.sizeThatFits(.unspecified) ?? .zero
-    let endSize = end?.sizeThatFits(.unspecified) ?? .zero
+    // Below: the end part under the line, at the bar's end; the line then as on a bar with nothing at its end.
+    let end: LayoutSubview? = below ? nil : last
+    if below, let last {
+      // As wide as the bar less its margins, from its top.
+      last.place(
+        at: CGPoint(x: bounds.minX + Self.endPadding, y: bounds.minY), anchor: .topLeading,
+        proposal: ProposedViewSize(width: max(0, bounds.width - 2 * Self.endPadding), height: nil))
+    }
+    let endSize: CGSize = end?.sizeThatFits(.unspecified) ?? .zero
     // The words between `low` and `high`, the end part outside them.
     let endX = mirrored ? bounds.minX + Self.endPadding : bounds.maxX - Self.endPadding - endSize.width
     let low = mirrored
@@ -1806,10 +1908,12 @@ struct BarLine: Layout {
     var x = bounds.midX - wordsWidth / 2
     x -= max(0, x + wordsWidth + afterSize.width - high)
     x = max(low, x)
+    // The line in the middle of the bar's first `rowHeight`, where it is on every bar (the end part under it, if so).
+    let lineY = below ? bounds.minY + Metrics.rowHeight / 2 : bounds.midY
     words.place(
-      at: CGPoint(x: x, y: bounds.midY), anchor: .leading, proposal: ProposedViewSize(width: wordsWidth, height: nil))
-    after?.place(at: CGPoint(x: x + wordsWidth, y: bounds.midY), anchor: .leading, proposal: .unspecified)
-    end?.place(at: CGPoint(x: endX, y: bounds.midY), anchor: .leading, proposal: .unspecified)
+      at: CGPoint(x: x, y: lineY), anchor: .leading, proposal: ProposedViewSize(width: wordsWidth, height: nil))
+    after?.place(at: CGPoint(x: x + wordsWidth, y: lineY), anchor: .leading, proposal: .unspecified)
+    end?.place(at: CGPoint(x: endX, y: lineY), anchor: .leading, proposal: .unspecified)
   }
 }
 

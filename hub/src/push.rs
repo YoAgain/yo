@@ -1,4 +1,4 @@
-//! Waking a device (spec 6.7). A push says only "there is mail": APNs with a constant alert and
+//! Waking a device (spec 6.7). A push says only "there is mail": APNs with a constant alert ("Yo", one line) and
 //! `mutable-content`, so the notification extension fetches, decrypts and writes "YO from CHRIS"; FCM as a
 //! high-priority data message. The requests go through `Transport`, so tests record them.
 
@@ -204,8 +204,7 @@ impl Pusher {
             }
         };
         let host = if sandbox { "api.sandbox.push.apple.com" } else { "api.push.apple.com" };
-        let body =
-            json!({ "aps": { "alert": { "title": "Yo", "body": "Yo" }, "sound": "yo.caf", "mutable-content": 1 } });
+        let body = json!({ "aps": { "alert": { "body": "Yo" }, "sound": "yo.caf", "mutable-content": 1 } });
         let request = Request {
             url: format!("https://{host}/3/device/{token}"),
             headers: vec![

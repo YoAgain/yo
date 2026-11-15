@@ -128,7 +128,10 @@ enum ShareBridge {
 
     /// The original's words, the name as its owner writes it: "Yo from LEO", "📷 from LEO", "🎥 from LEO"; more read
     /// as on the bar, with the photos and videos among them: "Yo!!!!! +4 from LEO · 📷 2".
-    var line: String { request ? "Yo Request from \(name)" : "\(what) from \(name)" }
+    var line: String {
+      let who = bar.map { $0.isEmpty ? name : "\(name) @ \($0)" } ?? name
+      return request ? "Yo Request from \(who)" : "\(what) from \(who)"
+    }
 
     /// What came, without who: "Yo", "📷", "🎥", "Yo!!!!! +4 · 📷 2".
     var what: String {
@@ -256,15 +259,15 @@ enum ShareBridge {
   /// background): a line per sender, the newest first, whose thread and "Yo Back" it is; the Yo sound.
   static func yo(_ content: UNMutableNotificationContent, _ senders: [Yos]) {
     guard let newest = senders.first else { return }
-    // One sender: their name as the title and what came under it, as Messages shows a message ("LEO" / "Yo!!");
-    // a group's: "LEO in FAMILY". Several: a line each ("Yo from LEO").
+    // One line, as the original's (2014: "Yo" over it, iOS's app name, then "From LEO"): "Yo from LEO", "Yo!! from
+    // LEO @ FAMILY". Several: a line each.
     if senders.count == 1, newest.request {
-      // A request says who, not what: "Yo Request" / "from LEO".
-      content.title = "Yo Request"
-      content.body = "from \(newest.name)"
+      // A request says who, not what.
+      content.title = ""
+      content.body = "Yo Request from \(newest.name)"
     } else if senders.count == 1 {
-      content.title = newest.bar.map { $0.isEmpty ? newest.name : "\(newest.name) in \($0)" } ?? newest.name
-      content.body = newest.what
+      content.title = ""
+      content.body = newest.line
     } else {
       content.title = ""
       content.body = senders.map(\.line).joined(separator: "\n")
@@ -284,12 +287,17 @@ enum ShareBridge {
   /// the screen name, written into `content`; the identifiers of the notifications it takes the place of.
   static func write(_ content: UNMutableNotificationContent, _ new: [Yos], over delivered: [UNNotification]) -> [String] {
     let (all, replaced) = merged(new, with: delivered)
+    // The app's red badge: as many as there are Yo notifications (one per sender or group, as merged here), until
+    // the app is opened, which clears both (Inbox.collectDelivered). None left: no badge.
+    let badge = NSNumber(value: all.count)
+    content.badge = badge
     // The newest sender in this notification; every other sender gets a notification of its own.
     guard let newest = all.first else { return replaced }
     yo(content, [newest])
     for other in all.dropFirst() {
       let own = UNMutableNotificationContent()
       yo(own, [other])
+      own.badge = badge
       UNUserNotificationCenter.current().add(UNNotificationRequest(identifier: other.id, content: own, trigger: nil))
     }
     return replaced
