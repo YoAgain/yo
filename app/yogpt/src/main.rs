@@ -201,6 +201,33 @@ fn jpeg_size(bytes: &[u8]) -> Option<(u16, u16)> {
     None
 }
 
+/// A JPEG as a photo goes (spec 5): its metadata segments (APP1 to APP15, comments: EXIF, GPS, XMP) taken out, and
+/// its width and height, at most 1600 px; `None` for no JPEG or a larger one.
+fn jpeg_clean(bytes: &[u8]) -> Option<(Vec<u8>, u16, u16)> {
+    let (width, height) = jpeg_size(bytes)?;
+    if width.max(height) > 1600 {
+        return None;
+    }
+    let be16 = |i: usize| Some(u16::from_be_bytes([*bytes.get(i)?, *bytes.get(i + 1)?]));
+    let mut out = bytes[..2].to_vec();
+    let mut i = 2;
+    while bytes.get(i) == Some(&0xFF) {
+        let marker = *bytes.get(i + 1)?;
+        // The image data from the start of scan on, as it is.
+        if marker == 0xDA {
+            out.extend_from_slice(&bytes[i..]);
+            return Some((out, width, height));
+        }
+        let end = i + 2 + be16(i + 2)? as usize;
+        let segment = bytes.get(i..end)?;
+        if !((0xE1..=0xEF).contains(&marker) || marker == 0xFE) {
+            out.extend_from_slice(segment);
+        }
+        i = end;
+    }
+    None
+}
+
 /// The reply pictures each sender got last (file names), bounded: `RECENT_PICTURES` per sender, `MAX_REMEMBERED`
 /// senders.
 #[derive(Default)]
@@ -263,7 +290,8 @@ fn pick_picture(dir: &Path, recent: Option<&VecDeque<String>>) -> Option<(String
     if bytes.is_empty() || bytes.len() as u64 > MAX_PICTURE {
         return None;
     }
-    let (width, height) = jpeg_size(&bytes).unwrap_or((720, 1280));
+    // As a photo goes: no metadata, at most 1600 px; another file is no reply picture.
+    let (bytes, width, height) = jpeg_clean(&bytes)?;
     Some((name.clone(), bytes, width, height))
 }
 
@@ -397,6 +425,12 @@ fn open(account: &Account) -> Option<Client> {
     let prepared = (|| {
         std::fs::create_dir_all(&account.state)?;
         std::fs::set_permissions(&account.state, std::fs::Permissions::from_mode(0o700))?;
+        // One process, one account, per directory, before its secrets are read or made: a second (another entry
+        // naming it, or another YoGPT) would advance the same state and roll the other's back. Held for the life of
+        // the process.
+        let lock = std::fs::File::create(account.state.join("lock"))?;
+        lock.try_lock().map_err(|e| std::io::Error::other(format!("another one has it ({e})")))?;
+        std::mem::forget(lock);
         Ok::<_, std::io::Error>((secret(&account.state.join("account"))?, secret(&account.state.join("key"))?))
     })();
     let (secret, key) = prepared.map_err(|e| log(format!("stopped: {}: {e}", account.state.display()))).ok()?;
@@ -549,7 +583,10 @@ fn mailbox(bot: &Bot, dir: &Path, events: &SyncSender<Event>) {
                 let _ = std::fs::rename(&path, path.with_extension("failed"));
                 continue;
             }
-            let (width, height) = jpeg_size(&bytes).unwrap_or((720, 1280));
+            let Some((bytes, width, height)) = jpeg_clean(&bytes) else {
+                let _ = std::fs::rename(&path, path.with_extension("failed"));
+                continue;
+            };
             match send_this_picture(bot, &to, &bytes, width, height) {
                 Ok((received, sent)) => {
                     received.into_iter().for_each(|event| bot.queue(events, event));
@@ -777,13 +814,20 @@ mod tests {
         for name in ["", ".jpg", "a.jpg", "007.jpeg", "007.jpg.sh", "../1.jpg", "1.JPG"] {
             assert!(!picture_name(name), "{name}");
         }
-        // A frame header after an APP0 segment: 720 wide, 1280 high.
+        // A frame header after an APP0 segment: 720 wide, 1280 high; then the scan.
         let jpeg = [
-            0xFF, 0xD8, 0xFF, 0xE0, 0, 4, 0, 0, 0xFF, 0xC0, 0, 17, 8, 0x05, 0x00, 0x02, 0xD0, 3, 0, 0, 0, 0, 0, 0, 0, 0,
+            0xFF, 0xD8, 0xFF, 0xE0, 0, 4, 0, 0, 0xFF, 0xC0, 0, 17, 8, 0x05, 0x00, 0x02, 0xD0, 3, 0, 0, 0, 0, 0, 0, 0,
+            0, 0, 0xFF, 0xDA, 0, 2, 1, 2, 3, 0xFF, 0xD9,
         ];
         assert_eq!(jpeg_size(&jpeg), Some((720, 1280)));
         assert_eq!(jpeg_size(&jpeg[..12]), None);
         assert_eq!(jpeg_size(b"not a jpeg"), None);
+        // Metadata out (an APP1 "Exif" segment), the rest as it was; too large: none.
+        let mut with_exif = jpeg[..2].to_vec();
+        with_exif.extend_from_slice(&[0xFF, 0xE1, 0x00, 0x08, b'E', b'x', b'i', b'f', 0, 0]);
+        with_exif.extend_from_slice(&jpeg[2..]);
+        let (clean, w, h) = jpeg_clean(&with_exif).unwrap();
+        assert_eq!((clean.as_slice(), w, h), (&jpeg[..], 720, 1280));
         let dir = std::env::temp_dir().join(format!("yogpt-pick-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         assert!(pick_picture(&dir, None).is_none(), "nothing there");

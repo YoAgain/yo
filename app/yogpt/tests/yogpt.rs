@@ -152,7 +152,9 @@ fn answers_until_quiet(client: &mut Client, quiet: Duration) -> (usize, Vec<Vec<
 
 /// A JPEG's start, 720 by 1280, and noise: what YoGPT sends is these bytes as they are.
 fn reply_picture() -> Vec<u8> {
-    let mut bytes = vec![0xFF, 0xD8, 0xFF, 0xC0, 0, 17, 8, 0x05, 0x00, 0x02, 0xD0, 3];
+    // A start, a frame header (720 × 1280), a scan: what YoGPT takes as a JPEG; then the scan's bytes.
+    let mut bytes = vec![0xFF, 0xD8, 0xFF, 0xC0, 0, 17, 8, 0x05, 0x00, 0x02, 0xD0, 3, 0, 0, 0, 0, 0, 0, 0, 0, 0];
+    bytes.extend_from_slice(&[0xFF, 0xDA, 0, 2]);
     bytes.extend((0..5000).map(|_| random_u64() as u8));
     bytes
 }
