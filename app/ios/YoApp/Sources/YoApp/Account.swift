@@ -231,6 +231,7 @@ final class AccountStore {
     opening = true
     defer { opening = false }
     var pause = 1.0
+    var tries = 0
     while client == nil, account != nil, !broken {
       do {
         try await openOnce()
@@ -242,9 +243,9 @@ final class AccountStore {
         // back from the iCloud Keychain as a new device of it, with new prekeys; contacts write to it again.
         return await recover()
       } catch let error as YoError where !Self.notNow(error) {
-        broken = true  // does not open (sealed under another key, or damaged)
+        if await Self.surely(&tries) { broken = true }  // does not open (sealed under another key, or damaged)
       } catch Unopened.gone {
-        broken = true
+        if await Self.surely(&tries) { broken = true }
       } catch {
         try? await Task.sleep(for: .seconds(pause))  // not now
         pause = min(pause * 2, 30)
@@ -255,6 +256,29 @@ final class AccountStore {
   /// An error opening a state that is there and reads: not saved (a full disk), or a registration to finish that did
   /// not reach the hub now. Never a reason to sign in again, which would replace this device.
   nonisolated private static func notNow(_ error: YoError) -> Bool { retryLater(error: error) }  // the core's one rule
+
+  /// A state that did not open is taken as broken only on the third try in a row, a few seconds apart: a file or
+  /// keychain the extensions hold for a moment (a burst of pushes after the hub came back) is no reason to sign in again.
+  private static func surely(_ tries: inout Int) async -> Bool {
+    tries += 1
+    guard tries >= 3 else {
+      try? await Task.sleep(for: .seconds(2))
+      return false
+    }
+    return true
+  }
+
+  /// Whether the hub answers now (its key, which every hub serves): "Sign In Again" replaces this phone's device at
+  /// the hub, so with the hub down it waits instead of signing out.
+  static func hubAnswers() async -> Bool {
+    var request = URLRequest(url: Hub.url.appending(path: ".well-known/yo-hub-key"), timeoutInterval: 8)
+    request.cachePolicy = .reloadIgnoringLocalAndRemoteCacheData
+    guard let (_, response) = try? await URLSession(configuration: .ephemeral).data(for: request) else { return false }
+    return (response as? HTTPURLResponse)?.statusCode == 200
+  }
+
+  /// "Sign In Again" found the hub down: the alert says so and offers to try again, the account stays.
+  private(set) var hubDown = false
 
   /// Opening under way (`open`).
   private var opening = false
@@ -311,6 +335,12 @@ final class AccountStore {
   /// account's key from the iCloud Keychain if it is there; else the way in (passkey, recovery key) brings it back.
   func recover() async {
     let item = account.flatMap { SyncedAccount.load($0.userID) }
+    // With the hub unreachable a new sign-in cannot finish: nothing is forgotten, the alert says why.
+    guard await Self.hubAnswers() else {
+      hubDown = true
+      return
+    }
+    hubDown = false
     reset()
     if let item { _ = try? await restore(synced: item) }
   }
@@ -856,6 +886,7 @@ final class AccountStore {
     client = nil
     secret = nil
     broken = false
+    hubDown = false
     restored = false
     storing = nil
     friendsSeeded = false

@@ -499,7 +499,7 @@ struct FriendList: View {
         Button(sent, systemImage: "arrow.up") {}.disabled(true)
         Button(came, systemImage: "arrow.down") {}.disabled(true)
       }
-      .controlGroupStyle(.compactMenu)
+      // The menu's own row of two (as Copy · Paste): each arrow with its line under it; compactMenu shows no text.
       .accessibilityLabel("Last Yo sent \(sent), received \(came)"))
       AnyView(Menu("Block & Report", systemImage: "hand.raised") {
         Button("Block", systemImage: "hand.raised") { blocking = (friend, false) }

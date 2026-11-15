@@ -52,10 +52,12 @@ struct YoApp: App {
       .animation(.smooth(duration: 0.5), value: accounts.account == nil)
       .animation(.smooth(duration: 0.5), value: AppUpdate.shared.needed)
       // The saved state is gone or does not open: the account on this phone is signed in again (AccountStore.recover).
-      .alert("Can’t Open Your Account", isPresented: Binding(get: { accounts.broken }, set: { _ in })) {
-        Button("Sign In Again") { Task { await accounts.recover() } }
+      .alert(accounts.hubDown ? "Server Not Reachable" : "Can’t Open Your Account", isPresented: Binding(get: { accounts.broken }, set: { _ in })) {
+        Button(accounts.hubDown ? "Try Again" : "Sign In Again") { Task { await accounts.recover() } }
       } message: {
-        Text("Yo can’t open your account on this iPhone. Sign in again to keep using it.")
+        Text(accounts.hubDown
+          ? "Yo can’t reach its server right now. Your account is fine; try again in a moment."
+          : "Yo can’t open your account on this iPhone. Sign in again to keep using it.")
       }
       .onChange(of: accounts.account == nil) { _, out in
         // Out, however (signed out, deleted, or the account taken to another iPhone): this phone's friends go too.
