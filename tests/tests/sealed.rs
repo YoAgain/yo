@@ -20,7 +20,24 @@ fn delivered(http: &Http, to: &str) -> Vec<Vec<u8>> {
     sent.iter().filter(|(m, p, _)| m == "POST" && *p == path).map(|(_, _, b)| b.clone()).collect()
 }
 
-/// Both ways, the first messages and the rest: no envelope carries anything of the sender (its user id, account key,
+/// A first message each way (a request is signed, unsealed: spec 4.10), then both take in each other's profile key
+/// and sender certificate (the work after a sync): from here on every delivery is sealed. How many envelopes each
+/// inbox got by then, to look only at what came after.
+fn contacts(a: &mut Client, ha: &Http, b: &mut Client, hb: &Http) -> (usize, usize) {
+    a.send(b.user_id(), Content::Text("hi".into())).unwrap();
+    assert_eq!(texts(b), ["hi"]);
+    b.send(a.user_id(), Content::Text("hi".into())).unwrap();
+    assert_eq!(texts(a), ["hi"]);
+    for _ in 0..2 {
+        a.after_sync().unwrap();
+        assert!(texts(b).is_empty());
+        b.after_sync().unwrap();
+        assert!(texts(a).is_empty());
+    }
+    (delivered(ha, b.user_id()).len(), delivered(hb, a.user_id()).len())
+}
+
+/// Between contacts, both ways: no envelope carries anything of the sender (its user id, account key,
 /// device key), and each opens only for the account it went to.
 #[test]
 fn the_hub_cannot_tell_which_envelopes_belong_to_one_chat() {
@@ -29,13 +46,14 @@ fn the_hub_cannot_tell_which_envelopes_belong_to_one_chat() {
     let (ha, hb) = (Http::new(hub.url()), Http::new(hub.url()));
     let mut a = Client::register_username(ha.clone(), &format!("Ann{n}"), None, None, Push::none()).unwrap();
     let mut b = Client::register_username(hb.clone(), &format!("Ben{n}"), None, None, Push::none()).unwrap();
+    let (skip_b, skip_a) = contacts(&mut a, &ha, &mut b, &hb);
     for i in 0..3 {
         a.send(b.user_id(), Content::Text(format!("a{i}"))).unwrap();
         assert_eq!(texts(&mut b), [format!("a{i}")]);
         b.send(a.user_id(), Content::Text(format!("b{i}"))).unwrap();
         assert_eq!(texts(&mut a), [format!("b{i}")]);
     }
-    let (to_b, to_a) = (delivered(&ha, b.user_id()), delivered(&hb, a.user_id()));
+    let (to_b, to_a) = (delivered(&ha, b.user_id()).split_off(skip_b), delivered(&hb, a.user_id()).split_off(skip_a));
     assert!(to_b.len() >= 3 && to_a.len() >= 3, "{} {}", to_b.len(), to_a.len());
     let account = |c: &Client| yo_tests::account_key(&c.account_secret()).to_vec();
     for (envelopes, sender) in [(&to_b, &a), (&to_a, &b)] {
@@ -54,13 +72,9 @@ fn the_hub_cannot_tell_which_envelopes_belong_to_one_chat() {
     for envelope in &to_a {
         assert!(yo_core::sealed::testing::open(&a.account_secret(), envelope).is_ok());
     }
-    // A session's first message carries its PQXDH (a Kyber ciphertext): 4 KiB. Once answered, a text is 1 KiB.
-    assert_eq!(to_b[0].len(), 4096);
-    assert!(
-        to_b[1..].iter().chain(&to_a[1..]).all(|e| e.len() == 1024),
-        "{:?}",
-        to_b.iter().map(Vec::len).collect::<Vec<_>>()
-    );
+    // The session's first message (its PQXDH, a Kyber ciphertext: 4 KiB) went with the request; once answered, every
+    // text is the same 1 KiB bucket.
+    assert!(to_b.iter().chain(&to_a).all(|e| e.len() == 1024), "{:?}", to_b.iter().map(Vec::len).collect::<Vec<_>>());
 }
 
 /// An envelope not sealed to the account (bare, or sealed to someone else) is dropped, and the chat goes on.
@@ -68,9 +82,10 @@ fn the_hub_cannot_tell_which_envelopes_belong_to_one_chat() {
 fn an_envelope_not_sealed_to_the_account_is_dropped() {
     let hub = TestHub::start();
     let n = random_u64() % 100_000;
-    let hb = Http::new(hub.url());
-    let mut a = Client::register_username(Http::new(hub.url()), &format!("Amy{n}"), None, None, Push::none()).unwrap();
+    let (ha, hb) = (Http::new(hub.url()), Http::new(hub.url()));
+    let mut a = Client::register_username(ha.clone(), &format!("Amy{n}"), None, None, Push::none()).unwrap();
     let mut b = Client::register_username(hb.clone(), &format!("Bob{n}"), None, None, Push::none()).unwrap();
+    contacts(&mut a, &ha, &mut b, &hb);
     b.send(a.user_id(), Content::Text("1".into())).unwrap();
     assert_eq!(texts(&mut a), ["1"]);
     b.send(a.user_id(), Content::Text("2".into())).unwrap();
@@ -194,7 +209,7 @@ fn the_certificate_is_refreshed_before_it_expires() {
     assert_ne!(a.sender_certificate_for_tests().unwrap(), first, "22 h: a new one");
     a.send(b.user_id(), Content::Text("sealed".into())).unwrap();
     assert_eq!(texts(&mut b), ["sealed"]);
-    assert!(delivered(&ha, b.user_id()).iter().all(|e| e[0] == yo_wire::envelope::SEALED));
+    assert_eq!(delivered(&ha, b.user_id()).last().unwrap()[0], yo_wire::envelope::SEALED, "the Yo after the refresh");
 }
 
 /// Offline for 31 days (its certificate long expired): what goes first (a receipt, a Yo) goes at once, identified;
