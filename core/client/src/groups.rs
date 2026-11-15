@@ -249,6 +249,46 @@ impl Client {
         self.finish_sent(result)
     }
 
+    /// `send_group` split around its network step, as `send_begin` for one friend: while the inbox is up to date (no
+    /// receiving first), the group's endorsements fresh and a session with every device of every member there, the Yo
+    /// is queued and saved, and what of the outbox can go now is handed out to be posted without the client
+    /// (`Deliveries::send`) and ended with `send_end`. So a burst into a group costs its deliveries alone, as a
+    /// burst to one friend does. `None`, with nothing changed: `send_group` it instead.
+    pub fn send_group_begin(&mut self, id: &str, content: Content) -> Option<crate::Deliveries> {
+        if !shown(&content)
+            || !matches!(content, Content::Yo | Content::Photo(_) | Content::Video { .. })
+            || (self.clock)() > self.inbox_fresh_until
+        {
+            return None;
+        }
+        let group = self.group(id).ok()?;
+        if group.endorsed_until < self.now_s() + ENDORSED_MARGIN_S || self.not_empty(&group).is_err() {
+            return None;
+        }
+        let me = self.state.user_id.clone();
+        let mut others = Vec::new();
+        for member in group.members.iter().filter(|m| **m != me) {
+            match self.state.contacts.get(member) {
+                Some(contact) if contact.gone => continue,
+                Some(contact) if !contact.devices.is_empty() && self.without_session(member).is_empty() => {}
+                // A session to start first (`reach_all`, which asks the hub): `send_group`.
+                _ => return None,
+            }
+            others.push(member.clone());
+        }
+        let tag = GroupTag { key: key_of(&group).ok()?, revision: group.revision };
+        self.atomic(|c| {
+            c.send_profiles();
+            c.queue(&others, Some(tag), content)?;
+            for user in others.iter().chain([&me]) {
+                c.encrypt_waiting(user); // its envelope in the same save
+            }
+            c.persist()
+        })
+        .ok()?;
+        Some(self.deliveries().unwrap_or_else(|_| self.no_deliveries()))
+    }
+
     /// How many fetches a photo or video to the group is uploaded for: every device of its other members, and this
     /// account's other devices (`MAX_BLOB_FETCHES` at most).
     pub fn group_media_fetches(&self, id: &str) -> Option<u32> {

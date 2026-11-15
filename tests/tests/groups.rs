@@ -273,3 +273,118 @@ fn a_new_phone_gets_its_groups_back_before_any_yo() {
     ann.send_group(&id, Content::Yo).unwrap();
     assert_eq!(group_yos(&take(c)), [(id.clone(), a.user_id().to_owned())]);
 }
+
+/// Deliveries `of` sent to `to` signed by its device: requests (spec 4.10), counted in the hub's buckets.
+fn signed_to(of: &Http, to: &Client) -> usize {
+    let path = yo_wire::api::deliver_path(&yo_tests::user_id(to.user_id()));
+    let signed = |hs: &[(String, String)]| hs.iter().any(|(n, _)| n == yo_wire::request::HEADER_DEVICE);
+    of.recorded.lock().unwrap().iter().filter(|(_, p, hs, _)| *p == path && signed(hs)).count()
+}
+
+/// Two accepted contacts and a third member who is neither's contact (as YoGPT), in a group: (a, b, c), their
+/// transports, the group.
+fn contacts_and_a_bot(hub: &TestHub) -> ([Client; 3], [std::sync::Arc<Http>; 3], String) {
+    let https = [(); 3].map(|_| Http::new(hub.url()));
+    let base = random_u64() % 1_000_000_000;
+    let mut a = register(https[0].clone(), &username(base), Some("ANN"));
+    let mut b = register(https[1].clone(), &username(base + 7), Some("BEN"));
+    let mut c = register(https[2].clone(), &username(base + 14), Some("BOT"));
+    a.send_yo(&username(base + 7)).unwrap();
+    b.sync(0).unwrap();
+    b.accept(a.user_id()).unwrap();
+    for _ in 0..2 {
+        for x in [&mut a, &mut b] {
+            x.sync(0).unwrap();
+            x.after_sync().unwrap();
+        }
+    }
+    let (id, _) = a.create_group("FAMILY", &[b.user_id().to_owned(), c.user_id().to_owned()]).unwrap();
+    take(&mut b);
+    take(&mut c);
+    c.accept_group(&id).unwrap();
+    ([a, b, c], https, id)
+}
+
+/// A group's Yo as the app sends it (`YoClient::send_group_yo`): split around its network step where it can, else
+/// whole.
+fn send_group_as_the_app(c: &mut Client, id: &str) -> Vec<Event> {
+    let Some(mut deliveries) = c.send_group_begin(id, Content::Yo) else {
+        return c.send_group(id, Content::Yo).unwrap();
+    };
+    loop {
+        let answers = deliveries.send();
+        match c.send_end(&deliveries, answers) {
+            yo_core::Sent::More(more) => deliveries = more,
+            yo_core::Sent::Done(events) => return events.unwrap(),
+        }
+    }
+}
+
+/// Two accepted contacts in a group with a third member who is neither's contact (as YoGPT, who answers into the
+/// group) fire many Yos into it, fast: each goes as a contact's (sealed, the access key or the group's endorsement),
+/// none as a request, so the hub's request bucket (ten per pair) never holds one back, and all arrive.
+#[test]
+fn contacts_in_a_group_send_many_yos_fast_and_none_is_a_request() {
+    let hub = TestHub::start();
+    let ([mut a, mut b, mut c], [ha, hb, hc], id) = contacts_and_a_bot(&hub);
+    let requests = |a: &Client, b: &Client, c: &Client| {
+        [(&ha, b), (&hb, a), (&ha, c), (&hb, c), (&hc, a), (&hc, b)].map(|(of, to)| signed_to(of, to))
+    };
+    let before = requests(&a, &b, &c);
+    const N: usize = 30;
+    let (mut at_a, mut at_b) = (Vec::new(), Vec::new());
+    for i in 0..N {
+        // Both ways the app sends: whole, and split around the network.
+        let send = |x: &mut Client| match i % 2 {
+            0 => x.send_group(&id, Content::Yo).unwrap(),
+            _ => send_group_as_the_app(x, &id),
+        };
+        at_a.extend(send(&mut a));
+        at_b.extend(send(&mut b));
+        // The third member answers each Yo into the group, as YoGPT does.
+        for _ in group_yos(&take(&mut c)) {
+            c.send_group(&id, Content::Yo).unwrap();
+        }
+    }
+    for x in [&a, &b, &c] {
+        assert_eq!((x.waiting(), x.dropped()), (0, 0), "none held back: {:?}", x.drop_reasons());
+    }
+    assert_eq!(requests(&a, &b, &c), before, "none sent as a request");
+    at_a.extend(take(&mut a));
+    at_b.extend(take(&mut b));
+    let from = |events: &[Event], who: &Client| group_yos(events).iter().filter(|(_, u)| u == who.user_id()).count();
+    assert_eq!((from(&at_b, &a), from(&at_a, &b)), (N, N));
+    assert_eq!((from(&at_a, &c), from(&at_b, &c)), (2 * N, 2 * N));
+}
+
+/// A burst of Yos into a group costs its deliveries alone, as a burst to one friend does: while the inbox is up to
+/// date no inbox read and no acknowledgement goes before each (a round trip each, with the client held meanwhile),
+/// one delivery per member, the members side by side.
+#[test]
+fn a_burst_into_a_group_costs_its_deliveries_alone() {
+    let hub = TestHub::start();
+    let ([mut a, mut b, mut c], [ha, _, _], id) = contacts_and_a_bot(&hub);
+    // The endorsements fetched, the inbox just read.
+    a.send_group(&id, Content::Yo).unwrap();
+    a.sync(0).unwrap();
+    a.after_sync().unwrap();
+    let sent_before = ha.sent.lock().unwrap().len();
+    const N: usize = 20;
+    for _ in 0..N {
+        let mut deliveries = a.send_group_begin(&id, Content::Yo).expect("the inbox just read");
+        loop {
+            let answers = deliveries.send();
+            match a.send_end(&deliveries, answers) {
+                yo_core::Sent::More(more) => deliveries = more,
+                yo_core::Sent::Done(events) => break assert!(events.is_ok()),
+            }
+        }
+    }
+    let paths: Vec<String> = ha.sent.lock().unwrap()[sent_before..].iter().map(|(_, p, _)| p.clone()).collect();
+    let to = |x: &Client| yo_wire::api::deliver_path(&yo_tests::user_id(x.user_id()));
+    assert!(paths.iter().all(|p| *p == to(&b) || *p == to(&c)), "deliveries only: {paths:?}");
+    assert_eq!(paths.len(), 2 * N, "one per member and Yo");
+    assert_eq!(a.waiting(), 0);
+    let from_a = |x: &mut Client| group_yos(&take(x)).iter().filter(|(_, u)| u == a.user_id()).count();
+    assert_eq!((from_a(&mut b), from_a(&mut c)), (N + 1, N + 1));
+}

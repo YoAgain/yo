@@ -643,6 +643,14 @@ impl YoClient {
         }
     }
 
+    /// A group's Yo, its way to the hub without holding the client where it can (`send_group_yo`).
+    fn send_group_content(&self, group: String, content: Content) -> Result<Vec<YoEvent>, YoError> {
+        match self.with(|c| c.send_group_begin(&group, content.clone()))? {
+            Some(deliveries) => self.deliver_from(deliveries),
+            None => events(self.with(|c| c.send_group(&group, content))?),
+        }
+    }
+
     /// The user id a send goes to: a name is asked of the hub, never taken as this device knew it (it may have
     /// changed hands, spec 4.2), without holding the client. `NotOnYo`: nobody by that name.
     fn user_for(&self, to: String) -> Result<String, YoError> {
@@ -1120,9 +1128,9 @@ impl YoClient {
         events(self.with(|c| c.leave_group(&group))?)
     }
 
-    /// A Yo to a group.
+    /// A Yo to a group; on its way like `send_yo` (the client not held while it travels, where it can).
     pub fn send_group_yo(&self, group: String) -> Result<Vec<YoEvent>, YoError> {
-        events(self.with(|c| c.send_group(&group, Content::Yo))?)
+        self.send_group_content(group, Content::Yo)
     }
 
     /// How many fetches a photo or video to the group is uploaded for, sessions with its members opened first.
@@ -1134,13 +1142,13 @@ impl YoClient {
     /// A Yo with a photo to a group, its blob uploaded (`group_media_chat`, `upload_media`).
     pub fn send_group_photo(&self, group: String, media: YoMedia) -> Result<Vec<YoEvent>, YoError> {
         let content = Content::Photo(media.try_into()?);
-        events(self.with(|c| c.send_group(&group, content))?)
+        self.send_group_content(group, content)
     }
 
     /// A Yo with a video to a group, its blob uploaded.
     pub fn send_group_video(&self, group: String, media: YoMedia, duration_ms: u32) -> Result<Vec<YoEvent>, YoError> {
         let content = Content::Video { media: media.try_into()?, duration_ms };
-        events(self.with(|c| c.send_group(&group, content))?)
+        self.send_group_content(group, content)
     }
 
     /// A Yo with a photo whose blob is uploaded; on its way like `send_yo`.

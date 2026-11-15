@@ -393,33 +393,75 @@ fn limit_of(response: &Response) -> Option<Limit> {
     })
 }
 
+/// The limits a `429` of a round named so far, shared by its users' chains (`Deliveries::send`).
+#[derive(Default)]
+struct Limits {
+    all: std::sync::atomic::AtomicBool,
+    address: std::sync::atomic::AtomicBool,
+    device: std::sync::atomic::AtomicBool,
+}
+
+impl Limits {
+    fn hit(&self, limit: Limit) {
+        let flag = match limit {
+            Limit::All => &self.all,
+            Limit::Address => &self.address,
+            Limit::Device => &self.device,
+            Limit::Recipient(_) => return,
+        };
+        flag.store(true, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    /// Whether a delivery (`signed` or sealed) waits for the next round.
+    fn holds(&self, signed: bool) -> bool {
+        let set = |flag: &std::sync::atomic::AtomicBool| flag.load(std::sync::atomic::Ordering::Relaxed);
+        set(&self.all) || set(&self.address) || (signed && set(&self.device))
+    }
+}
+
 impl Deliveries {
-    /// Posts each envelope, in order. After one to a user that the hub did not take, that user's next ones are held
-    /// (`None`), so they keep their order; after a `429` the rest that share its limit are (6.6). Blocks for the round
-    /// trips.
+    /// Posts each envelope, each user's in order, the users side by side (a group's Yo to every member at once, as
+    /// Signal's sends to several). After one to a user that the hub did not take, that user's next ones are held
+    /// (`None`), so they keep their order; after a `429` what is still to go that shares its limit is (6.6). Blocks
+    /// for the round trips.
     pub fn send(&self) -> Vec<Option<Answer>> {
-        let mut held = BTreeSet::new();
-        let (mut all, mut address, mut device) = (false, false, false);
-        let mut answers = Vec::new();
+        let mut users: Vec<&str> = Vec::new();
         for item in &self.items {
-            let signed = !item.sealed;
-            if all || held.contains(&item.user) || address || (device && signed) {
-                answers.push(None);
-                continue;
+            if !users.contains(&item.user.as_str()) {
+                users.push(&item.user);
             }
-            let answer = self.transport.request("POST", &item.path, &item.headers, &item.envelope);
-            let status = answer.as_ref().map_or(0, |r| r.status);
-            // A `429` holds back only what shares its limit (spec 6.6): a request's this recipient alone.
-            match answer.as_ref().ok().and_then(limit_of) {
-                Some(Limit::All) => all = true,
-                Some(Limit::Address) => address = true,
-                Some(Limit::Device) => device = true,
-                Some(Limit::Recipient(_)) | None => {}
+        }
+        let limits = Limits::default();
+        let chain = |user: &str| -> Vec<(usize, Option<Answer>)> {
+            let mut held = false;
+            let mut answers = Vec::new();
+            for (i, item) in self.items.iter().enumerate().filter(|(_, item)| item.user == user) {
+                if held || limits.holds(!item.sealed) {
+                    answers.push((i, None));
+                    continue;
+                }
+                let answer = self.transport.request("POST", &item.path, &item.headers, &item.envelope);
+                let status = answer.as_ref().map_or(0, |r| r.status);
+                // A `429` holds back only what shares its limit (spec 6.6): a request's this recipient alone.
+                if let Some(limit) = answer.as_ref().ok().and_then(limit_of) {
+                    limits.hit(limit);
+                }
+                held = !settled(status);
+                answers.push((i, Some(answer)));
             }
-            if !settled(status) {
-                held.insert(item.user.clone());
-            }
-            answers.push(Some(answer));
+            answers
+        };
+        let mut answers: Vec<Option<Answer>> = (0..self.items.len()).map(|_| None).collect();
+        let chains: Vec<Vec<(usize, Option<Answer>)>> = match users.as_slice() {
+            [] => Vec::new(),
+            [user] => vec![chain(user)],
+            _ => std::thread::scope(|scope| {
+                let running: Vec<_> = users.iter().map(|user| scope.spawn(|| chain(user))).collect();
+                running.into_iter().map(|t| t.join().unwrap_or_default()).collect()
+            }),
+        };
+        for (i, answer) in chains.into_iter().flatten() {
+            answers[i] = answer;
         }
         answers
     }
