@@ -367,12 +367,14 @@ final class AccountStore {
       NewAccountKey.forget(username)
       throw AccountError.taken
     }
-    NewAccountKey.forget(username)
     guard let id = Hub.bytes(client.userId()) else { throw AccountError.noBackup }
     use(client, secret: secret)
     friendsSeeded = true
     SyncedAccount.left = nil
     account = Account(username: client.username() ?? username, userID: id, byPasskey: false)
+    // Only now that the account is kept (its preference and keychain item): a kill before this keeps the key, and the
+    // next try registers the same account again rather than leaving its state where no launch opens it.
+    NewAccountKey.forget(username)
     SecureReminder.update(secured: false)
     wordsSaved = false
     passkeyTurnedOff = false
