@@ -64,7 +64,8 @@ fn main() {
         let found = client.groups().into_iter().find(|g| !g.left && g.name.eq_ignore_ascii_case(&to));
         to = found.expect("a group of that name (--sync first)").id;
     }
-    let send = |client: &mut Client, content| if group { client.send_group(&to, content) } else { client.send(&to, content) };
+    let send =
+        |client: &mut Client, content| if group { client.send_group(&to, content) } else { client.send(&to, content) };
     if let Some(file) = photo.or(video.clone()) {
         // What the app does: seal, upload for the chat's other devices, then the Yo that carries it.
         let plain = std::fs::read(&file).expect("photo or video");
