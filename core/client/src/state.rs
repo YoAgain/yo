@@ -134,6 +134,10 @@ pub struct Group {
     pub by: String,
     /// This account is no member of it (left, or removed).
     pub left: bool,
+    /// The members of the revision this one was made from: who may make a rival change at the same revision (a member
+    /// this revision removed, changing at once, is still heard, so both ends take the same one).
+    #[serde(default)]
+    pub before: Vec<String>,
 }
 
 /// An event as the state keeps it.

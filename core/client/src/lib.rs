@@ -31,7 +31,7 @@ use libsignal_protocol::{
 };
 use signal::Records;
 use state::{hex, unhex, Contact, Outgoing, Registering, Slot, State, StoredContent, StoredEvent};
-use std::collections::{BTreeSet, HashMap, VecDeque};
+use std::collections::{BTreeSet, HashMap, HashSet, VecDeque};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -335,6 +335,9 @@ pub struct Client {
     roster_asked: HashMap<String, u64>,
     /// The day (since the epoch) and how many lookups for recovery were made on it (`RECOVERY_LOOKUPS_PER_DAY`).
     recovery_lookups: (u64, u32),
+    /// Groups asked of a member whose Yo named a newer revision (group id, user): their answer is taken though they are
+    /// not in the group as this device has it (added since). Only for this run.
+    group_asks: HashSet<(String, String)>,
 }
 
 fn wall_ms() -> u64 {
@@ -728,6 +731,7 @@ impl Client {
             after_due: false,
             roster_asked: HashMap::new(),
             recovery_lookups: (0, 0),
+            group_asks: HashSet::new(),
         }
     }
 

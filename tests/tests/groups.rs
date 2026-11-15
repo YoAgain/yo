@@ -2,7 +2,7 @@
 //! of a group at the hub.
 
 use yo_core::{Client, Content, Event};
-use yo_tests::{random_u64, register, username, Http, TestHub};
+use yo_tests::{deliver_raw, random_u64, register, username, Fault, Http, TestHub};
 
 fn people(hub: &TestHub, n: usize) -> Vec<Client> {
     let base = random_u64() % 1_000_000_000;
@@ -118,15 +118,29 @@ fn two_changes_at_once_end_the_same_everywhere() {
     c.send_group(&id, Content::Yo).unwrap();
     take(b);
     take(a);
-    for t in &transports[1..] {
-        *t.base.write().unwrap() = "http://127.0.0.1:1".into();
-    }
-    let _ = b.rename_group(&id, "BEN");
-    let _ = c.rename_group(&id, "CLEO");
+    // At once: each change to the other is held on its way (the hub answers, takes nothing), so each is made before
+    // the other's arrives; then both arrive.
+    let (to_b, to_c) = (
+        yo_wire::api::deliver_path(&yo_tests::user_id(b.user_id())),
+        yo_wire::api::deliver_path(&yo_tests::user_id(c.user_id())),
+    );
+    transports[1].fault(&to_c, Fault::Answer(202));
+    transports[2].fault(&to_b, Fault::Answer(202));
+    b.rename_group(&id, "BEN").unwrap();
+    c.rename_group(&id, "CLEO").unwrap();
     assert_eq!((view(b, &id).name.as_str(), view(c, &id).name.as_str()), ("BEN", "CLEO"));
-    for t in &transports[1..] {
-        *t.base.write().unwrap() = hub.url();
-    }
+    let held = |t: &Http, path: &str| {
+        t.sent
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|(m, p, _)| m == "POST" && p == path)
+            .map(|(_, _, b)| b.clone())
+            .last()
+            .unwrap()
+    };
+    assert_eq!(deliver_raw(&hub.url(), c.user_id(), held(&transports[1], &to_c)), 202);
+    assert_eq!(deliver_raw(&hub.url(), b.user_id(), held(&transports[2], &to_b)), 202);
     for _ in 0..3 {
         for x in [&mut *b, &mut *c, &mut *a] {
             if let Ok(d) = x.deliver_begin() {
@@ -235,4 +249,83 @@ fn the_same_group_photo_goes_to_each_member_once() {
     a.send_group(&id, Content::Photo(photo.clone())).unwrap();
     assert_eq!(photos(&take(d)), 1, "the member added since gets it");
     assert_eq!((photos(&take(b)), photos(&take(c))), (0, 0), "who had it does not get it again");
+}
+
+/// Two members remove each other at once (each before the other's change arrives): both ends still hear the rival
+/// change, made from the same revision, and take the same one (the lower author's), so the group does not split.
+#[test]
+fn two_removing_each_other_at_once_end_the_same() {
+    let hub = TestHub::start();
+    let base = random_u64() % 1_000_000_000;
+    let transports: Vec<_> = (0..3).map(|_| Http::new(hub.url())).collect();
+    let mut p: Vec<Client> =
+        transports.iter().enumerate().map(|(i, t)| register(t.clone(), &username(base + i as u64 * 7), None)).collect();
+    let [a, b, c] = p.as_mut_slice() else { unreachable!() };
+    let (id, _) = a.create_group("ONE", &[b.user_id().to_owned(), c.user_id().to_owned()]).unwrap();
+    take(b);
+    take(c);
+    b.send_group(&id, Content::Yo).unwrap();
+    take(c);
+    c.send_group(&id, Content::Yo).unwrap();
+    take(b);
+    take(a);
+    let (to_b, to_c) = (
+        yo_wire::api::deliver_path(&yo_tests::user_id(b.user_id())),
+        yo_wire::api::deliver_path(&yo_tests::user_id(c.user_id())),
+    );
+    transports[1].fault(&to_c, Fault::Answer(202));
+    transports[2].fault(&to_b, Fault::Answer(202));
+    let (bid, cid) = (b.user_id().to_owned(), c.user_id().to_owned());
+    b.remove_from_group(&id, &[cid.clone()]).unwrap();
+    c.remove_from_group(&id, &[bid.clone()]).unwrap();
+    let held = |t: &Http, path: &str| {
+        t.sent
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|(m, p, _)| m == "POST" && p == path)
+            .map(|(_, _, b)| b.clone())
+            .last()
+            .unwrap()
+    };
+    assert_eq!(deliver_raw(&hub.url(), c.user_id(), held(&transports[1], &to_c)), 202);
+    assert_eq!(deliver_raw(&hub.url(), b.user_id(), held(&transports[2], &to_b)), 202);
+    for _ in 0..3 {
+        for x in [&mut *b, &mut *c, &mut *a] {
+            take(x);
+        }
+    }
+    let winner = if bid < cid { bid.clone() } else { cid.clone() };
+    let out = if bid < cid { cid } else { bid };
+    for x in [&*a, &*b, &*c] {
+        let g = view(x, &id);
+        assert_eq!((g.revision, g.members.contains(&winner), g.members.contains(&out)), (2, true, false), "{g:?}");
+    }
+}
+
+/// A member added since sends a Yo that arrives before the change that added them: shown (its revision is newer), and
+/// the group asked of them, not dropped as from no member.
+#[test]
+fn a_new_members_yo_before_the_change_is_shown() {
+    let hub = TestHub::start();
+    let base = random_u64() % 1_000_000_000;
+    let transports: Vec<_> = (0..3).map(|_| Http::new(hub.url())).collect();
+    let mut p: Vec<Client> =
+        transports.iter().enumerate().map(|(i, t)| register(t.clone(), &username(base + i as u64 * 7), None)).collect();
+    let [a, b, c] = p.as_mut_slice() else { unreachable!() };
+    let (id, _) = a.create_group("ONE", &[b.user_id().to_owned()]).unwrap();
+    take(b);
+    // Cleo is added; the change to Ben is held, so Cleo's Yo reaches Ben first.
+    let to_b = yo_wire::api::deliver_path(&yo_tests::user_id(b.user_id()));
+    transports[0].fault(&to_b, Fault::Answer(202));
+    a.add_to_group(&id, &[c.user_id().to_owned()]).unwrap();
+    take(c);
+    c.send_group(&id, Content::Yo).unwrap();
+    let events = take(b);
+    assert_eq!(group_yos(&events), [(id.clone(), c.user_id().to_owned())], "shown, though Ben's group is older");
+    for _ in 0..2 {
+        take(c);
+        take(b);
+    }
+    assert!(view(b, &id).members.contains(&c.user_id().to_owned()), "the group came from Cleo when asked");
 }

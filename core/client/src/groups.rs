@@ -225,13 +225,22 @@ impl Client {
         edit: impl FnOnce(&Group) -> Result<(Vec<String>, String)>,
     ) -> Result<()> {
         let me = self.state.user_id.clone();
+        // A change is built on what came meanwhile (spec 4.9): without the inbox read now, not at all (a new group has
+        // nothing to come, and is made offline too).
         match self.deliver().and_then(|()| self.receive_all(0)) {
             Ok(()) => {}
-            Err(error) if retryable(&error) => {}
+            Err(error) if creating && retryable(&error) => {}
             Err(error) => return Err(error),
         }
         let current = match creating {
-            true => Group { name: String::new(), members: Vec::new(), revision: 0, by: me.clone(), left: false },
+            true => Group {
+                name: String::new(),
+                members: Vec::new(),
+                revision: 0,
+                by: me.clone(),
+                left: false,
+                before: Vec::new(),
+            },
             false => self.group(id)?,
         };
         let (mut members, name) = edit(&current)?;
@@ -240,7 +249,11 @@ impl Client {
         if members.len() > MAX_GROUP {
             return Err(Error::Protocol("a group has 20 members at most"));
         }
-        let revision = current.revision.checked_add(1).ok_or(Error::Protocol("a group's last revision"))?;
+        let revision = current
+            .revision
+            .checked_add(1)
+            .filter(|r| *r < u32::MAX)
+            .ok_or(Error::Protocol("a group's last revision"))?;
         let left = !members.contains(&me);
         if left && members.is_empty() {
             // The last one out: nobody to tell, the group simply ends here.
@@ -257,14 +270,14 @@ impl Client {
         let info = GroupInfo { id: group_id(id)?, revision, by: user_bytes(&me)?, name: name.clone(), members: ids };
         // Checked as it goes on the wire: the name and the members as they may be.
         Message { sent_at_ms: 0, group: None, content: Content::Group(info.clone()) }.encode()?;
-        let mut told: Vec<String> = current.members.into_iter().chain(members.iter().cloned()).collect();
+        let mut told: Vec<String> = current.members.iter().chain(members.iter()).cloned().collect();
         told.sort();
         told.dedup();
         let reached = self.reach_all(&told)?;
         self.send_profiles();
         self.atomic(|c| {
             c.enqueue_group(&reached, None, Content::Group(info))?;
-            let group = Group { name, members, revision, by: me.clone(), left };
+            let group = Group { name, members, revision, by: me.clone(), left, before: current.members.clone() };
             c.state.groups.insert(id.to_owned(), group);
             c.push_event(Event::GroupChanged { group: id.to_owned() });
             c.persist()
@@ -280,9 +293,9 @@ impl Client {
         let id = hex(&info.id);
         let me = self.state.user_id.clone();
         let members: Vec<String> = info.members.iter().map(|m| hex(m)).collect();
-        // The last revision there is would leave no room for a change after it.
-        if info.revision == u32::MAX {
-            self.note("a group change at the last revision".into());
+        // The last revision there is would leave no room for a change after it; 0 is no change (a group starts at 1).
+        if info.revision == u32::MAX || info.revision == 0 {
+            self.note("a group change at no revision".into());
             return;
         }
         // The tie-break is by the revision's author, whoever passes it on (an answer to an ask).
@@ -291,9 +304,17 @@ impl Client {
             // New here, or known only by its Yos: from a member of it as it is now.
             None => own || members.iter().any(|m| m == from),
             Some(g) if g.revision == 0 => own || members.iter().any(|m| m == from),
+            // A newer revision from a member as it is now; a rival at the same revision from a member of the revision
+            // both were made from (two removing each other at once: each is still heard by the other).
+            // Or from one asked for it (their Yo named this newer revision: added since) who is in it.
+            Some(g) if info.revision > g.revision => {
+                own || g.members.iter().any(|m| m == from)
+                    || (self.group_asks.contains(&(id.clone(), from.to_owned())) && members.iter().any(|m| m == from))
+            }
             Some(g) => {
-                (own || g.members.iter().any(|m| m == from))
-                    && (info.revision > g.revision || (info.revision == g.revision && author < g.by))
+                info.revision == g.revision
+                    && author < g.by
+                    && (own || g.members.iter().any(|m| m == from) || g.before.iter().any(|m| m == from))
             }
         };
         if !newer {
@@ -310,7 +331,14 @@ impl Client {
             return;
         }
         let left = !members.contains(&me);
-        let group = Group { name: info.name, members, revision: info.revision, by: author, left };
+        // What it was made from: a rival at the same revision shares it; a newer one, made from what this device had,
+        // as far as it knows.
+        let before = match self.state.groups.get(&id) {
+            Some(g) if g.revision == info.revision => g.before.clone(),
+            Some(g) => g.members.clone(),
+            None => Vec::new(),
+        };
+        let group = Group { name: info.name, members, revision: info.revision, by: author, left, before };
         self.state.groups.insert(id.clone(), group);
         self.push_event(Event::GroupChanged { group: id });
     }
@@ -343,12 +371,24 @@ impl Client {
                 // Known by its Yo only: shown at once, the group itself asked for.
                 let mut members = vec![from.to_owned(), me];
                 members.sort();
-                let group = Group { name: String::new(), members, revision: 0, by: from.to_owned(), left: false };
+                let group = Group {
+                    name: String::new(),
+                    members,
+                    revision: 0,
+                    by: from.to_owned(),
+                    left: false,
+                    before: Vec::new(),
+                };
                 self.state.groups.insert(id.clone(), group);
                 self.push_event(Event::GroupChanged { group: id.clone() });
                 true
             }
-            Some(g) if g.left || (g.revision > 0 && !g.members.iter().any(|m| m == from)) => {
+            // From no member of it as it is here, or to a group left: dropped, unless its revision is newer (a member
+            // added since, its Yo here before the change): shown, and the group asked of them.
+            Some(g)
+                if tag.revision <= g.revision
+                    && (g.left || (g.revision > 0 && !g.members.iter().any(|m| m == from))) =>
+            {
                 self.note("a Yo to a group from no member".into());
                 return;
             }
@@ -362,6 +402,7 @@ impl Client {
             }
         };
         if ask {
+            self.group_asks.insert((id.clone(), from.to_owned()));
             if let Err(error) = self.enqueue_group(&[from.to_owned()], None, Content::GroupAsk { id: tag.id }) {
                 self.note(format!("group: {error}"));
             }
