@@ -22,7 +22,7 @@ use zeroize::Zeroize;
 /// The Kyber prekeys' kind (libsignal's for PQXDH).
 pub const KYBER: kem::KeyType = kem::KeyType::Kyber1024;
 /// Base keys of messages made with a last resort Kyber prekey, remembered against a replay while that prekey is kept;
-/// at most this many (beyond, the oldest go: a guard against a state that grows without end).
+/// at most this many (beyond, the oldest go: a bound on the state, far above a month's last-resort sessions).
 const LAST_RESORT_SEEN: usize = 20_000;
 
 pub type Entries = BTreeMap<String, Vec<u8>>;
@@ -380,6 +380,10 @@ impl KyberPreKeyStore for Kyber {
             ));
         }
         self.seen.push_back(seen);
+        // A marker goes with its prekey; only past the bound (20,000 sessions started on last resorts within a
+        // prekey's month) the oldest go before it.
+        let keys = &self.keys;
+        self.seen.retain(|(id, _)| keys.contains_key(&format!("kl/{id}")));
         while self.seen.len() > LAST_RESORT_SEEN {
             self.seen.pop_front();
         }
@@ -390,6 +394,21 @@ impl KyberPreKeyStore for Kyber {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_last_resort_replay_is_refused_while_its_prekey_is_kept_and_its_markers_go_with_it() {
+        let mut kyber = Kyber { keys: Entries::new(), seen: VecDeque::new() };
+        kyber.keys.insert("kl/1".into(), vec![1]);
+        kyber.keys.insert("kl/2".into(), vec![2]);
+        let base = KeyPair::generate(&mut rand::rng()).public_key;
+        let (one, two) = (KyberPreKeyId::from(1), KyberPreKeyId::from(2));
+        let signed = SignedPreKeyId::from(1);
+        now(kyber.mark_kyber_pre_key_used(one, signed, &base)).unwrap();
+        assert!(now(kyber.mark_kyber_pre_key_used(one, signed, &base)).is_err(), "the same base key again");
+        kyber.keys.remove("kl/1");
+        now(kyber.mark_kyber_pre_key_used(two, signed, &base)).unwrap();
+        assert!(kyber.seen.iter().all(|(id, _)| *id == 2), "the gone prekey's markers went");
+    }
 
     #[test]
     fn the_identity_key_is_the_account_keys_x25519_form() {

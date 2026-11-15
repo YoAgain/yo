@@ -183,7 +183,8 @@ fn a_refill_not_taken_is_sent_again_one_refused_made_anew() {
     drain(&hub, &target, base, 1..=TARGET - 10);
     c.sync(0).unwrap();
     let before = c.own_prekeys();
-    for _ in 0..6 {
+    // Twice a round: a refill that failed stays due, so the next sync's start tries it again too.
+    for _ in 0..12 {
         hc.fault(api::PREKEYS, Fault::Answer(503));
     }
     for _ in 0..6 {
@@ -199,6 +200,32 @@ fn a_refill_not_taken_is_sent_again_one_refused_made_anew() {
     drain(&hub, &target, base, TARGET..=TARGET + 19);
     assert!(new_chats(&c.sync(0).unwrap()) >= 20);
     assert_eq!(c.dropped(), 0, "{:?}", c.drop_reasons());
+}
+
+/// A rotation whose upload the hub refuses as it is (`400`) is still due: the batch made anew carries a new signed
+/// prekey and last resort too, not only one-time keys (the hub would hand out the old ones for another week).
+#[test]
+fn a_refused_rotation_is_made_anew_with_its_signed_prekey() {
+    let hub = TestHub::start();
+    let base = random_u64() % 1_000_000_000;
+    let hc = Http::new(hub.url());
+    let mut c = register(hc.clone(), &username(base), None);
+    let at = yo_hub::now_ms() + 8 * 24 * 3600 * 1000;
+    c.set_clock(Arc::new(move || at));
+    hc.fault(api::PREKEYS, Fault::Answer(400));
+    let _ = c.maintenance();
+    hc.sent.lock().unwrap().clear();
+    c.maintenance().unwrap();
+    let uploads: Vec<api::Prekeys> = hc
+        .sent
+        .lock()
+        .unwrap()
+        .iter()
+        .filter(|(method, path, _)| method == "PUT" && path == api::PREKEYS)
+        .map(|(_, _, body)| yo_wire::decode(body).unwrap())
+        .collect();
+    let last = uploads.last().expect("an upload made anew");
+    assert!(last.signed.is_some() && last.last_resort.is_some(), "the rotation still in it");
 }
 
 /// A week: the signed prekey and the last resort are replaced; the oldest of them go once enough newer ones are at

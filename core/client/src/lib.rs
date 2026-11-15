@@ -31,7 +31,7 @@ use libsignal_protocol::{
 };
 use signal::Records;
 use state::{hex, unhex, Contact, Outgoing, Registering, Slot, State, StoredContent, StoredEvent};
-use std::collections::{BTreeSet, VecDeque};
+use std::collections::{BTreeSet, HashMap, VecDeque};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -40,7 +40,8 @@ use yo_wire::content::Message;
 use yo_wire::envelope::{ForDevice, Payload, Plain};
 use yo_wire::handle::{Handle, KIND_USER, KIND_USERNAME};
 use yo_wire::limits::{
-    MAX_INBOX_FETCH, MAX_TOKENS_PER_REQUEST, PREKEY_REFILL_BELOW, PREKEY_TARGET, TOKEN_REFILL_BELOW, TOKEN_TARGET,
+    MAX_DEVICES, MAX_INBOX_FETCH, MAX_TOKENS_PER_REQUEST, PREKEY_REFILL_BELOW, PREKEY_TARGET, TOKEN_REFILL_BELOW,
+    TOKEN_TARGET,
 };
 use yo_wire::request::{HEADER_DEVICE, HEADER_SIGNATURE, HEADER_TIME};
 use yo_wire::token;
@@ -64,6 +65,8 @@ const SEEN: usize = 2000;
 const KEPT_FOR_RETRY: usize = 64;
 /// A retry is asked of one contact at most this often.
 const RETRY_EVERY_MS: u64 = 60 * 1000;
+/// How often a payload may make this device ask the hub for a user's devices (spec 4.4).
+const ROSTER_ASK_EVERY_MS: u64 = 60 * 1000;
 /// How often a registration whose answer did not come is tried again, with the same account key.
 const REGISTER_TRIES: usize = 2;
 /// How often a send updates its view of a user's devices and tries again before it leaves the rest to the next call.
@@ -317,6 +320,9 @@ pub struct Client {
     /// `sync_end` received: the work after it (receipts, retries, prekeys, the outbox, the storage, delivery tokens)
     /// waits for `after_sync`, or the next `sync_begin`.
     after_due: bool,
+    /// When (clock) a user's devices were last asked of the hub because a payload named one this device does not know
+    /// (spec 4.4): at most once a minute a user, whatever payloads anyone seals.
+    roster_asked: HashMap<String, u64>,
 }
 
 fn wall_ms() -> u64 {
@@ -702,6 +708,7 @@ impl Client {
             explicit_ack: false,
             unacked: Vec::new(),
             after_due: false,
+            roster_asked: HashMap::new(),
         }
     }
 
@@ -1730,6 +1737,33 @@ impl Client {
         }
     }
 
+    /// Whether the hub names this device of `user` at this number now (a lookup); its roster is taken in when it
+    /// does.
+    fn hub_names(&mut self, user: &str, account_key: &Key, device_key: &Key, id: u8) -> Result<bool> {
+        match self.lookup(&Handle::user(&user_bytes(user)?), 0, Vec::new()) {
+            Ok((found, _)) if found.account_key == *account_key => {
+                let named = found.devices.iter().any(|d| d.key == *device_key && d.id == id);
+                if named {
+                    self.take_devices(user, found.account_key, &found.devices)?;
+                }
+                Ok(named)
+            }
+            Ok(_) | Err(Error::NotOnYo) => Ok(false),
+            Err(error) => Err(error),
+        }
+    }
+
+    /// Whether a payload may make this device ask the hub for `user`'s devices now (once a minute a user).
+    fn may_ask_roster(&mut self, user: &str) -> bool {
+        let now = (self.clock)();
+        let last = self.roster_asked.get(user).copied().unwrap_or(0);
+        if last != 0 && now < last + ROSTER_ASK_EVERY_MS {
+            return false;
+        }
+        self.roster_asked.insert(user.to_owned(), now);
+        true
+    }
+
     /// Who sent a payload: this account (another of its devices), a contact pinned to its key, or whom the hub says
     /// the key is (someone writing first). `None`: a key that is no user's now (a replaced device, or a forger).
     fn sender(&mut self, account_key: Key) -> Result<Option<String>> {
@@ -1739,6 +1773,8 @@ impl Client {
         if let Some((user, _)) = self.state.contacts.iter().find(|(_, c)| c.account_key == account_key && !c.gone) {
             return Ok(Some(user.clone()));
         }
+        // Someone writing first, or a contact this state forgot (a state rolled back). A forger's payloads cost it a
+        // delivery each (the hub's limits, 6.6); the lookup is the hub's (counted there too).
         match self.lookup(&Handle::account_key(&account_key), 0, Vec::new()) {
             Ok((found, username)) if found.account_key == account_key => {
                 let user = hex(&found.user_id);
@@ -1760,7 +1796,6 @@ impl Client {
         if payload.device_key == mine || self.state.seen.contains(&sha256(copy.message.as_slice())) {
             return Ok(());
         }
-        self.remember(copy.message.as_slice());
         let Some(user) = self.sender(payload.account_key)? else {
             self.drop_one("a sender that is no user now".into());
             return Ok(());
@@ -1775,6 +1810,11 @@ impl Client {
             devices.iter().any(|d| d.slot == payload.device_id && d.key != payload.device_key)
         });
         if other {
+            // Asked at most once a minute a user: a forger claiming numbers costs a lookup a minute, no more.
+            if !self.may_ask_roster(&user) {
+                self.drop_one("a device the roster was asked of a moment ago".into());
+                return Ok(());
+            }
             let (found, _) = self.lookup(&Handle::user(&user_bytes(&user)?), 0, Vec::new())?;
             if found.account_key == payload.account_key {
                 self.take_devices(&user, found.account_key, &found.devices)?;
@@ -1814,10 +1854,16 @@ impl Client {
                 // a device known here under another number (made up): taken in is nothing either way. Also a
                 // "duplicate" whose bytes were not seen (above): made with message keys used before, by a sender whose
                 // state went back; it never opens, and the sender's next ones would not either until its chain passed.
-                let plausible = self.slot_of(&user, &payload.device_key).is_none_or(|n| n == payload.device_id);
-                if !own && plausible {
+                // Only a device of the user's roster, at its number (the hub asked at most once a minute a user when
+                // this device does not know it): the retry list stays as long as a roster (16), and a forger naming
+                // made-up devices adds nothing to it.
+                let rostered = !own
+                    && (self.slot_of(&user, &payload.device_key) == Some(payload.device_id)
+                        || (self.may_ask_roster(&user)
+                            && self.hub_names(&user, &payload.account_key, &payload.device_key, payload.device_id)?));
+                if rostered {
                     if let Some(contact) = self.state.contacts.get_mut(&user) {
-                        if !contact.retry.contains(&payload.device_key) {
+                        if !contact.retry.contains(&payload.device_key) && contact.retry.len() < MAX_DEVICES {
                             contact.retry.push(payload.device_key);
                         }
                     }
@@ -1826,13 +1872,20 @@ impl Client {
                 return Ok(());
             }
         };
-        // It opened: from that device of the account.
-        self.note_device(&user, payload.device_key, payload.device_id)?;
+        // It opened: from the account (its identity key), at that number; what it says is the account's. Which device
+        // key is there is the hub's to say: one this device does not know is taken in only once the hub names it
+        // (asked: only the account can make a message that opens). A replaced device's last ones still show.
+        self.remember(copy.message.as_slice());
+        if self.slot_of(&user, &payload.device_key) == Some(payload.device_id)
+            || self.hub_names(&user, &payload.account_key, &payload.device_key, payload.device_id)?
+        {
+            self.note_device(&user, payload.device_key, payload.device_id)?;
+        }
         self.note_updated(&user);
         let plain: Plain = decode(&plaintext)?;
         let message = Message::decode(plain.content.as_slice())?;
         if own {
-            return self.received_from_own(plain.to, message);
+            return self.received_from_own(plain.to, plain.content.as_slice(), message);
         }
         if plain.to.is_some() {
             return Err(Error::Protocol("a copy for another"));
@@ -1840,8 +1893,26 @@ impl Client {
         self.received(&user, plain.content.as_slice(), message)
     }
 
+    /// Whether this plaintext from `user` comes for the first time (the last `SEEN` kept), noting it.
+    fn first_time(&mut self, user: &str, plaintext: &[u8]) -> bool {
+        let id = sha256(&[user.as_bytes(), plaintext].concat());
+        if self.state.received.contains(&id) {
+            return false;
+        }
+        self.state.received.push_back(id);
+        if self.state.received.len() > SEEN {
+            self.state.received.pop_front();
+        }
+        true
+    }
+
     /// A message from one of this account's other devices: what it sent to `to`.
-    fn received_from_own(&mut self, to: Option<UserId>, message: Message) -> Result<()> {
+    fn received_from_own(&mut self, to: Option<UserId>, plaintext: &[u8], message: Message) -> Result<()> {
+        // A copy encrypted again (a session or roster change) is still one: shown once, as from a contact.
+        let me = self.state.user_id.clone();
+        if !self.first_time(&me, plaintext) {
+            return Ok(());
+        }
         // Groups: one copy for this account's other devices, naming no one (spec 4.7).
         if to.is_none() {
             let me = self.state.user_id.clone();
@@ -1891,13 +1962,8 @@ impl Client {
         }
         // Sent again on a retry (4.6) and seen already: once is enough. A sender's messages differ in their time at
         // least, so only a copy is the same.
-        let id = sha256(&[user.as_bytes(), plaintext].concat());
-        if self.state.received.contains(&id) {
+        if !self.first_time(user, plaintext) {
             return Ok(());
-        }
-        self.state.received.push_back(id);
-        if self.state.received.len() > SEEN {
-            self.state.received.pop_front();
         }
         match message.content {
             Content::Receipt => Ok(()),
@@ -2044,7 +2110,9 @@ impl Client {
         // `409` to the same upload again: the hub took it before and its answer was lost. Either way it is done.
         if response.status != status::NO_CONTENT && response.status != status::CONFLICT {
             if !retryable(&refused(&response)) {
+                // Made anew next time, with a new signed prekey and last resort too: a rotation it carried is still due.
                 self.state.prekeys.upload = None;
+                self.state.prekeys.signed_at = 0;
             }
             return Err(refused(&response));
         }
@@ -2376,14 +2444,16 @@ impl Client {
 
     fn after_sync_inner(&mut self) -> Result<()> {
         self.acknowledge_inbox()?;
-        if !std::mem::take(&mut self.after_due) {
+        if !self.after_due {
             return Ok(());
         }
+        // Due until all of it is done: a step that fails leaves it for the next call, not only the next receive.
         self.answer_due()?;
         self.refill()?;
         self.deliver()?;
         self.sync_storage_quietly()?;
         self.refill_tokens();
+        self.after_due = false;
         Ok(())
     }
 

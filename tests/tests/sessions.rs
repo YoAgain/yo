@@ -184,3 +184,28 @@ fn a_sender_whose_state_went_back_is_asked_again() {
     b.send(a.user_id(), text("back")).unwrap();
     assert_eq!(texts(&a.sync(0).unwrap()), ["back"]);
 }
+
+/// A contact's real message re-sealed with another device key under its number (by whoever has its bytes, the hub
+/// say): the hub's roster has another device at that number, so it is dropped unopened and nothing of it is taken in;
+/// the session goes on.
+#[test]
+fn a_device_key_the_hub_does_not_name_is_not_taken_in() {
+    let hub = TestHub::start();
+    let (mut a, mut b, ha) = pair(&hub, "Dkn");
+    let to_b = yo_wire::api::deliver_path(&yo_tests::user_id(b.user_id()));
+    ha.fault(&to_b, Fault::Answer(202));
+    a.send(b.user_id(), text("held")).unwrap();
+    let real = posted(&ha, b.user_id()).pop().unwrap();
+    let mut payload: yo_wire::envelope::Payload =
+        yo_wire::decode(&yo_core::seal::open(&b.account_secret(), &real).unwrap()).unwrap();
+    payload.device_key = [9; 32];
+    let account = ed25519_dalek::SigningKey::from_bytes(&b.account_secret()).verifying_key().to_bytes();
+    let forged = yo_core::seal::to(&account, &yo_wire::encode(&payload)).unwrap();
+    assert_eq!(deliver_raw(&hub.url(), b.user_id(), forged), 202);
+    // Another key at A's number: the hub's roster says it is not A's device there, so it is not even opened.
+    assert!(texts(&b.sync(0).unwrap()).is_empty());
+    let sessions = b.sessions_with(a.user_id());
+    assert!(sessions.len() == 1 && sessions[0].device != "09".repeat(32), "the made-up key is in no roster");
+    a.send(b.user_id(), text("next")).unwrap();
+    assert_eq!(texts(&b.sync(0).unwrap()), ["next"]);
+}
