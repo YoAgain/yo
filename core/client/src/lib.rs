@@ -846,9 +846,8 @@ impl Client {
     }
 
     fn persist(&self) -> Result<()> {
-        match &self.store {
-            Some((store, key)) => store.save(self.export(key)).map_err(Error::Save)?,
-            None => {}
+        if let Some((store, key)) = &self.store {
+            store.save(self.export(key)).map_err(Error::Save)?;
         }
         self.envelopes_unsaved.set(false);
         Ok(())
@@ -2522,6 +2521,7 @@ impl Client {
         self.atomic(|c| {
             c.send_profiles();
             c.send_message(&user, content)?;
+            c.encrypt_waiting(&user); // its envelope in the same save
             c.persist()
         })
         .ok()?;
@@ -2568,12 +2568,14 @@ impl Client {
             Ok(false) => Ok(()),
             Err(error) => Err(error),
         };
-        // As `send`: offline, the message waits in the outbox; to a user the hub no longer knows, it went nowhere.
+        // As `send`: offline, the message waits in the outbox; to a user the hub no longer knows, it went nowhere. It
+        // was saved when `send_begin` queued it: a save failing after is no reason to call it unsent (the app would
+        // send a second one).
         let result = match result {
-            Ok(()) | Err(Error::Network(_)) => self.check_sendable(deliveries.to.as_deref()),
+            Ok(()) | Err(Error::Network(_) | Error::Save(_)) => self.check_sendable(deliveries.to.as_deref()),
             Err(error) => Err(error),
         };
-        Sent::Done(self.finish(result))
+        Sent::Done(self.finish_sent(result))
     }
 
     /// What another process of this device received and saved for the app (the notification service, as its push

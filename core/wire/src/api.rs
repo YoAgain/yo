@@ -42,6 +42,16 @@ pub const HEADER_BODY_HASH: &str = "yo-body-sha256";
 pub const HEADER_APP: &str = "yo-app";
 
 /// `POST /v1/inbox/{user_id}`: to every device of a user.
+/// The requests that name nobody (sealed deliveries, blobs, the token directory): the only ones a client sends on its
+/// anonymous connections; every other request, signed or not (a registration, a backup's fetch), names its device or
+/// account and goes on the other ones, so no connection carries both (spec 1).
+pub fn anonymous(method: &str, path: &str) -> bool {
+    let path = path.split('?').next().unwrap_or(path);
+    (method == "POST" && path.starts_with(&format!("{INBOX}/")) && path != INBOX_ACK)
+        || path.starts_with(&format!("{BLOBS}/"))
+        || path == crate::token::DIRECTORY
+}
+
 pub fn deliver_path(user: &UserId) -> String {
     format!("{INBOX}/{}", crate::b64(user))
 }
@@ -418,6 +428,15 @@ pub mod status {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn only_requests_naming_nobody_are_anonymous() {
+        assert!(anonymous("POST", &deliver_path(&[1; 16])));
+        assert!(anonymous("GET", "/v1/blobs/abc") && anonymous("PUT", "/v1/blobs/abc?fetches=2"));
+        assert!(anonymous("GET", crate::token::DIRECTORY));
+        assert!(!anonymous("POST", INBOX_ACK) && !anonymous("GET", &inbox_path(25)));
+        assert!(!anonymous("POST", REGISTER) && !anonymous("GET", "/v1/backup/abc"));
+    }
 
     #[test]
     fn round_trips() {

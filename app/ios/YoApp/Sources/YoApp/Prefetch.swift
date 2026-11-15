@@ -58,8 +58,8 @@ enum Prefetch {
         continue
       }
       // The claim first: the app fetching it now, this one does not (and the app does not give the photo up).
-      guard claim(one) else { continue }
-      defer { unclaim(one) }
+      guard let token = claim(one) else { continue }
+      defer { unclaim(one, token: token) }
       guard let data = try? client.fetchMedia(media: one) else { continue }
       // Still this account's (the app publishes its friends with its own id; signed out meanwhile, it does not, or
       // another account's): an old account's photo is not left here.
@@ -95,28 +95,35 @@ enum Prefetch {
   /// Claims this device's fetch of `media`, for the service or the app, atomically (a file only one can make): false
   /// while the other has it. A claim older than `underWaySeconds` was left by a process that ended: taken over. No
   /// App Group (Yo Dev): nothing to share it with, true.
-  static func claim(_ media: YoMedia, again: Bool = false) -> Bool {
-    guard let directory, let mark = mark(media) else { return true }
+  /// The claim's token, which only its holder can give back (`unclaim`): nil when it is another's.
+  static func claim(_ media: YoMedia, again: Bool = false) -> String? {
+    let token = UUID().uuidString
+    guard let directory, let mark = mark(media) else { return token }
     make(directory)
     // Under one lock for both processes: two finding the same stale claim cannot both take it over.
     return locked(directory) {
       // The app has it already: the notification service fetches it no more. The app may (`again`): the same blob in
       // another conversation is another message, with fetches of its own at the hub.
-      if !again, let taken = taken(media), FileManager.default.fileExists(atPath: taken.path) { return false }
+      if !again, let taken = taken(media), FileManager.default.fileExists(atPath: taken.path) { return nil }
       if FileManager.default.fileExists(atPath: mark.path) && !underWay(media) {
         try? FileManager.default.removeItem(at: mark)
       }
       let fd = open(mark.path, O_CREAT | O_EXCL | O_WRONLY | O_CLOEXEC, 0o600)
-      guard fd >= 0 else { return false }
+      guard fd >= 0 else { return nil }
+      _ = Array(token.utf8).withUnsafeBytes { write(fd, $0.baseAddress, $0.count) }
       close(fd)
-      return true
+      return token
     }
   }
 
-  /// The claim given back (fetched, or not).
-  static func unclaim(_ media: YoMedia) {
+  /// The claim given back (fetched, or not), if it is still this holder's: one taken over after `underWaySeconds`
+  /// (this process suspended that long) is the other's now, and stays.
+  static func unclaim(_ media: YoMedia, token: String) {
     guard let directory, let mark = mark(media) else { return }
-    locked(directory) { try? FileManager.default.removeItem(at: mark) }
+    locked(directory) {
+      guard (try? String(contentsOf: mark, encoding: .utf8)) == token else { return }
+      try? FileManager.default.removeItem(at: mark)
+    }
   }
 
   /// `work` with the claims' lock held (flock on a file beside them, across the app and its extensions).

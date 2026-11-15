@@ -519,3 +519,31 @@ fn changes_cannot_fill_a_device_with_groups() {
     take(b);
     assert_eq!(b.groups().len(), 256);
 }
+
+/// A newcomer's Yo held until the change adding them comes, and Ben blocks the newcomer meanwhile: the change
+/// still counts, the held Yo is not shown (as no Yo of a blocked member is).
+#[test]
+fn a_held_yo_of_one_blocked_meanwhile_is_not_shown() {
+    let hub = TestHub::start();
+    let base = random_u64() % 1_000_000_000;
+    let transports: Vec<_> = (0..3).map(|_| Http::new(hub.url())).collect();
+    let mut p: Vec<Client> =
+        transports.iter().enumerate().map(|(i, t)| register(t.clone(), &username(base + i as u64 * 7), None)).collect();
+    let [a, b, c] = p.as_mut_slice() else { unreachable!() };
+    let (id, _) = a.create_group("ONE", &[b.user_id().to_owned()]).unwrap();
+    take(b);
+    let to_b = yo_wire::api::deliver_path(&yo_tests::user_id(b.user_id()));
+    transports[0].fault(&to_b, Fault::Answer(202));
+    a.add_to_group(&id, &[c.user_id().to_owned()]).unwrap();
+    take(c);
+    c.send_group(&id, Content::Yo).unwrap();
+    let mut events = take(b);
+    assert!(group_yos(&events).is_empty(), "held");
+    b.set_blocked(c.user_id(), true).unwrap();
+    for _ in 0..2 {
+        take(a);
+        events.extend(take(b));
+    }
+    assert!(view(b, &id).members.contains(&c.user_id().to_owned()), "the change counts");
+    assert!(group_yos(&events).is_empty(), "the blocked newcomer's held Yo stays hidden");
+}

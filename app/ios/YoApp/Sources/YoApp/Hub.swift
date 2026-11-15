@@ -100,6 +100,14 @@ final class HubTransport: HttpTransport {
     return config
   }
 
+  /// Sealed deliveries, blobs and the token directory: the requests that name nobody (as yo_wire::api::anonymous).
+  static func namesNobody(method: String, path: String) -> Bool {
+    let path = path.split(separator: "?", maxSplits: 1).first.map(String.init) ?? path
+    return (method == "POST" && path.hasPrefix("/v1/inbox/") && path != "/v1/inbox/ack")
+      || path.hasPrefix("/v1/blobs/")
+      || path == "/.well-known/private-token-issuer-directory"
+  }
+
   func request(method: String, path: String, headers: [Header], body: Data) -> HttpResult {
     guard !Self.unsupported else { return HttpResult(status: 426, body: Data(), error: nil) }
     guard let url = URL(string: path, relativeTo: base) else {
@@ -114,7 +122,10 @@ final class HubTransport: HttpTransport {
     let answer = Answer()
     let start = Perf.on ? CACurrentMediaTime() : 0
     let signed = headers.contains(where: { $0.name.lowercased() == "yo-device" })
-    let task = (signed ? Self.signedSession : Self.anonymousSession).dataTask(with: request)
+    // Only what names nobody goes on the anonymous connections (yo_wire::api::anonymous): a registration or a backup's
+    // fetch names the account, so never on a connection that also carries sealed deliveries (spec 1).
+    let anonymous = !signed && Self.namesNobody(method: method, path: path)
+    let task = (anonymous ? Self.anonymousSession : Self.signedSession).dataTask(with: request)
     // Read as it comes, and cut off past the largest answer the hub may give (`Limited`): a faulty or hostile hub
     // never fills the memory of the app or of an extension (which has 24 MB).
     task.delegate = Limited { data, response, error in

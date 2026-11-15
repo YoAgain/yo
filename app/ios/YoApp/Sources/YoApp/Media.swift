@@ -707,13 +707,13 @@ final class ReceivedMedia {
       if data == nil && (Prefetch.has(media) || Prefetch.underWay(media)) { continue }
       // The claim is held until the photo is written and noted (or given up): given back before, the service could
       // fetch it again meanwhile, and take another device's fetch.
-      var claimed = false
-      defer { if claimed { Prefetch.unclaim(media) } }
+      var claimed: String?
+      defer { if let claimed { Prefetch.unclaim(media, token: claimed) } }
       if data == nil {
         // This device's one fetch, claimed against the notification service's: each takes one of the blob's fetches,
         // and a second would be another device's. Its file may have come just before the claim.
-        guard Prefetch.claim(media, again: true) else { continue }
-        claimed = true
+        guard let token = Prefetch.claim(media, again: true) else { continue }
+        claimed = token
         data = Prefetch.take(media)
         do {
           if data == nil { data = try await Hub.run { try client.fetchMedia(media: media) } }

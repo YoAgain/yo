@@ -3904,6 +3904,7 @@ dependencies = [
  "reqwest",
  "yo-core",
  "yo-tests",
+ "yo-wire",
 ]
 
 [[package]]

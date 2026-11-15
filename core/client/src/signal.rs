@@ -78,12 +78,15 @@ impl Journaled {
         match self.undo.last_mut() {
             Some(outer) => {
                 for (key, old) in undo {
-                    if outer.contains_key(&key) {
-                        if let Some(mut old) = old {
-                            old.zeroize();
+                    match outer.entry(key) {
+                        std::collections::btree_map::Entry::Vacant(entry) => {
+                            entry.insert(old);
                         }
-                    } else {
-                        outer.insert(key, old);
+                        std::collections::btree_map::Entry::Occupied(_) => {
+                            if let Some(mut old) = old {
+                                old.zeroize();
+                            }
+                        }
                     }
                 }
             }
@@ -186,13 +189,16 @@ pub struct Identities {
     trusted: Option<(String, IdentityKey)>,
 }
 
+/// Base keys seen with each last resort: (its id, the key).
+type Seen = VecDeque<(u32, Vec<u8>)>;
+
 pub struct Kyber {
     /// One-time ones by `k/id`, last resorts by `kl/id`.
     keys: Journaled,
     /// Base keys seen with each last resort (its id, the key): a message made with one again is a replay.
-    seen: VecDeque<(u32, Vec<u8>)>,
+    seen: Seen,
     /// `seen` as it was when each open operation began, kept at its first change in it (`Records::begin`).
-    seen_before: Vec<Option<VecDeque<(u32, Vec<u8>)>>>,
+    seen_before: Vec<Option<Seen>>,
 }
 
 impl Kyber {

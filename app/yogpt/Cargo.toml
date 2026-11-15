@@ -8,6 +8,7 @@ description = "YoGPT: an account that answers every Yo with a Yo or a few."
 
 [dependencies]
 yo-core = { path = "../../core/client" }
+yo-wire = { path = "../../core/wire" }
 reqwest = { workspace = true, features = ["blocking"] }
 getrandom = { workspace = true }
 

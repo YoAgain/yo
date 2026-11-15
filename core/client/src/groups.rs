@@ -381,12 +381,16 @@ impl Client {
         let members = group.members.clone();
         self.state.groups.insert(id.clone(), group);
         self.push_event(Event::GroupChanged { group: id.clone() });
-        // Yos held from one not in the group then: shown if this change has them in it, else dropped.
+        // Yos held from one not in the group then: shown if this change has them in it, else dropped; never one of a
+        // sender blocked meanwhile, nor in a group this account is no longer in.
         let (theirs, rest): (Vec<_>, Vec<_>) =
             std::mem::take(&mut self.state.group_held).into_iter().partition(|(g, _)| *g == id);
         self.state.group_held = rest;
         for (_, event) in theirs {
-            if matches!(&event, crate::state::StoredEvent::GroupMessage { user, .. } if members.contains(user)) {
+            let shown = !left
+                && matches!(&event, crate::state::StoredEvent::GroupMessage { user, .. }
+                    if members.contains(user) && !self.blocked(user));
+            if shown {
                 self.state.events.push(event);
             }
         }

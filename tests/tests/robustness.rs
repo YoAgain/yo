@@ -360,3 +360,33 @@ fn a_save_failing_after_the_message_was_saved_does_not_make_it_unsent() {
     a.sync(0).unwrap();
     assert_eq!(yos(&b.sync(0).unwrap()), 1, "once");
 }
+
+/// The same for a send split around its network step (`send_begin` … `send_end`, as the app sends): the message was
+/// saved when queued, so saves failing after it do not report it unsent, and the app sends no second one.
+#[test]
+fn a_split_send_whose_later_saves_fail_is_still_sent() {
+    struct Filling(Mutex<Vec<u8>>, std::sync::atomic::AtomicU32);
+    impl Store for Filling {
+        fn save(&self, blob: Vec<u8>) -> Result<(), String> {
+            if self.1.load(std::sync::atomic::Ordering::SeqCst) == 0 {
+                return Err("disk full".into());
+            }
+            self.1.fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
+            *self.0.lock().unwrap() = blob;
+            Ok(())
+        }
+    }
+    let hub = TestHub::start();
+    let (mut a, mut b, _, _, _, _) = chat(&hub);
+    let store = Arc::new(Filling(Mutex::default(), std::sync::atomic::AtomicU32::new(u32::MAX)));
+    a.persist_to(store.clone(), [6; 32]).unwrap();
+    a.sync(0).unwrap();
+    let b_id = b.user_id().to_owned();
+    let deliveries = a.send_begin(&b_id, Content::Yo).expect("just synced");
+    store.1.store(0, std::sync::atomic::Ordering::SeqCst);
+    let answers = deliveries.send();
+    assert!(matches!(a.send_end(&deliveries, answers), yo_core::Sent::Done(Ok(_))), "queued and saved: sent");
+    store.1.store(u32::MAX, std::sync::atomic::Ordering::SeqCst);
+    a.sync(0).unwrap();
+    assert_eq!(yos(&b.sync(0).unwrap()), 1, "once");
+}

@@ -80,8 +80,10 @@ struct Http {
 impl Transport for Http {
     fn request(&self, method: &str, path: &str, headers: &[(String, String)], body: &[u8]) -> Result<Response, String> {
         let url = format!("{}{}", self.base, path);
+        // Only what names nobody goes anonymously; a registration or a backup's fetch names the account (spec 1).
         let signed = headers.iter().any(|(name, _)| name.eq_ignore_ascii_case("yo-device"));
-        let client = if signed { &self.client } else { &self.anonymous };
+        let anonymous = !signed && yo_wire::api::anonymous(method, path);
+        let client = if anonymous { &self.anonymous } else { &self.client };
         let mut request = client.request(method.parse().map_err(|_| "method")?, url).body(body.to_vec());
         for (name, value) in headers {
             request = request.header(name, value);
