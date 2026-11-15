@@ -517,9 +517,10 @@ fn a_replaced_device_still_sending_is_not_heard() {
 }
 
 /// B's state is rolled back past its session with A (a backup of the file from before): A's next Yo does not open.
-/// B asks again (a silent retry in a new session); A sends again what it keeps; B shows what it had not, once.
+/// B sends a `DecryptionErrorMessage` (Signal's); A archives the session, starts a new one and sends that Yo again; B
+/// shows it, once.
 #[test]
-fn a_wedged_session_heals_by_a_retry() {
+fn a_wedged_session_heals_by_a_decryption_error() {
     let hub = TestHub::start();
     let (a, b) = pair(&hub);
     let early = b.file.saved();
@@ -534,11 +535,11 @@ fn a_wedged_session_heals_by_a_retry() {
     assert_eq!(yos(&events, &a.user()), 0, "it does not open");
     b.acknowledge_events();
     b.after_sync().unwrap();
-    assert!(b.sessions_with(a.user()).iter().all(|s| !s.retrying), "the retry went");
+    assert!(b.sessions_with(a.user()).iter().all(|s| !s.retrying), "the decryption error went");
     a.drain();
     let times = yo_times(&b.drain(), &a.user());
-    // The first (shown before the rollback, which B's file forgot) and the one that did not open.
-    assert_eq!(times.len(), 2, "what A keeps, once each");
+    // The one that did not open, only: the first was shown before the rollback.
+    assert_eq!(times.len(), 1, "the Yo named, once");
     b.send_yo(a.user()).unwrap();
     assert_eq!(yos(&a.drain(), &b.user()), 1);
     a.send_yo(b.user()).unwrap();
@@ -631,7 +632,7 @@ fn silent_receipts_heal_a_one_way_stream() {
     let hub = TestHub::start();
     let (a, b) = pair(&hub);
     let kinds = |a: &Phone, b: &Phone| -> Vec<u8> {
-        posted(&a.http, &b.user()).iter().map(|e| payload(b, e).copies[0].prekey).collect()
+        posted(&a.http, &b.user()).iter().map(|e| payload(b, e).copies[0].kind).collect()
     };
     a.send_yo(b.user()).unwrap();
     a.send_yo(b.user()).unwrap();
@@ -646,7 +647,7 @@ fn silent_receipts_heal_a_one_way_stream() {
         posted(&a.http, &b.user())
             .iter()
             .map(|e| payload(b, e).copies.remove(0))
-            .filter(|c| c.prekey == 0)
+            .filter(|c| c.kind == 0)
             .map(|c| {
                 // A SignalMessage: its version, then its protobuf, whose field 1 is the sender's ratchet key.
                 let m = c.message.as_slice();

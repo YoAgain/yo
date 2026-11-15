@@ -29,8 +29,6 @@ pub const TYPE_LINK: u16 = 4;
 pub const TYPE_LOCATION: u16 = 5;
 /// Silent: a delivery receipt, the answer that moves the sender's ratchet on (spec 4.5).
 pub const TYPE_RECEIPT: u16 = 6;
-/// Silent: a message from the receiver did not open here; it sends again what it keeps (spec 4.6).
-pub const TYPE_RETRY: u16 = 7;
 /// A group as its sender has it now: id, revision, name, members (spec 4.9).
 pub const TYPE_GROUP: u16 = 8;
 /// Silent: the sender knows a newer revision of a group than this: it is asked for (spec 4.9).
@@ -132,8 +130,6 @@ pub enum Content {
     },
     /// Something from the receiver arrived (spec 4.5). Never shown.
     Receipt,
-    /// Something from the receiver did not open: send again (spec 4.6). Never shown.
-    Retry,
     /// A group made or changed: the whole group as the sender has it now.
     Group(GroupInfo),
     /// Send this group as you have it: the asker knows of a newer revision than its own. Never shown.
@@ -343,7 +339,6 @@ impl Message {
                 (TYPE_LOCATION, trailer(location))
             }
             Content::Receipt => (TYPE_RECEIPT, Vec::new()),
-            Content::Retry => (TYPE_RETRY, Vec::new()),
             Content::Group(info) => {
                 if !members_ok(&info.members) {
                     return Err(Error::Format);
@@ -402,9 +397,8 @@ impl Message {
                 let Location { lat_e7, lon_e7 } = crate::decode(own_part::<Location>(body)?)?;
                 Content::Location { lat_e7: lat_e7 as i32, lon_e7: lon_e7 as i32 }
             }
-            TYPE_RECEIPT | TYPE_RETRY if !body.is_empty() => return Err(Error::Format),
+            TYPE_RECEIPT if !body.is_empty() => return Err(Error::Format),
             TYPE_RECEIPT => Content::Receipt,
-            TYPE_RETRY => Content::Retry,
             TYPE_GROUP => {
                 let Group { id, revision, by, name, members } = crate::decode(body)?;
                 let name = read_text(&crate::encode(&Text { text: name }), MAX_NAME_LEN)?;
@@ -448,7 +442,6 @@ mod tests {
             Content::Link("https://justyo.co".into()),
             Content::Location { lat_e7: -338_688_000, lon_e7: 1_512_093_000 },
             Content::Receipt,
-            Content::Retry,
         ] {
             let message = Message { sent_at_ms: 1_762_000_000_000, group: None, content };
             assert_eq!(Message::decode(&message.encode().unwrap()).unwrap(), message);

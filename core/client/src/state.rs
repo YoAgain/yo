@@ -113,17 +113,15 @@ pub struct Contact {
     pub chat: bool,
     /// The own name changed and is not told to the user yet (`set_name`): it goes when it can.
     pub profile_due: bool,
-    /// The plaintexts of the last messages sent to the user: sent again when it asks (spec 4.6).
+    /// The plaintexts of the last messages sent to the user: one goes again when a `DecryptionErrorMessage` names
+    /// its time (spec 4.6).
     #[serde(with = "compact::list")]
     pub sent: VecDeque<Vec<u8>>,
     /// Something came from the user since the last receipt (spec 4.5).
     pub receipt_due: bool,
-    /// Its devices whose message did not open here: a new session with each, and a retry (spec 4.6).
-    pub retry: Vec<Key>,
-    /// When a retry was asked of the user last (wall clock, ms).
-    pub retry_at: u64,
-    /// When the user's retry was answered last (wall clock, ms).
-    pub resent_at: u64,
+    /// The `DecryptionErrorMessage`s due to its devices, for their messages that did not open here (spec 4.6).
+    #[serde(default)]
+    pub decryption_errors: Vec<DecryptionError>,
     /// When the hub last named devices of the user without prekeys (wall clock, ms; 0: never, or they have them
     /// now): an app too old for sessions, which must be updated. What waits for it stays (spec 4.2).
     pub outdated_at: u64,
@@ -151,6 +149,15 @@ pub struct Contact {
     pub key_gen: u32,
 }
 
+/// A `DecryptionErrorMessage` due to a device of a contact (spec 4.6): its device key, and the message as
+/// libsignal's `PlaintextContent`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DecryptionError {
+    pub device: Key,
+    #[serde(with = "compact::bytes")]
+    pub content: Vec<u8>,
+}
+
 /// What a field from before it was there is: true.
 pub fn yes() -> bool {
     true
@@ -172,9 +179,7 @@ impl Contact {
             profile_due: false,
             sent: VecDeque::new(),
             receipt_due: false,
-            retry: Vec::new(),
-            retry_at: 0,
-            resent_at: 0,
+            decryption_errors: Vec::new(),
             outdated_at: 0,
             accepted: false,
             profile_key: None,
@@ -204,9 +209,12 @@ pub struct Outgoing {
     /// The user it goes to (hex): a contact, or this account (a copy for its other devices).
     pub user: String,
     /// The session plaintext (`envelope::Plain`), sealed in the state: encrypted for the user's devices as they are
-    /// when it goes.
+    /// when it goes. For `device`: a `PlaintextContent`, as it goes.
     #[serde(with = "compact::bytes")]
     pub plain: Vec<u8>,
+    /// Only for this device of the user, outside the session: a `DecryptionErrorMessage` (spec 4.6).
+    #[serde(default)]
+    pub device: Option<Key>,
     /// Its payload once encrypted (`envelope::Payload`), with the devices it was made for: made again if they
     /// changed. Sealed as it goes, with the sender certificate of then (spec 6.1).
     #[serde(default, with = "compact::optional")]
@@ -382,7 +390,7 @@ pub struct State {
     pub storage_fetched: bool,
     /// The time of the last message sent: each later one strictly later.
     pub last_sent_ms: u64,
-    /// Hashes of the last messages received (sender and plaintext): a copy sent again on a retry is skipped.
+    /// Hashes of the last messages received (sender and plaintext): a copy sent again (4.6) is skipped.
     #[serde(with = "compact::hashes")]
     pub received: VecDeque<[u8; 32]>,
     /// This account's profile key (spec 4.10): its contacts show its access key on deliveries; none yet before the

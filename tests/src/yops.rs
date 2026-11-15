@@ -169,7 +169,7 @@ impl Device {
             .unwrap();
             copies.push(ForDevice {
                 device_key: device.state.device_key,
-                prekey: (message.message_type() == CiphertextMessageType::PreKey) as u8,
+                kind: (message.message_type() == CiphertextMessageType::PreKey) as u8,
                 message: message.serialize().to_vec().into(),
             });
         }
@@ -177,6 +177,7 @@ impl Device {
             account_key: self.account_key(),
             device_key: self.state.device_key,
             device_id: self.state.device_number,
+            sent_at: 0,
             copies,
         };
         let now = SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_millis() as u64;
@@ -191,7 +192,7 @@ impl Device {
         let payload: Payload = decode(&sealed::open(&own, sealed, &roots, now).unwrap().payload).unwrap();
         let copy = payload.copies.iter().find(|c| c.device_key == self.state.device_key).unwrap();
         let bytes = copy.message.as_slice();
-        let message = match copy.prekey {
+        let message = match copy.kind {
             1 => CiphertextMessage::PreKeySignalMessage(PreKeySignalMessage::try_from(bytes).unwrap()),
             _ => CiphertextMessage::SignalMessage(SignalMessage::try_from(bytes).unwrap()),
         };

@@ -26,20 +26,21 @@ pub use yo_wire::handle;
 use ed25519_dalek::{Signer as _, SigningKey};
 use identity::Key;
 use libsignal_protocol::{
-    message_decrypt, message_encrypt, process_prekey_bundle, CiphertextMessage, CiphertextMessageType, DeviceId,
-    PreKeyBundle, PreKeySignalMessage, ProtocolAddress, SignalMessage, SignalProtocolError,
+    extract_decryption_error_message_from_serialized_content, message_decrypt, message_encrypt, process_prekey_bundle,
+    CiphertextMessage, CiphertextMessageType, DecryptionErrorMessage, DeviceId, PlaintextContent, PreKeyBundle,
+    PreKeySignalMessage, ProtocolAddress, SignalMessage, SignalProtocolError, Timestamp,
 };
 use signal::Records;
-use state::{hex, unhex, Contact, Outgoing, Registering, Slot, State, StoredContent, StoredEvent};
+use state::{hex, unhex, Contact, DecryptionError, Outgoing, Registering, Slot, State, StoredContent, StoredEvent};
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 use yo_wire::api::{self, status};
 use yo_wire::content::Message;
-use yo_wire::envelope::{ForDevice, Payload, Plain};
+use yo_wire::envelope::{ForDevice, Payload, Plain, KIND_MESSAGE, KIND_PLAINTEXT, KIND_PREKEY};
 use yo_wire::handle::{Handle, KIND_USER, KIND_USERNAME};
 use yo_wire::hubsig;
-use yo_wire::limits::{MAX_DEVICES, MAX_INBOX_FETCH, PREKEY_REFILL_BELOW, PREKEY_TARGET};
+use yo_wire::limits::{MAX_INBOX_FETCH, PREKEY_REFILL_BELOW, PREKEY_TARGET};
 use yo_wire::request::{HEADER_DEVICE, HEADER_SIGNATURE, HEADER_TIME};
 use yo_wire::{decode, encode, sha256, DeviceId as HubDeviceId, UserId};
 
@@ -51,16 +52,15 @@ const ROTATE_EVERY_MS: u64 = 7 * 24 * 3600 * 1000;
 /// ... and the ones replaced kept this long (wall clock): a session started with one may still wait at the hub.
 const RETIRED_KEPT_MS: u64 = 31 * 24 * 3600 * 1000;
 /// One-time prekeys of each kind whose private keys are kept: lookups that never lead to a message use them up at
-/// the hub, and the oldest beyond this go (a message made with one later is answered by a retry, spec 4.6).
+/// the hub, and the oldest beyond this go (a message made with one later is answered by a decryption error, spec 4.6).
 const ONE_TIME_KEPT: usize = 4 * PREKEY_TARGET as usize;
 /// A saved signing time at most this far ahead of the clock is kept as the floor of the next (spec 6.2).
 const SIGN_AHEAD_MS: u64 = 60 * 1000;
-/// A contact's retry is answered at most this often (spec 4.6).
-const RESEND_EVERY_MS: u64 = 60 * 1000;
 /// Session message hashes remembered against redelivery.
 const SEEN: usize = 2000;
-/// Messages sent to a contact kept to send again when it asks (spec 4.6).
-const KEPT_FOR_RETRY: usize = 64;
+/// Messages sent to a contact kept to send again when a decryption error names one (spec 4.6); also the decryption
+/// errors due to a contact at most.
+const KEPT_FOR_RESEND: usize = 64;
 /// A sender certificate holds a day at the hub (spec 6.1); this device uses one for an hour less by its own clock
 /// from when it came (whatever time the clock shows), and fetches the next `sealed::REFRESH_MS` before.
 const CERTIFICATE_USED_MS: u64 = 23 * 3600 * 1000;
@@ -88,11 +88,9 @@ fn test_trust_roots() -> Vec<Key> {
     #[cfg(not(feature = "testing"))]
     Vec::new()
 }
-/// A retry is asked of one contact at most this often.
-const RETRY_EVERY_MS: u64 = 60 * 1000;
 /// How often a payload may make this device ask the hub for a user's devices (spec 4.4).
 const ROSTER_ASK_EVERY_MS: u64 = 60 * 1000;
-/// Lookups a day that payloads which did not open may make (roster checks and retries' bundles together): what is left
+/// Lookups a day that payloads which did not open may make (roster checks): what is left
 /// of the hub's allowance (6.6) stays for sessions the app starts, however many forgeries come.
 const RECOVERY_LOOKUPS_PER_DAY: u32 = 10;
 /// Payloads kept for a roster that could not be asked yet (`State::deferred`).
@@ -219,7 +217,7 @@ pub struct SessionInfo {
     pub device: String,
     /// A message can go to it now: a session made with PQXDH whose sending chain is good.
     pub usable: bool,
-    /// Its message did not open here last: a new session and a retry are on their way (4.6).
+    /// Its message did not open here last: a decryption error is on its way (4.6).
     pub retrying: bool,
 }
 
@@ -473,7 +471,7 @@ pub struct Client {
     /// Inbox ids a call received (its last batch, not full) and has not handed out yet: `finish` moves them to
     /// `unacked` once their events are saved and handed over, so no call acknowledges before the app has its events.
     received_ids: Vec<u64>,
-    /// `sync_end` received: the work after it (receipts, retries, prekeys, the outbox, the storage) waits
+    /// `sync_end` received: the work after it (receipts, decryption errors, prekeys, the outbox, the storage) waits
     /// for `after_sync`, or the next `sync_begin`.
     after_due: bool,
     /// The hub's public keys the app ships (spec 6.10: the current one and a spare kept offline): with them, every
@@ -565,7 +563,6 @@ pub(crate) fn stored(event: Event) -> StoredEvent {
         Content::Profile { name } => StoredContent::Profile(name),
         Content::Unknown(kind) => StoredContent::Unknown(kind),
         Content::Receipt => StoredContent::Unknown(yo_wire::content::TYPE_RECEIPT),
-        Content::Retry => StoredContent::Unknown(yo_wire::content::TYPE_RETRY),
         Content::Group(_) => StoredContent::Unknown(yo_wire::content::TYPE_GROUP),
         Content::GroupAsk { .. } => StoredContent::Unknown(yo_wire::content::TYPE_GROUP_ASK),
         Content::ProfileKey(_) => StoredContent::Unknown(yo_wire::content::TYPE_PROFILE_KEY),
@@ -640,7 +637,6 @@ fn shown(content: &Content) -> bool {
         content,
         Content::Profile { .. }
             | Content::Receipt
-            | Content::Retry
             | Content::GroupAsk { .. }
             | Content::ProfileKey(_)
             | Content::Unknown(_)
@@ -1111,7 +1107,7 @@ impl Client {
         state::seal(&self.state, self.records.export(), key)
     }
 
-    /// For tests: the clock that decides when prekeys rotate and retries are due.
+    /// For tests: the clock that decides when prekeys rotate and receipts are due.
     pub fn set_clock(&mut self, clock: Clock) {
         self.clock = clock;
     }
@@ -1666,7 +1662,8 @@ impl Client {
 
     /// Encrypts a message for every device of a user (spec 4.4): one payload, a copy per device, sealed to the user's
     /// account as it goes (6.1).
-    fn encrypt_for(&mut self, user: &str, plain: &[u8]) -> Result<(Vec<u8>, Vec<Key>)> {
+    /// With `device`: `plain` is a `PlaintextContent`, the one copy for that device as it is (4.6).
+    fn encrypt_for(&mut self, user: &str, plain: &[u8], device: Option<Key>) -> Result<(Vec<u8>, Vec<Key>)> {
         let (account_key, devices) = self.roster(user).map(|(k, d)| (k, d.to_vec())).ok_or(Error::Protocol("user"))?;
         if devices.is_empty() {
             return Err(Error::Protocol("no devices"));
@@ -1674,7 +1671,18 @@ impl Client {
         let identity = signal::identity_of(&account_key)?;
         let local = self.local_address()?;
         let mut copies = Vec::new();
-        for device in &devices {
+        // The content's time, as Signal's envelope shows it: what a decryption error names (4.6).
+        let sent_at = match device {
+            Some(_) => self.wall(),
+            None => decode::<Plain>(plain)
+                .ok()
+                .and_then(|plain| Message::decode(plain.content.as_slice()).ok())
+                .map_or(0, |m| m.sent_at_ms),
+        };
+        if let Some(key) = device {
+            copies.push(ForDevice { device_key: key, kind: KIND_PLAINTEXT, message: plain.to_vec().into() });
+        }
+        for device in devices.iter().filter(|_| device.is_none()) {
             let address = self.address(user, device.slot)?;
             self.records.trust(&address, identity);
             let records = &mut self.records;
@@ -1690,7 +1698,7 @@ impl Client {
             .map_err(signal::signal)?;
             copies.push(ForDevice {
                 device_key: device.key,
-                prekey: (message.message_type() == CiphertextMessageType::PreKey) as u8,
+                kind: if message.message_type() == CiphertextMessageType::PreKey { KIND_PREKEY } else { KIND_MESSAGE },
                 message: message.serialize().to_vec().into(),
             });
         }
@@ -1698,6 +1706,7 @@ impl Client {
             account_key: self.my_account_key(),
             device_key: self.state.device_key,
             device_id: self.state.device_number,
+            sent_at,
             copies,
         };
         Ok((encode(&payload), devices.iter().map(|d| d.key).collect()))
@@ -1866,11 +1875,11 @@ impl Client {
         }
         for i in 0..self.state.outbox.len() {
             let item = &self.state.outbox[i];
-            if item.user != user || item.payload.is_some() || !self.still_in_group(item) {
+            if item.user != user || item.payload.is_some() || item.device.is_some() || !self.still_in_group(item) {
                 continue;
             }
             let plain = item.plain.clone();
-            if let Ok((payload, made_for)) = self.atomic(|c| c.encrypt_for(user, &plain)) {
+            if let Ok((payload, made_for)) = self.atomic(|c| c.encrypt_for(user, &plain, None)) {
                 let item = &mut self.state.outbox[i];
                 item.payload = Some(payload);
                 item.made_for = made_for;
@@ -1888,7 +1897,16 @@ impl Client {
             payload: None,
             made_for: Vec::new(),
             refused: false,
+            device: None,
         });
+    }
+
+    /// Queues a `PlaintextContent` for one device of a user (a decryption error, spec 4.6): no session needed.
+    fn enqueue_plaintext(&mut self, user: &str, device: Key, content: Vec<u8>) {
+        self.enqueue(user, content);
+        if let Some(item) = self.state.outbox.back_mut() {
+            item.device = Some(device);
+        }
     }
 
     /// Whether a message with this photo's or video's blob went to the user already in the same conversation (1:1:
@@ -1959,7 +1977,7 @@ impl Client {
             .state
             .outbox
             .iter()
-            .filter(|item| !self.blocked(&item.user) && !self.delivering.contains(&item.user))
+            .filter(|item| item.device.is_none() && !self.blocked(&item.user) && !self.delivering.contains(&item.user))
             .filter(|item| self.state.contacts.get(&item.user).is_none_or(|c| now >= c.outdated_at + OUTDATED_RETRY_MS))
             .map(|item| item.user.clone())
             .collect();
@@ -2008,6 +2026,11 @@ impl Client {
                 self.state.outbox.remove(i);
                 continue;
             }
+            // A decryption error for a device gone since: of use to nobody either.
+            if self.state.outbox[i].device.is_some_and(|device| !current.contains(&device)) {
+                self.state.outbox.remove(i);
+                continue;
+            }
             let item = &self.state.outbox[i];
             let fresh = item.payload.is_some() && {
                 let mut made = item.made_for.clone();
@@ -2017,13 +2040,14 @@ impl Client {
                 made == now
             };
             if !fresh {
-                if !self.without_session(&user).is_empty() || self.roster_unknown(&user) {
+                // A plaintext (a decryption error) needs no session, only the roster.
+                if (item.device.is_none() && !self.without_session(&user).is_empty()) || self.roster_unknown(&user) {
                     waiting.insert(user);
                     i += 1;
                     continue;
                 }
-                let plain = item.plain.clone();
-                match self.atomic(|c| c.encrypt_for(&user, &plain)) {
+                let (plain, device) = (item.plain.clone(), item.device);
+                match self.atomic(|c| c.encrypt_for(&user, &plain, device)) {
                     Ok((payload, made_for)) => {
                         let item = &mut self.state.outbox[i];
                         item.payload = Some(payload);
@@ -2568,9 +2592,20 @@ impl Client {
         }
         let address = self.address(&user, payload.device_id)?;
         let bytes = copy.message.as_slice();
-        let message = match copy.prekey {
-            1 => PreKeySignalMessage::try_from(bytes).map(CiphertextMessage::PreKeySignalMessage),
-            0 => SignalMessage::try_from(bytes).map(CiphertextMessage::SignalMessage),
+        if copy.kind == KIND_PLAINTEXT {
+            // A contact's device at its number, as this device knows it: nothing else is answered (4.6).
+            let known =
+                !own && unpinned.is_none() && self.slot_of(&user, &payload.device_key) == Some(payload.device_id);
+            if !known {
+                self.drop_one("a decryption error from a device not known here".into());
+                return Ok(());
+            }
+            self.remember(bytes);
+            return self.decryption_error(&user, &address, bytes);
+        }
+        let message = match copy.kind {
+            KIND_PREKEY => PreKeySignalMessage::try_from(bytes).map(CiphertextMessage::PreKeySignalMessage),
+            KIND_MESSAGE => SignalMessage::try_from(bytes).map(CiphertextMessage::SignalMessage),
             _ => return Err(Error::Protocol("message type")),
         }
         .map_err(signal::signal)?;
@@ -2591,16 +2626,16 @@ impl Client {
         let plaintext = match decrypted {
             Ok(plaintext) => plaintext,
             Err(error) => {
-                // A session out of step (spec 4.6): a new one with that device, and a retry, so it sends again. Not for
-                // a device known here under another number (made up): taken in is nothing either way. Also a
+                // A session out of step (spec 4.6): Signal's `DecryptionErrorMessage` goes to that device (the ratchet
+                // key, the time, its number), so it starts a new session and sends that message again. Not for a
+                // device known here under another number (made up): taken in is nothing either way. Also a
                 // "duplicate" whose bytes were not seen (above): made with message keys used before, by a sender whose
                 // state went back; it never opens, and the sender's next ones would not either until its chain passed.
                 // Only a device of the user's roster, at its number (the hub asked at most once a minute a user when
-                // this device does not know it): the retry list stays as long as a roster (16), and a forger naming
-                // made-up devices adds nothing to it.
+                // this device does not know it), and at most `KEPT_FOR_RESEND` due a contact.
                 // Someone not pinned here (a state that went back and forgot them, or a forger naming a real
-                // account): pinned for a retry only when the hub, asked at most once a minute a user, names that
-                // device; else nothing of the payload is kept.
+                // account): pinned for it only when the hub, asked at most once a minute a user, names that device;
+                // else nothing of the payload is kept.
                 let rostered = !own
                     && match unpinned {
                         None => {
@@ -2624,11 +2659,21 @@ impl Client {
                                 )?
                         }
                     };
-                if rostered {
-                    if let Some(contact) = self.state.contacts.get_mut(&user) {
-                        if !contact.retry.contains(&payload.device_key) && contact.retry.len() < MAX_DEVICES {
-                            contact.retry.push(payload.device_key);
-                        }
+                let kind = if copy.kind == KIND_PREKEY {
+                    CiphertextMessageType::PreKey
+                } else {
+                    CiphertextMessageType::Whisper
+                };
+                let made = DecryptionErrorMessage::for_original(
+                    bytes,
+                    kind,
+                    Timestamp::from_epoch_millis(payload.sent_at),
+                    payload.device_id.into(),
+                );
+                if let (true, Ok(made), Some(contact)) = (rostered, made, self.state.contacts.get_mut(&user)) {
+                    if contact.decryption_errors.len() < KEPT_FOR_RESEND {
+                        let content = PlaintextContent::from(made).serialized().to_vec();
+                        contact.decryption_errors.push(DecryptionError { device: payload.device_key, content });
                     }
                 }
                 self.drop_one(format!("session: {error}"));
@@ -2725,14 +2770,14 @@ impl Client {
     }
 
     /// A contact's profile key as type 10 brought it (spec 4.10): taken. Its generation is not told; the one held
-    /// stays as the bound below it (a type 10 is never sent again on a retry: its key is the newest), until a content
+    /// stays as the bound below it (a type 10 is never sent again (4.6): its key is the newest), until a content
     /// message with it tells it.
     fn take_key_message(&mut self, user: &str, key: [u8; 32]) {
         self.adopt_key(user, key);
     }
 
     /// A contact's profile key a content message carried, with its generation: taken unless it is older than the one
-    /// held (a message sent again on a retry, one held back on the way), or one held came as type 10 since.
+    /// held (a message sent again (4.6), one held back on the way), or one held came as type 10 since.
     fn take_key_carried(&mut self, user: &str, key: [u8; 32], generation: u32) {
         let Some(contact) = self.state.contacts.get_mut(user) else { return };
         if carried_key_taken(contact, &key, generation) {
@@ -2791,15 +2836,15 @@ impl Client {
         if !self.state.requests_open && stranger && message.group.is_none() && shown(&message.content) {
             return Ok(());
         }
-        // Sent again on a retry (4.6) and seen already: once is enough. A sender's messages differ in their time at
+        // Sent again for a decryption error (4.6) and seen already: once is enough. A sender's messages differ in their time at
         // least, so only a copy is the same.
         if !self.first_time(user, plaintext) {
             return Ok(());
         }
-        // Everything but a receipt, a retry and an ask is answered by a receipt: the ratchet moves on also for a stream
-        // of changes or names one way (spec 4.5).
+        // Everything but a receipt and an ask is answered by a receipt: the ratchet moves on also for a stream of
+        // changes or names one way (spec 4.5).
         // Not to a request yet (spec 4.10): nothing goes back until it is said yes to.
-        if !matches!(message.content, Content::Receipt | Content::Retry | Content::GroupAsk { .. }) {
+        if !matches!(message.content, Content::Receipt | Content::GroupAsk { .. }) {
             if let Some(contact) = self.state.contacts.get_mut(user).filter(|c| c.accepted && !c.blocked) {
                 contact.receipt_due = true;
             }
@@ -2821,20 +2866,6 @@ impl Client {
             content if message.group.is_some() => {
                 let tag = message.group.expect("a group");
                 self.group_yo(user, tag, message.sent_at_ms, content);
-                Ok(())
-            }
-            Content::Retry => {
-                let now = (self.clock)();
-                let contact = self.state.contacts.get_mut(user).ok_or(Error::Internal("contact"))?;
-                if now >= contact.resent_at + RESEND_EVERY_MS {
-                    contact.resent_at = now;
-                    // The key first, as on a first message: what was sent again comes as a contact's.
-                    if contact.accepted && !contact.blocked {
-                        contact.key_due = true;
-                    }
-                    self.send_again(user);
-                    self.queue_key(user)?;
-                }
                 Ok(())
             }
             Content::Profile { name } => {
@@ -2860,69 +2891,78 @@ impl Client {
         }
     }
 
-    /// A contact asked again (spec 4.6): what this device keeps of what it sent them goes once more, in order.
-    fn send_again(&mut self, user: &str) {
-        let Some(sent) = self.state.contacts.get(user).map(|c| c.sent.clone()) else { return };
-        for message in sent {
-            // A group's message only while both are still in it (left, or the user removed: not again).
-            let in_group = Message::decode(&message).ok().and_then(|m| m.group).is_none_or(|tag| {
-                self.state.groups.get(&hex(&tag.id)).is_some_and(|g| !g.left && g.members.iter().any(|m| m == user))
-            });
-            if in_group {
-                self.enqueue(user, encode(&Plain { to: None, content: message.into() }));
-            }
+    /// A `DecryptionErrorMessage` from a contact's device (spec 4.6), taken as Signal takes one: the session with
+    /// that device is archived if its current state still sends with the ratchet key named (the next message starts
+    /// a new one from a fresh bundle), and the message sent at the time named goes again, if it is among those kept;
+    /// else, the session archived, an empty message (a receipt) starts the new one. From a device not this one's
+    /// peer (a forgery: an identified envelope proves no sender), at most a message the contact has already goes
+    /// to it again, encrypted for it: only the session's peer knows the ratchet key.
+    fn decryption_error(&mut self, user: &str, address: &ProtocolAddress, bytes: &[u8]) -> Result<()> {
+        let Some(error) = PlaintextContent::try_from(bytes)
+            .ok()
+            .and_then(|content| extract_decryption_error_message_from_serialized_content(content.body()).ok())
+        else {
+            self.drop_one("a plaintext that is no decryption error".into());
+            return Ok(());
+        };
+        if error.device_id() != u32::from(self.state.device_number) {
+            self.drop_one("a decryption error for another device".into());
+            return Ok(());
         }
+        let archived = error.ratchet_key().is_some_and(|key| self.records.archive_if_current(address, key));
+        let sent_at = error.timestamp().epoch_millis();
+        let Some(contact) = self.state.contacts.get(user) else { return Ok(()) };
+        let kept = contact.sent.iter().find(|m| Message::decode(m).is_ok_and(|m| m.sent_at_ms == sent_at)).cloned();
+        match kept {
+            Some(message) => {
+                // A group's message only while both are still in it (left, or the user removed: not again).
+                let in_group = Message::decode(&message).ok().and_then(|m| m.group).is_none_or(|tag| {
+                    self.state.groups.get(&hex(&tag.id)).is_some_and(|g| !g.left && g.members.iter().any(|m| m == user))
+                });
+                if in_group {
+                    self.enqueue(user, encode(&Plain { to: None, content: message.into() }));
+                }
+            }
+            None if archived => {
+                if let Some(contact) = self.state.contacts.get_mut(user).filter(|c| c.accepted && !c.blocked) {
+                    contact.receipt_due = true;
+                }
+            }
+            None => {}
+        }
+        Ok(())
     }
 
-    /// The receipts and retries due (spec 4.5, 4.6): a receipt to each contact that wrote since the last, so its
-    /// ratchet moves on; a new session with each device whose message did not open, and a retry in it.
+    /// The receipts and decryption errors due (spec 4.5, 4.6): a receipt to each contact that wrote since the last,
+    /// so its ratchet moves on; a `DecryptionErrorMessage` to each device whose message did not open here.
     fn answer_due(&mut self) -> Result<()> {
-        let now = (self.clock)();
-        let due: Vec<(String, bool, Vec<Key>)> = self
+        let due: Vec<(String, bool, Vec<DecryptionError>)> = self
             .state
             .contacts
             .iter()
             .filter(|(_, c)| !c.blocked && !c.gone && !c.unconfirmed)
             .map(|(user, c)| {
-                // A retry answers too: not to a request seen and not said yes to (spec 4.10). One whose first
-                // message never opened (a state rolled back past it) is none yet: its session heals.
+                // A decryption error answers too: not to a request seen and not said yes to (spec 4.10). One whose
+                // first message never opened (a state rolled back past it) is none yet: its session heals.
                 let answers = c.accepted || !c.chat || self.in_joined_group(user);
-                let retry = if answers && now >= c.retry_at + RETRY_EVERY_MS { c.retry.clone() } else { Vec::new() };
-                // A receipt needs a session; a retry makes one (a device this one lost its sessions with).
-                (user.clone(), c.receipt_due && !c.devices.is_empty(), retry)
+                let errors = if answers { c.decryption_errors.clone() } else { Vec::new() };
+                (user.clone(), c.receipt_due && !c.devices.is_empty(), errors)
             })
-            .filter(|(_, receipt, retry)| *receipt || !retry.is_empty())
+            .filter(|(_, receipt, errors)| *receipt || !errors.is_empty())
             .collect();
-        for (user, receipt, retry) in due {
-            let content = if retry.is_empty() {
-                Content::Receipt
-            } else if !self.recovery_lookup() {
-                // The day's lookups for recovery are used up (forgeries, perhaps): the retry waits for the next day.
-                if !receipt {
-                    continue;
-                }
-                Content::Receipt
-            } else {
-                match self.fetch_bundles(&user, &retry) {
-                    Ok(()) => {}
-                    // Not now (the hub's lookup limit, no network): this one's retry waits, the others' go on.
-                    Err(error) if retryable(&error) => continue,
-                    Err(error) => self.note(format!("retry: {error}")),
-                }
-                Content::Retry
-            };
-            let content_was_retry = content == Content::Retry;
+        for (user, receipt, errors) in due {
             self.atomic(|c| {
-                c.send_message(&user, content)?;
-                let contact = c.state.contacts.get_mut(&user).ok_or(Error::Internal("contact"))?;
-                contact.receipt_due = false;
-                if content_was_retry {
-                    contact.retry.clear();
-                    contact.retry_at = now;
+                for error in &errors {
+                    c.enqueue_plaintext(&user, error.device, error.content.clone());
                 }
+                if receipt {
+                    c.send_message(&user, Content::Receipt)?;
+                }
+                let contact = c.state.contacts.get_mut(&user).ok_or(Error::Internal("contact"))?;
+                contact.receipt_due &= !receipt;
+                contact.decryption_errors.retain(|e| !errors.contains(e));
                 Ok(())
             })?;
-            let _ = receipt;
         }
         Ok(())
     }
@@ -3278,7 +3318,7 @@ impl Client {
     }
 
     /// The rest of a `sync`, once its events are handed over: acknowledges at the hub what it received (saved
-    /// before), and for the app (not a guest) sends the receipts and retries due, refills prekeys, delivers the
+    /// before), and for the app (not a guest) sends the receipts and decryption errors due, refills prekeys, delivers the
     /// outbox, writes the storage. Without it the next `sync_begin` does it first.
     pub fn after_sync(&mut self) -> Result<()> {
         let result = self.after_sync_inner();
@@ -3586,7 +3626,8 @@ impl Client {
             .map(|device| SessionInfo {
                 device: hex(&device.key),
                 usable: self.address(user, device.slot).is_ok_and(|a| self.records.usable(&a)),
-                retrying: contact.retry.contains(&device.key),
+                retrying: contact.decryption_errors.iter().any(|e| e.device == device.key)
+                    || self.state.outbox.iter().any(|item| item.user == user && item.device == Some(device.key)),
             })
             .collect()
     }
@@ -3663,11 +3704,27 @@ impl Client {
 
     /// The safety number with a contact (spec 3.4).
     pub fn safety_number(&self, who: &str) -> Result<String> {
+        let (mine, theirs, key) = self.safety_sides(who)?;
+        identity::safety_number((&mine, &self.my_account_key()), (&theirs, &key))
+    }
+
+    /// The safety number's scannable form with a contact, to show as a QR code (spec 3.4).
+    pub fn safety_code(&self, who: &str) -> Result<Vec<u8>> {
+        let (mine, theirs, key) = self.safety_sides(who)?;
+        identity::safety_code((&mine, &self.my_account_key()), (&theirs, &key))
+    }
+
+    /// Whether a code scanned off a contact's screen matches the safety number with it (spec 3.4).
+    pub fn safety_code_matches(&self, who: &str, scanned: &[u8]) -> Result<bool> {
+        let (mine, theirs, key) = self.safety_sides(who)?;
+        identity::safety_code_matches((&mine, &self.my_account_key()), (&theirs, &key), scanned)
+    }
+
+    /// This user's id, a contact's, and the account key it is pinned to: the sides of a safety number.
+    fn safety_sides(&self, who: &str) -> Result<(Vec<u8>, Vec<u8>, Key)> {
         let user = self.contact_user(who)?;
         let contact = self.state.contacts.get(&user).ok_or(Error::NotOnYo)?;
-        let mine = unhex(&self.state.user_id).unwrap_or_default();
-        let theirs = unhex(&user).unwrap_or_default();
-        Ok(identity::safety_number((&mine, &self.my_account_key()), (&theirs, &contact.account_key)))
+        Ok((unhex(&self.state.user_id).unwrap_or_default(), unhex(&user).unwrap_or_default(), contact.account_key))
     }
 
     /// Marks a contact verified (or not) after comparing safety numbers. Any contact can be verified (spec 3.4).
@@ -3827,7 +3884,7 @@ mod handle_tests {
     #[test]
     fn a_carried_key_replaces_only_an_older_one() {
         let mut contact = Contact { profile_key: Some([2; 32]), key_gen: 2, ..Contact::unknown() };
-        assert!(!carried_key_taken(&contact, &[1; 32], 1), "a Yo sent again on a retry, with the key before");
+        assert!(!carried_key_taken(&contact, &[1; 32], 1), "a Yo sent again (4.6), with the key before");
         assert!(carried_key_taken(&contact, &[3; 32], 3), "the next key");
         assert!(carried_key_taken(&contact, &[2; 32], 2), "the same");
         contact.profile_key = Some([3; 32]);

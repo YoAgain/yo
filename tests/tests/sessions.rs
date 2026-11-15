@@ -1,4 +1,4 @@
-//! Sessions (spec 4): what the Double Ratchet and Yo's retry and receipts make of lost, duplicated and reordered
+//! Sessions (spec 4): what the Double Ratchet, Signal's decryption errors and receipts make of lost, duplicated and reordered
 //! messages, a session out of step, and a month away.
 
 use std::sync::{Arc, Mutex};
@@ -78,29 +78,46 @@ impl Store for Saved {
 }
 
 /// B's session with A is gone (its state from before A wrote, brought back): A's next message does not open. B
-/// starts a new session with A's device and sends a retry in it; A sends again what it keeps, and it arrives.
+/// sends a `DecryptionErrorMessage` to A's device; A archives its session, starts a new one and sends that message
+/// again, and it arrives.
 #[test]
-fn a_session_out_of_step_heals_by_a_retry() {
+fn a_session_out_of_step_heals_by_a_decryption_error() {
     let hub = TestHub::start();
     let n = random_u64() % 100_000;
-    let mut a = by_name(Http::new(hub.url()), &format!("Ret{n}"));
+    let ha = Http::new(hub.url());
+    let mut a = by_name(ha.clone(), &format!("Ret{n}"));
     let mut b = by_name(Http::new(hub.url()), &format!("Ter{n}"));
     let early = b.export(&[3; 32]);
+    // The kind of each copy in the last envelope one posted to the other.
+    let kinds = |http: &Http, to: &Client| -> Vec<u8> {
+        let last = posted(http, to.user_id()).pop().unwrap();
+        let (opened, _) = yo_core::sealed::testing::open(&to.account_secret(), &last).unwrap();
+        let payload: yo_wire::envelope::Payload = yo_wire::decode(&opened).unwrap();
+        payload.copies.iter().map(|c| c.kind).collect()
+    };
     a.send(b.user_id(), text("1")).unwrap();
     assert_eq!(texts(&b.sync(0).unwrap()), ["1"]);
     b.send(a.user_id(), text("r")).unwrap();
     assert_eq!(texts(&a.sync(0).unwrap()), ["r"]);
     // B's state from before A wrote: it has no session with A.
-    let mut b = Client::restore(Http::new(hub.url()), &early, &[3; 32]).unwrap();
+    let hb = Http::new(hub.url());
+    let mut b = Client::restore(hb.clone(), &early, &[3; 32]).unwrap();
     b.persist_to(Arc::new(Saved::default()), [3; 32]).unwrap();
     a.send(b.user_id(), text("2")).unwrap();
     assert!(texts(&b.sync(0).unwrap()).is_empty(), "it does not open");
     assert_eq!(b.dropped(), 1);
     b.after_sync().unwrap();
+    assert!(posted(&hb, a.user_id()).iter().any(|e| yo_core::sealed::testing::open(&a.account_secret(), e).is_ok_and(
+        |(opened, _)| {
+            yo_wire::decode::<yo_wire::envelope::Payload>(&opened)
+                .is_ok_and(|p| p.copies.iter().any(|c| c.kind == yo_wire::envelope::KIND_PLAINTEXT))
+        }
+    )));
     a.sync(0).unwrap();
     a.after_sync().unwrap();
-    let again = texts(&b.sync(0).unwrap());
-    assert!(again.contains(&"2".to_owned()), "{again:?}");
+    // A's session archived: what goes again starts a new one.
+    assert_eq!(kinds(&ha, &b), [yo_wire::envelope::KIND_PREKEY]);
+    assert_eq!(texts(&b.sync(0).unwrap()), ["2"], "the message named, once");
     b.send(a.user_id(), text("back")).unwrap();
     assert_eq!(texts(&a.sync(0).unwrap()), ["back"]);
     assert_eq!(a.dropped(), 0, "{:?}", a.drop_reasons());
@@ -156,7 +173,7 @@ fn a_forged_payload_changes_nothing() {
     assert_eq!(b.dropped(), 1);
     assert!(
         b.sessions_with(a.user_id()).iter().all(|s| s.usable && !s.retrying),
-        "no retry for a device under another number"
+        "no decryption error for a device under another number"
     );
     a.send(b.user_id(), text("still here")).unwrap();
     assert_eq!(texts(&b.sync(0).unwrap()), ["still here"]);
@@ -164,7 +181,7 @@ fn a_forged_payload_changes_nothing() {
 
 /// A's state goes back (its file from before its last Yo, the Yo gone out all the same): its next Yo is made with
 /// message keys B used already, which libsignal calls a duplicate. It is none (its bytes were not seen): a session out
-/// of step, healed by a retry like any; B shows the new Yo once, not the old one again.
+/// of step, healed by a decryption error like any; B shows the new Yo once, not the old one again.
 #[test]
 fn a_sender_whose_state_went_back_is_asked_again() {
     let hub = TestHub::start();
@@ -178,7 +195,7 @@ fn a_sender_whose_state_went_back_is_asked_again() {
     a.persist_to(disk, [3; 32]).unwrap();
     a.send(b.user_id(), text("2")).unwrap();
     assert!(texts(&b.sync(0).unwrap()).is_empty(), "made with keys used before: it does not open");
-    assert!(b.sessions_with(a.user_id()).iter().any(|s| s.retrying), "a retry is due");
+    assert!(b.sessions_with(a.user_id()).iter().any(|s| s.retrying), "a decryption error is due");
     b.after_sync().unwrap();
     a.sync(0).unwrap();
     a.after_sync().unwrap();
@@ -239,7 +256,7 @@ fn a_stranger_named_by_a_payload_that_does_not_open_is_not_pinned() {
 }
 
 /// Copies that do not open, claiming a contact's real device, once a minute all day (anyone can seal them): the
-/// retries' lookups stay within the day's budget for recovery, the rest of the hub's allowance is left for real
+/// roster checks stay within the day's budget for recovery, the rest of the hub's allowance is left for real
 /// sessions (6.6).
 #[test]
 fn forgeries_cannot_use_up_the_lookups() {

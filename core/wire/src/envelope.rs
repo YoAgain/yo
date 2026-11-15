@@ -21,15 +21,24 @@ pub struct Payload {
     pub device_key: [u8; KEY_LEN],
     /// The sender device's number (`api::Device`): its session's address.
     pub device_id: u8,
+    /// When the content was sent (its `sent_at`, ms), as Signal's envelope timestamp: what a
+    /// `DecryptionErrorMessage` names (spec 4.6).
+    pub sent_at: u64,
     pub copies: Vec<ForDevice>,
 }
 
-/// A session message for one device: a `PreKeySignalMessage` (`prekey` 1), which starts a session, or a
-/// `SignalMessage` (0).
+/// A copy's `kind`: a `SignalMessage`.
+pub const KIND_MESSAGE: u8 = 0;
+/// A copy's `kind`: a `PreKeySignalMessage`, which starts a session.
+pub const KIND_PREKEY: u8 = 1;
+/// A copy's `kind`: libsignal's `PlaintextContent`, outside the session (a `DecryptionErrorMessage`, spec 4.6).
+pub const KIND_PLAINTEXT: u8 = 2;
+
+/// A message for one device: a session message, or a plaintext one (`kind`).
 #[derive(Debug, Clone, PartialEq, Eq, TlsSerialize, TlsDeserializeBytes, TlsSize)]
 pub struct ForDevice {
     pub device_key: [u8; KEY_LEN],
-    pub prekey: u8,
+    pub kind: u8,
     pub message: VLBytes,
 }
 

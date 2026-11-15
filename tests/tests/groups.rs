@@ -340,9 +340,9 @@ fn the_same_photo_to_two_groups_and_one_to_one_goes_to_each() {
     assert_eq!((in_group(&one), in_group(&two), direct), (1, 1, 1));
 }
 
-/// A retry sends again what was sent to that contact, but no Yo of a group the sender has left since.
+/// A decryption error sends again what it names, but no Yo of a group the sender has left since.
 #[test]
-fn a_retry_sends_no_yo_of_a_group_left() {
+fn a_decryption_error_sends_no_yo_of_a_group_left() {
     let hub = TestHub::start();
     let mut p = people(&hub, 3);
     let [a, b, c] = p.as_mut_slice() else { unreachable!() };
@@ -359,7 +359,7 @@ fn a_retry_sends_no_yo_of_a_group_left() {
     assert_eq!(group_yos(&take(b)).len(), 1);
     a.leave_group(&id).unwrap();
     take(b);
-    // B's state goes back: A's next message does not open, B asks for a retry, A sends again what it keeps.
+    // B's state goes back: A's next message does not open, B sends a decryption error, A sends that one again.
     let mut b = Client::restore(Http::new(hub.url()), &early, &[3; 32]).unwrap();
     a.send(b.user_id(), Content::Yo).unwrap();
     take(&mut b);

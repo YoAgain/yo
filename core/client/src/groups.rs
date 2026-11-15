@@ -4,7 +4,7 @@
 //! revision stands, of two at the same revision the one by the lower user id. Only a member's change counts.
 
 use crate::state::{hex, unhex, Group, Mine};
-use crate::{retryable, shown, user_bytes, Client, Content, Error, Event, Result, KEPT_FOR_RETRY};
+use crate::{retryable, shown, user_bytes, Client, Content, Error, Event, Result, KEPT_FOR_RESEND};
 use yo_wire::content::{group_hash, GroupId, GroupInfo, GroupTag, Message, GROUP_HASH_LEN, GROUP_ID_LEN, MAX_GROUP};
 use yo_wire::envelope::Plain;
 use yo_wire::handle::Handle;
@@ -286,7 +286,7 @@ impl Client {
             if keep {
                 if let Some(contact) = self.state.contacts.get_mut(user) {
                     contact.sent.push_back(message.clone());
-                    while contact.sent.len() > KEPT_FOR_RETRY {
+                    while contact.sent.len() > KEPT_FOR_RESEND {
                         contact.sent.pop_front();
                     }
                 }

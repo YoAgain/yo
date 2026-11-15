@@ -320,6 +320,27 @@ impl Records {
         self.sessions.0.remove(&session_key(address));
     }
 
+    /// Signal's answer to a `DecryptionErrorMessage` (spec 4.6): the session with `address` archived if its current
+    /// state still sends with `ratchet_key`, so the next message starts a new one. Whether it was.
+    pub fn archive_if_current(&mut self, address: &ProtocolAddress, ratchet_key: &PublicKey) -> bool {
+        let key = session_key(address);
+        let Some(mut record) = self.sessions.0.get(&key).and_then(|bytes| SessionRecord::deserialize(bytes).ok())
+        else {
+            return false;
+        };
+        if !record.current_ratchet_key_matches(ratchet_key).unwrap_or(false) || record.archive_current_state().is_err()
+        {
+            return false;
+        }
+        match record.serialize() {
+            Ok(bytes) => {
+                self.sessions.0.insert(key, bytes);
+                true
+            }
+            Err(_) => false,
+        }
+    }
+
     /// Whether a message can go to `address` now: a session whose sending chain is good, made with PQXDH.
     pub fn usable(&self, address: &ProtocolAddress) -> bool {
         use libsignal_protocol::SessionUsabilityRequirements as Needs;

@@ -275,11 +275,9 @@ impl From<Content> for MessageKind {
             Content::Location { lat_e7, lon_e7 } => MessageKind::Location { lat_e7, lon_e7 },
             Content::Unknown(kind) => MessageKind::Unsupported { kind },
             // Never an event (spec 4.5, 4.6).
-            Content::Receipt
-            | Content::Retry
-            | Content::Group(_)
-            | Content::GroupAsk { .. }
-            | Content::ProfileKey(_) => MessageKind::Unsupported { kind: 0 },
+            Content::Receipt | Content::Group(_) | Content::GroupAsk { .. } | Content::ProfileKey(_) => {
+                MessageKind::Unsupported { kind: 0 }
+            }
         }
     }
 }
@@ -408,7 +406,7 @@ pub struct YoSession {
     pub device: String,
     /// A message can go to it now: made with PQXDH, its sending chain good.
     pub usable: bool,
-    /// Its last message did not open here: a new session and a retry are on their way.
+    /// Its last message did not open here: a decryption error is on its way.
     pub retrying: bool,
 }
 
@@ -824,7 +822,7 @@ impl YoClient {
     }
 
     /// The rest of the last `sync`, after its events are handed over: the hub is told what arrived; for the app also
-    /// receipts and retries, prekeys, the outbox, the storage. The notification extension calls it once its notification
+    /// receipts and decryption errors, prekeys, the outbox, the storage. The notification extension calls it once its notification
     /// is out; the app's next `sync` does it itself.
     pub fn after_sync(&self) -> Result<(), YoError> {
         Ok(self.with(|c| c.after_sync())??)
@@ -936,6 +934,16 @@ impl YoClient {
 
     pub fn safety_number(&self, who: String) -> Result<String, YoError> {
         Ok(self.with(|c| c.safety_number(&who))??)
+    }
+
+    /// The safety number's scannable form, for a QR code (Signal's).
+    pub fn safety_code(&self, who: String) -> Result<Vec<u8>, YoError> {
+        Ok(self.with(|c| c.safety_code(&who))??)
+    }
+
+    /// Whether a scanned code matches the safety number with this contact.
+    pub fn safety_code_matches(&self, who: String, scanned: Vec<u8>) -> Result<bool, YoError> {
+        Ok(self.with(|c| c.safety_code_matches(&who, &scanned))??)
     }
 
     pub fn set_verified(&self, who: String, verified: bool) -> Result<(), YoError> {
