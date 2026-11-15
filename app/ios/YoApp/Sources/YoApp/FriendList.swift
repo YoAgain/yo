@@ -425,8 +425,9 @@ struct FriendList: View {
   private func menu(for friend: Friend) -> ContextMenu<TupleView<(AnyView, AnyView, AnyView)>> {
     // When the last Yo went and came, as a heading over the choices ("Sent 7m ago · Received 1d ago").
     func when(_ date: Date?) -> String { date.map { Arrival.age($0) } ?? "–" }
-    // Who Yo'd whom last, both ways, in a glance: "↗ 7m · ↙ 1d" (sent by me, from them), greyed at the menu's top.
-    let times = "↗ \(when(Stats.lastSent(to: friend.name))) · ↙ \(when(Stats.lastReceived(from: friend.name)))"
+    // Who Yo'd whom last, both ways, in a glance at the menu's top: one row of two, iOS's own arrows (sent by me,
+    // from them), greyed.
+    let sent = when(Stats.lastSent(to: friend.name)), came = when(Stats.lastReceived(from: friend.name))
     if friend.group != nil {
       return ContextMenu {
         AnyView(Button("Members", systemImage: "person.3") { showMembers(friend) })
@@ -440,7 +441,12 @@ struct FriendList: View {
       }
     }
     return ContextMenu {
-      AnyView(Button(times) {}.disabled(true))
+      AnyView(ControlGroup {
+        Button(sent, systemImage: "arrow.up.right") {}.disabled(true)
+        Button(came, systemImage: "arrow.down.left") {}.disabled(true)
+      }
+      .controlGroupStyle(.compactMenu)
+      .accessibilityLabel("Last Yo sent \(sent), received \(came)"))
       AnyView(Menu("Block & Report", systemImage: "hand.raised") {
         Button("Block", systemImage: "hand.raised") { blocking = (friend, false) }
         Section("Report") {
