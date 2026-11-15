@@ -3,6 +3,7 @@
 // call still at the hub (the core does one at a time): `Hub.run` takes it off the main actor, and none is made there.
 import Foundation
 import Observation
+import os
 import QuartzCore
 import Security
 import Synchronization
@@ -371,13 +372,35 @@ enum StateKey {
     return (try? Keychain.write(inGroup, key, accessible: kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly)) != nil
   }
 
+  /// Yo Dev (`Keychain.scoped`): the keys of this name in the team's other groups, which its profile lets it read (Yo
+  /// from TestFlight on the same phone). Builds before took the first one found for their own, so a state Yo Dev made
+  /// meanwhile may be sealed under one of them: tried only when its own key does not open its state, and never
+  /// changed or deleted there.
+  static func others() -> [Data] {
+    guard Keychain.scoped, let own = Keychain.ownGroup() else { return [] }
+    var find = query
+    find[kSecReturnAttributes as String] = true
+    find[kSecReturnData as String] = true
+    find[kSecMatchLimit as String] = kSecMatchLimitAll
+    var items: CFTypeRef?
+    guard SecItemCopyMatching(find as CFDictionary, &items) == errSecSuccess, let found = items as? [[String: Any]]
+    else { return [] }
+    return found.filter { $0[kSecAttrAccessGroup as String] as? String != own }
+      .compactMap { $0[kSecValueData as String] as? Data }.filter { $0.count == 32 }
+  }
+
+  /// The key that opened the state, as the app's own from here on (`others`).
+  static func adopt(_ key: Data) throws {
+    try Keychain.write(query, key, accessible: kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly)
+  }
+
   /// The state is in the group: the app's own key goes.
   static func finishMoveIn() { deleteOwn() }
 
   /// The app's own item (in its default access group), the group's kept: found with its access group, deleted by it.
   private static func deleteOwn() {
     var items: CFTypeRef?
-    var find = query
+    guard var find = Keychain.own(query) else { return }
     find[kSecReturnAttributes as String] = true
     find[kSecMatchLimit as String] = kSecMatchLimitAll
     guard SecItemCopyMatching(find as CFDictionary, &items) == errSecSuccess,
@@ -401,8 +424,70 @@ enum Keychain {
     let status: OSStatus
   }
 
+  /// Yo Dev without its App Group (dev/push.sh): its development profile grants every access group of the team
+  /// ("TEAM.*"), so a query without a group would find, and change, the items of Yo from TestFlight on the same phone
+  /// as well (same service and account; one opened Yo Dev's state with the other's key). Its queries are kept to its
+  /// own group then: the one its items have always gone into, the group an item added without one gets (under such a
+  /// profile the first entry itself, "TEAM.*", a group of that name; Yo's items are in groups of their own). Yo from
+  /// TestFlight and the App Store names its groups in its entitlements and is never scoped.
+  static let scoped = Hub.isDevApp && ShareBridge.container == nil
+
+  /// The query within the app's own access group (`scoped`; else as it is). Nil while that group is not known yet
+  /// (the keychain does not answer now, before the first unlock): the caller takes it as "not now", never as none.
+  static func own(_ query: [String: Any]) -> [String: Any]? {
+    guard scoped, query[kSecAttrAccessGroup as String] == nil else { return query }
+    guard let group = ownGroup() else { return nil }
+    return query.merging([kSecAttrAccessGroup as String: group]) { $1 }
+  }
+
+  /// The group an item without one goes into, found once per launch from an item of its own (added without a group,
+  /// read back with its attributes) and kept: the app's default access group.
+  static func ownGroup() -> String? {
+    probeLock.lock()
+    defer { probeLock.unlock() }
+    if let probed { return probed }
+    let probe: [String: Any] = [
+      kSecClass as String: kSecClassGenericPassword,
+      kSecAttrService as String: "app.justyo.keychain-group",
+      kSecAttrAccount as String: Bundle.main.bundleIdentifier ?? "app",
+    ]
+    var add = probe
+    add[kSecValueData as String] = Data()
+    add[kSecAttrAccessible as String] = kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly
+    add[kSecReturnAttributes as String] = true
+    var result: CFTypeRef?
+    var status = SecItemAdd(add as CFDictionary, &result)
+    if status == errSecDuplicateItem {
+      // There from an earlier launch: only this app adds it (its bundle id), so the one found is its own.
+      var find = probe
+      find[kSecReturnAttributes as String] = true
+      find[kSecMatchLimit as String] = kSecMatchLimitOne
+      status = SecItemCopyMatching(find as CFDictionary, &result)
+    }
+    guard status == errSecSuccess, let group = (result as? [String: Any])?[kSecAttrAccessGroup as String] as? String,
+      !group.isEmpty
+    else {
+      Logger(subsystem: "app.justyo", category: "account").error("keychain: own group not known now (\(status))")
+      return nil
+    }
+    Logger(subsystem: "app.justyo", category: "account").notice("keychain: own group \(group, privacy: .public)")
+    probed = group
+    return group
+  }
+
+  private static let probeLock = NSLock()
+  nonisolated(unsafe) private static var probed: String?
+
+  /// Deletes the item (in the app's own group, `own`); errSecInteractionNotAllowed while that is not known.
+  @discardableResult
+  static func delete(_ query: [String: Any]) -> OSStatus {
+    guard let query = own(query) else { return errSecInteractionNotAllowed }
+    return SecItemDelete(query as CFDictionary)
+  }
+
   /// The item's data; nil only when there is none.
   static func read(_ query: [String: Any]) throws -> Data? {
+    guard let query = own(query) else { throw Failure(status: errSecInteractionNotAllowed) }
     var find = query
     find[kSecReturnData as String] = true
     find[kSecMatchLimit as String] = kSecMatchLimitOne
@@ -421,6 +506,7 @@ enum Keychain {
 
   /// Writes the item: updated in place (never deleted first), added when there is none; then read back.
   static func write(_ query: [String: Any], _ data: Data, accessible: CFString) throws {
+    guard let query = own(query) else { throw Failure(status: errSecInteractionNotAllowed) }
     let attributes: [String: Any] = [kSecValueData as String: data, kSecAttrAccessible as String: accessible]
     var status = SecItemUpdate(query as CFDictionary, attributes as CFDictionary)
     if status == errSecItemNotFound {

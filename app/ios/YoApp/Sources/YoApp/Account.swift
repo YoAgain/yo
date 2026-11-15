@@ -341,8 +341,20 @@ final class AccountStore {
         return (client, client.accountSecret())
       }
       guard let blob = StateFile.load() else { throw Self.unread(StateFile.url) }
-      guard let key = try StateKey.load() else { throw Unopened.gone }
-      let client = try YoClient.restore(transport: transport, store: StateFile(), stateKey: key, blob: blob)
+      let own = try StateKey.load()
+      let client: YoClient
+      do {
+        guard let own else { throw Unopened.gone }
+        client = try YoClient.restore(transport: transport, store: StateFile(), stateKey: own, blob: blob)
+      } catch let error where error is Unopened || (error as? YoError).map({ if case .State = $0 { true } else { false } }) == true {
+        // Yo Dev: sealed under the key a build before took from Yo of TestFlight (`StateKey.others`)? Taken over then.
+        guard let (key, opened) = StateKey.others().lazy.compactMap({ key in
+          (try? YoClient.restore(transport: transport, store: StateFile(), stateKey: key, blob: blob)).map { (key, $0) }
+        }).first else { throw error }
+        try StateKey.adopt(key)
+        accountLog.notice("open: the state opened with a key of another group, now this app's own")
+        client = opened
+      }
       Hub.pin(client)
       client.acknowledgeExplicitly()  // each batch as the app has stored it (Inbox.take)
       return (client, client.accountSecret())
@@ -1016,10 +1028,11 @@ enum NewAccountKey {
   /// Whether a key is kept for this name: a try whose answer was lost, so the name the hub calls taken may be this
   /// phone's own.
   static func has(_ name: String) -> Bool {
-    SecItemCopyMatching(query(name) as CFDictionary, nil) == errSecSuccess
+    guard let query = Keychain.own(query(name)) else { return false }
+    return SecItemCopyMatching(query as CFDictionary, nil) == errSecSuccess
   }
 
-  static func forget(_ name: String) { SecItemDelete(query(name) as CFDictionary) }
+  static func forget(_ name: String) { Keychain.delete(query(name)) }
 }
 
 /// The recovery key on this phone, to look up in the profile: in the keychain, for this device only (not in a
@@ -1052,15 +1065,15 @@ enum RecoveryWords {
   /// The hub has `key` in its backup now: it is the key from here on.
   static func settle(_ key: String) throws {
     if load() != key { try save(key) }
-    SecItemDelete(staged as CFDictionary)
+    Keychain.delete(staged)
   }
 
   /// This key and the 12 words of before (their items "words", "words.new").
   static func delete() {
-    SecItemDelete(query as CFDictionary)
-    SecItemDelete(staged as CFDictionary)
+    Keychain.delete(query)
+    Keychain.delete(staged)
     for old in ["words", "words.new"] {
-      SecItemDelete(query.merging([kSecAttrAccount as String: old]) { $1 } as CFDictionary)
+      Keychain.delete(query.merging([kSecAttrAccount as String: old]) { $1 })
     }
   }
 
@@ -1160,9 +1173,10 @@ enum SyncedAccount {
       kSecAttrAccessible as String: kSecAttrAccessibleAfterFirstUnlock,
       kSecAttrLabel as String: "\(Hub.isDevApp ? "Yo Dev" : "Yo") – \(item.username)",
     ]
-    let updated = SecItemUpdate(query(item.userID) as CFDictionary, attributes as CFDictionary)
+    guard let query = Keychain.own(query(item.userID)) else { return false }
+    let updated = SecItemUpdate(query as CFDictionary, attributes as CFDictionary)
     guard updated == errSecItemNotFound else { return updated == errSecSuccess }
-    return SecItemAdd(query(item.userID).merging(attributes) { $1 } as CFDictionary, nil) == errSecSuccess
+    return SecItemAdd(query.merging(attributes) { $1 } as CFDictionary, nil) == errSecSuccess
   }
 
   /// The item as it is now (`Item.upgraded`).
@@ -1170,7 +1184,7 @@ enum SyncedAccount {
 
   /// The item as stored.
   private static func raw(_ userID: Data) -> Item? {
-    var find = query(userID)
+    guard var find = Keychain.own(query(userID)) else { return nil }
     find[kSecReturnData as String] = true
     find[kSecMatchLimit as String] = kSecMatchLimitOne
     var result: CFTypeRef?
@@ -1194,7 +1208,7 @@ enum SyncedAccount {
   }
 
   private static func stored() -> [Item] {
-    var find = base
+    guard var find = Keychain.own(base) else { return [] }
     find[kSecReturnAttributes as String] = true
     find[kSecReturnData as String] = true
     find[kSecMatchLimit as String] = kSecMatchLimitAll
@@ -1230,7 +1244,7 @@ enum SyncedAccount {
   /// The account deleted, or its name gone to another key: the item brings nothing back any more. One the keychain
   /// does not delete now is noted, never offered meanwhile, and deleted at the next look (`retryPending`).
   static func delete(_ userID: Data) {
-    let status = SecItemDelete(query(userID) as CFDictionary)
+    let status = Keychain.delete(query(userID))
     if status == errSecSuccess || status == errSecItemNotFound {
       pendingDelete.remove(userID)
     } else {
@@ -1262,7 +1276,7 @@ enum SyncedAccount {
 
   /// Builds before one item per account kept one per hub (its host as the item's account): moved to the account's own.
   private static func migrate() {
-    let old = base.merging([kSecAttrAccount as String: host]) { $1 }
+    guard let old = Keychain.own(base.merging([kSecAttrAccount as String: host]) { $1 }) else { return }
     var find = old
     find[kSecReturnData as String] = true
     find[kSecMatchLimit as String] = kSecMatchLimitOne
