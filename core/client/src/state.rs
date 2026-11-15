@@ -377,6 +377,10 @@ pub struct State {
     pub storage_saved_at: u64,
     /// Fetched from the hub on this device (once, before the first message is received).
     pub storage_fetched: bool,
+    /// The key the storage was sealed under before the account key was libsignal's (from its Ed25519 seed, spec
+    /// 6.9): a storage of then opens with it until this device has written it under the account's key of now.
+    #[serde(default)]
+    pub legacy_storage_key: Option<[u8; 32]>,
     /// The time of the last message sent: each later one strictly later.
     pub last_sent_ms: u64,
     /// Hashes of the last messages received (sender and plaintext): a copy sent again (4.6) is skipped.
@@ -433,6 +437,7 @@ impl Drop for State {
     fn drop(&mut self) {
         self.account_secret.zeroize();
         self.auth_secret.zeroize();
+        self.legacy_storage_key.zeroize();
     }
 }
 
@@ -511,6 +516,8 @@ fn from_1(mut state: State) -> Result<State> {
     if state.registering.is_some() {
         return Err(Error::State);
     }
+    // The storage at the hub is sealed under the seed's key: opened with it until written again (`storage_dirty`).
+    state.legacy_storage_key = Some(crate::storage::key(&state.account_secret));
     state.account_secret = crate::identity::legacy_account_secret(&state.account_secret);
     // The auth key the same way: the hub converted its public half (schema 3).
     state.auth_secret = crate::identity::legacy_account_secret(&state.auth_secret);

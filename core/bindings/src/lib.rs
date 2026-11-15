@@ -680,7 +680,9 @@ impl YoClient {
     /// Registers this device with a username (spec 6.4). `state_key`: 32 bytes the app keeps in its keychain.
     /// Without `account_secret`, a new account: the name must be free. With the 32-byte account secret from the backup
     /// (spec 7), the key's account again, whatever the name: same user id, the name it has now (`username`), its
-    /// other device replaced. `Refused { status: 409 }`: the name is taken.
+    /// other device replaced. `Refused { status: 409 }`: the name is taken. `legacy_seed`: the Ed25519 seed an iCloud
+    /// Keychain item of before had, which `account_secret` was converted from (`legacy_account_secret`): the storage
+    /// sealed under its key opens, and is written again under the new one.
     #[uniffi::constructor]
     #[allow(clippy::too_many_arguments)]
     pub fn register_username(
@@ -689,16 +691,18 @@ impl YoClient {
         state_key: Vec<u8>,
         username: String,
         account_secret: Option<Vec<u8>>,
+        legacy_seed: Option<Vec<u8>>,
         name: Option<String>,
         push_platform: u8,
         push_token: String,
     ) -> Result<Arc<Self>, YoError> {
         let key = key_of(state_key)?;
         let account = account_secret.map(key_of).transpose()?;
+        let legacy = legacy_seed.map(key_of).transpose()?;
         let push = yo_core::Push { platform: push_platform, token: push_token.into_bytes().into() };
         // Saved before the request leaves: a crash after the hub took it is finished by `restore`.
         let (http, store) = (Arc::new(Http(transport)), Arc::new(Store(store)));
-        let client = Client::register_username_saved(http, store, key, &username, account, name, push)?;
+        let client = Client::register_username_saved(http, store, key, &username, account, legacy, name, push)?;
         Ok(Self::new(client))
     }
 

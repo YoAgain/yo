@@ -64,6 +64,7 @@ impl Device {
             storage_version: 0,
             storage_fetched: false,
             storage_dirty: false,
+            legacy_storage_key: None,
             storage_saved_at: 0,
             last_sent_ms: 0,
             received: VecDeque::new(),

@@ -373,7 +373,9 @@ final class AccountStore {
   /// Registers `username` at the hub (spec 6.4), or, with `secret`, takes the key's account back (a new phone), with
   /// the name it has now: `username` then only counts if the key's account is gone. One at a time, whichever way in (a
   /// second registration would replace the first).
-  private func register(_ username: String, secret: Data?) async throws -> (client: YoClient, secret: Data) {
+  private func register(_ username: String, secret: Data?, legacySeed: Data? = nil) async throws -> (
+    client: YoClient, secret: Data
+  ) {
     // One at a time, and never over an account signed in meanwhile (another way in finished first).
     guard !registering, account == nil else { throw AccountError.busy }
     registering = true
@@ -385,7 +387,7 @@ final class AccountStore {
         let make = { (store: StateStore, key: Data) in
           let client = try YoClient.registerUsername(
             transport: transport, store: store, stateKey: key, username: username, accountSecret: secret,
-            name: nil, pushPlatform: 0, pushToken: "")
+            legacySeed: legacySeed, name: nil, pushPlatform: 0, pushToken: "")
           Hub.pin(client)
           return client
         }
@@ -772,7 +774,7 @@ final class AccountStore {
     let client: YoClient
     let secret: Data
     do {
-      (client, secret) = try await register(item.username, secret: item.accountKey)
+      (client, secret) = try await register(item.username, secret: item.accountKey, legacySeed: item.legacySeed)
     } catch AccountError.taken {
       SyncedAccount.delete(item.userID)  // its account is gone, the name another key's: nothing to bring back
       throw AccountError.noBackup
@@ -1058,6 +1060,9 @@ enum SyncedAccount {
     var signedOut: Bool?
     /// As `Account.backupVersion`. Nil: an item of the Ed25519 account key and the 12 words (`upgraded`).
     var version: Int?
+    /// The Ed25519 seed an item of before had (`upgraded`): the account's storage at the hub may still be sealed under
+    /// its key (spec 6.9), so the core gets it with a restore. Kept, as the secret it was made into.
+    var legacySeed: Data?
 
     var id: Data { userID }
 
@@ -1068,7 +1073,7 @@ enum SyncedAccount {
       guard let secret = try? legacyAccountSecret(seed: accountKey) else { return nil }
       return Item(
         username: username, userID: userID, accountKey: secret, byPasskey: false, byCode: false, recoveryKey: nil,
-        signedOut: signedOut, version: Account.backupVersion)
+        signedOut: signedOut, version: Account.backupVersion, legacySeed: accountKey)
     }
   }
 
@@ -1099,7 +1104,8 @@ enum SyncedAccount {
     let item = Item(
       username: account.username, userID: account.userID, accountKey: secret,
       byPasskey: account.byPasskey, byCode: account.byCode,
-      recoveryKey: RecoveryWords.load() ?? previous?.recoveryKey, signedOut: false, version: Account.backupVersion)
+      recoveryKey: RecoveryWords.load() ?? previous?.recoveryKey, signedOut: false, version: Account.backupVersion,
+      legacySeed: previous?.legacySeed)
     // One the keychain does not take now (locked, a passing error) is noted and written again at the next opening
     // (`needsSave`), not taken as there: a new phone would miss it, or find old words.
     if write(item, previous: previous) {

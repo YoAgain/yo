@@ -657,24 +657,28 @@ impl Client {
         name: Option<String>,
         push: Push,
     ) -> Result<Client> {
-        let mut client = Client::registering(transport, username, account_secret, name, push)?;
+        let mut client = Client::registering(transport, username, account_secret, None, name, push)?;
         client.finish_registration()?;
         Ok(client)
     }
 
     /// `register_username`, saved to `store` from the start: the account and device secrets and the request are saved
     /// before the request leaves, so a crash after the hub took it loses neither the account nor its device. A state
-    /// saved so is finished by `finish_registration` after `restore` (`registering`).
+    /// saved so is finished by `finish_registration` after `restore` (`registering`). `legacy_seed`: the Ed25519 seed
+    /// `account_secret` was converted from (`identity::legacy_account_secret`, an iCloud Keychain item of before), so
+    /// the storage sealed under its key opens (and is written again under the new one).
+    #[allow(clippy::too_many_arguments)]
     pub fn register_username_saved(
         transport: Arc<dyn Transport>,
         store: Arc<dyn Store>,
         key: [u8; 32],
         username: &str,
         account_secret: Option<[u8; 32]>,
+        legacy_seed: Option<[u8; 32]>,
         name: Option<String>,
         push: Push,
     ) -> Result<Client> {
-        let mut client = Client::registering(transport, username, account_secret, name, push)?;
+        let mut client = Client::registering(transport, username, account_secret, legacy_seed, name, push)?;
         client.persist_to(store, key)?;
         client.finish_registration()?;
         Ok(client)
@@ -685,6 +689,7 @@ impl Client {
         transport: Arc<dyn Transport>,
         username: &str,
         account_secret: Option<[u8; 32]>,
+        legacy_seed: Option<[u8; 32]>,
         name: Option<String>,
         push: Push,
     ) -> Result<Client> {
@@ -700,6 +705,7 @@ impl Client {
         // A new account has nothing stored. A restored one takes its storage in once registered, so its blocks hold
         // before the first message; without network, before the first receive (`receive_all`).
         client.state.storage_fetched = account_secret.is_none();
+        client.state.legacy_storage_key = legacy_seed.map(|seed| storage::key(&seed));
         Ok(client)
     }
 
@@ -874,6 +880,7 @@ impl Client {
             storage_version: 0,
             storage_fetched: false,
             storage_dirty: false,
+            legacy_storage_key: None,
             storage_saved_at: 0,
             last_sent_ms: 0,
             received: VecDeque::new(),

@@ -28,8 +28,18 @@ impl StateStore for File {
 
 fn client(hub: &TestHub, username: &str, name: &str, file: Arc<File>) -> Arc<YoClient> {
     let app = Arc::new(App(Http::new(hub.url())));
-    YoClient::register_username(app, file, vec![7; 32], username.into(), None, Some(name.into()), 0, String::new())
-        .unwrap()
+    YoClient::register_username(
+        app,
+        file,
+        vec![7; 32],
+        username.into(),
+        None,
+        None,
+        Some(name.into()),
+        0,
+        String::new(),
+    )
+    .unwrap()
 }
 
 #[test]
@@ -44,6 +54,7 @@ fn the_app_layer_registers_by_username_and_restores_from_the_backup() {
             vec![7; 32],
             name.clone(),
             secret,
+            None,
             None,
             0,
             "".into(),
@@ -163,6 +174,7 @@ fn the_app_layer_runs_other_calls_while_sync_waits() {
         vec![7; 32],
         pa.clone(),
         None,
+        None,
         Some("ALICE".into()),
         0,
         String::new(),
@@ -233,6 +245,7 @@ fn the_app_layer_sends_a_photo_to_a_new_friend_and_yos_go_while_it_uploads() {
         Arc::new(File::default()),
         vec![7; 32],
         pa.clone(),
+        None,
         None,
         Some("ALICE".into()),
         0,
@@ -408,6 +421,7 @@ fn the_app_layer_sends_to_one_friend_while_a_delivery_to_another_waits() {
         vec![7; 32],
         pa.clone(),
         None,
+        None,
         Some("ALICE".into()),
         0,
         String::new(),
@@ -484,9 +498,18 @@ fn the_app_layer_sends_and_receives_bursts_with_many_friends_at_once() {
     let n = random_u64() % 1_000_000_000;
     let pa = username(n);
     let slow = Arc::new(Slow(App(Http::new(hub.url()))));
-    let a =
-        YoClient::register_username(slow, Arc::new(File::default()), vec![7; 32], pa.clone(), None, None, 0, "".into())
-            .unwrap();
+    let a = YoClient::register_username(
+        slow,
+        Arc::new(File::default()),
+        vec![7; 32],
+        pa.clone(),
+        None,
+        None,
+        None,
+        0,
+        "".into(),
+    )
+    .unwrap();
     let friends: Vec<(String, Arc<YoClient>)> = (1..=FRIENDS)
         .map(|i| {
             let p = username(n + i);
@@ -582,6 +605,7 @@ fn the_app_layer_asks_who_a_typed_name_is_before_the_first_yo() {
             Arc::new(File::default()),
             vec![7; 32],
             name.into(),
+            None,
             None,
             None,
             0,
@@ -727,6 +751,7 @@ fn the_app_layer_shares_its_state_with_an_extension_in_turns() {
         vec![7; 32],
         pa.clone(),
         None,
+        None,
         Some("ALICE".into()),
         0,
         String::new(),
@@ -809,6 +834,7 @@ fn the_app_layer_takes_in_what_an_extension_did_while_its_long_poll_waited() {
         vec![7; 32],
         pa.clone(),
         None,
+        None,
         Some("ALICE".into()),
         0,
         String::new(),
@@ -861,6 +887,7 @@ fn the_app_layer_closes_a_client_whose_shared_state_went_away() {
             process.clone(),
             vec![7; 32],
             username.into(),
+            None,
             None,
             None,
             0,
@@ -916,6 +943,7 @@ fn the_app_layer_and_its_extensions_take_turns_under_load() {
                 app.clone(),
                 vec![7; 32],
                 name,
+                None,
                 None,
                 None,
                 0,
@@ -1039,7 +1067,8 @@ fn a_photo_whose_state_did_not_save_is_tried_again_later() {
     let (pa, pb) = (username(n), username(n + 1));
     let disk = Arc::new(Full::default());
     let app = Arc::new(App(Http::new(hub.url())));
-    let a = YoClient::register_username(app, disk.clone(), vec![7; 32], pa, None, None, 0, String::new()).unwrap();
+    let a =
+        YoClient::register_username(app, disk.clone(), vec![7; 32], pa, None, None, None, 0, String::new()).unwrap();
     let _b = client(&hub, &pb, "BOB", Arc::new(File::default()));
     disk.0.store(true, std::sync::atomic::Ordering::Relaxed);
     let error = a.media_chat(pb.clone()).err().expect("not saved");

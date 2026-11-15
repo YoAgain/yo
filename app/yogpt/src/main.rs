@@ -555,6 +555,7 @@ fn open(account: &Account) -> Option<Client> {
                 username,
                 Some(secret),
                 None,
+                None,
                 Push::none(),
             )
             .inspect(|c| log(format!("registered {} on {}", c.username().unwrap_or("?"), account.hub))),

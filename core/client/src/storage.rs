@@ -233,8 +233,13 @@ pub fn seal(account_secret: &[u8; 32], user_id: &[u8], storage: &Storage) -> Res
 }
 
 pub fn open(account_secret: &[u8; 32], user_id: &[u8], sealed: &[u8]) -> Result<Storage> {
-    let plain = open_padded(&key(account_secret), &[&b"yo storage v1"[..], user_id].concat(), sealed)
-        .ok_or(Error::Protocol("storage"))?;
+    open_under(&key(account_secret), user_id, sealed)
+}
+
+/// Opens the storage sealed under `key` (`open` derives it from the account's secret).
+pub fn open_under(key: &[u8; 32], user_id: &[u8], sealed: &[u8]) -> Result<Storage> {
+    let plain =
+        open_padded(key, &[&b"yo storage v1"[..], user_id].concat(), sealed).ok_or(Error::Protocol("storage"))?;
     serde_json::from_slice(&plain).map_err(|_| Error::Protocol("storage"))
 }
 
@@ -450,7 +455,18 @@ impl Client {
 
     /// Takes in a version from the hub: merged with this device's, applied.
     fn take_storage(&mut self, version: u64, sealed: &[u8]) -> Result<()> {
-        let theirs = open(&self.state.account_secret, &self.user_id_bytes(), sealed)?;
+        let user = self.user_id_bytes();
+        let theirs = match (open(&self.state.account_secret, &user, sealed), self.state.legacy_storage_key) {
+            (Ok(theirs), _) => theirs,
+            // Sealed before the account key was libsignal's (under its Ed25519 seed's key): taken in, and written
+            // again under this key with the next write.
+            (Err(error), Some(legacy)) => {
+                let theirs = open_under(&legacy, &user, sealed).map_err(|_| error)?;
+                self.state.storage_dirty = true;
+                theirs
+            }
+            (Err(error), None) => return Err(error),
+        };
         // Sealed with the version it was written as: an older blob under a newer number is a hub replaying it.
         if theirs.version != version {
             return Err(Error::Protocol("storage version"));
@@ -521,6 +537,8 @@ impl Client {
                     self.state.storage.version = next.version;
                     self.state.storage_dirty = false;
                     self.state.storage_saved_at = crate::wall_ms();
+                    // Under this key now: the one of before opens nothing more.
+                    self.state.legacy_storage_key = None;
                     self.persist()?;
                 }
                 // Another writer was first: its version, merged, goes up again.

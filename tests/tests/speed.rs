@@ -75,7 +75,7 @@ fn hub() -> TestHub {
 
 fn client(app: Arc<App>, file: Arc<File>, name: &str, token: &str) -> Arc<YoClient> {
     let platform = if token.is_empty() { 0 } else { PUSH_APNS };
-    YoClient::register_username(app, file, vec![7; 32], name.into(), None, None, platform, token.into()).unwrap()
+    YoClient::register_username(app, file, vec![7; 32], name.into(), None, None, None, platform, token.into()).unwrap()
 }
 
 fn ms(d: Duration) -> f64 {
