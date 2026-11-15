@@ -206,3 +206,33 @@ fn the_last_member_can_leave() {
     a.leave_group(&id).unwrap();
     assert!(view(a, &id).left);
 }
+
+/// The same photo sent to a group again (an app that lost its answer and sends it once more) reaches each member
+/// once; a member added since gets it, who had it does not get it twice (spec 4.7, 5).
+#[test]
+fn the_same_group_photo_goes_to_each_member_once() {
+    use yo_core::media;
+    let hub = TestHub::start();
+    let mut p = people(&hub, 4);
+    let [a, b, c, d] = p.as_mut_slice() else { unreachable!() };
+    let (id, _) = a.create_group("FAMILY", &[b.user_id().to_owned(), c.user_id().to_owned()]).unwrap();
+    take(b);
+    take(c);
+    let (photo, sealed) = media::seal(b"one photo", 4, 3).unwrap();
+    a.upload(&photo, 3).unwrap().send(&sealed).unwrap();
+    let photos = |events: &[Event]| {
+        events
+            .iter()
+            .filter(|e| matches!(e, Event::GroupMessage { content: Content::Photo(m), .. } if m.id == photo.id))
+            .count()
+    };
+    a.send_group(&id, Content::Photo(photo.clone())).unwrap();
+    a.send_group(&id, Content::Photo(photo.clone())).unwrap();
+    assert_eq!((photos(&take(b)), photos(&take(c))), (1, 1), "once each, though sent twice");
+    a.add_to_group(&id, &[d.user_id().to_owned()]).unwrap();
+    take(b);
+    take(c);
+    a.send_group(&id, Content::Photo(photo.clone())).unwrap();
+    assert_eq!(photos(&take(d)), 1, "the member added since gets it");
+    assert_eq!((photos(&take(b)), photos(&take(c))), (0, 0), "who had it does not get it again");
+}

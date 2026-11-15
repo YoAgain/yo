@@ -182,11 +182,22 @@ impl Client {
 
     /// One message for each of `users` and a copy for this account's other devices: the same plaintext, one time.
     fn enqueue_group(&mut self, users: &[String], group: Option<GroupTag>, content: Content) -> Result<()> {
+        // A photo or video already sent to a member (an app that lost its answer and sends it again) goes only to the
+        // members it did not reach yet; to none, if it reached them all (spec 4.7, 5).
+        let users: Vec<String> = match &content {
+            Content::Photo(media) | Content::Video { media, .. } => {
+                users.iter().filter(|user| !self.sent_media(user, &media.id)).cloned().collect()
+            }
+            _ => users.to_vec(),
+        };
+        if users.is_empty() {
+            return Ok(());
+        }
         let sent_at_ms = wall_ms().max(self.state.last_sent_ms + 1);
         self.state.last_sent_ms = sent_at_ms;
         let keep = shown(&content);
         let message = Message { sent_at_ms, group, content }.encode()?;
-        for user in users {
+        for user in &users {
             self.enqueue(user, encode(&Plain { to: None, content: message.clone().into() }));
             if keep {
                 if let Some(contact) = self.state.contacts.get_mut(user) {

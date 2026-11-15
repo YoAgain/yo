@@ -1382,7 +1382,7 @@ impl Client {
     }
 
     /// Whether a message with this photo's or video's blob went to the user already (among the last kept).
-    fn sent_media(&self, user: &str, id: &[u8; 16]) -> bool {
+    pub(crate) fn sent_media(&self, user: &str, id: &[u8; 16]) -> bool {
         self.state.contacts.get(user).is_some_and(|c| {
             c.sent.iter().any(|plaintext| {
                 matches!(Message::decode(plaintext).map(|m| m.content),
