@@ -5,8 +5,8 @@
 //!   yo-gpt --replies app/yogpt/replies --account dev=https://dev.justyo.app,state/dev,YoGPT
 //!
 //! Pictures: with `--replies`, a photo or video sent to it is answered with one picture from DIR (files named like
-//! `007.jpg`, read as they are there at the time, at most 512 KB each), and one Yo in five it answers carries one
-//! (`--picture-every N`: one in N; 1 always, 0 never). Without it, Yos only. Each picture is drawn uniformly at random,
+//! `007.jpg`, read as they are there at the time, at most 512 KB each), always; a plain Yo gets Yos only, unless
+//! `--picture-every N` (one in N; 1 always, 0 never, the default) adds one now and then. Without `--replies`, Yos only. Each picture is drawn uniformly at random,
 //! leaving out the last `RECENT_PICTURES` that sender got (remembered in memory only, for at most `MAX_REMEMBERED`
 //! senders) while others are left.
 //!
@@ -56,8 +56,8 @@ const MAX_RESPONSE: u64 = 16 << 20;
 const MAINTENANCE: Duration = Duration::from_secs(3600);
 /// At most this many accounts on the command line.
 const MAX_ACCOUNTS: usize = 8;
-/// One Yo in this many carries a picture, by default.
-const PICTURE_EVERY: u64 = 5;
+/// One Yo in this many carries a picture, by default: none (a picture answers a picture only).
+const PICTURE_EVERY: u64 = 0;
 /// The largest reply picture read; a larger file is skipped.
 const MAX_PICTURE: u64 = 512 * 1024;
 /// Files looked at in the replies directory, at most.

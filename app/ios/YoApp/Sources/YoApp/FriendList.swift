@@ -1418,6 +1418,7 @@ struct RowButton: View {
           }
         }
         .frame(minWidth: 1)
+        Bangs(count: count).hidden()  // its "!"s after it, as the bar shows them: the "Yo" stays where it stands
       }
       .font(.yo(Metrics.rowFont))
       .lineLimit(1)
@@ -1638,7 +1639,9 @@ struct Bangs: View {
     let (bangs, more) = ShareBridge.bangs(count)  // as a notification says them (ShareBridge.yo)
     HStack(spacing: 0) {
       ForEach(0..<bangs, id: \.self) { _ in
-        Text("!").transition(.opacity.animation(.easeOut(duration: 0.15)))
+        Text("!").transition(.asymmetric(
+          insertion: .move(edge: .trailing).combined(with: .opacity),  // each comes in from the side, as the Yo did
+          removal: .opacity.animation(.easeOut(duration: 0.15))))
       }
       if more > 0 {
         Text(" +\(more)")
