@@ -987,10 +987,7 @@ impl YoClient {
 
     /// How many fetches a photo or video to the group is uploaded for, sessions with its members opened first.
     pub fn group_media_chat(&self, group: String) -> Result<MediaChat, YoError> {
-        let (fetches, received) = self.with(|c| match c.group_media_fetches(&group) {
-            Some(fetches) if c.groups().iter().any(|g| g.id == group) => Ok((fetches, Vec::new())),
-            _ => c.open_group(&group),
-        })??;
+        let (fetches, received) = self.with(|c| c.open_group(&group))??;
         Ok(MediaChat { fetches, events: received.into_iter().map(Into::into).collect() })
     }
 
