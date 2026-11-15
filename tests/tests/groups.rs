@@ -136,7 +136,7 @@ fn two_changes_at_once_end_the_same_everywhere() {
             .iter()
             .filter(|(m, p, _)| m == "POST" && p == path)
             .map(|(_, _, b)| b.clone())
-            .last()
+            .next_back()
             .unwrap()
     };
     assert_eq!(deliver_raw(&hub.url(), c.user_id(), held(&transports[1], &to_c)), 202);
@@ -276,8 +276,8 @@ fn two_removing_each_other_at_once_end_the_same() {
     transports[1].fault(&to_c, Fault::Answer(202));
     transports[2].fault(&to_b, Fault::Answer(202));
     let (bid, cid) = (b.user_id().to_owned(), c.user_id().to_owned());
-    b.remove_from_group(&id, &[cid.clone()]).unwrap();
-    c.remove_from_group(&id, &[bid.clone()]).unwrap();
+    b.remove_from_group(&id, std::slice::from_ref(&cid)).unwrap();
+    c.remove_from_group(&id, std::slice::from_ref(&bid)).unwrap();
     let held = |t: &Http, path: &str| {
         t.sent
             .lock()
@@ -285,7 +285,7 @@ fn two_removing_each_other_at_once_end_the_same() {
             .iter()
             .filter(|(m, p, _)| m == "POST" && p == path)
             .map(|(_, _, b)| b.clone())
-            .last()
+            .next_back()
             .unwrap()
     };
     assert_eq!(deliver_raw(&hub.url(), c.user_id(), held(&transports[1], &to_c)), 202);
