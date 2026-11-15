@@ -154,25 +154,13 @@ struct SettingsView: View {
               Label("Appearance", systemImage: "paintbrush.fill").labelStyle(Tile(.blue))
             }
             NavigationLink {
-              StatsPage()
-            } label: {
-              LabeledContent {
-                Text("\(Stats.sent + Stats.received)")
-              } label: {
-                Label("Statistics", systemImage: "chart.bar.fill").labelStyle(Tile(.amethyst))
-              }
-            }
-            NavigationLink {
               EncryptionPage()
             } label: {
               LabeledContent {
                 if let tally {
-                  HStack(spacing: 6) {
-                    Text("\(tally.encrypted)/\(tally.total)")
-                    let check: Check = tally.allGood ? .ok : .waiting
-                    Image(systemName: check.symbol).foregroundStyle(check.color).accessibilityHidden(true)
-                  }
-                  .accessibilityLabel("\(tally.encrypted) of \(tally.total) contacts encrypted")
+                  let check: Check = tally.allGood ? .ok : .waiting
+                  Image(systemName: check.symbol).foregroundStyle(check.color)
+                    .accessibilityLabel("\(tally.encrypted) of \(tally.total) contacts encrypted")
                 }
               } label: {
                 Label("Encryption", systemImage: "lock.fill").labelStyle(Tile(.green))
@@ -188,6 +176,15 @@ struct SettingsView: View {
                 Image(systemName: "envelope.fill")
               }
               .labelStyle(Tile(.gray))
+            }
+            NavigationLink {
+              StatsPage()
+            } label: {
+              LabeledContent {
+                Text("\(Stats.sent + Stats.received)")
+              } label: {
+                Label("Statistics", systemImage: "chart.bar.fill").labelStyle(Tile(.gray))
+              }
             }
             NavigationLink {
               LicensesPage()

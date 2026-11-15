@@ -106,43 +106,39 @@ private struct StatusRow: View {
 }
 
 /// The friends, blocked ones too, each with its overall check, each opening its details.
-struct ContactsList: View {
+/// Each contact with its overall check, a row each, leading to its own checks (ContactDetail): under Settings ›
+/// Encryption › Per Contact.
+struct ContactRows: View {
   @Environment(Friends.self) private var friends
   @Environment(AccountStore.self) private var accounts
   @State private var states: [String: ContactState] = [:]
 
   var body: some View {
-    Form {
-      if !friends.contacts.isEmpty {
-        Section {
-          ForEach(sorted) { friend in
-            let state = friend.user.flatMap { states[$0] } ?? ContactState()
-            let check = state.overall(friend)
-            NavigationLink {
-              ContactDetail(friend: friend)
-            } label: {
-              LabeledContent {
-                HStack(spacing: 6) {
-                  Text(summary(friend, check))
-                  Image(systemName: check.symbol).foregroundStyle(check.color).accessibilityHidden(true)
-                }
-              } label: {
-                Text(friend.name).font(.yo(17, relativeTo: .body)).lineLimit(1).minimumScaleFactor(0.5)
-              }
+    Group {
+      if friends.contacts.isEmpty {
+        Text("No contacts yet.").foregroundStyle(.secondary)
+      }
+      ForEach(sorted) { friend in
+        let state = friend.user.flatMap { states[$0] } ?? ContactState()
+        let check = state.overall(friend)
+        NavigationLink {
+          ContactDetail(friend: friend)
+        } label: {
+          LabeledContent {
+            HStack(spacing: 6) {
+              Text(summary(friend, check))
+              Image(systemName: check.symbol).foregroundStyle(check.color).accessibilityHidden(true)
             }
+          } label: {
+            Text(friend.name).font(.yo(17, relativeTo: .body)).lineLimit(1).minimumScaleFactor(0.5)
           }
-        } footer: {
-          Text("A green check: the chat is end-to-end encrypted, as it should be.")
         }
       }
     }
-    .overlay {
-      if friends.contacts.isEmpty { ContentUnavailableView("No Contacts", systemImage: "person.2") }
-    }
-    .navigationTitle("Contacts")
-    .navigationBarTitleDisplayMode(.inline)
     // Again once the core is open (the page opened before), and when a contact changes (a chat, a new key).
-    .task(id: Reload(accounts.client, friends.contacts)) { await load() }
+    .task(id: Reload(accounts.client, friends.contacts)) {
+      if let loaded = await ContactState.loadAll(accounts, friends) { states = loaded }
+    }
   }
 
   private var sorted: [Friend] {
@@ -161,10 +157,6 @@ struct ContactsList: View {
     case .waiting: "Updating"
     case .problem: "Check"
     }
-  }
-
-  private func load() async {
-    if let loaded = await ContactState.loadAll(accounts, friends) { states = loaded }
   }
 }
 
@@ -227,7 +219,7 @@ struct EncryptionPage: View {
         LabeledContent("Sealed Sender", value: "On")
       }
       Section {
-        NavigationLink("Per Contact") { ContactsList() }
+        DisclosureGroup("Per Contact") { ContactRows() }
       } footer: {
         Text("Each contact's checks, safety number and devices.")
       }
