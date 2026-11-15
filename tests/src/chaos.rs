@@ -965,10 +965,10 @@ fn op_new_phone(w: &World, a: &mut Acct, rng: &mut Rng) {
     let old_proc = a.proc_.clone();
     {
         let me = a.user.clone();
-        let pending = old.pending() > 0 || !a.uploads.is_empty();
-        let gen = format!("{}:{}:{}:", w.run, a.idx, a.gen);
-        w.ledger().relax(|m| m.to == me || (pending && m.from == me));
-        let _ = gen;
+        // What the old device sent and was not received yet may be lost too, also what the hub took: a receiver that
+        // reads it after the device is out of the account's roster drops it as a replaced device's (spec 4.6), which
+        // it cannot tell from a message the device sent after.
+        w.ledger().relax(|m| m.to == me || m.from == me);
     }
     a.uploads.clear();
     a.proc_ = proc_;

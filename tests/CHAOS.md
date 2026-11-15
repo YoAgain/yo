@@ -28,7 +28,22 @@ printed with the last things the users involved did.
 
 ## Runs
 
-None yet on sessions (libsignal). The runs and findings of the MLS chats are in the git history before the move.
+On sessions (libsignal), in-process hub, release, 16-core x86. The runs and findings of the MLS chats are in the git
+history before the move.
+
+| Run | Result |
+|---|---|
+| `--seed 1 --accounts 300 --threads 6 --seconds 300 --faults 20 --crashes 20 --restarts 3` | 2 violations: Yos the old phone sent before the account moved, dropped by friends who read them after learning of the new phone |
+| seeds 1–6, `--accounts 300 --threads 4 --seconds 240 --faults 30 --crashes 30` | 1–22 violations each, the same; fewer once a roster that drops a device waits for the inbox to be read (its cases in `flows.rs`), the rest from devices replaced again before their friend read them |
+| the same after the ledger change below | 0 violations each |
+| seeds 11–26, `--accounts 40 --threads 1 --seconds 120 --faults 30 --crashes 30 --restarts 2` | 0 violations each |
+| `--seed 77 --accounts 1000 --threads 8 --seconds 900 --faults 20 --crashes 20 --restarts 4` | 0 violations; 162302 messages that must arrive did, once each, in order |
+| `tests/simulation.rs`: seeds 1–1000 (6 clients, 400 steps), 1001–1100 (12, 2000), 2001–2050 (16, 4000) | all pass |
+
+What a replaced device sent and its friend had not received yet may be lost (the ledger marks it so at the new phone): a
+receiver that reads it once the device is out of the account's roster drops it as a replaced device's (spec 4.6), and
+cannot tell it from one the device sent after. Unless it knew the device's session still: then it reads its inbox
+before it takes in the roster, and the message opens.
 
 ## Noted
 
