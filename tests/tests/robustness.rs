@@ -297,3 +297,39 @@ fn a_first_yo_the_hub_cannot_look_up_now_goes_when_tried_again() {
     let yos = b.sync(0).unwrap().iter().filter(|e| matches!(e, Event::Message { content: Content::Yo, .. })).count();
     assert_eq!(yos, 1);
 }
+
+/// A send receives first (spec 4.7): what its last batch brought is acknowledged only after the call has saved and
+/// handed out its events, by the next call, never inside the one that hands them out.
+#[test]
+fn a_send_hands_out_what_it_received_before_the_hub_may_forget_it() {
+    let hub = TestHub::start();
+    let (mut a, mut b, _, hb, pa, pb) = chat(&hub);
+    a.send_yo(&pb).unwrap();
+    let acks = |hb: &Http| hb.recorded.lock().unwrap().iter().filter(|r| r.1 == api::INBOX_ACK).count();
+    let before = acks(&hb);
+    let events = b.send_yo(&pa).unwrap();
+    assert_eq!(yos(&events), 1, "the send received the Yo and handed it out");
+    assert_eq!(acks(&hb), before, "not acknowledged inside the call that hands it out");
+    b.sync(0).unwrap();
+    assert_eq!(acks(&hb), before + 1, "the next call acknowledges it");
+    assert_eq!(yos(&b.sync(0).unwrap()), 0, "and it does not come again");
+}
+
+/// A message queued and saved is sent, whatever the hub says to its delivery now (spec 4.7): the send succeeds and it
+/// waits in the outbox. An app that took "not now" for "not sent" would send it again itself (a share's photo, twice).
+#[test]
+fn a_send_the_hub_cannot_take_now_succeeds_and_waits() {
+    let hub = TestHub::start();
+    let (mut a, mut b, ha, _, _, pb) = chat(&hub);
+    let path = api::deliver_path(&yo_tests::user_id(b.user_id()));
+    ha.fault(&path, Fault::Answer(429));
+    a.send_yo(&pb).expect("queued and saved: sent");
+    assert_eq!(a.pending(), 1, "it waits in the outbox");
+    // Two faults: the first Yo's next try (before the second goes) and the second's own delivery.
+    ha.fault(&path, Fault::Answer(503));
+    ha.fault(&path, Fault::Answer(507));
+    a.send_yo(&pb).expect("also on a passing 503 or a full inbox");
+    a.sync(0).unwrap();
+    assert_eq!(a.pending(), 0);
+    assert_eq!(yos(&b.sync(0).unwrap()), 2, "each once");
+}

@@ -135,23 +135,16 @@ impl Client {
             return Err(Error::Protocol("not content for a group"));
         }
         // As a send to one: what waits goes, the inbox is taken in (a change of the group among it).
-        match self.deliver().and_then(|()| self.receive_all(0)) {
-            Ok(()) => {}
-            Err(error) if retryable(&error) => {}
-            Err(error) => return Err(error),
-        }
+        self.catch_up()?;
         let group = self.group(id)?;
         let others = self.reach_all(&group.members)?;
         self.send_profiles();
         let tag = GroupTag { id: group_id(id)?, revision: group.revision };
         self.atomic(|c| {
-            c.enqueue_group(&others, Some(tag), content)?;
+            c.queue(&others, Some(tag), content)?;
             c.persist()
         })?;
-        match self.deliver() {
-            Ok(()) | Err(Error::Network(_)) => Ok(()),
-            Err(error) => Err(error),
-        }
+        self.deliver_now()
     }
 
     /// A session with each other member this device can write to (spec 4.2), without making them a chat of their own:
@@ -187,7 +180,9 @@ impl Client {
     }
 
     /// One message for each of `users` and a copy for this account's other devices: the same plaintext, one time.
-    fn enqueue_group(&mut self, users: &[String], group: Option<GroupTag>, content: Content) -> Result<()> {
+    /// The one path of every message (1:1 through `send_message`, a group's, a group's changes): a 1:1 copy names the
+    /// user it went to (spec 4.4), a group's names its group inside.
+    pub(crate) fn queue(&mut self, users: &[String], group: Option<GroupTag>, content: Content) -> Result<()> {
         // A photo or video already sent to a member (an app that lost its answer and sends it again) goes only to the
         // members it did not reach yet; to none, if it reached them all (spec 4.7, 5).
         let users: Vec<String> = match &content {
@@ -217,7 +212,11 @@ impl Client {
         }
         if keep && !self.state.own.is_empty() {
             let me = self.state.user_id.clone();
-            self.enqueue(&me, encode(&Plain { to: None, content: message.into() }));
+            let to = match (&group, users.as_slice()) {
+                (None, [user]) => Some(user_bytes(user)?),
+                _ => None,
+            };
+            self.enqueue(&me, encode(&Plain { to, content: message.into() }));
         }
         Ok(())
     }
@@ -283,7 +282,7 @@ impl Client {
         let reached = self.reach_all(&told)?;
         self.send_profiles();
         self.atomic(|c| {
-            c.enqueue_group(&reached, None, Content::Group(info))?;
+            c.queue(&reached, None, Content::Group(info))?;
             let group = Group { name, members, revision, by: me.clone(), left, before: current.members.clone() };
             c.state.groups.insert(id.to_owned(), group);
             c.push_event(Event::GroupChanged { group: id.to_owned() });
@@ -364,7 +363,7 @@ impl Client {
         };
         let Ok(by) = user_bytes(&group.by) else { return };
         let info = GroupInfo { id: gid, revision: group.revision, by, name: group.name, members: ids };
-        if let Err(error) = self.enqueue_group(&[from.to_owned()], None, Content::Group(info)) {
+        if let Err(error) = self.queue(&[from.to_owned()], None, Content::Group(info)) {
             self.note(format!("group: {error}"));
         }
     }
@@ -425,7 +424,7 @@ impl Client {
                 if self.state.group_asks.len() < MAX_GROUPS {
                     self.state.group_asks.insert((id.clone(), asked.clone()));
                 }
-                if let Err(error) = self.enqueue_group(&[asked], None, Content::GroupAsk { id: tag.id }) {
+                if let Err(error) = self.queue(&[asked], None, Content::GroupAsk { id: tag.id }) {
                     self.note(format!("group: {error}"));
                 }
             }

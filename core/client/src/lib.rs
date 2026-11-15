@@ -329,6 +329,9 @@ pub struct Client {
     /// `after_sync` (or the next call that receives) acknowledges them. Lost with the process, they come again and are
     /// skipped as seen.
     unacked: Vec<u64>,
+    /// Inbox ids a call received (its last batch, not full) and has not handed out yet: `finish` moves them to
+    /// `unacked` once their events are saved and handed over, so no call acknowledges before the app has its events.
+    received_ids: Vec<u64>,
     /// `sync_end` received: the work after it (receipts, retries, prekeys, the outbox, the storage, delivery tokens)
     /// waits for `after_sync`, or the next `sync_begin`.
     after_due: bool,
@@ -727,6 +730,7 @@ impl Client {
             guest_events: None,
             explicit_ack: false,
             unacked: Vec::new(),
+            received_ids: Vec::new(),
             after_due: false,
         }
     }
@@ -759,6 +763,7 @@ impl Client {
         self.state = state;
         // Left to the hub's repeat: the state taken in says whether they are seen.
         self.unacked.clear();
+        self.received_ids.clear();
         if self.guest_events.is_some() {
             self.guest_events = Some(self.state.events.len());
         }
@@ -906,9 +911,12 @@ impl Client {
                 result.map(|_| self.state.events[returned.min(total)..].iter().cloned().map(unstored).collect());
             let saved = self.persist();
             if result.is_ok() && saved.is_err() {
+                self.received_ids.clear(); // not saved: the hub sends them again
                 return saved.map(|()| Vec::new());
             }
             self.guest_events = Some(total);
+            let received = std::mem::take(&mut self.received_ids);
+            self.unacked.extend(received);
             return result;
         }
         // This call acknowledges what the last one handed out. What it hands out stays saved until the next call, so
@@ -928,7 +936,13 @@ impl Client {
             Err(error) if result.is_ok() => {
                 let handed = std::mem::take(&mut self.state.handed);
                 self.state.events.splice(0..0, handed);
+                self.received_ids.clear(); // not saved: the hub sends them again
                 Err(error)
+            }
+            Ok(()) => {
+                let received = std::mem::take(&mut self.received_ids);
+                self.unacked.extend(received);
+                result
             }
             _ => result,
         }
@@ -1359,41 +1373,39 @@ impl Client {
         Ok(peer)
     }
 
-    /// Queues a message for a user, and for this account's other devices a copy that names the user (spec 4.4).
+    /// Queues a message for a user, and for this account's other devices a copy that names the user (spec 4.4): one
+    /// path with a group's messages (`queue`).
     fn send_message(&mut self, user: &str, content: Content) -> Result<()> {
-        // A photo or video already sent to this user: its blob id is random, so a message with it is this one, sent
-        // again by an app that lost its answer (a crash before it took it off its queue). It goes once.
-        if let Content::Photo(media) | Content::Video { media, .. } = &content {
-            if self.sent_media(user, &media.id, None) {
-                return Ok(());
-            }
-        }
         if self.state.contacts.get(user).is_some_and(|c| c.unconfirmed) {
             return Err(Error::Unconfirmed);
         }
-        // Strictly increasing: no two messages of a device are the same plaintext.
-        let sent_at_ms = wall_ms().max(self.state.last_sent_ms + 1);
-        self.state.last_sent_ms = sent_at_ms;
-        let keep = shown(&content);
-        let message = Message { sent_at_ms, group: None, content }.encode()?;
-        self.enqueue(user, encode(&Plain { to: None, content: message.clone().into() }));
-        if keep {
-            if !self.state.own.is_empty() {
-                let to = user_bytes(user)?;
-                self.enqueue(
-                    &self.state.user_id.clone(),
-                    encode(&Plain { to: Some(to), content: message.clone().into() }),
-                );
-            }
+        let shown = shown(&content);
+        self.queue(&[user.to_owned()], None, content)?;
+        if shown {
             if let Some(contact) = self.state.contacts.get_mut(user) {
                 contact.chat = true;
-                contact.sent.push_back(message);
-                while contact.sent.len() > KEPT_FOR_RETRY {
-                    contact.sent.pop_front();
-                }
             }
         }
         Ok(())
+    }
+
+    /// What waits goes first, and the inbox is taken in: the order in which things happened (spec 4.7). Offline, a
+    /// message still goes into the outbox after it.
+    fn catch_up(&mut self) -> Result<()> {
+        match self.deliver().and_then(|()| self.receive_all(0)) {
+            Err(error) if !retryable(&error) => Err(error),
+            _ => Ok(()),
+        }
+    }
+
+    /// Sends the outbox now, the message just queued and saved in it. What the hub cannot take now (no network, its
+    /// limit, a full inbox, "not now") waits there: the send succeeded (spec 4.7), so an app never sends it again
+    /// itself, a second time.
+    fn deliver_now(&mut self) -> Result<()> {
+        match self.deliver() {
+            Err(error) if !retryable(&error) => Err(error),
+            _ => Ok(()),
+        }
     }
 
     fn enqueue(&mut self, user: &str, plain: Vec<u8>) {
@@ -1683,7 +1695,10 @@ impl Client {
                 let (headers, again) = self.sign("GET", &path, &[]);
                 (response, time) = (self.unsigned("GET", &path, &headers, &[])?, again);
             }
-            if !self.inbox(response, time, false)?.0 {
+            // The last batch is acknowledged only after `finish` has saved and handed out its events.
+            let (more, ids) = self.inbox(response, time, true)?;
+            self.received_ids.extend(ids);
+            if !more {
                 self.inbox_fresh_until = (self.clock)() + INBOX_FRESH_MS;
                 return Ok(());
             }
@@ -2373,13 +2388,7 @@ impl Client {
         if !shown(&content) {
             return Err(Error::Protocol("not content to send"));
         }
-        // What waits goes first, and the inbox is taken in: the order in which things happened. Offline, the message
-        // still goes into the outbox.
-        match self.deliver().and_then(|()| self.receive_all(0)) {
-            Ok(()) => {}
-            Err(error) if retryable(&error) => {}
-            Err(error) => return Err(error),
-        }
+        self.catch_up()?;
         let user = self.send_target(&handle)?;
         self.check_sendable(user.as_deref())?;
         let peer = match user.filter(|u| self.has_chat(u)) {
@@ -2390,10 +2399,7 @@ impl Client {
         self.send_profiles();
         // Saved with the message in it, or not made at all (spec 4.7).
         self.atomic(|c| c.send_message(&peer, content).and_then(|()| c.persist()))?;
-        match self.deliver() {
-            Ok(()) | Err(Error::Network(_)) => {}
-            Err(error) => return Err(error),
-        }
+        self.deliver_now()?;
         // The hub knows the user no more: the message went nowhere. Its app too old: the message waits for it.
         self.check_sendable(Some(&peer))?;
         match self.state.contacts.get(&peer) {
