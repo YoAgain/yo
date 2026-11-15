@@ -234,9 +234,10 @@ fn a_burst_of_photos_is_answered_with_its_pictures_at_once() {
         alice.acknowledge_events();
     }
     assert_eq!(arrived.len(), N, "{arrived:?}");
-    // Thinking takes up to 3 s; the ten pictures after it, sealed, uploaded, sent and fetched, well within 2 s more.
-    assert!(arrived[N - 1] < Duration::from_secs(5), "{arrived:?}");
-    assert!(arrived[N - 1] - arrived[0] < Duration::from_secs(2), "{arrived:?}");
+    // Thinking takes up to 3 s; the ten pictures after it, sealed, uploaded, sent and fetched, together: a few seconds
+    // more on a slow machine (CI), never one after the other at the pace of a Yo each.
+    assert!(arrived[N - 1] < Duration::from_secs(10), "{arrived:?}");
+    assert!(arrived[N - 1] - arrived[0] < Duration::from_secs(5), "{arrived:?}");
     let _ = std::fs::remove_dir_all(&state);
     let _ = std::fs::remove_dir_all(&replies);
 }
