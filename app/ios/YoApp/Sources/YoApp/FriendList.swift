@@ -477,11 +477,13 @@ struct FriendList: View {
 
   /// A bar's menu: a friend's Report, Block and Remove; a group's Members, Rename and Leave.
   private func menu(for friend: Friend) -> ContextMenu<TupleView<(AnyView, AnyView, AnyView)>> {
-    // When the last Yo went and came, as a heading over the choices ("Sent 7m ago · Received 1d ago").
-    func when(_ date: Date?) -> String { date.map { let a = Arrival.age($0); return a == "now" ? "Yo now" : "Yo \(a) ago" } ?? "No Yo yet" }
-    // Who Yo'd whom last, both ways, in a glance at the menu's top: one row of two, up and down as upload and
-    // download ("Yo 7m ago" sent by me, received from them), greyed.
-    let sent = when(Stats.lastSent(to: friend.name)), came = when(Stats.lastReceived(from: friend.name))
+    // The last Yo, whichever way it went, in one greyed row at the menu's top: "↑ Yo 7m ago" sent by me,
+    // "↓ Yo 1d ago" from them (up and down as upload and download).
+    let out = Stats.lastSent(to: friend.name), back = Stats.lastReceived(from: friend.name)
+    let mine = (out ?? .distantPast) >= (back ?? .distantPast)
+    let lastDate = mine ? out : back
+    let last = lastDate.map { let a = Arrival.age($0); return a == "now" ? "Yo now" : "Yo \(a) ago" } ?? "No Yo yet"
+    let arrow = lastDate == nil ? "clock" : mine ? "arrow.up" : "arrow.down"
     if friend.group != nil {
       return ContextMenu {
         AnyView(Button("Members", systemImage: "person.3") { showMembers(friend) })
@@ -495,12 +497,8 @@ struct FriendList: View {
       }
     }
     return ContextMenu {
-      AnyView(ControlGroup {
-        Button(sent, systemImage: "arrow.up") {}.disabled(true)
-        Button(came, systemImage: "arrow.down") {}.disabled(true)
-      }
-      // The menu's own row of two (as Copy · Paste): each arrow with its line under it; compactMenu shows no text.
-      .accessibilityLabel("Last Yo sent \(sent), received \(came)"))
+      AnyView(Button(last, systemImage: arrow) {}.disabled(true)
+        .accessibilityLabel(lastDate == nil ? last : mine ? "Last Yo sent, \(last)" : "Last Yo received, \(last)"))
       AnyView(Menu("Block & Report", systemImage: "hand.raised") {
         Button("Block", systemImage: "hand.raised") { blocking = (friend, false) }
         Section("Report") {
