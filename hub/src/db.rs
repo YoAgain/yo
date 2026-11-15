@@ -248,6 +248,11 @@ CREATE TABLE IF NOT EXISTS reports (
 CREATE INDEX IF NOT EXISTS reports_by_reported ON reports(reported_id);
 -- Feedback on the app (spec 6.3), for the operator to read: who wrote it, the text as written (plain to the hub),
 -- the app's version, when (ms). Kept when the account goes, with an all-zero user id (`NOBODY`).
+-- Deliveries the hub took, per hour: a count, nothing of who or to whom (6.6); kept 8 days, for the operator's page.
+CREATE TABLE IF NOT EXISTS deliveries_hourly (
+    hour INTEGER PRIMARY KEY,
+    n INTEGER NOT NULL
+);
 CREATE TABLE IF NOT EXISTS feedback (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     user_id BLOB NOT NULL,
@@ -1010,6 +1015,18 @@ impl Db {
             .execute(params![user, text, app_version, now])?;
         tx.commit()?;
         Ok(Write::Done(()))
+    }
+
+    /// Deliveries taken in the hour of `now` (`n` more); hours older than 8 days go.
+    pub fn count_deliveries(&self, now: u64, n: u64) -> rusqlite::Result<()> {
+        let hour = (now / 3_600_000) as i64;
+        let conn = self.conn();
+        conn.prepare_cached(
+            "INSERT INTO deliveries_hourly (hour, n) VALUES (?1, ?2) ON CONFLICT(hour) DO UPDATE SET n = n + ?2",
+        )?
+        .execute(params![hour, n as i64])?;
+        conn.prepare_cached("DELETE FROM deliveries_hourly WHERE hour < ?1")?.execute([hour - 8 * 24])?;
+        Ok(())
     }
 
     /// A crash report: feedback the app sent on its own (`auto` = 1), with no user (an empty id).

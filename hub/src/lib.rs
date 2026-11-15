@@ -43,6 +43,8 @@ pub struct Hub {
     limiter: Limiter,
     /// Requests' buckets (spec 4.10), by the hub's clock as tests move it.
     requests: Requests,
+    /// Deliveries taken since the last flush, a count only (6.6): written to `deliveries_hourly` once a minute.
+    delivered: AtomicU64,
     replay: ReplayCache,
     waiting: Mutex<HashMap<DeviceId, Arc<Notify>>>,
     /// Inbox requests under way, by device (`INBOX_AT_ONCE`).
@@ -360,6 +362,7 @@ impl Hub {
             db,
             deliveries,
             limiter: Limiter::default(),
+            delivered: AtomicU64::new(0),
             requests: Requests::new(
                 config.limits.requests_per_pair,
                 config.limits.request_recipients_per_sender,
@@ -495,6 +498,12 @@ impl Hub {
             loop {
                 every.tick().await;
                 pruning.replay.forget_expired(now_ms());
+                // The minute's deliveries into their hour (a count, nothing of who): the operator's "messages · 24h".
+                let n = pruning.delivered.swap(0, Ordering::Relaxed);
+                if n > 0 {
+                    let hub = pruning.clone();
+                    let _ = tokio::task::spawn_blocking(move || hub.db.count_deliveries(now_ms(), n)).await;
+                }
                 if minutes.is_multiple_of(60) {
                     pruning.limiter.forget_idle(DAY);
                     pruning.requests.forget_full(pruning.clock_ms());
@@ -1292,6 +1301,7 @@ async fn deliver(
     match outcome {
         // Its devices are woken by the writer (`writer`).
         Delivered::Stored(_) => {
+            hub.delivered.fetch_add(1, Ordering::Relaxed);
             if let Some(sender) = request {
                 hub.requests.take(&sender, &user, hub.clock_ms());
             }
