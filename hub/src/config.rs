@@ -82,7 +82,7 @@ impl Default for Limits {
             lookup_per_device_day: 50,
             identity_lookup_per_device_day: 1000,
             signed_per_device_minute: 1200,
-            deliver_per_ip_minute: 200,
+            deliver_per_ip_minute: 1000,
             max_pending_per_device: 5000,
             anonymous_bytes_per_ip_hour: 64 * MIB,
             db_min_free_bytes: GIB,
