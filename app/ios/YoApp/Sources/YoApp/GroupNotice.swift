@@ -1,16 +1,16 @@
-// What happened in a group, as a picture sent to it: "LEO added MIA", "LEO removed NOAH", "LEO renamed the group
-// FAMILY", "LEO made FAMILY", "LEO left". Every member sees it as a photo on the group's bar, as Signal shows such
+// What happened in a group, as a picture sent to it: "LEO added MIA to FAMILY", "LEO removed NOAH from FAMILY", "LEO
+// renamed the group to FAMILY", "LEO made FAMILY", "LEO left FAMILY". Every member sees it as a photo on the group's bar, as Signal shows such
 // changes in the chat. Made on the phone that made the change (YoCard), sent as any group photo (MediaOutbox).
 import SwiftUI
 import YoCore
 
 @MainActor
 enum GroupNotice {
-  /// Renders `line` for the group `bar` and puts it in the outbox to the group; its id, nil if it could not be made.
+  /// Renders `sentence` and puts it in the outbox to the group `bar`; its id, nil if it could not be made.
   @discardableResult
-  static func send(_ line: String, to bar: Friend, accounts: AccountStore, outbox: MediaOutbox) async -> UUID? {
+  static func send(_ sentence: [YoCard.Piece], to bar: Friend, accounts: AccountStore, outbox: MediaOutbox) async -> UUID? {
     guard bar.group != nil, let client = accounts.client else { return nil }
-    guard let data = YoCard(title: line, subtitle: bar.name, symbol: "person.3.fill").jpeg(),
+    guard let data = YoCard(sentence: sentence).jpeg(),
       let file = await Task.detached(operation: { MediaFile.photo(data) }).value
     else { return nil }
     let id = UUID()
@@ -59,7 +59,7 @@ struct GroupMembersSheet: View {
           Section("Add") {
             ForEach(addable) { friend in
               Button {
-                if let user = friend.user { change(add: [user], line: "\(GroupNotice.me(accounts)) added \(friend.name)") }
+                if let user = friend.user { change(add: [user], line: [.user(GroupNotice.me(accounts)), " added ", .user(friend.name), " to ", .group(bar.name)]) }
               } label: {
                 Label(friend.name, systemImage: "plus.circle.fill").font(.yo(17, relativeTo: .body))
               }
@@ -82,7 +82,7 @@ struct GroupMembersSheet: View {
         titleVisibility: .visible, presenting: removing
       ) { who in
         Button("Remove \(who.name)", role: .destructive) {
-          change(remove: [who.user], line: "\(GroupNotice.me(accounts)) removed \(who.name)")
+          change(remove: [who.user], line: [.user(GroupNotice.me(accounts)), " removed ", .user(who.name), " from ", .group(bar.name)])
         }
         Button("Cancel", role: .cancel) {}
       } message: { _ in
@@ -107,7 +107,7 @@ struct GroupMembersSheet: View {
   }
 
   /// Adds or removes, then tells the group in a picture (sent after the change, so a new member sees it too).
-  private func change(add: [String] = [], remove: [String] = [], line: String) {
+  private func change(add: [String] = [], remove: [String] = [], line: [YoCard.Piece]) {
     guard let id = bar.group, let client = accounts.client else { return }
     busy = true
     failed = false
