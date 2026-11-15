@@ -77,6 +77,12 @@ const MAX_REMEMBERED: usize = 1000;
 /// Blobs of photos and videos sent to it, waiting to be fetched into nothing.
 const MAX_DRAINING: usize = 64;
 
+/// Its `Yo-App`: "yogpt/" and the build's UTC minute (YYYYMMDDHHMM, set by yo-hub's deploy as `YO_BUILD`).
+const BUILD: &str = match option_env!("YO_BUILD") {
+    Some(build) => build,
+    None => "0",
+};
+
 /// Signed requests and anonymous ones (sealed deliveries, blob fetches) on separate clients: never one connection for
 /// both (spec 1).
 struct Http {
@@ -95,6 +101,10 @@ impl Transport for Http {
         let mut request = client.request(method.parse().map_err(|_| "method")?, url).body(body.to_vec());
         for (name, value) in headers {
             request = request.header(name, value);
+        }
+        // Its build, as an app names its own (spec 6.3), on what names the account anyway: never on an anonymous one.
+        if signed {
+            request = request.header(yo_wire::api::HEADER_APP, format!("yogpt/{BUILD}"));
         }
         let response = request.send().map_err(|e| e.to_string())?;
         let status = response.status().as_u16();
