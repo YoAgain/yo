@@ -201,6 +201,7 @@ struct SettingsView: View {
       .sheet(isPresented: $showingCode) {
         if let account = accounts.account { NameCodeSheet(name: account.username) }
       }
+      .contentMargins(.top, 4, for: .scrollContent)  // the card right under the title, as Signal's Settings
       .navigationTitle("Profile")
       .task(id: Reload(accounts.client, friends.contacts)) { tally = await EncryptionTally.load(accounts, friends) }
       .navigationBarTitleDisplayMode(.inline)
