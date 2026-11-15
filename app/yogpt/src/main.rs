@@ -186,6 +186,8 @@ struct Options {
     /// `--yo NAME=COUNT`: send that many Yos to NAME from each account, then exit (the service stopped first: one
     /// process per state).
     yo: Option<(String, u32)>,
+    /// With `yo`: each Yo carries this JPEG (at most 1600 px a side), as a reply picture.
+    photo: Option<PathBuf>,
 }
 
 /// Whether a roll (uniform in `0..every`) gives a picture: one in `every`, none for 0.
@@ -350,7 +352,7 @@ fn hub_key(text: &str) -> Result<(String, [u8; 32]), String> {
 fn args() -> Result<(Vec<Account>, Options), String> {
     let mut accounts: Vec<Account> = Vec::new();
     let mut hub_keys = Vec::new();
-    let mut options = Options { replies: None, picture_every: PICTURE_EVERY, yo: None };
+    let mut options = Options { replies: None, picture_every: PICTURE_EVERY, yo: None, photo: None };
     let mut it = std::env::args().skip(1);
     while let Some(flag) = it.next() {
         let value = it.next().ok_or(format!("{flag}: a value"))?;
@@ -359,6 +361,7 @@ fn args() -> Result<(Vec<Account>, Options), String> {
             "--replies" => options.replies = Some(value.into()),
             "--picture-every" => options.picture_every = value.parse().map_err(|_| "--picture-every: a number")?,
             "--hub-key" => hub_keys.push(hub_key(&value)?),
+            "--photo" => options.photo = Some(value.into()),
             "--yo" => {
                 let (to, n) = value.split_once('=').ok_or("--yo NAME=COUNT")?;
                 options.yo = Some((to.into(), n.parse().map_err(|_| "--yo NAME=COUNT: a number")?));
@@ -600,8 +603,20 @@ fn main() {
     if let Some((to, n)) = options.yo.clone() {
         for account in &accounts {
             let Some(mut client) = open(account) else { std::process::exit(1) };
+            let photo = options.photo.as_deref().map(|path| {
+                let bytes = std::fs::read(path).unwrap_or_else(|e| panic!("--photo {}: {e}", path.display()));
+                jpeg_clean(&bytes).unwrap_or_else(|| panic!("--photo: a JPEG of at most 1600 px a side"))
+            });
             for i in 0..n {
-                match client.send_yo(&to) {
+                let sent = match &photo {
+                    None => client.send_yo(&to).map(drop),
+                    Some((bytes, width, height)) => media::seal(bytes, *width, *height).and_then(|(media, sealed)| {
+                        let fetches = client.media_fetches(&to).unwrap_or(1);
+                        client.upload(&media, fetches)?.send(&sealed)?;
+                        client.send(&to, Content::Photo(media)).map(drop)
+                    }),
+                };
+                match sent {
                     Ok(_) => eprintln!("yo-gpt [{}]: Yo {} of {n} to {to}", account.name, i + 1),
                     Err(error) => {
                         eprintln!("yo-gpt [{}]: Yo {} of {n} to {to}: {}", account.name, i + 1, reason(&error))
