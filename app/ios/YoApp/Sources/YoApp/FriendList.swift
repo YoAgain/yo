@@ -864,6 +864,22 @@ struct FriendList: View {
     let library = picked?.data
     picked = nil
     libraryItem = nil
+    // "Undo Before Sending" (Per Contact): the Yo waits under the ring as a photo does; a tap on it keeps it here.
+    if !cameraOn && library == nil && (friends.all.first { $0.key == friend.key }?.undoFirst ?? false) {
+      let (inbox, accounts, friends) = (inbox, accounts, friends)
+      run(friend, "Sent Yo") {
+        Prepared(
+          send: {
+            Task {
+              if let problem = await inbox.send(to: friend, accounts: accounts, friends: friends) {
+                showSent(to: friend, problem)
+              }
+            }
+          },
+          undo: {})
+      }
+      return
+    }
     guard cameraOn || library != nil else {
       showSent(to: friend, "Sent Yo", thenOnTop: true)
       Task {

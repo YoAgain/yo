@@ -317,6 +317,15 @@ private struct ContactDetail: View {
           }
         }
       }
+      Section {
+        Toggle(
+          "Undo Before Sending",
+          isOn: Binding(
+            get: { friends.all.first { $0.key == friend.key }?.undoFirst ?? false },
+            set: { friends.setUndoFirst(friend, $0) }))
+      } footer: {
+        Text("A Yo to \(friend.name) waits two seconds with a ring to undo it, as a photo does.")
+      }
     }
     .navigationTitle(friend.name)
     .navigationBarTitleDisplayMode(.inline)

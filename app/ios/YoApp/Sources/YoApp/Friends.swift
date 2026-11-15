@@ -31,6 +31,9 @@ struct Friend: Codable, Hashable, Identifiable {
   /// A request (spec 4.10): someone not yet a contact wrote, or added this account to a group. The bar asks "Yo?"
   /// instead of sending; nothing goes to them until it is said yes to.
   var request = false
+  /// "Undo Before Sending" (Settings › Encryption › Per Contact): a Yo tapped to them waits `FriendList.sendDelay`
+  /// under the undo ring, as a photo does, so one sent by mistake can be taken back. Kept on this phone.
+  var undoFirst = false
   /// Who they are on this phone, for good: a new spelling or a user id learned later keeps the bar in its place (a
   /// name as identity made the bar leave and come in again on top).
   var key = UUID()
@@ -62,6 +65,7 @@ struct Friend: Codable, Hashable, Identifiable {
     gone = try c.decodeIfPresent(Bool.self, forKey: .gone) ?? false
     keyChanged = try c.decodeIfPresent(Bool.self, forKey: .keyChanged) ?? false
     request = try c.decodeIfPresent(Bool.self, forKey: .request) ?? false
+    undoFirst = try c.decodeIfPresent(Bool.self, forKey: .undoFirst) ?? false
     group = try c.decodeIfPresent(String.self, forKey: .group)
     key = try c.decodeIfPresent(UUID.self, forKey: .key) ?? UUID()
   }
@@ -206,6 +210,12 @@ final class Friends {
       all.firstIndex(where: { $0.name == name }) ?? all.firstIndex(where: { Username.skeleton($0.name) == skeleton })
     guard let index = found, all[..<index].contains(where: { !$0.blocked }) else { return }
     all.insert(all.remove(at: index), at: 0)
+  }
+
+  /// A friend's "Undo Before Sending" on or off.
+  func setUndoFirst(_ friend: Friend, _ on: Bool) {
+    guard let index = all.firstIndex(where: { $0.key == friend.key }), all[index].undoFirst != on else { return }
+    all[index].undoFirst = on
   }
 
   /// The core's contacts not yet said yes to (`YoContact.accepted`): their bars are requests (spec 4.10).
