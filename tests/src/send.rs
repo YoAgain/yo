@@ -3,6 +3,10 @@
 //!   yo-send --url https://dev.justyo.app --state FILE --name NAME --to NAME [--count 1] [--every-ms 0] [--sync]
 //!           [--photo FILE | --video FILE] [--group] [--delete]
 //!
+//!           [--make-group NAME --members A,B | --group --to GROUP --add A | --remove A | --rename NEW]
+//!
+//! With `--url https://dev.justyo.app` the dev hub is pinned as the app pins it (hub keys, trust roots, zk params).
+//!
 //! `--group`: `--to` names a group this account is in (after a sync); the Yos and the photo or video go there.
 //!
 //! The account is registered as NAME the first time and kept in FILE (sealed under a fixed key: a test account).
@@ -23,6 +27,12 @@ impl Store for File {
 }
 
 const KEY: [u8; 32] = [9; 32];
+
+const DEV_HUB_KEYS: [&str; 2] =
+    ["LPiW1TOvv_ricbn7bXmS_fNdVbgtEw_3o7OdelvEdVo", "nFQuDMd-2Ueoec6oYG-Ty7lHQELq1OHs4TVODmPmryg"];
+const DEV_TRUST_ROOTS: [&str; 2] =
+    ["kKVskVCuVwESdvLeYWAEVAQmT9mdwvkQ2uhOlnxXO3Q", "Fj-t9EAOsTDPSHPT1Y39FdbcIvl2I7aEEdqlcRAQc0c"];
+const DEV_ZK_PARAMS: &str = "AABte-FyyNG7G0rm_Swi9dLOf6khh32C0-TmfHELCW5J4k4m_beuhn-LDZ6GFT19xzzza_-DQfEKUPdsKy99Knl4FgkgVTu8j8yZP5JoagLdul10PyCTaUcx649Z-JJuUWidD_T_ZYOgvSS61z9QixJQB6LAB_k0AYFY563qzWItEncY_vD68l2OUM1aTDNuXO6QeT0MgeRwrlsqLhF10C2SMQJotdkaEOGAMdr4E261qG0CNuVEua6ojEXs7BXCOpTIPvZhkxQf6N2-WWXVXyrm65kQSDkE32SYFSTxhP9dNNdVop_SDJE24rMYPJy1SH5DD1gs7Y67w0RNQIooUHmaUn3WlOjHXFMgwHpDDMGlDuMqgEMkz1D-ArhgAoYsXG6LduuWJgSRWi3KED6jZRm2QCUpd_LIkZKR2vmQp_Y68IvRf_myayJE33VuqTbfT0jp9KBeiJuIOdqubZBWb2vG_jI0ihgyFRJPTrFtpW0iv1tpngyN0m7_V3I-jUlzIGQSJRJDvDvlEvKPMDeA9Sc2Nh5tRY3JiMTqcFwCVMsbCujL_mhC4VBfXUFy-urGdLiqdTBZF53mInuT_yR8VFoSPLeTi7mHnRSlACAnh_GFnE80FlbXVEbW8EdMXzwycwLy3GajU4z0wOLmeI58jYlwZw8A-dNcB2CHG4zBwpkTiD2ZHZcdAL4kSljBUqE2Tml9cfKtGzqcvH7zrxOhjCL6Sn9IyV36TVf6lKf-oRjDHsPHP9pSp3apVZfG1dEdRQr2UEvHRHla3C8jQrte8e02zrqQwG0KxsUTueOVgiVsWtaUV3YohIHtxbSUOljwoaA-iRmPQsvUHgcpL2UoOghIMYvKSbwRIde_-NYhyQVSCBpcgz5bhRbHcc-uS_j7Qg";
 
 fn main() {
     let mut args = std::env::args().skip(1);
@@ -59,11 +69,21 @@ fn main() {
             other => panic!("unknown flag {other}"),
         }
     }
+    let dev = url.contains("dev.justyo.app");
     let http = Http::new(url);
     let mut client = match std::fs::read(&state) {
         Ok(blob) => Client::restore(http, &blob, &KEY).expect("restore"),
         Err(_) => Client::register_username(http, &name, None, None, Push::none()).expect("register"),
     };
+    // The dev hub's pins, as the app has them (app/ios/YoApp/Sources/YoApp/Hub.swift): hub keys, trust roots, zk params.
+    if dev {
+        let key = |text: &str| -> [u8; 32] { yo_wire::unb64(text).ok().and_then(|k| k.try_into().ok()).expect("pin") };
+        client.set_hub_keys(DEV_HUB_KEYS.iter().map(|k| key(k)).collect());
+        if trust_roots.is_empty() {
+            trust_roots = DEV_TRUST_ROOTS.iter().map(|k| key(k)).collect();
+        }
+        client.set_zk_params(&yo_wire::unb64(DEV_ZK_PARAMS).expect("zk params")).expect("zk params");
+    }
     // The hub's trust roots (`--trust-root`, base64url), else the test hubs'.
     if !trust_roots.is_empty() {
         client.set_trust_roots(trust_roots);
