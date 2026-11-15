@@ -29,7 +29,7 @@ enum Hub {
   }
   static var transport: HubTransport { HubTransport(base: url) }
 
-  /// The public keys each hub may sign its answers that hand out keys with (spec 6.11), base64url as the operator's
+  /// The public keys each hub may sign its answers that hand out keys with (spec 6.10), base64url as the operator's
   /// `hub-key` printed them: the one in use and a spare kept offline, so a lost or replaced hub key needs no app
   /// update first. A hub not listed (none yet, or another address for tests) is not checked: its answers are taken as
   /// they come, as before the hubs signed.
@@ -138,12 +138,11 @@ final class HubTransport: HttpTransport {
     return config
   }
 
-  /// Sealed deliveries, blobs and the token directory: the requests that name nobody (as yo_wire::api::anonymous).
+  /// Sealed deliveries, blobs and crash reports: the requests that name nobody (as yo_wire::api::anonymous).
   static func namesNobody(method: String, path: String) -> Bool {
     let path = path.split(separator: "?", maxSplits: 1).first.map(String.init) ?? path
     return (method == "POST" && path.hasPrefix("/v1/inbox/") && path != "/v1/inbox/ack")
       || path.hasPrefix("/v1/blobs/")
-      || path == "/.well-known/private-token-issuer-directory"
       || path == "/v1/crash"
   }
 

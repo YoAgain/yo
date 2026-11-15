@@ -10,7 +10,7 @@
 //! leaving out the last `RECENT_PICTURES` that sender got (remembered in memory only, for at most `MAX_REMEMBERED`
 //! senders) while others are left.
 //!
-//! `--hub-key NAME=KEY` pins a hub key of that account's hub (base64url of its 32-byte public key, spec 6.11), given
+//! `--hub-key NAME=KEY` pins a hub key of that account's hub (base64url of its 32-byte public key, spec 6.10), given
 //! once per key (the current one and a spare): answers that hand out keys are then taken only signed by one of them.
 //! `--trust-root NAME=KEY` pins a sender-certificate trust root of that account's hub (base64url of 32 bytes, spec
 //! 6.1, as `yo-hub trust-root new` printed it), once per key (the current one and a spare): without one no sealed Yo

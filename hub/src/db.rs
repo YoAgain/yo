@@ -96,19 +96,15 @@ pub struct Wake {
     pub push_token: Vec<u8>,
 }
 
-/// An envelope for the writer (`Db::deliver`): for a user, with the sender's device check and, if it came with one,
-/// the token it spends (its key's row and its nonce).
+/// An envelope for the writer (`Db::deliver`): for a user, with the sender's device check.
 pub struct Incoming<'a> {
     pub user: UserId,
     pub devices_hash: [u8; 32],
     pub envelope: &'a [u8],
-    pub token: Option<(i64, [u8; 32])>,
 }
 
 pub enum Delivered {
     Stored(Vec<Wake>),
-    /// Its token was spent before (by a delivery under way at the same time): nothing stored.
-    Spent,
     /// The sender's view of the user's devices is not the hub's: nothing stored.
     Mismatch(Roster),
     /// A device of the user holds as many envelopes as it may: later.
@@ -296,20 +292,6 @@ CREATE TABLE IF NOT EXISTS blobs (
 ) WITHOUT ROWID;
 CREATE INDEX IF NOT EXISTS blobs_by_user ON blobs(user_id);
 CREATE INDEX IF NOT EXISTS blobs_by_age ON blobs(created_at);
--- The Privacy Pass issuer's keys (spec 6.10), each as the seed it is derived from: the newest issues, the one before
--- still verifies what it issued. Older ones are deleted with their spent tokens.
-CREATE TABLE IF NOT EXISTS token_keys (
-    id INTEGER PRIMARY KEY,
-    seed BLOB NOT NULL,
-    created_at INTEGER NOT NULL
-);
--- Tokens redeemed, by the nonce the client chose, until their key is deleted: a token is spent once. Nothing here, or
--- anywhere, ties a nonce to the device it was issued to: the hub never saw it before.
-CREATE TABLE IF NOT EXISTS spent_tokens (
-    nonce BLOB PRIMARY KEY,
-    key_id INTEGER NOT NULL
-) WITHOUT ROWID;
-CREATE INDEX IF NOT EXISTS spent_tokens_by_key ON spent_tokens(key_id);
 -- How many blobs, and bytes, each user uploaded on a day (days since the epoch, UTC); kept two days.
 CREATE TABLE IF NOT EXISTS blob_quota (
     user_id BLOB NOT NULL,
@@ -507,8 +489,12 @@ fn without_grace(conn: &Connection) -> rusqlite::Result<()> {
              ALTER TABLE contact_keys DROP COLUMN previous_until;",
         )?;
     }
-    // The day counters of requests went for buckets in memory (`limiter::Requests`).
-    conn.execute_batch("DROP TABLE IF EXISTS requests_day; DROP TABLE IF EXISTS requests")
+    // The day counters of requests went for buckets in memory (`limiter::Requests`), and the delivery tokens went
+    // with their keys: a sealed delivery is limited by its address only (spec 6.6).
+    conn.execute_batch(
+        "DROP TABLE IF EXISTS requests_day; DROP TABLE IF EXISTS requests;
+         DROP TABLE IF EXISTS spent_tokens; DROP TABLE IF EXISTS token_keys;",
+    )
 }
 
 /// Feedback of before crash reports: the `auto` column comes (0 for all of it).
@@ -1230,17 +1216,7 @@ impl Db {
         let mut conn = self.conn();
         let tx = conn.transaction()?;
         let mut outcomes = Vec::with_capacity(items.len());
-        for Incoming { user, devices_hash, envelope, token } in items {
-            // Spent whatever becomes of the delivery: the token paid for the request.
-            if let Some((key, nonce)) = token {
-                let spent = tx
-                    .prepare_cached("INSERT OR IGNORE INTO spent_tokens (nonce, key_id) VALUES (?1, ?2)")?
-                    .execute(params![nonce, key])?;
-                if spent == 0 {
-                    outcomes.push(Delivered::Spent);
-                    continue;
-                }
-            }
+        for Incoming { user, devices_hash, envelope } in items {
             let Some(current) = roster(&tx, user)? else {
                 outcomes.push(Delivered::Unknown);
                 continue;
@@ -1279,32 +1255,6 @@ impl Db {
         }
         tx.commit()?;
         Ok(outcomes)
-    }
-
-    /// The issuer's keys (spec 6.10), newest first: row, seed, when made.
-    pub fn token_keys(&self) -> rusqlite::Result<Vec<(i64, Vec<u8>, u64)>> {
-        self.conn()
-            .prepare("SELECT id, seed, created_at FROM token_keys ORDER BY id DESC")?
-            .query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get::<_, i64>(2)? as u64)))?
-            .collect()
-    }
-
-    /// Adds an issuer key, the newest, and deletes all but the `keep` newest with the tokens they spent. Its row.
-    pub fn add_token_key(&self, seed: &[u8], now: u64, keep: usize) -> rusqlite::Result<i64> {
-        let mut conn = self.conn();
-        let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
-        tx.execute("INSERT INTO token_keys (seed, created_at) VALUES (?1, ?2)", params![seed, now as i64])?;
-        let id = tx.last_insert_rowid();
-        let old = "SELECT id FROM token_keys ORDER BY id DESC LIMIT -1 OFFSET ?1";
-        tx.execute(&format!("DELETE FROM spent_tokens WHERE key_id IN ({old})"), [keep as i64])?;
-        tx.execute(&format!("DELETE FROM token_keys WHERE id IN ({old})"), [keep as i64])?;
-        tx.commit()?;
-        Ok(id)
-    }
-
-    /// Whether a token's nonce was spent already.
-    pub fn token_spent(&self, nonce: &[u8; 32]) -> rusqlite::Result<bool> {
-        self.conn().prepare_cached("SELECT 1 FROM spent_tokens WHERE nonce = ?1")?.exists([nonce])
     }
 
     /// A device's envelopes, oldest first: id, envelope, when it came (ms).
@@ -1403,10 +1353,6 @@ impl Db {
                 "SELECT count(*) FROM messages WHERE device_id NOT IN (SELECT id FROM devices)",
             ),
             ("devices both there and gone", "SELECT count(*) FROM devices WHERE id IN (SELECT id FROM gone)"),
-            (
-                "spent tokens of a key gone",
-                "SELECT count(*) FROM spent_tokens WHERE key_id NOT IN (SELECT id FROM token_keys)",
-            ),
         ];
         let conn = self.conn();
         let mut failed = Vec::new();
@@ -1490,17 +1436,6 @@ mod tests {
     /// A lookup hands out a bundle per device: its one-time prekeys once each, the last resort Kyber prekey when
     /// none is left; a device without prekeys (an app from before sessions) has no bundle. A repeated upload changes
     /// nothing, and one-time prekeys beyond the most are not kept.
-    /// A token pays for the request, whatever becomes of it: one sent to nobody is spent all the same, and cannot be
-    /// sent again to learn something else (spec 6.10).
-    #[test]
-    fn a_token_is_spent_on_a_refused_delivery() {
-        let db = Db::open(":memory:").unwrap();
-        let item = Incoming { user: [9; 16], devices_hash: [0; 32], envelope: b"x", token: Some((1, [5; 32])) };
-        assert!(matches!(db.deliver(std::slice::from_ref(&item), 0, 10).unwrap()[..], [Delivered::Unknown]));
-        assert!(db.token_spent(&[5; 32]).unwrap());
-        assert!(matches!(db.deliver(&[item], 0, 10).unwrap()[..], [Delivered::Spent]));
-    }
-
     #[test]
     fn prekeys_go_once_and_the_last_resort_after() {
         let db = Db::open(":memory:").unwrap();
@@ -1832,7 +1767,7 @@ mod tests {
         let db = Db::open(":memory:").unwrap();
         let leo = user(register(&db, b"LEO", 1, 1, 0));
         let devices_hash = yo_wire::devices::hash(&[1; 32], &[[1; 32]]);
-        db.deliver(&[Incoming { user: leo, devices_hash, envelope: b"envelope", token: None }], 0, 10).unwrap();
+        db.deliver(&[Incoming { user: leo, devices_hash, envelope: b"envelope" }], 0, 10).unwrap();
         let synchronous = || -> i64 { db.conn().query_row("PRAGMA synchronous", [], |row| row.get(0)).unwrap() };
         assert_eq!(synchronous(), 2);
         let (id, _, _) = db.fetch(&[1; 16], 10).unwrap().remove(0);
@@ -1847,12 +1782,8 @@ mod tests {
         let leo = user(register(&db, b"LEO", 1, 1, 0));
         let mia = user(register(&db, b"MIA", 2, 2, 0));
         db.put_backup(&[1; 16], Some(&[9; 16]), b"record", &BackupAuth::default(), 0).unwrap();
-        let incoming = Incoming {
-            user: leo,
-            devices_hash: yo_wire::devices::hash(&[1; 32], &[[1; 32]]),
-            envelope: b"envelope",
-            token: None,
-        };
+        let incoming =
+            Incoming { user: leo, devices_hash: yo_wire::devices::hash(&[1; 32], &[[1; 32]]), envelope: b"envelope" };
         db.deliver(&[incoming], 0, 10).unwrap();
         // The test's users have the ids of their devices.
         let reported = |device: &DeviceId, whom: &UserId| match db.report(device, whom, 1, 0).unwrap() {

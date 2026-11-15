@@ -87,7 +87,6 @@ fn signed_routes(me: &str) -> Vec<(&'static str, String, Vec<u8>)> {
         ("PUT", api::BACKUP.into(), encode(&backup_record(Vec::new()))),
         ("GET", api::STORAGE.into(), Vec::new()),
         ("PUT", api::STORAGE.into(), encode(&api::Storage { version: 0, data: vec![1; 1024].into() })),
-        ("POST", api::TOKENS.into(), vec![0; 8]),
         ("POST", api::REPORT.into(), encode(&api::Report { user_id: [1; 16], reason: api::REPORT_SPAM })),
         (
             "POST",
@@ -779,29 +778,21 @@ fn reports_feedback_and_deletion() {
     assert_ne!(again.user_id(), a.user_id());
 }
 
-/// Spec 6.10: issuance answers `400` to what is no batch, `422` to none or more than 100 elements or another key;
-/// the directory names the key.
+/// Spec 6.6: an old client's delivery token (`Authorization: PrivateToken`) is ignored, no `401`: the delivery counts
+/// against its address like any other; there is no issuance any more.
 #[test]
-fn token_issuance_refuses_what_is_no_batch() {
-    let hub = hub_with(|l| l.tokens_per_device_day = 200);
-    let (mut a, _, _) = account(&hub);
-    let (code, directory) = raw(&hub, "GET", yo_wire::token::DIRECTORY, &[], Vec::new());
-    assert_eq!(code, status::OK);
-    let directory: serde_json::Value = serde_json::from_slice(&directory).unwrap();
-    assert_eq!(directory["issuer-request-uri"], api::TOKENS);
-    assert_eq!(directory["token-keys"][0]["token-type"], 1);
-    let batch = |n: usize, token_type: u16| {
-        encode(&yo_wire::token::BatchTokenRequest {
-            token_type,
-            truncated_token_key_id: 0,
-            blinded_elements: vec![[0; yo_wire::token::NE]; n],
-        })
-    };
-    assert_eq!(signed(&mut a, "POST", api::TOKENS, &[1, 2, 3]).0, status::BAD_REQUEST);
-    assert_eq!(signed(&mut a, "POST", api::TOKENS, &batch(0, 1)).0, 422);
-    assert_eq!(signed(&mut a, "POST", api::TOKENS, &batch(101, 1)).0, 422);
-    assert_eq!(signed(&mut a, "POST", api::TOKENS, &batch(1, 2)).0, 422);
-    assert_eq!(signed(&mut a, "POST", api::TOKENS, &batch(1, 1)).0, 422, "no point, no key");
+fn an_old_delivery_token_is_ignored() {
+    // The roster's fetch is a delivery too: two this minute.
+    let hub = hub_with(|l| l.deliver_per_ip_minute = 2);
+    let (a, _, _) = account(&hub);
+    let hash = yo_tests::devices_hash(&hub.url(), a.user_id()).unwrap();
+    let path = api::deliver_path(&user_id(a.user_id()));
+    let headers =
+        [(api::HEADER_DEVICES, yo_wire::b64(&hash)), ("authorization", "PrivateToken token=\"AAAA\"".to_owned())];
+    assert_eq!(raw(&hub, "POST", &path, &headers, junk(1)).0, status::ACCEPTED);
+    assert_eq!(raw(&hub, "POST", &path, &headers, junk(2)).0, status::RATE_LIMITED, "by address all the same");
+    assert_eq!(raw(&hub, "GET", "/.well-known/private-token-issuer-directory", &[], Vec::new()).0, status::NOT_FOUND);
+    assert_eq!(raw(&hub, "POST", "/v1/tokens", &[], Vec::new()).0, status::NOT_FOUND);
 }
 
 /// Spec 6.6: 1200 signed requests per device and minute (here 5), counted only once the signature holds.

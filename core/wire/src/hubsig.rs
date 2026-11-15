@@ -1,4 +1,4 @@
-//! The hub's signature on the answers that hand out keys (spec 6.11): a lookup's `200` (account key, devices,
+//! The hub's signature on the answers that hand out keys (spec 6.10): a lookup's `200` (account key, devices,
 //! bundles) and a delivery's `409` (the roster). A client that pins the hub's key sends a fresh `Yo-Nonce` with such a
 //! request; the answer then ends in the hub's Ed25519 signature over what was asked and what is answered, so a party
 //! between them (or an old answer played back) cannot hand out other keys. Without the header the answer is as before.

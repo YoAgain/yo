@@ -224,7 +224,6 @@ struct EncryptionPage: View {
           }
           check("Sealed Sender", .ok) {
             detail("Who sent a Yo", "Hidden from the hub")
-            detail("Delivery tokens", "\(status.deliveryTokens)")
           }
           check("Post-Quantum", status.pqSessions == status.devices ? .ok : .waiting) {
             detail("Sessions with PQXDH", "\(status.pqSessions) of \(status.devices)")

@@ -1,4 +1,4 @@
-//! Spec 6.11: answers that hand out keys (a lookup, a delivery's `409`) are signed by the hub's key, which the app
+//! Spec 6.10: answers that hand out keys (a lookup, a delivery's `409`) are signed by the hub's key, which the app
 //! ships; a client that pins it takes no keys the hub did not sign for its very question.
 
 use std::sync::{Arc, Mutex};

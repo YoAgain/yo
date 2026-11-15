@@ -17,7 +17,7 @@
 //!   YO_BLOB_BUDGET_MB     all blobs together at most, default 16384 (16 GiB); uploads beyond are refused (507)
 //!   YO_BLOB_MIN_FREE_MB   uploads are refused while the disk has less free, default 4096 (4 GiB)
 //!   YO_HUB_KEY_FILE       required: the 32-byte seed of the hub's Ed25519 key, which signs answers handing out keys
-//!                         (spec 6.11); its public half is pinned in the apps
+//!                         (spec 6.10); its public half is pinned in the apps
 //!   YO_SERVER_CERT_FILE   required: the server key and its certificate by the trust root (spec 6.1), which sign the
 //!                         devices' sender certificates; the trust root's public key is pinned in the apps
 //!

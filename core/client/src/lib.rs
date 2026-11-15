@@ -15,7 +15,6 @@ pub mod security;
 pub mod signal;
 pub mod state;
 pub mod storage;
-pub mod tokens;
 
 pub use error::{Error, Result};
 pub use net::{Response, Transport};
@@ -33,7 +32,6 @@ use libsignal_protocol::{
 use signal::Records;
 use state::{hex, unhex, Contact, Outgoing, Registering, Slot, State, StoredContent, StoredEvent};
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 use yo_wire::api::{self, status};
@@ -41,12 +39,8 @@ use yo_wire::content::Message;
 use yo_wire::envelope::{ForDevice, Payload, Plain};
 use yo_wire::handle::{Handle, KIND_USER, KIND_USERNAME};
 use yo_wire::hubsig;
-use yo_wire::limits::{
-    MAX_DEVICES, MAX_INBOX_FETCH, MAX_TOKENS_PER_REQUEST, PREKEY_REFILL_BELOW, PREKEY_TARGET, TOKEN_REFILL_BELOW,
-    TOKEN_TARGET,
-};
+use yo_wire::limits::{MAX_DEVICES, MAX_INBOX_FETCH, PREKEY_REFILL_BELOW, PREKEY_TARGET};
 use yo_wire::request::{HEADER_DEVICE, HEADER_SIGNATURE, HEADER_TIME};
-use yo_wire::token;
 use yo_wire::{decode, encode, sha256, DeviceId as HubDeviceId, UserId};
 
 /// A send goes without receiving first (`send_begin`) only while the inbox is up to date: waited on, or processed
@@ -112,8 +106,6 @@ pub const GUEST_EVENTS: usize = 256;
 const REGISTER_TRIES: usize = 2;
 /// How often a send updates its view of a user's devices and tries again before it leaves the rest to the next call.
 const DEVICE_ROUNDS: usize = 3;
-/// After an issuance of tokens failed, the next is asked for this much later (spec 6.10).
-const TOKENS_RETRY_MS: u64 = 3600 * 1000;
 /// A contact whose app is too old for sessions is asked about again at most this often (spec 4.2).
 const OUTDATED_RETRY_MS: u64 = 3600 * 1000;
 
@@ -338,8 +330,6 @@ pub struct Deliveries {
     items: Vec<Delivery>,
     /// The user `send_begin` sent a message to.
     to: Option<String>,
-    /// The hub refused a token of these (`401`): the delivery went again without it.
-    token_refused: AtomicBool,
 }
 
 struct Delivery {
@@ -353,9 +343,7 @@ struct Delivery {
     path: String,
     headers: Vec<(String, String)>,
     envelope: Vec<u8>,
-    /// The token it carries (`tokens::kept`), in `headers` as `Authorization`: back to the stash if it never left.
-    token: Option<String>,
-    /// The nonce a `409` must be signed for (spec 6.11), in `headers` too.
+    /// The nonce a `409` must be signed for (spec 6.10), in `headers` too.
     nonce: Option<[u8; hubsig::NONCE_LEN]>,
 }
 
@@ -383,7 +371,7 @@ fn is_key(item: &state::Outgoing) -> bool {
 enum Limit {
     /// A request's bucket (4.10): this recipient only, for the ms named.
     Recipient(u64),
-    /// The sender's address (or bytes): what goes without a token.
+    /// The sender's address (or bytes): every delivery.
     Address,
     /// This device's signed requests: what goes signed.
     Device,
@@ -416,19 +404,11 @@ impl Deliveries {
         let mut answers = Vec::new();
         for item in &self.items {
             let signed = item.access.is_none() || !item.sealed;
-            if all || held.contains(&item.user) || (address && item.token.is_none()) || (device && signed) {
+            if all || held.contains(&item.user) || address || (device && signed) {
                 answers.push(None);
                 continue;
             }
-            let mut answer = self.transport.request("POST", &item.path, &item.headers, &item.envelope);
-            // A token refused (spent, or of a key the hub no longer has): once more without it, as any delivery
-            // without one. Never anything that would name the sender (spec 6.10).
-            if item.token.is_some() && matches!(&answer, Ok(r) if r.status == status::UNAUTHORIZED) {
-                self.token_refused.store(true, Ordering::Relaxed);
-                let headers: Vec<_> =
-                    item.headers.iter().filter(|(name, _)| name != "authorization").cloned().collect();
-                answer = self.transport.request("POST", &item.path, &headers, &item.envelope);
-            }
+            let answer = self.transport.request("POST", &item.path, &item.headers, &item.envelope);
             let status = answer.as_ref().map_or(0, |r| r.status);
             // A `429` holds back only what shares its limit (spec 6.6): a request's this recipient alone.
             match answer.as_ref().ok().and_then(limit_of) {
@@ -493,10 +473,10 @@ pub struct Client {
     /// Inbox ids a call received (its last batch, not full) and has not handed out yet: `finish` moves them to
     /// `unacked` once their events are saved and handed over, so no call acknowledges before the app has its events.
     received_ids: Vec<u64>,
-    /// `sync_end` received: the work after it (receipts, retries, prekeys, the outbox, the storage, delivery tokens)
-    /// waits for `after_sync`, or the next `sync_begin`.
+    /// `sync_end` received: the work after it (receipts, retries, prekeys, the outbox, the storage) waits
+    /// for `after_sync`, or the next `sync_begin`.
     after_due: bool,
-    /// The hub's public keys the app ships (spec 6.11: the current one and a spare kept offline): with them, every
+    /// The hub's public keys the app ships (spec 6.10: the current one and a spare kept offline): with them, every
     /// answer that hands out keys must carry a signature by one of them over this very question; with none (an app
     /// from before), answers are taken as they come.
     hub_keys: Vec<Key>,
@@ -509,7 +489,7 @@ pub struct Client {
     skew_ms: i64,
 }
 
-/// Request headers with the nonce a signed answer is asked for (spec 6.11), if any.
+/// Request headers with the nonce a signed answer is asked for (spec 6.10), if any.
 fn with_nonce(mut headers: Vec<(String, String)>, nonce: Option<[u8; hubsig::NONCE_LEN]>) -> Vec<(String, String)> {
     if let Some(nonce) = nonce {
         headers.push((hubsig::NONCE_HEADER.to_owned(), yo_wire::b64(&nonce)));
@@ -517,7 +497,7 @@ fn with_nonce(mut headers: Vec<(String, String)>, nonce: Option<[u8; hubsig::NON
     headers
 }
 
-/// An answer that hands out keys, as the hub signed it for this request (spec 6.11): checked against the pinned keys
+/// An answer that hands out keys, as the hub signed it for this request (spec 6.10): checked against the pinned keys
 /// (any of them) and its signature cut off. With none pinned (an app from before), the answer as it came.
 fn hub_signed<'a>(
     keys: &[Key],
@@ -900,10 +880,6 @@ impl Client {
             storage_saved_at: 0,
             last_sent_ms: 0,
             received: VecDeque::new(),
-            token_key: None,
-            tokens: VecDeque::new(),
-            tokens_after: 0,
-            tokens_check: false,
             profile_key: None,
             profile_key_gen: 0,
             requests_open: true,
@@ -1068,7 +1044,7 @@ impl Client {
         }
     }
 
-    /// Pins the hub's public keys (spec 6.11): answers handing out keys are taken only signed by one of them from now
+    /// Pins the hub's public keys (spec 6.10): answers handing out keys are taken only signed by one of them from now
     /// on. None: not checked.
     pub fn set_hub_keys(&mut self, keys: Vec<Key>) {
         self.hub_keys = keys;
@@ -1079,7 +1055,7 @@ impl Client {
         !self.hub_keys.is_empty()
     }
 
-    /// A fresh nonce for an answer that hands out keys, when keys are pinned (spec 6.11).
+    /// A fresh nonce for an answer that hands out keys, when keys are pinned (spec 6.10).
     fn hub_nonce(&self) -> Option<[u8; hubsig::NONCE_LEN]> {
         self.hub_key_pinned().then(identity::random::<{ hubsig::NONCE_LEN }>)
     }
@@ -2068,8 +2044,6 @@ impl Client {
         if encrypted || self.envelopes_unsaved.get() {
             self.persist()?;
         }
-        let token_key =
-            self.state.token_key.as_deref().and_then(unhex).and_then(|k| <[u8; token::NE]>::try_from(k).ok());
         let mut items = Vec::new();
         // Sealed with this device's certificate while it has one in date; else identified at once, signed (as Signal
         // sends without one), and a fresh one fetched after (`refresh_certificate`).
@@ -2131,7 +2105,6 @@ impl Client {
                 path: api::deliver_path(&user),
                 headers: with_nonce(headers, nonce),
                 envelope,
-                token: None,
                 nonce,
             });
         }
@@ -2148,21 +2121,8 @@ impl Client {
             let (signed, _) = self.sign("POST", &delivery.path, &delivery.envelope);
             delivery.headers.extend(signed);
         }
-        // One token per sealed delivery while there are any, the oldest first: the hub counts it instead of the
-        // address. A request names its sender anyway.
-        if let Some(key) = &token_key {
-            for delivery in items.iter_mut().filter(|d| d.access.is_some() && d.sealed) {
-                while let Some(kept) = self.state.tokens.pop_front() {
-                    if let Some(found) = tokens::unkept(&kept, key) {
-                        delivery.headers.push(("authorization".to_owned(), found.authorization()));
-                        delivery.token = Some(kept);
-                        break;
-                    }
-                }
-            }
-        }
         self.delivering.extend(items.iter().map(|d| d.user.clone()));
-        Ok(Deliveries { transport: self.transport.clone(), items, to: None, token_refused: Default::default() })
+        Ok(Deliveries { transport: self.transport.clone(), items, to: None })
     }
 
     /// Takes the hub's answers to `Deliveries::send`: what it took leaves the outbox, what it refused for good is
@@ -2172,21 +2132,6 @@ impl Client {
         let mut done = BTreeSet::new();
         let mut gone = BTreeSet::new();
         let mut changed = false;
-        // Tokens that never reached the hub (held, or no answer) go back to the front of the stash, in their order. A
-        // lost answer may hide a spent one: then the hub refuses it next time, and the delivery goes without.
-        let unsent: Vec<String> = deliveries
-            .items
-            .iter()
-            .zip(&answers)
-            .filter(|(_, answer)| !matches!(answer, Some(Ok(_))))
-            .filter_map(|(item, _)| item.token.clone())
-            .collect();
-        for kept in unsent.into_iter().rev() {
-            self.state.tokens.push_front(kept);
-        }
-        if deliveries.token_refused.load(Ordering::Relaxed) {
-            self.state.tokens_check = true;
-        }
         let mut result = Ok(());
         for (item, answer) in deliveries.items.iter().zip(answers) {
             self.delivering.remove(&item.user);
@@ -3075,48 +3020,6 @@ impl Client {
         any
     }
 
-    /// Keeps the stash of delivery tokens (spec 6.10): below `TOKEN_REFILL_BELOW`, or after the hub refused one,
-    /// the hub's key is read from its directory (a new key: the stash is dropped) and a batch issued, up to
-    /// `TOKEN_TARGET`. Quietly: whatever fails (its daily limit, no network) leaves deliveries as they were, counted by
-    /// address, and the next try is an hour later.
-    fn refill_tokens(&mut self) {
-        let now = (self.clock)();
-        let low = self.state.tokens.len() < TOKEN_REFILL_BELOW;
-        if !(low || self.state.tokens_check) || now < self.state.tokens_after {
-            return;
-        }
-        if self.issue_tokens(now).is_none() {
-            self.state.tokens_after = now + TOKENS_RETRY_MS;
-        }
-        // Not saved: tokens lost to a crash are only tokens.
-        let _ = self.persist();
-    }
-
-    fn issue_tokens(&mut self, now: u64) -> Option<()> {
-        let directory = self.unsigned("GET", token::DIRECTORY, &[], &[]).ok().filter(|r| r.status == status::OK)?;
-        let key = tokens::directory_key(&directory.body, now / 1000)?;
-        if self.state.token_key.as_deref() != Some(hex(&key).as_str()) {
-            self.state.tokens.clear();
-            self.state.token_key = Some(hex(&key));
-        }
-        self.state.tokens_check = false;
-        if self.state.tokens.len() >= TOKEN_REFILL_BELOW {
-            return Some(());
-        }
-        let wanted = (TOKEN_TARGET - self.state.tokens.len()).min(MAX_TOKENS_PER_REQUEST);
-        let batch = tokens::request(&key, wanted)?;
-        let response =
-            self.signed("POST", api::TOKENS, &encode(&batch.request)).ok().filter(|r| r.status == status::OK)?;
-        let issued = tokens::finish(&batch, &decode(&response.body).ok()?)?;
-        self.state.tokens.extend(issued.iter().map(tokens::kept));
-        Some(())
-    }
-
-    /// Delivery tokens in the stash (spec 6.10).
-    pub fn tokens_left(&self) -> usize {
-        self.state.tokens.len()
-    }
-
     // ---- what the app calls ----
 
     /// Sends a Yo to "chris", or a user id from an event.
@@ -3250,7 +3153,7 @@ impl Client {
     }
 
     fn no_deliveries(&self) -> Deliveries {
-        Deliveries { transport: self.transport.clone(), items: Vec::new(), to: None, token_refused: Default::default() }
+        Deliveries { transport: self.transport.clone(), items: Vec::new(), to: None }
     }
 
     /// The outbox, without the client, like `send_begin` without a message: for sending again what the hub did not take
@@ -3375,8 +3278,8 @@ impl Client {
     }
 
     /// The rest of a `sync`, once its events are handed over: acknowledges at the hub what it received (saved
-    /// before), and for the app (not a guest) sends the receipts and retries due, refills prekeys and delivery tokens,
-    /// delivers the outbox, writes the storage. Without it the next `sync_begin` does it first.
+    /// before), and for the app (not a guest) sends the receipts and retries due, refills prekeys, delivers the
+    /// outbox, writes the storage. Without it the next `sync_begin` does it first.
     pub fn after_sync(&mut self) -> Result<()> {
         let result = self.after_sync_inner();
         let saved = self.persist();
@@ -3397,7 +3300,6 @@ impl Client {
         // After what waits went (identified, if the certificate is out of date): never a send held for it.
         self.refresh_certificate()?;
         self.sync_storage_quietly()?;
-        self.refill_tokens();
         self.after_due = false;
         Ok(())
     }
@@ -3426,7 +3328,6 @@ impl Client {
         self.reapply_groups()?;
         self.refresh_certificate()?;
         self.refill()?;
-        self.refill_tokens();
         self.send_profiles();
         self.profile_keys()?;
         self.deliver()?;

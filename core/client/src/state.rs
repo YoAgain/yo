@@ -385,14 +385,6 @@ pub struct State {
     /// Hashes of the last messages received (sender and plaintext): a copy sent again on a retry is skipped.
     #[serde(with = "compact::hashes")]
     pub received: VecDeque<[u8; 32]>,
-    /// Privacy Pass tokens for deliveries (spec 6.10): the hub's key they were made for (hex), and the tokens, the
-    /// oldest first (`tokens::kept`).
-    pub token_key: Option<String>,
-    pub tokens: VecDeque<String>,
-    /// No issuance is asked for before then (wall clock, ms): after one failed (its limit, no network).
-    pub tokens_after: u64,
-    /// The hub refused a token: its key is asked for at the next refill, whatever the stash.
-    pub tokens_check: bool,
     /// This account's profile key (spec 4.10): its contacts show its access key on deliveries; none yet before the
     /// first sync. The contact key from before is kept as it (the contacts have it already); only its check is told
     /// anew (`access_key_told` starts false).

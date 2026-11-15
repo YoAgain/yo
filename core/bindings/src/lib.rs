@@ -391,8 +391,6 @@ pub struct SecurityStatus {
     pub refill_pending: bool,
     /// Days since the signed and last-resort prekeys were replaced.
     pub signed_prekey_days: u64,
-    /// Delivery tokens in stock.
-    pub delivery_tokens: u32,
     /// Contacts' devices written to, and of them those with a PQXDH session good to send on.
     pub devices: u32,
     pub pq_sessions: u32,
@@ -826,8 +824,8 @@ impl YoClient {
     }
 
     /// The rest of the last `sync`, after its events are handed over: the hub is told what arrived; for the app also
-    /// receipts and retries, prekeys, the outbox, the storage, delivery tokens. The notification extension calls it once its
-    /// notification is out; the app's next `sync` does it itself.
+    /// receipts and retries, prekeys, the outbox, the storage. The notification extension calls it once its notification
+    /// is out; the app's next `sync` does it itself.
     pub fn after_sync(&self) -> Result<(), YoError> {
         Ok(self.with(|c| c.after_sync())??)
     }
@@ -881,7 +879,7 @@ impl YoClient {
         }
     }
 
-    /// Pins the hub's public keys the app ships for this hub (spec 6.11: the current one and a spare): from now on, an
+    /// Pins the hub's public keys the app ships for this hub (spec 6.10: the current one and a spare): from now on, an
     /// answer that hands out keys counts only signed by one of them. Called right after the client is made
     /// (`Hub.pin` in the app).
     pub fn set_hub_keys(&self, keys: Vec<Vec<u8>>) -> Result<(), YoError> {
@@ -897,14 +895,13 @@ impl YoClient {
         self.with(|c| c.set_trust_roots(keys))
     }
 
-    /// This device's security now: keys at the hub, tokens, sessions, verified contacts.
+    /// This device's security now: keys at the hub, sessions, verified contacts.
     pub fn security_status(&self) -> SecurityStatus {
         self.with(|c| c.security_status())
             .map(|s| SecurityStatus {
                 prekeys_at_hub: s.prekeys_at_hub,
                 refill_pending: s.refill_pending,
                 signed_prekey_days: s.signed_prekey_days,
-                delivery_tokens: s.delivery_tokens,
                 devices: s.devices,
                 pq_sessions: s.pq_sessions,
                 contacts: s.contacts,
@@ -915,7 +912,6 @@ impl YoClient {
                 prekeys_at_hub: 0,
                 refill_pending: false,
                 signed_prekey_days: 0,
-                delivery_tokens: 0,
                 devices: 0,
                 pq_sessions: 0,
                 contacts: 0,

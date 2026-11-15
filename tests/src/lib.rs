@@ -179,7 +179,7 @@ pub fn username(i: u64) -> String {
     format!("u{i:09}")
 }
 
-/// The public key of the test hubs' signing key (`Config::for_tests`), as an app ships its hub's (spec 6.11).
+/// The public key of the test hubs' signing key (`Config::for_tests`), as an app ships its hub's (spec 6.10).
 pub fn hub_key() -> [u8; 32] {
     ed25519_dalek::SigningKey::from_bytes(&yo_hub::config::TEST_HUB_KEY).verifying_key().to_bytes()
 }

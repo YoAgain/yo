@@ -40,9 +40,6 @@ const ROUTES: [(&str, &str); 30] = [
     ("PUT", "/v1/storage"),
     // Odd: signed, a fetch only a backup door's key may make.
     ("GET", "/v1/backup/AAAAAAAAAAAAAAAAAAAAAA"),
-    // Privacy Pass (spec 6.10): the issuer directory unsigned (even), an issuance signed (odd).
-    ("GET", "/.well-known/private-token-issuer-directory"),
-    ("POST", "/v1/tokens"),
 ];
 
 fuzz_target!(|data: &[u8]| {

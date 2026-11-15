@@ -23,8 +23,6 @@ pub const CRASH: &str = "/v1/crash";
 pub const STORAGE: &str = "/v1/storage";
 /// Photos and videos, encrypted (spec 6.8).
 pub const BLOBS: &str = "/v1/blobs";
-/// `POST`: Privacy Pass tokens for deliveries, issued in a batch (spec 6.10, `token`).
-pub const TOKENS: &str = "/v1/tokens";
 /// `PUT`, signed: the check of the account's access key and whether strangers may send requests (spec 4.10).
 pub const ACCESS_KEY: &str = "/v1/access-key";
 /// `GET`, signed: a sender certificate for the signing device (spec 6.1), libsignal's `SenderCertificate`.
@@ -50,14 +48,13 @@ pub const HEADER_BODY_HASH: &str = "yo-body-sha256";
 pub const HEADER_APP: &str = "yo-app";
 
 /// `POST /v1/inbox/{user_id}`: to every device of a user.
-/// The requests that name nobody (sealed deliveries, blobs, the token directory): the only ones a client sends on its
+/// The requests that name nobody (sealed deliveries, blobs, crash reports): the only ones a client sends on its
 /// anonymous connections; every other request, signed or not (a registration, a backup's fetch), names its device or
 /// account and goes on the other ones, so no connection carries both (spec 1).
 pub fn anonymous(method: &str, path: &str) -> bool {
     let path = path.split('?').next().unwrap_or(path);
     (method == "POST" && path.starts_with(&format!("{INBOX}/")) && path != INBOX_ACK)
         || path.starts_with(&format!("{BLOBS}/"))
-        || path == crate::token::DIRECTORY
         || path == CRASH
 }
 
@@ -468,7 +465,6 @@ mod tests {
     fn only_requests_naming_nobody_are_anonymous() {
         assert!(anonymous("POST", &deliver_path(&[1; 16])));
         assert!(anonymous("GET", "/v1/blobs/abc") && anonymous("PUT", "/v1/blobs/abc?fetches=2"));
-        assert!(anonymous("GET", crate::token::DIRECTORY));
         assert!(!anonymous("POST", INBOX_ACK) && !anonymous("GET", &inbox_path(25)));
         assert!(!anonymous("POST", REGISTER) && !anonymous("GET", "/v1/backup/abc"));
     }

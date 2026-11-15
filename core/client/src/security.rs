@@ -1,5 +1,5 @@
-//! What the app shows under Settings › Encryption as live checks: the keys this device keeps at the hub, its delivery
-//! tokens, and how its sessions and contacts stand. Facts only, read from the state; the app decides the colours.
+//! What the app shows under Settings › Encryption as live checks: the keys this device keeps at the hub, and how
+//! its sessions and contacts stand. Facts only, read from the state; the app decides the colours.
 
 use crate::Client;
 
@@ -12,8 +12,6 @@ pub struct SecurityStatus {
     pub refill_pending: bool,
     /// Days since the signed prekey and the Kyber last resort were last replaced (weekly, spec 4.2).
     pub signed_prekey_days: u64,
-    /// Privacy Pass tokens in stock: deliveries that count against no address (spec 6.10).
-    pub delivery_tokens: u32,
     /// Devices of contacts (not blocked, not gone) this device writes to.
     pub devices: u32,
     /// Of them, those with a session good to send on that was made with PQXDH (Kyber): libsignal's own check.
@@ -22,7 +20,7 @@ pub struct SecurityStatus {
     pub contacts: u32,
     /// Of them, those whose safety number was compared (verified).
     pub verified: u32,
-    /// Answers handing out keys are checked against the hub key the app ships (spec 6.11).
+    /// Answers handing out keys are checked against the hub key the app ships (spec 6.10).
     pub hub_signed: bool,
 }
 
@@ -44,7 +42,6 @@ impl Client {
             prekeys_at_hub: self.state.prekeys.left,
             refill_pending: self.state.prekeys.upload.is_some(),
             signed_prekey_days: SecurityStatus::days(self.state.prekeys.signed_at, (self.clock)()),
-            delivery_tokens: self.state.tokens.len() as u32,
             hub_signed: self.hub_key_pinned(),
             ..SecurityStatus::default()
         };

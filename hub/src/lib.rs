@@ -8,7 +8,6 @@ pub mod db;
 pub mod error;
 pub mod limiter;
 pub mod push;
-pub mod tokens;
 
 use axum::extract::{ConnectInfo, DefaultBodyLimit, Path, State};
 use axum::http::{HeaderMap, Method, StatusCode, Uri};
@@ -34,7 +33,6 @@ use yo_wire::handle::{Handle, KIND_USERNAME};
 use yo_wire::hubsig;
 use yo_wire::limits::{self, MAX_DEVICES, MAX_INBOX_FETCH, MAX_PREKEYS_PER_UPLOAD, PREKEY_TARGET};
 use yo_wire::request::{HEADER_DEVICE, HEADER_SIGNATURE, HEADER_TIME};
-use yo_wire::token::{BatchTokenRequest, Token};
 use yo_wire::{decode, encode, sha256, unb64, DeviceId, UserId};
 
 pub struct Hub {
@@ -53,7 +51,6 @@ pub struct Hub {
     disk_full: AtomicBool,
     pusher: push::Pusher,
     blobs: Arc<blobs::Blobs>,
-    tokens: tokens::Issuer,
     /// Places for work off the async workers (`Hub::blocking`).
     blocking: Arc<tokio::sync::Semaphore>,
     /// Requests whose small body is being read and handled at once (`admit`).
@@ -186,8 +183,6 @@ struct Delivery {
     user: UserId,
     devices_hash: [u8; 32],
     envelope: Bytes,
-    /// The token it came with: its key's row and nonce, spent in the same transaction.
-    token: Option<(i64, [u8; 32])>,
     stored: tokio::sync::oneshot::Sender<Result<Delivered, ()>>,
     /// Where its pushes are sent from.
     runtime: tokio::runtime::Handle,
@@ -219,7 +214,7 @@ fn writer(
         }
         let items: Vec<Incoming<'_>> = batch
             .iter()
-            .map(|d| Incoming { user: d.user, devices_hash: d.devices_hash, envelope: &d.envelope, token: d.token })
+            .map(|d| Incoming { user: d.user, devices_hash: d.devices_hash, envelope: &d.envelope })
             .collect();
         let now = now_ms().saturating_add_signed(shifted_ms.load(Ordering::Relaxed));
         match db.deliver(&items, now, most) {
@@ -317,7 +312,7 @@ async fn off_workers(
 }
 
 impl Hub {
-    /// An answer that hands out keys, signed with the hub's key when the request asks so with a nonce (spec 6.11):
+    /// An answer that hands out keys, signed with the hub's key when the request asks so with a nonce (spec 6.10):
     /// the answer, then the signature. Without the header it goes as it is.
     fn signed_answer(&self, headers: &HeaderMap, path: &str, request: &[u8], mut answer: Vec<u8>) -> Vec<u8> {
         let nonce = headers.get(hubsig::NONCE_HEADER).and_then(|v| v.to_str().ok()).and_then(hubsig::nonce);
@@ -345,8 +340,6 @@ impl Hub {
         eprintln!("yo-hub: reserved names: {} in the list, {added} new", config.reserved.len());
         let pusher = push::Pusher::new(push_transport, config.apns.as_ref(), config.fcm.as_ref())?;
         let blobs = blobs::Blobs::open(&config.blobs).map_err(|e| format!("{}: {e}", config.blobs.dir.display()))?;
-        let tokens = tokens::Issuer::open(&db, now_ms(), config.limits.token_key_days * DAY.as_millis() as u64)
-            .map_err(|e| format!("token keys: {e}"))?;
         // What a crash left under way: fetches (given back) and blobs whose file was being moved into place.
         for blob in db.recover_blobs().map_err(|e| format!("database: {e}"))? {
             blobs.remove(&blob);
@@ -374,7 +367,6 @@ impl Hub {
             disk_full: AtomicBool::new(false),
             pusher,
             blobs: Arc::new(blobs),
-            tokens,
             blocking: Arc::new(tokio::sync::Semaphore::new(BLOCKING_AT_ONCE)),
             reading: Arc::new(tokio::sync::Semaphore::new(READING_AT_ONCE)),
             config,
@@ -404,11 +396,9 @@ impl Hub {
             .route(api::FEEDBACK, post(feedback))
             .route(api::CRASH, post(crash))
             .route(api::STORAGE, get(get_storage).put(put_storage))
-            .route(yo_wire::token::DIRECTORY, get(token_directory))
             .route(hubsig::KEY_PATH, get(hub_key))
             .route(api::TRUST_ROOT_PATH, get(trust_root))
             .route(api::CERTIFICATE, get(sender_certificate))
-            .route(api::TOKENS, post(issue_tokens))
             .route("/v1/username/{name}", get(username_free))
             .route(api::INBOX_ACK, post(ack))
             .route_layer(axum::middleware::from_fn_with_state(self.clone(), off_workers))
@@ -445,7 +435,6 @@ impl Hub {
     pub fn prune(&self, now: u64) -> rusqlite::Result<()> {
         let limits = &self.config.limits;
         self.db.prune(now, limits.envelope_ttl_days * DAY.as_millis() as u64)?;
-        self.tokens.rotate(&self.db, now, limits.token_key_days * DAY.as_millis() as u64)?;
         for blob in self.db.prune_blobs(now, limits.blob_ttl_days * DAY.as_millis() as u64)? {
             self.blobs.remove(&blob);
         }
@@ -919,7 +908,7 @@ async fn prekeys(State(hub): Hubs, method: Method, uri: Uri, headers: HeaderMap,
     }
 }
 
-/// The hub's public key (spec 6.11), for tools: apps ship their own copy and trust only that.
+/// The hub's public key (spec 6.10), for tools: apps ship their own copy and trust only that.
 /// The public key of the trust root the hub's sender certificates go back to, 32 bytes (spec 6.1): for tools.
 async fn trust_root(State(hub): Hubs) -> Vec<u8> {
     hub.signer.root().to_vec()
@@ -1165,92 +1154,6 @@ async fn ack(State(hub): Hubs, method: Method, uri: Uri, headers: HeaderMap, bod
     Ok(StatusCode::NO_CONTENT)
 }
 
-// ---- Privacy Pass (spec 6.10) ----
-
-/// The issuer directory (RFC 9578, section 4): the key tokens are issued under now. Public, the same for everyone.
-/// `404` while the operator issues none (`tokens_per_device_day` 0): the apps then ask an hour later.
-async fn token_directory(State(hub): Hubs) -> axum::response::Response {
-    if hub.config.limits.tokens_per_device_day == 0 {
-        return StatusCode::NOT_FOUND.into_response();
-    }
-    (
-        [
-            (axum::http::header::CONTENT_TYPE, "application/private-token-issuer-directory"),
-            (axum::http::header::CACHE_CONTROL, "max-age=3600"),
-        ],
-        hub.tokens.directory(),
-    )
-        .into_response()
-}
-
-/// Evaluates a device's batch of blinded token inputs (the batched-tokens draft, section 5): `200` with the evaluated
-/// elements and their proof, `422` another key or type, no element or too many, `429` the device's tokens for the day
-/// are used up. What the device asked is neither kept nor logged: the hub must not recognise a token when it comes
-/// back.
-async fn issue_tokens(
-    State(hub): Hubs,
-    method: Method,
-    uri: Uri,
-    headers: HeaderMap,
-    body: Bytes,
-) -> Res<(StatusCode, Vec<u8>)> {
-    let device = hub.authenticate(&method, &uri, &headers, &body)?;
-    let request: BatchTokenRequest = decode(&body)?;
-    let n = request.blinded_elements.len();
-    let unprocessable = || refuse(StatusCode::UNPROCESSABLE_ENTITY);
-    if n == 0 || n > limits::MAX_TOKENS_PER_REQUEST {
-        return Err(unprocessable());
-    }
-    let per_day = hub.config.limits.tokens_per_device_day;
-    if !hub.limiter.allow_n(format!("tokens:{}", yo_wire::b64(&device.device_id)), n as u64, per_day as u64, DAY) {
-        return Err(refuse(StatusCode::TOO_MANY_REQUESTS));
-    }
-    // A hundred points times the key and one proof: off the request threads.
-    let issuing = hub.clone();
-    let issued = tokio::task::spawn_blocking(move || issuing.tokens.issue(&request, limits::MAX_TOKENS_PER_REQUEST))
-        .await
-        .map_err(|_| refuse(StatusCode::INTERNAL_SERVER_ERROR))?;
-    let response = issued.map_err(|_| unprocessable())?;
-    Ok(ok(encode(&response)))
-}
-
-/// What a delivery brings in `Authorization: PrivateToken` (RFC 9577).
-enum Brought {
-    Nothing,
-    /// Malformed, not this hub's, or spent.
-    Refused,
-    /// A good token: its key's row and its nonce.
-    Token(i64, [u8; 32]),
-}
-
-/// Tokens that fail its check, per address and minute, before the hub checks no more from there (each check costs a
-/// VOPRF evaluation; a forged token is free to make). A good token never counts: its holder is not limited.
-const BAD_TOKENS_PER_IP_MINUTE: u32 = 30;
-
-fn delivery_token(hub: &Hub, peer: SocketAddr, headers: &HeaderMap) -> Res<Brought> {
-    let Some(value) = headers.get(axum::http::header::AUTHORIZATION) else { return Ok(Brought::Nothing) };
-    let bad = format!("badtoken:ip:{}", hub.ip(peer, headers));
-    if !hub.own_service(peer, headers) && hub.limiter.spent(&bad, BAD_TOKENS_PER_IP_MINUTE, MINUTE) {
-        return Ok(Brought::Refused);
-    }
-    // Malformed counts like forged: every refused token is one of the 30.
-    let Some(token) = value.to_str().ok().and_then(Token::from_authorization) else {
-        hub.limiter.allow(bad, BAD_TOKENS_PER_IP_MINUTE, MINUTE);
-        return Ok(Brought::Refused);
-    };
-    // Spent already (one look in the database) before the costly check, and counted like a forged one: a token sent
-    // again and again costs the hub no more than a forged one.
-    if hub.db.token_spent(&token.nonce)? {
-        hub.limiter.allow(bad, BAD_TOKENS_PER_IP_MINUTE, MINUTE);
-        return Ok(Brought::Refused);
-    }
-    let Some(key) = hub.tokens.verify(&token) else {
-        hub.limiter.allow(bad, BAD_TOKENS_PER_IP_MINUTE, MINUTE);
-        return Ok(Brought::Refused);
-    };
-    Ok(Brought::Token(key, token.nonce))
-}
-
 // ---- sealed sender: no identity on these routes, but for a request (spec 4.10) ----
 
 /// Delivers an envelope to every device of a user, if the sender's view of the user's devices is the hub's (4.6).
@@ -1271,28 +1174,10 @@ async fn deliver(
         .and_then(|v| v.try_into().ok())
         .ok_or_else(bad)?;
     yo_wire::envelope::check(&body, headers.contains_key(HEADER_DEVICE))?;
-    // A good token instead of the address's limits (spec 6.10). One that is not is counted like a delivery without
-    // and refused, `401`: the client sends again without it.
-    // Its check looks up the spent nonces (the database) and evaluates P-384: off the async workers, bounded.
-    let brought = match headers.contains_key(axum::http::header::AUTHORIZATION) {
-        true => {
-            let headers = headers.clone();
-            hub.blocking(move |hub| delivery_token(hub, peer, &headers)).await??
-        }
-        false => Brought::Nothing,
-    };
-    let token = match brought {
-        Brought::Token(key, nonce) => Some((key, nonce)),
-        brought => {
-            hub.limit_ip("deliver", peer, &headers, hub.config.limits.deliver_per_ip_minute, MINUTE)
-                .map_err(|_| error::limited("ip", None))?;
-            if matches!(brought, Brought::Refused) {
-                return Err(refuse(StatusCode::UNAUTHORIZED));
-            }
-            hub.limit_ip_bytes(peer, &headers, body.len()).map_err(|_| error::limited("bytes", None))?;
-            None
-        }
-    };
+    // Sealed: limited by its address only (6.6). An `Authorization` header (an old client's token) is ignored.
+    hub.limit_ip("deliver", peer, &headers, hub.config.limits.deliver_per_ip_minute, MINUTE)
+        .map_err(|_| error::limited("ip", None))?;
+    hub.limit_ip_bytes(peer, &headers, body.len()).map_err(|_| error::limited("bytes", None))?;
     // A contact's, or a request (spec 4.10): the recipient's profile key shown names no sender, every contact has the
     // same. A request is signed by its sending device, so the hub knows whose it is and counts it in its buckets: past
     // them it waits with the sender (`429`, this recipient only, `Retry-After`); unsigned it is `403`. Past the
@@ -1325,7 +1210,7 @@ async fn deliver(
     let runtime = tokio::runtime::Handle::current();
     // Full (the writer behind) or gone: "later", the envelope stays with its sender. Never waits here.
     hub.deliveries
-        .try_send(Delivery { user, devices_hash, envelope: body.clone(), token, stored, runtime })
+        .try_send(Delivery { user, devices_hash, envelope: body.clone(), stored, runtime })
         .map_err(|_| refuse(StatusCode::SERVICE_UNAVAILABLE))?;
     let outcome = outcome.await.ok().and_then(Result::ok).ok_or_else(|| refuse(StatusCode::INTERNAL_SERVER_ERROR))?;
     match outcome {
@@ -1344,7 +1229,6 @@ async fn deliver(
         // deliveries only, not everyone's (a `429` stops its whole round).
         Delivered::Full => Err(refuse(StatusCode::INSUFFICIENT_STORAGE)),
         Delivered::Unknown => Err(refuse(StatusCode::NOT_FOUND)),
-        Delivered::Spent => Err(refuse(StatusCode::UNAUTHORIZED)),
     }
 }
 
@@ -1524,20 +1408,6 @@ mod tests {
     }
 
     #[test]
-    fn a_malformed_token_is_counted_like_a_forged_one() {
-        let hub = Hub::new(Config::for_tests(), Arc::new(push::Recorder::default())).unwrap();
-        let peer: SocketAddr = "192.0.2.1:1".parse().unwrap();
-        let mut headers = HeaderMap::new();
-        headers.insert(axum::http::header::AUTHORIZATION, "PrivateToken token=\"AAAA\"".parse().unwrap());
-        let bucket = "badtoken:ip:192.0.2.1";
-        for _ in 0..BAD_TOKENS_PER_IP_MINUTE {
-            assert!(!hub.limiter.spent(bucket, BAD_TOKENS_PER_IP_MINUTE, MINUTE));
-            assert!(matches!(delivery_token(&hub, peer, &headers).unwrap(), Brought::Refused));
-        }
-        assert!(hub.limiter.spent(bucket, BAD_TOKENS_PER_IP_MINUTE, MINUTE), "the address's 30 are used up");
-    }
-
-    #[test]
     fn a_device_has_a_few_inbox_requests_under_way_at_most() {
         let hub = Hub::new(Config::for_tests(), Arc::new(push::Recorder::default())).unwrap();
         let held: Vec<_> = (0..INBOX_AT_ONCE).map(|_| hub.fetching([1; 16]).expect("a place")).collect();
@@ -1618,7 +1488,7 @@ mod tests {
         let envelope = Bytes::from(sealed);
         let devices_hash = yo_wire::devices::hash(&[1; 32], &[[1; 32]]);
         let runtime = tokio::runtime::Handle::current();
-        hub.deliveries.send(Delivery { user: [1; 16], devices_hash, envelope, token: None, stored, runtime }).unwrap();
+        hub.deliveries.send(Delivery { user: [1; 16], devices_hash, envelope, stored, runtime }).unwrap();
         tokio::time::timeout(Duration::from_secs(5), notified).await.expect("its long poll answers");
         assert_eq!(hub.db.fetch(&[1; 16], 10).unwrap().len(), 1);
         let until = std::time::Instant::now() + Duration::from_secs(5);

@@ -39,7 +39,6 @@ flowchart LR
     blobs[("Photo/video blobs<br/>sealed")]
     hubkey["Hub signing key<br/>pinned in the app"]
     root["Trust root<br/>pinned in the app"]
-    tokens["Token key<br/>blind (Privacy Pass)"]
   end
   words --> K["K"]
   passkey --> K
@@ -54,7 +53,6 @@ flowchart LR
   device -- signs requests --> hub
   hubkey -. signs lookups .-> phone
   root -. sender certificate, 1 day .-> sessions
-  tokens -. anonymous send tokens .-> phone
 ```
 
 What each key is, where it lives and what it opens: [spec 7](spec/v1.md#7-backup-and-a-new-phone).
