@@ -33,10 +33,10 @@ enum Hub {
   /// `hub-key` printed them: the one in use and a spare kept offline, so a lost or replaced hub key needs no app
   /// update first. A hub not listed (none yet, or another address for tests) is not checked: its answers are taken as
   /// they come, as before the hubs signed.
-  static let keys: [String: [String]] = [:]
-  // Filled in when the hubs' keys are made (yo-hub's ./hub-key prints the lines):
-  //   "hub.justyo.app": ["…current…", "…spare…"],
-  //   "dev.justyo.app": ["…current…", "…spare…"],
+  static let keys: [String: [String]] = [
+    "hub.justyo.app": ["FLTC2hPhb2K2oAFe3dI2K1f9oebLemczKp9aWfvoGcQ", "-Ndnkf6v5B1HNQbkx4JfhDMTN-4vxa6NeIpJSMlpT6c"],
+    "dev.justyo.app": ["J9PZz9y9AD-7Ypf1wrfZmjA6-1NhsTEbREab-Pnq51w", "JuJhUXy5ToOZWspdAZiQm2ppfYXp-dlTNSrvpn9M5Ko"],
+  ]
 
   /// Pins this hub's keys in a client right after it is made: from then on it takes keys only the hub signed.
   static func pin(_ client: YoClient) {
