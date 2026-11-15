@@ -8,12 +8,16 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 use yo_core::{Client, Content, Event, Push, Response, Transport};
 
-struct Http(reqwest::blocking::Client, String);
+/// Signed and anonymous requests on separate connections, as YoGPT and the app send them (spec 1): the hub cannot tie a
+/// sealed delivery to the account by its connection.
+struct Http(reqwest::blocking::Client, reqwest::blocking::Client, String);
 
 impl Transport for Http {
     fn request(&self, method: &str, path: &str, headers: &[(String, String)], body: &[u8]) -> Result<Response, String> {
+        let signed = headers.iter().any(|(name, _)| name.eq_ignore_ascii_case("yo-device"));
+        let client = if !signed && yo_wire::api::anonymous(method, path) { &self.1 } else { &self.0 };
         let mut request =
-            self.0.request(method.parse().map_err(|_| "method")?, format!("{}{path}", self.1)).body(body.to_vec());
+            client.request(method.parse().map_err(|_| "method")?, format!("{}{path}", self.2)).body(body.to_vec());
         for (name, value) in headers {
             request = request.header(name, value);
         }
@@ -28,12 +32,14 @@ fn main() {
     let hub = args.next().unwrap_or_else(|| "https://dev.justyo.app".into());
     let bot = args.next().unwrap_or_else(|| "YOGPT".into());
     let rounds: usize = args.next().map_or(1, |n| n.parse().expect("rounds: a number"));
-    let http = reqwest::blocking::Client::builder().timeout(Duration::from_secs(60)).build().unwrap();
+    let pool = || reqwest::blocking::Client::builder().timeout(Duration::from_secs(60)).build().unwrap();
+    let (http, anonymous) = (pool(), pool());
     let mut n = [0u8; 4];
     getrandom::getrandom(&mut n).unwrap();
     let name = format!("PING{}", u32::from_le_bytes(n) % 100_000_000);
     let mut client =
-        Client::register_username(Arc::new(Http(http, hub.clone())), &name, None, None, Push::none()).unwrap();
+        Client::register_username(Arc::new(Http(http, anonymous, hub.clone())), &name, None, None, Push::none())
+            .unwrap();
     println!("registered {name} on {hub}");
     let mut counts = [0usize; 6];
     for round in 1..=rounds {

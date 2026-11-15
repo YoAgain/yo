@@ -74,8 +74,11 @@ final class Inbox {
   static func sender(of arrival: Arrival) -> String? {
     arrival.id.count > 64 ? String(arrival.id.dropFirst(32).prefix(32)) : nil
   }
-  /// Notifications already taken in, so one tapped and one collected on opening count once.
+  /// Notifications already taken in, so one tapped and one collected on opening count once: the newest 2000, oldest
+  /// first out (a notification and its Yo come within moments of each other).
   @ObservationIgnored private var taken: Set<String> = []
+  @ObservationIgnored private var takenOrder: [String] = []
+  private static let takenKept = 2000
   /// Photos and videos not yet seen, by sender, oldest first: kept on this iPhone until then (ReceivedMedia). By the
   /// sender name's skeleton: a friend whose spelling changed since ("LEO", then "Leo") still finds theirs. A group's by
   /// its id (an arrival `from` "group:" and the id), whatever it is called now.
@@ -114,6 +117,8 @@ final class Inbox {
     unseenMedia = [:]
     ready = []
     uncounted = [:]
+    taken = []
+    takenOrder = []
   }
 
 
@@ -510,6 +515,12 @@ final class Inbox {
   /// A Yo notification that arrived while the app is open, or was tapped.
   func received(id: String, from sender: String) {
     guard taken.insert(id).inserted else { return }
+    takenOrder.append(id)
+    if takenOrder.count > Self.takenKept {
+      let gone = takenOrder.prefix(takenOrder.count - Self.takenKept)
+      taken.subtract(gone)
+      takenOrder.removeFirst(gone.count)
+    }
     show(Arrival(id: id, from: sender))
   }
 

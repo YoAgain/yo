@@ -307,6 +307,10 @@ impl Client {
         told.dedup();
         let reached = self.reach_all(&told)?;
         self.send_profiles();
+        // A new group counted again after the inbox was read: one that came meanwhile may have reached the bound.
+        if creating && self.state.groups.len() >= MAX_GROUPS {
+            return Err(Error::Protocol("too many groups"));
+        }
         self.atomic(|c| {
             c.queue(&reached, None, Content::Group(info))?;
             let group = Group { name, members, revision, by: me.clone(), left, before: current.members.clone() };

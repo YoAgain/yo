@@ -72,6 +72,8 @@ const ROSTER_ASK_EVERY_MS: u64 = 60 * 1000;
 const RECOVERY_LOOKUPS_PER_DAY: u32 = 10;
 /// Payloads kept for a roster that could not be asked yet (`State::deferred`).
 const DEFERRED: usize = 64;
+/// Names a contact is remembered by at most: the newest.
+const HANDLES_KEPT: usize = 4;
 /// Events a guest (the notification service) keeps for the app at most: past them it takes nothing more from the
 /// hub, which keeps it for the app. Bounds a guest's state while the app stays unopened.
 pub const GUEST_EVENTS: usize = 256;
@@ -373,6 +375,11 @@ fn note_handle(contact: &mut Contact, shown: String) {
     match contact.handles.iter().position(|h| same_handle(h, &shown)) {
         Some(index) => contact.handles[index] = shown,
         None => contact.handles.push(shown),
+    }
+    // Names a contact had before (renamed again and again): the newest few, not every one for good.
+    if contact.handles.len() > HANDLES_KEPT {
+        let extra = contact.handles.len() - HANDLES_KEPT;
+        contact.handles.drain(..extra);
     }
 }
 
@@ -1913,6 +1920,8 @@ impl Client {
         if !self.recovery_lookup() {
             return false;
         }
+        // Only the last minute's asks matter: older ones go, so the markers stay a handful.
+        self.state.roster_asked.retain(|_, at| now < *at + ROSTER_ASK_EVERY_MS);
         self.state.roster_asked.insert(user.to_owned(), now);
         true
     }
@@ -2971,5 +2980,22 @@ impl Client {
         }
         self.state.username = canonical;
         self.persist()
+    }
+}
+
+#[cfg(test)]
+mod handle_tests {
+    use super::*;
+
+    /// A contact renamed again and again is remembered by its newest few names, the latest last, not by every one.
+    #[test]
+    fn a_contact_keeps_only_its_newest_names() {
+        let mut contact = Contact::unknown();
+        for i in 0..20 {
+            note_handle(&mut contact, format!("NAME{i}"));
+        }
+        assert_eq!(contact.handles, ["NAME16", "NAME17", "NAME18", "NAME19"]);
+        note_handle(&mut contact, "name19".into());
+        assert_eq!(contact.handles.last().map(String::as_str), Some("name19"), "a spelling replaces its name");
     }
 }
