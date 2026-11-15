@@ -292,6 +292,21 @@ CREATE TABLE IF NOT EXISTS blobs (
 ) WITHOUT ROWID;
 CREATE INDEX IF NOT EXISTS blobs_by_user ON blobs(user_id);
 CREATE INDEX IF NOT EXISTS blobs_by_age ON blobs(created_at);
+-- Each user's profile key commitment (zkgroup's `ProfileKeyCommitment`, spec 4.9), told with its access key: what
+-- profile key credentials are issued against. Gone with the account.
+CREATE TABLE IF NOT EXISTS profile_commitments (
+    user_id BLOB PRIMARY KEY,
+    commitment BLOB NOT NULL
+) WITHOUT ROWID;
+-- Groups (spec 4.9, Signal's Groups v2): by their identifier, the `GroupPublicParams`, the revision and the state
+-- (`GroupState`), whose members and title are encrypted under the group's key. The last member out ends the row.
+CREATE TABLE IF NOT EXISTS zk_groups (
+    id BLOB PRIMARY KEY,
+    params BLOB NOT NULL,
+    revision INTEGER NOT NULL,
+    state BLOB NOT NULL,
+    updated_at INTEGER NOT NULL
+) WITHOUT ROWID;
 -- How many blobs, and bytes, each user uploaded on a day (days since the epoch, UTC); kept two days.
 CREATE TABLE IF NOT EXISTS blob_quota (
     user_id BLOB NOT NULL,
@@ -406,6 +421,7 @@ fn remove_user(tx: &Transaction<'_>, user: &UserId, now: u64) -> rusqlite::Resul
     tx.execute("DELETE FROM reports WHERE reporter_id = ?1 OR reported_id = ?1", [user])?;
     tx.execute("DELETE FROM storage WHERE user_id = ?1", [user])?;
     tx.execute("DELETE FROM contact_keys WHERE user_id = ?1", [user])?;
+    tx.execute("DELETE FROM profile_commitments WHERE user_id = ?1", [user])?;
     tx.execute("UPDATE feedback SET user_id = ?2 WHERE user_id = ?1", params![user, NOBODY])?;
     // Its blobs' files go with the next sweep, or at once where the route knows them (`blobs_of`).
     tx.execute("DELETE FROM blobs WHERE user_id = ?1", [user])?;
@@ -750,14 +766,84 @@ impl Db {
 
     /// A user's profile key check and whether it takes requests (spec 4.10). A changed check counts at once: the
     /// one before does no more.
-    pub fn set_access_key(&self, user: &UserId, check: &[u8; 32], requests_open: bool) -> rusqlite::Result<()> {
+    pub fn set_access_key(
+        &self,
+        user: &UserId,
+        check: &[u8; 32],
+        requests_open: bool,
+        commitment: &[u8],
+    ) -> rusqlite::Result<()> {
+        let mut conn = self.conn();
+        let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        tx.prepare_cached(
+            "INSERT INTO contact_keys (user_id, current, requests_open) VALUES (?1, ?2, ?3)
+             ON CONFLICT(user_id) DO UPDATE SET current = ?2, requests_open = ?3",
+        )?
+        .execute(params![user, check.as_slice(), requests_open])?;
+        tx.prepare_cached(
+            "INSERT INTO profile_commitments (user_id, commitment) VALUES (?1, ?2)
+             ON CONFLICT(user_id) DO UPDATE SET commitment = ?2",
+        )?
+        .execute(params![user, commitment])?;
+        tx.commit()
+    }
+
+    /// For tests: a commitment without an account.
+    #[cfg(test)]
+    pub fn set_commitment_for_tests(&self, user: &UserId, commitment: &[u8]) {
         self.conn()
+            .execute(
+                "INSERT OR REPLACE INTO profile_commitments (user_id, commitment) VALUES (?1, ?2)",
+                params![user, commitment],
+            )
+            .unwrap();
+    }
+
+    /// A user's profile key commitment (spec 4.9), if it told one.
+    pub fn commitment(&self, user: &UserId) -> rusqlite::Result<Option<Vec<u8>>> {
+        self.conn()
+            .prepare_cached("SELECT commitment FROM profile_commitments WHERE user_id = ?1")?
+            .query_row([user], |row| row.get(0))
+            .optional()
+    }
+
+    /// A new group at revision 1; false if its id is taken.
+    pub fn create_group(&self, id: &[u8], params: &[u8], state: &[u8], now: u64) -> rusqlite::Result<bool> {
+        let n = self
+            .conn()
             .prepare_cached(
-                "INSERT INTO contact_keys (user_id, current, requests_open) VALUES (?1, ?2, ?3)
-                 ON CONFLICT(user_id) DO UPDATE SET current = ?2, requests_open = ?3",
+                "INSERT OR IGNORE INTO zk_groups (id, params, revision, state, updated_at) VALUES (?1, ?2, 1, ?3, ?4)",
             )?
-            .execute(params![user, check.as_slice(), requests_open])?;
-        Ok(())
+            .execute(params![id, params, state, now as i64])?;
+        Ok(n == 1)
+    }
+
+    /// A group's params and state.
+    pub fn group(&self, id: &[u8]) -> rusqlite::Result<Option<(Vec<u8>, Vec<u8>)>> {
+        self.conn()
+            .prepare_cached("SELECT params, state FROM zk_groups WHERE id = ?1")?
+            .query_row([id], |row| Ok((row.get(0)?, row.get(1)?)))
+            .optional()
+    }
+
+    /// A group's next revision, only if it is still at `revision` (compare and swap).
+    pub fn update_group(&self, id: &[u8], revision: u32, state: &[u8], now: u64) -> rusqlite::Result<bool> {
+        let n = self
+            .conn()
+            .prepare_cached(
+                "UPDATE zk_groups SET revision = revision + 1, state = ?3, updated_at = ?4 WHERE id = ?1 AND revision = ?2",
+            )?
+            .execute(params![id, revision, state, now as i64])?;
+        Ok(n == 1)
+    }
+
+    /// The group ends (its last member left), if it is still at `revision`.
+    pub fn end_group(&self, id: &[u8], revision: u32) -> rusqlite::Result<bool> {
+        let n = self
+            .conn()
+            .prepare_cached("DELETE FROM zk_groups WHERE id = ?1 AND revision = ?2")?
+            .execute(params![id, revision])?;
+        Ok(n == 1)
     }
 
     /// What a delivery to `user` is (spec 4.10): a contact's when it shows the profile key (`check` of what it shows),
@@ -1912,10 +1998,10 @@ mod tests {
         let db = Db::open(":memory:").unwrap();
         let users: Vec<UserId> = (1..=2u8).map(|i| user(register(&db, &[b'A' + i; 3], i, i, 0))).collect();
         let (spam, leo) = (&users[0], &users[1]);
-        db.set_access_key(leo, &[9; 32], true).unwrap();
+        db.set_access_key(leo, &[9; 32], true, &[1]).unwrap();
         assert_eq!(db.admit(leo, None, Some(spam)).unwrap(), Admission::Request);
         assert_eq!(db.admit(leo, None, None).unwrap(), Admission::Closed, "unsigned");
-        db.set_access_key(leo, &[9; 32], false).unwrap();
+        db.set_access_key(leo, &[9; 32], false, &[1]).unwrap();
         assert_eq!(db.admit(leo, None, Some(spam)).unwrap(), Admission::Request, "the switch is the device's");
     }
 

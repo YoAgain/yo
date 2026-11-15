@@ -214,6 +214,9 @@ pub struct Config {
     /// `yo-hub trust-root server`): it signs the devices' sender certificates (spec 6.1). The hub does not start
     /// without a good one.
     pub server_certificate: Vec<u8>,
+    /// The hub's zkgroup `ServerSecretParams` (`YO_ZK_PARAMS_FILE`, made by `yo-hub zk new`): groups' credentials and
+    /// endorsements (spec 4.9). Apps pin the public half. The hub does not start without good ones.
+    pub zk_params: Vec<u8>,
 }
 
 /// `YO_MIN_APP`: comma separated `PLATFORM/BUILD`.
@@ -289,6 +292,10 @@ impl Config {
             name_min: 2,
             hub_key: TEST_HUB_KEY,
             server_certificate: crate::certificate::test_file(),
+            zk_params: {
+                static PARAMS: std::sync::OnceLock<Vec<u8>> = std::sync::OnceLock::new();
+                PARAMS.get_or_init(crate::groups::test_params).clone()
+            },
         }
     }
 }

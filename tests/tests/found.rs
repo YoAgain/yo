@@ -256,30 +256,3 @@ fn a_group_yo_leaves_no_member_out_for_a_refusal_for_now() {
     let ben_got = group_yos_from(&ben.sync(0).unwrap(), ann.user_id());
     assert_eq!((dot_got, ben_got), (1, 1), "each member once: {:?}", ann.drop_reasons());
 }
-
-/// A group Yo naming a revision newer than this device's asks a member for the group (spec 4.9), and the member asked
-/// may be one this device never wrote to (members need not know each other): the ask sat in the outbox for good,
-/// never encrypted ("encrypt: protocol: user"), holding up nothing else but never leaving (yo-scale). A user the
-/// outbox has no roster of is looked up first, as any new chat.
-#[test]
-fn a_group_ask_to_a_member_never_written_to_leaves_the_outbox() {
-    let hub = TestHub::start();
-    let n = random_u64() % 100_000;
-    let mut ann = by_name(Http::new(hub.url()), &format!("Ask{n}"), None).unwrap();
-    let x = by_name(Http::new(hub.url()), &format!("Ex{n}"), None).unwrap();
-    let y = by_name(Http::new(hub.url()), &format!("Why{n}"), None).unwrap();
-    // Cleo is the lower user id of the two: the one Ann asks.
-    let (mut ben, mut cleo) = if x.user_id() > y.user_id() { (x, y) } else { (y, x) };
-    let (id, _) = ann.create_group("Ask", &[ben.user_id().to_owned()]).unwrap();
-    ben.sync(0).unwrap();
-    ben.add_to_group(&id, &[cleo.user_id().to_owned()]).unwrap();
-    ann.sync(0).unwrap();
-    cleo.sync(0).unwrap();
-    // Ben's Yo names a revision Ann has not seen: she asks the lowest other member, Cleo, whom she never wrote to.
-    ben.send_group_tagged_for_tests(ann.user_id(), &id, 9, Content::Yo).unwrap();
-    for _ in 0..3 {
-        ann.sync(0).unwrap();
-        cleo.sync(0).unwrap();
-    }
-    assert_eq!(ann.pending(), 0, "the ask left: {:?}", ann.drop_reasons());
-}

@@ -189,6 +189,11 @@ pub fn trust_root() -> [u8; 32] {
     yo_hub::certificate::Signer::from_bytes(&TEST_SIGNER).unwrap().root()
 }
 
+/// The test hubs' zkgroup public params (spec 4.9), as an app pins them.
+pub fn zk_params() -> Vec<u8> {
+    yo_hub::groups::Zk::from_bytes(&yo_hub::groups::test_params()).expect("params").public().to_vec()
+}
+
 static TEST_SIGNER: std::sync::LazyLock<Vec<u8>> = std::sync::LazyLock::new(yo_hub::certificate::test_file);
 
 /// A sender certificate as a test hub issues it, for a device of a user, good for a day from `now_ms`.

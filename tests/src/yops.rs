@@ -77,7 +77,6 @@ impl Device {
             groups: Default::default(),
             roster_asked: Default::default(),
             recovery_lookups: (0, 0),
-            group_asks: Default::default(),
             group_held: Vec::new(),
             deferred: Default::default(),
         };

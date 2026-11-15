@@ -1,7 +1,8 @@
 //! YoGPT: an account that answers every Yo, after a moment, with a Yo or a few. One process serves the account on
 //! several hubs, each on its own.
 //!
-//!   yo-gpt [--replies DIR] --account NAME=HUB,DIR[,USERNAME] [--hub-key NAME=KEY] [--trust-root NAME=KEY] [--account …]
+//!   yo-gpt [--replies DIR] --account NAME=HUB,DIR[,USERNAME] [--hub-key NAME=KEY] [--trust-root NAME=KEY]
+//!          [--zk-params NAME=PARAMS] [--account …]
 //!   yo-gpt --replies app/yogpt/replies --account dev=https://dev.justyo.app,state/dev,YoGPT
 //!
 //! Pictures: with `--replies`, a photo or video sent to it is answered with one picture from DIR (files named like
@@ -14,7 +15,8 @@
 //! once per key (the current one and a spare): answers that hand out keys are then taken only signed by one of them.
 //! `--trust-root NAME=KEY` pins a sender-certificate trust root of that account's hub (base64url of 32 bytes, spec
 //! 6.1, as `yo-hub trust-root new` printed it), once per key (the current one and a spare): without one no sealed Yo
-//! opens and its own go identified.
+//! opens and its own go identified. `--zk-params NAME=PARAMS` pins the hub's zkgroup public params (base64url, as
+//! `yo-hub zk new` printed them, spec 4.9): without them it answers in no group and leaves none.
 //!
 //! The username defaults to YOGPT; once registered, the account keeps the name it has, whatever is given later.
 //! Each account has its own client, state directory, threads and limits. Its first run registers the username with a
@@ -180,6 +182,8 @@ struct Account {
     /// The hub's sender-certificate trust roots (`--trust-root`, the current one and a spare): without one, no sealed
     /// Yo opens (spec 6.1).
     trust_roots: Vec<[u8; 32]>,
+    /// The hub's zkgroup public params (`--zk-params`): without them it makes, changes and fetches no group (spec 4.9).
+    zk_params: Option<Vec<u8>>,
 }
 
 /// What the whole process answers with.
@@ -352,6 +356,7 @@ fn account(value: &str) -> Result<Account, String> {
         username: username.into(),
         hub_keys: Vec::new(),
         trust_roots: Vec::new(),
+        zk_params: None,
     })
 }
 
@@ -364,7 +369,7 @@ fn named_key(flag: &str, text: &str) -> Result<(String, [u8; 32]), String> {
 
 fn args() -> Result<(Vec<Account>, Options), String> {
     let mut accounts: Vec<Account> = Vec::new();
-    let (mut hub_keys, mut trust_roots) = (Vec::new(), Vec::new());
+    let (mut hub_keys, mut trust_roots, mut zk_params) = (Vec::new(), Vec::new(), Vec::new());
     let mut options = Options { replies: None, picture_every: PICTURE_EVERY, yo: None, photo: None };
     let mut it = std::env::args().skip(1);
     while let Some(flag) = it.next() {
@@ -375,6 +380,11 @@ fn args() -> Result<(Vec<Account>, Options), String> {
             "--picture-every" => options.picture_every = value.parse().map_err(|_| "--picture-every: a number")?,
             "--hub-key" => hub_keys.push(named_key("--hub-key", &value)?),
             "--trust-root" => trust_roots.push(named_key("--trust-root", &value)?),
+            "--zk-params" => {
+                let (name, params) = value.split_once('=').ok_or("--zk-params NAME=PARAMS")?;
+                let params = yo_wire::unb64(params).map_err(|_| "--zk-params: base64url")?;
+                zk_params.push((name.to_owned(), params));
+            }
             "--photo" => options.photo = Some(value.into()),
             "--yo" => {
                 let (to, n) = value.split_once('=').ok_or("--yo NAME=COUNT")?;
@@ -386,6 +396,10 @@ fn args() -> Result<(Vec<Account>, Options), String> {
     for (name, key) in hub_keys {
         let account = accounts.iter_mut().find(|a| a.name == name).ok_or(format!("--hub-key: no account {name}"))?;
         account.hub_keys.push(key);
+    }
+    for (name, params) in zk_params {
+        let account = accounts.iter_mut().find(|a| a.name == name).ok_or(format!("--zk-params: no account {name}"))?;
+        account.zk_params = Some(params);
     }
     for (name, key) in trust_roots {
         let account = accounts.iter_mut().find(|a| a.name == name).ok_or(format!("--trust-root: no account {name}"))?;
@@ -545,6 +559,11 @@ fn open(account: &Account) -> Option<Client> {
                     client.set_hub_keys(account.hub_keys.clone());
                 }
                 client.set_trust_roots(account.trust_roots.clone());
+                if let Some(params) = &account.zk_params {
+                    if let Err(error) = client.set_zk_params(params) {
+                        eprintln!("yo-gpt: {}: --zk-params: {error}", account.name);
+                    }
+                }
                 // It never opens a photo or video: their keys are not even kept with the events.
                 client.forget_media_keys();
                 if let Err(error) = client.persist_to(Arc::new(File(path)), key) {

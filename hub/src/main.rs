@@ -20,12 +20,19 @@
 //!                         (spec 6.10); its public half is pinned in the apps
 //!   YO_SERVER_CERT_FILE   required: the server key and its certificate by the trust root (spec 6.1), which sign the
 //!                         devices' sender certificates; the trust root's public key is pinned in the apps
+//!   YO_ZK_PARAMS_FILE     required: the zkgroup ServerSecretParams of its groups (spec 4.9); their public half is
+//!                         pinned in the apps
 //!
 //! Sender-certificate keys (Signal's: a trust root kept offline, a server certificate on the hub):
 //!   yo-hub trust-root new ROOT_FILE                     a new trust root (its private key, 32 bytes, 0600); prints
 //!                                                       its public key, base64url, for the apps
 //!   yo-hub trust-root server ROOT_FILE KEY_ID OUT_FILE  a new server key with its certificate by that root: the hub's
 //!                                                       YO_SERVER_CERT_FILE (0600)
+//!
+//! Group keys (Signal's zkgroup server params, spec 4.9):
+//!   yo-hub zk new FILE                                  new ServerSecretParams (0600), the hub's YO_ZK_PARAMS_FILE;
+//!                                                       prints the public params, base64url, for the apps
+//!   yo-hub zk public FILE                               prints them again
 
 use std::sync::Arc;
 use yo_hub::config::{parse_min_app, read_hub_key, read_reserved, ApnsConfig, BlobConfig, Config, FcmConfig, Limits};
@@ -95,6 +102,10 @@ fn config() -> Result<(Config, String), String> {
             let path = required("YO_SERVER_CERT_FILE")?;
             std::fs::read(&path).map_err(|e| format!("YO_SERVER_CERT_FILE: {path}: {e}"))?
         },
+        zk_params: {
+            let path = required("YO_ZK_PARAMS_FILE")?;
+            std::fs::read(&path).map_err(|e| format!("YO_ZK_PARAMS_FILE: {path}: {e}"))?
+        },
     };
     Ok((config, var("YO_LISTEN").unwrap_or_else(|| "127.0.0.1:8080".into())))
 }
@@ -130,9 +141,34 @@ fn trust_root(args: &[String]) -> Result<(), String> {
     }
 }
 
+/// `yo-hub zk …` (see above).
+fn zk(args: &[String]) -> Result<(), String> {
+    match args {
+        [new, file] if new == "new" => {
+            let (secret, public) = yo_hub::groups::new_params();
+            write_new(file, &secret)?;
+            println!("{}", yo_wire::b64(&public));
+            Ok(())
+        }
+        [public, file] if public == "public" => {
+            let secret = std::fs::read(file).map_err(|e| format!("{file}: {e}"))?;
+            println!("{}", yo_wire::b64(yo_hub::groups::Zk::from_bytes(&secret)?.public()));
+            Ok(())
+        }
+        _ => Err("usage: yo-hub zk new FILE | yo-hub zk public FILE".into()),
+    }
+}
+
 #[tokio::main]
 async fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
+    if args.first().map(String::as_str) == Some("zk") {
+        if let Err(error) = zk(&args[1..]) {
+            eprintln!("yo-hub: {error}");
+            std::process::exit(2);
+        }
+        return;
+    }
     if args.first().map(String::as_str) == Some("trust-root") {
         if let Err(error) = trust_root(&args[1..]) {
             eprintln!("yo-hub: {error}");

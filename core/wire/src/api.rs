@@ -171,6 +171,9 @@ pub struct Registered {
 pub struct AccessKey {
     pub check: [u8; 32],
     pub requests_open: u8,
+    /// The profile key's commitment (zkgroup's `ProfileKeyCommitment`, bincode): what the hub issues profile key
+    /// credentials against (spec 4.9), so a contact holding the key can add this account to a group.
+    pub commitment: VLBytes,
 }
 
 /// The length of an access key (Signal's unidentified access key).
@@ -433,6 +436,109 @@ impl Devices {
         self.devices.iter().map(|d| d.key).collect()
     }
 }
+
+// ---- groups (spec 4.9): Signal's Groups v2, zkgroup ----
+
+/// `GET`, signed: today's auth credential (`GroupAuthCredential`), what a member presents to the hub for a group.
+pub const GROUP_AUTH: &str = "/v1/group-auth";
+/// `POST`, signed: a profile key credential for a user whose profile key the asker holds (`ProfileCredentialRequest`
+/// → zkgroup's `ExpiringProfileKeyCredentialResponse`): with it a member adds that user.
+pub const GROUP_CREDENTIAL: &str = "/v1/group-credential";
+/// `PUT /v1/groups/{id}` makes a group (`NewGroup`), `POST` fetches or changes it (`GroupRequest`); both answer
+/// `GroupAnswer`. `{id}` is the group's identifier (32 bytes, base64url).
+pub const GROUPS: &str = "/v1/groups";
+/// The hub's `ServerPublicParams` (zkgroup, bincode): for tools; apps pin their own copy.
+pub const ZK_PARAMS_PATH: &str = "/.well-known/yo-zk-params";
+/// On a delivery: a group send token (zkgroup's `GroupSendFullToken`, base64url) for the recipient, from a group both
+/// are in: a contact's delivery without the recipient's profile key (spec 4.9).
+pub const HEADER_GROUP_SEND: &str = "yo-group-send";
+/// The length of a group's identifier at the hub.
+pub const GROUP_ID_LEN: usize = 32;
+
+pub fn group_path(id: &[u8; GROUP_ID_LEN]) -> String {
+    format!("{GROUPS}/{}", crate::b64(id))
+}
+
+/// A day's auth credential (zkgroup's `AuthCredentialWithPniZkcResponse`, bincode), for `redemption_s` (a UTC day's
+/// start, seconds).
+#[derive(Debug, Clone, PartialEq, Eq, TlsSerialize, TlsDeserializeBytes, TlsSize)]
+pub struct GroupAuthCredential {
+    pub redemption_s: u64,
+    pub credential: VLBytes,
+}
+
+/// A profile key credential asked for `user_id` (zkgroup's `ProfileKeyCredentialRequest`, bincode).
+#[derive(Debug, Clone, PartialEq, Eq, TlsSerialize, TlsDeserializeBytes, TlsSize)]
+pub struct ProfileCredentialRequest {
+    pub user_id: UserId,
+    pub request: VLBytes,
+}
+
+/// A member added: with a profile key credential presentation (zkgroup's `ExpiringProfileKeyCredentialPresentation`)
+/// a member whose key the adder holds; without one (empty), invited by its `UuidCiphertext` alone.
+#[derive(Debug, Clone, PartialEq, Eq, TlsSerialize, TlsDeserializeBytes, TlsSize)]
+pub struct NewMember {
+    pub user: VLBytes,
+    pub presentation: VLBytes,
+}
+
+/// A new group: its `GroupPublicParams`, the maker's auth presentation (`AnyAuthCredentialPresentation`), the
+/// encrypted title, the members (the maker among them).
+#[derive(Debug, Clone, PartialEq, Eq, TlsSerialize, TlsDeserializeBytes, TlsSize)]
+pub struct NewGroup {
+    pub public_params: VLBytes,
+    pub auth: VLBytes,
+    pub title: VLBytes,
+    pub members: Vec<NewMember>,
+}
+
+pub const ACTION_ADD: u8 = 1;
+pub const ACTION_REMOVE: u8 = 2;
+pub const ACTION_TITLE: u8 = 3;
+pub const ACTION_PROFILE_KEY: u8 = 4;
+
+/// One change: add (`NewMember`), remove (a member's `UuidCiphertext`), title (encrypted), profile key (the asker's own
+/// presentation: from invited to a member with its key).
+#[derive(Debug, Clone, PartialEq, Eq, TlsSerialize, TlsDeserializeBytes, TlsSize)]
+pub struct GroupAction {
+    pub kind: u8,
+    pub data: VLBytes,
+}
+
+/// A member's request for a group: no actions, the group as it is; else the changes as `revision` (the hub's + 1).
+#[derive(Debug, Clone, PartialEq, Eq, TlsSerialize, TlsDeserializeBytes, TlsSize)]
+pub struct GroupRequest {
+    pub auth: VLBytes,
+    pub revision: u32,
+    pub actions: Vec<GroupAction>,
+}
+
+/// A member as the hub keeps it: its `UuidCiphertext`, its `ProfileKeyCiphertext` (empty: invited), who added it.
+#[derive(Debug, Clone, PartialEq, Eq, TlsSerialize, TlsDeserializeBytes, TlsSize)]
+pub struct GroupMember {
+    pub user: VLBytes,
+    pub profile_key: VLBytes,
+    pub added_by: VLBytes,
+}
+
+/// A group as the hub keeps it: everything encrypted under the group's key but the revision.
+#[derive(Debug, Clone, PartialEq, Eq, TlsSerialize, TlsDeserializeBytes, TlsSize)]
+pub struct GroupState {
+    pub revision: u32,
+    pub title: VLBytes,
+    pub members: Vec<GroupMember>,
+}
+
+/// The group, and group send endorsements for its members (`GroupSendEndorsementsResponse`, bincode; empty when the
+/// asker is no member any more).
+#[derive(Debug, Clone, PartialEq, Eq, TlsSerialize, TlsDeserializeBytes, TlsSize)]
+pub struct GroupAnswer {
+    pub state: GroupState,
+    pub endorsements: VLBytes,
+}
+
+/// The seed of the test hubs' `ServerSecretParams` (`ServerSecretParams::generate`): public, never a real hub's.
+pub const TEST_ZK_SEED: [u8; 32] = [0x5a; 32];
 
 /// The statuses the hub answers with, and what they mean to a client.
 pub mod status {

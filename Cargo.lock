@@ -3900,6 +3900,7 @@ dependencies = [
  "tokio",
  "tokio-util",
  "yo-wire",
+ "zkgroup",
 ]
 
 [[package]]

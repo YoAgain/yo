@@ -275,9 +275,7 @@ impl From<Content> for MessageKind {
             Content::Location { lat_e7, lon_e7 } => MessageKind::Location { lat_e7, lon_e7 },
             Content::Unknown(kind) => MessageKind::Unsupported { kind },
             // Never an event (spec 4.5, 4.6).
-            Content::Receipt | Content::Group(_) | Content::GroupAsk { .. } | Content::ProfileKey(_) => {
-                MessageKind::Unsupported { kind: 0 }
-            }
+            Content::Receipt | Content::Group(_) | Content::ProfileKey(_) => MessageKind::Unsupported { kind: 0 },
         }
     }
 }
@@ -891,6 +889,12 @@ impl YoClient {
     pub fn set_trust_roots(&self, keys: Vec<Vec<u8>>) -> Result<(), YoError> {
         let keys = keys.into_iter().map(key_of).collect::<Result<Vec<_>, _>>()?;
         self.with(|c| c.set_trust_roots(keys))
+    }
+
+    /// Pins the hub's zkgroup public params for groups (spec 4.9), as `yo-hub zk new` printed them. Without them no
+    /// group is made, changed or fetched (`Hub.pin`).
+    pub fn set_zk_params(&self, params: Vec<u8>) -> Result<(), YoError> {
+        self.with(|c| c.set_zk_params(&params))?.map_err(Into::into)
     }
 
     /// This device's security now: keys at the hub, sessions, verified contacts.

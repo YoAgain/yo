@@ -9,7 +9,7 @@ pub const WITH_LINK: u16 = 2;
 pub const WITH_LOCATION: u16 = 3;
 pub const WITH_PHOTO: u16 = 4;
 pub const WITH_VIDEO: u16 = 5;
-/// The group a Yo goes to (spec 5): its id and the revision the sender has.
+/// The group a Yo goes to (spec 4.9): its master key and the revision the sender has.
 pub const WITH_GROUP: u16 = 6;
 /// The sender's profile key and its generation (spec 4.10: `opaque key[32]; uint32 generation`), on every content
 /// message to an accepted contact or a joined group's members, as Signal's `DataMessage.profileKey`: a key missed or
@@ -29,17 +29,16 @@ pub const TYPE_LINK: u16 = 4;
 pub const TYPE_LOCATION: u16 = 5;
 /// Silent: a delivery receipt, the answer that moves the sender's ratchet on (spec 4.5).
 pub const TYPE_RECEIPT: u16 = 6;
-/// A group as its sender has it now: id, revision, name, members (spec 4.9).
+/// Silent: a group was made or changed at the hub (spec 4.9): its master key and the revision now.
 pub const TYPE_GROUP: u16 = 8;
-/// Silent: the sender knows a newer revision of a group than this: it is asked for (spec 4.9).
-pub const TYPE_GROUP_ASK: u16 = 9;
 /// The sender's profile key (spec 4.10): with it, the receiver's deliveries to the sender are a contact's, not a
 /// request. Never shown.
 pub const TYPE_PROFILE_KEY: u16 = 10;
 
-/// A group's id: 16 random bytes its creator chooses.
-pub const GROUP_ID_LEN: usize = 16;
-pub type GroupId = [u8; GROUP_ID_LEN];
+/// A group's master key (Signal's `GroupMasterKey`, zkgroup): 32 random bytes its creator chooses; its members hold it,
+/// the hub never does. The group's id at the hub (its `GroupIdentifier`) is derived from it.
+pub const GROUP_KEY_LEN: usize = 32;
+pub type GroupKey = [u8; GROUP_KEY_LEN];
 /// The most accounts in a group, its creator among them.
 pub const MAX_GROUP: usize = 20;
 
@@ -71,41 +70,19 @@ impl std::fmt::Debug for Media {
     }
 }
 
-/// What a group Yo names: the group, its revision as the sender has it, and `group_hash` of the sender's name and
-/// members, so a receiver at the same revision sees when the two diverged (spec 4.9).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, TlsSerialize, TlsDeserializeBytes, TlsSize)]
+/// What a group Yo or a group's change names (spec 4.9): the group's master key, and its revision as the sender has
+/// it. A receiver at an older revision fetches the group from the hub.
+#[derive(Clone, Copy, PartialEq, Eq, TlsSerialize, TlsDeserializeBytes, TlsSize)]
 pub struct GroupTag {
-    pub id: GroupId,
+    pub key: GroupKey,
     pub revision: u32,
-    pub hash: [u8; GROUP_HASH_LEN],
 }
 
-pub const GROUP_HASH_LEN: usize = 8;
-
-/// A group's name and members (sorted) as one value: the first 8 bytes of SHA-256("yo group v1" || id || name<V> ||
-/// members<V>). The name too: what a member sees is both, and a rename lost is as much a divergence as a member.
-pub fn group_hash(id: &GroupId, name: &str, members: &[crate::UserId]) -> [u8; GROUP_HASH_LEN] {
-    use sha2::{Digest, Sha256};
-    #[derive(TlsSerialize, TlsSize)]
-    struct Hashed {
-        id: GroupId,
-        name: VLBytes,
-        members: Vec<crate::UserId>,
+/// No key in a log.
+impl std::fmt::Debug for GroupTag {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("GroupTag").field("revision", &self.revision).finish_non_exhaustive()
     }
-    let hashed = Hashed { id: *id, name: name.as_bytes().to_vec().into(), members: members.to_vec() };
-    let digest = Sha256::new().chain_update(b"yo group v1").chain_update(crate::encode(&hashed)).finalize();
-    digest[..GROUP_HASH_LEN].try_into().expect("8 bytes")
-}
-
-/// A group as one member has it: who is in it (user ids, sorted, each once, 1 to `MAX_GROUP`) and what it is called.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct GroupInfo {
-    pub id: GroupId,
-    pub revision: u32,
-    /// Who made this revision (not who passes it on).
-    pub by: crate::UserId,
-    pub name: String,
-    pub members: Vec<crate::UserId>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -130,12 +107,8 @@ pub enum Content {
     },
     /// Something from the receiver arrived (spec 4.5). Never shown.
     Receipt,
-    /// A group made or changed: the whole group as the sender has it now.
-    Group(GroupInfo),
-    /// Send this group as you have it: the asker knows of a newer revision than its own. Never shown.
-    GroupAsk {
-        id: GroupId,
-    },
+    /// A group made or changed at the hub: fetch it there. Never shown.
+    Group(GroupTag),
     /// The sender's profile key: what the receiver shows the hub so that its deliveries to the sender are a contact's
     /// (spec 4.10). Never shown.
     ProfileKey([u8; 32]),
@@ -208,28 +181,8 @@ fn yo_body(items: Vec<(u16, Vec<u8>)>) -> Vec<u8> {
 }
 
 #[derive(TlsSerialize, TlsDeserializeBytes, TlsSize)]
-struct Group {
-    id: GroupId,
-    revision: u32,
-    /// Who made this revision: the tie-break of two at the same revision, also when another member passes it on.
-    by: crate::UserId,
-    name: VLBytes,
-    members: Vec<crate::UserId>,
-}
-
-#[derive(TlsSerialize, TlsDeserializeBytes, TlsSize)]
 struct ProfileKeyBody {
     key: [u8; 32],
-}
-
-#[derive(TlsSerialize, TlsDeserializeBytes, TlsSize)]
-struct GroupAsk {
-    id: GroupId,
-}
-
-/// A group's members as they may be: 1 to `MAX_GROUP`, sorted, each once.
-fn members_ok(members: &[crate::UserId]) -> bool {
-    !members.is_empty() && members.len() <= MAX_GROUP && members.windows(2).all(|pair| pair[0] < pair[1])
 }
 
 /// A Yo's body: empty, or what it carries, sorted by kind, each kind once, at least one. Kinds this version does not
@@ -339,17 +292,7 @@ impl Message {
                 (TYPE_LOCATION, trailer(location))
             }
             Content::Receipt => (TYPE_RECEIPT, Vec::new()),
-            Content::Group(info) => {
-                if !members_ok(&info.members) {
-                    return Err(Error::Format);
-                }
-                let name = text(&info.name, MAX_NAME_LEN)?;
-                let Text { text: name } = crate::decode(&name)?;
-                let group =
-                    Group { id: info.id, revision: info.revision, by: info.by, name, members: info.members.clone() };
-                (TYPE_GROUP, crate::encode(&group))
-            }
-            Content::GroupAsk { id } => (TYPE_GROUP_ASK, crate::encode(&GroupAsk { id: *id })),
+            Content::Group(tag) => (TYPE_GROUP, crate::encode(tag)),
             Content::ProfileKey(key) => (TYPE_PROFILE_KEY, crate::encode(&ProfileKeyBody { key: *key })),
             Content::Unknown(_) => return Err(Error::Unsupported),
         };
@@ -399,15 +342,7 @@ impl Message {
             }
             TYPE_RECEIPT if !body.is_empty() => return Err(Error::Format),
             TYPE_RECEIPT => Content::Receipt,
-            TYPE_GROUP => {
-                let Group { id, revision, by, name, members } = crate::decode(body)?;
-                let name = read_text(&crate::encode(&Text { text: name }), MAX_NAME_LEN)?;
-                if !members_ok(&members) {
-                    return Err(Error::Format);
-                }
-                Content::Group(GroupInfo { id, revision, by, name, members })
-            }
-            TYPE_GROUP_ASK => Content::GroupAsk { id: crate::decode::<GroupAsk>(body)?.id },
+            TYPE_GROUP => Content::Group(crate::decode::<GroupTag>(body)?),
             TYPE_PROFILE_KEY => Content::ProfileKey(crate::decode::<ProfileKeyBody>(body)?.key),
             other => Content::Unknown(other),
         };
@@ -480,7 +415,7 @@ mod tests {
         // Nothing known: a plain Yo.
         assert_eq!(Message::decode(&yo(vec![other(99)])).unwrap().content, Content::Yo);
         // The sender's profile key on a Yo: read beside it, skipped by `decode` (and so by apps before it).
-        let group = GroupTag { id: [3; 16], revision: 2, hash: [4; 8] };
+        let group = GroupTag { key: [3; 32], revision: 2 };
         let keyed = Message { sent_at_ms: 5, group: Some(group), content: Content::Photo(media(3)) };
         let bytes = keyed.encode_with_key(Some(([7; 32], 3))).unwrap();
         assert_eq!(Message::decode(&bytes).unwrap(), keyed);
@@ -518,22 +453,15 @@ mod tests {
 
     #[test]
     fn a_group_yo_and_a_group_round_trip() {
-        let tag = GroupTag { id: [9; 16], revision: 3, hash: [4; 8] };
+        let tag = GroupTag { key: [9; 32], revision: 3 };
         for content in [Content::Yo, Content::Photo(media(1)), Content::Video { media: media(2), duration_ms: 1 }] {
             let message = Message { sent_at_ms: 9, group: Some(tag), content };
             assert_eq!(Message::decode(&message.encode().unwrap()).unwrap(), message);
         }
-        let group =
-            GroupInfo { id: [7; 16], revision: 1, by: [1; 16], name: "FAMILY".into(), members: vec![[1; 16], [2; 16]] };
-        let message = Message { sent_at_ms: 9, group: None, content: Content::Group(group.clone()) };
+        let message = Message { sent_at_ms: 9, group: None, content: Content::Group(tag) };
         assert_eq!(Message::decode(&message.encode().unwrap()).unwrap(), message);
-        let ask = Message { sent_at_ms: 9, group: None, content: Content::GroupAsk { id: [7; 16] } };
-        assert_eq!(Message::decode(&ask.encode().unwrap()).unwrap(), ask);
-        // Members unsorted, twice, none or too many: refused; a group on a profile: refused.
-        for members in [vec![[2; 16], [1; 16]], vec![[1; 16], [1; 16]], vec![], (0..21u8).map(|i| [i; 16]).collect()] {
-            let bad = Content::Group(GroupInfo { members, ..group.clone() });
-            assert_eq!(Message { sent_at_ms: 9, group: None, content: bad }.encode(), Err(Error::Format));
-        }
+        // The key never shows in a log; a group on a profile: refused.
+        assert!(!format!("{tag:?}").contains("[9"));
         let profile = Content::Profile { name: "A".into() };
         assert_eq!(Message { sent_at_ms: 9, group: Some(tag), content: profile }.encode(), Err(Error::Format));
     }

@@ -12,7 +12,8 @@ RUN mkdir /data && chown 65534:65534 /data
 COPY --from=build /yo/target/release/yo-hub /usr/local/bin/yo-hub
 # The database lives in /data (a volume); the hub listens inside the container on 8080. Its signing key (spec 6.11):
 # mount a 32-byte file and point YO_HUB_KEY_FILE at it (docker run -e YO_HUB_KEY_FILE=/run/secrets/hub-key …). Its
-# server certificate (spec 6.1, `yo-hub trust-root server`): the same way, YO_SERVER_CERT_FILE.
+# server certificate (spec 6.1, `yo-hub trust-root server`): the same way, YO_SERVER_CERT_FILE; its groups' zkgroup
+# params (spec 4.9, `yo-hub zk new`): YO_ZK_PARAMS_FILE.
 ENV YO_DB=/data/yo-hub.sqlite YO_LISTEN=0.0.0.0:8080
 VOLUME /data
 USER 65534:65534

@@ -52,6 +52,13 @@ enum Hub {
     ],
   ]
 
+  /// The zkgroup public params of each hub's groups (spec 4.9), base64url as `yo-hub zk new` printed them. A hub with
+  /// none here (a placeholder left empty) makes, changes and fetches no group: it fails closed.
+  static let zkParams: [String: String] = [
+    "hub.justyo.app": "",  // live: `yo-hub zk new` on the live hub, its printed line here
+    "dev.justyo.app": "",  // dev: the same on the dev hub
+  ]
+
   /// Pins this hub's keys in a client right after it is made: from then on it takes keys only the hub signed, and
   /// sealed Yos only with a sender certificate from its trust roots.
   static func pin(_ client: YoClient) {
@@ -61,6 +68,11 @@ enum Hub {
       print("Yo: no trust root pinned for \(host): sealed Yos do not open, Yos go identified (Hub.trustRoots)")
     }
     try? client.setTrustRoots(keys: roots)
+    if let params = zkParams[host].flatMap({ Data(base64URL: $0) }), !params.isEmpty {
+      try? client.setZkParams(params: params)
+    } else {
+      print("Yo: no group params pinned for \(host): no groups (Hub.zkParams)")
+    }
     guard let texts = keys[host] else { return }
     let pinned = texts.compactMap { Data(base64URL: $0) }
     guard !pinned.isEmpty else { return }

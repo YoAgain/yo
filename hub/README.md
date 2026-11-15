@@ -38,6 +38,10 @@ registration on, written when it changes) and answers `426` to every request of 
 | PUT | `/v1/push` | set the device's push token (≤ 512 bytes) | signed | signed | the token |
 | GET | `/.well-known/yo-hub-key` | the hub's public signing key, 32 bytes (spec 6.10); apps pin their own copy | none | – | nothing |
 | GET | `/.well-known/yo-trust-root` | the sender-certificate trust root's public key, 32 bytes (spec 6.1); apps pin their own copy | none | – | nothing |
+| GET | `/.well-known/yo-zk-params` | the groups' zkgroup `ServerPublicParams` (spec 4.9); apps pin their own copy | none | – | nothing |
+| GET | `/v1/group-auth` | the day's group auth credential (spec 4.9) | signed | signed | that the device asked |
+| POST | `/v1/group-credential` | a profile key credential for a user whose profile key the asker holds (spec 4.9) | signed | 1000/day (device) | who asks a credential for whom |
+| PUT, POST | `/v1/groups/{id}` | make, fetch, change a group (spec 4.9): kept encrypted, checked by zero-knowledge proof, changes by revision (`409`) | signed, and a member's auth credential presentation | signed | which device touches which group id, when; never its members or name |
 | GET | `/v1/certificate` | a sender certificate for the signing device, a day (spec 6.1) | signed | signed | that the device asked |
 | PUT | `/v1/username` | change or give up the account's username | signed | signed | the name |
 | DELETE | `/v1/account` | delete the account and everything about it (spec 6.4) | signed | signed | – |

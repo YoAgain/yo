@@ -71,10 +71,11 @@ final class Inbox {
   /// Group members' names by user id (hex), as their Yos came: who a group's photo is from in the viewer.
   @ObservationIgnored var memberNames: [String: String] = [:]
 
-  /// Who a group's photo or video is from (their user id, hex): its id is the group's id (32 hex), the sender's (32
-  /// hex), then the rest (`mediaID`).
+  /// Who a group's photo or video is from (their user id, hex): its id is the group's id (64 hex, spec 4.9), the
+  /// sender's (32 hex), then the rest (`mediaID`).
   static func sender(of arrival: Arrival) -> String? {
-    arrival.id.count > 64 ? String(arrival.id.dropFirst(32).prefix(32)) : nil
+    let head = arrival.id.split(separator: "/").first.map(String.init) ?? ""
+    return head.count == 96 ? String(head.suffix(32)) : nil
   }
   /// Notifications already taken in, so one tapped and one collected on opening count once: the newest 2000, oldest
   /// first out (a notification and its Yo come within moments of each other).

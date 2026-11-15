@@ -1,22 +1,31 @@
-//! Groups (spec 4.9): up to `MAX_GROUP` accounts, no state at the hub. A group's Yo goes to each member over the
-//! sessions the members have with each other; its id and the sender's revision ride along. A change (made, renamed,
-//! someone added, removed or gone) is the whole group, one revision on, to everyone in it before and after: the higher
-//! revision stands, of two at the same revision the one by the lower user id. Only a member's change counts.
+//! Groups (spec 4.9): Signal's Groups v2 with zkgroup, a small part of it. The hub keeps each group encrypted under
+//! its master key (members, their profile keys, the title) with its revision, and checks every request by
+//! zero-knowledge proof: an auth credential presentation shows a member asks, a profile key credential presentation
+//! that a member added holds its key (else it is invited). Members hold the key; a change is one revision on at the
+//! hub (of two at once one wins, the other is made again on the winner). A Yo goes to each member over the sessions,
+//! sealed with a group send endorsement where the sender lacks the recipient's profile key; it and every change name
+//! the key and the revision, so a member behind fetches the group.
 
-use crate::state::{hex, unhex, Group, Mine};
-use crate::{retryable, shown, user_bytes, Client, Content, Error, Event, Result, KEPT_FOR_RESEND};
-use yo_wire::content::{group_hash, GroupId, GroupInfo, GroupTag, Message, GROUP_HASH_LEN, GROUP_ID_LEN, MAX_GROUP};
-use yo_wire::envelope::Plain;
-use yo_wire::handle::Handle;
+use crate::state::{hex, unhex, Group, StoredEvent};
+use crate::{refused, retryable, shown, user_bytes, Client, Content, Error, Event, Result};
+use libsignal_protocol::{Aci, Pni, ServiceId};
+use yo_wire::api::{self, status, GroupAction, GroupAnswer, NewMember};
+use yo_wire::content::{GroupKey, GroupTag, MAX_GROUP, MAX_NAME_LEN};
 use yo_wire::limits::MAX_BLOB_FETCHES;
-use yo_wire::{encode, UserId};
+use yo_wire::{decode, encode};
+use zkgroup::auth::{AuthCredentialWithPni, AuthCredentialWithPniZkc, AuthCredentialWithPniZkcResponse};
+use zkgroup::groups::{
+    GroupMasterKey, GroupSecretParams, GroupSendEndorsement, GroupSendEndorsementsResponse, UuidCiphertext,
+};
+use zkgroup::profiles::{ExpiringProfileKeyCredentialResponse, ProfileKey};
+use zkgroup::{ServerPublicParams, Timestamp, SECONDS_PER_DAY};
 
 /// A group as the app shows it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct GroupView {
-    /// Its id (hex).
+    /// Its id (hex): its identifier at the hub.
     pub id: String,
-    /// Empty while only its Yos are known, not yet the group itself (it is asked for).
+    /// Empty while it is not fetched yet.
     pub name: String,
     /// Its members by user id (hex), this account among them while it is in.
     pub members: Vec<String>,
@@ -33,33 +42,83 @@ fn not_now(error: &Error) -> bool {
     retryable(error) || matches!(error, Error::Refused(401) | Error::Save(_) | Error::Replaced)
 }
 
-fn group_id(id: &str) -> Result<GroupId> {
-    unhex(id).and_then(|bytes| bytes.try_into().ok()).ok_or(Error::Protocol("a group id"))
-}
-
-/// `group_hash` of a group as this device has it.
-fn hash_of(id: &GroupId, group: &Group) -> Result<[u8; GROUP_HASH_LEN]> {
-    let members = group.members.iter().map(|m| user_bytes(m)).collect::<Result<Vec<_>>>()?;
-    Ok(group_hash(id, &group.name, &members))
-}
-
-/// What a group Yo names: the group as this device has it.
-fn tag_of(id: &str, group: &Group) -> Result<GroupTag> {
-    let id = group_id(id)?;
-    Ok(GroupTag { id, revision: group.revision, hash: hash_of(&id, group)? })
-}
-
-/// Groups this device keeps at most: a sender naming new group ids cannot fill it (its asks are bounded the same).
+/// Groups this device keeps at most: a sender naming new group keys cannot fill it.
 const MAX_GROUPS: usize = 256;
-/// Group Yos held at once from senders not in their group yet (`State::group_held`).
+/// Group Yos held at once while their group is fetched (`State::group_held`).
 const MAX_HELD: usize = 64;
+/// How often a change is made again on what the hub has meanwhile (`409`) before it gives up.
+const CHANGE_TRIES: usize = 4;
+/// Endorsements are used until this long before they expire, then fetched anew.
+const ENDORSED_MARGIN_S: u64 = 3600;
+
+fn secret(key: &GroupKey) -> GroupSecretParams {
+    GroupSecretParams::derive_from_master_key(GroupMasterKey::new(*key))
+}
+
+/// A group's id (hex): its identifier at the hub, from its key.
+pub(crate) fn group_id_of(key: &GroupKey) -> String {
+    hex(&secret(key).get_group_identifier())
+}
+
+fn key_of(group: &Group) -> Result<GroupKey> {
+    unhex(&group.key).and_then(|k| k.try_into().ok()).ok_or(Error::Internal("a group key"))
+}
+
+fn aci(user: &str) -> Result<Aci> {
+    Ok(Aci::from_uuid_bytes(user_bytes(user)?))
+}
+
+fn random() -> [u8; 32] {
+    let mut bytes = [0u8; 32];
+    rand::fill(&mut bytes);
+    bytes
+}
+
+fn bad_answer() -> Error {
+    Error::Protocol("a group answer")
+}
+
+/// The test hubs' public params (`api::TEST_ZK_SEED`), which test clients start with.
+pub(crate) fn test_zk() -> Option<ServerPublicParams> {
+    #[cfg(feature = "testing")]
+    {
+        static PARAMS: std::sync::OnceLock<Vec<u8>> = std::sync::OnceLock::new();
+        let bytes = PARAMS.get_or_init(|| {
+            zkgroup::serialize(&zkgroup::ServerSecretParams::generate(api::TEST_ZK_SEED).get_public_params())
+        });
+        zkgroup::deserialize(bytes).ok()
+    }
+    #[cfg(not(feature = "testing"))]
+    None
+}
+
+/// What a change is to do, made again on the group as the hub has it after a `409`.
+enum Intent {
+    Add(Vec<String>),
+    Remove(Vec<String>),
+    Rename(String),
+    /// This account's own profile key into its entry (a yes to a request).
+    Key,
+}
 
 impl Client {
-    /// The groups this account is or was in.
+    /// Pins the hub's zkgroup `ServerPublicParams` (spec 4.9), as `yo-hub zk new` printed them: without them no group
+    /// is made, changed or fetched.
+    pub fn set_zk_params(&mut self, bytes: &[u8]) -> Result<()> {
+        self.zk = Some(zkgroup::deserialize(bytes).map_err(|_| Error::Protocol("not ServerPublicParams"))?);
+        Ok(())
+    }
+
+    fn zk(&self) -> Result<ServerPublicParams> {
+        self.zk.clone().ok_or(Error::Protocol("no group params pinned for this hub"))
+    }
+
+    /// The groups this account is or was in (fetched at least once).
     pub fn groups(&self) -> Vec<GroupView> {
         self.state
             .groups
             .iter()
+            .filter(|(_, g)| g.revision > 0)
             .map(|(id, g)| GroupView {
                 id: id.clone(),
                 name: g.name.clone(),
@@ -71,87 +130,116 @@ impl Client {
             .collect()
     }
 
-    /// Makes a group of this account and `members` (user ids), named `name`, and tells them; returns its id.
+    /// Makes a group of this account and `members` (user ids), named `name`, at the hub, and tells them; returns its
+    /// id.
     pub fn create_group(&mut self, name: &str, members: &[String]) -> Result<(String, Vec<Event>)> {
-        let mut id = [0u8; GROUP_ID_LEN];
-        rand::fill(&mut id);
-        let id = hex(&id);
+        let result = self.create_group_inner(name, members);
+        let id = result.as_ref().ok().cloned();
+        self.finish(result).map(|events| (id.unwrap_or_default(), events))
+    }
+
+    fn create_group_inner(&mut self, name: &str, members: &[String]) -> Result<String> {
+        let zk = self.zk()?;
         let me = self.state.user_id.clone();
-        let mut all: Vec<String> = members.iter().map(|m| m.to_ascii_lowercase()).collect();
-        all.push(me.clone());
-        let name = name.to_owned();
+        let mut others: Vec<String> = members.iter().map(|m| m.to_ascii_lowercase()).filter(|m| *m != me).collect();
+        others.sort();
+        others.dedup();
+        for user in &others {
+            user_bytes(user)?;
+        }
+        if others.len() + 1 > MAX_GROUP {
+            return Err(Error::Protocol("a group has 20 members at most"));
+        }
         if self.state.groups.len() >= MAX_GROUPS {
             return Err(Error::Protocol("too many groups"));
         }
-        let result = self.change_group(&id, true, move |_| Ok((all, name)));
-        self.finish(result).map(|events| (id, events))
-    }
-
-    /// For tests: a group's message naming any revision, to one user, as only a broken or hostile client sends it.
-    #[cfg(feature = "testing")]
-    pub fn send_group_tagged_for_tests(&mut self, to: &str, id: &str, revision: u32, content: Content) -> Result<()> {
-        // As this device would only if it were in the group with them: its own view says so, so it leaves.
-        let me = self.state.user_id.clone();
-        let group = self.state.groups.entry(id.to_owned()).or_insert_with(|| Group {
-            name: String::new(),
-            members: Vec::new(),
-            revision,
-            by: me.clone(),
-            left: false,
-            before: Vec::new(),
-            accepted: true,
-            synced: Default::default(),
-            mine: None,
+        // The hub has this account's commitment (with its access key): its own entry goes in with its key.
+        match self.profile_keys() {
+            Err(error) if !retryable(&error) => return Err(error),
+            _ => {}
+        }
+        let key: GroupKey = random();
+        let secret = secret(&key);
+        let id = secret.get_group_identifier();
+        let auth = self.auth_presentation(&zk, &secret)?;
+        let mut new = vec![self.new_member(&zk, &secret, &me)?];
+        for user in &others {
+            new.push(self.new_member(&zk, &secret, user)?);
+        }
+        let body = encode(&api::NewGroup {
+            public_params: zkgroup::serialize(&secret.get_public_params()).into(),
+            auth: auth.into(),
+            title: title(&secret, name)?.into(),
+            members: new,
         });
-        group.left = false;
-        let mut members = vec![me, to.to_owned()];
-        members.sort();
-        group.members = members;
-        let tag = GroupTag { revision, ..tag_of(id, group)? };
-        self.queue(&[to.to_owned()], Some(tag), content)?;
-        self.persist()?;
-        self.deliver_now()
-    }
-
-    /// For tests: this device's group changed in place, at the same revision, telling nobody: two members whose
-    /// lists diverged (a change lost, a bug).
-    #[cfg(feature = "testing")]
-    pub fn set_group_for_tests(&mut self, id: &str, name: &str, members: &[String]) -> Result<()> {
-        let group = self.state.groups.get_mut(id).ok_or(Error::Protocol("not in this group"))?;
-        let mut members = members.to_vec();
-        members.sort();
-        (group.name, group.members) = (name.to_owned(), members);
-        self.persist()
+        let response = self.signed("PUT", &api::group_path(&id), &body)?;
+        if response.status != status::OK {
+            return Err(refused(&response));
+        }
+        let answer: GroupAnswer = decode(&response.body).map_err(|_| bad_answer())?;
+        let id = hex(&id);
+        self.state.groups.insert(
+            id.clone(),
+            Group {
+                key: hex(&key),
+                name: String::new(),
+                members: Vec::new(),
+                revision: 0,
+                left: false,
+                accepted: true,
+                keyed: false,
+                named: 0,
+                endorsed_until: 0,
+                endorsements: Default::default(),
+            },
+        );
+        self.take_answer(&id, answer)?;
+        let members = self.state.groups[&id].members.clone();
+        self.tell(&id, &members)?;
+        Ok(id)
     }
 
     pub fn rename_group(&mut self, id: &str, name: &str) -> Result<Vec<Event>> {
-        let name = name.to_owned();
-        let result = self.change_group(id, false, move |g| Ok((g.members.clone(), name)));
+        let result = self.change(id, Intent::Rename(name.to_owned()));
         self.finish(result)
     }
 
     pub fn add_to_group(&mut self, id: &str, users: &[String]) -> Result<Vec<Event>> {
-        let users: Vec<String> = users.iter().map(|u| u.to_ascii_lowercase()).collect();
-        let result = self
-            .change_group(id, false, move |g| Ok((g.members.iter().cloned().chain(users).collect(), g.name.clone())));
+        let users = users.iter().map(|u| u.to_ascii_lowercase()).collect();
+        let result = self.change(id, Intent::Add(users));
         self.finish(result)
     }
 
     pub fn remove_from_group(&mut self, id: &str, users: &[String]) -> Result<Vec<Event>> {
-        let users = users.to_vec();
-        let result = self.change_group(id, false, move |g| {
-            let members = g.members.iter().filter(|m| !users.iter().any(|u| u.eq_ignore_ascii_case(m))).cloned();
-            Ok((members.collect(), g.name.clone()))
-        });
+        let users = users.iter().map(|u| u.to_ascii_lowercase()).collect();
+        let result = self.change(id, Intent::Remove(users));
         self.finish(result)
     }
 
     /// Leaves a group: the others are told, this account gets nothing of it any more.
     pub fn leave_group(&mut self, id: &str) -> Result<Vec<Event>> {
         let me = self.state.user_id.clone();
-        let result = self.change_group(id, false, move |g| {
-            Ok((g.members.iter().filter(|m| **m != me).cloned().collect(), g.name.clone()))
-        });
+        let result = self.change(id, Intent::Remove(vec![me]));
+        self.finish(result)
+    }
+
+    /// Says yes to a group someone else added this account to: joined, its profile key into its entry at the hub, and
+    /// its members get the key.
+    pub fn accept_group(&mut self, id: &str) -> Result<Vec<Event>> {
+        let result = (|| {
+            let group = self.state.groups.get_mut(id).ok_or(Error::Protocol("no such group"))?;
+            group.accepted = true;
+            let members = group.members.clone();
+            self.profile_key_due(&members);
+            self.persist()?;
+            match self.change(id, Intent::Key) {
+                Err(error) if not_now(&error) => return Err(error),
+                Err(error) => self.note(format!("group key: {error}")),
+                Ok(()) => {}
+            }
+            self.profile_keys()?;
+            self.deliver()
+        })();
         self.finish(result)
     }
 
@@ -164,7 +252,7 @@ impl Client {
     /// How many fetches a photo or video to the group is uploaded for: every device of its other members, and this
     /// account's other devices (`MAX_BLOB_FETCHES` at most).
     pub fn group_media_fetches(&self, id: &str) -> Option<u32> {
-        let group = self.state.groups.get(id).filter(|g| !g.left)?;
+        let group = self.state.groups.get(id).filter(|g| !g.left && g.revision > 0)?;
         let devices: usize = group
             .members
             .iter()
@@ -188,23 +276,42 @@ impl Client {
         Ok((fetches.unwrap_or(1), events))
     }
 
+    /// For tests: how many deliveries the hub took on a group send endorsement alone (no profile key).
+    pub fn endorsed_deliveries(&self) -> u64 {
+        self.endorsed_sent
+    }
+
     // ---- inside ----
 
     fn group(&self, id: &str) -> Result<Group> {
-        self.state.groups.get(id).filter(|g| !g.left).cloned().ok_or(Error::Protocol("not in this group"))
+        self.state
+            .groups
+            .get(id)
+            .filter(|g| !g.left && g.revision > 0)
+            .cloned()
+            .ok_or(Error::Protocol("not in this group"))
     }
 
     fn send_group_inner(&mut self, id: &str, content: Content) -> Result<()> {
         if !shown(&content) || !matches!(content, Content::Yo | Content::Photo(_) | Content::Video { .. }) {
             return Err(Error::Protocol("not content for a group"));
         }
-        // As a send to one: what waits goes, the inbox is taken in (a change of the group among it).
+        // As a send to one: what waits goes, the inbox is taken in (a change of the group among it, fetched).
         self.catch_up()?;
-        let group = self.group(id)?;
+        let mut group = self.group(id)?;
+        // Endorsements for the members, fresh: who has no profile key of theirs here still gets it sealed.
+        if group.endorsed_until < self.now_s() + ENDORSED_MARGIN_S {
+            match self.fetch_group(id) {
+                Err(error) if not_now(&error) => return Err(error),
+                Err(error) => self.note(format!("group: {error}")),
+                Ok(()) => {}
+            }
+            group = self.group(id)?;
+        }
         self.not_empty(&group)?;
         let others = self.reach_all(&group.members)?;
         self.send_profiles();
-        let tag = tag_of(id, &group)?;
+        let tag = GroupTag { key: key_of(&group)?, revision: group.revision };
         self.atomic(|c| {
             c.queue(&others, Some(tag), content)?;
             c.persist()
@@ -212,11 +319,439 @@ impl Client {
         self.deliver_now()
     }
 
-    /// A group of this account alone takes no Yo (`GroupEmpty`): the app offers to delete it.
+    /// A group of this account alone takes no Yo (`GroupEmpty`): the app offers to leave it.
     fn not_empty(&self, group: &Group) -> Result<()> {
         match group.members.iter().any(|m| *m != self.state.user_id) {
             true => Ok(()),
             false => Err(Error::GroupEmpty),
+        }
+    }
+
+    fn now_s(&self) -> u64 {
+        self.wall() / 1000
+    }
+
+    /// An auth credential presentation for this group (today's credential, fetched once a day).
+    fn auth_presentation(&mut self, zk: &ServerPublicParams, secret: &GroupSecretParams) -> Result<Vec<u8>> {
+        let now = self.now_s();
+        let fresh = self.group_auth.as_ref().is_some_and(|(day, _)| now >= *day && now < day + SECONDS_PER_DAY);
+        if !fresh {
+            let response = self.signed("GET", api::GROUP_AUTH, &[])?;
+            if response.status != status::OK {
+                return Err(refused(&response));
+            }
+            let answer: api::GroupAuthCredential = decode(&response.body).map_err(|_| bad_answer())?;
+            let issued: AuthCredentialWithPniZkcResponse =
+                zkgroup::deserialize(answer.credential.as_slice()).map_err(|_| bad_answer())?;
+            let user = user_bytes(&self.state.user_id)?;
+            let credential: AuthCredentialWithPniZkc = issued
+                .receive(
+                    Aci::from_uuid_bytes(user),
+                    Pni::from_uuid_bytes(user),
+                    Timestamp::from_epoch_seconds(answer.redemption_s),
+                    zk,
+                )
+                .map_err(|_| Error::Protocol("an auth credential that does not verify"))?;
+            self.group_auth = Some((answer.redemption_s, credential));
+        }
+        let (_, credential) = self.group_auth.clone().expect("fetched above");
+        Ok(zkgroup::serialize(&AuthCredentialWithPni::Zkc(credential).present(zk, secret, random())))
+    }
+
+    /// A member to add: with a profile key credential presentation if this device holds their key and the hub issues
+    /// a credential for it (it is the one they told); else invited by their user id alone.
+    fn new_member(&mut self, zk: &ServerPublicParams, secret: &GroupSecretParams, user: &str) -> Result<NewMember> {
+        let user_aci = aci(user)?;
+        let key = match user == self.state.user_id {
+            true => self.state.profile_key,
+            false => self.state.contacts.get(user).and_then(|c| c.profile_key),
+        };
+        let invited = || NewMember {
+            user: zkgroup::serialize(&secret.encrypt_service_id(user_aci.into())).into(),
+            presentation: Vec::new().into(),
+        };
+        let Some(key) = key else { return Ok(invited()) };
+        let context = zk.create_profile_key_credential_request_context(random(), user_aci, ProfileKey::create(key));
+        let body = encode(&api::ProfileCredentialRequest {
+            user_id: user_bytes(user)?,
+            request: zkgroup::serialize(&context.get_request()).into(),
+        });
+        let response = self.signed("POST", api::GROUP_CREDENTIAL, &body)?;
+        match response.status {
+            status::OK => {}
+            // No commitment told, or another key than the one held here: invited.
+            status::NOT_FOUND | status::FORBIDDEN => return Ok(invited()),
+            _ => return Err(refused(&response)),
+        }
+        let issued: ExpiringProfileKeyCredentialResponse =
+            zkgroup::deserialize(&response.body).map_err(|_| bad_answer())?;
+        let now = Timestamp::from_epoch_seconds(self.now_s());
+        let Ok(credential) = zk.receive_expiring_profile_key_credential(&context, &issued, now) else {
+            self.note("a profile key credential that does not verify".into());
+            return Ok(invited());
+        };
+        let presentation = zk.create_expiring_profile_key_credential_presentation(random(), *secret, credential);
+        Ok(NewMember { user: Vec::new().into(), presentation: zkgroup::serialize(&presentation).into() })
+    }
+
+    /// The group as the hub answered it, taken in: members and title decrypted, endorsements checked.
+    fn take_answer(&mut self, id: &str, answer: GroupAnswer) -> Result<()> {
+        let zk = self.zk()?;
+        let me = self.state.user_id.clone();
+        let old = self.state.groups.get(id).cloned().ok_or(Error::Internal("a group"))?;
+        let secret = secret(&key_of(&old)?);
+        let decrypt = |bytes: &[u8]| -> Result<String> {
+            let ciphertext: UuidCiphertext = zkgroup::deserialize(bytes).map_err(|_| bad_answer())?;
+            let service = secret.decrypt_service_id(ciphertext).map_err(|_| bad_answer())?;
+            let aci = Aci::try_from(service).map_err(|_| bad_answer())?;
+            Ok(hex(&aci.service_id_binary()))
+        };
+        let mut members = Vec::new();
+        let (mut keyed, mut added_by) = (false, String::new());
+        for member in &answer.state.members {
+            let user = decrypt(member.user.as_slice())?;
+            if user == me {
+                keyed = !member.profile_key.as_slice().is_empty();
+                added_by = decrypt(member.added_by.as_slice()).unwrap_or_default();
+            }
+            members.push(user);
+        }
+        let name = secret
+            .decrypt_blob_with_padding(answer.state.title.as_slice())
+            .ok()
+            .and_then(|t| String::from_utf8(t).ok())
+            .unwrap_or_default();
+        let mut endorsements = std::collections::BTreeMap::new();
+        let mut endorsed_until = 0;
+        if !answer.endorsements.as_slice().is_empty() {
+            let received = zkgroup::deserialize::<GroupSendEndorsementsResponse>(answer.endorsements.as_slice())
+                .ok()
+                .and_then(|response| {
+                    let until = response.expiration().epoch_seconds();
+                    let services: Vec<ServiceId> =
+                        members.iter().filter_map(|m| aci(m).ok()).map(ServiceId::from).collect();
+                    let now = Timestamp::from_epoch_seconds(self.now_s());
+                    response
+                        .receive_with_service_ids_single_threaded(services, now, &secret, &zk)
+                        .ok()
+                        .map(|r| (until, r))
+                });
+            match received {
+                Some((until, received)) => {
+                    endorsed_until = until;
+                    for (member, endorsement) in members.iter().zip(received) {
+                        endorsements.insert(member.clone(), hex(&zkgroup::serialize(&endorsement.decompressed)));
+                    }
+                }
+                None => self.note("group send endorsements that do not verify".into()),
+            }
+        }
+        members.sort();
+        let left = !members.contains(&me);
+        let accepted = old.accepted
+            || keyed
+            || added_by == me
+            || self.state.contacts.get(&added_by).is_some_and(|c| c.accepted && !c.blocked);
+        let revision = answer.state.revision;
+        let changed = old.revision != revision || old.members != members || old.name != name || old.left != left;
+        let joined = accepted && !left;
+        let group = Group {
+            key: old.key,
+            name,
+            members: members.clone(),
+            revision,
+            left,
+            accepted,
+            keyed,
+            named: old.named.max(revision),
+            endorsed_until: if left { 0 } else { endorsed_until },
+            endorsements: if left { Default::default() } else { endorsements },
+        };
+        self.state.groups.insert(id.to_owned(), group);
+        // Its members get this account's profile key, so their Yos to the group come as a contact's (spec 4.10).
+        if joined {
+            self.profile_key_due(&members);
+        }
+        if changed {
+            self.push_event(Event::GroupChanged { group: id.to_owned() });
+        }
+        self.release_held(id);
+        self.persist()
+    }
+
+    /// Yos held for this group: shown if the group as fetched has their sender in it (and this account), else dropped;
+    /// never one of a sender blocked meanwhile.
+    fn release_held(&mut self, id: &str) {
+        let (theirs, rest): (Vec<_>, Vec<_>) =
+            std::mem::take(&mut self.state.group_held).into_iter().partition(|(g, _)| g == id);
+        self.state.group_held = rest;
+        let Some(group) = self.state.groups.get(id).cloned() else { return };
+        for (_, event) in theirs {
+            let shown = !group.left
+                && match &event {
+                    StoredEvent::GroupMessage { user, own: false, .. } => {
+                        group.members.contains(user) && !self.blocked(user)
+                    }
+                    StoredEvent::GroupMessage { own: true, .. } => true,
+                    _ => false,
+                };
+            if shown {
+                self.state.events.push(event);
+            }
+        }
+    }
+
+    /// Fetches a group from the hub. Not (or no longer) a member, or the group gone: left (one never fetched is
+    /// forgotten, a stranger's made-up key).
+    fn fetch_group(&mut self, id: &str) -> Result<()> {
+        let zk = self.zk()?;
+        let group = self.state.groups.get(id).cloned().ok_or(Error::Internal("a group"))?;
+        let secret = secret(&key_of(&group)?);
+        let auth = self.auth_presentation(&zk, &secret)?;
+        let body = encode(&api::GroupRequest { auth: auth.into(), revision: 0, actions: Vec::new() });
+        let response = self.signed("POST", &api::group_path(&secret.get_group_identifier()), &body)?;
+        match response.status {
+            status::OK => self.take_answer(id, decode(&response.body).map_err(|_| bad_answer())?),
+            status::FORBIDDEN | status::NOT_FOUND => {
+                self.out_of(id);
+                self.persist()
+            }
+            _ => Err(refused(&response)),
+        }
+    }
+
+    /// This account is not in the group (any more).
+    fn out_of(&mut self, id: &str) {
+        let Some(group) = self.state.groups.get_mut(id) else { return };
+        if group.revision == 0 {
+            self.state.groups.remove(id);
+        } else {
+            group.named = group.revision;
+            group.endorsed_until = 0;
+            group.endorsements.clear();
+            if !std::mem::replace(&mut group.left, true) {
+                self.push_event(Event::GroupChanged { group: id.to_owned() });
+            }
+        }
+        self.state.group_held.retain(|(g, _)| g != id);
+    }
+
+    /// Every group a message named a newer revision of (or never fetched) is fetched now. Not now: later.
+    pub(crate) fn refresh_groups(&mut self) -> Result<()> {
+        let due: Vec<String> = (self.state.groups.iter())
+            .filter(|(_, g)| g.revision == 0 || g.named > g.revision)
+            .map(|(id, _)| id.clone())
+            .collect();
+        for id in due {
+            match self.fetch_group(&id) {
+                Ok(()) => {}
+                Err(error) if not_now(&error) => return Err(error),
+                Err(error) => {
+                    self.note(format!("group: {error}"));
+                    self.out_of(&id);
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// `refresh_groups`, whatever comes of it: noted, tried again after the next read.
+    pub(crate) fn refresh_groups_quietly(&mut self) {
+        if let Err(error) = self.refresh_groups() {
+            self.note(format!("groups later: {error}"));
+        }
+    }
+
+    /// A group a message names: known from now on, its revision noted (fetched after the inbox, `refresh_groups`).
+    fn group_named(&mut self, tag: GroupTag) -> Option<String> {
+        let id = group_id_of(&tag.key);
+        let full = self.state.groups.len() >= MAX_GROUPS;
+        match self.state.groups.get_mut(&id) {
+            Some(group) => group.named = group.named.max(tag.revision),
+            // A sender cannot fill this device with groups.
+            None if full => {
+                self.note("a group past the most kept".into());
+                return None;
+            }
+            None => {
+                self.state.groups.insert(
+                    id.clone(),
+                    Group {
+                        key: hex(&tag.key),
+                        name: String::new(),
+                        members: Vec::new(),
+                        revision: 0,
+                        left: false,
+                        accepted: false,
+                        keyed: false,
+                        named: tag.revision,
+                        endorsed_until: 0,
+                        endorsements: Default::default(),
+                    },
+                );
+            }
+        }
+        Some(id)
+    }
+
+    /// A group was made or changed (type 8, also from this account's other devices): fetched after the inbox.
+    pub(crate) fn group_changed(&mut self, tag: GroupTag) {
+        self.group_named(tag);
+    }
+
+    /// A Yo from `from` to a group: shown if they are in it as fetched; held while the group is fetched (a group not
+    /// known yet, or a newer revision than here).
+    pub(crate) fn group_yo(&mut self, from: &str, tag: GroupTag, sent_at_ms: u64, content: Content) {
+        let Some(id) = self.group_named(tag) else { return };
+        let group = self.state.groups[&id].clone();
+        let current = group.revision > 0 && group.revision >= tag.revision;
+        if current && (group.left || !group.members.iter().any(|m| m == from)) {
+            self.note("a Yo to a group from no member".into());
+            return;
+        }
+        // A receipt only in a group joined, or to a contact: a request gets nothing back (spec 4.10).
+        if let Some(contact) = self.state.contacts.get_mut(from).filter(|c| group.accepted || c.accepted) {
+            contact.receipt_due = true;
+        }
+        let content = self.forget_keys(content);
+        let event = Event::GroupMessage { group: id.clone(), user: from.to_owned(), sent_at_ms, content };
+        self.show_or_hold(&id, current, event);
+    }
+
+    /// One's own other device sent this to the group.
+    pub(crate) fn group_sent_elsewhere(&mut self, tag: GroupTag, sent_at_ms: u64, content: Content) {
+        let Some(id) = self.group_named(tag) else { return };
+        let group = &self.state.groups[&id];
+        let current = group.revision > 0 && group.revision >= tag.revision;
+        let content = self.forget_keys(content);
+        let event = Event::GroupSentElsewhere { group: id.clone(), sent_at_ms, content };
+        self.show_or_hold(&id, current, event);
+    }
+
+    fn show_or_hold(&mut self, id: &str, current: bool, event: Event) {
+        if current {
+            self.push_event(event);
+        } else if self.state.group_held.len() < MAX_HELD {
+            self.state.group_held.push((id.to_owned(), crate::stored(event)));
+        } else {
+            self.note("a group's Yo while its group is fetched, too many held".into());
+        }
+    }
+
+    /// A change at the hub, as one revision on; on a `409` (another change came first) made again on the group as the
+    /// hub has it. Everyone in it before and after is told (type 8).
+    fn change(&mut self, id: &str, intent: Intent) -> Result<()> {
+        let zk = self.zk()?;
+        let me = self.state.user_id.clone();
+        if self.state.groups.get(id).is_some_and(|g| g.named > g.revision) {
+            self.fetch_group(id)?;
+        }
+        for _ in 0..CHANGE_TRIES {
+            let group = self.group(id)?;
+            let secret = secret(&key_of(&group)?);
+            let mut actions = Vec::new();
+            let mut after = group.members.clone();
+            match &intent {
+                Intent::Add(users) => {
+                    for user in users.iter().filter(|u| !group.members.contains(u)) {
+                        let member = self.new_member(&zk, &secret, user)?;
+                        actions.push(GroupAction { kind: api::ACTION_ADD, data: encode(&member).into() });
+                        after.push(user.clone());
+                    }
+                }
+                Intent::Remove(users) => {
+                    for user in users.iter().filter(|u| group.members.contains(u)) {
+                        let ciphertext = secret.encrypt_service_id(aci(user)?.into());
+                        actions.push(GroupAction {
+                            kind: api::ACTION_REMOVE,
+                            data: zkgroup::serialize(&ciphertext).into(),
+                        });
+                        after.retain(|m| m != user);
+                    }
+                }
+                Intent::Rename(name) if *name != group.name => {
+                    actions.push(GroupAction { kind: api::ACTION_TITLE, data: title(&secret, name)?.into() });
+                }
+                Intent::Rename(_) => {}
+                Intent::Key if !group.keyed => {
+                    let member = self.new_member(&zk, &secret, &me)?;
+                    if !member.presentation.as_slice().is_empty() {
+                        actions.push(GroupAction { kind: api::ACTION_PROFILE_KEY, data: member.presentation });
+                    }
+                }
+                Intent::Key => {}
+            }
+            if actions.is_empty() {
+                return Ok(());
+            }
+            if after.len() > MAX_GROUP {
+                return Err(Error::Protocol("a group has 20 members at most"));
+            }
+            let auth = self.auth_presentation(&zk, &secret)?;
+            let revision = group.revision.checked_add(1).ok_or(Error::Protocol("a group's last revision"))?;
+            let body = encode(&api::GroupRequest { auth: auth.into(), revision, actions });
+            let response = self.signed("POST", &api::group_path(&secret.get_group_identifier()), &body)?;
+            match response.status {
+                status::OK => {
+                    self.take_answer(id, decode(&response.body).map_err(|_| bad_answer())?)?;
+                    let mut told: Vec<String> = group.members.iter().chain(&after).cloned().collect();
+                    told.sort();
+                    told.dedup();
+                    return self.tell(id, &told);
+                }
+                // Another change first: the group as it is now, and this one made again on it.
+                status::CONFLICT => self.take_answer(id, decode(&response.body).map_err(|_| bad_answer())?)?,
+                status::FORBIDDEN | status::NOT_FOUND => {
+                    self.out_of(id);
+                    self.persist()?;
+                    return Err(Error::Protocol("not in this group"));
+                }
+                _ => return Err(refused(&response)),
+            }
+        }
+        Err(Error::Protocol("the group changed too often meanwhile"))
+    }
+
+    /// Tells `users` (all but this account) and this account's other devices that the group is at its revision now.
+    fn tell(&mut self, id: &str, users: &[String]) -> Result<()> {
+        let group = self.state.groups.get(id).cloned().ok_or(Error::Internal("a group"))?;
+        let tag = GroupTag { key: key_of(&group)?, revision: group.revision };
+        let reached = self.reach_all(users)?;
+        if !group.left {
+            self.send_profiles();
+        }
+        // `queue` makes the copy for this account's other devices.
+        self.atomic(|c| {
+            c.queue(&reached, None, Content::Group(tag))?;
+            c.persist()
+        })?;
+        match self.deliver() {
+            Ok(()) | Err(Error::Network(_)) => Ok(()),
+            Err(error) if retryable(&error) => Ok(()),
+            Err(error) => Err(error),
+        }
+    }
+
+    /// A group send token for `user` from a group both are in (spec 4.9), base64url: their delivery goes sealed
+    /// without their profile key.
+    pub(crate) fn group_send_token(&self, user: &str) -> Option<String> {
+        let now = self.now_s();
+        let group = self
+            .state
+            .groups
+            .values()
+            .find(|g| !g.left && g.endorsed_until > now + 60 && g.endorsements.contains_key(user))?;
+        let compressed = unhex(group.endorsements.get(user)?)?;
+        let endorsement: GroupSendEndorsement = zkgroup::deserialize(&compressed).ok()?;
+        let token = endorsement.to_token(secret(&key_of(group).ok()?));
+        let full = token.into_full_token(Timestamp::from_epoch_seconds(group.endorsed_until));
+        Some(yo_wire::b64(&zkgroup::serialize(&full)))
+    }
+
+    /// The hub refused a delivery's group send token: the endorsements for `user` are fetched anew before the next.
+    pub(crate) fn endorsement_refused(&mut self, user: &str) {
+        for group in self.state.groups.values_mut().filter(|g| g.endorsements.contains_key(user)) {
+            group.endorsed_until = 0;
         }
     }
 
@@ -232,13 +767,10 @@ impl Client {
             }
             if !self.has_chat(member) {
                 let chat = self.state.contacts.get(member).is_some_and(|c| c.chat);
-                match self.start_chat(&Handle::user(&user_bytes(member)?)) {
+                match self.start_chat(&yo_wire::handle::Handle::user(&user_bytes(member)?)) {
                     Ok(_) => {}
-                    // Not now (no network, a limit, a signature refused while the clock is off, a full disk, this
-                    // device replaced): the whole send fails now, rather than leave this member out for good.
                     Err(error) if not_now(&error) => return Err(error),
-                    // A verified member's new key, not confirmed yet: theirs is queued and waits in the outbox until
-                    // it is (as a 1:1 message would), not left out for good.
+                    // A verified member's new key, not confirmed yet: theirs waits in the outbox until it is.
                     Err(Error::Unconfirmed) => {}
                     Err(error) => {
                         self.note(format!("group member: {error}"));
@@ -263,7 +795,7 @@ impl Client {
         // members it did not reach yet; to none, if it reached them all (spec 4.7, 5).
         let users: Vec<String> = match &content {
             Content::Photo(media) | Content::Video { media, .. } => {
-                let in_group = group.as_ref().map(|g| &g.id);
+                let in_group = group.as_ref().map(|g| &g.key);
                 users.iter().filter(|user| !self.sent_media(user, &media.id, in_group)).cloned().collect()
             }
             _ => users.to_vec(),
@@ -280,13 +812,13 @@ impl Client {
             self.in_joined_group(user) || self.state.contacts.get(user).is_some_and(|c| c.accepted && !c.blocked)
         });
         let key = self.state.profile_key.filter(|_| accepted).map(|key| (key, self.state.profile_key_gen.max(1)));
-        let message = Message { sent_at_ms, group, content }.encode_with_key(key)?;
+        let message = yo_wire::content::Message { sent_at_ms, group, content }.encode_with_key(key)?;
         for user in &users {
-            self.enqueue(user, encode(&Plain { to: None, content: message.clone().into() }));
+            self.enqueue(user, encode(&yo_wire::envelope::Plain { to: None, content: message.clone().into() }));
             if keep {
                 if let Some(contact) = self.state.contacts.get_mut(user) {
                     contact.sent.push_back(message.clone());
-                    while contact.sent.len() > KEPT_FOR_RESEND {
+                    while contact.sent.len() > crate::KEPT_FOR_RESEND {
                         contact.sent.pop_front();
                     }
                 }
@@ -298,400 +830,28 @@ impl Client {
                 (None, [user]) => Some(user_bytes(user)?),
                 _ => None,
             };
-            self.enqueue(&me, encode(&Plain { to, content: message.into() }));
+            self.enqueue(&me, encode(&yo_wire::envelope::Plain { to, content: message.into() }));
         }
         Ok(())
     }
 
-    /// Makes revision + 1 of a group, as `edit` makes it of the group as it is once the inbox is taken in (a change
-    /// that came meanwhile is built on, not overwritten), tells everyone in it before and after, and keeps it.
-    /// `creating`: a new group (by this account), revision 1. The last member leaving keeps it to itself.
-    fn change_group(
-        &mut self,
-        id: &str,
-        creating: bool,
-        edit: impl FnOnce(&Group) -> Result<(Vec<String>, String)>,
-    ) -> Result<()> {
-        let me = self.state.user_id.clone();
-        // A change is built on what came meanwhile (spec 4.9): without the inbox read now, not at all (a new group has
-        // nothing to come, and is made offline too).
-        match self.deliver().and_then(|()| self.receive_all(0)) {
-            Ok(()) => {}
-            Err(error) if creating && retryable(&error) => {}
-            Err(error) => return Err(error),
-        }
-        let current = match creating {
-            true => Group {
-                name: String::new(),
-                members: Vec::new(),
-                revision: 0,
-                by: me.clone(),
-                left: false,
-                before: Vec::new(),
-                accepted: true,
-                synced: Default::default(),
-                mine: None,
-            },
-            false => self.group(id)?,
-        };
-        let (members, name) = edit(&current)?;
-        self.make_revision(id, current, members, name, creating, !creating)?;
-        match self.deliver() {
-            Ok(()) | Err(Error::Network(_)) => Ok(()),
-            Err(error) => Err(error),
-        }
-    }
-
-    /// Revision + 1 of `current` with `members` and `name`, by this account: queued to everyone in it before and
-    /// after, and kept (`record`: as this account's change, made again should a rival at its revision win).
-    fn make_revision(
-        &mut self,
-        id: &str,
-        current: Group,
-        mut members: Vec<String>,
-        name: String,
-        creating: bool,
-        record: bool,
-    ) -> Result<()> {
-        let me = self.state.user_id.clone();
-        members.sort();
-        members.dedup();
-        if members.len() > MAX_GROUP {
-            return Err(Error::Protocol("a group has 20 members at most"));
-        }
-        let revision = current
-            .revision
-            .checked_add(1)
-            .filter(|r| *r < u32::MAX)
-            .ok_or(Error::Protocol("a group's last revision"))?;
-        let left = !members.contains(&me);
-        if left && members.is_empty() {
-            // The last one out: nobody to tell, the group simply ends here.
-            self.atomic(|c| {
-                if let Some(g) = c.state.groups.get_mut(id) {
-                    g.left = true;
-                }
-                c.push_event(Event::GroupChanged { group: id.to_owned() });
-                c.persist()
-            })?;
-            return Ok(());
-        }
-        let ids: Vec<UserId> = members.iter().map(|m| user_bytes(m)).collect::<Result<_>>()?;
-        let info = GroupInfo { id: group_id(id)?, revision, by: user_bytes(&me)?, name: name.clone(), members: ids };
-        // Checked as it goes on the wire: the name and the members as they may be.
-        Message { sent_at_ms: 0, group: None, content: Content::Group(info.clone()) }.encode()?;
-        let mut told: Vec<String> = current.members.iter().chain(members.iter()).cloned().collect();
-        told.sort();
-        told.dedup();
-        let reached = self.reach_all(&told)?;
-        self.send_profiles();
-        // A new group counted again after the inbox was read: one that came meanwhile may have reached the bound.
-        if creating && self.state.groups.len() >= MAX_GROUPS {
-            return Err(Error::Protocol("too many groups"));
-        }
-        let mine = record.then(|| Mine {
-            revision,
-            add: members.iter().filter(|m| !current.members.contains(m)).cloned().collect(),
-            remove: current.members.iter().filter(|m| !members.contains(m)).cloned().collect(),
-            name: (name != current.name).then(|| name.clone()),
-            due: false,
-        });
-        self.atomic(|c| {
-            c.queue(&reached, None, Content::Group(info))?;
-            let group = Group {
-                name,
-                members,
-                revision,
-                by: me.clone(),
-                left,
-                before: current.members.clone(),
-                accepted: true,
-                synced: Default::default(),
-                mine,
-            };
-            // Left (a request said no to among them): its members get nothing more, the key neither.
-            if !left {
-                c.profile_key_due(&group.members);
-            }
-            c.state.groups.insert(id.to_owned(), group);
-            c.push_event(Event::GroupChanged { group: id.to_owned() });
-            c.persist()
+    /// Whether this account and `user` are both in the group a message names (one of no group: yes).
+    pub(crate) fn both_in(&self, tag: Option<&GroupTag>, user: &str) -> bool {
+        tag.is_none_or(|tag| {
+            self.state
+                .groups
+                .get(&group_id_of(&tag.key))
+                .is_some_and(|g| !g.left && (user == self.state.user_id || g.members.iter().any(|m| m == user)))
         })
     }
+}
 
-    /// This account's changes that lost to a rival at their revision, made again on top of the winner as the next
-    /// revision, once each; nothing if the winner already has them (spec 4.9).
-    pub(crate) fn reapply_groups(&mut self) -> Result<()> {
-        let due: Vec<(String, Mine)> = (self.state.groups.iter())
-            .filter_map(|(id, g)| g.mine.clone().filter(|m| m.due && !g.left).map(|m| (id.clone(), m)))
-            .collect();
-        for (id, mine) in due {
-            let Some(group) = self.state.groups.get_mut(&id) else { continue };
-            group.mine = None;
-            let current = group.clone();
-            let mut members: Vec<String> =
-                (current.members.iter()).filter(|m| !mine.remove.contains(m)).chain(mine.add.iter()).cloned().collect();
-            members.sort();
-            members.dedup();
-            let name = mine.name.clone().unwrap_or_else(|| current.name.clone());
-            if members == current.members && name == current.name {
-                continue;
-            }
-            match self.make_revision(&id, current, members, name, false, false) {
-                Ok(()) => {}
-                Err(error) if not_now(&error) => {
-                    // Not now: still due, for the next call.
-                    if let Some(group) = self.state.groups.get_mut(&id) {
-                        group.mine = Some(mine);
-                    }
-                    return Err(error);
-                }
-                Err(error) => self.note(format!("group: {error}")),
-            }
-        }
-        Ok(())
+/// A group's name, encrypted under its key, padded to the longest a name may be.
+fn title(secret: &GroupSecretParams, name: &str) -> Result<Vec<u8>> {
+    if name.is_empty() || name.len() > MAX_NAME_LEN || name.chars().any(char::is_control) {
+        return Err(Error::Protocol("a group's name: 1 to 32 bytes"));
     }
-
-    /// `from`, a member, has this revision of the group otherwise: it gets the group as it is here, once per
-    /// revision, and the rule of rivals (spec 4.9) makes both the same.
-    fn diverged(&mut self, from: &str, id: &str) {
-        let Some(group) = self.state.groups.get_mut(id) else { return };
-        if group.synced.insert(from.to_owned()) {
-            self.group_asked(from, id);
-        }
-    }
-
-    /// A group as `from` (or, `own`, this account's other device) has it: taken if it is newer and from a member.
-    pub(crate) fn group_update(&mut self, from: &str, info: GroupInfo, own: bool) {
-        let id = hex(&info.id);
-        let me = self.state.user_id.clone();
-        let members: Vec<String> = info.members.iter().map(|m| hex(m)).collect();
-        // The last revision there is would leave no room for a change after it; 0 is no change (a group starts at 1).
-        if info.revision == u32::MAX || info.revision == 0 {
-            self.note("a group change at no revision".into());
-            return;
-        }
-        // The tie-break is by the revision's author, whoever passes it on (an answer to an ask): a member's word, which
-        // cannot be checked against revisions skipped here.
-        let author = hex(&info.by);
-        let theirs = group_hash(&info.id, &info.name, &info.members);
-        let ours = self.state.groups.get(&id).and_then(|g| hash_of(&info.id, g).ok());
-        let newer = match self.state.groups.get(&id) {
-            // New here, or known only by its Yos: from a member of it as it is now.
-            None => own || members.iter().any(|m| m == from),
-            Some(g) if g.revision == 0 => own || members.iter().any(|m| m == from),
-            // A newer revision from a member as it is now; a rival at the same revision from a member of the revision
-            // both were made from (two removing each other at once: each is still heard by the other).
-            // Or from one asked for it (their Yo named this newer revision: added since) who is in it.
-            // A newer revision only from a member as it is here: one not in it (removed, or added since) is never
-            // its own witness; its Yo makes this device ask a member instead (`group_yo`).
-            Some(g) if info.revision > g.revision => own || g.members.iter().any(|m| m == from),
-            // A rival at the same revision: from a member of the revision both were made from.
-            Some(g) => {
-                let base = if g.before.is_empty() { &g.members } else { &g.before };
-                // Of one author's two (never so between honest ends): the lower hash, so both still end the same.
-                let wins = author < g.by || (author == g.by && Some(theirs) < ours);
-                info.revision == g.revision && wins && (own || base.iter().any(|m| m == from))
-            }
-        };
-        if !newer {
-            // A member behind: it gets the group as it is here.
-            let behind =
-                self.state.groups.get(&id).is_some_and(|g| {
-                    !own && !g.left && info.revision < g.revision && g.members.iter().any(|m| m == from)
-                });
-            // A member's rival that lost here: it gets the winner, as one behind would.
-            let rival =
-                self.state.groups.get(&id).is_some_and(|g| {
-                    !own && !g.left && info.revision == g.revision && g.members.iter().any(|m| m == from)
-                }) && ours != Some(theirs);
-            if behind {
-                self.group_asked(from, &id);
-            } else if rival {
-                self.diverged(from, &id);
-            } else {
-                self.note("a group change not taken".into());
-            }
-            return;
-        }
-        // A sender cannot fill this device with groups (spec 4.9): past `MAX_GROUPS` a group not here yet is not taken
-        // in, by an update as by a Yo.
-        if !self.state.groups.contains_key(&id) && self.state.groups.len() >= MAX_GROUPS {
-            self.note("a group past the most kept".into());
-            return;
-        }
-        let left = !members.contains(&me);
-        // What it was made from: a rival at the same revision shares it; a newer one, made from what this device had,
-        // as far as it knows.
-        let before = match self.state.groups.get(&id) {
-            Some(g) if g.revision == info.revision => g.before.clone(),
-            Some(g) => g.members.clone(),
-            None => Vec::new(),
-        };
-        // Joined only from an accepted contact (or by this account); else a request until said yes to (spec 4.10).
-        let accepted = own
-            || self.state.groups.get(&id).is_some_and(|g| g.accepted)
-            || self.state.contacts.get(from).is_some_and(|c| c.accepted);
-        // This account's own change, beaten by a rival at its revision (another's, or another device's of this account):
-        // made again on the winner after the sync.
-        let mine = match self.state.groups.get(&id) {
-            Some(g) if g.revision == info.revision => {
-                g.mine.clone().filter(|m| m.revision == g.revision).map(|m| Mine { due: true, ..m })
-            }
-            _ => None,
-        };
-        let group = Group {
-            name: info.name,
-            members,
-            revision: info.revision,
-            by: author,
-            left,
-            before,
-            accepted,
-            synced: Default::default(),
-            mine,
-        };
-        self.state.group_asks.retain(|(g, _)| *g != id); // answered: an ask is no lasting exception
-        let members = group.members.clone();
-        let joined = group.accepted && !group.left;
-        self.state.groups.insert(id.clone(), group);
-        // Its members get this account's profile key, so their Yos to the group come as a contact's (spec 4.10).
-        if joined {
-            self.profile_key_due(&members);
-        }
-        self.push_event(Event::GroupChanged { group: id.clone() });
-        // Yos held from one not in the group then: shown if this change has them in it, else dropped; never one of a
-        // sender blocked meanwhile, nor in a group this account is no longer in.
-        let (theirs, rest): (Vec<_>, Vec<_>) =
-            std::mem::take(&mut self.state.group_held).into_iter().partition(|(g, _)| *g == id);
-        self.state.group_held = rest;
-        for (_, event) in theirs {
-            let shown = !left
-                && matches!(&event, crate::state::StoredEvent::GroupMessage { user, .. }
-                    if members.contains(user) && !self.blocked(user));
-            if shown {
-                self.state.events.push(event);
-            }
-        }
-    }
-
-    /// `from` asks for a group (spec 4.9): it goes to them as it is here, if they are in it.
-    pub(crate) fn group_asked(&mut self, from: &str, id: &str) {
-        let Some(group) = self.state.groups.get(id).filter(|g| !g.left && g.revision > 0).cloned() else { return };
-        if !group.members.iter().any(|m| m == from) {
-            return;
-        }
-        let (Ok(gid), Ok(ids)) =
-            (group_id(id), group.members.iter().map(|m| user_bytes(m)).collect::<Result<Vec<_>>>())
-        else {
-            return;
-        };
-        let Ok(by) = user_bytes(&group.by) else { return };
-        let info = GroupInfo { id: gid, revision: group.revision, by, name: group.name, members: ids };
-        if let Err(error) = self.queue(&[from.to_owned()], None, Content::Group(info)) {
-            self.note(format!("group: {error}"));
-        }
-    }
-
-    /// A Yo from `from` to a group: shown if they are in it; a group not known yet, or a newer revision of it, is asked
-    /// of them.
-    pub(crate) fn group_yo(&mut self, from: &str, tag: GroupTag, sent_at_ms: u64, content: Content) {
-        let id = hex(&tag.id);
-        let me = self.state.user_id.clone();
-        // One not in the group as it is here, naming a newer revision (added since, or removed and claiming it): its
-        // Yo is not shown until a member's change brings it in (spec 4.9); the group is asked of a member.
-        let mut outsider = false;
-        let ask = match self.state.groups.get(&id) {
-            // A sender cannot fill this device with groups: past `MAX_GROUPS` a group not known is not taken in.
-            None if self.state.groups.len() >= MAX_GROUPS => {
-                self.note("a Yo to a group not known, too many groups".into());
-                return;
-            }
-            None => {
-                // Known by its Yo only: shown at once, the group itself asked for.
-                let mut members = vec![from.to_owned(), me.clone()];
-                members.sort();
-                let group = Group {
-                    name: String::new(),
-                    members,
-                    revision: 0,
-                    by: from.to_owned(),
-                    left: false,
-                    before: Vec::new(),
-                    accepted: self.state.contacts.get(from).is_some_and(|c| c.accepted),
-                    synced: Default::default(),
-                    mine: None,
-                };
-                self.state.groups.insert(id.clone(), group);
-                self.push_event(Event::GroupChanged { group: id.clone() });
-                true
-            }
-            // To a group left: dropped whatever revision it names (only a change adding this account back brings
-            // it back). From no member of it as it is here: dropped; with a newer revision the group is asked of a
-            // member too (a member added since: its next Yos show once the change is here).
-            Some(g)
-                if g.left || (tag.revision <= g.revision && g.revision > 0 && !g.members.iter().any(|m| m == from)) =>
-            {
-                self.note("a Yo to a group from no member".into());
-                return;
-            }
-            Some(g) => {
-                let (behind, ask) = (tag.revision < g.revision, tag.revision > g.revision);
-                outsider = g.revision > 0 && !g.members.iter().any(|m| m == from);
-                // The same revision, other members or name (a change lost): the sender gets the group as it is here.
-                let diverged = tag.revision == g.revision
-                    && g.revision > 0
-                    && !outsider
-                    && hash_of(&tag.id, g).is_ok_and(|ours| ours != tag.hash);
-                // A member behind (its Yo names an older revision): it gets the group as it is here.
-                if behind {
-                    self.group_asked(from, &id);
-                } else if diverged {
-                    self.diverged(from, &id);
-                }
-                ask
-            }
-        };
-        if ask {
-            // Whom to ask: for a group known here, a member of it as it is here (its answer counts; the sender, not in
-            // it here, could not vouch for its own addition); for a group not known, the sender.
-            let asked = match self.state.groups.get(&id) {
-                Some(g) if g.revision > 0 => g.members.iter().filter(|m| **m != me).min().cloned(),
-                _ => Some(from.to_owned()),
-            };
-            // Asked once while unanswered: the outbox brings the ask there; every further Yo naming the revision
-            // asks nothing more.
-            // Not of one whose 1:1 request waits unanswered, for a group not joined: that would answer it.
-            let joined = self.state.groups.get(&id).is_some_and(|g| g.accepted);
-            let request = self.state.contacts.get(from).is_some_and(|c| !c.accepted && c.chat);
-            let asked = asked.filter(|_| joined || !request || self.in_joined_group(from));
-            if let Some(asked) = asked {
-                if self.state.group_asks.len() < MAX_GROUPS && self.state.group_asks.insert((id.clone(), asked.clone()))
-                {
-                    if let Err(error) = self.queue(&[asked], None, Content::GroupAsk { id: tag.id }) {
-                        self.note(format!("group: {error}"));
-                    }
-                }
-            }
-        }
-        // A receipt only in a group joined, or to a contact: a request gets nothing back (spec 4.10).
-        let joined = self.state.groups.get(&id).is_some_and(|g| g.accepted);
-        if let Some(contact) = self.state.contacts.get_mut(from).filter(|c| joined || c.accepted) {
-            contact.receipt_due = true;
-        }
-        let content = self.forget_keys(content);
-        let event = Event::GroupMessage { group: id.clone(), user: from.to_owned(), sent_at_ms, content };
-        if outsider {
-            // Held until a member's change says whether its sender is in (`group_update`).
-            if self.state.group_held.len() < MAX_HELD {
-                self.state.group_held.push((id, crate::stored(event)));
-            } else {
-                self.note("a Yo to a group from one not in it yet, too many held".into());
-            }
-            return;
-        }
-        self.push_event(event);
-    }
+    Ok(secret.encrypt_blob_with_padding(random(), name.as_bytes(), (MAX_NAME_LEN - name.len()) as u32))
 }
 
 impl Client {

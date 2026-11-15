@@ -76,7 +76,7 @@ mod compact {
         }
     }
 }
-use std::collections::{BTreeMap, BTreeSet, VecDeque};
+use std::collections::{BTreeMap, VecDeque};
 use tls_codec::{TlsDeserializeBytes, TlsSerialize, TlsSize, VLBytes};
 use yo_wire::DeviceId;
 use zeroize::Zeroize;
@@ -242,44 +242,32 @@ pub struct Prekeys {
     pub retired: Vec<(String, u32, u64)>,
 }
 
-/// A group as this device has it (spec 4.7): kept for good, also once left (it shows as left).
+/// A group as this device has it from the hub (spec 4.9): kept for good, also once left (it shows as left).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Group {
+    /// Its master key (hex): what its id, its secret params and every ciphertext of it at the hub come from.
+    pub key: String,
     pub name: String,
     /// Its members by user id (hex), sorted, this account among them while it is in.
     pub members: Vec<String>,
+    /// The revision this device fetched (0: not yet).
     pub revision: u32,
-    /// Who made this revision (hex): of two at the same revision, the lower one's stands.
-    pub by: String,
     /// This account is no member of it (left, or removed).
     pub left: bool,
-    /// The members of the revision this one was made from: who may make a rival change at the same revision (a member
-    /// this revision removed, changing at once, is still heard, so both ends take the same one).
-    #[serde(default)]
-    pub before: Vec<String>,
-    /// Joined here: made or changed by this account, or added to by an accepted contact, or said yes to. Until
-    /// then a group someone else added this account to is a request (spec 4.10).
-    #[serde(default = "yes")]
+    /// Joined here: made by this account, added by one that had its profile key or by an accepted contact, or said
+    /// yes to. Until then a group someone else added this account to is a request (spec 4.10).
     pub accepted: bool,
-    /// Members this device sent its group to because their Yo named this revision with another `group_hash` (or
-    /// their rival lost here): once each per revision, so two that disagree do not answer each other for ever.
+    /// This account's own entry at the hub has its profile key (else it was invited, by its user id alone).
     #[serde(default)]
-    pub synced: BTreeSet<String>,
-    /// This account's own change that made this revision, kept while it is the revision here: if a rival at the same
-    /// revision wins, it is made again on top of the winner (`due`), once.
+    pub keyed: bool,
+    /// The newest revision a message named (spec 4.9): above `revision`, the group is fetched again.
     #[serde(default)]
-    pub mine: Option<Mine>,
-}
-
-/// A change this account made to a group: what it added, removed, renamed to (spec 4.9).
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct Mine {
-    pub revision: u32,
-    pub add: Vec<String>,
-    pub remove: Vec<String>,
-    pub name: Option<String>,
-    /// Lost to a rival: made again on the winner as the next revision, after the sync.
-    pub due: bool,
+    pub named: u32,
+    /// Group send endorsements for its members (spec 4.9): until when (seconds), and each member's (hex, compressed).
+    #[serde(default)]
+    pub endorsed_until: u64,
+    #[serde(default)]
+    pub endorsements: BTreeMap<String, String>,
 }
 
 /// An event as the state keeps it.
@@ -418,8 +406,9 @@ pub struct State {
     pub certificate_clock: u64,
     /// This device's registration while the hub has not answered it: the user id is empty until then.
     pub registering: Option<Registering>,
-    /// The groups this account is or was in, by id (hex).
-    #[serde(default)]
+    /// The groups this account is or was in, by id (hex, the group's identifier at the hub). Groups of before the
+    /// hub kept them (the key `groups`) are gone.
+    #[serde(default, rename = "hub_groups")]
     pub groups: BTreeMap<String, Group>,
     /// When a payload last made this device ask the hub for a user's devices (user hex → ms), and the day's lookups for
     /// recovery (day since the epoch, how many): kept with the state, so a restart or an extension does not start
@@ -428,12 +417,8 @@ pub struct State {
     pub roster_asked: BTreeMap<String, u64>,
     #[serde(default)]
     pub recovery_lookups: (u64, u32),
-    /// Groups asked of a member whose Yo named a newer revision (group id, user, both hex): their answer is taken
-    /// though they are not in the group as this device has it (added since).
-    #[serde(default)]
-    pub group_asks: BTreeSet<(String, String)>,
-    /// Group Yos from one not in the group as this device has it, naming a newer revision (group id, the event): shown
-    /// once a member's change brings their sender in, dropped once one does not (at most `MAX_HELD`).
+    /// Group Yos waiting for their group to be fetched (group id, the event): shown once the group from the hub has
+    /// their sender in it, dropped once it does not (at most `groups::MAX_HELD`).
     #[serde(default)]
     pub group_held: Vec<(String, StoredEvent)>,
     /// Payloads from a device under another's number whose roster could not be asked now: received again later,

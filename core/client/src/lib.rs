@@ -334,6 +334,8 @@ struct Delivery {
     /// The recipient's profile key whose access key it shows: a contact's; none, a request signed by this device
     /// (spec 4.10).
     access: Option<[u8; 32]>,
+    /// Without the profile key, a group send token for the recipient instead (spec 4.9): a contact's as well.
+    endorsed: bool,
     /// Sealed with this device's sender certificate; else identified (none to hand), signed (spec 6.1).
     sealed: bool,
     seq: u64,
@@ -401,7 +403,7 @@ impl Deliveries {
         let (mut all, mut address, mut device) = (false, false, false);
         let mut answers = Vec::new();
         for item in &self.items {
-            let signed = item.access.is_none() || !item.sealed;
+            let signed = !item.sealed;
             if all || held.contains(&item.user) || address || (device && signed) {
                 answers.push(None);
                 continue;
@@ -485,6 +487,12 @@ pub struct Client {
     certificate_asked_at: u64,
     /// How far this device's clock is off (tests: a phone set to the wrong time); the signing time is wall time plus it.
     skew_ms: i64,
+    /// The hub's zkgroup public params the app pins (spec 4.9, `set_zk_params`): none, no groups.
+    zk: Option<zkgroup::ServerPublicParams>,
+    /// Today's group auth credential, for the day it is (seconds), fetched once a day.
+    group_auth: Option<(u64, zkgroup::auth::AuthCredentialWithPniZkc)>,
+    /// Deliveries the hub took on a group send endorsement alone (`endorsed_deliveries`).
+    endorsed_sent: u64,
 }
 
 /// Request headers with the nonce a signed answer is asked for (spec 6.10), if any.
@@ -564,7 +572,6 @@ pub(crate) fn stored(event: Event) -> StoredEvent {
         Content::Unknown(kind) => StoredContent::Unknown(kind),
         Content::Receipt => StoredContent::Unknown(yo_wire::content::TYPE_RECEIPT),
         Content::Group(_) => StoredContent::Unknown(yo_wire::content::TYPE_GROUP),
-        Content::GroupAsk { .. } => StoredContent::Unknown(yo_wire::content::TYPE_GROUP_ASK),
         Content::ProfileKey(_) => StoredContent::Unknown(yo_wire::content::TYPE_PROFILE_KEY),
     };
     match event {
@@ -633,14 +640,7 @@ struct Unpinned {
 
 /// Content worth keeping to send again, and a receipt for: what a person sent, not the protocol's own.
 fn shown(content: &Content) -> bool {
-    !matches!(
-        content,
-        Content::Profile { .. }
-            | Content::Receipt
-            | Content::GroupAsk { .. }
-            | Content::ProfileKey(_)
-            | Content::Unknown(_)
-    )
+    !matches!(content, Content::Profile { .. } | Content::Receipt | Content::ProfileKey(_) | Content::Unknown(_))
 }
 
 impl Client {
@@ -886,7 +886,6 @@ impl Client {
             groups: Default::default(),
             roster_asked: Default::default(),
             recovery_lookups: (0, 0),
-            group_asks: Default::default(),
             group_held: Vec::new(),
             deferred: Default::default(),
         };
@@ -968,6 +967,9 @@ impl Client {
             trust_roots: test_trust_roots(),
             certificate_asked_at: 0,
             skew_ms: 0,
+            zk: groups::test_zk(),
+            group_auth: None,
+            endorsed_sent: 0,
         }
     }
 
@@ -1157,7 +1159,7 @@ impl Client {
                 .ok()
                 .and_then(|plain| Message::decode(plain.content.as_slice()).ok())
                 .and_then(|m| m.group)
-                .map(|tag| hex(&tag.id));
+                .map(|tag| groups::group_id_of(&tag.key));
             match entries.iter_mut().find(|e| e.user == item.user && e.group == group) {
                 Some(entry) => entry.count += 1,
                 None => {
@@ -1912,11 +1914,11 @@ impl Client {
     /// Whether a message with this photo's or video's blob went to the user already in the same conversation (1:1:
     /// `group` none; else that group), among the last kept: the same blob sent to another group, or 1:1, is another
     /// message.
-    pub(crate) fn sent_media(&self, user: &str, id: &[u8; 16], group: Option<&yo_wire::content::GroupId>) -> bool {
+    pub(crate) fn sent_media(&self, user: &str, id: &[u8; 16], group: Option<&yo_wire::content::GroupKey>) -> bool {
         self.state.contacts.get(user).is_some_and(|c| {
             c.sent.iter().any(|plaintext| {
                 Message::decode(plaintext).is_ok_and(|m| {
-                    m.group.as_ref().map(|g| &g.id) == group
+                    m.group.as_ref().map(|g| &g.key) == group
                         && matches!(m.content, Content::Photo(media) | Content::Video { media, .. } if &media.id == id)
                 })
             })
@@ -1957,12 +1959,7 @@ impl Client {
             .ok()
             .and_then(|plain| Message::decode(plain.content.as_slice()).ok())
             .and_then(|m| m.group);
-        tag.is_none_or(|tag| {
-            self.state
-                .groups
-                .get(&hex(&tag.id))
-                .is_some_and(|g| !g.left && (item.user == self.state.user_id || g.members.contains(&item.user)))
-        })
+        self.both_in(tag.as_ref(), &item.user)
     }
 
     /// The sessions the outbox needs, from the hub. A user it cannot get them for now waits.
@@ -2105,11 +2102,20 @@ impl Client {
             if let Some(key) = access {
                 headers.push((api::HEADER_ACCESS.to_owned(), yo_wire::b64(&access_key(&key))));
             }
+            // Without their key, a fellow member's group send token (spec 4.9): sealed all the same.
+            let endorsement = match (access, &certificate) {
+                (None, Some(_)) if item.user != self.state.user_id => self.group_send_token(&item.user),
+                _ => None,
+            };
+            let endorsed = endorsement.is_some();
+            if let Some(token) = endorsement {
+                headers.push((api::HEADER_GROUP_SEND.to_owned(), token));
+            }
             // Identified for want of a certificate, or as a request (no access key: the hub knows the sender anyway,
             // and the recipient sees that its key is missing, spec 4.10). A payload too large to seal is dropped,
             // never sent so.
-            let envelope = match (&certificate, access) {
-                (Some(certificate), Some(_)) => {
+            let envelope = match (&certificate, access.is_some() || endorsed) {
+                (Some(certificate), true) => {
                     sealed::seal(certificate, &own, &signal::identity_of(&account_key)?, payload)
                 }
                 _ => yo_wire::envelope::pad(payload, &yo_wire::envelope::BUCKETS).map_err(Error::from),
@@ -2123,6 +2129,7 @@ impl Client {
             };
             items.push(Delivery {
                 access,
+                endorsed,
                 sealed: envelope[0] == yo_wire::envelope::SEALED,
                 seq: item.seq,
                 user: item.user.clone(),
@@ -2141,7 +2148,7 @@ impl Client {
                 self.drop_one("too large for an envelope".into());
             }
         }
-        for delivery in items.iter_mut().filter(|d| d.access.is_none() || !d.sealed) {
+        for delivery in items.iter_mut().filter(|d| !d.sealed) {
             let (signed, _) = self.sign("POST", &delivery.path, &delivery.envelope);
             delivery.headers.extend(signed);
         }
@@ -2165,6 +2172,9 @@ impl Client {
             match answer {
                 Some(Ok(response)) if response.status == status::ACCEPTED => {
                     done.insert(item.seq);
+                    if item.endorsed {
+                        self.endorsed_sent += 1;
+                    }
                 }
                 Some(Ok(response)) if response.status == status::CONFLICT => {
                     let answer =
@@ -2199,8 +2209,13 @@ impl Client {
                         contact.profile_key = None;
                         self.forget_key_stored(&item.user);
                     }
+                    // A group send token refused (expired meanwhile): the endorsements are fetched anew, the envelope
+                    // goes again after the next read.
+                    if item.endorsed {
+                        self.endorsement_refused(&item.user);
+                    }
                     match self.state.outbox.iter_mut().find(|o| o.seq == item.seq) {
-                        Some(kept) if item.access.is_some() => {
+                        Some(kept) if item.access.is_some() || item.endorsed => {
                             kept.refused = true;
                             self.refused_until_read.insert(item.user.clone());
                         }
@@ -2281,6 +2296,8 @@ impl Client {
             self.received_ids.extend(ids);
             if !more {
                 self.inbox_fresh_until = (self.clock)() + INBOX_FRESH_MS;
+                // Groups the inbox named a newer revision of: from the hub now, so their held Yos show.
+                self.refresh_groups_quietly();
                 return Ok(());
             }
             wait = 0;
@@ -2732,13 +2749,10 @@ impl Client {
         // Groups: one copy for this account's other devices, naming no one (spec 4.7).
         if to.is_none() {
             let me = self.state.user_id.clone();
+            let _ = me;
             match (message.group, message.content) {
-                (_, Content::Group(info)) => self.group_update(&me, info, true),
-                (Some(tag), content) if shown(&content) => {
-                    let group = state::hex(&tag.id);
-                    let content = self.forget_keys(content);
-                    self.push_event(Event::GroupSentElsewhere { group, sent_at_ms: message.sent_at_ms, content });
-                }
+                (_, Content::Group(tag)) => self.group_changed(tag),
+                (Some(tag), content) if shown(&content) => self.group_sent_elsewhere(tag, message.sent_at_ms, content),
                 _ => {}
             }
             return Ok(());
@@ -2825,9 +2839,7 @@ impl Client {
         // A blocked user's messages are opened (their sessions go on) and dropped unseen (4.8); what they change of a
         // group still counts, so the group stays one, and their profile key is kept: after an unblock what goes to
         // them is a contact's again, not a request.
-        if self.blocked(user)
-            && !matches!(message.content, Content::Group(_) | Content::GroupAsk { .. } | Content::ProfileKey(_))
-        {
+        if self.blocked(user) && !matches!(message.content, Content::Group(_) | Content::ProfileKey(_)) {
             return Ok(());
         }
         // "Requests from Strangers" off (spec 4.10): what a stranger shows is dropped here, unseen and unanswered; the
@@ -2844,7 +2856,7 @@ impl Client {
         // Everything but a receipt and an ask is answered by a receipt: the ratchet moves on also for a stream of
         // changes or names one way (spec 4.5).
         // Not to a request yet (spec 4.10): nothing goes back until it is said yes to.
-        if !matches!(message.content, Content::Receipt | Content::GroupAsk { .. }) {
+        if !matches!(message.content, Content::Receipt) {
             if let Some(contact) = self.state.contacts.get_mut(user).filter(|c| c.accepted && !c.blocked) {
                 contact.receipt_due = true;
             }
@@ -2855,12 +2867,8 @@ impl Client {
                 self.take_key_message(user, key);
                 Ok(())
             }
-            Content::Group(info) => {
-                self.group_update(user, info, false);
-                Ok(())
-            }
-            Content::GroupAsk { id } => {
-                self.group_asked(user, &state::hex(&id));
+            Content::Group(tag) => {
+                self.group_changed(tag);
                 Ok(())
             }
             content if message.group.is_some() => {
@@ -2916,9 +2924,8 @@ impl Client {
         match kept {
             Some(message) => {
                 // A group's message only while both are still in it (left, or the user removed: not again).
-                let in_group = Message::decode(&message).ok().and_then(|m| m.group).is_none_or(|tag| {
-                    self.state.groups.get(&hex(&tag.id)).is_some_and(|g| !g.left && g.members.iter().any(|m| m == user))
-                });
+                let tag = Message::decode(&message).ok().and_then(|m| m.group);
+                let in_group = self.both_in(tag.as_ref(), user);
                 if in_group {
                     self.enqueue(user, encode(&Plain { to: None, content: message.into() }));
                 }
@@ -3303,6 +3310,9 @@ impl Client {
                 }),
             })
             .and_then(|more| if more { self.receive_all(0) } else { Ok(()) });
+        if received.is_ok() {
+            self.refresh_groups_quietly();
+        }
         // The wait is over: the inbox is up to date only if its answer was taken in.
         self.inbox_fresh_until = if received.is_ok() { (self.clock)() + INBOX_FRESH_MS } else { 0 };
         // A guest does none of the work after (the app does): it only acknowledges.
@@ -3333,7 +3343,7 @@ impl Client {
         }
         // Due until all of it is done: a step that fails leaves it for the next call, not only the next receive.
         self.answer_due()?;
-        self.reapply_groups()?;
+        self.refresh_groups_quietly();
         self.refill()?;
         self.profile_keys()?;
         self.deliver()?;
@@ -3365,7 +3375,7 @@ impl Client {
         self.deliver()?;
         self.receive_all(0)?;
         self.answer_due()?;
-        self.reapply_groups()?;
+        self.refresh_groups_quietly();
         self.refresh_certificate()?;
         self.refill()?;
         self.send_profiles();
@@ -3418,9 +3428,12 @@ impl Client {
                 }
             }
             let key = self.state.profile_key.expect("made above");
+            let me = libsignal_protocol::Aci::from_uuid_bytes(user_bytes(&self.state.user_id)?);
+            let commitment = zkgroup::profiles::ProfileKey::create(key).get_commitment(me);
             let body = encode(&api::AccessKey {
                 check: api::access_check(&access_key(&key)),
                 requests_open: self.state.requests_open as u8,
+                commitment: zkgroup::serialize(&commitment).into(),
             });
             match self.signed("PUT", api::ACCESS_KEY, &body) {
                 Ok(response) if response.status == status::NO_CONTENT => {
@@ -3518,22 +3531,6 @@ impl Client {
             c.state.events.retain(|e| !theirs(e));
             c.persist()
         })
-    }
-
-    /// Says yes to a group someone else added this account to: joined, and its members get the profile key.
-    pub fn accept_group(&mut self, id: &str) -> Result<Vec<Event>> {
-        let result = (|| {
-            let group = self.state.groups.get_mut(id).ok_or(Error::Protocol("no such group"))?;
-            group.accepted = true;
-            let members = group.members.clone();
-            for member in members.iter().filter(|m| **m != self.state.user_id) {
-                self.state.contacts.entry(member.clone()).or_insert_with(Contact::unknown).key_due = true;
-            }
-            self.persist()?;
-            self.profile_keys()?;
-            self.deliver()
-        })();
-        self.finish(result)
     }
 
     /// Whether strangers may send requests (spec 4.10); off, the hub refuses them, and only contacts reach this account.

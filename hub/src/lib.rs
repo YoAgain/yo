@@ -6,6 +6,7 @@ pub mod certificate;
 pub mod config;
 pub mod db;
 pub mod error;
+pub mod groups;
 pub mod limiter;
 pub mod push;
 
@@ -59,6 +60,8 @@ pub struct Hub {
     signer: certificate::Signer,
     /// How far the clock of sender certificates and of envelopes' arrival is moved (tests: days gone by).
     shifted_ms: Arc<std::sync::atomic::AtomicI64>,
+    /// The zkgroup keys of its groups (spec 4.9).
+    zk: groups::Zk,
 }
 
 const HOUR: Duration = Duration::from_secs(3600);
@@ -346,9 +349,11 @@ impl Hub {
         }
         let signer = certificate::Signer::from_bytes(&config.server_certificate)
             .map_err(|e| format!("server certificate: {e}"))?;
+        let zk = groups::Zk::from_bytes(&config.zk_params).map_err(|e| format!("zk params: {e}"))?;
         let shifted_ms = Arc::new(std::sync::atomic::AtomicI64::new(0));
         let (deliveries, queue) = std::sync::mpsc::sync_channel(QUEUED);
         let hub = Arc::new(Hub {
+            zk,
             signer,
             shifted_ms: shifted_ms.clone(),
             db,
@@ -399,6 +404,10 @@ impl Hub {
             .route(hubsig::KEY_PATH, get(hub_key))
             .route(api::TRUST_ROOT_PATH, get(trust_root))
             .route(api::CERTIFICATE, get(sender_certificate))
+            .route(api::GROUP_AUTH, get(group_auth))
+            .route(api::GROUP_CREDENTIAL, post(group_credential))
+            .route("/v1/groups/{id}", put(create_group).post(group_request))
+            .route(api::ZK_PARAMS_PATH, get(zk_params))
             .route("/v1/username/{name}", get(username_free))
             .route(api::INBOX_ACK, post(ack))
             .route_layer(axum::middleware::from_fn_with_state(self.clone(), off_workers))
@@ -1009,11 +1018,67 @@ async fn set_access_key(
 ) -> Res<StatusCode> {
     let device = hub.authenticate(&method, &uri, &headers, &body)?;
     let request: api::AccessKey = decode(&body)?;
-    if request.requests_open > 1 {
+    let commitment = request.commitment.as_slice();
+    if request.requests_open > 1 || zkgroup::deserialize::<zkgroup::profiles::ProfileKeyCommitment>(commitment).is_err()
+    {
         return Err(refuse(StatusCode::BAD_REQUEST));
     }
-    hub.db.set_access_key(&device.user_id, &request.check, request.requests_open == 1)?;
+    hub.db.set_access_key(&device.user_id, &request.check, request.requests_open == 1, commitment)?;
     Ok(StatusCode::NO_CONTENT)
+}
+
+// ---- groups (spec 4.9) ----
+
+async fn zk_params(State(hub): Hubs) -> Vec<u8> {
+    hub.zk.public().to_vec()
+}
+
+/// Today's auth credential for the signing device's account.
+async fn group_auth(State(hub): Hubs, method: Method, uri: Uri, headers: HeaderMap) -> Res<(StatusCode, Vec<u8>)> {
+    let device = hub.authenticate(&method, &uri, &headers, &[])?;
+    Ok(ok(encode(&hub.group_auth(&device.user_id))))
+}
+
+/// A profile key credential for a user whose key the asker holds.
+async fn group_credential(
+    State(hub): Hubs,
+    method: Method,
+    uri: Uri,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Res<(StatusCode, Vec<u8>)> {
+    let device = hub.authenticate(&method, &uri, &headers, &body)?;
+    hub.limit(format!("credential:{}", yo_wire::b64(&device.device_id)), groups::CREDENTIALS_PER_DAY, DAY)?;
+    let request: api::ProfileCredentialRequest = decode(&body)?;
+    Ok(ok(hub.profile_credential(&request)?))
+}
+
+async fn create_group(
+    State(hub): Hubs,
+    method: Method,
+    uri: Uri,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+    body: Bytes,
+) -> Res<(StatusCode, Vec<u8>)> {
+    hub.authenticate(&method, &uri, &headers, &body)?;
+    let id = path_id(&id)?;
+    let request: api::NewGroup = decode(&body)?;
+    Ok(ok(encode(&hub.create_group(&id, &request)?)))
+}
+
+async fn group_request(
+    State(hub): Hubs,
+    method: Method,
+    uri: Uri,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+    body: Bytes,
+) -> Res<(StatusCode, Vec<u8>)> {
+    hub.authenticate(&method, &uri, &headers, &body)?;
+    let id = path_id(&id)?;
+    let request: api::GroupRequest = decode(&body)?;
+    Ok(ok(encode(&hub.group_request(&id, &request)?)))
 }
 
 /// Deletes the signing device's account with everything the hub holds about it; its other devices answer `410`.
@@ -1195,11 +1260,17 @@ async fn deliver(
         .and_then(|v| unb64(v).ok())
         .and_then(|v| <[u8; api::ACCESS_KEY_LEN]>::try_from(v).ok())
         .map(|key| api::access_check(&key));
+    // A group send token for the recipient (spec 4.9): a fellow member's, as a contact's; one that does not hold is
+    // as none.
+    let endorsed = header(&headers, api::HEADER_GROUP_SEND).is_some_and(|token| hub.endorsed(&user, token));
     let by = sender;
-    let request = match hub.blocking(move |hub| hub.db.admit(&user, shown, by.as_ref())).await?? {
-        db::Admission::Contact => None,
-        db::Admission::Request => sender,
-        db::Admission::Closed => return Err(refuse(StatusCode::FORBIDDEN)),
+    let request = match endorsed {
+        true => None,
+        false => match hub.blocking(move |hub| hub.db.admit(&user, shown, by.as_ref())).await?? {
+            db::Admission::Contact => None,
+            db::Admission::Request => sender,
+            db::Admission::Closed => return Err(refuse(StatusCode::FORBIDDEN)),
+        },
     };
     // Past its buckets: `429` with the time until a token, for this recipient only; the sender holds it till then.
     if let Some(sender) = &request {
