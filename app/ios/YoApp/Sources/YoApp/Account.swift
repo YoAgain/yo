@@ -11,6 +11,11 @@ import SwiftUI
 import UIKit
 import UserNotifications
 import YoCore
+import os
+
+/// What opening the account did and why it failed, in the device log (Console, `log stream`): the one place the reason
+/// is kept once the alert is gone.
+let accountLog = Logger(subsystem: "app.justyo", category: "account")
 
 /// The account as the app keeps it beside the core (in its preferences): what it shows and how the backup opens. Its
 /// key's secret is not here: the core's sealed state, the backup and the iCloud Keychain hold it (`client.accountSecret`).
@@ -248,20 +253,26 @@ final class AccountStore {
     while client == nil, account != nil, !broken {
       do {
         try await openOnce()
+        accountLog.notice("opened")
         return
       } catch YoError.Replaced {
+        accountLog.error("open: replaced")
         return reset()
       } catch YoError.State where account.flatMap({ SyncedAccount.load($0.userID) }) != nil {
+        accountLog.error("open: state does not open, signing in again from the iCloud Keychain")
         // A state that does not open, an older build's among them (before sessions, spec 4): the account comes
         // back from the iCloud Keychain as a new device of it, with new prekeys; contacts write to it again.
         return await recover()
       } catch let error as YoError where !Self.notNow(error) {
         brokenWhy = "\(error)"
+        accountLog.error("open: \(self.brokenWhy, privacy: .public) (try \(tries + 1))")
         if await Self.surely(&tries) { broken = true }  // does not open (sealed under another key, or damaged)
       } catch Unopened.gone {
         brokenWhy = Self.missing()
+        accountLog.error("open: \(self.brokenWhy, privacy: .public) (try \(tries + 1))")
         if await Self.surely(&tries) { broken = true }
       } catch {
+        accountLog.notice("open: not now: \(String(describing: error), privacy: .public)")
         try? await Task.sleep(for: .seconds(pause))  // not now
         pause = min(pause * 2, 30)
       }
@@ -366,6 +377,7 @@ final class AccountStore {
       return
     }
     hubDown = false
+    accountLog.error("recover: \(item == nil ? "no iCloud Keychain item" : "registering again", privacy: .public)")
     reset()
     if let item { _ = try? await restore(synced: item) }
   }
