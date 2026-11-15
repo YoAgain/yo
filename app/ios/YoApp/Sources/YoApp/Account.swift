@@ -1,5 +1,5 @@
 // Your account (spec 3, 6.4, 7): a username, a user id, an account key, and the backup that brings them back on a
-// new phone, opened by a passkey's PRF output or by a recovery code.
+// new phone, opened by a passkey's PRF output or by the recovery key (Signal's: 64 characters).
 //
 // The account lives at the hub, through the Rust core (`Hub.swift`), which also makes, fetches and opens the backup.
 import AuthenticationServices
@@ -17,15 +17,20 @@ import YoCore
 struct Account: Codable, Equatable {
   var username: String
   var userID: Data
-  /// How the backup opens: by the passkey (and the words), or by the recovery words only.
+  /// How the backup opens: by the passkey (and the recovery key), or by the recovery key only.
   var byPasskey: Bool
-  /// The recovery words open the backup (nil in accounts saved before this was kept: see `AccountStore.init`).
+  /// The recovery key opens the backup (nil in accounts saved before this was kept: see `AccountStore.init`).
   var byCode: Bool? = false
-  /// The backup's fetch may be signed by the words' auth key (spec 7): nil in an account whose record is from before
-  /// the auth keys, until the backup is made anew (`addAuthKeys`).
+  /// The backup's fetch may be signed by the recovery key's auth key (spec 7): nil in an account whose record is from
+  /// before the auth keys, until the backup is made anew (`addAuthKeys`).
   var codeAuth: Bool? = nil
   /// And by the passkey's: false while the record made anew has no passkey door yet (`confirmPasskey`).
   var passkeyAuth: Bool? = nil
+  /// The backup's kind: 3, opened by the recovery key (libsignal's account entropy pool). Nil: an account of the
+  /// 12 words, whose backup no longer opens (spec 7): not secured until made anew (`AccountStore.init`).
+  var backupVersion: Int? = Account.backupVersion
+
+  static let backupVersion = 3
 
   /// Backed up (spec 7): the name comes back on a new phone. Not yet, it is released after 365 days away (spec 6.4).
   var secured: Bool { byPasskey || byCode == true }
@@ -52,42 +57,30 @@ enum Username {
   static func skeleton(_ name: String) -> String { usernameSkeleton(name: name) }
 }
 
-/// The 12-word recovery code (BIP-39: 128 bits and a 4-bit checksum).
+/// The recovery key (spec 7): Signal's, libsignal's account entropy pool, 64 characters a–z and 0–9; the core makes
+/// and reads it. Shown in 16 blocks of 4.
 enum RecoveryCode {
-  static let words: [String] = {
-    guard let url = Bundle.main.url(forResource: "bip39-english", withExtension: "txt"),
-      let text = try? String(contentsOf: url, encoding: .utf8)
-    else { return [] }
-    return text.split(separator: "\n").map(String.init)
-  }()
+  static func make() -> String { YoCore.newRecoveryKey() }
 
-  static func make() -> [String] {
-    let entropy = Passkeys.random(16)
-    let check = Array(SHA256.hash(data: entropy))[0] >> 4
-    var bits = entropy.flatMap { byte in (0..<8).map { (byte >> (7 - $0)) & 1 } }
-    bits += (0..<4).map { (check >> (3 - $0)) & 1 }
-    return (0..<12).map { i in
-      words[bits[(i * 11)..<(i * 11 + 11)].reduce(0) { $0 << 1 | Int($1) }]
+  /// The recovery key in whatever was pasted, typed or scanned: case, spaces, dashes and line breaks do not matter;
+  /// a heading around it ("Yo recovery key for LEO: …") neither (the last 64 characters that make one count).
+  static func parse(_ typed: String) -> String? {
+    if let key = recoveryKeyParse(typed: typed) { return key }
+    let kept = typed.lowercased().filter { ($0.isASCII && ($0.isLetter || $0.isNumber)) }
+    guard kept.count >= 64 else { return nil }
+    return recoveryKeyParse(typed: String(kept.suffix(64)))
+  }
+
+  /// The key in blocks of 4, as shown and printed.
+  static func blocks(_ key: String) -> [String] {
+    stride(from: 0, to: key.count, by: 4).map { start in
+      let from = key.index(key.startIndex, offsetBy: start)
+      return String(key[from..<(key.index(from, offsetBy: 4, limitedBy: key.endIndex) ?? key.endIndex)])
     }
   }
 
-  /// The 12 words in whatever was pasted, typed or scanned: numbers, a heading ("Yo LEO"), line breaks and other
-  /// words around them do not matter; the first run of 12 list words whose checksum matches counts.
-  static func parse(_ typed: String) -> [String]? {
-    let known = typed.lowercased().split(whereSeparator: { !$0.isLetter }).map(String.init).filter(words.contains)
-    guard known.count >= 12 else { return nil }
-    return (0...(known.count - 12)).lazy.compactMap { check(Array(known[$0..<($0 + 12)])) }.first
-  }
-
-  /// The 12 words if their checksum matches.
-  private static func check(_ given: [String]) -> [String]? {
-    let indexes = given.compactMap { words.firstIndex(of: $0) }
-    guard indexes.count == 12 else { return nil }
-    let bits = indexes.flatMap { index in (0..<11).map { UInt8((index >> (10 - $0)) & 1) } }
-    let entropy = Data((0..<16).map { byte in bits[(byte * 8)..<(byte * 8 + 8)].reduce(0) { $0 << 1 | $1 } })
-    let check = bits[128..<132].reduce(0) { $0 << 1 | $1 }
-    return Array(SHA256.hash(data: entropy))[0] >> 4 == check ? given : nil
-  }
+  /// The key as text to share: its blocks, space-separated.
+  static func shown(_ key: String) -> String { blocks(key).joined(separator: " ") }
 }
 
 /// The backup (spec 7): the account under a random key K, and K wrapped by the passkey and by the code. The record
@@ -100,15 +93,15 @@ enum BackupRecord {
   /// A new K: 32 random bytes.
   static func newKey() -> Data { SymmetricKey(size: .bits256).withUnsafeBytes { Data($0) } }
 
-  /// What K seals: the account and its key's secret (Ed25519; signs the account's devices, spec 3.1), and the
-  /// recovery words, so a phone restored by passkey has them to show too. The secret sits in the account's JSON, as in
-  /// the backups made while `Account` still held it.
+  /// What K seals: the account and its key's secret (libsignal's identity key; signs the account's devices, spec
+  /// 3.1), and the recovery key, so a phone restored by passkey has it to show too. The secret sits in the account's
+  /// JSON, as in the backups made while `Account` still held it.
   struct Sealed: Codable {
     var account: Account
     var accountKey: Data
-    var code: [String]?
+    var code: String?
 
-    init(account: Account, accountKey: Data, code: [String]?) {
+    init(account: Account, accountKey: Data, code: String?) {
       self.account = account
       self.accountKey = accountKey
       self.code = code
@@ -121,7 +114,7 @@ enum BackupRecord {
       let c = try decoder.container(keyedBy: CodingKeys.self)
       account = try c.decode(Account.self, forKey: .account)
       accountKey = try c.nestedContainer(keyedBy: SecretKeys.self, forKey: .account).decode(Data.self, forKey: .accountKey)
-      code = try c.decodeIfPresent([String].self, forKey: .code)
+      code = try c.decodeIfPresent(String.self, forKey: .code)
     }
 
     func encode(to encoder: Encoder) throws {
@@ -186,8 +179,8 @@ final class AccountStore {
     Hub.isDevApp ? "\(account.username) (Dev)" : account.username
   }
   private let passkeys = Passkeys()
-  /// Securing under way: K and the words, made once per try.
-  private var securing: (k: Data, code: [String])?
+  /// Securing under way: K and the recovery key, made once per try.
+  private var securing: (k: Data, code: String)?
   /// The guide's passkey once made, before it is signed in with.
   private var newPasskey: Data?
   /// A registration under way (`register(_:secret:)`).
@@ -208,11 +201,31 @@ final class AccountStore {
   init() {
     let saved = UserDefaults.standard.data(forKey: Self.key)
     account = saved.flatMap { try? JSONDecoder().decode(Account.self, from: $0) }
+    if var old = account, old.backupVersion != Account.backupVersion {
+      // A backup of the 12 words no longer opens (spec 7): not secured, as a new account, its words and backup
+      // secrets forgotten; the passkey's door goes with it. Its iCloud Keychain item is written anew at the opening.
+      old.byPasskey = false
+      old.byCode = false
+      old.codeAuth = nil
+      old.passkeyAuth = nil
+      old.backupVersion = Account.backupVersion
+      RecoveryWords.delete()
+      SyncedAccount.mustSave(old.userID)
+      account = old
+      // Observers do not run in `init`: written here.
+      UserDefaults.standard.set(try? JSONEncoder().encode(old), forKey: Self.key)
+      wordsSaved = false
+      UserDefaults.standard.set(false, forKey: "recovery.saved")
+      passkeyTurnedOff = false
+      UserDefaults.standard.set(false, forKey: "passkey.turnedOff")
+    }
     if let account, let saved {
       // Builds before kept the account key's secret here too, in the preferences (and so in the phone's backups):
       // into the iCloud Keychain if the account has no item there yet, then written again without it.
-      if let old = try? JSONDecoder().decode(LegacySecret.self, from: saved).accountKey {
-        SyncedAccount.save(account, secret: old, onlyIfMissing: true)
+      if let old = try? JSONDecoder().decode(LegacySecret.self, from: saved).accountKey,
+        let secret = try? legacyAccountSecret(seed: old)
+      {
+        SyncedAccount.save(account, secret: secret, onlyIfMissing: true)
         UserDefaults.standard.set(try? JSONEncoder().encode(account), forKey: Self.key)
       }
       Task { await open() }
@@ -481,13 +494,13 @@ final class AccountStore {
     newPasskey = nil
   }
 
-  /// The words, to show when the passkey did not work.
-  func secureWords() -> [String] {
+  /// The recovery key, to show when the passkey did not work.
+  func secureWords() -> String {
     if securing == nil { securing = (BackupRecord.newKey(), RecoveryCode.make()) }
-    return securing?.code ?? []
+    return securing?.code ?? ""
   }
 
-  /// The words kept: the backup opens with them.
+  /// The recovery key kept: the backup opens with it.
   func keepWords() async throws { try await backupTurn { try await saveBackup(prf: nil) } }
 
   /// The first backup: K under the words always (passkey and words are equal doors), under the passkey's PRF too;
@@ -509,7 +522,7 @@ final class AccountStore {
   /// and sign-in meanwhile. The core seals the account and the words under K and wraps K (spec 7). New words are
   /// staged on this phone first and settled once the hub has them: a failure on the way leaves the words the backup
   /// opens with here, and the caller marks nothing done.
-  private func put(_ account: Account, code: [String], k: Data, passkey: YoPasskeyDoor, by client: YoClient)
+  private func put(_ account: Account, code: String, k: Data, passkey: YoPasskeyDoor, by client: YoClient)
     async throws
   {
     try still(client)
@@ -522,7 +535,7 @@ final class AccountStore {
       try await Hub.run {
         let sealed = try JSONEncoder().encode(
           BackupRecord.Sealed(account: account, accountKey: client.accountSecret(), code: code))
-        try client.putBackup(k: k, sealed: sealed, words: code, passkey: passkey)
+        try client.putBackup(k: k, sealed: sealed, recoveryKey: code, passkey: passkey)
       }
     } catch let error as YoError {
       throw AccountError.hub(error)
@@ -550,7 +563,7 @@ final class AccountStore {
 
   /// The backup again with the same K (opened by the words on this phone): its passkey door kept, set or removed, and
   /// optionally under new words (the old locator then finds nothing). Always with the doors' auth keys.
-  private func rewrap(_ passkey: Door, code new: [String]? = nil) async throws {
+  private func rewrap(_ passkey: Door, code new: String? = nil) async throws {
     guard var account, let client else { throw AccountError.noBackup }
     let (opened, code) = try await ownBackup(account, by: client)
     let record = opened.record
@@ -583,12 +596,12 @@ final class AccountStore {
   /// The backup, by the words on this phone: new ones staged and not settled first (the hub may have taken them and its
   /// answer been lost), else the ones there; whichever open it are the words from then on.
   /// Signed out (or out and in again) during a fetch: the words on this phone are the next account's, left alone.
-  private func ownBackup(_ account: Account, by client: YoClient) async throws -> (YoOpenedBackup, [String]) {
+  private func ownBackup(_ account: Account, by client: YoClient) async throws -> (YoOpenedBackup, String) {
     var tries = [RecoveryWords.pending(), RecoveryWords.load()].compactMap { $0 }
     if tries.count == 2 && tries[0] == tries[1] { tries.removeLast() }
     for (index, words) in tries.enumerated() {
       do {
-        let opened = try await fetchBackup(by: .words(words: words), userID: account.userID)
+        let opened = try await fetchBackup(by: .recoveryKey(key: words), userID: account.userID)
         try still(client)
         try? RecoveryWords.settle(words)
         return (opened, words)
@@ -622,7 +635,7 @@ final class AccountStore {
 
   /// A new backup with a new K: the words' door, and the passkey's when its PRF output is given. Without it, a passkey
   /// the account had shows "Confirm" until it is asked once.
-  private func makeAnew(words: [String], prf: Data?) async throws {
+  private func makeAnew(words: String, prf: Data?) async throws {
     guard var account, let client else { throw AccountError.noBackup }
     account.byCode = true
     account.codeAuth = true
@@ -672,7 +685,7 @@ final class AccountStore {
   func removePasskey() async throws { try await backupTurn { try await rewrap(.remove) } }
 
   /// New recovery words; the old ones stop working (the hub forgets their locator).
-  func newRecoveryKey() async throws -> [String] {
+  func newRecoveryKey() async throws -> String {
     let code = RecoveryCode.make()
     try await backupTurn { try await rewrap(.keep, code: code) }
     wordsSaved = false
@@ -688,9 +701,9 @@ final class AccountStore {
     try await restore(fetchBackup(by: .passkey(prf: prf), userID: answer.userID))
   }
 
-  /// By the recovery words alone: they say where the backup is and open it.
-  func restore(code: [String]) async throws {
-    try await restore(fetchBackup(by: .words(words: code), userID: nil), typed: code)
+  /// By the recovery key alone: it says where the backup is and opens it.
+  func restore(code: String) async throws {
+    try await restore(fetchBackup(by: .recoveryKey(key: code), userID: nil), typed: code)
     wordsSaved = RecoveryWords.load() != nil  // typed in: the person has them (once they are on this phone too)
   }
 
@@ -713,7 +726,7 @@ final class AccountStore {
   /// The account from its backup, and this phone registered for it with the account's key (spec 6.4): the hub finds
   /// the account by the key, not by the name the backup has (changed since, or taken by someone else).
   /// `typed`: the words that opened it, kept when the backup does not hold them (one made before it did).
-  private func restore(_ opened: YoOpenedBackup, typed: [String]? = nil) async throws {
+  private func restore(_ opened: YoOpenedBackup, typed: String? = nil) async throws {
     let sealed = try JSONDecoder().decode(BackupRecord.Sealed.self, from: opened.sealed)
     let (client, secret) = try await register(sealed.account.username, secret: sealed.accountKey)
     use(client, secret: secret)
@@ -769,7 +782,7 @@ final class AccountStore {
     use(client, secret: secret)
     // The same user, or (its name released after a year away, spec 6.4) a new one with the same key and no backup.
     let same = id == item.userID
-    if same, let words = item.words { try? RecoveryWords.save(words) }
+    if same, let key = item.recoveryKey { try? RecoveryWords.save(key) }
     let restored = Account(
       username: client.username() ?? item.username, userID: id, byPasskey: same && item.byPasskey,
       byCode: same && item.byCode == true)
@@ -977,49 +990,51 @@ enum NewAccountKey {
   static func forget(_ name: String) { SecItemDelete(query(name) as CFDictionary) }
 }
 
-/// The recovery words on this phone, to look up in the profile: in the keychain, for this device only (not in a
-/// backup, not synced), readable while the phone is unlocked.
+/// The recovery key on this phone, to look up in the profile: in the keychain, for this device only (not in a
+/// backup, not synced), readable while the phone is unlocked. The 12 words of before are only ever deleted.
 enum RecoveryWords {
   private static var query: [String: Any] {
     [
       kSecClass as String: kSecClassGenericPassword,
       kSecAttrService as String: "app.justyo.recovery-words",
-      kSecAttrAccount as String: "words",
+      kSecAttrAccount as String: "recovery-key",
     ]
   }
 
-  /// The words in place of those there (updated, never deleted first); throws when the keychain did not keep them.
-  static func save(_ words: [String]) throws {
-    try Keychain.write(query, Data(words.joined(separator: " ").utf8), accessible: kSecAttrAccessibleWhenUnlockedThisDeviceOnly)
+  /// The key in place of the one there (updated, never deleted first); throws when the keychain did not keep it.
+  static func save(_ key: String) throws {
+    try Keychain.write(query, Data(key.utf8), accessible: kSecAttrAccessibleWhenUnlockedThisDeviceOnly)
   }
 
-  static func load() -> [String]? { (try? Keychain.read(query)).map(words) }
+  static func load() -> String? { (try? Keychain.read(query)).flatMap(key) }
 
-  /// New words on their way into the backup at the hub: kept beside the ones there until the hub has them (`settle`),
-  /// so that whichever the backup opens with is on this phone, also when the answer or the app is lost between.
-  static func stage(_ words: [String]) throws {
-    try Keychain.write(staged, Data(words.joined(separator: " ").utf8), accessible: kSecAttrAccessibleWhenUnlockedThisDeviceOnly)
+  /// A new key on its way into the backup at the hub: kept beside the one there until the hub has it (`settle`), so
+  /// that whichever the backup opens with is on this phone, also when the answer or the app is lost between.
+  static func stage(_ key: String) throws {
+    try Keychain.write(staged, Data(key.utf8), accessible: kSecAttrAccessibleWhenUnlockedThisDeviceOnly)
   }
 
-  /// The new words staged and not settled (the hub may have them or not).
-  static func pending() -> [String]? { (try? Keychain.read(staged)).map(words) }
+  /// The new key staged and not settled (the hub may have it or not).
+  static func pending() -> String? { (try? Keychain.read(staged)).flatMap(key) }
 
-  /// The hub has `words` in its backup now: they are the words from here on.
-  static func settle(_ words: [String]) throws {
-    if load() != words { try save(words) }
+  /// The hub has `key` in its backup now: it is the key from here on.
+  static func settle(_ key: String) throws {
+    if load() != key { try save(key) }
     SecItemDelete(staged as CFDictionary)
   }
 
+  /// This key and the 12 words of before (their items "words", "words.new").
   static func delete() {
     SecItemDelete(query as CFDictionary)
     SecItemDelete(staged as CFDictionary)
+    for old in ["words", "words.new"] {
+      SecItemDelete(query.merging([kSecAttrAccount as String: old]) { $1 } as CFDictionary)
+    }
   }
 
-  private static var staged: [String: Any] { query.merging([kSecAttrAccount as String: "words.new"]) { $1 } }
+  private static var staged: [String: Any] { query.merging([kSecAttrAccount as String: "recovery-key.new"]) { $1 } }
 
-  private static func words(_ data: Data) -> [String] {
-    String(decoding: data, as: UTF8.self).split(separator: " ").map(String.init)
-  }
+  private static func key(_ data: Data) -> String? { RecoveryCode.parse(String(decoding: data, as: UTF8.self)) }
 }
 
 /// The accounts in the iCloud Keychain (spec 7): what brings one back without a word when the app is deleted and
@@ -1034,15 +1049,27 @@ enum SyncedAccount {
     var userID: Data
     /// The account key's secret: whoever has it is the account (spec 3.2), so this item is as precious as the phone.
     var accountKey: Data
-    /// How the backup opens, and its recovery words (they open nothing the key does not): so a phone brought back
-    /// this way shows the same security as the one before, and can still change its passkey or words.
+    /// How the backup opens, and its recovery key (it opens nothing the account key does not): so a phone brought
+    /// back this way shows the same security as the one before, and can still change its passkey or recovery key.
     var byPasskey: Bool
     var byCode: Bool?
-    var words: [String]?
+    var recoveryKey: String?
     /// Signed out (on any of the person's devices): only signed in again by a tap on Sign In.
     var signedOut: Bool?
+    /// As `Account.backupVersion`. Nil: an item of the Ed25519 account key and the 12 words (`upgraded`).
+    var version: Int?
 
     var id: Data { userID }
+
+    /// An item of before as it is now: its secret the libsignal key it was (`legacyAccountSecret`), not secured (its
+    /// backup of the 12 words no longer opens).
+    func upgraded() -> Item? {
+      guard version != Account.backupVersion else { return self }
+      guard let secret = try? legacyAccountSecret(seed: accountKey) else { return nil }
+      return Item(
+        username: username, userID: userID, accountKey: secret, byPasskey: false, byCode: false, recoveryKey: nil,
+        signedOut: signedOut, version: Account.backupVersion)
+    }
   }
 
   private static var host: String { Hub.home.host() ?? Hub.home.absoluteString }
@@ -1063,14 +1090,16 @@ enum SyncedAccount {
   static func save(_ account: Account, secret: Data, onlyIfMissing: Bool = false) {
     migrate()
     pendingSignOut.remove(account.userID)  // in use here again: not signed out
-    let previous = load(account.userID)
-    if onlyIfMissing && previous != nil { return }
-    // The words are readable only while the phone is unlocked (a launch in the background may come before): those
-    // already in the item are kept then.
+    let stored = raw(account.userID)
+    let previous = stored?.upgraded()
+    // An item of before (Ed25519, the 12 words) counts as missing: written anew.
+    if onlyIfMissing && previous != nil && stored?.version == Account.backupVersion { return }
+    // The key is readable only while the phone is unlocked (a launch in the background may come before): the one
+    // already in the item is kept then.
     let item = Item(
       username: account.username, userID: account.userID, accountKey: secret,
-      byPasskey: account.byPasskey, byCode: account.byCode, words: RecoveryWords.load() ?? previous?.words,
-      signedOut: false)
+      byPasskey: account.byPasskey, byCode: account.byCode,
+      recoveryKey: RecoveryWords.load() ?? previous?.recoveryKey, signedOut: false, version: Account.backupVersion)
     // One the keychain does not take now (locked, a passing error) is noted and written again at the next opening
     // (`needsSave`), not taken as there: a new phone would miss it, or find old words.
     if write(item, previous: previous) {
@@ -1082,6 +1111,9 @@ enum SyncedAccount {
 
   /// Whether this account's item was not written the last time it changed: write it again, whole.
   static func needsSave(_ userID: Data) -> Bool { pendingSave.contains(userID) }
+
+  /// This account's item to be written again, whole, at the next opening.
+  static func mustSave(_ userID: Data) { pendingSave.insert(userID) }
 
   @discardableResult
   private static func write(_ item: Item, previous: Item?) -> Bool {
@@ -1097,7 +1129,11 @@ enum SyncedAccount {
     return SecItemAdd(query(item.userID).merging(attributes) { $1 } as CFDictionary, nil) == errSecSuccess
   }
 
-  static func load(_ userID: Data) -> Item? {
+  /// The item as it is now (`Item.upgraded`).
+  static func load(_ userID: Data) -> Item? { raw(userID)?.upgraded() }
+
+  /// The item as stored.
+  private static func raw(_ userID: Data) -> Item? {
     var find = query(userID)
     find[kSecReturnData as String] = true
     find[kSecMatchLimit as String] = kSecMatchLimitOne
@@ -1132,6 +1168,7 @@ enum SyncedAccount {
     return found
       .filter { ($0[kSecAttrAccount as String] as? String)?.hasPrefix("\(host)/") == true }
       .compactMap { ($0[kSecValueData as String] as? Data).flatMap { try? JSONDecoder().decode(Item.self, from: $0) } }
+      .compactMap { $0.upgraded() }
       .sorted { $0.username.localizedCaseInsensitiveCompare($1.username) == .orderedAscending }
   }
 

@@ -29,7 +29,6 @@ targets:
       - {path: ../../YoApp/Resources/Assets.xcassets, buildPhase: resources}
       - {path: ../../YoApp/Resources/Montserrat-Bold.ttf, buildPhase: resources}
       - {path: ../../YoApp/Resources/yo.caf, buildPhase: resources}
-      - {path: ../../YoApp/Resources/bip39-english.txt, buildPhase: resources}
       - {path: ../../YoApp/Resources/Licenses.txt, buildPhase: resources}  # dev/licenses.sh, before the build
       - {path: ../../YoApp/Resources/IconNegative@2x.png, buildPhase: resources}
       - {path: ../../YoApp/Resources/IconNegative@3x.png, buildPhase: resources}

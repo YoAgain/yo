@@ -17,7 +17,7 @@ struct SecureNameSheet: View {
   /// The passkey is saved in the password manager; signing in with it once is left (the check).
   @State private var created = false
   @State private var skipped = false
-  @State private var words: [String] = []
+  @State private var words = ""
   @State private var busy = false
   @State private var problem: String?
 
@@ -49,7 +49,7 @@ struct SecureNameSheet: View {
     .interactiveDismissDisabled(busy)
     .onAppear {
       guard words.isEmpty else { return }
-      words = secured ? RecoveryWords.load() ?? [] : accounts.secureWords()
+      words = secured ? RecoveryWords.load() ?? "" : accounts.secureWords()
       skipped = accounts.passkeyTurnedOff && start != .passkey  // declined on purpose: not asked again
       switch start {
       case .passkey: page = .passkey
@@ -101,8 +101,8 @@ struct SecureNameSheet: View {
 
   private var wordsPage: some View {
     Page(title: "Recovery Key",
-      message: passkeyDone ? "Your passkey works. Save these 12 words too." : "Save these 12 words to sign back in.") {
-      FrostedKey(words: words, qrSize: 80)
+      message: passkeyDone ? "Your passkey works. Save your recovery key too." : "Save your recovery key to sign back in.") {
+      FrostedKey(key: words, qrSize: 80)
     } bottom: {
       PrimaryButton("Save…") { save() }
       Note(problem)
@@ -176,17 +176,17 @@ struct SecureNameSheet: View {
     }
   }
 
-  /// The words as the card (an image) and as text, to the share sheet. Once saved somewhere, they also secure the
-  /// account if nothing did yet, and the guide goes on.
+  /// The recovery key as the card (an image) and as text, to the share sheet. Once saved somewhere, it also secures
+  /// the account if nothing did yet, and the guide goes on.
   private func save() {
-    // Words missing here (a secured account brought back without them): nothing to draw.
-    guard words.count == 12 else {
+    // The key missing here (a secured account brought back without it): nothing to draw.
+    guard words.count == 64 else {
       return problem = "Your recovery key isn’t on this iPhone."
     }
     let name = accounts.account?.username ?? ""
-    let renderer = ImageRenderer(content: RecoveryCard(name: name, words: words))
+    let renderer = ImageRenderer(content: RecoveryCard(name: name, key: words))
     renderer.scale = 3
-    var items: [Any] = ["Yo recovery key for \(name): " + words.joined(separator: " ")]
+    var items: [Any] = ["Yo recovery key for \(name): " + RecoveryCode.shown(words)]
     if let image = renderer.uiImage { items.insert(image, at: 0) }
     Share.present(items) { completed in
       guard completed else { return }
@@ -252,25 +252,25 @@ private struct BigSymbol: View {
   }
 }
 
-/// The recovery key from Security, after Face ID: the words and their QR code on the full-colour card, Save…
+/// The recovery key from Security, after Face ID: the key and its QR code on the full-colour card, Save…
 /// to the share sheet, Done to close. No second "show" step.
 struct RecoveryShowSheet: View {
   let name: String
-  let words: [String]
+  let key: String
   @Environment(\.dismiss) private var dismiss
   @State private var saved = false
 
   var body: some View {
     ZStack {
       Color.amethyst.ignoresSafeArea()
-      Page(title: "Recovery Key", message: "Anyone with these words can sign in as you.") {
-        FrostedKey(words: words, qrSize: 80)  // milky until tapped, as everywhere the words show
+      Page(title: "Recovery Key", message: "Anyone with this key can sign in as you.") {
+        FrostedKey(key: key, qrSize: 80)  // milky until tapped, as everywhere the key shows
       } bottom: {
         PrimaryButton(saved ? "Done" : "Save…") {
           if saved { return dismiss() }
-          let renderer = ImageRenderer(content: RecoveryCard(name: name, words: words))
+          let renderer = ImageRenderer(content: RecoveryCard(name: name, key: key))
           renderer.scale = 3
-          var items: [Any] = ["Yo recovery key for \(name): " + words.joined(separator: " ")]
+          var items: [Any] = ["Yo recovery key for \(name): " + RecoveryCode.shown(key)]
           if let image = renderer.uiImage { items.insert(image, at: 0) }
           Share.present(items) { completed in if completed { saved = true } }
         }

@@ -1,7 +1,7 @@
 // The way in. Sign Up → a name → the list (the name is secured later, from the profile: Secure Your Account). The one
 // account in the iCloud Keychain not signed out (the app installed again, a new iPhone) comes back before anything,
-// without a word. "Sign In" brings an account from before: one of the iCloud Keychain's, tapped; a passkey; or the 12
-// words, which say whose they are. A passkey on this phone is offered by the system at once.
+// without a word. "Sign In" brings an account from before: one of the iCloud Keychain's, tapped; a passkey; or the recovery
+// key, which says whose it is. A passkey on this phone is offered by the system at once.
 //
 // Every step after the welcome is the same page, as Apple's setup screens are: a title and one line at the top, the
 // content in the middle, the button at the bottom over the full width, a text button under it if there is a second
@@ -449,28 +449,28 @@ private struct NameField: View {
   }
 }
 
-/// The 12 words, numbered, in two columns.
-struct WordGrid: View {
-  let words: [String]
+/// The recovery key in 16 blocks of 4, four to a row, monospaced so the blocks line up.
+struct KeyGrid: View {
+  let key: String
 
   var body: some View {
-    LazyVGrid(columns: [GridItem(.flexible()), GridItem(.flexible())], spacing: 10) {
-      ForEach(Array(words.enumerated()), id: \.offset) { index, word in
-        HStack(spacing: 8) {
-          Text("\(index + 1)").font(.caption.weight(.semibold).monospacedDigit()).opacity(0.6)
-            .frame(minWidth: 20, alignment: .trailing)
-          Text(word).font(.yo(18)).lineLimit(1).minimumScaleFactor(0.6)
-          Spacer(minLength: 0)
-        }
-        .padding(.vertical, 10)
-        .padding(.horizontal, 12)
-        .background(.white.opacity(0.14), in: .rect(cornerRadius: 12))
+    LazyVGrid(columns: Array(repeating: GridItem(.flexible(), spacing: 8), count: 4), spacing: 8) {
+      ForEach(Array(RecoveryCode.blocks(key).enumerated()), id: \.offset) { _, block in
+        Text(block)
+          .font(.system(size: 18, weight: .semibold, design: .monospaced))
+          .lineLimit(1)
+          .minimumScaleFactor(0.6)
+          .frame(maxWidth: .infinity)
+          .padding(.vertical, 10)
+          .background(.white.opacity(0.14), in: .rect(cornerRadius: 12))
       }
     }
+    .accessibilityElement(children: .ignore)
+    .accessibilityLabel(RecoveryCode.blocks(key).map { $0.map(String.init).joined(separator: " ") }.joined(separator: ", "))
   }
 }
 
-/// Logging in without a passkey: the 12 words, nothing else (they say whose they are): pasted or typed, or read from
+/// Logging in without a passkey: the recovery key, nothing else (it says whose it is): pasted or typed, or read from
 /// the card's QR code by the camera or from Photos.
 private struct LogIn: View {
   let back: () -> Void
@@ -485,8 +485,8 @@ private struct LogIn: View {
 
   var body: some View {
     Page(title: "Recovery Key", message: "Paste, type, or scan your recovery key.", back: back) {
-      TextField("", text: $words, prompt: Text("12 words").foregroundStyle(.white.opacity(0.35)), axis: .vertical)
-        .font(.yo(18))
+      TextField("", text: $words, prompt: Text("64 characters").foregroundStyle(.white.opacity(0.35)), axis: .vertical)
+        .font(.system(size: 18, weight: .semibold, design: .monospaced))
         .lineLimit(3...5)
         .tint(.white)
         .textInputAutocapitalization(.never)
@@ -523,7 +523,7 @@ private struct LogIn: View {
       Task {
         guard let data = try? await item.loadTransferable(type: Data.self), let image = UIImage(data: data),
           let text = RecoveryQR.read(image)
-        else { return problem = "We couldn’t read a recovery key from this photo. Try another photo or enter the 12 words." }
+        else { return problem = "We couldn’t read a recovery key from this photo. Try another photo or enter the key." }
         words = text
         logIn()
       }
@@ -532,7 +532,7 @@ private struct LogIn: View {
 
   private func logIn() {
     guard let code = RecoveryCode.parse(words) else {
-      return problem = "That doesn’t match a recovery key. Check the words and try again."
+      return problem = "That doesn’t match a recovery key. Check it and try again."
     }
     guard !busy else { return }
     busy = true
@@ -548,10 +548,10 @@ private struct LogIn: View {
   }
 }
 
-/// The recovery words as a picture for Photos: the brand's purple, the name, the 12 words, what they are for.
+/// The recovery key as a picture for Photos: the brand's purple, the name, the key in blocks of 4, what it is for.
 struct RecoveryCard: View {
   let name: String
-  let words: [String]
+  let key: String
 
   var body: some View {
     VStack(alignment: .leading, spacing: 18) {
@@ -563,18 +563,15 @@ struct RecoveryCard: View {
       HStack(alignment: .bottom) {
         Text("Recovery Key").font(.yo(22))
         Spacer()
-        RecoveryQRView(words: words, size: 110)
+        RecoveryQRView(key: key, size: 110)
       }
-      Grid(horizontalSpacing: 26, verticalSpacing: 10) {
-        ForEach(0..<6, id: \.self) { row in
+      let blocks = RecoveryCode.blocks(key)
+      Grid(horizontalSpacing: 18, verticalSpacing: 10) {
+        ForEach(0..<(blocks.count + 3) / 4, id: \.self) { row in
           GridRow {
-            ForEach([row, row + 6], id: \.self) { i in
-              HStack(spacing: 8) {
-                Text("\(i + 1)").font(.system(size: 13, weight: .semibold).monospacedDigit()).opacity(0.6)
-                  .frame(width: 20, alignment: .trailing)
-                Text(words[i]).font(.yo(20))
-              }
-              .frame(maxWidth: .infinity, alignment: .leading)
+            ForEach(row * 4..<min(row * 4 + 4, blocks.count), id: \.self) { i in
+              Text(blocks[i]).font(.system(size: 22, weight: .semibold, design: .monospaced))
+                .frame(maxWidth: .infinity)
             }
           }
         }

@@ -397,7 +397,7 @@ struct SettingsView: View {
     // The words show from here, the page their button is on (a sheet from the list two pages down came up late).
     .sheet(isPresented: $showingWords) {
       if let account = accounts.account, let words = RecoveryWords.load() {
-        RecoveryShowSheet(name: account.username, words: words)
+        RecoveryShowSheet(name: account.username, key: words)
       }
     }
     .modifier(SecurityDialogs(
@@ -864,7 +864,7 @@ private struct SecurityDialogs: ViewModifier {
         Button("Create New Recovery Key", role: .destructive) { renew() }
         Button("Cancel", role: .cancel) {}
       } message: {
-        Text("Your current 12 words will stop working.")
+        Text("Your current recovery key will stop working.")
       }
   }
 }

@@ -1,5 +1,5 @@
-// The recovery words as a QR code (on the card in Photos and on screen) and back: from a picture in Photos, or the
-// camera. The code holds the 12 words, space-separated, nothing else.
+// The recovery key as a QR code (on the card in Photos and on screen) and back: from a picture in Photos, or the
+// camera. The code holds the key's 64 characters, nothing else.
 import CoreImage
 import CoreImage.CIFilterBuiltins
 import PhotosUI
@@ -7,8 +7,8 @@ import SwiftUI
 import VisionKit
 
 enum RecoveryQR {
-  /// The words as a QR code: black on white, sharp at any size.
-  static func image(_ words: [String]) -> UIImage? { image(text: words.joined(separator: " ")) }
+  /// The recovery key as a QR code: black on white, sharp at any size.
+  static func image(key: String) -> UIImage? { image(text: key) }
 
   /// Any text as a QR code: black on white, sharp at any size.
   static func image(text: String) -> UIImage? {
@@ -30,13 +30,13 @@ enum RecoveryQR {
   }
 }
 
-/// The QR code of the words, on a white tile.
+/// The QR code of the recovery key, on a white tile.
 struct RecoveryQRView: View {
-  let words: [String]
+  let key: String
   var size: CGFloat = 140
 
   var body: some View {
-    if let image = RecoveryQR.image(words) {
+    if let image = RecoveryQR.image(key: key) {
       Image(uiImage: image)
         .interpolation(.none)
         .resizable()
@@ -87,15 +87,15 @@ struct QRScanner: UIViewControllerRepresentable {
 /// The recovery key on screen, frosted until tapped (someone looking over a shoulder sees nothing); tapped again, it
 /// frosts over again.
 struct FrostedKey: View {
-  let words: [String]
+  let key: String
   var qrSize: CGFloat = 140
   @State private var shown = false
   @Environment(\.scenePhase) private var phase
 
   var body: some View {
     VStack(spacing: 16) {
-      RecoveryQRView(words: words, size: qrSize)
-      WordGrid(words: words)
+      RecoveryQRView(key: key, size: qrSize)
+      KeyGrid(key: key)
     }
     .blur(radius: shown ? 0 : 14)
     .overlay {
