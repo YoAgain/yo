@@ -102,6 +102,8 @@ struct FriendList: View {
       /// Photos and videos on their way out, each with when it started; any number at once (a tap on the bar sends
       /// another, the ring at its left undoes them).
       var outgoing: [Outgoing] = []
+      /// How long the stack on its way out waits (`run`): `sendDelay`, or a friend's "Undo Before Sending" time.
+      var seconds = FriendList.sendDelay
     }
 
     /// Each friend's bar state, by `Friend.key`, made when first asked for.
@@ -867,9 +869,9 @@ struct FriendList: View {
     picked = nil
     libraryItem = nil
     // "Undo Before Sending" (Per Contact): the Yo waits under the ring as a photo does; a tap on it keeps it here.
-    if !cameraOn && library == nil && (friends.all.first { $0.key == friend.key }?.undoFirst ?? false) {
+    if !cameraOn && library == nil, let own = friends.all.first(where: { $0.key == friend.key }), own.undoFirst {
       let (inbox, accounts, friends) = (inbox, accounts, friends)
-      run(friend, "Sent Yo") {
+      run(friend, "Sent Yo", seconds: own.undoSeconds) {
         Prepared(
           send: {
             Task {
@@ -969,17 +971,21 @@ struct FriendList: View {
   /// A photo or video on its way out joins the friend's stack: every one in it waits until `sendDelay` has passed
   /// since the newest (each new one starts the time again, the ring after the words showing it); then the stack goes,
   /// in order. Meanwhile `prepare` takes the photo or ends the video. A tap on the ring keeps the whole stack here.
-  private func run(_ friend: Friend, _ text: String, prepare: @escaping @MainActor () async -> Prepared?) {
+  private func run(
+    _ friend: Friend, _ text: String, seconds: Double = FriendList.sendDelay,
+    prepare: @escaping @MainActor () async -> Prepared?
+  ) {
     let bars = bars  // the object itself into the task, not this view's copy of the state
     let one = Outgoing(text: text)
     let bar = bars.of(friend)
+    bar.seconds = seconds
     bar.outgoing.append(one)
     bars.preparing[one.id] = Task { await prepare() }
     let key = friend.key
     let round = (bars.stackRounds[key] ?? 0) + 1
     bars.stackRounds[key] = round
     Task {
-      try? await Task.sleep(for: .seconds(Self.sendDelay))
+      try? await Task.sleep(for: .seconds(seconds))
       guard bars.stackRounds[key] == round, !bar.outgoing.isEmpty else { return }  // another came, or undone
       let stack = bar.outgoing
       bars.stackRounds[key] = nil
@@ -1326,7 +1332,7 @@ struct LiveBar: View {
       // A request shows one "Yo Request from X": no count of its Yos ("!!!"), no photo, not even its 📷 (what spam
       // aims at); all of it only after a yes.
       title, count: friend.request ? 0 : count, color: color, recording: recording,
-      outgoing: bar.outgoing.last?.started, stop: stop,
+      outgoing: bar.outgoing.last?.started, sendSeconds: bar.seconds, stop: stop,
       media: friend.request ? [] : media, yo: friend.request ? nil : yo, hint: hint, hold: hold, view: view, faded: friend.gone && bar.sent == nil,
       icon: friend.group == nil ? nil : "person.3.fill", from: friend.group == nil ? nil : from, flies: true,
       action: action)

@@ -318,13 +318,20 @@ private struct ContactDetail: View {
         }
       }
       Section {
+        let current = friends.all.first { $0.key == friend.key }
         Toggle(
           "Undo Before Sending",
-          isOn: Binding(
-            get: { friends.all.first { $0.key == friend.key }?.undoFirst ?? false },
-            set: { friends.setUndoFirst(friend, $0) }))
+          isOn: Binding(get: { current?.undoFirst ?? false }, set: { friends.setUndoFirst(friend, $0) }))
+        if current?.undoFirst == true {
+          Stepper(
+            "Wait \(Int(current?.undoSeconds ?? FriendList.sendDelay)) Seconds",
+            value: Binding(
+              get: { current?.undoSeconds ?? FriendList.sendDelay }, set: { friends.setUndoSeconds(friend, $0) }),
+            in: FriendList.sendDelay...10, step: 1)
+        }
       } footer: {
-        Text("A Yo to \(friend.name) waits two seconds with a ring to undo it, as a photo does.")
+        let seconds = Int(friends.all.first { $0.key == friend.key }?.undoSeconds ?? FriendList.sendDelay)
+        Text("A Yo to \(friend.name) waits \(seconds) seconds with a ring to undo it, as a photo does.")
       }
     }
     .navigationTitle(friend.name)

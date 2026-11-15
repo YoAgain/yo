@@ -34,6 +34,8 @@ struct Friend: Codable, Hashable, Identifiable {
   /// "Undo Before Sending" (Settings › Encryption › Per Contact): a Yo tapped to them waits `FriendList.sendDelay`
   /// under the undo ring, as a photo does, so one sent by mistake can be taken back. Kept on this phone.
   var undoFirst = false
+  /// How long that Yo waits: 2 to 10 seconds, set beside the switch.
+  var undoSeconds = FriendList.sendDelay
   /// Who they are on this phone, for good: a new spelling or a user id learned later keeps the bar in its place (a
   /// name as identity made the bar leave and come in again on top).
   var key = UUID()
@@ -66,6 +68,7 @@ struct Friend: Codable, Hashable, Identifiable {
     keyChanged = try c.decodeIfPresent(Bool.self, forKey: .keyChanged) ?? false
     request = try c.decodeIfPresent(Bool.self, forKey: .request) ?? false
     undoFirst = try c.decodeIfPresent(Bool.self, forKey: .undoFirst) ?? false
+    undoSeconds = try c.decodeIfPresent(Double.self, forKey: .undoSeconds) ?? FriendList.sendDelay
     group = try c.decodeIfPresent(String.self, forKey: .group)
     key = try c.decodeIfPresent(UUID.self, forKey: .key) ?? UUID()
   }
@@ -216,6 +219,13 @@ final class Friends {
   func setUndoFirst(_ friend: Friend, _ on: Bool) {
     guard let index = all.firstIndex(where: { $0.key == friend.key }), all[index].undoFirst != on else { return }
     all[index].undoFirst = on
+  }
+
+  /// How long a friend's Yo waits under "Undo Before Sending" (2 to 10 s).
+  func setUndoSeconds(_ friend: Friend, _ seconds: Double) {
+    let seconds = min(max(seconds, FriendList.sendDelay), 10)
+    guard let index = all.firstIndex(where: { $0.key == friend.key }), all[index].undoSeconds != seconds else { return }
+    all[index].undoSeconds = seconds
   }
 
   /// The core's contacts not yet said yes to (`YoContact.accepted`): their bars are requests (spec 4.10).
