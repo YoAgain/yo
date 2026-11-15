@@ -6,6 +6,7 @@ import YoCore
 struct NewGroupSheet: View {
   @Environment(\.dismiss) private var dismiss
   @Environment(Friends.self) private var friends
+  @Environment(Inbox.self) private var inbox
   @Environment(AccountStore.self) private var accounts
   @State private var name = ""
   @State private var members: Set<String> = []
@@ -25,7 +26,7 @@ struct NewGroupSheet: View {
         Section {
           TextField("Group Name", text: $name)
             .font(.yo(20, relativeTo: .body))
-            .onChange(of: name) { if name.utf8.count > 32 { name = String(name.prefix(32)) } }
+            .onChange(of: name) { if name.utf8.count > 32 { name = FriendList.groupName(name) } }
         }
         Section {
           ForEach(choices) { friend in
@@ -74,7 +75,8 @@ struct NewGroupSheet: View {
     failed = false
     Task {
       do {
-        _ = try await Hub.run { try client.createGroup(name: name, members: members) }
+        let made = try await Hub.run { try client.createGroup(name: FriendList.groupName(name), members: members) }
+        await inbox.absorb(made.events, client: client, friends: friends)
         if let groups = try? await Hub.run({ client.groups() }) { friends.takeGroups(groups) }
         dismiss()
       } catch {

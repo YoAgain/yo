@@ -366,6 +366,12 @@ final class Inbox {
   /// or video is noted, fetched and waits on the bar until seen; a contact's new key is noted for Contacts. Then the
   /// core may forget this batch, all of it that is kept (another call's batch is its own: the core acknowledges each
   /// as named); what could not be kept comes again after a restart. `contacts`: the core's, read with the events.
+  /// What a call besides the sync brought from the inbox (a group made, renamed or left): taken as a sync's.
+  func absorb(_ events: [YoEvent], client: YoClient, friends: Friends) async {
+    guard !events.isEmpty, let contacts = try? await Hub.run({ client.contacts() }) else { return }
+    await take(events, contacts: contacts, client: client, friends: friends)
+  }
+
   private func take(_ events: [YoEvent], contacts: [YoContact], client: YoClient, friends: Friends) async {
     let start = Perf.on ? CACurrentMediaTime() : 0
     defer { if Perf.on { Perf.mark("take \(events.count) " + String(format: "%.1f ms", (CACurrentMediaTime() - start) * 1000)) } }

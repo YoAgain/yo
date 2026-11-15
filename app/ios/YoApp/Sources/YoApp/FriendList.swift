@@ -20,6 +20,7 @@
 // An invite link (justyo.co/NAME, Invite.swift) adds its name as if typed in Add Friend; one already on the list says
 // so on its bar. The first Yo ever sent from this phone says what it does, as the original's did (2015).
 import AVFoundation
+import ImageIO
 import PhotosUI
 import SwiftUI
 import UserNotifications
@@ -459,15 +460,26 @@ struct FriendList: View {
     let name = name.trimmingCharacters(in: .whitespaces)
     guard let id = bar.group, let client = accounts.client, !name.isEmpty else { return }
     Task {
-      _ = try? await Hub.run { try client.renameGroup(group: id, name: String(name.prefix(32))) }
+      if let events = try? await Hub.run({ try client.renameGroup(group: id, name: Self.groupName(name)) }) {
+        await inbox.absorb(events, client: client, friends: friends)
+      }
       if let groups = try? await Hub.run({ client.groups() }) { friends.takeGroups(groups) }
     }
+  }
+
+  /// A group's name as the core takes it: at most 32 bytes of UTF-8, cut at a whole character.
+  static func groupName(_ name: String) -> String {
+    var cut = ""
+    for character in name where cut.utf8.count + String(character).utf8.count <= 32 { cut.append(character) }
+    return cut
   }
 
   private func leave(_ bar: Friend) {
     guard let id = bar.group, let client = accounts.client else { return }
     Task {
-      _ = try? await Hub.run { try client.leaveGroup(group: id) }
+      if let events = try? await Hub.run({ try client.leaveGroup(group: id) }) {
+        await inbox.absorb(events, client: client, friends: friends)
+      }
       if let groups = try? await Hub.run({ client.groups() }) { withAnimation(.snappy) { friends.takeGroups(groups) } }
     }
   }
@@ -1969,7 +1981,7 @@ struct HeldMedia: View {
       player = nil
       full = nil
       if let file = current.file {
-        full = await Task.detached(priority: .userInitiated) { UIImage(contentsOfFile: file.path) }.value
+        full = await Task.detached(priority: .userInitiated) { Self.fitted(file) }.value
       }
       guard !Task.isCancelled else { return }
       shows(current)
@@ -1981,7 +1993,22 @@ struct HeldMedia: View {
     let length = (try? await AVURLAsset(url: video).load(.duration).seconds) ?? 0
     guard !Task.isCancelled else { return }
     shows(current)
-    seconds = length > 0 ? length : photoSeconds
+    // A video is 10 s at most (spec 5): a longer one, from a sender that ignores it, is cut there.
+    seconds = length > 0 ? min(length, Self.longestVideo) : photoSeconds
+  }
+
+  static let longestVideo = 10.5
+
+  /// A received photo decoded at most 2048 px on its longer side, whatever size its sender gave it (spec 5: the
+  /// receiver checks the bytes, not the sender's word): a huge one costs no memory beyond that.
+  nonisolated static func fitted(_ file: URL) -> UIImage? {
+    guard let source = CGImageSourceCreateWithURL(file as CFURL, nil) else { return nil }
+    let options: [CFString: Any] = [
+      kCGImageSourceCreateThumbnailFromImageAlways: true,
+      kCGImageSourceCreateThumbnailWithTransform: true,
+      kCGImageSourceThumbnailMaxPixelSize: 2048,
+    ]
+    return CGImageSourceCreateThumbnailAtIndex(source, 0, options as CFDictionary).map { UIImage(cgImage: $0) }
   }
 
   /// The showing one's time: running (the video playing) until it is over, then the next; paused while held.
