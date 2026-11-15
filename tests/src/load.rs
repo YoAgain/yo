@@ -167,12 +167,14 @@ fn main() {
     println!("end to end: {sent} Yos sent, {received} received, {dropped} dropped, {:.0} Yos/s", sent as f64 / e2e_s);
 
     // ---- phase 2: the hub alone ----
-    // Each user with its device check, learned once as any sender would (spec 4.4).
-    let targets: Vec<(String, String)> = clients
+    // Each user with its device check, learned once as any sender would (spec 4.4), and its access key, as a contact
+    // shows it (spec 4.10): a delivery without it is a request, refused unsigned.
+    let targets: Vec<(String, String, Option<String>)> = clients
         .iter()
         .map(|(_, c)| {
-            let hash = yo_tests::devices_hash(&url, c.user_id()).expect("a registered user");
-            (yo_wire::api::deliver_path(&yo_tests::user_id(c.user_id())), yo_wire::b64(&hash))
+            let access = c.access_key_for_tests();
+            let hash = yo_tests::devices_hash_with(&url, c.user_id(), access.as_deref()).expect("a registered user");
+            (yo_wire::api::deliver_path(&yo_tests::user_id(c.user_id())), yo_wire::b64(&hash), access)
         })
         .collect();
     let envelope = yo_tests::junk(0x5A);
@@ -188,13 +190,16 @@ fn main() {
                     let mut errors = 0u64;
                     let mut k = c;
                     while Instant::now() < deadline {
-                        let (path, hash) = &targets[k % targets.len()];
+                        let (path, hash, access) = &targets[k % targets.len()];
                         k += 1;
                         let t = Instant::now();
-                        let request = client
+                        let mut request = client
                             .post(format!("{url}{path}"))
-                            .header(yo_wire::api::HEADER_DEVICES, hash.as_str())
-                            .body(envelope.clone());
+                            .header(yo_wire::api::HEADER_DEVICES, hash.as_str());
+                        if let Some(access) = access {
+                            request = request.header(yo_wire::api::HEADER_ACCESS, access.as_str());
+                        }
+                        let request = request.body(envelope.clone());
                         match request.send().await {
                             Ok(r) if r.status().as_u16() == 202 => latencies.push(t.elapsed().as_micros() as u64),
                             _ => errors += 1,

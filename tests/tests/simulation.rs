@@ -123,9 +123,13 @@ fn run(seed: u64, clients: usize, steps: usize) {
     }
     for d in &devices {
         // Only what a replaced device sent may be dropped (spec 4.6), and is among `may_be_lost`.
-        // A payload kept for a roster ("later") is no drop, once a later sync decided it.
+        // A payload kept for a roster ("later") is no drop, once a later sync decided it; nor is one sent identified
+        // for want of a sender certificate (spec 6.1: it went, unsealed).
         assert!(
-            d.client.drop_reasons().iter().all(|r| r.contains("replaced device") || r.ends_with(": later")),
+            d.client
+                .drop_reasons()
+                .iter()
+                .all(|r| r.contains("replaced device") || r.ends_with(": later") || r.starts_with("sent identified")),
             "seed {seed}: {} dropped: {:?}",
             d.user,
             d.client.drop_reasons()
