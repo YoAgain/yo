@@ -134,7 +134,7 @@ struct SettingsView: View {
               ContactsList()
             } label: {
               LabeledContent {
-                Text("\(friends.all.count)")
+                Text("\(friends.contacts.count)")
               } label: {
                 Label("Contacts", systemImage: "person.2.fill").labelStyle(Tile(.blue))
               }

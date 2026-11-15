@@ -121,6 +121,8 @@ final class Friends {
   /// The friends on the list: all but the blocked.
   var shown: [Friend] { all.filter { !$0.blocked } }
   var blocked: [Friend] { all.filter(\.blocked) }
+  /// The people, blocked ones too: no group's bar (a group has no chat of its own to check).
+  var contacts: [Friend] { all.filter { $0.group == nil } }
 
   /// The colour the next friend gets: the one fewest friends have (the first of those), so the list stays colourful.
   var nextColor: Int {

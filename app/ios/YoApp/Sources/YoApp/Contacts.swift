@@ -113,7 +113,7 @@ struct ContactsList: View {
 
   var body: some View {
     Form {
-      if !friends.all.isEmpty {
+      if !friends.contacts.isEmpty {
         Section {
           ForEach(sorted) { friend in
             let state = friend.user.flatMap { states[$0] } ?? ContactState()
@@ -137,16 +137,16 @@ struct ContactsList: View {
       }
     }
     .overlay {
-      if friends.all.isEmpty { ContentUnavailableView("No Contacts", systemImage: "person.2") }
+      if friends.contacts.isEmpty { ContentUnavailableView("No Contacts", systemImage: "person.2") }
     }
     .navigationTitle("Contacts")
     .navigationBarTitleDisplayMode(.inline)
     // Again once the core is open (the page opened before), and when a contact changes (a chat, a new key).
-    .task(id: Reload(accounts.client, friends.all)) { await load() }
+    .task(id: Reload(accounts.client, friends.contacts)) { await load() }
   }
 
   private var sorted: [Friend] {
-    friends.all.sorted { $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending }
+    friends.contacts.sorted { $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending }
   }
 
   private func summary(_ friend: Friend, _ check: Check) -> String {
@@ -165,7 +165,7 @@ struct ContactsList: View {
 
   private func load() async {
     guard let client = accounts.client else { return }
-    let users = friends.all.compactMap(\.user)
+    let users = friends.contacts.compactMap(\.user)
     let loaded = (try? await Hub.run {
       Dictionary(users.map { ($0, ContactState.load(client, user: $0)) }, uniquingKeysWith: { a, _ in a })
     }) ?? [:]
