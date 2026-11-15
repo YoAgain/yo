@@ -26,6 +26,10 @@ path = "src/yops.rs"
 name = "yo-chaos"
 path = "src/chaos.rs"
 
+[[bin]]
+name = "yo-scale"
+path = "src/scale.rs"
+
 [dependencies]
 yo-wire = { path = "../core/wire" }
 yo-core = { path = "../core/client", features = ["testing"] }
