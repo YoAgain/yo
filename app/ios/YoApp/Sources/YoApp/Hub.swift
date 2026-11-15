@@ -86,6 +86,20 @@ final class HubTransport: HttpTransport {
     self.timeout = timeout
   }
 
+  /// Signed requests and anonymous ones (sealed deliveries, blob fetches) never share a connection, nor cookies, a
+  /// cache or credentials: an anonymous request carries nothing a signed one left (spec 1).
+  private static let signedSession = URLSession(configuration: plain())
+  private static let anonymousSession = URLSession(configuration: plain())
+
+  private static func plain() -> URLSessionConfiguration {
+    let config = URLSessionConfiguration.ephemeral
+    config.httpCookieStorage = nil
+    config.httpShouldSetCookies = false
+    config.urlCache = nil
+    config.urlCredentialStorage = nil
+    return config
+  }
+
   func request(method: String, path: String, headers: [Header], body: Data) -> HttpResult {
     guard !Self.unsupported else { return HttpResult(status: 426, body: Data(), error: nil) }
     guard let url = URL(string: path, relativeTo: base) else {
@@ -99,7 +113,8 @@ final class HubTransport: HttpTransport {
     let done = DispatchSemaphore(value: 0)
     let answer = Answer()
     let start = Perf.on ? CACurrentMediaTime() : 0
-    URLSession.shared.dataTask(with: request) { data, response, error in
+    let signed = headers.contains(where: { $0.name.lowercased() == "yo-device" })
+    (signed ? Self.signedSession : Self.anonymousSession).dataTask(with: request) { data, response, error in
       answer.result =
         if let error {
           HttpResult(status: 0, body: Data(), error: error.localizedDescription)
@@ -113,7 +128,7 @@ final class HubTransport: HttpTransport {
       done.signal()
     }.resume()
     done.wait()
-    if (200..<300).contains(answer.result.status), headers.contains(where: { $0.name.lowercased() == "yo-device" }) {  // the core sends it lowercase
+    if (200..<300).contains(answer.result.status), signed {  // the core sends the header lowercase
       SignedAt.note()
     }
     if Perf.on {

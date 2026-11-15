@@ -29,6 +29,9 @@ fn group_id(id: &str) -> Result<GroupId> {
     unhex(id).and_then(|bytes| bytes.try_into().ok()).ok_or(Error::Protocol("a group id"))
 }
 
+/// Groups this device keeps at most: a sender naming new group ids cannot fill it (its asks are bounded the same).
+const MAX_GROUPS: usize = 256;
+
 impl Client {
     /// The groups this account is or was in.
     pub fn groups(&self) -> Vec<GroupView> {
@@ -302,15 +305,9 @@ impl Client {
             self.note("a group change at no revision".into());
             return;
         }
-        // The tie-break is by the revision's author, whoever passes it on (an answer to an ask). The author is someone
-        // of the group: of this revision, or of the one it was made from as known here; a made-up author is refused.
+        // The tie-break is by the revision's author, whoever passes it on (an answer to an ask): a member's word, which
+        // cannot be checked against revisions skipped here.
         let author = hex(&info.by);
-        let of_group = members.contains(&author)
-            || self.state.groups.get(&id).is_some_and(|g| g.members.contains(&author) || g.before.contains(&author));
-        if !of_group {
-            self.note("a group change by someone not of the group".into());
-            return;
-        }
         let newer = match self.state.groups.get(&id) {
             // New here, or known only by its Yos: from a member of it as it is now.
             None => own || members.iter().any(|m| m == from),
@@ -318,15 +315,13 @@ impl Client {
             // A newer revision from a member as it is now; a rival at the same revision from a member of the revision
             // both were made from (two removing each other at once: each is still heard by the other).
             // Or from one asked for it (their Yo named this newer revision: added since) who is in it.
-            Some(g) if info.revision > g.revision => {
-                own || g.members.iter().any(|m| m == from)
-                    || (self.state.group_asks.contains(&(id.clone(), from.to_owned()))
-                        && members.iter().any(|m| m == from))
-            }
+            // A newer revision only from a member as it is here: one not in it (removed, or added since) is never
+            // its own witness; its Yo makes this device ask a member instead (`group_yo`).
+            Some(g) if info.revision > g.revision => own || g.members.iter().any(|m| m == from),
+            // A rival at the same revision: from a member of the revision both were made from.
             Some(g) => {
-                info.revision == g.revision
-                    && author < g.by
-                    && (own || g.members.iter().any(|m| m == from) || g.before.iter().any(|m| m == from))
+                let base = if g.before.is_empty() { &g.members } else { &g.before };
+                info.revision == g.revision && author < g.by && (own || base.iter().any(|m| m == from))
             }
         };
         if !newer {
@@ -351,6 +346,7 @@ impl Client {
             None => Vec::new(),
         };
         let group = Group { name: info.name, members, revision: info.revision, by: author, left, before };
+        self.state.group_asks.retain(|(g, _)| *g != id); // answered: an ask is no lasting exception
         self.state.groups.insert(id.clone(), group);
         self.push_event(Event::GroupChanged { group: id });
     }
@@ -379,9 +375,14 @@ impl Client {
         let id = hex(&tag.id);
         let me = self.state.user_id.clone();
         let ask = match self.state.groups.get(&id) {
+            // A sender cannot fill this device with groups: past `MAX_GROUPS` a group not known is not taken in.
+            None if self.state.groups.len() >= MAX_GROUPS => {
+                self.note("a Yo to a group not known, too many groups".into());
+                return;
+            }
             None => {
                 // Known by its Yo only: shown at once, the group itself asked for.
-                let mut members = vec![from.to_owned(), me];
+                let mut members = vec![from.to_owned(), me.clone()];
                 members.sort();
                 let group = Group {
                     name: String::new(),
@@ -414,9 +415,19 @@ impl Client {
             }
         };
         if ask {
-            self.state.group_asks.insert((id.clone(), from.to_owned()));
-            if let Err(error) = self.enqueue_group(&[from.to_owned()], None, Content::GroupAsk { id: tag.id }) {
-                self.note(format!("group: {error}"));
+            // Whom to ask: for a group known here, a member of it as it is here (its answer counts; the sender, not in
+            // it here, could not vouch for its own addition); for a group not known, the sender.
+            let asked = match self.state.groups.get(&id) {
+                Some(g) if g.revision > 0 => g.members.iter().filter(|m| **m != me).min().cloned(),
+                _ => Some(from.to_owned()),
+            };
+            if let Some(asked) = asked {
+                if self.state.group_asks.len() < MAX_GROUPS {
+                    self.state.group_asks.insert((id.clone(), asked.clone()));
+                }
+                if let Err(error) = self.enqueue_group(&[asked], None, Content::GroupAsk { id: tag.id }) {
+                    self.note(format!("group: {error}"));
+                }
             }
         }
         if let Some(contact) = self.state.contacts.get_mut(from) {

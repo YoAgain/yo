@@ -69,15 +69,20 @@ const MAX_REMEMBERED: usize = 1000;
 /// Blobs of photos and videos sent to it, waiting to be fetched into nothing.
 const MAX_DRAINING: usize = 64;
 
+/// Signed requests and anonymous ones (sealed deliveries, blob fetches) on separate clients: never one connection for
+/// both (spec 1).
 struct Http {
     client: reqwest::blocking::Client,
+    anonymous: reqwest::blocking::Client,
     base: String,
 }
 
 impl Transport for Http {
     fn request(&self, method: &str, path: &str, headers: &[(String, String)], body: &[u8]) -> Result<Response, String> {
         let url = format!("{}{}", self.base, path);
-        let mut request = self.client.request(method.parse().map_err(|_| "method")?, url).body(body.to_vec());
+        let signed = headers.iter().any(|(name, _)| name.eq_ignore_ascii_case("yo-device"));
+        let client = if signed { &self.client } else { &self.anonymous };
+        let mut request = client.request(method.parse().map_err(|_| "method")?, url).body(body.to_vec());
         for (name, value) in headers {
             request = request.header(name, value);
         }
@@ -451,8 +456,8 @@ fn open(account: &Account) -> Option<Client> {
     })();
     let (secret, key) = prepared.map_err(|e| log(format!("stopped: {}: {e}", account.state.display()))).ok()?;
     let path = account.state.join("state");
-    let http = reqwest::blocking::Client::builder().timeout(Duration::from_secs(60)).build().ok()?;
-    let transport = Arc::new(Http { client: http, base: account.hub.clone() });
+    let client = || reqwest::blocking::Client::builder().timeout(Duration::from_secs(60)).build().ok();
+    let transport = Arc::new(Http { client: client()?, anonymous: client()?, base: account.hub.clone() });
     let mut backoff = Backoff::default();
     loop {
         let opened = match std::fs::read(&path) {

@@ -856,7 +856,12 @@ impl Client {
         if result.is_err() {
             self.records = Records::new(&entries, &state.account_secret, state.registration_id)
                 .expect("the records it was made from");
+            // What the hub was asked stays asked: the limits on recovery lookups (spec 4.6) hold though the payload
+            // that made them failed after.
+            let (asked, lookups) = (std::mem::take(&mut self.state.roster_asked), self.state.recovery_lookups);
             self.state = state;
+            self.state.roster_asked = asked;
+            self.state.recovery_lookups = lookups;
         }
         result
     }
@@ -1432,6 +1437,21 @@ impl Client {
         Ok(())
     }
 
+    /// Whether a queued message may still go: one of a group only while this account and its user are in the group
+    /// (a copy for this account's other devices: while this account is).
+    fn still_in_group(&self, item: &Outgoing) -> bool {
+        let tag = decode::<yo_wire::envelope::Plain>(&item.plain)
+            .ok()
+            .and_then(|plain| Message::decode(plain.content.as_slice()).ok())
+            .and_then(|m| m.group);
+        tag.is_none_or(|tag| {
+            self.state
+                .groups
+                .get(&hex(&tag.id))
+                .is_some_and(|g| !g.left && (item.user == self.state.user_id || g.members.contains(&item.user)))
+        })
+    }
+
     /// The sessions the outbox needs, from the hub. A user it cannot get them for now waits.
     fn prepare(&mut self) -> Result<()> {
         let now = (self.clock)();
@@ -1475,6 +1495,13 @@ impl Client {
             if waiting.contains(&user) || held {
                 waiting.insert(user);
                 i += 1;
+                continue;
+            }
+            // A group's Yo or media only while both are still in it: left since, or the user removed since, it does
+            // not go (a change goes to everyone before and after; it carries no tag).
+            if !self.still_in_group(&self.state.outbox[i]) {
+                self.state.outbox.remove(i);
+                self.note("a group's message after its member left".into());
                 continue;
             }
             let current: Vec<Key> =
@@ -2075,6 +2102,13 @@ impl Client {
         if !self.first_time(user, plaintext) {
             return Ok(());
         }
+        // Everything but a receipt, a retry and an ask is answered by a receipt: the ratchet moves on also for a stream
+        // of changes or names one way (spec 4.5).
+        if !matches!(message.content, Content::Receipt | Content::Retry | Content::GroupAsk { .. }) {
+            if let Some(contact) = self.state.contacts.get_mut(user) {
+                contact.receipt_due = true;
+            }
+        }
         match message.content {
             Content::Receipt => Ok(()),
             Content::Group(info) => {
@@ -2216,6 +2250,10 @@ impl Client {
                 let left = self.state.prekeys.left;
                 let rotate = (self.clock)().saturating_sub(self.state.prekeys.signed_at) >= ROTATE_EVERY_MS;
                 if left >= PREKEY_REFILL_BELOW && !rotate {
+                    // Nothing to upload; retired keys still go when their month is over (spec 4.1).
+                    if self.forget_retired() {
+                        self.persist()?;
+                    }
                     return Ok(());
                 }
                 let fresh = if left < PREKEY_REFILL_BELOW { PREKEY_TARGET - left } else { 0 };
@@ -2252,21 +2290,24 @@ impl Client {
                 }
             }
         }
-        self.forget_retired();
+        let _ = self.forget_retired();
         self.records.keep_newest_one_time(ONE_TIME_KEPT);
         Ok(())
     }
 
     /// The private keys of signed prekeys and last resorts retired a month ago go (`RETIRED_KEPT_MS`).
-    fn forget_retired(&mut self) {
+    /// Whether any went.
+    fn forget_retired(&mut self) -> bool {
         let now = wall_ms();
         let (old, kept): (Vec<_>, Vec<_>) = std::mem::take(&mut self.state.prekeys.retired)
             .into_iter()
             .partition(|(_, _, at)| now.saturating_sub(*at) > RETIRED_KEPT_MS);
+        let any = !old.is_empty();
         for (kind, id, _) in old {
             self.records.forget(&kind, id);
         }
         self.state.prekeys.retired = kept;
+        any
     }
 
     /// Keeps the stash of delivery tokens (spec 6.10): below `TOKEN_REFILL_BELOW`, or after the hub refused one,

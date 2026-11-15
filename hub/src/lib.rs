@@ -1091,7 +1091,15 @@ async fn deliver(
     yo_wire::envelope::check_sealed(&body)?;
     // A good token instead of the address's limits (spec 6.10). One that is not is counted like a delivery without
     // and refused, `401`: the client sends again without it.
-    let token = match delivery_token(&hub, peer, &headers)? {
+    // Its check looks up the spent nonces (the database) and evaluates P-384: off the async workers, bounded.
+    let brought = match headers.contains_key(axum::http::header::AUTHORIZATION) {
+        true => {
+            let headers = headers.clone();
+            hub.blocking(move |hub| delivery_token(hub, peer, &headers)).await??
+        }
+        false => Brought::Nothing,
+    };
+    let token = match brought {
         Brought::Token(key, nonce) => Some((key, nonce)),
         brought => {
             hub.limit_ip("deliver", peer, &headers, hub.config.limits.deliver_per_ip_minute, MINUTE)?;

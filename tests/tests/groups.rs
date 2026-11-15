@@ -304,7 +304,7 @@ fn two_removing_each_other_at_once_end_the_same() {
 }
 
 /// A member added since sends a Yo that arrives before the change that added them: shown (its revision is newer), and
-/// the group asked of them, not dropped as from no member.
+/// the group asked of a member as Ben has it (Ann), not of the newcomer, who cannot vouch for its own addition.
 #[test]
 fn a_new_members_yo_before_the_change_is_shown() {
     let hub = TestHub::start();
@@ -324,10 +324,10 @@ fn a_new_members_yo_before_the_change_is_shown() {
     let events = take(b);
     assert_eq!(group_yos(&events), [(id.clone(), c.user_id().to_owned())], "shown, though Ben's group is older");
     for _ in 0..2 {
-        take(c);
+        take(a);
         take(b);
     }
-    assert!(view(b, &id).members.contains(&c.user_id().to_owned()), "the group came from Cleo when asked");
+    assert!(view(b, &id).members.contains(&c.user_id().to_owned()), "the group came from Ann when asked");
 }
 
 /// The same photo to two groups and 1:1 to a member of both: three conversations, three messages; once-only holds
@@ -408,39 +408,63 @@ fn a_new_members_answer_is_taken_after_a_restart() {
     let saved = b.export(&[4; 32]);
     let mut b = Client::restore(Http::new(hub.url()), &saved, &[4; 32]).unwrap();
     for _ in 0..2 {
-        take(c);
+        take(a);
         take(&mut b);
     }
     assert!(view(&b, &id).members.contains(&c.user_id().to_owned()), "the ask outlived the restart");
 }
 
-/// A change names its author; one naming someone who is not of the group (neither of this revision nor of the one it
-/// was made from) is refused, even from a member. One naming a member is taken.
+/// A member removed cannot bring themselves back: their own change naming a newer revision with them in it is not
+/// taken, nor does their Yo naming one make Ben ask them (Ben asks a member).
 #[test]
-fn a_change_by_an_author_not_of_the_group_is_refused() {
+fn a_removed_member_cannot_add_themselves_back() {
     let hub = TestHub::start();
-    let mut p = people(&hub, 4);
-    let [a, b, c, outsider] = p.as_mut_slice() else { unreachable!() };
+    let mut p = people(&hub, 3);
+    let [a, b, c] = p.as_mut_slice() else { unreachable!() };
     let (id, _) = a.create_group("TRIO", &[b.user_id().to_owned(), c.user_id().to_owned()]).unwrap();
     take(b);
     take(c);
-    let (ua, ub, uc, ux) =
-        (a.user_id().to_owned(), b.user_id().to_owned(), c.user_id().to_owned(), outsider.user_id().to_owned());
-    let group = |by: &str, name: &str| {
-        let mut members: Vec<_> = [&ua, &ub, &uc].into_iter().map(|u| yo_tests::user_id(u)).collect();
-        members.sort();
-        Content::Group(yo_wire::content::GroupInfo {
-            id: yo_tests::user_id(&id),
-            revision: 2,
-            by: yo_tests::user_id(by),
-            name: name.to_owned(),
-            members,
-        })
-    };
-    b.send(&uc, group(&ux, "FORGED")).unwrap();
+    a.remove_from_group(&id, &[c.user_id().to_owned()]).unwrap();
+    take(b);
     take(c);
-    assert_eq!(view(c, &id).name, "TRIO", "a made-up author is refused");
-    b.send(&uc, group(&ub, "RENAMED")).unwrap();
+    assert!(!view(b, &id).members.contains(&c.user_id().to_owned()));
+    let mut members: Vec<_> = [a.user_id(), b.user_id(), c.user_id()].into_iter().map(yo_tests::user_id).collect();
+    members.sort();
+    let back = Content::Group(yo_wire::content::GroupInfo {
+        id: yo_tests::user_id(&id),
+        revision: 9,
+        by: yo_tests::user_id(c.user_id()),
+        name: "MINE".into(),
+        members,
+    });
+    let ub = b.user_id().to_owned();
+    c.send(&ub, back).unwrap();
+    take(b);
+    let g = view(b, &id);
+    assert!(!g.members.contains(&c.user_id().to_owned()) && g.name == "TRIO", "{g:?}");
+}
+
+/// A group Yo still waiting for Cleo when Ann removes her does not go to her afterwards.
+#[test]
+fn a_waiting_group_yo_does_not_go_to_a_member_removed_since() {
+    let hub = TestHub::start();
+    let base = random_u64() % 1_000_000_000;
+    let transports: Vec<_> = (0..3).map(|_| Http::new(hub.url())).collect();
+    let mut p: Vec<Client> =
+        transports.iter().enumerate().map(|(i, t)| register(t.clone(), &username(base + i as u64 * 7), None)).collect();
+    let [a, b, c] = p.as_mut_slice() else { unreachable!() };
+    let (id, _) = a.create_group("TRIO", &[b.user_id().to_owned(), c.user_id().to_owned()]).unwrap();
+    take(b);
     take(c);
-    assert_eq!(view(c, &id).name, "RENAMED", "a member's own change is taken");
+    let to_c = yo_wire::api::deliver_path(&yo_tests::user_id(c.user_id()));
+    // Cleo's inbox refuses Ann twice: at the Yo, and at the flush the removal makes first.
+    transports[0].fault(&to_c, Fault::Answer(429));
+    transports[0].fault(&to_c, Fault::Answer(429));
+    a.send_group(&id, Content::Yo).unwrap();
+    assert!(a.waiting() > 0, "Cleo's copy waits");
+    a.remove_from_group(&id, &[c.user_id().to_owned()]).unwrap();
+    let _ = a.sync(0);
+    let got = take(c);
+    assert!(group_yos(&got).is_empty(), "removed before it went: {got:?}");
+    assert_eq!(group_yos(&take(b)).len(), 1);
 }
