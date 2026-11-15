@@ -787,6 +787,7 @@ fn serve(account: &Account, options: Options) {
 
 /// The long poll, without holding the client while it waits; every Yo to the dispatcher.
 fn receive(bot: &Bot, events: &SyncSender<Event>) {
+    leave_empty(bot, events); // the groups left alone while it was away
     let mut backoff = Backoff::default();
     let mut maintained = Instant::now();
     while bot.running() {
@@ -803,11 +804,36 @@ fn receive(bot: &Bot, events: &SyncSender<Event>) {
         match result {
             Ok(received) => {
                 backoff = Backoff::default();
+                let changed = received.iter().any(|event| matches!(event, Event::GroupChanged { .. }));
                 received.into_iter().for_each(|event| bot.queue(events, event));
                 bot.client().acknowledge_events();
+                if changed {
+                    leave_empty(bot, events);
+                }
             }
             Err(error) if gone(&error) => bot.stop(GONE),
             Err(error) => backoff.wait(&error, &bot.name),
+        }
+    }
+}
+
+/// Leaves every group YoGPT is alone in (the others left or removed one another): nobody to answer there.
+fn leave_empty(bot: &Bot, events: &SyncSender<Event>) {
+    let me = bot.client().user_id().to_owned();
+    let alone: Vec<String> = bot
+        .client()
+        .groups()
+        .into_iter()
+        .filter(|g| !g.left && g.members.contains(&me) && g.members.iter().all(|m| *m == me))
+        .map(|g| g.id)
+        .collect();
+    for id in alone {
+        match bot.client().leave_group(&id) {
+            Ok(received) => {
+                received.into_iter().for_each(|event| bot.queue(events, event));
+                bot.log(format!("left group {} (alone in it)", &id[..8.min(id.len())]));
+            }
+            Err(error) => bot.log(format!("leaving group {}: {}", &id[..8.min(id.len())], reason(&error))),
         }
     }
 }
