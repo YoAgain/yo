@@ -38,9 +38,30 @@ enum Hub {
     "dev.justyo.app": ["J9PZz9y9AD-7Ypf1wrfZmjA6-1NhsTEbREab-Pnq51w", "JuJhUXy5ToOZWspdAZiQm2ppfYXp-dlTNSrvpn9M5Ko"],
   ]
 
-  /// Pins this hub's keys in a client right after it is made: from then on it takes keys only the hub signed.
+  /// The sender-certificate trust roots of each hub (spec 6.1), base64url as `yo-hub trust-root new` printed them:
+  /// the one in use and a spare kept offline. Sealed Yos open only with a certificate from one of them; a hub with
+  /// none here (a placeholder left empty) opens no sealed Yo and sends every Yo identified: it fails closed.
+  static let trustRoots: [String: [String]] = [
+    "hub.justyo.app": [
+      "",  // TRUST_ROOT_LIVE
+      "",  // TRUST_ROOT_LIVE_SPARE
+    ],
+    "dev.justyo.app": [
+      "",  // TRUST_ROOT_DEV
+      "",  // TRUST_ROOT_DEV_SPARE
+    ],
+  ]
+
+  /// Pins this hub's keys in a client right after it is made: from then on it takes keys only the hub signed, and
+  /// sealed Yos only with a sender certificate from its trust roots.
   static func pin(_ client: YoClient) {
-    guard let host = url.host(), let texts = keys[host] else { return }
+    guard let host = url.host() else { return }
+    let roots = (trustRoots[host] ?? []).compactMap { Data(base64URL: $0) }.filter { $0.count == 32 }
+    if roots.isEmpty {
+      print("Yo: no trust root pinned for \(host): sealed Yos do not open, Yos go identified (Hub.trustRoots)")
+    }
+    try? client.setTrustRoots(keys: roots)
+    guard let texts = keys[host] else { return }
     let pinned = texts.compactMap { Data(base64URL: $0) }
     guard !pinned.isEmpty else { return }
     try? client.setHubKeys(keys: pinned)

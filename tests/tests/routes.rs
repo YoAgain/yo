@@ -818,7 +818,8 @@ fn signed_requests_are_limited_per_device() {
         ];
         assert_eq!(raw(&hub, "GET", &api::inbox_path(0), &headers, Vec::new()).0, status::UNAUTHORIZED);
     }
-    for _ in 0..5 {
+    // The registration's sender certificate (spec 6.1) took one of the 5.
+    for _ in 0..4 {
         assert_eq!(signed(&mut a, "PUT", api::PUSH, &encode(&api::Push::none())).0, status::NO_CONTENT);
     }
     assert_eq!(signed(&mut a, "PUT", api::PUSH, &encode(&api::Push::none())).0, status::RATE_LIMITED);

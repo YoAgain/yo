@@ -83,7 +83,7 @@ fn write_fuzz_corpus() {
     // core_receive: a sequence of payloads, out of their seals, each as u32 length + bytes.
     let mut framed = Vec::new();
     for envelope in &envelopes {
-        let payload = yo_core::seal::open(&b.account_secret(), envelope).unwrap();
+        let (payload, _) = yo_core::sealed::testing::open(&b.account_secret(), envelope).unwrap();
         framed.extend_from_slice(&(payload.len() as u32).to_be_bytes());
         framed.extend_from_slice(&payload);
     }

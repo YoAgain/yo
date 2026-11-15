@@ -20,6 +20,7 @@ impl Bot {
         command.args(args);
         for (i, (hub, state)) in accounts.iter().enumerate() {
             command.arg("--account").arg(format!("hub{i}={},{}", hub.url(), state.display()));
+            command.arg("--trust-root").arg(format!("hub{i}={}", yo_wire::b64(&yo_tests::trust_root())));
         }
         Bot(command.spawn().unwrap())
     }

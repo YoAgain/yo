@@ -19,7 +19,7 @@ use std::time::{Duration, Instant, SystemTime};
 use yo_core::identity::{self, Key};
 use yo_core::signal::{self, Records};
 use yo_core::state::{self, State};
-use yo_core::{seal, Content};
+use yo_core::{sealed, Content};
 use yo_wire::content::Message;
 use yo_wire::envelope::{ForDevice, Payload, Plain};
 use yo_wire::{decode, encode};
@@ -74,6 +74,8 @@ impl Device {
             contact_key: None,
             requests_open: true,
             contact_key_told: false,
+            sender_certificate: None,
+            certificate_clock: 0,
             registering: None,
             groups: Default::default(),
             roster_asked: Default::default(),
@@ -180,11 +182,16 @@ impl Device {
             device_id: self.state.device_number,
             copies,
         };
-        seal::to(&to[0].account_key(), &encode(&payload)).unwrap()
+        let now = SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_millis() as u64;
+        let certificate = yo_tests::sender_certificate(&self.user, self.state.device_number, &self.account_key(), now);
+        sealed::testing::seal(&self.account.to_bytes(), &certificate, &to[0].account_key(), &encode(&payload)).unwrap()
     }
 
     fn receive(&mut self, from: &Device, sealed: &[u8]) {
-        let payload: Payload = decode(&seal::open(&self.state.account_secret, sealed).unwrap()).unwrap();
+        let own = signal::identity_pair(&self.state.account_secret).unwrap();
+        let now = SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_millis() as u64;
+        let roots = sealed::roots(&[yo_tests::trust_root()]);
+        let payload: Payload = decode(&sealed::open(&own, sealed, &roots, now).unwrap().payload).unwrap();
         let copy = payload.copies.iter().find(|c| c.device_key == self.state.device_key).unwrap();
         let bytes = copy.message.as_slice();
         let message = match copy.prekey {

@@ -31,6 +31,7 @@ fn main() {
     let (mut photo, mut video, mut group, mut delete) = (None::<String>, None::<String>, false, false);
     let (mut make_group, mut members, mut add, mut remove, mut rename) =
         (None::<String>, Vec::<String>::new(), None::<String>, None::<String>, None::<String>);
+    let mut trust_roots: Vec<[u8; 32]> = Vec::new();
     while let Some(flag) = args.next() {
         match flag.as_str() {
             "--sync" => sync = true,
@@ -49,6 +50,12 @@ fn main() {
             "--add" => add = args.next(),
             "--remove" => remove = args.next(),
             "--rename" => rename = args.next(),
+            "--trust-root" => trust_roots.push(
+                yo_wire::unb64(&args.next().expect("--trust-root"))
+                    .ok()
+                    .and_then(|k| k.try_into().ok())
+                    .expect("--trust-root: 32 bytes, base64url"),
+            ),
             other => panic!("unknown flag {other}"),
         }
     }
@@ -57,6 +64,10 @@ fn main() {
         Ok(blob) => Client::restore(http, &blob, &KEY).expect("restore"),
         Err(_) => Client::register_username(http, &name, None, None, Push::none()).expect("register"),
     };
+    // The hub's trust roots (`--trust-root`, base64url), else the test hubs'.
+    if !trust_roots.is_empty() {
+        client.set_trust_roots(trust_roots);
+    }
     client.persist_to(Arc::new(File(state)), KEY).expect("state file");
     if sync {
         let events = client.sync(0).expect("sync");

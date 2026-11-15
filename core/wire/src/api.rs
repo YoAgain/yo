@@ -27,6 +27,10 @@ pub const BLOBS: &str = "/v1/blobs";
 pub const TOKENS: &str = "/v1/tokens";
 /// `PUT`, signed: the check of the account's contact key and whether strangers may send requests (spec 4.10).
 pub const CONTACT_KEY: &str = "/v1/contact-key";
+/// `GET`, signed: a sender certificate for the signing device (spec 6.1), libsignal's `SenderCertificate`.
+pub const CERTIFICATE: &str = "/v1/certificate";
+/// The public key of the hub's sender-certificate trust root, 32 bytes (spec 6.1): for tools; apps pin their own copy.
+pub const TRUST_ROOT_PATH: &str = "/.well-known/yo-trust-root";
 
 /// `GET /v1/blobs/{id}`: a blob, to whoever names its id.
 pub fn blob_path(id: &crate::content::BlobId) -> String {
@@ -266,6 +270,8 @@ pub struct LookupNamed {
 #[derive(Debug, Clone, PartialEq, Eq, TlsSerialize, TlsDeserializeBytes, TlsSize)]
 pub struct InboxItem {
     pub id: u64,
+    /// When the hub took it (ms since 1970): the time its sender certificate is checked at (spec 6.1).
+    pub received_ms: u64,
     pub envelope: VLBytes,
 }
 
@@ -486,7 +492,8 @@ mod tests {
         assert_eq!(crate::decode::<Register>(&crate::encode(&register)).unwrap(), register);
         let lookup = Lookup { handle: Handle::username("CHRIS"), flags: LOOKUP_PREKEYS, except: vec![[1; 32]] };
         assert_eq!(crate::decode::<Lookup>(&crate::encode(&lookup)).unwrap(), lookup);
-        let inbox = Inbox { prekeys_left: 7, items: vec![InboxItem { id: 1, envelope: vec![0; 1024].into() }] };
+        let inbox =
+            Inbox { prekeys_left: 7, items: vec![InboxItem { id: 1, received_ms: 5, envelope: vec![0; 1024].into() }] };
         assert_eq!(crate::decode::<Inbox>(&crate::encode(&inbox)).unwrap(), inbox);
         let backup = backup();
         assert_eq!(crate::decode::<Backup>(&crate::encode(&backup)).unwrap(), backup);

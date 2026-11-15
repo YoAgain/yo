@@ -48,11 +48,12 @@ fn the_hub_cannot_tell_which_envelopes_belong_to_one_chat() {
         }
     }
     for envelope in &to_b {
-        assert!(yo_core::seal::open(&b.account_secret(), envelope).is_ok());
-        assert!(yo_core::seal::open(&a.account_secret(), envelope).is_err());
+        assert_eq!(envelope[0], yo_wire::envelope::SEALED);
+        assert!(yo_core::sealed::testing::open(&b.account_secret(), envelope).is_ok());
+        assert!(yo_core::sealed::testing::open(&a.account_secret(), envelope).is_err());
     }
     for envelope in &to_a {
-        assert!(yo_core::seal::open(&a.account_secret(), envelope).is_ok());
+        assert!(yo_core::sealed::testing::open(&a.account_secret(), envelope).is_ok());
     }
     // A session's first message carries its PQXDH (a Kyber ciphertext): 4 KiB. Once answered, a text is 1 KiB.
     assert_eq!(to_b[0].len(), 4096);
@@ -75,7 +76,7 @@ fn an_envelope_not_sealed_to_the_account_is_dropped() {
     assert_eq!(texts(&mut a), ["1"]);
     b.send(a.user_id(), Content::Text("2".into())).unwrap();
     let last = delivered(&hb, a.user_id()).pop().unwrap();
-    let payload = yo_core::seal::open(&a.account_secret(), &last).unwrap();
+    let (payload, certificate) = yo_core::sealed::testing::open(&a.account_secret(), &last).unwrap();
     let stranger = SigningKey::from_bytes(&[9; 32]).verifying_key().to_bytes();
     let dropped = a.dropped();
     let key = a.contact_key_for_tests();
@@ -87,7 +88,7 @@ fn an_envelope_not_sealed_to_the_account_is_dropped() {
             &hub.url(),
             a.user_id(),
             key.as_deref(),
-            yo_core::seal::to(&stranger, &payload).unwrap()
+            yo_core::sealed::testing::seal(&b.account_secret(), &certificate, &stranger, &payload).unwrap()
         ),
         202
     );
@@ -95,4 +96,200 @@ fn an_envelope_not_sealed_to_the_account_is_dropped() {
     assert_eq!(a.dropped(), dropped + 1, "{:?}", a.drop_reasons());
     b.send(a.user_id(), Content::Text("3".into())).unwrap();
     assert_eq!(texts(&mut a), ["3"]);
+}
+
+const HOUR: u64 = 3600 * 1000;
+const DAY: u64 = 24 * HOUR;
+
+fn wall() -> u64 {
+    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_millis() as u64
+}
+
+/// A clock `ms` off the real time (tests: days gone by, or a phone set wrong).
+fn clock(ms: i64) -> yo_core::Clock {
+    std::sync::Arc::new(move || wall().saturating_add_signed(ms))
+}
+
+fn pair(hub: &TestHub, tag: &str) -> (Client, Client, std::sync::Arc<Http>, std::sync::Arc<Http>) {
+    let n = random_u64() % 100_000;
+    let (ha, hb) = (Http::new(hub.url()), Http::new(hub.url()));
+    let mut a = Client::register_username(ha.clone(), &format!("A{tag}{n}"), None, None, Push::none()).unwrap();
+    let mut b = Client::register_username(hb.clone(), &format!("B{tag}{n}"), None, None, Push::none()).unwrap();
+    a.send(b.user_id(), Content::Text("hi".into())).unwrap();
+    assert_eq!(texts(&mut b), ["hi"]);
+    b.send(a.user_id(), Content::Text("hello".into())).unwrap();
+    assert_eq!(texts(&mut a), ["hello"]);
+    (a, b, ha, hb)
+}
+
+fn account_key(c: &Client) -> [u8; 32] {
+    SigningKey::from_bytes(&c.account_secret()).verifying_key().to_bytes()
+}
+
+/// A's next text to B goes with `certificate` in place of its own: dropped by B (not shown), the chat goes on once A
+/// has its own again.
+fn refused_with(a: &mut Client, b: &mut Client, certificate: Vec<u8>) {
+    let dropped = b.dropped();
+    a.set_sender_certificate_for_tests(Some(certificate));
+    a.send(b.user_id(), Content::Text("forged".into())).unwrap();
+    assert!(texts(b).is_empty());
+    assert_eq!(b.dropped(), dropped + 1, "{:?}", b.drop_reasons());
+    a.set_sender_certificate_for_tests(None);
+    a.maintenance().unwrap();
+    a.send(b.user_id(), Content::Text("real".into())).unwrap();
+    let got = texts(b);
+    assert!(got.contains(&"real".to_owned()), "{got:?}");
+}
+
+/// A certificate that expired before the hub took the envelope: refused.
+#[test]
+fn an_expired_certificate_is_refused() {
+    let hub = TestHub::start();
+    let (mut a, mut b, _, _) = pair(&hub, "Exp");
+    let old = yo_tests::sender_certificate(&yo_tests::user_id(a.user_id()), 1, &account_key(&a), wall() - 2 * DAY);
+    refused_with(&mut a, &mut b, old);
+}
+
+/// A certificate from a server certificate of another trust root: refused; and the hub's answer from another root is
+/// not taken as this device's own (it sends identified meanwhile).
+#[test]
+fn a_certificate_of_another_trust_root_is_refused() {
+    let hub = TestHub::start();
+    let (mut a, mut b, _, _) = pair(&hub, "Root");
+    let (other, other_public) = yo_hub::certificate::new_root();
+    let signer =
+        yo_hub::certificate::Signer::from_bytes(&yo_hub::certificate::server_file(&other, 1).unwrap()).unwrap();
+    let foreign = signer.issue(&yo_tests::user_id(a.user_id()), 1, &account_key(&a), wall()).unwrap();
+    refused_with(&mut a, &mut b, foreign);
+    // A device pinning another root takes no certificate of this hub's: none in date, its Yos go identified.
+    a.set_trust_roots(vec![other_public]);
+    a.set_sender_certificate_for_tests(None);
+    a.maintenance().unwrap();
+    assert!(a.sender_certificate_for_tests().is_none());
+}
+
+/// A certificate naming A's user and device with another identity than the one that sealed: refused.
+#[test]
+fn a_certificate_for_another_identity_is_refused() {
+    let hub = TestHub::start();
+    let (mut a, mut b, _, _) = pair(&hub, "Idn");
+    let other = SigningKey::from_bytes(&[5; 32]).verifying_key().to_bytes();
+    let wrong = yo_tests::sender_certificate(&yo_tests::user_id(a.user_id()), 1, &other, wall());
+    refused_with(&mut a, &mut b, wrong);
+    // And one naming another user (B's) with A's own identity: refused too.
+    let wrong = yo_tests::sender_certificate(&yo_tests::user_id(b.user_id()), 1, &account_key(&a), wall());
+    refused_with(&mut a, &mut b, wrong);
+}
+
+/// A certificate is fetched again before it expires (less than 2 h left), not after: every Yo stays sealed.
+#[test]
+fn the_certificate_is_refreshed_before_it_expires() {
+    let hub = TestHub::start();
+    let (mut a, mut b, ha, _) = pair(&hub, "Ref");
+    let first = a.sender_certificate_for_tests().unwrap();
+    a.set_clock(clock((20 * HOUR) as i64));
+    a.maintenance().unwrap();
+    assert_eq!(a.sender_certificate_for_tests().unwrap(), first, "20 h: still the first");
+    a.set_clock(clock((22 * HOUR) as i64));
+    a.maintenance().unwrap();
+    assert_ne!(a.sender_certificate_for_tests().unwrap(), first, "22 h: a new one");
+    a.send(b.user_id(), Content::Text("sealed".into())).unwrap();
+    assert_eq!(texts(&mut b), ["sealed"]);
+    assert!(delivered(&ha, b.user_id()).iter().all(|e| e[0] == yo_wire::envelope::SEALED));
+}
+
+/// Offline for 31 days (its certificate long expired): what goes first (a receipt, a Yo) goes at once, identified;
+/// the certificate is fetched after it, and the next goes sealed. What a contact sealed 20 days ago with a certificate good then still
+/// opens (checked at the time the hub took it).
+#[test]
+fn back_after_a_month_offline() {
+    let hub = TestHub::start();
+    let shift = |c: &mut Client, ms: i64| c.set_clock(clock(ms));
+    hub.hub.shift_clock(-31 * DAY as i64);
+    let (mut a, mut b, ha, hb) = pair(&hub, "Away");
+    for (c, ms) in [(&mut a, -31 * DAY as i64), (&mut b, -31 * DAY as i64)] {
+        shift(c, ms);
+        c.maintenance().unwrap();
+    }
+    // Eleven days on, A writes; its certificate is from then: the first goes identified, the next sealed.
+    hub.hub.shift_clock(-20 * DAY as i64);
+    shift(&mut a, -20 * DAY as i64);
+    let before = delivered(&ha, b.user_id()).len();
+    a.send(b.user_id(), Content::Text("one".into())).unwrap();
+    a.send(b.user_id(), Content::Text("two".into())).unwrap();
+    let firsts = |sent: &[Vec<u8>]| sent.iter().map(|e| e[0]).collect::<Vec<_>>();
+    let to_b = firsts(&delivered(&ha, b.user_id())[before..]);
+    assert_eq!((to_b[0], *to_b.last().unwrap()), (yo_wire::VERSION, yo_wire::envelope::SEALED), "{to_b:?}");
+    // Today: B, offline since, receives both (the sealed one with a certificate that expired 19 days ago).
+    hub.hub.shift_clock(0);
+    shift(&mut b, 0);
+    let before = delivered(&hb, a.user_id()).len();
+    assert_eq!(texts(&mut b), ["one", "two"]);
+    b.send(a.user_id(), Content::Text("back".into())).unwrap();
+    b.send(a.user_id(), Content::Text("again".into())).unwrap();
+    shift(&mut a, 0);
+    assert_eq!(texts(&mut a), ["back", "again"]);
+    let to_a = firsts(&delivered(&hb, a.user_id())[before..]);
+    assert_eq!((to_a[0], *to_a.last().unwrap()), (yo_wire::VERSION, yo_wire::envelope::SEALED), "{to_a:?}");
+    assert_eq!(a.dropped() + b.dropped(), 0, "{:?} {:?}", a.drop_reasons(), b.drop_reasons());
+}
+
+/// Phones whose clocks are 3 h off (one ahead, one behind): certificates count from when they came by the phone's
+/// own clock, and are checked at the hub's time: everything goes sealed and opens.
+#[test]
+fn clocks_hours_off_still_seal() {
+    let hub = TestHub::start();
+    let (mut a, mut b, ha, hb) = pair(&hub, "Clk");
+    a.set_clock(clock(3 * HOUR as i64));
+    b.set_clock(clock(-3 * HOUR as i64));
+    a.maintenance().unwrap();
+    b.maintenance().unwrap();
+    let (sent_a, sent_b) = (delivered(&ha, b.user_id()).len(), delivered(&hb, a.user_id()).len());
+    a.send(b.user_id(), Content::Text("ahead".into())).unwrap();
+    assert_eq!(texts(&mut b), ["ahead"]);
+    b.send(a.user_id(), Content::Text("behind".into())).unwrap();
+    assert_eq!(texts(&mut a), ["behind"]);
+    assert!(delivered(&ha, b.user_id())[sent_a..].iter().all(|e| e[0] == yo_wire::envelope::SEALED));
+    assert!(delivered(&hb, a.user_id())[sent_b..].iter().all(|e| e[0] == yo_wire::envelope::SEALED));
+}
+
+/// The hub answers the certificate request with an error: the Yo goes at once, identified (signed), and B shows it as
+/// its contact's, not as a request; once the hub gives one again, Yos go sealed.
+#[test]
+fn without_a_certificate_a_yo_goes_identified() {
+    let hub = TestHub::start();
+    let (mut a, mut b, ha, _) = pair(&hub, "Idf");
+    a.set_sender_certificate_for_tests(None);
+    ha.fault(yo_wire::api::CERTIFICATE, yo_tests::Fault::Answer(500));
+    a.send(b.user_id(), Content::Text("identified".into())).unwrap();
+    let events: Vec<Event> = (0..3).flat_map(|_| b.sync(0).unwrap()).collect();
+    assert!(events.iter().any(|e| matches!(e, Event::Message { content: Content::Text(t), .. } if t == "identified")));
+    assert!(!events.iter().any(|e| matches!(e, Event::NewChat { .. })), "a contact's, no request");
+    assert!(b.contacts().iter().any(|c| c.user == a.user_id() && c.accepted));
+    let to_b = delivered(&ha, b.user_id());
+    assert_eq!(to_b.last().unwrap()[0], yo_wire::VERSION);
+    assert!(a.sender_certificate_for_tests().is_none(), "the hub refused it");
+    // A minute on, the hub gives one: the next Yo after it goes sealed.
+    a.set_clock(clock(61_000));
+    a.maintenance().unwrap();
+    a.send(b.user_id(), Content::Text("sealed".into())).unwrap();
+    assert_eq!(texts(&mut b), ["sealed"]);
+    assert_eq!(delivered(&ha, b.user_id()).last().unwrap()[0], yo_wire::envelope::SEALED);
+}
+
+/// A clock set back after the certificate came does not stretch its day: noticed, the next Yo goes identified, a new
+/// certificate is fetched, the one after goes sealed again.
+#[test]
+fn a_clock_set_back_is_noticed() {
+    let hub = TestHub::start();
+    let (mut a, mut b, ha, _) = pair(&hub, "Back");
+    a.set_clock(clock((12 * HOUR) as i64));
+    a.send(b.user_id(), Content::Text("noon".into())).unwrap();
+    a.set_clock(clock((6 * HOUR) as i64));
+    let before = delivered(&ha, b.user_id()).len();
+    a.send(b.user_id(), Content::Text("morning".into())).unwrap();
+    a.send(b.user_id(), Content::Text("later".into())).unwrap();
+    assert_eq!(texts(&mut b), ["noon", "morning", "later"]);
+    let firsts: Vec<u8> = delivered(&ha, b.user_id())[before..].iter().map(|e| e[0]).collect();
+    assert_eq!(firsts, [yo_wire::VERSION, yo_wire::envelope::SEALED]);
 }

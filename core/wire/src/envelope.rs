@@ -1,21 +1,20 @@
 //! The envelope (spec 6.1): what the hub stores is a fixed bucket, so it sees a size class, not a kind or a length.
-//! The version `SEALED` and an HPKE seal of the padded payload, the padding inside, so nothing but the bucket shows.
+//! libsignal's sealed sender (v1) message, the padded payload inside, so nothing but the bucket shows.
 
 use crate::{Error, UserId, KEY_LEN, VERSION};
 use tls_codec::{TlsDeserializeBytes, TlsSerialize, TlsSize, VLBytes};
 
 /// The sizes an envelope can have.
 pub const BUCKETS: [usize; 4] = [1024, 4096, 16 * 1024, 64 * 1024];
-const HEADER: usize = 1 + 4;
-/// The version of a sealed envelope.
-pub const SEALED: u8 = 2;
-/// What a seal adds to its plaintext: the version, the KEM output (an X25519 key) and the AEAD tag.
-pub const SEAL_OVERHEAD: usize = 1 + 32 + 16;
-/// The sizes of a seal's plaintext: each a bucket once sealed.
-pub const SEALED_PLAIN: [usize; 4] =
-    [BUCKETS[0] - SEAL_OVERHEAD, BUCKETS[1] - SEAL_OVERHEAD, BUCKETS[2] - SEAL_OVERHEAD, BUCKETS[3] - SEAL_OVERHEAD];
+/// What `pad` puts before the message: its version and length.
+pub const HEADER: usize = 1 + 4;
+/// The first byte of a sealed envelope: libsignal's sealed sender v1 (`SEALED_SENDER_V1_FULL_VERSION`).
+pub const SEALED: u8 = 0x11;
+/// The private key of the test hubs' sender-certificate trust root (Curve25519): public, never a real hub's.
+pub const TEST_TRUST_ROOT: [u8; 32] = [0x40; 32];
 
-/// What a sealed envelope holds (spec 6.1): who sends, and the message for each of the recipient's devices.
+/// What a sealed envelope holds (spec 6.1): who sends (its sender certificate says it too), and the message for each
+/// of the recipient's devices.
 #[derive(Debug, Clone, PartialEq, Eq, TlsSerialize, TlsDeserializeBytes, TlsSize)]
 pub struct Payload {
     pub account_key: [u8; KEY_LEN],
@@ -41,19 +40,21 @@ pub struct Plain {
     pub content: VLBytes,
 }
 
-/// What the hub checks of a delivery: a bucket, sealed. The rest only the recipient can read.
-pub fn check_sealed(envelope: &[u8]) -> Result<(), Error> {
+/// What the hub checks of a delivery: a bucket, sealed; or, `signed` by its sending device (the hub knows who sends),
+/// identified: the padded payload as it is (`pad`, version 1), for a sender without a certificate (spec 6.1).
+pub fn check(envelope: &[u8], signed: bool) -> Result<(), Error> {
     if !BUCKETS.contains(&envelope.len()) {
         return Err(Error::Size);
     }
-    if envelope[0] != SEALED {
-        return Err(Error::Unsupported);
+    match envelope[0] {
+        SEALED => Ok(()),
+        VERSION if signed => Ok(()),
+        _ => Err(Error::Unsupported),
     }
-    Ok(())
 }
 
 /// The envelope's padding to other sizes (ascending): version, length, the message, zeros up to the smallest that
-/// fits: inside the seal, and what the storage key and a backup's K seal (spec 6.9, 7).
+/// fits: inside the sealed sender message, and what the storage key and a backup's K seal (spec 6.9, 7).
 pub fn pad(message: &[u8], sizes: &[usize]) -> Result<Vec<u8>, Error> {
     let needed = HEADER + message.len();
     let size = *sizes.iter().find(|s| **s >= needed).ok_or(Error::Size)?;
@@ -131,27 +132,21 @@ mod tests {
 
     #[test]
     fn a_sealed_envelope_is_a_bucket_with_its_version() {
-        assert_eq!(
-            check_sealed(&{
-                let mut e = vec![0; 1024];
-                e[0] = SEALED;
-                e
-            }),
-            Ok(())
-        );
-        assert_eq!(check_sealed(&pad(b"bare", &BUCKETS).unwrap()), Err(Error::Unsupported));
-        assert_eq!(check_sealed(&[SEALED; 1000]), Err(Error::Size));
-        assert_eq!(check_sealed(&[]), Err(Error::Size));
-        // A message as large as a seal takes still fits the largest bucket, sealed.
-        let largest = SEALED_PLAIN[3] - HEADER;
-        assert_eq!(pad(&vec![1; largest], &SEALED_PLAIN).unwrap().len() + SEAL_OVERHEAD, BUCKETS[3]);
+        let mut sealed = vec![0; 1024];
+        sealed[0] = SEALED;
+        assert_eq!(check(&sealed, false), Ok(()));
+        // Identified: only signed.
+        assert_eq!(check(&pad(b"bare", &BUCKETS).unwrap(), false), Err(Error::Unsupported));
+        assert_eq!(check(&pad(b"bare", &BUCKETS).unwrap(), true), Ok(()));
+        assert_eq!(check(&[SEALED; 1000], false), Err(Error::Size));
+        assert_eq!(check(&[], true), Err(Error::Size));
     }
 
     proptest! {
         #[test]
         fn never_panics(bytes in proptest::collection::vec(any::<u8>(), 0..5000)) {
             let _ = unpad(&bytes, &BUCKETS);
-            let _ = check_sealed(&bytes);
+            let _ = check(&bytes, true);
         }
 
         #[test]

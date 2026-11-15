@@ -2,6 +2,7 @@
 //! the route that carries messages takes no identity: the hub never learns a sender.
 
 pub mod blobs;
+pub mod certificate;
 pub mod config;
 pub mod db;
 pub mod error;
@@ -55,6 +56,10 @@ pub struct Hub {
     blocking: Arc<tokio::sync::Semaphore>,
     /// Requests whose small body is being read and handled at once (`admit`).
     reading: Arc<tokio::sync::Semaphore>,
+    /// Signs the devices' sender certificates (spec 6.1).
+    signer: certificate::Signer,
+    /// How far the clock of sender certificates and of envelopes' arrival is moved (tests: days gone by).
+    shifted_ms: Arc<std::sync::atomic::AtomicI64>,
 }
 
 const HOUR: Duration = Duration::from_secs(3600);
@@ -109,6 +114,13 @@ impl Drop for Waiter<'_> {
         if Arc::strong_count(&self.notify) == 2 {
             waiting.remove(&self.device);
         }
+    }
+}
+
+impl Hub {
+    /// For tests: the clock of sender certificates and of envelopes' arrival moved by `ms` (days gone by, or back).
+    pub fn shift_clock(&self, ms: i64) {
+        self.shifted_ms.store(ms, Ordering::Relaxed);
     }
 }
 
@@ -183,7 +195,13 @@ const QUEUED: usize = 2048;
 
 /// Group commit: takes what has queued up, stores it in one transaction, wakes the devices and answers each. Under
 /// load the batches grow by themselves; alone, an envelope is stored at once.
-fn writer(db: Arc<Db>, queue: std::sync::mpsc::Receiver<Delivery>, most: u32, hub: Weak<Hub>) {
+fn writer(
+    db: Arc<Db>,
+    queue: std::sync::mpsc::Receiver<Delivery>,
+    most: u32,
+    hub: Weak<Hub>,
+    shifted_ms: Arc<std::sync::atomic::AtomicI64>,
+) {
     while let Ok(first) = queue.recv() {
         let mut batch = vec![first];
         while batch.len() < BATCH {
@@ -196,7 +214,8 @@ fn writer(db: Arc<Db>, queue: std::sync::mpsc::Receiver<Delivery>, most: u32, hu
             .iter()
             .map(|d| Incoming { user: d.user, devices_hash: d.devices_hash, envelope: &d.envelope, token: d.token })
             .collect();
-        match db.deliver(&items, now_ms(), most) {
+        let now = now_ms().saturating_add_signed(shifted_ms.load(Ordering::Relaxed));
+        match db.deliver(&items, now, most) {
             Ok(outcomes) => {
                 let hub = hub.upgrade();
                 for (delivery, mut outcome) in batch.into_iter().zip(outcomes) {
@@ -325,8 +344,13 @@ impl Hub {
         for blob in db.recover_blobs().map_err(|e| format!("database: {e}"))? {
             blobs.remove(&blob);
         }
+        let signer = certificate::Signer::from_bytes(&config.server_certificate)
+            .map_err(|e| format!("server certificate: {e}"))?;
+        let shifted_ms = Arc::new(std::sync::atomic::AtomicI64::new(0));
         let (deliveries, queue) = std::sync::mpsc::sync_channel(QUEUED);
         let hub = Arc::new(Hub {
+            signer,
+            shifted_ms: shifted_ms.clone(),
             db,
             deliveries,
             limiter: Limiter::default(),
@@ -346,7 +370,7 @@ impl Hub {
         let (writing, woken, most) = (hub.db.clone(), Arc::downgrade(&hub), hub.config.limits.max_pending_per_device);
         std::thread::Builder::new()
             .name("yo-hub-writer".into())
-            .spawn(move || writer(writing, queue, most, woken))
+            .spawn(move || writer(writing, queue, most, woken, shifted_ms))
             .map_err(|e| format!("writer: {e}"))?;
         Ok(hub)
     }
@@ -369,6 +393,8 @@ impl Hub {
             .route(api::STORAGE, get(get_storage).put(put_storage))
             .route(yo_wire::token::DIRECTORY, get(token_directory))
             .route(hubsig::KEY_PATH, get(hub_key))
+            .route(api::TRUST_ROOT_PATH, get(trust_root))
+            .route(api::CERTIFICATE, get(sender_certificate))
             .route(api::TOKENS, post(issue_tokens))
             .route("/v1/username/{name}", get(username_free))
             .route(api::INBOX_ACK, post(ack))
@@ -883,6 +909,30 @@ async fn prekeys(State(hub): Hubs, method: Method, uri: Uri, headers: HeaderMap,
 }
 
 /// The hub's public key (spec 6.11), for tools: apps ship their own copy and trust only that.
+/// The public key of the trust root the hub's sender certificates go back to, 32 bytes (spec 6.1): for tools.
+async fn trust_root(State(hub): Hubs) -> Vec<u8> {
+    hub.signer.root().to_vec()
+}
+
+/// A sender certificate for the signing device, good for a day (spec 6.1). The hub learns that this device asked,
+/// as of any signed request.
+async fn sender_certificate(
+    State(hub): Hubs,
+    method: Method,
+    uri: Uri,
+    headers: HeaderMap,
+) -> Res<(StatusCode, Vec<u8>)> {
+    let device = hub.authenticate(&method, &uri, &headers, &[])?;
+    let number = hub.db.device_number(&device.device_id)?.ok_or_else(|| refuse(StatusCode::UNAUTHORIZED))?;
+    let account_key = hub.db.account_key(&device.user_id)?.ok_or_else(|| refuse(StatusCode::UNAUTHORIZED))?;
+    let now = now_ms().saturating_add_signed(hub.shifted_ms.load(Ordering::Relaxed));
+    let certificate = hub.signer.issue(&device.user_id, number, &account_key, now).map_err(|error| {
+        eprintln!("yo-hub: sender certificate: {error}");
+        refuse(StatusCode::INTERNAL_SERVER_ERROR)
+    })?;
+    Ok(ok(certificate))
+}
+
 async fn hub_key(State(hub): Hubs) -> Vec<u8> {
     ed25519_dalek::SigningKey::from_bytes(&hub.config.hub_key).verifying_key().to_bytes().to_vec()
 }
@@ -1085,7 +1135,10 @@ async fn inbox(State(hub): Hubs, method: Method, uri: Uri, headers: HeaderMap) -
     }
     let inbox = api::Inbox {
         prekeys_left,
-        items: items.into_iter().map(|(id, envelope)| api::InboxItem { id, envelope: envelope.into() }).collect(),
+        items: items
+            .into_iter()
+            .map(|(id, envelope, received_ms)| api::InboxItem { id, received_ms, envelope: envelope.into() })
+            .collect(),
     };
     Ok(held(encode(&inbox), fetching))
 }
@@ -1205,7 +1258,7 @@ async fn deliver(
         .and_then(|v| unb64(v).ok())
         .and_then(|v| v.try_into().ok())
         .ok_or_else(bad)?;
-    yo_wire::envelope::check_sealed(&body)?;
+    yo_wire::envelope::check(&body, headers.contains_key(HEADER_DEVICE))?;
     // A good token instead of the address's limits (spec 6.10). One that is not is counted like a delivery without
     // and refused, `401`: the client sends again without it.
     // Its check looks up the spent nonces (the database) and evaluates P-384: off the async workers, bounded.

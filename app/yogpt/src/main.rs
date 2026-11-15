@@ -1,7 +1,7 @@
 //! YoGPT: an account that answers every Yo, after a moment, with a Yo or a few. One process serves the account on
 //! several hubs, each on its own.
 //!
-//!   yo-gpt [--replies DIR] --account NAME=HUB,DIR[,USERNAME] [--hub-key NAME=KEY] [--account …]
+//!   yo-gpt [--replies DIR] --account NAME=HUB,DIR[,USERNAME] [--hub-key NAME=KEY] [--trust-root NAME=KEY] [--account …]
 //!   yo-gpt --replies app/yogpt/replies --account dev=https://dev.justyo.app,state/dev,YoGPT
 //!
 //! Pictures: with `--replies`, a photo or video sent to it is answered with one picture from DIR (files named like
@@ -12,6 +12,9 @@
 //!
 //! `--hub-key NAME=KEY` pins a hub key of that account's hub (base64url of its 32-byte public key, spec 6.11), given
 //! once per key (the current one and a spare): answers that hand out keys are then taken only signed by one of them.
+//! `--trust-root NAME=KEY` pins a sender-certificate trust root of that account's hub (base64url of 32 bytes, spec
+//! 6.1, as `yo-hub trust-root new` printed it), once per key (the current one and a spare): without one no sealed Yo
+//! opens and its own go identified.
 //!
 //! The username defaults to YOGPT; once registered, the account keeps the name it has, whatever is given later.
 //! Each account has its own client, state directory, threads and limits. Its first run registers the username with a
@@ -174,6 +177,9 @@ struct Account {
     username: String,
     /// The hub's public keys, pinned (`--hub-key`, as often as there are: the current one and a spare).
     hub_keys: Vec<[u8; 32]>,
+    /// The hub's sender-certificate trust roots (`--trust-root`, the current one and a spare): without one, no sealed
+    /// Yo opens (spec 6.1).
+    trust_roots: Vec<[u8; 32]>,
 }
 
 /// What the whole process answers with.
@@ -339,19 +345,26 @@ fn account(value: &str) -> Result<Account, String> {
         return Err(bad());
     }
     let hub = hub.trim_end_matches('/').into();
-    Ok(Account { name: name.into(), hub, state: state.into(), username: username.into(), hub_keys: Vec::new() })
+    Ok(Account {
+        name: name.into(),
+        hub,
+        state: state.into(),
+        username: username.into(),
+        hub_keys: Vec::new(),
+        trust_roots: Vec::new(),
+    })
 }
 
-/// `NAME=KEY`: the hub key of an account, base64url of 32 bytes.
-fn hub_key(text: &str) -> Result<(String, [u8; 32]), String> {
-    let (name, key) = text.split_once('=').ok_or("--hub-key NAME=KEY")?;
-    let key = yo_wire::unb64(key).ok().and_then(|k| k.try_into().ok()).ok_or("--hub-key: 32 bytes, base64url")?;
+/// `NAME=KEY`: a key of an account's hub (`flag`), base64url of 32 bytes.
+fn named_key(flag: &str, text: &str) -> Result<(String, [u8; 32]), String> {
+    let (name, key) = text.split_once('=').ok_or(format!("{flag} NAME=KEY"))?;
+    let key = yo_wire::unb64(key).ok().and_then(|k| k.try_into().ok()).ok_or(format!("{flag}: 32 bytes, base64url"))?;
     Ok((name.into(), key))
 }
 
 fn args() -> Result<(Vec<Account>, Options), String> {
     let mut accounts: Vec<Account> = Vec::new();
-    let mut hub_keys = Vec::new();
+    let (mut hub_keys, mut trust_roots) = (Vec::new(), Vec::new());
     let mut options = Options { replies: None, picture_every: PICTURE_EVERY, yo: None, photo: None };
     let mut it = std::env::args().skip(1);
     while let Some(flag) = it.next() {
@@ -360,7 +373,8 @@ fn args() -> Result<(Vec<Account>, Options), String> {
             "--account" => accounts.push(account(&value)?),
             "--replies" => options.replies = Some(value.into()),
             "--picture-every" => options.picture_every = value.parse().map_err(|_| "--picture-every: a number")?,
-            "--hub-key" => hub_keys.push(hub_key(&value)?),
+            "--hub-key" => hub_keys.push(named_key("--hub-key", &value)?),
+            "--trust-root" => trust_roots.push(named_key("--trust-root", &value)?),
             "--photo" => options.photo = Some(value.into()),
             "--yo" => {
                 let (to, n) = value.split_once('=').ok_or("--yo NAME=COUNT")?;
@@ -372,6 +386,10 @@ fn args() -> Result<(Vec<Account>, Options), String> {
     for (name, key) in hub_keys {
         let account = accounts.iter_mut().find(|a| a.name == name).ok_or(format!("--hub-key: no account {name}"))?;
         account.hub_keys.push(key);
+    }
+    for (name, key) in trust_roots {
+        let account = accounts.iter_mut().find(|a| a.name == name).ok_or(format!("--trust-root: no account {name}"))?;
+        account.trust_roots.push(key);
     }
     if accounts.is_empty() || accounts.len() > MAX_ACCOUNTS {
         return Err(format!("1 to {MAX_ACCOUNTS} accounts: --account NAME=HUB,DIR[,USERNAME]"));
@@ -526,6 +544,7 @@ fn open(account: &Account) -> Option<Client> {
                 if !account.hub_keys.is_empty() {
                     client.set_hub_keys(account.hub_keys.clone());
                 }
+                client.set_trust_roots(account.trust_roots.clone());
                 // It never opens a photo or video: their keys are not even kept with the events.
                 client.forget_media_keys();
                 if let Err(error) = client.persist_to(Arc::new(File(path)), key) {

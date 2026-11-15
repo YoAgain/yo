@@ -32,3 +32,5 @@ jsonwebtoken = { workspace = true }
 voprf = { workspace = true }
 p384 = { workspace = true }
 rand_core = { workspace = true }
+rand = { workspace = true }
+libsignal-protocol = { workspace = true }

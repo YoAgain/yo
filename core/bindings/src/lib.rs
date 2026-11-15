@@ -889,6 +889,14 @@ impl YoClient {
         self.with(|c| c.set_hub_keys(keys))
     }
 
+    /// Pins the sender-certificate trust roots the app ships for this hub (spec 6.1: the current one and a spare),
+    /// 32 bytes each. Without one no sealed envelope opens and every delivery goes identified (signed): an app pins
+    /// them right after the client is made (`Hub.pin`).
+    pub fn set_trust_roots(&self, keys: Vec<Vec<u8>>) -> Result<(), YoError> {
+        let keys = keys.into_iter().map(key_of).collect::<Result<Vec<_>, _>>()?;
+        self.with(|c| c.set_trust_roots(keys))
+    }
+
     /// This device's security now: keys at the hub, tokens, sessions, verified contacts.
     pub fn security_status(&self) -> SecurityStatus {
         self.with(|c| c.security_status())

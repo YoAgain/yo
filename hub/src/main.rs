@@ -18,6 +18,14 @@
 //!   YO_BLOB_MIN_FREE_MB   uploads are refused while the disk has less free, default 4096 (4 GiB)
 //!   YO_HUB_KEY_FILE       required: the 32-byte seed of the hub's Ed25519 key, which signs answers handing out keys
 //!                         (spec 6.11); its public half is pinned in the apps
+//!   YO_SERVER_CERT_FILE   required: the server key and its certificate by the trust root (spec 6.1), which sign the
+//!                         devices' sender certificates; the trust root's public key is pinned in the apps
+//!
+//! Sender-certificate keys (Signal's: a trust root kept offline, a server certificate on the hub):
+//!   yo-hub trust-root new ROOT_FILE                     a new trust root (its private key, 32 bytes, 0600); prints
+//!                                                       its public key, base64url, for the apps
+//!   yo-hub trust-root server ROOT_FILE KEY_ID OUT_FILE  a new server key with its certificate by that root: the hub's
+//!                                                       YO_SERVER_CERT_FILE (0600)
 
 use std::sync::Arc;
 use yo_hub::config::{parse_min_app, read_hub_key, read_reserved, ApnsConfig, BlobConfig, Config, FcmConfig, Limits};
@@ -83,12 +91,55 @@ fn config() -> Result<(Config, String), String> {
             .transpose()?
             .unwrap_or(2),
         hub_key: read_hub_key(&required("YO_HUB_KEY_FILE")?)?,
+        server_certificate: {
+            let path = required("YO_SERVER_CERT_FILE")?;
+            std::fs::read(&path).map_err(|e| format!("YO_SERVER_CERT_FILE: {path}: {e}"))?
+        },
     };
     Ok((config, var("YO_LISTEN").unwrap_or_else(|| "127.0.0.1:8080".into())))
 }
 
+/// Writes a new file readable by its owner alone; never over one that is there.
+fn write_new(path: &str, bytes: &[u8]) -> Result<(), String> {
+    use std::io::Write;
+    use std::os::unix::fs::OpenOptionsExt;
+    let mut file = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .open(path)
+        .map_err(|e| format!("{path}: {e}"))?;
+    file.write_all(bytes).and_then(|()| file.sync_all()).map_err(|e| format!("{path}: {e}"))
+}
+
+/// `yo-hub trust-root …` (see above).
+fn trust_root(args: &[String]) -> Result<(), String> {
+    match args {
+        [new, root] if new == "new" => {
+            let (private, public) = yo_hub::certificate::new_root();
+            write_new(root, &private)?;
+            println!("{}", yo_wire::b64(&public));
+            Ok(())
+        }
+        [server, root, key_id, out] if server == "server" => {
+            let private = std::fs::read(root).map_err(|e| format!("{root}: {e}"))?;
+            let key_id = key_id.parse::<u32>().map_err(|_| "KEY_ID: a number".to_string())?;
+            write_new(out, &yo_hub::certificate::server_file(&private, key_id)?)
+        }
+        _ => Err("usage: yo-hub trust-root new ROOT_FILE | yo-hub trust-root server ROOT_FILE KEY_ID OUT_FILE".into()),
+    }
+}
+
 #[tokio::main]
 async fn main() {
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    if args.first().map(String::as_str) == Some("trust-root") {
+        if let Err(error) = trust_root(&args[1..]) {
+            eprintln!("yo-hub: {error}");
+            std::process::exit(2);
+        }
+        return;
+    }
     let (config, listen) = config().unwrap_or_else(|error| {
         eprintln!("yo-hub: {error}");
         std::process::exit(2);

@@ -215,6 +215,10 @@ pub struct Config {
     /// The seed of the hub's Ed25519 key (`YO_HUB_KEY_FILE`, 32 bytes, the operator's): it signs the answers that hand
     /// out keys for a client that asks so (spec 6.11). Apps ship its public half.
     pub hub_key: [u8; 32],
+    /// The server key and its certificate by the operator's trust root (`YO_SERVER_CERT_FILE`, made by
+    /// `yo-hub trust-root server`): it signs the devices' sender certificates (spec 6.1). The hub does not start
+    /// without a good one.
+    pub server_certificate: Vec<u8>,
 }
 
 /// `YO_MIN_APP`: comma separated `PLATFORM/BUILD`.
@@ -289,6 +293,7 @@ impl Config {
             min_app: Vec::new(),
             name_min: 2,
             hub_key: TEST_HUB_KEY,
+            server_certificate: crate::certificate::test_file(),
         }
     }
 }

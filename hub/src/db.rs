@@ -1354,11 +1354,22 @@ impl Db {
         self.conn().prepare_cached("SELECT 1 FROM spent_tokens WHERE nonce = ?1")?.exists([nonce])
     }
 
-    pub fn fetch(&self, device: &DeviceId, most: usize) -> rusqlite::Result<Vec<(u64, Vec<u8>)>> {
+    /// A device's envelopes, oldest first: id, envelope, when it came (ms).
+    pub fn fetch(&self, device: &DeviceId, most: usize) -> rusqlite::Result<Vec<(u64, Vec<u8>, u64)>> {
         self.conn()
-            .prepare_cached("SELECT id, envelope FROM messages WHERE device_id = ?1 ORDER BY id LIMIT ?2")?
-            .query_map(params![device, most as i64], |row| Ok((row.get::<_, i64>(0)? as u64, row.get(1)?)))?
+            .prepare_cached("SELECT id, envelope, received_at FROM messages WHERE device_id = ?1 ORDER BY id LIMIT ?2")?
+            .query_map(params![device, most as i64], |row| {
+                Ok((row.get::<_, i64>(0)? as u64, row.get(1)?, row.get::<_, i64>(2)? as u64))
+            })?
             .collect()
+    }
+
+    /// A device's number among its user's devices (spec 4).
+    pub fn device_number(&self, device: &DeviceId) -> rusqlite::Result<Option<u8>> {
+        self.conn()
+            .prepare_cached("SELECT number FROM devices WHERE id = ?1")?
+            .query_row([device], |row| row.get(0))
+            .optional()
     }
 
     /// Deletes a device's envelopes by id. Committed without waiting for the disk (`synchronous = NORMAL` for this
@@ -1866,7 +1877,7 @@ mod tests {
         db.deliver(&[Incoming { user: leo, devices_hash, envelope: b"envelope", token: None }], 0, 10).unwrap();
         let synchronous = || -> i64 { db.conn().query_row("PRAGMA synchronous", [], |row| row.get(0)).unwrap() };
         assert_eq!(synchronous(), 2);
-        let (id, _) = db.fetch(&[1; 16], 10).unwrap().remove(0);
+        let (id, _, _) = db.fetch(&[1; 16], 10).unwrap().remove(0);
         db.ack(&[1; 16], &[id]).unwrap();
         assert!(db.fetch(&[1; 16], 10).unwrap().is_empty());
         assert_eq!(synchronous(), 2);

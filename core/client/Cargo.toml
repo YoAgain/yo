@@ -30,6 +30,3 @@ rand_core = { workspace = true }
 libsignal-protocol = { workspace = true }
 async-trait = { workspace = true }
 rand = { workspace = true }
-hpke-rs = { workspace = true }
-hpke-rs-crypto = { workspace = true }
-hpke-rs-rust-crypto = { workspace = true }

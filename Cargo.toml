@@ -38,10 +38,6 @@ rand_core = { version = "=0.6.4", features = ["getrandom"] }
 libsignal-protocol = { git = "https://github.com/signalapp/libsignal", tag = "v0.108.0" }
 async-trait = "=0.1.92"
 rand = "=0.9.5"
-# The seal (spec 6.1): HPKE, RFC 9180.
-hpke-rs = "=0.7.0"
-hpke-rs-crypto = "=0.7.0"
-hpke-rs-rust-crypto = "=0.7.0"
 
 [profile.release]
 lto = "thin"

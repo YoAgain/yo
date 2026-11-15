@@ -526,9 +526,10 @@ impl Client {
         let accepted = own
             || self.state.groups.get(&id).is_some_and(|g| g.accepted)
             || self.state.contacts.get(from).is_some_and(|c| c.accepted);
-        // This account's own change, beaten by a rival at its revision: made again on the winner after the sync.
+        // This account's own change, beaten by a rival at its revision (another's, or another device's of this account):
+        // made again on the winner after the sync.
         let mine = match self.state.groups.get(&id) {
-            Some(g) if !own && g.revision == info.revision => {
+            Some(g) if g.revision == info.revision => {
                 g.mine.clone().filter(|m| m.revision == g.revision).map(|m| Mine { due: true, ..m })
             }
             _ => None,

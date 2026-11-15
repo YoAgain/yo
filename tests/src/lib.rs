@@ -184,6 +184,19 @@ pub fn hub_key() -> [u8; 32] {
     ed25519_dalek::SigningKey::from_bytes(&yo_hub::config::TEST_HUB_KEY).verifying_key().to_bytes()
 }
 
+/// The public key of the test hubs' trust root (`yo_wire::envelope::TEST_TRUST_ROOT`), as an app pins its hub's.
+pub fn trust_root() -> [u8; 32] {
+    yo_hub::certificate::Signer::from_bytes(&TEST_SIGNER).unwrap().root()
+}
+
+static TEST_SIGNER: std::sync::LazyLock<Vec<u8>> = std::sync::LazyLock::new(yo_hub::certificate::test_file);
+
+/// A sender certificate as a test hub issues it, for a device of a user, good for a day from `now_ms`.
+pub fn sender_certificate(user: &[u8; 16], device: u8, account_key: &[u8; 32], now_ms: u64) -> Vec<u8> {
+    let signer = yo_hub::certificate::Signer::from_bytes(&TEST_SIGNER).unwrap();
+    signer.issue(user, device, account_key, now_ms).unwrap()
+}
+
 /// Registers a new account with a free username; answers handing out keys checked against the test hub's key.
 pub fn register(transport: Arc<Http>, username: &str, name: Option<&str>) -> Client {
     let mut client =

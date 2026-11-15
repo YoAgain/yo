@@ -10,7 +10,7 @@ pub mod groups;
 pub mod identity;
 pub mod media;
 pub mod net;
-pub mod seal;
+pub mod sealed;
 pub mod security;
 pub mod signal;
 pub mod state;
@@ -67,6 +67,21 @@ const RESEND_EVERY_MS: u64 = 60 * 1000;
 const SEEN: usize = 2000;
 /// Messages sent to a contact kept to send again when it asks (spec 4.6).
 const KEPT_FOR_RETRY: usize = 64;
+/// A sender certificate holds a day at the hub (spec 6.1); this device uses one for an hour less by its own clock
+/// from when it came (whatever time the clock shows), and fetches the next `sealed::REFRESH_MS` before.
+const CERTIFICATE_USED_MS: u64 = 23 * 3600 * 1000;
+
+/// The trust roots a client starts with: none (an app pins its hub's, `set_trust_roots`); under tests, the test hubs'.
+fn test_trust_roots() -> Vec<Key> {
+    #[cfg(feature = "testing")]
+    {
+        let private = libsignal_protocol::PrivateKey::deserialize(&yo_wire::envelope::TEST_TRUST_ROOT).expect("a key");
+        let public = private.public_key().expect("a key").public_key_bytes().try_into().expect("32 bytes");
+        vec![public]
+    }
+    #[cfg(not(feature = "testing"))]
+    Vec::new()
+}
 /// A retry is asked of one contact at most this often.
 const RETRY_EVERY_MS: u64 = 60 * 1000;
 /// How often a payload may make this device ask the hub for a user's devices (spec 4.4).
@@ -276,6 +291,8 @@ pub struct Deliveries {
 struct Delivery {
     /// The recipient's contact key it shows: sealed sender; none, a request signed by this device (spec 4.10).
     access: Option<[u8; 32]>,
+    /// Sealed with this device's sender certificate; else identified (none to hand), signed (spec 6.1).
+    sealed: bool,
     seq: u64,
     user: String,
     path: String,
@@ -368,6 +385,11 @@ pub struct Client {
     /// answer that hands out keys must carry a signature by one of them over this very question; with none (an app
     /// from before), answers are taken as they come.
     hub_keys: Vec<Key>,
+    /// The sender-certificate trust roots the app ships for its hub (spec 6.1: the current one and a spare): sealed
+    /// envelopes open only with a certificate from one of them. None: no sealed envelope opens, and none is sent.
+    trust_roots: Vec<Key>,
+    /// When (this clock) a sender certificate was last asked for: at most once a minute.
+    certificate_asked_at: u64,
     /// How far this device's clock is off (tests: a phone set to the wrong time); the signing time is wall time plus it.
     skew_ms: i64,
 }
@@ -641,7 +663,25 @@ impl Client {
                 }
             }
         }
+        // A sender certificate at once, so the first Yo goes sealed (without one it would go identified).
+        if self.refresh_certificate().is_err() {
+            self.note("sender certificate: not now".into());
+        }
         self.persist()
+    }
+
+    /// For tests: this device's sender certificate as the hub gave it, if any.
+    #[cfg(feature = "testing")]
+    pub fn sender_certificate_for_tests(&self) -> Option<Vec<u8>> {
+        self.state.sender_certificate.as_ref().map(|(bytes, _)| bytes.clone())
+    }
+
+    /// For tests: this device's sender certificate replaced (one from another root, an old one), as if fetched now.
+    #[cfg(feature = "testing")]
+    pub fn set_sender_certificate_for_tests(&mut self, bytes: Option<Vec<u8>>) {
+        self.state.sender_certificate = bytes.map(|b| (b, (self.clock)()));
+        self.state.certificate_clock = (self.clock)();
+        self.certificate_asked_at = 0;
     }
 
     /// For tests: the phone's clock is `ms` off (spec 6.2: signed requests are within 5 minutes of the hub's).
@@ -750,6 +790,8 @@ impl Client {
             contact_key: None,
             requests_open: true,
             contact_key_told: false,
+            sender_certificate: None,
+            certificate_clock: 0,
             registering: None,
             groups: Default::default(),
             roster_asked: Default::default(),
@@ -795,7 +837,8 @@ impl Client {
     /// `sync`).
     #[cfg(feature = "fuzz")]
     pub fn receive_for_fuzzing(&mut self, payload: &[u8]) -> Result<()> {
-        self.atomic(|c| c.receive(payload))
+        let opened = [&[0u8; 16][..], payload].concat();
+        self.atomic(|c| c.receive(&opened))
     }
 
     /// Opens a sealed state.
@@ -830,7 +873,78 @@ impl Client {
             received_ids: Vec::new(),
             after_due: false,
             hub_keys: Vec::new(),
+            trust_roots: test_trust_roots(),
+            certificate_asked_at: 0,
             skew_ms: 0,
+        }
+    }
+
+    /// Pins the hub's sender-certificate trust roots (spec 6.1), 32 bytes each (Curve25519).
+    pub fn set_trust_roots(&mut self, keys: Vec<Key>) {
+        self.trust_roots = keys;
+    }
+
+    /// This device's sender certificate, while it is in date by this clock (a day less `sealed::REFRESH_MS` since it
+    /// came, whatever time the clock shows) and the trust roots are pinned.
+    fn certificate(&mut self) -> Option<libsignal_protocol::SenderCertificate> {
+        let now = (self.clock)();
+        self.state.certificate_clock = self.state.certificate_clock.max(now);
+        let fresh = self.certificate_left(now).is_some_and(|left| left > 0);
+        let (bytes, _) = self.state.sender_certificate.as_ref()?;
+        (fresh && !self.trust_roots.is_empty())
+            .then(|| libsignal_protocol::SenderCertificate::deserialize(bytes).ok())
+            .flatten()
+    }
+
+    /// How long this device's sender certificate is still used, by this clock: none if there is none, or the clock
+    /// went back since it came (or since it last looked).
+    fn certificate_left(&self, now: u64) -> Option<u64> {
+        let (_, at) = self.state.sender_certificate.as_ref()?;
+        let back = now < *at || now + 60_000 < self.state.certificate_clock;
+        (!back).then(|| CERTIFICATE_USED_MS.saturating_sub(now - at))
+    }
+
+    /// Fetches a sender certificate when there is none in date, or it is due (at most once a minute): after a sync, in
+    /// maintenance, after an identified send. Quietly: without one, deliveries go identified meanwhile.
+    fn refresh_certificate(&mut self) -> Result<()> {
+        let now = (self.clock)();
+        self.state.certificate_clock = self.state.certificate_clock.max(now);
+        let due = self.certificate_left(now).is_none_or(|left| left <= sealed::REFRESH_MS);
+        if !due || self.trust_roots.is_empty() || self.state.user_id.is_empty() {
+            return Ok(());
+        }
+        if self.certificate_asked_at != 0
+            && now >= self.certificate_asked_at
+            && now - self.certificate_asked_at < 60_000
+        {
+            return Ok(());
+        }
+        self.certificate_asked_at = now;
+        let response = match self.signed("GET", api::CERTIFICATE, &[]) {
+            Ok(response) => response,
+            Err(error) if retryable(&error) => return Ok(()),
+            Err(error) => return Err(error),
+        };
+        if response.status == status::GONE {
+            return Err(Error::Replaced);
+        }
+        if response.status != status::OK {
+            self.note(format!("sender certificate: {}", response.status));
+            return Ok(());
+        }
+        let roots = sealed::roots(&self.trust_roots);
+        let own = signal::identity_pair(&self.state.account_secret)?;
+        let user = user_bytes(&self.state.user_id)?;
+        match sealed::check_own(&response.body, &roots, &user, self.state.device_number, own.identity_key()) {
+            Ok(_) => {
+                self.state.sender_certificate = Some((response.body, now));
+                self.state.certificate_clock = now;
+                self.persist()
+            }
+            Err(error) => {
+                self.note(format!("sender certificate: {error}"));
+                Ok(())
+            }
         }
     }
 
@@ -1246,7 +1360,7 @@ impl Client {
         }
         // What waits for the user is encrypted for its devices as they are now.
         for item in self.state.outbox.iter_mut().filter(|item| item.user == user) {
-            item.envelope = None;
+            item.payload = None;
         }
         Ok(())
     }
@@ -1389,8 +1503,8 @@ impl Client {
         }
     }
 
-    /// Encrypts a message for every device of a user (spec 4.4) and seals it to the user's account (6.1): one
-    /// envelope, a copy per device.
+    /// Encrypts a message for every device of a user (spec 4.4): one payload, a copy per device, sealed to the user's
+    /// account as it goes (6.1).
     fn encrypt_for(&mut self, user: &str, plain: &[u8]) -> Result<(Vec<u8>, Vec<Key>)> {
         let (account_key, devices) = self.roster(user).map(|(k, d)| (k, d.to_vec())).ok_or(Error::Protocol("user"))?;
         if devices.is_empty() {
@@ -1425,8 +1539,7 @@ impl Client {
             device_id: self.state.device_number,
             copies,
         };
-        let envelope = seal::to(&account_key, &encode(&payload))?;
-        Ok((envelope, devices.iter().map(|d| d.key).collect()))
+        Ok((encode(&payload), devices.iter().map(|d| d.key).collect()))
     }
 
     /// Pins a contact's account key; another key than pinned for the same user is an identity change: its sessions
@@ -1592,13 +1705,13 @@ impl Client {
         }
         for i in 0..self.state.outbox.len() {
             let item = &self.state.outbox[i];
-            if item.user != user || item.envelope.is_some() || !self.still_in_group(item) {
+            if item.user != user || item.payload.is_some() || !self.still_in_group(item) {
                 continue;
             }
             let plain = item.plain.clone();
-            if let Ok((envelope, made_for)) = self.atomic(|c| c.encrypt_for(user, &plain)) {
+            if let Ok((payload, made_for)) = self.atomic(|c| c.encrypt_for(user, &plain)) {
                 let item = &mut self.state.outbox[i];
-                item.envelope = Some(envelope);
+                item.payload = Some(payload);
                 item.made_for = made_for;
                 self.envelopes_unsaved.set(true);
             }
@@ -1611,7 +1724,7 @@ impl Client {
             seq: self.state.next_seq,
             user: user.to_owned(),
             plain,
-            envelope: None,
+            payload: None,
             made_for: Vec::new(),
             refused: false,
         });
@@ -1636,15 +1749,26 @@ impl Client {
     /// Sends the outbox in order, per user, and takes in the devices the hub names for any user whose devices this
     /// device saw otherwise (4.4), until the outbox moves.
     fn deliver(&mut self) -> Result<()> {
+        let mut identified = false;
+        let mut result = Ok(());
         for _ in 0..DEVICE_ROUNDS {
             self.prepare()?;
             let deliveries = self.deliveries()?;
+            identified |= deliveries.items.iter().any(|d| !d.sealed);
             let answers = deliveries.send();
-            if !self.delivered(&deliveries, answers)? {
-                return Ok(());
+            match self.delivered(&deliveries, answers) {
+                Ok(true) => {}
+                other => {
+                    result = other.map(|_| ());
+                    break;
+                }
             }
         }
-        Ok(())
+        // Sent identified for want of a certificate: one now, for the next to go sealed.
+        if identified {
+            self.refresh_certificate()?;
+        }
+        result
     }
 
     /// Whether a queued message may still go: one of a group only while this account and its user are in the group
@@ -1722,7 +1846,7 @@ impl Client {
                 continue;
             }
             let item = &self.state.outbox[i];
-            let fresh = item.envelope.is_some() && {
+            let fresh = item.payload.is_some() && {
                 let mut made = item.made_for.clone();
                 let mut now = current.clone();
                 made.sort_unstable();
@@ -1737,9 +1861,9 @@ impl Client {
                 }
                 let plain = item.plain.clone();
                 match self.atomic(|c| c.encrypt_for(&user, &plain)) {
-                    Ok((envelope, made_for)) => {
+                    Ok((payload, made_for)) => {
                         let item = &mut self.state.outbox[i];
-                        item.envelope = Some(envelope);
+                        item.payload = Some(payload);
                         item.made_for = made_for;
                         encrypted = true;
                         self.envelopes_unsaved.set(true);
@@ -1760,8 +1884,13 @@ impl Client {
         let token_key =
             self.state.token_key.as_deref().and_then(unhex).and_then(|k| <[u8; token::NE]>::try_from(k).ok());
         let mut items = Vec::new();
+        // Sealed with this device's certificate while it has one in date; else identified at once, signed (as Signal
+        // sends without one), and a fresh one fetched after (`refresh_certificate`).
+        let certificate = self.certificate();
+        let own = signal::identity_pair(&self.state.account_secret)?;
+        let mut too_large = Vec::new();
         for item in &self.state.outbox {
-            let Some(envelope) = &item.envelope else { continue };
+            let Some(payload) = &item.payload else { continue };
             if waiting.contains(&item.user) || self.refused_until_read.contains(&item.user) {
                 continue;
             }
@@ -1784,25 +1913,47 @@ impl Client {
             if let Some(key) = access {
                 headers.push((api::HEADER_ACCESS.to_owned(), yo_wire::b64(&key)));
             }
+            // Identified only for want of a certificate: a payload too large to seal is dropped, never sent so.
+            let envelope = match &certificate {
+                Some(certificate) => sealed::seal(certificate, &own, &signal::identity_of(&account_key)?, payload),
+                None => yo_wire::envelope::pad(payload, &yo_wire::envelope::BUCKETS).map_err(Error::from),
+            };
+            let envelope = match envelope {
+                Ok(envelope) => envelope,
+                Err(_) => {
+                    too_large.push(item.seq);
+                    continue;
+                }
+            };
             items.push(Delivery {
                 access,
+                sealed: envelope[0] == yo_wire::envelope::SEALED,
                 seq: item.seq,
                 user: item.user.clone(),
                 path: api::deliver_path(&user),
                 headers: with_nonce(headers, nonce),
-                envelope: envelope.clone(),
+                envelope,
                 token: None,
                 nonce,
             });
         }
-        for delivery in items.iter_mut().filter(|d| d.access.is_none()) {
+        if items.iter().any(|d| !d.sealed) {
+            self.note("sent identified: no sender certificate in date".into());
+        }
+        if !too_large.is_empty() {
+            self.state.outbox.retain(|item| !too_large.contains(&item.seq));
+            for _ in &too_large {
+                self.drop_one("too large for an envelope".into());
+            }
+        }
+        for delivery in items.iter_mut().filter(|d| d.access.is_none() || !d.sealed) {
             let (signed, _) = self.sign("POST", &delivery.path, &delivery.envelope);
             delivery.headers.extend(signed);
         }
         // One token per sealed delivery while there are any, the oldest first: the hub counts it instead of the
         // address. A request names its sender anyway.
         if let Some(key) = &token_key {
-            for delivery in items.iter_mut().filter(|d| d.access.is_some()) {
+            for delivery in items.iter_mut().filter(|d| d.access.is_some() && d.sealed) {
                 while let Some(kept) = self.state.tokens.pop_front() {
                     if let Some(found) = tokens::unkept(&kept, key) {
                         delivery.headers.push(("authorization".to_owned(), found.authorization()));
@@ -1996,8 +2147,9 @@ impl Client {
                 backlogged = true;
                 break;
             }
-            // Not sealed to this account (spec 6.1): of use to nobody here.
-            let payload = match seal::open(&self.state.account_secret, item.envelope.as_slice()) {
+            // Not sealed to this account, or its sender certificate not good when the hub took it (spec 6.1): of use
+            // to nobody here.
+            let payload = match self.open(item.envelope.as_slice(), item.received_ms) {
                 Ok(payload) => payload,
                 Err(error) => {
                     self.drop_one(error.to_string());
@@ -2153,10 +2305,30 @@ impl Client {
         }
     }
 
-    /// Processes one payload, out of its seal (spec 4.4): the copy for this device, decrypted in the session with its
-    /// sender's device.
-    fn receive(&mut self, payload: &[u8]) -> Result<()> {
-        let raw = payload;
+    /// Opens an envelope (spec 6.1): what `receive` takes, the user its certificate names (16 zero bytes: none, an
+    /// identified envelope) and the payload. The certificate must name the payload's device and account key.
+    fn open(&self, envelope: &[u8], received_ms: u64) -> Result<Vec<u8>> {
+        let own = signal::identity_pair(&self.state.account_secret)?;
+        let opened = sealed::open(&own, envelope, &sealed::roots(&self.trust_roots), received_ms)?;
+        let payload: Payload = decode(&opened.payload)?;
+        let user = match opened.sender {
+            Some((user, device, identity)) => {
+                if device != payload.device_id || identity != signal::identity_of(&payload.account_key)? {
+                    return Err(Error::Protocol("a sender certificate for another"));
+                }
+                user
+            }
+            None => [0; 16],
+        };
+        Ok([&user[..], &opened.payload].concat())
+    }
+
+    /// Processes one opened envelope (`open`): the copy for this device, decrypted in the session with its sender's
+    /// device.
+    fn receive(&mut self, opened: &[u8]) -> Result<()> {
+        let raw = opened;
+        let (certified, payload) = opened.split_at_checked(16).ok_or(Error::Protocol("opened"))?;
+        let certified = (certified != [0; 16]).then(|| hex(certified));
         let payload: Payload = decode(payload)?;
         let mine = self.state.device_key;
         // Made before the sender knew this device (it was added since): not for it.
@@ -2168,6 +2340,10 @@ impl Client {
             self.drop_one("a sender that is no user now".into());
             return Ok(());
         };
+        if certified.as_ref().is_some_and(|c| *c != user) {
+            self.drop_one("a sender certificate for another user".into());
+            return Ok(());
+        }
         let own = user == self.state.user_id;
         // Another device of the user under this number here: one of the two was replaced, and only the hub knows
         // which (a replaced device can still deliver: deliveries are unsigned). Its roster decides before anything
@@ -2904,6 +3080,8 @@ impl Client {
         self.refill()?;
         self.contact_keys()?;
         self.deliver()?;
+        // After what waits went (identified, if the certificate is out of date): never a send held for it.
+        self.refresh_certificate()?;
         self.sync_storage_quietly()?;
         self.refill_tokens();
         self.after_due = false;
@@ -2932,6 +3110,7 @@ impl Client {
         self.receive_all(0)?;
         self.answer_due()?;
         self.reapply_groups()?;
+        self.refresh_certificate()?;
         self.refill()?;
         self.refill_tokens();
         self.send_profiles();

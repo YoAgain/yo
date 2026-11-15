@@ -199,7 +199,8 @@ fn posted(http: &Http, to: &str) -> Vec<Vec<u8>> {
 
 /// What an envelope to `to` carries, opened with its account secret.
 fn payload(to: &Phone, envelope: &[u8]) -> yo_wire::envelope::Payload {
-    yo_wire::decode(&yo_core::seal::open(&to.account_secret().try_into().unwrap(), envelope).unwrap()).unwrap()
+    let (payload, _) = yo_core::sealed::testing::open(&to.account_secret().try_into().unwrap(), envelope).unwrap();
+    yo_wire::decode(&payload).unwrap()
 }
 
 #[test]

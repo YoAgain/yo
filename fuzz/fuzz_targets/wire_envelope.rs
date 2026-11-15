@@ -5,8 +5,9 @@ use libfuzzer_sys::fuzz_target;
 use yo_wire::envelope::{self, Payload, Plain};
 
 fuzz_target!(|data: &[u8]| {
-    let _ = envelope::check_sealed(data);
-    for sizes in [&envelope::SEALED_PLAIN[..], &envelope::BUCKETS[..]] {
+    let _ = envelope::check(data, true);
+    // Inside a sealed message: padded to the size that makes the bucket; as a storage blob: to the buckets.
+    for sizes in [&[data.len()][..], &envelope::BUCKETS[..]] {
         if let Ok(message) = envelope::unpad(data, sizes) {
             assert_eq!(envelope::pad(message, sizes).unwrap(), data);
         }

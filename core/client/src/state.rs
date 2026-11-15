@@ -196,9 +196,10 @@ pub struct Outgoing {
     /// when it goes.
     #[serde(with = "compact::bytes")]
     pub plain: Vec<u8>,
-    /// Its envelope once encrypted, with the account key and devices it was made for: made again if they changed.
+    /// Its payload once encrypted (`envelope::Payload`), with the devices it was made for: made again if they
+    /// changed. Sealed as it goes, with the sender certificate of then (spec 6.1).
     #[serde(default, with = "compact::optional")]
-    pub envelope: Option<Vec<u8>>,
+    pub payload: Option<Vec<u8>>,
     pub made_for: Vec<Key>,
     /// Refused once as a request (`403`, spec 4.10) though sent with the recipient's key: their new key may wait in
     /// the inbox, so it goes once more after the next receive; a second `403` drops it.
@@ -390,6 +391,14 @@ pub struct State {
     /// The hub has the check of `contact_key` and `requests_open` as they are.
     #[serde(default)]
     pub contact_key_told: bool,
+    /// This device's sender certificate from the hub (spec 6.1), and when (this clock, ms) it came: used for a day
+    /// less `sealed::REFRESH_MS` of this clock from then, whatever time the clock shows.
+    #[serde(default)]
+    pub sender_certificate: Option<(Vec<u8>, u64)>,
+    /// The latest this clock showed since then: a clock set back is noticed (the certificate is fetched anew), it
+    /// never stretches the day.
+    #[serde(default)]
+    pub certificate_clock: u64,
     /// This device's registration while the hub has not answered it: the user id is empty until then.
     pub registering: Option<Registering>,
     /// The groups this account is or was in, by id (hex).
