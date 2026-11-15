@@ -39,6 +39,20 @@ pub struct Blobs {
     admission: Mutex<()>,
     /// Uploads under way, by user, and all.
     uploads: Mutex<HashMap<UserId, u32>>,
+    /// Blob ids whose upload is under way, from its check until its row is written.
+    claimed: Mutex<HashSet<BlobId>>,
+}
+
+/// A blob id held by its upload under way; let go when it is dropped.
+pub struct Claim {
+    blobs: Arc<Blobs>,
+    id: BlobId,
+}
+
+impl Drop for Claim {
+    fn drop(&mut self) {
+        self.blobs.claimed.lock().unwrap_or_else(PoisonError::into_inner).remove(&self.id);
+    }
 }
 
 /// An upload under way of a user; its place is given back when it is dropped.
@@ -126,7 +140,14 @@ impl Blobs {
             incoming: AtomicU64::new(0),
             admission: Mutex::default(),
             uploads: Mutex::default(),
+            claimed: Mutex::default(),
         })
+    }
+
+    /// Holds `id` for one upload: `None` while another upload of it is under way.
+    pub fn claim(self: &Arc<Self>, id: BlobId) -> Option<Claim> {
+        let fresh = self.claimed.lock().unwrap_or_else(PoisonError::into_inner).insert(id);
+        fresh.then(|| Claim { blobs: self.clone(), id })
     }
 
     /// A place for one more upload of `user`, if it has fewer than `UPLOADS_PER_USER` under way and all users fewer
@@ -426,6 +447,18 @@ mod tests {
         drop(held);
         assert!(blobs.uploading([1; 16]).is_some());
         assert!(blobs.uploads.lock().unwrap().len() <= 1);
+        let _ = std::fs::remove_dir_all(blobs.dir());
+    }
+
+    #[test]
+    fn an_id_is_held_by_one_upload_at_a_time() {
+        let blobs = Arc::new(Blobs::open(&crate::config::BlobConfig::for_tests()).unwrap());
+        let claim = blobs.claim([7; 16]).expect("free");
+        assert!(blobs.claim([7; 16]).is_none(), "the same id while its upload is under way");
+        assert!(blobs.claim([8; 16]).is_some(), "another id");
+        drop(claim);
+        assert!(blobs.claim([7; 16]).is_some(), "let go");
+        assert!(blobs.claimed.lock().unwrap().is_empty());
         let _ = std::fs::remove_dir_all(blobs.dir());
     }
 

@@ -1170,9 +1170,11 @@ async fn put_blob(
     let limits = &hub.config.limits;
     hub.limit_ip("blob:put", peer, &headers, limits.blob_put_per_ip_minute, MINUTE)?;
     let quota = limits.blob_quota();
-    let device = hub
+    let (device, _claim) = hub
         .blocking(move |hub| {
             let device = hub.authenticate_hash(&method, &uri, &headers, &body_hash)?;
+            // Held before the body comes, so a second upload of the same id is "later" at once (spec 6.8).
+            let claim = hub.blobs.claim(id).ok_or_else(|| refuse(StatusCode::SERVICE_UNAVAILABLE))?;
             match hub.db.blob_ready_state(&id)? {
                 Some(true) => return Err(refuse(StatusCode::CONFLICT)),
                 // Another upload of it is not done: "later", not "there" (spec 6.6).
@@ -1182,7 +1184,7 @@ async fn put_blob(
             if !hub.db.blob_quota_left(&device.user_id, size, now_ms(), &quota)? {
                 return Err(refuse(StatusCode::TOO_MANY_REQUESTS));
             }
-            Ok(device)
+            Ok((device, claim))
         })
         .await??;
     // A few uploads of one user at once, no more: none can hold the room of everyone's.
