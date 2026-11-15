@@ -84,6 +84,13 @@ delivers about 8,000 Yops, Yos per second, with every Yo on disk before it is an
 **YoGPT** ([app/yogpt](app/yogpt)): a real client that answers every Yo, keeping your rhythm, and now and then with
 a picture; one process for its account on each hub.
 
+## Lines of code
+
+Every line of code in the repository per day since the first commit (Rust, Swift, scripts; tests and fuzz targets
+included), redrawn by `dev/loc_history`:
+
+<p align="center"><img src="dev/loc-history.svg" alt="Lines of code per day" width="760"></p>
+
 ## Dev
 
 <details markdown="1">
