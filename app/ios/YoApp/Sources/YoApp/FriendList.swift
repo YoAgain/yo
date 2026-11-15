@@ -274,8 +274,13 @@ struct FriendList: View {
           isPresented: Binding(
             get: { keyChanged != nil }, set: { if !$0, let friend = keyChanged { friends.keyAlertShown(friend) } }),
           presenting: keyChanged
-        ) { _ in
+        ) { friend in
           Button("OK", role: .cancel) {}
+          if let user = friend.user {  // a verified contact's Yos wait for this (spec 3.4)
+            Button("Confirm New Key") {
+              Task { try? await Verification.confirm(user, accounts: accounts, inbox: inbox, friends: friends, outbox: outbox) }
+            }
+          }
         } message: { friend in
           Text(
             "\(friend.name) may have a new iPhone. If you didn’t expect this, compare safety numbers in Profile > "

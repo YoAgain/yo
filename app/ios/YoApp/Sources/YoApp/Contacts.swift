@@ -60,6 +60,33 @@ struct ContactState: Sendable {
   }
 }
 
+/// Verifying a contact and confirming their new key (spec 3.4), through the core; then what waited for them goes (the
+/// core's Yos and the photos in the outbox).
+@MainActor
+enum Verification {
+  static func setVerified(
+    _ user: String, _ verified: Bool, accounts: AccountStore, inbox: Inbox, friends: Friends, outbox: MediaOutbox
+  ) async throws {
+    guard let client = accounts.client else { return }
+    try await Hub.run { try client.setVerified(who: user, verified: verified) }
+    resume(accounts: accounts, inbox: inbox, friends: friends, outbox: outbox)
+  }
+
+  /// Their new key accepted: Yos to them go again (unverified, until the safety numbers are compared again).
+  static func confirm(_ user: String, accounts: AccountStore, inbox: Inbox, friends: Friends, outbox: MediaOutbox)
+    async throws
+  {
+    guard let client = accounts.client else { return }
+    try await Hub.run { try client.confirmIdentity(who: user) }
+    resume(accounts: accounts, inbox: inbox, friends: friends, outbox: outbox)
+  }
+
+  private static func resume(accounts: AccountStore, inbox: Inbox, friends: Friends, outbox: MediaOutbox) {
+    inbox.resume(accounts: accounts, friends: friends)
+    outbox.retryNow()
+  }
+}
+
 /// A row with its state at the end: title, a word, the check.
 private struct StatusRow: View {
   let title: String
@@ -151,7 +178,10 @@ private struct ContactDetail: View {
   let friend: Friend
   @Environment(AccountStore.self) private var accounts
   @Environment(Friends.self) private var friends
+  @Environment(Inbox.self) private var inbox
+  @Environment(MediaOutbox.self) private var outbox
   @State private var state: ContactState?
+  @State private var problem: String?
 
   var body: some View {
     Form {
@@ -163,6 +193,7 @@ private struct ContactDetail: View {
         }
       } else if let state {
         checks(state)
+        if let user = friend.user, state.safetyNumber != nil { verification(state, user: user) }
         Section("Account") {
           plain("User ID", friend.user ?? "", mono: true)
           if let key = state.accountKey { plain("Account Key", key, mono: true) }
@@ -180,6 +211,49 @@ private struct ContactDetail: View {
     .navigationTitle(friend.name)
     .navigationBarTitleDisplayMode(.inline)
     .task(id: Reload(accounts.client, friends.all.filter { $0.key == friend.key })) { await load() }
+    .alert("Something Went Wrong", isPresented: Binding(get: { problem != nil }, set: { if !$0 { problem = nil } })) {
+      Button("OK", role: .cancel) {}
+    } message: {
+      Text(problem ?? "")
+    }
+  }
+
+  /// Marking them verified once the safety numbers match; a verified contact's new key confirmed, so Yos go again.
+  @ViewBuilder private func verification(_ state: ContactState, user: String) -> some View {
+    let verified = state.contact?.verified == true
+    Section {
+      if state.contact?.unconfirmed == true {
+        Button("Confirm New Key") {
+          change { try await Verification.confirm(user, accounts: accounts, inbox: inbox, friends: friends, outbox: outbox) }
+        }
+      }
+      Button(verified ? "Mark as Not Verified" : "Mark as Verified") {
+        change {
+          try await Verification.setVerified(
+            user, !verified, accounts: accounts, inbox: inbox, friends: friends, outbox: outbox)
+        }
+      }
+    } footer: {
+      if state.contact?.unconfirmed == true {
+        Text("Your Yos to \(friend.name) wait until you confirm. Compare safety numbers first.")
+      } else if !verified {
+        Text(
+          "Compare the safety number below with \(friend.name)’s, in person or on a call. If it matches, mark "
+            + "them as verified: if their key changes, Yo then holds your Yos until you confirm.")
+      }
+    }
+  }
+
+  /// A change through the core, then the page read again.
+  private func change(_ work: @escaping @MainActor () async throws -> Void) {
+    Task {
+      do {
+        try await work()
+      } catch {
+        problem = error.localizedDescription
+      }
+      await load()
+    }
   }
 
   /// One row per thing that should hold, each with its check.

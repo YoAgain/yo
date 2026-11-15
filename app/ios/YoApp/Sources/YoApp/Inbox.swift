@@ -286,6 +286,11 @@ final class Inbox {
     }
   }
 
+  /// What the core held for a friend goes now: their new key confirmed (spec 3.4), or unblocked.
+  func resume(accounts: AccountStore, friends: Friends) {
+    deliverLater(accounts: accounts, friends: friends)
+  }
+
   /// The outbox being sent again (`deliverLater`), and whether a send asked for it since the last look.
   @ObservationIgnored private var delivering: Task<Void, Never>?
   @ObservationIgnored private var deliverAgain = false
