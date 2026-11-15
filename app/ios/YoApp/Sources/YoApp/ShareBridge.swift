@@ -259,15 +259,13 @@ enum ShareBridge {
   /// background): a line per sender, the newest first, whose thread and "Yo Back" it is; the Yo sound.
   static func yo(_ content: UNMutableNotificationContent, _ senders: [Yos]) {
     guard let newest = senders.first else { return }
-    // One line, as the original's (2014: "Yo" over it, iOS's app name, then "From LEO"): "Yo from LEO", "Yo!! from
-    // LEO @ FAMILY". Several: a line each.
-    if senders.count == 1, newest.request {
+    // As the original's (2014): "Yo" on top, then "From LEO" ("Yo!!" / "From LEO @ FAMILY"; a photo "📷"). Several:
+    // a line each.
+    if senders.count == 1 {
+      let who = newest.bar.map { $0.isEmpty ? newest.name : "\(newest.name) @ \($0)" } ?? newest.name
       // A request says who, not what.
-      content.title = ""
-      content.body = "Yo Request from \(newest.name)"
-    } else if senders.count == 1 {
-      content.title = ""
-      content.body = newest.line
+      content.title = newest.request ? "Yo Request" : newest.what
+      content.body = "From \(who)"
     } else {
       content.title = ""
       content.body = senders.map(\.line).joined(separator: "\n")
