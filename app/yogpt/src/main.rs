@@ -183,6 +183,9 @@ struct Options {
     replies: Option<PathBuf>,
     /// One Yo in this many carries a picture; 0 never.
     picture_every: u64,
+    /// `--yo NAME=COUNT`: send that many Yos to NAME from each account, then exit (the service stopped first: one
+    /// process per state).
+    yo: Option<(String, u32)>,
 }
 
 /// Whether a roll (uniform in `0..every`) gives a picture: one in `every`, none for 0.
@@ -347,7 +350,7 @@ fn hub_key(text: &str) -> Result<(String, [u8; 32]), String> {
 fn args() -> Result<(Vec<Account>, Options), String> {
     let mut accounts: Vec<Account> = Vec::new();
     let mut hub_keys = Vec::new();
-    let mut options = Options { replies: None, picture_every: PICTURE_EVERY };
+    let mut options = Options { replies: None, picture_every: PICTURE_EVERY, yo: None };
     let mut it = std::env::args().skip(1);
     while let Some(flag) = it.next() {
         let value = it.next().ok_or(format!("{flag}: a value"))?;
@@ -356,6 +359,10 @@ fn args() -> Result<(Vec<Account>, Options), String> {
             "--replies" => options.replies = Some(value.into()),
             "--picture-every" => options.picture_every = value.parse().map_err(|_| "--picture-every: a number")?,
             "--hub-key" => hub_keys.push(hub_key(&value)?),
+            "--yo" => {
+                let (to, n) = value.split_once('=').ok_or("--yo NAME=COUNT")?;
+                options.yo = Some((to.into(), n.parse().map_err(|_| "--yo NAME=COUNT: a number")?));
+            }
             other => return Err(format!("unknown flag {other}")),
         }
     }
@@ -579,6 +586,21 @@ fn main() {
         report(info);
         std::process::exit(101);
     }));
+    if let Some((to, n)) = options.yo.clone() {
+        for account in &accounts {
+            let Some(mut client) = open(account) else { std::process::exit(1) };
+            for i in 0..n {
+                match client.send_yo(&to) {
+                    Ok(_) => eprintln!("yo-gpt [{}]: Yo {} of {n} to {to}", account.name, i + 1),
+                    Err(error) => {
+                        eprintln!("yo-gpt [{}]: Yo {} of {n} to {to}: {}", account.name, i + 1, reason(&error))
+                    }
+                }
+                std::thread::sleep(Duration::from_millis(400));
+            }
+        }
+        std::process::exit(0);
+    }
     let serving: Vec<_> = accounts
         .into_iter()
         .map(|account| {
