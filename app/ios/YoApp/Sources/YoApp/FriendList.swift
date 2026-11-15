@@ -1594,7 +1594,8 @@ struct RowButton: View {
     BarLine(
       start: (outgoing == nil ? BarLine.margin : BarLine.margin + Self.ring + BarLine.gap) + (icon == nil ? 0 : Self.iconRoom),
       mirrored: leftHanded,
-      below: !senders.isEmpty && (yo != nil || !media.isEmpty)  // a group's senders: under the name, "Kai: Yo!!"
+      below: !senders.isEmpty && (yo != nil || !media.isEmpty),  // a group's senders: under the name, "Kai: Yo!!"
+      lineEnd: senders.isEmpty || media.isEmpty ? 0 : Self.sign  // its photo sign on the name's line
     ) {
         Group {
           if title == "Sent Yo" && !touchable {
@@ -1874,6 +1875,9 @@ struct BarLine: Layout {
   /// words' (a photo sign at its end), the senders' lines under it; the words stand in the middle of the bar's first
   /// `rowHeight`, as on any bar; the bar grows with the end part.
   var below = false
+  /// With `below`: room kept at the end of the first line for what stands there (a group's photo sign), so the words
+  /// and their "!"s move aside from it as from any end part.
+  var lineEnd = 0.0
 
   func sizeThatFits(proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) -> CGSize {
     let heights = subviews.map { $0.sizeThatFits(.unspecified).height }
@@ -1899,10 +1903,12 @@ struct BarLine: Layout {
     }
     let endSize: CGSize = end?.sizeThatFits(.unspecified) ?? .zero
     // The words between `low` and `high`, the end part outside them.
-    let endX = mirrored ? bounds.minX + Self.endPadding : bounds.maxX - Self.endPadding - endSize.width
+    // Below, the end part's width on the first line is `lineEnd` (its sign), not its own.
+    let endWidth = below ? lineEnd : endSize.width
+    let endX = mirrored ? bounds.minX + Self.endPadding : bounds.maxX - Self.endPadding - endWidth
     let low = mirrored
-      ? (endSize.width > 0 ? endX + endSize.width + Self.gap : bounds.minX + Self.margin) : bounds.minX + start
-    let high = mirrored ? bounds.maxX - start : (endSize.width > 0 ? endX - Self.gap : bounds.maxX - Self.margin)
+      ? (endWidth > 0 ? endX + endWidth + Self.gap : bounds.minX + Self.margin) : bounds.minX + start
+    let high = mirrored ? bounds.maxX - start : (endWidth > 0 ? endX - Self.gap : bounds.maxX - Self.margin)
     let room = max(0, high - low - afterSize.width)
     let wordsWidth = min(words.sizeThatFits(.unspecified).width, room)
     var x = bounds.midX - wordsWidth / 2
