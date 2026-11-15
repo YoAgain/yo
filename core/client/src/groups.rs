@@ -4,7 +4,7 @@
 //! revision stands, of two at the same revision the one by the lower user id. Only a member's change counts.
 
 use crate::state::{hex, unhex, Group};
-use crate::{retryable, shown, user_bytes, wall_ms, Client, Content, Error, Event, Result, KEPT_FOR_RETRY};
+use crate::{retryable, shown, user_bytes, Client, Content, Error, Event, Result, KEPT_FOR_RETRY};
 use yo_wire::content::{GroupId, GroupInfo, GroupTag, Message, GROUP_ID_LEN, MAX_GROUP};
 use yo_wire::envelope::Plain;
 use yo_wire::handle::Handle;
@@ -23,6 +23,12 @@ pub struct GroupView {
     pub revision: u32,
     /// This account is not in it (any more).
     pub left: bool,
+}
+
+/// A refusal that holds for now only: `retryable`, a signature refused (`401`: the clock off, or a replay), a save that
+/// failed, this device replaced.
+fn not_now(error: &Error) -> bool {
+    retryable(error) || matches!(error, Error::Refused(401) | Error::Save(_) | Error::Replaced)
 }
 
 fn group_id(id: &str) -> Result<GroupId> {
@@ -174,7 +180,8 @@ impl Client {
     }
 
     /// A session with each other member this device can write to (spec 4.2), without making them a chat of their own:
-    /// the members it can reach. One gone, blocked by the hub, or without devices is left out (noted).
+    /// the members it can reach. One gone, blocked by the hub, or without devices is left out (noted); one that cannot
+    /// be reached now fails the call.
     fn reach_all(&mut self, members: &[String]) -> Result<Vec<String>> {
         let mut reached = Vec::new();
         let me = self.state.user_id.clone();
@@ -186,7 +193,9 @@ impl Client {
                 let chat = self.state.contacts.get(member).is_some_and(|c| c.chat);
                 match self.start_chat(&Handle::user(&user_bytes(member)?)) {
                     Ok(_) => {}
-                    Err(error) if retryable(&error) => return Err(error),
+                    // Not now (no network, a limit, a signature refused while the clock is off, a full disk, this
+                    // device replaced): the whole send fails now, rather than leave this member out for good.
+                    Err(error) if not_now(&error) => return Err(error),
                     // A verified member's new key, not confirmed yet: theirs is queued and waits in the outbox until
                     // it is (as a 1:1 message would), not left out for good.
                     Err(Error::Unconfirmed) => {}
@@ -221,7 +230,7 @@ impl Client {
         if users.is_empty() {
             return Ok(());
         }
-        let sent_at_ms = wall_ms().max(self.state.last_sent_ms + 1);
+        let sent_at_ms = self.wall().max(self.state.last_sent_ms + 1);
         self.state.last_sent_ms = sent_at_ms;
         let keep = shown(&content);
         let message = Message { sent_at_ms, group, content }.encode()?;

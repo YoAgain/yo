@@ -918,7 +918,7 @@ impl Client {
     }
 
     /// This device's wall clock: the system's, off by the skew a test set.
-    fn wall(&self) -> u64 {
+    pub(crate) fn wall(&self) -> u64 {
         wall_ms().saturating_add_signed(self.skew_ms)
     }
 

@@ -224,3 +224,35 @@ fn a_block_that_could_not_be_saved_is_not_made() {
     b.send(a.user_id(), Content::Text("hidden".into())).unwrap();
     assert!(texts(&a.sync(0).unwrap()).is_empty());
 }
+
+fn group_yos_from(events: &[Event], from: &str) -> usize {
+    events.iter().filter(|e| matches!(e, Event::GroupMessage { user, .. } if user == from)).count()
+}
+
+/// A group Yo to a member this device had no session with yet, whose lookup the hub refused for now (`401`: a
+/// clock off for a while; also a full disk), went to the others and never to that member, and the send said it went
+/// (yo-scale). A refusal for now fails the send now, as the hub's `429` or no network did already.
+#[test]
+fn a_group_yo_leaves_no_member_out_for_a_refusal_for_now() {
+    let hub = TestHub::start();
+    let n = random_u64() % 100_000;
+    let http = Http::new(hub.url());
+    let mut ann = by_name(http.clone(), &format!("Ann{n}"), None).unwrap();
+    let mut ben = by_name(Http::new(hub.url()), &format!("Ben{n}"), None).unwrap();
+    let mut dot = by_name(Http::new(hub.url()), &format!("Dot{n}"), None).unwrap();
+    let (id, _) = ann.create_group("Trio", &[ben.user_id().to_owned()]).unwrap();
+    ben.sync(0).unwrap();
+    // Ben adds Dot: Ann learns of her, without a session with her.
+    ben.add_to_group(&id, &[dot.user_id().to_owned()]).unwrap();
+    ann.sync(0).unwrap();
+    dot.sync(0).unwrap();
+    assert!(ann.groups().iter().any(|g| g.id == id && g.members.iter().any(|m| m == dot.user_id())));
+    // Its lookup refused twice (the signature, and the one signed anew).
+    http.fault("/v1/lookup", Fault::Answer(401));
+    http.fault("/v1/lookup", Fault::Answer(401));
+    assert!(ann.send_group(&id, Content::Yo).is_err(), "not sent to everyone: not sent");
+    ann.send_group(&id, Content::Yo).unwrap();
+    let dot_got = group_yos_from(&dot.sync(0).unwrap(), ann.user_id());
+    let ben_got = group_yos_from(&ben.sync(0).unwrap(), ann.user_id());
+    assert_eq!((dot_got, ben_got), (1, 1), "each member once: {:?}", ann.drop_reasons());
+}
