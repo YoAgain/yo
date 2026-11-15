@@ -126,18 +126,21 @@ enum ShareBridge {
 
     /// The original's words, the name as its owner writes it: "Yo from LEO", "📷 from LEO", "🎥 from LEO"; more read
     /// as on the bar, with the photos and videos among them: "Yo!!!!! +4 from LEO · 📷 2".
-    var line: String {
+    var line: String { "\(what) from \(name)" }
+
+    /// What came, without who: "Yo", "📷", "🎥", "Yo!!!!! +4 · 📷 2".
+    var what: String {
       if count == 1 {
         switch kind {
-        case .photo: return "📷 from \(name)"
-        case .video: return "🎥 from \(name)"
-        case nil: return "Yo from \(name)"
+        case .photo: return "📷"
+        case .video: return "🎥"
+        case nil: return "Yo"
         }
       }
-      var line = "\(ShareBridge.yo(count)) from \(name)"
-      if photos > 0 { line += photos > 1 ? " · 📷 \(photos)" : " · 📷" }
-      if videos > 0 { line += videos > 1 ? " · 🎥 \(videos)" : " · 🎥" }
-      return line
+      var what = ShareBridge.yo(count)
+      if photos > 0 { what += photos > 1 ? " · 📷 \(photos)" : " · 📷" }
+      if videos > 0 { what += videos > 1 ? " · 🎥 \(videos)" : " · 🎥" }
+      return what
     }
 
     /// When the newest was sent, from its id ("user/sent at").
@@ -239,8 +242,15 @@ enum ShareBridge {
   /// background): a line per sender, the newest first, whose thread and "Yo Back" it is; the Yo sound.
   static func yo(_ content: UNMutableNotificationContent, _ senders: [Yos]) {
     guard let newest = senders.first else { return }
-    content.title = ""
-    content.body = senders.map(\.line).joined(separator: "\n")
+    // One sender: their name as the title and what came under it, as Messages shows a message ("LEO" / "Yo!!");
+    // a group's: "LEO in FAMILY". Several: a line each ("Yo from LEO").
+    if senders.count == 1 {
+      content.title = newest.bar.map { $0.isEmpty ? newest.name : "\(newest.name) in \($0)" } ?? newest.name
+      content.body = newest.what
+    } else {
+      content.title = ""
+      content.body = senders.map(\.line).joined(separator: "\n")
+    }
     content.sound = UNNotificationSound(named: UNNotificationSoundName("yo.caf"))
     content.categoryIdentifier = yoCategory
     content.threadIdentifier = newest.user
