@@ -208,12 +208,23 @@ fn bodies_are_held_to_their_limits() {
         if method == "GET" || method == "DELETE" {
             continue;
         }
-        assert_eq!(signed(&mut a, method, &path, &vec![0; most + 1]).0, status::TOO_LARGE, "{method} {path}");
+        // Refused before the body is read (spec 6.6): `413`, or the connection closed under a client still sending it.
+        match a.signed_for_tests(method, &path, &vec![0; most + 1]) {
+            Ok(response) => assert_eq!(response.status, status::TOO_LARGE, "{method} {path}"),
+            Err(error) => assert!(matches!(error, Error::Network(_)), "{method} {path}: {error:?}"),
+        }
     }
-    assert_eq!(raw(&hub, "POST", api::REGISTER, &[], vec![0; most + 1]).0, status::TOO_LARGE);
+    let too_large = |path: &str, headers: Vec<(&'static str, String)>| {
+        let mut request = reqwest::blocking::Client::new().post(format!("{}{path}", hub.url())).body(vec![2; most + 1]);
+        for (name, value) in headers {
+            request = request.header(name, value);
+        }
+        request.send().map(|r| r.status().as_u16()).unwrap_or(status::TOO_LARGE)
+    };
+    assert_eq!(too_large(api::REGISTER, Vec::new()), status::TOO_LARGE);
     let hash = yo_tests::devices_hash(&hub.url(), &me).unwrap();
     let path = api::deliver_path(&user_id(&me));
-    assert_eq!(raw(&hub, "POST", &path, &[(api::HEADER_DEVICES, yo_wire::b64(&hash))], vec![2; most + 1]).0, 413);
+    assert_eq!(too_large(&path, vec![(api::HEADER_DEVICES, yo_wire::b64(&hash))]), status::TOO_LARGE);
 
     // Prekeys (6.6): 32 one-time of each kind per upload, 2 KiB each, signatures of 64 bytes.
     let mut put = |prekeys: &api::Prekeys| signed(&mut a, "PUT", api::PREKEYS, &encode(prekeys)).0;

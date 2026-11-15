@@ -259,7 +259,16 @@ async fn admit(
     let Ok(_place) = hub.reading.clone().try_acquire_owned() else {
         return StatusCode::SERVICE_UNAVAILABLE.into_response();
     };
-    // Its place is held for at most this long, slow body or not.
+    // The body here, within its time, for every route admitted (a delivery as much as the others).
+    let (parts, body) = request.into_parts();
+    let Ok(read) = tokio::time::timeout(BODY_DEADLINE, axum::body::to_bytes(body, limits::MAX_BODY)).await else {
+        return StatusCode::REQUEST_TIMEOUT.into_response();
+    };
+    let Ok(body) = read else {
+        return StatusCode::PAYLOAD_TOO_LARGE.into_response();
+    };
+    let request = axum::extract::Request::from_parts(parts, axum::body::Body::from(body));
+    // Its place is held for at most this long in all.
     tokio::time::timeout(BODY_DEADLINE * 3, next.run(request))
         .await
         .unwrap_or_else(|_| StatusCode::REQUEST_TIMEOUT.into_response())
@@ -270,11 +279,9 @@ async fn off_workers(
     request: axum::extract::Request,
     next: axum::middleware::Next,
 ) -> axum::response::Response {
+    // Its body was read whole by `admit`, within its time: here it is taken as it is.
     let (parts, body) = request.into_parts();
-    let Ok(read) = tokio::time::timeout(BODY_DEADLINE, axum::body::to_bytes(body, limits::MAX_BODY)).await else {
-        return StatusCode::REQUEST_TIMEOUT.into_response();
-    };
-    let Ok(body) = read else {
+    let Ok(body) = axum::body::to_bytes(body, limits::MAX_BODY).await else {
         return StatusCode::PAYLOAD_TOO_LARGE.into_response();
     };
     let request = axum::extract::Request::from_parts(parts, axum::body::Body::from(body));
