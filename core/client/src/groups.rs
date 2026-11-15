@@ -43,7 +43,7 @@ fn not_now(error: &Error) -> bool {
 }
 
 /// Groups this device keeps at most: a sender naming new group keys cannot fill it.
-const MAX_GROUPS: usize = 256;
+pub(crate) const MAX_GROUPS: usize = 256;
 /// Group Yos held at once while their group is fetched (`State::group_held`).
 const MAX_HELD: usize = 64;
 /// How often a change is made again on what the hub has meanwhile (`409`) before it gives up.
@@ -468,6 +468,8 @@ impl Client {
             endorsements: if left { Default::default() } else { endorsements },
         };
         self.state.groups.insert(id.to_owned(), group);
+        // Its key into the account's storage, as Signal's: a new phone of this account fetches it at once.
+        self.store_group(id);
         // Its members get this account's profile key, so their Yos to the group come as a contact's (spec 4.10).
         if joined {
             self.profile_key_due(&members);
@@ -514,6 +516,7 @@ impl Client {
             status::OK => self.take_answer(id, decode(&response.body).map_err(|_| bad_answer())?),
             status::FORBIDDEN | status::NOT_FOUND => {
                 self.out_of(id);
+                self.unstore_group(id);
                 self.persist()
             }
             _ => Err(refused(&response)),
@@ -538,6 +541,10 @@ impl Client {
 
     /// Every group a message named a newer revision of (or never fetched) is fetched now. Not now: later.
     pub(crate) fn refresh_groups(&mut self) -> Result<()> {
+        // No group params pinned (yet): nothing can be fetched, nothing is given up (a restored group waits for them).
+        if self.zk.is_none() {
+            return Ok(());
+        }
         let due: Vec<String> = (self.state.groups.iter())
             .filter(|(_, g)| g.revision == 0 || g.named > g.revision)
             .map(|(id, _)| id.clone())
@@ -703,6 +710,7 @@ impl Client {
                 status::CONFLICT => self.take_answer(id, decode(&response.body).map_err(|_| bad_answer())?)?,
                 status::FORBIDDEN | status::NOT_FOUND => {
                     self.out_of(id);
+                    self.unstore_group(id);
                     self.persist()?;
                     return Err(Error::Protocol("not in this group"));
                 }

@@ -230,3 +230,46 @@ fn a_blocked_member_is_not_heard_but_the_group_stays_one() {
     take(c);
     assert_eq!(view(c, &id).name, "STILL");
 }
+
+/// The groups' master keys are in the account's storage, as Signal keeps them (GroupV2Record): a new phone of the
+/// account fetches its groups from the hub with its first sync, named and with their members, before anyone writes to
+/// them. A request stays a request; a group left does not come back.
+#[test]
+fn a_new_phone_gets_its_groups_back_before_any_yo() {
+    let hub = TestHub::start();
+    let base = random_u64() % 1_000_000_000;
+    let names: Vec<String> = (0..3).map(|i| username(base + i * 7)).collect();
+    let mut p: Vec<Client> = names.iter().map(|n| register(Http::new(hub.url()), n, None)).collect();
+    let [a, b, c] = p.as_mut_slice() else { unreachable!() };
+    let (id, _) = a.create_group("FAMILY", &[b.user_id().to_owned(), c.user_id().to_owned()]).unwrap();
+    let (gone, _) = a.create_group("GONE", &[b.user_id().to_owned()]).unwrap();
+    take(b);
+    take(c);
+    b.leave_group(&gone).unwrap();
+    for x in [&mut *a, &mut *b] {
+        x.maintenance().unwrap();
+        assert!(x.storage_saved_at().is_some(), "written: {:?}", x.drop_reasons());
+    }
+
+    // Ann's new phone: both groups, joined, before anyone writes to them.
+    let mut ann = yo_tests::new_phone(Http::new(hub.url()), &names[0], a);
+    assert_eq!(ann.user_id(), a.user_id());
+    let events = ann.sync(0).unwrap();
+    assert!(events.iter().any(|e| matches!(e, Event::GroupChanged { group } if *group == id)), "{events:?}");
+    let g = view(&ann, &id);
+    assert_eq!((g.name.as_str(), g.revision, g.left, g.accepted), ("FAMILY", 1, false, true));
+    assert_eq!(g.members, ids(&[a, b, c]));
+    assert_eq!(view(&ann, &gone).members, ids(&[a]));
+
+    // Ben's: FAMILY as he had it (a request, if it was one there), GONE not at all.
+    let mut ben = yo_tests::new_phone(Http::new(hub.url()), &names[1], b);
+    ben.sync(0).unwrap();
+    let g = view(&ben, &id);
+    assert_eq!((g.name.as_str(), g.left, g.accepted), ("FAMILY", false, view(b, &id).accepted));
+    assert_eq!(g.members, ids(&[a, b, c]));
+    assert!(!ben.groups().iter().any(|g| g.id == gone), "{:?}", ben.groups());
+
+    // And it works: Ann's Yo from her new phone reaches the others.
+    ann.send_group(&id, Content::Yo).unwrap();
+    assert_eq!(group_yos(&take(c)), [(id.clone(), a.user_id().to_owned())]);
+}

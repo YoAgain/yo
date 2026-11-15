@@ -1,5 +1,5 @@
 //! The account's storage at the hub (spec 6.9): what the user keeps beside the chats (friends with the name and
-//! colour shown for them, blocks, the app's icon) in one blob sealed under a key derived from the account key, so a
+//! colour shown for them, blocks, the app's icon, profile keys, the groups' master keys) in one blob sealed under a key derived from the account key, so a
 //! new phone restored from the backup (or the iCloud Keychain) gets it back, and the hub reads none of it.
 //!
 //! Every field carries the time it was set; two versions merge field by field, the later one winning, and friends are
@@ -151,6 +151,36 @@ fn merge_value(mine: &mut serde_json::Value, theirs: &serde_json::Value) {
     }
 }
 
+/// A group this account is in, as Signal's storage service keeps one (its GroupV2Record): the master key, so a new
+/// phone fetches the group from the hub right away, not only once someone writes to it. Kept after leaving (`removed`),
+/// so the leaving reaches the other side of a merge.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GroupEntry {
+    /// The master key (base64url): the same for the group's every version, never changed.
+    #[serde(default, rename = "k", skip_serializing_if = "String::is_empty")]
+    pub key: String,
+    /// Joined (Signal's whitelisted): else a request (spec 4.10).
+    #[serde(default, rename = "a", skip_serializing_if = "Field::unset")]
+    pub accepted: Field<bool>,
+    /// This account is in it no more.
+    #[serde(default, rename = "r", skip_serializing_if = "Field::unset")]
+    pub removed: Field<bool>,
+    /// What a later version keeps here, carried along unread.
+    #[serde(flatten)]
+    pub extra: BTreeMap<String, serde_json::Value>,
+}
+
+impl GroupEntry {
+    fn merge(&mut self, other: &GroupEntry) {
+        if self.key.is_empty() {
+            self.key.clone_from(&other.key);
+        }
+        self.accepted.merge(&other.accepted);
+        self.removed.merge(&other.removed);
+        merge_extra(&mut self.extra, &other.extra);
+    }
+}
+
 /// The longest name kept for a friend, in bytes.
 pub const MAX_FRIEND_NAME: usize = 64;
 
@@ -178,6 +208,9 @@ pub struct Storage {
     /// their contact at once. The first to go when the storage would not fit.
     #[serde(default, rename = "k", skip_serializing_if = "BTreeMap::is_empty")]
     pub keys: BTreeMap<String, Field<Option<String>>>,
+    /// The groups this account is or was in, by group id (hex), as Signal's storage keeps them.
+    #[serde(default, rename = "g", skip_serializing_if = "BTreeMap::is_empty")]
+    pub groups: BTreeMap<String, GroupEntry>,
     /// What a later version keeps here, carried along unread.
     #[serde(flatten)]
     pub extra: BTreeMap<String, serde_json::Value>,
@@ -194,6 +227,9 @@ impl Storage {
         self.profile_key_gen.merge(&other.profile_key_gen);
         for (user, key) in &other.keys {
             self.keys.entry(user.clone()).or_default().merge(key);
+        }
+        for (id, group) in &other.groups {
+            self.groups.entry(id.clone()).or_default().merge(group);
         }
         merge_extra(&mut self.extra, &other.extra);
         self.version = self.version.max(other.version);
@@ -412,6 +448,82 @@ impl Client {
         }
     }
 
+    /// A group as this device has it now (fetched), into the storage: its key while this account is in it, and when
+    /// it left. A group never kept there and left is not put in (a stranger's made-up key never goes up).
+    pub(crate) fn store_group(&mut self, id: &str) {
+        let Some(group) = self.state.groups.get(id).filter(|g| g.revision > 0) else { return };
+        let Some(key) = crate::state::unhex(&group.key) else { return };
+        let (left, accepted) = (group.left, group.accepted);
+        let storage = &mut self.state.storage;
+        if left && storage.groups.get(id).is_none_or(|g| g.removed.value) {
+            return;
+        }
+        let entry = storage.groups.entry(id.to_owned()).or_default();
+        let mut changed = false;
+        if entry.key.is_empty() {
+            entry.key = yo_wire::b64(&key);
+            changed = true;
+        }
+        if entry.removed.value != left {
+            entry.removed.set(left, crate::wall_ms().max(entry.removed.at + 1));
+            changed = true;
+        }
+        if !left && entry.accepted.value != accepted {
+            entry.accepted.set(accepted, crate::wall_ms().max(entry.accepted.at + 1));
+            changed = true;
+        }
+        if changed {
+            self.state.storage_dirty = true;
+        }
+    }
+
+    /// The hub says this account is in the group no more: so in the storage too, if it is there.
+    pub(crate) fn unstore_group(&mut self, id: &str) {
+        if let Some(entry) = self.state.storage.groups.get_mut(id).filter(|g| !g.removed.value) {
+            entry.removed.set(true, crate::wall_ms().max(entry.removed.at + 1));
+            self.state.storage_dirty = true;
+        }
+    }
+
+    /// The groups the storage holds that this device does not know (a restored phone): known from now on, fetched
+    /// from the hub with the next `refresh_groups`, as Signal's restore fetches every group of its storage.
+    fn apply_groups(&mut self) {
+        let entries: Vec<(String, String, bool)> = self
+            .state
+            .storage
+            .groups
+            .iter()
+            .filter(|(id, g)| !g.removed.value && !self.state.groups.contains_key(*id))
+            .filter_map(|(id, g)| {
+                let key: yo_wire::content::GroupKey = yo_wire::unb64(&g.key).ok()?.try_into().ok()?;
+                // Its id is the key's: a damaged entry is passed over.
+                (crate::groups::group_id_of(&key) == *id)
+                    .then(|| (id.clone(), crate::state::hex(&key), g.accepted.value))
+            })
+            .collect();
+        for (id, key, accepted) in entries {
+            if self.state.groups.len() >= crate::groups::MAX_GROUPS {
+                self.note("a group of the storage past the most kept".into());
+                break;
+            }
+            self.state.groups.insert(
+                id,
+                crate::state::Group {
+                    key,
+                    name: String::new(),
+                    members: Vec::new(),
+                    revision: 0,
+                    left: false,
+                    accepted,
+                    keyed: false,
+                    named: 0,
+                    endorsed_until: 0,
+                    endorsements: Default::default(),
+                },
+            );
+        }
+    }
+
     fn storage_changed(&mut self) -> Result<()> {
         self.state.storage_dirty = true;
         self.persist()
@@ -451,6 +563,7 @@ impl Client {
             });
         }
         self.apply_keys();
+        self.apply_groups();
     }
 
     /// Takes in a version from the hub: merged with this device's, applied.
@@ -517,6 +630,11 @@ impl Client {
             self.state.storage_fetched = true;
             self.persist()?;
         }
+        // The groups this device knows, also those from before the storage kept groups, into it.
+        let groups: Vec<String> = self.state.groups.keys().cloned().collect();
+        for id in groups {
+            self.store_group(&id);
+        }
         for _ in 0..WRITE_TRIES {
             if !self.state.storage_dirty {
                 // Nothing to write: the hub holds it all (a new account's empty storage too).
@@ -559,13 +677,14 @@ impl Client {
     }
 
     /// The storage sealed, within the hub's limit: the contacts' profile keys go first, the oldest first (they come
-    /// again with their next message), then friends taken off the list, the longest gone first, until it fits (a
+    /// again with their next message), then groups left, the longest gone first, then friends taken off the list, the longest gone first, until it fits (a
     /// removal older than the other writers' last read is no longer needed to merge).
     fn sealed_within_limit(&mut self, next: &mut Storage) -> Result<Vec<u8>> {
         loop {
             if let Ok(data) = seal(&self.state.account_secret, &self.user_id_bytes(), next) {
                 self.state.storage.friends.clone_from(&next.friends);
                 self.state.storage.keys.clone_from(&next.keys);
+                self.state.storage.groups.clone_from(&next.groups);
                 return Ok(data);
             }
             if !next.keys.is_empty() {
@@ -575,6 +694,11 @@ impl Client {
                 for (_, user) in by_age.into_iter().take(drop) {
                     next.keys.remove(&user);
                 }
+                continue;
+            }
+            let left = next.groups.iter().filter(|(_, g)| g.removed.value).min_by_key(|(_, g)| g.removed.at);
+            if let Some(id) = left.map(|(id, _)| id.clone()) {
+                next.groups.remove(&id);
                 continue;
             }
             let oldest = next
