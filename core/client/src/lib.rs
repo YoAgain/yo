@@ -909,6 +909,11 @@ impl Client {
 
     /// Envelopes waiting to be taken by the hub; not those held for a blocked user (spec 4.8), which go only after
     /// an unblock.
+    /// Payloads kept for a roster that could not be asked yet (`State::deferred`): received again by a later sync.
+    pub fn deferred(&self) -> usize {
+        self.state.deferred.len()
+    }
+
     pub fn pending(&self) -> usize {
         self.state.outbox.iter().filter(|item| !self.blocked(&item.user)).count()
     }

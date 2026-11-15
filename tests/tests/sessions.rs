@@ -320,6 +320,7 @@ fn a_new_phones_message_right_after_a_forgery_is_kept_not_lost() {
     let later = texts(&b.sync(0).unwrap());
     let all: Vec<String> = first.into_iter().chain(later).collect();
     assert!(all.contains(&"new phone".to_owned()), "{all:?}");
+    assert_eq!(b.deferred(), 0, "decided once the roster could be asked");
 }
 
 /// First Yos to a new friend, many at once and both ways: twenty strangers write to Bea by name while Bea writes to

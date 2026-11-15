@@ -93,22 +93,38 @@ fn run(seed: u64, clients: usize, steps: usize) {
             expected.insert(to, Vec::new());
         }
     }
-    // Quiet down: everybody receives until nothing moves.
+    // Quiet down: everybody receives until nothing moves, a couple of minutes apart, as an app's syncs come: a roster
+    // asked a moment ago is asked again then, and what waited for it (a device under another's number) is decided.
     for _ in 0..4 {
         for d in devices.iter_mut() {
+            d.clock.fetch_add(2 * 60 * 1000, Ordering::Relaxed);
             let to = d.user.clone();
             let events = d.client.sync(0).unwrap();
             collect(events, &mut received, &to);
         }
     }
+    // A roster that could not be asked these minutes (the day's lookups used up) is asked the next day: what waited
+    // for it is decided then, not lost.
+    for d in devices.iter_mut() {
+        if d.client.deferred() > 0 {
+            d.clock.fetch_add(25 * 3600 * 1000, Ordering::Relaxed);
+            let to = d.user.clone();
+            for _ in 0..2 {
+                let events = d.client.sync(0).unwrap();
+                collect(events, &mut received, &to);
+            }
+        }
+    }
     for d in &devices {
         // Only what a replaced device sent may be dropped (spec 4.6), and is among `may_be_lost`.
+        // A payload kept for a roster ("later") is no drop, once a later sync decided it.
         assert!(
-            d.client.drop_reasons().iter().all(|r| r.contains("replaced device")),
+            d.client.drop_reasons().iter().all(|r| r.contains("replaced device") || r.ends_with(": later")),
             "seed {seed}: {} dropped: {:?}",
             d.user,
             d.client.drop_reasons()
         );
+        assert_eq!(d.client.deferred(), 0, "seed {seed}: {} still waits for a roster", d.user);
         assert_eq!(d.client.pending(), 0, "seed {seed}: {} has an outbox", d.user);
     }
     for (to, want) in &expected {
