@@ -241,6 +241,25 @@ pub struct Group {
     /// then a group someone else added this account to is a request (spec 4.10).
     #[serde(default = "yes")]
     pub accepted: bool,
+    /// Members this device sent its group to because their Yo named this revision with another `group_hash` (or
+    /// their rival lost here): once each per revision, so two that disagree do not answer each other for ever.
+    #[serde(default)]
+    pub synced: BTreeSet<String>,
+    /// This account's own change that made this revision, kept while it is the revision here: if a rival at the same
+    /// revision wins, it is made again on top of the winner (`due`), once.
+    #[serde(default)]
+    pub mine: Option<Mine>,
+}
+
+/// A change this account made to a group: what it added, removed, renamed to (spec 4.9).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Mine {
+    pub revision: u32,
+    pub add: Vec<String>,
+    pub remove: Vec<String>,
+    pub name: Option<String>,
+    /// Lost to a rival: made again on the winner as the next revision, after the sync.
+    pub due: bool,
 }
 
 /// An event as the state keeps it.

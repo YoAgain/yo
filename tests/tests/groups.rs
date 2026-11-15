@@ -100,7 +100,8 @@ fn members_come_and_go_and_who_is_out_gets_nothing() {
 }
 
 /// Two members rename the group at once, each from the same revision and neither seeing the other's first (both
-/// offline): once everything arrived, all three have the same name, the one by the lower user id.
+/// offline): once everything arrived, all three have the same name: the lower user id's wins the revision, the other's
+/// is made again on top of it.
 #[test]
 fn two_changes_at_once_end_the_same_everywhere() {
     let hub = TestHub::start();
@@ -156,9 +157,10 @@ fn two_changes_at_once_end_the_same_everywhere() {
             take(x);
         }
     }
-    let lower = if b.user_id() < c.user_id() { "BEN" } else { "CLEO" };
+    // The lower author's rename wins revision 2; the other's, lost, is made again on top of it as revision 3.
+    let higher = if b.user_id() < c.user_id() { "CLEO" } else { "BEN" };
     for x in [&*a, &*b, &*c] {
-        assert_eq!((view(x, &id).name.as_str(), view(x, &id).revision), (lower, 2));
+        assert_eq!((view(x, &id).name.as_str(), view(x, &id).revision), (higher, 3));
     }
 }
 
@@ -619,4 +621,94 @@ fn a_group_left_alone_takes_no_yo() {
     let (id, _) = a.create_group("JUST ME", &[b.user_id().to_owned()]).unwrap();
     a.remove_from_group(&id, &[b.user_id().to_owned()]).unwrap();
     assert!(matches!(a.send_group(&id, Content::Yo), Err(yo_core::Error::GroupEmpty)));
+}
+
+/// Two members whose lists diverged at one revision (a change lost): the next Yo names another hash, its receiver
+/// sends its group back, and the rule of rivals makes both the same, with no answer going back and forth for ever.
+#[test]
+fn diverged_lists_at_one_revision_converge_after_one_yo() {
+    let hub = TestHub::start();
+    let mut p = people(&hub, 3);
+    let [a, b, c] = p.as_mut_slice() else { unreachable!() };
+    let (id, _) = a.create_group("ONE", &[b.user_id().to_owned(), c.user_id().to_owned()]).unwrap();
+    take(b);
+    take(c);
+    b.set_group_for_tests(&id, "ONE", &ids(&[a, b])).unwrap();
+    assert_ne!(view(a, &id).members, view(b, &id).members);
+    a.send_group(&id, Content::Yo).unwrap();
+    for _ in 0..3 {
+        take(b);
+        take(a);
+    }
+    let (ga, gb) = (view(a, &id), view(b, &id));
+    assert_eq!((ga.revision, &ga.members, &ga.name), (gb.revision, &gb.members, &gb.name));
+    assert_eq!(ga.revision, 1);
+    // Converged: further Yos make no group messages between them.
+    let changes = |events: &[Event]| events.iter().filter(|e| matches!(e, Event::GroupChanged { .. })).count();
+    a.send_group(&id, Content::Yo).unwrap();
+    b.send_group(&id, Content::Yo).unwrap();
+    assert_eq!((changes(&take(a)), changes(&take(b))), (0, 0));
+}
+
+/// Leo removes Noah while Zoe adds Ben, both at the same revision, neither seeing the other's first: Leo (the lower
+/// user id) wins it; Zoe's addition, lost, is made again on Leo's group as the next revision. Everyone ends with Leo,
+/// Mia, Zoe and Ben; Noah is out.
+#[test]
+fn a_lost_change_is_made_again_on_the_winner() {
+    let hub = TestHub::start();
+    let base = random_u64() % 1_000_000_000;
+    let transports: Vec<_> = (0..5).map(|_| Http::new(hub.url())).collect();
+    let mut p: Vec<(std::sync::Arc<Http>, Client)> = transports
+        .iter()
+        .enumerate()
+        .map(|(i, t)| (t.clone(), register(t.clone(), &username(base + i as u64 * 7), None)))
+        .collect();
+    // Leo the lowest user id, Zoe the next: Leo wins the tie.
+    p.sort_by(|x, y| x.1.user_id().cmp(y.1.user_id()));
+    let [(leo_t, leo), (zoe_t, zoe), (_, mia), (_, noah), (_, ben)] = p.as_mut_slice() else { unreachable!() };
+    let (id, _) = mia
+        .create_group("CREW", &[leo.user_id().to_owned(), zoe.user_id().to_owned(), noah.user_id().to_owned()])
+        .unwrap();
+    for x in [&mut *leo, &mut *zoe, &mut *noah] {
+        take(x);
+    }
+    // Sessions between Leo and Zoe first, then their changes to each other are held on the way.
+    leo.send_group(&id, Content::Yo).unwrap();
+    take(zoe);
+    zoe.send_group(&id, Content::Yo).unwrap();
+    take(leo);
+    take(mia);
+    take(noah);
+    let (to_leo, to_zoe) = (
+        yo_wire::api::deliver_path(&yo_tests::user_id(leo.user_id())),
+        yo_wire::api::deliver_path(&yo_tests::user_id(zoe.user_id())),
+    );
+    leo_t.fault(&to_zoe, Fault::Answer(202));
+    zoe_t.fault(&to_leo, Fault::Answer(202));
+    leo.remove_from_group(&id, &[noah.user_id().to_owned()]).unwrap();
+    zoe.add_to_group(&id, &[ben.user_id().to_owned()]).unwrap();
+    let held = |t: &Http, path: &str| {
+        t.sent
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|(m, p, _)| m == "POST" && p == path)
+            .map(|(_, _, b)| b.clone())
+            .next_back()
+            .unwrap()
+    };
+    let (to_z, to_l) = (held(leo_t, &to_zoe), held(zoe_t, &to_leo));
+    assert_eq!(deliver_raw_with(&hub.url(), zoe.user_id(), zoe.contact_key_for_tests().as_deref(), to_z), 202);
+    assert_eq!(deliver_raw_with(&hub.url(), leo.user_id(), leo.contact_key_for_tests().as_deref(), to_l), 202);
+    for _ in 0..3 {
+        for x in [&mut *zoe, &mut *leo, &mut *mia, &mut *ben, &mut *noah] {
+            take(x);
+        }
+    }
+    let want = ids(&[leo, mia, zoe, ben]);
+    for x in [&*leo, &*mia, &*zoe, &*ben] {
+        let g = view(x, &id);
+        assert_eq!((g.revision, &g.members, g.left), (3, &want, false), "{g:?}");
+    }
+    assert!(view(noah, &id).left);
 }

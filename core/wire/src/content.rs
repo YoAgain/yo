@@ -66,11 +66,30 @@ impl std::fmt::Debug for Media {
     }
 }
 
-/// What a group Yo names: the group, and its revision as the sender has it.
+/// What a group Yo names: the group, its revision as the sender has it, and `group_hash` of the sender's name and
+/// members, so a receiver at the same revision sees when the two diverged (spec 4.9).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, TlsSerialize, TlsDeserializeBytes, TlsSize)]
 pub struct GroupTag {
     pub id: GroupId,
     pub revision: u32,
+    pub hash: [u8; GROUP_HASH_LEN],
+}
+
+pub const GROUP_HASH_LEN: usize = 8;
+
+/// A group's name and members (sorted) as one value: the first 8 bytes of SHA-256("yo group v1" || id || name<V> ||
+/// members<V>). The name too: what a member sees is both, and a rename lost is as much a divergence as a member.
+pub fn group_hash(id: &GroupId, name: &str, members: &[crate::UserId]) -> [u8; GROUP_HASH_LEN] {
+    use sha2::{Digest, Sha256};
+    #[derive(TlsSerialize, TlsSize)]
+    struct Hashed {
+        id: GroupId,
+        name: VLBytes,
+        members: Vec<crate::UserId>,
+    }
+    let hashed = Hashed { id: *id, name: name.as_bytes().to_vec().into(), members: members.to_vec() };
+    let digest = Sha256::new().chain_update(b"yo group v1").chain_update(crate::encode(&hashed)).finalize();
+    digest[..GROUP_HASH_LEN].try_into().expect("8 bytes")
 }
 
 /// A group as one member has it: who is in it (user ids, sorted, each once, 1 to `MAX_GROUP`) and what it is called.
@@ -418,7 +437,7 @@ mod tests {
 
     #[test]
     fn a_group_yo_and_a_group_round_trip() {
-        let tag = GroupTag { id: [9; 16], revision: 3 };
+        let tag = GroupTag { id: [9; 16], revision: 3, hash: [4; 8] };
         for content in [Content::Yo, Content::Photo(media(1)), Content::Video { media: media(2), duration_ms: 1 }] {
             let message = Message { sent_at_ms: 9, group: Some(tag), content };
             assert_eq!(Message::decode(&message.encode().unwrap()).unwrap(), message);

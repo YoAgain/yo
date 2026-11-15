@@ -3,9 +3,9 @@
 //! someone added, removed or gone) is the whole group, one revision on, to everyone in it before and after: the higher
 //! revision stands, of two at the same revision the one by the lower user id. Only a member's change counts.
 
-use crate::state::{hex, unhex, Group};
+use crate::state::{hex, unhex, Group, Mine};
 use crate::{retryable, shown, user_bytes, Client, Content, Error, Event, Result, KEPT_FOR_RETRY};
-use yo_wire::content::{GroupId, GroupInfo, GroupTag, Message, GROUP_ID_LEN, MAX_GROUP};
+use yo_wire::content::{group_hash, GroupId, GroupInfo, GroupTag, Message, GROUP_HASH_LEN, GROUP_ID_LEN, MAX_GROUP};
 use yo_wire::envelope::Plain;
 use yo_wire::handle::Handle;
 use yo_wire::limits::MAX_BLOB_FETCHES;
@@ -35,6 +35,18 @@ fn not_now(error: &Error) -> bool {
 
 fn group_id(id: &str) -> Result<GroupId> {
     unhex(id).and_then(|bytes| bytes.try_into().ok()).ok_or(Error::Protocol("a group id"))
+}
+
+/// `group_hash` of a group as this device has it.
+fn hash_of(id: &GroupId, group: &Group) -> Result<[u8; GROUP_HASH_LEN]> {
+    let members = group.members.iter().map(|m| user_bytes(m)).collect::<Result<Vec<_>>>()?;
+    Ok(group_hash(id, &group.name, &members))
+}
+
+/// What a group Yo names: the group as this device has it.
+fn tag_of(id: &str, group: &Group) -> Result<GroupTag> {
+    let id = group_id(id)?;
+    Ok(GroupTag { id, revision: group.revision, hash: hash_of(&id, group)? })
 }
 
 /// Groups this device keeps at most: a sender naming new group ids cannot fill it (its asks are bounded the same).
@@ -78,7 +90,6 @@ impl Client {
     /// For tests: a group's message naming any revision, to one user, as only a broken or hostile client sends it.
     #[cfg(feature = "testing")]
     pub fn send_group_tagged_for_tests(&mut self, to: &str, id: &str, revision: u32, content: Content) -> Result<()> {
-        let tag = GroupTag { id: group_id(id)?, revision };
         // As this device would only if it were in the group with them: its own view says so, so it leaves.
         let me = self.state.user_id.clone();
         let group = self.state.groups.entry(id.to_owned()).or_insert_with(|| Group {
@@ -89,12 +100,28 @@ impl Client {
             left: false,
             before: Vec::new(),
             accepted: true,
+            synced: Default::default(),
+            mine: None,
         });
         group.left = false;
-        group.members = vec![me, to.to_owned()];
+        let mut members = vec![me, to.to_owned()];
+        members.sort();
+        group.members = members;
+        let tag = GroupTag { revision, ..tag_of(id, group)? };
         self.queue(&[to.to_owned()], Some(tag), content)?;
         self.persist()?;
         self.deliver_now()
+    }
+
+    /// For tests: this device's group changed in place, at the same revision, telling nobody: two members whose
+    /// lists diverged (a change lost, a bug).
+    #[cfg(feature = "testing")]
+    pub fn set_group_for_tests(&mut self, id: &str, name: &str, members: &[String]) -> Result<()> {
+        let group = self.state.groups.get_mut(id).ok_or(Error::Protocol("not in this group"))?;
+        let mut members = members.to_vec();
+        members.sort();
+        (group.name, group.members) = (name.to_owned(), members);
+        self.persist()
     }
 
     pub fn rename_group(&mut self, id: &str, name: &str) -> Result<Vec<Event>> {
@@ -177,7 +204,7 @@ impl Client {
         self.not_empty(&group)?;
         let others = self.reach_all(&group.members)?;
         self.send_profiles();
-        let tag = GroupTag { id: group_id(id)?, revision: group.revision };
+        let tag = tag_of(id, &group)?;
         self.atomic(|c| {
             c.queue(&others, Some(tag), content)?;
             c.persist()
@@ -296,10 +323,31 @@ impl Client {
                 left: false,
                 before: Vec::new(),
                 accepted: true,
+                synced: Default::default(),
+                mine: None,
             },
             false => self.group(id)?,
         };
-        let (mut members, name) = edit(&current)?;
+        let (members, name) = edit(&current)?;
+        self.make_revision(id, current, members, name, creating, !creating)?;
+        match self.deliver() {
+            Ok(()) | Err(Error::Network(_)) => Ok(()),
+            Err(error) => Err(error),
+        }
+    }
+
+    /// Revision + 1 of `current` with `members` and `name`, by this account: queued to everyone in it before and
+    /// after, and kept (`record`: as this account's change, made again should a rival at its revision win).
+    fn make_revision(
+        &mut self,
+        id: &str,
+        current: Group,
+        mut members: Vec<String>,
+        name: String,
+        creating: bool,
+        record: bool,
+    ) -> Result<()> {
+        let me = self.state.user_id.clone();
         members.sort();
         members.dedup();
         if members.len() > MAX_GROUP {
@@ -335,6 +383,13 @@ impl Client {
         if creating && self.state.groups.len() >= MAX_GROUPS {
             return Err(Error::Protocol("too many groups"));
         }
+        let mine = record.then(|| Mine {
+            revision,
+            add: members.iter().filter(|m| !current.members.contains(m)).cloned().collect(),
+            remove: current.members.iter().filter(|m| !members.contains(m)).cloned().collect(),
+            name: (name != current.name).then(|| name.clone()),
+            due: false,
+        });
         self.atomic(|c| {
             c.queue(&reached, None, Content::Group(info))?;
             let group = Group {
@@ -345,6 +400,8 @@ impl Client {
                 left,
                 before: current.members.clone(),
                 accepted: true,
+                synced: Default::default(),
+                mine,
             };
             // Left (a request said no to among them): its members get nothing more, the key neither.
             if !left {
@@ -353,10 +410,48 @@ impl Client {
             c.state.groups.insert(id.to_owned(), group);
             c.push_event(Event::GroupChanged { group: id.to_owned() });
             c.persist()
-        })?;
-        match self.deliver() {
-            Ok(()) | Err(Error::Network(_)) => Ok(()),
-            Err(error) => Err(error),
+        })
+    }
+
+    /// This account's changes that lost to a rival at their revision, made again on top of the winner as the next
+    /// revision, once each; nothing if the winner already has them (spec 4.9).
+    pub(crate) fn reapply_groups(&mut self) -> Result<()> {
+        let due: Vec<(String, Mine)> = (self.state.groups.iter())
+            .filter_map(|(id, g)| g.mine.clone().filter(|m| m.due && !g.left).map(|m| (id.clone(), m)))
+            .collect();
+        for (id, mine) in due {
+            let Some(group) = self.state.groups.get_mut(&id) else { continue };
+            group.mine = None;
+            let current = group.clone();
+            let mut members: Vec<String> =
+                (current.members.iter()).filter(|m| !mine.remove.contains(m)).chain(mine.add.iter()).cloned().collect();
+            members.sort();
+            members.dedup();
+            let name = mine.name.clone().unwrap_or_else(|| current.name.clone());
+            if members == current.members && name == current.name {
+                continue;
+            }
+            match self.make_revision(&id, current, members, name, false, false) {
+                Ok(()) => {}
+                Err(error) if not_now(&error) => {
+                    // Not now: still due, for the next call.
+                    if let Some(group) = self.state.groups.get_mut(&id) {
+                        group.mine = Some(mine);
+                    }
+                    return Err(error);
+                }
+                Err(error) => self.note(format!("group: {error}")),
+            }
+        }
+        Ok(())
+    }
+
+    /// `from`, a member, has this revision of the group otherwise: it gets the group as it is here, once per
+    /// revision, and the rule of rivals (spec 4.9) makes both the same.
+    fn diverged(&mut self, from: &str, id: &str) {
+        let Some(group) = self.state.groups.get_mut(id) else { return };
+        if group.synced.insert(from.to_owned()) {
+            self.group_asked(from, id);
         }
     }
 
@@ -373,6 +468,8 @@ impl Client {
         // The tie-break is by the revision's author, whoever passes it on (an answer to an ask): a member's word, which
         // cannot be checked against revisions skipped here.
         let author = hex(&info.by);
+        let theirs = group_hash(&info.id, &info.name, &info.members);
+        let ours = self.state.groups.get(&id).and_then(|g| hash_of(&info.id, g).ok());
         let newer = match self.state.groups.get(&id) {
             // New here, or known only by its Yos: from a member of it as it is now.
             None => own || members.iter().any(|m| m == from),
@@ -386,7 +483,9 @@ impl Client {
             // A rival at the same revision: from a member of the revision both were made from.
             Some(g) => {
                 let base = if g.before.is_empty() { &g.members } else { &g.before };
-                info.revision == g.revision && author < g.by && (own || base.iter().any(|m| m == from))
+                // Of one author's two (never so between honest ends): the lower hash, so both still end the same.
+                let wins = author < g.by || (author == g.by && Some(theirs) < ours);
+                info.revision == g.revision && wins && (own || base.iter().any(|m| m == from))
             }
         };
         if !newer {
@@ -395,8 +494,15 @@ impl Client {
                 self.state.groups.get(&id).is_some_and(|g| {
                     !own && !g.left && info.revision < g.revision && g.members.iter().any(|m| m == from)
                 });
+            // A member's rival that lost here: it gets the winner, as one behind would.
+            let rival =
+                self.state.groups.get(&id).is_some_and(|g| {
+                    !own && !g.left && info.revision == g.revision && g.members.iter().any(|m| m == from)
+                }) && ours != Some(theirs);
             if behind {
                 self.group_asked(from, &id);
+            } else if rival {
+                self.diverged(from, &id);
             } else {
                 self.note("a group change not taken".into());
             }
@@ -420,7 +526,24 @@ impl Client {
         let accepted = own
             || self.state.groups.get(&id).is_some_and(|g| g.accepted)
             || self.state.contacts.get(from).is_some_and(|c| c.accepted);
-        let group = Group { name: info.name, members, revision: info.revision, by: author, left, before, accepted };
+        // This account's own change, beaten by a rival at its revision: made again on the winner after the sync.
+        let mine = match self.state.groups.get(&id) {
+            Some(g) if !own && g.revision == info.revision => {
+                g.mine.clone().filter(|m| m.revision == g.revision).map(|m| Mine { due: true, ..m })
+            }
+            _ => None,
+        };
+        let group = Group {
+            name: info.name,
+            members,
+            revision: info.revision,
+            by: author,
+            left,
+            before,
+            accepted,
+            synced: Default::default(),
+            mine,
+        };
         self.state.group_asks.retain(|(g, _)| *g != id); // answered: an ask is no lasting exception
         let members = group.members.clone();
         let joined = group.accepted && !group.left;
@@ -489,6 +612,8 @@ impl Client {
                     left: false,
                     before: Vec::new(),
                     accepted: self.state.contacts.get(from).is_some_and(|c| c.accepted),
+                    synced: Default::default(),
+                    mine: None,
                 };
                 self.state.groups.insert(id.clone(), group);
                 self.push_event(Event::GroupChanged { group: id.clone() });
@@ -506,9 +631,16 @@ impl Client {
             Some(g) => {
                 let (behind, ask) = (tag.revision < g.revision, tag.revision > g.revision);
                 outsider = g.revision > 0 && !g.members.iter().any(|m| m == from);
+                // The same revision, other members or name (a change lost): the sender gets the group as it is here.
+                let diverged = tag.revision == g.revision
+                    && g.revision > 0
+                    && !outsider
+                    && hash_of(&tag.id, g).is_ok_and(|ours| ours != tag.hash);
                 // A member behind (its Yo names an older revision): it gets the group as it is here.
                 if behind {
                     self.group_asked(from, &id);
+                } else if diverged {
+                    self.diverged(from, &id);
                 }
                 ask
             }

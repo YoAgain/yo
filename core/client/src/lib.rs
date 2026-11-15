@@ -2900,6 +2900,7 @@ impl Client {
         }
         // Due until all of it is done: a step that fails leaves it for the next call, not only the next receive.
         self.answer_due()?;
+        self.reapply_groups()?;
         self.refill()?;
         self.contact_keys()?;
         self.deliver()?;
@@ -2930,6 +2931,7 @@ impl Client {
         self.deliver()?;
         self.receive_all(0)?;
         self.answer_due()?;
+        self.reapply_groups()?;
         self.refill()?;
         self.refill_tokens();
         self.send_profiles();
