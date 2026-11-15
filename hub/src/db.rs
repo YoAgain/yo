@@ -1374,6 +1374,17 @@ mod tests {
     /// A lookup hands out a bundle per device: its one-time prekeys once each, the last resort Kyber prekey when
     /// none is left; a device without prekeys (an app from before sessions) has no bundle. A repeated upload changes
     /// nothing, and one-time prekeys beyond the most are not kept.
+    /// A token pays for the request, whatever becomes of it: one sent to nobody is spent all the same, and cannot be
+    /// sent again to learn something else (spec 6.10).
+    #[test]
+    fn a_token_is_spent_on_a_refused_delivery() {
+        let db = Db::open(":memory:").unwrap();
+        let item = Incoming { user: [9; 16], devices_hash: [0; 32], envelope: b"x", token: Some((1, [5; 32])) };
+        assert!(matches!(db.deliver(std::slice::from_ref(&item), 0, 10).unwrap()[..], [Delivered::Unknown]));
+        assert!(db.token_spent(&[5; 32]).unwrap());
+        assert!(matches!(db.deliver(&[item], 0, 10).unwrap()[..], [Delivered::Spent]));
+    }
+
     #[test]
     fn prekeys_go_once_and_the_last_resort_after() {
         let db = Db::open(":memory:").unwrap();
