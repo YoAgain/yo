@@ -28,6 +28,9 @@ struct Friend: Codable, Hashable, Identifiable {
   /// Their account key changed (spec 3.2: a new phone without its backup, or someone else): Contacts says so until
   /// their details are opened.
   var keyChanged = false
+  /// A request (spec 4.10): someone not yet a contact wrote, or added this account to a group. The bar asks "Yo?"
+  /// instead of sending; nothing goes to them until it is said yes to.
+  var request = false
   /// Who they are on this phone, for good: a new spelling or a user id learned later keeps the bar in its place (a
   /// name as identity made the bar leave and come in again on top).
   var key = UUID()
@@ -58,6 +61,7 @@ struct Friend: Codable, Hashable, Identifiable {
     blocked = try c.decodeIfPresent(Bool.self, forKey: .blocked) ?? false
     gone = try c.decodeIfPresent(Bool.self, forKey: .gone) ?? false
     keyChanged = try c.decodeIfPresent(Bool.self, forKey: .keyChanged) ?? false
+    request = try c.decodeIfPresent(Bool.self, forKey: .request) ?? false
     group = try c.decodeIfPresent(String.self, forKey: .group)
     key = try c.decodeIfPresent(UUID.self, forKey: .key) ?? UUID()
   }
@@ -107,7 +111,11 @@ final class Friends {
       } else if !group.left {
         var bar = Friend(name: name, color: nextColor)
         bar.group = group.id
+        bar.request = !group.accepted
         list.insert(bar, at: 0)
+      }
+      if let index = list.firstIndex(where: { $0.group == group.id }), list[index].request != !group.accepted {
+        list[index].request = !group.accepted
       }
     }
     let known = Set(groups.filter { !$0.left }.map(\.id))
@@ -200,6 +208,19 @@ final class Friends {
     all.insert(all.remove(at: index), at: 0)
   }
 
+  /// The core's contacts not yet said yes to (`YoContact.accepted`): their bars are requests (spec 4.10).
+  func markRequests(_ contacts: [YoContact]) {
+    let open = Set(contacts.filter { !$0.accepted && !$0.blocked }.map(\.user))
+    let changed = all.contains { friend in friend.group == nil && friend.user.map(open.contains) != nil
+      && friend.request != open.contains(friend.user ?? "") }
+    guard changed else { return }
+    all = all.map { friend in
+      var friend = friend
+      if friend.group == nil, let user = friend.user { friend.request = open.contains(user) }
+      return friend
+    }
+  }
+
   /// The core's contacts whose account is gone (`YoContact.gone`): their bars say "Not on Yo".
   func markGone(_ contacts: [YoContact]) {
     let gone = Set(contacts.filter(\.gone).map(\.user))
@@ -238,13 +259,13 @@ final class Friends {
     }
     if prune && !seed {
       let users = Set(kept.map(\.user))
-      list.removeAll { $0.user.map { !users.contains($0) } ?? false }
+      list.removeAll { !$0.request && ($0.user.map { !users.contains($0) } ?? false) }  // a request is not kept there
     }
     if list.map(Self.mirrored) != all.map(Self.mirrored) { quietly { all = list } }
     guard seed else { return }
     let keptUsers = Dictionary(kept.map { ($0.user, $0) }, uniquingKeysWith: { a, _ in a })
     let missing = all.filter { friend in
-      guard let user = friend.user else { return false }
+      guard let user = friend.user, !friend.request else { return false }
       return keptUsers[user].map { $0.name != friend.name } ?? true
     }
     if !missing.isEmpty { stored?(missing, []) }
@@ -306,8 +327,12 @@ final class Friends {
   /// the account's storage.
   private func mirror(_ old: [Friend]) {
     guard let stored else { return }
+    // A request is no friend yet (spec 4.10): kept there only once said yes to (a restored phone takes them as
+    // contacts).
     func byUser(_ list: [Friend]) -> [String: Friend] {
-      Dictionary(list.compactMap { friend in friend.user.map { ($0, friend) } }, uniquingKeysWith: { a, _ in a })
+      Dictionary(
+        list.compactMap { friend in friend.request ? nil : friend.user.map { ($0, friend) } },
+        uniquingKeysWith: { a, _ in a })
     }
     let before = byUser(old)
     let now = byUser(all)

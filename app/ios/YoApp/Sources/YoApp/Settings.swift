@@ -49,6 +49,7 @@ struct SettingsView: View {
   @State private var deletingAccount = false
   @State private var deleteProblem: String?
   @State private var sendingFeedback = false
+  @State private var requestsOpen = true
 
   @Environment(\.dynamicTypeSize) private var typeSize
 
@@ -249,6 +250,15 @@ struct SettingsView: View {
         StorageRow(client: accounts.client)
       } footer: {
         Text("Backup of your friend list and blocks.")
+      }
+      Section {
+        Toggle("Requests from Strangers", isOn: Binding(get: { requestsOpen }, set: { setRequestsOpen($0) }))
+      } footer: {
+        Text("Off, only your friends can send you Yos. Anyone else is turned away.")
+      }
+      .task(id: accounts.client.map(ObjectIdentifier.init)) {
+        guard let client = accounts.client else { return }
+        requestsOpen = (try? await Hub.run { client.requestsOpen() }) ?? true
       }
       // Very large text: under the list, scrolled with it (pinned to the bottom they covered half the page).
       if typeSize.isAccessibilitySize {
@@ -465,6 +475,17 @@ struct SettingsView: View {
   }
 
 
+
+  /// Requests from strangers on or off (spec 4.10): the hub is told with the contact key's check.
+  private func setRequestsOpen(_ open: Bool) {
+    guard let client = accounts.client else { return }
+    requestsOpen = open
+    Task { @MainActor in
+      if (try? await Hub.run { try client.setRequestsOpen(open: open) }) == nil {
+        requestsOpen = (try? await Hub.run { client.requestsOpen() }) ?? true
+      }
+    }
+  }
 
   private func setSaveSent(_ enabled: Bool) {
     guard enabled else {

@@ -127,6 +127,24 @@ pub struct Contact {
     /// When the hub last named devices of the user without prekeys (wall clock, ms; 0: never, or they have them
     /// now): an app too old for sessions, which must be updated. What waits for it stays (spec 4.2).
     pub outdated_at: u64,
+    /// Accepted as a contact (spec 4.10): added or written to from here, or a request said yes to. Until then what
+    /// comes from them is a request: no receipt, no name goes to them. Contacts from before requests are accepted.
+    #[serde(default = "yes")]
+    pub accepted: bool,
+    /// Their contact key, as they sent it: shown on deliveries to them, so they come as a contact's.
+    #[serde(default)]
+    pub their_key: Option<[u8; 32]>,
+    /// This account's contact key is still to go to them (accepted, a group's member, or a new key after a block).
+    #[serde(default)]
+    pub key_due: bool,
+    /// The current contact key went to them (queued): not again until a new key.
+    #[serde(default)]
+    pub key_given: bool,
+}
+
+/// What a field from before it was there is: true.
+pub fn yes() -> bool {
+    true
 }
 
 impl Contact {
@@ -149,6 +167,10 @@ impl Contact {
             retry_at: 0,
             resent_at: 0,
             outdated_at: 0,
+            accepted: false,
+            their_key: None,
+            key_due: false,
+            key_given: false,
         }
     }
 }
@@ -178,6 +200,10 @@ pub struct Outgoing {
     #[serde(default, with = "compact::optional")]
     pub envelope: Option<Vec<u8>>,
     pub made_for: Vec<Key>,
+    /// Refused once as a request (`403`, spec 4.10) though sent with the recipient's key: their new key may wait in
+    /// the inbox, so it goes once more after the next receive; a second `403` drops it.
+    #[serde(default)]
+    pub refused: bool,
 }
 
 /// This device's prekeys (spec 4.1): the ids handed out so far, when the signed and last resort ones were made, the
@@ -211,6 +237,10 @@ pub struct Group {
     /// this revision removed, changing at once, is still heard, so both ends take the same one).
     #[serde(default)]
     pub before: Vec<String>,
+    /// Joined here: made or changed by this account, or added to by an accepted contact, or said yes to. Until
+    /// then a group someone else added this account to is a request (spec 4.10).
+    #[serde(default = "yes")]
+    pub accepted: bool,
 }
 
 /// An event as the state keeps it.
@@ -332,6 +362,15 @@ pub struct State {
     pub tokens_after: u64,
     /// The hub refused a token: its key is asked for at the next refill, whatever the stash.
     pub tokens_check: bool,
+    /// This account's contact key (spec 4.10): its contacts show it on deliveries; none yet before the first sync.
+    #[serde(default)]
+    pub contact_key: Option<[u8; 32]>,
+    /// Whether strangers may send requests at all.
+    #[serde(default = "yes")]
+    pub requests_open: bool,
+    /// The hub has the check of `contact_key` and `requests_open` as they are.
+    #[serde(default)]
+    pub contact_key_told: bool,
     /// This device's registration while the hub has not answered it: the user id is empty until then.
     pub registering: Option<Registering>,
     /// The groups this account is or was in, by id (hex).

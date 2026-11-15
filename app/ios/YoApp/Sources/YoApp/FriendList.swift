@@ -70,6 +70,9 @@ struct FriendList: View {
   @State private var blocking: (friend: Friend, reported: Bool)?
   /// A group to leave, asked first: its Yos stop for good (nobody can bring one back but a member adding again).
   @State private var leaving: Friend?
+  /// A request tapped (spec 4.10): "Yo X?", then on No "Block X?".
+  @State private var requesting: Friend?
+  @State private var blockingRequest: Friend?
   /// The camera's hint is showing; counted on by each photo or video taken, which hides it for 3 s more.
   @State private var hintShown = false
   /// Contacts whose new key waits for a confirmation (verified before): only they get "Confirm New Key".
@@ -218,7 +221,7 @@ struct FriendList: View {
 
   /// The list, and the question before leaving a group (on its own: one chain of modifiers less to type-check).
   private var asking: some View {
-    navigation.alert(
+    requests.alert(
       "Leave \(leaving?.name ?? "")?",
       isPresented: Binding(get: { leaving != nil }, set: { if !$0 { leaving = nil } }), presenting: leaving
     ) { bar in
@@ -226,6 +229,57 @@ struct FriendList: View {
       Button("Cancel", role: .cancel) {}
     } message: { _ in
       Text("You won’t get its Yos any more. A member can add you again.")
+    }
+  }
+
+  /// The two questions of a request: "Yo X?" (Yo: a contact from now on; No: asked "Block X?", Yo: blocked, No: the
+  /// request is gone).
+  private var requests: some View {
+    navigation
+      .alert(
+        "Yo \(requesting?.name ?? "")?",
+        isPresented: Binding(get: { requesting != nil }, set: { if !$0 { requesting = nil } }), presenting: requesting
+      ) { bar in
+        Button("Yo") { answer(bar, yes: true) }
+        Button("No", role: .cancel) { blockingRequest = bar }
+      } message: { bar in
+        Text(bar.group == nil ? "\(bar.name) wants to Yo you." : "You were added to \(bar.name).")
+      }
+      .alert(
+        "Block \(blockingRequest?.name ?? "")?",
+        isPresented: Binding(get: { blockingRequest != nil }, set: { if !$0 { blockingRequest = nil } }),
+        presenting: blockingRequest
+      ) { bar in
+        Button("Yo", role: .destructive) { answer(bar, yes: false, block: true) }
+        Button("No", role: .cancel) { answer(bar, yes: false) }
+      }
+  }
+
+  /// A request answered: yes makes a contact (or joins the group); no takes the bar off the list, blocked or not.
+  private func answer(_ bar: Friend, yes: Bool, block: Bool = false) {
+    guard let client = accounts.client else { return }
+    Task {
+      if yes {
+        let events = try? await Hub.run {
+          if let group = bar.group { return try client.acceptGroup(group: group) }
+          return try client.accept(who: bar.target)
+        }
+        if let events { await inbox.absorb(events, client: client, friends: friends) }
+        if let contacts = try? await Hub.run({ client.contacts() }) { friends.markRequests(contacts) }
+        if let groups = try? await Hub.run({ client.groups() }) { friends.takeGroups(groups) }
+      } else if let group = bar.group {
+        if let events = try? await Hub.run({ try client.leaveGroup(group: group) }) {
+          await inbox.absorb(events, client: client, friends: friends)
+        }
+        if let groups = try? await Hub.run({ client.groups() }) { withAnimation(.snappy) { friends.takeGroups(groups) } }
+      } else {
+        if block {
+          try? await Hub.run { try client.setBlocked(who: bar.target, blocked: true) }
+        } else {
+          try? await Hub.run { try client.decline(who: bar.target) }
+        }
+        withAnimation(.snappy) { friends.remove(bar) }
+      }
     }
   }
 
@@ -795,6 +849,11 @@ struct FriendList: View {
   // MARK: Sending
 
   private func send(to friend: Friend) {
+    // A request asks first (spec 4.10): nothing goes to them before a yes.
+    if friend.request {
+      requesting = friend
+      return
+    }
     hintEpoch += 1  // the camera's hint goes, and waits again
     Perf.mark("tap.action")
     defer { PerfProbe.frame("tap") }
@@ -1256,6 +1315,7 @@ struct LiveBar: View {
 
   /// The bar's words: what is happening, else the name.
   private var title: String {
+    if friend.request { return friend.group == nil ? "Yo Request from \(friend.name)" : "Yo Request: \(friend.name)" }
     if recording { return "● Recording" }
     if let last = bar.outgoing.last { return last.text }
     if let sent = bar.sent { return sent.text }

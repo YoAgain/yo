@@ -23,6 +23,8 @@ pub const STORAGE: &str = "/v1/storage";
 pub const BLOBS: &str = "/v1/blobs";
 /// `POST`: Privacy Pass tokens for deliveries, issued in a batch (spec 6.10, `token`).
 pub const TOKENS: &str = "/v1/tokens";
+/// `PUT`, signed: the check of the account's contact key and whether strangers may send requests (spec 4.10).
+pub const CONTACT_KEY: &str = "/v1/contact-key";
 
 /// `GET /v1/blobs/{id}`: a blob, to whoever names its id.
 pub fn blob_path(id: &crate::content::BlobId) -> String {
@@ -58,6 +60,9 @@ pub fn deliver_path(user: &UserId) -> String {
 
 /// The header of a delivery naming the devices it was encrypted for (spec 4.4): base64url of `devices::hash`.
 pub const HEADER_DEVICES: &str = "yo-devices";
+/// On a delivery: the recipient's contact key (base64url, 32 bytes), as its contacts have it; without it, or with
+/// another, the delivery is a request (spec 4.10). It names no sender: every contact has the same key.
+pub const HEADER_ACCESS: &str = "yo-access";
 
 /// `GET /v1/backup/{id}`: by the user id or by the recovery code's locator (spec 7).
 pub fn backup_path(id: &[u8]) -> String {
@@ -153,6 +158,23 @@ pub struct Registered {
     pub username: Option<VLBytes>,
     /// The device's number among the user's devices.
     pub device_id: u8,
+}
+
+/// The account's contact key as the hub keeps it: `SHA-256("yo contact key" || key)`, never the key; and whether
+/// deliveries without it (requests from strangers) are taken at all (spec 4.10).
+#[derive(Debug, Clone, PartialEq, Eq, TlsSerialize, TlsDeserializeBytes, TlsSize)]
+pub struct ContactKey {
+    pub check: [u8; 32],
+    pub requests_open: u8,
+}
+
+/// The check the hub keeps of a contact key (`ContactKey::check`).
+pub fn contact_check(key: &[u8; 32]) -> [u8; 32] {
+    use sha2::{Digest, Sha256};
+    let mut hash = Sha256::new();
+    hash.update(b"yo contact key");
+    hash.update(key);
+    hash.finalize().into()
 }
 
 /// Claims a username for the signing device's account, replacing its old one; `None` gives it up.

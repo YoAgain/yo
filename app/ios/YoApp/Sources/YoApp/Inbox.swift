@@ -436,6 +436,7 @@ final class Inbox {
     let start = Perf.on ? CACurrentMediaTime() : 0
     defer { if Perf.on { Perf.mark("take \(events.count) " + String(format: "%.1f ms", (CACurrentMediaTime() - start) * 1000)) } }
     friends.markGone(contacts)  // a delivery found their account gone (`NotOnYo` from now on)
+    defer { friends.markRequests(contacts) }  // after the new chats are on the list
     guard !events.isEmpty else { return }
     func friend(_ user: String) -> Friend {
       friends.friend(user: user, handles: contacts.first { $0.user == user }?.handles ?? [])
@@ -495,8 +496,11 @@ final class Inbox {
     switch UIApplication.shared.applicationState {
     case .background:
       let groups = (try? await Hub.run { client.groups() }) ?? []
+      let requests = (try? await Hub.run { ShareBridge.requests(of: client) }) ?? []
       await ShareBridge.post(
-        ShareBridge.yos(in: kept, name: { friend($0).name }, group: { id in groups.first { $0.id == id }?.name ?? "" }))
+        ShareBridge.yos(
+          in: kept, name: { friend($0).name }, group: { id in groups.first { $0.id == id }?.name ?? "" },
+          requests: requests))
     case .active: Task { await collectDelivered() }
     default: break
     }

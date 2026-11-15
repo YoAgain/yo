@@ -17,7 +17,8 @@ libsignal itself. **Assumed:** reachable only through the Cloudflare Tunnel when
 | Swap a contact's keys | Session identity = pinned account key's X25519 form (4.1); the hub delivers no key a client trusts by itself | a lying hub's device list (3.2); key transparency later |
 | Hand out other keys between app and hub (TLS broken, a proxy) | Lookups and `409` rosters signed by the hub key the app pins, bound to the client's nonce and question (spec 6.11) | the hub itself (or its key) lying: key transparency later; builds without a pinned key |
 | Fill the disk without identity | 64 MiB/IP/hour of delivered bytes; `507` below 1 GiB free; 30-day TTL | many addresses: the floor holds, deliveries stop until cleanup |
-| Fill one user's inbox | 5000 per device, then `507` for that recipient only | stranger spam until read; contact access keys later (8) |
+| Fill one user's inbox | 5000 per device, then `507` for that recipient only; strangers' deliveries 20/recipient/day, none with requests off (spec 4.10) | a contact's spam (block: the key rotates); scarce request tokens later (8) |
+| Tell contacts apart by the access key | One contact key per account, the same for every contact; the hub keeps its SHA-256 only (4.10) | the hub learns a delivery is a contact's, and a key rotation after a block |
 | Spend another device's request budget | Counted only after the signature holds | – |
 | Hold memory with inbox waits | 4 inbox requests per device at once | – |
 | Use up a user's one-time prekeys | Lookups 50/device/day; last-resort Kyber prekey keeps sessions possible; replay of a last-resort message refused (4.1); refill below 16 | first messages then use the last resort (weaker forward secrecy for that message) |

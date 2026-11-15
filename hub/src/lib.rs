@@ -361,6 +361,7 @@ impl Hub {
             .route(api::LOOKUP, post(lookup))
             .route(api::PUSH, put(set_push))
             .route(api::USERNAME, put(set_username))
+            .route(api::CONTACT_KEY, put(set_contact_key))
             .route(api::ACCOUNT, delete(delete_account))
             .route(api::REPORT, post(report))
             .route(api::FEEDBACK, post(feedback))
@@ -946,6 +947,24 @@ async fn set_username(State(hub): Hubs, method: Method, uri: Uri, headers: Heade
     }
 }
 
+/// Sets the signing device's account's contact key check and whether it takes requests (spec 4.10).
+async fn set_contact_key(
+    State(hub): Hubs,
+    method: Method,
+    uri: Uri,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Res<StatusCode> {
+    let device = hub.authenticate(&method, &uri, &headers, &body)?;
+    let request: api::ContactKey = decode(&body)?;
+    if request.requests_open > 1 {
+        return Err(refuse(StatusCode::BAD_REQUEST));
+    }
+    let (open, grace) = (request.requests_open == 1, hub.config.limits.contact_key_grace_ms);
+    hub.db.set_contact_key(&device.user_id, &request.check, open, now_ms(), grace)?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
 /// Deletes the signing device's account with everything the hub holds about it; its other devices answer `410`.
 async fn delete_account(State(hub): Hubs, method: Method, uri: Uri, headers: HeaderMap) -> Res<StatusCode> {
     let device = hub.authenticate(&method, &uri, &headers, &[])?;
@@ -1198,6 +1217,22 @@ async fn deliver(
             None
         }
     };
+    // A contact's, or a stranger's request (spec 4.10): the recipient's contact key shown names no sender, every
+    // contact has the same. A request the recipient takes no more of today waits with its sender (`507`, as a full
+    // inbox); one it takes none of at all is `403`. Past the limits above; counted only once stored.
+    let shown: Option<[u8; 32]> = headers
+        .get(api::HEADER_ACCESS)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| unb64(v).ok())
+        .and_then(|v| <[u8; 32]>::try_from(v).ok())
+        .map(|key| api::contact_check(&key));
+    let per_day = hub.config.limits.requests_per_user_day;
+    let request = match hub.blocking(move |hub| hub.db.admit(&user, shown, now_ms(), per_day)).await?? {
+        db::Admission::Contact => false,
+        db::Admission::Request => true,
+        db::Admission::Closed => return Err(refuse(StatusCode::FORBIDDEN)),
+        db::Admission::Full => return Err(refuse(StatusCode::INSUFFICIENT_STORAGE)),
+    };
     hub.db_room()?;
     let (stored, outcome) = tokio::sync::oneshot::channel();
     let runtime = tokio::runtime::Handle::current();
@@ -1208,7 +1243,12 @@ async fn deliver(
     let outcome = outcome.await.ok().and_then(Result::ok).ok_or_else(|| refuse(StatusCode::INTERNAL_SERVER_ERROR))?;
     match outcome {
         // Its devices are woken by the writer (`writer`).
-        Delivered::Stored(_) => Ok((StatusCode::ACCEPTED, Vec::new())),
+        Delivered::Stored(_) => {
+            if request {
+                hub.blocking(move |hub| hub.db.count_request(&user, now_ms())).await??;
+            }
+            Ok((StatusCode::ACCEPTED, Vec::new()))
+        }
         Delivered::Mismatch(roster) => {
             let answer = encode(&api::Devices { account_key: roster.account_key, devices: roster.devices });
             Err(Refusal(StatusCode::CONFLICT, hub.signed_answer(&headers, uri.path(), &body, answer)))

@@ -123,10 +123,12 @@ enum ShareBridge {
     let id: String
     /// A group's Yos (`user` is "group:" and its id): the name of its bar in the list ("FAMILY", "Group").
     var bar: String? = nil
+    /// From someone not yet a contact, or a group a stranger added this account to (spec 4.10): "Yo Request".
+    var request = false
 
     /// The original's words, the name as its owner writes it: "Yo from LEO", "📷 from LEO", "🎥 from LEO"; more read
     /// as on the bar, with the photos and videos among them: "Yo!!!!! +4 from LEO · 📷 2".
-    var line: String { "\(what) from \(name)" }
+    var line: String { request ? "Yo Request from \(name)" : "\(what) from \(name)" }
 
     /// What came, without who: "Yo", "📷", "🎥", "Yo!!!!! +4 · 📷 2".
     var what: String {
@@ -149,7 +151,7 @@ enum ShareBridge {
     /// As a notification keeps it (`userInfo["yos"]`), for the next one to add to.
     var info: [String: Any] {
       ["name": name, "user": user, "count": count, "photos": photos, "videos": videos, "id": id,
-       "kind": kind?.rawValue ?? "yo", "bar": bar ?? ""]
+       "kind": kind?.rawValue ?? "yo", "bar": bar ?? "", "request": request]
     }
 
     init(
@@ -168,6 +170,7 @@ enum ShareBridge {
         name: name, user: user, count: count, photos: info["photos"] as? Int ?? 0, videos: info["videos"] as? Int ?? 0,
         kind: kind, id: id)
       bar = (info["bar"] as? String).flatMap { $0.isEmpty ? nil : $0 }
+      request = info["request"] as? Bool ?? false
     }
   }
 
@@ -198,8 +201,10 @@ enum ShareBridge {
   /// The Yos among `events`, one per sender, the newest sender first, as a notification names them; `name` names a
   /// sender by user id. What Yo does not show yet (a text, a link, a place) comes as a Yo, as the app shows it.
   /// A group's Yos are one entry per group, named "LEO in FAMILY" by its newest sender (`group` names a group by id).
+  /// `requests`: the senders (user ids) and groups ("group:" and the id) not accepted yet (`requests(of:)`).
   static func yos(
-    in events: [YoEvent], name: (String) -> String, group: (String) -> String = { _ in "" }
+    in events: [YoEvent], name: (String) -> String, group: (String) -> String = { _ in "" },
+    requests: Set<String> = []
   ) -> [Yos] {
     var senders: [String: Yos] = [:]
     for event in events {
@@ -225,9 +230,16 @@ enum ShareBridge {
         videos: (before?.videos ?? 0) + (kind == .video ? 1 : 0),
         kind: newer ? kind : before!.kind, id: newer ? yoID : before!.id)
       yos.bar = bar
+      yos.request = requests.contains(key)
       senders[key] = yos
     }
     return senders.values.sorted { $0.sentAtMs > $1.sentAtMs }
+  }
+
+  /// Who is a request (spec 4.10), as `yos` takes it: contacts and groups not accepted yet.
+  static func requests(of client: YoClient) -> Set<String> {
+    Set(client.contacts().filter { !$0.accepted }.map(\.user))
+      .union(client.groups().filter { !$0.accepted && !$0.left }.map { "group:" + $0.id })
   }
 
   /// The name as the app's list shows it (the friends it published), else as the core knows them.
@@ -246,7 +258,11 @@ enum ShareBridge {
     guard let newest = senders.first else { return }
     // One sender: their name as the title and what came under it, as Messages shows a message ("LEO" / "Yo!!");
     // a group's: "LEO in FAMILY". Several: a line each ("Yo from LEO").
-    if senders.count == 1 {
+    if senders.count == 1, newest.request {
+      // A request says who, not what: "Yo Request" / "from LEO".
+      content.title = "Yo Request"
+      content.body = "from \(newest.name)"
+    } else if senders.count == 1 {
       content.title = newest.bar.map { $0.isEmpty ? newest.name : "\(newest.name) in \($0)" } ?? newest.name
       content.body = newest.what
     } else {

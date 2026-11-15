@@ -147,6 +147,8 @@ pub struct ContactInfo {
     pub gone: bool,
     /// Its app is too old for sessions: what is sent to it waits until it is updated (`Error::Outdated`).
     pub outdated: bool,
+    /// A contact said yes to, or one this account added or wrote to; else a request (spec 4.10).
+    pub accepted: bool,
 }
 
 /// A session with one device of a contact, for the app to show (spec 4).
@@ -254,6 +256,12 @@ fn gone_for_good(status: u16) -> bool {
     matches!(status, status::NOT_FOUND | status::BAD_REQUEST | status::TOO_LARGE)
 }
 
+/// A delivery's answer that ends it: taken, refused for good, or a request the recipient takes none of (spec 4.10).
+/// What comes after it to the same user may go.
+fn settled(status: u16) -> bool {
+    status == status::ACCEPTED || status == status::FORBIDDEN || gone_for_good(status)
+}
+
 /// Envelopes of the outbox on their way to the hub, sent without the client: see `Client::send_begin`. Each must
 /// be ended with `Client::send_end`, even unsent: until then its users' next envelopes wait.
 pub struct Deliveries {
@@ -301,7 +309,7 @@ impl Deliveries {
             }
             let status = answer.as_ref().map_or(0, |r| r.status);
             limited = status == status::RATE_LIMITED;
-            if status != status::ACCEPTED && !gone_for_good(status) {
+            if !settled(status) {
                 held.insert(item.user.clone());
             }
             answers.push(Some(answer));
@@ -329,6 +337,9 @@ pub struct Client {
     drop_reasons: Vec<String>,
     /// Users whose envelopes are on their way to the hub (`deliveries`): nothing else to them goes meanwhile.
     delivering: BTreeSet<String>,
+    /// Users a delivery to was refused as a request though it showed their key (spec 4.10): nothing more to them
+    /// until the inbox was read, where their new key may wait.
+    refused_until_read: BTreeSet<String>,
     /// An envelope was made (and its ratchet moved) since the state was last saved: saved before anything leaves.
     envelopes_unsaved: std::cell::Cell<bool>,
     /// Until when (clock) the inbox counts as up to date: the end of a long wait under way, or when it was emptied.
@@ -436,6 +447,7 @@ pub(crate) fn stored(event: Event) -> StoredEvent {
         Content::Retry => StoredContent::Unknown(yo_wire::content::TYPE_RETRY),
         Content::Group(_) => StoredContent::Unknown(yo_wire::content::TYPE_GROUP),
         Content::GroupAsk { .. } => StoredContent::Unknown(yo_wire::content::TYPE_GROUP_ASK),
+        Content::ContactKey(_) => StoredContent::Unknown(yo_wire::content::TYPE_CONTACT_KEY),
     };
     match event {
         Event::NewChat { user } => StoredEvent::NewChat { user },
@@ -505,7 +517,12 @@ struct Unpinned {
 fn shown(content: &Content) -> bool {
     !matches!(
         content,
-        Content::Profile { .. } | Content::Receipt | Content::Retry | Content::GroupAsk { .. } | Content::Unknown(_)
+        Content::Profile { .. }
+            | Content::Receipt
+            | Content::Retry
+            | Content::GroupAsk { .. }
+            | Content::ContactKey(_)
+            | Content::Unknown(_)
     )
 }
 
@@ -712,6 +729,9 @@ impl Client {
             tokens: VecDeque::new(),
             tokens_after: 0,
             tokens_check: false,
+            contact_key: None,
+            requests_open: true,
+            contact_key_told: false,
             registering: None,
             groups: Default::default(),
             roster_asked: Default::default(),
@@ -782,6 +802,7 @@ impl Client {
             dropped: 0,
             drop_reasons: Vec::new(),
             delivering: BTreeSet::new(),
+            refused_until_read: BTreeSet::new(),
             envelopes_unsaved: std::cell::Cell::new(false),
             inbox_fresh_until: 0,
             media_keys_forgotten: false,
@@ -1483,6 +1504,11 @@ impl Client {
             let contact = c.state.contacts.get_mut(&peer).ok_or(Error::Internal("contact"))?;
             contact.chat = true;
             contact.profile_due = c.state.name.is_some();
+            // Added from here: accepted, and told this account's contact key (spec 4.10).
+            if !contact.accepted {
+                contact.accepted = true;
+                contact.key_due = true;
+            }
             c.persist()
         })?;
         Ok(peer)
@@ -1497,11 +1523,22 @@ impl Client {
         let shown = shown(&content);
         self.queue(&[user.to_owned()], None, content)?;
         if shown {
+            self.accept_writing(user);
             if let Some(contact) = self.state.contacts.get_mut(user) {
                 contact.chat = true;
             }
         }
         Ok(())
+    }
+
+    /// Writing to someone accepts them (spec 4.10): they get this account's contact key and its name.
+    fn accept_writing(&mut self, user: &str) {
+        let name = self.state.name.is_some();
+        if let Some(contact) = self.state.contacts.get_mut(user).filter(|c| !c.accepted) {
+            contact.accepted = true;
+            contact.key_due = true;
+            contact.profile_due = name;
+        }
     }
 
     /// What waits goes first, and the inbox is taken in: the order in which things happened (spec 4.7). Offline, a
@@ -1558,6 +1595,7 @@ impl Client {
             plain,
             envelope: None,
             made_for: Vec::new(),
+            refused: false,
         });
     }
 
@@ -1706,7 +1744,7 @@ impl Client {
         let mut items = Vec::new();
         for item in &self.state.outbox {
             let Some(envelope) = &item.envelope else { continue };
-            if waiting.contains(&item.user) {
+            if waiting.contains(&item.user) || self.refused_until_read.contains(&item.user) {
                 continue;
             }
             let Some((account_key, _)) = self.roster(&item.user) else { continue };
@@ -1718,11 +1756,21 @@ impl Client {
             }
             let hash = yo_wire::devices::hash(&account_key, &named);
             let nonce = self.hub_nonce();
+            // The recipient's contact key, if they gave it (own copies: this account's): a contact's delivery, not a
+            // request (spec 4.10).
+            let access = match item.user == self.state.user_id {
+                true => self.state.contact_key,
+                false => self.state.contacts.get(&item.user).and_then(|c| c.their_key),
+            };
+            let mut headers = vec![(api::HEADER_DEVICES.to_owned(), yo_wire::b64(&hash))];
+            if let Some(key) = access {
+                headers.push((api::HEADER_ACCESS.to_owned(), yo_wire::b64(&key)));
+            }
             items.push(Delivery {
                 seq: item.seq,
                 user: item.user.clone(),
                 path: api::deliver_path(&user),
-                headers: with_nonce(vec![(api::HEADER_DEVICES.to_owned(), yo_wire::b64(&hash))], nonce),
+                headers: with_nonce(headers, nonce),
                 envelope: envelope.clone(),
                 token: None,
                 nonce,
@@ -1793,6 +1841,22 @@ impl Client {
                 Some(Ok(response)) if response.status == status::NOT_FOUND && item.user != self.state.user_id => {
                     done.insert(item.seq);
                     gone.insert(item.user.clone());
+                }
+                // The recipient takes no requests and this account is no contact of theirs (spec 4.10).
+                Some(Ok(response)) if response.status == status::FORBIDDEN => {
+                    // A contact's key that changed (a block of someone else, a restored phone) while this device
+                    // was away: the new one may be in the inbox. Once more after the next receive.
+                    let keyed = self.state.contacts.get(&item.user).is_some_and(|c| c.their_key.is_some());
+                    match self.state.outbox.iter_mut().find(|o| o.seq == item.seq) {
+                        Some(kept) if keyed && !kept.refused => {
+                            kept.refused = true;
+                            self.refused_until_read.insert(item.user.clone());
+                        }
+                        _ => {
+                            done.insert(item.seq);
+                            self.drop_one("the recipient takes no requests".into());
+                        }
+                    }
                 }
                 Some(Ok(response)) if gone_for_good(response.status) => {
                     done.insert(item.seq);
@@ -1880,6 +1944,7 @@ impl Client {
             return Err(refused(&response));
         }
         let inbox: api::Inbox = decode(&response.body)?;
+        self.refused_until_read.clear();
         if requested_at > self.prekeys_known_ms {
             self.state.prekeys.left = inbox.prekeys_left;
             self.prekeys_known_ms = requested_at;
@@ -2275,13 +2340,20 @@ impl Client {
         }
         // Everything but a receipt, a retry and an ask is answered by a receipt: the ratchet moves on also for a stream
         // of changes or names one way (spec 4.5).
+        // Not to a request yet (spec 4.10): nothing goes back until it is said yes to.
         if !matches!(message.content, Content::Receipt | Content::Retry | Content::GroupAsk { .. }) {
-            if let Some(contact) = self.state.contacts.get_mut(user) {
+            if let Some(contact) = self.state.contacts.get_mut(user).filter(|c| c.accepted) {
                 contact.receipt_due = true;
             }
         }
         match message.content {
             Content::Receipt => Ok(()),
+            Content::ContactKey(key) => {
+                if let Some(contact) = self.state.contacts.get_mut(user) {
+                    contact.their_key = Some(key);
+                }
+                Ok(())
+            }
             Content::Group(info) => {
                 self.group_update(user, info, false);
                 Ok(())
@@ -2313,9 +2385,11 @@ impl Client {
             }
             content => {
                 let contact = self.state.contacts.get_mut(user).ok_or(Error::Internal("contact"))?;
-                contact.receipt_due = true;
+                let accepted = contact.accepted;
+                contact.receipt_due = accepted;
                 if !std::mem::replace(&mut contact.chat, true) {
-                    contact.profile_due = self.state.name.is_some();
+                    // A request (spec 4.10): no name goes to them until it is said yes to (`accept`).
+                    contact.profile_due = accepted && self.state.name.is_some();
                     self.push_event(Event::NewChat { user: user.to_owned() });
                 }
                 let content = self.forget_keys(content);
@@ -2349,7 +2423,10 @@ impl Client {
             .iter()
             .filter(|(_, c)| !c.blocked && !c.gone && !c.unconfirmed)
             .map(|(user, c)| {
-                let retry = if now >= c.retry_at + RETRY_EVERY_MS { c.retry.clone() } else { Vec::new() };
+                // A retry answers too: not to a request seen and not said yes to (spec 4.10). One whose first
+                // message never opened (a state rolled back past it) is none yet: its session heals.
+                let answers = c.accepted || !c.chat || self.in_joined_group(user);
+                let retry = if answers && now >= c.retry_at + RETRY_EVERY_MS { c.retry.clone() } else { Vec::new() };
                 // A receipt needs a session; a retry makes one (a device this one lost its sessions with).
                 (user.clone(), c.receipt_due && !c.devices.is_empty(), retry)
             })
@@ -2562,7 +2639,8 @@ impl Client {
             Some(user) => user,
             None => self.start_chat(&handle)?,
         };
-        // A name not yet told goes first.
+        // Writing back accepts a request: its name goes first, as one not yet told does.
+        self.accept_writing(&peer);
         self.send_profiles();
         // Saved with the message in it, or not made at all (spec 4.7).
         // Its envelope made in the same step when the sessions are there: one save before it leaves, not two.
@@ -2640,6 +2718,7 @@ impl Client {
         // A name not yet told goes first, as in `send`. Saved with the message in it, or not made at all: `send` then
         // fails on the save the same way.
         self.atomic(|c| {
+            c.accept_writing(&user);
             c.send_profiles();
             c.send_message(&user, content)?;
             c.encrypt_waiting(&user); // its envelope in the same save
@@ -2671,9 +2750,7 @@ impl Client {
     /// more of the outbox can go now (a message queued meanwhile behind them), to send and end the same way; else
     /// what `send` returns. What the hub did not take waits in the outbox for the next call that delivers.
     pub fn send_end(&mut self, deliveries: &Deliveries, answers: Vec<Option<Answer>>) -> Sent {
-        let all_taken = answers
-            .iter()
-            .all(|answer| matches!(answer, Some(Ok(r)) if r.status == status::ACCEPTED || gone_for_good(r.status)));
+        let all_taken = answers.iter().all(|answer| matches!(answer, Some(Ok(r)) if settled(r.status)));
         let result = match self.delivered(deliveries, answers) {
             Ok(true) => self.deliver(),
             Ok(false) if all_taken && self.check_sendable(deliveries.to.as_deref()).is_ok() => {
@@ -2795,6 +2872,7 @@ impl Client {
         // Due until all of it is done: a step that fails leaves it for the next call, not only the next receive.
         self.answer_due()?;
         self.refill()?;
+        self.contact_keys()?;
         self.deliver()?;
         self.sync_storage_quietly()?;
         self.refill_tokens();
@@ -2826,8 +2904,153 @@ impl Client {
         self.refill()?;
         self.refill_tokens();
         self.send_profiles();
+        self.contact_keys()?;
         self.deliver()?;
         self.sync_storage_quietly()
+    }
+
+    // ---- contacts and requests (spec 4.10) ----
+
+    /// This account's contact key: made once, its check told to the hub, and sent to every contact due it. A hub
+    /// that cannot be reached now leaves the telling for later.
+    fn contact_keys(&mut self) -> Result<()> {
+        if self.state.contact_key.is_none() {
+            let mut key = [0u8; 32];
+            rand::fill(&mut key);
+            self.state.contact_key = Some(key);
+            // Contacts from before contact keys (or a phone restored): each gets it, else theirs come as requests.
+            self.key_due_to_all();
+            self.persist()?;
+        }
+        let key = self.state.contact_key.expect("made above");
+        if !self.state.contact_key_told {
+            let body = encode(&api::ContactKey {
+                check: api::contact_check(&key),
+                requests_open: self.state.requests_open as u8,
+            });
+            match self.signed("PUT", api::CONTACT_KEY, &body) {
+                Ok(response) if response.status == status::NO_CONTENT => {
+                    self.state.contact_key_told = true;
+                    self.persist()?;
+                }
+                Ok(response) => self.note(format!("contact key: {}", response.status)),
+                Err(error) if retryable(&error) => {}
+                Err(error) => return Err(error),
+            }
+        }
+        let me = self.state.user_id.clone();
+        let due: Vec<String> = self
+            .state
+            .contacts
+            .iter()
+            .filter(|(user, c)| c.key_due && !c.blocked && !c.gone && **user != me)
+            .map(|(user, _)| user.clone())
+            .collect();
+        for user in due {
+            self.queue(std::slice::from_ref(&user), None, Content::ContactKey(key))?;
+            if let Some(contact) = self.state.contacts.get_mut(&user) {
+                (contact.key_due, contact.key_given) = (false, true);
+            }
+        }
+        Ok(())
+    }
+
+    /// A member of a group this account is in and said yes to: no request, though perhaps no contact.
+    pub(crate) fn in_joined_group(&self, user: &str) -> bool {
+        self.state.groups.values().any(|g| g.accepted && !g.left && g.members.iter().any(|m| m == user))
+    }
+
+    /// The current key is to go to every accepted contact written with and every member of a group joined.
+    fn key_due_to_all(&mut self) {
+        for (user, contact) in self.state.contacts.iter_mut() {
+            let friend = self.state.storage.friends.get(user).is_some_and(|f| !f.removed.value);
+            contact.key_given = false;
+            contact.key_due =
+                (contact.key_due || contact.accepted && (contact.chat || friend)) && !contact.blocked && !contact.gone;
+        }
+        let members: Vec<String> = self
+            .state
+            .groups
+            .values()
+            .filter(|g| g.accepted && !g.left)
+            .flat_map(|g| g.members.iter().cloned())
+            .collect();
+        for member in members {
+            if let Some(contact) = self.state.contacts.get_mut(&member).filter(|c| !c.blocked && !c.gone) {
+                contact.key_due = true;
+            }
+        }
+    }
+
+    /// Says yes to a request (spec 4.10): from now on a contact; what waits for it goes, and it gets this account's
+    /// contact key, its name and a receipt.
+    pub fn accept(&mut self, who: &str) -> Result<Vec<Event>> {
+        let result = (|| {
+            let user = self.user_named(&Handle::parse(who)?)?.0;
+            let name = self.state.name.is_some();
+            let contact = self.state.contacts.entry(user).or_insert_with(Contact::unknown);
+            contact.accepted = true;
+            contact.key_due = true;
+            contact.receipt_due = contact.chat;
+            contact.profile_due = name;
+            self.persist()?;
+            self.contact_keys()?;
+            self.send_profiles();
+            self.deliver()
+        })();
+        self.finish(result)
+    }
+
+    /// Says no to a request: it is gone from the list (`chat` off); what comes from them later is a request again.
+    pub fn decline(&mut self, who: &str) -> Result<()> {
+        let user = self.user_named(&Handle::parse(who)?)?.0;
+        self.atomic(|c| {
+            if let Some(contact) = c.state.contacts.get_mut(&user).filter(|c| !c.accepted) {
+                contact.chat = false;
+            }
+            let theirs =
+                |e: &StoredEvent| matches!(e, StoredEvent::Message { user: from, own: false, .. } if *from == user);
+            c.state.events.retain(|e| !theirs(e));
+            c.persist()
+        })
+    }
+
+    /// Says yes to a group someone else added this account to: joined, and its members get the contact key.
+    pub fn accept_group(&mut self, id: &str) -> Result<Vec<Event>> {
+        let result = (|| {
+            let group = self.state.groups.get_mut(id).ok_or(Error::Protocol("no such group"))?;
+            group.accepted = true;
+            let members = group.members.clone();
+            for member in members.iter().filter(|m| **m != self.state.user_id) {
+                self.state.contacts.entry(member.clone()).or_insert_with(Contact::unknown).key_due = true;
+            }
+            self.persist()?;
+            self.contact_keys()?;
+            self.deliver()
+        })();
+        self.finish(result)
+    }
+
+    /// Whether strangers may send requests (spec 4.10); off, the hub refuses them, and only contacts reach this account.
+    pub fn set_requests_open(&mut self, open: bool) -> Result<()> {
+        self.state.requests_open = open;
+        self.state.contact_key_told = false;
+        self.persist()?;
+        self.contact_keys()
+    }
+
+    pub fn requests_open(&self) -> bool {
+        self.state.requests_open
+    }
+
+    /// A new contact key after a block: the blocked one's deliveries come as requests from then on (refused while
+    /// the account takes none), every other contact gets the new key; the old one counts a few days more at the hub.
+    fn rotate_contact_key(&mut self) {
+        let mut key = [0u8; 32];
+        rand::fill(&mut key);
+        self.state.contact_key = Some(key);
+        self.state.contact_key_told = false;
+        self.key_due_to_all();
     }
 
     /// Sets the name contacts see, and tells every contact this device writes to.
@@ -2835,7 +3058,8 @@ impl Client {
         let result = (|| {
             Message { sent_at_ms: 0, group: None, content: Content::Profile { name: name.to_owned() } }.encode()?;
             self.state.name = Some(name.to_owned());
-            for contact in self.state.contacts.values_mut().filter(|c| c.chat) {
+            // Not to a request (spec 4.10): it gets the name with a yes.
+            for contact in self.state.contacts.values_mut().filter(|c| c.chat && c.accepted) {
                 contact.profile_due = true;
             }
             self.send_profiles();
@@ -2853,7 +3077,9 @@ impl Client {
             .state
             .contacts
             .iter()
-            .filter(|(_, c)| c.profile_due && !c.blocked && !c.unconfirmed && !c.gone && !c.devices.is_empty())
+            .filter(|(_, c)| {
+                c.profile_due && c.accepted && !c.blocked && !c.unconfirmed && !c.gone && !c.devices.is_empty()
+            })
             .map(|(user, _)| user.clone())
             .collect();
         for user in due {
@@ -2881,6 +3107,7 @@ impl Client {
                 blocked: c.blocked,
                 gone: c.gone,
                 outdated: c.outdated_at > 0,
+                accepted: c.accepted,
             })
             .collect()
     }
@@ -3009,6 +3236,9 @@ impl Client {
         // brought back the state without it, and with it what they sent meanwhile.
         self.atomic(|c| {
             c.apply_block(&user, blocked);
+            if blocked && c.state.contact_key.is_some() {
+                c.rotate_contact_key();
+            }
             if let Some(shown) = shown {
                 note_handle(c.state.contacts.get_mut(&user).expect("blocked"), shown);
             }

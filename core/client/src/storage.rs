@@ -334,6 +334,23 @@ impl Client {
             }
             self.apply_block(&user, blocked);
         }
+        // Friends kept there that this device does not know (a restored phone): contacts, accepted (spec 4.10), and
+        // due the contact key. One it knows keeps its own say: a request stays one.
+        let friends: Vec<String> = self
+            .state
+            .storage
+            .friends
+            .iter()
+            .filter(|(user, f)| !f.removed.value && !f.blocked.value && **user != self.state.user_id)
+            .map(|(user, _)| user.clone())
+            .collect();
+        for user in friends {
+            self.state.contacts.entry(user).or_insert_with(|| crate::state::Contact {
+                accepted: true,
+                key_due: true,
+                ..crate::state::Contact::unknown()
+            });
+        }
     }
 
     /// Takes in a version from the hub: merged with this device's, applied.

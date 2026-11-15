@@ -848,7 +848,7 @@ fn a_yo_to_an_account_without_prekeys_is_outdated_and_waits() {
     let before = lookups();
     a.maintenance().unwrap();
     assert_eq!(lookups(), before, "not asked again within the hour");
-    assert_eq!(a.pending(), 1);
+    assert_eq!(a.pending(), 2, "the Yo, and now the contact key behind it");
     // The app updated: the account registers again with its key, a new device with prekeys.
     let mut phone = new_phone(Http::new(hub.url()), &b_name, &b);
     let later = yo_hub::now_ms() + 3600 * 1000 + 1;

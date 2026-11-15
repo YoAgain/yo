@@ -28,6 +28,11 @@ pub struct Limits {
     pub register_per_ip_hour: u32,
     /// Whether a username is free, asked while it is typed (spec 6.3).
     pub name_check_per_ip_minute: u32,
+    /// Requests from strangers one user takes a day (spec 4.10).
+    pub requests_per_user_day: u64,
+    /// How long a contact key's check before a change still counts: for contacts that have not heard of the new key
+    /// yet (spec 4.10).
+    pub contact_key_grace_ms: u64,
     /// Backup records fetched: by the user id or a locator, neither of which can be guessed (spec 7).
     pub backup_per_ip_hour: u32,
     /// Reports of users, by one user (spec 6.3).
@@ -82,6 +87,8 @@ impl Default for Limits {
             db_min_free_bytes: GIB,
             register_per_ip_hour: 10,
             name_check_per_ip_minute: 60,
+            requests_per_user_day: 20,
+            contact_key_grace_ms: 3 * 24 * 3600 * 1000,
             backup_per_ip_hour: 10,
             report_per_user_day: 20,
             feedback_per_user_day: 10,
@@ -113,6 +120,8 @@ impl Limits {
             db_min_free_bytes: 0,
             register_per_ip_hour: u32::MAX,
             name_check_per_ip_minute: u32::MAX,
+            requests_per_user_day: u64::MAX,
+            contact_key_grace_ms: 3 * 24 * 3600 * 1000,
             backup_per_ip_hour: u32::MAX,
             report_per_user_day: u32::MAX,
             feedback_per_user_day: u32::MAX,

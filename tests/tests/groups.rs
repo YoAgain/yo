@@ -582,6 +582,8 @@ fn a_newer_revision_is_asked_for_once() {
     let mut d = register(Http::new(hub.url()), &username(base + 2), None);
     let (id, _) = a.create_group("FAMILY", &[b.user_id().to_owned()]).unwrap();
     take(&mut b);
+    // Joined (a stranger's group is a request, which asks nobody anything: spec 4.10).
+    b.accept_group(&id).unwrap();
     d.send_yo(&username(base)).unwrap();
     take(&mut b);
     // Ann cannot be reached from here now: the ask waits.

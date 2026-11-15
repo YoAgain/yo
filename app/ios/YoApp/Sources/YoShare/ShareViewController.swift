@@ -206,7 +206,7 @@ final class ShareModel {
   nonisolated private static func notify(_ events: [YoEvent], client: YoClient) {
     let yos = ShareBridge.yos(
         in: events, name: { ShareBridge.name(of: $0, client: client) },
-        group: { id in client.groups().first { $0.id == id }?.name ?? "" })
+        group: { id in client.groups().first { $0.id == id }?.name ?? "" }, requests: ShareBridge.requests(of: client))
     guard !yos.isEmpty else { return }
     Task { await ShareBridge.post(yos) }
   }

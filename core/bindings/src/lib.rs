@@ -271,9 +271,11 @@ impl From<Content> for MessageKind {
             Content::Location { lat_e7, lon_e7 } => MessageKind::Location { lat_e7, lon_e7 },
             Content::Unknown(kind) => MessageKind::Unsupported { kind },
             // Never an event (spec 4.5, 4.6).
-            Content::Receipt | Content::Retry | Content::Group(_) | Content::GroupAsk { .. } => {
-                MessageKind::Unsupported { kind: 0 }
-            }
+            Content::Receipt
+            | Content::Retry
+            | Content::Group(_)
+            | Content::GroupAsk { .. }
+            | Content::ContactKey(_) => MessageKind::Unsupported { kind: 0 },
         }
     }
 }
@@ -357,6 +359,8 @@ pub struct YoContact {
     pub gone: bool,
     /// Its app is too old: a Yo to it waits until it is updated (`Outdated`).
     pub outdated: bool,
+    /// Accepted; else what came from it is a request (spec 4.10): show it as one, `accept` or `decline` it.
+    pub accepted: bool,
 }
 
 /// A group this account is or was in (spec 4.7).
@@ -370,6 +374,8 @@ pub struct YoGroup {
     pub members: Vec<String>,
     /// This account is not in it (any more).
     pub left: bool,
+    /// Joined; else someone not yet a contact added this account to it: a request (`accept_group`).
+    pub accepted: bool,
 }
 
 /// This device's security now, for Settings › Encryption's live checks (`Client::security_status`).
@@ -849,6 +855,7 @@ impl YoClient {
                 blocked: c.blocked,
                 gone: c.gone,
                 outdated: c.outdated,
+                accepted: c.accepted,
             })
             .collect()
     }
@@ -931,6 +938,30 @@ impl YoClient {
         Ok(self.with(|c| c.set_blocked(&who, blocked))??)
     }
 
+    /// Says yes to a request (spec 4.10): a contact from now on; what came from them shows as a friend's.
+    pub fn accept(&self, who: String) -> Result<Vec<YoEvent>, YoError> {
+        events(self.with(|c| c.accept(&who))?)
+    }
+
+    /// Says no to a request: gone from the list; a later Yo from them is a request again.
+    pub fn decline(&self, who: String) -> Result<(), YoError> {
+        Ok(self.with(|c| c.decline(&who))??)
+    }
+
+    /// Says yes to a group someone not yet a contact added this account to.
+    pub fn accept_group(&self, group: String) -> Result<Vec<YoEvent>, YoError> {
+        events(self.with(|c| c.accept_group(&group))?)
+    }
+
+    /// Whether strangers may send requests at all (Settings): off, the hub refuses them.
+    pub fn set_requests_open(&self, open: bool) -> Result<(), YoError> {
+        Ok(self.with(|c| c.set_requests_open(open))??)
+    }
+
+    pub fn requests_open(&self) -> bool {
+        self.with(|c| c.requests_open()).unwrap_or(true)
+    }
+
     /// The friends the account's storage keeps (spec 6.9), by user id: after a restore, the list to show.
     pub fn friends(&self) -> Vec<YoFriend> {
         self.with(|c| c.friends())
@@ -1009,7 +1040,7 @@ impl YoClient {
         self.with(|c| c.groups())
             .unwrap_or_default()
             .into_iter()
-            .map(|g| YoGroup { id: g.id, name: g.name, members: g.members, left: g.left })
+            .map(|g| YoGroup { id: g.id, name: g.name, members: g.members, left: g.left, accepted: g.accepted })
             .collect()
     }
 

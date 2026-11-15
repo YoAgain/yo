@@ -23,6 +23,8 @@ pub struct GroupView {
     pub revision: u32,
     /// This account is not in it (any more).
     pub left: bool,
+    /// Joined: else someone not yet a contact added this account to it, a request (spec 4.10).
+    pub accepted: bool,
 }
 
 /// A refusal that holds for now only: `retryable`, a signature refused (`401`: the clock off, or a replay), a save that
@@ -52,6 +54,7 @@ impl Client {
                 members: g.members.clone(),
                 revision: g.revision,
                 left: g.left,
+                accepted: g.accepted,
             })
             .collect()
     }
@@ -85,6 +88,7 @@ impl Client {
             by: me.clone(),
             left: false,
             before: Vec::new(),
+            accepted: true,
         });
         group.left = false;
         group.members = vec![me, to.to_owned()];
@@ -281,6 +285,7 @@ impl Client {
                 by: me.clone(),
                 left: false,
                 before: Vec::new(),
+                accepted: true,
             },
             false => self.group(id)?,
         };
@@ -322,7 +327,19 @@ impl Client {
         }
         self.atomic(|c| {
             c.queue(&reached, None, Content::Group(info))?;
-            let group = Group { name, members, revision, by: me.clone(), left, before: current.members.clone() };
+            let group = Group {
+                name,
+                members,
+                revision,
+                by: me.clone(),
+                left,
+                before: current.members.clone(),
+                accepted: true,
+            };
+            // Left (a request said no to among them): its members get nothing more, the key neither.
+            if !left {
+                c.contact_key_due(&group.members);
+            }
             c.state.groups.insert(id.to_owned(), group);
             c.push_event(Event::GroupChanged { group: id.to_owned() });
             c.persist()
@@ -389,10 +406,19 @@ impl Client {
             Some(g) => g.members.clone(),
             None => Vec::new(),
         };
-        let group = Group { name: info.name, members, revision: info.revision, by: author, left, before };
+        // Joined only from an accepted contact (or by this account); else a request until said yes to (spec 4.10).
+        let accepted = own
+            || self.state.groups.get(&id).is_some_and(|g| g.accepted)
+            || self.state.contacts.get(from).is_some_and(|c| c.accepted);
+        let group = Group { name: info.name, members, revision: info.revision, by: author, left, before, accepted };
         self.state.group_asks.retain(|(g, _)| *g != id); // answered: an ask is no lasting exception
         let members = group.members.clone();
+        let joined = group.accepted && !group.left;
         self.state.groups.insert(id.clone(), group);
+        // Its members get this account's contact key, so their Yos to the group come as a contact's (spec 4.10).
+        if joined {
+            self.contact_key_due(&members);
+        }
         self.push_event(Event::GroupChanged { group: id.clone() });
         // Yos held from one not in the group then: shown if this change has them in it, else dropped; never one of a
         // sender blocked meanwhile, nor in a group this account is no longer in.
@@ -452,6 +478,7 @@ impl Client {
                     by: from.to_owned(),
                     left: false,
                     before: Vec::new(),
+                    accepted: self.state.contacts.get(from).is_some_and(|c| c.accepted),
                 };
                 self.state.groups.insert(id.clone(), group);
                 self.push_event(Event::GroupChanged { group: id.clone() });
@@ -485,6 +512,10 @@ impl Client {
             };
             // Asked once while unanswered: the outbox brings the ask there; every further Yo naming the revision
             // asks nothing more.
+            // Not of one whose 1:1 request waits unanswered, for a group not joined: that would answer it.
+            let joined = self.state.groups.get(&id).is_some_and(|g| g.accepted);
+            let request = self.state.contacts.get(from).is_some_and(|c| !c.accepted && c.chat);
+            let asked = asked.filter(|_| joined || !request || self.in_joined_group(from));
             if let Some(asked) = asked {
                 if self.state.group_asks.len() < MAX_GROUPS && self.state.group_asks.insert((id.clone(), asked.clone()))
                 {
@@ -494,7 +525,9 @@ impl Client {
                 }
             }
         }
-        if let Some(contact) = self.state.contacts.get_mut(from) {
+        // A receipt only in a group joined, or to a contact: a request gets nothing back (spec 4.10).
+        let joined = self.state.groups.get(&id).is_some_and(|g| g.accepted);
+        if let Some(contact) = self.state.contacts.get_mut(from).filter(|c| joined || c.accepted) {
             contact.receipt_due = true;
         }
         let content = self.forget_keys(content);
@@ -509,5 +542,18 @@ impl Client {
             return;
         }
         self.push_event(event);
+    }
+}
+
+impl Client {
+    /// This account's contact key is to go to these users (all but itself), as members of a group it is in.
+    pub(crate) fn contact_key_due(&mut self, users: &[String]) {
+        for user in users.iter().filter(|u| **u != self.state.user_id) {
+            let contact = self.state.contacts.entry(user.clone()).or_insert_with(crate::state::Contact::unknown);
+            // Once per key: a group's every change need not send it again.
+            if !contact.key_given {
+                contact.key_due = true;
+            }
+        }
     }
 }

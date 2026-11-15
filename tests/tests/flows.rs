@@ -631,8 +631,9 @@ fn silent_receipts_heal_a_one_way_stream() {
     a.send_yo(b.user()).unwrap();
     assert_eq!(kinds(&a, &b), [1, 1, 1], "the name and two Yos, unacknowledged: prekey messages");
     assert_eq!(yos(&b.drain(), &a.user()), 2);
-    assert!(b.contacts().iter().any(|c| c.user == a.user()));
-    // A takes in B's receipt: nothing to show.
+    assert!(b.contacts().iter().any(|c| c.user == a.user() && !c.accepted), "a request");
+    // B says yes (spec 4.10): from now on receipts. A takes in B's receipt: nothing to show.
+    b.accept(a.user()).unwrap();
     let events = a.drain();
     assert!(events.iter().all(|e| matches!(e, YoEvent::Profile { .. })), "{}", describe(&events));
     let ratchets = |a: &Phone, b: &Phone| -> Vec<Vec<u8>> {
@@ -653,7 +654,8 @@ fn silent_receipts_heal_a_one_way_stream() {
         a.send_yo(b.user()).unwrap();
         assert_eq!(yos(&b.drain(), &a.user()), 1, "round {round}");
         a.drain();
-        keys = ratchets(&a, &b);
+        // Each round's Yo, the last one sent: the contact key may go in a round's chain too.
+        keys.push(ratchets(&a, &b).pop().unwrap());
     }
     assert_eq!(*kinds(&a, &b).last().unwrap(), 0, "acknowledged: plain session messages");
     let mut distinct = keys.clone();

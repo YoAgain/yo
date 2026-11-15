@@ -160,13 +160,15 @@ fn a_spent_token_is_refused_and_the_delivery_goes_again_without() {
     ha.fault(&api::deliver_path(&user_id(b.user_id())), Fault::LoseAnswer);
     a.send_yo(&pb).unwrap();
     assert_eq!((a.waiting(), a.tokens_left()), (1, left));
-    let spent = deliveries_to(&ha, b.user_id()).last().unwrap().clone();
+    let before = deliveries_to(&ha, b.user_id());
+    let (spent, n) = (before.last().unwrap().clone(), before.len());
     // Sent again with that token: refused, and at once again without it, which the hub takes.
     a.sync(0).unwrap();
     a.after_sync().unwrap();
     assert_eq!(a.waiting(), 0);
     let sent = deliveries_to(&ha, b.user_id());
-    let (again, without) = (&sent[sent.len() - 2], &sent[sent.len() - 1]);
+    // The contact key may follow them (its own delivery, after the sync).
+    let (again, without) = (&sent[n], &sent[n + 1]);
     // Each attempt asks the hub's signature with a fresh nonce (spec 6.11); all else is the same.
     let fresh = |headers: &[(String, String)]| -> Vec<(String, String)> {
         headers.iter().filter(|(name, _)| name != yo_wire::hubsig::NONCE_HEADER).cloned().collect()
