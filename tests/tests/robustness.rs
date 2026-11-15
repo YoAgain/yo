@@ -266,3 +266,16 @@ fn a_new_phone_gets_what_waits_once_its_device_is_named() {
     assert_eq!(yos(&a.sync(0).unwrap()), 1);
     assert_eq!(a.dropped() + b2.dropped(), 0, "{:?} {:?}", a.drop_reasons(), b2.drop_reasons());
 }
+
+/// A push token or a backup put: the request's signing time is saved with the state (one clock for every process of
+/// the device), not only kept in memory.
+#[test]
+fn a_signed_put_saves_its_signing_time() {
+    let hub = TestHub::start();
+    let mut a = register(Http::new(hub.url()), &username(random_u64() % 1_000_000_000), None);
+    let saved = Arc::new(Saved::default());
+    a.persist_to(saved.clone(), [5; 32]).unwrap();
+    let before = saved.0.lock().unwrap().clone();
+    a.set_push(yo_core::Push::none()).unwrap();
+    assert_ne!(*saved.0.lock().unwrap(), before, "saved after the signed request");
+}

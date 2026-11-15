@@ -594,6 +594,7 @@ impl Client {
     pub fn put_backup(&mut self, backup: &api::Backup) -> Result<()> {
         backup.check()?;
         let response = self.signed("PUT", api::BACKUP, &encode(backup))?;
+        self.persist()?; // its signing time kept, as every signed request's
         match response.status {
             status::NO_CONTENT => Ok(()),
             _ => Err(refused(&response)),
@@ -980,6 +981,8 @@ impl Client {
 
     pub fn set_push(&mut self, push: Push) -> Result<()> {
         let response = self.signed("PUT", api::PUSH, &encode(&push))?;
+        // Its signing time kept (spec 6.3: one clock for every process of the device).
+        self.persist()?;
         match response.status {
             status::NO_CONTENT => Ok(()),
             _ => Err(refused(&response)),
