@@ -560,10 +560,18 @@ impl Hub {
         good.then_some(()).ok_or_else(bad)
     }
 
+    /// A registration id in libsignal's range (14 bits, not 0) and an auth key that is an Ed25519 point (spec 4.1,
+    /// 6.2): else the device's bundles and signed requests could never work.
+    fn device_keys_usable(registration_id: u32, auth_key: &Key) -> bool {
+        (1..=0x3fff).contains(&registration_id) && ed25519_dalek::VerifyingKey::from_bytes(auth_key).is_ok()
+    }
+
     /// Everything about a registering device that is checked before it is stored (spec 6.4): its certificate, the
     /// account key's proof of possession over this handle and device, its prekeys.
     fn check_new_device(&self, handle: &Handle, device: &api::NewDevice, app: Option<&str>) -> Res<(Key, NewDevice)> {
-        if device.push.token.as_slice().len() > limits::MAX_PUSH_TOKEN_LEN {
+        if device.push.token.as_slice().len() > limits::MAX_PUSH_TOKEN_LEN
+            || !Self::device_keys_usable(device.registration_id, &device.auth_key)
+        {
             return Err(bad());
         }
         let certificate = DeviceCertificate::verify(device.certificate.as_slice(), &device.device_key)?;
@@ -1265,6 +1273,19 @@ async fn get_blob(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_registration_id_out_of_range_or_an_auth_key_off_the_curve_is_refused() {
+        let good = ed25519_dalek::SigningKey::from_bytes(&[3; 32]).verifying_key().to_bytes();
+        assert!(Hub::device_keys_usable(1, &good) && Hub::device_keys_usable(0x3fff, &good));
+        assert!(!Hub::device_keys_usable(0, &good) && !Hub::device_keys_usable(0x4000, &good));
+        // About half of all y have no x on the curve.
+        let off = (2u8..=255)
+            .map(|y| [&[y][..], &[0; 31]].concat().try_into().unwrap())
+            .find(|key: &Key| ed25519_dalek::VerifyingKey::from_bytes(key).is_err())
+            .unwrap();
+        assert!(!Hub::device_keys_usable(1, &off), "no point");
+    }
 
     #[test]
     fn a_device_has_a_few_inbox_requests_under_way_at_most() {
