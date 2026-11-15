@@ -130,7 +130,7 @@ struct ContactRows: View {
               Image(systemName: check.symbol).foregroundStyle(check.color).accessibilityHidden(true)
             }
           } label: {
-            Text(friend.name).font(.yo(17, relativeTo: .body)).lineLimit(1).minimumScaleFactor(0.5)
+            Text(friend.name).lineLimit(1).minimumScaleFactor(0.5)
           }
         }
       }
@@ -193,6 +193,8 @@ struct EncryptionPage: View {
   @Environment(Friends.self) private var friends
   @Environment(AccountStore.self) private var accounts
   @State private var tally: EncryptionTally?
+  @State private var status: SecurityStatus?
+  @Environment(Inbox.self) private var inbox
 
   var body: some View {
     Form {
@@ -211,12 +213,27 @@ struct EncryptionPage: View {
       } footer: {
         Text("Every Yo, photo and video is end-to-end encrypted: only you and your friends can open them.")
       }
-      Section("How") {
-        LabeledContent("Protocol", value: "Signal")
-        LabeledContent("Key Agreement", value: "PQXDH")
-        LabeledContent("Ratchet", value: "Double Ratchet + SPQR")
-        LabeledContent("Post-Quantum", value: "On")
-        LabeledContent("Sealed Sender", value: "On")
+      // Live, from the core and the inbox: what stands now, each with its check.
+      if let status {
+        Section {
+          row("Hub Connected", connected.text, connected.check)
+          row(
+            "Keys at the Hub", "\(status.prekeysAtHub) left" + (status.refillPending ? ", refill on its way" : ""),
+            status.prekeysAtHub >= 16 ? .ok : status.refillPending || status.prekeysAtHub > 0 ? .waiting : .problem)
+          row(
+            "Signed Keys Renewed", status.signedPrekeyDays == 0 ? "This week" : "\(status.signedPrekeyDays) days ago",
+            status.signedPrekeyDays <= 8 ? .ok : .waiting)
+          row("Post-Quantum Sessions", "\(status.pqSessions) of \(status.devices)",
+            status.pqSessions == status.devices ? .ok : .waiting)
+          row("Sealed Sender", "On, \(status.deliveryTokens) tokens", .ok)
+          row("Verified Contacts", "\(status.verified) of \(status.contacts)",
+            status.verified == status.contacts && status.contacts > 0 ? .ok : .open)
+        } header: {
+          Text("Now")
+        } footer: {
+          Text(
+            "Every contact's keys are signed with their account key and checked before a session starts. Sealed sender: the hub sees who a Yo is for, never who sent it.")
+        }
       }
       Section {
         DisclosureGroup("Per Contact") { ContactRows() }
@@ -226,7 +243,28 @@ struct EncryptionPage: View {
     }
     .navigationTitle("Encryption")
     .navigationBarTitleDisplayMode(.inline)
-    .task(id: Reload(accounts.client, friends.contacts)) { tally = await EncryptionTally.load(accounts, friends) }
+    .task(id: Reload(accounts.client, friends.contacts)) {
+      tally = await EncryptionTally.load(accounts, friends)
+      if let client = accounts.client { status = try? await Hub.run { client.securityStatus() } }
+    }
+  }
+
+  /// When the hub last answered: within a minute is connected; else how long ago.
+  private var connected: (text: String, check: Check) {
+    guard let last = inbox.lastSync else { return ("Not yet", .waiting) }
+    let age = Arrival.age(last)
+    return Date.now.timeIntervalSince(last) < 60 ? ("Now", .ok) : ("\(age) ago", .waiting)
+  }
+
+  private func row(_ title: String, _ value: String, _ check: Check) -> some View {
+    LabeledContent {
+      HStack(spacing: 6) {
+        Text(value)
+        Image(systemName: check.symbol).foregroundStyle(check.color).accessibilityHidden(true)
+      }
+    } label: {
+      Text(title)
+    }
   }
 }
 

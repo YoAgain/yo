@@ -53,6 +53,8 @@ struct Arrival: Equatable, Identifiable {
 
 @MainActor @Observable
 final class Inbox {
+  /// When the hub last answered a sync: Settings › Encryption's "Hub Connected".
+  var lastSync: Date?
   /// Counts each time Yos are ready for the list (`takeArrivals`): at most every `batchSeconds`, so a burst (twenty
   /// Yos in a second) redraws the list ten times, not twenty, and each time with all that came meanwhile.
   private(set) var arrived = 0
@@ -375,6 +377,7 @@ final class Inbox {
           fetchMedia(client: client)
         }
         let (events, contacts) = try await Hub.run { (try client.sync(waitS: 25), client.contacts()) }
+        lastSync = .now
         Perf.mark("listen.events \(events.count)")
         guard client === accounts.client else { continue }  // signed out meanwhile: not for this account
         await take(events, contacts: contacts, client: client, friends: friends)

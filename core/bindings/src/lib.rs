@@ -372,6 +372,25 @@ pub struct YoGroup {
     pub left: bool,
 }
 
+/// This device's security now, for Settings › Encryption's live checks (`Client::security_status`).
+#[derive(uniffi::Record)]
+pub struct SecurityStatus {
+    /// One-time prekeys the hub still has for this device.
+    pub prekeys_at_hub: u32,
+    /// A refill made and not yet taken by the hub.
+    pub refill_pending: bool,
+    /// Days since the signed and last-resort prekeys were replaced.
+    pub signed_prekey_days: u64,
+    /// Delivery tokens in stock.
+    pub delivery_tokens: u32,
+    /// Contacts' devices written to, and of them those with a PQXDH session good to send on.
+    pub devices: u32,
+    pub pq_sessions: u32,
+    /// Contacts, and of them those verified.
+    pub contacts: u32,
+    pub verified: u32,
+}
+
 /// A session with one device of a contact (spec 4): for the app's contact details.
 #[derive(uniffi::Record)]
 pub struct YoSession {
@@ -841,6 +860,31 @@ impl YoClient {
             Err(yo_core::Error::NotOnYo) => Ok(None),
             Err(error) => Err(error.into()),
         }
+    }
+
+    /// This device's security now: keys at the hub, tokens, sessions, verified contacts.
+    pub fn security_status(&self) -> SecurityStatus {
+        self.with(|c| c.security_status())
+            .map(|s| SecurityStatus {
+                prekeys_at_hub: s.prekeys_at_hub,
+                refill_pending: s.refill_pending,
+                signed_prekey_days: s.signed_prekey_days,
+                delivery_tokens: s.delivery_tokens,
+                devices: s.devices,
+                pq_sessions: s.pq_sessions,
+                contacts: s.contacts,
+                verified: s.verified,
+            })
+            .unwrap_or(SecurityStatus {
+                prekeys_at_hub: 0,
+                refill_pending: false,
+                signed_prekey_days: 0,
+                delivery_tokens: 0,
+                devices: 0,
+                pq_sessions: 0,
+                contacts: 0,
+                verified: 0,
+            })
     }
 
     /// The sessions with a contact's devices (user id).
