@@ -4,6 +4,7 @@
 // no room) keeps them waiting here, and they go later by themselves. What arrives is fetched at once, kept on this
 // iPhone until it has been seen once, then deleted.
 import AVFoundation
+import CryptoKit
 import Foundation
 import ImageIO
 import Observation
@@ -64,6 +65,63 @@ enum MediaStorage {
     }
     ReceivedMedia.shared.forgetAll()
     Prefetch.clear()
+    ManifestSeal.forget()
+  }
+}
+
+/// The two manifests (what waits to go, what came and waits to be seen) hold the photos' keys: sealed as the core's
+/// state is (spec 2), ChaCha20-Poly1305 under a key of their own derived from the state key in the keychain
+/// (HKDF-SHA256, "yo media manifest v1"), so the files alone open nothing. On disk: "YOM1" || nonce || ciphertext ||
+/// tag. A manifest of the builds before (plain JSON) is read once and written again sealed.
+@MainActor
+enum ManifestSeal {
+  private static let magic = Data("YOM1".utf8)
+  private static var cached: SymmetricKey?
+
+  /// What a manifest's bytes open to.
+  enum Opened {
+    /// Its JSON; `legacy`: it was not sealed (to be written again sealed).
+    case json(Data, legacy: Bool)
+    /// The keychain does not answer now (before the first unlock): read later.
+    case notNow
+    /// Damaged, or sealed under a key that is gone: never readable.
+    case unreadable
+  }
+
+  /// The key; throws while the keychain does not answer (locked), nil when there is none (no account).
+  private static func key() throws -> SymmetricKey? {
+    if let cached { return cached }
+    // Where the account's state key is: the App Group's (Yo), else the app's own (Yo Dev, or not moved in yet).
+    var state: Data? = nil
+    if SharedStateFile.available { state = try StateKey.shared() }
+    if state == nil { state = try StateKey.load() }
+    guard let state else { return nil }
+    let key = HKDF<SHA256>.deriveKey(
+      inputKeyMaterial: SymmetricKey(data: state), info: Data("yo media manifest v1".utf8), outputByteCount: 32)
+    cached = key
+    return key
+  }
+
+  /// Signed out: the key is read again (a new account may have a new one).
+  static func forget() { cached = nil }
+
+  /// Nil when there is no key now: the manifest is not written.
+  static func seal(_ json: Data) -> Data? {
+    guard let key = try? key(), let box = try? ChaChaPoly.seal(json, using: key) else { return nil }
+    return magic + box.combined
+  }
+
+  static func open(_ data: Data) -> Opened {
+    guard data.starts(with: magic) else {
+      // Builds before wrote plain JSON ("[" or "{"); anything else is damaged.
+      return data.first == UInt8(ascii: "[") || data.first == UInt8(ascii: "{") ? .json(data, legacy: true) : .unreadable
+    }
+    let key: SymmetricKey?
+    do { key = try Self.key() } catch { return .notNow }
+    guard let key, let box = try? ChaChaPoly.SealedBox(combined: data.dropFirst(magic.count)),
+      let json = try? ChaChaPoly.open(box, using: key)
+    else { return .unreadable }
+    return .json(json, legacy: false)
   }
 }
 
@@ -144,8 +202,15 @@ final class MediaOutbox {
       data = read
     }
     var read: [Item] = []
+    var legacy = false
     if let data {
-      if let decoded = try? JSONDecoder().decode([Item].self, from: data) {
+      var json: Data?
+      switch ManifestSeal.open(data) {
+      case .notNow: return false
+      case .unreadable: break
+      case .json(let opened, let plain): (json, legacy) = (opened, plain)
+      }
+      if let decoded = json.flatMap({ try? JSONDecoder().decode([Item].self, from: $0) }) {
         read = decoded
       } else {
         // Its blobs stay (nothing here deletes one it does not name).
@@ -156,6 +221,7 @@ final class MediaOutbox {
     for gone in read where gone.held == true { try? FileManager.default.removeItem(at: Self.blob(gone.id)) }
     loaded = true
     waiting = items.count
+    if legacy { save() }  // its keys out of the plain file
     return true
   }
 
@@ -164,7 +230,7 @@ final class MediaOutbox {
   private func save() -> Bool {
     guard loaded else { return false }
     waiting = items.count
-    guard let data = try? JSONEncoder().encode(items) else { return false }
+    guard let json = try? JSONEncoder().encode(items), let data = ManifestSeal.seal(json) else { return false }
     return (try? data.write(to: Self.index, options: [.atomic, .completeFileProtectionUntilFirstUserAuthentication]))
       != nil
   }
@@ -492,7 +558,13 @@ final class ReceivedMedia {
     var migrated = false
     do {
       if let data = try Self.contents(manifest) {
-        if let decoded = try? decoder.decode(Manifest.self, from: data) {
+        var json: Data?
+        switch ManifestSeal.open(data) {
+        case .notNow: return false
+        case .unreadable: break
+        case .json(let opened, let plain): (json, migrated) = (opened, plain)  // a plain one is written again sealed
+        }
+        if let decoded = json.flatMap({ try? decoder.decode(Manifest.self, from: $0) }) {
           found = decoded
         } else {
           // Kept aside with all it named, never read as empty.
@@ -541,7 +613,9 @@ final class ReceivedMedia {
   /// locked once it was unlocked after starting, so a Yo that comes then is noted (the photos and videos themselves
   /// have complete protection).
   private func store() -> Bool {
-    guard loaded, let data = try? JSONEncoder().encode(Manifest(pending: pending, saved: saved)) else { return false }
+    guard loaded, let json = try? JSONEncoder().encode(Manifest(pending: pending, saved: saved)),
+      let data = ManifestSeal.seal(json)
+    else { return false }
     return (try? data.write(to: manifest, options: [.atomic, .completeFileProtectionUntilFirstUserAuthentication])) != nil
   }
 
