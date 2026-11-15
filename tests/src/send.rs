@@ -29,6 +29,8 @@ fn main() {
     let (mut url, mut state, mut name, mut to) = (String::new(), String::new(), String::new(), String::new());
     let (mut count, mut every_ms, mut sync) = (1u32, 0u64, false);
     let (mut photo, mut video, mut group, mut delete) = (None::<String>, None::<String>, false, false);
+    let (mut make_group, mut members, mut add, mut remove, mut rename) =
+        (None::<String>, Vec::<String>::new(), None::<String>, None::<String>, None::<String>);
     while let Some(flag) = args.next() {
         match flag.as_str() {
             "--sync" => sync = true,
@@ -42,6 +44,11 @@ fn main() {
             "--to" => to = args.next().expect("--to"),
             "--count" => count = args.next().and_then(|v| v.parse().ok()).expect("--count"),
             "--every-ms" => every_ms = args.next().and_then(|v| v.parse().ok()).expect("--every-ms"),
+            "--make-group" => make_group = args.next(),
+            "--members" => members = args.next().expect("--members").split(',').map(str::to_owned).collect(),
+            "--add" => add = args.next(),
+            "--remove" => remove = args.next(),
+            "--rename" => rename = args.next(),
             other => panic!("unknown flag {other}"),
         }
     }
@@ -60,9 +67,43 @@ fn main() {
         println!("deleted");
         return;
     }
+    // A user id by name: a Yo first makes them a contact, then the contact names them.
+    let user_of = |client: &mut Client, name: &str| -> String {
+        client.send(name, yo_core::Content::Yo).expect("a Yo to them first");
+        let handle = yo_core::handle::skeleton(name);
+        client
+            .contacts()
+            .into_iter()
+            .find(|c| c.handles.iter().any(|h| yo_core::handle::skeleton(h) == handle))
+            .expect("the contact")
+            .user
+    };
+    if let Some(group_name) = make_group {
+        let ids: Vec<String> = members.iter().map(|m| user_of(&mut client, m)).collect();
+        let (id, _) = client.create_group(&group_name, &ids).expect("create group");
+        println!("group {group_name} {id} with {}", members.join(","));
+        return;
+    }
     if group {
         let found = client.groups().into_iter().find(|g| !g.left && g.name.eq_ignore_ascii_case(&to));
         to = found.expect("a group of that name (--sync first)").id;
+    }
+    if let Some(who) = add {
+        let id = user_of(&mut client, &who);
+        client.add_to_group(&to, &[id]).expect("add");
+        println!("added {who}");
+        return;
+    }
+    if let Some(who) = remove {
+        let id = user_of(&mut client, &who);
+        client.remove_from_group(&to, &[id]).expect("remove");
+        println!("removed {who}");
+        return;
+    }
+    if let Some(name) = rename {
+        client.rename_group(&to, &name).expect("rename");
+        println!("renamed to {name}");
+        return;
     }
     let send =
         |client: &mut Client, content| if group { client.send_group(&to, content) } else { client.send(&to, content) };
