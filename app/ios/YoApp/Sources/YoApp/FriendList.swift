@@ -1256,7 +1256,8 @@ struct LiveBar: View {
     RowButton(
       title, count: count, color: color, recording: recording, outgoing: bar.outgoing.last?.started, stop: stop,
       media: media, yo: yo, hint: hint, hold: hold, view: view, faded: friend.gone && bar.sent == nil,
-      icon: friend.group == nil ? nil : "person.3.fill", from: friend.group == nil ? nil : from, action: action)
+      icon: friend.group == nil ? nil : "person.3.fill", from: friend.group == nil ? nil : from, flies: true,
+      action: action)
       // Gone: still their name (whose bar it is), faded; a tap says "Not on Yo".
       .accessibilityValue(friend.gone ? "Not on Yo" : "")
   }
@@ -1339,14 +1340,19 @@ struct RowButton: View {
   @State private var touchedAt = Date.distantPast
   @State private var recordingByAction = false
   @AppStorage(SettingKey.leftHanded) private var leftHanded = false
+  /// A friend's bar: a Yo sent from it flies out of it, up and away.
+  var flies = false
+  /// The Yos on their way out of the bar now, each flying up and fading (FlyingYo).
+  @State private var flights: [UUID] = []
 
   init(
     _ title: String, count: Int = 1, color: Color, recording: Bool = false, outgoing: Date? = nil,
     stop: @escaping () -> Void = {},
     media: [Arrival] = [], yo: FriendList.Landing? = nil, hint: String? = nil, hold: ((Bool) -> Void)? = nil,
     view: @escaping (ThumbnailTouch) -> Void = { _ in }, faded: Bool = false, icon: String? = nil, from: String? = nil,
-    action: @escaping () -> Void
+    flies: Bool = false, action: @escaping () -> Void
   ) {
+    self.flies = flies
     self.icon = icon
     self.from = from
     self.title = title
@@ -1393,7 +1399,10 @@ struct RowButton: View {
           hold(recordingByAction)
         }
       } else {
-        Button(action: action) { label }
+        Button {
+          if flies { flights.append(UUID()) }
+          action()
+        } label: { label }
           .buttonStyle(RowPress())
           .disabled(viewing)  // a finger on the photos is not a press on the bar
       }
@@ -1408,6 +1417,16 @@ struct RowButton: View {
         undoRing(since: outgoing)
           .padding(leftHanded ? .trailing : .leading, BarLine.margin)
       }
+    }
+    // A Yo sent: it leaves from where an incoming one stands, up out of the bar.
+    .overlay(alignment: leftHanded ? .leading : .trailing) {
+      ZStack {
+        ForEach(flights, id: \.self) { id in
+          FlyingYo { flights.removeAll { $0 == id } }
+        }
+      }
+      .padding(leftHanded ? .leading : .trailing, BarLine.margin)
+      .allowsHitTesting(false)
     }
     .animation(.snappy, value: outgoing)
     .animation(.spring(duration: 0.4, bounce: 0.35), value: yo)
@@ -1569,7 +1588,10 @@ struct RowButton: View {
       }
       .accessibilityElement(children: .ignore)
       .accessibilityLabel((yo.count == 1 ? "Yo" : "\(yo.count) Yos") + (from.map { ", last from \($0)" } ?? ""))
-      .transition(.scale(scale: 0.3).combined(with: .opacity))
+      // It comes in from the bar's outer edge, sliding to its place; it goes by fading.
+      .transition(.asymmetric(
+        insertion: .move(edge: leftHanded ? .leading : .trailing).combined(with: .opacity),
+        removal: .opacity))
     }
   }
 }
@@ -2099,4 +2121,24 @@ struct PlayerLayer: UIViewRepresentable {
   FriendList()
     .environment(Inbox())
     .environment(Friends())
+}
+
+/// A Yo sent from a bar: "Yo" in the bar's type rises out of it and fades, as if thrown up and away.
+struct FlyingYo: View {
+  let done: () -> Void
+  @State private var gone = false
+  @Environment(\.accessibilityReduceMotion) private var reduceMotion
+
+  var body: some View {
+    Text("Yo")
+      .font(.yo(28, relativeTo: .title))
+      .foregroundStyle(.white)
+      .offset(y: gone && !reduceMotion ? -90 : 0)
+      .scaleEffect(gone ? 1.15 : 1)
+      .opacity(gone ? 0 : 1)
+      .onAppear {
+        withAnimation(.easeOut(duration: 0.55)) { gone = true } completion: { done() }
+      }
+      .accessibilityHidden(true)
+  }
 }
