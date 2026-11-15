@@ -1287,10 +1287,16 @@ impl Client {
             return self.fetch_bundles(user, &[]);
         }
         let missing = self.without_session(user);
-        if missing.is_empty() {
+        if missing.is_empty() && !self.roster_unknown(user) {
             return Ok(());
         }
         self.fetch_bundles(user, &missing)
+    }
+
+    /// A user something waits for whose devices this device does not know (a group's member it never wrote to, asked
+    /// for the group): looked up as for a new chat before anything is encrypted for them.
+    fn roster_unknown(&self, user: &str) -> bool {
+        user != self.state.user_id && self.roster(user).is_none_or(|(_, devices)| devices.is_empty())
     }
 
     /// New sessions with these devices of a user, from bundles the hub hands out; the user's devices as it names them
@@ -1663,7 +1669,7 @@ impl Client {
                 made == now
             };
             if !fresh {
-                if !self.without_session(&user).is_empty() {
+                if !self.without_session(&user).is_empty() || self.roster_unknown(&user) {
                     waiting.insert(user);
                     i += 1;
                     continue;
