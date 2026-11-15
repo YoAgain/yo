@@ -302,6 +302,8 @@ struct FriendList: View {
         .scrollTargetLayout()
       }
       .scrollBounceBehavior(.basedOnSize)
+      // Room above the first bar for the banner of a Yo that comes ("Yo from LEO"): it covers no bar.
+      .contentMargins(.top, 46, for: .scrollContent)
       .scrollDismissesKeyboard(.interactively)
       .scrollPosition($position)
       .onScrollTargetVisibilityChange(idType: String.self, threshold: 0.6) { ids in
@@ -320,17 +322,19 @@ struct FriendList: View {
       // Amethyst behind everything; in camera mode the live picture or the picked photo.
       .background { backdrop.ignoresSafeArea() }
       // The camera's controls in one row at the bottom, its button in the corner opening and closing it.
-      .overlay(alignment: .bottom) { cameraControls }
-      .navigationBarTitleDisplayMode(.inline)
-      .toolbarVisibility(cameraOn ? .visible : .hidden, for: .navigationBar)  // the list from the top, no heading
-      .toolbar {
-        // The camera mode (opened and closed at the bottom corner): what to do, at the top.
-        if cameraOn { ToolbarItem(placement: .principal) { title } }
+      .overlay(alignment: .bottom) {
+        // In camera mode what to do, just over its controls: at the top it would push the list down.
+        VStack(spacing: 10) {
+          if cameraOn { title }
+          cameraControls
+        }
       }
+      .navigationBarTitleDisplayMode(.inline)
+      .toolbarVisibility(.hidden, for: .navigationBar)  // the list from the top, no heading
     }
   }
 
-  /// No heading over the list (the bars are the app); in camera mode what to do, as a line at the top.
+  /// No heading over the list (the bars are the app); in camera mode what to do, as a line over the camera's controls.
   private var title: some View {
     Text(picked == nil ? "Tap a name for a photo. Hold for a video." : "Tap a name to send this photo.")
       .font(.system(size: 13, weight: .semibold))
@@ -339,7 +343,7 @@ struct FriendList: View {
       .fixedSize()
       .padding(.horizontal, 16)
       .frame(height: Metrics.titleHeight)
-      .glassEffect(scrolled ? .regular : .identity, in: .capsule)
+      .glassEffect(.regular, in: .capsule)
       .transition(.blurReplace)
   }
 
@@ -483,11 +487,11 @@ struct FriendList: View {
     .buttonStyle(.plain)
   }
 
-  /// "•••" at the bottom corner opposite the camera, as large as a toolbar button: Add Group, Invite and Settings
-  /// ("Settings (1)" while the account is not yet secured, AccountStore.toDo).
+  /// "•••" at the bottom corner opposite the camera, as large as the floating buttons of Apple's own apps: Add Group, Invite and Settings
+  /// (a red "1" on Settings while the account is not yet secured, AccountStore.toDo).
   private var moreMenu: some View {
     Menu {
-      Button("Add Group", systemImage: "person.3") { newGroup = true }
+      Button("+ Group", systemImage: "person.3") { newGroup = true }
       ShareLink(
         item: accounts.account.map { Invite.link(for: $0.username) } ?? URL(string: "https://justyo.co")!,
         message: Text("Yo! Add me on Yo:"),
@@ -498,12 +502,20 @@ struct FriendList: View {
         Label("Invite", systemImage: "square.and.arrow.up")
       }
       Divider()
-      Button(accounts.toDo > 0 ? "Settings (1)" : "Settings", systemImage: "gearshape") { settings = true }
+      // A red "1" while the account is not yet secured (AccountStore.toDo), as iOS badges: an image in its own
+      // colours, which a menu keeps.
+      Button { settings = true } label: {
+        if accounts.toDo > 0, let one = UIImage(systemName: "\(min(accounts.toDo, 50)).circle.fill") {
+          Label { Text("Settings") } icon: { Image(uiImage: one.withTintColor(.systemRed, renderingMode: .alwaysOriginal)) }
+        } else {
+          Label("Settings", systemImage: "gearshape")
+        }
+      }
     } label: {
       Image(systemName: "ellipsis")
-        .font(.system(size: 17, weight: .semibold))
+        .font(.system(size: 20, weight: .semibold))
         .foregroundStyle(.white)
-        .frame(width: 44, height: 44)
+        .frame(width: 52, height: 52)
         .contentShape(.circle)
     }
     .glassEffect(.regular.interactive(), in: .circle)
@@ -618,9 +630,9 @@ struct FriendList: View {
             Task { await readZooms() }
           } label: {
             Image(systemName: "arrow.triangle.2.circlepath")
-              .font(.system(size: 17, weight: .semibold))
+              .font(.system(size: 20, weight: .semibold))
               .foregroundStyle(.white)
-              .frame(width: 44, height: 44)
+              .frame(width: 52, height: 52)
               .contentShape(.circle)
           }
           .buttonStyle(.plain)
@@ -644,10 +656,10 @@ struct FriendList: View {
             withAnimation(.snappy) { cameraOn.toggle() }
           } label: {
             Image(systemName: cameraOn ? "xmark" : "camera.fill")
-              .font(.system(size: 17, weight: .semibold))
+              .font(.system(size: 20, weight: .semibold))
               .foregroundStyle(.white)
               .contentTransition(.symbolEffect(.replace))
-              .frame(width: 44, height: 44)
+              .frame(width: 52, height: 52)
               .contentShape(.circle)  // the whole circle, not only the thin "✕"
           }
           .buttonStyle(.plain)
@@ -1084,13 +1096,13 @@ struct LibraryLabel: View {
       Image(uiImage: thumbnail)
         .resizable()
         .scaledToFill()
-        .frame(width: 44, height: 44)
+        .frame(width: 52, height: 52)
         .clipShape(.circle)
     } else {
       Image(systemName: "photo.on.rectangle")
-        .font(.system(size: 17, weight: .semibold))
+        .font(.system(size: 20, weight: .semibold))
         .foregroundStyle(.white)
-        .frame(width: 44, height: 44)
+        .frame(width: 52, height: 52)
         .contentShape(.circle)
     }
   }
