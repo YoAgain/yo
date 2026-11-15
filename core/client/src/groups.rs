@@ -165,6 +165,9 @@ impl Client {
                 match self.start_chat(&Handle::user(&user_bytes(member)?)) {
                     Ok(_) => {}
                     Err(error) if retryable(&error) => return Err(error),
+                    // A verified member's new key, not confirmed yet: theirs is queued and waits in the outbox until
+                    // it is (as a 1:1 message would), not left out for good.
+                    Err(Error::Unconfirmed) => {}
                     Err(error) => {
                         self.note(format!("group member: {error}"));
                         continue;

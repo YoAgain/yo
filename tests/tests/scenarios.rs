@@ -791,3 +791,20 @@ fn a_copied_registration_registers_no_one() {
 fn yos_from_user(events: &[Event], from: &str) -> usize {
     events.iter().filter(|e| matches!(e, Event::Message { user, content: Content::Yo, .. } if user == from)).count()
 }
+
+/// A group made with a verified friend whose key changed: their copy of the group waits like a 1:1 message, and goes
+/// once the new key is confirmed (not left out for good).
+#[test]
+fn a_group_change_for_an_unconfirmed_member_waits_for_the_confirmation() {
+    let hub = TestHub::start();
+    let (mut a, pb, mut b2) = a_friend_with_another_key(&hub);
+    a.set_verified(&pb, true).unwrap();
+    let b = user_of(&pb);
+    let _ = a.create_group("PAIR", std::slice::from_ref(&b));
+    assert!(a.pending() >= 1, "held for the confirmation");
+    assert_eq!(unread_by(&mut b2), 0);
+    a.confirm_identity(&pb).unwrap();
+    a.send_yo(&pb).unwrap();
+    assert_eq!(a.pending(), 0);
+    assert!(unread_by(&mut b2) >= 2, "the group and the Yo went");
+}
