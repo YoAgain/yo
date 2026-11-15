@@ -76,16 +76,23 @@ const TOKENS_RETRY_MS: u64 = 3600 * 1000;
 /// A contact whose app is too old for sessions is asked about again at most this often (spec 4.2).
 const OUTDATED_RETRY_MS: u64 = 3600 * 1000;
 
-/// Errors that say "not now", not "never": the envelope or operation is tried again later. A `426` (this app too old,
-/// spec 6.3) too: nothing goes until the app is updated, and the update sends what waits.
-fn retryable(error: &Error) -> bool {
+/// Errors that say "not now", not "never" (spec 6.6), the one rule of the core and the apps: the envelope or
+/// operation is tried again later. No network, `429`, `507` (no room now), `5xx`; a `426` (this app too old, spec
+/// 6.3) too: nothing goes until the app is updated, and the update sends what waits.
+pub fn retryable(error: &Error) -> bool {
     match error {
         Error::Network(_) => true,
         Error::Refused(status) => {
-            *status == status::RATE_LIMITED || *status == status::UPGRADE_REQUIRED || *status >= 500
+            matches!(*status, status::RATE_LIMITED | status::UPGRADE_REQUIRED | status::INSUFFICIENT_STORAGE | 500..)
         }
         _ => false,
     }
+}
+
+/// For the apps: whether to keep what they were doing (a photo or video to upload and send, an account to open) and
+/// try again later: what `retryable` says, and a state that did not save (a full disk).
+pub fn retry_later(error: &Error) -> bool {
+    retryable(error) || matches!(error, Error::Save(_))
 }
 
 /// What happened, for the app to show. `user` is the contact's user id (hex): what `contacts()` describes and what

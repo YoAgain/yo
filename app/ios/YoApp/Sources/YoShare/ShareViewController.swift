@@ -188,7 +188,7 @@ final class ShareModel {
           case .video: received += try client.sendVideo(toTarget: friend.to, media: sealed.media, durationMs: file.durationMs)
           }
           sent += 1
-        } catch let error as YoError where mediaRetryLater(error: error) {
+        } catch let error as YoError where retryLater(error: error) {
           break
         } catch {
           // Refused for good (or the state would not do): this one is not sent; the next may be.

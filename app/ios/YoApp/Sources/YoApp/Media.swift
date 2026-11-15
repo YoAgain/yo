@@ -459,7 +459,7 @@ final class MediaOutbox {
       return .stopped  // this build too old: kept, for the build after it
     } catch YoError.Blocked, YoError.Unconfirmed {
       return .held  // kept until they are unblocked or their key confirmed, never dropped
-    } catch let error as YoError where mediaRetryLater(error: error) {
+    } catch let error as YoError where retryLater(error: error) {
       return .later
     } catch {
       return .dropped  // not on Yo, or refused for good
@@ -691,7 +691,7 @@ final class ReceivedMedia {
           if data == nil && Prefetch.has(media) { continue }
         } catch YoError.Refused(let status) where status == 426 {
           return  // this build too old: noted still, for the build after it
-        } catch let error as YoError where mediaRetryLater(error: error) {
+        } catch let error as YoError where retryLater(error: error) {
           continue  // noted still: tried again now, or with the next Yo or opening
         } catch {
           data = nil  // does not open: nothing to keep

@@ -222,13 +222,13 @@ pub fn seal_media(plain: Vec<u8>, width: u16, height: u16) -> Result<SealedMedia
     Ok(SealedMedia { media: media.into(), ciphertext })
 }
 
-/// Whether a refusal of `upload_media` means "later" (the account's quota for now, no room at the hub, no network, a
-/// state that did not save): keep the photo or video and try again.
+/// Whether an error means "later", not "never" (spec 6.6, the core's one rule, `yo_core::retry_later`): no network, a
+/// state that did not save, `429`, `426`, `507`, `5xx`. Keep the photo, video or operation and try again.
 #[uniffi::export]
-pub fn media_retry_later(error: &YoError) -> bool {
+pub fn retry_later(error: &YoError) -> bool {
     match error {
         YoError::Network { .. } | YoError::Save { .. } => true,
-        YoError::Refused { status } => *status == 429 || *status == 507 || *status >= 500,
+        YoError::Refused { status } => yo_core::retryable(&yo_core::Error::Refused(*status)),
         _ => false,
     }
 }
@@ -940,7 +940,7 @@ impl YoClient {
     }
 
     /// Uploads a sealed photo or video for `fetches` fetches (`media_chat`), before its Yo (`send_photo`,
-    /// `send_video`). Signed under the client, sent without it: other calls go on meanwhile. `media_retry_later`
+    /// `send_video`). Signed under the client, sent without it: other calls go on meanwhile. `retry_later`
     /// tells which refusals mean "later".
     pub fn upload_media(&self, media: YoMedia, ciphertext: Vec<u8>, fetches: u32) -> Result<(), YoError> {
         let media: yo_core::Media = media.try_into()?;

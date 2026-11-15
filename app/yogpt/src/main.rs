@@ -36,7 +36,7 @@ use std::sync::mpsc::{sync_channel, RecvTimeoutError, SyncSender, TrySendError};
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::{Duration, Instant};
 use yo_core::media::{self, Media};
-use yo_core::{Client, Content, Error, Event, Push, Response, Store, Transport};
+use yo_core::{retryable, Client, Content, Error, Event, Push, Response, Store, Transport};
 
 /// How many Yos an answer has, in percent: one mostly, more ever rarer (a half-normal tail), five at most.
 const YOS: [u32; 5] = [70, 17, 8, 4, 1];
@@ -455,11 +455,6 @@ fn open(account: &Account) -> Option<Client> {
             }
         }
     }
-}
-
-/// Network trouble, or the hub saying "not now".
-fn retryable(error: &Error) -> bool {
-    matches!(error, Error::Network(_) | Error::Refused(429 | 500..))
 }
 
 const GONE: &str = "the hub no longer knows this device (replaced by another, the name released, or the hub reset)";

@@ -254,13 +254,7 @@ final class AccountStore {
 
   /// An error opening a state that is there and reads: not saved (a full disk), or a registration to finish that did
   /// not reach the hub now. Never a reason to sign in again, which would replace this device.
-  nonisolated private static func notNow(_ error: YoError) -> Bool {
-    switch error {
-    case .Save, .Network: true
-    case .Refused(let status): status == 426 || status == 429 || status >= 500
-    default: false
-    }
-  }
+  nonisolated private static func notNow(_ error: YoError) -> Bool { retryLater(error: error) }  // the core's one rule
 
   /// Opening under way (`open`).
   private var opening = false

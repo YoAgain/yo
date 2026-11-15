@@ -274,8 +274,16 @@ fn the_app_layer_sends_a_photo_to_a_new_friend_and_yos_go_while_it_uploads() {
     assert_eq!((media.width, media.height), (1600, 1200));
     assert_eq!(b.fetch_media(media.clone()).unwrap(), Some(photo));
     assert_eq!(b.fetch_media(media).unwrap(), None, "fetched by its one device: gone");
-    assert!(yo::media_retry_later(&yo::YoError::Refused { status: 507 }));
-    assert!(!yo::media_retry_later(&yo::YoError::NotOnYo));
+    assert!(yo::retry_later(&yo::YoError::Refused { status: 507 }));
+    assert!(!yo::retry_later(&yo::YoError::NotOnYo));
+    // One rule for every path (spec 6.6): the core's, a too old app (426) and a full disk included.
+    for status in [426, 429, 500, 503, 507] {
+        assert!(yo::retry_later(&yo::YoError::Refused { status }), "{status}");
+        assert!(yo_core::retryable(&yo_core::Error::Refused(status)), "{status}");
+    }
+    for status in [400, 404, 409, 413] {
+        assert!(!yo::retry_later(&yo::YoError::Refused { status }), "{status}");
+    }
 }
 
 #[test]
@@ -1036,7 +1044,7 @@ fn a_photo_whose_state_did_not_save_is_tried_again_later() {
     disk.0.store(true, std::sync::atomic::Ordering::Relaxed);
     let error = a.media_chat(pb.clone()).err().expect("not saved");
     assert!(matches!(error, yo::YoError::Save { .. }), "{error:?}");
-    assert!(yo::media_retry_later(&error), "kept for later");
+    assert!(yo::retry_later(&error), "kept for later");
     disk.0.store(false, std::sync::atomic::Ordering::Relaxed);
     assert_eq!(a.media_chat(pb).unwrap().fetches, 1);
 }
