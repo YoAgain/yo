@@ -539,6 +539,12 @@ pub fn username_free(transport: Arc<dyn HttpTransport>, username: String) -> Res
     Ok(Client::username_free(&Http(transport), &username)?)
 }
 
+/// A crash report to the Yo team, sent without an account (not linked to anyone): a few lines and the app version.
+#[uniffi::export]
+pub fn send_crash_report(transport: Arc<dyn HttpTransport>, text: String, app_version: String) -> Result<(), YoError> {
+    Ok(Client::send_crash(&Http(transport), &text, &app_version)?)
+}
+
 /// What may be typed as a username (spec 3.3): the allowed characters as typed (NFC), a letter or emoji first, at
 /// most 16. The app keeps its field to this, so it can never disagree with the hub.
 #[uniffi::export]

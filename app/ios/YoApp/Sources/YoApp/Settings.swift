@@ -50,7 +50,7 @@ struct SettingsView: View {
   @State private var deleteProblem: String?
   @State private var sendingFeedback = false
   /// "Send Crash Reports" (CrashReports.on), as the switch shows it.
-  @State private var crashReports = true
+  @State private var crashReports = false
   @State private var requestsOpen = true
 
   @Environment(\.dynamicTypeSize) private var typeSize
@@ -198,7 +198,7 @@ struct SettingsView: View {
               Label("Send Crash Reports", systemImage: "ladybug.fill").labelStyle(Tile(.gray))
             }
           } footer: {
-            Text("If Yo crashes, a short technical report goes to the Yo team. It holds no Yos, names or photos.")
+            Text("If Yo crashes, a short technical report goes to the Yo team. It holds no Yos, names or photos and is not linked to you.")
           }
         }
       }

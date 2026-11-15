@@ -39,6 +39,8 @@ pub struct Limits {
     pub report_per_user_day: u32,
     /// Feedback on the app, by one user (spec 6.3).
     pub feedback_per_user_day: u32,
+    /// Crash reports from one address a day (spec 6.4): no account to count them by.
+    pub crash_per_ip_day: u32,
     pub storage_per_user_hour: u32,
     pub envelope_ttl_days: u64,
     /// A user without a backup record whose devices made no request for this long is removed with its name
@@ -92,6 +94,7 @@ impl Default for Limits {
             backup_per_ip_hour: 10,
             report_per_user_day: 20,
             feedback_per_user_day: 10,
+            crash_per_ip_day: 5,
             storage_per_user_hour: 120,
             envelope_ttl_days: 30,
             unsecured_idle_days: 365,
@@ -125,6 +128,7 @@ impl Limits {
             backup_per_ip_hour: u32::MAX,
             report_per_user_day: u32::MAX,
             feedback_per_user_day: u32::MAX,
+            crash_per_ip_day: u32::MAX,
             storage_per_user_hour: u32::MAX,
             envelope_ttl_days: 30,
             unsecured_idle_days: 365,

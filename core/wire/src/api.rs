@@ -17,6 +17,8 @@ pub const ACCOUNT: &str = "/v1/account";
 pub const REPORT: &str = "/v1/report";
 /// `POST`: feedback on the app, for the operator (spec 6.3).
 pub const FEEDBACK: &str = "/v1/feedback";
+/// A crash report: no account, no signature (spec 6.4); the body is a `Feedback`.
+pub const CRASH: &str = "/v1/crash";
 /// The account's storage, sealed (spec 6.9).
 pub const STORAGE: &str = "/v1/storage";
 /// Photos and videos, encrypted (spec 6.8).
@@ -52,6 +54,7 @@ pub fn anonymous(method: &str, path: &str) -> bool {
     (method == "POST" && path.starts_with(&format!("{INBOX}/")) && path != INBOX_ACK)
         || path.starts_with(&format!("{BLOBS}/"))
         || path == crate::token::DIRECTORY
+        || path == CRASH
 }
 
 pub fn deliver_path(user: &UserId) -> String {

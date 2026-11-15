@@ -1,25 +1,38 @@
-// Crash reports, sent on their own (Settings › "Send Crash Reports", on by default): iOS hands the app its crashes
-// at the next start (MetricKit, at most a day later); each goes to the Yo team as feedback (POST /v1/feedback), a
-// few lines: the build, iOS, the kind of crash and the crashed thread's frames. Nothing of the person's Yos, names
-// or photos is in them (the frames are offsets into the binaries).
+// Crash reports, only with the person's consent (App Review 5.1.1(ii)): iOS hands the app its crashes at the next
+// start (MetricKit, at most a day later). The first time one comes, the app asks ("Yo Crashed": Always Send / Not
+// Now); Settings › "Send Crash Reports" changes it later. Each goes to the Yo team without the account (POST
+// /v1/crash, unsigned, as feedback marked auto), a few lines: the build, iOS, the kind of crash and the crashed
+// thread's frames. Nothing of the person's Yos, names or photos is in them (the frames are offsets into the binaries).
 import Foundation
 import MetricKit
 import YoCore
 
-@MainActor
+@MainActor @Observable
 final class CrashReports: NSObject, MXMetricManagerSubscriber {
   static let shared = CrashReports()
 
   private static let onKey = "crashReports.on"
+  private static let askedKey = "crashReports.asked"
   private static let pendingKey = "crashReports.pending"
 
-  /// Whether crashes go to the Yo team on their own.
+  /// Whether crashes go to the Yo team: off until the person says so.
   static var on: Bool {
-    get { UserDefaults.standard.object(forKey: onKey) as? Bool ?? true }
+    get { UserDefaults.standard.object(forKey: onKey) as? Bool ?? false }
     set {
       UserDefaults.standard.set(newValue, forKey: onKey)
+      UserDefaults.standard.set(true, forKey: askedKey)
       if !newValue { UserDefaults.standard.removeObject(forKey: pendingKey) }
     }
+  }
+
+  /// A crash came and the person was never asked: the app asks now ("Yo Crashed").
+  var asking = false
+
+  /// The answer to "Yo Crashed": always send (this one too), or not now (this one dropped, the switch stays off).
+  func answer(always: Bool) {
+    asking = false
+    Self.on = always
+    if always { flush() }
   }
 
   /// Reports waiting for the account to open (or the hub to answer): at most five, the newest.
@@ -35,21 +48,24 @@ final class CrashReports: NSObject, MXMetricManagerSubscriber {
     let texts = payloads.flatMap { $0.crashDiagnostics ?? [] }.map(Self.text)
     guard !texts.isEmpty else { return }
     Task { @MainActor in
-      guard Self.on else { return }
+      let asked = UserDefaults.standard.bool(forKey: Self.askedKey)
+      guard Self.on || !asked else { return }
       pending += texts
+      if Self.on { flush() } else { asking = true }
     }
   }
 
-  /// Sends what waits, with the account's client; kept for the next time if the hub does not take it now.
-  func flush(_ client: YoClient) {
+  /// Sends what waits, without the account; kept for the next time if the hub does not take it now.
+  func flush() {
     guard Self.on, !pending.isEmpty else { return }
     let reports = pending
     let version = FeedbackSheet.appVersion
+    let transport = Hub.transport
     Task {
       var left: [String] = []
       for report in reports {
         do {
-          try await Hub.run { try client.sendFeedback(text: report, appVersion: version) }
+          try await Hub.run { try sendCrashReport(transport: transport, text: report, appVersion: version) }
         } catch let error as YoError where retryLater(error: error) {
           left.append(report)
         } catch {}  // refused for good (too long, too many today): not again
@@ -62,7 +78,7 @@ final class CrashReports: NSObject, MXMetricManagerSubscriber {
   nonisolated private static func text(_ crash: MXCrashDiagnostic) -> String {
     let meta = crash.metaData
     var lines = [
-      "[crash] \(meta.applicationBuildVersion) · \(meta.osVersion) · \(meta.deviceType)",
+      "\(meta.applicationBuildVersion) · \(meta.osVersion) · \(meta.deviceType)",
       "exception \(crash.exceptionType.map { "\($0)" } ?? "-") signal \(crash.signal.map { "\($0)" } ?? "-")"
         + (crash.terminationReason.map { " · \($0)" } ?? ""),
     ]

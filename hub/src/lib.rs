@@ -365,6 +365,7 @@ impl Hub {
             .route(api::ACCOUNT, delete(delete_account))
             .route(api::REPORT, post(report))
             .route(api::FEEDBACK, post(feedback))
+            .route(api::CRASH, post(crash))
             .route(api::STORAGE, get(get_storage).put(put_storage))
             .route(yo_wire::token::DIRECTORY, get(token_directory))
             .route(hubsig::KEY_PATH, get(hub_key))
@@ -1006,6 +1007,15 @@ async fn feedback(State(hub): Hubs, method: Method, uri: Uri, headers: HeaderMap
         Write::Done(()) => Ok(StatusCode::NO_CONTENT),
         Write::Refused(_) => Err(refuse(StatusCode::GONE)),
     }
+}
+
+/// A crash report (spec 6.4): unsigned, no account; kept as feedback marked `auto`, counted by the address.
+async fn crash(State(hub): Hubs, ConnectInfo(peer): Peer, headers: HeaderMap, body: Bytes) -> Res<StatusCode> {
+    hub.limit_ip("crash", peer, &headers, hub.config.limits.crash_per_ip_day, DAY)?;
+    let request: api::Feedback = decode(&body)?;
+    let (text, app_version) = request.check().map_err(|_| bad())?;
+    hub.db.crash(text, app_version, now_ms())?;
+    Ok(StatusCode::NO_CONTENT)
 }
 
 /// The signing device's account's storage (spec 6.9): `404` when there is none yet.

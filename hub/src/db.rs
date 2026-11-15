@@ -257,7 +257,9 @@ CREATE TABLE IF NOT EXISTS feedback (
     user_id BLOB NOT NULL,
     text TEXT NOT NULL,
     app_version TEXT NOT NULL,
-    created_at INTEGER NOT NULL
+    created_at INTEGER NOT NULL,
+    -- 1: a crash report the app sent on its own, without an account (user_id empty)
+    auto INTEGER NOT NULL DEFAULT 0
 );
 CREATE INDEX IF NOT EXISTS feedback_by_user ON feedback(user_id);
 -- Each user's contact key as a check, never the key (spec 4.10): a delivery that shows it is a contact's; else it
@@ -516,6 +518,15 @@ fn without_grace(conn: &Connection) -> rusqlite::Result<()> {
     conn.execute_batch("DROP TABLE IF EXISTS requests_day")
 }
 
+/// Feedback of before crash reports: the `auto` column comes (0 for all of it).
+fn with_auto_feedback(conn: &Connection) -> rusqlite::Result<()> {
+    let has = conn.prepare("SELECT 1 FROM pragma_table_info('feedback') WHERE name = 'auto'")?.exists([])?;
+    if !has {
+        conn.execute_batch("ALTER TABLE feedback ADD COLUMN auto INTEGER NOT NULL DEFAULT 0")?;
+    }
+    Ok(())
+}
+
 fn check_version(conn: &Connection) -> rusqlite::Result<()> {
     let version: i64 = conn.query_row("PRAGMA user_version", [], |row| row.get(0))?;
     let tables: i64 =
@@ -574,6 +585,7 @@ impl Db {
         }
         without_grace(&conn)?;
         conn.execute_batch(SCHEMA)?;
+        with_auto_feedback(&conn)?;
         Ok(Db { conn: Mutex::new(conn) })
     }
 
@@ -930,6 +942,16 @@ impl Db {
             .execute(params![user, text, app_version, now])?;
         tx.commit()?;
         Ok(Write::Done(()))
+    }
+
+    /// A crash report: feedback the app sent on its own (`auto` = 1), with no user (an empty id).
+    pub fn crash(&self, text: &str, app_version: &str, now: u64) -> rusqlite::Result<()> {
+        self.conn()
+            .prepare_cached(
+                "INSERT INTO feedback (user_id, text, app_version, created_at, auto) VALUES (X'', ?1, ?2, ?3, 1)",
+            )?
+            .execute(params![text, app_version, now])?;
+        Ok(())
     }
 
     // ---- storage (spec 6.9) ----

@@ -295,6 +295,9 @@ fn bodies_are_held_to_their_limits() {
     for body in [feedback(vec![b'x'; 2001], 1), feedback(Vec::new(), 1), feedback(b"x".to_vec(), 65)] {
         assert_eq!(signed(&mut a, "POST", api::FEEDBACK, &body).0, status::BAD_REQUEST);
     }
+    // A crash report: the same body, no account, no signature (6.4).
+    assert_eq!(raw(&hub, "POST", api::CRASH, &[], feedback(b"[crash] x".to_vec(), 9)).0, status::NO_CONTENT);
+    assert_eq!(raw(&hub, "POST", api::CRASH, &[], feedback(vec![b'x'; 2001], 1)).0, status::BAD_REQUEST);
     // Backup (7): wraps 256 bytes, sealed 60 KiB, a locator of 16 bytes or none, auth keys that are keys.
     let mut record = backup_record(Vec::new());
     record.sealed = vec![1; 60 * 1024].into();

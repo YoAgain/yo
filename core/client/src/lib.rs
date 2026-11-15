@@ -692,6 +692,16 @@ impl Client {
         }
     }
 
+    /// A crash report to the operator, without an account (spec 6.4): text and app version as feedback, unsigned.
+    pub fn send_crash(transport: &dyn Transport, text: &str, app_version: &str) -> Result<()> {
+        let body = encode(&api::Feedback { text: text.as_bytes().into(), app_version: app_version.as_bytes().into() });
+        let response = transport.request("POST", api::CRASH, &[], &body).map_err(Error::Network)?;
+        match response.status {
+            status::NO_CONTENT => Ok(()),
+            _ => Err(refused(&response)),
+        }
+    }
+
     /// A device's keys, certificate and first prekeys, and the proof of possession over the handle it registers
     /// with (spec 6.4).
     fn new_device(

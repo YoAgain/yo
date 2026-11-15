@@ -85,13 +85,20 @@ struct YoApp: App {
         ShareInbox.publish(list)
       }
       // The core opened (after a start or a sign-in): what waits goes.
+      // A crash came and the person was never asked (CrashReports): once, then Settings.
+      .alert("Yo Crashed", isPresented: Binding(get: { CrashReports.shared.asking }, set: { _ in })) {
+        Button("Always Send") { CrashReports.shared.answer(always: true) }
+        Button("Not Now", role: .cancel) { CrashReports.shared.answer(always: false) }
+      } message: {
+        Text("Send a short crash report to the Yo team? It holds no Yos, names or photos and is not linked to you.")
+      }
       .onChange(of: accounts.client == nil, initial: true) { _, none in
         guard !none, let client = accounts.client else { return }
         outbox.received = { [inbox, friends, accounts] events, contacts, client in
           await inbox.handle(events, contacts: contacts, client: client, accounts: accounts, friends: friends)
         }
         outbox.flush(accounts: accounts)
-        CrashReports.shared.flush(client)
+        CrashReports.shared.flush()
         ShareInbox.take(outbox: outbox, accounts: accounts)
         inbox.fetchMedia(client: client)
         // The account's storage: after a restore, the friends and the app icon of the phone before.

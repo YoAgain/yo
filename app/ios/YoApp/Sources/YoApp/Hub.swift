@@ -123,6 +123,7 @@ final class HubTransport: HttpTransport {
     return (method == "POST" && path.hasPrefix("/v1/inbox/") && path != "/v1/inbox/ack")
       || path.hasPrefix("/v1/blobs/")
       || path == "/.well-known/private-token-issuer-directory"
+      || path == "/v1/crash"
   }
 
   func request(method: String, path: String, headers: [Header], body: Data) -> HttpResult {
