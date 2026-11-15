@@ -321,3 +321,81 @@ fn a_new_phones_message_right_after_a_forgery_is_kept_not_lost() {
     let all: Vec<String> = first.into_iter().chain(later).collect();
     assert!(all.contains(&"new phone".to_owned()), "{all:?}");
 }
+
+/// First Yos to a new friend, many at once and both ways: twenty strangers write to Bea by name while Bea writes to
+/// each of them first too (sessions started from both ends at the same moment), some meeting a lost answer or a 429.
+/// No first send fails for good; every one arrives once.
+#[test]
+fn first_yos_crossing_at_once_all_arrive() {
+    use std::thread;
+    let hub = TestHub::start();
+    let n = random_u64() % 100_000;
+    let bea_name = format!("Fb{n}");
+    let bea = Arc::new(Mutex::new(by_name(Http::new(hub.url()), &bea_name)));
+    let strangers: Vec<(Arc<Http>, Client)> = (0..20)
+        .map(|i| {
+            let http = Http::new(hub.url());
+            let c = by_name(http.clone(), &format!("Fs{n}x{i}"));
+            (http, c)
+        })
+        .collect();
+    let users: Vec<String> = strangers.iter().map(|(_, c)| c.user_id().to_owned()).collect();
+    let bea_id = bea.lock().unwrap().user_id().to_owned();
+    let to_bea = yo_wire::api::deliver_path(&yo_tests::user_id(&bea_id));
+    let handles: Vec<_> = strangers
+        .into_iter()
+        .enumerate()
+        .map(|(i, (http, mut c))| {
+            let (name, to_bea) = (bea_name.clone(), to_bea.clone());
+            thread::spawn(move || {
+                match i % 4 {
+                    1 => http.fault(&to_bea, yo_tests::Fault::LoseAnswer),
+                    2 => http.fault(&to_bea, yo_tests::Fault::Answer(429)),
+                    _ => {}
+                }
+                // What any call hands back is kept: a send reads the inbox too (its events come with it).
+                let mut seen = Vec::new();
+                let first = c.send(&name, text(&format!("from {i}")));
+                assert!(first.is_ok() || c.waiting() > 0, "first send {i} failed for good: {first:?}");
+                seen.extend(texts(&first.unwrap_or_default()));
+                for _ in 0..20 {
+                    if c.waiting() == 0 {
+                        break;
+                    }
+                    seen.extend(texts(&c.sync(0).unwrap_or_default()));
+                    std::thread::sleep(std::time::Duration::from_millis(100));
+                }
+                assert_eq!(c.waiting(), 0, "first send {i} still waiting");
+                (c, seen)
+            })
+        })
+        .collect();
+    let mut got = Vec::new();
+    {
+        let mut b = bea.lock().unwrap();
+        for user in &users {
+            got.extend(texts(&b.send(user, text("hi from Bea")).unwrap()));
+        }
+    }
+    let mut strangers: Vec<(Client, Vec<String>)> = handles.into_iter().map(|h| h.join().unwrap()).collect();
+    let mut b = bea.lock().unwrap();
+    for _ in 0..10 {
+        got.extend(texts(&b.sync(0).unwrap()));
+        if got.len() >= 20 {
+            break;
+        }
+    }
+    got.sort();
+    let mut want: Vec<String> = (0..20).map(|i| format!("from {i}")).collect();
+    want.sort();
+    assert_eq!(got, want, "each first Yo once");
+    for (i, (s, theirs)) in strangers.iter_mut().enumerate() {
+        for _ in 0..5 {
+            theirs.extend(texts(&s.sync(0).unwrap()));
+            if !theirs.is_empty() {
+                break;
+            }
+        }
+        assert_eq!(theirs.as_slice(), ["hi from Bea"], "stranger {i}");
+    }
+}

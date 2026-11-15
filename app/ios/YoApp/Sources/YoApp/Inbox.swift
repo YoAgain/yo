@@ -271,6 +271,8 @@ final class Inbox {
       keepAndRetry(friend, accounts: accounts, friends: friends)
       return "Not Sent"
     } catch {
+      // Refused for good: why, for the diagnostics (a first Yo that said "Not Sent" in the Simulator once).
+      Perf.mark("send.refused \(error)")
       return "Not Sent"
     }
   }
