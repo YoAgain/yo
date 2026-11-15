@@ -19,6 +19,15 @@ enum Prefetch {
 
   private static var directory: URL? { ShareBridge.container?.appending(path: "Prefetched") }
 
+  /// The folder, never in the backup: what is in it is opened, a photo meant to be seen once (as MediaStorage's).
+  private static func make(_ directory: URL) {
+    try? FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+    var directory = directory
+    var values = URLResourceValues()
+    values.isExcludedFromBackup = true
+    try? directory.setResourceValues(values)
+  }
+
   private static func name(_ media: YoMedia) -> String { media.id.map { String(format: "%02x", $0) }.joined() }
   private static func file(_ media: YoMedia) -> URL? { directory?.appending(path: name(media) + ".media") }
   private static func mark(_ media: YoMedia) -> URL? { directory?.appending(path: name(media) + ".fetching") }
@@ -36,7 +45,7 @@ enum Prefetch {
       }
     }
     guard !media.isEmpty, let owner = Hub.bytes(client.userId())?.base64EncodedString() else { return }
-    try? FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+    make(directory)
     for one in media where one.size <= largest {
       // Room to write it, with plenty to spare: a fetch whose file then cannot be written has used this device's
       // fetch at the hub, and the photo would be lost. Without, the app fetches it itself (and keeps it in memory
@@ -82,7 +91,7 @@ enum Prefetch {
   /// App Group (Yo Dev): nothing to share it with, true.
   static func claim(_ media: YoMedia) -> Bool {
     guard let directory, let mark = mark(media) else { return true }
-    try? FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+    make(directory)
     if FileManager.default.fileExists(atPath: mark.path) && !underWay(media) {
       try? FileManager.default.removeItem(at: mark)
     }
