@@ -89,7 +89,7 @@ impl Default for Limits {
             db_min_free_bytes: GIB,
             register_per_ip_hour: 10,
             name_check_per_ip_minute: 60,
-            requests_per_pair_day: 3,
+            requests_per_pair_day: 10,
             request_recipients_per_sender_day: 20,
             backup_per_ip_hour: 10,
             report_per_user_day: 20,
