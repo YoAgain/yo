@@ -66,6 +66,14 @@ final class Inbox {
   static let batchSeconds = 0.1
   /// Who sent the last Yo on a group's bar (by its `Friend.mediaKey`): shown small beside its "Yo!!".
   var groupSenders: [String: String] = [:]
+  /// Group members' names by user id (hex), as their Yos came: who a group's photo is from in the viewer.
+  @ObservationIgnored var memberNames: [String: String] = [:]
+
+  /// Who a group's photo or video is from (their user id, hex): its id is the group's id (32 hex), the sender's (32
+  /// hex), then the rest (`mediaID`).
+  static func sender(of arrival: Arrival) -> String? {
+    arrival.id.count > 64 ? String(arrival.id.dropFirst(32).prefix(32)) : nil
+  }
   /// Notifications already taken in, so one tapped and one collected on opening count once.
   @ObservationIgnored private var taken: Set<String> = []
   /// Photos and videos not yet seen, by sender, oldest first: kept on this iPhone until then (ReceivedMedia). By the
@@ -97,6 +105,9 @@ final class Inbox {
 
   /// Signed out: what waited to be seen is gone (MediaStorage.clearAll deleted it), and Yos not shown yet.
   func forgetMedia() {
+    unsent = [:]  // the account's Yos kept to send again: not the next account's
+    resending?.cancel()
+    resending = nil
     unseenMedia = [:]
     ready = []
     uncounted = [:]
@@ -254,8 +265,40 @@ final class Inbox {
     } catch YoError.Replaced {
       accounts.replaced(client)
       return "Not Sent"
+    } catch let error as YoError where retryLater(error: error) {
+      // Not now (no network, the hub's limits; a first Yo the core cannot keep yet, its friend not looked up): kept
+      // here and tried again by itself, a little later each time, until it goes or is refused for good.
+      keepAndRetry(friend, accounts: accounts, friends: friends)
+      return "Not Sent"
     } catch {
       return "Not Sent"
+    }
+  }
+
+  /// Yos that met "not now" before the core could keep them, by friend: sent again from here (`keepAndRetry`).
+  @ObservationIgnored private var unsent: [UUID: (friend: Friend, count: Int)] = [:]
+  @ObservationIgnored private var resending: Task<Void, Never>?
+
+  /// Keeps one more Yo for `friend` and sends what is kept again after 2 s, then less and less often (up to 30 s).
+  private func keepAndRetry(_ friend: Friend, accounts: AccountStore, friends: Friends) {
+    unsent[friend.key, default: (friend, 0)].count += 1
+    guard resending == nil else { return }
+    resending = Task {
+      var pause = 2.0
+      while !unsent.isEmpty, !Task.isCancelled {
+        try? await Task.sleep(for: .seconds(pause))
+        pause = min(pause * 2, 30)
+        guard let client = accounts.client else { break }
+        // Taken out, each sent again: one that meets "not now" again comes back by itself (`sendNow` keeps it).
+        let round = unsent
+        unsent = [:]
+        for kept in round.values {
+          for _ in 0..<kept.count {
+            _ = await sendNow(to: kept.friend, client: client, accounts: accounts, friends: friends)
+          }
+        }
+      }
+      resending = nil
     }
   }
 
@@ -408,7 +451,9 @@ final class Inbox {
         }
         guard let bar = friends.groupBar(group) else { break }
         let from = contacts.first { $0.user == user }
-        groupSenders[bar.mediaKey] = friends.all.first { $0.user == user }?.name ?? from?.handles.first ?? from?.name ?? "?"
+        let senderName = friends.all.first { $0.user == user }?.name ?? from?.handles.first ?? from?.name ?? "?"
+        groupSenders[bar.mediaKey] = senderName
+        memberNames[user] = senderName
         received(id: "\(group)/\(user)/\(sentAtMs)", from: bar.name)
         count(from: bar.name)
         if let (media, kind) = kind.media {

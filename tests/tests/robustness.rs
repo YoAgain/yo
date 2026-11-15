@@ -279,3 +279,21 @@ fn a_signed_put_saves_its_signing_time() {
     a.set_push(yo_core::Push::none()).unwrap();
     assert_ne!(*saved.0.lock().unwrap(), before, "saved after the signed request");
 }
+
+/// The first Yo to a new friend while the hub cannot answer who they are (its lookups limited, 429): an error the app
+/// keeps and tries again ("not now", one rule for all, spec 6.6), and the Yo goes once it can.
+#[test]
+fn a_first_yo_the_hub_cannot_look_up_now_goes_when_tried_again() {
+    let hub = TestHub::start();
+    let n = random_u64() % 100_000_000;
+    let (pa, pb) = (username(n), username(n + 1));
+    let ha = Http::new(hub.url());
+    let mut a = register(ha.clone(), &pa, None);
+    let mut b = register(Http::new(hub.url()), &pb, None);
+    ha.fault(api::LOOKUP, Fault::Answer(429));
+    let error = a.send_yo(&pb).unwrap_err();
+    assert!(yo_core::retry_later(&error), "{error:?}: kept and tried again");
+    a.send_yo(&pb).unwrap();
+    let yos = b.sync(0).unwrap().iter().filter(|e| matches!(e, Event::Message { content: Content::Yo, .. })).count();
+    assert_eq!(yos, 1);
+}
