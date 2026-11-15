@@ -386,3 +386,30 @@ fn a_retry_sends_no_yo_of_a_group_left() {
     let again = take(&mut b);
     assert!(group_yos(&again).is_empty(), "no Yo of a group A has left: {again:?}");
 }
+
+/// As above, with Ben's app restarted between the new member's Yo and their answer: the ask is kept with the state,
+/// so the answer is still taken.
+#[test]
+fn a_new_members_answer_is_taken_after_a_restart() {
+    let hub = TestHub::start();
+    let base = random_u64() % 1_000_000_000;
+    let transports: Vec<_> = (0..3).map(|_| Http::new(hub.url())).collect();
+    let mut p: Vec<Client> =
+        transports.iter().enumerate().map(|(i, t)| register(t.clone(), &username(base + i as u64 * 7), None)).collect();
+    let [a, b, c] = p.as_mut_slice() else { unreachable!() };
+    let (id, _) = a.create_group("ONE", &[b.user_id().to_owned()]).unwrap();
+    take(b);
+    let to_b = yo_wire::api::deliver_path(&yo_tests::user_id(b.user_id()));
+    transports[0].fault(&to_b, Fault::Answer(202));
+    a.add_to_group(&id, &[c.user_id().to_owned()]).unwrap();
+    take(c);
+    c.send_group(&id, Content::Yo).unwrap();
+    assert_eq!(group_yos(&take(b)).len(), 1);
+    let saved = b.export(&[4; 32]);
+    let mut b = Client::restore(Http::new(hub.url()), &saved, &[4; 32]).unwrap();
+    for _ in 0..2 {
+        take(c);
+        take(&mut b);
+    }
+    assert!(view(&b, &id).members.contains(&c.user_id().to_owned()), "the ask outlived the restart");
+}

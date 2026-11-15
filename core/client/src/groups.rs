@@ -313,7 +313,8 @@ impl Client {
             // Or from one asked for it (their Yo named this newer revision: added since) who is in it.
             Some(g) if info.revision > g.revision => {
                 own || g.members.iter().any(|m| m == from)
-                    || (self.group_asks.contains(&(id.clone(), from.to_owned())) && members.iter().any(|m| m == from))
+                    || (self.state.group_asks.contains(&(id.clone(), from.to_owned()))
+                        && members.iter().any(|m| m == from))
             }
             Some(g) => {
                 info.revision == g.revision
@@ -387,11 +388,11 @@ impl Client {
                 self.push_event(Event::GroupChanged { group: id.clone() });
                 true
             }
-            // From no member of it as it is here, or to a group left: dropped, unless its revision is newer (a member
-            // added since, its Yo here before the change): shown, and the group asked of them.
+            // To a group left: dropped whatever revision it names (only a change adding this account back brings
+            // it back). From no member of it as it is here: dropped, unless its revision is newer (a member added
+            // since, its Yo here before the change): shown, and the group asked of them.
             Some(g)
-                if tag.revision <= g.revision
-                    && (g.left || (g.revision > 0 && !g.members.iter().any(|m| m == from))) =>
+                if g.left || (tag.revision <= g.revision && g.revision > 0 && !g.members.iter().any(|m| m == from)) =>
             {
                 self.note("a Yo to a group from no member".into());
                 return;
@@ -406,7 +407,7 @@ impl Client {
             }
         };
         if ask {
-            self.group_asks.insert((id.clone(), from.to_owned()));
+            self.state.group_asks.insert((id.clone(), from.to_owned()));
             if let Err(error) = self.enqueue_group(&[from.to_owned()], None, Content::GroupAsk { id: tag.id }) {
                 self.note(format!("group: {error}"));
             }

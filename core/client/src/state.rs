@@ -7,7 +7,7 @@ use crate::signal::Entries;
 use chacha20poly1305::aead::{Aead, KeyInit, Payload};
 use chacha20poly1305::ChaCha20Poly1305;
 use serde::{Deserialize, Serialize};
-use std::collections::{BTreeMap, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use tls_codec::{TlsDeserializeBytes, TlsSerialize, TlsSize, VLBytes};
 use yo_wire::DeviceId;
 use zeroize::Zeroize;
@@ -261,6 +261,21 @@ pub struct State {
     /// The groups this account is or was in, by id (hex).
     #[serde(default)]
     pub groups: BTreeMap<String, Group>,
+    /// When a payload last made this device ask the hub for a user's devices (user hex → ms), and the day's lookups for
+    /// recovery (day since the epoch, how many): kept with the state, so a restart or an extension does not start
+    /// them anew (spec 4.6).
+    #[serde(default)]
+    pub roster_asked: BTreeMap<String, u64>,
+    #[serde(default)]
+    pub recovery_lookups: (u64, u32),
+    /// Groups asked of a member whose Yo named a newer revision (group id, user, both hex): their answer is taken
+    /// though they are not in the group as this device has it (added since).
+    #[serde(default)]
+    pub group_asks: BTreeSet<(String, String)>,
+    /// Payloads from a device under another's number whose roster could not be asked now: received again later,
+    /// not dropped (at most `DEFERRED`).
+    #[serde(default)]
+    pub deferred: VecDeque<Vec<u8>>,
 }
 
 impl Drop for State {

@@ -73,6 +73,10 @@ impl Device {
             tokens_check: false,
             registering: None,
             groups: Default::default(),
+            roster_asked: Default::default(),
+            recovery_lookups: (0, 0),
+            group_asks: Default::default(),
+            deferred: Default::default(),
         };
         let records = Records::new(&Default::default(), &state.account_secret, registration_id).unwrap();
         Device { account: account.clone(), user, state, records, state_key: identity::random() }

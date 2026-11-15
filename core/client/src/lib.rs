@@ -31,7 +31,7 @@ use libsignal_protocol::{
 };
 use signal::Records;
 use state::{hex, unhex, Contact, Outgoing, Registering, Slot, State, StoredContent, StoredEvent};
-use std::collections::{BTreeSet, HashMap, HashSet, VecDeque};
+use std::collections::{BTreeSet, VecDeque};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -70,6 +70,8 @@ const ROSTER_ASK_EVERY_MS: u64 = 60 * 1000;
 /// Lookups a day that payloads which did not open may make (roster checks and retries' bundles together): what is left
 /// of the hub's allowance (6.6) stays for sessions the app starts, however many forgeries come.
 const RECOVERY_LOOKUPS_PER_DAY: u32 = 10;
+/// Payloads kept for a roster that could not be asked yet (`State::deferred`).
+const DEFERRED: usize = 64;
 /// How often a registration whose answer did not come is tried again, with the same account key.
 const REGISTER_TRIES: usize = 2;
 /// How often a send updates its view of a user's devices and tries again before it leaves the rest to the next call.
@@ -330,14 +332,6 @@ pub struct Client {
     /// `sync_end` received: the work after it (receipts, retries, prekeys, the outbox, the storage, delivery tokens)
     /// waits for `after_sync`, or the next `sync_begin`.
     after_due: bool,
-    /// When (clock) a user's devices were last asked of the hub because a payload named one this device does not know
-    /// (spec 4.4): at most once a minute a user, whatever payloads anyone seals.
-    roster_asked: HashMap<String, u64>,
-    /// The day (since the epoch) and how many lookups for recovery were made on it (`RECOVERY_LOOKUPS_PER_DAY`).
-    recovery_lookups: (u64, u32),
-    /// Groups asked of a member whose Yo named a newer revision (group id, user): their answer is taken though they are
-    /// not in the group as this device has it (added since). Only for this run.
-    group_asks: HashSet<(String, String)>,
 }
 
 fn wall_ms() -> u64 {
@@ -661,6 +655,10 @@ impl Client {
             tokens_check: false,
             registering: None,
             groups: Default::default(),
+            roster_asked: Default::default(),
+            recovery_lookups: (0, 0),
+            group_asks: Default::default(),
+            deferred: Default::default(),
         };
         let records = Records::new(&Default::default(), &state.account_secret, registration_id)?;
         let mut client = Client::with(transport, records, state);
@@ -730,9 +728,6 @@ impl Client {
             explicit_ack: false,
             unacked: Vec::new(),
             after_due: false,
-            roster_asked: HashMap::new(),
-            recovery_lookups: (0, 0),
-            group_asks: HashSet::new(),
         }
     }
 
@@ -1703,6 +1698,14 @@ impl Client {
         let full = inbox.items.len() >= MAX_INBOX_FETCH;
         let mut done = Vec::new();
         let mut stopped = None;
+        // Payloads kept for a roster that could not be asked: received again first (each may be kept again).
+        for payload in std::mem::take(&mut self.state.deferred) {
+            match self.atomic(|c| c.receive(&payload)) {
+                Ok(()) => {}
+                Err(error) if retryable(&error) => self.state.deferred.push_back(payload),
+                Err(error) => self.drop_one(error.to_string()),
+            }
+        }
         for item in inbox.items {
             // Not sealed to this account (spec 6.1): of use to nobody here.
             let payload = match seal::open(&self.state.account_secret, item.envelope.as_slice()) {
@@ -1811,27 +1814,27 @@ impl Client {
     /// the day's lookups for recovery).
     fn may_ask_roster(&mut self, user: &str) -> bool {
         let now = (self.clock)();
-        let last = self.roster_asked.get(user).copied().unwrap_or(0);
+        let last = self.state.roster_asked.get(user).copied().unwrap_or(0);
         if last != 0 && now < last + ROSTER_ASK_EVERY_MS {
             return false;
         }
         if !self.recovery_lookup() {
             return false;
         }
-        self.roster_asked.insert(user.to_owned(), now);
+        self.state.roster_asked.insert(user.to_owned(), now);
         true
     }
 
     /// Takes one of the day's lookups for recovery, if one is left.
     fn recovery_lookup(&mut self) -> bool {
         let day = (self.clock)() / (24 * 3600 * 1000);
-        if self.recovery_lookups.0 != day {
-            self.recovery_lookups = (day, 0);
+        if self.state.recovery_lookups.0 != day {
+            self.state.recovery_lookups = (day, 0);
         }
-        if self.recovery_lookups.1 >= RECOVERY_LOOKUPS_PER_DAY {
+        if self.state.recovery_lookups.1 >= RECOVERY_LOOKUPS_PER_DAY {
             return false;
         }
-        self.recovery_lookups.1 += 1;
+        self.state.recovery_lookups.1 += 1;
         true
     }
 
@@ -1861,6 +1864,7 @@ impl Client {
     /// Processes one payload, out of its seal (spec 4.4): the copy for this device, decrypted in the session with its
     /// sender's device.
     fn receive(&mut self, payload: &[u8]) -> Result<()> {
+        let raw = payload;
         let payload: Payload = decode(payload)?;
         let mine = self.state.device_key;
         // Made before the sender knew this device (it was added since): not for it.
@@ -1884,7 +1888,14 @@ impl Client {
         if other {
             // Asked at most once a minute a user: a forger claiming numbers costs a lookup a minute, no more.
             if !self.may_ask_roster(&user) {
-                self.drop_one("a device the roster was asked of a moment ago".into());
+                // Asked a moment ago, or the day's lookups used up: kept and received again later (a contact's new
+                // phone writing just after a forgery is not lost), up to `DEFERRED`.
+                if self.state.deferred.len() < DEFERRED {
+                    self.state.deferred.push_back(raw.to_vec());
+                    self.note("a device under another's number: later".into());
+                } else {
+                    self.drop_one("a device the roster was asked of a moment ago".into());
+                }
                 return Ok(());
             }
             let (found, _) = self.lookup(&Handle::user(&user_bytes(&user)?), 0, Vec::new())?;
