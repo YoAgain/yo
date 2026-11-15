@@ -69,6 +69,8 @@ struct FriendList: View {
   @State private var blocking: (friend: Friend, reported: Bool)?
   /// The camera's hint is showing; counted on by each photo or video taken, which hides it for 3 s more.
   @State private var hintShown = false
+  /// Contacts whose new key waits for a confirmation (verified before): only they get "Confirm New Key".
+  @State private var unconfirmed: Set<String> = []
   @State private var hintEpoch = 0
   /// A group's bar being renamed (the new name typed), or whose members are shown.
   @State private var renaming: Friend?
@@ -268,6 +270,13 @@ struct FriendList: View {
             "They’ll get “Yo from \(me)” with a sound that says Yo."
               + (notifications == .allowed ? "" : " To get a Yo back, turn on notifications."))
         }
+        // Whether the contact whose key changed waits for a confirmation (was verified): asked as the alert comes.
+        .task(id: keyChanged?.key) {
+          guard let client = accounts.client, keyChanged != nil,
+            let contacts = try? await Hub.run({ client.contacts() })
+          else { return }
+          unconfirmed = Set(contacts.filter(\.unconfirmed).map(\.user))
+        }
         // A contact's account key changed (spec 3.2): said once; Contacts shows it until their details are opened.
         .alert(
           "\(keyChanged?.name ?? "") Has a New Key",
@@ -276,7 +285,8 @@ struct FriendList: View {
           presenting: keyChanged
         ) { friend in
           Button("OK", role: .cancel) {}
-          if let user = friend.user {  // a verified contact's Yos wait for this (spec 3.4)
+          // Only for a contact that was verified: its Yos wait for this (spec 3.4).
+          if let user = friend.user, unconfirmed.contains(user) {
             Button("Confirm New Key") {
               Task { try? await Verification.confirm(user, accounts: accounts, inbox: inbox, friends: friends, outbox: outbox) }
             }
