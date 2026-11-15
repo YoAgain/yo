@@ -1240,12 +1240,19 @@ async fn put_blob(
             return Err(failed(error));
         }
         // Handed out from now on. Left not ready (a crash just before), it goes at the next start or within the hour.
-        if let Err(error) = hub.db.blob_ready(&id, stored_at) {
-            let _ = hub.db.delete_blob(&id);
-            hub.blobs.remove(&(id, stored_at));
-            return Err(error.into());
+        match hub.db.blob_ready(&id, stored_at) {
+            Ok(true) => Ok(StatusCode::CREATED),
+            // Its row went meanwhile (the account deleted while it came): no file left behind, and no 201.
+            Ok(false) => {
+                hub.blobs.remove(&(id, stored_at));
+                Err(refuse(StatusCode::NOT_FOUND))
+            }
+            Err(error) => {
+                let _ = hub.db.delete_blob(&id);
+                hub.blobs.remove(&(id, stored_at));
+                Err(error.into())
+            }
         }
-        Ok(StatusCode::CREATED)
     })
     .await?
 }

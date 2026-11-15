@@ -982,11 +982,14 @@ impl Db {
     }
 
     /// A blob's file is in place: it is handed out from now on.
-    pub fn blob_ready(&self, id: &BlobId, created_at: u64) -> rusqlite::Result<()> {
-        self.conn()
+    /// Marks a blob's upload done. `false`: its row is gone meanwhile (its account deleted while it came): the file is
+    /// the caller's to remove, the upload failed.
+    pub fn blob_ready(&self, id: &BlobId, created_at: u64) -> rusqlite::Result<bool> {
+        let changed = self
+            .conn()
             .prepare_cached("UPDATE blobs SET ready = 1 WHERE id = ?1 AND created_at = ?2")?
             .execute(params![id, created_at as i64])?;
-        Ok(())
+        Ok(changed == 1)
     }
 
     /// Takes one of a blob's fetches as a fetch starts, if it is ready, has one left and is within its time: its size
@@ -1315,7 +1318,8 @@ impl Db {
     pub fn release_unsecured(&self, now: u64, idle_ms: u64) -> rusqlite::Result<usize> {
         let mut conn = self.conn();
         let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
-        let before = now.saturating_sub(idle_ms) as i64;
+        // A device's last request is noted to the day (`touch` once a day): a day more, so none goes early.
+        let before = now.saturating_sub(idle_ms + 24 * 3600 * 1000) as i64;
         let idle: Vec<UserId> = tx
             .prepare_cached(
                 "SELECT id FROM users WHERE created_at < ?1
@@ -1689,7 +1693,7 @@ mod tests {
         assert_eq!(db.take_fetch(&id, 5, ttl).unwrap(), None, "not ready: its file is not in place");
         assert_eq!(db.put_blob(&[1; 16], &id, 100, 2, 5, &quota).unwrap(), BlobPut::Unfinished, "another try: later");
         assert_eq!(db.blob_ready_state(&id).unwrap(), Some(false));
-        db.blob_ready(&id, 5).unwrap();
+        assert!(db.blob_ready(&id, 5).unwrap());
         assert_eq!(db.put_blob(&[1; 16], &id, 100, 2, 5, &quota).unwrap(), BlobPut::Taken, "done: it is there");
         assert_eq!(db.take_fetch(&id, 5, ttl).unwrap(), Some((100, 5)));
         assert_eq!(db.take_fetch(&id, 5, ttl).unwrap(), Some((100, 5)));
@@ -1814,6 +1818,18 @@ mod tests {
         }
     }
 
+    /// An upload whose row went while it came (its account deleted meanwhile) is not marked done: its file is removed
+    /// and it is no 201.
+    #[test]
+    fn an_upload_whose_row_went_is_not_done() {
+        let db = Db::open(":memory:").unwrap();
+        register(&db, b"GONE", 1, 1, 0);
+        let quota = BlobQuota { per_day: 10, bytes_per_day: 1 << 20, stored: 1 << 20 };
+        assert_eq!(db.put_blob(&[1; 16], &[7; 16], 100, 2, 5, &quota).unwrap(), BlobPut::Stored);
+        db.delete_blob(&[7; 16]).unwrap();
+        assert!(!db.blob_ready(&[7; 16], 5).unwrap());
+    }
+
     #[test]
     fn names_not_secured_are_released_after_the_idle_time() {
         let db = Db::open(":memory:").unwrap();
@@ -1825,7 +1841,9 @@ mod tests {
         assert!(matches!(db.feedback(&[1; 16], "where are my friends", "1.0 (1)", 0).unwrap(), Write::Done(())));
         let exists = |user: &UserId| db.lookup(KIND_USER, user, false, &[]).unwrap().is_some();
         assert_eq!(db.release_unsecured(89 * DAY, 90 * DAY).unwrap(), 0);
-        assert_eq!(db.release_unsecured(91 * DAY, 90 * DAY).unwrap(), 1);
+        // Noted to the day: never before a full day more (a request the day of the last note was not written).
+        assert_eq!(db.release_unsecured(91 * DAY, 90 * DAY).unwrap(), 0);
+        assert_eq!(db.release_unsecured(91 * DAY + 1, 90 * DAY).unwrap(), 1);
         assert!(!exists(&idle));
         let feedback: (Vec<u8>, String) = db
             .conn()
