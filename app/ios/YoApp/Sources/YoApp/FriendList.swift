@@ -477,16 +477,21 @@ struct FriendList: View {
 
   /// A bar's menu: a friend's Report, Block and Remove; a group's Members, Rename and Leave.
   private func menu(for friend: Friend) -> ContextMenu<TupleView<(AnyView, AnyView, AnyView)>> {
-    // The last Yo, whichever way it went, in one greyed row at the menu's top: "↑ Yo 7m ago" sent by me,
+    // The last Yo (a group's too), whichever way it went, in one greyed row at the menu's top: "↑ Yo 7m ago" sent by me,
     // "↓ Yo 1d ago" from them (up and down as upload and download).
     let out = Stats.lastSent(to: friend.name), back = Stats.lastReceived(from: friend.name)
     let mine = (out ?? .distantPast) >= (back ?? .distantPast)
     let lastDate = mine ? out : back
     let last = lastDate.map { let a = Arrival.age($0); return a == "now" ? "Yo now" : "Yo \(a) ago" } ?? "No Yo yet"
     let arrow = lastDate == nil ? "clock" : mine ? "arrow.up" : "arrow.down"
+    let lastRow = Button(last, systemImage: arrow) {}.disabled(true)
+      .accessibilityLabel(lastDate == nil ? last : mine ? "Last Yo sent, \(last)" : "Last Yo received, \(last)")
     if friend.group != nil {
       return ContextMenu {
-        AnyView(Button("Members", systemImage: "person.3") { showMembers(friend) })
+        AnyView(Group {
+          lastRow
+          Button("Members", systemImage: "person.3") { showMembers(friend) }
+        })
         AnyView(Button("Rename", systemImage: "pencil") {
           newGroupName = friend.name
           renaming = friend
@@ -497,8 +502,7 @@ struct FriendList: View {
       }
     }
     return ContextMenu {
-      AnyView(Button(last, systemImage: arrow) {}.disabled(true)
-        .accessibilityLabel(lastDate == nil ? last : mine ? "Last Yo sent, \(last)" : "Last Yo received, \(last)"))
+      AnyView(lastRow)
       AnyView(Menu("Block & Report", systemImage: "hand.raised") {
         Button("Block", systemImage: "hand.raised") { blocking = (friend, false) }
         Section("Report") {
@@ -525,7 +529,7 @@ struct FriendList: View {
       if let groups = try? await Hub.run({ client.groups() }) { friends.takeGroups(groups) }
       let renamed = friends.all.first { $0.group == id } ?? bar
       await GroupNotice.send(
-        "\(GroupNotice.me(accounts)) renamed the group \(renamed.name)", to: renamed, accounts: accounts, outbox: outbox)
+        [.user(GroupNotice.me(accounts)), " renamed the group to ", .group(renamed.name)], to: renamed, accounts: accounts, outbox: outbox)
     }
   }
 
@@ -540,7 +544,7 @@ struct FriendList: View {
     guard let id = bar.group, let client = accounts.client else { return }
     Task {
       // "LEO left" first, and out only once it went (at most half a minute): a member who left sends nothing.
-      if let notice = await GroupNotice.send("\(GroupNotice.me(accounts)) left", to: bar, accounts: accounts, outbox: outbox) {
+      if let notice = await GroupNotice.send([.user(GroupNotice.me(accounts)), " left ", .group(bar.name)], to: bar, accounts: accounts, outbox: outbox) {
         for _ in 0..<60 where outbox.isWaiting(notice) { try? await Task.sleep(for: .milliseconds(500)) }
       }
       if let events = try? await Hub.run({ try client.leaveGroup(group: id) }) {
@@ -1319,8 +1323,11 @@ struct LiveBar: View {
 
   var body: some View {
     RowButton(
-      title, count: count, color: color, recording: recording, outgoing: bar.outgoing.last?.started, stop: stop,
-      media: media, yo: yo, hint: hint, hold: hold, view: view, faded: friend.gone && bar.sent == nil,
+      // A request shows one "Yo Request from X": no count of its Yos ("!!!"), no photo, not even its 📷 (what spam
+      // aims at); all of it only after a yes.
+      title, count: friend.request ? 0 : count, color: color, recording: recording,
+      outgoing: bar.outgoing.last?.started, stop: stop,
+      media: friend.request ? [] : media, yo: friend.request ? nil : yo, hint: hint, hold: hold, view: view, faded: friend.gone && bar.sent == nil,
       icon: friend.group == nil ? nil : "person.3.fill", from: friend.group == nil ? nil : from, flies: true,
       action: action)
       // Gone: still their name (whose bar it is), faded; a tap says "Not on Yo".

@@ -243,8 +243,10 @@ final class AccountStore {
         // back from the iCloud Keychain as a new device of it, with new prekeys; contacts write to it again.
         return await recover()
       } catch let error as YoError where !Self.notNow(error) {
+        brokenWhy = "\(error)"
         if await Self.surely(&tries) { broken = true }  // does not open (sealed under another key, or damaged)
       } catch Unopened.gone {
+        brokenWhy = Self.missing()
         if await Self.surely(&tries) { broken = true }
       } catch {
         try? await Task.sleep(for: .seconds(pause))  // not now
@@ -275,6 +277,16 @@ final class AccountStore {
     request.cachePolicy = .reloadIgnoringLocalAndRemoteCacheData
     guard let (_, response) = try? await URLSession(configuration: .ephemeral).data(for: request) else { return false }
     return (response as? HTTPURLResponse)?.statusCode == 200
+  }
+
+  /// Why the state did not open, as the alert says it small (to tell a damaged state from a missing file or key).
+  private(set) var brokenWhy = ""
+
+  /// What of the state is not there: the file, the key, or neither (the shared one's).
+  private static func missing() -> String {
+    let file = SharedStateFile.app ? "shared" : (StateFile.load() == nil ? "no file" : "file")
+    let key = SharedStateFile.app ? ((try? StateKey.shared()) == nil ? "no key" : "key") : ((try? StateKey.load()) == nil ? "no key" : "key")
+    return "gone: \(file), \(key)"
   }
 
   /// "Sign In Again" found the hub down: the alert says so and offers to try again, the account stays.

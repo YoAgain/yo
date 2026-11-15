@@ -57,7 +57,7 @@ struct YoApp: App {
       } message: {
         Text(accounts.hubDown
           ? "Yo can’t reach its server right now. Your account is fine; try again in a moment."
-          : "Yo can’t open your account on this iPhone. Sign in again to keep using it.")
+          : "Yo can’t open your account on this iPhone. Sign in again to keep using it.\n\n(\(accounts.brokenWhy))")
       }
       .onChange(of: accounts.account == nil) { _, out in
         // Out, however (signed out, deleted, or the account taken to another iPhone): this phone's friends go too.
