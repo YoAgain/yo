@@ -192,6 +192,9 @@ pub struct Config {
     /// ("ios/202611140619,android/12"): an older one gets `426` and asks to be updated. A request without `Yo-App`
     /// passes (apps from before it, tools).
     pub min_app: Vec<(String, u64)>,
+    /// The fewest characters (grapheme clusters) a username may have on this hub, from `YO_NAME_MIN` (default 2): a
+    /// switch the operator can lower to 1, or raise, without an app update (spec 3.3).
+    pub name_min: usize,
 }
 
 /// `YO_MIN_APP`: comma separated `PLATFORM/BUILD`.
@@ -255,6 +258,7 @@ impl Config {
             reserved: Vec::new(),
             blobs: BlobConfig::for_tests(),
             min_app: Vec::new(),
+            name_min: 2,
         }
     }
 }

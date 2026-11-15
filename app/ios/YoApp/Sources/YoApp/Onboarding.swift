@@ -26,6 +26,8 @@ struct Onboarding: View {
   @State private var looked = false
   /// Continue tapped with a name too short: the minimum shows, the field shakes (once per tap).
   @State private var tooShort = false
+  /// Names the hub refused as shorter than it allows now (its `YO_NAME_MIN`), by skeleton.
+  @State private var short: Set<String> = []
   @State private var shakes = 0
   /// What the hub said about names typed, by skeleton: free or taken (the checkmark or the red cross).
   @State private var checked: [String: Bool] = [:]
@@ -108,7 +110,7 @@ struct Onboarding: View {
     // No words while typing: the field keeps the rules, a checkmark says free, a red cross says taken. Too short is
     // said only after a pause in typing, or when Continue is tapped (the field shakes too), until the next letter.
     let free = checked[Username.skeleton(name)]  // the hub's answer: true free, false taken, nil not yet
-    let taken = name.count >= 2 && free == false
+    let taken = !name.isEmpty && free == false
     let trouble = Username.problem(name) ?? (taken ? "taken" : nil)
     let mine = taken  // or reserved: only the hub knows, and signing in with a name not one's own just fails
     return Page(title: "Choose a Name", back: { go(.welcome) }) {
@@ -116,7 +118,7 @@ struct Onboarding: View {
         shakes: shakes, onSubmit: { Task { await register() } })
       // Under the field, one place: the minimum after a Continue too soon, or "This Is My Name" when it is taken.
       ZStack {
-        Text("Use at least 2 characters.")
+        Text("Choose a longer name.")
           .font(.subheadline.weight(.semibold))
           .opacity(tooShort ? 1 : 0)
           .accessibilityHidden(!tooShort)
@@ -184,10 +186,15 @@ struct Onboarding: View {
       (try? await Task.sleep(for: .milliseconds(350))) != nil
     else { return }
     let transport = Hub.transport
-    if let free = try? await Hub.run({ try usernameFree(transport: transport, username: typed) }) {
+    do {
+      let free = try await Hub.run({ try usernameFree(transport: transport, username: typed) })
       // Taken by this phone's own try whose answer was lost (its key is kept): Continue takes it (`NewAccountKey`).
       checked[skeleton] = free || NewAccountKey.has(typed)
-    }
+    } catch YoError.Refused(status: 400) {
+      // A name of the right form the hub finds too short: how short a name may be is the hub's switch (spec 3.3).
+      short.insert(skeleton)
+      if typed == name { tooShort = true }
+    } catch {}
   }
 
   private func go(_ next: Step) {
@@ -215,7 +222,7 @@ struct Onboarding: View {
 
   private func register() async {
     guard !busy else { return }
-    guard name.count >= 2 else {
+    guard !name.isEmpty, !short.contains(Username.skeleton(name)) else {
       tooShort = true
       shakes += 1
       UINotificationFeedbackGenerator().notificationOccurred(.error)
@@ -228,6 +235,10 @@ struct Onboarding: View {
     let asked = name  // the field may change while the hub answers: "taken" is about this one
     do {
       try await accounts.register(asked)  // in: the list takes over, YoGPT on it (YoApp); secured later, from the profile
+    } catch YoError.Refused(status: 400) {
+      short.insert(Username.skeleton(asked))
+      tooShort = true
+      UINotificationFeedbackGenerator().notificationOccurred(.error)
     } catch AccountError.taken {
       checked[Username.skeleton(asked)] = false
       UINotificationFeedbackGenerator().notificationOccurred(.error)

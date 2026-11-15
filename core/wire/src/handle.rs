@@ -73,16 +73,21 @@ impl Handle {
     }
 }
 
-/// A username as it may be written (spec 3.3): 2 to 16 characters (grapheme clusters, NFC) of Latin letters with their
+/// A username as it may be written (spec 3.3): 1 to 16 characters (grapheme clusters, NFC) of Latin letters with their
 /// accents, 0–9, `_` and emoji, starting with a letter or an emoji, in any case ("YoGPT"). What the hub refuses with
 /// `400` (spec 6.3). Which names are reserved only the hub knows.
 pub fn check_username_form(name: &str) -> Result<(), Error> {
     let graphemes: Vec<&str> = name.graphemes(true).collect();
-    let ok = (2..=16).contains(&graphemes.len())
+    let ok = (1..=16).contains(&graphemes.len())
         && name.nfc().eq(name.chars())
         && graphemes.iter().all(|g| allowed(g))
         && graphemes.first().is_some_and(|g| is_latin_letter(g) || is_emoji(g));
     ok.then_some(()).ok_or(Error::Format)
+}
+
+/// How many characters a username has, as people count them (grapheme clusters): what a hub's least is measured in.
+pub fn username_len(name: &str) -> usize {
+    name.graphemes(true).count()
 }
 
 /// Whether two usernames are one name: the same skeleton.
@@ -185,7 +190,8 @@ mod tests {
         // Reserved names are the hub's to refuse: here they are names like any.
         assert_eq!(Handle::parse("admin").unwrap(), Handle::username("admin"));
         assert_eq!(Handle::parse("Or").unwrap(), Handle::username("Or"), "two letters are a name");
-        for bad in ["y", "a", "this_is_far_too_long_x", "+49 170 1234567", "1abc"] {
+        assert_eq!(Handle::parse("Y").unwrap(), Handle::username("Y"), "one is a name by form; the hub sets the least");
+        for bad in ["", "this_is_far_too_long_x", "+49 170 1234567", "1abc"] {
             assert!(Handle::parse(bad).is_err(), "{bad}");
         }
     }

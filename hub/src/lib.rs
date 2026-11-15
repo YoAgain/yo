@@ -290,6 +290,16 @@ async fn off_workers(
 }
 
 impl Hub {
+    /// A username at least as long as this hub allows now (`YO_NAME_MIN`, spec 3.3); shorter is `400`, as a name of
+    /// the wrong form.
+    fn long_enough(&self, name: &[u8]) -> Res<()> {
+        let name = std::str::from_utf8(name).map_err(|_| refuse(StatusCode::BAD_REQUEST))?;
+        if yo_wire::handle::username_len(name) < self.config.name_min {
+            return Err(refuse(StatusCode::BAD_REQUEST));
+        }
+        Ok(())
+    }
+
     pub fn new(config: Config, push_transport: Arc<dyn push::Transport>) -> Result<Arc<Self>, String> {
         let db = Arc::new(Db::open(&config.db_path).map_err(|e| format!("database: {e}"))?);
         let added = db.seed_reserved(&config.reserved, now_ms()).map_err(|e| format!("reserved names: {e}"))?;
@@ -755,6 +765,7 @@ async fn register(
     let request: api::Register = decode(&body)?;
     let handle = Handle { kind: KIND_USERNAME, value: request.username.clone() };
     handle.check()?;
+    hub.long_enough(request.username.as_slice())?;
     let checked = hub.check_new_device(&handle, &request.device, named_app(&headers))?;
     hub.register_checked(&handle, checked, &request.device.prekeys)
 }
@@ -770,6 +781,7 @@ async fn username_free(
 ) -> Res<StatusCode> {
     hub.limit_ip("name", peer, &headers, hub.config.limits.name_check_per_ip_minute, MINUTE)?;
     yo_wire::handle::check_username_form(&name)?;
+    hub.long_enough(name.as_bytes())?;
     if hub.db.username_taken(yo_wire::handle::skeleton(&name).as_bytes())? {
         return Err(refuse(StatusCode::CONFLICT));
     }
@@ -897,6 +909,7 @@ async fn set_username(State(hub): Hubs, method: Method, uri: Uri, headers: Heade
     let request: api::SetUsername = decode(&body)?;
     if let Some(name) = &request.username {
         Handle { kind: KIND_USERNAME, value: name.clone() }.check()?;
+        hub.long_enough(name.as_slice())?;
     }
     // Checked above: UTF-8.
     let spelling = request.username.as_ref().and_then(|n| std::str::from_utf8(n.as_slice()).ok());

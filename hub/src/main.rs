@@ -76,6 +76,10 @@ fn config() -> Result<(Config, String), String> {
         reserved: read_reserved(var("YO_RESERVED_FILE").as_deref())?,
         blobs,
         min_app: var("YO_MIN_APP").map(|text| parse_min_app(&text)).transpose()?.unwrap_or_default(),
+        name_min: var("YO_NAME_MIN")
+            .map(|text| text.parse::<usize>().ok().filter(|n| (1..=16).contains(n)).ok_or("YO_NAME_MIN: 1 to 16"))
+            .transpose()?
+            .unwrap_or(2),
     };
     Ok((config, var("YO_LISTEN").unwrap_or_else(|| "127.0.0.1:8080".into())))
 }

@@ -277,7 +277,7 @@ fn bodies_are_held_to_their_limits() {
         Handle { kind: 9, value: vec![1; 16].into() },
         Handle { kind: yo_wire::handle::KIND_USER, value: vec![1; 15].into() },
         Handle { kind: yo_wire::handle::KIND_ACCOUNT_KEY, value: vec![1; 31].into() },
-        Handle::username("x"),
+        Handle::username("_x"),
     ] {
         assert_eq!(signed(&mut a, "POST", api::LOOKUP, &lookup_body(handle, 0, Vec::new())).0, status::BAD_REQUEST);
     }
@@ -354,6 +354,20 @@ fn registration_answers_as_the_spec_says() {
     assert_eq!(phone.user_id(), old.user_id());
     assert_eq!(phone.username(), Some(name.as_str()));
     assert_eq!(old.sync(0), Err(Error::Replaced));
+}
+
+/// Spec 3.3: how short a name may be is the hub's switch (`YO_NAME_MIN`): "Or" with the default of 2, one letter
+/// only once it is lowered to 1.
+#[test]
+fn the_least_name_length_is_the_hubs_switch() {
+    for (least, one, two) in [(2, status::BAD_REQUEST, status::NO_CONTENT), (1, status::NO_CONTENT, status::NO_CONTENT)]
+    {
+        let mut config = Config::for_tests();
+        config.name_min = least;
+        let hub = TestHub::start_with(config, "127.0.0.1:0");
+        let check = |name: &str| raw(&hub, "GET", &api::username_path(name), &[], Vec::new()).0;
+        assert_eq!((check("O"), check("Or")), (one, two), "least {least}");
+    }
 }
 
 /// Spec 6.3: `204` free, `409` taken (in any spelling) or reserved, `400` no username; the rate per address.
