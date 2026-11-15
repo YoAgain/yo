@@ -1049,11 +1049,15 @@ const BAD_TOKENS_PER_IP_MINUTE: u32 = 30;
 
 fn delivery_token(hub: &Hub, peer: SocketAddr, headers: &HeaderMap) -> Res<Brought> {
     let Some(value) = headers.get(axum::http::header::AUTHORIZATION) else { return Ok(Brought::Nothing) };
-    let Some(token) = value.to_str().ok().and_then(Token::from_authorization) else { return Ok(Brought::Refused) };
     let bad = format!("badtoken:ip:{}", hub.ip(peer, headers));
     if !hub.own_service(peer, headers) && hub.limiter.spent(&bad, BAD_TOKENS_PER_IP_MINUTE, MINUTE) {
         return Ok(Brought::Refused);
     }
+    // Malformed counts like forged: every refused token is one of the 30.
+    let Some(token) = value.to_str().ok().and_then(Token::from_authorization) else {
+        hub.limiter.allow(bad, BAD_TOKENS_PER_IP_MINUTE, MINUTE);
+        return Ok(Brought::Refused);
+    };
     // Spent already (one look in the database) before the costly check, and counted like a forged one: a token sent
     // again and again costs the hub no more than a forged one.
     if hub.db.token_spent(&token.nonce)? {
@@ -1287,6 +1291,20 @@ mod tests {
             .find(|key: &Key| ed25519_dalek::VerifyingKey::from_bytes(key).is_err())
             .unwrap();
         assert!(!Hub::device_keys_usable(1, &off), "no point");
+    }
+
+    #[test]
+    fn a_malformed_token_is_counted_like_a_forged_one() {
+        let hub = Hub::new(Config::for_tests(), Arc::new(push::Recorder::default())).unwrap();
+        let peer: SocketAddr = "192.0.2.1:1".parse().unwrap();
+        let mut headers = HeaderMap::new();
+        headers.insert(axum::http::header::AUTHORIZATION, "PrivateToken token=\"AAAA\"".parse().unwrap());
+        let bucket = "badtoken:ip:192.0.2.1";
+        for _ in 0..BAD_TOKENS_PER_IP_MINUTE {
+            assert!(!hub.limiter.spent(bucket, BAD_TOKENS_PER_IP_MINUTE, MINUTE));
+            assert!(matches!(delivery_token(&hub, peer, &headers).unwrap(), Brought::Refused));
+        }
+        assert!(hub.limiter.spent(bucket, BAD_TOKENS_PER_IP_MINUTE, MINUTE), "the address's 30 are used up");
     }
 
     #[test]
