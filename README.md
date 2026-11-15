@@ -13,10 +13,56 @@ Its security layer is Signal's protocol through libsignal: PQXDH and the Double 
 with every answer, and any contact can be checked with a 60-digit safety number. Full text: [spec/v1.md](spec/v1.md); every
 key, where it lives and what it opens: [spec 7, the keys at a glance](spec/v1.md#7-backup-and-a-new-phone).
 
+### Keys
+
+```mermaid
+flowchart LR
+  subgraph you["You"]
+    words["12 recovery words"]
+    passkey["Passkey (PRF)"]
+  end
+  subgraph phone["iPhone"]
+    icloud["iCloud Keychain item"]
+    account["Account key<br/>Ed25519 · its X25519 form is the Signal identity"]
+    device["Device key + auth key"]
+    prekeys["Prekeys<br/>signed · one-time · Kyber"]
+    sessions["Signal sessions<br/>Double Ratchet + SPQR"]
+    profile["Profile key"]
+    state["State key<br/>(keychain)"]
+    media["Media key<br/>one per photo/video"]
+    storagekey["Storage key"]
+  end
+  subgraph hub["Hub"]
+    backup[("Backup<br/>sealed")]
+    storage[("Settings, friends<br/>sealed")]
+    access["Access key check"]
+    blobs[("Photo/video blobs<br/>sealed")]
+    hubkey["Hub signing key<br/>pinned in the app"]
+    root["Trust root<br/>pinned in the app"]
+    tokens["Token key<br/>blind (Privacy Pass)"]
+  end
+  words --> K["K"]
+  passkey --> K
+  K --> backup --> account
+  icloud --> account
+  account -- certifies --> device
+  account -- signs --> prekeys --> sessions
+  account -- HKDF --> storagekey --> storage
+  profile -- derives the access key --> access
+  state --> localstate[("App state on the phone")]
+  media --> blobs
+  device -- signs requests --> hub
+  hubkey -. signs lookups .-> phone
+  root -. sender certificate, 1 day .-> sessions
+  tokens -. anonymous send tokens .-> phone
+```
+
+What each key is, where it lives and what it opens: [spec 7](spec/v1.md#7-backup-and-a-new-phone).
+
 ### Hub
 
 The server: a mailbox per device, each device's prekeys, and the push that wakes a phone. One core
-delivers about 16,000 Yops, Yos per second ([measured](tests/README.md#load)).
+delivers about 8,000 Yops, Yos per second, with every Yo on disk before it is answered ([measured](tests/README.md#load)).
 
 ### Apps
 

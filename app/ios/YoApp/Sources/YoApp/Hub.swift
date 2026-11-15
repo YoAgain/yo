@@ -43,12 +43,12 @@ enum Hub {
   /// none here (a placeholder left empty) opens no sealed Yo and sends every Yo identified: it fails closed.
   static let trustRoots: [String: [String]] = [
     "hub.justyo.app": [
-      "",  // TRUST_ROOT_LIVE
-      "",  // TRUST_ROOT_LIVE_SPARE
+      "yj7lt_zG5IrePgCcIsK7gQoVqFDsmOBfUvO4NyK1GF0",  // live: the root in use
+      "mJjpj2WXfUy95PRcuA4tl9b_gZxJzRZhyGFq9iVglHU",  // live: the spare, kept offline
     ],
     "dev.justyo.app": [
-      "",  // TRUST_ROOT_DEV
-      "",  // TRUST_ROOT_DEV_SPARE
+      "kKVskVCuVwESdvLeYWAEVAQmT9mdwvkQ2uhOlnxXO3Q",  // dev: the root in use
+      "Fj-t9EAOsTDPSHPT1Y39FdbcIvl2I7aEEdqlcRAQc0c",  // dev: the spare, kept offline
     ],
   ]
 
