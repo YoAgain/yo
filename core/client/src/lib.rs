@@ -1872,15 +1872,17 @@ impl Client {
                 return Ok(());
             }
         };
-        // It opened: from the account (its identity key), at that number; what it says is the account's. Which device
-        // key is there is the hub's to say: one this device does not know is taken in only once the hub names it
-        // (asked: only the account can make a message that opens). A replaced device's last ones still show.
+        // It opened: from the account (its identity key), at that number. Which device key is there is the hub's to
+        // say: one this device does not know is taken in only once the hub names it (asked without a bound: only the
+        // account can make a message that opens); else it is a replaced device's, and dropped (4.6).
         self.remember(copy.message.as_slice());
-        if self.slot_of(&user, &payload.device_key) == Some(payload.device_id)
-            || self.hub_names(&user, &payload.account_key, &payload.device_key, payload.device_id)?
+        if self.slot_of(&user, &payload.device_key) != Some(payload.device_id)
+            && !self.hub_names(&user, &payload.account_key, &payload.device_key, payload.device_id)?
         {
-            self.note_device(&user, payload.device_key, payload.device_id)?;
+            self.drop_one("a message from a replaced device".into());
+            return Ok(());
         }
+        self.note_device(&user, payload.device_key, payload.device_id)?;
         self.note_updated(&user);
         let plain: Plain = decode(&plaintext)?;
         let message = Message::decode(plain.content.as_slice())?;

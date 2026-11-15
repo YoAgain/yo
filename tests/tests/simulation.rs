@@ -102,7 +102,13 @@ fn run(seed: u64, clients: usize, steps: usize) {
         }
     }
     for d in &devices {
-        assert_eq!(d.client.dropped(), 0, "seed {seed}: {} dropped: {:?}", d.user, d.client.drop_reasons());
+        // Only what a replaced device sent may be dropped (spec 4.6), and is among `may_be_lost`.
+        assert!(
+            d.client.drop_reasons().iter().all(|r| r.contains("replaced device")),
+            "seed {seed}: {} dropped: {:?}",
+            d.user,
+            d.client.drop_reasons()
+        );
         assert_eq!(d.client.pending(), 0, "seed {seed}: {} has an outbox", d.user);
     }
     for (to, want) in &expected {
