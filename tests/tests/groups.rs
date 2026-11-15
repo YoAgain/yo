@@ -99,20 +99,40 @@ fn members_come_and_go_and_who_is_out_gets_nothing() {
     assert_eq!(view(d, &id).revision, 4);
 }
 
-/// Two members rename the group at once, each from the same revision: once everything arrived, all three have the same
-/// name, the one by the lower user id.
+/// Two members rename the group at once, each from the same revision and neither seeing the other's first (both
+/// offline): once everything arrived, all three have the same name, the one by the lower user id.
 #[test]
 fn two_changes_at_once_end_the_same_everywhere() {
     let hub = TestHub::start();
-    let mut p = people(&hub, 3);
+    let base = random_u64() % 1_000_000_000;
+    let transports: Vec<_> = (0..3).map(|_| Http::new(hub.url())).collect();
+    let mut p: Vec<Client> =
+        transports.iter().enumerate().map(|(i, t)| register(t.clone(), &username(base + i as u64 * 7), None)).collect();
     let [a, b, c] = p.as_mut_slice() else { unreachable!() };
     let (id, _) = a.create_group("ONE", &[b.user_id().to_owned(), c.user_id().to_owned()]).unwrap();
     take(b);
     take(c);
-    b.rename_group(&id, "BEN").unwrap();
-    c.rename_group(&id, "CLEO").unwrap();
-    for _ in 0..2 {
-        for x in [&mut *a, &mut *b, &mut *c] {
+    // Sessions between Ben and Cleo first (a Yo each), then both go offline and rename.
+    b.send_group(&id, Content::Yo).unwrap();
+    take(c);
+    c.send_group(&id, Content::Yo).unwrap();
+    take(b);
+    take(a);
+    for t in &transports[1..] {
+        *t.base.write().unwrap() = "http://127.0.0.1:1".into();
+    }
+    let _ = b.rename_group(&id, "BEN");
+    let _ = c.rename_group(&id, "CLEO");
+    assert_eq!((view(b, &id).name.as_str(), view(c, &id).name.as_str()), ("BEN", "CLEO"));
+    for t in &transports[1..] {
+        *t.base.write().unwrap() = hub.url();
+    }
+    for _ in 0..3 {
+        for x in [&mut *b, &mut *c, &mut *a] {
+            if let Ok(d) = x.deliver_begin() {
+                let answers = d.send();
+                x.send_end(&d, answers);
+            }
             take(x);
         }
     }
