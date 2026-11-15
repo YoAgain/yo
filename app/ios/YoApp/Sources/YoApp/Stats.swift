@@ -12,11 +12,33 @@ enum Stats {
   /// Yos with each friend (sent and received), by name.
   static var byFriend: [String: Int] { defaults.dictionary(forKey: "stats.friends") as? [String: Int] ?? [:] }
 
-  static func sentYo(to friend: String) { count("stats.sent", friend) }
-  static func receivedYos(from friend: String, _ n: Int) { count("stats.received", friend, n) }
+  static func sentYo(to friend: String) {
+    count("stats.sent", friend)
+    stamp("stats.lastSent", friend)
+  }
+  static func receivedYos(from friend: String, _ n: Int) {
+    count("stats.received", friend, n)
+    stamp("stats.lastReceived", friend)
+  }
+
+  /// When the last Yo went to a friend, and when the last came from them (by name, as the counts): a bar's menu says it.
+  static func lastSent(to friend: String) -> Date? { last("stats.lastSent", friend) }
+  static func lastReceived(from friend: String) -> Date? { last("stats.lastReceived", friend) }
 
   static func reset() {
-    for key in ["stats.sent", "stats.received", "stats.friends"] { defaults.removeObject(forKey: key) }
+    for key in ["stats.sent", "stats.received", "stats.friends", "stats.lastSent", "stats.lastReceived"] {
+      defaults.removeObject(forKey: key)
+    }
+  }
+
+  private static func stamp(_ key: String, _ friend: String) {
+    var times = defaults.dictionary(forKey: key) as? [String: Double] ?? [:]
+    times[friend] = Date.now.timeIntervalSince1970
+    defaults.set(times, forKey: key)
+  }
+
+  private static func last(_ key: String, _ friend: String) -> Date? {
+    (defaults.dictionary(forKey: key) as? [String: Double])?[friend].map { Date(timeIntervalSince1970: $0) }
   }
 
   private static func count(_ key: String, _ friend: String, _ n: Int = 1) {

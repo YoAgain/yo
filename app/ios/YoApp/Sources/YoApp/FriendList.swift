@@ -429,6 +429,9 @@ struct FriendList: View {
 
   /// A bar's menu: a friend's Report, Block and Remove; a group's Members, Rename and Leave.
   private func menu(for friend: Friend) -> ContextMenu<TupleView<(AnyView, AnyView, AnyView)>> {
+    // When the last Yo went and came, as a heading over the choices ("Sent 7m ago · Received 1d ago").
+    func when(_ date: Date?) -> String { date.map { let a = Arrival.age($0); return a == "now" ? "just now" : "\(a) ago" } ?? "never" }
+    let times = "Sent \(when(Stats.lastSent(to: friend.name))) · Received \(when(Stats.lastReceived(from: friend.name)))"
     if friend.group != nil {
       return ContextMenu {
         AnyView(Button("Members", systemImage: "person.3") { showMembers(friend) })
@@ -442,13 +445,16 @@ struct FriendList: View {
       }
     }
     return ContextMenu {
-      AnyView(Menu("Report \(friend.name)", systemImage: "exclamationmark.bubble") {
-        Button("Spam") { report(friend, .spam) }
-        Button("Abuse") { report(friend, .abuse) }
-        Button("Something Else") { report(friend, .other) }
+      AnyView(Section(times) {})
+      AnyView(Menu("Block & Report", systemImage: "hand.raised") {
+        Button("Block", systemImage: "hand.raised") { blocking = (friend, false) }
+        Section("Report") {
+          Button("Spam") { report(friend, .spam) }
+          Button("Abuse") { report(friend, .abuse) }
+          Button("Something Else") { report(friend, .other) }
+        }
       })
-      AnyView(Button("Block \(friend.name)", systemImage: "hand.raised") { blocking = (friend, false) })
-      AnyView(Button("Remove \(friend.name)", systemImage: "trash", role: .destructive) { remove(friend) })
+      AnyView(Button("Remove", systemImage: "trash", role: .destructive) { remove(friend) })
     }
   }
 
@@ -714,30 +720,16 @@ struct FriendList: View {
   }
 
   /// At the bottom, under the thumb: the camera's button at the right corner (it opens the camera, and closes it as
-  /// "✕" in the same place), the library at the left one, the zoom and the switch to the selfie camera side by side in
+  /// "✕" in the same place) with the switch to the selfie camera beside it, the library at the left one, the zoom in
   /// the middle. Mirrored for the left hand.
   private var cameraControls: some View {
     ZStack {
-      // In the middle: the zoom circle and the switch to the selfie camera beside it.
+      // In the middle: the zoom circle.
       if cameraOn {
         HStack(spacing: 12) {
           if picked == nil {  // a picked photo goes as it is
             CameraZoom(choices: zooms, chosen: $zoom).onChange(of: zoom) { camera.zoom(to: zoom) }
           }
-          Button {
-            Haptic.tap(.light)
-            camera.flip()
-            Task { await readZooms() }
-          } label: {
-            Image(systemName: "arrow.triangle.2.circlepath")
-              .font(.system(size: 17, weight: .semibold))
-              .foregroundStyle(.white)
-              .frame(width: 44, height: 44)
-              .contentShape(.circle)
-          }
-          .buttonStyle(.plain)
-          .glassEffect(.regular.interactive(), in: .circle)
-          .accessibilityLabel("Switch Camera")
         }
         .transition(.scale.combined(with: .opacity))
       }
@@ -756,6 +748,24 @@ struct FriendList: View {
           moreMenu.transition(.scale.combined(with: .opacity))
         }
         Spacer(minLength: 0)
+        // The switch to the selfie camera beside the camera's "✕", as large.
+        if cameraOn {
+          Button {
+            Haptic.tap(.light)
+            camera.flip()
+            Task { await readZooms() }
+          } label: {
+            Image(systemName: "arrow.triangle.2.circlepath")
+              .font(.system(size: 20, weight: .semibold))
+              .foregroundStyle(.white)
+              .frame(width: 52, height: 52)
+              .contentShape(.circle)
+          }
+          .buttonStyle(.plain)
+          .glassEffect(.regular.interactive(), in: .circle)
+          .accessibilityLabel("Switch Camera")
+          .transition(.scale.combined(with: .opacity))
+        }
         Button {
           withAnimation(.snappy) { cameraOn.toggle() }
         } label: {
@@ -1389,7 +1399,12 @@ struct RowButton: View {
         }
       } else {
         Button {
-          if flies { flights.append(UUID()) }
+          if flies {
+            let id = UUID()
+            flights.append(id)
+            // One that never got its "Sent Yo" to rise from (not sent) is let go.
+            Task { try? await Task.sleep(for: .seconds(2)); flights.removeAll { $0 == id } }
+          }
           action()
         } label: { label }
           .buttonStyle(RowPress())
@@ -1406,24 +1421,6 @@ struct RowButton: View {
         undoRing(since: outgoing)
           .padding(leftHanded ? .trailing : .leading, BarLine.margin)
       }
-    }
-    // A Yo sent: the "Yo" of "Sent Yo" in the bar's middle rises out of it (an unseen "Sent " before it puts it in
-    // its place).
-    .overlay {
-      HStack(spacing: 0) {
-        Text("Sent ").hidden()
-        ZStack {
-          ForEach(flights, id: \.self) { id in
-            FlyingYo { flights.removeAll { $0 == id } }
-          }
-        }
-        .frame(minWidth: 1)
-        Bangs(count: count).hidden()  // its "!"s after it, as the bar shows them: the "Yo" stays where it stands
-      }
-      .font(.yo(Metrics.rowFont))
-      .lineLimit(1)
-      .environment(\.layoutDirection, .leftToRight)
-      .allowsHitTesting(false)
     }
     .animation(.snappy, value: outgoing)
     .animation(.spring(duration: 0.4, bounce: 0.35), value: yo)
@@ -1457,7 +1454,21 @@ struct RowButton: View {
             .font(.system(size: Metrics.rowFont * 0.62, weight: .bold))
             .accessibilityLabel("Group")
         }
-        Text(title)
+        Group {
+          if title == "Sent Yo" && !touchable {
+            // A Yo sent rises out of the very "Yo" of "Sent Yo" (FlyingYo), whatever stands around it.
+            HStack(spacing: 0) {
+              Text("Sent ")
+              Text("Yo").overlay {
+                ForEach(flights, id: \.self) { id in
+                  FlyingYo { flights.removeAll { $0 == id } }
+                }
+              }
+            }
+          } else {
+            Text(title)
+          }
+        }
           .lineLimit(1)
           .minimumScaleFactor(0.5)  // a long name, or large text, gets smaller before it is cut with "…"
           .contentTransition(.identity)  // other words come at once, never two drawn over each other
