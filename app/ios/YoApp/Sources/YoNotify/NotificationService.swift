@@ -44,7 +44,9 @@ final class NotificationService: UNNotificationServiceExtension {
         // of the push, so a slow network delays the notification little.
         Prefetch.fetch(events, client: client, startingBefore: start + 5)
         // Then what is on the screen, read just before writing: what the app wrote meanwhile is in it.
-        let senders = ShareBridge.yos(in: events) { ShareBridge.name(of: $0, client: client) }
+        let senders = ShareBridge.yos(
+        in: events, name: { ShareBridge.name(of: $0, client: client) },
+        group: { id in client.groups().first { $0.id == id }?.name ?? "" })
         let delivered = Self.delivered()
         replaced =
           pending.update { content in

@@ -179,13 +179,13 @@ final class ShareModel {
         do {
           let sealed = try sealMedia(
             plain: file.data, width: UInt16(clamping: file.width), height: UInt16(clamping: file.height))
-          let chat = try client.mediaChat(to: friend.to)
+          let chat = try client.mediaChat(toTarget: friend.to)
           received += chat.events
           try client.uploadMedia(media: sealed.media, ciphertext: sealed.ciphertext, fetches: chat.fetches)
           // Once the hub has the blob the Yo goes: offline it waits in the core's own outbox, sent by the app later.
           switch file.kind {
-          case .photo: received += try client.sendPhoto(to: friend.to, media: sealed.media)
-          case .video: received += try client.sendVideo(to: friend.to, media: sealed.media, durationMs: file.durationMs)
+          case .photo: received += try client.sendPhoto(toTarget: friend.to, media: sealed.media)
+          case .video: received += try client.sendVideo(toTarget: friend.to, media: sealed.media, durationMs: file.durationMs)
           }
           sent += 1
         } catch let error as YoError where mediaRetryLater(error: error) {
@@ -204,7 +204,9 @@ final class ShareModel {
 
   /// A notification for the Yos received while sending, as the notification service writes it.
   nonisolated private static func notify(_ events: [YoEvent], client: YoClient) {
-    let yos = ShareBridge.yos(in: events) { ShareBridge.name(of: $0, client: client) }
+    let yos = ShareBridge.yos(
+        in: events, name: { ShareBridge.name(of: $0, client: client) },
+        group: { id in client.groups().first { $0.id == id }?.name ?? "" })
     guard !yos.isEmpty else { return }
     Task { await ShareBridge.post(yos) }
   }

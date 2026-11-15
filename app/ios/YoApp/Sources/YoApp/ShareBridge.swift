@@ -121,6 +121,8 @@ enum ShareBridge {
     let kind: MediaFile.Kind?
     /// The newest one as the app's inbox calls it ("user/sent at"): shown once, from the notification or the core.
     let id: String
+    /// A group's Yos (`user` is "group:" and its id): the name of its bar in the list ("FAMILY", "Group").
+    var bar: String? = nil
 
     /// The original's words, the name as its owner writes it: "Yo from LEO", "📷 from LEO", "🎥 from LEO"; more read
     /// as on the bar, with the photos and videos among them: "Yo!!!!! +4 from LEO · 📷 2".
@@ -144,7 +146,7 @@ enum ShareBridge {
     /// As a notification keeps it (`userInfo["yos"]`), for the next one to add to.
     var info: [String: Any] {
       ["name": name, "user": user, "count": count, "photos": photos, "videos": videos, "id": id,
-       "kind": kind?.rawValue ?? "yo"]
+       "kind": kind?.rawValue ?? "yo", "bar": bar ?? ""]
     }
 
     init(
@@ -162,6 +164,7 @@ enum ShareBridge {
       self.init(
         name: name, user: user, count: count, photos: info["photos"] as? Int ?? 0, videos: info["videos"] as? Int ?? 0,
         kind: kind, id: id)
+      bar = (info["bar"] as? String).flatMap { $0.isEmpty ? nil : $0 }
     }
   }
 
@@ -189,18 +192,35 @@ enum ShareBridge {
 
   /// The Yos among `events`, one per sender, the newest sender first, as a notification names them; `name` names a
   /// sender by user id. What Yo does not show yet (a text, a link, a place) comes as a Yo, as the app shows it.
-  static func yos(in events: [YoEvent], name: (String) -> String) -> [Yos] {
+  /// A group's Yos are one entry per group, named "LEO in FAMILY" by its newest sender (`group` names a group by id).
+  static func yos(
+    in events: [YoEvent], name: (String) -> String, group: (String) -> String = { _ in "" }
+  ) -> [Yos] {
     var senders: [String: Yos] = [:]
     for event in events {
-      guard case .message(let user, let sentAtMs, let message) = event else { continue }
+      // The id as the app takes the Yo in (Inbox.take), so one notified and one received count once.
+      let (key, yoID, sentAtMs, message, from): (String, String, UInt64, MessageKind, String)
+      var bar: String?
+      var groupName = ""
+      switch event {
+      case .message(let user, let at, let kind):
+        (key, yoID, sentAtMs, message, from) = (user, "\(user)/\(at)", at, kind, user)
+      case .groupMessage(let id, let user, let at, let kind):
+        groupName = group(id)
+        bar = groupName.isEmpty ? "Group" : groupName  // as the list names the group's bar (Friends.takeGroups)
+        (key, yoID, sentAtMs, message, from) = ("group:" + id, "\(id)/\(user)/\(at)", at, kind, user)
+      default: continue
+      }
       let kind = message.media?.kind
-      let before = senders[user]
+      let before = senders[key]
       let newer = before.map { sentAtMs >= $0.sentAtMs } ?? true
-      senders[user] = Yos(
-        name: before?.name ?? name(user), user: user, count: (before?.count ?? 0) + 1,
+      var yos = Yos(
+        name: newer ? (groupName.isEmpty ? name(from) : "\(name(from)) in \(groupName)") : before!.name, user: key, count: (before?.count ?? 0) + 1,
         photos: (before?.photos ?? 0) + (kind == .photo ? 1 : 0),
         videos: (before?.videos ?? 0) + (kind == .video ? 1 : 0),
-        kind: newer ? kind : before!.kind, id: newer ? "\(user)/\(sentAtMs)" : before!.id)
+        kind: newer ? kind : before!.kind, id: newer ? yoID : before!.id)
+      yos.bar = bar
+      senders[key] = yos
     }
     return senders.values.sorted { $0.sentAtMs > $1.sentAtMs }
   }
@@ -226,7 +246,10 @@ enum ShareBridge {
     content.threadIdentifier = newest.user
     content.interruptionLevel = .active
     // `user` for Yo Back, also to someone not on the list yet; `id` so the app shows the Yo once.
-    content.userInfo = ["from": newest.name, "user": newest.user, "id": newest.id, "yos": senders.map(\.info)]
+    // A group's: from its bar, where the app shows it.
+    content.userInfo = [
+      "from": newest.bar ?? newest.name, "user": newest.user, "id": newest.id, "yos": senders.map(\.info),
+    ]
   }
 
   /// The Yo notification for `new` Yos (none: a push that brought nothing new), added to those the Yo notifications on
@@ -264,5 +287,23 @@ extension MessageKind {
     case .video(let video, _): (video, .video)
     default: nil
     }
+  }
+}
+
+/// Photos and videos to a friend (a user id or a name) or to a group ("group:" and its id, `Friend.target`).
+extension YoClient {
+  func mediaChat(toTarget to: String) throws -> MediaChat {
+    to.hasPrefix("group:") ? try groupMediaChat(group: String(to.dropFirst(6))) : try mediaChat(to: to)
+  }
+
+  func sendPhoto(toTarget to: String, media: YoMedia) throws -> [YoEvent] {
+    to.hasPrefix("group:")
+      ? try sendGroupPhoto(group: String(to.dropFirst(6)), media: media) : try sendPhoto(to: to, media: media)
+  }
+
+  func sendVideo(toTarget to: String, media: YoMedia, durationMs: UInt32) throws -> [YoEvent] {
+    to.hasPrefix("group:")
+      ? try sendGroupVideo(group: String(to.dropFirst(6)), media: media, durationMs: durationMs)
+      : try sendVideo(to: to, media: media, durationMs: durationMs)
   }
 }

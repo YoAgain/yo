@@ -100,5 +100,5 @@ extension AccountStore {
 
 extension Friend {
   /// As the share extension shows them.
-  var shared: ShareBridge.Friend { ShareBridge.Friend(name: name, color: color, to: user ?? name) }
+  var shared: ShareBridge.Friend { ShareBridge.Friend(name: name, color: color, to: target) }
 }

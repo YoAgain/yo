@@ -319,7 +319,7 @@ final class MediaOutbox {
     return await outcome {
       // Another account's (signed out meanwhile): never sent under this one.
       guard try await Hub.run({ client.userId() }) == item.owner else { return .dropped }
-      let (chat, contacts) = try await Hub.run { (try client.mediaChat(to: item.to), client.contacts()) }
+      let (chat, contacts) = try await Hub.run { (try client.mediaChat(toTarget: item.to), client.contacts()) }
       await received?(chat.events, contacts, client)
       guard generation == self.generation else { return .dropped }
       try await Hub.run {
@@ -337,8 +337,8 @@ final class MediaOutbox {
       guard try await Hub.run({ client.userId() }) == item.owner else { return .dropped }
       let (events, after) = try await Hub.run {
         switch item.kind {
-        case .photo: (try client.sendPhoto(to: item.to, media: media), client.contacts())
-        case .video: (try client.sendVideo(to: item.to, media: media, durationMs: item.durationMs), client.contacts())
+        case .photo: (try client.sendPhoto(toTarget: item.to, media: media), client.contacts())
+        case .video: (try client.sendVideo(toTarget: item.to, media: media, durationMs: item.durationMs), client.contacts())
         }
       }
       await received?(events, after, client)

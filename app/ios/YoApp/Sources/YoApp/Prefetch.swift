@@ -30,8 +30,10 @@ enum Prefetch {
   static func fetch(_ events: [YoEvent], client: YoClient, startingBefore deadline: Date = .distantFuture) {
     guard let directory else { return }
     let media: [YoMedia] = events.compactMap { event in
-      guard case .message(_, _, let kind) = event else { return nil }
-      return kind.media?.media
+      switch event {
+      case .message(_, _, let kind), .groupMessage(_, _, _, let kind): return kind.media?.media
+      default: return nil
+      }
     }
     guard !media.isEmpty, let owner = Hub.bytes(client.userId())?.base64EncodedString() else { return }
     try? FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)

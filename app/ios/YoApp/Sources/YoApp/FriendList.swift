@@ -67,6 +67,13 @@ struct FriendList: View {
   // Blocking and reporting
   /// The friend the Block dialog asks about, and whether it follows a report.
   @State private var blocking: (friend: Friend, reported: Bool)?
+  /// The camera's hint is showing; counted on by each photo or video taken, which hides it for 3 s more.
+  @State private var hintShown = false
+  @State private var hintEpoch = 0
+  /// A group's bar being renamed (the new name typed), or whose members are shown.
+  @State private var renaming: Friend?
+  @State private var newGroupName = ""
+  @State private var membersOf: (bar: Friend, names: String)?
   /// What went wrong reporting or blocking: the alert's title and message.
   @State private var problem: (title: String, message: String)?
   /// The friends whose bars are on screen now, by `Friend.key` (a new spelling leaves them on screen).
@@ -223,6 +230,22 @@ struct FriendList: View {
               : "You won’t get their Yos. Unblock them in your profile.")
         }
         .alert(
+          "Rename \(renaming?.name ?? "")",
+          isPresented: Binding(get: { renaming != nil }, set: { if !$0 { renaming = nil } }), presenting: renaming
+        ) { bar in
+          TextField("Group Name", text: $newGroupName)
+          Button("Rename") { renameGroup(bar, to: newGroupName) }
+          Button("Cancel", role: .cancel) {}
+        }
+        .alert(
+          membersOf?.bar.name ?? "",
+          isPresented: Binding(get: { membersOf != nil }, set: { if !$0 { membersOf = nil } }), presenting: membersOf
+        ) { _ in
+          Button("OK", role: .cancel) {}
+        } message: { members in
+          Text(members.names)
+        }
+        .alert(
           problem?.title ?? "", isPresented: Binding(get: { problem != nil }, set: { if !$0 { problem = nil } })
         ) {
           Button("OK", role: .cancel) {}
@@ -309,8 +332,16 @@ struct FriendList: View {
       .overlay(alignment: .bottom) {
         // In camera mode what to do, just over its controls: at the top it would push the list down.
         VStack(spacing: 10) {
-          if cameraOn { title }
+          if cameraOn && hintShown { title }
           cameraControls
+        }
+        // Said only after a while in camera mode without a photo or video: 3 s idle, again after each one taken.
+        .task(id: cameraOn ? hintEpoch : -1) {
+          withAnimation(.smooth(duration: 0.2)) { hintShown = false }
+          guard cameraOn else { return }
+          try? await Task.sleep(for: .seconds(3))
+          guard !Task.isCancelled else { return }
+          withAnimation(.smooth(duration: 0.4)) { hintShown = true }
         }
       }
       .navigationBarTitleDisplayMode(.inline)
@@ -325,10 +356,9 @@ struct FriendList: View {
       .foregroundStyle(.white)
       .lineLimit(1)
       .fixedSize()
-      .padding(.horizontal, 16)
+      .shadow(color: .black.opacity(0.6), radius: 3, y: 1)  // readable over any picture, no glass
       .frame(height: Metrics.titleHeight)
-      .glassEffect(.regular, in: .capsule)
-      .transition(.blurReplace)
+      .transition(.opacity)
   }
 
   // MARK: Bars
@@ -337,6 +367,7 @@ struct FriendList: View {
     let waiting = inbox.media(from: friend.name) ?? []
     let bar = LiveBar(
       friend: friend,
+      from: inbox.groupSenders[friend.name],
       bar: bars.of(friend),
       color: .row(friend.color).opacity(cameraOn ? 0.45 : 1),  // see-through over the camera
       recording: recordingFor == friend,
@@ -354,25 +385,75 @@ struct FriendList: View {
       open: Binding(
         get: { swiped == friend.key },
         set: { open in swiped = open ? friend.key : swiped == friend.key ? nil : swiped }),
-      enabled: !cameraOn,
+      enabled: !cameraOn && friend.group == nil,
       began: { if swiped != friend.key { withAnimation(.snappy) { swiped = nil } } },  // another one closes
       block: { blocking = (friend, false) },
       remove: { remove(friend) }
     ) {
-      if cameraOn || !waiting.isEmpty {
-        bar  // holding records a video, or shows the photos: no menu then
-      } else {
-        bar
-          .contextMenu {
-            Menu("Report \(friend.name)", systemImage: "exclamationmark.bubble") {
-              Button("Spam") { report(friend, .spam) }
-              Button("Abuse") { report(friend, .abuse) }
-              Button("Something Else") { report(friend, .other) }
-            }
-            Button("Block \(friend.name)", systemImage: "hand.raised") { blocking = (friend, false) }
-            Button("Remove \(friend.name)", systemImage: "trash", role: .destructive) { remove(friend) }
-          }
+      // One view whatever the mode, so the camera only makes the bars see-through and rebuilds nothing: no menu while
+      // holding records a video or shows the photos.
+      bar.contextMenu(cameraOn || !waiting.isEmpty ? nil : menu(for: friend))
+    }
+  }
+
+  /// A bar's menu: a friend's Report, Block and Remove; a group's Members, Rename and Leave.
+  private func menu(for friend: Friend) -> ContextMenu<TupleView<(AnyView, AnyView, AnyView)>> {
+    if friend.group != nil {
+      return ContextMenu {
+        AnyView(Button("Members", systemImage: "person.3") { showMembers(friend) })
+        AnyView(Button("Rename", systemImage: "pencil") {
+          newGroupName = friend.name
+          renaming = friend
+        })
+        AnyView(Button("Leave \(friend.name)", systemImage: "rectangle.portrait.and.arrow.right", role: .destructive) {
+          leave(friend)
+        })
       }
+    }
+    return ContextMenu {
+      AnyView(Menu("Report \(friend.name)", systemImage: "exclamationmark.bubble") {
+        Button("Spam") { report(friend, .spam) }
+        Button("Abuse") { report(friend, .abuse) }
+        Button("Something Else") { report(friend, .other) }
+      })
+      AnyView(Button("Block \(friend.name)", systemImage: "hand.raised") { blocking = (friend, false) })
+      AnyView(Button("Remove \(friend.name)", systemImage: "trash", role: .destructive) { remove(friend) })
+    }
+  }
+
+  // MARK: Groups
+
+  /// Who is in a group, by the names the list knows them by (else as the hub spells them).
+  private func showMembers(_ bar: Friend) {
+    guard let id = bar.group, let client = accounts.client else { return }
+    Task {
+      guard let (groups, contacts) = try? await Hub.run({ (client.groups(), client.contacts()) }),
+        let group = groups.first(where: { $0.id == id })
+      else { return }
+      let me = client.userId()
+      let names = group.members.map { user in
+        if user == me { return accounts.account?.username ?? "You" }
+        let contact = contacts.first { $0.user == user }
+        return friends.all.first { $0.user == user }?.name ?? contact?.handles.first ?? contact?.name ?? "Yo User"
+      }
+      membersOf = (bar, names.sorted().joined(separator: "\n"))
+    }
+  }
+
+  private func renameGroup(_ bar: Friend, to name: String) {
+    let name = name.trimmingCharacters(in: .whitespaces)
+    guard let id = bar.group, let client = accounts.client, !name.isEmpty else { return }
+    Task {
+      _ = try? await Hub.run { try client.renameGroup(group: id, name: String(name.prefix(32))) }
+      if let groups = try? await Hub.run({ client.groups() }) { friends.takeGroups(groups) }
+    }
+  }
+
+  private func leave(_ bar: Friend) {
+    guard let id = bar.group, let client = accounts.client else { return }
+    Task {
+      _ = try? await Hub.run { try client.leaveGroup(group: id) }
+      if let groups = try? await Hub.run({ client.groups() }) { withAnimation(.snappy) { friends.takeGroups(groups) } }
     }
   }
 
@@ -590,64 +671,65 @@ struct FriendList: View {
     }
   }
 
-  /// The photo library at the bottom left, front/back at the bottom right, as in the Camera app.
-  /// At the bottom, under the thumb: the camera's button at the corner (it opens the camera, and closes it as "✕" in
-  /// the same place), the library right above it, the zoom in the middle, the switch to the selfie camera at the
-  /// other corner, all as large. Mirrored for the left hand.
+  /// At the bottom, under the thumb: the camera's button at the right corner (it opens the camera, and closes it as
+  /// "✕" in the same place), the library at the left one, the zoom and the switch to the selfie camera side by side in
+  /// the middle. Mirrored for the left hand.
   private var cameraControls: some View {
-    ZStack(alignment: .bottom) {
-      if cameraOn && picked == nil {  // a picked photo goes as it is
-        CameraZoom(choices: zooms, chosen: $zoom).onChange(of: zoom) { camera.zoom(to: zoom) }
-          .padding(.bottom, 6)  // centred on the bottom buttons' line
-      }
-      HStack(alignment: .bottom, spacing: 12) {
-        if !cameraOn {
-          moreMenu.transition(.scale.combined(with: .opacity))
-        } else {
+    ZStack {
+      // In the middle: the zoom circle and the switch to the selfie camera beside it.
+      if cameraOn {
+        HStack(spacing: 12) {
+          if picked == nil {  // a picked photo goes as it is
+            CameraZoom(choices: zooms, chosen: $zoom).onChange(of: zoom) { camera.zoom(to: zoom) }
+          }
           Button {
+            Haptic.tap(.light)
             camera.flip()
             Task { await readZooms() }
           } label: {
             Image(systemName: "arrow.triangle.2.circlepath")
-              .font(.system(size: 20, weight: .semibold))
+              .font(.system(size: 17, weight: .semibold))
               .foregroundStyle(.white)
-              .frame(width: 52, height: 52)
+              .frame(width: 44, height: 44)
               .contentShape(.circle)
           }
           .buttonStyle(.plain)
           .glassEffect(.regular.interactive(), in: .circle)
           .accessibilityLabel("Switch Camera")
-          .transition(.scale.combined(with: .opacity))
         }
-        Spacer(minLength: 0)
-        VStack(spacing: 14) {
-          if cameraOn {
-            let thumbnail = picked?.thumbnail  // the picker's label closure is Sendable: take the value here
-            PhotosPicker(selection: $libraryItem, matching: .images) {
-              LibraryLabel(thumbnail: thumbnail)
-            }
-            .buttonStyle(.plain)
-            .glassEffect(.regular.interactive(), in: .circle)
-            .accessibilityLabel("Photo Library")
-            .transition(.scale.combined(with: .opacity))
-          }
-          Button {
-            withAnimation(.snappy) { cameraOn.toggle() }
-          } label: {
-            Image(systemName: cameraOn ? "xmark" : "camera.fill")
-              .font(.system(size: 20, weight: .semibold))
-              .foregroundStyle(.white)
-              .contentTransition(.symbolEffect(.replace))
-              .frame(width: 52, height: 52)
-              .contentShape(.circle)  // the whole circle, not only the thin "✕"
+        .transition(.scale.combined(with: .opacity))
+      }
+      // At the corners: the library (camera mode) or "•••" at the one, the camera's own button at the other.
+      HStack(alignment: .center, spacing: 12) {
+        if cameraOn {
+          let thumbnail = picked?.thumbnail  // the picker's label closure is Sendable: take the value here
+          PhotosPicker(selection: $libraryItem, matching: .images) {
+            LibraryLabel(thumbnail: thumbnail)
           }
           .buttonStyle(.plain)
           .glassEffect(.regular.interactive(), in: .circle)
-          .accessibilityLabel(cameraOn ? "Close Camera" : "Camera")
+          .accessibilityLabel("Photo Library")
+          .transition(.scale.combined(with: .opacity))
+        } else {
+          moreMenu.transition(.scale.combined(with: .opacity))
         }
+        Spacer(minLength: 0)
+        Button {
+          withAnimation(.snappy) { cameraOn.toggle() }
+        } label: {
+          Image(systemName: cameraOn ? "xmark" : "camera.fill")
+            .font(.system(size: 20, weight: .semibold))
+            .foregroundStyle(.white)
+            .contentTransition(.symbolEffect(.replace))
+            .frame(width: 52, height: 52)
+            .contentShape(.circle)  // the whole circle, not only the thin "✕"
+        }
+        .buttonStyle(.plain)
+        .glassEffect(.regular.interactive(), in: .circle)
+        .accessibilityLabel(cameraOn ? "Close Camera" : "Camera")
       }
-      .environment(\.layoutDirection, leftHanded ? .rightToLeft : .leftToRight)
     }
+    .environment(\.layoutDirection, leftHanded ? .rightToLeft : .leftToRight)
     .padding(.horizontal, 16)
     .padding(.bottom, 2)
   }
@@ -668,6 +750,7 @@ struct FriendList: View {
   // MARK: Sending
 
   private func send(to friend: Friend) {
+    hintEpoch += 1  // the camera's hint goes, and waits again
     Perf.mark("tap.action")
     defer { PerfProbe.frame("tap") }
     // A tap while a bar is swiped open closes it, as in Mail; it sends nothing. So does one while "+" is open.
@@ -731,7 +814,7 @@ struct FriendList: View {
     let id = UUID()
     guard let client, client === accounts.client,
       await outbox.send(
-        file, to: friend.user ?? friend.name, from: client, accounts: accounts, id: id, held: true, at: at)
+        file, to: friend.target, from: client, accounts: accounts, id: id, held: true, at: at)
     else { return nil }
     let outbox = outbox
     return Prepared(
@@ -744,6 +827,7 @@ struct FriendList: View {
 
   /// Holding a name in camera mode: a video from the moment it is held until it is let go.
   private func hold(_ friend: Friend, _ holding: Bool) {
+    hintEpoch += 1
     if holding {
       guard recordingFor == nil else { return }  // one video at a time: a second finger records nothing
       recordingFor = friend
@@ -1095,6 +1179,8 @@ enum ThumbnailTouch {
 /// read here, so a tap redraws this bar alone and not the whole list.
 struct LiveBar: View {
   let friend: Friend
+  /// A group's: who sent its last Yo.
+  var from: String? = nil
   let bar: FriendList.Bars.Bar
   let color: Color
   let recording: Bool
@@ -1110,7 +1196,7 @@ struct LiveBar: View {
     RowButton(
       title, count: count, color: color, recording: recording, outgoing: bar.outgoing.last?.started, stop: stop,
       media: media, yo: yo, hint: hint, hold: hold, view: view, faded: friend.gone && bar.sent == nil,
-      action: action)
+      icon: friend.group == nil ? nil : "person.3.fill", from: friend.group == nil ? nil : from, action: action)
       // Gone: still their name (whose bar it is), faded; a tap says "Not on Yo".
       .accessibilityValue(friend.gone ? "Not on Yo" : "")
   }
@@ -1183,6 +1269,9 @@ struct RowButton: View {
   var view: (ThumbnailTouch) -> Void = { _ in }
   /// The words faded (a friend no longer on Yo).
   var faded = false
+  /// A group's bar: its sign before the name (SF Symbol), and who sent its last Yo, small over the "Yo!!".
+  var icon: String?
+  var from: String?
   let action: () -> Void
   /// A hold started a video: letting go stops it, and the bar's tap does not take a photo as well.
   @State private var holding = false
@@ -1195,8 +1284,11 @@ struct RowButton: View {
     _ title: String, count: Int = 1, color: Color, recording: Bool = false, outgoing: Date? = nil,
     stop: @escaping () -> Void = {},
     media: [Arrival] = [], yo: FriendList.Landing? = nil, hint: String? = nil, hold: ((Bool) -> Void)? = nil,
-    view: @escaping (ThumbnailTouch) -> Void = { _ in }, faded: Bool = false, action: @escaping () -> Void
+    view: @escaping (ThumbnailTouch) -> Void = { _ in }, faded: Bool = false, icon: String? = nil, from: String? = nil,
+    action: @escaping () -> Void
   ) {
+    self.icon = icon
+    self.from = from
     self.title = title
     self.count = count
     self.color = color
@@ -1282,10 +1374,18 @@ struct RowButton: View {
   /// leaves it room.
   private func line(touchable: Bool) -> some View {
     BarLine(start: outgoing == nil ? BarLine.margin : BarLine.margin + Self.ring + BarLine.gap, mirrored: leftHanded) {
-      Text(title)
-        .lineLimit(1)
-        .minimumScaleFactor(0.5)  // a long name, or large text, gets smaller before it is cut with "…"
-        .contentTransition(.identity)  // other words come at once, never two drawn over each other
+      HStack(spacing: 8) {
+        // A group: its sign at the start, before its name.
+        if let icon {
+          Image(systemName: icon)
+            .font(.system(size: Metrics.rowFont * 0.62, weight: .bold))
+            .accessibilityLabel("Group")
+        }
+        Text(title)
+          .lineLimit(1)
+          .minimumScaleFactor(0.5)  // a long name, or large text, gets smaller before it is cut with "…"
+          .contentTransition(.identity)  // other words come at once, never two drawn over each other
+      }
         .modifier(Knock(trigger: yo?.first))
         .opacity(touchable ? 0 : faded ? 0.55 : 1)
         .accessibilityHidden(touchable)
@@ -1379,9 +1479,18 @@ struct RowButton: View {
       // "Yo" and a "!" for each Yo after the first: a "!" goes quickly when its Yo is over, the last Yo fades slowly.
       TimelineView(.animation(paused: yo.fading == nil)) { timeline in
         let fade = yo.fading.map { timeline.date.timeIntervalSince($0) / (yoSeconds - Self.solid) } ?? 0
-        HStack(spacing: 0) {
-          Text("Yo")
-          Bangs(count: yo.count)
+        VStack(alignment: leftHanded ? .leading : .trailing, spacing: -4) {
+          // In a group, who it is from, small over it.
+          if let from {
+            Text(from)
+              .font(.system(size: 12, weight: .heavy))
+              .lineLimit(1)
+              .opacity(0.85)
+          }
+          HStack(spacing: 0) {
+            Text("Yo")
+            Bangs(count: yo.count)
+          }
         }
         .lineLimit(1)
         .opacity(max(0, 1 - fade))
@@ -1392,33 +1501,31 @@ struct RowButton: View {
   }
 }
 
-/// The camera's zoom, as the Camera app has it: its choices as round buttons side by side, no capsule around them
-/// ("0.5  1×  2  3"), the chosen one with its "×"; a tap goes to another. Not there with one choice only (the front camera).
+/// The camera's zoom: one small circle with the factor ("1×"); each tap goes to the next of its choices (0.5, 1, 2, 3,
+/// then round again), ramped by the camera. Not there with one choice only (the front camera).
 struct CameraZoom: View {
   let choices: [Double]
   @Binding var chosen: Double
 
   var body: some View {
     if choices.count > 1 {
-      HStack(spacing: 2) {
-        ForEach(choices, id: \.self) { choice in
-          let on = choice == chosen
-          Button {
-            Haptic.tap(.light)
-            withAnimation(.snappy(duration: 0.2)) { chosen = choice }
-          } label: {
-            Text(Self.label(choice) + (on ? "×" : ""))
-              .font(.system(size: on ? 17 : 14, weight: .bold).monospacedDigit())
-              .foregroundStyle(on ? Color.yellow : .white)
-              .frame(width: 48, height: 48)
-              .background(.black.opacity(on ? 0.35 : 0.2), in: .circle)
-              .contentShape(.circle)
-          }
-          .buttonStyle(.plain)
-          .accessibilityLabel("Zoom \(Self.label(choice))×")
-          .accessibilityAddTraits(on ? .isSelected : [])
-        }
+      // One small circle with the factor, as Signal has it: each tap the next choice, round again.
+      Button {
+        Haptic.tap(.light)
+        let at = choices.firstIndex(of: chosen) ?? -1
+        withAnimation(.snappy(duration: 0.2)) { chosen = choices[(at + 1) % choices.count] }
+      } label: {
+        Text(Self.label(chosen) + "×")
+          .font(.system(size: 13, weight: .bold).monospacedDigit())
+          .foregroundStyle(.white)
+          .contentTransition(.numericText())
+          .frame(width: 38, height: 38)
+          .background(.black.opacity(0.35), in: .circle)
+          .contentShape(.circle.inset(by: -6))
       }
+      .buttonStyle(.plain)
+      .accessibilityLabel("Zoom \(Self.label(chosen))×")
+      .accessibilityHint("Changes the zoom")
       .transition(.opacity)
     }
   }

@@ -18,6 +18,8 @@ struct Friend: Codable, Hashable, Identifiable {
   var color: Int
   /// Their user id at the hub, once a Yo went or came.
   var user: String?
+  /// A group's bar (spec 4.9): the group's id; its name is the group's. No user id then.
+  var group: String?
   /// Blocked (spec 4.8): off the list, nothing from them shown; Settings lists them to unblock.
   var blocked = false
   /// Their account is gone (deleted, or the name released after a year away): the bar says "Not on Yo". The name
@@ -30,6 +32,9 @@ struct Friend: Codable, Hashable, Identifiable {
   /// name as identity made the bar leave and come in again on top).
   var key = UUID()
   var id: UUID { key }
+
+  /// Where a Yo to the bar goes: the user id once known, else the name; a group's, "group:" and its id.
+  var target: String { group.map { "group:" + $0 } ?? user ?? name }
 
   /// One friend is one friend, whatever was learned about them since: by `key` alone.
   static func == (a: Friend, b: Friend) -> Bool { a.key == b.key }
@@ -50,6 +55,7 @@ struct Friend: Codable, Hashable, Identifiable {
     blocked = try c.decodeIfPresent(Bool.self, forKey: .blocked) ?? false
     gone = try c.decodeIfPresent(Bool.self, forKey: .gone) ?? false
     keyChanged = try c.decodeIfPresent(Bool.self, forKey: .keyChanged) ?? false
+    group = try c.decodeIfPresent(String.self, forKey: .group)
     key = try c.decodeIfPresent(UUID.self, forKey: .key) ?? UUID()
   }
 }
@@ -80,6 +86,35 @@ final class Friends {
     }
   }
 
+  /// A friend known only by the name typed (not yet by user id), not a group's bar.
+  private static func typed(_ friend: Friend) -> Bool { friend.user == nil && friend.group == nil }
+
+  /// The group bars as the core has the groups (spec 4.9): one for each group this account is in, named as the group
+  /// ("Group" until its name is known), new ones on top; a group left goes.
+  func takeGroups(_ groups: [YoGroup]) {
+    var list = all
+    for group in groups {
+      let name = group.name.isEmpty ? "Group" : group.name
+      if let index = list.firstIndex(where: { $0.group == group.id }) {
+        if group.left {
+          list.remove(at: index)
+        } else if list[index].name != name {
+          list[index].name = name
+        }
+      } else if !group.left {
+        var bar = Friend(name: name, color: nextColor)
+        bar.group = group.id
+        list.insert(bar, at: 0)
+      }
+    }
+    let known = Set(groups.filter { !$0.left }.map(\.id))
+    list.removeAll { $0.group.map { !known.contains($0) } ?? false }
+    if list != all || zip(list, all).contains(where: { $0.name != $1.name }) { all = list }
+  }
+
+  /// The bar of a group, by its id.
+  func groupBar(_ id: String) -> Friend? { all.first { $0.group == id } }
+
   /// The friends on the list: all but the blocked.
   var shown: [Friend] { all.filter { !$0.blocked } }
   var blocked: [Friend] { all.filter(\.blocked) }
@@ -98,6 +133,7 @@ final class Friends {
     let name = Username.clean(typed)
     let skeleton = Username.skeleton(name)
     func same(_ friend: Friend) -> Bool {
+      if friend.group != nil { return false }  // a group's bar is no friend, whatever its name
       if let user, let known = friend.user, !friend.gone { return known == user }
       return Username.skeleton(friend.name) == skeleton || (user != nil && friend.user == user)
     }
@@ -115,7 +151,7 @@ final class Friends {
     let skeletons = Set(handles.map(Username.skeleton))
     let index =
       all.firstIndex(where: { $0.user == user })
-      ?? all.firstIndex(where: { $0.user == nil && skeletons.contains(Username.skeleton($0.name)) })
+      ?? all.firstIndex(where: { Self.typed($0) && skeletons.contains(Username.skeleton($0.name)) })
     if let index {
       // Written only when something changed: each write saves the list and redraws it (once per Yo in a burst).
       if all[index].user != user { all[index].user = user }
@@ -134,7 +170,7 @@ final class Friends {
   /// owner's spelling. A friend removed meanwhile stays removed.
   func found(_ name: String, user: String, spelled: String?) {
     let skeleton = Username.skeleton(name)
-    guard all.contains(where: { $0.user == nil && Username.skeleton($0.name) == skeleton }) else { return }
+    guard all.contains(where: { Self.typed($0) && Username.skeleton($0.name) == skeleton }) else { return }
     _ = friend(user: user, handles: [spelled ?? name])
   }
 
@@ -142,7 +178,7 @@ final class Friends {
   func spell(_ contacts: [YoContact]) {
     for contact in contacts {
       let skeletons = Set(contact.handles.map(Username.skeleton))
-      if all.contains(where: { $0.user == contact.user || ($0.user == nil && skeletons.contains(Username.skeleton($0.name))) }) {
+      if all.contains(where: { $0.user == contact.user || (Self.typed($0) && skeletons.contains(Username.skeleton($0.name))) }) {
         _ = friend(user: contact.user, handles: contact.handles)
       }
     }
@@ -182,7 +218,7 @@ final class Friends {
     for friend in kept {
       let stored = friend.name.flatMap(Self.storedName)
       if let index = list.firstIndex(where: { $0.user == friend.user }) ?? stored.flatMap({ name in
-        list.firstIndex { $0.user == nil && Username.skeleton($0.name) == Username.skeleton(name) }
+        list.firstIndex { Self.typed($0) && Username.skeleton($0.name) == Username.skeleton(name) }
       }) {
         list[index].user = friend.user
         list[index].blocked = friend.blocked

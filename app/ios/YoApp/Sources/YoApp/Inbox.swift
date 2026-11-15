@@ -64,6 +64,8 @@ final class Inbox {
   /// Counts Yos as they come, to tell whether more came during a batch.
   @ObservationIgnored private var came = 0
   static let batchSeconds = 0.1
+  /// Who sent the last Yo on a group's bar (by the bar's name): shown small beside its "Yo!!".
+  var groupSenders: [String: String] = [:]
   /// Notifications already taken in, so one tapped and one collected on opening count once.
   @ObservationIgnored private var taken: Set<String> = []
   /// Photos and videos not yet seen, by sender, oldest first: kept on this iPhone until then (ReceivedMedia). By the
@@ -198,11 +200,26 @@ final class Inbox {
       friends.spell(contacts)
       friends.markGone(contacts)
     }
-    let typed = friends.all.filter { $0.user == nil && !$0.blocked }.prefix(20).map(\.name)
+    if let groups = try? await Hub.run({ client.groups() }), client === accounts.client { friends.takeGroups(groups) }
+    let typed = friends.all.filter { $0.user == nil && $0.group == nil && !$0.blocked }.prefix(20).map(\.name)
     await identify(Array(typed), accounts: accounts, friends: friends)
   }
 
   private func sendNow(to friend: Friend, client: YoClient, accounts: AccountStore, friends: Friends) async -> String? {
+    if let group = friend.group {
+      do {
+        let (events, contacts) = try await Hub.run { (try client.sendGroupYo(group: group), client.contacts()) }
+        guard client === accounts.client else { return nil }
+        await take(events, contacts: contacts, client: client, friends: friends)
+        Stats.sentYo(to: friend.name)
+        return nil
+      } catch YoError.Replaced {
+        accounts.replaced(client)
+        return "Not Sent"
+      } catch {
+        return "Not Sent"
+      }
+    }
     let target = friend.user ?? friend.name
     do {
       let (events, contacts, waiting) = try await Hub.run {
@@ -369,6 +386,26 @@ final class Inbox {
             continue
           }
         }
+      case .groupMessage(let group, let user, let sentAtMs, let kind):
+        // On the group's bar, its sender's name beside the Yo (spec 4.9). A group not on the list yet comes now.
+        if friends.groupBar(group) == nil, let groups = try? await Hub.run({ client.groups() }) {
+          friends.takeGroups(groups)
+        }
+        guard let bar = friends.groupBar(group) else { break }
+        let from = contacts.first { $0.user == user }
+        groupSenders[bar.name] = friends.all.first { $0.user == user }?.name ?? from?.handles.first ?? from?.name ?? "?"
+        received(id: "\(group)/\(user)/\(sentAtMs)", from: bar.name)
+        count(from: bar.name)
+        if let (media, kind) = kind.media {
+          let id = Self.mediaID(group + user, sentAtMs, media)
+          guard ReceivedMedia.shared.expect(media, id: id, from: bar.name, kind: kind) else { continue }
+        }
+      case .groupChanged:
+        if let groups = try? await Hub.run({ client.groups() }) {
+          friends.takeGroups(groups)
+        }
+      case .groupSentElsewhere:
+        break
       case .newChat(let user):
         _ = friend(user)  // a friend writing first again (a new phone) is the same friend, by user id
       case .identityChanged(let user):
@@ -382,7 +419,10 @@ final class Inbox {
     // service would have written, which finds them read then. In front: shown on the bars, so a notification of
     // theirs (the service's, written just as the app opened) goes from Notification Center.
     switch UIApplication.shared.applicationState {
-    case .background: await ShareBridge.post(ShareBridge.yos(in: kept) { friend($0).name })
+    case .background:
+      let groups = (try? await Hub.run { client.groups() }) ?? []
+      await ShareBridge.post(
+        ShareBridge.yos(in: kept, name: { friend($0).name }, group: { id in groups.first { $0.id == id }?.name ?? "" }))
     case .active: Task { await collectDelivered() }
     default: break
     }

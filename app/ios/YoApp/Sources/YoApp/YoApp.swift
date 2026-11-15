@@ -188,7 +188,9 @@ final class NotificationDelegate: NSObject, UNUserNotificationCenterDelegate, Se
   /// The sender by user id when the notification service knew it (also someone not on the list yet), else by name.
   @MainActor private func yoBack(to sender: String, user: String?) async {
     guard accounts.account != nil,
-      let friend = user.map({ friends.friend(user: $0, handles: [sender]) }) ?? friends.shownFriend(named: sender),
+      let friend = user.flatMap({ $0.hasPrefix("group:") ? friends.groupBar(String($0.dropFirst(6))) : nil })
+        ?? user.flatMap({ $0.hasPrefix("group:") ? nil : friends.friend(user: $0, handles: [sender]) })
+        ?? friends.shownFriend(named: sender),
       !friend.blocked
     else { return }
     for _ in 0..<50 where accounts.client == nil { try? await Task.sleep(for: .milliseconds(100)) }  // opening
