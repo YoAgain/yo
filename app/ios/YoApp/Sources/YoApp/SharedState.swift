@@ -224,6 +224,7 @@ enum Guest {
     guard let blob = file.read(),
       let client = try? YoClient.restoreGuest(transport: HubTransport(base: Hub.url, timeout: timeout), store: file, stateKey: key, blob: blob)
     else { return nil }
+    Hub.pin(client)
     client.shareState(lock: file)
     return client
   }

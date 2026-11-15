@@ -34,9 +34,10 @@ registration on, written when it changes) and answers `426` to every request of 
 | GET | `/v1/backup/{user id or locator}` | the backup record, encrypted (spec 7); `404` none, and to any request not signed by one of its doors' auth keys | signed by a door's key (`Yo-Time`, `Yo-Signature`) | 10/h (IP) | which record is fetched, from where, by which door |
 | PUT | `/v1/backup` | store the account's backup record with its doors' auth keys | signed | signed | the record (opaque, its sealed part padded to 1, 4, 16 or 60 KiB), its locator, the doors' public auth keys |
 | PUT | `/v1/prekeys` | add one-time prekeys, replace the signed and last resort (spec 6.5) | signed | signed; ≤ 32 per kind per upload, ≤ 64 held | – |
-| POST | `/v1/lookup` | handle → user id, account key, device keys, a bundle per device if asked, username if asked | signed | 50/day with prekeys, 1000/day without (device) | who looks up whom |
+| POST | `/v1/lookup` | handle → user id, account key, device keys, a bundle per device if asked, username if asked; signed by the hub key when asked with `Yo-Nonce` (spec 6.11) | signed | 50/day with prekeys, 1000/day without (device) | who looks up whom |
 | PUT | `/v1/push` | set the device's push token (≤ 512 bytes) | signed | signed | the token |
 | GET | `/.well-known/private-token-issuer-directory` | the Privacy Pass issuer directory: the key delivery tokens are issued under now (spec 6.10) | none | – | nothing |
+| GET | `/.well-known/yo-hub-key` | the hub's public signing key, 32 bytes (spec 6.11); apps pin their own copy | none | – | nothing |
 | POST | `/v1/tokens` | evaluate a batch of 1–100 blinded token inputs with one proof (spec 6.10); `422` other key or type, `429` the day's used | signed | 200 tokens/day (device) | how many tokens a device asks for, when |
 | PUT | `/v1/username` | change or give up the account's username | signed | signed | the name |
 | DELETE | `/v1/account` | delete the account and everything about it (spec 6.4) | signed | signed | – |

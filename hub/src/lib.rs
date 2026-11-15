@@ -30,6 +30,7 @@ use yo_wire::api::{self, HEADER_BODY_HASH, HEADER_DEVICES};
 use yo_wire::cert::DeviceCertificate;
 use yo_wire::content::BlobId;
 use yo_wire::handle::{Handle, KIND_USERNAME};
+use yo_wire::hubsig;
 use yo_wire::limits::{self, MAX_DEVICES, MAX_INBOX_FETCH, MAX_PREKEYS_PER_UPLOAD, PREKEY_TARGET};
 use yo_wire::request::{HEADER_DEVICE, HEADER_SIGNATURE, HEADER_TIME};
 use yo_wire::token::{BatchTokenRequest, Token};
@@ -290,6 +291,18 @@ async fn off_workers(
 }
 
 impl Hub {
+    /// An answer that hands out keys, signed with the hub's key when the request asks so with a nonce (spec 6.11):
+    /// the answer, then the signature. Without the header it goes as it is.
+    fn signed_answer(&self, headers: &HeaderMap, path: &str, request: &[u8], mut answer: Vec<u8>) -> Vec<u8> {
+        let nonce = headers.get(hubsig::NONCE_HEADER).and_then(|v| v.to_str().ok()).and_then(hubsig::nonce);
+        if let Some(nonce) = nonce {
+            let key = ed25519_dalek::SigningKey::from_bytes(&self.config.hub_key);
+            let signature = ed25519_dalek::Signer::sign(&key, &hubsig::message(&nonce, path, request, &answer));
+            answer.extend_from_slice(&signature.to_bytes());
+        }
+        answer
+    }
+
     /// A username at least as long as this hub allows now (`YO_NAME_MIN`, spec 3.3); shorter is `400`, as a name of
     /// the wrong form.
     fn long_enough(&self, name: &[u8]) -> Res<()> {
@@ -353,6 +366,7 @@ impl Hub {
             .route(api::FEEDBACK, post(feedback))
             .route(api::STORAGE, get(get_storage).put(put_storage))
             .route(yo_wire::token::DIRECTORY, get(token_directory))
+            .route(hubsig::KEY_PATH, get(hub_key))
             .route(api::TOKENS, post(issue_tokens))
             .route("/v1/username/{name}", get(username_free))
             .route(api::INBOX_ACK, post(ack))
@@ -866,6 +880,11 @@ async fn prekeys(State(hub): Hubs, method: Method, uri: Uri, headers: HeaderMap,
     }
 }
 
+/// The hub's public key (spec 6.11), for tools: apps ship their own copy and trust only that.
+async fn hub_key(State(hub): Hubs) -> Vec<u8> {
+    ed25519_dalek::SigningKey::from_bytes(&hub.config.hub_key).verifying_key().to_bytes().to_vec()
+}
+
 async fn lookup(
     State(hub): Hubs,
     method: Method,
@@ -873,8 +892,14 @@ async fn lookup(
     headers: HeaderMap,
     body: Bytes,
 ) -> Res<(StatusCode, Vec<u8>)> {
-    let device = hub.authenticate(&method, &uri, &headers, &body)?;
-    let request: api::Lookup = decode(&body)?;
+    let answer = lookup_answer(&hub, &method, &uri, &headers, &body)?;
+    Ok(ok(hub.signed_answer(&headers, uri.path(), &body, answer)))
+}
+
+/// Who a handle is (spec 6.3), before the hub signs it.
+fn lookup_answer(hub: &Hub, method: &Method, uri: &Uri, headers: &HeaderMap, body: &Bytes) -> Res<Vec<u8>> {
+    let device = hub.authenticate(method, uri, headers, body)?;
+    let request: api::Lookup = decode(body)?;
     request.handle.check()?;
     if request.except.len() > MAX_DEVICES {
         return Err(bad());
@@ -897,10 +922,10 @@ async fn lookup(
         bundles: found.bundles.into_iter().take(MAX_DEVICES).collect(),
     };
     if request.flags & api::LOOKUP_USERNAME == 0 {
-        return Ok(ok(encode(&result)));
+        return Ok(encode(&result));
     }
     let username = found.username.map(|name| name.into_bytes().into());
-    Ok(ok(encode(&api::LookupNamed { found: result, username })))
+    Ok(encode(&api::LookupNamed { found: result, username }))
 }
 
 /// Claims or gives up the signing device's account's username.
@@ -1139,6 +1164,7 @@ fn delivery_token(hub: &Hub, peer: SocketAddr, headers: &HeaderMap) -> Res<Broug
 async fn deliver(
     State(hub): Hubs,
     ConnectInfo(peer): Peer,
+    uri: Uri,
     headers: HeaderMap,
     Path(user): Path<String>,
     body: Bytes,
@@ -1177,16 +1203,16 @@ async fn deliver(
     let runtime = tokio::runtime::Handle::current();
     // Full (the writer behind) or gone: "later", the envelope stays with its sender. Never waits here.
     hub.deliveries
-        .try_send(Delivery { user, devices_hash, envelope: body, token, stored, runtime })
+        .try_send(Delivery { user, devices_hash, envelope: body.clone(), token, stored, runtime })
         .map_err(|_| refuse(StatusCode::SERVICE_UNAVAILABLE))?;
     let outcome = outcome.await.ok().and_then(Result::ok).ok_or_else(|| refuse(StatusCode::INTERNAL_SERVER_ERROR))?;
     match outcome {
         // Its devices are woken by the writer (`writer`).
         Delivered::Stored(_) => Ok((StatusCode::ACCEPTED, Vec::new())),
-        Delivered::Mismatch(roster) => Err(Refusal(
-            StatusCode::CONFLICT,
-            encode(&api::Devices { account_key: roster.account_key, devices: roster.devices }),
-        )),
+        Delivered::Mismatch(roster) => {
+            let answer = encode(&api::Devices { account_key: roster.account_key, devices: roster.devices });
+            Err(Refusal(StatusCode::CONFLICT, hub.signed_answer(&headers, uri.path(), &body, answer)))
+        }
         // This recipient has no room now, not the sender too many: `507`, so the sender holds back this one's
         // deliveries only, not everyone's (a `429` stops its whole round).
         Delivered::Full => Err(refuse(StatusCode::INSUFFICIENT_STORAGE)),

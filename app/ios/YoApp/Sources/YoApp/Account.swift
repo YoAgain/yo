@@ -275,6 +275,7 @@ final class AccountStore {
           guard let blob = file.read() else { throw Self.unread(SharedStateFile.stateURL) }
           return try YoClient.restore(transport: transport, store: file, stateKey: key, blob: blob)
         }
+        Hub.pin(client)
         client.shareState(lock: file)
         client.acknowledgeExplicitly()  // each batch as the app has stored it (Inbox.take)
         return (client, client.accountSecret())
@@ -282,6 +283,7 @@ final class AccountStore {
       guard let blob = StateFile.load() else { throw Self.unread(StateFile.url) }
       guard let key = try StateKey.load() else { throw Unopened.gone }
       let client = try YoClient.restore(transport: transport, store: StateFile(), stateKey: key, blob: blob)
+      Hub.pin(client)
       client.acknowledgeExplicitly()  // each batch as the app has stored it (Inbox.take)
       return (client, client.accountSecret())
     }
@@ -326,9 +328,11 @@ final class AccountStore {
     do {
       return try await Hub.run {
         let make = { (store: StateStore, key: Data) in
-          try YoClient.registerUsername(
+          let client = try YoClient.registerUsername(
             transport: transport, store: store, stateKey: key, username: username, accountSecret: secret,
             name: nil, pushPlatform: 0, pushToken: "")
+          Hub.pin(client)
+          return client
         }
         guard SharedStateFile.app else {
           let client = try make(StateFile(), StateKey.make())

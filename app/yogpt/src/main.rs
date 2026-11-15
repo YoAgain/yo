@@ -1,7 +1,7 @@
 //! YoGPT: an account that answers every Yo, after a moment, with a Yo or a few. One process serves the account on
 //! several hubs, each on its own.
 //!
-//!   yo-gpt [--replies DIR] --account NAME=HUB,DIR[,USERNAME] [--account …]
+//!   yo-gpt [--replies DIR] --account NAME=HUB,DIR[,USERNAME] [--hub-key NAME=KEY] [--account …]
 //!   yo-gpt --replies app/yogpt/replies --account dev=https://dev.justyo.app,state/dev,YoGPT
 //!
 //! Pictures: with `--replies`, a photo or video sent to it is answered with one picture from DIR (files named like
@@ -9,6 +9,9 @@
 //! `--picture-every N` (one in N; 1 always, 0 never, the default) adds one now and then. Without `--replies`, Yos only. Each picture is drawn uniformly at random,
 //! leaving out the last `RECENT_PICTURES` that sender got (remembered in memory only, for at most `MAX_REMEMBERED`
 //! senders) while others are left.
+//!
+//! `--hub-key NAME=KEY` pins a hub key of that account's hub (base64url of its 32-byte public key, spec 6.11), given
+//! once per key (the current one and a spare): answers that hand out keys are then taken only signed by one of them.
 //!
 //! The username defaults to YOGPT; once registered, the account keeps the name it has, whatever is given later.
 //! Each account has its own client, state directory, threads and limits. Its first run registers the username with a
@@ -169,6 +172,8 @@ struct Account {
     hub: String,
     state: PathBuf,
     username: String,
+    /// The hub's public keys, pinned (`--hub-key`, as often as there are: the current one and a spare).
+    hub_keys: Vec<[u8; 32]>,
 }
 
 /// What the whole process answers with.
@@ -329,11 +334,19 @@ fn account(value: &str) -> Result<Account, String> {
         return Err(bad());
     }
     let hub = hub.trim_end_matches('/').into();
-    Ok(Account { name: name.into(), hub, state: state.into(), username: username.into() })
+    Ok(Account { name: name.into(), hub, state: state.into(), username: username.into(), hub_keys: Vec::new() })
+}
+
+/// `NAME=KEY`: the hub key of an account, base64url of 32 bytes.
+fn hub_key(text: &str) -> Result<(String, [u8; 32]), String> {
+    let (name, key) = text.split_once('=').ok_or("--hub-key NAME=KEY")?;
+    let key = yo_wire::unb64(key).ok().and_then(|k| k.try_into().ok()).ok_or("--hub-key: 32 bytes, base64url")?;
+    Ok((name.into(), key))
 }
 
 fn args() -> Result<(Vec<Account>, Options), String> {
-    let mut accounts = Vec::new();
+    let mut accounts: Vec<Account> = Vec::new();
+    let mut hub_keys = Vec::new();
     let mut options = Options { replies: None, picture_every: PICTURE_EVERY };
     let mut it = std::env::args().skip(1);
     while let Some(flag) = it.next() {
@@ -342,8 +355,13 @@ fn args() -> Result<(Vec<Account>, Options), String> {
             "--account" => accounts.push(account(&value)?),
             "--replies" => options.replies = Some(value.into()),
             "--picture-every" => options.picture_every = value.parse().map_err(|_| "--picture-every: a number")?,
+            "--hub-key" => hub_keys.push(hub_key(&value)?),
             other => return Err(format!("unknown flag {other}")),
         }
+    }
+    for (name, key) in hub_keys {
+        let account = accounts.iter_mut().find(|a| a.name == name).ok_or(format!("--hub-key: no account {name}"))?;
+        account.hub_keys.push(key);
     }
     if accounts.is_empty() || accounts.len() > MAX_ACCOUNTS {
         return Err(format!("1 to {MAX_ACCOUNTS} accounts: --account NAME=HUB,DIR[,USERNAME]"));
@@ -487,6 +505,9 @@ fn open(account: &Account) -> Option<Client> {
         };
         match opened {
             Ok(mut client) => {
+                if !account.hub_keys.is_empty() {
+                    client.set_hub_keys(account.hub_keys.clone());
+                }
                 // It never opens a photo or video: their keys are not even kept with the events.
                 client.forget_media_keys();
                 if let Err(error) = client.persist_to(Arc::new(File(path)), key) {

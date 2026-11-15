@@ -389,6 +389,8 @@ pub struct SecurityStatus {
     /// Contacts, and of them those verified.
     pub contacts: u32,
     pub verified: u32,
+    /// Answers handing out keys are checked against the hub keys the app ships (`set_hub_keys`).
+    pub hub_signed: bool,
 }
 
 /// A session with one device of a contact (spec 4): for the app's contact details.
@@ -862,6 +864,14 @@ impl YoClient {
         }
     }
 
+    /// Pins the hub's public keys the app ships for this hub (spec 6.11: the current one and a spare): from now on, an
+    /// answer that hands out keys counts only signed by one of them. Called right after the client is made
+    /// (`Hub.pin` in the app).
+    pub fn set_hub_keys(&self, keys: Vec<Vec<u8>>) -> Result<(), YoError> {
+        let keys = keys.into_iter().map(key_of).collect::<Result<Vec<_>, _>>()?;
+        self.with(|c| c.set_hub_keys(keys))
+    }
+
     /// This device's security now: keys at the hub, tokens, sessions, verified contacts.
     pub fn security_status(&self) -> SecurityStatus {
         self.with(|c| c.security_status())
@@ -874,6 +884,7 @@ impl YoClient {
                 pq_sessions: s.pq_sessions,
                 contacts: s.contacts,
                 verified: s.verified,
+                hub_signed: s.hub_signed,
             })
             .unwrap_or(SecurityStatus {
                 prekeys_at_hub: 0,
@@ -884,6 +895,7 @@ impl YoClient {
                 pq_sessions: 0,
                 contacts: 0,
                 verified: 0,
+                hub_signed: false,
             })
     }
 

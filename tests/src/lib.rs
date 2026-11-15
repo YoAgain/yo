@@ -179,16 +179,26 @@ pub fn username(i: u64) -> String {
     format!("u{i:09}")
 }
 
-/// Registers a new account with a free username.
+/// The public key of the test hubs' signing key (`Config::for_tests`), as an app ships its hub's (spec 6.11).
+pub fn hub_key() -> [u8; 32] {
+    ed25519_dalek::SigningKey::from_bytes(&yo_hub::config::TEST_HUB_KEY).verifying_key().to_bytes()
+}
+
+/// Registers a new account with a free username; answers handing out keys checked against the test hub's key.
 pub fn register(transport: Arc<Http>, username: &str, name: Option<&str>) -> Client {
-    let client = Client::register_username(transport, username, None, name.map(str::to_owned), Push::none()).unwrap();
+    let mut client =
+        Client::register_username(transport, username, None, name.map(str::to_owned), Push::none()).unwrap();
+    client.set_hub_keys(vec![hub_key()]);
     USERS.lock().unwrap_or_else(PoisonError::into_inner).insert(username.to_owned(), client.user_id().to_owned());
     client
 }
 
 /// A new phone of an account: the username registered again with the account key from the backup.
 pub fn new_phone(transport: Arc<Http>, username: &str, account: &Client) -> Client {
-    Client::register_username(transport, username, Some(account.account_secret()), None, Push::none()).unwrap()
+    let mut client =
+        Client::register_username(transport, username, Some(account.account_secret()), None, Push::none()).unwrap();
+    client.set_hub_keys(vec![hub_key()]);
+    client
 }
 
 static USERS: Mutex<std::collections::BTreeMap<String, String>> = Mutex::new(std::collections::BTreeMap::new());

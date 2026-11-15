@@ -195,6 +195,9 @@ pub struct Config {
     /// The fewest characters (grapheme clusters) a username may have on this hub, from `YO_NAME_MIN` (default 2): a
     /// switch the operator can lower to 1, or raise, without an app update (spec 3.3).
     pub name_min: usize,
+    /// The seed of the hub's Ed25519 key (`YO_HUB_KEY_FILE`, 32 bytes, the operator's): it signs the answers that hand
+    /// out keys for a client that asks so (spec 6.11). Apps ship its public half.
+    pub hub_key: [u8; 32],
 }
 
 /// `YO_MIN_APP`: comma separated `PLATFORM/BUILD`.
@@ -245,6 +248,15 @@ pub fn read_reserved(path: Option<&str>) -> Result<Vec<Reserved>, String> {
     }
 }
 
+/// The hub key of `Config::for_tests`: tests pin its public half.
+pub const TEST_HUB_KEY: [u8; 32] = [0x48; 32];
+
+/// The hub key in a file: exactly 32 bytes (the seed).
+pub fn read_hub_key(path: &str) -> Result<[u8; 32], String> {
+    let bytes = std::fs::read(path).map_err(|e| format!("{path}: {e}"))?;
+    bytes.try_into().map_err(|_| format!("{path}: not 32 bytes"))
+}
+
 impl Config {
     /// A hub for tests: in memory, no rate limits, no push services.
     pub fn for_tests() -> Self {
@@ -259,6 +271,7 @@ impl Config {
             blobs: BlobConfig::for_tests(),
             min_app: Vec::new(),
             name_min: 2,
+            hub_key: TEST_HUB_KEY,
         }
     }
 }

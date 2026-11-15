@@ -15,6 +15,7 @@ libsignal itself. **Assumed:** reachable only through the Cloudflare Tunnel when
 | Read who writes to whom from envelopes | Sealed to the recipient's account key, padded inside the seal (6.1); no group or session id anywhere (`tests/tests/sealed.rs`) | address and time (spec 1); Oblivious HTTP later |
 | Learn a sender | Unsigned delivery; the payload's sender only inside the seal | as above |
 | Swap a contact's keys | Session identity = pinned account key's X25519 form (4.1); the hub delivers no key a client trusts by itself | a lying hub's device list (3.2); key transparency later |
+| Hand out other keys between app and hub (TLS broken, a proxy) | Lookups and `409` rosters signed by the hub key the app pins, bound to the client's nonce and question (spec 6.11) | the hub itself (or its key) lying: key transparency later; builds without a pinned key |
 | Fill the disk without identity | 64 MiB/IP/hour of delivered bytes; `507` below 1 GiB free; 30-day TTL | many addresses: the floor holds, deliveries stop until cleanup |
 | Fill one user's inbox | 5000 per device, then `507` for that recipient only | stranger spam until read; contact access keys later (8) |
 | Spend another device's request budget | Counted only after the signature holds | – |

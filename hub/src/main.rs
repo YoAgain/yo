@@ -16,9 +16,11 @@
 //!                         database's backup: blobs are fleeting.
 //!   YO_BLOB_BUDGET_MB     all blobs together at most, default 16384 (16 GiB); uploads beyond are refused (507)
 //!   YO_BLOB_MIN_FREE_MB   uploads are refused while the disk has less free, default 4096 (4 GiB)
+//!   YO_HUB_KEY_FILE       required: the 32-byte seed of the hub's Ed25519 key, which signs answers handing out keys
+//!                         (spec 6.11); its public half is pinned in the apps
 
 use std::sync::Arc;
-use yo_hub::config::{parse_min_app, read_reserved, ApnsConfig, BlobConfig, Config, FcmConfig, Limits};
+use yo_hub::config::{parse_min_app, read_hub_key, read_reserved, ApnsConfig, BlobConfig, Config, FcmConfig, Limits};
 use yo_hub::{push, Hub};
 
 fn var(name: &str) -> Option<String> {
@@ -80,6 +82,7 @@ fn config() -> Result<(Config, String), String> {
             .map(|text| text.parse::<usize>().ok().filter(|n| (1..=16).contains(n)).ok_or("YO_NAME_MIN: 1 to 16"))
             .transpose()?
             .unwrap_or(2),
+        hub_key: read_hub_key(&required("YO_HUB_KEY_FILE")?)?,
     };
     Ok((config, var("YO_LISTEN").unwrap_or_else(|| "127.0.0.1:8080".into())))
 }

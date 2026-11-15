@@ -9,6 +9,7 @@ pub mod content;
 pub mod devices;
 pub mod envelope;
 pub mod handle;
+pub mod hubsig;
 pub mod limits;
 pub mod request;
 pub mod token;

@@ -29,6 +29,23 @@ enum Hub {
   }
   static var transport: HubTransport { HubTransport(base: url) }
 
+  /// The public keys each hub may sign its answers that hand out keys with (spec 6.11), base64url as the operator's
+  /// `hub-key` printed them: the one in use and a spare kept offline, so a lost or replaced hub key needs no app
+  /// update first. A hub not listed (none yet, or another address for tests) is not checked: its answers are taken as
+  /// they come, as before the hubs signed.
+  static let keys: [String: [String]] = [:]
+  // Filled in when the hubs' keys are made (yo-hub's ./hub-key prints the lines):
+  //   "hub.justyo.app": ["…current…", "…spare…"],
+  //   "dev.justyo.app": ["…current…", "…spare…"],
+
+  /// Pins this hub's keys in a client right after it is made: from then on it takes keys only the hub signed.
+  static func pin(_ client: YoClient) {
+    guard let host = url.host(), let texts = keys[host] else { return }
+    let pinned = texts.compactMap { Data(base64URL: $0) }
+    guard !pinned.isEmpty else { return }
+    try? client.setHubKeys(keys: pinned)
+  }
+
   /// A blocking core call, off the main actor: on threads of its own, not Swift's few shared ones. A core call waits
   /// for the network and for the core (one call at a time); blocked there, a burst of calls would hold every shared
   /// thread, and everything else async (the inbox's long wait too) would stand still.
@@ -373,5 +390,14 @@ enum Keychain {
     }
     guard status == errSecSuccess else { throw Failure(status: status) }
     guard try read(query) == data else { throw Failure(status: errSecDecode) }
+  }
+}
+
+extension Data {
+  /// base64url without padding, as the hub's keys are written (spec 6.1).
+  init?(base64URL text: String) {
+    var plain = text.replacingOccurrences(of: "-", with: "+").replacingOccurrences(of: "_", with: "/")
+    plain += String(repeating: "=", count: (4 - plain.count % 4) % 4)
+    self.init(base64Encoded: plain)
   }
 }

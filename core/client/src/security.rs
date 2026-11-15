@@ -22,6 +22,8 @@ pub struct SecurityStatus {
     pub contacts: u32,
     /// Of them, those whose safety number was compared (verified).
     pub verified: u32,
+    /// Answers handing out keys are checked against the hub key the app ships (spec 6.11).
+    pub hub_signed: bool,
 }
 
 const DAY_MS: u64 = 24 * 60 * 60 * 1000;
@@ -43,6 +45,7 @@ impl Client {
             refill_pending: self.state.prekeys.upload.is_some(),
             signed_prekey_days: SecurityStatus::days(self.state.prekeys.signed_at, (self.clock)()),
             delivery_tokens: self.state.tokens.len() as u32,
+            hub_signed: self.hub_key_pinned(),
             ..SecurityStatus::default()
         };
         for (user, contact) in self.state.contacts.iter().filter(|(_, c)| !c.blocked && !c.gone && c.chat) {

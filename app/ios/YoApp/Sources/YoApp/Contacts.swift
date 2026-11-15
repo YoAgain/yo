@@ -213,32 +213,41 @@ struct EncryptionPage: View {
       } footer: {
         Text("Every Yo, photo and video is end-to-end encrypted: only you and your friends can open them.")
       }
-      // Live, from the core and the inbox: what stands now, each with its check.
+      // Live, from the core and the inbox: a plain statement with its check each, the details inside.
       if let status {
         Section {
-          row("Hub Connected", connected.text, connected.check)
-          row(
-            "Keys at the Hub", "\(status.prekeysAtHub) left" + (status.refillPending ? ", refill on its way" : ""),
-            status.prekeysAtHub >= 16 ? .ok : status.refillPending || status.prekeysAtHub > 0 ? .waiting : .problem)
-          row(
-            "Signed Keys Renewed", status.signedPrekeyDays == 0 ? "This week" : "\(status.signedPrekeyDays) days ago",
-            status.signedPrekeyDays <= 8 ? .ok : .waiting)
-          row("Post-Quantum Sessions", "\(status.pqSessions) of \(status.devices)",
-            status.pqSessions == status.devices ? .ok : .waiting)
-          row("Sealed Sender", "On, \(status.deliveryTokens) tokens", .ok)
-          row("Verified Contacts", "\(status.verified) of \(status.contacts)",
-            status.verified == status.contacts && status.contacts > 0 ? .ok : .open)
-        } header: {
-          Text("Now")
+          check("Hub Connected", connected.check) {
+            detail("Last answer", connected.text)
+          }
+          check("Hub Signed", status.hubSigned ? .ok : .open) {
+            detail("Keys from the hub", status.hubSigned ? "Signed and checked" : "Not checked in this build")
+          }
+          check("Sealed Sender", .ok) {
+            detail("Who sent a Yo", "Hidden from the hub")
+            detail("Delivery tokens", "\(status.deliveryTokens)")
+          }
+          check("Post-Quantum", status.pqSessions == status.devices ? .ok : .waiting) {
+            detail("Sessions with PQXDH", "\(status.pqSessions) of \(status.devices)")
+          }
+          let keysFresh = status.prekeysAtHub >= 16 && status.signedPrekeyDays <= 8
+          check("Keys Fresh", keysFresh ? .ok : status.refillPending || status.prekeysAtHub > 0 ? .waiting : .problem) {
+            detail("One-time keys at the hub", "\(status.prekeysAtHub)" + (status.refillPending ? ", refill on its way" : ""))
+            detail("Signed keys renewed", status.signedPrekeyDays == 0 ? "This week" : "\(status.signedPrekeyDays) days ago")
+          }
         } footer: {
-          Text(
-            "Every contact's keys are signed with their account key and checked before a session starts. Sealed sender: the hub sees who a Yo is for, never who sent it.")
+          Text("Tap a line for the details.")
         }
       }
       Section {
-        DisclosureGroup("Per Contact") { ContactRows() }
+        DisclosureGroup {
+          ContactRows()
+        } label: {
+          LabeledContent("Per Contact") {
+            if let status { Text("\(status.verified)/\(status.contacts) verified") }
+          }
+        }
       } footer: {
-        Text("Each contact's checks, safety number and devices.")
+        Text("Each contact's checks, safety number and devices. Compare safety numbers to verify a contact.")
       }
     }
     .navigationTitle("Encryption")
@@ -256,15 +265,21 @@ struct EncryptionPage: View {
     return Date.now.timeIntervalSince(last) < 60 ? ("Now", .ok) : ("\(age) ago", .waiting)
   }
 
-  private func row(_ title: String, _ value: String, _ check: Check) -> some View {
-    LabeledContent {
-      HStack(spacing: 6) {
-        Text(value)
-        Image(systemName: check.symbol).foregroundStyle(check.color).accessibilityHidden(true)
-      }
+  /// A plain statement with its check; the details for the curious when opened.
+  private func check(_ title: String, _ state: Check, @ViewBuilder details: () -> some View) -> some View {
+    let shown = details()
+    return DisclosureGroup {
+      shown
     } label: {
-      Text(title)
+      LabeledContent(title) {
+        Image(systemName: state.symbol).foregroundStyle(state.color)
+          .accessibilityLabel(state == .ok ? "OK" : state == .problem ? "Problem" : "Pending")
+      }
     }
+  }
+
+  private func detail(_ title: String, _ value: String) -> some View {
+    LabeledContent(title, value: value).font(.subheadline)
   }
 }
 

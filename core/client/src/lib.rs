@@ -11,9 +11,9 @@ pub mod identity;
 pub mod media;
 pub mod net;
 pub mod seal;
+pub mod security;
 pub mod signal;
 pub mod state;
-pub mod security;
 pub mod storage;
 pub mod tokens;
 
@@ -40,6 +40,7 @@ use yo_wire::api::{self, status};
 use yo_wire::content::Message;
 use yo_wire::envelope::{ForDevice, Payload, Plain};
 use yo_wire::handle::{Handle, KIND_USER, KIND_USERNAME};
+use yo_wire::hubsig;
 use yo_wire::limits::{
     MAX_DEVICES, MAX_INBOX_FETCH, MAX_TOKENS_PER_REQUEST, PREKEY_REFILL_BELOW, PREKEY_TARGET, TOKEN_REFILL_BELOW,
     TOKEN_TARGET,
@@ -186,6 +187,8 @@ pub struct Whois {
     headers: Vec<(String, String)>,
     body: Vec<u8>,
     me: String,
+    hub_keys: Vec<Key>,
+    nonce: Option<[u8; hubsig::NONCE_LEN]>,
 }
 
 impl Whois {
@@ -199,7 +202,8 @@ impl Whois {
             status::NOT_FOUND => return Err(Error::NotOnYo),
             _ => return Err(refused(&response)),
         }
-        let named: api::LookupNamed = decode(&response.body)?;
+        let answer = hub_signed(&self.hub_keys, self.nonce.as_ref(), api::LOOKUP, &self.body, &response.body)?;
+        let named: api::LookupNamed = decode(answer)?;
         let user = hex(&named.found.user_id);
         if user == self.me {
             return Err(Error::Protocol("oneself"));
@@ -267,6 +271,8 @@ struct Delivery {
     envelope: Vec<u8>,
     /// The token it carries (`tokens::kept`), in `headers` as `Authorization`: back to the stash if it never left.
     token: Option<String>,
+    /// The nonce a `409` must be signed for (spec 6.11), in `headers` too.
+    nonce: Option<[u8; hubsig::NONCE_LEN]>,
 }
 
 impl Deliveries {
@@ -343,6 +349,33 @@ pub struct Client {
     /// `sync_end` received: the work after it (receipts, retries, prekeys, the outbox, the storage, delivery tokens)
     /// waits for `after_sync`, or the next `sync_begin`.
     after_due: bool,
+    /// The hub's public keys the app ships (spec 6.11: the current one and a spare kept offline): with them, every
+    /// answer that hands out keys must carry a signature by one of them over this very question; with none (an app
+    /// from before), answers are taken as they come.
+    hub_keys: Vec<Key>,
+}
+
+/// Request headers with the nonce a signed answer is asked for (spec 6.11), if any.
+fn with_nonce(mut headers: Vec<(String, String)>, nonce: Option<[u8; hubsig::NONCE_LEN]>) -> Vec<(String, String)> {
+    if let Some(nonce) = nonce {
+        headers.push((hubsig::NONCE_HEADER.to_owned(), yo_wire::b64(&nonce)));
+    }
+    headers
+}
+
+/// An answer that hands out keys, as the hub signed it for this request (spec 6.11): checked against the pinned keys
+/// (any of them) and its signature cut off. With none pinned (an app from before), the answer as it came.
+fn hub_signed<'a>(
+    keys: &[Key],
+    nonce: Option<&[u8; hubsig::NONCE_LEN]>,
+    path: &str,
+    request: &[u8],
+    body: &'a [u8],
+) -> Result<&'a [u8]> {
+    let Some(nonce) = nonce else { return Ok(body) };
+    keys.iter()
+        .find_map(|key| hubsig::open(key, nonce, path, request, body).ok())
+        .ok_or(Error::Protocol("answer not signed by the hub"))
 }
 
 fn wall_ms() -> u64 {
@@ -747,7 +780,24 @@ impl Client {
             unacked: Vec::new(),
             received_ids: Vec::new(),
             after_due: false,
+            hub_keys: Vec::new(),
         }
+    }
+
+    /// Pins the hub's public keys (spec 6.11): answers handing out keys are taken only signed by one of them from now
+    /// on. None: not checked.
+    pub fn set_hub_keys(&mut self, keys: Vec<Key>) {
+        self.hub_keys = keys;
+    }
+
+    /// Whether answers handing out keys are checked against pinned hub keys.
+    pub fn hub_key_pinned(&self) -> bool {
+        !self.hub_keys.is_empty()
+    }
+
+    /// A fresh nonce for an answer that hands out keys, when keys are pinned (spec 6.11).
+    fn hub_nonce(&self) -> Option<[u8; hubsig::NONCE_LEN]> {
+        self.hub_key_pinned().then(identity::random::<{ hubsig::NONCE_LEN }>)
     }
 
     /// Opens a sealed state as a guest: another process (a share or notification extension) using the state of the
@@ -1026,13 +1076,23 @@ impl Client {
     /// `LOOKUP_PREKEYS`, a bundle per device but those in `except`.
     fn lookup(&mut self, handle: &Handle, flags: u8, except: Vec<Key>) -> Result<(api::LookupResult, Option<String>)> {
         let body = encode(&api::Lookup { handle: handle.clone(), flags: flags | api::LOOKUP_USERNAME, except });
-        let response = self.signed("POST", api::LOOKUP, &body)?;
+        let nonce = self.hub_nonce();
+        let (headers, _) = self.sign("POST", api::LOOKUP, &body);
+        let response = self.unsigned("POST", api::LOOKUP, &with_nonce(headers, nonce), &body)?;
+        let response = match response.status {
+            status::UNAUTHORIZED => {
+                let (headers, _) = self.sign("POST", api::LOOKUP, &body);
+                self.unsigned("POST", api::LOOKUP, &with_nonce(headers, nonce), &body)?
+            }
+            _ => response,
+        };
         match response.status {
             status::OK => {}
             status::NOT_FOUND => return Err(Error::NotOnYo),
             _ => return Err(refused(&response)),
         }
-        let named: api::LookupNamed = decode(&response.body)?;
+        let answer = hub_signed(&self.hub_keys, nonce.as_ref(), api::LOOKUP, &body, &response.body)?;
+        let named: api::LookupNamed = decode(answer)?;
         Ok((named.found, spelled(named.username)))
     }
 
@@ -1625,13 +1685,15 @@ impl Client {
                 named.push(self.state.device_key);
             }
             let hash = yo_wire::devices::hash(&account_key, &named);
+            let nonce = self.hub_nonce();
             items.push(Delivery {
                 seq: item.seq,
                 user: item.user.clone(),
                 path: api::deliver_path(&user),
-                headers: vec![(api::HEADER_DEVICES.to_owned(), yo_wire::b64(&hash))],
+                headers: with_nonce(vec![(api::HEADER_DEVICES.to_owned(), yo_wire::b64(&hash))], nonce),
                 envelope: envelope.clone(),
                 token: None,
+                nonce,
             });
         }
         // One token per delivery while there are any, the oldest first: the hub counts it instead of the address.
@@ -1680,7 +1742,9 @@ impl Client {
                     done.insert(item.seq);
                 }
                 Some(Ok(response)) if response.status == status::CONFLICT => {
-                    match decode::<api::Devices>(&response.body) {
+                    let answer =
+                        hub_signed(&self.hub_keys, item.nonce.as_ref(), &item.path, &item.envelope, &response.body);
+                    match answer.and_then(|answer| Ok(decode::<api::Devices>(answer)?)) {
                         Ok(devices) => match self
                             .read_before_roster(&item.user, &devices.devices)
                             .and_then(|()| self.take_devices(&item.user, devices.account_key, &devices.devices))
@@ -2823,9 +2887,17 @@ impl Client {
         }
         let body = encode(&api::Lookup { handle, flags: api::LOOKUP_USERNAME, except: Vec::new() });
         let (headers, _) = self.sign("POST", api::LOOKUP, &body);
+        let nonce = self.hub_nonce();
         // The time signed saved before the request leaves: another process of this device signs later.
         self.persist()?;
-        Ok(Whois { transport: self.transport.clone(), headers, body, me: self.state.user_id.clone() })
+        Ok(Whois {
+            transport: self.transport.clone(),
+            headers: with_nonce(headers, nonce),
+            body,
+            me: self.state.user_id.clone(),
+            hub_keys: self.hub_keys.clone(),
+            nonce,
+        })
     }
 
     /// Takes in what `Whois::send` said a name is before a send to it by user id (the app's way to send to a name

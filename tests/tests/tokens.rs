@@ -167,7 +167,11 @@ fn a_spent_token_is_refused_and_the_delivery_goes_again_without() {
     assert_eq!(a.waiting(), 0);
     let sent = deliveries_to(&ha, b.user_id());
     let (again, without) = (&sent[sent.len() - 2], &sent[sent.len() - 1]);
-    assert_eq!(again, &spent, "the same token");
+    // Each attempt asks the hub's signature with a fresh nonce (spec 6.11); all else is the same.
+    let fresh = |headers: &[(String, String)]| -> Vec<(String, String)> {
+        headers.iter().filter(|(name, _)| name != yo_wire::hubsig::NONCE_HEADER).cloned().collect()
+    };
+    assert_eq!(fresh(again), fresh(&spent), "the same token");
     assert!(!has_token(without), "then none: never a signed delivery");
     let signed = [yo_wire::request::HEADER_DEVICE, yo_wire::request::HEADER_SIGNATURE];
     assert!(!without.iter().any(|(name, _)| signed.contains(&name.as_str())), "nor a signed one");
