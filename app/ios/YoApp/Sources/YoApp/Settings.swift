@@ -30,6 +30,8 @@ struct SettingsView: View {
   @Environment(Friends.self) private var friends
 
   @State private var resetting = false
+  /// Contacts encrypted as they should be, of all: the Encryption row's "23/23".
+  @State private var tally: EncryptionTally?
   @State private var requestingPhotos = false
   @State private var photosDenied = false
   @State private var addingPasskey = false
@@ -109,8 +111,8 @@ struct SettingsView: View {
               Text("Secure your account to keep your name “\(account.username)” forever.")
             }
           }
-          // Two groups: Account (security, signing out, deleting), Contacts and Blocked; then Media, Appearance and
-          // Statistics.
+          // Two groups: Account (security, signing out, deleting) and Blocked; then Media, Appearance, Statistics and
+          // Encryption (each contact's checks under it).
           Section {
             NavigationLink {
               accountPage(account)
@@ -128,15 +130,6 @@ struct SettingsView: View {
               } label: {
                 Label("Account", systemImage: "person.fill")
                   .labelStyle(Tile(accounts.toDo > 0 ? .orange : .green))
-              }
-            }
-            NavigationLink {
-              ContactsList()
-            } label: {
-              LabeledContent {
-                Text("\(friends.contacts.count)")
-              } label: {
-                Label("Contacts", systemImage: "person.2.fill").labelStyle(Tile(.blue))
               }
             }
             NavigationLink {
@@ -169,6 +162,22 @@ struct SettingsView: View {
                 Label("Statistics", systemImage: "chart.bar.fill").labelStyle(Tile(.amethyst))
               }
             }
+            NavigationLink {
+              EncryptionPage()
+            } label: {
+              LabeledContent {
+                if let tally {
+                  HStack(spacing: 6) {
+                    Text("\(tally.encrypted)/\(tally.total)")
+                    let check: Check = tally.allGood ? .ok : .waiting
+                    Image(systemName: check.symbol).foregroundStyle(check.color).accessibilityHidden(true)
+                  }
+                  .accessibilityLabel("\(tally.encrypted) of \(tally.total) contacts encrypted")
+                }
+              } label: {
+                Label("Encryption", systemImage: "lock.fill").labelStyle(Tile(.green))
+              }
+            }
           }
           // The last rows: a word to the Yo team, and the licences with the source of this build.
           Section {
@@ -193,6 +202,7 @@ struct SettingsView: View {
         if let account = accounts.account { NameCodeSheet(name: account.username) }
       }
       .navigationTitle("Profile")
+      .task(id: Reload(accounts.client, friends.contacts)) { tally = await EncryptionTally.load(accounts, friends) }
       .navigationBarTitleDisplayMode(.inline)
       .toolbar {
         // As Signal's settings: the system's close button, top right.

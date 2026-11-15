@@ -164,12 +164,77 @@ struct ContactsList: View {
   }
 
   private func load() async {
-    guard let client = accounts.client else { return }
+    if let loaded = await ContactState.loadAll(accounts, friends) { states = loaded }
+  }
+}
+
+extension ContactState {
+  /// Every contact's state, by user id; nil when the account changed meanwhile (signed out).
+  @MainActor static func loadAll(_ accounts: AccountStore, _ friends: Friends) async -> [String: ContactState]? {
+    guard let client = accounts.client else { return nil }
     let users = friends.contacts.compactMap(\.user)
     let loaded = (try? await Hub.run {
       Dictionary(users.map { ($0, ContactState.load(client, user: $0)) }, uniquingKeysWith: { a, _ in a })
     }) ?? [:]
-    if client === accounts.client { states = loaded }  // not an account signed out meanwhile
+    return client === accounts.client ? loaded : nil
+  }
+}
+
+/// How many contacts' chats are end-to-end encrypted as they should be, of all of them ("23/23").
+struct EncryptionTally: Equatable {
+  var encrypted = 0
+  var total = 0
+
+  var allGood: Bool { encrypted == total }
+
+  @MainActor static func load(_ accounts: AccountStore, _ friends: Friends) async -> EncryptionTally? {
+    guard let states = await ContactState.loadAll(accounts, friends) else { return nil }
+    let contacts = friends.contacts.filter { !$0.blocked }
+    let good = contacts.filter { friend in (friend.user.flatMap { states[$0] } ?? ContactState()).overall(friend) == .ok }
+    return EncryptionTally(encrypted: good.count, total: contacts.count)
+  }
+}
+
+/// Settings › Encryption: how Yo encrypts, in a few plain lines, how many contacts are encrypted as they should be,
+/// and under it each contact's own checks (Per Contact).
+struct EncryptionPage: View {
+  @Environment(Friends.self) private var friends
+  @Environment(AccountStore.self) private var accounts
+  @State private var tally: EncryptionTally?
+
+  var body: some View {
+    Form {
+      Section {
+        LabeledContent {
+          HStack(spacing: 6) {
+            Text(tally.map { "\($0.encrypted) of \($0.total)" } ?? "…")
+            if let tally {
+              let check: Check = tally.allGood ? .ok : .waiting
+              Image(systemName: check.symbol).foregroundStyle(check.color).accessibilityHidden(true)
+            }
+          }
+        } label: {
+          Text("Contacts Encrypted")
+        }
+      } footer: {
+        Text("Every Yo, photo and video is end-to-end encrypted: only you and your friends can open them.")
+      }
+      Section("How") {
+        LabeledContent("Protocol", value: "Signal")
+        LabeledContent("Key Agreement", value: "PQXDH")
+        LabeledContent("Ratchet", value: "Double Ratchet + SPQR")
+        LabeledContent("Post-Quantum", value: "On")
+        LabeledContent("Sealed Sender", value: "On")
+      }
+      Section {
+        NavigationLink("Per Contact") { ContactsList() }
+      } footer: {
+        Text("Each contact's checks, safety number and devices.")
+      }
+    }
+    .navigationTitle("Encryption")
+    .navigationBarTitleDisplayMode(.inline)
+    .task(id: Reload(accounts.client, friends.contacts)) { tally = await EncryptionTally.load(accounts, friends) }
   }
 }
 
@@ -344,7 +409,7 @@ private struct ContactDetail: View {
 
 /// When a contacts page loads again: another core (opened since, or another account), or its friends changed (a chat
 /// started, a key changed, one gone or blocked).
-private struct Reload: Equatable {
+struct Reload: Equatable {
   let client: ObjectIdentifier?
   let friends: [String]
 
