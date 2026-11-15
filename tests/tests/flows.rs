@@ -981,3 +981,19 @@ fn a_yo_the_old_phone_sent_before_the_move_arrives_after_the_friend_learned_of_i
     a2.send_yo(b.user()).unwrap();
     assert_eq!(yos(&b.drain(), &a.user()), 1);
 }
+
+/// As above, the inbox not readable just then (`503`): the roster waits with the Yo to the account, and the old
+/// phone's Yo still opens once the inbox is read.
+#[test]
+fn the_roster_waits_while_the_inbox_cannot_be_read_first() {
+    let hub = TestHub::start();
+    let (a, b) = friends(&hub);
+    a.send_yo(b.user()).unwrap();
+    let a2 = Phone::register(&hub, &a.name, None, Some(a.account_secret()));
+    b.http.fault("/v1/inbox?wait=0", Fault::Answer(503));
+    let mut events = b.send_yo(a.user()).unwrap_or_default();
+    events.extend(b.drain());
+    assert_eq!(yos(&events, &a.user()), 1, "{}", describe(&events));
+    assert_eq!(b.waiting(), 0);
+    assert_eq!(yos(&a2.drain(), &b.user()), 1);
+}

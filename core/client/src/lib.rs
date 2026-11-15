@@ -1067,15 +1067,12 @@ impl Client {
     }
 
     /// Reads the inbox before a roster that drops a device is taken in: an envelope its device sent before it was
-    /// replaced, waiting there, opens only in its session, which the roster deletes. "Not now" leaves it to chance.
+    /// replaced, waiting there, opens only in its session, which the roster deletes. "Not now": the roster waits too.
     fn read_before_roster(&mut self, user: &str, roster: &[api::Device]) -> Result<()> {
         if !self.drops_a_device(user, roster) {
             return Ok(());
         }
-        match self.receive_all(0) {
-            Err(error) if !retryable(&error) => Err(error),
-            _ => Ok(()),
-        }
+        self.receive_all(0)
     }
 
     /// Starts a session with each device of a bundle (spec 4.1): PQXDH, against the identity of the account key.
@@ -1567,6 +1564,8 @@ impl Client {
                             .and_then(|()| self.take_devices(&item.user, devices.account_key, &devices.devices))
                         {
                             Ok(()) => changed = true,
+                            // The inbox could not be read first: the envelope waits like any "not now".
+                            Err(error) if retryable(&error) => self.note(format!("roster later: {error}")),
                             Err(error) => result = Err(error),
                         },
                         // The hub did not take it: kept, and tried again like any "not now".
