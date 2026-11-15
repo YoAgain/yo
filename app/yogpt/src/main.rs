@@ -428,6 +428,14 @@ impl Bot {
     /// Queues an event for the dispatcher, or drops it when the queue is full; never blocks. Only Yos, photos and
     /// videos are worth it; of a photo or video only that it came (its blob goes to the drainer, its key nowhere).
     fn queue(&self, events: &SyncSender<Event>, event: Event) {
+        // A group's Yo is answered into the group: it goes on as a message from the group ("group:" and its id), so
+        // the group has its own turn and limits, as a sender has. Its own (from another device) and changes are not.
+        let event = match event {
+            Event::GroupMessage { group, sent_at_ms, content, .. } => {
+                Event::Message { user: format!("{GROUP}{group}"), sent_at_ms, content }
+            }
+            event => event,
+        };
         let event = match event {
             Event::Message { user, sent_at_ms, content: Content::Photo(media) | Content::Video { media, .. } } => {
                 self.drain(&media);
@@ -559,7 +567,10 @@ fn reason(error: &Error) -> String {
 
 /// How the log names a sender: the start of its user id (hex), nothing it chose itself.
 fn who(user: &str) -> String {
-    user.chars().take(8).filter(char::is_ascii_hexdigit).collect()
+    match user.strip_prefix(GROUP) {
+        Some(group) => format!("group {}", group.chars().take(8).filter(char::is_ascii_hexdigit).collect::<String>()),
+        None => user.chars().take(8).filter(char::is_ascii_hexdigit).collect(),
+    }
 }
 
 /// 1, 2, 4 … 60 seconds; back to 1 after a success.
@@ -786,6 +797,17 @@ fn receive(bot: &Bot, events: &SyncSender<Event>) {
     }
 }
 
+/// What answers go to: "group:" and a group's id for a group, else a user.
+const GROUP: &str = "group:";
+
+/// A Yo to a user or into a group (`GROUP`).
+fn send_to(bot: &Bot, to: &str, content: Content) -> Result<Vec<Event>, Error> {
+    match to.strip_prefix(GROUP) {
+        Some(group) => bot.client().send_group(group, content),
+        None => bot.client().send(to, content),
+    }
+}
+
 /// Sends a Yo or a few, one in `picture_every` of them with a picture; to a photo or video, one Yo with a picture.
 /// What sending receives goes to the dispatcher.
 fn answer(bot: &Bot, user: &str, events: &SyncSender<Event>, to_picture: bool) {
@@ -802,7 +824,7 @@ fn answer(bot: &Bot, user: &str, events: &SyncSender<Event>, to_picture: bool) {
         }
         let sent = match with_picture == Some(i) {
             true => send_picture(bot, user).inspect(|(_, sent)| pictures += *sent as usize).map(|(events, _)| events),
-            false => bot.client().send_yo(user),
+            false => send_to(bot, user, Content::Yo),
         };
         match sent {
             Ok(received) => received.into_iter().for_each(|event| bot.queue(events, event)),
@@ -818,7 +840,7 @@ fn answer(bot: &Bot, user: &str, events: &SyncSender<Event>, to_picture: bool) {
 fn send_picture(bot: &Bot, user: &str) -> Result<(Vec<Event>, bool), Error> {
     let recent = bot.recent.lock().unwrap_or_else(PoisonError::into_inner).of(user).cloned();
     let picked = bot.options.replies.as_deref().and_then(|dir| pick_picture(dir, recent.as_ref()));
-    let Some((name, bytes, width, height)) = picked else { return bot.client().send_yo(user).map(|e| (e, false)) };
+    let Some((name, bytes, width, height)) = picked else { return send_to(bot, user, Content::Yo).map(|e| (e, false)) };
     let sent = send_this_picture(bot, user, &bytes, width, height);
     // Only a picture that went counts against a repeat: a plain Yo instead keeps the sender's last 50 as they were.
     if matches!(sent, Ok((_, true))) {
@@ -839,15 +861,19 @@ fn send_this_picture(
     // Signed under the client, sent without it: other answers go on meanwhile.
     let upload = {
         let mut client = bot.client();
-        let fetches = client.media_fetches(user).unwrap_or(1);
+        let fetches = match user.strip_prefix(GROUP) {
+            Some(group) => client.group_media_fetches(group),
+            None => client.media_fetches(user),
+        };
+        let fetches = fetches.unwrap_or(1);
         client.upload(&media, fetches)?
     };
     match upload.send(&sealed) {
-        Ok(()) => bot.client().send(user, Content::Photo(media)).map(|e| (e, true)),
+        Ok(()) => send_to(bot, user, Content::Photo(media)).map(|e| (e, true)),
         Err(error) if gone(&error) => Err(error),
         Err(error) => {
             bot.log(format!("picture to {}: {}", who(user), reason(&error)));
-            bot.client().send_yo(user).map(|e| (e, false))
+            send_to(bot, user, Content::Yo).map(|e| (e, false))
         }
     }
 }

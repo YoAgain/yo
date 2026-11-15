@@ -248,3 +248,50 @@ fn a_burst_of_photos_is_answered_with_its_pictures_at_once() {
     let _ = std::fs::remove_dir_all(&state);
     let _ = std::fs::remove_dir_all(&replies);
 }
+
+/// Group Yos and photos it is sent, from the group (`group`) and from `from`, until `quiet` passes without one:
+/// (Yos, photos).
+fn group_answers(client: &mut Client, group: &str, from: &str, quiet: Duration) -> (usize, usize) {
+    let (mut yos, mut photos, mut last) = (0, 0, Instant::now());
+    while last.elapsed() < quiet {
+        for event in client.sync(1).unwrap() {
+            if let Event::GroupMessage { group: g, user, content, .. } = event {
+                if g == group && user == from {
+                    match content {
+                        Content::Photo(_) => photos += 1,
+                        _ => yos += 1,
+                    }
+                    last = Instant::now();
+                }
+            }
+        }
+        client.acknowledge_events();
+    }
+    (yos, photos)
+}
+
+/// In a group of three, YoGPT answers a Yo into the group, and a photo with a picture.
+#[test]
+fn yogpt_answers_in_a_group() {
+    let hub = TestHub::start();
+    let (state, replies) = (state_dir(), state_dir());
+    std::fs::create_dir_all(&replies).unwrap();
+    std::fs::write(replies.join("001.jpg"), reply_picture()).unwrap();
+    let _bot = Bot::start_with(&[(&hub, &state)], &["--replies", replies.to_str().unwrap()]);
+    let (mut alice, bob) = (someone(&hub), someone(&hub));
+    let yogpt = round_trip(&mut alice).remove(0);
+    let (group, _) = alice.create_group("Trio", &[yogpt.clone(), bob.user_id().to_string()]).unwrap();
+
+    alice.send_group(&group, Content::Yo).unwrap();
+    let (yos, photos) = group_answers(&mut alice, &group, &yogpt, Duration::from_secs(8));
+    assert!((1..=5).contains(&yos) && photos == 0, "{yos} Yos, {photos} pictures into the group");
+
+    let (photo, sealed) = media::seal(b"a group photo", 4, 3).unwrap();
+    let fetches = alice.group_media_fetches(&group).unwrap();
+    alice.upload(&photo, fetches).unwrap().send(&sealed).unwrap();
+    alice.send_group(&group, Content::Photo(photo)).unwrap();
+    let (yos, photos) = group_answers(&mut alice, &group, &yogpt, Duration::from_secs(8));
+    assert_eq!((yos, photos), (0, 1), "a picture into the group");
+    let _ = std::fs::remove_dir_all(&state);
+    let _ = std::fs::remove_dir_all(&replies);
+}
