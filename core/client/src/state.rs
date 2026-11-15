@@ -272,6 +272,10 @@ pub struct State {
     /// though they are not in the group as this device has it (added since).
     #[serde(default)]
     pub group_asks: BTreeSet<(String, String)>,
+    /// Group Yos from one not in the group as this device has it, naming a newer revision (group id, the event): shown
+    /// once a member's change brings their sender in, dropped once one does not (at most `MAX_HELD`).
+    #[serde(default)]
+    pub group_held: Vec<(String, StoredEvent)>,
     /// Payloads from a device under another's number whose roster could not be asked now: received again later,
     /// not dropped (at most `DEFERRED`).
     #[serde(default)]

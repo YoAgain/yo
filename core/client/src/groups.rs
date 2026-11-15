@@ -31,6 +31,8 @@ fn group_id(id: &str) -> Result<GroupId> {
 
 /// Groups this device keeps at most: a sender naming new group ids cannot fill it (its asks are bounded the same).
 const MAX_GROUPS: usize = 256;
+/// Group Yos held at once from senders not in their group yet (`State::group_held`).
+const MAX_HELD: usize = 64;
 
 impl Client {
     /// The groups this account is or was in.
@@ -57,8 +59,32 @@ impl Client {
         let mut all: Vec<String> = members.iter().map(|m| m.to_ascii_lowercase()).collect();
         all.push(me.clone());
         let name = name.to_owned();
+        if self.state.groups.len() >= MAX_GROUPS {
+            return Err(Error::Protocol("too many groups"));
+        }
         let result = self.change_group(&id, true, move |_| Ok((all, name)));
         self.finish(result).map(|events| (id, events))
+    }
+
+    /// For tests: a group's message naming any revision, to one user, as only a broken or hostile client sends it.
+    #[cfg(feature = "testing")]
+    pub fn send_group_tagged_for_tests(&mut self, to: &str, id: &str, revision: u32, content: Content) -> Result<()> {
+        let tag = GroupTag { id: group_id(id)?, revision };
+        // As this device would only if it were in the group with them: its own view says so, so it leaves.
+        let me = self.state.user_id.clone();
+        let group = self.state.groups.entry(id.to_owned()).or_insert_with(|| Group {
+            name: String::new(),
+            members: Vec::new(),
+            revision,
+            by: me.clone(),
+            left: false,
+            before: Vec::new(),
+        });
+        group.left = false;
+        group.members = vec![me, to.to_owned()];
+        self.queue(&[to.to_owned()], Some(tag), content)?;
+        self.persist()?;
+        self.deliver_now()
     }
 
     pub fn rename_group(&mut self, id: &str, name: &str) -> Result<Vec<Event>> {
@@ -95,7 +121,7 @@ impl Client {
     /// A Yo (with a photo or video or not) to a group this account is in.
     pub fn send_group(&mut self, id: &str, content: Content) -> Result<Vec<Event>> {
         let result = self.send_group_inner(id, content);
-        self.finish(result)
+        self.finish_sent(result)
     }
 
     /// How many fetches a photo or video to the group is uploaded for: every device of its other members, and this
@@ -336,6 +362,12 @@ impl Client {
             }
             return;
         }
+        // A sender cannot fill this device with groups (spec 4.9): past `MAX_GROUPS` a group not here yet is not taken
+        // in, by an update as by a Yo.
+        if !self.state.groups.contains_key(&id) && self.state.groups.len() >= MAX_GROUPS {
+            self.note("a group past the most kept".into());
+            return;
+        }
         let left = !members.contains(&me);
         // What it was made from: a rival at the same revision shares it; a newer one, made from what this device had,
         // as far as it knows.
@@ -346,8 +378,18 @@ impl Client {
         };
         let group = Group { name: info.name, members, revision: info.revision, by: author, left, before };
         self.state.group_asks.retain(|(g, _)| *g != id); // answered: an ask is no lasting exception
+        let members = group.members.clone();
         self.state.groups.insert(id.clone(), group);
-        self.push_event(Event::GroupChanged { group: id });
+        self.push_event(Event::GroupChanged { group: id.clone() });
+        // Yos held from one not in the group then: shown if this change has them in it, else dropped.
+        let (theirs, rest): (Vec<_>, Vec<_>) =
+            std::mem::take(&mut self.state.group_held).into_iter().partition(|(g, _)| *g == id);
+        self.state.group_held = rest;
+        for (_, event) in theirs {
+            if matches!(&event, crate::state::StoredEvent::GroupMessage { user, .. } if members.contains(user)) {
+                self.state.events.push(event);
+            }
+        }
     }
 
     /// `from` asks for a group (spec 4.9): it goes to them as it is here, if they are in it.
@@ -373,6 +415,9 @@ impl Client {
     pub(crate) fn group_yo(&mut self, from: &str, tag: GroupTag, sent_at_ms: u64, content: Content) {
         let id = hex(&tag.id);
         let me = self.state.user_id.clone();
+        // One not in the group as it is here, naming a newer revision (added since, or removed and claiming it): its
+        // Yo is not shown until a member's change brings it in (spec 4.9); the group is asked of a member.
+        let mut outsider = false;
         let ask = match self.state.groups.get(&id) {
             // A sender cannot fill this device with groups: past `MAX_GROUPS` a group not known is not taken in.
             None if self.state.groups.len() >= MAX_GROUPS => {
@@ -396,8 +441,8 @@ impl Client {
                 true
             }
             // To a group left: dropped whatever revision it names (only a change adding this account back brings
-            // it back). From no member of it as it is here: dropped, unless its revision is newer (a member added
-            // since, its Yo here before the change): shown, and the group asked of them.
+            // it back). From no member of it as it is here: dropped; with a newer revision the group is asked of a
+            // member too (a member added since: its next Yos show once the change is here).
             Some(g)
                 if g.left || (tag.revision <= g.revision && g.revision > 0 && !g.members.iter().any(|m| m == from)) =>
             {
@@ -406,6 +451,7 @@ impl Client {
             }
             Some(g) => {
                 let (behind, ask) = (tag.revision < g.revision, tag.revision > g.revision);
+                outsider = g.revision > 0 && !g.members.iter().any(|m| m == from);
                 // A member behind (its Yo names an older revision): it gets the group as it is here.
                 if behind {
                     self.group_asked(from, &id);
@@ -433,6 +479,16 @@ impl Client {
             contact.receipt_due = true;
         }
         let content = self.forget_keys(content);
-        self.push_event(Event::GroupMessage { group: id, user: from.to_owned(), sent_at_ms, content });
+        let event = Event::GroupMessage { group: id.clone(), user: from.to_owned(), sent_at_ms, content };
+        if outsider {
+            // Held until a member's change says whether its sender is in (`group_update`).
+            if self.state.group_held.len() < MAX_HELD {
+                self.state.group_held.push((id, crate::stored(event)));
+            } else {
+                self.note("a Yo to a group from one not in it yet, too many held".into());
+            }
+            return;
+        }
+        self.push_event(event);
     }
 }

@@ -372,7 +372,7 @@ fn note_handle(contact: &mut Contact, shown: String) {
 }
 
 /// An event as the state keeps it, and back: the app-facing types carry no serde.
-fn stored(event: Event) -> StoredEvent {
+pub(crate) fn stored(event: Event) -> StoredEvent {
     let content = |content: Content| match content {
         Content::Yo => StoredContent::Yo,
         Content::Photo(media) => StoredContent::Photo(media.into()),
@@ -661,6 +661,7 @@ impl Client {
             roster_asked: Default::default(),
             recovery_lookups: (0, 0),
             group_asks: Default::default(),
+            group_held: Vec::new(),
             deferred: Default::default(),
         };
         let records = Records::new(&Default::default(), &state.account_secret, registration_id)?;
@@ -1401,9 +1402,11 @@ impl Client {
     /// Sends the outbox now, the message just queued and saved in it. What the hub cannot take now (no network, its
     /// limit, a full inbox, "not now") waits there: the send succeeded (spec 4.7), so an app never sends it again
     /// itself, a second time.
-    fn deliver_now(&mut self) -> Result<()> {
+    pub(crate) fn deliver_now(&mut self) -> Result<()> {
         match self.deliver() {
-            Err(error) if !retryable(&error) => Err(error),
+            // A save that fails after it: the outbox as saved still has it, and a second copy is known by its
+            // plaintext at the receiver.
+            Err(error) if !retryable(&error) && !matches!(error, Error::Save(_)) => Err(error),
             _ => Ok(()),
         }
     }
@@ -2377,7 +2380,18 @@ impl Client {
     /// Sends a message: starts writing to the user if this device has not yet (spec 4.2).
     pub fn send(&mut self, to: &str, content: Content) -> Result<Vec<Event>> {
         let result = self.send_inner(to, content);
-        self.finish(result)
+        self.finish_sent(result)
+    }
+
+    /// `finish` for a send: the message was queued and saved before it went (spec 4.7), so a later save that fails
+    /// does not make it unsent. Its events wait for the next call; `Save` here would have the app send it again, a
+    /// second message.
+    pub(crate) fn finish_sent(&mut self, result: Result<()>) -> Result<Vec<Event>> {
+        let queued = result.is_ok();
+        match self.finish(result) {
+            Err(Error::Save(_)) if queued => Ok(Vec::new()),
+            other => other,
+        }
     }
 
     fn send_inner(&mut self, to: &str, content: Content) -> Result<()> {
@@ -2831,10 +2845,14 @@ impl Client {
     pub(crate) fn apply_block(&mut self, user: &str, blocked: bool) {
         self.state.contacts.entry(user.to_owned()).or_insert_with(Contact::unknown).blocked = blocked;
         if blocked {
-            self.state.events.retain(|e| {
-                !matches!(e, StoredEvent::Message { user: from, own: false, .. }
+            // From the events not handed out yet and from those handed out and not acknowledged, which a restart
+            // hands out again: nothing of theirs comes after the block.
+            let theirs = |e: &StoredEvent| {
+                matches!(e, StoredEvent::Message { user: from, own: false, .. }
                     | StoredEvent::GroupMessage { user: from, own: false, .. } if from == user)
-            });
+            };
+            self.state.events.retain(|e| !theirs(e));
+            self.state.handed.retain(|e| !theirs(e));
         }
     }
 

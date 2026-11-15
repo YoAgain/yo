@@ -333,3 +333,30 @@ fn a_send_the_hub_cannot_take_now_succeeds_and_waits() {
     assert_eq!(a.pending(), 0);
     assert_eq!(yos(&b.sync(0).unwrap()), 2, "each once");
 }
+
+/// Saves that fail after the message was queued and saved (the disk filling up as it went): the send is not reported
+/// as failed, so the app does not send it a second time (spec 4.7); it arrives once.
+#[test]
+fn a_save_failing_after_the_message_was_saved_does_not_make_it_unsent() {
+    struct Filling(Mutex<Vec<u8>>, std::sync::atomic::AtomicU32);
+    impl Store for Filling {
+        fn save(&self, blob: Vec<u8>) -> Result<(), String> {
+            if self.1.load(std::sync::atomic::Ordering::SeqCst) == 0 {
+                return Err("disk full".into());
+            }
+            self.1.fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
+            *self.0.lock().unwrap() = blob;
+            Ok(())
+        }
+    }
+    let hub = TestHub::start();
+    let (mut a, mut b, _, _, _, pb) = chat(&hub);
+    let store = Arc::new(Filling(Mutex::default(), std::sync::atomic::AtomicU32::new(u32::MAX)));
+    a.persist_to(store.clone(), [6; 32]).unwrap();
+    // The message's own save goes; every save after it fails.
+    store.1.store(1, std::sync::atomic::Ordering::SeqCst);
+    a.send_yo(&pb).expect("saved with the message in it: sent");
+    store.1.store(u32::MAX, std::sync::atomic::Ordering::SeqCst);
+    a.sync(0).unwrap();
+    assert_eq!(yos(&b.sync(0).unwrap()), 1, "once");
+}

@@ -303,10 +303,10 @@ fn two_removing_each_other_at_once_end_the_same() {
     }
 }
 
-/// A member added since sends a Yo that arrives before the change that added them: shown (its revision is newer), and
-/// the group asked of a member as Ben has it (Ann), not of the newcomer, who cannot vouch for its own addition.
+/// A member added since sends a Yo that arrives before the change that added them: held, the group asked of a member
+/// as Ben has it (Ann), not of the newcomer, who cannot vouch for its own addition; shown once Ann's answer has Cleo.
 #[test]
-fn a_new_members_yo_before_the_change_is_shown() {
+fn a_new_members_yo_before_the_change_is_shown_once_the_change_is_here() {
     let hub = TestHub::start();
     let base = random_u64() % 1_000_000_000;
     let transports: Vec<_> = (0..3).map(|_| Http::new(hub.url())).collect();
@@ -321,13 +321,14 @@ fn a_new_members_yo_before_the_change_is_shown() {
     a.add_to_group(&id, &[c.user_id().to_owned()]).unwrap();
     take(c);
     c.send_group(&id, Content::Yo).unwrap();
-    let events = take(b);
-    assert_eq!(group_yos(&events), [(id.clone(), c.user_id().to_owned())], "shown, though Ben's group is older");
+    let mut events = take(b);
+    assert!(group_yos(&events).is_empty(), "held: Ben's group has no Cleo yet");
     for _ in 0..2 {
         take(a);
-        take(b);
+        events.extend(take(b));
     }
     assert!(view(b, &id).members.contains(&c.user_id().to_owned()), "the group came from Ann when asked");
+    assert_eq!(group_yos(&events), [(id.clone(), c.user_id().to_owned())], "and then the Yo, once");
 }
 
 /// The same photo to two groups and 1:1 to a member of both: three conversations, three messages; once-only holds
@@ -404,14 +405,16 @@ fn a_new_members_answer_is_taken_after_a_restart() {
     a.add_to_group(&id, &[c.user_id().to_owned()]).unwrap();
     take(c);
     c.send_group(&id, Content::Yo).unwrap();
-    assert_eq!(group_yos(&take(b)).len(), 1);
+    assert!(group_yos(&take(b)).is_empty(), "held");
     let saved = b.export(&[4; 32]);
     let mut b = Client::restore(Http::new(hub.url()), &saved, &[4; 32]).unwrap();
+    let mut events = Vec::new();
     for _ in 0..2 {
         take(a);
-        take(&mut b);
+        events.extend(take(&mut b));
     }
     assert!(view(&b, &id).members.contains(&c.user_id().to_owned()), "the ask outlived the restart");
+    assert_eq!(group_yos(&events).len(), 1, "and so did the held Yo");
 }
 
 /// A member removed cannot bring themselves back: their own change naming a newer revision with them in it is not
@@ -467,4 +470,52 @@ fn a_waiting_group_yo_does_not_go_to_a_member_removed_since() {
     let got = take(c);
     assert!(group_yos(&got).is_empty(), "removed before it went: {got:?}");
     assert_eq!(group_yos(&take(b)).len(), 1);
+}
+
+/// One not in the group (removed, or never in it) cannot speak in it by naming a revision newer than Ben's: Ben does
+/// not show it, and asks a member instead (spec 4.9). Dan, a friend of Ben's, is not in TRIO.
+#[test]
+fn one_not_in_the_group_naming_a_newer_revision_is_not_shown() {
+    let hub = TestHub::start();
+    let mut p = people(&hub, 4);
+    let [a, b, c, d] = p.as_mut_slice() else { unreachable!() };
+    let (id, _) = a.create_group("TRIO", &[b.user_id().to_owned(), c.user_id().to_owned()]).unwrap();
+    take(b);
+    take(c);
+    let ub = b.user_id().to_owned();
+    d.send_yo(&ub).unwrap();
+    take(b);
+    d.send_group_tagged_for_tests(&ub, &id, 7, Content::Yo).unwrap();
+    assert_eq!(d.waiting(), 0, "it went");
+    let got = take(b);
+    assert!(group_yos(&got).is_empty(), "{got:?}");
+}
+
+/// Changes cannot fill a device with groups any more than Yos can (spec 4.9): past 256, a group not known is not
+/// taken in, by a change either.
+#[test]
+fn changes_cannot_fill_a_device_with_groups() {
+    let hub = TestHub::start();
+    let mut p = people(&hub, 2);
+    let [a, b] = p.as_mut_slice() else { unreachable!() };
+    let ub = b.user_id().to_owned();
+    for i in 0..260u32 {
+        let mut members = vec![yo_tests::user_id(a.user_id()), yo_tests::user_id(&ub)];
+        members.sort();
+        let mut gid = [0u8; 16];
+        gid[..4].copy_from_slice(&i.to_be_bytes());
+        let change = Content::Group(yo_wire::content::GroupInfo {
+            id: gid,
+            revision: 1,
+            by: yo_tests::user_id(a.user_id()),
+            name: format!("G{i}"),
+            members,
+        });
+        a.send(&ub, change).unwrap();
+        if i % 50 == 49 {
+            take(b);
+        }
+    }
+    take(b);
+    assert_eq!(b.groups().len(), 256);
 }
