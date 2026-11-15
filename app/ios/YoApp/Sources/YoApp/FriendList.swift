@@ -609,19 +609,8 @@ struct FriendList: View {
       }
       Button("Add Group", systemImage: "person.3") { newGroup = true }
       Divider()
-      // A red "1" while the account is not yet secured (AccountStore.toDo), as iOS badges. A menu shows no
-      // `.badge` and keeps only an item's icon in colour (drawn as it is): the red "1" stands in the gear's place.
-      Button { settings = true } label: {
-        Label {
-          Text("Settings")
-        } icon: {
-          if accounts.toDo > 0, let one = UIImage(systemName: "\(min(accounts.toDo, 50)).circle.fill") {
-            Image(uiImage: one.withTintColor(.systemRed, renderingMode: .alwaysOriginal))
-          } else {
-            Image(systemName: "gearshape")
-          }
-        }
-      }
+      // "Settings (1)" while the account is not yet secured (AccountStore.toDo): a menu draws no badge after a title.
+      Button(accounts.toDo > 0 ? "Settings (\(accounts.toDo))" : "Settings", systemImage: "gearshape") { settings = true }
       .accessibilityValue(accounts.toDo > 0 ? "\(accounts.toDo) to do" : "")
     } label: {
       Image(systemName: "ellipsis")
@@ -1418,14 +1407,21 @@ struct RowButton: View {
           .padding(leftHanded ? .trailing : .leading, BarLine.margin)
       }
     }
-    // A Yo sent: it leaves from where an incoming one stands, up out of the bar.
-    .overlay(alignment: leftHanded ? .leading : .trailing) {
-      ZStack {
-        ForEach(flights, id: \.self) { id in
-          FlyingYo { flights.removeAll { $0 == id } }
+    // A Yo sent: the "Yo" of "Sent Yo" in the bar's middle rises out of it (an unseen "Sent " before it puts it in
+    // its place).
+    .overlay {
+      HStack(spacing: 0) {
+        Text("Sent ").hidden()
+        ZStack {
+          ForEach(flights, id: \.self) { id in
+            FlyingYo { flights.removeAll { $0 == id } }
+          }
         }
+        .frame(minWidth: 1)
       }
-      .padding(leftHanded ? .leading : .trailing, BarLine.margin)
+      .font(.yo(Metrics.rowFont))
+      .lineLimit(1)
+      .environment(\.layoutDirection, .leftToRight)
       .allowsHitTesting(false)
     }
     .animation(.snappy, value: outgoing)
@@ -2131,7 +2127,6 @@ struct FlyingYo: View {
 
   var body: some View {
     Text("Yo")
-      .font(.yo(28, relativeTo: .title))
       .foregroundStyle(.white)
       .offset(y: gone && !reduceMotion ? -90 : 0)
       .scaleEffect(gone ? 1.15 : 1)
