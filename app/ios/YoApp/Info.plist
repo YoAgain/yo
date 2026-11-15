@@ -2,6 +2,10 @@
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
+	<!-- The version people see, set by hand for each App Store release (1.0.0, 1.0.1, 1.1.0 …); the build number is the
+	     build's timestamp (CI), which YO_MIN_APP compares. -->
+	<key>CFBundleShortVersionString</key>
+	<string>1.0.0</string>
 	<!-- iPhone only: on an iPad it runs as the iPhone app (no iPad screenshots, no iPad layout to review). -->
 	<key>UIDeviceFamily</key>
 	<array>
