@@ -378,8 +378,26 @@ final class AccountStore {
     }
     hubDown = false
     accountLog.error("recover: \(item == nil ? "no iCloud Keychain item" : "registering again", privacy: .public)")
+    Self.keepUnopened()
     reset()
     if let item { _ = try? await restore(synced: item) }
+  }
+
+  /// The state that did not open, kept aside beside it (never in the phone's backup) before signing in again deletes
+  /// it: the only copy of what this device had, for finding out why, or opening it later.
+  private static func keepUnopened() {
+    let stamp = Int(Date.now.timeIntervalSince1970)
+    for url in [StateFile.url, SharedStateFile.stateURL].compactMap({ $0 })
+    where FileManager.default.fileExists(atPath: url.path) {
+      let aside = url.deletingLastPathComponent().appending(path: url.lastPathComponent + ".unopened-\(stamp)")
+      do {
+        try FileManager.default.copyItem(at: url, to: aside)
+        SharedStateFile.excludeFromBackup(aside)
+        accountLog.notice("recover: the state kept as \(aside.lastPathComponent, privacy: .public)")
+      } catch {
+        accountLog.error("recover: the state not kept: \(String(describing: error), privacy: .public)")
+      }
+    }
   }
 
   /// Registers `username` at the hub (spec 6.4), or, with `secret`, takes the key's account back (a new phone), with
