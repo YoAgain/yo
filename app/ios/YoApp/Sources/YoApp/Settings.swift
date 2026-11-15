@@ -49,6 +49,8 @@ struct SettingsView: View {
   @State private var deletingAccount = false
   @State private var deleteProblem: String?
   @State private var sendingFeedback = false
+  /// "Send Crash Reports" (CrashReports.on), as the switch shows it.
+  @State private var crashReports = true
   @State private var requestsOpen = true
 
   @Environment(\.dynamicTypeSize) private var typeSize
@@ -192,10 +194,16 @@ struct SettingsView: View {
             } label: {
               Label("Licenses", systemImage: "doc.text.fill").labelStyle(Tile(.gray))
             }
+            Toggle(isOn: Binding(get: { crashReports }, set: { crashReports = $0; CrashReports.on = $0 })) {
+              Label("Send Crash Reports", systemImage: "ladybug.fill").labelStyle(Tile(.gray))
+            }
+          } footer: {
+            Text("If Yo crashes, a short technical report goes to the Yo team. It holds no Yos, names or photos.")
           }
         }
       }
       .sheet(isPresented: $sendingFeedback) { FeedbackSheet() }
+      .onAppear { crashReports = CrashReports.on }
       .sheet(isPresented: $showingCode) {
         if let account = accounts.account { NameCodeSheet(name: account.username) }
       }

@@ -34,6 +34,7 @@ struct YoApp: App {
     // Friends known by user id are kept for the account too (its storage, spec 6.9).
     friends.stored = { [weak accounts] changed, removed in accounts?.store(changed, removed: removed) }
     UNUserNotificationCenter.current().delegate = notifications
+    CrashReports.shared.start()  // crashes iOS hands over (MetricKit) go to the Yo team, if on
   }
 
   var body: some Scene {
@@ -90,6 +91,7 @@ struct YoApp: App {
           await inbox.handle(events, contacts: contacts, client: client, accounts: accounts, friends: friends)
         }
         outbox.flush(accounts: accounts)
+        CrashReports.shared.flush(client)
         ShareInbox.take(outbox: outbox, accounts: accounts)
         inbox.fetchMedia(client: client)
         // The account's storage: after a restore, the friends and the app icon of the phone before.
