@@ -42,8 +42,6 @@ struct FriendList: View {
 
   // The list
   @State private var adding = false
-  /// The banner of Yos that just came ("Yo from LEO"), as the original's came down from the top.
-  @State private var banner: Banner?
   @State private var newGroup = false
   @State private var newName = ""
   /// What the empty field says for a moment instead of "Name": "yogpt…" while the hub is asked who it is, "No Such
@@ -272,18 +270,6 @@ struct FriendList: View {
             .transition(.opacity)
           }
         }
-        .overlay(alignment: .top) {
-          if let banner {
-            YoBanner(text: banner.text)
-              .id(banner.id)
-              .transition(.move(edge: .top))
-              .onTapGesture { withAnimation(.snappy) { self.banner = nil } }
-              .task(id: banner.id) {
-                try? await Task.sleep(for: .seconds(3.2))
-                withAnimation(.smooth(duration: 0.35)) { if self.banner?.id == banner.id { self.banner = nil } }
-              }
-          }
-        }
     )
   }
 
@@ -302,8 +288,6 @@ struct FriendList: View {
         .scrollTargetLayout()
       }
       .scrollBounceBehavior(.basedOnSize)
-      // Room above the first bar for the banner of a Yo that comes ("Yo from LEO"): it covers no bar.
-      .contentMargins(.top, 46, for: .scrollContent)
       .scrollDismissesKeyboard(.interactively)
       .scrollPosition($position)
       .onScrollTargetVisibilityChange(idType: String.self, threshold: 0.6) { ids in
@@ -487,11 +471,10 @@ struct FriendList: View {
     .buttonStyle(.plain)
   }
 
-  /// "•••" at the bottom corner opposite the camera, as large as the floating buttons of Apple's own apps: Add Group, Invite and Settings
+  /// "•••" at the bottom corner opposite the camera, as large as the floating buttons of Apple's own apps: Invite, Add Group and Settings
   /// (a red "1" on Settings while the account is not yet secured, AccountStore.toDo).
   private var moreMenu: some View {
     Menu {
-      Button("+ Group", systemImage: "person.3") { newGroup = true }
       ShareLink(
         item: accounts.account.map { Invite.link(for: $0.username) } ?? URL(string: "https://justyo.co")!,
         message: Text("Yo! Add me on Yo:"),
@@ -501,16 +484,11 @@ struct FriendList: View {
       ) {
         Label("Invite", systemImage: "square.and.arrow.up")
       }
+      Button("Add Group", systemImage: "person.3") { newGroup = true }
       Divider()
-      // A red "1" while the account is not yet secured (AccountStore.toDo), as iOS badges: an image in its own
-      // colours, which a menu keeps.
-      Button { settings = true } label: {
-        if accounts.toDo > 0, let one = UIImage(systemName: "\(min(accounts.toDo, 50)).circle.fill") {
-          Label { Text("Settings") } icon: { Image(uiImage: one.withTintColor(.systemRed, renderingMode: .alwaysOriginal)) }
-        } else {
-          Label("Settings", systemImage: "gearshape")
-        }
-      }
+      // A red "1" after it while the account is not yet secured (AccountStore.toDo), as iOS badges.
+      Button("Settings", systemImage: "gearshape") { settings = true }
+        .badge(accounts.toDo)
     } label: {
       Image(systemName: "ellipsis")
         .font(.system(size: 20, weight: .semibold))
@@ -518,6 +496,7 @@ struct FriendList: View {
         .frame(width: 52, height: 52)
         .contentShape(.circle)
     }
+    .menuOrder(.fixed)  // as written, also opening upwards from the bottom corner
     .glassEffect(.regular.interactive(), in: .circle)
     .accessibilityLabel("More")
   }
@@ -950,7 +929,6 @@ extension FriendList {
       runs[arrival.from, default: (arrival.id, 0)].count += 1
     }
     cheers += 1
-    withAnimation(.spring(response: 0.35, dampingFraction: 0.85)) { banner = Banner(senders: senders, runs: runs) }
     Perf.mark("arrived \(batch.count)")
     PerfProbe.frame("arrived")
     for name in senders { rise(name) }  // on top as soon as no bar is being tapped, all in one step
@@ -1924,45 +1902,4 @@ struct PlayerLayer: UIViewRepresentable {
   FriendList()
     .environment(Inbox())
     .environment(Friends())
-}
-
-/// What a banner says: "Yo from LEO", "3 Yos from LEO", "Yo from LEO and MIA", "Yo from LEO, MIA +2".
-struct Banner: Equatable {
-  let id = UUID()
-  let text: String
-
-  init(senders: [String], runs: [String: (first: String, count: Int)]) {
-    let newest = Array(senders.reversed())
-    let count = newest.first.flatMap { runs[$0]?.count } ?? 1
-    switch newest.count {
-    case 0, 1: text = (count == 1 ? "Yo" : "\(count) Yos") + " from \(newest.first ?? "")"
-    case 2: text = "Yo from \(newest[0]) and \(newest[1])"
-    default: text = "Yo from \(newest[0]), \(newest[1]) +\(newest.count - 2)"
-    }
-  }
-}
-
-/// The original's in-app banner: the width of the screen, Peter River, down from the top under the status bar, its
-/// words white in Yo's type, a shadow of Wet Asphalt under it. A tap puts it away; it goes by itself after a moment.
-struct YoBanner: View {
-  let text: String
-
-  var body: some View {
-    Text(text)
-      .font(.yo(20, relativeTo: .headline))
-      .foregroundStyle(.white)
-      .lineLimit(1)
-      .minimumScaleFactor(0.6)
-      .padding(.horizontal, 16)
-      .padding(.bottom, 14)
-      .padding(.top, 10)
-      .frame(maxWidth: .infinity)
-      .background {
-        Color(hex: 0x3498DB)
-          .shadow(color: Color(hex: 0x34495E).opacity(0.7), radius: 4, y: 3)
-          .ignoresSafeArea(edges: .top)
-      }
-      .accessibilityAddTraits(.isButton)
-      .accessibilityLabel(text)
-  }
 }

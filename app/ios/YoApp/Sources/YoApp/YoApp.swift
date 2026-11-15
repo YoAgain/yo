@@ -162,7 +162,7 @@ final class NotificationDelegate: NSObject, UNUserNotificationCenterDelegate, Se
     // The Yo's own id when the notification extension (YoNotify) knew it: the same Yo from the core is not shown twice.
     await inbox.received(id: info["id"] as? String ?? notification.request.identifier, from: sender)
     // Nor left in Notification Center, seen here already (a moment later: it is listed only after this answer). The
-    // app shows it itself: on its bar and in its own banner (FriendList's YoBanner), as the original did.
+    // app shows it itself, on its bar ("Yo!!" at its end): no banner.
     Task { @MainActor [inbox] in
       try? await Task.sleep(for: .seconds(0.5))
       await inbox.collectDelivered()
