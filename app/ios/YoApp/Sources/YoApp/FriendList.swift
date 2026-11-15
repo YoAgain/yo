@@ -42,8 +42,8 @@ struct FriendList: View {
 
   // The list
   @State private var adding = false
-  /// "+" tapped: it opens into Add Friend, Add Group, Invite and Settings; a tap anywhere else closes it again.
-  @State private var addMenu = false
+  /// The banner of Yos that just came ("Yo from LEO"), as the original's came down from the top.
+  @State private var banner: Banner?
   @State private var newGroup = false
   @State private var newName = ""
   /// What the empty field says for a moment instead of "Name": "yogpt…" while the hub is asked who it is, "No Such
@@ -272,6 +272,18 @@ struct FriendList: View {
             .transition(.opacity)
           }
         }
+        .overlay(alignment: .top) {
+          if let banner {
+            YoBanner(text: banner.text)
+              .id(banner.id)
+              .transition(.move(edge: .top))
+              .onTapGesture { withAnimation(.snappy) { self.banner = nil } }
+              .task(id: banner.id) {
+                try? await Task.sleep(for: .seconds(3.2))
+                withAnimation(.smooth(duration: 0.35)) { if self.banner?.id == banner.id { self.banner = nil } }
+              }
+          }
+        }
     )
   }
 
@@ -304,7 +316,6 @@ struct FriendList: View {
       }
       .onScrollPhaseChange { _, phase in
         if phase != .idle && swiped != nil { withAnimation(.snappy) { swiped = nil } }  // scrolling closes it
-        if phase == .interacting && addMenu { withAnimation(.snappy) { addMenu = false } }  // and "+" open
       }
       // Amethyst behind everything; in camera mode the live picture or the picked photo.
       .background { backdrop.ignoresSafeArea() }
@@ -435,42 +446,17 @@ struct FriendList: View {
           if !focused { add() }
         }
         .onAppear { typing = true }
-    } else if addMenu {
-      RowButton("+ Friend", color: Color.row(friends.nextColor).opacity(cameraOn ? 0.45 : 1)) {
-        withAnimation(.snappy) {
-          addMenu = false
-          adding = true
-        }
-      }
-      .accessibilityLabel("Add Friend")
-      RowButton("+ Group", color: Color.row(friends.nextColor + 1).opacity(cameraOn ? 0.45 : 1)) {
-        withAnimation(.snappy) { addMenu = false }
-        newGroup = true
-      }
-      .accessibilityLabel("Add Group")
-      inviteBar
-        .simultaneousGesture(TapGesture().onEnded { withAnimation(.snappy) { addMenu = false } })
-      // A red "1" while something is left to secure (Secure Your Account), as an app's badge.
-      RowButton("Settings", color: Color.row(friends.nextColor + 3).opacity(cameraOn ? 0.45 : 1)) {
-        withAnimation(.snappy) { addMenu = false }
-        settings = true
-      }
-      .overlay(alignment: .trailing) { toDoBadge }
-      .task {
-        try? await Task.sleep(for: .seconds(10))  // untouched for a while, it closes again
-        withAnimation(.snappy) { addMenu = false }
-      }
     } else {
       RowButton("+", color: Color.row(friends.nextColor).opacity(cameraOn ? 0.45 : 1)) {
         withAnimation(.snappy) {
           swiped = nil
-          addMenu = true
+          adding = true
         }
       }
-      .accessibilityLabel("Add and Settings")
+      .accessibilityLabel("Add Friend")
     }
     // Until the first friend of one's own (YoGPT is there from the start): Invite always under "+".
-    if !addMenu && friends.shown.allSatisfy({ Username.skeleton($0.name) == Username.skeleton("YoGPT") }) {
+    if friends.shown.allSatisfy({ Username.skeleton($0.name) == Username.skeleton("YoGPT") }) {
       inviteBar
     }
   }
@@ -497,18 +483,31 @@ struct FriendList: View {
     .buttonStyle(.plain)
   }
 
-  /// A red "1" at a bar's end while the account is not yet secured (AccountStore.toDo), as iOS badges an app.
-  @ViewBuilder private var toDoBadge: some View {
-    if accounts.toDo > 0 {
-      Text("\(accounts.toDo)")
-        .font(.system(size: 15, weight: .bold).monospacedDigit())
+  /// "•••" at the bottom corner opposite the camera, as large as a toolbar button: Add Group, Invite and Settings
+  /// ("Settings (1)" while the account is not yet secured, AccountStore.toDo).
+  private var moreMenu: some View {
+    Menu {
+      Button("Add Group", systemImage: "person.3") { newGroup = true }
+      ShareLink(
+        item: accounts.account.map { Invite.link(for: $0.username) } ?? URL(string: "https://justyo.co")!,
+        message: Text("Yo! Add me on Yo:"),
+        preview: SharePreview(
+          "Add \(accounts.account?.username ?? "Me") on Yo",
+          image: Image(uiImage: UIImage(named: "IconStandard") ?? UIImage()))
+      ) {
+        Label("Invite", systemImage: "square.and.arrow.up")
+      }
+      Divider()
+      Button(accounts.toDo > 0 ? "Settings (1)" : "Settings", systemImage: "gearshape") { settings = true }
+    } label: {
+      Image(systemName: "ellipsis")
+        .font(.system(size: 17, weight: .semibold))
         .foregroundStyle(.white)
-        .frame(minWidth: 26, minHeight: 26)
-        .background(Color.alizarin, in: .circle)
-        .padding(.trailing, BarLine.endPadding)
-        .allowsHitTesting(false)
-        .accessibilityLabel("Something to do in Settings")
+        .frame(width: 44, height: 44)
+        .contentShape(.circle)
     }
+    .glassEffect(.regular.interactive(), in: .circle)
+    .accessibilityLabel("More")
   }
 
   /// The name typed in Add Friend.
@@ -605,22 +604,23 @@ struct FriendList: View {
   /// the same place), the library right above it, the zoom in the middle, the switch to the selfie camera at the
   /// other corner, all as large. Mirrored for the left hand.
   private var cameraControls: some View {
-    ZStack {
+    ZStack(alignment: .bottom) {
       if cameraOn && picked == nil {  // a picked photo goes as it is
         CameraZoom(choices: zooms, chosen: $zoom).onChange(of: zoom) { camera.zoom(to: zoom) }
-          .frame(maxHeight: .infinity, alignment: .bottom)
           .padding(.bottom, 6)  // centred on the bottom buttons' line
       }
       HStack(alignment: .bottom, spacing: 12) {
-        if cameraOn {
+        if !cameraOn {
+          moreMenu.transition(.scale.combined(with: .opacity))
+        } else {
           Button {
             camera.flip()
             Task { await readZooms() }
           } label: {
             Image(systemName: "arrow.triangle.2.circlepath")
-              .font(.system(size: 22, weight: .semibold))
+              .font(.system(size: 17, weight: .semibold))
               .foregroundStyle(.white)
-              .frame(width: 60, height: 60)
+              .frame(width: 44, height: 44)
               .contentShape(.circle)
           }
           .buttonStyle(.plain)
@@ -641,16 +641,13 @@ struct FriendList: View {
             .transition(.scale.combined(with: .opacity))
           }
           Button {
-            withAnimation(.snappy) {
-              addMenu = false
-              cameraOn.toggle()
-            }
+            withAnimation(.snappy) { cameraOn.toggle() }
           } label: {
             Image(systemName: cameraOn ? "xmark" : "camera.fill")
-              .font(.system(size: 22, weight: .semibold))
+              .font(.system(size: 17, weight: .semibold))
               .foregroundStyle(.white)
               .contentTransition(.symbolEffect(.replace))
-              .frame(width: 60, height: 60)
+              .frame(width: 44, height: 44)
               .contentShape(.circle)  // the whole circle, not only the thin "✕"
           }
           .buttonStyle(.plain)
@@ -684,7 +681,6 @@ struct FriendList: View {
     defer { PerfProbe.frame("tap") }
     // A tap while a bar is swiped open closes it, as in Mail; it sends nothing. So does one while "+" is open.
     guard swiped == nil else { return withAnimation(.snappy) { swiped = nil } }
-    guard !addMenu else { return withAnimation(.snappy) { addMenu = false } }
     // Here, as the finger lifts: not after the list has drawn the change. A photo: the shutter's click.
     if cameraOn && picked == nil { Haptic.shutter() } else { Haptic.tap() }
     let library = picked?.data
@@ -942,6 +938,7 @@ extension FriendList {
       runs[arrival.from, default: (arrival.id, 0)].count += 1
     }
     cheers += 1
+    withAnimation(.spring(response: 0.35, dampingFraction: 0.85)) { banner = Banner(senders: senders, runs: runs) }
     Perf.mark("arrived \(batch.count)")
     PerfProbe.frame("arrived")
     for name in senders { rise(name) }  // on top as soon as no bar is being tapped, all in one step
@@ -1087,13 +1084,13 @@ struct LibraryLabel: View {
       Image(uiImage: thumbnail)
         .resizable()
         .scaledToFill()
-        .frame(width: 60, height: 60)
+        .frame(width: 44, height: 44)
         .clipShape(.circle)
     } else {
       Image(systemName: "photo.on.rectangle")
-        .font(.system(size: 22, weight: .semibold))
+        .font(.system(size: 17, weight: .semibold))
         .foregroundStyle(.white)
-        .frame(width: 60, height: 60)
+        .frame(width: 44, height: 44)
         .contentShape(.circle)
     }
   }
@@ -1787,11 +1784,13 @@ struct HeldMedia: View {
             if current.video != nil, let player {
               PlayerLayer(player: player)
             } else if let photo = full ?? current.photo {
-              Image(uiImage: photo).resizable().scaledToFit()
+              Image(uiImage: photo).resizable().scaledToFit().clipShape(.rect(cornerRadius: 14))
             }
           }
+          .clipShape(.rect(cornerRadius: 14))
           .frame(maxWidth: .infinity, maxHeight: .infinity)
-          .ignoresSafeArea(edges: .bottom)
+          .padding(.horizontal, 4)
+          .padding(.bottom, 4)  // above the home indicator, clear of the screen's round corners
         }
       }
     }
@@ -1913,4 +1912,45 @@ struct PlayerLayer: UIViewRepresentable {
   FriendList()
     .environment(Inbox())
     .environment(Friends())
+}
+
+/// What a banner says: "Yo from LEO", "3 Yos from LEO", "Yo from LEO and MIA", "Yo from LEO, MIA +2".
+struct Banner: Equatable {
+  let id = UUID()
+  let text: String
+
+  init(senders: [String], runs: [String: (first: String, count: Int)]) {
+    let newest = Array(senders.reversed())
+    let count = newest.first.flatMap { runs[$0]?.count } ?? 1
+    switch newest.count {
+    case 0, 1: text = (count == 1 ? "Yo" : "\(count) Yos") + " from \(newest.first ?? "")"
+    case 2: text = "Yo from \(newest[0]) and \(newest[1])"
+    default: text = "Yo from \(newest[0]), \(newest[1]) +\(newest.count - 2)"
+    }
+  }
+}
+
+/// The original's in-app banner: the width of the screen, Peter River, down from the top under the status bar, its
+/// words white in Yo's type, a shadow of Wet Asphalt under it. A tap puts it away; it goes by itself after a moment.
+struct YoBanner: View {
+  let text: String
+
+  var body: some View {
+    Text(text)
+      .font(.yo(20, relativeTo: .headline))
+      .foregroundStyle(.white)
+      .lineLimit(1)
+      .minimumScaleFactor(0.6)
+      .padding(.horizontal, 16)
+      .padding(.bottom, 14)
+      .padding(.top, 10)
+      .frame(maxWidth: .infinity)
+      .background {
+        Color(hex: 0x3498DB)
+          .shadow(color: Color(hex: 0x34495E).opacity(0.7), radius: 4, y: 3)
+          .ignoresSafeArea(edges: .top)
+      }
+      .accessibilityAddTraits(.isButton)
+      .accessibilityLabel(text)
+  }
 }

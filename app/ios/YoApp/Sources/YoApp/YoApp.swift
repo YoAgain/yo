@@ -161,13 +161,13 @@ final class NotificationDelegate: NSObject, UNUserNotificationCenterDelegate, Se
     guard let sender = info["from"] as? String else { return [] }
     // The Yo's own id when the notification extension (YoNotify) knew it: the same Yo from the core is not shown twice.
     await inbox.received(id: info["id"] as? String ?? notification.request.identifier, from: sender)
-    // Its banner comes down from the top, as the original's Yos did, besides the bar, the sound and the haptic (the
-    // app plays the sound itself). Then it leaves Notification Center, seen here already: once the banner is gone.
+    // Nor left in Notification Center, seen here already (a moment later: it is listed only after this answer). The
+    // app shows it itself: on its bar and in its own banner (FriendList's YoBanner), as the original did.
     Task { @MainActor [inbox] in
-      try? await Task.sleep(for: .seconds(6))
+      try? await Task.sleep(for: .seconds(0.5))
       await inbox.collectDelivered()
     }
-    return [.banner]
+    return []
   }
 
   /// A tap on the notification opens the app, where the Yo shows on its row. "Yo Back" right on it sends one to the
