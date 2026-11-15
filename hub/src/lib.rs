@@ -52,6 +52,8 @@ pub struct Hub {
     tokens: tokens::Issuer,
     /// Places for work off the async workers (`Hub::blocking`).
     blocking: Arc<tokio::sync::Semaphore>,
+    /// Requests whose small body is being read and handled at once (`admit`).
+    reading: Arc<tokio::sync::Semaphore>,
 }
 
 const HOUR: Duration = Duration::from_secs(3600);
@@ -61,6 +63,13 @@ const DAY: Duration = Duration::from_secs(24 * 3600);
 /// The hub's work on blocking threads at once (`Hub::blocking`): the database is one connection, so more would only
 /// wait for it; the rest (signatures, sessions) is work for the cores.
 const BLOCKING_AT_ONCE: usize = 32;
+
+/// Requests with a body (all but a blob's, which streams) read and handled at once (`admit`): each holds up to
+/// `MAX_BODY` while read; beyond, `503` before a byte of the body is read.
+pub const READING_AT_ONCE: usize = 512;
+
+/// The time a body may take to arrive: a client that sends it slower holds a place for nothing (`408`).
+const BODY_DEADLINE: Duration = Duration::from_secs(20);
 
 /// Inbox requests of one device at once: the app, its notification extension, a share. One answer holds up to
 /// `MAX_INBOX_FETCH` envelopes of 64 KiB, and a wait holds a connection for a minute: a device that asks more often
@@ -231,13 +240,41 @@ async fn too_old(
 
 /// A route that is synchronous through and through (`Hub::router`), run off the async workers: its body is taken
 /// here first, so a slow client holds no blocking thread.
+/// Before a body is read (spec 6.6): one that says it is larger than any request may be is `413` at once, and only
+/// `READING_AT_ONCE` requests read and are handled at once (`503` beyond): a flood of slow or large bodies holds no
+/// more of the hub's memory than that.
+async fn admit(
+    State(hub): State<Arc<Hub>>,
+    request: axum::extract::Request,
+    next: axum::middleware::Next,
+) -> axum::response::Response {
+    let said = request
+        .headers()
+        .get(axum::http::header::CONTENT_LENGTH)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.parse::<usize>().ok());
+    if said.is_some_and(|n| n > limits::MAX_BODY) {
+        return StatusCode::PAYLOAD_TOO_LARGE.into_response();
+    }
+    let Ok(_place) = hub.reading.clone().try_acquire_owned() else {
+        return StatusCode::SERVICE_UNAVAILABLE.into_response();
+    };
+    // Its place is held for at most this long, slow body or not.
+    tokio::time::timeout(BODY_DEADLINE * 3, next.run(request))
+        .await
+        .unwrap_or_else(|_| StatusCode::REQUEST_TIMEOUT.into_response())
+}
+
 async fn off_workers(
     State(hub): State<Arc<Hub>>,
     request: axum::extract::Request,
     next: axum::middleware::Next,
 ) -> axum::response::Response {
     let (parts, body) = request.into_parts();
-    let Ok(body) = axum::body::to_bytes(body, limits::MAX_BODY).await else {
+    let Ok(read) = tokio::time::timeout(BODY_DEADLINE, axum::body::to_bytes(body, limits::MAX_BODY)).await else {
+        return StatusCode::REQUEST_TIMEOUT.into_response();
+    };
+    let Ok(body) = read else {
         return StatusCode::PAYLOAD_TOO_LARGE.into_response();
     };
     let request = axum::extract::Request::from_parts(parts, axum::body::Body::from(body));
@@ -272,6 +309,7 @@ impl Hub {
             blobs: Arc::new(blobs),
             tokens,
             blocking: Arc::new(tokio::sync::Semaphore::new(BLOCKING_AT_ONCE)),
+            reading: Arc::new(tokio::sync::Semaphore::new(READING_AT_ONCE)),
             config,
         });
         // The writer ends with the hub: when the last sender of its queue goes.
@@ -301,13 +339,17 @@ impl Hub {
             .route(api::TOKENS, post(issue_tokens))
             .route("/v1/username/{name}", get(username_free))
             .route(api::INBOX_ACK, post(ack))
-            .route_layer(axum::middleware::from_fn_with_state(self.clone(), off_workers));
+            .route_layer(axum::middleware::from_fn_with_state(self.clone(), off_workers))
+            .route_layer(axum::middleware::from_fn_with_state(self.clone(), admit));
+        let delivering = Router::new()
+            .route("/v1/inbox/{user}", post(deliver))
+            .route_layer(axum::middleware::from_fn_with_state(self.clone(), admit));
         // These wait (a long poll, the writer, a blob's bytes) and run their database work through `blocking`.
         let mut router = Router::new()
             .route("/", get(|| async { axum::response::Html(include_str!("index.html")) }))
             .route(api::INBOX, get(inbox))
-            .route("/v1/inbox/{user}", post(deliver))
             .route("/v1/blobs/{id}", put(put_blob).get(get_blob))
+            .merge(delivering)
             .merge(synchronous);
         if !self.config.apple_app_ids.is_empty() {
             // Which apps may make passkeys for this domain (Apple reads it through its CDN; spec 7).

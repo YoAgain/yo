@@ -875,3 +875,22 @@ fn a_replaced_device_is_gone_for_a_year() {
     assert_eq!(signed(&mut old, "GET", &api::inbox_path(0), &[]).0, status::UNAUTHORIZED);
     assert_eq!(signed(&mut phone, "GET", &api::inbox_path(0), &[]).0, status::OK, "secured: kept");
 }
+
+/// A body that says it is larger than any request may be is refused before it is read (spec 6.6): `413` at once,
+/// with not a byte of it sent, on a route with a small body and on a delivery.
+#[test]
+fn a_body_too_large_is_refused_before_it_is_read() {
+    use std::io::{Read, Write};
+    let hub = TestHub::start();
+    let host = hub.url().trim_start_matches("http://").trim_end_matches('/').to_owned();
+    for path in [api::REGISTER.to_owned(), api::deliver_path(&[7; 16])] {
+        let mut stream = std::net::TcpStream::connect(&host).unwrap();
+        stream.set_read_timeout(Some(std::time::Duration::from_secs(5))).unwrap();
+        let head = format!("POST {path} HTTP/1.1\r\nHost: {host}\r\nContent-Length: 10000000\r\n\r\n");
+        stream.write_all(head.as_bytes()).unwrap();
+        let mut answer = [0u8; 64];
+        let n = stream.read(&mut answer).expect("answered without the body");
+        let line = String::from_utf8_lossy(&answer[..n]);
+        assert!(line.starts_with("HTTP/1.1 413"), "{path}: {line}");
+    }
+}
