@@ -39,7 +39,29 @@ fn pair(hub: &TestHub, tag: &str) -> (Client, Client, Arc<Http>) {
     assert_eq!(texts(&b.sync(0).unwrap()), ["hi"]);
     b.send(a.user_id(), text("hello")).unwrap();
     assert_eq!(texts(&a.sync(0).unwrap()), ["hello"]);
+    keys_both_ways(&mut a, &mut b);
+    // A contact's message, sealed: what the tests below take apart.
+    a.send(b.user_id(), text("sealed")).unwrap();
+    assert_eq!(texts(&b.sync(0).unwrap()), ["sealed"]);
+    assert_sealed(&ha, &b);
     (a, b, ha)
+}
+
+/// The work after a sync, both ways, until each has the other's profile key and a sender certificate: from then on
+/// what one sends the other goes sealed, a contact's (spec 4.10, 6.1). `b` has said yes to `a`, or written to it.
+fn keys_both_ways(a: &mut Client, b: &mut Client) {
+    for _ in 0..2 {
+        a.after_sync().unwrap();
+        assert!(texts(&b.sync(0).unwrap()).is_empty());
+        b.after_sync().unwrap();
+        assert!(texts(&a.sync(0).unwrap()).is_empty());
+    }
+}
+
+/// The last envelope posted to `to` went sealed.
+fn assert_sealed(http: &Http, to: &Client) {
+    let last = posted(http, to.user_id()).pop().unwrap();
+    assert_eq!(last[0], yo_wire::envelope::SEALED, "a contact's delivery, sealed");
 }
 
 /// One message never reaches the hub, one arrives late (after the next), one twice: the ratchet takes the late one
@@ -143,7 +165,10 @@ fn a_first_message_opens_after_four_weeks_away() {
         b.set_clock(Arc::new(move || at));
         b.maintenance().unwrap();
     }
-    assert_eq!(deliver_raw_with(&hub.url(), b.user_id(), b.access_key_for_tests().as_deref(), first), 202);
+    // A request (A has no key of B's yet): identified and signed by A, posted again as it was.
+    assert_eq!(first[0], yo_wire::VERSION, "a request goes identified");
+    let to_b = yo_wire::api::deliver_path(&yo_tests::user_id(b.user_id()));
+    assert_eq!(yo_tests::deliver_held(&hub.url(), &ha, &to_b), 202);
     assert_eq!(texts(&b.sync(0).unwrap()), ["waiting"]);
     b.send(a.user_id(), text("back")).unwrap();
     assert_eq!(texts(&a.sync(0).unwrap()), ["back"]);
@@ -268,6 +293,11 @@ fn forgeries_cannot_use_up_the_lookups() {
     let mut b = by_name(hb.clone(), &format!("Bb{n}"));
     a.send(b.user_id(), text("hi")).unwrap();
     assert_eq!(texts(&b.sync(0).unwrap()), ["hi"]);
+    b.accept(a.user_id()).unwrap();
+    keys_both_ways(&mut a, &mut b);
+    a.send(b.user_id(), text("sealed")).unwrap();
+    assert_eq!(texts(&b.sync(0).unwrap()), ["sealed"]);
+    assert_sealed(&ha, &b);
     let real = posted(&ha, b.user_id()).pop().unwrap();
     let (opened, certificate) = yo_core::sealed::testing::open(&b.account_secret(), &real).unwrap();
     let mut payload: yo_wire::envelope::Payload = yo_wire::decode(&opened).unwrap();
@@ -309,6 +339,8 @@ fn a_new_phones_message_right_after_a_forgery_is_kept_not_lost() {
     let mut b = by_name(Http::new(hub.url()), &format!("Nq{n}"));
     a.send(b.user_id(), text("hi")).unwrap();
     assert_eq!(texts(&b.sync(0).unwrap()), ["hi"]);
+    b.accept(a.user_id()).unwrap();
+    keys_both_ways(&mut a, &mut b);
     let clock = Arc::new(AtomicU64::new(
         std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_millis() as u64,
     ));
