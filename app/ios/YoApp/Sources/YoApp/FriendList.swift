@@ -1505,12 +1505,24 @@ struct RowButton: View {
       let live = yo.flatMap { $0.fading == nil ? $0.count : nil } ?? 0
       HStack(spacing: 4) {
         if leftHanded { sign }
-        HStack(spacing: 0) {
-          Text("Yo")
-          Bangs(count: max(live, media.count))
+        VStack(alignment: leftHanded ? .leading : .trailing, spacing: -4) {
+          // In a group, who it is from, small over it, as over a plain Yo.
+          if let from {
+            Text(from)
+              .font(.system(size: 12, weight: .heavy))
+              .lineLimit(1)
+              .opacity(0.85)
+          }
+          HStack(spacing: 0) {
+            Text("Yo")
+            Bangs(count: max(live, media.count))
+          }
         }
         .allowsHitTesting(false)  // a tap there sends a Yo
-        .accessibilityLabel(media.count == 1 ? "Yo with a photo or video" : "\(media.count) Yos with photos or videos")
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel(
+          (media.count == 1 ? "Yo with a photo or video" : "\(media.count) Yos with photos or videos")
+            + (from.map { ", last from \($0)" } ?? ""))
         if !leftHanded { sign }
       }
       .lineLimit(1)
@@ -1536,7 +1548,8 @@ struct RowButton: View {
         .lineLimit(1)
         .opacity(max(0, 1 - fade))
       }
-      .accessibilityLabel(yo.count == 1 ? "Yo" : "\(yo.count) Yos")
+      .accessibilityElement(children: .ignore)
+      .accessibilityLabel((yo.count == 1 ? "Yo" : "\(yo.count) Yos") + (from.map { ", last from \($0)" } ?? ""))
       .transition(.scale(scale: 0.3).combined(with: .opacity))
     }
   }
