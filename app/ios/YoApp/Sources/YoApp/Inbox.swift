@@ -84,8 +84,11 @@ final class Inbox {
   /// A bar's photos and videos not yet seen, oldest first; nil when none wait.
   func media(for friend: Friend) -> [Arrival]? { unseenMedia[friend.mediaKey] }
 
-  /// The key an arrival's `from` is kept under: a group's as it is, a friend's name by its skeleton.
-  private static func mediaKey(_ from: String) -> String { from.hasPrefix("group:") ? from : Username.skeleton(from) }
+  /// Which bar a photo or video is on: a group's by its id, a friend's by the sender's user id, which starts the media's
+  /// own id ("user/ms/blob", `mediaID`). Never by a name: two people may have had the same one (Friend.mediaKey).
+  private static func mediaKey(_ arrival: Arrival) -> String {
+    arrival.from.hasPrefix("group:") ? arrival.from : "user:" + (arrival.id.split(separator: "/").first.map(String.init) ?? "")
+  }
 
   init() {
     Task { @MainActor in
@@ -96,7 +99,7 @@ final class Inbox {
 
   /// A photo or video kept, on its sender's bar until seen, in the order sent.
   private func add(_ arrival: Arrival) {
-    let key = Self.mediaKey(arrival.from)
+    let key = Self.mediaKey(arrival)
     var waiting = unseenMedia[key] ?? []
     guard !waiting.contains(where: { $0.id == arrival.id }) else { return }
     waiting.insert(arrival, at: waiting.firstIndex { Arrival.older(arrival, $0) } ?? waiting.endIndex)
@@ -572,7 +575,7 @@ final class Inbox {
   private func show(_ arrival: Arrival) {
     chime()
     ready.append(Arrival(id: arrival.id, from: arrival.from))
-    if arrival.photo != nil { unseenMedia[Self.mediaKey(arrival.from), default: []].append(arrival) }
+    if arrival.photo != nil { unseenMedia[Self.mediaKey(arrival), default: []].append(arrival) }
     came += 1
     guard !gathering else { return }
     gathering = true

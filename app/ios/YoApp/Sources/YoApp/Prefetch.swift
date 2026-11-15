@@ -31,6 +31,9 @@ enum Prefetch {
   private static func name(_ media: YoMedia) -> String { media.id.map { String(format: "%02x", $0) }.joined() }
   private static func file(_ media: YoMedia) -> URL? { directory?.appending(path: name(media) + ".media") }
   private static func mark(_ media: YoMedia) -> URL? { directory?.appending(path: name(media) + ".fetching") }
+  /// Left once the app has a photo or video for good: no process of this device fetches it again (each fetch is
+  /// another device's at the hub). Swept with the rest after 31 days, past the blob's life.
+  private static func taken(_ media: YoMedia) -> URL? { directory?.appending(path: name(media) + ".taken") }
 
   // MARK: The notification service
 
@@ -97,6 +100,8 @@ enum Prefetch {
     make(directory)
     // Under one lock for both processes: two finding the same stale claim cannot both take it over.
     return locked(directory) {
+      // The app has it already: nothing to fetch, by anyone here.
+      if let taken = taken(media), FileManager.default.fileExists(atPath: taken.path) { return false }
       if FileManager.default.fileExists(atPath: mark.path) && !underWay(media) {
         try? FileManager.default.removeItem(at: mark)
       }
@@ -134,7 +139,9 @@ enum Prefetch {
 
   /// Kept by the app (or gone for good): its file goes.
   static func done(_ media: YoMedia) {
-    guard let file = file(media) else { return }
+    guard let directory, let file = file(media) else { return }
+    make(directory)
+    if let taken = taken(media) { FileManager.default.createFile(atPath: taken.path, contents: nil) }
     try? FileManager.default.removeItem(at: file)
     if let mark = mark(media) { try? FileManager.default.removeItem(at: mark) }  // left by a service that was ended
   }

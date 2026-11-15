@@ -36,8 +36,8 @@ struct Friend: Codable, Hashable, Identifiable {
   /// Where a Yo to the bar goes: the user id once known, else the name; a group's, "group:" and its id.
   var target: String { group.map { "group:" + $0 } ?? user ?? name }
   /// Where its photos and videos and its last sender are kept (Inbox): a group by its id ("group:" and it), so a rename
-  /// or a namesake never mixes them; a friend by the name's skeleton.
-  var mediaKey: String { group.map { "group:" + $0 } ?? Username.skeleton(name) }
+  /// or a namesake never mixes them; a friend by its user id (the name's skeleton before it is known).
+  var mediaKey: String { group.map { "group:" + $0 } ?? user.map { "user:" + $0 } ?? Username.skeleton(name) }
 
   /// One friend is one friend, whatever was learned about them since: by `key` alone.
   static func == (a: Friend, b: Friend) -> Bool { a.key == b.key }

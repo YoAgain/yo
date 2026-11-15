@@ -114,19 +114,23 @@ final class HubTransport: HttpTransport {
     let answer = Answer()
     let start = Perf.on ? CACurrentMediaTime() : 0
     let signed = headers.contains(where: { $0.name.lowercased() == "yo-device" })
-    (signed ? Self.signedSession : Self.anonymousSession).dataTask(with: request) { data, response, error in
+    let task = (signed ? Self.signedSession : Self.anonymousSession).dataTask(with: request)
+    // Read as it comes, and cut off past the largest answer the hub may give (`Limited`): a faulty or hostile hub
+    // never fills the memory of the app or of an extension (which has 24 MB).
+    task.delegate = Limited { data, response, error in
       answer.result =
         if let error {
-          HttpResult(status: 0, body: Data(), error: error.localizedDescription)
+          HttpResult(status: 0, body: Data(), error: error)
         } else {
-          HttpResult(status: UInt16((response as? HTTPURLResponse)?.statusCode ?? 0), body: data ?? Data(), error: nil)
+          HttpResult(status: UInt16((response as? HTTPURLResponse)?.statusCode ?? 0), body: data, error: nil)
         }
       if answer.result.status == 426 {
         Self.tooOld.store(true, ordering: .relaxed)
         AppUpdate.tooOld()
       }
       done.signal()
-    }.resume()
+    }
+    task.resume()
     done.wait()
     if (200..<300).contains(answer.result.status), signed {  // the core sends the header lowercase
       SignedAt.note()
@@ -142,6 +146,51 @@ final class HubTransport: HttpTransport {
   /// Carries the answer out of URLSession's callback; written once before the semaphore is signalled.
   private final class Answer: @unchecked Sendable {
     var result = HttpResult(status: 0, body: Data(), error: "no answer")
+  }
+
+  /// The most an answer may be: a blob (10 MiB, its tag and padding) is the largest the hub gives; an inbox of 100
+  /// envelopes of at most 64 KiB is less (spec 6.3, 6.8).
+  static let largestAnswer = 11 * 1024 * 1024
+
+  /// One task's answer, read as it arrives: cancelled once it says or grows past `largestAnswer`. Its callback runs
+  /// once, at the end.
+  private final class Limited: NSObject, URLSessionDataDelegate, @unchecked Sendable {
+    private var data = Data()
+    private var response: URLResponse?
+    private var tooLarge = false
+    private let done: (Data, URLResponse?, String?) -> Void
+
+    init(done: @escaping (Data, URLResponse?, String?) -> Void) { self.done = done }
+
+    func urlSession(
+      _ session: URLSession, dataTask: URLSessionDataTask, didReceive response: URLResponse,
+      completionHandler: @escaping (URLSession.ResponseDisposition) -> Void
+    ) {
+      self.response = response
+      if response.expectedContentLength > Int64(HubTransport.largestAnswer) {
+        tooLarge = true
+        return completionHandler(.cancel)
+      }
+      completionHandler(.allow)
+    }
+
+    func urlSession(_ session: URLSession, dataTask: URLSessionDataTask, didReceive data: Data) {
+      guard !tooLarge else { return }
+      self.data.append(data)
+      if self.data.count > HubTransport.largestAnswer {
+        tooLarge = true
+        self.data = Data()
+        dataTask.cancel()
+      }
+    }
+
+    func urlSession(_ session: URLSession, task: URLSessionTask, didCompleteWithError error: Error?) {
+      if tooLarge {
+        done(Data(), nil, "answer too large")
+      } else {
+        done(data, response, error?.localizedDescription)
+      }
+    }
   }
 }
 
@@ -241,24 +290,23 @@ enum StateKey {
     return key
   }
 
-  /// The app, once: the key into the group, the same key (its state opens with no other). A copy first, read back,
-  /// then the app's own item deleted; a new key in the group when there was none. False when the keychain will not
-  /// (locked, no group in the signature): then the state stays where it is too.
+  /// The app, once: the key into the group, the same key (its state opens with no other); a new key in the group when
+  /// there was none. The app's own item stays until the state is in the group too (`finishMoveIn`): a state that
+  /// does not move keeps the key it opens with. A group key there already, with no state of the group's, gives way to
+  /// the app's own, which opens the state that moves. False when the keychain will not (locked, no group in the
+  /// signature): then the state stays where it is too.
   static func moveIn() -> Bool {
     // The keychain does not answer now (locked): not now.
     guard case .success(let there) = Result(catching: { try shared() }),
       case .success(let own) = Result(catching: { try load() })
     else { return false }
-    if there != nil {
-      deleteOwn()
-      return true
-    }
-    let key = own ?? random()
-    guard (try? Keychain.write(inGroup, key, accessible: kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly)) != nil
-    else { return false }
-    deleteOwn()
-    return true
+    let key = own ?? there ?? random()
+    guard key != there else { return true }
+    return (try? Keychain.write(inGroup, key, accessible: kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly)) != nil
   }
+
+  /// The state is in the group: the app's own key goes.
+  static func finishMoveIn() { deleteOwn() }
 
   /// The app's own item (in its default access group), the group's kept: found with its access group, deleted by it.
   private static func deleteOwn() {

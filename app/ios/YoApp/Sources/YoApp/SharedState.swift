@@ -187,12 +187,16 @@ final class SharedStateFile: StateStore, StateLock, @unchecked Sendable {
     return locked {
       let manager = FileManager.default
       if manager.fileExists(atPath: stateURL.path) {
-        // Moved in before: a copy left in the app's folder (stopped between the steps below) goes.
+        // Moved in before: a copy left in the app's folder (stopped between the steps below) goes, and the key with it.
         try? manager.removeItem(at: StateFile.url)
+        StateKey.finishMoveIn()
         return true
       }
       guard StateKey.moveIn() else { return false }
-      guard manager.fileExists(atPath: StateFile.url.path) else { return true }
+      guard manager.fileExists(atPath: StateFile.url.path) else {
+        StateKey.finishMoveIn()
+        return true
+      }
       // Written whole beside it with its word, then renamed into place in one step, then the old one deleted: never
       // no state, never half of one.
       guard let blob = StateFile.load(),
@@ -201,6 +205,7 @@ final class SharedStateFile: StateStore, StateLock, @unchecked Sendable {
       else { return false }
       excludeFromBackup(stateURL)
       try? manager.removeItem(at: StateFile.url)
+      StateKey.finishMoveIn()  // only now: until here the state that stayed opens with it
       return true
     }
   }()

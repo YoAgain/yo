@@ -292,7 +292,10 @@ final class AccountStore {
     // Into the iCloud Keychain if not there (accounts from before it, one signed out on another phone of the
     // person's). Only then: opening asks nothing of the hub, so this phone may have been replaced meanwhile, and the
     // item of the phone that has the account now must not be overwritten by an older one.
-    if let account { SyncedAccount.save(account, secret: secret, onlyIfMissing: true) }
+    // One whose last change the keychain did not take is written again, whole.
+    if let account {
+      SyncedAccount.save(account, secret: secret, onlyIfMissing: !SyncedAccount.needsSave(account.userID))
+    }
     Task { await addAuthKeys() }
   }
 
@@ -1021,8 +1024,17 @@ enum SyncedAccount {
       username: account.username, userID: account.userID, accountKey: secret,
       byPasskey: account.byPasskey, byCode: account.byCode, words: RecoveryWords.load() ?? previous?.words,
       signedOut: false)
-    write(item, previous: previous)
+    // One the keychain does not take now (locked, a passing error) is noted and written again at the next opening
+    // (`needsSave`), not taken as there: a new phone would miss it, or find old words.
+    if write(item, previous: previous) {
+      pendingSave.remove(account.userID)
+    } else {
+      pendingSave.insert(account.userID)
+    }
   }
+
+  /// Whether this account's item was not written the last time it changed: write it again, whole.
+  static func needsSave(_ userID: Data) -> Bool { pendingSave.contains(userID) }
 
   @discardableResult
   private static func write(_ item: Item, previous: Item?) -> Bool {
@@ -1116,6 +1128,11 @@ enum SyncedAccount {
   private static var pendingSignOut: Set<Data> {
     get { Set(UserDefaults.standard.array(forKey: "account.pendingSignOut") as? [Data] ?? []) }
     set { UserDefaults.standard.set(Array(newValue), forKey: "account.pendingSignOut") }
+  }
+
+  private static var pendingSave: Set<Data> {
+    get { Set(UserDefaults.standard.array(forKey: "account.pendingSave") as? [Data] ?? []) }
+    set { UserDefaults.standard.set(Array(newValue), forKey: "account.pendingSave") }
   }
 
   private static var pendingDelete: Set<Data> {
