@@ -440,6 +440,12 @@ fn refused(response: &Response) -> Error {
     }
 }
 
+/// A sender found by its account key at the hub, not a contact yet: pinned only once its message opened.
+struct Unpinned {
+    account_key: Key,
+    username: Option<String>,
+}
+
 /// Content worth keeping to send again, and a receipt for: what a person sent, not the protocol's own.
 fn shown(content: &Content) -> bool {
     !matches!(
@@ -1760,6 +1766,30 @@ impl Client {
         }
     }
 
+    /// A sender not pinned here, whose message did not open: pinned, with its devices, only when the hub (one lookup)
+    /// lists the payload's device at its number for that account; else nothing is kept.
+    fn pin_if_listed(
+        &mut self,
+        user: &str,
+        account_key: Key,
+        username: Option<String>,
+        device_key: Key,
+        id: u8,
+    ) -> Result<bool> {
+        match self.lookup(&Handle::user(&user_bytes(user)?), 0, Vec::new()) {
+            Ok((found, _))
+                if found.account_key == account_key
+                    && found.devices.iter().any(|d| d.key == device_key && d.id == id) =>
+            {
+                self.pin(user, account_key, username);
+                self.take_devices(user, found.account_key, &found.devices)?;
+                Ok(true)
+            }
+            Ok(_) | Err(Error::NotOnYo) => Ok(false),
+            Err(error) => Err(error),
+        }
+    }
+
     /// Whether a payload may make this device ask the hub for `user`'s devices now (once a minute a user).
     fn may_ask_roster(&mut self, user: &str) -> bool {
         let now = (self.clock)();
@@ -1773,20 +1803,21 @@ impl Client {
 
     /// Who sent a payload: this account (another of its devices), a contact pinned to its key, or whom the hub says
     /// the key is (someone writing first). `None`: a key that is no user's now (a replaced device, or a forger).
-    fn sender(&mut self, account_key: Key) -> Result<Option<String>> {
+    /// Who a payload's account key is: a contact, this account, or (asked of the hub) someone writing first, whose
+    /// pin (`Unpinned`) is kept only once the message opened: anyone can seal a payload naming any account.
+    fn sender(&mut self, account_key: Key) -> Result<Option<(String, Option<Unpinned>)>> {
         if account_key == self.my_account_key() {
-            return Ok(Some(self.state.user_id.clone()));
+            return Ok(Some((self.state.user_id.clone(), None)));
         }
         if let Some((user, _)) = self.state.contacts.iter().find(|(_, c)| c.account_key == account_key && !c.gone) {
-            return Ok(Some(user.clone()));
+            return Ok(Some((user.clone(), None)));
         }
         // Someone writing first, or a contact this state forgot (a state rolled back). A forger's payloads cost it a
         // delivery each (the hub's limits, 6.6); the lookup is the hub's (counted there too).
         match self.lookup(&Handle::account_key(&account_key), 0, Vec::new()) {
             Ok((found, username)) if found.account_key == account_key => {
                 let user = hex(&found.user_id);
-                self.pin(&user, account_key, username);
-                Ok(Some(user))
+                Ok(Some((user, Some(Unpinned { account_key, username }))))
             }
             Ok(_) | Err(Error::NotOnYo) => Ok(None),
             Err(error) => Err(error),
@@ -1803,7 +1834,7 @@ impl Client {
         if payload.device_key == mine || self.state.seen.contains(&sha256(copy.message.as_slice())) {
             return Ok(());
         }
-        let Some(user) = self.sender(payload.account_key)? else {
+        let Some((user, unpinned)) = self.sender(payload.account_key)? else {
             self.drop_one("a sender that is no user now".into());
             return Ok(());
         };
@@ -1864,10 +1895,32 @@ impl Client {
                 // Only a device of the user's roster, at its number (the hub asked at most once a minute a user when
                 // this device does not know it): the retry list stays as long as a roster (16), and a forger naming
                 // made-up devices adds nothing to it.
+                // Someone not pinned here (a state that went back and forgot them, or a forger naming a real
+                // account): pinned for a retry only when the hub, asked at most once a minute a user, names that
+                // device; else nothing of the payload is kept.
                 let rostered = !own
-                    && (self.slot_of(&user, &payload.device_key) == Some(payload.device_id)
-                        || (self.may_ask_roster(&user)
-                            && self.hub_names(&user, &payload.account_key, &payload.device_key, payload.device_id)?));
+                    && match unpinned {
+                        None => {
+                            self.slot_of(&user, &payload.device_key) == Some(payload.device_id)
+                                || (self.may_ask_roster(&user)
+                                    && self.hub_names(
+                                        &user,
+                                        &payload.account_key,
+                                        &payload.device_key,
+                                        payload.device_id,
+                                    )?)
+                        }
+                        Some(Unpinned { account_key, ref username }) => {
+                            self.may_ask_roster(&user)
+                                && self.pin_if_listed(
+                                    &user,
+                                    account_key,
+                                    username.clone(),
+                                    payload.device_key,
+                                    payload.device_id,
+                                )?
+                        }
+                    };
                 if rostered {
                     if let Some(contact) = self.state.contacts.get_mut(&user) {
                         if !contact.retry.contains(&payload.device_key) && contact.retry.len() < MAX_DEVICES {
@@ -1883,6 +1936,9 @@ impl Client {
         // say: one this device does not know is taken in only once the hub names it (asked without a bound: only the
         // account can make a message that opens); else it is a replaced device's, and dropped (4.6).
         self.remember(copy.message.as_slice());
+        if let Some(Unpinned { account_key, username }) = unpinned {
+            self.pin(&user, account_key, username);
+        }
         if self.slot_of(&user, &payload.device_key) != Some(payload.device_id)
             && !self.hub_names(&user, &payload.account_key, &payload.device_key, payload.device_id)?
         {

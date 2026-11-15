@@ -209,3 +209,25 @@ fn a_device_key_the_hub_does_not_name_is_not_taken_in() {
     a.send(b.user_id(), text("next")).unwrap();
     assert_eq!(texts(&b.sync(0).unwrap()), ["next"]);
 }
+
+/// A payload naming a real account this device does not know (someone could write first) with a message that does not
+/// open: dropped, and that account is not taken in as a contact; only a message that opens pins a first sender.
+#[test]
+fn a_stranger_named_by_a_payload_that_does_not_open_is_not_pinned() {
+    let hub = TestHub::start();
+    let (_a, mut b, ha) = pair(&hub, "Pin");
+    let c = yo_tests::register(Http::new(hub.url()), &yo_tests::username(random_u64() % 1_000_000_000), None);
+    let real = posted(&ha, b.user_id()).pop().unwrap();
+    let mut payload: yo_wire::envelope::Payload =
+        yo_wire::decode(&yo_core::seal::open(&b.account_secret(), &real).unwrap()).unwrap();
+    payload.account_key = ed25519_dalek::SigningKey::from_bytes(&c.account_secret()).verifying_key().to_bytes();
+    let mut message = payload.copies[0].message.as_slice().to_vec();
+    let last = message.len() - 1;
+    message[last] ^= 1;
+    payload.copies[0].message = message.into();
+    let account = ed25519_dalek::SigningKey::from_bytes(&b.account_secret()).verifying_key().to_bytes();
+    let forged = yo_core::seal::to(&account, &yo_wire::encode(&payload)).unwrap();
+    assert_eq!(deliver_raw(&hub.url(), b.user_id(), forged), 202);
+    assert!(texts(&b.sync(0).unwrap()).is_empty());
+    assert!(b.contacts().iter().all(|k| k.user != c.user_id()), "not pinned by a message that did not open");
+}
