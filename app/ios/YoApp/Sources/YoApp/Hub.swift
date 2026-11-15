@@ -34,11 +34,9 @@ enum Hub {
   /// hub key needs no app update first. A hub not listed or with none here (a placeholder left empty) is not checked:
   /// its answers are taken as they come, as before the hubs signed.
   static let keys: [String: [String]] = [
-    // PLACEHOLDER: the Curve25519 hub keys are not made yet (the Ed25519 ones of before no longer verify). Pin the
-    // live key in use and its spare here.
-    "hub.justyo.app": [],
-    // PLACEHOLDER: the dev hub's key in use and its spare.
-    "dev.justyo.app": [],
+    // The hub keys (Curve25519, XEdDSA; `yo-hub hub-key public`): the key in use and a spare kept offline (1Password).
+    "hub.justyo.app": ["X7-jqvmZLam-Oh_4VKIB2ozPLUACspOZ2K09v5R5yyY", "NJRBNxJ12bZa1JK8fCLCGFTgM1oJ658mrwKYCdgbmHY"],
+    "dev.justyo.app": ["LPiW1TOvv_ricbn7bXmS_fNdVbgtEw_3o7OdelvEdVo", "nFQuDMd-2Ueoec6oYG-Ty7lHQELq1OHs4TVODmPmryg"],
   ]
 
   /// The sender-certificate trust roots of each hub (spec 6.1), base64url as `yo-hub trust-root new` printed them:
