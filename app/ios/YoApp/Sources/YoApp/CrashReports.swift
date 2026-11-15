@@ -1,6 +1,6 @@
 // Crash reports, only with the person's consent (App Review 5.1.1(ii)): iOS hands the app its crashes at the next
 // start (MetricKit, at most a day later). The first time one comes, the app asks ("Yo Crashed": Always Send / Not
-// Now); Settings › "Send Crash Reports" changes it later. Each goes to the Yo team without the account (POST
+// Now); Settings › "Help Improve Yo" changes it later. Each goes to the Yo team without the account (POST
 // /v1/crash, unsigned, as feedback marked auto), a few lines: the build, iOS, the kind of crash and the crashed
 // thread's frames. Nothing of the person's Yos, names or photos is in them (the frames are offsets into the binaries).
 import Foundation
