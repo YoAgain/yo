@@ -194,6 +194,9 @@ final class MediaOutbox {
   private static func blob(_ id: UUID) -> URL { directory.appending(path: "\(id.uuidString).blob") }
   private static var index: URL { directory.appending(path: "outbox.json") }
 
+  /// Whether a photo or video is still in the queue (not sent, not dropped): a group's "LEO left" waits for it.
+  func isWaiting(_ id: UUID) -> Bool { items.contains { $0.id == id } }
+
   /// Whether the queue on disk was read: until then nothing writes over it.
   @ObservationIgnored private var loaded = false
 

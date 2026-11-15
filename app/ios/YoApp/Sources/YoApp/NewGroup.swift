@@ -8,6 +8,7 @@ struct NewGroupSheet: View {
   @Environment(Friends.self) private var friends
   @Environment(Inbox.self) private var inbox
   @Environment(AccountStore.self) private var accounts
+  @Environment(MediaOutbox.self) private var outbox
   @State private var name = ""
   @State private var members: Set<String> = []
   @State private var creating = false
@@ -78,6 +79,9 @@ struct NewGroupSheet: View {
         let made = try await Hub.run { try client.createGroup(name: FriendList.groupName(name), members: members) }
         await inbox.absorb(made.events, client: client, friends: friends)
         if let groups = try? await Hub.run({ client.groups() }) { friends.takeGroups(groups) }
+        if let bar = friends.all.first(where: { $0.group == made.id }) {
+          await GroupNotice.send("\(GroupNotice.me(accounts)) made \(bar.name)", to: bar, accounts: accounts, outbox: outbox)
+        }
         dismiss()
       } catch {
         failed = true

@@ -78,7 +78,8 @@ struct FriendList: View {
   /// A group's bar being renamed (the new name typed), or whose members are shown.
   @State private var renaming: Friend?
   @State private var newGroupName = ""
-  @State private var membersOf: (bar: Friend, names: String)?
+  /// A group whose members are shown (and added, removed): GroupMembersSheet.
+  @State private var membersOf: Friend?
   /// What went wrong reporting or blocking: the alert's title and message.
   @State private var problem: (title: String, message: String)?
   /// The friends whose bars are on screen now, by `Friend.key` (a new spelling leaves them on screen).
@@ -255,14 +256,7 @@ struct FriendList: View {
           Button("Rename") { renameGroup(bar, to: newGroupName) }
           Button("Cancel", role: .cancel) {}
         }
-        .alert(
-          membersOf?.bar.name ?? "",
-          isPresented: Binding(get: { membersOf != nil }, set: { if !$0 { membersOf = nil } }), presenting: membersOf
-        ) { _ in
-          Button("OK", role: .cancel) {}
-        } message: { members in
-          Text(members.names)
-        }
+        .sheet(item: $membersOf) { bar in GroupMembersSheet(bar: bar).preferredColorScheme(SystemAppearance.scheme) }
         .alert(
           problem?.title ?? "", isPresented: Binding(get: { problem != nil }, set: { if !$0 { problem = nil } })
         ) {
@@ -460,31 +454,19 @@ struct FriendList: View {
 
   // MARK: Groups
 
-  /// Who is in a group, by the names the list knows them by (else as the hub spells them).
-  private func showMembers(_ bar: Friend) {
-    guard let id = bar.group, let client = accounts.client else { return }
-    Task {
-      guard let (groups, contacts) = try? await Hub.run({ (client.groups(), client.contacts()) }),
-        let group = groups.first(where: { $0.id == id })
-      else { return }
-      let me = client.userId()
-      let names = group.members.map { user in
-        if user == me { return accounts.account?.username ?? "You" }
-        let contact = contacts.first { $0.user == user }
-        return friends.all.first { $0.user == user }?.name ?? contact?.handles.first ?? contact?.name ?? "Yo User"
-      }
-      membersOf = (bar, names.sorted().joined(separator: "\n"))
-    }
-  }
+  /// Who is in a group, to add and remove (GroupMembersSheet).
+  private func showMembers(_ bar: Friend) { membersOf = bar }
 
   private func renameGroup(_ bar: Friend, to name: String) {
     let name = name.trimmingCharacters(in: .whitespaces)
     guard let id = bar.group, let client = accounts.client, !name.isEmpty else { return }
     Task {
-      if let events = try? await Hub.run({ try client.renameGroup(group: id, name: Self.groupName(name)) }) {
-        await inbox.absorb(events, client: client, friends: friends)
-      }
+      guard let events = try? await Hub.run({ try client.renameGroup(group: id, name: Self.groupName(name)) }) else { return }
+      await inbox.absorb(events, client: client, friends: friends)
       if let groups = try? await Hub.run({ client.groups() }) { friends.takeGroups(groups) }
+      let renamed = friends.all.first { $0.group == id } ?? bar
+      await GroupNotice.send(
+        "\(GroupNotice.me(accounts)) renamed the group \(renamed.name)", to: renamed, accounts: accounts, outbox: outbox)
     }
   }
 
@@ -498,6 +480,10 @@ struct FriendList: View {
   private func leave(_ bar: Friend) {
     guard let id = bar.group, let client = accounts.client else { return }
     Task {
+      // "LEO left" first, and out only once it went (at most half a minute): a member who left sends nothing.
+      if let notice = await GroupNotice.send("\(GroupNotice.me(accounts)) left", to: bar, accounts: accounts, outbox: outbox) {
+        for _ in 0..<60 where outbox.isWaiting(notice) { try? await Task.sleep(for: .milliseconds(500)) }
+      }
       if let events = try? await Hub.run({ try client.leaveGroup(group: id) }) {
         await inbox.absorb(events, client: client, friends: friends)
       }
