@@ -146,3 +146,41 @@ fn a_chat_started_while_blocked_works_after_the_unblock() {
     r.send(s.user_id(), Content::Text("hi".into())).unwrap();
     assert_eq!(texts(&s.sync(0).unwrap()), ["hi"]);
 }
+
+/// A phone whose clock ran two hours ahead signed with that time and saved it as the floor for every later
+/// signature (spec 6.2: strictly increasing). With the clock set right again every request stayed two hours ahead,
+/// refused (`401`), until the real time caught up: the device was cut off for as long as its clock had been wrong.
+/// (yo-scale: also a clock a few minutes too far ahead, set back to within the window.)
+#[test]
+fn a_clock_set_right_again_reaches_the_hub_at_once() {
+    let hub = TestHub::start();
+    let n = random_u64() % 100_000;
+    let http = Http::new(hub.url());
+    let mut a = by_name(http.clone(), &format!("Late{n}"), None).unwrap();
+    let mut b = by_name(Http::new(hub.url()), &format!("Early{n}"), None).unwrap();
+    a.set_clock_skew(2 * 3600 * 1000);
+    assert!(a.sync(0).is_err(), "two hours off: the hub refuses");
+    a.set_clock_skew(0);
+    b.send(a.user_id(), Content::Text("on time".into())).unwrap();
+    assert_eq!(texts(&a.sync(0).unwrap()), ["on time"]);
+    a.acknowledge_events();
+    // Also after a restart from what it saved while its clock was wrong.
+    a.set_clock_skew(2 * 3600 * 1000);
+    assert!(a.sync(0).is_err());
+    let saved = a.export(&[1; 32]);
+    let mut a = Client::restore(http, &saved, &[1; 32]).unwrap();
+    b.send(a.user_id(), Content::Text("still?".into())).unwrap();
+    assert_eq!(texts(&a.sync(0).unwrap()), ["still?"]);
+    a.send(b.user_id(), Content::Text("yes".into())).unwrap();
+    assert_eq!(texts(&b.sync(0).unwrap()), ["yes"]);
+    a.acknowledge_events();
+    // A clock 4 minutes fast is within the window; 8 minutes is not, and once back at 4 the floor it left (4 minutes
+    // ahead of this clock, 8 of the hub's) must not hold.
+    a.set_clock_skew(4 * 60 * 1000);
+    assert!(a.sync(0).is_ok(), "4 minutes off: within the window");
+    a.set_clock_skew(8 * 60 * 1000);
+    assert!(a.sync(0).is_err(), "8 minutes off: refused");
+    a.set_clock_skew(4 * 60 * 1000);
+    b.send(a.user_id(), Content::Text("back".into())).unwrap();
+    assert_eq!(texts(&a.sync(0).unwrap()), ["back"]);
+}

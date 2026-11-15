@@ -59,6 +59,8 @@ const RETIRED_KEPT_MS: u64 = 31 * 24 * 3600 * 1000;
 /// One-time prekeys of each kind whose private keys are kept: lookups that never lead to a message use them up at
 /// the hub, and the oldest beyond this go (a message made with one later is answered by a retry, spec 4.6).
 const ONE_TIME_KEPT: usize = 4 * PREKEY_TARGET as usize;
+/// A saved signing time at most this far ahead of the clock is kept as the floor of the next (spec 6.2).
+const SIGN_AHEAD_MS: u64 = 60 * 1000;
 /// A contact's retry is answered at most this often (spec 4.6).
 const RESEND_EVERY_MS: u64 = 60 * 1000;
 /// Session message hashes remembered against redelivery.
@@ -353,6 +355,8 @@ pub struct Client {
     /// answer that hands out keys must carry a signature by one of them over this very question; with none (an app
     /// from before), answers are taken as they come.
     hub_keys: Vec<Key>,
+    /// How far this device's clock is off (tests: a phone set to the wrong time); the signing time is wall time plus it.
+    skew_ms: i64,
 }
 
 /// Request headers with the nonce a signed answer is asked for (spec 6.11), if any.
@@ -621,6 +625,12 @@ impl Client {
         self.persist()
     }
 
+    /// For tests: the phone's clock is `ms` off (spec 6.2: signed requests are within 5 minutes of the hub's).
+    #[cfg(feature = "testing")]
+    pub fn set_clock_skew(&mut self, ms: i64) {
+        self.skew_ms = ms;
+    }
+
     /// For tests: any request, signed by this device, as only a broken client would send it.
     #[cfg(feature = "testing")]
     pub fn signed_for_tests(&mut self, method: &str, path: &str, body: &[u8]) -> Result<Response> {
@@ -781,6 +791,7 @@ impl Client {
             received_ids: Vec::new(),
             after_due: false,
             hub_keys: Vec::new(),
+            skew_ms: 0,
         }
     }
 
@@ -904,6 +915,11 @@ impl Client {
 
     fn blocked(&self, user: &str) -> bool {
         self.state.contacts.get(user).is_some_and(|c| c.blocked)
+    }
+
+    /// This device's wall clock: the system's, off by the skew a test set.
+    fn wall(&self) -> u64 {
+        wall_ms().saturating_add_signed(self.skew_ms)
     }
 
     fn persist(&self) -> Result<()> {
@@ -1036,7 +1052,12 @@ impl Client {
     fn sign_hash(&mut self, method: &str, path: &str, body_hash: &[u8; 32]) -> (Vec<(String, String)>, u64) {
         // Each signature once (the hub's replay cache): strictly increasing times, also across the processes that
         // share this state (the app and its extensions) and across a restart (`signed_until` is saved with it).
-        let time = wall_ms().max(self.last_request_ms + 1).max(self.state.signed_until + 1);
+        // A floor well ahead of this clock was signed while the clock ran ahead (or before it was set back): kept, it
+        // could hold every request outside the hub's window until the real time caught up. Signing starts from the
+        // clock again; a time the hub saw already is answered `401`, and `signed` signs once more.
+        let wall = self.wall();
+        let floor = self.last_request_ms.max(self.state.signed_until);
+        let time = if floor >= wall + SIGN_AHEAD_MS { wall } else { wall.max(floor + 1) };
         self.last_request_ms = time;
         self.state.signed_until = time;
         let key = SigningKey::from_bytes(&self.state.auth_secret);
@@ -2420,7 +2441,7 @@ impl Client {
         self.state.prekeys.left = self.state.prekeys.left.saturating_add(fresh);
         self.prekeys_known_ms = self.last_request_ms;
         // The hub hands out the newest signed prekey and last resort from now on: the ones before are retired.
-        let now = wall_ms();
+        let now = self.wall();
         for kind in ["sp", "kl"] {
             let ids = self.records.ids(kind);
             for id in ids.iter().take(ids.len().saturating_sub(1)) {
@@ -2437,7 +2458,7 @@ impl Client {
     /// The private keys of signed prekeys and last resorts retired a month ago go (`RETIRED_KEPT_MS`).
     /// Whether any went.
     fn forget_retired(&mut self) -> bool {
-        let now = wall_ms();
+        let now = self.wall();
         let (old, kept): (Vec<_>, Vec<_>) = std::mem::take(&mut self.state.prekeys.retired)
             .into_iter()
             .partition(|(_, _, at)| now.saturating_sub(*at) > RETIRED_KEPT_MS);
