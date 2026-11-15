@@ -101,13 +101,15 @@ impl Store for File {
     }
 }
 
-/// Writes beside the file, then renames: a crash leaves the old one or the new one.
+/// Writes beside the file, then renames, then syncs the directory: a crash or a power cut leaves the old one or the
+/// new one, and once this returns, the new one.
 fn write_private(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
     let tmp = path.with_extension("tmp");
     let mut file = std::fs::OpenOptions::new().write(true).create(true).truncate(true).mode(0o600).open(&tmp)?;
     file.write_all(bytes)?;
     file.sync_all()?;
-    std::fs::rename(tmp, path)
+    std::fs::rename(tmp, path)?;
+    std::fs::File::open(path.parent().unwrap_or(Path::new(".")))?.sync_all()
 }
 
 /// 32 bytes kept in `path`, made at random the first time.
@@ -404,11 +406,23 @@ fn open(account: &Account) -> Option<Client> {
     let mut backoff = Backoff::default();
     loop {
         let opened = match std::fs::read(&path) {
-            Ok(blob) => Client::restore(transport.clone(), &blob, &key),
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-                Client::register_username(transport.clone(), username, Some(secret), None, Push::none())
-                    .inspect(|c| log(format!("registered {} on {}", c.username().unwrap_or("?"), account.hub)))
-            }
+            // A registration under way when it stopped is finished first (sent again only if it did not arrive).
+            Ok(blob) => Client::restore(transport.clone(), &blob, &key).and_then(|mut client| {
+                client.persist_to(Arc::new(File(path.clone())), key)?;
+                client.finish_registration()?;
+                Ok(client)
+            }),
+            // Saved before it is sent (spec 6.4): a lost answer or a stop halfway loses neither key nor prekeys.
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Client::register_username_saved(
+                transport.clone(),
+                Arc::new(File(path.clone())),
+                key,
+                username,
+                Some(secret),
+                None,
+                Push::none(),
+            )
+            .inspect(|c| log(format!("registered {} on {}", c.username().unwrap_or("?"), account.hub))),
             Err(error) => {
                 log(format!("stopped: {}: {error}", path.display()));
                 return None;
