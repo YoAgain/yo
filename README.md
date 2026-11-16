@@ -57,11 +57,24 @@ and [threat model](hub/SECURITY.md). Only you and your recipients can read your 
 
 Groups use zkgroup, with up to 20 members; group names and membership are encrypted too.
 Photos and videos are view-once: the app deletes them and their keys after viewing.
-The server deletes the encrypted file after its last allowed fetch.
+The server deletes the encrypted file after its last acknowledged fetch.
 
 </details>
 
 ## Hub
+
+<details>
+<summary>Hub routes</summary>
+
+| Method | Route | Purpose |
+|---|---|---|
+| PUT | `/v1/blobs/{id}?fetches=n` | Upload encrypted media (signed). |
+| GET | `/v1/blobs/{id}` | Fetch anonymously; never consumes a fetch. |
+| DELETE | `/v1/blobs/{id}` | Acknowledge durable storage anonymously; consumes one fetch, the last deletes the blob. Unknown/expired: `204`. |
+
+See [all hub routes](hub/README.md) for the full table and limits.
+
+</details>
 
 ```text
 hub alone    ████████████████████████████████  8,000 Yos/s   p50 7.7 ms · p99 ~20 ms

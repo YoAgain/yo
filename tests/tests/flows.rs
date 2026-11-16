@@ -225,7 +225,7 @@ fn register_add_a_friend_and_yo_both_ways() {
     assert!(events.contains(&YoEvent::Profile { user: b.user(), name: "BOB".into() }));
     assert!(!events.iter().any(|e| matches!(e, YoEvent::NewChat { .. })), "A wrote first: no new chat for A");
     for (me, peer) in [(&a, &b), (&b, &a)] {
-        let sessions = me.sessions_with(peer.user());
+        let sessions = me.sessions_with(peer.user()).unwrap();
         assert_eq!(sessions.len(), 1);
         assert!(sessions[0].usable && !sessions[0].retrying);
         assert_eq!(me.safety_number(peer.user()).unwrap(), peer.safety_number(me.user()).unwrap());
@@ -264,6 +264,8 @@ fn a_photo_and_a_video_go_as_blobs_and_are_opened_once() {
     assert!(photos[0] == sealed_photo.media && videos[0].0 == sealed_video.media && videos[0].1 == 4_500);
     assert_eq!(b.fetch_media(photos[0].clone()).unwrap(), Some(photo));
     assert_eq!(b.fetch_media(videos[0].0.clone()).unwrap(), Some(video));
+    b.ack_media(photos[0].id.clone()).unwrap();
+    b.ack_media(videos[0].0.id.clone()).unwrap();
     assert_eq!(b.fetch_media(photos[0].clone()).unwrap(), None, "fetched by B's one device: gone");
     // The ciphertext is all the hub holds: a key that is not the photo's opens nothing.
     let mut wrong = sealed_photo.media.clone();
@@ -478,7 +480,7 @@ fn a_new_phone_from_the_words_gets_its_friends_back_and_sessions_form_again() {
         !events.iter().any(|e| matches!(e, YoEvent::IdentityChanged { .. } | YoEvent::NewChat { .. })),
         "the same account: no new chat, no new key"
     );
-    let sessions = b.sessions_with(a.user());
+    let sessions = b.sessions_with(a.user()).unwrap();
     assert_eq!(sessions.len(), 1, "the old device's session is gone");
     assert!(sessions[0].usable);
     b.send_yo(a.name.clone()).unwrap();
@@ -514,7 +516,7 @@ fn a_replaced_device_still_sending_is_not_heard() {
     // B and the new phone go on.
     b.send_yo(a.user()).unwrap();
     assert_eq!(yos(&a2.drain(), &b.user()), 1);
-    assert_eq!(b.sessions_with(a.user()).len(), 1);
+    assert_eq!(b.sessions_with(a.user()).unwrap().len(), 1);
 }
 
 /// B's state is rolled back past its session with A (a backup of the file from before): A's next Yo does not open.
@@ -536,7 +538,7 @@ fn a_wedged_session_heals_by_a_decryption_error() {
     assert_eq!(yos(&events, &a.user()), 0, "it does not open");
     b.acknowledge_events();
     b.after_sync().unwrap();
-    assert!(b.sessions_with(a.user()).iter().all(|s| !s.retrying), "the decryption error went");
+    assert!(b.sessions_with(a.user()).unwrap().iter().all(|s| !s.retrying), "the decryption error went");
     a.drain();
     let times = yo_times(&b.drain(), &a.user());
     // The one that did not open, only: the first was shown before the rollback.

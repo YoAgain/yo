@@ -53,7 +53,8 @@ registration on, written when it changes) and answers `426` to every request of 
 | POST | `/v1/inbox/ack` | delete envelopes by id (≤ 1000), only the device's own | signed | signed | – |
 | POST | `/v1/inbox/{user id}` | deliver an envelope to every device of a user, `Yo-Devices` checked; `409` with the current account key and device keys | **none** (sealed sender); signed for a request or an identified envelope (spec 4.10, 6.1) | 200/min and 64 MiB/h (IP); 5000 waiting per device; `507` disk floor | the recipient, the bucket size, the address |
 | PUT | `/v1/blobs/{id}?fetches=n` | store a photo or video, encrypted, for `n` (1–32) fetches (spec 6.8) | signed, by the body's hash (`Yo-Body-SHA256`) | 120/min (IP); 4 at once (user), 256 at once (all); 2000 and 2 GiB/day, 1 GiB waiting (user); 10 MiB; 300 s; budget and disk floor (`507`) | uploader, size, fetch count |
-| GET | `/v1/blobs/{id}` | the blob, streamed; a complete fetch counts, the last deletes it | **none**, the 128-bit id | 600/min (IP) | which blob, from where |
+| GET | `/v1/blobs/{id}` | the blob, streamed; GET never consumes a fetch | **none**, the 128-bit id | 600/min (IP); 3 × original fetch count per blob | which blob, from where |
+| DELETE | `/v1/blobs/{id}` | acknowledge durable storage; consumes one fetch, the last deletes it; unknown/expired also `204` | **none**, the 128-bit id | 600/min (IP), shared with GET | which blob, from where |
 
 Spec 6.3 lists the same routes, without `/` and the apple-app-site-association file, which are not part of the protocol.
 
@@ -71,7 +72,7 @@ Spec 6.3 lists the same routes, without `/` and the apple-app-site-association f
   can be made to send requests to the hub (a proxy, a fetcher of user-given URLs) inherits that exemption.
 - **Disk.** Blobs have a budget (`YO_BLOB_BUDGET_MB`) and a floor of free space (`YO_BLOB_MIN_FREE_MB`); deliveries
   are refused (`507`) while the database's disk has less than 1 GiB free.
-- **Cleanup**, hourly: envelopes after 30 days, blobs after their last fetch or 30 days, users without
+- **Cleanup**, hourly: envelopes after 30 days, blobs after their last acknowledgement or 30 days, users without
   a backup idle for 365 days, replaced devices' `410` memory after a year. Rate-limit buckets idle for a day and
   expired replay-cache entries are dropped from memory.
 - **Schema.** A database of schema 1 (the hubs of MLS chats) is brought to schema 2 at start: accounts stay, the

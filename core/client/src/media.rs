@@ -49,7 +49,7 @@ pub fn open(media: &Media, ciphertext: &[u8]) -> Result<Vec<u8>> {
 }
 
 /// Fetches a blob by its id, without the client and without identity (spec 6.8), and checks it against the Yo.
-/// `None`: the hub no longer has it (fetched by all, or past its time). Each fetch counts at the hub: keep what came.
+/// `None`: unavailable (acknowledged by all, GET budget exhausted, or expired). Call `ack` only after the opened file is durably stored.
 pub fn fetch(transport: &dyn Transport, media: &Media) -> Result<Option<Vec<u8>>> {
     let response = transport.request("GET", &api::blob_path(&media.id), &[], &[]).map_err(Error::Network)?;
     match response.status {
@@ -58,6 +58,15 @@ pub fn fetch(transport: &dyn Transport, media: &Media) -> Result<Option<Vec<u8>>
         }
         status::OK => Err(Error::Protocol("media hash")),
         status::NOT_FOUND => Ok(None),
+        other => Err(Error::Refused(other)),
+    }
+}
+
+/// Acknowledges a durably stored blob anonymously. A lost answer can consume another fetch on retry.
+pub fn ack(transport: &dyn Transport, id: &yo_wire::content::BlobId) -> Result<()> {
+    let response = transport.request("DELETE", &api::blob_path(id), &[], &[]).map_err(Error::Network)?;
+    match response.status {
+        status::NO_CONTENT | status::NOT_FOUND => Ok(()),
         other => Err(Error::Refused(other)),
     }
 }
@@ -167,5 +176,62 @@ impl Client {
     fn fetches_for(&self, user: &str) -> Option<u32> {
         let devices = self.state.contacts.get(user)?.devices.len();
         (devices > 0).then(|| ((devices + self.state.own.len()) as u32).clamp(1, MAX_BLOB_FETCHES))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::Mutex;
+
+    type Call = (String, Vec<(String, String)>);
+
+    struct Wire {
+        response: Response,
+        calls: Mutex<Vec<Call>>,
+    }
+
+    impl Transport for Wire {
+        fn request(
+            &self,
+            method: &str,
+            _: &str,
+            headers: &[(String, String)],
+            body: &[u8],
+        ) -> std::result::Result<Response, String> {
+            assert!(body.is_empty());
+            self.calls.lock().unwrap().push((method.into(), headers.to_vec()));
+            Ok(self.response.clone())
+        }
+    }
+
+    #[test]
+    fn fetching_and_opening_never_acknowledge_even_on_invalid_media() {
+        let (m, ciphertext) = seal(b"photo", 1, 1).unwrap();
+        let wire = Wire { response: Response { status: status::OK, body: ciphertext }, calls: Mutex::new(vec![]) };
+        assert_eq!(fetch_open(&wire, &m).unwrap(), Some(b"photo".to_vec()));
+        let wrong_key = Media { key: [0; 32], ..m.clone() };
+        assert!(fetch_open(&wire, &wrong_key).is_err());
+        let wrong_size = Media { size: m.size + 1, ..m.clone() };
+        assert!(fetch_open(&wire, &wrong_size).is_err());
+        let wrong_hash = Media { sha256: [0; 32], ..m };
+        assert!(fetch_open(&wire, &wrong_hash).is_err());
+        let calls = wire.calls.lock().unwrap();
+        assert_eq!(calls.len(), 4);
+        for (method, headers) in calls.iter() {
+            assert_eq!(method, "GET");
+            assert!(headers.is_empty());
+        }
+    }
+
+    #[test]
+    fn explicit_ack_is_anonymous_and_failures_are_returned_for_retry() {
+        for (status, expected) in
+            [(204, Ok(())), (404, Ok(())), (429, Err(Error::Refused(429))), (503, Err(Error::Refused(503)))]
+        {
+            let wire = Wire { response: Response { status, body: vec![] }, calls: Mutex::new(vec![]) };
+            assert_eq!(ack(&wire, &[1; 16]), expected);
+            assert_eq!(*wire.calls.lock().unwrap(), vec![("DELETE".into(), vec![])]);
+        }
     }
 }

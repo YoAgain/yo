@@ -286,6 +286,7 @@ fn the_app_layer_sends_a_photo_to_a_new_friend_and_yos_go_while_it_uploads() {
         .expect("a photo");
     assert_eq!((media.width, media.height), (1600, 1200));
     assert_eq!(b.fetch_media(media.clone()).unwrap(), Some(photo));
+    b.ack_media(media.id.clone()).unwrap();
     assert_eq!(b.fetch_media(media).unwrap(), None, "fetched by its one device: gone");
     assert!(yo::retry_later(&yo::YoError::Refused { status: 507 }));
     assert!(!yo::retry_later(&yo::YoError::NotOnYo));
@@ -1120,7 +1121,7 @@ fn the_app_layer_makes_a_group_and_yos_it() {
     for x in [&b, &c] {
         let events = drain(x);
         assert!(events.iter().any(|e| matches!(e, YoEvent::GroupChanged { group } if *group == id)));
-        let group = x.groups().into_iter().find(|g| g.id == id).unwrap();
+        let group = x.groups().unwrap().into_iter().find(|g| g.id == id).unwrap();
         assert_eq!((group.name.as_str(), group.members.len(), group.left), ("FAMILY", 3, false));
     }
     a.send_group_yo(id.clone()).unwrap();
@@ -1133,8 +1134,8 @@ fn the_app_layer_makes_a_group_and_yos_it() {
     }
     c.leave_group(id.clone()).unwrap();
     drain(&a);
-    assert_eq!(a.groups()[0].members.len(), 2);
-    assert!(c.groups()[0].left);
+    assert_eq!(a.groups().unwrap()[0].members.len(), 2);
+    assert!(c.groups().unwrap()[0].left);
 }
 
 /// Background time refused: no state access and no unlock, but the client can retry when time is available.
@@ -1170,10 +1171,16 @@ fn a_refused_shared_turn_can_be_retried() {
     a.share_state(lock.clone());
     let before = file.0.lock().unwrap().clone();
     assert!(matches!(a.sync(0), Err(yo::YoError::Network { .. })));
+    assert!(matches!(a.groups(), Err(yo::YoError::Network { .. })));
+    assert!(matches!(a.sessions_with("contact".into()), Err(yo::YoError::Network { .. })));
+    assert!(matches!(a.storage_saved_at(), Err(yo::YoError::Network { .. })));
     assert_eq!(disk.state.lock().unwrap().1, before);
     assert_eq!(lock.unlocks.load(Ordering::Relaxed), 0);
     lock.refused.store(false, Ordering::Relaxed);
     a.sync(0).unwrap();
+    assert!(a.groups().unwrap().is_empty());
+    assert!(a.sessions_with("contact".into()).unwrap().is_empty());
+    assert!(a.storage_saved_at().is_ok());
     assert!(lock.unlocks.load(Ordering::Relaxed) > 0);
     assert!(!*disk.held.lock().unwrap());
 }

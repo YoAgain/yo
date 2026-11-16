@@ -428,7 +428,7 @@ impl Hub {
         let mut router = Router::new()
             .route("/", get(|| async { axum::response::Html(include_str!("index.html")) }))
             .route(api::INBOX, get(inbox))
-            .route("/v1/blobs/{id}", put(put_blob).get(get_blob))
+            .route("/v1/blobs/{id}", put(put_blob).get(get_blob).delete(ack_blob))
             .merge(delivering)
             .merge(synchronous);
         if !self.config.apple_app_ids.is_empty() {
@@ -1528,9 +1528,8 @@ async fn put_blob(
     .await?
 }
 
-/// A blob, to whoever names its id (no identity: the hub does not learn who fetches what), streamed from disk. A fetch
-/// counts when its last byte is handed on; after the last of its fetches the blob is gone. `404`: unknown, fetched by
-/// all, or past its time.
+/// Streams a blob anonymously. GETs spend only the GET budget; DELETE acknowledges a fetch.
+/// `404`: unknown, spent, GET budget exhausted, incomplete, or expired.
 async fn get_blob(
     State(hub): Hubs,
     ConnectInfo(peer): Peer,
@@ -1540,11 +1539,15 @@ async fn get_blob(
     hub.limit_ip("blob:get", peer, &headers, hub.config.limits.blob_get_per_ip_minute, MINUTE)?;
     let id: BlobId = path_id(&id)?;
     let ttl = hub.config.limits.blob_ttl_days * DAY.as_millis() as u64;
-    // One of its fetches is taken now, and given back if this one is cut off before its last byte (`Taken`).
-    let taking = hub.blocking(move |hub| hub.db.take_fetch(&id, now_ms(), ttl)).await??;
+    // Reserve a GET-budget slot; a cut-off stream returns it (`Taken`).
+    let taking = hub.blocking(move |hub| hub.db.take_blob_get(&id, now_ms(), ttl)).await??;
     let (size, created_at) = taking.ok_or_else(|| refuse(StatusCode::NOT_FOUND))?;
-    let (db, store) = (hub.db.clone(), hub.blobs.clone());
-    let taken = blobs::Taken::new(move |complete| blobs::fetched(&db, &store, id, created_at, complete));
+    let db = hub.db.clone();
+    let taken = blobs::Taken::new(move |complete| {
+        if !complete {
+            let _ = db.return_blob_get(&id, created_at);
+        }
+    });
     let file = hub.blobs.read(&(id, created_at), size).await.ok_or_else(|| refuse(StatusCode::NOT_FOUND))?;
     let stream = blobs::Counted::new(tokio_util::io::ReaderStream::with_capacity(file, 64 * 1024), size, taken);
     axum::response::Response::builder()
@@ -1552,6 +1555,26 @@ async fn get_blob(
         .header(axum::http::header::CONTENT_LENGTH, size)
         .body(axum::body::Body::from_stream(stream))
         .map_err(|_| refuse(StatusCode::INTERNAL_SERVER_ERROR))
+}
+
+/// Acknowledges durable local storage, on the anonymous connection like GET.
+async fn ack_blob(
+    State(hub): Hubs,
+    ConnectInfo(peer): Peer,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+) -> Res<StatusCode> {
+    hub.limit_ip("blob:get", peer, &headers, hub.config.limits.blob_get_per_ip_minute, MINUTE)?;
+    let id: BlobId = path_id(&id)?;
+    let ttl = hub.config.limits.blob_ttl_days * DAY.as_millis() as u64;
+    hub.blocking(move |hub| -> Res<()> {
+        if let Some(created_at) = hub.db.ack_blob(&id, now_ms(), ttl)? {
+            hub.blobs.remove(&(id, created_at));
+        }
+        Ok(())
+    })
+    .await??;
+    Ok(StatusCode::NO_CONTENT)
 }
 
 #[cfg(test)]
@@ -1707,7 +1730,7 @@ mod tests {
         drop(file);
         std::fs::write(&incoming.path, [0; 16]).unwrap();
         hub.blobs.keep(incoming, &blob).unwrap();
-        assert!(hub.db.take_fetch(&blob.0, 5, u64::MAX).unwrap().is_none(), "not handed out before it is ready");
+        assert!(hub.db.take_blob_get(&blob.0, 5, u64::MAX).unwrap().is_none(), "not handed out before it is ready");
         drop(hub);
         let hub = Hub::new(config.clone(), Arc::new(push::Recorder::default())).unwrap();
         assert!(!hub.db.blob_exists(&blob.0).unwrap() && !hub.blobs.has(&blob));

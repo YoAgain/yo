@@ -959,12 +959,12 @@ impl YoClient {
     }
 
     /// The sessions with a contact's devices (user id).
-    pub fn sessions_with(&self, user: String) -> Vec<YoSession> {
-        self.with(|c| c.sessions_with(&user))
-            .unwrap_or_default()
+    pub fn sessions_with(&self, user: String) -> Result<Vec<YoSession>, YoError> {
+        Ok(self
+            .with(|c| c.sessions_with(&user))?
             .into_iter()
             .map(|s| YoSession { device: s.device, usable: s.usable, retrying: s.retrying })
-            .collect()
+            .collect())
     }
 
     /// The account key a contact is pinned to (hex), as it was first seen or last confirmed.
@@ -1046,8 +1046,8 @@ impl YoClient {
 
     /// When the hub last held all of the stored friends, blocks and icon (ms since 1970); none while a change waits
     /// to go up (it goes with the next `sync` or `maintenance`).
-    pub fn storage_saved_at(&self) -> Option<u64> {
-        self.with(|c| c.storage_saved_at()).ok().flatten()
+    pub fn storage_saved_at(&self) -> Result<Option<u64>, YoError> {
+        self.with(|c| c.storage_saved_at())
     }
 
     /// The app's icon as stored ("Negative", "Original"); none for the default.
@@ -1098,12 +1098,12 @@ impl YoClient {
     }
 
     /// The groups this account is or was in.
-    pub fn groups(&self) -> Vec<YoGroup> {
-        self.with(|c| c.groups())
-            .unwrap_or_default()
+    pub fn groups(&self) -> Result<Vec<YoGroup>, YoError> {
+        Ok(self
+            .with(|c| c.groups())?
             .into_iter()
             .map(|g| YoGroup { id: g.id, name: g.name, members: g.members, left: g.left, accepted: g.accepted })
-            .collect()
+            .collect())
     }
 
     /// Makes a group of this account and `members` (user ids, at most 19), and tells them: its id, and what the
@@ -1162,9 +1162,13 @@ impl YoClient {
         self.send_content(to, Content::Video { media: media.try_into()?, duration_ms })
     }
 
-    /// Fetches a photo or video a Yo carried and opens it, without the client (not even waiting for its lock: as soon
-    /// as the Yo is there, beside the inbox's wait and sends); `None` when the hub no longer has it (fetched by all its
-    /// devices, or past its 30 days). Each fetch counts at the hub: keep what comes.
+    /// Acknowledges a blob only after its decrypted file is durably stored. No client lock or identity.
+    pub fn ack_media(&self, id: Vec<u8>) -> Result<(), YoError> {
+        let id = id.try_into().map_err(|_| YoError::Protocol { message: "blob id".into() })?;
+        Ok(yo_core::media::ack(self.transport.as_ref(), &id)?)
+    }
+
+    /// Fetches, verifies and opens media without holding the client lock. The app must store, then acknowledge it.
     pub fn fetch_media(&self, media: YoMedia) -> Result<Option<Vec<u8>>, YoError> {
         let media: yo_core::Media = media.try_into()?;
         Ok(yo_core::media::fetch_open(self.transport.as_ref(), &media)?)

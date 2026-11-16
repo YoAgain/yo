@@ -65,6 +65,8 @@ fn a_photo_and_a_video_go_with_their_yos_and_are_seen_once() {
     assert_eq!((p.width, p.height), (1080, 1920));
     assert_eq!(media::fetch_open(transport.as_ref(), p).unwrap().unwrap(), photo);
     assert_eq!(media::fetch_open(transport.as_ref(), v).unwrap().unwrap(), video);
+    media::ack(transport.as_ref(), &p.id).unwrap();
+    media::ack(transport.as_ref(), &v.id).unwrap();
     // Fetched by every device it was for: gone at the hub. The Yo stays a Yo for whoever comes late.
     assert_eq!(media::fetch(transport.as_ref(), p).unwrap(), None);
     assert_eq!(media::fetch(transport.as_ref(), v).unwrap(), None);
@@ -100,6 +102,7 @@ fn a_full_hub_holds_the_upload_and_the_yo_until_there_is_room() {
     assert_eq!(media_in(&events).len(), 1, "only the first came");
     // B fetches it: room again, the second goes, signed anew.
     media::fetch(b.transport().as_ref(), &first).unwrap().unwrap();
+    media::ack(b.transport().as_ref(), &first.id).unwrap();
     send_media(&mut a, &pb, &[2; 20_000], None).unwrap();
     assert_eq!(media_in(&b.sync(0).unwrap()).len(), 1);
     // The day's count is used up: later again (the next day it goes).

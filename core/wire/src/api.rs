@@ -572,6 +572,7 @@ mod tests {
     #[test]
     fn only_requests_naming_nobody_are_anonymous() {
         assert!(anonymous("POST", &deliver_path(&[1; 16])));
+        assert!(anonymous("DELETE", "/v1/blobs/abc"));
         assert!(anonymous("GET", "/v1/blobs/abc") && anonymous("PUT", "/v1/blobs/abc?fetches=2"));
         assert!(!anonymous("POST", INBOX_ACK) && !anonymous("GET", &inbox_path(25)));
         assert!(!anonymous("POST", REGISTER) && !anonymous("GET", "/v1/backup/abc"));

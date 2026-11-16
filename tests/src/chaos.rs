@@ -464,6 +464,7 @@ fn take_events(w: &World, a: &mut Acct, events: Vec<Event>, rng: &mut Rng) {
                         w.stats.violation(format!("photo {tag}: {} bytes, sent {want:?}", plain.len()));
                     }
                     w.stats.count("photo opened");
+                    let _ = definite(|| media::ack(transport.as_ref(), &m.id));
                     // View once: one device, one fetch; the next finds nothing.
                     if let Ok(Some(_)) = media::fetch(transport.as_ref(), m) {
                         w.stats.violation(format!("photo {tag} fetched twice"));

@@ -50,6 +50,12 @@ turn.finish()
 precondition(background.ends == 1)
 precondition(SharedAccess.current == nil)
 
+// A new turn after expiry is independent of the revoked one and can read state again.
+let recovered = SharedAccess.take(url)!
+let recoveredValue = try recovered.perform { 42 }
+precondition(recoveredValue == 42)
+recovered.finish()
+
 // Expiry waits for an atomic disk operation, but never waits for the rest of the core's turn.
 let disk = SharedAccess.take(url)!
 let entered = DispatchSemaphore(value: 0)

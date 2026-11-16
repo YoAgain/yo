@@ -1,6 +1,6 @@
 //! Photos and videos (spec 6.8): blobs the hub keeps for a chat's devices to fetch, encrypted under a key it never
 //! learns. Files on disk, one per blob, never in SQLite (which holds a small row each: size, uploader, fetches left,
-//! when). A blob goes when its last fetch is complete, or after its time (30 days), whatever comes first.
+//! when). A blob goes when its last fetch is acknowledged, or after its time (30 days), whatever comes first.
 //!
 //! An upload is signed by the body's hash, which comes in a header: the request is checked, and the room for it
 //! counted, before the body is taken. The body goes to a file in `tmp/` as it comes, hashed on the way, and is moved
@@ -283,7 +283,7 @@ impl Blobs {
     }
 }
 
-/// A fetch taken (`Db::take_fetch`), over when dropped: `done(true)` if its last chunk was handed on, else
+/// A GET slot taken (`Db::take_blob_get`), over when dropped: `done(true)` if its last chunk was handed on, else
 /// `done(false)`. On a blocking thread (it writes to the database), never on the async workers.
 pub struct Taken {
     done: Option<Box<dyn FnOnce(bool) + Send>>,
@@ -333,15 +333,6 @@ impl<S: Stream<Item = io::Result<Bytes>> + Unpin> Stream for Counted<S> {
             self.taken.complete = self.left == 0;
         }
         Poll::Ready(polled)
-    }
-}
-
-/// What a fetch taken does when it is over: counted if complete (the blob gone after the last), else given back.
-pub fn fetched(db: &Arc<Db>, blobs: &Arc<Blobs>, id: BlobId, created_at: u64, complete: bool) {
-    match db.blob_fetched(&id, created_at, complete) {
-        Ok(true) => blobs.remove(&(id, created_at)),
-        Ok(false) => {}
-        Err(error) => eprintln!("yo-hub: database: {error}"),
     }
 }
 

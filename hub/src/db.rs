@@ -284,8 +284,9 @@ CREATE TABLE IF NOT EXISTS storage (
 ) WITHOUT ROWID;
 -- Photos and videos (spec 6.8): the file is on disk, by its id; here what the hub needs to hand it out and delete it.
 -- `user_id` is the uploader (for its quota), never a recipient. Gone after the last fetch, or after its time.
--- `fetching`: fetches under way, each taken from `fetches_left` as it starts and given back if it is cut off (all of
--- them at a start: none completed). `ready`: 0 until the file is in place; such a blob is not handed out, and one left
+-- `gets_left`: persisted abuse budget for GETs (three per original fetch).
+-- `fetching`: reserved by older hub versions; recovered once at startup.
+-- `ready`: 0 until the file is in place; such a blob is not handed out, and one left
 -- so (a crash in between) is removed at the next start, or within the hour.
 CREATE TABLE IF NOT EXISTS blobs (
     id BLOB PRIMARY KEY,
@@ -294,6 +295,7 @@ CREATE TABLE IF NOT EXISTS blobs (
     fetches_left INTEGER NOT NULL,
     created_at INTEGER NOT NULL,
     fetching INTEGER NOT NULL DEFAULT 0,
+    gets_left INTEGER NOT NULL DEFAULT 192,
     ready INTEGER NOT NULL DEFAULT 1
 ) WITHOUT ROWID;
 CREATE INDEX IF NOT EXISTS blobs_by_user ON blobs(user_id);
@@ -641,6 +643,16 @@ impl Db {
         }
         without_grace(&conn)?;
         conn.execute_batch(SCHEMA)?;
+        let has_gets =
+            conn.prepare("SELECT name FROM pragma_table_info('blobs') WHERE name = 'gets_left'")?.exists([])?;
+        if !has_gets {
+            let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+            tx.execute_batch(
+                "ALTER TABLE blobs ADD COLUMN gets_left INTEGER NOT NULL DEFAULT 192;
+                UPDATE blobs SET gets_left = max(3, 3 * (fetches_left + fetching));",
+            )?;
+            tx.commit()?;
+        }
         // Initialize once: fresh hubs enforce reservations; existing hubs retain their old effective state.
         conn.execute_batch(
             "CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value INTEGER NOT NULL) WITHOUT ROWID;",
@@ -1269,42 +1281,41 @@ impl Db {
     pub fn blob_ready(&self, id: &BlobId, created_at: u64) -> rusqlite::Result<bool> {
         let changed = self
             .conn()
-            .prepare_cached("UPDATE blobs SET ready = 1 WHERE id = ?1 AND created_at = ?2")?
+            .prepare_cached(
+                "UPDATE blobs SET ready = 1, gets_left = max(3, 3 * fetches_left) WHERE id = ?1 AND created_at = ?2 AND ready = 0",
+            )?
             .execute(params![id, created_at as i64])?;
         Ok(changed == 1)
     }
 
-    /// Takes one of a blob's fetches as a fetch starts, if it is ready, has one left and is within its time: its size
-    /// and when it was stored (which upload under this id it is). In one statement, so fetches at once never pass
-    /// the blob's count; given back if the fetch is cut off (`blob_fetched`).
-    pub fn take_fetch(&self, id: &BlobId, now: u64, ttl_ms: u64) -> rusqlite::Result<Option<(u64, u64)>> {
+    /// A GET reserves only an abuse-budget slot. Cut-off streams return it.
+    pub fn take_blob_get(&self, id: &BlobId, now: u64, ttl_ms: u64) -> rusqlite::Result<Option<(u64, u64)>> {
         self.conn()
             .prepare_cached(
-                "UPDATE blobs SET fetches_left = fetches_left - 1, fetching = fetching + 1
-                 WHERE id = ?1 AND ready = 1 AND fetches_left > 0 AND created_at >= ?2
-                 RETURNING size, created_at",
+                "UPDATE blobs SET gets_left = gets_left - 1 WHERE id = ?1 AND ready = 1
+             AND fetches_left > 0 AND gets_left > 0 AND created_at >= ?2 RETURNING size, created_at",
             )?
-            .query_row(params![id, now.saturating_sub(ttl_ms) as i64], |row| {
-                Ok((row.get::<_, i64>(0)? as u64, row.get::<_, i64>(1)? as u64))
-            })
+            .query_row(params![id, now.saturating_sub(ttl_ms) as i64], |row| Ok((row.get(0)?, row.get(1)?)))
             .optional()
     }
 
-    /// A fetch taken of the blob stored at `created_at` is over: counted if `complete`, else given back. True when it
-    /// was the last and the row is gone (the file must go too). A fetch of a blob gone meanwhile counts for none
-    /// stored again under its id.
-    pub fn blob_fetched(&self, id: &BlobId, created_at: u64, complete: bool) -> rusqlite::Result<bool> {
+    pub fn return_blob_get(&self, id: &BlobId, created_at: u64) -> rusqlite::Result<()> {
+        self.conn().execute(
+            "UPDATE blobs SET gets_left = gets_left + 1 WHERE id = ?1 AND created_at = ?2",
+            params![id, created_at as i64],
+        )?;
+        Ok(())
+    }
+
+    /// One anonymous acknowledgement is one fetch; the last deletes the row immediately.
+    pub fn ack_blob(&self, id: &BlobId, now: u64, ttl_ms: u64) -> rusqlite::Result<Option<u64>> {
         let mut conn = self.conn();
         let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
-        let left: Option<(i64, i64)> = tx
-            .prepare_cached(
-                "UPDATE blobs SET fetching = fetching - 1, fetches_left = fetches_left + ?3
-                 WHERE id = ?1 AND created_at = ?2 AND fetching > 0 RETURNING fetches_left, fetching",
-            )?
-            .query_row(params![id, created_at as i64, !complete as i64], |row| Ok((row.get(0)?, row.get(1)?)))
-            .optional()?;
-        let last = left == Some((0, 0));
-        if last {
+        let last: Option<u64> = tx.prepare_cached(
+            "UPDATE blobs SET fetches_left = fetches_left - 1 WHERE id = ?1 AND ready = 1
+             AND fetches_left > 0 AND created_at >= ?2 RETURNING CASE WHEN fetches_left = 0 THEN created_at ELSE NULL END"
+        )?.query_row(params![id, now.saturating_sub(ttl_ms) as i64], |row| row.get::<_, Option<u64>>(0)).optional()?.flatten();
+        if last.is_some() {
             tx.execute("DELETE FROM blobs WHERE id = ?1", [id])?;
         }
         tx.commit()?;
@@ -2015,29 +2026,83 @@ mod tests {
         assert_eq!(db.audit().unwrap(), []);
     }
 
-    /// A blob's fetches are taken as they start: fetches at once never pass its count, one cut off gives its fetch
-    /// back, and so does a restart. A blob is handed out only once it is ready; one never ready goes at the next start.
     #[test]
-    fn blob_fetches_are_taken_as_they_start_and_given_back_when_cut_off() {
+    fn existing_blob_rows_gain_a_persisted_get_budget() {
+        let path = std::env::temp_dir().join(format!("yo-blob-ack-migration-{}.sqlite", std::process::id()));
+        let path = path.to_str().unwrap();
+        let _ = std::fs::remove_file(path);
+        {
+            let db = Db::open(path).unwrap();
+            user(register(&db, b"LEO", 1, 1, 0));
+            let quota = BlobQuota { per_day: 10, bytes_per_day: 1 << 20, stored: 1 << 20 };
+            db.put_blob(&[1; 16], &[9; 16], 100, 2, 5, &quota).unwrap();
+            db.blob_ready(&[9; 16], 5).unwrap();
+            db.conn().execute_batch("ALTER TABLE blobs DROP COLUMN gets_left").unwrap();
+        }
+        {
+            let db = Db::open(path).unwrap();
+            for _ in 0..5 {
+                assert_eq!(db.take_blob_get(&[9; 16], 5, 100).unwrap(), Some((100, 5)));
+            }
+        }
+        {
+            let db = Db::open(path).unwrap();
+            assert_eq!(db.take_blob_get(&[9; 16], 5, 100).unwrap(), Some((100, 5)));
+            assert_eq!(db.take_blob_get(&[9; 16], 5, 100).unwrap(), None);
+            assert!(!db.blob_ready(&[9; 16], 5).unwrap(), "cannot reset an existing budget");
+            assert_eq!(db.ack_blob(&[9; 16], 5, 100).unwrap(), None);
+            assert_eq!(db.ack_blob(&[9; 16], 5, 100).unwrap(), Some(5));
+        }
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn blob_gets_are_bounded_across_recovery_and_acks_expire() {
+        let db = Db::open(":memory:").unwrap();
+        user(register(&db, b"LEO", 1, 1, 0));
+        let quota = BlobQuota { per_day: 10, bytes_per_day: 1 << 20, stored: 1 << 20 };
+        let id = [9; 16];
+        db.put_blob(&[1; 16], &id, 100, 2, 5, &quota).unwrap();
+        assert_eq!(db.take_blob_get(&id, 5, 100).unwrap(), None);
+        assert_eq!(db.ack_blob(&id, 5, 100).unwrap(), None, "not ready");
+        db.blob_ready(&id, 5).unwrap();
+        for _ in 0..6 {
+            assert_eq!(db.take_blob_get(&id, 5, 100).unwrap(), Some((100, 5)));
+        }
+        assert_eq!(db.take_blob_get(&id, 5, 100).unwrap(), None);
+        db.recover_blobs().unwrap();
+        assert_eq!(db.take_blob_get(&id, 5, 100).unwrap(), None, "recovery never resets budget");
+        db.return_blob_get(&id, 5).unwrap();
+        assert_eq!(db.take_blob_get(&id, 5, 100).unwrap(), Some((100, 5)), "cut-off slot returned");
+        assert_eq!(db.ack_blob(&id, 5, 100).unwrap(), None, "one fetch remains despite six GETs");
+        assert_eq!(db.ack_blob(&id, 106, 100).unwrap(), None, "expired ack never consumes");
+        assert_eq!(db.take_blob_get(&id, 106, 100).unwrap(), None);
+        assert_eq!(db.ack_blob(&id, 5, 100).unwrap(), Some(5), "last ack deletes immediately");
+        assert!(!db.blob_exists(&id).unwrap());
+        assert_eq!(db.ack_blob(&id, 5, 100).unwrap(), None);
+    }
+
+    #[test]
+    fn blob_get_budget_returns_on_cutoff_and_only_ack_deletes() {
         let db = Db::open(":memory:").unwrap();
         user(register(&db, b"LEO", 1, 1, 0));
         let quota = BlobQuota { per_day: 10, bytes_per_day: 1 << 20, stored: 1 << 20 };
         let (id, ttl) = ([9; 16], 30 * DAY);
         assert_eq!(db.put_blob(&[1; 16], &id, 100, 2, 5, &quota).unwrap(), BlobPut::Stored);
-        assert_eq!(db.take_fetch(&id, 5, ttl).unwrap(), None, "not ready: its file is not in place");
+        assert_eq!(db.take_blob_get(&id, 5, ttl).unwrap(), None, "not ready: its file is not in place");
         assert_eq!(db.put_blob(&[1; 16], &id, 100, 2, 5, &quota).unwrap(), BlobPut::Unfinished, "another try: later");
         assert_eq!(db.blob_ready_state(&id).unwrap(), Some(false));
         assert!(db.blob_ready(&id, 5).unwrap());
         assert_eq!(db.put_blob(&[1; 16], &id, 100, 2, 5, &quota).unwrap(), BlobPut::Taken, "done: it is there");
-        assert_eq!(db.take_fetch(&id, 5, ttl).unwrap(), Some((100, 5)));
-        assert_eq!(db.take_fetch(&id, 5, ttl).unwrap(), Some((100, 5)));
-        assert_eq!(db.take_fetch(&id, 5, ttl).unwrap(), None, "two fetches under way, none left");
-        assert!(!db.blob_fetched(&id, 5, false).unwrap(), "one cut off");
-        assert!(!db.blob_fetched(&id, 5, true).unwrap(), "one complete, the other given back");
-        assert_eq!(db.take_fetch(&id, 5, ttl).unwrap(), Some((100, 5)));
-        assert!(db.recover_blobs().unwrap().is_empty(), "a restart: the fetch under way given back");
-        assert_eq!(db.take_fetch(&id, 5, ttl).unwrap(), Some((100, 5)));
-        assert!(db.blob_fetched(&id, 5, true).unwrap(), "the last: the blob goes");
+        for _ in 0..6 {
+            assert_eq!(db.take_blob_get(&id, 5, ttl).unwrap(), Some((100, 5)));
+        }
+        assert_eq!(db.take_blob_get(&id, 5, ttl).unwrap(), None);
+        db.return_blob_get(&id, 5).unwrap();
+        assert_eq!(db.take_blob_get(&id, 5, ttl).unwrap(), Some((100, 5)));
+        assert!(db.recover_blobs().unwrap().is_empty());
+        assert_eq!(db.ack_blob(&id, 5, ttl).unwrap(), None);
+        assert_eq!(db.ack_blob(&id, 5, ttl).unwrap(), Some(5));
         assert!(!db.blob_exists(&id).unwrap());
         // Stored, never ready (a crash before its file was in place): gone at the next start, its id free again.
         assert_eq!(db.put_blob(&[1; 16], &id, 100, 1, 6, &quota).unwrap(), BlobPut::Stored);

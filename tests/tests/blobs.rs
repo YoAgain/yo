@@ -56,8 +56,7 @@ fn files(dir: &Path) -> (usize, usize) {
     (stored, std::fs::read_dir(dir.join("tmp")).unwrap().count())
 }
 
-/// No blob files left: the last fetch deletes its blob once its last byte is handed on, a moment after the client may
-/// have it.
+/// No blob files left after the last acknowledgement or expiry.
 fn all_gone(dir: &Path) {
     let until = std::time::Instant::now() + std::time::Duration::from_secs(5);
     while files(dir) != (0, 0) {
@@ -80,7 +79,9 @@ fn a_blob_is_fetched_by_each_device_and_gone_after_the_last() {
     // Fetched without identity, by its id alone: twice, then gone, file and all.
     let stranger = Http::new(hub.url());
     assert_eq!(media::fetch_open(stranger.as_ref(), &media).unwrap().unwrap(), plain);
+    media::ack(stranger.as_ref(), &media.id).unwrap();
     assert_eq!(media::fetch_open(stranger.as_ref(), &media).unwrap().unwrap(), plain);
+    media::ack(stranger.as_ref(), &media.id).unwrap();
     assert_eq!(media::fetch(stranger.as_ref(), &media).unwrap(), None);
     all_gone(&dir);
     // A wrong key or hash opens nothing.
@@ -99,6 +100,7 @@ fn the_largest_blob_goes_and_comes_and_a_larger_one_is_refused() {
     let (media, plain, sent) = upload(&mut alice, media::MAX_MEDIA_LEN, 1);
     sent.unwrap();
     assert_eq!(media::fetch_open(Http::new(hub.url()).as_ref(), &media).unwrap().unwrap(), plain);
+    media::ack(Http::new(hub.url()).as_ref(), &media.id).unwrap();
     assert!(media::seal(&noise(media::MAX_MEDIA_LEN + 1), 1, 1).is_err());
     // Refused by its length, before the body is read or anyone is asked who sends it.
     use std::io::{Read, Write};
@@ -111,18 +113,18 @@ fn the_largest_blob_goes_and_comes_and_a_larger_one_is_refused() {
     all_gone(&dir);
 }
 
-/// Fetches at once never pass a blob's count: each takes its fetch as it starts. One cut off gives it back.
+/// Concurrent GETs reserve the three-slot budget; a cut-off stream returns its slot.
 #[test]
-fn fetches_at_once_take_no_more_than_the_blob_has_and_one_cut_off_gives_its_fetch_back() {
+fn concurrent_gets_reserve_the_budget_and_cutoff_returns_a_slot() {
     let (hub, dir) = hub_with(|_| {});
     let (mut alice, _) = someone(&hub);
     // The largest blob: more than the sockets hold, so a fetch not read is not complete.
     let (media, plain, sent) = upload(&mut alice, media::MAX_MEDIA_LEN, 1);
     sent.unwrap();
     let url = format!("{}{}", hub.url(), api::blob_path(&media.id));
-    let started = reqwest::blocking::get(&url).unwrap();
-    assert_eq!(started.status().as_u16(), 200);
-    assert_eq!(status(reqwest::blocking::Client::new().get(&url)), 404, "its one fetch is under way");
+    let started: Vec<_> = (0..3).map(|_| reqwest::blocking::get(&url).unwrap()).collect();
+    assert!(started.iter().all(|response| response.status().as_u16() == 200));
+    assert_eq!(status(reqwest::blocking::Client::new().get(&url)), 404, "all three GET slots are reserved");
     drop(started);
     let until = std::time::Instant::now() + std::time::Duration::from_secs(5);
     let stranger = Http::new(hub.url());
@@ -134,6 +136,7 @@ fn fetches_at_once_take_no_more_than_the_blob_has_and_one_cut_off_gives_its_fetc
         std::thread::sleep(std::time::Duration::from_millis(20));
     };
     assert_eq!(opened, plain);
+    media::ack(stranger.as_ref(), &media.id).unwrap();
     assert_eq!(media::fetch(stranger.as_ref(), &media).unwrap(), None);
     all_gone(&dir);
 }
@@ -203,6 +206,7 @@ fn quotas_per_user_and_day_and_waiting_bytes() {
     // Bytes waiting for their fetches: more only once these are fetched.
     assert_eq!(upload(&mut bob, 10_000, 1).2, Err(Error::Refused(429)));
     media::fetch(Http::new(hub.url()).as_ref(), &waiting).unwrap().unwrap();
+    media::ack(Http::new(hub.url()).as_ref(), &waiting.id).unwrap();
     upload(&mut bob, 10_000, 1).2.unwrap();
 }
 
@@ -217,6 +221,7 @@ fn the_budget_and_the_free_disk_hold_uploads_until_there_is_room() {
     assert!(media::retry_later(&full));
     // Fetched, deleted: room again.
     media::fetch(Http::new(hub.url()).as_ref(), &first).unwrap().unwrap();
+    media::ack(Http::new(hub.url()).as_ref(), &first.id).unwrap();
     upload(&mut alice, 20_000, 1).2.unwrap();
 
     let (hub, _) = hub_with(|config| config.blobs.min_free_bytes = u64::MAX / 4);
@@ -280,4 +285,37 @@ fn fetches_and_uploads_are_limited_per_address() {
     media::fetch(http.as_ref(), &media).unwrap().unwrap();
     media::fetch(http.as_ref(), &media).unwrap().unwrap();
     assert_eq!(media::fetch(http.as_ref(), &media), Err(Error::Refused(429)));
+}
+
+#[test]
+fn get_budget_does_not_consume_fetches_but_ack_does() {
+    let (hub, dir) = hub_with(|_| {});
+    let (mut sender, _) = someone(&hub);
+    let (m, plain, sent) = upload(&mut sender, 100, 1);
+    sent.unwrap();
+    let http = Http::new(hub.url());
+    for _ in 0..3 {
+        assert_eq!(media::fetch_open(http.as_ref(), &m).unwrap(), Some(plain.clone()));
+    }
+    assert_eq!(media::fetch(http.as_ref(), &m).unwrap(), None, "GET budget exhausted");
+    assert_eq!(files(&dir), (1, 0), "still stored until acknowledgement or expiry");
+    media::ack(http.as_ref(), &m.id).unwrap();
+    media::ack(http.as_ref(), &m.id).unwrap();
+    all_gone(&dir);
+}
+
+#[test]
+fn raw_gets_never_consume_fetches_and_unacknowledged_blobs_expire() {
+    let (hub, dir) = hub_with(|_| {});
+    let (mut sender, _) = someone(&hub);
+    let (m, _, sent) = upload(&mut sender, 100, 1);
+    sent.unwrap();
+    let url = format!("{}{}", hub.url(), api::blob_path(&m.id));
+    for _ in 0..3 {
+        assert_eq!(reqwest::blocking::get(&url).unwrap().bytes().unwrap().len(), m.size as usize);
+    }
+    assert_eq!(status(reqwest::blocking::Client::new().get(&url)), 404);
+    assert_eq!(files(&dir), (1, 0));
+    hub.hub.prune(yo_hub::now_ms() + 31 * 24 * 60 * 60 * 1000).unwrap();
+    all_gone(&dir);
 }

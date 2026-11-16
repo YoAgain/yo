@@ -1174,7 +1174,7 @@ fn fetch_photo(w: &World, a: &Acct, m: &yo_core::Media, info: Option<MediaInfo>,
             (first.join().unwrap(), second)
         });
         match (one, two) {
-            (Ok(Some(_)), Ok(Some(_))) => w.stats.violation(format!("blob of {} fetched twice at once", a.name)),
+            (Ok(Some(p)), Ok(Some(_))) => got = Some(Ok(Some(p))),
             (Ok(Some(p)), _) | (_, Ok(Some(p))) => got = Some(Ok(Some(p))),
             _ => {}
         }
@@ -1196,6 +1196,7 @@ fn fetch_photo(w: &World, a: &Acct, m: &yo_core::Media, info: Option<MediaInfo>,
                 ));
             }
             w.stats.count("photo opened");
+            let _ = definite(|| media::ack(clean.as_ref(), &m.id));
             if let Ok(Some(_)) = media::fetch(clean.as_ref(), m) {
                 w.stats.violation(format!("{}: a photo fetched twice", a.name));
             }
@@ -2769,7 +2770,10 @@ fn group_fetch(w: &World, a: &Acct, m: &yo_core::Media, info: Option<MediaInfo>,
         w.net.cut_fetch(&media::blob_path(&m.id), &a.ip);
     }
     match definite(|| media::fetch_open(clean.as_ref(), m)) {
-        Ok(Some(plain)) if info.map(|i| i.size) == Some(plain.len()) => w.stats.count("group photo opened"),
+        Ok(Some(plain)) if info.map(|i| i.size) == Some(plain.len()) => {
+            let _ = definite(|| media::ack(clean.as_ref(), &m.id));
+            w.stats.count("group photo opened");
+        }
         Ok(Some(plain)) => w.stats.violation(format!("{}: group photo of {} bytes", a.name, plain.len())),
         Ok(None) if cut => w.stats.count("group photo gone: the cut fetch had it all handed on"),
         Ok(None) if info.is_some_and(|i| !w.alive(&w.user_of(i.from))) => {
