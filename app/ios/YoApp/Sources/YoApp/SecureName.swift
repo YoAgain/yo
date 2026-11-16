@@ -167,6 +167,8 @@ struct SecureNameSheet: View {
       try await accounts.checkPasskey()
       created = false
       next()
+    } catch AccountError.tooMany {
+      problem = "Too many tries. Try again later."
     } catch AccountError.noPRF {
       problem = "This password manager can’t be used. Try iCloud Keychain."
     } catch {

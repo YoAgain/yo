@@ -98,6 +98,10 @@ fn config() -> Result<(Config, String), String> {
                 .map(|text| text.parse::<u32>().map_err(|_| "YO_REGISTER_PER_IP_HOUR: a number"))
                 .transpose()?
                 .unwrap_or(Limits::default().register_per_ip_hour),
+            backup_per_ip_hour: var("YO_BACKUP_PER_IP_HOUR")
+                .map(|text| text.parse::<u32>().map_err(|_| "YO_BACKUP_PER_IP_HOUR: a number"))
+                .transpose()?
+                .unwrap_or(Limits::default().backup_per_ip_hour),
             ..Limits::default()
         },
         apns,

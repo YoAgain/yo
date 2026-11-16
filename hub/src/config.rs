@@ -38,7 +38,7 @@ pub struct Limits {
     pub requests_per_recipient: u64,
     /// The hour those refill by, ms: an hour; a load test that runs days of use in minutes makes it shorter.
     pub request_hour_ms: u64,
-    /// Backup records fetched: by the user id or a locator, neither of which can be guessed (spec 7).
+    /// Failed backup fetches by address: unknown records or invalid door signatures (spec 7).
     pub backup_per_ip_hour: u32,
     /// Reports of users, by one user (spec 6.3).
     pub report_per_user_day: u32,
@@ -92,7 +92,7 @@ impl Default for Limits {
             request_recipients_per_sender: 20,
             requests_per_recipient: 1000,
             request_hour_ms: 3_600_000,
-            backup_per_ip_hour: 10,
+            backup_per_ip_hour: 30,
             report_per_user_day: 20,
             feedback_per_user_day: 10,
             crash_per_ip_day: 5,

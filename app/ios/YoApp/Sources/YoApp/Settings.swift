@@ -481,7 +481,9 @@ struct SettingsView: View {
 
   /// A security change failed (not a cancellation, nor a sign-out meanwhile).
   private func show(_ error: Error) {
-    if !SecurityPresentation.isCancellation(error) { passkeyProblem = error.localizedDescription }
+    if !SecurityPresentation.isCancellation(error) {
+      passkeyProblem = SecurityPresentation.passkeyMessage(error, fallback: error.localizedDescription)
+    }
   }
 
 
@@ -623,6 +625,9 @@ enum SecurityPresentation {
   }
 
   static func passkeyMessage(_ error: Error, fallback: String) -> String {
+    if let error = error as? AccountError, case .tooMany = error {
+      return "Too many tries. Try again later."
+    }
     if let error = error as? AccountError, case .noPRF = error {
       return "Your password manager can’t do this. Try iCloud Keychain."
     }

@@ -895,11 +895,13 @@ async fn fetch_backup(
     headers: HeaderMap,
     Path(id): Path<String>,
 ) -> Res<(StatusCode, Vec<u8>)> {
-    hub.limit_ip("backup", peer, &headers, hub.config.limits.backup_per_ip_hour, HOUR)?;
-    let id: [u8; api::LOCATOR_LEN] = path_id(&id)?;
+    let not_found = || match hub.limit_ip("backup", peer, &headers, hub.config.limits.backup_per_ip_hour, HOUR) {
+        Ok(()) => refuse(StatusCode::NOT_FOUND),
+        Err(error) => error,
+    };
+    let id: [u8; api::LOCATOR_LEN] = path_id(&id).map_err(|_| not_found())?;
     let now = now_ms();
     let found = hub.db.backup(&id)?;
-    let not_found = || refuse(StatusCode::NOT_FOUND);
     let (time, signature) = signature_of(&headers, now).ok_or_else(not_found)?;
     let auth = found.as_ref().map(|(_, auth)| auth.clone()).unwrap_or_default();
     let path = uri.path_and_query().map(|p| p.as_str()).unwrap_or("/");

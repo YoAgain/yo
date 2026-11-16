@@ -762,6 +762,34 @@ fn registration_and_backups_are_limited_per_address() {
 }
 
 #[test]
+fn only_failed_backup_fetches_spend_the_address_limit() {
+    let mut config = yo_hub::config::Config::for_tests();
+    config.limits.backup_per_ip_hour = 3;
+    let hub = TestHub::start_with(config, "127.0.0.1:0");
+    let http = Http::new(hub.url());
+    let mut account = by_name(&hub, &format!("SAFE{}", random_u64() % 100_000), None).unwrap();
+    let user = yo_tests::user_id(account.user_id());
+    let record = backup(vec![9; 16]);
+    account.put_backup(&record).unwrap();
+    for _ in 0..5 {
+        assert_eq!(fetch(&http, &user), Ok(Some(record.clone())));
+        assert_eq!(fetch(&http, &[9; 16]), Ok(Some(record.clone())));
+    }
+    // Missing records, wrong door keys and missing signatures all spend the same bucket.
+    assert_eq!(fetch(&http, &[5; 16]), Ok(None));
+    let wrong = yo_tests::backup::pool(&yo_tests::backup::recovery_key([2; 16]));
+    assert_eq!(Client::fetch_backup(&*http, &user, &Door::Code(&wrong)), Ok(None));
+    let raw = reqwest::blocking::Client::new();
+    let url = format!("{}{}", hub.url(), api::backup_path(&user));
+    assert_eq!(raw.get(&url).send().unwrap().status().as_u16(), api::status::NOT_FOUND);
+    assert_eq!(fetch(&http, &[5; 16]), Err(Error::Refused(api::status::RATE_LIMITED)));
+    assert_eq!(raw.get(&url).send().unwrap().status().as_u16(), api::status::RATE_LIMITED);
+    // Even an exhausted bucket cannot shut out the owner.
+    assert_eq!(fetch(&http, &user), Ok(Some(record.clone())));
+    assert_eq!(fetch(&http, &[9; 16]), Ok(Some(record)));
+}
+
+#[test]
 fn an_account_key_belongs_to_one_user_forever() {
     let hub = TestHub::start();
     let (a, _, _, _) = pair(&hub);

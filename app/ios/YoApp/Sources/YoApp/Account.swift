@@ -665,7 +665,20 @@ final class AccountStore {
   /// optionally under new words (the old locator then finds nothing). Always with the doors' auth keys.
   private func rewrap(_ passkey: Door, code new: String? = nil) async throws {
     guard var account, let client else { throw AccountError.noBackup }
-    let (opened, code) = try await ownBackup(account, by: client)
+    let opened: YoOpenedBackup
+    let code: String
+    do {
+      (opened, code) = try await ownBackup(account, by: client)
+    } catch AccountError.noBackup {
+      try still(client)
+      guard let words = new ?? RecoveryWords.load() else { throw AccountError.noBackup }
+      let prf: Data? = if case .set(let value) = passkey { value } else { nil }
+      let removing = if case .remove = passkey { true } else { false }
+      try await makeAnew(words: words, prf: prf, removingPasskey: removing)
+      if case .set = passkey { passkeyTurnedOff = false }
+      if case .remove = passkey { passkeyTurnedOff = true }
+      return
+    }
     let record = opened.record
     let words = new ?? code
     let door: YoPasskeyDoor =
@@ -734,12 +747,13 @@ final class AccountStore {
   }
 
   /// A new backup with a new K: the words' door, and the passkey's when its PRF output is given. Without it, a passkey
-  /// the account had shows "Confirm" until it is asked once.
-  private func makeAnew(words: String, prf: Data?) async throws {
+  /// the account had shows "Confirm" until it is asked once, unless explicitly removed.
+  private func makeAnew(words: String, prf: Data?, removingPasskey: Bool = false) async throws {
     guard var account, let client else { throw AccountError.noBackup }
     account.byCode = true
     account.codeAuth = true
     account.passkeyAuth = prf != nil
+    if removingPasskey { account.byPasskey = false }
     if prf != nil { account.byPasskey = true }
     let passkey: YoPasskeyDoor = prf.map { .new(prf: $0) } ?? .none
     try await put(account, code: words, k: BackupRecord.newKey(), passkey: passkey, by: client)
@@ -885,7 +899,8 @@ final class AccountStore {
     if same, let key = item.recoveryKey { try? RecoveryWords.save(key) }
     let restored = Account(
       username: client.username() ?? item.username, userID: id, byPasskey: same && item.byPasskey,
-      byCode: same && item.byCode == true)
+      byCode: same && item.byCode == true,
+      codeAuth: same ? item.codeAuth : nil, passkeyAuth: same ? item.passkeyAuth : nil)
     if !same { SyncedAccount.delete(item.userID) }  // the old user is gone; the new one gets its own item
     self.restored = same
     friendsSeeded = true
@@ -1162,6 +1177,9 @@ enum SyncedAccount {
     /// back this way shows the same security as the one before, and can still change its passkey or recovery key.
     var byPasskey: Bool
     var byCode: Bool?
+    /// Nil in older items: restore still checks the backup once to add its auth keys.
+    var codeAuth: Bool? = nil
+    var passkeyAuth: Bool? = nil
     var recoveryKey: String?
     /// Signed out (on any of the person's devices): only signed in again by a tap on Sign In.
     var signedOut: Bool?
@@ -1211,6 +1229,7 @@ enum SyncedAccount {
     let item = Item(
       username: account.username, userID: account.userID, accountKey: secret,
       byPasskey: account.byPasskey, byCode: account.byCode,
+      codeAuth: account.codeAuth, passkeyAuth: account.passkeyAuth,
       recoveryKey: RecoveryWords.load() ?? previous?.recoveryKey, signedOut: false, version: Account.backupVersion,
       legacySeed: previous?.legacySeed)
     // One the keychain does not take now (locked, a passing error) is noted and written again at the next opening
