@@ -42,7 +42,7 @@ through UniFFI; apps supply HTTP and storage.
 └──────────────────┘        └──────────────────┘        └──────────────────┘
 ```
 
-Sign up with a name only, no phone number or email. Your account is protected by Keychain sync, a passkey (PRF) or a 64-character recovery key.
+Sign up with a name only, no phone number or email. Your account is protected by Keychain sync, a passkey (PRF) or a 64-character recovery key. Details: the [YoIP spec](spec/v1.md).
 
 <details>
 <summary>Protocol, groups, media and privacy limits</summary>
@@ -62,6 +62,8 @@ The server deletes the encrypted file after its last allowed fetch.
 </details>
 
 ## Hub
+
+The hub stores and forwards encrypted Yos until the recipient fetches them; it cannot read them.
 
 ```text
 hub alone    ████████████████████████████████  8,000 Yos/s   p50 7.7 ms · p99 ~20 ms
