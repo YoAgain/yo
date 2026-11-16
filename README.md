@@ -1,116 +1,139 @@
 # Yo
 
-**One tap, one Yo — end-to-end encrypted, and the server never learns who sent it.**
+The 2014 one-tap app, back. Tap a friend's name. They get “Yo”. It's that simple.
 
-## Stack
+- One tap for a friend or a whole group.
+- End-to-end encrypted with Signal's libsignal.
+- Photos and videos, seen once. YoGPT to Yo back.
 
-### YoIP: Yo over IP
+**[Get Yo on TestFlight](https://testflight.apple.com/join/V3wa1DeX)** · [justyo.co](https://justyo.co)
 
-YoIP is the protocol between the apps and the hub: who you are, how a Yo is delivered, and what it says. Messages
-reach the hub without a sender, padded to one of four sizes; a push only says "there is mail".
+iOS now. App Store soon. Android in progress.
 
-Its security layer is Signal's protocol through libsignal: PQXDH and the Double Ratchet with SPQR, quantum-safe, healing
-with every answer, and any contact can be checked with a 60-digit safety number. Full text: [spec/v1.md](spec/v1.md); every
-key, where it lives and what it opens: [spec 7, the keys at a glance](spec/v1.md#7-backup-and-a-new-phone).
+<img src="app/ios/YoApp/AppIcon.png" alt="Yo app icon" width="160">
 
-### Keys
+## How to use
 
-```mermaid
-flowchart LR
-  subgraph you["You"]
-    words["12 recovery words"]
-    passkey["Passkey (PRF)"]
-  end
-  subgraph phone["iPhone"]
-    icloud["iCloud Keychain item"]
-    account["Account key<br/>libsignal identity key (Curve25519, XEdDSA)"]
-    device["Device key + auth key"]
-    prekeys["Prekeys<br/>signed · one-time · Kyber"]
-    sessions["Signal sessions<br/>Double Ratchet + SPQR"]
-    profile["Profile key"]
-    state["State key<br/>(keychain)"]
-    media["Media key<br/>one per photo/video"]
-    storagekey["Storage key"]
-  end
-  subgraph hub["Hub"]
-    backup[("Backup<br/>sealed")]
-    storage[("Settings, friends<br/>sealed")]
-    access["Access key check"]
-    blobs[("Photo/video blobs<br/>sealed")]
-    hubkey["Hub signing key<br/>pinned in the app"]
-    root["Trust root<br/>pinned in the app"]
-  end
-  words --> K["K"]
-  passkey --> K
-  K --> backup --> account
-  icloud --> account
-  account -- certifies --> device
-  account -- signs --> prekeys --> sessions
-  account -- HKDF --> storagekey --> storage
-  profile -- derives the access key --> access
-  state --> localstate[("App state on the phone")]
-  media --> blobs
-  device -- signs requests --> hub
-  hubkey -. signs lookups .-> phone
-  root -. sender certificate, 1 day .-> sessions
-```
+Pick a name, add a friend, tap their row. In camera mode, tap for a photo or hold for a video.
+Add **YoGPT** if you want a Yo back.
 
-What each key is, where it lives and what it opens: [spec 7](spec/v1.md#7-backup-and-a-new-phone).
+## How it works
 
-### Hub
+- **Just a name:** no phone number or email needed. Share your invite link or QR code.
+- **Private:** only you and your recipients can read your Yos and media. Push notifications carry no message content.
+- **Groups:** Yo everyone at once, with up to 20 members. Group names and membership are encrypted too.
+- **Photos and videos:** view once, then the app deletes them and their keys. The server deletes the encrypted file after its last allowed fetch.
+- **Recovery:** keep a passkey or your recovery key to bring your account back. On iPhone, your account key also syncs through iCloud Keychain.
+- **Your choice:** accept requests, block or report someone, or delete your account in the app.
 
-The server: a mailbox per device, each device's prekeys, and the push that wakes a phone. One core
-delivers about 8,000 Yops, Yos per second, with every Yo on disk before it is answered ([measured](tests/README.md#load)).
+## Under the hood
 
-### Apps
+<details>
+<summary><b>Encryption &amp; protocol</b> · Signal sessions, sealed sender, private groups</summary>
 
-**iPhone** ([app/ios](app/ios/README.md)), SwiftUI on the Rust core (UniFFI):
+[YoIP](spec/v1.md) uses libsignal's PQXDH and Double Ratchet with SPQR, sealed sender, and zkgroup for groups.
+Contacts can verify a 60-digit safety number. Messages are padded; backups and account storage are encrypted.
 
-- **Sign up with a name only:** no phone number, no e-mail. Names keep their spelling ("YoGPT") and are unique
-  by their look (yogpt, YOGPT and Y0GPT are one name).
-- **The list:** tap a friend, a Yo goes; their Yos land on their bar. Dozens of taps on dozens of friends while Yos
-  come in; a burst over the hub's limit waits on the phone and goes later, in order.
-- **Photos and videos:** camera mode, tap a friend for a photo, hold for a video; end-to-end encrypted, seen once,
-  gone at the hub once fetched.
-- **Push:** a Yo wakes the phone through APNs; the push carries nothing but "there is mail".
-- **Your account comes back:** its key is kept in the iCloud Keychain (end-to-end encrypted by Apple), so a new
-  iPhone or a reinstall signs straight back in. A passkey (Face ID) and a recovery key (64 characters, Signal's) bring it back
-  beyond Apple.
-- **Safety:** report and block on a friend's bar, delete your account (and everything the hub holds) in the app.
-- **Profile:** your code (QR), statistics counted on the phone, the app icon (Appearance).
+Sealed sender hides the sender on deliveries to contacts. First-contact requests are identified. The hub sees
+recipients, lookups and traffic metadata; see the [privacy limits](spec/v1.md#1-goals) and [threat model](hub/SECURITY.md).
+[Recovery](spec/v1.md#7-backup-and-a-new-phone) uses passkey PRF or libsignal's 64-character recovery key.
 
-**YoGPT** ([app/yogpt](app/yogpt)): a real client that answers every Yo, keeping your rhythm, and now and then with
-a picture; one process for its account on each hub.
+</details>
 
-## Lines of code
+<details>
+<summary><b>Core</b> · one Rust implementation, Swift and Kotlin bindings</summary>
 
-Every line of code in the repository per day since the first commit (Rust, Swift, scripts; tests and fuzz targets
-included), redrawn by `dev/loc_history`:
+[core/client](core/client) handles identities, sessions, groups, media, recovery and the outbox.
+[core/wire](core/wire) defines the protocol formats. [core/bindings](core/bindings) exposes the client through UniFFI;
+apps supply HTTP and storage. [YoGPT](app/yogpt) is a Rust client that answers Yos and can reply with pictures.
 
-<p align="center"><img src="dev/loc-history.svg" alt="Lines of code per day" width="760"></p>
+</details>
 
-## Dev
+<details>
+<summary><b>Hub (server)</b> · mailboxes, encrypted files, push</summary>
 
-<details markdown="1">
-<summary>Test, load, fuzz</summary>
+The small [Rust hub](hub/README.md) stores accounts, public prekeys, queued envelopes and encrypted files.
+It has no message content keys. SQLite persists each delivery before acknowledging it; measured throughput is
+about 8,000 deliveries per second on one core ([load tests](tests/README.md#load)).
+
+</details>
+
+<details>
+<summary><b>Speed</b> · the hub on one core</summary>
+
+Hub, measured with [yo-load](tests/README.md#load) on one CPU core, database on an SSD with every delivery on disk
+before it is acknowledged (`synchronous = FULL`):
+
+| | |
+|---|---|
+| Deliveries, hub alone | about 8,000 Yos/s (p50 7.7 ms, p99 20 ms) |
+| End to end (send, deliver, fetch, decrypt) | about 700 Yos/s |
+| Lost under load | 0 |
+
+Without the wait for the disk the hub does about 15,000 Yos/s; that trade is deliberate: an acknowledged Yo survives a
+power cut.
+
+</details>
+
+<details>
+<summary><b>iOS app</b> · SwiftUI, built on Linux with xtool</summary>
+
+[SwiftUI, iOS 26, Swift 6](app/ios/README.md), using system navigation and controls.
+Flat UI rows, Montserrat Bold and Amethyst (#9B59B6) keep the Yo look.
+The app includes camera capture, a share extension and notification replies.
+
+Build on Linux with [xtool](https://github.com/xtool-org/xtool); install wirelessly with
+`app/ios/dev/push.sh`. See the [build instructions](app/ios/README.md#build-and-run) and [device checks](app/ios/TESTING.md).
+
+</details>
+
+<details>
+<summary><b>Android</b> · in progress</summary>
+
+A Kotlin, Jetpack Compose and Material 3 app on the same [core](core/client) through its
+[UniFFI bindings](core/bindings) is being built on the `android` branch.
+
+</details>
+
+<details>
+<summary><b>Tests &amp; fuzzing</b> · protocol, recovery, failures, load</summary>
+
+[Tests](tests/README.md) cover real clients and the hub, groups, media, recovery, security and deterministic simulations.
+[Chaos tests](tests/CHAOS.md) exercise faults, crashes and restarts; [fuzz targets](fuzz/fuzz_targets) cover parsers,
+hub routes and the receive path. From the repository root, with Docker:
 
 ```sh
-dev/cargo test --workspace                                          # needs only Docker
-dev/cargo run --release -p yo-tests --bin yo-load -- --clients 200  # load test
-dev/fuzz all 300                                                    # every fuzz target 5 minutes
+dev/cargo test --workspace
+dev/cargo run --release -p yo-tests --bin yo-load -- --clients 200
+dev/fuzz all 300
 ```
 
 </details>
 
-## License
+<details>
+<summary><b>Repository layout</b> · where things live</summary>
 
-Yo's own source is [MIT](LICENSE.md), like the original Yo's `yo-ios` and `yo-api`. The name Yo, its logo and its
-sound are not covered by the code license.
+| Folder | Contents |
+|---|---|
+| [app/ios](app/ios) | iPhone app and build tools |
+| [app/yogpt](app/yogpt) | YoGPT bot |
+| [core](core) | Rust client, wire formats and bindings |
+| [hub](hub) | Rust server |
+| [spec](spec) | YoIP protocol |
+| [tests](tests), [fuzz](fuzz) | Integration tests, load tools and fuzzing |
+| [dev](dev) | Development scripts |
 
-**Third-party: libsignal.** The iOS app and its core (`core/`) link [libsignal](https://github.com/signalapp/libsignal)
-(AGPL-3.0, © Signal Messenger, LLC; [text](LICENSES/AGPL-3.0.txt)). Yo's own source is MIT; the built app as a whole
-is distributed under the AGPL-3.0, its complete corresponding source being this repository at the commit the app
-shows under Settings › Licenses. The hub (`hub/`) does not link libsignal and is MIT. Signal has stated it has no
-objection to App Store distribution of GPL-compliant apps ([2016](https://signal.org/blog/license-update/)); an
-explicit App Store additional permission for libsignal is proposed in
-[signalapp/libsignal#705](https://github.com/signalapp/libsignal/pull/705) (see #684).
+</details>
+
+<details>
+<summary><b>Contributing / License</b> · source, checks, third-party code</summary>
+
+Issues and pull requests are welcome. Start with the [spec](spec/v1.md), follow [AGENTS.md](AGENTS.md),
+and run the relevant [checks](tests/README.md). Keep secrets and machine settings out of the repository.
+
+Yo's own source is [MIT](LICENSE.md). The name, logo and sound are outside the code license.
+The app and core link libsignal ([AGPL-3.0](LICENSES/AGPL-3.0.txt)); the built app as a whole is distributed under
+AGPL-3.0, with corresponding source in this repository at the commit shown in Settings › Licenses.
+The hub does not link libsignal and is MIT. Third-party license texts are in [LICENSES](LICENSES).
+
+</details>
