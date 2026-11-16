@@ -63,13 +63,13 @@ The server deletes the encrypted file after its last allowed fetch.
 
 ## Hub
 
-The hub stores and forwards encrypted Yos until the recipient fetches them; it cannot read them.
-
 ```text
 hub alone    ████████████████████████████████  8,000 Yos/s   p50 7.7 ms · p99 ~20 ms
 end to end   ██▊                                 700 Yos/s   send, deliver, fetch, decrypt
 lost                                               0
 ```
+
+The hub stores and forwards encrypted Yos until the recipient fetches them; it cannot read them.
 
 <details>
 <summary>Storage, durability and load tests</summary>
