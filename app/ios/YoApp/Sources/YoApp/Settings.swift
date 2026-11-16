@@ -1059,6 +1059,7 @@ struct FeedbackSheet: View {
 struct AppearancePage: View {
   @Environment(AccountStore.self) private var accounts
   @State private var current = UIApplication.shared.alternateIconName
+  @State private var iconError: String?
   @AppStorage(SettingKey.leftHanded) private var leftHanded = false
 
   /// Each with its word and where it is from (yo-lore/assets/app-icon-appstore).
@@ -1079,7 +1080,12 @@ struct AppearancePage: View {
               guard !chosen else { return }
               let client = accounts.client  // the account it was chosen in
               Task {
-                try? await UIApplication.shared.setAlternateIconName(icon.name)
+                do {
+                  try await UIApplication.shared.setAlternateIconName(icon.name)
+                } catch {
+                  print("Yo: app icon \(icon.name ?? "default") not set: \(error)")
+                  iconError = error.localizedDescription
+                }
                 current = UIApplication.shared.alternateIconName
                 if current == icon.name { accounts.storeAppIcon(icon.name, by: client) }  // for its next phone
               }
@@ -1118,6 +1124,8 @@ struct AppearancePage: View {
         .padding(.vertical, 12)
       } header: {
         Text("App Icon")
+      } footer: {
+        if let iconError { Text("Not changed: \(iconError)") }
       }
       Section {
         Toggle("Left-Handed", isOn: $leftHanded)
