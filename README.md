@@ -9,13 +9,13 @@ Send photos and videos to view once.</p>
 
 ## Apps
 
+<details>
+<summary>iOS on TestFlight · Android in progress · YoGPT</summary>
+
 - **iOS:** [SwiftUI, iOS 26, Swift 6](app/ios/README.md), available on [TestFlight](https://testflight.apple.com/join/V3wa1DeX).
 - **Android:** Kotlin, Jetpack Compose and Material 3; in progress.
 - **Account:** sign up with a name only, no phone number or email; protected by Keychain sync, a passkey (PRF) or a 64-character recovery key.
 - **[YoGPT](app/yogpt):** a Rust client that answers Yos and can reply with pictures.
-
-<details>
-<summary>App details, Linux builds and shared core</summary>
 
 The iOS app uses system navigation and controls, with Flat UI rows, Montserrat Bold and Amethyst (#9B59B6).
 It includes camera capture, a share extension and notification replies.
@@ -32,6 +32,9 @@ through UniFFI; apps supply HTTP and storage.
 
 ## Encryption
 
+<details>
+<summary>Signal protocol and sealed sender; the hub sees only the recipient</summary>
+
 ```text
 ┌──────────────────┐        ┌──────────────────┐        ┌──────────────────┐
 │     Phone A      │        │       Hub        │        │     Phone B      │
@@ -42,9 +45,6 @@ through UniFFI; apps supply HTTP and storage.
 │ hidden           │        │ push: no content │        │                  │
 └──────────────────┘        └──────────────────┘        └──────────────────┘
 ```
-
-<details>
-<summary>Protocol, groups, media and privacy limits</summary>
 
 [YoIP](spec/v1.md) uses Signal's libsignal: PQXDH and Double Ratchet with SPQR.
 Contacts can verify a 60-digit safety number. Messages are padded; backups and account storage are encrypted.
@@ -62,14 +62,14 @@ The server deletes the encrypted file after its last allowed fetch.
 
 ## Hub
 
+<details>
+<summary>About 8,000 Yos/s on one core, every Yo on disk before it is acknowledged</summary>
+
 ```text
 hub alone    ████████████████████████████████  8,000 Yos/s   p50 7.7 ms · p99 ~20 ms
 end to end   ██▊                                 700 Yos/s   send, deliver, fetch, decrypt
 lost                                               0
 ```
-
-<details>
-<summary>Storage, durability and load tests</summary>
 
 The small [Rust hub](hub/README.md) stores accounts, public prekeys, queued envelopes and encrypted files.
 It has no message content keys. SQLite persists deliveries before acknowledging them using `synchronous = FULL`,
