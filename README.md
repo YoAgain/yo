@@ -88,8 +88,6 @@ Measured on one CPU core with the database on an SSD. See the [yo-load measureme
 
 ## Development
 
-Lines of code on `main` per day (blanks, comments and tests included; `python3 -I dev/loc-chart.py` updates it):
-
 <!-- loc -->
 ```text
 2026-11-11    6,326  ████▍                             Rust 6.3k
@@ -103,6 +101,8 @@ Lines of code on `main` per day (blanks, comments and tests included; `python3 -
 
 <details>
 <summary>Tests, fuzzing, repository layout and contributing</summary>
+
+The chart above counts lines of code on `main` per day, blanks, comments and tests included; `python3 -I dev/loc-chart.py` updates it.
 
 [Tests](tests/README.md) cover real clients and the hub, groups, media, recovery, security and deterministic simulations.
 [Chaos tests](tests/CHAOS.md) exercise faults, crashes and restarts; [fuzz targets](fuzz/fuzz_targets) cover parsers,
@@ -131,7 +131,12 @@ and run the relevant [checks](tests/README.md). Keep secrets and machine setting
 
 ## License
 
+<details>
+<summary>MIT; the built app AGPL-3.0 (libsignal)</summary>
+
 Yo's code is [MIT](LICENSE.md). The app and core link libsignal ([AGPL-3.0](LICENSES/AGPL-3.0.txt)),
 so the built app as a whole is distributed under AGPL-3.0; corresponding source is in this repository at the
 commit shown in Settings › Licenses. The hub does not link libsignal and is MIT.
 The name, logo and sound are outside the code license. [Third-party license texts](LICENSES).
+
+</details>
