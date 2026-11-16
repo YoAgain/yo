@@ -58,8 +58,17 @@ struct MediaFile: Sendable {
     export.shouldOptimizeForNetworkUse = true
     let out = FileManager.default.temporaryDirectory.appending(path: "\(UUID().uuidString).mp4")
     defer { try? FileManager.default.removeItem(at: out) }
+    nonisolated(unsafe) let session = export  // cancelExport() is thread-safe; the handler may run on any thread
     do {
-      try await export.export(to: out, as: .mp4)
+      try await withTaskCancellationHandler {
+        try Task.checkCancellation()
+        try await export.export(to: out, as: .mp4)
+        try Task.checkCancellation()
+      } onCancel: {
+        session.cancelExport()
+        try? FileManager.default.removeItem(at: recording)
+        try? FileManager.default.removeItem(at: out)
+      }
     } catch {
       return nil
     }

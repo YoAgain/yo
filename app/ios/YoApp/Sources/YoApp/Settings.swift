@@ -225,7 +225,9 @@ struct SettingsView: View {
       }
       .contentMargins(.top, 4, for: .scrollContent)  // the card right under the title, as Signal's Settings
       .navigationTitle("Profile")
-      .task(id: Reload(accounts.client, friends.contacts)) { tally = await EncryptionTally.load(accounts, friends) }
+      .task(id: Reload(accounts.client, friends.contacts)) {
+        if let loaded = await EncryptionTally.load(accounts, friends) { tally = loaded }
+      }
       .navigationBarTitleDisplayMode(.inline)
       .toolbar {
         // As Signal's settings: the system's close button, top right.
@@ -811,13 +813,14 @@ private struct StorageRow: View {
   @Environment(AccountStore.self) private var accounts
   @Environment(Friends.self) private var friends
   @State private var savedAt: Date?
+  @State private var unavailable = true
   @State private var saving = false
 
   var body: some View {
     Button { Task { await save() } } label: {
       SecurityRow(
         icon: "person.2.fill", color: savedAt == nil ? .orange : .green, title: "Contacts",
-        value: savedAt != nil ? "Saved" : saving ? "Saving…" : "Not Saved",
+        value: unavailable ? "Updating…" : savedAt != nil ? "Saved" : saving ? "Saving…" : "Not Saved",
         done: savedAt != nil, chevron: false)
     }
     .disabled(saving)
@@ -831,9 +834,12 @@ private struct StorageRow: View {
   }
 
   private func load() async {
-    guard let client else { return savedAt = nil }
-    let ms = try? await Hub.run { client.storageSavedAt() }
-    savedAt = (ms ?? nil).map { Date(timeIntervalSince1970: Double($0) / 1000) }
+    guard let client else { unavailable = true; return }
+    do {
+      let ms = try await Hub.run { try client.storageSavedAt() }
+      savedAt = ms.map { Date(timeIntervalSince1970: Double($0) / 1000) }
+      unavailable = false
+    } catch { unavailable = true }
   }
 
   private func save() async {

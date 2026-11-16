@@ -281,7 +281,7 @@ final class Inbox {
       friends.spell(contacts)
       friends.markGone(contacts)
     }
-    if let groups = try? await Hub.run({ client.groups() }), client === accounts.client { friends.takeGroups(groups) }
+    if let groups = try? await Hub.run({ try client.groups() }), client === accounts.client { friends.takeGroups(groups) }
     let typed = friends.all.filter { $0.user == nil && $0.group == nil && !$0.blocked }.prefix(20).map(\.name)
     await identify(Array(typed), accounts: accounts, friends: friends)
   }
@@ -518,7 +518,7 @@ final class Inbox {
     let needsGroups = events.contains { event in
       switch event { case .groupMessage, .groupChanged: true; default: false }
     }
-    if needsGroups, let groups = try? await Hub.run({ client.groups() }) {
+    if needsGroups, let groups = try? await Hub.run({ try client.groups() }) {
       Perf.timed("inbox.take.groups") { friends.takeGroups(groups) }
     }
     let bars: [String: Friend] = needsGroups
@@ -609,7 +609,7 @@ final class Inbox {
     // theirs (the service's, written just as the app opened) goes from Notification Center.
     switch UIApplication.shared.applicationState {
     case .background:
-      let groups = (try? await Hub.run { client.groups() }) ?? []
+      let groups = (try? await Hub.run { try client.groups() }) ?? []
       let requests = (try? await Hub.run { ShareBridge.requests(of: client) }) ?? []
       await ShareBridge.post(
         ShareBridge.yos(

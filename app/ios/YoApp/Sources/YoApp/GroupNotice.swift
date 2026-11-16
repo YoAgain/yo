@@ -113,7 +113,7 @@ struct GroupMembersSheet: View {
 
   private func load() async {
     guard let id = bar.group, let client = accounts.client,
-      let groups = try? await Hub.run({ client.groups() })
+      let groups = try? await Hub.run({ try client.groups() })
     else { return }
     members = (groups.first { $0.id == id }?.members ?? []).sorted { name(of: $0) < name(of: $1) }
     friends.takeGroups(groups)

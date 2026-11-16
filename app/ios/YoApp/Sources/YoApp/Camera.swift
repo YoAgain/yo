@@ -2,6 +2,7 @@
 // when a name is tapped, a video while a name is held, front or back. AVFoundation has the camera; SwiftUI has no
 // view for its preview, so one small UIViewRepresentable carries the preview layer.
 import AVFoundation
+import CoreImage
 import SwiftUI
 
 /// The capture session. Configured and run on its own queue, as AVFoundation asks; the session, its inputs and
@@ -12,6 +13,18 @@ final class Camera: NSObject, @unchecked Sendable {
 
   let session = AVCaptureSession()
   private let photoOutput = AVCapturePhotoOutput()
+  private let previewOutput = AVCaptureVideoDataOutput()
+  private let previewQueue = DispatchQueue(label: "yo.camera-preview", qos: .userInitiated)
+  private let previewContext = CIContext()
+  private let previewLock = NSLock()
+  // Only the preview worker writes; the main actor reads under the same lock.
+  private var latestPreview: UIImage?
+  private var previewTime = -Double.infinity
+
+  func previewThumbnail() -> UIImage? {
+    previewLock.withLock { latestPreview }
+  }
+
   private let movieOutput = AVCaptureMovieFileOutput()
   private let queue = DispatchQueue(label: "yo.camera")
   private var configured = false
@@ -175,6 +188,9 @@ final class Camera: NSObject, @unchecked Sendable {
     if photoOutput.isResponsiveCaptureSupported { photoOutput.isResponsiveCaptureEnabled = true }
     if photoOutput.isZeroShutterLagSupported { photoOutput.isZeroShutterLagEnabled = true }
     if session.canAddOutput(movieOutput) { session.addOutput(movieOutput) }
+    previewOutput.alwaysDiscardsLateVideoFrames = true
+    previewOutput.setSampleBufferDelegate(self, queue: previewQueue)
+    if session.canAddOutput(previewOutput) { session.addOutput(previewOutput) }
     movieOutput.maxRecordedDuration = CMTime(seconds: Self.longestVideo, preferredTimescale: 600)
     mirrorFrontCamera()
     session.commitConfiguration()
@@ -185,7 +201,7 @@ final class Camera: NSObject, @unchecked Sendable {
   /// as the preview showed them.
   private func mirrorFrontCamera() {
     let front = input?.device.position == .front
-    for output in [photoOutput, movieOutput] as [AVCaptureOutput] {
+    for output in [photoOutput, movieOutput, previewOutput] as [AVCaptureOutput] {
       guard let connection = output.connection(with: .video) else { continue }
       if connection.isVideoRotationAngleSupported(90) { connection.videoRotationAngle = 90 }
       if connection.isVideoMirroringSupported {
@@ -193,6 +209,21 @@ final class Camera: NSObject, @unchecked Sendable {
         connection.isVideoMirrored = front
       }
     }
+  }
+}
+
+extension Camera: AVCaptureVideoDataOutputSampleBufferDelegate {
+  func captureOutput(_ output: AVCaptureOutput, didOutput sampleBuffer: CMSampleBuffer,
+                     from connection: AVCaptureConnection) {
+    let now = CMSampleBufferGetPresentationTimeStamp(sampleBuffer).seconds
+    guard now - previewTime >= 0.1, let buffer = CMSampleBufferGetImageBuffer(sampleBuffer) else { return }
+    previewTime = now
+    let frame = CIImage(cvPixelBuffer: buffer)
+    let scale = 120 / max(frame.extent.width, frame.extent.height)
+    let small = frame.transformed(by: CGAffineTransform(scaleX: scale, y: scale))
+    guard let pixels = previewContext.createCGImage(small, from: small.extent) else { return }
+    let image = UIImage(cgImage: pixels)
+    previewLock.withLock { latestPreview = image }
   }
 }
 

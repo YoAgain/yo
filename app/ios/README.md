@@ -24,16 +24,24 @@ The app talks to the live hub (TestFlight and App Store) or the dev hub (Yo Dev)
 - Notifications (the same builds): "Yo from YoGPT", "📷 from …", "Yo!!!!! +4 from … · 📷 2" (one notification per run, as the bar says it), with the Yo sound and "Yo Back". The
   push only says "Yo"; the notification service (`Sources/YoNotify`) receives once, names the sender and fetches a
   photo or video of up to 6 MiB into the App Group first (`Prefetch.swift`; the app and the service claim a blob
-  before either fetches it, so one fetch is under way at a time, spec 6.7), so the app shows it at once. A push that brings no new Yo (a receipt, a
+  before either fetches it, so one fetch is under way at a time, spec 6.7; storage is acknowledged only after writing),
+  so the app shows it at once. A push that brings no new Yo (a receipt, a
   retry, the rest of a burst) goes quietly; Yos the app takes itself just after it was left get their
   notification from the app; Yos read in the app take theirs out of Notification Center.
 - The app and both extensions use one account state, in the App Group, its key in the group's keychain group, in
   turns under a file lock (`SharedState.swift`, `StateLock` in the core): each step of the core takes the lock and the
   newest state, so there is one writer and never a write from an old state. The state moves there once, at the
-  first start of a build that has the group. Every flock in the app gets background time. Refused time skips the
+  first start of a build that has the group. Every state flock in the app gets background time. Refused time skips the
   turn; expiry releases the flock, cancels its request and fences later saves and requests. The next turn reloads
+  first start of a build that has the group. Lock acquisition has a 10 s total budget and retries a refused turn once. Active app turns are revoked
+  on leaving the foreground; background turns require background time. Expiry releases the flock, cancels its
+  request and fences later saves and requests. Foreground probes retry and reopen the same saved client after
+  three failed reads, without resetting the account. Failed reads retain displayed groups and settings. The next turn reloads
   from disk, including when its generation did not change. Extensions revoke their turns before returning to iOS.
+  Anonymous blob GET/DELETE requests run outside these turns; complete blob answers survive turn expiry. The app
+  and service keep a shared acknowledgement journal, retrying after durable storage without delaying the photo.
   `app/ios/tests/shared-access.sh` tests the lock helper on Linux (Swift 6), without a device.
+  `app/ios/tests/blob-ack.sh` checks storage ordering, failed acknowledgements and the service/app file handoff.
   Yo Dev (`dev/push.sh`) is built without the extensions and keeps its
   state to itself.
 

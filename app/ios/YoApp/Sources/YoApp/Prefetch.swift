@@ -2,10 +2,9 @@
 // when it opens: the Yo's photo is there at once, not a fetch later. Compiled into the app and YoNotify (Sources/YoNotify
 // links to this file).
 //
-// A blob counts its fetches at the hub (one per device of the chat), so the two never both fetch it: the service
-// marks a fetch under way (`.fetching`) before it starts, and the app, whose own fetch the hub refuses meanwhile
-// ("no longer there"), takes the service's file, or waits for it while the mark is fresh, instead of giving the photo
-// up. The file is written as the device may be locked: complete unless open (made while locked, read only unlocked).
+// App and service claim each blob before fetching, then acknowledge only after storing it. The app takes the
+// service's file, or waits while its claim is fresh. A shared journal retries failed acknowledgements.
+// The file is written as the device may be locked: complete unless open (made while locked, read only unlocked).
 // The app takes it into its own media (complete protection) and deletes it here; a sign-out deletes them all.
 import Foundation
 import YoCore
@@ -31,15 +30,92 @@ enum Prefetch {
   private static func name(_ media: YoMedia) -> String { media.id.map { String(format: "%02x", $0) }.joined() }
   private static func file(_ media: YoMedia) -> URL? { directory?.appending(path: name(media) + ".media") }
   private static func mark(_ media: YoMedia) -> URL? { directory?.appending(path: name(media) + ".fetching") }
-  /// Left once the app has a photo or video for good: no process of this device fetches it again (each fetch is
-  /// another device's at the hub). Swept with the rest after 31 days, past the blob's life.
+  /// Left once the app has a photo or video for good: no process of this device fetches it again.
+  /// Swept with the rest after 31 days, past the blob's life.
   private static func taken(_ media: YoMedia) -> URL? { directory?.appending(path: name(media) + ".taken") }
+
+  private struct Ack: Codable {
+    let id: Data
+    let file: String
+  }
+
+  private static var acknowledgements: URL {
+    let base = ShareBridge.container ?? FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
+    return base.appending(path: "BlobAcks")
+  }
+
+  /// Persist the intent before writing the atomic media file. Only an existing file may be acknowledged.
+  @discardableResult
+  static func prepareAck(_ media: YoMedia, file: URL) -> Bool {
+    let directory = acknowledgements
+    make(directory)
+    return ackLocked(directory) {
+      let path = directory.appending(path: name(media) + ".json")
+      let done = directory.appending(path: name(media) + ".acked")
+      if FileManager.default.fileExists(atPath: done.path) { return true }
+      guard let data = try? JSONEncoder().encode(Ack(id: media.id, file: file.path)) else { return false }
+      return (try? data.write(to: path, options: [.atomic, .completeFileProtectionUntilFirstUserAuthentication])) != nil
+    } ?? false
+  }
+
+  static func stored(_ media: YoMedia) {
+    let directory = acknowledgements
+    _ = try? Data().write(to: directory.appending(path: name(media) + ".stored"),
+      options: [.atomic, .completeFileProtectionUntilFirstUserAuthentication])
+  }
+
+  /// App and service serialize retries. A lost HTTP answer may consume another fetch (anonymous by design).
+  @discardableResult
+  static func retryAcks(client: YoClient, startingBefore deadline: Date = .distantFuture) -> Bool {
+    let directory = acknowledgements
+    make(directory)
+    let files = (try? FileManager.default.contentsOfDirectory(at: directory, includingPropertiesForKeys: nil)) ?? []
+    let old = Date.now.addingTimeInterval(-31 * 24 * 3600)
+    for url in files where url.lastPathComponent != ".acks.lock" {
+      if let date = try? url.resourceValues(forKeys: [.creationDateKey]).creationDate, date < old {
+        try? FileManager.default.removeItem(at: url)
+      }
+    }
+    for url in files where url.pathExtension == "json" {
+      guard Date.now < deadline else { break }
+      // Only this blob is held across the request. A failed ack must not delay another photo's storage.
+      ackLocked(directory, name: url.deletingPathExtension().lastPathComponent + ".acklock") {
+        let done = url.deletingPathExtension().appendingPathExtension("acked")
+        if FileManager.default.fileExists(atPath: done.path) {
+          try? FileManager.default.removeItem(at: url)
+          return
+        }
+        guard let data = try? Data(contentsOf: url), let ack = try? JSONDecoder().decode(Ack.self, from: data),
+          (FileManager.default.fileExists(atPath: ack.file)
+            || FileManager.default.fileExists(atPath: url.deletingPathExtension().appendingPathExtension("stored").path)) else { return }
+        guard (try? Data().write(to: url.deletingPathExtension().appendingPathExtension("stored"),
+          options: [.atomic, .completeFileProtectionUntilFirstUserAuthentication])) != nil else { return }
+        guard (try? client.ackMedia(id: ack.id)) != nil else { return }
+        // Mark before removing the intent: the other process sees the successful acknowledgement.
+        guard (try? Data().write(to: done, options: [.atomic, .completeFileProtectionUntilFirstUserAuthentication])) != nil else { return }
+        try? FileManager.default.removeItem(at: url)
+      }
+    }
+    return files.contains { $0.pathExtension == "json" && FileManager.default.fileExists(atPath: $0.path) }
+  }
+
+  /// Short journal writes and per-blob ack requests use locks independent of account-state turns.
+  @discardableResult
+  private static func ackLocked<T>(_ directory: URL, name: String = ".acks.lock", _ work: () -> T) -> T? {
+    let fd = open(directory.appending(path: name).path, O_CREAT | O_RDWR | O_CLOEXEC, 0o600)
+    guard fd >= 0 else { return nil }
+    defer { close(fd) }
+    guard flock(fd, LOCK_EX | LOCK_NB) == 0 else { return nil }
+    defer { flock(fd, LOCK_UN) }
+    return work()
+  }
 
   // MARK: The notification service
 
   /// Fetches the photos and videos of `events` one after the other (small enough ones only), each to its file.
   /// Best effort: what is not here when the app opens, the app fetches itself.
   static func fetch(_ events: [YoEvent], client: YoClient, startingBefore deadline: Date = .distantFuture) {
+    retryAcks(client: client, startingBefore: deadline)
     guard let directory else { return }
     let media: [YoMedia] = events.compactMap { event in
       switch event {
@@ -50,24 +126,25 @@ enum Prefetch {
     guard !media.isEmpty, let owner = Hub.bytes(client.userId())?.base64EncodedString() else { return }
     make(directory)
     for one in media where one.size <= largest {
-      // Room to write it, with plenty to spare: a fetch whose file then cannot be written has used this device's
-      // fetch at the hub, and the photo would be lost. Without, the app fetches it itself (and keeps it in memory
-      // until it can write).
+      // Room to store it, with plenty to spare; otherwise leave the GET budget for the app.
       guard Date.now < deadline, room(for: one.size, in: directory) else { return }
-      guard let file = file(one), let mark = mark(one), !FileManager.default.fileExists(atPath: file.path) else {
+      guard let file = file(one), !FileManager.default.fileExists(atPath: file.path) else {
         continue
       }
       // The claim first: the app fetching it now, this one does not (and the app does not give the photo up).
       guard let token = claim(one) else { continue }
       defer { unclaim(one, token: token) }
+      guard prepareAck(one, file: file) else { continue }
       guard let data = try? client.fetchMedia(media: one) else { continue }
       // Still this account's (the app publishes its friends with its own id; signed out meanwhile, it does not, or
       // another account's): an old account's photo is not left here.
       guard ShareBridge.readList()?.owner == owner else { return }
-      // Written, or tried again once: the hub's copy for this device is spent, these bytes are the photo.
+      // Write atomically before acknowledging. A failed write leaves the hub copy available.
       if (try? data.write(to: file, options: [.atomic, .completeFileProtectionUnlessOpen])) == nil {
         try? data.write(to: file, options: [.atomic, .completeFileProtectionUnlessOpen])
       }
+      if FileManager.default.fileExists(atPath: file.path) { stored(one) }
+      retryAcks(client: client, startingBefore: deadline)
     }
   }
 
@@ -156,6 +233,7 @@ enum Prefetch {
 
   /// Signed out: none of them stays.
   static func clear() {
+    try? FileManager.default.removeItem(at: acknowledgements)
     guard let directory else { return }
     try? FileManager.default.removeItem(at: directory)
   }

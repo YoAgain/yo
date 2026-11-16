@@ -197,7 +197,8 @@ final class HubTransport: HttpTransport {
       }
       done.signal()
     }
-    let access = SharedAccess.current
+    let access = anonymous && path.hasPrefix("/v1/blobs/") && (method == "GET" || method == "DELETE")
+      ? nil : SharedAccess.current
     do {
       if let access { try access.start(task) }
       else { task.resume() }
@@ -209,6 +210,7 @@ final class HubTransport: HttpTransport {
     if access?.expired == true {
       return HttpResult(status: 0, body: Data(), error: "shared storage time ended")
     }
+    Availability.network(answer.result.status == 0 || answer.result.status >= 500)
     if (200..<300).contains(answer.result.status), signed {  // the core sends the header lowercase
       SignedAt.note()
     }
@@ -533,5 +535,36 @@ extension Data {
     var plain = text.replacingOccurrences(of: "-", with: "+").replacingOccurrences(of: "_", with: "/")
     plain += String(repeating: "=", count: (4 - plain.count % 4) % 4)
     self.init(base64Encoded: plain)
+  }
+}
+
+/// Independent signals: a reachable hub does not hide an unavailable local state.
+@MainActor @Observable
+final class Availability {
+  static let shared = Availability()
+  var local = false { didSet { settle() } }
+  var remote = false { didSet { settle() } }
+  /// Shown only once the hub or the state stayed unreachable for a few seconds (a launch's first second is not
+  /// "offline"); gone at the first success.
+  private(set) var offline = false
+  private var pending: Task<Void, Never>?
+
+  private func settle() {
+    guard local || remote else {
+      pending?.cancel()
+      pending = nil
+      offline = false
+      return
+    }
+    guard !offline, pending == nil else { return }
+    pending = Task { @MainActor [weak self] in
+      try? await Task.sleep(for: .seconds(4))
+      guard let self, !Task.isCancelled else { return }
+      self.pending = nil
+      self.offline = self.local || self.remote
+    }
+  }
+  nonisolated static func network(_ failed: Bool) {
+    Task { @MainActor in shared.remote = failed }
   }
 }

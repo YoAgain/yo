@@ -237,6 +237,43 @@ final class AccountStore {
     }
   }
 
+  /// Read-only probes retry refused turns. Reopen from the same sealed file and key after repeated failures.
+  func watchState() async {
+    var failures = 0
+    while !Task.isCancelled {
+      if let client {
+        do {
+          _ = try await Hub.run { try client.groups() }
+          if client === self.client {
+            failures = 0
+            Availability.shared.local = false
+          }
+        } catch {
+          if client === self.client, !Task.isCancelled {
+            Availability.shared.local = true
+            failures += 1
+            if failures >= 3, !opening {
+              failures = 0
+              let userID = account?.userID
+              opening = true
+              self.client = nil
+              do {
+                try await openOnce()
+              } catch {
+                // A soft restart never resets the account or replaces its sealed state.
+                if account?.userID == userID, account != nil, self.client == nil { self.client = client }
+              }
+              opening = false
+            }
+          }
+        }
+      } else {
+        Availability.shared.local = account != nil
+      }
+      do { try await Task.sleep(for: .seconds(2)) } catch { return }
+    }
+  }
+
   /// The secret as builds before kept it in the account's JSON.
   private struct LegacySecret: Decodable { var accountKey: Data? }
 
@@ -250,9 +287,12 @@ final class AccountStore {
     defer { opening = false }
     var pause = 1.0
     var tries = 0
+    var unavailableSince: ContinuousClock.Instant?
+    var unavailableTries = 0
     while client == nil, account != nil, !broken {
       do {
         try await openOnce()
+        Availability.shared.local = false
         accountLog.notice("opened")
         return
       } catch YoError.Replaced {
@@ -272,6 +312,21 @@ final class AccountStore {
         accountLog.error("open: \(self.brokenWhy, privacy: .public) (try \(tries + 1))")
         if await Self.surely(&tries) { broken = true }
       } catch {
+        Availability.shared.local = true
+        if UIApplication.shared.isProtectedDataAvailable {
+          unavailableTries += 1
+          let now = ContinuousClock.now
+          if unavailableSince == nil { unavailableSince = now }
+          if unavailableTries >= 3, let since = unavailableSince, since.duration(to: now) >= .seconds(30) {
+            brokenWhy = "shared storage unavailable for 30 seconds"
+            broken = true
+            accountLog.error("open: \(self.brokenWhy, privacy: .public); recovering")
+            return await recover()
+          }
+        } else {
+          unavailableSince = nil
+          unavailableTries = 0
+        }
         accountLog.notice("open: not now: \(String(describing: error), privacy: .public)")
         try? await Task.sleep(for: .seconds(pause))  // not now
         pause = min(pause * 2, 30)
@@ -325,6 +380,7 @@ final class AccountStore {
   private enum Unopened: Error { case notNow, gone }
 
   private func openOnce() async throws {
+    let userID = account?.userID
     let transport = Hub.transport
     let (client, secret) = try await Hub.run { () throws -> (YoClient, Data) in
       if SharedStateFile.app {
@@ -359,7 +415,7 @@ final class AccountStore {
       client.acknowledgeExplicitly()  // each batch as the app has stored it (Inbox.take)
       return (client, client.accountSecret())
     }
-    guard self.client == nil, account != nil else { return }  // signed out meanwhile
+    guard self.client == nil, account != nil, account?.userID == userID else { return }  // account changed meanwhile
     use(client, secret: secret)
     // The user id as the core has it (an earlier build read it wrongly): the passkey's handle and the backup's id.
     if let id = Hub.bytes(client.userId()), account?.userID != id { account?.userID = id }
@@ -935,7 +991,7 @@ final class AccountStore {
   /// account back by itself, here or on the person's other devices (Sign In lists it); then forgotten here (`reset`).
   func signOut() {
     if let id = account?.userID { SyncedAccount.markSignedOut(id) }
-    reset()
+    reset(fullLocalReset: true)
   }
 
   /// The hub said `client` is no longer the account's device (the account taken to another iPhone): out. Not when
@@ -948,7 +1004,7 @@ final class AccountStore {
   /// This phone forgets the account, as a new phone would (the hub keeps the backup): signed out, or the account
   /// taken to another phone (`YoError.Replaced`). The iCloud Keychain keeps it then, for the phone that has it now;
   /// this one does not take it back without being asked.
-  func reset() {
+  func reset(fullLocalReset: Bool = false) {
     if let id = account?.userID { SyncedAccount.left = id }
     let old = client
     account = nil
@@ -963,26 +1019,23 @@ final class AccountStore {
     newPasskey = nil
     passkeyTurnedOff = false
     wordsSaved = true
-    // The state goes off the main thread: the old client is closed first (a step under way ends and saves; after it,
-    // it saves nothing), then its file is deleted, whatever that step saved. The group's under the lock, too, for the
-    // extensions' clients (closed by their next step, the core's `StateTurn.gone`). The next registration waits for
-    // this (`register`), so it never deletes a new account's state, and no old call writes over it.
+    Availability.shared.local = false
+    // Registration waits for this bounded lock attempt and disk cleanup, never for a stale extension or network step.
     let before = deleting
     deleting = Task.detached(priority: .userInitiated) {
       await before?.value
       await MediaStorage.clearAll()
-      old?.close()
-      StateFile.delete()
-      if SharedStateFile.app {
-        while true {
-          do {
-            try SharedStateFile.locked { SharedStateFile.delete() }
-            break
-          } catch {
-            // No background time: the deletion waits too; a new registration already waits for this task.
-            try? await Task.sleep(for: .seconds(1))
-          }
-        }
+      // Closing a client may wait for a network step; generation retirement fences its later shared writes.
+      Task.detached(priority: .userInitiated) { old?.close() }
+      let held = SharedStateFile.take(within: 3)
+      defer { if held { SharedStateFile.give() } }
+      if fullLocalReset {
+        LocalReset.wipe()
+      } else {
+        // Retire the lock even if an extension never releases its old turn.
+        SharedStateFile.rotateLock()
+        StateFile.delete()
+        if let url = SharedStateFile.stateURL { try? FileManager.default.removeItem(at: url) }
       }
     }
     SecureReminder.update(secured: true)
@@ -990,6 +1043,7 @@ final class AccountStore {
     RecoveryWords.delete()
     Stats.reset()
     // Its notifications too: one tapped later would show (or Yo back) under the next account.
+    UNUserNotificationCenter.current().removeAllPendingNotificationRequests()
     UNUserNotificationCenter.current().removeAllDeliveredNotifications()
   }
 }

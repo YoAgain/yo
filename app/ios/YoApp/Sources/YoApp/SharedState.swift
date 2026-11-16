@@ -25,7 +25,22 @@ final class SharedStateFile: StateStore, StateLock, @unchecked Sendable {
   static var container: URL? { ShareBridge.container }
 
   static var stateURL: URL? { container?.appending(path: "yo-state") }
-  private static var lockURL: URL? { container?.appending(path: "yo-state.lock") }
+  static let generationKey = "yo-state.lock-generation"
+  static var generation: String {
+    let defaults = UserDefaults(suiteName: ShareBridge.group)
+    defaults?.synchronize()
+    return defaults?.string(forKey: generationKey) ?? ""
+  }
+
+  static func rotateLock() {
+    let defaults = UserDefaults(suiteName: ShareBridge.group)
+    defaults?.set(UUID().uuidString, forKey: generationKey)
+    defaults?.synchronize()
+  }
+
+  private static var lockURL: URL? {
+    container?.appending(path: "yo-state.lock" + (generation.isEmpty ? "" : "." + generation))
+  }
 
   /// A semaphore, not a mutex: a guest takes it on one thread and gives it back on another.
   private static let inProcess = DispatchSemaphore(value: 1)
@@ -46,17 +61,28 @@ final class SharedStateFile: StateStore, StateLock, @unchecked Sendable {
 
   /// The process keeps its turn until `give`, even if its background time ends meanwhile. Expiry releases the
   /// file lock, fences all later saves and requests of this turn, and makes the next turn reload from disk.
-  static func take(within seconds: Double = .infinity) -> Bool {
+  static func take(within seconds: Double = 10) -> Bool {
     return Perf.timed("state.lock.wait") {
       guard !Thread.isMainThread else { return false }
-      let deadline: DispatchTime = seconds.isFinite ? .now() + seconds : .distantFuture
-      guard inProcess.wait(timeout: deadline) == .success else { return false }
-      guard let lockURL, let turn = SharedAccess.take(lockURL, within: seconds) else {
-        inProcess.signal()
-        return false
+      let budget = min(seconds, 10)
+      let start = ProcessInfo.processInfo.systemUptime
+      guard inProcess.wait(timeout: .now() + budget) == .success else { return false }
+      // Retry a refused grant/open once, within the same total wait budget.
+      for attempt in 0..<2 {
+        let remaining = max(0, budget - (ProcessInfo.processInfo.systemUptime - start))
+        let knownGeneration = generation
+        if let lockURL = container?.appending(path: "yo-state.lock" + (knownGeneration.isEmpty ? "" : "." + knownGeneration)),
+          let turn = SharedAccess.take(lockURL, within: remaining,
+            valid: { generation == knownGeneration },
+            repair: { if generation == knownGeneration { rotateLock() } }) {
+          access = turn
+          return true
+        }
+        if attempt == 0, ProcessInfo.processInfo.systemUptime - start < budget { usleep(10_000) }
+        else { break }
       }
-      access = turn
-      return true
+      inProcess.signal()
+      return false
     }
   }
 

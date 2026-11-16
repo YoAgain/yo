@@ -14,12 +14,16 @@ struct YoApp: App {
   private let notifications: NotificationDelegate
 
   init() {
+    OneTimeReset.runIfDue()  // before anything opens the state
     Perf.mark("launch.init")
     MediaSignWarmup.start()
     Haptic.prepareArrival()
-    // Every flock in the app has background time. Expiry revokes the turn before ending that time.
+    // Every turn is revocable, by leaving the foreground or by background time expiring.
     let application = UIApplication.shared
+    let foreground = ForegroundTurns(active: application.applicationState == .active)
+    SharedAccess.foreground = { foreground.isActive }
     SharedAccess.hold = { expire in
+      if let end = foreground.hold(expire) { return end }
       let task = Ended(application)
       let id = application.beginBackgroundTask(withName: "yo.shared") {
         expire()
@@ -53,6 +57,23 @@ struct YoApp: App {
         } else {
           FriendList().transition(.opacity)
         }
+      }
+      .safeAreaInset(edge: .top, spacing: 0) {
+        if Availability.shared.offline {
+          HStack(spacing: 8) {
+            Circle().fill(.red).frame(width: 7, height: 7)
+            Text("Offline · trying again").font(.custom("Montserrat-Bold", size: 16))
+          }
+          .foregroundStyle(.white)
+          .frame(maxWidth: .infinity).frame(height: 36)
+          .background(Color(red: 44/255, green: 62/255, blue: 80/255))
+          .transition(.opacity)
+        }
+      }
+      .animation(.easeInOut(duration: 0.2), value: Availability.shared.offline)
+      .task(id: phase) {
+        guard phase == .active else { return }
+        await accounts.watchState()
       }
       .animation(.smooth(duration: 0.5), value: accounts.account == nil)
       .animation(.smooth(duration: 0.5), value: AppUpdate.shared.needed)
@@ -263,5 +284,48 @@ private enum MediaSignWarmup {
         }
       }
     }
+  }
+}
+
+/// No main-queue hop while Rust holds its mutex: main-thread identity reads may be waiting for that mutex.
+private final class ForegroundTurns: @unchecked Sendable {
+  private let gate = NSLock()
+  private var active: Bool
+  private var turns: [UUID: @Sendable () -> Void] = [:]
+  private var observers: [NSObjectProtocol] = []
+
+  init(active: Bool) {
+    self.active = active
+    observers = [
+      NotificationCenter.default.addObserver(
+        forName: UIApplication.didBecomeActiveNotification, object: nil, queue: nil
+      ) { [weak self] _ in self?.setActive(true) },
+      NotificationCenter.default.addObserver(
+        forName: UIApplication.willResignActiveNotification, object: nil, queue: nil
+      ) { [weak self] _ in self?.setActive(false) },
+    ]
+  }
+
+  var isActive: Bool { gate.withLock { active } }
+
+  func hold(_ expire: @escaping @Sendable () -> Void) -> (@Sendable () -> Void)? {
+    gate.withLock {
+      guard active else { return nil }
+      let id = UUID()
+      turns[id] = expire
+      return { _ = self.gate.withLock { self.turns.removeValue(forKey: id) } }
+    }
+  }
+
+  private func setActive(_ active: Bool) {
+    let expired = gate.withLock {
+      self.active = active
+      guard !active else { return [@Sendable () -> Void]() }
+      let expired = Array(turns.values)
+      turns.removeAll()
+      return expired
+    }
+    if !active { SharedAccess.resetContention() }
+    for expire in expired { expire() }
   }
 }

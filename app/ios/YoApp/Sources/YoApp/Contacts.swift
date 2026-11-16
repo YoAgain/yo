@@ -51,12 +51,12 @@ struct ContactState: Sendable {
     return sessionsCheck
   }
 
-  static func load(_ client: YoClient, user: String) -> ContactState {
+  static func load(_ client: YoClient, user: String) throws -> ContactState {
     ContactState(
       contact: client.contacts().first { $0.user == user },
       accountKey: client.accountKeyOf(user: user),
       safetyNumber: try? client.safetyNumber(who: user),
-      sessions: client.sessionsWith(user: user))
+      sessions: try client.sessionsWith(user: user))
   }
 }
 
@@ -112,6 +112,7 @@ struct ContactRows: View {
   @Environment(Friends.self) private var friends
   @Environment(AccountStore.self) private var accounts
   @State private var states: [String: ContactState] = [:]
+  @State private var unavailable = true
 
   var body: some View {
     Group {
@@ -137,7 +138,13 @@ struct ContactRows: View {
     }
     // Again once the core is open (the page opened before), and when a contact changes (a chat, a new key).
     .task(id: Reload(accounts.client, friends.contacts)) {
-      if let loaded = await ContactState.loadAll(accounts, friends) { states = loaded }
+      while !Task.isCancelled {
+        if let loaded = await ContactState.loadAll(accounts, friends) {
+          states = loaded
+          unavailable = false
+        } else { unavailable = true }
+        do { try await Task.sleep(for: .seconds(5)) } catch { return }
+      }
     }
   }
 
@@ -149,6 +156,7 @@ struct ContactRows: View {
     if friend.blocked { return "Blocked" }
     if friend.gone { return "Not on Yo" }
     if friend.user == nil { return "No Chat Yet" }
+    if unavailable || states[friend.user ?? ""] == nil { return "Updating…" }
     if states[friend.user ?? ""]?.contact?.outdated == true { return "Needs Update" }
     if friend.keyChanged && check == .waiting { return "New Key" }
     return switch check {
@@ -166,8 +174,8 @@ extension ContactState {
     guard let client = accounts.client else { return nil }
     let users = friends.contacts.compactMap(\.user)
     let loaded = (try? await Hub.run {
-      Dictionary(users.map { ($0, ContactState.load(client, user: $0)) }, uniquingKeysWith: { a, _ in a })
-    }) ?? [:]
+      Dictionary(try users.map { ($0, try ContactState.load(client, user: $0)) }, uniquingKeysWith: { a, _ in a })
+    })
     return client === accounts.client ? loaded : nil
   }
 }
@@ -252,7 +260,7 @@ struct EncryptionPage: View {
     .navigationTitle("Encryption")
     .navigationBarTitleDisplayMode(.inline)
     .task(id: Reload(accounts.client, friends.contacts)) {
-      tally = await EncryptionTally.load(accounts, friends)
+      if let loaded = await EncryptionTally.load(accounts, friends) { tally = loaded }
       if let client = accounts.client { status = try? await Hub.run { client.securityStatus() } }
     }
   }
@@ -315,6 +323,8 @@ private struct ContactDetail: View {
             }
           }
         }
+      } else {
+        Section { StatusRow(title: "Chat", value: "Updating…", check: .waiting) }
       }
       Section {
         let current = friends.all.first { $0.key == friend.key }
@@ -335,7 +345,12 @@ private struct ContactDetail: View {
     }
     .navigationTitle(friend.name)
     .navigationBarTitleDisplayMode(.inline)
-    .task(id: Reload(accounts.client, friends.all.filter { $0.key == friend.key })) { await load() }
+    .task(id: Reload(accounts.client, friends.all.filter { $0.key == friend.key })) {
+      while !Task.isCancelled {
+        await load()
+        do { try await Task.sleep(for: .seconds(5)) } catch { return }
+      }
+    }
     .alert("Something Went Wrong", isPresented: Binding(get: { problem != nil }, set: { if !$0 { problem = nil } })) {
       Button("OK", role: .cancel) {}
     } message: {
@@ -462,8 +477,8 @@ private struct ContactDetail: View {
   private func load() async {
     friends.keyChangeSeen(friend)  // seen here: the list no longer marks it (this page shows it as it came)
     guard let client = accounts.client, let user = friend.user else { return }
-    let loaded = try? await Hub.run { ContactState.load(client, user: user) }
-    if client === accounts.client { state = loaded }
+    let loaded = try? await Hub.run { try ContactState.load(client, user: user) }
+    if client === accounts.client, let loaded { state = loaded }
   }
 }
 

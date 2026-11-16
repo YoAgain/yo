@@ -242,7 +242,7 @@ enum ShareBridge {
   /// Who is a request (spec 4.10), as `yos` takes it: contacts and groups not accepted yet.
   static func requests(of client: YoClient) -> Set<String> {
     Set(client.contacts().filter { !$0.accepted }.map(\.user))
-      .union(client.groups().filter { !$0.accepted && !$0.left }.map { "group:" + $0.id })
+      .union(((try? client.groups()) ?? []).filter { !$0.accepted && !$0.left }.map { "group:" + $0.id })
   }
 
   /// The name as the app's list shows it (the friends it published), else as the core knows them.

@@ -48,7 +48,7 @@ final class NotificationService: UNNotificationServiceExtension {
           // Then what is on the screen, read just before writing: what the app wrote meanwhile is in it.
           let senders = ShareBridge.yos(
           in: events, name: { ShareBridge.name(of: $0, client: client) },
-          group: { id in client.groups().first { $0.id == id }?.name ?? "" }, requests: ShareBridge.requests(of: client))
+          group: { id in (try? client.groups())?.first { $0.id == id }?.name ?? "" }, requests: ShareBridge.requests(of: client))
           let delivered = Self.delivered()
           replaced =
             pending.update { content in

@@ -192,7 +192,7 @@ fn yogpt_answers_a_photo_with_a_picture_and_its_yos_carry_one() {
     assert!((0..=4).contains(&yos));
     assert!(files.contains(&pictures[0]));
 
-    // A photo to it: one picture back, and the photo fetched into nothing (the hub has it no more).
+    // A photo to it: one picture back. Without an acknowledgement, its blob stays until expiry.
     let (photo, sealed) = media::seal(b"a photo YoGPT never sees", 4, 3).unwrap();
     let fetches = alice.media_fetches("YOGPT").unwrap();
     assert_eq!(fetches, 1);
@@ -201,7 +201,7 @@ fn yogpt_answers_a_photo_with_a_picture_and_its_yos_carry_one() {
     let (yos, pictures) = answers_until_quiet(&mut alice, Duration::from_secs(6));
     assert_eq!((yos, pictures.len()), (0, 1));
     assert!(files.contains(&pictures[0]));
-    assert_eq!(media::fetch(alice.transport().as_ref(), &photo).unwrap(), None, "drained");
+    assert!(media::fetch(alice.transport().as_ref(), &photo).unwrap().is_some(), "unacknowledged blob stays");
     let _ = std::fs::remove_dir_all(&state);
     let _ = std::fs::remove_dir_all(&replies);
 }

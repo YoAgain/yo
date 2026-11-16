@@ -22,6 +22,7 @@
 import AVFoundation
 import ImageIO
 import PhotosUI
+import UniformTypeIdentifiers
 import _PhotosUI_SwiftUI
 
 private extension EnvironmentValues {
@@ -143,6 +144,8 @@ struct FriendList: View {
     /// Senders waiting to go on top, oldest first: gathered for a moment and moved in one step, so many Yos at once
     /// do not shuffle the list bar by bar.
     @ObservationIgnored var rising: [String] = []
+    @ObservationIgnored var pressed: Set<UUID> = []
+    @ObservationIgnored var awaitingThumbnail: Set<UUID> = []
   }
 
   struct Outgoing: Equatable {
@@ -150,6 +153,8 @@ struct FriendList: View {
     let started = Date.now
     /// What the bar says meanwhile ("Sent 📷!"), the undo ring at the bar's left.
     let text: String
+    var thumbnail: UIImage?
+    let origin: CGPoint?
   }
 
   // Camera mode
@@ -162,16 +167,22 @@ struct FriendList: View {
   @State private var zooms: [Double] = []
   @State private var zoom = 1.0
   @State private var recordingFor: Friend?
-  @State private var libraryItem: _PhotosUI_SwiftUI.PhotosPickerItem?
-  /// A photo from the library, waiting to be sent: it stands in for the live picture.
-  @State private var picked: Picked?
+  @State private var libraryItems: [_PhotosUI_SwiftUI.PhotosPickerItem] = []
+  /// Ordered library picks kept for repeated sends until closed.
+  @State private var picked: [Picked] = []
 
   /// A photo from the library: what is sent, and its pictures for the screen, made once (a 48-megapixel photo decoded
   /// at each redraw kept the list from answering).
   struct Picked: Equatable {
     let data: Data
+    var video: MediaFile? = nil
     let image: UIImage
     let thumbnail: UIImage?
+
+    static func == (lhs: Self, rhs: Self) -> Bool {
+      lhs.data == rhs.data && lhs.video?.data == rhs.video?.data
+        && lhs.image === rhs.image && lhs.thumbnail === rhs.thumbnail
+    }
 
     /// Off the main actor: decoded and scaled down for the screen and the library button.
     static func make(_ data: Data) async -> Picked? {
@@ -331,12 +342,12 @@ struct FriendList: View {
         }
         if let events { await inbox.absorb(events, client: client, friends: friends) }
         if let contacts = try? await Hub.run({ client.contacts() }) { friends.markRequests(contacts) }
-        if let groups = try? await Hub.run({ client.groups() }) { friends.takeGroups(groups) }
+        if let groups = try? await Hub.run({ try client.groups() }) { friends.takeGroups(groups) }
       } else if let group = bar.group {
         if let events = try? await Hub.run({ try client.leaveGroup(group: group) }) {
           await inbox.absorb(events, client: client, friends: friends)
         }
-        if let groups = try? await Hub.run({ client.groups() }) { withAnimation(.snappy) { friends.takeGroups(groups) } }
+        if let groups = try? await Hub.run({ try client.groups() }) { withAnimation(.snappy) { friends.takeGroups(groups) } }
       } else {
         if block {
           // Off the list and into Settings › Blocked, as any block (unblocked there, it is a request again).
@@ -507,7 +518,7 @@ struct FriendList: View {
 
   /// No heading over the list (the bars are the app); in camera mode what to do, in a glass capsule over the controls.
   private var title: some View {
-    Text(picked == nil ? "Tap a name · Hold for video" : "Tap a name to send this photo")
+    Text(picked.isEmpty ? "Tap a name · Hold for video" : "Tap a name to send selected media")
       .font(.system(size: 15, weight: .semibold))
       .foregroundStyle(.white)
       .lineLimit(1)
@@ -528,15 +539,21 @@ struct FriendList: View {
       senderRun: inbox.senderRun(friend.mediaKey),
       bar: bars.of(friend),
       color: .row(friend.color).opacity(cameraOn ? 0.45 : 1),  // see-through over the camera
+      cameraOn: cameraOn,
       recording: recordingFor == friend,
       stop: { cancelSending(friend) },
       media: waiting,
       landing: landings.slot(friend.name),
       hint: cameraOn ? "Takes and sends a photo. Use Record Video to record a video." : nil,
-      hold: cameraOn && picked == nil ? { hold(friend, $0) } : nil,
+      hold: cameraOn && picked.isEmpty ? { hold(friend, $0, origin: $1) } : nil,
+      press: { pressed(friend.key, $0) },
+      flyBegan: { id in
+        bars.awaitingThumbnail.remove(id)
+        flushRise()
+      },
       view: { see(friend, $0) }
-    ) {
-      send(to: friend)
+    ) { origin in
+      send(to: friend, origin: origin)
     }
     // Swiped left (not in camera mode, where the bars take photos): Block and Remove underneath, as in Mail.
     SwipeActions(
@@ -605,7 +622,7 @@ struct FriendList: View {
     Task {
       guard let events = try? await Hub.run({ try client.renameGroup(group: id, name: Self.groupName(name)) }) else { return }
       await inbox.absorb(events, client: client, friends: friends)
-      if let groups = try? await Hub.run({ client.groups() }) { friends.takeGroups(groups) }
+      if let groups = try? await Hub.run({ try client.groups() }) { friends.takeGroups(groups) }
       let renamed = friends.all.first { $0.group == id } ?? bar
       await GroupNotice.send(
         [.user(GroupNotice.me(accounts)), " renamed the group to ", .group(renamed.name)], to: renamed, accounts: accounts, outbox: outbox)
@@ -629,7 +646,7 @@ struct FriendList: View {
       if let events = try? await Hub.run({ try client.leaveGroup(group: id) }) {
         await inbox.absorb(events, client: client, friends: friends)
       }
-      if let groups = try? await Hub.run({ client.groups() }) { withAnimation(.snappy) { friends.takeGroups(groups) } }
+      if let groups = try? await Hub.run({ try client.groups() }) { withAnimation(.snappy) { friends.takeGroups(groups) } }
     }
   }
 
@@ -640,7 +657,7 @@ struct FriendList: View {
       if let events = try? await Hub.run({ try client.leaveGroup(group: id) }) {
         await inbox.absorb(events, client: client, friends: friends)
       }
-      if let groups = try? await Hub.run({ client.groups() }) { withAnimation(.snappy) { friends.takeGroups(groups) } }
+      if let groups = try? await Hub.run({ try client.groups() }) { withAnimation(.snappy) { friends.takeGroups(groups) } }
     }
   }
 
@@ -703,7 +720,7 @@ struct FriendList: View {
         }
         .onAppear { typing = true }
     } else {
-      RowButton("+", color: Color.row(friends.nextColor).opacity(cameraOn ? 0.45 : 1)) {
+      RowButton("+", color: Color.row(friends.nextColor).opacity(cameraOn ? 0.45 : 1)) { _ in
         withAnimation(.snappy) {
           swiped = nil
           adding = true
@@ -849,8 +866,33 @@ struct FriendList: View {
   // MARK: Camera mode
 
   @ViewBuilder private var backdrop: some View {
-    if cameraOn, let picked {
-      Image(uiImage: picked.image).resizable().scaledToFill()
+    if cameraOn, picked.count > 1 {
+      GeometryReader { geometry in
+        let columns = picked.count <= 4 ? 2 : 3
+        let side = (geometry.size.width - CGFloat(columns - 1)) / CGFloat(columns)
+        let rows = (picked.count + columns - 1) / columns
+        VStack(spacing: 1) {
+          ForEach(0..<rows, id: \.self) { row in
+            HStack(spacing: 1) {
+              ForEach(0..<columns, id: \.self) { column in
+                let index = row * columns + column
+                if index < picked.count {
+                  Image(uiImage: picked[index].image)
+                    .resizable().scaledToFill()
+                    .frame(width: side, height: side)
+                    .clipped()
+                } else {
+                  Color.black.frame(width: side, height: side)
+                }
+              }
+            }
+          }
+        }
+        .frame(width: geometry.size.width, height: geometry.size.height)
+      }
+      .background(.black)
+    } else if cameraOn, let item = picked.first {
+      Image(uiImage: item.image).resizable().scaledToFill()
     } else if cameraOn {
       CameraPreview(session: camera.session)
     } else {
@@ -866,7 +908,7 @@ struct FriendList: View {
       // In the middle: the zoom circle.
       if cameraOn {
         HStack(spacing: 12) {
-          if picked == nil {  // a picked photo goes as it is
+          if picked.isEmpty {  // a picked photo goes as it is
             CameraZoom(choices: zooms, chosen: $zoom).onChange(of: zoom) { camera.zoom(to: zoom) }
           }
         }
@@ -875,8 +917,8 @@ struct FriendList: View {
       // At the corners: the library (camera mode) or "•••" at the one, the camera's own button at the other.
       HStack(alignment: .center, spacing: 12) {
         if cameraOn {
-          let thumbnail = picked?.thumbnail  // the picker's label closure is Sendable: take the value here
-          PhotosPicker(selection: $libraryItem, matching: .images) {
+          let thumbnail = picked.first?.thumbnail  // the picker's label closure is Sendable: take the value here
+          PhotosPicker(selection: $libraryItems, maxSelectionCount: 10, selectionBehavior: .ordered, matching: .any(of: [.images, .videos])) {
             LibraryLabel(thumbnail: thumbnail)
           }
           .buttonStyle(.plain)
@@ -906,7 +948,14 @@ struct FriendList: View {
           .transition(.scale.combined(with: .opacity))
         }
         Button {
-          withAnimation(.snappy) { cameraOn.toggle() }
+          withAnimation(.snappy) {
+            if cameraOn && !libraryItems.isEmpty {
+              picked = []
+              libraryItems = []
+            } else {
+              cameraOn.toggle()
+            }
+          }
         } label: {
           Image(systemName: cameraOn ? "xmark" : "camera.fill")
             .font(.system(size: 20, weight: .semibold))
@@ -917,7 +966,7 @@ struct FriendList: View {
         }
         .buttonStyle(.plain)
         .glassEffect(.regular.interactive(), in: .circle)
-        .accessibilityLabel(cameraOn ? "Close Camera" : "Camera")
+        .accessibilityLabel(cameraOn ? (libraryItems.isEmpty ? "Close Camera" : "Clear Selection") : "Camera")
       }
     }
     .environment(\.layoutDirection, leftHanded ? .rightToLeft : .leftToRight)
@@ -927,6 +976,7 @@ struct FriendList: View {
 
   private func switchCamera(_ on: Bool) async {
     guard on else { return camera.stop() }
+    _ = Self.outgoingThumbnailQueue  // enqueue decode warm-up before camera startup/capture
     // Asked first: closed meanwhile, it stays closed.
     if await Camera.allowed() { if cameraOn { camera.start() } } else { cameraOn = false }
     await readZooms()
@@ -940,7 +990,7 @@ struct FriendList: View {
 
   // MARK: Sending
 
-  private func send(to friend: Friend) {
+  private func send(to friend: Friend, origin: CGPoint?) {
     // A group's bar just shrank back (its senders' lines went): the bars under it moved up under the finger, so a tap
     // on one of them in the first half second goes nowhere rather than to whoever slid there. The group's own bar
     // and those above it stay where they were: they take taps (to fire on).
@@ -965,32 +1015,31 @@ struct FriendList: View {
     }
     hintEpoch += 1  // the camera's hint goes, and waits again
     Perf.mark("tap.action")
+    Perf.mark("thumb.tap")
     defer { PerfProbe.frame("tap") }
     // A tap while a bar is swiped open closes it, as in Mail; it sends nothing. So does one while "+" is open.
     guard swiped == nil else { return withAnimation(.snappy) { swiped = nil } }
     // Here, as the finger lifts: not after the list has drawn the change. A photo: the shutter's click.
-    if cameraOn && picked == nil { Haptic.shutter() } else { Haptic.tap() }
-    let library = picked?.data
-    picked = nil
-    libraryItem = nil
+    if cameraOn && picked.isEmpty { Haptic.shutter() } else { Haptic.tap() }
+    let library = picked
     // "Undo Before Sending" (Per Contact): the Yo waits under the ring as a photo does; a tap on it keeps it here.
-    if !cameraOn && library == nil, let own = friends.all.first(where: { $0.key == friend.key }), own.undoFirst {
+    if !cameraOn && library.isEmpty, let own = friends.all.first(where: { $0.key == friend.key }), own.undoFirst {
       let (inbox, accounts, friends) = (inbox, accounts, friends)
-      run(friend, "Sent Yo", seconds: own.undoSeconds) {
+      run(friend, "Sent Yo", seconds: own.undoSeconds) { _ in
         Prepared(
           send: {
-            Task {
-              if let problem = await inbox.send(to: friend, accounts: accounts, friends: friends) {
-                if problem == Inbox.groupEmpty { emptyGroup = friend }
-                showSent(to: friend, problem)
-              }
+            if let problem = await inbox.send(to: friend, accounts: accounts, friends: friends) {
+              if problem == Inbox.groupEmpty { emptyGroup = friend }
+              showSent(to: friend, problem)
+              return false
             }
+            return true
           },
           undo: {})
       }
       return
     }
-    guard cameraOn || library != nil else {
+    guard cameraOn || !library.isEmpty else {
       showSent(to: friend, "Sent Yo", thenOnTop: true)
       Task {
         if let problem = await inbox.send(to: friend, accounts: accounts, friends: friends) {
@@ -1004,11 +1053,30 @@ struct FriendList: View {
     }
     let client = accounts.client  // the account tapped in: a photo waiting its 1.5 seconds never goes from the next one
     let at = Date.now
-    run(friend, "Sent 📷") {
-      var taken = library
-      if taken == nil { taken = await camera.photo() }
-      guard let taken, let file = await Task.detached(operation: { MediaFile.photo(taken) }).value else { return nil }
-      return await stage(file, to: friend, from: client, at: at, keep: library == nil)
+    if !library.isEmpty {
+      for item in library {
+        run(friend, item.video == nil ? "Sent 📷" : "Sent 🎥", origin: origin) { thumbnail in
+          if let image = item.thumbnail { thumbnail(image) }
+          let file: MediaFile?
+          if let video = item.video {
+            file = video
+          } else {
+            let data = item.data
+            file = await Task.detached { MediaFile.photo(data) }.value
+          }
+          guard !Task.isCancelled, let file else { return nil }
+          return await stage(file, to: friend, from: client, at: at, keep: false)
+        }
+      }
+    } else {
+      run(friend, "Sent 📷", origin: origin, placeholder: camera.previewThumbnail()) { thumbnail in
+        guard let taken = await camera.photo(), !Task.isCancelled else { return nil }
+        Perf.mark("thumb.capture.done")
+        if let image = await Self.outgoingThumbnail(taken) { thumbnail(image) }
+        guard !Task.isCancelled, let file = await Task.detached(operation: { MediaFile.photo(taken) }).value,
+          !Task.isCancelled else { return nil }
+        return await stage(file, to: friend, from: client, at: at)
+      }
     }
   }
 
@@ -1035,29 +1103,25 @@ struct FriendList: View {
     }
   }
 
-  /// A photo or video taken: into the library at once (`keep`, as Settings want it; not one picked from there), and
-  /// into the outbox, whose upload goes during the undo time; its Yo goes when that is over (`Prepared.send`), and an
-  /// undone one is taken out again. Only from `client`, the account the gesture began in.
+  /// Keep only the prepared bytes during undo. Sealing, disk storage and upload begin after the delay.
   private func stage(
     _ file: MediaFile, to friend: Friend, from client: YoClient?, at: Date, keep: Bool = true
   ) async -> Prepared? {
-    if keep { Task.detached(priority: .utility) { file.keepIfWanted() } }
-    let id = UUID()
-    guard let client, client === accounts.client,
-      await outbox.send(
-        file, to: friend.target, from: client, accounts: accounts, id: id, held: true, at: at)
-    else { return nil }
+    guard !Task.isCancelled, let client, client === accounts.client else { return nil }
     let outbox = outbox
     return Prepared(
       send: {
-        outbox.release(id)
-        Stats.sentYo(to: friend.name)
+        guard client === accounts.client else { return false }
+        let sent = await outbox.sendOnce(file, to: friend.target, from: client, accounts: accounts, at: at)
+        if sent { Stats.sentYo(to: friend.name) }
+        return sent
       },
-      undo: { outbox.discard(id) })
+      undo: {},
+      keep: { if keep { await Task.detached(priority: .utility) { file.keepIfWanted() }.value } })
   }
 
   /// Holding a name in camera mode: a video from the moment it is held until it is let go.
-  private func hold(_ friend: Friend, _ holding: Bool) {
+  private func hold(_ friend: Friend, _ holding: Bool, origin: CGPoint?) {
     hintEpoch += 1
     if holding {
       guard recordingFor == nil else { return }  // one video at a time: a second finger records nothing
@@ -1068,9 +1132,18 @@ struct FriendList: View {
       Haptic.tap()
       let client = accounts.client
       let at = Date.now
-      run(friend, "Sent 🎥") {
-        guard let recording = await camera.stopVideo(), let file = await MediaFile.video(recording) else { return nil }
-        return await stage(file, to: friend, from: client, at: at)
+      run(friend, "Sent 🎥", origin: origin, placeholder: camera.previewThumbnail()) { thumbnail in
+        guard let recording = await camera.stopVideo() else { return nil }
+        Perf.mark("thumb.capture.done")
+        defer { try? FileManager.default.removeItem(at: recording) }
+        guard !Task.isCancelled else { return nil }
+        return await withTaskCancellationHandler {
+          if let image = await Self.outgoingVideoThumbnail(recording) { thumbnail(image) }
+          guard !Task.isCancelled, let file = await MediaFile.video(recording), !Task.isCancelled else { return nil }
+          return await stage(file, to: friend, from: client, at: at)
+        } onCancel: {
+          try? FileManager.default.removeItem(at: recording)
+        }
       }
     }
   }
@@ -1079,15 +1152,36 @@ struct FriendList: View {
   /// since the newest (each new one starts the time again, the ring after the words showing it); then the stack goes,
   /// in order. Meanwhile `prepare` takes the photo or ends the video. A tap on the ring keeps the whole stack here.
   private func run(
-    _ friend: Friend, _ text: String, seconds: Double = FriendList.sendDelay,
-    prepare: @escaping @MainActor () async -> Prepared?
+    _ friend: Friend, _ text: String, seconds: Double = FriendList.sendDelay, origin: CGPoint? = nil, placeholder: UIImage? = nil,
+    prepare: @escaping @MainActor (@MainActor (UIImage) -> Void) async -> Prepared?
   ) {
     let bars = bars  // the object itself into the task, not this view's copy of the state
-    let one = Outgoing(text: text)
+    let one = Outgoing(text: text, thumbnail: placeholder, origin: origin)
     let bar = bars.of(friend)
     bar.seconds = seconds
     bar.outgoing.append(one)
-    bars.preparing[one.id] = Task { await prepare() }
+    bars.awaitingThumbnail.insert(one.id)
+    bars.preparing[one.id] = Task {
+      defer {
+        if !bar.outgoing.contains(where: { $0.id == one.id && $0.thumbnail != nil }) {
+          bars.awaitingThumbnail.remove(one.id)
+          Task { await Task.yield(); flushRise() }
+        }
+      }
+      return await prepare { image in
+        Perf.mark("thumb.thumbnail.ready")
+        guard let index = bar.outgoing.firstIndex(where: { $0.id == one.id }) else { return }
+        // Superseded thumbnails no longer have a view to report their fly-in.
+        for previous in bar.outgoing.prefix(index) {
+          bars.awaitingThumbnail.remove(previous.id)
+        }
+        bar.outgoing[index].thumbnail = image
+        if bar.outgoing.dropFirst(index + 1).contains(where: { $0.thumbnail != nil }) {
+          bars.awaitingThumbnail.remove(one.id)
+          Task { await Task.yield(); flushRise() }
+        }
+      }
+    }
     let key = friend.key
     let round = (bars.stackRounds[key] ?? 0) + 1
     bars.stackRounds[key] = round
@@ -1097,17 +1191,30 @@ struct FriendList: View {
       let stack = bar.outgoing
       bars.stackRounds[key] = nil
       bar.outgoing = []
+      for one in stack { bars.awaitingThumbnail.remove(one.id) }
+      flushRise()
       // After the stack before (a video still being finished): the friend gets them in the order taken.
       let before = bars.releasing[key]
       let releasing = Task {
         await before?.value
         var went = 0
+        var successful: [Prepared] = []
+        var allSent = true
         for one in stack {
-          guard let prepared = await bars.preparing.removeValue(forKey: one.id)?.value else { continue }
+          guard let prepared = await bars.preparing.removeValue(forKey: one.id)?.value else {
+            allSent = false
+            continue
+          }
           went += 1
-          prepared.send()  // uploaded meanwhile (or uploading): its Yo goes now
-          showSent(to: friend, one.text, thenOnTop: true)
+          if await prepared.send() {
+            successful.append(prepared)
+            showSent(to: friend, one.text, thenOnTop: true)
+          } else {
+            allSent = false
+            showSent(to: friend, "Not Sent")
+          }
         }
+        if allSent { for prepared in successful { await prepared.keep() } }
         if went == 0 { showSent(to: friend, "Not Sent") }
       }
       bars.releasing[key] = releasing
@@ -1116,18 +1223,75 @@ struct FriendList: View {
     }
   }
 
-  /// A photo or video in the outbox, held: `send` lets its Yo go, `undo` takes it out again.
+  /// One persistent worker: its first job exercises the exact JPEG/ImageIO path before capture.
+  nonisolated private static let outgoingThumbnailQueue: DispatchQueue = {
+    let queue = DispatchQueue(label: "yo.outgoing-thumbnail", qos: .userInitiated)
+    queue.async {
+      // Keep all Core Graphics/UIKit objects local to the worker's Sendable closure.
+      guard let context = CGContext(data: nil, width: 2, height: 2, bitsPerComponent: 8,
+        bytesPerRow: 8, space: CGColorSpaceCreateDeviceRGB(),
+        bitmapInfo: CGImageAlphaInfo.noneSkipLast.rawValue),
+        let pixels = context.makeImage(), let data = UIImage(cgImage: pixels).jpegData(compressionQuality: 0.8)
+      else { return }
+      _ = decodeOutgoingThumbnail(data)
+    }
+    return queue
+  }()
+
+  /// Capture bytes go straight to ImageIO, before any media file is written.
+  nonisolated private static func outgoingThumbnail(_ data: Data) async -> UIImage? {
+    await withCheckedContinuation { continuation in
+      outgoingThumbnailQueue.async {
+        continuation.resume(returning: decodeOutgoingThumbnail(data))
+      }
+    }
+  }
+
+  nonisolated private static func decodeOutgoingThumbnail(_ data: Data) -> UIImage? {
+    guard let source = CGImageSourceCreateWithData(data as CFData, nil) else { return nil }
+    let options: [CFString: Any] = [
+      kCGImageSourceCreateThumbnailFromImageAlways: true,
+      kCGImageSourceCreateThumbnailWithTransform: true,
+      kCGImageSourceThumbnailMaxPixelSize: 120,
+      kCGImageSourceShouldCacheImmediately: true,
+    ]
+    return CGImageSourceCreateThumbnailAtIndex(source, 0, options as CFDictionary).map { UIImage(cgImage: $0) }
+  }
+
+  /// Read the first frame before export, while the undo time is running. Export owns deletion of the recording.
+  nonisolated private static func outgoingVideoThumbnail(_ url: URL) async -> UIImage? {
+    await Task.detached(priority: .userInitiated) { () async -> UIImage? in
+      do {
+        let generator = AVAssetImageGenerator(asset: AVURLAsset(url: url))
+        generator.appliesPreferredTrackTransform = true
+        generator.maximumSize = CGSize(width: 120, height: 120)
+        generator.requestedTimeToleranceBefore = .zero
+        generator.requestedTimeToleranceAfter = .zero
+        let frame = try await generator.image(at: .zero)
+        return UIImage(cgImage: frame.image)
+      } catch {
+        return nil
+      }
+    }.value
+  }
+
+  /// Prepared bytes, without an outbox entry or media key; `send` starts the actual attempt.
   struct Prepared {
-    let send: @MainActor () -> Void
+    let send: @MainActor () async -> Bool
     let undo: @MainActor () -> Void
+    var keep: @MainActor () async -> Void = {}
   }
 
   /// The ring tapped: the whole stack stays here.
   private func cancelSending(_ friend: Friend) {
     let bar = bars.of(friend)
     for one in bar.outgoing {
-      // Taken out of the outbox once it is in (still being taken or sealed: as soon as it is).
-      if let preparing = bars.preparing.removeValue(forKey: one.id) { Task { await preparing.value?.undo() } }
+      // Cancel capture/export work; no outbox entry or media key exists during undo.
+      bars.awaitingThumbnail.remove(one.id)
+      if let preparing = bars.preparing.removeValue(forKey: one.id) {
+        preparing.cancel()
+        Task { await preparing.value?.undo() }
+      }
     }
     bars.stackRounds[friend.key] = nil
     bar.outgoing = []
@@ -1214,7 +1378,7 @@ extension FriendList {
       // While the list is on screen: Yos come in from the hub.
       .task { await inbox.listen(accounts: accounts, friends: friends) }
       .onChange(of: onScreen) { startClocks() }
-      .onChange(of: libraryItem) { _, item in load(item) }
+      .onChange(of: libraryItems) { _, items in load(items) }
       .onChange(of: cameraOn) { _, on in cameraSwitched(on) }
       .onDisappear { cameraOn = false }
       // An invite link's name, once the hub can be asked: added once (Invite.swift).
@@ -1358,9 +1522,7 @@ extension FriendList {
     if clocks.settling.isEmpty { clocks.stop() }
   }
 
-  /// A friend goes on top with the others coming within 0.3 seconds, in one step (the newest ends on top). While you
-  /// are sending (taps or a stack of photos still in their time) the list does not move at all, so no bar slides away
-  /// under your finger; it moves once you are done.
+  /// Batch rises, keeping the newest on top. A press or recording defers only ordering, never arrivals.
   private func rise(_ name: String) { rise([name]) }
 
   private func rise(_ names: [String]) {
@@ -1373,16 +1535,24 @@ extension FriendList {
     guard wasEmpty else { return }  // a step is already on its way
     Task {
       try? await Task.sleep(for: .seconds(0.3))
-      while sending { try? await Task.sleep(for: .milliseconds(200)) }
-      let names = bars.rising
-      bars.rising = []
-      toTop(names)
+      flushRise()
     }
   }
 
-  /// A send still in its time: taps on a bar, or photos and videos on their way.
-  private var sending: Bool {
-    !bars.sentRounds.isEmpty || !bars.stackRounds.isEmpty || bars.outgoing
+  private func pressed(_ key: UUID, _ down: Bool) {
+    if down { bars.pressed.insert(key) } else {
+      bars.pressed.remove(key)
+      Task { await Task.yield(); flushRise() }
+    }
+  }
+
+  /// Arrival counts land immediately; ordering waits for release and the thumbnail's fly-in to begin.
+  private func flushRise() {
+    guard bars.pressed.isEmpty, recordingFor == nil, bars.awaitingThumbnail.isEmpty,
+      !bars.rising.isEmpty else { return }
+    let names = bars.rising
+    bars.rising = []
+    toTop(names)
   }
 
   /// Friends go on top, the last of `names` uppermost. At the top of the list the list stays at its very start, so the
@@ -1419,25 +1589,46 @@ extension FriendList {
     }
   }
 
-  /// The photo picked in the library; a load that finishes after another pick, a send or the camera going off does not
-  /// land.
-  private func load(_ item: PhotosPickerItem?) {
-    guard let item else { return picked = nil }
+  /// Load in selection order. A selection superseded by another pick or closed cannot land.
+  private func load(_ items: [PhotosPickerItem]) {
+    picked = []
+    guard !items.isEmpty else { return }
     Task {
-      let data = try? await item.loadTransferable(type: Data.self)
-      var made: Picked?
-      if let data { made = await Picked.make(data) }
-      if libraryItem == item { picked = made }
+      var made: [Picked] = []
+      for item in items {
+        guard libraryItems == items else { return }
+        guard let data = try? await item.loadTransferable(type: Data.self) else { continue }
+        if item.supportedContentTypes.contains(where: { $0.conforms(to: .movie) }) {
+          let url = FileManager.default.temporaryDirectory.appending(path: "\(UUID().uuidString).mov")
+          do {
+            try await Task.detached { try data.write(to: url) }.value
+            let image = await Self.outgoingVideoThumbnail(url)
+            // Export applies the same limits as camera video and removes the temporary source.
+            let video = await MediaFile.video(url)
+            if let video, let image {
+              made.append(Picked(data: Data(), video: video, image: image, thumbnail: image))
+            }
+          } catch {
+            try? FileManager.default.removeItem(at: url)
+          }
+        } else if let photo = await Picked.make(data) {
+          made.append(photo)
+        }
+      }
+      if libraryItems == items { picked = made }
     }
   }
 
   private func cameraSwitched(_ on: Bool) {
     if !on {
-      picked = nil
-      libraryItem = nil
+      picked = []
+      libraryItems = []
       if recordingFor != nil {  // a hold the camera closed under: no video waits, the next hold records again
         recordingFor = nil
-        Task { _ = await camera.stopVideo() }
+        Task {
+          if let file = await camera.stopVideo() { try? FileManager.default.removeItem(at: file) }
+          flushRise()
+        }
       }
     }
     Task { await switchCamera(on) }
@@ -1484,6 +1675,7 @@ struct LiveBar: View, @MainActor Equatable {
       && lhs.friend.undoFirst == rhs.friend.undoFirst && lhs.friend.undoSeconds == rhs.friend.undoSeconds
       && lhs.senderRun === rhs.senderRun && lhs.bar === rhs.bar
       && lhs.landing === rhs.landing && lhs.color == rhs.color && lhs.recording == rhs.recording
+      && lhs.cameraOn == rhs.cameraOn
       && lhs.media == rhs.media && lhs.hint == rhs.hint && (lhs.hold == nil) == (rhs.hold == nil)
   }
 
@@ -1492,23 +1684,26 @@ struct LiveBar: View, @MainActor Equatable {
   let senderRun: Inbox.SenderRun
   let bar: FriendList.Bars.Bar
   let color: Color
+  let cameraOn: Bool
   let recording: Bool
   let stop: () -> Void
   let media: [Arrival]
   let landing: FriendList.LandingSlot
   private var yo: FriendList.Landing? { landing.value }
   let hint: String?
-  let hold: ((Bool) -> Void)?
+  let hold: ((Bool, CGPoint?) -> Void)?
+  let press: (Bool) -> Void
+  let flyBegan: (UUID) -> Void
   let view: (ThumbnailTouch) -> Void
-  let action: () -> Void
+  let action: (CGPoint?) -> Void
 
   var body: some View {
     RowButton(
       // A request shows one "Yo Request from X": no count of its Yos ("!!!"), no photo, not even its 📷 (what spam
       // aims at); all of it only after a yes.
-      title, count: friend.request ? 0 : count, color: color, recording: recording,
-      outgoing: bar.outgoing.last?.started, sendSeconds: bar.seconds, stop: stop,
-      media: friend.request ? [] : media, yo: friend.request ? nil : yo, hint: hint, hold: hold, view: view, faded: friend.gone && bar.sent == nil,
+      title, count: friend.request ? 0 : count, color: color, cameraOn: cameraOn, recording: recording,
+      outgoing: bar.outgoing.last?.started, outgoingItems: bar.outgoing, sendSeconds: bar.seconds, stop: stop,
+      media: friend.request ? [] : media, yo: friend.request ? nil : yo, hint: hint, hold: hold, press: press, flyBegan: flyBegan, view: view, faded: friend.gone && bar.sent == nil,
       icon: friend.group == nil ? nil : "person.3.fill", senders: friend.group == nil ? [] : senderRun.senders, flies: true,
       action: action)
       // Gone: still their name (whose bar it is), faded; a tap says "Not on Yo".
@@ -1579,6 +1774,85 @@ struct LiveBar: View, @MainActor Equatable {
   }
 }
 
+/// The slot keeps its identity even while empty. The resting stack survives each new flight.
+private struct OutgoingThumbnailSlot: View {
+  let item: FriendList.Outgoing?
+  let more: Int
+  let destination: CGPoint
+  let fallbackOrigin: CGPoint
+  let began: (UUID) -> Void
+  @State private var restingImage: UIImage?
+
+  var body: some View {
+    ZStack {
+      Image(uiImage: restingImage ?? UIImage())
+        .resizable().scaledToFill()
+        .frame(width: 28, height: 28).clipped()
+        .overlay {
+          if more > 0 {
+            Text("+\(more)")
+              .font(.custom("Montserrat-Bold", size: 12))
+              .foregroundStyle(.white)
+              .frame(maxWidth: .infinity, maxHeight: .infinity)
+              .background(.black.opacity(0.35))
+          }
+        }
+        .position(destination)
+        .opacity(item == nil || restingImage == nil ? 0 : 1)
+      if let item, let image = item.thumbnail {
+        OutgoingThumbnail(image: image, more: max(0, more), destination: destination,
+          origin: item.origin ?? fallbackOrigin, began: {
+            Perf.mark("thumb.fly.start")
+            began(item.id)
+          })
+          .id(item.id)
+          .transition(.identity)
+      }
+    }
+    .onChange(of: item, initial: true) { old, new in
+      if old?.id != new?.id { restingImage = new == nil ? nil : old?.thumbnail }
+    }
+  }
+}
+
+/// A captured item flies once, then rests beside the undo ring. SwiftUI interpolates cached pixels only.
+private struct OutgoingThumbnail: View {
+  let image: UIImage
+  let more: Int
+  let destination: CGPoint
+  let origin: CGPoint
+  let began: () -> Void
+  @Environment(\.accessibilityReduceMotion) private var reduceMotion
+  @State private var landed = false
+
+  var body: some View {
+    let resting = landed || reduceMotion
+    Image(uiImage: image)
+      .resizable()
+      .scaledToFill()
+      .frame(width: 28, height: 28)
+      .clipped()
+      .overlay {
+        if more > 0 {
+          Text("+\(more)")
+            .font(.custom("Montserrat-Bold", size: 12))
+            .foregroundStyle(.white)
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+            .background(.black.opacity(0.35))
+        }
+      }
+      .scaleEffect(resting ? 1 : Metrics.rowHeight * 0.8 / 28)
+      .position(resting ? destination : origin)
+      .opacity(reduceMotion && !landed ? 0 : 1)
+      .task {
+        withAnimation(reduceMotion ? .easeOut(duration: 0.18) : .spring(duration: 0.35, bounce: 0.16)) {
+          landed = true
+        }
+        began()
+      }
+  }
+}
+
 /// One friend's bar: tap to send. With `hold`, holding is reported as well (true when held long enough, false when let
 /// go): camera mode records a video with it. A finger on the photos' thumbnail is reported through `view`.
 struct RowButton: View {
@@ -1586,9 +1860,11 @@ struct RowButton: View {
   /// How many the words count: a "!" for each after the first (Bangs).
   var count = 1
   let color: Color
+  var cameraOn = false
   var recording = false
   /// When the newest photo or video on its way out started; its ring closes in `sendSeconds`, a tap on it undoes.
   var outgoing: Date?
+  var outgoingItems: [FriendList.Outgoing] = []
   var sendSeconds = FriendList.sendDelay
   var stop: () -> Void = {}
   var media: [Arrival] = []
@@ -1598,7 +1874,9 @@ struct RowButton: View {
   var yoSeconds = FriendList.yoSeconds
   private static let solid = FriendList.yoSolidSeconds
   var hint: String?
-  var hold: ((Bool) -> Void)?
+  var hold: ((Bool, CGPoint?) -> Void)?
+  var press: (Bool) -> Void = { _ in }
+  var flyBegan: (UUID) -> Void = { _ in }
   var view: (ThumbnailTouch) -> Void = { _ in }
   /// The words faded (a friend no longer on Yo).
   var faded = false
@@ -1606,11 +1884,14 @@ struct RowButton: View {
   /// (`SenderBlocks`).
   var icon: String?
   var senders: [Inbox.GroupSender] = []
-  let action: () -> Void
+  let action: (CGPoint?) -> Void
   /// A hold started a video: letting go stops it, and the bar's tap does not take a photo as well.
   @Environment(\.dynamicTypeSize) private var measureType
   @Environment(\.locale) private var measureLocale
   @Environment(\.legibilityWeight) private var measureWeight
+  @State private var touchOrigin: CGPoint?
+  @State private var holdOrigin: CGPoint?
+  @State private var touchSpace = UUID()
   @State private var holding = false
   @State private var viewing = false
   @State private var touchedAt = Date.distantPast
@@ -1622,11 +1903,12 @@ struct RowButton: View {
   @State private var flights: [UUID] = []
 
   init(
-    _ title: String, count: Int = 1, color: Color, recording: Bool = false, outgoing: Date? = nil,
+    _ title: String, count: Int = 1, color: Color, cameraOn: Bool = false, recording: Bool = false, outgoing: Date? = nil,
+    outgoingItems: [FriendList.Outgoing] = [],
     sendSeconds: Double = FriendList.sendDelay, stop: @escaping () -> Void = {},
-    media: [Arrival] = [], yo: FriendList.Landing? = nil, hint: String? = nil, hold: ((Bool) -> Void)? = nil,
+    media: [Arrival] = [], yo: FriendList.Landing? = nil, hint: String? = nil, hold: ((Bool, CGPoint?) -> Void)? = nil, press: @escaping (Bool) -> Void = { _ in }, flyBegan: @escaping (UUID) -> Void = { _ in },
     view: @escaping (ThumbnailTouch) -> Void = { _ in }, faded: Bool = false, icon: String? = nil, senders: [Inbox.GroupSender] = [],
-    flies: Bool = false, action: @escaping () -> Void
+    flies: Bool = false, action: @escaping (CGPoint?) -> Void
   ) {
     self.flies = flies
     self.icon = icon
@@ -1634,14 +1916,18 @@ struct RowButton: View {
     self.title = title
     self.count = count
     self.color = color
+    self.cameraOn = cameraOn
     self.recording = recording
     self.outgoing = outgoing
+    self.outgoingItems = outgoingItems
     self.sendSeconds = sendSeconds
     self.stop = stop
     self.media = media
     self.yo = yo
     self.hint = hint
     self.hold = hold
+    self.press = press
+    self.flyBegan = flyBegan
     self.view = view
     self.faded = faded
     self.action = action
@@ -1653,25 +1939,27 @@ struct RowButton: View {
         // The camera's shutter: pressed, the bar goes back and darkens at once; let go, it springs out again. Held,
         // a video records (the bar red, filling as its time runs) and letting go sends it, without a photo as well.
         Button {
-          if !holding { action() }
+          if !holding { action(touchOrigin); touchOrigin = nil }
         } label: {
           label
         }
-        .buttonStyle(ShutterPress(recording: recording))
+        .buttonStyle(ShutterPress(recording: recording, press: press))
         // Beside the Button, not against it: a long press attached to a Button in a scroll view loses the touch to
         // the Button (the tap still comes, the hold never does). Held 0.3 s, then the finger's end lets go.
         .simultaneousGesture(
           LongPressGesture(minimumDuration: 0.3, maximumDistance: 60)
-            .sequenced(before: DragGesture(minimumDistance: 0))
+            .sequenced(before: DragGesture(minimumDistance: 0, coordinateSpace: .named(touchSpace)))
             .onChanged { value in
-              if case .second(true, _) = value, !holding {
+              if case .second(true, let drag) = value, !holding {
+                holdOrigin = drag?.startLocation ?? touchOrigin
                 holding = true
-                hold(true)
+                hold(true, holdOrigin)
               }
             }
             .onEnded { _ in
               guard holding else { return }
-              hold(false)
+              hold(false, holdOrigin)
+              touchOrigin = nil
               Task {
                 try? await Task.sleep(for: .milliseconds(300))  // the bar's own tap on letting go comes first
                 holding = false
@@ -1682,7 +1970,7 @@ struct RowButton: View {
         // VoiceOver has no hold: recording starts and stops as an action.
         .accessibilityAction(named: recordingByAction ? "Stop and Send Video" : "Record Video") {
           recordingByAction.toggle()
-          hold(recordingByAction)
+          hold(recordingByAction, nil)
         }
       } else {
         Button {
@@ -1692,22 +1980,49 @@ struct RowButton: View {
             // One that never got its "Sent Yo" to rise from (not sent) is let go.
             Task { try? await Task.sleep(for: .seconds(2)); flights.removeAll { $0 == id } }
           }
-          action()
+          action(touchOrigin)
+          touchOrigin = nil
         } label: { label }
-          .buttonStyle(RowPress())
+          .buttonStyle(RowPress(press: press))
           .disabled(viewing)  // a finger on the photos is not a press on the bar
       }
     }
+    .simultaneousGesture(
+      DragGesture(minimumDistance: 0, coordinateSpace: .named(touchSpace))
+        .onChanged { value in touchOrigin = value.startLocation }
+    )
+    .coordinateSpace(name: touchSpace)
     // What takes its own touches (the undo ring, the photos) lies over the bar, in the same line (Buttons in a Button
     // do not work). The ring stands at the bar's very left, away from where the bar was tapped: a tap more is
     // another photo, never an undo by mistake.
-    .overlay { line(touchable: true) }
+    .overlay {
+      line(touchable: true)
+        // Received media stays visible; camera taps and holds reach the shutter underneath.
+        .allowsHitTesting(!cameraOn)
+        .accessibilityHidden(cameraOn)
+    }
     // At the bar's start (its end for the left hand), away from where it is tapped: the undo ring.
     .overlay(alignment: leftHanded ? .trailing : .leading) {
       if let outgoing {
         undoRing(since: outgoing)
           .padding(leftHanded ? .trailing : .leading, BarLine.margin)
       }
+    }
+    .overlay {
+      GeometryReader { geometry in
+        let item = outgoingItems.last(where: { $0.thumbnail != nil })
+        let edge = BarLine.margin + Self.ring + 8 + 14
+        OutgoingThumbnailSlot(
+          item: item, more: outgoingItems.count - 1,
+          destination: CGPoint(x: leftHanded ? geometry.size.width - edge : edge,
+                               y: geometry.size.height / 2),
+          fallbackOrigin: CGPoint(x: geometry.size.width / 2, y: geometry.size.height / 2),
+          began: flyBegan)
+          .animation(nil, value: item)
+
+      }
+      .allowsHitTesting(false)
+      .accessibilityHidden(true)
     }
     .animation(.snappy, value: outgoing)
     .animation(.spring(duration: 0.4, bounce: 0.35), value: yo)
@@ -1734,7 +2049,7 @@ struct RowButton: View {
   /// leaves it room.
   private func line(touchable: Bool) -> some View {
     BarLine(
-      start: (outgoing == nil ? BarLine.margin : BarLine.margin + Self.ring + BarLine.gap) + (icon == nil ? 0 : Self.iconRoom),
+      start: (outgoing == nil ? BarLine.margin : BarLine.margin + Self.ring + BarLine.gap + (outgoingItems.contains { $0.thumbnail != nil } ? 42 : 0)) + (icon == nil ? 0 : Self.iconRoom),
       mirrored: leftHanded,
       below: !senders.isEmpty && (yo != nil || !media.isEmpty),  // a group's senders: under the name, "Kai: Yo!!"
       lineEnd: senders.isEmpty || media.isEmpty ? 0 : Self.sign  // its photo sign on the name's line
@@ -2297,24 +2612,27 @@ struct RecordingFill: View {
 }
 
 /// A bar in camera mode, as the Camera app's shutter: pressed, it goes back and darkens at once; let go, it springs out
-/// again. Recording (held), it stays out.
+/// again. Recording keeps it pressed until release.
 struct ShutterPress: ButtonStyle {
   let recording: Bool
+  var press: (Bool) -> Void = { _ in }
 
   func makeBody(configuration: Configuration) -> some View {
-    let down = configuration.isPressed && !recording
+    let down = configuration.isPressed || recording
     configuration.label
       .brightness(down ? -0.12 : 0)
       .scaleEffect(down ? 0.94 : 1)
       .animation(down ? .easeOut(duration: 0.06) : .spring(response: 0.3, dampingFraction: 0.55), value: down)
       .onChange(of: configuration.isPressed) { _, pressed in
         if pressed { Haptic.prepare() }
+        press(pressed)
       }
   }
 }
 
 /// The bar under the finger: a quick light-up.
 struct RowPress: ButtonStyle {
+  var press: (Bool) -> Void = { _ in }
   func makeBody(configuration: Configuration) -> some View {
     configuration.label
       .overlay(.white.opacity(configuration.isPressed ? 0.18 : 0))
@@ -2322,6 +2640,7 @@ struct RowPress: ButtonStyle {
       .animation(.smooth(duration: 0.15), value: configuration.isPressed)
       .onChange(of: configuration.isPressed) { _, pressed in
         if pressed { Haptic.prepare() }
+        press(pressed)
       }
   }
 }
