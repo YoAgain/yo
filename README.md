@@ -1,5 +1,7 @@
 <p align="center">
   <img src="app/ios/YoApp/AppIcon.png" alt="Yo app icon" width="112">
+  &nbsp;&nbsp;&nbsp;
+  <img src="docs/app.png" alt="The Yo app: a list of friends and groups" width="150">
 </p>
 <h1 align="center">Yo · It's that simple.</h1>
 
@@ -10,12 +12,8 @@ Send photos and videos to view once.</p>
 
 ## How to use
 
-<img src="docs/app.png" alt="The Yo app: a list of friends and groups" width="220" align="right">
-
 1. **Pick a username.**
 2. **Tap to send Yo.**
-
-<br clear="right">
 
 ## Encryption
 
