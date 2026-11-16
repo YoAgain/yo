@@ -1435,6 +1435,10 @@ extension FriendList {
     if !on {
       picked = nil
       libraryItem = nil
+      if recordingFor != nil {  // a hold the camera closed under: no video waits, the next hold records again
+        recordingFor = nil
+        Task { _ = await camera.stopVideo() }
+      }
     }
     Task { await switchCamera(on) }
   }
@@ -1654,17 +1658,26 @@ struct RowButton: View {
           label
         }
         .buttonStyle(ShutterPress(recording: recording))
-        .onLongPressGesture(minimumDuration: 0.3, maximumDistance: 60) {
-          holding = true
-          hold(true)
-        } onPressingChanged: { pressing in
-          guard !pressing, holding else { return }
-          hold(false)
-          Task {
-            try? await Task.sleep(for: .milliseconds(300))  // the bar's own tap on letting go comes first
-            holding = false
-          }
-        }
+        // Beside the Button, not against it: a long press attached to a Button in a scroll view loses the touch to
+        // the Button (the tap still comes, the hold never does). Held 0.3 s, then the finger's end lets go.
+        .simultaneousGesture(
+          LongPressGesture(minimumDuration: 0.3, maximumDistance: 60)
+            .sequenced(before: DragGesture(minimumDistance: 0))
+            .onChanged { value in
+              if case .second(true, _) = value, !holding {
+                holding = true
+                hold(true)
+              }
+            }
+            .onEnded { _ in
+              guard holding else { return }
+              hold(false)
+              Task {
+                try? await Task.sleep(for: .milliseconds(300))  // the bar's own tap on letting go comes first
+                holding = false
+              }
+            }
+        )
         .accessibilityHint(hint ?? "")
         // VoiceOver has no hold: recording starts and stops as an action.
         .accessibilityAction(named: recordingByAction ? "Stop and Send Video" : "Record Video") {
