@@ -113,6 +113,7 @@ fn core_cost() {
                         user: user.clone(),
                         plain: vec![1; 64],
                         device: None,
+                        non_urgent: false,
                         payload: None,
                         made_for: vec![],
                         refused: false,

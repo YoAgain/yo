@@ -287,6 +287,20 @@ impl Config {
     }
 }
 
+/// A list of names, one per line, a note after `#` if any; blank lines and `#` lines skipped (tests and tools).
+pub fn parse_reserved(text: &str) -> Vec<Reserved> {
+    text.lines()
+        .filter_map(|line| {
+            let (name, note) = match line.split_once('#') {
+                Some((name, note)) => (name, Some(note.trim()).filter(|n| !n.is_empty())),
+                None => (line, None),
+            };
+            let name = name.trim().to_owned();
+            (!name.is_empty()).then(|| Reserved { spelling: name, note: note.map(str::to_owned) })
+        })
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -300,18 +314,4 @@ mod tests {
         assert_eq!(parse_min_app(" ios/5, android/7 ,").unwrap(), [("ios".into(), 5), ("android".into(), 7)]);
         assert!(parse_min_app("ios").is_err());
     }
-}
-
-/// A list of names, one per line, a note after `#` if any; blank lines and `#` lines skipped (tests and tools).
-pub fn parse_reserved(text: &str) -> Vec<Reserved> {
-    text.lines()
-        .filter_map(|line| {
-            let (name, note) = match line.split_once('#') {
-                Some((name, note)) => (name, Some(note.trim()).filter(|n| !n.is_empty())),
-                None => (line, None),
-            };
-            let name = name.trim().to_owned();
-            (!name.is_empty()).then(|| Reserved { spelling: name, note: note.map(str::to_owned) })
-        })
-        .collect()
 }
