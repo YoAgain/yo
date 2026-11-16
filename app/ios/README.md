@@ -30,7 +30,11 @@ The app talks to the live hub (TestFlight and App Store) or the dev hub (Yo Dev)
 - The app and both extensions use one account state, in the App Group, its key in the group's keychain group, in
   turns under a file lock (`SharedState.swift`, `StateLock` in the core): each step of the core takes the lock and the
   newest state, so there is one writer and never a write from an old state. The state moves there once, at the
-  first start of a build that has the group. Yo Dev (`dev/push.sh`) is built without the extensions and keeps its
+  first start of a build that has the group. Every flock in the app gets background time. Refused time skips the
+  turn; expiry releases the flock, cancels its request and fences later saves and requests. The next turn reloads
+  from disk, including when its generation did not change. Extensions revoke their turns before returning to iOS.
+  `app/ios/tests/shared-access.sh` tests the lock helper on Linux (Swift 6), without a device.
+  Yo Dev (`dev/push.sh`) is built without the extensions and keeps its
   state to itself.
 
 ## Build and run
@@ -53,6 +57,17 @@ Once before: pair over USB (`tools/tailnet-tunnel.py pair` in omarchy-apple-dev)
 (`tools/provision-dev.py --bundle-id app.justyo.ios.dev`). Keys, profiles and pairing records stay outside the
 repository; this machine's phone address and paths go in `dev/local.env` (ignored). The scripts run with
 pymobiledevice3's Python (`PY` in `local.env`).
+
+Yo Dev signing expands the profile's wildcard to the concrete app-id prefix plus bundle id for both the
+application identifier and default keychain group. The prefix comes from `ApplicationIdentifierPrefix`, which
+need not be the team id. Legacy keychain grants stay available so an older state's sealing key can be adopted
+only after it opens Yo Dev's own file. `python3 app/ios/tests/dev-sign.py` checks this with a synthetic profile.
+
+To check on a phone: sign in to Yo Dev, note its account and friends, then run `dev/push.sh` twice over the
+installed app, quitting and reopening after each install. The account and friends must remain, without
+“Sign In Again”; Yo from TestFlight must keep its own account. Check an older dev install as well to exercise
+key migration. Do not delete the app for this check: deleting it clears its private state file, so account
+recovery is required even if its key survives in the keychain.
 
 ## In the Simulator (on a Mac)
 
@@ -87,3 +102,68 @@ the main thread. `dev/core.sh` builds it on Linux and `dev/push.sh` runs it firs
   `libclang_rt.ios.a`;
 - `uniffi-bindgen` in library mode reads the interface from `libyo.a`: `yo.swift` becomes the target `YoCore`,
   `yoFFI.h` with its module map and the library a hand-made `yoFFI.xcframework` (binary target `yoFFI`).
+
+## Frame performance (Yo Dev, physical phone)
+
+`dev/perf.sh` installs an optimized Yo Dev, builds `yo-send`, and rotates **300 runs** through direct
+100/3 s, group 100/3 s, six simultaneous senders × 20/1 s, one synthetic photo, cold launch, warm reopen,
+and 30 physical tap-to-sends. It launches each process with `YO_PERF=1` and a unique run token. It uses
+wireless.py's userspace pairing tunnel and pymobiledevice3's unified log relay. It retains only the
+`YO_PERF_RUN {json}` summary, never unrelated device logs. Nothing is deployed until you run it.
+
+Prepare test accounts only, on the dev hub. `yo-send` registers a missing state automatically (there is no
+`--help`; options are at `tests/src/send.rs`). Put machine settings in ignored `dev/local.env`:
+
+```sh
+# Alongside the existing YO_PHONE/PY/signing settings; all names below must be synthetic test accounts.
+PERF_TO=...      # account signed into Yo Dev; accept senders and the group before measuring
+PERF_PREFIX=...  # unique synthetic prefix, short enough for username rules; retained across resumes
+PERF_GROUP=...   # test group name
+PERF_PHOTO=...   # absolute path to synthetic JPEG, no personal image/metadata
+```
+
+Before the first run, build and prepare six senders and a seven-member group (adjust members up to 20):
+
+```sh
+cargo build --release -p yo-tests --bin yo-send
+source app/ios/dev/local.env
+mkdir -p target/perf-state
+for n in 0 1 2 3 4 5; do
+  target/release/yo-send --url https://dev.justyo.app \
+    --state "target/perf-state/$PERF_PREFIX-$n" --name "$PERF_PREFIX$n" --to "$PERF_TO" --count 1
+done
+target/release/yo-send --url https://dev.justyo.app \
+  --state "target/perf-state/$PERF_PREFIX-0" --name "${PERF_PREFIX}0" \
+  --make-group "$PERF_GROUP" \
+  --members "$PERF_TO,${PERF_PREFIX}1,${PERF_PREFIX}2,${PERF_PREFIX}3,${PERF_PREFIX}4,${PERF_PREFIX}5"
+# Accept requests in Yo Dev; leave it on the friend list, phone unlocked, Low Power Mode off.
+N=300 app/ios/dev/perf.sh
+app/ios/dev/perf.sh --summary
+```
+
+The runner holds an exclusive lock (never overlap another sender using these states). It fsyncs completed
+runs to `target/perf/runs.jsonl`; rerun the same command/settings to skip completed indices. Remove that
+file to start a new campaign after code, device, refresh-rate, group-size or account changes. Summaries are
+`target/perf/summary.md`: worst **per-run** p50/p95/p99/max callback intervals, summed hitch count/time,
+worst callback stall with overlapping named main-thread work, and process-start-to-list milliseconds. They are deliberately not percentiles
+of percentiles represented as pooled frame percentiles. Failed sends, rate overruns and missing reports
+stop without completing that index. Sender output is checked in memory and discarded.
+
+Each measurement lasts 15 seconds after the list installs its watch. During burst runs, scroll and tap the
+list to exercise interaction under load. Warm runs prompt for Home → reopen; tap runs prompt for 30 real
+taps. Both require operator confirmation before saving. There is no private touch injection: this is an
+operator-assisted harness, not 300 unattended UI tests. Cold runs restart the process, not the phone or
+filesystem cache. Repeated warm runs restart first, then measure the operator's background/foreground
+cycle. Background display gaps are excluded. The phone's actual 60/120 Hz mode must be checked separately.
+
+`Perf.timed` emits Points of Interest signposts and records named synchronous main-thread spans. Each run
+emits one public unified-log JSON line with percentiles, hitches, excess hitch milliseconds, longest excess
+callback interval and overlapping spans (or explicitly unattributed). Deadline excess uses the current
+CADisplayLink target interval, with 0.5 ms jitter tolerance. These are **CPU callback scheduling proxies**:
+they cannot prove actual presentation deadlines, GPU hitches, or identify arbitrary uninstrumented stacks.
+Use Instruments Animation Hitches/Time Profiler on the phone to confirm the zero-hitch target, launch before
+list installation, and unattributed stalls. The baseline/fixed-device comparison is still outstanding.
+
+The static audit and remaining blockers are in [PERFORMANCE.md](PERFORMANCE.md). For restricted Linux builds,
+use `XDG_CACHE_HOME="$PWD/target/perf-cache"` (absolute repository path) with xtool when the default cache is
+read-only. No core semantics or durability boundaries were changed; no state-save debounce is used.

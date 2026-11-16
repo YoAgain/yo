@@ -8,6 +8,7 @@ import CryptoKit
 import Foundation
 import ImageIO
 import Observation
+import Synchronization
 import UIKit
 import UniformTypeIdentifiers
 import YoCore
@@ -59,11 +60,12 @@ enum MediaStorage {
   }
 
   /// Signing out: nothing of the account's photos and videos stays, sent or received.
-  @MainActor static func clearAll() {
+  static func clearAll() async {
+    await ReceivedMedia.shared.forgetAll()
+    ReceivedMedia.drainWrites()
     for name in ["Outbox", "Received"] {
       try? FileManager.default.removeItem(at: URL.applicationSupportDirectory.appending(path: name))
     }
-    ReceivedMedia.shared.forgetAll()
     Prefetch.clear()
     ManifestSeal.forget()
   }
@@ -73,10 +75,10 @@ enum MediaStorage {
 /// state is (spec 2), ChaCha20-Poly1305 under a key of their own derived from the state key in the keychain
 /// (HKDF-SHA256, "yo media manifest v1"), so the files alone open nothing. On disk: "YOM1" || nonce || ciphertext ||
 /// tag. A manifest of the builds before (plain JSON) is read once and written again sealed.
-@MainActor
 enum ManifestSeal {
   private static let magic = Data("YOM1".utf8)
-  private static var cached: SymmetricKey?
+  private static let cache = Mutex<(key: SymmetricKey?, generation: Int)>((nil, 0))
+  private static let reader = NSLock()
 
   /// What a manifest's bytes open to.
   enum Opened {
@@ -89,21 +91,34 @@ enum ManifestSeal {
   }
 
   /// The key; throws while the keychain does not answer (locked), nil when there is none (no account).
-  private static func key() throws -> SymmetricKey? {
-    if let cached { return cached }
-    // Where the account's state key is: the App Group's (Yo), else the app's own (Yo Dev, or not moved in yet).
-    var state: Data? = nil
-    if SharedStateFile.available { state = try StateKey.shared() }
-    if state == nil { state = try StateKey.load() }
-    guard let state else { return nil }
-    let key = HKDF<SHA256>.deriveKey(
-      inputKeyMaterial: SymmetricKey(data: state), info: Data("yo media manifest v1".utf8), outputByteCount: 32)
-    cached = key
-    return key
+  fileprivate static func key() throws -> SymmetricKey? {
+    if let cached = cache.withLock({ $0.key }) { return cached }
+    // Cache reads never wait behind securityd. Only worker threads take the reader lock.
+    guard !Thread.isMainThread else {
+      Task.detached(priority: .utility) { _ = try? key() }
+      throw SharedAccess.unavailable
+    }
+    reader.lock()
+    defer { reader.unlock() }
+    if let cached = cache.withLock({ $0.key }) { return cached }
+    let generation = cache.withLock { $0.generation }
+    return try Perf.timed("media.manifest.key") {
+      var state: Data?
+      if SharedStateFile.available { state = try StateKey.shared() }
+      if state == nil { state = try StateKey.load() }
+      guard let state else { return nil }
+      let key = HKDF<SHA256>.deriveKey(
+        inputKeyMaterial: SymmetricKey(data: state), info: Data("yo media manifest v1".utf8), outputByteCount: 32)
+      return cache.withLock {
+        guard $0.generation == generation else { return nil }
+        $0.key = key
+        return key
+      }
+    }
   }
 
-  /// Signed out: the key is read again (a new account may have a new one).
-  static func forget() { cached = nil }
+  /// Signed out: an in-flight keychain read cannot repopulate the old account's cache.
+  static func forget() { cache.withLock { $0 = (nil, $0.generation + 1) } }
 
   /// Nil when there is no key now: the manifest is not written.
   static func seal(_ json: Data) -> Data? {
@@ -136,7 +151,7 @@ enum ManifestSeal {
 }
 
 /// What the Yo of a photo or video says, as it waits on disk.
-struct StoredMedia: Codable {
+struct StoredMedia: Codable, Sendable {
   let id: Data
   let key: Data
   let sha256: Data
@@ -201,7 +216,10 @@ final class MediaOutbox {
   @ObservationIgnored private var loaded = false
 
   init() {
-    load()
+    Task {
+      _ = try? await Hub.run { try ManifestSeal.key() }
+      load()
+    }
   }
 
   /// Reads the queue, once; false while one is there and does not read now (before the first unlock after a restart).
@@ -503,31 +521,35 @@ final class MediaOutbox {
 /// or kept, never neither. It is read before anything else is done here; while it cannot be read (the iPhone locked
 /// since it started), nothing is written or deleted, and a note waits (the core keeps its Yo). All of it on the main
 /// actor but the reading, writing and fetching.
-@MainActor
-final class ReceivedMedia {
+actor ReceivedMedia {
   static let shared = ReceivedMedia()
 
-  private struct Pending: Codable {
+  private struct Pending: Codable, Sendable {
     let id: String
     let from: String
     let kind: MediaFile.Kind
     let media: StoredMedia
   }
 
-  private struct Saved: Codable {
+  private struct Saved: Codable, Sendable {
     let id: String
     let from: String
     let kind: MediaFile.Kind
   }
 
   /// Noted and kept, in one file.
-  private struct Manifest: Codable {
+  private struct Manifest: Codable, Sendable {
     var pending: [Pending] = []
     var saved: [Saved] = []
   }
 
-  private var pending: [Pending] = []
-  private var saved: [Saved] = []
+  private var manifestRevision = 0
+  private var pending: [Pending] = [] {
+    didSet { manifestRevision += 1 }
+  }
+  private var saved: [Saved] = [] {
+    didSet { manifestRevision += 1 }
+  }
   /// The manifest has been read (or is not there): until then nothing here is written or deleted.
   private var loaded = false
   private var fetching: Set<String> = []
@@ -548,17 +570,16 @@ final class ReceivedMedia {
   /// The longest side of a bar's thumbnail, in pixels.
   nonisolated private static let thumbnailPixels = 300
 
-  private var directory: URL { MediaStorage.directory("Received") }
+  private lazy var directory = MediaStorage.directory("Received")
   private var manifest: URL { directory.appending(path: "media.json") }
   /// The two indexes of the builds before, read once into the manifest.
   private var oldIndexes: [URL] { [directory.appending(path: "pending.json"), directory.appending(path: "received.json")] }
 
   private init() {
-    load()
     // In front again, or unlocked: what rests, or waited for the files to open, is tried now.
     for name in [UIApplication.didBecomeActiveNotification, UIApplication.protectedDataDidBecomeAvailableNotification] {
       _ = NotificationCenter.default.addObserver(forName: name, object: nil, queue: .main) { _ in
-        MainActor.assumeIsolated { ReceivedMedia.shared.wake() }
+        Task { await ReceivedMedia.shared.wake() }
       }
     }
   }
@@ -579,6 +600,10 @@ final class ReceivedMedia {
   /// off) is deleted. A few files, once, before any fetch can write one.
   @discardableResult
   private func load() -> Bool {
+    Perf.timed("media.manifest.load") { loadNow() }
+  }
+
+  private func loadNow() -> Bool {
     if loaded { return true }
     let decoder = JSONDecoder()
     let found: Manifest
@@ -617,7 +642,7 @@ final class ReceivedMedia {
     // Kept, and its file gone: seen, and the manifest that said so did not write before the app ended. Never again.
     let seen = saved.filter { !FileManager.default.fileExists(atPath: file($0.id, $0.kind).path) }
     saved.removeAll { one in seen.contains { $0.id == one.id } }
-    if (migrated || !written.isEmpty || !seen.isEmpty) && store() {
+    if (migrated || !written.isEmpty || !seen.isEmpty) && storeNow() {
       oldIndexes.forEach { try? FileManager.default.removeItem(at: $0) }
     }
     // What no note names goes, unless a damaged manifest was kept aside: then it may be what that one named.
@@ -639,27 +664,74 @@ final class ReceivedMedia {
   /// The manifest to disk, whole; false when it did not write (or was never read). Readable while the iPhone is
   /// locked once it was unlocked after starting, so a Yo that comes then is noted (the photos and videos themselves
   /// have complete protection).
-  private func store() -> Bool {
-    guard loaded, let json = try? JSONEncoder().encode(Manifest(pending: pending, saved: saved)),
-      let data = ManifestSeal.seal(json)
-    else { return false }
-    guard (try? data.write(to: manifest, options: [.atomic, .completeFileProtectionUntilFirstUserAuthentication])) != nil
-    else { return false }
-    ManifestSeal.wrote(manifest)
-    return true
+  // Serial writes; migration and sign-out drain the queue before their synchronous work.
+  private static let writes = DispatchQueue(label: "yo.received.manifest", qos: .utility)
+  static func drainWrites() { writes.sync {} }
+
+  private func store() async -> Bool {
+    guard loaded, let key = try? ManifestSeal.key() else { return false }
+    let snapshot = Manifest(pending: pending, saved: saved)
+    let url = manifest
+    return await withCheckedContinuation { continuation in
+      Self.writes.async {
+        let written = Perf.timed("media.manifest.save") {
+          _ = MediaStorage.directory("Received")  // recreate after sign-out, off the main actor
+          guard let json = try? JSONEncoder().encode(snapshot),
+            let box = try? ChaChaPoly.seal(json, using: key),
+            (try? (Data("YOM1".utf8) + box.combined).write(
+              to: url, options: [.atomic, .completeFileProtectionUntilFirstUserAuthentication])) != nil
+          else { return false }
+          UserDefaults.standard.set(true, forKey: "manifests.sealed." + url.lastPathComponent)
+          return true
+        }
+        continuation.resume(returning: written)
+      }
+    }
+  }
+
+  private func storeNow() -> Bool {
+    return Perf.timed("media.manifest.migrate") {
+      Self.drainWrites()
+      guard loaded, let json = try? JSONEncoder().encode(Manifest(pending: pending, saved: saved)),
+        let data = ManifestSeal.seal(json)
+      else { return false }
+      guard (try? data.write(to: manifest, options: [.atomic, .completeFileProtectionUntilFirstUserAuthentication])) != nil
+      else { return false }
+      ManifestSeal.wrote(manifest)
+      return true
+    }
   }
 
   /// A photo or video came: noted before the core may forget its Yo. False when the note did not write: the core then
   /// keeps the Yo (`Inbox.take`).
-  func expect(_ media: YoMedia, id: String, from: String, kind: MediaFile.Kind) -> Bool {
+  private var expecting: [String: Task<Bool, Never>] = [:]
+
+  /// A batch crosses from the UI once; each successful note is still durable before its event is acknowledged.
+  func expectBatch(_ notes: [(YoMedia, String, String, MediaFile.Kind)]) async -> Set<String> {
+    var written: Set<String> = []
+    for (media, id, from, kind) in notes {
+      if await expect(media, id: id, from: from, kind: kind) { written.insert(id) }
+    }
+    return written
+  }
+
+  func expect(_ media: YoMedia, id: String, from: String, kind: MediaFile.Kind) async -> Bool {
     guard load() else { return false }
+    if let writing = expecting[id] { return await writing.value }
     guard !pending.contains(where: { $0.id == id }), !saved.contains(where: { $0.id == id }) else { return true }
     pending.append(Pending(id: id, from: from, kind: kind, media: StoredMedia(media)))
-    guard store() else {
-      pending.removeAll { $0.id == id }
-      return false
+    let generation = generation
+    let writing = Task {
+      guard generation == self.generation else { return false }
+      let stored = await store()
+      return generation == self.generation && stored
     }
-    return true
+    expecting[id] = writing
+    let written = await writing.value
+    guard generation == self.generation else { return false }
+    expecting[id] = nil
+    if !written { pending.removeAll { $0.id == id } }
+    return written
   }
 
   /// Fetches what is noted and not under way, a few at a time, oldest first; one waiting to try again (the network
@@ -672,16 +744,18 @@ final class ReceivedMedia {
   }
 
   private func startMore() {
-    guard let client, let arrived, !HubTransport.unsupported, load() else { return }
-    // While a download is not written (a full disk), nothing new is fetched: only what is held in memory is tried
-    // again, so the memory held stays bounded and nothing fetched for the last time is lost to a kill.
-    let holding = !unwritten.isEmpty
-    for one in pending
-    where !fetching.contains(one.id) && fetching.count < Self.together && (resting[one.id]?.until ?? .distantPast) <= .now
-      && (!holding || unwritten[one.id] != nil)
-    {
-      fetching.insert(one.id)
-      Task { await fetch(one, client: client, arrived: arrived) }
+    Perf.timed("media.fetch.start") {
+      guard let client, let arrived, !HubTransport.unsupported, load() else { return }
+      // While a download is not written (a full disk), nothing new is fetched: only what is held in memory is tried
+      // again, so the memory held stays bounded and nothing fetched for the last time is lost to a kill.
+      let holding = !unwritten.isEmpty
+      for one in pending
+      where !fetching.contains(one.id) && fetching.count < Self.together && (resting[one.id]?.until ?? .distantPast) <= .now
+        && (!holding || unwritten[one.id] != nil)
+      {
+        fetching.insert(one.id)
+        Task { await fetch(one, client: client, arrived: arrived) }
+      }
     }
   }
 
@@ -737,7 +811,7 @@ final class ReceivedMedia {
         Prefetch.done(media)
         pending.removeAll { $0.id == one.id }
         resting[one.id] = nil
-        _ = store()
+        _ = await store()
         return
       }
       // Kept meanwhile from the same blob in another conversation (below): done.
@@ -757,7 +831,9 @@ final class ReceivedMedia {
       let kept = Saved(id: one.id, from: one.from, kind: one.kind)
       saved.append(kept)
       pending.removeAll { $0.id == one.id }
-      guard store() else {
+      let stored = await store()
+      guard generation == self.generation else { return }
+      guard stored else {
         saved.removeAll { $0.id == one.id }
         pending.append(one)
         unwritten[one.id] = data
@@ -768,7 +844,7 @@ final class ReceivedMedia {
       Prefetch.done(media)  // kept in the app's own media now
       let arrival = await arrival(kept)
       // Signed out while the thumbnail was made: not for the account after it.
-      if let arrival, generation == self.generation { arrived(arrival) }
+      if let arrival, generation == self.generation { await arrived(arrival) }
       // The same blob in other conversations waiting too (a photo to two groups): theirs from this one fetch, not
       // one more each (the notification service's file is gone, and its claim would not be given again).
       for other in pending where other.id != one.id && other.media.media.id == media.id {
@@ -779,12 +855,14 @@ final class ReceivedMedia {
         let also = Saved(id: other.id, from: other.from, kind: other.kind)
         saved.append(also)
         pending.removeAll { $0.id == other.id }
-        guard store() else {
+        let stored = await store()
+        guard generation == self.generation else { return }
+        guard stored else {
           saved.removeAll { $0.id == other.id }
           pending.append(other)
           continue
         }
-        if let shown = await self.arrival(also), generation == self.generation { arrived(shown) }
+        if let shown = await self.arrival(also), generation == self.generation { await arrived(shown) }
       }
       return
     }
@@ -799,15 +877,19 @@ final class ReceivedMedia {
     let generation = generation
     Task { [weak self] in
       try? await Task.sleep(for: .seconds(seconds))
-      guard let self, generation == self.generation else { return }
-      self.startMore()
+      await self?.resumeFetches(generation: generation)
     }
+  }
+
+  private func resumeFetches(generation: Int) {
+    guard generation == self.generation else { return }
+    startMore()
   }
 
   /// What waits to be seen, after a restart, oldest sent first. Once the files can be read: a start while the iPhone
   /// is locked waits for it to be unlocked.
   func waiting() async -> [Arrival] {
-    while !(UIApplication.shared.isProtectedDataAvailable && load()) {
+    while !(await MainActor.run { UIApplication.shared.isProtectedDataAvailable }) || !load() {
       try? await Task.sleep(for: .seconds(5))
     }
     let generation = generation
@@ -823,17 +905,21 @@ final class ReceivedMedia {
   /// next start). A manifest that does not write now is written again until it does (`storeUntilWritten`); its file
   /// goes when the viewer closes all the same, and a start drops a kept one without its file (`load`).
   func consumed(_ id: String) {
-    saved.removeAll { $0.id == id }
-    storeUntilWritten()
+    Perf.timed("media.consumed") {
+      saved.removeAll { $0.id == id }
+      storeUntilWritten()
+    }
   }
 
   /// Seen: gone from this iPhone, the file first (what makes it seen for good, see `load`), then the manifest.
   func forget(_ id: String) {
-    for kind in [MediaFile.Kind.photo, .video] {
-      try? FileManager.default.removeItem(at: file(id, kind))
+    Perf.timed("media.forget") {
+      for kind in [MediaFile.Kind.photo, .video] {
+        try? FileManager.default.removeItem(at: file(id, kind))
+      }
+      saved.removeAll { $0.id == id }
+      storeUntilWritten()
     }
-    saved.removeAll { $0.id == id }
-    storeUntilWritten()
   }
 
   /// Written again while it fails, a second, then longer, up to half a minute apart, until it writes (any later
@@ -841,13 +927,19 @@ final class ReceivedMedia {
   private var rewriting: Task<Void, Never>?
 
   private func storeUntilWritten() {
-    guard !store(), rewriting == nil else { return }
+    guard rewriting == nil else { return }
     let generation = generation
     rewriting = Task {
       var pause = 1.0
       while generation == self.generation {
+        let revision = manifestRevision
+        let written = await store()
+        guard generation == self.generation else { return }
+        if written {
+          if revision == manifestRevision { break }
+          continue  // a mutation during the write needs a newer snapshot
+        }
         try? await Task.sleep(for: .seconds(pause))
-        if generation != self.generation || store() { break }
         pause = min(pause * 2, 30)
       }
       if generation == self.generation { rewriting = nil }
@@ -857,6 +949,8 @@ final class ReceivedMedia {
   /// Signed out: nothing kept, nothing noted (the files went with MediaStorage.clearAll).
   func forgetAll() {
     generation += 1
+    expecting.values.forEach { $0.cancel() }
+    expecting = [:]
     pending = []
     saved = []
     loaded = true
@@ -875,7 +969,7 @@ final class ReceivedMedia {
     let url = file(one.id, one.kind)
     switch one.kind {
     case .photo:
-      let image = await Task.detached(priority: .userInitiated) { Self.thumbnail(url) }.value
+      let image = await Task.detached(priority: .userInitiated) { Perf.timed("media.thumbnail.decode") { Self.thumbnail(url) } }.value
       return image.map { Arrival(id: one.id, from: one.from, photo: $0, file: url) }
     case .video:
       guard FileManager.default.fileExists(atPath: url.path) else { return nil }
@@ -897,6 +991,11 @@ final class ReceivedMedia {
       kCGImageSourceShouldCacheImmediately: true,
       kCGImageSourceThumbnailMaxPixelSize: thumbnailPixels,
     ]
-    return CGImageSourceCreateThumbnailAtIndex(source, 0, options as CFDictionary).map { UIImage(cgImage: $0) }
+    return CGImageSourceCreateThumbnailAtIndex(source, 0, options as CFDictionary).map { image in
+      Perf.timed("media.thumbnail.image") {
+        let image = UIImage(cgImage: image)
+        return image.preparingForDisplay() ?? image
+      }
+    }
   }
 }

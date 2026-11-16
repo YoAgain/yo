@@ -57,8 +57,35 @@ final class Inbox {
   /// When the hub last answered a sync: Settings › Encryption's "Hub Connected".
   var lastSync: Date?
   /// Counts each time Yos are ready for the list (`takeArrivals`): at most every `batchSeconds`, so a burst (twenty
-  /// Yos in a second) redraws the list ten times, not twenty, and each time with all that came meanwhile.
+  /// Yos in a second) redraws the list five times, not twenty, and each time with all that came meanwhile.
   private(set) var arrived = 0
+  /// Sustained floods alone suppress list motion: more than twelve arrivals in one second.
+  private(set) var busy = false
+  @ObservationIgnored private var recentArrivals: [ContinuousClock.Instant] = []
+  @ObservationIgnored private var lastArrival = ContinuousClock.now
+
+  private func noteArrival() {
+    let now = ContinuousClock.now
+    lastArrival = now
+    recentArrivals.removeAll { now - $0 >= .seconds(1) }
+    // Only the latest thirteen are needed to detect the threshold.
+    if recentArrivals.count == 13 { recentArrivals.removeFirst() }
+    recentArrivals.append(now)
+    guard !busy, recentArrivals.count > 12 else { return }
+    busy = true
+    Perf.mark("flood.start")
+    Task { [weak self] in
+      while let deadline = self?.lastArrival.advanced(by: .milliseconds(1500)) {
+        do { try await ContinuousClock().sleep(until: deadline) } catch { return }
+        guard let self else { return }
+        guard ContinuousClock.now - self.lastArrival >= .milliseconds(1500) else { continue }
+        self.busy = false
+        self.recentArrivals.removeAll(keepingCapacity: true)
+        Perf.mark("flood.end")
+        return
+      }
+    }
+  }
   /// The Yos that came since the list last took them, in order. Who and which only; the photos stay in `media` and go
   /// once seen.
   @ObservationIgnored private var ready: [Arrival] = []
@@ -66,7 +93,8 @@ final class Inbox {
   @ObservationIgnored private var gathering = false
   /// Counts Yos as they come, to tell whether more came during a batch.
   @ObservationIgnored private var came = 0
-  static let batchSeconds = 0.1
+  // Allow the 160 ms count transition to finish between batches.
+  static let batchSeconds = 0.2
   /// One who sent Yos standing on a group's bar, and how many.
   struct GroupSender: Equatable {
     var name: String
@@ -76,12 +104,39 @@ final class Inbox {
   }
   /// Who sent the Yos standing on a group's bar (by its `Friend.mediaKey`), in the order they first came, each once
   /// with their count: a line each under the bar's name, "Kai: Yo!!" (`SenderBlocks`). Gone with the Yos (`endRun`).
-  var groupSenders: [String: [GroupSender]] = [:]
+  @MainActor @Observable final class SenderRun { var senders: [GroupSender] = [] }
+  @ObservationIgnored private var senderRuns: [String: SenderRun] = [:]
+  func senderRun(_ key: String) -> SenderRun {
+    if let run = senderRuns[key] { return run }
+    let run = SenderRun()
+    senderRuns[key] = run
+    return run
+  }
+  private final class PendingSenders {
+    var senders: [GroupSender]
+    var indexes: [String: Int]
+    init(_ senders: [GroupSender]) {
+      self.senders = senders
+      indexes = Dictionary(senders.enumerated().map { ($0.element.name, $0.offset) }, uniquingKeysWith: { a, _ in a })
+    }
+    func add(_ name: String) {
+      if let index = indexes[name] {
+        senders[index].count += 1
+        senders[index].at = .now
+      } else {
+        indexes[name] = senders.count
+        senders.append(GroupSender(name: name, count: 1))
+      }
+    }
+  }
+  @ObservationIgnored private var pendingSenders: [String: PendingSenders] = [:]
+  @ObservationIgnored private var publishingSenders = false
 
   /// A group bar's Yos are over (its senders' lines have faded): the bar is one line again, a photo still waiting
   /// with its sign at the end as on any bar; the next Yo starts its senders anew.
   func endRun(_ key: String) {
-    groupSenders[key] = nil
+    pendingSenders[key] = nil
+    senderRun(key).senders = []
   }
   /// Group members' names by user id (hex), as their Yos came: who a group's photo is from in the viewer.
   @ObservationIgnored var memberNames: [String: String] = [:]
@@ -115,16 +170,17 @@ final class Inbox {
     Task { @MainActor in
       for arrival in await ReceivedMedia.shared.waiting() { add(arrival) }
     }
-    Task { @MainActor in sounds = await Self.makeSounds() }
   }
 
   /// A photo or video kept, on its sender's bar until seen, in the order sent.
   private func add(_ arrival: Arrival) {
-    let key = Self.mediaKey(arrival)
-    var waiting = unseenMedia[key] ?? []
-    guard !waiting.contains(where: { $0.id == arrival.id }) else { return }
-    waiting.insert(arrival, at: waiting.firstIndex { Arrival.older(arrival, $0) } ?? waiting.endIndex)
-    unseenMedia[key] = waiting
+    Perf.timed("inbox.media.handoff") {
+      let key = Self.mediaKey(arrival)
+      var waiting = unseenMedia[key] ?? []
+      guard !waiting.contains(where: { $0.id == arrival.id }) else { return }
+      waiting.insert(arrival, at: waiting.firstIndex { Arrival.older(arrival, $0) } ?? waiting.endIndex)
+      unseenMedia[key] = waiting
+    }
   }
 
   /// Signed out: what waited to be seen is gone (MediaStorage.clearAll deleted it), and Yos not shown yet.
@@ -133,6 +189,8 @@ final class Inbox {
     resending?.cancel()
     resending = nil
     unseenMedia = [:]
+    pendingSenders = [:]
+    for run in senderRuns.values { run.senders = [] }
     ready = []
     uncounted = [:]
     taken = []
@@ -143,26 +201,8 @@ final class Inbox {
   /// The Yo sound, a few players taking turns: every Yo sounds in full, Yos close together over each other, as the
   /// original's did (none cuts off the one before). Made at launch off the main thread (eight players and the audio
   /// session took 60 ms of the launch there), ready long before the first Yo.
-  @ObservationIgnored private var sounds: [AVAudioPlayer] = []
+  @ObservationIgnored private let sounds = InboxSounds()
 
-  private static func makeSounds() async -> [AVAudioPlayer] {
-    final class Players: @unchecked Sendable {
-      let players: [AVAudioPlayer]
-      init(_ players: [AVAudioPlayer]) { self.players = players }
-    }
-    let made = await Task.detached(priority: .utility) { () -> Players in
-      guard let url = Bundle.main.url(forResource: "yo", withExtension: "caf") else { return Players([]) }
-      try? AVAudioSession.sharedInstance().setCategory(.ambient)
-      return Players(
-        (0..<8).compactMap { _ in
-          let player = try? AVAudioPlayer(contentsOf: url)
-          player?.prepareToPlay()  // loaded now: the first Yo sounds at once
-          return player
-        })
-    }.value
-    return made.players
-  }
-  @ObservationIgnored private var nextSound = 0
   /// When the Yo sound last played for Yos that came: at most `soundsPerSecond` in any second, so a burst sounds like
   /// many Yos without twenty players fighting over the speaker.
   @ObservationIgnored private var sounded: [ContinuousClock.Instant] = []
@@ -392,12 +432,12 @@ final class Inbox {
       }
       do {
         // What the notification service saved as its push came: on the bars at once, before the hub is asked.
-        let (saved, known) = try await Hub.run { (try client.savedEvents(), client.contacts()) }
+        let (saved, known) = try await Hub.run { try Perf.timed("inbox.listen.saved.core") { (try client.savedEvents(), client.contacts()) } }
         if !saved.isEmpty, client === accounts.client {
           await take(saved, contacts: known, client: client, friends: friends)
           fetchMedia(client: client)
         }
-        let (events, contacts) = try await Hub.run { (try client.sync(waitS: 25), client.contacts()) }
+        let (events, contacts) = try await Hub.run { try Perf.timed("inbox.listen.sync.core") { (try client.sync(waitS: 25), client.contacts()) } }
         lastSync = .now
         Perf.mark("listen.events \(events.count)")
         guard client === accounts.client else { continue }  // signed out meanwhile: not for this account
@@ -440,7 +480,7 @@ final class Inbox {
 
   /// A photo or video shown in the viewer: it will not show again.
   func viewed(_ arrival: Arrival) {
-    ReceivedMedia.shared.consumed(arrival.id)
+    Task { await ReceivedMedia.shared.consumed(arrival.id) }
   }
 
   /// What the core handed over: a Yo shows on its sender's bar, a new chat brings its friend into the list; a photo
@@ -456,71 +496,113 @@ final class Inbox {
   private func take(_ events: [YoEvent], contacts: [YoContact], client: YoClient, friends: Friends) async {
     let start = Perf.on ? CACurrentMediaTime() : 0
     defer { if Perf.on { Perf.mark("take \(events.count) " + String(format: "%.1f ms", (CACurrentMediaTime() - start) * 1000)) } }
-    friends.markGone(contacts)  // a delivery found their account gone (`NotOnYo` from now on)
-    defer { friends.markRequests(contacts) }  // after the new chats are on the list
-    guard !events.isEmpty else { return }
-    func friend(_ user: String) -> Friend {
-      friends.friend(user: user, handles: contacts.first { $0.user == user }?.handles ?? [])
-    }
-    var kept: [YoEvent] = []
+    var users: [String] = []
+    var seenUsers: Set<String> = []
+    var changedKeys: Set<String> = []
     for event in events {
       switch event {
-      case .message(let user, let sentAtMs, let kind):
-        // What Yo does not show yet (a text, a link, a place, a kind it does not know) hangs on a Yo: shown as one
-        // (spec 5).
-        let sender = friend(user)
-        received(id: "\(user)/\(sentAtMs)", from: sender.name)
-        // On top it goes by the list, in one step with the others and never under a finger (FriendList.rise).
-        count(from: sender.name)
-        if let (media, kind) = kind.media {
-          let id = Self.mediaID(user, sentAtMs, media)
-          // Not noted (the disk full): the core keeps the Yo, which comes again after a restart.
-          guard ReceivedMedia.shared.expect(media, id: id, from: sender.name, kind: kind) else {
+      case .message(let user, _, _), .newChat(let user):
+        if seenUsers.insert(user).inserted { users.append(user) }
+      case .identityChanged(let user):
+        if seenUsers.insert(user).inserted { users.append(user) }
+        changedKeys.insert(user)
+      default: break
+      }
+    }
+    let resolved = friends.reconcile(contacts, users: users, changedKeys: changedKeys)
+    guard !events.isEmpty else { return }
+    let contactsByUser = Perf.timed("inbox.take.contacts.index") {
+      Dictionary(contacts.map { ($0.user, $0) }, uniquingKeysWith: { first, _ in first })
+    }
+    // Resolve metadata once before the synchronous batch, never suspend between plain Yos.
+    let needsGroups = events.contains { event in
+      switch event { case .groupMessage, .groupChanged: true; default: false }
+    }
+    if needsGroups, let groups = try? await Hub.run({ client.groups() }) {
+      Perf.timed("inbox.take.groups") { friends.takeGroups(groups) }
+    }
+    let bars: [String: Friend] = needsGroups
+      ? Dictionary(friends.all.compactMap { bar in bar.group.map { ($0, bar) } }, uniquingKeysWith: { a, _ in a })
+      : [:]
+    func friend(_ user: String) -> Friend {
+      resolved[user] ?? Friend(name: contactsByUser[user]?.handles.first ?? contactsByUser[user]?.name ?? "?", color: 0, user: user)
+    }
+    var kept: [YoEvent] = []
+    var mediaNotes: [(YoEvent, YoMedia, String, String, MediaFile.Kind)] = []
+    Perf.timed("inbox.take.batch") {
+      for event in events {
+        switch event {
+        case .message(let user, let sentAtMs, let kind):
+          // What Yo does not show yet (a text, a link, a place, a kind it does not know) hangs on a Yo: shown as one
+          // (spec 5).
+          let sender = friend(user)
+          received(id: "\(user)/\(sentAtMs)", from: sender.name)
+          // On top it goes by the list, in one step with the others and never under a finger (FriendList.rise).
+          count(from: sender.name)
+          if let (media, kind) = kind.media {
+            let id = Self.mediaID(user, sentAtMs, media)
+            // Not noted (the disk full): the core keeps the Yo, which comes again after a restart.
+            mediaNotes.append((event, media, id, sender.name, kind))
             continue
           }
+        case .groupMessage(let group, let user, let sentAtMs, let kind):
+          // On the group's bar, its sender's name beside the Yo (spec 4.9). A group not on the list yet comes now.
+          guard let bar = bars[group] else { break }
+          let from = contactsByUser[user]
+          let senderName = resolved[user]?.name ?? from?.handles.first ?? from?.name ?? "?"
+          // In the order they first came, for the whole run: one who writes again stays in their place (and shows
+          // again there if faded), a new one comes in under the others.
+          Perf.timed("inbox.group.accumulate") {
+            let pending: PendingSenders
+            if let existing = pendingSenders[bar.mediaKey] { pending = existing }
+            else {
+              pending = PendingSenders(senderRun(bar.mediaKey).senders)
+              pendingSenders[bar.mediaKey] = pending
+            }
+            pending.add(senderName)
+          }
+          if !publishingSenders {
+            publishingSenders = true
+            PerfProbe.nextFrame { [weak self] in
+              guard let self else { return }
+              Perf.timed("inbox.group.publish") {
+                withAnimation(.snappy) {
+                  for (key, value) in pendingSenders {
+                    Perf.timed("inbox.group.assign") { senderRun(key).senders = value.senders }
+                  }
+                }
+                pendingSenders = [:]
+                publishingSenders = false
+              }
+            }
+          }
+          memberNames[user] = senderName
+          received(id: "\(group)/\(user)/\(sentAtMs)", from: bar.name)
+          count(from: bar.name)
+          if let (media, kind) = kind.media {
+            let id = Self.mediaID(group + user, sentAtMs, media)
+            // Kept by the group's id: a rename or a bar of the same name never takes it (Friend.mediaKey).
+            mediaNotes.append((event, media, id, bar.mediaKey, kind))
+            continue
+          }
+        case .groupChanged:
+          break
+        case .groupSentElsewhere:
+          break
+        case .newChat(let user):
+          _ = friend(user)  // a friend writing first again (a new phone) is the same friend, by user id
+        case .identityChanged:
+          break  // reconciled with the batch before publication
+        case .profile, .sentElsewhere:
+          break
         }
-      case .groupMessage(let group, let user, let sentAtMs, let kind):
-        // On the group's bar, its sender's name beside the Yo (spec 4.9). A group not on the list yet comes now.
-        if friends.groupBar(group) == nil, let groups = try? await Hub.run({ client.groups() }) {
-          friends.takeGroups(groups)
-        }
-        guard let bar = friends.groupBar(group) else { break }
-        let from = contacts.first { $0.user == user }
-        let senderName = friends.all.first { $0.user == user }?.name ?? from?.handles.first ?? from?.name ?? "?"
-        // In the order they first came, for the whole run: one who writes again stays in their place (and shows
-        // again there if faded), a new one comes in under the others.
-        var senders = groupSenders[bar.mediaKey] ?? []
-        if let index = senders.firstIndex(where: { $0.name == senderName }) {
-          senders[index].count += 1
-          senders[index].at = .now
-        } else {
-          senders.append(GroupSender(name: senderName, count: 1))
-        }
-        withAnimation(.snappy) {  // a new line slides in, a "!" more comes in, as on any bar
-          groupSenders[bar.mediaKey] = senders
-        }
-        memberNames[user] = senderName
-        received(id: "\(group)/\(user)/\(sentAtMs)", from: bar.name)
-        count(from: bar.name)
-        if let (media, kind) = kind.media {
-          let id = Self.mediaID(group + user, sentAtMs, media)
-          // Kept by the group's id: a rename or a bar of the same name never takes it (Friend.mediaKey).
-          guard ReceivedMedia.shared.expect(media, id: id, from: bar.mediaKey, kind: kind) else { continue }
-        }
-      case .groupChanged:
-        if let groups = try? await Hub.run({ client.groups() }) {
-          friends.takeGroups(groups)
-        }
-      case .groupSentElsewhere:
-        break
-      case .newChat(let user):
-        _ = friend(user)  // a friend writing first again (a new phone) is the same friend, by user id
-      case .identityChanged(let user):
-        friends.keyChanged(friend(user))  // spec 3.2: shown in Contacts, and said once
-      case .profile, .sentElsewhere:
-        break
+        kept.append(event)
       }
-      kept.append(event)
+    }
+    // Durably note media off main before acknowledging its event. Plain bursts have one main-actor turn.
+    if !mediaNotes.isEmpty {
+      let written = await ReceivedMedia.shared.expectBatch(mediaNotes.map { ($0.1, $0.2, $0.3, $0.4) })
+      kept += mediaNotes.filter { written.contains($0.2) }.map { $0.0 }
     }
     // Taken while not in front (just left, its wait at the hub still running): the notification the notification
     // service would have written, which finds them read then. In front: shown on the bars, so a notification of
@@ -548,43 +630,61 @@ final class Inbox {
 
   /// Fetches the photos and videos noted and not kept yet (also those a broken network left).
   func fetchMedia(client: YoClient) {
-    ReceivedMedia.shared.fetchWaiting(client: client) { [weak self] arrival in self?.add(arrival) }
+    Task { [weak self] in
+      await ReceivedMedia.shared.fetchWaiting(client: client) { [weak self] arrival in
+        Perf.timed("inbox.media.add") { self?.add(arrival) }
+      }
+    }
   }
 
   /// A Yo notification that arrived while the app is open, or was tapped.
   func received(id: String, from sender: String) {
-    guard taken.insert(id).inserted else { return }
-    takenOrder.append(id)
-    if takenOrder.count > Self.takenKept {
-      let gone = takenOrder.prefix(takenOrder.count - Self.takenKept)
-      taken.subtract(gone)
-      takenOrder.removeFirst(gone.count)
+    Perf.timed("inbox.arrived") {
+      guard taken.insert(id).inserted else { return }
+      takenOrder.append(id)
+      if takenOrder.count > Self.takenKept {
+        let gone = takenOrder.prefix(takenOrder.count - Self.takenKept)
+        taken.subtract(gone)
+        takenOrder.removeFirst(gone.count)
+      }
+      show(Arrival(id: id, from: sender))
     }
-    show(Arrival(id: id, from: sender))
   }
 
   /// On opening the app: the Yo notifications waiting in Notification Center come in, oldest first, and leave it, with
   /// the pushes that named nobody ("Yo": the core brings their Yos, if any).
+  @ObservationIgnored private var collectingDelivered = false
   func collectDelivered() async {
-    let center = UNUserNotificationCenter.current()
-    let delivered = await center.deliveredNotifications()
-    let waiting = delivered.filter { $0.request.content.categoryIdentifier == Self.category }.sorted { $0.date < $1.date }
-    for notification in waiting {
-      let info = notification.request.content.userInfo
-      guard let sender = info["from"] as? String else { continue }
-      // The Yo's own id when the notification service knew it, as when one is tapped: the core's Yo is not shown again.
-      received(id: info["id"] as? String ?? notification.request.identifier, from: sender)
+    guard !collectingDelivered else { return }
+    collectingDelivered = true
+    defer { collectingDelivered = false }
+    let waiting = await Task.detached(priority: .utility) {
+      let center = Perf.timed("inbox.notifications.center") { UNUserNotificationCenter.current() }
+      let delivered = await center.deliveredNotifications()
+      let waiting = Perf.timed("inbox.notifications.decode") {
+        delivered.filter { $0.request.content.categoryIdentifier == Self.category }
+          .sorted { $0.date < $1.date }.compactMap { notification -> Arrival? in
+            let info = notification.request.content.userInfo
+            guard let sender = info["from"] as? String else { return nil }
+            return Arrival(id: info["id"] as? String ?? notification.request.identifier, from: sender)
+          }
+      }
+      Perf.timed("inbox.notifications.remove") {
+        center.removeDeliveredNotifications(
+          withIdentifiers: delivered.filter { $0.request.identifier != SecureReminder.id }.map(\.request.identifier))
+      }
+      try? await center.setBadgeCount(0)
+      return waiting
+    }.value
+    Perf.timed("inbox.notifications.apply") {
+      for arrival in waiting { received(id: arrival.id, from: arrival.from) }
     }
-    center.removeDeliveredNotifications(
-      withIdentifiers: delivered.filter { $0.request.identifier != SecureReminder.id }.map(\.request.identifier))
-    // Seen, all of them: the red badge goes with the notifications.
-    try? await center.setBadgeCount(0)
   }
 
   /// Photos and videos seen (each once): they are gone, from this iPhone too.
   func seen(_ shown: [Arrival]) {
     for arrival in shown {
-      ReceivedMedia.shared.forget(arrival.id)
+      Task { await ReceivedMedia.shared.forget(arrival.id) }
       // By id wherever it is kept: the viewer shows it under the bar's name, not under the key it is kept by.
       unseenMedia = unseenMedia.compactMapValues { kept in
         let rest = kept.filter { $0.id != arrival.id }
@@ -594,13 +694,7 @@ final class Inbox {
   }
 
   /// The Yo sound, once, on a player not busy if there is one (over the ones still playing).
-  func playYo() {
-    guard !sounds.isEmpty else { return }
-    let player = sounds.first { !$0.isPlaying } ?? sounds[nextSound % sounds.count]
-    nextSound += 1
-    player.currentTime = 0
-    player.play()
-  }
+  func playYo() { sounds.play() }
 
   /// Yos received, for the statistics: written a second after the first of them, once per sender (not twice per Yo).
   private func count(from sender: String) {
@@ -617,30 +711,36 @@ final class Inbox {
 
   /// The Yos that came since the last time, for the list to show (each once).
   func takeArrivals() -> [Arrival] {
-    defer { ready = [] }
-    return ready
+    return Perf.timed("inbox.takeArrivals") {
+      var batch: [Arrival] = []
+      swap(&batch, &ready)  // transfer the buffer without copying elements
+      return batch
+    }
   }
 
   /// The sound, and the sender's row takes the Yo (as Messages and Signal show a new message in the list: on the
   /// bar, not in a banner). The first Yo after a quiet moment goes to the list at once; what comes within
   /// `batchSeconds` after it goes together, at the end of them.
   private func show(_ arrival: Arrival) {
-    chime()
-    ready.append(Arrival(id: arrival.id, from: arrival.from))
-    if arrival.photo != nil { unseenMedia[Self.mediaKey(arrival), default: []].append(arrival) }
-    came += 1
-    guard !gathering else { return }
-    gathering = true
-    arrived += 1
-    Task {
-      var told = came
-      while true {
-        try? await Task.sleep(for: .seconds(Self.batchSeconds))
-        guard came != told else { break }  // a quiet moment: the next Yo goes at once again
-        told = came
-        arrived += 1
+    Perf.timed("inbox.show") {
+      noteArrival()
+      chime()
+      ready.append(Arrival(id: arrival.id, from: arrival.from))
+      if arrival.photo != nil { unseenMedia[Self.mediaKey(arrival), default: []].append(arrival) }
+      came += 1
+      guard !gathering else { return }
+      gathering = true
+      PerfProbe.nextFrame { [weak self = self] in self?.arrived += 1 }
+      Task {
+        var told = came
+        while true {
+          try? await Task.sleep(for: .seconds(Self.batchSeconds))
+          guard came != told else { break }  // a quiet moment: the next Yo goes at once again
+          told = came
+          PerfProbe.nextFrame { [weak self = self] in self?.arrived += 1 }
+        }
+        gathering = false
       }
-      gathering = false
     }
   }
 
@@ -651,5 +751,39 @@ final class Inbox {
     guard sounded.count < Self.soundsPerSecond else { return }
     sounded.append(now)
     playYo()
+  }
+}
+
+/// Audio session, player preparation and playback stay on the same serial worker.
+private final class InboxSounds: @unchecked Sendable {
+  private let queue = DispatchQueue(label: "yo.inbox.audio", qos: .userInitiated)
+  // Accessed exclusively on queue.
+  private var players: [AVAudioPlayer] = []
+  private var next = 0
+
+  init() {
+    queue.async { [self] in
+      Perf.timed("inbox.sound.prepare") {
+        guard let url = Bundle.main.url(forResource: "yo", withExtension: "caf") else { return }
+        try? AVAudioSession.sharedInstance().setCategory(.ambient)
+        players = (0..<8).compactMap { _ in
+          let player = try? AVAudioPlayer(contentsOf: url)
+          player?.prepareToPlay()
+          return player
+        }
+      }
+    }
+  }
+
+  func play() {
+    queue.async { [self] in
+      Perf.timed("inbox.sound.play") {
+        guard !players.isEmpty else { return }
+        let player = players.first { !$0.isPlaying } ?? players[next % players.count]
+        next += 1
+        player.currentTime = 0
+        player.play()
+      }
+    }
   }
 }

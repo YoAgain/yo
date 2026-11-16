@@ -7,6 +7,7 @@
 // content in the middle, the button at the bottom over the full width, a text button under it if there is a second
 // way, back at the top left.
 import PhotosUI
+import _PhotosUI_SwiftUI
 import SwiftUI
 import YoCore
 
@@ -478,7 +479,7 @@ private struct LogIn: View {
   @State private var words = ""
   @State private var problem: String?
   @State private var scanning = false
-  @State private var picked: PhotosPickerItem?
+  @State private var picked: _PhotosUI_SwiftUI.PhotosPickerItem?
   /// Signing in: one at a time (a second registration would replace the first).
   @State private var busy = false
   @FocusState private var focused: Bool

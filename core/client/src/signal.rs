@@ -123,6 +123,7 @@ impl Drop for Journaled {
 
 /// Runs one of libsignal's store operations: they are `async`, but the store is in memory and never waits.
 pub fn now<F: Future>(future: F) -> F::Output {
+    let _cost = crate::cost::Span::new(0);
     match pin!(future).as_mut().poll(&mut Context::from_waker(Waker::noop())) {
         Poll::Ready(value) => value,
         Poll::Pending => unreachable!("an in-memory store never waits"),

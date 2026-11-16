@@ -85,6 +85,46 @@ use zeroize::Zeroize;
 const STATE_VERSION: u8 = 2;
 const AAD: &[u8] = b"yo state v2";
 
+/// Resend plaintexts are read on nearly every transaction and changed only by a send.
+/// Share their snapshot until changed, keeping rollback cheap without changing the JSON format.
+#[derive(Debug, Default, PartialEq, Eq)]
+pub struct SentCache(std::sync::Arc<VecDeque<Vec<u8>>>);
+impl Clone for SentCache {
+    fn clone(&self) -> Self {
+        #[cfg(feature = "testing")]
+        if crate::cost::copies_snapshots() {
+            return Self(std::sync::Arc::new((*self.0).clone()));
+        }
+        Self(self.0.clone())
+    }
+}
+impl std::ops::Deref for SentCache {
+    type Target = VecDeque<Vec<u8>>;
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+impl std::ops::DerefMut for SentCache {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        std::sync::Arc::make_mut(&mut self.0)
+    }
+}
+impl FromIterator<Vec<u8>> for SentCache {
+    fn from_iter<T: IntoIterator<Item = Vec<u8>>>(iter: T) -> Self {
+        Self(std::sync::Arc::new(iter.into_iter().collect()))
+    }
+}
+impl Serialize for SentCache {
+    fn serialize<S: serde::Serializer>(&self, s: S) -> std::result::Result<S::Ok, S::Error> {
+        compact::list::serialize(self, s)
+    }
+}
+impl<'de> Deserialize<'de> for SentCache {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> std::result::Result<Self, D::Error> {
+        compact::list::deserialize(d).map(|v| Self(std::sync::Arc::new(v)))
+    }
+}
+
 /// A device of a user as this device knows it: its key, and its number among the user's devices, as the hub gave it
 /// (spec 4.1): the session's address.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -116,8 +156,7 @@ pub struct Contact {
     pub profile_due: bool,
     /// The plaintexts of the last messages sent to the user: one goes again when a `DecryptionErrorMessage` names
     /// its time (spec 4.6).
-    #[serde(with = "compact::list")]
-    pub sent: VecDeque<Vec<u8>>,
+    pub sent: SentCache,
     /// Something came from the user since the last receipt (spec 4.5).
     pub receipt_due: bool,
     /// The `DecryptionErrorMessage`s due to its devices, for their messages that did not open here (spec 4.6).
@@ -178,7 +217,7 @@ impl Contact {
             devices: Vec::new(),
             chat: false,
             profile_due: false,
-            sent: VecDeque::new(),
+            sent: SentCache::default(),
             receipt_due: false,
             decryption_errors: Vec::new(),
             outdated_at: 0,
@@ -205,6 +244,9 @@ pub struct Registering {
 /// A message for one user, waiting for the hub to take it (spec 4.4).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Outgoing {
+    /// When queued (wall clock, milliseconds). Old states start their retention period when first pruned.
+    #[serde(default)]
+    pub queued_at: u64,
     /// Its place in the order of everything this device sent.
     pub seq: u64,
     /// The user it goes to (hex): a contact, or this account (a copy for its other devices).
@@ -216,6 +258,9 @@ pub struct Outgoing {
     /// Only for this device of the user, outside the session: a `DecryptionErrorMessage` (spec 4.6).
     #[serde(default)]
     pub device: Option<Key>,
+    /// A decryption-error resend: catch up silently even when its content was visible.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub non_urgent: bool,
     /// Its payload once encrypted (`envelope::Payload`), with the devices it was made for: made again if they
     /// changed. Sealed as it goes, with the sender certificate of then (spec 6.1).
     #[serde(default, with = "compact::optional")]
@@ -457,9 +502,14 @@ struct Plain {
 }
 
 pub fn seal(state: &State, records: Entries, key: &[u8; 32]) -> Vec<u8> {
+    let json = {
+        let _cost = crate::cost::Span::new(1);
+        serde_json::to_vec(state).expect("state encodes")
+    };
+    let _cost = crate::cost::Span::new(2);
     let plain = Plain {
         version: STATE_VERSION,
-        state: serde_json::to_vec(state).expect("state encodes").into(),
+        state: json.into(),
         records: records
             .into_iter()
             .map(|(key, value)| Entry { key: key.into_bytes().into(), value: value.into() })
@@ -485,16 +535,22 @@ pub fn open(blob: &[u8], key: &[u8; 32]) -> Result<(State, Entries)> {
         return Err(Error::State);
     }
     let (nonce, sealed) = blob.split_at(12);
-    let mut bytes = ChaCha20Poly1305::new(key.into())
-        .decrypt(nonce.into(), Payload { msg: sealed, aad: AAD })
-        .map_err(|_| Error::State)?;
+    let mut bytes = {
+        let _cost = crate::cost::Span::new(2);
+        ChaCha20Poly1305::new(key.into())
+            .decrypt(nonce.into(), Payload { msg: sealed, aad: AAD })
+            .map_err(|_| Error::State)?
+    };
     let decoded: std::result::Result<Plain, _> = yo_wire::decode(&bytes);
     bytes.zeroize();
     let mut plain = decoded.map_err(|_| Error::State)?;
     if plain.version != STATE_VERSION && plain.version != 1 {
         return Err(Error::State);
     }
-    let state: std::result::Result<State, _> = serde_json::from_slice(plain.state.as_slice());
+    let state: std::result::Result<State, _> = {
+        let _cost = crate::cost::Span::new(1);
+        serde_json::from_slice(plain.state.as_slice())
+    };
     let state = match (state, plain.version) {
         (Ok(state), 1) => from_1(state),
         (state, _) => state.map_err(|_| Error::State),
@@ -547,6 +603,18 @@ pub fn unhex(text: &str) -> Option<Vec<u8>> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn resend_snapshot_is_independent_and_json_unchanged() {
+        let mut cache: super::SentCache = [vec![1, 2, 3]].into_iter().collect();
+        let snapshot = cache.clone();
+        cache.push_back(vec![4]);
+        assert_eq!(snapshot.len(), 1);
+        assert_eq!(cache.len(), 2);
+        assert_eq!(serde_json::to_string(&snapshot).unwrap(), "[\"AQID\"]");
+        let old: super::SentCache = serde_json::from_str("[[1,2,3]]").unwrap();
+        assert_eq!(snapshot, old);
+    }
+
     #[test]
     fn a_contact_key_from_before_is_the_profile_key() {
         use super::Contact;

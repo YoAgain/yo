@@ -1042,24 +1042,30 @@ struct FeedbackSheet: View {
   }
 }
 
-/// Appearance: the app icon, chosen by its picture alone, and the bars' sides for the left hand. The default, its negative, and the original Yo's plain
-/// purple square (Info.plist CFBundleAlternateIcons).
+/// Appearance: the app icon, chosen by its picture and a word, and the bars' sides for the left hand. The default (white
+/// Yo on Violet), its negative, and Yo's icons of old, plain squares: Full Color in Violet (the iPhone icon of version
+/// 2.5.8, 2016–21), OG 2014 in Amethyst and 2015 in Lilac (the App Store's) (Info.plist CFBundleAlternateIcons).
 struct AppearancePage: View {
   @Environment(AccountStore.self) private var accounts
   @State private var current = UIApplication.shared.alternateIconName
   @AppStorage(SettingKey.leftHanded) private var leftHanded = false
 
-  private let icons: [(name: String?, image: String)] = [
-    (nil, "IconStandard"), ("Negative", "IconNegative"), ("Original", "IconOriginal"),
+  /// Each with its word and where it is from (yo-lore/assets/app-icon-appstore).
+  private let icons: [(name: String?, image: String, label: String, from: String)] = [
+    (nil, "IconStandard", "Yo", "New"), ("Negative", "IconNegative", "Negative Yo", "New"),
+    ("Original", "IconOriginal", "Full Color", "iPhone 2016–21"), ("OG2014", "IconOG2014", "OG 2014", "App Store 2014"),
+    ("Lilac2015", "IconLilac2015", "2015", "App Store 2015–21"),
   ]
 
   var body: some View {
     Form {
-      Section("App Icon") {
-        HStack(spacing: 22) {
+      // Three a row, the chosen one ringed (as Signal's icon picker): room for the picture and its word.
+      Section {
+        LazyVGrid(columns: Array(repeating: GridItem(.flexible()), count: 3), spacing: 22) {
           ForEach(icons, id: \.image) { icon in
+            let chosen = current == icon.name
             Button {
-              guard current != icon.name else { return }
+              guard !chosen else { return }
               let client = accounts.client  // the account it was chosen in
               Task {
                 try? await UIApplication.shared.setAlternateIconName(icon.name)
@@ -1067,24 +1073,40 @@ struct AppearancePage: View {
                 if current == icon.name { accounts.storeAppIcon(icon.name, by: client) }  // for its next phone
               }
             } label: {
-              VStack(spacing: 8) {
+              VStack(spacing: 10) {
                 Image(uiImage: UIImage(named: icon.image) ?? UIImage())
                   .resizable()
-                  .frame(width: 64, height: 64)
-                  .clipShape(.rect(cornerRadius: 15, style: .continuous))
+                  .frame(width: 76, height: 76)
+                  .clipShape(.rect(cornerRadius: 17, style: .continuous))
                   .overlay(
-                    RoundedRectangle(cornerRadius: 15, style: .continuous).strokeBorder(Color(.separator), lineWidth: 0.5))
-                Image(systemName: current == icon.name ? "checkmark.circle.fill" : "circle")
-                  .foregroundStyle(current == icon.name ? Color.amethyst : Color(.tertiaryLabel))
+                    RoundedRectangle(cornerRadius: 17, style: .continuous).strokeBorder(Color(.separator), lineWidth: 0.5))
+                  .padding(4)
+                  .overlay(
+                    RoundedRectangle(cornerRadius: 21, style: .continuous)
+                      .strokeBorder(chosen ? Color.amethyst : .clear, lineWidth: 3))
+                VStack(spacing: 1) {
+                  Text(icon.label)
+                    .font(.subheadline.weight(chosen ? .semibold : .regular))
+                    .foregroundStyle(chosen ? .primary : .secondary)
+                  Text(icon.from)
+                    .font(.caption2)
+                    .foregroundStyle(.tertiary)
+                }
+                .lineLimit(1)
+                .minimumScaleFactor(0.8)
               }
+              .frame(maxWidth: .infinity)
+              .contentShape(.rect)
             }
             .buttonStyle(.plain)
-            .accessibilityLabel(icon.name ?? "Default")
-            .accessibilityAddTraits(current == icon.name ? .isSelected : [])
+            .animation(.snappy, value: chosen)
+            .accessibilityLabel("\(icon.label), \(icon.from)")
+            .accessibilityAddTraits(chosen ? .isSelected : [])
           }
         }
-        .frame(maxWidth: .infinity)
-        .padding(.vertical, 8)
+        .padding(.vertical, 12)
+      } header: {
+        Text("App Icon")
       }
       Section {
         Toggle("Left-Handed", isOn: $leftHanded)

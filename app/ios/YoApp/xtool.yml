@@ -16,7 +16,13 @@ resources:
   # Settings › Licenses: the commit of the build and every licence (dev/licenses.sh makes it, ignored).
   - Resources/Licenses.txt
   # The app icons to choose from in Appearance (Info.plist CFBundleAlternateIcons; loose PNGs at the root, 60 pt):
-  # the negative (purple Yo on white) and the original Yo's plain purple square; IconStandard only shows the default.
+  # the negative (purple Yo on white), the icon purple alone (Full Color), OG 2014 (a plain Amethyst square, the App
+  # Store icon of 2014) and 2015 (plain Lilac, the App Store icon of 2015 to 2021);
+  # IconStandard only shows the default.
+  - Resources/IconLilac2015@2x.png
+  - Resources/IconLilac2015@3x.png
+  - Resources/IconOG2014@2x.png
+  - Resources/IconOG2014@3x.png
   - Resources/IconNegative@2x.png
   - Resources/IconNegative@3x.png
   - Resources/IconOriginal@2x.png

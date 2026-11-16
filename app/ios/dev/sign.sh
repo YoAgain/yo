@@ -20,11 +20,26 @@ bid=$(python3 -I -c 'import plistlib,sys; print(plistlib.load(open(sys.argv[1],"
 prof=$dev/$bid.mobileprovision
 [ -f "$prof" ] || { echo "no profile for $bid in $dev" >&2; exit 1; }
 ent=$stage/entitlements.plist
-team=$(python3 -I - "$prof" "$own" "$ent" <<'PY'
+team=$(python3 -I - "$prof" "$own" "$ent" "$app/Info.plist" <<'PY'
 import plistlib, sys
 raw = open(sys.argv[1], "rb").read()
 profile = plistlib.loads(raw[raw.index(b"<?xml"):raw.rindex(b"</plist>") + 8])
 entitlements = dict(profile["Entitlements"])
+# Expand the profile's wildcard to this app's identifier. A literal PREFIX.* as the default keychain group
+# is shared by development apps and is not a stable app identity across installations.
+info = plistlib.load(open(sys.argv[4], "rb"))
+prefix = profile["ApplicationIdentifierPrefix"][0]
+identifier = prefix + "." + info["CFBundleIdentifier"]
+entitlements["application-identifier"] = identifier
+if info["CFBundleIdentifier"].endswith(".dev"):
+    groups = entitlements.get("keychain-access-groups", [])
+    if identifier not in groups and prefix + ".*" not in groups:
+        sys.exit("the profile does not allow this app's keychain group")
+    # Keep the profile's grants after our concrete default, so an older state's key can be migrated.
+    entitlements["keychain-access-groups"] = [identifier] + [g for g in groups if g != identifier]
+    info["YoKeychainAccessGroup"] = identifier
+    plistlib.dump(info, open(sys.argv[4], "wb"))
+
 own = plistlib.load(open(sys.argv[2], "rb"))
 for key, value in own.items():
     if key not in entitlements:

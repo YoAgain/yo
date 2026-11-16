@@ -5,6 +5,7 @@ import SwiftUI
 @MainActor
 enum Stats {
   private static let defaults = UserDefaults.standard
+  private static let writes = DispatchQueue(label: "yo.stats", qos: .utility)
 
   static var sent: Int { defaults.integer(forKey: "stats.sent") }
   static var received: Int { defaults.integer(forKey: "stats.received") }
@@ -13,12 +14,16 @@ enum Stats {
   static var byFriend: [String: Int] { defaults.dictionary(forKey: "stats.friends") as? [String: Int] ?? [:] }
 
   static func sentYo(to friend: String) {
-    count("stats.sent", friend)
-    stamp("stats.lastSent", friend)
+    writes.async {
+      count("stats.sent", friend)
+      stamp("stats.lastSent", friend)
+    }
   }
   static func receivedYos(from friend: String, _ n: Int) {
-    count("stats.received", friend, n)
-    stamp("stats.lastReceived", friend)
+    writes.async {
+      count("stats.received", friend, n)
+      stamp("stats.lastReceived", friend)
+    }
   }
 
   /// When the last Yo went to a friend, and when the last came from them (by name, as the counts): a bar's menu says it.
@@ -26,12 +31,15 @@ enum Stats {
   static func lastReceived(from friend: String) -> Date? { last("stats.lastReceived", friend) }
 
   static func reset() {
-    for key in ["stats.sent", "stats.received", "stats.friends", "stats.lastSent", "stats.lastReceived"] {
-      defaults.removeObject(forKey: key)
+    writes.async {
+      for key in ["stats.sent", "stats.received", "stats.friends", "stats.lastSent", "stats.lastReceived"] {
+        UserDefaults.standard.removeObject(forKey: key)
+      }
     }
   }
 
-  private static func stamp(_ key: String, _ friend: String) {
+  nonisolated private static func stamp(_ key: String, _ friend: String) {
+    let defaults = UserDefaults.standard
     var times = defaults.dictionary(forKey: key) as? [String: Double] ?? [:]
     times[friend] = Date.now.timeIntervalSince1970
     defaults.set(times, forKey: key)
@@ -41,11 +49,12 @@ enum Stats {
     (defaults.dictionary(forKey: key) as? [String: Double])?[friend].map { Date(timeIntervalSince1970: $0) }
   }
 
-  private static func count(_ key: String, _ friend: String, _ n: Int = 1) {
-    defaults.set(defaults.integer(forKey: key) + n, forKey: key)
-    var friends = byFriend
+  nonisolated private static func count(_ key: String, _ friend: String, _ n: Int = 1) {
+    let defaults = UserDefaults.standard
+    var friends = defaults.dictionary(forKey: "stats.friends") as? [String: Int] ?? [:]
     friends[friend, default: 0] += n
     defaults.set(friends, forKey: "stats.friends")
+    defaults.set(defaults.integer(forKey: key) + n, forKey: key)
   }
 }
 

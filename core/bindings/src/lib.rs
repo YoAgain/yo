@@ -97,8 +97,9 @@ pub trait StateStore: Send + Sync {
 /// time.
 #[uniffi::export(with_foreign)]
 pub trait StateLock: Send + Sync {
-    /// Takes the lock, waiting while another process holds it, and says what the state is now (`StateTurn`).
-    fn lock(&self) -> StateTurn;
+    /// Takes the lock and says what the state is now. Refused background time returns an error without a turn;
+    /// the client stays usable for a later retry. `unlock` is called only after a successful acquisition.
+    fn lock(&self) -> Result<StateTurn, YoError>;
     /// Gives it back.
     fn unlock(&self);
 }
@@ -613,7 +614,7 @@ impl YoClient {
             return Err(YoError::State);
         }
         let Some(lock) = self.shared.get() else { return Ok(f(&mut client)) };
-        let turn = lock.lock();
+        let turn = lock.lock()?;
         let _turn = Turn(lock.as_ref());
         let current = match turn {
             StateTurn::Same => true,

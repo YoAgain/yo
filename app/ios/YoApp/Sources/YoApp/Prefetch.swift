@@ -101,7 +101,7 @@ enum Prefetch {
     guard let directory, let mark = mark(media) else { return token }
     make(directory)
     // Under one lock for both processes: two finding the same stale claim cannot both take it over.
-    return locked(directory) {
+    return locked(directory) { () -> String? in
       // The app has it already: the notification service fetches it no more. The app may (`again`): the same blob in
       // another conversation is another message, with fetches of its own at the hub.
       if !again, let taken = taken(media), FileManager.default.fileExists(atPath: taken.path) { return nil }
@@ -113,7 +113,7 @@ enum Prefetch {
       _ = Array(token.utf8).withUnsafeBytes { write(fd, $0.baseAddress, $0.count) }
       close(fd)
       return token
-    }
+    } ?? nil
   }
 
   /// The claim given back (fetched, or not), if it is still this holder's: one taken over after `underWaySeconds`
@@ -128,13 +128,13 @@ enum Prefetch {
 
   /// `work` with the claims' lock held (flock on a file beside them, across the app and its extensions).
   @discardableResult
-  private static func locked<T>(_ directory: URL, _ work: () -> T) -> T {
-    let fd = open(directory.appendingPathComponent(".claims.lock").path, O_CREAT | O_RDWR | O_CLOEXEC, 0o600)
-    guard fd >= 0 else { return work() }
-    defer { close(fd) }
-    flock(fd, LOCK_EX)
-    defer { flock(fd, LOCK_UN) }
-    return work()
+  private static func locked<T>(_ directory: URL, _ work: () -> T) -> T? {
+    // Media fetches claim from the UI actor too: contention retries later, never waits on the main thread.
+    guard let access = SharedAccess.take(
+      directory.appendingPathComponent(".claims.lock"), within: Thread.isMainThread ? 0 : .infinity)
+    else { return nil }
+    defer { access.finish() }
+    return try? access.perform(work)
   }
 
   /// Whether the service is fetching it now: the app waits for its file rather than giving the photo up.

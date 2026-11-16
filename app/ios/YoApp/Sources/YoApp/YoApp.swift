@@ -15,14 +15,18 @@ struct YoApp: App {
 
   init() {
     Perf.mark("launch.init")
-    // The state's lock in the App Group is held inside a background task: never while suspended (SharedState.swift).
-    // (Begun and ended on any thread: UIKit allows it for these two.)
+    MediaSignWarmup.start()
+    Haptic.prepareArrival()
+    // Every flock in the app has background time. Expiry revokes the turn before ending that time.
     let application = UIApplication.shared
-    SharedStateFile.hold = {
-      // Ended by its step, or by iOS's warning that time is up (the step then ends as it can; see `hold`).
-      let task = Ended()
-      task.id = application.beginBackgroundTask(withName: "yo.state") { task.end(application) }
-      return { task.end(application) }
+    SharedAccess.hold = { expire in
+      let task = Ended(application)
+      let id = application.beginBackgroundTask(withName: "yo.shared") {
+        expire()
+        task.end()
+      }
+      guard task.start(id) else { return nil }
+      return { task.end() }
     }
     let inbox = Inbox()
     let friends = Friends()
@@ -139,15 +143,36 @@ struct YoApp: App {
 
 /// A background task, ended once.
 private final class Ended: @unchecked Sendable {
-  private let lock = NSLock()
-  var id = UIBackgroundTaskIdentifier.invalid
+  private let application: UIApplication
 
-  func end(_ application: UIApplication) {
+  init(_ application: UIApplication) { self.application = application }
+  private let lock = NSLock()
+  private var id = UIBackgroundTaskIdentifier.invalid
+  private var ended = false
+
+  func start(_ id: UIBackgroundTaskIdentifier) -> Bool {
+    let keep = lock.withLock {
+      guard !ended, id != .invalid else { return false }
+      self.id = id
+      return true
+    }
+    if !keep { finish(id) }  // expiry may have arrived before beginBackgroundTask returned
+    return keep
+  }
+
+  func end() {
     let id = lock.withLock {
       defer { self.id = .invalid }
+      ended = true
       return self.id
     }
-    if id != .invalid { application.endBackgroundTask(id) }
+    finish(id)
+  }
+
+  private func finish(_ id: UIBackgroundTaskIdentifier) {
+    if id != .invalid {
+      application.endBackgroundTask(id)
+    }
   }
 }
 
@@ -221,5 +246,22 @@ final class NotificationDelegate: NSObject, UNUserNotificationCenterDelegate, Se
     else { return }
     for _ in 0..<50 where accounts.client == nil { try? await Task.sleep(for: .milliseconds(100)) }  // opening
     _ = await inbox.send(to: friend, accounts: accounts, friends: friends)
+  }
+}
+
+/// Force font fallback and color glyph rasterization before the first media bar needs them.
+private enum MediaSignWarmup {
+  static func start() {
+    DispatchQueue.global(qos: .userInitiated).async {
+      autoreleasepool {
+        Perf.timed("media.sign.warmup") {
+          let format = UIGraphicsImageRendererFormat()
+          format.scale = 3
+          _ = UIGraphicsImageRenderer(size: CGSize(width: 160, height: 64), format: format).image { _ in
+            ("📷🎥" as NSString).draw(at: .zero, withAttributes: [.font: UIFont.systemFont(ofSize: 36)])
+          }
+        }
+      }
+    }
   }
 }

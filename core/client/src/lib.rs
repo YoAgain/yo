@@ -4,6 +4,7 @@
 //! sessions to the outbox, is here. Every operation either completes or leaves the state as it was, except what the
 //! hub has already accepted, which is kept.
 
+pub mod cost;
 pub mod backup;
 pub mod error;
 pub mod groups;
@@ -46,6 +47,8 @@ use yo_wire::{decode, encode, sha256, DeviceId as HubDeviceId, UserId};
 /// A send goes without receiving first (`send_begin`) only while the inbox is up to date: waited on, or processed
 /// this recently.
 const INBOX_FRESH_MS: u64 = 5_000;
+const OUTBOX_KEPT_MS: u64 = 30 * 24 * 3600 * 1000;
+const OUTBOX_PER_RECIPIENT: usize = 1_000;
 /// The signed prekey and the last resort Kyber prekey are replaced this often (spec 4.1)...
 const ROTATE_EVERY_MS: u64 = 7 * 24 * 3600 * 1000;
 /// ... and the ones replaced kept this long (wall clock): a session started with one may still wait at the hub.
@@ -363,6 +366,15 @@ fn is_key(item: &state::Outgoing) -> bool {
         .ok()
         .and_then(|plain| Message::decode(plain.content.as_slice()).ok())
         .is_some_and(|m| matches!(m.content, Content::ProfileKey(_)))
+}
+
+/// Sync copies and protocol traffic must never trigger a visible push.
+fn urgent(plain: &[u8], control_or_own: bool) -> bool {
+    !control_or_own && decode::<yo_wire::envelope::Plain>(plain)
+        .ok()
+        .filter(|plain| plain.to.is_none())
+        .and_then(|plain| Message::decode(plain.content.as_slice()).ok())
+        .is_some_and(|m| shown(&m.content) && !matches!(m.content, Content::Group(_)))
 }
 
 /// What a `429` holds back (spec 6.6), by the limit the hub names in its body.
@@ -1951,8 +1963,13 @@ impl Client {
     }
 
     fn enqueue(&mut self, user: &str, plain: Vec<u8>) {
+        self.enqueue_with_urgency(user, plain, false);
+    }
+
+    fn enqueue_with_urgency(&mut self, user: &str, plain: Vec<u8>, non_urgent: bool) {
         self.state.next_seq += 1;
         self.state.outbox.push_back(Outgoing {
+            queued_at: (self.clock)(),
             seq: self.state.next_seq,
             user: user.to_owned(),
             plain,
@@ -1960,7 +1977,37 @@ impl Client {
             made_for: Vec::new(),
             refused: false,
             device: None,
+            non_urgent,
         });
+        self.prune_outbox();
+    }
+
+    /// Keep recent envelopes, newest first for the cap, without changing their delivery order.
+    fn prune_outbox(&mut self) -> bool {
+        let now = (self.clock)();
+        let mut counts = BTreeMap::new();
+        let mut stamped = false;
+        let mut dropped = Vec::new();
+        for item in self.state.outbox.iter_mut().rev() {
+            // There was no enqueue time in older states. Give those a bounded lifetime from this upgrade.
+            if item.queued_at == 0 {
+                item.queued_at = now;
+                stamped = true;
+            }
+            let count = counts.entry(item.user.clone()).or_insert(0usize);
+            if now.saturating_sub(item.queued_at) > OUTBOX_KEPT_MS || *count >= OUTBOX_PER_RECIPIENT {
+                dropped.push((item.seq, item.user.clone()));
+            } else {
+                *count += 1;
+            }
+        }
+        for (seq, user) in &dropped {
+            self.key_lost(*seq, user);
+            self.drop_one("outbox retention limit".into());
+        }
+        let seqs: BTreeSet<_> = dropped.iter().map(|(seq, _)| *seq).collect();
+        self.state.outbox.retain(|item| !seqs.contains(&item.seq));
+        stamped || !dropped.is_empty()
     }
 
     /// Queues a `PlaintextContent` for one device of a user (a decryption error, spec 4.6): no session needed.
@@ -2024,6 +2071,9 @@ impl Client {
 
     /// The sessions the outbox needs, from the hub. A user it cannot get them for now waits.
     fn prepare(&mut self) -> Result<()> {
+        if self.prune_outbox() {
+            self.persist()?;
+        }
         let now = (self.clock)();
         let outdated: Vec<String> =
             self.state.contacts.iter().filter(|(_, c)| c.outdated_at > 0).map(|(user, _)| user.clone()).collect();
@@ -2054,6 +2104,9 @@ impl Client {
     /// and with its device check (4.4); its users are marked as on their way, so no other flush sends after them
     /// meanwhile. Local work only: `Deliveries::send` talks to the hub, `delivered` takes the answers.
     fn deliveries(&mut self) -> Result<Deliveries> {
+        if self.prune_outbox() {
+            self.persist()?;
+        }
         // Users whose envelopes another flush is sending, or that cannot be written to now: theirs wait, in order.
         let mut waiting = self.delivering.clone();
         let now = (self.clock)();
@@ -2158,7 +2211,14 @@ impl Client {
                 true => self.state.profile_key,
                 false => self.state.contacts.get(&item.user).and_then(|c| c.profile_key),
             };
-            let mut headers = vec![(api::HEADER_DEVICES.to_owned(), yo_wire::b64(&hash))];
+            let mut headers = vec![
+                (api::HEADER_DEVICES.to_owned(), yo_wire::b64(&hash)),
+                (
+                    api::HEADER_URGENT.to_owned(),
+                    urgent(&item.plain, item.non_urgent || item.device.is_some() || item.user == self.state.user_id)
+                        .to_string(),
+                ),
+            ];
             if let Some(key) = access {
                 headers.push((api::HEADER_ACCESS.to_owned(), yo_wire::b64(&access_key(&key))));
             }
@@ -3006,7 +3066,7 @@ impl Client {
                 let tag = Message::decode(&message).ok().and_then(|m| m.group);
                 let in_group = self.both_in(tag.as_ref(), user);
                 if in_group {
-                    self.enqueue(user, encode(&Plain { to: None, content: message.into() }));
+                    self.enqueue_with_urgency(user, encode(&Plain { to: None, content: message.into() }), true);
                 }
             }
             None if archived => {
@@ -3943,6 +4003,126 @@ impl Client {
 #[cfg(test)]
 mod handle_tests {
     use super::*;
+
+    #[test]
+    fn urgency_is_only_visible_content_and_never_sync_or_control() {
+        use yo_wire::content::{GroupTag, Media};
+        let tag = GroupTag { key: [1; 32], revision: 1 };
+        let media = Media { id: [1; 16], key: [2; 32], sha256: [3; 32], size: 32, width: 1, height: 1 };
+        let cases = vec![
+            (Content::Yo, true), (Content::Photo(media.clone()), true),
+            (Content::Video { media, duration_ms: 100 }, true),
+            (Content::Text("test".into()), true), (Content::Link("https://example.com".into()), true),
+            (Content::Location { lat_e7: 0, lon_e7: 0 }, true),
+            (Content::Receipt, false), (Content::ProfileKey([4; 32]), false),
+            (Content::Profile { name: "TEST".into() }, false),
+            (Content::Group(tag), false), (Content::Unknown(999), false),
+        ];
+        for (content, expected) in cases {
+            for group in [None, Some(tag)] {
+                // Only Yo/media can carry a group tag on the wire.
+                if group.is_some() && !matches!(content, Content::Yo | Content::Photo(_) | Content::Video { .. }) {
+                    continue;
+                }
+                let message = if let Content::Unknown(kind) = content {
+                    let mut bytes = Message { sent_at_ms: 1, group: None, content: Content::Yo }.encode().unwrap();
+                    bytes[10..12].copy_from_slice(&kind.to_be_bytes());
+                    bytes
+                } else {
+                    Message { sent_at_ms: 1, group, content: content.clone() }.encode().unwrap()
+                };
+                for to in [None, Some([5; 16])] {
+                    let plain = encode(&yo_wire::envelope::Plain { to, content: message.clone().into() });
+                    assert_eq!(urgent(&plain, false), expected && to.is_none(), "{content:?}, {to:?}");
+                    assert!(!urgent(&plain, true), "control reply or own-account copy, including group sync");
+                }
+            }
+        }
+        assert!(!urgent(&[255], false));
+    }
+
+    #[test]
+    fn decryption_error_resends_remain_silent_after_reload() {
+        let mut client = Client::registering(Arc::new(Offline), "RESEND", None, None, None, Push::none()).unwrap();
+        let message = Message { sent_at_ms: 1, group: None, content: Content::Yo }.encode().unwrap();
+        let plain = encode(&yo_wire::envelope::Plain { to: None, content: message.into() });
+        client.enqueue_with_urgency("other", plain, true);
+        let item = client.state.outbox.back().unwrap();
+        let value = serde_json::to_value(item).unwrap();
+        let restored: Outgoing = serde_json::from_value(value.clone()).unwrap();
+        assert!(restored.non_urgent);
+        assert!(!urgent(&restored.plain, restored.non_urgent));
+        let mut old = value;
+        old.as_object_mut().unwrap().remove("non_urgent");
+        let restored: Outgoing = serde_json::from_value(old).unwrap();
+        assert!(!restored.non_urgent, "older outboxes still deserialize");
+        assert!(urgent(&restored.plain, restored.non_urgent));
+    }
+
+    struct Offline;
+    impl Transport for Offline {
+        fn request(&self, _: &str, _: &str, _: &[(String, String)], _: &[u8]) -> std::result::Result<Response, String> {
+            Err("offline".into())
+        }
+    }
+
+    #[test]
+    fn outbox_retention_survives_restore_and_keeps_recipients_separate() {
+        let mut client = Client::registering(Arc::new(Offline), "RETENTION", None, None, None, Push::none()).unwrap();
+        client.set_clock(Arc::new(|| 100));
+        client.enqueue("other", vec![2]);
+        for n in 0..OUTBOX_PER_RECIPIENT + 3 {
+            client.enqueue("recipient", n.to_be_bytes().to_vec());
+        }
+        assert_eq!(client.state.outbox.len(), OUTBOX_PER_RECIPIENT + 1);
+        assert_eq!(client.state.outbox[1].plain, 3usize.to_be_bytes());
+        assert_eq!(client.dropped(), 3);
+        let key = [7; 32];
+        let mut client = Client::restore(Arc::new(Offline), &client.export(&key), &key).unwrap();
+        client.set_clock(Arc::new(|| 100 + OUTBOX_KEPT_MS));
+        assert!(!client.prune_outbox(), "exactly 30 days is kept");
+        client.enqueue("fresh", vec![3]);
+        client.set_clock(Arc::new(|| 101 + OUTBOX_KEPT_MS));
+        client.prune_outbox();
+        assert_eq!(client.state.outbox.len(), 1);
+        assert_eq!(client.state.outbox[0].user, "fresh");
+
+        // A pre-upgrade state has no enqueue timestamps. Start its clock once and persist it.
+        client.state.outbox[0].queued_at = 0;
+        client.prune_outbox();
+        assert_eq!(client.state.outbox[0].queued_at, 101 + OUTBOX_KEPT_MS);
+        let blob = client.export(&key);
+        let mut restored = Client::restore(Arc::new(Offline), &blob, &key).unwrap();
+        restored.set_clock(Arc::new(|| 102 + 2 * OUTBOX_KEPT_MS));
+        restored.prune_outbox();
+        assert!(restored.state.outbox.is_empty());
+    }
+
+    #[test]
+    fn permanent_delivery_rejections_leave_the_outbox_but_transient_ones_wait() {
+        let mut client = Client::registering(Arc::new(Offline), "REFUSALS", None, None, None, Push::none()).unwrap();
+        for status in [202, 400, 403, 404, 413, 429, 500, 503, 507] {
+            client.state.outbox.clear();
+            client.enqueue("recipient", vec![]);
+            let deliveries = Deliveries {
+                transport: Arc::new(Offline),
+                to: None,
+                items: vec![Delivery {
+                    access: None,
+                    endorsed: false,
+                    sealed: false,
+                    seq: client.state.next_seq,
+                    user: "recipient".into(),
+                    path: String::new(),
+                    headers: vec![],
+                    envelope: vec![],
+                    nonce: None,
+                }],
+            };
+            client.delivered(&deliveries, vec![Some(Ok(Response { status, body: vec![] }))]).unwrap();
+            assert_eq!(client.state.outbox.is_empty(), matches!(status, 202 | 400 | 403 | 404 | 413), "{status}");
+        }
+    }
 
     /// A contact renamed again and again is remembered by its newest few names, the latest last, not by every one.
     #[test]

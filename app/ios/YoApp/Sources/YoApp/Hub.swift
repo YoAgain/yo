@@ -197,8 +197,18 @@ final class HubTransport: HttpTransport {
       }
       done.signal()
     }
-    task.resume()
+    let access = SharedAccess.current
+    do {
+      if let access { try access.start(task) }
+      else { task.resume() }
+    } catch {
+      task.cancel()
+      return HttpResult(status: 0, body: Data(), error: "shared storage time ended")
+    }
     done.wait()
+    if access?.expired == true {
+      return HttpResult(status: 0, body: Data(), error: "shared storage time ended")
+    }
     if (200..<300).contains(answer.result.status), signed {  // the core sends the header lowercase
       SignedAt.note()
     }
@@ -424,12 +434,8 @@ enum Keychain {
     let status: OSStatus
   }
 
-  /// Yo Dev without its App Group (dev/push.sh): its development profile grants every access group of the team
-  /// ("TEAM.*"), so a query without a group would find, and change, the items of Yo from TestFlight on the same phone
-  /// as well (same service and account; one opened Yo Dev's state with the other's key). Its queries are kept to its
-  /// own group then: the one its items have always gone into, the group an item added without one gets (under such a
-  /// profile the first entry itself, "TEAM.*", a group of that name; Yo's items are in groups of their own). Yo from
-  /// TestFlight and the App Store names its groups in its entitlements and is never scoped.
+  /// Yo Dev scopes its queries to the concrete app group set by dev/sign.sh. Older builds used the profile's
+  /// wildcard default; StateKey.others tries those keys only against this app's sealed state before adopting one.
   static let scoped = Hub.isDevApp && ShareBridge.container == nil
 
   /// The query within the app's own access group (`scoped`; else as it is). Nil while that group is not known yet
@@ -443,6 +449,8 @@ enum Keychain {
   /// The group an item without one goes into, found once per launch from an item of its own (added without a group,
   /// read back with its attributes) and kept: the app's default access group.
   static func ownGroup() -> String? {
+    if let group = Bundle.main.object(forInfoDictionaryKey: "YoKeychainAccessGroup") as? String,
+      !group.isEmpty { return group }
     probeLock.lock()
     defer { probeLock.unlock() }
     if let probed { return probed }
@@ -487,20 +495,22 @@ enum Keychain {
 
   /// The item's data; nil only when there is none.
   static func read(_ query: [String: Any]) throws -> Data? {
-    guard let query = own(query) else { throw Failure(status: errSecInteractionNotAllowed) }
-    var find = query
-    find[kSecReturnData as String] = true
-    find[kSecMatchLimit as String] = kSecMatchLimitOne
-    var item: CFTypeRef?
-    let status = SecItemCopyMatching(find as CFDictionary, &item)
-    switch status {
-    case errSecSuccess:
-      guard let data = item as? Data else { throw Failure(status: errSecDecode) }
-      return data
-    case errSecItemNotFound:
-      return nil
-    default:
-      throw Failure(status: status)
+    return try Perf.timed("keychain.read") {
+      guard let query = own(query) else { throw Failure(status: errSecInteractionNotAllowed) }
+      var find = query
+      find[kSecReturnData as String] = true
+      find[kSecMatchLimit as String] = kSecMatchLimitOne
+      var item: CFTypeRef?
+      let status = SecItemCopyMatching(find as CFDictionary, &item)
+      switch status {
+      case errSecSuccess:
+        guard let data = item as? Data else { throw Failure(status: errSecDecode) }
+        return data
+      case errSecItemNotFound:
+        return nil
+      default:
+        throw Failure(status: status)
+      }
     }
   }
 

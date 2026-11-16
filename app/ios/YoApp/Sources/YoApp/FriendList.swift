@@ -22,6 +22,12 @@
 import AVFoundation
 import ImageIO
 import PhotosUI
+import _PhotosUI_SwiftUI
+
+private extension EnvironmentValues {
+  @Entry var yoFlood = false
+}
+
 import SwiftUI
 import os
 import UserNotifications
@@ -156,7 +162,7 @@ struct FriendList: View {
   @State private var zooms: [Double] = []
   @State private var zoom = 1.0
   @State private var recordingFor: Friend?
-  @State private var libraryItem: PhotosPickerItem?
+  @State private var libraryItem: _PhotosUI_SwiftUI.PhotosPickerItem?
   /// A photo from the library, waiting to be sent: it stands in for the live picture.
   @State private var picked: Picked?
 
@@ -183,8 +189,24 @@ struct FriendList: View {
   /// Counts Yos arriving, for the haptic.
   @State private var cheers = 0
   /// The plain Yos on bars now, by sender.
-  @State private var landed: [String: Landing] = [:]
-  /// The stacks' running clocks, one per sender (a new Yo replaces it): not one waiting task per Yo.
+  @State private var landings = Landings()
+
+  @Observable final class LandingSlot { var value: Landing? }
+  final class Landings {
+    private var slots: [String: LandingSlot] = [:]
+    func slot(_ name: String) -> LandingSlot {
+      if let slot = slots[name] { return slot }
+      let slot = LandingSlot()
+      slots[name] = slot
+      return slot
+    }
+    subscript(_ name: String) -> Landing? {
+      get { slot(name).value }
+      set { slot(name).value = newValue }
+    }
+    var active: [(String, Landing)] { slots.compactMap { name, slot in slot.value.map { (name, $0) } } }
+  }
+  /// All stacks share a display clock; each sender keeps only its next deadline.
   @State private var clocks = Clocks()
   /// The first friend whose new key is still to be said (Friends.keyAlerts).
   private var keyChanged: Friend? {
@@ -203,9 +225,31 @@ struct FriendList: View {
   }
 
   /// Tasks the list keeps for itself, not drawn: replacing one is no change to the view.
-  @MainActor final class Clocks {
-    /// Each stack's clock, by sender: a new Yo cancels it and starts another.
-    var settling: [String: Task<Void, Never>] = [:]
+  @MainActor final class Clocks: NSObject {
+    /// Each stack's deadlines, replaced when another Yo arrives.
+    struct Deadline {
+      var since: Date
+      var next: Date
+      var step: Double?
+      var fading: Date?
+    }
+    var settling: [String: Deadline] = [:]
+    private var displayLink: CADisplayLink?
+    private var update: (() -> Void)?
+    func start(_ update: @escaping () -> Void) {
+      guard displayLink == nil else { return }
+      self.update = update
+      let link = CADisplayLink(target: self, selector: #selector(tick))
+      link.preferredFrameRateRange = CAFrameRateRange(minimum: 60, maximum: 120, preferred: 120)
+      link.add(to: .main, forMode: .common)
+      displayLink = link
+    }
+    func stop() {
+      displayLink?.invalidate()
+      displayLink = nil
+      update = nil
+    }
+    @objc private func tick() { update?() }
     /// The stacks' clocks start once the list has laid out where the bars are now (one wait for a whole batch).
     var starting = false
   }
@@ -406,6 +450,13 @@ struct FriendList: View {
           // from the top; it does not fly across the list.
           ForEach(friends.shown.map { Lifted(friend: $0, lifts: bars.lifts[$0.key] ?? 0) }) { lifted in
             row(lifted.friend)
+              .environment(\.yoFlood, inbox.busy)
+              .transaction {
+                if inbox.busy {
+                  $0.animation = nil
+                  $0.disablesAnimations = true
+                }
+              }
               .transition(.asymmetric(insertion: .move(edge: .top).combined(with: .opacity), removal: .opacity))
           }
           // In camera mode no "+" (nothing to add there): the list ends a bar sooner, clear of the camera's controls.
@@ -474,13 +525,13 @@ struct FriendList: View {
     let waiting = inbox.media(for: friend) ?? []
     let bar = LiveBar(
       friend: friend,
-      senders: inbox.groupSenders[friend.mediaKey] ?? [],
+      senderRun: inbox.senderRun(friend.mediaKey),
       bar: bars.of(friend),
       color: .row(friend.color).opacity(cameraOn ? 0.45 : 1),  // see-through over the camera
       recording: recordingFor == friend,
       stop: { cancelSending(friend) },
       media: waiting,
-      yo: landed[friend.name],
+      landing: landings.slot(friend.name),
       hint: cameraOn ? "Takes and sends a photo. Use Record Video to record a video." : nil,
       hold: cameraOn && picked == nil ? { hold(friend, $0) } : nil,
       view: { see(friend, $0) }
@@ -499,7 +550,7 @@ struct FriendList: View {
     ) {
       // One view whatever the mode, so the camera only makes the bars see-through and rebuilds nothing: no menu while
       // holding records a video or shows the photos.
-      bar.contextMenu(cameraOn || !waiting.isEmpty ? nil : menu(for: friend))
+      bar.equatable().contextMenu(cameraOn || !waiting.isEmpty ? nil : menu(for: friend))
     }
   }
 
@@ -905,11 +956,11 @@ struct FriendList: View {
     }
     // Firing back into a group whose senders' lines stand: they stay a while longer (its time starts again), so the
     // bar does not shrink under the finger.
-    if friend.group != nil, var landing = landed[friend.name], landing.seen != nil {
+    if friend.group != nil, var landing = landings[friend.name], landing.seen != nil {
       let now = Date.now
       landing.fading = nil
       landing.seen = now
-      landed[friend.name] = landing
+      landings[friend.name] = landing
       settle(friend.name, now)
     }
     hintEpoch += 1  // the camera's hint goes, and waits again
@@ -1156,7 +1207,10 @@ extension FriendList {
   private func changes(_ content: some View) -> some View {
     content
       .onChange(of: inbox.arrived, initial: true) { arrived() }
-      .onAppear { PerfProbe.install() }
+      .onAppear {
+        PerfProbe.install()
+        Haptic.prepareArrival()
+      }
       // While the list is on screen: Yos come in from the hub.
       .task { await inbox.listen(accounts: accounts, friends: friends) }
       .onChange(of: onScreen) { startClocks() }
@@ -1177,7 +1231,7 @@ extension FriendList {
 
   private func haptics(_ content: some View) -> some View {
     content
-      .sensoryFeedback(.impact(weight: .heavy), trigger: cheers)
+      .onChange(of: cheers) { Haptic.arrival() }
       .sensoryFeedback(.start, trigger: recordingFor) { (_: Friend?, new: Friend?) in new != nil }
       .sensoryFeedback(.selection, trigger: viewing) { (old: [Arrival]?, new: [Arrival]?) in old == nil && new != nil }
   }
@@ -1194,23 +1248,30 @@ extension FriendList {
   /// number. One haptic; each sender's bar goes on top once and counts all its Yos at once (one "!" for each); then
   /// the clocks start once.
   private func arrived() {
+    Perf.timed("list.arrived") { applyArrivals() }
+  }
+
+  private func applyArrivals() {
     let batch = inbox.takeArrivals()
     guard !batch.isEmpty else { return }
-    var senders: [String] = []  // by their newest Yo, the newest last (it ends on top)
+    var newest: [String: Int] = [:]  // last occurrence wins, without removing from an array
     var runs: [String: (first: String, count: Int)] = [:]
-    for arrival in batch {
-      if let at = senders.firstIndex(of: arrival.from) { senders.remove(at: at) }
-      senders.append(arrival.from)
+    for (index, arrival) in batch.enumerated() {
+      newest[arrival.from] = index
       runs[arrival.from, default: (arrival.id, 0)].count += 1
+    }
+    let senders = batch.enumerated().compactMap { index, arrival in
+      newest[arrival.from] == index ? arrival.from : nil
     }
     cheers += 1
     Perf.mark("arrived \(batch.count)")
     PerfProbe.frame("arrived")
-    for name in senders { rise(name) }  // on top as soon as no bar is being tapped, all in one step
-    withAnimation(.snappy(duration: 0.2)) {  // the words make room without a bounce
+    rise(senders)  // on top as soon as no bar is being tapped, all in one step
+    let landedAt = Date.now
+    withAnimation(inbox.busy ? nil : .snappy(duration: 0.2)) {  // the words make room without a bounce
       for name in senders {
         guard let run = runs[name] else { continue }
-        land(name, run.first, count: run.count)
+        land(name, run.first, count: run.count, now: landedAt)
       }
     }
     guard !clocks.starting else { return }
@@ -1224,66 +1285,92 @@ extension FriendList {
 
   /// Yos on a sender's bar: the stack counts them, and one on screen starts its time again. A new run (also over one
   /// fading out) knocks. A photo stays until seen (Inbox.media(for:)).
-  private func land(_ name: String, _ first: String, count: Int) {
-    if var landing = landed[name], landing.fading == nil {
-      landing.total += count
-      landing.count = landing.total  // all of the run again, also halfway down its "!"s
-      if landing.seen != nil {
-        let now = Date.now
-        landing.seen = now  // on screen: the stack's time starts again
-        settle(name, now)
+  private func land(_ name: String, _ first: String, count: Int, now: Date) {
+    Perf.timed("list.land") {
+      if var landing = landings[name], landing.fading == nil {
+        landing.total += count
+        landing.count = landing.total  // all of the run again, also halfway down its "!"s
+        if landing.seen != nil {
+          landing.seen = now  // on screen: the stack's time starts again
+          settle(name, now)
+        }
+        Perf.timed("list.land.publish") { landings[name] = landing }
+      } else {
+        Perf.timed("list.land.publish") { landings[name] = Landing(first: first, count: count, total: count) }
       }
-      landed[name] = landing
-    } else {
-      landed[name] = Landing(first: first, count: count, total: count)
     }
   }
 
   /// Stacks whose bars are on screen now start their time; one out of sight waits until it is seen.
   private func startClocks() {
-    let seen = Set(friends.shown.filter { onScreen.contains($0.key.uuidString) }.map(\.name))  // as named now
-    for (name, landing) in landed where seen.contains(name) && landing.seen == nil {
+    Perf.timed("list.clocks") {
+      let seen = Set(friends.shown.filter { onScreen.contains($0.key.uuidString) }.map(\.name))  // as named now
       let now = Date.now
-      landed[name]?.seen = now
-      settle(name, now)
+      for (name, landing) in landings.active where seen.contains(name) && landing.seen == nil {
+        landings[name]?.seen = now
+        settle(name, now)
+      }
     }
   }
 
   /// A stack's time, started at `since`: if no Yo came meanwhile, its "!"s go one by one (quickly; faster the more
   /// there are), then the last Yo fades out (`yoSeconds`). A new Yo starts it again.
   private func settle(_ name: String, _ since: Date) {
-    clocks.settling[name]?.cancel()  // the clock before is over: one per stack, not one per Yo
-    clocks.settling[name] = Task {
-      try? await Task.sleep(for: .seconds(Self.yoSolidSeconds))
-      guard !Task.isCancelled else { return }
-      let step = min(0.2, 2.0 / Double(max(1, landed[name]?.count ?? 1)))
-      while let landing = landed[name], landing.seen == since, landing.count > 1 {
-        withAnimation(.easeOut(duration: 0.15)) { landed[name]?.count -= 1 }
-        try? await Task.sleep(for: .seconds(step))
-      }
-      guard landed[name]?.seen == since else { return }  // another came
-      let fading = Date.now
-      landed[name]?.fading = fading
-      try? await Task.sleep(for: .seconds(Self.yoSeconds - Self.yoSolidSeconds))
-      if landed[name]?.fading == fading {
-        _ = landed.removeValue(forKey: name)
-        if let bar = friends.shown.first(where: { $0.name == name }) {
-          // Its senders' lines go and the bar shrinks: no taps for a moment (`send`).
-          if bar.group != nil, inbox.groupSenders[bar.mediaKey] != nil { tapLock = (bar.key, .now + 0.5) }
-          inbox.endRun(bar.mediaKey)
+    clocks.settling[name] = Clocks.Deadline(since: since, next: since + Self.yoSolidSeconds)
+    scheduleClock()
+  }
+
+  private func scheduleClock() {
+    clocks.start { tickClocks() }
+  }
+
+  private func tickClocks() {
+    let now = Date.now
+    guard clocks.settling.values.contains(where: { $0.next <= now }) else { return }
+    Perf.timed("list.land.clock") {
+      for (name, var deadline) in clocks.settling where deadline.next <= now {
+        guard let landing = landings[name], landing.seen == deadline.since else {
+          clocks.settling[name] = nil
+          continue
+        }
+        if let fading = deadline.fading {
+          if landing.fading == fading {
+            landings[name] = nil
+            if let bar = friends.shownFriend(named: name) {
+              if bar.group != nil, !inbox.senderRun(bar.mediaKey).senders.isEmpty { tapLock = (bar.key, now + 0.5) }
+              inbox.endRun(bar.mediaKey)
+            }
+          }
+          clocks.settling[name] = nil
+        } else if landing.count > 1 {
+          if deadline.step == nil { deadline.step = min(0.2, 2.0 / Double(max(1, landing.count))) }
+          withAnimation(.easeOut(duration: 0.15)) { landings[name]?.count -= 1 }
+          deadline.next += deadline.step ?? 0.2
+          clocks.settling[name] = deadline
+        } else {
+          landings[name]?.fading = now
+          deadline.fading = now
+          deadline.next = now + Self.yoSeconds - Self.yoSolidSeconds
+          clocks.settling[name] = deadline
         }
       }
     }
+    if clocks.settling.isEmpty { clocks.stop() }
   }
 
   /// A friend goes on top with the others coming within 0.3 seconds, in one step (the newest ends on top). While you
   /// are sending (taps or a stack of photos still in their time) the list does not move at all, so no bar slides away
   /// under your finger; it moves once you are done.
-  private func rise(_ name: String) {
+  private func rise(_ name: String) { rise([name]) }
+
+  private func rise(_ names: [String]) {
+    guard !names.isEmpty else { return }
     let bars = bars  // the object itself into the task, not this view's copy of the state
-    bars.rising.removeAll { $0 == name }
-    bars.rising.append(name)
-    guard bars.rising.count == 1 else { return }  // a step is already on its way
+    let wasEmpty = bars.rising.isEmpty
+    let selected = Set(names)
+    bars.rising.removeAll { selected.contains($0) }
+    bars.rising.append(contentsOf: names)
+    guard wasEmpty else { return }  // a step is already on its way
     Task {
       try? await Task.sleep(for: .seconds(0.3))
       while sending { try? await Task.sleep(for: .milliseconds(200)) }
@@ -1302,27 +1389,33 @@ extension FriendList {
   /// bar is in sight below the title; scrolled down, the view stays where it is (the Yo waits on its bar until it is
   /// seen).
   private func toTop(_ names: [String]) {
-    // By the friend, not the name: a name can change its spelling between a Yo landing and this step, and a name
-    // not found would count as "moving" and lift a bar that is already on top.
-    let shown = friends.shown
-    let skeleton = { (name: String) in Username.skeleton(name) }
-    var keys: [UUID] = []
-    for name in names {
-      guard let key = (shown.first { $0.name == name } ?? shown.first { skeleton($0.name) == skeleton(name) })?.key
-      else { continue }
-      keys.removeAll { $0 == key }
-      keys.append(key)
-    }
-    let order = shown.map(\.key)  // as on screen: a blocked friend above would make it "move"
-    // Already in place: the top bars are these friends in this order, newest first.
-    let moving = keys.enumerated().filter { i, key in order.firstIndex(of: key) != keys.count - 1 - i }.map(\.element)
-    guard !moving.isEmpty else { return }
-    withAnimation(.snappy(duration: 0.35)) {
-      for key in keys {
-        if moving.contains(key) { bars.lifts[key, default: 0] += 1 }
-        if let name = friends.all.first(where: { $0.key == key })?.name { friends.promote(name) }
+    Perf.timed("list.toTop") {
+      // By the friend, not the name: a name can change its spelling between a Yo landing and this step, and a name
+      // not found would count as "moving" and lift a bar that is already on top.
+      let shown = friends.shown
+      var keys: [UUID] = []
+      var selected: Set<UUID> = []
+      for name in names.reversed() {
+        guard let key = friends.liftKey(named: name), selected.insert(key).inserted else { continue }
+        keys.append(key)
       }
-      if !scrolled { position.scrollTo(edge: .top) }
+      keys.reverse()
+      let front = Array(shown.prefix(keys.count).map(\.key))
+      let moving = keys.enumerated().filter { i, key in
+        let position = keys.count - 1 - i
+        return position >= front.count || front[position] != key
+      }.map(\.element)
+      guard !moving.isEmpty else { return }
+      // One reorder for the whole batch (promoteBatch), still sliding as before.
+      withAnimation(inbox.busy ? nil : .snappy(duration: 0.35)) {
+        if !inbox.busy {
+          var lifts = bars.lifts
+          for key in moving { lifts[key, default: 0] += 1 }
+          bars.lifts = lifts
+        }
+        friends.promoteBatch(keys)
+        if !scrolled { position.scrollTo(edge: .top) }
+      }
     }
   }
 
@@ -1375,16 +1468,31 @@ enum ThumbnailTouch {
 
 /// A friend's bar as it is now: what it says after a send and what is on its way out (`FriendList.Bars.Bar`) are
 /// read here, so a tap redraws this bar alone and not the whole list.
-struct LiveBar: View {
+struct LiveBar: View, @MainActor Equatable {
+  // Closures access live State locations. Observable row objects still invalidate their own body;
+  // unrelated parent haptics/order updates can reuse unchanged bars.
+  static func == (lhs: Self, rhs: Self) -> Bool {
+    lhs.friend.key == rhs.friend.key
+      && lhs.friend.name == rhs.friend.name && lhs.friend.color == rhs.friend.color
+      && lhs.friend.user == rhs.friend.user && lhs.friend.group == rhs.friend.group
+      && lhs.friend.blocked == rhs.friend.blocked && lhs.friend.gone == rhs.friend.gone
+      && lhs.friend.keyChanged == rhs.friend.keyChanged && lhs.friend.request == rhs.friend.request
+      && lhs.friend.undoFirst == rhs.friend.undoFirst && lhs.friend.undoSeconds == rhs.friend.undoSeconds
+      && lhs.senderRun === rhs.senderRun && lhs.bar === rhs.bar
+      && lhs.landing === rhs.landing && lhs.color == rhs.color && lhs.recording == rhs.recording
+      && lhs.media == rhs.media && lhs.hint == rhs.hint && (lhs.hold == nil) == (rhs.hold == nil)
+  }
+
   let friend: Friend
   /// A group's: who sent the Yos on it now, the newest first, with their counts.
-  var senders: [Inbox.GroupSender] = []
+  let senderRun: Inbox.SenderRun
   let bar: FriendList.Bars.Bar
   let color: Color
   let recording: Bool
   let stop: () -> Void
   let media: [Arrival]
-  let yo: FriendList.Landing?
+  let landing: FriendList.LandingSlot
+  private var yo: FriendList.Landing? { landing.value }
   let hint: String?
   let hold: ((Bool) -> Void)?
   let view: (ThumbnailTouch) -> Void
@@ -1397,7 +1505,7 @@ struct LiveBar: View {
       title, count: friend.request ? 0 : count, color: color, recording: recording,
       outgoing: bar.outgoing.last?.started, sendSeconds: bar.seconds, stop: stop,
       media: friend.request ? [] : media, yo: friend.request ? nil : yo, hint: hint, hold: hold, view: view, faded: friend.gone && bar.sent == nil,
-      icon: friend.group == nil ? nil : "person.3.fill", senders: friend.group == nil ? [] : senders, flies: true,
+      icon: friend.group == nil ? nil : "person.3.fill", senders: friend.group == nil ? [] : senderRun.senders, flies: true,
       action: action)
       // Gone: still their name (whose bar it is), faded; a tap says "Not on Yo".
       .accessibilityValue(friend.gone ? "Not on Yo" : "")
@@ -1424,6 +1532,24 @@ struct LiveBar: View {
 /// SwiftUI's next update, once the list has been rebuilt for the change it watches (8 to 10 ms after the tap in the
 /// Simulator, later when the list is busy), and a generator not prepared starts late.
 @MainActor enum Haptic {
+  private static let heavy = Perf.timed("inbox.haptic.create") { UIImpactFeedbackGenerator(style: .heavy) }
+
+  static func prepareArrival() {
+    Perf.timed("inbox.haptic.prepare") { heavy.prepare() }
+  }
+
+  private static var arrivalPlayed = false
+
+  static func arrival() {
+    guard !arrivalPlayed else { return }
+    arrivalPlayed = true
+    Perf.timed("inbox.haptic.play") { heavy.impactOccurred() }
+    PerfProbe.nextFrame {
+      arrivalPlayed = false
+      prepareArrival()
+    }
+  }
+
   private static let medium = UIImpactFeedbackGenerator(style: .medium)
   private static let light = UIImpactFeedbackGenerator(style: .light)
   private static let rigid = UIImpactFeedbackGenerator(style: .rigid)
@@ -1478,6 +1604,9 @@ struct RowButton: View {
   var senders: [Inbox.GroupSender] = []
   let action: () -> Void
   /// A hold started a video: letting go stops it, and the bar's tap does not take a photo as well.
+  @Environment(\.dynamicTypeSize) private var measureType
+  @Environment(\.locale) private var measureLocale
+  @Environment(\.legibilityWeight) private var measureWeight
   @State private var holding = false
   @State private var viewing = false
   @State private var touchedAt = Date.distantPast
@@ -1612,6 +1741,7 @@ struct RowButton: View {
             Text(title)
           }
         }
+          .layoutValue(key: BarMeasureKey.self, value: measureKey("words:" + title))
           .lineLimit(1)
           .minimumScaleFactor(0.5)  // a long name, or large text, gets smaller before it is cut with "…"
           .contentTransition(.identity)  // other words come at once, never two drawn over each other
@@ -1630,7 +1760,9 @@ struct RowButton: View {
         .opacity(touchable ? 0 : faded ? 0.55 : 1)
         .accessibilityHidden(touchable)
       Bangs(count: count).opacity(touchable ? 0 : 1).accessibilityHidden(touchable)
-      ZStack { mark(touchable: touchable) }  // always a part, so a missing "!" never takes its place
+      ZStack { mark(touchable: touchable) }
+        .layoutValue(key: BarMeasureKey.self, value: media.isEmpty && yo == nil ? measureKey("empty") : nil)
+        // Always a part, so a missing "!" never takes its place
         .modifier(Knock(trigger: yo?.first))
         .opacity(touchable ? 1 : 0)
         .accessibilityHidden(!touchable)
@@ -1638,6 +1770,10 @@ struct RowButton: View {
     .font(.yo(Metrics.rowFont))
     .foregroundStyle(.white)
     .animation(nil, value: title)  // other words stand in their place at once; only "!"s, numbers and room animate
+  }
+
+  private func measureKey(_ text: String) -> String {
+    "\(measureType):\(measureLocale.identifier):\(String(describing: measureWeight)):\(leftHanded):" + text
   }
 
   private static let ring = 30.0
@@ -1678,7 +1814,7 @@ struct RowButton: View {
   /// Something on its way out: a ring at the bar's left closing like an upload; a tap on it undoes the send.
   private func undoRing(since start: Date) -> some View {
     Button(action: stop) {
-      TimelineView(.animation) { timeline in
+      TimelineView(.animation(minimumInterval: 1.0 / 120)) { timeline in
         let done = min(1, timeline.date.timeIntervalSince(start) / sendSeconds)
         ZStack {
           Circle().stroke(.white.opacity(0.35), lineWidth: 2.5)
@@ -1733,7 +1869,7 @@ struct RowButton: View {
       .transition(.scale.combined(with: .opacity))
     } else if let yo {
       // "Yo" and a "!" for each Yo after the first: a "!" goes quickly when its Yo is over, the last Yo fades slowly.
-      TimelineView(.animation(paused: yo.fading == nil)) { timeline in
+      TimelineView(.animation(minimumInterval: 1.0 / 120, paused: yo.fading == nil)) { timeline in
         let fade = yo.fading.map { timeline.date.timeIntervalSince($0) / (yoSeconds - Self.solid) } ?? 0
         if !senders.isEmpty {
           VStack(spacing: 0) {
@@ -1808,7 +1944,7 @@ struct SenderBlocks: View {
   var body: some View {
     // Each line fades on its own once its sender stops, as a bar's Yo: solid `yoSolidSeconds`, then gone by
     // `yoSeconds`. Its place stays (empty) until the whole bar's Yos are over and it shrinks.
-    TimelineView(.animation) { timeline in
+    TimelineView(.animation(minimumInterval: 1.0 / 120)) { timeline in
       VStack(spacing: 0) {
         ForEach(senders, id: \.name) { sender in  // in the order they first came
           let since = timeline.date.timeIntervalSince(sender.at)
@@ -1839,10 +1975,21 @@ struct SenderBlocks: View {
 /// five; beyond, the "!"s stay and how many more comes after them ("Yo!!!!! +3"), turning as a wheel, its digits all
 /// as wide (nothing shifts).
 struct Bangs: View {
+  @Environment(\.yoFlood) private var busy
+  @Environment(\.dynamicTypeSize) private var measureType
+  @Environment(\.locale) private var measureLocale
+  @Environment(\.legibilityWeight) private var measureWeight
   let count: Int
+  @State private var displayed: Int
+  @State private var nextTurn = ContinuousClock.now
+
+  init(count: Int) {
+    self.count = count
+    _displayed = State(initialValue: count)
+  }
 
   var body: some View {
-    let (bangs, more) = ShareBridge.bangs(count)  // as a notification says them (ShareBridge.yo)
+    let (bangs, more) = ShareBridge.bangs(busy ? count : displayed)  // as a notification says them (ShareBridge.yo)
     HStack(spacing: 0) {
       ForEach(0..<bangs, id: \.self) { _ in
         Text("!").transition(.asymmetric(
@@ -1850,11 +1997,27 @@ struct Bangs: View {
           removal: .opacity.animation(.easeOut(duration: 0.15))))
       }
       if more > 0 {
-        Text(" +\(more)")
-          .monospacedDigit()
-          .contentTransition(.numericText(value: Double(more)))
-          .transition(.opacity)
+        ZStack(alignment: .leading) {
+          // Keep room for two digits: +9 → +10 no longer moves the name.
+          Text(" +00").hidden()
+          Text(" +\(more)")
+            .contentTransition(.numericText(value: Double(more)))
+        }
+        .monospacedDigit()
+        .transition(.opacity)
       }
+    }
+    .layoutValue(key: BarMeasureKey.self, value:
+      "bangs:\(busy ? count : displayed):\(measureType):\(measureLocale.identifier):\(String(describing: measureWeight))")
+    .animation(busy ? nil : .easeOut(duration: 0.16), value: displayed)
+    .task(id: count) {
+      guard displayed != count else { return }
+      // Replace the pending target without retargeting a running transition.
+      // Keep the deadline across cancellation so continuous arrivals cannot starve it.
+      do { try await ContinuousClock().sleep(until: nextTurn) } catch { return }
+      guard !Task.isCancelled else { return }
+      displayed = count
+      nextTurn = .now.advanced(by: .milliseconds(200))
     }
   }
 }
@@ -1863,7 +2026,11 @@ struct Bangs: View {
 /// at the bar's end. The words stay in the middle until they would run into the end (or the edge): then they move left
 /// as far as needed, never past `start` (the margin, or after the undo ring); a name too long even then gets smaller
 /// (to half), then is cut with "…". Nothing overlaps.
-struct BarLine: Layout {
+private struct BarMeasureKey: LayoutValueKey {
+  static let defaultValue: String? = nil
+}
+
+struct BarLine: Layout, Equatable {
   static let margin = 20.0
   static let endPadding = 30.0
   static let gap = 14.0
@@ -1879,53 +2046,89 @@ struct BarLine: Layout {
   /// and their "!"s move aside from it as from any end part.
   var lineEnd = 0.0
 
-  func sizeThatFits(proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) -> CGSize {
-    let heights = subviews.map { $0.sizeThatFits(.unspecified).height }
-    if below, heights.count > 2 {
-      return CGSize(width: proposal.width ?? 393, height: max(Metrics.rowHeight, heights[2]))
-    }
-    return CGSize(width: proposal.width ?? 393, height: heights.max() ?? 0)
+  struct Cache {
+    var sizes: [CGSize] = []
+    var keys: [String?] = []
   }
 
-  func placeSubviews(in bounds: CGRect, proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) {
-    // An empty part (no "!"s, no Yo at the end) is no subview at all: take what is there.
-    guard let words = subviews.first else { return }
-    let after = subviews.count > 1 ? subviews[1] : nil
-    let last: LayoutSubview? = subviews.count > 2 ? subviews[2] : nil
-    let afterSize = after?.sizeThatFits(.unspecified) ?? .zero
-    // Below: the end part under the line, at the bar's end; the line then as on a bar with nothing at its end.
-    let end: LayoutSubview? = below ? nil : last
-    if below, let last {
-      // As wide as the bar less its margins, from its top.
-      last.place(
-        at: CGPoint(x: bounds.minX + Self.endPadding, y: bounds.minY), anchor: .topLeading,
-        proposal: ProposedViewSize(width: max(0, bounds.width - 2 * Self.endPadding), height: nil))
+  func makeCache(subviews: Subviews) -> Cache {
+    Perf.timed("media.sign.cache") {
+      var cache = Cache()
+      updateCache(&cache, subviews: subviews)
+      return cache
     }
-    let endSize: CGSize = end?.sizeThatFits(.unspecified) ?? .zero
-    // The words between `low` and `high`, the end part outside them.
-    // Below, the end part's width on the first line is `lineEnd` (its sign), not its own.
-    let endWidth = below ? lineEnd : endSize.width
-    let endX = mirrored ? bounds.minX + Self.endPadding : bounds.maxX - Self.endPadding - endWidth
-    let low = mirrored
-      ? (endWidth > 0 ? endX + endWidth + Self.gap : bounds.minX + Self.margin) : bounds.minX + start
-    let high = mirrored ? bounds.maxX - start : (endWidth > 0 ? endX - Self.gap : bounds.maxX - Self.margin)
-    let room = max(0, high - low - afterSize.width)
-    let wordsWidth = min(words.sizeThatFits(.unspecified).width, room)
-    var x = bounds.midX - wordsWidth / 2
-    x -= max(0, x + wordsWidth + afterSize.width - high)
-    x = max(low, x)
-    // The line in the middle of the bar's first `rowHeight`, where it is on every bar (the end part under it, if so).
-    let lineY = below ? bounds.minY + Metrics.rowHeight / 2 : bounds.midY
-    words.place(
-      at: CGPoint(x: x, y: lineY), anchor: .leading, proposal: ProposedViewSize(width: wordsWidth, height: nil))
-    after?.place(at: CGPoint(x: x + wordsWidth, y: lineY), anchor: .leading, proposal: .unspecified)
-    end?.place(at: CGPoint(x: endX, y: lineY), anchor: .leading, proposal: .unspecified)
+  }
+
+  func updateCache(_ cache: inout Cache, subviews: Subviews) {
+    // SwiftUI invalidates this when the subviews change (including text, counts and environment).
+    for (index, view) in subviews.enumerated() {
+      let key = view[BarMeasureKey.self]
+      if index >= cache.sizes.count {
+        cache.sizes.append(view.sizeThatFits(.unspecified))
+        cache.keys.append(key)
+      } else if key == nil || cache.keys[index] != key {
+        cache.sizes[index] = view.sizeThatFits(.unspecified)
+        cache.keys[index] = key
+      }
+    }
+    if cache.sizes.count > subviews.count {
+      cache.sizes.removeLast(cache.sizes.count - subviews.count)
+      cache.keys.removeLast(cache.keys.count - subviews.count)
+    }
+  }
+
+  func sizeThatFits(proposal: ProposedViewSize, subviews: Subviews, cache: inout Cache) -> CGSize {
+    return Perf.timed("media.sign.measure") {
+      let heights = cache.sizes.map(\.height)
+      if below, heights.count > 2 {
+        return CGSize(width: proposal.width ?? 393, height: max(Metrics.rowHeight, heights[2]))
+      }
+      return CGSize(width: proposal.width ?? 393, height: heights.max() ?? 0)
+    }
+  }
+
+  func placeSubviews(in bounds: CGRect, proposal: ProposedViewSize, subviews: Subviews, cache: inout Cache) {
+    Perf.timed("media.sign.place") {
+      // An empty part (no "!"s, no Yo at the end) is no subview at all: take what is there.
+      guard let words = subviews.first else { return }
+      let after = subviews.count > 1 ? subviews[1] : nil
+      let last: LayoutSubview? = subviews.count > 2 ? subviews[2] : nil
+      let afterSize = cache.sizes.count > 1 ? cache.sizes[1] : .zero
+      // Below: the end part under the line, at the bar's end; the line then as on a bar with nothing at its end.
+      let end: LayoutSubview? = below ? nil : last
+      if below, let last {
+        // As wide as the bar less its margins, from its top.
+        last.place(
+          at: CGPoint(x: bounds.minX + Self.endPadding, y: bounds.minY), anchor: .topLeading,
+          proposal: ProposedViewSize(width: max(0, bounds.width - 2 * Self.endPadding), height: nil))
+      }
+      let endSize: CGSize = !below && cache.sizes.count > 2 ? cache.sizes[2] : .zero
+      // The words between `low` and `high`, the end part outside them.
+      // Below, the end part's width on the first line is `lineEnd` (its sign), not its own.
+      let endWidth = below ? lineEnd : endSize.width
+      let endX = mirrored ? bounds.minX + Self.endPadding : bounds.maxX - Self.endPadding - endWidth
+      let low = mirrored
+        ? (endWidth > 0 ? endX + endWidth + Self.gap : bounds.minX + Self.margin) : bounds.minX + start
+      let high = mirrored ? bounds.maxX - start : (endWidth > 0 ? endX - Self.gap : bounds.maxX - Self.margin)
+      let room = max(0, high - low - afterSize.width)
+      let wordsWidth = min(cache.sizes[0].width, room)
+      var x = bounds.midX - wordsWidth / 2
+      x -= max(0, x + wordsWidth + afterSize.width - high)
+      x = max(low, x)
+      // The line in the middle of the bar's first `rowHeight`, where it is on every bar (the end part under it, if so).
+      let lineY = below ? bounds.minY + Metrics.rowHeight / 2 : bounds.midY
+      words.place(
+        at: CGPoint(x: x, y: lineY), anchor: .leading, proposal: ProposedViewSize(width: wordsWidth, height: nil))
+      after?.place(at: CGPoint(x: x + wordsWidth, y: lineY), anchor: .leading, proposal: .unspecified)
+      end?.place(at: CGPoint(x: endX, y: lineY), anchor: .leading, proposal: .unspecified)
+    }
   }
 }
 
 /// A Yo knocks: the words on a bar nudge left and right once, as a poke; the bar itself stays (moving it would show
 /// what is behind it).
 struct Knock: ViewModifier {
+  @Environment(\.yoFlood) private var busy
   let trigger: String?
   @State private var knocks = 0
 
@@ -1940,11 +2143,11 @@ struct Knock: ViewModifier {
       }
     }
     .onChange(of: trigger) { _, new in
-      if new != nil { knocks += 1 }
+      if new != nil && !busy { knocks += 1 }
     }
     // A bar that comes in on top already carrying its Yo knocks as it arrives.
     .onAppear {
-      if trigger != nil { knocks += 1 }
+      if trigger != nil && !busy { knocks += 1 }
     }
   }
 }
@@ -2066,7 +2269,7 @@ struct RecordingFill: View {
   @State private var start = Date.now
 
   var body: some View {
-    TimelineView(.animation) { context in
+    TimelineView(.animation(minimumInterval: 1.0 / 120)) { context in
       let elapsed = context.date.timeIntervalSince(start)
       let breath = 0.5 + 0.5 * cos(elapsed * 2 * .pi)
       GeometryReader { size in
@@ -2166,7 +2369,7 @@ struct HeldMedia: View {
         let current = queue[index]
         VStack(spacing: 10) {
           VStack(alignment: .leading, spacing: 10) {
-            TimelineView(.animation(paused: since == nil)) { timeline in
+            TimelineView(.animation(minimumInterval: 1.0 / 120, paused: since == nil)) { timeline in
               let running = progress(at: timeline.date)
               HStack(spacing: 3) {
                 ForEach(queue.indices, id: \.self) { i in
@@ -2276,14 +2479,16 @@ struct HeldMedia: View {
       player = nil
       full = nil
       if let file = current.file {
-        full = await Task.detached(priority: .userInitiated) { Self.fitted(file) }.value
+        full = await Task.detached(priority: .userInitiated) { Perf.timed("media.viewer.decode") { Self.fitted(file) } }.value
       }
       guard !Task.isCancelled else { return }
-      shows(current)
-      seconds = photoSeconds
+      Perf.timed("media.viewer.publish") {
+        shows(current)
+        seconds = photoSeconds
+      }
       return
     }
-    let player = AVPlayer(url: video)
+    let player = Perf.timed("media.viewer.player") { AVPlayer(url: video) }
     self.player = player
     let length = (try? await AVURLAsset(url: video).load(.duration).seconds) ?? 0
     guard !Task.isCancelled else { return }
@@ -2302,6 +2507,7 @@ struct HeldMedia: View {
       kCGImageSourceCreateThumbnailFromImageAlways: true,
       kCGImageSourceCreateThumbnailWithTransform: true,
       kCGImageSourceThumbnailMaxPixelSize: 2048,
+      kCGImageSourceShouldCacheImmediately: true,
     ]
     return CGImageSourceCreateThumbnailAtIndex(source, 0, options as CFDictionary).map { UIImage(cgImage: $0) }
   }

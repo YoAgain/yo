@@ -63,6 +63,8 @@ pub fn deliver_path(user: &UserId) -> String {
 }
 
 /// The header of a delivery naming the devices it was encrypted for (spec 4.4): base64url of `devices::hash`.
+/// Whether a delivery warrants a visible push (`true` by default for older clients).
+pub const HEADER_URGENT: &str = "yo-urgent";
 pub const HEADER_DEVICES: &str = "yo-devices";
 /// On a delivery: the recipient's access key (base64url, 16 bytes: Signal's unidentified access key, derived from its
 /// profile key), as its contacts have it; without it, or with another, the delivery is a request (spec 4.10). It

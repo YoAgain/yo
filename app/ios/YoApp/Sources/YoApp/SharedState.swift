@@ -5,9 +5,9 @@
 // One state, used in turns. Every step of the core on it (`YoClient.with` in core/bindings) takes a file lock in the
 // group (flock on `yo-state.lock`, inside the process's own lock) and first takes in what another process saved since
 // (`reload`): so no step ever runs on an old state, and each step's save is the newest when the lock is given back.
-// One writer at a time, never a write from an old state. The steps are short: the core waits for the hub (the long
-// poll, deliveries, uploads) outside them; only a few steps ask the hub something within (opening a chat, a send that
-// receives first).
+// One writer at a time, never a write from an old state. Most waits for the hub (the long poll, deliveries, uploads)
+// are outside the turn; some steps still ask the hub within it (opening a chat, a send that receives first). Those
+// requests can outlast background time: expiry revokes the turn rather than waiting for the network.
 //
 // Which save a process has: the file starts with a new random word (36 characters) for each save, written with the
 // state in one atomic write, so the word and the state never disagree. Each client keeps the word it read or wrote
@@ -15,9 +15,8 @@
 // nothing on disk and throws: the core's step fails before anything that needed the save leaves (no message, commit,
 // prekey upload or inbox ack), and the others see the state before it, as after a crash of this process.
 //
-// iOS ends a suspended app or extension that holds a file lock in a shared container (0xdead10cc): the app holds the
-// lock only inside a background task (`hold`), and nobody holds it while waiting for anything but the step itself.
-// A process that dies holding it gives it back with its file (flock).
+// Background time ending releases the flock before the process can suspend. The old turn may still be unwinding
+// a request, but cannot save or send again; its next turn reloads, even if the state on disk did not change.
 import Foundation
 import YoCore
 
@@ -28,25 +27,11 @@ final class SharedStateFile: StateStore, StateLock, @unchecked Sendable {
   static var stateURL: URL? { container?.appending(path: "yo-state") }
   private static var lockURL: URL? { container?.appending(path: "yo-state.lock") }
 
-  /// The app's: a background task while the lock is held, so the app is not suspended holding it. Returns its end.
-  /// (UIApplication is not there in an extension; an extension's own sheet or push keeps it running meanwhile.) A
-  /// task refused or run out still takes the lock: a step is short, and the core's waits are outside it; should iOS
-  /// end the app holding it, the lock goes with the process.
-  nonisolated(unsafe) static var hold: (@Sendable () -> @Sendable () -> Void)?
-
-  /// The lock file, open for the process's life; -1 when it does not open (then nothing is shared).
-  private static let fd: Int32 = {
-    guard let url = lockURL else { return -1 }
-    return open(url.path, O_RDWR | O_CREAT | O_CLOEXEC, 0o600)
-  }()
-
-  /// The lock within the process: a flock is the open file's, so two threads of one process would both get it.
   /// A semaphore, not a mutex: a guest takes it on one thread and gives it back on another.
   private static let inProcess = DispatchSemaphore(value: 1)
-  nonisolated(unsafe) private static var release: (@Sendable () -> Void)?
+  nonisolated(unsafe) private static var access: SharedAccess?
 
-  /// Whether the lock can be had here at all.
-  static var available: Bool { fd >= 0 && stateURL != nil }
+  static var available: Bool { lockURL != nil && stateURL != nil }
 
   /// The save this client read or made last (its `gen` word); only touched under the lock.
   private var known: String?
@@ -59,47 +44,50 @@ final class SharedStateFile: StateStore, StateLock, @unchecked Sendable {
 
   // MARK: The lock
 
-  /// Takes the lock, waiting while another process holds it.
-  static func take() {
-    inProcess.wait()
-    let end = hold?()
-    while flock(fd, LOCK_EX) != 0 && errno == EINTR {}
-    release = end
-  }
-
-  /// Takes the lock if it comes within `seconds`: an extension does not wait long for the app.
-  static func take(within seconds: Double) -> Bool {
-    let deadline = Date.now.addingTimeInterval(seconds)
-    guard inProcess.wait(timeout: .now() + seconds) == .success else { return false }
-    while flock(fd, LOCK_EX | LOCK_NB) != 0 {
-      guard Date.now < deadline else {
+  /// The process keeps its turn until `give`, even if its background time ends meanwhile. Expiry releases the
+  /// file lock, fences all later saves and requests of this turn, and makes the next turn reload from disk.
+  static func take(within seconds: Double = .infinity) -> Bool {
+    return Perf.timed("state.lock.wait") {
+      guard !Thread.isMainThread else { return false }
+      let deadline: DispatchTime = seconds.isFinite ? .now() + seconds : .distantFuture
+      guard inProcess.wait(timeout: deadline) == .success else { return false }
+      guard let lockURL, let turn = SharedAccess.take(lockURL, within: seconds) else {
         inProcess.signal()
         return false
       }
-      usleep(50_000)
+      access = turn
+      return true
     }
-    return true
   }
 
   static func give() {
-    flock(fd, LOCK_UN)
-    let end = release
-    release = nil
-    end?()
+    access?.finish()
+    access = nil
     inProcess.signal()
   }
 
-  /// `work` under the lock (opening, making or deleting the state), off the main thread.
-  static func locked<T>(_ work: () throws -> T) rethrows -> T {
-    take()
+  /// `work` under the lock, off the main thread. Refused background time is a retry, never an unprotected turn.
+  static func locked<T>(_ work: () throws -> T) throws -> T {
+    guard take() else { throw SharedAccess.unavailable }
     defer { give() }
-    return try work()
+    let result = try work()
+    guard access?.expired == false else { throw SharedAccess.unavailable }
+    return result
   }
 
   // MARK: StateLock (the core, around each step)
 
-  func lock() -> StateTurn {
-    Self.take()
+  func lock() throws -> StateTurn {
+    guard Self.take() else { throw SharedAccess.unavailable }
+    do {
+      return try Self.access!.perform { lockHeld() }
+    } catch {
+      Self.give()
+      throw error
+    }
+  }
+
+  private func lockHeld() -> StateTurn {
     guard let gen = Self.word() else {
       // Gone (signed out meanwhile) or not readable: this client is done (it never acts or saves again).
       known = nil
@@ -114,21 +102,32 @@ final class SharedStateFile: StateStore, StateLock, @unchecked Sendable {
     return .newer(blob: blob)
   }
 
-  func unlock() { Self.give() }
+  func unlock() {
+    if Self.access?.expired == true { known = nil }  // discard any work after expiry, even if nobody else saved
+    Self.give()
+  }
 
   // MARK: StateStore (under the lock)
 
   /// The state as saved last, now this client's (under the lock); nil when there is none.
   func read() -> Data? {
-    guard let (word, blob) = Self.load() else {
-      known = nil
-      return nil
+    guard let access = Self.access else { return nil }
+    return try? access.perform {
+      guard let (word, blob) = Self.load() else {
+        known = nil
+        return nil
+      }
+      known = word
+      return blob
     }
-    known = word
-    return blob
   }
 
   func save(blob: Data) throws {
+    guard let access = Self.access else { throw SharedAccess.unavailable }
+    try access.perform { try saveHeld(blob: blob) }
+  }
+
+  private func saveHeld(blob: Data) throws {
     guard let stateURL = Self.stateURL else { throw YoError.Save(message: "no App Group") }
     // Another save since this client's last one (or the state gone, signed out): this one is old and never written
     // over it. Under the lock that is only a client already closed or replaced.
@@ -148,7 +147,7 @@ final class SharedStateFile: StateStore, StateLock, @unchecked Sendable {
   /// (`AccountStore.register` waits for it).
   static func delete() {
     guard let stateURL else { return }
-    try? FileManager.default.removeItem(at: stateURL)
+    try? access?.perform { try FileManager.default.removeItem(at: stateURL) }
   }
 
   private static let wordLength = 36
@@ -184,30 +183,33 @@ final class SharedStateFile: StateStore, StateLock, @unchecked Sendable {
   /// keychain that takes the key.
   static let app: Bool = {
     guard available, let stateURL else { return false }
-    return locked {
-      let manager = FileManager.default
-      if manager.fileExists(atPath: stateURL.path) {
-        // Moved in before: a copy left in the app's folder (stopped between the steps below) goes, and the key with it.
+    return (try? locked {
+      guard let access else { return false }
+      return try access.perform {
+        let manager = FileManager.default
+        if manager.fileExists(atPath: stateURL.path) {
+          // Moved in before: a copy left in the app's folder (stopped between the steps below) goes, and the key with it.
+          try? manager.removeItem(at: StateFile.url)
+          StateKey.finishMoveIn()
+          return true
+        }
+        guard StateKey.moveIn() else { return false }
+        guard manager.fileExists(atPath: StateFile.url.path) else {
+          StateKey.finishMoveIn()
+          return true
+        }
+        // Written whole beside it with its word, then renamed into place in one step, then the old one deleted: never
+        // no state, never half of one.
+        guard let blob = StateFile.load(),
+          (try? (Data(UUID().uuidString.utf8) + blob).write(
+            to: stateURL, options: [.atomic, .completeFileProtectionUntilFirstUserAuthentication])) != nil
+        else { return false }
+        excludeFromBackup(stateURL)
         try? manager.removeItem(at: StateFile.url)
-        StateKey.finishMoveIn()
+        StateKey.finishMoveIn()  // only now: until here the state that stayed opens with it
         return true
       }
-      guard StateKey.moveIn() else { return false }
-      guard manager.fileExists(atPath: StateFile.url.path) else {
-        StateKey.finishMoveIn()
-        return true
-      }
-      // Written whole beside it with its word, then renamed into place in one step, then the old one deleted: never
-      // no state, never half of one.
-      guard let blob = StateFile.load(),
-        (try? (Data(UUID().uuidString.utf8) + blob).write(
-          to: stateURL, options: [.atomic, .completeFileProtectionUntilFirstUserAuthentication])) != nil
-      else { return false }
-      excludeFromBackup(stateURL)
-      try? manager.removeItem(at: StateFile.url)
-      StateKey.finishMoveIn()  // only now: until here the state that stayed opens with it
-      return true
-    }
+    }) ?? FileManager.default.fileExists(atPath: stateURL.path)  // refused time never switches to a private state
   }()
 }
 

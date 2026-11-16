@@ -268,7 +268,7 @@ final class AccountStore {
         accountLog.error("open: \(self.brokenWhy, privacy: .public) (try \(tries + 1))")
         if await Self.surely(&tries) { broken = true }  // does not open (sealed under another key, or damaged)
       } catch Unopened.gone {
-        brokenWhy = Self.missing()
+        brokenWhy = await Task.detached { Self.missing() }.value
         accountLog.error("open: \(self.brokenWhy, privacy: .public) (try \(tries + 1))")
         if await Self.surely(&tries) { broken = true }
       } catch {
@@ -307,7 +307,7 @@ final class AccountStore {
   private(set) var brokenWhy = ""
 
   /// What of the state is not there: the file, the key, or neither (the shared one's).
-  private static func missing() -> String {
+  nonisolated private static func missing() -> String {
     let file = SharedStateFile.app ? "shared" : (StateFile.load() == nil ? "no file" : "file")
     let key = SharedStateFile.app ? ((try? StateKey.shared()) == nil ? "no key" : "key") : ((try? StateKey.load()) == nil ? "no key" : "key")
     return "gone: \(file), \(key)"
@@ -970,15 +970,25 @@ final class AccountStore {
     let before = deleting
     deleting = Task.detached(priority: .userInitiated) {
       await before?.value
+      await MediaStorage.clearAll()
       old?.close()
       StateFile.delete()
-      if SharedStateFile.app { SharedStateFile.locked { SharedStateFile.delete() } }
+      if SharedStateFile.app {
+        while true {
+          do {
+            try SharedStateFile.locked { SharedStateFile.delete() }
+            break
+          } catch {
+            // No background time: the deletion waits too; a new registration already waits for this task.
+            try? await Task.sleep(for: .seconds(1))
+          }
+        }
+      }
     }
     SecureReminder.update(secured: true)
     SignedAt.forget()
     RecoveryWords.delete()
     Stats.reset()
-    MediaStorage.clearAll()
     // Its notifications too: one tapped later would show (or Yo back) under the next account.
     UNUserNotificationCenter.current().removeAllDeliveredNotifications()
   }

@@ -4,8 +4,22 @@
 // with the hub), and what. Without YO_PERF nothing is written or kept.
 import Foundation
 import QuartzCore
+import os
 
 enum Perf {
+  private static let logger = Logger(subsystem: "app.justyo.perf", category: "run")
+  private static let signposts = OSLog(subsystem: "app.justyo.perf", category: .pointsOfInterest)
+  private static let spans = NSLock()
+  nonisolated(unsafe) private static var mainSpans: [(Double, Double, String)] = []
+
+  static func names(from start: Double, to end: Double) -> [String] {
+    spans.lock()
+    defer { spans.unlock() }
+    return Array(Set(mainSpans.filter { $0.0 < end && $0.1 > start }.map { $0.2 })).sorted()
+  }
+
+  static func report(_ json: String) { logger.notice("YO_PERF_RUN \(json, privacy: .public)") }
+
   static let on = ProcessInfo.processInfo.environment["YO_PERF"] != nil
   private static let toStderr = ProcessInfo.processInfo.environment["YO_PERF"] == "stderr"
   private static let queue = DispatchQueue(label: "app.justyo.perf", qos: .utility)
@@ -24,7 +38,20 @@ enum Perf {
   static func timed<T>(_ what: String, _ work: () throws -> T) rethrows -> T {
     guard on else { return try work() }
     let start = CACurrentMediaTime()
-    defer { mark("\(what) " + String(format: "%.1f ms", (CACurrentMediaTime() - start) * 1000)) }
+    let signpost = OSSignpostID(log: signposts)
+    os_signpost(.begin, log: signposts, name: "Yo work", signpostID: signpost, "%{public}@", what)
+    let main = Thread.isMainThread
+    defer {
+      let end = CACurrentMediaTime()
+      os_signpost(.end, log: signposts, name: "Yo work", signpostID: signpost)
+      if main {
+        spans.lock()
+        mainSpans.append((start, end, what))
+        if mainSpans.count > 4096 { mainSpans.removeFirst(2048) }
+        spans.unlock()
+      }
+      mark("\(what) " + String(format: "%.1f ms", (end - start) * 1000))
+    }
     return try work()
   }
 

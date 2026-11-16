@@ -73,12 +73,15 @@ impl Handle {
     }
 }
 
+/// Maximum username length in grapheme clusters.
+pub const USERNAME_MAX: usize = 16;
+
 /// A username as it may be written (spec 3.3): 1 to 16 characters (grapheme clusters, NFC) of Latin letters with their
 /// accents, 0–9, `_` and emoji, starting with a letter or an emoji, in any case ("YoGPT"). What the hub refuses with
 /// `400` (spec 6.3). Which names are reserved only the hub knows.
 pub fn check_username_form(name: &str) -> Result<(), Error> {
     let graphemes: Vec<&str> = name.graphemes(true).collect();
-    let ok = (1..=16).contains(&graphemes.len())
+    let ok = (1..=USERNAME_MAX).contains(&graphemes.len())
         && name.nfc().eq(name.chars())
         && graphemes.iter().all(|g| allowed(g))
         && graphemes.first().is_some_and(|g| is_latin_letter(g) || is_emoji(g));
@@ -99,7 +102,7 @@ pub fn same_name(a: &str, b: &str) -> bool {
 /// at most 16, the case as typed. The apps keep their field to this; the hub accepts only names already so.
 pub fn canonical(typed: &str) -> String {
     let nfc: String = typed.nfc().collect();
-    nfc.graphemes(true).filter(|g| allowed(g)).skip_while(|g| !is_latin_letter(g) && !is_emoji(g)).take(16).collect()
+    nfc.graphemes(true).filter(|g| allowed(g)).skip_while(|g| !is_latin_letter(g) && !is_emoji(g)).take(USERNAME_MAX).collect()
 }
 
 /// What a username is compared by (spec 3.3): upper case, NFKD, without nonspacing marks, emoji variation selectors

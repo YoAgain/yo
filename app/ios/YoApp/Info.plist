@@ -2,6 +2,9 @@
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
+	<!-- Let the system use ProMotion on iPhone. -->
+	<key>CADisableMinimumFrameDurationOnPhone</key>
+	<true/>
 	<!-- The version people see, set by hand for each App Store release (1.0.0, 1.0.1, 1.1.0 …); the build number is the
 	     build's timestamp (CI), which YO_MIN_APP compares. -->
 	<key>CFBundleShortVersionString</key>
@@ -29,6 +32,20 @@
 				<key>CFBundleIconFiles</key>
 				<array>
 					<string>IconOriginal</string>
+				</array>
+			</dict>
+			<key>OG2014</key>
+			<dict>
+				<key>CFBundleIconFiles</key>
+				<array>
+					<string>IconOG2014</string>
+				</array>
+			</dict>
+			<key>Lilac2015</key>
+			<dict>
+				<key>CFBundleIconFiles</key>
+				<array>
+					<string>IconLilac2015</string>
 				</array>
 			</dict>
 		</dict>

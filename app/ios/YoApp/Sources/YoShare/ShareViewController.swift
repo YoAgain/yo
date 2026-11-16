@@ -11,7 +11,8 @@ import YoCore
 
 @objc(YoShareViewController)
 final class ShareViewController: UIViewController {
-  private lazy var model = ShareModel { [weak self] sent in
+  private lazy var model: ShareModel = ShareModel { [weak self] sent in
+    self?.model.lifetime.stop()
     guard let context = self?.extensionContext else { return }
     if sent {
       context.completeRequest(returningItems: nil)
@@ -20,8 +21,17 @@ final class ShareViewController: UIViewController {
     }
   }
 
+  override func viewDidDisappear(_ animated: Bool) {
+    super.viewDidDisappear(animated)
+    model.lifetime.stop()  // the host dismissed the sheet without our Cancel button
+  }
+
+  @objc private func hostInBackground() { model.cancel() }
+
   override func viewDidLoad() {
     super.viewDidLoad()
+    NotificationCenter.default.addObserver(
+      self, selector: #selector(hostInBackground), name: .NSExtensionHostDidEnterBackground, object: nil)
     let host = UIHostingController(rootView: ShareView(model: model))
     addChild(host)
     host.view.frame = view.bounds
@@ -55,6 +65,7 @@ final class ShareModel {
   private var cancelled = false
   /// Cancel, for the sending under way off the main actor: the next photo does not go.
   private let stop = Stop()
+  let lifetime = SharedAccess.Lifetime()
   private let done: @MainActor (Bool) -> Void
 
   init(done: @escaping @MainActor (Bool) -> Void) {
@@ -132,8 +143,9 @@ final class ShareModel {
       // Cancelled while they were being made: nothing goes.
       guard !cancelled else { return }
       let stop = stop
+      let lifetime = lifetime
       let outcome = await Task.detached(priority: .userInitiated) {
-        Self.send(made, to: friend, owner: owner, stop: stop)
+        lifetime.run { Self.send(made, to: friend, owner: owner, stop: stop) }
       }.value
       // Cancelled meanwhile: the sheet is closed already; what went, went.
       guard !cancelled else { return }

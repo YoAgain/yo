@@ -5,6 +5,7 @@ import UIKit
 
 @MainActor enum PerfProbe {
   private static var installed = false
+  private static var launchListMs = -1.0
 
   /// Once there is a window: the touch clock on every window and the hitch watch.
   static func install() {
@@ -21,6 +22,7 @@ import UIKit
     if sysctl(&name, 4, &info, &size, nil, 0) == 0 {
       let started = info.kp_proc.p_un.__p_starttime
       let wall = Double(started.tv_sec) + Double(started.tv_usec) / 1e6
+      launchListMs = (Date.now.timeIntervalSince1970 - wall) * 1000
       Perf.mark("launch.process", at: CACurrentMediaTime() - (Date.now.timeIntervalSince1970 - wall))
     }
     Perf.mark("launch.list")
@@ -38,6 +40,22 @@ import UIKit
       MainActor.assumeIsolated { Next(what).start() }
     }
     CFRunLoopAddObserver(CFRunLoopGetMain(), observer, .commonModes)
+  }
+
+  /// Also used in normal builds: one publication at the next display callback.
+  static func nextFrame(_ action: @escaping @MainActor () -> Void) {
+    Publication(action).start()
+  }
+
+  @MainActor private final class Publication: NSObject {
+    let action: @MainActor () -> Void
+    init(_ action: @escaping @MainActor () -> Void) { self.action = action }
+    func start() {
+      let link = CADisplayLink(target: self, selector: #selector(tick))
+      link.preferredFrameRateRange = CAFrameRateRange(minimum: 60, maximum: 120, preferred: 120)
+      link.add(to: .main, forMode: .common)
+    }
+    @objc func tick(_ link: CADisplayLink) { link.invalidate(); action() }
   }
 
   /// Marks every touch's start and end, taking none (it never recognizes anything).
@@ -77,6 +95,7 @@ import UIKit
 
     func start() {
       link = CADisplayLink(target: self, selector: #selector(tick))
+      link?.preferredFrameRateRange = CAFrameRateRange(minimum: 60, maximum: 120, preferred: 120)
       link?.add(to: .main, forMode: .common)
     }
 
@@ -87,22 +106,69 @@ import UIKit
     }
   }
 
-  /// Frames that came later than one frame after the one before: how late.
+  /// Callback intervals are a CPU scheduling proxy, not GPU presentation measurements.
   @MainActor private final class Watch: NSObject {
     static let shared = Watch()
     private var last = 0.0
+    private var samples: [Double] = []
+    private var hitches = 0
+    private var hitchMs = 0.0
+    private var worst = 0.0
+    private var worstNames: [String] = []
+    private var link: CADisplayLink?
+
+    @objc private func reset() { last = 0 }
 
     func start() {
       let link = CADisplayLink(target: self, selector: #selector(tick))
+      self.link = link
+      NotificationCenter.default.addObserver(self, selector: #selector(reset), name: UIApplication.didBecomeActiveNotification, object: nil)
+      NotificationCenter.default.addObserver(self, selector: #selector(reset), name: UIApplication.willResignActiveNotification, object: nil)
+      link.preferredFrameRateRange = CAFrameRateRange(minimum: 60, maximum: 120, preferred: 120)
       link.add(to: .main, forMode: .common)
+      let seconds = Double(ProcessInfo.processInfo.environment["YO_PERF_SECONDS"] ?? "10") ?? 10
+      Task {
+        try? await Task.sleep(for: .seconds(max(1, seconds)))
+        finish()
+      }
     }
 
     @objc func tick(_ link: CADisplayLink) {
-      let frame = link.targetTimestamp - link.timestamp
-      if last > 0, link.timestamp - last > frame * 1.5 {
-        Perf.mark(String(format: "hitch %.1f ms", (link.timestamp - last) * 1000), at: link.timestamp)
+      guard UIApplication.shared.applicationState == .active else { last = 0; return }
+      let now = CACurrentMediaTime()
+      let budget = link.targetTimestamp - link.timestamp
+      if last > 0 {
+        let elapsed = now - last
+        samples.append(elapsed * 1000)
+        let excess = max(0, elapsed - budget)
+        // Half a millisecond of callback jitter is not a missed display deadline.
+        if excess > 0.0005 { hitches += 1; hitchMs += excess * 1000 }
+        if excess * 1000 > worst {
+          worst = excess * 1000
+          worstNames = Perf.names(from: last, to: now)
+        }
       }
-      last = link.timestamp
+      last = now
+    }
+
+    private func finish() {
+      link?.invalidate()
+      let sorted = samples.sorted()
+      guard !sorted.isEmpty else { return }
+      func percentile(_ q: Double) -> Double { sorted[min(sorted.count - 1, Int(ceil(q * Double(sorted.count))) - 1)] }
+      let env = ProcessInfo.processInfo.environment
+      let record: [String: Any] = [
+        "run": env["YO_PERF_RUN"] ?? "manual", "scenario": env["YO_PERF_SCENARIO"] ?? "manual",
+        "metric": "display_callback_interval", "frames_ms": samples, "launch_list_ms": launchListMs,
+        "p50_ms": percentile(0.5), "p95_ms": percentile(0.95), "p99_ms": percentile(0.99),
+        "max_ms": sorted.last!, "hitches": hitches, "hitch_ms": hitchMs,
+        "worst_stall_ms": worst, "spans": worstNames.isEmpty ? ["unattributed (layout/system/unsampled)"] : worstNames,
+      ]
+      // Keep the device log line small: raw samples are used locally only for percentiles.
+      var summary = record
+      summary.removeValue(forKey: "frames_ms")
+      if let data = try? JSONSerialization.data(withJSONObject: summary, options: [.sortedKeys]),
+        let json = String(data: data, encoding: .utf8) { Perf.report(json) }
     }
   }
 }
