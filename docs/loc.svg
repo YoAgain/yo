@@ -1,0 +1,33 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 800 360" role="img" aria-labelledby="title desc">
+<title id="title">Lines of code by language on main</title>
+<desc id="desc">Cumulative daily source lines from Git numstat, including comments and blanks.</desc>
+<style>text{font:13px system-ui,sans-serif;fill:#808080}.grid{stroke:#808080;stroke-opacity:.25}</style>
+<text x="76" y="22">Lines of code</text>
+<path d="M76,43 h22" stroke="#bc7540" stroke-width="3"/>
+<text x="104" y="47">Rust</text>
+<path d="M242,43 h22" stroke="#ad62be" stroke-width="3"/>
+<text x="270" y="47">Swift</text>
+<path d="M408,43 h22" stroke="#468bc2" stroke-width="3"/>
+<text x="436" y="47">Kotlin</text>
+<path d="M574,43 h22" stroke="#589663" stroke-width="3"/>
+<text x="602" y="47">Other</text>
+<line x1="76" x2="770" y1="285.0" y2="285.0" class="grid"/>
+<text x="66" y="289.0" text-anchor="end">0</text>
+<line x1="76" x2="770" y1="230.0" y2="230.0" class="grid"/>
+<text x="66" y="234.0" text-anchor="end">10k</text>
+<line x1="76" x2="770" y1="175.0" y2="175.0" class="grid"/>
+<text x="66" y="179.0" text-anchor="end">20k</text>
+<line x1="76" x2="770" y1="120.0" y2="120.0" class="grid"/>
+<text x="66" y="124.0" text-anchor="end">30k</text>
+<line x1="76" x2="770" y1="65.0" y2="65.0" class="grid"/>
+<text x="66" y="69.0" text-anchor="end">40k</text>
+<path d="M76.0,250.2 H214.8 V244.3 H353.6 V211.1 H492.4 V162.9 H631.2 V100.1 H770.0 V100.1" fill="none" stroke="#bc7540" stroke-width="2.5"/>
+<path d="M76.0,285.0 H214.8 V276.6 H353.6 V247.8 H492.4 V230.0 H631.2 V218.0 H770.0 V218.0" fill="none" stroke="#ad62be" stroke-width="2.5"/>
+<path d="M76.0,285.0 H214.8 V285.0 H353.6 V285.0 H492.4 V285.0 H631.2 V285.0 H770.0 V285.0" fill="none" stroke="#468bc2" stroke-width="2.5"/>
+<path d="M76.0,285.0 H214.8 V284.2 H353.6 V282.8 H492.4 V280.8 H631.2 V279.8 H770.0 V279.8" fill="none" stroke="#589663" stroke-width="2.5"/>
+<text x="76.0" y="309" text-anchor="middle">2026-11-11</text>
+<text x="353.6" y="309" text-anchor="middle">2026-11-13</text>
+<text x="492.4" y="309" text-anchor="middle">2026-11-14</text>
+<text x="770.0" y="309" text-anchor="middle">2026-11-16</text>
+<text x="423" y="340" text-anchor="middle">Commit date (UTC)</text>
+</svg>
