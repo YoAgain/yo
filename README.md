@@ -71,9 +71,9 @@ through UniFFI; apps supply HTTP and storage.
 ## Hub
 
 ```text
- ~8,000 Yos/s   hub alone         p50 7.7 ms · p99 ~20 ms
-   ~700 Yos/s   end to end        send, deliver, fetch, decrypt
-      0         lost under load
+hub alone    ████████████████████████████████  8,000 Yos/s   p50 7.7 ms · p99 ~20 ms
+end to end   ██▊                                 700 Yos/s   send, deliver, fetch, decrypt
+lost                                               0
 ```
 One CPU core, database on an SSD, every Yo on disk before the hub acknowledges it.
 
