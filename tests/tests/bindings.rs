@@ -716,19 +716,15 @@ impl StateStore for Process {
 }
 
 impl yo::StateLock for Process {
-    fn lock(&self) -> yo::StateTurn {
+    fn lock(&self) -> Result<yo::StateTurn, yo::YoError> {
         self.hold();
         let state = self.disk.state.lock().unwrap();
         let mut known = self.known.lock().unwrap();
         if *known == state.0 {
-            return yo::StateTurn::Same;
+            return Ok(yo::StateTurn::Same);
         }
         *known = state.0;
-        if state.1.is_empty() {
-            yo::StateTurn::Gone
-        } else {
-            yo::StateTurn::Newer { blob: state.1.clone() }
-        }
+        Ok(if state.1.is_empty() { yo::StateTurn::Gone } else { yo::StateTurn::Newer { blob: state.1.clone() } })
     }
 
     fn unlock(&self) {
@@ -1139,4 +1135,45 @@ fn the_app_layer_makes_a_group_and_yos_it() {
     drain(&a);
     assert_eq!(a.groups()[0].members.len(), 2);
     assert!(c.groups()[0].left);
+}
+
+/// Background time refused: no state access and no unlock, but the client can retry when time is available.
+#[test]
+fn a_refused_shared_turn_can_be_retried() {
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+
+    struct Retry {
+        process: Arc<Process>,
+        refused: AtomicBool,
+        unlocks: AtomicUsize,
+    }
+    impl yo::StateLock for Retry {
+        fn lock(&self) -> Result<yo::StateTurn, yo::YoError> {
+            if self.refused.load(Ordering::Relaxed) {
+                return Err(yo::YoError::Network { message: "background time ended".into() });
+            }
+            self.process.lock()
+        }
+        fn unlock(&self) {
+            self.unlocks.fetch_add(1, Ordering::Relaxed);
+            self.process.unlock();
+        }
+    }
+
+    let hub = TestHub::start();
+    let file = Arc::new(File::default());
+    let a = client(&hub, &username(random_u64() % 1_000_000_000), "", file.clone());
+    let disk = Arc::new(Disk::default());
+    *disk.state.lock().unwrap() = (1, file.0.lock().unwrap().clone());
+    let lock =
+        Arc::new(Retry { process: Process::new(&disk), refused: AtomicBool::new(true), unlocks: AtomicUsize::new(0) });
+    a.share_state(lock.clone());
+    let before = file.0.lock().unwrap().clone();
+    assert!(matches!(a.sync(0), Err(yo::YoError::Network { .. })));
+    assert_eq!(disk.state.lock().unwrap().1, before);
+    assert_eq!(lock.unlocks.load(Ordering::Relaxed), 0);
+    lock.refused.store(false, Ordering::Relaxed);
+    a.sync(0).unwrap();
+    assert!(lock.unlocks.load(Ordering::Relaxed) > 0);
+    assert!(!*disk.held.lock().unwrap());
 }

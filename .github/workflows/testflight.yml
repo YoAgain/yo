@@ -146,6 +146,29 @@ jobs:
           export XCODE_VERSION=$(xcodebuild -version | sed -n 's/^Xcode //p') XCODE_BUILD=$(xcodebuild -version | sed -n 's/^Build version //p')
           "$GITHUB_WORKSPACE/.oad/ship.sh" --upload
 
+      # Debug symbols of the app and its extensions, kept with the run: crash reports (MetricKit, TestFlight) name
+      # "YoApp +0x1ed29c"; with these (and the UUIDs, to match the build) they can be symbolicated later.
+      - name: Debug symbols
+        if: always()
+        continue-on-error: true
+        working-directory: app/ios/YoApp
+        run: |
+          mkdir -p "$RUNNER_TEMP/dsym"
+          for bin in xtool/YoApp.app/YoApp xtool/YoApp.app/PlugIns/*.appex/*; do
+            [ -f "$bin" ] && file "$bin" | grep -q Mach-O || continue
+            name=$(basename "$bin")
+            dsymutil "$bin" -o "$RUNNER_TEMP/dsym/$name.dSYM" || true
+            dwarfdump --uuid "$bin" >> "$RUNNER_TEMP/dsym/uuids.txt" || true
+          done
+          ls -la "$RUNNER_TEMP/dsym"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        continue-on-error: true
+        with:
+          name: dsym-${{ github.sha }}
+          path: ${{ runner.temp }}/dsym
+          retention-days: 90
+
       # The app and its extensions share the account's state through the App Group (SharedState.swift); without it in
       # their profiles (the group not attached to their app ids in the developer portal) the notification service
       # names nobody and every push says only "Yo". Said in the run's summary, not fatal.

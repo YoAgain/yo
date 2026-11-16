@@ -260,7 +260,8 @@ CREATE TABLE IF NOT EXISTS feedback (
     app_version TEXT NOT NULL,
     created_at INTEGER NOT NULL,
     -- 1: a crash report the app sent on its own, without an account (user_id empty)
-    auto INTEGER NOT NULL DEFAULT 0
+    auto INTEGER NOT NULL DEFAULT 0,
+    type TEXT NOT NULL DEFAULT 'feedback'
 );
 CREATE INDEX IF NOT EXISTS feedback_by_user ON feedback(user_id);
 -- Each user's access key as a check, never the key (spec 4.10): a delivery that shows it is a contact's; else it
@@ -528,7 +529,10 @@ fn username_of(tx: &Transaction<'_>, user: &UserId) -> rusqlite::Result<Option<S
 
 /// Whether a skeleton is reserved, in a transaction.
 fn is_reserved(tx: &Transaction<'_>, skeleton: &[u8]) -> rusqlite::Result<bool> {
-    tx.prepare_cached("SELECT 1 FROM reserved WHERE skeleton = CAST(?1 AS TEXT)")?.exists([skeleton])
+    tx.prepare_cached(
+        "SELECT 1 FROM reserved WHERE skeleton = CAST(?1 AS TEXT)
+         AND (SELECT value FROM settings WHERE key='reserved_enabled') = 1",
+    )?.exists([skeleton])
 }
 
 /// The profile keys of before requests were signed (spec 4.10): the check before a change and the count per
@@ -547,6 +551,21 @@ fn without_grace(conn: &Connection) -> rusqlite::Result<()> {
         "DROP TABLE IF EXISTS requests_day; DROP TABLE IF EXISTS requests;
          DROP TABLE IF EXISTS spent_tokens; DROP TABLE IF EXISTS token_keys;",
     )
+}
+
+/// Add and backfill the kind only once; later starts preserve explicitly written kinds.
+fn with_feedback_type(conn: &Connection) -> rusqlite::Result<()> {
+    let has = conn.prepare("SELECT 1 FROM pragma_table_info('feedback') WHERE name = 'type'")?.exists([])?;
+    if !has {
+        conn.execute_batch(
+            "BEGIN IMMEDIATE;
+            ALTER TABLE feedback ADD COLUMN type TEXT NOT NULL DEFAULT 'feedback';
+            UPDATE feedback SET type = CASE WHEN auto = 1 THEN 'crash'
+                WHEN app_version = 'admin' THEN 'todo' ELSE 'feedback' END;
+            COMMIT;",
+        )?;
+    }
+    Ok(())
 }
 
 /// Feedback of before crash reports: the `auto` column comes (0 for all of it).
@@ -609,6 +628,7 @@ impl Db {
              PRAGMA foreign_keys = ON;
              PRAGMA busy_timeout = 5000;",
         )?;
+        let existing = conn.prepare("SELECT 1 FROM sqlite_master WHERE type='table'")?.exists([])?;
         check_version(&conn)?;
         let version: i64 = conn.query_row("PRAGMA user_version", [], |row| row.get(0))?;
         if version == 1 {
@@ -620,13 +640,40 @@ impl Db {
         }
         without_grace(&conn)?;
         conn.execute_batch(SCHEMA)?;
+        // Initialize once: fresh hubs enforce reservations; existing hubs retain their old effective state.
+        conn.execute_batch(
+            "CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value INTEGER NOT NULL) WITHOUT ROWID;",
+        )?;
+        conn.execute(
+            "INSERT OR IGNORE INTO settings(key,value) VALUES ('reserved_enabled', ?1)",
+            [!existing || conn.prepare("SELECT 1 FROM reserved")?.exists([])?],
+        )?;
         with_auto_feedback(&conn)?;
+        with_feedback_type(&conn)?;
         Ok(Db { conn: Mutex::new(conn) })
     }
 
-    /// Adds the operator's reserved names (spec 3.3) the table does not hold yet, by skeleton; names it holds stay
-    /// as they are, and a name gone from the list stays reserved until deleted by hand. Returns how many were new.
-    pub fn seed_reserved(&self, names: &[Reserved], now: u64) -> rusqlite::Result<usize> {
+    /// Stored names and the independent enforcement switch for the admin API.
+    pub fn reserved_state(&self) -> rusqlite::Result<serde_json::Value> {
+        let conn = self.conn();
+        let enabled: bool = conn.query_row("SELECT value FROM settings WHERE key='reserved_enabled'", [], |r| r.get(0))?;
+        let mut stmt = conn.prepare("SELECT spelling FROM reserved ORDER BY skeleton")?;
+        let names = stmt.query_map([], |r| r.get::<_, String>(0))?.collect::<rusqlite::Result<Vec<_>>>()?;
+        Ok(serde_json::json!({"enabled": enabled, "names": names}))
+    }
+
+    pub fn set_reserved_enabled(&self, enabled: bool) -> rusqlite::Result<()> {
+        self.conn().execute("UPDATE settings SET value=?1 WHERE key='reserved_enabled'", [enabled])?;
+        Ok(())
+    }
+
+    pub fn remove_reserved(&self, name: &str) -> rusqlite::Result<()> {
+        self.conn().execute("DELETE FROM reserved WHERE skeleton=?1", [yo_wire::handle::skeleton(name)])?;
+        Ok(())
+    }
+
+    /// Add names by skeleton, preserving existing spellings and notes. Returns how many were new.
+    pub fn add_reserved(&self, names: &[Reserved], now: u64) -> rusqlite::Result<usize> {
         let mut conn = self.conn();
         let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
         let mut added = 0;
@@ -916,7 +963,7 @@ impl Db {
         self.conn()
             .prepare_cached(
                 "SELECT 1 FROM handles WHERE kind = ?1 AND value = ?2
-                 UNION ALL SELECT 1 FROM reserved WHERE skeleton = CAST(?2 AS TEXT)",
+                 UNION ALL SELECT 1 FROM reserved WHERE skeleton = CAST(?2 AS TEXT) AND (SELECT value FROM settings WHERE key='reserved_enabled') = 1",
             )?
             .exists(params![KIND_USERNAME, skeleton])
     }
@@ -1011,8 +1058,10 @@ impl Db {
         let mut conn = self.conn();
         let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
         let Some(user) = user_of_device(&tx, device)? else { return Ok(Write::Refused(Conflict::DeviceGone)) };
-        tx.prepare_cached("INSERT INTO feedback (user_id, text, app_version, created_at) VALUES (?1, ?2, ?3, ?4)")?
-            .execute(params![user, text, app_version, now])?;
+        tx.prepare_cached(
+            "INSERT INTO feedback (user_id, text, app_version, created_at, type) VALUES (?1, ?2, ?3, ?4, 'feedback')",
+        )?
+        .execute(params![user, text, app_version, now])?;
         tx.commit()?;
         Ok(Write::Done(()))
     }
@@ -1033,10 +1082,21 @@ impl Db {
     pub fn crash(&self, text: &str, app_version: &str, now: u64) -> rusqlite::Result<()> {
         self.conn()
             .prepare_cached(
-                "INSERT INTO feedback (user_id, text, app_version, created_at, auto) VALUES (X'', ?1, ?2, ?3, 1)",
+                "INSERT INTO feedback (user_id, text, app_version, created_at, auto, type) VALUES (X'', ?1, ?2, ?3, 1, 'crash')",
             )?
             .execute(params![text, app_version, now])?;
         Ok(())
+    }
+
+    /// An operator's To-Do, with no account attached.
+    pub fn todo(&self, text: &str, now: u64) -> rusqlite::Result<i64> {
+        let conn = self.conn();
+        conn.execute(
+            "INSERT INTO feedback (user_id, text, app_version, created_at, type)
+            VALUES (X'', ?1, 'admin', ?2, 'todo')",
+            params![text, now],
+        )?;
+        Ok(conn.last_insert_rowid())
     }
 
     // ---- storage (spec 6.9) ----
@@ -1575,6 +1635,41 @@ mod tests {
     /// none is left; a device without prekeys (an app from before sessions) has no bundle. A repeated upload changes
     /// nothing, and one-time prekeys beyond the most are not kept.
     #[test]
+    fn feedback_type_migration_and_writes() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch("CREATE TABLE feedback (id INTEGER PRIMARY KEY, user_id BLOB NOT NULL,
+            text TEXT NOT NULL, app_version TEXT NOT NULL, created_at INTEGER NOT NULL, auto INTEGER NOT NULL DEFAULT 0);
+            INSERT INTO feedback VALUES (1, X'', 'plain', '1', 1, 0),
+                (2, X'', 'crash', 'admin', 2, 1), (3, X'', 'todo', 'admin', 3, 0);").unwrap();
+        with_feedback_type(&conn).unwrap();
+        with_feedback_type(&conn).unwrap();
+        let kinds: Vec<String> = conn
+            .prepare("SELECT type FROM feedback ORDER BY id")
+            .unwrap()
+            .query_map([], |r| r.get(0))
+            .unwrap()
+            .map(Result::unwrap)
+            .collect();
+        assert_eq!(kinds, ["feedback", "crash", "todo"]);
+        let db = Db::open(":memory:").unwrap();
+        db.crash("trace", "1", 7).unwrap();
+        let id = db.todo("fix", 8).unwrap();
+        let row: (Vec<u8>, String, String, String, u64, u32) = db
+            .conn()
+            .query_row(
+                "SELECT user_id, text, app_version, type, created_at, auto FROM feedback WHERE id = ?1",
+                [id],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?)),
+            )
+            .unwrap();
+        assert_eq!(row, (vec![], "fix".into(), "admin".into(), "todo".into(), 8, 0));
+        assert_eq!(
+            db.conn().query_row("SELECT type FROM feedback WHERE auto = 1", [], |r| r.get::<_, String>(0)).unwrap(),
+            "crash"
+        );
+    }
+
+    #[test]
     fn prekeys_go_once_and_the_last_resort_after() {
         let db = Db::open(":memory:").unwrap();
         let leo = user(register(&db, b"LEO", 1, 1, 0));
@@ -1604,7 +1699,7 @@ mod tests {
 
     fn reserve(db: &Db, names: &[&str]) -> usize {
         let names: Vec<Reserved> = names.iter().map(|n| Reserved { spelling: n.to_string(), note: None }).collect();
-        db.seed_reserved(&names, 0).unwrap()
+        db.add_reserved(&names, 0).unwrap()
     }
 
     /// The spelling a lookup by any spelling of the name answers.
@@ -1631,6 +1726,52 @@ mod tests {
         assert_eq!(spelling(&db, "yogpt").as_deref(), Some("YOgpt"));
         let mia = user(register(&db, b"Mia", 4, 4, 0));
         assert!(matches!(db.set_username(&mia, Some((b"YOGPT", "Y0GPT"))).unwrap(), Write::Refused(_)));
+    }
+
+    #[test]
+    fn reservation_switch_preserves_names_and_controls_all_claims() {
+        let db = Db::open(":memory:").unwrap();
+        assert_eq!(db.reserved_state().unwrap()["enabled"], true);
+        reserve(&db, &["Admin", "Support"]);
+        db.set_reserved_enabled(false).unwrap();
+        assert_eq!(db.reserved_state().unwrap()["names"].as_array().unwrap().len(), 2);
+        assert!(!db.username_taken(b"ADMIN").unwrap());
+        let owner = user(register(&db, b"Admin", 1, 1, 0));
+        assert!(db.username_taken(b"ADMIN").unwrap(), "a holder still takes the name while off");
+        assert!(matches!(db.set_username(&owner, Some((b"SUPPORT", "Support"))).unwrap(), Write::Done(())));
+        db.set_reserved_enabled(true).unwrap();
+        assert!(db.username_taken(b"ADMIN").unwrap());
+        assert!(matches!(register(&db, b"Admin", 2, 2, 0), Write::Refused(Conflict::UsernameTaken)));
+        db.remove_reserved("Adm1n").unwrap();
+        assert!(!db.username_taken(b"ADMIN").unwrap());
+        assert_eq!(db.reserved_state().unwrap()["names"], serde_json::json!(["Support"]));
+    }
+
+    #[test]
+    fn reservation_migration_keeps_the_old_state_once_and_persists_switch() {
+        for populated in [false, true] {
+            let path = std::env::temp_dir().join(format!("yo-reserved-{}-{populated}.sqlite", std::process::id()));
+            let path = path.to_str().unwrap();
+            let _ = std::fs::remove_file(path);
+            {
+                let db = Db::open(path).unwrap();
+                if populated {
+                    reserve(&db, &["Admin"]);
+                }
+                db.conn().execute_batch("DROP TABLE settings").unwrap();
+            }
+            {
+                let db = Db::open(path).unwrap();
+                assert_eq!(db.reserved_state().unwrap()["enabled"], populated);
+                db.set_reserved_enabled(!populated).unwrap();
+            }
+            {
+                let db = Db::open(path).unwrap();
+                assert_eq!(db.reserved_state().unwrap()["enabled"], !populated);
+                assert_eq!(db.reserved_state().unwrap()["names"].as_array().unwrap().len(), usize::from(populated));
+            }
+            std::fs::remove_file(path).unwrap();
+        }
     }
 
     #[test]
@@ -1970,6 +2111,12 @@ mod tests {
         let leo = user(register(&db, b"LEO", 1, 1, 0));
         assert!(matches!(db.feedback(&[1; 16], "Mehr Farben, bitte 🎨", "1.2 (34)", 5).unwrap(), Write::Done(())));
         assert!(matches!(db.feedback(&[1; 16], "again", "1.2 (35)", 6).unwrap(), Write::Done(())));
+        assert_eq!(
+            db.conn()
+                .query_row("SELECT count(*) FROM feedback WHERE type = 'feedback'", [], |r| r.get::<_, i64>(0))
+                .unwrap(),
+            2
+        );
         let rows: Vec<(i64, Vec<u8>, String, String, i64)> = db
             .conn()
             .prepare("SELECT id, user_id, text, app_version, created_at FROM feedback ORDER BY id")

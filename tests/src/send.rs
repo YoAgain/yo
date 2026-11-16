@@ -136,6 +136,16 @@ fn main() {
         println!("renamed to {name}");
         return;
     }
+    // A known contact by its user id, as the app sends: a name would be looked up at the hub for every Yo (its limit
+    // per device and day).
+    if !group {
+        let handle = yo_core::handle::skeleton(&to);
+        if let Some(contact) =
+            client.contacts().into_iter().find(|c| c.handles.iter().any(|h| yo_core::handle::skeleton(h) == handle))
+        {
+            to = contact.user;
+        }
+    }
     let send =
         |client: &mut Client, content| if group { client.send_group(&to, content) } else { client.send(&to, content) };
     if let Some(file) = photo.or(video.clone()) {
@@ -160,6 +170,7 @@ fn main() {
         let wall = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_secs_f64() * 1000.0;
         let result = send(&mut client, yo_core::Content::Yo);
         println!("yo {i} at {wall:.3} took {:.1} ms {}", at.elapsed().as_secs_f64() * 1000.0, result.is_ok());
+        if let Err(e) = &result { eprintln!("yo {i}: {e:?}"); }
         let next = start + Duration::from_millis(every_ms * u64::from(i + 1));
         std::thread::sleep(next.saturating_duration_since(Instant::now()));
     }

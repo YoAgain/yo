@@ -76,3 +76,19 @@ Spec 6.3 lists the same routes, without `/` and the apple-app-site-association f
   expired replay-cache entries are dropped from memory.
 - **Schema.** A database of schema 1 (the hubs of MLS chats) is brought to schema 2 at start: accounts stay, the
   MLS tables and the envelopes waiting go (spec 6.4).
+
+Operator To-Dos: `POST /v1/admin/todos`, plain UTF-8 body (1–4000 bytes),
+`Yo-Admin-Token` header matching `YO_ADMIN_TOKEN`; returns `201 {"id": integer}`.
+Unset/empty token or missing/wrong credential returns `404`; comparison is constant time.
+The route uses the crash-report rate (5/address/day) in its own bucket; no peer address grants access.
+Rows have `type` feedback/crash/todo; `auto` remains compatible with older readers.
+
+Reserved names live only in SQLite. New databases enforce reservations by default; existing databases migrate
+once to ON when `reserved` has rows, otherwise OFF. Disabling enforcement preserves names and existing holders.
+`YO_RESERVED_FILE` is deprecated and ignored with a startup log message; remove it from environment files.
+The same `YO_ADMIN_TOKEN` and hidden-route 404 rules as To-Dos protect:
+`GET /v1/admin/reserved` → `{ "enabled": true, "names": ["Admin"] }`,
+`POST /v1/admin/reserved` with a JSON string list (up to 1000 names, 256 UTF-8 bytes each),
+`PUT /v1/admin/reserved` with `{ "enabled": false }`, and
+`DELETE /v1/admin/reserved/{name}`. Adds and removals compare skeletons; duplicate adds preserve spelling.
+POST and PUT return the current state; DELETE returns 204, including when the name was absent.

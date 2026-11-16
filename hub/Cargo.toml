@@ -33,3 +33,8 @@ rand_core = { workspace = true }
 rand = { workspace = true }
 libsignal-protocol = { workspace = true }
 zkgroup = { workspace = true }
+
+subtle = "2.6"
+
+[dev-dependencies]
+tower = { version = "0.5", features = ["util"] }

@@ -6,12 +6,7 @@
 //!   YO_APPLE_APP_IDS      TEAMID.bundle.id, comma-separated: apps that may make passkeys for this hub's domain
 //!   YO_APNS_KEY_FILE, YO_APNS_KEY_ID, YO_APNS_TEAM_ID, YO_APNS_TOPIC
 //!   YO_FCM_SERVICE_ACCOUNT_FILE
-//!   YO_RESERVED_FILE      usernames nobody may claim (spec 3.3), kept by the operator outside this repository: one
-//!                         per line in its preferred spelling, an optional `# note`; blank lines and `#` lines are
-//!                         skipped. Read at every start; names the database does not hold yet are added (by
-//!                         skeleton, INSERT OR IGNORE). A name taken off the list stays reserved until deleted by hand:
-//!                         `DELETE FROM reserved WHERE skeleton = 'ADMIN';`. Unset, or no such file: nothing added.
-//!                         Reserving a name takes it from no one who has it already.
+//!   YO_RESERVED_FILE      deprecated: accepted but ignored; names and switch live in the database.
 //!   YO_BLOB_DIR           photos and videos (spec 6.8), one file each; default `blobs` beside YO_DB. Not for the
 //!                         database's backup: blobs are fleeting.
 //!   YO_BLOB_BUDGET_MB     all blobs together at most, default 16384 (16 GiB); uploads beyond are refused (507)
@@ -40,7 +35,7 @@
 //!   yo-hub zk public FILE                               prints them again
 
 use std::sync::Arc;
-use yo_hub::config::{parse_min_app, read_hub_key, read_reserved, ApnsConfig, BlobConfig, Config, FcmConfig, Limits};
+use yo_hub::config::{parse_min_app, read_hub_key, ApnsConfig, BlobConfig, Config, FcmConfig, Limits};
 use yo_hub::{push, Hub};
 
 fn var(name: &str) -> Option<String> {
@@ -86,8 +81,13 @@ fn config() -> Result<(Config, String), String> {
         budget_bytes: megabytes("YO_BLOB_BUDGET_MB", BlobConfig::DEFAULT_BUDGET_BYTES)?,
         min_free_bytes: megabytes("YO_BLOB_MIN_FREE_MB", BlobConfig::DEFAULT_MIN_FREE_BYTES)?,
     };
+    if var("YO_RESERVED_FILE").is_some() {
+        eprintln!("yo-hub: YO_RESERVED_FILE is deprecated and ignored; manage reserved names through admin");
+    }
     let config = Config {
+        admin_token: var("YO_ADMIN_TOKEN").filter(|token| !token.is_empty()),
         db_path,
+        reserved: Vec::new(), // the names live in the database, added through the admin page
         trust_cloudflare: var("YO_TRUST_CLOUDFLARE").as_deref() == Some("1"),
         apple_app_ids: var("YO_APPLE_APP_IDS")
             .map(|ids| ids.split(',').map(|id| id.trim().to_string()).filter(|id| !id.is_empty()).collect())
@@ -102,7 +102,7 @@ fn config() -> Result<(Config, String), String> {
         },
         apns,
         fcm,
-        reserved: read_reserved(var("YO_RESERVED_FILE").as_deref())?,
+
         blobs,
         min_app: var("YO_MIN_APP").map(|text| parse_min_app(&text)).transpose()?.unwrap_or_default(),
         name_min: var("YO_NAME_MIN")

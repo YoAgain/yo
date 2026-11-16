@@ -166,7 +166,11 @@ impl Transport for Http {
         }
         let response = request.send().map_err(|e| e.to_string())?;
         let status = response.status().as_u16();
+        let limited = status == 429;
         let body = response.bytes().map_err(|e| e.to_string())?.to_vec();
+        if limited && std::env::var_os("YO_SEND_LIMITS").is_some() {
+            eprintln!("429 {method} {path}: {}", String::from_utf8_lossy(&body));
+        }
         if fault == Some(Fault::LoseAnswer) {
             return Err("answer lost (injected)".into());
         }

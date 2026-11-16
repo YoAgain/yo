@@ -9,7 +9,7 @@ use tower::ServiceExt;
 static RUNTIME: OnceLock<tokio::runtime::Runtime> = OnceLock::new();
 static ROUTER: OnceLock<axum::Router> = OnceLock::new();
 
-const ROUTES: [(&str, &str); 28] = [
+const ROUTES: [(&str, &str); 45] = [
     ("PUT", "/v1/prekeys"),
     ("POST", "/v1/lookup"),
     ("PUT", "/v1/push"),
@@ -40,6 +40,23 @@ const ROUTES: [(&str, &str); 28] = [
     ("PUT", "/v1/storage"),
     // Odd: signed, a fetch only a backup door's key may make.
     ("GET", "/v1/backup/AAAAAAAAAAAAAAAAAAAAAA"),
+    ("PUT", "/v1/access-key"),
+    ("POST", "/v1/crash"),
+    ("GET", "/.well-known/yo-hub-key"),
+    ("GET", "/.well-known/yo-trust-root"),
+    ("GET", "/v1/certificate"),
+    ("GET", "/v1/group-auth"),
+    ("POST", "/v1/group-credential"),
+    ("PUT", "/v1/groups/AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"),
+    ("POST", "/v1/groups/AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"),
+    ("GET", "/.well-known/yo-zk-params"),
+    ("GET", "/"),
+    ("GET", "/.well-known/apple-app-site-association"),
+    ("POST", "/v1/admin/todos"),
+    ("GET", "/v1/admin/reserved"),
+    ("POST", "/v1/admin/reserved"),
+    ("PUT", "/v1/admin/reserved"),
+    ("DELETE", "/v1/admin/reserved/ADMIN"),
 ];
 
 fuzz_target!(|data: &[u8]| {
@@ -48,12 +65,19 @@ fuzz_target!(|data: &[u8]| {
     let runtime = RUNTIME.get_or_init(|| tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap());
     let router = ROUTER.get_or_init(|| {
         let _guard = runtime.enter();
-        let hub = yo_hub::Hub::new(yo_hub::config::Config::for_tests(), Arc::new(yo_hub::push::Recorder::default())).unwrap();
+        let mut config = yo_hub::config::Config::for_tests();
+        config.admin_token = Some("fuzz-only".into());
+        config.apple_app_ids = vec!["TEST.invalid.yo".into()];
+        let hub = yo_hub::Hub::new(config, Arc::new(yo_hub::push::Recorder::default())).unwrap();
         hub.router()
     });
     let mut request = Request::builder().method(method).uri(path);
+    if path.starts_with("/v1/admin/") {
+        request = request.header("yo-admin-token", "fuzz-only");
+    }
     if route % 2 == 1 {
-        request = request.header("yo-device", "AAAAAAAAAAAAAAAAAAAAAA").header("yo-time", "1").header("yo-signature", "AAAA");
+        request =
+            request.header("yo-device", "AAAAAAAAAAAAAAAAAAAAAA").header("yo-time", "1").header("yo-signature", "AAAA");
     }
     let mut request = request.body(Body::from(body.to_vec())).unwrap();
     request.extensions_mut().insert(axum::extract::ConnectInfo(std::net::SocketAddr::from(([127, 0, 0, 1], 9))));

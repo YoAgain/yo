@@ -188,6 +188,7 @@ struct Delivery {
     user: UserId,
     devices_hash: [u8; 32],
     envelope: Bytes,
+    urgent: bool,
     stored: tokio::sync::oneshot::Sender<Result<Delivered, ()>>,
     /// Where its pushes are sent from.
     runtime: tokio::runtime::Handle,
@@ -228,7 +229,7 @@ fn writer(
                 for (delivery, mut outcome) in batch.into_iter().zip(outcomes) {
                     // Here, not in the request: one cut off after its envelope was stored still wakes and pushes.
                     if let (Delivered::Stored(devices), Some(hub)) = (&mut outcome, &hub) {
-                        hub.woken(std::mem::take(devices), &delivery.runtime);
+                        hub.woken(std::mem::take(devices), delivery.urgent, &delivery.runtime);
                     }
                     let _ = delivery.stored.send(Ok(outcome));
                 }
@@ -342,8 +343,9 @@ impl Hub {
 
     pub fn new(config: Config, push_transport: Arc<dyn push::Transport>) -> Result<Arc<Self>, String> {
         let db = Arc::new(Db::open(&config.db_path).map_err(|e| format!("database: {e}"))?);
-        let added = db.seed_reserved(&config.reserved, now_ms()).map_err(|e| format!("reserved names: {e}"))?;
-        eprintln!("yo-hub: reserved names: {} in the list, {added} new", config.reserved.len());
+        if !config.reserved.is_empty() {
+            db.add_reserved(&config.reserved, now_ms()).map_err(|e| format!("database: {e}"))?;
+        }
         let pusher = push::Pusher::new(push_transport, config.apns.as_ref(), config.fcm.as_ref())?;
         let blobs = blobs::Blobs::open(&config.blobs).map_err(|e| format!("{}: {e}", config.blobs.dir.display()))?;
         // What a crash left under way: fetches (given back) and blobs whose file was being moved into place.
@@ -404,6 +406,9 @@ impl Hub {
             .route(api::REPORT, post(report))
             .route(api::FEEDBACK, post(feedback))
             .route(api::CRASH, post(crash))
+            .route("/v1/admin/todos", post(admin_todo))
+            .route("/v1/admin/reserved", get(admin_reserved).post(admin_reserved).put(admin_reserved))
+            .route("/v1/admin/reserved/{name}", delete(admin_reserved_delete))
             .route(api::STORAGE, get(get_storage).put(put_storage))
             .route(hubsig::KEY_PATH, get(hub_key))
             .route(api::TRUST_ROOT_PATH, get(trust_root))
@@ -782,20 +787,20 @@ impl Hub {
     }
 
     /// What follows a stored delivery: its devices' long polls answer, the others are pushed.
-    fn woken(self: &Arc<Self>, devices: Vec<db::Wake>, runtime: &tokio::runtime::Handle) {
+    fn woken(self: &Arc<Self>, devices: Vec<db::Wake>, urgent: bool, runtime: &tokio::runtime::Handle) {
         for wake in devices {
             self.wake_waiters(&wake.device_id);
-            self.push(wake, runtime);
+            self.push(wake, urgent, runtime);
         }
     }
 
-    fn push(self: &Arc<Self>, wake: db::Wake, runtime: &tokio::runtime::Handle) {
+    fn push(self: &Arc<Self>, wake: db::Wake, urgent: bool, runtime: &tokio::runtime::Handle) {
         if wake.push_token.is_empty() {
             return;
         }
         let hub = self.clone();
         runtime.spawn(async move {
-            match hub.pusher.wake(wake.push_platform, &wake.push_token).await {
+            match hub.pusher.wake(wake.push_platform, &wake.push_token, urgent).await {
                 push::Outcome::TokenInvalid => {
                     let cleared = hub.blocking(move |hub| hub.db.clear_push(&wake.device_id, &wake.push_token));
                     if let Ok(Err(error)) = cleared.await {
@@ -1148,6 +1153,73 @@ async fn crash(State(hub): Hubs, ConnectInfo(peer): Peer, headers: HeaderMap, bo
     Ok(StatusCode::NO_CONTENT)
 }
 
+fn require_admin(hub: &Hub, headers: &HeaderMap) -> Res<()> {
+    use subtle::ConstantTimeEq;
+    let token = hub
+        .config
+        .admin_token
+        .as_deref()
+        .filter(|token| !token.is_empty())
+        .ok_or_else(|| refuse(StatusCode::NOT_FOUND))?;
+    let supplied = headers.get("yo-admin-token").map(|v| v.as_bytes()).unwrap_or_default();
+    // Hash to fixed lengths before the constant-time comparison, including different-length credentials.
+    if !bool::from(sha256(token.as_bytes()).ct_eq(&sha256(supplied))) {
+        return Err(refuse(StatusCode::NOT_FOUND));
+    }
+    Ok(())
+}
+
+async fn admin_reserved(
+    State(hub): Hubs,
+    method: Method,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Res<axum::Json<serde_json::Value>> {
+    require_admin(&hub, &headers)?;
+    if method == Method::POST {
+        let names: Vec<String> = serde_json::from_slice(&body).map_err(|_| bad())?;
+        if names.len() > 1000 || names.iter().any(|n| n.trim().is_empty() || n.len() > 256) {
+            return Err(bad());
+        }
+        let names: Vec<_> = names.into_iter().map(|n| db::Reserved { spelling: n.trim().into(), note: None }).collect();
+        hub.db.add_reserved(&names, now_ms())?;
+    } else if method == Method::PUT {
+        let switch: serde_json::Value = serde_json::from_slice(&body).map_err(|_| bad())?;
+        let fields = switch.as_object().filter(|v| v.len() == 1).ok_or_else(bad)?;
+        let enabled = fields.get("enabled").and_then(|v| v.as_bool()).ok_or_else(bad)?;
+        hub.db.set_reserved_enabled(enabled)?;
+    }
+    let mut state = hub.db.reserved_state()?;
+    state["name_min"] = serde_json::json!(hub.config.name_min);
+    state["name_max"] = serde_json::json!(yo_wire::handle::USERNAME_MAX);
+    state["name_comparison"] = serde_json::json!("skeleton");
+    state["name_form"] = serde_json::json!("NFC Latin letters, digits, underscore or emoji; starts with a letter or emoji");
+    Ok(axum::Json(state))
+}
+
+async fn admin_reserved_delete(State(hub): Hubs, Path(name): Path<String>, headers: HeaderMap) -> Res<StatusCode> {
+    require_admin(&hub, &headers)?;
+    hub.db.remove_reserved(&name)?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+/// Operator-only plain UTF-8 text. Missing, disabled and incorrect credentials all answer 404.
+async fn admin_todo(
+    State(hub): Hubs,
+    ConnectInfo(peer): Peer,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Res<(StatusCode, axum::Json<serde_json::Value>)> {
+    require_admin(&hub, &headers)?;
+    hub.limit_ip("admin-todo", peer, &headers, hub.config.limits.crash_per_ip_day, DAY)?;
+    if body.is_empty() || body.len() > 4000 {
+        return Err(bad());
+    }
+    let text = std::str::from_utf8(&body).map_err(|_| bad())?;
+    let id = hub.db.todo(text, now_ms())?;
+    Ok((StatusCode::CREATED, axum::Json(serde_json::json!({ "id": id }))))
+}
+
 /// The signing device's account's storage (spec 6.9): `404` when there is none yet.
 async fn get_storage(State(hub): Hubs, method: Method, uri: Uri, headers: HeaderMap) -> Res<(StatusCode, Vec<u8>)> {
     let device = hub.authenticate(&method, &uri, &headers, &[])?;
@@ -1246,6 +1318,11 @@ async fn deliver(
     body: Bytes,
 ) -> Res<(StatusCode, Vec<u8>)> {
     let user: UserId = path_id(&user)?;
+    let urgent = match headers.get(api::HEADER_URGENT).map(|v| v.as_bytes()) {
+        None | Some(b"true") => true,
+        Some(b"false") => false,
+        _ => return Err(bad()),
+    };
     let devices_hash: [u8; 32] = headers
         .get(HEADER_DEVICES)
         .and_then(|v| v.to_str().ok())
@@ -1295,7 +1372,7 @@ async fn deliver(
     let runtime = tokio::runtime::Handle::current();
     // Full (the writer behind) or gone: "later", the envelope stays with its sender. Never waits here.
     hub.deliveries
-        .try_send(Delivery { user, devices_hash, envelope: body.clone(), stored, runtime })
+        .try_send(Delivery { user, devices_hash, envelope: body.clone(), urgent, stored, runtime })
         .map_err(|_| refuse(StatusCode::SERVICE_UNAVAILABLE))?;
     let outcome = outcome.await.ok().and_then(Result::ok).ok_or_else(|| refuse(StatusCode::INTERNAL_SERVER_ERROR))?;
     match outcome {
@@ -1480,6 +1557,107 @@ async fn get_blob(
 mod tests {
     use super::*;
 
+    #[tokio::test]
+    async fn admin_reserved_routes_authenticate_validate_and_manage_names() {
+        use axum::{
+            body::{to_bytes, Body},
+            http::Request,
+        };
+        use tower::ServiceExt;
+        for enabled in [false, true] {
+            let mut config = Config::for_tests();
+            config.admin_token = enabled.then(|| "test-token".into());
+            config.name_min = 3;
+            let hub = Hub::new(config, Arc::new(push::Recorder::default())).unwrap();
+            for (method, path, body, expected) in [
+                ("GET", "/v1/admin/reserved", "", StatusCode::OK),
+                ("POST", "/v1/admin/reserved", "[\"Admin\",\"Adm1n\",\"Support\"]", StatusCode::OK),
+                ("POST", "/v1/admin/reserved", "{}", StatusCode::BAD_REQUEST),
+                ("POST", "/v1/admin/reserved", "[\" \"]", StatusCode::BAD_REQUEST),
+                ("PUT", "/v1/admin/reserved", "{\"enabled\":false}", StatusCode::OK),
+                ("PUT", "/v1/admin/reserved", "{\"enabled\":1}", StatusCode::BAD_REQUEST),
+                ("PUT", "/v1/admin/reserved", "{\"enabled\":true,\"extra\":1}", StatusCode::BAD_REQUEST),
+                ("DELETE", "/v1/admin/reserved/Adm1n", "", StatusCode::NO_CONTENT),
+                ("PUT", "/v1/admin/reserved", "{\"enabled\":true}", StatusCode::OK),
+            ] {
+                for token in ["", "wrong", "test-token"] {
+                    let request = Request::builder()
+                        .method(method).uri(path).header("yo-admin-token", token).body(Body::from(body)).unwrap();
+                    let response = hub.router().oneshot(request).await.unwrap();
+                    assert_eq!(
+                        response.status(),
+                        if enabled && token == "test-token" { expected } else { StatusCode::NOT_FOUND },
+                    );
+                    if enabled && token == "test-token" && method == "GET" {
+                        let body = to_bytes(response.into_body(), 65536).await.unwrap();
+                        let value: serde_json::Value = serde_json::from_slice(&body).unwrap();
+                        assert_eq!(value["name_min"], 3);
+                        assert_eq!(value["name_max"], yo_wire::handle::USERNAME_MAX);
+                        assert_eq!(value["name_comparison"], "skeleton");
+                        assert!(value["name_form"].as_str().unwrap().contains("NFC"));
+                        continue;
+                    }
+                    if enabled && token == "test-token" && method == "POST" && expected == StatusCode::OK {
+                        let body = to_bytes(response.into_body(), 65536).await.unwrap();
+                        let value: serde_json::Value = serde_json::from_slice(&body).unwrap();
+                        assert_eq!(value["names"], serde_json::json!(["Admin", "Support"]));
+                    }
+                    if enabled && token == "test-token" && method == "PUT" && body == "{\"enabled\":false}" {
+                        assert!(!hub.db.username_taken(b"ADMIN").unwrap());
+                        assert_eq!(hub.db.reserved_state().unwrap()["names"].as_array().unwrap().len(), 2);
+                    }
+                }
+            }
+            if enabled {
+                assert_eq!(
+                    hub.db.reserved_state().unwrap(),
+                    serde_json::json!({"enabled":true,"names":["Support"]}),
+                );
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn admin_todos_require_a_token_and_validate_text() {
+        use axum::{
+            body::{to_bytes, Body},
+            http::Request,
+        };
+        use tower::ServiceExt;
+        let path = std::env::temp_dir().join(format!("yo-todo-{}-{}.sqlite", std::process::id(), now_ms()));
+        let mut config = Config { db_path: path.to_string_lossy().into(), ..Config::for_tests() };
+        config.limits.crash_per_ip_day = 5;
+        for enabled in [false, true] {
+            config.admin_token = enabled.then(|| "test-token".into());
+            let hub = Hub::new(config.clone(), Arc::new(push::Recorder::default())).unwrap();
+            for (token, body, expected) in [
+                ("", b"fix".to_vec(), StatusCode::NOT_FOUND),
+                ("wrong", b"fix".to_vec(), StatusCode::NOT_FOUND),
+                ("test-token", vec![], StatusCode::BAD_REQUEST),
+                ("test-token", vec![255], StatusCode::BAD_REQUEST),
+                ("test-token", vec![b'a'; 4001], StatusCode::BAD_REQUEST),
+                ("test-token", "fix 🎨".as_bytes().to_vec(), StatusCode::CREATED),
+                ("test-token", vec![b'a'; 4000], StatusCode::CREATED),
+                ("test-token", b"limit".to_vec(), StatusCode::TOO_MANY_REQUESTS),
+            ] {
+                let mut request =
+                    Request::post("/v1/admin/todos").header("yo-admin-token", token).body(Body::from(body)).unwrap();
+                request.extensions_mut().insert(ConnectInfo(SocketAddr::from(([127, 0, 0, 1], 9))));
+                let response = hub.router().oneshot(request).await.unwrap();
+                assert_eq!(response.status(), if enabled { expected } else { StatusCode::NOT_FOUND });
+                if response.status() == StatusCode::CREATED {
+                    let body = to_bytes(response.into_body(), 1024).await.unwrap();
+                    let id = serde_json::from_slice::<serde_json::Value>(&body).unwrap()["id"].as_i64().unwrap();
+                    let conn = rusqlite::Connection::open(&path).unwrap();
+                    let kind: String =
+                        conn.query_row("SELECT type FROM feedback WHERE id = ?1", [id], |r| r.get(0)).unwrap();
+                    assert_eq!(kind, "todo");
+                }
+            }
+        }
+        let _ = std::fs::remove_file(path);
+    }
+
     #[test]
     fn a_registration_id_out_of_range_or_an_auth_key_off_the_curve_is_refused() {
         let good = config::hub_public_key(&[3; 32]);
@@ -1572,7 +1750,7 @@ mod tests {
         let envelope = Bytes::from(sealed);
         let devices_hash = yo_wire::devices::hash(&[1; 32], &[[1; 32]]);
         let runtime = tokio::runtime::Handle::current();
-        hub.deliveries.send(Delivery { user: [1; 16], devices_hash, envelope, stored, runtime }).unwrap();
+        hub.deliveries.send(Delivery { user: [1; 16], devices_hash, envelope, urgent: true, stored, runtime }).unwrap();
         tokio::time::timeout(Duration::from_secs(5), notified).await.expect("its long poll answers");
         assert_eq!(hub.db.fetch(&[1; 16], 10).unwrap().len(), 1);
         let until = std::time::Instant::now() + Duration::from_secs(5);

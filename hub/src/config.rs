@@ -186,8 +186,13 @@ pub struct FcmConfig {
 
 #[derive(Debug, Clone)]
 pub struct Config {
+    /// Shared admin credential; absent disables the admin route.
+    pub admin_token: Option<String>,
     /// The SQLite file; ":memory:" for tests.
     pub db_path: String,
+    /// Names to reserve when the hub starts, for tests and tools only: the operator's names live in the database
+    /// (added through the admin page), never in a file.
+    pub reserved: Vec<Reserved>,
     /// Take the client's address from `CF-Connecting-IP`: only behind Cloudflare.
     pub trust_cloudflare: bool,
     /// Apps allowed to make passkeys for this hub's domain (`TEAMID.bundle.id`), served as
@@ -196,9 +201,6 @@ pub struct Config {
     pub limits: Limits,
     pub apns: Option<ApnsConfig>,
     pub fcm: Option<FcmConfig>,
-    /// Usernames nobody may claim (spec 3.3), from the operator's list (`YO_RESERVED_FILE`): added to the database
-    /// at every start where it does not hold them yet.
-    pub reserved: Vec<Reserved>,
     pub blobs: BlobConfig,
     /// The oldest build each platform may still use ("ios" → 202611140619), from `YO_MIN_APP`
     /// ("ios/202611140619,android/12"): an older one gets `426` and asks to be updated. A request without `Yo-App`
@@ -238,35 +240,6 @@ pub fn app(text: &str) -> Option<(String, u64)> {
     Some((platform.to_owned(), build.parse().ok()?))
 }
 
-/// The operator's list of reserved usernames: one per line in its preferred spelling, a note after `#` if any.
-/// Blank lines and lines starting with `#` are skipped; so is nothing else: a name is what stands before the `#`,
-/// trimmed, even one no app could register.
-pub fn parse_reserved(text: &str) -> Vec<Reserved> {
-    text.lines()
-        .filter_map(|line| {
-            let (name, note) = match line.split_once('#') {
-                Some((name, note)) => (name, Some(note.trim()).filter(|n| !n.is_empty())),
-                None => (line, None),
-            };
-            let name = name.trim().to_owned();
-            (!name.is_empty()).then(|| Reserved { spelling: name, note: note.map(str::to_owned) })
-        })
-        .collect()
-}
-
-/// The list in a file, if there is one: none named, or none there, is an empty list (the hub reserves nothing new).
-pub fn read_reserved(path: Option<&str>) -> Result<Vec<Reserved>, String> {
-    let Some(path) = path else { return Ok(Vec::new()) };
-    match std::fs::read_to_string(path) {
-        Ok(text) => Ok(parse_reserved(&text)),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-            eprintln!("yo-hub: {path}: not there, no reserved names added");
-            Ok(Vec::new())
-        }
-        Err(error) => Err(format!("{path}: {error}")),
-    }
-}
-
 /// The hub key of `Config::for_tests`: tests pin its public half.
 pub const TEST_HUB_KEY: [u8; 32] = [0x48; 32];
 
@@ -294,12 +267,13 @@ impl Config {
     pub fn for_tests() -> Self {
         Config {
             db_path: ":memory:".into(),
+            reserved: Vec::new(),
+            admin_token: None,
             trust_cloudflare: false,
             apple_app_ids: Vec::new(),
             limits: Limits::unlimited(),
             apns: None,
             fcm: None,
-            reserved: Vec::new(),
             blobs: BlobConfig::for_tests(),
             min_app: Vec::new(),
             name_min: 2,
@@ -318,22 +292,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn the_reserved_list_is_read_tolerantly() {
-        let path = std::env::temp_dir().join(format!("yo-hub-reserved-{}.txt", std::process::id()));
-        std::fs::write(&path, "# Reserved\n\nYo\n  Admin   # the operator\nJust Yo#\n#Gone\nLéo # accents too\n\r\n")
-            .unwrap();
-        let read = read_reserved(path.to_str()).unwrap();
-        std::fs::remove_file(&path).unwrap();
-        let spelt: Vec<(&str, Option<&str>)> = read.iter().map(|r| (r.spelling.as_str(), r.note.as_deref())).collect();
-        assert_eq!(
-            spelt,
-            [("Yo", None), ("Admin", Some("the operator")), ("Just Yo", None), ("Léo", Some("accents too"))]
-        );
-        assert!(read_reserved(None).unwrap().is_empty());
-        assert!(read_reserved(path.to_str()).unwrap().is_empty(), "a file not there: nothing");
-    }
-
-    #[test]
     fn apps_are_platform_and_build() {
         assert_eq!(app("ios/202611140619"), Some(("ios".into(), 202611140619)));
         for bad in ["", "ios", "ios/", "/1", "iOS/1", "ios/1a", "ios/-1", "a b/1", "ios/99999999999999999999"] {
@@ -342,4 +300,18 @@ mod tests {
         assert_eq!(parse_min_app(" ios/5, android/7 ,").unwrap(), [("ios".into(), 5), ("android".into(), 7)]);
         assert!(parse_min_app("ios").is_err());
     }
+}
+
+/// A list of names, one per line, a note after `#` if any; blank lines and `#` lines skipped (tests and tools).
+pub fn parse_reserved(text: &str) -> Vec<Reserved> {
+    text.lines()
+        .filter_map(|line| {
+            let (name, note) = match line.split_once('#') {
+                Some((name, note)) => (name, Some(note.trim()).filter(|n| !n.is_empty())),
+                None => (line, None),
+            };
+            let name = name.trim().to_owned();
+            (!name.is_empty()).then(|| Reserved { spelling: name, note: note.map(str::to_owned) })
+        })
+        .collect()
 }

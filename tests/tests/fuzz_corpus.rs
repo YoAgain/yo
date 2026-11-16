@@ -70,6 +70,14 @@ fn write_fuzz_corpus() {
     a.send_yo(&pb).unwrap();
     a.send_yo(&pb).unwrap();
     a.send(&pb, yo_core::Content::Text("hello".into())).unwrap();
+    // Exercise authenticated group changes and group/direct media through the same receive entry point.
+    let media = yo_core::media::seal(b"fuzz media", 1, 1).unwrap().0;
+    a.send(&pb, yo_core::Content::Photo(media.clone())).unwrap();
+    a.send(&pb, yo_core::Content::Video { media: media.clone(), duration_ms: 1 }).unwrap();
+    let (group, _) = a.create_group("FUZZ", &[b.user_id().to_owned()]).unwrap();
+    a.send_group(&group, yo_core::Content::Yo).unwrap();
+    a.send_group(&group, yo_core::Content::Photo(media.clone())).unwrap();
+    a.send_group(&group, yo_core::Content::Video { media, duration_ms: 1 }).unwrap();
     let to_b = api::deliver_path(&yo_tests::user_id(b.user_id()));
     let envelopes: Vec<Vec<u8>> = ha
         .sent

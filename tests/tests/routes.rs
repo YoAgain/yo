@@ -385,6 +385,8 @@ fn whether_a_username_is_free() {
     assert_eq!(check(&name), status::CONFLICT);
     assert_eq!(check(&name.replace('0', "O")), status::CONFLICT, "a lookalike");
     assert_eq!(check("ADM1N"), status::CONFLICT, "reserved");
+    let reserved = Client::register_username(Http::new(hub.url()), "Adm1n", None, None, yo_core::Push::none());
+    assert_eq!(reserved.err(), Some(Error::Refused(status::CONFLICT)));
     for bad in ["a", "_abc", "a b c", "seventeen_letters"] {
         assert_eq!(check(bad), status::BAD_REQUEST, "{bad}");
     }
@@ -917,4 +919,50 @@ fn a_body_too_large_is_refused_before_it_is_read() {
         let line = String::from_utf8_lossy(&answer[..n]);
         assert!(line.starts_with("HTTP/1.1 413"), "{path}: {line}");
     }
+}
+
+#[test]
+fn delivery_urgency_selects_alert_or_background_and_defaults_to_alert() {
+    let config = Config {
+        apns: Some(yo_hub::config::ApnsConfig {
+            key_pem: include_str!("../fixtures/test-apns.p8").into(),
+            key_id: "KEYID12345".into(), team_id: "TEAMID1234".into(), topic: "co.justyo.app".into(),
+        }),
+        ..Config::for_tests()
+    };
+    let hub = TestHub::start_with(config, "127.0.0.1:0");
+    let name = username(random_u64() % 1_000_000_000);
+    let client = Client::register_username(Http::new(hub.url()), &name, None, None,
+        yo_core::Push { platform: api::PUSH_APNS, token: b"a1b2c3".to_vec().into() }).unwrap();
+    let user = client.user_id();
+    let hash = yo_tests::devices_hash(&hub.url(), user).unwrap();
+    let path = api::deliver_path(&user_id(user));
+    for (index, value) in [None, Some("true"), Some("false")].into_iter().enumerate() {
+        let mut headers = vec![(api::HEADER_DEVICES, yo_wire::b64(&hash))];
+        if let Some(value) = value { headers.push((api::HEADER_URGENT, value.into())); }
+        assert_eq!(raw(&hub, "POST", &path, &headers, junk(index as u8)).0, status::ACCEPTED);
+        let until = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        loop {
+            if hub.push.sent.lock().unwrap().len() > index { break; }
+            assert!(std::time::Instant::now() < until, "push sent");
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        let sent = hub.push.sent.lock().unwrap();
+        let push = &sent[index];
+        let header = |name| push.headers.iter().find(|(n, _)| n == name).unwrap().1.as_str();
+        let body: serde_json::Value = serde_json::from_slice(&push.body).unwrap();
+        if value == Some("false") {
+            assert_eq!(header("apns-push-type"), "background");
+            assert_eq!(header("apns-priority"), "5");
+            assert_eq!(body, serde_json::json!({"aps": {"content-available": 1}}));
+        } else {
+            assert_eq!(header("apns-push-type"), "alert");
+            assert_eq!(header("apns-priority"), "10");
+            assert_eq!(body["aps"]["alert"]["body"], "Yo");
+            assert_eq!(body["aps"]["sound"], "yo.caf");
+            assert_eq!(body["aps"]["mutable-content"], 1);
+        }
+    }
+    assert_eq!(raw(&hub, "POST", &path, &[(api::HEADER_DEVICES, yo_wire::b64(&hash)),
+        (api::HEADER_URGENT, "invalid".into())], junk(4)).0, status::BAD_REQUEST);
 }

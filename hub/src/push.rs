@@ -1,6 +1,7 @@
 //! Waking a device (spec 6.7). A push says only "there is mail": APNs with a constant alert ("Yo", one line) and
 //! `mutable-content`, so the notification extension fetches, decrypts and writes "YO from CHRIS"; FCM as a
-//! high-priority data message. The requests go through `Transport`, so tests record them.
+//! data message. Non-urgent traffic uses silent APNs background pushes or normal-priority FCM.
+//! The requests go through `Transport`, so tests record them.
 
 use crate::config::{ApnsConfig, FcmConfig};
 use jsonwebtoken::{Algorithm, EncodingKey, Header};
@@ -164,7 +165,7 @@ impl Pusher {
         Ok(Pusher { transport, apns, fcm })
     }
 
-    pub async fn wake(&self, platform: u8, token: &[u8]) -> Outcome {
+    pub async fn wake(&self, platform: u8, token: &[u8], urgent: bool) -> Outcome {
         let Ok(token) = std::str::from_utf8(token) else { return Outcome::TokenInvalid };
         if token.is_empty() {
             return Outcome::Skipped;
@@ -173,18 +174,18 @@ impl Pusher {
             // An APNs device token is hex; anything else would go into the request's path (`apns`).
             PUSH_APNS | PUSH_APNS_SANDBOX if !token.bytes().all(|b| b.is_ascii_hexdigit()) => Outcome::TokenInvalid,
             PUSH_APNS | PUSH_APNS_SANDBOX => match &self.apns {
-                Some(apns) => self.apns(apns, platform == PUSH_APNS_SANDBOX, token).await,
+                Some(apns) => self.apns(apns, platform == PUSH_APNS_SANDBOX, token, urgent).await,
                 None => Outcome::Skipped,
             },
             PUSH_FCM => match &self.fcm {
-                Some(fcm) => self.fcm(fcm, token).await,
+                Some(fcm) => self.fcm(fcm, token, urgent).await,
                 None => Outcome::Skipped,
             },
             _ => Outcome::Skipped,
         }
     }
 
-    async fn apns(&self, apns: &Apns, sandbox: bool, token: &str) -> Outcome {
+    async fn apns(&self, apns: &Apns, sandbox: bool, token: &str, urgent: bool) -> Outcome {
         let jwt = {
             let mut cached = apns.jwt.lock().unwrap_or_else(PoisonError::into_inner);
             match cached.as_ref().filter(|c| c.until > Instant::now()) {
@@ -204,14 +205,18 @@ impl Pusher {
             }
         };
         let host = if sandbox { "api.sandbox.push.apple.com" } else { "api.push.apple.com" };
-        let body = json!({ "aps": { "alert": { "body": "Yo" }, "sound": "yo.caf", "mutable-content": 1 } });
+        let body = if urgent {
+            json!({ "aps": { "alert": { "body": "Yo" }, "sound": "yo.caf", "mutable-content": 1 } })
+        } else {
+            json!({ "aps": { "content-available": 1 } })
+        };
         let request = Request {
             url: format!("https://{host}/3/device/{token}"),
             headers: vec![
                 ("authorization".into(), format!("bearer {jwt}")),
                 ("apns-topic".into(), apns.config.topic.clone()),
-                ("apns-push-type".into(), "alert".into()),
-                ("apns-priority".into(), "10".into()),
+                ("apns-push-type".into(), if urgent { "alert" } else { "background" }.into()),
+                ("apns-priority".into(), if urgent { "10" } else { "5" }.into()),
                 ("content-type".into(), "application/json".into()),
             ],
             body: body.to_string().into_bytes(),
@@ -254,12 +259,12 @@ impl Pusher {
         Ok(token.to_owned())
     }
 
-    async fn fcm(&self, fcm: &Fcm, token: &str) -> Outcome {
+    async fn fcm(&self, fcm: &Fcm, token: &str, urgent: bool) -> Outcome {
         let access = match self.fcm_access(fcm).await {
             Ok(access) => access,
             Err(error) => return Outcome::Failed(error),
         };
-        let body = json!({ "message": { "token": token, "data": { "yo": "1" }, "android": { "priority": "HIGH" } } });
+        let body = json!({ "message": { "token": token, "data": { "yo": "1", "urgent": urgent.to_string() }, "android": { "priority": if urgent { "HIGH" } else { "NORMAL" } } } });
         let request = Request {
             url: format!("https://fcm.googleapis.com/v1/projects/{}/messages:send", fcm.project_id),
             headers: vec![
@@ -281,6 +286,25 @@ impl Pusher {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn fcm_urgency_sets_data_and_android_priority() {
+        let config = FcmConfig { service_account_json: json!({
+            "project_id": "yo-test", "client_email": "push@example.com",
+            "token_uri": "https://oauth2.googleapis.com/token",
+            "private_key": include_str!("../../tests/fixtures/test-fcm.pem"),
+        }).to_string() };
+        let recorder = Arc::new(Recorder::default());
+        let pusher = Pusher::new(recorder.clone(), None, Some(&config)).unwrap();
+        for urgent in [true, false] {
+            assert!(matches!(pusher.wake(PUSH_FCM, b"test-token", urgent).await, Outcome::Sent));
+            let sent = recorder.sent.lock().unwrap();
+            let body: serde_json::Value = serde_json::from_slice(&sent.last().unwrap().body).unwrap();
+            assert_eq!(body["message"]["data"]["urgent"], urgent.to_string());
+            assert_eq!(body["message"]["android"]["priority"], if urgent { "HIGH" } else { "NORMAL" });
+            assert!(body["message"].get("notification").is_none());
+        }
+    }
 
     #[tokio::test]
     async fn a_failed_push_does_not_name_the_device_token() {

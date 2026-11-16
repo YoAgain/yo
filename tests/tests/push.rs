@@ -69,7 +69,7 @@ fn apns_and_fcm_are_woken_without_content() {
     assert!(fcm.iter().all(|r| r.body == fcm[0].body));
     let body: serde_json::Value = serde_json::from_slice(&fcm[0].body).unwrap();
     assert_eq!(body["message"]["token"], "fcm-token");
-    assert_eq!(body["message"]["data"], serde_json::json!({ "yo": "1" }));
+    assert_eq!(body["message"]["data"], serde_json::json!({ "yo": "1", "urgent": "true" }));
     assert!(fcm[0].url.ends_with("/v1/projects/yo-test/messages:send"));
 }
 

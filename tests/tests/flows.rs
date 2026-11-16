@@ -884,19 +884,15 @@ impl StateStore for Process {
 }
 
 impl yo::StateLock for Process {
-    fn lock(&self) -> yo::StateTurn {
+    fn lock(&self) -> Result<yo::StateTurn, yo::YoError> {
         self.hold();
         let state = self.disk.state.lock().unwrap();
         let mut known = self.known.lock().unwrap();
         if *known == state.0 {
-            return yo::StateTurn::Same;
+            return Ok(yo::StateTurn::Same);
         }
         *known = state.0;
-        if state.1.is_empty() {
-            yo::StateTurn::Gone
-        } else {
-            yo::StateTurn::Newer { blob: state.1.clone() }
-        }
+        Ok(if state.1.is_empty() { yo::StateTurn::Gone } else { yo::StateTurn::Newer { blob: state.1.clone() } })
     }
 
     fn unlock(&self) {
