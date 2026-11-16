@@ -1,11 +1,11 @@
+<p align="center">
+  <img src="docs/yo-banner.png" alt="Yo app icon: It's that simple. 1. Pick a username. 2. Tap to send Yo." width="760">
+</p>
+
 <p align="center">The 2014 one-tap app, back. Tap a friend's name or a group to send an end-to-end encrypted Yo.<br>
 Send photos and videos to view once.</p>
 
 <p align="center"><a href="https://justyo.co"><b>justyo.co</b></a> · <a href="https://testflight.apple.com/join/V3wa1DeX">TestFlight</a></p>
-
-<p align="center">
-  <img src="docs/banner.png" alt="Yo app icon: It's that simple. 1. Pick a username. 2. Tap to send Yo." width="760">
-</p>
 
 ## Apps
 
