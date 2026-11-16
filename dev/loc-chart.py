@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Generate docs/loc.svg with python3 -I dev/loc-chart.py (stdlib only).
+"""Write the lines-of-code chart (plain text) into README.md: python3 -I dev/loc-chart.py (stdlib only).
 
 Follow main's first parents, diffing merges against their first parent so merged
 code counts exactly once. Disable rename detection: moves between languages must
@@ -55,53 +55,29 @@ def history():
 
 
 def chart(points):
-    width, height = 800, 360
-    left, right, top, bottom = 76, 770, 65, 285
-    start, end = points[0][0], points[-1][0]
-    span = max(1, (end - start).days)
-    peak = max(1, *(max(counts.values()) for _, counts in points))
-    step = 10 ** math.floor(math.log10(peak))
-    step *= next(n for n in (0.2, 0.5, 1, 2) if peak / (step * n) <= 6)
-    ceiling = math.ceil(peak / step) * step
+    """One line per day: the total as a bar, the languages beside it."""
+    peak = max(sum(counts.values()) for _, counts in points)
+    lines = []
+    for day, counts in points:
+        total = sum(counts.values())
+        eighths = round(total / peak * 32 * 8)
+        bar = "█" * (eighths // 8) + " ▏▎▍▌▋▊▉"[eighths % 8].strip()
+        parts = " · ".join(f"{lang} {counts[lang] / 1000:.1f}k" for lang in LANGUAGES if counts[lang] > 0)
+        lines.append(f"{day:%Y-%m-%d}  {total:>7,}  {bar:<33} {parts}")
+    return "\n".join(lines)
 
-    def x(day):
-        return left + (day - start).days / span * (right - left)
 
-    def y(count):
-        return bottom - count / ceiling * (bottom - top)
-
-    svg = [f'<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 {width} {height}" role="img" aria-labelledby="title desc">',
-           '<title id="title">Lines of code by language on main</title>',
-           '<desc id="desc">Cumulative daily source lines from Git numstat, including comments and blanks.</desc>',
-           '<style>text{font:13px system-ui,sans-serif;fill:#808080}.grid{stroke:#808080;stroke-opacity:.25}</style>',
-           '<text x="76" y="22">Lines of code</text>']
-    for i, (language, color) in enumerate(zip(LANGUAGES, COLORS)):
-        pos = left + i * 166
-        svg += [f'<path d="M{pos},43 h22" stroke="{color}" stroke-width="3"/>',
-                f'<text x="{pos + 28}" y="47">{language}</text>']
-    for i in range(round(ceiling / step) + 1):
-        count = i * step
-        label = f"{count / 1000:g}k" if count >= 1000 else f"{count:g}"
-        svg += [f'<line x1="{left}" x2="{right}" y1="{y(count):.1f}" y2="{y(count):.1f}" class="grid"/>',
-                f'<text x="{left - 10}" y="{y(count) + 4:.1f}" text-anchor="end">{label}</text>']
-    for language, color in zip(LANGUAGES, COLORS):
-        path = f"M{x(start):.1f},{y(points[0][1][language]):.1f}"
-        for day, counts in points[1:]:
-            path += f" H{x(day):.1f} V{y(counts[language]):.1f}"
-        svg.append(f'<path d="{path}" fill="none" stroke="{color}" stroke-width="2.5"/>')
-    for i in range(4 if span >= 3 else 2):
-        fraction = i / (3 if span >= 3 else 1)
-        day = start + timedelta(days=round(span * fraction))
-        if day > end:
-            continue
-        svg.append(f'<text x="{x(day):.1f}" y="309" text-anchor="middle">{day.isoformat()}</text>')
-    svg += ['<text x="423" y="340" text-anchor="middle">Commit date (UTC)</text>', '</svg>']
-    return "\n".join(svg) + "\n"
+def main():
+    readme = ROOT / "README.md"
+    text = readme.read_text()
+    start, end = "<!-- loc -->", "<!-- /loc -->"
+    if start not in text or end not in text:
+        raise SystemExit("README.md has no <!-- loc --> … <!-- /loc --> block")
+    block = f"{start}\n```text\n{chart(history())}\n```\n{end}"
+    before, rest = text.split(start, 1)
+    after = rest.split(end, 1)[1]
+    readme.write_text(before + block + after)
 
 
 if __name__ == "__main__":
-    points = history()
-    output = ROOT / "docs" / "loc.svg"
-    output.parent.mkdir(parents=True, exist_ok=True)
-    output.write_text(chart(points), encoding="utf-8")
-    print(f"Wrote {output.relative_to(ROOT)} through {points[-1][0]}")
+    main()

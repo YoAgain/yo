@@ -4,7 +4,8 @@
 <h1 align="center">Yo</h1>
 <p align="center"><b>It's that simple.</b></p>
 
-The 2014 one-tap app, back. Tap a friend's name or a group to send an end-to-end encrypted Yo. Send photos and videos to view once, or add YoGPT for a Yo back.
+<p align="center">The 2014 one-tap app, back. Tap a friend's name or a group to send an end-to-end encrypted Yo.<br>
+Send photos and videos to view once, or add YoGPT for a Yo back.</p>
 
 <p align="center"><a href="https://justyo.co"><b>justyo.co</b></a> · <a href="https://testflight.apple.com/join/V3wa1DeX">TestFlight</a></p>
 <p align="center">iOS now. App Store soon. Android in progress.</p>
@@ -17,13 +18,10 @@ Accept requests, block or report someone, or delete your account in the app.
 
 ## Encryption
 
-```mermaid
-flowchart TD
-    A[Phone A] --> E["Signal protocol: PQXDH + Double Ratchet"]
-    E --> S[Sealed sender]
-    S --> H["Hub: sees only the recipient; stores an opaque envelope"]
-    H --> P["Push: no message content"]
-    P --> B[Phone B fetches and decrypts]
+```text
+ Phone A ──► Signal protocol ──► sealed sender ──► Hub           ──► push       ──► Phone B
+             PQXDH + Double      sender hidden     sees only the     no content     fetches and
+             Ratchet (SPQR)                        recipient                        decrypts
 ```
 
 Sign up with a name only: no phone number or email. Come back with a passkey (PRF) or a
@@ -70,13 +68,12 @@ through UniFFI; apps supply HTTP and storage.
 
 ## Hub
 
-Measured on **one CPU core**, database on an SSD, with **every delivery on disk before acknowledgement**:
-
-| Measurement | Result |
-|---|---|
-| Deliveries, hub alone | ~8,000 Yos/s (p50 7.7 ms, p99 ~20 ms) |
-| End to end: send, deliver, fetch, decrypt | ~700 Yos/s |
-| Lost under load | 0 |
+```text
+ ~8,000 Yos/s   hub alone         p50 7.7 ms · p99 ~20 ms
+   ~700 Yos/s   end to end        send, deliver, fetch, decrypt
+      0         lost under load
+```
+One CPU core, database on an SSD, every Yo on disk before the hub acknowledges it.
 
 <details>
 <summary>Storage, durability and load tests</summary>
@@ -90,10 +87,18 @@ See the [yo-load measurements and commands](tests/README.md#load).
 
 ## Development
 
-![Lines of code over time by language](docs/loc.svg)
+Lines of code on `main` per day (blanks, comments and tests included; `python3 -I dev/loc-chart.py` updates it):
 
-Tracked source lines on `main`, including blanks, comments, tests and fuzz targets; cumulative daily counts from
-Git numstat. Other includes Python, shell and other source extensions. Regenerate with `python3 -I dev/loc-chart.py`.
+<!-- loc -->
+```text
+2026-11-11    6,326  ████▍                             Rust 6.3k
+2026-11-12    9,076  ██████▎                           Rust 7.4k · Swift 1.5k · Other 0.2k
+2026-11-13   20,585  ██████████████                    Rust 13.4k · Swift 6.8k · Other 0.4k
+2026-11-14   32,976  ██████████████████████▌           Rust 22.2k · Swift 10.0k · Other 0.8k
+2026-11-15   46,740  ███████████████████████████████▉  Rust 33.6k · Swift 12.2k · Other 0.9k
+2026-11-16   46,847  ████████████████████████████████  Rust 33.6k · Swift 12.2k · Other 1.1k
+```
+<!-- /loc -->
 
 <details>
 <summary>Tests, fuzzing, repository layout and contributing</summary>
