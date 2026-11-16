@@ -1,31 +1,24 @@
 <p align="center">
-  <img src="app/ios/YoApp/AppIcon.png" alt="Yo app icon" width="112">
-  &nbsp;&nbsp;&nbsp;
-  <img src="docs/app.png" alt="The Yo app: a list of friends and groups" width="150">
+  <img src="docs/banner.png" alt="Yo. It's that simple. 1. Pick a username. 2. Tap to send Yo." width="760">
 </p>
-<h1 align="center">Yo · It's that simple.</h1>
 
 <p align="center">The 2014 one-tap app, back. Tap a friend's name or a group to send an end-to-end encrypted Yo.<br>
 Send photos and videos to view once.</p>
 
 <p align="center"><a href="https://justyo.co"><b>justyo.co</b></a> · <a href="https://testflight.apple.com/join/V3wa1DeX">TestFlight</a></p>
 
-## How to use
-
-1. **Pick a username.**
-2. **Tap to send Yo.**
-
 ## Encryption
 
 ```text
-  Phone A                          Hub                              Phone B
-  ───────                          ───                              ───────
-  encrypts with the Signal    ──►  stores a sealed envelope,   ──►  fetches it
-  protocol (PQXDH + Double         sees only the recipient,         and decrypts
-  Ratchet), hides the sender       sends a push with no content
+┌──────────────────┐        ┌──────────────────┐        ┌──────────────────┐
+│     Phone A      │        │       Hub        │        │     Phone B      │
+│                  │        │                  │        │                  │
+│ Signal protocol  │───Yo──►│ sealed envelope  │──push─►│ fetches and      │
+│ PQXDH + Double   │        │ sees only the    │        │ decrypts         │
+│ Ratchet, sender  │        │ recipient        │        │                  │
+│ hidden           │        │ push: no content │        │                  │
+└──────────────────┘        └──────────────────┘        └──────────────────┘
 ```
-
-Sign up with a name only. Your account is protected by Keychain sync, a passkey (PRF) or a 64-character recovery key.
 
 <details>
 <summary>Protocol, groups, media and privacy limits</summary>
@@ -48,6 +41,7 @@ The server deletes the encrypted file after its last allowed fetch.
 
 - **iOS:** [SwiftUI, iOS 26, Swift 6](app/ios/README.md), available on [TestFlight](https://testflight.apple.com/join/V3wa1DeX).
 - **Android:** Kotlin, Jetpack Compose and Material 3; in progress.
+- **Account:** sign up with a name only, no phone number or email; protected by Keychain sync, a passkey (PRF) or a 64-character recovery key.
 - **[YoGPT](app/yogpt):** a Rust client that answers Yos and can reply with pictures.
 
 <details>
