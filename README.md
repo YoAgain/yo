@@ -10,11 +10,12 @@ Send photos and videos to view once.</p>
 
 ## How to use
 
-- Pick a name, add a friend, tap their row.
-- Share your invite link or QR code.
-- In camera mode, tap for a photo or hold for a video.
-- Add **YoGPT** if you want a Yo back.
-- Accept requests, block or report someone, or delete your account in the app.
+<img src="docs/app.png" alt="The Yo app: a list of friends and groups" width="220" align="right">
+
+1. **Pick a username.**
+2. **Tap to send Yo.**
+
+<br clear="right">
 
 ## Encryption
 
@@ -26,8 +27,7 @@ Send photos and videos to view once.</p>
   Ratchet), hides the sender       sends a push with no content
 ```
 
-Sign up with a name only: no phone number or email. Come back with a passkey (PRF) or a
-64-character recovery key. On iPhone, your account key also syncs through iCloud Keychain.
+Sign up with a name only. Your account is protected by Keychain sync, a passkey (PRF) or a 64-character recovery key.
 
 <details>
 <summary>Protocol, groups, media and privacy limits</summary>
@@ -75,7 +75,6 @@ hub alone    ██████████████████████�
 end to end   ██▊                                 700 Yos/s   send, deliver, fetch, decrypt
 lost                                               0
 ```
-One CPU core, database on an SSD, every Yo on disk before the hub acknowledges it.
 
 <details>
 <summary>Storage, durability and load tests</summary>
@@ -83,7 +82,7 @@ One CPU core, database on an SSD, every Yo on disk before the hub acknowledges i
 The small [Rust hub](hub/README.md) stores accounts, public prekeys, queued envelopes and encrypted files.
 It has no message content keys. SQLite persists deliveries before acknowledging them using `synchronous = FULL`,
 so an acknowledged Yo survives a power cut. Without the wait for disk, the hub does about 15,000 Yos/s.
-See the [yo-load measurements and commands](tests/README.md#load).
+Measured on one CPU core with the database on an SSD. See the [yo-load measurements and commands](tests/README.md#load).
 
 </details>
 
