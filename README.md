@@ -72,6 +72,43 @@ lost                                               0
 The hub stores and forwards encrypted Yos until the recipient fetches them; it cannot read them.
 
 <details>
+<summary>Hub routes</summary>
+
+| Route | Auth |
+|---|---|
+| `POST /v1/register` | proof (6.4) |
+| `GET /v1/username/{name}` | – |
+| `PUT /v1/prekeys` | signed |
+| `POST /v1/lookup` | signed |
+| `PUT /v1/username` | signed |
+| `PUT /v1/push` | signed |
+| `GET /v1/inbox?wait=s` | signed |
+| `GET /v1/certificate` | signed |
+| `POST /v1/inbox/ack` | signed |
+| `POST /v1/inbox/{user_id}` | none; signed for a request (4.10) or identified (6.1) |
+| `PUT /v1/access-key` | signed |
+| `GET /v1/group-auth` | signed |
+| `POST /v1/group-credential` | signed |
+| `PUT`, `POST /v1/groups/{id}` | signed |
+| `GET /.well-known/yo-zk-params` | – |
+| `PUT /v1/backup` | signed |
+| `GET /v1/backup/{user id or locator}` | door key (6.2) |
+| `GET`, `PUT /v1/storage` | signed |
+| `PUT /v1/blobs/{id}?fetches=n` | signed by body hash |
+| `GET /v1/blobs/{id}` | none |
+| `GET /.well-known/yo-hub-key` | – |
+| `GET /.well-known/yo-trust-root` | – |
+| `POST /v1/report` | signed |
+| `POST /v1/feedback` | signed |
+| `POST /v1/admin/todos` | shared `Yo-Admin-Token` (`YO_ADMIN_TOKEN`) |
+| `POST /v1/crash` | none |
+| `DELETE /v1/account` | signed |
+
+Bodies and answers: [spec 6](spec/v1.md).
+
+</details>
+
+<details>
 <summary>Storage, durability and load tests</summary>
 
 The small [Rust hub](hub/README.md) stores accounts, public prekeys, queued envelopes and encrypted files.
