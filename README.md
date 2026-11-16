@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="docs/yo-banner.png" alt="Yo app icon: It's that simple. 1. Pick a username. 2. Tap to send Yo." width="760">
+  <img src="docs/yo-app-banner.png" alt="Yo app icon: It's that simple. 1. Pick a username. 2. Tap to send Yo." width="760">
 </p>
 
 <p align="center">The 2014 one-tap app, back. Tap a friend's name or a group to send an end-to-end encrypted Yo.<br>
@@ -11,7 +11,6 @@ Send photos and videos to view once.</p>
 
 - **iOS:** [SwiftUI, iOS 26, Swift 6](app/ios/README.md), available on [TestFlight](https://testflight.apple.com/join/V3wa1DeX).
 - **Android:** Kotlin, Jetpack Compose and Material 3; in progress.
-- **Account:** sign up with a name only, no phone number or email; protected by Keychain sync, a passkey (PRF) or a 64-character recovery key.
 - **[YoGPT](app/yogpt):** a Rust client that answers Yos and can reply with pictures.
 
 <details>
@@ -42,6 +41,8 @@ through UniFFI; apps supply HTTP and storage.
 │ hidden           │        │ push: no content │        │                  │
 └──────────────────┘        └──────────────────┘        └──────────────────┘
 ```
+
+Sign up with a name only, no phone number or email. Your account is protected by Keychain sync, a passkey (PRF) or a 64-character recovery key.
 
 <details>
 <summary>Protocol, groups, media and privacy limits</summary>
@@ -78,10 +79,8 @@ Measured on one CPU core with the database on an SSD. See the [yo-load measureme
 
 </details>
 
-## Development
-
 <details>
-<summary>Lines of code, tests, fuzzing, repository layout and contributing</summary>
+<summary><h2>Development</h2></summary>
 
 <!-- loc -->
 ```text
@@ -121,10 +120,8 @@ and run the relevant [checks](tests/README.md). Keep secrets and machine setting
 
 </details>
 
-## License
-
 <details>
-<summary>MIT; the built app AGPL-3.0 (libsignal)</summary>
+<summary><h2>License</h2></summary>
 
 Yo's code is [MIT](LICENSE.md). The app and core link libsignal ([AGPL-3.0](LICENSES/AGPL-3.0.txt)),
 so the built app as a whole is distributed under AGPL-3.0; corresponding source is in this repository at the
