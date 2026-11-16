@@ -1,0 +1,134 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="robots" content="noindex">
+<meta name="theme-color" content="#16121c">
+<title>Yo admin</title>
+<link rel="icon" href="/icon.svg">
+<link rel="stylesheet" href="/app.css">
+</head>
+<body class="dash">
+<header>
+  <div class="brand" title="Yo admin"><span class="logo">Yo</span><button type="button" class="hubword" id="hub-word" title="which hub the lists show: click or key 0 to switch">live</button></div>
+  <div class="stale" id="stale" hidden>no answer from the server</div>
+  <span id="collection-status" role="status">Loading fresh data…</span>
+  <nav class="menu">
+    <span class="tabs" id="tabs" role="tablist">
+      <a role="tab" href="#" data-tab="overview" title="key 1">Overview</a>
+      <a role="tab" href="#users" data-tab="users" title="key 2">Users</a>
+      <a role="tab" href="#gpt" data-tab="gpt" title="key 3">GPT Images</a>
+      <a role="tab" href="#db" data-tab="db" title="key 4">Database</a>
+    </span>
+    <span id="which" hidden><button type="button" data-hub="live" class="on"></button><button type="button" data-hub="dev"></button></span>
+  </nav>
+</header>
+
+
+<!-- Two rows of small tiles: the server, its services and the hub at a glance; details in small text or on hover. -->
+<main class="bento overview" data-tabs="overview">
+  <article class="tile" id="t-system">
+    <h2>System</h2>
+    <div class="rows" id="t-net">
+      <div class="row" id="r-cpu"><span class="k">CPU</span><span class="bar"><i></i></span><span class="v" id="cpu">–</span></div>
+      <div class="row" id="r-mem"><span class="k">Memory</span><span class="bar"><i></i></span><span class="v" id="mem">–</span></div>
+      <div class="row" id="r-disk"><span class="k">Disk</span><span class="bar"><i></i></span><span class="v" id="disk">–</span></div>
+      <div class="row" id="r-rx"><span class="k">Net ↓</span><span class="bar"><i></i></span><span class="v" id="rx">–</span></div>
+      <div class="row" id="r-tx"><span class="k">Net ↑</span><span class="bar"><i></i></span><span class="v" id="tx">–</span></div>
+    </div>
+    <span id="cpu-cap" hidden></span><span id="mem-cap" hidden></span><span id="disk-cap" hidden></span><span id="load" hidden></span><span id="load-cap" hidden></span><span id="rx-cap" hidden></span><span id="tx-cap" hidden></span>
+  </article>
+  <article class="tile" id="t-services">
+    <h2 id="t-uptime">Services · up <span id="uptime">–</span> <b id="reboot-text"></b></h2>
+    <div class="svcs">
+      <div class="svc" id="t-hub"><h2><i></i>Hub</h2><span class="v" id="hub">–</span><span class="cap" id="hub-cap">–</span></div>
+      <div class="svc" id="t-dev"><h2><i></i>Dev Hub</h2><span class="v" id="dev">–</span><span class="cap" id="dev-cap">–</span></div>
+      <div class="svc" id="t-tunnel"><h2><i></i>Tunnel</h2><span class="v" id="tunnel">–</span><span class="cap" id="tunnel-cap">–</span></div>
+      <div class="svc link" id="t-yogpt" role="button" tabindex="0" title="YoGPT images"><h2><i></i>YoGPT</h2><span class="v" id="yogpt">–</span><span class="cap" id="yogpt-cap">–</span></div>
+    </div>
+  </article>
+
+  <article class="tile link" id="t-updates" role="button" tabindex="0" aria-label="Update details">
+    <h2><i></i>Updates</h2><div id="updates-summary">Unavailable</div><div class="cap" id="updates-reboot"></div><div class="cap" id="updates-release"></div>
+  </article>
+
+  <article class="tile" id="t-signups"><h2>Sign-ups · 14 days</h2><div class="big" id="st-signups">–</div><div class="bars" id="st-signup-bars"></div></article>
+  <article class="tile" id="t-msgs"><h2 title="the number: deliveries in the last 24 h (the hub counts none yet)">Messages</h2>
+    <div class="big"><span id="st-msgs">—</span><small>in 24h</small></div>
+    <div class="big queue" title="waiting deliveries / blobs waiting"><span id="q-line">–</span><small>queue</small></div></article>
+</main>
+
+<section id="gallery" data-tabs="gpt" hidden>
+  <div class="gallery-head">
+    <h2>YoGPT images <small></small></h2>
+  </div>
+  <div class="shots"></div>
+</section>
+
+<div id="hubs" data-tabs="overview users db">
+
+<main class="stack">
+  <article class="card users" id="users" data-tabs="overview users">
+    <h2><span id="users-heading">Users</span><span id="user-tabs" role="tablist" aria-label="Users and reserved names" hidden><button id="users-tab" role="tab" aria-selected="true" aria-controls="users-panel">Users (<span id="users-count">–</span>)</button><button id="reserved-tab" role="tab" aria-selected="false" aria-controls="reserved">Reserved names (<span id="reserved-count">–</span>)</button></span><small hidden></small></h2>
+    <div id="users-panel">
+    <div class="ugraphs">
+      <div class="ug" id="ug-users"><div class="big"><span id="ug-total">–</span><small id="ug-today">–</small></div><div class="sbar" id="ug-active-bar"></div></div>
+      <div class="ug" id="ug-apps"><div class="big"><span id="ug-fresh">–</span><small id="ug-fresh-cap">up to date</small></div><div class="sbar" id="ug-apps-bar"></div></div>
+    </div>
+    <div class="scroll"><table>
+      <thead><tr><th>Name</th><th>Signed up</th><th>Last seen</th><th>Devices</th><th>Push</th><th>Secured</th><th>Waiting</th><th>App</th></tr></thead>
+      <tbody></tbody>
+    </table></div>
+    <nav id="user-pages" aria-label="User pages"></nav>
+    </div>
+    <div id="reserved" role="tabpanel" aria-labelledby="reserved-tab" hidden>
+    <p>Hub: <span id="reserved-hub">live</span></p>
+    <p id="reserved-rule">Names: unavailable</p>
+    <label id="reserved-status"><input id="reserved-enabled" type="checkbox"> Reservation <span id="reserved-state">unavailable</span></label>
+    <input id="reserved-search" type="search" placeholder="Search reserved names" aria-label="Search reserved names">
+    <form id="reserved-add"><textarea id="reserved-input" required placeholder="Names, separated by commas or newlines" aria-label="Names to reserve"></textarea><button>Add</button></form>
+    <small id="reserved-error" role="alert"></small>
+    <div id="reserved-list" class="scroll"></div>
+    <nav id="reserved-pages" aria-label="Reserved name pages"></nav>
+    </div>
+  </article>
+
+
+  <div class="side">
+  <article class="card users" id="feedback" data-tabs="overview">
+    <h2>Feedback <small hidden></small>
+      <select id="fb-mode" aria-label="Show feedback">
+        <option value="all">Show: All</option><option value="feedback">Feedback</option><option value="crash">Crash</option><option value="todo">To-Do</option><option value="reports">User Reports</option><option value="done">Done</option>
+      </select></h2>
+    <form id="todo-form" action="/todos" method="post">
+      <label for="todo-text">New To-Do · <span id="todo-hub">live</span></label>
+      <div><input id="todo-text" name="text" required maxlength="4000" placeholder="What needs doing?"><button type="submit">Add</button></div>
+      <small id="todo-error" role="alert" hidden></small>
+    </form>
+    <div class="scroll"><table>
+      <thead><tr><th>Done</th><th>Type</th><th>When</th><th>From</th><th>Text</th></tr></thead>
+      <tbody></tbody>
+    </table></div>
+    <div id="reports" hidden><h2 hidden><small></small></h2>
+      <div class="scroll"><table>
+      <thead><tr><th>Done</th><th>When</th><th>Reported</th><th>Reason</th><th>By</th></tr></thead>
+      <tbody></tbody>
+    </table></div>
+    </div>
+  </article>
+
+
+  </div>
+
+  <article class="card users" id="tables" data-tabs="db">
+    <h2>All tables <small></small></h2>
+    <div class="tables"></div>
+  </article>
+</main>
+</div>
+<dialog id="pop"><form method="dialog"><button class="ghost icon close" aria-label="Close" title="Close">×</button></form><dl></dl><pre hidden></pre><label class="pop-done"><input type="checkbox"> done</label></dialog>
+<footer class="foot"><span id="host"></span><span id="foot-hub"></span> · <form method="post" action="/logout"><button type="submit" class="footlink">sign out</button></form></footer>
+<script src="/app.js"></script>
+</body>
+</html>

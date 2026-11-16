@@ -1,0 +1,25 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="robots" content="noindex">
+<meta name="theme-color" content="#9B59B6">
+<title>Yo admin</title>
+<link rel="icon" href="/icon.svg">
+<link rel="stylesheet" href="/app.css">
+</head>
+<body class="login">
+<main>
+  <form method="post" action="/login" autocomplete="on">
+    <div class="mark">Yo</div>
+    <p class="sub">admin</p>
+    <label>User<input name="user" autocomplete="username" required autofocus></label>
+    <label>Password<input name="password" type="password" autocomplete="current-password" required></label>
+    <p class="note" id="note" hidden></p>
+    <button type="submit">Sign in</button>
+  </form>
+</main>
+<script src="/app.js"></script>
+</body>
+</html>
