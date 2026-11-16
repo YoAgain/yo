@@ -289,11 +289,14 @@ mod tests {
 
     #[tokio::test]
     async fn fcm_urgency_sets_data_and_android_priority() {
-        let config = FcmConfig { service_account_json: json!({
-            "project_id": "yo-test", "client_email": "push@example.com",
-            "token_uri": "https://oauth2.googleapis.com/token",
-            "private_key": include_str!("../../tests/fixtures/test-fcm.pem"),
-        }).to_string() };
+        let config = FcmConfig {
+            service_account_json: json!({
+                "project_id": "yo-test", "client_email": "push@example.com",
+                "token_uri": "https://oauth2.googleapis.com/token",
+                "private_key": include_str!("../../tests/fixtures/test-fcm.pem"),
+            })
+            .to_string(),
+        };
         let recorder = Arc::new(Recorder::default());
         let pusher = Pusher::new(recorder.clone(), None, Some(&config)).unwrap();
         for urgent in [true, false] {

@@ -926,24 +926,36 @@ fn delivery_urgency_selects_alert_or_background_and_defaults_to_alert() {
     let config = Config {
         apns: Some(yo_hub::config::ApnsConfig {
             key_pem: include_str!("../fixtures/test-apns.p8").into(),
-            key_id: "KEYID12345".into(), team_id: "TEAMID1234".into(), topic: "co.justyo.app".into(),
+            key_id: "KEYID12345".into(),
+            team_id: "TEAMID1234".into(),
+            topic: "co.justyo.app".into(),
         }),
         ..Config::for_tests()
     };
     let hub = TestHub::start_with(config, "127.0.0.1:0");
     let name = username(random_u64() % 1_000_000_000);
-    let client = Client::register_username(Http::new(hub.url()), &name, None, None,
-        yo_core::Push { platform: api::PUSH_APNS, token: b"a1b2c3".to_vec().into() }).unwrap();
+    let client = Client::register_username(
+        Http::new(hub.url()),
+        &name,
+        None,
+        None,
+        yo_core::Push { platform: api::PUSH_APNS, token: b"a1b2c3".to_vec().into() },
+    )
+    .unwrap();
     let user = client.user_id();
     let hash = yo_tests::devices_hash(&hub.url(), user).unwrap();
     let path = api::deliver_path(&user_id(user));
     for (index, value) in [None, Some("true"), Some("false")].into_iter().enumerate() {
         let mut headers = vec![(api::HEADER_DEVICES, yo_wire::b64(&hash))];
-        if let Some(value) = value { headers.push((api::HEADER_URGENT, value.into())); }
+        if let Some(value) = value {
+            headers.push((api::HEADER_URGENT, value.into()));
+        }
         assert_eq!(raw(&hub, "POST", &path, &headers, junk(index as u8)).0, status::ACCEPTED);
         let until = std::time::Instant::now() + std::time::Duration::from_secs(5);
         loop {
-            if hub.push.sent.lock().unwrap().len() > index { break; }
+            if hub.push.sent.lock().unwrap().len() > index {
+                break;
+            }
             assert!(std::time::Instant::now() < until, "push sent");
             std::thread::sleep(std::time::Duration::from_millis(10));
         }
@@ -963,6 +975,15 @@ fn delivery_urgency_selects_alert_or_background_and_defaults_to_alert() {
             assert_eq!(body["aps"]["mutable-content"], 1);
         }
     }
-    assert_eq!(raw(&hub, "POST", &path, &[(api::HEADER_DEVICES, yo_wire::b64(&hash)),
-        (api::HEADER_URGENT, "invalid".into())], junk(4)).0, status::BAD_REQUEST);
+    assert_eq!(
+        raw(
+            &hub,
+            "POST",
+            &path,
+            &[(api::HEADER_DEVICES, yo_wire::b64(&hash)), (api::HEADER_URGENT, "invalid".into())],
+            junk(4)
+        )
+        .0,
+        status::BAD_REQUEST
+    );
 }

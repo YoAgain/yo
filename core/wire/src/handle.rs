@@ -102,7 +102,11 @@ pub fn same_name(a: &str, b: &str) -> bool {
 /// at most 16, the case as typed. The apps keep their field to this; the hub accepts only names already so.
 pub fn canonical(typed: &str) -> String {
     let nfc: String = typed.nfc().collect();
-    nfc.graphemes(true).filter(|g| allowed(g)).skip_while(|g| !is_latin_letter(g) && !is_emoji(g)).take(USERNAME_MAX).collect()
+    nfc.graphemes(true)
+        .filter(|g| allowed(g))
+        .skip_while(|g| !is_latin_letter(g) && !is_emoji(g))
+        .take(USERNAME_MAX)
+        .collect()
 }
 
 /// What a username is compared by (spec 3.3): upper case, NFKD, without nonspacing marks, emoji variation selectors

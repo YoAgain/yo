@@ -1193,7 +1193,8 @@ async fn admin_reserved(
     state["name_min"] = serde_json::json!(hub.config.name_min);
     state["name_max"] = serde_json::json!(yo_wire::handle::USERNAME_MAX);
     state["name_comparison"] = serde_json::json!("skeleton");
-    state["name_form"] = serde_json::json!("NFC Latin letters, digits, underscore or emoji; starts with a letter or emoji");
+    state["name_form"] =
+        serde_json::json!("NFC Latin letters, digits, underscore or emoji; starts with a letter or emoji");
     Ok(axum::Json(state))
 }
 
@@ -1582,7 +1583,11 @@ mod tests {
             ] {
                 for token in ["", "wrong", "test-token"] {
                     let request = Request::builder()
-                        .method(method).uri(path).header("yo-admin-token", token).body(Body::from(body)).unwrap();
+                        .method(method)
+                        .uri(path)
+                        .header("yo-admin-token", token)
+                        .body(Body::from(body))
+                        .unwrap();
                     let response = hub.router().oneshot(request).await.unwrap();
                     assert_eq!(
                         response.status(),
@@ -1609,10 +1614,7 @@ mod tests {
                 }
             }
             if enabled {
-                assert_eq!(
-                    hub.db.reserved_state().unwrap(),
-                    serde_json::json!({"enabled":true,"names":["Support"]}),
-                );
+                assert_eq!(hub.db.reserved_state().unwrap(), serde_json::json!({"enabled":true,"names":["Support"]}),);
             }
         }
     }

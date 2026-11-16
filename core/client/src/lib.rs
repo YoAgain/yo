@@ -4,8 +4,8 @@
 //! sessions to the outbox, is here. Every operation either completes or leaves the state as it was, except what the
 //! hub has already accepted, which is kept.
 
-pub mod cost;
 pub mod backup;
+pub mod cost;
 pub mod error;
 pub mod groups;
 pub mod identity;
@@ -370,11 +370,12 @@ fn is_key(item: &state::Outgoing) -> bool {
 
 /// Sync copies and protocol traffic must never trigger a visible push.
 fn urgent(plain: &[u8], control_or_own: bool) -> bool {
-    !control_or_own && decode::<yo_wire::envelope::Plain>(plain)
-        .ok()
-        .filter(|plain| plain.to.is_none())
-        .and_then(|plain| Message::decode(plain.content.as_slice()).ok())
-        .is_some_and(|m| shown(&m.content) && !matches!(m.content, Content::Group(_)))
+    !control_or_own
+        && decode::<yo_wire::envelope::Plain>(plain)
+            .ok()
+            .filter(|plain| plain.to.is_none())
+            .and_then(|plain| Message::decode(plain.content.as_slice()).ok())
+            .is_some_and(|m| shown(&m.content) && !matches!(m.content, Content::Group(_)))
 }
 
 /// What a `429` holds back (spec 6.6), by the limit the hub names in its body.
@@ -4010,13 +4011,17 @@ mod handle_tests {
         let tag = GroupTag { key: [1; 32], revision: 1 };
         let media = Media { id: [1; 16], key: [2; 32], sha256: [3; 32], size: 32, width: 1, height: 1 };
         let cases = vec![
-            (Content::Yo, true), (Content::Photo(media.clone()), true),
+            (Content::Yo, true),
+            (Content::Photo(media.clone()), true),
             (Content::Video { media, duration_ms: 100 }, true),
-            (Content::Text("test".into()), true), (Content::Link("https://example.com".into()), true),
+            (Content::Text("test".into()), true),
+            (Content::Link("https://example.com".into()), true),
             (Content::Location { lat_e7: 0, lon_e7: 0 }, true),
-            (Content::Receipt, false), (Content::ProfileKey([4; 32]), false),
+            (Content::Receipt, false),
+            (Content::ProfileKey([4; 32]), false),
             (Content::Profile { name: "TEST".into() }, false),
-            (Content::Group(tag), false), (Content::Unknown(999), false),
+            (Content::Group(tag), false),
+            (Content::Unknown(999), false),
         ];
         for (content, expected) in cases {
             for group in [None, Some(tag)] {

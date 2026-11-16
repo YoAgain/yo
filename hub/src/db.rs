@@ -532,7 +532,8 @@ fn is_reserved(tx: &Transaction<'_>, skeleton: &[u8]) -> rusqlite::Result<bool> 
     tx.prepare_cached(
         "SELECT 1 FROM reserved WHERE skeleton = CAST(?1 AS TEXT)
          AND (SELECT value FROM settings WHERE key='reserved_enabled') = 1",
-    )?.exists([skeleton])
+    )?
+    .exists([skeleton])
 }
 
 /// The profile keys of before requests were signed (spec 4.10): the check before a change and the count per
@@ -656,7 +657,8 @@ impl Db {
     /// Stored names and the independent enforcement switch for the admin API.
     pub fn reserved_state(&self) -> rusqlite::Result<serde_json::Value> {
         let conn = self.conn();
-        let enabled: bool = conn.query_row("SELECT value FROM settings WHERE key='reserved_enabled'", [], |r| r.get(0))?;
+        let enabled: bool =
+            conn.query_row("SELECT value FROM settings WHERE key='reserved_enabled'", [], |r| r.get(0))?;
         let mut stmt = conn.prepare("SELECT spelling FROM reserved ORDER BY skeleton")?;
         let names = stmt.query_map([], |r| r.get::<_, String>(0))?.collect::<rusqlite::Result<Vec<_>>>()?;
         Ok(serde_json::json!({"enabled": enabled, "names": names}))

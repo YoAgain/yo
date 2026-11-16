@@ -170,7 +170,9 @@ fn main() {
         let wall = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_secs_f64() * 1000.0;
         let result = send(&mut client, yo_core::Content::Yo);
         println!("yo {i} at {wall:.3} took {:.1} ms {}", at.elapsed().as_secs_f64() * 1000.0, result.is_ok());
-        if let Err(e) = &result { eprintln!("yo {i}: {e:?}"); }
+        if let Err(e) = &result {
+            eprintln!("yo {i}: {e:?}");
+        }
         let next = start + Duration::from_millis(every_ms * u64::from(i + 1));
         std::thread::sleep(next.saturating_duration_since(Instant::now()));
     }
