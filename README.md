@@ -1,11 +1,34 @@
-<p align="center">
-  <img src="docs/banner.png" alt="Yo. It's that simple. 1. Pick a username. 2. Tap to send Yo." width="760">
-</p>
-
 <p align="center">The 2014 one-tap app, back. Tap a friend's name or a group to send an end-to-end encrypted Yo.<br>
 Send photos and videos to view once.</p>
 
 <p align="center"><a href="https://justyo.co"><b>justyo.co</b></a> · <a href="https://testflight.apple.com/join/V3wa1DeX">TestFlight</a></p>
+
+<p align="center">
+  <img src="docs/banner.png" alt="Yo app icon: It's that simple. 1. Pick a username. 2. Tap to send Yo." width="760">
+</p>
+
+## Apps
+
+- **iOS:** [SwiftUI, iOS 26, Swift 6](app/ios/README.md), available on [TestFlight](https://testflight.apple.com/join/V3wa1DeX).
+- **Android:** Kotlin, Jetpack Compose and Material 3; in progress.
+- **Account:** sign up with a name only, no phone number or email; protected by Keychain sync, a passkey (PRF) or a 64-character recovery key.
+- **[YoGPT](app/yogpt):** a Rust client that answers Yos and can reply with pictures.
+
+<details>
+<summary>App details, Linux builds and shared core</summary>
+
+The iOS app uses system navigation and controls, with Flat UI rows, Montserrat Bold and Amethyst (#9B59B6).
+It includes camera capture, a share extension and notification replies.
+Build on Linux with [xtool](https://github.com/xtool-org/xtool); install wirelessly with
+`app/ios/dev/push.sh`. See the [build instructions](app/ios/README.md#build-and-run) and [device checks](app/ios/TESTING.md).
+
+Android is being built on the [`android` branch](https://github.com/YoAgain/yo/tree/android), using the same core through UniFFI.
+
+[core/client](core/client) handles identities, sessions, groups, media, recovery and the outbox in Rust.
+[core/wire](core/wire) defines protocol formats. [core/bindings](core/bindings) exposes the client to Swift and Kotlin
+through UniFFI; apps supply HTTP and storage.
+
+</details>
 
 ## Encryption
 
@@ -34,29 +57,6 @@ and [threat model](hub/SECURITY.md). Only you and your recipients can read your 
 Groups use zkgroup, with up to 20 members; group names and membership are encrypted too.
 Photos and videos are view-once: the app deletes them and their keys after viewing.
 The server deletes the encrypted file after its last allowed fetch.
-
-</details>
-
-## Apps
-
-- **iOS:** [SwiftUI, iOS 26, Swift 6](app/ios/README.md), available on [TestFlight](https://testflight.apple.com/join/V3wa1DeX).
-- **Android:** Kotlin, Jetpack Compose and Material 3; in progress.
-- **Account:** sign up with a name only, no phone number or email; protected by Keychain sync, a passkey (PRF) or a 64-character recovery key.
-- **[YoGPT](app/yogpt):** a Rust client that answers Yos and can reply with pictures.
-
-<details>
-<summary>App details, Linux builds and shared core</summary>
-
-The iOS app uses system navigation and controls, with Flat UI rows, Montserrat Bold and Amethyst (#9B59B6).
-It includes camera capture, a share extension and notification replies.
-Build on Linux with [xtool](https://github.com/xtool-org/xtool); install wirelessly with
-`app/ios/dev/push.sh`. See the [build instructions](app/ios/README.md#build-and-run) and [device checks](app/ios/TESTING.md).
-
-Android is being built on the [`android` branch](https://github.com/YoAgain/yo/tree/android), using the same core through UniFFI.
-
-[core/client](core/client) handles identities, sessions, groups, media, recovery and the outbox in Rust.
-[core/wire](core/wire) defines protocol formats. [core/bindings](core/bindings) exposes the client to Swift and Kotlin
-through UniFFI; apps supply HTTP and storage.
 
 </details>
 
