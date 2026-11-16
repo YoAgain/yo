@@ -1,27 +1,29 @@
 <p align="center">
   <img src="app/ios/YoApp/AppIcon.png" alt="Yo app icon" width="112">
 </p>
-<h1 align="center">Yo</h1>
-<p align="center"><b>It's that simple.</b></p>
+<h1 align="center">Yo · It's that simple.</h1>
 
 <p align="center">The 2014 one-tap app, back. Tap a friend's name or a group to send an end-to-end encrypted Yo.<br>
-Send photos and videos to view once, or add YoGPT for a Yo back.</p>
+Send photos and videos to view once.</p>
 
 <p align="center"><a href="https://justyo.co"><b>justyo.co</b></a> · <a href="https://testflight.apple.com/join/V3wa1DeX">TestFlight</a></p>
-<p align="center">iOS now. App Store soon. Android in progress.</p>
 
 ## How to use
 
-Pick a name, add a friend, tap their row. Share your invite link or QR code.
-In camera mode, tap for a photo or hold for a video. Add **YoGPT** if you want a Yo back.
-Accept requests, block or report someone, or delete your account in the app.
+- Pick a name, add a friend, tap their row.
+- Share your invite link or QR code.
+- In camera mode, tap for a photo or hold for a video.
+- Add **YoGPT** if you want a Yo back.
+- Accept requests, block or report someone, or delete your account in the app.
 
 ## Encryption
 
 ```text
- Phone A ──► Signal protocol ──► sealed sender ──► Hub           ──► push       ──► Phone B
-             PQXDH + Double      sender hidden     sees only the     no content     fetches and
-             Ratchet (SPQR)                        recipient                        decrypts
+  Phone A                          Hub                              Phone B
+  ───────                          ───                              ───────
+  encrypts with the Signal    ──►  stores a sealed envelope,   ──►  fetches it
+  protocol (PQXDH + Double         sees only the recipient,         and decrypts
+  Ratchet), hides the sender       sends a push with no content
 ```
 
 Sign up with a name only: no phone number or email. Come back with a passkey (PRF) or a
