@@ -80,21 +80,21 @@ Measured on one CPU core with the database on an SSD. See the [yo-load measureme
 
 ## Development
 
+<details>
+<summary>Lines of code, tests, fuzzing, repository layout and contributing</summary>
+
 <!-- loc -->
 ```text
 2026-11-11    6,326  ████▍                             Rust 6.3k
 2026-11-12    9,076  ██████▎                           Rust 7.4k · Swift 1.5k · Other 0.2k
-2026-11-13   20,585  ██████████████                    Rust 13.4k · Swift 6.8k · Other 0.4k
+2026-11-13   20,585  ██████████████▏                   Rust 13.4k · Swift 6.8k · Other 0.4k
 2026-11-14   32,976  ██████████████████████▌           Rust 22.2k · Swift 10.0k · Other 0.8k
-2026-11-15   46,740  ███████████████████████████████▉  Rust 33.6k · Swift 12.2k · Other 0.9k
-2026-11-16   46,847  ████████████████████████████████  Rust 33.6k · Swift 12.2k · Other 1.1k
+2026-11-15   46,740  ████████████████████████████████  Rust 33.6k · Swift 12.2k · Other 0.9k
+2026-11-16   46,823  ████████████████████████████████  Rust 33.6k · Swift 12.2k · Other 1.0k
 ```
 <!-- /loc -->
 
-<details>
-<summary>Tests, fuzzing, repository layout and contributing</summary>
-
-The chart above counts lines of code on `main` per day, blanks, comments and tests included; `python3 -I dev/loc-chart.py` updates it.
+The chart counts lines of code on `main` per day, blanks, comments and tests included; `python3 -I dev/loc-chart.py` updates it.
 
 [Tests](tests/README.md) cover real clients and the hub, groups, media, recovery, security and deterministic simulations.
 [Chaos tests](tests/CHAOS.md) exercise faults, crashes and restarts; [fuzz targets](fuzz/fuzz_targets) cover parsers,
