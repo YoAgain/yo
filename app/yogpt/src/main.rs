@@ -2,11 +2,18 @@
 //! several hubs, each on its own.
 //!
 //!   yo-gpt [--replies DIR] --account NAME=HUB,DIR[,USERNAME] [--hub-key NAME=KEY] [--trust-root NAME=KEY]
-//!          [--zk-params NAME=PARAMS] [--account …] [--echo NAME]
+//!          [--zk-params NAME=PARAMS] [--account …] [--echo NAME] [--quiet-for USERNAME[,USERNAME…]]
 //!   yo-gpt --replies app/yogpt/replies --account dev=https://dev.justyo.app,state/dev,YoGPT
 //!
 //! `--echo NAME` reserves that account for immediate, single plain-Yo answers with aggregate-only logs;
 //! see README.md for PING deployment and limits. Normal accounts keep the behavior below.
+//!
+//! `--quiet-for USERNAME[,USERNAME…]` (given once or more, any case): Yos, photos and videos from these users are never
+//! answered, one to one or in a group (by the group message's sender), so bot accounts in one group never answer each
+//! other. Each account looks the names up once at start (a name not found yet is tried again every minute) and
+//! compares user ids; its own name is left out. Only how many were passed over is logged. Independently, an account
+//! answers into one group at most once per `GROUP_COOLDOWN` (30 s): group Yos within that window are dropped, counted
+//! in the log only.
 //!
 //! Pictures: with `--replies`, a photo or video sent to it is answered with one picture from DIR (files named like
 //! `007.jpg`, read as they are there at the time, at most 512 KB each), always; a plain Yo gets Yos only, unless
@@ -79,6 +86,10 @@ const RECENT_PICTURES: usize = 50;
 const MAX_REMEMBERED: usize = 1000;
 /// Blobs of photos and videos sent to it, waiting to be fetched into nothing.
 const MAX_DRAINING: usize = 64;
+/// One answer into a group at most this often, per account: what comes within is dropped (no loop between bots).
+const GROUP_COOLDOWN: Duration = Duration::from_secs(30);
+/// Names of `--quiet-for` not found on the hub are looked up again this often.
+const QUIET_RETRY: Duration = Duration::from_secs(60);
 
 /// Its `Yo-App`: "yogpt/" and the build's UTC minute (YYYYMMDDHHMM, set by yo-hub's deploy as `YO_BUILD`).
 const BUILD: &str = match option_env!("YO_BUILD") {
@@ -190,6 +201,14 @@ fn think_ms() -> (u64, u64) {
         .unwrap_or(THINK_MS)
 }
 
+/// `GROUP_COOLDOWN`, or `YO_GPT_GROUP_COOLDOWN_MS` (tests).
+fn group_cooldown() -> Duration {
+    std::env::var("YO_GPT_GROUP_COOLDOWN_MS")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .map_or(GROUP_COOLDOWN, Duration::from_millis)
+}
+
 fn ms((low, high): (u64, u64)) -> Duration {
     Duration::from_millis(uniform(low, high))
 }
@@ -221,6 +240,8 @@ struct Options {
     yo: Option<(String, u32)>,
     /// With `yo`: each Yo carries this JPEG (at most 1600 px a side), as a reply picture.
     photo: Option<PathBuf>,
+    /// `--quiet-for`: usernames whose Yos are never answered (upper case).
+    quiet_for: Vec<String>,
 }
 
 /// Whether a roll (uniform in `0..every`) gives a picture: one in `every`, none for 0.
@@ -395,7 +416,8 @@ fn args() -> Result<(Vec<Account>, Options), String> {
     let mut accounts: Vec<Account> = Vec::new();
     let mut echoes = Vec::new();
     let (mut hub_keys, mut trust_roots, mut zk_params) = (Vec::new(), Vec::new(), Vec::new());
-    let mut options = Options { replies: None, picture_every: PICTURE_EVERY, yo: None, photo: None };
+    let mut options =
+        Options { replies: None, picture_every: PICTURE_EVERY, yo: None, photo: None, quiet_for: Vec::new() };
     let mut it = std::env::args().skip(1);
     while let Some(flag) = it.next() {
         let value = it.next().ok_or(format!("{flag}: a value"))?;
@@ -412,6 +434,10 @@ fn args() -> Result<(Vec<Account>, Options), String> {
                 zk_params.push((name.to_owned(), params));
             }
             "--photo" => options.photo = Some(value.into()),
+            "--quiet-for" => {
+                let names = value.split(',').map(str::trim).filter(|n| !n.is_empty());
+                options.quiet_for.extend(names.map(|n| n.trim_start_matches('@').to_uppercase()));
+            }
             "--yo" => {
                 let (to, n) = value.split_once('=').ok_or("--yo NAME=COUNT")?;
                 options.yo = Some((to.into(), n.parse().map_err(|_| "--yo NAME=COUNT: a number")?));
@@ -458,8 +484,32 @@ struct Bot {
     pending: Mutex<HashMap<String, VecDeque<(bool, u64)>>>,
     /// The pictures each sender got last, not sent to them again soon.
     recent: Mutex<Recent>,
-    dropped: AtomicU64,
-    dropped_logged_s: AtomicU64,
+    /// `--quiet-for` users found (user ids), and the names not found yet.
+    quiet: Mutex<std::collections::HashSet<String>>,
+    quiet_unresolved: Mutex<Vec<String>>,
+    dropped: Tally,
+    /// Yos from `--quiet-for` users passed over.
+    quieted: Tally,
+    /// Group Yos dropped within `GROUP_COOLDOWN`.
+    cooled: Tally,
+}
+
+/// A count logged at most once a minute.
+#[derive(Default)]
+struct Tally {
+    n: AtomicU64,
+    logged_s: AtomicU64,
+}
+
+impl Tally {
+    /// Counts one; the count so far when it is time to log it.
+    fn add(&self) -> Option<u64> {
+        let n = self.n.fetch_add(1, Ordering::Relaxed) + 1;
+        let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs());
+        let last = self.logged_s.load(Ordering::Relaxed);
+        (now >= last + 60 && self.logged_s.compare_exchange(last, now, Ordering::Relaxed, Ordering::Relaxed).is_ok())
+            .then_some(n)
+    }
 }
 
 impl Bot {
@@ -483,14 +533,55 @@ impl Bot {
 
     /// Something dropped for want of room; logged at most once a minute.
     fn dropped(&self) {
-        let n = self.dropped.fetch_add(1, Ordering::Relaxed) + 1;
-        let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs());
-        let last = self.dropped_logged_s.load(Ordering::Relaxed);
-        if now >= last + 60
-            && self.dropped_logged_s.compare_exchange(last, now, Ordering::Relaxed, Ordering::Relaxed).is_ok()
-        {
+        if let Some(n) = self.dropped.add() {
             self.log(format!("{n} dropped so far (too much at once)"));
         }
+    }
+
+    /// Whether `user` is one of `--quiet-for`.
+    fn is_quiet(&self, user: &str) -> bool {
+        self.quiet.lock().unwrap_or_else(PoisonError::into_inner).contains(user)
+    }
+
+    /// A Yo from a `--quiet-for` user passed over; logged as a count only.
+    fn quieted(&self) {
+        if let Some(n) = self.quieted.add() {
+            self.log(format!("{n} from --quiet-for users not answered so far"));
+        }
+    }
+
+    /// A group Yo within the group's cooldown dropped; logged as a count only.
+    fn cooled(&self) {
+        if let Some(n) = self.cooled.add() {
+            self.log(format!(
+                "{n} group Yos dropped so far (one answer per group per {} s)",
+                group_cooldown().as_secs()
+            ));
+        }
+    }
+
+    /// Looks up the `--quiet-for` names not found yet (its own name is left out); those the hub does not know or
+    /// cannot tell now are tried again later.
+    fn resolve_quiet(&self) {
+        let names = std::mem::take(&mut *self.quiet_unresolved.lock().unwrap_or_else(PoisonError::into_inner));
+        let mut left = Vec::new();
+        for name in names {
+            // Signed under the client, asked without it.
+            let begun = self.client().whois_begin(&name);
+            match begun.and_then(|whois| whois.send()) {
+                Ok((user, _)) => {
+                    self.quiet.lock().unwrap_or_else(PoisonError::into_inner).insert(user);
+                }
+                Err(Error::Protocol("oneself")) => {}
+                Err(error) if gone(&error) => return self.stop(GONE),
+                Err(error) if retryable(&error) || matches!(error, Error::NotOnYo) => {
+                    self.log(format!("--quiet-for {name}: {}, again later", reason(&error)));
+                    left.push(name);
+                }
+                Err(error) => self.log(format!("--quiet-for {name}: {}", reason(&error))),
+            }
+        }
+        *self.quiet_unresolved.lock().unwrap_or_else(PoisonError::into_inner) = left;
     }
 
     /// Queues an event for the dispatcher, or drops it when the queue is full; never blocks. Only Yos, photos and
@@ -500,6 +591,15 @@ impl Bot {
         // the group has its own turn and limits, as a sender has. Its own (from another device) and changes are not.
         if self.echo && matches!(event, Event::GroupMessage { .. }) {
             return;
+        }
+        // Nothing from a `--quiet-for` user, one to one or in a group (its sender); a photo's blob is still drained.
+        if let Event::Message { user, content, .. } | Event::GroupMessage { user, content, .. } = &event {
+            if matches!(content, Content::Yo | Content::Photo(_) | Content::Video { .. }) && self.is_quiet(user) {
+                if let (Content::Photo(media) | Content::Video { media, .. }, false) = (content, self.echo) {
+                    self.drain(media);
+                }
+                return self.quieted();
+            }
         }
         let event = match event {
             Event::GroupMessage { group, sent_at_ms, content, .. } => {
@@ -827,8 +927,11 @@ fn serve_once(account: &Account, options: &Options) -> bool {
         stopped: AtomicBool::new(false),
         pending: Mutex::default(),
         recent: Mutex::default(),
-        dropped: AtomicU64::new(0),
-        dropped_logged_s: AtomicU64::new(0),
+        quiet: Mutex::default(),
+        quiet_unresolved: Mutex::new(options.quiet_for.clone()),
+        dropped: Tally::default(),
+        quieted: Tally::default(),
+        cooled: Tally::default(),
     });
     let started = if account.echo {
         "echo ready".to_owned()
@@ -881,7 +984,10 @@ fn dispatch<'scope>(
     received: &std::sync::mpsc::Receiver<Event>,
     restart: &Arc<AtomicBool>,
 ) {
-    // Every Yo gets its answer: one sender's in turn, on one thread; senders side by side.
+    // Every Yo gets its answer: one sender's in turn, on one thread; senders side by side. A group, one at most per
+    // cooldown.
+    let mut cooldown = GroupCooldown::default();
+    let window = group_cooldown();
     while bot.running() {
         let event = match received.recv_timeout(Duration::from_secs(1)) {
             Ok(event) => event,
@@ -893,6 +999,10 @@ fn dispatch<'scope>(
             Event::Message { user, sent_at_ms, content: Content::Photo(_) } => (user, true, sent_at_ms),
             _ => continue,
         };
+        if user.starts_with(GROUP) && !cooldown.allow(&user, Instant::now(), window) {
+            bot.cooled();
+            continue;
+        }
         {
             let mut pending = bot.pending.lock().unwrap_or_else(PoisonError::into_inner);
             if let Some(owed) = pending.get_mut(&user) {
@@ -921,6 +1031,22 @@ fn dispatch<'scope>(
             bot.log(format!("cannot start answer worker: {error}"));
             bot.dropped();
         }
+    }
+}
+
+/// When each group was last answered, for the groups answered within the window.
+#[derive(Default)]
+struct GroupCooldown(HashMap<String, Instant>);
+
+impl GroupCooldown {
+    /// Whether `group` may be answered now: not answered within `window`. Counts as answered when it may.
+    fn allow(&mut self, group: &str, now: Instant, window: Duration) -> bool {
+        self.0.retain(|_, at| now.duration_since(*at) < window);
+        if self.0.contains_key(group) {
+            return false;
+        }
+        self.0.insert(group.to_owned(), now);
+        true
     }
 }
 
@@ -963,7 +1089,13 @@ fn receive(bot: &Bot, events: &SyncSender<Event>) {
     let mut maintained = Instant::now();
     let mut limits = EchoLimits::default();
     let mut answered = 0u64;
+    let mut quiet_tried: Option<Instant> = None;
     while bot.running() {
+        let unresolved = !bot.quiet_unresolved.lock().unwrap_or_else(PoisonError::into_inner).is_empty();
+        if unresolved && quiet_tried.is_none_or(|at| at.elapsed() >= QUIET_RETRY) {
+            quiet_tried = Some(Instant::now());
+            bot.resolve_quiet();
+        }
         let result = if maintained.elapsed() >= MAINTENANCE {
             maintained = Instant::now();
             bot.client().maintenance()
@@ -996,6 +1128,10 @@ fn receive(bot: &Bot, events: &SyncSender<Event>) {
                     }
                     for event in received {
                         let Event::Message { user, content: Content::Yo, .. } = event else { continue };
+                        if bot.is_quiet(&user) {
+                            bot.quieted();
+                            continue;
+                        }
                         if !limits.allow(&user, Instant::now()) {
                             bot.dropped();
                             continue;
@@ -1161,15 +1297,18 @@ mod tests {
             let (draining, _drain) = sync_channel(MAX_DRAINING);
             let bot = Bot {
                 name: account.name.clone(),
-                options: Options { replies: None, picture_every: 0, yo: None, photo: None },
+                options: Options { replies: None, picture_every: 0, yo: None, photo: None, quiet_for: vec![] },
                 echo: false,
                 draining,
                 client: Mutex::new(client),
                 stopped: AtomicBool::new(false),
                 pending: Mutex::default(),
                 recent: Mutex::default(),
-                dropped: AtomicU64::new(0),
-                dropped_logged_s: AtomicU64::new(0),
+                quiet: Mutex::default(),
+                quiet_unresolved: Mutex::default(),
+                dropped: Tally::default(),
+                quieted: Tally::default(),
+                cooled: Tally::default(),
             };
             let restart = AtomicBool::new(false);
             worker(&bot, "answer", &restart, true, || {});
@@ -1323,6 +1462,22 @@ mod tests {
         let last = recent.of(&format!("user{}", MAX_REMEMBERED + 9)).unwrap();
         assert_eq!(last.len(), RECENT_PICTURES);
         assert_eq!(last.front().map(String::as_str), Some("005.jpg"));
+    }
+}
+
+#[cfg(test)]
+mod cooldown_tests {
+    use super::*;
+    #[test]
+    fn a_group_is_answered_once_per_window() {
+        let mut cooldown = GroupCooldown::default();
+        let (now, window) = (Instant::now(), Duration::from_secs(30));
+        assert!(cooldown.allow("group:a", now, window));
+        assert!(!cooldown.allow("group:a", now + Duration::from_secs(29), window));
+        assert!(cooldown.allow("group:b", now + Duration::from_secs(1), window), "another group is not held back");
+        assert!(cooldown.allow("group:a", now + window, window));
+        assert!(!cooldown.allow("group:a", now + window + Duration::from_secs(1), window));
+        assert_eq!(cooldown.0.len(), 1, "only groups within the window are kept");
     }
 }
 

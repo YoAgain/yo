@@ -16,8 +16,12 @@ impl Bot {
     }
 
     fn start_with(accounts: &[(&TestHub, &Path)], args: &[&str]) -> Bot {
+        Self::start_env(accounts, args, &[])
+    }
+
+    fn start_env(accounts: &[(&TestHub, &Path)], args: &[&str], env: &[(&str, &str)]) -> Bot {
         let mut command = Command::new(env!("CARGO_BIN_EXE_yo-gpt"));
-        command.args(args);
+        command.args(args).envs(env.iter().copied());
         for (i, (hub, state)) in accounts.iter().enumerate() {
             command.arg("--account").arg(format!("hub{i}={},{}", hub.url(), state.display()));
             command.arg("--trust-root").arg(format!("hub{i}={}", yo_wire::b64(&yo_tests::trust_root())));
@@ -361,7 +365,9 @@ fn yogpt_answers_in_a_group() {
     let (state, replies) = (state_dir(), state_dir());
     std::fs::create_dir_all(&replies).unwrap();
     std::fs::write(replies.join("001.jpg"), reply_picture()).unwrap();
-    let _bot = Bot::start_with(&[(&hub, &state)], &["--replies", replies.to_str().unwrap()]);
+    // The group cooldown (30 s) short here: a Yo, then a photo a few seconds later, both answered.
+    let env = [("YO_GPT_GROUP_COOLDOWN_MS", "1000")];
+    let _bot = Bot::start_env(&[(&hub, &state)], &["--replies", replies.to_str().unwrap()], &env);
     let (mut alice, bob) = (someone(&hub), someone(&hub));
     let yogpt = round_trip(&mut alice).remove(0);
     let (group, _) = alice.create_group("Trio", &[yogpt.clone(), bob.user_id().to_string()]).unwrap();
@@ -378,6 +384,37 @@ fn yogpt_answers_in_a_group() {
     assert_eq!((yos, photos), (0, 1), "a picture into the group");
     let _ = std::fs::remove_dir_all(&state);
     let _ = std::fs::remove_dir_all(&replies);
+}
+
+/// `--quiet-for`: a listed user (named in another case) gets nothing back, one to one or in a group, while another
+/// does; and a group is answered once per cooldown, the Yos within it dropped.
+#[test]
+fn yogpt_stays_quiet_for_listed_users_and_answers_a_group_once_per_cooldown() {
+    let hub = TestHub::start();
+    let state = state_dir();
+    let (mut leo, mut mia) = (someone(&hub), someone(&hub));
+    let quiet = format!("{},nobody{}", leo.username().unwrap().to_lowercase(), random_u64() % 1000);
+    let _bot = Bot::start_with(&[(&hub, &state)], &["--quiet-for", &quiet]);
+    let yogpt = round_trip(&mut mia).remove(0);
+
+    leo.send_yo("YOGPT").unwrap();
+    assert!(yos_until_quiet(&mut leo, Duration::from_secs(7)).is_empty(), "a quiet-for sender was answered");
+
+    let (group, _) = mia.create_group("Bots", &[yogpt.clone(), leo.user_id().to_string()]).unwrap();
+    let _ = leo.sync(0).unwrap();
+    leo.acknowledge_events();
+    leo.send_group(&group, Content::Yo).unwrap();
+    let (yos, _) = group_answers(&mut mia, &group, &yogpt, Duration::from_secs(7));
+    assert_eq!(yos, 0, "answered a quiet-for sender in the group");
+
+    // Mia is answered in the group; a second Yo of hers within 30 s is not.
+    mia.send_group(&group, Content::Yo).unwrap();
+    let (yos, _) = group_answers(&mut mia, &group, &yogpt, Duration::from_secs(7));
+    assert!((1..=5).contains(&yos), "{yos} Yos into the group");
+    mia.send_group(&group, Content::Yo).unwrap();
+    let (yos, _) = group_answers(&mut mia, &group, &yogpt, Duration::from_secs(7));
+    assert_eq!(yos, 0, "answered the group again within its cooldown");
+    let _ = std::fs::remove_dir_all(&state);
 }
 
 #[test]

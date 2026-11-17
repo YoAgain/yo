@@ -9,6 +9,17 @@ answer/drop counts are logged. Media is dropped unanswered without fetching or d
 never becomes instructions. The bounded, volatile per-sender token buckets allow 1/s, burst 3; idle buckets
 expire after three seconds. The normal encrypted protocol sessions and delivery/replay state still persist.
 
+## Bot accounts together (`--quiet-for`, group cooldown)
+
+`--quiet-for USERNAME[,USERNAME…]` (repeatable, any case) never answers Yos, photos or videos from these users,
+one to one or in a group (by the group message's sender). Use it when several bot accounts share a hub and may
+share a group, so they never answer each other, for example
+`--account leo=…,Leo --account mia=…,Mia --quiet-for leo,mia,…` (its own name is skipped). Each account looks
+the names up at start; a name not found is retried every minute. Only aggregate counts are logged.
+
+Independently, every account answers into one group at most once per 30 s; group Yos within that window are
+dropped and only counted in the log. One-to-one answers are unchanged.
+
 ## Owner deployment (not performed by this change)
 
 Build the binary from this checkout: `cargo build --release --locked -p yo-gpt`.
