@@ -38,7 +38,57 @@ class FeedbackTests(unittest.TestCase):
                 self.assertEqual(kinds[1], "feedback")
                 self.assertEqual(kinds[2], "feedback" if 'type' in columns else "todo")
                 if 'auto' in columns:
-                    self.assertEqual(kinds[3], "feedback" if 'type' in columns else "crash")
+                    if 'type' in columns:
+                        self.assertEqual(kinds[3], "feedback")
+                    else:
+                        self.assertNotIn(3, kinds)
+
+    def test_diagnostics_collector_and_done_proxy(self):
+        users = load("users")
+        with tempfile.TemporaryDirectory() as directory:
+            path = str(Path(directory) / "hub.sqlite")
+            with sqlite3.connect(path) as db:
+                db.execute("CREATE TABLE diagnostics(id INTEGER, kind TEXT, count INTEGER, first_seen INTEGER, last_seen INTEGER, app TEXT, os TEXT, model TEXT, payload TEXT, done INTEGER)")
+                db.execute("INSERT INTO diagnostics VALUES(7,'error',20,1,3,'ios/1','26','iPhone','{}',1)")
+                db.execute("INSERT INTO diagnostics VALUES(8,'crash',2,2,4,'ios/1','26','iPhone','{}',0)")
+                db.execute("CREATE TABLE diagnostic_days(day INTEGER,kind TEXT,count INTEGER)")
+                db.execute("INSERT INTO diagnostic_days VALUES(20000,'crash',2),(20000,'error',20)")
+            snapshot = users.hub("live", path)
+            self.assertEqual(snapshot["diagnostics_open"], 1)
+            self.assertEqual(snapshot["diagnostic_days"], [{"day":20000,"kind":"crash","count":2},{"day":20000,"kind":"error","count":20}])
+            rows = snapshot["diagnostics"]
+            self.assertEqual(rows[1]["count"], 20)
+            self.assertEqual(rows[1]["done"], 1)
+        with patch.dict(os.environ, {"ADMIN_USER":"test", "ADMIN_PASSWORD_HASH":"unused", "ADMIN_SESSION_KEY":"00",
+                "ACCESS_TEAM":"invalid", "ACCESS_AUD":"test", "YO_ADMIN_TOKEN":"test-token"}):
+            admin = load("admin")
+        with patch.object(admin.urllib.request, "urlopen", return_value=io.BytesIO(b'[]')) as send:
+            admin.diagnostics_request("dev", {"id":7, "done":True})
+            request = send.call_args.args[0]
+            self.assertTrue(request.full_url.endswith("/v1/admin/diagnostics"))
+            self.assertEqual(request.method, "PUT")
+            self.assertEqual(request.get_header("Yo-admin-token"), "test-token")
+
+    def test_support_unread_days_and_last_line(self):
+        users = load("users")
+        now = users.time.time() * 1000
+        with tempfile.TemporaryDirectory() as directory:
+            path = str(Path(directory) / "hub.sqlite")
+            with sqlite3.connect(path) as db:
+                db.execute("CREATE TABLE support_messages(id INTEGER PRIMARY KEY, user_id BLOB, from_team INTEGER, text TEXT, created_at INTEGER, read_at INTEGER, done_at INTEGER)")
+                day = users.DAY_MS
+                db.executemany("INSERT INTO support_messages VALUES(?,?,?,?,?,?,?)", [
+                    (1, b"\x01" * 16, 0, "old, read yesterday", now - 5 * day, now - day, now - day),
+                    (2, b"\x01" * 16, 1, "team answer", now - day + 1000, None, None),
+                    (3, b"\x02" * 16, 0, "still open", now - 3 * day, now - day, None),
+                    (4, b"", 1, "team task", now - 3 * day, None, None)])
+            snapshot = users.hub("live", path)
+            days = snapshot["support_unread_days"]
+            self.assertEqual(len(days), 14)
+            self.assertEqual(days[-1], 1)
+            self.assertEqual(max(days), 2)
+            self.assertEqual(snapshot["support_last"]["01" * 16], {"text": "team answer", "team": True})
+            self.assertEqual(snapshot["support_last"]["02" * 16]["text"], "still open")
 
     def test_migration_resumes_and_remaps_done(self):
         import json
@@ -70,6 +120,51 @@ class FeedbackTests(unittest.TestCase):
             self.assertEqual(request.data, "fix 🎨".encode())
             self.assertEqual(request.get_header("Yo-admin-token"), "test-token")
 
+    def test_team_todos_snapshot(self):
+        users = load("users")
+        with tempfile.TemporaryDirectory() as directory:
+            path = str(Path(directory) / "hub.sqlite")
+            with sqlite3.connect(path) as db:
+                db.execute("CREATE TABLE support_messages(id INTEGER PRIMARY KEY,text TEXT,created_at INTEGER,done_at INTEGER,user_id BLOB)")
+                db.execute("INSERT INTO support_messages VALUES(3,'task',4,NULL,X''),(4,'done',5,6,X''),(5,'user',6,NULL,X'01')")
+            rows = users.hub("dev", path)["todos"]
+            self.assertEqual(rows, [{"id":3,"text":"task","at":4,"done_at":None},{"id":4,"text":"done","at":5,"done_at":6}])
+
+    def test_support_proxy_plain_text_and_no_content(self):
+        with patch.dict(os.environ, {"ADMIN_USER":"test", "ADMIN_PASSWORD_HASH":"unused",
+                "ADMIN_SESSION_KEY":"00", "ACCESS_TEAM":"invalid", "ACCESS_AUD":"test",
+                "YO_ADMIN_TOKEN":"test-token", "YO_HUB_DEV_URL":"http://localhost:19090"}):
+            admin = load("admin")
+        with patch.object(admin.urllib.request,"urlopen",return_value=io.BytesIO(b"")) as send:
+            self.assertEqual(admin.support_request("dev","messages/" + "a"*32,"reply 🎨"),{})
+            request = send.call_args.args[0]
+            self.assertEqual(request.full_url,"http://localhost:19090/v1/admin/messages/" + "a"*32)
+            self.assertEqual(request.data,"reply 🎨".encode())
+            self.assertEqual(request.get_header("Yo-admin-token"),"test-token")
+
+    def test_done_import_keeps_ids_and_is_repeatable(self):
+        import json
+        migration = load("migrate_support_done")
+        with tempfile.TemporaryDirectory() as directory:
+            path = str(Path(directory) / "hub.sqlite")
+            done = Path(directory) / "done.json"
+            done.write_text(json.dumps(["dev:3","dev:4","live:5","dev:r123"]))
+            with sqlite3.connect(path) as db:
+                db.executescript("CREATE TABLE todos(id INTEGER,text TEXT,done_at INTEGER);"
+                    "CREATE TABLE support_messages(id INTEGER,from_team INTEGER,read_at INTEGER);"
+                    "INSERT INTO todos VALUES(3,'task',NULL),(5,'other hub',NULL);"
+                    "INSERT INTO support_messages VALUES(4,0,NULL),(4,1,NULL);")
+            migration.migrate("dev",path,str(done))
+            with sqlite3.connect(path) as db:
+                first = db.execute("SELECT done_at FROM todos WHERE id=3").fetchone()[0]
+                self.assertIsNotNone(first)
+                self.assertIsNone(db.execute("SELECT done_at FROM todos WHERE id=5").fetchone()[0])
+                self.assertIsNotNone(db.execute("SELECT read_at FROM support_messages WHERE from_team=0").fetchone()[0])
+                self.assertIsNone(db.execute("SELECT read_at FROM support_messages WHERE from_team=1").fetchone()[0])
+            migration.migrate("dev",path,str(done))
+            with sqlite3.connect(path) as db:
+                self.assertEqual(db.execute("SELECT done_at FROM todos WHERE id=3").fetchone()[0],first)
+
 
 class ReservedTests(unittest.TestCase):
     def setUp(self):
@@ -93,6 +188,47 @@ class ReservedTests(unittest.TestCase):
                 self.assertEqual(request.method, method)
                 self.assertEqual(request.get_header("Yo-admin-token"), "test-token")
                 self.assertEqual(None if request.data is None else json.loads(request.data), data)
+
+    def test_support_requires_login_origin_and_valid_input(self):
+        import http.client
+        import json
+        import threading
+        admin = self.admin
+        with patch.object(admin.Admin,"who",return_value="test"), \
+                patch.object(admin,"session_valid",return_value=True) as login, \
+                patch.object(admin,"support_request",return_value={}) as proxy:
+            server = admin.ThreadingHTTPServer(("127.0.0.1",0),admin.Admin)
+            thread = threading.Thread(target=server.serve_forever,daemon=True)
+            thread.start()
+            try:
+                def call(method,path,data=None,origin=None):
+                    conn=http.client.HTTPConnection(*server.server_address)
+                    headers={"Content-Type":"application/json"}
+                    if origin: headers["Origin"]=origin
+                    conn.request(method,path,None if data is None else json.dumps(data),headers)
+                    response=conn.getresponse(); response.read(); conn.close()
+                    return response.status
+                data={"hub":"dev","user":"a"*32,"action":"reply","text":"hello"}
+                self.assertEqual(call("POST","/support",data,"https://invalid.example"),403)
+                login.return_value=False
+                self.assertEqual(call("POST","/support",data),401)
+                self.assertEqual(call("GET","/support.json?hub=dev"),401)
+                login.return_value=True
+                for invalid in [{**data,"hub":"other"},{**data,"user":"../x"},{**data,"text":"x"*2001},{**data,"action":"erase"}]:
+                    self.assertEqual(call("POST","/support",invalid),400)
+                proxy.assert_not_called()
+                self.assertEqual(call("POST","/support",data),200)
+                proxy.assert_called_with("dev","messages/"+"a"*32,"hello")
+                self.assertEqual(call("GET","/support.json?hub=dev&user="+"a"*32),200)
+                proxy.assert_called_with("dev","messages/"+"a"*32)
+                self.assertEqual(call("POST","/support/done",{"hub":"dev","id":3,"done":False}),200)
+                proxy.assert_called_with("dev","messages/done/3","0")
+                self.assertEqual(call("GET","/support.json?hub=dev&user=team"),200)
+                proxy.assert_called_with("dev","messages/team")
+                self.assertEqual(call("POST","/todos/done",{"hub":"dev","id":3,"done":True}),200)
+                proxy.assert_called_with("dev","todos/3","1")
+            finally:
+                server.shutdown(); server.server_close(); thread.join()
 
     def test_writes_require_login_origin_and_valid_hub(self):
         import http.client

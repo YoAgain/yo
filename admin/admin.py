@@ -220,6 +220,17 @@ def done_set(key: str, done: bool) -> None:
         os.replace(tmp, DONE_FILE)
 
 
+def support_request(hub, suffix="", body=None):
+    if not ADMIN_TOKEN:
+        raise ValueError("YO_ADMIN_TOKEN is not configured")
+    request = urllib.request.Request(HUB_URLS[hub].rstrip("/") + "/v1/admin/" + suffix,
+        data=None if body is None else body.encode("utf-8"),
+        headers={"Yo-Admin-Token": ADMIN_TOKEN, "Content-Type": "text/plain; charset=utf-8"})
+    with urllib.request.urlopen(request, timeout=5) as response:
+        payload = response.read()
+        return json.loads(payload) if payload else {}
+
+
 def todo_add(hub: str, text: str) -> dict:
     if not ADMIN_TOKEN:
         raise ValueError("YO_ADMIN_TOKEN is not configured")
@@ -308,6 +319,14 @@ def reserved_request(hub, method="GET", data=None, name=None):
         headers={"Yo-Admin-Token": ADMIN_TOKEN, "Content-Type": "application/json"})
     with urllib.request.urlopen(request, timeout=5) as response:
         return json.load(response) if method != "DELETE" else {}
+
+
+def diagnostics_request(hub, data):
+    request = urllib.request.Request(HUB_URLS[hub].rstrip("/") + "/v1/admin/diagnostics",
+        method="PUT", data=json.dumps(data).encode(),
+        headers={"Yo-Admin-Token": ADMIN_TOKEN, "Content-Type": "application/json"})
+    with urllib.request.urlopen(request, timeout=5) as response:
+        return json.load(response)
 
 
 def reserved_names() -> dict:
@@ -446,6 +465,18 @@ class Admin(BaseHTTPRequestHandler):
             if not logged_in:
                 return self.send(401, b"{}", "application/json")
             return self.send(200, json.dumps(stats()).encode(), "application/json")
+        if path == "/support.json":
+            if not logged_in:
+                return self.send(401, b"{}", "application/json")
+            query = parse_qs(self.path.partition("?")[2])
+            hub, user = query.get("hub", [""])[0], query.get("user", [""])[0]
+            if hub not in ("live", "dev") or (user and user != "team" and not re.fullmatch(r"[0-9a-fA-F]{32}", user)):
+                return self.send(400, b"Bad request", "text/plain")
+            try:
+                result = support_request(hub, "messages" + ("/" + user if user else ""))
+            except (OSError, ValueError):
+                return self.send(502, b"Hub unavailable", "text/plain")
+            return self.send(200, json.dumps(result).encode(), "application/json")
         if path == "/done.json":
             if not logged_in:
                 return self.send(401, b"[]", "application/json")
@@ -502,6 +533,43 @@ class Admin(BaseHTTPRequestHandler):
             except OSError:
                 return self.send(502, b"Hub unavailable or refused change", "text/plain")
             return self.send(200, json.dumps(result).encode(), "application/json")
+        if path in ("/support", "/todos/done", "/support/done"):
+            if not session_valid(self.headers.get("Cookie"), who):
+                return self.send(401, b"", "text/plain")
+            try:
+                length = int(self.headers.get("Content-Length") or 0)
+                if not 0 < length <= 12000:
+                    return self.send(413, b"Too large", "text/plain")
+                data = json.loads(self.rfile.read(length))
+                hub = data["hub"]
+                if hub not in ("live", "dev"):
+                    raise ValueError()
+                if path in ("/todos/done", "/support/done"):
+                    if type(data["id"]) is not int or type(data["done"]) is not bool:
+                        raise ValueError()
+                    suffix, body = ("messages/done/" if path == "/support/done" else "todos/") + str(data["id"]), "1" if data["done"] else "0"
+                else:
+                    user, action = data["user"], data["action"]
+                    if not isinstance(user, str) or not re.fullmatch(r"[0-9a-fA-F]{32}", user):
+                        raise ValueError()
+                    suffix = "messages/" + user
+                    if action == "reply":
+                        body = data["text"]
+                        if not isinstance(body, str) or not body.strip() or len(body.encode()) > 2000:
+                            raise ValueError()
+                    elif action == "handled":
+                        if type(data["through"]) is not int or data["through"] < 0:
+                            raise ValueError()
+                        suffix += "/handled"
+                        body = str(data["through"])
+                    else:
+                        raise ValueError()
+                result = support_request(hub, suffix, body)
+            except (ValueError, KeyError, TypeError):
+                return self.send(400, b"Bad request", "text/plain")
+            except OSError:
+                return self.send(502, b"Hub unavailable or refused change", "text/plain")
+            return self.send(200, json.dumps(result).encode(), "application/json")
         if path == "/todos":
             if not session_valid(self.headers.get("Cookie"), who):
                 return self.send(401, b"", "text/plain")
@@ -519,6 +587,22 @@ class Admin(BaseHTTPRequestHandler):
             except (OSError, ValueError):
                 return self.send(502, b"Hub unavailable or not configured", "text/plain")
             return self.send(201, json.dumps(todo).encode(), "application/json")
+        if path == "/diagnostics/done":
+            if not session_valid(self.headers.get("Cookie"), who):
+                return self.send(401, b"", "text/plain")
+            length = int(self.headers.get("Content-Length") or 0)
+            if length > 256:
+                return self.send(413, b"", "text/plain")
+            try:
+                data = json.loads(self.rfile.read(length))
+                if data["hub"] not in ("live", "dev") or type(data["id"]) is not int or data["id"] <= 0 or type(data["done"]) is not bool:
+                    raise ValueError()
+                diagnostics_request(data["hub"], {"id": data["id"], "done": data["done"]})
+            except (ValueError, KeyError, TypeError):
+                return self.send(400, b"", "text/plain")
+            except OSError:
+                return self.send(502, b"", "text/plain")
+            return self.send(204)
         if path == "/feedback/done":  # a feedback (id=12) or report (id=r<reporter+reported, hex>) marked done or not: hub=live&id=12&done=1
             if not session_valid(self.headers.get("Cookie"), who):
                 return self.send(401, b"", "text/plain")

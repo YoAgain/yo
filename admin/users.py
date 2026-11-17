@@ -171,7 +171,28 @@ def hub(name: str, path: str) -> dict:
         return {
             "users": users,
             "reports": reports,
-            "feedback": feedback,
+            "feedback": [f for f in feedback if f["type"] in ("feedback", "todo")],
+            "todos": part("todos", lambda: [{"id": i, "text": text(t), "at": at, "done_at": done}
+                for i,t,at,done in db.execute("SELECT id,text,created_at,done_at FROM support_messages WHERE user_id=X'' ORDER BY done_at IS NOT NULL,created_at DESC LIMIT ?", (LIMIT,))] if has_table(db,"support_messages") else [], []),
+            "diagnostics_open": part("diagnostics_open", lambda: one("SELECT count(*) FROM diagnostics WHERE done=0") if has_table(db,"diagnostics") else 0),
+            "todos_open": part("todos_open", lambda: one("SELECT count(*) FROM support_messages WHERE user_id=X'' AND done_at IS NULL") if has_table(db,"support_messages") else 0),
+            "diagnostic_days": part("diagnostic_days", lambda: [{"day": day, "kind": kind, "count": count}
+                for day,kind,count in db.execute("SELECT day,kind,count FROM diagnostic_days ORDER BY day")]
+                if has_table(db,"diagnostic_days") else [], []),
+            "diagnostics": part("diagnostics", lambda: [dict(zip(
+                ("id", "kind", "count", "first_seen", "last_seen", "app", "os", "model", "payload", "done"), row))
+                for row in db.execute("SELECT id,kind,count,first_seen,last_seen,app,os,model,payload,done FROM diagnostics ORDER BY last_seen DESC LIMIT ?", (LIMIT,))]
+                if has_table(db, "diagnostics") else [], []),
+            # Support chat: unread user messages at the end of each of the last 14 UTC days (today: now), oldest
+            # first; and each thread's last line, by the user id's hex (upper case, as the hub's thread list has it).
+            "support_unread_days": part("support_unread_days", lambda: [one(
+                "SELECT count(*) FROM support_messages WHERE length(user_id)>0 AND from_team = 0 AND created_at < ? AND (done_at IS NULL OR done_at >= ?)",
+                end, end) for end in (min(now, midnight - (i - 1) * DAY_MS) for i in range(13, -1, -1))]
+                if has_table(db, "support_messages") else [], []),
+            "support_last": part("support_last", lambda: {h: {"text": text(t)[:160], "team": bool(team)}
+                for h, t, team, _ in db.execute(
+                    "SELECT hex(user_id), text, from_team, max(id) FROM support_messages GROUP BY user_id LIMIT ?", (LIMIT,))}
+                if has_table(db, "support_messages") else {}, {}),
             "tables": part("tables", lambda: tables(db), []),
             "total": part("total", lambda: one("SELECT count(*) FROM users")),
             "secured": part("secured", lambda: one("SELECT count(*) FROM backups")),

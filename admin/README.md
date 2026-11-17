@@ -1,9 +1,9 @@
 # Yo admin
 
 Python standard library dashboard for server health, systemd services, hub users and database tables,
-User Reports, feedback and To-Dos, reserved-name management, and YoGPT reply pictures. The collector (`users.py`)
+User Reports, feedback and To-Dos, anonymous crash/error diagnostics with counts and done ticks, reserved-name management, and YoGPT reply pictures. The collector (`users.py`)
 reads SQLite databases read-only and atomically writes a JSON snapshot. To-Dos go through the hub API;
-only done markers are stored locally. `migrate_todos.py` is the one-time legacy JSON migration.
+message completion lives in the hub; user-report done markers are stored locally. `migrate_todos.py` is the one-time legacy JSON migration.
 
 Protection requires Cloudflare Access in front. The server verifies its JWT signature, issuer, audience
 and expiry, then requires its own scrypt login. Sessions last 12 hours, are signed and bound to the
@@ -132,3 +132,17 @@ mode 0700, and allows the web service to write there. The collector output remai
 Keep `ADMIN_REQUEST_FILE` at the installed path (including in admin.env); custom paths need matching
 path-unit, tmpfiles and sandbox settings. For a local sample, set it to `$sample/state/want`;
 without a path unit, run the collector manually after each request to supply fresh data.
+
+
+## Support chat rollout
+
+Back up the hub DB and admin state before rollout. If old dashboard JSON done flags still need
+importing, run `migrate_support_done.py` offline against schema 5 **before** upgrading to schema 6.
+Deploy the hub first, then admin and its collector. No app update is required.
+Startup follows schema 3 → 4 → 5 → 6 (or 4/5 → 6), atomically migrating each step.
+Schema 6 moves `todos` into `support_messages` with `user_id=X''`, `from_team=1`,
+preserving text, creation and done times, and allocating fresh message IDs to avoid collisions.
+It drops `todos` and backfills user-message `done_at` from existing team read markers once.
+The pinned Team To-Dos thread uses `team` in admin URLs. Every bubble can be completed or reopened;
+viewing a thread changes no completion state. Badges and the Overview red curve count open user
+messages only. App unread team replies still use `read_at`. Old JSON flags still serve user reports.
