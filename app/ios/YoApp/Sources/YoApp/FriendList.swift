@@ -2134,7 +2134,7 @@ struct RowButton: View {
   @AppStorage(SettingKey.leftHanded) private var leftHanded = false
   /// A friend's bar: a Yo sent from it flies out of it, up and away.
   var flies = false
-  /// The bar's own name, whatever its words say ("Sent Yo"): where its physics "!"s belong (BangPhysics.swift).
+  /// The bar's own name, whatever its words say ("Sent Yo"): where its physics "!"s start (BangPhysics.swift).
   var barID: String?
   private var physicsBar: String { barID ?? title }
   /// The Yos on their way out of the bar now, each flying up and fading (FlyingYo).
@@ -2280,7 +2280,7 @@ struct RowButton: View {
         }
       }
       .contentShape(.rect)
-      .bangPhysicsBar(physicsBar, color: color)  // dev prototype (BangPhysics.swift)
+      .bangPhysicsBar(physicsBar)  // dev prototype (BangPhysics.swift)
   }
 
   /// The bar's line, sending and receiving alike (BarLine): the words and their "!"s; a Yo that came at the end; room

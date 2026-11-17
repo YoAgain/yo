@@ -1,4 +1,4 @@
-// Dev-only rubber bars: capped at 200 objects, 30 spawns/s (15/bar), 4 ms/frame.
+// Dev-only free-falling "!": capped at 200 objects, 30 spawns/s (15/bar), 4 ms/frame.
 import SwiftUI
 import UIKit
 import simd
@@ -32,13 +32,12 @@ import simd
 }
 
 extension View {
-  /// On a bar: where its box is, and its colour (for its bulge).
-  func bangPhysicsBar(_ bar: String, color: Color) -> some View {
+  /// On a bar: where new "!"s start.
+  func bangPhysicsBar(_ bar: String) -> some View {
     #if YO_DEV
       onGeometryChange(for: CGRect.self) { $0.frame(in: .global) } action: {
-        BangHost.shared.bar(bar, $0, color: color)
+        BangHost.shared.bar(bar, $0)
       }
-      .onChange(of: color) { _, value in BangHost.shared.color(bar, value) }
     #else
       self
     #endif
@@ -76,20 +75,10 @@ struct BangPhysicsLayer: View {
     private(set) var world: BangWorld?
     @ObservationIgnored var bars: [String: BangBar] = [:]
 
-    func bar(_ id: String, _ frame: CGRect, color: Color) {
+    func bar(_ id: String, _ frame: CGRect) {
       guard BangWorld.valid(frame) else { return }
-      guard let before = bars[id]?.frame else {
-        bars[id] = BangBar(frame: frame, color: color)
-        return
-      }
-      bars[id]?.frame = frame
-      bars[id]?.color = color
-      if before != frame { world?.moved(id, from: before, to: frame) }
-    }
-
-    func color(_ id: String, _ color: Color) {
-      bars[id]?.color = color
-      world?.redraw()
+      if bars[id] == nil { bars[id] = BangBar(frame: frame) }
+      else { bars[id]?.frame = frame }
     }
 
     func label(_ id: String, incoming: Bool, _ rect: CGRect) {
@@ -115,7 +104,6 @@ struct BangPhysicsLayer: View {
 
   struct BangBar {
     var frame: CGRect = .null
-    var color = Color.clear
     var incoming: CGRect = .null
     var sent: CGRect = .null
     var tokens = 15.0  // BangWorld.perBarRate
@@ -126,10 +114,8 @@ struct BangPhysicsLayer: View {
     let world: BangWorld
 
     var body: some View {
-      let version = world.version
       TimelineView(.animation(paused: !world.running || !world.active)) { timeline in
         Canvas { context, _ in
-          _ = version
           world.advance(to: timeline.date)
           world.draw(&context)
         }
@@ -147,12 +133,8 @@ struct BangPhysicsLayer: View {
     // The only observed state (BangCanvas alone reads it): the list never updates for the physics.
     private(set) var running = false
     private(set) var active = true
-    /// Bumped when the picture changes without a frame (a bar scrolled while asleep).
-    private(set) var version = 0
 
     private struct Bang {
-      /// The bar it is in; nil: loose on the screen.
-      var bar: String?
       let origin: String
       let glow: Bool
       var alpha = 1.0
@@ -182,10 +164,6 @@ struct BangPhysicsLayer: View {
     @ObservationIgnored private var tokens = BangWorld.totalRate
     @ObservationIgnored private var filled = 0.0
     @ObservationIgnored private var seen: [String: Int] = [:]
-    // Per bang: collision group (0 loose, otherwise a bounded bar slot)
-    // and box (its bar's frame, or null).
-    @ObservationIgnored private var group: [Int] = []
-    @ObservationIgnored private var box: [CGRect] = []
     // A uniform grid for the collisions (counting sort).
     @ObservationIgnored private var cellOf: [Int] = []
     @ObservationIgnored private var cellStart: [Int] = []
@@ -193,16 +171,6 @@ struct BangPhysicsLayer: View {
     @ObservationIgnored private var cellItems: [Int] = []
     @ObservationIgnored private var cols = 1
     @ObservationIgnored private var rows = 1
-    // Per bar slot: how far its top and bottom bulge out (points), how fast, the pressure on its walls this
-    // step, whether it is snapping back after a burst, and its name.
-    @ObservationIgnored private var bulge: [Double] = []
-    @ObservationIgnored private var bulgeSpeed: [Double] = []
-    @ObservationIgnored private var pressure: [Double] = []
-    @ObservationIgnored private var snapping: [Bool] = []
-    @ObservationIgnored private var barIDs: [String?] = []
-    @ObservationIgnored private var slots: [String: Int] = [:]
-    @ObservationIgnored private var used = Array(repeating: false, count: 201)
-    @ObservationIgnored private let haptic = UIImpactFeedbackGenerator(style: .light)
     @ObservationIgnored private let motion = CMMotionManager()
     @ObservationIgnored private var observers: [NSObjectProtocol] = []
 
@@ -222,17 +190,6 @@ struct BangPhysicsLayer: View {
     private static let slop = 0.25
     /// Slower than this a step (in points), a particle rests.
     private static let rest = 0.03
-    /// The rubber: how hard a bar's wall pulls a "!" back per point it is out, and how much of its speed outwards a
-    /// pressed one loses each step.
-    private static let wall = 2500.0
-    private static let wallDamping = 0.85
-    /// The bulge: a spring (stiffness, damping) pushed out by the pressure on the walls; it bursts at +40% (20% at
-    /// the top and at the bottom).
-    private static let bulgeStiffness = 400.0
-    private static let bulgeDamping = 16.0
-    private static let bulgePush = 80.0
-    private static let burstAt = 0.2
-
     @ObservationIgnored private var glowing: GraphicsContext.ResolvedText?
     @ObservationIgnored private var plain: GraphicsContext.ResolvedText?
     @ObservationIgnored private var deadline = 0.0
@@ -244,22 +201,14 @@ struct BangPhysicsLayer: View {
         && rect.width < 10_000 && rect.height < 10_000
     }
 
-    func redraw() { if !running { version &+= 1 } }
     var empty: Bool { bangs.isEmpty }
 
     init() {
       bangs.reserveCapacity(Self.onScreen)
       pos.reserveCapacity(Self.onScreen * 2)
       old.reserveCapacity(Self.onScreen * 2)
-      group.reserveCapacity(Self.onScreen)
-      box.reserveCapacity(Self.onScreen)
       cellOf = Array(repeating: 0, count: Self.onScreen * 2)
       cellItems = cellOf
-      bulge = Array(repeating: 0, count: Self.onScreen + 1)
-      bulgeSpeed = bulge
-      pressure = bulge
-      snapping = Array(repeating: false, count: bulge.count)
-      barIDs = Array(repeating: nil, count: bulge.count)
       let center = NotificationCenter.default
       observers = [
         center.addObserver(forName: UIApplication.willResignActiveNotification, object: nil, queue: .main) { _ in
@@ -281,19 +230,6 @@ struct BangPhysicsLayer: View {
       if motion.isDeviceMotionActive { motion.stopDeviceMotionUpdates() }
       for observer in observers { NotificationCenter.default.removeObserver(observer) }
       observers = []
-    }
-
-    /// A bar scrolled: its "!"s with it.
-    func moved(_ id: String, from before: CGRect, to frame: CGRect) {
-      guard Self.valid(before), Self.valid(frame), before.origin != frame.origin else { return }
-      let delta = SIMD2(Double(frame.minX - before.minX), Double(frame.minY - before.minY))
-      var moved = false
-      for k in bangs.indices where bangs[k].bar == id {
-        pos[2 * k] += delta; old[2 * k] += delta
-        pos[2 * k + 1] += delta; old[2 * k + 1] += delta
-        moved = true
-      }
-      if moved && !running { version &+= 1 }
     }
 
     private func key(_ bar: String, _ incoming: Bool) -> String { bar + (incoming ? "|in" : "|out") }
@@ -319,7 +255,7 @@ struct BangPhysicsLayer: View {
         guard n > 0 else { return }
         tokens -= Double(n)
         bars[id]?.tokens -= Double(n)
-        for _ in 0..<n { add(id, origin: origin, glow: incoming, bar: bar) }
+        for _ in 0..<n { add(origin: origin, glow: incoming, bar: bar) }
         wake()
       } else if target < live {
         // The run is over: all of them go, oldest first, one quickly after the other.
@@ -347,27 +283,24 @@ struct BangPhysicsLayer: View {
       }
     }
 
-    private func add(_ id: String, origin: String, glow: Bool, bar: BangBar) {
-      guard bangs.count < Self.onScreen, Self.valid(bar.frame),
-            let slot = slots[id] ?? barIDs.indices.dropFirst().first(where: { barIDs[$0] == nil }) else { return }
-      slots[id] = slot
-      barIDs[slot] = id
+    private func add(origin: String, glow: Bool, bar: BangBar) {
+      guard bangs.count < Self.onScreen, Self.valid(bar.frame), Self.valid(screen) else { return }
       let frame = bar.frame
       let measured = glow ? bar.incoming : bar.sent
       let label = Self.valid(measured) ? measured : CGRect.null
       // Incoming: from the bar's right end, flying left. Sent: from the end of "Sent Yo!!!!!", dropping.
       let sent = !glow && !label.isNull
-      let x = sent ? Double(label.maxX) - 6 : Double(frame.maxX) - 10
-      let y = label.isNull ? Double(frame.midY) : Double(label.midY) - Double.random(in: 0...10)
-      let start = SIMD2(min(max(x, Double(frame.minX) + 12), Double(frame.maxX) - 12),
-                        min(max(y, Double(frame.minY) + 12), Double(frame.maxY) - 12))
+      let x = sent ? Double(label.maxX) - 6 : Double(screen.maxX) - Self.radius
+      let y = sent ? Double(label.midY) : Double(frame.midY)
+      let start = SIMD2(min(max(x, Double(screen.minX) + Self.radius), Double(screen.maxX) - Self.radius),
+                        min(y, Double(screen.maxY) - Self.length / 2 - Self.radius))
       let speed = sent
-        ? SIMD2(Double.random(in: -60...60), -Double.random(in: 40...140))
-        : SIMD2(-Double.random(in: 300...470), -Double.random(in: 40...200))
+        ? SIMD2(Double.random(in: -60...60), Double.random(in: 40...140))
+        : SIMD2(-Double.random(in: 300...470), Double.random(in: -40...40))
       let tilt = Double.random(in: -0.6...0.6)
       let axis = SIMD2(sin(tilt), -cos(tilt)) * (Self.length / 2)
       let spin = SIMD2(Double.random(in: -40...40), 0)
-      bangs.append(Bang(bar: id, origin: origin, glow: glow))
+      bangs.append(Bang(origin: origin, glow: glow))
       pos.append(start + axis)
       pos.append(start - axis)
       old.append(start + axis - (speed + spin) * Self.step)
@@ -474,13 +407,11 @@ struct BangPhysicsLayer: View {
       if spent > Self.budget * 0.75 { iterations = max(1, iterations - 1) }
       else if spent < Self.budget * 0.3 { iterations = min(Self.maxIterations, iterations + 1) }
       guard steps > 0 else { return }
-      let stretching = bulgeSpeed.contains { abs($0) > 0.3 } || snapping.contains(true)
-        || (bangs.isEmpty && bulge.contains { $0 > 0.3 })
-      let busy = stretching || bangs.contains { $0.fading || $0.leaveAt != nil }
+      let busy = bangs.contains { $0.fading || $0.leaveAt != nil }
       quiet = busy || moved > 0.06 ? 0 : quiet + steps
       calm = busy || moved > 0.4 ? 0 : calm + steps
       // At rest (or close enough for long enough): no more frames until something happens.
-      if (bangs.isEmpty && !stretching) || quiet > 50 || calm > 600 { settle() }
+      if bangs.isEmpty || quiet > 50 || calm > 600 { settle() }
     }
 
     /// One fixed step; the largest distance a particle went.
@@ -489,29 +420,12 @@ struct BangPhysicsLayer: View {
       prepare()
       let dt2 = Self.step * Self.step
       let fall = gravity * Self.g * dt2
-      for n in pressure.indices { pressure[n] = 0 }
       for i in pos.indices {
         var v = (pos[i] - old[i]) * 0.996
         let speed = simd_length(v)
         if speed > Self.maxStep { v *= Self.maxStep / speed }
-        // In a bar: its rubber walls pull back the further one is out (and damp it); the top and bottom bulge.
-        var pull = SIMD2<Double>(0, 0)
-        let n = group[i >> 1]
-        if n > 0 {
-          let frame = box[i >> 1]
-          let r = Self.radius
-          let t = min(max((pos[i].x - Double(frame.minX)) / max(1, Double(frame.width)), 0), 1)
-          let out = bulge[n] * sin(.pi * t)
-          let left = Double(frame.minX) + r - pos[i].x, right = pos[i].x - Double(frame.maxX) + r
-          let top = Double(frame.minY) - out + r - pos[i].y, bottom = pos[i].y - Double(frame.maxY) - out + r
-          if left > 0 { pull.x += left; if v.x < 0 { v.x *= Self.wallDamping } }
-          if right > 0 { pull.x -= right; if v.x > 0 { v.x *= Self.wallDamping } }
-          if top > 0 { pull.y += top; if v.y < 0 { v.y *= Self.wallDamping } }
-          if bottom > 0 { pull.y -= bottom; if v.y > 0 { v.y *= Self.wallDamping } }
-          pressure[n] += abs(pull.x) + abs(pull.y)
-        }
         old[i] = pos[i]
-        pos[i] += v + fall + pull * (Self.wall * dt2)
+        pos[i] += v + fall
       }
       for _ in 0..<min(iterations, Self.maxIterations) {
         if CACurrentMediaTime() >= deadline { break }
@@ -520,8 +434,7 @@ struct BangPhysicsLayer: View {
         collide()
         walls()
       }
-      stretch()
-      // Fade without changing collision groups.
+      // Fading objects keep colliding until removed.
       var gone = false
       for k in bangs.indices where bangs[k].fading {
         bangs[k].alpha -= Self.step * 1.2
@@ -538,7 +451,7 @@ struct BangPhysicsLayer: View {
       return moved
     }
 
-    /// Refresh collision groups and start scheduled fades.
+    /// Start scheduled fades and repair invalid positions.
     private func prepare() {
       for k in bangs.indices {
         if let at = bangs[k].leaveAt, at <= time {
@@ -546,33 +459,9 @@ struct BangPhysicsLayer: View {
           bangs[k].leaveAt = nil
         }
       }
-      for n in used.indices { used[n] = false }
-      for bang in bangs {
-        if let id = bang.bar, let n = slots[id] { used[n] = true }
-      }
-      for n in 1..<barIDs.count {
-        if let id = barIDs[n], !used[n], bulge[n] < 0.3 {
-          slots.removeValue(forKey: id)
-          barIDs[n] = nil
-          bulge[n] = 0; bulgeSpeed[n] = 0; snapping[n] = false
-        }
-      }
-      group.removeAll(keepingCapacity: true)
-      box.removeAll(keepingCapacity: true)
-      for bang in bangs {
-        if let id = bang.bar, let bar = bars[id], Self.valid(bar.frame),
-           let n = slots[id] {
-          barIDs[n] = id
-          slots[id] = n
-          group.append(n); box.append(bar.frame)
-        } else {
-          group.append(0); box.append(.null)
-        }
-      }
       for i in pos.indices {
         if !pos[i].x.isFinite || !pos[i].y.isFinite || !old[i].x.isFinite || !old[i].y.isFinite {
-          let f = box[i >> 1].isNull ? screen : box[i >> 1]
-          pos[i] = SIMD2(Double(f.midX), Double(f.midY))
+          pos[i] = SIMD2(Double(screen.midX), Double(screen.midY))
           old[i] = pos[i]
         }
         pos[i] = simd_clamp(pos[i], SIMD2(repeating: -100_000), SIMD2(repeating: 100_000))
@@ -588,14 +477,11 @@ struct BangPhysicsLayer: View {
         bangs[n] = bangs[k]
         pos[2 * n] = pos[2 * k]; pos[2 * n + 1] = pos[2 * k + 1]
         old[2 * n] = old[2 * k]; old[2 * n + 1] = old[2 * k + 1]
-        group[n] = group[k]; box[n] = box[k]
         n += 1
       }
       bangs.removeLast(bangs.count - n)
       pos.removeLast(pos.count - 2 * n)
       old.removeLast(old.count - 2 * n)
-      group.removeLast(group.count - n)
-      box.removeLast(box.count - n)
     }
 
     /// The particles into a grid of cells a little larger than two radii: neighbours only from the 9 cells around.
@@ -647,13 +533,12 @@ struct BangPhysicsLayer: View {
       }
     }
 
-    /// Circles push each other: in the same bar, or both loose on the screen.
+    /// Circles push each other across the whole screen.
     private func collide() {
       let r2 = 4 * Self.radius * Self.radius
       var checks = 0
       for i in pos.indices {
         if CACurrentMediaTime() >= deadline { return }
-        let gi = group[i >> 1]
         let c = cellOf[i]
         let cx = c % cols, cy = c / cols
         for ny in max(0, cy - 1)...min(rows - 1, cy + 1) {
@@ -663,7 +548,7 @@ struct BangPhysicsLayer: View {
               checks += 1
               if checks > 16_000 || (checks % 64 == 0 && CACurrentMediaTime() >= deadline) { return }
               let j = cellItems[t]
-              if j <= i || j >> 1 == i >> 1 || group[j >> 1] != gi { continue }
+              if j <= i || j >> 1 == i >> 1 { continue }
               let d = pos[j] - pos[i]
               let dist2 = simd_length_squared(d)
               guard dist2 < r2, dist2 > 0.0001 else { continue }
@@ -682,41 +567,9 @@ struct BangPhysicsLayer: View {
       }
     }
 
-    /// The screen's edges for loose ones (a bar's are rubber: in `step`).
+    /// Left, right and bottom screen edges; the top stays open.
     private func walls() {
-      for i in pos.indices where group[i >> 1] == 0 { inside(i, screen, bounce: 0.2) }
-    }
-
-    /// Each bar's bulge follows the pressure on its walls, springy; at +40% it bursts.
-    private func stretch() {
-      for n in bulge.indices {
-        guard let id = barIDs[n], let frame = bars[id]?.frame, !frame.isNull else { continue }
-        if snapping[n] {
-          // Torn: back to its own height at once.
-          bulge[n] *= 0.6
-          bulgeSpeed[n] = 0
-          if bulge[n] < 0.3 { bulge[n] = 0; snapping[n] = false }
-          continue
-        }
-        let force = pressure[n] * Self.bulgePush - bulge[n] * Self.bulgeStiffness - bulgeSpeed[n] * Self.bulgeDamping
-        bulgeSpeed[n] += force * Self.step
-        bulge[n] = max(0, bulge[n] + bulgeSpeed[n] * Self.step)
-        if bulge[n] == 0 { bulgeSpeed[n] = max(0, bulgeSpeed[n]) }
-        if bulge[n] >= Double(frame.height) * Self.burstAt { burst(n, id) }
-      }
-    }
-
-    /// The rubber tears: all of the bar's "!"s tumble out and down the screen; it snaps back and starts again.
-    private func burst(_ n: Int, _ id: String) {
-      snapping[n] = true
-      for k in bangs.indices where bangs[k].bar == id {
-        bangs[k].bar = nil
-        group[k] = 0
-        let kick = SIMD2(Double.random(in: -1.5...1.5), Double.random(in: 0.5...2.5))
-        old[2 * k] = pos[2 * k] - kick
-        old[2 * k + 1] = pos[2 * k + 1] - kick * 0.8
-      }
-      haptic.impactOccurred()
+      for i in pos.indices { inside(i, screen, bounce: 0.2) }
     }
 
     /// Hit a surface with normal `n` (unit) `depth` deep: out of it, the speed into it reflected by `bounce`, a little
@@ -737,7 +590,6 @@ struct BangPhysicsLayer: View {
       let p = pos[i]
       if p.x < Double(box.minX) + r { hit(i, SIMD2(1, 0), Double(box.minX) + r - p.x, bounce: bounce) }
       if p.x > Double(box.maxX) - r { hit(i, SIMD2(-1, 0), p.x - Double(box.maxX) + r, bounce: bounce) }
-      if p.y < Double(box.minY) + r { hit(i, SIMD2(0, 1), Double(box.minY) + r - p.y, bounce: bounce) }
       if p.y > Double(box.maxY) - r { hit(i, SIMD2(0, -1), p.y - Double(box.maxY) + r, bounce: bounce) }
     }
 
@@ -750,24 +602,6 @@ struct BangPhysicsLayer: View {
         plain = context.resolve(Text("!").font(.yo(Metrics.rowFont)).foregroundStyle(Color.white))
       }
       guard let glowing, let plain else { return }
-      // Each bulging bar: its colour over and under it, highest in the middle (only outside the bar: its words stay).
-      for n in bulge.indices where bulge[n] > 0.3 {
-        guard let id = barIDs[n], let bar = bars[id], !bar.frame.isNull else { continue }
-        let f = bar.frame.offsetBy(dx: -screen.minX, dy: -screen.minY)
-        let lift = bulge[n] * 4 / 3  // a cubic's middle reaches 3/4 of its handles
-        var path = Path()
-        path.move(to: CGPoint(x: f.minX, y: f.minY + 0.5))
-        path.addCurve(to: CGPoint(x: f.maxX, y: f.minY + 0.5),
-                      control1: CGPoint(x: f.minX + f.width * 0.2, y: f.minY - lift),
-                      control2: CGPoint(x: f.maxX - f.width * 0.2, y: f.minY - lift))
-        path.closeSubpath()
-        path.move(to: CGPoint(x: f.minX, y: f.maxY - 0.5))
-        path.addCurve(to: CGPoint(x: f.maxX, y: f.maxY - 0.5),
-                      control1: CGPoint(x: f.minX + f.width * 0.2, y: f.maxY + lift),
-                      control2: CGPoint(x: f.maxX - f.width * 0.2, y: f.maxY + lift))
-        path.closeSubpath()
-        context.fill(path, with: .color(bar.color))
-      }
       for k in bangs.indices {
         let head = pos[2 * k], foot = pos[2 * k + 1]
         guard head.x.isFinite, head.y.isFinite, foot.x.isFinite, foot.y.isFinite else { continue }
