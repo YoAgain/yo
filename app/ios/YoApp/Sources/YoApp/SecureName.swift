@@ -14,6 +14,8 @@ struct SecureNameSheet: View {
   var only: SecureStep? = nil
   /// Closes the sheet through the presenter's binding.
   var close: (() -> Void)? = nil
+  /// Finished with Done (not closed): the presenter may go on to the Security page.
+  var done: (() -> Void)? = nil
 
   @Environment(AccountStore.self) private var accounts
   @Environment(\.dismiss) private var dismiss
@@ -23,6 +25,7 @@ struct SecureNameSheet: View {
   @State private var words = ""
   @State private var busy: SecureStep?
   @State private var showingKey = false
+  @State private var copiedKey = false
   @State private var problem: String?
 
   private var secured: Bool { accounts.account?.secured == true }
@@ -38,7 +41,9 @@ struct SecureNameSheet: View {
       Color.amethyst.ignoresSafeArea()
       Page(title: "Set Up\nAccount Recovery") {
         StepCard(number: 1, title: "Recovery Key", done: wordsDone) {
-          Button("Show") { Task { await showKey() } }
+          Button(showingKey ? "Hide" : "Show") {
+            if showingKey { showingKey = false } else { Task { await showKey() } }
+          }
             .buttonStyle(.glass)
           if !wordsDone {
             Button { Task { await share() } } label: {
@@ -51,6 +56,15 @@ struct SecureNameSheet: View {
           }
         }
         .disabled(busy != nil)
+        // Shown: the key itself in its own card right under its step, the QR code and the words, and Copy.
+        if showingKey {
+          KeyCard(key: words, copied: $copiedKey) {
+            UIPasteboard.general.string = RecoveryCode.shown(words)
+            copiedKey = true
+            Task { await markSaved() }
+          }
+          .transition(.opacity.combined(with: .move(edge: .top)))
+        }
         StepCard(number: 2, title: "Passkey", done: passkeyDone) {
           if busy == .passkey {
             ProgressView()
@@ -79,9 +93,7 @@ struct SecureNameSheet: View {
     .presentationDragIndicator(.visible)
     .preferredColorScheme(.dark)
     .interactiveDismissDisabled(busy != nil)
-    .sheet(isPresented: $showingKey) {
-      KeyPeekSheet(key: words) { Task { await markSaved() } }
-    }
+    .animation(.smooth(duration: 0.25), value: showingKey)
     .onAppear {
       guard !initialized else { return }
       initialized = true
@@ -101,6 +113,7 @@ struct SecureNameSheet: View {
   /// Done: the passkey not set up is a choice (as Skip was), so it is not asked for again.
   private func finish() {
     if !passkeyDone { accounts.declinePasskey() }
+    done?()
     if let close { close() } else { dismiss() }
   }
 
@@ -223,29 +236,22 @@ private struct StepCard<Buttons: View>: View {
   }
 }
 
-/// The recovery key on its own sheet: frosted until tapped, and Copy (counted as saved).
-private struct KeyPeekSheet: View {
+/// The recovery key shown in the guide, as a card under its step: QR code, the words, Copy (counted as saved).
+private struct KeyCard: View {
   let key: String
-  let saved: () -> Void
-  @State private var copied = false
+  @Binding var copied: Bool
+  let copy: () -> Void
 
   var body: some View {
-    ZStack {
-      Color.amethyst.ignoresSafeArea()
-      Page(title: "Recovery Key") {
-        FrostedKey(key: key, qrSize: 80)
-      } bottom: {
-        KeepButton(title: "Copy", icon: "doc.on.doc", done: copied) {
-          UIPasteboard.general.string = RecoveryCode.shown(key)
-          copied = true
-          saved()
-        }
-      }
+    VStack(spacing: 14) {
+      RecoveryQRView(key: key, size: 120)
+      KeyGrid(key: key)
+      Button(copied ? "Copied" : "Copy", systemImage: copied ? "checkmark" : "doc.on.doc", action: copy)
+        .buttonStyle(.glass)
     }
-    .overlay(alignment: .topTrailing) { SheetClose() }
-    .foregroundStyle(.white)
-    .preferredColorScheme(.dark)
-    .presentationDragIndicator(.visible)
+    .frame(maxWidth: .infinity)
+    .padding(16)
+    .background(.white.opacity(0.14), in: .rect(cornerRadius: 18))
   }
 }
 

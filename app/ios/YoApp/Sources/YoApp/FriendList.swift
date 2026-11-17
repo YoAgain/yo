@@ -575,8 +575,11 @@ struct FriendList: View {
       ScrollView {
         LazyVStack(spacing: 0) {
           // Reordering preserves each bar's gestures, undo clock and thumbnail flight.
-          ForEach(orderedFriends, id: \.key) { friend in
-            row(friend)
+          // Each bar with its shade in the data: `Friend`'s == is its key alone, so after a reorder the ForEach saw
+          // nothing changed and kept every bar's old shade (from neighbours it no longer has).
+          ForEach(shadedFriends, id: \.friend.key) { shaded in
+            let friend = shaded.friend
+            row(friend, shade: shaded.shade)
               .modifier(FlightRowLayer(bar: bars.of(friend)))
               .id(friend.key.uuidString)
               .environment(\.yoFlood, inbox.busy)
@@ -652,7 +655,19 @@ struct FriendList: View {
             cameraBackdrop
               .frame(width: geometry.size.width, height: geometry.size.height)
               .clipped()
-              .opacity(0.55)
+              // See-through bars over the colours; a pressed bar clearer still (its flash), never coloured.
+              .mask {
+                ZStack(alignment: .topLeading) {
+                  Color.black.opacity(0.55)
+                  ForEach(colors, id: \.id) { entry in
+                    let bounds = entry.clips.reduce(geometry[entry.bounds]) { $0.intersection(geometry[$1]) }
+                    Color.black.opacity(entry.pressed ? 0.85 : 0)
+                      .animation(.easeOut(duration: entry.pressed ? 0.06 : 0.2), value: entry.pressed)
+                      .frame(width: max(0, bounds.width), height: max(0, bounds.height))
+                      .offset(x: bounds.isNull ? 0 : bounds.minX, y: bounds.isNull ? 0 : bounds.minY)
+                  }
+                }
+              }
               .clipShape(CameraWipeShape(progress: cameraLook, left: leftHanded))
           }
           .allowsHitTesting(false)
@@ -719,24 +734,35 @@ struct FriendList: View {
 
   // MARK: Bars
 
-  /// A bar's colour; the same colour right under itself gets a step darker each time (a run of three: colour,
-  /// darker, darker still), so equal bars never melt into one block. Read top down: the first keeps its colour.
-  private func shade(_ friend: Friend) -> Color {
-    let list = orderedFriends
-    guard let at = list.firstIndex(where: { $0.key == friend.key }) else { return .row(friend.color) }
-    let own = friend.color % Color.rows.count
-    var depth = 0
-    var above = at - 1
-    while above >= 0, list[above].color % Color.rows.count == own { depth += 1; above -= 1 }
-    return depth == 0 ? .row(friend.color) : Color.row(friend.color).mix(with: .black, by: min(0.12 * Double(depth), 0.36))
+  struct ShadedFriend: Equatable {
+    let friend: Friend
+    /// How many bars of the same colour stand right above it.
+    let depth: Int
+    var shade: Color {
+      depth == 0 ? .row(friend.color) : Color.row(friend.color).mix(with: .black, by: min(0.12 * Double(depth), 0.36))
+    }
   }
 
-  @ViewBuilder private func row(_ friend: Friend) -> some View {
+  /// The bars as shown, each with its colour; the same colour right under itself gets a step darker each time (a run
+  /// of three: colour, darker, darker still), so equal bars never melt into one block. Read top down: the first keeps
+  /// its colour.
+  private var shadedFriends: [ShadedFriend] {
+    var depth = 0
+    var previous: Int?
+    return orderedFriends.map { friend in
+      let own = friend.color % Color.rows.count
+      depth = previous == own ? depth + 1 : 0
+      previous = own
+      return ShadedFriend(friend: friend, depth: depth)
+    }
+  }
+
+  @ViewBuilder private func row(_ friend: Friend, shade: Color) -> some View {
     let waiting = inbox.media(for: friend) ?? []
     let bar = LiveBar(
       friend: friend,
       bar: bars.of(friend),
-      color: shade(friend),  // see-through over the camera
+      color: shade,  // see-through over the camera
       cameraOn: cameraOn,
       recording: recordingFor == friend,
       stop: { cancelSending(friend) },
@@ -788,7 +814,7 @@ struct FriendList: View {
         // shared colour layer left behind; in camera mode and while the edge swipe wipes the camera in, the bars stay
         // see-through (an opaque colour here hid the wipe: only the Amethyst under the list moved).
         bar.equatable()
-          .background(cameraOn || edgeActive || edgeSettling ? Color.clear : shade(friend))
+          .background(cameraOn || edgeActive || edgeSettling ? Color.clear : shade)
           .contentShape(.contextMenuPreview, Rectangle())
           .contextMenu {
             if !cameraOn && !friend.request {
@@ -796,7 +822,7 @@ struct FriendList: View {
             }
           }
         if friend.request {
-          requestChoices(friend)
+          requestChoices(friend, shade: shade)
             .frame(height: Metrics.rowHeight)
         }
       }
@@ -809,17 +835,17 @@ struct FriendList: View {
     }
   }
 
-  private func requestChoices(_ friend: Friend) -> some View {
+  private func requestChoices(_ friend: Friend, shade: Color) -> some View {
     GeometryReader { geometry in
       HStack(spacing: 0) {
-        if leftHanded { requestChoice(friend, yes: true, width: geometry.size.width * 2 / 3) }
-        requestChoice(friend, yes: false, width: geometry.size.width / 3)
-        if !leftHanded { requestChoice(friend, yes: true, width: geometry.size.width * 2 / 3) }
+        if leftHanded { requestChoice(friend, shade: shade, yes: true, width: geometry.size.width * 2 / 3) }
+        requestChoice(friend, shade: shade, yes: false, width: geometry.size.width / 3)
+        if !leftHanded { requestChoice(friend, shade: shade, yes: true, width: geometry.size.width * 2 / 3) }
       }
     }
   }
 
-  private func requestChoice(_ friend: Friend, yes: Bool, width: CGFloat) -> some View {
+  private func requestChoice(_ friend: Friend, shade: Color, yes: Bool, width: CGFloat) -> some View {
     Button { chooseRequest(friend, yes: yes) } label: {
       Text(yes ? "Yo" : "No")
         .font(.yo(Metrics.rowFont))
@@ -827,7 +853,7 @@ struct FriendList: View {
         .frame(width: width)
         .frame(maxHeight: .infinity)
         // Yo in the requester's own colour (one block with its bar), only No in red.
-        .background { addBackground(yes ? shade(friend) : Color(hex: 0xE74C3C)) }
+        .background { addBackground(yes ? shade : Color(hex: 0xE74C3C)) }
         .contentShape(Rectangle())
     }
     .buttonStyle(.plain)
@@ -1648,6 +1674,10 @@ extension FriendList {
       .onChange(of: listFriends, initial: true) { syncListFriends() }
       .onChange(of: inbox.memberNames) { syncSenderNames() }
       .onChange(of: scenePhase, initial: true) { publish(listModel.foreground(now: listNow, active: scenePhase == .active)) }
+      // "Yo Camera" (Shortcuts, Siri, the Action button): open straight in camera mode.
+      .onChange(of: AppRoute.shared.camera, initial: true) { _, on in
+        if on { AppRoute.shared.camera = false; if !cameraOn { cameraSwitched(true) } }
+      }
       // Back after more than 30 s away: the list again, not the camera (a quick app switch keeps the camera).
       .onChange(of: scenePhase) { _, phase in
         if phase == .background { leftAt = .now }
@@ -2346,16 +2376,10 @@ struct RowButton: View {
         ZStack(alignment: .leading) {
           if recording { Color.alizarin.opacity(0.85) }
           else {
-            Color.clear.modifier(ListColor(color: color,
-              opacity: cameraOn && shutterDown ? 0 : 1))
+            // Pressed in camera mode: more see-through, the picture shows clearer there (the shutter's flash).
+            Color.clear.modifier(ListColor(color: color, pressed: cameraOn && shutterDown))
           }
           if recording { RecordingFill(seconds: Camera.longestVideo) }
-          if !cameraOn { RowFlash(total: yo?.total ?? 0) }
-        }
-        // Animate only opacity: press feedback must not retarget the camera wipe.
-        .animation(cameraOn && (shutterDown || recording)
-          ? .easeOut(duration: 0.06) : ListMotion.expansion) { content in
-          content.opacity(cameraOn && shutterDown && !recording ? 0 : 1)
         }
       }
       .contentShape(.rect)
@@ -2368,9 +2392,7 @@ struct RowButton: View {
     Group {
       if touchable { signLayer } else { words }
     }
-    // Digits of one width (Montserrat's tabular figures): "23×" to "24×" stays put; only "99×" to "100×" moves, by
-    // a whole digit.
-    .font(.yoTabular(Metrics.rowFont))
+    .font(.yo(Metrics.rowFont))  // counts held still by SteadyText
     .foregroundStyle(.white)
     .animation(nil, value: title)  // other words stand in their place at once
     // A new count ("10×" to "11×") swaps in one frame, no crossfade of the old digits under the new.
@@ -2419,8 +2441,7 @@ struct RowButton: View {
       } else {
         let room = room(sign: hasSign && !twoRows)
         BarRow(lead: room.lead, trail: room.trail, prefix: icon == nil ? 0 : Self.iconRoom) {
-          Text(title == "Sent Yo" ? (sendingMedia ? YoWords.sending(count) : YoWords.sent(count)) : title)
-            .lineLimit(1).truncationMode(.tail)
+          SteadyText(title == "Sent Yo" ? (sendingMedia ? YoWords.sending(count) : YoWords.sent(count)) : title)
             // A group: its sign before its name, outside it: the name alone stands in the middle.
             .overlay(alignment: .leading) {
               if let icon {
@@ -2450,7 +2471,6 @@ struct RowButton: View {
       }
     }
     .opacity(faded ? 0.55 : 1)
-    .modifier(Knock(trigger: yo?.first))
   }
 
   /// "3× Yo from Mia", or "3× Yo" when that does not fit; in the middle, the photo sign kept clear at the end.
@@ -2458,8 +2478,8 @@ struct RowButton: View {
     let room = room(sign: hasSign)
     let yos = YoWords.yo(receivedCount)
     return BarRow(lead: room.lead, trail: room.trail) {
-      Text("\(yos) from \(name ?? "")").lineLimit(1).padding(.horizontal, 3)
-      Text(yos).lineLimit(1).padding(.horizontal, 3)
+      SteadyText("\(yos) from \(name ?? "")").padding(.horizontal, 3)
+      SteadyText(yos).padding(.horizontal, 3)
     }
     // A plain Yo fades out; photos and videos stay until seen.
     .modifier(ClockFade(since: media.isEmpty ? yo?.fading : nil, seconds: yoSeconds - Self.solid,
@@ -2646,7 +2666,7 @@ struct SenderBlocks: View {
           // Only the name is ever cut, never its Yos.
           HStack(spacing: 0) {
             Text(sender.name).lineLimit(1).truncationMode(.tail)
-            Text(": " + YoWords.yo(sender.count)).lineLimit(1).fixedSize()
+            SteadyText(": " + YoWords.yo(sender.count)).fixedSize()
           }
           .padding(.horizontal, 3)
         }
@@ -2684,31 +2704,32 @@ enum YoWords {
   static func sending(_ count: Int) -> String { count <= 1 ? "Sending Yo!" : "Sending \(count)× Yo!" }
 }
 
-/// The bar flashes once for each incoming Yo.
-private struct RowFlash: View {
-  let total: Int
-  @State private var flashes = 0
+/// Words with a count that hold still as it changes ("23× Yo" to "24× Yo"): placed as if every digit were "0" (the
+/// widest of Montserrat's figures, which are proportional and come without tabular ones), the real words drawn from
+/// that frame's start. Only a count growing a digit ("99×" to "100×") moves them.
+struct SteadyText: View {
+  let text: String
+  init(_ text: String) { self.text = text }
 
   var body: some View {
-    Color.white
-      .keyframeAnimator(initialValue: 0.0, trigger: flashes) { white, value in
-        white.opacity(value)
-      } keyframes: { _ in
-        KeyframeTrack {
-          LinearKeyframe(0.18, duration: 0.06)
-          LinearKeyframe(0, duration: 0.2)
-        }
-      }
-      .allowsHitTesting(false)
-      .accessibilityHidden(true)
-      .onChange(of: total) { old, new in if new > old { flashes += 1 } }
+    // Sized by the wider of the two: a digit wider than "0" never cuts the real words.
+    ZStack(alignment: .leading) {
+      Text(String(text.map { $0.isNumber ? "0" : $0 }))
+      Text(text)
+    }
+    .lineLimit(1)
+    .hidden()
+    .overlay(alignment: .leading) { Text(text).lineLimit(1).truncationMode(.tail) }
+      .accessibilityElement(children: .ignore)
+      .accessibilityLabel(text)
   }
 }
 
-/// One line of a bar, a bar tall: the first of its words that fits stands in the exact middle of the bar, clear of
-/// what the bar keeps at its sides (`lead` at the left, `trail` at the right: the outgoing thumbnail, the photo sign)
-/// and of `prefix` before it (a group's sign). Only when even the last does not fit in the middle does it move aside,
-/// and only when it does not fit at all is it cut with "…". Never smaller, nothing overlaps.
+/// One line of a bar, a bar tall: the first of its words that fits between what the bar keeps at its sides (`lead` at
+/// the left, `trail` at the right: the outgoing thumbnail, the photo sign) and `prefix` before it (a group's sign)
+/// is shown: in the exact middle of the bar when it fits there, else moved aside as little as it takes ("3× Yo from
+/// Mia" a little off the middle rather than "3× Yo"). Only when even the last does not fit at all is it cut with "…".
+/// Never smaller, nothing overlaps.
 struct BarRow: Layout {
   static let margin = 20.0
   var lead = margin
@@ -2722,55 +2743,17 @@ struct BarRow: Layout {
   func placeSubviews(in bounds: CGRect, proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) {
     guard !subviews.isEmpty else { return }
     let widths = subviews.map { $0.sizeThatFits(.unspecified).width }
-    let side = max(lead, trail)
-    var chosen = subviews.count - 1
-    var x: CGFloat
-    var width: CGFloat
-    if let fit = widths.indices.first(where: { index in
-      let start = bounds.midX - widths[index] / 2
-      return start - prefix >= bounds.minX + side - 0.5 && start + widths[index] <= bounds.maxX - side + 0.5
-    }) {
-      chosen = fit
-      width = widths[fit]
-      x = bounds.midX - width / 2
-    } else {
-      let low = bounds.minX + lead + prefix
-      let high = bounds.maxX - trail
-      width = min(widths[chosen], max(0, high - low))
-      x = min(max(bounds.midX - width / 2, low), high - width)
-    }
+    let low = bounds.minX + lead + prefix
+    let high = bounds.maxX - trail
+    let chosen = widths.indices.first { widths[$0] <= high - low + 0.5 } ?? subviews.count - 1
+    let width = min(widths[chosen], max(0, high - low))
+    // The middle, or as near it as the sides allow.
+    let x = min(max(bounds.midX - width / 2, low), high - width)
     for index in subviews.indices {
       // The others stay outside the bar.
       subviews[index].place(
         at: CGPoint(x: index == chosen ? x : bounds.minX - 100_000, y: bounds.midY), anchor: .leading,
         proposal: ProposedViewSize(width: index == chosen ? width : widths[index], height: nil))
-    }
-  }
-}
-
-/// A Yo knocks: the words on a bar nudge left and right once, as a poke; the bar itself stays (moving it would show
-/// what is behind it).
-struct Knock: ViewModifier {
-  @Environment(\.yoFlood) private var busy
-  let trigger: String?
-  @State private var knocks = 0
-
-  func body(content: Content) -> some View {
-    content.keyframeAnimator(initialValue: 0.0, trigger: knocks) { words, x in
-      words.offset(x: x)
-    } keyframes: { _ in
-      KeyframeTrack {
-        SpringKeyframe(-9, duration: 0.09)
-        SpringKeyframe(9, duration: 0.12)
-        SpringKeyframe(0, duration: 0.18)
-      }
-    }
-    .onChange(of: trigger) { _, new in
-      if new != nil && !busy { knocks += 1 }
-    }
-    // A bar that comes in on top already carrying its Yo knocks as it arrives.
-    .onAppear {
-      if trigger != nil && !busy { knocks += 1 }
     }
   }
 }
@@ -3170,14 +3153,9 @@ private struct BarPress: ButtonStyle {
 
   func makeBody(configuration: Configuration) -> some View {
     let pressed = cameraOn ? touchDown : configuration.isPressed
-    let down = cameraOn ? touchDown || recording : configuration.isPressed
+    // No press look on the label: in the list flat, as the original Yo; in camera mode the bar's colour plane goes
+    // see-through under the finger (ListColor's `pressed`).
     configuration.label
-      .animation(.easeOut(duration: cameraOn ? 0.06 : 0.15)) { content in
-        content
-          .brightness(cameraOn && down ? -0.12 : 0)
-          // In the list only a quick flash, as the original Yo: no shrinking.
-          .overlay(.white.opacity(!cameraOn && down ? 0.18 : 0))
-      }
       .onChange(of: pressed) { _, pressed in
         if pressed { Haptic.prepare() }
         press(pressed)
@@ -3233,60 +3211,72 @@ struct HeldMedia: View {
     self.finished = finished
   }
 
-  // As stories show it: a band at the top under the Dynamic Island with the lines and who it is from, the picture
-  // fitted below it, never under them; the status bar and the home indicator out of the way.
+  // As stories show it: the picture fills the whole screen, into its round corners and under the Dynamic Island;
+  // the lines and who it is from lie on it at the top, inside the safe area, over a soft dark shade.
   var body: some View {
     ZStack {
       Color.black.ignoresSafeArea()
       if index < queue.count {
         let current = queue[index]
-        VStack(spacing: 10) {
-          VStack(alignment: .leading, spacing: 10) {
-            TimelineView(.animation(minimumInterval: 1.0 / 120, paused: since == nil)) { timeline in
-              let running = progress(at: timeline.date)
-              HStack(spacing: 3) {
-                ForEach(queue.indices, id: \.self) { i in
-                  Capsule()
-                    .fill(.white.opacity(0.35))
-                    .overlay {
-                      Capsule()
-                        .fill(.white)
-                        .scaleEffect(x: i < index ? 1 : i == index ? running : 0, anchor: .leading)
-                    }
-                    .frame(height: 3)
+        // Inside a secure field's layer: screenshots and screen recordings show black where the picture is.
+        Color.clear
+          .overlay {
+            ScreenshotProof {
+              Color.clear
+                .overlay {
+                  if current.video != nil, let player {
+                    PlayerLayer(player: player)
+                  } else if let photo = full ?? current.photo {
+                    Image(uiImage: photo).resizable().scaledToFill()
+                  }
                 }
-              }
-            }
-            HStack(alignment: .firstTextBaseline, spacing: 8) {
-              Text(current.from)
-                .font(.yo(17, relativeTo: .headline))
-                .lineLimit(1)
-              if let at = current.sentAt {
-                Text(Arrival.age(at))
-                  .font(.subheadline.weight(.semibold))
-                  .opacity(0.7)
-                  .fixedSize()
-              }
-            }
-            .foregroundStyle(.white)
-            .padding(.horizontal, 4)
-            .accessibilityElement(children: .combine)
-            .accessibilityLabel("Yo from \(current.from)")
-          }
-          .padding(.horizontal, 8)
-          .padding(.top, 4)
-          Group {
-            if current.video != nil, let player {
-              PlayerLayer(player: player)
-            } else if let photo = full ?? current.photo {
-              Image(uiImage: photo).resizable().scaledToFit().clipShape(.rect(cornerRadius: 14))
+                .clipped()
             }
           }
-          .clipShape(.rect(cornerRadius: 14))
-          .frame(maxWidth: .infinity, maxHeight: .infinity)
+          .clipped()
+          .ignoresSafeArea()
+          .allowsHitTesting(false)
+        VStack(alignment: .leading, spacing: 10) {
+          TimelineView(.animation(minimumInterval: 1.0 / 120, paused: since == nil)) { timeline in
+            let running = progress(at: timeline.date)
+            HStack(spacing: 3) {
+              ForEach(queue.indices, id: \.self) { i in
+                Capsule()
+                  .fill(.white.opacity(0.35))
+                  .overlay {
+                    Capsule()
+                      .fill(.white)
+                      .scaleEffect(x: i < index ? 1 : i == index ? running : 0, anchor: .leading)
+                  }
+                  .frame(height: 3)
+              }
+            }
+          }
+          HStack(alignment: .firstTextBaseline, spacing: 8) {
+            Text(current.from)
+              .font(.yo(17, relativeTo: .headline))
+              .lineLimit(1)
+            if let at = current.sentAt {
+              Text(Arrival.age(at))
+                .font(.subheadline.weight(.semibold))
+                .opacity(0.7)
+                .fixedSize()
+            }
+          }
+          .foregroundStyle(.white)
+          .shadow(color: .black.opacity(0.3), radius: 2)
           .padding(.horizontal, 4)
-          .padding(.bottom, 4)  // above the home indicator, clear of the screen's round corners
+          .accessibilityElement(children: .combine)
+          .accessibilityLabel("Yo from \(current.from)")
         }
+        .padding(.horizontal, 8)
+        .padding(.top, 4)
+        .padding(.bottom, 40)
+        .background {
+          LinearGradient(colors: [.black.opacity(0.5), .clear], startPoint: .top, endPoint: .bottom)
+            .ignoresSafeArea(edges: .top)
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
       }
     }
     .offset(y: pulled)
@@ -3412,6 +3402,62 @@ struct HeldMedia: View {
   }
 }
 
+/// Content left out of screenshots and screen recordings: hosted in the layer a secure text field draws its text in,
+/// which iOS blanks in captures. Where that layer is not found (a later iOS), the content shows as usual.
+struct ScreenshotProof<Content: View>: UIViewRepresentable {
+  @ViewBuilder var content: () -> Content
+
+  func makeUIView(context: Context) -> UIView {
+    let container = UIView()
+    container.backgroundColor = .clear
+    let host = context.coordinator.host
+    host.view.backgroundColor = .clear
+    host.view.translatesAutoresizingMaskIntoConstraints = false
+    host.safeAreaRegions = []
+
+    let field = UITextField()
+    field.isSecureTextEntry = true
+    field.isUserInteractionEnabled = false
+    field.translatesAutoresizingMaskIntoConstraints = false
+    container.addSubview(field)
+    pin(field, to: container)
+    field.layoutIfNeeded()
+    let canvas = field.subviews.first { String(describing: type(of: $0)).contains("Canvas") }
+      ?? field.subviews.first
+    if let canvas {
+      canvas.translatesAutoresizingMaskIntoConstraints = false
+      pin(canvas, to: field)
+      canvas.addSubview(host.view)
+      pin(host.view, to: canvas)
+    } else {
+      field.removeFromSuperview()
+      container.addSubview(host.view)
+      pin(host.view, to: container)
+    }
+    return container
+  }
+
+  func updateUIView(_ view: UIView, context: Context) {
+    context.coordinator.host.rootView = AnyView(content())
+  }
+
+  func makeCoordinator() -> Coordinator { Coordinator(host: UIHostingController(rootView: AnyView(content()))) }
+
+  final class Coordinator {
+    let host: UIHostingController<AnyView>
+    init(host: UIHostingController<AnyView>) { self.host = host }
+  }
+
+  private func pin(_ view: UIView, to parent: UIView) {
+    NSLayoutConstraint.activate([
+      view.leadingAnchor.constraint(equalTo: parent.leadingAnchor),
+      view.trailingAnchor.constraint(equalTo: parent.trailingAnchor),
+      view.topAnchor.constraint(equalTo: parent.topAnchor),
+      view.bottomAnchor.constraint(equalTo: parent.bottomAnchor),
+    ])
+  }
+}
+
 /// A video without controls, filling the screen.
 struct PlayerLayer: UIViewRepresentable {
   let player: AVPlayer
@@ -3419,7 +3465,7 @@ struct PlayerLayer: UIViewRepresentable {
   func makeUIView(context: Context) -> PlayerView {
     let view = PlayerView()
     view.playerLayer.player = player
-    view.playerLayer.videoGravity = .resizeAspect
+    view.playerLayer.videoGravity = .resizeAspectFill
     return view
   }
 
@@ -3445,6 +3491,8 @@ private struct ListColorEntry {
   let bounds: Anchor<CGRect>
   let color: Color
   let opacity: Double
+  /// Under the finger in camera mode: the picture shows through it clearer.
+  var pressed = false
   var clips: [Anchor<CGRect>] = []
 }
 
@@ -3480,14 +3528,15 @@ private struct ListColor: ViewModifier {
   @State private var id = UUID()
   let color: Color
   var opacity: Double = 1
+  var pressed = false
 
   func body(content: Content) -> some View {
     if shared {
       content.anchorPreference(key: ListColorKey.self, value: .bounds) {
-        [ListColorEntry(id: id, bounds: $0, color: color, opacity: opacity)]
+        [ListColorEntry(id: id, bounds: $0, color: color, opacity: opacity, pressed: pressed)]
       }
     } else {
-      content.background(color.opacity(opacity))
+      content.background(color.opacity(pressed ? opacity * 0.45 : opacity))
     }
   }
 }

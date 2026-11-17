@@ -52,7 +52,7 @@ struct LicensesPage: View {
     }
     .background(Color(.systemGroupedBackground))
     .task { if content == nil { content = await LicenseContent.load() } }
-    .navigationTitle("Licenses")
+    .navigationTitle("About & Licenses")
     .navigationBarTitleDisplayMode(.inline)
   }
 

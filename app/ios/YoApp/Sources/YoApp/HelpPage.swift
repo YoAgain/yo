@@ -2,7 +2,7 @@ import SwiftUI
 import UIKit
 import YoCore
 
-/// Help, feedback to the Yo team, and this build's information.
+/// Help & About: the tutorial card, How to Use and Contact Us, then this build's information and licenses.
 @MainActor
 struct HelpPage: View {
   @State private var showingMessage = false
@@ -21,42 +21,36 @@ struct HelpPage: View {
   }
 
   private var content: some View {
-    SettingsForm {
+    SettingsForm(profileFirst: true) {
       Section {
+        HelpHero().padding(.top, 20)
+      }
+      Section("Help") {
         Button {
           showingHowTo = true
         } label: {
-          HStack {
-            Label("Tutorial", systemImage: "hand.tap.fill").labelStyle(Tile(.amethyst))
-            Spacer()
-            Chevron()
+          SettingsNavigationLabel {
+            Label("How to Use", systemImage: "hand.tap.fill").labelStyle(Tile(.amethyst))
           }
-          .frame(maxWidth: .infinity, alignment: .leading)
-          .contentShape(Rectangle())
         }
-        .foregroundStyle(Color(.label))
         Button {
           showingMessage = true
         } label: {
-          HStack {
-            Label("Contact Us", systemImage: "envelope.fill").labelStyle(Tile(.amethyst))
-            SupportBadge()
-            Spacer()
-            Chevron()
+          SettingsNavigationLabel {
+            HStack {
+              Label("Contact Us", systemImage: "envelope.fill").labelStyle(Tile(.blue))
+              SupportBadge()
+            }
           }
-          .frame(maxWidth: .infinity, alignment: .leading)
-          .contentShape(Rectangle())
         }
-        .foregroundStyle(Color(.label))
       }
-      Section {
-        StatusPage(summaryOnly: true)
+      Section("About") {
         NavigationLink(value: SettingsView.Page.licenses) {
           SettingsNavigationLabel {
             LabeledContent {
               Text("Yo \(Self.marketingVersion)")
             } label: {
-              Label("Licenses", systemImage: "doc.text.fill").labelStyle(Tile(.gray))
+              Label("About & Licenses", systemImage: "info.circle.fill").labelStyle(Tile(.gray))
             }
           }
         }
@@ -66,11 +60,11 @@ struct HelpPage: View {
 
   var body: some View {
     content
-      .hitchScene("Help")
-      .navigationTitle("Help")
+      .hitchScene("Help & About")
+      .navigationTitle("Help & About")
       .navigationBarTitleDisplayMode(.inline)
       .toolbar {
-        ToolbarItem(placement: .principal) { Text("Help").font(.headline) }
+        ToolbarItem(placement: .principal) { Text("Help & About").font(.headline) }
       }
       .toolbar(.visible, for: .navigationBar)
       .sheet(isPresented: $showingMessage) { MessagePage() }

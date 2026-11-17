@@ -94,10 +94,6 @@ struct Intro<First: View>: View {
 /// The welcome's cards, available again from Help without the logo or account setup.
 struct IntroHelp: View {
   @Environment(\.dismiss) private var dismiss
-  /// From Settings › Help: the tutorial with Contact Us, Status and Licenses as buttons under it (Help's own page
-  /// is gone); from the Help page itself only the tutorial.
-  var links = false
-  @State private var messaging = false
   @State private var page = 0
   @State private var pageHeight: CGFloat = 480
 
@@ -106,7 +102,7 @@ struct IntroHelp: View {
     NavigationStack {
       VStack(spacing: 0) {
         Spacer(minLength: 0)
-        // The pages at their own height with their dots right under the words, the block centred above the buttons.
+        // The pages at their own height with their dots right under the words, the block centred.
         TabView(selection: $page) {
           ForEach(IntroCard.all.indices, id: \.self) { index in
             IntroPage(card: IntroCard.all[index], low: true).tag(index)
@@ -120,38 +116,6 @@ struct IntroHelp: View {
         }
         Dots(count: IntroCard.all.count, page: page) { next in withAnimation(.smooth) { page = next } }
         Spacer(minLength: 0)
-        if links {
-          VStack(spacing: 10) {
-            Button { messaging = true } label: {
-              HStack(spacing: 6) {
-                Label("Contact Us", systemImage: "envelope.fill")
-                SupportBadge()
-              }
-              .frame(maxWidth: .infinity)
-            }
-            HStack(spacing: 10) {
-              NavigationLink { StatusPage().background(Color(.systemGroupedBackground)) } label: {
-                // Its dot is the connection at a glance: green online, orange slow or offline.
-                HStack(spacing: 8) {
-                  Label("Status", systemImage: "waveform.path.ecg")
-                  StatusPage(wordOnly: true)
-                }
-                .frame(maxWidth: .infinity)
-              }
-              NavigationLink { LicensesPage() } label: {
-                Label("Licenses", systemImage: "doc.text").frame(maxWidth: .infinity)
-              }
-            }
-          }
-          // White buttons with black labels, as the welcome screen's Sign Up: never purple text on the purple.
-          .buttonStyle(.glassProminent)
-          .tint(.white)
-          .foregroundStyle(.black)
-          .controlSize(.large)
-          .font(.body.weight(.semibold))
-          .padding(.horizontal, 20)
-          .padding(.bottom, 24)
-        }
       }
       .foregroundStyle(.white)
       .background(Color.amethyst)
@@ -173,10 +137,37 @@ struct IntroHelp: View {
       }
       .toolbar(.hidden, for: .navigationBar)
     }
-    .sheet(isPresented: $messaging) { MessagePage() }
     .presentationBackground(Color.amethyst)
     .presentationDragIndicator(.visible)
     .presentationDetents([.large])
+  }
+}
+
+/// Help & About's card on top: the tutorial's pages, smaller, swiped through on amethyst with their dots.
+struct HelpHero: View {
+  @State private var page = 0
+  @State private var pageHeight: CGFloat = 320
+
+  var body: some View {
+    VStack(spacing: 0) {
+      TabView(selection: $page) {
+        ForEach(IntroCard.all.indices, id: \.self) { index in
+          IntroPage(card: IntroCard.all[index], low: true, zoom: 1).tag(index)
+        }
+      }
+      .tabViewStyle(.page(indexDisplayMode: .never))
+      .frame(height: pageHeight)
+      .background {
+        IntroPage(card: IntroCard.all[0], low: true, zoom: 1).fixedSize(horizontal: false, vertical: true)
+          .hidden()
+          .onGeometryChange(for: CGFloat.self) { $0.size.height } action: { pageHeight = $0 }
+      }
+      Dots(count: IntroCard.all.count, page: page) { next in withAnimation(.smooth) { page = next } }
+    }
+    .padding(.top, 24)
+    .foregroundStyle(.white)
+    .frame(maxWidth: .infinity)
+    .background(Color.amethyst, in: .rect(cornerRadius: 26))
   }
 }
 
@@ -240,14 +231,16 @@ private struct IntroPage: View {
   let card: IntroCard
   /// In the Help card: picture and words at their own height, no room around them (the card places them).
   var low = false
+  /// The picture's scale there: bigger in the tutorial sheet, which has the room.
+  var zoom: CGFloat = 1.35
 
   var body: some View {
     if low {
       VStack(spacing: 24) {
-        // Bigger in the Help card, which has the room: the whole picture scaled, gestures and all.
+        // The whole picture scaled, gestures and all.
         PhoneShot(picture: card.picture, gesture: card.gesture)
-          .scaleEffect(1.35, anchor: .top)
-          .frame(height: 190 * 743 / 540 * 1.35, alignment: .top)
+          .scaleEffect(zoom, anchor: .top)
+          .frame(height: 190 * 743 / 540 * zoom, alignment: .top)
         words
       }
       .padding(.horizontal, 28)

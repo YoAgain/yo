@@ -26,7 +26,6 @@ struct SettingsView: View {
   @Environment(AccountStore.self) private var accounts
 
   @State private var hasRecoveryKey = true
-  @State private var showingHelp = false
   @State private var currentIconName = UIApplication.shared.alternateIconName
   enum Page: Hashable {
     case account, help, status, contacts, signInSecurity, code, licenses, appIcon
@@ -41,7 +40,7 @@ struct SettingsView: View {
   /// Only pages with more below get the grabber and the large detent.
   private var expandable: Bool { path.last.map(Self.expands) ?? false }
   private static func expands(_ page: Page) -> Bool {
-    page == .contacts || page == .status || page == .licenses
+    page == .help || page == .contacts || page == .status || page == .licenses
   }
 
   private var smallDetent: PresentationDetent {
@@ -135,10 +134,11 @@ struct SettingsView: View {
               }
             }
             compactCard {
-              // Help opens the tutorial right away; Contact Us, Status and Licenses are buttons under it.
-              Button { showingHelp = true } label: {
+              // The tutorial card on top, How to Use and Contact Us, then About & Licenses.
+              NavigationLink(value: Page.help) {
                 HStack {
-                  Label("Help", systemImage: "questionmark.circle.fill").labelStyle(Tile(.amethyst))
+                  Label("Help & About", systemImage: "questionmark.circle.fill").labelStyle(
+                    Tile(.amethyst))
                   SupportBadge()
                   Spacer()
                   Chevron()
@@ -183,9 +183,6 @@ struct SettingsView: View {
       // Only this root ignores insets; pushed pages retain their navigation safe area.
       .ignoresSafeArea(.container, edges: [.top, .bottom])
 
-      // From the root, not from inside the measured card: presented from there it threw the card's layout off
-      // when the Help sheet closed.
-      .sheet(isPresented: $showingHelp) { IntroHelp(links: true) }
       .navigationDestination(for: Page.self) { page in
         switch page {
         case .account:
@@ -264,6 +261,8 @@ struct SettingsView: View {
         HitchMonitor.shared.scene = next.last.map { String(describing: $0) } ?? "settings root"
       #endif
       if next.last.map(Self.expands) ?? false {
+        // Help & About opens tall: its card on top, the list under it.
+        if next.count > path.count, next.last == .help { detent = .large }
         path = next
       } else {
         detent = smallDetent

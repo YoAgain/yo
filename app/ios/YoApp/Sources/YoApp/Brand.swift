@@ -1,5 +1,3 @@
-import CoreText
-import UIKit
 // The look of the brand guide (yo-lore/press-kit): Flat UI colours, white Montserrat Bold, upper and lower case as the
 // name "Yo". The original's unbroken list of bars from edge to edge; glass only for what floats over it.
 import SwiftUI
@@ -38,17 +36,6 @@ extension Font {
   /// The brand's typeface, bundled and declared in Info.plist (UIAppFonts).
   static func yo(_ size: CGFloat, relativeTo style: Font.TextStyle = .title) -> Font {
     .custom("Montserrat-Bold", size: size, relativeTo: style)
-  }
-
-  /// The brand's typeface with digits of one width (its tabular figures): "23" to "24" keeps the words in place.
-  /// SwiftUI's monospacedDigit() leaves a custom font's figures proportional.
-  static func yoTabular(_ size: CGFloat) -> Font {
-    guard let base = UIFont(name: "Montserrat-Bold", size: size) else { return yo(size) }
-    let tabular = base.fontDescriptor.addingAttributes([.featureSettings: [[
-      UIFontDescriptor.FeatureKey.type: kNumberSpacingType,
-      UIFontDescriptor.FeatureKey.selector: kMonospacedNumbersSelector,
-    ]]])
-    return Font(UIFont(descriptor: tabular, size: size))
   }
 }
 

@@ -129,8 +129,10 @@ final class Camera: NSObject, @unchecked Sendable {
       } else if let input {
         session.addInput(input)
       }
-      mirrorFrontCamera()
       session.commitConfiguration()
+      // The new input's connections exist only once the configuration is committed: set upright and mirrored then
+      // (inside it they were still the old camera's, and the selfie came in sideways).
+      mirrorFrontCamera()
       readZooms()
     }
   }

@@ -29,6 +29,8 @@ struct AccountPage: View {
   @State private var deleteProblem: String?
   @State private var syncFailed = false
   @State private var showingSecurity = false
+  /// The guide finished with Done from the account page: Security opens once its sheet is gone.
+  @State private var securityAfterGuide = false
   @State private var showingRecoveryHelp = false
   @State private var showingBlocked = false
 
@@ -183,8 +185,15 @@ struct AccountPage: View {
     .navigationDestination(isPresented: $showingBlocked) {
       BlockedPage()
     }
-    .sheet(isPresented: $securing) {
-      SecureNameSheet(only: securingStart, close: { securing = false })
+    .sheet(isPresented: $securing, onDismiss: {
+      if securityAfterGuide {
+        securityAfterGuide = false
+        showingSecurity = true
+      }
+    }) {
+      // Done lands in Security, where its switches are; opened from Security, it just closes back to it.
+      SecureNameSheet(only: securingStart, close: { securing = false },
+        done: { securityAfterGuide = !securityOnly })
     }
   }
 
