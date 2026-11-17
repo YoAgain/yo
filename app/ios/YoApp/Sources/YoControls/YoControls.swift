@@ -1,6 +1,7 @@
 // Yo in Control Center, on the Lock Screen and on the Action button (Settings › Action Button › Controls): "Send Yo"
 // to the friend or group picked when adding it, "Yo Back", "Yo Camera" and "Open Yo". Each runs its intent
-// (YoIntents.swift, linked from the app's sources); sending works while the iPhone is locked.
+// (YoIntents.swift, linked from the app's sources); sending works while the iPhone is locked. Beside them the widgets
+// (YoWidgets.swift).
 import AppIntents
 import Foundation
 import SwiftUI
@@ -12,6 +13,10 @@ struct YoControls: WidgetBundle {
     YoBackControl()
     YoCameraControl()
     OpenYoControl()
+    // The widgets (YoWidgets.swift).
+    YoFriendWidget()
+    YoListWidget()
+    YoBackWidget()
   }
 }
 

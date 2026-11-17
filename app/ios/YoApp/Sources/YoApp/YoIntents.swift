@@ -6,6 +6,7 @@
 // (Sources/YoControls links to this file); the system runs each where it chooses.
 import AppIntents
 import Foundation
+import WidgetKit
 import YoCore
 
 /// A friend or group on the list, as the app shows it to the extensions (ShareBridge.List): whom a Yo goes to.
@@ -77,6 +78,7 @@ struct SendYoIntent: AppIntent {
   func perform() async throws -> some IntentResult & ProvidesDialog {
     guard let owner = ShareBridge.readList()?.owner else { throw YoIntentError.signedOut }
     try await YoSend.send(to: friend.id, owner: owner)
+    WidgetSent.note(to: friend.id)
     return .result(dialog: "Sent Yo to \(friend.name)!")
   }
 }
@@ -91,7 +93,35 @@ struct YoBackIntent: AppIntent {
   func perform() async throws -> some IntentResult & ProvidesDialog {
     guard let last = ShareBridge.readLastYo() else { throw YoIntentError.noYoYet }
     try await YoSend.send(to: last.to, owner: last.owner)
+    WidgetSent.note(to: last.to, back: true)
     return .result(dialog: "Sent Yo to \(last.name)!")
+  }
+}
+
+/// The widgets' "Sent Yo!" (YoWidgets.swift): whom the newest Yo from an intent went to, shown on that friend's bar
+/// (and on Yo Back's, for a Yo back) for a moment, then the name again. A small file in the App Group.
+struct WidgetSent: Codable, Sendable {
+  let to: String
+  var back = false
+  let until: Date
+
+  /// How long a bar says "Sent Yo!".
+  static let shown: TimeInterval = 3
+
+  private static var file: URL? { ShareBridge.container?.appending(path: "widget-sent.json") }
+
+  static func note(to: String, back: Bool = false) {
+    guard let file, let data = try? JSONEncoder().encode(WidgetSent(to: to, back: back, until: .now + shown)) else { return }
+    try? data.write(to: file, options: [.atomic, .completeFileProtectionUntilFirstUserAuthentication])
+    WidgetCenter.shared.reloadAllTimelines()
+  }
+
+  /// The note while it is still to be shown.
+  static func read(now: Date = .now) -> WidgetSent? {
+    guard let file, let data = try? Data(contentsOf: file),
+      let sent = try? JSONDecoder().decode(WidgetSent.self, from: data), sent.until > now
+    else { return nil }
+    return sent
   }
 }
 

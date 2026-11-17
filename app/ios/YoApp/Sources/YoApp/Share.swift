@@ -1,6 +1,7 @@
 // The app's side of sharing (ShareBridge): it tells the extensions who is on the list, and sends what the share
 // extension could not send itself as soon as it opens, through the media outbox as a photo or video taken here.
 import Foundation
+import WidgetKit
 
 @MainActor
 enum ShareInbox {
@@ -23,7 +24,21 @@ enum ShareInbox {
       // Siri and Shortcuts know the friends by name ("Yo Mia"): told once the list is written.
       YoShortcuts.updateAppShortcutParameters()
     }
+    reloadWidgets()
   }
+
+  /// The widgets show the list as it is (YoWidgets.swift): told a moment after it changes, at most once in that
+  /// moment however often it changes meanwhile (a run of Yos reorders it with each).
+  private static func reloadWidgets() {
+    guard widgetReload == nil else { return }
+    widgetReload = Task {
+      try? await Task.sleep(for: .seconds(2))
+      widgetReload = nil
+      WidgetCenter.shared.reloadAllTimelines()
+    }
+  }
+
+  private static var widgetReload: Task<Void, Never>?
 
   private static let writing = DispatchQueue(label: "app.justyo.share-list", qos: .utility)
 
