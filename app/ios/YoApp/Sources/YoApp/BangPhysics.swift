@@ -206,7 +206,7 @@ struct BangPhysicsLayer: View {
     private static let totalRate = 30.0
     private static let step = BangSim.tick
     private static let budget = 0.004
-    private static let yoSize: CGFloat = 20
+    private static let yoSize: CGFloat = Metrics.rowFont  // exactly the bar font: a Yo never smaller
     private static let bangLength: Float = 14
 
     static func valid(_ rect: CGRect) -> Bool {

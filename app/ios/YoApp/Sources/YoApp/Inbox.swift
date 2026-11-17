@@ -395,6 +395,12 @@ final class Inbox {
         try? await Task.sleep(for: .seconds(1))
         continue
       }
+      // In the background iOS gives no turn on the shared state once its time is up (SharedAccess): the wait goes on
+      // in front again, rather than asking for a turn every few seconds in vain. Pushes bring Yos meanwhile.
+      if UIApplication.shared.applicationState == .background {
+        try? await Task.sleep(for: .seconds(1))
+        continue
+      }
       if !respelled {
         respelled = true
         Task { await respell(client: client, accounts: accounts, friends: friends) }
@@ -406,7 +412,7 @@ final class Inbox {
           await take(saved, contacts: known, client: client, friends: friends)
           fetchMedia(client: client)
         }
-        let (events, contacts) = try await Hub.run { try Perf.timed("inbox.listen.sync.core") { (try client.sync(waitS: 25), client.contacts()) } }
+        let (events, contacts) = try await Hub.run(reportErrors: false) { try Perf.timed("inbox.listen.sync.core") { (try client.sync(waitS: 25), client.contacts()) } }
         lastSync = .now
         Perf.mark("listen.events \(events.count)")
         guard client === accounts.client else { continue }  // signed out meanwhile: not for this account
@@ -420,6 +426,8 @@ final class Inbox {
         accounts.replaced(client)
         return
       } catch {
+        // Signed out (or in again) meanwhile: the old client is closed and its wait fails with `State`, as expected.
+        if client === accounts.client { Diagnostics.recordUnreported(error) }
         try? await Task.sleep(for: .seconds(5))
       }
     }

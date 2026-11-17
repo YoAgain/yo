@@ -2811,7 +2811,6 @@ private struct SweepingYo: View {
     HStack(spacing: 0) {
       Text("Yo")
         .modifier(YoIntensity(incoming: true, pulse: 0))
-        .scaleEffect(landed ? 1 : 0.55, anchor: .trailing)
         .offset(x: landed ? 0 : BarLine.endPadding + 40 + Double(bangs) * 9)  // from beyond the screen's edge
         .opacity(gone ? 0 : 1)
       Text(String(repeating: "!", count: bangs)).hidden()

@@ -19,9 +19,9 @@ final class SharedAccess: @unchecked Sendable {
   static func resetContention() {
     contentionGate.withLock { blockedSince.removeAll() }
   }
-  private static func log(_ reason: String, _ code: Int32, file: String = #fileID, line: Int = #line, place: String = #function) {
+  private static func log(_ reason: String, _ code: Int32, report: Bool = true, file: String = #fileID, line: Int = #line, place: String = #function) {
     #if os(iOS)
-    Diagnostics.record(NSError(domain: "SharedAccess", code: Int(code)), place: place, file: file, line: line)
+    if report { Diagnostics.record(NSError(domain: "SharedAccess", code: Int(code)), place: place, file: file, line: line) }
     #endif
     #if canImport(os)
     Logger(subsystem: "app.justyo", category: "shared-lock").error("\(reason, privacy: .public); errno=\(code, privacy: .public)")
@@ -95,7 +95,13 @@ final class SharedAccess: @unchecked Sendable {
     guard hold != nil || turn.lifetime != nil else { log("no revocable lock lifetime", ECANCELED); close(fd); return nil }
     guard turn.lifetime?.add(turn) != false else { log("extension lifetime ended", ECANCELED); close(fd); return nil }
     if let hold {
-      guard let end = hold({ turn.revoke() }) else { log("background time refused", ECANCELED); turn.finish(); return nil }
+      // Refused in the background once iOS gives no more time (beginBackgroundTask: invalid): expected, no turn
+      // until the app is in front again (the caller tries again then); only logged here, never reported.
+      guard let end = hold({ turn.revoke() }) else {
+        log("background time refused", ECANCELED, report: false)
+        turn.finish()
+        return nil
+      }
       turn.end = end
     }
     let deadline = ProcessInfo.processInfo.systemUptime + min(seconds, 10)

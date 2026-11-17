@@ -202,7 +202,16 @@ final class HubTransport: HttpTransport {
     let diagnosticUpload = path == "/v1/errors" || path == "/v1/crash" || path == "/v1/diagnostics/crash"
     // Only static route components: never account, blob, group or username path values.
     let codePlace = "HubTransport.request \(method) " + path.split(separator: "/").prefix(2).joined(separator: "/")
-    task.delegate = Limited(diagnosticPlace: diagnosticUpload ? nil : codePlace) { data, response, error in
+    // Expected, never reported: a cancel is always ours (a revoked turn; too large is reported as 413), the inbox's
+    // long wait cut off (timed out, connection lost: the next wait follows), a name too short or taken while it is
+    // typed, no storage written yet. Every other failure is.
+    let route = path.split(separator: "?", maxSplits: 1).first.map(String.init) ?? path
+    let longPoll = method == "GET" && path.hasPrefix("/v1/inbox?wait=")
+    let quietErrors: Set<Int> = longPoll
+      ? [NSURLErrorCancelled, NSURLErrorTimedOut, NSURLErrorNetworkConnectionLost] : [NSURLErrorCancelled]
+    let quietStatus: Set<UInt16> =
+      method != "GET" ? [] : route.hasPrefix("/v1/username/") ? [400, 409] : route == "/v1/storage" ? [404] : []
+    task.delegate = Limited(diagnosticPlace: diagnosticUpload ? nil : codePlace, quiet: quietErrors) { data, response, error in
       answer.result =
         if let error {
           HttpResult(status: 0, body: Data(), error: error)
@@ -222,16 +231,17 @@ final class HubTransport: HttpTransport {
       if let access { try access.start(task) }
       else { task.resume() }
     } catch {
-      if !diagnosticUpload { Diagnostics.record(error, place: codePlace) }
+      // The turn ended before the request could start (see below): not reported either.
       task.cancel()
       return HttpResult(status: 0, body: Data(), error: "shared storage time ended")
     }
     done.wait()
     if access?.expired == true {
-      if !diagnosticUpload { Diagnostics.record(NSError(domain: "SharedAccess", code: Int(ECANCELED)), place: codePlace) }
+      // Not reported: the turn ends on leaving the foreground or with the background time, and the request with it
+      // (cancelled); the caller tries again in its next turn.
       return HttpResult(status: 0, body: Data(), error: "shared storage time ended")
     }
-    if !diagnosticUpload, answer.result.status >= 400 {
+    if !diagnosticUpload, answer.result.status >= 400, !quietStatus.contains(answer.result.status) {
       Diagnostics.record(NSError(domain: "HTTP", code: Int(answer.result.status)), place: codePlace)
     }
     Availability.network(answer.result.status == 0 || answer.result.status >= 500)
@@ -262,9 +272,15 @@ final class HubTransport: HttpTransport {
     private var response: URLResponse?
     private var tooLarge = false
     private let diagnosticPlace: String?
+    /// URL error codes that are expected here (see `request`): not reported.
+    private let quiet: Set<Int>
     private let done: (Data, URLResponse?, String?) -> Void
 
-    init(diagnosticPlace: String?, done: @escaping (Data, URLResponse?, String?) -> Void) { self.done = done; self.diagnosticPlace = diagnosticPlace }
+    init(diagnosticPlace: String?, quiet: Set<Int>, done: @escaping (Data, URLResponse?, String?) -> Void) {
+      self.done = done
+      self.diagnosticPlace = diagnosticPlace
+      self.quiet = quiet
+    }
 
     func urlSession(
       _ session: URLSession, dataTask: URLSessionDataTask, didReceive response: URLResponse,
@@ -289,7 +305,10 @@ final class HubTransport: HttpTransport {
     }
 
     func urlSession(_ session: URLSession, task: URLSessionTask, didCompleteWithError error: Error?) {
-      if let error, let diagnosticPlace { Diagnostics.record(error, place: diagnosticPlace) }
+      if let error, let diagnosticPlace,
+        !((error as NSError).domain == NSURLErrorDomain && quiet.contains((error as NSError).code)) {
+        Diagnostics.record(error, place: diagnosticPlace)
+      }
       if tooLarge {
         if let diagnosticPlace { Diagnostics.record(NSError(domain: "HubTransport", code: 413), place: diagnosticPlace) }
         done(Data(), nil, "answer too large")

@@ -52,10 +52,12 @@ struct ContactState: Sendable {
   }
 
   static func load(_ client: YoClient, user: String) throws -> ContactState {
-    ContactState(
-      contact: client.contacts().first { $0.user == user },
+    let contact = client.contacts().first { $0.user == user }
+    return ContactState(
+      contact: contact,
       accountKey: client.accountKeyOf(user: user),
-      safetyNumber: Diagnostics.attempt({ try client.safetyNumber(who: user) }),
+      // No contact yet (no chat with them so far): no safety number, which the core answers with `NotOnYo`.
+      safetyNumber: contact == nil ? nil : Diagnostics.attempt({ try client.safetyNumber(who: user) }),
       sessions: try client.sessionsWith(user: user))
   }
 }
