@@ -358,3 +358,5 @@ a.lg:hover { color: var(--text); }
 .extra { margin-top: 4px; }
 .extra summary { display: none; }
 .composer { margin-bottom: 14px; }
+.sbar .dead { background: var(--bad); }
+.fact.bad b { color: var(--bad); }

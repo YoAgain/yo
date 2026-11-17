@@ -218,9 +218,11 @@ if (document.body.classList.contains("login")) {
     const [p, b] = (app || "").split("/");
     return p && /^\d+$/.test(b || "") ? [p, Number(b)] : null;
   };
-  let newest = {};
+  // The hub's minimum (YO_MIN_APP, "ios/…"): a build below it is refused by the hub ("dead": the user must update).
+  let newest = {}, minApp = null;
   const findNewest = (h) => {
     newest = {};
+    minApp = parse(h?.min_app);
     for (const a of [...(h?.apps || []).map(([x]) => x), ...(h?.users || []).map((u) => u.app)]) {
       const v = parse(a);
       if (v && !(newest[v[0]] >= v[1])) newest[v[0]] = v[1];
@@ -228,11 +230,13 @@ if (document.body.classList.contains("login")) {
   };
   const appState = (app) => {
     const v = parse(app);
-    return !v || newest[v[0]] == null ? null : v[1] >= newest[v[0]] ? "new" : "old";
+    if (!v || newest[v[0]] == null) return null;
+    if (minApp && minApp[0] === v[0] && v[1] < minApp[1]) return "dead";
+    return v[1] >= newest[v[0]] ? "new" : "old";
   };
   const appTag = (app) => {
     const a = appState(app);
-    const t = tag(a === "new" ? "newest" : a === "old" ? "update" : app ? build(app) : "–", a === "new" ? "ok" : a === "old" ? "warn" : "muted");
+    const t = tag(a === "new" ? "newest" : a === "old" ? "update" : a === "dead" ? "too old" : app ? build(app) : "–", a === "new" ? "ok" : a === "old" ? "warn" : a === "dead" ? "bad" : "muted");
     t.title = app || "";
     return t;
   };
@@ -345,11 +349,12 @@ if (document.body.classList.contains("login")) {
 
       // App versions.
       let fresh = 0, old = 0, other = 0;
-      for (const [app, c] of h.apps || []) { const a = appState(app); if (a === "new") fresh += c; else if (a === "old") old += c; else other += c; }
-      set("ug-fresh", `${fresh}/${fresh + old + other}`);
-      set("ug-apps-cap", `${old ? `${old} older · ` : ""}min ${h.min_app ? build(h.min_app) : "not pinned"}${other ? ` · ${other} unknown` : ""}`);
+      let dead = 0;
+      for (const [app, c] of h.apps || []) { const a = appState(app); if (a === "new") fresh += c; else if (a === "old") old += c; else if (a === "dead") dead += c; else other += c; }
+      set("ug-fresh", `${fresh}/${fresh + old + dead + other}`);
+      set("ug-apps-cap", [`${fresh} newest`, old ? `${old} update` : "", dead ? `${dead} too old` : "", other ? `${other} unknown` : "", `min ${h.min_app ? build(h.min_app) : "not pinned"}`].filter(Boolean).join(" · "));
       $("ug-apps-cap").title = `newest: ${Object.entries(newest).map(([p, b]) => `${p} ${b}`).join(" · ") || "–"}`;
-      $("ug-apps-bar").replaceChildren(...[[fresh, "new", "on the newest build"], [old, "old", "on an older build"], [other, "a0", "unknown"]]
+      $("ug-apps-bar").replaceChildren(...[[fresh, "new", "on the newest build"], [old, "old", "on an older build, still allowed"], [dead, "dead", "below the minimum: refused, must update"], [other, "a0", "unknown"]]
         .filter(([v]) => v > 0).map(([v, cls, t]) => { const s = el("span", cls); s.style.flexGrow = v; s.title = `${v} ${t}`; return s; }));
     }
   };
@@ -499,7 +504,7 @@ if (document.body.classList.contains("login")) {
     const fact = (k, v, cls, title) => { const f = el("span", `fact ${cls || ""}`); f.append(el("small", null, k), el("b", null, v)); if (title) f.title = title; facts.append(f); };
     fact("signed up", rel(u.created), "", date(u.created));
     fact("seen", seenDay(u.last_seen), "", u.last_seen ? new Date(u.last_seen).toLocaleDateString() : "");
-    fact("app", u.app ? build(u.app) : "–", a === "new" ? "ok" : a === "old" ? "warn" : "", u.app ? `${u.app}${a === "new" ? " · newest" : a === "old" ? " · an older build" : ""}` : "");
+    fact("app", u.app ? build(u.app) : "–", a === "new" ? "ok" : a === "old" ? "warn" : a === "dead" ? "bad" : "", u.app ? `${u.app}${a === "new" ? " · newest" : a === "old" ? " · an older build" : a === "dead" ? " · below the minimum: must update" : ""}` : "");
     fact("secured", u.secured ? "yes" : "no", u.secured ? "ok" : "", u.backup_at ? `backup ${date(u.backup_at)}` : "");
     fact("push", u.push ? "on" : "off", "", "");
     if (u.queued) fact("waiting", num(u.queued), "", "messages waiting for this user's devices");
