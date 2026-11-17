@@ -2776,11 +2776,13 @@ private struct SweepingYo: View {
   @State private var gone = false
 
   var body: some View {
+    // A "!" from beyond the screen's edge onto the end of the label, where the new "!" appears (owner: "!" again, not
+    // a "Yo").
     HStack(spacing: 0) {
-      Text("Yo")
-        .offset(x: landed ? 0 : BarLine.endPadding + 40 + Double(bangs) * 9)  // from beyond the screen's edge
+      Text("!")
+        .offset(x: landed ? 0 : BarLine.endPadding + 40)
         .opacity(gone ? 0 : 1)
-      Text(String(repeating: "!", count: bangs) + (more > 0 ? " +\(more)" : "")).monospacedDigit().hidden()
+      Text(more > 0 ? " +\(more)" : "").monospacedDigit().hidden()
     }
     .lineLimit(1)
     .fixedSize()
