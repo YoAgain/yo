@@ -162,6 +162,7 @@ final class HubTransport: HttpTransport {
 
   private static func plain() -> URLSessionConfiguration {
     let config = URLSessionConfiguration.ephemeral
+    config.httpAdditionalHeaders = ["Connection": "keep-alive"]
     config.httpCookieStorage = nil
     config.httpShouldSetCookies = false
     config.urlCache = nil

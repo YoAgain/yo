@@ -75,9 +75,9 @@ fn a_send_goes_into_the_outbox_when_receiving_first_is_refused_for_now() {
     let mut a = by_name(http.clone(), &format!("Busy{n}"), None).unwrap();
     let mut b = by_name(Http::new(hub.url()), &format!("Ybus{n}"), None).unwrap();
     a.send(b.user_id(), Content::Text("first".into())).unwrap();
-    http.fault("/v1/inbox", Fault::Answer(429));
+    http.fault("/v1/inbox?wait=", Fault::Answer(429));
     a.send(b.user_id(), Content::Text("second".into())).unwrap();
-    http.fault("/v1/inbox", Fault::Answer(503));
+    http.fault("/v1/inbox?wait=", Fault::Answer(503));
     a.send(b.user_id(), Content::Text("third".into())).unwrap();
     assert_eq!(texts(&b.sync(0).unwrap()), ["first", "second", "third"]);
 }

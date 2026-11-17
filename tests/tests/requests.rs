@@ -187,6 +187,7 @@ fn requests_are_limited_per_sender_and_a_blocked_stranger_takes_nobody_elses() {
     let (mut t, _, _) = account(&hub, "TOM");
     t.send_yo(&pb).unwrap();
     assert_eq!(t.waiting(), 0, "{:?}", t.drop_reasons());
+    a.sync(0).unwrap(); // foreground reception takes in the key rotated by blocking
     a.send_yo(&pb).unwrap();
     assert_eq!(a.waiting(), 0);
     let events = b.sync(0).unwrap();

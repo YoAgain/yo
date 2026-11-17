@@ -1,4 +1,4 @@
-//! Reserved service Yos stay out of app events and encrypted Account Sync storage.
+//! Probes stay silent; explicitly added PING is an ordinary contact.
 use std::time::Duration;
 use yo_core::{state, Client, Content, Event, Push};
 use yo_tests::{register, Http, TestHub};
@@ -17,10 +17,10 @@ fn silent_probe_measures_a_real_yo_and_preserves_other_events_and_storage() {
     alice.maintenance().unwrap();
     let alice_id = alice.user_id().to_owned();
     let responder = std::thread::spawn(move || loop {
-        let events = ping.sync(0).unwrap();
-        if events.iter().any(|e| matches!(e, Event::Message { content: Content::Yo, .. })) {
+        ping.sync(0).unwrap();
+        if let Some((user, token)) = ping.take_probe_requests().pop() {
             bob.send_yo(&alice_id).unwrap();
-            ping.send_yo(&alice_id).unwrap();
+            ping.echo_probe(&user, token).unwrap();
             break;
         }
         std::thread::sleep(Duration::from_millis(5));
@@ -58,8 +58,9 @@ fn timed_out_and_unsolicited_answers_stay_silent_after_restore() {
     let before = storage(&alice);
     assert_eq!(alice.round_trip_probe("PING", 30).unwrap(), None);
     assert!(alice.contacts().is_empty());
-    assert!(ping.sync(0).unwrap().iter().any(|e| matches!(e, Event::Message { content: Content::Yo, .. })));
-    ping.send_yo(alice.user_id()).unwrap();
+    ping.sync(0).unwrap();
+    let (user, token) = ping.take_probe_requests().pop().unwrap();
+    ping.echo_probe(&user, token).unwrap();
     // Reopening has no active waiter. The late answer must still be consumed silently.
     let mut restored = Client::restore(Http::new(hub.url()), &alice.export(&[42; 32]), &[42; 32]).unwrap();
     restored.set_trust_roots(vec![yo_tests::trust_root()]);
@@ -94,11 +95,11 @@ fn repeated_probes_work_with_requests_closed_and_never_change_synced_storage() {
         let mut answered = 0;
         while answered < 3 {
             assert!(std::time::Instant::now() < deadline);
-            for event in ping.sync(0).unwrap() {
-                if matches!(event, Event::Message { content: Content::Yo, .. }) {
-                    ping.send_yo(&user).unwrap();
-                    answered += 1;
-                }
+            ping.sync(0).unwrap();
+            for (sender, token) in ping.take_probe_requests() {
+                assert_eq!(sender, user);
+                ping.echo_probe(&sender, token).unwrap();
+                answered += 1;
             }
             std::thread::sleep(Duration::from_millis(5));
         }
@@ -141,8 +142,10 @@ fn warm_probe_reuses_session_without_catch_up() {
     let responder = std::thread::spawn(move || {
         for _ in 0..2 {
             loop {
-                if ping.sync(10).unwrap().iter().any(|e| matches!(e, Event::Message { content: Content::Yo, .. })) {
-                    ping.send_yo(&user).unwrap();
+                ping.sync(10).unwrap();
+                if let Some((sender, token)) = ping.take_probe_requests().pop() {
+                    assert_eq!(sender, user);
+                    ping.echo_probe(&sender, token).unwrap();
                     break;
                 }
             }
@@ -158,6 +161,10 @@ fn warm_probe_reuses_session_without_catch_up() {
     let routes: Vec<_> = sent.iter().map(|(method, path, _)| (method.as_str(), path.as_str())).collect();
     eprintln!("warm probe: {} HTTP requests, {ms} ms: {routes:?}", routes.len());
     assert_eq!(routes.len(), 2, "one sealed POST and one long-poll GET");
+    assert!(sent
+        .iter()
+        .filter(|(method, _, _)| method == "POST")
+        .all(|(_, _, body)| body[0] == yo_wire::envelope::SEALED));
     assert!(routes.contains(&("GET", "/v1/inbox?wait=3")));
     assert!(!routes.iter().any(|(_, path)| path.contains("lookup") || *path == "/v1/inbox?wait=0"));
 }
@@ -176,5 +183,180 @@ fn echo_answers_before_inbox_maintenance_without_catch_up() {
     assert!(!sent
         .iter()
         .any(|(_, path, _)| path.contains("lookup") || path.contains("wait=") || path.ends_with("/ack")));
-    assert!(alice.sync(0).unwrap().is_empty(), "PING's echo is silent");
+    assert!(
+        alice.sync(0).unwrap().iter().any(|e| matches!(e, Event::Message { content: Content::Yo, .. })),
+        "explicitly writing to PING makes its echo visible"
+    );
+}
+
+#[test]
+fn normal_warm_request_counts() {
+    let hub = TestHub::start();
+    let http = Http::new(hub.url());
+    let mut alice = register(http.clone(), "ALICE", None);
+    let bh = Http::new(hub.url());
+    let mut bob = register(bh.clone(), "BOB", None);
+    alice.send_yo("BOB").unwrap();
+    bob.sync(0).unwrap();
+    bob.send_yo(alice.user_id()).unwrap();
+    alice.sync(0).unwrap();
+    alice.after_sync().unwrap();
+    bob.sync(0).unwrap();
+    bob.after_sync().unwrap();
+    for _ in 0..2 {
+        alice.sync(0).unwrap();
+        alice.after_sync().unwrap();
+        bob.sync(0).unwrap();
+        bob.after_sync().unwrap();
+    }
+    http.sent.lock().unwrap().clear();
+    alice.send_yo(bob.user_id()).unwrap();
+    let sent = http.sent.lock().unwrap().clone();
+    eprintln!(
+        "normal warm send: {} requests: {:?}",
+        sent.len(),
+        sent.iter().map(|(m, p, _)| (m, p)).collect::<Vec<_>>()
+    );
+    assert_eq!(sent.len(), 1, "warm send is exactly one POST");
+    assert_eq!(sent[0].0, "POST");
+    assert_eq!(sent[0].2[0], yo_wire::envelope::SEALED, "the single request uses sealed sender");
+    bh.sent.lock().unwrap().clear();
+    bob.sync(25).unwrap();
+    let received = bh.sent.lock().unwrap().clone();
+    assert_eq!(received.len(), 1, "receive before housekeeping is one long-poll GET");
+    eprintln!(
+        "normal receive: {} requests: {:?}",
+        received.len(),
+        received.iter().map(|(m, p, _)| (m, p)).collect::<Vec<_>>()
+    );
+}
+
+#[test]
+fn added_ping_shows_normal_yos_but_only_the_matched_probe_is_consumed() {
+    let hub = TestHub::start();
+    let mut alice = register(Http::new(hub.url()), "ALICE", None);
+    let mut ping = register(Http::new(hub.url()), "PING", None);
+    // A previous silent probe must not prevent subsequently adding PING.
+    assert_eq!(alice.round_trip_probe("PING", 10).unwrap(), None);
+    ping.sync(0).unwrap();
+    let (user, late) = ping.take_probe_requests().pop().unwrap();
+    alice.set_friend(ping.user_id(), Some("PING".into()), None).unwrap();
+    alice.send_yo("PING").unwrap();
+    assert_eq!(alice.friends().len(), 1);
+    assert_eq!(alice.contacts().len(), 1);
+    let probe = alice.round_trip_probe_begin("PING", 3000).unwrap();
+    let received = ping.sync(0).unwrap();
+    assert_eq!(received.iter().filter(|e| matches!(e, Event::Message { content: Content::Yo, .. })).count(), 1);
+    let (_, token) = ping.take_probe_requests().pop().unwrap();
+    // An old reply must not complete the new measurement, even if it arrives first.
+    ping.echo_probe(&user, late).unwrap();
+    let mut reply = probe.receive(3000).unwrap();
+    assert!(!alice.round_trip_probe_poll(&mut reply).unwrap());
+    let probe = alice.round_trip_probe_wait(&reply, 3000).unwrap();
+    ping.echo_yo(&user).unwrap();
+    ping.echo_probe(&user, token).unwrap();
+    let mut reply = probe.receive(3000).unwrap();
+    if !alice.round_trip_probe_poll(&mut reply).unwrap() {
+        let probe = alice.round_trip_probe_wait(&reply, 3000).unwrap();
+        let mut reply = probe.receive(3000).unwrap();
+        assert!(alice.round_trip_probe_poll(&mut reply).unwrap());
+    }
+    let events = alice.saved_for_app().unwrap();
+    assert_eq!(events.iter().filter(|e| matches!(e, Event::Message { content: Content::Yo, .. })).count(), 1);
+    assert_eq!(alice.friends().len(), 1);
+}
+
+#[test]
+fn empty_inbox_passes_do_not_save_full_state() {
+    use std::sync::{
+        atomic::{AtomicUsize, Ordering},
+        Arc,
+    };
+    struct Saves(AtomicUsize);
+    impl yo_core::Store for Saves {
+        fn save(&self, _: Vec<u8>) -> Result<(), String> {
+            self.0.fetch_add(1, Ordering::Relaxed);
+            Ok(())
+        }
+    }
+    let hub = TestHub::start();
+    let mut alice = register(Http::new(hub.url()), "ALICE", None);
+    alice.maintenance().unwrap();
+    let saves = Arc::new(Saves(AtomicUsize::new(0)));
+    alice.persist_to(saves.clone(), [42; 32]).unwrap();
+    saves.0.store(0, Ordering::Relaxed);
+    for _ in 0..3 {
+        assert!(alice.sync(0).unwrap().is_empty());
+    }
+    assert_eq!(saves.0.load(Ordering::Relaxed), 0);
+}
+
+#[test]
+fn failed_probe_keeps_an_added_pings_ordinary_outbox() {
+    let hub = TestHub::start();
+    let http = Http::new(hub.url());
+    let mut alice = register(http.clone(), "ALICE", None);
+    let mut ping = register(Http::new(hub.url()), "PING", None);
+    alice.send_yo("PING").unwrap();
+    ping.sync(0).unwrap();
+    ping.echo_yo(alice.user_id()).unwrap();
+    alice.sync(0).unwrap();
+    alice.after_sync().unwrap();
+    let path = yo_wire::api::deliver_path(&yo_tests::user_id(ping.user_id()));
+    // Leave a normal Yo queued, then refuse every attempted delivery during a probe.
+    for _ in 0..12 {
+        http.fault(&path, yo_tests::Fault::Answer(503));
+    }
+    alice.send_yo("PING").unwrap();
+    assert_eq!(alice.round_trip_probe("PING", 10).unwrap(), None);
+    let (state, _) = state::open(&alice.export(&[42; 32]), &[42; 32]).unwrap();
+    let contents: Vec<_> = state
+        .outbox
+        .iter()
+        .filter(|item| item.user == ping.user_id())
+        .map(|item| {
+            let plain: yo_wire::envelope::Plain = yo_wire::decode(&item.plain).unwrap();
+            yo_wire::content::Message::decode(plain.content.as_slice()).unwrap().content
+        })
+        .collect();
+    assert!(contents.contains(&Content::Yo));
+    assert!(!contents.iter().any(|c| matches!(c, Content::Probe(_))));
+    http.faults.lock().unwrap().clear();
+    alice.sync(0).unwrap();
+    assert_eq!(
+        ping.sync(0).unwrap().iter().filter(|e| matches!(e, Event::Message { content: Content::Yo, .. })).count(),
+        1
+    );
+}
+
+#[test]
+fn a_probe_to_an_added_ping_does_not_change_account_storage() {
+    let hub = TestHub::start();
+    let mut alice = register(Http::new(hub.url()), "ALICE", None);
+    let mut ping = register(Http::new(hub.url()), "PING", None);
+    alice.maintenance().unwrap();
+    ping.maintenance().unwrap();
+    alice.send_yo("PING").unwrap();
+    ping.sync(0).unwrap();
+    ping.echo_yo(alice.user_id()).unwrap();
+    alice.set_friend(ping.user_id(), Some("PING".into()), None).unwrap();
+    for _ in 0..3 {
+        alice.sync(0).unwrap();
+        alice.after_sync().unwrap();
+        ping.sync(0).unwrap();
+        ping.after_sync().unwrap();
+    }
+    let before = storage(&alice);
+    let responder = std::thread::spawn(move || loop {
+        ping.sync(3).unwrap();
+        if let Some((user, token)) = ping.take_probe_requests().pop() {
+            ping.echo_probe(&user, token).unwrap();
+            break;
+        }
+    });
+    assert!(alice.round_trip_probe("PING", 3000).unwrap().is_some());
+    responder.join().unwrap();
+    assert!(alice.saved_for_app().unwrap().is_empty());
+    assert_eq!(storage(&alice), before);
+    assert_eq!(alice.friends().len(), 1);
 }

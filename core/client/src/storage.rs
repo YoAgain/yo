@@ -324,12 +324,10 @@ impl Client {
     /// the next `sync` or `maintenance`.
     pub fn set_friend(&mut self, user: &str, name: Option<String>, color: Option<u8>) -> Result<()> {
         crate::user_bytes(user)?;
-        if self.probe_service(user) {
-            return Ok(());
-        }
         if name.as_ref().is_some_and(|n| n.len() > MAX_FRIEND_NAME) {
             return Err(Error::Protocol("friend's name too long"));
         }
+        self.promote_contact(user);
         let now = crate::wall_ms();
         let friend = self.state.storage.friends.entry(user.to_owned()).or_default();
         if friend.name.value != name {
@@ -435,6 +433,12 @@ impl Client {
     /// The profile keys the storage holds, applied: this account's (a new phone's, or one made on another device of
     /// it), and the contacts' this device does not know (a new phone).
     fn apply_keys(&mut self) {
+        let friends: Vec<_> =
+            self.state.storage.friends.iter().filter(|(_, f)| !f.removed.value).map(|(user, _)| user.clone()).collect();
+        for user in friends {
+            self.promote_contact(&user);
+        }
+
         let own = self.state.storage.profile_key.value.as_deref().and_then(decode_key);
         match own {
             Some(key) if self.state.profile_key != Some(key) => {

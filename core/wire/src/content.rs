@@ -34,6 +34,9 @@ pub const TYPE_GROUP: u16 = 8;
 /// The sender's profile key (spec 4.10): with it, the receiver's deliveries to the sender are a contact's, not a
 /// request. Never shown.
 pub const TYPE_PROFILE_KEY: u16 = 10;
+/// Silent roundtrip request / response, carrying a random 32-byte token.
+pub const TYPE_PROBE: u16 = 11;
+pub const TYPE_PROBE_REPLY: u16 = 12;
 
 /// A group's master key (Signal's `GroupMasterKey`, zkgroup): 32 random bytes its creator chooses; its members hold it,
 /// the hub never does. The group's id at the hub (its `GroupIdentifier`) is derived from it.
@@ -112,6 +115,8 @@ pub enum Content {
     /// The sender's profile key: what the receiver shows the hub so that its deliveries to the sender are a contact's
     /// (spec 4.10). Never shown.
     ProfileKey([u8; 32]),
+    Probe([u8; 32]),
+    ProbeReply([u8; 32]),
     /// A type this version does not know: newer apps may send it.
     Unknown(u16),
 }
@@ -291,6 +296,8 @@ impl Message {
                 let location = crate::encode(&Location { lat_e7: *lat_e7 as u32, lon_e7: *lon_e7 as u32 });
                 (TYPE_LOCATION, trailer(location))
             }
+            Content::Probe(token) => (TYPE_PROBE, token.to_vec()),
+            Content::ProbeReply(token) => (TYPE_PROBE_REPLY, token.to_vec()),
             Content::Receipt => (TYPE_RECEIPT, Vec::new()),
             Content::Group(tag) => (TYPE_GROUP, crate::encode(tag)),
             Content::ProfileKey(key) => (TYPE_PROFILE_KEY, crate::encode(&ProfileKeyBody { key: *key })),
@@ -342,6 +349,8 @@ impl Message {
             }
             TYPE_RECEIPT if !body.is_empty() => return Err(Error::Format),
             TYPE_RECEIPT => Content::Receipt,
+            TYPE_PROBE => Content::Probe(body.try_into().map_err(|_| Error::Format)?),
+            TYPE_PROBE_REPLY => Content::ProbeReply(body.try_into().map_err(|_| Error::Format)?),
             TYPE_GROUP => Content::Group(crate::decode::<GroupTag>(body)?),
             TYPE_PROFILE_KEY => Content::ProfileKey(crate::decode::<ProfileKeyBody>(body)?.key),
             other => Content::Unknown(other),
@@ -377,6 +386,8 @@ mod tests {
             Content::Link("https://justyo.co".into()),
             Content::Location { lat_e7: -338_688_000, lon_e7: 1_512_093_000 },
             Content::Receipt,
+            Content::Probe([1; 32]),
+            Content::ProbeReply([2; 32]),
         ] {
             let message = Message { sent_at_ms: 1_762_000_000_000, group: None, content };
             assert_eq!(Message::decode(&message.encode().unwrap()).unwrap(), message);

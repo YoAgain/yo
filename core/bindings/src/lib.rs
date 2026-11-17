@@ -295,7 +295,11 @@ impl From<Content> for MessageKind {
             Content::Location { lat_e7, lon_e7 } => MessageKind::Location { lat_e7, lon_e7 },
             Content::Unknown(kind) => MessageKind::Unsupported { kind },
             // Never an event (spec 4.5, 4.6).
-            Content::Receipt | Content::Group(_) | Content::ProfileKey(_) => MessageKind::Unsupported { kind: 0 },
+            Content::Receipt
+            | Content::Group(_)
+            | Content::ProfileKey(_)
+            | Content::Probe(_)
+            | Content::ProbeReply(_) => MessageKind::Unsupported { kind: 0 },
         }
     }
 }
@@ -675,8 +679,8 @@ impl YoClient {
         }
     }
 
-    /// The user id a send goes to: a name is asked of the hub, never taken as this device knew it (it may have
-    /// changed hands, spec 4.2), without holding the client. `NotOnYo`: nobody by that name.
+    /// Explicitly typed names are discovery: resolve their current owner without holding the client.
+    /// Normal contact sends already carry the pinned user id and reuse their sessions directly.
     fn user_for(&self, to: String) -> Result<String, YoError> {
         if Client::is_user_id(&to) {
             return Ok(to);

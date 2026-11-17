@@ -914,6 +914,21 @@ fn receive(bot: &Bot, events: &SyncSender<Event>) {
                 backoff = Backoff::default();
                 let changed = received.iter().any(|event| matches!(event, Event::GroupChanged { .. }));
                 if bot.echo {
+                    let probes = bot.client().take_probe_requests();
+                    for (user, token) in probes {
+                        if limits.allow(&user, Instant::now()) {
+                            match bot.client().echo_probe(&user, token) {
+                                Ok(_) => {
+                                    answered += 1;
+                                    bot.log(format!("echo answered={answered}"));
+                                }
+                                Err(error) if gone(&error) => bot.stop(GONE),
+                                Err(_) => bot.dropped(),
+                            }
+                        } else {
+                            bot.dropped();
+                        }
+                    }
                     for event in received {
                         let Event::Message { user, content: Content::Yo, .. } = event else { continue };
                         if !limits.allow(&user, Instant::now()) {
@@ -971,7 +986,17 @@ const GROUP: &str = "group:";
 fn send_to(bot: &Bot, to: &str, content: Content) -> Result<Vec<Event>, Error> {
     match to.strip_prefix(GROUP) {
         Some(group) => bot.client().send_group(group, content),
-        None => bot.client().send(to, content),
+        None => {
+            let deliveries = bot.client().send_begin(to, content.clone());
+            let Some(mut deliveries) = deliveries else { return bot.client().send(to, content) };
+            loop {
+                let answers = deliveries.send();
+                match bot.client().send_end(&deliveries, answers) {
+                    yo_core::Sent::More(more) => deliveries = more,
+                    yo_core::Sent::Done(result) => return result,
+                }
+            }
+        }
     }
 }
 

@@ -45,9 +45,6 @@ use yo_wire::limits::{MAX_INBOX_FETCH, PREKEY_REFILL_BELOW, PREKEY_TARGET};
 use yo_wire::request::{HEADER_DEVICE, HEADER_SIGNATURE, HEADER_TIME};
 use yo_wire::{decode, encode, sha256, DeviceId as HubDeviceId, UserId};
 
-/// A send goes without receiving first (`send_begin`) only while the inbox is up to date: waited on, or processed
-/// this recently.
-const INBOX_FRESH_MS: u64 = 5_000;
 const OUTBOX_KEPT_MS: u64 = 30 * 24 * 3600 * 1000;
 const OUTBOX_PER_RECIPIENT: usize = 1_000;
 /// The signed prekey and the last resort Kyber prekey are replaced this often (spec 4.1)...
@@ -586,8 +583,6 @@ pub struct Client {
     request_wait: BTreeMap<String, (u64, bool)>,
     /// An envelope was made (and its ratchet moved) since the state was last saved: saved before anything leaves.
     envelopes_unsaved: std::cell::Cell<bool>,
-    /// Until when (clock) the inbox counts as up to date: the end of a long wait under way, or when it was emptied.
-    inbox_fresh_until: u64,
     /// Keys of photos and videos received are forgotten before anything is kept (a bot that never opens them).
     media_keys_forgotten: bool,
     /// A guest (`restore_guest`): the events it receives stay in the state for the app; how many of them this one
@@ -608,6 +603,9 @@ pub struct Client {
     /// `sync_end` received: the work after it (receipts, decryption errors, prekeys, the outbox, the storage) waits
     /// for `after_sync`, or the next `sync_begin`.
     after_due: bool,
+    /// Once a signed inbox response says this device is revoked, no further sends leave.
+    replaced: std::cell::Cell<bool>,
+    probe_requests: Vec<(String, [u8; 32])>,
     /// The hub's public keys the app ships (spec 6.10: the current one and a spare kept offline): with them, every
     /// answer that hands out keys must carry a signature by one of them over this very question; with none (an app
     /// from before), answers are taken as they come.
@@ -703,6 +701,8 @@ pub(crate) fn stored(event: Event) -> StoredEvent {
         Content::Location { lat_e7, lon_e7 } => StoredContent::Location { lat_e7, lon_e7 },
         Content::Profile { name } => StoredContent::Profile(name),
         Content::Unknown(kind) => StoredContent::Unknown(kind),
+        Content::Probe(_) => StoredContent::Unknown(yo_wire::content::TYPE_PROBE),
+        Content::ProbeReply(_) => StoredContent::Unknown(yo_wire::content::TYPE_PROBE_REPLY),
         Content::Receipt => StoredContent::Unknown(yo_wire::content::TYPE_RECEIPT),
         Content::Group(_) => StoredContent::Unknown(yo_wire::content::TYPE_GROUP),
         Content::ProfileKey(_) => StoredContent::Unknown(yo_wire::content::TYPE_PROFILE_KEY),
@@ -773,7 +773,15 @@ struct Unpinned {
 
 /// Content worth keeping to send again, and a receipt for: what a person sent, not the protocol's own.
 fn shown(content: &Content) -> bool {
-    !matches!(content, Content::Profile { .. } | Content::Receipt | Content::ProfileKey(_) | Content::Unknown(_))
+    !matches!(
+        content,
+        Content::Profile { .. }
+            | Content::Receipt
+            | Content::ProfileKey(_)
+            | Content::Probe(_)
+            | Content::ProbeReply(_)
+            | Content::Unknown(_)
+    )
 }
 
 impl Client {
@@ -1097,7 +1105,6 @@ impl Client {
             last_answer: BTreeMap::new(),
             request_wait: BTreeMap::new(),
             envelopes_unsaved: std::cell::Cell::new(false),
-            inbox_fresh_until: 0,
             media_keys_forgotten: false,
             guest_events: None,
             explicit_ack: false,
@@ -1105,6 +1112,8 @@ impl Client {
             names_asked: BTreeSet::new(),
             received_ids: Vec::new(),
             after_due: false,
+            replaced: std::cell::Cell::new(false),
+            probe_requests: Vec::new(),
             hub_keys: Vec::new(),
             trust_roots: test_trust_roots(),
             certificate_asked_at: 0,
@@ -1550,7 +1559,11 @@ impl Client {
     }
 
     fn unsigned(&self, method: &str, path: &str, headers: &[(String, String)], body: &[u8]) -> Result<Response> {
-        self.transport.request(method, path, headers, body).map_err(Error::Network)
+        let response = self.transport.request(method, path, headers, body).map_err(Error::Network)?;
+        if response.status == status::GONE && headers.iter().any(|(name, _)| name.eq_ignore_ascii_case(HEADER_DEVICE)) {
+            self.replaced.set(true);
+        }
+        Ok(response)
     }
 
     pub fn set_push(&mut self, push: Push) -> Result<()> {
@@ -1902,16 +1915,19 @@ impl Client {
 
     /// A handle the hub says is this user's now: no other contact is known by it any more (it was theirs once).
     pub(crate) fn probe_service(&self, user: &str) -> bool {
-        self.state.contacts.get(user).is_some_and(|c| c.probe_service)
+        self.state.contacts.get(user).is_some_and(|c| c.probe_service && !c.chat)
     }
 
     fn take_handle(&mut self, user: &str, shown: String) {
         if same_handle(&shown, "PING") {
+            let added = self.state.storage.friends.get(user).is_some_and(|f| !f.removed.value);
             if let Some(contact) = self.state.contacts.get_mut(user) {
                 contact.probe_service = true;
-                contact.chat = false;
-                contact.profile_due = false;
-                contact.key_due = false;
+                contact.chat |= added;
+                if !contact.chat {
+                    contact.profile_due = false;
+                    contact.key_due = false;
+                }
             }
         }
         for (other, contact) in self.state.contacts.iter_mut() {
@@ -1977,8 +1993,8 @@ impl Client {
             c.take_bundles(&peer, found.account_key, &found.bundles)?;
             c.note_outdated(&peer);
             let contact = c.state.contacts.get_mut(&peer).ok_or(Error::Internal("contact"))?;
-            contact.chat = !contact.probe_service;
-            contact.profile_due = !contact.probe_service && c.state.name.is_some();
+            contact.chat |= !contact.probe_service;
+            contact.profile_due = contact.chat && c.state.name.is_some();
             // Added from here: accepted, and told this account's profile key (spec 4.10).
             if !contact.accepted {
                 contact.accepted = true;
@@ -2009,19 +2025,11 @@ impl Client {
     /// Writing to someone accepts them (spec 4.10): they get this account's profile key and its name.
     fn accept_writing(&mut self, user: &str) {
         let name = self.state.name.is_some();
-        if let Some(contact) = self.state.contacts.get_mut(user).filter(|c| !c.accepted && !c.probe_service) {
+        if let Some(contact) = self.state.contacts.get_mut(user).filter(|c| !c.accepted && (!c.probe_service || c.chat))
+        {
             contact.accepted = true;
             contact.key_due = true;
             contact.profile_due = name;
-        }
-    }
-
-    /// What waits goes first, and the inbox is taken in: the order in which things happened (spec 4.7). Offline, a
-    /// message still goes into the outbox after it.
-    fn catch_up(&mut self) -> Result<()> {
-        match self.deliver().and_then(|()| self.receive_all(0)) {
-            Err(error) if !retryable(&error) => Err(error),
-            _ => Ok(()),
         }
     }
 
@@ -2204,6 +2212,9 @@ impl Client {
     /// and with its device check (4.4); its users are marked as on their way, so no other flush sends after them
     /// meanwhile. Local work only: `Deliveries::send` talks to the hub, `delivered` takes the answers.
     fn deliveries(&mut self) -> Result<Deliveries> {
+        if self.replaced.get() {
+            return Err(Error::Replaced);
+        }
         if self.prune_outbox() {
             self.persist()?;
         }
@@ -2515,7 +2526,6 @@ impl Client {
             let (more, ids) = self.inbox(response, time, true)?;
             self.received_ids.extend(ids);
             if !more {
-                self.inbox_fresh_until = (self.clock)() + INBOX_FRESH_MS;
                 // Groups the inbox named a newer revision of: from the hub now, so their held Yos show.
                 self.refresh_groups_quietly();
                 return Ok(());
@@ -3065,11 +3075,29 @@ impl Client {
         }
         contact.key_resent_at = now;
         contact.key_due = true;
+        if self.guest_events.is_some() {
+            return Ok(());
+        }
         self.queue_key(user)
     }
 
     /// A message from a contact.
     fn received(&mut self, user: &str, plaintext: &[u8], message: Message) -> Result<()> {
+        if let Content::Probe(token) | Content::ProbeReply(token) = message.content {
+            if self.first_time(user, plaintext) && message.group.is_none() {
+                if matches!(message.content, Content::Probe(_)) {
+                    if self.probe_requests.len() < 256 {
+                        self.probe_requests.push((user.to_owned(), token));
+                    }
+                } else if let Some(contact) = self.state.contacts.get_mut(user) {
+                    if contact.probe_pending == Some(token) {
+                        contact.probe_reply_tag = token;
+                        contact.probe_pending = None;
+                    }
+                }
+            }
+            return Ok(());
+        }
         if self.probe_service(user) {
             // Access keys are protocol routing state. Keep them locally so repeated
             // probes are not stranger requests; store_key excludes them from sync.
@@ -3079,9 +3107,8 @@ impl Client {
             if let Content::ProfileKey(key) = &message.content {
                 self.take_key_message(user, *key);
             }
-            if self.first_time(user, plaintext) && message.group.is_none() && matches!(message.content, Content::Yo) {
-                self.state.contacts.get_mut(user).expect("service").probe_reply_tag = sha256(plaintext);
-            }
+            self.first_time(user, plaintext);
+            // Legacy plain answers from an older responder stay silent.
             return Ok(());
         }
         // The key a Yo carries (spec 4.10, `WITH_PROFILE_KEY`), also a blocked user's: theirs is a contact's again
@@ -3327,6 +3354,40 @@ impl Client {
         self.send(to, Content::Yo)
     }
 
+    /// Explicitly adding or writing to PING makes it an ordinary contact.
+    pub(crate) fn promote_contact(&mut self, user: &str) {
+        if let Some(contact) = self.state.contacts.get_mut(user).filter(|c| c.probe_service && !c.chat) {
+            contact.chat = true;
+            contact.accepted = true;
+            contact.key_due = true;
+            contact.profile_due = self.state.name.is_some();
+            let key = contact.profile_key;
+            if key.is_some() {
+                self.store_key(user, key);
+            }
+        }
+    }
+
+    /// Silent probe requests for an echo service; never app events or synced content.
+    pub fn take_probe_requests(&mut self) -> Vec<(String, [u8; 32])> {
+        std::mem::take(&mut self.probe_requests)
+    }
+
+    /// Echoes a probe token without app events or copies to own devices.
+    /// Accept protocol replies so subsequent probes can use sealed delivery in both directions.
+    pub fn echo_probe(&mut self, user: &str, token: [u8; 32]) -> Result<Vec<Event>> {
+        let result = self
+            .atomic(|c| {
+                c.accept_writing(user);
+                c.queue_key(user)?;
+                c.send_message(user, Content::ProbeReply(token))?;
+                c.encrypt_waiting(user);
+                c.persist()
+            })
+            .and_then(|()| self.deliver_now());
+        self.finish_sent(result)
+    }
+
     /// Starts a user-triggered probe to the reserved service. Returns a local ticket;
     /// app events received along the way remain queued for the ordinary inbox consumer.
     pub fn round_trip_probe_begin(&mut self, target: &str, timeout_ms: u64) -> Result<Probe> {
@@ -3340,11 +3401,13 @@ impl Client {
         };
         self.storage_fetched()?;
         self.acknowledge_inbox()?;
-        let ticket = self.state.contacts.get(&user).expect("service").probe_reply_tag;
+        let mut ticket = [0; 32];
+        getrandom::getrandom(&mut ticket).map_err(|_| Error::Internal("random"))?;
         let wait = self.probe_wait(timeout_ms);
         self.atomic(|c| {
             c.queue_key(&user)?;
-            c.send_message(&user, Content::Yo)?;
+            c.state.contacts.get_mut(&user).expect("service").probe_pending = Some(ticket);
+            c.send_message(&user, Content::Probe(ticket))?;
             c.encrypt_waiting(&user);
             c.persist()
         })?;
@@ -3358,7 +3421,13 @@ impl Client {
         let delivered = self.deliver_now();
         // A probe never becomes a deferred send on reconnection, even when its
         // immediate delivery was refused or failed. Ratchet state remains durable.
-        self.state.outbox.retain(|item| item.user != user);
+        self.state.outbox.retain(|item| {
+            item.user != user
+                || !decode::<Plain>(&item.plain)
+                    .ok()
+                    .and_then(|plain| Message::decode(plain.content.as_slice()).ok())
+                    .is_some_and(|message| message.content == Content::Probe(ticket))
+        });
         self.persist()?;
         delivered?;
         self.unacked.extend(std::mem::take(&mut self.received_ids));
@@ -3382,7 +3451,7 @@ impl Client {
             self.persist()?;
             self.unacked.extend(ids);
         }
-        Ok(self.state.contacts.get(&reply.user).is_some_and(|c| c.probe_service && c.probe_reply_tag != reply.ticket))
+        Ok(self.state.contacts.get(&reply.user).is_some_and(|c| c.probe_reply_tag == reply.ticket))
     }
 
     /// Continues waiting when unrelated mail woke the first long poll.
@@ -3435,24 +3504,24 @@ impl Client {
         if Handle::parse(user)?.kind != KIND_USER {
             return Err(Error::Protocol("echo requires a user id"));
         }
-        let result = self.send_inner_ready(user, Content::Yo, false);
+        let result = self.send_inner_ready(user, Content::Yo);
         self.finish_sent(result)
     }
 
     fn send_inner(&mut self, to: &str, content: Content) -> Result<()> {
-        self.send_inner_ready(to, content, true)
+        self.send_inner_ready(to, content)
     }
 
-    fn send_inner_ready(&mut self, to: &str, content: Content, catch_up: bool) -> Result<()> {
+    fn send_inner_ready(&mut self, to: &str, content: Content) -> Result<()> {
+        if self.replaced.get() {
+            return Err(Error::Replaced);
+        }
         let handle = Handle::parse(to)?;
         if self.is_me(&handle) {
             return Err(Error::Protocol("sending to oneself"));
         }
         if !shown(&content) {
             return Err(Error::Protocol("not content to send"));
-        }
-        if catch_up {
-            self.catch_up()?;
         }
         let user = self.send_target(&handle)?;
         self.check_sendable(user.as_deref())?;
@@ -3461,6 +3530,7 @@ impl Client {
             None => self.start_chat(&handle)?,
         };
         // Writing back accepts a request: its name goes first, as one not yet told does.
+        self.promote_contact(&peer);
         self.accept_writing(&peer);
         self.send_profiles();
         // Saved with the message in it, or not made at all (spec 4.7); the profile key ahead of it, if due.
@@ -3516,17 +3586,16 @@ impl Client {
     /// travels (sends to several friends and the inbox's wait then share the network): `send_begin` (locked) encrypts
     /// the message and takes what of the outbox can go, `Deliveries::send` (unlocked) posts it, `send_end` (locked)
     /// takes the answers. Only to a contact this device writes to already, with a session with each of its devices,
-    /// neither blocked nor waiting for confirmation, and while the inbox is up to date: a long wait for it is under way
-    /// (`sync_begin`), which brings what arrives at once, or it was emptied a moment ago. What the hub refuses for
+    /// neither blocked nor waiting for confirmation. The sealed POST goes first; a failed device check refreshes
+    /// sessions as needed. What the hub refuses for
     /// other devices is taken in by `send_end`. `None`, with nothing changed: `send` it instead.
     pub fn send_begin(&mut self, to: &str, content: Content) -> Option<Deliveries> {
+        if self.replaced.get() {
+            return None;
+        }
         let handle = Handle::parse(to).ok()?;
-        // By user id only: a name is asked of the hub (`send_target`).
-        if handle.kind != KIND_USER
-            || self.is_me(&handle)
-            || !shown(&content)
-            || (self.clock)() > self.inbox_fresh_until
-        {
+        // A typed name is discovery; bindings resolve it through whois.
+        if handle.kind != KIND_USER || self.is_me(&handle) || !shown(&content) {
             return None;
         }
         let user = self.known_user(&handle)?;
@@ -3540,6 +3609,7 @@ impl Client {
         // A name not yet told goes first, as in `send`. Saved with the message in it, or not made at all: `send` then
         // fails on the save the same way.
         self.atomic(|c| {
+            c.promote_contact(&user);
             c.accept_writing(&user);
             c.send_profiles();
             c.queue_key(&user)?;
@@ -3560,6 +3630,9 @@ impl Client {
     /// The outbox, without the client, like `send_begin` without a message: for sending again what the hub did not take
     /// yet (its limit per sender, or no network). Ended with `send_end`.
     pub fn deliver_begin(&mut self) -> Result<Deliveries> {
+        if self.replaced.get() {
+            return Err(Error::Replaced);
+        }
         self.prepare()?;
         self.deliveries()
     }
@@ -3637,10 +3710,7 @@ impl Client {
         self.storage_fetched()?;
         let path = api::inbox_path(wait_s);
         let (headers, time) = self.sign("GET", &path, &[]);
-        self.persist()?;
-        // What arrives during the wait comes at once: until it ends, a send need not receive first.
-        let until = (self.clock)() + wait_s * 1000 + INBOX_FRESH_MS;
-        self.inbox_fresh_until = self.inbox_fresh_until.max(until);
+        // Idempotent GET: a signature collision after a crash is retried by sync_end.
         Ok(InboxWait { transport: self.transport.clone(), path, headers, time })
     }
 
@@ -3664,14 +3734,26 @@ impl Client {
                 }),
             })
             .and_then(|more| if more { self.receive_all(0) } else { Ok(()) });
+        if matches!(received, Err(Error::Replaced)) {
+            self.replaced.set(true);
+        }
         if received.is_ok() {
             self.refresh_groups_quietly();
         }
-        // The wait is over: the inbox is up to date only if its answer was taken in.
-        self.inbox_fresh_until = if received.is_ok() { (self.clock)() + INBOX_FRESH_MS } else { 0 };
         // A guest does none of the work after (the app does): it only acknowledges.
         if received.is_ok() && self.guest_events.is_none() {
             self.after_due = true;
+        }
+        if received.is_ok()
+            && saved_later.is_empty()
+            && self.received_ids.is_empty()
+            && self.state.events.is_empty()
+            && self.state.deferred.is_empty()
+            && (self.explicit_ack || self.state.handed.is_empty())
+        {
+            // Only idempotent GET signing / maintenance hints changed. There is nothing
+            // received to make durable, nor an implicit app acknowledgement to save.
+            return Ok(Vec::new());
         }
         let events = self.finish_receiving(received);
         // Handed out only once saved: from now on the hub may forget them.
@@ -3954,7 +4036,7 @@ impl Client {
         self.state
             .contacts
             .iter()
-            .filter(|(_, c)| !c.probe_service)
+            .filter(|(_, c)| !c.probe_service || c.chat)
             .map(|(user, c)| ContactInfo {
                 user: user.clone(),
                 handles: c.handles.clone(),

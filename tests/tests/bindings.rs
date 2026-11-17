@@ -1196,20 +1196,16 @@ fn roundtrip_binding_serializes_runs_and_leaves_no_contact_or_app_event() {
     let probing = a.clone();
     let worker = std::thread::spawn(move || probing.round_trip_probe("PING".into(), 3000));
     let began = Instant::now();
-    loop {
-        if ping
-            .sync(0)
-            .unwrap()
-            .iter()
-            .any(|e| matches!(e, yo_core::Event::Message { content: yo_core::Content::Yo, .. }))
-        {
-            break;
+    let (user, token) = loop {
+        ping.sync(0).unwrap();
+        if let Some(request) = ping.take_probe_requests().pop() {
+            break request;
         }
         assert!(began.elapsed() < Duration::from_secs(3));
         std::thread::sleep(Duration::from_millis(5));
-    }
+    };
     assert!(matches!(a.round_trip_probe("PING".into(), 3000), Err(yo::YoError::State)));
-    ping.send_yo(&a.user_id()).unwrap();
+    ping.echo_probe(&user, token).unwrap();
     assert!(worker.join().unwrap().unwrap().is_some());
     assert!(a.contacts().is_empty());
     assert!(a.friends().is_empty());
@@ -1250,4 +1246,33 @@ fn the_app_layer_reads_and_marks_support_replies() {
     assert_eq!(thread.messages[0].text, "hello 🎨");
     a.support_read(thread.messages[1].id).unwrap();
     assert_eq!(a.support_thread().unwrap().unread, 0);
+}
+
+#[test]
+fn warm_app_send_is_one_request_without_an_active_inbox_poll() {
+    let hub = TestHub::start();
+    let http = Http::new(hub.url());
+    let a = YoClient::register_username(
+        Arc::new(App(http.clone())),
+        Arc::new(File::default()),
+        vec![7; 32],
+        "ALICE".into(),
+        None,
+        None,
+        None,
+        0,
+        String::new(),
+    )
+    .unwrap();
+    let mut b = yo_tests::register(Http::new(hub.url()), "BOB", None);
+    a.send_yo("BOB".into()).unwrap();
+    b.sync(0).unwrap();
+    b.send_yo(&a.user_id()).unwrap();
+    a.sync(0).unwrap(); // leave acknowledgements and housekeeping pending
+    http.sent.lock().unwrap().clear();
+    a.send_yo(b.user_id().to_owned()).unwrap();
+    let sent = http.sent.lock().unwrap();
+    assert_eq!(sent.len(), 1, "no catch-up, lookup, ack or prekey refill on send");
+    assert_eq!(sent[0].0, "POST");
+    assert_eq!(sent[0].1, yo_wire::api::deliver_path(&yo_tests::user_id(b.user_id())));
 }

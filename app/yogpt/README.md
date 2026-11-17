@@ -46,7 +46,12 @@ app's own home hub. Before PING is deployed, the app shows No answer after ten s
 
 Probes are user-triggered only. The operator can see that the account was active at that moment. No per-user
 probe history or timing is stored or logged; only aggregate echo counters are logged. Rate buckets are volatile;
-mandatory encrypted protocol/replay state is retained. PING is a reserved protocol-only peer: it never appears
-in app contacts, requests, list events, notifications, stats, or Account Sync storage. Sends have no copy for
-other devices; any device receiving a PING reply decrypts and consumes it silently, including late answers.
+mandatory encrypted protocol/replay state is retained. Users may add PING and Yo it like any contact: each
+plain Yo receives one immediate Yo, visible normally. Until explicitly added or written to, PING remains
+protocol routing state and creates no contact, request, list event, notification, stats or Account Sync entry.
+Probes carry a random encrypted token (types 11/12); only its matching reply completes the measurement.
+Probe replies, including late replies, are always consumed silently, even when PING is a contact; probes have
+no copy for other devices and create no visible Yo or Account Sync change. Deploy the updated echo service
+before using token probes; an older responder cannot answer them. Normal YoGPT retains its thinking delay;
+its working-session sends now bypass inbox catch-up and release the client lock during delivery.
 The app shares only its last result in memory between the Account title and Status page.

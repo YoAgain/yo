@@ -155,8 +155,10 @@ fn accounts_restored_forty_times_by_every_way_lose_nothing() {
             assert_eq!(new.user_id(), p.user, "{ctx}: the same user");
             let mut old = std::mem::replace(&mut p.client, new);
             // The old phone learns it was replaced, and stops.
-            assert_eq!(old.send(&friend_id, Content::Text("after".into())), Err(Error::Replaced), "{ctx}");
+            // A sealed POST cannot discover sender revocation. The signed inbox does;
+            // once observed, the old client refuses subsequent sends locally.
             assert_eq!(old.sync(0).map(|_| ()), Err(Error::Replaced), "{ctx}");
+            assert_eq!(old.send(&friend_id, Content::Text("after".into())), Err(Error::Replaced), "{ctx}");
             // (g) The storage came back, merged: the friend as last named, the block, the icon.
             let friends = p.client.friends();
             let f = friends.iter().find(|f| f.user == friend_id).expect(&ctx);

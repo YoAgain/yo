@@ -92,6 +92,12 @@ fn a_full_mailbox_refuses_until_it_is_read_and_strangers_cannot_rate_limit_it() 
     config.limits.max_pending_per_device = 5;
     let hub = TestHub::start_with(config, "127.0.0.1:0");
     let (mut a, mut b, _, _, pa, pb) = chat(&hub);
+    // Acknowledge the setup's already-processed mail without running account maintenance;
+    // this fixture deliberately tests the legacy inbox with no access check yet.
+    let response = b.signed_for_tests("GET", "/v1/inbox?wait=0", &[]).unwrap();
+    let inbox: api::Inbox = yo_wire::decode(&response.body).unwrap();
+    let ids = inbox.items.into_iter().map(|item| item.id).collect();
+    b.signed_for_tests("POST", api::INBOX_ACK, &yo_wire::encode(&api::Ack { ids })).unwrap();
     let junk = yo_tests::junk(7);
     // A stranger fills B's inbox with well-formed junk...
     let statuses: Vec<u16> = (0..6).map(|_| deliver_raw(&hub.url(), b.user_id(), junk.clone())).collect();
@@ -301,18 +307,20 @@ fn a_first_yo_the_hub_cannot_look_up_now_goes_when_tried_again() {
     assert_eq!(yos, 1);
 }
 
-/// A send receives first (spec 4.7): what its last batch brought is acknowledged only after the call has saved and
-/// handed out its events, by the next call, never inside the one that hands them out.
+/// Sending never fetches the inbox. A later receive hands out durable events before acknowledging them.
 #[test]
-fn a_send_hands_out_what_it_received_before_the_hub_may_forget_it() {
+fn sending_leaves_inbox_reception_and_acknowledgement_to_sync() {
     let hub = TestHub::start();
     let (mut a, mut b, _, hb, pa, pb) = chat(&hub);
+    b.after_sync().unwrap();
     a.send_yo(&pb).unwrap();
     let acks = |hb: &Http| hb.recorded.lock().unwrap().iter().filter(|r| r.1 == api::INBOX_ACK).count();
     let before = acks(&hb);
     let events = b.send_yo(&pa).unwrap();
-    assert_eq!(yos(&events), 1, "the send received the Yo and handed it out");
-    assert_eq!(acks(&hb), before, "not acknowledged inside the call that hands it out");
+    assert_eq!(yos(&events), 0, "send does not receive first");
+    assert_eq!(acks(&hb), before, "send does no inbox housekeeping");
+    assert_eq!(yos(&b.sync(0).unwrap()), 1, "sync hands out the Yo");
+    assert_eq!(acks(&hb), before, "not acknowledged before events are durable");
     b.sync(0).unwrap();
     assert_eq!(acks(&hb), before + 1, "the next call acknowledges it");
     assert_eq!(yos(&b.sync(0).unwrap()), 0, "and it does not come again");
@@ -335,6 +343,27 @@ fn a_send_the_hub_cannot_take_now_succeeds_and_waits() {
     a.sync(0).unwrap();
     assert_eq!(a.pending(), 0);
     assert_eq!(yos(&b.sync(0).unwrap()), 2, "each once");
+}
+
+/// No delivery answer: the persisted outbox survives a client restart and retries; the recipient skips the copy.
+#[test]
+fn an_unacknowledged_send_is_retried_after_restart() {
+    let hub = TestHub::start();
+    let (mut a, mut b, ha, _, _, pb) = chat(&hub);
+    let saved = Arc::new(Saved::default());
+    let key = [6; 32];
+    a.persist_to(saved.clone(), key).unwrap();
+    let path = api::deliver_path(&yo_tests::user_id(b.user_id()));
+    ha.fault(&path, Fault::LoseAnswer);
+    a.send_yo(&pb).unwrap();
+    assert_eq!(a.pending(), 1, "no 202 received: retained for retry");
+    drop(a);
+    let blob = saved.0.lock().unwrap().clone();
+    let mut a = Client::restore(Http::new(hub.url()), &blob, &key).unwrap();
+    a.sync(0).unwrap();
+    assert_eq!(a.pending(), 0, "retry acknowledged");
+    assert_eq!(yos(&b.sync(0).unwrap()), 1, "original and retry shown once");
+    assert_eq!(b.dropped(), 0);
 }
 
 /// Saves that fail after the message was queued and saved (the disk filling up as it went): the send is not reported

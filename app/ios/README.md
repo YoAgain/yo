@@ -212,7 +212,13 @@ still needs an on-device swipe check; a successful compile cannot measure it.
 The Account title and Status → Server share a user-triggered, ten-second PING probe and a volatile last result.
 The title flies a small Yo out and back, bounces on landing and gives success/warning feedback; Reduce Motion
 uses fades. The existing account client selects the same hub as `Hub.home` (including the dev test override).
-Probes neither send ordinary app events nor sync PING to another device. See
+Foreground inbox reception continuously long-polls; warm sends post without first fetching the inbox. Signed
+and anonymous connection pools remain separate, with anonymous warm-up on launch and foreground. Empty
+polls do not save full core state. Durable encrypted send state is still saved before delivery.
+
+PING can be added as a normal contact and answers plain Yos immediately. Token-matched probes remain
+silent even for an added PING contact: no visible Yo, notification or stats. Without adding PING, probes
+create no contact, request or Account Sync entry. Probes have no copy to another device. See
 [operator deployment and privacy](../yogpt/README.md).
 
 

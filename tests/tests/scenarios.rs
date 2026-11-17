@@ -88,7 +88,7 @@ fn names_not_on_yo_and_sending_to_oneself() {
 }
 
 #[test]
-fn a_send_skips_receiving_only_while_the_inbox_is_fresh() {
+fn a_working_session_sends_without_inbox_freshness() {
     use std::sync::atomic::{AtomicU64, Ordering};
     let hub = TestHub::start();
     let (mut a, mut b, pa, pb) = pair(&hub);
@@ -109,14 +109,16 @@ fn a_send_skips_receiving_only_while_the_inbox_is_fresh() {
     let deliveries = a.send_begin(&b_id, Content::Yo).expect("just emptied");
     send(&mut a, deliveries);
     now.fetch_add(6_000, Ordering::Relaxed);
-    assert!(a.send_begin(&b_id, Content::Yo).is_none(), "a while ago");
+    let deliveries = a.send_begin(&b_id, Content::Yo).expect("stale inbox does not delay sending");
+    send(&mut a, deliveries);
     let wait = a.sync_begin(25).unwrap();
     let deliveries = a.send_begin(&b_id, Content::Yo).expect("waited on");
     send(&mut a, deliveries);
     a.sync_end(&wait, Err("no network".into())).unwrap_err();
-    assert!(a.send_begin(&b_id, Content::Yo).is_none(), "the wait failed");
+    let deliveries = a.send_begin(&b_id, Content::Yo).expect("failed inbox does not delay sending");
+    send(&mut a, deliveries);
     a.send_yo(&pb).unwrap();
-    assert_eq!(yos_from(&b.sync(0).unwrap(), &pa), 3, "each once");
+    assert_eq!(yos_from(&b.sync(0).unwrap(), &pa), 5, "each once");
 }
 
 #[test]

@@ -343,3 +343,30 @@ fn echo_is_immediate_single_plain_bounded_and_logs_no_sender() {
     assert!(log.contains("echo answered=1"), "{log}");
     std::fs::remove_dir_all(state).unwrap();
 }
+
+#[test]
+fn ping_answers_normal_yos_and_token_probes_independently() {
+    let hub = TestHub::start();
+    let state = state_dir();
+    let mut command = Command::new(env!("CARGO_BIN_EXE_yo-gpt"));
+    command.args(["--account", &format!("ping={},{},PING", hub.url(), state.display()), "--echo", "ping"]);
+    command.args(["--trust-root", &format!("ping={}", yo_wire::b64(&yo_tests::trust_root()))]);
+    let bot = Bot(command.spawn().unwrap());
+    let ready = Instant::now();
+    while Client::username_free(Http::new(hub.url()).as_ref(), "PING").unwrap() {
+        assert!(ready.elapsed() < Duration::from_secs(10));
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    let mut alice = someone(&hub);
+    alice.send_yo("PING").unwrap();
+    assert_eq!(yos_until_quiet(&mut alice, Duration::from_millis(300)).len(), 1);
+    assert_eq!(alice.contacts().len(), 1);
+    let began = Instant::now();
+    assert!(alice.round_trip_probe("PING", 900).unwrap().is_some());
+    assert!(began.elapsed() < Duration::from_millis(900), "probe used the think path");
+    assert!(alice.sync(0).unwrap().is_empty(), "probe is silent for an ordinary PING contact too");
+    alice.send_yo("PING").unwrap();
+    assert_eq!(yos_until_quiet(&mut alice, Duration::from_millis(300)).len(), 1);
+    drop(bot);
+    std::fs::remove_dir_all(state).unwrap();
+}

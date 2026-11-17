@@ -118,6 +118,13 @@ struct YoApp: App {
       .onChange(of: SendFailure.shared.text) { _, _ in updateBanner() }
       .task(id: phase) {
         guard phase == .active else { return }
+        while !Task.isCancelled {
+          await HubTransport.warmAnonymous()
+          do { try await Task.sleep(for: .seconds(20)) } catch { return }
+        }
+      }
+      .task(id: phase) {
+        guard phase == .active else { return }
         await accounts.watchState()
       }
       .animation(.smooth(duration: 0.5), value: accounts.account == nil)

@@ -255,10 +255,10 @@ impl Client {
     /// (`Deliveries::send`) and ended with `send_end`. So a burst into a group costs its deliveries alone, as a
     /// burst to one friend does. `None`, with nothing changed: `send_group` it instead.
     pub fn send_group_begin(&mut self, id: &str, content: Content) -> Option<crate::Deliveries> {
-        if !shown(&content)
-            || !matches!(content, Content::Yo | Content::Photo(_) | Content::Video { .. })
-            || (self.clock)() > self.inbox_fresh_until
-        {
+        if self.replaced.get() {
+            return None;
+        }
+        if !shown(&content) || !matches!(content, Content::Yo | Content::Photo(_) | Content::Video { .. }) {
             return None;
         }
         let group = self.group(id).ok()?;
@@ -333,11 +333,12 @@ impl Client {
     }
 
     fn send_group_inner(&mut self, id: &str, content: Content) -> Result<()> {
+        if self.replaced.get() {
+            return Err(Error::Replaced);
+        }
         if !shown(&content) || !matches!(content, Content::Yo | Content::Photo(_) | Content::Video { .. }) {
             return Err(Error::Protocol("not content for a group"));
         }
-        // As a send to one: what waits goes, the inbox is taken in (a change of the group among it, fetched).
-        self.catch_up()?;
         let mut group = self.group(id)?;
         // Endorsements for the members, fresh: who has no profile key of theirs here still gets it sealed.
         if group.endorsed_until < self.now_s() + ENDORSED_MARGIN_S {

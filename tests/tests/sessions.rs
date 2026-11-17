@@ -121,6 +121,13 @@ fn a_session_out_of_step_heals_by_a_decryption_error() {
     assert_eq!(texts(&b.sync(0).unwrap()), ["1"]);
     b.send(a.user_id(), text("r")).unwrap();
     assert_eq!(texts(&a.sync(0).unwrap()), ["r"]);
+    // Finish the handshake explicitly; sends do not receive or do inbox housekeeping.
+    for _ in 0..2 {
+        a.after_sync().unwrap();
+        b.sync(0).unwrap();
+        b.after_sync().unwrap();
+        a.sync(0).unwrap();
+    }
     // B's state from before A wrote: it has no session with A.
     let hb = Http::new(hub.url());
     let mut b = Client::restore(hb.clone(), &early, &[3; 32]).unwrap();
@@ -139,7 +146,14 @@ fn a_session_out_of_step_heals_by_a_decryption_error() {
     a.after_sync().unwrap();
     // A's session archived: what goes again starts a new one.
     assert_eq!(kinds(&ha, &b), [yo_wire::envelope::KIND_PREKEY]);
-    assert_eq!(texts(&b.sync(0).unwrap()), ["2"], "the message named, once");
+    let mut recovered = texts(&b.sync(0).unwrap());
+    for _ in 0..4 {
+        b.after_sync().unwrap();
+        a.sync(0).unwrap();
+        a.after_sync().unwrap();
+        recovered.extend(texts(&b.sync(0).unwrap()));
+    }
+    assert_eq!(recovered, ["2"], "the message named, once");
     b.send(a.user_id(), text("back")).unwrap();
     assert_eq!(texts(&a.sync(0).unwrap()), ["back"]);
     assert_eq!(a.dropped(), 0, "{:?}", a.drop_reasons());
