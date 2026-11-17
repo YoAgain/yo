@@ -3783,6 +3783,7 @@ dependencies = [
  "getrandom 0.2.17",
  "reqwest",
  "yo-core",
+ "yo-hub",
  "yo-tests",
  "yo-wire",
 ]
