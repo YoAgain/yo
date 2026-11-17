@@ -146,22 +146,22 @@ struct IntroHelp: View {
 /// Help & About's card on top: the tutorial's pages, smaller, swiped through on amethyst with their dots.
 struct HelpHero: View {
   @State private var page = 0
-  @State private var pageHeight: CGFloat = 320
 
   var body: some View {
     VStack(spacing: 0) {
-      TabView(selection: $page) {
-        ForEach(IntroCard.all.indices, id: \.self) { index in
-          IntroPage(card: IntroCard.all[index], low: true, zoom: 1).tag(index)
+      // The pages sit on a hidden first page that gives the height: laid out on the first frame, nothing measured
+      // later and grown into place while the page slides in.
+      IntroPage(card: IntroCard.all[0], low: true, zoom: 1, sizer: true)
+        .fixedSize(horizontal: false, vertical: true)
+        .hidden()
+        .overlay {
+          TabView(selection: $page) {
+            ForEach(IntroCard.all.indices, id: \.self) { index in
+              IntroPage(card: IntroCard.all[index], low: true, zoom: 1).tag(index)
+            }
+          }
+          .tabViewStyle(.page(indexDisplayMode: .never))
         }
-      }
-      .tabViewStyle(.page(indexDisplayMode: .never))
-      .frame(height: pageHeight)
-      .background {
-        IntroPage(card: IntroCard.all[0], low: true, zoom: 1).fixedSize(horizontal: false, vertical: true)
-          .hidden()
-          .onGeometryChange(for: CGFloat.self) { $0.size.height } action: { pageHeight = $0 }
-      }
       Dots(count: IntroCard.all.count, page: page) { next in withAnimation(.smooth) { page = next } }
     }
     .padding(.top, 24)
@@ -233,14 +233,22 @@ private struct IntroPage: View {
   var low = false
   /// The picture's scale there: bigger in the tutorial sheet, which has the room.
   var zoom: CGFloat = 1.35
+  /// Only the page's size: the picture's room left empty (Help's card sizes its pages by it).
+  var sizer = false
 
   var body: some View {
     if low {
       VStack(spacing: 24) {
         // The whole picture scaled, gestures and all.
-        PhoneShot(picture: card.picture, gesture: card.gesture)
-          .scaleEffect(zoom, anchor: .top)
-          .frame(height: 190 * 743 / 540 * zoom, alignment: .top)
+        Group {
+          if sizer {
+            Color.clear.frame(width: 202, height: 190 * 743 / 540 + 6)
+          } else {
+            PhoneShot(picture: card.picture, gesture: card.gesture)
+          }
+        }
+        .scaleEffect(zoom, anchor: .top)
+        .frame(height: 190 * 743 / 540 * zoom, alignment: .top)
         words
       }
       .padding(.horizontal, 28)
@@ -290,11 +298,19 @@ private struct PhoneShot: View {
   let picture: String
   var gesture: IntroGesture? = nil
   @Environment(\.accessibilityReduceMotion) private var reduceMotion
-  @State private var swiping = false
+  @MainActor private static var cache: [String: UIImage] = [:]
+
+  /// Decoded once and kept: a page pushed in shows its picture on the first frame, not a beat later.
+  @MainActor private static func decoded(_ name: String) -> UIImage {
+    if let image = cache[name] { return image }
+    let image = UIImage(named: name).map { $0.preparingForDisplay() ?? $0 } ?? UIImage()
+    cache[name] = image
+    return image
+  }
 
   var body: some View {
     // Loose bundle files (Resources/<name>@3x.png), not an asset catalog: Image(name) would not find them.
-    Image(uiImage: UIImage(named: picture) ?? UIImage())
+    Image(uiImage: Self.decoded(picture))
       .resizable()
       .scaledToFit()
       // TabView can propose an unspecified height; keep the screenshot’s intrinsic proportions
@@ -319,10 +335,32 @@ private struct PhoneShot: View {
       .accessibilityHidden(true)
   }
 
+  /// The hint's loop: from rest to the gesture, eased, then back at once, over and over. A phase animator, not
+  /// withAnimation(.repeatForever) on appear: that one's transaction caught the card's first layout during the
+  /// push, so the card flew in offset and growing. Reduce Motion holds one still frame.
+  private func looping<Hint: View>(
+    still: Bool, delay: Double, curve: Animation,
+    @ViewBuilder hint: @escaping (Bool) -> Hint
+  ) -> some View {
+    Group {
+      if reduceMotion {
+        hint(still)
+      } else {
+        PhaseAnimator([false, true]) { on in
+          hint(on)
+        } animation: { on in
+          on ? curve.delay(delay) : nil
+        }
+      }
+    }
+    .frame(width: 190, height: 190 * 743 / 540)
+  }
+
   /// A hand tapping a bar again and again: it presses in, a soft ring spreads, it lifts.
   private func tapHint(y: Double, yo: Bool) -> some View {
-    GeometryReader { geometry in
-      let point = CGPoint(x: geometry.size.width * (yo ? 0.62 : 0.5), y: geometry.size.height * y)
+    let size = CGSize(width: 190, height: 190 * 743 / 540)
+    let point = CGPoint(x: size.width * (yo ? 0.62 : 0.5), y: size.height * y)
+    return looping(still: false, delay: 0.3, curve: .easeOut(duration: 0.9)) { swiping in
       ZStack {
         if yo {
           // The Yo rises straight up out of the tapped bar, as in the app.
@@ -330,9 +368,7 @@ private struct PhoneShot: View {
             .font(.yo(18))
             .foregroundStyle(.white.opacity(0.8))
             .opacity(swiping ? 0 : 1)
-            .position(
-              x: geometry.size.width * 0.5,
-              y: point.y + (swiping ? -geometry.size.height * 0.3 : -10))
+            .position(x: size.width * 0.5, y: point.y + (swiping ? -size.height * 0.3 : -10))
         }
         Circle()
           .stroke(.white.opacity(swiping ? 0 : 0.8), lineWidth: 3)
@@ -346,36 +382,26 @@ private struct PhoneShot: View {
           .position(x: point.x + 14, y: point.y + 26)
       }
     }
-    .onAppear {
-      guard !reduceMotion else { return }
-      withAnimation(.easeOut(duration: 0.9).repeatForever(autoreverses: false).delay(0.3)) { swiping = true }
-    }
   }
 
   /// A hand sliding in from the right edge, the camera following it in.
   private var swipeHint: some View {
-    GeometryReader { geometry in
-      let width = geometry.size.width
+    let size = CGSize(width: 190, height: 190 * 743 / 540)
+    return looping(still: true, delay: 0.4, curve: .easeInOut(duration: 1.4)) { swiping in
       ZStack(alignment: .leading) {
         Color.black.opacity(0.35)
           .overlay {
             Image(systemName: "camera.fill").font(.system(size: 34)).foregroundStyle(.white)
           }
-          .frame(width: width * (swiping ? 0.6 : 0.08))
-          .offset(x: width * (swiping ? 0.4 : 0.92))
+          .frame(width: size.width * (swiping ? 0.6 : 0.08), height: size.height)
+          .offset(x: size.width * (swiping ? 0.4 : 0.92))
         Image(systemName: "hand.point.up.left.fill")
           .font(.system(size: 40))
           .foregroundStyle(.white)
           .shadow(radius: 4)
-          .offset(x: width * (swiping ? 0.32 : 0.82), y: geometry.size.height * 0.45)
+          .offset(x: size.width * (swiping ? 0.32 : 0.82), y: size.height * 0.45)
       }
-    }
-    .onAppear {
-      guard !reduceMotion else {
-        swiping = true
-        return
-      }
-      withAnimation(.easeInOut(duration: 1.4).repeatForever(autoreverses: false).delay(0.4)) { swiping = true }
+      .frame(width: size.width, height: size.height, alignment: .leading)
     }
   }
 }

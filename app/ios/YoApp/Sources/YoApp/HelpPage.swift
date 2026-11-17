@@ -2,11 +2,10 @@ import SwiftUI
 import UIKit
 import YoCore
 
-/// Help & About: the tutorial card, How to Use and Contact Us, then this build's information and licenses.
+/// Help & About: the tutorial card, Contact Us and Status, then this build's information and licenses.
 @MainActor
 struct HelpPage: View {
   @State private var showingMessage = false
-  @State private var showingHowTo = false
 
   static var marketingVersion: String {
     Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "?"
@@ -25,14 +24,7 @@ struct HelpPage: View {
       Section {
         HelpHero().padding(.top, 20)
       }
-      Section("Help") {
-        Button {
-          showingHowTo = true
-        } label: {
-          SettingsNavigationLabel {
-            Label("How to Use", systemImage: "hand.tap.fill").labelStyle(Tile(.amethyst))
-          }
-        }
+      Section {
         Button {
           showingMessage = true
         } label: {
@@ -44,7 +36,9 @@ struct HelpPage: View {
           }
         }
       }
-      Section("About") {
+      // Status and this build's information together, under Contact Us.
+      Section {
+        StatusPage(summaryOnly: true)
         NavigationLink(value: SettingsView.Page.licenses) {
           SettingsNavigationLabel {
             LabeledContent {
@@ -68,6 +62,5 @@ struct HelpPage: View {
       }
       .toolbar(.visible, for: .navigationBar)
       .sheet(isPresented: $showingMessage) { MessagePage() }
-      .sheet(isPresented: $showingHowTo) { IntroHelp() }
   }
 }

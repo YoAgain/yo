@@ -36,6 +36,7 @@ private extension EnvironmentValues {
 }
 
 import SwiftUI
+import UIKit
 import os
 import UserNotifications
 import YoCore
@@ -160,6 +161,8 @@ struct FriendList: View {
       var sendingBatch: (id: UUID, count: Int, items: [Outgoing])?
       /// How long the stack on its way out waits (`run`): `sendDelay`, or a friend's "Undo Before Sending" time.
       var seconds = FriendList.sendDelay
+      /// A video being held on this bar: the stack's countdown waits for it, so the video joins the same stack.
+      var recording = false
     }
 
     /// Each friend's bar state, by `Friend.key`, made when first asked for.
@@ -609,6 +612,8 @@ struct FriendList: View {
           }
           .onEnded { _ in pinchStart = nil },
         isEnabled: cameraOn)
+      // A finger recording a video may wander: the list stays put until it lifts.
+      .scrollDisabled(recordingFor != nil)
       .scrollIndicators(.hidden)
       .scrollBounceBehavior(.basedOnSize)
       .scrollDismissesKeyboard(.interactively)
@@ -647,7 +652,7 @@ struct FriendList: View {
             ForEach(colors, id: \.id) { entry in
               let bounds = entry.clips.reduce(geometry[entry.bounds]) { $0.intersection(geometry[$1]) }
               entry.color.opacity(entry.opacity)
-                .animation(.easeOut(duration: 0.06), value: entry.opacity)
+                .animation(nil, value: entry.opacity)  // at once, in one frame
                 .frame(width: max(0, bounds.width), height: max(0, bounds.height))
                 .offset(x: bounds.isNull ? 0 : bounds.minX, y: bounds.isNull ? 0 : bounds.minY)
                 .transition(.opacity)
@@ -662,7 +667,7 @@ struct FriendList: View {
                   ForEach(colors, id: \.id) { entry in
                     let bounds = entry.clips.reduce(geometry[entry.bounds]) { $0.intersection(geometry[$1]) }
                     Color.black.opacity(entry.pressed ? 0.85 : 0)
-                      .animation(.easeOut(duration: entry.pressed ? 0.06 : 0.2), value: entry.pressed)
+                      .animation(nil, value: entry.pressed)  // see-through at once and back at once, no fade
                       .frame(width: max(0, bounds.width), height: max(0, bounds.height))
                       .offset(x: bounds.isNull ? 0 : bounds.minX, y: bounds.isNull ? 0 : bounds.minY)
                   }
@@ -1390,6 +1395,12 @@ struct FriendList: View {
   }
 
   private func recordingChanged(_ friend: Friend?) {
+    if let previous = recordingFor { bars.of(previous).recording = false }
+    if let friend {
+      let bar = bars.of(friend)
+      bar.recording = true
+      if !bar.outgoing.isEmpty { bar.countdownStarted = nil }  // the ring waits with the stack
+    }
     recordingFor = friend
     publish(listModel.recording(now: listNow, id: friend?.key.uuidString))
   }
@@ -1481,8 +1492,19 @@ struct FriendList: View {
         guard bars.stackRounds[key] == round else { return }
       }
       guard bars.stackRounds[key] == round else { return }
-      bar.countdownStarted = .now
-      try? await Task.sleep(for: .seconds(seconds))
+      // A video held on this bar pauses the countdown; its release joins this stack and starts the time again.
+      // A hold that ends without a video (canceled) gives the stack its full time back.
+      while true {
+        if bar.recording {
+          if bar.countdownStarted != nil { bar.countdownStarted = nil }
+        } else if let started = bar.countdownStarted {
+          if Date.now.timeIntervalSince(started) >= seconds { break }
+        } else {
+          bar.countdownStarted = .now
+        }
+        try? await Task.sleep(for: .milliseconds(50))
+        guard bars.stackRounds[key] == round, !bar.outgoing.isEmpty else { return }  // another came, or undone
+      }
       guard bars.stackRounds[key] == round, !bar.outgoing.isEmpty else { return }  // another came, or undone
       let stack = bar.outgoing
       let batchID = bar.sendingBatch?.id
@@ -2319,8 +2341,7 @@ struct RowButton: View {
           holdOrigin = touchOrigin
           hold(true, holdOrigin)
         } else if holding {
-          if stationaryTouch.isStationary { hold(false, holdOrigin) }
-          else { cancelHold() }
+          hold(false, holdOrigin)  // the finger lifted: moving while recording never cancels the video
           touchOrigin = nil
           Task {
             try? await Task.sleep(for: .milliseconds(300))
@@ -2440,11 +2461,13 @@ struct RowButton: View {
         receivedRow
       } else {
         let room = room(sign: hasSign && !twoRows)
-        BarRow(lead: room.lead, trail: room.trail, prefix: icon == nil ? 0 : Self.iconRoom) {
+        // A group's sign only beside its name: "Sent 5× Yo!" has the room to itself.
+        let groupSign = title == "Sent Yo" ? nil : icon
+        BarRow(lead: room.lead, trail: room.trail, prefix: groupSign == nil ? 0 : Self.iconRoom) {
           SteadyText(title == "Sent Yo" ? (sendingMedia ? YoWords.sending(count) : YoWords.sent(count)) : title)
             // A group: its sign before its name, outside it: the name alone stands in the middle.
             .overlay(alignment: .leading) {
-              if let icon {
+              if let icon = groupSign {
                 Image(systemName: icon)
                   .font(.system(size: Metrics.rowFont * 0.62, weight: .bold))
                   .frame(width: Self.iconRoom - 8, alignment: .trailing)
@@ -2704,24 +2727,51 @@ enum YoWords {
   static func sending(_ count: Int) -> String { count <= 1 ? "Sending Yo!" : "Sending \(count)× Yo!" }
 }
 
-/// Words with a count that hold still as it changes ("23× Yo" to "24× Yo"): placed as if every digit were "0" (the
-/// widest of Montserrat's figures, which are proportional and come without tabular ones), the real words drawn from
-/// that frame's start. Only a count growing a digit ("99×" to "100×") moves them.
+/// Words with a count that hold still as it changes ("23× Yo" to "24× Yo"): every digit in a slot as wide as
+/// Montserrat's widest figure (its figures are proportional, without tabular ones), centred there, the other words
+/// after it. The line is as wide for every count of as many digits; only a count growing a digit ("99×" to "100×")
+/// moves it. The words after the count are what is cut when it must be ("3× Yo from Mia…").
 struct SteadyText: View {
   let text: String
   init(_ text: String) { self.text = text }
+  @Environment(\.dynamicTypeSize) private var typeSize
+
+  /// The widest digit at the bar's size, measured once per text size.
+  @MainActor private static var slots: [DynamicTypeSize: CGFloat] = [:]
+  @MainActor private static func slot(_ size: DynamicTypeSize) -> CGFloat {
+    if let width = slots[size] { return width }
+    let base = UIFont(name: "Montserrat-Bold", size: Metrics.rowFont) ?? .boldSystemFont(ofSize: Metrics.rowFont)
+    let font = UIFontMetrics(forTextStyle: .title1)
+      .scaledFont(for: base, compatibleWith: UITraitCollection(preferredContentSizeCategory: UIContentSizeCategory(size)))
+    let width = (0...9).map { ceil(("\($0)" as NSString).size(withAttributes: [.font: font]).width) }.max() ?? 0
+    slots[size] = width
+    return width
+  }
+
+  /// The text in runs: each digit alone, the words between them whole.
+  private var parts: [(digit: Bool, text: String)] {
+    var parts: [(digit: Bool, text: String)] = []
+    for character in text {
+      if character.isNumber { parts.append((true, String(character))) }
+      else if let last = parts.last, !last.digit { parts[parts.count - 1].text.append(character) }
+      else { parts.append((false, String(character))) }
+    }
+    return parts
+  }
 
   var body: some View {
-    // Sized by the wider of the two: a digit wider than "0" never cuts the real words.
-    ZStack(alignment: .leading) {
-      Text(String(text.map { $0.isNumber ? "0" : $0 }))
-      Text(text)
+    let slot = Self.slot(typeSize)
+    HStack(spacing: 0) {
+      ForEach(Array(parts.enumerated()), id: \.offset) { _, part in
+        if part.digit {
+          Text(part.text).fixedSize().frame(width: slot)
+        } else {
+          Text(part.text).lineLimit(1).truncationMode(.tail)
+        }
+      }
     }
-    .lineLimit(1)
-    .hidden()
-    .overlay(alignment: .leading) { Text(text).lineLimit(1).truncationMode(.tail) }
-      .accessibilityElement(children: .ignore)
-      .accessibilityLabel(text)
+    .accessibilityElement(children: .ignore)
+    .accessibilityLabel(text)
   }
 }
 
@@ -2953,7 +3003,8 @@ struct BarTouchObserver: UIGestureRecognizerRepresentable {
     }
 
     private func checkMovement() {
-      guard let gate, let touch = gate.touch, !gate.blocked else { return }
+      // A video once started runs while the finger is down, wherever it goes; only lifting it ends the video.
+      guard !holding, let gate, let touch = gate.touch, !gate.blocked else { return }
       let point = touch.location(in: nil)
       if hypot(point.x - gate.origin.x, point.y - gate.origin.y) > 10 || !gate.isStationary {
         gate.blocked = true

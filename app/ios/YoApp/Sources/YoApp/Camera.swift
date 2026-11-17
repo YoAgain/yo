@@ -269,6 +269,11 @@ final class Camera: NSObject, @unchecked Sendable {
 extension Camera: AVCaptureVideoDataOutputSampleBufferDelegate {
   func captureOutput(_ output: AVCaptureOutput, didOutput sampleBuffer: CMSampleBuffer,
                      from connection: AVCaptureConnection) {
+    // Upright whatever the camera: a connection the front camera brought (or rebuilt) can come at its sensor's own
+    // angle, and the selfie showed sideways. Checked per frame, set only when wrong.
+    if connection.videoRotationAngle != 90, connection.isVideoRotationAngleSupported(90) {
+      connection.videoRotationAngle = 90
+    }
     if let renderer = display {
       let display = renderer.value
       if display.status == .failed { display.flush() }
