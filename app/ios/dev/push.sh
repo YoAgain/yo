@@ -29,6 +29,26 @@ info["CFBundleDisplayName"] = "Yo"
 plistlib.dump(info, open(sys.argv[1], "wb"))
 PY
 cp AppIcon-dev.png xtool/YoApp.app/AppIcon.png
+# App Intents metadata (Metadata.appintents), as ship.sh step 5 makes it: without it Shortcuts, Siri and the Action
+# button do not list Yo's actions. From the .swiftconstvalues swift-build writes. Training the App Shortcuts' phrases
+# needs Xcode's SiriSSUKitModel resources (SSU_RESOURCES, or install-toolchain.sh's copy); without them the actions
+# are still there and only the tool's last step fails, which is said and not fatal.
+ssu=${SSU_RESOURCES:-$(ls -dt "$HOME"/.cache/xtool/darwin-*.xtoolsdk.SiriSSUKitModel 2>/dev/null | head -n1 || true)}
+darwin_sdk="${XDG_CONFIG_HOME:+$XDG_CONFIG_HOME/swiftpm}"
+darwin_sdk="${darwin_sdk:-$HOME/.swiftpm}/swift-sdks/darwin.artifactbundle"
+mapfile -t constvals < <(find .build/out/Intermediates.noindex \
+  -path "*/Release-iphoneos/YoApp-t.build/Objects-normal/arm64/*.swiftconstvalues" 2>/dev/null | sort)
+if [ "${#constvals[@]}" = 0 ]; then
+  echo "warning: no .swiftconstvalues for YoApp: Yo Dev goes without its App Intents metadata" >&2
+else
+  rm -rf xtool/YoApp.app/Metadata.appintents
+  "${PY:-$HOME/pymobile3-venv/bin/python}" -I "$OAD/tools/appintentsmeta.py" --module-name YoApp \
+    --bundle-identifier "$(python3 -I -c 'import plistlib,sys; print(plistlib.load(open(sys.argv[1],"rb"))["CFBundleIdentifier"])' xtool/YoApp.app/Info.plist)" \
+    --output xtool/YoApp.app --binary-file xtool/YoApp.app/YoApp \
+    --sdk-root "$darwin_sdk/Developer/Platforms/iPhoneOS.platform/Developer/SDKs/iPhoneOS.sdk" \
+    ${ssu:+--ssu-resources "$ssu"} --const-values "${constvals[@]}" ||
+    echo "warning: App Shortcuts not trained (no SiriSSUKitModel resources): Siri may not know Yo's phrases" >&2
+fi
 # Without the extensions (share sheet, notification service): they share the state through an App Group (Yo Dev's
 # would be group.app.justyo.ios.dev, ShareBridge.group), which Yo Dev's development profiles do not grant; Yo Dev finds
 # no group and keeps its state to itself, and its pushes say only "Yo".
