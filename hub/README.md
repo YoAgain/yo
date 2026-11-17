@@ -82,7 +82,7 @@ Operator To-Dos: `POST /v1/admin/todos`, plain UTF-8 body (1–4000 bytes),
 `Yo-Admin-Token` header matching `YO_ADMIN_TOKEN`; returns `201 {"id": integer}`.
 Unset/empty token or missing/wrong credential returns `404`; comparison is constant time.
 The route uses the crash-report rate (5/address/day) in its own bucket; no peer address grants access.
-Rows have `type` feedback/crash/todo; `auto` remains compatible with older readers.
+To-dos live in the team thread in `support_messages`; user feedback lives in `support_messages`; anonymous crashes/errors live in `diagnostics`.
 
 Reserved names live only in SQLite. New databases enforce reservations by default; existing databases migrate
 once to ON when `reserved` has rows, otherwise OFF. Disabling enforcement preserves names and existing holders.
@@ -93,3 +93,17 @@ The same `YO_ADMIN_TOKEN` and hidden-route 404 rules as To-Dos protect:
 `PUT /v1/admin/reserved` with `{ "enabled": false }`, and
 `DELETE /v1/admin/reserved/{name}`. Adds and removals compare skeletons; duplicate adds preserve spelling.
 POST and PUT return the current state; DELETE returns 204, including when the name was absent.
+
+
+## Support chat rollout
+
+Back up the hub DB and admin state before rollout. If old dashboard JSON done flags still need
+importing, run `migrate_support_done.py` offline against schema 5 **before** upgrading to schema 6.
+Deploy the hub first, then admin and its collector. No app update is required.
+Startup follows schema 3 → 4 → 5 → 6 (or 4/5 → 6), atomically migrating each step.
+Schema 6 moves `todos` into `support_messages` with `user_id=X''`, `from_team=1`,
+preserving text, creation and done times, and allocating fresh message IDs to avoid collisions.
+It drops `todos` and backfills user-message `done_at` from existing team read markers once.
+The pinned Team To-Dos thread uses `team` in admin URLs. Every bubble can be completed or reopened;
+viewing a thread changes no completion state. Badges and the Overview red curve count open user
+messages only. App unread team replies still use `read_at`. Old JSON flags still serve user reports.

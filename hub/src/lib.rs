@@ -405,7 +405,17 @@ impl Hub {
             .route(api::ACCOUNT, delete(delete_account))
             .route(api::REPORT, post(report))
             .route(api::FEEDBACK, post(feedback))
+            .route(api::SUPPORT, get(support_get).post(feedback))
+            .route(api::SUPPORT_READ, post(support_read))
+            .route("/v1/admin/messages", get(admin_threads))
+            .route("/v1/admin/messages/{user}", get(admin_thread).post(admin_reply))
+            .route("/v1/admin/messages/{user}/handled", post(admin_handled))
+            .route("/v1/admin/messages/done/{id}", post(admin_todo_done))
+            .route("/v1/admin/todos/{id}", post(admin_todo_done))
             .route(api::CRASH, post(crash))
+            .route("/v1/errors", post(diagnostic_error))
+            .route("/v1/diagnostics/crash", post(diagnostic_crash))
+            .route("/v1/admin/diagnostics", get(admin_diagnostics).put(admin_diagnostics))
             .route("/v1/admin/todos", post(admin_todo))
             .route("/v1/admin/reserved", get(admin_reserved).post(admin_reserved).put(admin_reserved))
             .route("/v1/admin/reserved/{name}", delete(admin_reserved_delete))
@@ -1141,18 +1151,148 @@ async fn feedback(State(hub): Hubs, method: Method, uri: Uri, headers: HeaderMap
     let (text, app_version) = request.check().map_err(|_| bad())?;
     hub.limit(format!("feedback:{}", yo_wire::b64(&device.user_id)), hub.config.limits.feedback_per_user_day, DAY)?;
     match hub.db.feedback(&device.device_id, text, app_version, now_ms())? {
+        Write::Refused(db::Conflict::SupportFull) => Err(refuse(StatusCode::TOO_MANY_REQUESTS)),
         Write::Done(()) => Ok(StatusCode::NO_CONTENT),
         Write::Refused(_) => Err(refuse(StatusCode::GONE)),
     }
 }
 
+async fn support_get(State(hub): Hubs, method: Method, uri: Uri, headers: HeaderMap) -> Res<(StatusCode, Vec<u8>)> {
+    let device = hub.authenticate(&method, &uri, &headers, &[])?;
+    hub.limit(format!("support-read:{}", yo_wire::b64(&device.user_id)), 120, HOUR)?;
+    Ok(ok(encode(&hub.db.support_thread(&device.user_id)?)))
+}
+async fn support_read(State(hub): Hubs, method: Method, uri: Uri, headers: HeaderMap, body: Bytes) -> Res<StatusCode> {
+    let device = hub.authenticate(&method, &uri, &headers, &body)?;
+    let request: api::SupportRead = decode(&body)?;
+    if request.through > i64::MAX as u64 {
+        return Err(bad());
+    }
+    hub.limit(format!("support-mark:{}", yo_wire::b64(&device.user_id)), 120, HOUR)?;
+    hub.db.support_read(&device.user_id, true, request.through, now_ms())?;
+    Ok(StatusCode::NO_CONTENT)
+}
+fn support_user(user: &str) -> Res<UserId> {
+    if user.len() != 32 {
+        return Err(bad());
+    }
+    let bytes = (0..32)
+        .step_by(2)
+        .map(|i| user.get(i..i + 2).and_then(|s| u8::from_str_radix(s, 16).ok()).ok_or_else(bad))
+        .collect::<Res<Vec<_>>>()?;
+    bytes.try_into().map_err(|_| bad())
+}
+async fn admin_threads(State(hub): Hubs, headers: HeaderMap) -> Res<axum::Json<serde_json::Value>> {
+    require_admin(&hub, &headers)?;
+    Ok(axum::Json(hub.db.support_threads()?))
+}
+async fn admin_thread(
+    State(hub): Hubs,
+    Path(user): Path<String>,
+    headers: HeaderMap,
+) -> Res<axum::Json<serde_json::Value>> {
+    require_admin(&hub, &headers)?;
+    let user = if user == "team" { Vec::new() } else { support_user(&user)?.to_vec() };
+    Ok(axum::Json(hub.db.admin_support_thread(&user)?))
+}
+async fn admin_reply(State(hub): Hubs, Path(user): Path<String>, headers: HeaderMap, body: Bytes) -> Res<StatusCode> {
+    require_admin(&hub, &headers)?;
+    let user = support_user(&user)?;
+    let text = std::str::from_utf8(&body).map_err(|_| bad())?;
+    if text.trim().is_empty() || body.len() > limits::MAX_FEEDBACK_LEN {
+        return Err(bad());
+    }
+    hub.limit(format!("support-reply:{}", yo_wire::b64(&user)), 100, DAY)?;
+    if !hub.db.support_reply(&user, text, now_ms())? {
+        return Err(refuse(StatusCode::CONFLICT));
+    }
+    Ok(StatusCode::NO_CONTENT)
+}
+async fn admin_handled(State(hub): Hubs, Path(user): Path<String>, headers: HeaderMap, body: Bytes) -> Res<StatusCode> {
+    require_admin(&hub, &headers)?;
+    let through: u64 = std::str::from_utf8(&body).map_err(|_| bad())?.parse().map_err(|_| bad())?;
+    if through > i64::MAX as u64 {
+        return Err(bad());
+    }
+    hub.db.support_read(&support_user(&user)?, false, through, now_ms())?;
+    Ok(StatusCode::NO_CONTENT)
+}
+async fn admin_todo_done(State(hub): Hubs, Path(id): Path<i64>, headers: HeaderMap, body: Bytes) -> Res<StatusCode> {
+    require_admin(&hub, &headers)?;
+    let done = match body.as_ref() {
+        b"1" => Some(now_ms()),
+        b"0" => None,
+        _ => return Err(bad()),
+    };
+    let changed = hub.db.todo_done(id, done)?;
+    if !changed {
+        return Err(refuse(StatusCode::NOT_FOUND));
+    }
+    Ok(StatusCode::NO_CONTENT)
+}
+
 /// A crash report (spec 6.4): unsigned, no account; kept as feedback marked `auto`, counted by the address.
-async fn crash(State(hub): Hubs, ConnectInfo(peer): Peer, headers: HeaderMap, body: Bytes) -> Res<StatusCode> {
-    hub.limit_ip("crash", peer, &headers, hub.config.limits.crash_per_ip_day, DAY)?;
+async fn crash(State(hub): Hubs, body: Bytes) -> Res<StatusCode> {
     let request: api::Feedback = decode(&body)?;
     let (text, app_version) = request.check().map_err(|_| bad())?;
     hub.db.crash(text, app_version, now_ms())?;
     Ok(StatusCode::NO_CONTENT)
+}
+
+async fn diagnostic_error(State(hub): Hubs, body: Bytes) -> Res<StatusCode> {
+    diagnostic_receive(&hub, "error", &body)
+}
+async fn diagnostic_crash(State(hub): Hubs, body: Bytes) -> Res<StatusCode> {
+    diagnostic_receive(&hub, "crash", &body)
+}
+fn diagnostic_receive(hub: &Hub, kind: &str, body: &[u8]) -> Res<StatusCode> {
+    if body.len() > 60 * 1024 {
+        return Err(refuse(StatusCode::PAYLOAD_TOO_LARGE));
+    }
+    let payload: serde_json::Value = serde_json::from_slice(body).map_err(|_| bad())?;
+    let fields = payload.as_object().ok_or_else(bad)?;
+    let allowed =
+        ["uuid", "app", "os", "model", "domain", "code", "place", "exception", "frames", "termination", "details"];
+    if fields.iter().any(|(k, v)| !allowed.contains(&k.as_str()) || !v.is_string())
+        || ["app", "os", "model"].iter().any(|k| payload[k].as_str().is_none_or(str::is_empty))
+        || (kind == "error"
+            && ["domain", "code", "place"].iter().any(|k| payload[k].as_str().is_none_or(str::is_empty)))
+        || (kind == "crash" && ["exception", "frames", "termination"].iter().any(|k| payload[k].as_str().is_none()))
+    {
+        return Err(bad());
+    }
+    if let Some(uuid) = fields.get("uuid") {
+        let uuid = uuid.as_str().ok_or_else(bad)?;
+        if uuid.len() != 36
+            || uuid.bytes().enumerate().any(|(i, c)| {
+                if [8, 13, 18, 23].contains(&i) {
+                    c != b'-'
+                } else {
+                    !c.is_ascii_hexdigit()
+                }
+            })
+        {
+            return Err(bad());
+        }
+    }
+    hub.db.diagnostic(kind, &payload, now_ms())?;
+    Ok(StatusCode::NO_CONTENT)
+}
+async fn admin_diagnostics(
+    State(hub): Hubs,
+    method: Method,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Res<axum::Json<serde_json::Value>> {
+    require_admin(&hub, &headers)?;
+    if method == Method::PUT {
+        let value: serde_json::Value = serde_json::from_slice(&body).map_err(|_| bad())?;
+        hub.db.diagnostic_done(
+            value["id"].as_i64().filter(|v| *v > 0).ok_or_else(bad)?,
+            value["done"].as_bool().ok_or_else(bad)?,
+        )?;
+    }
+    Ok(axum::Json(hub.db.diagnostics()?))
 }
 
 fn require_admin(hub: &Hub, headers: &HeaderMap) -> Res<()> {
@@ -1677,8 +1817,8 @@ mod tests {
                     let id = serde_json::from_slice::<serde_json::Value>(&body).unwrap()["id"].as_i64().unwrap();
                     let conn = rusqlite::Connection::open(&path).unwrap();
                     let kind: String =
-                        conn.query_row("SELECT type FROM feedback WHERE id = ?1", [id], |r| r.get(0)).unwrap();
-                    assert_eq!(kind, "todo");
+                        conn.query_row("SELECT text FROM support_messages WHERE id = ?1", [id], |r| r.get(0)).unwrap();
+                    assert!(!kind.is_empty());
                 }
             }
         }

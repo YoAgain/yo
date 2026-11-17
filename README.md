@@ -55,6 +55,12 @@ Sealed sender hides the sender on deliveries to contacts, as shown above. First-
 The hub sees recipients, lookups and traffic metadata; see the [privacy limits](spec/v1.md#1-goals)
 and [threat model](hub/SECURITY.md). Only you and your recipients can read your Yos and media.
 
+The optional Yo-to-Yo Roundtrip probe runs only when tapped. Its operator can see that the account was
+active at that moment. No per-user probe history or timing is stored or logged (only aggregate counters;
+mandatory encrypted protocol state and volatile rate limiting remain). The reserved PING peer stays out of
+contacts, requests, notifications, stats and Account Sync, even for late replies. See
+[the PING deployment and privacy notes](app/yogpt/README.md).
+
 Groups use zkgroup, with up to 20 members; group names and membership are encrypted too.
 Photos and videos are view-once: the app deletes them and their keys after viewing.
 The server deletes the encrypted file after its last acknowledged fetch.
@@ -181,3 +187,8 @@ commit shown in Settings › Licenses. The hub does not link libsignal and is MI
 The name, logo and sound are outside the code license. [Third-party license texts](LICENSES).
 
 </details>
+
+Support chat schema 6 migrates schemas 3/4 through 5, merges to-dos into the pinned Team To-Dos
+thread (`support_messages.user_id=X''`), and tracks completion per message with nullable `done_at`.
+Deploy the hub before admin/collector; back up first and import any legacy JSON done flags on schema 5
+before upgrading. App reply read receipts are unchanged. See admin/README.md for rollout details.

@@ -2,8 +2,11 @@
 //! several hubs, each on its own.
 //!
 //!   yo-gpt [--replies DIR] --account NAME=HUB,DIR[,USERNAME] [--hub-key NAME=KEY] [--trust-root NAME=KEY]
-//!          [--zk-params NAME=PARAMS] [--account …]
+//!          [--zk-params NAME=PARAMS] [--account …] [--echo NAME]
 //!   yo-gpt --replies app/yogpt/replies --account dev=https://dev.justyo.app,state/dev,YoGPT
+//!
+//! `--echo NAME` reserves that account for immediate, single plain-Yo answers with aggregate-only logs;
+//! see README.md for PING deployment and limits. Normal accounts keep the behavior below.
 //!
 //! Pictures: with `--replies`, a photo or video sent to it is answered with one picture from DIR (files named like
 //! `007.jpg`, read as they are there at the time, at most 512 KB each), always; a plain Yo gets Yos only, unless
@@ -187,6 +190,7 @@ struct Account {
     hub: String,
     state: PathBuf,
     username: String,
+    echo: bool,
     /// The hub's public keys, pinned (`--hub-key`, as often as there are: the current one and a spare).
     hub_keys: Vec<[u8; 32]>,
     /// The hub's sender-certificate trust roots (`--trust-root`, the current one and a spare): without one, no sealed
@@ -364,6 +368,7 @@ fn account(value: &str) -> Result<Account, String> {
         hub,
         state: state.into(),
         username: username.into(),
+        echo: false,
         hub_keys: Vec::new(),
         trust_roots: Vec::new(),
         zk_params: None,
@@ -379,12 +384,14 @@ fn named_key(flag: &str, text: &str) -> Result<(String, [u8; 32]), String> {
 
 fn args() -> Result<(Vec<Account>, Options), String> {
     let mut accounts: Vec<Account> = Vec::new();
+    let mut echoes = Vec::new();
     let (mut hub_keys, mut trust_roots, mut zk_params) = (Vec::new(), Vec::new(), Vec::new());
     let mut options = Options { replies: None, picture_every: PICTURE_EVERY, yo: None, photo: None };
     let mut it = std::env::args().skip(1);
     while let Some(flag) = it.next() {
         let value = it.next().ok_or(format!("{flag}: a value"))?;
         match flag.as_str() {
+            "--echo" => echoes.push(value),
             "--account" => accounts.push(account(&value)?),
             "--replies" => options.replies = Some(value.into()),
             "--picture-every" => options.picture_every = value.parse().map_err(|_| "--picture-every: a number")?,
@@ -402,6 +409,12 @@ fn args() -> Result<(Vec<Account>, Options), String> {
             }
             other => return Err(format!("unknown flag {other}")),
         }
+    }
+    for name in echoes {
+        accounts.iter_mut().find(|a| a.name == name).ok_or(format!("--echo: no account {name}"))?.echo = true;
+    }
+    if accounts.iter().any(|a| a.echo) && options.yo.is_some() {
+        return Err("--echo cannot be combined with --yo".into());
     }
     for (name, key) in hub_keys {
         let account = accounts.iter_mut().find(|a| a.name == name).ok_or(format!("--hub-key: no account {name}"))?;
@@ -425,6 +438,7 @@ fn args() -> Result<(Vec<Account>, Options), String> {
 struct Bot {
     name: String,
     options: Options,
+    echo: bool,
     /// Blob ids of photos and videos sent to it, for the drainer.
     draining: SyncSender<[u8; 16]>,
     client: Mutex<Client>,
@@ -475,6 +489,9 @@ impl Bot {
     fn queue(&self, events: &SyncSender<Event>, event: Event) {
         // A group's Yo is answered into the group: it goes on as a message from the group ("group:" and its id), so
         // the group has its own turn and limits, as a sender has. Its own (from another device) and changes are not.
+        if self.echo && matches!(event, Event::GroupMessage { .. }) {
+            return;
+        }
         let event = match event {
             Event::GroupMessage { group, sent_at_ms, content, .. } => {
                 Event::Message { user: format!("{GROUP}{group}"), sent_at_ms, content }
@@ -483,6 +500,9 @@ impl Bot {
         };
         let event = match event {
             Event::Message { user, sent_at_ms, content: Content::Photo(media) | Content::Video { media, .. } } => {
+                if self.echo {
+                    return;
+                }
                 self.drain(&media);
                 Event::Message { user, sent_at_ms, content: Content::Photo(unopened()) }
             }
@@ -744,6 +764,27 @@ fn mailbox(bot: &Bot, dir: &Path, events: &SyncSender<Event>) {
     }
 }
 
+/// Volatile, bounded token buckets; idle senders expire after three seconds. No eviction
+/// of active buckets (a flood of fresh senders cannot reset another sender's limit).
+#[derive(Default)]
+struct EchoLimits(HashMap<String, (Instant, f64)>);
+impl EchoLimits {
+    fn allow(&mut self, user: &str, now: Instant) -> bool {
+        self.0.retain(|_, (last, _)| now.duration_since(*last) < Duration::from_secs(3));
+        if !self.0.contains_key(user) && self.0.len() >= MAX_REMEMBERED {
+            return false;
+        }
+        let (last, tokens) = self.0.entry(user.to_owned()).or_insert((now, 3.0));
+        *tokens = (*tokens + now.duration_since(*last).as_secs_f64()).min(3.0);
+        *last = now;
+        if *tokens < 1.0 {
+            return false;
+        }
+        *tokens -= 1.0;
+        true
+    }
+}
+
 /// Serves one account until it stops.
 fn serve(account: &Account, options: Options) {
     let Some(client) = open(account) else { return };
@@ -753,6 +794,7 @@ fn serve(account: &Account, options: Options) {
     let bot = Arc::new(Bot {
         name: account.name.clone(),
         options,
+        echo: account.echo,
         draining,
         client: Mutex::new(client),
         stopped: AtomicBool::new(false),
@@ -761,7 +803,9 @@ fn serve(account: &Account, options: Options) {
         dropped: AtomicU64::new(0),
         dropped_logged_s: AtomicU64::new(0),
     });
-    let started = {
+    let started = if account.echo {
+        "echo ready".to_owned()
+    } else {
         let client = bot.client();
         format!("{} on {}, user {}", client.username().unwrap_or("?"), account.hub, client.user_id())
     };
@@ -769,8 +813,10 @@ fn serve(account: &Account, options: Options) {
     let (events, received) = sync_channel(MAX_QUEUED);
     let (receiving, to_dispatch) = (bot.clone(), events.clone());
     std::thread::spawn(move || receive(&receiving, &to_dispatch));
-    let (mailing, to_queue, outbox) = (bot.clone(), events.clone(), account.state.join("outbox"));
-    std::thread::spawn(move || mailbox(&mailing, &outbox, &to_queue));
+    if !account.echo {
+        let (mailing, to_queue, outbox) = (bot.clone(), events.clone(), account.state.join("outbox"));
+        std::thread::spawn(move || mailbox(&mailing, &outbox, &to_queue));
+    }
     // Every Yo gets its answer: one sender's in turn, on one thread; senders side by side.
     while bot.running() {
         let event = match received.recv_timeout(Duration::from_secs(1)) {
@@ -836,9 +882,13 @@ fn serve(account: &Account, options: Options) {
 
 /// The long poll, without holding the client while it waits; every Yo to the dispatcher.
 fn receive(bot: &Bot, events: &SyncSender<Event>) {
-    leave_empty(bot, events); // the groups left alone while it was away
+    if !bot.echo {
+        leave_empty(bot, events);
+    } // the groups left alone while it was away
     let mut backoff = Backoff::default();
     let mut maintained = Instant::now();
+    let mut limits = EchoLimits::default();
+    let mut answered = 0u64;
     while bot.running() {
         let result = if maintained.elapsed() >= MAINTENANCE {
             maintained = Instant::now();
@@ -854,9 +904,27 @@ fn receive(bot: &Bot, events: &SyncSender<Event>) {
             Ok(received) => {
                 backoff = Backoff::default();
                 let changed = received.iter().any(|event| matches!(event, Event::GroupChanged { .. }));
-                received.into_iter().for_each(|event| bot.queue(events, event));
+                if bot.echo {
+                    for event in received {
+                        let Event::Message { user, content: Content::Yo, .. } = event else { continue };
+                        if !limits.allow(&user, Instant::now()) {
+                            bot.dropped();
+                            continue;
+                        }
+                        match bot.client().echo_yo(&user) {
+                            Ok(_) => {
+                                answered += 1;
+                                bot.log(format!("echo answered={answered}"));
+                            }
+                            Err(error) if gone(&error) => bot.stop(GONE),
+                            Err(_) => bot.dropped(),
+                        }
+                    }
+                } else {
+                    received.into_iter().for_each(|event| bot.queue(events, event));
+                }
                 bot.client().acknowledge_events();
-                if changed {
+                if changed && !bot.echo {
                     leave_empty(bot, events);
                 }
             }
@@ -1097,5 +1165,29 @@ mod tests {
         let last = recent.of(&format!("user{}", MAX_REMEMBERED + 9)).unwrap();
         assert_eq!(last.len(), RECENT_PICTURES);
         assert_eq!(last.front().map(String::as_str), Some("005.jpg"));
+    }
+}
+
+#[cfg(test)]
+mod echo_tests {
+    use super::*;
+    #[test]
+    fn sender_buckets_refill_expire_and_stay_bounded() {
+        let mut limits = EchoLimits::default();
+        let now = Instant::now();
+        for _ in 0..3 {
+            assert!(limits.allow("sender", now));
+        }
+        assert!(!limits.allow("sender", now));
+        assert!(!limits.allow("sender", now + Duration::from_millis(999)));
+        assert!(limits.allow("sender", now + Duration::from_secs(1)));
+        assert!(!limits.allow("sender", now + Duration::from_secs(1)));
+        for n in 0..MAX_REMEMBERED - 1 {
+            assert!(limits.allow(&n.to_string(), now + Duration::from_secs(1)));
+        }
+        assert!(!limits.allow("overflow", now + Duration::from_secs(1)));
+        assert!(!limits.allow("sender", now + Duration::from_secs(1)));
+        assert!(limits.allow("fresh", now + Duration::from_secs(5)));
+        assert_eq!(limits.0.len(), 1);
     }
 }

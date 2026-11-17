@@ -297,3 +297,47 @@ fn yogpt_answers_in_a_group() {
     let _ = std::fs::remove_dir_all(&state);
     let _ = std::fs::remove_dir_all(&replies);
 }
+
+#[test]
+fn echo_is_immediate_single_plain_bounded_and_logs_no_sender() {
+    let hub = TestHub::start();
+    let state = state_dir();
+    std::fs::create_dir_all(&state).unwrap();
+    let log_path = state.join("test.log");
+    let log = std::fs::File::create(&log_path).unwrap();
+    let mut command = Command::new(env!("CARGO_BIN_EXE_yo-gpt"));
+    command.args(["--account", &format!("echo={},{},ECHO", hub.url(), state.display())]);
+    command.args(["--echo", "echo", "--picture-every", "1", "--replies", "app/yogpt/replies"]);
+    command.args(["--trust-root", &format!("echo={}", yo_wire::b64(&yo_tests::trust_root()))]);
+    command.stderr(log);
+    let bot = Bot(command.spawn().unwrap());
+    let ready = Instant::now();
+    while Client::username_free(Http::new(hub.url()).as_ref(), "ECHO").unwrap() {
+        assert!(ready.elapsed() < Duration::from_secs(10));
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    let mut alice = someone(&hub);
+    let began = Instant::now();
+    alice.send_yo("ECHO").unwrap();
+    let mut answers = Vec::new();
+    while answers.is_empty() {
+        answers.extend(alice.sync(0).unwrap().into_iter().filter_map(|event| match event {
+            Event::Message { content, .. } => Some(content),
+            _ => None,
+        }));
+        assert!(began.elapsed() < Duration::from_millis(900), "echo used the think path");
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    assert_eq!(answers, [Content::Yo]);
+    assert!(yos_until_quiet(&mut alice, Duration::from_millis(1100)).is_empty(), "one answer only");
+    // Media is not answered, even when the normal bot would always send a picture.
+    let (photo, _) = media::seal(b"untrusted bytes", 1, 1).unwrap();
+    alice.send("ECHO", Content::Photo(photo.clone())).unwrap();
+    alice.send("ECHO", Content::Video { media: photo, duration_ms: 1 }).unwrap();
+    assert!(yos_until_quiet(&mut alice, Duration::from_millis(1100)).is_empty());
+    drop(bot);
+    let log = std::fs::read_to_string(log_path).unwrap();
+    assert!(!log.contains(alice.user_id()) && !log.contains(&alice.user_id()[..8]), "{log}");
+    assert!(log.contains("echo answered=1"), "{log}");
+    std::fs::remove_dir_all(state).unwrap();
+}

@@ -114,6 +114,7 @@ pub enum Delivered {
 
 #[derive(Debug, PartialEq, Eq)]
 pub enum Conflict {
+    SupportFull,
     DeviceTaken,
     /// The account key is, or was, another user's.
     KeyTaken,
@@ -430,6 +431,7 @@ fn remove_user(tx: &Transaction<'_>, user: &UserId, now: u64) -> rusqlite::Resul
     tx.execute("DELETE FROM storage WHERE user_id = ?1", [user])?;
     tx.execute("DELETE FROM contact_keys WHERE user_id = ?1", [user])?;
     tx.execute("DELETE FROM profile_commitments WHERE user_id = ?1", [user])?;
+    tx.execute("UPDATE support_messages SET user_id = ?2 WHERE user_id = ?1", params![user, NOBODY])?;
     tx.execute("UPDATE feedback SET user_id = ?2 WHERE user_id = ?1", params![user, NOBODY])?;
     // Its blobs' files go with the next sweep, or at once where the route knows them (`blobs_of`).
     tx.execute("DELETE FROM blobs WHERE user_id = ?1", [user])?;
@@ -440,7 +442,7 @@ fn remove_user(tx: &Transaction<'_>, user: &UserId, now: u64) -> rusqlite::Resul
 
 /// The schema this hub writes. A database of another (or a pre-release) schema is refused, never half migrated; one of
 /// schema 1 or 2 is brought up to it (`from_1`, `from_2`).
-const SCHEMA_VERSION: i64 = 3;
+const SCHEMA_VERSION: i64 = 6;
 
 /// What a delivery is to its recipient (spec 4.10, `Db::admit`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -557,6 +559,57 @@ fn without_grace(conn: &Connection) -> rusqlite::Result<()> {
 }
 
 /// Add and backfill the kind only once; later starts preserve explicitly written kinds.
+fn with_support(conn: &Connection, legacy_max: i64) -> rusqlite::Result<()> {
+    if conn.prepare("SELECT 1 FROM pragma_table_info('support_messages') WHERE name='done_at'")?.exists([])? {
+        return Ok(());
+    }
+    conn.execute_batch(&format!(
+        "BEGIN IMMEDIATE;
+        CREATE TABLE IF NOT EXISTS support_messages (
+            id INTEGER PRIMARY KEY AUTOINCREMENT, user_id BLOB NOT NULL,
+            from_team INTEGER NOT NULL CHECK(from_team IN (0,1)), text TEXT NOT NULL,
+            created_at INTEGER NOT NULL, read_at INTEGER, app_version TEXT NOT NULL DEFAULT '');
+        CREATE INDEX IF NOT EXISTS support_by_user ON support_messages(user_id, created_at, id);
+        CREATE TABLE IF NOT EXISTS todos (id INTEGER PRIMARY KEY AUTOINCREMENT,
+            text TEXT NOT NULL, created_at INTEGER NOT NULL, done_at INTEGER);
+        INSERT INTO support_messages(id,user_id,from_team,text,created_at,app_version)
+            SELECT id,user_id,0,text,created_at,app_version FROM feedback WHERE type = 'feedback';
+        INSERT INTO todos(id,text,created_at) SELECT id,text,created_at FROM feedback WHERE type = 'todo';
+        -- Reserve every legacy feedback id in both sequences: old dashboard done keys
+        -- must never accidentally identify a newly created row in the other table.
+        INSERT INTO sqlite_sequence(name,seq) SELECT 'support_messages',coalesce((SELECT max(id) FROM feedback),0)
+            WHERE NOT EXISTS(SELECT 1 FROM sqlite_sequence WHERE name='support_messages');
+        INSERT INTO sqlite_sequence(name,seq) SELECT 'todos',coalesce((SELECT max(id) FROM feedback),0)
+            WHERE NOT EXISTS(SELECT 1 FROM sqlite_sequence WHERE name='todos');
+        UPDATE sqlite_sequence SET seq=max(seq,{legacy_max},(SELECT coalesce(max(id),0) FROM feedback))
+            WHERE name IN ('support_messages','todos');
+        DELETE FROM feedback WHERE type IN ('feedback','todo');
+        PRAGMA user_version = 5;
+        COMMIT;",
+    ))
+}
+
+/// Schema 6: X'' is the accountless team thread. To-do IDs are reallocated to avoid
+/// collisions with support IDs; text, creation and completion times are retained.
+fn with_support_done(conn: &mut Connection) -> rusqlite::Result<()> {
+    let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+    if !tx.prepare("SELECT 1 FROM pragma_table_info('support_messages') WHERE name='done_at'")?.exists([])? {
+        tx.execute_batch(
+            "ALTER TABLE support_messages ADD COLUMN done_at INTEGER;
+            UPDATE support_messages SET done_at=read_at WHERE from_team=0 AND read_at IS NOT NULL;",
+        )?;
+    }
+    if tx.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='todos'")?.exists([])? {
+        tx.execute_batch(
+            "INSERT INTO support_messages(user_id,from_team,text,created_at,done_at)
+            SELECT X'',1,text,created_at,done_at FROM todos ORDER BY created_at,id;
+            DROP TABLE todos;",
+        )?;
+    }
+    tx.execute_batch("PRAGMA user_version=6;")?;
+    tx.commit()
+}
+
 fn with_feedback_type(conn: &Connection) -> rusqlite::Result<()> {
     let has = conn.prepare("SELECT 1 FROM pragma_table_info('feedback') WHERE name = 'type'")?.exists([])?;
     if !has {
@@ -569,6 +622,74 @@ fn with_feedback_type(conn: &Connection) -> rusqlite::Result<()> {
         )?;
     }
     Ok(())
+}
+
+// Schema 4 stored only first/last per signature. Daily counts start with schema 5;
+// never invent a historical distribution from those aggregates.
+const DIAGNOSTIC_DAYS: &str = "CREATE TABLE IF NOT EXISTS diagnostic_days (
+    day INTEGER NOT NULL, kind TEXT NOT NULL, count INTEGER NOT NULL,
+    PRIMARY KEY(day,kind)) WITHOUT ROWID;";
+
+const DIAGNOSTICS: &str = "
+CREATE TABLE IF NOT EXISTS diagnostics (
+ id INTEGER PRIMARY KEY, kind TEXT NOT NULL CHECK(kind IN ('crash','error')),
+ signature TEXT NOT NULL UNIQUE, count INTEGER NOT NULL DEFAULT 1,
+ first_seen INTEGER NOT NULL, last_seen INTEGER NOT NULL,
+ app TEXT NOT NULL, os TEXT NOT NULL, model TEXT NOT NULL,
+ payload TEXT NOT NULL, done INTEGER NOT NULL DEFAULT 0
+);
+CREATE INDEX IF NOT EXISTS diagnostics_recent ON diagnostics(last_seen DESC);";
+
+fn diagnostic_write(conn: &Connection, kind: &str, payload: &serde_json::Value, now: u64) -> rusqlite::Result<i64> {
+    let field = |name| payload[name].as_str().unwrap_or("");
+    let identity = if kind == "error" {
+        serde_json::json!([kind, field("domain"), field("code"), field("place"), field("app")])
+    } else {
+        serde_json::json!([kind, field("exception"), field("frames"), field("termination"), field("app")])
+    };
+    let signature = yo_wire::b64(&yo_wire::sha256(identity.to_string().as_bytes()));
+    conn.execute(
+        "INSERT INTO diagnostics(kind, signature, first_seen, last_seen, app, os, model, payload)
+        VALUES (?1,?2,?3,?3,?4,?5,?6,?7)
+        ON CONFLICT(signature) DO UPDATE SET count=count+1, last_seen=excluded.last_seen,
+        app=excluded.app, os=excluded.os, model=excluded.model, payload=excluded.payload",
+        params![kind, signature, now, field("app"), field("os"), field("model"), payload.to_string()],
+    )?;
+    conn.execute(
+        "INSERT INTO diagnostic_days(day,kind,count) VALUES (?1,?2,1)
+        ON CONFLICT(day,kind) DO UPDATE SET count=count+1",
+        params![now / 86_400_000, kind],
+    )?;
+    conn.execute("DELETE FROM diagnostic_days WHERE day < ?1", [now.saturating_sub(14 * 86_400_000) / 86_400_000])?;
+    conn.query_row("SELECT id FROM diagnostics WHERE signature=?1", [signature], |r| r.get(0))
+}
+
+fn legacy_crash(text: &str, app: &str) -> serde_json::Value {
+    let lines: Vec<_> = text.lines().collect();
+    let meta: Vec<_> = lines.first().unwrap_or(&"").split(" · ").collect();
+    serde_json::json!({"app": app, "os": meta.get(1).unwrap_or(&""), "model": meta.get(2).unwrap_or(&""),
+        "exception": lines.get(1).unwrap_or(&""), "frames": lines.iter().skip(2).copied().collect::<Vec<_>>().join("\n"),
+        "termination": "", "details": text})
+}
+
+fn migrate_diagnostics(conn: &mut Connection) -> rusqlite::Result<()> {
+    let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+    if tx.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='diagnostics'")?.exists([])? {
+        return tx.commit();
+    }
+    tx.execute_batch(DIAGNOSTICS)?;
+    let rows = tx
+        .prepare(
+            "SELECT text, app_version, created_at FROM feedback WHERE type='crash' OR auto=1 ORDER BY created_at, id",
+        )?
+        .query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?, r.get::<_, u64>(2)?)))?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    for (text, app, at) in rows {
+        diagnostic_write(&tx, "crash", &legacy_crash(&text, &app), at)?;
+    }
+    tx.execute("DELETE FROM feedback WHERE type='crash' OR auto=1", [])?;
+    tx.execute_batch("PRAGMA user_version = 4")?;
+    tx.commit()
 }
 
 /// Feedback of before crash reports: the `auto` column comes (0 for all of it).
@@ -585,7 +706,7 @@ fn check_version(conn: &Connection) -> rusqlite::Result<()> {
     let tables: i64 =
         conn.query_row("SELECT count(*) FROM sqlite_master WHERE type = 'table'", [], |row| row.get(0))?;
     match version {
-        SCHEMA_VERSION | 1 | 2 => Ok(()),
+        SCHEMA_VERSION | 1 | 2 | 3 | 4 | 5 => Ok(()),
         0 if tables == 0 => conn.execute_batch(&format!("PRAGMA user_version = {SCHEMA_VERSION}")),
         _ => Err(rusqlite::Error::InvalidParameterName(format!(
             "database schema {version}, this hub writes {SCHEMA_VERSION}: start from an empty database"
@@ -663,6 +784,12 @@ impl Db {
         )?;
         with_auto_feedback(&conn)?;
         with_feedback_type(&conn)?;
+        let legacy_max: i64 = conn.query_row("SELECT coalesce(max(id),0) FROM feedback", [], |r| r.get(0))?;
+        conn.execute_batch(DIAGNOSTIC_DAYS)?;
+        migrate_diagnostics(&mut conn)?;
+        conn.execute_batch("CREATE TABLE IF NOT EXISTS diagnostic_seen (uuid TEXT PRIMARY KEY, diagnostic_id INTEGER NOT NULL REFERENCES diagnostics(id) ON DELETE CASCADE) WITHOUT ROWID;")?;
+        with_support(&conn, legacy_max)?;
+        with_support_done(&mut conn)?;
         Ok(Db { conn: Mutex::new(conn) })
     }
 
@@ -1072,12 +1199,76 @@ impl Db {
         let mut conn = self.conn();
         let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
         let Some(user) = user_of_device(&tx, device)? else { return Ok(Write::Refused(Conflict::DeviceGone)) };
-        tx.prepare_cached(
-            "INSERT INTO feedback (user_id, text, app_version, created_at, type) VALUES (?1, ?2, ?3, ?4, 'feedback')",
-        )?
-        .execute(params![user, text, app_version, now])?;
+        // An atomic cap shared by old and new app routes. A full thread is retained, never silently trimmed.
+        let count: i64 =
+            tx.query_row("SELECT count(*) FROM support_messages WHERE user_id = ?1", [user], |r| r.get(0))?;
+        if count >= 1000 {
+            return Ok(Write::Refused(Conflict::SupportFull));
+        }
+        tx.execute(
+            "INSERT INTO support_messages(user_id,from_team,text,created_at,app_version) VALUES (?1,0,?2,?3,?4)",
+            params![user, text, now, app_version],
+        )?;
         tx.commit()?;
         Ok(Write::Done(()))
+    }
+
+    pub fn support_thread(&self, user: &UserId) -> rusqlite::Result<yo_wire::api::SupportThread> {
+        let conn = self.conn();
+        let mut stmt = conn.prepare("SELECT id,from_team,text,created_at,coalesce(read_at,0) FROM support_messages WHERE user_id=?1 ORDER BY created_at,id")?;
+        let messages = stmt
+            .query_map([user], |r| {
+                Ok(yo_wire::api::SupportMessage {
+                    id: r.get(0)?,
+                    from_team: r.get(1)?,
+                    text: r.get::<_, String>(2)?.into_bytes().into(),
+                    created_at: r.get(3)?,
+                    read_at: r.get(4)?,
+                })
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        let unread = messages.iter().filter(|m| m.from_team == 1 && m.read_at == 0).count() as u32;
+        Ok(yo_wire::api::SupportThread { messages, unread })
+    }
+
+    pub fn support_read(&self, user: &UserId, from_team: bool, through: u64, now: u64) -> rusqlite::Result<()> {
+        self.conn().execute(
+            "UPDATE support_messages SET read_at=CASE WHEN ?3 THEN coalesce(read_at,?1) ELSE read_at END, done_at=CASE WHEN ?3 THEN done_at ELSE ?1 END WHERE user_id=?2 AND from_team=?3 AND id<=?4",
+            params![now, user, from_team, through],
+        )?;
+        Ok(())
+    }
+
+    pub fn support_reply(&self, user: &UserId, text: &str, now: u64) -> rusqlite::Result<bool> {
+        let conn = self.conn();
+        Ok(conn.execute(
+            "INSERT INTO support_messages(user_id,from_team,text,created_at)
+            SELECT ?1,1,?2,?3 WHERE EXISTS (SELECT 1 FROM users WHERE id=?1)
+            AND EXISTS (SELECT 1 FROM support_messages WHERE user_id=?1)
+            AND (SELECT count(*) FROM support_messages WHERE user_id=?1)<1000",
+            params![user, text, now],
+        )? == 1)
+    }
+
+    pub fn support_threads(&self) -> rusqlite::Result<serde_json::Value> {
+        let conn = self.conn();
+        let mut stmt = conn.prepare(
+            "SELECT hex(s.user_id),max(s.created_at),sum(s.from_team=0 AND s.done_at IS NULL),
+            (SELECT coalesce(spelling,value) FROM handles WHERE user_id=s.user_id AND kind=2 LIMIT 1)
+            FROM support_messages s WHERE length(s.user_id)>0 GROUP BY s.user_id
+            ORDER BY (sum(s.from_team=0 AND s.done_at IS NULL)>0) DESC,max(s.created_at) DESC LIMIT 999",
+        )?;
+        let (at, open): (i64, i64) = conn.query_row("SELECT coalesce(max(created_at),0),coalesce(sum(done_at IS NULL),0) FROM support_messages WHERE user_id=X''", [], |r| Ok((r.get(0)?, r.get(1)?)))?;
+        let mut rows = vec![serde_json::json!({"user_id":"team","name":"Team To-Dos","unread":0,"open":open,"at":at})];
+        rows.extend(stmt.query_map([], |r| Ok(serde_json::json!({"user_id":r.get::<_,String>(0)?,"at":r.get::<_,i64>(1)?,"unread":r.get::<_,i64>(2)?,"name":r.get::<_,Option<String>>(3)?})))?.collect::<rusqlite::Result<Vec<_>>>()?);
+        Ok(serde_json::json!(rows))
+    }
+
+    pub fn admin_support_thread(&self, user: &[u8]) -> rusqlite::Result<serde_json::Value> {
+        let conn = self.conn();
+        let mut stmt = conn.prepare("SELECT id,from_team,text,created_at,read_at,done_at FROM support_messages WHERE user_id=?1 ORDER BY created_at,id")?;
+        let rows = stmt.query_map([user], |r| Ok(serde_json::json!({"id":r.get::<_,i64>(0)?,"from_team":r.get::<_,bool>(1)?,"text":r.get::<_,String>(2)?,"created_at":r.get::<_,i64>(3)?,"read_at":r.get::<_,Option<i64>>(4)?,"done_at":r.get::<_,Option<i64>>(5)?})))?.collect::<rusqlite::Result<Vec<_>>>()?;
+        Ok(serde_json::json!({"messages": rows}))
     }
 
     /// Deliveries taken in the hour of `now` (`n` more); hours older than 8 days go.
@@ -1092,22 +1283,52 @@ impl Db {
         Ok(())
     }
 
-    /// A crash report: feedback the app sent on its own (`auto` = 1), with no user (an empty id).
+    /// Old apps' crash encoding, mapped into anonymous diagnostics.
     pub fn crash(&self, text: &str, app_version: &str, now: u64) -> rusqlite::Result<()> {
-        self.conn()
-            .prepare_cached(
-                "INSERT INTO feedback (user_id, text, app_version, created_at, auto, type) VALUES (X'', ?1, ?2, ?3, 1, 'crash')",
-            )?
-            .execute(params![text, app_version, now])?;
+        self.diagnostic("crash", &legacy_crash(text, app_version), now)
+    }
+
+    pub fn diagnostic(&self, kind: &str, payload: &serde_json::Value, now: u64) -> rusqlite::Result<()> {
+        let mut conn = self.conn();
+        let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let uuid = payload["uuid"].as_str().map(str::to_ascii_lowercase);
+        if let Some(uuid) = &uuid {
+            if tx.prepare("SELECT 1 FROM diagnostic_seen WHERE uuid=?1")?.exists([uuid])? {
+                return tx.commit();
+            }
+        }
+        let id = diagnostic_write(&tx, kind, payload, now)?;
+        if let Some(uuid) = uuid {
+            tx.execute("INSERT INTO diagnostic_seen(uuid, diagnostic_id) VALUES (?1, ?2)", params![uuid, id])?;
+        }
+        tx.commit()
+    }
+
+    pub fn diagnostics(&self) -> rusqlite::Result<serde_json::Value> {
+        let conn = self.conn();
+        let mut stmt = conn.prepare("SELECT id,kind,count,first_seen,last_seen,app,os,model,payload,done FROM diagnostics ORDER BY last_seen DESC")?;
+        let rows = stmt.query_map([], |r| Ok(serde_json::json!({
+            "id":r.get::<_,i64>(0)?, "kind":r.get::<_,String>(1)?, "count":r.get::<_,i64>(2)?,
+            "first_seen":r.get::<_,i64>(3)?, "last_seen":r.get::<_,i64>(4)?, "app":r.get::<_,String>(5)?,
+            "os":r.get::<_,String>(6)?, "model":r.get::<_,String>(7)?, "payload":r.get::<_,String>(8)?, "done":r.get::<_,bool>(9)?
+        })))?.collect::<rusqlite::Result<Vec<_>>>()?;
+        Ok(serde_json::json!(rows))
+    }
+
+    pub fn diagnostic_done(&self, id: i64, done: bool) -> rusqlite::Result<()> {
+        self.conn().execute("UPDATE diagnostics SET done=?2 WHERE id=?1", params![id, done])?;
         Ok(())
+    }
+
+    pub fn todo_done(&self, id: i64, done: Option<u64>) -> rusqlite::Result<bool> {
+        Ok(self.conn().execute("UPDATE support_messages SET done_at=?1 WHERE id=?2", params![done, id])? == 1)
     }
 
     /// An operator's To-Do, with no account attached.
     pub fn todo(&self, text: &str, now: u64) -> rusqlite::Result<i64> {
         let conn = self.conn();
         conn.execute(
-            "INSERT INTO feedback (user_id, text, app_version, created_at, type)
-            VALUES (X'', ?1, 'admin', ?2, 'todo')",
+            "INSERT INTO support_messages (user_id,from_team,text,created_at) VALUES (X'',1,?1,?2)",
             params![text, now],
         )?;
         Ok(conn.last_insert_rowid())
@@ -1546,6 +1767,10 @@ impl Db {
                  OR reported_id NOT IN (SELECT id FROM users)",
             ),
             (
+                "support of a user gone, not anonymised",
+                "SELECT count(*) FROM support_messages WHERE user_id != zeroblob(16) AND user_id NOT IN (SELECT id FROM users)",
+            ),
+            (
                 "feedback of a user gone, not anonymised",
                 "SELECT count(*) FROM feedback WHERE user_id != zeroblob(16) AND user_id NOT IN (SELECT id FROM users)",
             ),
@@ -1667,19 +1892,206 @@ mod tests {
         let db = Db::open(":memory:").unwrap();
         db.crash("trace", "1", 7).unwrap();
         let id = db.todo("fix", 8).unwrap();
-        let row: (Vec<u8>, String, String, String, u64, u32) = db
+        let row: (String, u64, Option<u64>) = db
             .conn()
-            .query_row(
-                "SELECT user_id, text, app_version, type, created_at, auto FROM feedback WHERE id = ?1",
-                [id],
-                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?)),
-            )
+            .query_row("SELECT text,created_at,done_at FROM support_messages WHERE id=?1", [id], |r| {
+                Ok((r.get(0)?, r.get(1)?, r.get(2)?))
+            })
             .unwrap();
-        assert_eq!(row, (vec![], "fix".into(), "admin".into(), "todo".into(), 8, 0));
+        assert_eq!(row, ("fix".into(), 8, None));
+        with_support(&conn, 0).unwrap();
+        with_support(&conn, 0).unwrap();
+        conn.execute("INSERT INTO support_messages(user_id,from_team,text,created_at) VALUES(X'',0,'new',4)", [])
+            .unwrap();
+        assert!(conn.last_insert_rowid() > 3, "new support IDs cannot reuse old crash or todo done flags");
         assert_eq!(
-            db.conn().query_row("SELECT type FROM feedback WHERE auto = 1", [], |r| r.get::<_, String>(0)).unwrap(),
+            conn.query_row("SELECT text FROM support_messages WHERE id=1", [], |r| r.get::<_, String>(0)).unwrap(),
+            "plain"
+        );
+        assert_eq!(conn.query_row("SELECT text FROM todos WHERE id=3", [], |r| r.get::<_, String>(0)).unwrap(), "todo");
+        assert_eq!(conn.query_row("SELECT count(*) FROM feedback", [], |r| r.get::<_, i64>(0)).unwrap(), 1);
+        assert_eq!(
+            db.conn().query_row("SELECT kind FROM diagnostics", [], |r| r.get::<_, String>(0)).unwrap(),
             "crash"
         );
+    }
+
+    #[test]
+    fn schemas_3_and_4_reach_6_without_losing_support_or_diagnostics() {
+        for version in [3, 4] {
+            let path = std::env::temp_dir().join(format!("yo-support-{version}-{}.sqlite", std::process::id()));
+            let _ = std::fs::remove_file(&path);
+            {
+                let db = Db::open(path.to_str().unwrap()).unwrap();
+                let mut conn = db.conn();
+                conn.execute_batch(
+                    "DROP TABLE support_messages;
+                    DROP TABLE diagnostic_seen; DROP TABLE diagnostics; DROP TABLE diagnostic_days;
+                    INSERT INTO feedback(id,user_id,text,app_version,created_at,auto,type) VALUES
+                    (10,zeroblob(16),'Help with notifications 🎨','ios/123',1700000000000,0,'feedback'),
+                    (11,zeroblob(16),'ios/123 · 26 · iPhone\nSIGSEGV\nYo +0x10','ios/123',1700000001000,1,'crash'),
+                    (12,zeroblob(16),'Fix notifications','admin',1700000002000,0,'todo'),
+                    (13,zeroblob(16),'ios/123 · 26 · iPhone\nSIGSEGV\nYo +0x10','ios/123',1700000003000,1,'crash');
+                    PRAGMA user_version=3;",
+                )
+                .unwrap();
+                if version == 4 {
+                    conn.execute_batch(DIAGNOSTIC_DAYS).unwrap();
+                    migrate_diagnostics(&mut conn).unwrap();
+                    conn.execute_batch("UPDATE diagnostics SET done=1;
+                        CREATE TABLE diagnostic_seen(uuid TEXT PRIMARY KEY, diagnostic_id INTEGER NOT NULL REFERENCES diagnostics(id));
+                        INSERT INTO diagnostic_seen SELECT '550e8400-e29b-41d4-a716-446655440000',id FROM diagnostics;
+                        DROP TABLE diagnostic_days;").unwrap();
+                }
+            }
+            for _ in 0..2 {
+                let db = Db::open(path.to_str().unwrap()).unwrap();
+                let conn = db.conn();
+                assert_eq!(conn.query_row("PRAGMA user_version", [], |r| r.get::<_, i64>(0)).unwrap(), 6);
+                let message: (String, String, i64) = conn
+                    .query_row("SELECT text,app_version,created_at FROM support_messages WHERE id=10", [], |r| {
+                        Ok((r.get(0)?, r.get(1)?, r.get(2)?))
+                    })
+                    .unwrap();
+                assert_eq!(message, ("Help with notifications 🎨".into(), "ios/123".into(), 1700000000000));
+                assert_eq!(
+                    conn.query_row("SELECT text FROM support_messages WHERE user_id=X''", [], |r| r
+                        .get::<_, String>(0))
+                        .unwrap(),
+                    "Fix notifications"
+                );
+                assert_eq!(conn.query_row("SELECT count(*) FROM feedback", [], |r| r.get::<_, i64>(0)).unwrap(), 0);
+                let diagnostic: (i64, i64, i64, bool) = conn
+                    .query_row("SELECT count,first_seen,last_seen,done FROM diagnostics", [], |r| {
+                        Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?))
+                    })
+                    .unwrap();
+                assert_eq!(diagnostic, (2, 1700000001000, 1700000003000, version == 4));
+                if version == 3 {
+                    assert!(
+                        conn.query_row("SELECT seq FROM sqlite_sequence WHERE name='support_messages'", [], |r| r
+                            .get::<_, i64>(0))
+                            .unwrap()
+                            >= 13
+                    );
+                }
+                if version == 4 {
+                    assert_eq!(
+                        conn.query_row("SELECT count(*) FROM diagnostic_seen", [], |r| r.get::<_, i64>(0)).unwrap(),
+                        1
+                    );
+                }
+            }
+            std::fs::remove_file(path).unwrap();
+        }
+    }
+
+    #[test]
+    fn schema_5_done_migration_preserves_colliding_todos_and_receipts() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch("CREATE TABLE support_messages(id INTEGER PRIMARY KEY AUTOINCREMENT,user_id BLOB,from_team INTEGER,text TEXT,created_at INTEGER,read_at INTEGER);
+            CREATE TABLE todos(id INTEGER PRIMARY KEY,text TEXT,created_at INTEGER,done_at INTEGER);
+            INSERT INTO support_messages VALUES(1,zeroblob(16),0,'handled',100,200),
+                (2,zeroblob(16),0,'open',101,NULL),(3,zeroblob(16),1,'reply',102,210);
+            INSERT INTO todos VALUES(1,'open task 🎨',90,NULL),(3,'completed task',95,205);
+            PRAGMA user_version=5;").unwrap();
+        for _ in 0..2 {
+            with_support_done(&mut conn).unwrap();
+            assert_eq!(conn.query_row("SELECT count(*) FROM support_messages", [], |r| r.get::<_, i64>(0)).unwrap(), 5);
+            assert_eq!(
+                conn.query_row("SELECT done_at FROM support_messages WHERE id=1", [], |r| r.get::<_, i64>(0)).unwrap(),
+                200
+            );
+            assert_eq!(conn.query_row("SELECT count(*) FROM support_messages WHERE user_id=X'' AND from_team=1 AND done_at IS NULL AND text='open task 🎨'", [], |r| r.get::<_,i64>(0)).unwrap(),1);
+            assert_eq!(
+                conn.query_row("SELECT done_at FROM support_messages WHERE text='completed task'", [], |r| r
+                    .get::<_, i64>(0))
+                    .unwrap(),
+                205
+            );
+            assert_eq!(
+                conn.query_row("SELECT read_at FROM support_messages WHERE id=3", [], |r| r.get::<_, i64>(0)).unwrap(),
+                210
+            );
+        }
+        conn.execute("UPDATE support_messages SET done_at=NULL WHERE id=1", []).unwrap();
+        with_support_done(&mut conn).unwrap();
+        assert!(conn
+            .query_row("SELECT done_at FROM support_messages WHERE id=1", [], |r| r.get::<_, Option<i64>>(0))
+            .unwrap()
+            .is_none());
+    }
+
+    #[test]
+    fn support_cap_and_read_direction() {
+        let db = Db::open(":memory:").unwrap();
+        let leo = user(register(&db, b"LEO", 1, 1, 0));
+        db.feedback(&[1; 16], "hi", "1", 1).unwrap();
+        assert!(db.support_reply(&leo, "reply", 2).unwrap());
+        db.support_read(&leo, false, 100, 3).unwrap();
+        assert_eq!(db.support_thread(&leo).unwrap().unread, 1);
+        db.support_read(&leo, true, 2, 4).unwrap();
+        assert_eq!(db.support_thread(&leo).unwrap().unread, 0);
+        for _ in 2..1000 {
+            db.feedback(&[1; 16], "hi", "1", 5).unwrap();
+        }
+        assert!(matches!(db.feedback(&[1; 16], "full", "1", 6).unwrap(), Write::Refused(Conflict::SupportFull)));
+        assert!(!db.support_reply(&leo, "full", 6).unwrap());
+        assert_eq!(db.support_thread(&leo).unwrap().messages.len(), 1000);
+        let id = db.todo("task", 7).unwrap();
+        assert!(db.todo_done(id, Some(8)).unwrap());
+        assert!(db.todo_done(id, None).unwrap());
+        assert!(!db.todo_done(id + 1, None).unwrap());
+    }
+
+    #[test]
+    fn diagnostics_uuid_is_idempotent() {
+        let db = Db::open(":memory:").unwrap();
+        let mut payload = serde_json::json!({"uuid": "550e8400-e29b-41d4-a716-446655440000",
+            "app": "ios/test", "domain": "test", "code": "1", "place": "test"});
+        db.diagnostic("error", &payload, 1).unwrap();
+        db.diagnostic("error", &payload, 2).unwrap();
+        assert_eq!(db.diagnostics().unwrap()[0]["count"], 1);
+        payload["uuid"] = "550e8400-e29b-41d4-a716-446655440001".into();
+        db.diagnostic("error", &payload, 3).unwrap();
+        assert_eq!(db.diagnostics().unwrap()[0]["count"], 2);
+        payload.as_object_mut().unwrap().remove("uuid");
+        db.diagnostic("error", &payload, 4).unwrap();
+        db.diagnostic("error", &payload, 5).unwrap();
+        assert_eq!(db.diagnostics().unwrap()[0]["count"], 4);
+    }
+
+    #[test]
+    fn diagnostics_migrate_once_and_count_every_occurrence() {
+        let db = Db::open(":memory:").unwrap();
+        {
+            let mut conn = db.conn();
+            conn.execute_batch("DROP TABLE diagnostics; PRAGMA user_version = 3").unwrap();
+            conn.execute("INSERT INTO feedback(user_id,text,app_version,created_at,auto,type) VALUES(X'', 'trace','1',2,1,'crash'), (X'', 'trace','1',3,1,'crash')", []).unwrap();
+            migrate_diagnostics(&mut conn).unwrap();
+            migrate_diagnostics(&mut conn).unwrap();
+            assert_eq!(conn.query_row("SELECT count(*) FROM feedback", [], |r| r.get::<_, i64>(0)).unwrap(), 0);
+        }
+        let rows = db.diagnostics().unwrap();
+        assert_eq!(rows[0]["count"], 2);
+        assert_eq!(rows[0]["first_seen"], 2);
+        assert_eq!(rows[0]["last_seen"], 3);
+        db.diagnostic_done(rows[0]["id"].as_i64().unwrap(), true).unwrap();
+        db.crash("trace", "1", 4).unwrap();
+        assert_eq!(db.diagnostics().unwrap()[0]["done"], true);
+        let mut error = serde_json::json!({"domain":"test", "code":"1", "place":"sync", "app":"ios/2", "os":"26", "model":"iPhone"});
+        for at in 10..110 {
+            db.diagnostic("error", &error, at).unwrap();
+        }
+        error["os"] = serde_json::json!("27");
+        db.diagnostic("error", &error, 110).unwrap();
+        let rows = db.diagnostics().unwrap();
+        assert_eq!(rows[0]["count"], 101);
+        assert_eq!(rows[0]["os"], "27");
+        assert_eq!(rows[0]["first_seen"], 10);
+        error["app"] = serde_json::json!("ios/3");
+        db.diagnostic("error", &error, 111).unwrap();
+        assert_eq!(db.diagnostics().unwrap().as_array().unwrap().len(), 3);
     }
 
     #[test]
@@ -2156,7 +2568,7 @@ mod tests {
         assert_eq!((left("reports"), left("prekeys"), left("account_keys")), (0, 2, 1), "only MIA's are left");
         let feedback: Vec<Vec<u8>> = db
             .conn()
-            .prepare("SELECT user_id FROM feedback ORDER BY id")
+            .prepare("SELECT user_id FROM support_messages ORDER BY id")
             .unwrap()
             .query_map([], |row| row.get(0))
             .unwrap()
@@ -2180,13 +2592,13 @@ mod tests {
         assert!(matches!(db.feedback(&[1; 16], "again", "1.2 (35)", 6).unwrap(), Write::Done(())));
         assert_eq!(
             db.conn()
-                .query_row("SELECT count(*) FROM feedback WHERE type = 'feedback'", [], |r| r.get::<_, i64>(0))
+                .query_row("SELECT count(*) FROM support_messages WHERE from_team = 0", [], |r| r.get::<_, i64>(0))
                 .unwrap(),
             2
         );
         let rows: Vec<(i64, Vec<u8>, String, String, i64)> = db
             .conn()
-            .prepare("SELECT id, user_id, text, app_version, created_at FROM feedback ORDER BY id")
+            .prepare("SELECT id, user_id, text, app_version, created_at FROM support_messages ORDER BY id")
             .unwrap()
             .query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?)))
             .unwrap()
@@ -2306,7 +2718,7 @@ mod tests {
         assert!(!exists(&idle));
         let feedback: (Vec<u8>, String) = db
             .conn()
-            .query_row("SELECT user_id, text FROM feedback", [], |row| Ok((row.get(0)?, row.get(1)?)))
+            .query_row("SELECT user_id, text FROM support_messages", [], |row| Ok((row.get(0)?, row.get(1)?)))
             .unwrap();
         assert_eq!(feedback, (NOBODY.to_vec(), "where are my friends".into()), "the feedback stays, without IDLE");
         assert!(db.is_gone(&[1; 16]).unwrap(), "its device learns that it was removed");
