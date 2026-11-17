@@ -563,6 +563,11 @@ final class Inbox {
       let written = await ReceivedMedia.shared.expectBatch(mediaNotes.map { ($0.1, $0.2, $0.3, $0.4) })
       kept += mediaNotes.filter { written.contains($0.2) }.map { $0.0 }
     }
+    // Who sent the newest, for Yo Back from the Action button, Shortcuts or Siri (ShareBridge.noteLast).
+    let newest = ShareBridge.yos(
+      in: kept, name: { friend($0).name }, group: { bars[$0]?.name ?? "" },
+      requests: Set(contacts.filter { !$0.accepted }.map(\.user)))
+    if !newest.isEmpty { _ = try? await Hub.run { ShareBridge.noteLast(newest, client: client) } }
     // Taken while not in front (just left, its wait at the hub still running): the notification the notification
     // service would have written, which finds them read then. In front: shown on the bars, so a notification of
     // theirs (the service's, written just as the app opened) goes from Notification Center.

@@ -220,6 +220,7 @@ final class ShareModel {
         in: events, name: { ShareBridge.name(of: $0, client: client) },
         group: { id in (try? client.groups())?.first { $0.id == id }?.name ?? "" }, requests: ShareBridge.requests(of: client))
     guard !yos.isEmpty else { return }
+    ShareBridge.noteLast(yos, client: client)
     Task { await ShareBridge.post(yos) }
   }
 

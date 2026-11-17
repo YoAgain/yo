@@ -334,6 +334,40 @@ enum ShareBridge {
   }
 }
 
+/// Who sent the newest Yo, for "Yo Back" from the Action button, Shortcuts or Siri (YoIntents.swift): written wherever
+/// Yos are taken (the app, the notification service, the share extension, an intent's own send), the newest wins.
+/// A file in the group, readable after the first unlock as the state is: Yo Back works while the iPhone is locked.
+extension ShareBridge {
+  struct LastYo: Codable, Equatable, Sendable {
+    /// The account it came to (as `List.owner`): another account never sends it back.
+    let owner: String
+    /// Whom the Yo goes back to: a user id, or "group:" and the group's id.
+    let to: String
+    /// As the notification names it: the sender, or the group's bar.
+    let name: String
+    let sentAtMs: UInt64
+  }
+
+  static var lastYoFile: URL? { container?.appending(path: "last-yo.json") }
+
+  static func readLastYo() -> LastYo? {
+    guard let file = lastYoFile, let data = try? Data(contentsOf: file) else { return nil }
+    return try? JSONDecoder().decode(LastYo.self, from: data)
+  }
+
+  /// The newest of `yos` (as `yos(in:)` makes them), if newer than the one noted.
+  static func noteLast(_ yos: [Yos], client: YoClient) {
+    guard let newest = yos.filter({ !$0.request }).max(by: { $0.sentAtMs < $1.sentAtMs }), let file = lastYoFile,
+      let owner = Hub.bytes(client.userId())?.base64EncodedString()
+    else { return }
+    if let noted = readLastYo(), noted.owner == owner, noted.sentAtMs >= newest.sentAtMs { return }
+    let name = newest.bar.map { $0.isEmpty ? newest.name : $0 } ?? newest.name
+    let last = LastYo(owner: owner, to: newest.user, name: name, sentAtMs: newest.sentAtMs)
+    guard let data = try? JSONEncoder().encode(last) else { return }
+    Diagnostics.attempt({ try data.write(to: file, options: [.atomic, .completeFileProtectionUntilFirstUserAuthentication]) })
+  }
+}
+
 extension MessageKind {
   /// The photo or video a Yo carries, and which it is; nil for a Yo (or what Yo does not show yet).
   var media: (media: YoMedia, kind: MediaFile.Kind)? {

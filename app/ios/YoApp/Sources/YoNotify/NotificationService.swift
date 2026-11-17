@@ -48,6 +48,7 @@ final class NotificationService: UNNotificationServiceExtension {
           let senders = ShareBridge.yos(
           in: events, name: { ShareBridge.name(of: $0, client: client) },
           group: { id in (try? client.groups())?.first { $0.id == id }?.name ?? "" }, requests: ShareBridge.requests(of: client))
+          ShareBridge.noteLast(senders, client: client)
           let delivered = Self.delivered()
           pending.update { content in
             let replaced = ShareBridge.write(content, senders, over: delivered)

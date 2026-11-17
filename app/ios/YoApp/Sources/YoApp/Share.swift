@@ -20,6 +20,8 @@ enum ShareInbox {
       } else {
         try? FileManager.default.removeItem(at: file)
       }
+      // Siri and Shortcuts know the friends by name ("Yo Mia"): told once the list is written.
+      YoShortcuts.updateAppShortcutParameters()
     }
   }
 

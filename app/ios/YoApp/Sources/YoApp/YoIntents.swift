@@ -1,0 +1,172 @@
+// What Yo offers the system (App Intents): the Action button, Control Center and the Lock Screen (YoControls),
+// Shortcuts and Siri (YoShortcuts.swift). "Send Yo" to a friend or group and "Yo Back" to whoever sent the last Yo go
+// without opening the app, also while the iPhone is locked: as the share extension does, they open the app's state as
+// a guest in the App Group (SharedState.swift), whose file and key are readable after the first unlock, and send one
+// Yo. "Yo Camera" opens Yo in the camera, "Open Yo" just opens it. Compiled into the app and into YoControls
+// (Sources/YoControls links to this file); the system runs each where it chooses.
+import AppIntents
+import Foundation
+import YoCore
+
+/// A friend or group on the list, as the app shows it to the extensions (ShareBridge.List): whom a Yo goes to.
+struct FriendEntity: AppEntity {
+  static let typeDisplayRepresentation: TypeDisplayRepresentation = "Friend"
+  static let defaultQuery = FriendQuery()
+
+  /// The target as the app sends to it: a user id, a name before the first Yo, or "group:" and the group's id.
+  let id: String
+  let name: String
+
+  var displayRepresentation: DisplayRepresentation { DisplayRepresentation(title: "\(name)") }
+
+  init(_ friend: ShareBridge.Friend) {
+    (id, name) = (friend.to, friend.name)
+  }
+}
+
+/// The friends in the list's order; Siri and Shortcuts find one by name.
+struct FriendQuery: EntityStringQuery {
+  private var all: [FriendEntity] { (ShareBridge.readList()?.friends ?? []).map(FriendEntity.init) }
+
+  func entities(for identifiers: [String]) async throws -> [FriendEntity] {
+    all.filter { identifiers.contains($0.id) }
+  }
+
+  func entities(matching string: String) async throws -> [FriendEntity] {
+    all.filter { $0.name.localizedCaseInsensitiveContains(string) }
+  }
+
+  func suggestedEntities() async throws -> [FriendEntity] { all }
+}
+
+/// What a send says when it did not go.
+enum YoIntentError: Error, CustomLocalizedStringResourceConvertible {
+  case signedOut
+  case noYoYet
+  case notNow
+  case refused(String)
+
+  var localizedStringResource: LocalizedStringResource {
+    switch self {
+    case .signedOut: "Open Yo once to sign in."
+    case .noYoYet: "No Yo to answer yet."
+    case .notNow: "Not sent. Yo could not reach the internet."
+    case .refused(let why): "Not sent: \(why)."
+    }
+  }
+}
+
+/// One Yo to a friend or group.
+struct SendYoIntent: AppIntent {
+  static let title: LocalizedStringResource = "Send Yo"
+  static let description = IntentDescription("Sends one Yo to a friend or group, without opening Yo.")
+  static let supportedModes: IntentModes = .background
+  static let authenticationPolicy: IntentAuthenticationPolicy = .alwaysAllowed
+
+  @Parameter(title: "Friend", requestValueDialog: "To whom?")
+  var friend: FriendEntity
+
+  static var parameterSummary: some ParameterSummary { Summary("Send Yo to \(\.$friend)") }
+
+  init() {}
+
+  init(friend: FriendEntity) {
+    self.friend = friend
+  }
+
+  func perform() async throws -> some IntentResult & ProvidesDialog {
+    guard let owner = ShareBridge.readList()?.owner else { throw YoIntentError.signedOut }
+    try await YoSend.send(to: friend.id, owner: owner)
+    return .result(dialog: "Sent Yo to \(friend.name)!")
+  }
+}
+
+/// One Yo back to whoever sent the newest (ShareBridge.LastYo).
+struct YoBackIntent: AppIntent {
+  static let title: LocalizedStringResource = "Yo Back"
+  static let description = IntentDescription("Sends a Yo back to whoever sent you the last one, without opening Yo.")
+  static let supportedModes: IntentModes = .background
+  static let authenticationPolicy: IntentAuthenticationPolicy = .alwaysAllowed
+
+  func perform() async throws -> some IntentResult & ProvidesDialog {
+    guard let last = ShareBridge.readLastYo() else { throw YoIntentError.noYoYet }
+    try await YoSend.send(to: last.to, owner: last.owner)
+    return .result(dialog: "Sent Yo to \(last.name)!")
+  }
+}
+
+/// Yo, opened in the camera.
+struct YoCameraIntent: AppIntent {
+  static let title: LocalizedStringResource = "Yo Camera"
+  static let description = IntentDescription("Opens Yo in the camera.")
+  static let supportedModes: IntentModes = .foreground(.immediate)
+
+  @MainActor func perform() async throws -> some IntentResult {
+    AppRoute.shared.camera = true
+    return .result()
+  }
+}
+
+/// Yo, opened.
+struct OpenYoIntent: AppIntent {
+  static let title: LocalizedStringResource = "Open Yo"
+  static let description = IntentDescription("Opens Yo.")
+  static let supportedModes: IntentModes = .foreground(.immediate)
+
+  func perform() async throws -> some IntentResult { .result() }
+}
+
+/// Where an intent that opens the app asks it to go; the list takes it as it shows (FriendList).
+@MainActor @Observable final class AppRoute {
+  static let shared = AppRoute()
+  /// Open the camera, once.
+  var camera = false
+}
+
+/// A Yo from outside the app: the state as a guest (as the share extension's send), one Yo, the Yos that came
+/// meanwhile written as the notification service would. The app, whenever it runs next, sees it as sent.
+enum YoSend {
+  static func send(to target: String, owner: String) async throws {
+    let lifetime = SharedAccess.Lifetime()
+    defer { lifetime.stop() }
+    let outcome = await Task.detached(priority: .userInitiated) {
+      lifetime.run { sendNow(to: target, owner: owner) }
+    }.value
+    if let outcome { throw outcome }
+  }
+
+  /// Nil when it went (or waits in the core's outbox for the app); else why not.
+  private static func sendNow(to target: String, owner: String) -> YoIntentError? {
+    guard let client = Guest.open(within: 8, timeout: 20) else { return .notNow }
+    guard Hub.bytes(client.userId())?.base64EncodedString() == owner else { return .signedOut }
+    do {
+      let events =
+        target.hasPrefix("group:")
+        ? try client.sendGroupYo(group: String(target.dropFirst(6))) : try client.sendYo(to: target)
+      notify(events, client: client)
+      return nil
+    } catch YoError.NotOnYo {
+      return .refused("not on Yo")
+    } catch YoError.Blocked {
+      return .refused("blocked")
+    } catch YoError.GroupEmpty {
+      return .refused("the group is empty")
+    } catch let error as YoError where retryLater(error: error) {
+      return .notNow
+    } catch {
+      Diagnostics.record(error)
+      return .refused("try again in Yo")
+    }
+  }
+
+  /// The Yos that came while sending, as the share extension writes them.
+  private static func notify(_ events: [YoEvent], client: YoClient) {
+    let yos = ShareBridge.yos(
+      in: events, name: { ShareBridge.name(of: $0, client: client) },
+      group: { id in (try? client.groups())?.first { $0.id == id }?.name ?? "" },
+      requests: ShareBridge.requests(of: client))
+    guard !yos.isEmpty else { return }
+    ShareBridge.noteLast(yos, client: client)
+    Task { await ShareBridge.post(yos) }
+  }
+}
