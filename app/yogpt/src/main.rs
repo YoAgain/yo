@@ -34,9 +34,9 @@
 //! holds a bounded amount of work per account: every Yo answered in turn, up to `MAX_OWED` owed to one sender,
 //! `MAX_ANSWERING` senders at once, `MAX_QUEUED` events waiting; what does not fit is dropped and counted. A photo or
 //! video sent to it is never opened, decoded, stored or logged: its encrypted blob is fetched into nothing (so the hub
-//! can delete it at once), one at a time, at most `MAX_DRAINING` waiting, its key forgotten with the event. A panic
-//! anywhere ends the process (systemd starts it again): the state on disk
-//! is only ever replaced whole, after an operation completed.
+//! can delete it at once), one at a time, at most `MAX_DRAINING` waiting, its key forgotten with the event. Account
+//! workers log unexpected exits and panics and restart; the state on disk is only ever replaced whole, after an
+//! operation completed.
 
 use std::collections::{HashMap, VecDeque};
 use std::io::{Read, Write};
@@ -468,7 +468,7 @@ impl Bot {
     }
 
     fn client(&self) -> std::sync::MutexGuard<'_, Client> {
-        self.client.lock().unwrap_or_else(PoisonError::into_inner)
+        self.client.lock().expect("client operation panicked; account must be restored")
     }
 
     fn stop(&self, why: impl std::fmt::Display) {
@@ -538,9 +538,16 @@ fn unopened() -> Media {
 
 /// Fetches the blobs of photos and videos sent to the account into nothing, one at a time: each fetch counts at the
 /// hub, which deletes a blob after its last. Nothing of them is kept, opened or logged.
-fn drainer(hub: String, ids: std::sync::mpsc::Receiver<[u8; 16]>) {
-    let Ok(http) = reqwest::blocking::Client::builder().timeout(Duration::from_secs(120)).build() else { return };
-    while let Ok(id) = ids.recv() {
+fn drainer(bot: &Bot, hub: &str, ids: &std::sync::mpsc::Receiver<[u8; 16]>) {
+    let Ok(http) = reqwest::blocking::Client::builder().timeout(Duration::from_secs(120)).build() else {
+        panic!("building blob HTTP client")
+    };
+    while bot.running() {
+        let id = match ids.recv_timeout(Duration::from_secs(1)) {
+            Ok(id) => id,
+            Err(RecvTimeoutError::Timeout) => continue,
+            Err(RecvTimeoutError::Disconnected) => return,
+        };
         let url = format!("{hub}{}", yo_core::media::blob_path(&id));
         if let Ok(response) = http.get(url).send() {
             let _ = std::io::copy(&mut response.take(media::MAX_MEDIA_LEN as u64 + 64), &mut std::io::sink());
@@ -549,21 +556,20 @@ fn drainer(hub: String, ids: std::sync::mpsc::Receiver<[u8; 16]>) {
 }
 
 /// Registers or restores, trying again while the hub cannot be reached; `None` (logged) when it cannot be opened.
-fn open(account: &Account) -> Option<Client> {
+fn open(account: &Account) -> Option<(Client, std::fs::File)> {
     let username = account.username.as_str();
     let log = |what: String| eprintln!("yo-gpt [{}]: {what}", account.name);
     let prepared = (|| {
         std::fs::create_dir_all(&account.state)?;
         std::fs::set_permissions(&account.state, std::fs::Permissions::from_mode(0o700))?;
         // One process, one account, per directory, before its secrets are read or made: a second (another entry
-        // naming it, or another YoGPT) would advance the same state and roll the other's back. Held for the life of
-        // the process.
+        // naming it, or another YoGPT) would advance the same state and roll the other's back. Held until every
+        // worker of this account has joined, including before a restart.
         let lock = std::fs::File::create(account.state.join("lock"))?;
         lock.try_lock().map_err(|e| std::io::Error::other(format!("another one has it ({e})")))?;
-        std::mem::forget(lock);
-        Ok::<_, std::io::Error>((secret(&account.state.join("account"))?, secret(&account.state.join("key"))?))
+        Ok::<_, std::io::Error>((secret(&account.state.join("account"))?, secret(&account.state.join("key"))?, lock))
     })();
-    let (secret, key) = prepared.map_err(|e| log(format!("stopped: {}: {e}", account.state.display()))).ok()?;
+    let (secret, key, lock) = prepared.map_err(|e| log(format!("stopped: {}: {e}", account.state.display()))).ok()?;
     let path = account.state.join("state");
     let client = || reqwest::blocking::Client::builder().timeout(Duration::from_secs(60)).build().ok();
     let transport = Arc::new(Http { client: client()?, anonymous: client()?, base: account.hub.clone() });
@@ -610,7 +616,7 @@ fn open(account: &Account) -> Option<Client> {
                     log(format!("stopped: {username}: {error}"));
                     return None;
                 }
-                return Some(client);
+                return Some((client, lock));
             }
             Err(error) if retryable(&error) => backoff.wait(&error, &account.name),
             // A state it cannot open (one from before the sessions, or damaged) is set aside as `state.old`; the account
@@ -672,15 +678,9 @@ fn main() {
         eprintln!("yo-gpt: {error}");
         std::process::exit(2);
     });
-    // A panic in any thread ends the process, after the usual message; systemd starts it again.
-    let report = std::panic::take_hook();
-    std::panic::set_hook(Box::new(move |info| {
-        report(info);
-        std::process::exit(101);
-    }));
     if let Some((to, n)) = options.yo.clone() {
         for account in &accounts {
-            let Some(mut client) = open(account) else { std::process::exit(1) };
+            let Some((mut client, _lock)) = open(account) else { std::process::exit(1) };
             let photo = options.photo.as_deref().map(|path| {
                 let bytes = std::fs::read(path).unwrap_or_else(|e| panic!("--photo {}: {e}", path.display()));
                 jpeg_clean(&bytes).unwrap_or_else(|| panic!("--photo: a JPEG of at most 1600 px a side"))
@@ -713,7 +713,9 @@ fn main() {
         })
         .collect();
     for thread in serving {
-        let _ = thread.join();
+        if thread.join().is_err() {
+            eprintln!("yo-gpt: ACCOUNT THREAD PANICKED during initialization");
+        }
     }
     eprintln!("yo-gpt: no account left");
     std::process::exit(1);
@@ -743,6 +745,9 @@ fn mailbox(bot: &Bot, dir: &Path, events: &SyncSender<Event>) {
         ticks = ticks.wrapping_add(1);
         let Ok(entries) = std::fs::read_dir(dir) else { continue };
         for path in entries.flatten().map(|entry| entry.path()).take(20) {
+            if !bot.running() {
+                return;
+            }
             let Some(name) = path.file_name().and_then(|n| n.to_str()).filter(|n| n.ends_with(".jpg")) else {
                 continue;
             };
@@ -796,13 +801,26 @@ impl EchoLimits {
 
 /// Serves one account until it stops.
 fn serve(account: &Account, options: Options) {
-    let Some(client) = open(account) else { return };
+    loop {
+        // A failed worker stops and joins this account's other workers before reopening the saved state.
+        // No old worker may write over the restarted account's state or advance its sessions.
+        match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| serve_once(account, &options))) {
+            Ok(false) => return,
+            Ok(true) => {}
+            Err(_) => eprintln!("yo-gpt [{}]: ACCOUNT PANICKED during initialization; restarting", account.name),
+        }
+        eprintln!("yo-gpt [{}]: RESTARTING account from saved state in 1 s", account.name);
+        std::thread::sleep(Duration::from_secs(1));
+    }
+}
+
+fn serve_once(account: &Account, options: &Options) -> bool {
+    let Some((client, _lock)) = open(account) else { return false };
     let (draining, to_drain) = sync_channel(MAX_DRAINING);
     let hub = account.hub.clone();
-    std::thread::spawn(move || drainer(hub, to_drain));
     let bot = Arc::new(Bot {
         name: account.name.clone(),
-        options,
+        options: options.clone(),
         echo: account.echo,
         draining,
         client: Mutex::new(client),
@@ -820,12 +838,49 @@ fn serve(account: &Account, options: Options) {
     };
     bot.log(started);
     let (events, received) = sync_channel(MAX_QUEUED);
-    let (receiving, to_dispatch) = (bot.clone(), events.clone());
-    std::thread::spawn(move || receive(&receiving, &to_dispatch));
-    if !account.echo {
-        let (mailing, to_queue, outbox) = (bot.clone(), events.clone(), account.state.join("outbox"));
-        std::thread::spawn(move || mailbox(&mailing, &outbox, &to_queue));
+    let restart = Arc::new(AtomicBool::new(false));
+    std::thread::scope(|scope| {
+        worker(&bot, "dispatcher", &restart, false, || {
+            let (receiving, to_dispatch, restart_rx) = (bot.clone(), events.clone(), restart.clone());
+            scope.spawn(move || {
+                worker(&receiving, "receiver", &restart_rx, false, || receive(&receiving, &to_dispatch))
+            });
+            let (draining_bot, restart_drain) = (bot.clone(), restart.clone());
+            scope.spawn(move || {
+                worker(&draining_bot, "blob drainer", &restart_drain, false, || drainer(&draining_bot, &hub, &to_drain))
+            });
+            if !account.echo {
+                let (mailing, to_queue, outbox, restart_mail) =
+                    (bot.clone(), events.clone(), account.state.join("outbox"), restart.clone());
+                scope.spawn(move || {
+                    worker(&mailing, "mailbox", &restart_mail, false, || mailbox(&mailing, &outbox, &to_queue))
+                });
+            }
+            dispatch(scope, &bot, &events, &received, &restart);
+        });
+    });
+    restart.load(Ordering::Relaxed)
+}
+
+/// Unexpected exits and panics stop the whole account, so it can restart from durable state rather than reuse
+/// a client whose operation unwound halfway through. Intentional device removal remains terminal.
+fn worker(bot: &Bot, name: &str, restart: &AtomicBool, may_finish: bool, work: impl FnOnce()) {
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(work));
+    if result.is_err() || (!may_finish && bot.running()) {
+        let failure = if result.is_err() { "PANICKED" } else { "EXITED unexpectedly" };
+        bot.log(format!("{name} {failure}; restarting account after workers stop"));
+        restart.store(true, Ordering::Relaxed);
+        bot.stop("worker failed");
     }
+}
+
+fn dispatch<'scope>(
+    scope: &'scope std::thread::Scope<'scope, '_>,
+    bot: &Arc<Bot>,
+    events: &SyncSender<Event>,
+    received: &std::sync::mpsc::Receiver<Event>,
+    restart: &Arc<AtomicBool>,
+) {
     // Every Yo gets its answer: one sender's in turn, on one thread; senders side by side.
     while bot.running() {
         let event = match received.recv_timeout(Duration::from_secs(1)) {
@@ -854,38 +909,48 @@ fn serve(account: &Account, options: Options) {
             }
             pending.insert(user.clone(), VecDeque::from([(picture, sent_at)]));
         }
-        let (answering, events, sender) = (bot.clone(), events.clone(), user.clone());
-        let spawned = std::thread::Builder::new().spawn(move || {
-            // It thinks before its first answer only.
-            std::thread::sleep(ms(think_ms()));
-            let (mut picture, mut last) = (picture, sent_at);
-            loop {
-                // The rhythm counts from when an answer began: its own time (a picture sealed, uploaded and sent, a
-                // few Yos) is part of the gap, never added to it.
-                let began = Instant::now();
-                answer(&answering, &sender, &events, picture);
-                let next = {
-                    let mut pending = answering.pending.lock().unwrap_or_else(PoisonError::into_inner);
-                    let Some(owed) = pending.get_mut(&sender) else { break };
-                    owed.pop_front();
-                    match owed.front() {
-                        Some(&next) => next,
-                        None => {
-                            pending.remove(&sender);
-                            break;
-                        }
-                    }
-                };
-                // As far apart as the sender's Yos were (their clocks' difference, never more than MAX_GAP_MS).
-                let gap = Duration::from_millis(next.1.saturating_sub(last).min(MAX_GAP_MS));
-                std::thread::sleep(gap.saturating_sub(began.elapsed()));
-                (picture, last) = next;
-            }
+        let (answering, events, sender, restart) = (Arc::clone(bot), events.clone(), user.clone(), restart.clone());
+        let spawned = std::thread::Builder::new().spawn_scoped(scope, move || {
+            worker(&answering, "answer worker", &restart, true, || {
+                std::thread::sleep(ms(think_ms()));
+                answer_pending(&answering, &sender, &events);
+            });
         });
-        if spawned.is_err() {
+        if let Err(error) = spawned {
             bot.pending.lock().unwrap_or_else(PoisonError::into_inner).remove(&user);
+            bot.log(format!("cannot start answer worker: {error}"));
             bot.dropped();
         }
+    }
+}
+
+/// Keep the current answer in pending until it completes; one sender is answered in order.
+fn answer_pending(bot: &Bot, sender: &str, events: &SyncSender<Event>) {
+    while bot.running() {
+        let next = bot
+            .pending
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .get(sender)
+            .and_then(|owed| owed.front())
+            .copied();
+        let Some((picture, last)) = next else { return };
+        let began = Instant::now();
+        answer(bot, sender, events, picture);
+        let next = {
+            let mut pending = bot.pending.lock().unwrap_or_else(PoisonError::into_inner);
+            let Some(owed) = pending.get_mut(sender) else { return };
+            owed.pop_front();
+            match owed.front() {
+                Some(&next) => next,
+                None => {
+                    pending.remove(sender);
+                    return;
+                }
+            }
+        };
+        let gap = Duration::from_millis(next.1.saturating_sub(last).min(MAX_GAP_MS));
+        std::thread::sleep(gap.saturating_sub(began.elapsed()));
     }
 }
 
@@ -1073,6 +1138,60 @@ fn send_this_picture(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn failed_workers_request_an_account_restart_from_durable_state() {
+        let hub = yo_tests::TestHub::start();
+        for panics in [false, true] {
+            let account = Account {
+                name: "test".into(),
+                hub: hub.url(),
+                state: std::env::temp_dir().join(format!("yogpt-supervise-{}", yo_tests::random_u64())),
+                username: yo_tests::username(yo_tests::random_u64() % 1_000_000_000),
+                echo: false,
+                hub_keys: vec![],
+                trust_roots: vec![],
+                zk_params: None,
+            };
+            let (client, lock) = open(&account).unwrap();
+            let user = client.user_id().to_owned();
+            let (draining, _drain) = sync_channel(MAX_DRAINING);
+            let bot = Bot {
+                name: account.name.clone(),
+                options: Options { replies: None, picture_every: 0, yo: None, photo: None },
+                echo: false,
+                draining,
+                client: Mutex::new(client),
+                stopped: AtomicBool::new(false),
+                pending: Mutex::default(),
+                recent: Mutex::default(),
+                dropped: AtomicU64::new(0),
+                dropped_logged_s: AtomicU64::new(0),
+            };
+            let restart = AtomicBool::new(false);
+            worker(&bot, "answer", &restart, true, || {});
+            assert!(!restart.load(Ordering::Relaxed));
+            assert!(bot.running());
+            worker(&bot, "receiver", &restart, false, || {
+                if panics {
+                    let _client = bot.client();
+                    panic!("injected failure while holding the client");
+                }
+            });
+            assert!(restart.load(Ordering::Relaxed));
+            assert!(!bot.running());
+            assert_eq!(bot.client.is_poisoned(), panics);
+            drop(bot);
+            drop(lock);
+            // Reopening reacquires the state lock and discards the poisoned in-memory client.
+            let (mut restored, lock) = open(&account).unwrap();
+            assert_eq!(restored.user_id(), user);
+            restored.sync(0).unwrap();
+            drop(restored);
+            drop(lock);
+            std::fs::remove_dir_all(account.state).unwrap();
+        }
+    }
 
     #[test]
     fn yos_follow_the_table() {

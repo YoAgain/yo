@@ -103,6 +103,45 @@ fn yogpt_answers_a_yo_and_again_after_a_restart() {
 }
 
 #[test]
+fn two_accounts_survive_a_hub_connection_refusal() {
+    let state = state_dir();
+    std::fs::create_dir_all(&state).unwrap();
+    let mut config = yo_hub::config::Config::for_tests();
+    config.db_path = state.join("hub.sqlite").to_str().unwrap().to_owned();
+    let hub = TestHub::start_with(config.clone(), "127.0.0.1:0");
+    let other = TestHub::start();
+    let other_state = state_dir();
+    let mut alice = someone(&hub);
+    let mut bob = someone(&other);
+    let replies = state.join("replies");
+    std::fs::create_dir_all(&replies).unwrap();
+    std::fs::write(replies.join("001.jpg"), reply_picture()).unwrap();
+    let mut bot = Bot::start_with(
+        &[(&hub, &state.join("bot")), (&other, &other_state)],
+        &["--replies", replies.to_str().unwrap()],
+    );
+    let first = round_trip(&mut alice);
+    // Interrupt a sender's picture-answer queue too, rather than only an idle long poll.
+    let (photo, sealed) = media::seal(b"not opened", 4, 3).unwrap();
+    alice.upload(&photo, 1).unwrap().send(&sealed).unwrap();
+    for _ in 0..10 {
+        alice.send("YOGPT", Content::Photo(photo.clone())).unwrap();
+    }
+    let addr = hub.addr.to_string();
+    hub.stop();
+    // Refused connections last long enough for the receiver to fail and retry.
+    std::thread::sleep(Duration::from_secs(4));
+    round_trip(&mut bob);
+    let _hub = TestHub::start_with(config, &addr);
+    assert!(bot.0.try_wait().unwrap().is_none());
+    let second = round_trip(&mut alice);
+    assert!(second.iter().all(|user| *user == first[0]));
+    drop(bot);
+    let _ = std::fs::remove_dir_all(state);
+    let _ = std::fs::remove_dir_all(other_state);
+}
+
+#[test]
 fn two_accounts_in_one_process_stop_one_by_one() {
     let (a, b) = (TestHub::start(), TestHub::start());
     let (state_a, state_b) = (state_dir(), state_dir());

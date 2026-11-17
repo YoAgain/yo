@@ -407,6 +407,7 @@ impl Hub {
             .route(api::FEEDBACK, post(feedback))
             .route(api::SUPPORT, get(support_get).post(feedback))
             .route(api::SUPPORT_READ, post(support_read))
+            .route("/v1/admin/users/{user}", delete(admin_delete_user))
             .route("/v1/admin/messages", get(admin_threads))
             .route("/v1/admin/messages/{user}", get(admin_thread).post(admin_reply))
             .route("/v1/admin/messages/{user}/handled", post(admin_handled))
@@ -1182,6 +1183,16 @@ fn support_user(user: &str) -> Res<UserId> {
         .collect::<Res<Vec<_>>>()?;
     bytes.try_into().map_err(|_| bad())
 }
+async fn admin_delete_user(State(hub): Hubs, Path(user): Path<String>, headers: HeaderMap) -> Res<StatusCode> {
+    require_admin(&hub, &headers)?;
+    let blobs =
+        hub.db.admin_delete_user(&support_user(&user)?, now_ms())?.ok_or_else(|| refuse(StatusCode::NOT_FOUND))?;
+    for blob in &blobs {
+        hub.blobs.remove(blob);
+    }
+    Ok(StatusCode::NO_CONTENT)
+}
+
 async fn admin_threads(State(hub): Hubs, headers: HeaderMap) -> Res<axum::Json<serde_json::Value>> {
     require_admin(&hub, &headers)?;
     Ok(axum::Json(hub.db.support_threads()?))
@@ -1722,6 +1733,57 @@ async fn ack_blob(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn admin_user_deletion_requires_admin_and_removes_the_account() {
+        use axum::{body::Body, http::Request};
+        use tower::ServiceExt;
+        let mut config = Config::for_tests();
+        config.admin_token = Some("test-token".into());
+        let hub = Hub::new(config, Arc::new(push::Recorder::default())).unwrap();
+        let user = [7; 16];
+        let device = db::NewDevice {
+            device_id: [8; 16],
+            device_key: [8; 32],
+            auth_key: [8; 32],
+            registration_id: 8,
+            push_platform: 0,
+            push_token: Vec::new(),
+            app: None,
+        };
+        let prekeys = api::Prekeys { signed: None, last_resort: None, one_time: Vec::new(), kyber: Vec::new() };
+        assert!(matches!(
+            hub.db.register(b"deletable", "Deletable", &user, &[7; 32], &device, &prekeys, 100, 1).unwrap(),
+            Write::Done(_)
+        ));
+        let path = format!("/v1/admin/users/{}", "07".repeat(16));
+        for (token, target, expected) in [
+            ("", path.as_str(), StatusCode::NOT_FOUND),
+            ("wrong", path.as_str(), StatusCode::NOT_FOUND),
+            ("test-token", "/v1/admin/users/invalid", StatusCode::BAD_REQUEST),
+            ("test-token", path.as_str(), StatusCode::NO_CONTENT),
+            ("test-token", path.as_str(), StatusCode::NOT_FOUND),
+        ] {
+            let request = Request::delete(target).header("yo-admin-token", token).body(Body::empty()).unwrap();
+            let response = hub.router().oneshot(request).await.unwrap();
+            assert_eq!(response.status(), expected);
+            if token != "test-token" || target.ends_with("invalid") {
+                assert!(hub.db.account_key(&user).unwrap().is_some());
+            }
+        }
+        assert!(hub.db.account_key(&user).unwrap().is_none());
+        assert!(!hub.db.username_taken(b"deletable").unwrap());
+        assert!(matches!(hub.db.delete_account(&device.device_id, 2).unwrap(), Write::Refused(_)));
+        let mut config = Config::for_tests();
+        config.admin_token = None;
+        let disabled = Hub::new(config, Arc::new(push::Recorder::default())).unwrap();
+        let response = disabled
+            .router()
+            .oneshot(Request::delete(path).header("yo-admin-token", "test-token").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    }
 
     #[tokio::test]
     async fn admin_reserved_routes_authenticate_validate_and_manage_names() {

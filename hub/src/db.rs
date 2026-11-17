@@ -1178,6 +1178,22 @@ impl Db {
         Ok(Write::Done(()))
     }
 
+    /// Operator deletion, using the same cleanup as account deletion; unknown users change nothing.
+    pub fn admin_delete_user(&self, user: &UserId, now: u64) -> rusqlite::Result<Option<Vec<(BlobId, u64)>>> {
+        let mut conn = self.conn();
+        let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        if !tx.prepare_cached("SELECT 1 FROM users WHERE id = ?1")?.exists([user])? {
+            return Ok(None);
+        }
+        let blobs = tx
+            .prepare_cached("SELECT id, created_at FROM blobs WHERE user_id = ?1")?
+            .query_map([user], blob_row)?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        remove_user(&tx, user, now)?;
+        tx.commit()?;
+        Ok(Some(blobs))
+    }
+
     /// Stores the report of `reported` by a device's user, replacing the pair's earlier one; false when there is no
     /// such user. The device is checked in this transaction: an account deleted meanwhile reports nobody.
     pub fn report(&self, device: &DeviceId, reported: &UserId, reason: u8, now: u64) -> rusqlite::Result<Write<bool>> {
@@ -2569,46 +2585,59 @@ mod tests {
 
     #[test]
     fn a_deleted_account_leaves_nothing_behind() {
-        let db = Db::open(":memory:").unwrap();
-        let leo = user(register(&db, b"LEO", 1, 1, 0));
-        let mia = user(register(&db, b"MIA", 2, 2, 0));
-        db.put_backup(&[1; 16], Some(&[9; 16]), b"record", &BackupAuth::default(), 0).unwrap();
-        let incoming =
-            Incoming { user: leo, devices_hash: yo_wire::devices::hash(&[1; 32], &[[1; 32]]), envelope: b"envelope" };
-        db.deliver(&[incoming], 0, 10).unwrap();
-        // The test's users have the ids of their devices.
-        let reported = |device: &DeviceId, whom: &UserId| match db.report(device, whom, 1, 0).unwrap() {
-            Write::Done(stored) => Some(stored),
-            Write::Refused(_) => None,
-        };
-        assert_eq!((reported(&leo, &mia), reported(&mia, &leo)), (Some(true), Some(true)));
-        assert!(matches!(db.feedback(&[1; 16], "more colors", "1.0 (1)", 0).unwrap(), Write::Done(())));
-        assert!(matches!(db.feedback(&[2; 16], "fine", "1.0 (1)", 0).unwrap(), Write::Done(())));
-        assert!(matches!(db.delete_account(&[1; 16], 1).unwrap(), Write::Done(())));
-        assert!(db.is_gone(&[1; 16]).unwrap(), "its device learns that the account is gone");
-        assert!(db.lookup(KIND_USER, &leo, false, &[]).unwrap().is_none());
-        assert!(db.backup(&leo).unwrap().is_none() && db.backup(&[9; 16]).unwrap().is_none());
-        assert!(db.fetch(&[1; 16], 10).unwrap().is_empty());
-        let left = |table: &str| -> i64 {
-            db.conn().query_row(&format!("SELECT count(*) FROM {table}"), [], |row| row.get(0)).unwrap()
-        };
-        assert_eq!((left("reports"), left("prekeys"), left("account_keys")), (0, 2, 1), "only MIA's are left");
-        let feedback: Vec<Vec<u8>> = db
-            .conn()
-            .prepare("SELECT user_id FROM support_messages ORDER BY id")
-            .unwrap()
-            .query_map([], |row| row.get(0))
-            .unwrap()
-            .collect::<Result<_, _>>()
-            .unwrap();
-        assert_eq!(feedback, [NOBODY.to_vec(), mia.to_vec()], "LEO's feedback stays without LEO, MIA's as it was");
-        assert_eq!(db.audit().unwrap(), [], "nothing of LEO's is left behind");
-        assert!(matches!(db.feedback(&[1; 16], "late", "1.0 (1)", 1).unwrap(), Write::Refused(Conflict::DeviceGone)));
-        assert!(matches!(db.delete_account(&[1; 16], 1).unwrap(), Write::Refused(Conflict::DeviceGone)));
-        // The name and the key are free again.
-        user(register(&db, b"LEO", 1, 3, 2));
-        assert_eq!(reported(&mia, &leo), Some(false), "no such user any more");
-        assert_eq!(reported(&leo, &mia), None, "a deleted account reports nobody");
+        for admin in [false, true] {
+            let db = Db::open(":memory:").unwrap();
+            let leo = user(register(&db, b"LEO", 1, 1, 0));
+            let mia = user(register(&db, b"MIA", 2, 2, 0));
+            db.put_backup(&[1; 16], Some(&[9; 16]), b"record", &BackupAuth::default(), 0).unwrap();
+            let incoming = Incoming {
+                user: leo,
+                devices_hash: yo_wire::devices::hash(&[1; 32], &[[1; 32]]),
+                envelope: b"envelope",
+            };
+            db.deliver(&[incoming], 0, 10).unwrap();
+            // The test's users have the ids of their devices.
+            let reported = |device: &DeviceId, whom: &UserId| match db.report(device, whom, 1, 0).unwrap() {
+                Write::Done(stored) => Some(stored),
+                Write::Refused(_) => None,
+            };
+            assert_eq!((reported(&leo, &mia), reported(&mia, &leo)), (Some(true), Some(true)));
+            assert!(matches!(db.feedback(&[1; 16], "more colors", "1.0 (1)", 0).unwrap(), Write::Done(())));
+            assert!(matches!(db.feedback(&[2; 16], "fine", "1.0 (1)", 0).unwrap(), Write::Done(())));
+            if admin {
+                assert_eq!(db.admin_delete_user(&leo, 1).unwrap(), Some(Vec::new()));
+                assert_eq!(db.admin_delete_user(&leo, 1).unwrap(), None);
+            } else {
+                assert!(matches!(db.delete_account(&[1; 16], 1).unwrap(), Write::Done(())));
+            }
+            assert!(db.is_gone(&[1; 16]).unwrap(), "its device learns that the account is gone");
+            assert!(db.lookup(KIND_USER, &leo, false, &[]).unwrap().is_none());
+            assert!(db.backup(&leo).unwrap().is_none() && db.backup(&[9; 16]).unwrap().is_none());
+            assert!(db.fetch(&[1; 16], 10).unwrap().is_empty());
+            let left = |table: &str| -> i64 {
+                db.conn().query_row(&format!("SELECT count(*) FROM {table}"), [], |row| row.get(0)).unwrap()
+            };
+            assert_eq!((left("reports"), left("prekeys"), left("account_keys")), (0, 2, 1), "only MIA's are left");
+            let feedback: Vec<Vec<u8>> = db
+                .conn()
+                .prepare("SELECT user_id FROM support_messages ORDER BY id")
+                .unwrap()
+                .query_map([], |row| row.get(0))
+                .unwrap()
+                .collect::<Result<_, _>>()
+                .unwrap();
+            assert_eq!(feedback, [NOBODY.to_vec(), mia.to_vec()], "LEO's feedback stays without LEO, MIA's as it was");
+            assert_eq!(db.audit().unwrap(), [], "nothing of LEO's is left behind");
+            assert!(matches!(
+                db.feedback(&[1; 16], "late", "1.0 (1)", 1).unwrap(),
+                Write::Refused(Conflict::DeviceGone)
+            ));
+            assert!(matches!(db.delete_account(&[1; 16], 1).unwrap(), Write::Refused(Conflict::DeviceGone)));
+            // The name and the key are free again.
+            user(register(&db, b"LEO", 1, 3, 2));
+            assert_eq!(reported(&mia, &leo), Some(false), "no such user any more");
+            assert_eq!(reported(&leo, &mia), None, "a deleted account reports nobody");
+        }
     }
 
     #[test]

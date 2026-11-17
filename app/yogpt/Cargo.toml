@@ -14,3 +14,4 @@ getrandom = { workspace = true }
 
 [dev-dependencies]
 yo-tests = { path = "../../tests" }
+yo-hub = { path = "../../hub" }

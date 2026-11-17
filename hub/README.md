@@ -94,6 +94,9 @@ The same `YO_ADMIN_TOKEN` and hidden-route 404 rules as To-Dos protect:
 `DELETE /v1/admin/reserved/{name}`. Adds and removals compare skeletons; duplicate adds preserve spelling.
 POST and PUT return the current state; DELETE returns 204, including when the name was absent.
 
+`DELETE /v1/admin/users/{user}` deletes an account using the same cleanup as account deletion, including its blobs.
+Requires `Yo-Admin-Token`; `user` is its 32 hexadecimal digit user id (as in support routes).
+Returns `204`, or `404` for an unknown user or missing/incorrect admin credentials.
 
 ## Support chat rollout
 
