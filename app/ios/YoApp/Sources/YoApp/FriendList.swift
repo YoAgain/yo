@@ -2011,6 +2011,17 @@ private struct OutgoingThumbnailSlot: View {
       }
         .frame(width: side, height: side).clipped()
         .overlay { VideoPlayGlyph(visible: restingVideo, side: side) }
+        // The number of photos on the stack again (owner), as before the layers came.
+        .overlay {
+          Text("\(more + 1)")
+            .font(.custom("Montserrat-Bold", size: side * 0.36)).minimumScaleFactor(0.5).lineLimit(1)
+            .foregroundStyle(.white)
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+            .background(.black.opacity(0.35))
+            .opacity(more > 0 ? 1 : 0)
+            .contentTransition(.numericText())
+            .animation(.easeOut(duration: 0.16), value: more)
+        }
         .scaleEffect(topScale)
         .position(top)
         .opacity(item == nil || restingImage == nil ? 0 : 1)
