@@ -1970,9 +1970,8 @@ struct LiveBar: View, @MainActor Equatable {
   }
 }
 
-/// The slot keeps its identity even while empty. The resting stack survives each new flight. No number: a small real
-/// stack, the top photo with one or two photos' edges behind it (2 photos: one edge, 3 or more: two; never more). The
-/// exact number is in the bar's menu.
+/// The slot keeps its identity even while empty. The resting stack survives each new flight: one photo with the number
+/// of photos on it.
 private struct OutgoingThumbnailSlot: View {
   let item: FriendList.Outgoing?
   let more: Int
@@ -1985,26 +1984,9 @@ private struct OutgoingThumbnailSlot: View {
   @State private var restingImage: UIImage?
   @State private var restingVideo = false
 
-  /// Photos' edges shown behind the top one.
-  private var edges: Int { min(max(0, more), 2) }
-  /// The top photo leaves room for the edges behind it.
-  private var topScale: CGFloat { edges == 0 ? 1 : 0.8 }
-  private var topShift: CGFloat { -side * 0.045 * CGFloat(edges) }
-
   var body: some View {
-    let top = CGPoint(x: destination.x + topShift, y: destination.y + topShift)
+    let top = destination
     ZStack {
-      ForEach(Array((1...2).reversed()), id: \.self) { layer in
-        if layer <= edges, let image = restingImage ?? item?.thumbnail {
-          Image(uiImage: image).resizable().scaledToFill()
-            .frame(width: side * topScale, height: side * topScale).clipped()
-            .brightness(-0.12 * Double(layer))
-            .overlay { Rectangle().stroke(.black.opacity(0.35), lineWidth: 1) }
-            .rotationEffect(.degrees(layer == 1 ? 6 : -5))
-            .position(x: top.x + side * 0.09 * CGFloat(layer), y: top.y + side * 0.09 * CGFloat(layer))
-            .transition(.opacity)
-        }
-      }
       Group {
         if let restingImage { Image(uiImage: restingImage).resizable().scaledToFill() }
         else { Color.clear }
@@ -2022,11 +2004,10 @@ private struct OutgoingThumbnailSlot: View {
             .contentTransition(.numericText())
             .animation(.easeOut(duration: 0.16), value: more)
         }
-        .scaleEffect(topScale)
         .position(top)
         .opacity(item == nil || restingImage == nil ? 0 : 1)
       if let item, let image = item.thumbnail {
-        OutgoingThumbnail(image: image, video: item.text.contains("🎥"), destination: top, scale: topScale,
+        OutgoingThumbnail(image: image, video: item.text.contains("🎥"), destination: top,
           origin: item.origin.map { CGPoint(x: $0.x - coordinateOrigin.x, y: $0.y - coordinateOrigin.y) } ?? fallbackOrigin, side: side, began: {
             Perf.mark("thumb.fly.start")
             began(item.id)
@@ -2035,7 +2016,7 @@ private struct OutgoingThumbnailSlot: View {
           .transition(.identity)
       }
     }
-    .animation(.spring(duration: 0.3, bounce: 0.2), value: edges)
+
     .onChange(of: item, initial: true) { old, new in
       if old?.id != new?.id {
         if new == nil { restingImage = nil }
