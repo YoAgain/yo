@@ -27,6 +27,7 @@ final class NotificationService: UNNotificationServiceExtension {
     _ request: UNNotificationRequest, withContentHandler contentHandler: @escaping (UNNotificationContent) -> Void
   ) {
     Perf.mark("nse.start")
+    ShareBridge.registerCategories()  // "Yo Back" on it, also before the app has run since a restart
     let content = (request.content.mutableCopy() as? UNMutableNotificationContent) ?? UNMutableNotificationContent()
     content.title = ""  // "Yo" once, not as title and text
     let pending = Pending()

@@ -206,7 +206,7 @@ impl Pusher {
         };
         let host = if sandbox { "api.sandbox.push.apple.com" } else { "api.push.apple.com" };
         let body = if urgent {
-            json!({ "aps": { "alert": { "body": "Yo" }, "sound": "yo.caf", "mutable-content": 1 } })
+            json!({ "aps": { "alert": { "body": "Yo" }, "sound": "yo.caf", "category": "yo", "mutable-content": 1 } })
         } else {
             json!({ "aps": { "content-available": 1 } })
         };
@@ -306,6 +306,26 @@ mod tests {
             assert_eq!(body["message"]["data"]["urgent"], urgent.to_string());
             assert_eq!(body["message"]["android"]["priority"], if urgent { "HIGH" } else { "NORMAL" });
             assert!(body["message"].get("notification").is_none());
+        }
+    }
+
+    #[tokio::test]
+    async fn an_urgent_apns_push_carries_the_yo_category() {
+        let config = ApnsConfig {
+            key_pem: include_str!("../../tests/fixtures/test-apns.p8").into(),
+            key_id: "KEY".into(),
+            team_id: "TEAM".into(),
+            topic: "app.example".into(),
+        };
+        let recorder = Arc::new(Recorder::default());
+        let pusher = Pusher::new(recorder.clone(), Some(&config), None).unwrap();
+        let token = "ab".repeat(32);
+        for urgent in [true, false] {
+            assert!(matches!(pusher.wake(PUSH_APNS, token.as_bytes(), urgent).await, Outcome::Sent));
+            let sent = recorder.sent.lock().unwrap();
+            let body: serde_json::Value = serde_json::from_slice(&sent.last().unwrap().body).unwrap();
+            // "Yo Back" on the Lock Screen even when the notification extension runs out of time.
+            assert_eq!(body["aps"].get("category").and_then(|c| c.as_str()), urgent.then_some("yo"));
         }
     }
 

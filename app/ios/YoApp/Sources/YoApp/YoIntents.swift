@@ -125,11 +125,12 @@ struct WidgetSent: Codable, Sendable {
   }
 }
 
-/// Yo, opened in the camera.
+/// Yo, opened in the camera: the system opens the app first and runs this in it (`openAppWhenRun`); a custom URL
+/// scheme is refused to intents ("launch is prohibited").
 struct YoCameraIntent: AppIntent {
   static let title: LocalizedStringResource = "Yo Camera"
   static let description = IntentDescription("Opens Yo in the camera.")
-  static let supportedModes: IntentModes = .foreground(.immediate)
+  static let openAppWhenRun = true
 
   @MainActor func perform() async throws -> some IntentResult {
     AppRoute.shared.camera = true
@@ -141,7 +142,7 @@ struct YoCameraIntent: AppIntent {
 struct OpenYoIntent: AppIntent {
   static let title: LocalizedStringResource = "Open Yo"
   static let description = IntentDescription("Opens Yo.")
-  static let supportedModes: IntentModes = .foreground(.immediate)
+  static let openAppWhenRun = true
 
   func perform() async throws -> some IntentResult { .result() }
 }

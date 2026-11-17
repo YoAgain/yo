@@ -156,7 +156,12 @@ struct YoApp: App {
         }
       }
       // Invite links (justyo.co/NAME, yo://add/NAME): the name waits for the list (Invite.swift).
-      .onOpenURL { Invite.shared.open($0) }
+      .onOpenURL { url in
+        // yo://camera and yo://open come from Yo's own intents (Shortcuts, Siri, the Action button, controls).
+        if url.scheme?.lowercased() == "yo", url.host()?.lowercased() == "camera" { AppRoute.shared.camera = true }
+        else if url.scheme?.lowercased() == "yo", url.host()?.lowercased() == "open" {}
+        else { Invite.shared.open(url) }
+      }
       .onContinueUserActivity(NSUserActivityTypeBrowsingWeb) { activity in
         if let url = activity.webpageURL { Invite.shared.open(url) }
       }
@@ -291,39 +296,54 @@ final class NotificationDelegate: NSObject, UNUserNotificationCenterDelegate, Se
   }
 
   /// A tap on the notification opens the app, where the Yo shows on its row. "Yo Back" right on it sends one to the
-  /// sender without opening the app (in the background, once the core has opened).
+  /// sender without opening the app, also from the Lock Screen while the iPhone is locked: as the Yo Back intent
+  /// does (YoSend), the state as a guest in the App Group, readable after the first unlock. To the notification's
+  /// sender (`user`, as the notification service wrote it), else to whoever sent the newest Yo (a bare "Yo" from
+  /// the hub, when the service ran out of time).
   func userNotificationCenter(
     _ center: UNUserNotificationCenter, didReceive response: UNNotificationResponse,
     withCompletionHandler completionHandler: @escaping @Sendable () -> Void
   ) {
     let info = response.notification.request.content.userInfo
-    // "Yo": the app opens, the core brings the Yo
-    guard let sender = info["from"] as? String else { return DispatchQueue.main.async { completionHandler() } }
+    let sender = info["from"] as? String
     let senderName = info["sender"] as? String
     let id = info["id"] as? String ?? response.notification.request.identifier
     let user = info["user"] as? String
     let action = response.actionIdentifier
-    Task { @MainActor [inbox] in
-      switch action {
-      case UNNotificationDefaultActionIdentifier:
-        inbox.received(id: id, from: sender, senderName: senderName)
-      case Inbox.yoBack:
-        await yoBack(to: sender, user: user)
-      default:
-        break
+    if action == Inbox.yoBack {
+      Task.detached { [self] in
+        await yoBack(to: user, named: sender)
+        DispatchQueue.main.async { completionHandler() }
       }
+      return
+    }
+    // "Yo": the app opens, the core brings the Yo
+    guard let sender, action == UNNotificationDefaultActionIdentifier else {
+      return DispatchQueue.main.async { completionHandler() }
+    }
+    Task { @MainActor [inbox] in
+      inbox.received(id: id, from: sender, senderName: senderName)
       completionHandler()
     }
   }
 
-  /// The sender by user id when the notification service knew it (also someone not on the list yet), else by name.
-  @MainActor private func yoBack(to sender: String, user: String?) async {
-    guard accounts.account != nil,
-      let friend = user.flatMap({ $0.hasPrefix("group:") ? friends.groupBar(String($0.dropFirst(6))) : nil })
-        ?? user.flatMap({ $0.hasPrefix("group:") ? nil : friends.friend(user: $0, handles: [sender]) })
-        ?? friends.shownFriend(named: sender),
-      !friend.blocked
-    else { return }
+  /// One Yo back as a guest (YoSend, as the Yo Back intent); without a `user` (an older notification) by name
+  /// through the app's own client, once it has opened.
+  private func yoBack(to user: String?, named sender: String?) async {
+    let last = ShareBridge.readLastYo()
+    if let owner = ShareBridge.readList()?.owner ?? last?.owner, let target = user ?? (sender == nil ? last?.to : nil) {
+      do {
+        try await YoSend.send(to: target, owner: owner)
+        WidgetSent.note(to: target, back: true)
+      } catch {}
+      return
+    }
+    guard let sender else { return }
+    await yoBackInApp(named: sender)
+  }
+
+  @MainActor private func yoBackInApp(named sender: String) async {
+    guard accounts.account != nil, let friend = friends.shownFriend(named: sender), !friend.blocked else { return }
     for _ in 0..<50 where accounts.client == nil { try? await Task.sleep(for: .milliseconds(100)) }  // opening
     _ = await inbox.send(to: friend, accounts: accounts, friends: friends)
   }

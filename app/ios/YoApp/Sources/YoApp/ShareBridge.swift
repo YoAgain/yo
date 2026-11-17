@@ -90,8 +90,20 @@ enum ShareBridge {
     }
   }
 
-  /// A Yo notification's category: "Yo Back" right on it (`Inbox.askForNotifications`).
+  /// A Yo notification's category: "Yo Back" right on it, also on the Lock Screen without unlocking (no
+  /// authentication, not opening the app: NotificationDelegate sends it as a guest, as the Yo Back intent does). The
+  /// hub's push names it too, so the action is there even when the notification service runs out of time.
   static let yoCategory = "yo"
+  static let yoBackAction = "yo.back"
+
+  /// The Yo category, set by the app and by the notification service alike: after a restart the service may show a
+  /// Yo before the app has run.
+  static func registerCategories() {
+    let yoBack = UNNotificationAction(identifier: yoBackAction, title: "Yo Back", options: [])
+    UNUserNotificationCenter.current().setNotificationCategories([
+      UNNotificationCategory(identifier: yoCategory, actions: [yoBack], intentIdentifiers: [])
+    ])
+  }
 
   /// How a run of Yos reads, on the app's bar and in a notification alike: "Yo", one "!" for each Yo after the
   /// first, at most `mostBangs`, then " +n" for the rest ("Yo!!!!! +4" for ten).

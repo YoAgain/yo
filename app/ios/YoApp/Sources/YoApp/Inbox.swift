@@ -165,14 +165,11 @@ final class Inbox {
 
   /// The notification's category: "Yo back" right on it, as the original had, sent without opening the app.
   nonisolated static let category = ShareBridge.yoCategory
-  nonisolated static let yoBack = "yo.back"
+  nonisolated static let yoBack = ShareBridge.yoBackAction
 
   func askForNotifications() async {
     let center = UNUserNotificationCenter.current()
-    let yoBack = UNNotificationAction(identifier: Self.yoBack, title: "Yo Back", options: [])
-    center.setNotificationCategories([
-      UNNotificationCategory(identifier: Self.category, actions: [yoBack], intentIdentifiers: [])
-    ])
+    ShareBridge.registerCategories()
     _ = try? await center.requestAuthorization(options: [.alert, .sound, .badge])
   }
 
