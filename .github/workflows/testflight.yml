@@ -187,6 +187,24 @@ jobs:
                   print(f"::warning::{bundle.name}: no App Group group.app.justyo.ios in its profile")
           EOF
 
+      # The icons to choose from in Appearance: actool's partial Info.plist replaces CFBundleIcons, so its alternates
+      # come from the catalog (xtool.env ALTERNATE_APP_ICONS). Said in the run's summary, not fatal.
+      - name: Alternate icons
+        working-directory: app/ios/YoApp
+        run: |
+          ~/pymobile3-venv/bin/python -I - xtool/YoApp.app <<'EOF'
+          import pathlib, plistlib, sys
+          app = pathlib.Path(sys.argv[1])
+          icons = plistlib.loads((app / "Info.plist").read_bytes()).get("CFBundleIcons", {})
+          alternates = icons.get("CFBundleAlternateIcons", {})
+          print("primary:", icons.get("CFBundlePrimaryIcon"))
+          for name, entry in sorted(alternates.items()):
+              files = [p.name for f in entry.get("CFBundleIconFiles", []) for p in app.glob(f + "*.png")]
+              print(f"{name}: {entry} {files}")
+          if not alternates:
+              print("::warning::no CFBundleAlternateIcons in the app's Info.plist: the icon cannot be switched")
+          EOF
+
       # Outside testers (the public link) get every build too: into the group "Public", submitted to Beta App Review.
       - name: Public beta
         timeout-minutes: 35
