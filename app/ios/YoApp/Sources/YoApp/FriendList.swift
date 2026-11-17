@@ -2266,7 +2266,10 @@ struct RowButton: View {
       mirrored: leftHanded,
       centeredSuffixWidth: 0,
       below: !senders.isEmpty && (yo != nil || !media.isEmpty),  // a group's senders: under the name, "Kai: Yo!!"
-      lineEnd: senders.isEmpty || media.isEmpty ? 0 : Self.sign  // its photo sign on the name's line
+      lineEnd: senders.isEmpty || media.isEmpty ? 0 : Self.sign,  // its photo sign on the name's line
+      // Sent and received at once without room for both: the received one stays, the sent one goes (the stack still
+      // shows what is going out).
+      wordsYield: title == "Sent Yo" && (yo != nil || !media.isEmpty)
     ) {
         // Exclamation marks only behind a Yo ("Sent Yo!!"), never behind a name or "+".
         Bangs(count: title.hasSuffix("Yo") ? count : 0, prefix: title,
@@ -2691,7 +2694,13 @@ struct Bangs: View {
   private func run(bangs: Int, more: Int) -> some View {
     HStack(spacing: 0) {
       if prefix == "Sent Yo" {
-        Text("Sent ")
+        // "Sent Yo" for the first; from the second on a dimmed arrow takes the place of "Sent" ("↑ Yo!!").
+        if count > 0 {
+          Text("\(Text(Image(systemName: "arrow.up")).font(.system(size: Metrics.rowFont, weight: .heavy))) ")
+            .foregroundStyle(.white.opacity(0.7))
+        } else {
+          Text("Sent ")
+        }
         Text("Yo").overlay { flightOverlay }
         Text(String(repeating: "!", count: bangs))
       } else {
@@ -2851,7 +2860,7 @@ private struct BarMeasureKey: LayoutValueKey {
 struct BarLine: Layout, Equatable {
   static let margin = 20.0
   static let endPadding = 30.0
-  static let gap = 14.0
+  static let gap = 16.0
   /// How far from the bar's start (left; right when mirrored) the words may go at most: room for the ring and sign.
   var start = margin
   /// For the left hand: the end part ("Yo!!") at the left, the room kept at the right.
@@ -2869,6 +2878,8 @@ struct BarLine: Layout, Equatable {
   /// With `below`: room kept at the end of the first line for what stands there (a group's photo sign), so the words
   /// and their "!"s move aside from it as from any end part.
   var lineEnd = 0.0
+  /// The words give way to the end part when both do not fit (a sent status before a received one).
+  var wordsYield = false
 
   struct Cache {
     var sizes: [CGSize] = []
@@ -2926,6 +2937,18 @@ struct BarLine: Layout, Equatable {
           proposal: ProposedViewSize(width: max(0, bounds.width - 2 * Self.endPadding), height: nil))
       }
       let endSize: CGSize = !below && cache.sizes.count > 2 ? cache.sizes[2] : .zero
+      // Sent and received both in full sizes with their gap, or else the sent one hides and the received one stays.
+      if wordsYield, !below,
+         (cache.sizes.count > 3 ? cache.sizes[3].width : 0) + Self.gap + (cache.sizes.count > 4 ? cache.sizes[4].width : 0)
+           > bounds.width - start - Self.endPadding {
+        let away = CGPoint(x: bounds.minX - 100_000, y: bounds.midY)
+        words.place(at: away, anchor: .leading, proposal: .unspecified)
+        after?.place(at: away, anchor: .leading, proposal: .unspecified)
+        let endWidth = min(endSize.width, max(0, bounds.width - start - Self.endPadding))
+        last?.place(at: CGPoint(x: mirrored ? bounds.minX + Self.endPadding : bounds.maxX - Self.endPadding - endWidth,
+          y: bounds.midY), anchor: .leading, proposal: ProposedViewSize(width: endWidth, height: nil))
+        return
+      }
       // The words between `low` and `high`, the end part outside them.
       // Below, the end part's width on the first line is `lineEnd` (its sign), not its own.
       let total = max(0, bounds.width - start - Self.endPadding - (endSize.width > 0 ? Self.gap : 0))
