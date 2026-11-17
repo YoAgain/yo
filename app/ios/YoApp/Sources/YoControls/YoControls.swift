@@ -7,7 +7,9 @@ import Foundation
 import SwiftUI
 import WidgetKit
 
-// @main: App Store processing wants the __swift5_entry section the compiler writes for it (ITMS-90896).
+// @main, as Xcode builds it: the extension starts at Foundation's NSExtensionMain (xtool links it so; App Store
+// processing wants exactly that, ITMS-90898), which finds this bundle through the __swift5_entry section the
+// compiler writes for @main (ITMS-90896).
 @main
 struct YoControls: WidgetBundle {
   var body: some Widget {
@@ -87,12 +89,4 @@ struct OpenYoControl: ControlWidget {
     .displayName("Open Yo")
     .description("Opens Yo.")
   }
-}
-
-/// xtool starts every extension at Foundation's NSExtensionMain; a WidgetKit extension starts at its bundle's main
-/// (what Xcode's `@main` would call), which this one defined here takes the place of.
-@_cdecl("NSExtensionMain")
-func yoControlsMain(_ argc: Int32, _ argv: UnsafeMutablePointer<UnsafeMutablePointer<CChar>?>) -> Int32 {
-  MainActor.assumeIsolated { YoControls.main() }
-  return 0
 }
