@@ -38,9 +38,10 @@ final class CrashReports: NSObject, MXMetricManagerSubscriber {
   }
   private var revision = 0
 
-  /// Whether crashes go to the Yo team: off until the person says so.
+  /// Whether crashes go to the Yo team: on unless the person turned it off (they are anonymous: no account, no
+  /// names, Yos or photos); Status › Send Crashes.
   static var on: Bool {
-    get { UserDefaults.standard.object(forKey: onKey) as? Bool ?? false }
+    get { UserDefaults.standard.object(forKey: onKey) as? Bool ?? true }
     set {
       UserDefaults.standard.set(newValue, forKey: onKey)
       UserDefaults.standard.set(true, forKey: askedKey)

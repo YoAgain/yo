@@ -96,7 +96,7 @@ final class Inbox {
   // Allow the 160 ms count transition to finish between batches.
   static let batchSeconds = 0.2
   /// Group members' names by user id (hex), as their Yos came: who a group's photo is from in the viewer.
-  @ObservationIgnored var memberNames: [String: String] = [:]
+  var memberNames: [String: String] = [:]
 
   /// Who a group's photo or video is from (their user id, hex): its id is the group's id (64 hex, spec 4.9), the
   /// sender's (32 hex), then the rest (`mediaID`).
@@ -482,6 +482,11 @@ final class Inbox {
       }
     }
     let resolved = friends.reconcile(contacts, users: users, changedKeys: changedKeys)
+    for contact in contacts {
+      if let name = resolved[contact.user]?.name ?? contact.handles.first ?? contact.name, name != "?", !name.isEmpty {
+        memberNames[contact.user] = name
+      }
+    }
     guard !events.isEmpty else { return }
     let contactsByUser = Perf.timed("inbox.take.contacts.index") {
       Dictionary(contacts.map { ($0.user, $0) }, uniquingKeysWith: { first, _ in first })
@@ -522,7 +527,7 @@ final class Inbox {
           guard let bar = bars[group] else { break }
           let from = contactsByUser[user]
           let senderName = resolved[user]?.name ?? from?.handles.first ?? from?.name ?? "?"
-          memberNames[user] = senderName
+          if senderName != "?" { memberNames[user] = senderName }
           received(id: "\(group)/\(user)/\(sentAtMs)", from: bar.name)
           count(from: bar.name)
           if let (media, kind) = kind.media {
@@ -584,7 +589,11 @@ final class Inbox {
   }
 
   /// A Yo notification that arrived while the app is open, or was tapped.
-  func received(id: String, from sender: String) {
+  func received(id: String, from sender: String, senderName: String? = nil) {
+    let parts = id.split(separator: "/")
+    if parts.count == 3, let senderName, senderName != "?", !senderName.isEmpty {
+      memberNames[String(parts[1])] = senderName
+    }
     Perf.timed("inbox.arrived") {
       guard taken.insert(id).inserted else { return }
       takenOrder.append(id)
@@ -609,10 +618,10 @@ final class Inbox {
       let delivered = await center.deliveredNotifications()
       let waiting = Perf.timed("inbox.notifications.decode") {
         delivered.filter { $0.request.content.categoryIdentifier == Self.category }
-          .sorted { $0.date < $1.date }.compactMap { notification -> Arrival? in
+          .sorted { $0.date < $1.date }.compactMap { notification -> (Arrival, String?)? in
             let info = notification.request.content.userInfo
             guard let sender = info["from"] as? String else { return nil }
-            return Arrival(id: info["id"] as? String ?? notification.request.identifier, from: sender)
+            return (Arrival(id: info["id"] as? String ?? notification.request.identifier, from: sender), info["sender"] as? String)
           }
       }
       Perf.timed("inbox.notifications.remove") {
@@ -623,7 +632,7 @@ final class Inbox {
       return waiting
     }.value
     Perf.timed("inbox.notifications.apply") {
-      for arrival in waiting { received(id: arrival.id, from: arrival.from) }
+      for (arrival, name) in waiting { received(id: arrival.id, from: arrival.from, senderName: name) }
     }
   }
 

@@ -157,7 +157,7 @@ enum ShareBridge {
 
     /// As a notification keeps it (`userInfo["yos"]`), for the next one to add to.
     var info: [String: Any] {
-      ["name": name, "user": user, "count": count, "photos": photos, "videos": videos, "id": id,
+      ["sender": name, "name": name, "user": user, "count": count, "photos": photos, "videos": videos, "id": id,
        "kind": kind?.rawValue ?? "yo", "bar": bar ?? "", "request": request]
     }
 
@@ -281,7 +281,7 @@ enum ShareBridge {
     // `user` for Yo Back, also to someone not on the list yet; `id` so the app shows the Yo once.
     // A group's: from its bar, where the app shows it.
     content.userInfo = [
-      "from": newest.bar ?? newest.name, "user": newest.user, "id": newest.id, "yos": senders.map(\.info),
+      "from": newest.bar ?? newest.name, "sender": newest.name, "user": newest.user, "id": newest.id, "yos": senders.map(\.info),
     ]
   }
 

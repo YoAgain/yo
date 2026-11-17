@@ -215,6 +215,7 @@ struct StatusPage: View {
       #if YO_DEV
         Section {
           HitchesRows()
+          NavigationLink("HDR Test") { HDRTestPage() }
         }
       #endif
     }

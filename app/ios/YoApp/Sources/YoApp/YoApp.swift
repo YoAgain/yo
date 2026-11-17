@@ -275,9 +275,10 @@ final class NotificationDelegate: NSObject, UNUserNotificationCenterDelegate, Se
     // A push that names nobody ("Yo"): the app's own wait at the hub brings the Yo, if there is one.
     guard let sender = info["from"] as? String else { return DispatchQueue.main.async { completionHandler([]) } }
     // The Yo's own id when the notification extension (YoNotify) knew it: the same Yo from the core is not shown twice.
+    let senderName = info["sender"] as? String
     let id = info["id"] as? String ?? notification.request.identifier
     Task { @MainActor [inbox] in
-      inbox.received(id: id, from: sender)
+      inbox.received(id: id, from: sender, senderName: senderName)
       // The app shows it itself, on its bar ("Yo!!" at its end): no banner.
       completionHandler([])
       // Nor left in Notification Center, seen here already (a moment later: it is listed only after this answer).
@@ -295,13 +296,14 @@ final class NotificationDelegate: NSObject, UNUserNotificationCenterDelegate, Se
     let info = response.notification.request.content.userInfo
     // "Yo": the app opens, the core brings the Yo
     guard let sender = info["from"] as? String else { return DispatchQueue.main.async { completionHandler() } }
+    let senderName = info["sender"] as? String
     let id = info["id"] as? String ?? response.notification.request.identifier
     let user = info["user"] as? String
     let action = response.actionIdentifier
     Task { @MainActor [inbox] in
       switch action {
       case UNNotificationDefaultActionIdentifier:
-        inbox.received(id: id, from: sender)
+        inbox.received(id: id, from: sender, senderName: senderName)
       case Inbox.yoBack:
         await yoBack(to: sender, user: user)
       default:
