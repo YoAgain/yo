@@ -196,8 +196,26 @@ struct FriendList: View {
   @State private var leftAt: Date?
   @State private var cameraPrepared = false
   @State private var listScrolling = false
-  /// A group's bar that shrank back, and until when the bars under it (which moved up) take no taps (`send`).
-  @State private var tapLock: (bar: UUID, until: Date)?
+  /// Until when bars take no taps (`send`): with a bar, a group's bar that shrank back and only the bars under it
+  /// (which moved up); without one, the list just reordered and no bar does (a row slid under the finger).
+  @State private var tapLock: (bar: UUID?, until: Date)?
+  /// The bars that just changed place (from the first one that did, down): a tap on them waits a moment.
+  @State private var movedLock: (ids: Set<String>, until: Date)?
+  /// While bars are being tapped the order stays: the newest one waits here until `tapQuiet` has passed and no finger
+  /// is down (`heldSince` caps the wait), then goes in one go (`flushHeldOrder`).
+  @State private var tapQuiet = Date.distantPast
+  @State private var fingersDown: Set<UUID> = []
+  @State private var heldOrder: [String]?
+  @State private var heldSince: Date?
+  @State private var heldFlush: Task<Void, Never>?
+  /// While taps go on, the bars not tapped keep their height (one row or two, a group's sender lines), so no bar above
+  /// the finger grows or shrinks under it; all of them change together with the held order (`releaseHold`).
+  @State private var heightsHeld = false
+  @State private var heightsSince: Date?
+  @State private var tappedBars: Set<UUID> = []
+  static let tapQuietSeconds = 1.5
+  static let reorderTapLock = 0.5
+  static let heldOrderCap = 8.0
   @AppStorage(SettingKey.leftHanded) private var leftHanded = false
   @State private var camera = Camera()
   /// The camera's zooms (CameraZoom) and the one chosen.
@@ -721,6 +739,7 @@ struct FriendList: View {
       stop: { cancelSending(friend) },
       media: waiting,
       landing: landings.slot(friend.name),
+      keepHeight: heightsHeld && !tappedBars.contains(friend.key),
       hint: cameraOn ? "Takes and sends a photo. Use Record Video to record a video." : nil,
       hold: cameraOn && picked.isEmpty && !friend.request ? { hold(friend, $0, origin: $1) } : nil,
       cancelHold: {
@@ -768,7 +787,9 @@ struct FriendList: View {
           .background(cameraOn ? Color.clear : shade(friend))
           .contentShape(.contextMenuPreview, Rectangle())
           .contextMenu {
-            if !cameraOn && !friend.request { menu(for: friend) }
+            if !cameraOn && !friend.request {
+              menu(for: friend)
+            }
           }
         if friend.request {
           requestChoices(friend)
@@ -801,7 +822,8 @@ struct FriendList: View {
         .foregroundStyle(.white)
         .frame(width: width)
         .frame(maxHeight: .infinity)
-        .background { addBackground(Color(hex: yes ? 0x2ECC71 : 0xE74C3C)) }
+        // Yo in the requester's own colour (one block with its bar), only No in red.
+        .background { addBackground(yes ? shade(friend) : Color(hex: 0xE74C3C)) }
         .contentShape(Rectangle())
     }
     .buttonStyle(.plain)
@@ -830,13 +852,7 @@ struct FriendList: View {
       Button(stacked == 1 ? "1 photo waiting to send" : "\(stacked) photos waiting to send", systemImage: "photo.stack") {}
         .disabled(true)
     }
-    if run.modelTitle == "Sent Yo", run.modelCount > 0 {
-      Button("Sent Yo \(run.modelCount) times") {}.disabled(true)
-    }
-    let received = landings[friend.name]?.total ?? run.modelMarkCount
-    if received > 0 {
-      Button("Yo \(received) times") {}.disabled(true)
-    }
+    // No "Sent Yo 2 times" / "Yo 3 times" rows: the bar already says it ("Sent 2× Yo!").
     let lastRow = Button(activity.text, systemImage: activity.icon) {}.disabled(true)
       .accessibilityLabel(activity.accessibility)
     if friend.group != nil {
@@ -856,7 +872,7 @@ struct FriendList: View {
     } else {
     Group {
       AnyView(lastRow)
-      AnyView(Menu("Block & Report", systemImage: "hand.raised") {
+      AnyView(Menu("Block", systemImage: "hand.raised") {
         Button("Block", systemImage: "hand.raised") { blocking = (friend, false) }
         Section("Report") {
           Button("Spam") { report(friend, .spam) }
@@ -1223,13 +1239,11 @@ struct FriendList: View {
     // A group's bar just shrank back (its senders' lines went): the bars under it moved up under the finger, so a tap
     // on one of them in the first half second goes nowhere rather than to whoever slid there. The group's own bar
     // and those above it stay where they were: they take taps (to fire on).
-    if let lock = tapLock, Date.now < lock.until, let group = friends.shown.firstIndex(where: { $0.key == lock.bar }),
-      let tapped = friends.shown.firstIndex(where: { $0.key == friend.key }), tapped > group
-    {
-      return
-    }
-    // A request asks first (spec 4.10): nothing goes to them before a yes.
-    if friend.request { return }
+    guard !tapLocked(friend) else { return }
+    tapped(friend.key)
+    // A request asks first (spec 4.10): nothing goes to them before a yes. A tap on its bar is that yes (only No
+    // declines), as a tap on its Yo.
+    if friend.request { chooseRequest(friend, yes: true); return }
 
     // Firing back into a group whose senders' lines stand: they stay a while longer (its time starts again), so the
     // bar does not shrink under the finger.
@@ -1348,6 +1362,8 @@ struct FriendList: View {
 
   /// Holding a name in camera mode: a video from the moment it is held until it is let go.
   private func hold(_ friend: Friend, _ holding: Bool, origin: CGPoint?) {
+    if holding { guard !tapLocked(friend) else { return } }
+    tapped(friend.key)
     hintEpoch += 1
     if holding {
       guard recordingFor == nil else { return }  // one video at a time: a second finger records nothing
@@ -1560,6 +1576,7 @@ struct FriendList: View {
   /// A finger on a bar's thumbnail plays its photos and videos, oldest first. Held, letting go closes them; a short
   /// tap lets them run to the end (held: paused; a tap on the left third: back; elsewhere: on). What was shown is gone.
   private func see(_ friend: Friend, _ touch: ThumbnailTouch) {
+    tapped(friend.key)
     switch touch {
     case .down:
       shown = []
@@ -1735,15 +1752,19 @@ extension FriendList {
     let order = snapshot.rows.map(\.id)
     let anchor = snapshot.lockedRow ?? lockedRow
     if order != listOrder {
-      let hadOrder = !listOrder.isEmpty
-      withAnimation(inbox.busy || reduceMotion ? nil : ListMotion.expansion) {
-        // With no alignment anchor, an already visible target does not jump. SwiftUI
-        // preserves that identity through the reorder, including content inserted above it.
-        if let anchor { position.scrollTo(id: anchor) }
-        else if !scrolled { position.scrollTo(edge: .top) }
-        listOrder = order
-        if hadOrder && snapshot.deletion == nil && snapshot.committedDeletes.isEmpty { friends.promoteBatch(order.reversed().compactMap(UUID.init(uuidString:))) }
+      // Only a reshuffle of the same bars waits for the taps to end; the first order, a bar added or gone (a delete,
+      // its undo) goes at once.
+      let deleting = snapshot.deletion != nil || !snapshot.committedDeletes.isEmpty
+      if !listOrder.isEmpty && !deleting && Set(order) == Set(listOrder) && orderHeld(now) {
+        heldOrder = order
+        if heldSince == nil { heldSince = now }
+        scheduleHeldFlush()
+      } else {
+        applyOrder(order, anchor: anchor, promote: !listOrder.isEmpty && !deleting)
       }
+    } else {
+      heldOrder = nil
+      heldSince = nil
     }
     if snapshot.lockedRow != lockedRow, let id = snapshot.lockedRow {
       var transaction = Transaction(); transaction.disablesAnimations = true
@@ -1793,12 +1814,99 @@ extension FriendList {
     if snapshot.nextTick != nil { clocks.start { tickClocks() } } else { clocks.stop() }
   }
 
+  private func applyOrder(_ order: [String], anchor: String?, promote: Bool) {
+    heldOrder = nil
+    heldSince = nil
+    let old = listOrder
+    let moved = !old.isEmpty
+    // In one frame, no sliding: the bars stand in their new places at once.
+    var instant = Transaction(); instant.disablesAnimations = true
+    withTransaction(instant) {
+      // With no alignment anchor, an already visible target does not jump. SwiftUI
+      // preserves that identity through the reorder, including content inserted above it.
+      if let anchor { position.scrollTo(id: anchor) }
+      else if !scrolled { position.scrollTo(edge: .top) }
+      listOrder = order
+      if promote { friends.promoteBatch(order.reversed().compactMap(UUID.init(uuidString:))) }
+    }
+    // Rows slid: a tap in the next moment would land on whichever one moved under the finger.
+    // Only the bars that changed place are locked: those above stand where they were.
+    if moved, let first = order.indices.first(where: { $0 >= old.count || old[$0] != order[$0] }) {
+      movedLock = (Set(order[first...]), Date.now + Self.reorderTapLock)
+    }
+  }
+
+  /// Any touch on a bar: the order and the other bars' heights stay until the taps have been quiet a moment.
+  private func tapped(_ key: UUID) {
+    tapQuiet = Date.now + Self.tapQuietSeconds
+    if !heightsHeld {
+      heightsHeld = true
+      heightsSince = .now
+      tappedBars = []
+    }
+    tappedBars.insert(key)
+    scheduleHeldFlush()
+  }
+
+  /// A tap ignored: the list just reordered (any bar), or a group's bar shrank back (the bars under it).
+  private func tapLocked(_ friend: Friend) -> Bool {
+    if let moved = movedLock, Date.now < moved.until, moved.ids.contains(friend.key.uuidString) { return true }
+    guard let lock = tapLock, Date.now < lock.until else { return false }
+    guard let bar = lock.bar else { return true }
+    guard let group = friends.shown.firstIndex(where: { $0.key == bar }),
+      let tapped = friends.shown.firstIndex(where: { $0.key == friend.key }) else { return false }
+    return tapped > group
+  }
+
+  private func orderHeld(_ now: Date) -> Bool {
+    // Taps going on hold it however long they last; the cap only frees a finger that seems stuck.
+    if now < tapQuiet { return true }
+    if let since = heldSince, now.timeIntervalSince(since) >= Self.heldOrderCap { return false }
+    return !fingersDown.isEmpty
+  }
+
+  /// The held order and heights always go in the end: once the taps are quiet (or the cap is reached).
+  private func scheduleHeldFlush() {
+    guard heldFlush == nil else { return }
+    heldFlush = Task { @MainActor in
+      defer { heldFlush = nil }
+      while heldOrder != nil || heightsHeld, !Task.isCancelled {
+        let wait = max(0.05, min(tapQuiet.timeIntervalSinceNow, Self.heldOrderCap))
+        try? await Task.sleep(for: .seconds(wait))
+        if holdGoesOn(.now) { continue }
+        releaseHold()
+      }
+    }
+  }
+
+  private func holdGoesOn(_ now: Date) -> Bool {
+    // A finger seemingly stuck frees the heights after the cap as it frees the order.
+    if now >= tapQuiet, let since = heightsSince, now.timeIntervalSince(since) >= Self.heldOrderCap { return false }
+    return orderHeld(now)
+  }
+
+  /// The taps are over: the bars take their heights and the held order in one move.
+  private func releaseHold() {
+    let order = heldOrder
+    var instant = Transaction(); instant.disablesAnimations = true
+    withTransaction(instant) {
+      heightsHeld = false
+      heightsSince = nil
+      tappedBars = []
+      if let order, Set(order) == Set(listOrder) { applyOrder(order, anchor: lockedRow, promote: true) }
+    }
+    heldOrder = nil
+    heldSince = nil
+  }
+
   private func tickClocks() {
     guard let deadline = listDeadline, listNow >= deadline else { return }
     withAnimation(.easeOut(duration: 0.15)) { publish(listModel.tick(now: listNow)) }
   }
 
   private func pressed(_ key: UUID, _ down: Bool) {
+    if down { fingersDown.insert(key) } else { fingersDown.remove(key) }
+    tapped(key)
     publish(listModel.press(now: listNow, id: key.uuidString, down: down))
   }
 
@@ -1876,6 +1984,7 @@ struct LiveBar: View, @MainActor Equatable {
       && lhs.landing === rhs.landing && lhs.color == rhs.color && lhs.recording == rhs.recording
       && lhs.cameraOn == rhs.cameraOn
       && lhs.media == rhs.media && lhs.hint == rhs.hint && (lhs.hold == nil) == (rhs.hold == nil)
+      && lhs.keepHeight == rhs.keepHeight
   }
 
   let friend: Friend
@@ -1886,6 +1995,8 @@ struct LiveBar: View, @MainActor Equatable {
   let stop: () -> Void
   let media: [Arrival]
   let landing: FriendList.LandingSlot
+  /// Another bar is being tapped: this one keeps its height.
+  let keepHeight: Bool
   private var yo: FriendList.Landing? { landing.value }
   let hint: String?
   let hold: ((Bool, CGPoint?) -> Void)?
@@ -1900,12 +2011,12 @@ struct LiveBar: View, @MainActor Equatable {
     RowButton(
       // A request shows one "Yo Request from X": no count of its Yos ("!!!"), no photo, not even its 📷 (what spam
       // aims at); all of it only after a yes.
-      title, count: friend.request ? 0 : count, color: color, cameraOn: cameraOn, recording: recording,
+      title, count: friend.request ? 0 : count, name: friend.group == nil ? friend.name : nil, color: color, cameraOn: cameraOn, recording: recording,
       outgoing: bar.outgoing.isEmpty ? bar.sendingBatch?.items.last?.started : (bar.countdownStarted ?? .distantFuture),
       outgoingItems: bar.outgoing.isEmpty ? (bar.sendingBatch?.items ?? []) : bar.outgoing,
       undoAvailable: !bar.outgoing.isEmpty, sendSeconds: bar.seconds, stop: stop,
       media: friend.request ? [] : media, mediaMarkCount: bar.modelMarkCount, mediaSign: bar.modelMediaSign, yo: friend.request ? nil : yo, hint: hint, hold: hold, cancelHold: cancelHold, press: press, flightChanged: flightChanged, flyBegan: flyBegan, view: view, faded: friend.gone && !bar.hasNotice,
-      icon: friend.group == nil ? nil : "person.3.fill", senders: bar.modelSenders, flies: true,
+      icon: friend.group == nil ? nil : "person.3.fill", senders: bar.modelSenders, keepHeight: keepHeight, flies: true,
       action: action)
       // Gone: still their name (whose bar it is), faded; a tap says "Not on Yo".
       .accessibilityValue(friend.gone ? "Not on Yo" : "")
@@ -1970,11 +2081,10 @@ struct LiveBar: View, @MainActor Equatable {
   }
 }
 
-/// The slot keeps its identity even while empty. The resting stack survives each new flight: one photo with the number
-/// of photos on it.
+/// The slot keeps its identity even while empty. The resting stack survives each new flight: one photo, no number (a
+/// video with its ▶).
 private struct OutgoingThumbnailSlot: View {
   let item: FriendList.Outgoing?
-  let more: Int
   var video = false
   let destination: CGPoint
   let fallbackOrigin: CGPoint
@@ -2004,17 +2114,6 @@ private struct OutgoingThumbnailSlot: View {
           .id(item.id)
           .transition(.identity)
       }
-      // The number of photos, on top of everything (the flying photo landed over the resting one and hid it).
-      Text("\(more + 1)")
-        .font(.custom("Montserrat-Bold", size: side * 0.36)).minimumScaleFactor(0.5).lineLimit(1)
-        .foregroundStyle(.white)
-        .frame(width: side, height: side)
-        .background(.black.opacity(0.35))
-        .position(top)
-        .opacity(more > 0 && (restingImage != nil || item != nil) ? 1 : 0)
-        .contentTransition(.numericText())
-        .animation(.easeOut(duration: 0.16), value: more)
-        .allowsHitTesting(false)
     }
 
     .onChange(of: item, initial: true) { old, new in
@@ -2063,8 +2162,10 @@ private struct OutgoingThumbnail: View {
 /// go): camera mode records a video with it. A finger on the photos' thumbnail is reported through `view`.
 struct RowButton: View {
   let title: String
-  /// How many the words count: a "!" for each after the first (Bangs).
+  /// How many sends the words count ("Sent 3× Yo!").
   var count = 1
+  /// A friend's name, for what came from them ("3× Yo from Mia"); nil for a group or the add row.
+  var name: String?
   let color: Color
   var cameraOn = false
   var recording = false
@@ -2095,11 +2196,11 @@ struct RowButton: View {
   /// (`SenderBlocks`).
   var icon: String?
   var senders: [RenderedSender] = []
+  /// Another bar is being tapped: this one keeps the rows it had then (`frozen`), showing its newest line in one.
+  var keepHeight = false
+  @State private var frozen: Rows?
   let action: (CGPoint?) -> Void
   /// A hold started a video: letting go stops it, and the bar's tap does not take a photo as well.
-  @Environment(\.dynamicTypeSize) private var measureType
-  @Environment(\.locale) private var measureLocale
-  @Environment(\.legibilityWeight) private var measureWeight
   @State private var stationaryTouch = BarTouchGate()
   @State private var touchOrigin: CGPoint?
   @State private var holdOrigin: CGPoint?
@@ -2110,25 +2211,24 @@ struct RowButton: View {
   @State private var touchedAt = Date.distantPast
   @State private var recordingByAction = false
   @AppStorage(SettingKey.leftHanded) private var leftHanded = false
-  /// A friend's bar: a Yo sent from it flies out of it, up and away.
+  /// A friend's bar (no flights any more; kept for its callers).
   var flies = false
-  /// The Yos on their way out of the bar now, each flying up and fading (FlyingYo).
-  @State private var flights: [UUID] = []
-  @State private var sentSuffixWidth: CGFloat = 0
 
   init(
-    _ title: String, count: Int = 1, color: Color, cameraOn: Bool = false, recording: Bool = false, outgoing: Date? = nil,
+    _ title: String, count: Int = 1, name: String? = nil, color: Color, cameraOn: Bool = false, recording: Bool = false, outgoing: Date? = nil,
     outgoingItems: [FriendList.Outgoing] = [], undoAvailable: Bool = true,
     sendSeconds: Double = FriendList.sendDelay, stop: @escaping () -> Void = {},
     media: [Arrival] = [], mediaMarkCount: Int = 0, mediaSign: String = "", yo: FriendList.Landing? = nil, hint: String? = nil, hold: ((Bool, CGPoint?) -> Void)? = nil, cancelHold: @escaping () -> Void = {}, press: @escaping (Bool) -> Void = { _ in }, flightChanged: @escaping (UUID, Bool) -> Void = { _, _ in }, flyBegan: @escaping (UUID) -> Void = { _ in },
     view: @escaping (ThumbnailTouch) -> Void = { _ in }, faded: Bool = false, icon: String? = nil, senders: [RenderedSender] = [],
-    flies: Bool = false, action: @escaping (CGPoint?) -> Void
+    keepHeight: Bool = false, flies: Bool = false, action: @escaping (CGPoint?) -> Void
   ) {
+    self.keepHeight = keepHeight
     self.flies = flies
     self.icon = icon
     self.senders = senders
     self.title = title
     self.count = count
+    self.name = name
     self.color = color
     self.cameraOn = cameraOn
     self.recording = recording
@@ -2157,15 +2257,6 @@ struct RowButton: View {
       // One button and one label subtree across camera changes: stacks and flights keep their state.
       Button {
         guard stationaryTouch.isStationary, !cameraOn || !holding else { return }
-        if !cameraOn && flies {
-          let id = UUID()
-          flights.append(id)
-          Task {
-            try? await Task.sleep(for: .seconds(2))
-            flights.removeAll { $0 == id }
-            flightChanged(id, false)
-          }
-        }
         action(touchOrigin)
         touchOrigin = nil
       } label: { label }
@@ -2227,9 +2318,13 @@ struct RowButton: View {
       // replace the stack's thumbnail flight or countdown.
       if let outgoing {
         undoRing(since: outgoing)
-          .padding(leftHanded ? .trailing : .leading, BarLine.margin)
+          .padding(leftHanded ? .trailing : .leading, BarRow.margin)
+          // In the sent line (the top one when two), not between both lines.
+          .frame(height: Metrics.rowHeight)
+          .frame(maxHeight: .infinity, alignment: .top)
       }
     }
+    .onChange(of: keepHeight, initial: true) { _, keep in frozen = keep ? natural : nil }
   }
 
   /// A bar of the friend's colour from edge to edge, the name large in the middle (the original's), red while
@@ -2256,97 +2351,145 @@ struct RowButton: View {
       .contentShape(.rect)
   }
 
-  /// The bar's line, sending and receiving alike (BarLine): the words and their "!"s; a Yo that came at the end; room
-  /// at the start for the undo ring while something is on its way out. Laid out twice the same: in the bar the words
-  /// and their "!"s, over it what takes its own touches (the Yo at the end), so each sits exactly where the other
-  /// leaves it room.
+  /// The bar's words, each line in the exact middle of the bar (BarRow): the name, "Sent 2× Yo!", "3× Yo from Mia".
+  /// Sending and receiving at once: two full lines, the sent one on top. A group: its senders' lines under its name.
+  /// Drawn twice: in the bar the words, over it only the photo sign (what takes its own touches), at the same place.
   private func line(touchable: Bool) -> some View {
-    BarLine(
-      start: (outgoing == nil ? BarLine.margin : BarLine.margin + Self.ring + BarLine.gap) + (icon == nil ? 0 : Self.iconRoom),
-      mirrored: leftHanded,
-      centeredSuffixWidth: 0,
-      below: !senders.isEmpty && (yo != nil || !media.isEmpty),  // a group's senders: under the name, "Kai: Yo!!"
-      lineEnd: senders.isEmpty || media.isEmpty ? 0 : Self.sign,  // its photo sign on the name's line
-      // Sent and received at once without room for both: the received one stays, the sent one goes (the stack still
-      // shows what is going out).
-      wordsYield: title == "Sent Yo" && (yo != nil || !media.isEmpty)
-    ) {
-        // Exclamation marks only behind a Yo ("Sent Yo!!"), never behind a name or "+".
-        Bangs(count: title.hasSuffix("Yo") ? count : 0, prefix: title,
-          flightOverlay: title == "Sent Yo" && !touchable ? AnyView(
-            ForEach(flights, id: \.self) { id in
-              FlyingYo { flights.removeAll { $0 == id }; flightChanged(id, false) }
-                .onAppear { flightChanged(id, true) }
-            }
-          ) : nil)
-          // Measured by Bangs' own key (what it shows now, not the count it is still counting up to).
-          .contentTransition(.identity)  // other words come at once, never two drawn over each other
-        // A group: its sign before its name, outside it: the name alone stands in the middle (`iconRoom` keeps the
-        // sign on the bar when a long name moves to the start).
-        .overlay(alignment: .leading) {
-          if let icon {
-            Image(systemName: icon)
-              .font(.system(size: Metrics.rowFont * 0.62, weight: .bold))
-              .frame(width: Self.iconRoom - 8, alignment: .trailing)
-              .offset(x: -Self.iconRoom)  // wholly before the name, 8 apart
-              .accessibilityLabel("Group")
-          }
-        }
-        .modifier(Knock(trigger: yo?.first))
-        .opacity(touchable ? 0 : faded ? 0.55 : 1)
-        .accessibilityHidden(touchable)
-      Color.clear.frame(width: 0, height: 0)
-      ZStack(alignment: leftHanded ? .leading : .trailing) { mark(touchable: touchable) }
-        .frame(maxWidth: .infinity, alignment: leftHanded ? .leading : .trailing)
-        .clipped()
-        // Outside the clip: each further incoming Yo's "!" comes in from the screen's edge.
-        .overlay {
-          if touchable && sweeps {
-            IncomingSweeps(total: yo?.total ?? 0, landing: 3 + (media.isEmpty || mediaSign.isEmpty ? 0 : Self.sign + 4))
-          }
-        }
-        // Replacing media with a plain Yo (or back) must not retain the old label
-        // alongside the new one while their different widths are laid out.
-        .animation(nil, value: media.isEmpty)
-        .animation(nil, value: senders.isEmpty)
-        .layoutValue(key: BarMeasureKey.self, value: media.isEmpty && yo == nil ? measureKey("empty") : nil)
-        // Always a part, so a missing "!" never takes its place
-        .modifier(Knock(trigger: yo?.first))
-        .opacity(touchable ? 1 : 0)
-        .accessibilityHidden(!touchable)
-      // Each measurement/candidate owns a stable slot even when its content is empty.
-      ZStack {
-        if title == "Sent Yo" || title == "Yo" {
-          Bangs(count: count, maximumBangs: 0, prefix: title)
-        }
-      }.hidden().accessibilityHidden(true)
-      ZStack { mark(touchable: false, compact: true) }
-        .hidden().accessibilityHidden(true)
-
+    Group {
+      if touchable { signLayer } else { words }
     }
     .font(.yo(Metrics.rowFont))
+    // Digits of one width (Montserrat's tabular figures): "7×" to "8×" stays put; only "9×" to "10×" moves, by a
+    // whole digit.
+    .monospacedDigit()
     .foregroundStyle(.white)
-    .animation(nil, value: title)  // other words stand in their place at once; only "!"s, numbers and room animate
+    .animation(nil, value: title)  // other words stand in their place at once
+    // A new count ("10×" to "11×") swaps in one frame, no crossfade of the old digits under the new.
+    .contentTransition(.identity)
+    .animation(nil, value: count)
+    .animation(nil, value: receivedCount)
   }
 
-  /// The "!" sweep runs on a one-line mark at the bar's right end (a group's senders and the left hand pulse only).
-  private var sweeps: Bool { senders.isEmpty && !leftHanded }
+  /// Waiting photos or videos: their sign at the bar's end, on the line with the received words.
+  private var hasSign: Bool { !media.isEmpty && !mediaSign.isEmpty }
+  /// A one-to-one bar with Yos or photos come in ("3× Yo from Mia").
+  private var received: Bool { icon == nil && name != nil && (!media.isEmpty || yo != nil) }
+  /// What came in and what the bar says otherwise (sent, canceled, recording): a line each. Kept as it was while
+  /// another bar is tapped (`keepHeight`): then one row shows the received line alone.
+  private var twoRows: Bool { rows.two }
+  /// A group's senders, a line each under its name (as many as when another bar's taps began, `keepHeight`).
+  private var senderRows: Int { rows.senders }
 
-  private func measureKey(_ text: String) -> String {
-    "\(measureType):\(measureLocale.identifier):\(String(describing: measureWeight)):\(leftHanded):" + text
+  struct Rows: Equatable {
+    var two: Bool
+    var senders: Int
+  }
+  private var natural: Rows {
+    Rows(two: received && title != name,
+      senders: icon != nil && !senders.isEmpty && (yo != nil || !media.isEmpty) ? senders.count : 0)
+  }
+  private var rows: Rows { keepHeight ? (frozen ?? natural) : natural }
+  /// Photos still in their countdown (undo possible): "Sending", not yet "Sent".
+  private var sendingMedia: Bool {
+    undoAvailable && outgoingItems.contains { $0.text.hasSuffix("📷") || $0.text.hasSuffix("🎥") }
+  }
+  /// All of the run: photos waiting count as Yos.
+  private var receivedCount: Int { !media.isEmpty ? max(1, mediaMarkCount, media.count) : (yo?.total ?? 1) }
+
+  /// Room kept at the bar's left and right: the outgoing thumbnail on its side (every line), the photo sign on its.
+  private func room(sign: Bool) -> (lead: CGFloat, trail: CGFloat) {
+    let thumb = outgoing == nil ? BarRow.margin : BarRow.margin + Self.ring + 12
+    let end = sign ? BarRow.margin + Self.sign + 8 : BarRow.margin
+    return leftHanded ? (end, thumb) : (thumb, end)
+  }
+
+  private var words: some View {
+    VStack(spacing: 0) {
+      if received && !twoRows {
+        receivedRow
+      } else {
+        let room = room(sign: hasSign && !twoRows)
+        BarRow(lead: room.lead, trail: room.trail, prefix: icon == nil ? 0 : Self.iconRoom) {
+          Text(title == "Sent Yo" ? (sendingMedia ? YoWords.sending(count) : YoWords.sent(count)) : title)
+            .lineLimit(1).truncationMode(.tail)
+            // A group: its sign before its name, outside it: the name alone stands in the middle.
+            .overlay(alignment: .leading) {
+              if let icon {
+                Image(systemName: icon)
+                  .font(.system(size: Metrics.rowFont * 0.62, weight: .bold))
+                  .frame(width: Self.iconRoom - 8, alignment: .trailing)
+                  .offset(x: -Self.iconRoom)  // wholly before the name, 8 apart
+                  .accessibilityLabel("Group")
+              }
+            }
+        }
+        if twoRows {
+          if received { receivedRow.transition(.opacity) }
+          else { Color.clear.frame(height: Metrics.rowHeight) }
+        }
+      }
+      if senderRows > 0 {
+        let room = room(sign: false)
+        let shown = icon != nil && !senders.isEmpty && (yo != nil || !media.isEmpty) ? Array(senders.prefix(senderRows)) : []
+        SenderBlocks(senders: shown, lead: room.lead, trail: room.trail, paused: yo?.paused ?? cameraOn)
+          .modifier(ClockFade(since: yo?.fading, seconds: yoSeconds - Self.solid, paused: yo?.paused ?? false,
+            elapsed: yo?.fadeElapsed ?? 0))
+          .transition(.opacity)
+        if shown.count < senderRows {
+          Color.clear.frame(height: Metrics.rowHeight * CGFloat(senderRows - shown.count))
+        }
+      }
+    }
+    .opacity(faded ? 0.55 : 1)
+    .modifier(Knock(trigger: yo?.first))
+  }
+
+  /// "3× Yo from Mia", or "3× Yo" when that does not fit; in the middle, the photo sign kept clear at the end.
+  private var receivedRow: some View {
+    let room = room(sign: hasSign)
+    let yos = YoWords.yo(receivedCount)
+    return BarRow(lead: room.lead, trail: room.trail) {
+      Text("\(yos) from \(name ?? "")").lineLimit(1).padding(.horizontal, 3)
+      Text(yos).lineLimit(1).padding(.horizontal, 3)
+    }
+    // A plain Yo fades out; photos and videos stay until seen.
+    .modifier(ClockFade(since: media.isEmpty ? yo?.fading : nil, seconds: yoSeconds - Self.solid,
+      paused: media.isEmpty && (yo?.paused ?? false), elapsed: media.isEmpty ? (yo?.fadeElapsed ?? 0) : 0))
+    .accessibilityElement(children: .ignore)
+    .accessibilityLabel(media.isEmpty
+      ? "\(receivedCount == 1 ? "Yo" : "\(receivedCount) Yos") from \(name ?? "")"
+      : (media.count == 1 ? "Yo with a photo or video from \(name ?? "")"
+        : "\(media.count) Yos with photos or videos from \(name ?? "")"))
+  }
+
+  /// Over the bar: the photo sign alone, where the received words leave it room.
+  private var signLayer: some View {
+    VStack(spacing: 0) {
+      if twoRows { Color.clear.frame(height: Metrics.rowHeight).allowsHitTesting(false) }
+      HStack(spacing: 0) {
+        if !leftHanded { Spacer(minLength: 0) }
+        if hasSign { sign }
+        if leftHanded { Spacer(minLength: 0) }
+      }
+      .padding(.horizontal, BarRow.margin)
+      .frame(height: Metrics.rowHeight)
+      Spacer(minLength: 0)
+    }
+    .frame(maxHeight: .infinity, alignment: .top)
+    .animation(nil, value: media.isEmpty)
   }
 
   private static let ring = 56.0
   /// Room before a group's name for its sign (`icon`, at most 28 wide) and the gap of 8 after it.
   private static let iconRoom = 36.0
-  private static let sign = 34.0
+  private static let sign = 40.0  // the sign at the words' own size
 
   /// "📷" or "🎥" while photos and videos wait unseen: a finger on it shows them at once; a short tap lets them run,
   /// holding closes on letting go. Only the sign takes the touch: the rest of the bar sends Yos as ever.
   @ViewBuilder private var sign: some View {
     if !mediaSign.isEmpty {
       Text(mediaSign)
-        .font(.system(size: 24))
+        .font(.system(size: Metrics.rowFont))  // as tall as the words
         .frame(width: Self.sign, height: Self.sign)
         .scaleEffect(viewing ? 0.88 : 1)
         .contentShape(.rect.inset(by: -10))  // easy to hit
@@ -2381,17 +2524,17 @@ struct RowButton: View {
             GeometryReader { geometry in
               OutgoingThumbnailSlot(
                 item: outgoingItems.last(where: { $0.thumbnail != nil }),
-                more: outgoingItems.count - 1,
                 destination: CGPoint(x: Self.ring / 2, y: Self.ring / 2),
                 fallbackOrigin: CGPoint(x: Self.ring / 2, y: Self.ring / 2),
                 coordinateOrigin: geometry.frame(in: .named(touchSpace)).origin,
                 side: Self.ring, began: flyBegan)
             }
             .clipShape(Rectangle())  // square, like the bars: no rounded corners in the list
-            Rectangle().stroke(.white.opacity(0.35), lineWidth: 3)
-            Rectangle()
-              .trim(from: 0, to: 1 - done)
-              .stroke(.white, style: StrokeStyle(lineWidth: 3, lineCap: .butt))
+            // The time left to take it back: a white line under the photo, running out to the left.
+            Rectangle().fill(.white)
+              .frame(width: Self.ring * (1 - done), height: 3)
+              .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottomLeading)
+              .offset(y: 3)  // right under the photo, touching it
           } else {
           Circle().stroke(.white.opacity(0.35), lineWidth: 3)
           Circle()
@@ -2412,64 +2555,8 @@ struct RowButton: View {
     .accessibilityLabel(undoAvailable ? "Undo Send" : "Sending")
     .transition(.scale.combined(with: .opacity))
   }
-
-  /// At the bar's end (its start for the left hand), in the name's own type: "Yo" and a "!" for each Yo after the
-  /// first, then the photo sign while photos or videos wait ("Yo!! 📷"; "📷 Yo!!" for the left hand). The "!"s count
-  /// every Yo of the run, with or without a photo; with only unseen photos left, one for each.
-  @ViewBuilder private func mark(touchable: Bool, compact: Bool = false) -> some View {
-    if !media.isEmpty, !senders.isEmpty {
-      // A group's: the photo sign on the name's line at the bar's end, as on any bar; the senders' lines under it.
-      VStack(spacing: 0) {
-        HStack(spacing: 0) {
-          if leftHanded { sign }
-          Spacer(minLength: 0)
-          if !leftHanded { sign }
-        }
-        .frame(height: Metrics.rowHeight)
-        SenderBlocks(senders: senders, mirrored: leftHanded, paused: yo?.paused ?? cameraOn)
-      }
-      .allowsHitTesting(touchable)  // the copy in the bar under it is only for the layout
-      .transition(.opacity)
-    } else if !media.isEmpty {
-      HStack(spacing: 4) {
-        if leftHanded { sign }
-        Bangs(count: mediaMarkCount, maximumBangs: compact ? 0 : 5, prefix: "Yo", incoming: true,
-              intensityCount: yo?.total ?? mediaMarkCount, sweeps: sweeps && yo != nil)
-        .allowsHitTesting(false)  // a tap there sends a Yo
-        .accessibilityElement(children: .ignore)
-        .accessibilityLabel(media.count == 1 ? "Yo with a photo or video" : "\(media.count) Yos with photos or videos")
-        if !leftHanded { sign }
-      }
-      .lineLimit(1)
-      .allowsHitTesting(touchable)  // the copy in the bar under it is only for the layout
-      .transition(.scale.combined(with: .opacity))
-    } else if let yo {
-      // "Yo" and a "!" for each Yo after the first: a "!" goes quickly when its Yo is over, the last Yo fades slowly.
-      Group {
-        if !senders.isEmpty {
-          VStack(spacing: 0) {
-            Color.clear.frame(height: Metrics.rowHeight)  // the name's line, as with a photo sign
-            SenderBlocks(senders: senders, mirrored: leftHanded, paused: yo.paused)
-          }
-        } else {
-          Bangs(count: yo.count, maximumBangs: compact ? 0 : 5, prefix: "Yo", incoming: true, intensityCount: yo.total,
-                sweeps: sweeps)
-          .lineLimit(1)
-        }
-      }
-      .modifier(ClockFade(since: yo.fading, seconds: yoSeconds - Self.solid, paused: yo.paused, elapsed: yo.fadeElapsed))
-      .accessibilityElement(children: .ignore)
-      .accessibilityLabel(
-        senders.isEmpty
-          ? (yo.count == 1 ? "Yo" : "\(yo.count) Yos")
-          : senders.map { "\($0.count == 1 ? "Yo" : "\($0.count) Yos") from \($0.name)" }.joined(separator: ", "))
-      // It comes in from the bar's outer edge, sliding to its place; it goes by fading.
-      .transition(.asymmetric(
-        insertion: .move(edge: leftHanded ? .leading : .trailing).combined(with: .opacity),
-        removal: .opacity))
-    }
-  }
 }
+
 
 /// The camera's zoom: one small circle with the factor ("1×"); each tap goes to the next of its choices (0.5, 1, 2, 3,
 /// then round again), ramped by the camera. Not there with one choice only (the front camera).
@@ -2524,9 +2611,9 @@ struct CameraZoom: View {
   }
 }
 
-/// A group's Yos, by whom: a line each, "Kai: Yo!!" in the middle as a bar's name, as tall as a bar, in the order they
-/// came, all under the bar's name (`BarLine.below`), which stays as on any bar. One sender, one line: the bar grows by
-/// a bar's height with each.
+/// A group's Yos, by whom: a line each, "Kai: 2× Yo" in the middle as a bar's name, as tall as a bar, in the order they
+/// came, all under the bar's name, which stays as on any bar. One sender, one line: the bar grows by a bar's height
+/// with each.
 struct RenderedSender {
   let user: String
   let name: String
@@ -2537,7 +2624,8 @@ struct RenderedSender {
 
 struct SenderBlocks: View {
   let senders: [RenderedSender]
-  var mirrored = false
+  var lead = BarRow.margin
+  var trail = BarRow.margin
   var paused = false
 
   var body: some View {
@@ -2545,9 +2633,13 @@ struct SenderBlocks: View {
     // `yoSeconds`. Its place stays (empty) until the whole bar's Yos are over and it shrinks.
     VStack(spacing: 0) {
       ForEach(senders, id: \.user) { sender in
-        Group {
-          Bangs(count: sender.count, prefix: "\(sender.name): Yo", incoming: true)
-          .frame(maxWidth: .infinity, minHeight: Metrics.rowHeight)
+        BarRow(lead: lead, trail: trail) {
+          // Only the name is ever cut, never its Yos.
+          HStack(spacing: 0) {
+            Text(sender.name).lineLimit(1).truncationMode(.tail)
+            Text(": " + YoWords.yo(sender.count)).lineLimit(1).fixedSize()
+          }
+          .padding(.horizontal, 3)
         }
         .modifier(ClockFade(since: sender.at.addingTimeInterval(FriendList.yoSolidSeconds),
           seconds: FriendList.yoSeconds - FriendList.yoSolidSeconds, paused: paused,
@@ -2576,233 +2668,11 @@ private struct ClockFade: ViewModifier {
   }
 }
 
-/// How many, the way Yo says it: one "!" for each, at most five; beyond, the "!"s stay and how many more comes after
-/// them ("Yo!!!!! +6"), turning as a wheel, its digits all as wide (nothing shifts). Short of room the "!"s give way
-/// first, never the count. Each arrival's pulse belongs to the glyphs, not a layout copy.
-struct Bangs: View {
-  @Environment(\.yoFlood) private var busy
-  @Environment(\.dynamicTypeSize) private var measureType
-  @Environment(\.locale) private var measureLocale
-  @Environment(\.legibilityWeight) private var measureWeight
-  @Environment(\.accessibilityReduceMotion) private var reduceMotion
-  @State private var pulses = 0
-  let count: Int
-  var intensityCount: Int?
-  var flightOverlay: AnyView?
-  var maximumBangs: Int
-  var prefix: String
-  @State private var displayed: Int
-  @State private var nextTurn = ContinuousClock.now
-  /// The Yos not shown yet, one "!" each, strictly one after the other (`gap` apart).
-  @State private var arrivals: [ContinuousClock.Instant] = []
-  @State private var lastShow = ContinuousClock.now
-  static let gap = Duration.milliseconds(100)
-  /// More waiting than this (a flood): no more one by one, the count shows at once.
-  private static let queueLimit = 10
-
-  var incoming = false
-  /// Each new "!" is swept in from the screen's edge first (IncomingSweeps): it shows here when that lands.
-  var sweeps = false
-
-  init(count: Int, maximumBangs: Int = 5, prefix: String = "", incoming: Bool = false, intensityCount: Int? = nil,
-       sweeps: Bool = false, flightOverlay: AnyView? = nil) {
-    self.sweeps = sweeps
-    self.flightOverlay = flightOverlay
-    self.incoming = incoming
-    self.intensityCount = intensityCount
-    self.prefix = prefix
-    self.maximumBangs = maximumBangs
-    self.count = count
-    _displayed = State(initialValue: count)
-  }
-
-  var body: some View {
-    let shown = max(0, busy ? count : displayed)
-    let more = Self.more(shown)
-    let bangs = min(shown, maximumBangs, ShareBridge.mostBangs)
-    let motionReduced = reduceMotion
-    BangsFit {
-      // Drop marks before compromising the full-size Yo. Candidates go by rank (0 = most marks): the one showing stays
-      // the same view when a mark comes, so the words are never drawn twice (no crossfade) and a flying "Yo" in it
-      // stays on its glyph.
-      ForEach(0...bangs, id: \.self) { rank in
-        run(bangs: bangs - rank, more: more).fixedSize(horizontal: true, vertical: false).transition(.identity)
-      }
-      run(bangs: 0, more: more).fixedSize(horizontal: true, vertical: false)
-    }
-    .lineLimit(1)
-    // One pulse for all candidates, on the glyphs themselves: only ever brighter (and a touch larger).
-    .keyframeAnimator(initialValue: 0.0, trigger: pulses) { text, pulse in
-      text
-        .scaleEffect(motionReduced || !isYo ? 1 : 1 + max(0, pulse) * 0.025)
-    } keyframes: { _ in
-      KeyframeTrack {
-        LinearKeyframe(1, duration: 0.08)
-        LinearKeyframe(0, duration: 0.17)
-      }
-    }
-    .layoutValue(key: BarMeasureKey.self, value:
-      "bangs:\(prefix):\(maximumBangs):\(busy ? count : displayed):\(measureType):\(measureLocale.identifier):\(String(describing: measureWeight))")
-    .animation(busy ? nil : .easeOut(duration: 0.16), value: displayed)
-    .onChange(of: intensityCount ?? count) { old, new in
-      if new > old && isYo { pulses += 1 }
-    }
-    .onChange(of: isYo) { _, active in
-      if active && count > 0 { pulses += 1 }
-    }
-    .onAppear { if isYo && count > 0 { pulses += 1 } }
-    .onChange(of: count) { _, new in
-      let waiting = new - displayed
-      if waiting > Self.queueLimit {
-        arrivals.removeAll()
-        displayed = new
-        lastShow = .now
-      } else if waiting > arrivals.count {
-        arrivals.append(contentsOf: repeatElement(ContinuousClock.now, count: waiting - arrivals.count))
-      } else if waiting < arrivals.count {
-        arrivals.removeAll()
-      }
-    }
-    // Up: one "!" for each Yo, `gap` apart; one swept in from the edge (IncomingSweeps) shows once it lands there.
-    .task(id: arrivals.isEmpty) {
-      while let arrival = arrivals.first {
-        let next = displayed + 1
-        let swept = sweeps && !busy && !motionReduced && next - 1 <= ShareBridge.mostBangs  // no sweep once "+N" counts
-        let at = max(lastShow.advanced(by: Self.gap), swept ? arrival.advanced(by: IncomingSweeps.flight) : arrival)
-        do { try await ContinuousClock().sleep(until: at) } catch { return }
-        guard !arrivals.isEmpty else { return }
-        arrivals.removeFirst()
-        displayed = next
-        lastShow = at
-      }
-    }
-    // Down: the "!"s go as before.
-    .task(id: count) {
-      guard count < displayed, arrivals.isEmpty else { return }
-      do { try await ContinuousClock().sleep(until: nextTurn) } catch { return }
-      guard !Task.isCancelled, count < displayed else { return }
-      displayed = count
-      nextTurn = .now.advanced(by: .milliseconds(200))
-    }
-  }
-
-  /// How many more than five "!"s: the " +n" after them. Only behind a Yo.
-  static func more(_ shown: Int) -> Int { max(0, shown - ShareBridge.mostBangs) }
-
-  private var isYo: Bool { incoming || prefix == "Yo" || prefix == "Sent Yo" }
-
-  private func run(bangs: Int, more: Int) -> some View {
-    HStack(spacing: 0) {
-      if prefix == "Sent Yo" {
-        // "Sent Yo" for the first; from the second on a dimmed arrow takes the place of "Sent" ("↑ Yo!!").
-        if count > 0 {
-          Text("\(Text(Image(systemName: "arrow.up")).font(.system(size: Metrics.rowFont, weight: .heavy))) ")
-            .foregroundStyle(.white.opacity(0.7))
-        } else {
-          Text("Sent ")
-        }
-        Text("Yo").overlay { flightOverlay }
-        Text(String(repeating: "!", count: bangs))
-      } else {
-        Text(prefix + String(repeating: "!", count: bangs))
-      }
-      if more > 0 {
-        Text(" +\(more)")
-          .monospacedDigit()
-          .fixedSize()
-          .contentTransition(.numericText(value: Double(more)))
-      }
-    }
-      .lineLimit(1)
-      .contentTransition(.identity)  // a "!" more comes at once, never two texts over each other
-      // Reserve the pulse's growth so adjacent text and the thumbnail stay clear.
-      .padding(.horizontal, isYo ? 3 : 0)
-      .padding(.vertical, isYo ? 1 : 0)
-  }
-
-}
-
-/// Each incoming Yo after the first (which comes in with the whole mark): a small "Yo" sweeps in from the screen's edge
-/// into the label's "Yo" and merges with it; then Bangs shows one "!" more (up to five; beyond, its "+n" counts up).
-/// Several fly one after the other, `Bangs.gap` apart, as Bangs shows them; never
-/// a queue longer than Bangs keeps. Not with Reduce Motion (the label pulses only).
-struct IncomingSweeps: View {
-  static let flightSeconds = 0.26
-  static let flight = Duration.seconds(flightSeconds)
-  /// All Yos of the run.
-  let total: Int
-  /// From the overlay's trailing edge to where the last "!" ends.
-  let landing: CGFloat
-  @Environment(\.accessibilityReduceMotion) private var reduceMotion
-  @Environment(\.yoFlood) private var busy
-  /// Each flight and the "!"s the label shows while it flies (the "Yo" lands just before them).
-  @State private var flying: [Flight] = []
-  /// When the last sweep set off: the next one `Bangs.gap` after it, as Bangs shows them.
-  @State private var lastLaunch = ContinuousClock.now
-
-  struct Flight: Hashable {
-    let id = UUID()
-    let bangs: Int
-    let more: Int
-  }
-
-  var body: some View {
-    ZStack(alignment: .trailing) {
-      ForEach(flying, id: \.self) { flight in
-        SweepingYo(bangs: flight.bangs, more: flight.more) { flying.removeAll { $0 == flight } }
-      }
-    }
-    .padding(.trailing, landing)
-    .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .trailing)
-    .allowsHitTesting(false)
-    .accessibilityHidden(true)
-    .onChange(of: total) { old, new in
-      // A flood (more than Bangs queues) shows at once, without sweeps.
-      guard old > 0, new > old, new - old <= 10, !reduceMotion, !busy else { return }
-      // One for each Yo, one after the other.
-      // Only while "!" are added (up to five); once the "+N" counts, no more sweeps.
-      for k in (old + 1)...new where k - 1 <= ShareBridge.mostBangs {
-        let at = max(lastLaunch.advanced(by: Bangs.gap), .now)
-        if at > .now.advanced(by: Bangs.gap * 10) { break }
-        lastLaunch = at
-        let flight = Flight(bangs: min(ShareBridge.mostBangs, max(0, k - 1)), more: Bangs.more(max(0, k - 1)))
-        Task {
-          try? await ContinuousClock().sleep(until: at)
-          flying.append(flight)
-        }
-      }
-    }
-  }
-}
-
-/// A small "Yo" from beyond the screen's edge into the label's "Yo" (as many "!"s before the end as it shows), growing
-/// to its size as it lands, then gone into it.
-private struct SweepingYo: View {
-  let bangs: Int
-  var more = 0
-  let done: () -> Void
-  @State private var landed = false
-  @State private var gone = false
-
-  var body: some View {
-    // A "!" from beyond the screen's edge onto the end of the label, where the new "!" appears (owner: "!" again, not
-    // a "Yo").
-    HStack(spacing: 0) {
-      Text("!")
-        .offset(x: landed ? 0 : BarLine.endPadding + 40)
-        .opacity(gone ? 0 : 1)
-      Text(more > 0 ? " +\(more)" : "").monospacedDigit().hidden()
-    }
-    .lineLimit(1)
-    .fixedSize()
-    .onAppear {
-      withAnimation(.easeOut(duration: IncomingSweeps.flightSeconds)) {
-        landed = true
-      } completion: {
-        withAnimation(.easeOut(duration: 0.12)) { gone = true } completion: { done() }
-      }
-    }
-  }
+/// How Yos are counted on a bar: "Yo", "3× Yo"; sent: "Sent Yo!", "Sent 3× Yo!".
+enum YoWords {
+  static func yo(_ count: Int) -> String { count <= 1 ? "Yo" : "\(count)× Yo" }
+  static func sent(_ count: Int) -> String { count <= 1 ? "Sent Yo!" : "Sent \(count)× Yo!" }
+  static func sending(_ count: Int) -> String { count <= 1 ? "Sending Yo!" : "Sending \(count)× Yo!" }
 }
 
 /// The bar flashes once for each incoming Yo.
@@ -2826,155 +2696,45 @@ private struct RowFlash: View {
   }
 }
 
-/// Choose from intrinsic candidates in this pass, without retaining ViewThatFits' last selection.
-private struct BangsFit: Layout {
-  private func selection(_ proposal: ProposedViewSize, _ subviews: Subviews) -> Int? {
-    subviews.indices.first { subviews[$0].sizeThatFits(.unspecified).width <= (proposal.width ?? .infinity) }
-      ?? subviews.indices.last
-  }
+/// One line of a bar, a bar tall: the first of its words that fits stands in the exact middle of the bar, clear of
+/// what the bar keeps at its sides (`lead` at the left, `trail` at the right: the outgoing thumbnail, the photo sign)
+/// and of `prefix` before it (a group's sign). Only when even the last does not fit in the middle does it move aside,
+/// and only when it does not fit at all is it cut with "…". Never smaller, nothing overlaps.
+struct BarRow: Layout {
+  static let margin = 20.0
+  var lead = margin
+  var trail = margin
+  var prefix = 0.0
 
   func sizeThatFits(proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) -> CGSize {
-    guard let index = selection(proposal, subviews) else { return .zero }
-    return subviews[index].sizeThatFits(proposal)
+    CGSize(width: proposal.width ?? 393, height: Metrics.rowHeight)
   }
 
   func placeSubviews(in bounds: CGRect, proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) {
-    let selected = selection(ProposedViewSize(width: bounds.width, height: bounds.height), subviews)
+    guard !subviews.isEmpty else { return }
+    let widths = subviews.map { $0.sizeThatFits(.unspecified).width }
+    let side = max(lead, trail)
+    var chosen = subviews.count - 1
+    var x: CGFloat
+    var width: CGFloat
+    if let fit = widths.indices.first(where: { index in
+      let start = bounds.midX - widths[index] / 2
+      return start - prefix >= bounds.minX + side - 0.5 && start + widths[index] <= bounds.maxX - side + 0.5
+    }) {
+      chosen = fit
+      width = widths[fit]
+      x = bounds.midX - width / 2
+    } else {
+      let low = bounds.minX + lead + prefix
+      let high = bounds.maxX - trail
+      width = min(widths[chosen], max(0, high - low))
+      x = min(max(bounds.midX - width / 2, low), high - width)
+    }
     for index in subviews.indices {
-      // Unselected fixed-size candidates stay outside the clipped suffix bounds.
-      subviews[index].place(at: CGPoint(x: index == selected ? bounds.minX : bounds.minX - 100_000,
-        y: bounds.midY), anchor: .leading,
-        proposal: ProposedViewSize(width: bounds.width, height: bounds.height))
-    }
-  }
-}
-
-/// A bar's line, for sending and receiving alike: the words in the middle, their "!"s right after them, a Yo that came
-/// at the bar's end. The words stay in the middle until they would run into the end (or the edge): then they move left
-/// as far as needed, never past `start` (the margin, or after the undo ring); a name too long even then gets smaller
-/// (to half), then is cut with "…". Nothing overlaps.
-private struct BarMeasureKey: LayoutValueKey {
-  static let defaultValue: String? = nil
-}
-
-struct BarLine: Layout, Equatable {
-  static let margin = 20.0
-  static let endPadding = 30.0
-  static let gap = 16.0
-  /// How far from the bar's start (left; right when mirrored) the words may go at most: room for the ring and sign.
-  var start = margin
-  /// For the left hand: the end part ("Yo!!") at the left, the room kept at the right.
-  var mirrored = false
-  // Interpolate the measured suffix width so adding a bang eases the entire phrase to its new centre.
-  var centeredSuffixWidth: CGFloat = 0
-  var animatableData: CGFloat {
-    get { centeredSuffixWidth }
-    set { centeredSuffixWidth = newValue }
-  }
-  /// The end part from the bar's top, as wide as the bar (a group's senders, `SenderBlocks`): its first line is the
-  /// words' (a photo sign at its end), the senders' lines under it; the words stand in the middle of the bar's first
-  /// `rowHeight`, as on any bar; the bar grows with the end part.
-  var below = false
-  /// With `below`: room kept at the end of the first line for what stands there (a group's photo sign), so the words
-  /// and their "!"s move aside from it as from any end part.
-  var lineEnd = 0.0
-  /// The words give way to the end part when both do not fit (a sent status before a received one).
-  var wordsYield = false
-
-  struct Cache {
-    var sizes: [CGSize] = []
-    var keys: [String?] = []
-  }
-
-  func makeCache(subviews: Subviews) -> Cache {
-    Perf.timed("media.sign.cache") {
-      var cache = Cache()
-      updateCache(&cache, subviews: subviews)
-      return cache
-    }
-  }
-
-  func updateCache(_ cache: inout Cache, subviews: Subviews) {
-    // SwiftUI invalidates this when the subviews change (including text, counts and environment).
-    for (index, view) in subviews.enumerated() {
-      let key = view[BarMeasureKey.self]
-      if index >= cache.sizes.count {
-        cache.sizes.append(view.sizeThatFits(.unspecified))
-        cache.keys.append(key)
-      } else if index != 0 || key == nil || cache.keys[index] != key {
-        cache.sizes[index] = view.sizeThatFits(.unspecified)
-        cache.keys[index] = key
-      }
-    }
-    if cache.sizes.count > subviews.count {
-      cache.sizes.removeLast(cache.sizes.count - subviews.count)
-      cache.keys.removeLast(cache.keys.count - subviews.count)
-    }
-  }
-
-  func sizeThatFits(proposal: ProposedViewSize, subviews: Subviews, cache: inout Cache) -> CGSize {
-    return Perf.timed("media.sign.measure") {
-      if below, cache.sizes.count > 2 {
-        return CGSize(width: proposal.width ?? 393, height: max(Metrics.rowHeight, cache.sizes[2].height))
-      }
-      return CGSize(width: proposal.width ?? 393, height: cache.sizes.reduce(0) { max($0, $1.height) })
-    }
-  }
-
-  func placeSubviews(in bounds: CGRect, proposal: ProposedViewSize, subviews: Subviews, cache: inout Cache) {
-    Perf.timed("media.sign.place") {
-      // An empty part (no "!"s, no Yo at the end) is no subview at all: take what is there.
-      guard let words = subviews.first else { return }
-      let after = subviews.count > 1 ? subviews[1] : nil
-      let last: LayoutSubview? = subviews.count > 2 ? subviews[2] : nil
-      let afterSize = cache.sizes.count > 1 ? cache.sizes[1] : .zero
-      // Below: the end part under the line, at the bar's end; the line then as on a bar with nothing at its end.
-      let end: LayoutSubview? = below ? nil : last
-      if below, let last {
-        // As wide as the bar less its margins, from its top.
-        last.place(
-          at: CGPoint(x: bounds.minX + Self.endPadding, y: bounds.minY), anchor: .topLeading,
-          proposal: ProposedViewSize(width: max(0, bounds.width - 2 * Self.endPadding), height: nil))
-      }
-      let endSize: CGSize = !below && cache.sizes.count > 2 ? cache.sizes[2] : .zero
-      // Sent and received both in full sizes with their gap, or else the sent one hides and the received one stays.
-      if wordsYield, !below,
-         (cache.sizes.count > 3 ? cache.sizes[3].width : 0) + Self.gap + (cache.sizes.count > 4 ? cache.sizes[4].width : 0)
-           > bounds.width - start - Self.endPadding {
-        let away = CGPoint(x: bounds.minX - 100_000, y: bounds.midY)
-        words.place(at: away, anchor: .leading, proposal: .unspecified)
-        after?.place(at: away, anchor: .leading, proposal: .unspecified)
-        let endWidth = min(endSize.width, max(0, bounds.width - start - Self.endPadding))
-        last?.place(at: CGPoint(x: mirrored ? bounds.minX + Self.endPadding : bounds.maxX - Self.endPadding - endWidth,
-          y: bounds.midY), anchor: .leading, proposal: ProposedViewSize(width: endWidth, height: nil))
-        return
-      }
-      // The words between `low` and `high`, the end part outside them.
-      // Below, the end part's width on the first line is `lineEnd` (its sign), not its own.
-      let total = max(0, bounds.width - start - Self.endPadding - (endSize.width > 0 ? Self.gap : 0))
-      let minimumAfter = cache.sizes.count > 3 ? cache.sizes[3].width : 0
-      let minimumEnd = cache.sizes.count > 4 ? cache.sizes[4].width : 0
-      // Spend spare room on marks only after reserving the full-size words and Yo.
-      let endWidth = below ? lineEnd : min(endSize.width,
-        max(minimumEnd, total - max(cache.sizes[0].width, minimumAfter)))
-      let endX = mirrored ? bounds.minX + Self.endPadding : bounds.maxX - Self.endPadding - endWidth
-      let low = mirrored
-        ? (endWidth > 0 ? endX + endWidth + Self.gap : bounds.minX + Self.margin) : bounds.minX + start
-      let high = mirrored ? bounds.maxX - start : (endWidth > 0 ? endX - Self.gap : bounds.maxX - Self.margin)
-      let available = max(0, high - low)
-      let afterWidth = min(afterSize.width, max(0, available - max(cache.sizes[0].width, minimumAfter)))
-      let room = max(0, available - afterWidth)
-      let wordsWidth = max(minimumAfter, min(cache.sizes[0].width, room))
-      var x = bounds.midX - (wordsWidth + min(centeredSuffixWidth, afterWidth)) / 2
-      x -= max(0, x + wordsWidth + afterWidth - high)
-      x = max(low, x)
-      // The line in the middle of the bar's first `rowHeight`, where it is on every bar (the end part under it, if so).
-      let lineY = below ? bounds.minY + Metrics.rowHeight / 2 : bounds.midY
-      words.place(
-        at: CGPoint(x: x, y: lineY), anchor: .leading, proposal: ProposedViewSize(width: wordsWidth, height: nil))
-      after?.place(at: CGPoint(x: x + wordsWidth, y: lineY), anchor: .leading, proposal: ProposedViewSize(width: afterWidth, height: nil))
-      end?.place(at: CGPoint(x: endX, y: lineY), anchor: .leading,
-        proposal: ProposedViewSize(width: endWidth, height: nil))
+      // The others stay outside the bar.
+      subviews[index].place(
+        at: CGPoint(x: index == chosen ? x : bounds.minX - 100_000, y: bounds.midY), anchor: .leading,
+        proposal: ProposedViewSize(width: index == chosen ? width : widths[index], height: nil))
     }
   }
 }
@@ -3668,25 +3428,6 @@ struct PlayerLayer: UIViewRepresentable {
   FriendList()
     .environment(Inbox())
     .environment(Friends())
-}
-
-/// A Yo sent from a bar: "Yo" in the bar's type rises out of it and fades, as if thrown up and away.
-struct FlyingYo: View {
-  let done: () -> Void
-  @State private var gone = false
-  @Environment(\.accessibilityReduceMotion) private var reduceMotion
-
-  var body: some View {
-    Text("Yo")
-      .foregroundStyle(.white)
-      .offset(y: gone && !reduceMotion ? -90 : 0)
-      .scaleEffect(gone ? 1.15 : 1)
-      .opacity(gone ? 0 : 1)
-      .onAppear {
-        withAnimation(.easeOut(duration: 0.55)) { gone = true } completion: { done() }
-      }
-      .accessibilityHidden(true)
-  }
 }
 
 /// Bounds come from the actual row subtree: scrolling, expansion and reordering have one layout.
