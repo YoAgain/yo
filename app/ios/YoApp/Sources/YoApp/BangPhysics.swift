@@ -401,8 +401,13 @@ struct BangPhysicsLayer: View {
       }
       motion.deviceMotionUpdateInterval = running ? 1.0 / 30 : 1.0 / 5
       guard !motion.isDeviceMotionActive else { return }
-      let box = tiltBox
-      motion.startDeviceMotionUpdates(to: motionQueue) { data, _ in
+      // The handler is built outside the main actor: CoreMotion calls it on its own queue, and a main-actor closure
+      // there traps (Swift checks the executor), which crashed the app as soon as the physics started.
+      motion.startDeviceMotionUpdates(to: motionQueue, withHandler: Self.motionHandler(tiltBox))
+    }
+
+    nonisolated private static func motionHandler(_ box: BangTilt) -> CMDeviceMotionHandler {
+      { data, _ in
         guard let g = data?.gravity, g.x.isFinite, g.y.isFinite else { return }
         let raw = SIMD2(g.x, -g.y)
         let wakeNow = box.state.withLock { s -> Bool in
