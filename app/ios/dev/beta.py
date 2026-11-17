@@ -16,12 +16,25 @@ BUNDLE = sys.argv[2] if len(sys.argv) > 2 else "app.justyo.ios"
 GROUP = "Public"
 WAIT_S, EVERY_S = 30 * 60, 30
 
-app = asc.call("GET", f"/v1/apps?filter[bundleId]={BUNDLE}")["data"][0]["id"]
-group = next(g["id"] for g in asc.call("GET", f"/v1/apps/{app}/betaGroups")["data"] if g["attributes"]["name"] == GROUP)
+
+def get(path, tries=6):
+    """GET, again after a pause when App Store Connect answers 5xx (UNEXPECTED_ERROR comes and goes)."""
+    for attempt in range(tries):
+        try:
+            return asc.call("GET", path)
+        except SystemExit as e:  # asc.die
+            if ": HTTP 5" not in str(e) or attempt == tries - 1:
+                raise
+            print(f"{str(e).splitlines()[0]}; again in {EVERY_S} s", flush=True)
+            time.sleep(EVERY_S)
+
+
+app = get(f"/v1/apps?filter[bundleId]={BUNDLE}")["data"][0]["id"]
+group = next(g["id"] for g in get(f"/v1/apps/{app}/betaGroups")["data"] if g["attributes"]["name"] == GROUP)
 
 deadline = time.time() + WAIT_S
 while True:
-    builds = asc.call("GET", f"/v1/builds?filter[app]={app}&sort=-uploadedDate&limit=1&include=buildBetaDetail")
+    builds = get(f"/v1/builds?filter[app]={app}&sort=-uploadedDate&limit=1&include=buildBetaDetail")
     build = builds["data"][0]
     state = build["attributes"]["processingState"]
     external = next((i["attributes"]["externalBuildState"] for i in builds.get("included", [])), None)

@@ -4,6 +4,21 @@
 import PackageDescription
 import Foundation
 
+let env = ProcessInfo.processInfo.environment
+
+// App Intents metadata (Metadata.appintents, for Shortcuts, Siri and the Action button): ship.sh makes it from each
+// target's .swiftconstvalues, which swift-build (Swift 6.4, Linux) writes by itself. The TestFlight runner's
+// SwiftPM (Xcode's Swift) builds natively and writes none, so there (YO_CONST_VALUES=1) swiftc is asked for them,
+// at the place ship.sh reads them from, with swift-build's list of protocols.
+func constValues(_ target: String) -> [SwiftSetting] {
+  guard env["YO_CONST_VALUES"] == "1" else { return [] }
+  let objects = "\(Context.packageDirectory)/.build/out/Intermediates.noindex/YoApp.build/Release-iphoneos/\(target)-t.build/Objects-normal/arm64"
+  return [.unsafeFlags([
+    "-emit-const-values-path", "\(objects)/\(target)-primary.swiftconstvalues",
+    "-const-gather-protocols-list", "\(Context.packageDirectory)/../dev/const-protocols.json",
+  ])]
+}
+
 let package = Package(
   name: "YoApp",
   platforms: [.iOS(.v26)],
@@ -18,10 +33,10 @@ let package = Package(
     .library(name: "YoControls", targets: ["YoControls"]),
   ],
   targets: [
-    .target(name: "YoApp", dependencies: ["YoCore"], swiftSettings: ProcessInfo.processInfo.environment["YO_DEV_BUILD"] == "1" ? [.define("YO_DEV")] : []),
-    .target(name: "YoShare", dependencies: ["YoCore"]),
-    .target(name: "YoNotify", dependencies: ["YoCore"]),
-    .target(name: "YoControls", dependencies: ["YoCore"]),
+    .target(name: "YoApp", dependencies: ["YoCore"], swiftSettings: (env["YO_DEV_BUILD"] == "1" ? [.define("YO_DEV")] : []) + constValues("YoApp")),
+    .target(name: "YoShare", dependencies: ["YoCore"], swiftSettings: constValues("YoShare")),
+    .target(name: "YoNotify", dependencies: ["YoCore"], swiftSettings: constValues("YoNotify")),
+    .target(name: "YoControls", dependencies: ["YoCore"], swiftSettings: constValues("YoControls")),
     // The Rust core (core/bindings) through UniFFI: `import YoCore`. ../dev/core.sh makes both into build/core
     // (ignored); run it before the first build and after a change in core/ (dev/push.sh does).
     .target(name: "YoCore", dependencies: ["yoFFI"], path: "build/core/swift"),

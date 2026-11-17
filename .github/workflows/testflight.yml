@@ -139,8 +139,13 @@ jobs:
         env:
           ASC_KEY_ID: ${{ secrets.ASC_KEY_ID }}
           ASC_ISSUER_ID: ${{ secrets.ASC_ISSUER_ID }}
+          # App Intents metadata (ship.sh step 5): Package.swift asks this SwiftPM for the .swiftconstvalues, which
+          # only swift-build writes by itself; App Shortcuts are trained with Xcode's SiriSSUKitModel resources.
+          YO_CONST_VALUES: 1
         run: |
           export ASC_KEY_PATH=$RUNNER_TEMP/asc/AuthKey.p8 ASC_IDENTITY_DIR=$RUNNER_TEMP/asc/distribution
+          export SSU_RESOURCES=$(dirname "$DEVELOPER_DIR")/Frameworks/SiriSSUKitModel.framework/Versions/A/Resources
+          ls -d "$SSU_RESOURCES"
           # Xcode in place of the Linux SDK and its stand-ins.
           # dev/actool.sh: Xcode's actool, keeping Info.plist's alternate icons through the merge of its partial plist.
           export REAL_ACTOOL=$(xcrun -f actool) ACTOOL=$PWD/../dev/actool.sh DARWIN_SDK=$(dirname "$DEVELOPER_DIR")
