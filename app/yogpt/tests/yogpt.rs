@@ -141,6 +141,49 @@ fn two_accounts_survive_a_hub_connection_refusal() {
     let _ = std::fs::remove_dir_all(other_state);
 }
 
+/// Runs the same bot process through five hub restarts, with traffic before and during each outage.
+#[test]
+#[ignore = "ten-minute hub restart soak"]
+fn yogpt_keeps_answering_through_repeated_hub_restarts() {
+    let state = state_dir();
+    std::fs::create_dir_all(&state).unwrap();
+    let mut config = yo_hub::config::Config::for_tests();
+    config.db_path = state.join("hub.sqlite").to_str().unwrap().to_owned();
+    let mut hub = TestHub::start_with(config.clone(), "127.0.0.1:0");
+    let mut alice = someone(&hub);
+    let mut bot = Bot::start(&[(&hub, &state.join("bot"))]);
+    let yogpt = round_trip(&mut alice).remove(0);
+    let mut rounds = 1;
+    for cycle in 1..=5 {
+        let deadline = Instant::now() + Duration::from_secs(120);
+        while Instant::now() < deadline {
+            assert!(round_trip(&mut alice).iter().all(|user| *user == yogpt));
+            rounds += 1;
+        }
+        assert!(bot.0.try_wait().unwrap().is_none());
+        let addr = hub.addr.to_string();
+        hub.stop();
+        alice.send_yo(&yogpt).unwrap();
+        assert!(alice.waiting() > 0, "outage {cycle}: send was not queued");
+        std::thread::sleep(Duration::from_secs(5));
+        hub = TestHub::start_with(config.clone(), &addr);
+
+        let answers = yos_until_quiet(&mut alice, Duration::from_secs(20));
+        assert!((1..=5).contains(&answers.len()), "outage {cycle}: got {} replies", answers.len());
+        assert!(answers.iter().all(|user| *user == yogpt));
+        assert_eq!(alice.waiting(), 0);
+        assert_eq!(alice.dropped(), 0);
+        assert!(bot.0.try_wait().unwrap().is_none());
+        rounds += 1;
+        println!("hub restart {cycle}: queued Yo answered by the same bot");
+    }
+    assert!(hub.hub.audit().unwrap().is_empty());
+    println!("{rounds} YoGPT round trips across five hub restarts");
+    drop(bot);
+    hub.stop();
+    std::fs::remove_dir_all(state).unwrap();
+}
+
 #[test]
 fn two_accounts_in_one_process_stop_one_by_one() {
     let (a, b) = (TestHub::start(), TestHub::start());

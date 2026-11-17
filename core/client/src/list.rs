@@ -198,9 +198,8 @@ impl List {
     }
     pub fn apply(&mut self, now: u64, input: Input) -> Snapshot {
         self.committed_deletes.clear();
-        self.advance(now);
         // Settle already-due moves before a new input can introduce a freeze.
-        self.flush();
+        self.advance(now);
         let target = match &input {
             Input::Received { id, .. }
             | Input::SendStarted { id, .. }
@@ -401,11 +400,29 @@ impl List {
     }
     fn advance(&mut self, now: u64) {
         let now = now.max(self.now);
+        // A pending move starts the visible clock at its deadline, even when no tick arrived then.
+        // Expiring notices, undo windows and deletions can also settle pending moves.
+        loop {
+            let boundary = self
+                .batch_at
+                .filter(|_| !self.frozen())
+                .into_iter()
+                .chain(self.pending_delete.as_ref().map(|d| d.deadline))
+                .chain(self.states.values().filter_map(|s| s.outgoing.map(|(_, _, until)| until)))
+                .chain(self.states.values().filter_map(|s| s.sent.as_ref().filter(|s| s.rise).map(|s| s.until)))
+                .min()
+                .unwrap_or(now)
+                .clamp(self.now, now);
+            self.advance_to(boundary);
+            self.flush();
+            if boundary == now {
+                break;
+            }
+        }
+    }
+    fn advance_to(&mut self, now: u64) {
         let elapsed = now - self.now;
         self.now = now;
-        if self.pending_delete.as_ref().is_some_and(|d| d.deadline <= now) {
-            self.commit_delete();
-        }
         let mut rises = Vec::new();
         for (id, state) in &mut self.states {
             if !self.camera
@@ -444,6 +461,9 @@ impl List {
         for (_, _, id) in rises {
             self.rise(id);
             self.batch_at = Some(now);
+        }
+        if self.pending_delete.as_ref().is_some_and(|d| d.deadline <= now) {
+            self.commit_delete();
         }
     }
     fn frozen(&self) -> bool {
@@ -1009,6 +1029,24 @@ mod tests {
         l.apply(1000, Input::Press { id: "b".into(), down: true });
         assert_eq!(order(&l), ["c", "a", "b"]);
         assert_eq!(l.snapshot().locked_row.as_deref(), Some("b"));
+    }
+    #[test]
+    fn a_late_tick_spends_visible_time_from_the_move_deadline() {
+        for undo_ms in [None, Some(0), Some(500)] {
+            let mut on_time = model();
+            let mut late = model();
+            let moved_at = undo_ms.unwrap_or(300).max(300);
+            for list in [&mut on_time, &mut late] {
+                if let Some(undo_ms) = undo_ms {
+                    list.apply(0, Input::SendStarted { id: "b".into(), kind: Kind::Photo, undo_ms });
+                }
+                list.apply(0, receive("c"));
+            }
+            on_time.apply(moved_at, Input::Tick);
+            let now = moved_at + YO_SOLID_MS;
+            assert_eq!(late.apply(now, Input::Tick), on_time.apply(now, Input::Tick));
+            assert_eq!(row(&late, "c").fade_elapsed, Some(0));
+        }
     }
     #[test]
     fn tap_lock_expires_without_another_user_event() {

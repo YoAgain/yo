@@ -522,3 +522,34 @@ fn warm_send_recovers_a_rotated_access_key() {
         }
     }
 }
+
+#[test]
+fn a_recoverable_access_refusal_keeps_the_outbox_in_order() {
+    let hub = TestHub::start();
+    let (mut a, ha, _) = account(&hub, "ALICE");
+    let (mut b, _, pb) = account(&hub, "BOB");
+    friends(&mut a, &mut b, &pb);
+    let to = b.user_id().to_owned();
+    let path = api::deliver_path(&user_id(&to));
+    for text in ["first", "second"] {
+        ha.fault(&path, Fault::Answer(503));
+        a.send(&to, Content::Text(text.into())).unwrap();
+    }
+    assert_eq!(a.waiting(), 2);
+
+    // Only the first envelope is refused. Its signed fallback needs to go before
+    // the second envelope, which the hub would otherwise accept in this round.
+    ha.fault(&path, Fault::Answer(403));
+    a.sync(0).unwrap();
+    assert_eq!(a.waiting(), 0);
+    let received: Vec<_> = b
+        .sync(0)
+        .unwrap()
+        .into_iter()
+        .filter_map(|event| match event {
+            Event::Message { content: Content::Text(text), .. } => Some(text),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(received, ["first", "second"]);
+}

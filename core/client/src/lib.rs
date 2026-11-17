@@ -392,8 +392,10 @@ fn gone_for_good(status: u16) -> bool {
 
 /// A delivery's answer that ends it: taken, refused for good, or a request the recipient takes none of (spec 4.10).
 /// What comes after it to the same user may go.
-fn settled(status: u16) -> bool {
-    status == status::ACCEPTED || status == status::FORBIDDEN || gone_for_good(status)
+fn settled(status: u16, item: &Delivery) -> bool {
+    status == status::ACCEPTED
+        || (status == status::FORBIDDEN && item.access.is_none() && !item.endorsed)
+        || gone_for_good(status)
 }
 
 /// Envelopes of the outbox on their way to the hub, sent without the client: see `Client::send_begin`. Each must
@@ -532,7 +534,7 @@ impl Deliveries {
                 if let Some(limit) = answer.as_ref().ok().and_then(limit_of) {
                     limits.hit(limit);
                 }
-                held = !settled(status);
+                held = !settled(status, item);
                 answers.push((i, Some(answer)));
             }
             answers
@@ -1076,7 +1078,7 @@ impl Client {
     #[cfg(feature = "fuzz")]
     pub fn receive_for_fuzzing(&mut self, payload: &[u8]) -> Result<()> {
         let opened = [&[0u8; 16][..], payload].concat();
-        self.atomic(|c| c.receive(&opened))
+        self.receive(&opened, &mut BTreeSet::new())
     }
 
     /// Opens a sealed state.
@@ -1263,6 +1265,13 @@ impl Client {
     /// For tests: the clock that decides when prekeys rotate and receipts are due.
     pub fn set_clock(&mut self, clock: Clock) {
         self.clock = clock;
+    }
+
+    /// Allows the next round of roster recovery in a test without aging messages or certificates.
+    #[cfg(feature = "testing")]
+    pub fn reset_recovery_limits_for_tests(&mut self) {
+        self.state.roster_asked.clear();
+        self.state.recovery_lookups = (0, 0);
     }
 
     /// The own user id (hex): stable across new phones.
@@ -2486,9 +2495,10 @@ impl Client {
         }
         for user in recover {
             // The hub never has the plaintext profile key. Read its encrypted update first,
-            // then refresh the signed roster without disturbing established sessions.
+            // then refresh the roster and request bundles for any sessions the read archived.
             self.receive_all(0)?;
-            self.fetch_bundles(&user, &[])?;
+            let missing = self.without_session(&user);
+            self.fetch_bundles(&user, &missing)?;
         }
         result.map(|()| changed)
     }
@@ -2587,13 +2597,14 @@ impl Client {
         // each may be kept again; after one kept, its sender's next ones too, so they keep their order.
         let sender_of = |opened: &[u8]| opened.get(16..).and_then(|p| decode::<Payload>(p).ok()).map(|p| p.account_key);
         let mut kept: BTreeSet<Key> = BTreeSet::new();
+        let mut refreshed = BTreeSet::new();
         for payload in std::mem::take(&mut self.state.deferred) {
             let sender = sender_of(&payload);
             if sender.is_some_and(|s| kept.contains(&s)) {
                 self.state.deferred.push_back(payload);
                 continue;
             }
-            match self.atomic(|c| c.receive(&payload)) {
+            match self.receive(&payload, &mut refreshed) {
                 Ok(()) => {}
                 Err(error) if retryable(&error) => {
                     kept.extend(sender);
@@ -2621,17 +2632,25 @@ impl Client {
             };
             let sender = sender_of(&payload);
             let room = self.state.deferred.len() < DEFERRED;
-            if room && sender.is_some_and(|s| kept.contains(&s)) {
+            if sender.is_some_and(|s| kept.contains(&s)) {
+                if !room {
+                    stopped = Some(Error::Refused(status::RATE_LIMITED));
+                    continue;
+                }
                 self.state.deferred.push_back(payload);
                 done.push(item.id);
                 continue;
             }
-            match self.atomic(|c| c.receive(&payload)) {
+            match self.receive(&payload, &mut refreshed) {
                 Ok(()) => {}
-                // A limit of the hub's for this one sender (a lookup of its devices): kept here for later, the others
-                // go on. Within `DEFERRED`; past it, as any "not now".
-                Err(Error::Refused(status::RATE_LIMITED)) if room => {
+                // A roster limit for this sender. Keep its envelopes locally if there is room,
+                // otherwise leave them unacknowledged. Other senders in this batch can go on.
+                Err(error @ Error::Refused(status::RATE_LIMITED)) => {
                     kept.extend(sender);
+                    if !room {
+                        stopped = Some(error);
+                        continue;
+                    }
                     self.state.deferred.push_back(payload);
                 }
                 // Not this envelope's fault: it stays at the hub and is read again next time.
@@ -2822,8 +2841,15 @@ impl Client {
 
     /// Processes one opened envelope (`open`): the copy for this device, decrypted in the session with its sender's
     /// device.
-    fn receive(&mut self, opened: &[u8]) -> Result<()> {
-        let raw = opened;
+    fn receive(&mut self, opened: &[u8], refreshed: &mut BTreeSet<Key>) -> Result<()> {
+        let mut checked = None;
+        self.atomic(|c| c.receive_opened(opened, refreshed, &mut checked))?;
+        // Share a roster only after the envelope committed the state updates that came with it.
+        refreshed.extend(checked);
+        Ok(())
+    }
+
+    fn receive_opened(&mut self, opened: &[u8], refreshed: &BTreeSet<Key>, checked: &mut Option<Key>) -> Result<()> {
         let (certified, payload) = opened.split_at_checked(16).ok_or(Error::Protocol("opened"))?;
         let certified = (certified != [0; 16]).then(|| hex(certified));
         let payload: Payload = decode(payload)?;
@@ -2851,22 +2877,24 @@ impl Client {
             devices.iter().any(|d| d.slot == payload.device_id && d.key != payload.device_key)
         });
         if other {
+            // All envelopes in this batch arrived before the lookup. An unlisted device cannot
+            // need another lookup until a new batch arrives.
+            if refreshed.contains(&payload.account_key) {
+                self.note("a message from a replaced device".into());
+                return Ok(());
+            }
             // Asked at most once a minute a user: a forger claiming numbers costs a lookup a minute, no more.
             if !self.may_ask_roster(&user) {
-                // Asked a moment ago, or the day's lookups used up: kept and received again later (a contact's new
-                // phone writing just after a forgery is not lost), up to `DEFERRED`.
-                if self.state.deferred.len() < DEFERRED {
-                    self.state.deferred.push_back(raw.to_vec());
-                    self.note("a device under another's number: later".into());
-                } else {
-                    self.drop_one("a device the roster was asked of a moment ago".into());
-                }
-                return Ok(());
+                // Like a hub lookup limit, defer this envelope and the sender's successors.
+                // Once local storage is full, the inbox leaves them at the hub.
+                self.note("a device under another's number: later".into());
+                return Err(Error::Refused(status::RATE_LIMITED));
             }
             let (found, username) = self.lookup(&Handle::user(&user_bytes(&user)?), 0, Vec::new())?;
             if found.account_key == payload.account_key {
                 self.take_devices(&user, found.account_key, &found.devices, username)?;
             }
+            *checked = Some(payload.account_key);
             let current = found.devices.iter().any(|d| d.key == payload.device_key && d.id == payload.device_id);
             if found.account_key != payload.account_key || !current {
                 self.note("a message from a replaced device".into());
@@ -3663,7 +3691,11 @@ impl Client {
     /// more of the outbox can go now (a message queued meanwhile behind them), to send and end the same way; else
     /// what `send` returns. What the hub did not take waits in the outbox for the next call that delivers.
     pub fn send_end(&mut self, deliveries: &Deliveries, answers: Vec<Option<Answer>>) -> Sent {
-        let all_taken = answers.iter().all(|answer| matches!(answer, Some(Ok(r)) if settled(r.status)));
+        let all_taken = answers.len() == deliveries.items.len()
+            && answers
+                .iter()
+                .zip(&deliveries.items)
+                .all(|(answer, item)| matches!(answer, Some(Ok(r)) if settled(r.status, item)));
         let result = match self.delivered(deliveries, answers) {
             Ok(true) => self.deliver(),
             Ok(false) if all_taken && self.check_sendable(deliveries.to.as_deref()).is_ok() => {

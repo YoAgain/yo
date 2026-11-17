@@ -1,7 +1,7 @@
 # Chaos
 
 `yo-chaos` (tests/src/chaos.rs) runs thousands of accounts through the real core against an in-process hub (restarted
-on its database meanwhile, audited at the end, a year jumped for the release of names not secured) or a hub by URL.
+on its database meanwhile, audited at the end, with account names checked after a year of simulated age) or a hub by URL.
 Every account is owned by one worker thread that runs random operations on it: texts that name themselves, bursts,
 fan-outs to many friends, photos and videos (upload, `429`/`507` held, fetched once), blocks and unblocks, reports,
 feedback past its limit, backups, sends to oneself, to blocked and to deleted accounts, restarts from the saved state,
@@ -64,6 +64,8 @@ friends' and strangers' alike), the request limits are the hub's own with their 
 minutes). Envelopes that wait for someone who blocked the sender (it does not know: they go as requests, one an hour,
 and are dropped there unseen) are counted apart (`held_for_blockers`), not as an outbox left. What may be lost is
 counted by why (a send that failed before it was queued, a crash in it, a block, a new phone, a deletion).
+The order check covers uninterrupted device pairs. Messages replayed after a phone replacement still count
+toward the delivery and duplicate checks.
 
 ```sh
 cargo build --release -p yo-tests --bin yo-scale
@@ -87,8 +89,8 @@ Send call p50 6–12 ms, p99 90–180 ms; delivery to a running receiver p50 0.6
 
 - A group member's new phone is a device the other members may not know. A member who never wrote to them takes its
   payloads in only once the hub names the device, asked at most once a minute a user and 10 times a day in all
-  (recovery lookups); past that, they wait for the next day (64 kept, then dropped). In yo-scale, where phones change
-  far more often than in life, group Yos from a new phone are counted at most, not at least.
+  (recovery lookups); past that, they wait for the next day (64 kept locally, with overflow left at the hub).
+  In yo-scale, phones change far more often than in life, so group Yos from a new phone have only an upper count bound.
 - A cut-off fetch after the hub handed on the last byte (into the socket's buffers) counts: on loopback that is every
   blob up to a few MB (spec 6.8, "Noted" below).
 - A phone whose clock ran hours ahead sent Yos whose `sent_at` stays that far ahead (each device's times rise) until

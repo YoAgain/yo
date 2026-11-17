@@ -553,6 +553,8 @@ struct MediaInfo {
     from: u32,
 }
 
+const REPLACED_PHONE: u8 = 5;
+
 /// Why a message need not arrive (`Msg::why`), for the run's account of what may be lost.
 const WHY: [&str; 9] = [
     "",
@@ -1313,14 +1315,19 @@ fn take_events(w: &World, a: &mut Acct, events: Vec<Event>, rng: &mut Rng) {
         }
         let latency = (now.saturating_sub(msg.sent_ms)) as u64 * 1000;
         let last = ledger.last.entry((a.uid, from_uid)).or_default();
-        if msg.seq <= *last {
+        // A replacement can resend old mail to a new device after mail addressed to it
+        // directly. Check order among messages whose devices stayed in place.
+        let from_before_replacement = msg.why == REPLACED_PHONE;
+        if !from_before_replacement && msg.seq <= *last {
             let was = *last;
             drop(ledger);
             w.stats.violation(format!("{} received {tag:?} (#{}) after #{was} from {from}", a.user, msg.seq));
             w.dump(a.uid);
             w.dump(from_uid);
         } else {
-            *last = msg.seq;
+            if !from_before_replacement {
+                *last = msg.seq;
+            }
             drop(ledger);
             w.received.fetch_add(1, Relaxed);
             w.stats.count("received");
@@ -1801,8 +1808,8 @@ fn op_new_phone(w: &World, a: &mut Acct, rng: &mut Rng) {
         // What the old phone had not received is gone with it, and so is what it sent that was not received yet: a
         // message from a replaced device is not opened (spec 4.6), though the hub took it.
         let mut ledger = w.ledger();
-        ledger.relax_to(a.uid, 5);
-        ledger.relax_from(a.uid, 5);
+        ledger.relax_to(a.uid, REPLACED_PHONE);
+        ledger.relax_from(a.uid, REPLACED_PHONE);
         let me = a.uid;
         ledger.last.retain(|(to, _), _| *to != me);
         drop(ledger);
@@ -2045,11 +2052,12 @@ fn quiesce(w: &Arc<World>, all: Vec<Vec<Acct>>, what: &str) -> Vec<Vec<Acct>> {
     for round in 0..60 {
         let before = w.received.load(Relaxed);
         let waiting = Arc::new(AtomicUsize::new(0));
+        let deferred = Arc::new(AtomicUsize::new(0));
         all = all
             .into_iter()
             .enumerate()
             .map(|(t, mut accts)| {
-                let (w, waiting) = (w.clone(), waiting.clone());
+                let (w, waiting, deferred) = (w.clone(), waiting.clone(), deferred.clone());
                 std::thread::spawn(move || {
                     let mut rng = Rng(w.args.seed ^ 0xABCD ^ ((round as u64) << 20) ^ t as u64);
                     for a in accts.iter_mut().filter(|a| a.alive) {
@@ -2063,6 +2071,11 @@ fn quiesce(w: &Arc<World>, all: Vec<Vec<Acct>>, what: &str) -> Vec<Vec<Acct>> {
                         }
                         a.disk_full = 0;
                         a.proc_.disk_full.store(false, Relaxed);
+                        let client = a.client.as_mut().unwrap();
+                        if client.deferred() > 0 {
+                            // Recovery lookup quotas are daily, even when the run compresses months of phone changes.
+                            client.reset_recovery_limits_for_tests();
+                        }
                         for _ in 0..3 {
                             op_uploads(&w, a, &mut rng);
                             op_group_uploads(&w, a, &mut rng);
@@ -2088,6 +2101,7 @@ fn quiesce(w: &Arc<World>, all: Vec<Vec<Acct>>, what: &str) -> Vec<Vec<Acct>> {
                             + a.uploads.len()
                             + a.group_uploads.len();
                         waiting.fetch_add(left, Relaxed);
+                        deferred.fetch_add(a.client.as_ref().map_or(0, |c| c.deferred()), Relaxed);
                         // Uploads cannot wait on disk: what is left goes now or not at all.
                         if a.uploads.is_empty() && a.group_uploads.is_empty() {
                             evict(&w, a);
@@ -2102,8 +2116,12 @@ fn quiesce(w: &Arc<World>, all: Vec<Vec<Acct>>, what: &str) -> Vec<Vec<Acct>> {
             .collect();
         let moved = w.received.load(Relaxed) - before;
         let waiting = waiting.load(Relaxed);
-        println!("{what} round {round}: {moved} received, {waiting} waiting, {}", watch_hub(w, &None));
-        if moved == 0 && waiting == 0 && round >= 1 {
+        let deferred = deferred.load(Relaxed);
+        println!(
+            "{what} round {round}: {moved} received, {waiting} waiting, {deferred} deferred, {}",
+            watch_hub(w, &None)
+        );
+        if moved == 0 && waiting == 0 && deferred == 0 && round >= 1 {
             // A payload from a device under another's number whose roster was asked a moment ago is received again
             // a minute later (spec 4.6): once more after that, then done.
             if waited {
@@ -2199,6 +2217,9 @@ fn check_ledger(w: &World, all: &[Vec<Acct>]) -> serde_json::Value {
         match Client::restore(proc_, &blob, &STATE_KEY) {
             Ok(c) => {
                 opened += 1;
+                if c.deferred() > 0 {
+                    w.stats.violation(format!("{} still has {} deferred inbox envelopes", a.name, c.deferred()));
+                }
                 let (left, to_blockers) = owed(w, a.uid, &c);
                 held_for_blockers += to_blockers;
                 if left > 0 {

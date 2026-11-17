@@ -153,6 +153,7 @@ pub type Recorded = (String, String, Vec<(String, String)>, Vec<u8>);
 pub struct Http {
     client: reqwest::blocking::Client,
     pub base: RwLock<String>,
+    record: bool,
     /// Every signed request, for replay tests.
     pub recorded: Mutex<Vec<Recorded>>,
     pub faults: Mutex<Vec<(String, Fault)>>,
@@ -162,6 +163,15 @@ pub struct Http {
 
 impl Http {
     pub fn new(base: String) -> Arc<Self> {
+        Self::with_recording(base, true)
+    }
+
+    /// The same transport without request history, for sustained traffic.
+    pub fn unrecorded(base: String) -> Arc<Self> {
+        Self::with_recording(base, false)
+    }
+
+    fn with_recording(base: String, record: bool) -> Arc<Self> {
         Arc::new(Http {
             client: reqwest::blocking::Client::builder()
                 .timeout(std::time::Duration::from_secs(90))
@@ -169,6 +179,7 @@ impl Http {
                 .build()
                 .unwrap(),
             base: RwLock::new(base),
+            record,
             recorded: Mutex::default(),
             faults: Mutex::default(),
             sent: Mutex::default(),
@@ -183,7 +194,7 @@ impl Http {
 
 impl Transport for Http {
     fn request(&self, method: &str, path: &str, headers: &[(String, String)], body: &[u8]) -> Result<Response, String> {
-        if !headers.is_empty() {
+        if self.record && !headers.is_empty() {
             self.recorded.lock().unwrap_or_else(PoisonError::into_inner).push((
                 method.into(),
                 path.into(),
@@ -191,7 +202,9 @@ impl Transport for Http {
                 body.to_vec(),
             ));
         }
-        self.sent.lock().unwrap_or_else(PoisonError::into_inner).push((method.into(), path.into(), body.to_vec()));
+        if self.record {
+            self.sent.lock().unwrap_or_else(PoisonError::into_inner).push((method.into(), path.into(), body.to_vec()));
+        }
         let fault = {
             let mut faults = self.faults.lock().unwrap_or_else(PoisonError::into_inner);
             faults.iter().position(|(pattern, _)| path.contains(pattern.as_str())).map(|i| faults.remove(i).1)

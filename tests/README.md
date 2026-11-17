@@ -73,6 +73,10 @@ Phase 1 is the whole system on one machine (clients with sessions, the hub, fetc
 (deliveries over many connections). Every run writes `tests/results/<date>-<clients>c.json`; commit the ones worth
 keeping, so a regression shows against them.
 
+For a ten-minute end-to-end soak, pass `--seconds 600 --raw-seconds 15`. This keeps the hub-only phase comparable
+to the benchmark below and within its undrained inboxes' capacity. The driver checks delivery counts and order
+for each pair, tracks HTTP errors, and uses fixed-size latency histograms.
+
 | Run | Yops (hub alone) | p50 / p99 | End to end | Dropped |
 |---|---|---|---|---|
 | 2026-11-11, 16 cores, one transaction per delivery | 5,793 | 6.4 / 34.0 ms | 2,047 Yos/s | 0 |

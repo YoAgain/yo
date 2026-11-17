@@ -159,6 +159,37 @@ fn a_session_out_of_step_heals_by_a_decryption_error() {
     assert_eq!(a.dropped(), 0, "{:?}", a.drop_reasons());
 }
 
+#[test]
+fn access_refresh_fetches_a_session_archived_while_reading_the_inbox() {
+    let hub = TestHub::start();
+    let n = random_u64() % 100_000;
+    let ha = Http::new(hub.url());
+    let mut a = by_name(ha.clone(), &format!("Ar{n}"));
+    let mut b = by_name(Http::new(hub.url()), &format!("Br{n}"));
+    let early = b.export(&[3; 32]);
+    a.send(b.user_id(), text("first contact")).unwrap();
+    assert_eq!(texts(&b.sync(0).unwrap()), ["first contact"]);
+    b.send(a.user_id(), text("reply")).unwrap();
+    assert_eq!(texts(&a.sync(0).unwrap()), ["reply"]);
+    keys_both_ways(&mut a, &mut b);
+
+    let mut b = Client::restore(Http::new(hub.url()), &early, &[3; 32]).unwrap();
+    a.send(b.user_id(), text("needs resend")).unwrap();
+    assert!(texts(&b.sync(0).unwrap()).is_empty());
+    assert_eq!(b.dropped(), 1);
+    b.after_sync().unwrap();
+
+    // Reading B's decryption error during access-key recovery archives A's session.
+    let path = yo_wire::api::deliver_path(&yo_tests::user_id(b.user_id()));
+    ha.fault(&path, Fault::Answer(403));
+    a.send(b.user_id(), text("next send")).unwrap();
+    assert_eq!(a.waiting(), 0);
+    assert!(!a.contacts().iter().any(|contact| contact.user == b.user_id() && contact.outdated));
+    let mut received = texts(&b.sync(0).unwrap());
+    received.sort();
+    assert_eq!(received, ["needs resend", "next send"]);
+}
+
 /// A writes first while B is away for four weeks, B's signed prekey and last resort replaced each week meanwhile:
 /// the first message, held at the hub all along, still opens (a replaced prekey's private key is kept a month), and
 /// the sessions work both ways.
@@ -394,6 +425,69 @@ fn a_new_phones_message_right_after_a_forgery_is_kept_not_lost() {
     let all: Vec<String> = first.into_iter().chain(later).collect();
     assert!(all.contains(&"new phone".to_owned()), "{all:?}");
     assert_eq!(b.deferred(), 0, "decided once the roster could be asked");
+}
+
+#[test]
+fn one_roster_lookup_decides_an_inbox_batch_after_two_phone_replacements() {
+    let hub = TestHub::start();
+    let n = random_u64() % 100_000;
+    let name = format!("Rb{n}");
+    let mut old = by_name(Http::new(hub.url()), &name);
+    let mut receiver = by_name(Http::new(hub.url()), &format!("Rc{n}"));
+    old.send(receiver.user_id(), text("original phone")).unwrap();
+    assert_eq!(texts(&receiver.sync(0).unwrap()), ["original phone"]);
+
+    let mut middle = yo_tests::new_phone(Http::new(hub.url()), &name, &old);
+    for content in ["previous phone 1", "previous phone 2", "previous phone 3"] {
+        middle.send(receiver.user_id(), text(content)).unwrap();
+    }
+    assert_eq!(middle.waiting(), 0);
+    let mut current = yo_tests::new_phone(Http::new(hub.url()), &name, &middle);
+    current.send(receiver.user_id(), text("current phone")).unwrap();
+    assert_eq!(current.waiting(), 0);
+
+    assert_eq!(texts(&receiver.sync(0).unwrap()), ["current phone"]);
+    assert_eq!(receiver.deferred(), 0, "one fresh roster decides every delivery in this batch");
+}
+
+#[test]
+fn a_full_deferred_queue_leaves_the_rest_at_the_hub() {
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    let hub = TestHub::start();
+    let n = random_u64() % 100_000;
+    let name = format!("Rd{n}");
+    let mut original = by_name(Http::new(hub.url()), &name);
+    let mut receiver = by_name(Http::new(hub.url()), &format!("Re{n}"));
+    original.send(receiver.user_id(), text("original phone")).unwrap();
+    assert_eq!(texts(&receiver.sync(0).unwrap()), ["original phone"]);
+    let clock = Arc::new(AtomicU64::new(yo_hub::now_ms()));
+    let read = clock.clone();
+    receiver.set_clock(Arc::new(move || read.load(Ordering::Relaxed)));
+
+    let mut middle = yo_tests::new_phone(Http::new(hub.url()), &name, &original);
+    middle.send(receiver.user_id(), text("first replacement")).unwrap();
+    assert_eq!(texts(&receiver.sync(0).unwrap()), ["first replacement"]);
+
+    let mut current = yo_tests::new_phone(Http::new(hub.url()), &name, &middle);
+    let expected: Vec<_> = (0..80).map(|i| format!("new phone {i}")).collect();
+    for content in &expected {
+        current.send(receiver.user_id(), text(content)).unwrap();
+    }
+    assert_eq!(current.waiting(), 0);
+    let mut other = by_name(Http::new(hub.url()), &format!("Rf{n}"));
+    other.send(receiver.user_id(), text("another sender")).unwrap();
+    assert_eq!(texts(&receiver.sync(0).unwrap()), ["another sender"]);
+    assert!(receiver.deferred() > 0);
+
+    clock.fetch_add(61_000, Ordering::Relaxed);
+    let mut received = Vec::new();
+    for _ in 0..3 {
+        received.extend(texts(&receiver.sync(0).unwrap()));
+    }
+    assert_eq!(received, expected);
+    assert_eq!(receiver.deferred(), 0);
+    assert_eq!(receiver.dropped(), 0);
 }
 
 /// First Yos to a new friend, many at once and both ways: twenty strangers write to Bea by name while Bea writes to

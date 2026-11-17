@@ -5,7 +5,7 @@
 //!            [--restarts 3] [--url https://…] [--db path]
 //!
 //! Without `--url` the hub runs in-process on a SQLite file, so it can be restarted on the same database and audited
-//! at the end, and time can be jumped (the 365-day release). With `--url` it runs against that hub as it is (its
+//! at the end, including after a year of simulated age. With `--url` it runs against that hub as it is (its
 //! limits, its clock): no restarts, no audit, no time travel.
 //!
 //! Every account is owned by one worker thread, which runs random operations on it (seeded: `--seed` replays the
@@ -698,7 +698,12 @@ fn whois(w: &World, a: &mut Acct, peer: &Entry) -> bool {
             }
             false
         }
-        Err(Error::NotOnYo) if !peer.alive => false,
+        // The selected entry may have been deleted while the lookup was in flight.
+        Err(Error::NotOnYo)
+            if !w.dir.read().unwrap_or_else(PoisonError::into_inner).iter().any(|e| e.user == peer.user && e.alive) =>
+        {
+            false
+        }
         Err(error) => {
             note_error(w, a, "whois", &error);
             false
@@ -723,6 +728,10 @@ fn op_fan_out(w: &World, a: &mut Acct, rng: &mut Rng) {
 
 fn op_sync(w: &World, a: &mut Acct, rng: &mut Rng) {
     let wait = if rng.below(10) == 0 { 1 } else { 0 };
+    sync(w, a, rng, wait);
+}
+
+fn sync(w: &World, a: &mut Acct, rng: &mut Rng, wait: u64) {
     let result = a.client.as_mut().unwrap().sync(wait);
     w.trace(&a.user, format!("sync: {:?}", result.as_ref().map(|e| e.len())));
     match result {
@@ -1162,21 +1171,29 @@ fn quiesce(w: &World, all: &mut [Vec<Acct>]) {
     for round in 0..120 {
         let before = w.stats.get("received");
         let mut waiting = 0;
+        let mut deferred = 0;
         for accts in all.iter_mut() {
             for a in accts.iter_mut().filter(|a| a.client.is_some()) {
+                let client = a.client.as_mut().unwrap();
+                if round > 0 && client.deferred() > 0 {
+                    // Rapid phone replacements can consume a day's recovery lookups in minutes.
+                    // Renew that quota between drain passes without aging queued messages.
+                    client.reset_recovery_limits_for_tests();
+                }
                 op_uploads(w, a, &mut rng);
-                op_sync(w, a, &mut rng);
+                sync(w, a, &mut rng, 0);
                 sync_blocks(w, a);
                 if a.proc_.crashed.load(Relaxed) {
                     a.client = None;
                     restart(w, a, &mut rng);
                 }
                 waiting += a.client.as_ref().map_or(0, |c| c.pending()) + a.uploads.len();
+                deferred += a.client.as_ref().map_or(0, |c| c.deferred());
             }
         }
         let moved = w.stats.get("received") - before;
-        println!("quiet round {round}: {moved} received, {waiting} waiting");
-        if moved == 0 && waiting == 0 && round >= 2 {
+        println!("quiet round {round}: {moved} received, {waiting} waiting, {deferred} deferred");
+        if moved == 0 && waiting == 0 && deferred == 0 && round >= 2 {
             return;
         }
         // A hub with its limits takes the backlog at its pace (deliveries per address per minute).
@@ -1366,9 +1383,9 @@ fn main() {
     quiesce(&w, &mut all);
     check_ledger(&w, &all);
 
-    // Phase 4 (in-process): a year later, the names not secured are released; the secured stay.
+    // Phase 4 (in-process): pruning after a year leaves account names alone.
     if w.args.url.is_none() {
-        release(&w, &mut all);
+        check_names_retained(&w, &all);
         audit(&w);
     } else {
         // On a shared hub: leave nothing behind.
@@ -1401,6 +1418,9 @@ fn check_ledger(w: &World, all: &[Vec<Acct>]) {
         if let Some(c) = &a.client {
             if c.pending() > 0 {
                 w.stats.violation(format!("{} still has {} envelopes in its outbox", a.name, c.pending()));
+            }
+            if c.deferred() > 0 {
+                w.stats.violation(format!("{} still has {} deferred inbox envelopes", a.name, c.deferred()));
             }
             harvest_drops(w, Some(c));
             // The saved state opens.
@@ -1435,43 +1455,20 @@ fn check_ledger(w: &World, all: &[Vec<Acct>]) {
     }
 }
 
-fn release(w: &World, all: &mut [Vec<Acct>]) {
+fn check_names_retained(w: &World, all: &[Vec<Acct>]) {
     let hub = w.hub.lock().unwrap();
     let Some(hub) = hub.as_ref() else { return };
     let year = 366 * 24 * 3600 * 1000;
     hub.hub.prune(yo_hub::now_ms() + year).unwrap();
-    let mut rng = Rng(w.args.seed ^ 0x365);
-    let (mut released, mut kept) = (0, 0);
-    for a in all.iter_mut().flatten() {
-        if a.client.is_none() {
-            continue;
-        }
-        if a.proc_.crashed.load(Relaxed) {
-            restart(w, a, &mut rng);
-        }
-        a.proc_.crash_in.store(0, Relaxed);
-        let Some(client) = a.client.as_mut() else { continue };
-        let result = definite(|| client.sync(0));
-        match (a.backed_up, result) {
-            (Some(false), Err(Error::Replaced)) => released += 1,
-            (Some(true), Ok(_)) => kept += 1,
-            (None, _) => {}
-            (secured, other) => {
-                // A secured name whose device was replaced meanwhile has a new device that never backed up.
-                w.stats.violation(format!("{}: secured {secured:?}, a year later: {:?}", a.name, other.map(|_| ())))
-            }
-        }
-        if a.backed_up == Some(false) {
-            // Free again: anyone may take it.
-            let probe = Proc::new(&w.net, &w.stats, 0, rng.next_u64());
-            match Client::username_free(probe.as_ref(), &a.name) {
-                Ok(true) => {}
-                other => w.stats.violation(format!("{}: released but not free: {other:?}", a.name)),
-            }
-            a.client = None;
+    let probe = Proc::new(&w.net, &w.stats, 0, w.args.seed ^ 0x365);
+    let mut kept = 0;
+    for a in all.iter().flatten().filter(|a| a.client.is_some()) {
+        match definite(|| Client::username_free(probe.as_ref(), &a.name)) {
+            Ok(false) => kept += 1,
+            result => w.stats.violation(format!("{}: name a year later: {result:?}", a.name)),
         }
     }
-    println!("a year later: {released} names released, {kept} secured kept");
+    println!("a year later: {kept} names retained");
 }
 
 fn audit(w: &World) {
