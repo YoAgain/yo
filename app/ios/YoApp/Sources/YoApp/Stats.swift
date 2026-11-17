@@ -59,7 +59,7 @@ enum Stats {
 }
 
 /// The numbers, as a plain list.
-struct StatsPage: View {
+struct StatisticsSection: View {
   @Environment(Friends.self) private var friends
   // Read through AppStorage, so the page follows Yos sent and received while it is open (and the friend with the
   // most with them).
@@ -68,20 +68,19 @@ struct StatsPage: View {
 
   var body: some View {
     let top = Stats.byFriend.max { $0.value < $1.value }
-    Form {
-      Section {
+    Section {
         row("Yos Sent", "\(sent)", icon: "arrow.up.circle.fill", color: .amethyst)
         row("Yos Received", "\(received)", icon: "arrow.down.circle.fill", color: .blue)
         row("Friends", "\(friends.shown.count)", icon: "person.2.fill", color: .green)  // the blocked are not
         if let top {
           row("Most Yos With", "\(top.key) · \(top.value)", icon: "star.fill", color: .orange)
         }
-      } footer: {
+    } header: {
+      Text("Statistics")
+    } footer: {
         Text("Counted on this iPhone.")
       }
-    }
-    .navigationTitle("Statistics")
-    .navigationBarTitleDisplayMode(.inline)
+
   }
 
   private func row(_ title: String, _ value: String, icon: String, color: Color) -> some View {
@@ -90,5 +89,48 @@ struct StatsPage: View {
     } label: {
       Label(title, systemImage: icon).labelStyle(Tile(color))
     }
+  }
+}
+
+/// File bytes in both writable containers. Enumeration runs on a utility thread, never during a UI update.
+struct LocalStorageUsage: Sendable {
+  var state: Int64 = 0
+  var media: Int64 = 0
+  var other: Int64 = 0
+  var total: Int64 { state + media + other }
+
+  static func load() async -> Self {
+    await Task.detached(priority: .utility) { scan() }.value
+  }
+
+  private static func scan() -> Self {
+    let manager = FileManager.default
+    var roots = [URL(fileURLWithPath: NSHomeDirectory(), isDirectory: true)]
+    if let group = ShareBridge.container { roots.append(group) }
+    var result = Self()
+    var seen = Set<String>()
+    for root in roots {
+      guard let files = manager.enumerator(at: root, includingPropertiesForKeys: [.isRegularFileKey, .fileSizeKey],
+                                           options: [.skipsPackageDescendants]) else { continue }
+      for case let file as URL in files {
+        guard seen.insert(file.standardizedFileURL.path).inserted,
+              let values = try? file.resourceValues(forKeys: [.isRegularFileKey, .fileSizeKey]),
+              values.isRegularFile == true else { continue }
+        let bytes = Int64(values.fileSize ?? 0)
+        let parts = Set(file.pathComponents)
+        let ext = file.pathExtension.lowercased()
+        if !parts.isDisjoint(with: ["Outbox", "Received"]) || ["jpg", "jpeg", "png", "heic", "mp4", "mov", "blob"].contains(ext) {
+          result.media += bytes
+        } else if file.lastPathComponent.hasPrefix("yo-state") || ["sqlite", "sqlite3", "db"].contains(ext)
+                    || parts.contains("Preferences") || file.lastPathComponent == "friends.json" {
+          result.state += bytes
+        } else { result.other += bytes }
+      }
+    }
+    return result
+  }
+
+  static func formatted(_ bytes: Int64) -> String {
+    ByteCountFormatter.string(fromByteCount: bytes, countStyle: .file)
   }
 }

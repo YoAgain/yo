@@ -1,7 +1,8 @@
 # Agents
 
 - The repository is public: never commit secrets, keys, device ids, addresses or personal names. Machine settings go
-  in ignored files (`app/ios/dev/local.env`).
+  in ignored files (`app/ios/dev/local.env`). One exception: the app's credit line names Yo's owner and
+  operator as justyo.co's imprint does ("Yo by Or Arbel, operated by Christopher Eller").
 - No AI attribution in commits.
 
 ## iOS (`app/ios`)

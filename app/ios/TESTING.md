@@ -39,6 +39,51 @@ Not in the Simulator: passkeys (the app id has no team, so `justyo.app` is not a
 guide), the iCloud Keychain's sync (its items stay on the Simulator, which is enough for the Sign In list), a real
 push through APNs (see above), the camera (black; photos come from the library).
 
+## Account and tutorial regression checks
+
+Run on a device or Simulator after changing Settings. These visual checks are pending for the current change;
+the Linux build does not run the Simulator UI driver.
+
+- Open Account from the small root sheet and go back: neither transition changes its height. Scroll Account to
+  reach the final group, then drag to large and repeat; the large height also stays unchanged.
+- Account uses the account name as its inline title, with no avatar header or QR button. Your Code remains
+  reachable from the root profile card's QR button. Rows start with the normal top gap.
+- Account: title = the user's name and a coloured status dot (VoiceOver reads the word). [Contacts, Blocked], then [Security, Manage
+  Account]. Blocked: [Allow Yo Requests, Block Contact…], then Blocked Contacts (tap asks to unblock). Security has no info button; its red 1
+  sits right, before the chevron, while recovery
+  needs attention. Tapping it then opens Secure Your Account directly. With recovery set up, it pushes Security.
+- Security has Account Sync and iCloud Keychain in its first group, Passkey Recovery and Recovery Key in its
+  second, without info buttons. Below: "How Account Security Works" opens a short sheet (iCloud Keychain,
+  Passkey, Recovery Key, end-to-end encryption). Toggles keep their per-method assistants and turning-off
+  confirmation. Showing the recovery key still requires device authentication.
+- The Account Contacts row shows no count; only a red mark when a contact has a real problem.
+- Contacts lists the contacts only (blocking lives in its own Blocked page). A contact opens as a card (no chevron in the list; the sheet is as tall as its
+  rows): Verified (toggle, asks first), problem rows only when needed, Sealed Yos, Encryption (On + check;
+  folds open: Devices, Identity — Unchanged/Changed — which folds open once more to the keys, one line each, tap
+  shows a whole key), Wait 5 s Before Sending (no time setting, no footer).
+- Every settings destination keeps the root's small height on push/pop. Only Contacts, Status and Licenses
+  show the grabber and can be dragged to large (all open at the small height); all other pages have no grabber and
+  no large detent. Eager rows must appear throughout the animation, with no late cells or jumps.
+- UI driver: from Account run `drive.py DIR account-layout unsecured=true`, which checks direct setup.
+  Repeat with `unsecured=false` to check the Security destination, recovery controls, Contacts and Status.
+  Account identifiers are account.security, account.contacts and account.manage. Info buttons use
+  info.<title>. Security rows use security.accountSync, security.keychainRecovery, security.passkey,
+  security.recoveryKey and security.howRecoveryWorks. There is no security.setup button.
+- In camera mode, scroll to Add Friend and run `drive.py DIR camera-add`. The + stays in its original
+  position, uses the same translucency as friend rows, and opens the name field without taking a photo.
+  Check Group and Invite after opening the field. Receive Yos while adding: camera mode must keep row
+  order and countdowns frozen until it closes, as in the core list regressions.
+- Root: profile card; App Icon and Left-Handed; Help and Add Friends (last).
+- Help: Tutorial and Contact Us, then Status (help.status: overall state word and glyph) and Licenses.
+- Status: Crashes (Send Crashes, the reports or No Crashes); Usage (Total Yos — tap: ↑/↓, then Most Yos With —,
+  Data Usage "… this month", Storage); Server (Notifications; one connection row: Round Trip by default, measured continuously
+  (a second after each answer) while Status is open; a tap cycles to Server Ping and Sync and back; Identity — just a check; a tap brings up a card with its checks and both keys); Hitches inline in dev.
+- All rewritten pages retain title-case section headers.
+- Help shares the root and Account detent: push/pop at small or large height must preserve the height. Check
+  normal top spacing and a bottom gap at least as large as root, scrolling only when large text needs it.
+  Open Tutorial, swipe through all three cards and compare each
+  picture, phone frame and fade with signup; repeat with large text and Reduce Motion. No black placeholder.
+
 ## Flows (2026-11-14 night)
 
 | Flow | Result | Shots |
@@ -171,3 +216,34 @@ api.push.apple.com a request on a new connection took 420 ms, on an open one 138
   guarded since (outgoing media bound to its account, `Media.swift`; received media checked by generation; the old
   client closed and its state deleted under the shared lock, `Account.swift`), not yet tried on a device.
 - Video recording (no camera in the Simulator).
+
+## First camera swipe and requests (settings-tidy)
+
+Static trace: the first `Camera.start()` previously configured every capture input/output before
+`startRunning()`. The preview view already existed behind a zero-width wipe, but its first visible
+composite and the conditional photo picker, flip and zoom controls were paid for on camera entry.
+The authorization async path also ran on every entry. These are first-entry costs; HitchMonitor's
+callback intervals alone cannot establish which caused the reported stutter or measure GPU presentation.
+
+After 700 ms on the active list (waiting for scrolling to idle), with permission already authorized, prepare the session on its
+user-initiated serial queue without starting it, warm Core Image on its preview worker, read zooms
+and mount the hidden controls and close glyph. Submit the
+full-size preview/wipe once at 0.001 opacity for 100 ms, then fully clip it again. This does not request
+permission, capture frames, or keep a session running. Entering during preparation still uses the same
+serial queue; entering before preparation retains the normal first-start fallback. Authorized entry
+avoids `Camera.allowed()`'s async hop. AV outputs are created on the capture queue.
+
+Device regression: cold-launch with camera access granted, wait a second on the list, check that the
+camera indicator stays off, then swipe in/out twice (also cancel the first swipe and repeat left-handed).
+Compare Hitches' `camera prepare` and `edge wipe` entries. With `YO_PERF`, expect one
+`camera.configure.prepare`, then `camera.preview.create`, and only `camera.start` on entry;
+`camera.configure.first-start` identifies an entry before preparation. Confirm actual presentation in
+Instruments; no before/after physical swipe timings were collected in this change. Repeat with permission
+undetermined and denied: no early prompt or preview preparation; request access only on entry. Background
+or leave the list during the delay; capture must remain stopped.
+
+Requests always show their name bar and the No/Yo choice row. Check direct and group requests on arrival,
+after scrolling, and after waiting more than four seconds: No stays one third, Yo two thirds, mirrored
+left-handed, with their existing colors. Tapping the name does nothing; choices and VoiceOver's Accept
+and Yo / Decline actions still work. The Rust list model has no request expansion state, so no core
+model or test change is needed for this presentation rule.

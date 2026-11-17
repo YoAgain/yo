@@ -32,13 +32,13 @@ cd "$root"
 SDKROOT="$sdk" IPHONEOS_DEPLOYMENT_TARGET=26.0 \
   CARGO_PROFILE_RELEASE_OPT_LEVEL=s CARGO_PROFILE_RELEASE_LTO=fat CARGO_PROFILE_RELEASE_CODEGEN_UNITS=1 \
   CARGO_PROFILE_RELEASE_DEBUG=false \
-  cargo rustc -q -p yo-bindings --lib --release --target "$target" --crate-type staticlib
+  cargo rustc -j 4 -q -p yo-bindings --lib --release --target "$target" --crate-type staticlib
 lib="$CARGO_TARGET_DIR/$target/release/libyo.a"
 
 # UniFFI reads the interface from the library itself (library mode).
 rm -rf "$out"
 mkdir -p "$out/swift" "$out/gen"
-cargo run -q -p yo-bindings --bin uniffi-bindgen -- \
+cargo run -j 4 -q -p yo-bindings --bin uniffi-bindgen -- \
   generate --library "$lib" --language swift --out-dir "$out/gen" >/dev/null
 mv "$out/gen/yo.swift" "$out/swift/"
 

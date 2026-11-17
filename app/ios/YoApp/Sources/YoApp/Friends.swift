@@ -51,6 +51,14 @@ struct Friend: Codable, Hashable, Identifiable {
   static func == (a: Friend, b: Friend) -> Bool { a.key == b.key }
   func hash(into hasher: inout Hasher) { hasher.combine(key) }
 
+  /// Identity equality is for gestures; caches must compare the displayed content too.
+  func contentMatches(_ other: Friend) -> Bool {
+    key == other.key && name == other.name && color == other.color
+      && user == other.user && group == other.group && blocked == other.blocked
+      && gone == other.gone && keyChanged == other.keyChanged && request == other.request
+      && undoFirst == other.undoFirst && undoSeconds == other.undoSeconds
+  }
+
   init(name: String, color: Int, user: String? = nil) {
     self.name = name
     self.color = color

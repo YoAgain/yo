@@ -46,6 +46,8 @@ struct GroupMembersSheet: View {
   @Environment(MediaOutbox.self) private var outbox
   @State private var members: [String] = []
   @State private var removing: (user: String, name: String)?
+  @State private var search = ""
+  @State private var ownUser: String?
   @State private var busy = false
   @State private var failed = false
 
@@ -54,60 +56,53 @@ struct GroupMembersSheet: View {
   var body: some View {
     NavigationStack {
       Form {
-        Section("\(members.count) of \(Self.most)") {
-          ForEach(members, id: \.self) { user in
-            HStack {
-              Text(name(of: user)).font(.yo(17, relativeTo: .body))
-              Spacer()
-              if user != accounts.client?.userId() {
-                Button("Remove", role: .destructive) { removing = (user, name(of: user)) }
-                  .buttonStyle(.borderless)
-                  .disabled(busy)
-              }
-            }
+        Section("Members · \(members.count) of 20") {
+          if let ownUser {
+            GroupMemberRow(name: name(of: ownUser), selected: true).disabled(true)
           }
-        }
-        let addable = friends.shown.filter { $0.group == nil && $0.user != nil && !members.contains($0.user ?? "") }
-        if !addable.isEmpty && members.count < Self.most {
-          Section("Add") {
-            ForEach(addable) { friend in
-              Button {
-                if let user = friend.user { change(add: [user], line: [.user(GroupNotice.me(accounts)), " added ", .user(friend.name), " to ", .group(bar.name)]) }
-              } label: {
-                Label(friend.name, systemImage: "plus.circle.fill").font(.yo(17, relativeTo: .body))
+          ForEach(choices, id: \.self) { user in
+            let selected = members.contains(user)
+            Button {
+              if selected { removing = (user, name(of: user)) }
+              else {
+                change(add: [user], line: [.user(GroupNotice.me(accounts)), " added ", .user(name(of: user)), " to ", .group(bar.name)])
               }
-              .disabled(busy)
+            } label: {
+              GroupMemberRow(name: name(of: user), selected: selected)
             }
+            .buttonStyle(.plain)
+            .disabled(busy || (!selected && members.count >= Self.most))
           }
         }
         if failed {
           Section { Text("That didn’t work. Try again in a moment.").foregroundStyle(.secondary) }
         }
       }
+      .searchable(text: $search, prompt: "Find Friends")
       .navigationTitle(bar.name)
       .navigationBarTitleDisplayMode(.inline)
       .toolbar {
         ToolbarItem(placement: .confirmationAction) { Button("Done") { dismiss() } }
       }
-      .confirmationDialog(
-        "Remove \(removing?.name ?? "")?",
-        isPresented: Binding(get: { removing != nil }, set: { if !$0 { removing = nil } }),
-        titleVisibility: .visible, presenting: removing
-      ) { who in
-        Button("Remove \(who.name)", role: .destructive) {
+      .confirmCard(
+        $removing, title: { "Remove \($0.name)?" },
+        message: { _ in "They won’t receive any more Yos from this group." },
+        action: { "Remove \($0.name)" },
+        run: { who in
           change(remove: [who.user], line: [.user(GroupNotice.me(accounts)), " removed ", .user(who.name), " from ", .group(bar.name)])
-        }
-        Button("Cancel", role: .cancel) {}
-      } message: { _ in
-        Text("They won’t get the group’s Yos any more.")
-      }
+        })
       .task { await load() }
     }
-    .tint(Color.amethyst)
+  }
+
+  private var choices: [String] {
+    let users = Set(members + friends.all.filter { $0.group == nil && !$0.blocked && !$0.gone }.compactMap(\.user))
+    return users.filter { $0 != ownUser && (search.isEmpty || name(of: $0).localizedStandardContains(search)) }
+      .sorted { name(of: $0).localizedStandardCompare(name(of: $1)) == .orderedAscending }
   }
 
   private func name(of user: String) -> String {
-    if user == accounts.client?.userId() { return accounts.account?.username ?? "You" }
+    if user == ownUser { return accounts.account?.username ?? "You" }
     return friends.all.first { $0.user == user }?.name ?? "Yo User"
   }
 
@@ -115,6 +110,7 @@ struct GroupMembersSheet: View {
     guard let id = bar.group, let client = accounts.client,
       let groups = try? await Hub.run({ try client.groups() })
     else { return }
+    ownUser = try? await Hub.run { client.userId() }
     members = (groups.first { $0.id == id }?.members ?? []).sorted { name(of: $0) < name(of: $1) }
     friends.takeGroups(groups)
   }

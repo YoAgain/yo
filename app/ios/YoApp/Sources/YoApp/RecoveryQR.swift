@@ -11,13 +11,29 @@ enum RecoveryQR {
   static func image(key: String) -> UIImage? { image(text: key) }
 
   /// Any text as a QR code: black on white, sharp at any size.
-  static func image(text: String) -> UIImage? {
+  static func image(text: String, correctionLevel: String = "M") -> UIImage? {
     let filter = CIFilter.qrCodeGenerator()
     filter.message = Data(text.utf8)
-    filter.correctionLevel = "M"
+    filter.correctionLevel = correctionLevel
     guard let code = filter.outputImage?.transformed(by: CGAffineTransform(scaleX: 12, y: 12)),
       let cg = CIContext().createCGImage(code, from: code.extent)
     else { return nil }
+    return UIImage(cgImage: cg)
+  }
+
+  /// White modules on the brand colour; high correction tolerates the card’s small centre logo.
+  static func contactImage(text: String, inverted: Bool) -> UIImage? {
+    let generator = CIFilter.qrCodeGenerator()
+    generator.message = Data(text.utf8)
+    generator.correctionLevel = "H"
+    guard let qr = generator.outputImage else { return nil }
+    let colors = CIFilter.falseColor()
+    colors.inputImage = qr
+    let amethyst = CIColor(red: 155.0 / 255, green: 89.0 / 255, blue: 182.0 / 255)
+    colors.color0 = inverted ? CIColor.white : amethyst
+    colors.color1 = inverted ? amethyst : CIColor.white
+    guard let output = colors.outputImage?.transformed(by: CGAffineTransform(scaleX: 12, y: 12)),
+      let cg = CIContext().createCGImage(output, from: output.extent) else { return nil }
     return UIImage(cgImage: cg)
   }
 

@@ -13,6 +13,9 @@ helpers = source[source.index('  private static func make('):source.index('  pri
 journal = source[source.index('  private struct Ack:'):source.index('  // MARK: The notification service')]
 Path(sys.argv[2]).write_text('''import Foundation
 import Glibc
+enum Diagnostics {
+  @discardableResult static func attempt<T>(_ work: () throws -> T) -> T? { try? work() }
+}
 struct YoMedia { let id: Data }
 enum ShareBridge { static let container: URL? = URL(fileURLWithPath: CommandLine.arguments[1]) }
 final class YoClient {

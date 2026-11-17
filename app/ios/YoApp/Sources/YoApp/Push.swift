@@ -15,6 +15,10 @@ final class Push {
   private var sentToken: String?
   private weak var sentTo: YoClient?
 
+  func registered(for client: YoClient?) -> Bool {
+    token != nil && sentToken == token && sentTo === client
+  }
+
   private static let production: UInt8 = 1
   private static let sandbox: UInt8 = 2
 
@@ -49,4 +53,8 @@ final class AppDelegate: NSObject, UIApplicationDelegate {
   func application(_ application: UIApplication, didRegisterForRemoteNotificationsWithDeviceToken deviceToken: Data) {
     Push.shared.received(deviceToken)
   }
+  func application(_ application: UIApplication, didFailToRegisterForRemoteNotificationsWithError error: Error) {
+    Diagnostics.record(error)
+  }
+
 }

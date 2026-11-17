@@ -5,26 +5,33 @@
 // through the system's share sheet (Save Image, Notes, Files, a password manager, AirDrop).
 import SwiftUI
 
-enum SecureStep { case passkey, words }
+enum SecureStep { case passkey, recoveryKey }
 
 struct SecureNameSheet: View {
   /// Where to begin; nil, the first step left.
   var start: SecureStep?
+  /// nil keeps the combined first-run guide.
+  var only: SecureStep? = nil
+  /// Closes the sheet through the presenter's binding.
+  var close: (() -> Void)? = nil
 
   @Environment(AccountStore.self) private var accounts
   @Environment(\.dismiss) private var dismiss
   @State private var page = Stage.passkey
   /// The passkey is saved in the password manager; signing in with it once is left (the check).
+  @State private var initialized = false
   @State private var created = false
   @State private var skipped = false
   @State private var words = ""
   @State private var busy = false
   @State private var problem: String?
 
-  private enum Stage { case passkey, words, done }
+  private enum Stage { case passkey, wordsIntro, words, done }
 
   private var secured: Bool { accounts.account?.secured == true }
-  private var passkeyDone: Bool { accounts.account?.byPasskey == true }
+  private var passkeyDone: Bool {
+    accounts.account?.byPasskey == true && accounts.account?.passkeyAuth == true
+  }
   private var wordsDone: Bool { secured && accounts.wordsSaved }
 
   var body: some View {
@@ -34,13 +41,14 @@ struct SecureNameSheet: View {
         switch page {
         case .passkey:
           if created { checkPage } else { passkeyPage }
+        case .wordsIntro: wordsIntroPage
         case .words: wordsPage
         case .done: donePage
         }
       }
       .transition(.asymmetric(insertion: .move(edge: .trailing), removal: .move(edge: .leading)))
     }
-    .overlay(alignment: .topTrailing) { SheetClose().disabled(busy) }
+    .overlay(alignment: .topTrailing) { SheetClose(action: close).disabled(busy) }
     .animation(.smooth(duration: 0.35), value: page)
     .animation(.smooth(duration: 0.35), value: created)
     .foregroundStyle(.white)
@@ -48,13 +56,14 @@ struct SecureNameSheet: View {
     .preferredColorScheme(.dark)
     .interactiveDismissDisabled(busy)
     .onAppear {
-      guard words.isEmpty else { return }
+      guard !initialized else { return }
+      initialized = true
       words = secured ? RecoveryWords.load() ?? "" : accounts.secureWords()
-      skipped = accounts.passkeyTurnedOff && start != .passkey  // declined on purpose: not asked again
-      switch start {
+      skipped = accounts.passkeyTurnedOff && (only ?? start) != .passkey  // declined on purpose: not asked again
+      switch only ?? start {
       case .passkey: page = .passkey
-      case .words: page = .words
-      case nil: page = passkeyDone || skipped ? .words : .passkey
+      case .recoveryKey: page = .wordsIntro
+      case nil: page = passkeyDone || skipped ? .wordsIntro : .passkey
       }
     }
   }
@@ -68,7 +77,8 @@ struct SecureNameSheet: View {
     } bottom: {
       PrimaryButton("Continue with Face ID", busy: busy) { Task { await createPasskey() } }
         .disabled(busy)
-      Button("Skip") {
+      Button(only == nil ? "Skip" : "Cancel") {
+        if only != nil { dismiss(); return }
         skipped = true
         accounts.declinePasskey()  // a choice, as turning it off: not asked again
         next()
@@ -87,7 +97,8 @@ struct SecureNameSheet: View {
       PrimaryButton("Sign In", busy: busy) { Task { await checkPasskey() } }
         .disabled(busy)
       // A password manager that cannot do it (no PRF): on without the passkey, to the recovery key.
-      Button("Skip") {
+      Button(only == nil ? "Skip" : "Cancel") {
+        if only != nil { dismiss(); return }
         skipped = true
         created = false
         accounts.declinePasskey()  // as the first page's Skip: not asked again
@@ -99,12 +110,38 @@ struct SecureNameSheet: View {
     }
   }
 
+  private var wordsIntroPage: some View {
+    Page(title: "Recovery Key", message: "Save your recovery key to sign back in.") {
+      BigSymbol(name: "key.fill")
+    } bottom: {
+      PrimaryButton("Continue", busy: busy) {
+        Task {
+          busy = true
+          defer { busy = false }
+          do {
+            if secured && words.isEmpty { words = try await accounts.newRecoveryKey() }
+            page = .words
+          } catch { problem = error.localizedDescription }
+        }
+      }
+      .disabled(busy)
+      Note(problem)
+    }
+  }
+
   private var wordsPage: some View {
     Page(title: "Recovery Key",
-      message: passkeyDone ? "Your passkey works. Save your recovery key too." : "Save your recovery key to sign back in.") {
+      message: only == nil && passkeyDone ? "Your passkey works. Save your recovery key too." : "Save your recovery key to sign back in.") {
       FrostedKey(key: words, qrSize: 80)
     } bottom: {
       PrimaryButton("Save…") { save() }
+        .disabled(busy)
+      Button("Copy") { UIPasteboard.general.string = RecoveryCode.shown(words) }
+        .font(.yo(17))
+        .disabled(busy)
+      Button("I Saved My Recovery Key") { Task { await confirmWords() } }
+        .font(.yo(17))
+        .disabled(busy)
       Note(problem)
     }
   }
@@ -113,8 +150,8 @@ struct SecureNameSheet: View {
   private var donePage: some View {
     Page(title: "All Set", message: "“\(accounts.account?.username ?? "")” is yours forever.") {
       VStack(spacing: 12) {
-        if passkeyDone { DoneRow(title: "Passkey and Face ID") }
-        if wordsDone { DoneRow(title: "Recovery Key") }
+        if only != .recoveryKey && passkeyDone { DoneRow(title: "Passkey and Face ID") }
+        if only != .passkey && wordsDone { DoneRow(title: "Recovery Key") }
       }
       .padding(.top, 20)
     } bottom: {
@@ -134,10 +171,12 @@ struct SecureNameSheet: View {
   /// On to the next step left (a skipped passkey is not asked again), or the end.
   private func next() {
     problem = nil
-    if !passkeyDone && !skipped && page != .passkey {
+    if only != nil {
+      page = .done
+    } else if !passkeyDone && !skipped && page != .passkey {
       page = .passkey
     } else if !wordsDone && page != .words {
-      page = .words
+      page = .wordsIntro
     } else {
       UINotificationFeedbackGenerator().notificationOccurred(.success)
       page = .done
@@ -154,7 +193,7 @@ struct SecureNameSheet: View {
       created = true
     } catch {
       if !SecurityPresentation.isCancellation(error) {
-        problem = "Couldn’t create passkey. Try again or skip." + Self.detail(error)
+        problem = (only == nil ? "Couldn’t create passkey. Try again or skip." : "Couldn’t create passkey. Try again.") + Self.detail(error)
       }
     }
   }
@@ -178,8 +217,18 @@ struct SecureNameSheet: View {
     }
   }
 
-  /// The recovery key as the card (an image) and as text, to the share sheet. Once saved somewhere, it also secures
-  /// the account if nothing did yet, and the guide goes on.
+  private func confirmWords() async {
+    guard words.count == 64 else { return problem = "Your recovery key isn’t on this iPhone." }
+    busy = true
+    defer { busy = false }
+    do {
+      if !secured { try await accounts.keepWords() }
+      accounts.markWordsSaved(true)
+      next()
+    } catch { problem = error.localizedDescription }
+  }
+
+  /// Share the recovery card and text before confirming that the key is saved.
   private func save() {
     // The key missing here (a secured account brought back without it): nothing to draw.
     guard words.count == 64 else {
@@ -192,15 +241,7 @@ struct SecureNameSheet: View {
     if let image = renderer.uiImage { items.insert(image, at: 0) }
     Share.present(items) { completed in
       guard completed else { return }
-      Task {
-        if !secured {
-          busy = true
-          defer { busy = false }
-          do { try await accounts.keepWords() } catch { return problem = error.localizedDescription }
-        }
-        accounts.markWordsSaved(true)
-        next()
-      }
+      // Sharing is followed by the explicit saved confirmation on the key page.
     }
   }
 }

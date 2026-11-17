@@ -20,11 +20,11 @@ enum Prefetch {
 
   /// The folder, never in the backup: what is in it is opened, a photo meant to be seen once (as MediaStorage's).
   private static func make(_ directory: URL) {
-    try? FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+    Diagnostics.attempt({ try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true) })
     var directory = directory
     var values = URLResourceValues()
     values.isExcludedFromBackup = true
-    try? directory.setResourceValues(values)
+    Diagnostics.attempt({ try directory.setResourceValues(values) })
   }
 
   private static func name(_ media: YoMedia) -> String { media.id.map { String(format: "%02x", $0) }.joined() }
@@ -54,14 +54,14 @@ enum Prefetch {
       let done = directory.appending(path: name(media) + ".acked")
       if FileManager.default.fileExists(atPath: done.path) { return true }
       guard let data = try? JSONEncoder().encode(Ack(id: media.id, file: file.path)) else { return false }
-      return (try? data.write(to: path, options: [.atomic, .completeFileProtectionUntilFirstUserAuthentication])) != nil
+      return (Diagnostics.attempt({ try data.write(to: path, options: [.atomic, .completeFileProtectionUntilFirstUserAuthentication]) })) != nil
     } ?? false
   }
 
   static func stored(_ media: YoMedia) {
     let directory = acknowledgements
-    _ = try? Data().write(to: directory.appending(path: name(media) + ".stored"),
-      options: [.atomic, .completeFileProtectionUntilFirstUserAuthentication])
+    _ = Diagnostics.attempt({ try Data().write(to: directory.appending(path: name(media) + ".stored"),
+      options: [.atomic, .completeFileProtectionUntilFirstUserAuthentication]) })
   }
 
   /// App and service serialize retries. A lost HTTP answer may consume another fetch (anonymous by design).
@@ -88,11 +88,11 @@ enum Prefetch {
         guard let data = try? Data(contentsOf: url), let ack = try? JSONDecoder().decode(Ack.self, from: data),
           (FileManager.default.fileExists(atPath: ack.file)
             || FileManager.default.fileExists(atPath: url.deletingPathExtension().appendingPathExtension("stored").path)) else { return }
-        guard (try? Data().write(to: url.deletingPathExtension().appendingPathExtension("stored"),
-          options: [.atomic, .completeFileProtectionUntilFirstUserAuthentication])) != nil else { return }
-        guard (try? client.ackMedia(id: ack.id)) != nil else { return }
+        guard (Diagnostics.attempt({ try Data().write(to: url.deletingPathExtension().appendingPathExtension("stored"),
+          options: [.atomic, .completeFileProtectionUntilFirstUserAuthentication]) })) != nil else { return }
+        guard (Diagnostics.attempt({ try client.ackMedia(id: ack.id) })) != nil else { return }
         // Mark before removing the intent: the other process sees the successful acknowledgement.
-        guard (try? Data().write(to: done, options: [.atomic, .completeFileProtectionUntilFirstUserAuthentication])) != nil else { return }
+        guard (Diagnostics.attempt({ try Data().write(to: done, options: [.atomic, .completeFileProtectionUntilFirstUserAuthentication]) })) != nil else { return }
         try? FileManager.default.removeItem(at: url)
       }
     }
@@ -135,13 +135,13 @@ enum Prefetch {
       guard let token = claim(one) else { continue }
       defer { unclaim(one, token: token) }
       guard prepareAck(one, file: file) else { continue }
-      guard let data = try? client.fetchMedia(media: one) else { continue }
+      guard let data = Diagnostics.attempt({ try client.fetchMedia(media: one) }).flatMap({ $0 }) else { continue }
       // Still this account's (the app publishes its friends with its own id; signed out meanwhile, it does not, or
       // another account's): an old account's photo is not left here.
       guard ShareBridge.readList()?.owner == owner else { return }
       // Write atomically before acknowledging. A failed write leaves the hub copy available.
-      if (try? data.write(to: file, options: [.atomic, .completeFileProtectionUnlessOpen])) == nil {
-        try? data.write(to: file, options: [.atomic, .completeFileProtectionUnlessOpen])
+      if (Diagnostics.attempt({ try data.write(to: file, options: [.atomic, .completeFileProtectionUnlessOpen]) })) == nil {
+        Diagnostics.attempt({ try data.write(to: file, options: [.atomic, .completeFileProtectionUnlessOpen]) })
       }
       if FileManager.default.fileExists(atPath: file.path) { stored(one) }
       retryAcks(client: client, startingBefore: deadline)

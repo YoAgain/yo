@@ -28,7 +28,7 @@ final class Passkeys: NSObject {
     request.displayName = name
     request.prf = .checkForSupport
     guard let made = try await perform(request).credential as? ASAuthorizationPlatformPublicKeyCredentialRegistration
-    else { throw PasskeyError.unexpected }
+    else { throw Diagnostics.failure(PasskeyError.unexpected) }
     return (made.credentialID, made.prf?.isSupported ?? false)
   }
 
@@ -41,7 +41,7 @@ final class Passkeys: NSObject {
     request.prf = .inputValues(.init(saltInput1: salt))
     guard let asserted = try await perform(request, quietly: quietly).credential
       as? ASAuthorizationPlatformPublicKeyCredentialAssertion
-    else { throw PasskeyError.unexpected }
+    else { throw Diagnostics.failure(PasskeyError.unexpected) }
     let prf = asserted.prf?.first.withUnsafeBytes { Data($0) }
     return Answer(credentialID: asserted.credentialID, userID: asserted.userID, prf: prf)
   }
@@ -80,6 +80,7 @@ extension Passkeys: ASAuthorizationControllerDelegate, ASAuthorizationController
   }
 
   func authorizationController(controller: ASAuthorizationController, didCompleteWithError error: Error) {
+    Diagnostics.record(error)
     finish(controller) { $0.resume(throwing: error) }
   }
 

@@ -13,30 +13,15 @@ import UIKit
 import UniformTypeIdentifiers
 import YoCore
 
-extension MediaFile {
-  /// To the camera roll, when Keep Sent Photos is on.
-  func keepIfWanted() {
-    switch kind {
-    case .photo:
-      Library.saveIfWanted(photo: data)
-    case .video:
-      let file = FileManager.default.temporaryDirectory.appending(path: "\(UUID().uuidString).mp4")
-      guard (try? data.write(to: file)) != nil else { return }
-      Library.saveIfWanted(video: file)
-      try? FileManager.default.removeItem(at: file)
-    }
-  }
-}
-
 /// Where photos and videos wait on this iPhone: never in its backup (a photo seen once must not live on there), and
 /// gone with the account when it signs out.
 enum MediaStorage {
   static func directory(_ name: String) -> URL {
     var dir = URL.applicationSupportDirectory.appending(path: name, directoryHint: .isDirectory)
-    try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+    Diagnostics.attempt({ try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true) })
     var values = URLResourceValues()
     values.isExcludedFromBackup = true
-    try? dir.setResourceValues(values)
+    Diagnostics.attempt({ try dir.setResourceValues(values) })
     return dir
   }
 
@@ -46,7 +31,7 @@ enum MediaStorage {
   static func quarantine(_ url: URL) -> Bool {
     let aside = url.deletingLastPathComponent().appending(
       path: url.lastPathComponent + ".unreadable-\(Int(Date.now.timeIntervalSince1970))")
-    guard (try? FileManager.default.moveItem(at: url, to: aside)) != nil else { return false }
+    guard (Diagnostics.attempt({ try FileManager.default.moveItem(at: url, to: aside) })) != nil else { return false }
     Perf.mark("media manifest unreadable: \(url.lastPathComponent) kept as \(aside.lastPathComponent)")
     return true
   }
@@ -56,7 +41,7 @@ enum MediaStorage {
 
   /// Writes off the main actor.
   static func write(_ data: Data, to url: URL, _ protection: Data.WritingOptions) async -> Bool {
-    await Task.detached(priority: .utility) { (try? data.write(to: url, options: [.atomic, protection])) != nil }.value
+    await Task.detached(priority: .utility) { (Diagnostics.attempt({ try data.write(to: url, options: [.atomic, protection]) })) != nil }.value
   }
 
   /// Signing out: nothing of the account's photos and videos stays, sent or received.
@@ -122,7 +107,7 @@ enum ManifestSeal {
 
   /// Nil when there is no key now: the manifest is not written.
   static func seal(_ json: Data) -> Data? {
-    guard let key = try? key(), let box = try? ChaChaPoly.seal(json, using: key) else { return nil }
+    guard let key = try? key(), let box = Diagnostics.attempt({ try ChaChaPoly.seal(json, using: key) }) else { return nil }
     return magic + box.combined
   }
 
@@ -143,8 +128,8 @@ enum ManifestSeal {
     }
     let key: SymmetricKey?
     do { key = try Self.key() } catch { return .notNow }
-    guard let key, let box = try? ChaChaPoly.SealedBox(combined: data.dropFirst(magic.count)),
-      let json = try? ChaChaPoly.open(box, using: key)
+    guard let key, let box = Diagnostics.attempt({ try ChaChaPoly.SealedBox(combined: data.dropFirst(magic.count)) }),
+      let json = Diagnostics.attempt({ try ChaChaPoly.open(box, using: key) })
     else { return .unreadable }
     return .json(json, legacy: false)
   }
@@ -264,7 +249,7 @@ final class MediaOutbox {
     guard loaded else { return false }
     waiting = items.count
     guard let json = try? JSONEncoder().encode(items), let data = ManifestSeal.seal(json) else { return false }
-    guard (try? data.write(to: Self.index, options: [.atomic, .completeFileProtectionUntilFirstUserAuthentication])) != nil
+    guard (Diagnostics.attempt({ try data.write(to: Self.index, options: [.atomic, .completeFileProtectionUntilFirstUserAuthentication]) })) != nil
     else { return false }
     ManifestSeal.wrote(Self.index)
     return true
@@ -444,6 +429,7 @@ final class MediaOutbox {
       if outcome == .replaced { accounts.replaced(client); return false }
       return outcome != .stopped
     }
+    if outcome == .dropped { SendFailure.shared.show() }
     switch outcome {
     case .sent, .dropped:
       items.remove(at: at)
@@ -668,6 +654,7 @@ actor ReceivedMedia {
         migrated = old != nil || kept != nil
       }
     } catch {
+      Diagnostics.record(error)
       return false
     }
     loaded = true
@@ -706,17 +693,17 @@ actor ReceivedMedia {
   static func drainWrites() { writes.sync {} }
 
   private func store() async -> Bool {
-    guard loaded, let key = try? ManifestSeal.key() else { return false }
+    guard loaded, let key = Diagnostics.attempt({ try ManifestSeal.key() }).flatMap({ $0 }) else { return false }
     let snapshot = Manifest(pending: pending, saved: saved)
     let url = manifest
     return await withCheckedContinuation { continuation in
       Self.writes.async {
         let written = Perf.timed("media.manifest.save") {
           _ = MediaStorage.directory("Received")  // recreate after sign-out, off the main actor
-          guard let json = try? JSONEncoder().encode(snapshot),
-            let box = try? ChaChaPoly.seal(json, using: key),
-            (try? (Data("YOM1".utf8) + box.combined).write(
-              to: url, options: [.atomic, .completeFileProtectionUntilFirstUserAuthentication])) != nil
+          guard let json = Diagnostics.attempt({ try JSONEncoder().encode(snapshot) }),
+            let box = Diagnostics.attempt({ try ChaChaPoly.seal(json, using: key) }),
+            (Diagnostics.attempt { try (Data("YOM1".utf8) + box.combined).write(
+              to: url, options: [.atomic, .completeFileProtectionUntilFirstUserAuthentication]) }) != nil
           else { return false }
           UserDefaults.standard.set(true, forKey: "manifests.sealed." + url.lastPathComponent)
           return true
@@ -732,7 +719,7 @@ actor ReceivedMedia {
       guard loaded, let json = try? JSONEncoder().encode(Manifest(pending: pending, saved: saved)),
         let data = ManifestSeal.seal(json)
       else { return false }
-      guard (try? data.write(to: manifest, options: [.atomic, .completeFileProtectionUntilFirstUserAuthentication])) != nil
+      guard (Diagnostics.attempt { try data.write(to: manifest, options: [.atomic, .completeFileProtectionUntilFirstUserAuthentication]) }) != nil
       else { return false }
       ManifestSeal.wrote(manifest)
       return true

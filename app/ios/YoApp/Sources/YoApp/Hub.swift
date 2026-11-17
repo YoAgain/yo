@@ -73,24 +73,30 @@ enum Hub {
     if roots.isEmpty {
       print("Yo: no trust root pinned for \(host): sealed Yos do not open, Yos go identified (Hub.trustRoots)")
     }
-    try? client.setTrustRoots(keys: roots)
+    Diagnostics.attempt({ try client.setTrustRoots(keys: roots) })
     if let params = zkParams[host].flatMap({ Data(base64URL: $0) }), !params.isEmpty {
-      try? client.setZkParams(params: params)
+      Diagnostics.attempt({ try client.setZkParams(params: params) })
     } else {
       print("Yo: no group params pinned for \(host): no groups (Hub.zkParams)")
     }
     guard let texts = keys[host] else { return }
     let pinned = texts.compactMap { Data(base64URL: $0) }.filter { $0.count == 32 }
     guard !pinned.isEmpty else { return }
-    try? client.setHubKeys(keys: pinned)
+    Diagnostics.attempt({ try client.setHubKeys(keys: pinned) })
   }
 
   /// A blocking core call, off the main actor: on threads of its own, not Swift's few shared ones. A core call waits
   /// for the network and for the core (one call at a time); blocked there, a burst of calls would hold every shared
   /// thread, and everything else async (the inbox's long wait too) would stand still.
-  static func run<T: Sendable>(_ work: @escaping @Sendable () throws -> T) async throws -> T {
+  static func run<T: Sendable>(reportErrors: Bool = true, file: String = #fileID, line: Int = #line, place: String = #function, _ work: @escaping @Sendable () throws -> T) async throws -> T {
     try await withCheckedThrowingContinuation { done in
-      queue.async { done.resume(with: Result { try work() }) }
+      queue.async {
+        do { done.resume(returning: try work()) }
+        catch {
+          if reportErrors { Diagnostics.recordUnreported(error, file: file, line: line, place: place) }
+          done.resume(throwing: error)
+        }
+      }
     }
   }
 
@@ -147,6 +153,13 @@ final class HubTransport: HttpTransport {
   private static let signedSession = URLSession(configuration: plain())
   private static let anonymousSession = URLSession(configuration: plain())
 
+  /// A public, account-free request primes the same pool used by sealed deliveries.
+  static func warmAnonymous() async {
+    var request = URLRequest(url: Hub.url, timeoutInterval: 10)
+    request.httpMethod = "HEAD"
+    _ = try? await anonymousSession.data(for: request)
+  }
+
   private static func plain() -> URLSessionConfiguration {
     let config = URLSessionConfiguration.ephemeral
     config.httpCookieStorage = nil
@@ -161,12 +174,13 @@ final class HubTransport: HttpTransport {
     let path = path.split(separator: "?", maxSplits: 1).first.map(String.init) ?? path
     return (method == "POST" && path.hasPrefix("/v1/inbox/") && path != "/v1/inbox/ack")
       || path.hasPrefix("/v1/blobs/")
-      || path == "/v1/crash"
+      || path == "/v1/crash" || path == "/v1/errors" || path == "/v1/diagnostics/crash"
   }
 
   func request(method: String, path: String, headers: [Header], body: Data) -> HttpResult {
     guard !Self.unsupported else { return HttpResult(status: 426, body: Data(), error: nil) }
     guard let url = URL(string: path, relativeTo: base) else {
+      Diagnostics.record(NSError(domain: "HubTransport", code: -1000))
       return HttpResult(status: 0, body: Data(), error: "bad path")
     }
     var request = URLRequest(url: url, timeoutInterval: timeout)
@@ -184,13 +198,17 @@ final class HubTransport: HttpTransport {
     let task = (anonymous ? Self.anonymousSession : Self.signedSession).dataTask(with: request)
     // Read as it comes, and cut off past the largest answer the hub may give (`Limited`): a faulty or hostile hub
     // never fills the memory of the app or of an extension (which has 24 MB).
-    task.delegate = Limited { data, response, error in
+    let diagnosticUpload = path == "/v1/errors" || path == "/v1/crash" || path == "/v1/diagnostics/crash"
+    // Only static route components: never account, blob, group or username path values.
+    let codePlace = "HubTransport.request \(method) " + path.split(separator: "/").prefix(2).joined(separator: "/")
+    task.delegate = Limited(diagnosticPlace: diagnosticUpload ? nil : codePlace) { data, response, error in
       answer.result =
         if let error {
           HttpResult(status: 0, body: Data(), error: error)
         } else {
           HttpResult(status: UInt16((response as? HTTPURLResponse)?.statusCode ?? 0), body: data, error: nil)
         }
+      DataUsage.record(sent: Int(task.countOfBytesSent), received: Int(task.countOfBytesReceived))
       if answer.result.status == 426 {
         Self.tooOld.store(true, ordering: .relaxed)
         AppUpdate.tooOld()
@@ -203,12 +221,17 @@ final class HubTransport: HttpTransport {
       if let access { try access.start(task) }
       else { task.resume() }
     } catch {
+      if !diagnosticUpload { Diagnostics.record(error, place: codePlace) }
       task.cancel()
       return HttpResult(status: 0, body: Data(), error: "shared storage time ended")
     }
     done.wait()
     if access?.expired == true {
+      if !diagnosticUpload { Diagnostics.record(NSError(domain: "SharedAccess", code: Int(ECANCELED)), place: codePlace) }
       return HttpResult(status: 0, body: Data(), error: "shared storage time ended")
+    }
+    if !diagnosticUpload, answer.result.status >= 400 {
+      Diagnostics.record(NSError(domain: "HTTP", code: Int(answer.result.status)), place: codePlace)
     }
     Availability.network(answer.result.status == 0 || answer.result.status >= 500)
     if (200..<300).contains(answer.result.status), signed {  // the core sends the header lowercase
@@ -237,9 +260,10 @@ final class HubTransport: HttpTransport {
     private var data = Data()
     private var response: URLResponse?
     private var tooLarge = false
+    private let diagnosticPlace: String?
     private let done: (Data, URLResponse?, String?) -> Void
 
-    init(done: @escaping (Data, URLResponse?, String?) -> Void) { self.done = done }
+    init(diagnosticPlace: String?, done: @escaping (Data, URLResponse?, String?) -> Void) { self.done = done; self.diagnosticPlace = diagnosticPlace }
 
     func urlSession(
       _ session: URLSession, dataTask: URLSessionDataTask, didReceive response: URLResponse,
@@ -264,7 +288,9 @@ final class HubTransport: HttpTransport {
     }
 
     func urlSession(_ session: URLSession, task: URLSessionTask, didCompleteWithError error: Error?) {
+      if let error, let diagnosticPlace { Diagnostics.record(error, place: diagnosticPlace) }
       if tooLarge {
+        if let diagnosticPlace { Diagnostics.record(NSError(domain: "HubTransport", code: 413), place: diagnosticPlace) }
         done(Data(), nil, "answer too large")
       } else {
         done(data, response, error?.localizedDescription)
@@ -301,7 +327,7 @@ final class StateFile: StateStore {
 
   /// Throws when it is not written (a full disk): the core's call fails, and nothing that needed the save leaves.
   func save(blob: Data) throws {
-    try? FileManager.default.createDirectory(at: URL.applicationSupportDirectory, withIntermediateDirectories: true)
+    Diagnostics.attempt({ try FileManager.default.createDirectory(at: URL.applicationSupportDirectory, withIntermediateDirectories: true) })
     do {
       try blob.write(to: Self.url, options: [.atomic, .completeFileProtectionUntilFirstUserAuthentication])
     } catch {
@@ -310,10 +336,13 @@ final class StateFile: StateStore {
     var url = Self.url
     var values = URLResourceValues()
     values.isExcludedFromBackup = true
-    try? url.setResourceValues(values)
+    Diagnostics.attempt({ try url.setResourceValues(values) })
   }
 
-  static func load() -> Data? { try? Data(contentsOf: url) }
+  static func load() -> Data? {
+    guard FileManager.default.fileExists(atPath: url.path) else { return nil }
+    return Diagnostics.attempt { try Data(contentsOf: url) }
+  }
   static func delete() { try? FileManager.default.removeItem(at: url) }
 }
 
@@ -381,7 +410,7 @@ enum StateKey {
     else { return false }
     let key = own ?? there ?? random()
     guard key != there else { return true }
-    return (try? Keychain.write(inGroup, key, accessible: kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly)) != nil
+    return (Diagnostics.attempt({ try Keychain.write(inGroup, key, accessible: kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly) })) != nil
   }
 
   /// Yo Dev (`Keychain.scoped`): the keys of this name in the team's other groups, which its profile lets it read (Yo
@@ -432,8 +461,14 @@ enum StateKey {
 /// The app's keychain items, read and written so that a keychain that does not answer now (locked, a passing error)
 /// is never taken for one without the item: only `errSecItemNotFound` is "none".
 enum Keychain {
-  struct Failure: Error {
+  struct Failure: Error, CustomNSError {
     let status: OSStatus
+    static var errorDomain: String { "Keychain" }
+    var errorCode: Int { Int(status) }
+    init(status: OSStatus, file: String = #fileID, line: Int = #line, place: String = #function) {
+      self.status = status
+      Diagnostics.record(self, place: place, file: file, line: line)
+    }
   }
 
   /// Yo Dev scopes its queries to the concrete app group set by dev/sign.sh. Older builds used the profile's
@@ -566,5 +601,36 @@ final class Availability {
   }
   nonisolated static func network(_ failed: Bool) {
     Task { @MainActor in shared.remote = failed }
+  }
+}
+
+/// Payload bytes, including media, counted once at the transport boundary. Serialised across request callbacks.
+enum DataUsage {
+  private static let lock = NSLock()
+  static func record(sent: Int, received: Int) {
+    lock.lock()
+    defer { lock.unlock() }
+    let defaults = UserDefaults.standard
+    let month = monthKey
+    for (direction, count) in [("sent", sent), ("received", received)] {
+      for period in ["all", month] {
+        let key = "usage.\(period).\(direction)"
+        defaults.set(defaults.double(forKey: key) + Double(max(0, count)), forKey: key)
+      }
+    }
+  }
+  private static var monthKey: String {
+    let parts = Calendar(identifier: .gregorian).dateComponents([.year, .month], from: .now)
+    return "\(parts.year ?? 0)-\(parts.month ?? 0)"
+  }
+  static func total(month: Bool) -> String {
+    let defaults = UserDefaults.standard
+    let period = month ? monthKey : "all"
+    let bytes = defaults.double(forKey: "usage.\(period).sent") + defaults.double(forKey: "usage.\(period).received")
+    return (bytes / 1_000_000).formatted(.number.precision(.fractionLength(1))) + " MB"
+  }
+  static func megabytes(month: Bool, direction: String, unit: Bool = true) -> String {
+    let bytes = UserDefaults.standard.double(forKey: "usage.\(month ? monthKey : "all").\(direction)")
+    return (bytes / 1_000_000).formatted(.number.precision(.fractionLength(1))) + (unit ? " MB" : "")
   }
 }

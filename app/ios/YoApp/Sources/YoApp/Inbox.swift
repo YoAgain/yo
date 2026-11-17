@@ -95,49 +95,6 @@ final class Inbox {
   @ObservationIgnored private var came = 0
   // Allow the 160 ms count transition to finish between batches.
   static let batchSeconds = 0.2
-  /// One who sent Yos standing on a group's bar, and how many.
-  struct GroupSender: Equatable {
-    var name: String
-    var count: Int
-    /// Their last Yo came then: their line fades on its own, as a bar's Yo does (`SenderBlocks`).
-    var at = Date.now
-  }
-  /// Who sent the Yos standing on a group's bar (by its `Friend.mediaKey`), in the order they first came, each once
-  /// with their count: a line each under the bar's name, "Kai: Yo!!" (`SenderBlocks`). Gone with the Yos (`endRun`).
-  @MainActor @Observable final class SenderRun { var senders: [GroupSender] = [] }
-  @ObservationIgnored private var senderRuns: [String: SenderRun] = [:]
-  func senderRun(_ key: String) -> SenderRun {
-    if let run = senderRuns[key] { return run }
-    let run = SenderRun()
-    senderRuns[key] = run
-    return run
-  }
-  private final class PendingSenders {
-    var senders: [GroupSender]
-    var indexes: [String: Int]
-    init(_ senders: [GroupSender]) {
-      self.senders = senders
-      indexes = Dictionary(senders.enumerated().map { ($0.element.name, $0.offset) }, uniquingKeysWith: { a, _ in a })
-    }
-    func add(_ name: String) {
-      if let index = indexes[name] {
-        senders[index].count += 1
-        senders[index].at = .now
-      } else {
-        indexes[name] = senders.count
-        senders.append(GroupSender(name: name, count: 1))
-      }
-    }
-  }
-  @ObservationIgnored private var pendingSenders: [String: PendingSenders] = [:]
-  @ObservationIgnored private var publishingSenders = false
-
-  /// A group bar's Yos are over (its senders' lines have faded): the bar is one line again, a photo still waiting
-  /// with its sign at the end as on any bar; the next Yo starts its senders anew.
-  func endRun(_ key: String) {
-    pendingSenders[key] = nil
-    senderRun(key).senders = []
-  }
   /// Group members' names by user id (hex), as their Yos came: who a group's photo is from in the viewer.
   @ObservationIgnored var memberNames: [String: String] = [:]
 
@@ -189,8 +146,6 @@ final class Inbox {
     resending?.cancel()
     resending = nil
     unseenMedia = [:]
-    pendingSenders = [:]
-    for run in senderRuns.values { run.senders = [] }
     ready = []
     uncounted = [:]
     taken = []
@@ -238,6 +193,13 @@ final class Inbox {
     lastSend[key] = this
     let problem = await this.value
     if lastSend[key] == this { lastSend[key] = nil }
+    if problem != nil {
+      let retry: (@MainActor () -> Void)?
+      if unsent[friend.key] != nil || delivering != nil {
+        retry = { self.resume(accounts: accounts, friends: friends) }
+      } else { retry = nil }
+      SendFailure.shared.show(name: friend.name, retry: retry)
+    }
     return problem
   }
 
@@ -408,6 +370,13 @@ final class Inbox {
 
   /// What the core held for a friend goes now: their new key confirmed (spec 3.4), or unblocked.
   func resume(accounts: AccountStore, friends: Friends) {
+    let round = unsent
+    unsent = [:]
+    Task {
+      for kept in round.values {
+        for _ in 0..<kept.count { _ = await send(to: kept.friend, accounts: accounts, friends: friends) }
+      }
+    }
     deliverLater(accounts: accounts, friends: friends)
   }
 
@@ -467,15 +436,18 @@ final class Inbox {
 
   /// When the core opens and each time the app comes to the foreground (spec 4.4): key updates that are due, the
   /// storage's write; what it received on the way, as any.
-  func maintain(accounts: AccountStore, friends: Friends) async {
-    guard let client = accounts.client, !HubTransport.unsupported else { return }
+  @discardableResult
+  func maintain(accounts: AccountStore, friends: Friends) async -> Bool {
+    guard let client = accounts.client, !HubTransport.unsupported else { return false }
     do {
       let (events, contacts) = try await Hub.run { (try client.maintenance(), client.contacts()) }
-      guard client === accounts.client else { return }  // signed out meanwhile: not for this account
+      guard client === accounts.client else { return false }  // signed out meanwhile: not for this account
       await take(events, contacts: contacts, client: client, friends: friends)
+      return true
     } catch YoError.Replaced {
       accounts.replaced(client)
     } catch {}
+    return false
   }
 
   /// A photo or video shown in the viewer: it will not show again.
@@ -550,32 +522,6 @@ final class Inbox {
           guard let bar = bars[group] else { break }
           let from = contactsByUser[user]
           let senderName = resolved[user]?.name ?? from?.handles.first ?? from?.name ?? "?"
-          // In the order they first came, for the whole run: one who writes again stays in their place (and shows
-          // again there if faded), a new one comes in under the others.
-          Perf.timed("inbox.group.accumulate") {
-            let pending: PendingSenders
-            if let existing = pendingSenders[bar.mediaKey] { pending = existing }
-            else {
-              pending = PendingSenders(senderRun(bar.mediaKey).senders)
-              pendingSenders[bar.mediaKey] = pending
-            }
-            pending.add(senderName)
-          }
-          if !publishingSenders {
-            publishingSenders = true
-            PerfProbe.nextFrame { [weak self] in
-              guard let self else { return }
-              Perf.timed("inbox.group.publish") {
-                withAnimation(.snappy) {
-                  for (key, value) in pendingSenders {
-                    Perf.timed("inbox.group.assign") { senderRun(key).senders = value.senders }
-                  }
-                }
-                pendingSenders = [:]
-                publishingSenders = false
-              }
-            }
-          }
           memberNames[user] = senderName
           received(id: "\(group)/\(user)/\(sentAtMs)", from: bar.name)
           count(from: bar.name)

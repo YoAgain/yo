@@ -24,21 +24,21 @@ struct MediaFile: Sendable {
   /// A photo as it goes: a JPEG at most `longestSide` pixels on its longest side, upright, and nothing but its
   /// pixels (no place, no camera, no date).
   static func photo(_ data: Data) -> MediaFile? {
-    guard let source = CGImageSourceCreateWithData(data as CFData, nil) else { return nil }
+    guard let source = CGImageSourceCreateWithData(data as CFData, nil) else { Diagnostics.record(NSError(domain: "MediaFile", code: 1)); return nil }
     let options: [CFString: Any] = [
       kCGImageSourceCreateThumbnailFromImageAlways: true,
       kCGImageSourceCreateThumbnailWithTransform: true,  // upright, as it was taken
       kCGImageSourceThumbnailMaxPixelSize: longestSide,
       kCGImageSourceShouldCacheImmediately: true,
     ]
-    guard let image = CGImageSourceCreateThumbnailAtIndex(source, 0, options as CFDictionary) else { return nil }
+    guard let image = CGImageSourceCreateThumbnailAtIndex(source, 0, options as CFDictionary) else { Diagnostics.record(NSError(domain: "MediaFile", code: 1)); return nil }
     let out = NSMutableData()
     guard let destination = CGImageDestinationCreateWithData(out, UTType.jpeg.identifier as CFString, 1, nil)
-    else { return nil }
+    else { Diagnostics.record(NSError(domain: "MediaFile", code: 1)); return nil }
     // Only the quality: no properties, so no metadata.
     CGImageDestinationAddImage(
       destination, image, [kCGImageDestinationLossyCompressionQuality: quality] as CFDictionary)
-    guard CGImageDestinationFinalize(destination) else { return nil }
+    guard CGImageDestinationFinalize(destination) else { Diagnostics.record(NSError(domain: "MediaFile", code: 1)); return nil }
     return MediaFile(kind: .photo, data: out as Data, width: image.width, height: image.height, durationMs: 0)
   }
 
@@ -48,8 +48,8 @@ struct MediaFile: Sendable {
     defer { try? FileManager.default.removeItem(at: recording) }
     let asset = AVURLAsset(url: recording)
     guard let export = AVAssetExportSession(asset: asset, presetName: AVAssetExportPreset960x540),
-      let duration = try? await asset.load(.duration)
-    else { return nil }
+      let duration = await Diagnostics.attempt({ try await asset.load(.duration) })
+    else { Diagnostics.record(NSError(domain: "MediaFile", code: 1)); return nil }
     let length = CMTimeMinimum(duration, CMTime(seconds: longestVideo, preferredTimescale: 600))
     export.timeRange = CMTimeRange(start: .zero, duration: length)
     export.metadata = []
@@ -70,9 +70,10 @@ struct MediaFile: Sendable {
         try? FileManager.default.removeItem(at: out)
       }
     } catch {
+      Diagnostics.record(error)
       return nil
     }
-    guard let data = try? Data(contentsOf: out), !data.isEmpty, data.count <= largestVideo + 1_000_000 else {
+    guard let data = Diagnostics.attempt({ try Data(contentsOf: out) }), !data.isEmpty, data.count <= largestVideo + 1_000_000 else {
       return nil
     }
     var size = CGSize(width: 540, height: 960)

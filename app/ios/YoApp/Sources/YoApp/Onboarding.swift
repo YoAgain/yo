@@ -1,7 +1,7 @@
 // The way in. Sign Up → a name → the list (the name is secured later, from the profile: Secure Your Account). The one
 // account in the iCloud Keychain not signed out (the app installed again, a new iPhone) comes back before anything,
 // without a word. "Sign In" brings an account from before: one of the iCloud Keychain's, tapped; a passkey; or the recovery
-// key, which says whose it is. A passkey on this phone is offered by the system at once.
+// key, which says whose it is. With an account in the iCloud Keychain, Sign In comes up by itself at the first start.
 //
 // Every step after the welcome is the same page, as Apple's setup screens are: a title and one line at the top, the
 // content in the middle, the button at the bottom over the full width, a text button under it if there is a second
@@ -19,6 +19,10 @@ struct Onboarding: View {
     case welcome, name, logIn, logInWithWords
   }
 
+  /// Set by Sign Out, for this run of the app only: the welcome then shows the Sign In card instead of signing in
+  /// again. The next cold start (the app closed, or installed anew) signs in from the iCloud Keychain by itself.
+  @MainActor static var signedOutThisRun = false
+
   @State private var step = Step.welcome
   @State private var name = ""
   @State private var busy = false
@@ -30,11 +34,18 @@ struct Onboarding: View {
   /// Names the hub refused as shorter than it allows now (its `YO_NAME_MIN`), by skeleton.
   @State private var short: Set<String> = []
   @State private var shakes = 0
+  @State private var focusRequests = 0
+  /// The name once the typing paused on it: only then its taken or free mark.
+  @State private var settled = ""
   /// What the hub said about names typed, by skeleton: free or taken (the checkmark or the red cross).
   @State private var checked: [String: Bool] = [:]
   /// The accounts in the iCloud Keychain, for Sign In; the one being signed in with.
   @State private var synced: [SyncedAccount.Item] = []
   @State private var signingIn: Data?
+  /// The Sign In card over the welcome.
+  @State private var signingInCard = false
+  /// The account the card signs in by itself after a moment (a cold start with exactly one in the keychain).
+  @State private var autoSignIn: Data?
 
   var body: some View {
     ZStack {
@@ -53,6 +64,7 @@ struct Onboarding: View {
     .foregroundStyle(.white)
     .animation(.smooth(duration: 0.35), value: step)
     .preferredColorScheme(.dark)
+    .sheet(isPresented: $signingInCard) { signInCard }
   }
 
   // MARK: Welcome
@@ -61,6 +73,7 @@ struct Onboarding: View {
   /// The logo is the first of the pages swiped through above the pair (Intro.swift), as in the original.
   private var welcome: some View {
     VStack(spacing: 0) {
+      // The pages and their dots as one block, a little higher; the room left goes between them and the name.
       Intro {
         VStack(spacing: 0) {
           Text("Yo")
@@ -70,6 +83,8 @@ struct Onboarding: View {
             .opacity(0.85)
         }
       }
+      // The carousel where it was (centred in the room above the form); only its dots sit close under the cards.
+      .frame(maxHeight: .infinity)
       VStack(spacing: 0) {
         // An invite link opened before the account: its name comes on the list once there is one (Invite.swift).
         if let invited = Invite.shared.pending {
@@ -81,10 +96,66 @@ struct Onboarding: View {
             .padding(.bottom, 16)
             .transition(.opacity)
         }
-        PrimaryButton("Sign Up") { go(.name) }
-        Button("Sign In") { go(.logIn) }
+        // Sign Up right here: the name, its free/taken mark, the button. No page of its own.
+        // Taken or free shows once the typing has paused (500 ms), never while passing a name on the way ("Peter5").
+        let free = name == settled ? checked[Username.skeleton(name)] : nil
+        let taken = !name.isEmpty && free == false
+        ZStack {
+          Text("Choose a longer name.")
+            .font(.subheadline.weight(.semibold))
+            .opacity(tooShort ? 1 : 0)
+            .accessibilityHidden(!tooShort)
+          Button {
+            go(.logIn)
+          } label: {
+            (Text("Name taken. Yours? ").foregroundStyle(.white.opacity(0.8))
+              + Text("Sign In").foregroundStyle(.white).underline())
+              .font(.subheadline.weight(.semibold))
+          }
+          .buttonStyle(.plain)
+          .opacity(taken ? 1 : 0)
+          .disabled(!taken)
+          .accessibilityHidden(!taken)
+          .accessibilityLabel("Name taken. Sign In if it’s yours")
+        }
+        .frame(minHeight: 22)
+        .padding(.bottom, 8)
+        .animation(.snappy(duration: 0.2), value: taken)
+        .animation(.snappy(duration: 0.2), value: tooShort)
+        .onChange(of: name) { tooShort = false }
+        .task(id: name) { await check(name) }
+        .task(id: name) {
+          guard (try? await Task.sleep(for: .milliseconds(500))) != nil else { return }
+          settled = name
+        }
+        .task(id: name) {
+          // Too short shows (line and red mark) only once the typing has paused, never on the first letter.
+          guard (try? await Task.sleep(for: .seconds(1.5))) != nil else { return }
+          if (1...2).contains(name.count) || short.contains(Username.skeleton(name)) { tooShort = true }
+        }
+        // The line about the name, then field, Sign Up and Sign In close together as one block.
+        VStack(spacing: 10) {
+          NameField(name: $name, mark: name.isEmpty ? nil : Username.problem(name) == nil && free == true ? .available
+            : taken || tooShort ? .taken : nil,
+            shakes: shakes, autofocus: false, focusRequests: focusRequests, onSubmit: { Task { await register() } })
+          // Always tappable: with no name yet it shakes the field and brings the keyboard up.
+          PrimaryButton("Sign Up", busy: busy) {
+            if name.isEmpty {
+              shakes += 1
+              focusRequests += 1
+              UINotificationFeedbackGenerator().notificationOccurred(.warning)
+            } else {
+              Task { await register() }
+            }
+          }
+          .disabled(taken || busy)
+        }
+
+        Note(problem)
+        // One line, all of it the link.
+        Button("Got Yo? Sign In") { go(.logIn) }
           .font(.yo(18))
-          .padding(.top, 18)
+          .padding(.top, 14)
       }
       .padding(.horizontal, 28)
     }
@@ -93,15 +164,23 @@ struct Onboarding: View {
     .task {
       guard !looked else { return }
       looked = true
-      // The account in the iCloud Keychain (the app installed again, a new iPhone): straight back to the list.
-      busy = true
-      let back = await accounts.restoreFromKeychain()
-      busy = false
-      if back { return }
-      // The welcome on screen first; gone meanwhile (Sign Up or Sign In tapped): no quiet passkey look over it.
-      guard (try? await Task.sleep(for: .seconds(0.4))) != nil else { return }
+      // Exactly one account in the iCloud Keychain, not signed out on purpose (a new iPhone, the app installed again):
+      // straight back to the list, without a question.
+      // Installed anew (no defaults of this app yet): a fresh start, even after a Sign Out on the old install.
+      // A cold start signs in from the iCloud Keychain by itself; right after a Sign Out (same run) the card comes.
+      let fresh = !Self.signedOutThisRun
+      if fresh {
+        busy = true
+        let back = await accounts.restoreFromKeychain(fresh: true)
+        busy = false
+        if back { return }
+      }
+      // The welcome on screen first; gone meanwhile (Sign Up or Sign In tapped): nothing over it.
+      guard (try? await Task.sleep(for: .seconds(0.4))) != nil, step == .welcome else { return }
       inbox.playYo()  // the app says what it is: "Yo"
-      try? await accounts.restoreWithPasskey(quietly: true)  // a Yo passkey here: the system offers it
+      // Otherwise accounts in the iCloud Keychain (signed out before, or several): the Sign In card comes up by itself,
+      // listing them to tap, with the passkey and the recovery key as the other ways. No passkey is looked for unasked.
+      if !SyncedAccount.all().isEmpty { withAnimation(.smooth) { go(.logIn) } }
     }
   }
 
@@ -115,7 +194,8 @@ struct Onboarding: View {
     let trouble = Username.problem(name) ?? (taken ? "taken" : nil)
     let mine = taken  // or reserved: only the hub knows, and signing in with a name not one's own just fails
     return Page(title: "Choose a Name", back: { go(.welcome) }) {
-      NameField(name: $name, mark: trouble == nil && free == true ? .available : taken ? .taken : nil,
+      NameField(name: $name, mark: name.isEmpty ? nil : trouble == nil && free == true ? .available
+        : trouble != nil ? .taken : nil,
         shakes: shakes, onSubmit: { Task { await register() } })
       // Under the field, one place: the minimum after a Continue too soon, or "This Is My Name" when it is taken.
       ZStack {
@@ -148,34 +228,19 @@ struct Onboarding: View {
   // MARK: Log in
 
   /// Asked for on purpose: the accounts in the iCloud Keychain to tap, if any; then the two ways, the passkey first.
-  private var logInChoice: some View {
-    Page(title: "Sign In", message: "Use your passkey or recovery key.", back: { go(.welcome) }) {
-      if !synced.isEmpty {
-        VStack(spacing: 10) {
-          ForEach(synced) { item in
-            Button { Task { await logIn(item) } } label: {
-              HStack(spacing: 12) {
-                Avatar(name: item.username, size: 36)
-                Text(item.username).font(.yo(20)).lineLimit(1)
-                Spacer(minLength: 0)
-                if signingIn == item.userID { ProgressView().tint(.white) }
-              }
-              .frame(maxWidth: .infinity, minHeight: 44)
-            }
-            .buttonStyle(.glass)
-            .disabled(busy)
-            .accessibilityLabel("Sign In as \(item.username)")
-          }
-          Text("Saved in your iCloud Keychain.").font(.footnote).opacity(0.75)
-        }
-      }
-    } bottom: {
-      PrimaryButton("Use Passkey", busy: busy) { Task { await logInWithPasskey() } }
-        .disabled(busy)
-      Button("Use Recovery Key") { go(.logInWithWords) }
-        .font(.yo(17))
-      Note(problem)
-    }
+  private var logInChoice: some View { welcome }
+
+  /// Sign In as a small card over the welcome: the iCloud Keychain's accounts to tap, then the passkey and the
+  /// recovery key. Comes up by itself at the first start when the keychain holds an account.
+  private var signInCard: some View {
+    SignInCard(
+      busy: busy, signingIn: signingIn, problem: problem, autoSignIn: $autoSignIn,
+      logIn: { item in Task { await logIn(item) } },
+      passkey: { Task { await logInWithPasskey() } },
+      recoveryKey: {
+        signingInCard = false
+        go(.logInWithWords)
+      })
   }
 
   // MARK: Doing
@@ -184,7 +249,7 @@ struct Onboarding: View {
   private func check(_ typed: String) async {
     let skeleton = Username.skeleton(typed)
     guard Username.problem(typed) == nil, checked[skeleton] == nil,
-      (try? await Task.sleep(for: .milliseconds(350))) != nil
+      (try? await Task.sleep(for: .milliseconds(500))) != nil
     else { return }
     let transport = Hub.transport
     do {
@@ -193,14 +258,24 @@ struct Onboarding: View {
       checked[skeleton] = free || NewAccountKey.has(typed)
     } catch YoError.Refused(status: 400) {
       // A name of the right form the hub finds too short: how short a name may be is the hub's switch (spec 3.3).
-      short.insert(skeleton)
-      if typed == name { tooShort = true }
+      short.insert(skeleton)  // shown after the pause (the 1.5 s task), not at once
     } catch {}
   }
 
   private func go(_ next: Step) {
     problem = nil
-    if next == .logIn { synced = SyncedAccount.all() }
+    if next == .logIn {
+      // The list first, the card a moment later: shown in the same update, the sheet drew the empty list from before
+      // and refreshed only on the next change (a passkey try cancelled).
+      synced = SyncedAccount.all()
+      problem = nil
+      step = .welcome
+      Task { @MainActor in
+        await Task.yield()
+        signingInCard = true
+      }
+      return
+    }
     step = next
   }
 
@@ -244,7 +319,15 @@ struct Onboarding: View {
       checked[Username.skeleton(asked)] = false
       UINotificationFeedbackGenerator().notificationOccurred(.error)
     } catch {
-      problem = error.localizedDescription
+      // The hub's refusal of a name can arrive wrapped (no raw codes on screen): a refusal reads as too short, anything
+      // else as one plain line.
+      if case YoError.Refused = error {
+        short.insert(Username.skeleton(asked))
+        tooShort = true
+      } else {
+        problem = "Couldn’t sign up. Check your connection and try again."
+      }
+      UINotificationFeedbackGenerator().notificationOccurred(.error)
     }
   }
 
@@ -314,16 +397,23 @@ struct Page<Content: View, Bottom: View>: View {
 /// pages' back button and as large, so the sheet says how it goes away, not only by a swipe down.
 struct SheetClose: View {
   @Environment(\.dismiss) private var dismiss
+  /// The presenter's own close (its binding), when the environment's dismiss would not reach the sheet.
+  var action: (() -> Void)? = nil
 
   var body: some View {
-    Button { dismiss() } label: {
+    Button { if let action { action() } else { dismiss() } } label: {
+      // The system's close: a Liquid Glass circle, as the navigation bar's buttons.
       Image(systemName: "xmark")
-        .font(.title3.weight(.semibold))
-        .frame(width: 44, height: 44, alignment: .trailing)
-        .contentShape(.rect)
+        .font(.system(size: 17, weight: .semibold))
+        .frame(width: 44, height: 44)
+        .glassEffect(.regular.interactive(), in: .circle)
+        .contentShape(.circle)
     }
     .accessibilityLabel("Close")
-    .padding(.trailing, 24)
+    .buttonStyle(.plain)
+    .padding(.trailing, 16)
+    // Below the sheet's grabber strip: the system takes touches there for dragging, not for this button.
+    .padding(.top, 20)
   }
 }
 
@@ -342,13 +432,13 @@ struct PrimaryButton: View {
   var body: some View {
     Button(action: action) {
       Group {
-        if busy { ProgressView().tint(Color.amethyst) } else { Text(title).font(.yo(21)) }
+        if busy { ProgressView() } else { Text(title).font(.system(.title3, weight: .semibold)) }
       }
       .frame(maxWidth: .infinity, minHeight: 40)
     }
     .buttonStyle(.glassProminent)
     .tint(.white)
-    .foregroundStyle(Color.amethyst)
+    .foregroundStyle(.black)
   }
 }
 
@@ -392,16 +482,20 @@ private struct NameField: View {
   enum Mark { case available, taken }
   /// Counted up to shake the field (Continue with a name too short).
   var shakes = 0
+  /// The keyboard comes up at once (its own page); on the welcome it waits for a tap.
+  var autofocus = true
+  /// Counted up to bring the keyboard up from outside (Sign Up tapped with no name yet).
+  var focusRequests = 0
   var onSubmit: () -> Void = {}
   @FocusState private var focused: Bool
   /// The name's width at full size, and the field's room for it: a long name gets smaller until all of it fits.
   @State private var needed = 0.0
   @State private var room = 0.0
 
-  private static let full = 34.0
+  private static let full = 28.0
 
   var body: some View {
-    TextField("", text: $name, prompt: Text("Name").foregroundStyle(.white.opacity(0.3)))
+    TextField("", text: $name)
       .font(.yo(fontSize))
       .tint(.white)
       .multilineTextAlignment(.center)
@@ -417,7 +511,9 @@ private struct NameField: View {
       }
       .padding(.vertical, 14)
       .padding(.horizontal, 44)  // room for the checkmark, the name staying in the middle
-      .background(.white.opacity(0.14), in: .rect(cornerRadius: 16))
+      // A pill like the Sign Up button under it, same width and shape; tinted, not white, so the two read as field
+      // and button. Its prompt says what goes in.
+      .background(.white.opacity(0.16), in: .capsule)
       .overlay(alignment: .trailing) {
         if let mark {
           Image(systemName: mark == .available ? "checkmark.circle.fill" : "xmark.circle.fill")
@@ -426,7 +522,7 @@ private struct NameField: View {
             .padding(.trailing, 14)
             .transition(.scale.combined(with: .opacity))
             .id(mark)
-            .accessibilityLabel(mark == .available ? "Available" : "Taken")
+            .accessibilityLabel(mark == .available ? "Available" : "Not available")
         }
       }
       .animation(.snappy(duration: 0.2), value: mark)
@@ -438,7 +534,20 @@ private struct NameField: View {
         if clean != typed { name = clean }
       }
       .onSubmit(onSubmit)
-      .onAppear { focused = true }
+      .onAppear { if autofocus { focused = true } }
+      .onChange(of: focusRequests) { focused = true }
+      // The prompt in the name's own font and size, one short word.
+      .overlay {
+        if name.isEmpty {
+          Text("Username")
+            .font(.yo(Self.full))
+            .lineLimit(1)
+            .minimumScaleFactor(0.7)
+            .foregroundStyle(.white.opacity(0.45))
+            .allowsHitTesting(false)
+            .accessibilityHidden(true)
+        }
+      }
   }
 
   /// Full size, and smaller as a long name needs, so all 16 characters stay in sight beside the checkmark (the cursor
@@ -586,5 +695,128 @@ struct RecoveryCard: View {
     .padding(30)
     .frame(width: 390)
     .background(Color.amethyst)
+  }
+}
+
+/// Sign In as a small card: its own view with its own list, read from the iCloud Keychain as it appears (a sheet does
+/// not redraw from its presenter's state reliably: the list showed only after the next tap).
+private struct SignInCard: View {
+  let busy: Bool
+  let signingIn: Data?
+  let problem: String?
+  @Binding var autoSignIn: Data?
+  let logIn: (SyncedAccount.Item) -> Void
+  let passkey: () -> Void
+  let recoveryKey: () -> Void
+  @State private var synced: [SyncedAccount.Item] = SyncedAccount.all()
+  @State private var removing: SyncedAccount.Item?
+  /// The card's own height, measured: as tall as its accounts and buttons, no taller.
+  @State private var height: CGFloat = 300
+
+  var body: some View {
+    VStack(spacing: 14) {
+      Text("Sign In")
+        .font(.yo(28))
+        .padding(.top, 28)
+      if autoSignIn != nil {
+        Button("Cancel") { withAnimation(.smooth) { autoSignIn = nil } }
+          .font(.yo(17))
+          .accessibilityLabel("Cancel signing in")
+      }
+      if !synced.isEmpty {
+        VStack(spacing: 10) {
+          ForEach(synced) { item in
+            Button { logIn(item) } label: {
+              HStack(spacing: 12) {
+                Avatar(name: item.username, size: 36)
+                Text(item.username).font(.yo(20)).lineLimit(1).foregroundStyle(.white)
+                Spacer(minLength: 0)
+                if signingIn == item.userID {
+                  ProgressView().tint(.white)
+                } else if autoSignIn == item.userID {
+                  // Two seconds to cancel, as a ring filling up; tap Cancel (or anything) to stay signed out.
+                  AutoSignInRing()
+                }
+              }
+              .padding(.horizontal, 14)
+              .frame(maxWidth: .infinity, minHeight: 56)
+              .background(.white.opacity(0.16), in: .capsule)
+              .contentShape(.capsule)
+            }
+            .buttonStyle(.plain)
+            .disabled(busy)
+            .accessibilityLabel("Sign In as \(item.username)")
+            // Clean up: an old account taken out of the iCloud Keychain (on all devices), after a question.
+            .contextMenu {
+              Button("Remove from iCloud Keychain", systemImage: "trash", role: .destructive) { removing = item }
+            }
+            .accessibilityAction(named: "Remove from iCloud Keychain") { removing = item }
+          }
+        }
+        Text("or").font(.yo(17)).opacity(0.75)
+      } else {
+        Color.clear.frame(height: 18)  // some air between the title and the buttons when there is no account to show
+      }
+      PrimaryButton("Use Passkey", busy: busy) { passkey() }
+        .disabled(busy)
+      Button("Use Recovery Key") { recoveryKey() }
+        .font(.yo(17))
+      Note(problem)
+    }
+    .padding(.horizontal, 24)
+    .padding(.bottom, 12)
+    .fixedSize(horizontal: false, vertical: true)
+    .onGeometryChange(for: CGFloat.self) { $0.size.height } action: { new in
+      if abs(new - height) > 1 { height = new }
+    }
+    .frame(maxHeight: .infinity, alignment: .top)
+    .foregroundStyle(.white)
+    .task(id: autoSignIn) {
+      guard let id = autoSignIn, (try? await Task.sleep(for: .seconds(2))) != nil, autoSignIn == id,
+        let item = synced.first(where: { $0.userID == id })
+      else { return }
+      autoSignIn = nil
+      logIn(item)
+    }
+    .onDisappear { autoSignIn = nil }
+    .task {
+      for _ in 0..<5 where synced.isEmpty {
+        try? await Task.sleep(for: .milliseconds(300))
+        synced = SyncedAccount.all()
+      }
+    }
+    .alert(
+      "Remove \(removing?.username ?? "")?",
+      isPresented: Binding(get: { removing != nil }, set: { if !$0 { removing = nil } })
+    ) {
+      Button("Remove", role: .destructive) {
+        if let item = removing {
+          SyncedAccount.delete(item.userID)
+          withAnimation(.smooth) { synced = SyncedAccount.all() }
+        }
+        removing = nil
+      }
+      Button("Cancel", role: .cancel) { removing = nil }
+    } message: {
+      Text("It’s taken out of your iCloud Keychain on all your devices. Without a passkey or recovery key, you can’t sign in to it again.")
+    }
+    .presentationDetents([.height(height)])
+    .presentationBackground(Color.amethyst)
+    .presentationDragIndicator(.visible)
+    .preferredColorScheme(.dark)
+  }
+}
+
+/// Fills once in two seconds: the time left to cancel signing in by itself.
+private struct AutoSignInRing: View {
+  @State private var done = false
+  var body: some View {
+    Circle()
+      .trim(from: 0, to: done ? 1 : 0)
+      .stroke(.white, style: StrokeStyle(lineWidth: 3, lineCap: .round))
+      .rotationEffect(.degrees(-90))
+      .frame(width: 22, height: 22)
+      .onAppear { withAnimation(.linear(duration: 2)) { done = true } }
+      .accessibilityHidden(true)
   }
 }

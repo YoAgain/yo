@@ -1,44 +1,97 @@
-// Settings › Licenses: the commit this build is made from, with a link to it (the app links libsignal under the
-// AGPL-3.0, so that commit is its complete corresponding source), then every licence as dev/licenses.sh wrote them
-// into Licenses.txt.
 import SwiftUI
 
 struct LicensesPage: View {
-  @State private var parts: [String] = []
-  @State private var source: URL?
+  /// The bundled text (Resources/Licenses.txt, no network), read off the main thread after the page is up.
+  @State private var content: LicenseContent?
 
   var body: some View {
-    List {
-      Section {
-        if let source {
-          Link(destination: source) {
-            LabeledContent("Source", value: String(source.lastPathComponent.prefix(12)))
+    ScrollView {
+      VStack(spacing: 28) {
+        card {
+          Link(destination: URL(string: "https://justyo.co/p/imprint")!) {
+            row("Yo \(HelpPage.appVersion) by Or Arbel")
+          }
+          Divider().padding(.horizontal, 16)
+          row("Operated by Christopher Eller", secondary: true)
+          Divider().padding(.horizontal, 16)
+          Link(destination: URL(string: "https://justyo.co")!) {
+            row("Website", value: "justyo.co")
           }
         }
-      } footer: {
-        Text("Yo is MIT licensed. The app includes libsignal, licensed under the AGPL-3.0; this build’s complete source is the commit above.")
-      }
-      Section {
-        ForEach(Array(parts.enumerated()), id: \.offset) { _, part in
-          Text(part)
-            .font(.system(.caption2, design: .monospaced))
-            .textSelection(.enabled)
+        card {
+          if let source = content?.source {
+            Link(destination: source) {
+              row("Source", value: String(source.lastPathComponent.prefix(12)))
+            }
+            Divider().padding(.horizontal, 16)
+          }
+          Text("Yo: MIT. libsignal: AGPL-3.0. Complete source: the commit above.")
+            .font(.subheadline)
+            .foregroundStyle(.secondary)
+            .frame(maxWidth: .infinity, minHeight: 44, alignment: .leading)
+            .padding(.horizontal, 16)
+            .padding(.vertical, 5)
+        }
+        // Thousands of lines: drawn lazily, as they scroll in.
+        if let content {
+          LazyVStack(alignment: .leading, spacing: 14) {
+            ForEach(Array(content.parts.enumerated()), id: \.offset) { _, part in
+              Text(part)
+                .font(.system(.caption2, design: .monospaced))
+                .textSelection(.enabled)
+                .frame(maxWidth: .infinity, alignment: .leading)
+            }
+          }
+          .padding(16)
+          .background(Color(.secondarySystemGroupedBackground), in: .rect(cornerRadius: 26))
+        } else {
+          ProgressView().frame(maxWidth: .infinity, minHeight: 80)
         }
       }
+      .padding(20)
     }
+    .background(Color(.systemGroupedBackground))
+    .task { if content == nil { content = await LicenseContent.load() } }
     .navigationTitle("Licenses")
     .navigationBarTitleDisplayMode(.inline)
-    .task { await load() }
   }
 
-  /// The file in parts of a paragraph each, so the list draws only what is on the screen.
-  private func load() async {
-    let text = await Task.detached {
-      Bundle.main.url(forResource: "Licenses", withExtension: "txt").flatMap { try? String(contentsOf: $0, encoding: .utf8) }
-    }.value ?? ""
-    let first = text.prefix { $0 != "\n" }
-    source = first.hasPrefix("Source: ")
-      ? URL(string: String(first.dropFirst("Source: ".count).prefix { $0 != " " })) : nil
-    parts = text.components(separatedBy: "\n\n").dropFirst().filter { !$0.isEmpty }
+  private func card<Content: View>(@ViewBuilder _ content: () -> Content) -> some View {
+    VStack(spacing: 0) { content() }
+      .background(Color(.secondarySystemGroupedBackground), in: .rect(cornerRadius: 26))
+  }
+
+  private func row(_ title: String, value: String? = nil, secondary: Bool = false) -> some View {
+    HStack {
+      Text(title).foregroundStyle(secondary ? Color.secondary : Color(.label))
+      Spacer(minLength: 8)
+      if let value { Text(value).foregroundStyle(.secondary) }
+    }
+    .lineLimit(1)
+    .frame(maxWidth: .infinity, minHeight: 44, alignment: .leading)
+    .padding(.horizontal, 16)
+    .padding(.vertical, 5)
+    .contentShape(Rectangle())
+  }
+}
+
+/// Load the bundled paragraphs before the push so the source row is present in its first frame.
+struct LicenseContent: Sendable {
+  let parts: [String]
+  let source: URL?
+
+  static func load() async -> Self {
+    await Task.detached(priority: .utility) {
+      let text =
+        Bundle.main.url(forResource: "Licenses", withExtension: "txt")
+        .flatMap { try? String(contentsOf: $0, encoding: .utf8) } ?? ""
+      let first = text.prefix { $0 != "\n" }
+      let source =
+        first.hasPrefix("Source: ")
+        ? URL(string: String(first.dropFirst("Source: ".count).prefix { $0 != " " })) : nil
+      return Self(
+        parts: text.components(separatedBy: "\n\n").dropFirst().filter { !$0.isEmpty },
+        source: source)
+    }.value
   }
 }

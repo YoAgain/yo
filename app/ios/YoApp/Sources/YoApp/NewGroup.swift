@@ -9,6 +9,9 @@ struct NewGroupSheet: View {
   @Environment(Inbox.self) private var inbox
   @Environment(AccountStore.self) private var accounts
   @Environment(MediaOutbox.self) private var outbox
+  @FocusState private var naming: Bool
+  @State private var ownName = "You"
+  @State private var search = ""
   @State private var name = ""
   @State private var members: Set<String> = []
   @State private var creating = false
@@ -21,56 +24,82 @@ struct NewGroupSheet: View {
     friends.all.filter { $0.user != nil && $0.group == nil && !$0.blocked && !$0.gone }
   }
 
+  private var canCreate: Bool {
+    !creating && !members.isEmpty && !name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+  }
+
+  private var filteredChoices: [Friend] {
+    choices.filter { search.isEmpty || $0.name.localizedStandardContains(search) }
+  }
+
   var body: some View {
     NavigationStack {
-      Form {
-        Section {
-          TextField("Group Name", text: $name)
-            .font(.yo(20, relativeTo: .body))
-            .onChange(of: name) { if name.utf8.count > 32 { name = FriendList.groupName(name) } }
-        }
-        Section {
-          ForEach(choices) { friend in
-            let user = friend.user ?? ""
-            let chosen = members.contains(user)
-            Button {
-              if chosen { members.remove(user) } else if members.count < Self.most { members.insert(user) }
-            } label: {
-              HStack {
-                Circle().fill(Color.row(friend.color)).frame(width: 12, height: 12)
-                Text(friend.name).font(.yo(17, relativeTo: .body)).foregroundStyle(Color(.label))
-                  .lineLimit(1).minimumScaleFactor(0.5)
-                Spacer()
-                Image(systemName: chosen ? "checkmark.circle.fill" : "circle")
-                  .foregroundStyle(chosen ? Color.amethyst : Color(.tertiaryLabel))
-              }
-            }
-            .disabled(!chosen && members.count >= Self.most)
-          }
-        } header: {
-          Text("Members")
-        } footer: {
-          Text(failed ? "The group could not be made. Try again in a moment." : "Up to \(Self.most) friends.")
-        }
-      }
-      .navigationTitle("Add Group")  // as the menu item that opens it
+      form
+      .task { ownName = accounts.account?.username ?? "You" }
+      .searchable(text: $search, prompt: "Find Friends")
+      .navigationTitle("New Group")
       .navigationBarTitleDisplayMode(.inline)
       .toolbar {
         ToolbarItem(placement: .cancellationAction) {
-          Button(role: .close) { dismiss() }
+          Button("Cancel", role: .cancel) { dismiss() }
         }
         ToolbarItem(placement: .confirmationAction) {
           Button("Create") { create() }
-            .disabled(creating || members.isEmpty || name.trimmingCharacters(in: .whitespaces).isEmpty)
+            .disabled(!canCreate)
+        }
+      }
+      .interactiveDismissDisabled(creating)
+    }
+  }
+
+  private var form: some View {
+    Form {
+      Section {
+        TextField("Group Name", text: $name)
+          .focused($naming)
+          .submitLabel(canCreate ? .done : .next)
+          .onSubmit {
+            if canCreate { create() } else { naming = false }
+          }
+          .onChange(of: name) { if name.utf8.count > 32 { name = FriendList.groupName(name) } }
+      }
+      Section {
+        GroupMemberRow(name: ownName, selected: true).disabled(true)
+        ForEach(filteredChoices) { friend in
+          let user = friend.user ?? ""
+          let chosen = members.contains(user)
+          let unavailable = !chosen && members.count >= Self.most
+          Button {
+            naming = false
+            if chosen { members.remove(user) } else if members.count < Self.most { members.insert(user) }
+          } label: {
+            GroupMemberRow(name: friend.name, selected: chosen)
+          }
+          .buttonStyle(.plain)
+          .accessibilityAddTraits(chosen ? [.isSelected] : [])
+          .disabled(unavailable)
+          .opacity(unavailable ? 0.4 : 1)
+        }
+      } header: {
+        Text("Members · \(members.count + 1) of 20")
+      } footer: {
+        Text("You can add up to \(Self.most) friends, plus yourself.")
+      }
+      if failed {
+        Section {
+          Text("The group could not be made. Try again in a moment.")
+            .foregroundStyle(.red)
         }
       }
     }
-    .tint(Color.amethyst)
+    .formStyle(.grouped)
+    .disabled(creating)
   }
 
   private func create() {
-    guard let client = accounts.client else { return }
-    let name = name.trimmingCharacters(in: .whitespaces)
+    guard canCreate, let client = accounts.client else { return }
+    naming = false
+    let name = name.trimmingCharacters(in: .whitespacesAndNewlines)
     let members = Array(members)
     creating = true
     failed = false
@@ -91,5 +120,22 @@ struct NewGroupSheet: View {
       }
       creating = false
     }
+  }
+}
+
+struct GroupMemberRow: View {
+  let name: String
+  let selected: Bool
+  var body: some View {
+    HStack(spacing: 12) {
+      Avatar(name: name, size: 36)
+      Text(name).font(.body).foregroundStyle(.primary).lineLimit(1)
+      Spacer()
+      Image(systemName: selected ? "checkmark.circle.fill" : "circle")
+        .font(.title2)
+        .foregroundStyle(selected ? AnyShapeStyle(Color.accentColor) : AnyShapeStyle(.tertiary))
+    }
+    .contentShape(Rectangle())
+    .accessibilityAddTraits(selected ? [.isSelected] : [])
   }
 }

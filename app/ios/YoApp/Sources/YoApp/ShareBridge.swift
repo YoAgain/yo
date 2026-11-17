@@ -51,11 +51,11 @@ enum ShareBridge {
 
   static var outbox: URL? {
     guard var dir = container?.appending(path: "Outbox", directoryHint: .isDirectory) else { return nil }
-    try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+    Diagnostics.attempt({ try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true) })
     // Never in the backup, as the app's own outbox (MediaStorage).
     var values = URLResourceValues()
     values.isExcludedFromBackup = true
-    try? dir.setResourceValues(values)
+    Diagnostics.attempt({ try dir.setResourceValues(values) })
     return dir
   }
 
@@ -84,6 +84,7 @@ enum ShareBridge {
         to: note(share.id, in: dir), options: [.atomic, .completeFileProtectionUntilFirstUserAuthentication])
       return true
     } catch {
+      Diagnostics.record(error)
       try? FileManager.default.removeItem(at: media(share, in: dir))
       return false
     }
@@ -148,6 +149,9 @@ enum ShareBridge {
       return what
     }
 
+    /// Stable across a sender’s run; message ids remain in userInfo for deduplication.
+    var notificationIdentifier: String { "yo:" + user }
+
     /// When the newest was sent, from its id ("user/sent at").
     var sentAtMs: UInt64 { UInt64(id.split(separator: "/").last ?? "") ?? 0 }
 
@@ -178,7 +182,7 @@ enum ShareBridge {
   }
 
   /// `new` (the newest first) with the Yos the Yo notifications still on the screen name, per sender: one
-  /// notification says them all ("Yo!!!!! +4 from LEO · 📷 2"), and those before it go (`replaced`).
+  /// notification per sender keeps its accumulated count ("Yo!!!!! +4 from LEO · 📷 2").
   private static func merged(_ new: [Yos], with delivered: [UNNotification]) -> (yos: [Yos], replaced: [String]) {
     // One notification per sender (or group): a sender's earlier notification is taken into its new one; the others
     // stay as they are.
@@ -242,7 +246,7 @@ enum ShareBridge {
   /// Who is a request (spec 4.10), as `yos` takes it: contacts and groups not accepted yet.
   static func requests(of client: YoClient) -> Set<String> {
     Set(client.contacts().filter { !$0.accepted }.map(\.user))
-      .union(((try? client.groups()) ?? []).filter { !$0.accepted && !$0.left }.map { "group:" + $0.id })
+      .union(((Diagnostics.attempt({ try client.groups() })) ?? []).filter { !$0.accepted && !$0.left }.map { "group:" + $0.id })
   }
 
   /// The name as the app's list shows it (the friends it published), else as the core knows them.
@@ -292,13 +296,23 @@ enum ShareBridge {
     // The newest sender in this notification; every other sender gets a notification of its own.
     guard let newest = all.first else { return replaced }
     yo(content, [newest])
+    quietUpdate(content, for: newest, over: delivered)
     for other in all.dropFirst() {
       let own = UNMutableNotificationContent()
       yo(own, [other])
       own.badge = badge
-      UNUserNotificationCenter.current().add(UNNotificationRequest(identifier: other.id, content: own, trigger: nil))
+      quietUpdate(own, for: other, over: delivered)
+      UNUserNotificationCenter.current().add(UNNotificationRequest(identifier: other.notificationIdentifier, content: own, trigger: nil))
     }
     return replaced
+  }
+
+  /// Replacing an existing sender’s notification should not play the Yo sound again.
+  private static func quietUpdate(_ content: UNMutableNotificationContent, for sender: Yos, over delivered: [UNNotification]) {
+    if delivered.contains(where: { $0.request.identifier == sender.notificationIdentifier }) {
+      content.sound = nil
+      content.interruptionLevel = .passive
+    }
   }
 
   /// A Yo notification from the app or the share extension (Yos they took themselves, which the notification service
@@ -315,8 +329,8 @@ enum ShareBridge {
     let new = yos.filter { !written.contains($0.id) }.sorted { $0.sentAtMs > $1.sentAtMs }
     guard let newest = new.first else { return }
     let content = UNMutableNotificationContent()
-    center.removeDeliveredNotifications(withIdentifiers: write(content, new, over: delivered))
-    try? await center.add(UNNotificationRequest(identifier: newest.id, content: content, trigger: nil))
+    _ = write(content, new, over: delivered)
+    try? await center.add(UNNotificationRequest(identifier: newest.notificationIdentifier, content: content, trigger: nil))
   }
 }
 

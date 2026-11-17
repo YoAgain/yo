@@ -16,7 +16,6 @@ The app talks to the live hub (TestFlight and App Store) or the dev hub (Yo Dev)
   after a crash is never sent. Photo library, zoom and front/back at the bottom. Received photos and videos wait as a round thumbnail; hold or tap it to see them once.
 - Invite links: https://justyo.co/NAME (your code, Invite on the list) and yo://add/NAME open Yo and add NAME as a
   friend; before an account the name waits through the way in (`Invite.swift`). The first Yo sent says what it does.
-- Profile sheet: save the photos and videos you send to your library (at capture).
 - Share sheet (Yo from the App Store and TestFlight): "Yo" for up to ten photos or one video from Photos or any app;
   the same bars, a tap on a name sends them to that friend from there (`Sources/YoShare`), as the app would. Without
   network (or with the hub's "not now") they wait in the App Group `group.app.justyo.ios` and the app sends them as
@@ -44,6 +43,8 @@ The app talks to the live hub (TestFlight and App Store) or the dev hub (Yo Dev)
   `app/ios/tests/blob-ack.sh` checks storage ordering, failed acknowledgements and the service/app file handoff.
   Yo Dev (`dev/push.sh`) is built without the extensions and keeps its
   state to itself.
+
+Account storage backs up contacts, groups, keys and settings like the app icon and left-handed mode.
 
 ## Build and run
 
@@ -111,6 +112,23 @@ the main thread. `dev/core.sh` builds it on Linux and `dev/push.sh` runs it firs
 - `uniffi-bindgen` in library mode reads the interface from `libyo.a`: `yo.swift` becomes the target `YoCore`,
   `yoFFI.h` with its module map and the library a hand-made `yoFFI.xcframework` (binary target `yoFFI`).
 
+## Shared list rules
+
+`YoList` (`core/client/src/list.rs`, UniFFI in `core/bindings`) owns row ordering, titles/counts, requests, media
+signs, undo/notice deadlines, group sender clocks, and the tapped row lock. `FriendList` reports monotonic time,
+visible row ids, scene phase, camera mode, and touch/recording/flight events; it ticks at the returned deadline.
+Yo lifetimes spend time only in the visible viewport, foreground, and outside camera mode. SwiftUI keeps the
+animations and gestures, and anchors the core's locked row with `ScrollPosition` during reorders. The same model
+and API are available to Android; see spec §5.1 and the Rust list regression tests and seeded simulation.
+
+List notification priority is shared core policy: a pending deletion (3 seconds, Undo) takes precedence over
+server offline, which takes precedence over the latest send failure. Clearing a higher priority notice reveals
+the current lower priority notice. Replacing a deletion commits the previous one; backgrounding commits it too.
+The platform inserts the white-on-amethyst bar above the list and animates layout changes, without covering rows.
+Arrival and group sender clocks wait for the arrival's batched reorder to finish, then spend time only while
+that row is visible in the foreground outside camera mode. A frozen arrival keeps its full lifetime.
+
+
 ## Frame performance (Yo Dev, physical phone)
 
 `dev/perf.sh` installs an optimized Yo Dev, builds `yo-send`, and rotates **300 runs** through direct
@@ -175,3 +193,31 @@ list installation, and unattributed stalls. The baseline/fixed-device comparison
 The static audit and remaining blockers are in [PERFORMANCE.md](PERFORMANCE.md). For restricted Linux builds,
 use `XDG_CACHE_HOME="$PWD/target/perf-cache"` (absolute repository path) with xtool when the default cache is
 read-only. No core semantics or durability boundaries were changed; no state-save debounce is used.
+
+
+## Camera wipe and Yo-to-Yo Roundtrip
+
+The edge wipe uses only finger translation, with animations disabled during the drag. Touch-down queues
+capture startup without awaiting permission or frames; permission is requested only after entering camera
+mode when needed. Session construction, configuration, connection rotation/mirroring and start/stop all
+run on the capture queue. A persistent amethyst-backed sample-buffer surface replaces the preview layer's
+session attachment: assigning `AVCaptureVideoPreviewLayer.session` on the main thread while starting or
+configuring capture could contend with AVFoundation's session work during the first drag. Preview insertion
+and the old priming-layout changes are removed from gesture startup. The serial preview renderer displays
+buffers without a session connection; only feed opacity fades in from black over 40 ms after its first buffer. Thumbnail
+conversion stays off the main actor. HitchMonitor only samples callback intervals on main and writes on its
+own utility queue; it does not gate the wipe or wait for camera readiness. Physical presentation smoothness
+still needs an on-device swipe check; a successful compile cannot measure it.
+
+The Account title and Status → Server share a user-triggered, ten-second PING probe and a volatile last result.
+The title flies a small Yo out and back, bounces on landing and gives success/warning feedback; Reduce Motion
+uses fades. The existing account client selects the same hub as `Hub.home` (including the dev test override).
+Probes neither send ordinary app events nor sync PING to another device. See
+[operator deployment and privacy](../yogpt/README.md).
+
+
+Help › Contact Us is a support conversation with the Yo team, not end-to-end encrypted (the chat says so).
+The core signs sends, thread fetches and bounded read markers under the state lock and performs transport
+outside it. Opening the chat marks displayed team replies read; pull to refresh fetches later replies.
+Unread counts refresh at launch, foreground and opening Settings; no polling. Draft text remains on send
+failure for retry. Deploy the hub and admin support changes before releasing this app (hub/README.md).

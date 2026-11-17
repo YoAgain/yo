@@ -38,7 +38,6 @@ final class NotificationService: UNNotificationServiceExtension {
         // Read: the new Yos with those on the screen, in one notification; none new, the same quietly. Else, unread,
         // the push goes as it came.
         let read = Self.newest()
-        var replaced: [String] = []
         if let (client, events) = read {
           // The photos and videos before the notification goes: once it is delivered, iOS may end or freeze this
           // process at any moment, and a fetch cut off there has used this device's fetch at the hub with nothing
@@ -50,23 +49,18 @@ final class NotificationService: UNNotificationServiceExtension {
           in: events, name: { ShareBridge.name(of: $0, client: client) },
           group: { id in (try? client.groups())?.first { $0.id == id }?.name ?? "" }, requests: ShareBridge.requests(of: client))
           let delivered = Self.delivered()
-          replaced =
-            pending.update { content in
-              let replaced = ShareBridge.write(content, senders, over: delivered)
-              if senders.isEmpty {
-                (content.sound, content.interruptionLevel) = (nil, .passive)
-                // Nothing on the screen to say again (a receipt, after the app was opened): no text, which
-                // iOS does not show, rather than a bare "Yo" left in Notification Center.
-                if replaced.isEmpty { content.body = "" }
-              }
-              return replaced
-            } ?? []
+          pending.update { content in
+            let replaced = ShareBridge.write(content, senders, over: delivered)
+            if senders.isEmpty {
+              (content.sound, content.interruptionLevel) = (nil, .passive)
+              // Nothing on the screen to say again (a receipt, after the app was opened).
+              if replaced.isEmpty { content.body = "" }
+            }
+          }
+          if pending.postLocally() { return }
         }
         pending.deliver()
         Perf.mark("nse.delivered")
-        // Those it takes the place of only now that its own is out: never a moment with none on the screen, in which the
-        // app (taking the saved Yos) would write one more.
-        UNUserNotificationCenter.current().removeDeliveredNotifications(withIdentifiers: replaced)
       }
     }
   }
@@ -113,6 +107,35 @@ final class NotificationService: UNNotificationServiceExtension {
     /// Changes the content while it is not delivered yet (nil once it is).
     func update<T>(_ change: (UNMutableNotificationContent) -> T) -> T? {
       lock.withLock { content.map(change) }
+    }
+
+    /// The incoming APNs request id is read-only. Post with the same stable id as the app,
+    /// then return empty, silent content for the transport push. On failure keep its content.
+    func postLocally() -> Bool {
+      let request: UNNotificationRequest? = lock.withLock {
+        guard let content, !content.threadIdentifier.isEmpty else { return nil }
+        return UNNotificationRequest(identifier: "yo:" + content.threadIdentifier, content: content, trigger: nil)
+      }
+      guard let request else { return false }
+      UNUserNotificationCenter.current().add(request) { [self] error in
+        if error == nil {
+          update { content in
+            content.title = ""
+            content.subtitle = ""
+            content.body = ""
+            content.sound = nil
+            content.badge = nil
+            content.categoryIdentifier = ""
+            content.threadIdentifier = ""
+            content.userInfo = [:]
+            content.attachments = []
+            content.interruptionLevel = .passive
+          }
+        }
+        deliver()
+        Perf.mark("nse.delivered")
+      }
+      return true
     }
 
     func deliver() {

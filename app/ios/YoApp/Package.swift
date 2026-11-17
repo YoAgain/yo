@@ -2,6 +2,7 @@
 // YoApp: the iOS app (an xtool project), SwiftUI only, iOS 26, Swift 6.
 // Build on Linux with `xtool dev build`; install with `xtool dev run` (USB) or ../dev/push.sh (network).
 import PackageDescription
+import Foundation
 
 let package = Package(
   name: "YoApp",
@@ -15,7 +16,7 @@ let package = Package(
     .library(name: "YoNotify", targets: ["YoNotify"]),
   ],
   targets: [
-    .target(name: "YoApp", dependencies: ["YoCore"]),
+    .target(name: "YoApp", dependencies: ["YoCore"], swiftSettings: ProcessInfo.processInfo.environment["YO_DEV_BUILD"] == "1" ? [.define("YO_DEV")] : []),
     .target(name: "YoShare", dependencies: ["YoCore"]),
     .target(name: "YoNotify", dependencies: ["YoCore"]),
     // The Rust core (core/bindings) through UniFFI: `import YoCore`. ../dev/core.sh makes both into build/core

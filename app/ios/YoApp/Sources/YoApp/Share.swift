@@ -16,7 +16,7 @@ enum ShareInbox {
     let data = list.flatMap { try? JSONEncoder().encode($0) }
     writing.async {
       if let data {
-        try? data.write(to: file, options: [.atomic, .completeFileProtectionUntilFirstUserAuthentication])
+        Diagnostics.attempt({ try data.write(to: file, options: [.atomic, .completeFileProtectionUntilFirstUserAuthentication]) })
       } else {
         try? FileManager.default.removeItem(at: file)
       }
@@ -61,7 +61,6 @@ enum ShareInbox {
               file, to: share.to, from: client, accounts: accounts, id: share.id, at: share.created)
           else { continue }
           Stats.sentYo(to: share.name)
-          Task.detached(priority: .utility) { file.keepIfWanted() }
         }
         try? FileManager.default.removeItem(at: note)
         try? FileManager.default.removeItem(at: media)

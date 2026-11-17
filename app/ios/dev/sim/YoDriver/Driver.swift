@@ -47,6 +47,47 @@ import XCTest
   private func run(_ c: [String: Any]) throws -> [String: Any] {
     let op = c["op"] as? String ?? ""
     switch op {
+    case "account-layout":
+      // Start on Account; exercise the rows and title status button.
+      let ids = ["account.contacts", "account.security", "account.manage"]
+      let rows = ids.map { app.descendants(matching: .any).matching(identifier: $0).firstMatch }
+      for (id, row) in zip(ids, rows) {
+        guard row.waitForExistence(timeout: 5) else { throw Failure(description: "missing \(id)") }
+      }
+      guard zip(rows, rows.dropFirst()).allSatisfy({ $0.frame.minY < $1.frame.minY }),
+        !app.buttons["security.setup"].exists
+      else { throw Failure(description: "Account row order or misplaced setup") }
+      rows[1].tap()
+      if c["unsecured"] as? Bool == true {
+        guard app.staticTexts["Secure Your Account"].waitForExistence(timeout: 5) else {
+          throw Failure(description: "Security did not open setup directly")
+        }
+        return ["rows": ids, "setup": true]
+      }
+      guard app.navigationBars["Security"].waitForExistence(timeout: 5),
+        app.switches["security.passkey"].exists,
+        app.switches["security.recoveryKey"].exists,
+        !app.buttons["security.setup"].exists
+      else { throw Failure(description: "missing security destination or recovery toggles") }
+      app.navigationBars.buttons.element(boundBy: 0).tap()
+      rows[0].tap()
+      guard app.navigationBars["Contacts"].waitForExistence(timeout: 5),
+        app.staticTexts["Blocked"].exists
+      else { throw Failure(description: "missing Contacts title or Blocked section") }
+      app.navigationBars.buttons.element(boundBy: 0).tap()
+      return ["rows": ids]
+    case "camera-add":
+      // Begin with camera mode open and the final row visible.
+      let add = app.buttons["Add Friend"]
+      guard add.waitForExistence(timeout: 5), add.isHittable else {
+        throw Failure(description: "Add Friend is missing in camera mode")
+      }
+      add.tap()
+      guard app.textFields["Name"].waitForExistence(timeout: 5),
+        app.buttons["Group"].exists,
+        !app.buttons["Stop and Send Video"].exists
+      else { throw Failure(description: "camera Add Friend did not open the add field") }
+      return ["adding": true]
     case "launch":
       app.launchArguments = c["args"] as? [String] ?? []
       app.launchEnvironment = c["env"] as? [String: String] ?? [:]

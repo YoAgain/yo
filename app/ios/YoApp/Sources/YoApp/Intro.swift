@@ -13,7 +13,7 @@ import SwiftUI
 /// The welcome's swipeable pages: `first` (the logo) and then the intro cards, dots under them. They go on by
 /// themselves every `advanceSeconds`, a full interval after the user last swiped or tapped a dot; never with VoiceOver.
 struct Intro<First: View>: View {
-  static var advanceSeconds: Double { 4 }
+  static var advanceSeconds: Double { 6 }
 
   @ViewBuilder let first: First
   /// Where the pages stand among the slots: the pages, with the last one again before the first and the first again
@@ -30,6 +30,7 @@ struct Intro<First: View>: View {
 
   var body: some View {
     VStack(spacing: 0) {
+      Spacer(minLength: 0)
       ScrollView(.horizontal) {
         LazyHStack(spacing: 0) {
           ForEach(0..<(Self.count + 2), id: \.self) { slot in
@@ -41,6 +42,7 @@ struct Intro<First: View>: View {
       .scrollTargetBehavior(.paging)
       .scrollIndicators(.hidden)
       .scrollPosition(id: $slot)
+      .frame(height: 360)  // the cards' own height: the dots follow right under them
       // Starting on the logo (slot 1 of count + 2), also when the position is not applied at the first layout: the
       // anchor 1 / (count + 1) of the content is the same point of the view.
       .defaultScrollAnchor(UnitPoint(x: 1 / Double(Self.count + 1), y: 0.5))
@@ -57,14 +59,20 @@ struct Intro<First: View>: View {
         touched = .now
         withAnimation(.smooth(duration: 0.4)) { slot = page + 1 }
       }
-      .padding(.bottom, 20)
+      .padding(.top, 4)
+      // On the logo the screen stays clean: the dots come with the first card.
+      .opacity(Self.page(slot ?? 1) == 0 ? 0 : 1)
+      .animation(.smooth(duration: 0.3), value: Self.page(slot ?? 1) == 0)
+      Spacer(minLength: 0)
     }
     // Reduce Motion: the next page fades in rather than sliding.
     .task(id: voiceOver) {
       guard !voiceOver else { return }
       while (try? await Task.sleep(for: .seconds(Self.advanceSeconds))) != nil {
         guard Date.now.timeIntervalSince(touched) >= Self.advanceSeconds else { continue }
-        withAnimation(reduceMotion ? .easeInOut(duration: 0.3) : .smooth(duration: 0.6)) { slot = (slot ?? 1) + 1 }
+        withAnimation(reduceMotion ? .easeInOut(duration: 0.3) : .smooth(duration: 0.6)) {
+          slot = (slot ?? 1) + 1
+        }
       }
     }
   }
@@ -76,10 +84,47 @@ struct Intro<First: View>: View {
         .lineLimit(1)
         .minimumScaleFactor(0.3)
         .padding(.horizontal, 28)
-        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .frame(maxWidth: .infinity, maxHeight: .infinity)  // the logo stays centred, higher than the cards
     } else {
       IntroPage(card: IntroCard.all[page - 1])
     }
+  }
+}
+
+/// The welcome's cards, available again from Help without the logo or account setup.
+struct IntroHelp: View {
+  @Environment(\.dismiss) private var dismiss
+
+  /// A sheet like Secure Your Account: amethyst, grabber, a close button, the pages and their dots.
+  var body: some View {
+    TabView {
+      ForEach(IntroCard.all.indices, id: \.self) { index in
+        IntroPage(card: IntroCard.all[index])
+          .padding(.top, 44)
+          .padding(.bottom, 48)
+      }
+    }
+    .tabViewStyle(.page(indexDisplayMode: .always))
+    .foregroundStyle(.white)
+    .overlay(alignment: .topTrailing) {
+      Button {
+        dismiss()
+      } label: {
+        Image(systemName: "xmark")
+          .font(.system(size: 17, weight: .semibold))
+          .foregroundStyle(.white)
+          .frame(width: 44, height: 44)
+          .glassEffect(.regular.interactive(), in: .circle)
+          .contentShape(.circle)
+      }
+      .buttonStyle(.plain)
+      .accessibilityLabel("Close")
+      .padding(.top, 20)
+      .padding(.trailing, 16)
+    }
+    .presentationBackground(Color.amethyst)
+    .presentationDragIndicator(.visible)
+    .presentationDetents([.large])
   }
 }
 
@@ -119,12 +164,24 @@ struct IntroCard {
   let line: String
   /// The app's list as it looks for this (Resources/<name>@3x.png).
   let picture: String
+  /// A hand over the picture showing what to do.
+  var gesture: IntroGesture? = nil
 
   static let all: [IntroCard] = [
-    IntroCard(title: "Tap a Name", line: "That’s a Yo. Nothing to type.", picture: "IntroTap"),
-    IntroCard(title: "Yo Back", line: "A Yo comes in. Tap their name to Yo back.", picture: "IntroYoBack"),
-    IntroCard(title: "Add Friends by Name", line: "YoGPT is there from the start. It Yos back.", picture: "IntroAdd"),
+    IntroCard(
+      title: "Tap to Send Yo", line: "", picture: "IntroTap",
+      gesture: .tap(y: 0.456, yo: false)),  // the "Sent Yo" bar
+    IntroCard(title: "Swipe for Pictures", line: "", picture: "IntroTap", gesture: .swipe),
+    IntroCard(
+      title: "Add Friends", line: "", picture: "IntroTap",
+      gesture: .tap(y: 0.868, yo: false)),  // the "+" bar
   ]
+}
+
+/// What the tutorial's hand does: tap a bar (its centre, as a share of the picture's height) or swipe the camera in.
+enum IntroGesture: Equatable {
+  case tap(y: Double, yo: Bool)
+  case swipe
 }
 
 private struct IntroPage: View {
@@ -137,7 +194,7 @@ private struct IntroPage: View {
       // they do not fit, the words scroll.
       ViewThatFits(in: .vertical) {
         VStack(spacing: 24) {
-          PhoneShot(picture: card.picture)
+          PhoneShot(picture: card.picture, gesture: card.gesture)
           words
         }
         words
@@ -154,9 +211,11 @@ private struct IntroPage: View {
       Text(card.title)
         .font(.yo(28, relativeTo: .title))
         .accessibilityAddTraits(.isHeader)
-      Text(card.line)
-        .font(.system(.body, weight: .medium))
-        .opacity(0.85)
+      if !card.line.isEmpty {
+        Text(card.line)
+          .font(.system(.body, weight: .medium))
+          .opacity(0.85)
+      }
     }
     .multilineTextAlignment(.center)
     .fixedSize(horizontal: false, vertical: true)
@@ -167,12 +226,26 @@ private struct IntroPage: View {
 /// A picture of the app in the top of a phone: a black frame with round corners, fading out below.
 private struct PhoneShot: View {
   let picture: String
+  var gesture: IntroGesture? = nil
+  @Environment(\.accessibilityReduceMotion) private var reduceMotion
+  @State private var swiping = false
 
   var body: some View {
+    // Loose bundle files (Resources/<name>@3x.png), not an asset catalog: Image(name) would not find them.
     Image(uiImage: UIImage(named: picture) ?? UIImage())
       .resizable()
       .scaledToFit()
-      .frame(width: 190)
+      // TabView can propose an unspecified height; keep the screenshot’s intrinsic proportions
+      // instead of letting the resizable image collapse to the black phone background.
+      .frame(width: 190, height: 190 * 743 / 540)
+      // Inside the phone's screen: clipped with the picture, faded with it.
+      .overlay {
+        switch gesture {
+        case .swipe: swipeHint
+        case .tap(let y, let yo): tapHint(y: y, yo: yo)
+        case nil: EmptyView()
+        }
+      }
       .clipShape(UnevenRoundedRectangle(topLeadingRadius: 26, topTrailingRadius: 26))
       .padding([.top, .horizontal], 6)
       .background(.black, in: UnevenRoundedRectangle(topLeadingRadius: 32, topTrailingRadius: 32))
@@ -182,5 +255,65 @@ private struct PhoneShot: View {
           startPoint: .top, endPoint: .bottom)
       }
       .accessibilityHidden(true)
+  }
+
+  /// A hand tapping a bar again and again: it presses in, a soft ring spreads, it lifts.
+  private func tapHint(y: Double, yo: Bool) -> some View {
+    GeometryReader { geometry in
+      let point = CGPoint(x: geometry.size.width * (yo ? 0.62 : 0.5), y: geometry.size.height * y)
+      ZStack {
+        if yo {
+          // The Yo rises straight up out of the tapped bar, as in the app.
+          Text("Yo")
+            .font(.yo(18))
+            .foregroundStyle(.white.opacity(0.8))
+            .opacity(swiping ? 0 : 1)
+            .position(
+              x: geometry.size.width * 0.5,
+              y: point.y + (swiping ? -geometry.size.height * 0.3 : -10))
+        }
+        Circle()
+          .stroke(.white.opacity(swiping ? 0 : 0.8), lineWidth: 3)
+          .frame(width: swiping ? 64 : 18, height: swiping ? 64 : 18)
+          .position(point)
+        Image(systemName: "hand.point.up.left.fill")
+          .font(.system(size: 40))
+          .foregroundStyle(.white)
+          .shadow(radius: 4)
+          .scaleEffect(swiping ? 1 : 0.86)
+          .position(x: point.x + 14, y: point.y + 26)
+      }
+    }
+    .onAppear {
+      guard !reduceMotion else { return }
+      withAnimation(.easeOut(duration: 0.9).repeatForever(autoreverses: false).delay(0.3)) { swiping = true }
+    }
+  }
+
+  /// A hand sliding in from the right edge, the camera following it in.
+  private var swipeHint: some View {
+    GeometryReader { geometry in
+      let width = geometry.size.width
+      ZStack(alignment: .leading) {
+        Color.black.opacity(0.35)
+          .overlay {
+            Image(systemName: "camera.fill").font(.system(size: 34)).foregroundStyle(.white)
+          }
+          .frame(width: width * (swiping ? 0.6 : 0.08))
+          .offset(x: width * (swiping ? 0.4 : 0.92))
+        Image(systemName: "hand.point.up.left.fill")
+          .font(.system(size: 40))
+          .foregroundStyle(.white)
+          .shadow(radius: 4)
+          .offset(x: width * (swiping ? 0.32 : 0.82), y: geometry.size.height * 0.45)
+      }
+    }
+    .onAppear {
+      guard !reduceMotion else {
+        swiping = true
+        return
+      }
+      withAnimation(.easeInOut(duration: 1.4).repeatForever(autoreverses: false).delay(0.4)) { swiping = true }
+    }
   }
 }

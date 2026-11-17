@@ -11,11 +11,23 @@ final class Camera: NSObject, @unchecked Sendable {
   /// The longest video a held name records.
   static let longestVideo = 10.0
 
-  let session = AVCaptureSession()
-  private let photoOutput = AVCapturePhotoOutput()
-  private let previewOutput = AVCaptureVideoDataOutput()
+  private lazy var session = AVCaptureSession()
+  // Display buffers have no connection to the capture session or its configuration lock.
+  private var display: PreviewRenderer?
+  private var reveal: (@Sendable (Bool) -> Void)?
+  private var revealed = false
+
+  func display(on renderer: PreviewRenderer, reveal: @escaping @Sendable (Bool) -> Void) {
+    previewQueue.async { [self] in
+      display = renderer
+      self.reveal = reveal
+      revealed = false
+    }
+  }
+  private lazy var photoOutput = AVCapturePhotoOutput()
+  private lazy var previewOutput = AVCaptureVideoDataOutput()
   private let previewQueue = DispatchQueue(label: "yo.camera-preview", qos: .userInitiated)
-  private let previewContext = CIContext()
+  private lazy var previewContext = CIContext()
   private let previewLock = NSLock()
   // Only the preview worker writes; the main actor reads under the same lock.
   private var latestPreview: UIImage?
@@ -25,8 +37,8 @@ final class Camera: NSObject, @unchecked Sendable {
     previewLock.withLock { latestPreview }
   }
 
-  private let movieOutput = AVCaptureMovieFileOutput()
-  private let queue = DispatchQueue(label: "yo.camera")
+  private lazy var movieOutput = AVCaptureMovieFileOutput()
+  private let queue = DispatchQueue(label: "yo.camera", qos: .userInitiated)
   private var configured = false
   private var input: AVCaptureDeviceInput?
   private var photos: [Int64: CheckedContinuation<Data?, Never>] = [:]
@@ -57,10 +69,33 @@ final class Camera: NSObject, @unchecked Sendable {
     }
   }
 
+  /// Never asks permission or starts capture: safe to call after the list settles.
+  static var authorized: Bool { AVCaptureDevice.authorizationStatus(for: .video) == .authorized }
+
+  func prepare() async {
+    await withCheckedContinuation { continuation in
+      queue.async { [self] in
+        guard Self.authorized else { return continuation.resume() }
+        if !configured { Perf.timed("camera.configure.prepare") { configure() } }
+        previewQueue.async { [self] in
+          _ = previewContext  // Core Image/Metal setup belongs before the first captured frame too.
+          continuation.resume()
+        }
+      }
+    }
+  }
+
   func start() {
     queue.async { [self] in
-      if !configured { configure() }
-      if !session.isRunning { session.startRunning() }
+      if !configured { Perf.timed("camera.configure.first-start") { configure() } }
+      if !session.isRunning {
+        previewQueue.async { [self] in
+          revealed = false
+          display?.value.flush()
+          reveal?(false)
+        }
+        Perf.timed("camera.start") { session.startRunning() }
+      }
     }
   }
 
@@ -77,7 +112,7 @@ final class Camera: NSObject, @unchecked Sendable {
       let next: AVCaptureDevice.Position = input?.device.position == .back ? .front : .back
       let device =
         next == .back ? Self.back() : AVCaptureDevice.default(.builtInWideAngleCamera, for: .video, position: .front)
-      guard let device, let new = try? AVCaptureDeviceInput(device: device)
+      guard let device, let new = Diagnostics.attempt({ try AVCaptureDeviceInput(device: device) })
       else { return }
       session.beginConfiguration()
       if let input { session.removeInput(input) }
@@ -98,12 +133,17 @@ final class Camera: NSObject, @unchecked Sendable {
     await withCheckedContinuation { continuation in queue.async { [self] in continuation.resume(returning: zooms) } }
   }
 
-  /// To one of `zoomChoices`, quickly, as the Camera app goes.
-  func zoom(to choice: Double) {
+  /// To one of `zoomChoices`, quickly, as the Camera app goes; under a pinch (`immediate`) straight with the fingers.
+  func zoom(to choice: Double, immediate: Bool = false) {
     queue.async { [self] in
-      guard let device = input?.device, (try? device.lockForConfiguration()) != nil else { return }
+      guard let device = input?.device, (Diagnostics.attempt({ try device.lockForConfiguration() })) != nil else { return }
       let factor = min(max(CGFloat(choice) * wide, device.minAvailableVideoZoomFactor), device.maxAvailableVideoZoomFactor)
-      device.ramp(toVideoZoomFactor: factor, withRate: 32)
+      if immediate {
+        device.cancelVideoZoomRamp()
+        device.videoZoomFactor = factor
+      } else {
+        device.ramp(toVideoZoomFactor: factor, withRate: 32)
+      }
       device.unlockForConfiguration()
     }
   }
@@ -121,7 +161,7 @@ final class Camera: NSObject, @unchecked Sendable {
     var factors = Set([1] + switches + [2 * wide])
     factors = factors.filter { $0 >= device.minAvailableVideoZoomFactor && $0 <= device.maxAvailableVideoZoomFactor }
     zooms = factors.sorted().map { (Double($0 / wide) * 10).rounded() / 10 }
-    if (try? device.lockForConfiguration()) != nil {
+    if (Diagnostics.attempt({ try device.lockForConfiguration() })) != nil {
       device.videoZoomFactor = max(wide, device.minAvailableVideoZoomFactor)
       device.unlockForConfiguration()
     }
@@ -179,7 +219,7 @@ final class Camera: NSObject, @unchecked Sendable {
     configured = true
     session.beginConfiguration()
     session.sessionPreset = .high  // photo and video from one session
-    if let device = Self.back(), let new = try? AVCaptureDeviceInput(device: device), session.canAddInput(new)
+    if let device = Self.back(), let new = Diagnostics.attempt({ try AVCaptureDeviceInput(device: device) }), session.canAddInput(new)
     {
       session.addInput(new)
       input = new
@@ -215,11 +255,19 @@ final class Camera: NSObject, @unchecked Sendable {
 extension Camera: AVCaptureVideoDataOutputSampleBufferDelegate {
   func captureOutput(_ output: AVCaptureOutput, didOutput sampleBuffer: CMSampleBuffer,
                      from connection: AVCaptureConnection) {
+    if let renderer = display {
+      let display = renderer.value
+      if display.status == .failed { display.flush() }
+      if display.isReadyForMoreMediaData {
+        display.enqueue(sampleBuffer)
+        if !revealed { revealed = true; reveal?(true) }
+      }
+    }
     let now = CMSampleBufferGetPresentationTimeStamp(sampleBuffer).seconds
     guard now - previewTime >= 0.1, let buffer = CMSampleBufferGetImageBuffer(sampleBuffer) else { return }
     previewTime = now
     let frame = CIImage(cvPixelBuffer: buffer)
-    let scale = 120 / max(frame.extent.width, frame.extent.height)
+    let scale = 360 / max(frame.extent.width, frame.extent.height)
     let small = frame.transformed(by: CGAffineTransform(scaleX: scale, y: scale))
     guard let pixels = previewContext.createCGImage(small, from: small.extent) else { return }
     let image = UIImage(cgImage: pixels)
@@ -229,6 +277,7 @@ extension Camera: AVCaptureVideoDataOutputSampleBufferDelegate {
 
 extension Camera: AVCapturePhotoCaptureDelegate {
   func photoOutput(_ output: AVCapturePhotoOutput, didFinishProcessingPhoto photo: AVCapturePhoto, error: Error?) {
+    if let error { Diagnostics.record(error) }
     let data = photo.fileDataRepresentation()
     let id = photo.resolvedSettings.uniqueID
     queue.async { [self] in
@@ -244,6 +293,7 @@ extension Camera: AVCaptureFileOutputRecordingDelegate {
   ) {
     // Reaching the longest length reports an "error" but the file is complete.
     let done = (error as NSError?)?.userInfo[AVErrorRecordingSuccessfullyFinishedKey] as? Bool ?? (error == nil)
+    if !done, let error { Diagnostics.record(error) }
     if !done { try? FileManager.default.removeItem(at: file) }  // a failed recording leaves nothing behind
     queue.async { [self] in
       if let movie {
@@ -259,21 +309,93 @@ extension Camera: AVCaptureFileOutputRecordingDelegate {
   }
 }
 
-/// The live picture, filling its frame.
+/// AVFoundation's renderer is used only by the serial preview worker. The main actor
+/// owns its layer but never calls renderer methods, so capture never needs a main-actor hop.
+final class PreviewRenderer: @unchecked Sendable {
+  let value: AVSampleBufferVideoRenderer
+  init(_ value: AVSampleBufferVideoRenderer) { self.value = value }
+}
+
+/// Persistent, session-independent surface. A first buffer reveals only the feed, never the wipe.
 struct CameraPreview: UIViewRepresentable {
-  let session: AVCaptureSession
+  let camera: Camera
 
   func makeUIView(context: Context) -> PreviewView {
     let view = PreviewView()
-    view.preview.session = session
-    view.preview.videoGravity = .resizeAspectFill
+    // No black card before the first frame: the rows' colours show through until the feed fades in.
+    view.backgroundColor = .clear
+    view.feed.videoGravity = .resizeAspectFill
+    view.feed.opacity = 0
+    camera.display(on: PreviewRenderer(view.feed.sampleBufferRenderer)) { [weak view] ready in
+      DispatchQueue.main.async {
+        guard let view else { return }
+        view.reveal(ready)
+      }
+    }
     return view
   }
 
   func updateUIView(_ view: PreviewView, context: Context) {}
 
   final class PreviewView: UIView {
-    override class var layerClass: AnyClass { AVCaptureVideoPreviewLayer.self }
-    var preview: AVCaptureVideoPreviewLayer { layer as! AVCaptureVideoPreviewLayer }
+    let feed = AVSampleBufferDisplayLayer()
+    /// A plain blur over the first moments (no white tint): hides focus and exposure settling while the edge between
+    /// the clear window and the colour rows stays sharp. Before the first frame there is nothing over the window.
+    private let milk = UIVisualEffectView(effect: nil)
+    /// Holds the blur part-way in: a blur without the material's milky wash.
+    private var blur: UIViewPropertyAnimator?
+    override init(frame: CGRect) {
+      super.init(frame: frame)
+      layer.addSublayer(feed)
+      milk.frame = bounds
+      milk.autoresizingMask = [.flexibleWidth, .flexibleHeight]
+      milk.isUserInteractionEnabled = false
+      addSubview(milk)
+    }
+
+    private func clearBlur() {
+      blur?.stopAnimation(true)
+      blur = nil
+      milk.effect = nil
+      milk.alpha = 1
+    }
+
+    /// First frame: the feed fades in blurred (250 ms), then the blur clears (450 ms, after the camera had a moment
+    /// to focus). Gone: back to the start, at once.
+    func reveal(_ ready: Bool) {
+      feed.removeAllAnimations()
+      milk.layer.removeAllAnimations()
+      clearBlur()
+      guard ready else {
+        feed.opacity = 0
+        return
+      }
+      let animator = UIViewPropertyAnimator(duration: 1, curve: .linear) { [milk] in
+        milk.effect = UIBlurEffect(style: .regular)
+      }
+      animator.pausesOnCompletion = true
+      animator.fractionComplete = 0.3
+      blur = animator
+      let fade = CABasicAnimation(keyPath: "opacity")
+      fade.fromValue = 0
+      fade.toValue = 1
+      fade.duration = 0.25
+      fade.timingFunction = CAMediaTimingFunction(name: .easeOut)
+      feed.opacity = 1
+      feed.add(fade, forKey: "fade")
+      UIView.animate(withDuration: 0.45, delay: 0.2, options: [.curveEaseOut, .allowUserInteraction]) {
+        self.milk.alpha = 0
+      } completion: { [weak self] done in
+        if done, self?.blur === animator { self?.clearBlur() }
+      }
+    }
+    required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
+    override func layoutSubviews() {
+      super.layoutSubviews()
+      CATransaction.begin()
+      CATransaction.setDisableActions(true)
+      feed.frame = bounds
+      CATransaction.commit()
+    }
   }
 }

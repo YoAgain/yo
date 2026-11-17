@@ -1,7 +1,4 @@
-import AuthenticationServices
 import Foundation
-import LocalAuthentication
-import Photos
 import SwiftUI
 import UIKit
 import YoCore
@@ -15,1125 +12,272 @@ import YoCore
 }
 
 enum SettingKey {
-  static let saveSent = "settings.saveSent"
   /// The bars' sides swapped: "Yo!!" at the left end, the photo sign and the undo ring at the right.
   static let leftHanded = "settings.leftHanded"
 }
 
 @MainActor
 struct SettingsView: View {
-  @AppStorage(SettingKey.saveSent) private var saveSent = false
+  enum ListAction { case addContact }
+  var listAction: (ListAction) -> Void
+
+  @AppStorage(SettingKey.leftHanded) private var leftHanded = false
   @Environment(\.dismiss) private var dismiss
-  @Environment(\.openURL) private var openURL
-  @Environment(\.scenePhase) private var scenePhase
   @Environment(AccountStore.self) private var accounts
-  @Environment(Friends.self) private var friends
 
-  @State private var resetting = false
-  /// Contacts encrypted as they should be, of all: the Encryption row's "23/23".
-  @State private var tally: EncryptionTally?
-  @State private var requestingPhotos = false
-  @State private var photosDenied = false
-  @State private var addingPasskey = false
-  @State private var passkeyProblem: String?
-  /// Confirming the passkey went wrong: shown on the account page, where its row is.
-  @State private var confirmProblem: String?
-  /// Securing and the words open as sheets.
-  @State private var securing = false
-  @State private var securingStart: SecureStep?
-  @State private var showingWords = false
-  @State private var showingCode = false
-  @State private var turningOffPasskey = false
-  @State private var renewingWords = false
-  @State private var deleteTyped = ""
-  @State private var deletingAccount = false
-  @State private var deleteProblem: String?
-  @State private var sendingFeedback = false
-  /// "Help Improve Yo" (CrashReports.on), as the switch shows it.
-  @State private var crashReports = false
-  @State private var requestsOpen = true
+  @State private var hasRecoveryKey = true
+  @State private var currentIconName = UIApplication.shared.alternateIconName
+  enum Page: Hashable {
+    case account, help, status, contacts, signInSecurity, code, licenses, appIcon
+  }
+  @State private var path: [Page] = []
+  @State private var showingDeleteAccount = false
+  @State private var showingManageAccount = false
+  @State private var preparingNavigation: Task<Void, Never>?
+  // Bootstrap at a system detent only until the first device layout arrives.
+  @State private var detent: PresentationDetent = .medium
+  @State private var rootHeight: CGFloat?
+  /// Only pages with more below get the grabber and the large detent.
+  private var expandable: Bool { path.last.map(Self.expands) ?? false }
+  private static func expands(_ page: Page) -> Bool {
+    page == .contacts || page == .status || page == .licenses
+  }
 
-  @Environment(\.dynamicTypeSize) private var typeSize
+  private var smallDetent: PresentationDetent {
+    return rootHeight.map { .height(max(1, $0 - bottomInset)) } ?? .medium
+  }
+
+  // Custom detents exclude the home-indicator inset; the measured root includes both outer gaps.
+  private var bottomInset: CGFloat {
+    (UIApplication.shared.connectedScenes.first as? UIWindowScene)?.keyWindow?.safeAreaInsets.bottom
+      ?? 0
+  }
+
+  private var currentIconAsset: String {
+    switch currentIconName {
+    case "Negative": "IconNegative"
+    case "Original": "IconOriginal"
+    case "OG2014": "IconOG2014"
+    case "Lilac2015": "IconLilac2015"
+    default: "IconStandard"
+    }
+  }
 
   private var codeButton: some View {
-    Button { showingCode = true } label: {
-      Image(systemName: "qrcode")
-        .font(.title2)
-        .frame(width: 44, height: 44)
-    }
-    .buttonStyle(.borderless)
-    .accessibilityLabel("Show Your Code")
+    YourCodeButton { navigate(to: path + [.code]) }
   }
 
   var body: some View {
-    NavigationStack {
-      Form {
-        if let account = accounts.account {
-          // You, at the top: a picture (your initial, as Signal makes one), your name, and your code to show.
-          Section {
-            // Very large text: the name on a line of its own under the picture and the code, not cut to "Sim…".
-            let layout = typeSize.isAccessibilitySize
-              ? AnyLayout(VStackLayout(alignment: .leading, spacing: 10)) : AnyLayout(HStackLayout(spacing: 14))
-            layout {
-              HStack {
-                Avatar(name: account.username, size: 56)
-                if typeSize.isAccessibilitySize {
-                  Spacer()
-                  codeButton
+    NavigationStack(path: Binding(get: { path }, set: { navigate(to: $0) })) {
+      ScrollView {
+        VStack(spacing: 20) {
+          if let account = accounts.account {
+            VStack(spacing: 0) {
+              HStack(spacing: 12) {
+                Button {
+                  navigate(to: path + [.account])
+                } label: {
+                  HStack(spacing: 14) {
+                    Avatar(name: account.username, size: 76)
+                    HStack(spacing: 6) {
+                      Text(account.username)
+                        .font(.yo(26, relativeTo: .title2))
+                        .lineLimit(1)
+                        .minimumScaleFactor(0.5)
+                      if recoveryNeedsAttention { RecoveryBadge() }
+                    }
+                    Spacer(minLength: 0)
+                  }
+                  .frame(maxWidth: .infinity, alignment: .leading)
+                  .contentShape(Rectangle())
                 }
-              }
-              Text(account.username)
-                .font(.yo(26, relativeTo: .title2))
-                .lineLimit(1)
-                .minimumScaleFactor(0.5)
-              if !typeSize.isAccessibilitySize {
-                Spacer()
+                .buttonStyle(.plain)
                 codeButton
+                Button {
+                  navigate(to: path + [.account])
+                } label: {
+                  Chevron().frame(minWidth: 16, minHeight: 44).contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                .accessibilityLabel("Account")
               }
+              .padding(.vertical, 20)
             }
-            .padding(.vertical, 4)
-          }
-          // Friends to Yo with: the invite link, as the list's ••• menu has it.
-          Section {
-            ShareLink(
-              item: Invite.link(for: account.username),
-              message: Text("Yo! Add me on Yo:"),
-              preview: SharePreview(
-                "Add \(account.username) on Yo", image: Image(uiImage: UIImage(named: "IconStandard") ?? UIImage()))
-            ) {
-              Label {
-                Text("Invite Friends").foregroundStyle(Color(.label))
-              } icon: {
-                Image(systemName: "square.and.arrow.up")
-              }
-              .labelStyle(Tile(.amethyst))
-            }
-          }
-          // While something is left to secure: the guide, right here, with the badge.
-          if accounts.toDo > 0 {
-            Section {
-              Button { secure(nil) } label: {
+            .padding(.horizontal, 16)
+            .background(Color(.secondarySystemGroupedBackground), in: .rect(cornerRadius: 26))
+            compactCard {
+              NavigationLink(value: Page.appIcon) {
                 HStack {
                   Label {
-                    Text("Secure Your Account").foregroundStyle(Color(.label))
+                    Text("App Icon")
                   } icon: {
-                    Image(systemName: "lock.fill")
+                    AppIconPicture(asset: currentIconAsset)
                   }
-                  .labelStyle(Tile(.orange))
+                  .labelStyle(Tile(.amethyst))
                   Spacer()
-                  CountBadge(count: accounts.toDo)
                   Chevron()
                 }
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .contentShape(Rectangle())
               }
-            } footer: {
-              // Kept in the iCloud Keychain already (SyncedAccount): the passkey and words are for life without it.
-              Text("Secure your account to keep your name “\(account.username)” forever.")
-            }
-          }
-          // Two groups: Account (security, signing out, deleting) and Blocked; then Media, Appearance, Statistics and
-          // Encryption (each contact's checks under it).
-          Section {
-            NavigationLink {
-              accountPage(account)
-            } label: {
-              // LabeledContent, as Settings' rows: the value goes under the name when the text is very large.
-              LabeledContent {
-                if accounts.toDo > 0 {
-                  Text("Not Secured")
-                } else {
-                  HStack(spacing: 6) {
-                    Text("Secured")
-                    Image(systemName: "checkmark.circle.fill").foregroundStyle(.green).accessibilityHidden(true)
+              Divider()
+              Toggle(
+                isOn: Binding(
+                  get: { leftHanded },
+                  set: {
+                    leftHanded = $0
+                    accounts.storeLeftHanded($0)
                   }
-                }
-              } label: {
-                Label("Account", systemImage: "person.fill")
-                  .labelStyle(Tile(accounts.toDo > 0 ? .orange : .green))
+                )
+              ) {
+                Label("Left-Handed", systemImage: "hand.point.up.left.fill").labelStyle(Tile(.blue))
               }
             }
-            NavigationLink {
-              BlockedList()
-            } label: {
-              LabeledContent {
-                Text("\(friends.blocked.count)")
+            compactCard {
+              NavigationLink(value: Page.help) {
+                HStack {
+                  Label("Help", systemImage: "questionmark.circle.fill").labelStyle(Tile(.amethyst))
+                  SupportBadge()
+                  Spacer()
+                  Chevron()
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .contentShape(Rectangle())
+              }
+              Divider()
+              // Opens the list's own "+" field, so one learns where friends are added.
+              Button {
+                listAction(.addContact)
               } label: {
-                Label("Blocked", systemImage: "hand.raised.fill").labelStyle(Tile(.red))
+                HStack {
+                  Label("Add Friends", systemImage: "person.fill.badge.plus").labelStyle(
+                    Tile(.green))
+                  Spacer()
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .contentShape(Rectangle())
               }
             }
           }
-          Section {
-            NavigationLink {
-              mediaPage
-            } label: {
-              Label("Media", systemImage: "photo.on.rectangle").labelStyle(Tile(.green))
-            }
-            NavigationLink {
-              AppearancePage()
-            } label: {
-              Label("Appearance", systemImage: "paintbrush.fill").labelStyle(Tile(.blue))
-            }
-            NavigationLink {
-              EncryptionPage()
-            } label: {
-              LabeledContent {
-                if let tally {
-                  let check: Check = tally.allGood ? .ok : .waiting
-                  Image(systemName: check.symbol).foregroundStyle(check.color)
-                    .accessibilityLabel("\(tally.encrypted) of \(tally.total) contacts encrypted")
-                }
-              } label: {
-                Label("Encryption", systemImage: "lock.fill").labelStyle(Tile(.green))
-              }
+        }
+        .padding(.horizontal, 20)
+        .padding(.vertical, 20)
+        // Intrinsic content height depends on width/content, never the animated sheet height.
+        .fixedSize(horizontal: false, vertical: true)
+        .onGeometryChange(for: CGFloat.self) {
+          $0.size.height
+        } action: { height in
+          guard height > 0, rootHeight.map({ abs($0 - height) > 1 }) ?? true else { return }
+          rootHeight = height
+          if path.isEmpty { detent = smallDetent }
+        }
+      }
+      .task { await accounts.refreshSupport() }
+      .onAppear { currentIconName = UIApplication.shared.alternateIconName }
+      .scrollBounceBehavior(.basedOnSize)
+      // Keep the 44 pt bar installed for pushes, but lay the root out from the sheet edge.
+      // Include the home-indicator area so the two measured 20 pt gaps are physical gaps.
+      // Only this root ignores insets; pushed pages retain their navigation safe area.
+      .ignoresSafeArea(.container, edges: [.top, .bottom])
+
+      .navigationDestination(for: Page.self) { page in
+        switch page {
+        case .account:
+          if let account = accounts.account {
+            AccountPage(
+              account: account, hasRecoveryKey: hasRecoveryKey,
+              dismissSettings: { dismiss() },
+              showingDelete: $showingDeleteAccount, showingManage: $showingManageAccount)
+          }
+        case .signInSecurity:
+          if let account = accounts.account {
+            fullPage {
+              AccountPage(
+                account: account, hasRecoveryKey: hasRecoveryKey, securityOnly: true,
+                dismissSettings: { dismiss() },
+                showingDelete: $showingDeleteAccount, showingManage: $showingManageAccount)
             }
           }
-          // The last rows: a word to the Yo team, and the licences with the source of this build.
-          Section {
-            Button { sendingFeedback = true } label: {
-              Label {
-                Text("Send Feedback").foregroundStyle(Color(.label))
-              } icon: {
-                Image(systemName: "envelope.fill")
-              }
-              .labelStyle(Tile(.gray))
-            }
-            NavigationLink {
-              StatsPage()
-            } label: {
-              LabeledContent {
-                Text("\(Stats.sent + Stats.received)")
-              } label: {
-                Label("Statistics", systemImage: "chart.bar.fill").labelStyle(Tile(.gray))
-              }
-            }
-            NavigationLink {
-              LicensesPage()
-            } label: {
-              Label("Licenses", systemImage: "doc.text.fill").labelStyle(Tile(.gray))
-            }
-            Toggle(isOn: Binding(get: { crashReports }, set: { crashReports = $0; CrashReports.on = $0 })) {
-              Label("Help Improve Yo", systemImage: "ladybug.fill").labelStyle(Tile(.gray))
-            }
-          } footer: {
-            Text("Send anonymized crash reports")
+        case .appIcon:
+          AppIconPage(sheetHeight: (rootHeight ?? 430) - bottomInset)
+        case .help:
+          HelpPage()
+        case .status:
+          fullPage { StatusPage() }
+        case .contacts:
+          fullPage { ContactSecurityPage() }
+        case .licenses:
+          LicensesPage()  // opens at once; its text loads in the page
+        case .code:
+          if let account = accounts.account {
+            YourCodePage(name: account.username, sheetHeight: (rootHeight ?? 430) - bottomInset)
           }
         }
       }
-      .sheet(isPresented: $sendingFeedback) { FeedbackSheet() }
-      .onAppear { crashReports = CrashReports.on }
-      .sheet(isPresented: $showingCode) {
-        if let account = accounts.account { NameCodeSheet(name: account.username) }
-      }
-      .contentMargins(.top, 4, for: .scrollContent)  // the card right under the title, as Signal's Settings
-      .navigationTitle("Profile")
-      .task(id: Reload(accounts.client, friends.contacts)) {
-        if let loaded = await EncryptionTally.load(accounts, friends) { tally = loaded }
-      }
+      .navigationTitle("Yodentity")
       .navigationBarTitleDisplayMode(.inline)
+      // A hidden bar changes the destination's safe area during the push animation.
+      .toolbar(.visible, for: .navigationBar)
+      .toolbarBackground(.hidden, for: .navigationBar)
       .toolbar {
-        // As Signal's settings: the system's close button, top right.
-        ToolbarItem(placement: .topBarTrailing) {
-          Button(role: .close) { dismiss() }
-            .disabled(addingPasskey)
+        ToolbarItem(placement: .principal) {
+          Color.clear.frame(width: 1, height: 1).accessibilityHidden(true)
         }
       }
-      .interactiveDismissDisabled(addingPasskey)
-      .sheet(isPresented: $securing) { SecureNameSheet(start: securingStart) }
-      .onAppear { checkPhotosPermission() }
-      .onChange(of: scenePhase) { _, phase in
-        if phase == .active { checkPhotosPermission() }
-      }
-    }
-    .tint(Color.amethyst)
-  }
 
-  /// Media: what happens to the photos and videos you send.
-  private var mediaPage: some View {
-    Form {
-      Section {
-        Toggle("Keep Sent Photos", isOn: Binding(get: { saveSent }, set: { setSaveSent($0) }))
-          .disabled(requestingPhotos)
-      } footer: {
-        Text("Saves photos and videos you send to your camera roll.")
-      }
     }
-    .navigationTitle("Media")
-    .navigationBarTitleDisplayMode(.inline)
-    // On this page, where the switch is (an alert of the profile's root does not show over a page pushed on it).
-    .alert("Allow Access to Photos", isPresented: $photosDenied) {
-      Button("Open Settings") { openSystemSettings() }
-      Button("Cancel", role: .cancel) {}
-    } message: {
-      Text("To save photos and videos, allow Yo to add to your photo library in Settings.")
-    }
-  }
-
-  /// Your account: its security (passkey and recovery key), then signing out and, below, deleting it (App Review
-  /// 5.1.1(v)).
-  private func accountPage(_ account: Account) -> some View {
-    Form {
-      securitySection(account)
-      Section {
-        StorageRow(client: accounts.client)
-      } footer: {
-        Text("Backup of your friend list and blocks.")
-      }
-      Section {
-        Toggle("Requests from Strangers", isOn: Binding(get: { requestsOpen }, set: { setRequestsOpen($0) }))
-      } footer: {
-        Text("Off, only your friends can send you Yos. Anyone else is turned away.")
-      }
-      .task(id: accounts.client.map(ObjectIdentifier.init)) {
-        guard let client = accounts.client else { return }
-        requestsOpen = (try? await Hub.run { client.requestsOpen() }) ?? true
-      }
-      // Very large text: under the list, scrolled with it (pinned to the bottom they covered half the page).
-      if typeSize.isAccessibilitySize {
-        Section { leaving(account) }
-          .listRowBackground(Color.clear)
-          .listRowInsets(EdgeInsets())
-      }
-    }
-    .navigationTitle("Account")
-    .navigationBarTitleDisplayMode(.inline)
-    .alert(
-      "Something Went Wrong",
-      isPresented: Binding(get: { confirmProblem != nil }, set: { if !$0 { confirmProblem = nil } })
+    .modifier(RoundTripOverlay())
+    .hitchScene("settings root")
+    .onDisappear { preparingNavigation?.cancel() }
+    .presentationDragIndicator(expandable ? .visible : .hidden)
+    .presentationDetents(expandable ? [smallDetent, .large] : [smallDetent], selection: $detent)
+    // A sheet below full height is see-through glass on iOS 26: the list behind showed through and turned the
+    // cards light. Opaque, the same at every height.
+    .presentationBackground(Color(.systemGroupedBackground))
+    .task(
+      id:
+        "\(accounts.account?.username ?? "")/\(accounts.account?.secured == true)/\(accounts.wordsSaved)"
     ) {
-      Button("OK", role: .cancel) {}
-    } message: {
-      Text(confirmProblem ?? "")
-    }
-    // Signing out and deleting: at the very bottom of the screen, however short the list.
-    .safeAreaInset(edge: .bottom) {
-      if !typeSize.isAccessibilitySize {
-        leaving(account)
-          .padding(.horizontal, 20)
-          .padding(.bottom, 8)
-      }
+      let available = await Task.detached(priority: .utility) { RecoveryWords.load() != nil }.value
+      guard !Task.isCancelled else { return }
+      hasRecoveryKey = available
     }
   }
 
-  /// Sign Out and Delete Account, glass buttons over the full width.
-  private func leaving(_ account: Account) -> some View {
-    VStack(spacing: 10) {
-      Button(role: .destructive) { resetting = true } label: {
-        Text("Sign Out").frame(maxWidth: .infinity)
-      }
-      // Not secured all the way: the guide first, signing out anyway second.
-      .confirmationDialog("Sign Out?", isPresented: $resetting, titleVisibility: .visible) {
-        if accounts.toDo > 0 {
-          Button("Secure Your Account") { secure(nil) }
-          Button("Sign Out Anyway", role: .destructive) { reset() }
-        } else {
-          Button("Sign Out", role: .destructive) { reset() }
-        }
-        Button("Cancel", role: .cancel) {}
-      } message: {
-        Text(resetMessage)
-      }
-      NavigationLink {
-        deletePage(account)
-      } label: {
-        Text("Delete Account").foregroundStyle(.red).frame(maxWidth: .infinity)
-      }
-    }
-    .buttonStyle(.glass)
-    .controlSize(.large)
-    .disabled(addingPasskey || deletingAccount)
+  private func fullPage<Content: View>(@ViewBuilder content: () -> Content) -> some View {
+    content()
   }
 
-  /// Security: Passkey and Face ID, and Recovery Key, one row each with its state. A step not done yet opens the
-  /// guide at it; one done opens its own page with what can be done with it (as Settings' Face ID & Passcode).
-  @ViewBuilder private func securitySection(_ account: Account) -> some View {
-    let wordsDone = account.secured && accounts.wordsSaved && RecoveryWords.load() != nil
-    Section("Security") {
-      if account.byPasskey && account.passkeyAuth != true {
-        // A backup made anew (spec 7) without the passkey's door: a new phone finds it by the passkey only once Face
-        // ID has been asked here.
-        Button { Task { await confirmPasskey() } } label: {
-          SecurityRow(icon: "faceid", color: .orange, title: "Passkey and Face ID", value: "Confirm")
-        }
-      } else if account.byPasskey {
-        NavigationLink {
-          securityPage("Passkey and Face ID") {
-            Button("Replace Passkey") { Task { await replacePasskey() } }
-            if wordsDone {
-              Button("Turn Off Passkey", role: .destructive) { turningOffPasskey = true }
-            }
-          }
-        } label: {
-          SecurityRow(
-            icon: "faceid", color: .green, title: "Passkey and Face ID", value: "On", done: true, chevron: false)
-        }
+  private func navigate(to next: [Page]) {
+    preparingNavigation?.cancel()
+    if next.count > path.count, next.last == .code, let name = accounts.account?.username {
+      YourCodePage.prepare(name: name)
+    }
+    withAnimation(.smooth(duration: 0.35)) {
+      #if YO_DEV
+        HitchMonitor.shared.scene = next.last.map { String(describing: $0) } ?? "settings root"
+      #endif
+      if next.last.map(Self.expands) ?? false {
+        path = next
       } else {
-        Button { secure(.passkey) } label: {
-          SecurityRow(icon: "faceid", color: .orange, title: "Passkey and Face ID", value: "Off")
-        }
-      }
-      if wordsDone {
-        NavigationLink {
-          securityPage("Recovery Key") {
-            Button("Show Recovery Key") { Task { await showRecoveryKey() } }
-            Button("Create New Recovery Key") { renewingWords = true }
-          }
-        } label: {
-          SecurityRow(icon: "key.fill", color: .green, title: "Recovery Key", value: "Saved", done: true, chevron: false)
-        }
-      } else {
-        Button { secure(.words) } label: {
-          SecurityRow(icon: "key.fill", color: .orange, title: "Recovery Key", value: "Not Saved")
-        }
-      }
-    }
-    .disabled(addingPasskey)
-  }
-
-  /// The page under Passkey and Face ID or Recovery Key: what can be done with it, and the dialogs those ask.
-  private func securityPage(_ title: String, @ViewBuilder actions: () -> some View) -> some View {
-    Form {
-      Section { actions() }
-        .disabled(addingPasskey)
-    }
-    .navigationTitle(title)
-    .navigationBarTitleDisplayMode(.inline)
-    // The words show from here, the page their button is on (a sheet from the list two pages down came up late).
-    .sheet(isPresented: $showingWords) {
-      if let account = accounts.account, let words = RecoveryWords.load() {
-        RecoveryShowSheet(name: account.username, key: words)
-      }
-    }
-    .modifier(SecurityDialogs(
-      turningOffPasskey: $turningOffPasskey, renewingWords: $renewingWords, turnOff: removePasskey, renew: newWords))
-    // Here, where the actions are (an alert of the profile's root does not show over a pushed page).
-    .alert(
-      "Something Went Wrong",
-      isPresented: Binding(get: { passkeyProblem != nil }, set: { if !$0 { passkeyProblem = nil } })
-    ) {
-      Button("OK", role: .cancel) {}
-    } message: {
-      Text(passkeyProblem ?? "")
-    }
-  }
-
-  /// The guide, at a step or (nil) at the first one left.
-  private func secure(_ step: SecureStep?) {
-    securingStart = step
-    securing = true
-  }
-
-  /// The words, after Face ID (or the passcode), straight on screen.
-  private func showRecoveryKey() async {
-    let context = LAContext()
-    guard (try? await context.evaluatePolicy(.deviceOwnerAuthentication, localizedReason: "Show your recovery key."))
-      == true
-    else { return }
-    showingWords = true
-  }
-
-
-  private func replacePasskey() async {
-    guard !addingPasskey else { return }
-    addingPasskey = true
-    defer { addingPasskey = false }
-    do { try await accounts.replacePasskey() } catch {
-      if !SecurityPresentation.isCancellation(error) {
-        passkeyProblem = SecurityPresentation.passkeyMessage(error, fallback: "Try again.")
+        detent = smallDetent
+        path = next
       }
     }
   }
 
-  private func confirmPasskey() async {
-    guard !addingPasskey else { return }
-    addingPasskey = true
-    defer { addingPasskey = false }
-    do {
-      if try await accounts.confirmPasskey() { secure(.words) }  // new words, to save in the guide
-    } catch {
-      if !SecurityPresentation.isCancellation(error) {
-        confirmProblem = SecurityPresentation.passkeyMessage(error, fallback: "Try again.")
-      }
-    }
+  private var recoveryNeedsAttention: Bool {
+    let passkeyOn = accounts.account?.byPasskey == true && accounts.account?.passkeyAuth == true
+    let keyOn = accounts.account?.secured == true && accounts.wordsSaved && hasRecoveryKey
+    return !passkeyOn && !keyOn
   }
 
-  /// One change of the backup at a time (`addingPasskey` disables the security rows and pages meanwhile).
-  private func removePasskey() {
-    guard !addingPasskey else { return }
-    addingPasskey = true
-    Task {
-      defer { addingPasskey = false }
-      do { try await accounts.removePasskey() } catch { show(error) }
-    }
+  private func compactCard<Content: View>(@ViewBuilder content: () -> Content) -> some View {
+    VStack(spacing: 10) { content() }
+      .padding(.horizontal, 16)
+      .padding(.vertical, 12)
+      .background(Color(.secondarySystemGroupedBackground), in: .rect(cornerRadius: 26))
+      .buttonStyle(.plain)
   }
 
-  private func newWords() {
-    guard !addingPasskey else { return }
-    addingPasskey = true
-    Task {
-      defer { addingPasskey = false }
-      do {
-        _ = try await accounts.newRecoveryKey()
-        secure(.words)  // the new words, to save in the guide
-      } catch {
-        show(error)
-      }
-    }
-  }
-
-  /// A security change failed (not a cancellation, nor a sign-out meanwhile).
-  private func show(_ error: Error) {
-    if !SecurityPresentation.isCancellation(error) {
-      passkeyProblem = SecurityPresentation.passkeyMessage(error, fallback: error.localizedDescription)
-    }
-  }
-
-
-  /// What signing out costs, in one line: whether, and how, the name comes back.
-  private var resetMessage: String {
-    guard let account = accounts.account, account.secured else {
-      // The iCloud Keychain keeps it (marked signed out, listed on Sign In); nothing else would bring it back.
-      return "Your account isn’t secured. Without your iCloud Keychain, you won’t be able to sign in as "
-        + "\(accounts.account?.username ?? "this name") again."
-    }
-    if !accounts.wordsSaved && !account.byPasskey {
-      return "Your recovery key isn’t saved. You may not be able to sign back in."
-    }
-    return account.byPasskey
-      ? "Sign back in with your passkey or recovery key. Friends on this iPhone are removed."
-      : "Sign back in with your recovery key. Friends on this iPhone are removed."
-  }
-
-
-
-  /// Requests from strangers on or off (spec 4.10): the hub is told with the contact key's check.
-  private func setRequestsOpen(_ open: Bool) {
-    guard let client = accounts.client else { return }
-    requestsOpen = open
-    Task { @MainActor in
-      if (try? await Hub.run { try client.setRequestsOpen(open: open) }) == nil {
-        requestsOpen = (try? await Hub.run { client.requestsOpen() }) ?? true
-      }
-    }
-  }
-
-  private func setSaveSent(_ enabled: Bool) {
-    guard enabled else {
-      saveSent = false
-      return
-    }
-    guard !requestingPhotos else { return }
-
-    requestingPhotos = true
-    Task { @MainActor in
-      defer { requestingPhotos = false }
-
-      let status = await PHPhotoLibrary.requestAuthorization(for: .addOnly)
-      let allowed = status == .authorized || status == .limited
-      saveSent = allowed
-      photosDenied = !allowed
-    }
-  }
-
-  private func checkPhotosPermission() {
-    let status = PHPhotoLibrary.authorizationStatus(for: .addOnly)
-    if saveSent && (status == .denied || status == .restricted) {
-      saveSent = false
-    }
-  }
-
-  private func openSystemSettings() {
-    guard let url = URL(string: UIApplication.openSettingsURLString) else {
-      return
-    }
-    openURL(url)
-  }
-
-  /// Deleting, on a page of its own: what it means, your name typed to confirm, then Face ID (or the passcode).
-  private func deletePage(_ account: Account) -> some View {
-    let confirmed = Username.skeleton(deleteTyped) == Username.skeleton(account.username)
-    return Form {
-      Section {
-        Label("“\(account.username)” becomes free for anyone.", systemImage: "person.crop.circle.badge.xmark")
-        Label("Your friends can’t reach you anymore.", systemImage: "person.2.slash")
-        Label("This can’t be undone.", systemImage: "exclamationmark.triangle")
-        if account.byPasskey {
-          Label("Delete the passkey in your password manager too.", systemImage: "key")
-        }
-      }
-      Section {
-        TextField("Your Name", text: $deleteTyped)
-          .textInputAutocapitalization(.never)
-          .autocorrectionDisabled()
-      } footer: {
-        Text("Type “\(account.username)” to confirm.")
-      }
-      Section {
-        Button(role: .destructive) {
-          Task { await deleteAccount() }
-        } label: {
-          if deletingAccount { ProgressView().frame(maxWidth: .infinity) } else {
-            Text("Delete Account").frame(maxWidth: .infinity)
-          }
-        }
-        .disabled(!confirmed || deletingAccount)
-      }
-    }
-    .navigationTitle("Delete Account")
-    .navigationBarTitleDisplayMode(.inline)
-    .onDisappear { deleteTyped = "" }
-    .alert(
-      "Unable to Delete Account",
-      isPresented: Binding(get: { deleteProblem != nil }, set: { if !$0 { deleteProblem = nil } })
-    ) {
-      Button("OK", role: .cancel) {}
-    } message: {
-      Text(deleteProblem ?? "")
-    }
-  }
-
-  /// Deleted at the hub, then forgotten here as signing out forgets.
-  private func deleteAccount() async {
-    let context = LAContext()
-    guard (try? await context.evaluatePolicy(.deviceOwnerAuthentication, localizedReason: "Delete your account."))
-      == true
-    else { return }
-    deletingAccount = true
-    defer { deletingAccount = false }
-    do {
-      try await accounts.deleteAccount()
-      reset()
-    } catch {
-      deleteProblem = error.localizedDescription
-    }
-  }
-
-  private func reset() {
-    if let domain = Bundle.main.bundleIdentifier {
-      UserDefaults.standard.removePersistentDomain(forName: domain)
-    }
-    dismiss()
-    accounts.signOut()  // the friends go with the account (YoApp)
-  }
-}
-
-enum SecurityPresentation {
-  static func isCancellation(_ error: Error) -> Bool {
-    if error is CancellationError { return true }
-
-    let error = error as NSError
-    return error.domain == ASAuthorizationError.errorDomain
-      && error.code == ASAuthorizationError.Code.canceled.rawValue
-  }
-
-  static func passkeyMessage(_ error: Error, fallback: String) -> String {
-    if let error = error as? AccountError, case .tooMany = error {
-      return "Too many tries. Try again later."
-    }
-    if let error = error as? AccountError, case .noPRF = error {
-      return "Your password manager can’t do this. Try iCloud Keychain."
-    }
-    return fallback
-  }
-}
-
-// Existing sent-media behavior.
-enum Library {
-  static func saveIfWanted(photo: Data? = nil, video: URL? = nil) {
-    guard UserDefaults.standard.bool(forKey: SettingKey.saveSent) else {
-      return
-    }
-
-    var file: URL?
-    if let video {
-      let destination = FileManager.default.temporaryDirectory
-        .appending(path: "library-\(UUID().uuidString).mov")
-
-      guard
-        (try? FileManager.default.copyItem(
-          at: video,
-          to: destination
-        )) != nil
-      else { return }
-
-      file = destination
-    }
-
-    let copy = file
-    PHPhotoLibrary.shared().performChanges {
-      let request = PHAssetCreationRequest.forAsset()
-
-      if let photo {
-        request.addResource(with: .photo, data: photo, options: nil)
-      } else if let copy {
-        let options = PHAssetResourceCreationOptions()
-        options.shouldMoveFile = true
-        request.addResource(with: .video, fileURL: copy, options: options)
-      }
-    } completionHandler: { saved, _ in
-      if !saved, let copy {
-        try? FileManager.default.removeItem(at: copy)
-      }
-    }
-  }
-}
-
-/// The friends blocked on this phone (spec 4.8), as Settings lists blocked contacts: swipe to unblock, and they are
-/// back on the list.
-@MainActor
-private struct BlockedList: View {
-  @Environment(AccountStore.self) private var accounts
-  @Environment(Friends.self) private var friends
-  @Environment(MediaOutbox.self) private var outbox
-  @State private var problem: String?
-
-  var body: some View {
-    Form {
-      if !friends.blocked.isEmpty {
-        Section {
-          ForEach(friends.blocked) { friend in
-            Text(friend.name)
-              .font(.yo(17, relativeTo: .body))
-              .lineLimit(1)
-              .minimumScaleFactor(0.5)
-              .swipeActions {
-                Button("Unblock") { unblock(friend) }
-              }
-          }
-        } footer: {
-          Text("Blocked friends can’t send you Yos. Swipe to unblock.")
-        }
-      }
-    }
-    // Empty: in the middle of the page, as Settings shows it, not in a cell.
-    .overlay {
-      if friends.blocked.isEmpty { ContentUnavailableView("No Blocked Friends", systemImage: "hand.raised") }
-    }
-    .navigationTitle("Blocked")
-    .navigationBarTitleDisplayMode(.inline)
-    .alert("Unable to Unblock", isPresented: Binding(get: { problem != nil }, set: { if !$0 { problem = nil } })) {
-      Button("OK", role: .cancel) {}
-    } message: {
-      Text(problem ?? "")
-    }
-  }
-
-  private func unblock(_ friend: Friend) {
-    Task {
-      do {
-        try await accounts.setBlocked(friend.user ?? friend.name, false)
-        withAnimation { friends.setBlocked(friend, false) }
-        outbox.retryNow()  // photos taken for them while blocked go now
-      } catch {
-        problem = error.localizedDescription
-      }
-    }
-  }
-}
-
-/// A row's symbol as Settings draws it: white on a small rounded square of colour.
-struct Tile: LabelStyle {
-  let color: Color
-  init(_ color: Color) { self.color = color }
-
-  func makeBody(configuration: Configuration) -> some View {
-    HStack(spacing: 14) {
-      configuration.icon
-        .font(.system(size: 15, weight: .semibold))
-        .foregroundStyle(.white)
-        .frame(width: 29, height: 29)
-        .background(color.gradient, in: .rect(cornerRadius: 7))
-      configuration.title
-    }
-  }
-}
-
-/// The red count Settings shows on a row with something to do ("1" beside Finish Setting Up).
-struct CountBadge: View {
-  let count: Int
-
-  var body: some View {
-    Text("\(count)")
-      .font(.subheadline.weight(.semibold))
-      .foregroundStyle(.white)
-      .frame(minWidth: 23, minHeight: 23)
-      .background(.red, in: .capsule)
-      .accessibilityLabel(count == 1 ? "1 thing to do" : "\(count) things to do")
-  }
-}
-
-/// The disclosure arrow Settings draws after a row's count, so the row reads as tappable.
-struct Chevron: View {
-  var body: some View {
-    Image(systemName: "chevron.right")
-      .font(.footnote.weight(.semibold))
-      .foregroundStyle(Color(.tertiaryLabel))
-      .accessibilityHidden(true)
-  }
-}
-
-/// A security row: its tile, its title, its state at the end, as Settings lists a setting.
-private struct SecurityRow: View {
-  let icon: String
-  let color: Color
-  let title: String
-  let value: String
-  var done = false
-  var chevron = true
-  @Environment(\.dynamicTypeSize) private var typeSize
-
-  var body: some View {
-    // Plain label colours, not the tint a button or menu would give them; the checkmark after the state. Very large
-    // text: the state under the title (as LabeledContent does), not the title broken letter by letter beside it.
-    HStack {
-      Label {
-        VStack(alignment: .leading) {
-          Text(title).foregroundStyle(Color(.label))
-          if typeSize.isAccessibilitySize { state }
-        }
-      } icon: {
-        Image(systemName: icon)
-      }
-      .labelStyle(Tile(color))
-      Spacer(minLength: 0)
-      if !typeSize.isAccessibilitySize { state }
-      if chevron { Chevron() }
-    }
-  }
-
-  /// The state and its mark. Done: a green check; not yet: an empty circle, the step still to take.
-  private var state: some View {
-    HStack(spacing: 6) {
-      Text(value).foregroundStyle(Color(.secondaryLabel))
-      Image(systemName: done ? "checkmark.circle.fill" : "circle")
-        .foregroundStyle(done ? Color.green : Color(.tertiaryLabel))
-        .accessibilityHidden(true)
-    }
-  }
-}
-
-/// Friends, blocks and the app icon in the account's storage on the hub (spec 6.9): saved, or still to go up. A tap
-/// writes now.
-private struct StorageRow: View {
-  let client: YoClient?
-  @Environment(Inbox.self) private var inbox
-  @Environment(AccountStore.self) private var accounts
-  @Environment(Friends.self) private var friends
-  @State private var savedAt: Date?
-  @State private var unavailable = true
-  @State private var saving = false
-
-  var body: some View {
-    Button { Task { await save() } } label: {
-      SecurityRow(
-        icon: "person.2.fill", color: savedAt == nil ? .orange : .green, title: "Contacts",
-        value: unavailable ? "Updating…" : savedAt != nil ? "Saved" : saving ? "Saving…" : "Not Saved",
-        done: savedAt != nil, chevron: false)
-    }
-    .disabled(saving)
-    // A write from elsewhere (the inbox's sync) shows up.
-    .task {
-      while !Task.isCancelled {
-        await load()
-        try? await Task.sleep(for: .seconds(5))
-      }
-    }
-  }
-
-  private func load() async {
-    guard let client else { unavailable = true; return }
-    do {
-      let ms = try await Hub.run { try client.storageSavedAt() }
-      savedAt = ms.map { Date(timeIntervalSince1970: Double($0) / 1000) }
-      unavailable = false
-    } catch { unavailable = true }
-  }
-
-  private func save() async {
-    guard client != nil else { return }
-    saving = true
-    await inbox.maintain(accounts: accounts, friends: friends)  // what it received too, as any
-    await load()
-    saving = false
-  }
-}
-
-/// The two confirmations of the security rows, wherever they are shown.
-private struct SecurityDialogs: ViewModifier {
-  @Binding var turningOffPasskey: Bool
-  @Binding var renewingWords: Bool
-  let turnOff: () -> Void
-  let renew: () -> Void
-
-  func body(content: Content) -> some View {
-    content
-      .confirmationDialog("Turn Off Passkey?", isPresented: $turningOffPasskey, titleVisibility: .visible) {
-        Button("Turn Off Passkey", role: .destructive) { turnOff() }
-        Button("Cancel", role: .cancel) {}
-      } message: {
-        Text("You’ll sign back in with your recovery key only. Delete the passkey in your password manager too.")
-      }
-      .confirmationDialog("Create New Recovery Key?", isPresented: $renewingWords, titleVisibility: .visible) {
-        Button("Create New Recovery Key", role: .destructive) { renew() }
-        Button("Cancel", role: .cancel) {}
-      } message: {
-        Text("Your current recovery key will stop working.")
-      }
-  }
-}
-
-/// A picture for someone without one, as Signal makes it: the first letter of the name on a colour of the list's,
-/// the same for the same name on every phone.
-struct Avatar: View {
-  let name: String
-  var size: CGFloat = 44
-
-  var body: some View {
-    let seed = Username.skeleton(name).unicodeScalars.reduce(0) { $0 &+ Int($1.value) }
-    Circle()
-      .fill(Color.row(seed))
-      .frame(width: size, height: size)
-      .overlay {
-        Text(name.first.map { String($0).uppercased() } ?? "?")
-          .font(.yo(size * 0.45))
-          .foregroundStyle(.white)
-      }
-      .accessibilityHidden(true)
-  }
-}
-
-/// Your code, big: a friend's camera reads it to add you. It holds your link (justyo.co/NAME).
-struct NameCodeSheet: View {
-  let name: String
-  @Environment(\.dismiss) private var dismiss
-
-  var body: some View {
-    NavigationStack {
-      VStack(spacing: 20) {
-        Spacer()
-        if let image = RecoveryQR.image(text: Invite.link(for: name).absoluteString) {
-          Image(uiImage: image)
-            .interpolation(.none)
-            .resizable()
-            .scaledToFit()
-            .frame(maxWidth: 240, maxHeight: 240)  // smaller where the half-height sheet has less room (iPhone SE)
-            .padding(16)
-            .background(.white, in: .rect(cornerRadius: 22))
-            .accessibilityLabel("QR code for \(name)")
-        }
-        Text(name).font(.yo(30, relativeTo: .title)).lineLimit(1).minimumScaleFactor(0.5).padding(.horizontal)
-          .layoutPriority(1)
-        Spacer()
-      }
-      .frame(maxWidth: .infinity)
-      .navigationTitle("Your Code")
-      .navigationBarTitleDisplayMode(.inline)
-      .toolbar {
-        ToolbarItem(placement: .topBarTrailing) { Button(role: .close) { dismiss() } }
-      }
-    }
-    .presentationDetents([.medium, .large])
-  }
-}
-
-/// Send Feedback: a few words to the Yo team, with the app's version. Plain to the hub (spec 1), and the footer says
-/// so. Sent through the core off the main actor; a short "Thanks!" and the sheet closes.
-struct FeedbackSheet: View {
-  @Environment(\.dismiss) private var dismiss
-  @Environment(AccountStore.self) private var accounts
-
-  @State private var text = ""
-  @State private var sending = false
-  @State private var thanked = false
-  @State private var problem: String?
-  @FocusState private var focused: Bool
-
-  /// The hub takes up to this many bytes of UTF-8 (spec 6.3).
-  private static let maxBytes = 2000
-
-  private var trimmed: String { text.trimmingCharacters(in: .whitespacesAndNewlines) }
-
-  /// "1.2 (34)": CFBundleShortVersionString and CFBundleVersion.
-  static var appVersion: String {
-    let info = Bundle.main.infoDictionary
-    let short = info?["CFBundleShortVersionString"] as? String ?? "?"
-    let build = info?["CFBundleVersion"] as? String ?? "?"
-    return String(bytes: "\(short) (\(build))".utf8.prefix(64), encoding: .utf8) ?? "?"
-  }
-
-  var body: some View {
-    NavigationStack {
-      Form {
-        Section {
-          TextEditor(text: $text)
-            .focused($focused)
-            .frame(minHeight: 180)
-            .overlay(alignment: .topLeading) {
-              if text.isEmpty {
-                Text("What should Yo do better?")
-                  .foregroundStyle(Color(.placeholderText))
-                  .padding(.top, 8)
-                  .padding(.leading, 5)
-                  .allowsHitTesting(false)
-              }
-            }
-            .disabled(sending || thanked)
-        } footer: {
-          Text("Goes to the Yo team, not end-to-end encrypted.")
-        }
-      }
-      .overlay {
-        if thanked {
-          Label("Thanks!", systemImage: "checkmark.circle.fill")
-            .font(.yo(22, relativeTo: .title3))
-            .padding(.horizontal, 24)
-            .padding(.vertical, 16)
-            .glassEffect()
-            .transition(.scale.combined(with: .opacity))
-        }
-      }
-      .navigationTitle("Send Feedback")
-      .navigationBarTitleDisplayMode(.inline)
-      .toolbar {
-        ToolbarItem(placement: .cancellationAction) {
-          Button("Cancel", role: .cancel) { dismiss() }
-            .disabled(sending)
-        }
-        ToolbarItem(placement: .confirmationAction) {
-          if sending {
-            ProgressView()
-          } else {
-            Button("Send") { Task { await send() } }
-              .disabled(trimmed.isEmpty || thanked)
-          }
-        }
-      }
-      .onChange(of: text) { _, new in
-        // Within the hub's length, cut at a whole character.
-        if new.utf8.count > Self.maxBytes {
-          var cut = new
-          while cut.utf8.count > Self.maxBytes { cut.removeLast() }
-          text = cut
-        }
-      }
-      .onAppear { focused = true }
-      .alert(
-        "Unable to Send Feedback",
-        isPresented: Binding(get: { problem != nil }, set: { if !$0 { problem = nil } })
-      ) {
-        Button("OK", role: .cancel) {}
-      } message: {
-        Text(problem ?? "")
-      }
-    }
-    .interactiveDismissDisabled(sending || !trimmed.isEmpty)
-    .sensoryFeedback(.success, trigger: thanked) { _, now in now }
-  }
-
-  private func send() async {
-    guard let client = accounts.client, !trimmed.isEmpty, !sending else { return }
-    let words = trimmed
-    let version = Self.appVersion
-    sending = true
-    defer { sending = false }
-    do {
-      try await Hub.run { try client.sendFeedback(text: words, appVersion: version) }
-    } catch YoError.Refused(let status) where status == 429 {
-      problem = "You’ve sent a lot of feedback today. Try again tomorrow."
-      return
-    } catch let error as YoError {
-      problem = AccountError.hub(error).localizedDescription
-      return
-    } catch {
-      problem = error.localizedDescription
-      return
-    }
-    focused = false
-    withAnimation(.snappy) { thanked = true }
-    try? await Task.sleep(for: .seconds(1.2))
-    dismiss()
-  }
-}
-
-/// Appearance: the app icon, chosen by its picture and a word, and the bars' sides for the left hand. The default (white
-/// Yo on Violet), its negative, and Yo's icons of old, plain squares: Full Color in Violet (the iPhone icon of version
-/// 2.5.8, 2016–21), OG 2014 in Amethyst and 2015 in Lilac (the App Store's) (Info.plist CFBundleAlternateIcons).
-struct AppearancePage: View {
-  @Environment(AccountStore.self) private var accounts
-  @State private var current = UIApplication.shared.alternateIconName
-  @State private var iconError: String?
-  @AppStorage(SettingKey.leftHanded) private var leftHanded = false
-
-  /// Each with its word and where it is from (yo-lore/assets/app-icon-appstore).
-  private let icons: [(name: String?, image: String, label: String, from: String)] = [
-    (nil, "IconStandard", "Yo", "New"), ("Negative", "IconNegative", "Negative Yo", "New"),
-    ("Original", "IconOriginal", "Full Color", "iPhone 2016–21"), ("OG2014", "IconOG2014", "OG 2014", "App Store 2014"),
-    ("Lilac2015", "IconLilac2015", "2015", "App Store 2015–21"),
-  ]
-
-  var body: some View {
-    Form {
-      // Three a row, the chosen one ringed (as Signal's icon picker): room for the picture and its word.
-      Section {
-        LazyVGrid(columns: Array(repeating: GridItem(.flexible()), count: 3), spacing: 22) {
-          ForEach(icons, id: \.image) { icon in
-            let chosen = current == icon.name
-            Button {
-              guard !chosen else { return }
-              let client = accounts.client  // the account it was chosen in
-              Task {
-                do {
-                  try await UIApplication.shared.setAlternateIconName(icon.name)
-                } catch {
-                  print("Yo: app icon \(icon.name ?? "default") not set: \(error)")
-                  iconError = error.localizedDescription
-                }
-                current = UIApplication.shared.alternateIconName
-                if current == icon.name { accounts.storeAppIcon(icon.name, by: client) }  // for its next phone
-              }
-            } label: {
-              VStack(spacing: 10) {
-                Image(uiImage: UIImage(named: icon.image) ?? UIImage())
-                  .resizable()
-                  .frame(width: 76, height: 76)
-                  .clipShape(.rect(cornerRadius: 17, style: .continuous))
-                  .overlay(
-                    RoundedRectangle(cornerRadius: 17, style: .continuous).strokeBorder(Color(.separator), lineWidth: 0.5))
-                  .padding(4)
-                  .overlay(
-                    RoundedRectangle(cornerRadius: 21, style: .continuous)
-                      .strokeBorder(chosen ? Color.amethyst : .clear, lineWidth: 3))
-                VStack(spacing: 1) {
-                  Text(icon.label)
-                    .font(.subheadline.weight(chosen ? .semibold : .regular))
-                    .foregroundStyle(chosen ? .primary : .secondary)
-                  Text(icon.from)
-                    .font(.caption2)
-                    .foregroundStyle(.tertiary)
-                }
-                .lineLimit(1)
-                .minimumScaleFactor(0.8)
-              }
-              .frame(maxWidth: .infinity)
-              .contentShape(.rect)
-            }
-            .buttonStyle(.plain)
-            .animation(.snappy, value: chosen)
-            .accessibilityLabel("\(icon.label), \(icon.from)")
-            .accessibilityAddTraits(chosen ? .isSelected : [])
-          }
-        }
-        .padding(.vertical, 12)
-      } header: {
-        Text("App Icon")
-      } footer: {
-        if let iconError { Text("Not changed: \(iconError)") }
-      }
-      Section {
-        Toggle("Left-Handed", isOn: $leftHanded)
-      } footer: {
-        Text("Yo and photos at the left end of a bar, Undo at the right; the camera at the bottom left, the menu at the bottom right.")
-      }
-    }
-    .navigationTitle("Appearance")
-    .navigationBarTitleDisplayMode(.inline)
-  }
 }

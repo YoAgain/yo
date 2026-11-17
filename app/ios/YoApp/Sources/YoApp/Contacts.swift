@@ -55,7 +55,7 @@ struct ContactState: Sendable {
     ContactState(
       contact: client.contacts().first { $0.user == user },
       accountKey: client.accountKeyOf(user: user),
-      safetyNumber: try? client.safetyNumber(who: user),
+      safetyNumber: Diagnostics.attempt({ try client.safetyNumber(who: user) }),
       sessions: try client.sessionsWith(user: user))
   }
 }
@@ -65,7 +65,8 @@ struct ContactState: Sendable {
 @MainActor
 enum Verification {
   static func setVerified(
-    _ user: String, _ verified: Bool, accounts: AccountStore, inbox: Inbox, friends: Friends, outbox: MediaOutbox
+    _ user: String, _ verified: Bool, accounts: AccountStore, inbox: Inbox, friends: Friends,
+    outbox: MediaOutbox
   ) async throws {
     guard let client = accounts.client else { return }
     try await Hub.run { try client.setVerified(who: user, verified: verified) }
@@ -73,7 +74,9 @@ enum Verification {
   }
 
   /// Their new key accepted: Yos to them go again (unverified, until the safety numbers are compared again).
-  static func confirm(_ user: String, accounts: AccountStore, inbox: Inbox, friends: Friends, outbox: MediaOutbox)
+  static func confirm(
+    _ user: String, accounts: AccountStore, inbox: Inbox, friends: Friends, outbox: MediaOutbox
+  )
     async throws
   {
     guard let client = accounts.client else { return }
@@ -81,60 +84,120 @@ enum Verification {
     resume(accounts: accounts, inbox: inbox, friends: friends, outbox: outbox)
   }
 
-  private static func resume(accounts: AccountStore, inbox: Inbox, friends: Friends, outbox: MediaOutbox) {
+  private static func resume(
+    accounts: AccountStore, inbox: Inbox, friends: Friends, outbox: MediaOutbox
+  ) {
     inbox.resume(accounts: accounts, friends: friends)
     outbox.retryNow()
   }
 }
 
-/// A row with its state at the end: title, a word, the check.
-private struct StatusRow: View {
-  let title: String
-  let value: String
+/// Each contact with its overall check, a row each, leading to its own checks (ContactDetail): under Settings ›
+/// Account › Contacts.
+/// A contact in the list: its name and encryption mark (a tap shows the details), and Verified as a switch.
+struct ContactListRow: View {
+  let friend: Friend
+  let state: ContactState?
   let check: Check
+  let summary: String
+  let details: () -> Void
 
+  /// Name left; its mark and a chevron right; the whole row opens the contact's card.
   var body: some View {
-    LabeledContent {
-      HStack(spacing: 6) {
-        Text(value)
-        Image(systemName: check.symbol).foregroundStyle(check.color).accessibilityHidden(true)
+    Button(action: details) {
+      SettingsNavigationLabel {
+        LabeledContent {
+          Image(systemName: check.symbol).foregroundStyle(check.color).accessibilityLabel(summary)
+        } label: {
+          HStack(spacing: 10) {
+            Avatar(name: friend.name, size: 28)
+            Text(friend.name).lineLimit(1).minimumScaleFactor(0.5)
+          }
+        }
       }
-    } label: {
-      Text(title)
     }
+    .buttonStyle(.plain)
+    .disabled(friend.user != nil && state == nil)
   }
 }
 
-/// The friends, blocked ones too, each with its overall check, each opening its details.
-/// Each contact with its overall check, a row each, leading to its own checks (ContactDetail): under Settings ›
-/// Encryption › Per Contact.
+/// The groups, each opening its members (the same sheet as the list's menu).
+struct GroupRows: View {
+  @Environment(Friends.self) private var friends
+  @State private var open: Friend?
+
+  var body: some View {
+    VStack(spacing: 0) {
+      let groups = friends.all.filter { $0.group != nil }
+        .sorted { $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending }
+      ForEach(Array(groups.enumerated()), id: \.element.id) { index, group in
+        if index > 0 { Divider().padding(.vertical, 5) }
+        Button {
+          open = group
+        } label: {
+          HStack(spacing: 10) {
+            Image(systemName: "person.3.fill")
+              .font(.system(size: 12, weight: .semibold))
+              .foregroundStyle(.white)
+              .frame(width: 28, height: 28)
+              .background(Color.row(group.color), in: .circle)
+            Text(group.name).lineLimit(1).minimumScaleFactor(0.5)
+            Spacer(minLength: 0)
+          }
+          .frame(maxWidth: .infinity, minHeight: 44, alignment: .leading)
+          .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .foregroundStyle(Color(.label))
+      }
+    }
+    .sheet(item: $open) { group in GroupMembersSheet(bar: group) }
+  }
+}
+
 struct ContactRows: View {
   @Environment(Friends.self) private var friends
   @Environment(AccountStore.self) private var accounts
   @State private var states: [String: ContactState] = [:]
   @State private var unavailable = true
+  /// The contact whose card is open: it slides in over the list instead of another page level.
+  @State private var open: Friend?
+  @State private var cardDetent: PresentationDetent = .medium
+  /// The card's height from its rows: bar 64, each row 54, two groups' gaps 28 and 40 padding.
+  private func cardHeight(for friend: Friend) -> CGFloat {
+    let state = friend.user.flatMap { states[$0] }
+    var rows = 3  // Verified, Identity, the wait switch
+    if friend.gone || state?.contact?.gone == true { rows += 1 }
+    if state?.contact?.outdated == true { rows += 1 }
+    return 64 + CGFloat(rows) * 54 + 28 + 40 + 20
+  }
 
   var body: some View {
-    Group {
+    VStack(spacing: 0) {
       if friends.contacts.isEmpty {
         Text("No contacts yet.").foregroundStyle(.secondary)
       }
-      ForEach(sorted) { friend in
+      ForEach(Array(sorted.enumerated()), id: \.element.id) { index, friend in
+        if index > 0 { Divider().padding(.vertical, 5) }
         let state = friend.user.flatMap { states[$0] } ?? ContactState()
         let check = state.overall(friend)
-        NavigationLink {
-          ContactDetail(friend: friend)
-        } label: {
-          LabeledContent {
-            HStack(spacing: 6) {
-              Text(summary(friend, check))
-              Image(systemName: check.symbol).foregroundStyle(check.color).accessibilityHidden(true)
-            }
-          } label: {
-            Text(friend.name).lineLimit(1).minimumScaleFactor(0.5)
-          }
-        }
+        ContactListRow(friend: friend, state: friend.user.flatMap { states[$0] }, check: check,
+          summary: summary(friend, check)) { open = friend }
       }
+    }
+    .sheet(item: $open) { friend in
+      NavigationStack {
+        ContactDetail(friend: friend, state: states[friend.user ?? ""])
+          .toolbar {
+            ToolbarItem(placement: .confirmationAction) {
+              Button("Done", systemImage: "checkmark") { open = nil }
+            }
+          }
+      }
+      // Low: the card's few rows (Verified, Encryption, a problem row maybe, the wait switch) and its bar.
+      .presentationDetents([.medium, .large])
+      .presentationDragIndicator(.visible)
+      .presentationBackground(Color(.systemGroupedBackground))
     }
     // Again once the core is open (the page opened before), and when a contact changes (a chat, a new key).
     .task(id: Reload(accounts.client, friends.contacts)) {
@@ -142,14 +205,18 @@ struct ContactRows: View {
         if let loaded = await ContactState.loadAll(accounts, friends) {
           states = loaded
           unavailable = false
-        } else { unavailable = true }
+        } else {
+          unavailable = true
+        }
         do { try await Task.sleep(for: .seconds(5)) } catch { return }
       }
     }
   }
 
   private var sorted: [Friend] {
-    friends.contacts.sorted { $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending }
+    friends.contacts.sorted {
+      $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending
+    }
   }
 
   private func summary(_ friend: Friend, _ check: Check) -> String {
@@ -170,12 +237,17 @@ struct ContactRows: View {
 
 extension ContactState {
   /// Every contact's state, by user id; nil when the account changed meanwhile (signed out).
-  @MainActor static func loadAll(_ accounts: AccountStore, _ friends: Friends) async -> [String: ContactState]? {
+  @MainActor static func loadAll(_ accounts: AccountStore, _ friends: Friends) async -> [String:
+    ContactState]?
+  {
     guard let client = accounts.client else { return nil }
     let users = friends.contacts.compactMap(\.user)
-    let loaded = (try? await Hub.run {
-      Dictionary(try users.map { ($0, try ContactState.load(client, user: $0)) }, uniquingKeysWith: { a, _ in a })
-    })
+    let loaded =
+      (try? await Hub.run {
+        Dictionary(
+          try users.map { ($0, try ContactState.load(client, user: $0)) },
+          uniquingKeysWith: { a, _ in a })
+      })
     return client === accounts.client ? loaded : nil
   }
 }
@@ -184,113 +256,89 @@ extension ContactState {
 struct EncryptionTally: Equatable {
   var encrypted = 0
   var total = 0
+  /// Contacts with a real problem (red), e.g. a changed key: the only thing the Account row shows.
+  var problems = 0
 
   var allGood: Bool { encrypted == total }
 
-  @MainActor static func load(_ accounts: AccountStore, _ friends: Friends) async -> EncryptionTally? {
+  @MainActor static func load(_ accounts: AccountStore, _ friends: Friends) async
+    -> EncryptionTally?
+  {
     guard let states = await ContactState.loadAll(accounts, friends) else { return nil }
     let contacts = friends.contacts.filter { !$0.blocked }
-    let good = contacts.filter { friend in (friend.user.flatMap { states[$0] } ?? ContactState()).overall(friend) == .ok }
-    return EncryptionTally(encrypted: good.count, total: contacts.count)
+    let good = contacts.filter { friend in
+      (friend.user.flatMap { states[$0] } ?? ContactState()).overall(friend) == .ok
+    }
+    let problems = contacts.filter { friend in
+      (friend.user.flatMap { states[$0] } ?? ContactState()).overall(friend) == .problem
+    }
+    return EncryptionTally(encrypted: good.count, total: contacts.count, problems: problems.count)
   }
 }
 
-/// Settings › Encryption: how Yo encrypts, in a few plain lines, how many contacts are encrypted as they should be,
-/// and under it each contact's own checks (Per Contact).
-struct EncryptionPage: View {
-  @Environment(Friends.self) private var friends
-  @Environment(AccountStore.self) private var accounts
-  @State private var tally: EncryptionTally?
-  @State private var status: SecurityStatus?
-  @Environment(Inbox.self) private var inbox
+struct PublicKeyRow: View {
+  let title: String
+  let value: String
+  /// One line, cut with "…"; a tap shows it whole.
+  @State private var whole = false
 
   var body: some View {
-    Form {
-      Section {
-        LabeledContent {
-          HStack(spacing: 6) {
-            Text(tally.map { "\($0.encrypted) of \($0.total)" } ?? "…")
-            if let tally {
-              let check: Check = tally.allGood ? .ok : .waiting
-              Image(systemName: check.symbol).foregroundStyle(check.color).accessibilityHidden(true)
-            }
-          }
-        } label: {
-          Text("Contacts Encrypted")
-        }
-      } footer: {
-        Text("Every Yo, photo and video is end-to-end encrypted: only you and your friends can open them.")
-      }
-      // Live, from the core and the inbox: a plain statement with its check each, the details inside.
-      if let status {
-        Section {
-          check("Hub Connected", connected.check) {
-            detail("Last answer", connected.text)
-          }
-          check("Hub Signed", status.hubSigned ? .ok : .open) {
-            detail("Keys from the hub", status.hubSigned ? "Signed and checked" : "Not checked in this build")
-          }
-          check("Sealed Sender", .ok) {
-            detail("Who sent a Yo", "Hidden from the hub")
-          }
-          check("Post-Quantum", status.pqSessions == status.devices ? .ok : .waiting) {
-            detail("Sessions with PQXDH", "\(status.pqSessions) of \(status.devices)")
-          }
-          let keysFresh = status.prekeysAtHub >= 16 && status.signedPrekeyDays <= 8
-          check("Keys Fresh", keysFresh ? .ok : status.refillPending || status.prekeysAtHub > 0 ? .waiting : .problem) {
-            detail("One-time keys at the hub", "\(status.prekeysAtHub)" + (status.refillPending ? ", refill on its way" : ""))
-            detail("Signed keys renewed", status.signedPrekeyDays == 0 ? "This week" : "\(status.signedPrekeyDays) days ago")
-          }
-        } footer: {
-          Text("Tap a line for the details.")
-        }
-      }
-      Section {
-        DisclosureGroup {
-          ContactRows()
-        } label: {
-          LabeledContent("Per Contact") {
-            if let status { Text("\(status.verified)/\(status.contacts) verified") }
-          }
-        }
-      } footer: {
-        Text("Each contact's checks, safety number and devices. Compare safety numbers to verify a contact.")
-      }
+    // The name above, the key under it in one line (cut in the middle); a tap shows it whole.
+    VStack(alignment: .leading, spacing: 3) {
+      Text(title).font(.subheadline.weight(.semibold))
+      Text(value).font(.system(.footnote, design: .monospaced))
+        .foregroundStyle(.secondary)
+        .lineLimit(whole ? nil : 1)
+        .truncationMode(.middle)
+        .fixedSize(horizontal: false, vertical: whole)
+        .textSelection(.enabled)
     }
-    .navigationTitle("Encryption")
-    .navigationBarTitleDisplayMode(.inline)
-    .task(id: Reload(accounts.client, friends.contacts)) {
-      if let loaded = await EncryptionTally.load(accounts, friends) { tally = loaded }
-      if let client = accounts.client { status = try? await Hub.run { client.securityStatus() } }
+    .frame(maxWidth: .infinity, minHeight: 44, alignment: .leading)
+    .padding(.vertical, 6)
+    .contentShape(Rectangle())
+    .onTapGesture { withAnimation(.snappy) { whole.toggle() } }
+    .contextMenu {
+      Button("Copy", systemImage: "doc.on.doc") { UIPasteboard.general.string = value }
     }
-  }
-
-  /// When the hub last answered: within a minute is connected; else how long ago.
-  private var connected: (text: String, check: Check) {
-    guard let last = inbox.lastSync else { return ("Not yet", .waiting) }
-    let age = Arrival.age(last)
-    return Date.now.timeIntervalSince(last) < 60 ? ("Now", .ok) : ("\(age) ago", .waiting)
-  }
-
-  /// A plain statement with its check; the details for the curious when opened.
-  private func check(_ title: String, _ state: Check, @ViewBuilder details: () -> some View) -> some View {
-    let shown = details()
-    return DisclosureGroup {
-      shown
-    } label: {
-      LabeledContent(title) {
-        Image(systemName: state.symbol).foregroundStyle(state.color)
-          .accessibilityLabel(state == .ok ? "OK" : state == .problem ? "Problem" : "Pending")
-      }
-    }
-  }
-
-  private func detail(_ title: String, _ value: String) -> some View {
-    LabeledContent(title, value: value).font(.subheadline)
   }
 }
 
-/// One contact: the checks first, then who they are and their devices in plain values.
+struct ContactSecurityPage: View {
+  var summaryOnly = false
+  @Environment(AccountStore.self) private var accounts
+  @Environment(Friends.self) private var friends
+  @State private var tally: EncryptionTally?
+  var body: some View {
+    Group {
+      if summaryOnly {
+        // Quiet unless something is wrong: a red mark only for a real problem, no count.
+        if let tally, tally.problems > 0 {
+          Image(systemName: Check.problem.symbol).foregroundStyle(Check.problem.color)
+            .accessibilityLabel("Contacts need attention")
+        } else {
+          Color.clear.frame(width: 1, height: 1).accessibilityHidden(true)  // keeps the tally task alive
+        }
+      } else {
+        SettingsForm {
+          Section { ContactRows() }
+          if friends.all.contains(where: { $0.group != nil }) {
+            Section("Groups") { GroupRows() }
+          }
+        }
+        .navigationTitle("Contacts")
+        .navigationBarTitleDisplayMode(.inline)
+      }
+    }
+    .task(id: Reload(accounts.client, friends.contacts)) {
+      while !Task.isCancelled {
+        tally = await EncryptionTally.load(accounts, friends)
+        do { try await Task.sleep(for: .seconds(5)) } catch { return }
+      }
+    }
+  }
+}
+
+/// One contact: identity and actions first, with technical checks and values folded away.
 private struct ContactDetail: View {
   let friend: Friend
   @Environment(AccountStore.self) private var accounts
@@ -299,48 +347,82 @@ private struct ContactDetail: View {
   @Environment(MediaOutbox.self) private var outbox
   @State private var state: ContactState?
   @State private var problem: String?
+  @State private var keysShown = false
+  @State private var waitShown = ContactDetail.waitOptionShown
+  /// "Wait 5 s Before Sending" is hidden: five quick taps on a contact in the list show it (an expert option).
+  static var waitOptionShown: Bool {
+    get { UserDefaults.standard.bool(forKey: "settings.waitOptionShown") }
+    set { UserDefaults.standard.set(newValue, forKey: "settings.waitOptionShown") }
+  }
+  /// Asks the presenting sheet to go tall (true) while the encryption card shows, and back (false).
+  var tall: ((Bool) -> Void)? = nil
+  /// Turning Verified on asks first: only after comparing safety numbers.
+  @State private var confirmingVerify = false
+  @State private var safetyNumber = ""
+
+  init(friend: Friend, state: ContactState?, tall: ((Bool) -> Void)? = nil) {
+    self.friend = friend
+    self.tall = tall
+    _state = State(initialValue: state)
+    _safetyNumber = State(initialValue: state?.safetyNumber.map(Self.grouped) ?? "")
+  }
 
   var body: some View {
-    Form {
-      if friend.user == nil {
-        Section {
-          StatusRow(title: "Chat", value: "Not Yet", check: .open)
-        } footer: {
-          Text("The first Yo starts an end-to-end encrypted chat.")
-        }
-      } else if let state {
-        checks(state)
-        if let user = friend.user, state.safetyNumber != nil { verification(state, user: user) }
-        Section("Account") {
-          plain("User ID", friend.user ?? "", mono: true)
-          if let key = state.accountKey { plain("Account Key", key, mono: true) }
-          if let number = state.safetyNumber { plain("Safety Number", grouped(number), mono: true) }
-        }
-        if !state.sessions.isEmpty {
-          Section(state.sessions.count == 1 ? "Device" : "Devices") {
-            ForEach(state.sessions, id: \.device) { session in
-              plain("Device Key", session.device, mono: true)
-            }
-          }
-        }
-      } else {
-        Section { StatusRow(title: "Chat", value: "Updating…", check: .waiting) }
-      }
+    SettingsForm {
       Section {
+        if friend.user == nil {
+          StatusRow(title: "Chat", value: "Not Yet", check: .open)
+        } else if let state {
+          if friend.gone || state.contact?.gone == true {
+            StatusRow(title: "Account", value: "Deleted", check: .problem)
+          }
+          if state.contact?.outdated == true {
+            StatusRow(title: "Yo", value: "Needs Update", check: .waiting)
+          }
+          if let user = friend.user, state.safetyNumber != nil {
+            verification(state, user: user)
+          }
+          StatusRow(
+            title: "Identity",
+            value: state.contact?.unconfirmed == true || friend.keyChanged ? "Changed" : "",
+            check: state.contact?.unconfirmed == true ? .problem : friend.keyChanged ? .waiting : .ok)
+            // Five quick taps show (or hide) the hidden "Wait 5 s Before Sending".
+            .contentShape(Rectangle())
+            .onTapGesture(count: 5) {
+              withAnimation(.smooth) { waitShown.toggle() }
+              Self.waitOptionShown = waitShown
+              UINotificationFeedbackGenerator().notificationOccurred(.success)
+            }
+          if !state.sessions.isEmpty {
+            StatusRow(title: "Sealed Yos", value: "", check: .ok)
+            StatusRow(title: "Devices", value: "\(state.sessions.count)", check: state.sessionsCheck)
+          }
+          if state.contact?.unconfirmed == true {
+            Text("Their key changed after you verified them. Compare safety numbers again.")
+              .font(.footnote).foregroundStyle(.secondary)
+          } else if friend.keyChanged {
+            Text("Their key changed, possibly on a new phone. Compare safety numbers to check it’s still them.")
+              .font(.footnote).foregroundStyle(.secondary)
+          }
+        } else {
+          StatusRow(title: "Chat", value: "Updating…", check: .waiting)
+        }
+      }
+      if let state, friend.user != nil {
+        Section("Keys") { keyInfo(state) }
+      }
+      if waitShown {
+        Section {
         let current = friends.all.first { $0.key == friend.key }
         Toggle(
-          "Undo Before Sending",
-          isOn: Binding(get: { current?.undoFirst ?? false }, set: { friends.setUndoFirst(friend, $0) }))
-        if current?.undoFirst == true {
-          Stepper(
-            "Wait \(Int(current?.undoSeconds ?? FriendList.sendDelay)) Seconds",
-            value: Binding(
-              get: { current?.undoSeconds ?? FriendList.sendDelay }, set: { friends.setUndoSeconds(friend, $0) }),
-            in: FriendList.sendDelay...10, step: 1)
+          "Wait 5 s Before Sending",
+          isOn: Binding(
+            get: { current?.undoFirst ?? false },
+            set: {
+              friends.setUndoFirst(friend, $0)
+              if $0 { friends.setUndoSeconds(friend, 5) }
+            }))
         }
-      } footer: {
-        let seconds = Int(friends.all.first { $0.key == friend.key }?.undoSeconds ?? FriendList.sendDelay)
-        Text("A Yo to \(friend.name) waits \(seconds) seconds with a ring to undo it, as a photo does.")
       }
     }
     .navigationTitle(friend.name)
@@ -351,7 +433,10 @@ private struct ContactDetail: View {
         do { try await Task.sleep(for: .seconds(5)) } catch { return }
       }
     }
-    .alert("Something Went Wrong", isPresented: Binding(get: { problem != nil }, set: { if !$0 { problem = nil } })) {
+    .alert(
+      "Something Went Wrong",
+      isPresented: Binding(get: { problem != nil }, set: { if !$0 { problem = nil } })
+    ) {
       Button("OK", role: .cancel) {}
     } message: {
       Text(problem ?? "")
@@ -361,28 +446,80 @@ private struct ContactDetail: View {
   /// Marking them verified once the safety numbers match; a verified contact's new key confirmed, so Yos go again.
   @ViewBuilder private func verification(_ state: ContactState, user: String) -> some View {
     let verified = state.contact?.verified == true
-    Section {
+    Group {
+      Toggle(
+        "Verified",
+        isOn: Binding(
+          get: { verified },
+          set: { on in
+            if on {
+              confirmingVerify = true
+            } else {
+              change {
+                try await Verification.setVerified(
+                  user, false, accounts: accounts, inbox: inbox, friends: friends, outbox: outbox)
+              }
+            }
+          })
+      )
+      .tint(.green)
+      .alert("Mark \(friend.name) as Verified?", isPresented: $confirmingVerify) {
+        Button("Mark as Verified") {
+          change {
+            try await Verification.setVerified(
+              user, true, accounts: accounts, inbox: inbox, friends: friends, outbox: outbox)
+          }
+        }
+        Button("Cancel", role: .cancel) {}
+      } message: {
+        Text("Only if your safety numbers match. Compare them with \(friend.name) in person or on a call.")
+      }
+      .lineLimit(1)
       if state.contact?.unconfirmed == true {
         Button("Confirm New Key") {
-          change { try await Verification.confirm(user, accounts: accounts, inbox: inbox, friends: friends, outbox: outbox) }
+          change {
+            try await Verification.confirm(
+              user, accounts: accounts, inbox: inbox, friends: friends, outbox: outbox)
+          }
         }
       }
-      Button(verified ? "Mark as Not Verified" : "Mark as Verified") {
-        change {
-          try await Verification.setVerified(
-            user, !verified, accounts: accounts, inbox: inbox, friends: friends, outbox: outbox)
-        }
-      }
-    } footer: {
       if state.contact?.unconfirmed == true {
         Text("Your Yos to \(friend.name) wait until you confirm. Compare safety numbers first.")
-      } else if !verified {
-        Text(
-          "Compare the safety number below with \(friend.name)’s, in person or on a call. If it matches, mark "
-            + "them as verified: if their key changes, Yo then holds your Yos until you confirm.")
       }
     }
   }
+
+  /// The worst of the checks the details page lists.
+  private func overall(_ state: ContactState) -> Check {
+    let contact = state.contact
+    let all: [Check] = [
+      friend.gone || contact?.gone == true ? .problem : .ok,
+      contact?.unconfirmed == true ? .problem : friend.keyChanged ? .waiting : .ok,
+      state.accountKey == nil ? .waiting : .ok,
+      state.safetyNumber == nil ? .waiting : .ok,
+      state.sessions.isEmpty ? .open : state.sessionsCheck,
+    ]
+    for check in [Check.problem, .waiting, .open] where all.contains(check) { return check }
+    return .ok
+  }
+
+  /// Every key and id of this contact in one place.
+  @ViewBuilder private func keyInfo(_ state: ContactState) -> some View {
+    PublicKeyRow(title: "User ID", value: friend.user ?? "").accessibilityElement(children: .combine)
+    if let key = state.accountKey {
+      Divider()
+      PublicKeyRow(title: "Account Key", value: key).accessibilityElement(children: .combine)
+    }
+    if state.safetyNumber != nil {
+      Divider()
+      PublicKeyRow(title: "Safety Number", value: safetyNumber).accessibilityElement(children: .combine)
+    }
+    ForEach(state.sessions, id: \.device) { session in
+      Divider()
+      PublicKeyRow(title: "Device Key", value: session.device).accessibilityElement(children: .combine)
+    }
+  }
+
 
   /// A change through the core, then the page read again.
   private func change(_ work: @escaping @MainActor () async throws -> Void) {
@@ -396,89 +533,27 @@ private struct ContactDetail: View {
     }
   }
 
-  /// One row per thing that should hold, each with its check.
-  @ViewBuilder private func checks(_ state: ContactState) -> some View {
-    let contact = state.contact
-    Section {
-      StatusRow(
-        title: "Account",
-        value: friend.gone || contact?.gone == true ? "Deleted" : "On Yo",
-        check: friend.gone || contact?.gone == true ? .problem : .ok)
-      StatusRow(
-        title: "Identity Key",
-        value: contact?.unconfirmed == true || friend.keyChanged ? "Changed" : "Unchanged",
-        check: contact?.unconfirmed == true ? .problem : friend.keyChanged ? .waiting : .ok)
-      StatusRow(title: "Verified", value: contact?.verified == true ? "Yes" : "No", check: contact?.verified == true ? .ok : .open)
-      StatusRow(title: "Blocked", value: friend.blocked ? "Yes" : "No", check: friend.blocked ? .open : .ok)
-    } header: {
-      Text("Identity")
-    } footer: {
-      if contact?.unconfirmed == true {
-        Text("Their key changed after you verified them. Compare safety numbers again.")
-      } else if friend.keyChanged {
-        Text("Their key changed: they may have a new iPhone. To be sure it’s them, compare safety numbers.")
-      }
-    }
-    if contact?.outdated == true {
-      Section {
-        StatusRow(title: "Yo", value: "Needs Update", check: .waiting)
-      } header: {
-        Text("Encryption")
-      } footer: {
-        Text("\(friend.name) uses an older Yo. Your Yos wait and arrive once they update the app.")
-      }
-    } else if !state.sessions.isEmpty {
-      Section {
-        StatusRow(title: "End-to-End Encrypted", value: "Signal Protocol", check: .ok)
-        StatusRow(title: "Quantum-Safe", value: "PQXDH, SPQR", check: .ok)
-        StatusRow(title: "Sealed Sender", value: "On", check: .ok)
-        StatusRow(
-          title: "Devices",
-          value: "\(state.sessions.count)",
-          check: state.sessionsCheck)
-      } header: {
-        Text("Encryption")
-      } footer: {
-        Text("The server delivers your Yos without learning they are from you.")
-      }
-    } else {
-      Section {
-        StatusRow(title: "Chat", value: "Not Yet", check: .open)
-      }
-    }
-  }
-
-  /// A short value beside its title; a long one (keys, ids) under it, from the left, as Settings' About shows them:
-  /// beside the title it was right-aligned in a narrow column and broke at odd places.
-  @ViewBuilder private func plain(_ title: String, _ value: String, mono: Bool = false) -> some View {
-    if mono {
-      VStack(alignment: .leading, spacing: 4) {
-        Text(title)
-        Text(value)
-          .font(.system(.footnote, design: .monospaced))
-          .foregroundStyle(.secondary)
-          .textSelection(.enabled)
-      }
-      .accessibilityElement(children: .combine)
-    } else {
-      LabeledContent(title, value: value)
-    }
-  }
-
   /// The safety number in fives, three to a line, as it is read aloud ("12345 67890 12345"): only its digits, however
   /// the core spaced them (its own spaces cut the fives in the wrong places).
-  private func grouped(_ number: String) -> String {
+  private static func grouped(_ number: String) -> String {
     let digits = Array(number.filter(\.isNumber))
-    let fives = stride(from: 0, to: digits.count, by: 5).map { String(digits[$0..<min($0 + 5, digits.count)]) }
-    return stride(from: 0, to: fives.count, by: 3).map { fives[$0..<min($0 + 3, fives.count)].joined(separator: " ") }
-      .joined(separator: "\n")
+    let fives = stride(from: 0, to: digits.count, by: 5).map {
+      String(digits[$0..<min($0 + 5, digits.count)])
+    }
+    return stride(from: 0, to: fives.count, by: 3).map {
+      fives[$0..<min($0 + 3, fives.count)].joined(separator: " ")
+    }
+    .joined(separator: "\n")
   }
 
   private func load() async {
     friends.keyChangeSeen(friend)  // seen here: the list no longer marks it (this page shows it as it came)
     guard let client = accounts.client, let user = friend.user else { return }
     let loaded = try? await Hub.run { try ContactState.load(client, user: user) }
-    if client === accounts.client, let loaded { state = loaded }
+    if client === accounts.client, !Task.isCancelled, let loaded {
+      safetyNumber = loaded.safetyNumber.map(Self.grouped) ?? ""
+      state = loaded
+    }
   }
 }
 
@@ -490,6 +565,8 @@ struct Reload: Equatable {
 
   init(_ client: YoClient?, _ friends: [Friend]) {
     self.client = client.map(ObjectIdentifier.init)
-    self.friends = friends.map { "\($0.key)/\($0.user ?? "")/\($0.keyChanged)/\($0.gone)/\($0.blocked)" }
+    self.friends = friends.map {
+      "\($0.key)/\($0.user ?? "")/\($0.keyChanged)/\($0.gone)/\($0.blocked)"
+    }
   }
 }

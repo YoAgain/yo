@@ -19,7 +19,10 @@ final class SharedAccess: @unchecked Sendable {
   static func resetContention() {
     contentionGate.withLock { blockedSince.removeAll() }
   }
-  private static func log(_ reason: String, _ code: Int32) {
+  private static func log(_ reason: String, _ code: Int32, file: String = #fileID, line: Int = #line, place: String = #function) {
+    #if os(iOS)
+    Diagnostics.record(NSError(domain: "SharedAccess", code: Int(code)), place: place, file: file, line: line)
+    #endif
     #if canImport(os)
     Logger(subsystem: "app.justyo", category: "shared-lock").error("\(reason, privacy: .public); errno=\(code, privacy: .public)")
     #endif

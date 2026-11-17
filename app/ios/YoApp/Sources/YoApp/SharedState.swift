@@ -198,7 +198,7 @@ final class SharedStateFile: StateStore, StateLock, @unchecked Sendable {
     var url = url
     var values = URLResourceValues()
     values.isExcludedFromBackup = true
-    try? url.setResourceValues(values)
+    Diagnostics.attempt({ try url.setResourceValues(values) })
   }
 
   // MARK: Moving in (the app, once)
@@ -227,8 +227,8 @@ final class SharedStateFile: StateStore, StateLock, @unchecked Sendable {
         // Written whole beside it with its word, then renamed into place in one step, then the old one deleted: never
         // no state, never half of one.
         guard let blob = StateFile.load(),
-          (try? (Data(UUID().uuidString.utf8) + blob).write(
-            to: stateURL, options: [.atomic, .completeFileProtectionUntilFirstUserAuthentication])) != nil
+          (Diagnostics.attempt({ try (Data(UUID().uuidString.utf8) + blob).write(
+            to: stateURL, options: [.atomic, .completeFileProtectionUntilFirstUserAuthentication]) })) != nil
         else { return false }
         excludeFromBackup(stateURL)
         try? manager.removeItem(at: StateFile.url)
@@ -250,7 +250,7 @@ enum Guest {
     defer { SharedStateFile.give() }
     let file = SharedStateFile(guest: true)
     guard let blob = file.read(),
-      let client = try? YoClient.restoreGuest(transport: HubTransport(base: Hub.url, timeout: timeout), store: file, stateKey: key, blob: blob)
+      let client = Diagnostics.attempt({ try YoClient.restoreGuest(transport: HubTransport(base: Hub.url, timeout: timeout), store: file, stateKey: key, blob: blob) })
     else { return nil }
     Hub.pin(client)
     client.shareState(lock: file)

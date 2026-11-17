@@ -1,6 +1,16 @@
 // The app: one scene, the list of friends. SwiftUI's own lifecycle; a UIKit app delegate only for the push token.
 import SwiftUI
 import UserNotifications
+import YoCore
+
+@MainActor @Observable final class DeleteNotice {
+  static let shared = DeleteNotice()
+  let model = YoList()
+  var receive: ((ListSnapshot) -> Void)?
+  var banner: String?
+  var deletion: ListDeletion?
+  var undo: (() -> Void)?
+}
 
 @main
 struct YoApp: App {
@@ -45,6 +55,14 @@ struct YoApp: App {
     CrashReports.shared.start()  // crashes iOS hands over (MetricKit) go to the Yo team, if on
   }
 
+  private func updateBanner() {
+    let snapshot = DeleteNotice.shared.model.connectivity(
+      now: UInt64(ProcessInfo.processInfo.systemUptime * 1000),
+      offline: Availability.shared.offline, failure: SendFailure.shared.text)
+    if let receive = DeleteNotice.shared.receive { receive(snapshot) }
+    else { DeleteNotice.shared.banner = snapshot.banner }
+  }
+
   var body: some Scene {
     WindowGroup {
       // No account yet (or after "Reset Yo"): the way in; then the list.
@@ -59,18 +77,45 @@ struct YoApp: App {
         }
       }
       .safeAreaInset(edge: .top, spacing: 0) {
-        if Availability.shared.offline {
+        if DeleteNotice.shared.deletion != nil || DeleteNotice.shared.banner != nil {
           HStack(spacing: 8) {
-            Circle().fill(.red).frame(width: 7, height: 7)
-            Text("Offline · trying again").font(.custom("Montserrat-Bold", size: 16))
+            if let deletion = DeleteNotice.shared.deletion {
+              TimelineView(.animation) { _ in
+                Circle().trim(from: 0, to: max(0, min(1,
+                  (Double(deletion.deadline) - ProcessInfo.processInfo.systemUptime * 1000) / 3000)))
+                  .stroke(.white, lineWidth: 2).rotationEffect(.degrees(-90))
+                  .frame(width: 14, height: 14)
+              }
+              Text("\(deletion.name) deleted").font(.custom("Montserrat-Bold", size: 16))
+                .lineLimit(1).minimumScaleFactor(0.5)
+              Button("Undo") { DeleteNotice.shared.undo?() }.font(.system(size: 16, weight: .bold))
+            } else {
+              Circle().fill(.red).frame(width: 7, height: 7)
+              Text(DeleteNotice.shared.banner ?? "").font(.custom("Montserrat-Bold", size: 16))
+              if DeleteNotice.shared.banner == "Offline" {
+                // Trying again, shown as dots that fill up one by one and start over.
+                TimelineView(.periodic(from: .now, by: 0.45)) { context in
+                  let n = Int(context.date.timeIntervalSinceReferenceDate / 0.45) % 4
+                  Text(String(repeating: ".", count: n) + String(repeating: " ", count: 3 - n))
+                    .font(.custom("Montserrat-Bold", size: 16)).monospaced()
+                }
+                .padding(.leading, -6)
+              }
+            }
           }
           .foregroundStyle(.white)
           .frame(maxWidth: .infinity).frame(height: 36)
-          .background(Color(red: 44/255, green: 62/255, blue: 80/255))
+          .background(Color.amethyst)
+          .onTapGesture { if DeleteNotice.shared.deletion == nil && !Availability.shared.offline { SendFailure.shared.retry?() } }
+          .accessibilityAddTraits(SendFailure.shared.retry == nil ? [] : [.isButton])
+          .accessibilityAction { if DeleteNotice.shared.deletion == nil && !Availability.shared.offline { SendFailure.shared.retry?() } }
           .transition(.opacity)
         }
       }
-      .animation(.easeInOut(duration: 0.2), value: Availability.shared.offline)
+      .animation(.easeInOut(duration: 0.2), value: DeleteNotice.shared.banner)
+      .animation(.easeInOut(duration: 0.2), value: DeleteNotice.shared.deletion?.id)
+      .onChange(of: Availability.shared.offline, initial: true) { _, _ in updateBanner() }
+      .onChange(of: SendFailure.shared.text) { _, _ in updateBanner() }
       .task(id: phase) {
         guard phase == .active else { return }
         await accounts.watchState()
@@ -115,7 +160,7 @@ struct YoApp: App {
         Button("Always Send") { CrashReports.shared.answer(always: true) }
         Button("Not Now", role: .cancel) { CrashReports.shared.answer(always: false) }
       } message: {
-        Text("Send a short crash report to the Yo team? It holds no Yos, names or photos and is not linked to you.")
+        Text("Send anonymous crash and error reports to the Yo team? They hold code details, build, iOS version and model, with no Yos, names or photos.")
       }
       .onChange(of: accounts.client == nil, initial: true) { _, none in
         guard !none, let client = accounts.client else { return }
@@ -144,11 +189,13 @@ struct YoApp: App {
         // The push token to the hub, once there is both a token and an account (and again for a new account).
         .task(id: "\(Push.shared.token ?? "")/\(accounts.account?.userID.base64EncodedString() ?? "")/\(accounts.client != nil)") {
           await Push.shared.send(accounts)
+          await accounts.refreshSupport()
         }
         // Opening the app: the Yos waiting as notifications come in and show on their bars.
         .onChange(of: phase, initial: true) { _, phase in
           guard phase == .active else { return }
           Task { await inbox.collectDelivered() }
+          Task { await accounts.refreshSupport() }
           // In front again: receipts, retries and prekeys due (spec 4.1, 4.5); on the first opening, once the core has opened (above).
           Task { await inbox.maintain(accounts: accounts, friends: friends) }
           // What the hub said "later" to goes now (the outbox's events go to the inbox, set when the core opened).

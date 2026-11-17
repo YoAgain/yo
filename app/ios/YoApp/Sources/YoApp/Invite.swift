@@ -47,7 +47,7 @@ final class Invite {
 
   /// Your link, which adds you: https://justyo.co/NAME.
   nonisolated static func link(for username: String) -> URL {
-    let path = username.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) ?? ""
+    let path = username.addingPercentEncoding(withAllowedCharacters: CharacterSet(charactersIn: "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-._~")) ?? ""
     return URL(string: "https://justyo.co/\(path)") ?? URL(string: "https://justyo.co")!
   }
 }
