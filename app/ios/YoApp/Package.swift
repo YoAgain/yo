@@ -14,11 +14,14 @@ let package = Package(
     // with the core (SharedState.swift); the app's files they use are linked into Sources/YoShare and Sources/YoNotify.
     .library(name: "YoShare", targets: ["YoShare"]),
     .library(name: "YoNotify", targets: ["YoNotify"]),
+    // The controls (Control Center, Lock Screen, Action button): Send Yo, Yo Back, Yo Camera, Open Yo.
+    .library(name: "YoControls", targets: ["YoControls"]),
   ],
   targets: [
     .target(name: "YoApp", dependencies: ["YoCore"], swiftSettings: ProcessInfo.processInfo.environment["YO_DEV_BUILD"] == "1" ? [.define("YO_DEV")] : []),
     .target(name: "YoShare", dependencies: ["YoCore"]),
     .target(name: "YoNotify", dependencies: ["YoCore"]),
+    .target(name: "YoControls", dependencies: ["YoCore"]),
     // The Rust core (core/bindings) through UniFFI: `import YoCore`. ../dev/core.sh makes both into build/core
     // (ignored); run it before the first build and after a change in core/ (dev/push.sh does).
     .target(name: "YoCore", dependencies: ["yoFFI"], path: "build/core/swift"),

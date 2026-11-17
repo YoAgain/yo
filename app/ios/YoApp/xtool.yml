@@ -45,3 +45,8 @@ extensions:
   - product: YoNotify
     bundleID: app.justyo.ios.notify
     infoPath: YoNotify-Info.plist
+  # The controls (Sources/YoControls, YoControls-Info.plist): Send Yo, Yo Back, Yo Camera and Open Yo in Control Center,
+  # on the Lock Screen and on the Action button; they read the friends and the state in the App Group too.
+  - product: YoControls
+    bundleID: app.justyo.ios.controls
+    infoPath: YoControls-Info.plist
