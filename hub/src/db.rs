@@ -742,13 +742,16 @@ fn blob_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<(BlobId, u64)> {
 }
 
 impl Db {
-    /// WAL with `synchronous = FULL`: every commit is on the disk before it is answered, so what the hub acknowledged
-    /// (a delivery, spec 4.7) survives a power loss, not only a crash of the process.
+    /// WAL with `synchronous = NORMAL`: commits survive a process crash, but recent transactions may roll back
+    /// after an OS crash or power loss. See SECURITY.md for the durability tradeoff.
     pub fn open(path: &str) -> rusqlite::Result<Self> {
         let mut conn = Connection::open(path)?;
+        // 16K WAL pages (~64 MiB) amortize checkpoint syncs on SSDs; keep automatic checkpoints so
+        // the WAL can reset even under continuous deliveries. The default 1000 pages stalls too often.
         conn.execute_batch(
             "PRAGMA journal_mode = WAL;
-             PRAGMA synchronous = FULL;
+             PRAGMA synchronous = NORMAL;
+             PRAGMA wal_autocheckpoint = 16384;
              PRAGMA foreign_keys = ON;
              PRAGMA busy_timeout = 5000;",
         )?;
@@ -1707,24 +1710,18 @@ impl Db {
             .optional()
     }
 
-    /// Deletes a device's envelopes by id. Committed without waiting for the disk (`synchronous = NORMAL` for this
-    /// transaction alone; the next commit's sync takes it along): an ack lost to a power cut costs a repeat, which the
-    /// device skips (spec 4.7), and an ack of its own `fsync` would cost one per inbox read.
+    /// Deletes a device's envelopes by id. Like deliveries, acks use WAL NORMAL: a power loss may undo one,
+    /// costing a repeat which the device skips (spec 4.7).
     pub fn ack(&self, device: &DeviceId, ids: &[u64]) -> rusqlite::Result<()> {
         let mut conn = self.conn();
-        conn.execute_batch("PRAGMA synchronous = NORMAL")?;
-        let acked = (|| {
-            let tx = conn.transaction()?;
-            {
-                let mut delete = tx.prepare_cached("DELETE FROM messages WHERE device_id = ?1 AND id = ?2")?;
-                for id in ids {
-                    delete.execute(params![device, *id as i64])?;
-                }
+        let tx = conn.transaction()?;
+        {
+            let mut delete = tx.prepare_cached("DELETE FROM messages WHERE device_id = ?1 AND id = ?2")?;
+            for id in ids {
+                delete.execute(params![device, *id as i64])?;
             }
-            tx.commit()
-        })();
-        conn.execute_batch("PRAGMA synchronous = FULL")?;
-        acked
+        }
+        tx.commit()
     }
 
     /// Deletes envelopes older than the TTL, and forgets replaced devices after a year.
@@ -2525,19 +2522,49 @@ mod tests {
         assert_eq!(db.prune_blobs(7 + NOT_READY_KEPT_MS + 1, ttl).unwrap(), [(id, 7)]);
     }
 
-    /// Commits wait for the disk (`FULL`, 2); an ack alone does not, and leaves the connection as it was.
+    /// NORMAL (1) avoids fsync per commit; an inbox ack must not restore FULL for subsequent deliveries.
     #[test]
-    fn only_an_ack_commits_without_waiting_for_the_disk() {
+    fn deliveries_and_acks_keep_normal_synchronization() {
         let db = Db::open(":memory:").unwrap();
         let leo = user(register(&db, b"LEO", 1, 1, 0));
         let devices_hash = yo_wire::devices::hash(&[1; 32], &[[1; 32]]);
         db.deliver(&[Incoming { user: leo, devices_hash, envelope: b"envelope" }], 0, 10).unwrap();
         let synchronous = || -> i64 { db.conn().query_row("PRAGMA synchronous", [], |row| row.get(0)).unwrap() };
-        assert_eq!(synchronous(), 2);
+        assert_eq!(synchronous(), 1);
+        assert_eq!(db.conn().query_row("PRAGMA wal_autocheckpoint", [], |row| row.get::<_, i64>(0)).unwrap(), 16384);
         let (id, _, _) = db.fetch(&[1; 16], 10).unwrap().remove(0);
         db.ack(&[1; 16], &[id]).unwrap();
         assert!(db.fetch(&[1; 16], 10).unwrap().is_empty());
-        assert_eq!(synchronous(), 2);
+        assert_eq!(synchronous(), 1);
+    }
+
+    /// Exit without dropping SQLite (no close-time checkpoint): the committed WAL survives a process crash.
+    #[test]
+    fn committed_delivery_survives_process_exit() {
+        const CHILD_DB: &str = "YO_DB_CRASH_TEST";
+        if let Ok(path) = std::env::var(CHILD_DB) {
+            let db = Db::open(&path).unwrap();
+            let leo = user(register(&db, b"LEO", 1, 1, 0));
+            let devices_hash = yo_wire::devices::hash(&[1; 32], &[[1; 32]]);
+            db.deliver(&[Incoming { user: leo, devices_hash, envelope: b"committed" }], 0, 10).unwrap();
+            std::process::exit(0);
+        }
+        let path = std::env::temp_dir().join(format!("yo-db-crash-{}.sqlite", std::process::id()));
+        let status = std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", "db::tests::committed_delivery_survives_process_exit", "--test-threads=4"])
+            .env(CHILD_DB, &path)
+            .status()
+            .unwrap();
+        assert!(status.success());
+        assert!(std::fs::metadata(format!("{}-wal", path.display())).unwrap().len() > 0);
+        let db = Db::open(path.to_str().unwrap()).unwrap();
+        let messages = db.fetch(&[1; 16], 10).unwrap();
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].1, b"committed");
+        drop(db);
+        for suffix in ["", "-wal", "-shm"] {
+            let _ = std::fs::remove_file(format!("{}{suffix}", path.display()));
+        }
     }
 
     #[test]

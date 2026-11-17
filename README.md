@@ -57,8 +57,9 @@ and [threat model](hub/SECURITY.md). Only you and your recipients can read your 
 
 The optional Yo-to-Yo Roundtrip probe runs only when tapped. Its operator can see that the account was
 active at that moment. No per-user probe history or timing is stored or logged (only aggregate counters;
-mandatory encrypted protocol state and volatile rate limiting remain). The reserved PING peer stays out of
-contacts, requests, notifications, stats and Account Sync, even for late replies. See
+mandatory encrypted protocol state and volatile rate limiting remain). Probes and their token-matched replies
+stay out of requests, notifications, stats and Account Sync, including late replies. PING can be added like
+any contact: ordinary Yos then appear normally, while probe replies remain silent. See
 [the PING deployment and privacy notes](app/yogpt/README.md).
 
 Groups use zkgroup, with up to 20 members; group names and membership are encrypted too.
@@ -83,8 +84,8 @@ See [all hub routes](hub/README.md) for the full table and limits.
 </details>
 
 ```text
-hub alone    ████████████████████████████████  8,000 Yos/s   p50 7.7 ms · p99 ~20 ms
-end to end   ██▊                                 700 Yos/s   send, deliver, fetch, decrypt
+hub alone    ████████████████████████████████  10,431 Yos/s   p50 2.1 ms · p99 130 ms
+end to end   ███████████▊                       3,826 Yos/s   send, deliver, fetch, decrypt
 lost                                               0
 ```
 
@@ -131,9 +132,13 @@ Bodies and answers: [spec 6](spec/v1.md).
 <summary>Storage, durability and load tests</summary>
 
 The small [Rust hub](hub/README.md) stores accounts, public prekeys, queued envelopes and encrypted files.
-It has no message content keys. SQLite persists deliveries before acknowledging them using `synchronous = FULL`,
-so an acknowledged Yo survives a power cut. Without the wait for disk, the hub does about 15,000 Yos/s.
-Measured on one CPU core with the database on an SSD. See the [yo-load measurements and commands](tests/README.md#load).
+It has no message content keys. SQLite WAL uses `synchronous = NORMAL`: commits survive a hub/process crash,
+but an OS crash or power loss can roll back recent acknowledged deliveries and other state changes. Clients retry
+unacknowledged sends; see the [durability tradeoff](hub/SECURITY.md#durability).
+The numbers above are medians of three native release runs: hub on CPU 0, load on the other CPUs, fresh SSD/Btrfs
+database under `~/.cache`, automatic checkpoints every 16,384 WAL pages (about 64 MiB). The hub reached about
+10,400 Yos/s here, short of 20,000; larger checkpoints improve throughput but increase p99 latency.
+See the [yo-load measurements and commands](tests/README.md#load).
 
 </details>
 

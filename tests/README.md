@@ -55,12 +55,19 @@ artifact. A crash found becomes a regular test.
 ## Load
 
 ```sh
-YO_ENV="YO_DATE=$(date +%F) YO_COMMIT=$(git rev-parse --short HEAD)" \
-  dev/cargo run --release -p yo-tests --bin yo-load -- --clients 200 --seconds 15 --threads 16 --connections 64
+export PATH=$HOME/.cargo/bin:$PATH CARGO_BUILD_JOBS=4
+for run in 1 2 3; do
+  YO_HUB_CPU=0 YO_LOAD_DB="$HOME/.cache/yo-load-$$-$run.sqlite" \
+    YO_DATE="$(date +%F)-ssd-$run" YO_COMMIT="$(git rev-parse --short HEAD)" \
+    nice -n 10 cargo run --release -j 4 -p yo-tests --bin yo-load -- \
+      --clients 200 --seconds 15 --threads 16 --connections 64
+done
 ```
 
-`YO_HUB_CPU=n` (in `YO_ENV`) pins every thread of the hub to CPU n and the load to the other CPUs: the hub's
-throughput on one core. Its one writer thread with group commit is what bounds it, not the cores.
+`YO_HUB_CPU=n` pins every thread of the hub to CPU n and the load to the other CPUs: the hub's
+throughput on one core. The harness captures the allowed CPU set before pinning, so the load really uses the
+other CPUs; previously it queried after pinning and silently left the load on the hub's CPU. Use fresh database
+paths for comparable runs. The command above builds natively and keeps the database on the SSD, outside tmpfs.
 
 Phase 1 is the whole system on one machine (clients with sessions, the hub, fetch, decrypt); phase 2 the hub alone
 (deliveries over many connections). Every run writes `tests/results/<date>-<clients>c.json`; commit the ones worth
@@ -79,13 +86,35 @@ keeping, so a regression shows against them.
 | 2026-11-14, one core, SSD, `synchronous = FULL` | 8,085 | 7.7 / 18.4 ms | 198 Yos/s | 0 |
 | 2026-11-14, one core, SSD, FULL, database work off the async workers | 8,086 | 7.6 / 18.8 ms | 235 Yos/s | 0 |
 | 2026-11-14, one core, SSD, FULL, acks without their own `fsync` | 7,935 | 7.7 / 20.4 ms | 705 Yos/s | 0 |
+| 2026-11-17, SSD/Btrfs, original affinity, FULL (3-run median) | 3,562 | 14.3 / 54.7 ms | 549 Yos/s | 0 |
+| 2026-11-17, SSD/Btrfs, corrected affinity, FULL (3-run median) | 3,529 | 14.7 / 51.4 ms | 456 Yos/s | 0 |
+| 2026-11-17, SSD/Btrfs, NORMAL, default 1000-page checkpoint (3-run median) | 6,505 | 1.8 / 91.9 ms | 2,693 Yos/s | 0 |
+| 2026-11-17, SSD/Btrfs, NORMAL, 16,384-page checkpoint (3-run median) | 10,431 | 2.1 / 129.5 ms | 3,826 Yos/s | 0 |
 
-Yops: Yos delivered per second, the only benchmark unit that says what it measures. Runs before the last three
-had the database in the temp dir, which is tmpfs here: in RAM. `YO_LOAD_DB` puts it elsewhere (a path, or
-`:memory:`). The bound is the one writer thread; a real disk costs about a third. With `synchronous = FULL` (since
-2026-11-14: an acknowledged write survives a power loss) every transaction waits for its `fsync`: group commit
-shares one among a batch of deliveries, a transaction of its own pays one alone. An ack commits without one (the
-next commit's takes it along): lost to a power cut, it costs a repeat the device skips.
+Yops: Yos delivered per second. Historical runs used different builds and database placement; temp-dir runs
+can be tmpfs and must not be compared as SSD results. The 2026-11-17 rows use the same native release profile,
+200 clients, 15 seconds per phase, 16 client threads and 64 hub connections. Each value is the median of three
+runs, with fresh database files on the SSD under `~/.cache`; CPU 0 hosts the hub, the corrected harness puts the
+load on the other 23 allowed CPUs. All runs had zero delivery errors and zero dropped Yos. The unchanged original
+harness baseline is included separately. [Raw runs and medians](results/2026-11-17-ssd-checkpoints.json).
+
+FULL was limited by per-commit fsync. NORMAL alone still paid for a checkpoint every 1000 WAL pages (about
+4 MiB) while holding the shared request connection's mutex. Raising `wal_autocheckpoint` to 16,384 (about 64 MiB)
+amortizes that I/O and keeps WAL reuse automatic. This reaches about 10,400 Yos/s here, **not 20,000**; p99 rises
+from 51 to 130 ms versus FULL, with occasional longer checkpoint stalls. No filesystem settings were changed.
+
+A separate PASSIVE checkpointer every 100 ms was also measured three times: median 8,979 Yos/s, but continuous
+writes prevented WAL resets and grew files to multiple GiB. Adding the 16,384-page automatic fallback held the
+WAL near 64 MiB but gave 8,992 Yos/s and worse stalls. Neither background variant is retained. Thread sampling
+showed the writer waiting in Btrfs sync, inode-lock and page-writeback paths rather than saturating its CPU.
+Deliveries already group up to 512 envelopes per transaction and cache their hot statements. Adding writer
+connections cannot bypass SQLite's single-writer lock; no extra writer or speculative batching/caching changes
+were added. Remaining SSD/Btrfs I/O limits this measurement.
+
+WAL NORMAL preserves commits through a process crash, but recent commits can roll back after an OS crash or
+power loss. Unacknowledged client sends survive in the saved outbox and are retried; acknowledged envelopes lost
+to power failure are not automatically resent. This applies to all database state, not only envelopes: see the
+[durability note](../hub/SECURITY.md#durability).
 
 ### Registration and backups
 
@@ -103,3 +132,26 @@ phone `410`); malformed bodies `400`, an oversized one `413`. A failed check mak
 |---|---|---|---|---|---|
 | 2026-11-13, 16 cores, 200 accounts | 390/s | 39 / 63 ms | 20 of 20 one winner | 4,968/s / 30,172/s | 321/s |
 | 2026-11-13, 16 cores, 2000 accounts | 313/s | 47 / 87 ms | 50 of 50 one winner | 6,017/s / 26,548/s | 226/s |
+
+### Warm send / receive request regression
+
+`cargo test -j 4 -p yo-tests --test probe normal_warm_request_counts -- --test-threads=4 --nocapture`
+uses the local test hub and a pair with established sessions and exchanged profile keys. Counts stop when
+send returns / receive events are handed out, before deferred housekeeping; first-contact discovery,
+recovery, additional devices and pending messages can require additional requests.
+
+| Operation | Before fast-send | After |
+|---|---:|---:|
+| Normal warm sealed send by user id, settled inbox | 2 (inbox GET, Yo POST) | 1 (Yo POST) |
+| Warm receive | 1 (long-poll GET) | 1 (long-poll GET) |
+| Warm title / Status probe | 2 | 2 (sealed probe POST + long-poll GET) |
+
+The foreground inbox already long-polled without a successful-pass sleep. Empty passes now avoid full
+state saves. `warm_app_send_is_one_request_without_an_active_inbox_poll` covers the app binding with pending
+receive housekeeping, sending to the pinned contact id, without requiring inbox freshness. Explicitly
+typed names still discover their current owner, so a name changing hands cannot redirect an existing contact. Probe tests cover normal
+PING contact Yos, matched / late / overlapping replies, closed requests, restore and failed-probe outbox
+preservation. Encrypted ratchet/outbox state still saves before any delivery.
+
+With a receipt still arriving during initial session setup, the original measurement was 3 → 1 requests
+(inbox GET, receipt POST, Yo POST). The settled, sealed-session case above isolates the normal steady state.

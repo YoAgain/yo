@@ -25,7 +25,7 @@ libsignal itself. **Assumed:** reachable only through the Cloudflare Tunnel when
 | Read a backup record | Fetch signed by a door's auth key, else `404` as for none; sealed part padded | – |
 | Push to another path on Apple's host | Non-hex APNs tokens cleared | – |
 | Spoof `CF-Connecting-IP` | Only with `YO_TRUST_CLOUDFLARE`; warning when not listening on loopback | operator: check the published port |
-| Lose an acknowledged delivery to a power cut | SQLite WAL `synchronous = FULL` | – |
+| Lose recent commits to an OS crash or power cut | SQLite WAL `synchronous = NORMAL`; process crashes preserve commits | Recent acknowledged deliveries and other state changes can roll back; see durability below |
 | Act as a replaced device | Every write checks the device in its own transaction (`410`) | – |
 | Replay a signed request | 5-minute window, cache keyed by signature (`verify_strict`) | the cache is in memory: a restart within 5 min |
 | Probe without an account | username taken (by design), device replaced (`410` vs `401`) | device ids are random and unpublished |
@@ -41,3 +41,22 @@ libsignal itself. **Assumed:** reachable only through the Cloudflare Tunnel when
 - Growing tables: `feedback` (10/user/day), `gone` (a year).
 
 Open: `cargo audit` in CI.
+
+## Durability
+
+The owner's throughput choice is SQLite WAL with `synchronous = NORMAL`, without an fsync per commit.
+Committed transactions survive a hub/process crash. An OS crash or power loss can roll back recent commits;
+SQLite keeps the database consistent. See [SQLite's synchronous documentation](https://www.sqlite.org/pragma.html#pragma_synchronous).
+
+Clients persist their outbox before sending. Without a `202` response they keep the send and retry on the next
+flush/sync, including after a client restart; duplicate envelopes are skipped by the recipient. This is checked by
+`tests/tests/robustness.rs::an_unacknowledged_send_is_retried_after_restart`. Once `202` is received the send leaves
+the outbox: an acknowledged envelope subsequently lost to power failure is not automatically resent. Signal's
+ratchet tolerates a missing message; the missing message itself is lost.
+
+**A lost acknowledged envelope is not the only possible effect.** NORMAL applies to the whole database: recent
+registrations, device/key changes, consumed one-time prekeys, backups, sealed storage and blob metadata can also
+roll back. A rolled-back inbox ack can redeliver an envelope (the client skips duplicates); rolled-back prekey
+consumption can hand out a prekey again, and account/device changes can revert. Client send retries do not repair
+all of these state changes. The protocol and libsignal processing are unchanged, but power-loss durability is
+weaker than FULL. NORMAL is not a promise that every acknowledged operation survives a machine failure.

@@ -11,6 +11,22 @@ use yo_hub::{push, Hub};
 #[cfg(not(target_os = "linux"))]
 fn set_affinity(_cpus: &[usize]) {}
 
+#[cfg(not(target_os = "linux"))]
+fn affinity() -> Vec<usize> {
+    (0..std::thread::available_parallelism().map_or(1, |n| n.get())).collect()
+}
+
+/// Read before pinning: available_parallelism after pinning sees only the hub's CPU.
+#[cfg(target_os = "linux")]
+fn affinity() -> Vec<usize> {
+    // SAFETY: sched_getaffinity initializes the set; CPU_ISSET reads indices within CPU_SETSIZE.
+    unsafe {
+        let mut set: libc::cpu_set_t = std::mem::zeroed();
+        assert_eq!(libc::sched_getaffinity(0, std::mem::size_of::<libc::cpu_set_t>(), &mut set), 0);
+        (0..libc::CPU_SETSIZE as usize).filter(|&cpu| libc::CPU_ISSET(cpu, &set)).collect()
+    }
+}
+
 /// Pins the calling thread to these CPUs (Linux).
 #[cfg(target_os = "linux")]
 fn set_affinity(cpus: &[usize]) {
@@ -20,8 +36,27 @@ fn set_affinity(cpus: &[usize]) {
         for &cpu in cpus {
             libc::CPU_SET(cpu, &mut set);
         }
-        libc::sched_setaffinity(0, std::mem::size_of::<libc::cpu_set_t>(), &set);
+        assert_eq!(libc::sched_setaffinity(0, std::mem::size_of::<libc::cpu_set_t>(), &set), 0);
     }
+}
+
+#[cfg(all(test, target_os = "linux"))]
+#[test]
+fn load_affinity_can_be_restored_after_pinning_the_hub() {
+    std::thread::spawn(|| {
+        let all = affinity();
+        if all.len() < 2 {
+            return;
+        }
+        let cpu = all[0];
+        let others: Vec<_> = all.into_iter().filter(|c| *c != cpu).collect();
+        set_affinity(&[cpu]);
+        assert_eq!(affinity(), [cpu]);
+        set_affinity(&others);
+        assert_eq!(affinity(), others);
+    })
+    .join()
+    .unwrap();
 }
 
 pub struct TestHub {
@@ -41,6 +76,13 @@ impl TestHub {
     /// alone, and the calling thread (the load) on all the others, so the hub's throughput on one core shows.
     pub fn start_with(config: Config, addr: &str) -> Self {
         let pinned = std::env::var("YO_HUB_CPU").ok().and_then(|cpu| cpu.parse::<usize>().ok());
+        let others = pinned.map(|cpu| {
+            let all = affinity();
+            assert!(all.contains(&cpu), "YO_HUB_CPU must be in the allowed CPU set");
+            let others: Vec<_> = all.into_iter().filter(|c| *c != cpu).collect();
+            assert!(!others.is_empty(), "YO_HUB_CPU needs another CPU for the load");
+            others
+        });
         if let Some(cpu) = pinned {
             set_affinity(&[cpu]); // threads made from here on inherit it
         }
@@ -63,9 +105,7 @@ impl TestHub {
                 .await
                 .unwrap();
         });
-        if let Some(cpu) = pinned {
-            let all = std::thread::available_parallelism().map_or(1, |n| n.get());
-            let others: Vec<usize> = (0..all).filter(|c| *c != cpu).collect();
+        if let Some(others) = others {
             set_affinity(&others);
         }
         TestHub { hub, push, addr, runtime: Some(runtime), stop: Some(stop) }

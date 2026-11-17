@@ -1,0 +1,772 @@
+{
+  "date": "2026-11-17",
+  "revision": "fast-send working tree",
+  "build": "native release, rustc 1.99.1",
+  "database": "fresh SQLite file per run, SSD, Btrfs, under ~/.cache",
+  "hub_cpu": 0,
+  "command": "nice -n 10 yo-load --clients 200 --seconds 15 --threads 16 --connections 64",
+  "summary": "Each statistic is the median of three runs. The final configuration does not reach 20000 Yos/s and has a worse p99 than FULL.",
+  "configurations": {
+    "full": {
+      "settings": {
+        "synchronous": "FULL",
+        "wal_autocheckpoint": 1000,
+        "affinity_fixed": false
+      },
+      "median": {
+        "hub_yos_per_s": 3561.7488378860794,
+        "p50_ms": 14.308,
+        "p99_ms": 54.737,
+        "end_to_end_yos_per_s": 548.8493795860951
+      },
+      "runs": [
+        {
+          "clients": 200,
+          "commit": "",
+          "cores": 1,
+          "date": "full-1",
+          "end_to_end": {
+            "dropped": 0,
+            "seconds": 15.322939149,
+            "send": {
+              "max_ms": 171.797,
+              "p50_ms": 22.812,
+              "p90_ms": 39.134,
+              "p99_ms": 75.953
+            },
+            "yos_per_s": 619.8549708800388,
+            "yos_received": 9498,
+            "yos_sent": 9498
+          },
+          "hub_alone": {
+            "connections": 64,
+            "delivered": 53038,
+            "errors": 0,
+            "latency": {
+              "max_ms": 633.536,
+              "p50_ms": 14.308,
+              "p90_ms": 28.648,
+              "p99_ms": 61.437
+            },
+            "per_s": 3532.2504099226617,
+            "seconds": 15.01535674
+          },
+          "registration": {
+            "per_s": 133.63766031893707,
+            "seconds": 1.496584118
+          },
+          "threads": 16
+        },
+        {
+          "clients": 200,
+          "commit": "",
+          "cores": 1,
+          "date": "full-2",
+          "end_to_end": {
+            "dropped": 0,
+            "seconds": 15.328690224,
+            "send": {
+              "max_ms": 458.368,
+              "p50_ms": 32.455,
+              "p90_ms": 56.104,
+              "p99_ms": 102.561
+            },
+            "yos_per_s": 420.06198219848636,
+            "yos_received": 6439,
+            "yos_sent": 6439
+          },
+          "hub_alone": {
+            "connections": 64,
+            "delivered": 53467,
+            "errors": 0,
+            "latency": {
+              "max_ms": 119.828,
+              "p50_ms": 15.229,
+              "p90_ms": 28.819,
+              "p99_ms": 54.737
+            },
+            "per_s": 3561.7488378860794,
+            "seconds": 15.011445903
+          },
+          "registration": {
+            "per_s": 89.68141012667344,
+            "seconds": 2.230116584
+          },
+          "threads": 16
+        },
+        {
+          "clients": 200,
+          "commit": "",
+          "cores": 1,
+          "date": "full-3",
+          "end_to_end": {
+            "dropped": 0,
+            "seconds": 15.348473212,
+            "send": {
+              "max_ms": 459.953,
+              "p50_ms": 24.917,
+              "p90_ms": 42.463,
+              "p99_ms": 81.627
+            },
+            "yos_per_s": 548.8493795860951,
+            "yos_received": 8424,
+            "yos_sent": 8424
+          },
+          "hub_alone": {
+            "connections": 64,
+            "delivered": 68481,
+            "errors": 0,
+            "latency": {
+              "max_ms": 127.367,
+              "p50_ms": 12.292,
+              "p90_ms": 21.554,
+              "p99_ms": 36.871
+            },
+            "per_s": 4563.560955822117,
+            "seconds": 15.006044767
+          },
+          "registration": {
+            "per_s": 87.84119504818716,
+            "seconds": 2.276836055
+          },
+          "threads": 16
+        }
+      ]
+    },
+    "full-fixed": {
+      "settings": {
+        "synchronous": "FULL",
+        "wal_autocheckpoint": 1000,
+        "affinity_fixed": true
+      },
+      "median": {
+        "hub_yos_per_s": 3529.013138813513,
+        "p50_ms": 14.67,
+        "p99_ms": 51.368,
+        "end_to_end_yos_per_s": 456.43074725221425
+      },
+      "runs": [
+        {
+          "clients": 200,
+          "commit": "",
+          "cores": 23,
+          "date": "full-fixed-1",
+          "end_to_end": {
+            "dropped": 0,
+            "seconds": 15.345045639,
+            "send": {
+              "max_ms": 184.924,
+              "p50_ms": 24.405,
+              "p90_ms": 40.142,
+              "p99_ms": 83.76
+            },
+            "yos_per_s": 582.3377922897033,
+            "yos_received": 8936,
+            "yos_sent": 8936
+          },
+          "hub_alone": {
+            "connections": 64,
+            "delivered": 52995,
+            "errors": 0,
+            "latency": {
+              "max_ms": 239.197,
+              "p50_ms": 14.67,
+              "p90_ms": 28.926,
+              "p99_ms": 54.964
+            },
+            "per_s": 3529.013138813513,
+            "seconds": 15.016946074
+          },
+          "registration": {
+            "per_s": 153.32674745888437,
+            "seconds": 1.304403852
+          },
+          "threads": 16
+        },
+        {
+          "clients": 200,
+          "commit": "",
+          "cores": 23,
+          "date": "full-fixed-2",
+          "end_to_end": {
+            "dropped": 0,
+            "seconds": 15.319613834,
+            "send": {
+              "max_ms": 457.662,
+              "p50_ms": 33.463,
+              "p90_ms": 48.193,
+              "p99_ms": 85.389
+            },
+            "yos_per_s": 440.74218013346825,
+            "yos_received": 6752,
+            "yos_sent": 6752
+          },
+          "hub_alone": {
+            "connections": 64,
+            "delivered": 55493,
+            "errors": 0,
+            "latency": {
+              "max_ms": 96.686,
+              "p50_ms": 14.506,
+              "p90_ms": 27.193,
+              "p99_ms": 44.793
+            },
+            "per_s": 3697.171894186938,
+            "seconds": 15.009580725
+          },
+          "registration": {
+            "per_s": 102.82346737836684,
+            "seconds": 1.945081265
+          },
+          "threads": 16
+        },
+        {
+          "clients": 200,
+          "commit": "",
+          "cores": 23,
+          "date": "full-fixed-3",
+          "end_to_end": {
+            "dropped": 0,
+            "seconds": 15.34077194,
+            "send": {
+              "max_ms": 492.643,
+              "p50_ms": 31.938,
+              "p90_ms": 45.229,
+              "p99_ms": 91.215
+            },
+            "yos_per_s": 456.43074725221425,
+            "yos_received": 7002,
+            "yos_sent": 7002
+          },
+          "hub_alone": {
+            "connections": 64,
+            "delivered": 52244,
+            "errors": 0,
+            "latency": {
+              "max_ms": 145.08,
+              "p50_ms": 15.144,
+              "p90_ms": 29.016,
+              "p99_ms": 51.368
+            },
+            "per_s": 3478.7458009605843,
+            "seconds": 15.018056216
+          },
+          "registration": {
+            "per_s": 117.02440562293587,
+            "seconds": 1.7090452109999998
+          },
+          "threads": 16
+        }
+      ]
+    },
+    "normal": {
+      "settings": {
+        "synchronous": "NORMAL",
+        "wal_autocheckpoint": 1000,
+        "affinity_fixed": true
+      },
+      "median": {
+        "hub_yos_per_s": 6504.733132866762,
+        "p50_ms": 1.845,
+        "p99_ms": 91.935,
+        "end_to_end_yos_per_s": 2692.913618090098
+      },
+      "runs": [
+        {
+          "clients": 200,
+          "commit": "",
+          "cores": 23,
+          "date": "normal-1",
+          "end_to_end": {
+            "dropped": 0,
+            "seconds": 15.038527305,
+            "send": {
+              "max_ms": 36.754,
+              "p50_ms": 2.479,
+              "p90_ms": 3.719,
+              "p99_ms": 24.08
+            },
+            "yos_per_s": 4288.7178173727425,
+            "yos_received": 64496,
+            "yos_sent": 64496
+          },
+          "hub_alone": {
+            "connections": 64,
+            "delivered": 117881,
+            "errors": 0,
+            "latency": {
+              "max_ms": 416.837,
+              "p50_ms": 1.898,
+              "p90_ms": 20.423,
+              "p99_ms": 91.935
+            },
+            "per_s": 7823.950201800836,
+            "seconds": 15.066685876
+          },
+          "registration": {
+            "per_s": 469.41602175418427,
+            "seconds": 0.426061299
+          },
+          "threads": 16
+        },
+        {
+          "clients": 200,
+          "commit": "",
+          "cores": 23,
+          "date": "normal-2",
+          "end_to_end": {
+            "dropped": 0,
+            "seconds": 15.047270632,
+            "send": {
+              "max_ms": 277.079,
+              "p50_ms": 2.414,
+              "p90_ms": 3.611,
+              "p99_ms": 67.437
+            },
+            "yos_per_s": 2692.913618090098,
+            "yos_received": 40521,
+            "yos_sent": 40521
+          },
+          "hub_alone": {
+            "connections": 64,
+            "delivered": 94183,
+            "errors": 0,
+            "latency": {
+              "max_ms": 364.779,
+              "p50_ms": 1.813,
+              "p90_ms": 52.364,
+              "p99_ms": 101.129
+            },
+            "per_s": 6276.264542868646,
+            "seconds": 15.006218963
+          },
+          "registration": {
+            "per_s": 221.12463569578065,
+            "seconds": 0.90446729
+          },
+          "threads": 16
+        },
+        {
+          "clients": 200,
+          "commit": "",
+          "cores": 23,
+          "date": "normal-3",
+          "end_to_end": {
+            "dropped": 0,
+            "seconds": 15.039831223,
+            "send": {
+              "max_ms": 401.778,
+              "p50_ms": 2.41,
+              "p90_ms": 3.616,
+              "p99_ms": 77.337
+            },
+            "yos_per_s": 2470.705917442329,
+            "yos_received": 37159,
+            "yos_sent": 37159
+          },
+          "hub_alone": {
+            "connections": 64,
+            "delivered": 97632,
+            "errors": 0,
+            "latency": {
+              "max_ms": 359.862,
+              "p50_ms": 1.845,
+              "p90_ms": 44.541,
+              "p99_ms": 90.714
+            },
+            "per_s": 6504.733132866762,
+            "seconds": 15.009378249
+          },
+          "registration": {
+            "per_s": 239.64530874303742,
+            "seconds": 0.834566723
+          },
+          "threads": 16
+        }
+      ]
+    },
+    "checkpoint": {
+      "settings": {
+        "synchronous": "NORMAL",
+        "wal_autocheckpoint": 0,
+        "background_checkpoint_ms": 100,
+        "affinity_fixed": true,
+        "rejected": "WAL grew to multiple GiB under continuous writes"
+      },
+      "median": {
+        "hub_yos_per_s": 8978.923946074907,
+        "p50_ms": 2.502,
+        "p99_ms": 97.408,
+        "end_to_end_yos_per_s": 4506.699955707045
+      },
+      "runs": [
+        {
+          "clients": 200,
+          "commit": "",
+          "cores": 23,
+          "date": "checkpoint-1",
+          "end_to_end": {
+            "dropped": 0,
+            "seconds": 15.019354989,
+            "send": {
+              "max_ms": 63.269,
+              "p50_ms": 2.505,
+              "p90_ms": 3.565,
+              "p99_ms": 11.015
+            },
+            "yos_per_s": 5759.901145113016,
+            "yos_received": 86510,
+            "yos_sent": 86510
+          },
+          "hub_alone": {
+            "connections": 64,
+            "delivered": 160168,
+            "errors": 0,
+            "latency": {
+              "max_ms": 3007.346,
+              "p50_ms": 2.502,
+              "p90_ms": 6.523,
+              "p99_ms": 36.815
+            },
+            "per_s": 10671.805226434602,
+            "seconds": 15.008519796
+          },
+          "registration": {
+            "per_s": 964.4371608864138,
+            "seconds": 0.207374838
+          },
+          "threads": 16
+        },
+        {
+          "clients": 200,
+          "commit": "",
+          "cores": 23,
+          "date": "checkpoint-2",
+          "end_to_end": {
+            "dropped": 0,
+            "seconds": 15.053143246,
+            "send": {
+              "max_ms": 579.013,
+              "p50_ms": 2.461,
+              "p90_ms": 3.487,
+              "p99_ms": 26.925
+            },
+            "yos_per_s": 4506.699955707045,
+            "yos_received": 67840,
+            "yos_sent": 67840
+          },
+          "hub_alone": {
+            "connections": 64,
+            "delivered": 81180,
+            "errors": 0,
+            "latency": {
+              "max_ms": 1376.034,
+              "p50_ms": 4.28,
+              "p90_ms": 17.005,
+              "p99_ms": 114.227
+            },
+            "per_s": 5302.658514013098,
+            "seconds": 15.309301888
+          },
+          "registration": {
+            "per_s": 756.1138515407501,
+            "seconds": 0.26451043
+          },
+          "threads": 16
+        },
+        {
+          "clients": 200,
+          "commit": "",
+          "cores": 23,
+          "date": "checkpoint-3",
+          "end_to_end": {
+            "dropped": 0,
+            "seconds": 15.19390949,
+            "send": {
+              "max_ms": 503.964,
+              "p50_ms": 2.506,
+              "p90_ms": 3.521,
+              "p99_ms": 39.072
+            },
+            "yos_per_s": 4098.484332882517,
+            "yos_received": 62272,
+            "yos_sent": 62272
+          },
+          "hub_alone": {
+            "connections": 64,
+            "delivered": 134761,
+            "errors": 0,
+            "latency": {
+              "max_ms": 2779.192,
+              "p50_ms": 2.365,
+              "p90_ms": 5.656,
+              "p99_ms": 97.408
+            },
+            "per_s": 8978.923946074907,
+            "seconds": 15.00859132
+          },
+          "registration": {
+            "per_s": 302.85928710954875,
+            "seconds": 0.660372683
+          },
+          "threads": 16
+        }
+      ]
+    },
+    "tuned": {
+      "settings": {
+        "synchronous": "NORMAL",
+        "wal_autocheckpoint": 16384,
+        "background_checkpoint_ms": 100,
+        "affinity_fixed": true,
+        "rejected": "Concurrent checkpoint I/O stalled the writer; no throughput advantage"
+      },
+      "median": {
+        "hub_yos_per_s": 8992.230252578192,
+        "p50_ms": 2.096,
+        "p99_ms": 121.334,
+        "end_to_end_yos_per_s": 2976.6268226909133
+      },
+      "runs": [
+        {
+          "clients": 200,
+          "commit": "",
+          "cores": 23,
+          "date": "tuned-1",
+          "end_to_end": {
+            "dropped": 0,
+            "seconds": 15.016442846,
+            "send": {
+              "max_ms": 56.518,
+              "p50_ms": 2.501,
+              "p90_ms": 3.524,
+              "p99_ms": 11.331
+            },
+            "yos_per_s": 5662.059974652934,
+            "yos_received": 85024,
+            "yos_sent": 85024
+          },
+          "hub_alone": {
+            "connections": 64,
+            "delivered": 118717,
+            "errors": 0,
+            "latency": {
+              "max_ms": 9297.674,
+              "p50_ms": 2.133,
+              "p90_ms": 5.044,
+              "p99_ms": 96.721
+            },
+            "per_s": 5147.918038613326,
+            "seconds": 23.061167468
+          },
+          "registration": {
+            "per_s": 913.5025575810694,
+            "seconds": 0.218937537
+          },
+          "threads": 16
+        },
+        {
+          "clients": 200,
+          "commit": "",
+          "cores": 23,
+          "date": "tuned-2",
+          "end_to_end": {
+            "dropped": 0,
+            "seconds": 15.014982617,
+            "send": {
+              "max_ms": 725.092,
+              "p50_ms": 2.47,
+              "p90_ms": 3.441,
+              "p99_ms": 101.85
+            },
+            "yos_per_s": 2976.6268226909133,
+            "yos_received": 44694,
+            "yos_sent": 44694
+          },
+          "hub_alone": {
+            "connections": 64,
+            "delivered": 135230,
+            "errors": 0,
+            "latency": {
+              "max_ms": 1513.493,
+              "p50_ms": 2.096,
+              "p90_ms": 5.539,
+              "p99_ms": 121.334
+            },
+            "per_s": 8992.230252578192,
+            "seconds": 15.038538405
+          },
+          "registration": {
+            "per_s": 461.9659378100715,
+            "seconds": 0.432932352
+          },
+          "threads": 16
+        },
+        {
+          "clients": 200,
+          "commit": "",
+          "cores": 23,
+          "date": "tuned-3",
+          "end_to_end": {
+            "dropped": 0,
+            "seconds": 15.015333219,
+            "send": {
+              "max_ms": 5577.995,
+              "p50_ms": 2.453,
+              "p90_ms": 3.392,
+              "p99_ms": 30.931
+            },
+            "yos_per_s": 1404.5642339334354,
+            "yos_received": 21090,
+            "yos_sent": 21090
+          },
+          "hub_alone": {
+            "connections": 64,
+            "delivered": 149014,
+            "errors": 0,
+            "latency": {
+              "max_ms": 824.355,
+              "p50_ms": 1.942,
+              "p90_ms": 3.241,
+              "p99_ms": 155.211
+            },
+            "per_s": 9843.7860412011,
+            "seconds": 15.137874734
+          },
+          "registration": {
+            "per_s": 526.412523316028,
+            "seconds": 0.379930171
+          },
+          "threads": 16
+        }
+      ]
+    },
+    "large": {
+      "settings": {
+        "synchronous": "NORMAL",
+        "wal_autocheckpoint": 16384,
+        "affinity_fixed": true,
+        "selected": true
+      },
+      "median": {
+        "hub_yos_per_s": 10430.888256103653,
+        "p50_ms": 2.096,
+        "p99_ms": 129.54,
+        "end_to_end_yos_per_s": 3826.2767465904803
+      },
+      "runs": [
+        {
+          "clients": 200,
+          "commit": "",
+          "cores": 23,
+          "date": "large-1",
+          "end_to_end": {
+            "dropped": 0,
+            "seconds": 15.017007538,
+            "send": {
+              "max_ms": 121.975,
+              "p50_ms": 2.406,
+              "p90_ms": 3.245,
+              "p99_ms": 4.63
+            },
+            "yos_per_s": 5834.717721109264,
+            "yos_received": 87620,
+            "yos_sent": 87620
+          },
+          "hub_alone": {
+            "connections": 64,
+            "delivered": 156982,
+            "errors": 0,
+            "latency": {
+              "max_ms": 1601.648,
+              "p50_ms": 2.251,
+              "p90_ms": 4.497,
+              "p99_ms": 129.54
+            },
+            "per_s": 10430.888256103653,
+            "seconds": 15.049725023
+          },
+          "registration": {
+            "per_s": 930.2749916597359,
+            "seconds": 0.214990193
+          },
+          "threads": 16
+        },
+        {
+          "clients": 200,
+          "commit": "",
+          "cores": 23,
+          "date": "large-2",
+          "end_to_end": {
+            "dropped": 0,
+            "seconds": 15.016645462,
+            "send": {
+              "max_ms": 828.067,
+              "p50_ms": 2.424,
+              "p90_ms": 3.272,
+              "p99_ms": 19.014
+            },
+            "yos_per_s": 3776.87547751735,
+            "yos_received": 56716,
+            "yos_sent": 56716
+          },
+          "hub_alone": {
+            "connections": 64,
+            "delivered": 150066,
+            "errors": 0,
+            "latency": {
+              "max_ms": 1469.218,
+              "p50_ms": 2.096,
+              "p90_ms": 3.429,
+              "p99_ms": 128.405
+            },
+            "per_s": 9839.471724140987,
+            "seconds": 15.251428553
+          },
+          "registration": {
+            "per_s": 670.0683176194049,
+            "seconds": 0.298477028
+          },
+          "threads": 16
+        },
+        {
+          "clients": 200,
+          "commit": "",
+          "cores": 23,
+          "date": "large-3",
+          "end_to_end": {
+            "dropped": 0,
+            "seconds": 15.167486265,
+            "send": {
+              "max_ms": 629.992,
+              "p50_ms": 2.398,
+              "p90_ms": 3.216,
+              "p99_ms": 6.532
+            },
+            "yos_per_s": 3826.2767465904803,
+            "yos_received": 58035,
+            "yos_sent": 58035
+          },
+          "hub_alone": {
+            "connections": 64,
+            "delivered": 160720,
+            "errors": 0,
+            "latency": {
+              "max_ms": 1596.438,
+              "p50_ms": 2.048,
+              "p90_ms": 3.42,
+              "p99_ms": 139.634
+            },
+            "per_s": 10708.44673676926,
+            "seconds": 15.00871265
+          },
+          "registration": {
+            "per_s": 668.7970729266796,
+            "seconds": 0.299044371
+          },
+          "threads": 16
+        }
+      ]
+    }
+  }
+}
