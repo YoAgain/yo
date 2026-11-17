@@ -32,6 +32,9 @@ resources:
   - Resources/IntroTap@3x.png
   - Resources/IntroYoBack@3x.png
   - Resources/IntroAdd@3x.png
+  # Each bundle's privacy manifest at its root (Resources/Privacy/<target>): no tracking, the data the hub gets, the
+  # required-reason APIs that target's sources use.
+  - Resources/Privacy/YoApp/PrivacyInfo.xcprivacy
 # "Yo" in the share sheet (Sources/YoShare, YoShare-Info.plist): photos and videos sent to a friend from there; and the
 # notification service (Sources/YoNotify, YoNotify-Info.plist): "Yo from YoGPT" on a push. Both use the app's state in
 # the App Group group.app.justyo.ios (SharedState.swift). App Store and TestFlight only: dev/push.sh drops them from
@@ -42,9 +45,12 @@ extensions:
     infoPath: YoShare-Info.plist
     resources:
       - Resources/Montserrat-Bold.ttf
+      - Resources/Privacy/YoShare/PrivacyInfo.xcprivacy
   - product: YoNotify
     bundleID: app.justyo.ios.notify
     infoPath: YoNotify-Info.plist
+    resources:
+      - Resources/Privacy/YoNotify/PrivacyInfo.xcprivacy
   # The controls (Sources/YoControls, YoControls-Info.plist): Send Yo, Yo Back, Yo Camera and Open Yo in Control Center,
   # on the Lock Screen and on the Action button; and the widgets (YoWidgets.swift): the friends' bars on the Home
   # Screen, Yo and Yo Back on the Lock Screen. They read the friends and the state in the App Group too.
@@ -53,3 +59,4 @@ extensions:
     infoPath: YoControls-Info.plist
     resources:
       - Resources/Montserrat-Bold.ttf
+      - Resources/Privacy/YoControls/PrivacyInfo.xcprivacy

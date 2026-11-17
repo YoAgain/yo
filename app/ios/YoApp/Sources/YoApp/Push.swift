@@ -57,4 +57,37 @@ final class AppDelegate: NSObject, UIApplicationDelegate {
     Diagnostics.record(error)
   }
 
+  /// The inbox's one short look for a silent push (YoApp sets it once the inbox is there).
+  static var silentSync: (@MainActor () async -> Bool?)?
+
+  /// A silent push (`content-available`: the hub's non-urgent deliveries): one short inbox sync in the background,
+  /// answered within 25 s (iOS gives 30), no UI. The async form on the main actor answers on the main thread.
+  func application(
+    _ application: UIApplication, didReceiveRemoteNotification userInfo: [AnyHashable: Any]
+  ) async -> UIBackgroundFetchResult {
+    guard let sync = Self.silentSync else { return .noData }
+    return await withCheckedContinuation { done in
+      let answer = Answer(done)
+      Task { @MainActor in
+        let result = await sync()
+        answer.give(result.map { $0 ? .newData : .noData } ?? .failed)
+      }
+      Task { @MainActor in
+        try? await Task.sleep(for: .seconds(25))
+        answer.give(.failed)
+      }
+    }
+  }
+}
+
+/// A background fetch's answer, given once: by the sync or by the deadline, whichever comes first.
+private final class Answer: @unchecked Sendable {
+  private let lock = NSLock()
+  private var done: CheckedContinuation<UIBackgroundFetchResult, Never>?
+
+  init(_ done: CheckedContinuation<UIBackgroundFetchResult, Never>) { self.done = done }
+
+  func give(_ result: UIBackgroundFetchResult) {
+    lock.withLock { defer { done = nil }; return done }?.resume(returning: result)
+  }
 }

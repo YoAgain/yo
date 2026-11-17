@@ -133,7 +133,8 @@ jobs:
       - name: Licenses
         run: app/ios/dev/licenses.sh
 
-      - name: Build, sign and upload
+      # Built, signed and validated here; uploaded after the checks below (ship.sh step 9, as a step of its own).
+      - name: Build and sign
         working-directory: app/ios/YoApp
         timeout-minutes: 30
         env:
@@ -150,7 +151,36 @@ jobs:
           # dev/actool.sh: Xcode's actool, keeping Info.plist's alternate icons through the merge of its partial plist.
           export REAL_ACTOOL=$(xcrun -f actool) ACTOOL=$PWD/../dev/actool.sh DARWIN_SDK=$(dirname "$DEVELOPER_DIR")
           export XCODE_VERSION=$(xcodebuild -version | sed -n 's/^Xcode //p') XCODE_BUILD=$(xcodebuild -version | sed -n 's/^Build version //p')
-          "$GITHUB_WORKSPACE/.oad/ship.sh" --upload
+          "$GITHUB_WORKSPACE/.oad/ship.sh"
+
+      # The app and its extensions share the account's state through the App Group (SharedState.swift); without it in
+      # their profiles (the group not attached to their app ids in the developer portal) the notification service
+      # names nobody and every push says only "Yo". Fatal, before the upload: such a build does not go to testers.
+      - name: App Group
+        working-directory: app/ios/YoApp
+        run: |
+          ~/pymobile3-venv/bin/python -I - xtool/YoApp.app <<'EOF'
+          import pathlib, plistlib, sys
+          app = pathlib.Path(sys.argv[1])
+          missing = False
+          for bundle in [app, *sorted(app.glob("PlugIns/*.appex"))]:
+              raw = (bundle / "embedded.mobileprovision").read_bytes()
+              profile = plistlib.loads(raw[raw.index(b"<?xml"):raw.rindex(b"</plist>") + 8])
+              groups = profile["Entitlements"].get("com.apple.security.application-groups", [])
+              print(f"{bundle.name}: {groups}")
+              if "group.app.justyo.ios" not in groups:
+                  print(f"::error::{bundle.name}: no App Group group.app.justyo.ios in its profile")
+                  missing = True
+          sys.exit(1 if missing else 0)
+          EOF
+
+      - name: Upload
+        working-directory: app/ios/YoApp
+        timeout-minutes: 20
+        env:
+          ASC_KEY_ID: ${{ secrets.ASC_KEY_ID }}
+          ASC_ISSUER_ID: ${{ secrets.ASC_ISSUER_ID }}
+        run: ASC_KEY_PATH=$RUNNER_TEMP/asc/AuthKey.p8 ~/pymobile3-venv/bin/python "$GITHUB_WORKSPACE/.oad/tools/asc.py" upload "$PWD/xtool/YoApp.ipa"
 
       # Debug symbols of the app and its extensions, kept with the run: crash reports (MetricKit, TestFlight) name
       # "YoApp +0x1ed29c"; with these (and the UUIDs, to match the build) they can be symbolicated later.
@@ -174,24 +204,6 @@ jobs:
           name: dsym-${{ github.sha }}
           path: ${{ runner.temp }}/dsym
           retention-days: 90
-
-      # The app and its extensions share the account's state through the App Group (SharedState.swift); without it in
-      # their profiles (the group not attached to their app ids in the developer portal) the notification service
-      # names nobody and every push says only "Yo". Said in the run's summary, not fatal.
-      - name: App Group
-        working-directory: app/ios/YoApp
-        run: |
-          ~/pymobile3-venv/bin/python -I - xtool/YoApp.app <<'EOF'
-          import pathlib, plistlib, sys
-          app = pathlib.Path(sys.argv[1])
-          for bundle in [app, *sorted(app.glob("PlugIns/*.appex"))]:
-              raw = (bundle / "embedded.mobileprovision").read_bytes()
-              profile = plistlib.loads(raw[raw.index(b"<?xml"):raw.rindex(b"</plist>") + 8])
-              groups = profile["Entitlements"].get("com.apple.security.application-groups", [])
-              print(f"{bundle.name}: {groups}")
-              if "group.app.justyo.ios" not in groups:
-                  print(f"::warning::{bundle.name}: no App Group group.app.justyo.ios in its profile")
-          EOF
 
       # The icons to choose from in Appearance: actool's partial Info.plist replaces CFBundleIcons, dev/actool.sh puts
       # Info.plist's alternates (loose PNGs at the root) back into it. Said in the run's summary, not fatal.

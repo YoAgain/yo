@@ -1,4 +1,5 @@
-// The app: one scene, the list of friends. SwiftUI's own lifecycle; a UIKit app delegate only for the push token.
+// The app: one scene, the list of friends. SwiftUI's own lifecycle; a UIKit app delegate only for the push token and
+// silent pushes.
 import SwiftUI
 import UserNotifications
 import YoCore
@@ -51,6 +52,8 @@ struct YoApp: App {
     notifications = NotificationDelegate(inbox: inbox, friends: friends, accounts: accounts)
     // Friends known by user id are kept for the account too (its storage, spec 6.9).
     friends.stored = { [weak accounts] changed, removed in accounts?.store(changed, removed: removed) }
+    // A silent push (the hub's non-urgent deliveries): one short inbox sync in the background (AppDelegate).
+    AppDelegate.silentSync = { await inbox.syncOnce(accounts: accounts, friends: friends) }
     UNUserNotificationCenter.current().delegate = notifications
     CrashReports.shared.start()  // crashes iOS hands over (MetricKit) go to the Yo team, if on
   }

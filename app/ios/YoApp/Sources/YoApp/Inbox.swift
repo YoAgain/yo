@@ -433,6 +433,26 @@ final class Inbox {
     }
   }
 
+  /// A silent push (content-available, a delivery that is not urgent) woke the app in the background: one short look
+  /// at the hub, as the long wait's, without waiting there. Whether it brought something; nil when it could not ask.
+  func syncOnce(accounts: AccountStore, friends: Friends) async -> Bool? {
+    // Started by the push itself: the core may still be opening.
+    for _ in 0..<100 where accounts.client == nil && accounts.account != nil { try? await Task.sleep(for: .milliseconds(100)) }
+    guard let client = accounts.client, !HubTransport.unsupported else { return nil }
+    do {
+      let (events, contacts) = try await Hub.run(reportErrors: false) { (try client.sync(waitS: 0), client.contacts()) }
+      guard client === accounts.client else { return nil }
+      await take(events, contacts: contacts, client: client, friends: friends)
+      if !events.isEmpty { fetchMedia(client: client) }
+      return !events.isEmpty
+    } catch YoError.Replaced {
+      accounts.replaced(client)
+    } catch {
+      Diagnostics.recordUnreported(error)
+    }
+    return nil
+  }
+
   /// What the core handed over while sending a photo or video (the outbox): as any, if `client` is still the
   /// account's (not signed out, or out and in again, meanwhile).
   func handle(

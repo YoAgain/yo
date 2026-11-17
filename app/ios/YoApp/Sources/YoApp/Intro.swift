@@ -151,13 +151,13 @@ struct HelpHero: View {
     VStack(spacing: 0) {
       // The pages sit on a hidden first page that gives the height: laid out on the first frame, nothing measured
       // later and grown into place while the page slides in.
-      IntroPage(card: IntroCard.all[0], low: true, zoom: 1, sizer: true)
+      IntroPage(card: IntroCard.all[0], low: true, zoom: 1.25, sizer: true)
         .fixedSize(horizontal: false, vertical: true)
         .hidden()
         .overlay {
           TabView(selection: $page) {
             ForEach(IntroCard.all.indices, id: \.self) { index in
-              IntroPage(card: IntroCard.all[index], low: true, zoom: 1).tag(index)
+              IntroPage(card: IntroCard.all[index], low: true, zoom: 1.25).tag(index)
             }
           }
           .tabViewStyle(.page(indexDisplayMode: .never))

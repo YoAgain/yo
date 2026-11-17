@@ -10,6 +10,12 @@
 	<key>CFBundleShortVersionString</key>
 	<string>1.0.0</string>
 	<!-- iPhone only: on an iPad it runs as the iPhone app (no iPad screenshots, no iPad layout to review). -->
+	<!-- Silent pushes (content-available, the hub's non-urgent deliveries) wake the app for one short inbox sync
+	     (AppDelegate in Push.swift). -->
+	<key>UIBackgroundModes</key>
+	<array>
+		<string>remote-notification</string>
+	</array>
 	<key>UIDeviceFamily</key>
 	<array>
 		<integer>1</integer>
