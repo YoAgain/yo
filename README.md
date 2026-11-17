@@ -70,21 +70,8 @@ The server deletes the encrypted file after its last acknowledged fetch.
 
 ## Hub
 
-<details>
-<summary>Hub routes</summary>
-
-| Method | Route | Purpose |
-|---|---|---|
-| PUT | `/v1/blobs/{id}?fetches=n` | Upload encrypted media (signed). |
-| GET | `/v1/blobs/{id}` | Fetch anonymously; never consumes a fetch. |
-| DELETE | `/v1/blobs/{id}` | Acknowledge durable storage anonymously; consumes one fetch, the last deletes the blob. Unknown/expired: `204`. |
-
-See [all hub routes](hub/README.md) for the full table and limits.
-
-</details>
-
 ```text
-hub alone    ████████████████████████████████  10,431 Yos/s   p50 2.1 ms · p99 130 ms
+hub alone    ████████████████████████████████  10,431 Yos/s   1 CPU core · p50 2.1 ms · p99 130 ms
 end to end   ███████████▊                       3,826 Yos/s   send, deliver, fetch, decrypt
 lost                                               0
 ```
@@ -116,6 +103,7 @@ The hub stores and forwards encrypted Yos until the recipient fetches them; it c
 | `GET`, `PUT /v1/storage` | signed |
 | `PUT /v1/blobs/{id}?fetches=n` | signed by body hash |
 | `GET /v1/blobs/{id}` | none |
+| `DELETE /v1/blobs/{id}` | none; acknowledges storage, the last fetch deletes it |
 | `GET /.well-known/yo-hub-key` | – |
 | `GET /.well-known/yo-trust-root` | – |
 | `POST /v1/report` | signed |
