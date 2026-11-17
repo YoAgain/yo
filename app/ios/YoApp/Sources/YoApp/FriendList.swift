@@ -26,19 +26,6 @@ import PhotosUI
 import UniformTypeIdentifiers
 import _PhotosUI_SwiftUI
 
-/// Incoming Yos glow white, as bright as the screen allows (HDR); `pulse` (0…1) only ever adds to it: brighter, never
-/// dimmer, never another hue. What you sent stays plain white.
-private struct YoIntensity: ViewModifier {
-  let incoming: Bool
-  let pulse: Double
-
-  func body(content: Content) -> some View {
-    content
-      .foregroundStyle(incoming ? Color.white.exposureAdjust(3 + max(0, pulse)) : .white)
-      .allowedDynamicRange(incoming ? .high : .standard)
-  }
-}
-
 private enum ListMotion {
   static let expansion = Animation.spring(duration: 0.35, bounce: 0)
   static let flight = Animation.spring(duration: 0.35, bounce: 0.16)
@@ -322,7 +309,6 @@ struct FriendList: View {
   /// The list, and the question before leaving a group (on its own: one chain of modifiers less to type-check).
   private var asking: some View {
     navigation
-      .overlay { BangPhysicsLayer() }  // dev prototype: falling "!"s (BangPhysics.swift)
       .alert(
       "Leave \(leaving?.name ?? "")?",
       isPresented: Binding(get: { leaving != nil }, set: { if !$0 { leaving = nil } }), presenting: leaving
@@ -1919,7 +1905,7 @@ struct LiveBar: View, @MainActor Equatable {
       outgoingItems: bar.outgoing.isEmpty ? (bar.sendingBatch?.items ?? []) : bar.outgoing,
       undoAvailable: !bar.outgoing.isEmpty, sendSeconds: bar.seconds, stop: stop,
       media: friend.request ? [] : media, mediaMarkCount: bar.modelMarkCount, mediaSign: bar.modelMediaSign, yo: friend.request ? nil : yo, hint: hint, hold: hold, cancelHold: cancelHold, press: press, flightChanged: flightChanged, flyBegan: flyBegan, view: view, faded: friend.gone && !bar.hasNotice,
-      icon: friend.group == nil ? nil : "person.3.fill", senders: bar.modelSenders, flies: true, barID: friend.name,
+      icon: friend.group == nil ? nil : "person.3.fill", senders: bar.modelSenders, flies: true,
       action: action)
       // Gone: still their name (whose bar it is), faded; a tap says "Not on Yo".
       .accessibilityValue(friend.gone ? "Not on Yo" : "")
@@ -2134,9 +2120,6 @@ struct RowButton: View {
   @AppStorage(SettingKey.leftHanded) private var leftHanded = false
   /// A friend's bar: a Yo sent from it flies out of it, up and away.
   var flies = false
-  /// The bar's own name, whatever its words say ("Sent Yo"): where its physics "!"s start (BangPhysics.swift).
-  var barID: String?
-  private var physicsBar: String { barID ?? title }
   /// The Yos on their way out of the bar now, each flying up and fading (FlyingYo).
   @State private var flights: [UUID] = []
   @State private var sentSuffixWidth: CGFloat = 0
@@ -2147,9 +2130,8 @@ struct RowButton: View {
     sendSeconds: Double = FriendList.sendDelay, stop: @escaping () -> Void = {},
     media: [Arrival] = [], mediaMarkCount: Int = 0, mediaSign: String = "", yo: FriendList.Landing? = nil, hint: String? = nil, hold: ((Bool, CGPoint?) -> Void)? = nil, cancelHold: @escaping () -> Void = {}, press: @escaping (Bool) -> Void = { _ in }, flightChanged: @escaping (UUID, Bool) -> Void = { _, _ in }, flyBegan: @escaping (UUID) -> Void = { _ in },
     view: @escaping (ThumbnailTouch) -> Void = { _ in }, faded: Bool = false, icon: String? = nil, senders: [RenderedSender] = [],
-    flies: Bool = false, barID: String? = nil, action: @escaping (CGPoint?) -> Void
+    flies: Bool = false, action: @escaping (CGPoint?) -> Void
   ) {
-    self.barID = barID
     self.flies = flies
     self.icon = icon
     self.senders = senders
@@ -2280,7 +2262,6 @@ struct RowButton: View {
         }
       }
       .contentShape(.rect)
-      .bangPhysicsBar(physicsBar)  // dev prototype (BangPhysics.swift)
   }
 
   /// The bar's line, sending and receiving alike (BarLine): the words and their "!"s; a Yo that came at the end; room
@@ -2302,8 +2283,7 @@ struct RowButton: View {
               FlyingYo { flights.removeAll { $0 == id }; flightChanged(id, false) }
                 .onAppear { flightChanged(id, true) }
             }
-          ) : nil, physics: touchable ? nil : physicsBar)
-          .bangPhysicsLabel(physicsBar, incoming: false, on: !touchable && title == "Sent Yo")
+          ) : nil)
           // Measured by Bangs' own key (what it shows now, not the count it is still counting up to).
           .contentTransition(.identity)  // other words come at once, never two drawn over each other
         // A group: its sign before its name, outside it: the name alone stands in the middle (`iconRoom` keeps the
@@ -2459,9 +2439,7 @@ struct RowButton: View {
       HStack(spacing: 4) {
         if leftHanded { sign }
         Bangs(count: mediaMarkCount, maximumBangs: compact ? 0 : 5, prefix: "Yo", incoming: true,
-              intensityCount: yo?.total ?? mediaMarkCount, sweeps: sweeps && yo != nil,
-              physics: touchable && !compact ? physicsBar : nil)
-        .bangPhysicsLabel(physicsBar, incoming: true, on: touchable && !compact)
+              intensityCount: yo?.total ?? mediaMarkCount, sweeps: sweeps && yo != nil)
         .allowsHitTesting(false)  // a tap there sends a Yo
         .accessibilityElement(children: .ignore)
         .accessibilityLabel(media.count == 1 ? "Yo with a photo or video" : "\(media.count) Yos with photos or videos")
@@ -2480,9 +2458,8 @@ struct RowButton: View {
           }
         } else {
           Bangs(count: yo.count, maximumBangs: compact ? 0 : 5, prefix: "Yo", incoming: true, intensityCount: yo.total,
-                sweeps: sweeps, physics: touchable && !compact ? physicsBar : nil)
+                sweeps: sweeps)
           .lineLimit(1)
-          .bangPhysicsLabel(physicsBar, incoming: true, on: touchable && !compact)
         }
       }
       .modifier(ClockFade(since: yo.fading, seconds: yoSeconds - Self.solid, paused: yo.paused, elapsed: yo.fadeElapsed))
@@ -2604,8 +2581,9 @@ private struct ClockFade: ViewModifier {
   }
 }
 
-/// Keep Yo at its full type size; spare width buys up to five exclamation marks.
-/// Run intensity and each arrival's pulse belong to the glyphs, not a layout copy.
+/// How many, the way Yo says it: one "!" for each, at most five; beyond, the "!"s stay and how many more comes after
+/// them ("Yo!!!!! +6"), turning as a wheel, its digits all as wide (nothing shifts). Short of room the "!"s give way
+/// first, never the count. Each arrival's pulse belongs to the glyphs, not a layout copy.
 struct Bangs: View {
   @Environment(\.yoFlood) private var busy
   @Environment(\.dynamicTypeSize) private var measureType
@@ -2623,8 +2601,6 @@ struct Bangs: View {
   /// The Yos not shown yet, one "!" each, strictly one after the other (`gap` apart).
   @State private var arrivals: [ContinuousClock.Instant] = []
   @State private var lastShow = ContinuousClock.now
-  /// The bar whose physics "!"s carry on beyond `maximumBangs` (BangPhysics.swift, dev only).
-  var physics: String?
   static let gap = Duration.milliseconds(100)
   /// More waiting than this (a flood): no more one by one, the count shows at once.
   private static let queueLimit = 10
@@ -2634,8 +2610,7 @@ struct Bangs: View {
   var sweeps = false
 
   init(count: Int, maximumBangs: Int = 5, prefix: String = "", incoming: Bool = false, intensityCount: Int? = nil,
-       sweeps: Bool = false, flightOverlay: AnyView? = nil, physics: String? = nil) {
-    self.physics = physics
+       sweeps: Bool = false, flightOverlay: AnyView? = nil) {
     self.sweeps = sweeps
     self.flightOverlay = flightOverlay
     self.incoming = incoming
@@ -2647,22 +2622,23 @@ struct Bangs: View {
   }
 
   var body: some View {
-    let bangs = min(max(0, busy ? count : displayed), maximumBangs)
+    let shown = max(0, busy ? count : displayed)
+    let more = Self.more(shown)
+    let bangs = min(shown, maximumBangs, ShareBridge.mostBangs)
     let motionReduced = reduceMotion
     BangsFit {
       // Drop marks before compromising the full-size Yo. Candidates go by rank (0 = most marks): the one showing stays
       // the same view when a mark comes, so the words are never drawn twice (no crossfade) and a flying "Yo" in it
       // stays on its glyph.
       ForEach(0...bangs, id: \.self) { rank in
-        run(bangs: bangs - rank).fixedSize(horizontal: true, vertical: false).transition(.identity)
+        run(bangs: bangs - rank, more: more).fixedSize(horizontal: true, vertical: false).transition(.identity)
       }
-      run(bangs: 0).fixedSize(horizontal: true, vertical: false)
+      run(bangs: 0, more: more).fixedSize(horizontal: true, vertical: false)
     }
     .lineLimit(1)
     // One pulse for all candidates, on the glyphs themselves: only ever brighter (and a touch larger).
     .keyframeAnimator(initialValue: 0.0, trigger: pulses) { text, pulse in
       text
-        .modifier(YoIntensity(incoming: incoming, pulse: isYo ? pulse : 0))
         .scaleEffect(motionReduced || !isYo ? 1 : 1 + max(0, pulse) * 0.025)
     } keyframes: { _ in
       KeyframeTrack {
@@ -2696,7 +2672,7 @@ struct Bangs: View {
     .task(id: arrivals.isEmpty) {
       while let arrival = arrivals.first {
         let next = displayed + 1
-        let swept = sweeps && !busy && !motionReduced && (next <= maximumBangs || !BangPhysics.on)
+        let swept = sweeps && !busy && !motionReduced
         let at = max(lastShow.advanced(by: Self.gap), swept ? arrival.advanced(by: IncomingSweeps.flight) : arrival)
         do { try await ContinuousClock().sleep(until: at) } catch { return }
         guard !arrivals.isEmpty else { return }
@@ -2713,30 +2689,27 @@ struct Bangs: View {
       displayed = count
       nextTurn = .now.advanced(by: .milliseconds(200))
     }
-    // Beyond `maximumBangs`, each "!" is a physics one (dev only), one for one with what the label counts.
-    .onChange(of: displayed) { old, new in
-      BangPhysics.sync(physics, incoming: incoming, target: physicsTarget(new), up: new > old)
-    }
-    .onAppear { BangPhysics.sync(physics, incoming: incoming, target: physicsTarget(displayed), up: true) }
-    .onDisappear { BangPhysics.vanish(physics, incoming: incoming) }
   }
 
-  private func physicsTarget(_ shown: Int) -> Int {
-    physics != nil && (incoming || prefix == "Sent Yo") ? max(0, shown - maximumBangs) : 0
-  }
+  /// How many more than five "!"s: the " +n" after them. Only behind a Yo.
+  static func more(_ shown: Int) -> Int { max(0, shown - ShareBridge.mostBangs) }
 
   private var isYo: Bool { incoming || prefix == "Yo" || prefix == "Sent Yo" }
 
-  private func run(bangs: Int) -> some View {
-    Group {
+  private func run(bangs: Int, more: Int) -> some View {
+    HStack(spacing: 0) {
       if prefix == "Sent Yo" {
-        HStack(spacing: 0) {
-          Text("Sent ")
-          Text("Yo").overlay { flightOverlay }
-          Text(String(repeating: "!", count: bangs))
-        }
+        Text("Sent ")
+        Text("Yo").overlay { flightOverlay }
+        Text(String(repeating: "!", count: bangs))
       } else {
         Text(prefix + String(repeating: "!", count: bangs))
+      }
+      if more > 0 {
+        Text(" +\(more)")
+          .monospacedDigit()
+          .fixedSize()
+          .contentTransition(.numericText(value: Double(more)))
       }
     }
       .lineLimit(1)
@@ -2749,9 +2722,9 @@ struct Bangs: View {
 }
 
 /// Each incoming Yo after the first (which comes in with the whole mark): a small "Yo" sweeps in from the screen's edge
-/// into the label's "Yo" and merges with it; then Bangs shows one "!" more (up to five; beyond, in dev builds, physics
-/// "Yo"s take over, BangPhysics.swift). Several fly one after the other, `Bangs.gap` apart, as Bangs shows them; never
-/// a queue longer than Bangs keeps. Not with Reduce Motion (the glow pulses only).
+/// into the label's "Yo" and merges with it; then Bangs shows one "!" more (up to five; beyond, its "+n" counts up).
+/// Several fly one after the other, `Bangs.gap` apart, as Bangs shows them; never
+/// a queue longer than Bangs keeps. Not with Reduce Motion (the label pulses only).
 struct IncomingSweeps: View {
   static let flightSeconds = 0.26
   static let flight = Duration.seconds(flightSeconds)
@@ -2769,12 +2742,13 @@ struct IncomingSweeps: View {
   struct Flight: Hashable {
     let id = UUID()
     let bangs: Int
+    let more: Int
   }
 
   var body: some View {
     ZStack(alignment: .trailing) {
       ForEach(flying, id: \.self) { flight in
-        SweepingYo(bangs: flight.bangs) { flying.removeAll { $0 == flight } }
+        SweepingYo(bangs: flight.bangs, more: flight.more) { flying.removeAll { $0 == flight } }
       }
     }
     .padding(.trailing, landing)
@@ -2784,12 +2758,12 @@ struct IncomingSweeps: View {
     .onChange(of: total) { old, new in
       // A flood (more than Bangs queues) shows at once, without sweeps.
       guard old > 0, new > old, new - old <= 10, !reduceMotion, !busy else { return }
-      // One for each Yo, one after the other; beyond five they are physics "Yo"s (dev) instead.
-      for k in (old + 1)...new where k <= 5 || !BangPhysics.on {
+      // One for each Yo, one after the other.
+      for k in (old + 1)...new {
         let at = max(lastLaunch.advanced(by: Bangs.gap), .now)
         if at > .now.advanced(by: Bangs.gap * 10) { break }
         lastLaunch = at
-        let flight = Flight(bangs: min(5, max(0, k - 1)))
+        let flight = Flight(bangs: min(ShareBridge.mostBangs, max(0, k - 1)), more: Bangs.more(max(0, k - 1)))
         Task {
           try? await ContinuousClock().sleep(until: at)
           flying.append(flight)
@@ -2803,6 +2777,7 @@ struct IncomingSweeps: View {
 /// to its size as it lands, then gone into it.
 private struct SweepingYo: View {
   let bangs: Int
+  var more = 0
   let done: () -> Void
   @State private var landed = false
   @State private var gone = false
@@ -2810,10 +2785,9 @@ private struct SweepingYo: View {
   var body: some View {
     HStack(spacing: 0) {
       Text("Yo")
-        .modifier(YoIntensity(incoming: true, pulse: 0))
         .offset(x: landed ? 0 : BarLine.endPadding + 40 + Double(bangs) * 9)  // from beyond the screen's edge
         .opacity(gone ? 0 : 1)
-      Text(String(repeating: "!", count: bangs)).hidden()
+      Text(String(repeating: "!", count: bangs) + (more > 0 ? " +\(more)" : "")).monospacedDigit().hidden()
     }
     .lineLimit(1)
     .fixedSize()
@@ -2827,7 +2801,7 @@ private struct SweepingYo: View {
   }
 }
 
-/// The bar flashes once for each incoming Yo, on every screen (the HDR glow comes on top where the screen has it).
+/// The bar flashes once for each incoming Yo.
 private struct RowFlash: View {
   let total: Int
   @State private var flashes = 0
