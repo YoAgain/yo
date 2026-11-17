@@ -94,34 +94,86 @@ struct Intro<First: View>: View {
 /// The welcome's cards, available again from Help without the logo or account setup.
 struct IntroHelp: View {
   @Environment(\.dismiss) private var dismiss
+  /// From Settings › Help: the tutorial with Contact Us, Status and Licenses as buttons under it (Help's own page
+  /// is gone); from the Help page itself only the tutorial.
+  var links = false
+  @State private var messaging = false
+  @State private var page = 0
+  @State private var pageHeight: CGFloat = 480
 
   /// A sheet like Secure Your Account: amethyst, grabber, a close button, the pages and their dots.
   var body: some View {
-    TabView {
-      ForEach(IntroCard.all.indices, id: \.self) { index in
-        IntroPage(card: IntroCard.all[index])
-          .padding(.top, 44)
-          .padding(.bottom, 48)
+    NavigationStack {
+      VStack(spacing: 0) {
+        Spacer(minLength: 0)
+        // The pages at their own height with their dots right under the words, the block centred above the buttons.
+        TabView(selection: $page) {
+          ForEach(IntroCard.all.indices, id: \.self) { index in
+            IntroPage(card: IntroCard.all[index], low: true).tag(index)
+          }
+        }
+        .tabViewStyle(.page(indexDisplayMode: .never))
+        .frame(height: pageHeight)
+        .background {
+          IntroPage(card: IntroCard.all[0], low: true).fixedSize(horizontal: false, vertical: true).hidden()
+            .onGeometryChange(for: CGFloat.self) { $0.size.height } action: { pageHeight = $0 }
+        }
+        Dots(count: IntroCard.all.count, page: page) { next in withAnimation(.smooth) { page = next } }
+        Spacer(minLength: 0)
+        if links {
+          VStack(spacing: 10) {
+            Button { messaging = true } label: {
+              HStack(spacing: 6) {
+                Label("Contact Us", systemImage: "envelope.fill")
+                SupportBadge()
+              }
+              .frame(maxWidth: .infinity)
+            }
+            HStack(spacing: 10) {
+              NavigationLink { StatusPage().background(Color(.systemGroupedBackground)) } label: {
+                // Its dot is the connection at a glance: green online, orange slow or offline.
+                HStack(spacing: 8) {
+                  Label("Status", systemImage: "waveform.path.ecg")
+                  StatusPage(wordOnly: true)
+                }
+                .frame(maxWidth: .infinity)
+              }
+              NavigationLink { LicensesPage() } label: {
+                Label("Licenses", systemImage: "doc.text").frame(maxWidth: .infinity)
+              }
+            }
+          }
+          // White buttons with black labels, as the welcome screen's Sign Up: never purple text on the purple.
+          .buttonStyle(.glassProminent)
+          .tint(.white)
+          .foregroundStyle(.black)
+          .controlSize(.large)
+          .font(.body.weight(.semibold))
+          .padding(.horizontal, 20)
+          .padding(.bottom, 24)
+        }
       }
-    }
-    .tabViewStyle(.page(indexDisplayMode: .always))
-    .foregroundStyle(.white)
-    .overlay(alignment: .topTrailing) {
-      Button {
-        dismiss()
-      } label: {
-        Image(systemName: "xmark")
-          .font(.system(size: 17, weight: .semibold))
-          .foregroundStyle(.white)
-          .frame(width: 44, height: 44)
-          .glassEffect(.regular.interactive(), in: .circle)
-          .contentShape(.circle)
+      .foregroundStyle(.white)
+      .background(Color.amethyst)
+      .overlay(alignment: .topTrailing) {
+        Button {
+          dismiss()
+        } label: {
+          Image(systemName: "xmark")
+            .font(.system(size: 17, weight: .semibold))
+            .foregroundStyle(.white)
+            .frame(width: 44, height: 44)
+            .glassEffect(.regular.interactive(), in: .circle)
+            .contentShape(.circle)
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel("Close")
+        .padding(.top, 20)
+        .padding(.trailing, 16)
       }
-      .buttonStyle(.plain)
-      .accessibilityLabel("Close")
-      .padding(.top, 20)
-      .padding(.trailing, 16)
+      .toolbar(.hidden, for: .navigationBar)
     }
+    .sheet(isPresented: $messaging) { MessagePage() }
     .presentationBackground(Color.amethyst)
     .presentationDragIndicator(.visible)
     .presentationDetents([.large])
@@ -186,8 +238,25 @@ enum IntroGesture: Equatable {
 
 private struct IntroPage: View {
   let card: IntroCard
+  /// In the Help card: picture and words at their own height, no room around them (the card places them).
+  var low = false
 
   var body: some View {
+    if low {
+      VStack(spacing: 24) {
+        // Bigger in the Help card, which has the room: the whole picture scaled, gestures and all.
+        PhoneShot(picture: card.picture, gesture: card.gesture)
+          .scaleEffect(1.35, anchor: .top)
+          .frame(height: 190 * 743 / 540 * 1.35, alignment: .top)
+        words
+      }
+      .padding(.horizontal, 28)
+    } else {
+      roomy
+    }
+  }
+
+  private var roomy: some View {
     VStack(spacing: 0) {
       Spacer(minLength: 12)
       // The picture when there is room for it beside the words; with very large text, the words alone; and if even

@@ -234,6 +234,11 @@ final class Camera: NSObject, @unchecked Sendable {
     movieOutput.maxRecordedDuration = CMTime(seconds: Self.longestVideo, preferredTimescale: 600)
     mirrorFrontCamera()
     session.commitConfiguration()
+    // The photo pipeline set up ahead (same settings as `photo()`): the first shot is as quick as the next ones,
+    // its shutter sound at once instead of after a warm-up.
+    let ready = AVCapturePhotoSettings(format: [AVVideoCodecKey: AVVideoCodecType.jpeg])
+    ready.photoQualityPrioritization = .speed
+    photoOutput.setPreparedPhotoSettingsArray([ready], completionHandler: nil)
     readZooms()
   }
 

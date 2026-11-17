@@ -26,6 +26,7 @@ struct SettingsView: View {
   @Environment(AccountStore.self) private var accounts
 
   @State private var hasRecoveryKey = true
+  @State private var showingHelp = false
   @State private var currentIconName = UIApplication.shared.alternateIconName
   enum Page: Hashable {
     case account, help, status, contacts, signInSecurity, code, licenses, appIcon
@@ -134,7 +135,8 @@ struct SettingsView: View {
               }
             }
             compactCard {
-              NavigationLink(value: Page.help) {
+              // Help opens the tutorial right away; Contact Us, Status and Licenses are buttons under it.
+              Button { showingHelp = true } label: {
                 HStack {
                   Label("Help", systemImage: "questionmark.circle.fill").labelStyle(Tile(.amethyst))
                   SupportBadge()
@@ -144,6 +146,7 @@ struct SettingsView: View {
                 .frame(maxWidth: .infinity, alignment: .leading)
                 .contentShape(Rectangle())
               }
+              .foregroundStyle(Color(.label))
               Divider()
               // Opens the list's own "+" field, so one learns where friends are added.
               Button {
@@ -180,6 +183,9 @@ struct SettingsView: View {
       // Only this root ignores insets; pushed pages retain their navigation safe area.
       .ignoresSafeArea(.container, edges: [.top, .bottom])
 
+      // From the root, not from inside the measured card: presented from there it threw the card's layout off
+      // when the Help sheet closed.
+      .sheet(isPresented: $showingHelp) { IntroHelp(links: true) }
       .navigationDestination(for: Page.self) { page in
         switch page {
         case .account:
