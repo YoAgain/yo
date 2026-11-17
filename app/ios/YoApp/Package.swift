@@ -15,7 +15,8 @@ func constValues(_ target: String) -> [SwiftSetting] {
   let objects = "\(Context.packageDirectory)/.build/out/Intermediates.noindex/YoApp.build/Release-iphoneos/\(target)-t.build/Objects-normal/arm64"
   return [.unsafeFlags([
     "-emit-const-values-path", "\(objects)/\(target)-primary.swiftconstvalues",
-    "-const-gather-protocols-list", "\(Context.packageDirectory)/../dev/const-protocols.json",
+    // The frontend's flag: Xcode 26's swiftc has no driver flag for the list (-const-gather-protocols-list).
+    "-Xfrontend", "-const-gather-protocols-file", "-Xfrontend", "\(Context.packageDirectory)/../dev/const-protocols.json",
   ])]
 }
 
