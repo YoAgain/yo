@@ -284,7 +284,7 @@ final class Inbox {
       Stats.sentYo(to: friend.name)
       return nil
     } catch YoError.NotOnYo {
-      // Gone (deleted, or the name released): the bar says so from now on.
+      // Gone (deleted): the bar says so from now on.
       if let contacts = try? await Hub.run({ client.contacts() }), client === accounts.client {
         friends.markGone(contacts)
       }
@@ -634,7 +634,7 @@ final class Inbox {
       }
       Perf.timed("inbox.notifications.remove") {
         center.removeDeliveredNotifications(
-          withIdentifiers: delivered.filter { $0.request.identifier != SecureReminder.id }.map(\.request.identifier))
+          withIdentifiers: delivered.map(\.request.identifier))
       }
       try? await center.setBadgeCount(0)
       return waiting

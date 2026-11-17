@@ -22,7 +22,7 @@ struct Friend: Codable, Hashable, Identifiable {
   var group: String?
   /// Blocked (spec 4.8): off the list, nothing from them shown; Settings lists them to unblock.
   var blocked = false
-  /// Their account is gone (deleted, or the name released after a year away): the bar says "Not on Yo". The name
+  /// Their account is gone (deleted): the bar says "Not on Yo". The name
   /// added again is asked of the hub anew and may be someone else's now.
   var gone = false
   /// Their account key changed (spec 3.2: a new phone without its backup, or someone else): Contacts says so until

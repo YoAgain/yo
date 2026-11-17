@@ -37,7 +37,7 @@ struct Account: Codable, Equatable {
 
   static let backupVersion = 3
 
-  /// Backed up (spec 7): the name comes back on a new phone. Not yet, it is released after 365 days away (spec 6.4).
+  /// Backed up (spec 7): the account comes back on a new phone by a recovery method, not only by iCloud Keychain.
   var secured: Bool { byPasskey || byCode == true }
 }
 
@@ -557,7 +557,6 @@ final class AccountStore {
     // Only now that the account is kept (its preference and keychain item): a kill before this keeps the key, and the
     // next try registers the same account again rather than leaving its state where no launch opens it.
     NewAccountKey.forget(username)
-    SecureReminder.update(secured: false)
     wordsSaved = false
     passkeyTurnedOff = false
   }
@@ -635,7 +634,6 @@ final class AccountStore {
     self.account = account
     self.securing = nil
     if prf != nil { passkeyTurnedOff = false }
-    SecureReminder.update(secured: true)
   }
 
   /// The backup to the hub through `client`, the one the change began with: never another account's after a sign-out
@@ -843,7 +841,7 @@ final class AccountStore {
     let (client, secret) = try await register(sealed.account.username, secret: sealed.accountKey)
     use(client, secret: secret)
     // The name as the hub answered it (changed since the backup was made), the user id as registered. Another user id
-    // (the name released after a year away, spec 6.4, and taken again with the same key) has no backup yet.
+    // (the account deleted meanwhile, spec 6.4, and taken again with the same key) has no backup yet.
     var account = sealed.account
     account.username = client.username() ?? account.username
     let id = Hub.bytes(client.userId()) ?? account.userID
@@ -856,7 +854,6 @@ final class AccountStore {
     friendsSeeded = true
     tookPasskeyChoice(of: account)
     self.account = account
-    SecureReminder.update(secured: account.secured)
     Task { await addAuthKeys() }
   }
 
@@ -895,7 +892,7 @@ final class AccountStore {
     guard account == nil, let id = Hub.bytes(client.userId()) else { return false }
     SyncedAccount.left = nil
     use(client, secret: secret)
-    // The same user, or (its name released after a year away, spec 6.4) a new one with the same key and no backup.
+    // The same user, or (the account deleted meanwhile, spec 6.4) a new one with the same key and no backup.
     let same = id == item.userID
     if same, let key = item.recoveryKey { Diagnostics.attempt({ try RecoveryWords.save(key) }) }
     let restored = Account(
@@ -907,7 +904,6 @@ final class AccountStore {
     friendsSeeded = true
     tookPasskeyChoice(of: restored)
     account = restored
-    SecureReminder.update(secured: restored.secured)
     Task { await addAuthKeys() }
     return true
   }
@@ -1062,8 +1058,6 @@ final class AccountStore {
         if let url = SharedStateFile.stateURL { try? FileManager.default.removeItem(at: url) }
       }
     }
-    SecureReminder.update(secured: true)
-    SignedAt.forget()
     RecoveryWords.delete()
     Stats.reset()
     // Its notifications too: one tapped later would show (or Yo back) under the next account.
@@ -1388,24 +1382,5 @@ enum SyncedAccount {
   static var left: Data? {
     get { UserDefaults.standard.data(forKey: "account.left") }
     set { UserDefaults.standard.set(newValue, forKey: "account.left") }
-  }
-}
-
-/// The reminder to secure the name (spec 6.4): a name not backed up is released 365 days after the hub last took a
-/// signed request of it, so 358 days after that (`SignedAt`; now, if none is known yet) a notification says so. Set
-/// again each time Yo opens; gone once secured.
-enum SecureReminder {
-  static let id = "yo.secure"
-
-  @MainActor static func update(secured: Bool) {
-    let center = UNUserNotificationCenter.current()
-    center.removePendingNotificationRequests(withIdentifiers: [id])
-    guard !secured else { return }
-    let content = UNMutableNotificationContent()
-    content.title = "Secure Your Account"
-    content.body = "Secure your account to keep your name. Otherwise it’s freed in 7 days."
-    let due = (SignedAt.last ?? .now).addingTimeInterval(358 * 24 * 3600)
-    let trigger = UNTimeIntervalNotificationTrigger(timeInterval: max(60, due.timeIntervalSinceNow), repeats: false)
-    center.add(UNNotificationRequest(identifier: id, content: content, trigger: trigger))
   }
 }

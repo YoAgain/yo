@@ -245,9 +245,6 @@ final class HubTransport: HttpTransport {
       Diagnostics.record(NSError(domain: "HTTP", code: Int(answer.result.status)), place: codePlace)
     }
     Availability.network(answer.result.status == 0 || answer.result.status >= 500)
-    if (200..<300).contains(answer.result.status), signed {  // the core sends the header lowercase
-      SignedAt.note()
-    }
     if Perf.on {
       let ms = (CACurrentMediaTime() - start) * 1000
       let route = path.split(separator: "/").prefix(2).joined(separator: "/")  // not the ids after it
@@ -316,27 +313,6 @@ final class HubTransport: HttpTransport {
         done(data, response, error?.localizedDescription)
       }
     }
-  }
-}
-
-/// When the hub last took a signed request of this device: an account not secured is removed 365 days after its last
-/// one (spec 6.4), and the app's reminder counts from it, not from the app's last opening (one offline counts
-/// nothing). In the App Group, so the extensions' requests (a push's fetch) count too; written at most once an hour.
-enum SignedAt {
-  private static let key = "hub.signedAt"
-  private static var defaults: UserDefaults { UserDefaults(suiteName: ShareBridge.group) ?? .standard }
-
-  static var last: Date? {
-    let seconds = defaults.double(forKey: key)
-    return seconds > 0 ? Date(timeIntervalSince1970: seconds) : nil
-  }
-
-  /// Signed out: the next account counts from its own.
-  static func forget() { defaults.removeObject(forKey: key) }
-
-  static func note() {
-    if let last, Date.now.timeIntervalSince(last) < 3600 { return }
-    defaults.set(Date.now.timeIntervalSince1970, forKey: key)
   }
 }
 

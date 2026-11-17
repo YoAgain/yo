@@ -1,161 +1,91 @@
-// "Secure Your Account" (spec 7): a guide of two full-colour pages like the onboarding, one task each, as iOS guides a
-// setup. Opened at a step (from its row) or at the first one left; after each step it goes on to the next one left,
-// and closes when none is. 1, the passkey: made, then used once for its PRF output (iCloud Keychain gives it at once;
-// 1Password only when used, so the same page asks once more); skippable. 2, the recovery key: the 12 words, saved
-// through the system's share sheet (Save Image, Notes, Files, a password manager, AirDrop).
+// "Set Up Account Recovery" (spec 7): one full-colour page with two steps, each a card with its number (a green
+// checkmark once done) and its buttons. 1, the recovery key: shown (frosted until tapped) and saved through the
+// system's share sheet (Save Image, Notes, Files, a password manager, AirDrop) or copied. 2, the passkey: made, then
+// used once for its PRF output (iCloud Keychain gives it at once; 1Password only when used). The passkey is optional;
+// Done waits for the recovery key.
 import SwiftUI
 
 enum SecureStep { case passkey, recoveryKey }
 
 struct SecureNameSheet: View {
-  /// Where to begin; nil, the first step left.
+  /// Kept for the callers; the page shows both steps.
   var start: SecureStep?
-  /// nil keeps the combined first-run guide.
+  /// The step the sheet was opened for; nil, the combined first-run guide.
   var only: SecureStep? = nil
   /// Closes the sheet through the presenter's binding.
   var close: (() -> Void)? = nil
 
   @Environment(AccountStore.self) private var accounts
   @Environment(\.dismiss) private var dismiss
-  @State private var page = Stage.passkey
-  /// The passkey is saved in the password manager; signing in with it once is left (the check).
   @State private var initialized = false
+  /// The passkey is saved in the password manager; signing in with it once is left (Confirm).
   @State private var created = false
-  @State private var skipped = false
   @State private var words = ""
-  @State private var busy = false
+  @State private var busy: SecureStep?
+  @State private var showingKey = false
   @State private var problem: String?
-
-  private enum Stage { case passkey, wordsIntro, words, done }
 
   private var secured: Bool { accounts.account?.secured == true }
   private var passkeyDone: Bool {
     accounts.account?.byPasskey == true && accounts.account?.passkeyAuth == true
   }
   private var wordsDone: Bool { secured && accounts.wordsSaved }
+  /// Done needs the recovery key; opened for the passkey alone, the passkey is enough.
+  private var canFinish: Bool { wordsDone || (only == .passkey && passkeyDone) }
 
   var body: some View {
     ZStack {
       Color.amethyst.ignoresSafeArea()
-      Group {
-        switch page {
-        case .passkey:
-          if created { checkPage } else { passkeyPage }
-        case .wordsIntro: wordsIntroPage
-        case .words: wordsPage
-        case .done: donePage
+      Page(title: "Set Up\nAccount Recovery") {
+        StepCard(number: 1, title: "Recovery Key", done: wordsDone) {
+          Button("Show") { Task { await showKey() } }
+            .buttonStyle(.glass)
+          if !wordsDone {
+            Button { Task { await share() } } label: {
+              Image(systemName: "square.and.arrow.up")
+                .accessibilityLabel("Save Recovery Key")
+            }
+            .buttonStyle(.glassProminent)
+            .tint(.white)
+            .foregroundStyle(.black)
+          }
         }
+        .disabled(busy != nil)
+        StepCard(number: 2, title: "Passkey", done: passkeyDone) {
+          if busy == .passkey {
+            ProgressView()
+          } else if !passkeyDone {
+            Button(created ? "Confirm" : "Set Up") {
+              Task { created ? await checkPasskey() : await createPasskey() }
+            }
+            .buttonStyle(.glassProminent)
+            .tint(.white)
+            .foregroundStyle(.black)
+            .disabled(busy != nil)
+          }
+        }
+        Note(problem)
+          .padding(.top, 4)
+      } bottom: {
+        PrimaryButton("Done") { finish() }
+          .disabled(!canFinish || busy != nil)
       }
-      .transition(.asymmetric(insertion: .move(edge: .trailing), removal: .move(edge: .leading)))
     }
-    .overlay(alignment: .topTrailing) { SheetClose(action: close).disabled(busy) }
-    .animation(.smooth(duration: 0.35), value: page)
-    .animation(.smooth(duration: 0.35), value: created)
+    .overlay(alignment: .topTrailing) { SheetClose(action: close).disabled(busy != nil) }
+    .animation(.smooth(duration: 0.3), value: wordsDone)
+    .animation(.smooth(duration: 0.3), value: passkeyDone)
+    .animation(.smooth(duration: 0.3), value: created)
     .foregroundStyle(.white)
     .presentationDragIndicator(.visible)
     .preferredColorScheme(.dark)
-    .interactiveDismissDisabled(busy)
+    .interactiveDismissDisabled(busy != nil)
+    .sheet(isPresented: $showingKey) {
+      KeyPeekSheet(key: words) { Task { await markSaved() } }
+    }
     .onAppear {
       guard !initialized else { return }
       initialized = true
       words = secured ? RecoveryWords.load() ?? "" : accounts.secureWords()
-      skipped = accounts.passkeyTurnedOff && (only ?? start) != .passkey  // declined on purpose: not asked again
-      switch only ?? start {
-      case .passkey: page = .passkey
-      case .recoveryKey: page = .wordsIntro
-      case nil: page = passkeyDone || skipped ? .wordsIntro : .passkey
-      }
-    }
-  }
-
-  // MARK: Pages
-
-  private var passkeyPage: some View {
-    Page(title: "Secure Your Account",
-      message: "In case you leave Apple or lose your Apple Account.") {
-      BigSymbol(name: "faceid")
-    } bottom: {
-      PrimaryButton("Continue with Face ID", busy: busy) { Task { await createPasskey() } }
-        .disabled(busy)
-      Button(only == nil ? "Skip" : "Cancel") {
-        if only != nil { dismiss(); return }
-        skipped = true
-        accounts.declinePasskey()  // a choice, as turning it off: not asked again
-        next()
-      }
-      .font(.yo(17))
-      .disabled(busy)
-      Note(problem)
-    }
-  }
-
-  /// Saved: a green checkmark, then one sign-in to see that it works.
-  private var checkPage: some View {
-    Page(title: "Passkey Saved", message: "Now sign in once to check it works.") {
-      BigSymbol(name: "checkmark.circle.fill", done: true)
-    } bottom: {
-      PrimaryButton("Sign In", busy: busy) { Task { await checkPasskey() } }
-        .disabled(busy)
-      // A password manager that cannot do it (no PRF): on without the passkey, to the recovery key.
-      Button(only == nil ? "Skip" : "Cancel") {
-        if only != nil { dismiss(); return }
-        skipped = true
-        created = false
-        accounts.declinePasskey()  // as the first page's Skip: not asked again
-        next()
-      }
-      .font(.yo(17))
-      .disabled(busy)
-      Note(problem)
-    }
-  }
-
-  private var wordsIntroPage: some View {
-    Page(title: "Recovery Key", message: "Save your recovery key to sign back in.") {
-      BigSymbol(name: "key.fill")
-    } bottom: {
-      PrimaryButton("Continue", busy: busy) {
-        Task {
-          busy = true
-          defer { busy = false }
-          do {
-            if secured && words.isEmpty { words = try await accounts.newRecoveryKey() }
-            page = .words
-          } catch { problem = error.localizedDescription }
-        }
-      }
-      .disabled(busy)
-      Note(problem)
-    }
-  }
-
-  private var wordsPage: some View {
-    Page(title: "Recovery Key",
-      message: only == nil && passkeyDone ? "Your passkey works. Save your recovery key too." : "Save your recovery key to sign back in.") {
-      FrostedKey(key: words, qrSize: 80)
-    } bottom: {
-      PrimaryButton("Save…") { save() }
-        .disabled(busy)
-      Button("Copy") { UIPasteboard.general.string = RecoveryCode.shown(words) }
-        .font(.yo(17))
-        .disabled(busy)
-      Button("I Saved My Recovery Key") { Task { await confirmWords() } }
-        .font(.yo(17))
-        .disabled(busy)
-      Note(problem)
-    }
-  }
-
-  /// The end: it worked, and what is set up, each with a clean green checkmark.
-  private var donePage: some View {
-    Page(title: "All Set", message: "“\(accounts.account?.username ?? "")” is yours forever.") {
-      VStack(spacing: 12) {
-        if only != .recoveryKey && passkeyDone { DoneRow(title: "Passkey and Face ID") }
-        if only != .passkey && wordsDone { DoneRow(title: "Recovery Key") }
-      }
-      .padding(.top, 20)
-    } bottom: {
-      PrimaryButton("Done") { dismiss() }
     }
   }
 
@@ -168,24 +98,63 @@ struct SecureNameSheet: View {
     return " (\(e.domain) \(e.code): \(e.localizedDescription))"
   }
 
-  /// On to the next step left (a skipped passkey is not asked again), or the end.
-  private func next() {
-    problem = nil
-    if only != nil {
-      page = .done
-    } else if !passkeyDone && !skipped && page != .passkey {
-      page = .passkey
-    } else if !wordsDone && page != .words {
-      page = .wordsIntro
-    } else {
-      UINotificationFeedbackGenerator().notificationOccurred(.success)
-      page = .done
+  /// Done: the passkey not set up is a choice (as Skip was), so it is not asked for again.
+  private func finish() {
+    if !passkeyDone { accounts.declinePasskey() }
+    if let close { close() } else { dismiss() }
+  }
+
+  /// The words to show or save; a secured account brought back without them gets new ones.
+  private func ensureWords() async -> Bool {
+    if words.count == 64 { return true }
+    guard secured else {
+      problem = "Your recovery key isn’t on this iPhone."
+      return false
+    }
+    busy = .recoveryKey
+    defer { busy = nil }
+    do {
+      words = try await accounts.newRecoveryKey()
+      return true
+    } catch {
+      problem = error.localizedDescription
+      return false
     }
   }
 
+  private func showKey() async {
+    problem = nil
+    if await ensureWords() { showingKey = true }
+  }
+
+  /// The recovery card and text to the share sheet; done once something was done with them.
+  private func share() async {
+    problem = nil
+    guard await ensureWords() else { return }
+    let name = accounts.account?.username ?? ""
+    let renderer = ImageRenderer(content: RecoveryCard(name: name, key: words))
+    renderer.scale = 3
+    var items: [Any] = ["Yo recovery key for \(name): " + RecoveryCode.shown(words)]
+    if let image = renderer.uiImage { items.insert(image, at: 0) }
+    Share.present(items) { completed in
+      if completed { Task { await markSaved() } }
+    }
+  }
+
+  /// Saved (shared or copied): the backup opens with the words, and the step is done.
+  private func markSaved() async {
+    guard !wordsDone, words.count == 64 else { return }
+    busy = .recoveryKey
+    defer { busy = nil }
+    do {
+      if !secured { try await accounts.keepWords() }
+      accounts.markWordsSaved(true)
+    } catch { problem = error.localizedDescription }
+  }
+
   private func createPasskey() async {
-    busy = true
-    defer { busy = false }
+    busy = .passkey
+    defer { busy = nil }
     problem = nil
     do {
       try await accounts.createPasskey()
@@ -193,19 +162,18 @@ struct SecureNameSheet: View {
       created = true
     } catch {
       if !SecurityPresentation.isCancellation(error) {
-        problem = (only == nil ? "Couldn’t create passkey. Try again or skip." : "Couldn’t create passkey. Try again.") + Self.detail(error)
+        problem = "Couldn’t create passkey. Try again." + Self.detail(error)
       }
     }
   }
 
   private func checkPasskey() async {
-    busy = true
-    defer { busy = false }
+    busy = .passkey
+    defer { busy = nil }
     problem = nil
     do {
       try await accounts.checkPasskey()
       created = false
-      next()
     } catch AccountError.tooMany {
       problem = "Too many tries. Try again later."
     } catch AccountError.noPRF {
@@ -216,68 +184,68 @@ struct SecureNameSheet: View {
       }
     }
   }
-
-  private func confirmWords() async {
-    guard words.count == 64 else { return problem = "Your recovery key isn’t on this iPhone." }
-    busy = true
-    defer { busy = false }
-    do {
-      if !secured { try await accounts.keepWords() }
-      accounts.markWordsSaved(true)
-      next()
-    } catch { problem = error.localizedDescription }
-  }
-
-  /// Share the recovery card and text before confirming that the key is saved.
-  private func save() {
-    // The key missing here (a secured account brought back without it): nothing to draw.
-    guard words.count == 64 else {
-      return problem = "Your recovery key isn’t on this iPhone."
-    }
-    let name = accounts.account?.username ?? ""
-    let renderer = ImageRenderer(content: RecoveryCard(name: name, key: words))
-    renderer.scale = 3
-    var items: [Any] = ["Yo recovery key for \(name): " + RecoveryCode.shown(words)]
-    if let image = renderer.uiImage { items.insert(image, at: 0) }
-    Share.present(items) { completed in
-      guard completed else { return }
-      // Sharing is followed by the explicit saved confirmation on the key page.
-    }
-  }
 }
 
-/// One thing set up: a green checkmark in a circle and its name, on glass.
-private struct DoneRow: View {
+/// One step: its number in a white circle (a green checkmark once done), its name, its buttons, on glass.
+private struct StepCard<Buttons: View>: View {
+  let number: Int
   let title: String
+  let done: Bool
+  @ViewBuilder let buttons: Buttons
 
   var body: some View {
-    HStack(spacing: 14) {
-      Image(systemName: "checkmark.circle.fill")
-        .font(.system(size: 30))
-        .foregroundStyle(.white, .green)
-      Text(title).font(.body.weight(.semibold))
-      Spacer()
+    HStack(spacing: 12) {
+      Group {
+        if done {
+          Image(systemName: "checkmark.circle.fill")
+            .foregroundStyle(.white, .green)
+        } else {
+          Image(systemName: "\(number).circle.fill")
+            .symbolRenderingMode(.palette)
+            .foregroundStyle(Color.amethyst, .white)
+        }
+      }
+      .font(.system(size: 30))
+      .contentTransition(.symbolEffect(.replace))
+      .accessibilityHidden(true)
+      Text(title)
+        .font(.body.weight(.semibold))
+        .accessibilityLabel(done ? "\(title), set up" : "Step \(number), \(title)")
+      Spacer(minLength: 8)
+      HStack(spacing: 8) { buttons }
+        .font(.subheadline.weight(.semibold))
     }
-    .padding(.horizontal, 16)
-    .padding(.vertical, 14)
+    .padding(.horizontal, 14)
+    .padding(.vertical, 12)
+    .frame(minHeight: 64)
     .background(.white.opacity(0.14), in: .rect(cornerRadius: 18))
-    .accessibilityElement(children: .combine)
-    .accessibilityLabel("\(title), set up")
+    .sensoryFeedback(.success, trigger: done) { _, now in now }
   }
 }
 
-/// A large symbol for a guide page; green and white once something is done.
-private struct BigSymbol: View {
-  let name: String
-  var done = false
+/// The recovery key on its own sheet: frosted until tapped, and Copy (counted as saved).
+private struct KeyPeekSheet: View {
+  let key: String
+  let saved: () -> Void
+  @State private var copied = false
 
   var body: some View {
-    Image(systemName: name)
-      .font(.system(size: 80, weight: done ? .regular : .light))
-      .foregroundStyle(.white, done ? Color.green : .white)
-      .symbolEffect(.bounce, value: done)
-      .padding(.top, 28)
-      .accessibilityHidden(true)
+    ZStack {
+      Color.amethyst.ignoresSafeArea()
+      Page(title: "Recovery Key") {
+        FrostedKey(key: key, qrSize: 80)
+      } bottom: {
+        KeepButton(title: "Copy", icon: "doc.on.doc", done: copied) {
+          UIPasteboard.general.string = RecoveryCode.shown(key)
+          copied = true
+          saved()
+        }
+      }
+    }
+    .overlay(alignment: .topTrailing) { SheetClose() }
+    .foregroundStyle(.white)
+    .preferredColorScheme(.dark)
+    .presentationDragIndicator(.visible)
   }
 }
 

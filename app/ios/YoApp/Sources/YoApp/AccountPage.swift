@@ -176,7 +176,7 @@ struct AccountPage: View {
     }
     .confirmCard(
       $signingOut, title: { _ in "Sign Out?" },
-      message: { $0.secured ? "" : "Your account isn’t secured. You may not get “\($0.username)” back." },
+      message: { $0.secured ? "" : "Your account isn’t secured. Set up recovery methods to access your account." },
       action: { _ in "Sign Out" }, run: { _ in reset() })
     .interactiveDismissDisabled(addingPasskey)
     .sheet(isPresented: $showingRecoveryHelp) { RecoveryHelpSheet() }
@@ -208,7 +208,7 @@ struct AccountPage: View {
         Button("Cancel", role: .cancel) {}
       } message: {
         if !account.secured {
-          Text("Your account isn't secured. You may not get \"\(account.username)\" back.")
+          Text("Your account isn’t secured. Set up recovery methods to access your account.")
         }
       }
     }

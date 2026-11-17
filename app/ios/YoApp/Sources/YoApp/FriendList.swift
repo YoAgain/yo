@@ -122,6 +122,8 @@ struct FriendList: View {
   /// Contacts whose new key waits for a confirmation (verified before): only they get "Confirm New Key".
   @State private var unconfirmed: Set<String> = []
   @State private var hintEpoch = 0
+  /// A photo or video went out since the camera opened: its hint is not needed again until the next opening.
+  @State private var hintNeeded = true
   /// A group's bar being renamed (the new name typed), or whose members are shown.
   @State private var renaming: Friend?
   @State private var newGroupName = ""
@@ -663,10 +665,11 @@ struct FriendList: View {
         VStack(spacing: 10) {
           if cameraOn && hintShown { title }
         }
-        // Said only after a while in camera mode without a photo or video: 3 s idle, again after each one taken.
+        // Said only after a while in camera mode without a photo or video: 3 s idle; once one went out, not again
+        // until the camera opens next time.
         .task(id: cameraOn ? hintEpoch : -1) {
           withAnimation(.smooth(duration: 0.2)) { hintShown = false }
-          guard cameraOn else { return }
+          guard cameraOn, hintNeeded else { return }
           try? await Task.sleep(for: .seconds(3))
           guard !Task.isCancelled else { return }
           withAnimation(.smooth(duration: 0.4)) { hintShown = true }
@@ -782,9 +785,10 @@ struct FriendList: View {
       VStack(spacing: 0) {
         // The bar itself lifts on a long press: square and nearly full width (a separate preview got the menu's
         // rounded, inset platter). It carries its own colour under it, so the lifted bar is bright, not the list's
-        // shared colour layer left behind; in camera mode the bars stay see-through.
+        // shared colour layer left behind; in camera mode and while the edge swipe wipes the camera in, the bars stay
+        // see-through (an opaque colour here hid the wipe: only the Amethyst under the list moved).
         bar.equatable()
-          .background(cameraOn ? Color.clear : shade(friend))
+          .background(cameraOn || edgeActive || edgeSettling ? Color.clear : shade(friend))
           .contentShape(.contextMenuPreview, Rectangle())
           .contextMenu {
             if !cameraOn && !friend.request {
@@ -1202,7 +1206,10 @@ struct FriendList: View {
 
   private var cameraButton: some View {
     Button {
-      withAnimation(reduceMotion ? nil : .easeOut(duration: 0.25)) {
+      // At once, no wipe from the side: the button switches straight to the see-through bars over the camera.
+      var transaction = Transaction()
+      transaction.disablesAnimations = true
+      withTransaction(transaction) {
         if cameraOn && !libraryItems.isEmpty {
           picked = []
           libraryItems = []
@@ -1248,7 +1255,8 @@ struct FriendList: View {
     // Firing back into a group whose senders' lines stand: they stay a while longer (its time starts again), so the
     // bar does not shrink under the finger.
     if friend.group != nil { publish(listModel.keepAlive(now: listNow, id: friend.key.uuidString)) }
-    hintEpoch += 1  // the camera's hint goes, and waits again
+    hintEpoch += 1  // the camera's hint goes
+    if cameraOn { hintNeeded = false }
     Perf.mark("tap.action")
     Perf.mark("thumb.tap")
     defer { PerfProbe.frame("tap") }
@@ -1365,6 +1373,7 @@ struct FriendList: View {
     if holding { guard !tapLocked(friend) else { return } }
     tapped(friend.key)
     hintEpoch += 1
+    if cameraOn { hintNeeded = false }
     if holding {
       guard recordingFor == nil else { return }  // one video at a time: a second finger records nothing
       recordingChanged(friend)
@@ -1946,6 +1955,7 @@ extension FriendList {
 
   private func cameraSwitched(_ on: Bool) {
     cameraOn = on
+    if on { hintNeeded = true }
     HitchScene.event("edge wipe", then: on ? "camera" : "list")
     publish(listModel.camera(now: listNow, on: on))
     if !on {
@@ -2358,10 +2368,9 @@ struct RowButton: View {
     Group {
       if touchable { signLayer } else { words }
     }
-    .font(.yo(Metrics.rowFont))
-    // Digits of one width (Montserrat's tabular figures): "7×" to "8×" stays put; only "9×" to "10×" moves, by a
-    // whole digit.
-    .monospacedDigit()
+    // Digits of one width (Montserrat's tabular figures): "23×" to "24×" stays put; only "99×" to "100×" moves, by
+    // a whole digit.
+    .font(.yoTabular(Metrics.rowFont))
     .foregroundStyle(.white)
     .animation(nil, value: title)  // other words stand in their place at once
     // A new count ("10×" to "11×") swaps in one frame, no crossfade of the old digits under the new.

@@ -209,8 +209,8 @@ struct YoApp: App {
           outbox.flush(accounts: accounts)
           ShareInbox.take(outbox: outbox, accounts: accounts)  // what was shared meanwhile
           if let client = accounts.client { inbox.fetchMedia(client: client) }
-          // Opened: the reminder set again, from the hub's last signed request (spec 6.4), extensions' too.
-          if let account = accounts.account { SecureReminder.update(secured: account.secured) }
+          // The old reminder to secure the account (removed with the rule behind it), still pending from earlier builds.
+          UNUserNotificationCenter.current().removePendingNotificationRequests(withIdentifiers: ["yo.secure"])
         }
     }
   }

@@ -103,6 +103,13 @@ final class Camera: NSObject, @unchecked Sendable {
     queue.async { [self] in
       if movieOutput.isRecording { movieOutput.stopRecording() }
       if session.isRunning { session.stopRunning() }
+      // The last frame goes with it: kept, the next open showed it at once, then hid it on start and faded the new
+      // feed in (a flicker on the camera button). Now each open fades in from the first new frame only.
+      previewQueue.async { [self] in
+        revealed = false
+        display?.value.flush()
+        reveal?(false)
+      }
     }
   }
 
@@ -375,12 +382,8 @@ struct CameraPreview: UIViewRepresentable {
         feed.opacity = 0
         return
       }
-      let animator = UIViewPropertyAnimator(duration: 1, curve: .linear) { [milk] in
-        milk.effect = UIBlurEffect(style: .regular)
-      }
-      animator.pausesOnCompletion = true
-      animator.fractionComplete = 0.3
-      blur = animator
+      // Test: no blur ("milk") over the first moments: with the see-through rows it was too much.
+      milk.alpha = 0
       let fade = CABasicAnimation(keyPath: "opacity")
       fade.fromValue = 0
       fade.toValue = 1
@@ -388,11 +391,6 @@ struct CameraPreview: UIViewRepresentable {
       fade.timingFunction = CAMediaTimingFunction(name: .easeOut)
       feed.opacity = 1
       feed.add(fade, forKey: "fade")
-      UIView.animate(withDuration: 0.45, delay: 0.2, options: [.curveEaseOut, .allowUserInteraction]) {
-        self.milk.alpha = 0
-      } completion: { [weak self] done in
-        if done, self?.blur === animator { self?.clearBlur() }
-      }
     }
     required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
     override func layoutSubviews() {
