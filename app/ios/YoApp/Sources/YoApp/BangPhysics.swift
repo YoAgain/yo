@@ -462,16 +462,16 @@ struct BangPhysicsLayer: View {
       if sim.count == 0 || quiet > 50 || calm > 600 { settle() }
     }
 
-    /// After each frame: the frame's own work, and the time since the last frame while running. Twice over 50 ms
-    /// within half a minute, the physics turns itself off for the session.
+    /// After each frame: the physics' own work. Three times over 50 ms within half a minute, it turns itself off for
+    /// the session.
     func watch(work: Double) {
       let now = CACurrentMediaTime()
       defer { lastFrame = running && active ? now : nil }
-      var slow = work > 0.05
-      if let lastFrame, now - lastFrame > 0.05, now - lastFrame < 2 { slow = true }
-      guard slow else { return }
+      // Only the physics' OWN work counts: a gap between frames is usually the rest of the app (a Yo arriving, a
+      // sheet), and counting it switched the physics off and made every "Yo" vanish at once.
+      guard work > 0.05 else { return }
       strikes = strikes.filter { now - $0 < 30 } + [now]
-      if strikes.count >= 2 {
+      if strikes.count >= 3 {
         BangHost.shared.disable(String(format: "frame %.0f ms, work %.1f ms, %d objects",
                                        (now - (lastFrame ?? now)) * 1000, work * 1000, sim.count))
       }
