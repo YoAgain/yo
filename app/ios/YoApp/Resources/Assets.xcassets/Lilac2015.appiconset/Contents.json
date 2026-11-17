@@ -1,7 +1,0 @@
-{
-  "images" : [
-    { "filename" : "IconLilac2015@2x.png", "idiom" : "iphone", "scale" : "2x", "size" : "60x60" },
-    { "filename" : "IconLilac2015@3x.png", "idiom" : "iphone", "scale" : "3x", "size" : "60x60" }
-  ],
-  "info" : { "author" : "xcode", "version" : 1 }
-}

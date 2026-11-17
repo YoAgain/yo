@@ -142,7 +142,8 @@ jobs:
         run: |
           export ASC_KEY_PATH=$RUNNER_TEMP/asc/AuthKey.p8 ASC_IDENTITY_DIR=$RUNNER_TEMP/asc/distribution
           # Xcode in place of the Linux SDK and its stand-ins.
-          export ACTOOL=$(xcrun -f actool) DARWIN_SDK=$(dirname "$DEVELOPER_DIR")
+          # dev/actool.sh: Xcode's actool, keeping Info.plist's alternate icons through the merge of its partial plist.
+          export REAL_ACTOOL=$(xcrun -f actool) ACTOOL=$PWD/../dev/actool.sh DARWIN_SDK=$(dirname "$DEVELOPER_DIR")
           export XCODE_VERSION=$(xcodebuild -version | sed -n 's/^Xcode //p') XCODE_BUILD=$(xcodebuild -version | sed -n 's/^Build version //p')
           "$GITHUB_WORKSPACE/.oad/ship.sh" --upload
 
@@ -187,8 +188,8 @@ jobs:
                   print(f"::warning::{bundle.name}: no App Group group.app.justyo.ios in its profile")
           EOF
 
-      # The icons to choose from in Appearance: actool's partial Info.plist replaces CFBundleIcons, so its alternates
-      # come from the catalog (xtool.env ALTERNATE_APP_ICONS). Said in the run's summary, not fatal.
+      # The icons to choose from in Appearance: actool's partial Info.plist replaces CFBundleIcons, dev/actool.sh puts
+      # Info.plist's alternates (loose PNGs at the root) back into it. Said in the run's summary, not fatal.
       - name: Alternate icons
         working-directory: app/ios/YoApp
         run: |

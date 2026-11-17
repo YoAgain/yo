@@ -181,6 +181,15 @@ fn yos(p: u32) -> usize {
         + 1
 }
 
+/// `THINK_MS`, or `YO_GPT_THINK_MS=low,high` (tests: a think far longer than any slow runner's echo, so timing tells
+/// the paths apart).
+fn think_ms() -> (u64, u64) {
+    std::env::var("YO_GPT_THINK_MS")
+        .ok()
+        .and_then(|v| v.split_once(',').and_then(|(a, b)| Some((a.parse().ok()?, b.parse().ok()?))))
+        .unwrap_or(THINK_MS)
+}
+
 fn ms((low, high): (u64, u64)) -> Duration {
     Duration::from_millis(uniform(low, high))
 }
@@ -848,7 +857,7 @@ fn serve(account: &Account, options: Options) {
         let (answering, events, sender) = (bot.clone(), events.clone(), user.clone());
         let spawned = std::thread::Builder::new().spawn(move || {
             // It thinks before its first answer only.
-            std::thread::sleep(ms(THINK_MS));
+            std::thread::sleep(ms(think_ms()));
             let (mut picture, mut last) = (picture, sent_at);
             loop {
                 // The rhythm counts from when an answer began: its own time (a picture sealed, uploaded and sent, a

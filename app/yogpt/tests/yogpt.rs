@@ -309,6 +309,8 @@ fn echo_is_immediate_single_plain_bounded_and_logs_no_sender() {
     command.args(["--account", &format!("echo={},{},ECHO", hub.url(), state.display())]);
     command.args(["--echo", "echo", "--picture-every", "1", "--replies", "app/yogpt/replies"]);
     command.args(["--trust-root", &format!("echo={}", yo_wire::b64(&yo_tests::trust_root()))]);
+    // A think of 8–9 s: a slow CI runner's echo stays far below it, so the bound below can't flake.
+    command.env("YO_GPT_THINK_MS", "8000,9000");
     command.stderr(log);
     let bot = Bot(command.spawn().unwrap());
     let ready = Instant::now();
@@ -325,7 +327,7 @@ fn echo_is_immediate_single_plain_bounded_and_logs_no_sender() {
             Event::Message { content, .. } => Some(content),
             _ => None,
         }));
-        assert!(began.elapsed() < Duration::from_millis(900), "echo used the think path");
+        assert!(began.elapsed() < Duration::from_millis(6000), "echo used the think path");
         std::thread::sleep(Duration::from_millis(5));
     }
     assert_eq!(answers, [Content::Yo]);
