@@ -388,3 +388,16 @@ fn a_burst_into_a_group_costs_its_deliveries_alone() {
     let from_a = |x: &mut Client| group_yos(&take(x)).iter().filter(|(_, u)| u == a.user_id()).count();
     assert_eq!((from_a(&mut b), from_a(&mut c)), (N + 1, N + 1));
 }
+
+#[test]
+fn a_non_contact_group_sender_name_is_learned() {
+    let hub = TestHub::start();
+    let ([_, mut a, mut c], _, id) = contacts_and_a_bot(&hub);
+    c.send_group(&id, Content::Yo).unwrap();
+    assert_eq!(group_yos(&take(&mut a)), [(id, c.user_id().to_owned())]);
+    let contact = a.contacts().into_iter().find(|x| x.user == c.user_id()).unwrap();
+    assert!(
+        contact.handles.iter().any(|name| Some(name.as_str()) == c.username()),
+        "a non-contact member has the sender's username"
+    );
+}

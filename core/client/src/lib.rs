@@ -2393,6 +2393,7 @@ impl Client {
     fn delivered(&mut self, deliveries: &Deliveries, answers: Vec<Option<Answer>>) -> Result<bool> {
         let mut done = BTreeSet::new();
         let mut gone = BTreeSet::new();
+        let mut recover = BTreeSet::new();
         let mut changed = false;
         let mut result = Ok(());
         for (item, answer) in deliveries.items.iter().zip(answers) {
@@ -2430,7 +2431,10 @@ impl Client {
                 }
                 // The key it showed is not the recipient's (any more), or the recipient takes no requests and this
                 // account is no contact of theirs (spec 4.10).
-                Some(Ok(response)) if response.status == status::FORBIDDEN => {
+                Some(Ok(response))
+                    if response.status == status::FORBIDDEN
+                        || (response.status == status::UNAUTHORIZED && item.access.is_some()) =>
+                {
                     // A contact's key that changed (a block of someone else): forgotten, the new one may be in the
                     // inbox. Again after the next receive, with the new key or as a request; only a request's `403`
                     // (the recipient takes none) drops it. A key forgotten is never a message lost.
@@ -2447,8 +2451,12 @@ impl Client {
                     }
                     match self.state.outbox.iter_mut().find(|o| o.seq == item.seq) {
                         Some(kept) if item.access.is_some() || item.endorsed => {
+                            // One refresh for this envelope; a second refusal goes identified.
+                            if !kept.refused {
+                                recover.insert(item.user.clone());
+                            }
                             kept.refused = true;
-                            self.refused_until_read.insert(item.user.clone());
+                            changed = true;
                         }
                         _ => {
                             done.insert(item.seq);
@@ -2475,6 +2483,12 @@ impl Client {
         self.state.outbox.retain(|item| !done.contains(&item.seq));
         for user in gone {
             self.user_gone(&user);
+        }
+        for user in recover {
+            // The hub never has the plaintext profile key. Read its encrypted update first,
+            // then refresh the signed roster without disturbing established sessions.
+            self.receive_all(0)?;
+            self.fetch_bundles(&user, &[])?;
         }
         result.map(|()| changed)
     }
@@ -2732,7 +2746,7 @@ impl Client {
 
     /// A contact known without a name (a group's member, whose keys came by its id): the hub asked once in this process
     /// who it is, as Signal fetches a member's profile, so its Yos say who they are from. Not answered now: asked again
-    /// in a later process.
+    /// on the next Yo if the lookup failed.
     fn learn_name(&mut self, user: &str, account_key: Key) {
         if !self.names_asked.insert(user.to_owned()) {
             return;
@@ -2741,7 +2755,10 @@ impl Client {
         match self.lookup(&Handle::user(&id), 0, Vec::new()) {
             Ok((found, Some(username))) if found.account_key == account_key => self.take_handle(user, username),
             Ok(_) => {}
-            Err(error) => self.note(format!("name of a member: {error}")),
+            Err(error) => {
+                self.names_asked.remove(user);
+                self.note(format!("name of a member: {error}"));
+            }
         }
     }
 
@@ -4390,6 +4407,35 @@ mod handle_tests {
         let restored: Outgoing = serde_json::from_value(old).unwrap();
         assert!(!restored.non_urgent, "older outboxes still deserialize");
         assert!(urgent(&restored.plain, restored.non_urgent));
+    }
+
+    #[test]
+    fn a_failed_member_name_lookup_is_retried_for_the_next_sender() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        struct FailedLookup(AtomicUsize);
+        impl Transport for FailedLookup {
+            fn request(
+                &self,
+                _: &str,
+                path: &str,
+                _: &[(String, String)],
+                _: &[u8],
+            ) -> std::result::Result<Response, String> {
+                assert_eq!(path, api::LOOKUP);
+                self.0.fetch_add(1, Ordering::SeqCst);
+                Err("offline".into())
+            }
+        }
+        let transport = Arc::new(FailedLookup(AtomicUsize::new(0)));
+        let mut client = Client::registering(transport.clone(), "RETRY", None, None, None, Push::none()).unwrap();
+        let user = hex(&[7; 16]);
+        let key = [8; 32];
+        client.state.contacts.insert(user.clone(), Contact { account_key: key, ..Contact::unknown() });
+        // Each incoming Yo resolves its sender through this path; a failed name lookup must not suppress the next.
+        for expected in 1..=2 {
+            assert_eq!(client.sender(key).unwrap().unwrap().0, user);
+            assert_eq!(transport.0.load(Ordering::SeqCst), expected);
+        }
     }
 
     struct Offline;

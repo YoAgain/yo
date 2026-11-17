@@ -45,6 +45,7 @@ pub struct ListRow {
 }
 #[derive(uniffi::Record)]
 pub struct ListSender {
+    pub user: String,
     pub name: String,
     pub count: u32,
     pub elapsed: u64,
@@ -56,7 +57,7 @@ impl From<list::Row> for ListRow {
             senders: row
                 .senders
                 .into_iter()
-                .map(|s| ListSender { name: s.name, count: s.count, elapsed: s.elapsed })
+                .map(|s| ListSender { user: s.user, name: s.name, count: s.count, elapsed: s.elapsed })
                 .collect(),
             id: row.id,
             title: row.title,
@@ -136,6 +137,9 @@ impl YoList {
         sender: Option<String>,
     ) -> ListSnapshot {
         self.apply(now, Input::Received { id, kind: kind.into(), token, sender })
+    }
+    pub fn sender_named(&self, now: u64, user: String, name: String) -> ListSnapshot {
+        self.apply(now, Input::SenderNamed { user, name })
     }
     pub fn send_started(&self, now: u64, id: String, kind: ListKind, undo_ms: u64) -> ListSnapshot {
         self.apply(now, Input::SendStarted { id, kind: kind.into(), undo_ms })

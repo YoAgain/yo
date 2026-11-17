@@ -48,6 +48,10 @@ pub enum Input {
         token: String,
         sender: Option<String>,
     },
+    SenderNamed {
+        user: String,
+        name: String,
+    },
     SendStarted {
         id: String,
         kind: Kind,
@@ -116,6 +120,7 @@ pub struct Row {
 }
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Sender {
+    pub user: String,
     pub name: String,
     pub count: u32,
     pub elapsed: u64,
@@ -172,6 +177,7 @@ pub struct List {
     now: u64,
     sequence: u64,
     friends: BTreeMap<String, Friend>,
+    names: BTreeMap<String, String>,
     order: Vec<String>,
     proposed: Vec<String>,
     source_order: Vec<String>,
@@ -230,6 +236,16 @@ impl List {
                     }
                 }
             }
+            Input::SenderNamed { user, name } => {
+                self.names.insert(user.clone(), name.clone());
+                for state in self.states.values_mut() {
+                    for sender in &mut state.senders {
+                        if sender.user == user {
+                            sender.name.clone_from(&name);
+                        }
+                    }
+                }
+            }
             Input::Received { id, kind, token, sender } => {
                 if self.friends.contains_key(&id) {
                     let state = self.states.entry(id.clone()).or_default();
@@ -243,12 +259,13 @@ impl List {
                     if total == 1 {
                         state.senders.clear();
                     }
-                    if let Some(name) = sender {
-                        if let Some(s) = state.senders.iter_mut().find(|s| s.name == name) {
+                    if let Some(user) = sender {
+                        if let Some(s) = state.senders.iter_mut().find(|s| s.user == user) {
                             s.count = s.count.saturating_add(1);
                             s.elapsed = 0;
                         } else {
-                            state.senders.push(Sender { name, count: 1, elapsed: 0 });
+                            let name = self.names.get(&user).cloned().unwrap_or_else(|| "?".into());
+                            state.senders.push(Sender { user, name, count: 1, elapsed: 0 });
                         }
                     }
                     state.run = Some(Run {
@@ -1046,6 +1063,31 @@ mod tests {
         assert_eq!(order(&l), ["c", "a"]);
         assert_eq!(l.snapshot().locked_row, None);
     }
+    #[test]
+    fn unknown_group_senders_heal_without_resetting_counts_or_clocks() {
+        let mut l = model();
+        for user in ["one", "two", "one"] {
+            l.apply(
+                0,
+                Input::Received { id: "b".into(), kind: Kind::Yo, token: user.into(), sender: Some(user.into()) },
+            );
+        }
+        l.apply(300, Input::Tick);
+        l.apply(1000, Input::Tick);
+        let before = row(&l, "b");
+        assert_eq!(before.senders.len(), 2);
+        assert_eq!(before.senders[0].name, "?");
+        l.apply(1000, Input::SenderNamed { user: "one".into(), name: "KNOWN".into() });
+        let after = row(&l, "b");
+        assert_eq!(after.senders[0].name, "KNOWN");
+        assert_eq!(after.senders[0].count, 2);
+        assert_eq!(after.senders[0].elapsed, before.senders[0].elapsed);
+        assert_eq!(after.senders[1].name, "?");
+        assert_eq!(after.yo_count, before.yo_count);
+        l.apply(1000, Input::SenderNamed { user: "two".into(), name: "KNOWN".into() });
+        assert_eq!(row(&l, "b").senders.len(), 2, "same names retain separate identities");
+    }
+
     #[test]
     fn group_senders_use_the_same_viewport_clock() {
         let mut l = model();

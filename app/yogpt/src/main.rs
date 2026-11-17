@@ -1153,8 +1153,11 @@ mod tests {
                 trust_roots: vec![],
                 zk_params: None,
             };
-            let (client, lock) = open(&account).unwrap();
+            let (mut client, lock) = open(&account).unwrap();
+            client.maintenance().unwrap();
             let user = client.user_id().to_owned();
+            let account_key = client.account_secret();
+            let access_key = client.access_key_for_tests().expect("profile key initialized");
             let (draining, _drain) = sync_channel(MAX_DRAINING);
             let bot = Bot {
                 name: account.name.clone(),
@@ -1186,6 +1189,8 @@ mod tests {
             // Reopening reacquires the state lock and discards the poisoned in-memory client.
             let (mut restored, lock) = open(&account).unwrap();
             assert_eq!(restored.user_id(), user);
+            assert_eq!(restored.account_secret(), account_key);
+            assert_eq!(restored.access_key_for_tests().as_ref(), Some(&access_key));
             restored.sync(0).unwrap();
             drop(restored);
             drop(lock);

@@ -479,3 +479,46 @@ fn a_second_stale_key_drops_nothing() {
     assert_eq!((b.waiting(), b.dropped()), (0, 0), "{:?}", b.drop_reasons());
     assert_eq!(shown, 2);
 }
+
+/// A warm app send recovers immediately, even with no concurrent inbox poll.
+#[test]
+fn warm_send_recovers_a_rotated_access_key() {
+    for (lost_update, refusal) in [(false, None), (true, None), (false, Some(401)), (false, Some(403))] {
+        let hub = TestHub::start();
+        let (mut a, ha, _) = account(&hub, "ALICE");
+        let (mut b, hb, pb) = account(&hub, "BOB");
+        let (c, _, _) = account(&hub, "CAROL");
+        friends(&mut a, &mut b, &pb);
+        let old_key = b.access_key_for_tests();
+        if lost_update {
+            hb.fault(&api::deliver_path(&user_id(a.user_id())), Fault::Answer(400));
+        }
+        b.set_blocked(c.user_id(), true).unwrap();
+        assert_ne!(b.access_key_for_tests(), old_key);
+        let to = b.user_id().to_owned();
+        let path = api::deliver_path(&user_id(&to));
+        if let Some(status) = refusal {
+            // First refusal triggers refresh; the refreshed key is refused once more.
+            ha.fault(&path, Fault::Answer(status));
+            ha.fault(&path, Fault::Answer(status));
+        }
+        let before = kinds(&ha, &b);
+        let pending = a.send_begin(&to, Content::Yo).expect("warm session");
+        let mut sent = a.send_end(&pending, pending.send());
+        loop {
+            match sent {
+                yo_core::Sent::More(next) => sent = a.send_end(&next, next.send()),
+                yo_core::Sent::Done(result) => {
+                    result.unwrap();
+                    break;
+                }
+            }
+        }
+        assert_eq!(a.waiting(), 0, "lost update: {lost_update}");
+        assert_eq!(yos(&b.sync(0).unwrap(), &a), 1);
+        assert_eq!(a.dropped(), 0, "{:?}", a.drop_reasons());
+        if lost_update || refusal.is_some() {
+            assert!(kinds(&ha, &b).0 > before.0, "falls back to a signed request");
+        }
+    }
+}
