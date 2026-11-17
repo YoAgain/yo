@@ -2672,7 +2672,7 @@ struct Bangs: View {
     .task(id: arrivals.isEmpty) {
       while let arrival = arrivals.first {
         let next = displayed + 1
-        let swept = sweeps && !busy && !motionReduced
+        let swept = sweeps && !busy && !motionReduced && next - 1 <= ShareBridge.mostBangs  // no sweep once "+N" counts
         let at = max(lastShow.advanced(by: Self.gap), swept ? arrival.advanced(by: IncomingSweeps.flight) : arrival)
         do { try await ContinuousClock().sleep(until: at) } catch { return }
         guard !arrivals.isEmpty else { return }
@@ -2759,7 +2759,8 @@ struct IncomingSweeps: View {
       // A flood (more than Bangs queues) shows at once, without sweeps.
       guard old > 0, new > old, new - old <= 10, !reduceMotion, !busy else { return }
       // One for each Yo, one after the other.
-      for k in (old + 1)...new {
+      // Only while "!" are added (up to five); once the "+N" counts, no more sweeps.
+      for k in (old + 1)...new where k - 1 <= ShareBridge.mostBangs {
         let at = max(lastLaunch.advanced(by: Bangs.gap), .now)
         if at > .now.advanced(by: Bangs.gap * 10) { break }
         lastLaunch = at
