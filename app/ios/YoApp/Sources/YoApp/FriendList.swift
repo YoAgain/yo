@@ -1919,7 +1919,7 @@ struct LiveBar: View, @MainActor Equatable {
       outgoingItems: bar.outgoing.isEmpty ? (bar.sendingBatch?.items ?? []) : bar.outgoing,
       undoAvailable: !bar.outgoing.isEmpty, sendSeconds: bar.seconds, stop: stop,
       media: friend.request ? [] : media, mediaMarkCount: bar.modelMarkCount, mediaSign: bar.modelMediaSign, yo: friend.request ? nil : yo, hint: hint, hold: hold, cancelHold: cancelHold, press: press, flightChanged: flightChanged, flyBegan: flyBegan, view: view, faded: friend.gone && !bar.hasNotice,
-      icon: friend.group == nil ? nil : "person.3.fill", senders: bar.modelSenders, flies: true,
+      icon: friend.group == nil ? nil : "person.3.fill", senders: bar.modelSenders, flies: true, barID: friend.name,
       action: action)
       // Gone: still their name (whose bar it is), faded; a tap says "Not on Yo".
       .accessibilityValue(friend.gone ? "Not on Yo" : "")
@@ -2134,6 +2134,9 @@ struct RowButton: View {
   @AppStorage(SettingKey.leftHanded) private var leftHanded = false
   /// A friend's bar: a Yo sent from it flies out of it, up and away.
   var flies = false
+  /// The bar's own name, whatever its words say ("Sent Yo"): where its physics "!"s belong (BangPhysics.swift).
+  var barID: String?
+  private var physicsBar: String { barID ?? title }
   /// The Yos on their way out of the bar now, each flying up and fading (FlyingYo).
   @State private var flights: [UUID] = []
   @State private var sentSuffixWidth: CGFloat = 0
@@ -2144,8 +2147,9 @@ struct RowButton: View {
     sendSeconds: Double = FriendList.sendDelay, stop: @escaping () -> Void = {},
     media: [Arrival] = [], mediaMarkCount: Int = 0, mediaSign: String = "", yo: FriendList.Landing? = nil, hint: String? = nil, hold: ((Bool, CGPoint?) -> Void)? = nil, cancelHold: @escaping () -> Void = {}, press: @escaping (Bool) -> Void = { _ in }, flightChanged: @escaping (UUID, Bool) -> Void = { _, _ in }, flyBegan: @escaping (UUID) -> Void = { _ in },
     view: @escaping (ThumbnailTouch) -> Void = { _ in }, faded: Bool = false, icon: String? = nil, senders: [RenderedSender] = [],
-    flies: Bool = false, action: @escaping (CGPoint?) -> Void
+    flies: Bool = false, barID: String? = nil, action: @escaping (CGPoint?) -> Void
   ) {
+    self.barID = barID
     self.flies = flies
     self.icon = icon
     self.senders = senders
@@ -2276,7 +2280,7 @@ struct RowButton: View {
         }
       }
       .contentShape(.rect)
-      .bangPhysicsBar(title, total: sweeps ? (yo?.total ?? 0) : 0)  // dev prototype (BangPhysics.swift)
+      .bangPhysicsBar(physicsBar, color: color)  // dev prototype (BangPhysics.swift)
   }
 
   /// The bar's line, sending and receiving alike (BarLine): the words and their "!"s; a Yo that came at the end; room
@@ -2298,8 +2302,9 @@ struct RowButton: View {
               FlyingYo { flights.removeAll { $0 == id }; flightChanged(id, false) }
                 .onAppear { flightChanged(id, true) }
             }
-          ) : nil)
-          .layoutValue(key: BarMeasureKey.self, value: measureKey("words:\(title):\(count)"))
+          ) : nil, physics: touchable ? nil : physicsBar)
+          .bangPhysicsLabel(physicsBar, incoming: false, on: !touchable && title == "Sent Yo")
+          // Measured by Bangs' own key (what it shows now, not the count it is still counting up to).
           .contentTransition(.identity)  // other words come at once, never two drawn over each other
         // A group: its sign before its name, outside it: the name alone stands in the middle (`iconRoom` keeps the
         // sign on the bar when a long name moves to the start).
@@ -2454,8 +2459,9 @@ struct RowButton: View {
       HStack(spacing: 4) {
         if leftHanded { sign }
         Bangs(count: mediaMarkCount, maximumBangs: compact ? 0 : 5, prefix: "Yo", incoming: true,
-              intensityCount: yo?.total ?? mediaMarkCount, sweeps: sweeps && yo != nil)
-        .bangPhysicsLabel(title, on: touchable && !compact)
+              intensityCount: yo?.total ?? mediaMarkCount, sweeps: sweeps && yo != nil,
+              physics: touchable && !compact ? physicsBar : nil)
+        .bangPhysicsLabel(physicsBar, incoming: true, on: touchable && !compact)
         .allowsHitTesting(false)  // a tap there sends a Yo
         .accessibilityElement(children: .ignore)
         .accessibilityLabel(media.count == 1 ? "Yo with a photo or video" : "\(media.count) Yos with photos or videos")
@@ -2474,9 +2480,9 @@ struct RowButton: View {
           }
         } else {
           Bangs(count: yo.count, maximumBangs: compact ? 0 : 5, prefix: "Yo", incoming: true, intensityCount: yo.total,
-                sweeps: sweeps)
+                sweeps: sweeps, physics: touchable && !compact ? physicsBar : nil)
           .lineLimit(1)
-          .bangPhysicsLabel(title, on: touchable && !compact)
+          .bangPhysicsLabel(physicsBar, incoming: true, on: touchable && !compact)
         }
       }
       .modifier(ClockFade(since: yo.fading, seconds: yoSeconds - Self.solid, paused: yo.paused, elapsed: yo.fadeElapsed))
@@ -2614,14 +2620,22 @@ struct Bangs: View {
   var prefix: String
   @State private var displayed: Int
   @State private var nextTurn = ContinuousClock.now
-  @State private var landsAt: ContinuousClock.Instant?
+  /// The Yos not shown yet, one "!" each, strictly one after the other (`gap` apart).
+  @State private var arrivals: [ContinuousClock.Instant] = []
+  @State private var lastShow = ContinuousClock.now
+  /// The bar whose physics "!"s carry on beyond `maximumBangs` (BangPhysics.swift, dev only).
+  var physics: String?
+  static let gap = Duration.milliseconds(100)
+  /// More waiting than this (a flood): no more one by one, the count shows at once.
+  private static let queueLimit = 10
 
   var incoming = false
   /// Each new "!" is swept in from the screen's edge first (IncomingSweeps): it shows here when that lands.
   var sweeps = false
 
   init(count: Int, maximumBangs: Int = 5, prefix: String = "", incoming: Bool = false, intensityCount: Int? = nil,
-       sweeps: Bool = false, flightOverlay: AnyView? = nil) {
+       sweeps: Bool = false, flightOverlay: AnyView? = nil, physics: String? = nil) {
+    self.physics = physics
     self.sweeps = sweeps
     self.flightOverlay = flightOverlay
     self.incoming = incoming
@@ -2657,7 +2671,7 @@ struct Bangs: View {
       }
     }
     .layoutValue(key: BarMeasureKey.self, value:
-      "bangs:\(busy ? count : displayed):\(measureType):\(measureLocale.identifier):\(String(describing: measureWeight))")
+      "bangs:\(prefix):\(maximumBangs):\(busy ? count : displayed):\(measureType):\(measureLocale.identifier):\(String(describing: measureWeight))")
     .animation(busy ? nil : .easeOut(duration: 0.16), value: displayed)
     .onChange(of: intensityCount ?? count) { old, new in
       if new > old && isYo { pulses += 1 }
@@ -2666,20 +2680,49 @@ struct Bangs: View {
       if active && count > 0 { pulses += 1 }
     }
     .onAppear { if isYo && count > 0 { pulses += 1 } }
-    .task(id: count) {
-      guard displayed != count else { return }
-      // A "!" swept in from the edge (IncomingSweeps) shows here once the first pending one lands.
-      if sweeps && !busy && !motionReduced && count > displayed && landsAt == nil {
-        landsAt = .now.advanced(by: IncomingSweeps.flight)
+    .onChange(of: count) { _, new in
+      let waiting = new - displayed
+      if waiting > Self.queueLimit {
+        arrivals.removeAll()
+        displayed = new
+        lastShow = .now
+      } else if waiting > arrivals.count {
+        arrivals.append(contentsOf: repeatElement(ContinuousClock.now, count: waiting - arrivals.count))
+      } else if waiting < arrivals.count {
+        arrivals.removeAll()
       }
-      // Replace the pending target without retargeting a running transition.
-      // Keep the deadline across cancellation so continuous arrivals cannot starve it.
-      do { try await ContinuousClock().sleep(until: max(nextTurn, landsAt ?? nextTurn)) } catch { return }
-      guard !Task.isCancelled else { return }
-      landsAt = nil
+    }
+    // Up: one "!" for each Yo, `gap` apart; one swept in from the edge (IncomingSweeps) shows once it lands there.
+    .task(id: arrivals.isEmpty) {
+      while let arrival = arrivals.first {
+        let next = displayed + 1
+        let swept = sweeps && !busy && !motionReduced && (next <= maximumBangs || !BangPhysics.on)
+        let at = max(lastShow.advanced(by: Self.gap), swept ? arrival.advanced(by: IncomingSweeps.flight) : arrival)
+        do { try await ContinuousClock().sleep(until: at) } catch { return }
+        guard !arrivals.isEmpty else { return }
+        arrivals.removeFirst()
+        displayed = next
+        lastShow = at
+      }
+    }
+    // Down: the "!"s go as before.
+    .task(id: count) {
+      guard count < displayed, arrivals.isEmpty else { return }
+      do { try await ContinuousClock().sleep(until: nextTurn) } catch { return }
+      guard !Task.isCancelled, count < displayed else { return }
       displayed = count
       nextTurn = .now.advanced(by: .milliseconds(200))
     }
+    // Beyond `maximumBangs`, each "!" is a physics one (dev only), one for one with what the label counts.
+    .onChange(of: displayed) { old, new in
+      BangPhysics.sync(physics, incoming: incoming, target: physicsTarget(new), up: new > old)
+    }
+    .onAppear { BangPhysics.sync(physics, incoming: incoming, target: physicsTarget(displayed), up: true) }
+    .onDisappear { BangPhysics.vanish(physics, incoming: incoming) }
+  }
+
+  private func physicsTarget(_ shown: Int) -> Int {
+    physics != nil && (incoming || prefix == "Sent Yo") ? max(0, shown - maximumBangs) : 0
   }
 
   private var isYo: Bool { incoming || prefix == "Yo" || prefix == "Sent Yo" }
@@ -2706,8 +2749,9 @@ struct Bangs: View {
 }
 
 /// Each incoming Yo after the first (which comes in with the whole mark): one "!" sweeps in from the screen's edge
-/// and lands at the end of "Yo!!", where Bangs then shows it; beyond five it merges into the last "!". Several at once
-/// fly a little apart, overlapping, never a long queue. Not with Reduce Motion (the glow pulses only).
+/// and lands at the end of "Yo!!", where Bangs then shows it; beyond five it merges into the last "!" (in dev builds
+/// physics "!"s take over there, BangPhysics.swift). Several fly one after the other, `Bangs.gap` apart, as Bangs
+/// shows them; never a queue longer than Bangs keeps. Not with Reduce Motion (the glow pulses only).
 struct IncomingSweeps: View {
   static let flightSeconds = 0.26
   static let flight = Duration.seconds(flightSeconds)
@@ -2718,6 +2762,8 @@ struct IncomingSweeps: View {
   @Environment(\.accessibilityReduceMotion) private var reduceMotion
   @Environment(\.yoFlood) private var busy
   @State private var flying: [UUID] = []
+  /// When the last sweep set off: the next one `Bangs.gap` after it, as Bangs shows them.
+  @State private var lastLaunch = ContinuousClock.now
 
   var body: some View {
     ZStack(alignment: .trailing) {
@@ -2730,10 +2776,15 @@ struct IncomingSweeps: View {
     .allowsHitTesting(false)
     .accessibilityHidden(true)
     .onChange(of: total) { old, new in
-      guard old > 0, new > old, !reduceMotion, !busy else { return }
-      for step in 0..<min(new - old, 6) {
+      // A flood (more than Bangs queues) shows at once, without sweeps.
+      guard old > 0, new > old, new - old <= 10, !reduceMotion, !busy else { return }
+      // One for each Yo, one after the other; beyond five they are physics "!"s (dev) instead.
+      for k in (old + 1)...new where k <= 5 || !BangPhysics.on {
+        let at = max(lastLaunch.advanced(by: Bangs.gap), .now)
+        if at > .now.advanced(by: Bangs.gap * 10) { break }
+        lastLaunch = at
         Task {
-          try? await Task.sleep(for: .milliseconds(70 * step))
+          try? await ContinuousClock().sleep(until: at)
           flying.append(UUID())
         }
       }

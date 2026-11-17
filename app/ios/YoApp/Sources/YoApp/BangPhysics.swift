@@ -1,10 +1,4 @@
-// Dev prototype (YO_DEV only): from the 6th Yo of a run on, each further Yo drops one "!" into its bar as a small
-// physical object: a capsule (two Verlet circles and a stick) under gravity that follows the phone's tilt. They bounce
-// off the bar's "Yo!!!!!" (a solid rect), push each other, fill the bar (60 at most) and then spill over into the whole
-// screen, piling up at its bottom (300 at most, the oldest fade). When the run ends they drop away.
-// Battery: one Canvas, its TimelineView runs only while something moves; at rest it sleeps (no frames), motion drops to
-// 5 Hz only to notice a tilt. No objects, app in the background, Low Power Mode or Reduce Motion: no motion, no frames.
-// Release builds: the hooks below do nothing.
+// Dev-only rubber bars: capped at 200 objects, 30 spawns/s (15/bar), 4 ms/frame.
 import SwiftUI
 import UIKit
 import simd
@@ -12,22 +6,51 @@ import simd
   import CoreMotion
 #endif
 
-extension View {
-  /// On a bar: where it is, and its run's Yos (0: none, or not a bar whose "!"s sweep in).
-  func bangPhysicsBar(_ bar: String, total: Int) -> some View {
+@MainActor enum BangPhysics {
+  /// Whether "!"s beyond the label's five become physics objects now.
+  static var on: Bool {
     #if YO_DEV
-      modifier(BangBarHook(bar: bar, total: total))
+      !UIAccessibility.isReduceMotionEnabled
+    #else
+      false
+    #endif
+  }
+
+  /// The label on `bar` shows `count` "!"s beyond its own (`up`: one more came; else they are going).
+  static func sync(_ bar: String?, incoming: Bool, target: Int, up: Bool) {
+    #if YO_DEV
+      if let bar { BangHost.shared.sync(bar, incoming: incoming, target: target, up: up) }
+    #endif
+  }
+
+  /// The label went (perhaps only re-laid out): its "!"s fade unless it is back within a second.
+  static func vanish(_ bar: String?, incoming: Bool) {
+    #if YO_DEV
+      if let bar { BangHost.shared.world?.vanish(bar, incoming: incoming) }
+    #endif
+  }
+}
+
+extension View {
+  /// On a bar: where its box is, and its colour (for its bulge).
+  func bangPhysicsBar(_ bar: String, color: Color) -> some View {
+    #if YO_DEV
+      onGeometryChange(for: CGRect.self) { $0.frame(in: .global) } action: {
+        BangHost.shared.bar(bar, $0, color: color)
+      }
+      .onChange(of: color) { _, value in BangHost.shared.color(bar, value) }
     #else
       self
     #endif
   }
 
-  /// On the bar's "Yo!!" mark: the obstacle the "!"s bounce off.
-  func bangPhysicsLabel(_ bar: String, on: Bool) -> some View {
+  /// On the bar's "Yo!!" (or "Sent Yo!!"): where a sent one starts.
+  func bangPhysicsLabel(_ bar: String, incoming: Bool, on: Bool) -> some View {
     #if YO_DEV
       onGeometryChange(for: CGRect.self) { $0.frame(in: .global) } action: { rect in
-        if on { BangWorld.shared.label(bar, rect) }
+        if on { BangHost.shared.label(bar, incoming: incoming, rect) }
       }
+      .onDisappear { if on { BangHost.shared.label(bar, incoming: incoming, .null) } }
     #else
       self
     #endif
@@ -38,7 +61,7 @@ extension View {
 struct BangPhysicsLayer: View {
   var body: some View {
     #if YO_DEV
-      BangCanvas()
+      if let world = BangHost.shared.world { BangCanvas(world: world) }
     #else
       EmptyView()
     #endif
@@ -46,38 +69,72 @@ struct BangPhysicsLayer: View {
 }
 
 #if YO_DEV
-  private struct BangBarHook: ViewModifier {
-    let bar: String
-    let total: Int
+  /// Where the bars and their labels are (only that, kept always: a dictionary write when one moves), and the engine
+  /// while something overflows.
+  @MainActor @Observable final class BangHost {
+    static let shared = BangHost()
+    private(set) var world: BangWorld?
+    @ObservationIgnored var bars: [String: BangBar] = [:]
 
-    func body(content: Content) -> some View {
-      content
-        .onGeometryChange(for: CGRect.self) { $0.frame(in: .global) } action: { BangWorld.shared.bar(bar, $0) }
-        .onChange(of: total) { old, new in
-          if new == 0 { BangWorld.shared.release(bar) }
-          else if new > old, new > 5 { BangWorld.shared.spawn(bar, count: min(new - max(old, 5), 6)) }
-        }
-        .onDisappear { BangWorld.shared.release(bar) }
+    func bar(_ id: String, _ frame: CGRect, color: Color) {
+      guard BangWorld.valid(frame) else { return }
+      guard let before = bars[id]?.frame else {
+        bars[id] = BangBar(frame: frame, color: color)
+        return
+      }
+      bars[id]?.frame = frame
+      bars[id]?.color = color
+      if before != frame { world?.moved(id, from: before, to: frame) }
+    }
+
+    func color(_ id: String, _ color: Color) {
+      bars[id]?.color = color
+      world?.redraw()
+    }
+
+    func label(_ id: String, incoming: Bool, _ rect: CGRect) {
+      guard bars[id] != nil else { return }
+      if incoming { bars[id]?.incoming = rect } else { bars[id]?.sent = rect }
+    }
+
+    func sync(_ id: String, incoming: Bool, target: Int, up: Bool) {
+      if world == nil {
+        guard up, target > 0, BangPhysics.on else { return }
+        world = BangWorld()
+      }
+      world?.sync(id, incoming: incoming, target: target, up: up)
+      if world?.empty == true { tearDown() }
+    }
+
+    /// The last one went: the engine, its overlay and motion with it.
+    func tearDown() {
+      world?.stop()
+      world = nil
     }
   }
 
+  struct BangBar {
+    var frame: CGRect = .null
+    var color = Color.clear
+    var incoming: CGRect = .null
+    var sent: CGRect = .null
+    var tokens = 15.0  // BangWorld.perBarRate
+    var filled = 0.0
+  }
+
   private struct BangCanvas: View {
-    @State private var world = BangWorld.shared
+    let world: BangWorld
 
     var body: some View {
       let version = world.version
-      ZStack {
-        if world.visible {
-          TimelineView(.animation(paused: !world.running || !world.active)) { timeline in
-            Canvas { context, _ in
-              _ = version
-              world.advance(to: timeline.date)
-              world.draw(&context)
-            }
-          }
-          .allowedDynamicRange(.high)
+      TimelineView(.animation(paused: !world.running || !world.active)) { timeline in
+        Canvas { context, _ in
+          _ = version
+          world.advance(to: timeline.date)
+          world.draw(&context)
         }
       }
+      .allowedDynamicRange(.high)
       .frame(maxWidth: .infinity, maxHeight: .infinity)
       .onGeometryChange(for: CGRect.self) { $0.frame(in: .global) } action: { world.screen = $0 }
       .ignoresSafeArea()
@@ -87,147 +144,269 @@ struct BangPhysicsLayer: View {
   }
 
   @MainActor @Observable final class BangWorld {
-    static let shared = BangWorld()
-
-    /// Something to draw.
-    private(set) var visible = false
-    /// Frames run (false: asleep at rest).
+    // The only observed state (BangCanvas alone reads it): the list never updates for the physics.
     private(set) var running = false
     private(set) var active = true
     /// Bumped when the picture changes without a frame (a bar scrolled while asleep).
     private(set) var version = 0
 
     private struct Bang {
-      var bar: String?  // nil: loose on the screen
+      /// The bar it is in; nil: loose on the screen.
+      var bar: String?
       let origin: String
+      let glow: Bool
       var alpha = 1.0
-      var leaving = false
       var fading = false
-    }
-
-    private struct Bar {
-      var frame: CGRect = .null
-      var label: CGRect = .null
+      var leaveAt: Double?
     }
 
     // Bang k: particles 2k (head) and 2k + 1 (foot).
     @ObservationIgnored private var bangs: [Bang] = []
     @ObservationIgnored private var pos: [SIMD2<Double>] = []
     @ObservationIgnored private var old: [SIMD2<Double>] = []
-    @ObservationIgnored private var bars: [String: Bar] = [:]
-    @ObservationIgnored var screen: CGRect = .zero
+    private var bars: [String: BangBar] {
+      get { BangHost.shared.bars }
+      set { BangHost.shared.bars = newValue }
+    }
+    @ObservationIgnored var screen: CGRect = UIApplication.shared.connectedScenes
+      .compactMap { ($0 as? UIWindowScene)?.screen.bounds }.first ?? .zero
     @ObservationIgnored private var gravity = SIMD2<Double>(0, 1)
+    /// The tilt, low-pass filtered (the accelerometer's noise never shakes a pile).
+    @ObservationIgnored private var tiltFiltered = SIMD2<Double>(0, 1)
     @ObservationIgnored private var last: Date?
     @ObservationIgnored private var pending = 0.0
+    @ObservationIgnored private var time = 0.0
     @ObservationIgnored private var quiet = 0
     @ObservationIgnored private var calm = 0
+    @ObservationIgnored private var iterations = 6
+    @ObservationIgnored private var tokens = BangWorld.totalRate
+    @ObservationIgnored private var filled = 0.0
+    @ObservationIgnored private var seen: [String: Int] = [:]
+    // Per bang: collision group (0 loose, otherwise a bounded bar slot)
+    // and box (its bar's frame, or null).
+    @ObservationIgnored private var group: [Int] = []
+    @ObservationIgnored private var box: [CGRect] = []
+    // A uniform grid for the collisions (counting sort).
+    @ObservationIgnored private var cellOf: [Int] = []
+    @ObservationIgnored private var cellStart: [Int] = []
+    @ObservationIgnored private var cellFill: [Int] = []
+    @ObservationIgnored private var cellItems: [Int] = []
+    @ObservationIgnored private var cols = 1
+    @ObservationIgnored private var rows = 1
+    // Per bar slot: how far its top and bottom bulge out (points), how fast, the pressure on its walls this
+    // step, whether it is snapping back after a burst, and its name.
+    @ObservationIgnored private var bulge: [Double] = []
+    @ObservationIgnored private var bulgeSpeed: [Double] = []
+    @ObservationIgnored private var pressure: [Double] = []
+    @ObservationIgnored private var snapping: [Bool] = []
+    @ObservationIgnored private var barIDs: [String?] = []
+    @ObservationIgnored private var slots: [String: Int] = [:]
+    @ObservationIgnored private var used = Array(repeating: false, count: 201)
+    @ObservationIgnored private let haptic = UIImpactFeedbackGenerator(style: .light)
     @ObservationIgnored private let motion = CMMotionManager()
     @ObservationIgnored private var observers: [NSObjectProtocol] = []
 
     private static let radius = 4.5
     private static let length = 14.0
-    private static let perBar = 60
-    private static let onScreen = 300
+    private static let onScreen = 200
+    static let perBarRate = 15.0
+    private static let totalRate = 30.0
     private static let step = 1.0 / 120
     private static let g = 1400.0
+    /// The most a particle goes in a step (under its radius: nothing passes through another or the screen's edge).
+    private static let maxStep = 0.8 * radius
+    private static let cell = 12.0
+    private static let budget = 0.004
+    private static let maxIterations = 6
+    /// Overlaps up to this much stay (no correcting back and forth at rest).
+    private static let slop = 0.25
+    /// Slower than this a step (in points), a particle rests.
+    private static let rest = 0.03
+    /// The rubber: how hard a bar's wall pulls a "!" back per point it is out, and how much of its speed outwards a
+    /// pressed one loses each step.
+    private static let wall = 2500.0
+    private static let wallDamping = 0.85
+    /// The bulge: a spring (stiffness, damping) pushed out by the pressure on the walls; it bursts at +40% (20% at
+    /// the top and at the bottom).
+    private static let bulgeStiffness = 400.0
+    private static let bulgeDamping = 16.0
+    private static let bulgePush = 80.0
+    private static let burstAt = 0.2
 
-    private init() {
+    @ObservationIgnored private var glowing: GraphicsContext.ResolvedText?
+    @ObservationIgnored private var plain: GraphicsContext.ResolvedText?
+    @ObservationIgnored private var deadline = 0.0
+
+    static func valid(_ rect: CGRect) -> Bool {
+      !rect.isNull && rect.minX.isFinite && rect.minY.isFinite
+        && rect.maxX.isFinite && rect.maxY.isFinite && rect.width >= 24 && rect.height >= 24
+        && abs(rect.minX) < 100_000 && abs(rect.minY) < 100_000
+        && rect.width < 10_000 && rect.height < 10_000
+    }
+
+    func redraw() { if !running { version &+= 1 } }
+    var empty: Bool { bangs.isEmpty }
+
+    init() {
+      bangs.reserveCapacity(Self.onScreen)
+      pos.reserveCapacity(Self.onScreen * 2)
+      old.reserveCapacity(Self.onScreen * 2)
+      group.reserveCapacity(Self.onScreen)
+      box.reserveCapacity(Self.onScreen)
+      cellOf = Array(repeating: 0, count: Self.onScreen * 2)
+      cellItems = cellOf
+      bulge = Array(repeating: 0, count: Self.onScreen + 1)
+      bulgeSpeed = bulge
+      pressure = bulge
+      snapping = Array(repeating: false, count: bulge.count)
+      barIDs = Array(repeating: nil, count: bulge.count)
       let center = NotificationCenter.default
       observers = [
         center.addObserver(forName: UIApplication.willResignActiveNotification, object: nil, queue: .main) { _ in
-          MainActor.assumeIsolated { BangWorld.shared.setActive(false) }
+          MainActor.assumeIsolated { BangHost.shared.world?.setActive(false) }
         },
         center.addObserver(forName: UIApplication.didBecomeActiveNotification, object: nil, queue: .main) { _ in
-          MainActor.assumeIsolated { BangWorld.shared.setActive(true) }
-        },
-        center.addObserver(forName: .NSProcessInfoPowerStateDidChange, object: nil, queue: .main) { _ in
-          MainActor.assumeIsolated { if !BangWorld.allowed { BangWorld.shared.clear() } }
+          MainActor.assumeIsolated { BangHost.shared.world?.setActive(true) }
         },
         center.addObserver(forName: UIAccessibility.reduceMotionStatusDidChangeNotification, object: nil,
                            queue: .main) { _ in
-          MainActor.assumeIsolated { if !BangWorld.allowed { BangWorld.shared.clear() } }
+          MainActor.assumeIsolated { if !BangPhysics.on { BangHost.shared.world?.clear() } }
         },
       ]
     }
 
-    private static var allowed: Bool {
-      !ProcessInfo.processInfo.isLowPowerModeEnabled && !UIAccessibility.isReduceMotionEnabled
-    }
-
     // MARK: Hooks
 
-    func bar(_ id: String, _ frame: CGRect) {
-      let before = bars[id]?.frame ?? .null
-      bars[id, default: Bar()].frame = frame
-      guard !before.isNull, before.origin != frame.origin, bangs.contains(where: { $0.bar == id }) else { return }
+    func stop() {
+      if motion.isDeviceMotionActive { motion.stopDeviceMotionUpdates() }
+      for observer in observers { NotificationCenter.default.removeObserver(observer) }
+      observers = []
+    }
+
+    /// A bar scrolled: its "!"s with it.
+    func moved(_ id: String, from before: CGRect, to frame: CGRect) {
+      guard Self.valid(before), Self.valid(frame), before.origin != frame.origin else { return }
       let delta = SIMD2(Double(frame.minX - before.minX), Double(frame.minY - before.minY))
+      var moved = false
       for k in bangs.indices where bangs[k].bar == id {
-        for i in [2 * k, 2 * k + 1] {
-          pos[i] += delta
-          old[i] += delta
+        pos[2 * k] += delta; old[2 * k] += delta
+        pos[2 * k + 1] += delta; old[2 * k + 1] += delta
+        moved = true
+      }
+      if moved && !running { version &+= 1 }
+    }
+
+    private func key(_ bar: String, _ incoming: Bool) -> String { bar + (incoming ? "|in" : "|out") }
+
+    func sync(_ id: String, incoming: Bool, target: Int, up: Bool) {
+      let origin = key(id, incoming)
+      seen[origin, default: 0] &+= 1
+      var live = 0
+      for bang in bangs where bang.origin == origin && !bang.fading && bang.leaveAt == nil { live += 1 }
+      if up {
+        guard target > live, BangPhysics.on, active, let bar = bars[id], !bar.frame.isNull else { return }
+        // The brakes: the screen's cap, then so many a second per bar and in all; the rest still count on the label.
+        refill(id)
+        let room = Self.onScreen - bangs.count
+        if room <= 0 {
+          if let oldest = bangs.firstIndex(where: { !$0.fading && $0.leaveAt == nil }) {
+            bangs[oldest].leaveAt = time
+            wake()
+          }
+          return
         }
+        let n = min(target - live, room, Int(tokens), Int(bars[id]?.tokens ?? 0))
+        guard n > 0 else { return }
+        tokens -= Double(n)
+        bars[id]?.tokens -= Double(n)
+        for _ in 0..<n { add(id, origin: origin, glow: incoming, bar: bar) }
+        wake()
+      } else if target < live {
+        // The run is over: all of them go, oldest first, one quickly after the other.
+        leave(origin)
       }
-      if !running { version &+= 1 }
     }
 
-    func label(_ id: String, _ rect: CGRect) {
-      bars[id, default: Bar()].label = rect
-    }
-
-    func spawn(_ id: String, count: Int) {
-      guard Self.allowed, active, let bar = bars[id], !bar.frame.isNull, !bar.label.isNull else { return }
-      for n in 0..<count {
-        let inBar = bangs.count(where: { $0.bar == id }) < Self.perBar
-        // From the screen's edge toward the "Yo!!!!!", a little high: it hits and bounces off.
-        let start = SIMD2(Double(bar.frame.maxX) - 8, Double(bar.label.midY) - Double.random(in: 0...10))
-        let speed = SIMD2(-Double.random(in: 380...620), -Double.random(in: 60...260)) * (1 + Double(n) * 0.08)
-        let tilt = Double.random(in: -0.6...0.6)
-        let axis = SIMD2(sin(tilt), -cos(tilt)) * (Self.length / 2)
-        let spin = SIMD2(Double.random(in: -40...40), 0)
-        bangs.append(Bang(bar: inBar ? id : nil, origin: id))
-        pos.append(start + axis)
-        pos.append(start - axis)
-        old.append(start + axis - (speed + spin) * Self.step)
-        old.append(start - axis - (speed - spin) * Self.step)
+    func vanish(_ id: String, incoming: Bool) {
+      let origin = key(id, incoming)
+      let token = seen[origin, default: 0]
+      Task { @MainActor in
+        try? await Task.sleep(for: .seconds(1))
+        if self.seen[origin, default: 0] == token { self.leave(origin) }
       }
-      // The oldest fade once the screen holds too many.
-      let live = bangs.indices.filter { !bangs[$0].fading }
-      for k in live.prefix(max(0, live.count - Self.onScreen)) { bangs[k].fading = true }
-      wake()
     }
 
-    /// The run ended (or the bar went): its "!"s drop away, out of the screen's bottom.
-    func release(_ id: String) {
-      var any = false
-      for k in bangs.indices where bangs[k].origin == id && !bangs[k].leaving {
-        bangs[k].leaving = true
-        bangs[k].bar = nil
-        any = true
+    private func refill(_ id: String) {
+      let now = ProcessInfo.processInfo.systemUptime
+      tokens = min(Self.totalRate, tokens + (now - filled) * Self.totalRate)
+      filled = now
+      if var bar = bars[id] {
+        bar.tokens = min(Self.perBarRate, bar.tokens + (now - bar.filled) * Self.perBarRate)
+        bar.filled = now
+        bars[id] = bar
       }
-      if any { wake() }
     }
 
-    private func clear() {
+    private func add(_ id: String, origin: String, glow: Bool, bar: BangBar) {
+      guard bangs.count < Self.onScreen, Self.valid(bar.frame),
+            let slot = slots[id] ?? barIDs.indices.dropFirst().first(where: { barIDs[$0] == nil }) else { return }
+      slots[id] = slot
+      barIDs[slot] = id
+      let frame = bar.frame
+      let measured = glow ? bar.incoming : bar.sent
+      let label = Self.valid(measured) ? measured : CGRect.null
+      // Incoming: from the bar's right end, flying left. Sent: from the end of "Sent Yo!!!!!", dropping.
+      let sent = !glow && !label.isNull
+      let x = sent ? Double(label.maxX) - 6 : Double(frame.maxX) - 10
+      let y = label.isNull ? Double(frame.midY) : Double(label.midY) - Double.random(in: 0...10)
+      let start = SIMD2(min(max(x, Double(frame.minX) + 12), Double(frame.maxX) - 12),
+                        min(max(y, Double(frame.minY) + 12), Double(frame.maxY) - 12))
+      let speed = sent
+        ? SIMD2(Double.random(in: -60...60), -Double.random(in: 40...140))
+        : SIMD2(-Double.random(in: 300...470), -Double.random(in: 40...200))
+      let tilt = Double.random(in: -0.6...0.6)
+      let axis = SIMD2(sin(tilt), -cos(tilt)) * (Self.length / 2)
+      let spin = SIMD2(Double.random(in: -40...40), 0)
+      bangs.append(Bang(bar: id, origin: origin, glow: glow))
+      pos.append(start + axis)
+      pos.append(start - axis)
+      old.append(start + axis - (speed + spin) * Self.step)
+      old.append(start - axis - (speed - spin) * Self.step)
+    }
+
+    private func leave(_ origin: String) {
+      var n = 0.0
+      for k in bangs.indices where bangs[k].origin == origin && !bangs[k].fading && bangs[k].leaveAt == nil {
+        bangs[k].leaveAt = time + n * 0.05
+        n += 1
+      }
+      if n > 0 { wake() }
+    }
+
+    fileprivate func clear() {
       bangs.removeAll()
       pos.removeAll()
       old.removeAll()
       settle()
     }
 
-    private func setActive(_ now: Bool) {
+    fileprivate func setActive(_ now: Bool) {
       active = now
       last = nil
       updateMotion()
     }
 
-    private func tilt(_ g: SIMD2<Double>) {
-      let moved = simd_length(g - gravity) > 0.06
-      gravity = g
+    fileprivate func tilt(_ raw: SIMD2<Double>) {
+      guard raw.x.isFinite, raw.y.isFinite else { return }
+      tiltFiltered += (simd_clamp(raw, SIMD2(repeating: -1), SIMD2(repeating: 1)) - tiltFiltered) * 0.1
+      // Small changes are noise: gravity stays.
+      guard simd_length(tiltFiltered - gravity) > 0.02 else { return }
+      let moved = simd_length(tiltFiltered - gravity) > 0.06
+      gravity = tiltFiltered
       if moved && !running { wake() }
     }
 
     private func wake() {
-      if !bangs.isEmpty, !visible { visible = true }
       if !running {
         running = true
         last = nil
@@ -239,15 +418,16 @@ struct BangPhysicsLayer: View {
 
     private func settle() {
       Task { @MainActor in
+        guard BangHost.shared.world === self else { return }
+        if self.bangs.isEmpty { BangHost.shared.tearDown(); return }
         self.running = false
-        if self.bangs.isEmpty { self.visible = false }
         self.updateMotion()
       }
     }
 
     /// Device motion only while "!"s exist and the app is in front: 30 Hz while they move, 5 Hz asleep (a tilt wakes).
     private func updateMotion() {
-      let want = !bangs.isEmpty && active && Self.allowed && motion.isDeviceMotionAvailable
+      let want = !bangs.isEmpty && active && BangPhysics.on && motion.isDeviceMotionAvailable
       guard want else {
         if motion.isDeviceMotionActive { motion.stopDeviceMotionUpdates() }
         if bangs.isEmpty { gravity = SIMD2(0, 1) }
@@ -258,104 +438,285 @@ struct BangPhysicsLayer: View {
       motion.startDeviceMotionUpdates(to: .main) { data, _ in
         guard let g = data?.gravity else { return }
         let x = g.x, y = g.y
-        MainActor.assumeIsolated { BangWorld.shared.tilt(SIMD2(x, -y)) }
+        MainActor.assumeIsolated { BangHost.shared.world?.tilt(SIMD2(x, -y)) }
       }
     }
 
     // MARK: Simulation
 
+    /// In the frame callback only, within its budget: a slow frame drops steps and the next one iterates less.
     func advance(to date: Date) {
-      guard running, active else { return }
-      let dt = min(1.0 / 20, max(0, date.timeIntervalSince(last ?? date)))
+      guard running, active, Self.valid(screen) else { return }
+      // All paired-array accesses below share this invariant.
+      guard bangs.count <= Self.onScreen, pos.count == bangs.count * 2, old.count == pos.count else {
+        clear(); return
+      }
+      let began = CACurrentMediaTime()
+      deadline = began + Self.budget
+      let elapsed = date.timeIntervalSince(last ?? date)
+      guard elapsed.isFinite else { last = nil; return }
+      let dt = min(1.0 / 20, max(0, elapsed))
       last = date
       pending += dt
       var moved = 0.0
       var steps = 0
-      while pending >= Self.step && steps < 6 {
+      while pending >= Self.step && steps < 4 && CACurrentMediaTime() < deadline {
         pending -= Self.step
         steps += 1
         moved = max(moved, step())
+        if CACurrentMediaTime() - began > Self.budget {
+          pending = 0
+          break
+        }
       }
-      if steps == 6 { pending = 0 }
+      if steps == 4 { pending = 0 }
+      let spent = CACurrentMediaTime() - began
+      if spent > Self.budget * 0.75 { iterations = max(1, iterations - 1) }
+      else if spent < Self.budget * 0.3 { iterations = min(Self.maxIterations, iterations + 1) }
       guard steps > 0 else { return }
-      let busy = bangs.contains { $0.leaving || $0.fading }
+      let stretching = bulgeSpeed.contains { abs($0) > 0.3 } || snapping.contains(true)
+        || (bangs.isEmpty && bulge.contains { $0 > 0.3 })
+      let busy = stretching || bangs.contains { $0.fading || $0.leaveAt != nil }
       quiet = busy || moved > 0.06 ? 0 : quiet + steps
       calm = busy || moved > 0.4 ? 0 : calm + steps
       // At rest (or close enough for long enough): no more frames until something happens.
-      if bangs.isEmpty || quiet > 50 || calm > 600 { settle() }
+      if (bangs.isEmpty && !stretching) || quiet > 50 || calm > 600 { settle() }
     }
 
     /// One fixed step; the largest distance a particle went.
     private func step() -> Double {
-      let r = Self.radius
-      let before = pos
-      let fall = gravity * Self.g * Self.step * Self.step
+      time += Self.step
+      prepare()
+      let dt2 = Self.step * Self.step
+      let fall = gravity * Self.g * dt2
+      for n in pressure.indices { pressure[n] = 0 }
       for i in pos.indices {
-        let v = (pos[i] - old[i]) * 0.996
+        var v = (pos[i] - old[i]) * 0.996
+        let speed = simd_length(v)
+        if speed > Self.maxStep { v *= Self.maxStep / speed }
+        // In a bar: its rubber walls pull back the further one is out (and damp it); the top and bottom bulge.
+        var pull = SIMD2<Double>(0, 0)
+        let n = group[i >> 1]
+        if n > 0 {
+          let frame = box[i >> 1]
+          let r = Self.radius
+          let t = min(max((pos[i].x - Double(frame.minX)) / max(1, Double(frame.width)), 0), 1)
+          let out = bulge[n] * sin(.pi * t)
+          let left = Double(frame.minX) + r - pos[i].x, right = pos[i].x - Double(frame.maxX) + r
+          let top = Double(frame.minY) - out + r - pos[i].y, bottom = pos[i].y - Double(frame.maxY) - out + r
+          if left > 0 { pull.x += left; if v.x < 0 { v.x *= Self.wallDamping } }
+          if right > 0 { pull.x -= right; if v.x > 0 { v.x *= Self.wallDamping } }
+          if top > 0 { pull.y += top; if v.y < 0 { v.y *= Self.wallDamping } }
+          if bottom > 0 { pull.y -= bottom; if v.y > 0 { v.y *= Self.wallDamping } }
+          pressure[n] += abs(pull.x) + abs(pull.y)
+        }
         old[i] = pos[i]
-        pos[i] += v + fall
+        pos[i] += v + fall + pull * (Self.wall * dt2)
       }
-      // Pairs close in x, sorted once per step.
-      let order = pos.indices.sorted { pos[$0].x < pos[$1].x }
-      for _ in 0..<3 {
-        // The stick between head and foot.
-        for k in bangs.indices {
-          let a = 2 * k, b = a + 1
-          let d = pos[a] - pos[b]
-          let len = max(simd_length(d), 0.001)
-          let fix = d * ((len - Self.length) / len / 2)
-          pos[a] -= fix
-          pos[b] += fix
-        }
-        // Circles push each other (same bar, or both loose on the screen).
-        for n in order.indices {
-          let i = order[n]
-          let bi = bangs[i / 2]
-          if bi.leaving { continue }
-          var m = n + 1
-          while m < order.count {
-            let j = order[m]
-            m += 1
-            let d = pos[j] - pos[i]
-            if d.x > 2 * r + 2 { break }
-            if j / 2 == i / 2 { continue }
-            let bj = bangs[j / 2]
-            if bj.leaving || bj.bar != bi.bar { continue }
-            let dist2 = simd_length_squared(d)
-            guard dist2 < 4 * r * r, dist2 > 0.0001 else { continue }
-            let dist = dist2.squareRoot()
-            let push = d * ((2 * r - dist) / dist / 2)
-            pos[i] -= push
-            pos[j] += push
-          }
-        }
-        // Walls: the bar's box and its label for a bar's "!"s, the screen for loose ones.
-        for i in pos.indices {
-          let bang = bangs[i / 2]
-          if let id = bang.bar, let bar = bars[id], !bar.frame.isNull {
-            inside(i, bar.frame, bounce: 0.35)
-            if !bar.label.isNull { outside(i, bar.label.insetBy(dx: 2, dy: bar.label.height * 0.2), bounce: 0.5) }
-          } else if !bang.leaving {
-            inside(i, screen, bounce: 0.3)
-          }
-        }
+      for _ in 0..<min(iterations, Self.maxIterations) {
+        if CACurrentMediaTime() >= deadline { break }
+        stick()
+        grid()
+        collide()
+        walls()
       }
-      // Fading and falling away; gone ones are dropped.
-      var keep: [Int] = []
-      for k in bangs.indices {
-        if bangs[k].fading || bangs[k].leaving { bangs[k].alpha -= Self.step * (bangs[k].leaving ? 1.2 : 2) }
-        let below = pos[2 * k].y > screen.maxY + 40 && pos[2 * k + 1].y > screen.maxY + 40
-        if bangs[k].alpha > 0 && !below { keep.append(k) }
+      stretch()
+      // Fade without changing collision groups.
+      var gone = false
+      for k in bangs.indices where bangs[k].fading {
+        bangs[k].alpha -= Self.step * 1.2
+        let below = min(pos[2 * k].y, pos[2 * k + 1].y) > Double(screen.maxY) + 40
+        if bangs[k].alpha <= 0 || below { gone = true }
       }
-      if keep.count != bangs.count {
-        bangs = keep.map { bangs[$0] }
-        pos = keep.flatMap { [pos[2 * $0], pos[2 * $0 + 1]] }
-        old = keep.flatMap { [old[2 * $0], old[2 * $0 + 1]] }
-        return 1
-      }
+      if gone { compact() }
+      // Tiny speeds are none: a particle that hardly moves rests.
       var moved = 0.0
-      for i in pos.indices { moved = max(moved, simd_length(pos[i] - before[i])) }
+      for i in pos.indices {
+        let speed = simd_length(pos[i] - old[i])
+        if speed < Self.rest { old[i] = pos[i] } else { moved = max(moved, speed) }
+      }
       return moved
+    }
+
+    /// Refresh collision groups and start scheduled fades.
+    private func prepare() {
+      for k in bangs.indices {
+        if let at = bangs[k].leaveAt, at <= time {
+          bangs[k].fading = true
+          bangs[k].leaveAt = nil
+        }
+      }
+      for n in used.indices { used[n] = false }
+      for bang in bangs {
+        if let id = bang.bar, let n = slots[id] { used[n] = true }
+      }
+      for n in 1..<barIDs.count {
+        if let id = barIDs[n], !used[n], bulge[n] < 0.3 {
+          slots.removeValue(forKey: id)
+          barIDs[n] = nil
+          bulge[n] = 0; bulgeSpeed[n] = 0; snapping[n] = false
+        }
+      }
+      group.removeAll(keepingCapacity: true)
+      box.removeAll(keepingCapacity: true)
+      for bang in bangs {
+        if let id = bang.bar, let bar = bars[id], Self.valid(bar.frame),
+           let n = slots[id] {
+          barIDs[n] = id
+          slots[id] = n
+          group.append(n); box.append(bar.frame)
+        } else {
+          group.append(0); box.append(.null)
+        }
+      }
+      for i in pos.indices {
+        if !pos[i].x.isFinite || !pos[i].y.isFinite || !old[i].x.isFinite || !old[i].y.isFinite {
+          let f = box[i >> 1].isNull ? screen : box[i >> 1]
+          pos[i] = SIMD2(Double(f.midX), Double(f.midY))
+          old[i] = pos[i]
+        }
+        pos[i] = simd_clamp(pos[i], SIMD2(repeating: -100_000), SIMD2(repeating: 100_000))
+      }
+    }
+
+
+    private func compact() {
+      var n = 0
+      for k in bangs.indices {
+        let below = min(pos[2 * k].y, pos[2 * k + 1].y) > Double(screen.maxY) + 40
+        if bangs[k].fading && (bangs[k].alpha <= 0 || below) { continue }
+        bangs[n] = bangs[k]
+        pos[2 * n] = pos[2 * k]; pos[2 * n + 1] = pos[2 * k + 1]
+        old[2 * n] = old[2 * k]; old[2 * n + 1] = old[2 * k + 1]
+        group[n] = group[k]; box[n] = box[k]
+        n += 1
+      }
+      bangs.removeLast(bangs.count - n)
+      pos.removeLast(pos.count - 2 * n)
+      old.removeLast(old.count - 2 * n)
+      group.removeLast(group.count - n)
+      box.removeLast(box.count - n)
+    }
+
+    /// The particles into a grid of cells a little larger than two radii: neighbours only from the 9 cells around.
+    private func grid() {
+      let s = Self.cell
+      cols = max(1, min(256, Int(screen.width / s) + 3))
+      rows = max(1, min(256, Int(screen.height / s) + 3))
+      let cells = cols * rows
+      if cellStart.count != cells + 1 {
+        cellStart = Array(repeating: 0, count: cells + 1)
+        cellFill = Array(repeating: 0, count: cells + 1)
+      } else {
+        for c in cellStart.indices { cellStart[c] = 0 }
+      }
+      if cellOf.count < pos.count {
+        cellOf = Array(repeating: 0, count: pos.count * 2)
+        cellItems = Array(repeating: 0, count: pos.count * 2)
+      }
+      let minX = Double(screen.minX), minY = Double(screen.minY)
+      for i in pos.indices {
+        if !pos[i].x.isFinite || !pos[i].y.isFinite {
+          pos[i] = SIMD2(Double(screen.midX), Double(screen.midY))
+          old[i] = pos[i]
+        }
+        // Clamp before conversion: Int traps on infinity and out-of-range values.
+        let cx = Int(min(max((pos[i].x - minX) / s + 1, 0), Double(cols - 1)))
+        let cy = Int(min(max((pos[i].y - minY) / s + 1, 0), Double(rows - 1)))
+        let c = cy * cols + cx
+        cellOf[i] = c
+        cellStart[c + 1] += 1
+      }
+      for c in 0..<cells { cellStart[c + 1] += cellStart[c] }
+      for c in 0...cells { cellFill[c] = cellStart[c] }
+      for i in pos.indices {
+        cellItems[cellFill[cellOf[i]]] = i
+        cellFill[cellOf[i]] += 1
+      }
+    }
+
+    /// The stick between head and foot.
+    private func stick() {
+      for k in bangs.indices {
+        let a = 2 * k, b = a + 1
+        let d = pos[a] - pos[b]
+        let len = max(simd_length(d), 0.001)
+        let fix = d * ((len - Self.length) / len / 2)
+        pos[a] -= fix
+        pos[b] += fix
+      }
+    }
+
+    /// Circles push each other: in the same bar, or both loose on the screen.
+    private func collide() {
+      let r2 = 4 * Self.radius * Self.radius
+      var checks = 0
+      for i in pos.indices {
+        if CACurrentMediaTime() >= deadline { return }
+        let gi = group[i >> 1]
+        let c = cellOf[i]
+        let cx = c % cols, cy = c / cols
+        for ny in max(0, cy - 1)...min(rows - 1, cy + 1) {
+          for nx in max(0, cx - 1)...min(cols - 1, cx + 1) {
+            let n = ny * cols + nx
+            for t in cellStart[n]..<cellStart[n + 1] {
+              checks += 1
+              if checks > 16_000 || (checks % 64 == 0 && CACurrentMediaTime() >= deadline) { return }
+              let j = cellItems[t]
+              if j <= i || j >> 1 == i >> 1 || group[j >> 1] != gi { continue }
+              let d = pos[j] - pos[i]
+              let dist2 = simd_length_squared(d)
+              guard dist2 < r2, dist2 > 0.0001 else { continue }
+              let dist = dist2.squareRoot()
+              let overlap = 2 * Self.radius - dist
+              // In contact: a little damping (they settle, hardly bounce: restitution about 0.2).
+              old[i] += (pos[i] - old[i]) * 0.04
+              old[j] += (pos[j] - old[j]) * 0.04
+              guard overlap > Self.slop else { continue }
+              let push = d * ((overlap - Self.slop) / dist / 2)
+              pos[i] -= push
+              pos[j] += push
+            }
+          }
+        }
+      }
+    }
+
+    /// The screen's edges for loose ones (a bar's are rubber: in `step`).
+    private func walls() {
+      for i in pos.indices where group[i >> 1] == 0 { inside(i, screen, bounce: 0.2) }
+    }
+
+    /// Each bar's bulge follows the pressure on its walls, springy; at +40% it bursts.
+    private func stretch() {
+      for n in bulge.indices {
+        guard let id = barIDs[n], let frame = bars[id]?.frame, !frame.isNull else { continue }
+        if snapping[n] {
+          // Torn: back to its own height at once.
+          bulge[n] *= 0.6
+          bulgeSpeed[n] = 0
+          if bulge[n] < 0.3 { bulge[n] = 0; snapping[n] = false }
+          continue
+        }
+        let force = pressure[n] * Self.bulgePush - bulge[n] * Self.bulgeStiffness - bulgeSpeed[n] * Self.bulgeDamping
+        bulgeSpeed[n] += force * Self.step
+        bulge[n] = max(0, bulge[n] + bulgeSpeed[n] * Self.step)
+        if bulge[n] == 0 { bulgeSpeed[n] = max(0, bulgeSpeed[n]) }
+        if bulge[n] >= Double(frame.height) * Self.burstAt { burst(n, id) }
+      }
+    }
+
+    /// The rubber tears: all of the bar's "!"s tumble out and down the screen; it snaps back and starts again.
+    private func burst(_ n: Int, _ id: String) {
+      snapping[n] = true
+      for k in bangs.indices where bangs[k].bar == id {
+        bangs[k].bar = nil
+        group[k] = 0
+        let kick = SIMD2(Double.random(in: -1.5...1.5), Double.random(in: 0.5...2.5))
+        old[2 * k] = pos[2 * k] - kick
+        old[2 * k + 1] = pos[2 * k + 1] - kick * 0.8
+      }
+      haptic.impactOccurred()
     }
 
     /// Hit a surface with normal `n` (unit) `depth` deep: out of it, the speed into it reflected by `bounce`, a little
@@ -380,38 +741,43 @@ struct BangPhysicsLayer: View {
       if p.y > Double(box.maxY) - r { hit(i, SIMD2(0, -1), p.y - Double(box.maxY) + r, bounce: bounce) }
     }
 
-    private func outside(_ i: Int, _ rect: CGRect, bounce: Double) {
-      let r = Self.radius
-      let p = pos[i]
-      let closest = SIMD2(min(max(p.x, Double(rect.minX)), Double(rect.maxX)),
-                          min(max(p.y, Double(rect.minY)), Double(rect.maxY)))
-      let d = p - closest
-      let dist = simd_length(d)
-      if dist > 0.0001 {
-        if dist < r { hit(i, d / dist, r - dist, bounce: bounce) }
-        return
-      }
-      // The centre inside: out along the shortest way.
-      let ways = [(Double(rect.minX) - p.x, SIMD2<Double>(-1, 0)), (p.x - Double(rect.maxX), SIMD2<Double>(1, 0)),
-                  (Double(rect.minY) - p.y, SIMD2<Double>(0, -1)), (p.y - Double(rect.maxY), SIMD2<Double>(0, 1))]
-      let way = ways.max { $0.0 < $1.0 }!
-      hit(i, way.1, r - way.0, bounce: bounce)
-    }
-
     // MARK: Drawing
 
     func draw(_ context: inout GraphicsContext) {
-      let glyph = context.resolve(
-        Text("!").font(.yo(Metrics.rowFont)).foregroundStyle(Color.white.exposureAdjust(3)))
+      guard Self.valid(screen), pos.count == bangs.count * 2 else { return }
+      if glowing == nil {
+        glowing = context.resolve(Text("!").font(.yo(Metrics.rowFont)).foregroundStyle(Color.white.exposureAdjust(3)))
+        plain = context.resolve(Text("!").font(.yo(Metrics.rowFont)).foregroundStyle(Color.white))
+      }
+      guard let glowing, let plain else { return }
+      // Each bulging bar: its colour over and under it, highest in the middle (only outside the bar: its words stay).
+      for n in bulge.indices where bulge[n] > 0.3 {
+        guard let id = barIDs[n], let bar = bars[id], !bar.frame.isNull else { continue }
+        let f = bar.frame.offsetBy(dx: -screen.minX, dy: -screen.minY)
+        let lift = bulge[n] * 4 / 3  // a cubic's middle reaches 3/4 of its handles
+        var path = Path()
+        path.move(to: CGPoint(x: f.minX, y: f.minY + 0.5))
+        path.addCurve(to: CGPoint(x: f.maxX, y: f.minY + 0.5),
+                      control1: CGPoint(x: f.minX + f.width * 0.2, y: f.minY - lift),
+                      control2: CGPoint(x: f.maxX - f.width * 0.2, y: f.minY - lift))
+        path.closeSubpath()
+        path.move(to: CGPoint(x: f.minX, y: f.maxY - 0.5))
+        path.addCurve(to: CGPoint(x: f.maxX, y: f.maxY - 0.5),
+                      control1: CGPoint(x: f.minX + f.width * 0.2, y: f.maxY + lift),
+                      control2: CGPoint(x: f.maxX - f.width * 0.2, y: f.maxY + lift))
+        path.closeSubpath()
+        context.fill(path, with: .color(bar.color))
+      }
       for k in bangs.indices {
         let head = pos[2 * k], foot = pos[2 * k + 1]
+        guard head.x.isFinite, head.y.isFinite, foot.x.isFinite, foot.y.isFinite else { continue }
         let mid = (head + foot) / 2
         let axis = head - foot
         var c = context
         c.opacity = max(0, bangs[k].alpha)
         c.translateBy(x: mid.x - Double(screen.minX), y: mid.y - Double(screen.minY))
         c.rotate(by: .radians(atan2(axis.y, axis.x) + .pi / 2))
-        c.draw(glyph, at: .zero, anchor: .center)
+        c.draw(bangs[k].glow ? glowing : plain, at: .zero, anchor: .center)
       }
     }
   }
