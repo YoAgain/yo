@@ -190,6 +190,9 @@ struct BangPhysicsLayer: View {
     private static let slop = 0.25
     /// Slower than this a step (in points), a particle rests.
     private static let rest = 0.03
+    /// Between two "!": the share of the approach speed they part with, and of their sliding a resting pair loses a step.
+    private static let bounce = 0.2
+    private static let friction = 0.2
     @ObservationIgnored private var glowing: GraphicsContext.ResolvedText?
     @ObservationIgnored private var plain: GraphicsContext.ResolvedText?
     @ObservationIgnored private var deadline = 0.0
@@ -420,6 +423,8 @@ struct BangPhysicsLayer: View {
       prepare()
       let dt2 = Self.step * Self.step
       let fall = gravity * Self.g * dt2
+      grid()
+      contacts()
       for i in pos.indices {
         var v = (pos[i] - old[i]) * 0.996
         let speed = simd_length(v)
@@ -533,6 +538,42 @@ struct BangPhysicsLayer: View {
       }
     }
 
+    /// Once a step, on the relative speed of each touching pair only (what they share, a common fall, stays): they
+    /// bump apart (restitution 0.2) and rub only where one rests on the other along gravity, never side by side.
+    private func contacts() {
+      let r2 = 4 * Self.radius * Self.radius
+      let down = simd_length(gravity) > 0.01 ? simd_normalize(gravity) : SIMD2<Double>(0, 1)
+      var checks = 0
+      for i in pos.indices {
+        if CACurrentMediaTime() >= deadline { return }
+        let c = cellOf[i]
+        let cx = c % cols, cy = c / cols
+        for ny in max(0, cy - 1)...min(rows - 1, cy + 1) {
+          for nx in max(0, cx - 1)...min(cols - 1, cx + 1) {
+            let n = ny * cols + nx
+            for t in cellStart[n]..<cellStart[n + 1] {
+              checks += 1
+              if checks > 16_000 || (checks % 64 == 0 && CACurrentMediaTime() >= deadline) { return }
+              let j = cellItems[t]
+              if j <= i || j >> 1 == i >> 1 { continue }
+              let d = pos[j] - pos[i]
+              let dist2 = simd_length_squared(d)
+              guard dist2 < r2, dist2 > 0.0001 else { continue }
+              let normal = d / dist2.squareRoot()
+              let rel = (pos[j] - old[j]) - (pos[i] - old[i])
+              let vn = simd_dot(rel, normal)
+              // The change to j's speed; i gets the opposite (equal masses: momentum kept).
+              var dv = SIMD2<Double>.zero
+              if vn < 0 { dv += normal * (-(1 + Self.bounce) * vn / 2) }
+              if abs(simd_dot(normal, down)) > 0.5 { dv -= (rel - normal * vn) * (Self.friction / 2) }
+              old[j] -= dv
+              old[i] += dv
+            }
+          }
+        }
+      }
+    }
+
     /// Circles push each other across the whole screen.
     private func collide() {
       let r2 = 4 * Self.radius * Self.radius
@@ -554,9 +595,7 @@ struct BangPhysicsLayer: View {
               guard dist2 < r2, dist2 > 0.0001 else { continue }
               let dist = dist2.squareRoot()
               let overlap = 2 * Self.radius - dist
-              // In contact: a little damping (they settle, hardly bounce: restitution about 0.2).
-              old[i] += (pos[i] - old[i]) * 0.04
-              old[j] += (pos[j] - old[j]) * 0.04
+              // Positions only: no speed is taken here (a touch in the air never brakes the fall).
               guard overlap > Self.slop else { continue }
               let push = d * ((overlap - Self.slop) / dist / 2)
               pos[i] -= push
