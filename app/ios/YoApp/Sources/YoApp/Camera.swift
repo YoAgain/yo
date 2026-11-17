@@ -3,6 +3,7 @@
 // view for its preview, so one small UIViewRepresentable carries the preview layer.
 import AVFoundation
 import CoreImage
+import ImageIO
 import SwiftUI
 
 /// The capture session. Configured and run on its own queue, as AVFoundation asks; the session, its inputs and
@@ -16,11 +17,19 @@ final class Camera: NSObject, @unchecked Sendable {
   private var display: PreviewRenderer?
   private var reveal: (@Sendable (Bool) -> Void)?
   private var revealed = false
+  /// How the display turns the frames upright (an EXIF orientation's raw value), told only when it changes.
+  private var turn: (@Sendable (UInt32) -> Void)?
+  private var turned: CGImagePropertyOrientation?
 
-  func display(on renderer: PreviewRenderer, reveal: @escaping @Sendable (Bool) -> Void) {
+  func display(
+    on renderer: PreviewRenderer, reveal: @escaping @Sendable (Bool) -> Void,
+    turn: @escaping @Sendable (UInt32) -> Void
+  ) {
     previewQueue.async { [self] in
       display = renderer
       self.reveal = reveal
+      self.turn = turn
+      turned = nil
       revealed = false
     }
   }
@@ -130,9 +139,7 @@ final class Camera: NSObject, @unchecked Sendable {
         session.addInput(input)
       }
       session.commitConfiguration()
-      // The new input's connections exist only once the configuration is committed: set upright and mirrored then
-      // (inside it they were still the old camera's, and the selfie came in sideways).
-      mirrorFrontCamera()
+      orient()
       readZooms()
     }
   }
@@ -184,6 +191,7 @@ final class Camera: NSObject, @unchecked Sendable {
         guard session.isRunning, photoOutput.connection(with: .video) != nil else {
           return continuation.resume(returning: nil)
         }
+        orient()
         let settings = AVCapturePhotoSettings(format: [AVVideoCodecKey: AVVideoCodecType.jpeg])
         settings.photoQualityPrioritization = .speed  // the shutter at once: a Yo is a snapshot
         photos[settings.uniqueID] = continuation
@@ -197,6 +205,7 @@ final class Camera: NSObject, @unchecked Sendable {
     queue.async { [self] in
       guard session.isRunning, movieOutput.connection(with: .video) != nil, !movieOutput.isRecording, !videoActive
       else { return }
+      orient()
       finishedAlone = nil
       videoActive = true
       let file = FileManager.default.temporaryDirectory.appending(path: "\(UUID().uuidString).mov")
@@ -241,8 +250,8 @@ final class Camera: NSObject, @unchecked Sendable {
     previewOutput.setSampleBufferDelegate(self, queue: previewQueue)
     if session.canAddOutput(previewOutput) { session.addOutput(previewOutput) }
     movieOutput.maxRecordedDuration = CMTime(seconds: Self.longestVideo, preferredTimescale: 600)
-    mirrorFrontCamera()
     session.commitConfiguration()
+    orient()
     // The photo pipeline set up ahead (same settings as `photo()`): the first shot is as quick as the next ones,
     // its shutter sound at once instead of after a warm-up.
     let ready = AVCapturePhotoSettings(format: [AVVideoCodecKey: AVVideoCodecType.jpeg])
@@ -252,27 +261,93 @@ final class Camera: NSObject, @unchecked Sendable {
   }
 
   /// Photos and videos come out upright in portrait (the app is portrait only), and from the front camera mirrored,
-  /// as the preview showed them.
-  private func mirrorFrontCamera() {
+  /// as the preview showed them. Set after every change of camera and again before each photo and video: a
+  /// connection is rebuilt with the camera, and the new one starts at the sensor's own angle.
+  ///
+  /// The preview's frames stay as the sensor gives them (no turn, no mirror): the display turns them itself, from
+  /// each frame's own shape (`captureOutput`). A turn asked of the preview's connection was not kept for the front
+  /// camera, and its selfie showed sideways.
+  private func orient() {
     let front = input?.device.position == .front
-    for output in [photoOutput, movieOutput, previewOutput] as [AVCaptureOutput] {
+    for output in [photoOutput, movieOutput] as [AVCaptureOutput] {
       guard let connection = output.connection(with: .video) else { continue }
-      if connection.isVideoRotationAngleSupported(90) { connection.videoRotationAngle = 90 }
+      if connection.isVideoRotationAngleSupported(90), connection.videoRotationAngle != 90 {
+        connection.videoRotationAngle = 90
+      }
       if connection.isVideoMirroringSupported {
         connection.automaticallyAdjustsVideoMirroring = false
         connection.isVideoMirrored = front
       }
     }
+    if let connection = previewOutput.connection(with: .video) {
+      if connection.isVideoRotationAngleSupported(0), connection.videoRotationAngle != 0 {
+        connection.videoRotationAngle = 0
+      }
+      if connection.isVideoMirroringSupported {
+        connection.automaticallyAdjustsVideoMirroring = false
+        connection.isVideoMirrored = false
+      }
+    }
   }
+
+  /// The turn that shows a frame upright in portrait, from its shape alone: a landscape frame is the sensor's own
+  /// (turned a quarter right; from the front camera also mirrored, as a mirror shows a face), a portrait one is
+  /// upright already (from the front camera only mirrored, unless its connection did).
+  fileprivate static func upright(width: Int, height: Int, front: Bool, mirrored: Bool) -> CGImagePropertyOrientation {
+    if width > height { return front ? (mirrored ? .left : .leftMirrored) : .right }
+    return front && !mirrored ? .upMirrored : .up
+  }
+
+  /// A photo that would show landscape gets the portrait orientation in its metadata (the pixels are untouched).
+  fileprivate static func upright(photo data: Data, front: Bool) -> Data {
+    guard let source = CGImageSourceCreateWithData(data as CFData, nil),
+      let properties = CGImageSourceCopyPropertiesAtIndex(source, 0, nil) as? [CFString: Any],
+      let width = properties[kCGImagePropertyPixelWidth] as? Int,
+      let height = properties[kCGImagePropertyPixelHeight] as? Int, let type = CGImageSourceGetType(source)
+    else { return data }
+    let tag = properties[kCGImagePropertyOrientation] as? UInt32 ?? 1
+    let quarter = (5...8).contains(tag)
+    guard quarter ? height > width : width > height else { return data }  // portrait as it shows: kept
+    let fixed: CGImagePropertyOrientation = width > height ? (front ? .leftMirrored : .right) : .up
+    let out = NSMutableData()
+    guard let destination = CGImageDestinationCreateWithData(out, type, 1, nil) else { return data }
+    let options = [kCGImagePropertyOrientation: fixed.rawValue] as CFDictionary
+    guard CGImageDestinationCopyImageSource(destination, source, options, nil) else { return data }
+    return out as Data
+  }
+}
+
+extension CGImagePropertyOrientation {
+  /// The same turn for a layer: in UIKit's coordinates (y down) a positive angle turns clockwise.
+  var layerTransform: CGAffineTransform {
+    let mirror = CGAffineTransform(scaleX: -1, y: 1)
+    return switch self {
+    case .upMirrored: mirror
+    case .right: CGAffineTransform(rotationAngle: .pi / 2)
+    case .left: CGAffineTransform(rotationAngle: -.pi / 2)
+    case .leftMirrored: CGAffineTransform(rotationAngle: .pi / 2).concatenating(mirror)
+    case .rightMirrored: CGAffineTransform(rotationAngle: -.pi / 2).concatenating(mirror)
+    case .down: CGAffineTransform(rotationAngle: .pi)
+    case .downMirrored: CGAffineTransform(rotationAngle: .pi).concatenating(mirror)
+    default: .identity
+    }
+  }
+
+  var quarterTurn: Bool { [.left, .right, .leftMirrored, .rightMirrored].contains(self) }
 }
 
 extension Camera: AVCaptureVideoDataOutputSampleBufferDelegate {
   func captureOutput(_ output: AVCaptureOutput, didOutput sampleBuffer: CMSampleBuffer,
                      from connection: AVCaptureConnection) {
-    // Upright whatever the camera: a connection the front camera brought (or rebuilt) can come at its sensor's own
-    // angle, and the selfie showed sideways. Checked per frame, set only when wrong.
-    if connection.videoRotationAngle != 90, connection.isVideoRotationAngleSupported(90) {
-      connection.videoRotationAngle = 90
+    guard let buffer = CMSampleBufferGetImageBuffer(sampleBuffer) else { return }
+    // Upright whatever the camera and whatever the connection did: decided by each frame's own shape.
+    let front = connection.inputPorts.first?.sourceDevicePosition == .front
+    let orientation = Self.upright(
+      width: CVPixelBufferGetWidth(buffer), height: CVPixelBufferGetHeight(buffer), front: front,
+      mirrored: connection.isVideoMirrored)
+    if orientation != turned {
+      turned = orientation
+      turn?(orientation.rawValue)
     }
     if let renderer = display {
       let display = renderer.value
@@ -283,9 +358,9 @@ extension Camera: AVCaptureVideoDataOutputSampleBufferDelegate {
       }
     }
     let now = CMSampleBufferGetPresentationTimeStamp(sampleBuffer).seconds
-    guard now - previewTime >= 0.1, let buffer = CMSampleBufferGetImageBuffer(sampleBuffer) else { return }
+    guard now - previewTime >= 0.1 else { return }
     previewTime = now
-    let frame = CIImage(cvPixelBuffer: buffer)
+    let frame = CIImage(cvPixelBuffer: buffer).oriented(orientation)
     let scale = 360 / max(frame.extent.width, frame.extent.height)
     let small = frame.transformed(by: CGAffineTransform(scaleX: scale, y: scale))
     guard let pixels = previewContext.createCGImage(small, from: small.extent) else { return }
@@ -297,7 +372,8 @@ extension Camera: AVCaptureVideoDataOutputSampleBufferDelegate {
 extension Camera: AVCapturePhotoCaptureDelegate {
   func photoOutput(_ output: AVCapturePhotoOutput, didFinishProcessingPhoto photo: AVCapturePhoto, error: Error?) {
     if let error { Diagnostics.record(error) }
-    let data = photo.fileDataRepresentation()
+    let front = output.connection(with: .video)?.inputPorts.first?.sourceDevicePosition == .front
+    let data = photo.fileDataRepresentation().map { Self.upright(photo: $0, front: front) }
     let id = photo.resolvedSettings.uniqueID
     queue.async { [self] in
       photos.removeValue(forKey: id)?.resume(returning: data)
@@ -345,12 +421,20 @@ struct CameraPreview: UIViewRepresentable {
     view.backgroundColor = .clear
     view.feed.videoGravity = .resizeAspectFill
     view.feed.opacity = 0
-    camera.display(on: PreviewRenderer(view.feed.sampleBufferRenderer)) { [weak view] ready in
-      DispatchQueue.main.async {
-        guard let view else { return }
-        view.reveal(ready)
-      }
-    }
+    camera.display(
+      on: PreviewRenderer(view.feed.sampleBufferRenderer),
+      reveal: { [weak view] ready in
+        DispatchQueue.main.async {
+          guard let view else { return }
+          view.reveal(ready)
+        }
+      },
+      turn: { [weak view] raw in
+        DispatchQueue.main.async {
+          guard let view, let orientation = CGImagePropertyOrientation(rawValue: raw) else { return }
+          view.turn = orientation
+        }
+      })
     return view
   }
 
@@ -358,6 +442,10 @@ struct CameraPreview: UIViewRepresentable {
 
   final class PreviewView: UIView {
     let feed = AVSampleBufferDisplayLayer()
+    /// The frames' turn to upright (the sensor's landscape frames a quarter right; a selfie mirrored as well).
+    var turn = CGImagePropertyOrientation.up {
+      didSet { if turn != oldValue { setNeedsLayout() } }
+    }
     /// A plain blur over the first moments (no white tint): hides focus and exposure settling while the edge between
     /// the clear window and the colour rows stays sharp. Before the first frame there is nothing over the window.
     private let milk = UIVisualEffectView(effect: nil)
@@ -404,7 +492,12 @@ struct CameraPreview: UIViewRepresentable {
       super.layoutSubviews()
       CATransaction.begin()
       CATransaction.setDisableActions(true)
-      feed.frame = bounds
+      // Turned about its centre: a quarter turn lays it out with width and height swapped, then turns it to fill.
+      feed.setAffineTransform(.identity)
+      let size = turn.quarterTurn ? CGSize(width: bounds.height, height: bounds.width) : bounds.size
+      feed.bounds = CGRect(origin: .zero, size: size)
+      feed.position = CGPoint(x: bounds.midX, y: bounds.midY)
+      feed.setAffineTransform(turn.layerTransform)
       CATransaction.commit()
     }
   }
