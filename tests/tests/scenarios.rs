@@ -624,26 +624,6 @@ fn a_backup_is_found_by_user_id_and_by_locator() {
 }
 
 #[test]
-fn names_not_secured_are_released_after_a_year() {
-    const DAY: u64 = 24 * 3600 * 1000;
-    let hub = TestHub::start();
-    let (secured_name, idle_name) =
-        (format!("KEPT{}", random_u64() % 100_000), format!("GONE{}", random_u64() % 100_000));
-    let mut secured = by_name(&hub, &secured_name, None).unwrap();
-    let mut idle = by_name(&hub, &idle_name, None).unwrap();
-    secured.put_backup(&backup(Vec::new())).unwrap();
-    let now = yo_hub::now_ms();
-    hub.hub.prune(now + 364 * DAY).unwrap();
-    idle.sync(0).unwrap();
-    hub.hub.prune(now + 366 * DAY).unwrap();
-    assert_eq!(idle.sync(0), Err(Error::Replaced), "the device learns that its account is gone");
-    secured.sync(0).unwrap();
-    // The name is free again; the secured one is kept.
-    by_name(&hub, &idle_name, None).unwrap();
-    assert_eq!(by_name(&hub, &secured_name, None).err(), Some(Error::Refused(api::status::CONFLICT)));
-}
-
-#[test]
 fn a_deleted_account_is_gone_with_its_name() {
     let hub = TestHub::start();
     let http = Http::new(hub.url());

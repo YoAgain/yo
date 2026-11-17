@@ -227,8 +227,7 @@ CREATE TABLE IF NOT EXISTS messages (
 CREATE INDEX IF NOT EXISTS messages_by_device ON messages(device_id, id);
 CREATE INDEX IF NOT EXISTS messages_by_age ON messages(received_at);
 -- Each user's backup record (spec 7), as the client sent it: found by the user id or by its locator, handed out to a
--- request signed by one of its doors' auth keys (the passkey's NULL without one). A user with one has secured the
--- name, which is then never released (spec 6.4).
+-- request signed by one of its doors' auth keys (the passkey's NULL without one).
 CREATE TABLE IF NOT EXISTS backups (
     user_id BLOB PRIMARY KEY REFERENCES users(id),
     locator BLOB UNIQUE,
@@ -1813,29 +1812,6 @@ impl Db {
         }
         Ok(failed)
     }
-
-    /// Releases names not secured (spec 6.4): removes every user without a backup record none of whose devices made
-    /// a request for `idle_ms`, with its handles and account keys. Its devices answer 410 from then on. Returns how
-    /// many users were removed.
-    pub fn release_unsecured(&self, now: u64, idle_ms: u64) -> rusqlite::Result<usize> {
-        let mut conn = self.conn();
-        let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
-        // A device's last request is noted to the day (`touch` once a day): a day more, so none goes early.
-        let before = now.saturating_sub(idle_ms + 24 * 3600 * 1000) as i64;
-        let idle: Vec<UserId> = tx
-            .prepare_cached(
-                "SELECT id FROM users WHERE created_at < ?1
-                 AND NOT EXISTS (SELECT 1 FROM backups WHERE user_id = users.id)
-                 AND NOT EXISTS (SELECT 1 FROM devices WHERE user_id = users.id AND last_seen_at >= ?1)",
-            )?
-            .query_map([before], |row| array(row.get(0)?))?
-            .collect::<Result<_, _>>()?;
-        for user in &idle {
-            remove_user(&tx, user, now)?;
-        }
-        tx.commit()?;
-        Ok(idle.len())
-    }
 }
 
 /// Two byte strings equal, in constant time for their length.
@@ -2755,34 +2731,5 @@ mod tests {
         assert_eq!(db.put_blob(&[1; 16], &[7; 16], 100, 2, 5, &quota).unwrap(), BlobPut::Stored);
         db.delete_blob(&[7; 16]).unwrap();
         assert!(!db.blob_ready(&[7; 16], 5).unwrap());
-    }
-
-    #[test]
-    fn names_not_secured_are_released_after_the_idle_time() {
-        let db = Db::open(":memory:").unwrap();
-        let idle = user(register(&db, b"IDLE", 1, 1, 0));
-        let secured = user(register(&db, b"SAFE", 2, 2, 0));
-        let active = user(register(&db, b"BUSY", 3, 3, 0));
-        db.put_backup(&[2; 16], None, b"record", &BackupAuth::default(), 0).unwrap();
-        db.touch(&[3; 16], 50 * DAY, None).unwrap();
-        assert!(matches!(db.feedback(&[1; 16], "where are my friends", "1.0 (1)", 0).unwrap(), Write::Done(())));
-        let exists = |user: &UserId| db.lookup(KIND_USER, user, false, &[]).unwrap().is_some();
-        assert_eq!(db.release_unsecured(89 * DAY, 90 * DAY).unwrap(), 0);
-        // Noted to the day: never before a full day more (a request the day of the last note was not written).
-        assert_eq!(db.release_unsecured(91 * DAY, 90 * DAY).unwrap(), 0);
-        assert_eq!(db.release_unsecured(91 * DAY + 1, 90 * DAY).unwrap(), 1);
-        assert!(!exists(&idle));
-        let feedback: (Vec<u8>, String) = db
-            .conn()
-            .query_row("SELECT user_id, text FROM support_messages", [], |row| Ok((row.get(0)?, row.get(1)?)))
-            .unwrap();
-        assert_eq!(feedback, (NOBODY.to_vec(), "where are my friends".into()), "the feedback stays, without IDLE");
-        assert!(db.is_gone(&[1; 16]).unwrap(), "its device learns that it was removed");
-        assert!(exists(&secured) && exists(&active));
-        // The name is free for anyone now, and so is the key.
-        user(register(&db, b"IDLE", 4, 4, 91 * DAY));
-        user(register(&db, b"OTHER", 1, 5, 91 * DAY));
-        assert_eq!(db.release_unsecured(200 * DAY, 90 * DAY).unwrap(), 3, "BUSY and the two new ones, never SAFE");
-        assert!(exists(&secured));
     }
 }

@@ -48,9 +48,6 @@ pub struct Limits {
     pub crash_per_ip_day: u32,
     pub storage_per_user_hour: u32,
     pub envelope_ttl_days: u64,
-    /// A user without a backup record whose devices made no request for this long is removed with its name
-    /// (spec 6.4).
-    pub unsecured_idle_days: u64,
     /// A blob not fetched by all its devices is deleted after this long (spec 6.8).
     pub blob_ttl_days: u64,
     /// Photos and videos one user may upload per day (UTC), and their bytes.
@@ -98,7 +95,6 @@ impl Default for Limits {
             crash_per_ip_day: 5,
             storage_per_user_hour: 120,
             envelope_ttl_days: 30,
-            unsecured_idle_days: 365,
             blob_ttl_days: 30,
             blobs_per_user_day: 2000,
             blob_bytes_per_user_day: 2 * GIB,
@@ -132,7 +128,6 @@ impl Limits {
             crash_per_ip_day: u32::MAX,
             storage_per_user_hour: u32::MAX,
             envelope_ttl_days: 30,
-            unsecured_idle_days: 365,
             blob_put_per_ip_minute: u32::MAX,
             blob_get_per_ip_minute: u32::MAX,
             ..Limits::default()

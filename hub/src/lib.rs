@@ -459,8 +459,8 @@ impl Hub {
             .with_state(self.clone())
     }
 
-    /// The hourly cleanup at `now`: envelopes and commits past their time (6.6), names not secured past theirs (6.4),
-    /// blobs past theirs and files no blob owns (6.8).
+    /// The hourly cleanup at `now`: envelopes and commits past their time (6.6), blobs past theirs and files no
+    /// blob owns (6.8).
     pub fn prune(&self, now: u64) -> rusqlite::Result<()> {
         let limits = &self.config.limits;
         self.db.prune(now, limits.envelope_ttl_days * DAY.as_millis() as u64)?;
@@ -471,10 +471,6 @@ impl Hub {
             Ok(0) => {}
             Ok(n) => eprintln!("yo-hub: {n} stray blob files removed"),
             Err(error) => eprintln!("yo-hub: blob sweep in {}: {error}", self.blobs.dir().display()),
-        }
-        let released = self.db.release_unsecured(now, limits.unsecured_idle_days * DAY.as_millis() as u64)?;
-        if released > 0 {
-            eprintln!("yo-hub: {released} names not secured released");
         }
         Ok(())
     }
