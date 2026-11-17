@@ -2748,10 +2748,10 @@ struct Bangs: View {
 
 }
 
-/// Each incoming Yo after the first (which comes in with the whole mark): one "!" sweeps in from the screen's edge
-/// and lands at the end of "Yo!!", where Bangs then shows it; beyond five it merges into the last "!" (in dev builds
-/// physics "!"s take over there, BangPhysics.swift). Several fly one after the other, `Bangs.gap` apart, as Bangs
-/// shows them; never a queue longer than Bangs keeps. Not with Reduce Motion (the glow pulses only).
+/// Each incoming Yo after the first (which comes in with the whole mark): a small "Yo" sweeps in from the screen's edge
+/// into the label's "Yo" and merges with it; then Bangs shows one "!" more (up to five; beyond, in dev builds, physics
+/// "Yo"s take over, BangPhysics.swift). Several fly one after the other, `Bangs.gap` apart, as Bangs shows them; never
+/// a queue longer than Bangs keeps. Not with Reduce Motion (the glow pulses only).
 struct IncomingSweeps: View {
   static let flightSeconds = 0.26
   static let flight = Duration.seconds(flightSeconds)
@@ -2761,14 +2761,20 @@ struct IncomingSweeps: View {
   let landing: CGFloat
   @Environment(\.accessibilityReduceMotion) private var reduceMotion
   @Environment(\.yoFlood) private var busy
-  @State private var flying: [UUID] = []
+  /// Each flight and the "!"s the label shows while it flies (the "Yo" lands just before them).
+  @State private var flying: [Flight] = []
   /// When the last sweep set off: the next one `Bangs.gap` after it, as Bangs shows them.
   @State private var lastLaunch = ContinuousClock.now
 
+  struct Flight: Hashable {
+    let id = UUID()
+    let bangs: Int
+  }
+
   var body: some View {
     ZStack(alignment: .trailing) {
-      ForEach(flying, id: \.self) { id in
-        SweepingBang { flying.removeAll { $0 == id } }
+      ForEach(flying, id: \.self) { flight in
+        SweepingYo(bangs: flight.bangs) { flying.removeAll { $0 == flight } }
       }
     }
     .padding(.trailing, landing)
@@ -2778,37 +2784,47 @@ struct IncomingSweeps: View {
     .onChange(of: total) { old, new in
       // A flood (more than Bangs queues) shows at once, without sweeps.
       guard old > 0, new > old, new - old <= 10, !reduceMotion, !busy else { return }
-      // One for each Yo, one after the other; beyond five they are physics "!"s (dev) instead.
+      // One for each Yo, one after the other; beyond five they are physics "Yo"s (dev) instead.
       for k in (old + 1)...new where k <= 5 || !BangPhysics.on {
         let at = max(lastLaunch.advanced(by: Bangs.gap), .now)
         if at > .now.advanced(by: Bangs.gap * 10) { break }
         lastLaunch = at
+        let flight = Flight(bangs: min(5, max(0, k - 1)))
         Task {
           try? await ContinuousClock().sleep(until: at)
-          flying.append(UUID())
+          flying.append(flight)
         }
       }
     }
   }
 }
 
-private struct SweepingBang: View {
+/// A small "Yo" from beyond the screen's edge into the label's "Yo" (as many "!"s before the end as it shows), growing
+/// to its size as it lands, then gone into it.
+private struct SweepingYo: View {
+  let bangs: Int
   let done: () -> Void
   @State private var landed = false
   @State private var gone = false
 
   var body: some View {
-    Text("!")
-      .modifier(YoIntensity(incoming: true, pulse: 0))
-      .offset(x: landed ? 0 : BarLine.endPadding + 40)  // from beyond the screen's edge
-      .opacity(gone ? 0 : 1)
-      .onAppear {
-        withAnimation(.easeOut(duration: IncomingSweeps.flightSeconds)) {
-          landed = true
-        } completion: {
-          withAnimation(.easeOut(duration: 0.12)) { gone = true } completion: { done() }
-        }
+    HStack(spacing: 0) {
+      Text("Yo")
+        .modifier(YoIntensity(incoming: true, pulse: 0))
+        .scaleEffect(landed ? 1 : 0.55, anchor: .trailing)
+        .offset(x: landed ? 0 : BarLine.endPadding + 40 + Double(bangs) * 9)  // from beyond the screen's edge
+        .opacity(gone ? 0 : 1)
+      Text(String(repeating: "!", count: bangs)).hidden()
+    }
+    .lineLimit(1)
+    .fixedSize()
+    .onAppear {
+      withAnimation(.easeOut(duration: IncomingSweeps.flightSeconds)) {
+        landed = true
+      } completion: {
+        withAnimation(.easeOut(duration: 0.12)) { gone = true } completion: { done() }
       }
+    }
   }
 }
 
