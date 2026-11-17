@@ -56,22 +56,17 @@ struct GroupMembersSheet: View {
   var body: some View {
     NavigationStack {
       Form {
+        // Who is in the group first, then the friends who could be added.
         Section("Members · \(members.count) of 20") {
           if let ownUser {
             GroupMemberRow(name: name(of: ownUser), selected: true).disabled(true)
           }
-          ForEach(choices, id: \.self) { user in
-            let selected = members.contains(user)
-            Button {
-              if selected { removing = (user, name(of: user)) }
-              else {
-                change(add: [user], line: [.user(GroupNotice.me(accounts)), " added ", .user(name(of: user)), " to ", .group(bar.name)])
-              }
-            } label: {
-              GroupMemberRow(name: name(of: user), selected: selected)
-            }
-            .buttonStyle(.plain)
-            .disabled(busy || (!selected && members.count >= Self.most))
+          ForEach(choices.filter { members.contains($0) }, id: \.self) { user in memberButton(user) }
+        }
+        let others = choices.filter { !members.contains($0) }
+        if !others.isEmpty {
+          Section("Add Friends") {
+            ForEach(others, id: \.self) { user in memberButton(user) }
           }
         }
         if failed {
@@ -93,6 +88,20 @@ struct GroupMembersSheet: View {
         })
       .task { await load() }
     }
+  }
+
+  private func memberButton(_ user: String) -> some View {
+    let selected = members.contains(user)
+    return Button {
+      if selected { removing = (user, name(of: user)) }
+      else {
+        change(add: [user], line: [.user(GroupNotice.me(accounts)), " added ", .user(name(of: user)), " to ", .group(bar.name)])
+      }
+    } label: {
+      GroupMemberRow(name: name(of: user), selected: selected)
+    }
+    .buttonStyle(.plain)
+    .disabled(busy || (!selected && members.count >= Self.most))
   }
 
   private var choices: [String] {

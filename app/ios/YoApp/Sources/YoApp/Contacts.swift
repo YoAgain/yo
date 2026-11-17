@@ -266,8 +266,11 @@ struct EncryptionTally: Equatable {
   {
     guard let states = await ContactState.loadAll(accounts, friends) else { return nil }
     let contacts = friends.contacts.filter { !$0.blocked }
+    // A friend with no Yo exchanged yet has no session to check: it comes with the first Yo, so it counts as fine.
     let good = contacts.filter { friend in
-      (friend.user.flatMap { states[$0] } ?? ContactState()).overall(friend) == .ok
+      let state = friend.user.flatMap { states[$0] } ?? ContactState()
+      let check = state.overall(friend)
+      return check == .ok || (check != .problem && state.sessions.isEmpty)
     }
     let problems = contacts.filter { friend in
       (friend.user.flatMap { states[$0] } ?? ContactState()).overall(friend) == .problem
