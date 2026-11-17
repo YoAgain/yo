@@ -1993,17 +1993,6 @@ private struct OutgoingThumbnailSlot: View {
       }
         .frame(width: side, height: side).clipped()
         .overlay { VideoPlayGlyph(visible: restingVideo, side: side) }
-        // The number of photos on the stack again (owner), as before the layers came.
-        .overlay {
-          Text("\(more + 1)")
-            .font(.custom("Montserrat-Bold", size: side * 0.36)).minimumScaleFactor(0.5).lineLimit(1)
-            .foregroundStyle(.white)
-            .frame(maxWidth: .infinity, maxHeight: .infinity)
-            .background(.black.opacity(0.35))
-            .opacity(more > 0 ? 1 : 0)
-            .contentTransition(.numericText())
-            .animation(.easeOut(duration: 0.16), value: more)
-        }
         .position(top)
         .opacity(item == nil || restingImage == nil ? 0 : 1)
       if let item, let image = item.thumbnail {
@@ -2015,6 +2004,17 @@ private struct OutgoingThumbnailSlot: View {
           .id(item.id)
           .transition(.identity)
       }
+      // The number of photos, on top of everything (the flying photo landed over the resting one and hid it).
+      Text("\(more + 1)")
+        .font(.custom("Montserrat-Bold", size: side * 0.36)).minimumScaleFactor(0.5).lineLimit(1)
+        .foregroundStyle(.white)
+        .frame(width: side, height: side)
+        .background(.black.opacity(0.35))
+        .position(top)
+        .opacity(more > 0 && (restingImage != nil || item != nil) ? 1 : 0)
+        .contentTransition(.numericText())
+        .animation(.easeOut(duration: 0.16), value: more)
+        .allowsHitTesting(false)
     }
 
     .onChange(of: item, initial: true) { old, new in
