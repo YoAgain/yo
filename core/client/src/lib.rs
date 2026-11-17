@@ -9,6 +9,7 @@ pub mod cost;
 pub mod error;
 pub mod groups;
 pub mod identity;
+pub mod list;
 pub mod media;
 pub mod net;
 pub mod sealed;
@@ -19,7 +20,7 @@ pub mod storage;
 
 pub use error::{Error, Result};
 pub use net::{Response, Transport};
-pub use yo_wire::api::{Backup, Push, BACKUP_VERSION, REPORT_ABUSE, REPORT_OTHER, REPORT_SPAM};
+pub use yo_wire::api::{Backup, Push, SupportThread, BACKUP_VERSION, REPORT_ABUSE, REPORT_OTHER, REPORT_SPAM};
 pub use yo_wire::content::{Content, Media};
 /// Usernames as the hub takes and compares them (spec 3.3), for the apps.
 pub use yo_wire::handle;
@@ -232,6 +233,7 @@ pub trait Store: Send + Sync {
 pub type Clock = Arc<dyn Fn() -> u64 + Send + Sync>;
 
 /// The signed inbox request of a `sync`, sent without the client: see `Client::sync_begin`.
+#[derive(Clone)]
 pub struct InboxWait {
     transport: Arc<dyn Transport>,
     path: String,
@@ -244,6 +246,31 @@ impl InboxWait {
     pub fn send(&self) -> std::result::Result<Response, String> {
         self.transport.request("GET", &self.path, &self.headers, &[])
     }
+}
+
+/// A probe's inbox wait runs beside its sealed delivery, outside the caller's state lock.
+pub struct Probe {
+    pub began: std::time::Instant,
+    user: String,
+    ticket: [u8; 32],
+    wait: InboxWait,
+    response: std::sync::mpsc::Receiver<Answer>,
+}
+
+impl Probe {
+    pub fn receive(self, timeout_ms: u64) -> Option<ProbeReply> {
+        let remaining = std::time::Duration::from_millis(timeout_ms).saturating_sub(self.began.elapsed());
+        let response = self.response.recv_timeout(remaining).ok()?;
+        Some(ProbeReply { began: self.began, user: self.user, ticket: self.ticket, wait: self.wait, response })
+    }
+}
+
+pub struct ProbeReply {
+    pub began: std::time::Instant,
+    user: String,
+    ticket: [u8; 32],
+    wait: InboxWait,
+    response: Answer,
 }
 
 /// The signed lookup of `Client::whois_begin`, sent without the client.
@@ -282,8 +309,24 @@ fn spelled(username: Option<yo_wire::VLBytes>) -> Option<String> {
     username.and_then(|n| String::from_utf8(n.into()).ok()).filter(|n| yo_wire::handle::check_username_form(n).is_ok())
 }
 
+/// A light signed certificate GET, sent without holding the client.
+pub struct StatusProbe {
+    transport: Arc<dyn Transport>,
+    headers: Vec<(String, String)>,
+}
+
+impl StatusProbe {
+    pub fn send(&self) -> Result<u16> {
+        self.transport
+            .request("GET", api::CERTIFICATE, &self.headers, &[])
+            .map(|answer| answer.status)
+            .map_err(Error::Network)
+    }
+}
+
 /// The signed feedback of `Client::feedback_begin`, sent without the client.
 pub struct FeedbackRequest {
+    path: &'static str,
     transport: Arc<dyn Transport>,
     headers: Vec<(String, String)>,
     body: Vec<u8>,
@@ -292,12 +335,45 @@ pub struct FeedbackRequest {
 impl FeedbackRequest {
     /// Blocks for the round trip. `Refused(429)`: the day's feedback is used up.
     pub fn send(&self) -> Result<()> {
-        let response =
-            self.transport.request("POST", api::FEEDBACK, &self.headers, &self.body).map_err(Error::Network)?;
+        let response = self.transport.request("POST", self.path, &self.headers, &self.body).map_err(Error::Network)?;
         match response.status {
             status::NO_CONTENT => Ok(()),
             _ => Err(refused(&response)),
         }
+    }
+}
+
+/// A support read signed and persisted under the client, sent after releasing its state lock.
+pub struct SupportRequest {
+    transport: Arc<dyn Transport>,
+    headers: Vec<(String, String)>,
+    body: Vec<u8>,
+    mark: bool,
+}
+impl SupportRequest {
+    fn response(&self) -> Result<Response> {
+        self.transport
+            .request(
+                if self.mark { "POST" } else { "GET" },
+                if self.mark { api::SUPPORT_READ } else { api::SUPPORT },
+                &self.headers,
+                &self.body,
+            )
+            .map_err(Error::Network)
+    }
+    pub fn thread(&self) -> Result<api::SupportThread> {
+        let response = self.response()?;
+        if response.status != status::OK {
+            return Err(refused(&response));
+        }
+        Ok(decode(&response.body)?)
+    }
+    pub fn read(&self) -> Result<()> {
+        let response = self.response()?;
+        if response.status != status::NO_CONTENT {
+            return Err(refused(&response));
+        }
+        Ok(())
     }
 }
 
@@ -1314,6 +1390,17 @@ impl Client {
     }
 
     fn push_event(&mut self, event: Event) {
+        let user = match &event {
+            Event::Message { user, .. }
+            | Event::NewChat { user }
+            | Event::Profile { user, .. }
+            | Event::IdentityChanged { user }
+            | Event::SentElsewhere { user, .. } => Some(user),
+            _ => None,
+        };
+        if user.is_some_and(|u| self.probe_service(u)) {
+            return;
+        }
         self.state.events.push(stored(event));
     }
 
@@ -1814,7 +1901,19 @@ impl Client {
     }
 
     /// A handle the hub says is this user's now: no other contact is known by it any more (it was theirs once).
+    pub(crate) fn probe_service(&self, user: &str) -> bool {
+        self.state.contacts.get(user).is_some_and(|c| c.probe_service)
+    }
+
     fn take_handle(&mut self, user: &str, shown: String) {
+        if same_handle(&shown, "PING") {
+            if let Some(contact) = self.state.contacts.get_mut(user) {
+                contact.probe_service = true;
+                contact.chat = false;
+                contact.profile_due = false;
+                contact.key_due = false;
+            }
+        }
         for (other, contact) in self.state.contacts.iter_mut() {
             if other != user {
                 contact.handles.retain(|h| !same_handle(h, &shown));
@@ -1878,8 +1977,8 @@ impl Client {
             c.take_bundles(&peer, found.account_key, &found.bundles)?;
             c.note_outdated(&peer);
             let contact = c.state.contacts.get_mut(&peer).ok_or(Error::Internal("contact"))?;
-            contact.chat = true;
-            contact.profile_due = c.state.name.is_some();
+            contact.chat = !contact.probe_service;
+            contact.profile_due = !contact.probe_service && c.state.name.is_some();
             // Added from here: accepted, and told this account's profile key (spec 4.10).
             if !contact.accepted {
                 contact.accepted = true;
@@ -1896,7 +1995,7 @@ impl Client {
         if self.state.contacts.get(user).is_some_and(|c| c.unconfirmed) {
             return Err(Error::Unconfirmed);
         }
-        let shown = shown(&content);
+        let shown = shown(&content) && !self.probe_service(user);
         self.queue(&[user.to_owned()], None, content)?;
         if shown {
             self.accept_writing(user);
@@ -1910,7 +2009,7 @@ impl Client {
     /// Writing to someone accepts them (spec 4.10): they get this account's profile key and its name.
     fn accept_writing(&mut self, user: &str) {
         let name = self.state.name.is_some();
-        if let Some(contact) = self.state.contacts.get_mut(user).filter(|c| !c.accepted) {
+        if let Some(contact) = self.state.contacts.get_mut(user).filter(|c| !c.accepted && !c.probe_service) {
             contact.accepted = true;
             contact.key_due = true;
             contact.profile_due = name;
@@ -2860,7 +2959,7 @@ impl Client {
         if plain.to.is_some() {
             return Err(Error::Protocol("a copy for another"));
         }
-        if certified.is_none() {
+        if certified.is_none() && !self.probe_service(&user) {
             self.identified_from(&user)?;
         }
         self.received(&user, plain.content.as_slice(), message)
@@ -2971,6 +3070,20 @@ impl Client {
 
     /// A message from a contact.
     fn received(&mut self, user: &str, plaintext: &[u8], message: Message) -> Result<()> {
+        if self.probe_service(user) {
+            // Access keys are protocol routing state. Keep them locally so repeated
+            // probes are not stranger requests; store_key excludes them from sync.
+            if let Some((key, generation)) = Message::profile_key_of(plaintext) {
+                self.take_key_carried(user, key, generation);
+            }
+            if let Content::ProfileKey(key) = &message.content {
+                self.take_key_message(user, *key);
+            }
+            if self.first_time(user, plaintext) && message.group.is_none() && matches!(message.content, Content::Yo) {
+                self.state.contacts.get_mut(user).expect("service").probe_reply_tag = sha256(plaintext);
+            }
+            return Ok(());
+        }
         // The key a Yo carries (spec 4.10, `WITH_PROFILE_KEY`), also a blocked user's: theirs is a contact's again
         // after an unblock.
         if let Some((key, generation)) = Message::profile_key_of(plaintext) {
@@ -3214,6 +3327,92 @@ impl Client {
         self.send(to, Content::Yo)
     }
 
+    /// Starts a user-triggered probe to the reserved service. Returns a local ticket;
+    /// app events received along the way remain queued for the ordinary inbox consumer.
+    pub fn round_trip_probe_begin(&mut self, target: &str, timeout_ms: u64) -> Result<Probe> {
+        if !same_handle(target, "PING") {
+            return Err(Error::Protocol("probe target must be PING"));
+        }
+        let handle = Handle::parse("PING")?;
+        let user = match self.known_user(&handle).filter(|u| self.has_chat(u)) {
+            Some(user) => user,
+            None => self.start_chat(&handle)?,
+        };
+        self.storage_fetched()?;
+        self.acknowledge_inbox()?;
+        let ticket = self.state.contacts.get(&user).expect("service").probe_reply_tag;
+        let wait = self.probe_wait(timeout_ms);
+        self.atomic(|c| {
+            c.queue_key(&user)?;
+            c.send_message(&user, Content::Yo)?;
+            c.encrypt_waiting(&user);
+            c.persist()
+        })?;
+        // The save above also reserves the signed request for other processes.
+        let sending = wait.clone();
+        let began = std::time::Instant::now();
+        let (received, response) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let _ = received.send(sending.send());
+        });
+        let delivered = self.deliver_now();
+        // A probe never becomes a deferred send on reconnection, even when its
+        // immediate delivery was refused or failed. Ratchet state remains durable.
+        self.state.outbox.retain(|item| item.user != user);
+        self.persist()?;
+        delivered?;
+        self.unacked.extend(std::mem::take(&mut self.received_ids));
+        Ok(Probe { user, ticket, began, wait, response })
+    }
+
+    fn probe_wait(&mut self, timeout_ms: u64) -> InboxWait {
+        let path = api::inbox_path(timeout_ms.div_ceil(1000).clamp(1, 10));
+        let (headers, time) = self.sign("GET", &path, &[]);
+        InboxWait { transport: self.transport.clone(), path, headers, time }
+    }
+
+    /// Processes a completed long poll, preserving ordinary events for the app.
+    pub fn round_trip_probe_poll(&mut self, reply: &mut ProbeReply) -> Result<bool> {
+        let (_, ids) = self.inbox(
+            std::mem::replace(&mut reply.response, Err("taken".into())).map_err(Error::Network)?,
+            reply.wait.time,
+            true,
+        )?;
+        if !ids.is_empty() {
+            self.persist()?;
+            self.unacked.extend(ids);
+        }
+        Ok(self.state.contacts.get(&reply.user).is_some_and(|c| c.probe_service && c.probe_reply_tag != reply.ticket))
+    }
+
+    /// Continues waiting when unrelated mail woke the first long poll.
+    pub fn round_trip_probe_wait(&mut self, user: &ProbeReply, timeout_ms: u64) -> Result<Probe> {
+        self.acknowledge_inbox()?;
+        let wait = self.probe_wait(timeout_ms);
+        self.persist()?; // Reserve the signed request before another process can sign.
+        let sending = wait.clone();
+        let (received, response) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let _ = received.send(sending.send());
+        });
+        Ok(Probe { began: user.began, user: user.user.clone(), ticket: user.ticket, wait, response })
+    }
+
+    /// Locally timed convenience API. No app events are taken from the inbox.
+    pub fn round_trip_probe(&mut self, target: &str, timeout_ms: u64) -> Result<Option<u64>> {
+        let mut probe = self.round_trip_probe_begin(target, timeout_ms)?;
+        let began = probe.began;
+        loop {
+            let Some(mut reply) = probe.receive(timeout_ms) else { return Ok(None) };
+            let done = self.round_trip_probe_poll(&mut reply)?;
+            let elapsed = began.elapsed().as_millis() as u64;
+            if done || elapsed >= timeout_ms {
+                return Ok((done && elapsed < timeout_ms).then_some(elapsed));
+            }
+            probe = self.round_trip_probe_wait(&reply, timeout_ms - elapsed)?;
+        }
+    }
+
     /// Sends a message: starts writing to the user if this device has not yet (spec 4.2).
     pub fn send(&mut self, to: &str, content: Content) -> Result<Vec<Event>> {
         let result = self.send_inner(to, content);
@@ -3231,7 +3430,20 @@ impl Client {
         }
     }
 
+    /// Answers a Yo just received by sync, before its deferred maintenance. No inbox fetch.
+    pub fn echo_yo(&mut self, user: &str) -> Result<Vec<Event>> {
+        if Handle::parse(user)?.kind != KIND_USER {
+            return Err(Error::Protocol("echo requires a user id"));
+        }
+        let result = self.send_inner_ready(user, Content::Yo, false);
+        self.finish_sent(result)
+    }
+
     fn send_inner(&mut self, to: &str, content: Content) -> Result<()> {
+        self.send_inner_ready(to, content, true)
+    }
+
+    fn send_inner_ready(&mut self, to: &str, content: Content, catch_up: bool) -> Result<()> {
         let handle = Handle::parse(to)?;
         if self.is_me(&handle) {
             return Err(Error::Protocol("sending to oneself"));
@@ -3239,7 +3451,9 @@ impl Client {
         if !shown(&content) {
             return Err(Error::Protocol("not content to send"));
         }
-        self.catch_up()?;
+        if catch_up {
+            self.catch_up()?;
+        }
         let user = self.send_target(&handle)?;
         self.check_sendable(user.as_deref())?;
         let peer = match user.filter(|u| self.has_chat(u)) {
@@ -3740,6 +3954,7 @@ impl Client {
         self.state
             .contacts
             .iter()
+            .filter(|(_, c)| !c.probe_service)
             .map(|(user, c)| ContactInfo {
                 user: user.clone(),
                 handles: c.handles.clone(),
@@ -3951,16 +4166,47 @@ impl Client {
         }
     }
 
+    /// Signs a read-only connectivity check; preserves the device signing clock.
+    pub fn status_probe_begin(&mut self) -> Result<StatusProbe> {
+        let (headers, _) = self.sign("GET", api::CERTIFICATE, &[]);
+        self.persist()?;
+        Ok(StatusProbe { transport: self.transport.clone(), headers })
+    }
+
     /// Signs feedback on the app for the operator (spec 6.3), to send without the client (`FeedbackRequest::send`).
     /// The text goes as written, readable by the hub: not end-to-end encrypted. Empty text, or text or version too
     /// long, is refused here.
     pub fn feedback_begin(&mut self, text: &str, app_version: &str) -> Result<FeedbackRequest> {
+        self.support_message_begin(text, app_version, api::FEEDBACK)
+    }
+    pub fn send_support_begin(&mut self, text: &str, app_version: &str) -> Result<FeedbackRequest> {
+        self.support_message_begin(text, app_version, api::SUPPORT)
+    }
+    fn support_message_begin(&mut self, text: &str, app_version: &str, path: &'static str) -> Result<FeedbackRequest> {
         let feedback = api::Feedback { text: text.as_bytes().into(), app_version: app_version.as_bytes().into() };
         feedback.check().map_err(|_| Error::Protocol("feedback empty or too long"))?;
         let body = encode(&feedback);
-        let (headers, _) = self.sign("POST", api::FEEDBACK, &body);
+        let (headers, _) = self.sign("POST", path, &body);
         self.persist()?;
-        Ok(FeedbackRequest { transport: self.transport.clone(), headers, body })
+        Ok(FeedbackRequest { path, transport: self.transport.clone(), headers, body })
+    }
+
+    /// Signs a thread fetch or a bounded read marker; transport runs outside the shared state lock.
+    pub fn support_begin(&mut self, through: Option<u64>) -> Result<SupportRequest> {
+        let body = through.map(|through| encode(&api::SupportRead { through })).unwrap_or_default();
+        let (headers, _) = self.sign(
+            if through.is_some() { "POST" } else { "GET" },
+            if through.is_some() { api::SUPPORT_READ } else { api::SUPPORT },
+            &body,
+        );
+        self.persist()?;
+        Ok(SupportRequest { transport: self.transport.clone(), headers, body, mark: through.is_some() })
+    }
+    pub fn support_thread(&mut self) -> Result<api::SupportThread> {
+        self.support_begin(None)?.thread()
+    }
+    pub fn support_read(&mut self, through: u64) -> Result<()> {
+        self.support_begin(Some(through))?.read()
     }
 
     /// `feedback_begin` and its send, holding the client throughout.

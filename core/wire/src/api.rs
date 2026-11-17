@@ -56,6 +56,8 @@ pub fn anonymous(method: &str, path: &str) -> bool {
     (method == "POST" && path.starts_with(&format!("{INBOX}/")) && path != INBOX_ACK)
         || path.starts_with(&format!("{BLOBS}/"))
         || path == CRASH
+        || path == "/v1/errors"
+        || path == "/v1/diagnostics/crash"
 }
 
 pub fn deliver_path(user: &UserId) -> String {
@@ -662,4 +664,26 @@ mod tests {
         assert!(deliver_path(&[0; 16]).starts_with("/v1/inbox/AAAA"));
         assert_eq!(backup_path(&[0; 16]), "/v1/backup/AAAAAAAAAAAAAAAAAAAAAA");
     }
+}
+
+/// Support messages are plaintext for the Yo team. Zero read_at means unread.
+pub const SUPPORT: &str = "/v1/support";
+pub const SUPPORT_READ: &str = "/v1/support/read";
+#[derive(Debug, Clone, TlsSerialize, TlsDeserializeBytes, TlsSize)]
+pub struct SupportMessage {
+    pub id: u64,
+    pub from_team: u8,
+    pub text: VLBytes,
+    pub created_at: u64,
+    pub read_at: u64,
+}
+#[derive(Debug, Clone, TlsSerialize, TlsDeserializeBytes, TlsSize)]
+pub struct SupportThread {
+    pub messages: Vec<SupportMessage>,
+    pub unread: u32,
+}
+/// Mark only the displayed messages through this id read.
+#[derive(Debug, Clone, TlsSerialize, TlsDeserializeBytes, TlsSize)]
+pub struct SupportRead {
+    pub through: u64,
 }

@@ -1,5 +1,6 @@
 //! The core for Swift and Kotlin (UniFFI). The apps supply HTTP and a place for one sealed blob; everything else
-//! is `yo-core`. Every call blocks: run it off the main thread.
+//! is `yo-core`. Network/client calls block: run them off the main thread. The pure `YoList` presentation model
+//! is synchronous and can be called on the UI thread.
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, OnceLock, PoisonError};
@@ -7,6 +8,9 @@ use yo_core::backup::Door;
 use yo_core::{Client, Content, Event, Sent};
 
 uniffi::setup_scaffolding!();
+
+mod list;
+pub use list::*;
 
 #[derive(Debug, thiserror::Error, uniffi::Error)]
 pub enum YoError {
@@ -62,6 +66,20 @@ impl From<yo_core::Error> for YoError {
             other => YoError::Protocol { message: other.to_string() },
         }
     }
+}
+
+#[derive(uniffi::Record)]
+pub struct SupportMessage {
+    pub id: u64,
+    pub from_team: bool,
+    pub text: String,
+    pub created_at: u64,
+    pub read_at: u64,
+}
+#[derive(uniffi::Record)]
+pub struct SupportThread {
+    pub messages: Vec<SupportMessage>,
+    pub unread: u32,
 }
 
 #[derive(uniffi::Record)]
@@ -383,6 +401,9 @@ pub struct YoGroup {
 /// This device's security now, for Settings › Encryption's live checks (`Client::security_status`).
 #[derive(uniffi::Record)]
 pub struct SecurityStatus {
+    /// Public identity keys only, hex encoded.
+    pub account_key: String,
+    pub device_key: String,
     /// One-time prekeys the hub still has for this device.
     pub prekeys_at_hub: u32,
     /// A refill made and not yet taken by the hub.
@@ -591,6 +612,7 @@ pub struct YoClient {
     shared: OnceLock<Arc<dyn StateLock>>,
     /// The state went away under this client (`with`).
     closed: AtomicBool,
+    probe: Mutex<()>,
 }
 
 impl YoClient {
@@ -600,6 +622,7 @@ impl YoClient {
             client: Mutex::new(client),
             shared: OnceLock::new(),
             closed: AtomicBool::new(false),
+            probe: Mutex::new(()),
         })
     }
 
@@ -678,6 +701,23 @@ impl YoClient {
 
 #[uniffi::export]
 impl YoClient {
+    /// A silent Yo-to-Yo probe. Each step releases the shared state lock; ordinary
+    /// inbox consumers continue receiving their events while this call waits.
+    pub fn round_trip_probe(&self, target: String, timeout_ms: u64) -> Result<Option<u64>, YoError> {
+        let _probe = self.probe.try_lock().map_err(|_| YoError::State)?;
+        let mut probe = self.with(|c| c.round_trip_probe_begin(&target, timeout_ms))??;
+        let began = probe.began;
+        loop {
+            let Some(mut reply) = probe.receive(timeout_ms) else { return Ok(None) };
+            let done = self.with(|c| c.round_trip_probe_poll(&mut reply))??;
+            let elapsed = began.elapsed().as_millis() as u64;
+            if done || elapsed >= timeout_ms {
+                return Ok((done && elapsed < timeout_ms).then_some(elapsed));
+            }
+            probe = self.with(|c| c.round_trip_probe_wait(&reply, timeout_ms - elapsed))??;
+        }
+    }
+
     /// Signed out: this client stops, after the step under way (if any) has ended; from then on it saves nothing and
     /// every step fails with `State`. So a call still on its way cannot write over the next account's state.
     pub fn close(&self) {
@@ -863,7 +903,7 @@ impl YoClient {
     }
 
     /// Writes a change of the friends, blocks or icon to the hub now, not with the inbox's next answer: right after
-    /// `set_friend`, `remove_friend`, `set_blocked`, `set_app_icon`.
+    /// `set_friend`, `remove_friend`, `set_blocked`, `set_app_icon`, `set_left_handed`.
     pub fn write_storage(&self) -> Result<(), YoError> {
         Ok(self.with(|c| c.write_storage())??)
     }
@@ -911,6 +951,12 @@ impl YoClient {
         }
     }
 
+    /// A signed read-only hub check, without holding the client during the request.
+    pub fn status_probe(&self) -> Result<u16, YoError> {
+        let probe = self.with(|c| c.status_probe_begin())??;
+        Ok(probe.send()?)
+    }
+
     /// Pins the hub's public keys the app ships for this hub (spec 6.10: the current one and a spare): from now on, an
     /// answer that hands out keys counts only signed by one of them. Called right after the client is made
     /// (`Hub.pin` in the app).
@@ -937,6 +983,8 @@ impl YoClient {
     pub fn security_status(&self) -> SecurityStatus {
         self.with(|c| c.security_status())
             .map(|s| SecurityStatus {
+                account_key: s.account_key,
+                device_key: s.device_key,
                 prekeys_at_hub: s.prekeys_at_hub,
                 refill_pending: s.refill_pending,
                 signed_prekey_days: s.signed_prekey_days,
@@ -947,6 +995,8 @@ impl YoClient {
                 hub_signed: s.hub_signed,
             })
             .unwrap_or(SecurityStatus {
+                account_key: String::new(),
+                device_key: String::new(),
                 prekeys_at_hub: 0,
                 refill_pending: false,
                 signed_prekey_days: 0,
@@ -1044,7 +1094,7 @@ impl YoClient {
         Ok(self.with(|c| c.remove_friend(&user))??)
     }
 
-    /// When the hub last held all of the stored friends, blocks and icon (ms since 1970); none while a change waits
+    /// When the hub last held all of the stored friends, blocks and settings (ms since 1970); none while a change waits
     /// to go up (it goes with the next `sync` or `maintenance`).
     pub fn storage_saved_at(&self) -> Result<Option<u64>, YoError> {
         self.with(|c| c.storage_saved_at())
@@ -1061,6 +1111,17 @@ impl YoClient {
         _ = self.with(|c| c.set_app_icon(icon));
     }
 
+    /// Left-handed mode as stored; none until chosen.
+    pub fn left_handed(&self) -> Option<bool> {
+        self.with(|c| c.left_handed()).ok().flatten()
+    }
+
+    /// Stores left-handed mode for the account's other and next phones.
+    pub fn set_left_handed(&self, left_handed: bool) {
+        // Kept in memory if not saved: it goes with the next save.
+        _ = self.with(|c| c.set_left_handed(left_handed));
+    }
+
     /// Reports a user to the operator. `NotOnYo`: no such user.
     pub fn report(&self, who: String, reason: ReportReason) -> Result<(), YoError> {
         Ok(self.with(|c| c.report(&who, reason.into()))??)
@@ -1071,6 +1132,33 @@ impl YoClient {
     pub fn send_feedback(&self, text: String, app_version: String) -> Result<(), YoError> {
         let request = self.with(|c| c.feedback_begin(&text, &app_version))??;
         Ok(request.send()?)
+    }
+
+    pub fn send_support(&self, text: String, app_version: String) -> Result<(), YoError> {
+        let request = self.with(|c| c.send_support_begin(&text, &app_version))??;
+        Ok(request.send()?)
+    }
+    pub fn support_thread(&self) -> Result<SupportThread, YoError> {
+        let request = self.with(|c| c.support_begin(None))??;
+        let thread = request.thread()?;
+        Ok(SupportThread {
+            unread: thread.unread,
+            messages: thread
+                .messages
+                .into_iter()
+                .map(|m| SupportMessage {
+                    id: m.id,
+                    from_team: m.from_team == 1,
+                    text: String::from_utf8_lossy(m.text.as_slice()).into_owned(),
+                    created_at: m.created_at,
+                    read_at: m.read_at,
+                })
+                .collect(),
+        })
+    }
+    pub fn support_read(&self, through: u64) -> Result<(), YoError> {
+        let request = self.with(|c| c.support_begin(Some(through)))??;
+        Ok(request.read()?)
     }
 
     /// Deletes the account at the hub with everything it holds about it; then forget this client and its state.

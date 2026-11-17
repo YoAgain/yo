@@ -872,7 +872,8 @@ impl Client {
                 }
             }
         }
-        if keep && !self.state.own.is_empty() {
+        let probe = group.is_none() && users.iter().any(|u| self.probe_service(u));
+        if keep && !probe && !self.state.own.is_empty() {
             let me = self.state.user_id.clone();
             let to = match (&group, users.as_slice()) {
                 (None, [user]) => Some(user_bytes(user)?),

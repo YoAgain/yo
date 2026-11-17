@@ -6,6 +6,9 @@ use crate::Client;
 /// A device's security as it stands now.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct SecurityStatus {
+    /// Public account and device identity keys (hex); never secret material.
+    pub account_key: String,
+    pub device_key: String,
     /// One-time prekeys (of the scarcer kind, classic or Kyber) the hub still has to hand out for this device.
     pub prekeys_at_hub: u32,
     /// A refill made and not yet taken by the hub (sent again with the next sync).
@@ -39,6 +42,8 @@ impl SecurityStatus {
 impl Client {
     pub fn security_status(&self) -> SecurityStatus {
         let mut status = SecurityStatus {
+            account_key: crate::hex(&self.my_account_key()),
+            device_key: crate::hex(&self.state.device_key),
             prekeys_at_hub: self.state.prekeys.left,
             refill_pending: self.state.prekeys.upload.is_some(),
             signed_prekey_days: SecurityStatus::days(self.state.prekeys.signed_at, (self.clock)()),

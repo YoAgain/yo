@@ -1,5 +1,5 @@
 //! The account's storage at the hub (spec 6.9): what the user keeps beside the chats (friends with the name and
-//! colour shown for them, blocks, the app's icon, profile keys, the groups' master keys) in one blob sealed under a key derived from the account key, so a
+//! colour shown for them, blocks, the app's icon, left-handed mode, profile keys, the groups' master keys) in one blob sealed under a key derived from the account key, so a
 //! new phone restored from the backup (or the iCloud Keychain) gets it back, and the hub reads none of it.
 //!
 //! Every field carries the time it was set; two versions merge field by field, the later one winning, and friends are
@@ -197,6 +197,9 @@ pub struct Storage {
     /// The app's icon: none (the default) or its name ("Negative", "Original").
     #[serde(default)]
     pub icon: Field<Option<String>>,
+    /// Left-handed mode: none until a device chooses it.
+    #[serde(default)]
+    pub left_handed: Field<Option<bool>>,
     /// This account's profile key (base64url), as Signal keeps it in its storage: a new phone goes on with it, so
     /// what its contacts hold stays good and nothing of theirs becomes a request (spec 4.10).
     #[serde(default, rename = "pk", skip_serializing_if = "Field::unset")]
@@ -223,6 +226,7 @@ impl Storage {
             self.friends.entry(user.clone()).or_default().merge(friend);
         }
         self.icon.merge(&other.icon);
+        self.left_handed.merge(&other.left_handed);
         self.profile_key.merge(&other.profile_key);
         self.profile_key_gen.merge(&other.profile_key_gen);
         for (user, key) in &other.keys {
@@ -320,6 +324,9 @@ impl Client {
     /// the next `sync` or `maintenance`.
     pub fn set_friend(&mut self, user: &str, name: Option<String>, color: Option<u8>) -> Result<()> {
         crate::user_bytes(user)?;
+        if self.probe_service(user) {
+            return Ok(());
+        }
         if name.as_ref().is_some_and(|n| n.len() > MAX_FRIEND_NAME) {
             return Err(Error::Protocol("friend's name too long"));
         }
@@ -365,6 +372,19 @@ impl Client {
         Ok(())
     }
 
+    /// Left-handed mode as kept in the storage: none until chosen.
+    pub fn left_handed(&self) -> Option<bool> {
+        self.state.storage.left_handed.value
+    }
+
+    pub fn set_left_handed(&mut self, left_handed: bool) -> Result<()> {
+        if self.state.storage.left_handed.value != Some(left_handed) {
+            self.state.storage.left_handed.set(Some(left_handed), crate::wall_ms());
+            return self.storage_changed();
+        }
+        Ok(())
+    }
+
     /// A block or unblock, kept in the storage too (`set_blocked`).
     pub(crate) fn storage_block(&mut self, user: &str, blocked: bool) {
         let friend = self.state.storage.friends.entry(user.to_owned()).or_default();
@@ -393,6 +413,9 @@ impl Client {
 
     /// A contact's profile key as this device has it now (none: forgotten), into the storage.
     pub(crate) fn store_key(&mut self, user: &str, key: Option<[u8; 32]>) {
+        if self.probe_service(user) {
+            return;
+        }
         let value = key.map(|key| yo_wire::b64(&key));
         let field = self.state.storage.keys.entry(user.to_owned()).or_default();
         if field.value != value || field.unset() {
@@ -738,10 +761,12 @@ mod tests {
     fn merging_takes_the_union_and_the_later_field() {
         let mut a = Storage::default();
         a.friends.insert("aa".into(), friend("Leo", 5));
+        a.left_handed = Field { value: Some(true), at: 4 };
         a.icon = Field { value: Some("Negative".into()), at: 9 };
         let mut b = Storage::default();
         b.friends.insert("aa".into(), Friend { blocked: Field { value: true, at: 7 }, ..friend("Leonard", 3) });
         b.friends.insert("bb".into(), friend("Mia", 1));
+        b.left_handed = Field { value: Some(false), at: 9 };
         b.icon = Field { value: Some("Original".into()), at: 4 };
         let mut ab = a.clone();
         ab.merge(&b);
@@ -751,7 +776,23 @@ mod tests {
         assert_eq!(ab.friends.len(), 2);
         assert_eq!(ab.friends["aa"].name.value.as_deref(), Some("Leo"), "the later name");
         assert!(ab.friends["aa"].blocked.value, "the block from the other side");
+        assert_eq!(ab.left_handed.value, Some(false));
         assert_eq!(ab.icon.value.as_deref(), Some("Negative"));
+    }
+
+    #[test]
+    fn left_handed_round_trips_and_old_storage_opens() {
+        let key = [1; 32];
+        let old =
+            seal_padded(&self::key(&key), b"yo storage v1user", br#"{"version":3,"icon":["Negative",9]}"#).unwrap();
+        let old = open(&key, b"user", &old).unwrap();
+        assert_eq!(old.left_handed.value, None);
+        assert_eq!(old.icon.value.as_deref(), Some("Negative"));
+        for value in [None, Some(false), Some(true)] {
+            let storage = Storage { left_handed: Field { value, at: 10 }, ..Storage::default() };
+            let sealed = seal(&key, b"user", &storage).unwrap();
+            assert_eq!(open(&key, b"user", &sealed).unwrap(), storage);
+        }
     }
 
     /// Fields of a later version merged by their value: `["z", 1]` beat `["a", 2]`, and an object of them was taken

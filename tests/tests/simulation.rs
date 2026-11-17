@@ -37,6 +37,7 @@ fn collect(events: Vec<Event>, received: &mut BTreeMap<String, Vec<(String, Stri
 }
 
 fn run(seed: u64, clients: usize, steps: usize) {
+    simulate_list(seed, steps);
     let hub = TestHub::start();
     let mut rng = Rng(seed.max(1));
     let base = random_u64() % 1_000_000_000;
@@ -226,5 +227,47 @@ fn many_clients_at_once() {
     for receiver in receivers {
         let (i, yos, dropped) = receiver.join().unwrap();
         assert_eq!((yos, dropped), (3, 0), "client {i}");
+    }
+}
+
+/// Replay the UI inputs alongside each network seed. Two clocks with different tick
+/// cadence must produce identical rows, and pauses must never spend visible time.
+fn simulate_list(seed: u64, steps: usize) {
+    use yo_core::list::{Friend, Input, Kind, List};
+    let mut rng = Rng(seed.max(1));
+    let mut a = List::new();
+    let mut b = List::new();
+    let friends = (0..8)
+        .map(|i| Friend { id: i.to_string(), name: format!("ROW{i}"), request: false, group: false })
+        .collect::<Vec<_>>();
+    for list in [&mut a, &mut b] {
+        list.apply(0, Input::Friends(friends.clone()));
+    }
+    let mut now = 0;
+    for step in 0..steps {
+        let jump = rng.below(2000);
+        // b receives no intermediate ticks; a does. Timers are input-clock based.
+        a.apply(now + jump / 2, Input::Tick);
+        now += jump;
+        let id = rng.below(8).to_string();
+        let input = match rng.below(12) {
+            0 => Input::Camera(true),
+            1 => Input::Camera(false),
+            2 => Input::Foreground(false),
+            3 => Input::Foreground(true),
+            4 => Input::RowsVisible(vec![id.clone()]),
+            5 => Input::Press { id: id.clone(), down: true },
+            6 => Input::Press { id: id.clone(), down: false },
+            7 => Input::Recording(Some(id.clone())),
+            8 => Input::Recording(None),
+            9 => Input::SendFinished { id: id.clone(), kind: Kind::Photo },
+            _ => Input::Received { id, kind: Kind::Yo, token: step.to_string(), sender: None },
+        };
+        let left = a.apply(now, input.clone());
+        let right = b.apply(now, input);
+        assert_eq!(left, right, "list seed {seed} step {step}");
+        assert_eq!(left.rows.len(), 8);
+        let unique: std::collections::BTreeSet<_> = left.rows.iter().map(|r| &r.id).collect();
+        assert_eq!(unique.len(), 8, "list seed {seed} duplicate row");
     }
 }

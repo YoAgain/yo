@@ -135,6 +135,11 @@ pub struct Slot {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Contact {
+    /// Reserved PING service: protocol routing only, never an app contact or synced key.
+    #[serde(default)]
+    pub probe_service: bool,
+    #[serde(default)]
+    pub probe_reply_tag: [u8; 32],
     /// The account key pinned on first contact, or the one confirmed after a change.
     pub account_key: Key,
     pub name: Option<String>,
@@ -207,6 +212,8 @@ impl Contact {
     /// A contact known by its user id only, no key pinned yet.
     pub fn unknown() -> Contact {
         Contact {
+            probe_service: false,
+            probe_reply_tag: [0; 32],
             account_key: [0; 32],
             name: None,
             verified: false,

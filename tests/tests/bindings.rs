@@ -1184,3 +1184,70 @@ fn a_refused_shared_turn_can_be_retried() {
     assert!(lock.unlocks.load(Ordering::Relaxed) > 0);
     assert!(!*disk.held.lock().unwrap());
 }
+
+#[test]
+fn roundtrip_binding_serializes_runs_and_leaves_no_contact_or_app_event() {
+    use std::time::{Duration, Instant};
+    let hub = TestHub::start();
+    let a = client(&hub, "PROBER", "", Arc::new(File::default()));
+    a.set_trust_roots(vec![yo_tests::trust_root().to_vec()]).unwrap();
+    a.set_requests_open(false).unwrap();
+    let mut ping = yo_tests::register(Http::new(hub.url()), "PING", None);
+    let probing = a.clone();
+    let worker = std::thread::spawn(move || probing.round_trip_probe("PING".into(), 3000));
+    let began = Instant::now();
+    loop {
+        if ping
+            .sync(0)
+            .unwrap()
+            .iter()
+            .any(|e| matches!(e, yo_core::Event::Message { content: yo_core::Content::Yo, .. }))
+        {
+            break;
+        }
+        assert!(began.elapsed() < Duration::from_secs(3));
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    assert!(matches!(a.round_trip_probe("PING".into(), 3000), Err(yo::YoError::State)));
+    ping.send_yo(&a.user_id()).unwrap();
+    assert!(worker.join().unwrap().unwrap().is_some());
+    assert!(a.contacts().is_empty());
+    assert!(a.friends().is_empty());
+    assert!(a.sync(0).unwrap().is_empty());
+}
+
+#[test]
+fn the_app_layer_reads_and_marks_support_replies() {
+    let config =
+        yo_hub::config::Config { admin_token: Some("test-token".into()), ..yo_hub::config::Config::for_tests() };
+    let hub = TestHub::start_with(config, "127.0.0.1:0");
+    let a = client(&hub, &username(random_u64() % 1_000_000_000), "Test", Arc::new(File::default()));
+    a.send_support("hello 🎨".into(), "1".into()).unwrap();
+    let http = reqwest::blocking::Client::new();
+    let threads: serde_json::Value = http
+        .get(format!("{}/v1/admin/messages", hub.url()))
+        .header("yo-admin-token", "test-token")
+        .send()
+        .unwrap()
+        .json()
+        .unwrap();
+    let user =
+        threads.as_array().unwrap().iter().find(|t| t["user_id"] != "team").unwrap()["user_id"].as_str().unwrap();
+    assert_eq!(
+        http.post(format!("{}/v1/admin/messages/{user}", hub.url()))
+            .header("yo-admin-token", "test-token")
+            .body("Hello from the team")
+            .send()
+            .unwrap()
+            .status(),
+        204
+    );
+    let thread = a.support_thread().unwrap();
+    assert_eq!(thread.unread, 1);
+    assert_eq!(thread.messages.len(), 2);
+    assert!(!thread.messages[0].from_team);
+    assert!(thread.messages[1].from_team);
+    assert_eq!(thread.messages[0].text, "hello 🎨");
+    a.support_read(thread.messages[1].id).unwrap();
+    assert_eq!(a.support_thread().unwrap().unread, 0);
+}

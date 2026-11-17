@@ -93,6 +93,13 @@ fn signed_routes(me: &str) -> Vec<(&'static str, String, Vec<u8>)> {
             api::FEEDBACK.into(),
             encode(&api::Feedback { text: b"hi".to_vec().into(), app_version: b"1".to_vec().into() }),
         ),
+        ("GET", api::SUPPORT.into(), Vec::new()),
+        ("POST", api::SUPPORT_READ.into(), encode(&api::SupportRead { through: 0 })),
+        (
+            "POST",
+            api::SUPPORT.into(),
+            encode(&api::Feedback { text: b"hi".to_vec().into(), app_version: Vec::new().into() }),
+        ),
         ("DELETE", api::ACCOUNT.into(), Vec::new()),
     ]
 }
@@ -986,4 +993,102 @@ fn delivery_urgency_selects_alert_or_background_and_defaults_to_alert() {
         .0,
         status::BAD_REQUEST
     );
+}
+
+#[test]
+fn support_threads_are_private_and_read_markers_are_bounded() {
+    let config = Config { admin_token: Some("test-token".into()), ..Config::for_tests() };
+    let hub = TestHub::start_with(config, "127.0.0.1:0");
+    let (mut a, _, _) = account(&hub);
+    let (mut b, _, _) = account(&hub);
+    a.send_feedback("hello 🎨", "1").unwrap();
+    assert!(b.support_thread().unwrap().messages.is_empty());
+    let headers = [("yo-admin-token", "test-token".into())];
+    assert_eq!(raw(&hub, "GET", "/v1/admin/messages", &[], vec![]).0, 404);
+    let (_, body) = raw(&hub, "GET", "/v1/admin/messages", &headers, vec![]);
+    let threads: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(threads[1]["unread"], 1);
+    assert_eq!(threads[0]["name"], "Team To-Dos");
+    let (_, empty) = raw(&hub, "GET", "/v1/admin/messages/team", &headers, vec![]);
+    assert_eq!(serde_json::from_slice::<serde_json::Value>(&empty).unwrap()["messages"], serde_json::json!([]));
+    let path = format!("/v1/admin/messages/{}", threads[1]["user_id"].as_str().unwrap());
+    assert_eq!(raw(&hub, "POST", &path, &headers, b"team reply".to_vec()).0, 204);
+    let first = a.support_thread().unwrap();
+    assert_eq!(first.unread, 1);
+    assert_eq!(first.messages.len(), 2);
+    assert_eq!(first.messages[1].text.as_slice(), b"team reply");
+    assert_eq!(raw(&hub, "POST", &path, &headers, b"later reply".to_vec()).0, 204);
+    a.support_read(first.messages[1].id).unwrap();
+    assert_eq!(a.support_thread().unwrap().unread, 1, "reply arriving after fetch stays unread");
+    b.support_read(u64::MAX >> 1).unwrap();
+    assert_eq!(a.support_thread().unwrap().unread, 1, "another account cannot mark this thread read");
+    let handled = format!("{path}/handled");
+    assert_eq!(raw(&hub, "POST", &handled, &headers, first.messages[0].id.to_string().into_bytes()).0, 204);
+    let (_, body) = raw(&hub, "GET", "/v1/admin/messages", &headers, vec![]);
+    let threads: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(threads[1]["unread"], 0);
+    for message in &first.messages {
+        let done = format!("/v1/admin/messages/done/{}", message.id);
+        assert_eq!(raw(&hub, "POST", &done, &[], b"1".to_vec()).0, 404);
+        assert_eq!(raw(&hub, "POST", &done, &headers, b"bad".to_vec()).0, 400);
+        for value in [b"1", b"0"] {
+            assert_eq!(raw(&hub, "POST", &done, &headers, value.to_vec()).0, 204);
+            let (_, body) = raw(&hub, "GET", &path, &headers, vec![]);
+            let thread: serde_json::Value = serde_json::from_slice(&body).unwrap();
+            let row = thread["messages"].as_array().unwrap().iter().find(|m| m["id"] == message.id).unwrap();
+            assert_eq!(row["done_at"].is_null(), value == b"0");
+        }
+    }
+    assert_eq!(a.support_thread().unwrap().unread, 1);
+    assert_eq!(raw(&hub, "POST", "/v1/admin/todos", &headers, b"team task".to_vec()).0, 201);
+    let (_, body) = raw(&hub, "GET", "/v1/admin/messages/team", &headers, vec![]);
+    let team: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    let done = format!("/v1/admin/messages/done/{}", team["messages"][0]["id"]);
+    assert_eq!(raw(&hub, "POST", &done, &headers, b"1".to_vec()).0, 204);
+    assert_eq!(raw(&hub, "POST", &path, &headers, vec![b'x'; 2001]).0, 400);
+    assert_eq!(raw(&hub, "GET", "/v1/admin/messages/invalid", &headers, vec![]).0, 400);
+}
+
+#[test]
+fn support_and_legacy_feedback_share_the_user_rate_limit() {
+    let hub = hub_with(|limits| limits.feedback_per_user_day = 2);
+    let (mut a, _, _) = account(&hub);
+    let (mut b, _, _) = account(&hub);
+    a.send_support_begin("new route", "1").unwrap().send().unwrap();
+    a.send_feedback("legacy route", "1").unwrap();
+    assert_eq!(a.send_support_begin("limited", "1").unwrap().send(), Err(Error::Refused(status::RATE_LIMITED)));
+    b.send_support_begin("separate user", "1").unwrap().send().unwrap();
+    assert_eq!(a.support_thread().unwrap().messages.len(), 2);
+    assert_eq!(
+        signed(&mut a, "POST", api::SUPPORT_READ, &encode(&api::SupportRead { through: u64::MAX })).0,
+        status::BAD_REQUEST
+    );
+}
+
+#[test]
+fn diagnostics_are_anonymous_count_all_and_admin_ticks_require_a_token() {
+    let mut config = Config::for_tests();
+    config.admin_token = Some("test-token".into());
+    config.limits.crash_per_ip_day = 1;
+    let hub = TestHub::start_with(config, "127.0.0.1:0");
+    let error = serde_json::json!({"domain":"network", "code":"timeout", "place":"sync", "app":"ios/1", "os":"26", "model":"iPhone"}).to_string().into_bytes();
+    for _ in 0..12 {
+        assert_eq!(raw(&hub, "POST", "/v1/errors", &[], error.clone()).0, status::NO_CONTENT);
+    }
+    for body in [b"{}".to_vec(), b"null".to_vec(), b"{bad".to_vec(), serde_json::json!({"app":"ios/1","os":"26","model":"iPhone","domain":"test","code":"1","place":"sync","user":"forbidden"}).to_string().into_bytes()] {
+        assert_eq!(raw(&hub, "POST", "/v1/errors", &[], body).0, status::BAD_REQUEST);
+    }
+    assert_eq!(raw(&hub, "POST", "/v1/errors", &[], vec![b'x'; 60 * 1024 + 1]).0, 413);
+    let path = "/v1/admin/diagnostics";
+    assert_eq!(raw(&hub, "GET", path, &[], vec![]).0, 404);
+    assert_eq!(raw(&hub, "PUT", path, &[("Yo-Admin-Token", "wrong".into())], b"{}".to_vec()).0, 404);
+    let headers = [("Yo-Admin-Token", "test-token".into())];
+    let (status, body) = raw(&hub, "GET", path, &headers, vec![]);
+    assert_eq!(status, 200);
+    let rows: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(rows[0]["count"], 12);
+    let (status, body) =
+        raw(&hub, "PUT", path, &headers, serde_json::json!({"id":rows[0]["id"],"done":true}).to_string().into_bytes());
+    assert_eq!(status, 200);
+    assert_eq!(serde_json::from_slice::<serde_json::Value>(&body).unwrap()[0]["done"], true);
 }

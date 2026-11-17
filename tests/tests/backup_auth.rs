@@ -146,8 +146,8 @@ fn what_k_and_the_storage_key_seal_lands_on_the_sizes() {
     let hub = TestHub::start();
     let mut t = register(&hub);
     let mut seen = std::collections::BTreeSet::new();
-    for round in 0..3 {
-        for i in 0..40 {
+    for (round, count) in [1, 10, 40, 160].into_iter().enumerate() {
+        for i in 0..count {
             t.set_friend(&format!("{:032x}", round * 1000 + i), Some(format!("Friend number {i}")), Some(1)).unwrap();
         }
         t.maintenance().unwrap();
@@ -156,5 +156,5 @@ fn what_k_and_the_storage_key_seal_lands_on_the_sizes() {
         assert!(SEALED_SIZES.contains(&stored.data.as_slice().len()), "{}", stored.data.as_slice().len());
         seen.insert(stored.data.as_slice().len());
     }
-    assert!(seen.len() > 1, "grew past a bucket: {seen:?}");
+    assert_eq!(seen, SEALED_SIZES.into_iter().collect(), "grew through every bucket");
 }
