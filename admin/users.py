@@ -51,6 +51,7 @@ SELECT r.reporter_id, (SELECT coalesce(spelling, value) FROM handles WHERE user_
 FROM reports r ORDER BY r.created_at DESC LIMIT ?
 """
 REASONS = {1: "spam", 2: "abuse", 3: "other"}
+PUSH = {0: None, 1: "APNs", 2: "APNs (sandbox)", 3: "FCM"}
 
 # Feedback sent from the apps (not end-to-end encrypted: meant for us), newest first.
 FEEDBACK = """
@@ -153,6 +154,18 @@ def hub(name: str, path: str) -> dict:
             for uid, created, name, devices, seen, platform, push_token, backup, queued, app
             in db.execute(USERS if has_app else USERS.replace("max(d.app)", "NULL"), (LIMIT,))
         ], [])
+        # Each user's devices, for the user panel: when added, last seen (to the day), push service, app build.
+        device_list = part("device_list", lambda: [
+            (uid.hex(), {"created": created, "last_seen": seen, "push": PUSH.get(platform, str(platform)) if has_token else None,
+                         "app": text(app)})
+            for uid, created, seen, platform, has_token, app in db.execute(
+                "SELECT user_id, created_at, last_seen_at, push_platform, length(push_token) > 0, "
+                + ("app" if has_app else "NULL") + " FROM devices ORDER BY last_seen_at DESC")], [])
+        by_user = {}
+        for uid, d in device_list:
+            by_user.setdefault(uid, []).append(d)
+        for u in users:
+            u["device_list"] = by_user.get(u["id"], [])
         reports = part("reports", lambda: [
             {"id": a.hex()[:16] + b.hex()[:16], "reporter": a.hex(), "reporter_name": text(an), "reported": b.hex(), "reported_name": text(bn),
              "reason": REASONS.get(reason, str(reason)), "at": at}
@@ -214,7 +227,14 @@ def hub(name: str, path: str) -> dict:
                 "SELECT count(*), coalesce(sum(size), 0) FROM blobs").fetchone() if has_table(db, "blobs") else None),
             # Deliveries counted by the hub per hour (count only, kept 8 days); None on a hub without the table.
             "deliveries": part("deliveries", lambda: {"day": one(
-                "SELECT coalesce(sum(n), 0) FROM deliveries_hourly WHERE hour >= ?", now // 3600000 - 24)}
+                "SELECT coalesce(sum(n), 0) FROM deliveries_hourly WHERE hour >= ?", now // 3600000 - 24),
+                # Per hour, the last 24 (the current one last), for the overview's graph.
+                "hours": [dict(db.execute("SELECT hour, n FROM deliveries_hourly WHERE hour > ?", (now // 3600000 - 24,)).fetchall())
+                          .get(h, 0) for h in range(now // 3600000 - 23, now // 3600000 + 1)],
+                # Per UTC day, the last 14 (the hub keeps 8 days of hours: older days are None).
+                "days": [None if (midnight - i * DAY_MS) // 3600000 < now // 3600000 - 8 * 24 else one(
+                    "SELECT coalesce(sum(n), 0) FROM deliveries_hourly WHERE hour >= ? AND hour < ?",
+                    (midnight - i * DAY_MS) // 3600000, (midnight - (i - 1) * DAY_MS) // 3600000) for i in range(13, -1, -1)]}
                 if has_table(db, "deliveries_hourly") else None),
             "min_app": min_app(name),
             "yogpt_min": yogpt_min(),

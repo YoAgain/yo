@@ -1,4 +1,4 @@
-// Login: a word on why the last try did not work. Dashboard: the numbers, every three seconds.
+// Login: a word on why the last try did not work. Dashboard: the server every three seconds, the hubs every ten.
 const $ = (id) => document.getElementById(id);
 
 if (document.body.classList.contains("login")) {
@@ -6,15 +6,16 @@ if (document.body.classList.contains("login")) {
   if (q.includes("wrong")) { note.textContent = "Wrong user or password."; note.hidden = false; }
   if (q.includes("locked")) { note.textContent = "Too many tries. Wait 15 minutes."; note.hidden = false; }
 } else {
-  // A short history per tile (60 ticks of 3 s: three minutes), kept by the page only.
-  const history = {};
-  const keep = 60;
-  const remember = (key, v) => {
-    const h = (history[key] ||= []);
-    if (v != null && Number.isFinite(v)) { h.push(v); if (h.length > keep) h.shift(); }
-    return h;
+  // ---- small helpers ----------------------------------------------------------------------------------------------
+  const el = (tag, cls, text) => {
+    const e = document.createElement(tag);
+    if (cls) e.className = cls;
+    if (text != null) e.textContent = text;
+    return e;
   };
-
+  const set = (id, text) => { $(id).textContent = text; };
+  const part = (fn) => { try { fn(); } catch (e) { console.warn(e); } };
+  const state = (id, cls) => { $(id).classList.remove("ok", "bad", "warn"); if (cls) $(id).classList.add(cls); };
   const bytes = (n) => {
     if (n == null) return "–";
     const u = ["B", "KB", "MB", "GB", "TB"];
@@ -23,114 +24,100 @@ if (document.body.classList.contains("login")) {
     return `${n.toFixed(n < 10 && i ? 1 : 0)} ${u[i]}`;
   };
   const rate = (n) => (n == null ? "–" : `${bytes(n)}/s`);
+  const num = (n) => (n == null ? "–" : Number(n).toLocaleString());
   const span = (s) => {
     s = Math.floor(s);
     const d = Math.floor(s / 86400), h = Math.floor((s % 86400) / 3600), m = Math.floor((s % 3600) / 60);
     return d ? `${d} d ${h} h` : h ? `${h} h ${m} min` : `${m} min`;
   };
-  const up = (unix) => (unix ? `up ${span(Date.now() / 1000 - unix)}` : "–");
-  const set = (id, text) => { $(id).textContent = text; };
-  const gauge = (id, frac) => {
-    const el = $(id);
-    el.style.width = `${Math.min(100, Math.max(0, frac * 100)).toFixed(1)}%`;
-    el.classList.toggle("hot", frac > 0.9);
+  const date = (ms) => (ms ? new Date(ms).toLocaleString(undefined, { dateStyle: "medium", timeStyle: "short" }) : "–");
+  // "5 min ago", "3 h ago", "2 days", "3 weeks", "2 months"; the exact time goes in a tooltip.
+  const rel = (ms) => {
+    if (!ms) return "–";
+    const m = Math.max(0, (Date.now() - ms) / 60000), d = m / 1440;
+    if (m < 1) return "just now";
+    if (m < 60) return `${Math.floor(m)} min ago`;
+    if (d < 1) return `${Math.floor(m / 60)} h ago`;
+    const unit = (n, w) => `${n} ${w}${n === 1 ? "" : "s"} ago`;
+    if (d < 7) return unit(Math.floor(d), "day");
+    if (d < 60) return unit(Math.floor(d / 7), "week");
+    return unit(Math.floor(d / 30), "month");
   };
-  // The graph of a tile: an area from the right edge, scaled 0..max (or 0..its own peak); fit: around the values
-  // themselves (a memory curve that hardly moves would otherwise be a flat block).
-  const spark = (id, values, max, fit) => {
-    const el = $(id);
-    if (!el) return;
-    const path = el.tagName === "path" ? el : el.querySelector("path");
-    if (values.length < 2) { path.removeAttribute("d"); return; }
-    let lo = 0, hi = max ?? Math.max(...values) * 1.15;
-    if (fit) {
-      const a = Math.min(...values), b = Math.max(...values), pad = Math.max((b - a) * 0.4, b * 0.02);
-      lo = Math.max(0, a - pad); hi = b + pad;
-    }
-    hi = Math.max(hi, lo + 1e-9);
-    const step = 120 / (keep - 1), start = 120 - (values.length - 1) * step;
-    const pts = values.map((v, i) => `${(start + i * step).toFixed(2)},${(32 - ((v - lo) / (hi - lo)) * 29).toFixed(2)}`);
-    path.setAttribute("d", `M${start.toFixed(2)},32 L${pts.join(" L")} L120,32 Z`);
+  // Last seen counts to the day only (the hub writes it once a day, on purpose).
+  const seenDay = (ms) => (!ms ? "–" : Date.now() - ms < 86400000 ? "today" : Date.now() - ms < 2 * 86400000 ? "yesterday" : rel(ms));
+  const clock = (ms) => {
+    if (!ms) return "";
+    const d = new Date(ms), today = new Date().toDateString() === d.toDateString();
+    return today ? d.toLocaleTimeString(undefined, { timeStyle: "short" }) : d.toLocaleDateString(undefined, { day: "numeric", month: "short" });
   };
-  // Each part of the page on its own: a section the server could not read (null) shows "–", the others still update.
-  // A ring gauge: its percentage inside, the ring filled to it (red over 90 %).
-  const ring = (id, frac) => {
-    const el = $(`r-${id}`), p = Math.min(100, Math.max(0, frac * 100));
-    el.style.setProperty("--p", p.toFixed(1));
-    el.classList.toggle("hot", p > 90);
-    set(id, `${Math.round(p)} %`);
+  const cell = (tr, text, cls, title) => {
+    const td = tr.insertCell();
+    if (text instanceof Node) td.append(text); else td.textContent = text ?? "–";
+    if (cls) td.className = cls;
+    if (title) td.title = title;
+    return td;
   };
-  const bar = (id, frac) => { $(`r-${id}`).style.setProperty("--p", Math.min(100, Math.max(0, frac * 100)).toFixed(1)); };
-  const part = (fn) => { try { fn(); } catch (e) { console.warn(e); } };
-  const state = (tile, cls) => { $(tile).classList.remove("ok", "bad", "warn", "alarm"); if (cls) $(tile).classList.add(...cls.split(" ")); };
-  // A service tile: its state as the number, how long it runs and its memory as the caption, its memory as the graph.
-  const service = (id, u, big) => {
+  const tag = (text, cls) => el("span", `tag ${cls || ""}`, text);
+  // A round tick: done or not; a click toggles it (the change is the caller's).
+  const tickButton = (done, label, onToggle) => {
+    const b = el("button", `tick${done ? " on" : ""}`);
+    b.type = "button";
+    b.setAttribute("aria-pressed", String(done));
+    b.setAttribute("aria-label", label);
+    b.title = done ? "done (click to reopen)" : "mark done";
+    b.innerHTML = '<svg viewBox="0 0 16 16" aria-hidden="true"><path d="M3.5 8.5l3 3 6-7"/></svg>';
+    b.addEventListener("click", async (e) => {
+      e.stopPropagation();
+      b.disabled = true;
+      try { await onToggle(!done); } finally { b.disabled = false; }
+    });
+    return b;
+  };
+  // Initials on a colour picked from the name: the same person, the same colour.
+  const avatar = (node, name, team) => {
+    node.replaceChildren();
+    node.className = node.className.replace(/\bteam\b/, "").trim();
+    if (team) { node.classList.add("team"); node.innerHTML = '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M9 6h11M9 12h11M9 18h11M3.5 6l1.2 1.2L7 5M3.5 12l1.2 1.2L7 11M3.5 18l1.2 1.2L7 17"/></svg>'; return node; }
+    const words = (name || "?").replace(/[^\p{L}\p{N} ]/gu, " ").trim().split(/\s+/);
+    node.textContent = ((words[0] || "?")[0] + (words[1] ? words[1][0] : (words[0] || "")[1] || "")).toUpperCase();
+    let h = 0;
+    for (const c of name || "") h = (h * 31 + c.codePointAt(0)) % 360;
+    node.style.setProperty("--h", h);
+    return node;
+  };
+  const postJSON = async (path, data) => {
+    const r = await fetch(path, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(data) });
+    if (!r.ok) throw new Error("Change failed. Try again.");
+    return r;
+  };
+
+  // ---- the hub shown: live (default) or dev, remembered in this browser; key 0 switches ----------------------------
+  let which = "live", last = null, lastDone = new Set(), currentTab = "overview", reservedData = null;
+  try { if (localStorage.getItem("hub") === "dev") which = "dev"; } catch {}
+  const switchHub = () => {
+    which = which === "live" ? "dev" : "live";
+    try { localStorage.setItem("hub", which); } catch {}
+    set("hub-word", which);
+    document.body.classList.toggle("dev", which === "dev");
+    if (last) render();
+  };
+  set("hub-word", which);
+  document.body.classList.toggle("dev", which === "dev");
+  $("hub-word").addEventListener("click", switchHub);
+
+  // ---- server: every three seconds --------------------------------------------------------------------------------
+  const bar = (id, frac) => {
+    const p = Math.min(100, Math.max(0, frac * 100));
+    $(`r-${id}`).style.setProperty("--p", p.toFixed(1));
+    $(`r-${id}`).classList.toggle("hot", p > 90);
+  };
+  const service = (id, u) => {
     u = u || {};
     const ok = u.state === "active";
     state(`t-${id}`, ok ? "ok" : "bad");
-    set(id, ok ? (big || "running") : (u.state || "unknown"));
+    set(`${id}-cap`, ok ? (u.since ? span(Date.now() / 1000 - u.since) : "–") : (u.state || "not running"));
     const restarts = u.restarts ? ` · ${u.restarts} restarts` : "";
-    set(`${id}-cap`, ok ? `${up(u.since)}${u.memory != null ? ` · ${bytes(u.memory)}` : ""}${restarts}` : "not running");
-    $(`t-${id}`).title = `${$(id).textContent} · ${$(`${id}-cap`).textContent}`;
-    if ($(`${id}-spark`)) spark(`${id}-spark`, remember(id, u.memory), null, true);
-  };
-
-  // The system tile's small stats carry their details on hover.
-  const hoverDetails = () => { for (const el of document.querySelectorAll(".stat, .flag")) { const c = el.querySelector(".cap"); if (c) el.title = c.textContent; } };
-
-  // Keep independent pages for each hub and view; long lists use 10,000 rows.
-  const listPages = {};
-  const paginate = (list, id, key, size, redraw, always = false) => {
-    const pages = Math.max(1, Math.ceil(list.length / size));
-    const page = listPages[key] = Math.min(listPages[key] || 1, pages);
-    const nav = $(id);
-    nav.replaceChildren();
-    nav.hidden = !always && pages === 1;
-    if (!nav.hidden) {
-      for (const [label, target] of [["‹", page - 1], ...Array.from({length: pages}, (_, i) => [String(i + 1), i + 1]), ["›", page + 1]]) {
-        const b = document.createElement("button"); b.textContent = label;
-        b.disabled = target < 1 || target > pages || target === page;
-        if (target === page) b.setAttribute("aria-current", "page");
-        b.onclick = () => { listPages[key] = target; redraw(); };
-        nav.append(b);
-      }
-    }
-    return list.slice((page - 1) * size, page * size);
-  };
-  let reservedData = null;
-  function drawReserved() {
-    const data = reservedData?.[which];
-    set("reserved-hub", which);
-    set("reserved-count", data ? data.names.length : "–");
-    set("reserved-rule", data?.name_min != null ? `Names: ${data.name_min}–${data.name_max} characters (graphemes), ${data.name_form}; compared by ${data.name_comparison} (lookalikes count as the same)` : "Names: unavailable");
-    set("reserved-state", data ? data.enabled ? "ON" : "OFF" : "unavailable");
-    $("reserved-enabled").disabled = !data;
-    $("reserved-enabled").checked = !!data?.enabled;
-    $("reserved-status").classList.toggle("reservation-off", !!data && !data.enabled);
-    const list = $("reserved-list"); list.replaceChildren();
-    const names = (data?.names || []).filter(n => n.toLocaleLowerCase().includes($("reserved-search").value.toLocaleLowerCase()));
-    for (const name of paginate(names, "reserved-pages", `reserved:${which}`, 10000, drawReserved)) {
-      const row = document.createElement("div"), label = document.createElement("span"), b = document.createElement("button");
-      label.textContent = name; b.textContent = "Remove"; b.onclick = () => changeReserved({action: "remove", name});
-      row.append(label, b); list.append(row);
-    }
-  }
-  async function changeReserved(data) {
-    const hub = which;
-    try {
-      const r = await fetch("/reserved", {method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify({hub, ...data})});
-      if (!r.ok) throw new Error(`Could not save (${r.status}).`);
-      $("reserved-error").textContent = "";
-      await tick();
-      return true;
-    } catch (e) { $("reserved-error").textContent = e.message; drawReserved(); return false; }
-  }
-  $("reserved-search").oninput = () => { listPages[`reserved:${which}`] = 1; drawReserved(); };
-  $("reserved-enabled").onchange = e => changeReserved({action: "switch", enabled: e.target.checked});
-  $("reserved-add").onsubmit = async e => {
-    e.preventDefault();
-    const names = $("reserved-input").value.split(/[,\n]/).map(n => n.trim()).filter(Boolean);
-    if (names.length && await changeReserved({action: "add", names})) $("reserved-input").value = "";
+    $(`t-${id}`).title = ok ? `running${u.memory != null ? ` · ${bytes(u.memory)}` : ""}${restarts}` : "not running";
   };
   async function tick() {
     if (document.visibilityState !== "visible") return;
@@ -140,210 +127,72 @@ if (document.body.classList.contains("login")) {
       if (r.status === 401 || r.status === 403) { location.reload(); return; }
       s = await r.json();
       $("stale").hidden = true;
-    } catch {
-      $("stale").hidden = false;
-      return;
-    }
-    set("host", s.host);
+    } catch { $("stale").hidden = false; return; }
+    set("host", s.host || "");
     reservedData = s.reserved;
-    drawReserved();
-
     part(() => {
-      const c = s.cpu || { percent: null, load: [], cores: null };
-      set("cpu", c.percent == null ? "–" : c.percent.toFixed(c.percent < 10 ? 1 : 0));
-      set("cpu-cap", c.cores ? `${c.cores} cores` : "–");
-      if (c.percent != null) ring("cpu", c.percent / 100);
+      const c = s.cpu || {};
+      set("cpu", c.percent == null ? "–" : `${Math.round(c.percent)} %`);
+      if (c.percent != null) bar("cpu", c.percent / 100);
+      $("r-cpu").title = [c.cores ? `${c.cores} cores` : "", c.load?.length ? `load ${c.load.map((x) => x.toFixed(2)).join(" · ")}` : ""].filter(Boolean).join(" · ");
     });
-    part(() => {
-      const c = s.cpu || { load: [] };
-      set("load", c.load.length ? c.load[0].toFixed(2) : "–");
-      set("load-cap", c.load.length ? `5 min ${c.load[1].toFixed(2)} · 15 min ${c.load[2].toFixed(2)}` : "–");
-      $("t-system").title = c.load.length ? `Load ${c.load.map((x) => x.toFixed(2)).join(" · ")}` : "";
-    });
-
     part(() => {
       const m = s.memory;
-      if (!m) { set("mem", "–"); set("mem-cap", "–"); return; }
+      if (!m) { set("mem", "–"); return; }
       const used = m.total - m.available;
-      set("mem", bytes(used));
-      set("mem-cap", `of ${bytes(m.total)} · ${Math.round((100 * used) / m.total)} %`
-        + (m.swap_total ? ` · swap ${bytes(m.swap_total - m.swap_free)}` : ""));
-      ring("mem", used / m.total);
+      set("mem", bytes(used)); bar("mem", used / m.total);
+      $("r-mem").title = `of ${bytes(m.total)} · ${Math.round((100 * used) / m.total)} %${m.swap_total ? ` · swap ${bytes(m.swap_total - m.swap_free)}` : ""}`;
     });
-
     part(() => {
       const d = s.disk;
-      if (!d) { set("disk", "–"); set("disk-cap", "–"); return; }
-      set("disk", bytes(d.used));
-      set("disk-cap", `of ${bytes(d.total)} · ${bytes(d.free)} free`);
-      ring("disk", d.used / d.total);
+      if (!d) { set("disk", "–"); return; }
+      set("disk", bytes(d.used)); bar("disk", d.used / d.total);
+      $("r-disk").title = `of ${bytes(d.total)} · ${bytes(d.free)} free`;
     });
-
     part(() => {
-      const n = s.network || { rx_per_s: null, tx_per_s: null, rx: null, tx: null };
-      set("rx", rate(n.rx_per_s)); set("rx-cap", `${bytes(n.rx)} since boot`);
-      set("tx", rate(n.tx_per_s)); set("tx-cap", `${bytes(n.tx)} since boot`);
+      const n = s.network || {};
+      set("rx", rate(n.rx_per_s)); set("tx", rate(n.tx_per_s));
       bar("rx", (n.rx_per_s || 0) / 1e6); bar("tx", (n.tx_per_s || 0) / 1e6);  // bars up to 1 MB/s
-      $("t-net").title = `since boot: ${bytes(n.rx)} in · ${bytes(n.tx)} out`;
+      $("r-rx").title = `${bytes(n.rx)} since boot`; $("r-tx").title = `${bytes(n.tx)} since boot`;
     });
-
     part(() => {
-      set("uptime", s.uptime == null ? "–" : span(s.uptime));
-      const r = s.reboot, cap = $("reboot-text");
-      cap.textContent = r && r.needed ? "REBOOT" : "";
-      $("t-uptime").title = r == null ? "" : r.needed ? `reboot required${r.packages.length ? ` (${r.packages[0]})` : ""}` : "no reboot needed";
-      cap.classList.toggle("warn", !!(r && r.needed));
-      state("t-uptime", r && r.needed ? "warn" : null);
+      $("t-services").title = s.uptime == null ? "" : `server running ${span(s.uptime)}`;
+      const r = s.reboot;
+      set("reboot-text", r && r.needed ? "reboot needed" : "");
+      $("reboot-text").title = r && r.needed && r.packages?.length ? r.packages.join(", ") : "";
     });
-
     part(() => {
       const version = s.hub && s.hub.version;
-      service("hub", s.hub, version ? version.split(" ")[0] : null);
-      if (version) $("t-hub").title = version;
+      service("hub", s.hub);
+      if (version) $("t-hub").title = `${version} · ${$("t-hub").title}`;
       set("foot-hub", version ? ` · hub ${version.split(" ")[0]}` : "");
     });
     part(() => service("dev", s.hub_dev));
     part(() => service("tunnel", s.tunnel));
     part(() => {
-      const y = s.yogpt;
-      service("yogpt", y);
-      const people = last && last.live && last.live.yogpt_contacts;
-      if (y && y.state === "active" && people != null) $("t-yogpt").title += ` · knows ${people}`;
+      service("yogpt", s.yogpt);
+      const people = last?.live?.yogpt_contacts;
+      if (s.yogpt?.state === "active" && people != null) $("t-yogpt").title += ` · knows ${people}`;
     });
-
-    hoverDetails();
+    if (currentTab === "db" && last) part(drawTables);
   }
 
-  // The users, as users.py wrote them (on request). Last seen counts to the day only (the hub writes it once a day).
-  const date = (ms) => (ms ? new Date(ms).toLocaleString(undefined, { dateStyle: "medium", timeStyle: "short" }) : "–");
-  // "5 min ago", "3 h ago", "1 day", "2 weeks", "2 months"; the exact time goes in the tooltip.
-  const rel = (ms) => {
-    if (!ms) return "–";
-    const m = Math.max(0, (Date.now() - ms) / 60000), d = m / 1440;
-    if (m < 1) return "just now";
-    if (m < 60) return `${Math.floor(m)} min ago`;
-    if (d < 1) return `${Math.floor(m / 60)} h ago`;
-    const unit = (n, w) => `${n} ${w}${n === 1 ? "" : "s"}`;
-    if (d < 7) return unit(Math.floor(d), "day");
-    if (d < 60) return unit(Math.floor(d / 7), "week");
-    return unit(Math.floor(d / 30), "month");
-  };
-  const day = (ms) => {
-    if (!ms) return "–";
-    const days = Math.floor((Date.now() - ms) / 86400000);
-    return days < 1 ? "today" : days < 2 ? "yesterday" : `${days} days ago`;
-  };
-  const cell = (tr, text, cls) => {
-    const td = tr.insertCell();
-    td.textContent = text;
-    if (cls) td.className = cls;
-  };
-  const users = (id, h) => {
-    const card = $(id), body = card.querySelector("tbody"), note = card.querySelector("h2 small");
-    set("users-count", h && !h.error ? h.total : "–");
-    body.replaceChildren();
-    $("user-pages").replaceChildren();
-    $("user-pages").hidden = true;
-    if (!h || h.error) { note.textContent = h ? h.error : "no data"; return; }
-    note.textContent = `${h.total} users · ${h.active_today ?? "?"} today`;
-    note.title = `${h.active_users ?? "?"} this week · ${h.secured} secured · ${h.devices} devices · ${h.reserved ?? "?"} reserved · ${bytes(h.size)}`;
-    let list = [...h.users].sort((a, b) => (b.last_seen || 0) - (a.last_seen || 0) || b.created - a.created);
-    const overview = currentTab === "overview";
-    list = paginate(list, "user-pages", `users:${currentTab}:${which}`, overview ? 10 : 10000,
-      () => render(last, lastDone), overview);
-    for (const u of list) {
-      const tr = body.insertRow();
-      cell(tr, u.name ?? "–", "name");
-      // The user id on hover, copied on a click.
-      const nameCell = tr.cells[0];
-      nameCell.title = `${u.id} (click to copy)`;
-      nameCell.classList.add("copy");
-      nameCell.addEventListener("click", () => { navigator.clipboard?.writeText(u.id).then(() => { nameCell.title = `${u.id} (copied)`; }).catch(() => {}); });
-      cell(tr, rel(u.created)); tr.cells[tr.cells.length - 1].title = date(u.created);
-      // Last seen counts to the day only (the hub writes it once a day, on purpose).
-      cell(tr, !u.last_seen ? "–" : Date.now() - u.last_seen < 86400000 ? "today" : Date.now() - u.last_seen < 2 * 86400000 ? "yesterday" : rel(u.last_seen));
-      tr.cells[tr.cells.length - 1].title = u.last_seen ? new Date(u.last_seen).toLocaleDateString() : "";
-      cell(tr, u.devices);
-      cell(tr, u.push ? "yes" : "no", u.push ? "yes" : "no");
-      cell(tr, u.secured ? "yes" : "no", u.secured ? "yes" : "no");
-      cell(tr, u.queued);
-      const a = appState(u.app, h.min_app);
-      cell(tr, a === "new" ? "newest" : a === "old" ? "update" : (u.app ?? "–"), a === "new" ? "yes" : a === "old" ? "warn" : "mono");
-      tr.cells[tr.cells.length - 1].title = u.app ?? "";
-    }
-    for (let i = list.length; i < (overview ? 10 : 0); i++) {
-      const row = body.insertRow(); row.setAttribute("aria-hidden", "true");
-      for (let j = 0; j < 8; j++) cell(row, "\u00a0");
-    }
-  };
-
-  // User Reports, open ones first; a tick closes one (kept by the page, like feedback: key "live:r<ids>").
-  const reports = (id, h, done) => {
-    const card = $(id), body = card.querySelector("tbody"), note = card.querySelector("h2 small");
-    body.replaceChildren();
-    const list = ((h && h.reports) || []).map((r) => ({ ...r, key: `${which}:r${r.id}` }));
-    list.sort((a, b) => (done.has(a.key) - done.has(b.key)) || (b.at - a.at));
-    const open = list.filter((r) => !done.has(r.key)).length;
-    note.textContent = list.length ? `${open} open · ${list.length}` : "none";
-    badge("badge-users", open);
-    card.querySelector(".scroll").hidden = !list.length;
-
-    for (const r of list) {
-      const tr = body.insertRow(), hub = which;
-      const box = document.createElement("input");
-      box.type = "checkbox";
-      box.checked = done.has(r.key);
-      box.disabled = r.id == null;
-      box.addEventListener("change", async () => {
-        await fetch("/feedback/done", { method: "POST", headers: { "Content-Type": "application/x-www-form-urlencoded" },
-          body: `hub=${hub}&id=r${r.id}&done=${box.checked ? 1 : 0}` });
-        people();
-      });
-      tr.insertCell().append(box);
-      if (done.has(r.key)) tr.className = "done";
-      cell(tr, rel(r.at)); tr.cells[tr.cells.length - 1].title = date(r.at);
-      cell(tr, r.reported_name ?? "–", "name");
-      cell(tr, r.reason, r.reason === "abuse" ? "bad" : "");
-      cell(tr, r.reporter_name ?? r.reporter.slice(0, 8));
-      rowOpens(tr, () => popup([["Reported", r.reported_name], ["Reported id", r.reported], ["Reason", r.reason], ["By", r.reporter_name], ["By id", r.reporter], ["When", date(r.at)]], null, false, box));
-    }
-  };
-
-  // Which hub the lower half shows: Live (the default) or Test (the dev hub); remembered in this browser.
-  let which = "live", last = null, lastDone = new Set(), currentTab = "overview";
-  try { if (localStorage.getItem("hub") === "dev") which = "dev"; } catch {}
-  $("hub-word").textContent = which === "dev" ? "dev" : "live";
-  $("hub-word").addEventListener("click", () => document.querySelector("#which button:not(.on)").click());
-  for (const button of document.querySelectorAll("#which button")) {
-    button.classList.toggle("on", button.dataset.hub === which);
-    button.addEventListener("click", () => {
-      which = button.dataset.hub;
-      drawReserved();
-      try { localStorage.setItem("hub", which); } catch {}
-      for (const b of document.querySelectorAll("#which button")) b.classList.toggle("on", b === button);
-      $("hub-word").textContent = which === "dev" ? "dev" : "live";
-      if (last) render(last, lastDone);
-    });
-  }
-
-  // Feedback and To-Dos of that hub, open ones first, then newest; a tick marks one done (kept by the page itself).
-  // A row's details in a small popup: its fields, a long text (monospace for crash reports), the done tick.
-  const popup = (fields, text, mono, box) => {
-    const d = $("pop"), dl = d.querySelector("dl"), pre = d.querySelector("pre"), tick = d.querySelector(".pop-done input");
+  // Updates live in the System title: a dot (green: all fine, no package updates), details on hover and on a click.
+  const popup = (fields, text, mono) => {
+    const d = $("pop"), dl = d.querySelector("dl"), pre = d.querySelector("pre");
     dl.replaceChildren();
-    for (const [k, v] of fields) { const dt = document.createElement("dt"), dd = document.createElement("dd"); dt.textContent = k; dd.textContent = v ?? "–"; dl.append(dt, dd); }
+    for (const [k, v] of fields) dl.append(el("dt", null, k), el("dd", null, v ?? "–"));
     pre.hidden = !text; pre.textContent = text || ""; pre.classList.toggle("mono", !!mono);
-    d.querySelector(".pop-done").hidden = !box;
-    tick.checked = box ? box.checked : false;
-    tick.onchange = () => { box.checked = tick.checked; box.dispatchEvent(new Event("change")); };
     d.showModal();
   };
-  const updateTile = (u) => {
+  const updates = (u) => {
     const stale = !u || Date.now() / 1000 - u.at > 1800;
-    state("t-updates", stale ? "warn" : u.status);
-    set("updates-summary", stale ? "Update data unavailable" : u.apt.error || u.apt.packages == null ? "Package check unavailable" : u.apt.packages ? `${u.apt.packages} updates (${u.apt.security} security)` : "Up to date");
-    set("updates-reboot", u?.reboot ? `Reboot needed (kernel ${u.running_kernel || "?"} → ${u.installed_kernel || "?"}), next window ${u.next_reboot || "unknown"}` : "");
-    set("updates-release", u ? `${u.current_release}${u.release.available ? ` · ${u.release.available} available` : u.release.error ? " · release check unavailable" : ""}` : "");
+    state("t-system", stale ? "warn" : u.status);
+    const summary = stale ? "Update data unavailable" : u.apt.error || u.apt.packages == null ? "Package check unavailable"
+      : u.apt.packages ? `${u.apt.packages} updates (${u.apt.security} security)` : "Up to date";
+    set("sys-updates", stale || u.status !== "ok" ? (u?.reboot ? "reboot needed" : summary) : "");
+    $("sys-head").title = [u ? `${u.current_release}${u.release?.available ? ` · ${u.release.available} available` : ""}` : "", summary,
+      u?.reboot ? `Reboot needed (kernel ${u.running_kernel || "?"} → ${u.installed_kernel || "?"})` : "", "click for details"].filter(Boolean).join("\n");
     const open = () => popup(u ? [
       ["Checked", new Date(u.at * 1000).toLocaleString()],
       ["Packages / security", `${u.apt.packages ?? "?"} / ${u.apt.security ?? "?"}`],
@@ -352,126 +201,376 @@ if (document.body.classList.contains("login")) {
       ["Reboot needed since", u.reboot ? new Date(u.reboot_since * 1000).toLocaleString() : "No"],
       ["Reboot packages", (u.reboot_packages || []).join(", ")],
       ["Running / installed kernel", `${u.running_kernel || "?"} / ${u.installed_kernel || "?"}`],
-      ["Last automatic upgrade trigger", u.last_upgrade_trigger || "Unknown"],
+      ["Last automatic upgrade", u.last_upgrade_trigger || "Unknown"],
       ["Unattended upgrades", u.unattended || "Unknown"],
       ["Next reboot window (only if needed)", u.next_reboot || "Unknown"],
       ["Ubuntu", u.current_release],
-      ["Release checked", u.release.checked ? new Date(u.release.checked * 1000).toLocaleString() : "Never"],
-      ["LTS release check", u.release.error || u.release.result || "Unknown"],
-      ["Errors", [...(u.errors || []), u.apt.error].filter(Boolean).join("\n") || "None"]
-    ] : [["Updates", "Collector data unavailable"]], null, false, null);
-    $("t-updates").onclick = open;
-    $("t-updates").onkeydown = e => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); open(); } };
+      ["LTS release check", u.release?.error || u.release?.result || "Unknown"],
+      ["Errors", [...(u.errors || []), u.apt.error].filter(Boolean).join("\n") || "None"],
+    ] : [["Updates", "Collector data unavailable"]]);
+    $("sys-head").onclick = open;
+    $("sys-head").onkeydown = (e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); open(); } };
   };
-  const rowOpens = (tr, open) => { tr.classList.add("opens"); tr.addEventListener("click", (e) => { if (!e.target.closest("input")) open(); }); };
 
-  // Support chat: the threads on the left (unread first), the open one as bubbles on the right; Enter sends.
-  // Completion is explicit; while the Feedback tab is open, both refresh every few seconds.
-  let supportUser = null, supportHub = null, supportName = "", supportSeen = "", supportBusy = false, supportThreads = [];
-  let supportWant = null, threadsDrawn = "";
+  // ---- app builds: "new" on the highest build of its platform this hub has seen (ios, android, yogpt apart) -------
+  const build = (app) => (app || "").split("/").pop();
+  const parse = (app) => {
+    const [p, b] = (app || "").split("/");
+    return p && /^\d+$/.test(b || "") ? [p, Number(b)] : null;
+  };
+  let newest = {};
+  const findNewest = (h) => {
+    newest = {};
+    for (const a of [...(h?.apps || []).map(([x]) => x), ...(h?.users || []).map((u) => u.app)]) {
+      const v = parse(a);
+      if (v && !(newest[v[0]] >= v[1])) newest[v[0]] = v[1];
+    }
+  };
+  const appState = (app) => {
+    const v = parse(app);
+    return !v || newest[v[0]] == null ? null : v[1] >= newest[v[0]] ? "new" : "old";
+  };
+  const appTag = (app) => {
+    const a = appState(app);
+    const t = tag(a === "new" ? "newest" : a === "old" ? "update" : app ? build(app) : "–", a === "new" ? "ok" : a === "old" ? "warn" : "muted");
+    t.title = app || "";
+    return t;
+  };
+
+  // ---- small charts (SVG, drawn to the size of their viewBox) ---------------------------------------------------
+  const SVG = "http://www.w3.org/2000/svg";
+  const svg = (name, attrs) => {
+    const e = document.createElementNS(SVG, name);
+    for (const [k, v] of Object.entries(attrs || {})) e.setAttribute(k, v);
+    return e;
+  };
+  const days14 = () => Array.from({ length: 14 }, (_, i) => Math.floor(Date.now() / 86400000) - 13 + i);
+  const dayName = (d) => new Date(d * 86400000).toLocaleDateString(undefined, { day: "numeric", month: "short" });
+  // Lines on one scale; a hover title per day.
+  const lines = (node, series, titles) => {
+    const n = 14, top = Math.max(1, ...series.flatMap(([v]) => v)), w = 140, hgt = 40, step = w / (n - 1);
+    const y = (v) => (hgt - 2 - (v / top) * (hgt - 6)).toFixed(1);
+    node.replaceChildren(
+      ...[0.5, 0.25].map((f) => svg("line", { x1: 0, x2: w, y1: (hgt * f).toFixed(1), y2: (hgt * f).toFixed(1), class: "grid" })),
+      ...series.map(([values, cls]) => svg("path", { d: values.map((v, i) => `${i ? "L" : "M"}${(i * step).toFixed(1)},${y(v)}`).join(" "), class: `line ${cls}` })),
+      ...titles.map((t, i) => { const r = svg("rect", { x: Math.max(0, i * step - step / 2), width: step, y: 0, height: hgt }); r.append(svg("title")); r.lastChild.textContent = t; return r; }));
+  };
+
+  // ---- overview: the users widget, sortable by every column ---------------------------------------------------------
+  let ovSort = { key: "last_seen", dir: -1 };
+  const ovValue = (u, key) => key === "name" ? (u.name || "").toLowerCase() : key === "app" ? (parse(u.app)?.[1] ?? -1)
+    : key === "secured" ? Number(!!u.secured) : u[key] ?? 0;
+  for (const th of document.querySelectorAll("#ov-users th[data-sort]")) {
+    th.tabIndex = 0;
+    const go = () => {
+      const key = th.dataset.sort;
+      ovSort = { key, dir: ovSort.key === key ? -ovSort.dir : key === "name" ? 1 : -1 };
+      part(() => drawOvUsers(last?.[which]));
+    };
+    th.addEventListener("click", go);
+    th.addEventListener("keydown", (e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); go(); } });
+  }
+  const drawOvUsers = (h) => {
+    for (const th of document.querySelectorAll("#ov-users th[data-sort]")) {
+      th.classList.toggle("sorted", th.dataset.sort === ovSort.key);
+      th.dataset.dir = th.dataset.sort === ovSort.key ? (ovSort.dir > 0 ? "▲" : "▼") : "";
+    }
+    const body = $("newusers-body");
+    body.replaceChildren();
+    const list = [...(h?.users || [])].sort((a, b) => {
+      const x = ovValue(a, ovSort.key), y = ovValue(b, ovSort.key);
+      return (x < y ? -1 : x > y ? 1 : 0) * ovSort.dir || b.created - a.created;
+    }).slice(0, 10);
+    for (const u of list) {
+      const tr = body.insertRow();
+      tr.className = "opens";
+      cell(tr, u.name ?? "–", "name", u.id);
+      cell(tr, rel(u.created), null, date(u.created));
+      cell(tr, seenDay(u.last_seen), null, u.last_seen ? new Date(u.last_seen).toLocaleDateString() : "");
+      cell(tr, u.secured ? tag("yes", "ok") : tag("no", "muted"));
+      cell(tr, appTag(u.app));
+      tr.addEventListener("click", () => select(up(u.id), u.name || u.id));
+    }
+    if (!list.length) cell(body.insertRow(), h && !h.error ? "No users yet." : (h?.error || "No data"), "empty").colSpan = 5;
+  };
+
+  // ---- overview ---------------------------------------------------------------------------------------------------
+  const reportKey = (r) => `${which}:r${r.id}`;
+  const overview = (h) => {
+    const ok = h && !h.error;
+    // Open: feedback (open user messages at each day's end), crashes (open, by the day last seen), reports (open, by day).
+    const days = days14(), fb = h?.support_unread_days || [];
+    const f = days.map((_, i) => fb[fb.length - 14 + i] ?? 0);
+    const openDiag = (h?.diagnostics || []).filter((d) => !d.done);
+    const cr = days.map((d) => openDiag.filter((x) => Math.floor(x.last_seen / 86400000) === d).length);
+    const openRep = (h?.reports || []).filter((r) => !lastDone.has(reportKey(r)));
+    const rp = days.map((d) => openRep.filter((r) => Math.floor(r.at / 86400000) === d).length);
+    lines($("issues-graph"), [[f, "fb"], [cr, "cr"], [rp, "rp"]], days.map((d, i) => `${dayName(d)}: ${f[i]} feedback open · ${cr[i]} crashes · ${rp[i]} reports`));
+    if (!supportThreads.length) set("feedback-unread", fb.length ? fb[fb.length - 1] : "–");
+    set("diagnostics-open", h?.diagnostics_open ?? openDiag.length);
+    set("reports-open", openRep.length);
+
+    // Services: the queue at the bottom.
+    const blobs = ok && h.blobs;
+    set("q-line", ok ? `${num(h.messages)} in queue · ${blobs ? num(blobs[0]) : "–"} images in queue` : "–");
+    $("q-line").title = blobs ? `images waiting: ${bytes(blobs[1])}` : "";
+
+    // Users: ten, by the chosen column (last seen first); a click opens the user in the Users tab.
+    drawOvUsers(h);
+
+    // Activity: sign-ups per day as bars, messages per day as a line (own scale), 14 days.
+    if (ok) {
+      const total = h.total || 0, today = h.active_today || 0, week = Math.max(today, h.active_users || 0);
+      set("ug-today", num(today));
+      set("ug-total", `of ${num(total)} today`);
+      $("ug-today").parentElement.title = `${week} active this week · ${h.secured ?? "?"} secured · ${h.devices ?? "?"} devices`;
+      set("st-msgs", num(h.deliveries?.day));
+      const su = (h.signups || []).slice(-14), md = h.deliveries?.days || [];
+      const ms = days.map((_, i) => md[md.length - 14 + i] ?? null);
+      const W = 280, H = 90, slot = W / 14, sTop = Math.max(1, ...su), mTop = Math.max(1, ...ms.filter((v) => v != null));
+      const chart = $("activity-chart"), kids = [];
+      su.forEach((v, i) => kids.push(svg("rect", { x: (i * slot + slot * 0.18).toFixed(1), width: (slot * 0.64).toFixed(1),
+        y: (H - Math.max(1.5, (v / sTop) * (H - 14))).toFixed(1), height: Math.max(1.5, (v / sTop) * (H - 14)).toFixed(1), rx: 2, class: v ? "su" : "su zero" })));
+      const pts = ms.map((v, i) => (v == null ? null : [i * slot + slot / 2, H - 4 - (v / mTop) * (H - 14)]));
+      let d = "", pen = false;
+      for (const p of pts) { if (!p) { pen = false; continue; } d += `${pen ? "L" : "M"}${p[0].toFixed(1)},${p[1].toFixed(1)} `; pen = true; }
+      kids.push(svg("path", { d: d.trim(), class: "ms" }));
+      pts.forEach((p) => { if (p) kids.push(svg("circle", { cx: p[0].toFixed(1), cy: p[1].toFixed(1), r: 2.2, class: "ms" })); });
+      days.forEach((day, i) => {
+        const r = svg("rect", { x: (i * slot).toFixed(1), width: slot.toFixed(1), y: 0, height: H, class: "hit" });
+        const t = svg("title"); t.textContent = `${dayName(day)}: ${su[i] ?? 0} sign-ups · ${ms[i] == null ? "messages not kept" : `${num(ms[i])} messages`}`;
+        r.append(t); kids.push(r);
+      });
+      chart.replaceChildren(...kids);
+
+      // App versions.
+      let fresh = 0, old = 0, other = 0;
+      for (const [app, c] of h.apps || []) { const a = appState(app); if (a === "new") fresh += c; else if (a === "old") old += c; else other += c; }
+      set("ug-fresh", `${fresh}/${fresh + old + other}`);
+      set("ug-apps-cap", `${old ? `${old} older · ` : ""}min ${h.min_app ? build(h.min_app) : "not pinned"}${other ? ` · ${other} unknown` : ""}`);
+      $("ug-apps-cap").title = `newest: ${Object.entries(newest).map(([p, b]) => `${p} ${b}`).join(" · ") || "–"}`;
+      $("ug-apps-bar").replaceChildren(...[[fresh, "new", "on the newest build"], [old, "old", "on an older build"], [other, "a0", "unknown"]]
+        .filter(([v]) => v > 0).map(([v, cls, t]) => { const s = el("span", cls); s.style.flexGrow = v; s.title = `${v} ${t}`; return s; }));
+    }
+  };
+
+  // ---- users: everyone on the left, the chosen one on the right (who, reports, support chat) -----------------------
+  // The list merges the collector's users with the hub's support threads: the team's To-Dos pinned on top, a red dot
+  // on users with open messages (first by default). A click always wins over a refresh still under way.
+  let supportUser = null, supportHub = null, supportName = "", supportSeen = null, supportBusy = false, supportThreads = [];
+  let supportWant = null, listDrawn = "", supportMessages = [];
+  let userQuery = "", userFilter = "all", userSort = "open";
   const supportGet = async (user) => {
-    const r = await fetch(`/support.json?${new URLSearchParams({hub: which, ...(user ? {user} : {})})}`, { cache: "no-store" });
-    if (!r.ok) throw new Error("Could not load messages");
+    const r = await fetch(`/support.json?${new URLSearchParams({ hub: which, ...(user ? { user } : {}) })}`, { cache: "no-store" });
+    if (!r.ok) throw new Error("Could not load messages.");
     return r.json();
   };
-  const supportPost = async (path, data) => {
-    const r = await fetch(path, {method:"POST", headers:{"Content-Type":"application/json"},body:JSON.stringify(data)});
-    if (!r.ok) throw new Error("Change failed. Try again.");
+  const isTeam = (u) => u === "team";
+  const up = (id) => String(id || "").toUpperCase();
+  const userById = (id) => (last?.[which]?.users || []).find((u) => up(u.id) === up(id));
+  const threadOf = (id) => supportThreads.find((t) => up(t.user_id) === up(id));
+  const reportsAbout = (id) => (last?.[which]?.reports || []).filter((r) => up(r.reported) === up(id));
+  const openReports = (id) => reportsAbout(id).filter((r) => !lastDone.has(reportKey(r))).length;
+  // One row per person: users of the collector, plus threads of accounts it no longer has (deleted ones).
+  const personRows = () => {
+    const users = last?.[which]?.users || [], ids = new Set(users.map((u) => up(u.id)));
+    const rows = users.map((u) => ({ id: up(u.id), user: u, name: u.name || "(no name)", thread: threadOf(u.id) }));
+    for (const t of supportThreads) if (!isTeam(t.user_id) && !ids.has(up(t.user_id))) rows.push({ id: up(t.user_id), user: null, name: t.name || "Deleted account", thread: t });
+    return rows;
   };
-  const clock = (ms) => {
-    if (!ms) return "";
-    const d = new Date(ms), today = new Date().toDateString() === d.toDateString();
-    return today ? d.toLocaleTimeString(undefined, { timeStyle: "short" }) : d.toLocaleDateString(undefined, { day: "numeric", month: "short" });
+  const sortPeople = (rows) => {
+    const by = {
+      open: (a, b) => (b.thread?.unread || 0) - (a.thread?.unread || 0) || openReports(b.id) - openReports(a.id) || (b.thread?.at || 0) - (a.thread?.at || 0) || (b.user?.last_seen || 0) - (a.user?.last_seen || 0),
+      last_seen: (a, b) => (b.user?.last_seen || 0) - (a.user?.last_seen || 0),
+      created: (a, b) => (b.user?.created || 0) - (a.user?.created || 0),
+      name: (a, b) => a.name.localeCompare(b.name),
+    }[userSort];
+    return rows.sort((a, b) => by(a, b) || (b.user?.created || 0) - (a.user?.created || 0));
   };
-  const badge = (id, n) => { const b = $(id); b.hidden = !n; b.textContent = n > 99 ? "99+" : String(n || ""); };
-  const supportUnread = (n) => {
-    set("feedback-unread", n == null ? "–" : String(n));
-    set("support-count", n ? `${n} open` : "");
-    badge("badge-feedback", n);
-  };
-  // Redrawn only when something changed: a list rebuilt under the pointer would swallow the click.
-  const drawThreads = () => {
-    const box = $("support-threads"), lastLines = (last && last[which] && last[which].support_last) || {};
-    const drawn = JSON.stringify([which, supportUser, supportThreads, supportThreads.map((t) => lastLines[t.user_id.toUpperCase()])]);
-    if (drawn === threadsDrawn && box.childElementCount) return;
-    threadsDrawn = drawn;
+  const drawList = () => {
+    const box = $("person-list"), lastLines = last?.[which]?.support_last || {};
+    const team = supportThreads.find((t) => isTeam(t.user_id));
+    let rows = personRows().filter((p) => !userQuery || p.name.toLowerCase().includes(userQuery) || p.id.toLowerCase().includes(userQuery));
+    if (userFilter === "open") rows = rows.filter((p) => p.thread?.unread);
+    rows = sortPeople(rows);
+    const drawn = JSON.stringify([which, supportUser, userQuery, userFilter, userSort, team, rows.map((p) => [p.id, p.name, p.thread, p.user?.last_seen, p.user?.app, lastLines[p.id], openReports(p.id)])]);
+    if (drawn === listDrawn && box.childElementCount) return;
+    listDrawn = drawn;
     box.replaceChildren();
-    if (!supportThreads.length) { const p = document.createElement("p"); p.className = "cap"; p.textContent = "No conversations yet."; box.append(p); }
-    for (const t of supportThreads) {
-      const b = document.createElement("button"), id = t.user_id.toUpperCase();
+    const row = (id, name, isT, open, line, time, timeTitle, badge) => {
+      const b = el("button", `thread${open && !isT ? " unread" : ""}${isT ? " team" : ""}${up(supportUser) === id ? " on" : ""}`);
       b.type = "button";
-      b.className = `thread${t.unread ? " unread" : ""}${supportUser !== null && supportUser.toUpperCase() === id ? " on" : ""}`;
-      const top = document.createElement("span"), dot = document.createElement("i"), name = document.createElement("b"), time = document.createElement("time");
-      top.className = "top"; name.textContent = t.name || "Deleted account"; time.textContent = clock(t.at); time.title = date(t.at);
-      top.append(dot, name, time);
-      const line = document.createElement("span"), l = lastLines[id];
-      line.className = "line";
-      line.textContent = t.user_id === "team" ? `${t.open || 0} open to-dos` : l ? `${l.team ? "You: " : ""}${l.text}` : "";
-      b.append(top, line);
-      b.addEventListener("click", () => supportOpen(t.user_id, t.name || "Deleted account", true));
-      box.append(b);
+      const body = el("span", "body"), top = el("span", "top"), bottom = el("span", "bottom");
+      top.append(el("b", "name", name));
+      if (badge) top.append(badge);
+      top.append(el("time", null, time));
+      bottom.append(el("span", "line", line));
+      if (open) bottom.append(el("span", "count", String(open)));
+      body.append(top, bottom);
+      const av = avatar(el("span", "avatar"), name, isT);
+      if (name === "Deleted account") av.classList.add("gone");
+      b.append(av, body);
+      if (timeTitle) b.title = timeTitle;
+      b.addEventListener("click", () => select(isT ? "team" : id, name));
+      return b;
+    };
+    if (team && !userQuery && userFilter === "all") box.append(row("TEAM", "Team To-Dos", true, team.open || 0, team.open ? `${team.open} open` : "Nothing open", clock(team.at), team.at ? date(team.at) : ""));
+    for (const p of rows) {
+      const l = lastLines[p.id], u = p.user, rep = openReports(p.id);
+      const line = l ? `${l.team ? "You: " : ""}${l.text}` : u ? [u.app ? build(u.app) : "", `seen ${seenDay(u.last_seen)}`].filter(Boolean).join(" · ") : "";
+      const time = p.thread ? clock(p.thread.at) : u ? clock(u.last_seen) : "";
+      box.append(row(p.id, p.name, false, p.thread?.unread || 0, line, time, p.thread ? `last message ${date(p.thread.at)}` : "",
+        rep ? Object.assign(el("span", "flag", "⚑"), { title: `${rep} open report${rep === 1 ? "" : "s"} about this user` }) : null));
     }
+    if (!box.childElementCount) box.append(el("p", "empty", userQuery ? "No user matches." : userFilter === "open" ? "No open conversations." : "No users yet."));
+  };
+  $("user-search").addEventListener("input", (e) => { userQuery = e.target.value.trim().toLowerCase(); part(drawList); });
+  for (const b of document.querySelectorAll(".seg [data-filter]")) b.addEventListener("click", () => {
+    userFilter = b.dataset.filter;
+    for (const x of document.querySelectorAll(".seg [data-filter]")) x.classList.toggle("on", x === b);
+    part(drawList);
+  });
+
+  const supportDone = async (ids, done) => {
+    const hub = which, user = supportUser;
+    try {
+      await Promise.all(ids.map((id) => postJSON("/support/done", { hub, id, done })));
+      if (which === hub && supportUser === user) await supportOpen(user);
+      await supportRefresh();
+    } catch (e) { set("support-error", e.message); }
   };
   const drawThread = (messages) => {
-    const box = $("support-history"), atEnd = box.scrollHeight - box.scrollTop - box.clientHeight < 40;
+    const box = $("support-history"), atEnd = box.scrollHeight - box.scrollTop - box.clientHeight < 60;
+    const team = isTeam(supportUser);
     box.replaceChildren();
-    let lastDay = "";
-    for (const m of messages) {
-      const day = new Date(m.created_at).toDateString();
-      if (day !== lastDay) {
-        const d = document.createElement("div"); d.className = "day";
-        d.textContent = new Date(m.created_at).toLocaleDateString(undefined, { dateStyle: "medium" });
-        box.append(d); lastDay = day;
-      }
-      const p = document.createElement("div"), t = document.createElement("time");
-      p.className = `bubble ${m.from_team ? "team" : "user"}`;
-      p.textContent = m.text;
-      t.textContent = new Date(m.created_at).toLocaleTimeString(undefined, { timeStyle: "short" });
-      t.title = `${date(m.created_at)}${m.from_team ? (m.read_at ? " · read" : " · not read yet") : ""}`;
-      const tick = document.createElement("input"), hub = supportHub, user = supportUser;
-      tick.type = "checkbox"; tick.checked = m.done_at != null;
-      tick.setAttribute("aria-label", "Message done");
-      tick.onchange = async () => {
-        tick.disabled = true;
-        try {
-          await supportPost("/support/done", {hub, id:m.id, done:tick.checked});
-          if (which === hub && supportUser === user) await supportOpen(user);
-          await supportRefresh();
-        } catch (e) { tick.checked = !tick.checked; set("support-error", e.message); }
-        finally { tick.disabled = false; }
-      };
-      p.classList.toggle("done", m.done_at != null);
-      const meta = document.createElement("label");
-      meta.className = "meta"; meta.title = m.done_at != null ? `done ${date(m.done_at)}` : "tick when done";
-      meta.append(t, tick);
-      p.append(meta);
-      box.append(p);
+    box.classList.toggle("todos", team);
+    if (!messages.length) {
+      const e = el("div", "empty-state");
+      e.append(el("b", null, team ? "No to-dos yet" : "No messages"), el("span", null, team ? "Add the first one below." : "This user has not written to the team. Replies are possible once they do."));
+      box.append(e);
     }
-    if (atEnd || box.dataset.user !== supportUser) box.scrollTop = box.scrollHeight;
+    if (team) {
+      // The To-Dos as a list: open ones first (oldest first), done ones after, dimmed.
+      const sorted = [...messages].sort((a, b) => (a.done_at != null) - (b.done_at != null) || a.created_at - b.created_at);
+      for (const m of sorted) {
+        const row = el("div", `todo${m.done_at != null ? " done" : ""}`);
+        row.append(tickButton(m.done_at != null, "To-do done", (d) => supportDone([m.id], d)), el("span", "text", m.text));
+        const t = el("time", null, clock(m.created_at)); t.title = date(m.created_at) + (m.done_at ? ` · done ${date(m.done_at)}` : "");
+        row.append(t);
+        box.append(row);
+      }
+    } else {
+      let lastDay = "", lastFrom = null;
+      for (const m of messages) {
+        const dayKey = new Date(m.created_at).toDateString();
+        if (dayKey !== lastDay) { box.append(el("div", "day", new Date(m.created_at).toLocaleDateString(undefined, { weekday: "short", day: "numeric", month: "short", year: "numeric" }))); lastDay = dayKey; lastFrom = null; }
+        const from = m.from_team ? "team" : "user";
+        const row = el("div", `msg ${from}${from === lastFrom ? " cont" : ""}${m.done_at != null ? " done" : ""}`);
+        const bubble = el("div", "bubble", m.text), meta = el("span", "meta");
+        const t = el("time", null, new Date(m.created_at).toLocaleTimeString(undefined, { timeStyle: "short" }));
+        t.title = date(m.created_at) + (m.from_team ? (m.read_at ? " · read by the user" : " · not read yet") : "");
+        meta.append(t);
+        if (m.from_team) meta.append(el("span", `seen${m.read_at ? " on" : ""}`, m.read_at ? "✓✓" : "✓"));
+        bubble.append(meta);
+        row.append(bubble);
+        if (!m.from_team) row.append(tickButton(m.done_at != null, "Message handled", (d) => supportDone([m.id], d)));
+        box.append(row);
+        lastFrom = from;
+      }
+    }
+    if (atEnd || box.dataset.user !== supportUser) box.scrollTop = team ? 0 : box.scrollHeight;
     box.dataset.user = supportUser;
   };
-  // A click wins over a refresh still under way: only the thread asked for last is shown.
+  const growComposer = () => {
+    const t = $("support-text");
+    if (!t.offsetParent) { t.style.height = ""; return; }
+    t.style.height = "auto"; t.style.height = `${Math.min(Math.max(t.scrollHeight, 22), 180)}px`;
+  };
+  // Who the chosen person is: facts in a row, devices and reports folded below.
+  const drawPerson = () => {
+    const team = isTeam(supportUser), u = team ? null : userById(supportUser);
+    const facts = $("p-facts");
+    facts.replaceChildren();
+    $("p-id").hidden = team || !supportUser;
+    if (!team && supportUser) { $("p-id").textContent = supportUser.toLowerCase(); $("p-id").dataset.id = supportUser.toLowerCase(); }
+    $("p-extra").hidden = team || !u;
+    if (team || !u) return;
+    const a = appState(u.app);
+    const fact = (k, v, cls, title) => { const f = el("span", `fact ${cls || ""}`); f.append(el("small", null, k), el("b", null, v)); if (title) f.title = title; facts.append(f); };
+    fact("signed up", rel(u.created), "", date(u.created));
+    fact("seen", seenDay(u.last_seen), "", u.last_seen ? new Date(u.last_seen).toLocaleDateString() : "");
+    fact("app", u.app ? build(u.app) : "–", a === "new" ? "ok" : a === "old" ? "warn" : "", u.app ? `${u.app}${a === "new" ? " · newest" : a === "old" ? " · an older build" : ""}` : "");
+    fact("secured", u.secured ? "yes" : "no", u.secured ? "ok" : "", u.backup_at ? `backup ${date(u.backup_at)}` : "");
+    fact("push", u.push ? "on" : "off", "", "");
+    if (u.queued) fact("waiting", num(u.queued), "", "messages waiting for this user's devices");
+    const more = el("button", "fact more");
+    more.type = "button";
+    more.addEventListener("click", () => { $("p-extra").open = !$("p-extra").open; more.classList.toggle("open", $("p-extra").open); });
+    more.classList.toggle("open", $("p-extra").open);
+    facts.append(more);
+    const dev = $("p-devices");
+    dev.replaceChildren();
+    for (const d of u.device_list || []) {
+      const r = el("div", "drow");
+      r.append(el("b", null, d.app ? build(d.app) : "unknown app"), el("span", "muted", [d.push || "no push", `added ${rel(d.created)}`, `seen ${seenDay(d.last_seen)}`].join(" · ")));
+      r.title = d.app || "";
+      dev.append(r);
+    }
+    if (!dev.childElementCount) dev.append(el("p", "empty", `${u.devices || 0} device${u.devices === 1 ? "" : "s"}`));
+    const reps = $("p-reports");
+    reps.replaceChildren();
+    const about = reportsAbout(u.id), by = (last?.[which]?.reports || []).filter((r) => up(r.reporter) === up(u.id));
+    for (const [r, dir] of [...about.map((r) => [r, "about"]), ...by.map((r) => [r, "by"])]) {
+      const done = lastDone.has(reportKey(r)), row = el("div", `drow${done ? " done" : ""}`), line = el("span");
+      line.append(reasonTag(r.reason), document.createTextNode(dir === "about" ? ` by ${r.reporter_name ?? r.reporter.slice(0, 8)}` : ` reported ${r.reported_name ?? r.reported.slice(0, 8)}`));
+      if (dir === "about" && r.id != null) row.append(tickButton(done, "Report handled", (d) => reportDone(r, d)));
+      row.append(line, el("span", "muted", rel(r.at)));
+      reps.append(row);
+    }
+    if (!reps.childElementCount) reps.append(el("p", "empty", "No reports."));
+    const n = openReports(u.id);
+    more.textContent = `${num(u.devices)} device${u.devices === 1 ? "" : "s"} · ${about.length ? `${about.length} report${about.length === 1 ? "" : "s"}${n ? ` (${n} open)` : ""}` : "no reports"}`;
+    more.classList.toggle("alert", n > 0);
+  };
+  $("p-id").addEventListener("click", () => {
+    navigator.clipboard?.writeText($("p-id").dataset.id).then(() => { $("p-id").dataset.copied = "1"; setTimeout(() => delete $("p-id").dataset.copied, 1200); }).catch(() => {});
+  });
+  const convoHead = (messages) => {
+    const team = isTeam(supportUser), open = messages.filter((m) => (team || !m.from_team) && m.done_at == null).length;
+    $("convo-done").hidden = team || !open;
+    const canWrite = team || messages.length > 0;
+    $("support-reply").hidden = !canWrite;
+    $("support-reply").classList.toggle("team", team);
+    $("support-text").maxLength = team ? 4000 : 2000;
+    $("support-text").placeholder = team ? "Add a to-do (Enter)" : `Reply to ${supportName} (Enter sends, Shift+Enter new line)`;
+    growComposer();
+  };
+  const select = (id, name) => {
+    if (location.hash !== "#users") history.replaceState(null, "", "#users");
+    if (currentTab !== "users") tab();
+    supportOpen(id, name, true);
+  };
   const supportOpen = async (user, title, chosen) => {
     const hub = which;
     if (chosen || supportWant === null) supportWant = user;
     if (chosen) {
-      if (supportUser !== user || supportHub !== hub) { $("support-text").value = ""; supportSeen = ""; $("support-history").replaceChildren(); }
-      supportUser = user; supportHub = hub; supportName = title || user; set("support-title", supportName); drawThreads();
+      if (supportUser !== user || supportHub !== hub) {
+        $("support-text").value = ""; growComposer(); supportSeen = null; $("support-history").replaceChildren();
+        $("support-reply").hidden = true; $("convo-done").hidden = true;
+      }
+      supportUser = user; supportHub = hub; supportName = title || user;
+      avatar($("convo-avatar"), supportName, isTeam(user)); set("support-title", supportName);
+      part(drawPerson); part(drawList);
     }
     try {
       const data = await supportGet(user);
       if (which !== hub || supportWant !== user) return;
-      if (supportUser !== user || supportHub !== hub) { $("support-text").value = ""; supportSeen = ""; }
       supportUser = user; supportHub = hub; supportName = title || supportName || user;
-      set("support-title", supportName);
-      set("support-sub", `${data.messages.length} messages`);
-      $("support-reply").hidden = false;
-      $("support-text").maxLength = user === "team" ? 4000 : 2000;
-      $("support-text").placeholder = user === "team" ? "What needs doing?" : "Reply";
-      $("support-reply").querySelector("button").textContent = user === "team" ? "Add To-Do" : "Send";
+      supportMessages = data.messages;
+      convoHead(data.messages);
       const seen = data.messages.map((m) => `${m.id}:${m.read_at ? 1 : 0}:${m.done_at}`).join(",");
       if (seen !== supportSeen) { supportSeen = seen; drawThread(data.messages); }
-      drawThreads();
+      if (chosen && !$("support-reply").hidden) $("support-text").focus({ preventScroll: true });
       set("support-error", "");
     } catch (e) { set("support-error", e.message); }
   };
@@ -480,19 +579,25 @@ if (document.body.classList.contains("login")) {
     supportBusy = true;
     const hub = which;
     if (supportHub !== hub) {
-      supportUser = null; supportWant = null; supportSeen = ""; $("support-reply").hidden = true;
-      $("support-history").replaceChildren(); set("support-title", "Loading…"); set("support-sub", "");
+      supportUser = null; supportWant = null; supportSeen = null; $("support-reply").hidden = true;
+      $("support-history").replaceChildren(); set("support-title", "Loading…");
     }
     try {
       const threads = await supportGet();
       if (hub !== which) return;
-      supportThreads = [...threads].sort((a, b) => Number(b.user_id === "team") - Number(a.user_id === "team") || Number(b.unread > 0) - Number(a.unread > 0) || b.at - a.at);
-      supportUnread(threads.reduce((n, t) => n + t.unread, 0));
-      drawThreads();
-      // Nothing open yet: the first thread with something open (else the newest conversation, else the To-Dos).
-      if (supportWant === null && supportThreads.length) {
-        const first = supportThreads.find((t) => t.unread || t.open) || supportThreads.find((t) => t.user_id !== "team") || supportThreads[0];
-        supportOpen(first.user_id, first.name || "Deleted account", true);
+      supportThreads = threads;
+      const open = threads.reduce((n, t) => n + (isTeam(t.user_id) ? 0 : t.unread), 0);
+      set("feedback-unread", open);
+      // The Users tab's badge: conversations whose last word is the user's and still open.
+      const lastLines = last?.[which]?.support_last || {};
+      const unanswered = threads.filter((t) => !isTeam(t.user_id) && t.unread > 0 && !lastLines[up(t.user_id)]?.team).length;
+      $("badge-users").hidden = !unanswered; $("badge-users").textContent = unanswered > 99 ? "99+" : String(unanswered);
+      part(drawList);
+      // Nothing chosen yet: the first conversation with something open (else the newest, else the To-Dos).
+      if (supportWant === null && currentTab === "users") {
+        const user = threads.filter((t) => !isTeam(t.user_id)).sort((a, b) => (b.unread > 0) - (a.unread > 0) || b.at - a.at)[0];
+        if (user) supportOpen(user.user_id, userById(user.user_id)?.name || user.name || "Deleted account", true);
+        else if (threads.length) supportOpen("team", "Team To-Dos", true);
       }
       set("support-error", "");
     } catch (e) { set("support-error", e.message); }
@@ -504,61 +609,66 @@ if (document.body.classList.contains("login")) {
     const button = $("support-reply").querySelector("button"), user = supportUser, hub = supportHub;
     button.disabled = true;
     try {
-      if (user === "team") {
-        const r = await fetch("/todos", {method:"POST", body:new URLSearchParams({hub, text})});
-        if (!r.ok) throw new Error("Could not add To-Do");
+      if (isTeam(user)) {
+        const r = await fetch("/todos", { method: "POST", body: new URLSearchParams({ hub, text }) });
+        if (!r.ok) throw new Error("Could not add the to-do.");
       } else {
-        await supportPost("/support", {hub, user, action: "reply", text});
-        // The reply answers the user's open messages in this thread: they are ticked done.
+        await postJSON("/support", { hub, user, action: "reply", text });
+        // The reply answers the user's open messages in this thread: they are marked handled.
         const open = which !== hub ? [] : (await supportGet(user)).messages.filter((m) => !m.from_team && m.done_at == null);
-        await Promise.all(open.map((m) => supportPost("/support/done", {hub, id: m.id, done: true})));
+        await Promise.all(open.map((m) => postJSON("/support/done", { hub, id: m.id, done: true })));
       }
       if (which !== hub || supportUser !== user) return;
-      $("support-text").value = "";
+      $("support-text").value = ""; growComposer();
       await supportOpen(user);
       await supportRefresh();
     } catch (e) { set("support-error", e.message); }
-    finally { button.disabled = false; $("support-text").focus(); }
+    finally { button.disabled = false; $("support-text").focus({ preventScroll: true }); }
   };
-  $("support-reply").onsubmit = (e) => { e.preventDefault(); supportSend(); };
+  $("support-reply").addEventListener("submit", (e) => { e.preventDefault(); supportSend(); });
+  $("support-text").addEventListener("input", growComposer);
   $("support-text").addEventListener("keydown", (e) => {
     if (e.key === "Enter" && !e.shiftKey && !e.isComposing) { e.preventDefault(); supportSend(); }
   });
+  $("convo-done").addEventListener("click", () => supportDone(supportMessages.filter((m) => !m.from_team && m.done_at == null).map((m) => m.id), true));
   setInterval(() => {
-    if (document.visibilityState !== "visible" || currentTab !== "feedback") return;
+    if (document.visibilityState !== "visible" || currentTab !== "users") return;
     supportRefresh();
     if (supportUser && supportHub === which) supportOpen(supportUser);
   }, 4000);
 
-
-
-  // A small graph of 14 values: an area and its line, a hover title per day.
-  const SVG = "http://www.w3.org/2000/svg";
-  const graph = (el, values, titles) => {
-    const top = Math.max(1, ...values), w = 140, hgt = 40, step = w / Math.max(1, values.length - 1);
-    const pts = values.map((v, i) => [i * step, hgt - 2 - (v / top) * (hgt - 6)]);
-    const line = pts.map(([x, y], i) => `${i ? "L" : "M"}${x.toFixed(1)},${y.toFixed(1)}`).join(" ");
-    const area = document.createElementNS(SVG, "path"), stroke = document.createElementNS(SVG, "path");
-    area.setAttribute("d", `${line} L${w},${hgt} L0,${hgt} Z`); area.setAttribute("class", "area");
-    stroke.setAttribute("d", line); stroke.setAttribute("class", "line");
-    const hits = values.map((v, i) => {
-      const r = document.createElementNS(SVG, "rect"), t = document.createElementNS(SVG, "title");
-      r.setAttribute("x", Math.max(0, i * step - step / 2)); r.setAttribute("width", step); r.setAttribute("y", 0); r.setAttribute("height", hgt);
-      t.textContent = titles[i]; r.append(t); return r;
-    });
-    el.replaceChildren(area, stroke, ...hits);
+  // ---- users: the reports list (who reported whom); handled is kept by the admin page (done.json) ---------------------
+  let reportsMode = "open";
+  $("reports-mode").addEventListener("change", (e) => { reportsMode = e.target.value; part(drawReports); });
+  const reportDone = async (r, done) => {
+    await fetch("/feedback/done", { method: "POST", headers: { "Content-Type": "application/x-www-form-urlencoded" },
+      body: `hub=${which}&id=r${r.id}&done=${done ? 1 : 0}` });
+    await refresh();
   };
-  const days14 = () => Array.from({length: 14}, (_, i) => Math.floor(Date.now() / 86400000) - 13 + i);
-  const dayName = (d) => new Date(d * 86400000).toLocaleDateString(undefined, { day: "numeric", month: "short" });
-
-  // Feedback tile: open user messages at the end of each day (red: rising is worse).
-  const feedbackTile = (h) => {
-    const v = (h && h.support_unread_days) || [], days = days14();
-    if (v.length) graph($("feedback-graph"), v, v.map((n, i) => `${dayName(days[i])}: ${n} open`));
-    if (!supportThreads.length && v.length) supportUnread(v[v.length - 1]);
+  const reasonTag = (reason) => tag(reason, reason === "abuse" ? "bad" : reason === "spam" ? "warn" : "muted");
+  const drawReports = () => {
+    const h = last?.[which], list = [...(h?.reports || [])].sort((a, b) => b.at - a.at);
+    const open = list.filter((r) => !lastDone.has(reportKey(r)));
+    set("reports-note", list.length ? `${open.length} open · ${list.length} in all` : "");
+    const shown = list.filter((r) => reportsMode === "all" || (reportsMode === "done") === lastDone.has(reportKey(r)));
+    const body = $("reports-body");
+    body.replaceChildren();
+    for (const r of shown) {
+      const tr = body.insertRow(), done = lastDone.has(reportKey(r));
+      if (done) tr.className = "done";
+      cell(tr, r.id == null ? "" : tickButton(done, "Report handled", (d) => reportDone(r, d)), "tick-col");
+      const who = el("button", "link name", r.reported_name ?? r.reported.slice(0, 8));
+      who.type = "button"; who.title = "open this user";
+      who.addEventListener("click", () => { select(up(r.reported), r.reported_name || r.reported); $("people").scrollIntoView({ behavior: "smooth" }); });
+      cell(tr, who);
+      cell(tr, reasonTag(r.reason));
+      cell(tr, r.reporter_name ?? r.reporter.slice(0, 8), "muted", r.reporter);
+      cell(tr, rel(r.at), null, date(r.at));
+    }
+    if (!shown.length) cell(body.insertRow(), reportsMode === "open" ? "No open reports." : "None.", "empty").colSpan = 5;
   };
 
-  // A diagnostic's one line: the exception for a crash, domain · code · place for an error.
+  // ---- crashes: one row per signature; a click shows the report under it; pages only beyond 100 -------------------
   const diagInfo = (d) => {
     let p = {};
     try { p = JSON.parse(d.payload || "{}") || {}; } catch {}
@@ -567,67 +677,61 @@ if (document.body.classList.contains("login")) {
     const text = [p.details, p.frames, p.message].filter(Boolean).join("\n\n") || d.payload || "";
     return { title, text };
   };
-  let diagMode = "open";
+  let diagMode = "open", diagPage = 1;
   const diagOpen = new Set();
-  $("diag-mode").addEventListener("change", (e) => { diagMode = e.target.value; if (last) render(last, lastDone); });
-  const diagnostics = (h) => {
-    const list = (h && h.diagnostics) || [], open = list.filter((d) => !d.done);
-    set("diagnostics-open", h?.diagnostics_open ?? open.length);
-    badge("badge-diagnostics", h?.diagnostics_open ?? open.length);
-    // Tile: open crashes (red) and errors (yellow) by the day they were last seen.
-    const days = days14();
-    $("diagnostics-bars").replaceChildren(...days.map((day) => {
-      const here = open.filter((d) => Math.floor(d.last_seen / 86400000) === day);
-      const c = here.filter((d) => d.kind === "crash").length, e = here.length - c;
-      const bar = document.createElement("span");
-      bar.title = `${dayName(day)}: ${c} crashes · ${e} errors open`;
-      if (!here.length) { bar.className = "zero"; return bar; }
-      for (const [n, cls] of [[c, "crash"], [e, "error"]]) if (n) { const i = document.createElement("i"); i.className = cls; i.style.flexGrow = n; bar.append(i); }
-      bar.style.height = `${(here.length / Math.max(1, ...days.map((x) => open.filter((d) => Math.floor(d.last_seen / 86400000) === x).length))) * 100}%`;
-      return bar;
-    }));
-    // Tab: one row per signature, open ones by last seen; a click shows the report under it.
-    const card = $("diag"), body = card.querySelector("tbody");
-    card.querySelector("h2 small").textContent = `${open.length} open · ${list.length}`;
-    body.replaceChildren();
+  $("diag-mode").addEventListener("change", (e) => { diagMode = e.target.value; diagPage = 1; part(drawDiagnostics); });
+  const PAGE = 100;
+  // Every open entry of this hub done at once, after a confirm.
+  $("diag-all").addEventListener("click", async () => {
+    const hub = which, open = (last?.[hub]?.diagnostics || []).filter((d) => !d.done);
+    if (!open.length || !confirm(`Mark all ${open.length} open crashes and errors on ${hub} done?`)) return;
+    $("diag-all").disabled = true;
+    try {
+      await Promise.all(open.map((d) => fetch("/diagnostics/done", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ hub, id: d.id, done: true }) })));
+      await refresh();
+    } finally { $("diag-all").disabled = false; }
+  });
+  const drawDiagnostics = () => {
+    const h = last?.[which], list = h?.diagnostics || [], open = list.filter((d) => !d.done);
+    $("diag-all").hidden = !open.length;
+    $("diag-all").textContent = `Mark all ${open.length} done`;
+    set("diag-note", `${open.length} open · ${list.length} in all`);
     const shown = list.filter((d) => diagMode === "all" || (diagMode === "done") === !!d.done).sort((a, b) => b.last_seen - a.last_seen);
-    if (!shown.length) { const tr = body.insertRow(); cell(tr, diagMode === "open" ? "Nothing open." : "None.", "muted"); tr.cells[0].colSpan = 7; }
-    for (const d of shown) {
-      const info = diagInfo(d), tr = body.insertRow(), box = document.createElement("input"), hub = which;
-      box.type = "checkbox"; box.checked = !!d.done;
-      box.setAttribute("aria-label", "Mark diagnostic done");
-      box.onchange = async () => {
-        const response = await fetch("/diagnostics/done", {method: "POST", headers: {"Content-Type": "application/json"},
-          body: JSON.stringify({hub, id: d.id, done: box.checked})});
-        if (!response.ok) box.checked = !box.checked; else people();
-      };
-      tr.insertCell().append(box);
-      const type = document.createElement("span"); type.className = `kind ${d.kind}`;
-      type.textContent = d.kind === "crash" ? "Crash" : "Error";
-      tr.insertCell().append(type);
-      cell(tr, info.title, "sig"); tr.cells[2].title = info.title;
-      cell(tr, d.count, "num");
-      cell(tr, rel(d.first_seen)); tr.cells[4].title = date(d.first_seen);
-      cell(tr, rel(d.last_seen)); tr.cells[5].title = date(d.last_seen);
-      cell(tr, d.app || "–", "mono"); tr.cells[6].title = [d.os, d.model].filter(Boolean).join(" · ");
-      if (d.done) tr.classList.add("done");
-      tr.classList.add("opens");
-      const more = body.insertRow(), td = more.insertCell(), pre = document.createElement("pre"), meta = document.createElement("p");
+    const pages = Math.max(1, Math.ceil(shown.length / PAGE));
+    diagPage = Math.min(diagPage, pages);
+    const nav = $("diag-pages");
+    nav.hidden = pages === 1;
+    nav.replaceChildren(...Array.from({ length: pages }, (_, i) => {
+      const b = el("button", i + 1 === diagPage ? "on" : "", String(i + 1));
+      b.type = "button"; b.onclick = () => { diagPage = i + 1; drawDiagnostics(); };
+      return b;
+    }));
+    const body = $("diag-body");
+    body.replaceChildren();
+    for (const d of shown.slice((diagPage - 1) * PAGE, diagPage * PAGE)) {
+      const info = diagInfo(d), tr = body.insertRow(), hub = which;
+      tr.className = `opens${d.done ? " done" : ""}`;
+      cell(tr, tickButton(!!d.done, "Crash done", async (done) => {
+        const r = await fetch("/diagnostics/done", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ hub, id: d.id, done }) });
+        if (r.ok) await refresh();
+      }), "tick-col");
+      cell(tr, tag(d.kind === "crash" ? "Crash" : "Error", d.kind === "crash" ? "bad" : "warn"));
+      cell(tr, info.title, "sig", info.title);
+      cell(tr, num(d.count), "num");
+      cell(tr, rel(d.first_seen), null, date(d.first_seen));
+      cell(tr, rel(d.last_seen), null, date(d.last_seen));
+      cell(tr, d.app || "–", "mono", [d.os, d.model].filter(Boolean).join(" · "));
+      const more = body.insertRow(), td = more.insertCell();
       more.className = "more"; td.colSpan = 7;
-      meta.className = "cap"; meta.textContent = `${d.app || "?"} · ${d.os || "?"} · ${d.model || "?"} · first ${date(d.first_seen)} · last ${date(d.last_seen)}`;
-      pre.textContent = info.text;
-      td.append(meta, pre);
+      td.append(el("p", "cap", `${d.app || "?"} · ${d.os || "?"} · ${d.model || "?"} · first ${date(d.first_seen)} · last ${date(d.last_seen)}`), el("pre", null, info.text));
       more.hidden = !diagOpen.has(d.id);
-      tr.addEventListener("click", (e) => {
-        if (e.target.closest("input")) return;
-        more.hidden = !more.hidden;
-        (more.hidden ? diagOpen.delete(d.id) : diagOpen.add(d.id));
-      });
+      tr.addEventListener("click", () => { more.hidden = !more.hidden; more.hidden ? diagOpen.delete(d.id) : diagOpen.add(d.id); tr.classList.toggle("open", !more.hidden); });
+      tr.classList.toggle("open", !more.hidden);
     }
+    if (!body.rows.length) cell(body.insertRow(), diagMode === "open" ? "Nothing open. 🎉" : "None.", "empty").colSpan = 7;
   };
 
-  // Every table of that hub's database, as it is (long blobs by their length): the names on the left, one table on the right.
-  // Grouped by topic, so Yo's core message traffic stands apart from the rest; unknown tables land under "Other".
+  // ---- database: every table, grouped by topic; reserved names with their switch --------------------------------
   const TABLE_GROUPS = [
     ["Accounts & Identity", ["users", "handles", "reserved", "gone", "account_keys", "devices", "contact_keys", "profile_commitments"]],
     ["Messaging (core)", ["messages", "prekeys", "blobs", "blob_quota", "zk_groups"]],
@@ -635,6 +739,34 @@ if (document.body.classList.contains("login")) {
     ["Team & Support", ["support_messages", "diagnostics", "diagnostic_seen", "diagnostic_days", "reports", "feedback"]],
     ["Internal", ["settings", "deliveries_hourly", "_litestream_lock", "_litestream_seq"]],
   ];
+  // What each table is for, from the hub's schema (hub/src/db.rs); "(?)" marks a guess.
+  const TABLE_INFO = {
+    users: "Accounts: id, account key, sign-up time",
+    handles: "Usernames by skeleton, as their owners spell them",
+    reserved: "Usernames nobody may claim, by skeleton",
+    gone: "Replaced devices; their requests answer 410",
+    account_keys: "Every account key a user ever had",
+    devices: "Each user's devices: keys, push, app, last seen",
+    contact_keys: "Checks of users' access keys, never the keys",
+    profile_commitments: "Users' profile key commitments, for credentials",
+    messages: "Encrypted envelopes waiting for their device",
+    prekeys: "Devices' prekeys, to start encrypted sessions",
+    blobs: "Photos and videos until their last fetch",
+    blob_quota: "Uploads per user and day, kept two days",
+    zk_groups: "Groups: encrypted state, revision (Signal Groups v2)",
+    storage: "Each user's sealed storage, versioned writes",
+    backups: "Each user's backup record; it secures the name",
+    support_messages: "Support chat messages and the team's to-dos",
+    diagnostics: "Crash and error reports, one row per signature",
+    diagnostic_seen: "Report ids already counted, never counted twice",
+    diagnostic_days: "Crashes and errors per day, last 14 days",
+    reports: "Users reported by users, latest per pair",
+    feedback: "Old app feedback, before the support chat",
+    settings: "Hub switches, such as name reservation on/off",
+    deliveries_hourly: "Deliveries per hour, a count only, 8 days",
+    _litestream_lock: "Litestream replication bookkeeping (?)",
+    _litestream_seq: "Litestream replication bookkeeping (?)",
+  };
   const tableGroups = (list) => {
     const byName = new Map(list.map((t) => [t.name, t])), known = new Set();
     const groups = TABLE_GROUPS.map(([title, names]) => {
@@ -644,192 +776,155 @@ if (document.body.classList.contains("login")) {
     groups.push(["Other", list.filter((t) => !known.has(t.name))]);
     return groups.filter(([, ts]) => ts.length);
   };
-  let tableOpen = null;
-  const tables = (h) => {
-    const box = $("tables").querySelector(".tables"), note = $("tables").querySelector("h2 small");
-    const list = (h && h.tables) || [];
-    note.textContent = `${list.length}`;
+  // A timestamp column (…_at, ms since 1970) as a readable date, the raw value on hover.
+  const isTime = (col, v) => /_at$/.test(col) && typeof v === "number" && v > 1e11 && v < 1e14;
+  let tableOpen = null, tablesDrawn = "";
+  const changeReserved = async (data) => {
+    const r = await fetch("/reserved", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ hub: which, ...data }) });
+    if (!r.ok) throw new Error(`Could not save (${r.status}).`);
+    await tick(); await refresh();
+  };
+  const reservedBar = () => {
+    const data = reservedData?.[which], wrap = el("div", "reserved-bar");
+    const sw = el("button", `switch${data?.enabled ? " on" : ""}`);
+    sw.type = "button"; sw.disabled = !data;
+    sw.setAttribute("role", "switch"); sw.setAttribute("aria-checked", String(!!data?.enabled));
+    sw.append(el("i"));
+    const label = el("span", "state", data ? (data.enabled ? "Reservation ON: these names cannot be claimed" : "Reservation OFF: anyone may claim these names") : "Reservation state unavailable");
+    const err = el("small", "error");
+    sw.addEventListener("click", async () => { sw.disabled = true; try { await changeReserved({ action: "switch", enabled: !data.enabled }); } catch (e) { err.textContent = e.message; sw.disabled = false; } });
+    const form = el("form", "add");
+    const input = el("input"); input.placeholder = "Add names (comma separated)"; input.setAttribute("aria-label", "Names to reserve");
+    const add = el("button", "pill", "Add"); add.type = "submit";
+    form.append(input, add);
+    form.addEventListener("submit", async (e) => {
+      e.preventDefault();
+      const names = input.value.split(/[,\n]/).map((n) => n.trim()).filter(Boolean);
+      if (!names.length) return;
+      try { await changeReserved({ action: "add", names }); input.value = ""; } catch (x) { err.textContent = x.message; }
+    });
+    wrap.classList.toggle("off", !!data && !data.enabled);
+    wrap.append(sw, label, form, err);
+    return wrap;
+  };
+  const drawTables = () => {
+    const box = $("tables").querySelector(".tables"), list = last?.[which]?.tables || [];
+    const drawn = JSON.stringify([which, tableOpen, list.map((t) => [t.name, t.count]), tableOpen === "reserved" ? reservedData?.[which]?.enabled : 0,
+      (list.find((t) => t.name === tableOpen) || {}).rows?.length]);
+    if (drawn === tablesDrawn && box.childElementCount) return;
+    tablesDrawn = drawn;
+    set("tables-note", `${list.length} tables`);
     const groups = tableGroups(list);
     if (!list.some((t) => t.name === tableOpen)) tableOpen = groups.length ? groups[0][1][0].name : null;
-    const side = document.createElement("nav"), pane = document.createElement("div");
-    side.className = "tside"; pane.className = "tpane scroll";
+    const side = el("nav", "tside"), pane = el("div", "tpane");
     for (const [title, ts] of groups) {
-      const head = document.createElement("h3");
-      head.textContent = title;
-      side.append(head);
+      side.append(el("h3", null, title));
       for (const t of ts) {
-        const b = document.createElement("button");
-        b.type = "button";
-        b.className = t.name === tableOpen ? "on" : "";
-        const name = document.createElement("span"), count = document.createElement("small");
-        name.textContent = t.name; count.textContent = t.count;
-        b.append(name, count);
-        b.addEventListener("click", () => { tableOpen = t.name; tables(h); });
+        const b = el("button", t.name === tableOpen ? "on" : "");
+        b.type = "button"; b.title = TABLE_INFO[t.name] || "";
+        b.append(el("span", null, t.name), el("small", null, num(t.count)));
+        b.addEventListener("click", () => { tableOpen = t.name; drawTables(); });
         side.append(b);
       }
     }
     const t = list.find((x) => x.name === tableOpen);
     if (t) {
-      const head = document.createElement("p");
-      head.className = "cap";
-      head.textContent = `${t.name} · ${t.count} rows${t.count > t.rows.length ? ` (first ${t.rows.length})` : ""}`;
-      const table = document.createElement("table");
+      const head = el("div", "thead");
+      const h = el("h3", null, t.name);
+      h.append(el("small", null, `${num(t.count)} rows${t.count > t.rows.length ? ` · first ${t.rows.length} shown` : ""}`));
+      head.append(h, el("p", "desc", TABLE_INFO[t.name] || "No description."));
+      pane.append(head);
+      if (t.name === "reserved") pane.append(reservedBar());
+      const wrap = el("div", "scroll grid"), table = el("table", "list data");
       const hr = table.createTHead().insertRow();
-      for (const c of t.columns) { const th = document.createElement("th"); th.textContent = c; hr.append(th); }
+      for (const c of t.columns) hr.append(el("th", null, c));
+      if (t.name === "reserved") hr.append(el("th"));
       const body = table.createTBody();
       for (const row of t.rows) {
         const tr = body.insertRow();
-        for (const v of row) cell(tr, v == null ? "–" : String(v), "mono");
+        row.forEach((v, i) => {
+          if (isTime(t.columns[i], v)) cell(tr, date(v), "mono", String(v));
+          else cell(tr, v == null ? "–" : String(v), "mono", v != null && String(v).length > 40 ? String(v) : "");
+        });
+        if (t.name === "reserved") {
+          const name = row[t.columns.indexOf("spelling")] ?? row[0];
+          const x = el("button", "ghost-x", "Remove"); x.type = "button";
+          x.addEventListener("click", async () => { x.disabled = true; try { await changeReserved({ action: "remove", name }); } catch { x.disabled = false; } });
+          cell(tr, x);
+        }
       }
-      pane.append(head, table);
+      if (!t.rows.length) cell(body.insertRow(), "Empty.", "empty").colSpan = t.columns.length + (t.name === "reserved" ? 1 : 0);
+      wrap.append(table);
+      pane.append(wrap);
     }
-    const keep = box.querySelector(".tpane");
-    const scroll = keep ? [keep.scrollLeft, keep.scrollTop] : [0, 0];
+    const keep = box.querySelector(".tpane .grid"), scroll = keep ? [keep.scrollLeft, keep.scrollTop, box.querySelector(".tpane").dataset.name] : null;
     box.replaceChildren(side, pane);
-    if (keep && t && keep.dataset.name === t.name) { pane.scrollLeft = scroll[0]; pane.scrollTop = scroll[1]; }
     if (t) pane.dataset.name = t.name;
+    if (scroll && t && scroll[2] === t.name) { const g = pane.querySelector(".grid"); g.scrollLeft = scroll[0]; g.scrollTop = scroll[1]; }
   };
 
-  // An app string "ios/202611151343" against the hub's YO_MIN_APP: "new" (that build or newer), "old" (update screen), null.
-  const build = (app) => (app || "").split("/").pop();
-  // YoGPT's own device counts against the YoGPT build on the server (h.yogpt_min), the apps against YO_MIN_APP.
-  let yogptMin = null;
-  const appState = (app, min) => {
-    if (app && app.startsWith("yogpt/")) min = yogptMin;
-    if (!app || !min) return null;
-    const [p, b] = app.split("/"), [mp, mb] = min.split("/");
-    if (p !== mp || !b || !mb) return null;
-    return Number(b) >= Number(mb) ? "new" : "old";
-  };
-  const ago = (ms) => span((Date.now() - ms) / 1000);
-
-  // What an operator wants at a glance (no content, nothing new tracked): from what the hub's database has anyway.
-  const stats = (h, done) => {
-    const ok = h && !h.error;
-    const n = (v) => (ok && v != null ? v : "–");
-    const su = (ok && h.signups) || [];
-    set("st-signups", su.length ? su.reduce((a, b) => a + b, 0) : "–");
-    // Deliveries per day: the hub keeps no such counter yet (messages holds only the waiting ones).
-    const md = ok && h.deliveries;
-    set("st-msgs", md ? md.day ?? "—" : "—");
-    const bars = $("st-signup-bars"), top = Math.max(1, ...su);
-    bars.replaceChildren(...su.map((v, i) => {
-      const b = document.createElement("span");
-      b.style.height = `${Math.max(4, (v / top) * 100)}%`;
-      b.title = `${new Date(Date.now() - (su.length - 1 - i) * 86400000).toLocaleDateString()}: ${v}`;
-      if (!v) b.className = "zero";
-      return b;
-    }));
-    const blobs = ok && h.blobs;
-    set("q-line", ok ? `queue: ${n(h.messages)} waiting · ${blobs ? `${blobs[0]} blobs, ${bytes(blobs[1])}` : "–"}` : "–");
-    const apps = (ok && h.apps) || [];
-    let fresh = 0, old = 0, other = 0;
-    for (const [app, c] of apps) { const a = appState(app, h.min_app); if (a === "new") fresh += c; else if (a === "old") old += c; else other += c; }
-    // Two small graphs above the users table: active users, and app versions (newest green, update yellow).
-    const seg = (el, parts) => el.replaceChildren(...parts.filter(([v]) => v > 0).map(([v, cls, title]) => {
-      const s = document.createElement("span"); s.className = cls; s.style.flexGrow = v; s.title = title; return s;
-    }));
-    if (ok) {
-      const total = h.total || 0, today = h.active_today || 0, week = Math.max(today, h.active_users || 0);
-      set("ug-total", total);
-      set("ug-today", `${today} today`);
-      set("ug-cap", `${week} this week · ${n(h.secured)} secured · ${n(h.devices)} devices`);
-      seg($("ug-active-bar"), [[today, "a1", `${today} today`], [week - today, "a2", `${week} this week`], [Math.max(0, total - week), "a0", `${total} users`]]);
-      set("ug-fresh", `${fresh}/${fresh + old + other}`);
-      set("ug-apps-cap", `${old ? `${old} need the update · ` : ""}min ${h.min_app ? build(h.min_app) : "not pinned"}${other ? ` · ${other} unknown` : ""}`);
-      seg($("ug-apps-bar"), [[fresh, "new", `${fresh} newest`], [old, "old", `${old} need the update`], [other, "a0", `${other} unknown`]]);
-    }
-  };
-
-  const render = (d, done) => {
-    const h = d[which];
-    yogptMin = h && h.yogpt_min;
-    part(() => users("users", h));
-    part(() => stats(h, done));
-    part(() => feedbackTile(h));
+  // ---- everything from the collector -------------------------------------------------------------------------------
+  const render = () => {
+    const h = last?.[which];
+    findNewest(h);
+    part(() => overview(h));
     supportRefresh();
-    part(() => diagnostics(h));
-    part(() => reports("reports", h, done));
-    part(() => tables(h));
+    part(drawReports);
+    part(drawDiagnostics);
+    if (currentTab === "users") part(drawPerson);
+    part(drawTables);
   };
-
   let peopleBusy = false;
-  async function people() {
+  async function refresh() {
     if (document.visibilityState !== "visible" || peopleBusy) return;
     peopleBusy = true;
     const status = $("collection-status");
-    status.textContent = last ? "updating…" : "Loading fresh data…";
+    if (!last) status.textContent = "Loading fresh data…";
     try {
       const r = await fetch("/users.json", { cache: "no-store" });
       if (!r.ok) throw new Error("collector unavailable");
       last = await r.json();
-      updateTile(last.updates);
+      updates(last.updates);
       const doneResponse = await fetch("/done.json", { cache: "no-store" });
       lastDone = new Set(doneResponse.ok ? await doneResponse.json() : []);
-      render(last, lastDone);
-      status.textContent = last.stale ? "Stale data · waiting for collector" : "";
+      render();
+      status.textContent = last.stale ? "Stale data · waiting for the collector" : "";
     } catch {
       status.textContent = last ? "Stale data · refresh failed" : "Waiting for fresh data…";
     } finally { peopleBusy = false; }
   }
 
-  // Tabs at the top: Overview, Feedback, Crashes, Users, Database; the hash keeps the tab across reloads and links.
-  let userTab = "users";
-  try { if (localStorage.getItem("users-tab") === "reserved") userTab = "reserved"; } catch {}
-  const usersLink = document.querySelector('#tabs [data-tab="users"]');
-  usersLink.hash = userTab;
-  for (const name of ["users", "reserved"]) {
-    $(`${name}-tab`).onclick = () => { location.hash = name; };
-    $(`${name}-tab`).onkeydown = e => {
-      if (!["ArrowLeft", "ArrowRight", "Home", "End"].includes(e.key)) return;
-      e.preventDefault();
-      const next = e.key === "Home" ? "users" : e.key === "End" ? "reserved" : name === "users" ? "reserved" : "users";
-      $(`${next}-tab`).focus();
-      location.hash = next;
-    };
-  }
+  // ---- tabs: the hash keeps the tab across reloads and links; keys 1–4 switch, 0 the hub ----------------------------
+  const TABS = ["overview", "users", "crashes", "db"];
   const tab = () => {
-    const h = location.hash.slice(1), t = h === "reserved" ? "users" : h === "diagnostics" ? "crashes" : ["db", "users", "feedback", "crashes"].includes(h) ? h : "overview";
-    if (t === "users") {
-      userTab = h;
-      try { localStorage.setItem("users-tab", userTab); } catch {}
-      usersLink.hash = userTab;
-    }
-    const reserved = t === "users" && userTab === "reserved";
-    $("users-heading").hidden = t === "users";
-    $("user-tabs").hidden = t !== "users";
-    $("users-panel").hidden = reserved;
-    $("reserved").hidden = !reserved;
-    $("users-panel").setAttribute("role", t === "users" ? "tabpanel" : "presentation");
-    if (t === "users") $("users-panel").setAttribute("aria-labelledby", "users-tab");
-    else $("users-panel").removeAttribute("aria-labelledby");
-    for (const name of ["users", "reserved"]) {
-      const selected = name === userTab;
-      $(`${name}-tab`).setAttribute("aria-selected", String(selected));
-      $(`${name}-tab`).tabIndex = selected ? 0 : -1;
-    }
+    const h = location.hash.slice(1);
+    const t = h === "diagnostics" ? "crashes" : h === "reserved" ? "db" : h === "feedback" ? "users" : TABS.includes(h) ? h : "overview";
+    if (h === "feedback") history.replaceState(null, "", "#users");
+    const changed = t !== currentTab;
     currentTab = t;
     document.body.dataset.tab = t;
-    if (last) render(last, lastDone);
-    for (const el of document.querySelectorAll("[data-tabs]")) el.hidden = !el.dataset.tabs.split(" ").includes(t);
-    for (const a of document.querySelectorAll("#tabs a")) a.classList.toggle("on", a.dataset.tab === t);
-    if (t === "feedback") supportRefresh();
+    for (const e of document.querySelectorAll("[data-tabs]")) e.hidden = !e.dataset.tabs.split(" ").includes(t);
+    for (const a of document.querySelectorAll("#tabs a")) { const on = a.dataset.tab === t; a.classList.toggle("on", on); a.setAttribute("aria-selected", String(on)); }
+    if (last) render();
+    if (changed) window.scrollTo(0, 0);
   };
   window.addEventListener("hashchange", tab);
-  // Keys 1-5: the tabs in order (not while typing, not with modifiers).
+  const typing = (t) => t instanceof Element && (t.isContentEditable || t.closest("textarea, select, [contenteditable]")
+    || (t.closest("input") && !["checkbox", "radio", "button", "submit"].includes(t.closest("input").type)));
   document.addEventListener("keydown", (e) => {
-    if (e.ctrlKey || e.metaKey || e.altKey || e.shiftKey || e.target.closest("input, textarea, select, [contenteditable]")) return;
-    const a = document.querySelectorAll("#tabs a")[Number(e.key) - 1];
-    if (a && /^[1-5]$/.test(e.key)) location.hash = a.getAttribute("href").slice(1);
-    if (e.key === "0") document.querySelector("#which button:not(.on)")?.click();
+    if (e.ctrlKey || e.metaKey || e.altKey || typing(e.target) || $("pop").open) return;
+    const n = /^Digit[0-4]$/.test(e.code) ? Number(e.code.slice(5)) : /^[0-4]$/.test(e.key) ? Number(e.key) : null;
+    if (n == null) return;
+    e.preventDefault();
+    if (n === 0) { switchHub(); return; }
+    const target = TABS[n - 1];
+    if (target === "overview") { history.pushState(null, "", location.pathname + location.search); tab(); }
+    else if (location.hash !== `#${target}`) location.hash = target;
   });
   tab();
-
   tick();
   setInterval(tick, 3000);
-  people();
-  setInterval(people, 10000);
-  document.addEventListener("visibilitychange", () => {
-    if (document.visibilityState === "visible") people();
-  });
+  refresh();
+  setInterval(refresh, 10000);
+  document.addEventListener("visibilitychange", () => { if (document.visibilityState === "visible") { tick(); refresh(); } });
 }

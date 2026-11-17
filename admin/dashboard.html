@@ -12,25 +12,21 @@
 <body class="dash">
 <header>
   <div class="brand" title="Yo admin"><span class="logo">Yo</span><button type="button" class="hubword" id="hub-word" title="which hub the lists show: click or key 0 to switch">live</button></div>
-  <div class="stale" id="stale" hidden>no answer from the server</div>
-  <span id="collection-status" role="status">Loading fresh data…</span>
   <nav class="menu">
     <span class="tabs" id="tabs" role="tablist">
       <a role="tab" href="#" data-tab="overview" title="key 1">Overview</a>
-      <a role="tab" href="#feedback" data-tab="feedback" title="key 2">Feedback<b class="badge" id="badge-feedback" hidden></b></a>
-      <a role="tab" href="#crashes" data-tab="crashes" title="key 3">Crashes<b class="badge" id="badge-diagnostics" hidden></b></a>
-      <a role="tab" href="#users" data-tab="users" title="key 4">Users<b class="badge" id="badge-users" hidden></b></a>
-      <a role="tab" href="#db" data-tab="db" title="key 5">Database</a>
+      <a role="tab" href="#users" data-tab="users" title="key 2">Users<b class="badge" id="badge-users" hidden></b></a>
+      <a role="tab" href="#crashes" data-tab="crashes" title="key 3">Crashes</a>
+      <a role="tab" href="#db" data-tab="db" title="key 4">Database</a>
     </span>
-    <span id="which" hidden><button type="button" data-hub="live" class="on"></button><button type="button" data-hub="dev"></button></span>
   </nav>
+  <div class="status"><span class="stale" id="stale" hidden>no answer from the server</span><span id="collection-status" role="status">Loading fresh data…</span></div>
 </header>
 
-
-<!-- The overview: the server on top; below, the newest users on the left and small tiles on the right. -->
-<main class="bento overview" data-tabs="overview">
-  <article class="tile w2" id="t-system">
-    <h2>System</h2>
+<!-- Overview: the server and what is open on top; below, the newest users and the activity. -->
+<main class="ov" data-tabs="overview">
+  <article class="tile" id="t-system">
+    <h2 id="sys-head" role="button" tabindex="0"><i></i>System <small id="sys-updates"></small></h2>
     <div class="rows" id="t-net">
       <div class="row" id="r-cpu"><span class="k">CPU</span><span class="bar"><i></i></span><span class="v" id="cpu">–</span></div>
       <div class="row" id="r-mem"><span class="k">Memory</span><span class="bar"><i></i></span><span class="v" id="mem">–</span></div>
@@ -38,96 +34,118 @@
       <div class="row" id="r-rx"><span class="k">Net ↓</span><span class="bar"><i></i></span><span class="v" id="rx">–</span></div>
       <div class="row" id="r-tx"><span class="k">Net ↑</span><span class="bar"><i></i></span><span class="v" id="tx">–</span></div>
     </div>
-    <span id="cpu-cap" hidden></span><span id="mem-cap" hidden></span><span id="disk-cap" hidden></span><span id="load" hidden></span><span id="load-cap" hidden></span><span id="rx-cap" hidden></span><span id="tx-cap" hidden></span>
   </article>
+
   <article class="tile" id="t-services">
-    <h2 id="t-uptime">Services · up <span id="uptime">–</span> <b id="reboot-text"></b></h2>
+    <h2 id="t-uptime">Services <b id="reboot-text"></b></h2>
     <div class="svcs">
-      <div class="svc" id="t-hub"><h2><i></i>Hub</h2><span class="v" id="hub">–</span><span class="cap" id="hub-cap">–</span></div>
-      <div class="svc" id="t-dev"><h2><i></i>Dev Hub</h2><span class="v" id="dev">–</span><span class="cap" id="dev-cap">–</span></div>
-      <div class="svc" id="t-tunnel"><h2><i></i>Tunnel</h2><span class="v" id="tunnel">–</span><span class="cap" id="tunnel-cap">–</span></div>
-      <div class="svc" id="t-yogpt"><h2><i></i>YoGPT</h2><span class="v" id="yogpt">–</span><span class="cap" id="yogpt-cap">–</span></div>
+      <div class="svc" id="t-hub"><span class="dot"></span><b>Hub</b><span class="cap" id="hub-cap">–</span></div>
+      <div class="svc" id="t-dev"><span class="dot"></span><b>Dev Hub</b><span class="cap" id="dev-cap">–</span></div>
+      <div class="svc" id="t-tunnel"><span class="dot"></span><b>Tunnel</b><span class="cap" id="tunnel-cap">–</span></div>
+      <div class="svc" id="t-yogpt"><span class="dot"></span><b>YoGPT</b><span class="cap" id="yogpt-cap">–</span></div>
     </div>
+    <div class="foot-line" id="q-line">–</div>
   </article>
 
-
-  <article class="tile link" id="t-updates" role="button" tabindex="0" aria-label="Update details">
-    <h2><i></i>Updates</h2><div id="updates-summary">Unavailable</div><div class="cap" id="updates-reboot"></div><div class="cap" id="updates-release"></div>
-  </article>
-
-</main>
-
-<div id="hubs" data-tabs="overview users db feedback crashes">
-
-<main class="stack">
-  <article class="card small" id="reports" data-tabs="users">
-    <h2>User reports <small></small></h2>
-    <div class="scroll"><table>
-      <thead><tr><th>Done</th><th>When</th><th>Reported</th><th>Reason</th><th>By</th></tr></thead>
-      <tbody></tbody>
-    </table></div>
-  </article>
-  <article class="card users" id="users" data-tabs="overview users">
-    <h2><span id="users-heading">New users</span><span id="user-tabs" role="tablist" aria-label="Users and reserved names" hidden><button id="users-tab" role="tab" aria-selected="true" aria-controls="users-panel">Users (<span id="users-count">–</span>)</button><button id="reserved-tab" role="tab" aria-selected="false" aria-controls="reserved">Reserved names (<span id="reserved-count">–</span>)</button></span><small hidden></small></h2>
-    <div id="users-panel">
-    <div class="scroll"><table>
-      <thead><tr><th>Name</th><th>Signed up</th><th>Last seen</th><th>Devices</th><th>Push</th><th>Secured</th><th>Waiting</th><th>App</th></tr></thead>
-      <tbody></tbody>
-    </table></div>
-    <nav id="user-pages" aria-label="User pages"></nav>
+  <article class="tile" id="t-issues">
+    <h2>Open</h2>
+    <div class="legend">
+      <a href="#users" class="lg fb"><i></i>Feedback <b id="feedback-unread">–</b></a>
+      <a href="#crashes" class="lg cr"><i></i>Crashes <b id="diagnostics-open">–</b></a>
+      <a href="#users" class="lg rp"><i></i>Reports <b id="reports-open">–</b></a>
     </div>
-    <div id="reserved" role="tabpanel" aria-labelledby="reserved-tab" hidden>
-    <p>Hub: <span id="reserved-hub">live</span></p>
-    <p id="reserved-rule">Names: unavailable</p>
-    <label id="reserved-status"><input id="reserved-enabled" type="checkbox"> Reservation <span id="reserved-state">unavailable</span></label>
-    <input id="reserved-search" type="search" placeholder="Search reserved names" aria-label="Search reserved names">
-    <form id="reserved-add"><textarea id="reserved-input" required placeholder="Names, separated by commas or newlines" aria-label="Names to reserve"></textarea><button>Add</button></form>
-    <small id="reserved-error" role="alert"></small>
-    <div id="reserved-list" class="scroll"></div>
-    <nav id="reserved-pages" aria-label="Reserved name pages"></nav>
-    </div>
+    <svg class="graph" id="issues-graph" viewBox="0 0 140 40" preserveAspectRatio="none" aria-label="Open feedback, crashes and user reports per day, 14 days"></svg>
+    <div class="axis"><span>14 days ago</span><span>today</span></div>
   </article>
 
-  <div class="bento minis" data-tabs="overview">
-    <article class="tile" id="t-active"><h2>Users</h2><div class="big"><span id="ug-total">–</span><small id="ug-today">–</small></div><div class="cap" id="ug-cap"></div><div class="sbar" id="ug-active-bar"></div></article>
-    <article class="tile" id="t-apps"><h2>App versions</h2><div class="big"><span id="ug-fresh">–</span><small>up to date</small></div><div class="cap" id="ug-apps-cap"></div><div class="sbar" id="ug-apps-bar"></div></article>
-    <article class="tile" id="t-signups"><h2>Sign-ups · 14 days</h2><div class="big" id="st-signups">–</div><div class="bars" id="st-signup-bars"></div></article>
-    <article class="tile" id="t-msgs"><h2>Messages</h2>
-      <div class="big"><span id="st-msgs">—</span><small>in 24h</small></div>
-      <div class="cap" id="q-line">–</div></article>
-    <a class="tile link" id="t-feedback" href="#feedback"><h2>Feedback · open <small id="feedback-unread">–</small></h2><svg class="graph" id="feedback-graph" viewBox="0 0 140 40" preserveAspectRatio="none" aria-label="Open user messages per day, 14 days"></svg></a>
-    <a class="tile link" id="t-diagnostics" href="#crashes"><h2>Crashes · open <small id="diagnostics-open">–</small></h2><div class="bars stacked" id="diagnostics-bars" aria-label="Open crashes and errors by the day they were last seen"></div></a>
+  <article class="tile wide" id="t-newusers">
+    <h2><a href="#users" class="more">Users <span aria-hidden="true">›</span></a></h2>
+    <table class="list sortable" id="ov-users">
+      <thead><tr><th data-sort="name">Name</th><th data-sort="created">Signed up</th><th data-sort="last_seen">Last seen</th><th data-sort="secured">Secured</th><th data-sort="app">App</th></tr></thead>
+      <tbody id="newusers-body"></tbody>
+    </table>
+  </article>
+
+  <div class="col">
+    <article class="tile" id="t-activity">
+      <h2>Activity</h2>
+      <div class="headline"><b id="ug-today">–</b><span id="ug-total">of – today</span><span class="sep">·</span><b id="st-msgs">–</b><span>messages in 24h</span></div>
+      <svg class="chart" id="activity-chart" viewBox="0 0 280 90" preserveAspectRatio="none" aria-label="Sign-ups per day (bars) and messages per day (line), 14 days"></svg>
+      <div class="legend small"><span class="lg su"><i></i>sign-ups / day</span><span class="lg ms"><i></i>messages / day</span></div>
+    </article>
+    <article class="tile" id="t-apps">
+      <h2>App versions</h2>
+      <div class="big"><span id="ug-fresh">–</span><small>on the newest build</small></div>
+      <div class="cap" id="ug-apps-cap"></div>
+      <div class="sbar" id="ug-apps-bar"></div>
+    </article>
   </div>
-
-  <article class="card" id="support" data-tabs="feedback">
-    <h2>Support chat <small id="support-count"></small></h2>
-    <small id="support-error" role="alert"></small>
-    <div class="chat">
-      <nav id="support-threads" aria-label="Conversations"></nav>
-      <section id="support-thread">
-        <div class="chat-head"><h3 id="support-title">Loading…</h3><small id="support-sub"></small></div>
-        <div id="support-history" class="bubbles" aria-live="polite"></div>
-        <form id="support-reply" hidden><textarea id="support-text" rows="2" required maxlength="2000" aria-label="Reply" placeholder="Reply… (Enter sends, Shift+Enter new line)"></textarea><button>Send</button></form>
-      </section>
-    </div>
-  </article>
-
-  <article class="card" id="diag" data-tabs="crashes">
-    <h2>Crashes <small></small>
-      <select id="diag-mode" aria-label="Show crashes"><option value="open">Open</option><option value="done">Done</option><option value="all">All</option></select></h2>
-    <div class="scroll"><table>
-      <thead><tr><th>Done</th><th>Type</th><th>Signature</th><th>Count</th><th>First seen</th><th>Last seen</th><th>App</th></tr></thead>
-      <tbody></tbody>
-    </table></div>
-  </article>
-
-  <article class="card users" id="tables" data-tabs="db">
-    <h2>All tables <small></small></h2>
-    <div class="tables"></div>
-  </article>
 </main>
-</div>
-<dialog id="pop"><form method="dialog"><button class="ghost icon close" aria-label="Close" title="Close">×</button></form><dl></dl><pre hidden></pre><label class="pop-done"><input type="checkbox"> done</label></dialog>
+
+
+<!-- Crashes and errors from the apps, one row per signature. -->
+<main class="view" data-tabs="crashes">
+  <section class="card" id="diag">
+    <div class="card-head"><h2>Crashes &amp; errors</h2><small id="diag-note"></small>
+      <button type="button" class="pill" id="diag-all" hidden>Mark all done</button>
+      <select id="diag-mode" aria-label="Show crashes"><option value="open">Open</option><option value="done">Done</option><option value="all">All</option></select></div>
+    <table class="list">
+      <thead><tr><th class="tick-col"></th><th>Type</th><th>Signature</th><th class="num">Count</th><th>First seen</th><th>Last seen</th><th>App</th></tr></thead>
+      <tbody id="diag-body"></tbody>
+    </table>
+    <nav class="pages" id="diag-pages" aria-label="Pages" hidden></nav>
+  </section>
+</main>
+
+<!-- Users: everyone on the left (the team's To-Dos pinned, open conversations first), the chosen one on the right:
+     who they are, their reports, and the support chat. -->
+<main class="view" data-tabs="users">
+  <section class="people card" id="people">
+    <aside class="plist">
+      <div class="plist-head">
+        <input type="search" id="user-search" placeholder="Search name or id" aria-label="Search users" autocomplete="off">
+        <div class="seg" role="group" aria-label="Show"><button type="button" data-filter="all" class="on">All</button><button type="button" data-filter="open">Open</button></div>
+      </div>
+      <nav id="person-list" aria-label="Users"></nav>
+    </aside>
+    <section class="pane" id="pane">
+      <div class="pane-head">
+        <span class="avatar" id="convo-avatar"></span>
+        <div class="who"><h3 id="support-title">Loading…</h3><button type="button" class="copy mono" id="p-id" title="click to copy" hidden></button></div>
+        <button type="button" class="pill" id="convo-done" hidden>Mark all handled</button>
+      </div>
+      <div class="facts" id="p-facts"></div>
+      <details class="extra" id="p-extra"><summary id="p-extra-sum">Devices &amp; reports</summary>
+        <div class="extra-grid"><div><h4>Devices</h4><div id="p-devices"></div></div><div><h4>Reports</h4><div id="p-reports"></div></div></div>
+      </details>
+      <div id="support-history" class="bubbles" aria-live="polite"></div>
+      <form id="support-reply" class="composer" hidden>
+        <textarea id="support-text" rows="1" required maxlength="2000" aria-label="Reply" placeholder="Write a reply…"></textarea>
+        <button type="submit" class="send" aria-label="Send" title="Send (Enter)"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3.4 20.4 21 12 3.4 3.6 3.4 10.2 15 12 3.4 13.8z"/></svg></button>
+      </form>
+      <small id="support-error" role="alert"></small>
+    </section>
+  </section>
+
+  <section class="card" id="reports">
+    <div class="card-head"><h2>User reports</h2><small id="reports-note"></small>
+      <select id="reports-mode" aria-label="Show reports"><option value="open">Open</option><option value="done">Handled</option><option value="all">All</option></select></div>
+    <table class="list">
+      <thead><tr><th class="tick-col"></th><th>Reported user</th><th>Reason</th><th>Reported by</th><th>When</th></tr></thead>
+      <tbody id="reports-body"></tbody>
+    </table>
+  </section>
+</main>
+
+<!-- Database: every table, grouped by topic. -->
+<main class="view" data-tabs="db">
+  <section class="card" id="tables">
+    <div class="card-head"><h2>All tables</h2><small id="tables-note"></small></div>
+    <div class="tables"></div>
+  </section>
+</main>
+
+<dialog id="pop"><form method="dialog"><button class="close" aria-label="Close" title="Close">×</button></form><dl></dl><pre hidden></pre></dialog>
 <footer class="foot"><span id="host"></span><span id="foot-hub"></span> · <form method="post" action="/logout"><button type="submit" class="footlink">sign out</button></form></footer>
 <script src="/app.js"></script>
 </body>
