@@ -7,6 +7,8 @@ import Foundation
 import SwiftUI
 import WidgetKit
 
+// @main: App Store processing wants the __swift5_entry section the compiler writes for it (ITMS-90896).
+@main
 struct YoControls: WidgetBundle {
   var body: some Widget {
     SendYoControl()
