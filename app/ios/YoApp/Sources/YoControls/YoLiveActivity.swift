@@ -26,7 +26,9 @@ struct YoSentLiveActivity: Widget {
         // with the list's words ("Sent Yo!") and the name. Its corners follow the island's (ContainerRelativeShape),
         // the same gap left, right and below (contentMargins), so the two curves run side by side.
         DynamicIslandExpandedRegion(.bottom) {
+          // Its own room below: the region ends at the island's edge and cut the bar when it filled it.
           Bar(state: context.state, stale: context.isStale)
+            .padding(.bottom, 6)
         }
       } compactLeading: {
         Word(state: context.state, stale: context.isStale, size: 16)
@@ -61,10 +63,11 @@ private struct Bar: View {
   let state: YoSentAttributes.ContentState
   var stale = false
   /// The gap between the bar and the island's edge, the same on three sides.
-  /// The gap to the island's edge. With the island's corner radius (about 44 pt) and the bar's half height (32 pt)
-  /// it is concentric: 44 − 32 = 12, so the island's curve runs alongside the bar's ends instead of cutting them.
-  static let inset: CGFloat = 12
-  static let height: CGFloat = 64
+  /// The gap to the island's edge. With the island's corner radius (about 44 pt) and the bar's half height (22 pt)
+  /// it is concentric: 44 − 22 = 22, so the island's curve runs alongside the bar's ends. A shorter bar also stays
+  /// inside the bottom region, which cut a taller one at its lower edge.
+  static let inset: CGFloat = 22
+  static let height: CGFloat = 44
 
   /// The list's words (YoWords in the app, which this extension cannot import).
   private var words: String {
@@ -91,11 +94,11 @@ private struct Bar: View {
       Text(verbatim: words)
         .fixedSize()  // the words never shrink; the name is what is cut
         .contentTransition(.numericText(value: Double(state.others.isEmpty ? state.count : state.total)))
-      Name(state: state, size: 22, tinted: false, all: true)
+      Name(state: state, size: 20, tinted: false, all: true)
         .opacity(0.85)
     }
     // A fixed size (no Dynamic Type here): the island's height is fixed too, a larger text would be cut.
-    .font(.custom("Montserrat-Bold", fixedSize: 22))
+    .font(.custom("Montserrat-Bold", fixedSize: 20))
     .foregroundStyle(.white)
     .lineLimit(1)
     .minimumScaleFactor(0.8)
