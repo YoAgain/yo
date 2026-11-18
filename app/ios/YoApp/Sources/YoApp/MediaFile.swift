@@ -6,6 +6,7 @@ import Foundation
 import ImageIO
 import UniformTypeIdentifiers
 import VideoToolbox
+import os
 
 /// A photo or video ready to be sealed: its bytes and what the Yo says about it.
 struct MediaFile: Sendable {
@@ -49,36 +50,40 @@ struct MediaFile: Sendable {
 
   /// A video as it goes: HEVC at 2.5 Mbit/s, at most 1280 by 720 (either way round), with its sound as stereo AAC,
   /// in an MP4 of at most `longestVideo` seconds and `largestVideo` bytes, without metadata. Written with explicit
-  /// settings (an export preset has no 720p HEVC). The recording is deleted. From the app's camera (portrait only)
-  /// `landscapeTurn` is how it stands upright should it show landscape: the camera's connection did not turn it (as
-  /// the front camera's did not), and the receiver saw a selfie on its side.
-  static func video(_ recording: URL, landscapeTurn: CGImagePropertyOrientation? = nil) async -> MediaFile? {
+  /// settings (an export preset has no 720p HEVC). The recording is deleted.
+  ///
+  /// It goes standing in its pixels: the recording's own turn (its track's transform, as a player shows it: from
+  /// the app's camera as `Camera.orient` set it, mirror and all) is drawn into the frames, and what goes has none.
+  /// So every reader shows it alike, whether it honours a track's transform or not.
+  static func video(_ recording: URL) async -> MediaFile? {
     defer { try? FileManager.default.removeItem(at: recording) }
     let out = FileManager.default.temporaryDirectory.appending(path: "\(UUID().uuidString).mp4")
     defer { try? FileManager.default.removeItem(at: out) }
     let asset = AVURLAsset(url: recording)
     guard let duration = await Diagnostics.attempt({ try await asset.load(.duration) }),
-      let picture = await Diagnostics.attempt({ try await asset.loadTracks(withMediaType: .video).first }) ?? nil,
-      let (natural, recorded, rate) = await Diagnostics.attempt({
+      let pictures = await Diagnostics.attempt({ try await asset.loadTracks(withMediaType: .video) }),
+      let picture = pictures.first,
+      let (natural, turn, rate) = await Diagnostics.attempt({
         try await picture.load(.naturalSize, .preferredTransform, .nominalFrameRate)
-      })
+      }),
+      var standing = await Diagnostics.attempt({ try await AVVideoComposition.Configuration(for: asset) })
     else { Diagnostics.record(NSError(domain: "MediaFile", code: 1)); return nil }
-    let shows = natural.applying(recorded)
-    let turn = landscapeTurn.flatMap { abs(shows.width) > abs(shows.height) ? Self.turn($0) : nil } ?? recorded
+    os.Logger(subsystem: "app.justyo", category: "media-diag").notice(
+      "YoMediaDiag file natural=\(natural.width, privacy: .public)x\(natural.height, privacy: .public) transform=[\(turn.a, privacy: .public) \(turn.b, privacy: .public) \(turn.c, privacy: .public) \(turn.d, privacy: .public) \(turn.tx, privacy: .public) \(turn.ty, privacy: .public)]")
+    // Frames as 8-bit SDR (an HDR recording is mapped down).
+    standing.colorPrimaries = AVVideoColorPrimaries_ITU_R_709_2
+    standing.colorTransferFunction = AVVideoTransferFunction_ITU_R_709_2
+    standing.colorYCbCrMatrix = AVVideoYCbCrMatrix_ITU_R_709_2
+    let shown = natural.applying(turn)
     let sound = (try? await asset.loadTracks(withMediaType: .audio).first) ?? nil
     let length = CMTimeMinimum(duration, CMTime(seconds: longestVideo, preferredTimescale: 600))
-    let size = fitted(natural)
-    // Moved back into place for the size written (the recording's own moves by its larger frames).
-    var transform = CGAffineTransform(a: turn.a, b: turn.b, c: turn.c, d: turn.d, tx: 0, ty: 0)
-    let turned = CGRect(origin: .zero, size: size).applying(transform)
-    transform.tx = -turned.minX
-    transform.ty = -turned.minY
+    let size = fitted(CGSize(width: abs(shown.width), height: abs(shown.height)))
     do {
       try await withTaskCancellationHandler {
         try Task.checkCancellation()
         try await write(
-          asset, picture: picture, sound: sound, to: out, size: size, transform: transform, rate: rate,
-          range: CMTimeRange(start: .zero, duration: length))
+          asset, pictures: pictures, standing: AVVideoComposition(configuration: standing), sound: sound, to: out,
+          size: size, rate: rate, range: CMTimeRange(start: .zero, duration: length))
         try Task.checkCancellation()
       } onCancel: {
         try? FileManager.default.removeItem(at: recording)
@@ -91,23 +96,8 @@ struct MediaFile: Sendable {
     guard let data = Diagnostics.attempt({ try Data(contentsOf: out) }), !data.isEmpty, data.count <= largestVideo else {
       return nil
     }
-    let shown = CGSize(width: size.width, height: size.height).applying(transform)
     let ms = UInt32(max(0, min(length.seconds, longestVideo)) * 1000)
-    return MediaFile(kind: .video, data: data, width: Int(abs(shown.width)), height: Int(abs(shown.height)), durationMs: ms)
-  }
-
-  /// A track's turn as an EXIF orientation says it (the camera preview's turn); `video` moves it back into place.
-  private static func turn(_ orientation: CGImagePropertyOrientation) -> CGAffineTransform {
-    switch orientation {
-    case .upMirrored: CGAffineTransform(a: -1, b: 0, c: 0, d: 1, tx: 0, ty: 0)
-    case .down: CGAffineTransform(a: -1, b: 0, c: 0, d: -1, tx: 0, ty: 0)
-    case .downMirrored: CGAffineTransform(a: 1, b: 0, c: 0, d: -1, tx: 0, ty: 0)
-    case .right: CGAffineTransform(a: 0, b: 1, c: -1, d: 0, tx: 0, ty: 0)  // a quarter clockwise
-    case .left: CGAffineTransform(a: 0, b: -1, c: 1, d: 0, tx: 0, ty: 0)  // a quarter anticlockwise
-    case .leftMirrored: CGAffineTransform(a: 0, b: 1, c: 1, d: 0, tx: 0, ty: 0)  // corner to corner
-    case .rightMirrored: CGAffineTransform(a: 0, b: -1, c: -1, d: 0, tx: 0, ty: 0)
-    default: .identity
-    }
+    return MediaFile(kind: .video, data: data, width: Int(size.width), height: Int(size.height), durationMs: ms)
   }
 
   /// The recording's size made to fit 1280 by 720 (never larger), in even pixels as the encoder wants them.
@@ -119,11 +109,11 @@ struct MediaFile: Sendable {
     return CGSize(width: even(natural.width), height: even(natural.height))
   }
 
-  /// Reads the recording and writes it again as it goes: its frames scaled into `size` and kept turned as recorded
-  /// (`transform`), its sound as stereo AAC at 48 kHz; no metadata.
+  /// Reads the recording and writes it again as it goes: its frames stood upright (`standing`) and scaled into
+  /// `size`, its sound as stereo AAC at 48 kHz; no metadata.
   private static func write(
-    _ asset: AVAsset, picture: AVAssetTrack, sound: AVAssetTrack?, to out: URL, size: CGSize,
-    transform: CGAffineTransform, rate: Float, range: CMTimeRange
+    _ asset: AVAsset, pictures: [AVAssetTrack], standing: AVVideoComposition, sound: AVAssetTrack?, to out: URL,
+    size: CGSize, rate: Float, range: CMTimeRange
   ) async throws {
     let reader = try AVAssetReader(asset: asset)
     reader.timeRange = range
@@ -135,13 +125,11 @@ struct MediaFile: Sendable {
       AVVideoTransferFunctionKey: AVVideoTransferFunction_ITU_R_709_2,
       AVVideoYCbCrMatrixKey: AVVideoYCbCrMatrix_ITU_R_709_2,
     ]
-    // Frames as 8-bit SDR (an HDR recording is mapped down), at their own size; the encoder scales them.
-    let frames = AVAssetReaderTrackOutput(
-      track: picture,
-      outputSettings: [
-        kCVPixelBufferPixelFormatTypeKey as String: kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange,
-        AVVideoColorPropertiesKey: sdr,
-      ])
+    // Frames upright at their own size (the encoder scales them), in 8-bit SDR as `standing` renders them.
+    let frames = AVAssetReaderVideoCompositionOutput(
+      videoTracks: pictures,
+      videoSettings: [kCVPixelBufferPixelFormatTypeKey as String: kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange])
+    frames.videoComposition = standing
     frames.alwaysCopiesSampleData = false
     guard reader.canAdd(frames) else { throw NSError(domain: "MediaFile", code: 2) }
     reader.add(frames)
@@ -161,7 +149,6 @@ struct MediaFile: Sendable {
         ],
       ])
     video.expectsMediaDataInRealTime = false
-    video.transform = transform  // upright as recorded: the player turns it
     guard writer.canAdd(video) else { throw NSError(domain: "MediaFile", code: 3) }
     writer.add(video)
     var pairs = [(frames as AVAssetReaderOutput, video)]
