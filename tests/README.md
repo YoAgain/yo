@@ -30,6 +30,25 @@ YO_ENV="YO_SEEDS=1,2 YO_CLIENTS=12 YO_STEPS=4000" dev/cargo test -p yo-tests --t
 
 A failing simulation names its seed; the run is deterministic in what it does, so the seed reproduces it.
 
+## SQLite state upgrade
+
+The Linux integration test builds a small fixture generator in a detached worktree at the last revision before
+V0001. The worktree and test accounts are temporary. The test needs that Git revision locally and runs explicitly
+because it builds a second client. Set `TMPDIR` to a writable directory with room for the second build.
+
+```sh
+export CARGO_BUILD_JOBS=4
+nice -n 15 cargo test -j 2 -p yo-tests --test db_upgrade -- --ignored --nocapture
+```
+
+For repeat runs, point `YO_UPGRADE_OLD_TARGET` at a dedicated Cargo target directory outside the temporary
+worktree. Use a different target directory for the current client.
+
+The old client writes a real SQLite V0000 row, which also supplies the bytes for the iOS group file and the Android
+AtomicFile base file. A loopback hub stays live across the upgrade so the new client can continue the old sessions.
+Child processes stop at SQLite statement boundaries and the parent sends SIGKILL. The test also opens the same
+database from two processes and checks that a future schema is refused without changing the files.
+
 ## Chaos
 
 `yo-chaos`: thousands of accounts with faults, crashes and hub restarts, every message accounted for. How to run it

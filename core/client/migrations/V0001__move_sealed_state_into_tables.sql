@@ -157,7 +157,7 @@ CREATE TABLE groups (
     owner TEXT NOT NULL,
     entry TEXT NOT NULL,
     value BLOB NOT NULL,
-    key TEXT,
+    key BLOB,
     name TEXT,
     revision INTEGER,
     left INTEGER,

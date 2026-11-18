@@ -233,7 +233,7 @@ fn columns(table: &str) -> &'static [(&'static str, Column)] {
             ("key_gen", Integer),
         ],
         "groups" => &[
-            ("key", Text),
+            ("key", Secret),
             ("name", Text),
             ("revision", Integer),
             ("left", Bool),
@@ -264,6 +264,7 @@ fn columns(table: &str) -> &'static [(&'static str, Column)] {
 }
 
 fn sealed_record(table: &str) -> bool {
+    // Synced group entries contain another copy of the master key. Pending events can contain media keys.
     matches!(
         table,
         "sessions"
@@ -272,8 +273,10 @@ fn sealed_record(table: &str) -> bool {
             | "signed_prekeys"
             | "kyber_prekeys"
             | "sender_keys"
+            | "storage_groups"
             | "storage_keys"
             | "sent_cache"
+            | "inbox_events"
     )
 }
 
