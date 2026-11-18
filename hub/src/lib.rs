@@ -453,6 +453,10 @@ impl Hub {
                 }),
             );
         }
+        if let Some(statements) = &self.config.asset_links {
+            let statements = statements.clone();
+            router = router.route("/.well-known/assetlinks.json", get(move || async move { axum::Json(statements) }));
+        }
         router
             .layer(axum::middleware::from_fn_with_state(self.clone(), too_old))
             .layer(DefaultBodyLimit::max(limits::MAX_BODY))
@@ -1736,6 +1740,36 @@ async fn ack_blob(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn asset_links_are_served_only_when_configured() {
+        use axum::body::{to_bytes, Body};
+        use axum::http::Request;
+        use tower::ServiceExt;
+
+        let statements = vec![serde_json::json!({
+            "relation": ["delegate_permission/common.get_login_creds"],
+            "target": { "namespace": "android_app", "package_name": "app.example" }
+        })];
+        for asset_links in [None, Some(statements.clone())] {
+            let configured = asset_links.is_some();
+            let hub =
+                Hub::new(Config { asset_links, ..Config::for_tests() }, Arc::new(push::Recorder::default())).unwrap();
+            let response = hub
+                .router()
+                .oneshot(Request::get("/.well-known/assetlinks.json").body(Body::empty()).unwrap())
+                .await
+                .unwrap();
+            if configured {
+                assert_eq!(response.status(), StatusCode::OK);
+                assert_eq!(response.headers()[axum::http::header::CONTENT_TYPE], "application/json");
+                let body = to_bytes(response.into_body(), 4096).await.unwrap();
+                assert_eq!(serde_json::from_slice::<Vec<serde_json::Value>>(&body).unwrap(), statements);
+            } else {
+                assert_eq!(response.status(), StatusCode::NOT_FOUND);
+            }
+        }
+    }
 
     #[tokio::test]
     async fn admin_user_deletion_requires_admin_and_removes_the_account() {

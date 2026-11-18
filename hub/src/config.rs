@@ -193,6 +193,8 @@ pub struct Config {
     /// Apps allowed to make passkeys for this hub's domain (`TEAMID.bundle.id`), served as
     /// `/.well-known/apple-app-site-association`; none, no such file.
     pub apple_app_ids: Vec<String>,
+    /// Digital Asset Links statements served at /.well-known/assetlinks.json.
+    pub asset_links: Option<Vec<serde_json::Value>>,
     pub limits: Limits,
     pub apns: Option<ApnsConfig>,
     pub fcm: Option<FcmConfig>,
@@ -266,6 +268,7 @@ impl Config {
             admin_token: None,
             trust_cloudflare: false,
             apple_app_ids: Vec::new(),
+            asset_links: None,
             limits: Limits::unlimited(),
             apns: None,
             fcm: None,

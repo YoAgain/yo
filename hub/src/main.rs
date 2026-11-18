@@ -5,7 +5,7 @@
 //!   YO_TRUST_CLOUDFLARE   1: take the client address from CF-Connecting-IP
 //!   YO_APPLE_APP_IDS      TEAMID.bundle.id, comma-separated: apps that may make passkeys for this hub's domain
 //!   YO_APNS_KEY_FILE, YO_APNS_KEY_ID, YO_APNS_TEAM_ID, YO_APNS_TOPIC
-//!   YO_FCM_SERVICE_ACCOUNT_FILE
+//!   YO_FCM_SERVICE_ACCOUNT_FILE, YO_ASSET_LINKS_FILE
 //!   YO_RESERVED_FILE      deprecated: accepted but ignored; names and switch live in the database.
 //!   YO_BLOB_DIR           photos and videos (spec 6.8), one file each; default `blobs` beside YO_DB. Not for the
 //!                         database's backup: blobs are fleeting.
@@ -92,6 +92,9 @@ fn config() -> Result<(Config, String), String> {
         apple_app_ids: var("YO_APPLE_APP_IDS")
             .map(|ids| ids.split(',').map(|id| id.trim().to_string()).filter(|id| !id.is_empty()).collect())
             .unwrap_or_default(),
+        asset_links: file("YO_ASSET_LINKS_FILE")?
+            .map(|file| serde_json::from_str(&file).map_err(|error| format!("YO_ASSET_LINKS_FILE: {error}")))
+            .transpose()?,
         limits: Limits {
             // A test hub takes more sign-ups from one address (scripts making accounts); the default is production's.
             register_per_ip_hour: var("YO_REGISTER_PER_IP_HOUR")
