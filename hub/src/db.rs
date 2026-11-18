@@ -1687,12 +1687,15 @@ impl Db {
                     Ok(Wake { device_id: array(row.get(0)?)?, push_platform: row.get(1)?, push_token: row.get(2)? })
                 })?
                 .collect::<Result<_, _>>()?;
-            // Bounded: counts at most `most` rows per device.
-            let mut held =
-                tx.prepare_cached("SELECT count(*) FROM (SELECT 1 FROM messages WHERE device_id = ?1 LIMIT ?2)")?;
-            let mut full = false;
+            // Only the last allowed slot matters. Skip the earlier index entries without
+            // counting them or materializing rows from the messages table.
+            let mut slot = tx.prepare_cached("SELECT 1 FROM messages WHERE device_id = ?1 LIMIT 1 OFFSET ?2")?;
+            let mut full = most == 0;
             for device in &devices {
-                full |= held.query_row(params![device.device_id, most], |row| row.get::<_, u32>(0))? >= most;
+                if full {
+                    break;
+                }
+                full = slot.exists(params![device.device_id, most - 1])?;
             }
             if full {
                 outcomes.push(Delivered::Full);

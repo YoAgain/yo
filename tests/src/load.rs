@@ -8,7 +8,7 @@
 //! The hub runs in-process on a SQLite file (WAL), as in production. Results are printed and written as JSON.
 
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{mpsc, Arc, Mutex};
 use std::time::{Duration, Instant};
 use yo_core::{Client, Content, Event, Push, Response, Transport};
 use yo_hub::config::{Config, Limits};
@@ -127,10 +127,13 @@ struct Peer {
     sent: u64,
     received: u64,
     latest: Option<u64>,
+    send_started: mpsc::Sender<Instant>,
+    receive_started: mpsc::Receiver<Instant>,
 }
 
 impl Peer {
-    fn receive(&mut self, events: Vec<Event>) -> u64 {
+    fn receive(&mut self, events: Vec<Event>, latency: &mut Latency) -> u64 {
+        let decrypted = Instant::now();
         let before = self.received;
         for event in events {
             if let Event::Message { user, sent_at_ms, content: Content::Yo } = event {
@@ -141,6 +144,8 @@ impl Peer {
                     self.index
                 );
                 self.latest = Some(sent_at_ms);
+                let started = self.receive_started.try_recv().expect("a send started for every decrypted Yo");
+                latency.record(decrypted.duration_since(started));
                 self.received += 1;
             }
         }
@@ -228,10 +233,24 @@ fn main() {
     let send_latency = Arc::new(Mutex::new(Latency::new()));
     let ids: Vec<_> = clients.iter().map(|(_, client)| client.user_id().to_owned()).collect();
     let mut groups: Vec<Vec<Peer>> = (0..args.threads).map(|_| Vec::new()).collect();
-    for (index, client) in clients {
+    // Each ring hop is FIFO. Publish the monotonic start before sending, since the recipient
+    // can decrypt the Yo before the sender gets its HTTP response.
+    let (starts, mut arrivals): (Vec<_>, Vec<_>) = (0..n).map(|_| mpsc::channel()).unzip();
+    arrivals.rotate_right(1);
+    for (((index, client), send_started), receive_started) in clients.into_iter().zip(starts).zip(arrivals) {
         let from = ids[(index + n - 1) % n].clone();
         let to = username(base + ((index + 1) % n) as u64);
-        groups[index % args.threads].push(Peer { index, client, from, to, sent: 0, received: 0, latest: None });
+        groups[index % args.threads].push(Peer {
+            index,
+            client,
+            from,
+            to,
+            sent: 0,
+            received: 0,
+            latest: None,
+            send_started,
+            receive_started,
+        });
     }
     let started = Instant::now();
     let workers: Vec<_> = groups
@@ -241,22 +260,24 @@ fn main() {
                 (stop.clone(), sent.clone(), received.clone(), send_latency.clone());
             std::thread::spawn(move || {
                 let mut latencies = Latency::new();
+                let mut decrypted_latencies = Latency::new();
                 while !stop.load(Ordering::Relaxed) {
                     for peer in &mut mine {
                         let t = Instant::now();
+                        peer.send_started.send(t).unwrap();
                         let events = peer.client.send_yo(&peer.to).unwrap();
                         latencies.record(t.elapsed());
                         peer.sent += 1;
                         sent.fetch_add(1, Ordering::Relaxed);
-                        let mut count = peer.receive(events);
+                        let mut count = peer.receive(events, &mut decrypted_latencies);
                         // Warm sends no longer fetch the inbox.
                         let events = peer.client.sync(0).unwrap();
-                        count += peer.receive(events);
+                        count += peer.receive(events, &mut decrypted_latencies);
                         received.fetch_add(count, Ordering::Relaxed);
                     }
                 }
                 send_latency.lock().unwrap().merge(latencies);
-                mine
+                (mine, decrypted_latencies)
             })
         })
         .collect();
@@ -272,14 +293,20 @@ fn main() {
         );
     }
     stop.store(true, Ordering::Relaxed);
-    let mut peers: Vec<_> = workers.into_iter().flat_map(|w| w.join().unwrap()).collect();
-    peers.sort_by_key(|peer| peer.index);
+    let completed: Vec<_> = workers.into_iter().map(|worker| worker.join().unwrap()).collect();
     let e2e_s = started.elapsed().as_secs_f64();
+    let mut peers = Vec::with_capacity(n);
+    let mut yo_to_yo = Latency::new();
+    for (group, latency) in completed {
+        peers.extend(group);
+        yo_to_yo.merge(latency);
+    }
+    peers.sort_by_key(|peer| peer.index);
     // What is still in flight is received now; it counts, the time does not.
     for _ in 0..10 {
         for peer in &mut peers {
             let events = peer.client.sync(0).unwrap();
-            received.fetch_add(peer.receive(events), Ordering::Relaxed);
+            received.fetch_add(peer.receive(events, &mut yo_to_yo), Ordering::Relaxed);
             peer.client.after_sync().unwrap();
         }
         if sent.load(Ordering::Relaxed) == received.load(Ordering::Relaxed)
@@ -292,6 +319,7 @@ fn main() {
     let e2e_errors = http_errors.load(Ordering::Relaxed);
     let dropped: u64 = peers.iter().map(|peer| peer.client.dropped()).sum();
     let (sent, received) = (sent.load(Ordering::Relaxed), received.load(Ordering::Relaxed));
+    assert_eq!(yo_to_yo.count, received);
     let e2e = serde_json::json!({
         "seconds": e2e_s,
         "yos_sent": sent,
@@ -301,8 +329,10 @@ fn main() {
         "http_errors": e2e_errors,
         "yos_per_s": sent as f64 / e2e_s,
         "send": send_latency.lock().unwrap().json(),
+        "yo_to_yo": yo_to_yo.json(),
     });
     println!("end to end: {sent} Yos sent, {received} received, {dropped} dropped, {:.0} Yos/s", sent as f64 / e2e_s);
+    println!("Yo to Yo: p50 {:.1} ms, p99 {:.1} ms", yo_to_yo.percentile(0.50), yo_to_yo.percentile(0.99));
 
     // ---- phase 2: the hub alone ----
     // Each user with its device check, learned once as any sender would (spec 4.4), and its access key, as a contact
@@ -369,10 +399,14 @@ fn main() {
     });
     println!("hub alone: {delivered} deliveries, {errors} errors, {:.0}/s", delivered as f64 / raw_s);
 
+    let hub_cpu = std::env::var("YO_HUB_CPU").ok().and_then(|cpu| cpu.parse::<usize>().ok());
     let result = serde_json::json!({
         "date": std::env::var("YO_DATE").unwrap_or_default(),
         "commit": std::env::var("YO_COMMIT").unwrap_or_default(),
         "cores": cores,
+        "hub_cpu": hub_cpu,
+        "requested_seconds": args.seconds,
+        "requested_raw_seconds": raw_seconds,
         "clients": n,
         "threads": args.threads,
         "registration": { "seconds": registration_s, "per_s": n as f64 / registration_s },

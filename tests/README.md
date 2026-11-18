@@ -73,6 +73,12 @@ Phase 1 is the whole system on one machine (clients with sessions, the hub, fetc
 (deliveries over many connections). Every run writes `tests/results/<date>-<clients>c.json`; commit the ones worth
 keeping, so a regression shows against them.
 
+The end-to-end `yo_to_yo` histogram starts immediately before the sender calls `send_yo` and stops
+when the recipient's client returns the decrypted event. It includes time waiting for the next
+poll and includes messages decrypted during the drain. The `send` histogram times the sender's
+call alone. Pass comparable pinned SSD runs to `python3 dev/update-hub-bench.py FILE [FILE ...]`
+to regenerate the README's Hub block from their medians.
+
 For a ten-minute end-to-end soak, pass `--seconds 600 --raw-seconds 15`. This keeps the hub-only phase comparable
 to the benchmark below and within its undrained inboxes' capacity. The driver checks delivery counts and order
 for each pair, tracks HTTP errors, and uses fixed-size latency histograms.
