@@ -7,6 +7,8 @@
 // now"), or all of it when the state does not open here (no account, the keychain locked, the app holding it), waits
 // in the group's outbox instead and goes as soon as Yo opens (ShareBridge); so does a photo or video there was no
 // memory left to make small here (the app makes it). Up to ten photos or one video (Info: NSExtensionActivationRule).
+// A video longer than a Yo's (30 s) is offered to the system's trimmer first (VideoTrimmer); only where that cannot
+// be is it refused.
 import SwiftUI
 import UIKit
 import UniformTypeIdentifiers
@@ -77,8 +79,11 @@ final class ShareModel {
   private(set) var state = State.picking
   /// What was shared: how many photos and videos, for the words above the list.
   private(set) var counts = (photos: 0, videos: 0)
-  /// The video is longer than a Yo's (`MediaFile.longestVideo`): refused whole, nothing goes.
+  /// The video is longer than a Yo's (`MediaFile.longestVideo`) and the trimmer could not cut it: refused whole,
+  /// nothing goes.
   private(set) var tooLong = false
+  /// The system's trimmer, open for a video longer than a Yo's.
+  var trim: VideoTrim?
   private var files: Task<[Shared], Never>?
   private var giving: Task<Void, Never>?
   /// Those the hub refused here, for "Send when Yo opens".
@@ -98,7 +103,7 @@ final class ShareModel {
   /// "📷" or "🎥", as the island and the bars say it.
   var mark: String { counts.videos > 0 ? "🎥" : "📷" }
 
-  /// Makes them as they go (a HEIC of at most 2048 pixels, an HEVC video of at most 10 seconds) while a name is chosen,
+  /// Makes them as they go (a HEIC of at most 2048 pixels, an HEVC video of at most 30 seconds) while a name is chosen,
   /// one after the other: an extension has little memory. One there is no room for (`room`) is kept as it was shared
   /// and goes to the app, which makes it; a video that would not make here goes to the app as well.
   func prepare(_ providers: [NSItemProvider]) {
@@ -133,13 +138,19 @@ final class ShareModel {
             made.append(.ready(file))
           }
         case .video:
-          guard let url = await Self.copyFile(provider, type: .movie) else { continue }
-          // Longer than a Yo's video: never cut, refused, and nothing of this share goes.
+          guard var url = await Self.copyFile(provider, type: .movie) else { continue }
+          // Longer than a Yo's video: the system's trimmer offers the part to send. Closed, the share closes; where
+          // it cannot cut, the video is refused and nothing of this share goes.
           if let seconds = await MediaFile.length(of: url), !MediaFile.fits(seconds) {
+            let result = await VideoTrim.run(url) { trim = $0 }
             try? FileManager.default.removeItem(at: url)
-            for case .original(let other, _) in made { try? FileManager.default.removeItem(at: other) }
-            tooLong = true
-            return []
+            if case .cut(let cut) = result {
+              url = cut
+            } else {
+              for case .original(let other, _) in made { try? FileManager.default.removeItem(at: other) }
+              if case .cancelled = result { cancel() } else { tooLong = true }
+              return []
+            }
           }
           // MediaFile deletes what it reads: it reads a clone, the original stays for the app should it fail.
           let work = FileManager.default.temporaryDirectory.appending(path: "\(UUID().uuidString).\(url.pathExtension)")
@@ -452,6 +463,7 @@ struct ShareView: View {
       .animation(.smooth, value: model.state)
       .animation(.smooth, value: model.tooLong)
     }
+    .videoTrimming(Binding(get: { model.trim }, set: { model.trim = $0 }))
     .preferredColorScheme(.dark)  // white on purple, as the app's list
   }
 
@@ -518,7 +530,8 @@ struct SentCard: View {
   }
 }
 
-/// A video longer than a Yo's, refused as the island says "No": "Video too long" in red, "max 10 s" beside it.
+/// A video longer than a Yo's that could not be trimmed, refused as the island says "No": "Video too long" in red,
+/// "max 30 s" beside it.
 struct TooLongCard: View {
   var body: some View {
     HStack(spacing: 10) {

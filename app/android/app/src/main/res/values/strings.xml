@@ -246,6 +246,7 @@
 <string name="no_passkey">No Yo passkey found. Use your recovery key.</string>
 <string name="camera_open_failed">Couldn’t open the camera. Check its permission or try another camera.</string>
 <string name="camera_not_ready">Camera not ready</string>
+<string name="video_too_long">Video too long · max 30 s</string>
 <string name="video_too_large">Video is too large. Use a shorter video.</string>
 <string name="keystore_missing">Keystore key missing. Sign in with your recovery key.</string>
 <string name="vault_damaged">Damaged vault item</string>

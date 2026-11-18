@@ -1,5 +1,5 @@
 // Photos and videos (spec 5, 6.8): made small and plain before they go (a HEIC of at most 2048 pixels, an HEVC video
-// of at most 720p, 10 seconds and 6 MB, neither with a place or a device in it), sealed by the core under a key of their own,
+// of at most 720p, 30 seconds (the camera's 10) and 9 MB, neither with a place or a device in it), sealed by the core under a key of their own,
 // and kept in an outbox until the hub has them; only then their Yo goes. A hub that says "not now" (the day's quota,
 // no room) keeps them waiting here, and they go later by themselves. What arrives is fetched at once, kept on this
 // iPhone until it has been seen once, then deleted.
