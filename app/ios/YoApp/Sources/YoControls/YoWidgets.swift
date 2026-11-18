@@ -1,9 +1,10 @@
-// Yo's widgets: the friends' bars on the Home Screen as in the app, each a Yo on a tap without opening it (small: one
-// friend or group, on Yo's purple; medium: 4 bars; large: 8), and on the Lock Screen "Yo" to one friend and "Yo Back".
-// Whom they show is picked in Edit Widget (a list widget shows just those, its bars sharing its height; none picked:
-// the top of the list). Groups read as in the app ("#Spanien 2024"). The list is the one the app writes for its extensions
-// (ShareBridge.List, in its order), which reloads the widgets when it changes (ShareInbox); a sent Yo reads "Sent Yo!"
-// on its bar for a moment (WidgetSent), then the name again.
+// Yo's widgets: the friends' bars on the Home Screen as in the app, each a Yo on a tap without opening it, and on the
+// Lock Screen "Yo" to one friend and "Yo Back". On the Home Screen one widget for every size, so the size can change
+// in place: whom it shows is picked in Edit Widget (Friend 1 to 16, in that order), each size shows as many of them
+// as it holds (small 4, medium 4, large 8, tall 16), the bars sharing its height; none picked: the top of the list
+// (small 1, on Yo's purple). Groups read as in the app ("#Spanien 2024"), each bar in its colour on the app's list.
+// The list is the one the app writes for its extensions (ShareBridge.List, in its order), which reloads the widgets
+// when it changes (ShareInbox); a sent Yo reads "Sent Yo!" on its bar for a moment (WidgetSent), then the name again.
 import AppIntents
 import SwiftUI
 import WidgetKit
@@ -13,22 +14,22 @@ struct YoEntry: TimelineEntry {
   let date: Date
   let list: ShareBridge.List?
   let sent: WidgetSent?
-  /// The friends picked in Edit Widget, slot by slot (nil: that slot shows the top of the list).
+  /// The friends picked in Edit Widget, slot by slot (nil: an empty slot).
   var picked: [FriendEntity?] = []
 
   var friends: [ShareBridge.Friend] { list?.friends ?? [] }
 
-  /// The friend a one-friend widget sends to.
-  var friend: ShareBridge.Friend? { shown(1).first ?? friends.first }
+  /// The friend a Lock Screen circle sends to.
+  var friend: ShareBridge.Friend? { shown(1, else: 1).first }
 
   /// At most `count` bars: the picks in their slots' order (by whom the Yo goes to, else by name: the target turns from
-  /// a name into a user id after the first Yo), each once; none picked: the top `count` of the list.
-  func shown(_ count: Int) -> [ShareBridge.Friend] {
-    let picks = picked.prefix(count).compactMap { $0 }
-    guard !picks.isEmpty else { return Array(friends.prefix(count)) }
+  /// a name into a user id after the first Yo), each once; none picked (or none still on the list): the top `top`.
+  func shown(_ count: Int, else top: Int) -> [ShareBridge.Friend] {
     var seen = Set<String>()
-    return picks.compactMap { pick in friends.first { $0.to == pick.id } ?? friends.first { $0.name == pick.name } }
+    let picks = picked.prefix(count).compactMap { $0 }
+      .compactMap { pick in friends.first { $0.to == pick.id } ?? friends.first { $0.name == pick.name } }
       .filter { seen.insert($0.to).inserted }
+    return picks.isEmpty ? Array(friends.prefix(top)) : picks
   }
 
   func justSent(_ friend: ShareBridge.Friend) -> Bool { sent?.to == friend.to }
@@ -46,15 +47,16 @@ struct YoEntry: TimelineEntry {
     date: .now,
     list: ShareBridge.List(
       owner: "",
-      friends: ["Leo", "Mia", "Noah", "Emma", "Finn", "Lena", "Ben", "YoGPT"].enumerated().map {
-        ShareBridge.Friend(name: $1, color: $0, to: $1)
-      }),
+      friends: [
+        "Leo", "Mia", "Noah", "Emma", "Finn", "Lena", "Ben", "YoGPT", "Ida", "Paul", "Ella", "Max", "Lia", "Tom", "Zoe",
+        "Jan",
+      ].enumerated().map { ShareBridge.Friend(name: $1, color: $0, to: $1) }),
     sent: nil)
 }
 
-// MARK: - One friend (Home Screen small, Lock Screen)
+// MARK: - One friend (Lock Screen)
 
-/// The friend or group a one-friend widget sends to, picked in Edit Widget; none: the top one.
+/// The friend or group a Lock Screen circle sends to, picked in Edit Widget; none: the top one.
 struct YoFriendConfiguration: WidgetConfigurationIntent {
   static let title: LocalizedStringResource = "Yo a Friend"
   static let description = IntentDescription("Sends a Yo to a friend or group.")
@@ -66,6 +68,7 @@ struct YoFriendConfiguration: WidgetConfigurationIntent {
   init() {}
 }
 
+/// The Lock Screen's "Yo" to one friend. (Its kind once also had a small Home Screen size, now the list widget's.)
 struct YoFriendWidget: Widget {
   var body: some WidgetConfiguration {
     AppIntentConfiguration(kind: "app.justyo.ios.widget.friend", intent: YoFriendConfiguration.self, provider: Provider()) {
@@ -73,8 +76,7 @@ struct YoFriendWidget: Widget {
     }
     .configurationDisplayName("Yo a Friend")
     .description("A tap sends a Yo. Your top friend, or the one you pick.")
-    .supportedFamilies([.systemSmall, .accessoryCircular])
-    .contentMarginsDisabled()
+    .supportedFamilies([.accessoryCircular])
   }
 
   struct Provider: AppIntentTimelineProvider {
@@ -91,27 +93,11 @@ struct YoFriendWidget: Widget {
   }
 }
 
+/// "Yo" over the name.
 struct YoFriendView: View {
   let entry: YoEntry
-  @Environment(\.widgetFamily) private var family
 
   var body: some View {
-    if family == .accessoryCircular {
-      circle
-    } else if let friend = entry.friend {
-      // Always Yo's own purple, whatever the friend's bar colour in the list: the widget is Yo's, the name on it.
-      Button(intent: SendYoIntent(friend: FriendEntity(friend))) {
-        BarLabel(text: entry.justSent(friend) ? "Sent Yo!" : friend.title, size: 28)
-      }
-      .buttonStyle(.plain)
-      .containerBackground(.amethyst, for: .widget)
-    } else {
-      SignedOut()
-    }
-  }
-
-  /// The Lock Screen's: "Yo" over the name.
-  @ViewBuilder private var circle: some View {
     if let friend = entry.friend {
       Button(intent: SendYoIntent(friend: FriendEntity(friend))) {
         CircleLines(top: entry.justSent(friend) ? "Sent" : "Yo", bottom: entry.justSent(friend) ? "Yo!" : friend.title)
@@ -125,10 +111,10 @@ struct YoFriendView: View {
   }
 }
 
-// MARK: - The list (Home Screen medium and large)
+// MARK: - The list (Home Screen, every size)
 
-/// The bars of a list widget, picked in Edit Widget in their order: medium shows the first 4, large all 8, just those
-/// picked; none picked: the top of the list. One set for both sizes (the metadata knows no per-size parameters).
+/// The bars of the Home Screen widget, picked in Edit Widget in their order; each size shows as many as it holds. One
+/// set for every size (the metadata knows no per-size parameters).
 struct YoListConfiguration: WidgetConfigurationIntent {
   static let title: LocalizedStringResource = "Yo"
   static let description = IntentDescription("Your friends and groups, in your order. None: the top of your list.")
@@ -142,8 +128,21 @@ struct YoListConfiguration: WidgetConfigurationIntent {
   @Parameter(title: "Friend 6 (large)") var friend6: FriendEntity?
   @Parameter(title: "Friend 7 (large)") var friend7: FriendEntity?
   @Parameter(title: "Friend 8 (large)") var friend8: FriendEntity?
+  @Parameter(title: "Friend 9 (tall)") var friend9: FriendEntity?
+  @Parameter(title: "Friend 10 (tall)") var friend10: FriendEntity?
+  @Parameter(title: "Friend 11 (tall)") var friend11: FriendEntity?
+  @Parameter(title: "Friend 12 (tall)") var friend12: FriendEntity?
+  @Parameter(title: "Friend 13 (tall)") var friend13: FriendEntity?
+  @Parameter(title: "Friend 14 (tall)") var friend14: FriendEntity?
+  @Parameter(title: "Friend 15 (tall)") var friend15: FriendEntity?
+  @Parameter(title: "Friend 16 (tall)") var friend16: FriendEntity?
 
-  var picked: [FriendEntity?] { [friend1, friend2, friend3, friend4, friend5, friend6, friend7, friend8] }
+  var picked: [FriendEntity?] {
+    [
+      friend1, friend2, friend3, friend4, friend5, friend6, friend7, friend8, friend9, friend10, friend11, friend12,
+      friend13, friend14, friend15, friend16,
+    ]
+  }
 
   init() {}
 }
@@ -155,8 +154,16 @@ struct YoListWidget: Widget {
     }
     .configurationDisplayName("Yo")
     .description("Your friends and groups, as in Yo, in the order you pick. A tap on a bar sends a Yo.")
-    .supportedFamilies([.systemMedium, .systemLarge])
+    .supportedFamilies(Self.families)
     .contentMarginsDisabled()
+  }
+
+  /// Small to large, and the tall one from iOS 27 (its SDK's compiler: the iOS 26 SDK has no such size).
+  static var families: [WidgetFamily] {
+    #if compiler(>=6.4)
+      if #available(iOS 27, *) { return [.systemSmall, .systemMedium, .systemLarge, .systemExtraLargePortrait] }
+    #endif
+    return [.systemSmall, .systemMedium, .systemLarge]
   }
 
   struct Provider: AppIntentTimelineProvider {
@@ -177,10 +184,27 @@ struct YoListView: View {
   let entry: YoEntry
   @Environment(\.widgetFamily) private var family
 
+  /// How many bars this size holds, and how many of the list's top it shows when none are picked.
+  private var room: (most: Int, top: Int) {
+    switch family {
+    case .systemSmall: (4, 1)
+    case .systemMedium: (4, 4)
+    case .systemLarge: (8, 8)
+    default: (16, 16)
+    }
+  }
+
   var body: some View {
-    let friends = entry.shown(family == .systemLarge ? 8 : 4)
+    let friends = entry.shown(room.most, else: room.top)
     if friends.isEmpty {
       SignedOut()
+    } else if family == .systemSmall, friends.count == 1, let friend = friends.first {
+      // One friend on a small widget: Yo's own purple, whatever their bar colour on the list.
+      Button(intent: SendYoIntent(friend: FriendEntity(friend))) {
+        BarLabel(text: entry.justSent(friend) ? "Sent Yo!" : friend.title, size: 28)
+      }
+      .buttonStyle(.plain)
+      .containerBackground(.amethyst, for: .widget)
     } else {
       // The bars share the widget's height evenly (2 picked: 2 half-height bars), the name growing with its bar up to
       // the app's own size.
