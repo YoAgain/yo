@@ -45,6 +45,35 @@ through UniFFI; apps supply HTTP and storage.
 Sign up with a name only, no phone number or email. Your account is protected by Keychain sync, a passkey (PRF) or a 64-character recovery key. Details: the [YoIP spec](spec/v1.md).
 
 <details>
+<summary>Keys</summary>
+
+Where each key lives on iOS, with made-up example values. One device per account; a new sign-in replaces it.
+
+| Key | Where | Example | Purpose |
+|---|---|---|---|
+| Account key | iCloud, DB | `1cd3276568646ac5113afae6038fd3f745c22a20d2ef2e9a570cf69332a9d1c8` | identity, the account |
+| User id | iCloud, DB | `9e4b02bb46c6cf346d6a046281bf768e` | fixed id at the hub |
+| Name | iCloud, DB | `Christopher` | to be found |
+| Recovery key | iCloud, device | `598t 08e1 7rns vrue br45 hdfl 5jce r5qh m4pl 4mas hhx9 0eyv 9u4e 9jlc s9ym 3qgy` | backup without iCloud |
+| Backup status | iCloud | `{"byPasskey":true,"byCode":true,"version":3}` | same security after a restore |
+| Ed25519 seed | iCloud | `d00b86d29901e0bfbf0ccf78195e1fd4f0bc1292384807a618e401b09034eaaa` | converted to today's key once |
+| State key | device | `485ff0f29cf6d3eaf409470bb4d0751f533498007045f927d7be807476683972` | opens the local DB |
+| Device key | DB | `e064d0dbe73a4e9f0a7331fed49b7eb3649f69a163864f2fd67acd8e8d30f026` | this device, encryption |
+| Auth key | DB | `2cea6bee0a80939cee23a260a58a95000ee8077b2b60608fdabc0869c4bec8f3` | signs hub requests |
+| Prekey | DB | `id 17 → 052a51fc10b0df55bef16d58339e947cab34cff6f6dcaf4e362fc31e5a8ae42e84` | first message while offline |
+| Profile key | DB | `1e820bbd1a7b2baa1e1d1f68ff3ed67cc41429a97900d2b0a23f4b68b4a8ea00` | sealed sender for contacts |
+| Group key | DB | `5e6bdf11e728b3dbb843f2de720435eac0bff47d73152ab5c85731550d242738` | read and change a group |
+| Storage key | derived | `e55cab9cede427cfceca5d012f0c570992a208565ebe2904f5b13691d47e1e5d` | contacts at the hub |
+| Session | DB | ratchet state, about 1–2 KB | a new key per message |
+| Backup key K | RAM | never stored | encrypts the backup |
+| Passkey | Apple Passwords | "Yo – Christopher" | backup by Face ID |
+
+iCloud: one synced iCloud Keychain item per account. Device: this phone's keychain. DB: the local SQLite state,
+sealed per column under the state key. Sessions and device keys are never backed up.
+
+</details>
+
+<details>
 <summary>Protocol, groups, media and privacy limits</summary>
 
 [YoIP](spec/v1.md) uses Signal's libsignal: PQXDH and Double Ratchet with SPQR.
