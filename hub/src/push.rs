@@ -1,8 +1,4 @@
-//! Waking a device (spec 6.7). A push says only "there is mail": APNs with a constant alert ("You may have received
-//! a Yo", as Signal's, what shows when the extension cannot read: locked since a restart, no network, out of time)
-//! and `mutable-content`, so the notification extension fetches, decrypts and writes "YO from CHRIS"; FCM as a
-//! data message. Non-urgent traffic uses silent APNs background pushes or normal-priority FCM.
-//! The requests go through `Transport`, so tests record them.
+//! Waking a device (spec 6.7): a push says only "there is mail"; requests go through `Transport` for tests.
 
 use crate::config::{ApnsConfig, FcmConfig};
 use jsonwebtoken::{Algorithm, EncodingKey, Header};
@@ -10,7 +6,7 @@ use serde_json::json;
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::{Arc, Mutex, PoisonError};
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant};
 
 /// An urgent APNs push's text, shown as it is when the notification extension cannot read what came.
 pub const ALERT: &str = "You may have received a Yo";
@@ -30,10 +26,7 @@ pub trait Transport: Send + Sync {
     fn send(&self, request: Request) -> Fut<Result<(u16, Vec<u8>), String>>;
 }
 
-/// Sends over HTTPS (HTTP/2 where the server speaks it, as APNs requires). One connection per service, kept open
-/// as APNs asks: a push after a quiet spell would otherwise wait for a new TCP and TLS connection first, two round
-/// trips more (about 300 ms more to api.push.apple.com than on an open connection, measured from Germany). HTTP/2
-/// pings keep it open while idle and find one that died; a closed one is made again by the next push.
+/// HTTPS, one connection per service kept open with HTTP/2 pings, as APNs asks (a cold one costs ~300 ms).
 pub struct Https(reqwest::Client);
 
 impl Default for Https {
@@ -125,13 +118,21 @@ struct Fcm {
     access: tokio::sync::Mutex<Option<Cached>>,
 }
 
-/// A push service's answer as logged: without the token, should it name it.
-fn told(body: &[u8], token: &str) -> String {
-    String::from_utf8_lossy(body).replace(token, "(token)")
+/// A push service's answer: `dead` names a dead token; logged without the token, should it name it.
+fn outcome(service: &str, sent: Result<(u16, Vec<u8>), String>, token: &str, dead: fn(u16, &str) -> bool) -> Outcome {
+    let (status, body) = match sent {
+        Ok(answer) => answer,
+        Err(error) => return Outcome::Failed(error),
+    };
+    match status {
+        200 => Outcome::Sent,
+        _ if dead(status, &String::from_utf8_lossy(&body)) => Outcome::TokenInvalid,
+        _ => Outcome::Failed(format!("{service} {status} {}", told(&body, token))),
+    }
 }
 
-fn unix_s() -> u64 {
-    SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_secs()
+fn told(body: &[u8], token: &str) -> String {
+    String::from_utf8_lossy(body).replace(token, "(token)")
 }
 
 impl Pusher {
@@ -174,17 +175,15 @@ impl Pusher {
         if token.is_empty() {
             return Outcome::Skipped;
         }
-        match platform {
+        match (platform, &self.apns, &self.fcm) {
             // An APNs device token is hex; anything else would go into the request's path (`apns`).
-            PUSH_APNS | PUSH_APNS_SANDBOX if !token.bytes().all(|b| b.is_ascii_hexdigit()) => Outcome::TokenInvalid,
-            PUSH_APNS | PUSH_APNS_SANDBOX => match &self.apns {
-                Some(apns) => self.apns(apns, platform == PUSH_APNS_SANDBOX, token, urgent).await,
-                None => Outcome::Skipped,
-            },
-            PUSH_FCM => match &self.fcm {
-                Some(fcm) => self.fcm(fcm, token, urgent).await,
-                None => Outcome::Skipped,
-            },
+            (PUSH_APNS | PUSH_APNS_SANDBOX, ..) if !token.bytes().all(|b| b.is_ascii_hexdigit()) => {
+                Outcome::TokenInvalid
+            }
+            (PUSH_APNS | PUSH_APNS_SANDBOX, Some(apns), _) => {
+                self.apns(apns, platform == PUSH_APNS_SANDBOX, token, urgent).await
+            }
+            (PUSH_FCM, _, Some(fcm)) => self.fcm(fcm, token, urgent).await,
             _ => Outcome::Skipped,
         }
     }
@@ -197,7 +196,7 @@ impl Pusher {
                 None => {
                     let mut header = Header::new(Algorithm::ES256);
                     header.kid = Some(apns.config.key_id.clone());
-                    let claims = json!({ "iss": apns.config.team_id, "iat": unix_s() });
+                    let claims = json!({ "iss": apns.config.team_id, "iat": crate::now_ms() / 1000 });
                     let Ok(value) = jsonwebtoken::encode(&header, &claims, &apns.key) else {
                         return Outcome::Failed("APNs token".into());
                     };
@@ -225,13 +224,8 @@ impl Pusher {
             ],
             body: body.to_string().into_bytes(),
         };
-        match self.transport.send(request).await {
-            Ok((200, _)) => Outcome::Sent,
-            Ok((410, _)) => Outcome::TokenInvalid,
-            Ok((400, body)) if String::from_utf8_lossy(&body).contains("BadDeviceToken") => Outcome::TokenInvalid,
-            Ok((status, body)) => Outcome::Failed(format!("APNs {status} {}", told(&body, token))),
-            Err(error) => Outcome::Failed(error),
-        }
+        let dead = |status: u16, body: &str| status == 410 || (status == 400 && body.contains("BadDeviceToken"));
+        outcome("APNs", self.transport.send(request).await, token, dead)
     }
 
     async fn fcm_access(&self, fcm: &Fcm) -> Result<String, String> {
@@ -239,7 +233,7 @@ impl Pusher {
         if let Some(c) = access.as_ref().filter(|c| c.until > Instant::now()) {
             return Ok(c.value.clone());
         }
-        let now = unix_s();
+        let now = crate::now_ms() / 1000;
         let claims = json!({
             "iss": fcm.client_email,
             "scope": "https://www.googleapis.com/auth/firebase.messaging",
@@ -277,13 +271,8 @@ impl Pusher {
             ],
             body: body.to_string().into_bytes(),
         };
-        match self.transport.send(request).await {
-            Ok((200, _)) => Outcome::Sent,
-            Ok((404, _)) => Outcome::TokenInvalid,
-            Ok((400, body)) if String::from_utf8_lossy(&body).contains("INVALID_ARGUMENT") => Outcome::TokenInvalid,
-            Ok((status, body)) => Outcome::Failed(format!("FCM {status} {}", told(&body, token))),
-            Err(error) => Outcome::Failed(error),
-        }
+        let dead = |status: u16, body: &str| status == 404 || (status == 400 && body.contains("INVALID_ARGUMENT"));
+        outcome("FCM", self.transport.send(request).await, token, dead)
     }
 }
 

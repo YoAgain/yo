@@ -12,29 +12,23 @@ pub struct Limits {
     pub identity_lookup_per_device_day: u32,
     /// Signed requests of one device, all routes.
     pub signed_per_device_minute: u32,
-    /// Deliveries of one sender. A delivery is not signed (the hub does not learn who sends), so the sender is its
-    /// address (spec 6.6).
+    /// Deliveries per address: they are not signed (spec 6.6).
     pub deliver_per_ip_minute: u32,
-    /// Envelopes a device holds before deliveries to its user are refused. No rate per recipient: a stranger who
-    /// knows a user id could spend it and shut out everyone else.
+    /// Envelopes a device holds before deliveries to its user are refused; no rate a stranger could spend.
     pub max_pending_per_device: u32,
-    /// Bytes stored without identity, by address: delivered envelopes. They stay up to `envelope_ttl_days`, so
-    /// without it one address could fill the disk.
+    /// Bytes stored without identity, by address: envelopes stay up to `envelope_ttl_days`.
     pub anonymous_bytes_per_ip_hour: u64,
-    /// Deliveries are refused (`507`) while the database's disk has less than this free:
-    /// better a refusal than a full disk.
+    /// Deliveries are refused (`507`) while the database's disk has less than this free.
     pub db_min_free_bytes: u64,
     /// Registrations by username: first come, first served, this many per address (spec 6.4).
     pub register_per_ip_hour: u32,
     /// Whether a username is free, asked while it is typed (spec 6.3).
     pub name_check_per_ip_minute: u32,
-    /// Requests (signed deliveries without the recipient's profile key) one sender sends one recipient at once,
-    /// one more an hour (spec 4.10).
+    /// Requests one sender sends one recipient at once, one more an hour (spec 4.10).
     pub requests_per_pair: u64,
     /// Recipients new to one sender's requests at once, one more an hour (spec 4.10).
     pub request_recipients_per_sender: u64,
-    /// Requests one recipient takes from everyone at once, as many again a day (spec 4.10): against many accounts
-    /// made to flood one.
+    /// Requests one recipient takes from everyone at once, as many again a day (spec 4.10).
     pub requests_per_recipient: u64,
     /// The hour those refill by, ms: an hour; a load test that runs days of use in minutes makes it shorter.
     pub request_hour_ms: u64,
@@ -113,7 +107,6 @@ impl Limits {
             identity_lookup_per_device_day: u32::MAX,
             signed_per_device_minute: u32::MAX,
             deliver_per_ip_minute: u32::MAX,
-            max_pending_per_device: 5000,
             anonymous_bytes_per_ip_hour: u64::MAX,
             db_min_free_bytes: 0,
             register_per_ip_hour: u32::MAX,
@@ -121,13 +114,11 @@ impl Limits {
             requests_per_pair: u64::MAX,
             request_recipients_per_sender: u64::MAX,
             requests_per_recipient: u64::MAX,
-            request_hour_ms: 3_600_000,
             backup_per_ip_hour: u32::MAX,
             report_per_user_day: u32::MAX,
             feedback_per_user_day: u32::MAX,
             crash_per_ip_day: u32::MAX,
             storage_per_user_hour: u32::MAX,
-            envelope_ttl_days: 30,
             blob_put_per_ip_minute: u32::MAX,
             blob_get_per_ip_minute: u32::MAX,
             ..Limits::default()
@@ -138,8 +129,7 @@ impl Limits {
 /// Where blobs live and how much room they may take (spec 6.8).
 #[derive(Debug, Clone)]
 pub struct BlobConfig {
-    /// One file per blob, in 256 directories, and `tmp/` for uploads under way. Not in the database's backup:
-    /// blobs are fleeting.
+    /// One file per blob in 256 directories, `tmp/` for uploads; not backed up: blobs are fleeting.
     pub dir: PathBuf,
     /// All blobs together, at most; uploads beyond are refused (`507`) until fetches and time have made room.
     pub budget_bytes: u64,
@@ -185,13 +175,11 @@ pub struct Config {
     pub admin_token: Option<String>,
     /// The SQLite file; ":memory:" for tests.
     pub db_path: String,
-    /// Names to reserve when the hub starts, for tests and tools only: the operator's names live in the database
-    /// (added through the admin page), never in a file.
+    /// Names to reserve at start, for tests and tools: the operator's live in the database.
     pub reserved: Vec<Reserved>,
     /// Take the client's address from `CF-Connecting-IP`: only behind Cloudflare.
     pub trust_cloudflare: bool,
-    /// Apps allowed to make passkeys for this hub's domain (`TEAMID.bundle.id`), served as
-    /// `/.well-known/apple-app-site-association`; none, no such file.
+    /// Apps allowed passkeys for this domain (`TEAMID.bundle.id`), for `/.well-known/apple-app-site-association`.
     pub apple_app_ids: Vec<String>,
     /// Digital Asset Links statements served at /.well-known/assetlinks.json.
     pub asset_links: Option<Vec<serde_json::Value>>,
@@ -199,22 +187,15 @@ pub struct Config {
     pub apns: Option<ApnsConfig>,
     pub fcm: Option<FcmConfig>,
     pub blobs: BlobConfig,
-    /// The oldest build each platform may still use ("ios" → 202611140619), from `YO_MIN_APP`
-    /// ("ios/202611140619,android/12"): an older one gets `426` and asks to be updated. A request without `Yo-App`
-    /// passes (apps from before it, tools).
+    /// The oldest build per platform (`YO_MIN_APP` "ios/202611140619,android/12"): older gets `426` (spec 6.3).
     pub min_app: Vec<(String, u64)>,
-    /// The fewest characters (grapheme clusters) a username may have on this hub, from `YO_NAME_MIN` (default 2): a
-    /// switch the operator can lower to 1, or raise, without an app update (spec 3.3).
+    /// The fewest grapheme clusters of a username (`YO_NAME_MIN`, default 2, spec 3.3).
     pub name_min: usize,
-    /// The hub's Curve25519 private key (`YO_HUB_KEY_FILE`, 32 bytes, the operator's; `yo-hub hub-key new`): it signs
-    /// the answers that hand out keys for a client that asks so (spec 6.10), XEdDSA. Apps ship its public half.
+    /// The hub's Curve25519 private key (`YO_HUB_KEY_FILE`): it signs answers handing out keys (spec 6.10).
     pub hub_key: [u8; 32],
-    /// The server key and its certificate by the operator's trust root (`YO_SERVER_CERT_FILE`, made by
-    /// `yo-hub trust-root server`): it signs the devices' sender certificates (spec 6.1). The hub does not start
-    /// without a good one.
+    /// The server key and its certificate by the trust root (`YO_SERVER_CERT_FILE`, spec 6.1).
     pub server_certificate: Vec<u8>,
-    /// The hub's zkgroup `ServerSecretParams` (`YO_ZK_PARAMS_FILE`, made by `yo-hub zk new`): groups' credentials and
-    /// endorsements (spec 4.9). Apps pin the public half. The hub does not start without good ones.
+    /// The hub's zkgroup `ServerSecretParams` (`YO_ZK_PARAMS_FILE`, spec 4.9).
     pub zk_params: Vec<u8>,
 }
 

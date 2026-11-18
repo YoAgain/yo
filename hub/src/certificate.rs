@@ -1,8 +1,4 @@
-//! Sender certificates (spec 6.1), Signal's: a trust root (Curve25519, the operator's, kept offline) signs a server
-//! certificate (a key id and the server's key); the server key signs each device's sender certificate, for a day. The
-//! hub holds the server key and its certificate (`YO_SERVER_CERT_FILE`), never the trust root; apps pin the root.
-//!
-//! The file: server private key (32) || trust root public key (32) || the server certificate (libsignal's).
+//! Sender certificates (spec 6.1). The file: server private key (32) || trust root public key (32) || certificate.
 
 use libsignal_protocol::{
     Aci, DeviceId, KeyPair, PrivateKey, PublicKey, SenderCertificate, ServerCertificate, Timestamp,
@@ -43,8 +39,7 @@ impl Signer {
         self.root
     }
 
-    /// A sender certificate for a user's device: its user id as an ACI, its number, the account key as its identity
-    /// (spec 4.1), good until a day from `now_ms`.
+    /// A sender certificate for a user's device (spec 4.1), good until a day from `now_ms`.
     pub fn issue(
         &self,
         user: &UserId,

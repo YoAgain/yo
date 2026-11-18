@@ -11,10 +11,7 @@ pub fn refuse(status: StatusCode) -> Refusal {
     Refusal(status, Vec::new())
 }
 
-/// `429` naming the limit it is (spec 6.6), so a sender holds back only what shares it: `pair`, `new` or
-/// `recipient` (a request's buckets, 4.10: this recipient only), `ip` or `bytes` (deliveries without a token),
-/// `device` (this device's signed requests); with the seconds until a token where known, as `Retry-After` too. The
-/// body says it (the apps' transport hands over the body only): "pair 3600".
+/// `429` naming its limit (spec 6.6) in the body, and the seconds until a token as `Retry-After` where known.
 pub fn limited(scope: &str, wait_ms: Option<u64>) -> Refusal {
     let body = match wait_ms {
         Some(ms) => format!("{scope} {}", ms.div_ceil(1000).max(1)),
@@ -39,6 +36,18 @@ impl From<rusqlite::Error> for Refusal {
     fn from(error: rusqlite::Error) -> Self {
         eprintln!("yo-hub: database: {error}");
         refuse(StatusCode::INTERNAL_SERVER_ERROR)
+    }
+}
+
+/// A write the database refused: `410` a device gone, `429` a support thread full, else `409`.
+impl From<crate::db::Conflict> for Refusal {
+    fn from(conflict: crate::db::Conflict) -> Self {
+        use crate::db::Conflict;
+        refuse(match conflict {
+            Conflict::DeviceGone => StatusCode::GONE,
+            Conflict::SupportFull => StatusCode::TOO_MANY_REQUESTS,
+            _ => StatusCode::CONFLICT,
+        })
     }
 }
 

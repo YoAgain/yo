@@ -37,6 +37,7 @@
 use std::sync::Arc;
 use yo_hub::config::{parse_min_app, read_hub_key, ApnsConfig, BlobConfig, Config, FcmConfig, Limits};
 use yo_hub::{push, Hub};
+use yo_wire::b64;
 
 fn var(name: &str) -> Option<String> {
     std::env::var(name).ok().filter(|v| !v.is_empty())
@@ -50,15 +51,19 @@ fn file(name: &str) -> Result<Option<String>, String> {
     var(name).map(|path| std::fs::read_to_string(&path).map_err(|e| format!("{name}: {e}"))).transpose()
 }
 
+fn bytes(name: &str) -> Result<Vec<u8>, String> {
+    let path = required(name)?;
+    std::fs::read(&path).map_err(|e| format!("{name}: {path}: {e}"))
+}
+
+/// A variable's value as `T`, if `valid`; `default` when unset.
+fn parsed<T: std::str::FromStr>(name: &str, default: T, valid: fn(&T) -> bool, what: &str) -> Result<T, String> {
+    var(name).map_or(Ok(default), |text| text.parse().ok().filter(valid).ok_or(format!("{name}: {what}")))
+}
+
 fn megabytes(name: &str, default: u64) -> Result<u64, String> {
-    match var(name) {
-        Some(value) => value
-            .parse::<u64>()
-            .ok()
-            .and_then(|mb| mb.checked_mul(1024 * 1024))
-            .ok_or_else(|| format!("{name}: a number of MiB")),
-        None => Ok(default),
-    }
+    let bytes = |mb: String| mb.parse::<u64>().ok()?.checked_mul(1024 * 1024);
+    var(name).map_or(Ok(default), |mb| bytes(mb).ok_or(format!("{name}: a number of MiB")))
 }
 
 fn config() -> Result<(Config, String), String> {
@@ -84,8 +89,9 @@ fn config() -> Result<(Config, String), String> {
     if var("YO_RESERVED_FILE").is_some() {
         eprintln!("yo-hub: YO_RESERVED_FILE is deprecated and ignored; manage reserved names through admin");
     }
+    let defaults = Limits::default();
     let config = Config {
-        admin_token: var("YO_ADMIN_TOKEN").filter(|token| !token.is_empty()),
+        admin_token: var("YO_ADMIN_TOKEN"),
         db_path,
         reserved: Vec::new(), // the names live in the database, added through the admin page
         trust_cloudflare: var("YO_TRUST_CLOUDFLARE").as_deref() == Some("1"),
@@ -97,40 +103,29 @@ fn config() -> Result<(Config, String), String> {
             .transpose()?,
         limits: Limits {
             // A test hub takes more sign-ups from one address (scripts making accounts); the default is production's.
-            register_per_ip_hour: var("YO_REGISTER_PER_IP_HOUR")
-                .map(|text| text.parse::<u32>().map_err(|_| "YO_REGISTER_PER_IP_HOUR: a number"))
-                .transpose()?
-                .unwrap_or(Limits::default().register_per_ip_hour),
-            backup_per_ip_hour: var("YO_BACKUP_PER_IP_HOUR")
-                .map(|text| text.parse::<u32>().map_err(|_| "YO_BACKUP_PER_IP_HOUR: a number"))
-                .transpose()?
-                .unwrap_or(Limits::default().backup_per_ip_hour),
-            ..Limits::default()
+            register_per_ip_hour: parsed(
+                "YO_REGISTER_PER_IP_HOUR",
+                defaults.register_per_ip_hour,
+                |_| true,
+                "a number",
+            )?,
+            backup_per_ip_hour: parsed("YO_BACKUP_PER_IP_HOUR", defaults.backup_per_ip_hour, |_| true, "a number")?,
+            ..defaults
         },
         apns,
         fcm,
-
         blobs,
         min_app: var("YO_MIN_APP").map(|text| parse_min_app(&text)).transpose()?.unwrap_or_default(),
-        name_min: var("YO_NAME_MIN")
-            .map(|text| text.parse::<usize>().ok().filter(|n| (1..=16).contains(n)).ok_or("YO_NAME_MIN: 1 to 16"))
-            .transpose()?
-            .unwrap_or(2),
+        name_min: parsed("YO_NAME_MIN", 2, |n| (1..=16).contains(n), "1 to 16")?,
         hub_key: read_hub_key(&required("YO_HUB_KEY_FILE")?)?,
-        server_certificate: {
-            let path = required("YO_SERVER_CERT_FILE")?;
-            std::fs::read(&path).map_err(|e| format!("YO_SERVER_CERT_FILE: {path}: {e}"))?
-        },
-        zk_params: {
-            let path = required("YO_ZK_PARAMS_FILE")?;
-            std::fs::read(&path).map_err(|e| format!("YO_ZK_PARAMS_FILE: {path}: {e}"))?
-        },
+        server_certificate: bytes("YO_SERVER_CERT_FILE")?,
+        zk_params: bytes("YO_ZK_PARAMS_FILE")?,
     };
     Ok((config, var("YO_LISTEN").unwrap_or_else(|| "127.0.0.1:8080".into())))
 }
 
-/// Writes a new file readable by its owner alone; never over one that is there.
-fn write_new(path: &str, bytes: &[u8]) -> Result<(), String> {
+/// Writes a new file readable by its owner alone, never over one that is there; prints the public half, base64url.
+fn write_new(path: &str, bytes: &[u8], public: Option<&[u8]>) -> Result<(), String> {
     use std::io::Write;
     use std::os::unix::fs::OpenOptionsExt;
     let mut file = std::fs::OpenOptions::new()
@@ -139,104 +134,70 @@ fn write_new(path: &str, bytes: &[u8]) -> Result<(), String> {
         .mode(0o600)
         .open(path)
         .map_err(|e| format!("{path}: {e}"))?;
-    file.write_all(bytes).and_then(|()| file.sync_all()).map_err(|e| format!("{path}: {e}"))
+    file.write_all(bytes).and_then(|()| file.sync_all()).map_err(|e| format!("{path}: {e}"))?;
+    if let Some(public) = public {
+        println!("{}", b64(public));
+    }
+    Ok(())
 }
 
-/// `yo-hub trust-root …` (see above).
-fn trust_root(args: &[String]) -> Result<(), String> {
-    match args {
-        [new, root] if new == "new" => {
+/// `yo-hub trust-root …`, `yo-hub hub-key …`, `yo-hub zk …` (see above).
+fn tool(args: &[String]) -> Result<(), String> {
+    let read = |file: &str| std::fs::read(file).map_err(|e| format!("{file}: {e}"));
+    match args.iter().map(String::as_str).collect::<Vec<_>>()[..] {
+        ["trust-root", "new", root] => {
             let (private, public) = yo_hub::certificate::new_root();
-            write_new(root, &private)?;
-            println!("{}", yo_wire::b64(&public));
-            Ok(())
+            write_new(root, &private, Some(&public))
         }
-        [server, root, key_id, out] if server == "server" => {
-            let private = std::fs::read(root).map_err(|e| format!("{root}: {e}"))?;
+        ["trust-root", "server", root, key_id, out] => {
             let key_id = key_id.parse::<u32>().map_err(|_| "KEY_ID: a number".to_string())?;
-            write_new(out, &yo_hub::certificate::server_file(&private, key_id)?)
+            write_new(out, &yo_hub::certificate::server_file(&read(root)?, key_id)?, None)
         }
-        _ => Err("usage: yo-hub trust-root new ROOT_FILE | yo-hub trust-root server ROOT_FILE KEY_ID OUT_FILE".into()),
-    }
-}
-
-/// `yo-hub hub-key …` (see above).
-fn hub_key(args: &[String]) -> Result<(), String> {
-    match args {
-        [new, file] if new == "new" => {
+        ["hub-key", "new", file] => {
             let (private, public) = yo_hub::config::new_hub_key();
-            write_new(file, &private)?;
-            println!("{}", yo_wire::b64(&public));
+            write_new(file, &private, Some(&public))
+        }
+        ["hub-key", "public", file] => {
+            println!("{}", b64(&yo_hub::config::hub_public_key(&read_hub_key(file)?)));
             Ok(())
         }
-        [public, file] if public == "public" => {
-            println!("{}", yo_wire::b64(&yo_hub::config::hub_public_key(&read_hub_key(file)?)));
-            Ok(())
-        }
-        _ => Err("usage: yo-hub hub-key new FILE | yo-hub hub-key public FILE".into()),
-    }
-}
-
-/// `yo-hub zk …` (see above).
-fn zk(args: &[String]) -> Result<(), String> {
-    match args {
-        [new, file] if new == "new" => {
+        ["zk", "new", file] => {
             let (secret, public) = yo_hub::groups::new_params();
-            write_new(file, &secret)?;
-            println!("{}", yo_wire::b64(&public));
+            write_new(file, &secret, Some(&public))
+        }
+        ["zk", "public", file] => {
+            println!("{}", b64(yo_hub::groups::Zk::from_bytes(&read(file)?)?.public()));
             Ok(())
         }
-        [public, file] if public == "public" => {
-            let secret = std::fs::read(file).map_err(|e| format!("{file}: {e}"))?;
-            println!("{}", yo_wire::b64(yo_hub::groups::Zk::from_bytes(&secret)?.public()));
-            Ok(())
+        ["trust-root", ..] => {
+            Err("usage: yo-hub trust-root new ROOT_FILE | yo-hub trust-root server ROOT_FILE KEY_ID OUT_FILE".into())
         }
+        ["hub-key", ..] => Err("usage: yo-hub hub-key new FILE | yo-hub hub-key public FILE".into()),
         _ => Err("usage: yo-hub zk new FILE | yo-hub zk public FILE".into()),
     }
+}
+
+fn or_exit<T>(result: Result<T, String>) -> T {
+    result.unwrap_or_else(|error| {
+        eprintln!("yo-hub: {error}");
+        std::process::exit(2)
+    })
 }
 
 #[tokio::main]
 async fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
-    if args.first().map(String::as_str) == Some("hub-key") {
-        if let Err(error) = hub_key(&args[1..]) {
-            eprintln!("yo-hub: {error}");
-            std::process::exit(2);
-        }
-        return;
+    if args.first().is_some_and(|command| ["hub-key", "zk", "trust-root"].contains(&command.as_str())) {
+        return or_exit(tool(&args));
     }
-    if args.first().map(String::as_str) == Some("zk") {
-        if let Err(error) = zk(&args[1..]) {
-            eprintln!("yo-hub: {error}");
-            std::process::exit(2);
-        }
-        return;
-    }
-    if args.first().map(String::as_str) == Some("trust-root") {
-        if let Err(error) = trust_root(&args[1..]) {
-            eprintln!("yo-hub: {error}");
-            std::process::exit(2);
-        }
-        return;
-    }
-    let (config, listen) = config().unwrap_or_else(|error| {
-        eprintln!("yo-hub: {error}");
-        std::process::exit(2);
-    });
+    let (config, listen) = or_exit(config());
     let trust_cloudflare = config.trust_cloudflare;
-    let hub = Hub::new(config, Arc::new(push::Https::default())).unwrap_or_else(|error| {
-        eprintln!("yo-hub: {error}");
-        std::process::exit(2);
-    });
-    let listener = tokio::net::TcpListener::bind(&listen).await.unwrap_or_else(|error| {
-        eprintln!("yo-hub: {listen}: {error}");
-        std::process::exit(2);
-    });
+    let hub = or_exit(Hub::new(config, Arc::new(push::Https::default())));
+    let listener = or_exit(tokio::net::TcpListener::bind(&listen).await.map_err(|error| format!("{listen}: {error}")));
     eprintln!("yo-hub: listening on {listen}");
     if trust_cloudflare && !listener.local_addr().is_ok_and(|a| a.ip().is_loopback()) {
         // CF-Connecting-IP is believed: whoever reaches this address without Cloudflare names any address it likes
-        // and passes every per-address limit. Fine only where nothing but cloudflared can reach it (a container
-        // whose port is published on 127.0.0.1 alone).
+        // and passes every per-address limit.
         eprintln!("yo-hub: YO_TRUST_CLOUDFLARE with {listen}, not a loopback address: only cloudflared may reach it");
     }
     let shutdown = async {

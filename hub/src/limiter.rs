@@ -1,8 +1,7 @@
-//! Token buckets for rate limits, and the replay cache of signed requests. Both in memory: a restart forgets them,
-//! which costs at most one window.
+//! Rate limits and the replay cache, in memory: a restart forgets them, which costs at most one window.
 
 use std::collections::HashMap;
-use std::sync::{Mutex, PoisonError};
+use std::sync::{Arc, Mutex, PoisonError};
 use std::time::{Duration, Instant};
 
 #[derive(Default)]
@@ -11,8 +10,7 @@ pub struct Limiter {
 }
 
 impl Limiter {
-    /// Drops buckets untouched for `idle`: run periodically, never inside a request. The longest window is a day,
-    /// so a bucket idle that long is full again and costs nothing to forget.
+    /// Drops buckets idle for `idle` (a day: full again), run periodically.
     pub fn forget_idle(&self, idle: Duration) {
         let now = Instant::now();
         self.buckets.lock().unwrap_or_else(PoisonError::into_inner).retain(|_, (_, at)| now.duration_since(*at) < idle);
@@ -26,19 +24,7 @@ impl Limiter {
         self.allow_n(key, 1, per as u64, window)
     }
 
-    /// Whether the bucket `key` is used up now, taking nothing from it.
-    pub fn spent(&self, key: &str, per: u32, window: Duration) -> bool {
-        if per == u32::MAX {
-            return false;
-        }
-        let buckets = self.buckets.lock().unwrap_or_else(PoisonError::into_inner);
-        let Some((tokens, at)) = buckets.get(key) else { return false };
-        let rate = per as f64 / window.as_secs_f64();
-        (tokens + at.elapsed().as_secs_f64() * rate).min(per as f64) < 1.0
-    }
-
-    /// Takes `cost` tokens (bytes, say) from the bucket `key`, which holds `per` and refills `per` every `window`;
-    /// none when it holds fewer. `u64::MAX` is no limit.
+    /// Takes `cost` tokens from the bucket `key` (`per` every `window`), none if it holds fewer; `u64::MAX`: no limit.
     pub fn allow_n(&self, key: String, cost: u64, per: u64, window: Duration) -> bool {
         if per == u64::MAX {
             return true;
@@ -60,11 +46,38 @@ impl Limiter {
     }
 }
 
-/// Requests (signed deliveries without the recipient's access key, spec 4.10) as buckets that refill evenly, by the
-/// hub's clock (ms, which tests move): per sender and recipient `pair`, refilling one an hour; recipients new to a
-/// sender (no bucket of the pair, or a full one) `recipients`, one an hour; per recipient from everyone
-/// `per_recipient`, all of them in a day. In memory, as every rate: a restart fills them.
-/// A bucket by its kind (0 pair, 1 new recipients, 2 recipient) and key: its tokens, and when (ms) they were counted.
+/// Places under way by key: a device's inbox requests, a user's uploads, a blob id's upload.
+pub type Places = Mutex<HashMap<[u8; 16], u32>>;
+
+/// A place taken (`take_place`), given back when dropped.
+pub struct Place {
+    places: Arc<Places>,
+    key: [u8; 16],
+}
+
+impl Drop for Place {
+    fn drop(&mut self) {
+        let mut places = self.places.lock().unwrap_or_else(PoisonError::into_inner);
+        if let Some(n) = places.get_mut(&self.key) {
+            *n -= 1;
+            if *n == 0 {
+                places.remove(&self.key);
+            }
+        }
+    }
+}
+
+/// One more place for `key`, if it holds fewer than `most` and all together fewer than `all`.
+pub fn take_place(places: &Arc<Places>, key: [u8; 16], most: u32, all: Option<u32>) -> Option<Place> {
+    let mut taken = places.lock().unwrap_or_else(PoisonError::into_inner);
+    let free = taken.get(&key).is_none_or(|n| *n < most) && all.is_none_or(|all| taken.values().sum::<u32>() < all);
+    if free {
+        *taken.entry(key).or_default() += 1;
+    }
+    free.then(|| Place { places: places.clone(), key })
+}
+
+/// Requests' buckets (spec 4.10) by kind (0 pair, 1 new recipients, 2 recipient) and key: tokens, and when (ms).
 type Buckets = HashMap<(u8, Vec<u8>), (f64, u64)>;
 
 pub struct Requests {
@@ -92,78 +105,54 @@ impl Requests {
         (size != u64::MAX).then_some((size as f64, every))
     }
 
-    /// Tokens in a bucket now (none there: full), and the shape.
-    fn level(
-        &self,
-        buckets: &HashMap<(u8, Vec<u8>), (f64, u64)>,
-        kind: u8,
-        key: &[u8],
-        now: u64,
-    ) -> Option<(f64, f64)> {
-        let (size, every) = self.shape(kind)?;
+    /// Tokens in a bucket now (none there: full), and ms per token.
+    fn level(&self, buckets: &Buckets, bucket: &(u8, Vec<u8>), now: u64) -> Option<(f64, f64)> {
+        let (size, every) = self.shape(bucket.0)?;
         let tokens = buckets
-            .get(&(kind, key.to_vec()))
+            .get(bucket)
             .map_or(size, |(tokens, at)| (tokens + now.saturating_sub(*at) as f64 / every).min(size));
         Some((tokens, every))
     }
 
-    fn keys(sender: &[u8], recipient: &[u8]) -> [(u8, Vec<u8>); 3] {
-        [(0, [sender, recipient].concat()), (1, sender.to_vec()), (2, recipient.to_vec())]
+    /// The buckets a request counts in, with tokens and ms per token; new recipients' only for one new to the sender.
+    fn levels(&self, buckets: &Buckets, sender: &[u8], recipient: &[u8], now: u64) -> Vec<((u8, Vec<u8>), f64, f64)> {
+        let keys = [(0, [sender, recipient].concat()), (1, sender.to_vec()), (2, recipient.to_vec())];
+        let new = self.level(buckets, &keys[0], now).is_none_or(|(tokens, _)| tokens >= self.pair as f64);
+        let counted = keys.into_iter().filter(|(kind, _)| *kind != 1 || new);
+        counted.filter_map(|key| self.level(buckets, &key, now).map(|(tokens, every)| (key, tokens, every))).collect()
     }
 
-    /// Whether a request of `sender` to `recipient` may go now: else the bucket that is empty ("pair", "new",
-    /// "recipient") and the ms until it may (`Retry-After`). Takes nothing (`take` does, once it is stored).
+    /// `Err` with the empty bucket and the ms until a token (`Retry-After`); takes nothing (`take` does, once stored).
     pub fn check(&self, sender: &[u8], recipient: &[u8], now: u64) -> Result<(), (&'static str, u64)> {
         let buckets = self.buckets.lock().unwrap_or_else(PoisonError::into_inner);
-        let keys = Self::keys(sender, recipient);
-        let new = self.level(&buckets, 0, &keys[0].1, now).is_none_or(|(tokens, _)| tokens >= self.pair as f64);
-        let mut wait = (0u64, "");
-        for (kind, key) in &keys {
-            if *kind == 1 && !new {
-                continue;
-            }
-            if let Some((tokens, every)) = self.level(&buckets, *kind, key, now) {
-                let ms = ((1.0 - tokens) * every).ceil() as u64;
-                if tokens < 1.0 && ms > wait.0 {
-                    wait = (ms, ["pair", "new", "recipient"][*kind as usize]);
-                }
+        let mut longest: Option<(&'static str, u64)> = None;
+        for ((kind, _), tokens, every) in self.levels(&buckets, sender, recipient, now) {
+            let wait = ((1.0 - tokens) * every).ceil() as u64;
+            if tokens < 1.0 && longest.is_none_or(|(_, longest)| wait > longest) {
+                longest = Some((["pair", "new", "recipient"][kind as usize], wait));
             }
         }
-        match wait {
-            (0, _) => Ok(()),
-            (ms, scope) => Err((scope, ms)),
+        match longest {
+            None => Ok(()),
+            Some(empty) => Err(empty),
         }
     }
 
-    /// A request stored: one token from each of its buckets (a recipient new to the sender: from that one too).
+    /// A request stored: one token from each of its buckets.
     pub fn take(&self, sender: &[u8], recipient: &[u8], now: u64) {
         let mut buckets = self.buckets.lock().unwrap_or_else(PoisonError::into_inner);
-        let keys = Self::keys(sender, recipient);
-        let new = self.level(&buckets, 0, &keys[0].1, now).is_none_or(|(tokens, _)| tokens >= self.pair as f64);
-        for (kind, key) in keys {
-            if kind == 1 && !new {
-                continue;
-            }
-            if let Some((tokens, _)) = self.level(&buckets, kind, &key, now) {
-                buckets.insert((kind, key), ((tokens - 1.0).max(0.0), now));
-            }
+        for (key, tokens, _) in self.levels(&buckets, sender, recipient, now) {
+            buckets.insert(key, ((tokens - 1.0).max(0.0), now));
         }
     }
 
     /// Drops the buckets full again: run periodically.
     pub fn forget_full(&self, now: u64) {
         let mut buckets = self.buckets.lock().unwrap_or_else(PoisonError::into_inner);
-        let full: Vec<(u8, Vec<u8>)> = buckets
-            .keys()
-            .filter(|(kind, key)| {
-                self.level(&buckets, *kind, key, now)
-                    .is_none_or(|(tokens, _)| tokens >= self.shape(*kind).map_or(0.0, |(size, _)| size))
-            })
-            .cloned()
-            .collect();
-        for key in full {
-            buckets.remove(&key);
-        }
+        buckets.retain(|(kind, _), (tokens, at)| {
+            self.shape(*kind)
+                .is_some_and(|(size, every)| (*tokens + now.saturating_sub(*at) as f64 / every).min(size) < size)
+        });
     }
 }
 
@@ -234,17 +223,6 @@ mod tests {
         }
         assert!(!limiter.allow("k".into(), 3, Duration::from_secs(3600)));
         assert!(limiter.allow("other".into(), 3, Duration::from_secs(3600)));
-    }
-
-    #[test]
-    fn spent_looks_without_taking() {
-        let (limiter, hour) = (Limiter::default(), Duration::from_secs(3600));
-        assert!(!limiter.spent("k", 2, hour), "untouched: full");
-        assert!(limiter.allow("k".into(), 2, hour));
-        assert!(!limiter.spent("k", 2, hour));
-        assert!(!limiter.spent("k", 2, hour), "looking took nothing");
-        assert!(limiter.allow("k".into(), 2, hour));
-        assert!(limiter.spent("k", 2, hour));
     }
 
     #[test]

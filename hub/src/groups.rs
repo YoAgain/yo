@@ -1,21 +1,18 @@
-//! Groups at the hub (spec 4.9): Signal's Groups v2 with zkgroup, a small part of it. Per group the hub keeps its
-//! `GroupPublicParams`, its revision and its state encrypted under the group's key (members as `UuidCiphertext`s with
-//! their `ProfileKeyCiphertext`s, the title): it checks every request by zero-knowledge proof (an auth credential
-//! presentation names a member, a profile key credential presentation a member added), never learns who is in a group
-//! or what it is called. Every member may change it (no admins); a change names the revision it makes, the hub's +1:
-//! of two at once, one wins and the other is answered `409` with the group as it is (its maker builds on that).
+//! Groups at the hub (spec 4.9): Signal's Groups v2 with zkgroup; every request checked by proof, nothing learned.
 
 use crate::error::{refuse, Refusal, Res};
+use crate::request::{bad, path_id, Auth, Hubs, DAY};
 use crate::{now_ms, Hub};
+use axum::extract::{Path, State};
 use axum::http::StatusCode;
 use libsignal_protocol::{Aci, Pni, ServiceId};
 use yo_wire::api::{self, GroupAction, GroupAnswer, GroupMember, GroupState, NewGroup, NewMember};
 use yo_wire::content::MAX_GROUP;
-use yo_wire::{UserId, VLBytes};
+use yo_wire::{decode, encode, UserId, VLBytes};
 use zkgroup::auth::{AnyAuthCredentialPresentation, AuthCredentialWithPniZkcResponse};
 use zkgroup::groups::{GroupPublicParams, GroupSendDerivedKeyPair, GroupSendEndorsementsResponse, UuidCiphertext};
 use zkgroup::profiles::{AnyProfileKeyCredentialPresentation, ProfileKeyCommitment, ProfileKeyCredentialRequest};
-use zkgroup::{ServerPublicParams, ServerSecretParams, Timestamp, SECONDS_PER_DAY};
+use zkgroup::{ServerSecretParams, Timestamp, SECONDS_PER_DAY};
 
 /// The longest encrypted title the hub keeps (a 32-byte name, padded and sealed, is 65).
 pub const MAX_TITLE: usize = 256;
@@ -53,7 +50,8 @@ pub fn test_params() -> Vec<u8> {
 }
 
 /// The test hubs' public params, as test clients pin them.
-pub fn test_public() -> ServerPublicParams {
+#[cfg(test)]
+fn test_public() -> zkgroup::ServerPublicParams {
     ServerSecretParams::generate(api::TEST_ZK_SEED).get_public_params()
 }
 
@@ -69,10 +67,6 @@ fn aci(user: &UserId) -> Aci {
 
 fn forbidden() -> Refusal {
     refuse(StatusCode::FORBIDDEN)
-}
-
-fn bad() -> Refusal {
-    refuse(StatusCode::BAD_REQUEST)
 }
 
 impl Hub {
@@ -94,8 +88,7 @@ impl Hub {
         api::GroupAuthCredential { redemption_s: day, credential: zkgroup::serialize(&response).into() }
     }
 
-    /// A profile key credential for `request.user_id` against the commitment its account told (`404` none), if the
-    /// request proves the key behind it (`403` otherwise), good for six to seven days.
+    /// A profile key credential for `request.user_id` (`404` no commitment, `403` the key not proved).
     pub(crate) fn profile_credential(&self, request: &api::ProfileCredentialRequest) -> Res<Vec<u8>> {
         let commitment = self.db.commitment(&request.user_id)?.ok_or_else(|| refuse(StatusCode::NOT_FOUND))?;
         let commitment: ProfileKeyCommitment = zkgroup::deserialize(&commitment).map_err(|_| forbidden())?;
@@ -175,20 +168,15 @@ impl Hub {
             return Err(bad());
         }
         let state = GroupState { revision: 1, title: request.title.clone(), members };
-        if !self.db.create_group(id, request.public_params.as_slice(), &yo_wire::encode(&state), now_ms())? {
+        if !self.db.create_group(id, request.public_params.as_slice(), &encode(&state), now_ms())? {
             return Err(refuse(StatusCode::CONFLICT));
         }
         self.answer(state, &maker)
     }
 
-    /// A member's request: the group as it is, or changed as one revision on (`409` with the group as it is when the
-    /// revision is not the next). A member removing itself is answered the group without endorsements; the last one
-    /// out ends it.
+    /// The group, or changed one revision on (`409` with the group as it is); the last member out ends it.
     pub(crate) fn group_request(&self, id: &[u8; api::GROUP_ID_LEN], request: &api::GroupRequest) -> Res<GroupAnswer> {
-        let (params, state) = self.db.group(id)?.ok_or_else(|| refuse(StatusCode::NOT_FOUND))?;
-        let params: GroupPublicParams =
-            zkgroup::deserialize(&params).map_err(|_| refuse(StatusCode::INTERNAL_SERVER_ERROR))?;
-        let mut state: GroupState = yo_wire::decode(&state).map_err(|_| refuse(StatusCode::INTERNAL_SERVER_ERROR))?;
+        let (params, mut state) = self.group(id)?;
         let me = self.presenter(&params, request.auth.as_slice())?;
         if !state.members.iter().any(|m| m.user.as_slice() == me) {
             return Err(forbidden());
@@ -197,8 +185,7 @@ impl Hub {
             return self.answer(state, &me);
         }
         if request.revision != state.revision.wrapping_add(1) {
-            let answer = self.answer(state, &me)?;
-            return Err(Refusal(StatusCode::CONFLICT, yo_wire::encode(&answer)));
+            return Err(Refusal(StatusCode::CONFLICT, encode(&self.answer(state, &me)?)));
         }
         let before = state.revision;
         for action in &request.actions {
@@ -210,22 +197,27 @@ impl Hub {
         state.revision = request.revision;
         let stored = match state.members.is_empty() {
             true => self.db.end_group(id, before)?,
-            false => self.db.update_group(id, before, &yo_wire::encode(&state), now_ms())?,
+            false => self.db.update_group(id, before, &encode(&state), now_ms())?,
         };
         if !stored {
             // Another change came in between: as if it had come first.
-            let (_, now) = self.db.group(id)?.ok_or_else(|| refuse(StatusCode::NOT_FOUND))?;
-            let now: GroupState = yo_wire::decode(&now).map_err(|_| refuse(StatusCode::INTERNAL_SERVER_ERROR))?;
-            return Err(Refusal(StatusCode::CONFLICT, yo_wire::encode(&self.answer(now, &me)?)));
+            return Err(Refusal(StatusCode::CONFLICT, encode(&self.answer(self.group(id)?.1, &me)?)));
         }
         self.answer(state, &me)
+    }
+
+    /// A group as stored: its params and state (`404` none).
+    fn group(&self, id: &[u8]) -> Res<(GroupPublicParams, GroupState)> {
+        let (params, state) = self.db.group(id)?.ok_or_else(|| refuse(StatusCode::NOT_FOUND))?;
+        let broken = || refuse(StatusCode::INTERNAL_SERVER_ERROR);
+        Ok((zkgroup::deserialize(&params).map_err(|_| broken())?, decode(&state).map_err(|_| broken())?))
     }
 
     fn apply(&self, params: &GroupPublicParams, state: &mut GroupState, action: &GroupAction, me: &[u8]) -> Res<()> {
         let data = action.data.as_slice();
         match action.kind {
             api::ACTION_ADD => {
-                let member = self.new_member(params, &yo_wire::decode::<NewMember>(data)?, me)?;
+                let member = self.new_member(params, &decode::<NewMember>(data)?, me)?;
                 state.members.push(member);
             }
             api::ACTION_REMOVE => {
@@ -268,6 +260,27 @@ impl Hub {
         let key = GroupSendDerivedKeyPair::for_expiration(expiration, &self.zk.secret);
         token.verify([ServiceId::from(aci(user))], now, &key).is_ok()
     }
+}
+
+/// `GET /v1/group-auth`: today's auth credential for the signing device's account.
+pub(crate) async fn get_group_auth(State(hub): Hubs, Auth(device, _): Auth) -> Res<Vec<u8>> {
+    Ok(encode(&hub.group_auth(&device.user_id)))
+}
+
+/// `POST /v1/group-credential`: a profile key credential for a user whose key the asker holds.
+pub(crate) async fn post_group_credential(State(hub): Hubs, Auth(device, body): Auth) -> Res<Vec<u8>> {
+    hub.limit_by("credential", &device.device_id, CREDENTIALS_PER_DAY, DAY)?;
+    hub.profile_credential(&decode(&body)?)
+}
+
+/// `PUT /v1/groups/{id}`: a new group.
+pub(crate) async fn put_group(State(hub): Hubs, Path(id): Path<String>, Auth(_, body): Auth) -> Res<Vec<u8>> {
+    Ok(encode(&hub.create_group(&path_id(&id)?, &decode(&body)?)?))
+}
+
+/// `POST /v1/groups/{id}`: a member's request (`GroupRequest`).
+pub(crate) async fn post_group(State(hub): Hubs, Path(id): Path<String>, Auth(_, body): Auth) -> Res<Vec<u8>> {
+    Ok(encode(&hub.group_request(&path_id(&id)?, &decode(&body)?)?))
 }
 
 fn duplicates(members: &[GroupMember]) -> bool {

@@ -1,26 +1,28 @@
-//! Photos and videos (spec 6.8): blobs the hub keeps for a chat's devices to fetch, encrypted under a key it never
-//! learns. Files on disk, one per blob, never in SQLite (which holds a small row each: size, uploader, fetches left,
-//! when). A blob goes when its last fetch is acknowledged, or after its time (30 days), whatever comes first.
-//!
-//! An upload is signed by the body's hash, which comes in a header: the request is checked, and the room for it
-//! counted, before the body is taken. The body goes to a file in `tmp/` as it comes, hashed on the way, and is moved
-//! into place only when its hash is the signed one. A fetch is streamed from the file. No blob is ever held whole in
-//! memory.
+//! Photos and videos (spec 6.8): one file each, streamed in and out, never held whole in memory.
 
 use crate::config::BlobConfig;
 use crate::db::{BlobPut, Db};
+use crate::error::{refuse, Refusal, Res};
+use crate::limiter::{take_place, Place, Places};
+use crate::now_ms;
+use crate::request::{b64_array, bad, header, octets, path_id, query, Hubs, Peer, DAY_MS, MINUTE};
+use axum::extract::{ConnectInfo, Path, State};
+use axum::http::header::CONTENT_LENGTH;
+use axum::http::{HeaderMap, Method, StatusCode, Uri};
+use axum::response::Response;
 use bytes::Bytes;
 use futures_core::Stream;
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 use std::io;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::pin::Pin;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
 use std::task::{Context, Poll};
 use std::time::Duration;
+use yo_wire::api::HEADER_BODY_HASH;
 use yo_wire::content::{BlobId, BLOB_ID_LEN};
-use yo_wire::UserId;
+use yo_wire::{limits, UserId};
 
 /// A file in `tmp/` older than this belongs to no upload under way.
 const TMP_KEPT: Duration = Duration::from_secs(3600);
@@ -33,45 +35,17 @@ pub struct Blobs {
     dir: PathBuf,
     budget: u64,
     min_free: u64,
-    /// Bytes of uploads under way: counted against the budget before they are stored. Changed only under
-    /// `admission`, so an upload being admitted never misses one that moves from coming in to stored meanwhile.
+    /// Bytes of uploads under way; changed only under `admission`, so no upload in between is missed.
     incoming: AtomicU64,
     admission: Mutex<()>,
-    /// Uploads under way, by user, and all.
-    uploads: Mutex<HashMap<UserId, u32>>,
+    /// Uploads under way, by user.
+    uploads: Arc<Places>,
     /// Blob ids whose upload is under way, from its check until its row is written.
-    claimed: Mutex<HashSet<BlobId>>,
-}
-
-/// A blob id held by its upload under way; let go when it is dropped.
-pub struct Claim {
-    blobs: Arc<Blobs>,
-    id: BlobId,
-}
-
-impl Drop for Claim {
-    fn drop(&mut self) {
-        self.blobs.claimed.lock().unwrap_or_else(PoisonError::into_inner).remove(&self.id);
-    }
+    claimed: Arc<Places>,
 }
 
 /// An upload under way of a user; its place is given back when it is dropped.
-pub struct Slot<'a> {
-    blobs: &'a Blobs,
-    user: UserId,
-}
-
-impl Drop for Slot<'_> {
-    fn drop(&mut self) {
-        let mut uploads = self.blobs.uploads.lock().unwrap_or_else(PoisonError::into_inner);
-        if let Some(n) = uploads.get_mut(&self.user) {
-            *n -= 1;
-            if *n == 0 {
-                uploads.remove(&self.user);
-            }
-        }
-    }
-}
+pub type Slot<'a> = Place;
 
 fn hex(bytes: &[u8]) -> String {
     bytes.iter().map(|b| format!("{b:02x}")).collect()
@@ -86,20 +60,13 @@ fn stored_of(name: &str) -> Option<Stored> {
     Some((unhex(id)?, at.parse().ok()?))
 }
 
-fn unhex(text: &str) -> Option<BlobId> {
+pub(crate) fn unhex(text: &str) -> Option<BlobId> {
     if text.len() != 2 * BLOB_ID_LEN {
         return None;
     }
     let bytes: Option<Vec<u8>> =
         (0..BLOB_ID_LEN).map(|i| text.get(2 * i..2 * i + 2).and_then(|h| u8::from_str_radix(h, 16).ok())).collect();
     bytes?.try_into().ok()
-}
-
-/// Why there is no room for a blob now.
-#[derive(Debug, PartialEq, Eq)]
-pub enum NoRoom {
-    /// The budget for all blobs, or the disk's free space, is used up.
-    Full,
 }
 
 /// Room held for an upload under way; given back when it is dropped.
@@ -139,70 +106,41 @@ impl Blobs {
             min_free: config.min_free_bytes,
             incoming: AtomicU64::new(0),
             admission: Mutex::default(),
-            uploads: Mutex::default(),
-            claimed: Mutex::default(),
+            uploads: Arc::default(),
+            claimed: Arc::default(),
         })
     }
 
     /// Holds `id` for one upload: `None` while another upload of it is under way.
-    pub fn claim(self: &Arc<Self>, id: BlobId) -> Option<Claim> {
-        let fresh = self.claimed.lock().unwrap_or_else(PoisonError::into_inner).insert(id);
-        fresh.then(|| Claim { blobs: self.clone(), id })
+    pub fn claim(&self, id: BlobId) -> Option<Place> {
+        take_place(&self.claimed, id, 1, None)
     }
 
-    /// A place for one more upload of `user`, if it has fewer than `UPLOADS_PER_USER` under way and all users fewer
-    /// than `UPLOADS`.
+    /// A place for one more upload of `user`, within `UPLOADS_PER_USER` and `UPLOADS`.
     pub fn uploading(&self, user: UserId) -> Option<Slot<'_>> {
-        let mut uploads = self.uploads.lock().unwrap_or_else(PoisonError::into_inner);
-        let all: u32 = uploads.values().sum();
-        let n = uploads.entry(user).or_default();
-        if *n >= UPLOADS_PER_USER || all >= UPLOADS {
-            if *n == 0 {
-                uploads.remove(&user);
-            }
-            return None;
-        }
-        *n += 1;
-        Some(Slot { blobs: self, user })
+        take_place(&self.uploads, user, UPLOADS_PER_USER, Some(UPLOADS))
     }
 
-    /// Where a blob lives: by the first byte of its id in one of 256 directories, named with when it was stored, so
-    /// what is done to one upload under an id never touches another's file.
+    /// A blob's file: in one of 256 directories, named with when it was stored, so uploads under one id never meet.
     fn path(&self, (id, at): &Stored) -> PathBuf {
         self.dir.join(hex(&id[..1])).join(format!("{}.{at}", hex(id)))
     }
 
-    /// The disk's space free for this process.
-    fn free_bytes(&self) -> io::Result<u64> {
-        let stat = rustix::fs::statvfs(&self.dir)?;
-        Ok(stat.f_bavail.saturating_mul(stat.f_frsize))
-    }
-
-    /// Holds room for `size` bytes, if the budget and the disk have it with what is stored (`stored()`, asked under
-    /// the admission lock) and what is coming in.
+    /// Holds room for `size` bytes if the budget and the disk have it, with what is stored and what is coming in.
     pub fn reserve<E>(
         self: &Arc<Self>,
         size: u64,
         stored: impl FnOnce() -> Result<u64, E>,
-    ) -> Result<Result<Reserved, NoRoom>, E> {
+    ) -> Result<Option<Reserved>, E> {
         let admission = self.admission.lock().unwrap_or_else(PoisonError::into_inner);
         let stored = stored()?;
         let incoming = self.incoming.fetch_add(size, Ordering::Relaxed) + size;
         drop(admission);
         let reserved = Reserved { blobs: self.clone(), size };
-        Ok(self.room(reserved, stored, incoming))
-    }
-
-    fn room(&self, reserved: Reserved, stored: u64, incoming: u64) -> Result<Reserved, NoRoom> {
-        if stored.saturating_add(incoming) > self.budget {
-            return Err(NoRoom::Full);
-        }
         // An error asking the disk counts as no room: better a refusal than a full disk.
-        let free = self.free_bytes().unwrap_or(0);
-        if free < self.min_free.saturating_add(incoming) {
-            return Err(NoRoom::Full);
-        }
-        Ok(reserved)
+        let free = || rustix::fs::statvfs(&self.dir).map_or(0, |stat| stat.f_bavail.saturating_mul(stat.f_frsize));
+        Ok((stored.saturating_add(incoming) <= self.budget && free() >= self.min_free.saturating_add(incoming))
+            .then_some(reserved))
     }
 
     /// A new file in `tmp/` for an upload.
@@ -214,8 +152,7 @@ impl Blobs {
         Ok((tokio::fs::File::from_std(file), Incoming { path, kept: false }))
     }
 
-    /// Moves a complete upload into place, durably: its bytes, its name and a new shard directory are on the disk
-    /// before the blob is marked ready and its upload answered (a power cut must not keep the row without the file).
+    /// Moves a complete upload into place durably: a power cut must not keep the row without the file.
     pub fn keep(&self, mut incoming: Incoming, blob: &Stored) -> io::Result<()> {
         std::fs::File::open(&incoming.path)?.sync_all()?;
         let path = self.path(blob);
@@ -246,9 +183,7 @@ impl Blobs {
         let _ = std::fs::remove_file(self.path(blob));
     }
 
-    /// Removes files the database does not know (a blob deleted with its account, an upload cut off by a crash) and
-    /// uploads left in `tmp/`. The files are listed before the rows are read: a blob is in the database before its
-    /// file is in place, so none stored meanwhile is taken for a stray.
+    /// Removes files the database does not know, and old uploads in `tmp/`; files are listed before rows are read.
     pub fn sweep(&self, db: &Db) -> io::Result<usize> {
         let mut files = Vec::new();
         for shard in std::fs::read_dir(&self.dir)? {
@@ -278,13 +213,12 @@ impl Blobs {
         Ok(removed)
     }
 
-    pub fn dir(&self) -> &Path {
+    pub fn dir(&self) -> &std::path::Path {
         &self.dir
     }
 }
 
-/// A GET slot taken (`Db::take_blob_get`), over when dropped: `done(true)` if its last chunk was handed on, else
-/// `done(false)`. On a blocking thread (it writes to the database), never on the async workers.
+/// A GET slot taken (`Db::take_blob_get`): `done(complete)` when dropped, on a blocking thread.
 pub struct Taken {
     done: Option<Box<dyn FnOnce(bool) + Send>>,
     complete: bool,
@@ -308,8 +242,7 @@ impl Drop for Taken {
     }
 }
 
-/// A blob's bytes as they are read, counting: a fetch counts once its last chunk is handed on (the server drops the
-/// body right after it), one cut off before gives it back. Nothing is counted while a chunk still waits to go.
+/// A blob's bytes as read: a fetch counts once its last chunk is handed on, one cut off before gives it back.
 pub struct Counted<S> {
     inner: S,
     left: u64,
@@ -337,8 +270,7 @@ impl<S: Stream<Item = io::Result<Bytes>> + Unpin> Stream for Counted<S> {
 }
 
 /// The outcome of storing a blob's row, as the route answers it.
-pub fn refused(put: &BlobPut) -> Option<axum::http::StatusCode> {
-    use axum::http::StatusCode;
+fn refused(put: &BlobPut) -> Option<StatusCode> {
     match put {
         BlobPut::Stored => None,
         BlobPut::Taken => Some(StatusCode::CONFLICT),
@@ -352,6 +284,167 @@ pub fn refused(put: &BlobPut) -> Option<axum::http::StatusCode> {
 /// A directory's entries on the disk (a file moved or made in it).
 fn sync_dir(dir: &std::path::Path) -> io::Result<()> {
     std::fs::File::open(dir)?.sync_all()
+}
+
+// ---- routes ----
+
+/// The longest an upload may take: a whole blob over a slow line, and no longer.
+const UPLOAD_TIME: Duration = Duration::from_secs(300);
+
+/// `PUT /v1/blobs/{id}?fetches=n`: signed by its body's hash, checked before the body is taken, kept only if it holds.
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn put_blob(
+    State(hub): Hubs,
+    ConnectInfo(peer): Peer,
+    method: Method,
+    uri: Uri,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+    body: axum::body::Body,
+) -> Res<StatusCode> {
+    use futures_util::StreamExt;
+    use sha2::Digest;
+    use tokio::io::AsyncWriteExt;
+    let id: BlobId = path_id(&id)?;
+    let size: u64 = header(&headers, CONTENT_LENGTH)
+        .and_then(|v| v.parse().ok())
+        .ok_or_else(|| refuse(StatusCode::LENGTH_REQUIRED))?;
+    if size > limits::MAX_BLOB_LEN as u64 {
+        return Err(refuse(StatusCode::PAYLOAD_TOO_LARGE));
+    }
+    // A ChaCha20-Poly1305 ciphertext has its 16-byte tag at least.
+    if size < 16 {
+        return Err(bad());
+    }
+    let fetches = query(&uri, "fetches").filter(|n| (1..=limits::MAX_BLOB_FETCHES).contains(n)).ok_or_else(bad)?;
+    let body_hash: [u8; 32] = header(&headers, HEADER_BODY_HASH).and_then(b64_array).ok_or_else(bad)?;
+    let limits = &hub.config.limits;
+    hub.limit_ip("blob:put", peer, &headers, limits.blob_put_per_ip_minute, MINUTE)?;
+    let quota = limits.blob_quota();
+    let (device, _claim) = hub
+        .blocking(move |hub| {
+            let device = hub.authenticate_hash(&method, &uri, &headers, &body_hash)?;
+            // Held before the body comes, so a second upload of the same id is "later" at once (spec 6.8).
+            let claim = hub.blobs.claim(id).ok_or_else(|| refuse(StatusCode::SERVICE_UNAVAILABLE))?;
+            match hub.db.blob_ready_state(&id)? {
+                Some(true) => return Err(refuse(StatusCode::CONFLICT)),
+                // Another upload of it is not done: "later", not "there" (spec 6.6).
+                Some(false) => return Err(refuse(StatusCode::SERVICE_UNAVAILABLE)),
+                None => {}
+            }
+            if !hub.db.blob_quota_left(&device.user_id, size, now_ms(), &quota)? {
+                return Err(refuse(StatusCode::TOO_MANY_REQUESTS));
+            }
+            Ok((device, claim))
+        })
+        .await??;
+    // A few uploads of one user at once, no more: none can hold the room of everyone's.
+    let _slot = hub.blobs.uploading(device.user_id).ok_or_else(|| refuse(StatusCode::TOO_MANY_REQUESTS))?;
+    let failed = |error: std::io::Error| {
+        eprintln!("yo-hub: blob upload: {error}");
+        refuse(StatusCode::INTERNAL_SERVER_ERROR)
+    };
+    let (room, mut file, incoming) = hub
+        .blocking(move |hub| {
+            let room = hub.blobs.reserve(size, || hub.db.blobs_stored())?;
+            let room = room.ok_or_else(|| refuse(StatusCode::INSUFFICIENT_STORAGE))?;
+            let (file, incoming) = hub.blobs.incoming().map_err(failed)?;
+            Ok::<_, Refusal>((room, file, incoming))
+        })
+        .await??;
+    let taken = async {
+        let mut stream = body.into_data_stream();
+        let mut hash = sha2::Sha256::new();
+        let mut got = 0u64;
+        while let Some(chunk) = stream.next().await {
+            // The client went away, or sent something that is no body.
+            let chunk = chunk.map_err(|_| bad())?;
+            got += chunk.len() as u64;
+            if got > size {
+                return Err(refuse(StatusCode::PAYLOAD_TOO_LARGE));
+            }
+            hash.update(&chunk);
+            file.write_all(&chunk).await.map_err(failed)?;
+        }
+        file.flush().await.map_err(failed)?;
+        if got != size || <[u8; 32]>::from(hash.finalize()) != body_hash {
+            return Err(bad());
+        }
+        Ok(())
+    };
+    tokio::time::timeout(UPLOAD_TIME, taken).await.map_err(|_| refuse(StatusCode::REQUEST_TIMEOUT))??;
+    drop(file);
+    hub.blocking(move |hub| {
+        // The room is held until the blob's row counts it.
+        let _room = room;
+        let stored_at = now_ms();
+        let put = hub.db.put_blob(&device.device_id, &id, size, fetches, stored_at, &quota)?;
+        if let Some(status) = refused(&put) {
+            return Err(refuse(status));
+        }
+        if let Err(error) = hub.blobs.keep(incoming, &(id, stored_at)) {
+            let _ = hub.db.delete_blob(&id);
+            return Err(failed(error));
+        }
+        // Handed out from now on. Left not ready (a crash just before), it goes at the next start or within the hour.
+        match hub.db.blob_ready(&id, stored_at) {
+            Ok(true) => Ok(StatusCode::CREATED),
+            // Its row went meanwhile (the account deleted while it came): no file left behind, and no 201.
+            Ok(false) => {
+                hub.blobs.remove(&(id, stored_at));
+                Err(refuse(StatusCode::NOT_FOUND))
+            }
+            Err(error) => {
+                let _ = hub.db.delete_blob(&id);
+                hub.blobs.remove(&(id, stored_at));
+                Err(error.into())
+            }
+        }
+    })
+    .await?
+}
+
+/// `GET /v1/blobs/{id}`, anonymous: spends only the GET budget; a cut-off stream gives it back (`Taken`).
+pub(crate) async fn get_blob(
+    State(hub): Hubs,
+    ConnectInfo(peer): Peer,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+) -> Res<Response> {
+    hub.limit_ip("blob:get", peer, &headers, hub.config.limits.blob_get_per_ip_minute, MINUTE)?;
+    let id: BlobId = path_id(&id)?;
+    let ttl = hub.config.limits.blob_ttl_days * DAY_MS;
+    let taking = hub.blocking(move |hub| hub.db.take_blob_get(&id, now_ms(), ttl)).await??;
+    let (size, created_at) = taking.ok_or_else(|| refuse(StatusCode::NOT_FOUND))?;
+    let db = hub.db.clone();
+    let taken = Taken::new(move |complete| {
+        if !complete {
+            let _ = db.return_blob_get(&id, created_at);
+        }
+    });
+    let file = hub.blobs.read(&(id, created_at), size).await.ok_or_else(|| refuse(StatusCode::NOT_FOUND))?;
+    let stream = Counted::new(tokio_util::io::ReaderStream::with_capacity(file, 64 * 1024), size, taken);
+    Ok(octets(size, axum::body::Body::from_stream(stream)))
+}
+
+/// `DELETE /v1/blobs/{id}`, anonymous like GET: one fetch stored for good; the last removes the blob.
+pub(crate) async fn delete_blob(
+    State(hub): Hubs,
+    ConnectInfo(peer): Peer,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+) -> Res<StatusCode> {
+    hub.limit_ip("blob:get", peer, &headers, hub.config.limits.blob_get_per_ip_minute, MINUTE)?;
+    let id: BlobId = path_id(&id)?;
+    let ttl = hub.config.limits.blob_ttl_days * DAY_MS;
+    hub.blocking(move |hub| -> Res<()> {
+        if let Some(created_at) = hub.db.ack_blob(&id, now_ms(), ttl)? {
+            hub.blobs.remove(&(id, created_at));
+        }
+        Ok(())
+    })
+    .await??;
+    Ok(StatusCode::NO_CONTENT)
 }
 
 #[cfg(test)]
