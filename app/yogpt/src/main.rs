@@ -3,6 +3,7 @@
 //!
 //!   yo-gpt [--replies DIR] --account NAME=HUB,DIR[,USERNAME] [--hub-key NAME=KEY] [--trust-root NAME=KEY]
 //!          [--zk-params NAME=PARAMS] [--account …] [--echo NAME] [--quiet-for USERNAME[,USERNAME…]]
+//!          [--make-group "GROUP NAME=USERNAME,USERNAME…" …]
 //!   yo-gpt --replies app/yogpt/replies --account dev=https://dev.justyo.app,state/dev,YoGPT
 //!
 //! `--echo NAME` reserves that account for immediate, single plain-Yo answers with aggregate-only logs;
@@ -27,6 +28,10 @@
 //! 6.1, as `yo-hub trust-root new` printed it), once per key (the current one and a spare): without one no sealed Yo
 //! opens and its own go identified. `--zk-params NAME=PARAMS` pins the hub's zkgroup public params (base64url, as
 //! `yo-hub zk new` printed them, spec 4.9): without them it answers in no group and leaves none.
+//!
+//! `--make-group "GROUP NAME=USERNAME,…"` (repeatable, needs the account's `--zk-params`): the FIRST account makes
+//! each group with those members (looked up by username), prints each group's id and exits (1 if one failed); run
+//! with the service stopped, like `--yo`. A name is 1 to 32 bytes (UTF-8, emoji count 4 each), no control characters.
 //!
 //! The username defaults to YOGPT; once registered, the account keeps the name it has, whatever is given later.
 //! Each account has its own client, state directory, threads and limits. Its first run registers the username with a
@@ -242,6 +247,8 @@ struct Options {
     photo: Option<PathBuf>,
     /// `--quiet-for`: usernames whose Yos are never answered (upper case).
     quiet_for: Vec<String>,
+    /// `--make-group "NAME=USER,USER…"`: the first account makes these groups (name, member usernames), then exits.
+    make_groups: Vec<(String, Vec<String>)>,
 }
 
 /// Whether a roll (uniform in `0..every`) gives a picture: one in `every`, none for 0.
@@ -412,13 +419,38 @@ fn named_key(flag: &str, text: &str) -> Result<(String, [u8; 32]), String> {
     Ok((name.into(), key))
 }
 
+/// `NAME=USER,USER…`: a group's name (1 to 32 bytes, no control characters, as the core takes it; it may hold `=`,
+/// the last one splits) and its members' usernames (one at least, at most 19: with the maker, 20).
+fn make_group(value: &str) -> Result<(String, Vec<String>), String> {
+    let bad = |why: &str| format!("--make-group {value}: NAME=USER,USER… ({why})");
+    let (name, members) = value.rsplit_once('=').ok_or_else(|| bad("no ="))?;
+    if name.is_empty() || name.len() > yo_wire::content::MAX_NAME_LEN || name.chars().any(char::is_control) {
+        return Err(bad("a name of 1 to 32 bytes, no control characters"));
+    }
+    let members: Vec<String> =
+        members.split(',').map(|m| m.trim().trim_start_matches('@').to_owned()).filter(|m| !m.is_empty()).collect();
+    if members.is_empty() || members.len() + 1 > yo_wire::content::MAX_GROUP {
+        return Err(bad("1 to 19 members"));
+    }
+    Ok((name.to_owned(), members))
+}
+
 fn args() -> Result<(Vec<Account>, Options), String> {
+    args_from(std::env::args().skip(1))
+}
+
+fn args_from(mut it: impl Iterator<Item = String>) -> Result<(Vec<Account>, Options), String> {
     let mut accounts: Vec<Account> = Vec::new();
     let mut echoes = Vec::new();
     let (mut hub_keys, mut trust_roots, mut zk_params) = (Vec::new(), Vec::new(), Vec::new());
-    let mut options =
-        Options { replies: None, picture_every: PICTURE_EVERY, yo: None, photo: None, quiet_for: Vec::new() };
-    let mut it = std::env::args().skip(1);
+    let mut options = Options {
+        replies: None,
+        picture_every: PICTURE_EVERY,
+        yo: None,
+        photo: None,
+        quiet_for: Vec::new(),
+        make_groups: Vec::new(),
+    };
     while let Some(flag) = it.next() {
         let value = it.next().ok_or(format!("{flag}: a value"))?;
         match flag.as_str() {
@@ -442,6 +474,7 @@ fn args() -> Result<(Vec<Account>, Options), String> {
                 let (to, n) = value.split_once('=').ok_or("--yo NAME=COUNT")?;
                 options.yo = Some((to.into(), n.parse().map_err(|_| "--yo NAME=COUNT: a number")?));
             }
+            "--make-group" => options.make_groups.push(make_group(&value)?),
             other => return Err(format!("unknown flag {other}")),
         }
     }
@@ -450,6 +483,9 @@ fn args() -> Result<(Vec<Account>, Options), String> {
     }
     if accounts.iter().any(|a| a.echo) && options.yo.is_some() {
         return Err("--echo cannot be combined with --yo".into());
+    }
+    if !options.make_groups.is_empty() && options.yo.is_some() {
+        return Err("--make-group cannot be combined with --yo".into());
     }
     for (name, key) in hub_keys {
         let account = accounts.iter_mut().find(|a| a.name == name).ok_or(format!("--hub-key: no account {name}"))?;
@@ -778,6 +814,9 @@ fn main() {
         eprintln!("yo-gpt: {error}");
         std::process::exit(2);
     });
+    if !options.make_groups.is_empty() {
+        std::process::exit(make_groups(&accounts[0], &options.make_groups));
+    }
     if let Some((to, n)) = options.yo.clone() {
         for account in &accounts {
             let Some((mut client, _lock)) = open(account) else { std::process::exit(1) };
@@ -819,6 +858,44 @@ fn main() {
     }
     eprintln!("yo-gpt: no account left");
     std::process::exit(1);
+}
+
+/// `--make-group`: the account makes each group of the members it finds (by username), printing each group's id;
+/// exits 1 when one could not be made.
+fn make_groups(account: &Account, groups: &[(String, Vec<String>)]) -> i32 {
+    if account.zk_params.is_none() {
+        eprintln!("yo-gpt [{}]: --make-group needs --zk-params {}=PARAMS", account.name, account.name);
+        return 2;
+    }
+    let Some((mut client, _lock)) = open(account) else { return 1 };
+    let mut failed = false;
+    for (name, usernames) in groups {
+        let mut members = Vec::new();
+        for username in usernames {
+            match client.whois_begin(username).and_then(|whois| whois.send()) {
+                Ok((user, _)) => members.push(user),
+                Err(error) => {
+                    eprintln!("yo-gpt [{}]: group {name:?}: member {username}: {}", account.name, reason(&error));
+                    failed = true;
+                }
+            }
+        }
+        if members.is_empty() {
+            failed = true;
+            continue;
+        }
+        match client.create_group(name, &members) {
+            Ok((id, _)) => {
+                println!("yo-gpt [{}]: group {name:?} made: {id} ({} members)", account.name, members.len() + 1)
+            }
+            Err(error) => {
+                eprintln!("yo-gpt [{}]: group {name:?}: {}", account.name, reason(&error));
+                failed = true;
+            }
+        }
+        std::thread::sleep(Duration::from_millis(400));
+    }
+    i32::from(failed)
 }
 
 /// `stats.json` beside the outbox: `{"contacts":N}`, written whole.
@@ -1297,7 +1374,14 @@ mod tests {
             let (draining, _drain) = sync_channel(MAX_DRAINING);
             let bot = Bot {
                 name: account.name.clone(),
-                options: Options { replies: None, picture_every: 0, yo: None, photo: None, quiet_for: vec![] },
+                options: Options {
+                    replies: None,
+                    picture_every: 0,
+                    yo: None,
+                    photo: None,
+                    quiet_for: vec![],
+                    make_groups: vec![],
+                },
                 echo: false,
                 draining,
                 client: Mutex::new(client),
@@ -1502,5 +1586,24 @@ mod echo_tests {
         assert!(!limits.allow("sender", now + Duration::from_secs(1)));
         assert!(limits.allow("fresh", now + Duration::from_secs(5)));
         assert_eq!(limits.0.len(), 1);
+    }
+
+    #[test]
+    fn make_group_parses_names_with_signs_and_rejects_bad_ones() {
+        let args = |list: &[&str]| args_from(list.iter().map(|s| s.to_string()));
+        let account = "--account";
+        let leo = "leo=https://hub.example,state/leo,LEO";
+        let (_, options) =
+            args(&[account, leo, "--make-group", "👥 Hey=mia, @Noah", "--make-group", "a=b=emma"]).unwrap();
+        assert_eq!(
+            options.make_groups,
+            vec![("👥 Hey".into(), vec!["mia".into(), "Noah".into()]), ("a=b".into(), vec!["emma".into()])]
+        );
+        for bad in ["Hey", "=mia", "Hey=", "Hey= , ", &format!("{}=mia", "x".repeat(33)), "a\nb=mia"] {
+            assert!(make_group(bad).is_err(), "{bad:?}");
+        }
+        assert!(make_group(&format!("{}=mia", "x".repeat(32))).is_ok());
+        assert!(make_group(&format!("g={}", vec!["u"; 20].join(","))).is_err(), "20 others and the maker: 21");
+        assert!(args(&[account, leo, "--make-group", "g=mia", "--yo", "MIA=1"]).is_err());
     }
 }
