@@ -29,7 +29,7 @@ jobs:
               {"iss": os.environ["ASC_ISSUER_ID"], "iat": int(time.time()), "exp": int(time.time()) + 600,
                "aud": "appstoreconnect-v1"},
               raw + "\n", algorithm="ES256", headers={"kid": os.environ["ASC_KEY_ID"]})
-          url = "https://api.appstoreconnect.apple.com/v1/apps/6834493649/appEncryptionDeclarations?limit=50"
+          url = "https://api.appstoreconnect.apple.com/v1/appEncryptionDeclarations?filter[app]=6834493649&limit=50"
           req = urllib.request.Request(url, headers={"Authorization": f"Bearer {token}"})
           data = json.load(urllib.request.urlopen(req))["data"]
           print(f"{len(data)} declaration(s)")
