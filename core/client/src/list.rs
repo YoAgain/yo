@@ -627,7 +627,9 @@ impl List {
                     media_sign: if f.request {
                         String::new()
                     } else {
-                        s.media.first().copied().map_or("", Kind::sign).into()
+                        // A video among them shows 🎥 (as the notification says it), else what is there.
+                        let video = s.media.contains(&Kind::Video);
+                        s.media.first().map_or("", |&k| if video { Kind::Video } else { k }.sign()).into()
                     },
                 })
             })
@@ -1101,7 +1103,7 @@ mod tests {
         assert_eq!(s.next_tick, None);
     }
     #[test]
-    fn media_mark_uses_unseen_stack_and_its_oldest_kind() {
+    fn media_mark_uses_unseen_stack_and_shows_video_when_any() {
         let mut l = model();
         l.apply(0, receive("a"));
         l.apply(300, Input::Tick);
@@ -1113,6 +1115,9 @@ mod tests {
         l.apply(6300, Input::MediaChanged { id: "a".into(), kinds: vec![Kind::Photo] });
         assert_eq!(row(&l, "a").mark_count, 1);
         assert_eq!(row(&l, "a").media_sign, "📷");
+        // Photos first, then a video: the video's sign.
+        l.apply(6300, Input::MediaChanged { id: "a".into(), kinds: vec![Kind::Photo, Kind::Photo, Kind::Video] });
+        assert_eq!(row(&l, "a").media_sign, "🎥");
         l.apply(6300, Input::MediaSeen("a".into()));
         assert_eq!(row(&l, "a").mark_count, 0);
     }

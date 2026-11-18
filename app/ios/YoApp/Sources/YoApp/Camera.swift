@@ -50,6 +50,8 @@ final class Camera: NSObject, @unchecked Sendable {
   private let queue = DispatchQueue(label: "yo.camera", qos: .userInitiated)
   private var configured = false
   private var input: AVCaptureDeviceInput?
+  /// The microphone, for the videos' sound: in the session once it is allowed (photos are taken without it).
+  private var microphone: AVCaptureDeviceInput?
   private var photos: [Int64: CheckedContinuation<Data?, Never>] = [:]
   private var movie: CheckedContinuation<URL?, Never>?
   /// A video that ended at the length limit before the name was let go; `stopVideo()` hands it over then.
@@ -57,6 +59,9 @@ final class Camera: NSObject, @unchecked Sendable {
   /// A video was started and not yet handed over: while true, `stopVideo()` waits for its file, even when the length
   /// limit stopped it and AVFoundation is still finishing the file.
   private var videoActive = false
+  /// How the video being recorded turns upright should its frames come out landscape (the connection not turning
+  /// them, as the front camera's did not): the preview's own rule (`upright`), read as it starts.
+  private var videoTurn = CGImagePropertyOrientation.right
   /// The zooms the camera in use offers, as the Camera app names them (0.5, 1, 2, 3); and the device's factor that
   /// is "1" (the wide camera's, behind the ultra wide one of a multi-camera device).
   private var zooms: [Double] = [1]
@@ -69,14 +74,23 @@ final class Camera: NSObject, @unchecked Sendable {
       .compactMap { AVCaptureDevice.default($0, for: .video, position: .back) }.first
   }
 
-  /// Asks for the camera once; false when it is refused.
+  /// Asks for the camera once, then for the microphone (videos have sound); false when the camera is refused. A
+  /// refused microphone only leaves the videos silent.
   static func allowed() async -> Bool {
-    switch AVCaptureDevice.authorizationStatus(for: .video) {
-    case .authorized: true
-    case .notDetermined: await AVCaptureDevice.requestAccess(for: .video)
-    default: false
+    let camera =
+      switch AVCaptureDevice.authorizationStatus(for: .video) {
+      case .authorized: true
+      case .notDetermined: await AVCaptureDevice.requestAccess(for: .video)
+      default: false
+      }
+    if camera, AVCaptureDevice.authorizationStatus(for: .audio) == .notDetermined {
+      _ = await AVCaptureDevice.requestAccess(for: .audio)
     }
+    return camera
   }
+
+  /// The microphone not asked yet (`allowed` asks it).
+  static var microphoneUndecided: Bool { AVCaptureDevice.authorizationStatus(for: .audio) == .notDetermined }
 
   /// Never asks permission or starts capture: safe to call after the list settles.
   static var authorized: Bool { AVCaptureDevice.authorizationStatus(for: .video) == .authorized }
@@ -97,6 +111,11 @@ final class Camera: NSObject, @unchecked Sendable {
   func start() {
     queue.async { [self] in
       if !configured { Perf.timed("camera.configure.first-start") { configure() } }
+      if microphone == nil, AVCaptureDevice.authorizationStatus(for: .audio) == .authorized {
+        session.beginConfiguration()
+        addMicrophone()  // allowed since the session was set up
+        session.commitConfiguration()
+      }
       if !session.isRunning {
         previewQueue.async { [self] in
           revealed = false
@@ -206,6 +225,9 @@ final class Camera: NSObject, @unchecked Sendable {
       guard session.isRunning, movieOutput.connection(with: .video) != nil, !movieOutput.isRecording, !videoActive
       else { return }
       orient()
+      let connection = movieOutput.connection(with: .video)
+      videoTurn = Self.upright(
+        width: 2, height: 1, front: input?.device.position == .front, mirrored: connection?.isVideoMirrored == true)
       finishedAlone = nil
       videoActive = true
       let file = FileManager.default.temporaryDirectory.appending(path: "\(UUID().uuidString).mov")
@@ -213,8 +235,17 @@ final class Camera: NSObject, @unchecked Sendable {
     }
   }
 
-  /// Ends the video and returns its file; nil when none was recording or it failed.
-  func stopVideo() async -> URL? {
+  /// Ends the video and returns its file, with the turn that shows it upright should it come out landscape
+  /// (`MediaFile.video`); nil when none was recording or it failed.
+  func stopVideo() async -> (file: URL, turn: CGImagePropertyOrientation)? {
+    guard let file = await finishVideo() else { return nil }
+    let turn = await withCheckedContinuation { continuation in
+      queue.async { [self] in continuation.resume(returning: videoTurn) }
+    }
+    return (file, turn)
+  }
+
+  private func finishVideo() async -> URL? {
     await withCheckedContinuation { continuation in
       queue.async { [self] in
         if movieOutput.isRecording {
@@ -242,6 +273,9 @@ final class Camera: NSObject, @unchecked Sendable {
       session.addInput(new)
       input = new
     }
+    // Music or a call playing on keeps playing while the camera is open (the microphone would stop it otherwise).
+    session.configuresApplicationAudioSessionToMixWithOthers = true
+    addMicrophone()
     if session.canAddOutput(photoOutput) { session.addOutput(photoOutput) }
     if photoOutput.isResponsiveCaptureSupported { photoOutput.isResponsiveCaptureEnabled = true }
     if photoOutput.isZeroShutterLagSupported { photoOutput.isZeroShutterLagEnabled = true }
@@ -258,6 +292,18 @@ final class Camera: NSObject, @unchecked Sendable {
     ready.photoQualityPrioritization = .speed
     photoOutput.setPreparedPhotoSettingsArray([ready], completionHandler: nil)
     readZooms()
+  }
+
+  /// The microphone into the session, in stereo where the iPhone records stereo; nothing until it is allowed.
+  /// Inside a configuration.
+  private func addMicrophone() {
+    guard microphone == nil, AVCaptureDevice.authorizationStatus(for: .audio) == .authorized,
+      let device = AVCaptureDevice.default(for: .audio),
+      let new = Diagnostics.attempt({ try AVCaptureDeviceInput(device: device) }), session.canAddInput(new)
+    else { return }
+    session.addInput(new)
+    if new.isMultichannelAudioModeSupported(.stereo) { new.multichannelAudioMode = .stereo }
+    microphone = new
   }
 
   /// Photos and videos come out upright in portrait (the app is portrait only), and from the front camera mirrored,

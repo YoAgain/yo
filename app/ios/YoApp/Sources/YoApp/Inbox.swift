@@ -17,6 +17,11 @@ struct Arrival: Equatable, Identifiable {
   let video: URL?
   /// The photo's file.
   var file: URL? = nil
+  /// Not downloaded yet: what it will be. On its bar from the moment its message comes; the viewer waits for it.
+  var pending: MediaFile.Kind? = nil
+
+  /// A video, downloaded or on its way.
+  var isVideo: Bool { video != nil || pending == .video }
 
   /// When it was sent: a photo's or video's id starts with its sender and the time (`Inbox.mediaID`).
   var sentAt: Date? { Self.sentAtMs(id).map { Date(timeIntervalSince1970: Double($0) / 1000) } }
@@ -43,12 +48,15 @@ struct Arrival: Equatable, Identifiable {
     }
   }
 
-  init(id: String, from: String, photo: UIImage? = nil, video: URL? = nil, file: URL? = nil) {
+  init(
+    id: String, from: String, photo: UIImage? = nil, video: URL? = nil, file: URL? = nil, pending: MediaFile.Kind? = nil
+  ) {
     self.id = id
     self.from = from
     self.photo = photo
     self.video = video
     self.file = file
+    self.pending = pending
   }
 }
 
@@ -112,7 +120,18 @@ final class Inbox {
   /// Photos and videos not yet seen, by sender, oldest first: kept on this iPhone until then (ReceivedMedia). By the
   /// sender name's skeleton: a friend whose spelling changed since ("LEO", then "Leo") still finds theirs. A group's by
   /// its id (an arrival `from` "group:" and the id), whatever it is called now.
-  private var unseenMedia: [String: [Arrival]] = [:]
+  private var unseenMedia: [String: [Arrival]] = [:] {
+    didSet { mediaChanges += 1 }
+  }
+  /// Counts changes of the photos and videos waiting (one came, its download finished, one was seen): the list's
+  /// signs follow it.
+  private(set) var mediaChanges = 0
+
+  /// A photo or video waiting, wherever it is kept: the viewer takes the downloaded one in place of its placeholder.
+  func unseen(id: String) -> Arrival? {
+    for kept in unseenMedia.values { if let found = kept.first(where: { $0.id == id }) { return found } }
+    return nil
+  }
 
   /// A bar's photos and videos not yet seen, oldest first; nil when none wait.
   func media(for friend: Friend) -> [Arrival]? { unseenMedia[friend.mediaKey] }
@@ -129,14 +148,28 @@ final class Inbox {
     }
   }
 
-  /// A photo or video kept, on its sender's bar until seen, in the order sent.
+  /// A photo or video kept, on its sender's bar until seen, in the order sent: noted as its message comes (`pending`,
+  /// the download still to come), then the downloaded one in its place.
   private func add(_ arrival: Arrival) {
     Perf.timed("inbox.media.handoff") {
       let key = Self.mediaKey(arrival)
       var waiting = unseenMedia[key] ?? []
-      guard !waiting.contains(where: { $0.id == arrival.id }) else { return }
-      waiting.insert(arrival, at: waiting.firstIndex { Arrival.older(arrival, $0) } ?? waiting.endIndex)
+      if let at = waiting.firstIndex(where: { $0.id == arrival.id }) {
+        // Downloaded now: in its placeholder's place. Never the other way round (a late placeholder after a restart).
+        guard waiting[at].pending != nil, arrival.pending == nil else { return }
+        waiting[at] = arrival
+      } else {
+        waiting.insert(arrival, at: waiting.firstIndex { Arrival.older(arrival, $0) } ?? waiting.endIndex)
+      }
       unseenMedia[key] = waiting
+    }
+  }
+
+  /// A photo or video that will not come (the hub no longer has it, or it does not open): off its bar.
+  private func drop(_ id: String) {
+    unseenMedia = unseenMedia.compactMapValues { kept in
+      let rest = kept.filter { $0.id != id }
+      return rest.isEmpty ? nil : rest
     }
   }
 
@@ -546,6 +579,7 @@ final class Inbox {
             let id = Self.mediaID(user, sentAtMs, media)
             // Not noted (the disk full): the core keeps the Yo, which comes again after a restart.
             mediaNotes.append((event, media, id, sender.name, kind))
+            add(Arrival(id: id, from: sender.name, pending: kind))  // on the bar at once; the download follows
             continue
           }
         case .groupMessage(let group, let user, let sentAtMs, let kind):
@@ -568,6 +602,7 @@ final class Inbox {
             let id = Self.mediaID(group + user, sentAtMs, media)
             // Kept by the group's id: a rename or a bar of the same name never takes it (Friend.mediaKey).
             mediaNotes.append((event, media, id, bar.mediaKey, kind))
+            add(Arrival(id: id, from: bar.mediaKey, pending: kind))
             continue
           }
         case .groupChanged:
@@ -588,6 +623,8 @@ final class Inbox {
     if !mediaNotes.isEmpty {
       let written = await ReceivedMedia.shared.expectBatch(mediaNotes.map { ($0.1, $0.2, $0.3, $0.4) })
       kept += mediaNotes.filter { written.contains($0.2) }.map { $0.0 }
+      // Not noted: off the bar again until its Yo comes again (after a restart); a download already there stays.
+      for note in mediaNotes where !written.contains(note.2) && unseen(id: note.2)?.pending != nil { drop(note.2) }
     }
     // Who sent the newest, for Yo Back from the Action button, Shortcuts or Siri (ShareBridge.noteLast).
     let newest = ShareBridge.yos(
@@ -623,6 +660,8 @@ final class Inbox {
     Task { [weak self] in
       await ReceivedMedia.shared.fetchWaiting(client: client) { [weak self] arrival in
         Perf.timed("inbox.media.add") { self?.add(arrival) }
+      } dropped: { [weak self] id in
+        self?.drop(id)
       }
     }
   }

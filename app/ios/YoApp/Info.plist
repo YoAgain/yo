@@ -87,6 +87,8 @@
 	<false/>
 	<key>NSCameraUsageDescription</key>
 	<string>Yo uses the camera so you can send photos and videos to friends and scan your recovery key to sign in.</string>
+	<key>NSMicrophoneUsageDescription</key>
+	<string>Yo records sound with the videos you send.</string>
 	<key>NSFaceIDUsageDescription</key>
 	<string>Yo uses Face ID to verify your identity before showing your recovery key.</string>
 	<key>NSPhotoLibraryAddUsageDescription</key>

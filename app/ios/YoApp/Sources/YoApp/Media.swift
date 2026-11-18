@@ -1,5 +1,5 @@
-// Photos and videos (spec 5, 6.8): made small and plain before they go (a JPEG of at most 1600 pixels, a video of
-// at most 10 seconds and 8 MB, neither with a place or a device in it), sealed by the core under a key of their own,
+// Photos and videos (spec 5, 6.8): made small and plain before they go (a HEIC of at most 2048 pixels, an HEVC video
+// of at most 720p, 10 seconds and 6 MB, neither with a place or a device in it), sealed by the core under a key of their own,
 // and kept in an outbox until the hub has them; only then their Yo goes. A hub that says "not now" (the day's quota,
 // no room) keeps them waiting here, and they go later by themselves. What arrives is fetched at once, kept on this
 // iPhone until it has been seen once, then deleted.
@@ -584,6 +584,11 @@ actor ReceivedMedia {
   /// What fetches go by, as `fetchWaiting` was last given it: more start as others end.
   private var client: YoClient?
   private var arrived: (@MainActor (Arrival) -> Void)?
+  /// A noted one that will not come (the hub no longer has it): off its bar.
+  private var dropped: (@MainActor (String) -> Void)?
+  /// Seen (swiped away) before its download finished: fetched and acknowledged as any (spec 6.8), then deleted
+  /// instead of shown.
+  private var unwanted: Set<String> = []
   /// Counts sign-outs: a fetch begun before one keeps nothing.
   private var generation = 0
 
@@ -682,6 +687,7 @@ actor ReceivedMedia {
 
   private func file(_ id: String, _ kind: MediaFile.Kind) -> URL {
     let safe = String(id.map { $0.isLetter || $0.isNumber ? $0 : "-" })
+    // The name's ending stays ".jpg" for photos kept from before: HEIC or JPEG, ImageIO reads them by their bytes.
     return directory.appending(path: safe + (kind == .photo ? ".jpg" : ".mp4"))
   }
 
@@ -760,10 +766,14 @@ actor ReceivedMedia {
 
   /// Fetches what is noted and not under way, a few at a time, oldest first; one waiting to try again (the network
   /// broke it) tries now: the next Yo came, so the network is back. Each one kept goes to `arrived`.
-  func fetchWaiting(client: YoClient, arrived: @escaping @MainActor (Arrival) -> Void) {
+  func fetchWaiting(
+    client: YoClient, arrived: @escaping @MainActor (Arrival) -> Void,
+    dropped: @escaping @MainActor (String) -> Void = { _ in }
+  ) {
     retryAcks(client: client)
     self.client = client
     self.arrived = arrived
+    self.dropped = dropped
     for one in pending where fetching.contains(one.id) { pauses[one.id]?.cancel() }
     startMore()
   }
@@ -853,7 +863,9 @@ actor ReceivedMedia {
         Prefetch.done(media)
         pending.removeAll { $0.id == one.id }
         resting[one.id] = nil
+        unwanted.remove(one.id)
         _ = await store()
+        if generation == self.generation, let dropped { await dropped(one.id) }
         return
       }
       // Kept meanwhile from the same blob in another conversation (below): done.
@@ -887,9 +899,14 @@ actor ReceivedMedia {
       resting[one.id] = nil
       retryAcks(client: client)
       Prefetch.done(media)  // kept in the app's own media now
-      let arrival = await arrival(kept)
-      // Signed out while the thumbnail was made: not for the account after it.
-      if let arrival, generation == self.generation { await arrived(arrival) }
+      if unwanted.remove(one.id) != nil {
+        forget(one.id)  // swiped away while it downloaded: seen
+      } else if let arrival = await arrival(kept) {
+        // Signed out while the thumbnail was made: not for the account after it.
+        if generation == self.generation { await arrived(arrival) }
+      } else if generation == self.generation, let dropped {
+        await dropped(one.id)  // no picture of it to show: not left loading on its bar
+      }
       // The same blob in other conversations waiting too (a photo to two groups): theirs from this one fetch, not
       // one more each (the notification service's file is gone, and its claim would not be given again).
       for other in pending where other.id != one.id && other.media.media.id == media.id {
@@ -907,7 +924,11 @@ actor ReceivedMedia {
           pending.append(other)
           continue
         }
-        if let shown = await self.arrival(also), generation == self.generation { await arrived(shown) }
+        if unwanted.remove(other.id) != nil {
+          forget(other.id)
+        } else if let shown = await self.arrival(also), generation == self.generation {
+          await arrived(shown)
+        }
       }
       return
     }
@@ -943,6 +964,8 @@ actor ReceivedMedia {
       if let arrival = await arrival(one) { arrivals.append(arrival) }
       guard generation == self.generation else { return [] }  // signed out meanwhile: not for the next account
     }
+    // Noted and not downloaded yet: on their bars too, loading.
+    arrivals += pending.filter { !unwanted.contains($0.id) }.map { Arrival(id: $0.id, from: $0.from, pending: $0.kind) }
     return arrivals.sorted(by: Arrival.older)
   }
 
@@ -951,6 +974,7 @@ actor ReceivedMedia {
   /// goes when the viewer closes all the same, and a start drops a kept one without its file (`load`).
   func consumed(_ id: String) {
     Perf.timed("media.consumed") {
+      if pending.contains(where: { $0.id == id }) { unwanted.insert(id) }
       saved.removeAll { $0.id == id }
       storeUntilWritten()
     }
@@ -959,6 +983,7 @@ actor ReceivedMedia {
   /// Seen: gone from this iPhone, the file first (what makes it seen for good, see `load`), then the manifest.
   func forget(_ id: String) {
     Perf.timed("media.forget") {
+      if pending.contains(where: { $0.id == id }) { unwanted.insert(id) }
       for kind in [MediaFile.Kind.photo, .video] {
         try? FileManager.default.removeItem(at: file(id, kind))
       }
@@ -1005,6 +1030,8 @@ actor ReceivedMedia {
     unwritten = [:]
     client = nil
     arrived = nil
+    dropped = nil
+    unwanted = []
     pauses.values.forEach { $0.cancel() }
     pauses = [:]
     rewriting?.cancel()

@@ -74,7 +74,7 @@ final class ShareModel {
 
   var friends: [ShareBridge.Friend]? { list?.friends }
 
-  /// Makes them as they go (a JPEG of at most 1600 pixels, a video of at most 10 seconds) while a name is chosen,
+  /// Makes them as they go (a HEIC of at most 2048 pixels, an HEVC video of at most 10 seconds) while a name is chosen,
   /// one after the other: an extension has little memory.
   func prepare(_ providers: [NSItemProvider]) {
     var picked: [(NSItemProvider, MediaFile.Kind)] = []
