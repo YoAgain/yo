@@ -70,11 +70,11 @@ The server deletes the encrypted file after its last acknowledged fetch.
 
 ## Hub
 
-```text
-hub alone    ████████████████████████████████  10,431 Yos/s   1 CPU core · p50 2.1 ms · p99 130 ms
-end to end   ███████████▊                       3,826 Yos/s   send, deliver, fetch, decrypt
-lost                                               0
-```
+| | Yos/s | |
+|---|---:|---|
+| Hub alone | 10,431 | 1 CPU core · p50 2.1 ms · p99 130 ms |
+| End to end | 3,826 | send, deliver, fetch, decrypt |
+| Lost | 0 | |
 
 The hub stores and forwards encrypted Yos until the recipient fetches them; it cannot read them.
 
