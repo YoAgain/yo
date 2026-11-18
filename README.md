@@ -29,7 +29,7 @@ through UniFFI; apps supply HTTP and storage.
 
 </details>
 
-## Encryption
+## Encryption / Core
 
 ```text
 ┌──────────────────┐        ┌──────────────────┐        ┌──────────────────┐
@@ -51,19 +51,19 @@ Where each key lives on iOS, with made-up example values. One device per account
 
 | Key | Where | Example | Purpose |
 |---|---|---|---|
-| Account key | iCloud, DB | `1cd3276568646ac5113afae6038fd3f745c22a20d2ef2e9a570cf69332a9d1c8` | identity, the account |
+| Account key | iCloud, DB | `1cd32765…32a9d1c8` (64 chars) | identity, the account |
 | User id | iCloud, DB | `9e4b02bb46c6cf346d6a046281bf768e` | fixed id at the hub |
 | Name | iCloud, DB | `Christopher` | to be found |
-| Recovery key | iCloud, device | `598t 08e1 7rns vrue br45 hdfl 5jce r5qh m4pl 4mas hhx9 0eyv 9u4e 9jlc s9ym 3qgy` | backup without iCloud |
+| Recovery key | iCloud, device | `598t 08e1 … s9ym 3qgy` (64 chars) | backup without iCloud |
 | Backup status | iCloud | `{"byPasskey":true,"byCode":true,"version":3}` | same security after a restore |
-| Ed25519 seed | iCloud | `d00b86d29901e0bfbf0ccf78195e1fd4f0bc1292384807a618e401b09034eaaa` | converted to today's key once |
-| State key | device | `485ff0f29cf6d3eaf409470bb4d0751f533498007045f927d7be807476683972` | opens the local DB |
-| Device key | DB | `e064d0dbe73a4e9f0a7331fed49b7eb3649f69a163864f2fd67acd8e8d30f026` | this device, encryption |
-| Auth key | DB | `2cea6bee0a80939cee23a260a58a95000ee8077b2b60608fdabc0869c4bec8f3` | signs hub requests |
-| Prekey | DB | `id 17 → 052a51fc10b0df55bef16d58339e947cab34cff6f6dcaf4e362fc31e5a8ae42e84` | first message while offline |
-| Profile key | DB | `1e820bbd1a7b2baa1e1d1f68ff3ed67cc41429a97900d2b0a23f4b68b4a8ea00` | sealed sender for contacts |
-| Group key | DB | `5e6bdf11e728b3dbb843f2de720435eac0bff47d73152ab5c85731550d242738` | read and change a group |
-| Storage key | derived | `e55cab9cede427cfceca5d012f0c570992a208565ebe2904f5b13691d47e1e5d` | contacts at the hub |
+| Ed25519 seed | iCloud | `d00b86d2…9034eaaa` (64 chars) | converted to today's key once |
+| State key | device | `485ff0f2…76683972` (64 chars) | opens the local DB |
+| Device key | DB | `e064d0db…8d30f026` (64 chars) | this device, encryption |
+| Auth key | DB | `2cea6bee…c4bec8f3` (64 chars) | signs hub requests |
+| Prekey | DB | `id 17 → 052a51fc…8ae42e84` (66 chars) | first message while offline |
+| Profile key | DB | `1e820bbd…b4a8ea00` (64 chars) | sealed sender for contacts |
+| Group key | DB | `5e6bdf11…0d242738` (64 chars) | read and change a group |
+| Storage key | derived | `e55cab9c…d47e1e5d` (64 chars) | contacts at the hub |
 | Session | DB | ratchet state, about 1–2 KB | a new key per message |
 | Backup key K | RAM | never stored | encrypts the backup |
 | Passkey | Apple Passwords | "Yo – Christopher" | backup by Face ID |
@@ -85,9 +85,9 @@ under the storage key, padded to 1, 4, 16 or 60 KiB; every value is `[value, ms]
 | Friend colour | `"c": 3` | the row's colour |
 | Friend blocked | `"b": false` | a block survives a restore |
 | Friend removed | `"r": false` | removed friends stay gone |
-| Friends' profile keys | `"k": {"9e4b…": "HoILvRp7K6oeHR9o_z7WfMQUKal5ANKwoj9LaLSo6gA"}` | sealed sender to them |
-| Own profile key | `"pk": "Hm4L0Rp7K6oeHR9o_z7WfMQUKal5ANKwoj9LaLSo6gA"` | contacts write to you sealed |
-| Group master key | `"k": "XmvfEecos9u4Q_LecgQ16sC_9H1zFSq1yFcxVQ0kJzg"` | read the group at the hub |
+| Friends' profile keys | `"k": {"9e4b…": "HoILvR…LSo6gA"}` (43 chars) | sealed sender to them |
+| Own profile key | `"pk": "Hm4L0R…LSo6gA"` (43 chars) | contacts write to you sealed |
+| Group master key | `"k": "XmvfEe…Q0kJzg"` (43 chars) | read the group at the hub |
 | Group joined | `"a": true` | member or request |
 | Group left | `"r": false` | left groups stay gone |
 | App icon | `"icon": "amethyst"` | the same icon |
