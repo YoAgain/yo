@@ -2,7 +2,7 @@
 
 use std::sync::{Arc, Mutex};
 use yo::{HttpResult, HttpTransport, MessageKind, StateStore, YoClient, YoEvent};
-use yo_tests::{random_u64, username, Http, TestHub};
+use yo_tests::{random_u64, username, Disk, Http, Process, TestHub};
 
 struct App(Arc<Http>);
 
@@ -665,72 +665,26 @@ fn the_app_layer_sends_a_burst_over_the_hubs_limit_later_in_order() {
     assert!(sent.windows(2).all(|w| w[0] <= w[1]), "in order");
 }
 
-/// The state's file shared by processes (an app and its extensions): the sealed state and how often it was saved,
-/// and the lock between them.
-#[derive(Default)]
-struct Disk {
-    state: Mutex<(u64, Vec<u8>)>,
-    held: Mutex<bool>,
-    free: std::sync::Condvar,
+/// A client on `disk` as the app registers it.
+fn shared_client(transport: Arc<App>, disk: &Arc<Disk>, username: &str, name: Option<&str>) -> Arc<YoClient> {
+    YoClient::register_username_db(
+        transport,
+        disk.db(),
+        vec![7; 32],
+        Some(Process::new(disk)),
+        username.into(),
+        None,
+        None,
+        name.map(Into::into),
+        0,
+        String::new(),
+    )
+    .unwrap()
 }
 
-/// One process's view of `Disk`, as the app implements `StateStore` and `StateLock`: which save it read or made last.
-struct Process {
-    disk: Arc<Disk>,
-    known: Mutex<u64>,
-}
-
-impl Process {
-    fn new(disk: &Arc<Disk>) -> Arc<Self> {
-        Arc::new(Process { disk: disk.clone(), known: Mutex::new(0) })
-    }
-
-    fn hold(&self) {
-        let mut held = self.disk.held.lock().unwrap();
-        while *held {
-            held = self.disk.free.wait(held).unwrap();
-        }
-        *held = true;
-    }
-
-    fn release(&self) {
-        *self.disk.held.lock().unwrap() = false;
-        self.disk.free.notify_all();
-    }
-
-    /// Under the lock: the state as saved last, now this process's.
-    fn read(&self) -> Vec<u8> {
-        let state = self.disk.state.lock().unwrap();
-        *self.known.lock().unwrap() = state.0;
-        state.1.clone()
-    }
-}
-
-impl StateStore for Process {
-    fn save(&self, blob: Vec<u8>) -> Result<(), yo::YoError> {
-        assert!(*self.disk.held.lock().unwrap(), "saved only under the lock");
-        let mut state = self.disk.state.lock().unwrap();
-        *state = (state.0 + 1, blob);
-        *self.known.lock().unwrap() = state.0;
-        Ok(())
-    }
-}
-
-impl yo::StateLock for Process {
-    fn lock(&self) -> Result<yo::StateTurn, yo::YoError> {
-        self.hold();
-        let state = self.disk.state.lock().unwrap();
-        let mut known = self.known.lock().unwrap();
-        if *known == state.0 {
-            return Ok(yo::StateTurn::Same);
-        }
-        *known = state.0;
-        Ok(if state.1.is_empty() { yo::StateTurn::Gone } else { yo::StateTurn::Newer { blob: state.1.clone() } })
-    }
-
-    fn unlock(&self) {
-        self.release();
-    }
+/// An extension's client on the app's state: no turn to open it, each step takes its own.
+fn guest_client(transport: Arc<App>, disk: &Arc<Disk>) -> Arc<YoClient> {
+    YoClient::open_db(transport, disk.db(), vec![7; 32], true, Some(Process::new(disk))).unwrap()
 }
 
 #[test]
@@ -739,39 +693,19 @@ fn the_app_layer_shares_its_state_with_an_extension_in_turns() {
     let n = random_u64() % 1_000_000_000;
     let (pa, pb) = (username(n), username(n + 1));
     let transport = || Arc::new(App(Http::new(hub.url())));
-    let disk = Arc::new(Disk::default());
-    let app = Process::new(&disk);
-    app.hold();
-    let a = YoClient::register_username(
-        transport(),
-        app.clone(),
-        vec![7; 32],
-        pa.clone(),
-        None,
-        None,
-        Some("ALICE".into()),
-        0,
-        String::new(),
-    )
-    .unwrap();
-    app.release();
-    a.share_state(app.clone());
+    let disk = Disk::new();
+    let a = shared_client(transport(), &disk, &pa, Some("ALICE"));
     let b = client(&hub, &pb, "BOB", Arc::new(File::default()));
     a.send_yo(pb.clone()).unwrap();
     assert_eq!(yos(&drain(&b), &a.user_id()), 1);
     b.send_yo(pa.clone()).unwrap();
 
-    // A share extension, while the app sleeps: it holds the lock, opens the newest state and sends (receiving B's
-    // Yo first); what it receives stays for the app.
+    // A share extension, while the app sleeps: it opens the newest state and sends (receiving B's Yo first); what it
+    // receives stays for the app.
     let guest = |send: &dyn Fn(&YoClient) -> Vec<YoEvent>| {
-        let process = Process::new(&disk);
-        process.hold();
-        let blob = process.read();
-        let g = YoClient::restore_guest(transport(), process.clone(), vec![7; 32], blob).unwrap();
+        let g = guest_client(transport(), &disk);
         let events = send(&g);
         g.acknowledge_events();
-        drop(g);
-        process.release();
         events
     };
     let photo = yo::seal_media(b"JPEG".repeat(1000), 160, 120).unwrap();
@@ -808,7 +742,89 @@ fn the_app_layer_shares_its_state_with_an_extension_in_turns() {
     assert_eq!(yos(&drain(&b), &a.user_id()), 2);
     b.send_yo(pa.clone()).unwrap();
     assert_eq!(yos(&a.sync(0).unwrap(), &b.user_id()), 1);
-    assert!(!*disk.held.lock().unwrap(), "every lock given back");
+    assert!(!disk.is_held(), "every turn given back");
+}
+
+/// Reads never wait for the turn: while an extension holds it (a long step), the app reads its friends, contacts and
+/// groups at once, from the last committed state, and sees what the extension wrote as soon as it is written.
+#[test]
+fn the_app_layer_reads_while_an_extension_holds_the_turn() {
+    use std::time::{Duration, Instant};
+    let hub = TestHub::start();
+    let n = random_u64() % 1_000_000_000;
+    let (pa, pb) = (username(n), username(n + 1));
+    let transport = || Arc::new(App(Http::new(hub.url())));
+    let disk = Disk::new();
+    let a = shared_client(transport(), &disk, &pa, None);
+    let b = client(&hub, &pb, "BOB", Arc::new(File::default()));
+    a.set_friend(b.user_id(), Some("BOB".into()), Some(3)).unwrap();
+    a.send_yo(b.user_id()).unwrap();
+    let g = guest_client(transport(), &disk);
+    g.set_friend(b.user_id(), Some("ROBERT".into()), Some(4)).unwrap();
+    // The extension in a long step: the turn held.
+    let blocker = Process::new(&disk);
+    blocker.hold();
+    let started = Instant::now();
+    let friends = a.friends();
+    assert!(started.elapsed() < Duration::from_secs(2), "no wait for the turn");
+    assert_eq!(friends.len(), 1);
+    assert_eq!(friends[0].name.as_deref(), Some("ROBERT"), "the extension's write, taken in by a read");
+    assert!(a.contacts().iter().any(|c| c.user == b.user_id()));
+    assert!(a.groups().unwrap().is_empty());
+    assert!(a.storage_saved_at().is_ok());
+    // A write waits for the turn, and goes once it is given back.
+    let writing = {
+        let a = a.clone();
+        let user = b.user_id();
+        std::thread::spawn(move || a.set_friend(user, Some("BOBBY".into()), None))
+    };
+    std::thread::sleep(Duration::from_millis(300));
+    assert!(!writing.is_finished(), "the write waits for the turn");
+    blocker.release();
+    writing.join().unwrap().unwrap();
+    assert_eq!(g.friends()[0].name.as_deref(), Some("BOBBY"), "and the extension reads it without a turn");
+    assert!(!disk.is_held());
+}
+
+/// An account's state from before the database (the file `yo-state`: the 36-character word of its last save, then
+/// the sealed state; Yo Dev's own file without the word) moves in once and opens as the same account, its friends,
+/// sessions and outbox with it.
+#[test]
+fn a_state_file_of_before_moves_into_the_database() {
+    let hub = TestHub::start();
+    let n = random_u64() % 1_000_000_000;
+    let (pa, pb) = (username(n), username(n + 1));
+    let transport = || Arc::new(App(Http::new(hub.url())));
+    for word in [36usize, 0] {
+        let file = Arc::new(File::default());
+        let (pa, pb) = (format!("{pa}{word}"), format!("{pb}{word}"));
+        let a = client(&hub, &pa, "ALICE", file.clone());
+        let b = client(&hub, &pb, "BOB", Arc::new(File::default()));
+        a.set_friend(b.user_id(), Some("BOB".into()), Some(2)).unwrap();
+        a.send_yo(b.user_id()).unwrap();
+        assert_eq!(yos(&drain(&b), &a.user_id()), 1);
+        let (user, friends) = (a.user_id(), a.friends());
+        a.close();
+        let disk = Disk::new();
+        let old = disk.dir().join("yo-state");
+        let word_text = "0123456789abcdef0123456789abcdef0123";
+        std::fs::write(&old, [&word_text.as_bytes()[..word], &file.0.lock().unwrap()].concat()).unwrap();
+        let db = disk.db();
+        assert!(!db.has_state().unwrap());
+        assert!(db.move_in(old.to_string_lossy().into(), word as u32).unwrap(), "moved in");
+        assert!(!old.exists(), "the file goes");
+        assert!(!db.move_in(old.to_string_lossy().into(), word as u32).unwrap(), "once");
+        let moved = YoClient::open_db(transport(), db, vec![7; 32], false, Some(Process::new(&disk))).unwrap();
+        assert_eq!(moved.user_id(), user);
+        assert_eq!(moved.friends().len(), friends.len());
+        assert_eq!(moved.friends()[0].name.as_deref(), Some("BOB"));
+        // Its sessions came along: both ways, no new session needed.
+        moved.send_yo(b.user_id()).unwrap();
+        assert_eq!(yos(&drain(&b), &user), 1);
+        b.send_yo(user.clone()).unwrap();
+        assert_eq!(yos(&moved.sync(0).unwrap(), &b.user_id()), 1);
+        assert!(disk.word().is_some());
+    }
 }
 
 #[test]
@@ -818,17 +834,16 @@ fn the_app_layer_takes_in_what_an_extension_did_while_its_long_poll_waited() {
     let hub = TestHub::start();
     let n = random_u64() % 1_000_000_000;
     let (pa, pb) = (username(n), username(n + 1));
-    let disk = Arc::new(Disk::default());
-    let app = Process::new(&disk);
+    let disk = Disk::new();
     let (waiting, waited) = channel();
     let (release, released) = channel();
     let held =
         Arc::new(Held { app: App(Http::new(hub.url())), waiting: Mutex::new(waiting), release: Mutex::new(released) });
-    app.hold();
-    let a = YoClient::register_username(
+    let a = YoClient::register_username_db(
         held,
-        app.clone(),
+        disk.db(),
         vec![7; 32],
+        Some(Process::new(&disk)),
         pa.clone(),
         None,
         None,
@@ -837,8 +852,6 @@ fn the_app_layer_takes_in_what_an_extension_did_while_its_long_poll_waited() {
         String::new(),
     )
     .unwrap();
-    app.release();
-    a.share_state(app.clone());
     let b = client(&hub, &pb, "BOB", Arc::new(File::default()));
     a.send_yo(pb.clone()).unwrap();
     assert_eq!(yos(&drain(&b), &a.user_id()), 1);
@@ -847,17 +860,13 @@ fn the_app_layer_takes_in_what_an_extension_did_while_its_long_poll_waited() {
         std::thread::spawn(move || a.sync(25))
     };
     waited.recv_timeout(Duration::from_secs(30)).expect("the long poll starts");
-    // While it waits (the lock is free then), B writes and the extension sends and receives.
+    // While it waits (the turn is free then), B writes and the extension sends and receives.
     b.send_yo(pa.clone()).unwrap();
-    let process = Process::new(&disk);
-    process.hold();
-    let blob = process.read();
-    let g = YoClient::restore_guest(Arc::new(App(Http::new(hub.url()))), process.clone(), vec![7; 32], blob).unwrap();
+    let g = guest_client(Arc::new(App(Http::new(hub.url()))), &disk);
     let mut seen = g.send_yo(b.user_id()).unwrap();
     seen.extend(g.sync(0).unwrap());
     assert_eq!(yos(&seen, &b.user_id()), 1, "received before its send, once");
     drop(g);
-    process.release();
     // The long poll's answer (B's Yo, received by the extension already) is processed against the newest state.
     release.send(()).unwrap();
     let events = syncing.join().unwrap().unwrap();
@@ -876,52 +885,32 @@ fn the_app_layer_closes_a_client_whose_shared_state_went_away() {
     let (pa, pb) = (username(n), username(n + 1));
     let transport = || Arc::new(App(Http::new(hub.url())));
     let b = client(&hub, &pb, "BOB", Arc::new(File::default()));
-    let register = |disk: &Arc<Disk>, username: &str| {
-        let process = Process::new(disk);
-        process.hold();
-        let client = YoClient::register_username(
-            transport(),
-            process.clone(),
-            vec![7; 32],
-            username.into(),
-            None,
-            None,
-            None,
-            0,
-            String::new(),
-        )
-        .unwrap();
-        process.release();
-        client.share_state(process);
-        client
-    };
-    let disk = Arc::new(Disk::default());
-    let a = register(&disk, &pa);
+    let disk = Disk::new();
+    let a = shared_client(transport(), &disk, &pa, None);
     a.send_yo(pb.clone()).unwrap();
     // A guest opened on A's state.
-    let guest = Process::new(&disk);
-    guest.hold();
-    let blob = guest.read();
-    let g = YoClient::restore_guest(transport(), guest.clone(), vec![7; 32], blob).unwrap();
-    guest.release();
-    g.share_state(guest);
+    let g = guest_client(transport(), &disk);
     // Signed out, and in again as another account under the same key: the guest neither acts as it nor saves.
-    *disk.state.lock().unwrap() = (1000, Vec::new());
-    let other = register(&disk, &username(n + 2));
-    let saved = disk.state.lock().unwrap().clone();
+    disk.db().clear().unwrap();
+    let other = shared_client(transport(), &disk, &username(n + 2), None);
+    let saved = disk.word();
     assert!(matches!(g.send_yo(pb.clone()), Err(yo::YoError::State)));
     assert!(matches!(g.sync(0), Err(yo::YoError::State)), "closed for good");
     assert!(g.contacts().is_empty());
-    assert_eq!(disk.state.lock().unwrap().0, saved.0, "nothing saved over the other account's state");
+    assert!(matches!(a.sync(0), Err(yo::YoError::State)), "the app's old client too");
+    assert_eq!(disk.word(), saved, "nothing saved over the other account's state");
     // A client whose state is gone (signed out): closed too.
-    *disk.state.lock().unwrap() = (2000, Vec::new());
+    disk.db().clear().unwrap();
     assert!(matches!(other.send_yo(pb.clone()), Err(yo::YoError::State)));
+    assert!(matches!(other.friends().len(), 0));
+    assert_eq!(disk.word(), None, "and nothing made again");
     assert!(drain(&b).iter().all(|e| !matches!(e, YoEvent::Message { user, .. } if *user == other.user_id())));
 }
 
 /// Chaos of two processes on one account, many accounts at once: the app's long poll runs all the time, an
 /// extension opens the state as a guest again and again (sends Yos, syncs like the notification service), the friend
-/// writes meanwhile. Every Yo arrives exactly once, both ways; every lock is given back; the state stays loadable.
+/// writes meanwhile, and the app reads its contacts without a turn all along. Every Yo arrives exactly once, both
+/// ways; every turn is given back; the state stays loadable.
 #[test]
 fn the_app_layer_and_its_extensions_take_turns_under_load() {
     use std::sync::atomic::{AtomicUsize, Ordering::Relaxed};
@@ -931,24 +920,8 @@ fn the_app_layer_and_its_extensions_take_turns_under_load() {
     let transport = |hub: &TestHub| Arc::new(App(Http::new(hub.url())));
     let accounts: Vec<_> = (0..6u64)
         .map(|i| {
-            let disk = Arc::new(Disk::default());
-            let app = Process::new(&disk);
-            let name = username(n + 2 * i);
-            app.hold();
-            let a = YoClient::register_username(
-                transport(&hub),
-                app.clone(),
-                vec![7; 32],
-                name,
-                None,
-                None,
-                None,
-                0,
-                String::new(),
-            )
-            .unwrap();
-            app.release();
-            a.share_state(app);
+            let disk = Disk::new();
+            let a = shared_client(transport(&hub), &disk, &username(n + 2 * i), None);
             let friend = client(&hub, &username(n + 2 * i + 1), "FRIEND", Arc::new(File::default()));
             a.send_yo(friend.user_id()).unwrap();
             assert_eq!(yos(&drain(&friend), &a.user_id()), 1);
@@ -967,6 +940,7 @@ fn the_app_layer_and_its_extensions_take_turns_under_load() {
                     (friend.user_id(), AtomicUsize::new(1), AtomicUsize::new(0), AtomicUsize::new(0));
                 let got_by_app = AtomicUsize::new(0);
                 let got_by_friend = AtomicUsize::new(0);
+                let reads = AtomicUsize::new(0);
                 std::thread::scope(|s| {
                     // The app: its long poll, and now and then a Yo of its own.
                     s.spawn(|| {
@@ -984,15 +958,19 @@ fn the_app_layer_and_its_extensions_take_turns_under_load() {
                             }
                         }
                     });
+                    // The app's list: reads all along, never a turn; the friend is always there.
+                    s.spawn(|| {
+                        while Instant::now() < until {
+                            assert!(a.contacts().iter().any(|c| c.user == friend_id), "account {i}: a read sees all");
+                            reads.fetch_add(1, Relaxed);
+                            std::thread::sleep(Duration::from_millis(5));
+                        }
+                    });
                     // The extensions: a share sheet that sends, a notification service that syncs, each a guest.
                     s.spawn(|| {
                         let mut k = 0u64;
                         while Instant::now() < until {
-                            let process = Process::new(&disk);
-                            process.hold();
-                            let blob = process.read();
-                            let g =
-                                YoClient::restore_guest(transport(&hub), process.clone(), vec![7; 32], blob).unwrap();
+                            let g = guest_client(transport(&hub), &disk);
                             if k.is_multiple_of(2) {
                                 g.send_yo(friend_id.clone()).unwrap();
                                 sent_by_guest.fetch_add(1, Relaxed);
@@ -1000,7 +978,6 @@ fn the_app_layer_and_its_extensions_take_turns_under_load() {
                                 g.sync(0).unwrap();
                             }
                             drop(g);
-                            process.release();
                             k += 1;
                             std::thread::sleep(Duration::from_millis(30 + (k * 7 + i as u64) % 50));
                         }
@@ -1031,8 +1008,9 @@ fn the_app_layer_and_its_extensions_take_turns_under_load() {
                     "account {i}: the app got every Yo once"
                 );
                 assert!(sent_by_guest.load(Relaxed) > 10, "account {i}: the extension had turns");
-                assert!(!*disk.held.lock().unwrap(), "account {i}: every lock given back");
-                let blob = disk.state.lock().unwrap().1.clone();
+                assert!(reads.load(Relaxed) > 100, "account {i}: the list read all along");
+                assert!(!disk.is_held(), "account {i}: every turn given back");
+                let blob = disk.db().blob().unwrap().unwrap();
                 assert!(yo_core::Client::restore(Http::new(hub.url()), &blob, &[7; 32]).is_ok());
             })
         })
@@ -1138,7 +1116,8 @@ fn the_app_layer_makes_a_group_and_yos_it() {
     assert!(c.groups().unwrap()[0].left);
 }
 
-/// Background time refused: no state access and no unlock, but the client can retry when time is available.
+/// Background time refused: no write and no unlock, but reads go on (they need no turn), and the client can write
+/// again when time is available.
 #[test]
 fn a_refused_shared_turn_can_be_retried() {
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
@@ -1149,40 +1128,101 @@ fn a_refused_shared_turn_can_be_retried() {
         unlocks: AtomicUsize,
     }
     impl yo::StateLock for Retry {
-        fn lock(&self) -> Result<yo::StateTurn, yo::YoError> {
+        fn lock(&self) -> Result<(), yo::YoError> {
             if self.refused.load(Ordering::Relaxed) {
                 return Err(yo::YoError::Network { message: "background time ended".into() });
             }
-            self.process.lock()
+            yo::StateLock::lock(self.process.as_ref())
         }
-        fn unlock(&self) {
+        fn held(&self) -> bool {
+            yo::StateLock::held(self.process.as_ref())
+        }
+        fn unlock(&self, saved: bool) {
             self.unlocks.fetch_add(1, Ordering::Relaxed);
-            self.process.unlock();
+            yo::StateLock::unlock(self.process.as_ref(), saved);
         }
     }
 
     let hub = TestHub::start();
-    let file = Arc::new(File::default());
-    let a = client(&hub, &username(random_u64() % 1_000_000_000), "", file.clone());
-    let disk = Arc::new(Disk::default());
-    *disk.state.lock().unwrap() = (1, file.0.lock().unwrap().clone());
+    let disk = Disk::new();
     let lock =
-        Arc::new(Retry { process: Process::new(&disk), refused: AtomicBool::new(true), unlocks: AtomicUsize::new(0) });
-    a.share_state(lock.clone());
-    let before = file.0.lock().unwrap().clone();
+        Arc::new(Retry { process: Process::new(&disk), refused: AtomicBool::new(false), unlocks: AtomicUsize::new(0) });
+    let a = YoClient::register_username_db(
+        Arc::new(App(Http::new(hub.url()))),
+        disk.db(),
+        vec![7; 32],
+        Some(lock.clone()),
+        username(random_u64() % 1_000_000_000),
+        None,
+        None,
+        None,
+        0,
+        String::new(),
+    )
+    .unwrap();
+    lock.refused.store(true, Ordering::Relaxed);
+    let (before, unlocks) = (disk.word(), lock.unlocks.load(Ordering::Relaxed));
     assert!(matches!(a.sync(0), Err(yo::YoError::Network { .. })));
-    assert!(matches!(a.groups(), Err(yo::YoError::Network { .. })));
-    assert!(matches!(a.sessions_with("contact".into()), Err(yo::YoError::Network { .. })));
-    assert!(matches!(a.storage_saved_at(), Err(yo::YoError::Network { .. })));
-    assert_eq!(disk.state.lock().unwrap().1, before);
-    assert_eq!(lock.unlocks.load(Ordering::Relaxed), 0);
-    lock.refused.store(false, Ordering::Relaxed);
-    a.sync(0).unwrap();
-    assert!(a.groups().unwrap().is_empty());
+    assert!(a.groups().unwrap().is_empty(), "reads need no turn");
     assert!(a.sessions_with("contact".into()).unwrap().is_empty());
     assert!(a.storage_saved_at().is_ok());
-    assert!(lock.unlocks.load(Ordering::Relaxed) > 0);
-    assert!(!*disk.held.lock().unwrap());
+    assert_eq!(disk.word(), before);
+    assert_eq!(lock.unlocks.load(Ordering::Relaxed), unlocks);
+    lock.refused.store(false, Ordering::Relaxed);
+    a.sync(0).unwrap();
+    assert!(lock.unlocks.load(Ordering::Relaxed) > unlocks);
+    assert!(!disk.is_held());
+}
+
+/// A turn taken back in the middle of a step (background time ran out): its write never lands, and the next step
+/// starts again from the database, not from what the step did in memory.
+#[test]
+fn a_turn_taken_back_writes_nothing_and_the_next_step_starts_from_the_database() {
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    struct Revocable {
+        process: Arc<Process>,
+        revoked: AtomicBool,
+    }
+    impl yo::StateLock for Revocable {
+        fn lock(&self) -> Result<(), yo::YoError> {
+            yo::StateLock::lock(self.process.as_ref())
+        }
+        fn held(&self) -> bool {
+            !self.revoked.load(Ordering::Relaxed) && yo::StateLock::held(self.process.as_ref())
+        }
+        fn unlock(&self, saved: bool) {
+            yo::StateLock::unlock(self.process.as_ref(), saved);
+        }
+    }
+
+    let hub = TestHub::start();
+    let n = random_u64() % 1_000_000_000;
+    let disk = Disk::new();
+    let lock = Arc::new(Revocable { process: Process::new(&disk), revoked: AtomicBool::new(false) });
+    let a = YoClient::register_username_db(
+        Arc::new(App(Http::new(hub.url()))),
+        disk.db(),
+        vec![7; 32],
+        Some(lock.clone()),
+        username(n),
+        None,
+        None,
+        None,
+        0,
+        String::new(),
+    )
+    .unwrap();
+    let b = client(&hub, &username(n + 1), "BOB", Arc::new(File::default()));
+    let before = disk.word();
+    lock.revoked.store(true, Ordering::Relaxed);
+    assert!(matches!(a.set_friend(b.user_id(), Some("BOB".into()), None), Err(yo::YoError::Save { .. })));
+    assert_eq!(disk.word(), before, "nothing written");
+    lock.revoked.store(false, Ordering::Relaxed);
+    assert!(a.friends().is_empty(), "what the step did in memory is gone: the database's state again");
+    a.set_friend(b.user_id(), Some("BOB".into()), None).unwrap();
+    assert_eq!(a.friends().len(), 1);
+    assert_ne!(disk.word(), before);
 }
 
 #[test]

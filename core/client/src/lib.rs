@@ -16,6 +16,7 @@ pub mod sealed;
 pub mod security;
 pub mod signal;
 pub mod state;
+pub mod statedb;
 pub mod storage;
 
 pub use error::{Error, Result};
@@ -1083,12 +1084,19 @@ impl Client {
 
     /// Opens a sealed state.
     pub fn restore(transport: Arc<dyn Transport>, blob: &[u8], key: &[u8; 32]) -> Result<Client> {
+        Ok(Client::restore_changed(transport, blob, key)?.0)
+    }
+
+    /// `restore`, and whether opening changed the state (what the last call handed out comes again): then it is to be
+    /// saved before another process reads it, else it may be kept as it is (`keep_in`).
+    pub fn restore_changed(transport: Arc<dyn Transport>, blob: &[u8], key: &[u8; 32]) -> Result<(Client, bool)> {
         let (mut state, entries) = state::open(blob, key)?;
         // What the last call handed out may not have reached the app before the restart: it comes again.
         let handed = std::mem::take(&mut state.handed);
+        let changed = !handed.is_empty();
         state.events.splice(0..0, handed);
         let records = Records::new(&entries, &state.account_secret, state.registration_id)?;
-        Ok(Client::with(transport, records, state))
+        Ok((Client::with(transport, records, state), changed))
     }
 
     fn with(transport: Arc<dyn Transport>, records: Records, state: State) -> Client {
@@ -1255,6 +1263,12 @@ impl Client {
     pub fn persist_to(&mut self, store: Arc<dyn Store>, key: [u8; 32]) -> Result<()> {
         self.store = Some((store, key));
         self.persist()
+    }
+
+    /// Saves the sealed state to `store` after every operation from now on; not now: it is there as it is (opened
+    /// from it, unchanged), and a reader writes nothing.
+    pub fn keep_in(&mut self, store: Arc<dyn Store>, key: [u8; 32]) {
+        self.store = Some((store, key));
     }
 
     /// The state sealed under `key`.

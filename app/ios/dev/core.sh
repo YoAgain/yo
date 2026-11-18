@@ -4,7 +4,8 @@
 #   swift/yo.swift      UniFFI's Swift side (Package.swift: target YoCore)
 # Runs with the host's rustup (the toolchain of rust-toolchain.toml, plus `rustup target add aarch64-apple-ios`):
 # on Linux against the darwin Swift SDK of omarchy-apple-dev, on macOS (CI) against Xcode's iPhoneOS SDK. No C
-# compiler is needed: the core has no C dependencies. dev/push.sh calls it before the app's build.
+# compiler is needed: the core has no C dependencies (its SQLite is the SDK's libsqlite3, linked by Package.swift).
+# dev/push.sh calls it before the app's build.
 # YO_CORE_TARGET=aarch64-apple-ios-sim builds it for the Simulator on a Mac instead (dev/sim.sh).
 set -euo pipefail
 here=$(cd "$(dirname "$0")" && pwd)

@@ -316,30 +316,35 @@ final class HubTransport: HttpTransport {
   }
 }
 
-/// The core's sealed state, in one file of the app's own (excluded from backups: the account comes back by its backup
-/// record, spec 7, not by an old copy of the state). Yo Dev's; Yo's moves into the App Group (SharedState.swift).
-final class StateFile: StateStore {
+/// The core's state in a database of the app's own, as the group's (SharedState.swift) but used by the app alone:
+/// Yo Dev's, and Yo's until it moves into the App Group. Excluded from backups (the account comes back by its backup
+/// record, spec 7, not by an old copy of the state). The file of before (`url`, the sealed state alone) moves in at
+/// the first opening.
+enum StateFile {
   static let url = URL.applicationSupportDirectory.appending(path: "yo-state")
+  static let folder = URL.applicationSupportDirectory.appending(path: "yo-state-db", directoryHint: .isDirectory)
+  private static let opening = NSLock()
+  nonisolated(unsafe) private static var opened: StateDb?
 
-  /// Throws when it is not written (a full disk): the core's call fails, and nothing that needed the save leaves.
-  func save(blob: Data) throws {
-    Diagnostics.attempt({ try FileManager.default.createDirectory(at: URL.applicationSupportDirectory, withIntermediateDirectories: true) })
-    do {
-      try blob.write(to: Self.url, options: [.atomic, .completeFileProtectionUntilFirstUserAuthentication])
-    } catch {
-      throw YoError.Save(message: error.localizedDescription)
+  /// Throws while it cannot be opened (the phone not unlocked since its start).
+  static func database() throws -> StateDb {
+    try StateStorage.open(folder, gate: opening, cached: &opened, before: url, wordLength: 0)
+  }
+
+  /// Whether there is a state of the app's own (in its database or its file of before); one not readable now counts.
+  static var exists: Bool {
+    if FileManager.default.fileExists(atPath: url.path) { return true }
+    guard FileManager.default.fileExists(atPath: folder.appending(path: "state.sqlite").path) else { return false }
+    return (try? database().hasState()) ?? true
+  }
+
+  /// Gone: the database's state and the file of before.
+  static func forget() {
+    if FileManager.default.fileExists(atPath: folder.appending(path: "state.sqlite").path) {
+      Diagnostics.attempt({ try database().clear() })
     }
-    var url = Self.url
-    var values = URLResourceValues()
-    values.isExcludedFromBackup = true
-    Diagnostics.attempt({ try url.setResourceValues(values) })
+    try? FileManager.default.removeItem(at: url)
   }
-
-  static func load() -> Data? {
-    guard FileManager.default.fileExists(atPath: url.path) else { return nil }
-    return Diagnostics.attempt { try Data(contentsOf: url) }
-  }
-  static func delete() { try? FileManager.default.removeItem(at: url) }
 }
 
 /// The 32-byte key that seals the core's state: in the keychain, this device only. Yo from the App Store and TestFlight

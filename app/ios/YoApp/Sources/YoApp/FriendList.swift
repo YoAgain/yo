@@ -235,6 +235,8 @@ struct FriendList: View {
   @State private var libraryItems: [_PhotosUI_SwiftUI.PhotosPickerItem] = []
   /// Ordered library picks kept for repeated sends until closed.
   @State private var picked: [Picked] = []
+  /// The system's trimmer, open for a picked video longer than a Yo's (30 s).
+  @State private var videoTrim: VideoTrim?
 
   /// A photo from the library: what is sent, and its pictures for the screen, made once (a 48-megapixel photo decoded
   /// at each redraw kept the list from answering).
@@ -429,6 +431,7 @@ struct FriendList: View {
           .preferredColorScheme(SystemAppearance.scheme)
         }
         .sheet(isPresented: $newGroup) { NewGroupSheet().preferredColorScheme(SystemAppearance.scheme) }
+        .videoTrimming($videoTrim)
         .confirmCard(
           $blocking,
           title: { $0.reported ? "Thanks for Reporting" : "Block \($0.friend.name)?" },
@@ -1753,6 +1756,13 @@ extension FriendList {
       .task { IntentSent.listen(); takeIntentSent() }
       .onChange(of: scenePhase) { _, phase in if phase == .active { takeIntentSent() } }
       .onReceive(NotificationCenter.default.publisher(for: IntentSent.changed)) { _ in takeIntentSent() }
+      // An extension wrote the shared state (a push read by the notification service, a share, a control's Yo):
+      // what it saved comes to the list at once (SharedState.swift).
+      .task { StateChanged.listen() }
+      .onReceive(NotificationCenter.default.publisher(for: StateChanged.changed)) { _ in
+        guard scenePhase == .active else { return }
+        Task { await inbox.takeSaved(accounts: accounts, friends: friends) }
+      }
       // "Yo Camera" (Shortcuts, Siri, the Action button): open straight in camera mode.
       .onChange(of: AppRoute.shared.camera, initial: true) { _, on in
         if on { AppRoute.shared.camera = false; if !cameraOn { cameraSwitched(true) } }
@@ -2051,9 +2061,23 @@ extension FriendList {
           let url = FileManager.default.temporaryDirectory.appending(path: "\(UUID().uuidString).mov")
           do {
             try await Task.detached { try data.write(to: url) }.value
-            let image = await Self.outgoingVideoThumbnail(url)
+            var source = url
+            // Longer than a Yo's video (30 s): the system's trimmer offers the part to send; closed, it is left out;
+            // where it cannot cut, it is refused.
+            if let seconds = await MediaFile.length(of: url), !MediaFile.fits(seconds) {
+              let result = await VideoTrim.run(url) { videoTrim = $0 }
+              Task.detached(priority: .utility) { try? FileManager.default.removeItem(at: url) }
+              switch result {
+              case .cut(let cut): source = cut
+              case .cancelled: continue
+              case .failed:
+                problem = ("Video too long · max 30 s", "")
+                continue
+              }
+            }
+            let image = await Self.outgoingVideoThumbnail(source)
             // Export applies the same limits as camera video and removes the temporary source.
-            let video = await MediaFile.video(url)
+            let video = await MediaFile.video(source)
             if let video, let image {
               made.append(Picked(data: Data(), video: video, image: image, thumbnail: image))
             }
@@ -3526,11 +3550,12 @@ struct HeldMedia: View {
     let length = (try? await AVURLAsset(url: video).load(.duration).seconds) ?? 0
     guard !Task.isCancelled else { return }
     shows(current)
-    // A video is 10 s at most (spec 5): a longer one, from a sender that ignores it, is cut there.
+    // A video is 30 s at most (spec 5): a longer one, from a sender that ignores it, is cut there. The bar runs over
+    // its real length, not the sender's word.
     seconds = length > 0 ? min(length, Self.longestVideo) : photoSeconds
   }
 
-  static let longestVideo = 10.5
+  static let longestVideo = MediaFile.longestVideo + 0.5
 
   /// A received photo decoded at most 2048 px on its longer side, whatever size its sender gave it (spec 5: the
   /// receiver checks the bytes, not the sender's word): a huge one costs no memory beyond that.

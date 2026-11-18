@@ -75,6 +75,8 @@ final class SharedAccess: @unchecked Sendable {
   private var request: URLSessionTask?
   private var end: (@Sendable () -> Void)?
   var expired: Bool { gate.withLock { revoked } }
+  /// Still this process's turn: not taken back, its lock generation current.
+  var holds: Bool { gate.withLock { !revoked && valid() } }
 
   private init(fd: Int32, valid: @escaping @Sendable () -> Bool) { self.fd = fd; self.valid = valid }
 

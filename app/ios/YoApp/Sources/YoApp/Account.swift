@@ -397,7 +397,7 @@ final class AccountStore {
 
   /// What of the state is not there: the file, the key, or neither (the shared one's).
   nonisolated private static func missing() -> String {
-    let file = SharedStateFile.app ? "shared" : (StateFile.load() == nil ? "no file" : "file")
+    let file = SharedStateFile.app ? "shared" : (StateFile.exists ? "file" : "no file")
     let key = SharedStateFile.app ? ((try? StateKey.shared()) == nil ? "no key" : "key") : ((try? StateKey.load()) == nil ? "no key" : "key")
     return "gone: \(file), \(key)"
   }
@@ -419,28 +419,28 @@ final class AccountStore {
     let (client, secret) = try await Hub.run { () throws -> (YoClient, Data) in
       try Perf.timed("launch.core.open") { () throws -> (YoClient, Data) in
         if SharedStateFile.app {
-          // Shared with the extensions: opened under the lock, then each step takes it (SharedState.swift).
-          let file = SharedStateFile(guest: false)
-          let client = try SharedStateFile.locked { () throws -> YoClient in
-            guard let key = try StateKey.shared() else { throw Unopened.gone }
-            guard let blob = file.read() else { throw Self.unread(SharedStateFile.stateURL) }
-            return try YoClient.restore(transport: transport, store: file, stateKey: key, blob: blob)
-          }
+          // Shared with the extensions: opened as it is, without the turn (a read); each step that may write takes
+          // it (SharedState.swift).
+          guard let key = try StateKey.shared() else { throw Unopened.gone }
+          let db = try SharedStateFile.database()
+          guard try db.hasState() else { throw Unopened.gone }
+          let client = try YoClient.openDb(
+            transport: transport, db: db, stateKey: key, guest: false, lock: SharedStateFile())
           Hub.pin(client)
-          client.shareState(lock: file)
           client.acknowledgeExplicitly()  // each batch as the app has stored it (Inbox.take)
           return (client, client.accountSecret())
         }
-        guard let blob = StateFile.load() else { throw Self.unread(StateFile.url) }
+        let db = try StateFile.database()
+        guard try db.hasState() else { throw Unopened.gone }
         let own = try StateKey.load()
         let client: YoClient
         do {
           guard let own else { throw Unopened.gone }
-          client = try YoClient.restore(transport: transport, store: StateFile(), stateKey: own, blob: blob)
+          client = try YoClient.openDb(transport: transport, db: db, stateKey: own, guest: false, lock: nil)
         } catch let error where error is Unopened || (error as? YoError).map({ if case .State = $0 { true } else { false } }) == true {
           // Yo Dev: sealed under the key a build before took from Yo of TestFlight (`StateKey.others`)? Taken over then.
           guard let (key, opened) = StateKey.others().lazy.compactMap({ key in
-            (Diagnostics.attempt({ try YoClient.restore(transport: transport, store: StateFile(), stateKey: key, blob: blob) })).map { (key, $0) }
+            (Diagnostics.attempt({ try YoClient.openDb(transport: transport, db: db, stateKey: key, guest: false, lock: nil) })).map { (key, $0) }
           }).first else { throw error }
           try StateKey.adopt(key)
           accountLog.notice("open: the state opened with a key of another group, now this app's own")
@@ -468,12 +468,6 @@ final class AccountStore {
     Task { await addAuthKeys() }
   }
 
-  /// A state file that did not read: there but locked (not now), or not there.
-  nonisolated private static func unread(_ url: URL?) -> Unopened {
-    guard let url, FileManager.default.fileExists(atPath: url.path) else { return .gone }
-    return .notNow
-  }
-
   /// "Sign In Again" for a state that does not open (`broken`): this phone forgets it, and registers again with the
   /// account's key from the iCloud Keychain if it is there; else the way in (passkey, recovery key) brings it back.
   func recover() async {
@@ -494,12 +488,12 @@ final class AccountStore {
   /// it: the only copy of what this device had, for finding out why, or opening it later.
   private static func keepUnopened() {
     let stamp = Int(Date.now.timeIntervalSince1970)
-    for url in [StateFile.url, SharedStateFile.stateURL].compactMap({ $0 })
-    where FileManager.default.fileExists(atPath: url.path) {
-      let aside = url.deletingLastPathComponent().appending(path: url.lastPathComponent + ".unopened-\(stamp)")
+    let places: [(URL?, () throws -> StateDb)] = [(StateFile.folder, StateFile.database), (SharedStateFile.folder, SharedStateFile.database)]
+    for case let (folder?, database) in places where FileManager.default.fileExists(atPath: folder.appending(path: "state.sqlite").path) {
+      guard let blob = try? database().blob() else { continue }
+      let aside = folder.appending(path: "yo-state.unopened-\(stamp)")
       do {
-        try FileManager.default.copyItem(at: url, to: aside)
-        SharedStateFile.excludeFromBackup(aside)
+        try blob.write(to: aside, options: [.atomic, .completeFileProtectionUntilFirstUserAuthentication])
         accountLog.notice("recover: the state kept as \(aside.lastPathComponent, privacy: .public)")
       } catch {
         accountLog.error("recover: the state not kept: \(String(describing: error), privacy: .public)")
@@ -521,25 +515,17 @@ final class AccountStore {
     let transport = Hub.transport
     do {
       return try await Hub.run {
-        let make = { (store: StateStore, key: Data) in
-          let client = try YoClient.registerUsername(
-            transport: transport, store: store, stateKey: key, username: username, accountSecret: secret,
+        // The state there now (none, or a signed-out one's) is replaced, under the turn in the group.
+        let make = { (db: StateDb, key: Data, lock: StateLock?) in
+          let client = try YoClient.registerUsernameDb(
+            transport: transport, db: db, stateKey: key, lock: lock, username: username, accountSecret: secret,
             legacySeed: legacySeed, name: nil, pushPlatform: 0, pushToken: "")
           Hub.pin(client)
           return client
         }
-        guard SharedStateFile.app else {
-          let client = try make(StateFile(), StateKey.make())
-          client.acknowledgeExplicitly()  // each batch as the app has stored it (Inbox.take)
-          return (client, client.accountSecret())
-        }
-        let file = SharedStateFile(guest: false)
-        let client = try SharedStateFile.locked {
-          let key = try StateKey.makeShared()
-          _ = file.read()  // the state there now (none, or a signed-out one's): this one's to replace
-          return try make(file, key)
-        }
-        client.shareState(lock: file)
+        let client = try SharedStateFile.app
+          ? make(SharedStateFile.database(), StateKey.makeShared(), SharedStateFile())
+          : make(StateFile.database(), StateKey.make(), nil)
         client.acknowledgeExplicitly()  // each batch as the app has stored it (Inbox.take)
         return (client, client.accountSecret())
       }
@@ -977,9 +963,9 @@ final class AccountStore {
     let known = Set(friends.all.compactMap(\.user))
     guard
       let (kept, icon, leftHanded, names) = try? await Hub.run(reportErrors: false, { () throws -> ([YoFriend], String?, Bool?, [String: String]) in
-        // `friends()` answers a turn on the shared state it did not get (another step or an extension holding it past
-        // the wait, background time refused) as an empty list: a read that throws before and after it tells that
-        // the core answered (and a refused one is no read; the next takes it).
+        // `friends()` answers a read it could not make (the shared database not readable now, the client closed) as
+        // an empty list: a read that throws before and after it tells that the core answered (and a failed one is
+        // no read; the next takes it). Reads take no turn: an extension's step never holds them up.
         _ = try client.storageSavedAt()
         let kept = client.friends()
         _ = try client.storageSavedAt()
@@ -1082,7 +1068,8 @@ final class AccountStore {
       } else {
         // Retire the lock even if an extension never releases its old turn.
         SharedStateFile.rotateLock()
-        StateFile.delete()
+        StateFile.forget()
+        if SharedStateFile.available { Diagnostics.attempt({ try SharedStateFile.database().clear() }) }
         if let url = SharedStateFile.stateURL { try? FileManager.default.removeItem(at: url) }
       }
     }

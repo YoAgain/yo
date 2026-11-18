@@ -8,7 +8,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 use yo::{HttpResult, HttpTransport, StateStore, YoClient, YoError};
 use yo_hub::config::{ApnsConfig, Config};
-use yo_tests::{random_u64, username, Http, TestHub};
+use yo_tests::{random_u64, username, Disk, Http, TestHub};
 use yo_wire::api::PUSH_APNS;
 
 /// The app's HTTP: counts the requests and remembers their routes; with `rtt`, each takes that much longer (half
@@ -78,6 +78,24 @@ fn client(app: Arc<App>, file: Arc<File>, name: &str, token: &str) -> Arc<YoClie
     YoClient::register_username(app, file, vec![7; 32], name.into(), None, None, None, platform, token.into()).unwrap()
 }
 
+/// A client on a shared state database (no other process: no turn), as the iPhone's app keeps it.
+fn db_client(app: Arc<App>, disk: &Disk, name: &str, token: &str) -> Arc<YoClient> {
+    let platform = if token.is_empty() { 0 } else { PUSH_APNS };
+    YoClient::register_username_db(
+        app,
+        disk.db(),
+        vec![7; 32],
+        None,
+        name.into(),
+        None,
+        None,
+        None,
+        platform,
+        token.into(),
+    )
+    .unwrap()
+}
+
 fn ms(d: Duration) -> f64 {
     d.as_secs_f64() * 1000.0
 }
@@ -143,9 +161,9 @@ fn the_notification_service_reads_a_push_in_few_requests() {
     let hub = hub();
     let n = random_u64() % 1_000_000_000;
     let names: Vec<String> = (0..21).map(|i| username(n + i)).collect();
-    let file = Arc::new(File::default());
+    let disk = Disk::new();
     let app = App::new(&hub);
-    let b = client(app.clone(), file.clone(), &names[0], "a1b2c3");
+    let b = db_client(app.clone(), &disk, &names[0], "a1b2c3");
     // Twenty friends with chats in use, as a phone has after a while.
     let friends: Vec<_> =
         names[1..].iter().map(|name| client(App::new(&hub), Arc::new(File::default()), name, "")).collect();
@@ -158,23 +176,23 @@ fn the_notification_service_reads_a_push_in_few_requests() {
         friend.sync(0).unwrap();
     }
     b.sync(0).unwrap();
-    let blob = file.blob.lock().unwrap().clone();
+    b.acknowledge_events();
+    let blob = disk.db().blob().unwrap().unwrap();
     println!("state: {} KiB", blob.len() / 1024);
     let start = Instant::now();
-    let saves = file.saves.load(Ordering::Relaxed);
+    let word = disk.word();
     for _ in 0..20 {
-        let _ = YoClient::restore(App::new(&hub), Arc::new(File::default()), vec![7; 32], blob.clone()).unwrap();
+        let _ = YoClient::open_db(App::new(&hub), disk.db(), vec![7; 32], false, None).unwrap();
     }
     println!("open the state: {:.1} ms", ms(start.elapsed()) / 20.0);
-    assert_eq!(file.saves.load(Ordering::Relaxed), saves);
+    assert_eq!(disk.word(), word, "opening writes nothing");
     let mut took = Vec::new();
     let mut requests = Vec::new();
     for friend in friends.iter().take(10) {
         friend.send_yo(b.user_id()).unwrap();
-        let blob = file.blob.lock().unwrap().clone();
         let guest_app = App::new(&hub);
         let start = Instant::now();
-        let guest = YoClient::restore_guest(guest_app.clone(), file.clone(), vec![7; 32], blob).unwrap();
+        let guest = YoClient::open_db(guest_app.clone(), disk.db(), vec![7; 32], true, None).unwrap();
         let events = guest.sync(0).unwrap();
         let _ = guest.contacts();
         took.push(ms(start.elapsed()));
@@ -182,8 +200,7 @@ fn the_notification_service_reads_a_push_in_few_requests() {
         requests = guest_app.take();
         // The app takes it in as ever.
         drop(guest);
-        let app_blob = file.blob.lock().unwrap().clone();
-        let again = YoClient::restore(App::new(&hub), file.clone(), vec![7; 32], app_blob).unwrap();
+        let again = YoClient::open_db(App::new(&hub), disk.db(), vec![7; 32], false, None).unwrap();
         again.sync(0).unwrap();
         again.acknowledge_events();
     }
@@ -203,8 +220,8 @@ fn a_yo_reaches_the_receiver_within_one_way_of_the_hub() {
         let n = random_u64() % 1_000_000_000;
         let (name_a, name_b) = (username(n), username(n + 1));
         let a = client(App::new(&hub), Arc::new(File::default()), &name_a, "");
-        let file = Arc::new(File::default());
-        let b = client(App::with_rtt(&hub, rtt), file.clone(), &name_b, "a1b2c3");
+        let disk = Disk::new();
+        let b = db_client(App::with_rtt(&hub, rtt), &disk, &name_b, "a1b2c3");
         b.acknowledge_explicitly();
         a.send_yo(name_b.clone()).unwrap();
         b.acknowledge(b.sync(0).unwrap());
@@ -239,8 +256,7 @@ fn a_yo_reaches_the_receiver_within_one_way_of_the_hub() {
         for _ in 0..10 {
             a.send_yo(b.user_id()).unwrap();
             let stored = Instant::now();
-            let blob = file.blob.lock().unwrap().clone();
-            let nse = YoClient::restore_guest(App::with_rtt(&hub, rtt), file.clone(), vec![7; 32], blob).unwrap();
+            let nse = YoClient::open_db(App::with_rtt(&hub, rtt), disk.db(), vec![7; 32], true, None).unwrap();
             let events = nse.sync(0).unwrap();
             guest.push(ms(stored.elapsed()));
             assert_eq!(events.len(), 1);
@@ -248,8 +264,7 @@ fn a_yo_reaches_the_receiver_within_one_way_of_the_hub() {
             after.push(ms(stored.elapsed()));
             drop(nse);
             // The app takes it in as ever.
-            let blob = file.blob.lock().unwrap().clone();
-            let again = YoClient::restore(App::new(&hub), file.clone(), vec![7; 32], blob).unwrap();
+            let again = YoClient::open_db(App::new(&hub), disk.db(), vec![7; 32], false, None).unwrap();
             again.acknowledge_events();
             again.sync(0).unwrap();
             again.acknowledge_events();

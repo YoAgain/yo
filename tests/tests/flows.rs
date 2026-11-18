@@ -4,7 +4,7 @@
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use yo::{HttpResult, HttpTransport, MessageKind, StateStore, YoClient, YoError, YoEvent};
-use yo_tests::{access_shown, deliver_raw_with, random_u64, username, Fault, Http, TestHub};
+use yo_tests::{access_shown, deliver_raw_with, random_u64, username, Disk, Fault, Http, Process, TestHub};
 
 const KEY: [u8; 32] = [7; 32];
 
@@ -837,71 +837,6 @@ fn thirty_days_offline_then_everything_arrives() {
 
 /// The state's file shared by the app and its notification service: the sealed state with how often it was saved,
 /// and the lock between them.
-#[derive(Default)]
-struct Disk {
-    state: Mutex<(u64, Vec<u8>)>,
-    held: Mutex<bool>,
-    free: std::sync::Condvar,
-}
-
-/// One process's view of `Disk`: which save it read or made last.
-struct Process {
-    disk: Arc<Disk>,
-    known: Mutex<u64>,
-}
-
-impl Process {
-    fn new(disk: &Arc<Disk>) -> Arc<Self> {
-        Arc::new(Process { disk: disk.clone(), known: Mutex::new(0) })
-    }
-
-    fn hold(&self) {
-        let mut held = self.disk.held.lock().unwrap();
-        while *held {
-            held = self.disk.free.wait(held).unwrap();
-        }
-        *held = true;
-    }
-
-    fn release(&self) {
-        *self.disk.held.lock().unwrap() = false;
-        self.disk.free.notify_all();
-    }
-
-    fn read(&self) -> Vec<u8> {
-        let state = self.disk.state.lock().unwrap();
-        *self.known.lock().unwrap() = state.0;
-        state.1.clone()
-    }
-}
-
-impl StateStore for Process {
-    fn save(&self, blob: Vec<u8>) -> Result<(), YoError> {
-        assert!(*self.disk.held.lock().unwrap(), "saved only under the lock");
-        let mut state = self.disk.state.lock().unwrap();
-        *state = (state.0 + 1, blob);
-        *self.known.lock().unwrap() = state.0;
-        Ok(())
-    }
-}
-
-impl yo::StateLock for Process {
-    fn lock(&self) -> Result<yo::StateTurn, yo::YoError> {
-        self.hold();
-        let state = self.disk.state.lock().unwrap();
-        let mut known = self.known.lock().unwrap();
-        if *known == state.0 {
-            return Ok(yo::StateTurn::Same);
-        }
-        *known = state.0;
-        Ok(if state.1.is_empty() { yo::StateTurn::Gone } else { yo::StateTurn::Newer { blob: state.1.clone() } })
-    }
-
-    fn unlock(&self) {
-        self.release();
-    }
-}
-
 /// The notification service opens the app's state as a guest while the app has it open (in memory, between
 /// calls): it decrypts the pushed Yos and returns them for the notification; the app, at its next call, takes in
 /// the newer state (the session moved on), shows the Yos once and goes on writing in the same sessions.
@@ -909,13 +844,12 @@ impl yo::StateLock for Process {
 fn the_notification_service_decrypts_while_the_app_holds_the_state() {
     let hub = TestHub::start();
     let n = random_u64() % 1_000_000_000;
-    let disk = Arc::new(Disk::default());
-    let app = Process::new(&disk);
-    app.hold();
-    let a = YoClient::register_username(
+    let disk = Disk::new();
+    let a = YoClient::register_username_db(
         App::new(Http::new(hub.url())),
-        app.clone(),
+        disk.db(),
         KEY.to_vec(),
+        Some(Process::new(&disk)),
         username(n),
         None,
         None,
@@ -924,24 +858,20 @@ fn the_notification_service_decrypts_while_the_app_holds_the_state() {
         String::new(),
     )
     .unwrap();
-    app.release();
-    a.share_state(app.clone());
     let b = Phone::new(&hub, &username(n + 1), Some("BOB"));
     a.send_yo(b.user()).unwrap();
     assert_eq!(yos(&b.drain(), &a.user_id()), 1);
     for round in 0..3 {
         b.send_yo(a.user_id()).unwrap();
         b.send_yo(a.user_id()).unwrap();
-        // The push: the extension's own process, holding the lock for as long as it runs.
-        let nse = Process::new(&disk);
-        nse.hold();
+        // The push: the extension's own process, a turn for each of its steps.
         let guest =
-            YoClient::restore_guest(App::new(Http::new(hub.url())), nse.clone(), KEY.to_vec(), nse.read()).unwrap();
+            YoClient::open_db(App::new(Http::new(hub.url())), disk.db(), KEY.to_vec(), true, Some(Process::new(&disk)))
+                .unwrap();
         let shown = guest.sync(0).unwrap();
         guest.after_sync().unwrap();
         guest.acknowledge_events();
         drop(guest);
-        nse.release();
         assert_eq!(yos(&shown, &b.user()), 2, "round {round}: decrypted by the extension");
         // The app comes back: what the extension received, once.
         let events = a.saved_events().unwrap();
@@ -953,6 +883,7 @@ fn the_notification_service_decrypts_while_the_app_holds_the_state() {
         a.send_yo(b.user()).unwrap();
         assert_eq!(yos(&b.drain(), &a.user_id()), 1, "round {round}: the app writes on");
     }
+    assert!(!disk.is_held());
     assert_eq!(a.core_for_tests(|c| c.dropped()), 0);
     assert_eq!(b.core_for_tests(|c| c.dropped()), 0);
 }

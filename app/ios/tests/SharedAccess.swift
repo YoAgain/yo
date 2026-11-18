@@ -37,8 +37,10 @@ let background = Background()
 SharedAccess.hold = { background.begin($0) }
 let turn = SharedAccess.take(url)!
 precondition(!isFree())
+precondition(turn.holds, "a turn taken holds")
 background.expire()
 precondition(isFree(), "expiry gives the other process the lock before ending background time")
+precondition(!turn.holds, "a turn taken back never writes again (the core asks `held` before each write)")
 precondition((try? turn.perform { preconditionFailure("late save") }) == nil)
 let task = URLSession.shared.dataTask(with: URL(string: "https://example.invalid")!)
 do {

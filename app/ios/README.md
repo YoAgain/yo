@@ -19,7 +19,8 @@ The app talks to the live hub (TestFlight and App Store) or the dev hub (Yo Dev)
 - Share sheet (Yo from the App Store and TestFlight): "Yo" for up to ten photos or one video from Photos or any app;
   the same bars, a tap on a name sends them to that friend from there (`Sources/YoShare`), as the app would. Without
   network (or with the hub's "not now") they wait in the App Group `group.app.justyo.ios` and the app sends them as
-  soon as it opens (`ShareBridge.swift`, `Share.swift`).
+  soon as it opens (`ShareBridge.swift`, `Share.swift`). A shared or library video may be 30 s (the camera's 10 s); a
+  longer one opens the system's trimmer (`VideoTrimmer.swift`), and only where that cannot cut is it refused.
 - Notifications (the same builds): "Yo from YoGPT", "📷 from …", "Yo!!!!! +4 from … · 📷 2" (one notification per run, as the bar says it), with the Yo sound and "Yo Back". The
   push only says "Yo"; the notification service (`Sources/YoNotify`) receives once, names the sender and fetches a
   photo or video of up to 6 MiB into the App Group first (`Prefetch.swift`; the app and the service claim a blob
@@ -27,22 +28,28 @@ The app talks to the live hub (TestFlight and App Store) or the dev hub (Yo Dev)
   so the app shows it at once. A push that brings no new Yo (a receipt, a
   retry, the rest of a burst) goes quietly; Yos the app takes itself just after it was left get their
   notification from the app; Yos read in the app take theirs out of Notification Center.
-- The app and both extensions use one account state, in the App Group, its key in the group's keychain group, in
-  turns under a file lock (`SharedState.swift`, `StateLock` in the core): each step of the core takes the lock and the
-  newest state, so there is one writer and never a write from an old state. The state moves there once, at the
-  first start of a build that has the group. Every state flock in the app gets background time. Refused time skips the
-  turn; expiry releases the flock, cancels its request and fences later saves and requests. The next turn reloads
-  first start of a build that has the group. Lock acquisition has a 10 s total budget and retries a refused turn once. Active app turns are revoked
-  on leaving the foreground; background turns require background time. Expiry releases the flock, cancels its
-  request and fences later saves and requests. Foreground probes retry and reopen the same saved client after
-  three failed reads, without resetting the account. Failed reads retain displayed groups and settings. The next turn reloads
-  from disk, including when its generation did not change. Extensions revoke their turns before returning to iOS.
-  Anonymous blob GET/DELETE requests run outside these turns; complete blob answers survive turn expiry. The app
-  and service keep a shared acknowledgement journal, retrying after durable storage without delaying the photo.
+- The app and its extensions use one account state, in the App Group, its key in the group's keychain group: one
+  SQLite database in WAL mode (`yo-state-db/state.sqlite`, `SharedState.swift`, `StateDb` and `StateLock` in the
+  core), its one row the sealed state. Reads (the list's friends, contacts, groups, settings) take the last
+  committed state without any turn, so the app never waits for the notification service at launch. Each step that
+  may write takes the turn (a file lock) and the newest state, and writes only over the state it started from
+  (compare and swap in one short transaction, never across a request): one writer, never a write from an old state.
+  A connection lives for one access, so no SQLite lock is held when iOS suspends a process (0xdead10cc). After an
+  process wrote, a Darwin notification named for it (`StateChanged`, as Signal's SDSCrossProcess) makes the app take
+  in what an extension saved. The SQLite settings follow Signal-iOS (IMMEDIATE writes, synchronous NORMAL, full fsync,
+  a TRUNCATE checkpoint after each write that gives up after 50 ms). The state file of
+  before (`yo-state`) moves into the database at the first opening, and a state moves into the group once, at the
+  first start of a build that has the group. Every state flock in the app gets background time. Refused time skips
+  the turn (reads go on); expiry releases the flock, cancels its request and fences later writes (`held`) and
+  requests; the next step starts again from the database. Lock acquisition has a 10 s total budget and retries a
+  refused turn once. Active app turns are revoked on leaving the foreground; background turns require background
+  time. Extensions revoke their turns before returning to iOS. Anonymous blob GET/DELETE requests run outside these
+  turns; complete blob answers survive turn expiry. The app and service keep a shared acknowledgement journal,
+  retrying after durable storage without delaying the photo.
   `app/ios/tests/shared-access.sh` tests the lock helper on Linux (Swift 6), without a device.
   `app/ios/tests/blob-ack.sh` checks storage ordering, failed acknowledgements and the service/app file handoff.
-  Yo Dev (`dev/push.sh`) is built without the extensions and keeps its
-  state to itself.
+  Yo Dev (`dev/push.sh`) is built without the extensions and keeps its state to itself, in the same kind of
+  database in its own folder.
 
 Account storage backs up contacts, groups, keys and settings like the app icon and left-handed mode.
 

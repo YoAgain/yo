@@ -484,3 +484,88 @@ impl Transport for Lying {
         Ok(Response { status: response.status, body })
     }
 }
+
+/// The state shared by processes (the iPhone's app and its extensions in the App Group): one database in a folder of
+/// its own (gone when dropped), and the turn between the processes for writing.
+pub struct Disk {
+    dir: std::path::PathBuf,
+    held: Mutex<bool>,
+    free: std::sync::Condvar,
+}
+
+impl Disk {
+    pub fn new() -> Arc<Disk> {
+        let dir = std::env::temp_dir().join(format!("yo-shared-{}", random_u64()));
+        std::fs::create_dir_all(&dir).unwrap();
+        Arc::new(Disk { dir, held: Mutex::new(false), free: std::sync::Condvar::new() })
+    }
+
+    pub fn dir(&self) -> &std::path::Path {
+        &self.dir
+    }
+
+    pub fn path(&self) -> String {
+        self.dir.join("state.sqlite").to_string_lossy().into_owned()
+    }
+
+    /// A process's own opening of the database.
+    pub fn db(&self) -> Arc<yo::StateDb> {
+        yo::StateDb::open(self.path()).unwrap()
+    }
+
+    /// The word of the last write (none: no state).
+    pub fn word(&self) -> Option<String> {
+        yo_core::statedb::StateDb::open(self.path()).unwrap().word().unwrap()
+    }
+
+    /// Whether a process has the turn.
+    pub fn is_held(&self) -> bool {
+        *self.held.lock().unwrap()
+    }
+}
+
+impl Drop for Disk {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.dir);
+    }
+}
+
+/// One process's turn on a `Disk`, as the app implements `StateLock`.
+pub struct Process {
+    disk: Arc<Disk>,
+}
+
+impl Process {
+    pub fn new(disk: &Arc<Disk>) -> Arc<Self> {
+        Arc::new(Process { disk: disk.clone() })
+    }
+
+    pub fn hold(&self) {
+        let mut held = self.disk.held.lock().unwrap();
+        while *held {
+            held = self.disk.free.wait(held).unwrap();
+        }
+        *held = true;
+    }
+
+    pub fn release(&self) {
+        *self.disk.held.lock().unwrap() = false;
+        self.disk.free.notify_all();
+    }
+}
+
+impl yo::StateLock for Process {
+    fn lock(&self) -> std::result::Result<(), yo::YoError> {
+        self.hold();
+        Ok(())
+    }
+
+    fn held(&self) -> bool {
+        assert!(self.disk.is_held(), "written only in a turn");
+        true
+    }
+
+    fn unlock(&self, _saved: bool) {
+        self.release();
+    }
+}

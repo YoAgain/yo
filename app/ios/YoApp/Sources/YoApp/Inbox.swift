@@ -480,6 +480,20 @@ final class Inbox {
     }
   }
 
+  /// An extension wrote the shared state (`StateChanged`) while the list is on screen: what it saved for the app (its
+  /// Yos) on the bars now, and the stored friends again; no request to the hub.
+  func takeSaved(accounts: AccountStore, friends: Friends) async {
+    guard let client = accounts.client else { return }
+    guard let (saved, known) = try? await Hub.run({ (try client.savedEvents(), client.contacts()) }),
+      client === accounts.client
+    else { return }
+    if !saved.isEmpty {
+      await take(saved, contacts: known, client: client, friends: friends)
+      fetchMedia(client: client)
+    }
+    await accounts.takeStorage(into: friends)
+  }
+
   /// A silent push (content-available, a delivery that is not urgent) woke the app in the background: one short look
   /// at the hub, as the long wait's, without waiting there. Whether it brought something; nil when it could not ask.
   func syncOnce(accounts: AccountStore, friends: Friends) async -> Bool? {
