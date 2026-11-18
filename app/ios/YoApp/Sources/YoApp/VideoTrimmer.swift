@@ -55,7 +55,9 @@ struct VideoTrimmer: View {
   let trim: VideoTrim
 
   private static let frameCount = 12
+  private static let stripHeight: CGFloat = 58
   private let limit = MediaFile.longestVideo
+  @Environment(\.displayScale) private var displayScale
   @State private var asset: AVURLAsset?
   @State private var player: AVPlayer?
   @State private var duration = 0.0
@@ -125,7 +127,6 @@ struct VideoTrimmer: View {
             player?.replaceCurrentItem(with: nil)
             player = nil
             playing = false
-            frames.removeAll()
             saving = true
           }
           .buttonStyle(.glassProminent)
@@ -140,9 +141,6 @@ struct VideoTrimmer: View {
     }
     .preferredColorScheme(.dark)
     .task { await prepare() }
-    .task(id: duration > 0 && !saving) {
-      if let asset, duration > 0, !saving { await loadFrames(from: asset, duration: duration) }
-    }
     .task(id: saving) { if saving { await exportSelection() } }
     .task(id: player) {
       guard let player else { return }
@@ -151,8 +149,8 @@ struct VideoTrimmer: View {
           let currentTime = player.currentTime().seconds
           if currentTime.isFinite {
             position = min(max(currentTime, selection.lowerBound), selection.upperBound)
-            if currentTime >= selection.upperBound - 0.01 {
-              position = selection.lowerBound
+            if currentTime >= min(selection.upperBound, time(selection.upperBound).seconds) {
+              position = selection.upperBound
               _ = await player.seek(to: time(selection.lowerBound), toleranceBefore: .zero, toleranceAfter: .zero)
               if playing, dragOrigin == nil, !Task.isCancelled { player.play() }
             }
@@ -171,37 +169,51 @@ struct VideoTrimmer: View {
   private var filmstrip: some View {
     GeometryReader { geometry in
       let width = geometry.size.width
-      let left = selection.lowerBound / duration * width
-      let right = selection.upperBound / duration * width
-      ZStack(alignment: .leading) {
-        HStack(spacing: 0) {
-          ForEach(0..<Self.frameCount, id: \.self) { index in
-            Color(white: 0.16)
-              .overlay {
-                if let frame = frames[index] {
-                  Image(decorative: frame, scale: 1).resizable().scaledToFill()
-                }
-              }
-              .frame(width: width / Double(Self.frameCount), height: 58)
-              .clipped()
-          }
-        }
-        .clipShape(.rect(cornerRadius: 7))
-        .overlay(alignment: .leading) { Color.black.opacity(0.55).frame(width: left) }
-        .overlay(alignment: .trailing) { Color.black.opacity(0.55).frame(width: width - right) }
+      let cellWidth = width / CGFloat(Self.frameCount)
+      let left = CGFloat(selection.lowerBound / duration) * width
+      let right = CGFloat(selection.upperBound / duration) * width
+      let windowWidth = right - left
+      let handleWidth = min(13, windowWidth / 3)
+      let innerWidth = windowWidth - 2 * handleWidth
+      let playheadWidth = min(2, innerWidth)
+      let progress = (min(max(position, selection.lowerBound), selection.upperBound) - selection.lowerBound)
+        / (selection.upperBound - selection.lowerBound)
+      let playheadOffset = handleWidth + CGFloat(progress) * (innerWidth - playheadWidth)
 
+      HStack(spacing: 0) {
+        ForEach(0..<Self.frameCount, id: \.self) { index in
+          Color(white: 0.16)
+            .frame(width: cellWidth, height: Self.stripHeight)
+            .overlay {
+              if let frame = frames[index] {
+                Image(decorative: frame, scale: 1).resizable().scaledToFill()
+              }
+            }
+            .clipped()
+        }
+      }
+      .frame(width: width, height: Self.stripHeight)
+      .overlay(alignment: .leading) { Color.black.opacity(0.55).frame(width: left) }
+      .overlay(alignment: .trailing) { Color.black.opacity(0.55).frame(width: max(0, width - right)) }
+      .clipShape(.rect(cornerRadius: 7))
+      .overlay(alignment: .leading) {
         RoundedRectangle(cornerRadius: 7)
           .strokeBorder(.yellow, lineWidth: 3)
-          .overlay(alignment: .leading) { handle(width: min(13, (right - left) / 2)) }
-          .overlay(alignment: .trailing) { handle(width: min(13, (right - left) / 2)) }
-          .frame(width: right - left)
+          .frame(width: windowWidth, height: Self.stripHeight)
+          .overlay(alignment: .leading) { handle(width: handleWidth) }
+          .overlay(alignment: .trailing) { handle(width: handleWidth) }
+          .overlay(alignment: .leading) {
+            Rectangle().fill(.white)
+              .frame(width: playheadWidth)
+              .offset(x: playheadOffset)
+          }
           .clipShape(.rect(cornerRadius: 7))
           .offset(x: left)
-
-        Rectangle().fill(.white)
-          .frame(width: 2)
-          .offset(x: min(max(0, position / duration * width - 1), width - 2))
-          .shadow(radius: 2)
+      }
+      .task(id: width > 0 && !saving) {
+        if let asset, width > 0, !saving {
+          await loadFrames(from: asset, duration: duration, cellWidth: cellWidth)
+        }
       }
       .contentShape(Rectangle())
       .gesture(DragGesture(minimumDistance: 0)
@@ -217,7 +229,7 @@ struct VideoTrimmer: View {
             player?.pause()
           }
           guard let origin = dragOrigin else { return }
-          let delta = value.translation.width / width * duration
+          let delta = Double(value.translation.width / width) * duration
           let wasAtLimit = selection.upperBound - selection.lowerBound >= limit - 0.0001
           let minimum = min(1, duration)
           switch dragPart {
@@ -247,7 +259,7 @@ struct VideoTrimmer: View {
           cueSelection()
         })
     }
-    .frame(height: 58)
+    .frame(height: Self.stripHeight)
     .environment(\.layoutDirection, .leftToRight)
   }
 
@@ -320,19 +332,24 @@ struct VideoTrimmer: View {
     }
   }
 
-  private func loadFrames(from asset: AVURLAsset, duration: Double) async {
+  @MainActor
+  private func loadFrames(from asset: AVURLAsset, duration: Double, cellWidth: CGFloat) async {
     let generator = AVAssetImageGenerator(asset: asset)
     generator.appliesPreferredTrackTransform = true
-    generator.maximumSize = CGSize(width: 128, height: 128)
+    generator.maximumSize = CGSize(width: ceil(cellWidth * displayScale), height: ceil(Self.stripHeight * displayScale))
     let spacing = duration / Double(Self.frameCount)
-    let tolerance = time(spacing / 2)
+    let tolerance = time(max(0.25, spacing / 2))
     generator.requestedTimeToleranceBefore = tolerance
     generator.requestedTimeToleranceAfter = tolerance
-    for index in 0..<Self.frameCount {
-      if Task.isCancelled || saving { break }
-      if let thumbnail = try? await generator.image(at: time((Double(index) + 0.5) * spacing)),
-         !Task.isCancelled, !saving {
-        frames[index] = thumbnail.image
+    let times = (0..<Self.frameCount).map {
+      CMTime(seconds: (Double($0) + 0.5) * spacing, preferredTimescale: 600_000)
+    }
+    for await result in generator.images(for: times) {
+      guard !Task.isCancelled, !saving else { return }
+      if case .success(let requestedTime, let image, _) = result {
+        for index in times.indices where times[index] == requestedTime {
+          frames[index] = image
+        }
       }
     }
   }
