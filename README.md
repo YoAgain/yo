@@ -130,8 +130,7 @@ See the [yo-load measurements and commands](tests/README.md#load).
 
 </details>
 
-<details>
-<summary><h2>Development</h2></summary>
+## Development
 
 <!-- loc -->
 ```text
@@ -146,7 +145,10 @@ Day 8    71k  ██████████████████████
 ```
 <!-- /loc -->
 
-The chart counts lines of code on `main` per day, blanks, comments and tests included; `python3 -I dev/loc-chart.py` updates it.
+The chart counts lines of code on `main` per day, blanks and comments included, tests apart; `python3 -I dev/loc-chart.py` updates it.
+
+<details>
+<summary>Tests, folders and contributing</summary>
 
 [Tests](tests/README.md) cover real clients and the hub, groups, media, recovery, security and deterministic simulations.
 [Chaos tests](tests/CHAOS.md) exercise faults, crashes and restarts; [fuzz targets](fuzz/fuzz_targets) cover parsers,
