@@ -93,6 +93,8 @@ def chart(points):
     return "\n".join([head, *lines])
 
 
+# Width of a line of the daily chart, which the client bar spans too.
+LINE = 33 + 4 * 7
 # Width of a part's column in the first chart.
 WIDTH = 7
 # The second chart: today's code by app, tests not counted.
@@ -113,14 +115,19 @@ def by_app():
             blob = git("show", f"main:{path}")
             if b"\0" not in blob[:8000]:
                 counts[app] += blob.count(b"\n")
-    # One bar for the whole client, the apps' parts apart by a space; under it the apps in fixed columns.
+    # One bar for the whole client, as wide as the chart above, the apps' parts apart by a space; each app's name
+    # under the start of its part (moved right only where the one before needs the room).
     total = sum(counts.values()) or 1
-    width = 48
+    width = LINE - 5 - (len(APPS) - 1)
     cells = [max(1, round(counts[name] / total * width)) for name, _ in APPS]
     cells[cells.index(max(cells))] += width - sum(cells)
     bar = " ".join("█" * n for n in cells)
-    legend = "".join(f"{f'{name} {round(counts[name] / 1000)}k {counts[name] * 100 // total}%':<17}" for name, _ in APPS)
-    return f"{round(total / 1000)}k  {bar}\n\n     {legend.rstrip()}"
+    legend, at = "", 0
+    for (name, _), n in zip(APPS, cells):
+        label = f"{name} {round(counts[name] / 1000)}k {counts[name] * 100 // total}%"
+        legend += " " * max(at - len(legend), 2 if legend else 0) + label
+        at += n + 1
+    return f"{round(total / 1000):>2}k  {bar}\n\n     {legend}"
 
 
 def main():
