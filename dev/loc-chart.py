@@ -84,9 +84,40 @@ def chart(points):
         eighths = round(total / peak * 24 * 8)
         bar = "█" * (eighths // 8) + " ▏▎▍▌▋▊▉"[eighths % 8].strip()
         # A fixed column per part, so the numbers line up day by day.
-        parts = "  ".join(f"{kind} {round(counts[kind] / 1000):>2}k" for kind in KINDS)
+        parts = "".join(f"{round(counts[kind] / 1000):>{WIDTH - 1}}k" for kind in KINDS)
         label = f"Day {(day - first).days + 1}"
-        lines.append(f"{label:<7} {round(total / 1000):>3}k  {bar:<25} {parts}")
+        lines.append(f"{label:<7} {round(total / 1000):>3}k  {bar:<25}{parts}")
+    # The parts named once, over their columns.
+    head = " " * 38 + "".join(f"{kind:>{WIDTH}}" for kind in KINDS)
+    return "\n".join([head, *lines])
+
+
+# Width of a part's column in the first chart.
+WIDTH = 7
+# The second chart: today's code by app, tests not counted.
+APPS = (("Core", "core/"), ("iOS", "app/ios/"), ("Android", "app/android/"), ("YoGPT", "app/yogpt/"))
+
+
+def by_app():
+    """Lines of code on main's tip per app (tests and binary files left out)."""
+    names = git("ls-tree", "-r", "-z", "--name-only", "main").split(b"\0")
+    counts = {name: 0 for name, _ in APPS}
+    for raw in names:
+        path = raw.decode("utf-8", "surrogateescape")
+        ext = Path(path).suffix.lower()
+        if not path or is_test(path) or (ext not in EXTENSIONS and ext not in OTHER):
+            continue
+        app = next((name for name, prefix in APPS if path.startswith(prefix)), None)
+        if app:
+            blob = git("show", f"main:{path}")
+            if b"\0" not in blob[:8000]:
+                counts[app] += blob.count(b"\n")
+    peak = max(counts.values()) or 1
+    lines = []
+    for name, _ in APPS:
+        eighths = round(counts[name] / peak * 24 * 8)
+        bar = "█" * (eighths // 8) + " ▏▎▍▌▋▊▉"[eighths % 8].strip()
+        lines.append(f"{name:<8}{round(counts[name] / 1000):>3}k  {bar}")
     return "\n".join(lines)
 
 
@@ -96,7 +127,7 @@ def main():
     start, end = "<!-- loc -->", "<!-- /loc -->"
     if start not in text or end not in text:
         raise SystemExit("README.md has no <!-- loc --> … <!-- /loc --> block")
-    block = f"{start}\n```text\n{chart(history())}\n```\n{end}"
+    block = f"{start}\n```text\n{chart(history())}\n```\n\n```text\n{by_app()}\n```\n{end}"
     before, rest = text.split(start, 1)
     after = rest.split(end, 1)[1]
     readme.write_text(before + block + after)

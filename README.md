@@ -134,18 +134,26 @@ See the [yo-load measurements and commands](tests/README.md#load).
 
 <!-- loc -->
 ```text
-Day 1     6k  ██▏                       Hub  2k  Core  3k  Apps  0k  Tests  2k
-Day 2     9k  ███▏                      Hub  2k  Core  3k  Apps  2k  Tests  2k
-Day 3    21k  ███████                   Hub  4k  Core  5k  Apps  8k  Tests  4k
-Day 4    33k  ███████████▏              Hub  5k  Core  7k  Apps 11k  Tests  9k
-Day 5    47k  ███████████████▉          Hub  6k  Core 11k  Apps 14k  Tests 16k
-Day 6    53k  █████████████████▉        Hub  9k  Core 11k  Apps 16k  Tests 17k
-Day 7    62k  █████████████████████▏    Hub 10k  Core 13k  Apps 21k  Tests 18k
-Day 8    71k  ████████████████████████  Hub 10k  Core 14k  Apps 28k  Tests 19k
+                                          Hub   Core   Apps  Tests
+Day 1     6k  ██▏                           2k     3k     0k     2k
+Day 2     9k  ███▏                          2k     3k     2k     2k
+Day 3    21k  ███████                       4k     5k     8k     4k
+Day 4    33k  ███████████▏                  5k     7k    11k     9k
+Day 5    47k  ███████████████▉              6k    11k    14k    16k
+Day 6    53k  █████████████████▉            9k    11k    16k    17k
+Day 7    62k  █████████████████████▏       10k    13k    21k    18k
+Day 8    71k  ████████████████████████     10k    14k    28k    19k
+```
+
+```text
+Core     14k  ███████████████▋
+iOS      22k  ████████████████████████
+Android   5k  █████▍
+YoGPT     2k  ██
 ```
 <!-- /loc -->
 
-The chart counts lines of code on `main` per day, blanks and comments included: the hub with its admin page, the shared core, the apps (iOS, Android, YoGPT) and the tests; `python3 -I dev/loc-chart.py` updates it.
+The first chart counts lines of code on `main` per day, blanks and comments included: the hub with its admin page, the shared core, the apps (iOS, Android, YoGPT) and the tests. The second is today's code per app, tests left out. `python3 -I dev/loc-chart.py` updates both.
 
 <details>
 <summary>Tests, folders and contributing</summary>
