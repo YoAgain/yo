@@ -1,8 +1,9 @@
-// "Set Up Account Recovery" (spec 7): one full-colour page with two steps, each a card with its number (a green
-// checkmark once done) and its buttons. 1, the recovery key: shown (frosted until tapped) and saved through the
-// system's share sheet (Save Image, Notes, Files, a password manager, AirDrop) or copied. 2, the passkey: made, then
-// used once for its PRF output (iCloud Keychain gives it at once; 1Password only when used). The passkey is optional;
-// Done waits for the recovery key.
+// "Set Up Account Recovery" (spec 7): one full-colour page, a large plain key symbol above the title, two steps,
+// each its caption and one full-width white button, the action itself (a translucent row with a green checkmark
+// once done). 1, Save Recovery Key through the system's share sheet (Save Image, Notes, Files, a password manager,
+// AirDrop); Show Recovery Key under it opens the key in a card, Copy there counts as saved. 2, Set Up Passkey
+// (Face ID): made, then Confirm Passkey uses it once for its PRF output (iCloud Keychain gives it at once;
+// 1Password only when used). Done once either step is done.
 import SwiftUI
 
 enum SecureStep { case passkey, recoveryKey }
@@ -34,50 +35,48 @@ struct SecureNameSheet: View {
   }
   private var wordsDone: Bool { secured && accounts.wordsSaved }
   /// Done needs the recovery key; opened for the passkey alone, the passkey is enough.
-  private var canFinish: Bool { wordsDone || (only == .passkey && passkeyDone) }
+  private var canFinish: Bool { wordsDone || passkeyDone }  // either way back in is enough
 
   var body: some View {
     ZStack {
       Color.amethyst.ignoresSafeArea()
-      Page(title: "Set Up\nAccount Recovery") {
-        StepCard(number: 1, title: "Recovery Key", done: wordsDone) {
-          Button(showingKey ? "Hide" : "Show") {
-            if showingKey { showingKey = false } else { Task { await showKey() } }
-          }
-            .buttonStyle(.glass)
-          if !wordsDone {
-            Button { Task { await share() } } label: {
-              Image(systemName: "square.and.arrow.up")
-                .accessibilityLabel("Save Recovery Key")
-            }
-            .buttonStyle(.glassProminent)
-            .tint(.white)
-            .foregroundStyle(.black)
-          }
-        }
+      GuidePage(symbol: "key.fill", title: "Set Up\nAccount Recovery") {
+        // Two steps, each its caption and one full-width button, the step's action itself; once done, a
+        // translucent row with a green checkmark.
+        StepCaption(number: 1)
+        StepButton(
+          "Save Recovery Key", systemImage: "square.and.arrow.up", doneTitle: "Recovery Key Saved",
+          done: wordsDone, busy: busy == .recoveryKey
+        ) { Task { await share() } }
         .disabled(busy != nil)
-        // Shown: the key itself in its own card right under its step, the QR code and the words, and Copy.
+        // Under the step: Show Recovery Key, the key itself in its own card, the QR code, the words, Copy.
+        Button {
+          if showingKey { showingKey = false } else { Task { await showKey() } }
+        } label: {
+          Label(showingKey ? "Hide Recovery Key" : "Show Recovery Key", systemImage: showingKey ? "eye.slash" : "eye")
+            .font(.subheadline.weight(.semibold))
+            .contentTransition(.symbolEffect(.replace))
+            .frame(minHeight: 36)
+            .contentShape(.rect)
+        }
+        .buttonStyle(.plain)
+        .opacity(0.85)
+        .disabled(busy != nil)
         if showingKey {
-          KeyCard(key: words, copied: $copiedKey) {
+          KeyCard(key: words, copied: copiedKey) {
             UIPasteboard.general.string = RecoveryCode.shown(words)
             copiedKey = true
             Task { await markSaved() }
           }
           .transition(.opacity.combined(with: .move(edge: .top)))
         }
-        StepCard(number: 2, title: "Passkey", done: passkeyDone) {
-          if busy == .passkey {
-            ProgressView()
-          } else if !passkeyDone {
-            Button(created ? "Confirm" : "Set Up") {
-              Task { created ? await checkPasskey() : await createPasskey() }
-            }
-            .buttonStyle(.glassProminent)
-            .tint(.white)
-            .foregroundStyle(.black)
-            .disabled(busy != nil)
-          }
-        }
+        StepCaption(number: 2)
+          .padding(.top, 12)
+        StepButton(
+          created ? "Confirm Passkey" : "Set Up Passkey", systemImage: "faceid", doneTitle: "Passkey Set Up",
+          done: passkeyDone, busy: busy == .passkey
+        ) { Task { created ? await checkPasskey() : await createPasskey() } }
+        .disabled(busy != nil)
         Note(problem)
           .padding(.top, 4)
       } bottom: {
@@ -199,55 +198,124 @@ struct SecureNameSheet: View {
   }
 }
 
-/// One step: its number in a white circle (a green checkmark once done), its name, its buttons, on glass.
-private struct StepCard<Buttons: View>: View {
-  let number: Int
+/// The guide's page, as Apple's Settings: a large plain symbol above the title, the steps under it scrolling when
+/// large text needs the room, the buttons at the bottom.
+private struct GuidePage<Content: View, Bottom: View>: View {
+  let symbol: String
   let title: String
-  let done: Bool
-  @ViewBuilder let buttons: Buttons
+  @ViewBuilder let content: Content
+  @ViewBuilder let bottom: Bottom
 
   var body: some View {
-    HStack(spacing: 12) {
-      Group {
-        if done {
-          Image(systemName: "checkmark.circle.fill")
-            .foregroundStyle(.white, .green)
-        } else {
-          Image(systemName: "\(number).circle.fill")
-            .symbolRenderingMode(.palette)
-            .foregroundStyle(Color.amethyst, .white)
+    VStack(spacing: 0) {
+      Color.clear.frame(height: 44)
+      ScrollView {
+        VStack(spacing: 20) {
+          Image(systemName: symbol)
+            .font(.system(size: 96))
+            .accessibilityHidden(true)
+          Text(title).font(.yo(30)).multilineTextAlignment(.center)
         }
+        .padding(.top, 8)
+        VStack(spacing: 8) { content }
+          .padding(.top, 28)
+          .padding(.bottom, 16)
       }
-      .font(.system(size: 30))
-      .contentTransition(.symbolEffect(.replace))
-      .accessibilityHidden(true)
-      Text(title)
-        .font(.body.weight(.semibold))
-        .accessibilityLabel(done ? "\(title), set up" : "Step \(number), \(title)")
-      Spacer(minLength: 8)
-      HStack(spacing: 8) { buttons }
-        .font(.subheadline.weight(.semibold))
+      .scrollBounceBehavior(.basedOnSize)
+      .scrollIndicators(.hidden)
+      VStack(spacing: 18) { bottom }
     }
-    .padding(.horizontal, 14)
-    .padding(.vertical, 12)
-    .frame(minHeight: 64)
-    .background(.white.opacity(0.14), in: .rect(cornerRadius: 18))
+    .padding(.horizontal, 24)
+    .padding(.bottom, 16)
+  }
+}
+
+/// A step's caption above its card: "STEP 1", small and uppercase.
+private struct StepCaption: View {
+  let number: Int
+
+  var body: some View {
+    Text("Step \(number)")
+      .textCase(.uppercase)
+      .font(.caption.weight(.semibold))
+      .opacity(0.75)
+      .frame(maxWidth: .infinity, alignment: .center)
+  }
+}
+
+/// One step's action: a full-width white button with black label (a progress view while busy); once done, a
+/// translucent row with a green checkmark and what was done, no longer a button.
+private struct StepButton: View {
+  let title: String
+  let systemImage: String
+  let doneTitle: String
+  let done: Bool
+  let busy: Bool
+  let action: () -> Void
+
+  init(
+    _ title: String, systemImage: String, doneTitle: String, done: Bool, busy: Bool,
+    action: @escaping () -> Void
+  ) {
+    self.title = title
+    self.systemImage = systemImage
+    self.doneTitle = doneTitle
+    self.done = done
+    self.busy = busy
+    self.action = action
+  }
+
+  var body: some View {
+    Group {
+      if done {
+        Label {
+          Text(doneTitle)
+        } icon: {
+          Image(systemName: "checkmark.circle.fill")
+            .symbolRenderingMode(.palette)
+            .foregroundStyle(.white, .green)
+        }
+        .font(.system(.title3, weight: .semibold))
+        .frame(maxWidth: .infinity, minHeight: 48)
+        .background(.white.opacity(0.14), in: .capsule)
+        .accessibilityElement(children: .combine)
+        .transition(.opacity)
+      } else {
+        Button(action: action) {
+          Group {
+            if busy {
+              ProgressView().tint(.black)
+            } else {
+              Label(title, systemImage: systemImage)
+                .contentTransition(.interpolate)
+            }
+          }
+          .font(.system(.title3, weight: .semibold))
+          .frame(maxWidth: .infinity, minHeight: 40)
+        }
+        .buttonStyle(.glassProminent)  // the same glass and height as Done below
+        .tint(.white)
+        .foregroundStyle(.black)
+        .transition(.opacity)
+      }
+    }
     .sensoryFeedback(.success, trigger: done) { _, now in now }
   }
 }
 
-/// The recovery key shown in the guide, as a card under its step: QR code, the words, Copy (counted as saved).
+/// The recovery key shown in its own card under its step: QR code, the words, Copy (counted as saved).
 private struct KeyCard: View {
   let key: String
-  @Binding var copied: Bool
+  let copied: Bool
   let copy: () -> Void
 
   var body: some View {
-    VStack(spacing: 14) {
+    VStack(spacing: 12) {
       RecoveryQRView(key: key, size: 120)
       KeyGrid(key: key)
-      Button(copied ? "Copied" : "Copy", systemImage: copied ? "checkmark" : "doc.on.doc", action: copy)
-        .buttonStyle(.glass)
+      Button(copied ? "Copied" : "Copy", action: copy)
+        .buttonStyle(.plain)
+        .fontWeight(.semibold)
     }
     .frame(maxWidth: .infinity)
     .padding(16)

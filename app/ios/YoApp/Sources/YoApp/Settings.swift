@@ -37,10 +37,13 @@ struct SettingsView: View {
   // Bootstrap at a system detent only until the first device layout arrives.
   @State private var detent: PresentationDetent = .medium
   @State private var rootHeight: CGFloat?
+  /// The sheet is growing to .large before a tall page is pushed.
+  @State private var growing = false
   /// Only pages with more below get the grabber and the large detent.
-  private var expandable: Bool { path.last.map(Self.expands) ?? false }
+  private var expandable: Bool { growing || (path.last.map(Self.expands) ?? false) }
   private static func expands(_ page: Page) -> Bool {
     page == .help || page == .contacts || page == .status || page == .licenses
+      || page == .signInSecurity
   }
 
   private var smallDetent: PresentationDetent {
@@ -190,6 +193,7 @@ struct SettingsView: View {
             AccountPage(
               account: account, hasRecoveryKey: hasRecoveryKey,
               dismissSettings: { dismiss() },
+              openSecurity: { navigate(to: path + [.signInSecurity]) },
               showingDelete: $showingDeleteAccount, showingManage: $showingManageAccount)
           }
         case .signInSecurity:
@@ -256,18 +260,31 @@ struct SettingsView: View {
     if next.count > path.count, next.last == .code, let name = accounts.account?.username {
       YourCodePage.prepare(name: name)
     }
-    withAnimation(.smooth(duration: 0.35)) {
+    // A tall page pushed from a half sheet slid in drawn at the old height above empty sheet, even after
+    // the sheet had grown. So the sheet grows first, and that is the motion: the page then appears in place.
+    if next.count > path.count, next.last.map(Self.expands) ?? false, detent != .large {
+      growing = true
+      withAnimation(.smooth(duration: 0.35)) { detent = .large }
+      preparingNavigation = Task {
+        try? await Task.sleep(for: .milliseconds(500))
+        guard !Task.isCancelled else { return }
+        show(next, animated: false)
+      }
+      return
+    }
+    show(next)
+  }
+
+  private func show(_ next: [Page], animated: Bool = true) {
+    var transaction = Transaction(animation: animated ? .smooth(duration: 0.35) : nil)
+    transaction.disablesAnimations = !animated
+    withTransaction(transaction) {
       #if YO_DEV
         HitchMonitor.shared.scene = next.last.map { String(describing: $0) } ?? "settings root"
       #endif
-      if next.last.map(Self.expands) ?? false {
-        // Help & About opens tall: its card on top, the list under it.
-        if next.count > path.count, next.last == .help { detent = .large }
-        path = next
-      } else {
-        detent = smallDetent
-        path = next
-      }
+      growing = false
+      if !(next.last.map(Self.expands) ?? false) { detent = smallDetent }
+      path = next
     }
   }
 

@@ -59,7 +59,7 @@ struct StatusPage: View {
     }
     if encryptionCheck == .problem { return (.problem, "Keys") }
     if encryptionCheck == .waiting { return (.waiting, "Encryption") }
-    if backupAvailable && savedAt == nil { return (.waiting, "Account Sync") }
+    if backupAvailable && savedAt == nil { return (.waiting, "Account Backup") }
     if reachable == nil || accepted == nil || allowed == nil || storage == nil
       || lastAnswer == nil || !backupAvailable || encryptionCheck != .ok
     {

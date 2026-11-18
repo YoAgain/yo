@@ -9,6 +9,8 @@ struct AccountPage: View {
   let hasRecoveryKey: Bool
   var securityOnly = false
   var dismissSettings: () -> Void
+  /// Pushes Account Recovery through the settings path, so the sheet can grow before the push.
+  var openSecurity: (() -> Void)? = nil
   @Environment(AccountStore.self) private var accounts
   @State private var resetting = false
   /// Sign Out asks on a card from the bottom (the account it is about).
@@ -67,12 +69,12 @@ struct AccountPage: View {
               securingStart = nil
               securing = true
             } else {
-              showingSecurity = true
+              showSecurity()
             }
           } label: {
             SettingsNavigationLabel {
               HStack {
-                Label("Security", systemImage: "lock.fill").labelStyle(Tile(.orange))
+                Label("Account Recovery", systemImage: "lock.fill").labelStyle(Tile(.orange))
                 Spacer(minLength: 8)
                 if recoveryNeedsAttention { RecoveryBadge() }
               }
@@ -109,13 +111,13 @@ struct AccountPage: View {
       }
     }
     .accessibilityIdentifier(securityOnly ? "security.page" : "account.page")
-    .navigationTitle(securityOnly ? "Security" : account.username)
+    .navigationTitle(securityOnly ? "Account Recovery" : account.username)
     .navigationBarTitleDisplayMode(.inline)
     .toolbar(.visible, for: .navigationBar)
     .toolbar {
       ToolbarItem(placement: .principal) {
         if securityOnly {
-          Text("Security").font(.headline)
+          Text("Account Recovery").font(.headline)
         } else {
           RoundTripTitle(name: account.username, client: accounts.client)
         }
@@ -188,13 +190,17 @@ struct AccountPage: View {
     .sheet(isPresented: $securing, onDismiss: {
       if securityAfterGuide {
         securityAfterGuide = false
-        showingSecurity = true
+        showSecurity()
       }
     }) {
       // Done lands in Security, where its switches are; opened from Security, it just closes back to it.
       SecureNameSheet(only: securingStart, close: { securing = false },
         done: { securityAfterGuide = !securityOnly })
     }
+  }
+
+  private func showSecurity() {
+    if let openSecurity { openSecurity() } else { showingSecurity = true }
   }
 
   /// Account actions together at the end of the page.
@@ -242,11 +248,6 @@ struct AccountPage: View {
     Section {
       AccountSyncRow(client: accounts.client, failed: $syncFailed)
         .accessibilityIdentifier("security.accountSync")
-      SecurityRow(
-        icon: "icloud.fill", color: .amethyst, title: "iCloud Keychain",
-        value: accounts.keychainRecoveryActive ? "On" : "Off",
-        done: accounts.keychainRecoveryActive)
-        .accessibilityIdentifier("security.keychainRecovery")
     }
     Section {
       Toggle(
@@ -261,7 +262,7 @@ struct AccountPage: View {
           })
       ) {
         Label {
-          Text("Passkey Recovery")
+          Text("Passkey")
         } icon: { Image(systemName: "faceid") }
         .labelStyle(Tile(.amethyst))
       }
@@ -289,10 +290,16 @@ struct AccountPage: View {
         .buttonStyle(.plain)
       }
       .accessibilityIdentifier("security.recoveryKey")
+      SecurityRow(
+        icon: "icloud.fill", color: .amethyst, title: "iCloud Keychain",
+        value: accounts.keychainRecoveryActive ? "On" : "Off",
+        done: accounts.keychainRecoveryActive)
+        .accessibilityIdentifier("security.keychainRecovery")
     } footer: {
-      Button("How Account Security Works") { showingRecoveryHelp = true }
+      // As Settings links its explanations: blue, under the section (the link names the section; no header).
+      Button("How Account Recovery Works") { showingRecoveryHelp = true }
         .font(.footnote)
-        .foregroundStyle(Color.accentColor)
+        .foregroundStyle(.tint)
         .accessibilityIdentifier("security.howRecoveryWorks")
     }
     .disabled(addingPasskey)

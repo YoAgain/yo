@@ -16,6 +16,7 @@ struct RecoveryBadge: View {
 /// "How Account Security Works": the key, its three ways back in, and Account Sync, in a few calm lines.
 struct RecoveryHelpSheet: View {
   @Environment(\.dismiss) private var dismiss
+  @State private var contentHeight: CGFloat = 0
 
   var body: some View {
     NavigationStack {
@@ -33,16 +34,18 @@ struct RecoveryHelpSheet: View {
             "key.fill", "Recovery Key",
             "Optionally, keep a recovery key. Enter it on any phone to get your account back.")
           item(
-            "arrow.triangle.2.circlepath.icloud.fill", "Account Sync",
-            "Your contacts, groups and settings are kept on Yo’s server, encrypted with a key made from your account key, so a new phone finds them again. Yos, photos and videos aren’t synced.")
+            "arrow.triangle.2.circlepath.icloud.fill", "Account Backup",
+            "Your contacts, groups and settings are kept on Yo’s server, encrypted with a key made from your account key, so a new phone finds them again. Yos, photos and videos aren’t backed up.")
           Text(
-            "Backups and Account Sync are end-to-end encrypted. Yo’s server stores them but can’t read them."
+            "Account Backup is end-to-end encrypted. Yo’s server stores them but can’t read them."
           )
           .font(.footnote)
           .foregroundStyle(.secondary)
         }
         .padding(20)
+        .onGeometryChange(for: CGFloat.self) { $0.size.height } action: { contentHeight = $0 }
       }
+      .sheetFit(contentHeight: contentHeight)
       .background(Color(.systemGroupedBackground))
       .navigationTitle("Account Security")
       .navigationBarTitleDisplayMode(.inline)
@@ -52,7 +55,7 @@ struct RecoveryHelpSheet: View {
         }
       }
     }
-    .presentationDetents([.medium, .large])
+    .fittedSheet()
   }
 
   private func item(_ symbol: String, _ title: String, _ text: String) -> some View {

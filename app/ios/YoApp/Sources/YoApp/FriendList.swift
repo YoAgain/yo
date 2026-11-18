@@ -1018,8 +1018,18 @@ struct FriendList: View {
     revealAddBlock()
   }
 
+  /// No friend on the list yet (bots, groups and requests don't count): Group and Invite stay under the closed "+"
+  /// until the first friend is added; "+" still opens the name field. Then "+" opens the whole block as before.
+  private var noFriendYet: Bool {
+    !friends.all.contains {
+      $0.group == nil && !$0.request && !$0.blocked && !$0.gone
+        && !AddFriendHint.bots.contains($0.name.lowercased())
+    }
+  }
+
   private var addRow: some View {
-    VStack(spacing: 0) {
+    let open = adding || noFriendYet
+    return VStack(spacing: 0) {
       if adding {
         TextField(hint ?? "Name", text: $newName)
           .font(.yo(Metrics.rowFont))
@@ -1037,6 +1047,13 @@ struct FriendList: View {
           .frame(height: Metrics.rowHeight)
           .background { addBackground(Color.row(friends.nextColor)) }
           .onAppear { typing = true }
+      } else {
+        RowButton("+", color: Color.row(friends.nextColor), cameraOn: cameraOn) { _ in
+          beginAdding()
+        }
+        .accessibilityLabel("Add Friend")
+      }
+      if open {
         HStack(spacing: 0) {
           Button {
             typing = false
@@ -1052,20 +1069,11 @@ struct FriendList: View {
           }
         }
         .buttonStyle(.plain)
-      } else {
-        // Until the first friend is on the list (bots don't count) the row says what it does; nothing pops over it.
-        RowButton(
-          friends.all.contains(where: { !AddFriendHint.bots.contains($0.name.lowercased()) }) ? "+" : "+ Add a Friend",
-          color: Color.row(friends.nextColor), cameraOn: cameraOn
-        ) { _ in
-          beginAdding()
-        }
-        .accessibilityLabel("Add Friend")
       }
     }
     .transaction { $0.animation = nil }
     .animation(reduceMotion ? nil : ListMotion.expansion) { content in
-      content.frame(height: Metrics.rowHeight * (adding ? 2 : 1), alignment: .top).clipped()
+      content.frame(height: Metrics.rowHeight * (open ? 2 : 1), alignment: .top).clipped()
         .modifier(ListColorClip())
     }
     .onChange(of: typing) { _, active in
@@ -2461,18 +2469,10 @@ struct RowButton: View {
         let room = room(sign: hasSign && !twoRows)
         // A group's sign only beside its name: "Sent 5× Yo!" has the room to itself.
         let groupSign = title == "Sent Yo" ? nil : icon
-        BarRow(lead: room.lead, trail: room.trail, prefix: groupSign == nil ? 0 : Self.iconRoom) {
-          SteadyText(title == "Sent Yo" ? (sendingMedia ? YoWords.sending(count) : YoWords.sent(count)) : title)
-            // A group: its sign before its name, outside it: the name alone stands in the middle.
-            .overlay(alignment: .leading) {
-              if let icon = groupSign {
-                Image(systemName: icon)
-                  .font(.system(size: Metrics.rowFont * 0.62, weight: .bold))
-                  .frame(width: Self.iconRoom - 8, alignment: .trailing)
-                  .offset(x: -Self.iconRoom)  // wholly before the name, 8 apart
-                  .accessibilityLabel("Group")
-              }
-            }
+        BarRow(lead: room.lead, trail: room.trail) {
+          // A group: "#" as part of its name ("#Hey"), in the name's own font (usernames can't hold "#" or "@").
+          SteadyText(title == "Sent Yo" ? (sendingMedia ? YoWords.sending(count) : YoWords.sent(count))
+            : groupSign != nil ? "#" + title : title)
         }
         if twoRows {
           if received { receivedRow.transition(.opacity) }

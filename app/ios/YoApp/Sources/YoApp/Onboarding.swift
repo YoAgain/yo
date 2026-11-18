@@ -46,6 +46,9 @@ struct Onboarding: View {
   @State private var signingInCard = false
   /// The account the card signs in by itself after a moment (a cold start with exactly one in the keychain).
   @State private var autoSignIn: Data?
+  /// The carousel's own height on the welcome, and the room it gets above the form (less with the keyboard up).
+  @State private var introHeight = 0.0
+  @State private var introRoom = 0.0
 
   var body: some View {
     ZStack {
@@ -83,8 +86,13 @@ struct Onboarding: View {
             .opacity(0.85)
         }
       }
+      .onGeometryChange(for: Double.self) { $0.size.height } action: { introHeight = $0 }
+      // With the keyboard up the room above the form gets smaller than the cards: the carousel shrinks into it, so
+      // the name field and the whole Sign Up button stay above the keyboard on every iPhone (the form keeps its size).
+      .scaleEffect(introHeight > 0 ? min(1, introRoom / introHeight) : 1)
       // The carousel where it was (centred in the room above the form); only its dots sit close under the cards.
-      .frame(maxHeight: .infinity)
+      .frame(minHeight: 0, maxHeight: .infinity)
+      .onGeometryChange(for: Double.self) { $0.size.height } action: { introRoom = $0 }
       VStack(spacing: 0) {
         // An invite link opened before the account: its name comes on the list once there is one (Invite.swift).
         if let invited = Invite.shared.pending {
@@ -152,10 +160,20 @@ struct Onboarding: View {
         }
 
         Note(problem)
-        // One line, all of it the link.
-        Button("Got Yo? Sign In") { go(.logIn) }
-          .font(.yo(18))
-          .padding(.top, 14)
+        // One line, all of it the link: the question small, "Sign In" what stands out, exactly in the middle of the
+        // screen; the question hangs to its left, the same room left unseen on the right keeps it there.
+        Button { go(.logIn) } label: {
+          let question = Text("Got Yo?").font(.system(size: 15, weight: .semibold)).foregroundStyle(.white.opacity(0.85))
+          HStack(alignment: .firstTextBaseline, spacing: 6) {
+            question
+            Text("Sign In").font(.yo(18))
+            question.hidden()
+          }
+          .lineLimit(1)
+          .fixedSize()
+        }
+        .accessibilityLabel("Got Yo? Sign In")
+        .padding(.top, 14)
       }
       .padding(.horizontal, 28)
     }
@@ -802,7 +820,7 @@ private struct SignInCard: View {
     }
     .presentationDetents([.height(height)])
     .presentationBackground(Color.amethyst)
-    .presentationDragIndicator(.visible)
+    .presentationDragIndicator(.hidden)  // one detent: nothing to pull
     .preferredColorScheme(.dark)
   }
 }

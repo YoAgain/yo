@@ -43,6 +43,8 @@ struct SettingsForm<Content: View>: View {
   var profileFirst = false
   var measuredHeight: (CGFloat) -> Void = { _ in }
   @ViewBuilder var content: () -> Content
+  /// The rows fit the visible sheet: the page stands still instead of scrolling its bottom margin.
+  @State private var fits = false
 
   var body: some View {
     ScrollView {
@@ -95,6 +97,14 @@ struct SettingsForm<Content: View>: View {
     .buttonStyle(.plain)
     .environment(\.eagerSettingsRows, true)
     .scrollBounceBehavior(.basedOnSize)
+    // The 20 pt bottom margin and the home-indicator inset made a half sheet scrollable though every row
+    // was visible. Only content below the visible area counts.
+    .onScrollGeometryChange(for: Bool.self) {
+      $0.contentSize.height - 20 <= $0.containerSize.height - $0.contentInsets.top + 0.5
+    } action: { _, new in
+      fits = new
+    }
+    .scrollDisabled(fits)
   }
 }
 

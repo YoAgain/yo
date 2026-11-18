@@ -38,7 +38,7 @@ struct AccountSyncRow: View {
         }
       } label: {
         Label {
-          Text("Account Sync")
+          Text("Account Backup")
         } icon: {
           Image(systemName: "icloud.fill")
         }
@@ -47,7 +47,7 @@ struct AccountSyncRow: View {
     }
     .foregroundStyle(.primary)
     .disabled(client == nil || saving || savedNow)
-    .accessibilityHint("Syncs your account now")
+    .accessibilityHint("Backs up your account now")
     .sensoryFeedback(.success, trigger: savedNow) { _, now in now }
     .sensoryFeedback(.error, trigger: failed) { _, now in now }
     .task(id: justSaved) {
