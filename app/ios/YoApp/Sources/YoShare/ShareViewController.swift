@@ -77,6 +77,8 @@ final class ShareModel {
   private(set) var state = State.picking
   /// What was shared: how many photos and videos, for the words above the list.
   private(set) var counts = (photos: 0, videos: 0)
+  /// The video is longer than a Yo's (`MediaFile.longestVideo`): refused whole, nothing goes.
+  private(set) var tooLong = false
   private var files: Task<[Shared], Never>?
   private var giving: Task<Void, Never>?
   /// Those the hub refused here, for "Send when Yo opens".
@@ -132,6 +134,13 @@ final class ShareModel {
           }
         case .video:
           guard let url = await Self.copyFile(provider, type: .movie) else { continue }
+          // Longer than a Yo's video: never cut, refused, and nothing of this share goes.
+          if let seconds = await MediaFile.length(of: url), !MediaFile.fits(seconds) {
+            try? FileManager.default.removeItem(at: url)
+            for case .original(let other, _) in made { try? FileManager.default.removeItem(at: other) }
+            tooLong = true
+            return []
+          }
           // MediaFile deletes what it reads: it reads a clone, the original stays for the app should it fail.
           let work = FileManager.default.temporaryDirectory.appending(path: "\(UUID().uuidString).\(url.pathExtension)")
           guard Self.room(for: .video), (try? FileManager.default.copyItem(at: url, to: work)) != nil else {
@@ -188,7 +197,7 @@ final class ShareModel {
   }
 
   func give(to friend: ShareBridge.Friend) {
-    guard state == .picking, let files, let owner = list?.owner else { return }
+    guard state == .picking, !tooLong, let files, let owner = list?.owner else { return }
     state = .giving(friend.to)
     giving = Task {
       let made = await files.value
@@ -381,6 +390,9 @@ struct ShareView: View {
       Group {
         if !model.ready {
           note("Sharing to Yo isn’t set up on this iPhone yet.")
+        } else if model.tooLong {
+          TooLongCard()
+            .transition(.scale(scale: 0.9).combined(with: .opacity))
         } else if case .done(let done) = model.state {
           SentCard(done: done, mark: model.mark, later: done.failed > 0 ? { model.sendLater() } : nil)
             .transition(.scale(scale: 0.9).combined(with: .opacity))
@@ -422,7 +434,7 @@ struct ShareView: View {
         ToolbarItem(placement: .principal) {
           VStack(spacing: 0) {
             Text("Yo").font(.yo(Metrics.titleFont, relativeTo: .largeTitle))
-            if model.ready, model.friends?.isEmpty == false {
+            if model.ready, model.friends?.isEmpty == false, !model.tooLong {
               Text(model.subtitle)
                 .font(.system(size: 11, weight: .semibold))
                 .opacity(0.85)
@@ -438,6 +450,7 @@ struct ShareView: View {
         }
       }
       .animation(.smooth, value: model.state)
+      .animation(.smooth, value: model.tooLong)
     }
     .preferredColorScheme(.dark)  // white on purple, as the app's list
   }
@@ -501,6 +514,23 @@ struct SentCard: View {
         .foregroundStyle(.black)
       }
     }
+    .padding(24)
+  }
+}
+
+/// A video longer than a Yo's, refused as the island says "No": "Video too long" in red, "max 10 s" beside it.
+struct TooLongCard: View {
+  var body: some View {
+    HStack(spacing: 10) {
+      Text(verbatim: "Video too long").foregroundStyle(Color.alizarin).fixedSize()
+      Text(verbatim: "·").foregroundStyle(.white.opacity(0.5)).fixedSize()
+      Text(verbatim: "max \(Int(MediaFile.longestVideo)) s").foregroundStyle(.white).fixedSize()
+    }
+    .font(.yo(22, relativeTo: .title2))
+    .padding(.horizontal, 24)
+    .frame(minHeight: 60)
+    .background(.black, in: .capsule)
+    .accessibilityElement(children: .combine)
     .padding(24)
   }
 }

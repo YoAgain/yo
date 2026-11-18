@@ -48,6 +48,15 @@ struct MediaFile: Sendable {
     return MediaFile(kind: .photo, data: out as Data, width: image.width, height: image.height, durationMs: 0)
   }
 
+  /// A shared video's length in seconds (nil: not readable as a video). A share longer than `longestVideo` (and
+  /// the half second a recording may run over) is refused whole, never cut (ShareViewController).
+  static func length(of video: URL) async -> Double? {
+    guard let duration = try? await AVURLAsset(url: video).load(.duration), duration.isNumeric else { return nil }
+    return duration.seconds
+  }
+
+  static func fits(_ seconds: Double) -> Bool { seconds <= longestVideo + 0.5 }
+
   /// A video as it goes: HEVC at 2.5 Mbit/s, at most 1280 by 720 (either way round), with its sound as stereo AAC,
   /// in an MP4 of at most `longestVideo` seconds and `largestVideo` bytes, without metadata. Written with explicit
   /// settings (an export preset has no 720p HEVC). The recording is deleted.
