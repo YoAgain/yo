@@ -135,14 +135,14 @@ See the [yo-load measurements and commands](tests/README.md#load).
 
 <!-- loc -->
 ```text
-2026-11-11    6,326  ██▉                               Rust 6.3k
-2026-11-12    9,076  ████▏                             Rust 7.4k · Swift 1.5k · Other 0.2k
-2026-11-13   20,585  █████████▎                        Rust 13.4k · Swift 6.8k · Other 0.4k
-2026-11-14   32,976  ██████████████▉                   Rust 22.2k · Swift 10.0k · Other 0.8k
-2026-11-15   46,740  █████████████████████▏            Rust 33.6k · Swift 12.2k · Other 0.9k
-2026-11-16   52,931  ███████████████████████▉          Rust 34.8k · Swift 14.1k · Other 4.0k
-2026-11-17   62,364  ████████████████████████████▏     Rust 39.0k · Swift 18.7k · Other 4.6k
-2026-11-18   70,849  ████████████████████████████████  Rust 40.2k · Swift 20.9k · Kotlin 4.8k · Other 4.8k
+Day 1     6k  ██▏                       Rust 5k · Tests 2k
+Day 2     9k  ███▏                      Rust 5k · Swift 2k · Tests 2k
+Day 3    21k  ███████                   Rust 9k · Swift 7k · Tests 4k
+Day 4    33k  ███████████▏              Rust 13k · Swift 10k · Other 1k · Tests 9k
+Day 5    47k  ███████████████▉          Rust 18k · Swift 12k · Other 1k · Tests 16k
+Day 6    53k  █████████████████▉        Rust 19k · Swift 14k · Other 3k · Tests 17k
+Day 7    62k  █████████████████████▏    Rust 22k · Swift 19k · Other 4k · Tests 18k
+Day 8    71k  ████████████████████████  Rust 23k · Swift 21k · Kotlin 5k · Other 4k · Tests 19k
 ```
 <!-- /loc -->
 
