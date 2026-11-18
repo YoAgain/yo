@@ -90,17 +90,19 @@ def chart(points):
 
 
 def shares(counts, names):
-    """One bar of the whole, as wide as the daily chart, each part apart by a space; under each part its name,
-    size and share (moved right only where the one before needs the room)."""
+    """One bar of the whole, as wide as the daily chart, each part apart by a space; under each part, centred,
+    its name and size."""
     total = sum(counts[name] for name in names) or 1
     width = LINE - 5 - (len(names) - 1)
     cells = [max(1, round(counts[name] / total * width)) for name in names]
     cells[cells.index(max(cells))] += width - sum(cells)
     bar = " ".join("█" * n for n in cells)
+    # Each label centred under its part; moved right only where the one before needs the room.
     legend, at = "", 0
     for name, n in zip(names, cells):
-        label = f"{name} {round(counts[name] / 1000)}k {counts[name] * 100 // total}%"
-        legend += " " * max(at - len(legend), 2 if legend else 0) + label
+        label = f"{name} {round(counts[name] / 1000)}k"
+        start = max(at + (n - len(label)) // 2, len(legend) + (1 if legend else 0), 0)
+        legend += " " * (start - len(legend)) + label
         at += n + 1
     return f"{round(total / 1000):>2}k  {bar}\n\n     {legend}"
 
