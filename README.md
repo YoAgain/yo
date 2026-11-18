@@ -190,8 +190,3 @@ commit shown in Settings › Licenses. The hub does not link libsignal and is MI
 The name, logo and sound are outside the code license. [Third-party license texts](LICENSES).
 
 </details>
-
-Support chat schema 6 migrates schemas 3/4 through 5, merges to-dos into the pinned Team To-Dos
-thread (`support_messages.user_id=X''`), and tracks completion per message with nullable `done_at`.
-Deploy the hub before admin/collector; back up first and import any legacy JSON done flags on schema 5
-before upgrading. App reply read receipts are unchanged. See admin/README.md for rollout details.
