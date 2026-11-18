@@ -81,33 +81,33 @@ private struct Bar: View {
     }
   }
 
-  private var color: Color {
-    switch state.outcome {
-    case .failed: .alizarin
-    case .nobody: Color(hex: 0x7F8C8D)  // asbestos
-    case .sending, .sent: .friend(state)
+  /// "Sent Yo!" with "Yo!" in Yo's purple, the rest white (owner's pick: white text on the island's black, the
+  /// brand only in "Yo"); "Not Sent" / "No Yo to answer" red; faded while it goes.
+  private var line: Text {
+    let plain = state.outcome == .failed || state.outcome == .nobody
+    if plain || !words.hasSuffix("Yo!") {
+      return Text(verbatim: words).foregroundColor(plain ? .alizarin : .white)
     }
+    let head = String(words.dropLast(3))
+    return Text(verbatim: head).foregroundColor(.white) + Text(verbatim: "Yo!").foregroundColor(.amethyst)
   }
 
   var body: some View {
     HStack(spacing: 12) {
-      Text(verbatim: words)
+      line
         .fixedSize()  // the words never shrink; the name is what is cut
         .contentTransition(.numericText(value: Double(state.others.isEmpty ? state.count : state.total)))
-      Name(state: state, size: 20, tinted: false, all: true)
-        .opacity(0.85)
+        .opacity(state.outcome == .sending && !stale ? 0.45 : 1)
+      Name(state: state, size: 24, tinted: false, all: true)
+        .foregroundStyle(.white)
     }
     // A fixed size (no Dynamic Type here): the island's height is fixed too, a larger text would be cut.
-    .font(.custom("Montserrat-Bold", fixedSize: 20))
-    .foregroundStyle(.white)
+    .font(.custom("Montserrat-Bold", fixedSize: 24))
     .lineLimit(1)
     .minimumScaleFactor(0.8)
-    .padding(.horizontal, 18)
+    .padding(.horizontal, 6)
     .frame(maxWidth: .infinity)
     .frame(height: Self.height)
-    // A capsule: with the island's corners and the `inset` gap it runs alongside them (ContainerRelativeShape took the
-    // region's own, wrong, corners).
-    .background(color, in: Capsule())
   }
 }
 
