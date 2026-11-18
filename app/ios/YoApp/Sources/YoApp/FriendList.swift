@@ -3207,6 +3207,9 @@ private struct BarPress: ButtonStyle {
     // No press look on the label: in the list flat, as the original Yo; in camera mode the bar's colour plane goes
     // see-through under the finger (ListColor's `pressed`).
     configuration.label
+      // In the list a quick, light flash while pressed (test).
+      .overlay(.white.opacity(!cameraOn && configuration.isPressed ? 0.18 : 0))
+      .animation(.easeOut(duration: 0.15), value: configuration.isPressed)
       .onChange(of: pressed) { _, pressed in
         if pressed { Haptic.prepare() }
         press(pressed)
