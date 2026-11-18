@@ -3373,10 +3373,14 @@ struct HeldMedia: View {
             ScreenshotProof {
               Color.clear
                 .overlay {
-                  if current.video != nil, let player {
-                    PlayerLayer(player: player)
-                  } else if let photo = full ?? current.photo {
-                    Image(uiImage: photo).resizable().scaledToFit()  // whole, black bars where its shape differs
+                  GeometryReader { box in
+                    if current.video != nil, let player {
+                      PlayerLayer(player: player, screen: box.size)
+                    } else if let photo = full ?? current.photo {
+                      Image(uiImage: photo).resizable()
+                        .aspectRatio(contentMode: ViewerFit.fills(photo.size, box.size) ? .fill : .fit)
+                        .frame(width: box.size.width, height: box.size.height)
+                    }
                   }
                 }
                 .clipped()
@@ -3673,19 +3677,32 @@ enum ViewerSound {
   }
 }
 
-/// A video without controls, filling the screen.
+/// Whether a picture fills the screen or shows whole: one of about the screen's own shape (a phone's portrait photo
+/// or video) fills it, losing only its rounded corners; any other shows whole, black above and below or beside.
+enum ViewerFit {
+  static func fills(_ picture: CGSize, _ screen: CGSize) -> Bool {
+    guard picture.width > 0, picture.height > 0, screen.width > 0, screen.height > 0 else { return false }
+    let ratio = (picture.width / picture.height) / (screen.width / screen.height)
+    return ratio > 0.85 && ratio < 1.18
+  }
+}
+
+/// A video without controls: filling the screen when its shape is about the screen's, else whole (ViewerFit).
 struct PlayerLayer: UIViewRepresentable {
   let player: AVPlayer
+  var screen: CGSize = .zero
 
   func makeUIView(context: Context) -> PlayerView {
     let view = PlayerView()
     view.playerLayer.player = player
-    view.playerLayer.videoGravity = .resizeAspect  // whole, as photos
+    view.playerLayer.videoGravity = .resizeAspect
     return view
   }
 
   func updateUIView(_ view: PlayerView, context: Context) {
     view.playerLayer.player = player
+    let size = player.currentItem?.presentationSize ?? .zero
+    view.playerLayer.videoGravity = ViewerFit.fills(size, screen) ? .resizeAspectFill : .resizeAspect
   }
 
   final class PlayerView: UIView {
