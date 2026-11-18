@@ -1,0 +1,45 @@
+// The bar on top of the list while Yos can't reach this phone: notifications turned off for Yo. A tap opens Yo's
+// notification settings; back in the app it is gone once they are on. No dismiss: without them Yo is mute.
+import SwiftUI
+import UserNotifications
+
+struct NotificationsBar: View {
+  @Environment(\.scenePhase) private var scenePhase
+  @State private var denied = false
+  /// Asked in this launch: a "Don't Allow" just given is respected, the bar waits for the next launch (no nudging).
+  @MainActor private static var askedThisLaunch = false
+
+  var body: some View {
+    VStack(spacing: 0) {
+      if denied {
+        Button {
+          if let url = URL(string: UIApplication.openNotificationSettingsURLString) {
+            UIApplication.shared.open(url)
+          }
+        } label: {
+          Text("Turn On Notifications")
+            .font(.yo(Metrics.rowFont))
+            .foregroundStyle(.white)
+            .lineLimit(1)
+            .minimumScaleFactor(0.5)
+            .padding(.horizontal, 16)
+            .frame(maxWidth: .infinity)
+            .frame(height: Metrics.rowHeight)
+            .background(.alizarin)
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel("Notifications Are Off")
+        .accessibilityHint("Yos can't reach you. Opens Settings to turn on notifications for Yo.")
+      }
+    }
+    // The answer is asked for when the list first shows (YoApp); the prompt and Settings both leave the app inactive,
+    // so coming back to active reads the answer.
+    .task(id: scenePhase) {
+      guard scenePhase == .active else { return }
+      let status = await UNUserNotificationCenter.current().notificationSettings().authorizationStatus
+      if status == .notDetermined { Self.askedThisLaunch = true }
+      denied = status == .denied && !Self.askedThisLaunch
+    }
+  }
+}

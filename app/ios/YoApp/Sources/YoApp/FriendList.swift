@@ -581,6 +581,7 @@ struct FriendList: View {
     NavigationStack {
       ScrollView {
         LazyVStack(spacing: 0) {
+          if !cameraOn { NotificationsBar() }
           // Reordering preserves each bar's gestures, undo clock and thumbnail flight.
           // Each bar with its shade in the data: `Friend`'s == is its key alone, so after a reorder the ForEach saw
           // nothing changed and kept every bar's old shade (from neighbours it no longer has).

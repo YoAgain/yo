@@ -1,8 +1,8 @@
 // Yo's widgets: the friends' bars on the Home Screen as in the app, each a Yo on a tap without opening it (small: one
-// friend, picked when adding it, else the top one; medium: the top 4; large: the top 8), and on the Lock Screen "Yo"
-// to one friend and "Yo Back". The list is the one the app writes for its extensions (ShareBridge.List, in its order),
-// which reloads the widgets when it changes (ShareInbox); a sent Yo reads "Sent Yo!" on its bar for a moment
-// (WidgetSent), then the name again.
+// friend, picked when adding it, else the top one, on Yo's purple; medium: the top 4; large: the top 8), and on the
+// Lock Screen "Yo" to one friend and "Yo Back". The list is the one the app writes for its extensions
+// (ShareBridge.List, in its order), which reloads the widgets when it changes (ShareInbox); a sent Yo reads "Sent Yo!"
+// on its bar for a moment (WidgetSent), then the name again.
 import AppIntents
 import SwiftUI
 import WidgetKit
@@ -92,11 +92,12 @@ struct YoFriendView: View {
     if family == .accessoryCircular {
       circle
     } else if let friend = entry.friend {
+      // Always Yo's own purple, whatever the friend's bar colour in the list: the widget is Yo's, the name on it.
       Button(intent: SendYoIntent(friend: FriendEntity(friend))) {
         BarLabel(text: entry.justSent(friend) ? "Sent Yo!" : friend.name, size: 28)
       }
       .buttonStyle(.plain)
-      .containerBackground(Color.row(friend.color), for: .widget)
+      .containerBackground(.amethyst, for: .widget)
     } else {
       SignedOut()
     }
@@ -224,6 +225,8 @@ private struct BarLabel: View {
       .padding(.horizontal, 12)
       .frame(maxWidth: .infinity, maxHeight: .infinity)
       .contentShape(.rect)
+      // A tinted Home Screen: the name in the accent, as the system's own widgets.
+      .widgetAccentable()
   }
 }
 

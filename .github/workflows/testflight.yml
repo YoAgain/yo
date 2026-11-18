@@ -68,6 +68,58 @@ jobs:
           open(path, "w").write(s)
           EOF
 
+      # OAD trains App Shortcuts for CFBundleDevelopmentRegion only (Metadata.appintents/nlu, "trained for en"), so
+      # Siri in German answered "Die App „Yo“ unterstützt diesen Vorgang mit Siri nicht". Xcode's
+      # appintentsnltrainingprocessor (in this runner's Xcode) trains every localization: the development region in
+      # Metadata.appintents/nlu, each <lang>.lproj with an AppShortcuts.strings in <lang>.lproj/nlu.appintents. With
+      # XCODE_NLTRAINING set, the tool's training step runs Xcode's, with the arguments of Xcode's release build
+      # (AppIntentsNLTraining.xcspec), on OAD's extract.actionsdata; it fails if a localization stays untrained.
+      # Patched into this checkout only; fails if the tool changed.
+      - name: OAD, App Shortcuts trained for every localization
+        run: |
+          python3 -I - .oad/tools/appintentsmeta.py <<'EOF'
+          import sys
+          path = sys.argv[1]
+          s = open(path).read()
+          anchor = ('def write_training(data, args, root):\n'
+                    '    """appintentsnltrainingprocessor --archive-ssu-assets: root.ssu.yaml and nlu/."""\n')
+          assert s.count(anchor) == 1 and "args.output" in s and "args.bundle_identifier" in s, \
+              "appintentsmeta.py changed: patch again"
+          xcode = '''def xcode_training(data, args, root):
+              """Xcode's own appintentsnltrainingprocessor, as its release build runs it: every localization."""
+              import glob, shutil, subprocess, tempfile
+              bundle = args.output
+              info = args.info_plist or os.path.join(bundle, 'Info.plist')
+              # Xcode's release products hold no root.ssu.yaml; nothing of OAD's own training stays.
+              if os.path.isdir(os.path.join(root, 'nlu')):
+                  shutil.rmtree(os.path.join(root, 'nlu'))
+              if os.path.exists(os.path.join(root, 'root.ssu.yaml')):
+                  os.remove(os.path.join(root, 'root.ssu.yaml'))
+              strings = sorted(glob.glob(os.path.join(bundle, '*.lproj', 'AppShortcuts.strings')))
+              with tempfile.TemporaryDirectory() as tmp:
+                  cmd = ['xcrun', 'appintentsnltrainingprocessor', '--infoplist-path', info, '--temp-dir-path', tmp,
+                         '--bundle-id', args.bundle_identifier, '--product-path', bundle,
+                         '--extracted-metadata-path', root, '--deployment-postprocessing']
+                  for f in [info] + strings:
+                      cmd += ['--source-file', f]
+                  subprocess.run(cmd + ['--archive-ssu-assets'], check=True)
+              trained = sorted(glob.glob(os.path.join(bundle, '*.lproj', 'nlu.appintents', 'nlu.lzfse')))
+              if os.path.isfile(os.path.join(root, 'nlu', 'nlu.lzfse')):
+                  trained.append(os.path.join(root, 'nlu', 'nlu.lzfse'))
+              missing = [s for s in strings
+                         if not os.path.isfile(os.path.join(os.path.dirname(s), 'nlu.appintents', 'nlu.lzfse'))]
+              if not trained or missing:
+                  raise MetadataError(f'Xcode trained {trained or "nothing"}; untrained: {missing}')
+              print(f'{bundle}: App Shortcuts trained by Xcode: ' + ', '.join(os.path.relpath(t, bundle) for t in trained))
+
+
+          '''
+          hook = "    if os.environ.get('XCODE_NLTRAINING') and data['autoShortcuts']:\n        return xcode_training(data, args, root)\n"
+          s = s.replace(anchor, xcode + anchor + hook)
+          open(path, "w").write(s)
+          EOF
+          python3 -I -m py_compile .oad/tools/appintentsmeta.py
+
       # Downloaded tools, kept between runs (the versions above are the key).
       - id: tools
         uses: actions/cache@v4
@@ -174,6 +226,8 @@ jobs:
           # App Intents metadata (ship.sh step 5): Package.swift asks this SwiftPM for the .swiftconstvalues, which
           # only swift-build writes by itself; App Shortcuts are trained with Xcode's SiriSSUKitModel resources.
           YO_CONST_VALUES: 1
+          # App Shortcuts trained by Xcode's own tool for every localization (step "OAD, App Shortcuts trained …").
+          XCODE_NLTRAINING: 1
         run: |
           export ASC_KEY_PATH=$RUNNER_TEMP/asc/AuthKey.p8 ASC_IDENTITY_DIR=$RUNNER_TEMP/asc/distribution
           export SSU_RESOURCES=$(dirname "$DEVELOPER_DIR")/Frameworks/SiriSSUKitModel.framework/Versions/A/Resources
