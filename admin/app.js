@@ -31,14 +31,14 @@ if (document.body.classList.contains("login")) {
     return d ? `${d} d ${h} h` : h ? `${h} h ${m} min` : `${m} min`;
   };
   const date = (ms) => (ms ? new Date(ms).toLocaleString(undefined, { dateStyle: "medium", timeStyle: "short" }) : "–");
-  // "5 min ago", "3 h ago", "2 days", "3 weeks", "2 months"; the exact time goes in a tooltip.
+  // "5 min", "3 h", "2 days", "3 weeks", "2 months"; the exact time goes in a tooltip.
   const rel = (ms) => {
     if (!ms) return "–";
     const m = Math.max(0, (Date.now() - ms) / 60000), d = m / 1440;
     if (m < 1) return "just now";
-    if (m < 60) return `${Math.floor(m)} min ago`;
-    if (d < 1) return `${Math.floor(m / 60)} h ago`;
-    const unit = (n, w) => `${n} ${w}${n === 1 ? "" : "s"} ago`;
+    if (m < 60) return `${Math.floor(m)} min`;
+    if (d < 1) return `${Math.floor(m / 60)} h`;
+    const unit = (n, w) => `${n} ${w}${n === 1 ? "" : "s"}`;
     if (d < 7) return unit(Math.floor(d), "day");
     if (d < 60) return unit(Math.floor(d / 7), "week");
     return unit(Math.floor(d / 30), "month");
@@ -261,7 +261,7 @@ if (document.body.classList.contains("login")) {
   };
 
   // ---- overview: the users widget, sortable by every column ---------------------------------------------------------
-  let ovSort = { key: "last_seen", dir: -1 };
+  let ovSort = { key: "created", dir: -1 };
   const ovValue = (u, key) => key === "name" ? (u.name || "").toLowerCase() : key === "app" ? (parse(u.app)?.[1] ?? -1)
     : key === "secured" ? Number(!!u.secured) : u[key] ?? 0;
   for (const th of document.querySelectorAll("#ov-users th[data-sort]")) {
@@ -288,14 +288,21 @@ if (document.body.classList.contains("login")) {
     for (const u of list) {
       const tr = body.insertRow();
       tr.className = "opens";
-      cell(tr, u.name ?? "–", "name", u.id);
+      const nm = el("span", null, u.name ?? "–");
+      const seen = el("small", "muted", ` · ${seenDay(u.last_seen)}`);
+      seen.title = u.last_seen ? `last seen ${new Date(u.last_seen).toLocaleDateString()}` : "never seen";
+      nm.append(seen);
+      cell(tr, nm, "name", u.id);
       cell(tr, rel(u.created), null, date(u.created));
-      cell(tr, seenDay(u.last_seen), null, u.last_seen ? new Date(u.last_seen).toLocaleDateString() : "");
       cell(tr, u.secured ? tag("yes", "ok") : tag("no", "muted"));
-      cell(tr, appTag(u.app));
+      const pf = { ios: "iOS", android: "Android", yogpt: "YoGPT" }[parse(u.app)?.[0]];
+      const ap = el("span");
+      if (pf) ap.append(`${pf} `);
+      ap.append(appTag(u.app));
+      cell(tr, ap);
       tr.addEventListener("click", () => select(up(u.id), u.name || u.id));
     }
-    if (!list.length) cell(body.insertRow(), h && !h.error ? "No users yet." : (h?.error || "No data"), "empty").colSpan = 5;
+    if (!list.length) cell(body.insertRow(), h && !h.error ? "No users yet." : (h?.error || "No data"), "empty").colSpan = 4;
   };
 
   // ---- overview ---------------------------------------------------------------------------------------------------
