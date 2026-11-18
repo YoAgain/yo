@@ -134,20 +134,18 @@ See the [yo-load measurements and commands](tests/README.md#load).
 
 <!-- loc -->
 ```text
-Day 1     6k  ██▏                       R  5k                       T  2k
-Day 2     9k  ███▏                      R  5k  S  2k                T  2k
-Day 3    21k  ███████                   R  9k  S  7k                T  4k
-Day 4    33k  ███████████▏              R 13k  S 10k         O  1k  T  9k
-Day 5    47k  ███████████████▉          R 18k  S 12k         O  1k  T 16k
-Day 6    53k  █████████████████▉        R 19k  S 14k         O  3k  T 17k
-Day 7    62k  █████████████████████▏    R 22k  S 19k         O  4k  T 18k
-Day 8    71k  ████████████████████████  R 23k  S 21k  K  5k  O  4k  T 19k
-
-R Rust · S Swift · K Kotlin · O Other · T Tests
+Day 1     6k  ██▏                       Hub  2k  Core  3k  Apps  0k  Tests  2k
+Day 2     9k  ███▏                      Hub  2k  Core  3k  Apps  2k  Tests  2k
+Day 3    21k  ███████                   Hub  4k  Core  5k  Apps  8k  Tests  4k
+Day 4    33k  ███████████▏              Hub  5k  Core  7k  Apps 11k  Tests  9k
+Day 5    47k  ███████████████▉          Hub  6k  Core 11k  Apps 14k  Tests 16k
+Day 6    53k  █████████████████▉        Hub  9k  Core 11k  Apps 16k  Tests 17k
+Day 7    62k  █████████████████████▏    Hub 10k  Core 13k  Apps 21k  Tests 18k
+Day 8    71k  ████████████████████████  Hub 10k  Core 14k  Apps 28k  Tests 19k
 ```
 <!-- /loc -->
 
-The chart counts lines of code on `main` per day, blanks and comments included, tests apart; `python3 -I dev/loc-chart.py` updates it.
+The chart counts lines of code on `main` per day, blanks and comments included: the hub with its admin page, the shared core, the apps (iOS, Android, YoGPT) and the tests; `python3 -I dev/loc-chart.py` updates it.
 
 <details>
 <summary>Tests, folders and contributing</summary>

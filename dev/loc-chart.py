@@ -15,15 +15,21 @@ import math
 import subprocess
 
 ROOT = Path(__file__).resolve().parents[1]
-LANGUAGES = ("Rust", "Swift", "Kotlin", "Other")
-# Test code of any language, counted on its own and shown last.
-KINDS = LANGUAGES + ("Tests",)
-# One letter each in the chart; the legend under it says which.
-SHORT = {"Rust": "R", "Swift": "S", "Kotlin": "K", "Other": "O", "Tests": "T"}
+# By part of the project: the server (hub, admin page), the shared core, the apps (iOS, Android, YoGPT), tests (tests/,
+# fuzz/ and test files anywhere). Development scripts (dev/ and the like) are not counted.
+KINDS = ("Hub", "Core", "Apps", "Tests")
 COLORS = ("#bc7540", "#ad62be", "#468bc2", "#589663")
 EXTENSIONS = {".rs": "Rust", ".swift": "Swift", ".kt": "Kotlin", ".kts": "Kotlin"}
 OTHER = {".py", ".sh", ".bash", ".c", ".h", ".cpp", ".hpp", ".m", ".mm",
          ".js", ".jsx", ".ts", ".tsx", ".css", ".html", ".sql", ".proto"}
+
+
+def part(path):
+    """Which part of the project a source file belongs to, or None."""
+    if is_test(path):
+        return "Tests"
+    top = path.split("/", 1)[0]
+    return {"hub": "Hub", "admin": "Hub", "core": "Core", "app": "Apps"}.get(top)
 
 
 def is_test(path):
@@ -59,11 +65,9 @@ def history():
                 continue
             path = name.decode("utf-8", "surrogateescape")
             ext = Path(path).suffix.lower()
-            language = EXTENSIONS.get(ext, "Other" if ext in OTHER else None)
-            if language and is_test(path):
-                language = "Tests"
-            if language:
-                totals[language] += int(added) - int(removed)
+            kind = part(path) if (ext in EXTENSIONS or ext in OTHER) else None
+            if kind:
+                totals[kind] += int(added) - int(removed)
     if day is None:
         raise SystemExit("main has no commits")
     daily[day] = totals.copy()
@@ -71,7 +75,7 @@ def history():
 
 
 def chart(points):
-    """One line per day: the total (whole thousands) as a bar, the languages beside it, tests last."""
+    """One line per day: the total (whole thousands) as a bar, the parts beside it, tests last."""
     peak = max(sum(counts.values()) for _, counts in points)
     lines = []
     first = points[0][0]
@@ -79,13 +83,11 @@ def chart(points):
         total = sum(counts.values())
         eighths = round(total / peak * 24 * 8)
         bar = "█" * (eighths // 8) + " ▏▎▍▌▋▊▉"[eighths % 8].strip()
-        # A fixed column per kind (blank while it has none), so the numbers line up day by day.
-        parts = "  ".join(f"{SHORT[kind]} {round(counts[kind] / 1000):>2}k" if counts[kind] >= 500 else " " * 5
-                          for kind in KINDS).rstrip()
+        # A fixed column per part, so the numbers line up day by day.
+        parts = "  ".join(f"{kind} {round(counts[kind] / 1000):>2}k" for kind in KINDS)
         label = f"Day {(day - first).days + 1}"
         lines.append(f"{label:<7} {round(total / 1000):>3}k  {bar:<25} {parts}")
-    legend = " · ".join(f"{SHORT[kind]} {kind}" for kind in KINDS)
-    return "\n".join(lines + ["", legend])
+    return "\n".join(lines)
 
 
 def main():
