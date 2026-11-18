@@ -1,5 +1,5 @@
 // What a photo or video is as it goes (spec 5, 6.8): a HEIC of at most 2048 pixels, an HEVC video of at most 720p and
-// 30 seconds (the camera's 10) with stereo AAC sound, neither with a place or a device in it. Without the core: the share extension (YoShare) makes them the same
+// 10 seconds with stereo AAC sound, neither with a place or a device in it. Without the core: the share extension (YoShare) makes them the same
 // way, from this very file.
 import AVFoundation
 import Foundation
@@ -21,22 +21,13 @@ struct MediaFile: Sendable {
   static let longestSide = 2048
   static let quality = 0.75
   /// The longest video that goes (spec 5): a shared or picked one; the camera records `Camera.longestVideo`.
-  static let longestVideo = 30.0
+  static let longestVideo = 10.0
   /// The most a video's bytes may be: under a blob's 10 MiB (MAX_BLOB_LEN, its tag included) with room to spare.
   static let largestVideo = 9_000_000
-  /// What a video aims at: 2.5 Mbit/s up to some 21 s, less beyond, so 30 s are some 7 MB too.
-  static let videoTarget = 7_000_000
   /// 1280 by 720 at most, either way round.
   static let videoSides = (long: 1280.0, short: 720.0)
   static let videoBitRate = 2_500_000
   static let audioBitRate = 128_000
-
-  /// The picture's bit rate for a video `seconds` long: `videoBitRate`, lowered so it stays near `videoTarget`.
-  static func videoBitRate(for seconds: Double) -> Int {
-    guard seconds > 0 else { return videoBitRate }
-    let fitting = Int(Double(videoTarget) * 8 / seconds) - audioBitRate
-    return max(500_000, min(videoBitRate, fitting))
-  }
 
   /// A photo as it goes: a HEIC (no older reader needs a JPEG: both decode HEIC) at most `longestSide` pixels on its longest side, upright, and nothing but its
   /// pixels (no place, no camera, no date).
@@ -59,17 +50,15 @@ struct MediaFile: Sendable {
     return MediaFile(kind: .photo, data: out as Data, width: image.width, height: image.height, durationMs: 0)
   }
 
-  /// A shared video's length in seconds (nil: not readable as a video). A share longer than `longestVideo` (and
-  /// the half second a recording may run over) is offered to the system's trimmer, never cut by itself
-  /// (VideoTrimmer); where that cannot be, it is refused whole.
+  /// A shared video's length in seconds (nil when the duration cannot be read).
   static func length(of video: URL) async -> Double? {
     guard let duration = try? await AVURLAsset(url: video).load(.duration), duration.isNumeric else { return nil }
     return duration.seconds
   }
 
-  static func fits(_ seconds: Double) -> Bool { seconds <= longestVideo + 0.5 }
+  static func fits(_ seconds: Double) -> Bool { seconds <= longestVideo }
 
-  /// A video as it goes: HEVC at 2.5 Mbit/s (less for one longer than some 21 s: `videoBitRate(for:)`), at most 1280 by 720 (either way round), with its sound as stereo AAC,
+  /// A video as it goes: HEVC at 2.5 Mbit/s, at most 1280 by 720 (either way round), with its sound as stereo AAC,
   /// in an MP4 of at most `longestVideo` seconds and `largestVideo` bytes, without metadata. Written with explicit
   /// settings (an export preset has no 720p HEVC). The recording is deleted.
   ///
@@ -104,7 +93,7 @@ struct MediaFile: Sendable {
         try Task.checkCancellation()
         try await write(
           asset, pictures: pictures, standing: AVVideoComposition(configuration: standing), sound: sound, to: out,
-          size: size, rate: rate, bitRate: videoBitRate(for: length.seconds),
+          size: size, rate: rate, bitRate: videoBitRate,
           range: CMTimeRange(start: .zero, duration: length))
         try Task.checkCancellation()
       } onCancel: {

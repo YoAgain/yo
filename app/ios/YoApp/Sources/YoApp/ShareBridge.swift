@@ -93,7 +93,7 @@ enum ShareBridge {
     }
   }
 
-  /// The extension: a photo or video it could not make small itself (too little memory), moved into the outbox as it
+  /// The extension: a photo or video it could not make small itself (too little memory), copied into the outbox as it
   /// was shared, for the app to make and send. The media first, the note last, as `put`.
   static func putOriginal(_ url: URL, kind: MediaFile.Kind, for friend: Friend, of owner: String) -> Bool {
     guard let dir = outbox else { return false }
@@ -101,7 +101,7 @@ enum ShareBridge {
       id: UUID(), owner: owner, to: friend.to, name: friend.name, kind: kind, width: 0, height: 0, durationMs: 0,
       created: .now, original: url.pathExtension.isEmpty ? (kind == .photo ? "jpg" : "mov") : url.pathExtension)
     do {
-      try FileManager.default.moveItem(at: url, to: media(share, in: dir))
+      try FileManager.default.copyItem(at: url, to: media(share, in: dir))
       try JSONEncoder().encode(share).write(
         to: note(share.id, in: dir), options: [.atomic, .completeFileProtectionUntilFirstUserAuthentication])
       return true

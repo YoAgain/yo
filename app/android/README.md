@@ -82,8 +82,8 @@ The media queue persists encrypted blobs and manifests before upload; a media Yo
 retry. Incoming media descriptors are saved before acknowledging their core events. Downloads stay encrypted
 until opened, are marked consumed before display, and are deleted afterward; a restart also discards consumed
 items. Camera/library photos are resized to 1600 px and encoded as metadata-free JPEGs. Videos use CameraX and
-Media3: camera recordings stop at 10 seconds; shared or picked videos may be 30 seconds (a longer one is refused,
-Android has no system trimmer), their bit rate lowered past ~21 s, with an output byte-size check (9 MB). See PARITY for remaining stress/crash tests.
+Media3: camera recordings stop at 10 seconds; shared or picked videos may be 10 seconds (a longer one is refused,
+Android has no system trimmer), with an output byte-size check (9 MB). See PARITY for remaining stress/crash tests.
 
 ## Device acceptance
 

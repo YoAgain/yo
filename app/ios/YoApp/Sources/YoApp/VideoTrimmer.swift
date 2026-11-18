@@ -1,4 +1,4 @@
-// A shared or picked video longer than a Yo's (`MediaFile.longestVideo`, 30 s): the system's own trimmer
+// A shared or picked video longer than a Yo's (`MediaFile.longestVideo`, 10 s): the system's own trimmer
 // (UIVideoEditorController) offers the part to send, at most that long. Compiled into the app (the library picker)
 // and YoShare (the share sheet; Sources/YoShare links to this file).
 import SwiftUI
@@ -27,7 +27,7 @@ final class VideoTrim: Identifiable {
   /// Whether the system's trimmer can take this video at all.
   static func possible(_ video: URL) -> Bool { UIVideoEditorController.canEditVideo(atPath: video.path) }
 
-  /// Shows the trimmer through `show` (setting what a `.videoTrimming` sheet presents) and waits for its answer.
+  /// Shows the trimmer through `show` and waits for its answer.
   static func run(_ video: URL, show: (VideoTrim?) -> Void) async -> Result {
     guard possible(video) else { return .failed }
     let result = await withCheckedContinuation { (done: CheckedContinuation<Result, Never>) in
@@ -44,11 +44,10 @@ final class VideoTrim: Identifiable {
 }
 
 extension View {
-  /// Presents the system's trimmer for `trim`; swiping it away counts as Cancel.
+  /// Presents the system's trimmer for `trim` full-screen.
   func videoTrimming(_ trim: Binding<VideoTrim?>) -> some View {
-    sheet(item: trim) { trim in
-      // Gone without an answer (swiped away): cancelled. After an answer this does nothing.
-      VideoTrimmer(trim: trim).ignoresSafeArea().onDisappear { trim.finish(.cancelled) }
+    fullScreenCover(item: trim) { trim in
+      VideoTrimmer(trim: trim).preferredColorScheme(.dark).onDisappear { trim.finish(.cancelled) }
     }
   }
 }
@@ -57,34 +56,46 @@ extension View {
 private struct VideoTrimmer: UIViewControllerRepresentable {
   let trim: VideoTrim
 
-  func makeUIViewController(context: Context) -> UIVideoEditorController {
-    let editor = UIVideoEditorController()
-    editor.videoPath = trim.video.path
-    editor.videoMaximumDuration = MediaFile.longestVideo
-    editor.videoQuality = .typeHigh  // made small afterwards (MediaFile.video), as any other
-    editor.delegate = context.coordinator
-    return editor
+  func makeUIViewController(context: Context) -> YoVideoEditor { YoVideoEditor(trim: trim) }
+
+  func updateUIViewController(_ editor: YoVideoEditor, context: Context) {}
+}
+
+/// The system editor is already a navigation controller. Present it directly in the share extension.
+final class YoVideoEditor: UIVideoEditorController, UIVideoEditorControllerDelegate, UINavigationControllerDelegate {
+  private let trim: VideoTrim
+
+  init(trim: VideoTrim) {
+    self.trim = trim
+    super.init(nibName: nil, bundle: nil)
+    modalPresentationStyle = .fullScreen
+    overrideUserInterfaceStyle = .dark
+    videoPath = trim.video.path
+    videoMaximumDuration = MediaFile.longestVideo
+    videoQuality = .typeHigh
+    delegate = self
+    setNavigationBarHidden(false, animated: false)
   }
 
-  func updateUIViewController(_ editor: UIVideoEditorController, context: Context) {}
+  @available(*, unavailable)
+  required init?(coder: NSCoder) { fatalError() }
 
-  func makeCoordinator() -> Coordinator { Coordinator(trim: trim) }
-
-  @MainActor
-  final class Coordinator: NSObject, UIVideoEditorControllerDelegate, UINavigationControllerDelegate {
-    let trim: VideoTrim
-    init(trim: VideoTrim) { self.trim = trim }
-
-    // The editor may report a save twice: `finish` answers the first.
-    func videoEditorController(_ editor: UIVideoEditorController, didSaveEditedVideoToPath editedVideoPath: String) {
-      trim.finish(.cut(URL(fileURLWithPath: editedVideoPath)))
+  override func viewWillLayoutSubviews() {
+    if let item = navigationBar.topItem {
+      let prompt = "Trim video · max \(Int(MediaFile.longestVideo)) s"
+      if item.prompt != prompt { item.prompt = prompt }
     }
-
-    func videoEditorController(_ editor: UIVideoEditorController, didFailWithError error: any Error) {
-      Diagnostics.record(error)
-      trim.finish(.failed)
-    }
-
-    func videoEditorControllerDidCancel(_ editor: UIVideoEditorController) { trim.finish(.cancelled) }
+    super.viewWillLayoutSubviews()
   }
+
+  func videoEditorController(_ editor: UIVideoEditorController, didSaveEditedVideoToPath path: String) {
+    trim.finish(.cut(URL(fileURLWithPath: path)))
+  }
+
+  func videoEditorController(_ editor: UIVideoEditorController, didFailWithError error: any Error) {
+    Diagnostics.record(error)
+    trim.finish(.failed)
+  }
+
+  func videoEditorControllerDidCancel(_ editor: UIVideoEditorController) { trim.finish(.cancelled) }
 }

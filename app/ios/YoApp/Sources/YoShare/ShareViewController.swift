@@ -1,13 +1,11 @@
-// "Yo" in the share sheet: the list of friends as in the app (a coloured bar each, the name large in Montserrat, on
-// Amethyst); a tap on a name sends the photos or the video to that friend (or group), from here, right away, and a
-// short card says so before the sheet closes, as the island does ("Yo 📷 · lina", "3× 📷 · lina", "No 📷 · lina").
+// Tap the Yo bars to send the same media to several friends or groups, then tap Done.
 // It sends as the app does, with the app's own state (SharedState.swift: in turns with the app, under the lock in the
 // App Group, its key from the shared keychain): made small and plain (MediaFile), sealed, uploaded, its Yo sent, one
 // after the other (an extension has little memory, about 120 MB). What the hub cannot take now (no network, "not
 // now"), or all of it when the state does not open here (no account, the keychain locked, the app holding it), waits
 // in the group's outbox instead and goes as soon as Yo opens (ShareBridge); so does a photo or video there was no
 // memory left to make small here (the app makes it). Up to ten photos or one video (Info: NSExtensionActivationRule).
-// A video longer than a Yo's (30 s) is offered to the system's trimmer first (VideoTrimmer); only where that cannot
+// A video longer than a Yo's (10 s) is offered to the system's trimmer first (VideoTrimmer); only where that cannot
 // be is it refused.
 import SwiftUI
 import UIKit
@@ -17,25 +15,48 @@ import os
 
 @objc(YoShareViewController)
 final class ShareViewController: UIViewController {
-  private lazy var model: ShareModel = ShareModel { [weak self] sent in
-    self?.model.lifetime.stop()
-    guard let context = self?.extensionContext else { return }
-    if sent {
-      context.completeRequest(returningItems: nil)
-    } else {
-      context.cancelRequest(withError: NSError(domain: NSCocoaErrorDomain, code: NSUserCancelledError))
-    }
+  private var trim: VideoTrim?
+  private var appeared = false
+  private var presentingTrim = false
+  private lazy var model = ShareModel(showTrim: { [weak self] in
+    self?.showTrim($0)
+  }, done: { [weak self] in
+    self?.trim?.finish(.cancelled)
+    self?.extensionContext?.completeRequest(returningItems: nil)
+  })
+
+  override func viewDidAppear(_ animated: Bool) {
+    super.viewDidAppear(animated)
+    appeared = true
+    presentTrimIfReady()
   }
 
   override func viewDidDisappear(_ animated: Bool) {
     super.viewDidDisappear(animated)
-    model.lifetime.stop()  // the host dismissed the sheet without our Cancel button
+    appeared = false
+    if !presentingTrim { model.cancel() }
+  }
+
+  private func showTrim(_ trim: VideoTrim?) {
+    self.trim = trim
+    if trim == nil, presentingTrim {
+      dismiss(animated: true) { self.presentingTrim = false }
+    } else {
+      presentTrimIfReady()
+    }
+  }
+
+  private func presentTrimIfReady() {
+    guard appeared, !presentingTrim, let trim else { return }
+    presentingTrim = true
+    present(YoVideoEditor(trim: trim), animated: true)
   }
 
   @objc private func hostInBackground() { model.cancel() }
 
   override func viewDidLoad() {
     super.viewDidLoad()
+    overrideUserInterfaceStyle = .dark
     NotificationCenter.default.addObserver(
       self, selector: #selector(hostInBackground), name: .NSExtensionHostDidEnterBackground, object: nil)
     let host = UIHostingController(rootView: ShareView(model: model))
@@ -51,21 +72,8 @@ final class ShareViewController: UIViewController {
 
 @MainActor @Observable
 final class ShareModel {
-  /// What happened to what was shared, for the card.
-  struct Done: Equatable {
-    let friend: ShareBridge.Friend
-    /// Sent from here.
-    var sent: Int
-    /// Waiting for the app.
-    var queued: Int
-    /// Not sent (the hub refused it here); "Send when Yo opens" offers them to the app.
-    var failed: Int
-  }
-
-  enum State: Equatable {
-    case picking
-    case giving(String)
-    case done(Done)
+  enum Feedback: Equatable {
+    case sending, sent, queued, failed
   }
 
   /// One shared photo or video as prepared: made small here, or its original for the app to make (no memory left).
@@ -76,25 +84,24 @@ final class ShareModel {
 
   let list = ShareBridge.readList()
   let ready = ShareBridge.container != nil
-  private(set) var state = State.picking
+  private(set) var feedback: [String: Feedback] = [:]
+  private(set) var sending = false
   /// What was shared: how many photos and videos, for the words above the list.
   private(set) var counts = (photos: 0, videos: 0)
   /// The video is longer than a Yo's (`MediaFile.longestVideo`) and the trimmer could not cut it: refused whole,
   /// nothing goes.
   private(set) var tooLong = false
-  /// The system's trimmer, open for a video longer than a Yo's.
-  var trim: VideoTrim?
   private var files: Task<[Shared], Never>?
-  private var giving: Task<Void, Never>?
-  /// Those the hub refused here, for "Send when Yo opens".
-  private var failed: [Shared] = []
+  private var originals: [URL] = []
   private var cancelled = false
   /// Cancel, for the sending under way off the main actor: the next photo does not go.
   private let stop = Stop()
   let lifetime = SharedAccess.Lifetime()
-  private let done: @MainActor (Bool) -> Void
+  private let showTrim: (VideoTrim?) -> Void
+  private let done: () -> Void
 
-  init(done: @escaping @MainActor (Bool) -> Void) {
+  init(showTrim: @escaping (VideoTrim?) -> Void, done: @escaping () -> Void) {
+    self.showTrim = showTrim
     self.done = done
   }
 
@@ -103,7 +110,7 @@ final class ShareModel {
   /// "📷" or "🎥", as the island and the bars say it.
   var mark: String { counts.videos > 0 ? "🎥" : "📷" }
 
-  /// Makes them as they go (a HEIC of at most 2048 pixels, an HEVC video of at most 30 seconds) while a name is chosen,
+  /// Makes them as they go (a HEIC of at most 2048 pixels, an HEVC video of at most 10 seconds) while a name is chosen,
   /// one after the other: an extension has little memory. One there is no room for (`room`) is kept as it was shared
   /// and goes to the app, which makes it; a video that would not make here goes to the app as well.
   func prepare(_ providers: [NSItemProvider]) {
@@ -141,8 +148,8 @@ final class ShareModel {
           guard var url = await Self.copyFile(provider, type: .movie) else { continue }
           // Longer than a Yo's video: the system's trimmer offers the part to send. Closed, the share closes; where
           // it cannot cut, the video is refused and nothing of this share goes.
-          if let seconds = await MediaFile.length(of: url), !MediaFile.fits(seconds) {
-            let result = await VideoTrim.run(url) { trim = $0 }
+          if let seconds = await MediaFile.length(of: url), !MediaFile.fits(seconds), !cancelled {
+            let result = await VideoTrim.run(url, show: showTrim)
             try? FileManager.default.removeItem(at: url)
             if case .cut(let cut) = result {
               url = cut
@@ -168,6 +175,11 @@ final class ShareModel {
           }
         }
       }
+      originals = made.compactMap {
+        if case .original(let url, _) = $0 { return url }
+        return nil
+      }
+      if cancelled { removeOriginals() }
       return made
     }
   }
@@ -187,66 +199,50 @@ final class ShareModel {
   }
 
   var subtitle: String {
-    switch state {
-    case .picking:
-      switch (counts.photos, counts.videos) {
-      case (0, 1): return "Tap a name to send this video."
-      case (1, 0): return "Tap a name to send this photo."
-      case (0, 0): return "Nothing to send."
-      default: return "Tap a name to send these \(counts.photos + counts.videos)."
-      }
-    case .giving: return "Sending…"
-    case .done(let done) where done.sent > 0: return "Sent."
-    case .done(let done) where done.queued > 0: return "Sends when you open Yo."
-    case .done: return "This could not be sent."
+    switch (counts.photos, counts.videos) {
+    case (0, 1): return "Tap a name to send this video."
+    case (1, 0): return "Tap a name to send this photo."
+    case (0, 0): return "Nothing to send."
+    default: return "Tap a name to send these \(counts.photos + counts.videos)."
     }
   }
 
-  /// The bar's words while it goes: "Sending 📷", else the name.
   func title(_ friend: ShareBridge.Friend) -> String {
-    state == .giving(friend.to) ? "Sending \(mark)" : friend.name
+    switch feedback[friend.to] {
+    case .sending: return "Sending \(mark)!"
+    case .sent: return "Sent \(mark)!"
+    case .queued: return "Sends when you open Yo"
+    case .failed: return "Not Sent"
+    case nil: return friend.name
+    }
+  }
+
+  func canGive(to friend: ShareBridge.Friend) -> Bool {
+    !sending && !tooLong && counts.photos + counts.videos > 0 && feedback[friend.to] == nil
   }
 
   func give(to friend: ShareBridge.Friend) {
-    guard state == .picking, !tooLong, let files, let owner = list?.owner else { return }
-    state = .giving(friend.to)
-    giving = Task {
+    guard canGive(to: friend), let files, let owner = list?.owner else { return }
+    sending = true
+    feedback[friend.to] = .sending
+    Task {
+      defer {
+        sending = false
+        if cancelled { removeOriginals() }
+      }
       let made = await files.value
-      // Cancelled while they were being made: nothing goes.
       guard !cancelled else { return }
       let stop = stop
       let lifetime = lifetime
       let outcome = await Task.detached(priority: .userInitiated) {
         lifetime.run { Self.send(made, to: friend, owner: owner, stop: stop) }
       }.value
-      // Cancelled meanwhile: the sheet is closed already; what went, went.
-      guard !cancelled else { return }
-      // The app's list shows it as its own ("Sent Yo", the bar on top), as a Yo from the Action button.
       if outcome.sent > 0 { SentNote.note(to: friend.to) }
-      failed = outcome.failed
-      state = .done(Done(friend: friend, sent: outcome.sent, queued: outcome.queued, failed: outcome.failed.count))
-      // Refused: the card stays, with "Send when Yo opens", until that or Cancel.
-      guard failed.isEmpty else { return }
-      try? await Task.sleep(for: .seconds(1.6))
-      done(outcome.sent + outcome.queued > 0)
-    }
-  }
-
-  /// "Send when Yo opens" on a card that says "No": those refused here wait for the app, which tries them again.
-  func sendLater() {
-    guard case .done(var shown) = state, !failed.isEmpty, let owner = list?.owner else { return }
-    let left = failed
-    failed = []
-    Task {
-      let friend = shown.friend
-      let put = await Task.detached(priority: .userInitiated) {
-        left.reduce(into: 0) { count, item in if Self.hand(item, to: friend, of: owner) { count += 1 } }
-      }.value
-      shown.queued += put
-      shown.failed = 0
-      state = .done(shown)
-      try? await Task.sleep(for: .seconds(1.2))
-      done(shown.sent + shown.queued > 0)
+      if outcome.failed > 0 || made.isEmpty {
+        feedback[friend.to] = .failed
+      } else {
+        feedback[friend.to] = outcome.queued > 0 ? .queued : .sent
+      }
     }
   }
 
@@ -255,14 +251,14 @@ final class ShareModel {
     /// Left for the app.
     var queued = 0
     /// Refused here (for good, or the state would not do).
-    var failed: [Shared] = []
+    var failed = 0
   }
 
   /// Sends them from here, one after the other: sealed, uploaded, then its Yo (the core's `media_chat`,
   /// `upload_media`, `send_photo` or `send_video`, as the app's outbox). Without the app's state here (not moved into
   /// the group yet, the keychain locked, another account), without the lock within a few seconds, or once the hub
   /// cannot take one now (no network, "not now"), that one and the rest wait in the group's outbox for the app, as
-  /// do the originals not made here. One the hub refuses here is offered to the app on the card.
+  /// do the originals not made here. A refusal is shown on the recipient’s bar.
   nonisolated private static func send(
     _ made: [Shared], to friend: ShareBridge.Friend, owner: String, stop: Stop
   ) -> Outcome {
@@ -295,13 +291,16 @@ final class ShareModel {
           break
         } catch {
           Diagnostics.record(error)
-          outcome.failed.append(item)
+          outcome.failed += 1
         }
       }
     }
     // Cancelled: the rest is neither sent nor left for the app.
     guard !stop.isSet else { return outcome }
-    for item in later + left where hand(item, to: friend, of: owner) { outcome.queued += 1 }
+    for item in later + left {
+      guard !stop.isSet else { break }
+      if hand(item, to: friend, of: owner) { outcome.queued += 1 } else { outcome.failed += 1 }
+    }
     return outcome
   }
 
@@ -328,14 +327,19 @@ final class ShareModel {
     Hub.bytes(client.userId())?.base64EncodedString()
   }
 
-  /// Cancel: what is being made stops and nothing is given; once given, the sheet only closes.
   func cancel() {
-    if case .done(let shown) = state { return done(shown.sent + shown.queued > 0) }
+    guard !cancelled else { return }
     cancelled = true
     stop.set()
+    lifetime.stop()
     files?.cancel()
-    giving?.cancel()
-    done(false)
+    if !sending { removeOriginals() }
+    done()
+  }
+
+  private func removeOriginals() {
+    for url in originals { try? FileManager.default.removeItem(at: url) }
+    originals.removeAll()
   }
 
   /// A photo's bytes, whatever form the app sharing it gives: its data, else (only then) an image.
@@ -404,9 +408,6 @@ struct ShareView: View {
         } else if model.tooLong {
           TooLongCard()
             .transition(.scale(scale: 0.9).combined(with: .opacity))
-        } else if case .done(let done) = model.state {
-          SentCard(done: done, mark: model.mark, later: done.failed > 0 ? { model.sendLater() } : nil)
-            .transition(.scale(scale: 0.9).combined(with: .opacity))
         } else if let friends = model.friends {
           if friends.isEmpty {
             note("Add a friend in Yo first.")
@@ -419,15 +420,18 @@ struct ShareView: View {
                   } label: {
                     Text(model.title(friend))
                       .font(.yo(Metrics.rowFont))
-                      .foregroundStyle(.white)
+                      .foregroundStyle(model.feedback[friend.to] == .failed ? Color.alizarin : .white)
                       .lineLimit(1)
+                      .minimumScaleFactor(0.6)
+                      .accessibilityLabel(friend.name)
+                      .accessibilityValue(model.feedback[friend.to] == nil ? "" : model.title(friend))
                       .padding(.horizontal, 16)
                       .frame(maxWidth: .infinity, minHeight: Metrics.rowHeight)
                       .background(Color.row(friend.color))
                       .contentShape(.rect)
                   }
                   .buttonStyle(BarPress())
-                  .disabled(model.state != .picking)
+                  .disabled(!model.canGive(to: friend))
                 }
               }
             }
@@ -456,14 +460,13 @@ struct ShareView: View {
           .foregroundStyle(.white)
           .accessibilityAddTraits(.isHeader)
         }
-        ToolbarItem(placement: .topBarLeading) {
-          Button("Cancel", systemImage: "xmark") { model.cancel() }
+        ToolbarItem(placement: .confirmationAction) {
+          Button("Done") { model.cancel() }
         }
       }
-      .animation(.smooth, value: model.state)
+      .animation(.smooth, value: model.feedback)
       .animation(.smooth, value: model.tooLong)
     }
-    .videoTrimming(Binding(get: { model.trim }, set: { model.trim = $0 }))
     .preferredColorScheme(.dark)  // white on purple, as the app's list
   }
 
@@ -476,62 +479,7 @@ struct ShareView: View {
   }
 }
 
-/// What happened, as the island says it (YoLiveActivity): a black pill, "Yo 📷" in Yo's purple ("3× 📷"; "No 📷" in
-/// red when it did not go; faded while it waits for the app), then the friend's name in their bar's colour ("#Name"
-/// for a group). Under it what waits for the app, or "Send when Yo opens" for what the hub refused here.
-struct SentCard: View {
-  let done: ShareModel.Done
-  let mark: String
-  let later: (() -> Void)?
-
-  private var shown: Int { done.sent > 0 ? done.sent : done.queued }
-  private var word: String {
-    if shown == 0 { return "No \(mark)" }
-    return shown == 1 ? "Yo \(mark)" : "\(shown)× \(mark)"
-  }
-  private var name: String { done.friend.to.hasPrefix("group:") ? "#" + done.friend.name : done.friend.name }
-
-  var body: some View {
-    VStack(spacing: 18) {
-      HStack(spacing: 10) {
-        Text(verbatim: word)
-          .foregroundStyle(shown == 0 ? Color.alizarin : .amethyst)
-          .opacity(done.sent == 0 && done.queued > 0 ? 0.5 : 1)
-          .fixedSize()  // "Yo" never shrinks
-          .contentTransition(.numericText(value: Double(shown)))
-        Text(verbatim: "·").foregroundStyle(.white.opacity(0.5)).fixedSize()
-        Text(verbatim: name)
-          .foregroundStyle(Color.row(done.friend.color))
-          .lineLimit(1)
-          .truncationMode(.tail)
-      }
-      .font(.yo(28, relativeTo: .title))
-      .padding(.horizontal, 26)
-      .frame(minHeight: 64)
-      .background(.black, in: .capsule)
-      .accessibilityElement(children: .combine)
-      if done.queued > 0 {
-        Text(done.sent > 0 ? "The rest sends when you open Yo" : "Sends when you open Yo")
-          .font(.yo(17, relativeTo: .headline))
-          .foregroundStyle(.white)
-          .multilineTextAlignment(.center)
-      }
-      if let later {
-        // White with a black label: no purple on purple.
-        Button(action: later) {
-          Text("Send when Yo opens").font(.yo(17, relativeTo: .headline))
-        }
-        .buttonStyle(.glassProminent)
-        .tint(.white)
-        .foregroundStyle(.black)
-      }
-    }
-    .padding(24)
-  }
-}
-
-/// A video longer than a Yo's that could not be trimmed, refused as the island says "No": "Video too long" in red,
-/// "max 30 s" beside it.
+/// An over-limit video the system editor could not open or save.
 struct TooLongCard: View {
   var body: some View {
     HStack(spacing: 10) {

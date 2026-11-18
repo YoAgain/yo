@@ -160,16 +160,11 @@ class YoCamera(private val context: Context) {
     }
 }
 internal const val VideoLimitMs = 10_000L
-/** A shared or picked video (spec 5): up to 30 s; Android has no system trimmer, so a longer one is refused. */
-internal const val SharedVideoLimitMs = 30_000L
+/** A shared or picked video (spec 5): up to 10 s; Android has no system trimmer, so a longer one is refused. */
+internal const val SharedVideoLimitMs = VideoLimitMs
 /** What a video may be at most: under a blob's 10 MiB (MAX_BLOB_LEN, its tag included) with room to spare. */
 internal const val LargestVideo = 9_000_000L
-/** What a video aims at: 2.5 Mbit/s up to some 21 s, less beyond, so 30 s are some 7 MB too. */
-internal fun videoBitrate(durationMs: Long): Int {
-    if (durationMs <= 0) return 2_500_000
-    val fitting = (7_000_000L * 8 * 1000 / durationMs - 128_000).toInt()
-    return fitting.coerceIn(500_000, 2_500_000)
-}
+private const val VideoBitrate = 2_500_000
 
 data class PreparedMedia(val bytes: ByteArray,val width: Int,val height: Int,val video: Boolean=false,val duration: Int=0, val heic: Boolean=false)
 object MediaFiles {
@@ -204,7 +199,7 @@ object MediaFiles {
         }
     }
     @androidx.annotation.OptIn(androidx.media3.common.util.UnstableApi::class)
-    suspend fun video(context: Context,uri: Uri): PreparedMedia {
+    suspend fun video(context: Context,uri: Uri,fromCamera: Boolean = false): PreparedMedia {
         val file=File(context.cacheDir,"prepared-${UUID.randomUUID()}.mp4")
         try {
             val (width, height, lengthMs) = withContext(Dispatchers.IO) {
@@ -212,7 +207,8 @@ object MediaFiles {
                 try {
                     retriever.setDataSource(context, uri)
                     val lengthMs = retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_DURATION)?.toLongOrNull() ?: 0L
-                    require(lengthMs <= SharedVideoLimitMs + 500) { context.getString(R.string.video_too_long) }
+                    val maxInputMs = SharedVideoLimitMs + if (fromCamera) 500L else 0L
+                    require(lengthMs <= maxInputMs) { context.getString(R.string.video_too_long) }
                     val w = checkNotNull(retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_VIDEO_WIDTH)).toInt()
                     val h = checkNotNull(retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_VIDEO_HEIGHT)).toInt()
                     val rotation = retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_VIDEO_ROTATION)?.toInt()
@@ -235,7 +231,7 @@ object MediaFiles {
                         listOf(Presentation.createForWidthAndHeight(width, height, Presentation.LAYOUT_SCALE_TO_FIT)),
                     )).build()
                     val encoder = DefaultEncoderFactory.Builder(context)
-                        .setRequestedVideoEncoderSettings(VideoEncoderSettings.Builder().setBitrate(videoBitrate(minOf(lengthMs, SharedVideoLimitMs))).setiFrameIntervalSeconds(2f).build())
+                        .setRequestedVideoEncoderSettings(VideoEncoderSettings.Builder().setBitrate(VideoBitrate).setiFrameIntervalSeconds(2f).build())
                         .setRequestedAudioEncoderSettings(AudioEncoderSettings.Builder().setBitrate(128_000).build())
                         .setEnableFormatFallback(false)
                         .build()

@@ -17,10 +17,10 @@ The app talks to the live hub (TestFlight and App Store) or the dev hub (Yo Dev)
 - Invite links: https://justyo.co/NAME (your code, Invite on the list) and yo://add/NAME open Yo and add NAME as a
   friend; before an account the name waits through the way in (`Invite.swift`). The first Yo sent says what it does.
 - Share sheet (Yo from the App Store and TestFlight): "Yo" for up to ten photos or one video from Photos or any app;
-  the same bars, a tap on a name sends them to that friend from there (`Sources/YoShare`), as the app would. Without
-  network (or with the hub's "not now") they wait in the App Group `group.app.justyo.ios` and the app sends them as
-  soon as it opens (`ShareBridge.swift`, `Share.swift`). A shared or library video may be 30 s (the camera's 10 s); a
-  longer one opens the system's trimmer (`VideoTrimmer.swift`), and only where that cannot cut is it refused.
+  tap a friend's or group's Yo bar to send the media and see the result on that bar. Tap more bars to send to more
+  recipients, then tap Done. Without network (or with the hub's "not now") shares wait in the App Group
+  `group.app.justyo.ios` and go when Yo opens (`ShareBridge.swift`, `Share.swift`). Shared, library and camera videos
+  have a 10 s limit. Longer shared or library videos open the system's trimmer full-screen (`VideoTrimmer.swift`).
 - Notifications (the same builds): "Yo from YoGPT", "📷 from …", "Yo!!!!! +4 from … · 📷 2" (one notification per run, as the bar says it), with the Yo sound and "Yo Back". The
   push only says "Yo"; the notification service (`Sources/YoNotify`) receives once, names the sender and fetches a
   photo or video of up to 6 MiB into the App Group first (`Prefetch.swift`; the app and the service claim a blob

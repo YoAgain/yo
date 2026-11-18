@@ -235,7 +235,7 @@ struct FriendList: View {
   @State private var libraryItems: [_PhotosUI_SwiftUI.PhotosPickerItem] = []
   /// Ordered library picks kept for repeated sends until closed.
   @State private var picked: [Picked] = []
-  /// The system's trimmer, open for a picked video longer than a Yo's (30 s).
+  /// The system's trimmer, open for a picked video longer than a Yo's (10 s).
   @State private var videoTrim: VideoTrim?
 
   /// A photo from the library: what is sent, and its pictures for the screen, made once (a 48-megapixel photo decoded
@@ -2062,7 +2062,7 @@ extension FriendList {
           do {
             try await Task.detached { try data.write(to: url) }.value
             var source = url
-            // Longer than a Yo's video (30 s): the system's trimmer offers the part to send; closed, it is left out;
+            // Longer than a Yo's video (10 s): the system's trimmer offers the part to send; closed, it is left out;
             // where it cannot cut, it is refused.
             if let seconds = await MediaFile.length(of: url), !MediaFile.fits(seconds) {
               let result = await VideoTrim.run(url) { videoTrim = $0 }
@@ -2071,7 +2071,7 @@ extension FriendList {
               case .cut(let cut): source = cut
               case .cancelled: continue
               case .failed:
-                problem = ("Video too long · max 30 s", "")
+                problem = ("Video too long · max \(Int(MediaFile.longestVideo)) s", "")
                 continue
               }
             }
@@ -3550,7 +3550,7 @@ struct HeldMedia: View {
     let length = (try? await AVURLAsset(url: video).load(.duration).seconds) ?? 0
     guard !Task.isCancelled else { return }
     shows(current)
-    // A video is 30 s at most (spec 5): a longer one, from a sender that ignores it, is cut there. The bar runs over
+    // A video is 10 s at most (spec 5): a longer one, from a sender that ignores it, is cut there. The bar runs over
     // its real length, not the sender's word.
     seconds = length > 0 ? min(length, Self.longestVideo) : photoSeconds
   }
