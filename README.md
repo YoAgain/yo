@@ -133,23 +133,23 @@ See the [yo-load measurements and commands](tests/README.md#load).
 ## Development
 
 <!-- loc -->
-```text
-Lines of code per day, without tests
-                                                                    44k       52k
-                                                31k       36k      ▃▃▃▃▃     █████
-                            17k       24k      ▃▃▃▃▃     ▆▆▆▆▆     █████     █████
-         5k        7k      ▂▂▂▂▂     ▇▇▇▇▇     █████     █████     █████     █████
-       ▃▃▃▃▃     ▄▄▄▄▄     █████     █████     █████     █████     █████     █████
-       Day 1     Day 2     Day 3     Day 4     Day 5     Day 6     Day 7     Day 8
+Lines of code on `main`, without tests, day by day:
 
-The code today, by part
-71k  ███████████ ████████████████ ██████████████████████████████ █████████████████████
-       Hub 10k       Core 14k                Apps 28k                  Tests 19k
+| Day 1 | Day 2 | Day 3 | Day 4 | Day 5 | Day 6 | Day 7 | Day 8 |
+|---:|---:|---:|---:|---:|---:|---:|---:|
+| 5k | 7k | 17k | 24k | 31k | 36k | 44k | 52k |
 
-The client today, by app
-42k  ██████████████████████████ ████████████████████████████████████████ █████████ ███
-              Core 14k                          iOS 22k            Android 5k YoGPT 2k
-```
+Today, by part:
+
+| Hub | Core | Apps | Tests | Total |
+|---:|---:|---:|---:|---:|
+| 10k | 14k | 28k | 19k | 71k |
+
+The client today, by app (without tests):
+
+| Core | iOS | Android | YoGPT | Total |
+|---:|---:|---:|---:|---:|
+| 14k | 22k | 5k | 2k | 42k |
 <!-- /loc -->
 
 

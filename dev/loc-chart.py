@@ -74,69 +74,11 @@ def history():
     return sorted(daily.items())
 
 
-def chart(points):
-    """The total lines without tests per day as upright columns, the day under each and the total on top."""
-    code = lambda counts: sum(n for kind, n in counts.items() if kind != "Tests")
-    totals = [code(counts) for _, counts in points]
-    first = points[0][0]
-    days = [f"Day {(day - first).days + 1}" for day, _ in points]
-    height, peak = 4, max(totals) or 1
-    column = max(7, (LINE - 5) // len(points))
-    eighths = [round(t / peak * height * 8) for t in totals]
-    lines = []
-    for row in range(height + 1, 0, -1):
-        cells = []
-        for k, (t, e) in enumerate(zip(totals, eighths)):
-            full, rest = divmod(e, 8)
-            tip = full + (1 if rest else 0)
-            if row <= full:
-                cell = "█████"
-            elif row == full + 1 and rest:
-                cell = " ▁▂▃▄▅▆▇"[rest] * 5
-            elif row == tip + 1:
-                cell = f"{round(t / 1000)}k"
-            else:
-                cell = ""
-            cells.append(f"{cell:^{column}}")
-        lines.append("     " + "".join(cells).rstrip())
-    lines.append("     " + "".join(f"{d:^{column}}" for d in days).rstrip())
-    return "\n".join(lines)
-
-
-def shares(counts, names):
-    """One bar of the whole, as wide as the daily chart, each part apart by a space; under each part, centred,
-    its name and size."""
-    total = sum(counts[name] for name in names) or 1
-    width = LINE - 5 - (len(names) - 1)
-    cells = [max(1, round(counts[name] / total * width)) for name in names]
-    cells[cells.index(max(cells))] += width - sum(cells)
-    bar = " ".join("█" * n for n in cells)
-    # Each label centred under its part; where labels would touch or run past the bar's end, they move apart
-    # just enough (right first, then back left from the end).
-    labels = [f"{name} {round(counts[name] / 1000)}k" for name in names]
-    starts, at = [], 0
-    for label, n in zip(labels, cells):
-        starts.append(max(at + (n - len(label)) // 2, starts[-1] + len(labels[len(starts) - 1]) + 1 if starts else 0))
-        at += n + 1
-    limit = len(bar)
-    for k in range(len(labels) - 1, -1, -1):
-        starts[k] = min(starts[k], limit - len(labels[k]))
-        limit = starts[k] - 1
-    legend = ""
-    for label, start in zip(labels, starts):
-        legend += " " * (start - len(legend)) + label
-    return f"{round(total / 1000):>2}k  {bar}\n     {legend}"
-
-
-# Width of every chart line: the width of a README code block on GitHub.
-LINE = 86
-# Width of a part's column in the first chart.
-WIDTH = 7
-# The second chart: today's code by app, tests not counted.
+# Today's client by app, tests not counted.
 APPS = (("Core", "core/"), ("iOS", "app/ios/"), ("Android", "app/android/"), ("YoGPT", "app/yogpt/"))
 
 
-def by_app():
+def app_counts():
     """Lines of code on main's tip per app (tests and binary files left out)."""
     names = git("ls-tree", "-r", "-z", "--name-only", "main").split(b"\0")
     counts = {name: 0 for name, _ in APPS}
@@ -150,7 +92,30 @@ def by_app():
             blob = git("show", f"main:{path}")
             if b"\0" not in blob[:8000]:
                 counts[app] += blob.count(b"\n")
-    return shares(counts, [name for name, _ in APPS])
+    return counts
+
+
+def table(head, cells):
+    """A one-row Markdown table: the heads, then the numbers in whole thousands, right-aligned."""
+    return "\n".join([
+        "| " + " | ".join(head) + " |",
+        "|" + "|".join("---:" for _ in head) + "|",
+        "| " + " | ".join(cells) + " |",
+    ])
+
+
+def tables(points):
+    """Three small tables: lines per day without tests, today's code by part, today's client by app."""
+    k = lambda n: f"{round(n / 1000)}k"
+    first = points[0][0]
+    code = lambda counts: sum(n for kind, n in counts.items() if kind != "Tests")
+    days = table([f"Day {(day - first).days + 1}" for day, _ in points], [k(code(c)) for _, c in points])
+    today = points[-1][1]
+    parts = table([*KINDS, "Total"], [k(today[kind]) for kind in KINDS] + [k(sum(today.values()))])
+    apps = app_counts()
+    client = table([*apps, "Total"], [k(n) for n in apps.values()] + [k(sum(apps.values()))])
+    return (f"Lines of code on `main`, without tests, day by day:\n\n{days}\n\n"
+            f"Today, by part:\n\n{parts}\n\nThe client today, by app (without tests):\n\n{client}")
 
 
 def main():
@@ -159,10 +124,7 @@ def main():
     start, end = "<!-- loc -->", "<!-- /loc -->"
     if start not in text or end not in text:
         raise SystemExit("README.md has no <!-- loc --> … <!-- /loc --> block")
-    points = history()
-    block = (f"{start}\n```text\nLines of code per day, without tests\n{chart(points)}\n\n"
-             f"The code today, by part\n{shares(points[-1][1], KINDS)}\n\n"
-             f"The client today, by app\n{by_app()}\n```\n{end}")
+    block = f"{start}\n{tables(history())}\n{end}"
     before, rest = text.split(start, 1)
     after = rest.split(end, 1)[1]
     readme.write_text(before + block + after)
