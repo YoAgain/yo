@@ -81,9 +81,11 @@ final class YoVideoEditor: UIVideoEditorController, UIVideoEditorControllerDeleg
   required init?(coder: NSCoder) { fatalError() }
 
   override func viewWillLayoutSubviews() {
+    // The limit as the bar's title (instead of the system's "Edit"); a prompt above it ran into the sheet's top edge.
     if let item = navigationBar.topItem {
-      let prompt = "Trim video · max \(Int(MediaFile.longestVideo)) s"
-      if item.prompt != prompt { item.prompt = prompt }
+      let title = "Max \(Int(MediaFile.longestVideo)) s"
+      if item.title != title { item.title = title }
+      if item.prompt != nil { item.prompt = nil }
     }
     super.viewWillLayoutSubviews()
   }
