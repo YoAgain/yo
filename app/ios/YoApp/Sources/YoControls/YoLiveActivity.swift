@@ -98,11 +98,11 @@ private struct Bar: View {
         .fixedSize()  // the words never shrink; the name is what is cut
         .contentTransition(.numericText(value: Double(state.others.isEmpty ? state.count : state.total)))
         .opacity(state.outcome == .sending && !stale ? 0.45 : 1)
-      Name(state: state, size: 24, tinted: false, all: true)
+      Name(state: state, size: 30, tinted: false, all: true)
         .foregroundStyle(.white)
     }
     // A fixed size (no Dynamic Type here): the island's height is fixed too, a larger text would be cut.
-    .font(.custom("Montserrat-Bold", fixedSize: 24))
+    .font(.custom("Montserrat-Bold", fixedSize: 30))
     .lineLimit(1)
     .minimumScaleFactor(0.8)
     .padding(.horizontal, 6)
