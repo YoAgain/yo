@@ -105,8 +105,8 @@ def shares(counts, names):
     return f"{round(total / 1000):>2}k  {bar}\n\n     {legend}"
 
 
-# Width of a line of the daily chart, which the client bar spans too.
-LINE = 61
+# Width of every chart line: the width of a README code block on GitHub.
+LINE = 96
 # Width of a part's column in the first chart.
 WIDTH = 7
 # The second chart: today's code by app, tests not counted.
