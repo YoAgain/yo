@@ -75,20 +75,21 @@ def history():
 
 
 def chart(points):
-    """One line per day: the total (whole thousands) as a bar, the parts beside it, tests last."""
-    peak = max(sum(counts.values()) for _, counts in points)
+    """One line per day: a bar, the parts, the total last (whole thousands); tests left out."""
+    shown = ("Hub", "Core", "Apps")
+    peak = max(sum(counts[kind] for kind in shown) for _, counts in points)
     lines = []
     first = points[0][0]
     for day, counts in points:
-        total = sum(counts.values())
+        total = sum(counts[kind] for kind in shown)
         eighths = round(total / peak * 24 * 8)
         bar = "█" * (eighths // 8) + " ▏▎▍▌▋▊▉"[eighths % 8].strip()
         # A fixed column per part, so the numbers line up day by day.
-        parts = "".join(f"{round(counts[kind] / 1000):>{WIDTH - 1}}k" for kind in KINDS)
+        parts = "".join(f"{round(counts[kind] / 1000):>{WIDTH - 1}}k" for kind in shown)
         label = f"Day {(day - first).days + 1}"
-        lines.append(f"{label:<7} {round(total / 1000):>3}k  {bar:<25}{parts}")
+        lines.append(f"{label:<7} {bar:<25}{parts}{round(total / 1000):>{WIDTH - 1}}k")
     # The parts named once, over their columns.
-    head = " " * 38 + "".join(f"{kind:>{WIDTH}}" for kind in KINDS)
+    head = " " * 33 + "".join(f"{kind:>{WIDTH}}" for kind in (*shown, "Total"))
     return "\n".join([head, *lines])
 
 
@@ -128,7 +129,7 @@ def main():
     start, end = "<!-- loc -->", "<!-- /loc -->"
     if start not in text or end not in text:
         raise SystemExit("README.md has no <!-- loc --> … <!-- /loc --> block")
-    block = (f"{start}\n#### Lines of code per day\n\n```text\n{chart(history())}\n```\n\n"
+    block = (f"{start}\n#### Lines of code per day (without tests)\n\n```text\n{chart(history())}\n```\n\n"
              f"#### The client today, by app\n\n```text\n{by_app()}\n```\n{end}")
     before, rest = text.split(start, 1)
     after = rest.split(end, 1)[1]

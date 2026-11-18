@@ -133,18 +133,18 @@ See the [yo-load measurements and commands](tests/README.md#load).
 ## Development
 
 <!-- loc -->
-#### Lines of code per day
+#### Lines of code per day (without tests)
 
 ```text
-                                          Hub   Core   Apps  Tests
-Day 1     6k  ██▏                           2k     3k     0k     2k
-Day 2     9k  ███▏                          2k     3k     2k     2k
-Day 3    21k  ███████                       4k     5k     8k     4k
-Day 4    33k  ███████████▏                  5k     7k    11k     9k
-Day 5    47k  ███████████████▉              6k    11k    14k    16k
-Day 6    53k  █████████████████▉            9k    11k    16k    17k
-Day 7    62k  █████████████████████▏       10k    13k    21k    18k
-Day 8    71k  ████████████████████████     10k    14k    28k    19k
+                                     Hub   Core   Apps  Total
+Day 1   ██▏                           2k     3k     0k     5k
+Day 2   ███▎                          2k     3k     2k     7k
+Day 3   ███████▊                      4k     5k     8k    17k
+Day 4   ██████████▉                   5k     7k    11k    24k
+Day 5   ██████████████▎               6k    11k    14k    31k
+Day 6   ████████████████▋             9k    11k    16k    36k
+Day 7   ████████████████████▍        10k    13k    21k    44k
+Day 8   ████████████████████████     10k    14k    28k    52k
 ```
 
 #### The client today, by app
