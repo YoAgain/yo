@@ -88,7 +88,6 @@ private struct Bar: View {
       Text(verbatim: words)
         .fixedSize()  // the words never shrink; the name is what is cut
         .contentTransition(.numericText(value: Double(state.others.isEmpty ? state.count : state.total)))
-        .animation(.default, value: words)
       Name(state: state, size: 22, tinted: false, all: true)
         .opacity(0.85)
     }
