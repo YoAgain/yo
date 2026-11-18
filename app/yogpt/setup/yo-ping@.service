@@ -1,5 +1,5 @@
 [Unit]
-Description=Yo roundtrip echo (%i)
+Description=Yo PING echo (%i)
 After=network.target
 
 [Service]

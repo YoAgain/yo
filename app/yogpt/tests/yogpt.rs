@@ -467,39 +467,48 @@ fn echo_is_immediate_single_plain_bounded_and_logs_no_sender() {
 fn ping_answers_normal_yos_and_token_probes_independently() {
     let hub = TestHub::start();
     let state = state_dir();
-    let mut command = Command::new(env!("CARGO_BIN_EXE_yo-gpt"));
-    command.args(["--account", &format!("ping={},{},PING", hub.url(), state.display()), "--echo", "ping"]);
-    command.args(["--trust-root", &format!("ping={}", yo_wire::b64(&yo_tests::trust_root()))]);
-    let bot = Bot(command.spawn().unwrap());
-    let ready = Instant::now();
-    while Client::username_free(Http::new(hub.url()).as_ref(), "PING").unwrap() {
-        assert!(ready.elapsed() < Duration::from_secs(10));
-        std::thread::sleep(Duration::from_millis(20));
-    }
+    let probe_state = state_dir();
+    let bot = ping(&hub, &state, &[], &[]);
+    let probe_bot = echo_bot(&hub, &probe_state, "PINGTEST", &[], &[]);
     let mut alice = someone(&hub);
+    let (user, name) = alice.whois_begin("PING").unwrap().send().unwrap();
+    alice.whois_end("PING", &user, name.clone()).unwrap();
+    alice.set_friend(&user, name, None).unwrap();
+    alice.write_storage().unwrap();
+    assert!(alice.sync(0).unwrap().is_empty(), "adding PING does not require a reply");
+    assert_eq!(alice.friends()[0].user, user);
     alice.send_yo("PING").unwrap();
     assert_eq!(yos_until_quiet(&mut alice, Duration::from_millis(300)).len(), 1);
     assert_eq!(alice.contacts().len(), 1);
+    assert!(alice.round_trip_probe("PING", 900).is_err());
     let began = Instant::now();
-    assert!(alice.round_trip_probe("PING", 900).unwrap().is_some());
+    assert!(alice.round_trip_probe("PINGTEST", 900).unwrap().is_some());
     assert!(began.elapsed() < Duration::from_millis(900), "probe used the think path");
-    assert!(alice.sync(0).unwrap().is_empty(), "probe is silent for an ordinary PING contact too");
+    assert!(alice.sync(0).unwrap().is_empty(), "PINGTEST probe is silent");
+    assert_eq!(alice.contacts().len(), 1);
+    assert_eq!(alice.contacts()[0].user, user);
     alice.send_yo("PING").unwrap();
     assert_eq!(yos_until_quiet(&mut alice, Duration::from_millis(300)).len(), 1);
     drop(bot);
+    drop(probe_bot);
+    std::fs::remove_dir_all(probe_state).unwrap();
     std::fs::remove_dir_all(state).unwrap();
 }
 
-/// PING (`--echo`) on `hub`, with the hub's trust root and zkgroup params (groups), `args` added; once it is there.
 fn ping(hub: &TestHub, state: &Path, args: &[&str], env: &[(&str, &str)]) -> Bot {
+    echo_bot(hub, state, "PING", args, env)
+}
+
+/// An echo account with the hub's trust root and group parameters, ready to receive.
+fn echo_bot(hub: &TestHub, state: &Path, name: &str, args: &[&str], env: &[(&str, &str)]) -> Bot {
     let mut command = Command::new(env!("CARGO_BIN_EXE_yo-gpt"));
-    command.args(["--account", &format!("ping={},{},PING", hub.url(), state.display()), "--echo", "ping"]);
-    command.args(["--trust-root", &format!("ping={}", yo_wire::b64(&yo_tests::trust_root()))]);
-    command.args(["--zk-params", &format!("ping={}", yo_wire::b64(&yo_tests::zk_params()))]);
+    command.args(["--account", &format!("{name}={},{},{name}", hub.url(), state.display()), "--echo", name]);
+    command.args(["--trust-root", &format!("{name}={}", yo_wire::b64(&yo_tests::trust_root()))]);
+    command.args(["--zk-params", &format!("{name}={}", yo_wire::b64(&yo_tests::zk_params()))]);
     command.args(args).envs(env.iter().copied());
     let bot = Bot(command.spawn().unwrap());
     let ready = Instant::now();
-    while Client::username_free(Http::new(hub.url()).as_ref(), "PING").unwrap() {
+    while Client::username_free(Http::new(hub.url()).as_ref(), name).unwrap() {
         assert!(ready.elapsed() < Duration::from_secs(10));
         std::thread::sleep(Duration::from_millis(20));
     }

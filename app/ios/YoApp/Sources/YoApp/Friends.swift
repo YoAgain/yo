@@ -229,7 +229,7 @@ final class Friends {
   /// A friend on the list who counts as one (bots, groups, requests, blocked and gone accounts don't).
   var hasFriend: Bool {
     all.contains {
-      $0.group == nil && !$0.request && !$0.blocked && !$0.gone && !AddFriendHint.bots.contains($0.name.lowercased())
+      $0.group == nil && !$0.request && !$0.blocked && !$0.gone && !AddFriendHint.bots.contains(Username.skeleton($0.name))
     }
   }
   var blocked: [Friend] { all.filter(\.blocked) }

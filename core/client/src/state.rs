@@ -135,7 +135,7 @@ pub struct Slot {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Contact {
-    /// PING routing state; hidden only until explicitly added or written to.
+    /// PINGTEST routing state; hidden only until explicitly added or written to.
     #[serde(default)]
     pub probe_service: bool,
     #[serde(default)]
@@ -570,7 +570,14 @@ pub fn open(blob: &[u8], key: &[u8; 32]) -> Result<(State, Entries)> {
         .map(|entry| Ok((String::from_utf8(entry.key.into()).map_err(|_| Error::State)?, entry.value.into())))
         .collect::<Result<Entries>>();
     wipe(plain.state);
-    Ok((state?, entries?))
+    let mut state = state?;
+    for contact in state.contacts.values_mut().filter(|contact| contact.probe_service) {
+        // Older clients marked the public PING account as the probe service.
+        if !contact.handles.iter().any(|handle| crate::same_handle(handle, crate::PROBE_HANDLE)) {
+            contact.probe_service = false;
+        }
+    }
+    Ok((state, entries?))
 }
 
 /// A state from before the keys were libsignal's: the Ed25519 seeds of the account key and the auth key become the

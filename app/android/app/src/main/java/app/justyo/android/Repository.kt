@@ -604,7 +604,7 @@ class Repository(private val context: Context, ownerScope: CoroutineScope) {
     suspend fun feedback(text: String) { client?.sendSupport(utf8Limit(text.trim(), 2000), BuildConfig.VERSION_NAME) }
     suspend fun supportThread() = client?.supportThread()
     suspend fun supportRead(through: ULong) { client?.supportRead(through) }
-    suspend fun roundTrip() = client?.roundTripProbe("PING", 10000u)
+    suspend fun roundTrip() = client?.roundTripProbe("PINGTEST", 10000u)
     val crashes = CrashReports(context, transport)
 
     suspend fun settings(left: Boolean = state.value.leftHanded, save: Boolean = state.value.saveSent, requests: Boolean = state.value.requestsOpen) {

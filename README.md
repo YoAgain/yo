@@ -58,9 +58,9 @@ and [threat model](hub/SECURITY.md). Only you and your recipients can read your 
 The optional Yo-to-Yo Roundtrip probe runs only when tapped. Its operator can see that the account was
 active at that moment. No per-user probe history or timing is stored or logged (only aggregate counters;
 mandatory encrypted protocol state and volatile rate limiting remain). Probes and their token-matched replies
-stay out of requests, notifications, stats and Account Sync, including late replies. PING can be added like
-any contact: ordinary Yos then appear normally, while probe replies remain silent. See
-[the PING deployment and privacy notes](app/yogpt/README.md).
+stay out of requests, notifications, stats and Account Sync, including late replies. The probe uses PINGTEST.
+PING is a separate, visible echo contact for Yos, photos and videos. See
+[the echo deployment and privacy notes](app/yogpt/README.md).
 
 Groups use zkgroup, with up to 20 members; group names and membership are encrypted too.
 Photos and videos are view-once: the app deletes them and their keys after viewing.

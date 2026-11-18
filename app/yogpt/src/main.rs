@@ -8,7 +8,7 @@
 //!
 //! `--echo NAME` reserves that account for immediate echoes with aggregate-only logs: what it gets goes back once,
 //! as it came (a Yo as a Yo, a photo or video as the same one, sealed anew), to the sender or into the group; see
-//! README.md for PING deployment and limits. Normal accounts keep the behavior below.
+//! README.md for echo deployment and limits. Normal accounts keep the behavior below.
 //!
 //! `--quiet-for USERNAME[,USERNAME…]` (given once or more, any case): Yos, photos and videos from these users are never
 //! answered, one to one or in a group (by the group message's sender), so bot accounts in one group never answer each

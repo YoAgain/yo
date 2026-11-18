@@ -489,7 +489,7 @@ import uniffi.yo.usernameFree
                     } else FlatRow("+",Repository.nextColor(s.friends),onClick={add=true})
                 }
                 val hasContacts = friends.any {
-                    it.group == null && !it.request && uniffi.yo.usernameSkeleton(it.name) !in setOf("YOGPT", "PING")
+                    it.group == null && !it.request && uniffi.yo.usernameSkeleton(it.name) !in setOf("YOGPT", "PING", "PINGTEST")
                 }
                 if (!hasContacts || add) {
                     item { FlatRow(uiResources.getString(R.string.group_row), Repository.nextColor(s.friends) + 1, onClick = { group = true }) }

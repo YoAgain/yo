@@ -215,6 +215,7 @@ final class AccountStore {
   private var restored = false
   /// Writes to the storage, one after the other in the order made (`Hub.run` runs calls side by side).
   private var storing: Task<Void, Never>?
+  private var storageWriteGeneration: UInt64 = 0
   /// The shared state of an account signed out of, being deleted (`reset`): a registration waits for it.
   private var deleting: Task<Void, Never>?
   /// This phone's friends from before the storage went up to it once (`takeStorage`); a new or restored account has
@@ -944,6 +945,7 @@ final class AccountStore {
   private func toStorage(_ write: @escaping @Sendable (YoClient) -> Void = { _ in }) {
     guard let client else { return }
     let before = storing
+    storageWriteGeneration &+= 1
     storing = Task {
       await before?.value
       _ = try? await Hub.run {
@@ -959,39 +961,47 @@ final class AccountStore {
   /// Settings are written only by their controls, never from here.
   func takeStorage(into friends: Friends, read: Bool = false) async {
     guard let client else { return }
-    await storing?.value  // this phone's own writes first
-    let known = Set(friends.all.compactMap(\.user))
-    guard
-      let (kept, icon, leftHanded, names) = try? await Hub.run(reportErrors: false, { () throws -> ([YoFriend], String?, Bool?, [String: String]) in
-        // `friends()` answers a read it could not make (the shared database not readable now, the client closed) as
-        // an empty list: a read that throws before and after it tells that the core answered (and a failed one is
-        // no read; the next takes it). Reads take no turn: an extension's step never holds them up.
-        _ = try client.storageSavedAt()
-        let kept = client.friends()
-        _ = try client.storageSavedAt()
-        // A friend kept without a name (a block alone, a name over 64 bytes) and new here: the core's name for them,
-        // else the hub's.
-        let contacts = client.contacts()
-        var names: [String: String] = [:]
-        for friend in kept where friend.name == nil && !known.contains(friend.user) {
-          names[friend.user] =
-            contacts.first { $0.user == friend.user }?.handles.first ?? Diagnostics.attempt({ try client.whois(name: friend.user) }).flatMap({ $0 })?.username
-        }
-        return (kept, client.appIcon(), client.leftHanded(), names)
-      }), client === self.client
-    else { return }
-    // Pruned only by a list that has friends: an empty one may still be a refused read, and taking it would empty
-    // the list of everyone known by user id (and its saved copy, until the next read put them back).
-    friends.take(kept, names: names, seed: !friendsSeeded, prune: !restored && !kept.isEmpty)
-    friendsSeeded = true
-    storageRead = true
-    if let leftHanded {
-      UserDefaults.standard.set(leftHanded, forKey: SettingKey.leftHanded)
-    }
-    guard restored, read || !kept.isEmpty || icon != nil || leftHanded != nil else { return }  // maybe not read yet: after the first sync
-    restored = false
-    if icon != UIApplication.shared.alternateIconName {
-      try? await UIApplication.shared.setAlternateIconName(icon)
+    while client === self.client {
+      let generation = storageWriteGeneration
+      await storing?.value
+      guard client === self.client else { return }
+      guard generation == storageWriteGeneration else { continue }
+      let known = Set(friends.all.compactMap(\.user))
+      guard
+        let (kept, icon, leftHanded, names) = try? await Hub.run(reportErrors: false, { () throws -> ([YoFriend], String?, Bool?, [String: String]) in
+          // `friends()` answers a read it could not make (the shared database not readable now, the client closed) as
+          // an empty list: a read that throws before and after it tells that the core answered (and a failed one is
+          // no read; the next takes it). Reads take no turn: an extension's step never holds them up.
+          _ = try client.storageSavedAt()
+          let kept = client.friends()
+          _ = try client.storageSavedAt()
+          // A friend kept without a name (a block alone, a name over 64 bytes) and new here: the core's name for them,
+          // else the hub's.
+          let contacts = client.contacts()
+          var names: [String: String] = [:]
+          for friend in kept where friend.name == nil && !known.contains(friend.user) {
+            names[friend.user] =
+              contacts.first { $0.user == friend.user }?.handles.first ?? Diagnostics.attempt({ try client.whois(name: friend.user) }).flatMap({ $0 })?.username
+          }
+          return (kept, client.appIcon(), client.leftHanded(), names)
+        }), client === self.client
+      else { return }
+      // A local edit can queue another write while the snapshot is read off the main actor.
+      guard generation == storageWriteGeneration else { continue }
+      // Pruned only by a list that has friends: an empty one may still be a refused read, and taking it would empty
+      // the list of everyone known by user id (and its saved copy, until the next read put them back).
+      friends.take(kept, names: names, seed: !friendsSeeded, prune: !restored && !kept.isEmpty)
+      friendsSeeded = true
+      storageRead = true
+      if let leftHanded {
+        UserDefaults.standard.set(leftHanded, forKey: SettingKey.leftHanded)
+      }
+      guard restored, read || !kept.isEmpty || icon != nil || leftHanded != nil else { return }  // maybe not read yet: after the first sync
+      restored = false
+      if icon != UIApplication.shared.alternateIconName {
+        try? await UIApplication.shared.setAlternateIconName(icon)
+      }
+      return
     }
   }
 

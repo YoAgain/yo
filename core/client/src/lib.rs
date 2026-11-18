@@ -674,6 +674,8 @@ fn user_bytes(user: &str) -> Result<UserId> {
     unhex(user).and_then(|u| u.try_into().ok()).ok_or(Error::Protocol("user id"))
 }
 
+const PROBE_HANDLE: &str = "PINGTEST";
+
 /// Whether two handles as shown name the same: a username by its skeleton (spec 3.3), so "yogpt" is "YoGPT".
 fn same_handle(a: &str, b: &str) -> bool {
     yo_wire::handle::same_name(a, b)
@@ -1936,13 +1938,13 @@ impl Client {
         }
     }
 
-    /// A handle the hub says is this user's now: no other contact is known by it any more (it was theirs once).
     pub(crate) fn probe_service(&self, user: &str) -> bool {
         self.state.contacts.get(user).is_some_and(|c| c.probe_service && !c.chat)
     }
 
+    /// A handle the hub says is this user's now: no other contact is known by it any more (it was theirs once).
     fn take_handle(&mut self, user: &str, shown: String) {
-        if same_handle(&shown, "PING") {
+        if same_handle(&shown, PROBE_HANDLE) {
             let added = self.state.storage.friends.get(user).is_some_and(|f| !f.removed.value);
             if let Some(contact) = self.state.contacts.get_mut(user) {
                 contact.probe_service = true;
@@ -3157,8 +3159,8 @@ impl Client {
             }
             return Ok(());
         }
-        // In a group, PING is a member like any other: what it sends there, and its changes, are the group's (checked
-        // there against the members). Only one to one it stays routing state until added.
+        // Group messages and changes are checked against group membership. The probe service stays routing
+        // state only in one-to-one exchanges until added.
         let in_group = message.group.is_some() || matches!(message.content, Content::Group(_));
         if self.probe_service(user) && !in_group {
             // Access keys are protocol routing state. Keep them locally so repeated
@@ -3416,7 +3418,7 @@ impl Client {
         self.send(to, Content::Yo)
     }
 
-    /// Explicitly adding or writing to PING makes it an ordinary contact.
+    /// Explicitly adding or writing to the probe service makes it an ordinary contact.
     pub(crate) fn promote_contact(&mut self, user: &str) {
         if let Some(contact) = self.state.contacts.get_mut(user).filter(|c| c.probe_service && !c.chat) {
             contact.chat = true;
@@ -3453,10 +3455,10 @@ impl Client {
     /// Starts a user-triggered probe to the reserved service. Returns a local ticket;
     /// app events received along the way remain queued for the ordinary inbox consumer.
     pub fn round_trip_probe_begin(&mut self, target: &str, timeout_ms: u64) -> Result<Probe> {
-        if !same_handle(target, "PING") {
-            return Err(Error::Protocol("probe target must be PING"));
+        if !same_handle(target, PROBE_HANDLE) {
+            return Err(Error::Protocol("probe target must be PINGTEST"));
         }
-        let handle = Handle::parse("PING")?;
+        let handle = Handle::parse(PROBE_HANDLE)?;
         let user = match self.known_user(&handle).filter(|u| self.has_chat(u)) {
             Some(user) => user,
             None => self.start_chat(&handle)?,

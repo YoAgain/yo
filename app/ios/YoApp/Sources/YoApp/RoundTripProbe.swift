@@ -24,7 +24,7 @@ import YoCore
     let token = UUID()
     run = token
     Task {
-      let result = try? await Hub.run { try client.roundTripProbe(target: "PING", timeoutMs: 10_000) }
+      let result = try? await Hub.run { try client.roundTripProbe(target: "PINGTEST", timeoutMs: 10_000) }
       guard run == token else { return }
       milliseconds = result
       measured = true
