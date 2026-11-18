@@ -133,6 +133,8 @@ See the [yo-load measurements and commands](tests/README.md#load).
 ## Development
 
 <!-- loc -->
+#### Lines of code per day
+
 ```text
                                           Hub   Core   Apps  Tests
 Day 1     6k  ██▏                           2k     3k     0k     2k
@@ -145,15 +147,15 @@ Day 7    62k  █████████████████████▏
 Day 8    71k  ████████████████████████     10k    14k    28k    19k
 ```
 
+#### The client today, by app
+
 ```text
-Core     14k  ███████████████▋
-iOS      22k  ████████████████████████
-Android   5k  █████▍
-YoGPT     2k  ██
+42k  ████████████████▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▒▒▒▒▒░░
+
+█ Core 14k (33%)   ▓ iOS 22k (51%)   ▒ Android 5k (11%)   ░ YoGPT 2k (4%)
 ```
 <!-- /loc -->
 
-The first chart counts lines of code on `main` per day, blanks and comments included: the hub with its admin page, the shared core, the apps (iOS, Android, YoGPT) and the tests. The second is today's code per app, tests left out. `python3 -I dev/loc-chart.py` updates both.
 
 <details>
 <summary>Tests, folders and contributing</summary>

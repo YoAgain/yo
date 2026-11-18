@@ -112,13 +112,16 @@ def by_app():
             blob = git("show", f"main:{path}")
             if b"\0" not in blob[:8000]:
                 counts[app] += blob.count(b"\n")
-    peak = max(counts.values()) or 1
-    lines = []
-    for name, _ in APPS:
-        eighths = round(counts[name] / peak * 24 * 8)
-        bar = "█" * (eighths // 8) + " ▏▎▍▌▋▊▉"[eighths % 8].strip()
-        lines.append(f"{name:<8}{round(counts[name] / 1000):>3}k  {bar}")
-    return "\n".join(lines)
+    # One bar for the whole client, each app's share in its own shade, named below with its share.
+    total = sum(counts.values()) or 1
+    shades = "█▓▒░"
+    width = 48
+    cells = [round(counts[name] / total * width) for name, _ in APPS]
+    cells[cells.index(max(cells))] += width - sum(cells)
+    bar = "".join(shade * n for shade, n in zip(shades, cells))
+    legend = "   ".join(f"{shade} {name} {round(counts[name] / 1000)}k ({counts[name] * 100 // total}%)"
+                       for shade, (name, _) in zip(shades, APPS))
+    return f"{round(total / 1000)}k  {bar}\n\n{legend}"
 
 
 def main():
@@ -127,7 +130,8 @@ def main():
     start, end = "<!-- loc -->", "<!-- /loc -->"
     if start not in text or end not in text:
         raise SystemExit("README.md has no <!-- loc --> … <!-- /loc --> block")
-    block = f"{start}\n```text\n{chart(history())}\n```\n\n```text\n{by_app()}\n```\n{end}"
+    block = (f"{start}\n#### Lines of code per day\n\n```text\n{chart(history())}\n```\n\n"
+             f"#### The client today, by app\n\n```text\n{by_app()}\n```\n{end}")
     before, rest = text.split(start, 1)
     after = rest.split(end, 1)[1]
     readme.write_text(before + block + after)
