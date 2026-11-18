@@ -97,18 +97,25 @@ def shares(counts, names):
     cells = [max(1, round(counts[name] / total * width)) for name in names]
     cells[cells.index(max(cells))] += width - sum(cells)
     bar = " ".join("█" * n for n in cells)
-    # Each label centred under its part; moved right only where the one before needs the room.
-    legend, at = "", 0
-    for name, n in zip(names, cells):
-        label = f"{name} {round(counts[name] / 1000)}k"
-        start = max(at + (n - len(label)) // 2, len(legend) + (1 if legend else 0), 0)
-        legend += " " * (start - len(legend)) + label
+    # Each label centred under its part; where labels would touch or run past the bar's end, they move apart
+    # just enough (right first, then back left from the end).
+    labels = [f"{name} {round(counts[name] / 1000)}k" for name in names]
+    starts, at = [], 0
+    for label, n in zip(labels, cells):
+        starts.append(max(at + (n - len(label)) // 2, starts[-1] + len(labels[len(starts) - 1]) + 1 if starts else 0))
         at += n + 1
+    limit = len(bar)
+    for k in range(len(labels) - 1, -1, -1):
+        starts[k] = min(starts[k], limit - len(labels[k]))
+        limit = starts[k] - 1
+    legend = ""
+    for label, start in zip(labels, starts):
+        legend += " " * (start - len(legend)) + label
     return f"{round(total / 1000):>2}k  {bar}\n\n     {legend}"
 
 
 # Width of every chart line: the width of a README code block on GitHub.
-LINE = 96
+LINE = 86
 # Width of a part's column in the first chart.
 WIDTH = 7
 # The second chart: today's code by app, tests not counted.
