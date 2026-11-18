@@ -21,6 +21,8 @@ struct YoControls: WidgetBundle {
     YoFriendWidget()
     YoListWidget()
     YoBackWidget()
+    // "Sent Yo! to Mia" in the Dynamic Island after a Yo from here (YoLiveActivity.swift).
+    YoSentLiveActivity()
   }
 }
 

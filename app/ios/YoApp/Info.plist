@@ -9,6 +9,13 @@
 	     build's timestamp (CI), which YO_MIN_APP compares. -->
 	<key>CFBundleShortVersionString</key>
 	<string>1.0.0</string>
+	<!-- English, and German for Siri and Shortcuts: de.lproj/AppShortcuts.strings has the App Shortcuts' phrases in
+	     German (YoShortcuts.swift). -->
+	<key>CFBundleLocalizations</key>
+	<array>
+		<string>en</string>
+		<string>de</string>
+	</array>
 	<!-- iPhone only: on an iPad it runs as the iPhone app (no iPad screenshots, no iPad layout to review). -->
 	<!-- Silent pushes (content-available, the hub's non-urgent deliveries) wake the app for one short inbox sync
 	     (AppDelegate in Push.swift). -->
@@ -84,6 +91,9 @@
 	<string>Yo uses Face ID to verify your identity before showing your recovery key.</string>
 	<key>NSPhotoLibraryAddUsageDescription</key>
 	<string>Yo saves your recovery key to Photos when you choose.</string>
+	<!-- "Sent Yo! to Mia" in the Dynamic Island after a Yo from outside the app (YoActivity.swift). -->
+	<key>NSSupportsLiveActivities</key>
+	<true/>
 	<key>UIAppFonts</key>
 	<array>
 		<string>Montserrat-Bold.ttf</string>

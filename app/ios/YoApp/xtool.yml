@@ -15,6 +15,9 @@ resources:
   - Resources/yo.caf
   # Settings › Licenses: the commit of the build and every licence (dev/licenses.sh makes it, ignored).
   - Resources/Licenses.txt
+  # Siri and Shortcuts in German (Info.plist CFBundleLocalizations): the App Shortcuts' phrases (YoShortcuts.swift)
+  # in German, which Siri reads from the bundle's de.lproj.
+  - Resources/de.lproj
   # The app icons to choose from in Appearance (Info.plist CFBundleAlternateIcons; loose PNGs at the root, 60 pt):
   # the negative (purple Yo on white), the icon purple alone (Full Color), OG 2014 (a plain Amethyst square, the App
   # Store icon of 2014) and 2015 (plain Lilac, the App Store icon of 2015 to 2021);

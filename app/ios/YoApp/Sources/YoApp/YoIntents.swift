@@ -57,8 +57,9 @@ enum YoIntentError: Error, CustomLocalizedStringResourceConvertible {
   }
 }
 
-/// One Yo to a friend or group.
-struct SendYoIntent: AppIntent {
+/// One Yo to a friend or group. A LiveActivityIntent: the system runs it in the app's process (also from the
+/// controls and widgets), where "Sent Yo! to Mia" may start in the Dynamic Island (YoActivity.swift).
+struct SendYoIntent: LiveActivityIntent {
   static let title: LocalizedStringResource = "Send Yo"
   static let description = IntentDescription("Sends one Yo to a friend or group, without opening Yo.")
   static let supportedModes: IntentModes = .background
@@ -77,22 +78,25 @@ struct SendYoIntent: AppIntent {
 
   func perform() async throws -> some IntentResult & ProvidesDialog {
     guard let owner = ShareBridge.readList()?.owner else { throw YoIntentError.signedOut }
-    try await YoSend.send(to: friend.id, owner: owner)
+    try await YoSend.send(to: friend.id, owner: owner, shown: (name: friend.name, back: false, lastYoAtMs: nil))
     WidgetSent.note(to: friend.id)
     return .result(dialog: "Sent Yo to \(friend.name)!")
   }
 }
 
-/// One Yo back to whoever sent the newest (ShareBridge.LastYo).
-struct YoBackIntent: AppIntent {
+/// One Yo back to whoever sent the newest (ShareBridge.LastYo); the island names whom it went to.
+struct YoBackIntent: LiveActivityIntent {
   static let title: LocalizedStringResource = "Yo Back"
   static let description = IntentDescription("Sends a Yo back to whoever sent you the last one, without opening Yo.")
   static let supportedModes: IntentModes = .background
   static let authenticationPolicy: IntentAuthenticationPolicy = .alwaysAllowed
 
   func perform() async throws -> some IntentResult & ProvidesDialog {
-    guard let last = ShareBridge.readLastYo() else { throw YoIntentError.noYoYet }
-    try await YoSend.send(to: last.to, owner: last.owner)
+    guard let last = ShareBridge.readLastYo() else {
+      await YoSentActivity.showNobody()
+      throw YoIntentError.noYoYet
+    }
+    try await YoSend.send(to: last.to, owner: last.owner, shown: (name: last.name, back: true, lastYoAtMs: last.sentAtMs))
     WidgetSent.note(to: last.to, back: true)
     return .result(dialog: "Sent Yo to \(last.name)!")
   }
@@ -157,12 +161,20 @@ struct OpenYoIntent: AppIntent {
 /// A Yo from outside the app: the state as a guest (as the share extension's send), one Yo, the Yos that came
 /// meanwhile written as the notification service would. The app, whenever it runs next, sees it as sent.
 enum YoSend {
-  static func send(to target: String, owner: String) async throws {
+  /// With `shown` (the intents) it then shows in the Dynamic Island for a moment, whether it went or not
+  /// (YoSentActivity): the name, a Yo back or not, and when the Yo it answers came.
+  static func send(
+    to target: String, owner: String, shown: (name: String, back: Bool, lastYoAtMs: UInt64?)? = nil
+  ) async throws {
     let lifetime = SharedAccess.Lifetime()
-    defer { lifetime.stop() }
     let outcome = await Task.detached(priority: .userInitiated) {
       lifetime.run { sendNow(to: target, owner: owner) }
     }.value
+    lifetime.stop()
+    if let shown {
+      await YoSentActivity.show(
+        to: target, name: shown.name, back: shown.back, failure: outcome, lastYoAtMs: shown.lastYoAtMs)
+    }
     if let outcome { throw outcome }
   }
 
