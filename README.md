@@ -74,6 +74,31 @@ sealed per column under the state key. Sessions and device keys are never backed
 </details>
 
 <details>
+<summary>Account Sync</summary>
+
+What a new device gets back besides the account ([storage](spec/v1.md#69-storage)), with made-up examples. Sealed
+under the storage key, padded to 1, 4, 16 or 60 KiB; every value is `[value, ms]`, so the newer one wins a merge.
+
+| Field | Example | Purpose |
+|---|---|---|
+| Friend name | `"n": "lina"` | shown in the list |
+| Friend colour | `"c": 3` | the row's colour |
+| Friend blocked | `"b": false` | a block survives a restore |
+| Friend removed | `"r": false` | removed friends stay gone |
+| Friends' profile keys | `"k": {"9e4b…": "HoILvRp7K6oeHR9o_z7WfMQUKal5ANKwoj9LaLSo6gA"}` | sealed sender to them |
+| Own profile key | `"pk": "Hm4L0Rp7K6oeHR9o_z7WfMQUKal5ANKwoj9LaLSo6gA"` | contacts write to you sealed |
+| Group master key | `"k": "XmvfEecos9u4Q_LecgQ16sC_9H1zFSq1yFcxVQ0kJzg"` | read the group at the hub |
+| Group joined | `"a": true` | member or request |
+| Group left | `"r": false` | left groups stay gone |
+| App icon | `"icon": "amethyst"` | the same icon |
+| Left-handed | `"left_handed": true` | the same side |
+| Version | `"version": 42` | old copies are ignored |
+
+Not synced: sessions, messages, media, list order.
+
+</details>
+
+<details>
 <summary>Protocol, groups, media and privacy limits</summary>
 
 [YoIP](spec/v1.md) uses Signal's libsignal: PQXDH and Double Ratchet with SPQR.
