@@ -171,7 +171,14 @@ enum YoSentActivity {
       Task.detached { for old in earlier { await old.end(nil, dismissalPolicy: .immediate) } }
     }
     do {
-      return try Activity.request(attributes: YoSentAttributes(), content: ActivityContent(state: state, staleDate: staleDate))
+      let content = ActivityContent(state: state, staleDate: staleDate)
+      let activity = try Activity.request(attributes: YoSentAttributes(), content: content)
+      // Opened big every time (an update with an alert opens the island), without a sound: a silent file.
+      Task {
+        await activity.update(
+          content, alertConfiguration: AlertConfiguration(title: "Yo", body: "", sound: .named("YoSilent.wav")))
+      }
+      return activity
     } catch {
       failed("request " + String(describing: error))
       return nil

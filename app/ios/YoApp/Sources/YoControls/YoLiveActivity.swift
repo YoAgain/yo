@@ -89,15 +89,20 @@ private struct Bar: View {
         .fixedSize()  // the words never shrink; the name is what is cut
         .contentTransition(.numericText(value: Double(state.others.isEmpty ? state.count : state.total)))
         .animation(.default, value: words)
-      Name(state: state, size: 26, tinted: false, all: true)
+      Name(state: state, size: 22, tinted: false, all: true)
         .opacity(0.85)
     }
-    .font(.yo(26, relativeTo: .headline))
+    // A fixed size (no Dynamic Type here): the island's height is fixed too, a larger text would be cut.
+    .font(.custom("Montserrat-Bold", fixedSize: 22))
     .foregroundStyle(.white)
     .lineLimit(1)
-    .padding(.horizontal, 16)
-    .frame(maxWidth: .infinity, minHeight: 50)
-    .background(color, in: ContainerRelativeShape())
+    .minimumScaleFactor(0.8)
+    .padding(.horizontal, 18)
+    .frame(maxWidth: .infinity)
+    .frame(height: 48)
+    // A capsule: with the island's corners and a 10 pt gap it runs alongside them (ContainerRelativeShape took the
+    // region's own, wrong, corners).
+    .background(color, in: Capsule())
   }
 }
 
@@ -167,7 +172,7 @@ private struct Name: View {
   var body: some View {
     if !text.isEmpty {  // no gap beside "No Yo back"
       Text(verbatim: text)
-        .font(.yo(size, relativeTo: .headline))
+        .font(.custom("Montserrat-Bold", fixedSize: size))  // fixed: the island does not grow with Dynamic Type
         .foregroundStyle(color)
         .lineLimit(1)
         .truncationMode(.tail)

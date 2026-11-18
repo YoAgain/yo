@@ -13,6 +13,7 @@ iconPath: AppIcon.png
 resources:
   - Resources/Montserrat-Bold.ttf
   - Resources/yo.caf
+  - Resources/YoSilent.wav
   # Settings › Licenses: the commit of the build and every licence (dev/licenses.sh makes it, ignored).
   - Resources/Licenses.txt
   # Siri and Shortcuts in German (Info.plist CFBundleLocalizations): the App Shortcuts' phrases (YoShortcuts.swift)
