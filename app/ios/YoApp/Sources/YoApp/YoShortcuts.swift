@@ -10,6 +10,9 @@ struct YoShortcuts: AppShortcutsProvider {
         "Send a Yo with \(.applicationName)",
         "Send a Yo to \(\.$friend) with \(.applicationName)",
         "\(.applicationName) \(\.$friend)",
+        "Send a \(.applicationName) to \(\.$friend)",
+        "Send \(\.$friend) a \(.applicationName)",
+        "Send a \(.applicationName)",
       ],
       shortTitle: "Send Yo", systemImageName: "hand.wave.fill")
     AppShortcut(

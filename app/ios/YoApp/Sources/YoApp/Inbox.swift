@@ -794,14 +794,13 @@ private final class InboxSounds: @unchecked Sendable {
   private var players: [AVAudioPlayer] = []
   /// How many Yo sounds may play at the same time.
   static let atOnce = 3
-  /// When the last Yo sound started (or will start), on the players' device clock.
-  private var lastStart: TimeInterval = 0
 
   init() {
     queue.async { [self] in
       Perf.timed("inbox.sound.prepare") {
         guard let url = Bundle.main.url(forResource: "yo", withExtension: "caf") else { return }
         try? AVAudioSession.sharedInstance().setCategory(.ambient)
+        try? AVAudioSession.sharedInstance().setActive(true)  // ready before the first Yo, not woken by it
         players = (0..<Self.atOnce).compactMap { _ in
           let player = try? AVAudioPlayer(contentsOf: url)
           player?.prepareToPlay()
@@ -815,14 +814,9 @@ private final class InboxSounds: @unchecked Sendable {
     queue.async { [self] in
       Perf.timed("inbox.sound.play") {
         guard !players.isEmpty else { return }
-        // At most `atOnce` Yos sound together; more at the same moment stay quiet. Yos arriving together sound one
-        // after the other, each half a Yo after the one before.
-        guard let player = players.first(where: { !$0.isPlaying }) else { return }  // a waiting one counts as playing
-        let now = player.deviceCurrentTime
-        let at = max(now, lastStart + player.duration / 2)
-        lastStart = at
-        player.currentTime = 0
-        player.play(atTime: at)
+        // Each Yo sounds at once, up to `atOnce` together; one more while they play is left out.
+        guard let player = players.first(where: { !$0.isPlaying }) else { return }
+        player.play()
       }
     }
   }
