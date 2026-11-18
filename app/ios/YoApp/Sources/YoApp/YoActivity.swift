@@ -1,112 +1,176 @@
-// "Sent Yo! to Mia" in the Dynamic Island (and on the Lock Screen) for a moment after a Yo from outside the app: the
-// Action button, Control Center, a widget, Shortcuts or Siri (YoIntents.swift). Inside the app the bar says it, so
-// nothing starts there. The attributes and the start are compiled into the app and into YoControls (linked), whose
-// widget bundle draws it (YoLiveActivity.swift); only the app's process may start one, which is why the sending
-// intents are LiveActivityIntents.
+// "Yo" beside the camera and the friend's name on its other side, in the Dynamic Island (and on the Lock Screen),
+// for a moment after a Yo from outside the app: the Action button, Control Center, a widget, Shortcuts or Siri
+// (YoIntents.swift). Inside the app the bar says it, so nothing starts there. It starts as the intent starts, before
+// the state opens and the Yo goes ("Yo" faded: sending), so our pill stands in the island instead of iOS's running
+// mark; then "Yo" in full (sent) or "No Yo" in red (did not go). No alert: it never opens big or sounds by itself.
+// The attributes and the start are compiled into the app and into YoControls (linked), whose widget bundle draws it
+// (YoLiveActivity.swift); only the app's process may start one, which is why the sending intents are
+// LiveActivityIntents.
 import ActivityKit
 import Foundation
 #if canImport(os)
 import os
 #endif
 
-/// One Yo that went (or did not) to one friend or group.
+/// The Yos from outside the app, one after the other in one activity: the newest one's friend, and how it went. All
+/// in the state, so a second press updates the one showing (the name switching, or "2× Yo") instead of ending it
+/// and sliding in another.
 struct YoSentAttributes: ActivityAttributes {
   struct ContentState: Codable, Hashable, Sendable {
     enum Outcome: String, Codable, Hashable, Sendable {
-      /// It went: a green check.
+      /// On its way: "Yo" faded.
+      case sending
+      /// It went: "Yo" in full.
       case sent
-      /// Not now (offline), or refused: an orange "!".
+      /// Not now (offline), or refused: "No Yo" in red.
       case failed
-      /// Yo Back with no Yo to answer: a grey "?".
+      /// Yo Back with no Yo to answer: "No Yo", "nobody yet".
       case nobody
     }
 
     var outcome: Outcome
-    /// "Sent Yo! to Mia", "Yo back to Leo", "Yo to Mia didn't go out", "No one to Yo back".
-    var title: String
-    /// Only where it says more than the title: why it was refused ("blocked"); else empty, and not shown.
-    var detail: String
+    /// The friend's or group's name as the list shows it ("" for nobody).
+    var name: String
+    /// The bar's colour (Color.row); nil: not on the list, Yo's purple.
+    var color: Int?
+    /// A Yo back to whoever sent the last one.
+    var back = false
+    /// Yos to this friend in a row while it showed: "2× Yo".
+    var count = 1
+    /// Friends Yo'd before this one while it showed, newest first ("+ Kevin, lina"); the pill grows, never stacks.
+    var others: [String] = []
+    /// One of those whose Yo did not go ("No Yo to Kevin").
+    var missed: String?
+    /// All Yos while it showed: "3 Yo" in the small island once there were others.
+    var total = 1
   }
-
-  /// The friend's or group's name, as on the bar ("" for nobody).
-  let name: String
-  /// The bar's colour (Color.row); nil: not on the list, Yo's purple.
-  let color: Int?
-  /// A Yo back to whoever sent the last one.
-  let back: Bool
-
-  var initial: String { name.first.map { String($0).uppercased() } ?? "?" }
 }
 
 enum YoSentActivity {
-  /// How long it shows: opened big by itself first (the system's moment, about 2 s), then small, then gone.
-  static let shown: Duration = .seconds(4)
+  /// How long it stays once the Yo went or did not.
+  static let shown: Duration = .seconds(3)
 
-  /// After a Yo from outside the app: whom it went to, or why it did not.
-  static func show(to target: String, name: String, back: Bool, failure: YoIntentError?, lastYoAtMs: UInt64? = nil) async {
-    let outcome: YoSentAttributes.ContentState.Outcome = failure == nil ? .sent : .failed
-    let title: String
-    let detail: String
-    // One line, the title, wherever a second says nothing more ("just now", "try again"): only a refusal's reason
-    // and "open Yo once to sign in" stay under it.
-    switch failure {
-    case nil:
-      (title, detail) = (back ? "Yo back to \(name)" : "Sent Yo! to \(name)", "")
-    case .notNow?:
-      (title, detail) = ("Yo to \(name) didn't go out", "")
-    case .refused(let why)?:
-      (title, detail) = ("Yo to \(name) not sent", why)
-    case let failure?:
-      (title, detail) = ("Yo to \(name) not sent", String(localized: failure.localizedStringResource))
+  /// How long the steps of an intent took (from its start): seen in the device's log under "YoIntentTiming".
+  struct Timing: Sendable {
+    let start = ContinuousClock.now
+
+    /// The first mark: how long the process had been running when the intent began (a cold launch's cost).
+    init() {
+      var info = kinfo_proc()
+      var size = MemoryLayout<kinfo_proc>.stride
+      var mib: [Int32] = [CTL_KERN, KERN_PROC, KERN_PROC_PID, getpid()]
+      var age = -1.0
+      if sysctl(&mib, 4, &info, &size, nil, 0) == 0 {
+        let started = info.kp_proc.p_un.__p_starttime
+        age = (Date().timeIntervalSince1970 - (Double(started.tv_sec) + Double(started.tv_usec) / 1e6)) * 1000
+      }
+      #if canImport(os)
+      Logger(subsystem: "app.justyo", category: "YoIntentTiming")
+        .notice("perform start, process age \(age, format: .fixed(precision: 0), privacy: .public) ms")
+      #endif
     }
-    let color = ShareBridge.readList()?.friends.first { $0.to == target }?.color
-    await present(YoSentAttributes(name: name, color: color, back: back), .init(outcome: outcome, title: title, detail: detail))
+
+    func mark(_ step: String) {
+      let ms = (ContinuousClock.now - start).components
+      let elapsed = Double(ms.seconds) * 1000 + Double(ms.attoseconds) / 1e15
+      #if canImport(os)
+      Logger(subsystem: "app.justyo", category: "YoIntentTiming")
+        .notice("\(step, privacy: .public) \(elapsed, format: .fixed(precision: 0), privacy: .public) ms")
+      #endif
+    }
+  }
+
+  /// Starts it at once, "sending", before the Yo goes; or, while one still shows, updates that one: the same friend
+  /// counts up ("2× Yo"), another takes its place, and it stays `shown` from this Yo's end. Nil when none may show
+  /// (counted).
+  static func start(name: String, color: Int?, back: Bool) async -> Activity<YoSentAttributes>? {
+    let current = Activity<YoSentAttributes>.activities.first { $0.activityState == .active }
+    if let current {
+      let old = current.content.state
+      var state = YoSentAttributes.ContentState(outcome: .sending, name: name, color: color, back: back)
+      if old.outcome != .nobody {
+        let again = old.name == name
+        state.count = again ? old.count + 1 : 1
+        state.others = again ? old.others : [old.name] + old.others.filter { $0 != name && $0 != old.name }
+        state.missed = old.outcome == .failed && !again ? old.name : old.missed.flatMap { $0 == name ? nil : $0 }
+        state.total = old.total + 1
+      }
+      _ = Ending.next(current.id)  // its end, due from the Yo before, waits for this one
+      await current.update(ActivityContent(state: state, staleDate: nil))
+      return current
+    }
+    return await request(.init(outcome: .sending, name: name, color: color, back: back))
+  }
+
+  /// The Yo went (`failed` false) or did not: the faded "Yo" turns full, or "No Yo"; gone `shown` later.
+  static func finish(_ activity: Activity<YoSentAttributes>?, failed: Bool) async {
+    guard let activity else { return }
+    var state = activity.content.state
+    state.outcome = failed ? .failed : .sent
+    await activity.update(ActivityContent(state: state, staleDate: nil))
+    endLater(activity)
   }
 
   /// Yo Back with no Yo to answer.
   static func showNobody() async {
-    await present(
-      YoSentAttributes(name: "", color: nil, back: true),
-      .init(outcome: .nobody, title: "No one to Yo back", detail: ""))
-  }
-
-  /// Starts it and opens it big at once (an update with an alert opens the island; a banner on an iPhone without
-  /// one), and ends it `shown` later. The intent does not wait for that: it returns at once, so iOS's own "running"
-  /// mark (the control's blue hand) leaves the island right away. Not ended at once with a later dismissal: an ended
-  /// activity leaves the Dynamic Island immediately (the dismissal policy holds only on the Lock Screen).
-  /// Every reason it does not show is counted (CountedErrors, "LiveActivity"), for the admin page.
-  private static func present(_ attributes: YoSentAttributes, _ state: YoSentAttributes.ContentState) async {
-    // Only the app's process may start one: an extension (the controls' intents run in YoControls when the App
-    // Intents metadata does not mark them LiveActivityIntent) is refused by the system.
-    guard Bundle.main.bundleURL.pathExtension != "appex" else { return failed("inExtension") }
-    guard ActivityAuthorizationInfo().areActivitiesEnabled else { return failed("disabled", expected: true) }
-    let content = ActivityContent(state: state, staleDate: .now + Double(shown.components.seconds))
-    // One at a time: an earlier one still there (its process suspended) goes now.
-    for old in Activity<YoSentAttributes>.activities { await old.end(nil, dismissalPolicy: .immediate) }
-    let activity: Activity<YoSentAttributes>
-    do {
-      activity = try Activity.request(attributes: attributes, content: content)
-    } catch {
-      return failed("request " + String(describing: error))
+    let state = YoSentAttributes.ContentState(outcome: .nobody, name: "nobody yet", color: nil, back: true)
+    if let current = Activity<YoSentAttributes>.activities.first(where: { $0.activityState == .active }) {
+      _ = Ending.next(current.id)
+      await current.update(ActivityContent(state: state, staleDate: nil))
+      return endLater(current)
     }
-    // Not the system's alert sound: a soft click of Yo's own (Resources/YoClick.caf, in the app's bundle).
-    await activity.update(
-      content,
-      alertConfiguration: AlertConfiguration(
-        title: "\(state.title)", body: "\(state.detail)", sound: .named("YoClick.caf")))
+    guard let activity = await request(state) else { return }
     endLater(activity)
   }
 
+  /// Which end of an activity is due: each update makes the ends planned before it void.
+  private enum Ending {
+    private static let lock = NSLock()
+    nonisolated(unsafe) private static var generations: [String: Int] = [:]
+
+    static func next(_ id: String) -> Int {
+      lock.withLock {
+        generations[id, default: 0] += 1
+        return generations[id]!
+      }
+    }
+
+    static func due(_ id: String, _ generation: Int) -> Bool { lock.withLock { generations[id] == generation } }
+  }
+
+  /// Every reason it does not show is counted (CountedErrors, "LiveActivity"), for the admin page.
+  private static func request(_ state: YoSentAttributes.ContentState) async -> Activity<YoSentAttributes>? {
+    // Only the app's process may start one: an extension (the controls' intents run in YoControls when the App
+    // Intents metadata does not mark them LiveActivityIntent) is refused by the system.
+    guard Bundle.main.bundleURL.pathExtension != "appex" else { failed("inExtension"); return nil }
+    guard ActivityAuthorizationInfo().areActivitiesEnabled else { failed("disabled", expected: true); return nil }
+    // One at a time: an earlier one no longer active (ended, stale) goes now, without holding this one up.
+    let earlier = Activity<YoSentAttributes>.activities
+    if !earlier.isEmpty {
+      Task.detached { for old in earlier { await old.end(nil, dismissalPolicy: .immediate) } }
+    }
+    do {
+      return try Activity.request(attributes: YoSentAttributes(), content: ActivityContent(state: state, staleDate: nil))
+    } catch {
+      failed("request " + String(describing: error))
+      return nil
+    }
+  }
+
   /// Ends it after `shown`, with the time the system gives a process that is about to be suspended; if that time
-  /// ends first, it ends then (never left on until its next start).
+  /// ends first, it ends then (never left on until its next start). An ended activity leaves the island at once.
   private static func endLater(_ activity: Activity<YoSentAttributes>) {
     let id = activity.id
+    let generation = Ending.next(id)
     ProcessInfo.processInfo.performExpiringActivity(withReason: "Yo sent") { expired in
       let done = DispatchSemaphore(value: 0)
       Task.detached {
         if !expired { try? await Task.sleep(for: shown) }
-        for running in Activity<YoSentAttributes>.activities where running.id == id {
-          await running.end(nil, dismissalPolicy: .immediate)
+        // Updated meanwhile (another Yo): that one's end is due, not this.
+        if expired || Ending.due(id, generation) {
+          for running in Activity<YoSentAttributes>.activities where running.id == id {
+            await running.end(nil, dismissalPolicy: .immediate)
+          }
         }
         done.signal()
       }

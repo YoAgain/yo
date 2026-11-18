@@ -4,6 +4,7 @@
 // a guest in the App Group (SharedState.swift), whose file and key are readable after the first unlock, and send one
 // Yo. "Yo Camera" opens Yo in the camera, "Open Yo" just opens it. Compiled into the app and into YoControls
 // (Sources/YoControls links to this file); the system runs each where it chooses.
+import ActivityKit
 import AppIntents
 import Foundation
 import Security
@@ -71,7 +72,8 @@ enum YoIntentError: Error, CustomLocalizedStringResourceConvertible {
 }
 
 /// One Yo to a friend or group. A LiveActivityIntent: the system runs it in the app's process (also from the
-/// controls and widgets), where "Sent Yo! to Mia" may start in the Dynamic Island (YoActivity.swift).
+/// controls and widgets), where "Yo! Mia" may show in the Dynamic Island (YoActivity.swift). It returns once that
+/// stands; the Yo goes in the background (YoSend.dispatch).
 struct SendYoIntent: LiveActivityIntent {
   static let title: LocalizedStringResource = "Send Yo"
   static let description = IntentDescription("Sends one Yo to a friend or group, without opening Yo.")
@@ -90,16 +92,18 @@ struct SendYoIntent: LiveActivityIntent {
   }
 
   func perform() async throws -> some IntentResult & ProvidesDialog {
+    let timing = YoSentActivity.Timing()
     guard let list = ShareBridge.readList() else {
       YoSend.count("signedOut")
       throw YoIntentError.signedOut
     }
     // The name as the list shows it now: the control keeps the friend as it was picked ("lina", typed then).
-    let name = list.friends.first { $0.to == friend.id }?.name
-      ?? list.friends.first { $0.name.caseInsensitiveCompare(friend.name) == .orderedSame }?.name ?? friend.name
-    try await YoSend.send(to: friend.id, owner: list.owner, shown: (name: name, back: false, lastYoAtMs: nil))
-    WidgetSent.note(to: friend.id)
-    return .result(dialog: "Sent Yo to \(name)!")
+    let shown = list.friends.first { $0.to == friend.id }
+      ?? list.friends.first { $0.name.caseInsensitiveCompare(friend.name) == .orderedSame }
+    let name = shown?.name ?? friend.name
+    await YoSend.dispatch(
+      to: friend.id, owner: list.owner, shown: (name: name, color: shown?.color, back: false), timing: timing)
+    return .result(dialog: "Yo to \(name)!")
   }
 }
 
@@ -111,14 +115,17 @@ struct YoBackIntent: LiveActivityIntent {
   static let authenticationPolicy: IntentAuthenticationPolicy = .alwaysAllowed
 
   func perform() async throws -> some IntentResult & ProvidesDialog {
+    let timing = YoSentActivity.Timing()
     guard let last = ShareBridge.readLastYo() else {
       YoSend.count("noYoYet", expected: true)
       await YoSentActivity.showNobody()
       throw YoIntentError.noYoYet
     }
-    try await YoSend.send(to: last.to, owner: last.owner, shown: (name: last.name, back: true, lastYoAtMs: last.sentAtMs))
-    WidgetSent.note(to: last.to, back: true)
-    return .result(dialog: "Sent Yo to \(last.name)!")
+    let bar = ShareBridge.readList()?.friends.first { $0.to == last.to }
+    let name = bar?.name ?? last.name
+    await YoSend.dispatch(
+      to: last.to, owner: last.owner, shown: (name: name, color: bar?.color, back: true), timing: timing)
+    return .result(dialog: "Yo back to \(name)!")
   }
 }
 
@@ -183,20 +190,57 @@ struct OpenYoIntent: AppIntent {
 enum YoSend {
   /// With `shown` (the intents) it then shows in the Dynamic Island for a moment, whether it went or not
   /// (YoSentActivity): the name, a Yo back or not, and when the Yo it answers came.
-  static func send(
-    to target: String, owner: String, shown: (name: String, back: Bool, lastYoAtMs: UInt64?)? = nil
-  ) async throws {
+  static func send(to target: String, owner: String) async throws {
     let lifetime = SharedAccess.Lifetime()
     let outcome = await Task.detached(priority: .userInitiated) {
       lifetime.run { sendNow(to: target, owner: owner) }
     }.value
     lifetime.stop()
-    if outcome == nil { IntentSent.note(to: target, back: shown?.back ?? false) }
-    if let shown {
-      await YoSentActivity.show(
-        to: target, name: shown.name, back: shown.back, failure: outcome, lastYoAtMs: shown.lastYoAtMs)
-    }
+    if outcome == nil { IntentSent.note(to: target, back: true) }
     if let outcome { throw outcome }
+  }
+
+  /// An intent's Yo: the island first ("sending", before the state opens: as early as iOS lets it), then the Yo
+  /// in the background, and the island says how it went. Returns once the island stands, not when the Yo went: the
+  /// intent ends at once, so iOS's own running mark (the control's blue hand) does not stay for the network's time.
+  /// The process is kept up for the send (performExpiringActivity, in the app and in an extension alike); if that
+  /// time ends first, the turn is revoked (no lock held into a suspension) and the island says "Yo?".
+  static func dispatch(
+    to target: String, owner: String, shown: (name: String, color: Int?, back: Bool), timing: YoSentActivity.Timing
+  ) async {
+    // A group as the list writes it: "#Hey".
+    let name = target.hasPrefix("group:") && !shown.name.hasPrefix("#") ? "#" + shown.name : shown.name
+    let activity = await YoSentActivity.start(name: name, color: shown.color, back: shown.back)
+    timing.mark(activity == nil ? "activity none" : "activity requested")
+    let lifetime = SharedAccess.Lifetime()
+    let box = ActivityBox(activity)
+    ProcessInfo.processInfo.performExpiringActivity(withReason: "Yo") { expired in
+      guard !expired else { return lifetime.stop() }
+      let outcome = lifetime.run { sendNow(to: target, owner: owner) }
+      lifetime.stop()
+      timing.mark(outcome == nil ? "sent" : "not sent")
+      if outcome == nil {
+        IntentSent.note(to: target, back: shown.back)
+        WidgetSent.note(to: target, back: shown.back)
+        sent?()
+      }
+      let done = DispatchSemaphore(value: 0)
+      Task.detached {
+        await YoSentActivity.finish(box.activity, failed: outcome != nil)
+        done.signal()
+      }
+      _ = done.wait(timeout: .now() + 3)
+    }
+  }
+
+  /// Set by the app: a light success tap once a Yo went, while the app is in front (a haptic plays only there; in
+  /// the background and in an extension there is none, beyond the system's own tap on the Action button).
+  nonisolated(unsafe) static var sent: (@Sendable () -> Void)?
+
+  /// The activity handed to the send's queue.
+  private final class ActivityBox: @unchecked Sendable {
+    let activity: Activity<YoSentAttributes>?
+    init(_ activity: Activity<YoSentAttributes>?) { self.activity = activity }
   }
 
   /// Nil when it went (or waits in the core's outbox for the app); else why not. Every Yo that did not go is counted

@@ -45,6 +45,13 @@ struct YoApp: App {
       guard task.start(id) else { return nil }
       return { task.end() }
     }
+    // A Yo from the Action button, Shortcuts or Siri went: a light success tap, only while Yo is in front.
+    YoSend.sent = {
+      Task { @MainActor in
+        guard UIApplication.shared.applicationState == .active else { return }
+        UINotificationFeedbackGenerator().notificationOccurred(.success)
+      }
+    }
     let inbox = Inbox()
     let friends = Friends()
     let accounts = AccountStore()

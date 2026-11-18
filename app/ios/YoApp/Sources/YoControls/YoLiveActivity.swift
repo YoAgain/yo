@@ -1,7 +1,9 @@
-// How "Sent Yo! to Mia" looks (YoActivity.swift starts it): in the Dynamic Island "Yo" on the left and the friend's
-// initial in their bar's colour with a green check on the right (an orange "!" when it did not go); opened, the
-// initial big with the whole line (it opens so by itself at first, then turns small, and is gone after ~4 s; a tap
-// opens Yo); with another activity beside it, the initial alone; on the Lock Screen one row.
+// How a Yo from outside the app looks (YoActivity.swift starts it): two words around the camera, nothing else. On the
+// left "Yo" in Yo's purple (faded while it goes; "2× Yo" for another to the same friend; "No Yo" in red when it did
+// not go), on the right the friend's name in their bar's colour. Opened (by a long press only: it never opens by
+// itself) the same two words bigger, beside the camera; with another activity beside it, "Yo" alone. On the Lock
+// Screen the same two words in white on Yo's purple, and under them who else got one while it showed. A Live Activity cannot animate by itself, so "sending" is a
+// steady faded "Yo", not a pulse.
 import ActivityKit
 import SwiftUI
 import WidgetKit
@@ -9,117 +11,154 @@ import WidgetKit
 struct YoSentLiveActivity: Widget {
   var body: some WidgetConfiguration {
     ActivityConfiguration(for: YoSentAttributes.self) { context in
-      // The Lock Screen (and the banner on an iPhone without the island): the same row, equal margins all round.
-      Row(attributes: context.attributes, state: context.state, initial: 40, title: 18, mark: 22)
-        .padding(16)
-        .activityBackgroundTint(.black.opacity(0.6))
-        .activitySystemActionForegroundColor(.white)
+      // The Lock Screen (and the banner on an iPhone without the island): the newest big, under it who else
+      // ("+ Kevin, lina") or whose did not go ("No Yo to Kevin").
+      VStack(alignment: .leading, spacing: 4) {
+        HStack(spacing: 12) {
+          Word(state: context.state, size: 28, tinted: false, long: true)
+          Spacer(minLength: 0)
+          Name(state: context.state, size: 24, tinted: false)
+        }
+        if let line = Others.line(context.state) {
+          Text(verbatim: line)
+            .font(.yo(15, relativeTo: .subheadline))
+            .foregroundStyle(.white.opacity(0.8))
+            .lineLimit(1)
+            .frame(maxWidth: .infinity, alignment: .trailing)
+        }
+      }
+      .padding(14)
+      .activityBackgroundTint(.amethyst)
+      .activitySystemActionForegroundColor(.white)
     } dynamicIsland: { context in
       DynamicIsland {
-        // One row across the island's whole width, so the name reads at a glance.
-        DynamicIslandExpandedRegion(.bottom) {
-          Row(attributes: context.attributes, state: context.state, initial: 44, title: 20, mark: 24)
-            .frame(maxHeight: .infinity)
+        // Beside the camera, centred on it; nothing under it, so the island opens no higher than it must.
+        DynamicIslandExpandedRegion(.leading) {
+          Word(state: context.state, size: 26, tinted: true)
+            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .trailing)
+        }
+        DynamicIslandExpandedRegion(.trailing) {
+          Name(state: context.state, size: 26, tinted: true)
+            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .leading)
         }
       } compactLeading: {
-        Text(verbatim: context.attributes.back ? "Yo ↩︎" : "Yo")
-          .font(.yo(15, relativeTo: .headline))
-          .foregroundStyle(.amethyst)
+        Word(state: context.state, size: 16, tinted: true, compact: true)
       } compactTrailing: {
-        HStack(spacing: 3) {
-          Initial(attributes: context.attributes, size: 20)
-          Mark(state: context.state, size: 13)
-        }
+        CompactName(state: context.state)
       } minimal: {
-        Initial(attributes: context.attributes, size: 20)
+        // "Yo" in the friend's colour (red when it did not go).
+        Text(verbatim: "Yo")
+          .font(.yo(14, relativeTo: .headline))
+          .foregroundStyle(context.state.outcome == .failed ? .alizarin : Color.friend(context.state))
+          .opacity(context.state.outcome == .sending ? 0.4 : 1)
       }
-      // The same margin on every side of the opened island.
-      .contentMargins(.all, 16, for: .expanded)
       .keylineTint(.amethyst)
     }
   }
 }
 
-/// The initial, then the title with the mark at its end on one line (centred on it), and the reason under it only
-/// when there is one; with no reason the title sits in the middle beside the initial.
-private struct Row: View {
-  let attributes: YoSentAttributes
-  let state: YoSentAttributes.ContentState
-  let initial: CGFloat
-  let title: CGFloat
-  let mark: CGFloat
-
-  var body: some View {
-    HStack(spacing: 12) {
-      Initial(attributes: attributes, size: initial)
-      VStack(alignment: .leading, spacing: 2) {
-        HStack(spacing: 8) {
-          Title(name: attributes.name, text: state.title, size: title)
-          Spacer(minLength: 0)
-          Mark(state: state, size: mark)
-        }
-        if !state.detail.isEmpty {
-          Text(verbatim: state.detail)
-            .font(.caption)
-            .foregroundStyle(.secondary)
-            .lineLimit(1)
-        }
-      }
-    }
+extension Color {
+  /// The friend's bar colour; Yo's purple for one not on the list (or nobody).
+  static func friend(_ state: YoSentAttributes.ContentState) -> Color {
+    state.color.map(Color.row) ?? .amethyst
   }
 }
 
-/// "Sent Yo! to Mia", one line in Montserrat Bold: "Yo" and the rest never shrink, a long name is cut at its end.
-private struct Title: View {
-  let name: String
-  let text: String
-  let size: CGFloat
-
-  var body: some View {
-    Group {
-      if !name.isEmpty, let range = text.range(of: name) {
-        HStack(spacing: 0) {
-          Text(verbatim: String(text[..<range.lowerBound])).fixedSize()
-          Text(verbatim: name).lineLimit(1).truncationMode(.tail)
-          Text(verbatim: String(text[range.upperBound...])).fixedSize()
-        }
-      } else {
-        Text(verbatim: text).lineLimit(1)
-      }
-    }
-    .font(.yo(size, relativeTo: .headline))
-    .foregroundStyle(.white)
-  }
-}
-
-/// The friend's initial in a circle of their bar's colour; a grey "?" when there is no one.
-private struct Initial: View {
-  let attributes: YoSentAttributes
-  let size: CGFloat
-
-  var body: some View {
-    Text(verbatim: attributes.initial)
-      .font(.yo(size * 0.5))
-      .foregroundStyle(.white)
-      .frame(width: size, height: size)
-      .background(attributes.name.isEmpty ? .gray : attributes.color.map(Color.row) ?? .amethyst, in: .circle)
-  }
-}
-
-/// A green check when it went, an orange "!" when not, a grey "?" when there was no one to Yo back.
-private struct Mark: View {
+/// "Yo", "2× Yo" or "No Yo"; faded while it goes. `tinted`: in Yo's colours (the island), else white (the Lock
+/// Screen's purple).
+private struct Word: View {
   let state: YoSentAttributes.ContentState
   let size: CGFloat
+  let tinted: Bool
+  /// The Lock Screen: room for "Yo back".
+  var long = false
+  /// The small island: once there were others, how many Yos in all ("3 Yo").
+  var compact = false
 
-  var body: some View {
+  private var text: String {
     switch state.outcome {
-    case .sent: symbol("checkmark", .green)
-    case .failed: symbol("exclamationmark", .orange)
-    case .nobody: symbol("questionmark", .gray)
+    case .failed, .nobody: "No Yo"
+    case .sending, .sent:
+      if compact && !state.others.isEmpty { "\(state.total) Yo" }
+      else if state.count > 1 { "\(state.count)× Yo" }
+      else if long && state.back { "Yo back" }
+      else { "Yo" }
     }
   }
 
-  private func symbol(_ name: String, _ color: Color) -> some View {
-    Image(systemName: name).font(.system(size: size * 0.8, weight: .bold)).foregroundStyle(color)
+  private var color: Color {
+    switch state.outcome {
+    case .failed: tinted ? .alizarin : .white
+    case .nobody: tinted ? .gray : .white
+    case .sending, .sent: tinted ? .amethyst : .white
+    }
+  }
+
+  var body: some View {
+    Text(verbatim: text)
+      .font(.yo(size, relativeTo: .headline))
+      .foregroundStyle(color)
+      .opacity(state.outcome == .sending ? 0.4 : 1)
+      .lineLimit(1)
+      .fixedSize()  // "Yo" never shrinks
+      .contentTransition(.numericText(value: Double(compact ? state.total : state.count)))
+  }
+}
+
+/// The friend's name, one line, cut at its end; in their bar's colour in the island, white on the Lock Screen.
+private struct Name: View {
+  let state: YoSentAttributes.ContentState
+  let size: CGFloat
+  let tinted: Bool
+
+  private var color: Color {
+    if state.outcome == .nobody { return tinted ? .gray : .white.opacity(0.8) }
+    return tinted ? .friend(state) : .white
+  }
+
+  var body: some View {
+    Text(verbatim: state.name)
+      .font(.yo(size, relativeTo: .headline))
+      .foregroundStyle(color)
+      .lineLimit(1)
+      .truncationMode(.tail)
+      .contentTransition(.opacity)
+      .id(state.name)  // another friend: the name switches, it does not morph letter by letter
+  }
+}
+
+/// The compact island's name: about as wide as "Yo" on the other side at most (balanced around the camera), cut at
+/// its end; none where the island is limited in width (another app's activity beside it).
+private struct CompactName: View {
+  let state: YoSentAttributes.ContentState
+
+  var body: some View {
+    if #available(iOS 27.0, *) {
+      Limited { name }
+    } else {
+      name
+    }
+  }
+
+  private var name: some View {
+    Name(state: state, size: 16, tinted: true).frame(maxWidth: 64, alignment: .leading)
+  }
+
+  @available(iOS 27.0, *)
+  private struct Limited<Content: View>: View {
+    @Environment(\.isDynamicIslandLimitedInWidth) private var limited
+    @ViewBuilder let content: Content
+
+    var body: some View {
+      if !limited { content }
+    }
+  }
+}
+
+/// Under the Lock Screen's row: whose Yo did not go, else who else got one meanwhile.
+private enum Others {
+  static func line(_ state: YoSentAttributes.ContentState) -> String? {
+    if let missed = state.missed { return "No Yo to \(missed)" }
+    return state.others.isEmpty ? nil : "+ " + state.others.joined(separator: ", ")
   }
 }

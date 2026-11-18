@@ -13,9 +13,6 @@ iconPath: AppIcon.png
 resources:
   - Resources/Montserrat-Bold.ttf
   - Resources/yo.caf
-  # The Dynamic Island's "Sent Yo!" (YoActivity.swift): a soft click in place of the system's alert sound; an alert
-  # sound must be in the main bundle too.
-  - Resources/YoClick.caf
   # Settings › Licenses: the commit of the build and every licence (dev/licenses.sh makes it, ignored).
   - Resources/Licenses.txt
   # Siri and Shortcuts in German (Info.plist CFBundleLocalizations): the App Shortcuts' phrases (YoShortcuts.swift)
