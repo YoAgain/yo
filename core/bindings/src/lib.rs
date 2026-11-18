@@ -5,7 +5,7 @@
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
 use yo_core::backup::Door;
-use yo_core::statedb::{DbStore, Snapshot};
+use yo_core::statedb::{DbStore, Loaded};
 use yo_core::{Client, Content, Event, Sent};
 
 uniffi::setup_scaffolding!();
@@ -15,6 +15,8 @@ pub use list::*;
 
 #[derive(Debug, thiserror::Error, uniffi::Error)]
 pub enum YoError {
+    #[error("the initial state migration rolled back")]
+    MigrationRolledBack,
     #[error("network: {message}")]
     Network { message: String },
     #[error("refused: {status}")]
@@ -151,8 +153,24 @@ impl Drop for Turn<'_> {
     }
 }
 
+/// Reads an existing platform-managed sealed blob only when the initial migration needs it.
+#[uniffi::export(with_foreign)]
+pub trait LegacyStateSource: Send + Sync {
+    fn load(&self) -> Result<Option<Vec<u8>>, YoError>;
+}
+
+/// Receives only a schema version and a fixed error kind, suitable for counted diagnostics.
+#[uniffi::export(with_foreign)]
+pub trait StateDiagnostics: Send + Sync {
+    fn failure(&self, step: u32, before: u32, after: u32, kind: String);
+}
+
+fn state_report(diagnostics: Arc<dyn StateDiagnostics>) -> yo_core::statedb::Report {
+    Arc::new(move |step, before, after, kind| diagnostics.failure(step, before, after, kind))
+}
+
 /// The account's state in one database that the app and its extensions share (iOS: in the App Group), SQLite in WAL
-/// mode, the state in it sealed as before (`yo_core::statedb`). Opened by each process for itself.
+/// mode (`yo_core::statedb`). Opened by each process for itself.
 #[derive(uniffi::Object)]
 pub struct StateDb(Arc<yo_core::statedb::StateDb>);
 
@@ -162,6 +180,80 @@ impl StateDb {
     #[uniffi::constructor]
     pub fn open(path: String) -> Result<Arc<Self>, YoError> {
         Ok(Arc::new(StateDb(Arc::new(yo_core::statedb::StateDb::open(path)?))))
+    }
+
+    /// Opens Android's encrypted state database. Only V0001 requests the AtomicFile snapshot.
+    #[uniffi::constructor]
+    pub fn open_encrypted(
+        path: String,
+        state_key: Vec<u8>,
+        source: Arc<dyn LegacyStateSource>,
+        diagnostics: Arc<dyn StateDiagnostics>,
+    ) -> Result<Arc<Self>, YoError> {
+        let mut rolled_back = false;
+        let result = yo_core::statedb::StateDb::open_encrypted(
+            path,
+            key_of(state_key)?,
+            Some(state_report(diagnostics)),
+            || {
+                source
+                    .load()
+                    .map(|blob| blob.map(|blob| (yo_core::state::hex(&yo_core::identity::random::<16>()), blob)))
+                    .map_err(|_| yo_core::Error::Save("Io".into()))
+            },
+            None,
+            &mut rolled_back,
+        );
+        match result {
+            Ok(db) => Ok(Arc::new(StateDb(Arc::new(db)))),
+            Err(_) if rolled_back => Err(YoError::MigrationRolledBack),
+            Err(error) => Err(error.into()),
+        }
+    }
+
+    /// Opens iOS's encrypted state beside the old SQLite database and flat file. The App Group lock
+    /// serializes the legacy snapshot with its writers.
+    #[uniffi::constructor]
+    #[allow(clippy::too_many_arguments)]
+    pub fn open_migrating(
+        path: String,
+        state_key: Vec<u8>,
+        legacy_db: String,
+        legacy_file: String,
+        word_length: u32,
+        lock: Option<Arc<dyn StateLock>>,
+        diagnostics: Arc<dyn StateDiagnostics>,
+    ) -> Result<Arc<Self>, YoError> {
+        use std::path::Path;
+        let report = state_report(diagnostics);
+        let key = key_of(state_key)?;
+        if let Some(db) = yo_core::statedb::StateDb::open_current(&path, key, report.clone())? {
+            return Ok(Arc::new(StateDb(Arc::new(db))));
+        }
+        let _turn = lock.as_deref().map(|lock| Turn::take(lock, None)).transpose()?;
+        let mut rolled_back = false;
+        let holds = || lock.as_ref().is_none_or(|lock| lock.held());
+        let legacy_file = Path::new(&legacy_file);
+        let db = match yo_core::statedb::StateDb::open_encrypted(
+            &path,
+            key,
+            Some(report.clone()),
+            || yo_core::statedb::StateDb::legacy_source(Path::new(&legacy_db), legacy_file, word_length as usize),
+            Some(&holds),
+            &mut rolled_back,
+        ) {
+            Ok(db) => db,
+            Err(_) if rolled_back && holds() => yo_core::statedb::StateDb::open_fallback(
+                legacy_db,
+                legacy_file,
+                word_length as usize,
+                path,
+                key,
+                report,
+            )?,
+            Err(error) => return Err(error.into()),
+        };
+        Ok(Arc::new(StateDb(Arc::new(db))))
     }
 
     /// The state file of before moved in, once (`word_length`: the 36 characters a shared one starts with, else 0):
@@ -174,6 +266,19 @@ impl StateDb {
     /// one has none; `other` is emptied once it is here. True when it came in.
     pub fn adopt(&self, other: Arc<StateDb>) -> Result<bool, YoError> {
         Ok(self.0.adopt(&other.0)?)
+    }
+
+    /// Moves the app's own state into the group under a live platform write turn.
+    pub fn adopt_locked(&self, other: Arc<StateDb>, lock: Arc<dyn StateLock>) -> Result<bool, YoError> {
+        lock.lock()?;
+        let result = self.0.adopt_with_turn(&other.0, Some(&|| lock.held()));
+        lock.unlock(result.as_ref().is_ok_and(|saved| *saved));
+        Ok(result?)
+    }
+
+    /// Whether this launch opened the encrypted tables.
+    pub fn encrypted(&self) -> bool {
+        self.0.encrypted()
     }
 
     /// Whether there is a state (an account on this phone).
@@ -694,23 +799,28 @@ impl YoClient {
         })
     }
 
-    /// One step that may write the state. Shared, under the turn between the processes (inside this one's own lock,
-    /// so both are always taken in that order), on the newest state: what another process wrote since is taken in
+    /// One step that may write the state. Acquire the interprocess turn before the client mutex, so local readers
+    /// can still run while the writer waits for the turn. What another process wrote since is taken in
     /// first, so nothing is ever done on an old one, and the step's write is the newest when the turn is given back
     /// (the database takes it only over the state it started from). A client whose state is gone or became another
     /// account's or device's (signed out, and in again, meanwhile) is closed: it stops saving and every step fails
     /// with `State`, so it never acts on a state that is not there any more.
     fn with<T>(&self, f: impl FnOnce(&mut Client) -> T) -> Result<T, YoError> {
+        if self.closed.load(Ordering::Relaxed) {
+            return Err(YoError::State);
+        }
+        let _turn = self
+            .shared
+            .as_ref()
+            .and_then(|shared| shared.lock.as_ref().map(|lock| Turn::take(lock.as_ref(), Some(shared.store.clone()))))
+            .transpose()?;
         let mut client = self.client.lock().unwrap_or_else(PoisonError::into_inner);
         if self.closed.load(Ordering::Relaxed) {
             return Err(YoError::State);
         }
-        let Some(shared) = &self.shared else { return Ok(f(&mut client)) };
-        let _turn = match &shared.lock {
-            Some(lock) => Some(Turn::take(lock.as_ref(), Some(shared.store.clone()))?),
-            None => None,
-        };
-        self.catch_up(&mut client, shared)?;
+        if let Some(shared) = &self.shared {
+            self.catch_up(&mut client, shared)?;
+        }
         Ok(f(&mut client))
     }
 
@@ -738,16 +848,16 @@ impl YoClient {
 
     /// The state as the database has it now, taken in if another process wrote it since; closed when it is gone.
     fn catch_up(&self, client: &mut Client, shared: &Shared) -> Result<(), YoError> {
-        let current = match shared.store.snapshot()? {
-            Snapshot::Same => true,
-            Snapshot::Newer { word, blob } => {
-                let taken = client.reload(&blob).is_ok();
+        let current = match client.load_db(&shared.store)? {
+            Loaded::Same => true,
+            Loaded::Newer { word, state, records } => {
+                let taken = client.reload_snapshot(*state, records).is_ok();
                 if taken {
                     shared.store.took(Some(word));
                 }
                 taken
             }
-            Snapshot::Gone => false,
+            Loaded::Gone => false,
         };
         if !current {
             client.stop_persisting();
@@ -893,11 +1003,10 @@ impl YoClient {
         let key = key_of(state_key)?;
         let http: Arc<dyn yo_core::Transport> = Arc::new(Http(transport));
         let open = || -> Result<(Client, bool, Arc<DbStore>), YoError> {
-            let (word, blob) = db.0.read()?.ok_or(YoError::State)?;
-            let (client, changed) = match guest {
-                true => (Client::restore_guest(http.clone(), &blob, &key)?, false),
-                false => Client::restore_changed(http.clone(), &blob, &key)?,
+            let Loaded::Newer { word, state, records } = db.0.load(None, &key)? else {
+                return Err(YoError::State);
             };
+            let (client, changed) = Client::from_snapshot(http.clone(), *state, records, guest)?;
             Ok((client, changed, Arc::new(DbStore::new(db.0.clone(), Some(word), held(&lock)))))
         };
         let (mut client, changed, store) = open()?;

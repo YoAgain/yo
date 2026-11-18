@@ -493,6 +493,20 @@ pub struct Disk {
     free: std::sync::Condvar,
 }
 
+struct EmptyStateSource;
+
+impl yo::LegacyStateSource for EmptyStateSource {
+    fn load(&self) -> Result<Option<Vec<u8>>, yo::YoError> {
+        Ok(None)
+    }
+}
+
+impl yo::StateDiagnostics for EmptyStateSource {
+    fn failure(&self, step: u32, before: u32, after: u32, kind: String) {
+        eprintln!("StateMigration V{step} {kind} (before={before} after={after})");
+    }
+}
+
 impl Disk {
     pub fn new() -> Arc<Disk> {
         let dir = std::env::temp_dir().join(format!("yo-shared-{}", random_u64()));
@@ -510,12 +524,16 @@ impl Disk {
 
     /// A process's own opening of the database.
     pub fn db(&self) -> Arc<yo::StateDb> {
-        yo::StateDb::open(self.path()).unwrap()
+        yo::StateDb::open_encrypted(self.path(), vec![7; 32], Arc::new(EmptyStateSource), Arc::new(EmptyStateSource))
+            .unwrap()
     }
 
     /// The word of the last write (none: no state).
     pub fn word(&self) -> Option<String> {
-        yo_core::statedb::StateDb::open(self.path()).unwrap().word().unwrap()
+        yo_core::statedb::StateDb::open_encrypted(self.path(), [7; 32], None, || Ok(None), None, &mut false)
+            .unwrap()
+            .word()
+            .unwrap()
     }
 
     /// Whether a process has the turn.

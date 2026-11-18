@@ -809,12 +809,12 @@ fn a_state_file_of_before_moves_into_the_database() {
         let old = disk.dir().join("yo-state");
         let word_text = "0123456789abcdef0123456789abcdef0123";
         std::fs::write(&old, [&word_text.as_bytes()[..word], &file.0.lock().unwrap()].concat()).unwrap();
-        let db = disk.db();
+        let db = yo::StateDb::open(disk.path()).unwrap();
         assert!(!db.has_state().unwrap());
         assert!(db.move_in(old.to_string_lossy().into(), word as u32).unwrap(), "moved in");
         assert!(!old.exists(), "the file goes");
         assert!(!db.move_in(old.to_string_lossy().into(), word as u32).unwrap(), "once");
-        let moved = YoClient::open_db(transport(), db, vec![7; 32], false, Some(Process::new(&disk))).unwrap();
+        let moved = YoClient::open_db(transport(), db.clone(), vec![7; 32], false, Some(Process::new(&disk))).unwrap();
         assert_eq!(moved.user_id(), user);
         assert_eq!(moved.friends().len(), friends.len());
         assert_eq!(moved.friends()[0].name.as_deref(), Some("BOB"));
@@ -823,7 +823,7 @@ fn a_state_file_of_before_moves_into_the_database() {
         assert_eq!(yos(&drain(&b), &user), 1);
         b.send_yo(user.clone()).unwrap();
         assert_eq!(yos(&moved.sync(0).unwrap(), &b.user_id()), 1);
-        assert!(disk.word().is_some());
+        assert!(db.has_state().unwrap());
     }
 }
 

@@ -226,6 +226,10 @@ pub struct SessionInfo {
 /// needed it leaves (spec 4.7): `Error::Save`.
 pub trait Store: Send + Sync {
     fn save(&self, blob: Vec<u8>) -> std::result::Result<(), String>;
+
+    fn save_state(&self, state: &State, records: signal::Entries, key: &[u8; 32]) -> std::result::Result<(), String> {
+        self.save(state::seal(state, records, key))
+    }
 }
 
 pub type Clock = Arc<dyn Fn() -> u64 + Send + Sync>;
@@ -1092,7 +1096,23 @@ impl Client {
     /// `restore`, and whether opening changed the state (what the last call handed out comes again): then it is to be
     /// saved before another process reads it, else it may be kept as it is (`keep_in`).
     pub fn restore_changed(transport: Arc<dyn Transport>, blob: &[u8], key: &[u8; 32]) -> Result<(Client, bool)> {
-        let (mut state, entries) = state::open(blob, key)?;
+        let (state, entries) = state::open(blob, key)?;
+        Self::from_snapshot(transport, state, entries, false)
+    }
+
+    /// Opens a decoded database snapshot. A guest leaves events handed to the app where they are.
+    pub fn from_snapshot(
+        transport: Arc<dyn Transport>,
+        mut state: State,
+        entries: signal::Entries,
+        guest: bool,
+    ) -> Result<(Client, bool)> {
+        if guest {
+            let records = Records::new(&entries, &state.account_secret, state.registration_id)?;
+            let mut client = Client::with(transport, records, state);
+            client.guest_events = Some(client.state.events.len());
+            return Ok((client, false));
+        }
         // What the last call handed out may not have reached the app before the restart: it comes again.
         let handed = std::mem::take(&mut state.handed);
         let changed = !handed.is_empty();
@@ -1227,10 +1247,7 @@ impl Client {
     /// a guest never acknowledges.
     pub fn restore_guest(transport: Arc<dyn Transport>, blob: &[u8], key: &[u8; 32]) -> Result<Client> {
         let (state, entries) = state::open(blob, key)?;
-        let records = Records::new(&entries, &state.account_secret, state.registration_id)?;
-        let mut client = Client::with(transport, records, state);
-        client.guest_events = Some(client.state.events.len());
-        Ok(client)
+        Ok(Self::from_snapshot(transport, state, entries, true)?.0)
     }
 
     /// Takes in the state another process saved meanwhile (sharing it in turns, see `restore_guest`), in place of
@@ -1241,6 +1258,11 @@ impl Client {
     pub fn reload(&mut self, blob: &[u8]) -> Result<()> {
         let Some((_, key)) = &self.store else { return Err(Error::State) };
         let (state, entries) = state::open(blob, key)?;
+        self.reload_snapshot(state, entries)
+    }
+
+    /// Reloads rows read in a single database snapshot.
+    pub fn reload_snapshot(&mut self, state: State, entries: signal::Entries) -> Result<()> {
         // Another account's or device's (signed out and in again meanwhile, under the same key): not this client's.
         if state.user_id != self.state.user_id || state.device_id != self.state.device_id {
             return Err(Error::State);
@@ -1254,6 +1276,12 @@ impl Client {
             self.guest_events = Some(self.state.events.len());
         }
         Ok(())
+    }
+
+    /// Takes in a newer database snapshot, if another process changed the state.
+    pub fn load_db(&self, store: &statedb::DbStore) -> Result<statedb::Loaded> {
+        let Some((_, key)) = &self.store else { return Err(Error::State) };
+        store.load(key)
     }
 
     /// Stops saving: the state is gone or someone else's now (see `reload`).
@@ -1417,7 +1445,7 @@ impl Client {
 
     fn persist(&self) -> Result<()> {
         if let Some((store, key)) = &self.store {
-            store.save(self.export(key)).map_err(Error::Save)?;
+            store.save_state(&self.state, self.records.export(), key).map_err(Error::Save)?;
         }
         self.envelopes_unsaved.set(false);
         Ok(())
