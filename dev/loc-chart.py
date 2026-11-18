@@ -75,17 +75,31 @@ def history():
 
 
 def chart(points):
-    """One line per day: the total lines without tests, as a bar and in whole thousands."""
+    """The total lines without tests per day as upright columns, the day under each and the total on top."""
     code = lambda counts: sum(n for kind, n in counts.items() if kind != "Tests")
-    peak = max(code(counts) for _, counts in points)
-    lines = []
+    totals = [code(counts) for _, counts in points]
     first = points[0][0]
-    for day, counts in points:
-        total = code(counts)
-        eighths = round(total / peak * (LINE - 13) * 8)
-        bar = "█" * (eighths // 8) + " ▏▎▍▌▋▊▉"[eighths % 8].strip()
-        label = f"Day {(day - first).days + 1}"
-        lines.append(f"{label:<7} {round(total / 1000):>3}k  {bar}")
+    days = [f"Day {(day - first).days + 1}" for day, _ in points]
+    height, peak = 10, max(totals) or 1
+    column = max(7, (LINE - 5) // len(points))
+    eighths = [round(t / peak * height * 8) for t in totals]
+    lines = []
+    for row in range(height + 1, 0, -1):
+        cells = []
+        for k, (t, e) in enumerate(zip(totals, eighths)):
+            full, rest = divmod(e, 8)
+            tip = full + (1 if rest else 0)
+            if row <= full:
+                cell = "█████"
+            elif row == full + 1 and rest:
+                cell = " ▁▂▃▄▅▆▇"[rest] * 5
+            elif row == tip + 1:
+                cell = f"{round(t / 1000)}k"
+            else:
+                cell = ""
+            cells.append(f"{cell:^{column}}")
+        lines.append("     " + "".join(cells).rstrip())
+    lines.append("     " + "".join(f"{d:^{column}}" for d in days).rstrip())
     return "\n".join(lines)
 
 
@@ -146,9 +160,9 @@ def main():
     if start not in text or end not in text:
         raise SystemExit("README.md has no <!-- loc --> … <!-- /loc --> block")
     points = history()
-    block = (f"{start}\n#### Lines of code per day (without tests)\n\n```text\n{chart(points)}\n```\n\n"
-             f"#### The code today, by part\n\n```text\n{shares(points[-1][1], KINDS)}\n```\n\n"
-             f"#### The client today, by app\n\n```text\n{by_app()}\n```\n{end}")
+    block = (f"{start}\n```text\nLines of code per day, without tests\n\n{chart(points)}\n\n\n"
+             f"The code today, by part\n\n{shares(points[-1][1], KINDS)}\n\n\n"
+             f"The client today, by app\n\n{by_app()}\n```\n{end}")
     before, rest = text.split(start, 1)
     after = rest.split(end, 1)[1]
     readme.write_text(before + block + after)
