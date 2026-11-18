@@ -2,8 +2,7 @@
 // from, YoControls sends from Control Center), in the App Group (ShareBridge.group). A build without the group (Yo Dev
 // from dev/push.sh) keeps its state to itself, in the same kind of database (StateFile in Hub.swift).
 //
-// One database, SQLite in WAL mode (`StateDb` in core/bindings, yo_core::statedb): its one row is the sealed state,
-// encrypted as before, with the word of the write that put it there. Each process opens it for itself.
+// SQLite in WAL mode stores client state and libsignal records in tables. Each process opens it for itself.
 // - Reads (the list's friends, contacts, groups, settings) take the last committed state in one read transaction,
 //   without any turn: never a wait for an extension's step, never an empty answer for a refused turn.
 // - Each step that may write takes the turn between the processes (flock on `yo-state.lock`, inside the process's
@@ -16,7 +15,7 @@
 //   the database.
 // - A connection lives for one access: no SQLite lock is held between them, so iOS never suspends a process with a
 //   lock on a file in the group (0xdead10cc). The database, its -wal and -shm are complete until first user
-//   authentication, as the state file was (SQLite's open flag and the folder's class), and never in a backup.
+//   authentication, as the state file was (SQLite’s open flag and the folder’s class), and never in a backup.
 // - A write failing (a full disk) changes nothing: the core's step fails before anything that needed it leaves (no
 //   message, commit, prekey upload or inbox ack), and the others see the state before it, as after a crash.
 // - After a turn that wrote, a Darwin notification named for the writing process (`StateChanged`, as Signal-iOS's
@@ -73,7 +72,9 @@ final class SharedStateFile: StateLock, @unchecked Sendable {
   /// not unlocked since its start) or without a group.
   static func database() throws -> StateDb {
     guard let folder, let stateURL else { throw YoError.State }
-    return try StateStorage.open(folder, gate: opening, cached: &opened, before: stateURL, wordLength: 36)
+    guard let key = try StateKey.shared() else { throw YoError.State }
+    return try StateStorage.open(folder, gate: opening, cached: &opened, before: stateURL,
+      wordLength: 36, key: key, lock: SharedStateFile())
   }
 
   // MARK: The turn
@@ -143,9 +144,12 @@ final class SharedStateFile: StateLock, @unchecked Sendable {
   /// starts there. No (and the app's own database and keychain item as before) without a group or a keychain that
   /// takes the key.
   static let app: Bool = {
-    guard available else { return false }
+    guard available, let folder, let stateURL else { return false }
     let shared: StateDb
     do {
+      if try StateKey.shared() == nil && !StateStorage.exists(folder, before: stateURL) {
+        guard StateKey.moveIn() else { return false }
+      }
       shared = try database()
     } catch {
       // Not readable now (before the first unlock): the group's, unless the app's own is still there (not moved yet).
@@ -153,15 +157,19 @@ final class SharedStateFile: StateLock, @unchecked Sendable {
     }
     do {
       if try shared.hasState() {
-        // Moved in before: a copy left in the app's own (stopped between the steps below) goes, and the key with it.
-        StateFile.forget()
-        StateKey.finishMoveIn()
+        if shared.encrypted() {
+          StateFile.discardMigrated()
+          StateKey.finishMoveIn()
+        }
         return true
       }
-      guard StateKey.moveIn() else { return false }
       // The app's own state (its database, or its file of before) into the group's in one write, then gone there:
       // never no state, never half of one.
-      if StateFile.exists { _ = try shared.adopt(other: try StateFile.database()) }
+      if StateFile.exists {
+        let own = try StateFile.database()
+        guard shared.encrypted(), try shared.adoptLocked(other: own, lock: SharedStateFile()) else { return false }
+        StateFile.discardMigrated()
+      }
       StateKey.finishMoveIn()  // only now: until here the state that stayed opens with it
       return true
     } catch {
@@ -173,19 +181,54 @@ final class SharedStateFile: StateLock, @unchecked Sendable {
 
 /// Opening a state database (the group's or the app's own): its folder made in the state's protection class and
 /// kept out of backups, the file of before moved in.
+final class StateFailureCounts: StateDiagnostics, Sendable {
+  func failure(step: UInt32, before: UInt32, after: UInt32, kind: String) {
+    CountedErrors.record(domain: "StateMigration", place: "StateDb", code: "StateMigration V\(step) \(kind)",
+      details: "before=\(before) after=\(after)")
+  }
+}
+
 enum StateStorage {
-  static func open(_ folder: URL, gate: NSLock, cached: inout StateDb?, before file: URL, wordLength: UInt32) throws -> StateDb {
+  static func exists(_ folder: URL, before file: URL) -> Bool {
+    [file, folder.appending(path: "state.sqlite"), folder.appending(path: "tables.sqlite")].contains {
+      FileManager.default.fileExists(atPath: $0.path)
+    }
+  }
+
+  static func open(_ folder: URL, gate: NSLock, cached: inout StateDb?, before file: URL,
+    wordLength: UInt32, key: Data, lock: StateLock? = nil) throws -> StateDb {
     try gate.withLock {
-      let path = folder.appending(path: "state.sqlite").path
-      if let cached, FileManager.default.fileExists(atPath: path) { return cached }
+      let path = folder.appending(path: "tables.sqlite")
+      let legacy = folder.appending(path: "state.sqlite")
       let files = FileManager.default
+      if let cached, files.fileExists(atPath: path.path) || files.fileExists(atPath: legacy.path) { return cached }
+      let diagnostics = StateFailureCounts()
       if !files.fileExists(atPath: folder.path) {
-        try files.createDirectory(at: folder, withIntermediateDirectories: true,
-          attributes: [.protectionKey: FileProtectionType.completeUntilFirstUserAuthentication])
+        do {
+          try files.createDirectory(at: folder, withIntermediateDirectories: true,
+            attributes: [.protectionKey: FileProtectionType.completeUntilFirstUserAuthentication])
+        } catch {
+          diagnostics.failure(step: 0, before: 0, after: 0, kind: "Io")
+          throw error
+        }
         SharedStateFile.excludeFromBackup(folder)
       }
-      let db = try Perf.timed("state.db.open") { try StateDb.open(path: path) }
-      _ = try db.moveIn(file: file.path, wordLength: wordLength)
+      let db = try Perf.timed("state.db.open") {
+        try StateDb.openMigrating(path: path.path, stateKey: key, legacyDb: legacy.path,
+          legacyFile: file.path, wordLength: wordLength, lock: lock, diagnostics: diagnostics)
+      }
+      if db.encrypted() {
+        for old in [legacy, URL(fileURLWithPath: legacy.path + "-wal"),
+          URL(fileURLWithPath: legacy.path + "-shm"), file] {
+          do {
+            try files.removeItem(at: old)
+          } catch let error as CocoaError where error.code == .fileNoSuchFile {
+            continue
+          } catch {
+            diagnostics.failure(step: 1, before: 1, after: 1, kind: "Io")
+          }
+        }
+      }
       cached = db
       return db
     }

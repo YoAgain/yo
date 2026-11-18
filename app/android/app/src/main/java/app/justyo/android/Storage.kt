@@ -11,6 +11,9 @@ import javax.crypto.Cipher
 import javax.crypto.KeyGenerator
 import javax.crypto.SecretKey
 import javax.crypto.spec.GCMParameterSpec
+import uniffi.yo.LegacyStateSource
+import uniffi.yo.StateDb
+import uniffi.yo.StateDiagnostics
 import uniffi.yo.StateStore
 import uniffi.yo.YoException
 
@@ -49,7 +52,7 @@ class Vault(private val context: Context) {
     }
     @Synchronized fun secret(name: String): ByteArray = read(name) ?: randomBytes(32).also { write(name, it) }
     @Synchronized fun delete(name: String) = AtomicFile(File(directory, name)).delete()
-    @Synchronized fun clear() { directory.listFiles().orEmpty().forEach { it.delete() } }
+    @Synchronized fun clear() { directory.listFiles().orEmpty().filter { it.name != "state-key" }.forEach { it.delete() } }
 }
 
 fun randomBytes(size: Int) = ByteArray(size).also { SecureRandom().nextBytes(it) }
@@ -60,11 +63,46 @@ fun atomicWrite(file: File, data: ByteArray) {
     try { stream.write(data); atomic.finishWrite(stream) } catch (error: Exception) { atomic.failWrite(stream); throw error }
 }
 
-class CoreState(private val context: Context) : StateStore {
-    private val file by lazy { File(context.noBackupFilesDir, "yo-state") }
-    override fun save(blob: ByteArray) {
-        try { atomicWrite(file, blob) } catch (_: Exception) { throw YoException.Save(context.getString(R.string.save_state_failed)) }
+/** The AtomicFile is a source for V0001 and a writable fallback for this launch if V0001 rolls back. */
+class CoreState(context: Context, private val diagnostics: StateDiagnostics) : LegacyStateSource, StateStore {
+    private val legacy = File(context.noBackupFilesDir, "yo-state")
+    private val path = File(context.noBackupFilesDir, "yo-state.sqlite")
+    private var db: StateDb? = null
+    private var rolledBack = false
+
+    fun exists(): Boolean = path.exists() || legacy.exists() || File(legacy.path + ".bak").exists()
+
+    @Synchronized fun database(key: ByteArray): StateDb? {
+        db?.let { return it }
+        if (rolledBack) return null
+        return try {
+            StateDb.openEncrypted(path.path, key, this, diagnostics).also {
+                db = it
+                AtomicFile(legacy).delete()
+            }
+        } catch (_: YoException.MigrationRolledBack) {
+            rolledBack = true
+            null
+        }
     }
-    fun load(): ByteArray? = if (file.exists() || File(file.path + ".bak").exists()) AtomicFile(file).readFully() else null
-    fun delete() = AtomicFile(file).delete()
+
+    override fun save(blob: ByteArray) {
+        try { atomicWrite(legacy, blob) } catch (_: Exception) {
+            diagnostics.failure(0u, 0u, 0u, "Io")
+            throw YoException.Save("State write failed")
+        }
+    }
+    override fun load(): ByteArray? {
+        if (!legacy.exists() && !File(legacy.path + ".bak").exists()) return null
+        return try {
+            AtomicFile(legacy).readFully()
+        } catch (_: java.io.IOException) {
+            if (rolledBack) diagnostics.failure(0u, 0u, 0u, "Io")
+            throw YoException.Save("Legacy state read failed")
+        }
+    }
+    fun delete(key: ByteArray?) {
+        if (key != null && exists()) database(key)?.clear()
+        AtomicFile(legacy).delete()
+    }
 }

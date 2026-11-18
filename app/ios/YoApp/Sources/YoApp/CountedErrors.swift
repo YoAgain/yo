@@ -80,8 +80,11 @@ enum UnknownSender {
 }
 
 enum CountedErrors {
-  private static var file: URL? { ShareBridge.container?.appending(path: "counted-errors") }
-  private static var taking: URL? { ShareBridge.container?.appending(path: "counted-errors.taking") }
+  private static var folder: URL? {
+    ShareBridge.container ?? FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask).first
+  }
+  private static var file: URL? { folder?.appending(path: "counted-errors") }
+  private static var taking: URL? { folder?.appending(path: "counted-errors.taking") }
 
   /// A short hash prefix of an id: the same id is the same prefix, and it names nobody.
   static func hashPrefix(_ id: String) -> String {
@@ -89,8 +92,7 @@ enum CountedErrors {
   }
 
   /// One line "day domain|place|code|expected|details", appended in one write (O_APPEND: a line from another process
-  /// never interleaves). The file has no protection, so this works before the first unlock too. Without the App
-  /// Group (Yo Dev from dev/push.sh) nothing is counted.
+  /// never interleaves). The file has no protection, so this works before the first unlock too.
   static func record(domain: String, place: String, code: String, expected: Bool = false, details: String = "") {
     guard let file else { return }
     ensure(file)

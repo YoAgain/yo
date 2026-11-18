@@ -328,22 +328,32 @@ enum StateFile {
 
   /// Throws while it cannot be opened (the phone not unlocked since its start).
   static func database() throws -> StateDb {
-    try StateStorage.open(folder, gate: opening, cached: &opened, before: url, wordLength: 0)
+    try database(key: StateKey.load())
   }
 
-  /// Whether there is a state of the app's own (in its database or its file of before); one not readable now counts.
+  static func database(key: Data?) throws -> StateDb {
+    guard let key else { throw YoError.State }
+    return try StateStorage.open(folder, gate: opening, cached: &opened, before: url, wordLength: 0, key: key)
+  }
+
+  /// Whether there is a state of the app's own. One that cannot be read yet counts as present.
   static var exists: Bool {
-    if FileManager.default.fileExists(atPath: url.path) { return true }
-    guard FileManager.default.fileExists(atPath: folder.appending(path: "state.sqlite").path) else { return false }
+    guard StateStorage.exists(folder, before: url) else { return false }
     return (try? database().hasState()) ?? true
   }
 
-  /// Gone: the database's state and the file of before.
   static func forget() {
-    if FileManager.default.fileExists(atPath: folder.appending(path: "state.sqlite").path) {
-      Diagnostics.attempt({ try database().clear() })
-    }
+    if StateStorage.exists(folder, before: url) { Diagnostics.attempt({ try database().clear() }) }
     try? FileManager.default.removeItem(at: url)
+  }
+
+  /// Called after the group has a durable copy and before deleting the app's own key.
+  static func discardMigrated() {
+    opening.withLock {
+      opened = nil
+      try? FileManager.default.removeItem(at: folder)
+      try? FileManager.default.removeItem(at: url)
+    }
   }
 }
 

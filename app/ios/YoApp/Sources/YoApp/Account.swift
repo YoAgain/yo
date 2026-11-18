@@ -431,17 +431,21 @@ final class AccountStore {
           client.acknowledgeExplicitly()  // each batch as the app has stored it (Inbox.take)
           return (client, client.accountSecret())
         }
-        let db = try StateFile.database()
-        guard try db.hasState() else { throw Unopened.gone }
+        guard StateStorage.exists(StateFile.folder, before: StateFile.url) else { throw Unopened.gone }
         let own = try StateKey.load()
         let client: YoClient
         do {
           guard let own else { throw Unopened.gone }
+          let db = try StateFile.database(key: own)
+          guard try db.hasState() else { throw Unopened.gone }
           client = try YoClient.openDb(transport: transport, db: db, stateKey: own, guest: false, lock: nil)
         } catch let error where error is Unopened || (error as? YoError).map({ if case .State = $0 { true } else { false } }) == true {
           // Yo Dev: sealed under the key a build before took from Yo of TestFlight (`StateKey.others`)? Taken over then.
           guard let (key, opened) = StateKey.others().lazy.compactMap({ key in
-            (Diagnostics.attempt({ try YoClient.openDb(transport: transport, db: db, stateKey: key, guest: false, lock: nil) })).map { (key, $0) }
+            Diagnostics.attempt {
+              let db = try StateFile.database(key: key)
+              return (key, try YoClient.openDb(transport: transport, db: db, stateKey: key, guest: false, lock: nil))
+            }
           }).first else { throw error }
           try StateKey.adopt(key)
           accountLog.notice("open: the state opened with a key of another group, now this app's own")
@@ -490,7 +494,7 @@ final class AccountStore {
   private static func keepUnopened() {
     let stamp = Int(Date.now.timeIntervalSince1970)
     let places: [(URL?, () throws -> StateDb)] = [(StateFile.folder, StateFile.database), (SharedStateFile.folder, SharedStateFile.database)]
-    for case let (folder?, database) in places where FileManager.default.fileExists(atPath: folder.appending(path: "state.sqlite").path) {
+    for case let (folder?, database) in places where FileManager.default.fileExists(atPath: folder.path) {
       guard let blob = try? database().blob() else { continue }
       let aside = folder.appending(path: "yo-state.unopened-\(stamp)")
       do {
@@ -524,9 +528,14 @@ final class AccountStore {
           Hub.pin(client)
           return client
         }
-        let client = try SharedStateFile.app
-          ? make(SharedStateFile.database(), StateKey.makeShared(), SharedStateFile())
-          : make(StateFile.database(), StateKey.make(), nil)
+        let client: YoClient
+        if SharedStateFile.app {
+          let key = try StateKey.makeShared()
+          client = try make(SharedStateFile.database(), key, SharedStateFile())
+        } else {
+          let key = try StateKey.make()
+          client = try make(StateFile.database(), key, nil)
+        }
         client.acknowledgeExplicitly()  // each batch as the app has stored it (Inbox.take)
         return (client, client.accountSecret())
       }
@@ -1071,6 +1080,7 @@ final class AccountStore {
       await MediaStorage.clearAll()
       // Closing a client may wait for a network step; generation retirement fences its later shared writes.
       Task.detached(priority: .userInitiated) { old?.close() }
+      let shared = !fullLocalReset && SharedStateFile.available ? (try? SharedStateFile.database()) : nil
       let held = SharedStateFile.take(within: 3)
       defer { if held { SharedStateFile.give() } }
       if fullLocalReset {
@@ -1079,7 +1089,7 @@ final class AccountStore {
         // Retire the lock even if an extension never releases its old turn.
         SharedStateFile.rotateLock()
         StateFile.forget()
-        if SharedStateFile.available { Diagnostics.attempt({ try SharedStateFile.database().clear() }) }
+        if let shared { Diagnostics.attempt({ try shared.clear() }) }
         if let url = SharedStateFile.stateURL { try? FileManager.default.removeItem(at: url) }
       }
     }

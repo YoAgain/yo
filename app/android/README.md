@@ -56,9 +56,9 @@ are unchanged. Generation enables UniFFI’s JNA cleaner for API 28; Java’s Cl
 
 ## State, identity, recovery
 
-`CoreState` implements UniFFI’s throwing `StateStore` with `AtomicFile` in `noBackupFilesDir`. A failed write is
-returned to Rust; the core must save before it sends or acknowledges. The sealed Rust state format and hub
-protocol are identical to iOS. All blocking core/network/disk calls run on `Dispatchers.IO`; a long poll is separate
+`CoreState` opens the same Rust SQLite database as iOS in `noBackupFilesDir`. The first migration reads the
+legacy `AtomicFile`, authenticates it with the existing state key, and commits the rows together. A failed save
+stops any send or acknowledgement that depended on it. All blocking core/network/disk calls run on `Dispatchers.IO`; a long poll is separate
 from sending. Requests have bounded answers (11 MiB), timeouts, no cookies/cache, no redirects, and independent
 OkHttp pools for identified and anonymous traffic. Hub keys, sender-certificate roots and group parameters are the
 public dev pins from iOS `Hub.swift`. HTTP 426 stops networking and replaces the UI with the update screen.

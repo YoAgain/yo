@@ -68,15 +68,21 @@ class CrashReports(context: Context, private val transport: HttpTransport) {
         preferences.edit(commit = true) { putLong(key, count + 1) }
     }
 
-    private fun flushNotificationFallbacks() {
+    @Synchronized internal fun countStateFailure(step: UInt, before: UInt, after: UInt, kind: String) {
+        val day = System.currentTimeMillis() / 86_400_000L
+        val key = "state:$day:StateMigration V$step $kind (before=$before after=$after)"
+        preferences.edit(commit = true) { putLong(key, preferences.getLong(key, 0) + 1) }
+    }
+
+    private fun flushCountedErrors() {
         for ((key, value) in preferences.all) {
             if (!enabled) return
-            if (!key.startsWith("fallback:") || value !is Long) continue
-            val (_, day, reason) = key.split(':', limit = 3)
+            if ((!key.startsWith("fallback:") && !key.startsWith("state:")) || value !is Long) continue
+            val (category, day, reason) = key.split(':', limit = 3)
             val body = JSONObject()
                 .put("app", BuildConfig.YO_APP).put("os", "Android ${Build.VERSION.SDK_INT}")
-                .put("model", "Android").put("domain", "NotificationFallback")
-                .put("place", "ForegroundInbox").put("code", reason)
+                .put("model", "Android").put("domain", if (category == "state") "StateMigration" else "NotificationFallback")
+                .put("place", if (category == "state") "StateDb" else "ForegroundInbox").put("code", reason)
                 .put("details", "day=$day count=$value")
                 .put("count", value.coerceAtMost(100_000).toString())
             fun upload() = transport.request("POST", "/v1/errors", emptyList(), body.toString().toByteArray()).status.toInt()
@@ -121,7 +127,7 @@ class CrashReports(context: Context, private val transport: HttpTransport) {
             }
         }
         if(!enabled) return
-        flushNotificationFallbacks()
+        flushCountedErrors()
         val rows=rows()
         for(row in rows) {
             if(!enabled) break

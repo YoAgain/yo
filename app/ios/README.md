@@ -29,16 +29,16 @@ The app talks to the live hub (TestFlight and App Store) or the dev hub (Yo Dev)
   retry, the rest of a burst) goes quietly; Yos the app takes itself just after it was left get their
   notification from the app; Yos read in the app take theirs out of Notification Center.
 - The app and its extensions use one account state, in the App Group, its key in the group's keychain group: one
-  SQLite database in WAL mode (`yo-state-db/state.sqlite`, `SharedState.swift`, `StateDb` and `StateLock` in the
-  core), its one row the sealed state. Reads (the list's friends, contacts, groups, settings) take the last
+  SQLite database in WAL mode (`yo-state-db/tables.sqlite`, `SharedState.swift`, `StateDb` and `StateLock` in the
+  core), with tables for client state and libsignal records. Reads (the list's friends, contacts, groups, settings) take the last
   committed state without any turn, so the app never waits for the notification service at launch. Each step that
   may write takes the turn (a file lock) and the newest state, and writes only over the state it started from
   (compare and swap in one short transaction, never across a request): one writer, never a write from an old state.
   A connection lives for one access, so no SQLite lock is held when iOS suspends a process (0xdead10cc). After an
   process wrote, a Darwin notification named for it (`StateChanged`, as Signal's SDSCrossProcess) makes the app take
   in what an extension saved. The SQLite settings follow Signal-iOS (IMMEDIATE writes, synchronous NORMAL, full fsync,
-  a TRUNCATE checkpoint after each write that gives up after 50 ms). The state file of
-  before (`yo-state`) moves into the database at the first opening, and a state moves into the group once, at the
+  a TRUNCATE checkpoint after each write that gives up after 50 ms). The first migration imports the old SQLite
+  database or flat `yo-state` file, and a state moves into the group once, at the
   first start of a build that has the group. Every state flock in the app gets background time. Refused time skips
   the turn (reads go on); expiry releases the flock, cancels its request and fences later writes (`held`) and
   requests; the next step starts again from the database. Lock acquisition has a 10 s total budget and retries a

@@ -28,7 +28,13 @@ class Repository(private val context: Context, ownerScope: CoroutineScope) {
         } else if (error !is CancellationException) throw error
     })
     private val vault = Vault(context)
-    private val file = CoreState(context)
+    private val file by lazy {
+        CoreState(context, object : StateDiagnostics {
+            override fun failure(step: UInt, before: UInt, after: UInt, kind: String) {
+                crashes.countStateFailure(step, before, after, kind)
+            }
+        })
+    }
     val transport = HubTransport { mutable.update { it.copy(update = true) } }
     @Volatile private var client: YoClient? = null
     @Volatile var sessionId: Long = 0
@@ -136,10 +142,17 @@ class Repository(private val context: Context, ownerScope: CoroutineScope) {
                 saveSent = cached.optBoolean("saveSent"), sent = cached.optLong("sent"), received = cached.optLong("received"),
                 pendingInvite = cached.stringOrNull("invite"), appIcon = cached.stringOrNull("appIcon"),
             ) }
-            val blob = file.load()
-            if (blob != null) {
-                val key = vault.read("state-key") ?: error(context.getString(R.string.ui_state_key_missing_use_your_recovery_key))
-                val restored = YoClient.restore(transport, file, key, blob)
+            val key = vault.read("state-key")
+            val restored = if (file.exists()) {
+                key ?: error(context.getString(R.string.ui_state_key_missing_use_your_recovery_key))
+                val db = file.database(key)
+                if (db != null) {
+                    if (db.hasState()) YoClient.openDb(transport, db, key, false, null) else null
+                } else {
+                    file.load()?.let { YoClient.restore(transport, file, key, it) }
+                }
+            } else null
+            if (restored != null) {
                 pin(restored)
                 restored.acknowledgeExplicitly()
                 client = restored; sessionId++
@@ -186,7 +199,7 @@ class Repository(private val context: Context, ownerScope: CoroutineScope) {
             require(usernameValid(name)) { context.getString(R.string.valid_name) }
             val pendingName = "registration-" + usernameSkeleton(name).toByteArray().sha256Hex()
             val secret = vault.secret(pendingName)
-            val c = YoClient.registerUsername(transport, file, vault.secret("state-key"), name, secret, null, null, 0u, "")
+            val c = registerCore(name, secret)
             pin(c); c.acknowledgeExplicitly(); client = c; sessionId++
             mutable.update { it.copy(username = c.username() ?: name, friends = listOf(Friend(name = "YoGPT", color = 0)), broken = false) }
             persist(); vault.delete(pendingName)
@@ -214,11 +227,20 @@ class Repository(private val context: Context, ownerScope: CoroutineScope) {
         } finally { mutable.update { it.copy(busy = false) } }
     }
 
+    private fun registerCore(name: String, account: ByteArray): YoClient {
+        val key = vault.secret("state-key")
+        val db = file.database(key)
+        return if (db != null) {
+            YoClient.registerUsernameDb(transport, db, key, null, name, account, null, null, 0u, "")
+        } else {
+            YoClient.registerUsername(transport, file, key, name, account, null, null, 0u, "")
+        }
+    }
+
     private suspend fun restoreBackup(opened: YoOpenedBackup, typedCode: String?) {
         val sealed = JSONObject(opened.sealed.decodeToString())
         val account = sealed.getJSONObject("account")
-        val c = YoClient.registerUsername(transport, file, vault.secret("state-key"), account.getString("username"),
-            decode(account.getString("accountKey")), null, null, 0u, "")
+        val c = registerCore(account.getString("username"), decode(account.getString("accountKey")))
         pin(c); c.acknowledgeExplicitly(); client = c; sessionId++
         val same = c.userId().hexBytes().contentEquals(decode(account.getString("userID")))
         val recovered = if (same) sealed.stringOrNull("code") ?: typedCode else null
@@ -651,7 +673,7 @@ class Repository(private val context: Context, ownerScope: CoroutineScope) {
         registeredPush = null
         old?.shutdown()
         changes.withLock {
-            media.clear(); file.delete(); vault.clear(); seen.clear(); removedUsers.clear(); clearTemporaryMedia()
+            media.clear(); file.delete(vault.read("state-key")); vault.clear(); seen.clear(); removedUsers.clear(); clearTemporaryMedia()
             synchronized(listLock) {
                 listJob?.cancel();orderSave?.cancel();displayedOrder=emptyList();list=YoList();mutable.value=AppState(loading=false)
             }
