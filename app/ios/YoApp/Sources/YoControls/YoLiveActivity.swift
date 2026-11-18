@@ -128,30 +128,18 @@ private struct Name: View {
 }
 
 /// The compact island's name: about as wide as "Yo" on the other side at most (balanced around the camera), cut at
-/// its end; none where the island is limited in width (another app's activity beside it).
+/// its end.
 private struct CompactName: View {
   let state: YoSentAttributes.ContentState
 
   var body: some View {
-    if #available(iOS 27.0, *) {
-      Limited { name }
-    } else {
-      name
-    }
+    // iOS 27's isDynamicIslandLimitedInWidth (hide the name when the island is narrow) needs the iOS 27 SDK; CI
+    // builds with Xcode 26 for now.
+    name
   }
 
   private var name: some View {
     Name(state: state, size: 16, tinted: true).frame(maxWidth: 64, alignment: .leading)
-  }
-
-  @available(iOS 27.0, *)
-  private struct Limited<Content: View>: View {
-    @Environment(\.isDynamicIslandLimitedInWidth) private var limited
-    @ViewBuilder let content: Content
-
-    var body: some View {
-      if !limited { content }
-    }
   }
 }
 
