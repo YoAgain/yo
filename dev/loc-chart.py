@@ -4,13 +4,10 @@
 Writes the numbers into dev/loc-chart.html and renders it with headless Chromium to dev/loc-chart.png, which the README
 shows: a line of lines per day without tests, and today's code by part and the client by app as shares.
 
-Follow main's first parents, diffing merges against their first parent so merged
-code counts exactly once. Disable rename detection: moves between languages must
-subtract the old extension and add the new one. Binary files are skipped.
-Counts include blank lines and comments, not just executable statements. Test code
-(tests/ directories and test-named files) is counted apart, as Tests.
-Committer dates are UTC; clock regressions are clamped to the preceding day.
-Only committed main history counts, never the working tree.
+Each day counts the tree of main's last commit that day (first parents, UTC, clock regressions clamped): lines of
+source per part (Hub, Admin, Core, Apps), blanks and comments included, binary files skipped. Test code counts apart
+as Tests: files in test directories or named as tests, and in Rust files everything from `#[cfg(test)]` on. Only
+committed main history counts, never the working tree.
 """
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -20,7 +17,7 @@ import subprocess
 ROOT = Path(__file__).resolve().parents[1]
 # By part of the project: the server (hub, admin page), the shared core, the apps (iOS, Android, YoGPT), tests (tests/,
 # fuzz/ and test files anywhere). Development scripts (dev/ and the like) are not counted.
-KINDS = ("Hub", "Core", "Apps", "Tests")
+KINDS = ("Hub", "Admin", "Core", "Apps", "Tests")
 COLORS = ("#bc7540", "#ad62be", "#468bc2", "#589663")
 EXTENSIONS = {".rs": "Rust", ".swift": "Swift", ".kt": "Kotlin", ".kts": "Kotlin"}
 OTHER = {".py", ".sh", ".bash", ".c", ".h", ".cpp", ".hpp", ".m", ".mm",
@@ -32,7 +29,7 @@ def part(path):
     if is_test(path):
         return "Tests"
     top = path.split("/", 1)[0]
-    return {"hub": "Hub", "admin": "Hub", "core": "Core", "app": "Apps"}.get(top)
+    return {"hub": "Hub", "admin": "Admin", "core": "Core", "app": "Apps"}.get(top)
 
 
 def is_test(path):
@@ -47,34 +44,48 @@ def git(*args):
     return subprocess.check_output(["git", "-C", str(ROOT), *args])
 
 
-def history():
-    # NUL delimiters preserve spaces, tabs and newlines in tracked filenames.
-    raw = git("log", "main", "--first-parent", "--reverse", "--diff-merges=first-parent",
-              "--root", "--no-renames", "--numstat", "-z", "--format=%x00COMMIT %ct%x00")
+def counts_at(commit):
+    """Lines per part in the tree of one commit. A Rust file's lines from its `#[cfg(test)]` on are tests, as
+    are files in test directories."""
     totals = dict.fromkeys(KINDS, 0)
-    daily = {}
+    names = [n.decode("utf-8", "surrogateescape") for n in git("ls-tree", "-r", "-z", "--name-only", commit).split(b"\0") if n]
+    wanted = [n for n in names if Path(n).suffix.lower() in EXTENSIONS or Path(n).suffix.lower() in OTHER]
+    wanted = [n for n in wanted if part(n)]
+    if not wanted:
+        return totals
+    blobs = subprocess.run(["git", "-C", str(ROOT), "cat-file", "--batch"], check=True, capture_output=True,
+                           input="".join(f"{commit}:{n}\n" for n in wanted).encode()).stdout
+    at = 0
+    for name in wanted:
+        header_end = blobs.index(b"\n", at)
+        size = int(blobs[at:header_end].split()[2])
+        body = blobs[header_end + 1:header_end + 1 + size]
+        at = header_end + 1 + size + 1
+        if b"\0" in body[:8000]:
+            continue
+        lines = body.split(b"\n")
+        kind = part(name)
+        if kind != "Tests" and name.endswith(".rs"):
+            cut = next((i for i, line in enumerate(lines) if line.strip() == b"#[cfg(test)]"), len(lines))
+            totals[kind] += cut
+            totals["Tests"] += len(lines) - cut
+        else:
+            totals[kind] += len(lines)
+    return totals
+
+
+def history():
+    """The parts' lines at the last commit of each day on main (UTC days, clock regressions clamped)."""
+    raw = git("log", "main", "--first-parent", "--reverse", "--format=%H %ct").decode().split()
+    last = {}
     day = None
-    for token in raw.split(b"\0"):
-        token = token.lstrip(b"\n")
-        if token.startswith(b"COMMIT "):
-            if day is not None:
-                daily[day] = totals.copy()
-            stamp = int(token.split()[1])
-            current = datetime.fromtimestamp(stamp, timezone.utc).date()
-            day = max(day, current) if day else current
-        elif token:
-            added, removed, name = token.split(b"\t", 2)
-            if added == b"-" or removed == b"-":
-                continue
-            path = name.decode("utf-8", "surrogateescape")
-            ext = Path(path).suffix.lower()
-            kind = part(path) if (ext in EXTENSIONS or ext in OTHER) else None
-            if kind:
-                totals[kind] += int(added) - int(removed)
-    if day is None:
+    for commit, stamp in zip(raw[::2], raw[1::2]):
+        current = datetime.fromtimestamp(int(stamp), timezone.utc).date()
+        day = max(day, current) if day else current
+        last[day] = commit
+    if not last:
         raise SystemExit("main has no commits")
-    daily[day] = totals.copy()
-    return sorted(daily.items())
+    return [(d, counts_at(c)) for d, c in sorted(last.items())]
 
 
 # Today's client by app, tests not counted.
@@ -94,7 +105,10 @@ def app_counts():
         if app:
             blob = git("show", f"main:{path}")
             if b"\0" not in blob[:8000]:
-                counts[app] += blob.count(b"\n")
+                lines = blob.split(b"\n")
+                if path.endswith(".rs"):  # a Rust file's tests start at #[cfg(test)]
+                    lines = lines[:next((i for i, l in enumerate(lines) if l.strip() == b"#[cfg(test)]"), len(lines))]
+                counts[app] += len(lines)
     return counts
 
 
