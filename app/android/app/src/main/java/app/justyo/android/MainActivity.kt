@@ -7,6 +7,9 @@ import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import androidx.activity.viewModels
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.setValue
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import android.app.Application
@@ -19,9 +22,21 @@ import kotlinx.coroutines.launch
 import java.io.File
 
 class YoViewModel(application: Application) : AndroidViewModel(application) {
-    val repository = Repository(application, viewModelScope)
+    val repository = application.repository
     val shares = MutableStateFlow<List<Uri>>(emptyList())
+    private val shareSending = kotlinx.coroutines.sync.Mutex()
     val importingShares=MutableStateFlow(false)
+    val notificationsEnabled=MutableStateFlow(false)
+    var deniedThisLaunch by mutableStateOf(false)
+        private set
+    fun refreshNotifications() {
+        notificationsEnabled.value = getApplication<Application>()
+            .getSystemService(android.app.NotificationManager::class.java).areNotificationsEnabled()
+    }
+    fun notificationResult(granted: Boolean) {
+        if (!granted) deniedThisLaunch = true
+        refreshNotifications()
+    }
     @Volatile private var shareImportVersion=0
     private var importShares: Job?=null
     init {
@@ -39,7 +54,10 @@ class YoViewModel(application: Application) : AndroidViewModel(application) {
             Intent.ACTION_SEND_MULTIPLE -> intent.getParcelableArrayListExtra<Uri>(Intent.EXTRA_STREAM).orEmpty()
             else -> emptyList()
         }
-        val items=incoming.filter { it.scheme=="content" }.take(10)
+        val sources = incoming.filter { it.scheme == "content" }
+        val resolver = getApplication<Application>().contentResolver
+        val video = sources.firstOrNull { (resolver.getType(it) ?: intent.type)?.startsWith("video/") == true }
+        val items = if (video == null) sources.take(10) else listOf(video)
         if(items.isEmpty()) return
         val version=++shareImportVersion
         importingShares.value=true
@@ -52,7 +70,7 @@ class YoViewModel(application: Application) : AndroidViewModel(application) {
                 repository.pendingShares.clear()
                 val staged=mutableListOf<Uri>()
                 for(source in items) {
-                    val imported=repository.pendingShares.import(source)
+                    val imported=repository.pendingShares.import(source, video != null)
                     staged+=imported
                     if(repository.pendingShares.open(imported).video) break
                 }
@@ -75,28 +93,58 @@ class YoViewModel(application: Application) : AndroidViewModel(application) {
     fun stage(friend: Friend, uris: List<Uri>, fromCamera: Boolean = false, session: Long = repository.sessionId): Job {
         val context=getApplication<Application>()
         return repository.command {
-            click()
-            for(uri in uris) {
-                if(sessionId != session) {
-                    if(fromCamera && uri.scheme=="file") uri.path?.let { File(it).delete() }
-                    continue
+            val shared = uris.isNotEmpty() && uris.all { it.scheme == "yo-share" }
+            if (shared && !shareSending.tryLock()) return@command
+            try {
+                if (shared && !pendingShares.items().containsAll(uris)) return@command
+                click()
+                var sharedVideo = false
+                val queued = mutableListOf<String>()
+                for (uri in uris) {
+                    try {
+                        if (sessionId != session) continue
+                        val staged = if (shared) pendingShares.open(uri) else null
+                        val isVideo = staged?.video ?: (context.contentResolver.getType(uri)?.startsWith("video/") == true ||
+                            uri.path?.endsWith(".mp4") == true)
+                        val prepared = staged ?: if (isVideo) MediaFiles.video(context, uri) else MediaFiles.photo(context, uri)
+                        if (sessionId != session) continue
+                        if (fromCamera && state.value.saveSent) MediaFiles.keep(context, prepared)
+                        queued += media.stage(friend.target, prepared.bytes, prepared.width, prepared.height, prepared.video,
+                            prepared.duration, held = !shared)
+                        if (shared) {
+                            sharedVideo = isVideo
+                            pendingShares.remove(uri)
+                        }
+                    } finally {
+                        if (fromCamera && uri.scheme == "file") uri.path?.let { File(it).delete() }
+                    }
                 }
-                val staged=if(uri.scheme=="yo-share") pendingShares.open(uri) else null
-                val isVideo=staged?.video ?: (context.contentResolver.getType(uri)?.startsWith("video/") == true || uri.path?.endsWith(".mp4") == true)
-                try {
-                    val prepared=staged ?: if(isVideo) MediaFiles.video(context,uri) else MediaFiles.photo(context,uri)
-                    if(sessionId != session) break
-                    if(fromCamera && state.value.saveSent) MediaFiles.keep(context,prepared)
-                    media.stage(friend.target,prepared.bytes,prepared.width,prepared.height,prepared.video,prepared.duration)
-                    if(staged!=null) pendingShares.remove(uri)
-                } finally { if(fromCamera && uri.scheme=="file") uri.path?.let { File(it).delete() } }
-                if(isVideo) break
+                if (shared) {
+                    shares.value = pendingShares.items()
+                    val sent = kotlinx.coroutines.withTimeoutOrNull(30_000) {
+                        for (id in queued) while (sessionId == session && media.isWaiting(id)) kotlinx.coroutines.delay(200)
+                        sessionId == session
+                    } == true
+                    if (sent && queued.isNotEmpty()) {
+                        val sign = if (sharedVideo) "🎥" else "📷"
+                        val name = if (friend.group == null) friend.name else "#${friend.name.removePrefix("#")}"
+                        kotlinx.coroutines.withContext(Dispatchers.Main) {
+                            android.widget.Toast.makeText(context, context.getString(R.string.share_confirmation, sign, name),
+                                android.widget.Toast.LENGTH_SHORT).show()
+                        }
+                    }
+                }
+            } finally {
+                if (shared) {
+                    shareSending.unlock()
+                    if (sessionId == session) shares.value = pendingShares.items()
+                }
             }
-            shares.value=pendingShares.items()
         }
     }
+
     fun error(text: String) { repository.command { error(text) } }
-    override fun onCleared() { repository.active(false);repository.close() }
+
 }
 class MainActivity : ComponentActivity() {
     private val model: YoViewModel by viewModels()
@@ -113,6 +161,7 @@ class MainActivity : ComponentActivity() {
     }
     override fun onDestroy() { perf?.close(); super.onDestroy() }
     override fun onNewIntent(intent: Intent) { super.onNewIntent(intent); setIntent(intent); model.intent(intent) }
+    override fun onResume() { super.onResume(); model.refreshNotifications() }
     override fun onStart() { super.onStart(); model.repository.active(true) }
     override fun onStop() { model.repository.active(false); super.onStop() }
 }

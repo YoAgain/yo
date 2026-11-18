@@ -1,6 +1,7 @@
 @file:OptIn(androidx.compose.material3.ExperimentalMaterial3ExpressiveApi::class, androidx.compose.material3.ExperimentalMaterial3Api::class)
 package app.justyo.android
 
+import kotlinx.coroutines.launch
 import android.app.Activity
 import android.app.KeyguardManager
 import android.content.Context
@@ -88,7 +89,7 @@ import uniffi.yo.*
         }
     }
     var notificationGranted by remember { mutableStateOf(false) }
-    val notificationPermission = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) { notificationGranted = it }
+    val notificationPermission = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) { notificationGranted = it; model.notificationResult(it) }
     val notificationsEnabled = notificationGranted || contextNotificationsEnabled()
     var encrypted by remember { mutableStateOf<Pair<Int,Int>?>(null) }
     LaunchedEffect(s.friends, s.lastSync) {
@@ -479,8 +480,7 @@ private val TileGray=Color(0xFF8E8E93)
     val key = s.recovery
     val ready = key?.length == 64
     var sharing by remember { mutableStateOf(false) }
-    var showPasskeyProblem by remember { mutableStateOf(false) }
-    val passkeyUnavailable = stringResource(R.string.ui_passkeys_need_domain_association_before_they_can_work_on_android)
+    val passkeyScope = rememberCoroutineScope()
     ModalBottomSheet(
         onDismissRequest = { if (!busy) onClose() },
         containerColor = Amethyst,
@@ -530,12 +530,25 @@ private val TileGray=Color(0xFF8E8E93)
             }
             item {
                 RecoveryStep(2, stringResource(R.string.recovery_passkey)) {
-                    TextButton(onClick = { showPasskeyProblem = true }, enabled = !busy) {
+                    TextButton(onClick = {
+                        passkeyScope.launch {
+                            busy = true
+                            try {
+                                val (name, user) = model.repository.passkeyAccount() ?: return@launch
+                                val answer = Passkeys.create(context, name, user)
+                                kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) { model.repository.keepPasskey(answer) }
+                                saved = true
+                            } catch (e: kotlinx.coroutines.CancellationException) {
+                                throw e
+                            } catch (e: Exception) {
+                                model.error(e.localizedMessage ?: uiResources.getString(R.string.passkey_prf_required))
+                            } finally { busy = false }
+                        }
+                    }, enabled = !busy) {
                         Text(stringResource(R.string.recovery_set_up), color = Color.White)
                     }
                 }
             }
-            if (showPasskeyProblem) item { Text(passkeyUnavailable) }
         }
         Button(
             onClick = onClose,

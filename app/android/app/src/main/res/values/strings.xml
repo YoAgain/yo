@@ -117,7 +117,6 @@
     <string name="ui_show_your_code">Show Your Code</string>
     <string name="ui_contacts">Contacts</string>
     <string name="ui_your_encrypted_friend_list_and_contact_checks">Your encrypted friend list and contact checks.</string>
-    <string name="ui_passkeys_need_domain_association_before_they_can_work_on_android">Passkeys need domain association before they can work on Android. Use your recovery key.</string>
     <string name="ui_off_only_your_friends_can_send_you_yos_anyone_else_is_turned_away">Off, only your friends can send you Yos. Anyone else is turned away.</string>
     <string name="ui_requests_from_strangers">Requests from Strangers</string>
     <string name="ui_blocked_friends_can_t_send_you_yos_tap_unblock_to_unblock">Blocked friends can’t send you Yos. Tap Unblock to unblock.</string>
@@ -159,7 +158,6 @@
     <string name="ui_profile">Profile</string>
     <string name="ui_statistics">Statistics</string>
     <string name="ui_create">Create</string>
-    <string name="ui_couldn_t_open_photo">Couldn’t open photo</string>
     <string name="ui_couldn_t_open_this_photo_or_video">Couldn’t open this photo or video.</string>
     <string name="ui_photo">Photo</string>
     <string name="media_sender_in_group">%1$s in %2$s</string>
@@ -245,9 +243,7 @@
 <string name="valid_name">Start with a letter or emoji. Use no more than 16 characters.</string>
 <string name="type_name">Type a name.</string>
 <string name="contacts_saved">Contacts saved</string>
-<string name="passkeys_unavailable">Passkeys aren’t available for this Android build yet. Use your recovery key.</string>
 <string name="no_passkey">No Yo passkey found. Use your recovery key.</string>
-<string name="passkey_pending">Passkey PRF integration is pending. Use your recovery key.</string>
 <string name="camera_open_failed">Couldn’t open the camera. Check its permission or try another camera.</string>
 <string name="camera_not_ready">Camera not ready</string>
 <string name="video_too_large">Video is too large. Use a shorter video.</string>
@@ -293,4 +289,15 @@
     <string name="enable_yo_notifications">Enable Yo Notifications</string>
     <string name="yo_notification_channel">Yos</string>
     <string name="yo_notification_fallback">You may have received a Yo</string>
+    <string name="yo_followup_channel">Quiet Yo follow-ups</string>
+    <string name="yo_notification_group_suffix">\u0020in #%1$s</string>
+    <string name="notification_settings_unavailable">Notification settings are unavailable on this device.</string>
+    <string name="turn_on_notifications">Turn On Notifications</string>
+    <string name="mute_video">Mute video</string>
+    <string name="unmute_video">Unmute video</string>
+    <string name="share_confirmation">Yo %1$s · %2$s</string>
+    <string name="yo_widget">Yo</string>
+    <string name="widget_choose">Choose friends and groups</string>
+    <string name="yo_back_tile">Yo Back</string>
+    <string name="passkey_prf_required">This passkey provider did not return a backup key. Use a provider that supports PRF or use your recovery key.</string>
 </resources>

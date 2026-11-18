@@ -2,11 +2,13 @@ package app.justyo.android
 
 import android.content.Context
 import android.media.AudioAttributes
-import android.media.SoundPool
+import android.media.MediaPlayer
 import android.util.Base64
+import androidx.glance.appwidget.updateAll
 import kotlinx.coroutines.*
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.distinctUntilChanged
@@ -87,45 +89,26 @@ class Repository(private val context: Context, ownerScope: CoroutineScope) {
     fun press(key: String, down: Boolean) = present { press(it, key, down) }
     private val seen = LinkedHashSet<String>()
     private val removedUsers = mutableSetOf<String>()
-    private var foreground = false
+    @Volatile private var foreground = false
+    private val syncing = Mutex()
     private var listening: Job? = null
     private var retrying: Job? = null
     val media = MediaQueue(context,vault, scope, { client }, { sessionId }, { source, events -> absorb(events, source) }, { refreshMedia() }).also { queue ->
         queue.sendYo = { friend -> client?.let { sendNow(friend, it) } }
-        queue.sent = { target ->
-            state.value.friends.firstOrNull { it.target==target }?.let { showSent(it,"Sent Yo") }
-            state.value.friends.firstOrNull { it.target==target }?.let { recordStat(it,true) }
-        }
-    }
-    private val soundPool=lazy { SoundPool.Builder().setMaxStreams(8).setAudioAttributes(
-        AudioAttributes.Builder().setUsage(AudioAttributes.USAGE_ASSISTANCE_SONIFICATION).build()).build() }
-    private val sounds by soundPool
-    fun close() {
-        listening?.cancel()
-        retrying?.cancel()
-        listJob?.cancel()
-        orderSave?.cancel()
-        val closingClient = client
-        client = null
-        if (soundPool.isInitialized()) sounds.release()
-        // ViewModel cleanup runs on Main after its scope is cancelled. TLS socket close can perform network I/O.
-        CoroutineScope(Dispatchers.IO).launch {
-            try {
-                transport.close()
-            } finally {
-                closingClient?.shutdown()
+        queue.sent = { target, last ->
+            state.value.friends.firstOrNull { it.target == target }?.let {
+                if (last) showSent(it, "Sent Yo")
+                recordStat(it, true)
             }
         }
     }
-    private var sound = 0
-    private var soundReady = false
-    private var lastSound = 0L
-
+    private val soundPlayers = mutableSetOf<MediaPlayer>()
     fun start() = scope.launch(Dispatchers.IO) {
         scope.launch(Dispatchers.IO) {
-            state.map { it.friends }.distinctUntilChanged().collect { friends ->
+            state.map { it.username to it.friends }.distinctUntilChanged().collect { (_, friends) ->
                 // Shortcut publishing is advisory; launcher rejection must not break the account.
                 runCatching { updateSharingShortcuts(context,friends) }
+                runCatching { YoWidget().updateAll(context) }
             }
         }
         scope.launch {
@@ -139,8 +122,6 @@ class Repository(private val context: Context, ownerScope: CoroutineScope) {
                 previous=stacks
             }
         }
-        sounds.setOnLoadCompleteListener { _, _, status -> soundReady = status == 0 }
-        sound = sounds.load(context, R.raw.yo, 1)
         try {
             scope.launch(Dispatchers.IO) { runCatching { crashes.flush() } }
             // A process may have ended while viewing or normalizing media. Plain temporary files never survive a launch.
@@ -166,10 +147,15 @@ class Repository(private val context: Context, ownerScope: CoroutineScope) {
                 media.load()
                 absorb(restored.savedEvents(), restored)
                 refresh()
+                refreshMedia()
+                media.wake()
                 deliverLater(restored)
             } else if (state.value.username != null) error(context.getString(R.string.ui_account_state_missing_use_your_recovery_key))
             mutable.update { it.copy(loading = false) }
-            if (foreground) listen()
+            if (foreground) {
+                if (client != null) YoWork.registerIfConfigured(context)
+                listen()
+            }
             consumeInvite()
         } catch (e: Exception) {
             mutable.update { it.copy(loading = false, broken = true, error = friendlyError(context,e)) }
@@ -204,7 +190,7 @@ class Repository(private val context: Context, ownerScope: CoroutineScope) {
             pin(c); c.acknowledgeExplicitly(); client = c; sessionId++
             mutable.update { it.copy(username = c.username() ?: name, friends = listOf(Friend(name = "YoGPT", color = 0)), broken = false) }
             persist(); vault.delete(pendingName)
-            refresh(); consumeInvite(); listen()
+            refresh(); consumeInvite(); listen(); YoWork.registerIfConfigured(context)
         } finally { mutable.update { it.copy(busy = false) } }
     }
     suspend fun restore(codeText: String) = accountTurn.withLock {
@@ -214,17 +200,39 @@ class Repository(private val context: Context, ownerScope: CoroutineScope) {
             val code = recoveryKeyParse(codeText) ?: recoveryKeyParse(codeText.lowercase().filter { it in 'a'..'z' || it in '0'..'9' }.takeLast(64))
                 ?: error(context.getString(R.string.ui_that_doesn_t_match_a_recovery_key_check_it_and_try_again))
             val opened = openBackup(transport, null, YoDoor.RecoveryKey(code)) ?: error(context.getString(R.string.ui_we_couldn_t_find_your_account_check_your_recovery_key))
-            val sealed = JSONObject(opened.sealed.decodeToString())
-            val account = sealed.getJSONObject("account")
-            val c = YoClient.registerUsername(transport, file, vault.secret("state-key"), account.getString("username"),
-                decode(account.getString("accountKey")), null, null, 0u, "")
-            pin(c); c.acknowledgeExplicitly(); client = c; sessionId++
-            val recovered = sealed.stringOrNull("code") ?: code
-            vault.write("recovery", recovered.toByteArray())
-            mutable.update { it.copy(username = c.username(), secured = true, recovery = recovered, broken = false, friends = emptyList()) }
-            persist(); refresh(); consumeInvite(); listen()
+            restoreBackup(opened, code)
         } finally { mutable.update { it.copy(busy = false) } }
     }
+
+    internal suspend fun restorePasskey(answer: Passkeys.Answer) = accountTurn.withLock {
+        check(client == null)
+        mutable.update { it.copy(busy = true) }
+        try {
+            val opened = openBackup(transport, answer.user, YoDoor.Passkey(answer.prf))
+                ?: error(context.getString(R.string.no_passkey))
+            restoreBackup(opened, null)
+        } finally { mutable.update { it.copy(busy = false) } }
+    }
+
+    private suspend fun restoreBackup(opened: YoOpenedBackup, typedCode: String?) {
+        val sealed = JSONObject(opened.sealed.decodeToString())
+        val account = sealed.getJSONObject("account")
+        val c = YoClient.registerUsername(transport, file, vault.secret("state-key"), account.getString("username"),
+            decode(account.getString("accountKey")), null, null, 0u, "")
+        pin(c); c.acknowledgeExplicitly(); client = c; sessionId++
+        val same = c.userId().hexBytes().contentEquals(decode(account.getString("userID")))
+        val recovered = if (same) sealed.stringOrNull("code") ?: typedCode else null
+        if (recovered != null) vault.write("recovery", recovered.toByteArray())
+        mutable.update { it.copy(username = c.username(), secured = same, recovery = recovered, broken = false, friends = emptyList()) }
+        persist(); refresh(); consumeInvite(); listen(); YoWork.registerIfConfigured(context)
+    }
+
+    internal fun passkeyAccount(): Pair<String, ByteArray>? = client?.let { c ->
+        c.username()?.let { it to c.userId().hexBytes() }
+    }
+
+    internal suspend fun keepPasskey(answer: Passkeys.Answer) = saveRecovery(answer)
+
     suspend fun prepareRecovery(renew: Boolean = false) {
         val c = client ?: return
         val code = if (renew) newRecoveryKey() else state.value.recovery ?: vault.read("recovery-pending")?.decodeToString() ?: newRecoveryKey()
@@ -232,25 +240,41 @@ class Repository(private val context: Context, ownerScope: CoroutineScope) {
         mutable.update { it.copy(recovery = code) }
         check(c === client)
     }
-    suspend fun keepRecovery() = accountTurn.withLock {
+    suspend fun keepRecovery() = saveRecovery(null)
+
+    private suspend fun saveRecovery(answer: Passkeys.Answer?) = accountTurn.withLock {
         val c = client ?: return@withLock
-        val code = state.value.recovery ?: error(context.getString(R.string.ui_recovery_key_missing))
+        if (answer != null) check(answer.user.contentEquals(c.userId().hexBytes()))
+        val code = state.value.recovery ?: if (answer != null) newRecoveryKey()
+            else error(context.getString(R.string.ui_recovery_key_missing))
         val old = vault.read("recovery")?.decodeToString()
         val backup = old?.let { openBackup(transport, null, YoDoor.RecoveryKey(it)) }
+        val passkey = answer?.let { YoPasskeyDoor.New(it.prf) }
+            ?: backup?.let { YoPasskeyDoor.Keep(it.record) } ?: YoPasskeyDoor.None
         val account = JSONObject().put("username", c.username()).put("userID", encode(c.userId().hexBytes()))
-            .put("accountKey", encode(c.accountSecret())).put("byPasskey", backup?.record?.byPasskey?.isNotEmpty() == true).put("byCode", true)
-            .put("codeAuth", true).put("passkeyAuth", backup?.record?.authPasskey?.isNotEmpty() == true).put("backupVersion", 3)
+            .put("accountKey", encode(c.accountSecret())).put("byPasskey", answer != null || backup?.record?.byPasskey?.isNotEmpty() == true).put("byCode", true)
+            .put("codeAuth", true).put("passkeyAuth", answer != null || backup?.record?.authPasskey?.isNotEmpty() == true).put("backupVersion", 3)
         val sealed = JSONObject().put("account", account).put("code", code).toString().toByteArray()
-        c.putBackup(backup?.k ?: randomBytes(32), sealed, code, backup?.let { YoPasskeyDoor.Keep(it.record) } ?: YoPasskeyDoor.None)
+        c.putBackup(backup?.k ?: randomBytes(32), sealed, code, passkey)
         check(c === client)
         vault.write("recovery", code.toByteArray()); vault.delete("recovery-pending")
-        mutable.update { it.copy(secured = true) }; changes.withLock { persist() }
+        mutable.update { it.copy(secured = true, recovery = code) }; changes.withLock { persist() }
     }
     fun active(on: Boolean) {
         foreground = on
         present { foreground(it, on) }
-        if (on) command { listen(); client?.let { source -> absorb(source.maintenance(), source) }; media.wake() }
-        else { listening?.cancel(); listening = null }
+        if (on) command {
+            notifications.clear()
+            listen()
+            client?.let { source ->
+                YoWork.registerIfConfigured(context)
+                absorb(source.maintenance(), source)
+            }
+            media.wake()
+        } else {
+            listening?.cancel()
+            listening = null
+        }
     }
     private fun listen() {
         if (!foreground || listening?.isActive == true || client == null || state.value.update) return
@@ -259,10 +283,11 @@ class Repository(private val context: Context, ownerScope: CoroutineScope) {
             while (isActive && foreground && !state.value.update) {
                 val c = client ?: break
                 try {
-                    absorb(c.savedEvents(), c)
-                    val events = c.sync(25u)
-                    if (c !== client) break
-                    absorb(events, c); c.afterSync()
+                    syncing.withLock {
+                        absorb(c.savedEvents(), c)
+                        val events = c.sync(25u)
+                        if (c === client) { absorb(events, c); c.afterSync() }
+                    }
                     mutable.update { it.copy(lastSync = System.currentTimeMillis()) }
                     refresh(); media.wake(); pause = 1000
                 } catch (e: CancellationException) { throw e }
@@ -271,6 +296,54 @@ class Repository(private val context: Context, ownerScope: CoroutineScope) {
             }
         }
     }
+    private var registeredPush: Pair<Long, String>? = null
+
+    suspend fun registerPush(token: String) = accountTurn.withLock {
+        val c = client ?: return@withLock
+        val registration = sessionId to token
+        if (registeredPush != registration) {
+            c.setPush(3u, token)
+            registeredPush = registration
+        }
+    }
+
+    suspend fun syncPush() {
+        if (foreground && listening?.isActive == true) return
+        syncing.withLock {
+            val c = client ?: return
+            absorb(c.savedEvents(), c)
+            absorb(c.sync(0u), c)
+            if (c === client) {
+                c.afterSync()
+                mutable.update { it.copy(lastSync = System.currentTimeMillis()) }
+            }
+        }
+        // Keep the process eligible to complete downloads started by the inbox pass.
+        withTimeoutOrNull(15_000) {
+            state.first { snapshot -> snapshot.media.none { !it.ready } }
+        }
+    }
+
+    suspend fun pushFallback() = changes.withLock {
+        if (!foreground) {
+            crashes.countNotificationFallback("pushSyncFailed")
+            try {
+                notifications.show("yo-fallback", "yo-fallback:${java.util.UUID.randomUUID()}", null, null, MessageKind.Yo)
+            } catch (_: SecurityException) { }
+        }
+    }
+
+    suspend fun sendWidgetYo(key: String?, account: String?, latest: Boolean) {
+        val c = client ?: return
+        if (!latest && account != c.userId()) return
+        val snapshot = state.value
+        val target = if (latest) snapshot.lastReceived.maxByOrNull { it.value }?.key else key
+        val friend = snapshot.friends.firstOrNull { it.key == target && !it.blocked && !it.request && !it.gone } ?: return
+        sendNow(friend, c)
+    }
+
+    fun widgetAccount() = client?.userId()
+
     suspend fun add(typed: String) {
         val c = client ?: return
         val name = usernameCanonical(typed)
@@ -370,7 +443,7 @@ class Repository(private val context: Context, ownerScope: CoroutineScope) {
             else -> ListKind.YO
         }, token, if(friend.group != null) user else null) }
         recordStat(friend,false)
-        chime()
+        if (foreground) chime()
     }
     suspend fun refresh() = changes.withLock {
         val c = client ?: return@withLock
@@ -444,7 +517,7 @@ class Repository(private val context: Context, ownerScope: CoroutineScope) {
                                 crashes.countNotificationFallback(if (group == null) "unknownSender" else "unknownGroupSender")
                             }
                             try {
-                                notifications.show(user, name, kind)
+                                if (!foreground) notifications.show(friend.target, id, name, friend.name.takeIf { group != null }, kind)
                             } catch (_: SecurityException) {
                                 // Notification permission may be revoked between checking and posting.
                             }
@@ -463,8 +536,21 @@ class Repository(private val context: Context, ownerScope: CoroutineScope) {
             audio.playSoundEffect(android.media.AudioManager.FX_KEY_CLICK)
     }
     private fun chime() {
-        val now = System.currentTimeMillis()
-        if (soundReady && now - lastSound >= 100) { sounds.play(sound, 1f, 1f, 1, 0, 1f); lastSound = now }
+        // MediaPlayer callbacks need a looper, even though the inbox runs on IO.
+        scope.launch(Dispatchers.Main.immediate) {
+            synchronized(soundPlayers) {
+                if (soundPlayers.size >= 3) return@synchronized
+                val attributes = AudioAttributes.Builder().setUsage(AudioAttributes.USAGE_ASSISTANCE_SONIFICATION).build()
+                val player = MediaPlayer.create(context, R.raw.yo, attributes, 0) ?: return@synchronized
+                fun release() = synchronized(soundPlayers) {
+                    if (soundPlayers.remove(player)) player.release()
+                }
+                soundPlayers += player
+                player.setOnCompletionListener { release() }
+                player.setOnErrorListener { _, _, _ -> release(); true }
+                try { player.start() } catch (_: IllegalStateException) { release() }
+            }
+        }
     }
     suspend fun answer(friend: Friend, yes: Boolean, block: Boolean = false) {
         val c = client ?: return
@@ -561,6 +647,8 @@ class Repository(private val context: Context, ownerScope: CoroutineScope) {
         notifications.clear()
         val old = client; client = null; sessionId++
         listening?.cancel(); listening = null; retrying?.cancel(); retrying = null
+        if (registeredPush?.first == sessionId - 1) runCatching { old?.setPush(0u, "") }
+        registeredPush = null
         old?.shutdown()
         changes.withLock {
             media.clear(); file.delete(); vault.clear(); seen.clear(); removedUsers.clear(); clearTemporaryMedia()

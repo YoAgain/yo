@@ -16,9 +16,8 @@ internal class PendingShares(private val context: Context,private val vault: Vau
     private fun manifest()=vault.read("share-inbox")?.let { JSONArray(it.toString(Charsets.UTF_8)).objects() }.orEmpty()
     private fun save(rows: List<JSONObject>)=vault.write("share-inbox",JSONArray(rows).toString().toByteArray())
     suspend fun items(): List<Uri> = gate.withLock { manifest().map { uri(it.getString("id")) } }
-    suspend fun import(source: Uri): Uri {
+    suspend fun import(source: Uri, video: Boolean): Uri {
         val version=session()
-        val video=context.contentResolver.getType(source)?.startsWith("video/")==true
         val prepared=if(video) MediaFiles.video(context,source) else MediaFiles.photo(context,source)
         return gate.withLock { accountGuard.withLock {
             currentCoroutineContext().ensureActive()

@@ -145,13 +145,14 @@ internal data class BarContent(
     val heldMedia = bar.undo?.takeUnless { it.kind == ListKind.YO }
     SideEffect {
         if (heldMedia != null) outgoingCount = heldMedia.count.toLong()
+        else if (bar.thumbnails.isNotEmpty()) outgoingCount = maxOf(outgoingCount, bar.thumbnails.size.toLong())
         else if (!bar.sent) outgoingCount = 0L
     }
     val count = bar.undo?.count?.toLong()
         ?: maxOf(bar.row?.count?.toLong() ?: 1L, bar.thumbnails.size.toLong(), outgoingCount)
     val title = when {
         bar.recording -> stringResource(R.string.recording)
-        bar.undo != null -> if (count <= 1) stringResource(R.string.sending_yo)
+        bar.undo != null || bar.thumbnails.isNotEmpty() -> if (count <= 1) stringResource(R.string.sending_yo)
             else stringResource(R.string.sending_yos, count)
         bar.sent -> if (count <= 1) stringResource(R.string.sent_yo)
             else stringResource(R.string.sent_yos, count)
@@ -159,16 +160,18 @@ internal data class BarContent(
     }
     val extraReceive = bar.separate && lines >= 2
     val primaryReceived = bar.received && !extraReceive
-    val currentThumb = bar.thumbnails.lastOrNull()
-    var previousThumb by remember(friend.key) { mutableStateOf<OutgoingPreview?>(null) }
+    var previousThumbnails by remember(friend.key) { mutableStateOf(emptyList<OutgoingPreview>()) }
     SideEffect {
-        if (currentThumb != null || !bar.sent) previousThumb = currentThumb
+        if (!bar.sent || bar.undo != null || bar.thumbnails.size >= previousThumbnails.size) {
+            previousThumbnails = bar.thumbnails
+        }
     }
-    val thumb = (currentThumb ?: previousThumb).takeIf { bar.sent && !primaryReceived && bar.undo?.kind != ListKind.YO }
+    val thumbnails = (if (bar.thumbnails.size >= previousThumbnails.size) bar.thumbnails else previousThumbnails)
+        .takeIf { bar.sent && !primaryReceived && bar.undo?.kind != ListKind.YO }.orEmpty()
     val showUndo = bar.undo != null && !primaryReceived
     val hasSign = bar.media.isNotEmpty() && !friend.request
     val showSignOnPrimary = hasSign && !extraReceive
-    val outgoingInset = if (showUndo || thumb != null) 88 else 20
+    val outgoingInset = if (showUndo || thumbnails.isNotEmpty()) 88 else 20
     val primarySignInset = if (showSignOnPrimary) 68 else 20
     val receivedSignInset = if (hasSign) 68 else 20
     val start = if (left) Alignment.CenterEnd else Alignment.CenterStart
@@ -192,7 +195,7 @@ internal data class BarContent(
             interactionSource = null, indication = null, role = Role.Button, onClick = onMedia,
         ).semantics { contentDescription = resources.getQuantityString(R.plurals.media_items, bar.media.size, bar.media.size) },
             contentAlignment = Alignment.Center) {
-            val sign = bar.row?.mediaSign.orEmpty().ifEmpty { if (bar.media.first().video) "🎥" else "📷" }
+            val sign = if (bar.media.any { it.video }) "🎥" else "📷"
             Text(sign, fontSize = BarFont)
         }
     }
@@ -225,13 +228,12 @@ internal data class BarContent(
             }
             BarWords(
                 if (primaryReceived) receivedFull else title,
-                fallback = received.takeIf { primaryReceived },
                 startInset = if (left) primarySignInset else outgoingInset,
                 endInset = if (left) outgoingInset else primarySignInset,
                 modifier = if (primaryReceived && !hasSign) Modifier.graphicsLayer { alpha = receivedOpacity.value } else Modifier,
             )
-            if (showUndo || thumb != null) Box(Modifier.align(start).padding(horizontal = 20.dp)) {
-                OutgoingThumbnail(repo, thumb, bar.undo, onUndo)
+            if (showUndo || thumbnails.isNotEmpty()) Box(Modifier.align(start).padding(horizontal = 20.dp)) {
+                OutgoingThumbnail(repo, thumbnails, bar.undo, onUndo)
             }
             if (showSignOnPrimary) Box(Modifier.align(end)) { mediaSign() }
         }
@@ -245,7 +247,6 @@ internal data class BarContent(
             if (extraReceive) Box(Modifier.fillMaxWidth().height(BarHeight).then(gesture), contentAlignment = Alignment.Center) {
                 BarWords(
                     receivedFull,
-                    fallback = received,
                     modifier = if (!hasSign) Modifier.graphicsLayer { alpha = receivedOpacity.value } else Modifier,
                     startInset = if (left) receivedSignInset else outgoingInset,
                     endInset = if (left) outgoingInset else receivedSignInset,
@@ -288,7 +289,6 @@ private val CountDigits = Regex("[0-9]+(?=×)")
 private fun BarWords(
     text: String,
     modifier: Modifier = Modifier,
-    fallback: String? = null,
     startInset: Int = 20,
     endInset: Int = 20,
 ) {
@@ -310,7 +310,7 @@ private fun BarWords(
             val (prefix, digits, suffix) = parts(value)
             (width(prefix) + digitBlock(digits) + width(suffix)).toDp()
         }
-        val selected = if (fallback != null && total(text) > available) fallback else text
+        val selected = text
         val (prefix, digits, suffix) = parts(selected)
         val lineWidth = total(selected).coerceAtMost(available)
         val lineStart = ((maxWidth - lineWidth) / 2).coerceIn(start, (maxWidth - end - lineWidth).coerceAtLeast(start))

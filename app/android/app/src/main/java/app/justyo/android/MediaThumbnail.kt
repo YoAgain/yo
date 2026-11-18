@@ -1,7 +1,8 @@
 package app.justyo.android
 
 import android.graphics.Bitmap
-import android.graphics.BitmapFactory
+import android.graphics.ImageDecoder
+import java.nio.ByteBuffer
 import android.media.MediaDataSource
 import android.media.MediaMetadataRetriever
 import java.io.ByteArrayOutputStream
@@ -21,12 +22,13 @@ internal fun mediaThumbnail(bytes: ByteArray,video: Boolean): ByteArray? {
             })
             reader.getScaledFrameAtTime(0,MediaMetadataRetriever.OPTION_CLOSEST_SYNC,256,256)
         } finally { reader.release() }
-    }.getOrNull() else {
-        val bounds=BitmapFactory.Options().apply { inJustDecodeBounds=true }
-        BitmapFactory.decodeByteArray(bytes,0,bytes.size,bounds)
-        var sample=1
-        while(maxOf(bounds.outWidth,bounds.outHeight)/sample>256) sample*=2
-        BitmapFactory.decodeByteArray(bytes,0,bytes.size,BitmapFactory.Options().apply { inSampleSize=sample })
-    }
+    }.getOrNull() else runCatching {
+        ImageDecoder.decodeBitmap(ImageDecoder.createSource(ByteBuffer.wrap(bytes))) { decoder, info, _ ->
+            val scale = minOf(1.0, 256.0 / maxOf(info.size.width, info.size.height))
+            decoder.setTargetSize((info.size.width * scale).toInt().coerceAtLeast(1),
+                (info.size.height * scale).toInt().coerceAtLeast(1))
+            decoder.allocator = ImageDecoder.ALLOCATOR_SOFTWARE
+        }
+    }.getOrNull()
     return bitmap?.let { ByteArrayOutputStream().also { out -> it.compress(Bitmap.CompressFormat.JPEG,80,out);it.recycle() }.toByteArray() }
 }

@@ -10,3 +10,5 @@ replay_pid*.log
 core.*
 
 !dev/core.sh
+
+/app/google-services.json

@@ -11,6 +11,7 @@ import android.os.Build
 import android.provider.MediaStore
 import android.util.Log
 import android.view.Surface
+import android.view.OrientationEventListener
 import androidx.camera.core.MirrorMode
 import androidx.camera.core.Camera
 import androidx.camera.core.CameraSelector
@@ -18,6 +19,7 @@ import androidx.camera.core.ImageCapture
 import androidx.camera.core.ImageCaptureException
 import androidx.camera.core.Preview
 import androidx.camera.lifecycle.ProcessCameraProvider
+import androidx.heifwriter.HeifWriter
 import androidx.camera.video.FileOutputOptions
 import androidx.camera.video.Quality
 import androidx.camera.video.QualitySelector
@@ -39,7 +41,16 @@ import java.io.File
 import java.util.UUID
 import androidx.media3.common.MediaItem
 import androidx.media3.common.MimeTypes
+import androidx.media3.common.util.Clock
+import androidx.media3.exoplayer.mediacodec.MediaCodecSelector
 import androidx.media3.effect.Presentation
+import androidx.media3.common.audio.ChannelMixingAudioProcessor
+import androidx.media3.common.audio.ChannelMixingMatrix
+import androidx.media3.common.audio.SonicAudioProcessor
+import android.media.MediaMetadataRetriever
+import android.os.Handler
+import android.os.Looper
+import kotlin.math.roundToInt
 import androidx.media3.transformer.*
 
 class YoCamera(private val context: Context) {
@@ -49,12 +60,27 @@ class YoCamera(private val context: Context) {
     private var video: VideoCapture<Recorder>? = null
     private var recording: Recording? = null
     private var binding = 0
+    private var previewView: PreviewView? = null
+    private var physicalRotation: Int? = null
+    private val orientation = object : OrientationEventListener(context) {
+        override fun onOrientationChanged(degrees: Int) {
+            if (degrees == ORIENTATION_UNKNOWN) return
+            physicalRotation = when (degrees) {
+                in 45..134 -> Surface.ROTATION_270
+                in 135..224 -> Surface.ROTATION_180
+                in 225..314 -> Surface.ROTATION_90
+                else -> Surface.ROTATION_0
+            }
+        }
+    }
     var front = false
         private set
     var zoom by mutableFloatStateOf(1f)
         private set
     fun bind(owner: LifecycleOwner, view: PreviewView, failed: (String) -> Unit) {
         val request = ++binding
+        previewView = view
+        orientation.enable()
         image = null
         video = null
         val future = ProcessCameraProvider.getInstance(context)
@@ -69,7 +95,11 @@ class YoCamera(private val context: Context) {
                 val preview = Preview.Builder().setTargetRotation(rotation).build().also { it.surfaceProvider = view.surfaceProvider }
                 val photo = ImageCapture.Builder().setTargetRotation(rotation)
                     .setCaptureMode(ImageCapture.CAPTURE_MODE_MINIMIZE_LATENCY).build()
-                val recorder = Recorder.Builder().setQualitySelector(QualitySelector.from(Quality.SD)).build()
+                val recorder = Recorder.Builder()
+                    .setQualitySelector(QualitySelector.from(Quality.HD, androidx.camera.video.FallbackStrategy.lowerQualityOrHigherThan(Quality.HD)))
+                    .setTargetAudioChannelCount(2)
+                    .setTargetAudioEncodingBitRate(128_000)
+                    .build()
                 val movie = VideoCapture.Builder(recorder).setTargetRotation(rotation)
                     .setMirrorMode(MirrorMode.MIRROR_MODE_ON_FRONT_ONLY).build()
                 camera=p.bindToLifecycle(owner,selector,preview,photo,movie)
@@ -91,6 +121,7 @@ class YoCamera(private val context: Context) {
             val file=File(context.cacheDir,"capture-${UUID.randomUUID()}.jpg")
             val capture=image
             if(capture==null) { done.resumeWithException(IllegalStateException(context.getString(R.string.camera_not_ready))); return@suspendCancellableCoroutine }
+            capture.targetRotation = physicalRotation ?: previewView?.display?.rotation ?: capture.targetRotation
             val metadata = ImageCapture.Metadata().apply { isReversedHorizontal = front }
             capture.takePicture(ImageCapture.OutputFileOptions.Builder(file).setMetadata(metadata).build(),ContextCompat.getMainExecutor(context),object: ImageCapture.OnImageSavedCallback {
                 override fun onImageSaved(result: ImageCapture.OutputFileResults) { if(done.isActive) done.resume(Uri.fromFile(file)) else file.delete() }
@@ -101,6 +132,7 @@ class YoCamera(private val context: Context) {
     fun startVideo(done: (Uri?) -> Unit) {
         if(recording!=null) return
         val capture=video ?: return done(null)
+        capture.targetRotation = physicalRotation ?: previewView?.display?.rotation ?: capture.targetRotation
         val file=File(context.cacheDir,"capture-${UUID.randomUUID()}.mp4")
         val options=FileOutputOptions.Builder(file).setDurationLimitMillis(VideoLimitMs).build()
         var pending=capture.output.prepareRecording(context,options)
@@ -119,6 +151,9 @@ class YoCamera(private val context: Context) {
         binding++
         recording?.close()
         provider?.unbindAll()
+        orientation.disable()
+        physicalRotation = null
+        previewView = null
         camera = null
         image = null
         video = null
@@ -126,42 +161,98 @@ class YoCamera(private val context: Context) {
 }
 internal const val VideoLimitMs = 10_000L
 
-data class PreparedMedia(val bytes: ByteArray,val width: Int,val height: Int,val video: Boolean=false,val duration: Int=0)
+data class PreparedMedia(val bytes: ByteArray,val width: Int,val height: Int,val video: Boolean=false,val duration: Int=0, val heic: Boolean=false)
 object MediaFiles {
     suspend fun photo(context: Context,uri: Uri): PreparedMedia = withContext(Dispatchers.IO) {
         val source=ImageDecoder.createSource(context.contentResolver,uri)
         val bitmap=ImageDecoder.decodeBitmap(source) { decoder,info,_ ->
-            val ratio=minOf(1.0,1600.0/maxOf(info.size.width,info.size.height))
+            val ratio=minOf(1.0,2048.0/maxOf(info.size.width,info.size.height))
             decoder.setTargetSize((info.size.width*ratio).toInt().coerceAtLeast(1),(info.size.height*ratio).toInt().coerceAtLeast(1))
             decoder.allocator=ImageDecoder.ALLOCATOR_SOFTWARE
         }
-        val bytes=ByteArrayOutputStream().also { bitmap.compress(Bitmap.CompressFormat.JPEG,70,it) }.toByteArray()
-        PreparedMedia(bytes,bitmap.width,bitmap.height).also { bitmap.recycle() }
+        val file = File(context.cacheDir, "prepared-${UUID.randomUUID()}.heic")
+        try {
+            val heic = try {
+                HeifWriter.Builder(file.path, bitmap.width, bitmap.height, HeifWriter.INPUT_MODE_BITMAP)
+                    .setQuality(75).build().use { writer ->
+                        writer.start()
+                        writer.addBitmap(bitmap)
+                        writer.stop(5_000)
+                    }
+                file.takeIf { it.length() > 0 }?.readBytes()
+            } catch (e: Exception) {
+                Log.d("YoMedia", "HEIC encoder unavailable", e)
+                null
+            }
+            val bytes = heic ?: ByteArrayOutputStream().also {
+                check(bitmap.compress(Bitmap.CompressFormat.JPEG, 75, it))
+            }.toByteArray()
+            PreparedMedia(bytes, bitmap.width, bitmap.height, heic = heic != null)
+        } finally {
+            file.delete()
+            bitmap.recycle()
+        }
     }
     @androidx.annotation.OptIn(androidx.media3.common.util.UnstableApi::class)
     suspend fun video(context: Context,uri: Uri): PreparedMedia {
         val file=File(context.cacheDir,"prepared-${UUID.randomUUID()}.mp4")
         try {
+            val (width, height) = withContext(Dispatchers.IO) {
+                val retriever = MediaMetadataRetriever()
+                try {
+                    retriever.setDataSource(context, uri)
+                    val w = checkNotNull(retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_VIDEO_WIDTH)).toInt()
+                    val h = checkNotNull(retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_VIDEO_HEIGHT)).toInt()
+                    val rotation = retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_VIDEO_ROTATION)?.toInt()
+                    val scale = minOf(1.0, 1280.0 / maxOf(w, h), 720.0 / minOf(w, h))
+                    fun fit(side: Int) = ((side * scale / 2).roundToInt() * 2).coerceAtLeast(2)
+                    if (rotation == 90 || rotation == 270) fit(h) to fit(w) else fit(w) to fit(h)
+                } finally { retriever.release() }
+            }
             withContext(Dispatchers.Main) {
                 suspendCancellableCoroutine<Unit> { done ->
                     val item=MediaItem.Builder().setUri(uri).setClippingConfiguration(MediaItem.ClippingConfiguration.Builder().setEndPositionMs(VideoLimitMs).build()).build()
-                    val edited=EditedMediaItem.Builder(item).setEffects(Effects(emptyList(),listOf(Presentation.createForHeight(540)))).build()
-                    val transformer=Transformer.Builder(context).setVideoMimeType(MimeTypes.VIDEO_H264).setAudioMimeType(MimeTypes.AUDIO_AAC)
+                    val stereo = ChannelMixingAudioProcessor().apply {
+                        for (channels in 1..6) {
+                            putChannelMixingMatrix(ChannelMixingMatrix.createForConstantPower(channels, 2))
+                        }
+                    }
+                    val sampleRate = SonicAudioProcessor().apply { setOutputSampleRateHz(48_000) }
+                    val edited = EditedMediaItem.Builder(item).setEffects(Effects(
+                        listOf(stereo, sampleRate),
+                        listOf(Presentation.createForWidthAndHeight(width, height, Presentation.LAYOUT_SCALE_TO_FIT)),
+                    )).build()
+                    val encoder = DefaultEncoderFactory.Builder(context)
+                        .setRequestedVideoEncoderSettings(VideoEncoderSettings.Builder().setBitrate(2_500_000).setiFrameIntervalSeconds(2f).build())
+                        .setRequestedAudioEncoderSettings(AudioEncoderSettings.Builder().setBitrate(128_000).build())
+                        .setEnableFormatFallback(false)
+                        .build()
+                    val builder = Transformer.Builder(context).setVideoMimeType(MimeTypes.VIDEO_H265)
+                        .setAudioMimeType(MimeTypes.AUDIO_AAC)
+                    if (Build.HARDWARE == "ranchu" || Build.HARDWARE == "goldfish") {
+                        // The virtual hardware decoder can fail after accepting the input format.
+                        val decoder = DefaultDecoderFactory.Builder(context)
+                            .setMediaCodecSelector(MediaCodecSelector.PREFER_SOFTWARE).build()
+                        builder.setAssetLoaderFactory(ExoPlayerAssetLoader.Factory(context, decoder, Clock.DEFAULT))
+                    }
+                    val transformer = builder.setPortraitEncodingEnabled(true)
+                        .setUsePlatformDiagnostics(false)
+                        .setEncoderFactory(encoder)
                         .addListener(object: Transformer.Listener {
                             override fun onCompleted(composition: Composition,exportResult: ExportResult) { if(done.isActive) done.resume(Unit) }
                             override fun onError(composition: Composition,exportResult: ExportResult,exportException: ExportException) { if(done.isActive) done.resumeWithException(exportException) }
                         }).build()
-                    done.invokeOnCancellation { transformer.cancel() }
+                    done.invokeOnCancellation { Handler(Looper.getMainLooper()).post { transformer.cancel(); file.delete() } }
                     transformer.start(edited,file.absolutePath)
                 }
             }
             return withContext(Dispatchers.IO) {
-                require(file.length() in 1..9_000_000) { context.getString(R.string.video_too_large) }
+                require(file.length() in 1..6_000_000) { context.getString(R.string.video_too_large) }
                 val retriever=android.media.MediaMetadataRetriever()
                 try {
                     retriever.setDataSource(file.path)
-                    PreparedMedia(file.readBytes(),retriever.extractMetadata(android.media.MediaMetadataRetriever.METADATA_KEY_VIDEO_WIDTH)?.toInt() ?: 540,
-                        retriever.extractMetadata(android.media.MediaMetadataRetriever.METADATA_KEY_VIDEO_HEIGHT)?.toInt() ?: 960,true,
+                    PreparedMedia(file.readBytes(),retriever.extractMetadata(android.media.MediaMetadataRetriever.METADATA_KEY_VIDEO_WIDTH)?.toInt() ?: width,
+                        retriever.extractMetadata(android.media.MediaMetadataRetriever.METADATA_KEY_VIDEO_HEIGHT)?.toInt() ?: height,true,
                         (retriever.extractMetadata(android.media.MediaMetadataRetriever.METADATA_KEY_DURATION)?.toInt() ?: 10000).coerceAtMost(10000))
                 } finally { retriever.release() }
             }
@@ -171,8 +262,8 @@ object MediaFiles {
         // Android 10+ adds our own media without asking for broad library access.
         if(Build.VERSION.SDK_INT<29) return@withContext
         val values=ContentValues().apply {
-            put(MediaStore.MediaColumns.DISPLAY_NAME,"Yo-${UUID.randomUUID()}.${if(media.video) "mp4" else "jpg"}")
-            put(MediaStore.MediaColumns.MIME_TYPE,if(media.video) "video/mp4" else "image/jpeg")
+            put(MediaStore.MediaColumns.DISPLAY_NAME,"Yo-${UUID.randomUUID()}.${if(media.video) "mp4" else if(media.heic) "heic" else "jpg"}")
+            put(MediaStore.MediaColumns.MIME_TYPE,if(media.video) "video/mp4" else if(media.heic) "image/heic" else "image/jpeg")
             put(MediaStore.MediaColumns.RELATIVE_PATH,if(media.video) "Movies/Yo" else "Pictures/Yo")
             put(MediaStore.MediaColumns.IS_PENDING,1)
         }

@@ -11,6 +11,8 @@ import android.graphics.Typeface
 import kotlinx.coroutines.*
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.sync.Semaphore
 import kotlinx.coroutines.sync.withPermit
 import kotlinx.coroutines.sync.Mutex
@@ -20,6 +22,7 @@ import org.json.JSONObject
 import uniffi.yo.*
 import java.io.ByteArrayOutputStream
 import java.util.UUID
+import java.util.concurrent.atomic.AtomicBoolean
 
 private data class Outgoing(val id: String, val owner: String, val target: String, val media: YoMedia,
     val video: Boolean, val duration: Int, val held: Boolean = true, val uploaded: Boolean = false)
@@ -42,6 +45,7 @@ class MediaQueue(
     private val undoMs=listTimings().undoMs.toLong()
     private val gate = Mutex()
     private val flushGate = Mutex()
+    private val flushRequested = AtomicBoolean()
     private var outgoing = listOf<Outgoing>()
     private var incoming = listOf<Received>()
     private var loaded = false
@@ -58,7 +62,7 @@ class MediaQueue(
     internal val thumbnails=previews.asStateFlow()
     private fun publishPreviews() { previews.value=outgoing.groupBy { it.target }.mapValues { (_,items) -> items.map { OutgoingPreview(it.id, it.video) } } }
     suspend fun thumbnail(id: String,incoming: Boolean=false): ByteArray? = gate.withLock { vault.read(if(incoming) "in-thumb-$id" else "thumb-$id") }
-    var sent: ((String)->Unit)? = null
+    var sent: ((String, Boolean)->Unit)? = null
     var sendYo: (suspend (Friend) -> Unit)? = null
     suspend fun load() = gate.withLock {
         if (loaded) return@withLock
@@ -192,9 +196,11 @@ class MediaQueue(
         publishStacks()
     }
     fun wake() {
+        if (!flushRequested.compareAndSet(false, true)) return
         scope.launch(Dispatchers.IO) {
-            if (!flushGate.tryLock()) return@launch
+            flushGate.lock()
             try {
+                flushRequested.set(false)
                 load()
                 val version = generation
                 var pause = 1000L
@@ -239,8 +245,16 @@ class MediaQueue(
                                 else -> c.sendPhoto(item.target,item.media)
                             }
                             absorb(c, events)
-                            if(c === client() && generation==version) sent?.invoke(item.target)
-                            gate.withLock { if (generation == version) { outgoing = outgoing.filter { it.id != item.id }; saveOut(); vault.delete("out-${item.id}");vault.delete("thumb-${item.id}");publishPreviews() } }
+                            val last = gate.withLock {
+                                if (generation != version) return@withLock null
+                                outgoing = outgoing.filterNot { it.id == item.id }
+                                saveOut()
+                                vault.delete("out-${item.id}")
+                                vault.delete("thumb-${item.id}")
+                                publishPreviews()
+                                outgoing.none { it.target == item.target }
+                            }
+                            if (last != null && c === client()) sent?.invoke(item.target, last)
                             progress = true
                         } catch (e: CancellationException) { throw e }
                         catch (_: Exception) { blockedTargets += item.target }
@@ -259,7 +273,7 @@ class MediaQueue(
                                     incoming = incoming.map { if (it.id == item.id) it.copy(ready=true) else it }; saveIn()
                                 }
                             } else gate.withLock { incoming = incoming.filter { it.id != item.id }; saveIn() }
-                            progress = true; changed()
+                            downloadChanges.update { it + 1 }; progress = true; changed()
                         } catch (e: CancellationException) { throw e } catch (_: Exception) { }
                     }
                     if (progress) pause=1000 else pause=(pause*2).coerceAtMost(30000)
@@ -279,12 +293,19 @@ class MediaQueue(
         }
         changed()
     }
-    suspend fun received() = gate.withLock { incoming.filter { it.ready && !it.consumed }.sortedBy { it.at } }
-    suspend fun open(item: Received): ByteArray = gate.withLock {
-        val data=vault.read(receivedFile(item.id)) ?: error(context.getString(R.string.photo_unavailable))
-        incoming=incoming.map { if(it.id==item.id) it.copy(consumed=true) else it }
-        saveIn() // mark seen before showing, so a crash cannot show it twice
-        data
+    suspend fun received() = gate.withLock { incoming.filter { !it.consumed }.sortedBy { it.at } }
+    private val downloadChanges = MutableStateFlow(0L)
+    suspend fun open(item: Received): ByteArray {
+        downloadChanges.first {
+            gate.withLock { incoming.firstOrNull { it.id == item.id }?.ready != false }
+        }
+        return gate.withLock {
+            val data = vault.read(receivedFile(item.id)) ?: error(context.getString(R.string.photo_unavailable))
+            val before = incoming
+            incoming = incoming.map { if (it.id == item.id) it.copy(consumed = true) else it }
+            try { saveIn() } catch (e: Exception) { incoming = before; throw e }
+            data
+        }
     }
     suspend fun forget(items: List<Received>) {
         gate.withLock {
@@ -298,7 +319,7 @@ class MediaQueue(
         releases.values.forEach { it.cancel() }; releases.clear(); paused.clear()
         yoReleases.values.forEach { it.cancel() }; yoReleases.clear()
         mediaStacks.clear(); yoStacks.clear()
-        outgoing=emptyList(); incoming=emptyList(); loaded=false; stacks.value=emptyMap();previews.value=emptyMap()
+        outgoing=emptyList(); incoming=emptyList(); loaded=false; stacks.value=emptyMap();previews.value=emptyMap(); downloadChanges.update { it + 1 }
     }
     suspend fun stageCard(context: Context, target: String, text: String,users: List<String>,groups: List<String>): String {
         val bitmap=androidx.core.graphics.createBitmap(1080,1080)

@@ -23,21 +23,27 @@ import androidx.compose.ui.unit.dp
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 
-@Composable internal fun OutgoingThumbnail(repo: Repository, preview: OutgoingPreview?, undo: UndoStack?, onUndo: () -> Unit) {
-    val id = preview?.id
-    val image by produceState<android.graphics.Bitmap?>(null, id) {
-        if (id != null) value = withContext(Dispatchers.IO) {
-            repo.media.thumbnail(id)?.let { BitmapFactory.decodeByteArray(it, 0, it.size) }
-        }
-    }
+@Composable internal fun OutgoingThumbnail(repo: Repository, previews: List<OutgoingPreview>, undo: UndoStack?, onUndo: () -> Unit) {
     val description = stringResource(if (undo != null) R.string.ui_undo_send else R.string.outgoing_photo)
     Box(Modifier.size(48.dp).then(
         if (undo != null) Modifier.clickable(interactionSource = null, indication = null, role = Role.Button,
             onClickLabel = description, onClick = onUndo) else Modifier
     ), contentAlignment = Alignment.Center) {
-        image?.let { Image(it.asImageBitmap(), description, Modifier.size(44.dp), contentScale = ContentScale.Crop) }
-        if (preview?.video == true || undo?.video == true) Icon(Icons.Default.PlayArrow, description, tint = Color.White)
-        else if (image == null && undo != null) Icon(Icons.AutoMirrored.Filled.Undo, description, tint = Color.White)
+        val pictures = previews.takeLast(3)
+        pictures.forEachIndexed { index, preview -> key(preview.id) {
+            val image by produceState<android.graphics.Bitmap?>(null, preview.id) {
+                value = withContext(Dispatchers.IO) {
+                    repo.media.thumbnail(preview.id)?.let { BitmapFactory.decodeByteArray(it, 0, it.size) }
+                }
+            }
+            val offset = (index * 4 - (pictures.size - 1) * 2).dp
+            image?.let {
+                Image(it.asImageBitmap(), description, Modifier.offset(x = offset, y = -offset)
+                    .size(if (pictures.size > 1) 36.dp else 44.dp), contentScale = ContentScale.Crop)
+            }
+        } }
+        if (pictures.lastOrNull()?.video == true || undo?.video == true) Icon(Icons.Default.PlayArrow, description, tint = Color.White)
+        else if (pictures.isEmpty() && undo != null) Icon(Icons.AutoMirrored.Filled.Undo, description, tint = Color.White)
         if (undo != null) {
             val fraction = remember(undo) { mutableFloatStateOf(undo.fraction(SystemClock.elapsedRealtime())) }
             LaunchedEffect(undo) {

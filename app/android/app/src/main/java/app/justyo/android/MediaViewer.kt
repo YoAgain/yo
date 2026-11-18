@@ -1,6 +1,8 @@
 package app.justyo.android
 
-import android.graphics.BitmapFactory
+import android.graphics.ImageDecoder
+import android.media.MediaPlayer
+import java.nio.ByteBuffer
 import android.net.Uri
 import android.widget.VideoView
 import androidx.activity.compose.PredictiveBackHandler
@@ -19,6 +21,8 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.window.SecureFlagPolicy
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Close
+import androidx.compose.material.icons.automirrored.filled.VolumeOff
+import androidx.compose.material.icons.automirrored.filled.VolumeUp
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
@@ -34,6 +38,7 @@ import androidx.compose.ui.viewinterop.AndroidView
 import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.window.DialogProperties
 import androidx.compose.ui.window.DialogWindowProvider
+import androidx.core.content.edit
 import androidx.core.view.WindowCompat
 import androidx.core.view.WindowInsetsCompat
 import androidx.core.view.WindowInsetsControllerCompat
@@ -51,6 +56,13 @@ import java.util.UUID
     var bitmap by remember { mutableStateOf<android.graphics.Bitmap?>(null) }
     var video by remember { mutableStateOf<File?>(null) }
     var player by remember { mutableStateOf<VideoView?>(null) }
+    val settings = remember { context.getSharedPreferences("viewer", android.content.Context.MODE_PRIVATE) }
+    var muted by remember { mutableStateOf(settings.getBoolean("muted", false)) }
+    var audioPlayer by remember { mutableStateOf<MediaPlayer?>(null) }
+    LaunchedEffect(muted, audioPlayer) {
+        val volume = if (muted) 0f else 1f
+        audioPlayer?.setVolume(volume, volume)
+    }
     var held by remember { mutableStateOf(false) }
     var progress by remember { mutableFloatStateOf(0f) }
     var ready by remember { mutableStateOf(false) }
@@ -66,7 +78,7 @@ import java.util.UUID
     }
     DisposableEffect(Unit) { onDispose { player?.stopPlayback();repo.command { if(sessionId==session) media.forget(viewed.toList());files.forEach { it.delete() } } } }
     LaunchedEffect(index) {
-        progress=0f;ready=false;bitmap=null;video=null;videoRatio=0f;player?.stopPlayback()
+        audioPlayer=null;progress=0f;ready=false;bitmap=null;video=null;videoRatio=0f;player?.stopPlayback()
         if(index>=queue.size) { finish();return@LaunchedEffect }
         val item=queue[index]
         try {
@@ -75,9 +87,12 @@ import java.util.UUID
                 video=withContext(Dispatchers.IO) { File(context.cacheDir,"view-${UUID.randomUUID()}.mp4").also { it.writeBytes(bytes);files+=it } }
             } else {
                 bitmap=withContext(Dispatchers.IO) {
-                    val bounds=BitmapFactory.Options().apply { inJustDecodeBounds=true };BitmapFactory.decodeByteArray(bytes,0,bytes.size,bounds)
-                    var sample=1;while(maxOf(bounds.outWidth,bounds.outHeight)/sample>2048) sample*=2
-                    BitmapFactory.decodeByteArray(bytes,0,bytes.size,BitmapFactory.Options().apply { inSampleSize=sample }) ?: error(uiResources.getString(R.string.ui_couldn_t_open_photo))
+                    ImageDecoder.decodeBitmap(ImageDecoder.createSource(ByteBuffer.wrap(bytes))) { decoder, info, _ ->
+                        val scale = minOf(1.0, 2048.0 / maxOf(info.size.width, info.size.height))
+                        decoder.setTargetSize((info.size.width * scale).toInt().coerceAtLeast(1),
+                            (info.size.height * scale).toInt().coerceAtLeast(1))
+                        decoder.allocator = ImageDecoder.ALLOCATOR_SOFTWARE
+                    }
                 }
                 ready=true
             }
@@ -138,9 +153,17 @@ import java.util.UUID
                     player = this
                     setVideoURI(Uri.fromFile(file))
                     setOnPreparedListener {
+                        val volume = if (muted) 0f else 1f
+                        it.setVolume(volume, volume)
+                        audioPlayer = it
                         if (it.videoWidth > 0 && it.videoHeight > 0) videoRatio = it.videoWidth.toFloat() / it.videoHeight
                         ready = true
                         if (!currentHeld) start()
+                    }
+                    setOnErrorListener { _, _, _ ->
+                        repo.command { error(uiResources.getString(R.string.ui_couldn_t_open_this_photo_or_video)) }
+                        finish()
+                        true
                     }
                     setOnCompletionListener { if (index == current) index++ }
                 } }, modifier = Modifier.requiredSize(width, height))
@@ -171,6 +194,13 @@ import java.util.UUID
                     }.orEmpty()
                     Text(title, Modifier.weight(1f), color = Color.White, fontFamily = YoFont, fontSize = 17.sp,
                         maxLines = 1, overflow = TextOverflow.Ellipsis)
+                    if (queue.getOrNull(index)?.video == true) IconButton(onClick = {
+                        muted = !muted
+                        settings.edit { putBoolean("muted", muted) }
+                    }) {
+                        Icon(if (muted) Icons.AutoMirrored.Filled.VolumeOff else Icons.AutoMirrored.Filled.VolumeUp,
+                            stringResource(if (muted) R.string.unmute_video else R.string.mute_video), tint = Color.White)
+                    }
                     IconButton(onClick = { finish() }) {
                         Icon(Icons.Default.Close, uiResources.getString(R.string.ui_close), tint = Color.White)
                     }

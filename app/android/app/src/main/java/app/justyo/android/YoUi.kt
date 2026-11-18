@@ -157,7 +157,7 @@ import uniffi.yo.usernameFree
             if(s.busy) CircularProgressIndicator(Modifier.padding(16.dp))
             when(step) {
                 2 -> {
-                    Button(onClick={scope.launch { try { Passkeys.signIn(context) } catch(e: Exception) { model.error(e.message ?: uiResources.getString(R.string.ui_use_your_recovery_key)) } }},modifier=Modifier.fillMaxWidth().heightIn(min=54.dp)){BrandButtonText(stringResource(R.string.ui_use_passkey))}
+                    Button(onClick={scope.launch { try { val assertion = Passkeys.assert(context); model.repository.command { restorePasskey(assertion) } } catch(e: Exception) { model.error(e.message ?: uiResources.getString(R.string.ui_use_your_recovery_key)) } }},modifier=Modifier.fillMaxWidth().heightIn(min=54.dp)){BrandButtonText(stringResource(R.string.ui_use_passkey))}
                     TextButton(onClick={step=3}){BrandText(stringResource(R.string.ui_use_recovery_key),17)}
                 }
                 3 -> Button(onClick={model.repository.command { restore(code) }},enabled=!s.busy && code.isNotBlank(),modifier=Modifier.fillMaxWidth().heightIn(min=54.dp)){BrandButtonText(stringResource(R.string.ui_sign_in))}
@@ -245,6 +245,7 @@ import uniffi.yo.usernameFree
 
     val repo=model.repository
     val shares by model.shares.collectAsStateWithLifecycle()
+    val notificationsEnabled by model.notificationsEnabled.collectAsStateWithLifecycle()
     val importingShares by model.importingShares.collectAsStateWithLifecycle()
     val context=LocalContext.current
     val owner=LocalLifecycleOwner.current
@@ -329,6 +330,7 @@ import uniffi.yo.usernameFree
     PredictiveBackHandler(recording==null && (cameraOn || picked!=null)) { events -> events.collect { };cameraOn=false;picked=null }
     fun tap(friend: Friend) {
         if(importingShares) return
+        if (shares.isNotEmpty() && (friend.request || friend.blocked || friend.gone)) return
         if(!touch(friend)) return
         if (friend.request) {
             repo.command {
@@ -428,6 +430,11 @@ import uniffi.yo.usernameFree
         }
         if(picked!=null) PhotoUri(picked!!,Modifier.fillMaxSize())
         LazyColumn(Modifier.fillMaxSize(),state=listState,userScrollEnabled=recording==null,contentPadding=PaddingValues(bottom=84.dp)) {
+            if (!notificationsEnabled && !model.deniedThisLaunch) item(key = "notification-settings") {
+                FlatRow(stringResource(R.string.turn_on_notifications), 0) {
+                    openNotificationSettings(context)
+                }
+            }
             if(importingShares) item { LinearProgressIndicator(Modifier.fillMaxWidth());Text(stringResource(R.string.preparing_shared_media),modifier=Modifier.padding(20.dp));TextButton(onClick=model::cancelShares){Text(stringResource(R.string.ui_cancel_share))} }
             if(shares.isNotEmpty()) item { Text(uiResources.getQuantityString(R.plurals.shared_items,shares.size,shares.size),modifier=Modifier.padding(20.dp)); TextButton(onClick=model::cancelShares){Text(stringResource(R.string.ui_cancel_share))} }
             items(visible.size,key={visible[it].key}) { index ->
