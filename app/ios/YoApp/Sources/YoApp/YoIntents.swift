@@ -171,6 +171,7 @@ enum YoSend {
       lifetime.run { sendNow(to: target, owner: owner) }
     }.value
     lifetime.stop()
+    if outcome == nil { IntentSent.note(to: target, back: shown?.back ?? false) }
     if let shown {
       await YoSentActivity.show(
         to: target, name: shown.name, back: shown.back, failure: outcome, lastYoAtMs: shown.lastYoAtMs)
@@ -212,4 +213,55 @@ enum YoSend {
     ShareBridge.noteLast(yos, client: client)
     Task { await ShareBridge.post(yos) }
   }
+}
+
+/// The Yos sent from outside the list (the intents, a notification's Yo Back), for the list to show as its own: the
+/// bar on top with "Sent Yo" (FriendList). The core's state has the Yo already; the list's order and its "Sent Yo"
+/// are the app's and learn of it here. A small file in the App Group (the send may run in YoControls, or in the app
+/// before its list is there), and a Darwin notification for a list on screen meanwhile.
+struct IntentSent: Codable, Sendable {
+  /// Whom it went to, as the bar sends: a user id, a name, or "group:" and the group's id.
+  let to: String
+  var back = false
+  let at: Date
+
+  /// Posted (in the app) when a note came, from whichever process.
+  static let changed = Notification.Name("yo.intentSent")
+  private static var darwinName: String { ShareBridge.group + ".intentSent" }
+  private static var file: URL? { ShareBridge.container?.appending(path: "intent-sent.json") }
+  /// How long a note waits for the list: a Yo sent a day ago is no news on opening.
+  static let kept: TimeInterval = 24 * 3600
+
+  static func note(to: String, back: Bool) {
+    guard let file else { return }
+    let notes = (read(file) + [IntentSent(to: to, back: back, at: .now)]).suffix(20)
+    guard let data = try? JSONEncoder().encode(Array(notes)) else { return }
+    try? data.write(to: file, options: [.atomic, .completeFileProtectionUntilFirstUserAuthentication])
+    CFNotificationCenterPostNotification(
+      CFNotificationCenterGetDarwinNotifyCenter(), CFNotificationName(darwinName as CFString), nil, nil, true)
+  }
+
+  /// The app: the notes not yet shown, oldest first; taken (the file goes).
+  static func take() -> [IntentSent] {
+    guard let file else { return [] }
+    let notes = read(file)
+    try? FileManager.default.removeItem(at: file)
+    return notes.filter { $0.at > .now - kept }
+  }
+
+  private static func read(_ file: URL) -> [IntentSent] {
+    guard let data = try? Data(contentsOf: file) else { return [] }
+    return (try? JSONDecoder().decode([IntentSent].self, from: data)) ?? []
+  }
+
+  /// The app, once: a note from another process (or this one) posts `changed` here, on the main queue.
+  @MainActor static func listen() {
+    guard !listening else { return }
+    listening = true
+    CFNotificationCenterAddObserver(
+      CFNotificationCenterGetDarwinNotifyCenter(), nil,
+      { _, _, _, _, _ in DispatchQueue.main.async { NotificationCenter.default.post(name: IntentSent.changed, object: nil) } },
+      darwinName as CFString, nil, .deliverImmediately)
+  }
+  @MainActor private static var listening = false
 }

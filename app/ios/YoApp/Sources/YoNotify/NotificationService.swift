@@ -1,8 +1,9 @@
 // The notification service extension: a push says only "Yo" (the hub knows nothing more, spec 6.3); this one makes
-// it "Yo from YoGPT" ("📷 from …", "🎥 from …"; more read as on the bar, "Yo!!!!! +4 from YoGPT · 📷 2"), one
-// notification with the Yos those still on the screen name (ShareBridge.write). It opens the app's state as a guest
-// (SharedState.swift: in turns with the app, under the lock in the App Group), receives once without waiting, and
-// names who the new Yos are from (a line per sender, the newest first). What it receives stays in the state for the
+// it "Yo from YoGPT" ("Yo from YoGPT 📷", "Yo from Mia in #Hey 🎥"): as Signal's, every Yo a notification of its own,
+// in its sender's (or group's) thread, which iOS stacks ("3 more notifications from YoGPT"); the Yo sound only for
+// the first unread of a thread (ShareBridge.write). It opens the app's state as a guest (SharedState.swift: in turns
+// with the app, under the lock in the App Group), receives once without waiting, and names who the new Yos are
+// from (several in one push: one notification each, the newest this push's own). What it receives stays in the state for the
 // app (never acknowledged here), which shows it as ever. The photos and videos those Yos carry are fetched to the App
 // Group (Prefetch) before the notification goes (after it, iOS may end the process mid-fetch), within the extension's
 // limits (about 24 MB, 30 s): the app shows them as it opens, not a fetch later. The app acknowledges them on its
@@ -39,7 +40,7 @@ final class NotificationService: UNNotificationServiceExtension {
     let start = Date.now
     DispatchQueue.global(qos: .userInitiated).async {
       pending.lifetime.run {
-        // Read: the new Yos with those on the screen, in one notification; none new, the same quietly. Else, unread,
+        // Read: a notification per new Yo; none new, the newest on the screen again, quietly. Else, unread,
         // "You may have received a Yo", and why.
         switch Self.newest() {
         case .failure(let reason):
@@ -56,9 +57,9 @@ final class NotificationService: UNNotificationServiceExtension {
           group: { id in (try? client.groups())?.first { $0.id == id }?.name ?? "" }, requests: ShareBridge.requests(of: client))
           ShareBridge.noteLast(senders, client: client)
           let delivered = Self.delivered()
-          // This push's own notification is the sender's one (iOS shows a push whatever its content: an emptied
-          // one comes out as the bare "Yo" it came as), with the Yos of the one it replaces; nothing new, the newest
-          // on the screen again, quietly. The ones it replaces go as it is handed over.
+          // This push's own notification is the newest Yo's (iOS shows a push whatever its content: an emptied one
+          // comes out as the bare "Yo" it came as), the others are added beside it; nothing new, the newest on the
+          // screen again, quietly, and that one goes as it is handed over.
           let replaced = pending.update { ShareBridge.write($0, senders, over: delivered) } ?? []
           pending.deliver(replacing: replaced)
         }

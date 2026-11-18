@@ -119,131 +119,65 @@ enum ShareBridge {
   /// "Yo", "3× Yo", as on the bars.
   static func yo(_ count: Int) -> String { count <= 1 ? "Yo" : "\(count)× Yo" }
 
-  /// Yos from one sender, for a notification.
+  /// One Yo, for a notification of its own (as Signal: every message its own, iOS stacks them by sender).
   struct Yos: Sendable {
+    /// Who sent it: "Mia"; a group's "Mia in #Hey".
     let name: String
+    /// The sender's user id, or "group:" and the group's id: the notification's thread.
     let user: String
-    var count: Int
-    /// Of them, photos and videos: always named, never lost among the Yos.
-    var photos = 0
-    var videos = 0
-    /// The newest one's: a photo, a video, or nil for a Yo.
+    /// A photo, a video, or nil for a Yo.
     let kind: MediaFile.Kind?
-    /// The newest one as the app's inbox calls it ("user/sent at"): shown once, from the notification or the core.
+    /// As the app's inbox calls it ("user/sent at"): shown once, from the notification or the core.
     let id: String
-    /// A group's Yos (`user` is "group:" and its id): the name of its bar in the list ("FAMILY", "Group").
+    /// A group's Yo (`user` is "group:" and its id): the name of its bar in the list ("FAMILY", "Group").
     var bar: String? = nil
     /// From someone not yet a contact, or a group a stranger added this account to (spec 4.10): "Yo Request".
     var request = false
 
-    /// As the bar says it: "Yo from Mia", "3× Yo from Mia", with 📷 or 🎥 at the end when photos or videos came.
-    var line: String {
-      let who = bar.map { $0.isEmpty ? name : "\(name) @ \($0)" } ?? name
-      return request ? "Yo Request from \(who)" : "\(ShareBridge.yo(count)) from \(who)\(media)"
-    }
+    /// "Yo from Mia", "Yo from Mia 📷", "Yo from Mia in #Hey 🎥", "Yo Request from Mia".
+    var line: String { request ? "Yo Request from \(name)" : "Yo from \(name)\(media)" }
 
-    /// What came, without who: "Yo", "3× Yo 📷".
-    var what: String { ShareBridge.yo(count) + media }
+    private var media: String { kind == .video ? " 🎥" : kind == .photo ? " 📷" : "" }
 
-    /// " 🎥" or " 📷" when videos or photos are among them (the newest's kind for a single one), else "".
-    private var media: String {
-      if videos > 0 || (count == 1 && kind == .video) { return " 🎥" }
-      if photos > 0 || (count == 1 && kind == .photo) { return " 📷" }
-      return ""
-    }
+    /// One per Yo: none takes another's place.
+    var notificationIdentifier: String { "yo:" + id }
 
-    /// Stable across a sender’s run; message ids remain in userInfo for deduplication.
-    var notificationIdentifier: String { "yo:" + user }
-
-    /// When the newest was sent, from its id ("user/sent at").
+    /// When it was sent, from its id ("user/sent at").
     var sentAtMs: UInt64 { UInt64(id.split(separator: "/").last ?? "") ?? 0 }
 
-    /// As a notification keeps it (`userInfo["yos"]`), for the next one to add to.
-    var info: [String: Any] {
-      ["sender": name, "name": name, "user": user, "count": count, "photos": photos, "videos": videos, "id": id,
-       "kind": kind?.rawValue ?? "yo", "bar": bar ?? "", "request": request]
-    }
-
-    init(
-      name: String, user: String, count: Int, photos: Int = 0, videos: Int = 0, kind: MediaFile.Kind?, id: String
-    ) {
-      (self.name, self.user, self.count, self.photos, self.videos, self.kind, self.id) =
-        (name, user, count, photos, videos, kind, id)
-    }
-
-    init?(info: [String: Any]) {
-      guard let name = info["name"] as? String, let user = info["user"] as? String, let count = info["count"] as? Int,
-        let id = info["id"] as? String
-      else { return nil }
-      let kind = (info["kind"] as? String).flatMap(MediaFile.Kind.init(rawValue:))
-      self.init(
-        name: name, user: user, count: count, photos: info["photos"] as? Int ?? 0, videos: info["videos"] as? Int ?? 0,
-        kind: kind, id: id)
-      bar = (info["bar"] as? String).flatMap { $0.isEmpty ? nil : $0 }
-      request = info["request"] as? Bool ?? false
+    init(name: String, user: String, kind: MediaFile.Kind?, id: String) {
+      (self.name, self.user, self.kind, self.id) = (name, user, kind, id)
     }
   }
 
-  /// `new` (the newest first) with the Yos the Yo notifications still on the screen name, per sender: one
-  /// notification per sender keeps its accumulated count ("Yo!!!!! +4 from LEO · 📷 2").
-  private static func merged(_ new: [Yos], with delivered: [UNNotification]) -> (yos: [Yos], replaced: [String]) {
-    // One notification per sender (or group): a sender's earlier notification is taken into its new one; the others
-    // stay as they are.
-    var all = new
-    var replaced: [String] = []
-    for note in delivered.sorted(by: { $0.date > $1.date })
-    where note.request.content.categoryIdentifier == yoCategory {
-      guard let kept = note.request.content.userInfo["yos"] as? [[String: Any]] else { continue }
-      let earlier = kept.compactMap(Yos.init(info:))
-      guard earlier.contains(where: { e in all.contains { $0.user == e.user } }) else { continue }
-      replaced.append(note.request.identifier)
-      for e in earlier {
-        if let at = all.firstIndex(where: { $0.user == e.user }) {
-          all[at].count += e.count
-          all[at].photos += e.photos
-          all[at].videos += e.videos
-        }
-      }
-    }
-    return (all, replaced)
-  }
-
-  /// The Yos among `events`, one per sender, the newest sender first, as a notification names them; `name` names a
-  /// sender by user id. What Yo does not show yet (a text, a link, a place) comes as a Yo, as the app shows it.
-  /// A group's Yos are one entry per group, named "LEO in FAMILY" by its newest sender (`group` names a group by id).
-  /// `requests`: the senders (user ids) and groups ("group:" and the id) not accepted yet (`requests(of:)`).
+  /// The Yos among `events`, one per Yo, the newest first, as notifications name them; `name` names a sender by user
+  /// id. What Yo does not show yet (a text, a link, a place) comes as a Yo, as the app shows it. A group's Yo is named
+  /// "LEO in #FAMILY" (`group` names a group by id). `requests`: the senders (user ids) and groups ("group:" and the
+  /// id) not accepted yet (`requests(of:)`).
   static func yos(
     in events: [YoEvent], name: (String) -> String, group: (String) -> String = { _ in "" },
     requests: Set<String> = []
   ) -> [Yos] {
-    var senders: [String: Yos] = [:]
+    var all: [Yos] = []
     for event in events {
       // The id as the app takes the Yo in (Inbox.take), so one notified and one received count once.
-      let (key, yoID, sentAtMs, message, from): (String, String, UInt64, MessageKind, String)
-      var bar: String?
-      var groupName = ""
+      var yos: Yos
       switch event {
       case .message(let user, let at, let kind):
-        (key, yoID, sentAtMs, message, from) = (user, "\(user)/\(at)", at, kind, user)
+        yos = Yos(name: name(user), user: user, kind: kind.media?.kind, id: "\(user)/\(at)")
       case .groupMessage(let id, let user, let at, let kind):
-        groupName = group(id)
-        bar = groupName.isEmpty ? "Group" : groupName  // as the list names the group's bar (Friends.takeGroups)
-        (key, yoID, sentAtMs, message, from) = ("group:" + id, "\(id)/\(user)/\(at)", at, kind, user)
+        let groupName = group(id)
+        let from = name(user)
+        yos = Yos(
+          name: groupName.isEmpty ? from : "\(from) in #\(groupName)", user: "group:" + id, kind: kind.media?.kind,
+          id: "\(id)/\(user)/\(at)")
+        yos.bar = groupName.isEmpty ? "Group" : groupName  // as the list names the group's bar (Friends.takeGroups)
       default: continue
       }
-      let kind = message.media?.kind
-      let before = senders[key]
-      let newer = before.map { sentAtMs >= $0.sentAtMs } ?? true
-      var yos = Yos(
-        name: newer ? (groupName.isEmpty ? name(from) : "\(name(from)) in \(groupName)") : before!.name, user: key, count: (before?.count ?? 0) + 1,
-        photos: (before?.photos ?? 0) + (kind == .photo ? 1 : 0),
-        videos: (before?.videos ?? 0) + (kind == .video ? 1 : 0),
-        kind: newer ? kind : before!.kind, id: newer ? yoID : before!.id)
-      yos.bar = bar
-      yos.request = requests.contains(key)
-      senders[key] = yos
+      yos.request = requests.contains(yos.user)
+      all.append(yos)
     }
-    return senders.values.sorted { $0.sentAtMs > $1.sentAtMs }
+    return all.sorted { $0.sentAtMs > $1.sentAtMs }
   }
 
   /// Who is a request (spec 4.10), as `yos` takes it: contacts and groups not accepted yet.
@@ -266,67 +200,44 @@ enum ShareBridge {
   }
 
   /// A Yo notification, written by the notification service (a push) or by the app (Yos it took while in the
-  /// background): a line per sender, the newest first, whose thread and "Yo Back" it is; the Yo sound.
-  static func yo(_ content: UNMutableNotificationContent, _ senders: [Yos]) {
-    guard let newest = senders.first else { return }
-    // As the original's (2014): "Yo" on top, then "From LEO" ("Yo!!" / "From LEO @ FAMILY"; a photo "📷"). Several:
-    // a line each.
-    if senders.count == 1 {
-      let who = newest.bar.map { $0.isEmpty ? newest.name : "\(newest.name) @ \($0)" } ?? newest.name
-      // A request says who, not what.
-      content.title = newest.request ? "Yo Request" : newest.what
-      content.body = "From \(who)"
-    } else {
-      content.title = ""
-      content.body = senders.map(\.line).joined(separator: "\n")
-    }
-    content.sound = UNNotificationSound(named: UNNotificationSoundName("yo.caf"))
+  /// background): "Yo from Mia", in the thread of its sender (or group), which iOS stacks (its own "+n" wording: a
+  /// summary argument is ignored since iOS 15), with "Yo Back". The Yo sound only when `sounds` (the first of its thread on the screen), else quietly.
+  static func yo(_ content: UNMutableNotificationContent, _ yo: Yos, sounds: Bool) {
+    (content.title, content.subtitle, content.body) = ("", "", yo.line)
+    content.sound = sounds ? UNNotificationSound(named: UNNotificationSoundName("yo.caf")) : nil
+    content.interruptionLevel = sounds ? .active : .passive
     content.categoryIdentifier = yoCategory
-    content.threadIdentifier = newest.user
-    content.interruptionLevel = .active
+    content.threadIdentifier = yo.user
     // `user` for Yo Back, also to someone not on the list yet; `id` so the app shows the Yo once.
     // A group's: from its bar, where the app shows it.
-    content.userInfo = [
-      "from": newest.bar ?? newest.name, "sender": newest.name, "user": newest.user, "id": newest.id, "yos": senders.map(\.info),
-    ]
+    content.userInfo = ["from": yo.bar ?? yo.name, "sender": yo.name, "user": yo.user, "id": yo.id]
   }
 
-  /// The Yo notification for `new` Yos (none: a push that brought nothing new), added to those the Yo notifications on
-  /// the screen name, written into `content`; the identifiers of the notifications it takes the place of.
+  /// The notifications for `new` Yos (the newest first; none: a push that brought nothing new): the newest written into
+  /// `content`, each other one added as its own. The identifiers of the notifications `content` takes the place of.
   static func write(_ content: UNMutableNotificationContent, _ new: [Yos], over delivered: [UNNotification]) -> [String] {
     // Nothing new (a push whose Yos an earlier push or the app took): never one more bare "Yo" (an empty one is not
     // hidden either, without the filtering entitlement), but the newest Yo notification again, quietly, in its place.
-    guard !new.isEmpty else { return again(content, over: delivered) }
-    let (all, replaced) = merged(new, with: delivered)
-    // The app's red badge: as many as there are Yo notifications (one per sender or group, as merged here), until
-    // the app is opened, which clears both (Inbox.collectDelivered). None left: no badge.
-    let badge = NSNumber(value: all.count)
-    content.badge = badge
-    // The newest sender in this notification; every other sender gets a notification of its own.
-    guard let newest = all.first else { return replaced }
-    yo(content, [newest])
-    quietUpdate(content, for: newest, over: delivered)
-    for other in all.dropFirst() {
+    guard let newest = new.first else { return again(content, over: delivered) }
+    let shown = delivered.filter { $0.request.content.categoryIdentifier == yoCategory }
+    // The app's red badge: as many as there are Yo notifications, until the app is opened, which clears both
+    // (Inbox.collectDelivered).
+    let badge = NSNumber(value: shown.count + new.count)
+    // The sound for the first unread of a sender (or group) only: while one of its thread is on the screen, the next
+    // come quietly (no sound, no banner); once read or cleared, the next one sounds again.
+    var unread = Set(shown.map(\.request.content.threadIdentifier))
+    func sounds(_ yo: Yos) -> Bool { unread.insert(yo.user).inserted }
+    // The oldest first, the newest last (this push's own, on top).
+    for other in new.dropFirst().reversed() {
       let own = UNMutableNotificationContent()
-      yo(own, [other])
+      yo(own, other, sounds: sounds(other))
       own.badge = badge
-      quietUpdate(own, for: other, over: delivered)
-      UNUserNotificationCenter.current().add(UNNotificationRequest(identifier: other.notificationIdentifier, content: own, trigger: nil))
+      UNUserNotificationCenter.current().add(
+        UNNotificationRequest(identifier: other.notificationIdentifier, content: own, trigger: nil))
     }
-    return replaced
-  }
-
-  /// Replacing an existing sender’s notification (whatever its identifier: the app's "yo:" one or a push's own)
-  /// should not play the Yo sound again.
-  private static func quietUpdate(_ content: UNMutableNotificationContent, for sender: Yos, over delivered: [UNNotification]) {
-    let onScreen = delivered.contains { note in
-      note.request.identifier == sender.notificationIdentifier
-        || ((note.request.content.userInfo["yos"] as? [[String: Any]]) ?? []).contains { $0["user"] as? String == sender.user }
-    }
-    if onScreen {
-      content.sound = nil
-      content.interruptionLevel = .passive
-    }
+    yo(content, newest, sounds: sounds(newest))
+    content.badge = badge
+    return []
   }
 
   /// The newest Yo notification on the screen said again into `content`, quietly, with the badge as it is; its
@@ -335,7 +246,7 @@ enum ShareBridge {
   private static func again(_ content: UNMutableNotificationContent, over delivered: [UNNotification]) -> [String] {
     (content.sound, content.interruptionLevel) = (nil, .passive)
     let yos = delivered.filter {
-      $0.request.content.categoryIdentifier == yoCategory && $0.request.content.userInfo["yos"] != nil
+      $0.request.content.categoryIdentifier == yoCategory && $0.request.content.userInfo["id"] != nil
     }
     guard let newest = yos.max(by: { $0.date < $1.date }) else {
       (content.title, content.subtitle, content.body) = ("", "", "Yo")
@@ -349,25 +260,17 @@ enum ShareBridge {
     return [newest.request.identifier]
   }
 
-  /// A Yo notification from the app or the share extension (Yos they took themselves, which the notification service
-  /// then finds read): one with those on the screen. Not for a Yo a notification already names.
+  /// Yo notifications from the app or the share extension (Yos they took themselves, which the notification service
+  /// then finds read). Not for a Yo a notification already names.
   static func post(_ yos: [Yos]) async {
     let center = UNUserNotificationCenter.current()
     let delivered = await center.deliveredNotifications()
-    // Every Yo a notification already names, by each sender's newest id in it: none is counted twice.
-    let written = Set(
-      delivered.flatMap { note in
-        ((note.request.content.userInfo["yos"] as? [[String: Any]]) ?? []).compactMap { $0["id"] as? String }
-          + [note.request.content.userInfo["id"] as? String].compactMap { $0 }
-      })
+    let written = Set(delivered.compactMap { $0.request.content.userInfo["id"] as? String })
     let new = yos.filter { !written.contains($0.id) }.sorted { $0.sentAtMs > $1.sentAtMs }
     guard let newest = new.first else { return }
     let content = UNMutableNotificationContent()
-    let replaced = write(content, new, over: delivered)
+    _ = write(content, new, over: delivered)
     try? await center.add(UNNotificationRequest(identifier: newest.notificationIdentifier, content: content, trigger: nil))
-    // The senders' earlier ones under other identifiers (a push's own) go once these are out.
-    let posted = Set(new.map(\.notificationIdentifier))
-    center.removeDeliveredNotifications(withIdentifiers: replaced.filter { !posted.contains($0) })
   }
 }
 

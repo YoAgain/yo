@@ -159,6 +159,8 @@ struct FriendList: View {
       var countdownStarted: Date?
       /// Keep the already-counted batch visible after undo ends, until its sends finish.
       var sendingBatch: (id: UUID, count: Int, items: [Outgoing])?
+      /// The photos a "Sent Yo" confirms: they stay beside it and go when its words go.
+      var sentStack: [Outgoing] = []
       /// How long the stack on its way out waits (`run`): `sendDelay`, or a friend's "Undo Before Sending" time.
       var seconds = FriendList.sendDelay
       /// A video being held on this bar: the stack's countdown waits for it, so the video joins the same stack.
@@ -228,6 +230,8 @@ struct FriendList: View {
   @State private var zoom = 1.0
   @State private var pinchStart: Double?
   @State private var recordingFor: Friend?
+  /// Each hold's own mark: the 10 s limit sends only the video it was started for.
+  @State private var recordingRound: UUID?
   @State private var libraryItems: [_PhotosUI_SwiftUI.PhotosPickerItem] = []
   /// Ordered library picks kept for repeated sends until closed.
   @State private var picked: [Picked] = []
@@ -780,7 +784,7 @@ struct FriendList: View {
         guard recordingFor == friend else { return }
         recordingChanged(nil)
         Task {
-          if let file = await camera.stopVideo() { Task.detached(priority: .utility) { try? FileManager.default.removeItem(at: file) } }
+          if let file = await camera.stopVideo()?.file { Task.detached(priority: .utility) { try? FileManager.default.removeItem(at: file) } }
         }
       },
       press: { pressed(friend.key, $0) },
@@ -1268,7 +1272,8 @@ struct FriendList: View {
     guard on else { return camera.stop() }
     _ = Self.outgoingThumbnailQueue  // enqueue decode warm-up before camera startup/capture
     // Asked first: closed meanwhile, it stays closed.
-    if Camera.authorized { if cameraOn { camera.start() } }
+    // The microphone asked too where the camera was allowed before videos had sound (else they stay silent).
+    if Camera.authorized, !Camera.microphoneUndecided { if cameraOn { camera.start() } }
     else if await Camera.allowed() { if cameraOn { camera.start() } } else { cameraSwitched(false) }
     await readZooms()
   }
@@ -1423,19 +1428,29 @@ struct FriendList: View {
       guard recordingFor == nil else { return }  // one video at a time: a second finger records nothing
       recordingChanged(friend)
       camera.startVideo()
+      // At the longest length (the red fill full) the video goes as if the finger had lifted; the bar is a bar again
+      // under the finger, and its later lift finds no recording and does nothing.
+      let round = UUID()
+      recordingRound = round
+      Task {
+        try? await Task.sleep(for: .seconds(Camera.longestVideo))
+        guard recordingRound == round, let current = recordingFor, current.key == friend.key else { return }
+        hold(current, false, origin: nil)
+      }
     } else if recordingFor == friend {
       recordingChanged(nil)
       Haptic.tap()
       let client = accounts.client
       let at = Date.now
       run(friend, "Sent 🎥", origin: origin, placeholder: camera.previewThumbnail()) { thumbnail in
-        guard let recording = await camera.stopVideo() else { return nil }
+        guard case let (recording, turn)? = await camera.stopVideo() else { return nil }
         Perf.mark("thumb.capture.done")
         defer { Task.detached(priority: .utility) { try? FileManager.default.removeItem(at: recording) } }
         guard !Task.isCancelled else { return nil }
         return await withTaskCancellationHandler {
           if let image = await Self.outgoingVideoThumbnail(recording) { thumbnail(image) }
-          guard !Task.isCancelled, let file = await MediaFile.video(recording), !Task.isCancelled else { return nil }
+          guard !Task.isCancelled, let file = await MediaFile.video(recording, landscapeTurn: turn),
+            !Task.isCancelled else { return nil }
           return await stage(file, to: friend, from: client, at: at)
         } onCancel: {
           try? FileManager.default.removeItem(at: recording)
@@ -1535,7 +1550,10 @@ struct FriendList: View {
           if !(await prepared.send()) { failed = true }
         }
         // Starts already counted every item. Finish the batch once, without replaying those counts.
-        if bar.sendingBatch?.id == batchID { bar.sendingBatch = nil }
+        if bar.sendingBatch?.id == batchID {
+          bar.sentStack = failed ? [] : bar.sendingBatch?.items ?? []
+          bar.sendingBatch = nil
+        }
         showSent(to: friend, failed ? "Not Sent" : (stack.last?.text ?? "Not Sent"), thenOnTop: !failed)
       }
       bars.releasing[key] = releasing
@@ -1621,6 +1639,18 @@ struct FriendList: View {
   }
 
   /// Network/capture handlers report their result; text, counts and lifetime are core-owned.
+  /// The Yos sent from outside the list since it last looked (IntentSent), oldest first: the newest ends on top.
+  private func takeIntentSent() {
+    guard scenePhase == .active else { return }
+    for sent in IntentSent.take() {
+      let skeleton = Username.skeleton(sent.to)
+      let bar = friends.all.first { $0.target == sent.to }
+        ?? friends.all.first { $0.group == nil && $0.user == nil && Username.skeleton($0.name) == skeleton }
+      guard let bar, !bar.blocked else { continue }
+      showSent(to: bar, "Sent Yo", thenOnTop: true)
+    }
+  }
+
   private func showSent(to friend: Friend, _ text: String, thenOnTop: Bool = false) {
     if text == "Not Sent", cameraOn { SendFailure.shared.show(name: friend.name, retry: { outbox.retryNow() }) }
     let id = friend.key.uuidString
@@ -1651,7 +1681,7 @@ struct FriendList: View {
         let user = Inbox.sender(of: $0)
         let name = user.flatMap { u in inbox.memberNames[u] ?? friends.all.first { $0.user == u }?.name }
         let from = friend.group == nil ? friend.name : "\(name ?? "Someone") in \(friend.name)"
-        return Arrival(id: $0.id, from: from, photo: $0.photo, video: $0.video, file: $0.file)
+        return Arrival(id: $0.id, from: from, photo: $0.photo, video: $0.video, file: $0.file, pending: $0.pending)
       }
     case .tapped:
       break  // it runs on by itself
@@ -1703,7 +1733,23 @@ extension FriendList {
       .task { await inbox.listen(accounts: accounts, friends: friends) }
       .onChange(of: listFriends, initial: true) { syncListFriends() }
       .onChange(of: inbox.memberNames) { syncSenderNames() }
+      // A photo or video noted, downloaded or gone: the sign follows, and an open viewer takes the download.
+      .onChange(of: inbox.mediaChanges) {
+        syncListMedia()
+        if let open = viewing, open.contains(where: { $0.pending != nil }) {
+          viewing = open.map { item in
+            guard item.pending != nil, let ready = inbox.unseen(id: item.id), ready.pending == nil else { return item }
+            return Arrival(id: item.id, from: item.from, photo: ready.photo, video: ready.video, file: ready.file)
+          }
+        }
+      }
       .onChange(of: scenePhase, initial: true) { publish(listModel.foreground(now: listNow, active: scenePhase == .active)) }
+      // A Yo sent from outside the list (the Action button, Control Center, Shortcuts, Siri, a notification's Yo
+      // Back): its bar on top with "Sent Yo", as a tap's. Taken while the list is in front; one sent meanwhile in
+      // the background waits for the opening.
+      .task { IntentSent.listen(); takeIntentSent() }
+      .onChange(of: scenePhase) { _, phase in if phase == .active { takeIntentSent() } }
+      .onReceive(NotificationCenter.default.publisher(for: IntentSent.changed)) { _ in takeIntentSent() }
       // "Yo Camera" (Shortcuts, Siri, the Action button): open straight in camera mode.
       .onChange(of: AppRoute.shared.camera, initial: true) { _, on in
         if on { AppRoute.shared.camera = false; if !cameraOn { cameraSwitched(true) } }
@@ -1799,7 +1845,7 @@ extension FriendList {
   private func syncListMedia() {
     for friend in friends.shown {
       let id = friend.key.uuidString
-      let videos = (inbox.media(for: friend) ?? []).map { $0.video != nil }
+      let videos = (inbox.media(for: friend) ?? []).map(\.isVideo)
       guard (listMedia.each[id] ?? []) != videos else { continue }
       listMedia.each[id] = videos
       publish(listModel.mediaChanged(now: listNow, id: id, kinds: videos.map { $0 ? .video : .photo }))
@@ -1846,6 +1892,10 @@ extension FriendList {
       let bar = bars.of(friend)
       let sending = !bar.outgoing.isEmpty || !row.sending ? bar.sendingBatch : nil
       let title = sending == nil ? row.title : "Sent Yo"
+      // The sent photos go with their "Sent Yo", in the same update.
+      if !bar.sentStack.isEmpty, title != "Sent Yo" || !bar.outgoing.isEmpty || bar.sendingBatch != nil {
+        bar.sentStack = []
+      }
       let count = sending?.count ?? Int(row.count)
       if bar.modelTitle != title { bar.modelTitle = title }
       if bar.modelCount != count { bar.modelCount = count }
@@ -2024,7 +2074,7 @@ extension FriendList {
       if recordingFor != nil {  // a hold the camera closed under: no video waits, the next hold records again
         recordingChanged(nil)
         Task {
-          if let file = await camera.stopVideo() { Task.detached(priority: .utility) { try? FileManager.default.removeItem(at: file) } }
+          if let file = await camera.stopVideo()?.file { Task.detached(priority: .utility) { try? FileManager.default.removeItem(at: file) } }
           flushRise()
         }
       }
@@ -2082,8 +2132,9 @@ struct LiveBar: View, @MainActor Equatable {
       // A request shows one "Yo Request from X": no count of its Yos ("!!!"), no photo, not even its 📷 (what spam
       // aims at); all of it only after a yes.
       title, count: friend.request ? 0 : count, name: friend.group == nil ? friend.name : nil, color: color, cameraOn: cameraOn, recording: recording,
-      outgoing: bar.outgoing.isEmpty ? bar.sendingBatch?.items.last?.started : (bar.countdownStarted ?? .distantFuture),
-      outgoingItems: bar.outgoing.isEmpty ? (bar.sendingBatch?.items ?? []) : bar.outgoing,
+      outgoing: bar.outgoing.isEmpty ? (bar.sendingBatch?.items ?? bar.sentStack).last?.started
+        : (bar.countdownStarted ?? .distantFuture),
+      outgoingItems: bar.outgoing.isEmpty ? (bar.sendingBatch?.items ?? bar.sentStack) : bar.outgoing,
       undoAvailable: !bar.outgoing.isEmpty, sendSeconds: bar.seconds, stop: stop,
       media: friend.request ? [] : media, mediaMarkCount: bar.modelMarkCount, mediaSign: bar.modelMediaSign, yo: friend.request ? nil : yo, hint: hint, hold: hold, cancelHold: cancelHold, press: press, flightChanged: flightChanged, flyBegan: flyBegan, view: view, faded: friend.gone && !bar.hasNotice,
       icon: friend.group == nil ? nil : "person.3.fill", senders: bar.modelSenders, keepHeight: keepHeight, flies: true,
@@ -2403,8 +2454,9 @@ struct RowButton: View {
       .frame(maxWidth: .infinity, minHeight: Metrics.rowHeight)
       .background {
         ZStack(alignment: .leading) {
-          // Pressed in camera mode: more see-through, the picture shows clearer there (the shutter's flash).
-          Color.clear.modifier(ListColor(color: color, pressed: cameraOn && shutterDown && !recording))
+          // Pressed in camera mode: more see-through, the picture shows clearer there (the shutter's flash). Held to
+          // record it stays so, also if the touch observer lets go of the press while the video runs.
+          Color.clear.modifier(ListColor(color: color, pressed: cameraOn && (shutterDown || recording)))
           // Recording: the bar stays see-through, only the red grows over it from the leading edge.
           if recording { RecordingFill(seconds: Camera.longestVideo, fromRight: leftHanded) }
         }
@@ -2495,11 +2547,22 @@ struct RowButton: View {
   }
 
   /// "3× Yo from Mia", or "3× Yo" when that does not fit; in the middle, the photo sign kept clear at the end.
+  /// A name cut ever shorter at its end, each with "…": "Christophe…" down to "Chr…".
+  static func cuts(_ name: String) -> [String] {
+    let letters = Array(name)
+    guard letters.count > 4 else { return [] }
+    return (3..<letters.count - 1).reversed().map { String(letters[..<$0]) + "…" }
+  }
+
   private var receivedRow: some View {
     let room = room(sign: hasSign)
     let yos = YoWords.yo(receivedCount)
     return BarRow(lead: room.lead, trail: room.trail) {
       SteadyText("\(yos) from \(name ?? "")").padding(.horizontal, 3)
+      // Too wide: the name is cut at its end ("Yo from Christo…"), never dropped while 3 letters fit; "Yo" whole.
+      ForEach(Self.cuts(name ?? ""), id: \.self) { cut in
+        SteadyText("\(yos) from \(cut)").padding(.horizontal, 3)
+      }
       SteadyText(yos).padding(.horizontal, 3)
     }
     // A plain Yo fades out; photos and videos stay until seen.
@@ -3290,6 +3353,12 @@ struct HeldMedia: View {
           .clipped()
           .ignoresSafeArea()
           .allowsHitTesting(false)
+        // Still downloading: it shows as soon as it is here.
+        if current.pending != nil {
+          ProgressView().controlSize(.large).tint(.white)
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+            .allowsHitTesting(false)
+        }
         VStack(alignment: .leading, spacing: 10) {
           TimelineView(.animation(minimumInterval: 1.0 / 120, paused: since == nil)) { timeline in
             let running = progress(at: timeline.date)
@@ -3345,8 +3414,16 @@ struct HeldMedia: View {
       if !holding && pulled != 0 { withAnimation(.snappy(duration: 0.25)) { pulled = 0 } }
     }
     .task(id: round) { await load() }
+    // The one waited for is downloaded: shown from its start.
+    .onChange(of: index < queue.count && queue[index].pending == nil) { _, ready in
+      if ready && seconds == nil { go(to: index) }
+    }
     .task(id: Run(round: round, held: held, ready: seconds != nil)) { await run() }
-    .onDisappear { player?.pause() }
+    .onAppear { ViewerSound.open() }
+    .onDisappear {
+      player?.pause()
+      ViewerSound.close()
+    }
     .accessibilityAction(named: "Previous") { go(to: index - 1) }
     .accessibilityAction(named: "Next") { go(to: index + 1) }
     .accessibilityAction(.escape) { finished() }
@@ -3402,6 +3479,11 @@ struct HeldMedia: View {
     guard index < queue.count else { return finished() }
     let current = queue[index]
     player?.pause()
+    guard current.pending == nil else {
+      player = nil  // waits for its download (`queue` changes then)
+      full = nil
+      return
+    }
     guard let video = current.video else {
       player = nil
       full = nil
@@ -3509,6 +3591,36 @@ struct ScreenshotProof<Content: View>: UIViewRepresentable {
       view.topAnchor.constraint(equalTo: parent.topAnchor),
       view.bottomAnchor.constraint(equalTo: parent.bottomAnchor),
     ])
+  }
+}
+
+/// Videos play their sound as Stories do, the ringer switch on silent too: `.playback` while the viewer is open (the
+/// Yo sound's `.ambient` is silenced by the switch), `.ambient` again after. The camera's own session (play and
+/// record, which the switch does not silence) is left as it is.
+enum ViewerSound {
+  private static let queue = DispatchQueue(label: "yo.viewer-sound", qos: .userInitiated)
+  nonisolated(unsafe) private static var switched = false  // only on `queue`
+
+  static func open() {
+    queue.async {
+      let session = AVAudioSession.sharedInstance()
+      guard [.ambient, .soloAmbient].contains(session.category) else { return }
+      do {
+        try session.setCategory(.playback, mode: .moviePlayback)
+        try session.setActive(true)
+        switched = true
+      } catch { Diagnostics.record(error) }
+    }
+  }
+
+  static func close() {
+    queue.async {
+      guard switched else { return }
+      switched = false
+      let session = AVAudioSession.sharedInstance()
+      try? session.setActive(false, options: .notifyOthersOnDeactivation)  // music stopped for the video goes on
+      try? session.setCategory(.ambient)
+    }
   }
 }
 

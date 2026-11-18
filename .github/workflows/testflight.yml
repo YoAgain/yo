@@ -37,6 +37,37 @@ jobs:
           ref: ${{ env.OAD_COMMIT }}
           path: .oad
 
+      # OAD's App Intents metadata knows one system protocol (WidgetConfiguration) and leaves LiveActivityIntent out,
+      # which Xcode writes as com.apple.link.systemProtocol.SessionStarting. Without it the system runs Send Yo and Yo
+      # Back from a control in YoControls, where no Live Activity may start ("Sent Yo! to Mia" never showed;
+      # liveactivitiesd: "Target does not include NSSupportsLiveActivities"), and the list never heard of the Yo. With
+      # it they run in the app's process. Patched into this checkout only; fails if the tool changed.
+      - name: OAD, LiveActivityIntent metadata
+        run: |
+          python3 -I - .oad/tools/appintentsmeta.py <<'EOF'
+          import sys
+          path = sys.argv[1]
+          s = open(path).read()
+          old = [
+              "        'systemProtocolMetadata': [WIDGET_PROTOCOL, {'empty': {}}] if widget else [],\n",
+              "        'systemProtocolMetadataV2': [WIDGET_PROTOCOL, {'empty': {}}] if widget else [],\n",
+              "        'systemProtocols': [WIDGET_PROTOCOL] if widget else [],\n",
+          ]
+          new = [
+              "        'systemProtocolMetadata': [x for p in protocols for x in (p, {'empty': {}})],\n",
+              "        'systemProtocolMetadataV2': [x for p in protocols for x in (p, {'empty': {}})],\n",
+              "        'systemProtocols': protocols,\n",
+          ]
+          anchor = "    widget = module.conforms(entry, 'AppIntents.WidgetConfigurationIntent')\n"
+          assert s.count(anchor) == 1 and all(s.count(o) == 1 for o in old), "appintentsmeta.py changed: patch again"
+          s = s.replace(anchor, anchor + "    protocols = ([WIDGET_PROTOCOL] if widget else []) + (\n"
+              "        ['com.apple.link.systemProtocol.SessionStarting']\n"
+              "        if module.conforms(entry, 'AppIntents.LiveActivityIntent') else [])\n")
+          for o, n in zip(old, new):
+              s = s.replace(o, n)
+          open(path, "w").write(s)
+          EOF
+
       # Downloaded tools, kept between runs (the versions above are the key).
       - id: tools
         uses: actions/cache@v4

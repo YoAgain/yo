@@ -5,6 +5,9 @@
 // intents are LiveActivityIntents.
 import ActivityKit
 import Foundation
+#if canImport(os)
+import os
+#endif
 
 /// One Yo that went (or did not) to one friend or group.
 struct YoSentAttributes: ActivityAttributes {
@@ -73,18 +76,53 @@ enum YoSentActivity {
   }
 
   /// Starts it and opens it big at once (an update with an alert opens the island; a banner on an iPhone without
-  /// one), then ends it. Waits while it shows: a process left in the background may be suspended before it could
-  /// end it.
+  /// one), and ends it `shown` later. The intent does not wait for that: it returns at once, so iOS's own "running"
+  /// mark (the control's blue hand) leaves the island right away. Not ended at once with a later dismissal: an ended
+  /// activity leaves the Dynamic Island immediately (the dismissal policy holds only on the Lock Screen).
+  /// Every reason it does not show is counted (CountedErrors, "LiveActivity"), for the admin page.
   private static func present(_ attributes: YoSentAttributes, _ state: YoSentAttributes.ContentState) async {
-    guard ActivityAuthorizationInfo().areActivitiesEnabled else { return }
-    let content = ActivityContent(state: state, staleDate: .now + 4)
+    // Only the app's process may start one: an extension (the controls' intents run in YoControls when the App
+    // Intents metadata does not mark them LiveActivityIntent) is refused by the system.
+    guard Bundle.main.bundleURL.pathExtension != "appex" else { return failed("inExtension") }
+    guard ActivityAuthorizationInfo().areActivitiesEnabled else { return failed("disabled", expected: true) }
+    let content = ActivityContent(state: state, staleDate: .now + Double(shown.components.seconds))
     // One at a time: an earlier one still there (its process suspended) goes now.
     for old in Activity<YoSentAttributes>.activities { await old.end(nil, dismissalPolicy: .immediate) }
-    guard let activity = try? Activity.request(attributes: attributes, content: content) else { return }
+    let activity: Activity<YoSentAttributes>
+    do {
+      activity = try Activity.request(attributes: attributes, content: content)
+    } catch {
+      return failed("request " + String(describing: error))
+    }
     await activity.update(
       content,
       alertConfiguration: AlertConfiguration(title: "\(state.title)", body: "\(state.detail)", sound: .default))
-    try? await Task.sleep(for: shown)
-    await activity.end(nil, dismissalPolicy: .immediate)
+    endLater(activity)
+  }
+
+  /// Ends it after `shown`, with the time the system gives a process that is about to be suspended; if that time
+  /// ends first, it ends then (never left on until its next start).
+  private static func endLater(_ activity: Activity<YoSentAttributes>) {
+    let id = activity.id
+    ProcessInfo.processInfo.performExpiringActivity(withReason: "Yo sent") { expired in
+      let done = DispatchSemaphore(value: 0)
+      Task.detached {
+        if !expired { try? await Task.sleep(for: shown) }
+        for running in Activity<YoSentAttributes>.activities where running.id == id {
+          await running.end(nil, dismissalPolicy: .immediate)
+        }
+        done.signal()
+      }
+      // The block keeps the process awake until it returns; on `expired` it is called again and ends it now.
+      _ = done.wait(timeout: .now() + .seconds(Int(shown.components.seconds) + 2))
+    }
+  }
+
+  private static func failed(_ reason: String, expected: Bool = false) {
+    let process = Bundle.main.bundleURL.pathExtension == "appex" ? "extension" : "app"
+    CountedErrors.record(domain: "LiveActivity", place: "YoSentActivity." + process, code: reason, expected: expected)
+    #if canImport(os)
+    Logger(subsystem: "app.justyo", category: "live-activity").error("not shown: \(reason, privacy: .public)")
+    #endif
   }
 }
