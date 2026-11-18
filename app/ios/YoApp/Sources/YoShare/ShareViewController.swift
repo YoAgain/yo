@@ -5,7 +5,7 @@
 // now"), or all of it when the state does not open here (no account, the keychain locked, the app holding it), waits
 // in the group's outbox instead and goes as soon as Yo opens (ShareBridge); so does a photo or video there was no
 // memory left to make small here (the app makes it). Up to ten photos or one video (Info: NSExtensionActivationRule).
-// A video longer than a Yo's (10 s) is offered to the system's trimmer first (VideoTrimmer); only where that cannot
+// A video longer than a Yo's (10 s) is offered to Yo's trimmer first (VideoTrimmer); only where that cannot
 // be is it refused.
 import SwiftUI
 import UIKit
@@ -49,7 +49,10 @@ final class ShareViewController: UIViewController {
   private func presentTrimIfReady() {
     guard appeared, !presentingTrim, let trim else { return }
     presentingTrim = true
-    present(YoVideoEditor(trim: trim), animated: true)
+    let controller = UIHostingController(rootView: VideoTrimmer(trim: trim))
+    controller.modalPresentationStyle = .fullScreen
+    controller.overrideUserInterfaceStyle = .dark
+    present(controller, animated: true)
   }
 
   @objc private func hostInBackground() { model.cancel() }
@@ -146,7 +149,7 @@ final class ShareModel {
           }
         case .video:
           guard var url = await Self.copyFile(provider, type: .movie) else { continue }
-          // Longer than a Yo's video: the system's trimmer offers the part to send. Closed, the share closes; where
+          // Longer than a Yo's video: Yo's trimmer offers the part to send. Closed, the share closes; where
           // it cannot cut, the video is refused and nothing of this share goes.
           if let seconds = await MediaFile.length(of: url), !MediaFile.fits(seconds), !cancelled {
             let result = await VideoTrim.run(url, show: showTrim)
@@ -479,7 +482,7 @@ struct ShareView: View {
   }
 }
 
-/// An over-limit video the system editor could not open or save.
+/// An over-limit video the trimmer could not open or save.
 struct TooLongCard: View {
   var body: some View {
     HStack(spacing: 10) {

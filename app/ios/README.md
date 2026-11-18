@@ -20,7 +20,7 @@ The app talks to the live hub (TestFlight and App Store) or the dev hub (Yo Dev)
   tap a friend's or group's Yo bar to send the media and see the result on that bar. Tap more bars to send to more
   recipients, then tap Done. Without network (or with the hub's "not now") shares wait in the App Group
   `group.app.justyo.ios` and go when Yo opens (`ShareBridge.swift`, `Share.swift`). Shared, library and camera videos
-  have a 10 s limit. Longer shared or library videos open the system's trimmer full-screen (`VideoTrimmer.swift`).
+  have a 10 s limit. Longer shared or library videos open Yo's trimmer full-screen (`VideoTrimmer.swift`).
 - Notifications (the same builds): "Yo from YoGPT", "📷 from …", "Yo!!!!! +4 from … · 📷 2" (one notification per run, as the bar says it), with the Yo sound and "Yo Back". The
   push only says "Yo"; the notification service (`Sources/YoNotify`) receives once, names the sender and fetches a
   photo or video of up to 6 MiB into the App Group first (`Prefetch.swift`; the app and the service claim a blob

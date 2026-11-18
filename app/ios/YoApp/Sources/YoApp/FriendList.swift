@@ -2062,7 +2062,7 @@ extension FriendList {
           do {
             try await Task.detached { try data.write(to: url) }.value
             var source = url
-            // Longer than a Yo's video (10 s): the system's trimmer offers the part to send; closed, it is left out;
+            // Longer than a Yo's video (10 s): Yo's trimmer offers the part to send; closed, it is left out;
             // where it cannot cut, it is refused.
             if let seconds = await MediaFile.length(of: url), !MediaFile.fits(seconds) {
               let result = await VideoTrim.run(url) { videoTrim = $0 }

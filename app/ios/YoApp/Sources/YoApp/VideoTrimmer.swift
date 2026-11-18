@@ -1,6 +1,5 @@
-// A shared or picked video longer than a Yo's (`MediaFile.longestVideo`, 10 s): the system's own trimmer
-// (UIVideoEditorController) offers the part to send, at most that long. Compiled into the app (the library picker)
-// and YoShare (the share sheet; Sources/YoShare links to this file).
+// Shared by the library picker and YoShare.
+import AVFoundation
 import SwiftUI
 import UIKit
 
@@ -24,12 +23,8 @@ final class VideoTrim: Identifiable {
     self.answer = answer
   }
 
-  /// Whether the system's trimmer can take this video at all.
-  static func possible(_ video: URL) -> Bool { UIVideoEditorController.canEditVideo(atPath: video.path) }
-
   /// Shows the trimmer through `show` and waits for its answer.
   static func run(_ video: URL, show: (VideoTrim?) -> Void) async -> Result {
-    guard possible(video) else { return .failed }
     let result = await withCheckedContinuation { (done: CheckedContinuation<Result, Never>) in
       show(VideoTrim(video: video) { done.resume(returning: $0) })
     }
@@ -38,66 +33,350 @@ final class VideoTrim: Identifiable {
   }
 
   func finish(_ result: Result) {
-    answer?(result)
-    answer = nil
+    guard let answer else {
+      if case .cut(let url) = result { try? FileManager.default.removeItem(at: url) }
+      return
+    }
+    self.answer = nil
+    answer(result)
   }
 }
 
 extension View {
-  /// Presents the system's trimmer for `trim` full-screen.
+  /// Presents the trimmer for `trim` full-screen.
   func videoTrimming(_ trim: Binding<VideoTrim?>) -> some View {
     fullScreenCover(item: trim) { trim in
-      VideoTrimmer(trim: trim).preferredColorScheme(.dark).onDisappear { trim.finish(.cancelled) }
+      VideoTrimmer(trim: trim)
     }
   }
 }
 
-/// UIVideoEditorController in SwiftUI: its length held to `MediaFile.longestVideo`.
-private struct VideoTrimmer: UIViewControllerRepresentable {
+struct VideoTrimmer: View {
   let trim: VideoTrim
 
-  func makeUIViewController(context: Context) -> YoVideoEditor { YoVideoEditor(trim: trim) }
+  private static let frameCount = 12
+  private let limit = MediaFile.longestVideo
+  @State private var asset: AVURLAsset?
+  @State private var player: AVPlayer?
+  @State private var duration = 0.0
+  @State private var selection = 0.0...0.0
+  @State private var position = 0.0
+  @State private var playing = false
+  @State private var frames: [Int: CGImage] = [:]
+  @State private var saving = false
+  @State private var dragOrigin: ClosedRange<Double>?
+  @State private var dragPart: DragPart = .window
+  @State private var resumeAfterDrag = false
 
-  func updateUIViewController(_ editor: YoVideoEditor, context: Context) {}
+  private enum DragPart { case start, window, end }
+
+  var body: some View {
+    NavigationStack {
+      VStack(spacing: 12) {
+        ZStack {
+          Color.black
+          if let player {
+            VideoPreview(player: player)
+              .accessibilityHidden(true)
+            Button(action: togglePlayback) {
+              Color.clear.contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .accessibilityLabel(playing ? "Pause video" : "Play video")
+            .disabled(saving)
+          } else if !saving {
+            ProgressView()
+          }
+        }
+        if duration > 0 {
+          filmstrip
+            .accessibilityElement(children: .ignore)
+            .accessibilityLabel("Selected video range")
+            .accessibilityValue(rangeLabel)
+            .accessibilityHint("Swipe up or down to move the selection by one second.")
+            .accessibilityAdjustableAction { direction in
+              switch direction {
+              case .increment: moveWindow(from: selection, by: 1)
+              case .decrement: moveWindow(from: selection, by: -1)
+              @unknown default: return
+              }
+              cueSelection()
+            }
+            .disabled(saving)
+          Text(rangeLabel)
+            .font(.footnote.monospacedDigit())
+            .foregroundStyle(.secondary)
+            .accessibilityHidden(true)
+        }
+      }
+      .padding(.horizontal, 16)
+      .padding(.bottom, 8)
+      .background(.black)
+      .navigationTitle("Max \(Int(limit)) s")
+      .navigationBarTitleDisplayMode(.inline)
+      .toolbar {
+        ToolbarItem(placement: .cancellationAction) {
+          Button("Cancel", systemImage: "xmark") { trim.finish(.cancelled) }
+            .labelStyle(.iconOnly)
+        }
+        ToolbarItem(placement: .confirmationAction) {
+          Button("Use") {
+            player?.pause()
+            player?.replaceCurrentItem(with: nil)
+            player = nil
+            playing = false
+            frames.removeAll()
+            saving = true
+          }
+          .buttonStyle(.glassProminent)
+          .disabled(asset == nil || duration == 0 || saving)
+        }
+      }
+      .overlay(alignment: .center) {
+        if saving {
+          ProgressView("Saving…").padding().background(.regularMaterial, in: .rect(cornerRadius: 12))
+        }
+      }
+    }
+    .preferredColorScheme(.dark)
+    .task { await prepare() }
+    .task(id: duration > 0 && !saving) {
+      if let asset, duration > 0, !saving { await loadFrames(from: asset, duration: duration) }
+    }
+    .task(id: saving) { if saving { await exportSelection() } }
+    .task(id: player) {
+      guard let player else { return }
+      while !Task.isCancelled {
+        if playing, dragOrigin == nil {
+          let currentTime = player.currentTime().seconds
+          if currentTime.isFinite {
+            position = min(max(currentTime, selection.lowerBound), selection.upperBound)
+            if currentTime >= selection.upperBound - 0.01 {
+              position = selection.lowerBound
+              _ = await player.seek(to: time(selection.lowerBound), toleranceBefore: .zero, toleranceAfter: .zero)
+              if playing, dragOrigin == nil, !Task.isCancelled { player.play() }
+            }
+          }
+        }
+        try? await Task.sleep(for: .milliseconds(33))
+      }
+    }
+    .onDisappear {
+      player?.pause()
+      player?.replaceCurrentItem(with: nil)
+      trim.finish(.cancelled)
+    }
+  }
+
+  private var filmstrip: some View {
+    GeometryReader { geometry in
+      let width = geometry.size.width
+      let left = selection.lowerBound / duration * width
+      let right = selection.upperBound / duration * width
+      ZStack(alignment: .leading) {
+        HStack(spacing: 0) {
+          ForEach(0..<Self.frameCount, id: \.self) { index in
+            Color(white: 0.16)
+              .overlay {
+                if let frame = frames[index] {
+                  Image(decorative: frame, scale: 1).resizable().scaledToFill()
+                }
+              }
+              .frame(width: width / Double(Self.frameCount), height: 58)
+              .clipped()
+          }
+        }
+        .clipShape(.rect(cornerRadius: 7))
+        .overlay(alignment: .leading) { Color.black.opacity(0.55).frame(width: left) }
+        .overlay(alignment: .trailing) { Color.black.opacity(0.55).frame(width: width - right) }
+
+        RoundedRectangle(cornerRadius: 7)
+          .strokeBorder(.yellow, lineWidth: 3)
+          .overlay(alignment: .leading) { handle(width: min(13, (right - left) / 2)) }
+          .overlay(alignment: .trailing) { handle(width: min(13, (right - left) / 2)) }
+          .frame(width: right - left)
+          .clipShape(.rect(cornerRadius: 7))
+          .offset(x: left)
+
+        Rectangle().fill(.white)
+          .frame(width: 2)
+          .offset(x: min(max(0, position / duration * width - 1), width - 2))
+          .shadow(radius: 2)
+      }
+      .contentShape(Rectangle())
+      .gesture(DragGesture(minimumDistance: 0)
+        .onChanged { value in
+          guard width > 0, !saving else { return }
+          if dragOrigin == nil {
+            let handleHit = min(22, (right - left) / 3)
+            let x = value.startLocation.x
+            guard x >= left - 10, x <= right + 10 else { return }
+            dragPart = x <= left + handleHit ? .start : x >= right - handleHit ? .end : .window
+            dragOrigin = selection
+            resumeAfterDrag = playing
+            player?.pause()
+          }
+          guard let origin = dragOrigin else { return }
+          let delta = value.translation.width / width * duration
+          let wasAtLimit = selection.upperBound - selection.lowerBound >= limit - 0.0001
+          let minimum = min(1, duration)
+          switch dragPart {
+          case .start:
+            let end = origin.upperBound
+            selection = max(0, end - limit, min(end - minimum, origin.lowerBound + delta))...end
+          case .end:
+            let start = origin.lowerBound
+            selection = start...min(duration, start + limit, max(start + minimum, origin.upperBound + delta))
+          case .window:
+            moveWindow(from: origin, by: delta)
+          }
+          if !wasAtLimit, selection.upperBound - selection.lowerBound >= limit - 0.0001 {
+            UISelectionFeedbackGenerator().selectionChanged()
+          }
+          let target = dragPart == .end ? selection.upperBound : selection.lowerBound
+          if abs(target - position) >= 0.1 {
+            position = target
+            player?.currentItem?.forwardPlaybackEndTime = .invalid
+            player?.seek(to: time(target), toleranceBefore: time(0.1), toleranceAfter: time(0.1))
+          }
+        }
+        .onEnded { _ in
+          guard dragOrigin != nil else { return }
+          dragOrigin = nil
+          playing = resumeAfterDrag
+          cueSelection()
+        })
+    }
+    .frame(height: 58)
+    .environment(\.layoutDirection, .leftToRight)
+  }
+
+  private func handle(width: Double) -> some View {
+    Color.yellow.overlay {
+      Capsule().fill(.black.opacity(0.75)).frame(width: min(2, width), height: 17)
+    }
+    .frame(width: width)
+  }
+
+  private var rangeLabel: String {
+    let length = (selection.upperBound - selection.lowerBound).formatted(
+      .number.precision(.fractionLength(0...1))
+    )
+    return "\(timestamp(selection.lowerBound)) – \(timestamp(selection.upperBound)) · \(length) s"
+  }
+
+  private func timestamp(_ seconds: Double) -> String {
+    let total = Int(seconds.rounded())
+    return String(format: "%d:%02d", total / 60, total % 60)
+  }
+
+  private func moveWindow(from range: ClosedRange<Double>, by delta: Double) {
+    let length = min(limit, range.upperBound - range.lowerBound)
+    let start = min(max(0, duration - length), max(0, range.lowerBound + delta))
+    selection = start...min(duration, start + length)
+  }
+
+  private func togglePlayback() {
+    guard let player else { return }
+    playing.toggle()
+    if playing {
+      if position >= selection.upperBound - 0.01 { cueSelection() } else { player.play() }
+    } else {
+      player.pause()
+    }
+  }
+
+  private func cueSelection() {
+    guard let player else { return }
+    position = selection.lowerBound
+    player.currentItem?.forwardPlaybackEndTime = time(selection.upperBound)
+    player.seek(to: time(selection.lowerBound), toleranceBefore: .zero, toleranceAfter: .zero)
+    if playing { player.play() }
+  }
+
+  private func time(_ seconds: Double) -> CMTime { CMTime(seconds: seconds, preferredTimescale: 600) }
+
+  private func prepare() async {
+    let source = AVURLAsset(url: trim.video)
+    do {
+      let seconds = try await source.load(.duration).seconds
+      let tracks = try await source.loadTracks(withMediaType: .video)
+      try Task.checkCancellation()
+      guard seconds.isFinite, seconds > 0, !tracks.isEmpty else {
+        trim.finish(.failed)
+        return
+      }
+
+      asset = source
+      duration = seconds
+      selection = 0...min(limit, seconds)
+      player = AVPlayer(playerItem: AVPlayerItem(asset: source))
+      playing = true
+      cueSelection()
+    } catch {
+      guard !Task.isCancelled else { return }
+      Diagnostics.record(error)
+      trim.finish(.failed)
+    }
+  }
+
+  private func loadFrames(from asset: AVURLAsset, duration: Double) async {
+    let generator = AVAssetImageGenerator(asset: asset)
+    generator.appliesPreferredTrackTransform = true
+    generator.maximumSize = CGSize(width: 128, height: 128)
+    let spacing = duration / Double(Self.frameCount)
+    let tolerance = time(spacing / 2)
+    generator.requestedTimeToleranceBefore = tolerance
+    generator.requestedTimeToleranceAfter = tolerance
+    for index in 0..<Self.frameCount {
+      if Task.isCancelled || saving { break }
+      if let thumbnail = try? await generator.image(at: time((Double(index) + 0.5) * spacing)),
+         !Task.isCancelled, !saving {
+        frames[index] = thumbnail.image
+      }
+    }
+  }
+
+  private func exportSelection() async {
+    guard let asset else { return }
+    let start = time(selection.lowerBound)
+    let length = CMTimeMinimum(time(limit), time(selection.upperBound) - start)
+    let range = CMTimeRange(start: start, duration: length)
+    for preset in [AVAssetExportPresetPassthrough, AVAssetExportPresetHighestQuality] {
+      guard !Task.isCancelled else { return }
+      guard let session = AVAssetExportSession(asset: asset, presetName: preset),
+            let type = [AVFileType.mov, .mp4].first(where: session.supportedFileTypes.contains)
+      else { continue }
+      let url = FileManager.default.temporaryDirectory
+        .appendingPathComponent(UUID().uuidString)
+        .appendingPathExtension(type == .mov ? "mov" : "mp4")
+      session.timeRange = range
+      do {
+        try await session.export(to: url, as: type)
+        try Task.checkCancellation()
+        trim.finish(.cut(url))
+        return
+      } catch {
+        try? FileManager.default.removeItem(at: url)
+        if !Task.isCancelled { Diagnostics.record(error) }
+      }
+    }
+    if !Task.isCancelled { trim.finish(.failed) }
+  }
 }
 
-/// The system editor is already a navigation controller. Present it directly in the share extension.
-final class YoVideoEditor: UIVideoEditorController, UIVideoEditorControllerDelegate, UINavigationControllerDelegate {
-  private let trim: VideoTrim
+private struct VideoPreview: UIViewRepresentable {
+  let player: AVPlayer
 
-  init(trim: VideoTrim) {
-    self.trim = trim
-    super.init(nibName: nil, bundle: nil)
-    modalPresentationStyle = .fullScreen
-    overrideUserInterfaceStyle = .dark
-    videoPath = trim.video.path
-    videoMaximumDuration = MediaFile.longestVideo
-    videoQuality = .typeHigh
-    delegate = self
-    setNavigationBarHidden(false, animated: false)
+  func makeUIView(context: Context) -> PlayerView { PlayerView() }
+
+  func updateUIView(_ view: PlayerView, context: Context) {
+    view.playerLayer.player = player
+    view.playerLayer.videoGravity = .resizeAspect
   }
 
-  @available(*, unavailable)
-  required init?(coder: NSCoder) { fatalError() }
-
-  override func viewWillLayoutSubviews() {
-    // The limit as the bar's title (instead of the system's "Edit"); a prompt above it ran into the sheet's top edge.
-    if let item = navigationBar.topItem {
-      let title = "Max \(Int(MediaFile.longestVideo)) s"
-      if item.title != title { item.title = title }
-      if item.prompt != nil { item.prompt = nil }
-    }
-    super.viewWillLayoutSubviews()
+  final class PlayerView: UIView {
+    override class var layerClass: AnyClass { AVPlayerLayer.self }
+    var playerLayer: AVPlayerLayer { layer as! AVPlayerLayer }
   }
-
-  func videoEditorController(_ editor: UIVideoEditorController, didSaveEditedVideoToPath path: String) {
-    trim.finish(.cut(URL(fileURLWithPath: path)))
-  }
-
-  func videoEditorController(_ editor: UIVideoEditorController, didFailWithError error: any Error) {
-    Diagnostics.record(error)
-    trim.finish(.failed)
-  }
-
-  func videoEditorControllerDidCancel(_ editor: UIVideoEditorController) { trim.finish(.cancelled) }
 }
