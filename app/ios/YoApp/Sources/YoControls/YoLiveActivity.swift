@@ -61,7 +61,10 @@ private struct Bar: View {
   let state: YoSentAttributes.ContentState
   var stale = false
   /// The gap between the bar and the island's edge, the same on three sides.
-  static let inset: CGFloat = 10
+  /// The gap to the island's edge. With the island's corner radius (about 44 pt) and the bar's half height (32 pt)
+  /// it is concentric: 44 − 32 = 12, so the island's curve runs alongside the bar's ends instead of cutting them.
+  static let inset: CGFloat = 12
+  static let height: CGFloat = 64
 
   /// The list's words (YoWords in the app, which this extension cannot import).
   private var words: String {
@@ -98,8 +101,8 @@ private struct Bar: View {
     .minimumScaleFactor(0.8)
     .padding(.horizontal, 18)
     .frame(maxWidth: .infinity)
-    .frame(height: 48)
-    // A capsule: with the island's corners and a 10 pt gap it runs alongside them (ContainerRelativeShape took the
+    .frame(height: Self.height)
+    // A capsule: with the island's corners and the `inset` gap it runs alongside them (ContainerRelativeShape took the
     // region's own, wrong, corners).
     .background(color, in: Capsule())
   }
