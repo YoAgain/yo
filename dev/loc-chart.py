@@ -112,16 +112,14 @@ def by_app():
             blob = git("show", f"main:{path}")
             if b"\0" not in blob[:8000]:
                 counts[app] += blob.count(b"\n")
-    # One bar for the whole client, each app's share in its own shade, named below with its share.
+    # One bar for the whole client, the apps' parts apart by a space; under it the apps in fixed columns.
     total = sum(counts.values()) or 1
-    shades = "█▓▒░"
     width = 48
-    cells = [round(counts[name] / total * width) for name, _ in APPS]
+    cells = [max(1, round(counts[name] / total * width)) for name, _ in APPS]
     cells[cells.index(max(cells))] += width - sum(cells)
-    bar = "".join(shade * n for shade, n in zip(shades, cells))
-    legend = "   ".join(f"{shade} {name} {round(counts[name] / 1000)}k ({counts[name] * 100 // total}%)"
-                       for shade, (name, _) in zip(shades, APPS))
-    return f"{round(total / 1000)}k  {bar}\n\n{legend}"
+    bar = " ".join("█" * n for n in cells)
+    legend = "".join(f"{f'{name} {round(counts[name] / 1000)}k {counts[name] * 100 // total}%':<17}" for name, _ in APPS)
+    return f"{round(total / 1000)}k  {bar}\n\n     {legend.rstrip()}"
 
 
 def main():
