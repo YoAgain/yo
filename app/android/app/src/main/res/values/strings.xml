@@ -250,7 +250,6 @@
 <string name="video_too_large">Video is too large. Use a shorter video.</string>
 <string name="keystore_missing">Keystore key missing. Sign in with your recovery key.</string>
 <string name="vault_damaged">Damaged vault item</string>
-<string name="save_state_failed">Could not save account state</string>
 <string name="sign_in_first">Sign in first</string>
 <string name="photo_unavailable">Photo no longer available</string>
 <string name="icon_negative">Negative</string>
