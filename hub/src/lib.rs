@@ -1258,9 +1258,16 @@ fn diagnostic_receive(hub: &Hub, kind: &str, body: &[u8]) -> Res<StatusCode> {
     }
     let payload: serde_json::Value = serde_json::from_slice(body).map_err(|_| bad())?;
     let fields = payload.as_object().ok_or_else(bad)?;
-    let allowed =
-        ["uuid", "app", "os", "model", "domain", "code", "place", "exception", "frames", "termination", "details"];
+    // `count`: one report for that many of the same (a day's notifications the extension could not read, counted
+    // on the phone); `severity` "expected": what is known to happen (locked since a restart), for the admin to filter.
+    let allowed = ["uuid", "app", "os", "model", "domain", "code", "place", "exception", "frames", "termination"]
+        .into_iter()
+        .chain(["details", "count", "severity"])
+        .collect::<Vec<_>>();
+    let count = payload.get("count").map(|c| c.as_str().and_then(|c| c.parse::<u32>().ok()));
     if fields.iter().any(|(k, v)| !allowed.contains(&k.as_str()) || !v.is_string())
+        || count.is_some_and(|c| c.is_none_or(|c| !(1..=100_000).contains(&c)))
+        || payload.get("severity").is_some_and(|s| s != "expected")
         || ["app", "os", "model"].iter().any(|k| payload[k].as_str().is_none_or(str::is_empty))
         || (kind == "error"
             && ["domain", "code", "place"].iter().any(|k| payload[k].as_str().is_none_or(str::is_empty)))

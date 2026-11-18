@@ -7,6 +7,8 @@ import YoCore
 @MainActor @Observable final class DeleteNotice {
   static let shared = DeleteNotice()
   let model = YoList()
+  /// The list model's clock, in ms: it keeps counting while the phone sleeps, so a seen Yo's fade runs in real time.
+  nonisolated static var now: UInt64 { clock_gettime_nsec_np(CLOCK_MONOTONIC_RAW) / 1_000_000 }
   var receive: ((ListSnapshot) -> Void)?
   var banner: String?
   var deletion: ListDeletion?
@@ -60,7 +62,7 @@ struct YoApp: App {
 
   private func updateBanner() {
     let snapshot = DeleteNotice.shared.model.connectivity(
-      now: UInt64(ProcessInfo.processInfo.systemUptime * 1000),
+      now: DeleteNotice.now,
       offline: Availability.shared.offline, failure: SendFailure.shared.text)
     if let receive = DeleteNotice.shared.receive { receive(snapshot) }
     else { DeleteNotice.shared.banner = snapshot.banner }
@@ -85,7 +87,7 @@ struct YoApp: App {
             if let deletion = DeleteNotice.shared.deletion {
               TimelineView(.animation) { _ in
                 Circle().trim(from: 0, to: max(0, min(1,
-                  (Double(deletion.deadline) - ProcessInfo.processInfo.systemUptime * 1000) / 3000)))
+                  (Double(deletion.deadline) - Double(DeleteNotice.now)) / 3000)))
                   .stroke(.white, lineWidth: 2).rotationEffect(.degrees(-90))
                   .frame(width: 14, height: 14)
               }

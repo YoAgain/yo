@@ -17,7 +17,8 @@ struct AccountSyncRow: View {
   @State private var savedTime = "Not Saved"
 
   var body: some View {
-    Group {
+    // The whole row syncs on a tap (no separate cloud button).
+    Button { Task { await save() } } label: {
       LabeledContent {
         HStack(spacing: 8) {
           if failed {
@@ -33,23 +34,7 @@ struct AccountSyncRow: View {
             (unavailable || savedAt == nil || failed ? Check.waiting : Check.ok).color
           )
           .accessibilityHidden(true)
-          if saving {
-            ProgressView().controlSize(.small)
-          } else {
-            Button {
-              Task { await save() }
-            } label: {
-              Image(
-                systemName: failed
-                  ? "exclamationmark.icloud" : savedNow ? "checkmark.icloud" : "icloud.and.arrow.up"
-              )
-              .foregroundStyle(failed ? Color.orange : savedNow ? Color.green : Color.secondary)
-            }
-            .buttonStyle(.borderless)
-            .tint(.secondary)
-            .accessibilityLabel("Account Sync Now")
-            .disabled(client == nil || savedNow)
-          }
+          if saving { ProgressView().controlSize(.small) }
         }
       } label: {
         Label {
@@ -60,6 +45,9 @@ struct AccountSyncRow: View {
         .labelStyle(Tile(.blue))
       }
     }
+    .foregroundStyle(.primary)
+    .disabled(client == nil || saving || savedNow)
+    .accessibilityHint("Syncs your account now")
     .sensoryFeedback(.success, trigger: savedNow) { _, now in now }
     .sensoryFeedback(.error, trigger: failed) { _, now in now }
     .task(id: justSaved) {

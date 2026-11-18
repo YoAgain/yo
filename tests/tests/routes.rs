@@ -977,7 +977,7 @@ fn delivery_urgency_selects_alert_or_background_and_defaults_to_alert() {
         } else {
             assert_eq!(header("apns-push-type"), "alert");
             assert_eq!(header("apns-priority"), "10");
-            assert_eq!(body["aps"]["alert"]["body"], "Yo");
+            assert_eq!(body["aps"]["alert"]["body"], "You may have received a Yo");
             assert_eq!(body["aps"]["sound"], "yo.caf");
             assert_eq!(body["aps"]["mutable-content"], 1);
         }
@@ -1079,6 +1079,21 @@ fn diagnostics_are_anonymous_count_all_and_admin_ticks_require_a_token() {
         assert_eq!(raw(&hub, "POST", "/v1/errors", &[], body).0, status::BAD_REQUEST);
     }
     assert_eq!(raw(&hub, "POST", "/v1/errors", &[], vec![b'x'; 60 * 1024 + 1]).0, 413);
+    // A day's unread notifications, counted on the phone: one report, the count it carries.
+    let fallback = |count: &str, severity: Option<&str>| {
+        let mut body = serde_json::json!({"domain":"NotificationFallback", "code":"lockedBeforeFirstUnlock",
+            "place":"NotificationService", "app":"ios/1", "os":"26", "model":"iPhone", "count":count, "details":"2026-11-18"});
+        if let Some(severity) = severity {
+            body["severity"] = severity.into();
+        }
+        body.to_string().into_bytes()
+    };
+    for (count, severity) in [("0", Some("expected")), ("x", Some("expected")), ("100001", None), ("3", Some("loud"))] {
+        assert_eq!(raw(&hub, "POST", "/v1/errors", &[], fallback(count, severity)).0, status::BAD_REQUEST);
+    }
+    for _ in 0..2 {
+        assert_eq!(raw(&hub, "POST", "/v1/errors", &[], fallback("5", Some("expected"))).0, status::NO_CONTENT);
+    }
     let path = "/v1/admin/diagnostics";
     assert_eq!(raw(&hub, "GET", path, &[], vec![]).0, 404);
     assert_eq!(raw(&hub, "PUT", path, &[("Yo-Admin-Token", "wrong".into())], b"{}".to_vec()).0, 404);
@@ -1086,9 +1101,16 @@ fn diagnostics_are_anonymous_count_all_and_admin_ticks_require_a_token() {
     let (status, body) = raw(&hub, "GET", path, &headers, vec![]);
     assert_eq!(status, 200);
     let rows: serde_json::Value = serde_json::from_slice(&body).unwrap();
-    assert_eq!(rows[0]["count"], 12);
+    let rows = rows.as_array().unwrap();
+    let with = |code: &str| rows.iter().find(|r| r["payload"].as_str().unwrap().contains(code)).unwrap().clone();
+    assert_eq!(with("timeout")["count"], 12);
+    let locked = with("lockedBeforeFirstUnlock");
+    assert_eq!(locked["count"], 10);
+    assert!(locked["payload"].as_str().unwrap().contains(r#""severity":"expected""#));
+    let id = with("timeout")["id"].clone();
     let (status, body) =
-        raw(&hub, "PUT", path, &headers, serde_json::json!({"id":rows[0]["id"],"done":true}).to_string().into_bytes());
+        raw(&hub, "PUT", path, &headers, serde_json::json!({"id":id,"done":true}).to_string().into_bytes());
     assert_eq!(status, 200);
-    assert_eq!(serde_json::from_slice::<serde_json::Value>(&body).unwrap()[0]["done"], true);
+    let rows: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(rows.as_array().unwrap().iter().find(|r| r["id"] == id).unwrap()["done"], true);
 }

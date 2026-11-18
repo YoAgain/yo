@@ -1,11 +1,15 @@
 //! Deterministic presentation rules for every platform's friend list.
 //!
 //! Times are monotonic milliseconds supplied by the caller. Call `tick` at `next_tick`,
-//! and report viewport/foreground changes before suspending. No networking or wall clock.
+//! and report viewport/foreground changes before suspending. No networking or wall clock; the caller's
+//! clock must keep counting while the device sleeps (a seen Yo's clock runs in real time).
 use std::collections::{BTreeMap, BTreeSet};
 
 pub const YO_SOLID_MS: u64 = 3_000;
 pub const YO_FADE_MS: u64 = 2_000;
+/// A Yo counts as seen once its bar was on screen this long at a stretch while the app was active. From then on
+/// its solid+fade clock runs in real time (background, off screen, camera); before, a glimpse leaves it fresh.
+pub const YO_SEEN_MS: u64 = 1_000;
 pub const UNDO_MS: u64 = 2_000;
 pub const SENT_MS: u64 = 1_500;
 
@@ -149,6 +153,7 @@ struct Run {
     elapsed: u64,
     step: u64,
     waiting_order: bool,
+    seen: bool,
 }
 #[derive(Clone, Debug)]
 struct Sent {
@@ -275,6 +280,7 @@ impl List {
                         solid_count: total,
                         elapsed: 0,
                         step: 200.min(2_000 / u64::from(total.max(1))).max(1),
+                        seen: false,
                     });
                     if kind != Kind::Yo {
                         state.media.push(kind);
@@ -425,18 +431,26 @@ impl List {
         self.now = now;
         let mut rises = Vec::new();
         for (id, state) in &mut self.states {
-            if !self.camera
+            let watched = !self.camera
                 && !self.background
                 && !self.pending_delete.as_ref().is_some_and(|d| &d.id == id)
                 && !state.run.as_ref().is_some_and(|r| r.waiting_order)
                 && self.visible.contains(id)
-                && !self.friends.get(id).is_some_and(|f| f.request)
-            {
+                && !self.friends.get(id).is_some_and(|f| f.request);
+            let seen = state.run.as_ref().is_some_and(|r| r.seen) && !self.friends.get(id).is_some_and(|f| f.request);
+            if !watched && !seen {
+                // A glimpse shorter than YO_SEEN_MS leaves the Yo fresh.
+                if let Some(run) = &mut state.run {
+                    run.elapsed = 0;
+                }
+            }
+            if watched || seen {
                 for sender in &mut state.senders {
                     sender.elapsed = sender.elapsed.saturating_add(elapsed).min(YO_SOLID_MS + YO_FADE_MS);
                 }
                 if let Some(run) = &mut state.run {
                     run.elapsed = run.elapsed.saturating_add(elapsed);
+                    run.seen |= run.elapsed >= YO_SEEN_MS;
                     let removed =
                         if run.elapsed < YO_SOLID_MS { 0 } else { 1 + (run.elapsed - YO_SOLID_MS) / run.step.max(1) };
                     run.count = run
@@ -554,12 +568,13 @@ impl List {
                     next.push(until);
                 }
                 let run = s.run.as_ref().filter(|_| !f.request);
-                if !self.camera
-                    && !self.background
-                    && self.visible.contains(id)
-                    && !f.request
-                    && !run.is_some_and(|r| r.waiting_order)
-                {
+                let clock_running = run.is_some_and(|r| r.seen)
+                    || (!self.camera
+                        && !self.background
+                        && self.visible.contains(id)
+                        && !f.request
+                        && !run.is_some_and(|r| r.waiting_order));
+                if clock_running {
                     for sender in &s.senders {
                         let boundary =
                             if sender.elapsed < YO_SOLID_MS { YO_SOLID_MS } else { YO_SOLID_MS + YO_FADE_MS };
@@ -580,11 +595,7 @@ impl List {
                     }
                 }
                 Some(Row {
-                    clock_running: !self.camera
-                        && !self.background
-                        && self.visible.contains(id)
-                        && !f.request
-                        && !run.is_some_and(|r| r.waiting_order),
+                    clock_running,
                     id: id.clone(),
                     title,
                     count,
@@ -789,17 +800,20 @@ mod tests {
         assert_eq!(row(&l, "a").yo_total, 1);
     }
     #[test]
-    fn scroll_out_and_in_preserves_remaining_time() {
+    fn a_glimpse_leaves_the_yo_fresh() {
         let mut l = model();
         l.apply(0, receive("a"));
         l.apply(300, Input::Tick);
-        l.apply(1300, Input::RowsVisible(vec!["b".into()]));
-        l.apply(100_300, Input::Tick);
-        assert_eq!(row(&l, "a").fade_elapsed, None);
-        l.apply(100_300, Input::RowsVisible(vec!["a".into()]));
-        l.apply(102_299, Input::Tick);
-        assert_eq!(row(&l, "a").fade_elapsed, None);
-        l.apply(102_300, Input::Tick);
+        l.apply(1299, Input::RowsVisible(vec!["b".into()]));
+        l.apply(100_000, Input::Tick);
+        assert_eq!(row(&l, "a").yo_count, 1);
+        assert!(!row(&l, "a").clock_running);
+        l.apply(100_000, Input::RowsVisible(vec!["a".into()]));
+        l.apply(100_100, Input::Foreground(false));
+        l.apply(200_000, Input::Foreground(true));
+        l.apply(202_999, Input::Tick);
+        assert_eq!(row(&l, "a").fade_elapsed, None, "both glimpses were too short; the clock starts afresh");
+        l.apply(203_000, Input::Tick);
         assert_eq!(row(&l, "a").fade_elapsed, Some(0));
     }
     #[test]
@@ -814,27 +828,54 @@ mod tests {
         assert_eq!(l.snapshot().next_tick, Some(103_000));
     }
     #[test]
-    fn background_and_camera_pause_even_during_fade() {
-        for pause in [Input::Foreground(false), Input::Camera(true)] {
+    fn a_seen_yo_runs_in_real_time_away_and_off_screen() {
+        for away in [Input::Foreground(false), Input::Camera(true), Input::RowsVisible(vec![])] {
+            let back = match away {
+                Input::Camera(_) => Input::Camera(false),
+                Input::Foreground(_) => Input::Foreground(true),
+                _ => Input::RowsVisible(vec!["a".into()]),
+            };
+            // Back before the fade ends: it continues at the right point.
             let mut l = model();
             l.apply(0, receive("a"));
             l.apply(300, Input::Tick);
-            l.apply(3800, pause.clone());
+            l.apply(3800, away.clone());
             assert_eq!(row(&l, "a").fade_elapsed, Some(500));
-            l.apply(100_300, Input::Tick);
-            assert_eq!(row(&l, "a").fade_elapsed, Some(500));
-            l.apply(
-                100_300,
-                match pause {
-                    Input::Camera(_) => Input::Camera(false),
-                    _ => Input::Foreground(true),
-                },
-            );
-            l.apply(101_799, Input::Tick);
-            assert_eq!(row(&l, "a").yo_count, 1);
-            l.apply(101_800, Input::Tick);
+            assert!(row(&l, "a").clock_running);
+            l.apply(4800, back.clone());
+            assert_eq!(row(&l, "a").fade_elapsed, Some(1500));
+            l.apply(5300, Input::Tick);
             assert_eq!(row(&l, "a").yo_count, 0);
+            // Back hours later: gone at once.
+            let mut l = model();
+            l.apply(0, receive("a"));
+            l.apply(300, Input::Tick);
+            l.apply(1300, away.clone());
+            assert_eq!(l.snapshot().next_tick, Some(3300), "the seen clock keeps ticking while away");
+            let r = l.apply(3_600_000, back).rows.into_iter().find(|r| r.id == "a").unwrap();
+            assert_eq!((r.yo_count, r.fade_elapsed, r.mark_count), (0, None, 0));
         }
+    }
+    #[test]
+    fn yos_arriving_while_away_stay_fresh() {
+        let mut l = model();
+        l.apply(0, receive("a"));
+        l.apply(300, Input::Tick);
+        l.apply(4000, Input::Foreground(false));
+        assert_eq!(row(&l, "a").fade_elapsed, Some(700));
+        l.apply(4100, receive("a"));
+        l.apply(4100, receive("b"));
+        l.apply(3_600_000, Input::Tick);
+        for id in ["a", "b"] {
+            let r = row(&l, id);
+            assert_eq!((r.yo_count, r.yo_total, r.fade_elapsed, r.clock_running), (1, 1, None, false));
+        }
+        l.apply(3_600_000, Input::Foreground(true));
+        l.apply(3_602_999, Input::Tick);
+        assert_eq!(row(&l, "a").fade_elapsed, None);
+        l.apply(3_603_000, Input::Tick);
+        assert_eq!(row(&l, "a").fade_elapsed, Some(0));
+        assert_eq!(row(&l, "b").fade_elapsed, Some(0));
     }
     #[test]
     fn incoming_in_camera_is_immediate_but_countdown_waits_for_close() {

@@ -680,9 +680,11 @@ if (document.body.classList.contains("login")) {
     const title = d.kind === "crash" ? (p.exception || p.termination || "Crash")
       : [p.domain, p.code, p.place].filter((x) => x != null && x !== "").join(" · ") || "Error";
     const text = [p.details, p.frames, p.message].filter(Boolean).join("\n\n") || d.payload || "";
-    return { title, text };
+    // "expected": known to happen (a push unread while locked since a restart), counted but filtered out by default.
+    return { title, text, expected: p.severity === "expected" };
   };
-  let diagMode = "open", diagPage = 1;
+  let diagMode = "open", diagPage = 1, diagLevel = "hide";
+  $("diag-level").addEventListener("change", (e) => { diagLevel = e.target.value; diagPage = 1; part(drawDiagnostics); });
   const diagOpen = new Set();
   $("diag-mode").addEventListener("change", (e) => { diagMode = e.target.value; diagPage = 1; part(drawDiagnostics); });
   const PAGE = 100;
@@ -701,7 +703,8 @@ if (document.body.classList.contains("login")) {
     $("diag-all").hidden = !open.length;
     $("diag-all").textContent = `Mark all ${open.length} done`;
     set("diag-note", `${open.length} open · ${list.length} in all`);
-    const shown = list.filter((d) => diagMode === "all" || (diagMode === "done") === !!d.done).sort((a, b) => b.last_seen - a.last_seen);
+    const shown = list.filter((d) => diagMode === "all" || (diagMode === "done") === !!d.done)
+      .filter((d) => diagLevel === "all" || !diagInfo(d).expected).sort((a, b) => b.last_seen - a.last_seen);
     const pages = Math.max(1, Math.ceil(shown.length / PAGE));
     diagPage = Math.min(diagPage, pages);
     const nav = $("diag-pages");
@@ -720,7 +723,7 @@ if (document.body.classList.contains("login")) {
         const r = await fetch("/diagnostics/done", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ hub, id: d.id, done }) });
         if (r.ok) await refresh();
       }), "tick-col");
-      cell(tr, tag(d.kind === "crash" ? "Crash" : "Error", d.kind === "crash" ? "bad" : "warn"));
+      cell(tr, d.kind === "crash" ? tag("Crash", "bad") : info.expected ? tag("Expected", "muted") : tag("Error", "warn"));
       cell(tr, info.title, "sig", info.title);
       cell(tr, num(d.count), "num");
       cell(tr, rel(d.first_seen), null, date(d.first_seen));

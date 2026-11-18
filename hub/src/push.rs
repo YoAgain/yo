@@ -1,5 +1,6 @@
-//! Waking a device (spec 6.7). A push says only "there is mail": APNs with a constant alert ("Yo", one line) and
-//! `mutable-content`, so the notification extension fetches, decrypts and writes "YO from CHRIS"; FCM as a
+//! Waking a device (spec 6.7). A push says only "there is mail": APNs with a constant alert ("You may have received
+//! a Yo", as Signal's, what shows when the extension cannot read: locked since a restart, no network, out of time)
+//! and `mutable-content`, so the notification extension fetches, decrypts and writes "YO from CHRIS"; FCM as a
 //! data message. Non-urgent traffic uses silent APNs background pushes or normal-priority FCM.
 //! The requests go through `Transport`, so tests record them.
 
@@ -10,6 +11,9 @@ use std::future::Future;
 use std::pin::Pin;
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+
+/// An urgent APNs push's text, shown as it is when the notification extension cannot read what came.
+pub const ALERT: &str = "You may have received a Yo";
 use yo_wire::api::{PUSH_APNS, PUSH_APNS_SANDBOX, PUSH_FCM};
 
 pub type Fut<T> = Pin<Box<dyn Future<Output = T> + Send>>;
@@ -206,7 +210,7 @@ impl Pusher {
         };
         let host = if sandbox { "api.sandbox.push.apple.com" } else { "api.push.apple.com" };
         let body = if urgent {
-            json!({ "aps": { "alert": { "body": "Yo" }, "sound": "yo.caf", "category": "yo", "mutable-content": 1 } })
+            json!({ "aps": { "alert": { "body": ALERT }, "sound": "yo.caf", "category": "yo", "mutable-content": 1 } })
         } else {
             json!({ "aps": { "content-available": 1 } })
         };
@@ -326,6 +330,9 @@ mod tests {
             let body: serde_json::Value = serde_json::from_slice(&sent.last().unwrap().body).unwrap();
             // "Yo Back" on the Lock Screen even when the notification extension runs out of time.
             assert_eq!(body["aps"].get("category").and_then(|c| c.as_str()), urgent.then_some("yo"));
+            // Unread (a dead or locked extension), the push says so, as Signal's.
+            assert_eq!(body["aps"]["alert"]["body"].as_str(), urgent.then_some("You may have received a Yo"));
+            assert_eq!(body["aps"]["mutable-content"].as_i64(), urgent.then_some(1));
         }
     }
 

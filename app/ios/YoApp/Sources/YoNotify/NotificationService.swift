@@ -12,10 +12,13 @@
 // push before already took, a blocked sender's Yo (dropped unseen, spec 4.8), a Yo the app
 // took itself (it was open, or just left: then it writes the notification itself). Such a push, read and found with
 // nothing new, goes out quietly (no sound, no banner) and takes the place of the Yo notifications on the screen,
-// saying what they said, rather than lying on top of them as one more "Yo". It goes out as it came ("Yo", with the sound) when nothing could be read:
-// the app holds the lock longer than `lockWait` (it is in front then and shows Yos itself), there is no state, the hub
-// does not answer in time, or the time is up.
+// saying what they said, rather than lying on top of them as one more "Yo". When nothing could be read it goes out as
+// Signal's does, "You may have received a Yo", with the sound (NotifyFallback): locked since a restart (no key before
+// the first unlock), no account or App Group, the app holds the lock longer than `lockWait` (it is in front then and
+// shows Yos itself), the state does not open, no network, the hub refuses, or the time is up. Each of those is
+// recorded with its reason, for the app's next diagnostics upload.
 import Foundation
+import Security
 import UserNotifications
 import YoCore
 
@@ -37,9 +40,11 @@ final class NotificationService: UNNotificationServiceExtension {
     DispatchQueue.global(qos: .userInitiated).async {
       pending.lifetime.run {
         // Read: the new Yos with those on the screen, in one notification; none new, the same quietly. Else, unread,
-        // the push goes as it came.
-        let read = Self.newest()
-        if let (client, events) = read {
+        // "You may have received a Yo", and why.
+        switch Self.newest() {
+        case .failure(let reason):
+          pending.fallback(reason)
+        case .success(let (client, events)):
           // The photos and videos before the notification goes: once it is delivered, iOS may end or freeze this
           // process at any moment, and a fetch cut off there has used this device's fetch at the hub with nothing
           // written (the app then finds the blob gone and gives the photo up). A new fetch starts only within 5 seconds
@@ -51,28 +56,23 @@ final class NotificationService: UNNotificationServiceExtension {
           group: { id in (try? client.groups())?.first { $0.id == id }?.name ?? "" }, requests: ShareBridge.requests(of: client))
           ShareBridge.noteLast(senders, client: client)
           let delivered = Self.delivered()
-          pending.update { content in
-            let replaced = ShareBridge.write(content, senders, over: delivered)
-            if senders.isEmpty {
-              (content.sound, content.interruptionLevel) = (nil, .passive)
-              // Nothing on the screen to say again (a receipt, after the app was opened).
-              if replaced.isEmpty { content.body = "" }
-            }
-          }
-          if pending.postLocally() { return }
+          // This push's own notification is the sender's one (iOS shows a push whatever its content: an emptied
+          // one comes out as the bare "Yo" it came as), with the Yos of the one it replaces; nothing new, the newest
+          // on the screen again, quietly. The ones it replaces go as it is handed over.
+          let replaced = pending.update { ShareBridge.write($0, senders, over: delivered) } ?? []
+          pending.deliver(replacing: replaced)
         }
-        pending.deliver()
         Perf.mark("nse.delivered")
       }
     }
   }
 
-  /// Time is up: the push as it came.
+  /// Time is up: "You may have received a Yo".
   override func serviceExtensionTimeWillExpire() {
-    pending.deliver()
+    pending.fallback(.timeout)
   }
 
-  /// How long the app may hold the state before the push goes out as it came.
+  /// How long the app may hold the state before the push goes out unread.
   static let lockWait = 10.0
 
   /// The notifications on the screen (none if the system does not say within two seconds).
@@ -87,12 +87,28 @@ final class NotificationService: UNNotificationServiceExtension {
     return done.wait(timeout: .now() + 2) == .success ? found.notifications : []
   }
 
-  /// What one receive without waiting brings, as a guest on the app's state; nil when nothing could be read.
-  private static func newest() -> (YoClient, [YoEvent])? {
-    guard let client = Perf.timed("nse.open", { Guest.open(within: lockWait, timeout: 10) }),
-      let events = Perf.timed("nse.sync", { try? client.sync(waitS: 0) })
-    else { return nil }
-    return (client, events)
+  /// What one receive without waiting brings, as a guest on the app's state; else why nothing could be read.
+  private static func newest() -> Result<(YoClient, [YoEvent]), NotifyFallback.Reason> {
+    let client: YoClient
+    switch Perf.timed("nse.open", { Guest.opened(within: lockWait, timeout: 10) }) {
+    case .success(let opened): client = opened
+    case .failure(.keychain(errSecInteractionNotAllowed)): return .failure(.lockedBeforeFirstUnlock)
+    case .failure(.noGroup), .failure(.noAccount): return .failure(.noAccount)
+    case .failure(.restore): return .failure(.decrypt)
+    case .failure(.keychain), .failure(.busy): return .failure(.other)
+    }
+    do {
+      let events = try Perf.timed("nse.sync", { try client.sync(waitS: 0) })
+      return .success((client, events))
+    } catch YoError.Network {
+      return .failure(.network)
+    } catch YoError.Refused(let status) {
+      return .failure(.hubStatus(status))
+    } catch YoError.Protocol, YoError.State {
+      return .failure(.decrypt)
+    } catch {
+      return .failure(.other)
+    }
   }
 
   /// The content and its handler, delivered once (by the work or by the time running out, whichever first).
@@ -106,47 +122,40 @@ final class NotificationService: UNNotificationServiceExtension {
       lock.withLock { (self.content, self.handler) = (content, handler) }
     }
 
+    /// The content is what was read (written by `update`): the time running out hands it over as it is.
+    private var read = false
+
     /// Changes the content while it is not delivered yet (nil once it is).
     func update<T>(_ change: (UNMutableNotificationContent) -> T) -> T? {
-      lock.withLock { content.map(change) }
+      lock.withLock {
+        guard let content else { return nil }
+        read = true
+        return change(content)
+      }
     }
 
-    /// The incoming APNs request id is read-only. Post with the same stable id as the app,
-    /// then return empty, silent content for the transport push. On failure keep its content.
-    func postLocally() -> Bool {
-      let request: UNNotificationRequest? = lock.withLock {
-        guard let content, !content.threadIdentifier.isEmpty else { return nil }
-        return UNNotificationRequest(identifier: "yo:" + content.threadIdentifier, content: content, trigger: nil)
+    /// Unread: "You may have received a Yo" (also under a hub of before, whose push said "Yo"), recorded with its
+    /// reason; nothing when it was delivered already, and as it is when it was read just before the time ran out.
+    func fallback(_ reason: NotifyFallback.Reason) {
+      let unread = lock.withLock {
+        guard let content, !read else { return false }
+        content.body = NotifyFallback.text
+        return true
       }
-      guard let request else { return false }
-      UNUserNotificationCenter.current().add(request) { [self] error in
-        if error == nil {
-          update { content in
-            content.title = ""
-            content.subtitle = ""
-            content.body = ""
-            content.sound = nil
-            content.badge = nil
-            content.categoryIdentifier = ""
-            content.threadIdentifier = ""
-            content.userInfo = [:]
-            content.attachments = []
-            content.interruptionLevel = .passive
-          }
-        }
-        deliver()
-        Perf.mark("nse.delivered")
-      }
-      return true
+      if unread { NotifyFallback.record(reason) }
+      deliver()
     }
 
-    func deliver() {
+    /// Hands the content over; `replacing`: the notifications it takes the place of, removed just before (once it is
+    /// handed over, iOS may freeze the process before a removal after it goes out).
+    func deliver(replacing replaced: [String] = []) {
       let (content, handler) = lock.withLock {
         defer { (self.content, self.handler) = (nil, nil) }
         return (self.content, self.handler)
       }
       if let content, let handler {
         lifetime.stop()
+        if !replaced.isEmpty { UNUserNotificationCenter.current().removeDeliveredNotifications(withIdentifiers: replaced) }
         handler(content)
       }
     }

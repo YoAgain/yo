@@ -116,11 +116,8 @@ enum ShareBridge {
     return (bangs, wanted - bangs)
   }
 
-  /// "Yo", "Yo!!", "Yo!!!!! +4".
-  static func yo(_ count: Int) -> String {
-    let (bangs, more) = bangs(count)
-    return "Yo" + String(repeating: "!", count: bangs) + (more > 0 ? " +\(more)" : "")
-  }
+  /// "Yo", "3× Yo", as on the bars.
+  static func yo(_ count: Int) -> String { count <= 1 ? "Yo" : "\(count)× Yo" }
 
   /// Yos from one sender, for a notification.
   struct Yos: Sendable {
@@ -139,26 +136,20 @@ enum ShareBridge {
     /// From someone not yet a contact, or a group a stranger added this account to (spec 4.10): "Yo Request".
     var request = false
 
-    /// The original's words, the name as its owner writes it: "Yo from LEO", "📷 from LEO", "🎥 from LEO"; more read
-    /// as on the bar, with the photos and videos among them: "Yo!!!!! +4 from LEO · 📷 2".
+    /// As the bar says it: "Yo from Mia", "3× Yo from Mia", with 📷 or 🎥 at the end when photos or videos came.
     var line: String {
       let who = bar.map { $0.isEmpty ? name : "\(name) @ \($0)" } ?? name
-      return request ? "Yo Request from \(who)" : "\(what) from \(who)"
+      return request ? "Yo Request from \(who)" : "\(ShareBridge.yo(count)) from \(who)\(media)"
     }
 
-    /// What came, without who: "Yo", "📷", "🎥", "Yo!!!!! +4 · 📷 2".
-    var what: String {
-      if count == 1 {
-        switch kind {
-        case .photo: return "📷"
-        case .video: return "🎥"
-        case nil: return "Yo"
-        }
-      }
-      var what = ShareBridge.yo(count)
-      if photos > 0 { what += photos > 1 ? " · 📷 \(photos)" : " · 📷" }
-      if videos > 0 { what += videos > 1 ? " · 🎥 \(videos)" : " · 🎥" }
-      return what
+    /// What came, without who: "Yo", "3× Yo 📷".
+    var what: String { ShareBridge.yo(count) + media }
+
+    /// " 🎥" or " 📷" when videos or photos are among them (the newest's kind for a single one), else "".
+    private var media: String {
+      if videos > 0 || (count == 1 && kind == .video) { return " 🎥" }
+      if photos > 0 || (count == 1 && kind == .photo) { return " 📷" }
+      return ""
     }
 
     /// Stable across a sender’s run; message ids remain in userInfo for deduplication.
@@ -268,7 +259,10 @@ enum ShareBridge {
       return friend.name
     }
     let contact = client.contacts().first { $0.user == user }
-    return contact?.handles.first ?? contact?.name ?? "Someone"
+    if let name = contact?.handles.first ?? contact?.name, !name.isEmpty, name != "?" { return name }
+    UnknownSender.record(place: "notification", user: user, contact: contact.map(UnknownSender.facts), group: nil,
+      friend: readList()?.friends.contains { $0.to == user } ?? false)
+    return "Someone"
   }
 
   /// A Yo notification, written by the notification service (a push) or by the app (Yos it took while in the
@@ -300,6 +294,9 @@ enum ShareBridge {
   /// The Yo notification for `new` Yos (none: a push that brought nothing new), added to those the Yo notifications on
   /// the screen name, written into `content`; the identifiers of the notifications it takes the place of.
   static func write(_ content: UNMutableNotificationContent, _ new: [Yos], over delivered: [UNNotification]) -> [String] {
+    // Nothing new (a push whose Yos an earlier push or the app took): never one more bare "Yo" (an empty one is not
+    // hidden either, without the filtering entitlement), but the newest Yo notification again, quietly, in its place.
+    guard !new.isEmpty else { return again(content, over: delivered) }
     let (all, replaced) = merged(new, with: delivered)
     // The app's red badge: as many as there are Yo notifications (one per sender or group, as merged here), until
     // the app is opened, which clears both (Inbox.collectDelivered). None left: no badge.
@@ -319,12 +316,37 @@ enum ShareBridge {
     return replaced
   }
 
-  /// Replacing an existing sender’s notification should not play the Yo sound again.
+  /// Replacing an existing sender’s notification (whatever its identifier: the app's "yo:" one or a push's own)
+  /// should not play the Yo sound again.
   private static func quietUpdate(_ content: UNMutableNotificationContent, for sender: Yos, over delivered: [UNNotification]) {
-    if delivered.contains(where: { $0.request.identifier == sender.notificationIdentifier }) {
+    let onScreen = delivered.contains { note in
+      note.request.identifier == sender.notificationIdentifier
+        || ((note.request.content.userInfo["yos"] as? [[String: Any]]) ?? []).contains { $0["user"] as? String == sender.user }
+    }
+    if onScreen {
       content.sound = nil
       content.interruptionLevel = .passive
     }
+  }
+
+  /// The newest Yo notification on the screen said again into `content`, quietly, with the badge as it is; its
+  /// identifier, to go. None on the screen: a bare "Yo" with no sound (a receipt after the app was opened; read, so
+  /// not the push's "You may have received a Yo", and an empty one would show that).
+  private static func again(_ content: UNMutableNotificationContent, over delivered: [UNNotification]) -> [String] {
+    (content.sound, content.interruptionLevel) = (nil, .passive)
+    let yos = delivered.filter {
+      $0.request.content.categoryIdentifier == yoCategory && $0.request.content.userInfo["yos"] != nil
+    }
+    guard let newest = yos.max(by: { $0.date < $1.date }) else {
+      (content.title, content.subtitle, content.body) = ("", "", "Yo")
+      return []
+    }
+    let shown = newest.request.content
+    (content.title, content.subtitle, content.body) = (shown.title, shown.subtitle, shown.body)
+    (content.categoryIdentifier, content.threadIdentifier, content.userInfo) =
+      (shown.categoryIdentifier, shown.threadIdentifier, shown.userInfo)
+    content.badge = NSNumber(value: yos.count)
+    return [newest.request.identifier]
   }
 
   /// A Yo notification from the app or the share extension (Yos they took themselves, which the notification service
@@ -341,8 +363,11 @@ enum ShareBridge {
     let new = yos.filter { !written.contains($0.id) }.sorted { $0.sentAtMs > $1.sentAtMs }
     guard let newest = new.first else { return }
     let content = UNMutableNotificationContent()
-    _ = write(content, new, over: delivered)
+    let replaced = write(content, new, over: delivered)
     try? await center.add(UNNotificationRequest(identifier: newest.notificationIdentifier, content: content, trigger: nil))
+    // The senders' earlier ones under other identifiers (a push's own) go once these are out.
+    let posted = Set(new.map(\.notificationIdentifier))
+    center.removeDeliveredNotifications(withIdentifiers: replaced.filter { !posted.contains($0) })
   }
 }
 

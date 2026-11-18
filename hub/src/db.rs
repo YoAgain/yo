@@ -647,17 +647,19 @@ fn diagnostic_write(conn: &Connection, kind: &str, payload: &serde_json::Value, 
         serde_json::json!([kind, field("exception"), field("frames"), field("termination"), field("app")])
     };
     let signature = yo_wire::b64(&yo_wire::sha256(identity.to_string().as_bytes()));
+    // One report may stand for several of the same, counted on the phone (checked on receipt).
+    let count = field("count").parse::<i64>().unwrap_or(1).max(1);
     conn.execute(
-        "INSERT INTO diagnostics(kind, signature, first_seen, last_seen, app, os, model, payload)
-        VALUES (?1,?2,?3,?3,?4,?5,?6,?7)
-        ON CONFLICT(signature) DO UPDATE SET count=count+1, last_seen=excluded.last_seen,
+        "INSERT INTO diagnostics(kind, signature, count, first_seen, last_seen, app, os, model, payload)
+        VALUES (?1,?2,?8,?3,?3,?4,?5,?6,?7)
+        ON CONFLICT(signature) DO UPDATE SET count=count+excluded.count, last_seen=excluded.last_seen,
         app=excluded.app, os=excluded.os, model=excluded.model, payload=excluded.payload",
-        params![kind, signature, now, field("app"), field("os"), field("model"), payload.to_string()],
+        params![kind, signature, now, field("app"), field("os"), field("model"), payload.to_string(), count],
     )?;
     conn.execute(
-        "INSERT INTO diagnostic_days(day,kind,count) VALUES (?1,?2,1)
-        ON CONFLICT(day,kind) DO UPDATE SET count=count+1",
-        params![now / 86_400_000, kind],
+        "INSERT INTO diagnostic_days(day,kind,count) VALUES (?1,?2,?3)
+        ON CONFLICT(day,kind) DO UPDATE SET count=count+excluded.count",
+        params![now / 86_400_000, kind, count],
     )?;
     conn.execute("DELETE FROM diagnostic_days WHERE day < ?1", [now.saturating_sub(14 * 86_400_000) / 86_400_000])?;
     conn.query_row("SELECT id FROM diagnostics WHERE signature=?1", [signature], |r| r.get(0))

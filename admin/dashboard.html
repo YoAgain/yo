@@ -88,7 +88,8 @@
   <section class="card" id="diag">
     <div class="card-head"><h2>Crashes &amp; errors</h2><small id="diag-note"></small>
       <button type="button" class="pill" id="diag-all" hidden>Mark all done</button>
-      <select id="diag-mode" aria-label="Show crashes"><option value="open">Open</option><option value="done">Done</option><option value="all">All</option></select></div>
+      <select id="diag-mode" aria-label="Show crashes"><option value="open">Open</option><option value="done">Done</option><option value="all">All</option></select>
+      <select id="diag-level" aria-label="Show expected"><option value="hide">Without expected</option><option value="all">With expected</option></select></div>
     <table class="list">
       <thead><tr><th class="tick-col"></th><th>Type</th><th>Signature</th><th class="num">Count</th><th>First seen</th><th>Last seen</th><th>App</th></tr></thead>
       <tbody id="diag-body"></tbody>

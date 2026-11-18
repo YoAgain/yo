@@ -8,8 +8,8 @@
 //
 // A Yo arriving: the sound and a haptic (the title stays "Yo"); the sender's bar goes on top, its words knock (the
 // first Yo of a run only) and it says "Yo" at its end, in the name's own type, one "!" for each Yo after the first
-// ("Yo!!" for three). Each Yo stands `yoSolidSeconds` from when its bar is on screen; then the last "!" (the oldest)
-// goes at once, and the last Yo fades out within `yoSeconds`; then it is gone, as in the original (no unread mark). A
+// ("Yo!!" for three). Each Yo stands `yoSolidSeconds` from when its bar is on screen (seen after 1 s there, its
+// clock then runs in real time, away too: back later, it is gone); then the last "!" (the oldest) goes at once, and the last Yo fades out within `yoSeconds`; then it is gone, as in the original (no unread mark). A
 // photo or video waits in the same place as "Yo 📷" or "Yo 🎥": a finger on it plays them (HeldMedia), and what was shown
 // is gone (as Snapchat began).
 //
@@ -64,7 +64,7 @@ struct FriendList: View {
   @State private var listOrder: [String] = []
   @State private var listDeadline: UInt64?
   @State private var lockedRow: String?
-  private var listNow: UInt64 { UInt64(ProcessInfo.processInfo.systemUptime * 1000) }
+  private var listNow: UInt64 { DeleteNotice.now }
   /// Cache render data only; the core supplies every ordering decision.
   private final class RenderedRows {
     private var source: [Friend] = []
@@ -2395,12 +2395,10 @@ struct RowButton: View {
       .frame(maxWidth: .infinity, minHeight: Metrics.rowHeight)
       .background {
         ZStack(alignment: .leading) {
-          if recording { Color.alizarin.opacity(0.85) }
-          else {
-            // Pressed in camera mode: more see-through, the picture shows clearer there (the shutter's flash).
-            Color.clear.modifier(ListColor(color: color, pressed: cameraOn && shutterDown))
-          }
-          if recording { RecordingFill(seconds: Camera.longestVideo) }
+          // Pressed in camera mode: more see-through, the picture shows clearer there (the shutter's flash).
+          Color.clear.modifier(ListColor(color: color, pressed: cameraOn && shutterDown && !recording))
+          // Recording: the bar stays see-through, only the red grows over it from the leading edge.
+          if recording { RecordingFill(seconds: Camera.longestVideo, fromRight: leftHanded) }
         }
       }
       .contentShape(.rect)
@@ -2727,9 +2725,9 @@ enum YoWords {
   static func sending(_ count: Int) -> String { count <= 1 ? "Sending Yo!" : "Sending \(count)× Yo!" }
 }
 
-/// Words with a count that hold still as it changes ("23× Yo" to "24× Yo"): every digit in a slot as wide as
-/// Montserrat's widest figure (its figures are proportional, without tabular ones), centred there, the other words
-/// after it. The line is as wide for every count of as many digits; only a count growing a digit ("99×" to "100×")
+/// Words with a count that hold still as it changes ("23× Yo" to "24× Yo"): the number in a block as wide as its
+/// digits times Montserrat's widest figure (its figures are proportional, without tabular ones), its digits at their
+/// own spacing against the block's trailing edge (tight to "×"), the other words after it. The line is as wide for every count of as many digits; only a count growing a digit ("99×" to "100×")
 /// moves it. The words after the count are what is cut when it must be ("3× Yo from Mia…").
 struct SteadyText: View {
   let text: String
@@ -2748,13 +2746,13 @@ struct SteadyText: View {
     return width
   }
 
-  /// The text in runs: each digit alone, the words between them whole.
+  /// The text in runs: each number whole, the words between them whole.
   private var parts: [(digit: Bool, text: String)] {
     var parts: [(digit: Bool, text: String)] = []
     for character in text {
-      if character.isNumber { parts.append((true, String(character))) }
-      else if let last = parts.last, !last.digit { parts[parts.count - 1].text.append(character) }
-      else { parts.append((false, String(character))) }
+      let digit = character.isNumber
+      if let last = parts.last, last.digit == digit { parts[parts.count - 1].text.append(character) }
+      else { parts.append((digit, String(character))) }
     }
     return parts
   }
@@ -2764,7 +2762,7 @@ struct SteadyText: View {
     HStack(spacing: 0) {
       ForEach(Array(parts.enumerated()), id: \.offset) { _, part in
         if part.digit {
-          Text(part.text).fixedSize().frame(width: slot)
+          Text(part.text).fixedSize().frame(width: slot * CGFloat(part.text.count), alignment: .trailing)
         } else {
           Text(part.text).lineLimit(1).truncationMode(.tail)
         }
@@ -3176,18 +3174,20 @@ struct CameraEdgePan: UIGestureRecognizerRepresentable {
   }
 }
 
-/// A video recording: from the bar's left, darker as its time runs to the longest a video may be, breathing once a
-/// second.
+/// A video recording: red from the bar's leading edge (the right one left-handed), reaching the other edge when the
+/// longest a video may be has run. The rest of the bar stays as it is.
 struct RecordingFill: View {
   let seconds: Double
+  var fromRight = false
   @State private var start = Date.now
 
   var body: some View {
     TimelineView(.animation(minimumInterval: 1.0 / 120)) { context in
       let elapsed = context.date.timeIntervalSince(start)
-      let breath = 0.5 + 0.5 * cos(elapsed * 2 * .pi)
       Canvas { context, size in
-        context.fill(Path(CGRect(x: 0, y: 0, width: size.width * min(1, elapsed / seconds), height: size.height)), with: .color(.black.opacity(0.16 + 0.08 * breath)))
+        let width = size.width * min(1, elapsed / seconds)
+        let x = fromRight ? size.width - width : 0
+        context.fill(Path(CGRect(x: x, y: 0, width: width, height: size.height)), with: .color(.alizarin.opacity(0.85)))
       }
     }
     .allowsHitTesting(false)

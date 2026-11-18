@@ -520,8 +520,9 @@ final class Inbox {
     let needsGroups = events.contains { event in
       switch event { case .groupMessage, .groupChanged: true; default: false }
     }
-    if needsGroups, let groups = try? await Hub.run({ try client.groups() }) {
-      Perf.timed("inbox.take.groups") { friends.takeGroups(groups) }
+    let groupsRead = needsGroups ? try? await Hub.run({ try client.groups() }) : nil
+    if let groupsRead {
+      Perf.timed("inbox.take.groups") { friends.takeGroups(groupsRead) }
     }
     let bars: [String: Friend] = needsGroups
       ? Dictionary(friends.all.compactMap { bar in bar.group.map { ($0, bar) } }, uniquingKeysWith: { a, _ in a })
@@ -552,7 +553,15 @@ final class Inbox {
           guard let bar = bars[group] else { break }
           let from = contactsByUser[user]
           let senderName = resolved[user]?.name ?? from?.handles.first ?? from?.name ?? "?"
-          if senderName != "?" { memberNames[user] = senderName }
+          if senderName != "?" {
+            memberNames[user] = senderName
+          } else if memberNames[user] == nil {
+            // Shown as "?" on the group's bar: why, to find it (no name, no id: a hash prefix).
+            let roster = groupsRead?.first { $0.id == group }
+            UnknownSender.record(place: "list", user: user, contact: from.map(UnknownSender.facts),
+              group: (roster?.members.count ?? 0, roster.map { $0.members.contains(user) }),
+              friend: friends.all.contains { $0.user == user }, groupsRead: groupsRead != nil)
+          }
           received(id: "\(group)/\(user)/\(sentAtMs)", from: bar.name)
           count(from: bar.name)
           if let (media, kind) = kind.media {

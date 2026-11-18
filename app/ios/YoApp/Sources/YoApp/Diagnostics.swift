@@ -136,16 +136,20 @@ enum Diagnostics {
     let uuid = UUID().uuidString
     queue.async {
       guard UserDefaults.standard.string(forKey: generation) == epoch else { return }
-      var machine = utsname()
-      uname(&machine)
-      let model = withUnsafeBytes(of: machine.machine) { bytes in
-        String(decoding: bytes.prefix { $0 != 0 }, as: UTF8.self)
-      }
       let payload = ["uuid": uuid, "domain": domain, "code": code, "place": tag,
         "app": AppUpdate.header, "os": ProcessInfo.processInfo.operatingSystemVersionString, "model": model]
       guard let data = try? JSONSerialization.data(withJSONObject: payload), let text = String(data: data, encoding: .utf8) else { return }
       append(text, kind: "error", epoch: epoch)
       send(epoch: epoch)
+    }
+  }
+
+  /// The hardware model: "iPhone17,1".
+  static var model: String {
+    var machine = utsname()
+    uname(&machine)
+    return withUnsafeBytes(of: machine.machine) { bytes in
+      String(decoding: bytes.prefix { $0 != 0 }, as: UTF8.self)
     }
   }
 

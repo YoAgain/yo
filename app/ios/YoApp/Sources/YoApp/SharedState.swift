@@ -243,17 +243,46 @@ final class SharedStateFile: StateStore, StateLock, @unchecked Sendable {
 /// the app), sharing the state step by step as the app does. Nil when there is no state to open (signed out, never
 /// moved in, the keychain locked) or the app does not give the lock within `seconds`.
 enum Guest {
+  /// Why the state did not open.
+  enum Failure: Error {
+    /// No App Group in the signature.
+    case noGroup
+    /// The keychain does not answer: before the first unlock since a restart (errSecInteractionNotAllowed), or else.
+    case keychain(OSStatus)
+    /// No key, or no state: no account on this phone (yet).
+    case noAccount
+    /// The app held the state longer than allowed.
+    case busy
+    /// The state did not open with its key.
+    case restore(Error)
+  }
+
   static func open(within seconds: Double, timeout: TimeInterval = 70) -> YoClient? {
-    guard SharedStateFile.available, let key = try? StateKey.shared(),
-      SharedStateFile.take(within: seconds)
-    else { return nil }
+    try? opened(within: seconds, timeout: timeout).get()
+  }
+
+  static func opened(within seconds: Double, timeout: TimeInterval = 70) -> Result<YoClient, Failure> {
+    guard SharedStateFile.available else { return .failure(.noGroup) }
+    let key: Data
+    do {
+      guard let found = try StateKey.shared() else { return .failure(.noAccount) }
+      key = found
+    } catch {
+      return .failure(.keychain((error as? Keychain.Failure)?.status ?? errSecInternalError))
+    }
+    guard SharedStateFile.take(within: seconds) else { return .failure(.busy) }
     defer { SharedStateFile.give() }
     let file = SharedStateFile(guest: true)
-    guard let blob = file.read(),
-      let client = Diagnostics.attempt({ try YoClient.restoreGuest(transport: HubTransport(base: Hub.url, timeout: timeout), store: file, stateKey: key, blob: blob) })
-    else { return nil }
+    guard let blob = file.read() else { return .failure(.noAccount) }
+    let client: YoClient
+    do {
+      client = try YoClient.restoreGuest(transport: HubTransport(base: Hub.url, timeout: timeout), store: file, stateKey: key, blob: blob)
+    } catch {
+      Diagnostics.recordUnreported(error)
+      return .failure(.restore(error))
+    }
     Hub.pin(client)
     client.shareState(lock: file)
-    return client
+    return .success(client)
   }
 }

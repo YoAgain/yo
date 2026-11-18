@@ -95,6 +95,7 @@ final class CrashReports: NSObject, MXMetricManagerSubscriber {
 
   /// Sends what waits, without the account; kept for the next time if the hub does not take it now.
   func flush() {
+    CountedErrors.collect()  // what the app and its extensions counted (unread pushes, unnamed senders), as errors
     Diagnostics.flush()
     guard Self.on, !pending.isEmpty, !sending else { return }
     sending = true
