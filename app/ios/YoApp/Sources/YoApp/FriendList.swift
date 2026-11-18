@@ -3376,7 +3376,7 @@ struct HeldMedia: View {
                   if current.video != nil, let player {
                     PlayerLayer(player: player)
                   } else if let photo = full ?? current.photo {
-                    Image(uiImage: photo).resizable().scaledToFill()
+                    Image(uiImage: photo).resizable().scaledToFit()  // whole, black bars where its shape differs
                   }
                 }
                 .clipped()
@@ -3680,7 +3680,7 @@ struct PlayerLayer: UIViewRepresentable {
   func makeUIView(context: Context) -> PlayerView {
     let view = PlayerView()
     view.playerLayer.player = player
-    view.playerLayer.videoGravity = .resizeAspectFill
+    view.playerLayer.videoGravity = .resizeAspect  // whole, as photos
     return view
   }
 
