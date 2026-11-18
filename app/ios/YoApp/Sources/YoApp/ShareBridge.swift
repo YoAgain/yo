@@ -36,6 +36,9 @@ enum ShareBridge {
     let height: Int
     let durationMs: UInt32
     let created: Date
+    /// Not made small yet (the extension had no memory for it): the original's file extension ("mov", "heic"); the
+    /// app makes it (MediaFile) before it goes. Nil: ready as it lies.
+    var original: String? = nil
   }
 
   /// The App Group of the app and its extensions; Yo Dev's own (its accounts are the dev hub's). Without it in the
@@ -80,6 +83,25 @@ enum ShareBridge {
       durationMs: file.durationMs, created: .now)
     do {
       try file.data.write(to: media(share, in: dir), options: [.atomic, .completeFileProtectionUntilFirstUserAuthentication])
+      try JSONEncoder().encode(share).write(
+        to: note(share.id, in: dir), options: [.atomic, .completeFileProtectionUntilFirstUserAuthentication])
+      return true
+    } catch {
+      Diagnostics.record(error)
+      try? FileManager.default.removeItem(at: media(share, in: dir))
+      return false
+    }
+  }
+
+  /// The extension: a photo or video it could not make small itself (too little memory), moved into the outbox as it
+  /// was shared, for the app to make and send. The media first, the note last, as `put`.
+  static func putOriginal(_ url: URL, kind: MediaFile.Kind, for friend: Friend, of owner: String) -> Bool {
+    guard let dir = outbox else { return false }
+    let share = Share(
+      id: UUID(), owner: owner, to: friend.to, name: friend.name, kind: kind, width: 0, height: 0, durationMs: 0,
+      created: .now, original: url.pathExtension.isEmpty ? (kind == .photo ? "jpg" : "mov") : url.pathExtension)
+    do {
+      try FileManager.default.moveItem(at: url, to: media(share, in: dir))
       try JSONEncoder().encode(share).write(
         to: note(share.id, in: dir), options: [.atomic, .completeFileProtectionUntilFirstUserAuthentication])
       return true

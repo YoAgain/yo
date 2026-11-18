@@ -63,15 +63,26 @@ enum ShareInbox {
       for share in shares {
         let media = ShareBridge.media(share, in: dir)
         let note = ShareBridge.note(share.id, in: dir)
-        let data = await Task.detached(priority: .utility) { try? Data(contentsOf: media) }.value
+        // An original the extension could not make small: made here first (`.unreadable`: there, not readable now).
+        let made: Made
+        if let ext = share.original {
+          made = await original(share, at: media, ext: ext)
+        } else {
+          made = .data(await Task.detached(priority: .utility) { try? Data(contentsOf: media) }.value)
+        }
         // Checked after the read: signed out (or into another account) meanwhile, nothing goes under the new one.
         guard generation == self.generation, client === accounts.client, let owner = accounts.shareOwner else { return }
         // There and not readable now (protected until the iPhone is unlocked, a passing error): tried again later, not
         // thrown away.
-        if data == nil && FileManager.default.fileExists(atPath: media.path) { continue }
-        if let data, share.owner == owner {
-          let file = MediaFile(
-            kind: share.kind, data: data, width: share.width, height: share.height, durationMs: share.durationMs)
+        if case .unreadable = made { continue }
+        if case .data(nil) = made, FileManager.default.fileExists(atPath: media.path) { continue }
+        let file: MediaFile? = switch made {
+        case .data(let data?):
+          MediaFile(kind: share.kind, data: data, width: share.width, height: share.height, durationMs: share.durationMs)
+        case .file(let file): file
+        default: nil
+        }
+        if let file, share.owner == owner {
           // By the share's own id: taken in once, also when the app ended before the note below went.
           guard
             await outbox.send(
@@ -82,6 +93,26 @@ enum ShareInbox {
         try? FileManager.default.removeItem(at: note)
         try? FileManager.default.removeItem(at: media)
       }
+    }
+  }
+
+  private enum Made: Sendable { case data(Data?), file(MediaFile?), unreadable }
+
+  /// A shared original made as the app's own (MediaFile), from a copy (MediaFile.video deletes what it reads); nil
+  /// inside when it cannot be made (it does not go).
+  nonisolated private static func original(_ share: ShareBridge.Share, at media: URL, ext: String) async -> Made {
+    let copy = FileManager.default.temporaryDirectory.appending(path: "\(UUID().uuidString).\(ext)")
+    guard (try? FileManager.default.copyItem(at: media, to: copy)) != nil else {
+      return FileManager.default.fileExists(atPath: media.path) ? .unreadable : .file(nil)
+    }
+    switch share.kind {
+    case .video:
+      return .file(await MediaFile.video(copy))
+    case .photo:
+      defer { try? FileManager.default.removeItem(at: copy) }
+      return .file(await Task.detached(priority: .utility) {
+        (try? Data(contentsOf: copy, options: .alwaysMapped)).flatMap(MediaFile.photo)
+      }.value)
     }
   }
 

@@ -69,11 +69,59 @@ enum YoIntentError: Error, CustomLocalizedStringResourceConvertible {
     case .refused(let why): "Not sent: \(why)."
     }
   }
+
+  /// Why, in plain words, after "No Yo to lina.".
+  var why: String {
+    switch self {
+    case .signedOut: "Open Yo once to sign in."
+    case .noYoYet: "Nobody sent you a Yo yet."
+    case .notNow: "Yo could not reach the internet."
+    case .refused(let why): why.prefix(1).uppercased() + why.dropFirst() + "."
+    }
+  }
 }
 
-/// One Yo to a friend or group. A LiveActivityIntent: the system runs it in the app's process (also from the
-/// controls and widgets), where "Yo! Mia" may show in the Dynamic Island (YoActivity.swift). It returns once that
-/// stands; the Yo goes in the background (YoSend.dispatch).
+/// The two ways a Yo from outside the app goes, one code for both. From Siri and Shortcuts (`wait`) the intent waits
+/// for how it went and says so ("Yo to lina!", or "No Yo to lina." and why). From the Action button, a control or a
+/// widget it returns as soon as the island stands and the Yo goes on in the background (YoSend.dispatch), so iOS's
+/// running mark does not stay for the network's time.
+enum IntentYo {
+  static func send(_ friend: FriendEntity, wait: Bool) async throws -> some IntentResult & ProvidesDialog {
+    let timing = YoSentActivity.Timing()
+    guard let list = ShareBridge.readList() else {
+      YoSend.count("signedOut")
+      throw YoIntentError.signedOut
+    }
+    // The name as the list shows it now: the control keeps the friend as it was picked ("lina", typed then).
+    let shown = list.friends.first { $0.to == friend.id }
+      ?? list.friends.first { $0.name.caseInsensitiveCompare(friend.name) == .orderedSame }
+    let name = shown?.name ?? friend.name
+    let outcome = await YoSend.dispatch(
+      to: friend.id, owner: list.owner, shown: (name: name, color: shown?.color, back: false), timing: timing,
+      wait: wait)
+    if let outcome { return .result(dialog: "No Yo to \(name). \(outcome.why)") }
+    return .result(dialog: "Yo to \(name)!")
+  }
+
+  static func back(wait: Bool) async throws -> some IntentResult & ProvidesDialog {
+    let timing = YoSentActivity.Timing()
+    guard let last = ShareBridge.readLastYo() else {
+      YoSend.count("noYoYet", expected: true)
+      await YoSentActivity.showNobody()
+      throw YoIntentError.noYoYet
+    }
+    let bar = ShareBridge.readList()?.friends.first { $0.to == last.to }
+    let name = bar?.name ?? last.name
+    let outcome = await YoSend.dispatch(
+      to: last.to, owner: last.owner, shown: (name: name, color: bar?.color, back: true), timing: timing, wait: wait)
+    if let outcome { return .result(dialog: "No Yo back to \(name). \(outcome.why)") }
+    return .result(dialog: "Yo back to \(name)!")
+  }
+}
+
+/// One Yo to a friend or group, from Siri and Shortcuts (YoShortcuts.swift): it waits for the Yo and says whether it
+/// went. A LiveActivityIntent: the system runs it in the app's process, where "Yo lina" shows in the Dynamic Island
+/// meanwhile (YoActivity.swift).
 struct SendYoIntent: LiveActivityIntent {
   static let title: LocalizedStringResource = "Send Yo"
   static let description = IntentDescription("Sends one Yo to a friend or group, without opening Yo.")
@@ -91,42 +139,52 @@ struct SendYoIntent: LiveActivityIntent {
     self.friend = friend
   }
 
-  func perform() async throws -> some IntentResult & ProvidesDialog {
-    let timing = YoSentActivity.Timing()
-    guard let list = ShareBridge.readList() else {
-      YoSend.count("signedOut")
-      throw YoIntentError.signedOut
-    }
-    // The name as the list shows it now: the control keeps the friend as it was picked ("lina", typed then).
-    let shown = list.friends.first { $0.to == friend.id }
-      ?? list.friends.first { $0.name.caseInsensitiveCompare(friend.name) == .orderedSame }
-    let name = shown?.name ?? friend.name
-    await YoSend.dispatch(
-      to: friend.id, owner: list.owner, shown: (name: name, color: shown?.color, back: false), timing: timing)
-    return .result(dialog: "Yo to \(name)!")
-  }
+  func perform() async throws -> some IntentResult & ProvidesDialog { try await IntentYo.send(friend, wait: true) }
 }
 
-/// One Yo back to whoever sent the newest (ShareBridge.LastYo); the island names whom it went to.
+/// Send Yo's twin for the Action button's control, Control Center and the widgets (YoControls): it returns as soon
+/// as the island stands, the Yo going on in the background. Not offered in Shortcuts (the waiting one is).
+struct SendYoNowIntent: LiveActivityIntent {
+  static let title: LocalizedStringResource = "Send Yo"
+  static let description = IntentDescription("Sends one Yo to a friend or group, without opening Yo.")
+  static let supportedModes: IntentModes = .background
+  static let authenticationPolicy: IntentAuthenticationPolicy = .alwaysAllowed
+  static let isDiscoverable = false
+
+  @Parameter(title: "Friend", requestValueDialog: "To whom?")
+  var friend: FriendEntity
+
+  static var parameterSummary: some ParameterSummary { Summary("Send Yo to \(\.$friend)") }
+
+  init() {}
+
+  init(friend: FriendEntity) {
+    self.friend = friend
+  }
+
+  func perform() async throws -> some IntentResult & ProvidesDialog { try await IntentYo.send(friend, wait: false) }
+}
+
+/// One Yo back to whoever sent the newest (ShareBridge.LastYo), from Siri and Shortcuts: it waits for how it went;
+/// the island names whom it went to.
 struct YoBackIntent: LiveActivityIntent {
   static let title: LocalizedStringResource = "Yo Back"
   static let description = IntentDescription("Sends a Yo back to whoever sent you the last one, without opening Yo.")
   static let supportedModes: IntentModes = .background
   static let authenticationPolicy: IntentAuthenticationPolicy = .alwaysAllowed
 
-  func perform() async throws -> some IntentResult & ProvidesDialog {
-    let timing = YoSentActivity.Timing()
-    guard let last = ShareBridge.readLastYo() else {
-      YoSend.count("noYoYet", expected: true)
-      await YoSentActivity.showNobody()
-      throw YoIntentError.noYoYet
-    }
-    let bar = ShareBridge.readList()?.friends.first { $0.to == last.to }
-    let name = bar?.name ?? last.name
-    await YoSend.dispatch(
-      to: last.to, owner: last.owner, shown: (name: name, color: bar?.color, back: true), timing: timing)
-    return .result(dialog: "Yo back to \(name)!")
-  }
+  func perform() async throws -> some IntentResult & ProvidesDialog { try await IntentYo.back(wait: true) }
+}
+
+/// Yo Back's twin for the controls and the widget: it returns once the island stands. Not offered in Shortcuts.
+struct YoBackNowIntent: LiveActivityIntent {
+  static let title: LocalizedStringResource = "Yo Back"
+  static let description = IntentDescription("Sends a Yo back to whoever sent you the last one, without opening Yo.")
+  static let supportedModes: IntentModes = .background
+  static let authenticationPolicy: IntentAuthenticationPolicy = .alwaysAllowed
+  static let isDiscoverable = false
+
+  func perform() async throws -> some IntentResult & ProvidesDialog { try await IntentYo.back(wait: false) }
 }
 
 /// The widgets' "Sent Yo!" (YoWidgets.swift): whom the newest Yo from an intent went to, shown on that friend's bar
@@ -200,36 +258,82 @@ enum YoSend {
     if let outcome { throw outcome }
   }
 
-  /// An intent's Yo: the island first ("sending", before the state opens: as early as iOS lets it), then the Yo
-  /// in the background, and the island says how it went. Returns once the island stands, not when the Yo went: the
-  /// intent ends at once, so iOS's own running mark (the control's blue hand) does not stay for the network's time.
-  /// The process is kept up for the send (performExpiringActivity, in the app and in an extension alike); if that
-  /// time ends first, the turn is revoked (no lock held into a suspension) and the island says "Yo?".
+  /// An intent's Yo: the island first ("sending", before the state opens: as early as iOS lets it), then the Yo,
+  /// and the island says how it went. Without `wait` (the Action button, controls, widgets) it returns once the
+  /// island stands, not when the Yo went: the intent ends at once, so iOS's own running mark (the control's blue
+  /// hand) does not stay for the network's time; the process is kept up for the send (performExpiringActivity, in
+  /// the app and in an extension alike), and if that time ends first, the turn is revoked (no lock held into a
+  /// suspension) and the island says "No Yo". With `wait` (Siri, Shortcuts) it returns how it went: nil when it went.
+  @discardableResult
   static func dispatch(
-    to target: String, owner: String, shown: (name: String, color: Int?, back: Bool), timing: YoSentActivity.Timing
-  ) async {
+    to target: String, owner: String, shown: (name: String, color: Int?, back: Bool), timing: YoSentActivity.Timing,
+    wait: Bool = false
+  ) async -> YoIntentError? {
     // A group as the list writes it: "#Hey".
     let name = target.hasPrefix("group:") && !shown.name.hasPrefix("#") ? "#" + shown.name : shown.name
     let activity = await YoSentActivity.start(name: name, color: shown.color, back: shown.back)
     timing.mark(activity == nil ? "activity none" : "activity requested")
     let lifetime = SharedAccess.Lifetime()
     let box = ActivityBox(activity)
-    ProcessInfo.processInfo.performExpiringActivity(withReason: "Yo") { expired in
-      guard !expired else { return lifetime.stop() }
-      let outcome = lifetime.run { sendNow(to: target, owner: owner) }
-      lifetime.stop()
+    @Sendable func went(_ outcome: YoIntentError?) {
       timing.mark(outcome == nil ? "sent" : "not sent")
       if outcome == nil {
         IntentSent.note(to: target, back: shown.back)
         WidgetSent.note(to: target, back: shown.back)
         sent?()
       }
-      let done = DispatchSemaphore(value: 0)
-      Task.detached {
-        await YoSentActivity.finish(box.activity, failed: outcome != nil)
-        done.signal()
+    }
+    // The intent's own request keeps the process up while it runs; its end (or ours) revokes the turn.
+    @Sendable func sendHere() async -> YoIntentError? {
+      let lifetime = SharedAccess.Lifetime()
+      let outcome = await Task.detached(priority: .userInitiated) {
+        lifetime.run { sendNow(to: target, owner: owner) }
+      }.value
+      lifetime.stop()
+      went(outcome)
+      await YoSentActivity.finish(box.activity, failed: outcome != nil)
+      return outcome
+    }
+    if wait { return await sendHere() }
+    // Refused at once (called expired before it ran: the app's background time is spent, which iOS counts for the
+    // app as a whole), the intent's own time sends it, as with `wait`. Ended mid-send, the island says how it stands
+    // before the expiry block returns (iOS suspends the process after it), never "sending" for good.
+    let ran = await withCheckedContinuation { (resume: CheckedContinuation<Bool, Never>) in
+      let begun = Begun(resume)
+      ProcessInfo.processInfo.performExpiringActivity(withReason: "Yo") { expired in
+        guard !expired else {
+          lifetime.stop()
+          if begun.first(false) { return }
+          return YoSentActivity.finishWaiting(box.activity, failed: true)
+        }
+        guard begun.first(true) else { return }
+        let outcome = lifetime.run { sendNow(to: target, owner: owner) }
+        lifetime.stop()
+        went(outcome)
+        YoSentActivity.finishWaiting(box.activity, failed: outcome != nil)
       }
-      _ = done.wait(timeout: .now() + 3)
+    }
+    if !ran {
+      timing.mark("no background time")
+      return await sendHere()
+    }
+    return nil
+  }
+
+  /// Which call of the expiring activity's block came first: it resumes the intent, once.
+  private final class Begun: @unchecked Sendable {
+    private let lock = NSLock()
+    private var resume: CheckedContinuation<Bool, Never>?
+    init(_ resume: CheckedContinuation<Bool, Never>) { self.resume = resume }
+
+    /// True for the first call only: `ran` true, the send runs on the activity's time; false, the intent sends it.
+    func first(_ ran: Bool) -> Bool {
+      guard let resume = lock.withLock({ () -> CheckedContinuation<Bool, Never>? in
+        defer { self.resume = nil }
+        return self.resume
+      }) else { return false }
+      resume.resume(returning: ran)
+      return true
     }
   }
 
@@ -247,7 +351,9 @@ enum YoSend {
   /// with its reason (CountedErrors "IntentSend"), for the admin page.
   private static func sendNow(to target: String, owner: String) -> YoIntentError? {
     let client: YoClient
-    switch Guest.opened(within: 8, timeout: 20) {
+    // The hub's answer comes within a step that holds the state's lock: under the notification service's wait for
+    // it (NotificationService.lockWait, 10 s), so a push meanwhile is read, not "You may have received a Yo".
+    switch Guest.opened(within: 8, timeout: 8) {
     case .success(let opened): client = opened
     case .failure(let failure):
       // Before the first unlock since a restart the keychain does not answer (errSecInteractionNotAllowed): expected.

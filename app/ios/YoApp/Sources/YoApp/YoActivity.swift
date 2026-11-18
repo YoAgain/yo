@@ -49,6 +49,9 @@ struct YoSentAttributes: ActivityAttributes {
 enum YoSentActivity {
   /// How long it stays once the Yo went or did not.
   static let shown: Duration = .seconds(3)
+  /// How long "sending" may stand: if no outcome came by then (the process was suspended mid-send), the island
+  /// says "Yo?" instead of a faded "Yo" for good.
+  static let sendingFor: TimeInterval = 30
 
   /// How long the steps of an intent took (from its start): seen in the device's log under "YoIntentTiming".
   struct Timing: Sendable {
@@ -96,10 +99,10 @@ enum YoSentActivity {
         state.total = old.total + 1
       }
       _ = Ending.next(current.id)  // its end, due from the Yo before, waits for this one
-      await current.update(ActivityContent(state: state, staleDate: nil))
+      await current.update(ActivityContent(state: state, staleDate: .now + sendingFor))
       return current
     }
-    return await request(.init(outcome: .sending, name: name, color: color, back: back))
+    return await request(.init(outcome: .sending, name: name, color: color, back: back), staleDate: .now + sendingFor)
   }
 
   /// The Yo went (`failed` false) or did not: the faded "Yo" turns full, or "No Yo"; gone `shown` later.
@@ -109,6 +112,22 @@ enum YoSentActivity {
     state.outcome = failed ? .failed : .sent
     await activity.update(ActivityContent(state: state, staleDate: nil))
     endLater(activity)
+  }
+
+  /// `finish` from a thread that must not return before it is done (a performExpiringActivity block, whose return
+  /// lets iOS suspend the process): at most two seconds.
+  static func finishWaiting(_ activity: Activity<YoSentAttributes>?, failed: Bool) {
+    final class Box: @unchecked Sendable {
+      let activity: Activity<YoSentAttributes>?
+      init(_ activity: Activity<YoSentAttributes>?) { self.activity = activity }
+    }
+    let box = Box(activity)
+    let done = DispatchSemaphore(value: 0)
+    Task.detached {
+      await finish(box.activity, failed: failed)
+      done.signal()
+    }
+    _ = done.wait(timeout: .now() + 2)
   }
 
   /// Yo Back with no Yo to answer.
@@ -139,7 +158,9 @@ enum YoSentActivity {
   }
 
   /// Every reason it does not show is counted (CountedErrors, "LiveActivity"), for the admin page.
-  private static func request(_ state: YoSentAttributes.ContentState) async -> Activity<YoSentAttributes>? {
+  private static func request(
+    _ state: YoSentAttributes.ContentState, staleDate: Date? = nil
+  ) async -> Activity<YoSentAttributes>? {
     // Only the app's process may start one: an extension (the controls' intents run in YoControls when the App
     // Intents metadata does not mark them LiveActivityIntent) is refused by the system.
     guard Bundle.main.bundleURL.pathExtension != "appex" else { failed("inExtension"); return nil }
@@ -150,7 +171,7 @@ enum YoSentActivity {
       Task.detached { for old in earlier { await old.end(nil, dismissalPolicy: .immediate) } }
     }
     do {
-      return try Activity.request(attributes: YoSentAttributes(), content: ActivityContent(state: state, staleDate: nil))
+      return try Activity.request(attributes: YoSentAttributes(), content: ActivityContent(state: state, staleDate: staleDate))
     } catch {
       failed("request " + String(describing: error))
       return nil

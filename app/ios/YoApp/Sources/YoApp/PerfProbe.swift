@@ -7,6 +7,101 @@ import UIKit
   private static var installed = false
   private static var launchListMs = -1.0
 
+  /// From the app's start, for 4 s: each time the main thread answered late (more than 12 ms), with the timed main
+  /// spans meanwhile ("main.lag 230 ms [list.syncFriends]").
+  nonisolated static func watchLaunchLag() {
+    guard Perf.on else { return }
+    Thread.detachNewThread {
+      let end = CACurrentMediaTime() + 4
+      while CACurrentMediaTime() < end {
+        let sent = CACurrentMediaTime()
+        let done = DispatchSemaphore(value: 0)
+        DispatchQueue.main.async { done.signal() }
+        done.wait()
+        let lag = CACurrentMediaTime() - sent
+        if lag > 0.012 {
+          let names = Perf.names(from: sent, to: sent + lag).joined(separator: ",")
+          Perf.mark("main.lag \(Int(lag * 1000)) ms [\(names)]", at: sent)
+        }
+        usleep(2000)
+      }
+    }
+  }
+
+  /// YO_PERF_PROFILE=1: the main thread sampled every 2 ms for the launch's first `YO_PERF_PROFILE_MS` (800) ms;
+  /// the functions found on its stack most often, as marks ("prof 42% UIKitCore:-[UIApplication _run]").
+  /// Call on the main thread.
+  nonisolated static func profileLaunch() {
+    let env = ProcessInfo.processInfo.environment
+    guard Perf.on, env["YO_PERF_PROFILE"] != nil else { return }
+    let span = (Double(env["YO_PERF_PROFILE_MS"] ?? "") ?? 800) / 1000
+    let main = mach_thread_self()
+    let me = pthread_self()
+    let top = UInt(bitPattern: pthread_get_stackaddr_np(me))
+    let bottom = top - UInt(pthread_get_stacksize_np(me))
+    Thread.detachNewThread {
+      let capacity = 160
+      let buffer = UnsafeMutablePointer<UInt>.allocate(capacity: capacity)
+      var counts: [String: Int] = [:]
+      var leaf: [String: Int] = [:]
+      var samples = 0
+      let mask: UInt = 0x0000_007F_FFFF_FFFF  // pointer authentication bits off
+      let end = CACurrentMediaTime() + span
+      while CACurrentMediaTime() < end {
+        var n = 0
+        if thread_suspend(main) == KERN_SUCCESS {
+          var state = arm_thread_state64_t()
+          var count = mach_msg_type_number_t(MemoryLayout<arm_thread_state64_t>.size / MemoryLayout<UInt32>.size)
+          let kr = withUnsafeMutablePointer(to: &state) {
+            $0.withMemoryRebound(to: integer_t.self, capacity: Int(count)) {
+              thread_get_state(main, ARM_THREAD_STATE64, $0, &count)
+            }
+          }
+          if kr == KERN_SUCCESS {
+            buffer[0] = UInt(state.__pc) & mask
+            buffer[1] = UInt(state.__lr) & mask
+            n = 2
+            var fp = UInt(state.__fp)
+            while n < capacity, fp >= bottom, fp + 16 <= top, fp % 8 == 0 {
+              let frame = UnsafePointer<UInt>(bitPattern: fp)!
+              let next = frame[0]
+              let ret = frame[1] & mask
+              if ret == 0 { break }
+              buffer[n] = ret
+              n += 1
+              if next <= fp { break }
+              fp = next
+            }
+          }
+          thread_resume(main)
+        }
+        if n > 0 {
+          samples += 1
+          var seen = Set<String>()
+          for i in 0..<n {
+            var info = Dl_info()
+            guard dladdr(UnsafeRawPointer(bitPattern: buffer[i]), &info) != 0 else { continue }
+            let image = info.dli_fname.map { String(cString: $0).split(separator: "/").last.map(String.init) ?? "" } ?? "?"
+            let symbol = info.dli_sname.map { String(cString: $0) } ?? "?"
+            let key = image + ":" + String(symbol.prefix(90))
+            if i == 0 { leaf[key, default: 0] += 1 }
+            if seen.insert(key).inserted { counts[key, default: 0] += 1 }
+          }
+        }
+        usleep(2000)
+      }
+      buffer.deallocate()
+      Perf.mark("prof samples \(samples)")
+      for (key, value) in counts.sorted(by: { $0.value > $1.value }).prefix(70) where value * 50 >= samples {
+        Perf.mark("prof \(value * 100 / max(samples, 1))% \(key)")
+      }
+      for (key, value) in leaf.sorted(by: { $0.value > $1.value }).prefix(25) {
+        Perf.mark("leaf \(value * 100 / max(samples, 1))% \(key)")
+      }
+      Perf.dump()
+    }
+  }
+
   /// Once there is a window: the touch clock on every window and the hitch watch.
   static func install() {
     guard Perf.on, !installed else { return }
@@ -169,6 +264,7 @@ import UIKit
       summary.removeValue(forKey: "frames_ms")
       if let data = try? JSONSerialization.data(withJSONObject: summary, options: [.sortedKeys]),
         let json = String(data: data, encoding: .utf8) { Perf.report(json) }
+      Perf.dump()
     }
   }
 }

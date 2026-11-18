@@ -99,7 +99,7 @@ struct YoFriendView: View {
 
   var body: some View {
     if let friend = entry.friend {
-      Button(intent: SendYoIntent(friend: FriendEntity(friend))) {
+      Button(intent: SendYoNowIntent(friend: FriendEntity(friend))) {
         CircleLines(top: entry.justSent(friend) ? "Sent" : "Yo", bottom: entry.justSent(friend) ? "Yo!" : friend.title)
       }
       .buttonStyle(.plain)
@@ -200,7 +200,7 @@ struct YoListView: View {
       SignedOut()
     } else if family == .systemSmall, friends.count == 1, let friend = friends.first {
       // One friend on a small widget: Yo's own purple, whatever their bar colour on the list.
-      Button(intent: SendYoIntent(friend: FriendEntity(friend))) {
+      Button(intent: SendYoNowIntent(friend: FriendEntity(friend))) {
         BarLabel(text: entry.justSent(friend) ? "Sent Yo!" : friend.title, size: 28)
       }
       .buttonStyle(.plain)
@@ -212,7 +212,7 @@ struct YoListView: View {
         let size = min(Metrics.rowFont, space.size.height / CGFloat(friends.count) * 0.42)
         VStack(spacing: 0) {
           ForEach(friends, id: \.to) { friend in
-            Button(intent: SendYoIntent(friend: FriendEntity(friend))) {
+            Button(intent: SendYoNowIntent(friend: FriendEntity(friend))) {
               BarLabel(text: entry.justSent(friend) ? "Sent Yo!" : friend.title, size: size)
                 .background(Color.row(friend.color))
             }
@@ -252,7 +252,7 @@ struct YoBackView: View {
   let entry: YoEntry
 
   var body: some View {
-    Button(intent: YoBackIntent()) {
+    Button(intent: YoBackNowIntent()) {
       if entry.sent?.back == true {
         CircleLines(top: "Sent", bottom: "Yo!")
       } else {

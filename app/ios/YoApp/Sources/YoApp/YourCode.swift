@@ -1,26 +1,33 @@
 import SwiftUI
 import UIKit
+import UniformTypeIdentifiers
 import YoCore
 
+/// The invite: the link as text, the card with the QR code as the share sheet's picture. Nothing is drawn before the
+/// share sheet asks for the picture (`InviteCard`), not as the list or a page with the button shows.
 @MainActor
 struct InviteShareLink<Label: View>: View {
   let name: String
   @ViewBuilder var label: () -> Label
-  @State private var card: ContactCodeExport?
 
   var body: some View {
-    Group {
-      if let card {
-        ShareLink(
-          item: "Yo me on Yo: \(Invite.link(for: name).absoluteString)",
-          preview: SharePreview("\(name) wants to Yo", icon: Image(uiImage: card.image))
-        ) { label() }
-      } else {
-        label().disabled(true)
-      }
-    }
-    .task(id: name) {
-      card = ContactCodeExport.render(name: name)
+    ShareLink(
+      item: "Yo me on Yo: \(Invite.link(for: name).absoluteString)",
+      preview: SharePreview("\(name) wants to Yo", icon: InviteCard(name: name))
+    ) { label() }
+  }
+}
+
+/// The invite card as the share sheet's picture, drawn when the sheet asks for it (ContactCodeExport).
+private struct InviteCard: Transferable {
+  let name: String
+
+  struct Unavailable: Error {}
+
+  static var transferRepresentation: some TransferRepresentation {
+    DataRepresentation(exportedContentType: .png) { card in
+      guard let data = await ContactCodeExport.render(name: card.name)?.image.pngData() else { throw Unavailable() }
+      return data
     }
   }
 }
@@ -36,28 +43,41 @@ private struct ContactCodeExport {
     cached.flatMap { $0.name == name ? $0.export.code : nil }
   }
 
-  static func render(name: String) -> Self? {
+  /// The one under way, which another asking for the same name waits for.
+  private static var making: (name: String, task: Task<Self?, Never>)?
+
+  /// The QR codes and the check that the card reads back are made off the main thread (Core Image and its QR reader
+  /// took a quarter of a second there, right as the list first showed); only the card's layout is drawn on it.
+  static func render(name: String) async -> Self? {
     if let cached, cached.name == name { return cached.export }
+    if let making, making.name == name { return await making.task.value }
+    let task = Task { await make(name: name) }
+    making = (name, task)
+    let result = await task.value
+    if making?.name == name { making = nil }
+    if let result { cached = (name, result) }
+    return result
+  }
+
+  private static func make(name: String) async -> Self? {
     let url = Invite.link(for: name).absoluteString
-    func card(inverted: Bool) -> UIImage? {
-      guard let code = RecoveryQR.contactImage(text: url, inverted: inverted) else { return nil }
+    func card(inverted: Bool) async -> (image: UIImage, code: UIImage)? {
+      guard let code = await Task.detached(priority: .utility, operation: {
+        RecoveryQR.contactImage(text: url, inverted: inverted)
+      }).value else { return nil }
       let renderer = ImageRenderer(
         content: ContactCodeCard(name: name, code: code, inverted: inverted))
       renderer.scale = 3
       renderer.isOpaque = true
-      return renderer.uiImage
+      guard let image = renderer.uiImage else { return nil }
+      return (image, code)
     }
-    var usedFallback = false
-    var candidate = card(inverted: true)
-    if candidate.flatMap({ RecoveryQR.read($0) }) != url {
-      usedFallback = true
-      candidate = card(inverted: false)
+    func reads(_ image: UIImage) async -> Bool {
+      await Task.detached(priority: .utility) { RecoveryQR.read(image) == url }.value
     }
-    guard let image = candidate, RecoveryQR.read(image) == url else { return nil }
-    guard let code = RecoveryQR.contactImage(text: url, inverted: !usedFallback) else { return nil }
-    let result = Self(image: image, code: code)
-    cached = (name, result)
-    return result
+    if let made = await card(inverted: true), await reads(made.image) { return Self(image: made.image, code: made.code) }
+    guard let made = await card(inverted: false), await reads(made.image) else { return nil }
+    return Self(image: made.image, code: made.code)
   }
 }
 
@@ -123,7 +143,7 @@ struct YourCodePage: View {
   }
 
   static func prepare(name: String) {
-    _ = ContactCodeExport.render(name: name)
+    Task { _ = await ContactCodeExport.render(name: name) }
   }
 
   var body: some View {
@@ -188,7 +208,7 @@ struct YourCodePage: View {
 
     .tint(.white)
     .task(id: name) {
-      let card = ContactCodeExport.render(name: name)
+      let card = await ContactCodeExport.render(name: name)
       image = card?.code
       loaded = true
     }

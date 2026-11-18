@@ -27,10 +27,14 @@ struct YoApp: App {
   private let notifications: NotificationDelegate
 
   init() {
-    OneTimeReset.runIfDue()  // before anything opens the state
-    Perf.mark("launch.init")
-    MediaSignWarmup.start()
-    Haptic.prepareArrival()
+    Perf.mark("launch.init state \(UIApplication.shared.applicationState.rawValue)")
+    PerfProbe.watchLaunchLag()
+    PerfProbe.profileLaunch()
+    Launch.start()
+    Perf.timed("launch.reset") { OneTimeReset.runIfDue() }  // before anything opens the state
+    // For the screen only: once Yo is in front, after its first frame (never in a launch in the background, for the
+    // Action button's Yo or a silent push). The list prepares the arrival haptic itself as it shows.
+    Launch.whenActive { MediaSignWarmup.start() }
     // Every turn is revocable, by leaving the foreground or by background time expiring.
     let application = UIApplication.shared
     let foreground = ForegroundTurns(active: application.applicationState == .active)
@@ -52,9 +56,9 @@ struct YoApp: App {
         UINotificationFeedbackGenerator().notificationOccurred(.success)
       }
     }
-    let inbox = Inbox()
-    let friends = Friends()
-    let accounts = AccountStore()
+    let inbox = Perf.timed("launch.inbox") { Inbox() }
+    let friends = Perf.timed("launch.friends") { Friends() }
+    let accounts = Perf.timed("launch.accounts") { AccountStore() }
     _inbox = State(initialValue: inbox)
     _friends = State(initialValue: friends)
     _accounts = State(initialValue: accounts)
@@ -64,7 +68,9 @@ struct YoApp: App {
     // A silent push (the hub's non-urgent deliveries): one short inbox sync in the background (AppDelegate).
     AppDelegate.silentSync = { await inbox.syncOnce(accounts: accounts, friends: friends) }
     UNUserNotificationCenter.current().delegate = notifications
-    CrashReports.shared.start()  // crashes iOS hands over (MetricKit) go to the Yo team, if on
+    // Crashes iOS hands over (MetricKit) go to the Yo team, if on: not in a launch for an intent, nor before the list.
+    Launch.later { CrashReports.shared.start() }
+    Perf.mark("launch.init.end")
   }
 
   private func updateBanner() {
@@ -124,6 +130,9 @@ struct YoApp: App {
           .transition(.opacity)
         }
       }
+      // A scene, so Yo is opening for the screen: the account's core opens now (in a launch in the background only
+      // when asked for, AccountStore.openNow).
+      .onAppear { accounts.openNow() }
       .animation(.easeInOut(duration: 0.2), value: DeleteNotice.shared.banner)
       .animation(.easeInOut(duration: 0.2), value: DeleteNotice.shared.deletion?.id)
       .onChange(of: Availability.shared.offline, initial: true) { _, _ in updateBanner() }
@@ -174,10 +183,13 @@ struct YoApp: App {
       .onContinueUserActivity(NSUserActivityTypeBrowsingWeb) { activity in
         if let url = activity.webpageURL { Invite.shared.open(url) }
       }
-      // The share extension shows the list as it is (ShareBridge).
-      .onChange(of: accounts.shareList(friends), initial: true) { _, list in
-        ShareInbox.publish(list)
+      // The share extension, the widgets, Siri and the intents see the list as it is (ShareBridge): each change at
+      // once; at the start (the file has the list already) a few seconds after the first frame, with the widgets'
+      // reload and Siri's names.
+      .onChange(of: accounts.shareList(friends)) { _, list in
+        Perf.timed("app.shareList") { ShareInbox.publish(list) }
       }
+      .task { Launch.later { ShareInbox.publish(accounts.shareList(friends)) } }
       // The core opened (after a start or a sign-in): what waits goes.
       // A crash came and the person was never asked (CrashReports): once, then Settings.
       .alert("Yo Crashed", isPresented: Binding(get: { CrashReports.shared.asking }, set: { _ in })) {
@@ -188,17 +200,21 @@ struct YoApp: App {
       }
       .onChange(of: accounts.client == nil, initial: true) { _, none in
         guard !none, let client = accounts.client else { return }
+        Perf.mark("app.client")
         outbox.received = { [inbox, friends, accounts] events, contacts, client in
           await inbox.handle(events, contacts: contacts, client: client, accounts: accounts, friends: friends)
         }
         outbox.flush(accounts: accounts)
-        CrashReports.shared.flush()
         ShareInbox.take(outbox: outbox, accounts: accounts)
         inbox.fetchMedia(client: client)
-        // The account's storage: after a restore, the friends and the app icon of the phone before.
-        Task { await accounts.takeStorage(into: friends) }
+        // Not for the list: a few seconds after the first frame (Launch.later), at low priority.
+        Launch.later {
+          CrashReports.shared.flush()
+          // The account's storage: after a restore, the friends and the app icon of the phone before.
+          await accounts.takeStorage(into: friends)
+        }
         // Receipts, retries and prekeys due (spec 4.1, 4.5): also for a phone that only receives.
-        Task { await inbox.maintain(accounts: accounts, friends: friends) }
+        Launch.later { await inbox.maintain(accounts: accounts, friends: friends) }
       }
         .environment(inbox)
         .environment(friends)
@@ -213,15 +229,19 @@ struct YoApp: App {
         // The push token to the hub, once there is both a token and an account (and again for a new account).
         .task(id: "\(Push.shared.token ?? "")/\(accounts.account?.userID.base64EncodedString() ?? "")/\(accounts.client != nil)") {
           await Push.shared.send(accounts)
-          await accounts.refreshSupport()
+          Launch.later { await accounts.refreshSupport() }
         }
         // Opening the app: the Yos waiting as notifications come in and show on their bars.
         .onChange(of: phase, initial: true) { _, phase in
           guard phase == .active else { return }
+          Perf.mark("app.active")
           Task { await inbox.collectDelivered() }
-          Task { await accounts.refreshSupport() }
-          // In front again: receipts, retries and prekeys due (spec 4.1, 4.5); on the first opening, once the core has opened (above).
-          Task { await inbox.maintain(accounts: accounts, friends: friends) }
+          // Not for the list (support's unread count; receipts, retries and prekeys due, spec 4.1, 4.5): a few
+          // seconds later; on the first opening the core has opened by then (above).
+          Launch.later {
+            await accounts.refreshSupport()
+            await inbox.maintain(accounts: accounts, friends: friends)
+          }
           // What the hub said "later" to goes now (the outbox's events go to the inbox, set when the core opened).
           outbox.flush(accounts: accounts)
           ShareInbox.take(outbox: outbox, accounts: accounts)  // what was shared meanwhile
@@ -353,8 +373,76 @@ final class NotificationDelegate: NSObject, UNUserNotificationCenterDelegate, Se
 
   @MainActor private func yoBackInApp(named sender: String) async {
     guard accounts.account != nil, let friend = friends.shownFriend(named: sender), !friend.blocked else { return }
+    accounts.openNow()
     for _ in 0..<50 where accounts.client == nil { try? await Task.sleep(for: .milliseconds(100)) }  // opening
     _ = await inbox.send(to: friend, accounts: accounts, friends: friends)
+  }
+}
+
+/// What waits for Yo to be in front: for the screen only, never in a launch in the background (an App Intent from the
+/// Action button, a control, a widget or Siri; a silent push), where the intent's own Yo should have the CPU and the
+/// shared state to itself. In a launch for the screen it runs as the app first becomes active, by its first frame.
+/// (At `App.init` UIKit says `.active` in any launch: the first `didBecomeActive` is what tells.)
+@MainActor enum Launch {
+  private static var active = false
+  private static var waiting: [@MainActor () -> Void] = []
+  private static var observer: NSObjectProtocol?
+  private static var scene = false
+  private static var waitingForScene: [@MainActor () -> Void] = []
+  private static var sceneObserver: NSObjectProtocol?
+
+  /// `work` as soon as a scene connects (a launch for the screen, well before its first frame; a launch in the
+  /// background has none): at once if one has.
+  static func whenScene(_ work: @escaping @MainActor () -> Void) {
+    if scene { return work() }
+    start()
+    waitingForScene.append(work)
+  }
+
+  /// From the app's start (`YoApp.init`), before anything waits.
+  static func start() {
+    guard observer == nil else { return }
+    sceneObserver = NotificationCenter.default.addObserver(
+      forName: UIScene.willConnectNotification, object: nil, queue: .main
+    ) { _ in
+      MainActor.assumeIsolated {
+        guard !scene else { return }
+        scene = true
+        let due = waitingForScene
+        waitingForScene = []
+        for work in due { work() }
+      }
+    }
+    observer = NotificationCenter.default.addObserver(
+      forName: UIApplication.didBecomeActiveNotification, object: nil, queue: .main
+    ) { _ in
+      MainActor.assumeIsolated {
+        guard !active else { return }
+        active = true
+        let due = waiting
+        waiting = []
+        for work in due { work() }
+      }
+    }
+  }
+
+  /// `work` once the app has been in front: at once if it has.
+  static func whenActive(_ work: @escaping @MainActor () -> Void) {
+    if active { return work() }
+    start()
+    waiting.append(work)
+  }
+
+  /// What the list needs neither to show nor to send (diagnostics, the account's storage, support, maintenance, the
+  /// widgets): `seconds` after Yo is in front, past its first frame and first taps, at low priority. Never in a
+  /// launch in the background for an intent.
+  static func later(_ seconds: Double = 3, _ work: @escaping @MainActor () async -> Void) {
+    whenActive {
+      Task(priority: .utility) { @MainActor in
+        try? await Task.sleep(for: .seconds(seconds))
+        await work()
+      }
+    }
   }
 }
 

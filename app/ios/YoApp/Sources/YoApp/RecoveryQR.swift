@@ -7,6 +7,9 @@ import SwiftUI
 import VisionKit
 
 enum RecoveryQR {
+  /// One Core Image context for every code: making one sets up Metal, tens of milliseconds each time.
+  private static let context = CIContext()
+
   /// The recovery key as a QR code: black on white, sharp at any size.
   static func image(key: String) -> UIImage? { image(text: key) }
 
@@ -16,7 +19,7 @@ enum RecoveryQR {
     filter.message = Data(text.utf8)
     filter.correctionLevel = correctionLevel
     guard let code = filter.outputImage?.transformed(by: CGAffineTransform(scaleX: 12, y: 12)),
-      let cg = CIContext().createCGImage(code, from: code.extent)
+      let cg = context.createCGImage(code, from: code.extent)
     else { return nil }
     return UIImage(cgImage: cg)
   }
@@ -33,7 +36,7 @@ enum RecoveryQR {
     colors.color0 = inverted ? CIColor.white : amethyst
     colors.color1 = inverted ? amethyst : CIColor.white
     guard let output = colors.outputImage?.transformed(by: CGAffineTransform(scaleX: 12, y: 12)),
-      let cg = CIContext().createCGImage(output, from: output.extent) else { return nil }
+      let cg = context.createCGImage(output, from: output.extent) else { return nil }
     return UIImage(cgImage: cg)
   }
 

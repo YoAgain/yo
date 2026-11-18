@@ -42,7 +42,7 @@ struct SendYoConfiguration: ControlConfigurationIntent {
 struct SendYoControl: ControlWidget {
   var body: some ControlWidgetConfiguration {
     AppIntentControlConfiguration(kind: "app.justyo.ios.controls.send", provider: Provider()) { friend in
-      ControlWidgetButton(action: friend.map(SendYoIntent.init(friend:)) ?? SendYoIntent()) {
+      ControlWidgetButton(action: friend.map(SendYoNowIntent.init(friend:)) ?? SendYoNowIntent()) {
         Label(friend.map { "Yo \($0.name)" } ?? "Send Yo", systemImage: "hand.wave.fill")
       }
     }
@@ -60,7 +60,7 @@ struct SendYoControl: ControlWidget {
 struct YoBackControl: ControlWidget {
   var body: some ControlWidgetConfiguration {
     StaticControlConfiguration(kind: "app.justyo.ios.controls.back") {
-      ControlWidgetButton(action: YoBackIntent()) {
+      ControlWidgetButton(action: YoBackNowIntent()) {
         Label("Yo Back", systemImage: "arrowshape.turn.up.left.fill")
       }
     }

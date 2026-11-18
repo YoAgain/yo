@@ -10,7 +10,8 @@ import os
 /// A cancellable turn in the shared container. Only short disk operations run under `gate`; never a network wait.
 /// Expiry takes the same gate, releases the flock and cancels the request. A late answer cannot save stale state.
 final class SharedAccess: @unchecked Sendable {
-  static var unavailable: YoError { .Network(message: "shared storage is not available now") }
+  static let unavailableMessage = "shared storage is not available now"
+  static var unavailable: YoError { .Network(message: unavailableMessage) }
   /// Installed by the app; extensions instead revoke their turns before completing their request.
   nonisolated(unsafe) static var hold: (@Sendable (@escaping @Sendable () -> Void) -> (@Sendable () -> Void)?)?
   nonisolated(unsafe) static var foreground: (@Sendable () -> Bool)?

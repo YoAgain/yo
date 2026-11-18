@@ -408,7 +408,8 @@ struct FriendList: View {
   }
 
   var body: some View {
-    reacting(
+    let _ = Perf.mark("list.body")
+    return reacting(
       asking
         // The list is always dark (white on purple); the profile follows the iPhone's own appearance.
         .sheet(isPresented: $settings, onDismiss: {
@@ -1710,13 +1711,14 @@ extension FriendList {
     content
       .onChange(of: inbox.arrived, initial: true) { arrived() }
       .onAppear {
-        publish(listModel.foreground(now: listNow, active: scenePhase == .active))
+        Perf.timed("list.appear.publish") { publish(listModel.foreground(now: listNow, active: scenePhase == .active)) }
         #if YO_DEV
         HitchMonitor.shared.start()
         HitchMonitor.shared.scene = "list"
         #endif
         PerfProbe.install()
         Haptic.prepareArrival()
+        Perf.mark("launch.appear.end")
       }
       .task {
         try? await Task.sleep(for: .milliseconds(700))
@@ -1839,9 +1841,11 @@ extension FriendList {
   }
 
   private func syncListFriends() {
-    syncSenderNames()
-    publish(listModel.friends(now: listNow, rows: listFriends))
-    syncListMedia()
+    Perf.timed("list.syncFriends") {
+      syncSenderNames()
+      publish(listModel.friends(now: listNow, rows: listFriends))
+      syncListMedia()
+    }
   }
 
   private func syncListMedia() {

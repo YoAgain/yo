@@ -21,13 +21,15 @@ enum NotifyFallback {
   static let text = "You may have received a Yo"
 
   enum Reason: Error, Equatable, Sendable {
-    case lockedBeforeFirstUnlock, noAccount, network, hubStatus(UInt16), decrypt, timeout, other
+    /// `busy`: the app held the state longer than the extension may wait (its own send, an Action button's Yo).
+    case lockedBeforeFirstUnlock, noAccount, network, busy, hubStatus(UInt16), decrypt, timeout, other
 
     var code: String {
       switch self {
       case .lockedBeforeFirstUnlock: "lockedBeforeFirstUnlock"
       case .noAccount: "noAccount"
       case .network: "network"
+      case .busy: "busy"
       case .hubStatus(let status): "hubStatus/\(status)"
       case .decrypt: "decrypt"
       case .timeout: "timeout"

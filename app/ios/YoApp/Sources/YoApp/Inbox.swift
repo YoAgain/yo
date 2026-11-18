@@ -143,8 +143,14 @@ final class Inbox {
   }
 
   init() {
-    Task { @MainActor in
-      for arrival in await ReceivedMedia.shared.waiting() { add(arrival) }
+    // The audio session and its players once Yo is in front (after its first frame); never for a launch in the
+    // background (the Action button's Yo, a silent push), where nothing sounds.
+    Launch.whenActive { [sounds] in sounds.prepare() }
+    // The photos waiting: for the list, so not in a launch in the background (until Yo comes to the front).
+    Launch.whenActive { [weak self] in
+      Task { @MainActor in
+        for arrival in await ReceivedMedia.shared.waiting() { self?.add(arrival) }
+      }
     }
   }
 
@@ -187,8 +193,8 @@ final class Inbox {
 
 
   /// The Yo sound, a few players taking turns: every Yo sounds in full, Yos close together over each other, as the
-  /// original's did (none cuts off the one before). Made at launch off the main thread (eight players and the audio
-  /// session took 60 ms of the launch there), ready long before the first Yo.
+  /// original's did (none cuts off the one before). Made off the main thread once Yo is in front (the audio session
+  /// and the players took a quarter of a second, beside the launch), ready long before the first Yo.
   @ObservationIgnored private let sounds = InboxSounds()
 
   /// When the Yo sound last played for Yos that came: at most `soundsPerSecond` in any second, so a burst sounds like
@@ -214,9 +220,20 @@ final class Inbox {
   func send(to friend: Friend, accounts: AccountStore, friends: Friends) async -> String? {
     let key = Username.skeleton(friend.name)
     let before = lastSend[key]
-    let client = accounts.client  // the account tapped in: a Yo waiting here never goes from the next one
+    let tapped = accounts.client  // the account tapped in: a Yo waiting here never goes from the next one
+    let account = accounts.account?.userID
     let this = Task { () async -> String? in
       _ = await before?.value
+      var client = tapped
+      // Tapped right after a cold start, while the core still opens: the Yo waits for it (up to 5 s), for the same
+      // account only.
+      if client == nil, let account {
+        accounts.openNow()
+        for _ in 0..<50 where accounts.client == nil && accounts.account?.userID == account {
+          try? await Task.sleep(for: .milliseconds(100))
+        }
+        if accounts.account?.userID == account { client = accounts.client }
+      }
       guard let client, client === accounts.client else { return "Not Sent" }
       return await sendNow(to: friend, client: client, accounts: accounts, friends: friends)
     }
@@ -466,7 +483,8 @@ final class Inbox {
   /// A silent push (content-available, a delivery that is not urgent) woke the app in the background: one short look
   /// at the hub, as the long wait's, without waiting there. Whether it brought something; nil when it could not ask.
   func syncOnce(accounts: AccountStore, friends: Friends) async -> Bool? {
-    // Started by the push itself: the core may still be opening.
+    // Started by the push itself: the core may still be opening (or, launched for it, not yet asked to).
+    accounts.openNow()
     for _ in 0..<100 where accounts.client == nil && accounts.account != nil { try? await Task.sleep(for: .milliseconds(100)) }
     guard let client = accounts.client, !HubTransport.unsupported else { return nil }
     do {
@@ -795,23 +813,32 @@ private final class InboxSounds: @unchecked Sendable {
   /// How many Yo sounds may play at the same time.
   static let atOnce = 3
 
-  init() {
-    queue.async { [self] in
-      Perf.timed("inbox.sound.prepare") {
-        guard let url = Bundle.main.url(forResource: "yo", withExtension: "caf") else { return }
-        try? AVAudioSession.sharedInstance().setCategory(.ambient)
-        try? AVAudioSession.sharedInstance().setActive(true)  // ready before the first Yo, not woken by it
-        players = (0..<Self.atOnce).compactMap { _ in
-          let player = try? AVAudioPlayer(contentsOf: url)
-          player?.prepareToPlay()
-          return player
-        }
+  /// Accessed exclusively on queue.
+  private var prepared = false
+
+  /// The audio session and the players, once (also by the first `play`, should it come first).
+  func prepare() {
+    queue.async { [self] in prepareNow() }
+  }
+
+  private func prepareNow() {
+    guard !prepared else { return }
+    prepared = true
+    Perf.timed("inbox.sound.prepare") {
+      guard let url = Bundle.main.url(forResource: "yo", withExtension: "caf") else { return }
+      try? AVAudioSession.sharedInstance().setCategory(.ambient)
+      try? AVAudioSession.sharedInstance().setActive(true)  // ready before the first Yo, not woken by it
+      players = (0..<Self.atOnce).compactMap { _ in
+        let player = try? AVAudioPlayer(contentsOf: url)
+        player?.prepareToPlay()
+        return player
       }
     }
   }
 
   func play() {
     queue.async { [self] in
+      prepareNow()
       Perf.timed("inbox.sound.play") {
         guard !players.isEmpty else { return }
         // Each Yo sounds at once, up to `atOnce` together; one more while they play is left out.

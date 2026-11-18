@@ -96,13 +96,15 @@ final class NotificationService: UNNotificationServiceExtension {
     case .failure(.keychain(errSecInteractionNotAllowed)): return .failure(.lockedBeforeFirstUnlock)
     case .failure(.noGroup), .failure(.noAccount): return .failure(.noAccount)
     case .failure(.restore): return .failure(.decrypt)
-    case .failure(.keychain), .failure(.busy): return .failure(.other)
+    case .failure(.busy): return .failure(.busy)
+    case .failure(.keychain): return .failure(.other)
     }
     do {
       let events = try Perf.timed("nse.sync", { try client.sync(waitS: 0) })
       return .success((client, events))
-    } catch YoError.Network {
-      return .failure(.network)
+    } catch YoError.Network(let message) {
+      // A step's turn refused (SharedAccess.unavailable): the app held the state, not the network.
+      return .failure(message == SharedAccess.unavailableMessage ? .busy : .network)
     } catch YoError.Refused(let status) {
       return .failure(.hubStatus(status))
     } catch YoError.Protocol, YoError.State {

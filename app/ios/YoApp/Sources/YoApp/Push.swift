@@ -50,6 +50,12 @@ final class Push {
 /// The one thing SwiftUI's lifecycle cannot do: receive the APNs device token.
 @MainActor
 final class AppDelegate: NSObject, UIApplicationDelegate {
+  func application(
+    _ application: UIApplication, didFinishLaunchingWithOptions options: [UIApplication.LaunchOptionsKey: Any]? = nil
+  ) -> Bool {
+    Perf.mark("launch.didFinish")
+    return true
+  }
   func application(_ application: UIApplication, didRegisterForRemoteNotificationsWithDeviceToken deviceToken: Data) {
     Push.shared.received(deviceToken)
   }

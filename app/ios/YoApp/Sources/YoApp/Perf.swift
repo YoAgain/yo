@@ -22,9 +22,30 @@ enum Perf {
 
   static let on = ProcessInfo.processInfo.environment["YO_PERF"] != nil
   private static let toStderr = ProcessInfo.processInfo.environment["YO_PERF"] == "stderr"
+  /// YO_PERF=syslog: each mark in the device's log (category "run", "YO_PERF_MARK"), for a real phone's cold start.
+  private static let toSyslog = ProcessInfo.processInfo.environment["YO_PERF"] == "syslog"
   private static let queue = DispatchQueue(label: "app.justyo.perf", qos: .utility)
   /// Written only on `queue`.
   nonisolated(unsafe) private static var file: FileHandle?
+  /// YO_PERF=syslog: every mark so far, for `dump` (the device's log drops lines in a launch's rush). Only on `queue`.
+  nonisolated(unsafe) private static var kept: [String] = []
+
+  /// YO_PERF=syslog: all marks so far again, a few per log line ("YO_PERF_DUMP").
+  static func dump() {
+    guard toSyslog else { return }
+    queue.async {
+      var chunk = ""
+      for line in kept {
+        if chunk.count + line.count > 800 {
+          logger.notice("YO_PERF_DUMP \(chunk, privacy: .public)")
+          chunk = ""
+        }
+        chunk += line
+      }
+      if !chunk.isEmpty { logger.notice("YO_PERF_DUMP \(chunk, privacy: .public)") }
+      kept.removeAll()
+    }
+  }
 
   static var url: URL { FileManager.default.temporaryDirectory.appending(path: "perf.log") }
 
@@ -57,6 +78,10 @@ enum Perf {
 
   private static func write(_ line: String) {
     if toStderr { return FileHandle.standardError.write(Data(line.utf8)) }
+    if toSyslog {
+      kept.append(line)
+      return logger.notice("YO_PERF_MARK \(line, privacy: .public)")
+    }
     if file == nil {
       // Appending: the file may be emptied between measurements.
       let fd = open(url.path, O_WRONLY | O_APPEND | O_CREAT, 0o644)

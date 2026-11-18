@@ -253,8 +253,18 @@ final class AccountStore {
         SyncedAccount.save(account, secret: secret, onlyIfMissing: true)
         UserDefaults.standard.set(try? JSONEncoder().encode(account), forKey: Self.key)
       }
-      Task { await open() }
+      // The core opens as the first scene connects (or once Yo is in front), and in a launch in the background only
+      // when something asks for it (`openNow`: a silent push's sync, a notification's Yo Back): the Action button's
+      // Yo opens the state itself (YoSend), and would wait for ours.
+      Launch.whenScene { [weak self] in self?.openNow() }
+      Launch.whenActive { [weak self] in self?.openNow() }
     }
+  }
+
+  /// The core, opening now if it has not (a launch in the background opens it only when something needs it).
+  func openNow() {
+    guard client == nil, account != nil, !opening else { return }
+    Task { await open() }
   }
 
   /// Read-only probes retry refused turns. Reopen from the same sealed file and key after repeated failures.
@@ -403,40 +413,43 @@ final class AccountStore {
     let userID = account?.userID
     let transport = Hub.transport
     let (client, secret) = try await Hub.run { () throws -> (YoClient, Data) in
-      if SharedStateFile.app {
-        // Shared with the extensions: opened under the lock, then each step takes it (SharedState.swift).
-        let file = SharedStateFile(guest: false)
-        let client = try SharedStateFile.locked { () throws -> YoClient in
-          guard let key = try StateKey.shared() else { throw Unopened.gone }
-          guard let blob = file.read() else { throw Self.unread(SharedStateFile.stateURL) }
-          return try YoClient.restore(transport: transport, store: file, stateKey: key, blob: blob)
+      try Perf.timed("launch.core.open") { () throws -> (YoClient, Data) in
+        if SharedStateFile.app {
+          // Shared with the extensions: opened under the lock, then each step takes it (SharedState.swift).
+          let file = SharedStateFile(guest: false)
+          let client = try SharedStateFile.locked { () throws -> YoClient in
+            guard let key = try StateKey.shared() else { throw Unopened.gone }
+            guard let blob = file.read() else { throw Self.unread(SharedStateFile.stateURL) }
+            return try YoClient.restore(transport: transport, store: file, stateKey: key, blob: blob)
+          }
+          Hub.pin(client)
+          client.shareState(lock: file)
+          client.acknowledgeExplicitly()  // each batch as the app has stored it (Inbox.take)
+          return (client, client.accountSecret())
+        }
+        guard let blob = StateFile.load() else { throw Self.unread(StateFile.url) }
+        let own = try StateKey.load()
+        let client: YoClient
+        do {
+          guard let own else { throw Unopened.gone }
+          client = try YoClient.restore(transport: transport, store: StateFile(), stateKey: own, blob: blob)
+        } catch let error where error is Unopened || (error as? YoError).map({ if case .State = $0 { true } else { false } }) == true {
+          // Yo Dev: sealed under the key a build before took from Yo of TestFlight (`StateKey.others`)? Taken over then.
+          guard let (key, opened) = StateKey.others().lazy.compactMap({ key in
+            (Diagnostics.attempt({ try YoClient.restore(transport: transport, store: StateFile(), stateKey: key, blob: blob) })).map { (key, $0) }
+          }).first else { throw error }
+          try StateKey.adopt(key)
+          accountLog.notice("open: the state opened with a key of another group, now this app's own")
+          client = opened
         }
         Hub.pin(client)
-        client.shareState(lock: file)
         client.acknowledgeExplicitly()  // each batch as the app has stored it (Inbox.take)
         return (client, client.accountSecret())
       }
-      guard let blob = StateFile.load() else { throw Self.unread(StateFile.url) }
-      let own = try StateKey.load()
-      let client: YoClient
-      do {
-        guard let own else { throw Unopened.gone }
-        client = try YoClient.restore(transport: transport, store: StateFile(), stateKey: own, blob: blob)
-      } catch let error where error is Unopened || (error as? YoError).map({ if case .State = $0 { true } else { false } }) == true {
-        // Yo Dev: sealed under the key a build before took from Yo of TestFlight (`StateKey.others`)? Taken over then.
-        guard let (key, opened) = StateKey.others().lazy.compactMap({ key in
-          (Diagnostics.attempt({ try YoClient.restore(transport: transport, store: StateFile(), stateKey: key, blob: blob) })).map { (key, $0) }
-        }).first else { throw error }
-        try StateKey.adopt(key)
-        accountLog.notice("open: the state opened with a key of another group, now this app's own")
-        client = opened
-      }
-      Hub.pin(client)
-      client.acknowledgeExplicitly()  // each batch as the app has stored it (Inbox.take)
-      return (client, client.accountSecret())
     }
     guard self.client == nil, account != nil, account?.userID == userID else { return }  // account changed meanwhile
     use(client, secret: secret)
+    Perf.mark("launch.client")
     // The user id as the core has it (an earlier build read it wrongly): the passkey's handle and the backup's id.
     if let id = Hub.bytes(client.userId()), account?.userID != id { account?.userID = id }
     // Into the iCloud Keychain if not there (accounts from before it, one signed out on another phone of the
@@ -444,7 +457,9 @@ final class AccountStore {
     // item of the phone that has the account now must not be overwritten by an older one.
     // One whose last change the keychain did not take is written again, whole.
     if let account {
-      SyncedAccount.save(account, secret: secret, onlyIfMissing: !SyncedAccount.needsSave(account.userID))
+      Perf.timed("launch.keychain.synced") {
+        SyncedAccount.save(account, secret: secret, onlyIfMissing: !SyncedAccount.needsSave(account.userID))
+      }
     }
     Task { await addAuthKeys() }
   }
