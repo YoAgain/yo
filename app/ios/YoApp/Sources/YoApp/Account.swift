@@ -223,6 +223,10 @@ final class AccountStore {
     didSet { UserDefaults.standard.set(friendsSeeded, forKey: "storage.seeded") }
   }
 
+  /// The account's storage read into the list since the core opened (`takeStorage`): until then a list without
+  /// friends may only not have them yet (the add row keeps Group and Invite closed).
+  private(set) var storageRead = false
+
   init() {
     let saved = UserDefaults.standard.data(forKey: Self.key)
     account = saved.flatMap { try? JSONDecoder().decode(Account.self, from: $0) }
@@ -972,8 +976,13 @@ final class AccountStore {
     await storing?.value  // this phone's own writes first
     let known = Set(friends.all.compactMap(\.user))
     guard
-      let (kept, icon, leftHanded, names) = try? await Hub.run({ () -> ([YoFriend], String?, Bool?, [String: String]) in
+      let (kept, icon, leftHanded, names) = try? await Hub.run(reportErrors: false, { () throws -> ([YoFriend], String?, Bool?, [String: String]) in
+        // `friends()` answers a turn on the shared state it did not get (another step or an extension holding it past
+        // the wait, background time refused) as an empty list: a read that throws before and after it tells that
+        // the core answered (and a refused one is no read; the next takes it).
+        _ = try client.storageSavedAt()
         let kept = client.friends()
+        _ = try client.storageSavedAt()
         // A friend kept without a name (a block alone, a name over 64 bytes) and new here: the core's name for them,
         // else the hub's.
         let contacts = client.contacts()
@@ -985,8 +994,11 @@ final class AccountStore {
         return (kept, client.appIcon(), client.leftHanded(), names)
       }), client === self.client
     else { return }
-    friends.take(kept, names: names, seed: !friendsSeeded, prune: !restored)
+    // Pruned only by a list that has friends: an empty one may still be a refused read, and taking it would empty
+    // the list of everyone known by user id (and its saved copy, until the next read put them back).
+    friends.take(kept, names: names, seed: !friendsSeeded, prune: !restored && !kept.isEmpty)
     friendsSeeded = true
+    storageRead = true
     if let leftHanded {
       UserDefaults.standard.set(leftHanded, forKey: SettingKey.leftHanded)
     }
@@ -1049,6 +1061,7 @@ final class AccountStore {
     hubDown = false
     restored = false
     storing = nil
+    storageRead = false
     friendsSeeded = false
     securing = nil
     newPasskey = nil

@@ -207,12 +207,17 @@ struct YoApp: App {
         outbox.flush(accounts: accounts)
         ShareInbox.take(outbox: outbox, accounts: accounts)
         inbox.fetchMedia(client: client)
-        // Not for the list: a few seconds after the first frame (Launch.later), at low priority.
-        Launch.later {
-          CrashReports.shared.flush()
-          // The account's storage: after a restore, the friends and the app icon of the phone before.
-          await accounts.takeStorage(into: friends)
+        // The account's storage: after a restore, the friends and the app icon of the phone before. A list with
+        // friends shows them from its saved copy and takes it a few seconds after the first frame (Launch.later); one
+        // without (a saved copy that lost them, a restore, a new account) at once, from the core's own store, and the
+        // add row waits for it (`AccountStore.storageRead`).
+        if friends.hasFriend {
+          Launch.later { await accounts.takeStorage(into: friends) }
+        } else {
+          Task { await accounts.takeStorage(into: friends) }
         }
+        // Not for the list: a few seconds after the first frame (Launch.later), at low priority.
+        Launch.later { CrashReports.shared.flush() }
         // Receipts, retries and prekeys due (spec 4.1, 4.5): also for a phone that only receives.
         Launch.later { await inbox.maintain(accounts: accounts, friends: friends) }
       }

@@ -226,6 +226,12 @@ final class Friends {
 
   /// The friends on the list: all but the blocked.
   var shown: [Friend] { all.filter { !$0.blocked } }
+  /// A friend on the list who counts as one (bots, groups, requests, blocked and gone accounts don't).
+  var hasFriend: Bool {
+    all.contains {
+      $0.group == nil && !$0.request && !$0.blocked && !$0.gone && !AddFriendHint.bots.contains($0.name.lowercased())
+    }
+  }
   var blocked: [Friend] { all.filter(\.blocked) }
   /// The people, blocked ones too: no group's bar (a group has no chat of its own to check).
   var contacts: [Friend] { all.filter { $0.group == nil } }

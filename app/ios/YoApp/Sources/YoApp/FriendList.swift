@@ -1026,11 +1026,10 @@ struct FriendList: View {
 
   /// No friend on the list yet (bots, groups and requests don't count): Group and Invite stay under the closed "+"
   /// until the first friend is added; "+" still opens the name field. Then "+" opens the whole block as before.
+  /// Only once the account's storage is read (`AccountStore.storageRead`): before, a list without friends may only
+  /// not have them yet.
   private var noFriendYet: Bool {
-    !friends.all.contains {
-      $0.group == nil && !$0.request && !$0.blocked && !$0.gone
-        && !AddFriendHint.bots.contains($0.name.lowercased())
-    }
+    !friends.hasFriend && accounts.storageRead
   }
 
   private var addRow: some View {
