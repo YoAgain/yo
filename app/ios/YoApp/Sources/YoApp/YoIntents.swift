@@ -6,26 +6,38 @@
 // (Sources/YoControls links to this file); the system runs each where it chooses.
 import AppIntents
 import Foundation
+import Security
 import WidgetKit
 import YoCore
 
-/// A friend or group on the list, as the app shows it to the extensions (ShareBridge.List): whom a Yo goes to.
+/// A friend or group on the list, as the app shows it to the extensions (ShareBridge.List): whom a Yo goes to. Shown
+/// as in the app: a group with its "#" ("#Spanien 2024").
 struct FriendEntity: AppEntity {
-  static let typeDisplayRepresentation: TypeDisplayRepresentation = "Friend"
+  static let typeDisplayRepresentation: TypeDisplayRepresentation = "Friend or Group"
   static let defaultQuery = FriendQuery()
 
   /// The target as the app sends to it: a user id, a name before the first Yo, or "group:" and the group's id.
   let id: String
   let name: String
 
-  var displayRepresentation: DisplayRepresentation { DisplayRepresentation(title: "\(name)") }
+  /// The name as the list shows it: a group's with its "#".
+  var title: String { ShareBridge.Friend.title(name, to: id) }
+
+  var displayRepresentation: DisplayRepresentation { DisplayRepresentation(title: "\(title)") }
 
   init(_ friend: ShareBridge.Friend) {
     (id, name) = (friend.to, friend.name)
   }
 }
 
-/// The friends in the list's order; Siri and Shortcuts find one by name.
+extension ShareBridge.Friend {
+  /// The name as the list shows it: a group's with its "#" (usernames can't hold one).
+  var title: String { Self.title(name, to: to) }
+
+  static func title(_ name: String, to: String) -> String { to.hasPrefix("group:") ? "#" + name : name }
+}
+
+/// The friends and groups in the list's order; Siri and Shortcuts find one by name ("#" or not for a group).
 struct FriendQuery: EntityStringQuery {
   private var all: [FriendEntity] { (ShareBridge.readList()?.friends ?? []).map(FriendEntity.init) }
 
@@ -34,7 +46,8 @@ struct FriendQuery: EntityStringQuery {
   }
 
   func entities(matching string: String) async throws -> [FriendEntity] {
-    all.filter { $0.name.localizedCaseInsensitiveContains(string) }
+    let string = string.hasPrefix("#") ? String(string.dropFirst()) : string
+    return all.filter { $0.name.localizedCaseInsensitiveContains(string) }
   }
 
   func suggestedEntities() async throws -> [FriendEntity] { all }
@@ -77,10 +90,16 @@ struct SendYoIntent: LiveActivityIntent {
   }
 
   func perform() async throws -> some IntentResult & ProvidesDialog {
-    guard let owner = ShareBridge.readList()?.owner else { throw YoIntentError.signedOut }
-    try await YoSend.send(to: friend.id, owner: owner, shown: (name: friend.name, back: false, lastYoAtMs: nil))
+    guard let list = ShareBridge.readList() else {
+      YoSend.count("signedOut")
+      throw YoIntentError.signedOut
+    }
+    // The name as the list shows it now: the control keeps the friend as it was picked ("lina", typed then).
+    let name = list.friends.first { $0.to == friend.id }?.name
+      ?? list.friends.first { $0.name.caseInsensitiveCompare(friend.name) == .orderedSame }?.name ?? friend.name
+    try await YoSend.send(to: friend.id, owner: list.owner, shown: (name: name, back: false, lastYoAtMs: nil))
     WidgetSent.note(to: friend.id)
-    return .result(dialog: "Sent Yo to \(friend.name)!")
+    return .result(dialog: "Sent Yo to \(name)!")
   }
 }
 
@@ -93,6 +112,7 @@ struct YoBackIntent: LiveActivityIntent {
 
   func perform() async throws -> some IntentResult & ProvidesDialog {
     guard let last = ShareBridge.readLastYo() else {
+      YoSend.count("noYoYet", expected: true)
       await YoSentActivity.showNobody()
       throw YoIntentError.noYoYet
     }
@@ -179,10 +199,22 @@ enum YoSend {
     if let outcome { throw outcome }
   }
 
-  /// Nil when it went (or waits in the core's outbox for the app); else why not.
+  /// Nil when it went (or waits in the core's outbox for the app); else why not. Every Yo that did not go is counted
+  /// with its reason (CountedErrors "IntentSend"), for the admin page.
   private static func sendNow(to target: String, owner: String) -> YoIntentError? {
-    guard let client = Guest.open(within: 8, timeout: 20) else { return .notNow }
-    guard Hub.bytes(client.userId())?.base64EncodedString() == owner else { return .signedOut }
+    let client: YoClient
+    switch Guest.opened(within: 8, timeout: 20) {
+    case .success(let opened): client = opened
+    case .failure(let failure):
+      // Before the first unlock since a restart the keychain does not answer (errSecInteractionNotAllowed): expected.
+      let locked: Bool = if case .keychain(let status) = failure { status == errSecInteractionNotAllowed } else { false }
+      count("open " + reason(failure), expected: locked)
+      return .notNow
+    }
+    guard Hub.bytes(client.userId())?.base64EncodedString() == owner else {
+      count("otherAccount")
+      return .signedOut
+    }
     do {
       let events =
         target.hasPrefix("group:")
@@ -190,16 +222,45 @@ enum YoSend {
       notify(events, client: client)
       return nil
     } catch YoError.NotOnYo {
+      count("notOnYo", expected: true)
       return .refused("not on Yo")
     } catch YoError.Blocked {
+      count("blocked", expected: true)
       return .refused("blocked")
     } catch YoError.GroupEmpty {
+      count("groupEmpty", expected: true)
       return .refused("the group is empty")
     } catch let error as YoError where retryLater(error: error) {
+      count("later " + described(error))
       return .notNow
     } catch {
+      count("error " + described(error))
       Diagnostics.record(error)
       return .refused("try again in Yo")
+    }
+  }
+
+  /// One Yo that did not go, and why: in which process (the app, or YoControls) and the reason.
+  static func count(_ reason: String, expected: Bool = false) {
+    let process = Bundle.main.bundleURL.pathExtension == "appex" ? "extension" : "app"
+    CountedErrors.record(domain: "IntentSend", place: "YoSend." + process, code: reason, expected: expected)
+  }
+
+  /// The error's case and message, without what could name someone: no URL (an id or a name in its path), at most
+  /// 120 characters.
+  private static func described(_ error: Error) -> String {
+    let text = String(describing: error)
+      .replacingOccurrences(of: #"[a-z]+://\S+"#, with: "<url>", options: .regularExpression)
+    return String(text.prefix(120))
+  }
+
+  private static func reason(_ failure: Guest.Failure) -> String {
+    switch failure {
+    case .noGroup: "noGroup"
+    case .keychain(let status): "keychain/\(status)"
+    case .noAccount: "noAccount"
+    case .busy: "busy"
+    case .restore(let error): "restore " + described(error)
     }
   }
 

@@ -24,7 +24,7 @@ struct YoSentAttributes: ActivityAttributes {
     var outcome: Outcome
     /// "Sent Yo! to Mia", "Yo back to Leo", "Yo to Mia didn't go out", "No one to Yo back".
     var title: String
-    /// "just now", "sent you one 2 min ago", "try again", "no Yo received yet".
+    /// Only where it says more than the title: why it was refused ("blocked"); else empty, and not shown.
     var detail: String
   }
 
@@ -47,12 +47,15 @@ enum YoSentActivity {
     let outcome: YoSentAttributes.ContentState.Outcome = failure == nil ? .sent : .failed
     let title: String
     let detail: String
+    // One line, the title, wherever a second says nothing more ("just now", "try again"): only a refusal's reason
+    // and "open Yo once to sign in" stay under it.
     switch failure {
     case nil:
-      title = back ? "Yo back to \(name)" : "Sent Yo! to \(name)"
-      detail = back ? lastYoAtMs.map(sentYouOne) ?? "just now" : "just now"
+      (title, detail) = (back ? "Yo back to \(name)" : "Sent Yo! to \(name)", "")
     case .notNow?:
-      (title, detail) = ("Yo to \(name) didn't go out", "try again")
+      (title, detail) = ("Yo to \(name) didn't go out", "")
+    case .refused(let why)?:
+      (title, detail) = ("Yo to \(name) not sent", why)
     case let failure?:
       (title, detail) = ("Yo to \(name) not sent", String(localized: failure.localizedStringResource))
     }
@@ -64,15 +67,7 @@ enum YoSentActivity {
   static func showNobody() async {
     await present(
       YoSentAttributes(name: "", color: nil, back: true),
-      .init(outcome: .nobody, title: "No one to Yo back", detail: "no Yo received yet"))
-  }
-
-  /// "sent you one 2 min ago" (no he or she: the app does not know).
-  private static func sentYouOne(atMs: UInt64) -> String {
-    let at = Date(timeIntervalSince1970: TimeInterval(atMs) / 1000)
-    let formatter = RelativeDateTimeFormatter()
-    formatter.unitsStyle = .short
-    return "sent you one \(formatter.localizedString(for: min(at, .now), relativeTo: .now))"
+      .init(outcome: .nobody, title: "No one to Yo back", detail: ""))
   }
 
   /// Starts it and opens it big at once (an update with an alert opens the island; a banner on an iPhone without
@@ -94,9 +89,11 @@ enum YoSentActivity {
     } catch {
       return failed("request " + String(describing: error))
     }
+    // Not the system's alert sound: a soft click of Yo's own (Resources/YoClick.caf, in the app's bundle).
     await activity.update(
       content,
-      alertConfiguration: AlertConfiguration(title: "\(state.title)", body: "\(state.detail)", sound: .default))
+      alertConfiguration: AlertConfiguration(
+        title: "\(state.title)", body: "\(state.detail)", sound: .named("YoClick.caf")))
     endLater(activity)
   }
 

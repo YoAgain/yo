@@ -785,7 +785,7 @@ struct FriendList: View {
         guard recordingFor == friend else { return }
         recordingChanged(nil)
         Task {
-          if let file = await camera.stopVideo()?.file { Task.detached(priority: .utility) { try? FileManager.default.removeItem(at: file) } }
+          if let file = await camera.stopVideo() { Task.detached(priority: .utility) { try? FileManager.default.removeItem(at: file) } }
         }
       },
       press: { pressed(friend.key, $0) },
@@ -1444,13 +1444,13 @@ struct FriendList: View {
       let client = accounts.client
       let at = Date.now
       run(friend, "Sent 🎥", origin: origin, placeholder: camera.previewThumbnail()) { thumbnail in
-        guard case let (recording, turn)? = await camera.stopVideo() else { return nil }
+        guard let recording = await camera.stopVideo() else { return nil }
         Perf.mark("thumb.capture.done")
         defer { Task.detached(priority: .utility) { try? FileManager.default.removeItem(at: recording) } }
         guard !Task.isCancelled else { return nil }
         return await withTaskCancellationHandler {
           if let image = await Self.outgoingVideoThumbnail(recording) { thumbnail(image) }
-          guard !Task.isCancelled, let file = await MediaFile.video(recording, landscapeTurn: turn),
+          guard !Task.isCancelled, let file = await MediaFile.video(recording),
             !Task.isCancelled else { return nil }
           return await stage(file, to: friend, from: client, at: at)
         } onCancel: {
@@ -1599,6 +1599,7 @@ struct FriendList: View {
   }
 
   /// Read the first frame before export, while the undo time is running. Export owns deletion of the recording.
+  /// Shown as the recording's own transform has it, as `MediaFile.video` stands it.
   nonisolated private static func outgoingVideoThumbnail(_ url: URL) async -> UIImage? {
     await Task.detached(priority: .userInitiated) { () async -> UIImage? in
       do {
@@ -2075,7 +2076,7 @@ extension FriendList {
       if recordingFor != nil {  // a hold the camera closed under: no video waits, the next hold records again
         recordingChanged(nil)
         Task {
-          if let file = await camera.stopVideo()?.file { Task.detached(priority: .utility) { try? FileManager.default.removeItem(at: file) } }
+          if let file = await camera.stopVideo() { Task.detached(priority: .utility) { try? FileManager.default.removeItem(at: file) } }
           flushRise()
         }
       }
@@ -3329,6 +3330,9 @@ struct HeldMedia: View {
     self.finished = finished
   }
 
+  /// Videos without sound, chosen in the viewer and kept.
+  @AppStorage("viewerMuted") private var muted = false
+
   // As stories show it: the picture fills the whole screen, into its round corners and under the Dynamic Island;
   // the lines and who it is from lie on it at the top, inside the safe area, over a soft dark shade.
   var body: some View {
@@ -3385,6 +3389,21 @@ struct HeldMedia: View {
                 .font(.subheadline.weight(.semibold))
                 .opacity(0.7)
                 .fixedSize()
+            }
+            Spacer(minLength: 0)
+            // A video's sound, on or off, kept for the next ones.
+            if current.video != nil {
+              Image(systemName: muted ? "speaker.slash.fill" : "speaker.wave.2.fill")
+                .font(.body.weight(.semibold))
+                .contentTransition(.symbolEffect(.replace))
+                .frame(width: 44, height: 32, alignment: .trailing)
+                .contentShape(.rect)
+                .highPriorityGesture(TapGesture().onEnded {
+                  muted.toggle()
+                  player?.isMuted = muted
+                })
+                .accessibilityLabel(muted ? "Sound Off" : "Sound On")
+                .accessibilityAddTraits(.isButton)
             }
           }
           .foregroundStyle(.white)
@@ -3499,6 +3518,7 @@ struct HeldMedia: View {
       return
     }
     let player = Perf.timed("media.viewer.player") { AVPlayer(url: video) }
+    player.isMuted = muted
     self.player = player
     let length = (try? await AVURLAsset(url: video).load(.duration).seconds) ?? 0
     guard !Task.isCancelled else { return }

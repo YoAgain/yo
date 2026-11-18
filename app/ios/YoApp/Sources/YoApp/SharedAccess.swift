@@ -97,12 +97,18 @@ final class SharedAccess: @unchecked Sendable {
     if let hold {
       // Refused in the background once iOS gives no more time (beginBackgroundTask: invalid): expected, no turn
       // until the app is in front again (the caller tries again then); only logged here, never reported.
-      guard let end = hold({ turn.revoke() }) else {
+      // A turn within a request's lifetime (an App Intent the system runs in the app, launched in the background for
+      // it: YoSend) needs no background time of its own: the system keeps the process up while the request runs, and
+      // the request's end revokes the turn (`Lifetime.stop`). Refused, a Yo from the Action button would be "not now"
+      // whenever iOS gave the app no background time of its own.
+      let end = hold({ turn.revoke() })
+      if let end {
+        turn.end = end
+      } else if turn.lifetime == nil {
         log("background time refused", ECANCELED, report: false)
         turn.finish()
         return nil
       }
-      turn.end = end
     }
     let deadline = ProcessInfo.processInfo.systemUptime + min(seconds, 10)
     while true {

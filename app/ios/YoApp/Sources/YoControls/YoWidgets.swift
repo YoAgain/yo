@@ -1,6 +1,7 @@
 // Yo's widgets: the friends' bars on the Home Screen as in the app, each a Yo on a tap without opening it (small: one
-// friend, picked when adding it, else the top one, on Yo's purple; medium: the top 4; large: the top 8), and on the
-// Lock Screen "Yo" to one friend and "Yo Back". The list is the one the app writes for its extensions
+// friend or group, on Yo's purple; medium: 4 bars; large: 8), and on the Lock Screen "Yo" to one friend and "Yo Back".
+// Whom they show is picked in Edit Widget (a list widget shows just those, its bars sharing its height; none picked:
+// the top of the list). Groups read as in the app ("#Spanien 2024"). The list is the one the app writes for its extensions
 // (ShareBridge.List, in its order), which reloads the widgets when it changes (ShareInbox); a sent Yo reads "Sent Yo!"
 // on its bar for a moment (WidgetSent), then the name again.
 import AppIntents
@@ -12,22 +13,28 @@ struct YoEntry: TimelineEntry {
   let date: Date
   let list: ShareBridge.List?
   let sent: WidgetSent?
-  /// The friend a one-friend widget was set to (nil: the top one).
-  var picked: FriendEntity? = nil
+  /// The friends picked in Edit Widget, slot by slot (nil: that slot shows the top of the list).
+  var picked: [FriendEntity?] = []
 
   var friends: [ShareBridge.Friend] { list?.friends ?? [] }
 
-  /// The friend a one-friend widget sends to: the one picked (by whom the Yo goes to, else by name: the target turns
-  /// from a name into a user id after the first Yo), else the top one.
-  var friend: ShareBridge.Friend? {
-    guard let picked else { return friends.first }
-    return friends.first { $0.to == picked.id } ?? friends.first { $0.name == picked.name } ?? friends.first
+  /// The friend a one-friend widget sends to.
+  var friend: ShareBridge.Friend? { shown(1).first ?? friends.first }
+
+  /// At most `count` bars: the picks in their slots' order (by whom the Yo goes to, else by name: the target turns from
+  /// a name into a user id after the first Yo), each once; none picked: the top `count` of the list.
+  func shown(_ count: Int) -> [ShareBridge.Friend] {
+    let picks = picked.prefix(count).compactMap { $0 }
+    guard !picks.isEmpty else { return Array(friends.prefix(count)) }
+    var seen = Set<String>()
+    return picks.compactMap { pick in friends.first { $0.to == pick.id } ?? friends.first { $0.name == pick.name } }
+      .filter { seen.insert($0.to).inserted }
   }
 
   func justSent(_ friend: ShareBridge.Friend) -> Bool { sent?.to == friend.to }
 
   /// Now, and if a Yo was just sent, again once its "Sent Yo!" is over.
-  static func timeline(picked: FriendEntity? = nil) -> Timeline<YoEntry> {
+  static func timeline(picked: [FriendEntity?] = []) -> Timeline<YoEntry> {
     let now = Date.now
     let list = ShareBridge.readList()
     var entries = [YoEntry(date: now, list: list, sent: WidgetSent.read(now: now), picked: picked)]
@@ -47,13 +54,13 @@ struct YoEntry: TimelineEntry {
 
 // MARK: - One friend (Home Screen small, Lock Screen)
 
-/// The friend a one-friend widget sends to, picked when adding it; none: the top one.
+/// The friend or group a one-friend widget sends to, picked in Edit Widget; none: the top one.
 struct YoFriendConfiguration: WidgetConfigurationIntent {
   static let title: LocalizedStringResource = "Yo a Friend"
   static let description = IntentDescription("Sends a Yo to a friend or group.")
   static let isDiscoverable = false
 
-  @Parameter(title: "Friend")
+  @Parameter(title: "Friend or Group")
   var friend: FriendEntity?
 
   init() {}
@@ -74,12 +81,12 @@ struct YoFriendWidget: Widget {
     func placeholder(in context: Context) -> YoEntry { .preview }
 
     func snapshot(for configuration: YoFriendConfiguration, in context: Context) async -> YoEntry {
-      let entry = YoEntry.timeline(picked: configuration.friend).entries[0]
+      let entry = YoEntry.timeline(picked: [configuration.friend]).entries[0]
       return entry.list == nil && context.isPreview ? .preview : entry
     }
 
     func timeline(for configuration: YoFriendConfiguration, in context: Context) async -> Timeline<YoEntry> {
-      YoEntry.timeline(picked: configuration.friend)
+      YoEntry.timeline(picked: [configuration.friend])
     }
   }
 }
@@ -94,7 +101,7 @@ struct YoFriendView: View {
     } else if let friend = entry.friend {
       // Always Yo's own purple, whatever the friend's bar colour in the list: the widget is Yo's, the name on it.
       Button(intent: SendYoIntent(friend: FriendEntity(friend))) {
-        BarLabel(text: entry.justSent(friend) ? "Sent Yo!" : friend.name, size: 28)
+        BarLabel(text: entry.justSent(friend) ? "Sent Yo!" : friend.title, size: 28)
       }
       .buttonStyle(.plain)
       .containerBackground(.amethyst, for: .widget)
@@ -107,7 +114,7 @@ struct YoFriendView: View {
   @ViewBuilder private var circle: some View {
     if let friend = entry.friend {
       Button(intent: SendYoIntent(friend: FriendEntity(friend))) {
-        CircleLines(top: entry.justSent(friend) ? "Sent" : "Yo", bottom: entry.justSent(friend) ? "Yo!" : friend.name)
+        CircleLines(top: entry.justSent(friend) ? "Sent" : "Yo", bottom: entry.justSent(friend) ? "Yo!" : friend.title)
       }
       .buttonStyle(.plain)
       .containerBackground(for: .widget) { AccessoryWidgetBackground() }
@@ -120,25 +127,48 @@ struct YoFriendView: View {
 
 // MARK: - The list (Home Screen medium and large)
 
+/// The bars of a list widget, picked in Edit Widget in their order: medium shows the first 4, large all 8, just those
+/// picked; none picked: the top of the list. One set for both sizes (the metadata knows no per-size parameters).
+struct YoListConfiguration: WidgetConfigurationIntent {
+  static let title: LocalizedStringResource = "Yo"
+  static let description = IntentDescription("Your friends and groups, in your order. None: the top of your list.")
+  static let isDiscoverable = false
+
+  @Parameter(title: "Friend 1") var friend1: FriendEntity?
+  @Parameter(title: "Friend 2") var friend2: FriendEntity?
+  @Parameter(title: "Friend 3") var friend3: FriendEntity?
+  @Parameter(title: "Friend 4") var friend4: FriendEntity?
+  @Parameter(title: "Friend 5 (large)") var friend5: FriendEntity?
+  @Parameter(title: "Friend 6 (large)") var friend6: FriendEntity?
+  @Parameter(title: "Friend 7 (large)") var friend7: FriendEntity?
+  @Parameter(title: "Friend 8 (large)") var friend8: FriendEntity?
+
+  var picked: [FriendEntity?] { [friend1, friend2, friend3, friend4, friend5, friend6, friend7, friend8] }
+
+  init() {}
+}
+
 struct YoListWidget: Widget {
   var body: some WidgetConfiguration {
-    StaticConfiguration(kind: "app.justyo.ios.widget.list", provider: Provider()) { YoListView(entry: $0) }
-      .configurationDisplayName("Yo")
-      .description("Your top friends, as in Yo. A tap on a bar sends a Yo.")
-      .supportedFamilies([.systemMedium, .systemLarge])
-      .contentMarginsDisabled()
+    AppIntentConfiguration(kind: "app.justyo.ios.widget.list", intent: YoListConfiguration.self, provider: Provider()) {
+      YoListView(entry: $0)
+    }
+    .configurationDisplayName("Yo")
+    .description("Your friends and groups, as in Yo, in the order you pick. A tap on a bar sends a Yo.")
+    .supportedFamilies([.systemMedium, .systemLarge])
+    .contentMarginsDisabled()
   }
 
-  struct Provider: TimelineProvider {
+  struct Provider: AppIntentTimelineProvider {
     func placeholder(in context: Context) -> YoEntry { .preview }
 
-    func getSnapshot(in context: Context, completion: @escaping (YoEntry) -> Void) {
-      let entry = YoEntry.timeline().entries[0]
-      completion(entry.list == nil && context.isPreview ? .preview : entry)
+    func snapshot(for configuration: YoListConfiguration, in context: Context) async -> YoEntry {
+      let entry = YoEntry.timeline(picked: configuration.picked).entries[0]
+      return entry.list == nil && context.isPreview ? .preview : entry
     }
 
-    func getTimeline(in context: Context, completion: @escaping (Timeline<YoEntry>) -> Void) {
-      completion(YoEntry.timeline())
+    func timeline(for configuration: YoListConfiguration, in context: Context) async -> Timeline<YoEntry> {
+      YoEntry.timeline(picked: configuration.picked)
     }
   }
 }
@@ -148,17 +178,22 @@ struct YoListView: View {
   @Environment(\.widgetFamily) private var family
 
   var body: some View {
-    let friends = Array(entry.friends.prefix(family == .systemLarge ? 8 : 4))
+    let friends = entry.shown(family == .systemLarge ? 8 : 4)
     if friends.isEmpty {
       SignedOut()
     } else {
-      VStack(spacing: 0) {
-        ForEach(friends, id: \.to) { friend in
-          Button(intent: SendYoIntent(friend: FriendEntity(friend))) {
-            BarLabel(text: entry.justSent(friend) ? "Sent Yo!" : friend.name, size: 22)
-              .background(Color.row(friend.color))
+      // The bars share the widget's height evenly (2 picked: 2 half-height bars), the name growing with its bar up to
+      // the app's own size.
+      GeometryReader { space in
+        let size = min(Metrics.rowFont, space.size.height / CGFloat(friends.count) * 0.42)
+        VStack(spacing: 0) {
+          ForEach(friends, id: \.to) { friend in
+            Button(intent: SendYoIntent(friend: FriendEntity(friend))) {
+              BarLabel(text: entry.justSent(friend) ? "Sent Yo!" : friend.title, size: size)
+                .background(Color.row(friend.color))
+            }
+            .buttonStyle(.plain)
           }
-          .buttonStyle(.plain)
         }
       }
       .containerBackground(Color.row(friends[friends.count - 1].color), for: .widget)
