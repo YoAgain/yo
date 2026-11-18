@@ -1,5 +1,8 @@
 #!/usr/bin/env python3
-"""Write the lines-of-code chart (plain text) into README.md: python3 -I dev/loc-chart.py (stdlib only).
+"""Draw the lines-of-code chart for README.md: python3 -I dev/loc-chart.py (stdlib and Chromium).
+
+Writes the numbers into dev/loc-chart.html and renders it with headless Chromium to dev/loc-chart.png, which the README
+shows: a line of lines per day without tests, and today's code by part and the client by app as shares.
 
 Follow main's first parents, diffing merges against their first parent so merged
 code counts exactly once. Disable rename detection: moves between languages must
@@ -119,12 +122,32 @@ def tables(points):
 
 
 def main():
+    import json
+    import os
+    import shutil
+    import tempfile
+    points = history()
+    code = lambda counts: sum(n for kind, n in counts.items() if kind != "Tests")
+    today = points[-1][1]
+    data = {"days": [code(c) for _, c in points], "parts": [[k, today[k]] for k in KINDS],
+            "apps": [[k, v] for k, v in app_counts().items()]}
+    page = (ROOT / "dev" / "loc-chart.html").read_text().replace("DATA", json.dumps(data))
+    browser = shutil.which("chromium") or shutil.which("google-chrome-stable") or shutil.which("google-chrome")
+    if not browser:
+        raise SystemExit("needs Chromium to render the chart")
+    with tempfile.TemporaryDirectory() as tmp:
+        html = Path(tmp) / "chart.html"
+        html.write_text(page)
+        out = ROOT / "dev" / "loc-chart.png"
+        subprocess.run([browser, "--headless=new", "--disable-gpu", "--hide-scrollbars",
+                        "--force-device-scale-factor=2", "--window-size=900,450", f"--screenshot={out}", str(html)],
+                       check=True, capture_output=True, timeout=60)
     readme = ROOT / "README.md"
     text = readme.read_text()
     start, end = "<!-- loc -->", "<!-- /loc -->"
     if start not in text or end not in text:
         raise SystemExit("README.md has no <!-- loc --> … <!-- /loc --> block")
-    block = f"{start}\n{tables(history())}\n{end}"
+    block = f"{start}\n![Lines of code: per day, by part and by app](dev/loc-chart.png)\n{end}"
     before, rest = text.split(start, 1)
     after = rest.split(end, 1)[1]
     readme.write_text(before + block + after)

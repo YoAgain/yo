@@ -133,23 +133,7 @@ See the [yo-load measurements and commands](tests/README.md#load).
 ## Development
 
 <!-- loc -->
-Lines of code on `main`, without tests, day by day:
-
-| Day 1 | Day 2 | Day 3 | Day 4 | Day 5 | Day 6 | Day 7 | Day 8 |
-|---:|---:|---:|---:|---:|---:|---:|---:|
-| 5k | 7k | 17k | 24k | 31k | 36k | 44k | 52k |
-
-Today, by part:
-
-| Hub | Core | Apps | Tests | Total |
-|---:|---:|---:|---:|---:|
-| 10k | 14k | 28k | 19k | 71k |
-
-The client today, by app (without tests):
-
-| Core | iOS | Android | YoGPT | Total |
-|---:|---:|---:|---:|---:|
-| 14k | 22k | 5k | 2k | 42k |
+![Lines of code: per day, by part and by app](dev/loc-chart.png)
 <!-- /loc -->
 
 
