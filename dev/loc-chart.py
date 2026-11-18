@@ -80,7 +80,7 @@ def chart(points):
     totals = [code(counts) for _, counts in points]
     first = points[0][0]
     days = [f"Day {(day - first).days + 1}" for day, _ in points]
-    height, peak = 10, max(totals) or 1
+    height, peak = 4, max(totals) or 1
     column = max(7, (LINE - 5) // len(points))
     eighths = [round(t / peak * height * 8) for t in totals]
     lines = []
@@ -125,7 +125,7 @@ def shares(counts, names):
     legend = ""
     for label, start in zip(labels, starts):
         legend += " " * (start - len(legend)) + label
-    return f"{round(total / 1000):>2}k  {bar}\n\n     {legend}"
+    return f"{round(total / 1000):>2}k  {bar}\n     {legend}"
 
 
 # Width of every chart line: the width of a README code block on GitHub.
@@ -160,9 +160,9 @@ def main():
     if start not in text or end not in text:
         raise SystemExit("README.md has no <!-- loc --> … <!-- /loc --> block")
     points = history()
-    block = (f"{start}\n```text\nLines of code per day, without tests\n\n{chart(points)}\n\n\n"
-             f"The code today, by part\n\n{shares(points[-1][1], KINDS)}\n\n\n"
-             f"The client today, by app\n\n{by_app()}\n```\n{end}")
+    block = (f"{start}\n```text\nLines of code per day, without tests\n{chart(points)}\n\n"
+             f"The code today, by part\n{shares(points[-1][1], KINDS)}\n\n"
+             f"The client today, by app\n{by_app()}\n```\n{end}")
     before, rest = text.split(start, 1)
     after = rest.split(end, 1)[1]
     readme.write_text(before + block + after)
