@@ -128,6 +128,10 @@ pub fn skeleton(name: &str) -> String {
 }
 
 fn allowed(g: &str) -> bool {
+    // Never '#' or '@' in any form (the keycap emoji "#️⃣" too): a group is shown as "#name", a bot may be "@name".
+    if g.contains('#') || g.contains('@') {
+        return false;
+    }
     is_latin_letter(g) || g == "_" || (g.len() == 1 && g.as_bytes()[0].is_ascii_digit()) || is_emoji(g)
 }
 
@@ -255,7 +259,6 @@ mod tests {
             "👨‍👩‍👧ab",
             "🇩🇪ab",
             "1️⃣ab",
-            "#️⃣ab",
             "🏴\u{E0067}\u{E0062}\u{E0073}\u{E0063}\u{E0074}\u{E007F}ab",
             "👁️‍🗨️ab",
             "⌚ab",
@@ -265,6 +268,8 @@ mod tests {
             assert_eq!(canonical(good), good, "{good:?}");
         }
         for bad in [
+            "#️⃣ab",
+            "a@b",
             "1\u{301}ab",
             "#\u{301}ab",
             "1\u{FE0F}ab",
