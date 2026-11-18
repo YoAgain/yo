@@ -136,15 +136,22 @@ See the [yo-load measurements and commands](tests/README.md#load).
 #### Lines of code per day (without tests)
 
 ```text
-                                     Hub   Core   Apps  Total
-Day 1   ██▏                           2k     3k     0k     5k
-Day 2   ███▎                          2k     3k     2k     7k
-Day 3   ███████▊                      4k     5k     8k    17k
-Day 4   ██████████▉                   5k     7k    11k    24k
-Day 5   ██████████████▎               6k    11k    14k    31k
-Day 6   ████████████████▋             9k    11k    16k    36k
-Day 7   ████████████████████▍        10k    13k    21k    44k
-Day 8   ████████████████████████     10k    14k    28k    52k
+Day 1     5k  ████▎
+Day 2     7k  ██████▋
+Day 3    17k  ███████████████▍
+Day 4    24k  █████████████████████▊
+Day 5    31k  ████████████████████████████▋
+Day 6    36k  █████████████████████████████████▎
+Day 7    44k  ████████████████████████████████████████▋
+Day 8    52k  ████████████████████████████████████████████████
+```
+
+#### The code today, by part
+
+```text
+71k  ███████ ███████████ █████████████████████ ██████████████
+
+     Hub 10k 13%  Core 14k 19%  Apps 28k 39%   Tests 19k 26%
 ```
 
 #### The client today, by app

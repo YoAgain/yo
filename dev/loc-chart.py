@@ -75,26 +75,38 @@ def history():
 
 
 def chart(points):
-    """One line per day: a bar, the parts, the total last (whole thousands); tests left out."""
-    shown = ("Hub", "Core", "Apps")
-    peak = max(sum(counts[kind] for kind in shown) for _, counts in points)
+    """One line per day: the total lines without tests, as a bar and in whole thousands."""
+    code = lambda counts: sum(n for kind, n in counts.items() if kind != "Tests")
+    peak = max(code(counts) for _, counts in points)
     lines = []
     first = points[0][0]
     for day, counts in points:
-        total = sum(counts[kind] for kind in shown)
-        eighths = round(total / peak * 24 * 8)
+        total = code(counts)
+        eighths = round(total / peak * (LINE - 13) * 8)
         bar = "█" * (eighths // 8) + " ▏▎▍▌▋▊▉"[eighths % 8].strip()
-        # A fixed column per part, so the numbers line up day by day.
-        parts = "".join(f"{round(counts[kind] / 1000):>{WIDTH - 1}}k" for kind in shown)
         label = f"Day {(day - first).days + 1}"
-        lines.append(f"{label:<7} {bar:<25}{parts}{round(total / 1000):>{WIDTH - 1}}k")
-    # The parts named once, over their columns.
-    head = " " * 33 + "".join(f"{kind:>{WIDTH}}" for kind in (*shown, "Total"))
-    return "\n".join([head, *lines])
+        lines.append(f"{label:<7} {round(total / 1000):>3}k  {bar}")
+    return "\n".join(lines)
+
+
+def shares(counts, names):
+    """One bar of the whole, as wide as the daily chart, each part apart by a space; under each part its name,
+    size and share (moved right only where the one before needs the room)."""
+    total = sum(counts[name] for name in names) or 1
+    width = LINE - 5 - (len(names) - 1)
+    cells = [max(1, round(counts[name] / total * width)) for name in names]
+    cells[cells.index(max(cells))] += width - sum(cells)
+    bar = " ".join("█" * n for n in cells)
+    legend, at = "", 0
+    for name, n in zip(names, cells):
+        label = f"{name} {round(counts[name] / 1000)}k {counts[name] * 100 // total}%"
+        legend += " " * max(at - len(legend), 2 if legend else 0) + label
+        at += n + 1
+    return f"{round(total / 1000):>2}k  {bar}\n\n     {legend}"
 
 
 # Width of a line of the daily chart, which the client bar spans too.
-LINE = 33 + 4 * 7
+LINE = 61
 # Width of a part's column in the first chart.
 WIDTH = 7
 # The second chart: today's code by app, tests not counted.
@@ -115,19 +127,7 @@ def by_app():
             blob = git("show", f"main:{path}")
             if b"\0" not in blob[:8000]:
                 counts[app] += blob.count(b"\n")
-    # One bar for the whole client, as wide as the chart above, the apps' parts apart by a space; each app's name
-    # under the start of its part (moved right only where the one before needs the room).
-    total = sum(counts.values()) or 1
-    width = LINE - 5 - (len(APPS) - 1)
-    cells = [max(1, round(counts[name] / total * width)) for name, _ in APPS]
-    cells[cells.index(max(cells))] += width - sum(cells)
-    bar = " ".join("█" * n for n in cells)
-    legend, at = "", 0
-    for (name, _), n in zip(APPS, cells):
-        label = f"{name} {round(counts[name] / 1000)}k {counts[name] * 100 // total}%"
-        legend += " " * max(at - len(legend), 2 if legend else 0) + label
-        at += n + 1
-    return f"{round(total / 1000):>2}k  {bar}\n\n     {legend}"
+    return shares(counts, [name for name, _ in APPS])
 
 
 def main():
@@ -136,7 +136,9 @@ def main():
     start, end = "<!-- loc -->", "<!-- /loc -->"
     if start not in text or end not in text:
         raise SystemExit("README.md has no <!-- loc --> … <!-- /loc --> block")
-    block = (f"{start}\n#### Lines of code per day (without tests)\n\n```text\n{chart(history())}\n```\n\n"
+    points = history()
+    block = (f"{start}\n#### Lines of code per day (without tests)\n\n```text\n{chart(points)}\n```\n\n"
+             f"#### The code today, by part\n\n```text\n{shares(points[-1][1], KINDS)}\n```\n\n"
              f"#### The client today, by app\n\n```text\n{by_app()}\n```\n{end}")
     before, rest = text.split(start, 1)
     after = rest.split(end, 1)[1]
