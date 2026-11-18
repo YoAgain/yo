@@ -1,0 +1,8 @@
+# JNA resolves the generated FFI methods and callback structures by their original names.
+-keep class uniffi.yo.** { *; }
+-keep class com.sun.jna.** { *; }
+# JNA also ships desktop-only AWT helpers; Android/UniFFI never calls these APIs.
+-dontwarn java.awt.Component
+-dontwarn java.awt.GraphicsEnvironment
+-dontwarn java.awt.HeadlessException
+-dontwarn java.awt.Window

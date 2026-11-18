@@ -1,0 +1,4 @@
+# Manually maintained startup entry points. Device-generated profiles should extend these.
+HSPLapp/justyo/android/MainActivity;->onCreate(Landroid/os/Bundle;)V
+HSPLapp/justyo/android/YoViewModel;-><init>(Landroid/app/Application;)V
+HSPLapp/justyo/android/Repository;->start()Lkotlinx/coroutines/Job;

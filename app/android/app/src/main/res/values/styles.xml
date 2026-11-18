@@ -1,0 +1,4 @@
+<resources><style name="Theme.Yo" parent="android:style/Theme.Material.Light.NoActionBar">
+<item name="android:fontFamily">sans</item><item name="android:windowLightStatusBar">false</item>
+<item name="android:windowActionModeOverlay">true</item><item name="android:windowBackground">#9B59B6</item>
+</style></resources>

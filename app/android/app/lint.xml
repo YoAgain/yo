@@ -1,0 +1,6 @@
+<lint>
+    <!-- Toolchain and libraries are deliberately pinned for reproducible builds; review upgrades separately. -->
+    <issue id="GradleDependency" severity="ignore" />
+    <issue id="NewerVersionAvailable" severity="ignore" />
+    <issue id="AndroidGradlePluginVersion" severity="ignore" />
+</lint>

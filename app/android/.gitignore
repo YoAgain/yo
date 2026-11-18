@@ -1,0 +1,12 @@
+.gradle/
+.kotlin/
+**/build/
+local.properties
+*.jks
+*.keystore
+screenshots/*.xml
+hs_err_pid*.log
+replay_pid*.log
+core.*
+
+!dev/core.sh

@@ -1,0 +1,4 @@
+[defaults.bindings.kotlin]
+android = true
+# JNA's cleaner works on API 28 and on the JVM used by unit tests.
+disable_java_cleaner = true
