@@ -134,14 +134,16 @@ See the [yo-load measurements and commands](tests/README.md#load).
 
 <!-- loc -->
 ```text
-Day 1     6k  ██▏                       Rust 5k · Tests 2k
-Day 2     9k  ███▏                      Rust 5k · Swift 2k · Tests 2k
-Day 3    21k  ███████                   Rust 9k · Swift 7k · Tests 4k
-Day 4    33k  ███████████▏              Rust 13k · Swift 10k · Other 1k · Tests 9k
-Day 5    47k  ███████████████▉          Rust 18k · Swift 12k · Other 1k · Tests 16k
-Day 6    53k  █████████████████▉        Rust 19k · Swift 14k · Other 3k · Tests 17k
-Day 7    62k  █████████████████████▏    Rust 22k · Swift 19k · Other 4k · Tests 18k
-Day 8    71k  ████████████████████████  Rust 23k · Swift 21k · Kotlin 5k · Other 4k · Tests 19k
+Day 1     6k  ██▏                       R  5k                       T  2k
+Day 2     9k  ███▏                      R  5k  S  2k                T  2k
+Day 3    21k  ███████                   R  9k  S  7k                T  4k
+Day 4    33k  ███████████▏              R 13k  S 10k         O  1k  T  9k
+Day 5    47k  ███████████████▉          R 18k  S 12k         O  1k  T 16k
+Day 6    53k  █████████████████▉        R 19k  S 14k         O  3k  T 17k
+Day 7    62k  █████████████████████▏    R 22k  S 19k         O  4k  T 18k
+Day 8    71k  ████████████████████████  R 23k  S 21k  K  5k  O  4k  T 19k
+
+R Rust · S Swift · K Kotlin · O Other · T Tests
 ```
 <!-- /loc -->
 

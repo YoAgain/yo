@@ -18,6 +18,8 @@ ROOT = Path(__file__).resolve().parents[1]
 LANGUAGES = ("Rust", "Swift", "Kotlin", "Other")
 # Test code of any language, counted on its own and shown last.
 KINDS = LANGUAGES + ("Tests",)
+# One letter each in the chart; the legend under it says which.
+SHORT = {"Rust": "R", "Swift": "S", "Kotlin": "K", "Other": "O", "Tests": "T"}
 COLORS = ("#bc7540", "#ad62be", "#468bc2", "#589663")
 EXTENSIONS = {".rs": "Rust", ".swift": "Swift", ".kt": "Kotlin", ".kts": "Kotlin"}
 OTHER = {".py", ".sh", ".bash", ".c", ".h", ".cpp", ".hpp", ".m", ".mm",
@@ -77,10 +79,13 @@ def chart(points):
         total = sum(counts.values())
         eighths = round(total / peak * 24 * 8)
         bar = "█" * (eighths // 8) + " ▏▎▍▌▋▊▉"[eighths % 8].strip()
-        parts = " · ".join(f"{kind} {round(counts[kind] / 1000)}k" for kind in KINDS if counts[kind] >= 500)
+        # A fixed column per kind (blank while it has none), so the numbers line up day by day.
+        parts = "  ".join(f"{SHORT[kind]} {round(counts[kind] / 1000):>2}k" if counts[kind] >= 500 else " " * 5
+                          for kind in KINDS).rstrip()
         label = f"Day {(day - first).days + 1}"
         lines.append(f"{label:<7} {round(total / 1000):>3}k  {bar:<25} {parts}")
-    return "\n".join(lines)
+    legend = " · ".join(f"{SHORT[kind]} {kind}" for kind in KINDS)
+    return "\n".join(lines + ["", legend])
 
 
 def main():
