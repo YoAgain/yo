@@ -360,3 +360,27 @@ fn a_probe_to_an_added_ping_does_not_change_account_storage() {
     assert_eq!(storage(&alice), before);
     assert_eq!(alice.friends().len(), 1);
 }
+
+/// PING in a group is a member like any: its group Yos reach a member who never added it, with no 1:1 chat made.
+#[test]
+fn ping_in_a_group_reaches_members_who_never_added_it() {
+    let hub = TestHub::start();
+    let mut alice = register(Http::new(hub.url()), "ALICE", None);
+    let mut ping = register(Http::new(hub.url()), "PING", None);
+    let mut cleo = register(Http::new(hub.url()), "CLEO", None);
+    let (id, _) = alice.create_group("ECHO", &[ping.user_id().to_owned(), cleo.user_id().to_owned()]).unwrap();
+    for x in [&mut ping, &mut cleo] {
+        for _ in 0..3 {
+            x.sync(0).unwrap();
+        }
+    }
+    ping.send_group(&id, Content::Yo).unwrap();
+    let events: Vec<Event> = (0..3).flat_map(|_| cleo.sync(0).unwrap()).collect();
+    let from_ping = |e: &Event| matches!(e, Event::GroupMessage { group, user, content: Content::Yo, .. } if *group == id && user == ping.user_id());
+    assert_eq!(events.iter().filter(|e| from_ping(e)).count(), 1, "{events:?}");
+    assert!(!events.iter().any(|e| matches!(e, Event::NewChat { .. } | Event::Message { .. })));
+    assert!(cleo.contacts().iter().all(|c| c.handles.iter().all(|h| h != "PING")));
+    // Cleo knows it by its name: still the probe service to her, not a chat.
+    let (state, _) = state::open(&cleo.export(&[42; 32]), &[42; 32]).unwrap();
+    assert!(state.contacts.get(ping.user_id()).is_some_and(|c| c.probe_service && !c.chat));
+}

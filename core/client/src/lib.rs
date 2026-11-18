@@ -3143,7 +3143,10 @@ impl Client {
             }
             return Ok(());
         }
-        if self.probe_service(user) {
+        // In a group, PING is a member like any other: what it sends there, and its changes, are the group's (checked
+        // there against the members). Only one to one it stays routing state until added.
+        let in_group = message.group.is_some() || matches!(message.content, Content::Group(_));
+        if self.probe_service(user) && !in_group {
             // Access keys are protocol routing state. Keep them locally so repeated
             // probes are not stranger requests; store_key excludes them from sync.
             if let Some((key, generation)) = Message::profile_key_of(plaintext) {

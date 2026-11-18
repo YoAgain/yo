@@ -3,11 +3,15 @@
 The ordinary YoGPT account keeps its existing replies. Add `--echo ACCOUNT_LABEL` for a dedicated
 account, for example `--account PING=http://127.0.0.1:8080,/var/lib/yo-ping-live,PING --echo PING`.
 Flags can precede account declarations; unknown echo labels fail startup. Never reuse YoGPT's state directory.
-Each echo account answers a direct plain Yo with exactly one plain Yo, immediately after processing it:
-no think delay, rhythm, pictures, mailbox, group answers, or sender identifiers in logs. Only aggregate
-answer/drop counts are logged. Media is dropped unanswered without fetching or decoding it. Hostile content
-never becomes instructions. The bounded, volatile per-sender token buckets allow 1/s, burst 3; idle buckets
-expire after three seconds. The normal encrypted protocol sessions and delivery/replay state still persist.
+Each echo account sends back everything it gets, as it got it, immediately (no think delay, rhythm, reply
+pictures or mailbox): a Yo as one Yo, a photo as the same photo, a video as the same video (same bytes, size and
+length; fetched, opened in memory only, sealed anew under a new key and uploaded for the receivers, its own fetch
+acknowledged). In a group it answers into the group, once per message and at most once per group per 30 s (the
+group cooldown below); it never answers `--quiet-for` users, so list the other bots there. A blob that is gone or
+larger than a blob may be gets nothing. Logs hold aggregate answer/drop counts only, never senders or content.
+Hostile content never becomes instructions. The bounded, volatile per-sender token buckets allow 1/s, burst 3;
+idle buckets expire after three seconds; at most 64 photos, videos and group Yos wait for the one echo worker,
+more are dropped and counted. The normal encrypted protocol sessions and delivery/replay state still persist.
 
 ## Bot accounts together (`--quiet-for`, group cooldown)
 
@@ -36,8 +40,9 @@ PINS="--hub-key PING=PUBLIC_HUB_KEY --hub-key PING=SPARE_PUBLIC_HUB_KEY --trust-
 ```
 
 Replace the four public-key placeholders with that hub's existing pins (the same pins in its YoGPT
-account configuration or `Hub.swift`, relabelled `PING`). No zkgroup parameters are needed: PING does
-not answer groups. These are public verification keys, never hub signing secrets. The unit allows
+account configuration or `Hub.swift`, relabelled `PING`). For groups, add that hub's zkgroup params and the
+other bots to `PINS`: `--zk-params PING=PUBLIC_ZK_PARAMS --quiet-for YOGPT` (and `--quiet-for PING` on YoGPT);
+without `--zk-params` PING answers in no group. These are public verification keys, never hub signing secrets. The unit allows
 loopback networking only; its state directories are independent (`yo-ping-dev`, `yo-ping-live`).
 Run these commands on the server after installing the binary, unit, and both environment files:
 
@@ -57,8 +62,8 @@ app's own home hub. Before PING is deployed, the app shows No answer after ten s
 
 Probes are user-triggered only. The operator can see that the account was active at that moment. No per-user
 probe history or timing is stored or logged; only aggregate echo counters are logged. Rate buckets are volatile;
-mandatory encrypted protocol/replay state is retained. Users may add PING and Yo it like any contact: each
-plain Yo receives one immediate Yo, visible normally. Until explicitly added or written to, PING remains
+mandatory encrypted protocol/replay state is retained. Users may add PING by name and Yo it like any contact: each
+Yo, photo or video comes back once, immediately, visible normally; in a group, PING is a member like any other. Until explicitly added or written to, PING remains
 protocol routing state and creates no contact, request, list event, notification, stats or Account Sync entry.
 Probes carry a random encrypted token (types 11/12); only its matching reply completes the measurement.
 Probe replies, including late replies, are always consumed silently, even when PING is a contact; probes have

@@ -6,8 +6,9 @@
 //!          [--make-group "GROUP NAME=USERNAME,USERNAME…" …]
 //!   yo-gpt --replies app/yogpt/replies --account dev=https://dev.justyo.app,state/dev,YoGPT
 //!
-//! `--echo NAME` reserves that account for immediate, single plain-Yo answers with aggregate-only logs;
-//! see README.md for PING deployment and limits. Normal accounts keep the behavior below.
+//! `--echo NAME` reserves that account for immediate echoes with aggregate-only logs: what it gets goes back once,
+//! as it came (a Yo as a Yo, a photo or video as the same one, sealed anew), to the sender or into the group; see
+//! README.md for PING deployment and limits. Normal accounts keep the behavior below.
 //!
 //! `--quiet-for USERNAME[,USERNAME…]` (given once or more, any case): Yos, photos and videos from these users are never
 //! answered, one to one or in a group (by the group message's sender), so bot accounts in one group never answer each
@@ -45,7 +46,7 @@
 //! else, never reads, logs or runs what a message says (a sender shows in the log as the start of its user id), and
 //! holds a bounded amount of work per account: every Yo answered in turn, up to `MAX_OWED` owed to one sender,
 //! `MAX_ANSWERING` senders at once, `MAX_QUEUED` events waiting; what does not fit is dropped and counted. A photo or
-//! video sent to it is never opened, decoded, stored or logged: its encrypted blob is fetched into nothing (so the hub
+//! video sent to it (other than to `--echo`, which sends it back as it came) is never opened, decoded, stored or logged: its encrypted blob is fetched into nothing (so the hub
 //! can delete it at once), one at a time, at most `MAX_DRAINING` waiting, its key forgotten with the event. Account
 //! workers log unexpected exits and panics and restart; the state on disk is only ever replaced whole, after an
 //! operation completed.
@@ -512,6 +513,10 @@ struct Bot {
     echo: bool,
     /// Blob ids of photos and videos sent to it, for the drainer.
     draining: SyncSender<[u8; 16]>,
+    /// `--echo`: what goes back (to a user or `GROUP` and an id) other than a Yo to a user, for the echo worker.
+    echoing: SyncSender<(String, Content)>,
+    /// `--echo`: answers sent, for the log (a count only).
+    echoed: AtomicU64,
     client: Mutex<Client>,
     /// The hub no longer knows the device: everything of this account stops.
     stopped: AtomicBool,
@@ -625,9 +630,6 @@ impl Bot {
     fn queue(&self, events: &SyncSender<Event>, event: Event) {
         // A group's Yo is answered into the group: it goes on as a message from the group ("group:" and its id), so
         // the group has its own turn and limits, as a sender has. Its own (from another device) and changes are not.
-        if self.echo && matches!(event, Event::GroupMessage { .. }) {
-            return;
-        }
         // Nothing from a `--quiet-for` user, one to one or in a group (its sender); a photo's blob is still drained.
         if let Event::Message { user, content, .. } | Event::GroupMessage { user, content, .. } = &event {
             if matches!(content, Content::Yo | Content::Photo(_) | Content::Video { .. }) && self.is_quiet(user) {
@@ -663,6 +665,18 @@ impl Bot {
     fn drain(&self, media: &Media) {
         if let Err(TrySendError::Full(_)) = self.draining.try_send(media.id) {
             self.dropped();
+        }
+    }
+
+    /// An echo sent, or not: counted (logged as a count only, never whom), dropped, or the account stops.
+    fn echo_sent<T>(&self, sent: Result<T, Error>) {
+        match sent {
+            Ok(_) => {
+                let answered = self.echoed.fetch_add(1, Ordering::Relaxed) + 1;
+                self.log(format!("echo answered={answered}"));
+            }
+            Err(error) if gone(&error) => self.stop(GONE),
+            Err(_) => self.dropped(),
         }
     }
 }
@@ -746,8 +760,11 @@ fn open(account: &Account) -> Option<(Client, std::fs::File)> {
                         eprintln!("yo-gpt: {}: --zk-params: {error}", account.name);
                     }
                 }
-                // It never opens a photo or video: their keys are not even kept with the events.
-                client.forget_media_keys();
+                // It never opens a photo or video: their keys are not even kept with the events. An echo account
+                // opens them only to send them back as they came (`echo_worker`), never keeping or logging them.
+                if !account.echo {
+                    client.forget_media_keys();
+                }
                 if let Err(error) = client.persist_to(Arc::new(File(path)), key) {
                     log(format!("stopped: {username}: {error}"));
                     return None;
@@ -994,12 +1011,15 @@ fn serve(account: &Account, options: Options) {
 fn serve_once(account: &Account, options: &Options) -> bool {
     let Some((client, _lock)) = open(account) else { return false };
     let (draining, to_drain) = sync_channel(MAX_DRAINING);
+    let (echoing, to_echo) = sync_channel(MAX_DRAINING);
     let hub = account.hub.clone();
     let bot = Arc::new(Bot {
         name: account.name.clone(),
         options: options.clone(),
         echo: account.echo,
         draining,
+        echoing,
+        echoed: AtomicU64::new(0),
         client: Mutex::new(client),
         stopped: AtomicBool::new(false),
         pending: Mutex::default(),
@@ -1029,7 +1049,12 @@ fn serve_once(account: &Account, options: &Options) -> bool {
             scope.spawn(move || {
                 worker(&draining_bot, "blob drainer", &restart_drain, false, || drainer(&draining_bot, &hub, &to_drain))
             });
-            if !account.echo {
+            if account.echo {
+                let (echoing_bot, restart_echo) = (bot.clone(), restart.clone());
+                scope.spawn(move || {
+                    worker(&echoing_bot, "echo worker", &restart_echo, false, || echo_worker(&echoing_bot, &to_echo))
+                });
+            } else {
                 let (mailing, to_queue, outbox, restart_mail) =
                     (bot.clone(), events.clone(), account.state.join("outbox"), restart.clone());
                 scope.spawn(move || {
@@ -1165,7 +1190,7 @@ fn receive(bot: &Bot, events: &SyncSender<Event>) {
     let mut backoff = Backoff::default();
     let mut maintained = Instant::now();
     let mut limits = EchoLimits::default();
-    let mut answered = 0u64;
+    let mut cooldown = GroupCooldown::default();
     let mut quiet_tried: Option<Instant> = None;
     while bot.running() {
         let unresolved = !bot.quiet_unresolved.lock().unwrap_or_else(PoisonError::into_inner).is_empty();
@@ -1191,36 +1216,14 @@ fn receive(bot: &Bot, events: &SyncSender<Event>) {
                     let probes = bot.client().take_probe_requests();
                     for (user, token) in probes {
                         if limits.allow(&user, Instant::now()) {
-                            match bot.client().echo_probe(&user, token) {
-                                Ok(_) => {
-                                    answered += 1;
-                                    bot.log(format!("echo answered={answered}"));
-                                }
-                                Err(error) if gone(&error) => bot.stop(GONE),
-                                Err(_) => bot.dropped(),
-                            }
+                            let sent = bot.client().echo_probe(&user, token);
+                            bot.echo_sent(sent);
                         } else {
                             bot.dropped();
                         }
                     }
                     for event in received {
-                        let Event::Message { user, content: Content::Yo, .. } = event else { continue };
-                        if bot.is_quiet(&user) {
-                            bot.quieted();
-                            continue;
-                        }
-                        if !limits.allow(&user, Instant::now()) {
-                            bot.dropped();
-                            continue;
-                        }
-                        match bot.client().echo_yo(&user) {
-                            Ok(_) => {
-                                answered += 1;
-                                bot.log(format!("echo answered={answered}"));
-                            }
-                            Err(error) if gone(&error) => bot.stop(GONE),
-                            Err(_) => bot.dropped(),
-                        }
+                        echo(bot, event, &mut limits, &mut cooldown);
                     }
                 } else {
                     received.into_iter().for_each(|event| bot.queue(events, event));
@@ -1234,6 +1237,88 @@ fn receive(bot: &Bot, events: &SyncSender<Event>) {
             Err(error) => backoff.wait(&error, &bot.name),
         }
     }
+}
+
+/// `--echo`: what came goes back as it came, once: a Yo as a Yo, a photo or video as the same photo or video, to its
+/// sender or into its group. Nothing from a `--quiet-for` user; a group once per cooldown; each sender by its token
+/// bucket. A Yo to a user goes at once; the rest waits for the echo worker (`MAX_DRAINING` at most, more dropped).
+fn echo(bot: &Bot, event: Event, limits: &mut EchoLimits, cooldown: &mut GroupCooldown) {
+    let (to, user, content) = match event {
+        Event::Message { user, content, .. } => (user.clone(), user, content),
+        Event::GroupMessage { group, user, content, .. } => (format!("{GROUP}{group}"), user, content),
+        _ => return,
+    };
+    if !matches!(content, Content::Yo | Content::Photo(_) | Content::Video { .. }) {
+        return;
+    }
+    if bot.is_quiet(&user) {
+        return bot.quieted();
+    }
+    if to.starts_with(GROUP) && !cooldown.allow(&to, Instant::now(), group_cooldown()) {
+        return bot.cooled();
+    }
+    if !limits.allow(&user, Instant::now()) {
+        return bot.dropped();
+    }
+    if content == Content::Yo && !to.starts_with(GROUP) {
+        let sent = bot.client().echo_yo(&user);
+        return bot.echo_sent(sent);
+    }
+    if let Err(TrySendError::Full(_)) = bot.echoing.try_send((to, content)) {
+        bot.dropped();
+    }
+}
+
+/// `--echo`: sends back, one at a time, what `echo` handed over: a group's Yo, and photos and videos, each fetched,
+/// opened, sealed anew under a key of its own and uploaded for its receivers. Its bytes are held in memory only while
+/// this is under way, never stored, decoded or logged.
+fn echo_worker(bot: &Bot, jobs: &std::sync::mpsc::Receiver<(String, Content)>) {
+    let transport = bot.client().transport();
+    while bot.running() {
+        let (to, content) = match jobs.recv_timeout(Duration::from_secs(1)) {
+            Ok(job) => job,
+            Err(RecvTimeoutError::Timeout) => continue,
+            Err(RecvTimeoutError::Disconnected) => return,
+        };
+        let content = match content {
+            Content::Photo(media) => reseal(bot, transport.as_ref(), &to, &media).map(|m| m.map(Content::Photo)),
+            Content::Video { media, duration_ms } => reseal(bot, transport.as_ref(), &to, &media)
+                .map(|m| m.map(|media| Content::Video { media, duration_ms })),
+            content => Ok(Some(content)),
+        };
+        match content {
+            Ok(Some(content)) => {
+                let sent = send_to(bot, &to, content);
+                bot.echo_sent(sent);
+            }
+            Ok(None) => bot.dropped(),
+            Err(error) => bot.echo_sent::<()>(Err(error)),
+        }
+    }
+}
+
+/// A photo or video sent to it, fetched and opened, then sealed anew and uploaded for `to`: what goes back. `None`
+/// when its blob is no more (fetched by all, expired, never uploaded) or larger than a blob may be.
+fn reseal(bot: &Bot, transport: &dyn Transport, to: &str, media: &Media) -> Result<Option<Media>, Error> {
+    if media.size as usize > yo_wire::limits::MAX_BLOB_LEN {
+        return Ok(None);
+    }
+    let Some(plain) = media::fetch_open(transport, media)? else { return Ok(None) };
+    // Its fetch done: the hub may let it go once its other receivers have theirs.
+    let _ = media::ack(transport, &media.id);
+    let (fresh, sealed) = media::seal(&plain, media.width, media.height)?;
+    drop(plain);
+    // Signed under the client, sent without it.
+    let upload = {
+        let mut client = bot.client();
+        let fetches = match to.strip_prefix(GROUP) {
+            Some(group) => client.group_media_fetches(group),
+            None => client.media_fetches(to),
+        };
+        client.upload(&fresh, fetches.unwrap_or(1))?
+    };
+    upload.send(&sealed)?;
+    Ok(Some(fresh))
 }
 
 /// Leaves every group YoGPT is alone in (the others left or removed one another): nobody to answer there.
@@ -1372,6 +1457,7 @@ mod tests {
             let account_key = client.account_secret();
             let access_key = client.access_key_for_tests().expect("profile key initialized");
             let (draining, _drain) = sync_channel(MAX_DRAINING);
+            let (echoing, _echo) = sync_channel(MAX_DRAINING);
             let bot = Bot {
                 name: account.name.clone(),
                 options: Options {
@@ -1384,6 +1470,8 @@ mod tests {
                 },
                 echo: false,
                 draining,
+                echoing,
+                echoed: AtomicU64::new(0),
                 client: Mutex::new(client),
                 stopped: AtomicBool::new(false),
                 pending: Mutex::default(),
