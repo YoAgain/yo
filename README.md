@@ -132,16 +132,15 @@ DB: the local database, sealed per column.
 ![Lines of code: per day, by part and by app](dev/loc-chart.png)
 <!-- /loc -->
 
-Release: `gh release create v1.0.0-RC --prerelease --generate-notes` (or GitHub → Releases → Draft a new release); the tag sets the version.
-
 - [app](app)
   - [ios](app/ios): the iPhone app ([YoApp](app/ios/YoApp)), its extensions and [build tools](app/ios/dev)
-  - [android](https://github.com/YoAgain/yo/tree/android/app/android): the Android app, on the `android` branch
+  - [android](app/android): the Android app
   - [cli](app/cli): the CLI, `yo`
 - [skills](skills): the bots (YoGPT, PING, PINGTEST) as scripts driving the CLI
 - [core](core)
   - [client](core/client): state, sessions, groups, media, recovery, outbox
   - [wire](core/wire): protocol formats
+  - [product](core/product): the apps' rules and texts (en, de)
   - [bindings](core/bindings): Swift and Kotlin through UniFFI
 - [hub](hub): the Rust server, with its [routes](hub/README.md) and [threat model](hub/SECURITY.md)
 - [admin](admin): the admin page
@@ -151,8 +150,15 @@ Release: `gh release create v1.0.0-RC --prerelease --generate-notes` (or GitHub 
 - [dev](dev): Docker builds, this chart
 - [update-deps.sh](update-deps.sh): every dependency to its newest release, tested, one commit
 
-TestFlight: every push to `main` goes to the internal testers; a GitHub release or pre-release (tag `v…`) also goes
-to the public beta.
+Workflows ([.github/workflows](.github/workflows)):
+
+- **Test**: every push and pull request: Rust tests, lint, format.
+- **Android**: pushes touching the app or the core: build and unit tests; a release builds it with the tag's version.
+- **TestFlight**: every push to `main` touching iOS or the core: an iPhone build for the internal testers.
+- **Release**: `gh release create v1.0.0-RC --prerelease --generate-notes` (or GitHub → Releases): the same build
+  goes to the public beta; the tag sets the version.
+- **Fuzz**: every push to `main` for a minute, nightly for 15.
+- **Update dependencies**: monthly: every dependency to its newest release; a pull request when all checks pass.
 
 ```sh
 dev/cargo test --workspace     # tests, with Docker
