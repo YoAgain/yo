@@ -220,52 +220,6 @@ def done_set(key: str, done: bool) -> None:
         os.replace(tmp, DONE_FILE)
 
 
-# Stars and to-do owners for the Support tab, kept by this page only (the hub knows neither):
-# {"stars": ["live:u:<HEX>", "live:t:<id>"], "todo_user": {"live:<id>": "<HEX>"}}.
-MARKS_FILE = os.environ.get("STATE_DIRECTORY", "./state") + "/support-marks.json"
-_marks_lock = threading.Lock()
-STAR_KEY = re.compile(r"(?:u:[0-9A-F]{32}|t:[1-9][0-9]{0,17})")
-
-
-def marks_read() -> dict:
-    try:
-        data = json.loads(read_bytes(MARKS_FILE))
-        return {"stars": list(data.get("stars", [])), "todo_user": dict(data.get("todo_user", {}))}
-    except (OSError, ValueError, AttributeError, TypeError):
-        return {"stars": [], "todo_user": {}}
-
-
-def marks_change(data) -> dict:
-    """{"hub", "star": key, "on": bool} or {"hub", "todo": id, "user": HEX or None}; ValueError when malformed."""
-    hub = data.get("hub")
-    if hub not in ("live", "dev"):
-        raise ValueError()
-    with _marks_lock:
-        marks = marks_read()
-        if "star" in data:
-            key, on = data["star"], data.get("on")
-            if not isinstance(key, str) or not STAR_KEY.fullmatch(key) or type(on) is not bool:
-                raise ValueError()
-            stars = set(marks["stars"])
-            (stars.add if on else stars.discard)(f"{hub}:{key}")
-            marks["stars"] = sorted(stars)
-        elif "todo" in data:
-            todo, user = data["todo"], data.get("user")
-            if type(todo) is not int or todo <= 0 or not (user is None or (isinstance(user, str) and re.fullmatch(r"[0-9A-F]{32}", user))):
-                raise ValueError()
-            if user is None:
-                marks["todo_user"].pop(f"{hub}:{todo}", None)
-            else:
-                marks["todo_user"][f"{hub}:{todo}"] = user
-        else:
-            raise ValueError()
-        tmp = MARKS_FILE + ".new"
-        with open(tmp, "w") as f:
-            json.dump(marks, f)
-        os.replace(tmp, MARKS_FILE)
-        return marks
-
-
 # The STATUS bot (skills/status): how often, written here, read by the bot every minute; the numbers of its last
 # report, written by the bot (no names). Whom it sends to is fixed on the server (STATUS_TO_USER), never set here.
 STATUS_CONFIG = os.environ.get("STATUS_CONFIG", os.environ.get("STATE_DIRECTORY", "./state") + "/status-bot.json")
@@ -340,11 +294,11 @@ def active_days(snapshot: dict, now_ms=None) -> dict:
     return out
 
 
-def support_request(hub, suffix="", body=None):
+def support_request(hub, suffix="", body=None, method=None):
     if not ADMIN_TOKEN:
         raise ValueError("YO_ADMIN_TOKEN is not configured")
     request = urllib.request.Request(HUB_URLS[hub].rstrip("/") + "/v1/admin/" + suffix,
-        data=None if body is None else body.encode("utf-8"),
+        data=None if body is None else body.encode("utf-8"), method=method,
         headers={"Yo-Admin-Token": ADMIN_TOKEN, "Content-Type": "text/plain; charset=utf-8"})
     with urllib.request.urlopen(request, timeout=5) as response:
         payload = response.read()
@@ -505,7 +459,31 @@ def hub_unit() -> dict:
     return {**unit(os.environ.get("YO_HUB_UNIT", "yo-hub.service")), "version": version}
 
 
+# The server's figures once a minute, the last hour, in memory only (gone on a restart): the Server rows' bars.
+# Each [ms, cpu %, memory %, disk %, rx B/s, tx B/s].
+HISTORY = []
+_history_lock = threading.Lock()
+
+
+def remember(out: dict, now: float) -> list:
+    def pct(part, whole):
+        return round(100 * part / whole, 1) if part is not None and whole else None
+    m, d, c, n = out.get("memory") or {}, out.get("disk") or {}, out.get("cpu") or {}, out.get("network") or {}
+    with _history_lock:
+        if not HISTORY or now * 1000 - HISTORY[-1][0] >= 60_000:
+            HISTORY.append([int(now * 1000), c.get("percent"), pct(m.get("total", 0) - m.get("available", 0) if m else None, m.get("total")),
+                            pct(d.get("used"), d.get("total")), n.get("rx_per_s"), n.get("tx_per_s")])
+            del HISTORY[:-60]
+        return list(HISTORY)
+
+
 def stats() -> dict:
+    out = stats_now()
+    out["history"] = remember(out, time.time())
+    return out
+
+
+def stats_now() -> dict:
     cpu, net = section("cpu/network", cpu_net) or (None, None)
     uname = os.uname()
     return {
@@ -590,7 +568,7 @@ class Admin(BaseHTTPRequestHandler):
                 return self.send(401, b"{}", "application/json")
             query = parse_qs(self.path.partition("?")[2])
             hub, user = query.get("hub", [""])[0], query.get("user", [""])[0]
-            if hub not in ("live", "dev") or (user and user != "team" and not re.fullmatch(r"[0-9a-fA-F]{32}", user)):
+            if hub not in ("live", "dev") or (user and not re.fullmatch(r"[0-9a-fA-F]{32}", user)):
                 return self.send(400, b"Bad request", "text/plain")
             try:
                 result = support_request(hub, "messages" + ("/" + user if user else ""))
@@ -601,10 +579,6 @@ class Admin(BaseHTTPRequestHandler):
             if not logged_in:
                 return self.send(401, b"[]", "application/json")
             return self.send(200, json.dumps(done_read()).encode(), "application/json")
-        if path == "/marks.json":
-            if not logged_in:
-                return self.send(401, b"{}", "application/json")
-            return self.send(200, json.dumps(marks_read()).encode(), "application/json")
         if path == "/yogpt.json":
             if not logged_in:
                 return self.send(401, b"[]", "application/json")
@@ -661,7 +635,7 @@ class Admin(BaseHTTPRequestHandler):
             except OSError:
                 return self.send(502, b"Hub unavailable or refused change", "text/plain")
             return self.send(200, json.dumps(result).encode(), "application/json")
-        if path in ("/support", "/todos/done", "/support/done"):
+        if path in ("/support", "/todos/done", "/todos/delete", "/support/done"):
             if not session_valid(self.headers.get("Cookie"), who):
                 return self.send(401, b"", "text/plain")
             try:
@@ -672,7 +646,12 @@ class Admin(BaseHTTPRequestHandler):
                 hub = data["hub"]
                 if hub not in ("live", "dev"):
                     raise ValueError()
-                if path in ("/todos/done", "/support/done"):
+                method = None
+                if path == "/todos/delete":
+                    if type(data["id"]) is not int:
+                        raise ValueError()
+                    suffix, body, method = "todos/" + str(data["id"]), None, "DELETE"
+                elif path in ("/todos/done", "/support/done"):
                     if type(data["id"]) is not int or type(data["done"]) is not bool:
                         raise ValueError()
                     suffix, body = ("messages/done/" if path == "/support/done" else "todos/") + str(data["id"]), "1" if data["done"] else "0"
@@ -692,7 +671,7 @@ class Admin(BaseHTTPRequestHandler):
                         body = str(data["through"])
                     else:
                         raise ValueError()
-                result = support_request(hub, suffix, body)
+                result = support_request(hub, suffix, body, method) if method else support_request(hub, suffix, body)
             except (ValueError, KeyError, TypeError):
                 return self.send(400, b"Bad request", "text/plain")
             except OSError:
@@ -715,19 +694,6 @@ class Admin(BaseHTTPRequestHandler):
             except (OSError, ValueError):
                 return self.send(502, b"Hub unavailable or not configured", "text/plain")
             return self.send(201, json.dumps(todo).encode(), "application/json")
-        if path == "/marks":
-            if not session_valid(self.headers.get("Cookie"), who):
-                return self.send(401, b"", "text/plain")
-            length = int(self.headers.get("Content-Length") or 0)
-            if not 0 < length <= 512:
-                return self.send(413, b"", "text/plain")
-            try:
-                marks = marks_change(json.loads(self.rfile.read(length)))
-            except (ValueError, KeyError, TypeError, AttributeError):
-                return self.send(400, b"Bad request", "text/plain")
-            except OSError:
-                return self.send(500, b"Could not save", "text/plain")
-            return self.send(200, json.dumps(marks).encode(), "application/json")
         if path == "/status":
             if not session_valid(self.headers.get("Cookie"), who):
                 return self.send(401, b"", "text/plain")

@@ -1,12 +1,16 @@
 # Yo admin
 
-Python standard library dashboard for server health, systemd services, a Users tab (today's figures, sign-ups and
-active users per day, every user in a table sortable by each column), hub database tables,
-User Reports, feedback and To-Dos, anonymous crash/error diagnostics with counts and done ticks, reserved-name management, YoGPT reply pictures, and a Status tab for the STATUS bot ([skills/status](../skills/status): its last report and how often it sends; the recipient is fixed on the server). The collector (`users.py`)
-reads SQLite databases read-only and atomically writes a JSON snapshot. The Overview's Yos, Media and Groups tiles
-read the hub's `events` table (counts per kind and minute, no identifiers); Secured shows, per sign-up day, the share
-of accounts with a backup now. Usernames on the Overview are blurred until their row is hovered or focused. To-Dos go through the hub API;
-message completion lives in the hub; user-report done markers are stored locally. `migrate_todos.py` is the one-time legacy JSON migration.
+Python standard library dashboard, one page: Usage (sign-ups, Yos, media, groups) and Attention (feedback, errors,
+reports) over one range next to the logo (7, 30 or 365 days: totals with a trend against the range before, bars per
+day or month; green where more is good, orange where more is bad), Users (secured, active, platforms), Server (CPU,
+memory, disk, network with the last hour's bars, kept in memory by admin.py; updates), Services (queue, the units, the
+STATUS bot with its frequency, [skills/status](../skills/status)) and an always-open Database widget. Its tables carry the tools: users is the sortable users table, support_messages opens as the support chat
+(List | Chat), diagnostics show open groups first with Done/Reopen, reserved has its switch and reasons; a footer eye
+blurs names and ids for screenshots. The collector (`users.py`) reads SQLite databases read-only and atomically writes
+a JSON snapshot. Yos, Media and Groups read the hub's `events` table (counts per kind and minute, no identifiers). Bots
+(an account whose every device names a `yogpt/` or `cli/` app) are left out of Sign-ups; the hub counts a bot's
+inbox apart (`yo-in-bot`) since that change, so Yos exclude them from then on. To-Dos go through the hub API; message completion lives in the hub; user-report done markers are stored locally.
+`migrate_todos.py` is the one-time legacy JSON migration.
 
 Protection requires Cloudflare Access in front. The server verifies its JWT signature, issuer, audience
 and expiry, then requires its own scrypt login. Sessions last 12 hours, are signed and bound to the
@@ -167,15 +171,17 @@ Tests: `python3 -m unittest discover -s admin -p 'test_versions.py'`.
 Back up the hub DB and admin state before rollout. If old dashboard JSON done flags still need
 importing, run `migrate_support_done.py` offline against schema 5 **before** upgrading to schema 6.
 Deploy the hub first, then admin and its collector. No app update is required.
-Startup follows schema 3 → 4 → 5 → 6 (or 4/5 → 6), atomically migrating each step.
+Startup follows schema 3 → 4 → 5 → 6 → 7 (or 4/5/6 → 7), atomically migrating each step.
 Schema 6 moves `todos` into `support_messages` with `user_id=X''`, `from_team=1`,
 preserving text, creation and done times, and allocating fresh message IDs to avoid collisions.
 It drops `todos` and backfills user-message `done_at` from existing team read markers once.
-The team's to-dos use `team` in admin URLs. In the Support tab all of them are one row, "To-dos · N" (open ones),
-which opens the checklist; a to-do written in a user's conversation also shows at the top of that user's chat. The
-list shows by default only users who have written to the team ("Chats"), starred first, then newest; "Open", "★" and
-"All" (every user) switch it. Stars and which user a to-do is about are kept by the admin only, in
-`STATE_DIRECTORY/support-marks.json` (`/marks.json`, `POST /marks`). The list's logic is `supportList` in `app.js`,
-tested in node by `test_support.py` (skipped without node). The Crashes tab shows a quiet count of open, non-expected entries. Every bubble can be completed or reopened;
+Schema 7 moves that team thread back into a `todos` table of its own (text and times kept, ids new).
+From the hub's schema 7 the team's to-dos are a table of their own, `todos`, shown raw in the Database widget (Support
+group) with a field to add one, a tick per row and a delete. The support chat (support_messages, Chat view; Feedback
+in Attention, key 2 or `#feedback` opens it) lists the people who wrote, "Open" (something of theirs not handled,
+the default) or "Answered", newest first; the right side is the conversation under one line of facts. Each of their
+messages is ticked handled by hand; a reply ticks the ones it answers. The list's logic is `supportList` in `app.js`,
+tested in node by `test_support.py` (skipped without node). Errors in Attention open the diagnostics table, open
+groups first, newest first, with Done/Reopen per row; Reports open the reports table; Sign-ups the users table. Every bubble can be completed or reopened;
 viewing a thread changes no completion state. Badges and the Overview red curve count open user
 messages only. App unread team replies still use `read_at`. Old JSON flags still serve user reports.

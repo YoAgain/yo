@@ -10,227 +10,83 @@
 <link rel="stylesheet" href="/app.css">
 </head>
 <body class="dash">
-<header>
-  <div class="brand" title="Yo admin"><span class="logo">Yo</span><button type="button" class="hubword" id="hub-word" title="which hub the lists show: click or key 0 to switch">live</button></div>
-  <nav class="menu">
-    <span class="tabs" id="tabs" role="tablist">
-      <a role="tab" href="#" data-tab="overview" title="Overview (key 1)" aria-label="Overview"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 15a8 8 0 0 1 16 0"/><path d="M12 15l4-5"/><path d="M4 19h16"/></svg><span class="label">Overview</span></a>
-      <a role="tab" href="#support" data-tab="support" title="Support (key 2)" aria-label="Support"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 5h14a1 1 0 0 1 1 1v9a1 1 0 0 1-1 1H10l-4 3.5V16H5a1 1 0 0 1-1-1V6a1 1 0 0 1 1-1z"/></svg><span class="label">Support</span><span class="quiet" id="tab-support"></span></a>
-      <a role="tab" href="#users" data-tab="users" title="Users (key 3)" aria-label="Users"><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="9" cy="8.5" r="3.5"/><path d="M2.5 20a6.5 6.5 0 0 1 13 0"/><path d="M15.5 5.2a3.5 3.5 0 0 1 0 6.6"/><path d="M18 14.3a6.5 6.5 0 0 1 3.5 5.7"/></svg><span class="label">Users</span></a>
-      <a role="tab" href="#crashes" data-tab="crashes" title="Crashes (key 4)" aria-label="Crashes"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3.5 2.5 20h19z"/><path d="M12 10v4.5"/><path d="M12 17.2v.3"/></svg><span class="label">Crashes</span><span class="quiet" id="tab-crashes" title="open crashes and errors, without expected ones"></span></a>
-      <a role="tab" href="#db" data-tab="db" title="Database (key 5)" aria-label="Database"><svg viewBox="0 0 24 24" aria-hidden="true"><ellipse cx="12" cy="6" rx="7.5" ry="2.8"/><path d="M4.5 6v12c0 1.5 3.4 2.8 7.5 2.8s7.5-1.3 7.5-2.8V6"/><path d="M4.5 12c0 1.5 3.4 2.8 7.5 2.8s7.5-1.3 7.5-2.8"/></svg><span class="label">Database</span></a>
-      <a role="tab" href="#status" data-tab="status" title="Status (key 6)" aria-label="Status"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M2.5 12h4l2.5-6 4 12 2.5-6h6"/></svg><span class="label">Status</span></a>
-    </span>
-  </nav>
+
+<!-- One page of widgets: the header (logo, range), the Yos and Accounts charts, one widget of counts (Media, Groups,
+     Problems, Queue, Secured, Platforms), Server with the services as chips, the Database widget
+     below, always open; rows that lead to a table open it there (the support chat, diagnostics, reports, users). -->
+<main class="ov" id="overview">
+<header class="tile hdr group" id="t-hdr">
+  <div class="chartw hchart" id="t-yc">
+    <h2 class="gh"><button type="button" class="logo small" id="hub-word" title="live or dev hub: click or key 0 to switch">Yo</button><span class="sr">Yos</span><b class="gsum big" id="yc-n">–</b></h2>
+    <div class="area" id="yc-area"><svg id="yc-svg" aria-hidden="true"></svg><span class="area-tip" id="yc-tip"></span></div>
+    <svg class="spark cstrip" id="yc-strip" viewBox="0 0 140 28" preserveAspectRatio="none" aria-hidden="true"></svg>
+  </div>
   <div class="status"><span class="stale" id="stale" hidden>no answer from the server</span><span id="collection-status" role="status">Loading fresh data…</span></div>
 </header>
-
-<!-- Overview: the server and what is open on top; below, the newest users, usage (media, groups, waiting), the activity and the Yos. -->
-<main class="ov" data-tabs="overview">
-  <article class="tile" id="t-system">
-    <h2 id="sys-head" role="button" tabindex="0"><i></i>System <small id="sys-updates"></small></h2>
-    <div class="rows" id="t-net">
-      <div class="row" id="r-cpu"><span class="k">CPU</span><span class="bar"><i></i></span><span class="v" id="cpu">–</span></div>
-      <div class="row" id="r-mem"><span class="k">Memory</span><span class="bar"><i></i></span><span class="v" id="mem">–</span></div>
-      <div class="row" id="r-disk"><span class="k">Disk</span><span class="bar"><i></i></span><span class="v" id="disk">–</span></div>
-      <div class="row" id="r-rx"><span class="k">Net ↓</span><span class="bar"><i></i></span><span class="v" id="rx">–</span></div>
-      <div class="row" id="r-tx"><span class="k">Net ↑</span><span class="bar"><i></i></span><span class="v" id="tx">–</span></div>
-    </div>
+  <div class="charts">
+  <article class="tile group chartw" id="t-uc">
+    <h2 class="gh"><svg class="ico" viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="8" r="3.5"/><path d="M5 20a7 7 0 0 1 14 0"/></svg><span>Accounts</span><b class="gsum big" id="uc-n">–</b></h2>
+    <div class="area" id="uc-area"><svg id="uc-svg" aria-hidden="true"></svg><span class="area-tip" id="uc-tip"></span></div>
+    <svg class="spark cstrip" id="uc-strip" viewBox="0 0 140 28" preserveAspectRatio="none" aria-hidden="true"></svg>
   </article>
-
-  <article class="tile" id="t-services">
-    <h2 id="t-uptime">Services <b id="reboot-text"></b></h2>
-    <div class="svcs">
-      <div class="svc" id="t-hub"><span class="dot"></span><b>Hub</b><span class="cap" id="hub-cap">–</span></div>
-      <div class="svc" id="t-dev"><span class="dot"></span><b>Dev Hub</b><span class="cap" id="dev-cap">–</span></div>
-      <div class="svc" id="t-tunnel"><span class="dot"></span><b>Tunnel</b><span class="cap" id="tunnel-cap">–</span></div>
-      <div class="svc" id="t-yogpt"><span class="dot"></span><b>YoGPT</b><span class="cap" id="yogpt-cap">–</span></div>
-    </div>
-    <div class="foot-line" id="q-line">–</div>
-  </article>
-
-  <article class="tile" id="t-issues">
-    <h2>Open</h2>
-    <div class="legend">
-      <a href="#support" class="lg fb"><i></i>Feedback <b id="feedback-unread">–</b></a>
-      <a href="#crashes" class="lg cr"><i></i>Crashes <b id="diagnostics-open">–</b></a>
-      <a href="#support" class="lg rp"><i></i>Reports <b id="reports-open">–</b></a>
-    </div>
-    <svg class="graph" id="issues-graph" viewBox="0 0 140 40" preserveAspectRatio="none" aria-label="Open feedback, crashes and user reports per day, 14 days"></svg>
-    <div class="axis"><span>14 days ago</span><span>today</span></div>
-  </article>
-
-  <article class="tile" id="t-newusers">
-    <h2><a href="#users" class="more">Users <span aria-hidden="true">›</span></a></h2>
-    <ul class="people-mini" id="newusers-body"></ul>
-  </article>
-
-  <div class="col">
-    <article class="tile ev" id="t-media">
-      <h2><svg class="ico" viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="5" width="18" height="14" rx="2"/><circle cx="9" cy="10" r="1.6"/><path d="M21 16l-5-5-8 8"/></svg>Media<span class="h-today" id="md-today"></span></h2>
-      <div class="mini flat">
-        <div class="mini-plot"><svg class="chart" id="md-chart" viewBox="0 0 280 60" preserveAspectRatio="none" aria-label="Photos and videos uploaded and fetched per hour, last 24 hours"></svg><span class="ymax" id="md-max"></span><div class="tip" hidden></div></div>
-        <div class="axis"><span id="md-from"></span><span id="md-to"></span></div>
-      </div>
-    </article>
-    <article class="tile ev" id="t-groups">
-      <h2><svg class="ico" viewBox="0 0 24 24" aria-hidden="true"><circle cx="9" cy="8.5" r="3.5"/><path d="M2.5 20a6.5 6.5 0 0 1 13 0"/><path d="M15.5 5.2a3.5 3.5 0 0 1 0 6.6"/><path d="M18 14.3a6.5 6.5 0 0 1 3.5 5.7"/></svg>Groups<span class="h-today" id="gr-today"></span></h2>
-      <div class="mini flat">
-        <div class="mini-plot"><svg class="chart" id="gr-chart" viewBox="0 0 280 60" preserveAspectRatio="none" aria-label="Groups made per day, last 14 days"></svg><span class="ymax" id="gr-max"></span><div class="tip" hidden></div></div>
-        <div class="axis"><span id="gr-from"></span><span id="gr-to"></span></div>
-      </div>
-    </article>
-    <article class="tile ev" id="t-secured">
-      <h2><svg class="ico" viewBox="0 0 24 24" aria-hidden="true"><rect x="5" y="10.5" width="14" height="10" rx="2"/><path d="M8 10.5V8a4 4 0 0 1 8 0v2.5"/></svg>Secured<span class="h-today" id="sc-today"></span></h2>
-      <div class="mini flat">
-        <div class="mini-plot"><svg class="chart" id="sc-chart" viewBox="0 0 280 60" preserveAspectRatio="none" aria-label="Share of each day's sign-ups with a backup now, last 14 days"></svg><span class="ymax" id="sc-max"></span><div class="tip" hidden></div></div>
-        <div class="axis"><span id="sc-from"></span><span id="sc-to"></span></div>
-      </div>
-    </article>
-    <article class="tile" id="t-waiting">
-      <h2>Waiting</h2>
-      <div class="stat"><svg class="ico" viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="8.5"/><path d="M12 7.5V12l3 2"/></svg><div><div class="n"><b id="wt-n">–</b><small id="wt-old"></small></div><div class="l">Yos queued at the hub</div></div></div>
-    </article>
   </div>
-
-  <div class="col">
-    <article class="tile" id="t-activity">
-      <h2>Activity</h2>
-      <div class="stats">
-        <div class="stat" id="st-active"><svg class="ico" viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="8" r="3.5"/><path d="M5 20a7 7 0 0 1 14 0"/></svg><div><div class="n"><b id="ug-today">–</b><small id="ug-total">/ – users</small></div><div class="l">Active today</div></div></div>
-      </div>
-      <div class="mini" id="mini-su">
-        <div class="mini-head"><svg class="ico" viewBox="0 0 24 24" aria-hidden="true"><circle cx="10" cy="8" r="3.5"/><path d="M3 20a7 7 0 0 1 13 -3"/><path d="M19 14v6"/><path d="M16 17h6"/></svg><span>Sign-ups</span><span class="mini-last" id="su-last"></span></div>
-        <div class="mini-plot"><svg class="chart" id="su-chart" viewBox="0 0 280 60" preserveAspectRatio="none" aria-label="Sign-ups per hour, last 24 hours"></svg><span class="ymax" id="su-max"></span><div class="tip" hidden></div></div>
-        <div class="axis"><span id="su-from"></span><span id="su-to"></span></div>
-      </div>
-    </article>
-    <article class="tile ev ms" id="t-yos">
-      <h2><svg class="ico" viewBox="0 0 24 24" aria-hidden="true"><path d="M5 5h14a1 1 0 0 1 1 1v9a1 1 0 0 1-1 1H10l-4 3.5V16H5a1 1 0 0 1-1-1V6a1 1 0 0 1 1-1z"/></svg>Yos<span class="h-today" id="yo-today"></span></h2>
-      <div class="mini flat">
-        <div class="mini-plot"><svg class="chart" id="yo-chart" viewBox="0 0 280 60" preserveAspectRatio="none" aria-label="Yos accepted and fetched per hour, last 24 hours"></svg><span class="ymax" id="yo-max"></span><div class="tip" hidden></div></div>
-        <div class="axis"><span id="yo-from"></span><span id="yo-to"></span></div>
-      </div>
-    </article>
-    <article class="tile" id="t-apps">
-      <h2>App versions</h2>
-      <div class="big"><span id="ug-fresh">–</span><small>current</small></div>
-      <div class="cap" id="ug-apps-cap"></div>
-      <div class="sbar" id="ug-apps-bar"></div>
-    </article>
-  </div>
-</main>
-
-
-<!-- Crashes and errors from the apps, one row per signature. -->
-<main class="view" data-tabs="crashes">
-  <section class="card" id="diag">
-    <div class="card-head"><h2>Crashes &amp; errors</h2><small id="diag-note"></small>
-      <button type="button" class="pill" id="diag-all" hidden>Mark all done</button>
-      <select id="diag-mode" aria-label="Show crashes"><option value="open">Open</option><option value="done">Done</option><option value="all">All</option></select>
-      <select id="diag-level" aria-label="Show expected"><option value="hide">Without expected</option><option value="all">With expected</option></select></div>
-    <table class="list">
-      <thead><tr><th class="tick-col"></th><th>Type</th><th>Signature</th><th class="num">Count</th><th>First seen</th><th>Last seen</th><th>App</th></tr></thead>
-      <tbody id="diag-body"></tbody>
-    </table>
-    <nav class="pages" id="diag-pages" aria-label="Pages" hidden></nav>
-  </section>
-</main>
-
-<!-- Users: today's numbers, sign-ups and active users per day, and every user in one sortable table. -->
-<main class="view" data-tabs="users">
-  <section class="ustats">
-    <article class="tile figure"><h2>Signed up today</h2><div class="big" id="us-new">–</div><p class="cap" id="us-new-cap"></p></article>
-    <article class="tile figure"><h2>Active today</h2><div class="big" id="us-active">–</div><p class="cap" id="us-active-cap"></p></article>
-    <article class="tile figure"><h2>Users</h2><div class="big" id="us-total">–</div><p class="cap" id="us-total-cap"></p></article>
-    <article class="tile wide2"><h2>Sign-ups per day <small class="muted" id="us-signups-sum"></small></h2>
-      <svg class="chart" id="us-signups" viewBox="0 0 300 90" preserveAspectRatio="none" aria-label="Sign-ups per UTC day, 30 days"></svg>
-      <div class="axis"><span>30 days ago</span><span>today</span></div></article>
-    <article class="tile wide2"><h2>Active users per day <small class="muted" id="us-active-sum"></small></h2>
-      <svg class="chart" id="us-actives" viewBox="0 0 300 90" preserveAspectRatio="none" aria-label="Active users per UTC day, 30 days"></svg>
-      <div class="axis"><span>30 days ago</span><span>today</span></div></article>
-  </section>
-  <section class="card" id="all-users">
-    <div class="card-head"><h2>All users</h2><small id="all-users-note"></small>
-      <input type="search" id="all-users-search" placeholder="Search name or id" aria-label="Search users" autocomplete="off"></div>
-    <div class="scroll ugrid">
-      <table class="list sortable" id="all-users-table">
-        <thead><tr><th data-sort="name">Name</th><th data-sort="created">Signed up</th><th data-sort="last_seen">Last seen</th><th data-sort="app">App</th><th data-sort="push">Push</th><th data-sort="secured">Secured</th><th data-sort="devices" class="num">Devices</th><th data-sort="queued" class="num" title="messages waiting for this user's devices">Waiting</th></tr></thead>
-        <tbody id="all-users-body"></tbody>
-      </table>
-    </div>
-  </section>
-</main>
-
-<!-- Support: conversations and to-dos on the left (starred and open ones on top), the chosen one on the right:
-     who they are, their to-dos and reports, and the support chat. -->
-<main class="view" data-tabs="support">
-  <section class="people card" id="people">
-    <aside class="plist">
-      <div class="plist-head">
-        <input type="search" id="user-search" placeholder="Search name or id" aria-label="Search users" autocomplete="off">
-        <div class="seg" role="group" aria-label="Show"><button type="button" data-filter="chats" class="on" title="everyone who wrote to the team, and the to-dos">Chats</button><button type="button" data-filter="open">Open</button><button type="button" data-filter="star" title="starred">★</button><button type="button" data-filter="all" title="every user">All</button></div>
-        <button type="button" class="newtodo" id="new-todo" title="the team's to-dos; add one">To-dos<span id="new-todo-count"></span></button>
-      </div>
-      <nav id="person-list" aria-label="Conversations and to-dos"></nav>
-    </aside>
-    <section class="pane" id="pane">
-      <div class="pane-head">
-        <span class="avatar" id="convo-avatar"></span>
-        <div class="who"><h3 id="support-title">Loading…</h3><button type="button" class="copy mono" id="p-id" title="click to copy" hidden></button></div>
-        <button type="button" class="star big-star" id="convo-star" hidden aria-pressed="false" title="star">★</button>
-        <button type="button" class="pill" id="convo-done" hidden>Mark all handled</button>
-      </div>
-      <div class="facts" id="p-facts"></div>
-      <details class="extra" id="p-extra"><summary id="p-extra-sum">Devices &amp; reports</summary>
-        <div class="extra-grid"><div><h4>Devices</h4><div id="p-devices"></div></div><div><h4>Reports</h4><div id="p-reports"></div></div></div>
-      </details>
-      <div id="user-todos" class="user-todos" hidden></div>
-      <div id="support-history" class="bubbles" aria-live="polite"></div>
-      <div class="compose-mode" id="compose-mode" hidden><button type="button" data-mode="reply" class="on">Reply</button><button type="button" data-mode="todo">To-do about this user</button></div>
-      <form id="support-reply" class="composer" hidden>
-        <textarea id="support-text" rows="1" required maxlength="2000" aria-label="Reply" placeholder="Write a reply…"></textarea>
-        <button type="submit" class="send" aria-label="Send" title="Send (Enter)"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3.4 20.4 21 12 3.4 3.6 3.4 10.2 15 12 3.4 13.8z"/></svg></button>
-      </form>
-      <small id="support-error" role="alert"></small>
-    </section>
-  </section>
-
-  <section class="card" id="reports">
-    <div class="card-head"><h2>User reports</h2><small id="reports-note"></small>
-      <select id="reports-mode" aria-label="Show reports"><option value="open">Open</option><option value="done">Handled</option><option value="all">All</option></select></div>
-    <table class="list">
-      <thead><tr><th class="tick-col"></th><th>Reported user</th><th>Reason</th><th>Reported by</th><th>When</th></tr></thead>
-      <tbody id="reports-body"></tbody>
-    </table>
-  </section>
-</main>
-
-<!-- Database: every table, grouped by topic. -->
-<main class="view" data-tabs="db">
-  <section class="card" id="tables">
-    <div class="card-head"><h2>All tables</h2><small id="tables-note"></small></div>
-    <div class="tables"></div>
-  </section>
-</main>
-
-<!-- Status: the STATUS bot (skills/status), its last report and how often it sends to whom. -->
-<main class="view" data-tabs="status">
-  <section class="ustats">
-    <article class="tile figure"><h2>Last report</h2><div class="big" id="st-when">–</div><p class="cap" id="st-sent"></p></article>
-    <article class="tile figure"><h2>Users</h2><div class="big" id="st-users">–</div><p class="cap" id="st-since"></p></article>
-    <article class="tile figure"><h2>Services</h2><div class="big" id="st-up">–</div><p class="cap" id="st-load"></p></article>
-  </section>
-  <section class="card" id="status-bot">
-    <div class="card-head"><h2>Status bot</h2><small id="st-note">A picture of the server's numbers as a Yo to the owner (fixed on the server), sent by the bot there.</small></div>
-    <form id="st-form" class="stform">
-      <label>Every <select id="st-every" aria-label="How often">
-        <option value="0">Off</option><option value="15">15 min</option><option value="30">30 min</option>
-        <option value="60">60 min</option><option value="120">120 min</option><option value="1440">Daily (09:00 Berlin)</option></select></label>
-      <button type="submit" class="pill">Save</button>
-      <small id="st-error" role="status"></small>
-    </form>
-  </section>
+  <article class="tile group" id="g-usage">
+      <section class="counts" id="t-usage">
+        <div class="crow bars" id="c-md"><svg class="ico" viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="5" width="18" height="14" rx="2"/><circle cx="9" cy="10" r="1.6"/><path d="M21 16l-5-5-8 8"/></svg><span class="cl">Media</span><b class="cn" id="md-n">–</b><span class="sv" id="md-sv"></span><svg class="spark" id="md-spark" viewBox="0 0 140 28" preserveAspectRatio="none"></svg></div>
+        <div class="crow bars" id="c-gr"><svg class="ico" viewBox="0 0 24 24" aria-hidden="true"><circle cx="9" cy="8.5" r="3.5"/><path d="M2.5 20a6.5 6.5 0 0 1 13 0"/><path d="M15.5 5.2a3.5 3.5 0 0 1 0 6.6"/><path d="M18 14.3a6.5 6.5 0 0 1 3.5 5.7"/></svg><span class="cl">Groups</span><b class="cn" id="gr-n">–</b><span class="sv" id="gr-sv"></span><svg class="spark" id="gr-spark" viewBox="0 0 140 28" preserveAspectRatio="none"></svg></div>
+        <div class="crow bars sep" id="c-sc"><svg class="ico" viewBox="0 0 24 24" aria-hidden="true"><rect x="5" y="10.5" width="14" height="10" rx="2"/><path d="M8 10.5V8a4 4 0 0 1 8 0v2.5"/></svg><span class="cl">Secured</span><b class="cn" id="sc-n">–</b><span class="sv" id="sc-sv"></span><svg class="spark" id="sc-spark" viewBox="0 0 140 28" preserveAspectRatio="none" hidden></svg><span class="stack share" id="sc-bar"><span></span></span></div>
+        <div class="crow bars" id="c-pl"><svg class="ico" viewBox="0 0 24 24" aria-hidden="true"><rect x="6.5" y="2.5" width="11" height="19" rx="2.5"/><path d="M11 18.5h2"/></svg><span class="cl">Platforms</span><b class="cn" id="pl-n">–</b><span class="stack plats" id="pl-bar"></span></div>
+        <div class="crow bars opens sep" id="c-pr" data-open="table:support_messages" role="button" tabindex="0"><svg class="ico" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3.5 2.5 20h19z"/><path d="M12 10v4.5"/><path d="M12 17.2v.3"/></svg><span class="cl">Problems</span><b class="cn" id="pr-n">–</b><span class="sv" id="pr-sv"></span><svg class="spark" id="pr-spark" viewBox="0 0 140 28" preserveAspectRatio="none"></svg></div>
+        <div class="crow kv" id="c-q" data-card="q"><svg class="ico" viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="8.5"/><path d="M12 7.5V12l3 2"/></svg><span class="cl">Queue</span><b class="cn" id="q-n">–</b></div>
+      </section>
+  </article>
+  <article class="tile group" id="g-server">
+    <div class="svcbar" role="group" aria-label="Services"><button type="button" class="chip" id="t-hub" data-card="svc:hub"><span class="dot"></span>Hub</button><button type="button" class="chip" id="t-dev" data-card="svc:dev"><span class="dot"></span>Dev</button><button type="button" class="chip" id="t-tunnel" data-card="svc:tunnel"><span class="dot"></span>Tunnel</button><button type="button" class="chip" id="t-cli" data-card="svc:cli" title="YoGPT and the status bot"><span class="dot"></span>CLI</button></div>
+      <section class="counts" id="t-system">
+        <div class="crow bars" id="c-cpu"><svg class="ico" viewBox="0 0 24 24" aria-hidden="true"><rect x="6" y="6" width="12" height="12" rx="2"/><path d="M9 2.5v3M15 2.5v3M9 18.5v3M15 18.5v3M2.5 9h3M2.5 15h3M18.5 9h3M18.5 15h3"/></svg><span class="cl">CPU</span><b class="cn" id="cpu-n">–</b><span class="sv" id="cpu-sv"></span><svg class="spark" id="cpu-spark" viewBox="0 0 140 28" preserveAspectRatio="none"></svg></div>
+        <div class="crow bars" id="c-mem"><svg class="ico" viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="7" width="18" height="10" rx="1.5"/><path d="M7 17v3M12 17v3M17 17v3M7 10.5v3M11 10.5v3"/></svg><span class="cl">Memory</span><b class="cn" id="mem-n">–</b><span class="sv" id="mem-sv"></span><svg class="spark" id="mem-spark" viewBox="0 0 140 28" preserveAspectRatio="none"></svg></div>
+        <div class="crow bars" id="c-disk"><svg class="ico" viewBox="0 0 24 24" aria-hidden="true"><ellipse cx="12" cy="6" rx="7.5" ry="2.8"/><path d="M4.5 6v12c0 1.5 3.4 2.8 7.5 2.8s7.5-1.3 7.5-2.8V6"/></svg><span class="cl">Disk</span><b class="cn" id="disk-n">–</b><span class="sv" id="disk-sv"></span><svg class="spark" id="disk-spark" viewBox="0 0 140 28" preserveAspectRatio="none"></svg></div>
+        <div class="crow bars sep" id="c-net"><svg class="ico" viewBox="0 0 24 24" aria-hidden="true"><path d="M8 4v15M4.5 15.5 8 19l3.5-3.5"/><path d="M16 20V5M12.5 8.5 16 5l3.5 3.5"/></svg><span class="cl">LAN</span><b class="cn" id="net-n">–</b><span class="sv" id="net-sv"></span><svg class="spark" id="net-spark" viewBox="0 0 140 28" preserveAspectRatio="none"></svg></div>
+        <div class="crow kv" id="c-upd"><svg class="ico" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 4v11M7.5 10.5 12 15l4.5-4.5"/><path d="M4 19h16"/></svg><span class="cl">Updates</span><b class="cn" id="upd-n">–</b></div>
+        <select id="st-every" aria-label="How often the status bot reports" hidden>
+          <option value="0">Off</option><option value="15">15 min</option><option value="30">30 min</option>
+          <option value="60">60 min</option><option value="120">120 min</option><option value="1440">Daily (09:00 Berlin)</option></select>
+        <b id="reboot-text" hidden></b>
+      </section>
+  </article>
+  <div class="rangebar"><div class="range" id="range" role="group" aria-label="Range of Usage and Attention"><button type="button" data-r="1" title="last 24 hours">1</button><button type="button" data-r="7" class="on" title="last 7 days">7</button><button type="button" data-r="30" title="last 30 days">30</button><button type="button" data-r="0" title="since the start">Total</button></div></div>
+  <article class="tile full" id="t-db" aria-label="Database">
+    <div class="tables" id="tables"></div>
+    <div class="dbfoot"><span id="tables-note">–</span><button type="button" class="eye" id="db-blur" title="blur names and ids (for a screenshot); again to show them" aria-pressed="false"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M2 12s3.5-6.5 10-6.5S22 12 22 12s-3.5 6.5-10 6.5S2 12 2 12z"/><circle cx="12" cy="12" r="3"/></svg></button></div>
+  </article>
+  <!-- Shown inside the Database widget: the support chat (support_messages, Chat view) and the users table (users). -->
+  <div id="chat-home" hidden><section class="card" id="all-users">
+        <div class="scroll ugrid">
+          <table class="list sortable" id="all-users-table">
+            <thead><tr><th data-sort="name">Name</th><th data-sort="created">Signed up</th><th data-sort="last_seen">Last seen</th><th data-sort="app">App</th><th data-sort="push">Push</th><th data-sort="secured">Secured</th><th data-sort="devices" class="num">Devices</th><th data-sort="queued" class="num" title="messages waiting for this user's devices">Waiting</th></tr></thead>
+            <tbody id="all-users-body"></tbody>
+          </table>
+        </div>
+      </section><section class="people card" id="people">
+        <aside class="plist">
+          <div class="plist-head">
+            <div class="seg" role="group" aria-label="Show"><button type="button" data-filter="open" class="on" title="something of theirs not handled yet">Open</button><button type="button" data-filter="answered" title="everything of theirs handled">Answered</button></div>
+          </div>
+          <nav id="person-list" aria-label="Conversations"></nav>
+        </aside>
+        <section class="pane" id="pane">
+          <div class="facts" id="p-facts"></div>
+          <details class="extra" id="p-extra"><summary id="p-extra-sum">Devices &amp; reports</summary>
+            <div class="extra-grid"><div><h4>Devices</h4><div id="p-devices"></div></div><div><h4>Reports</h4><div id="p-reports"></div></div></div>
+          </details>
+          <div id="support-history" class="bubbles" aria-live="polite"></div>
+          <form id="support-reply" class="composer" hidden>
+            <textarea id="support-text" rows="1" required maxlength="2000" aria-label="Reply" placeholder="Write a reply…"></textarea>
+            <button type="submit" class="send" aria-label="Send" title="Send (Enter)"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3.4 20.4 21 12 3.4 3.6 3.4 10.2 15 12 3.4 13.8z"/></svg></button>
+          </form>
+          <small id="support-error" role="alert"></small>
+        </section>
+      </section></div>
 </main>
 
 <dialog id="pop"><form method="dialog"><button class="close" aria-label="Close" title="Close">×</button></form><dl></dl><pre hidden></pre></dialog>

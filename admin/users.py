@@ -127,23 +127,60 @@ def has_column(db, table: str, column: str) -> bool:
     return db.execute("SELECT count(*) FROM pragma_table_info(?) WHERE name = ?", (table, column)).fetchone()[0] > 0
 
 
-EVENT_KINDS = ("yo-in", "yo-out", "media-in", "media-out", "group-create")
+EVENT_KINDS = ("yo-in", "yo-out", "media-in", "media-out", "group-create", "yo-in-bot", "media-in-bytes")
+# A bot's account (alias u): it has devices and every one names a bot's app (YoGPT or the CLI), as the hub's is_bot_app.
+BOT_USER = ("EXISTS (SELECT 1 FROM devices d WHERE d.user_id = u.id) AND NOT EXISTS (SELECT 1 FROM devices d"
+            " WHERE d.user_id = u.id AND NOT (coalesce(d.app, '') LIKE 'yogpt/%' OR coalesce(d.app, '') LIKE 'cli/%'))")
+
+
+def TODOS_SQL(db):  # noqa: N802
+    """The team's to-dos as (id, text, created_at, done_at): `todos` (schema 7) or the X'' thread (schema 6)."""
+    if has_table(db, "todos"):
+        return "SELECT id, text, created_at, done_at FROM todos"
+    if has_table(db, "support_messages"):
+        return "SELECT id, text, created_at, done_at FROM support_messages WHERE user_id = X''"
+    return None
 
 
 def events(db, now: int) -> dict:
-    """Per event kind: "hours" (the last 24, the current one last), "days" (the last 14 UTC days, today last) and
-    "today" (since UTC midnight), summed from the hub's `events` (counts per kind and minute, nothing else)."""
+    """Per event kind: "hours" (the last 24, the current one last), "days" (the last 14 UTC days, today last),
+    "today" (since UTC midnight), "total" (since the hub began counting) and "year" (the last 365 UTC days, today last), summed from the hub's `events` (counts per
+    kind and minute, nothing else)."""
     hour, day = now // 3600000, now // DAY_MS
     by_hour = {}
     for kind, h, n in db.execute("SELECT kind, minute / 60, sum(n) FROM events WHERE minute >= ? GROUP BY 1, 2",
                                  ((day - 13) * 24 * 60,)):
         by_hour.setdefault(kind, {})[h] = n
+    totals = dict(db.execute("SELECT kind, sum(n) FROM events GROUP BY 1").fetchall())
+    by_day = {}
+    for kind, d, n in db.execute("SELECT kind, minute / 1440, sum(n) FROM events WHERE minute >= ? GROUP BY 1, 2",
+                                 ((day - 364) * 24 * 60,)):
+        by_day.setdefault(kind, {})[d] = n
     out = {}
     for kind in EVENT_KINDS:
         hours = by_hour.get(kind, {})
         days = [sum(n for h, n in hours.items() if h // 24 == d) for d in range(day - 13, day + 1)]
-        out[kind] = {"hours": [hours.get(h, 0) for h in range(hour - 23, hour + 1)], "days": days, "today": days[-1]}
+        out[kind] = {"hours": [hours.get(h, 0) for h in range(hour - 23, hour + 1)], "days": days, "today": days[-1],
+                     "total": totals.get(kind, 0), "year": [by_day.get(kind, {}).get(d, 0) for d in range(day - 364, day + 1)]}
     return out
+
+
+def open_problems(db, now: int) -> dict:
+    spans = []
+    if has_table(db, "support_messages"):
+        spans += db.execute("SELECT created_at, done_at FROM support_messages WHERE length(user_id)>0 AND from_team = 0").fetchall()
+    if has_table(db, "diagnostics"):
+        for first, last, done, payload in db.execute("SELECT first_seen, last_seen, done, payload FROM diagnostics"):
+            try:
+                expected = (json.loads(payload or "{}") or {}).get("severity") == "expected"
+            except (ValueError, AttributeError):
+                expected = False
+            if not expected:
+                spans.append((first, last if done else None))
+    at = lambda t: sum(1 for a, b in spans if a <= t and (b is None or b > t))  # noqa: E731
+    hour, midnight = now // 3600000, now - now % DAY_MS
+    return {"hours": [at(min(now, (h + 1) * 3600000)) for h in range(hour - 23, hour + 1)],
+            "days": [at(min(now, midnight + (1 - i) * DAY_MS)) for i in range(364, -1, -1)]}
 
 
 def hub(name: str, path: str) -> dict:
@@ -204,10 +241,11 @@ def hub(name: str, path: str) -> dict:
             "users": users,
             "reports": reports,
             "feedback": [f for f in feedback if f["type"] in ("feedback", "todo")],
+            # The team's to-dos: their own table from the hub's schema 7, the X'' thread before it.
             "todos": part("todos", lambda: [{"id": i, "text": text(t), "at": at, "done_at": done}
-                for i,t,at,done in db.execute("SELECT id,text,created_at,done_at FROM support_messages WHERE user_id=X'' ORDER BY done_at IS NOT NULL,created_at DESC LIMIT ?", (LIMIT,))] if has_table(db,"support_messages") else [], []),
+                for i,t,at,done in db.execute(TODOS_SQL(db) + " ORDER BY done_at IS NOT NULL,created_at DESC LIMIT ?", (LIMIT,))] if TODOS_SQL(db) else [], []),
             "diagnostics_open": part("diagnostics_open", lambda: one("SELECT count(*) FROM diagnostics WHERE done=0") if has_table(db,"diagnostics") else 0),
-            "todos_open": part("todos_open", lambda: one("SELECT count(*) FROM support_messages WHERE user_id=X'' AND done_at IS NULL") if has_table(db,"support_messages") else 0),
+            "todos_open": part("todos_open", lambda: one(f"SELECT count(*) FROM ({TODOS_SQL(db)}) WHERE done_at IS NULL") if TODOS_SQL(db) else 0),
             "diagnostic_days": part("diagnostic_days", lambda: [{"day": day, "kind": kind, "count": count}
                 for day,kind,count in db.execute("SELECT day,kind,count FROM diagnostic_days ORDER BY day")]
                 if has_table(db,"diagnostic_days") else [], []),
@@ -221,6 +259,25 @@ def hub(name: str, path: str) -> dict:
                 "SELECT count(*) FROM support_messages WHERE length(user_id)>0 AND from_team = 0 AND created_at < ? AND (done_at IS NULL OR done_at >= ?)",
                 end, end) for end in (min(now, midnight - (i - 1) * DAY_MS) for i in range(13, -1, -1))]
                 if has_table(db, "support_messages") else [], []),
+            # Problems open at each point: user messages not yet handled, crash and error groups not done (from
+            # their first report; a done one counted until its last, the hub keeps no time of the tick), "expected"
+            # ones left out. "hours": at the end of each of the last 24 (the current one: now), "days": at the end of
+            # each of the last 365 UTC days (today: now). Reports are added by the page (their ticks live there).
+            "problems_open": part("problems_open", lambda: open_problems(db, now)),
+            # Sign-ups per UTC day since the first account, bots left out (every device a bot's: YoGPT or the CLI, as
+            # the hub's db::is_bot_app), [[day, n], ...]: Sign-ups' bars and total.
+            "signup_days": part("signup_days", lambda: [list(r) for r in db.execute(
+                f"SELECT created_at / ?, count(*) FROM users u WHERE NOT ({BOT_USER}) GROUP BY 1 ORDER BY 1", (DAY_MS,))], []),
+            # Messages users wrote to the team per UTC day, the last 365 (today last): Feedback's bars and total.
+            "support_days": part("support_days", lambda: [one(
+                "SELECT count(*) FROM support_messages WHERE length(user_id)>0 AND from_team = 0 AND created_at >= ? AND created_at < ?",
+                (midnight - i * DAY_MS), (midnight - (i - 1) * DAY_MS)) for i in range(364, -1, -1)]
+                if has_table(db, "support_messages") else None),
+            # Messages users wrote to the team per hour, the last 24 (the current one last): the Feedback card's bars.
+            "support_hours": part("support_hours", lambda: [one(
+                "SELECT count(*) FROM support_messages WHERE length(user_id)>0 AND from_team = 0 AND created_at >= ? AND created_at < ?",
+                h * 3600000, (h + 1) * 3600000) for h in range(now // 3600000 - 23, now // 3600000 + 1)]
+                if has_table(db, "support_messages") else None),
             "support_last": part("support_last", lambda: {h: {"text": text(t)[:160], "team": bool(team)}
                 for h, t, team, _ in db.execute(
                     "SELECT hex(user_id), text, from_team, max(id) FROM support_messages GROUP BY user_id LIMIT ?", (LIMIT,))}

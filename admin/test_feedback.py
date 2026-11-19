@@ -129,6 +129,11 @@ class FeedbackTests(unittest.TestCase):
                 db.execute("INSERT INTO support_messages VALUES(3,'task',4,NULL,X''),(4,'done',5,6,X''),(5,'user',6,NULL,X'01')")
             rows = users.hub("dev", path)["todos"]
             self.assertEqual(rows, [{"id":3,"text":"task","at":4,"done_at":None},{"id":4,"text":"done","at":5,"done_at":6}])
+            # From the hub's schema 7 on: their own table.
+            with sqlite3.connect(path) as db:
+                db.execute("CREATE TABLE todos(id INTEGER PRIMARY KEY,text TEXT,created_at INTEGER,done_at INTEGER)")
+                db.execute("INSERT INTO todos VALUES(7,'own',8,NULL)")
+            self.assertEqual(users.hub("dev", path)["todos"], [{"id":7,"text":"own","at":8,"done_at":None}])
 
     def test_support_proxy_plain_text_and_no_content(self):
         with patch.dict(os.environ, {"ADMIN_USER":"test", "ADMIN_PASSWORD_HASH":"unused",
@@ -224,10 +229,12 @@ class ReservedTests(unittest.TestCase):
                 proxy.assert_called_with("dev","messages/"+"a"*32)
                 self.assertEqual(call("POST","/support/done",{"hub":"dev","id":3,"done":False}),200)
                 proxy.assert_called_with("dev","messages/done/3","0")
-                self.assertEqual(call("GET","/support.json?hub=dev&user=team"),200)
-                proxy.assert_called_with("dev","messages/team")
+                self.assertEqual(call("GET","/support.json?hub=dev&user=team"),400)  # the to-dos are no thread any more
                 self.assertEqual(call("POST","/todos/done",{"hub":"dev","id":3,"done":True}),200)
                 proxy.assert_called_with("dev","todos/3","1")
+                self.assertEqual(call("POST","/todos/delete",{"hub":"dev","id":3}),200)
+                proxy.assert_called_with("dev","todos/3",None,"DELETE")
+                self.assertEqual(call("POST","/todos/delete",{"hub":"dev","id":"3"}),400)
             finally:
                 server.shutdown(); server.server_close(); thread.join()
 

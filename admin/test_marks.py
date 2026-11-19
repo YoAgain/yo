@@ -1,17 +1,13 @@
-"""Stars, to-do owners and the kept active-user counts; the Users tab's collector numbers."""
-import http.client
-import json
+"""The kept active-user counts and server history; the collector's numbers."""
 import os
 from pathlib import Path
 import sqlite3
 import tempfile
-import threading
 import unittest
 from unittest.mock import patch
 
 from test_feedback import load
 
-HEX = "AB" * 16
 
 
 class MarksTests(unittest.TestCase):
@@ -21,57 +17,6 @@ class MarksTests(unittest.TestCase):
         with patch.dict(os.environ, {"ADMIN_USER": "test", "ADMIN_PASSWORD_HASH": "unused", "ADMIN_SESSION_KEY": "00",
                                      "ACCESS_TEAM": "invalid", "ACCESS_AUD": "test", "STATE_DIRECTORY": self.temp.name}):
             self.admin = load("admin")
-
-    def test_stars_and_todo_owners_per_hub(self):
-        admin = self.admin
-        self.assertEqual(admin.marks_read(), {"stars": [], "todo_user": {}})
-        admin.marks_change({"hub": "live", "star": "u:" + HEX, "on": True})
-        admin.marks_change({"hub": "dev", "star": "t:7", "on": True})
-        admin.marks_change({"hub": "live", "todo": 7, "user": HEX})
-        marks = admin.marks_change({"hub": "live", "star": "u:" + HEX, "on": True})  # twice: still once
-        self.assertEqual(marks, {"stars": ["dev:t:7", "live:u:" + HEX], "todo_user": {"live:7": HEX}})
-        admin.marks_change({"hub": "dev", "star": "t:7", "on": False})
-        admin.marks_change({"hub": "live", "todo": 7, "user": None})
-        self.assertEqual(admin.marks_read(), {"stars": ["live:u:" + HEX], "todo_user": {}})
-
-    def test_malformed_marks_are_refused(self):
-        for bad in [{"hub": "other", "star": "t:1", "on": True}, {"hub": "live", "star": "u:ab", "on": True},
-                    {"hub": "live", "star": "t:0", "on": True}, {"hub": "live", "star": "t:1", "on": 1},
-                    {"hub": "live", "star": "x:../", "on": True}, {"hub": "live", "todo": "7", "user": HEX},
-                    {"hub": "live", "todo": 7, "user": HEX.lower()}, {"hub": "live", "todo": -1, "user": None}, {"hub": "live"}]:
-            with self.subTest(bad=bad), self.assertRaises(ValueError):
-                self.admin.marks_change(bad)
-        self.assertFalse((Path(self.temp.name) / "support-marks.json").exists())
-
-    def test_marks_routes_need_login_and_origin(self):
-        admin = self.admin
-        with patch.object(admin.Admin, "who", return_value="test"), \
-                patch.object(admin, "session_valid", return_value=False) as login:
-            server = admin.ThreadingHTTPServer(("127.0.0.1", 0), admin.Admin)
-            thread = threading.Thread(target=server.serve_forever, daemon=True)
-            thread.start()
-            try:
-                def call(method, path, data=None, origin=None):
-                    conn = http.client.HTTPConnection(*server.server_address)
-                    headers = {"Content-Type": "application/json", **({"Origin": origin} if origin else {})}
-                    conn.request(method, path, None if data is None else json.dumps(data), headers)
-                    response = conn.getresponse()
-                    body = response.read()
-                    conn.close()
-                    return response.status, body
-                star = {"hub": "live", "star": "t:3", "on": True}
-                self.assertEqual(call("GET", "/marks.json")[0], 401)
-                self.assertEqual(call("POST", "/marks", star)[0], 401)
-                login.return_value = True
-                self.assertEqual(call("POST", "/marks", star, "https://invalid.example")[0], 403)
-                self.assertEqual(call("POST", "/marks", {**star, "star": "t:x"})[0], 400)
-                status, body = call("POST", "/marks", star)
-                self.assertEqual((status, json.loads(body)["stars"]), (200, ["live:t:3"]))
-                self.assertEqual(json.loads(call("GET", "/marks.json")[1])["stars"], ["live:t:3"])
-            finally:
-                server.shutdown()
-                server.server_close()
-                thread.join()
 
     def test_active_days_keep_the_highest_count_per_day(self):
         admin, day = self.admin, 20400
@@ -88,6 +33,18 @@ class MarksTests(unittest.TestCase):
         later = now + 61 * 86400000
         self.assertEqual(admin.active_days({"at": later, "live": {"active_day": 4}}, later)["live"]["active_days"], {str(day + 61): 4})
         self.assertEqual(admin.active_days({"stale": True})["stale"], True)
+
+    def test_server_history_a_point_a_minute_the_last_hour(self):
+        admin = self.admin
+        admin.HISTORY.clear()
+        out = {"cpu": {"percent": 12.0}, "memory": {"total": 100, "available": 60}, "disk": {"total": 200, "used": 50},
+               "network": {"rx_per_s": 5, "tx_per_s": 7}}
+        admin.remember(out, 1000.0)
+        admin.remember(out, 1030.0)  # within the minute: not again
+        self.assertEqual(admin.remember(out, 1000.0 + 60), [[1_000_000, 12.0, 40.0, 25.0, 5, 7], [1_060_000, 12.0, 40.0, 25.0, 5, 7]])
+        for k in range(100):
+            admin.remember(out, 2000.0 + 60 * k)
+        self.assertEqual(len(admin.HISTORY), 60)
 
 
 class UsersTabCollectorTests(unittest.TestCase):
@@ -128,13 +85,23 @@ class UsersTabCollectorTests(unittest.TestCase):
                 db.executemany("INSERT INTO events VALUES(?,?,?)", [
                     ("yo-in", minute, 3), ("yo-in", minute - 1, 2) if minute % 60 else ("yo-in", minute + 1, 2),
                     ("yo-out", minute - 60, 4), ("group-create", minute - 2 * 24 * 60, 1),
-                    ("media-in", (day - 20) * 24 * 60, 9)])  # older than 14 days: not counted
+                    ("media-in", (day - 20) * 24 * 60, 9),  # older than 14 days: only in the total
+                    ("media-in-bytes", minute, 3_000_000), ("media-in-bytes", (day - 20) * 24 * 60, 9_000_000)])
             e = users.hub("live", path)["events"]
             self.assertEqual(e["yo-in"]["hours"][-1], 5)
             self.assertEqual(e["yo-out"]["hours"][-2], 4)
             self.assertEqual(len(e["yo-in"]["hours"]), 24)
             self.assertEqual(e["group-create"]["days"], [0] * 11 + [1, 0, 0])
-            self.assertEqual(e["media-in"], {"hours": [0] * 24, "days": [0] * 14, "today": 0})
+            media = [0] * 365
+            media[-21] = 9  # 20 days ago: in the year, not in the 14 days
+            self.assertEqual(e["media-in"], {"hours": [0] * 24, "days": [0] * 14, "today": 0, "total": 9, "year": media})
+            self.assertEqual(len(e["yo-in-bot"]["year"]), 365)
+            # The bytes uploaded, kept for good like the counts: the Media row's hours, days and total.
+            self.assertEqual(e["media-in-bytes"]["hours"][-1], 3_000_000)
+            self.assertEqual(e["media-in-bytes"]["today"], 3_000_000)
+            self.assertEqual(e["media-in-bytes"]["total"], 12_000_000)
+            self.assertEqual(e["yo-in"]["total"], 5)
+            self.assertEqual(e["media-out"]["total"], 0)
             self.assertEqual(e["media-out"]["today"], 0)
             self.assertEqual(e["yo-in"]["today"], 5)
             self.assertEqual(e["yo-out"]["today"], 4 if (minute - 60) // 1440 == day else 0)

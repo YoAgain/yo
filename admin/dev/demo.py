@@ -76,6 +76,8 @@ CREATE TABLE diagnostic_seen (uuid TEXT PRIMARY KEY, diagnostic_id INTEGER NOT N
 CREATE TABLE support_messages (id INTEGER PRIMARY KEY AUTOINCREMENT, user_id BLOB NOT NULL,
     from_team INTEGER NOT NULL CHECK(from_team IN (0,1)), text TEXT NOT NULL, created_at INTEGER NOT NULL,
     read_at INTEGER, app_version TEXT NOT NULL DEFAULT '', done_at INTEGER);
+CREATE TABLE todos (id INTEGER PRIMARY KEY AUTOINCREMENT, text TEXT NOT NULL, created_at INTEGER NOT NULL, done_at INTEGER);
+CREATE TABLE events (kind TEXT NOT NULL, minute INTEGER NOT NULL, n INTEGER NOT NULL, PRIMARY KEY (kind, minute)) WITHOUT ROWID;
 """
 
 # ---- names --------------------------------------------------------------------------------------------------------
@@ -299,15 +301,28 @@ def make_hub(path: str, rng: random.Random, now: int, n_users: int, live: bool) 
             read = t + rng.randint(5, 120) * 60_000 if team and j < len(lines) - 1 or (team and rng.random() < 0.5) else None
             db.execute("INSERT INTO support_messages (user_id,from_team,text,created_at,read_at,app_version,done_at) VALUES (?,?,?,?,?,?,?)",
                        (uid, int(team), text, t, read if read and read < now else None, newest if not team else "", done))
-    todo_ids = {}
     for k, (text, flag) in enumerate(TODOS if live else TODOS[:2]):
         at = now - (k + 1) * rng.randint(3 * HOUR, 20 * HOUR)
-        cur = db.execute("INSERT INTO support_messages (user_id,from_team,text,created_at,done_at) VALUES (X'',1,?,?,?)",
-                         (text, at, at + 5 * HOUR if flag == "done" else None))
-        if flag == "photo":
-            todo_ids["photo"] = cur.lastrowid
-        if k == 1:
-            todo_ids["star"] = cur.lastrowid
+        db.execute("INSERT INTO todos (text,created_at,done_at) VALUES (?,?,?)", (text, at, at + 5 * HOUR if flag == "done" else None))
+    # The hub's event counts (per kind and minute, nothing of who): 20 days, busier in the afternoon, few at night.
+    for m in range((now // 60_000) - 20 * 1440, now // 60_000 + 1, 7):
+        busy = 0.15 + 0.85 * max(0.0, 1 - abs((m // 60) % 24 - 15) / 9)
+        # Since two days ago the hub keeps a bot's inbox apart (yo-in-bot); before, every Yo is a yo-in.
+        apart = m >= now // 60_000 - 2 * 1440
+        kinds = [("yo-in", 6 if live else 1), ("media-in", 1.2 if live else 0.2), ("group-create", 0.05 if live else 0.01)]
+        if apart:
+            kinds.append(("yo-in-bot", 1.5 if live else 0.3))
+        for kind, rate in kinds:
+            n = sum(rng.random() < rate * busy / 3 for _ in range(3))
+            if n:
+                db.execute("INSERT INTO events VALUES (?,?,?)", (kind, m, n))
+                out = kind.replace("-in", "-out", 1)
+                if out != kind and not kind.endswith("-bot"):
+                    db.execute("INSERT INTO events VALUES (?,?,?)", (out, m, n + rng.randint(0, 2)))
+                if kind == "media-in":  # each upload's bytes: photos of a few hundred KB, now and then a video
+                    size = sum(int(rng.lognormvariate(12.6, 0.6)) if rng.random() < 0.9 else rng.randint(5, 40) * 1_000_000
+                               for _ in range(n))
+                    db.execute("INSERT INTO events VALUES (?,?,?)", ("media-in-bytes", m, size))
     # Crashes and errors.
     n_open = 0
     for k, (kind, payload) in enumerate(CRASHES if live else CRASHES[:3]):
@@ -330,7 +345,7 @@ def make_hub(path: str, rng: random.Random, now: int, n_users: int, live: bool) 
         db.execute("INSERT INTO reserved VALUES (?,?,?,?)", (skeleton(name), name, note, now - 25 * DAY))
     db.commit()
     db.close()
-    return {"threads": threads, "photo_user": photo_user, "todo_ids": todo_ids, "media_hours": media_hours,
+    return {"threads": threads, "photo_user": photo_user, "media_hours": media_hours,
             "newest": newest, "internal": users[0]}
 
 
@@ -343,21 +358,19 @@ class FakeHubs:
     def db(self, hub):
         return sqlite3.connect(self.paths[hub])
 
-    def support(self, hub, suffix="", body=None):
+    def support(self, hub, suffix="", body=None, method=None):
         now = int(time.time() * 1000)
         with self.lock, self.db(hub) as db:
             parts = suffix.split("/")
-            if body is None and suffix == "messages":
-                at, open_ = db.execute("SELECT coalesce(max(created_at),0),coalesce(sum(done_at IS NULL),0) FROM support_messages WHERE user_id=X''").fetchone()
-                rows = [{"user_id": "team", "name": "Team To-Dos", "unread": 0, "open": open_, "at": at}]
-                rows += [{"user_id": u, "at": a, "unread": n, "name": name} for u, a, n, name in db.execute(
+            if body is None and method is None and suffix == "messages":
+                rows = [{"user_id": u, "at": a, "unread": n, "name": name} for u, a, n, name in db.execute(
                     "SELECT hex(s.user_id),max(s.created_at),sum(s.from_team=0 AND s.done_at IS NULL),"
                     "(SELECT coalesce(spelling,value) FROM handles WHERE user_id=s.user_id AND kind=2 LIMIT 1) "
                     "FROM support_messages s WHERE length(s.user_id)>0 GROUP BY s.user_id "
                     "ORDER BY (sum(s.from_team=0 AND s.done_at IS NULL)>0) DESC,max(s.created_at) DESC")]
                 return rows
-            if body is None and parts[0] == "messages" and len(parts) == 2:
-                user = b"" if parts[1] == "team" else bytes.fromhex(parts[1])
+            if body is None and method is None and parts[0] == "messages" and len(parts) == 2:
+                user = bytes.fromhex(parts[1])
                 return {"messages": [{"id": i, "from_team": bool(t), "text": x, "created_at": c, "read_at": r, "done_at": d}
                                      for i, t, x, c, r, d in db.execute("SELECT id,from_team,text,created_at,read_at,done_at FROM "
                                      "support_messages WHERE user_id=? ORDER BY created_at,id", (user,))]}
@@ -369,8 +382,12 @@ class FakeHubs:
             elif parts[0] == "messages" and parts[-1] == "handled":
                 db.execute("UPDATE support_messages SET done_at=? WHERE user_id=? AND from_team=0 AND id<=? AND done_at IS NULL",
                            (now, bytes.fromhex(parts[1]), int(body)))
-            elif parts[0] in ("messages", "todos"):  # messages/done/<id>, todos/<id>
+            elif parts[0] == "messages":  # messages/done/<id>
                 db.execute("UPDATE support_messages SET done_at=? WHERE id=?", (now if body == "1" else None, int(parts[-1])))
+            elif parts[0] == "todos" and method == "DELETE":  # DELETE todos/<id>
+                db.execute("DELETE FROM todos WHERE id=?", (int(parts[-1]),))
+            elif parts[0] == "todos":  # todos/<id>
+                db.execute("UPDATE todos SET done_at=? WHERE id=?", (now if body == "1" else None, int(parts[-1])))
             else:
                 raise ValueError(suffix)
         self.on_change()
@@ -378,8 +395,7 @@ class FakeHubs:
 
     def todo(self, hub, text):
         with self.lock, self.db(hub) as db:
-            cur = db.execute("INSERT INTO support_messages (user_id,from_team,text,created_at) VALUES (X'',1,?,?)",
-                             (text, int(time.time() * 1000)))
+            cur = db.execute("INSERT INTO todos (text,created_at) VALUES (?,?)", (text, int(time.time() * 1000)))
         self.on_change()
         return {"id": cur.lastrowid}
 
@@ -433,7 +449,20 @@ class FakeServer:
             "tunnel": unit(self.boot, 38 << 20, 1),
             "yogpt": unit(time.time() - 26 * 3600, 112 << 20),
             "reserved": reserved,
+            # The last hour, a point a minute, as admin.remember keeps it.
+            "history": self.history(),
         }
+
+    def history(self):
+        if not hasattr(self, "past"):
+            r, t0 = random.Random(7), int(time.time() // 60) * 60_000
+            cpu = 20.0
+            self.past = []
+            for i in range(60):
+                cpu = min(96, max(3, cpu + r.gauss(0, 8) + (30 if i in (41, 42) else 0)))
+                self.past.append([t0 - (59 - i) * 60_000, round(cpu, 1), round(33 + r.random() * 4, 1), 24.0,
+                                  abs(r.gauss(180_000, 90_000)), abs(r.gauss(95_000, 50_000))])
+        return self.past
 
     def updates(self):
         now = time.time()
@@ -463,13 +492,14 @@ def main():
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     ap.add_argument("--demo", action="store_true", help="required: serve without Access or login, fake data only")
     ap.add_argument("--host", default="127.0.0.1")
+    ap.add_argument("--lan", action="store_true", help="allow a non-loopback --host (fake data only, no login)")
     ap.add_argument("--port", type=int, default=8099)
     ap.add_argument("--users", type=int, default=120)
     ap.add_argument("--seed", type=int, default=None, help="same world on every start")
     args = ap.parse_args()
     if not (args.demo or os.environ.get("YO_ADMIN_DEMO") == "1"):
         sys.exit("demo.py serves the admin without authentication: pass --demo (or YO_ADMIN_DEMO=1) to start it")
-    if not loopback(args.host):
+    if not loopback(args.host) and not args.lan:
         sys.exit(f"refusing {args.host}: the demo listens on a loopback address only")
 
     rng = random.Random(args.seed)
@@ -491,9 +521,6 @@ def main():
     os.makedirs(os.path.join(state, "yogpt", "live"))
     write("yogpt/live/stats.json", {"contacts": 87})
     hub_hex = lambda b: b.hex().upper()  # noqa: E731
-    write("support-marks.json", {"stars": [f"live:u:{hub_hex(live['threads'][1])}", f"live:u:{hub_hex(live['threads'][4])}",
-                                           f"live:t:{live['todo_ids']['star']}"],
-                                 "todo_user": {f"live:{live['todo_ids']['photo']}": hub_hex(live["photo_user"] or live["threads"][1])}})
     write("feedback-done.json", [])
     write("status-bot.json", {"every_minutes": 60, "baseline_users": args.users - 14})
     today = now // DAY
@@ -574,8 +601,12 @@ def main():
     admin.stats = lambda: server.stats(admin.reserved_names())
     # No Access and no login: everyone who reaches 127.0.0.1 is "demo". POSTs only from this page's own origin.
     origins = {f"http://{args.host}:{args.port}", f"http://localhost:{args.port}", f"http://127.0.0.1:{args.port}"}
+    if args.lan:  # every address of this machine on the port
+        import socket
+        origins |= {f"http://{a}:{args.port}" for a in {i[4][0] for i in socket.getaddrinfo(socket.gethostname(), None)} | {socket.gethostname()}}
     admin.access_user = lambda token: "demo@localhost"
     admin.session_valid = lambda cookie, who: True
+    origins |= set(filter(None, os.environ.get("YO_DEMO_ORIGINS", "").split()))  # e.g. a tailscale serve URL
     admin.Admin.same_origin = lambda self: self.headers.get("Origin") in origins | {None}
 
     def snapshot(timeout=3):
