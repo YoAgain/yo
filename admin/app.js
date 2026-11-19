@@ -645,14 +645,12 @@ if (document.body.classList.contains("login")) {
     // A stretch of days (Total, long): its last kept day.
     const rows = ends.map((e) => { for (let d = e; d > e - step; d--) if (kept[d]) return kept[d]; return null; });
     verData = { rows, names: ends.map((e) => (e === t ? "today" : dayName(e))), first, today: kept[t] || null };
-    // The row: one bar of today's shares (the last kept day while today has none), like Platforms.
-    const now = verData.today || [...rows].reverse().find(Boolean);
-    $("vr-bar").replaceChildren(...VKEYS.map((k, i) => {
-      if (!now?.[i]) return null;
-      const x = el("span", `v-${k}`);
-      x.style.flexGrow = now[i];
-      return x;
-    }).filter(Boolean));
+    // The row: a bar per slot like Problems, each full height: current (green) from the bottom, the rest above it, so
+    // the green is seen growing after a release.
+    const host = $("vr-bar"), W = 140, H = 28, sl = W / rows.length, top = 0;
+    const s = svg("svg", { class: "spark", viewBox: `0 0 ${W} ${H}`, preserveAspectRatio: "none" });
+    rows.forEach((r, i) => vStack(r, i * sl + sl * 0.16, sl * 0.68, H, top).forEach((x) => s.append(x)));
+    host.replaceChildren(s);
     const p = vPct(verData.today);
     $("c-vr").dataset.tip = p == null ? "" : `today: ${p} % current`;
   };
