@@ -32,8 +32,11 @@ struct SettingsView: View {
   }
   @State private var path: [Page] = []
   @State private var showingDeleteAccount = false
-  /// The first page's own height (its rows and the bar above them): the sheet's one detent while it shows.
-  @State private var fit: CGFloat?
+  /// Where the first page's rows begin and end: the sheet opens as high as them, with the list's own margin above
+  /// them repeated below (`fit`).
+  @State private var rowsTop: CGFloat?
+  @State private var rowsBottom: CGFloat?
+  private var fit: CGFloat? { rowsBottom.flatMap { bottom in rowsTop.map { bottom + $0 } } }
 
   private var currentIconAsset: String {
     AppIconPage.icons.first { $0.name == currentIconName }?.image ?? "IconStandard"
@@ -60,6 +63,7 @@ struct SettingsView: View {
               }
               .padding(.vertical, 8)
             }
+            .onGeometryChange(for: CGFloat.self) { $0.frame(in: .scrollView).minY } action: { rowsTop = $0 }
           }
           Section {
             NavigationLink(value: Page.appIcon) {
@@ -88,44 +92,43 @@ struct SettingsView: View {
               Label("Add Friends", systemImage: "person.fill.badge.plus").labelStyle(Tile(.green))
             }
             .tint(Color(.label))
+            .onGeometryChange(for: CGFloat.self) { $0.frame(in: .scrollView).maxY } action: { rowsBottom = $0 }
           }
         }
       }
       .listSectionSpacing(.compact)
-      // A height detent counts without the home indicator's strip: the rows and the bar above them only.
-      .onScrollGeometryChange(for: CGFloat.self) { geometry in
-        geometry.contentSize.height + geometry.contentInsets.top
-      } action: { _, height in
-        guard path.isEmpty, height > 0, abs(height - (fit ?? 0)) > 1 else { return }
-        fit = height
-      }
+      // It fits, so it holds still (the rows' places stay the sheet's height).
+      .scrollBounceBehavior(.basedOnSize)
+      // No title on the first page: its rows start at the sheet's top. The pages pushed in keep their bar.
+      .toolbar(.hidden, for: .navigationBar)
       .task { await accounts.refreshSupport() }
       .onAppear { currentIconName = UIApplication.shared.alternateIconName }
       .navigationDestination(for: Page.self) { page in
-        switch page {
-        case .account:
-          if let account = accounts.account {
-            AccountPage(
-              account: account, hasRecoveryKey: hasRecoveryKey, dismissSettings: { dismiss() },
-              openSecurity: { path.append(.signInSecurity) }, showingDelete: $showingDeleteAccount)
+        Group {
+          switch page {
+          case .account:
+            if let account = accounts.account {
+              AccountPage(
+                account: account, hasRecoveryKey: hasRecoveryKey, dismissSettings: { dismiss() },
+                openSecurity: { path.append(.signInSecurity) }, showingDelete: $showingDeleteAccount)
+            }
+          case .signInSecurity:
+            if let account = accounts.account {
+              AccountPage(
+                account: account, hasRecoveryKey: hasRecoveryKey, securityOnly: true, dismissSettings: { dismiss() },
+                showingDelete: $showingDeleteAccount)
+            }
+          case .appIcon: AppIconPage()
+          case .help: HelpPage()
+          case .status: StatusPage()
+          case .contacts: ContactSecurityPage()
+          case .licenses: LicensesPage()
+          case .code:
+            if let account = accounts.account { YourCodePage(name: account.username) }
           }
-        case .signInSecurity:
-          if let account = accounts.account {
-            AccountPage(
-              account: account, hasRecoveryKey: hasRecoveryKey, securityOnly: true, dismissSettings: { dismiss() },
-              showingDelete: $showingDeleteAccount)
-          }
-        case .appIcon: AppIconPage()
-        case .help: HelpPage()
-        case .status: StatusPage()
-        case .contacts: ContactSecurityPage()
-        case .licenses: LicensesPage()
-        case .code:
-          if let account = accounts.account { YourCodePage(name: account.username) }
         }
+        .toolbar(.visible, for: .navigationBar)
       }
-      .navigationTitle("Yodentity")
-      .navigationBarTitleDisplayMode(.inline)
     }
     .hitchScene("settings root")
     .onChange(of: path) { _, path in

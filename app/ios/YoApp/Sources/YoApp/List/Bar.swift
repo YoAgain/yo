@@ -57,8 +57,9 @@ struct LiveBar: View, @MainActor Equatable {
       outgoingItems: bar.outgoing.isEmpty ? (bar.sendingBatch?.items ?? bar.sentStack) : bar.outgoing,
       undoAvailable: !bar.outgoing.isEmpty, sendSeconds: bar.seconds, stop: stop,
       media: friend.request ? [] : media, mediaMarkCount: bar.modelMarkCount, mediaSign: bar.modelMediaSign, yo: friend.request ? nil : yo, hint: hint, hold: hold, cancelHold: cancelHold, holdDrag: holdDrag, press: press, flyBegan: flyBegan, view: view, faded: friend.gone && !bar.hasNotice,
-      icon: friend.group == nil ? nil : "person.3.fill", line: friend.request ? .title : bar.modelLine,
-      action: action)
+      // A request's line brings its own "#" ("Yo Request: #FAMILIE") and is shown whole, smaller where it must be.
+      icon: friend.group == nil || friend.request ? nil : "person.3.fill", line: friend.request ? .title : bar.modelLine,
+      whole: friend.request, action: action)
       // Gone: still their name (whose bar it is), faded; a tap says "Not on Yo".
       .accessibilityValue(friend.gone ? productText(text: .notOnYo, lang: .english) : "")
   }
@@ -173,6 +174,8 @@ struct RowButton: View {
   /// What the bar's one line tells (the core's `ListLine`): the title, or the Yos that came after it. A bar never
   /// grows; a group's senders share it in two small lines.
   var line: ListLine = .title
+  /// The title is never cut: where it does not fit at the bar's size, the small size (a request's line).
+  var whole = false
   let action: (CGPoint?) -> Void
   @State private var stationaryTouch = BarTouchGate()
   @State private var touchOrigin: CGPoint?
@@ -193,8 +196,9 @@ struct RowButton: View {
     sendSeconds: Double = FriendList.sendDelay, stop: @escaping () -> Void = {},
     media: [Arrival] = [], mediaMarkCount: Int = 0, mediaSign: String = "", yo: FriendList.Landing? = nil, hint: String? = nil, hold: ((Bool, CGPoint?) -> Void)? = nil, cancelHold: @escaping () -> Void = {}, holdDrag: @escaping (CGFloat, CGFloat) -> Void = { _, _ in }, press: @escaping (Bool) -> Void = { _ in }, flyBegan: @escaping (UUID) -> Void = { _ in },
     view: @escaping (ThumbnailTouch) -> Void = { _ in }, faded: Bool = false, icon: String? = nil,
-    line: ListLine = .title, action: @escaping (CGPoint?) -> Void
+    line: ListLine = .title, whole: Bool = false, action: @escaping (CGPoint?) -> Void
   ) {
+    self.whole = whole
     self.icon = icon
     self.line = line
     self.title = title
@@ -355,8 +359,11 @@ struct RowButton: View {
         let groupSign = title == BarSendText.sentYo ? nil : icon
         BarRow(lead: room.lead, trail: room.trail) {
           // A group: "#" as part of its name ("#Hey"), in the name's own font (usernames can't hold "#" or "@").
-          SteadyText(title == BarSendText.sentYo ? productSendWords(mark: productCounted(count: Int64(count)), sending: sendingMedia, lang: .english)
-            : groupSign != nil ? "#" + title : title)
+          let text = title == BarSendText.sentYo
+            ? productSendWords(mark: productCounted(count: Int64(count)), sending: sendingMedia, lang: .english)
+            : groupSign != nil ? "#" + title : title
+          SteadyText(text)
+          if whole { SteadyText(text).font(.yo(Metrics.rowSmallFont)) }
         }
       }
     }
