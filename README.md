@@ -154,6 +154,7 @@ Workflows ([.github/workflows](.github/workflows)):
 
 - **iOS**: push → internal TestFlight · RC release (`v1.0.0-RC`) → public TestFlight · stable release → App Store (by hand for now)
 - **Android**: push → build · RC release → test build · stable release → Play Store (by hand for now)
+- **CLI**: push → binary artifact · release → binary attached to the release
 - **Test**: every push → Rust tests, lint · **Fuzz**: push → 1 min, nightly → 15 min · **Dependencies**: monthly → pull request
 
 ```sh

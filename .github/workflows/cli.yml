@@ -1,0 +1,59 @@
+name: CLI
+
+# The `yo` CLI (app/cli) as a Linux x86_64 binary, like the server it runs on: every push → workflow artifact,
+# a published release → `yo-linux-x86_64` and `skills.tar.gz` attached to it.
+on:
+  push:
+    paths: ['app/cli/**', 'core/**', 'skills/**', 'Cargo.toml', 'Cargo.lock', 'rust-toolchain.toml', '.github/workflows/cli.yml']
+  release:
+    types: [published]
+permissions:
+  contents: read
+concurrency:
+  group: cli-${{ github.ref }}
+  cancel-in-progress: true
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: protoc (libsignal builds its protobufs)
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq protobuf-compiler
+      - name: Toolchain (rust-toolchain.toml)
+        run: rustup show active-toolchain
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: cargo-cli-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml') }}
+      # YO_BUILD: the build's UTC minute, sent as the CLI's Yo-App (app/cli/README.md).
+      - name: Build
+        run: YO_BUILD=$(date -u +%Y%m%d%H%M) cargo build --release --locked -p yo-cli
+      - name: Package
+        run: |
+          mkdir dist
+          cp target/release/yo dist/yo-linux-x86_64
+          tar -czf dist/skills.tar.gz skills
+      - uses: actions/upload-artifact@v4
+        with:
+          name: yo-cli
+          path: dist/
+
+  release:
+    if: github.event_name == 'release'
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: yo-cli
+          path: dist
+      - name: Attach to the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.event.release.tag_name }}
+        run: gh release upload "$TAG" dist/yo-linux-x86_64 dist/skills.tar.gz --clobber --repo "$GITHUB_REPOSITORY"
