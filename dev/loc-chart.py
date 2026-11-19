@@ -123,7 +123,7 @@ def main():
     apps = app_counts()
     data = {"days": [code(c) for _, c in points],
             "parts": [["Core", today["Core"]], ["iOS", apps["iOS"]], ["Android", apps["Android"]],
-                      ["Server", today["Hub"] + today["Admin"]], ["YoGPT", apps["YoGPT"]], ["Tests", today["Tests"]]]}
+                      ["Server", today["Hub"] + today["Admin"]], ["CLI", apps["YoGPT"]], ["Tests", today["Tests"]]]}
     page = (ROOT / "dev" / "loc-chart.html").read_text().replace("DATA", json.dumps(data))
     browser = shutil.which("chromium") or shutil.which("google-chrome-stable") or shutil.which("google-chrome")
     if not browser:
@@ -133,7 +133,7 @@ def main():
         html.write_text(page)
         out = ROOT / "dev" / "loc-chart.png"
         subprocess.run([browser, "--headless=new", "--disable-gpu", "--hide-scrollbars",
-                        "--force-device-scale-factor=2", "--window-size=900,390", f"--screenshot={out}", str(html)],
+                        "--force-device-scale-factor=2", "--window-size=900,370", f"--screenshot={out}", str(html)],
                        check=True, capture_output=True, timeout=60)
     readme = ROOT / "README.md"
     text = readme.read_text()
