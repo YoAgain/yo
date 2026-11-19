@@ -232,6 +232,8 @@ final class Camera: NSObject, @unchecked Sendable {
       guard session.isRunning, movieOutput.connection(with: .video) != nil, !movieOutput.isRecording, !videoActive
       else { return }
       orient()  // the whole video keeps this rotation
+      // The session sets the audio session up again as it records: the zoom's tick stays allowed.
+      _ = Diagnostics.attempt { try AVAudioSession.sharedInstance().setAllowHapticsAndSystemSoundsDuringRecording(true) }
       finishedAlone = nil
       videoActive = true
       let file = FileManager.default.temporaryDirectory.appending(path: "\(UUID().uuidString).mov")
@@ -270,6 +272,8 @@ final class Camera: NSObject, @unchecked Sendable {
     }
     // Music or a call keeps playing while the camera is open.
     session.configuresApplicationAudioSessionToMixWithOthers = true
+    // A recording mutes haptics unless allowed: the zoom's tick while filming.
+    _ = Diagnostics.attempt { try AVAudioSession.sharedInstance().setAllowHapticsAndSystemSoundsDuringRecording(true) }
     addMicrophone()
     if session.canAddOutput(photoOutput) { session.addOutput(photoOutput) }
     compensateNot()
