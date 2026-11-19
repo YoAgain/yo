@@ -1,33 +1,34 @@
 <!doctype html><html><head><meta charset="utf-8"><style>
 *{margin:0;box-sizing:border-box}
 body{width:900px;background:#0d1117;color:#e6edf3;font:14px -apple-system,"Segoe UI",system-ui,sans-serif;padding:28px 32px}
-h3{font-weight:600;font-size:14px;color:#8b949e;margin-bottom:14px}
-section{margin-bottom:34px}
+h3{font-weight:600;font-size:15px;color:#8b949e;margin-bottom:14px}
+section{margin-bottom:30px}
 svg text{fill:#8b949e;font:12px -apple-system,system-ui,sans-serif}
-.bar{display:flex;height:30px;border-radius:5px;overflow:hidden;margin-bottom:6px}.bar i{display:flex;align-items:center;justify-content:center;font-style:normal;font-size:13px;color:#fff;white-space:nowrap;overflow:hidden}.bar i b{font-weight:600}.under{display:flex;font-size:12px;color:#8b949e}.under span{text-align:center;white-space:nowrap}
-.leg{display:flex;gap:18px;font-size:13px;color:#8b949e}.leg b{color:#e6edf3;font-weight:600}
-.dot{display:inline-block;width:9px;height:9px;border-radius:2px;margin-right:6px}
+.bar{display:flex;height:30px;border-radius:6px;overflow:hidden;gap:2px;margin-bottom:12px}
+.leg{position:relative;height:44px;font-size:14px;color:#8b949e}.leg span{position:absolute;white-space:nowrap;transform:translateX(-50%)}.leg b{color:#e6edf3;font-weight:600;margin-left:4px}
+.dot{display:inline-block;width:10px;height:10px;border-radius:3px;margin-right:7px;vertical-align:-1px}
 </style></head><body>
-<section id="s1"><h3>Lines of code, without tests</h3><svg id="line" width="836" height="190"></svg></section>
-<section id="s2"><h3 id="h2"></h3><div class="bar" id="pb"></div><div class="under" id="pl"></div></section>
-<section id="s3" style="margin-bottom:0"><h3 id="h3"></h3><div class="bar" id="cb"></div><div class="under" id="cl"></div></section>
+<section><h3>Lines of code per day, without tests</h3><svg id="line" width="836" height="180"></svg></section>
+<section style="margin-bottom:0"><h3 id="h"></h3><div class="bar" id="bar"></div><div class="leg" id="leg"></div></section>
 <script>
 const D=DATA,k=n=>Math.round(n/1000)+'k';
-const W=836,H=190,L=26,R=44,T=30,B=26,peak=Math.max(...D.days);
+const W=836,H=180,L=26,R=44,T=28,B=26,peak=Math.max(...D.days);
 const x=i=>L+i*(W-L-R)/(D.days.length-1), y=v=>T+(1-v/peak)*(H-T-B);
-const pts=D.days.map((v,i)=>`${x(i)},${y(v)}`).join(' ');
 let s=`<line x1="${L}" x2="${W-R}" y1="${H-B}" y2="${H-B}" stroke="#30363d"/>`;
-s+=`<polyline points="${pts}" fill="none" stroke="#9b59b6" stroke-width="3" stroke-linejoin="round" stroke-linecap="round"/>`;
-D.days.forEach((v,i)=>{s+=`<circle cx="${x(i)}" cy="${y(v)}" r="3.5" fill="#9b59b6"/><text x="${x(i)}" y="${H-8}" text-anchor="middle">Day ${i+1}</text><text x="${x(i)}" y="${y(v)-10}" text-anchor="middle" style="fill:#e6edf3;font-weight:600">${k(v)}</text>`});
+s+=`<polyline points="${D.days.map((v,i)=>`${x(i)},${y(v)}`).join(' ')}" fill="none" stroke="#9b59b6" stroke-width="3" stroke-linejoin="round"/>`;
+const last=D.days.length-1;
+D.days.forEach((v,i)=>{s+=`<circle cx="${x(i)}" cy="${y(v)}" r="3.5" fill="#9b59b6"/><text x="${x(i)}" y="${H-8}" text-anchor="middle">Day ${i+1}</text>`;
+ if(i==0||i==last)s+=`<text x="${x(i)}" y="${y(v)-10}" text-anchor="middle" style="fill:#e6edf3;font-weight:600;font-size:14px">${k(v)}</text>`});
 document.getElementById('line').innerHTML=s;
-const C=['#9b59b6','#e67e22','#3498db','#2ecc71','#7f8c8d'];
-function share(bar,leg,h,title,items){const t=items.reduce((a,[,v])=>a+v,0);
- document.getElementById(h).textContent=`${title} · ${k(t)}`;
- // The label centred in its part; shortened until it fits (about 8 px per character): name and size, the size
- // alone, the name's first letter.
- const label=(nm,v)=>{const room=v/t*836-12;
-   for(const c of [`<b>${nm}</b>&nbsp;${k(v)}`,`${k(v)}`,`<b>${nm[0]}</b>`]){if(c.replace(/<[^>]+>/g,'').replace('&nbsp;',' ').length*10<=room)return c}return ''};
- document.getElementById(bar).innerHTML=items.map(([nm,v],i)=>`<i style="flex:${v};background:${C[i]}">${label(nm,v)}</i>`).join('');
- document.getElementById(leg).innerHTML='';}
-share('pb','pl','h2','By part',D.parts); share('cb','cl','h3','The client by app',D.apps);
+const C={Core:'#9b59b6',iOS:'#e67e22',Android:'#2ecc71',Server:'#3498db',YoGPT:'#f1c40f',Tests:'#59636e'};
+const t=D.parts.reduce((a,[,v])=>a+v,0);
+document.getElementById('h').textContent=`Today · ${k(t)}`;
+document.getElementById('bar').innerHTML=D.parts.map(([n,v])=>`<i style="flex:${v};background:${C[n]}"></i>`).join('');
+const leg=document.getElementById('leg');let at=0;const rows=[[],[]];
+// Each label centred under its own part; a label that would touch its neighbour drops to the second row.
+D.parts.forEach(([n,v])=>{const mid=(at+v/2)/t*836;at+=v;const e=document.createElement('span');
+ e.innerHTML=`<i class="dot" style="background:${C[n]}"></i>${n}<b>${k(v)}</b>`;leg.appendChild(e);
+ const w=e.offsetWidth,c=Math.min(Math.max(mid,w/2),836-w/2),l=c-w/2,r=c+w/2;
+ const row=rows[0].some(([a,b])=>l<b+12&&r>a-12)?1:0;rows[row].push([l,r]);
+ e.style.left=c+'px';e.style.top=row*22+'px'});
 </script></body></html>

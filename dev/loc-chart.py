@@ -2,7 +2,7 @@
 """Draw the lines-of-code chart for README.md: python3 -I dev/loc-chart.py (stdlib and Chromium).
 
 Writes the numbers into dev/loc-chart.html and renders it with headless Chromium to dev/loc-chart.png, which the README
-shows: a line of lines per day without tests, and today's code by part and the client by app as shares.
+shows: a line of lines per day without tests, and one bar of today's code by part, each label under its part.
 
 Each day counts the tree of main's last commit that day (first parents, UTC, clock regressions clamped): lines of
 source per part (Hub, Admin, Core, Apps), blanks and comments included, binary files skipped. Test code counts apart
@@ -112,29 +112,6 @@ def app_counts():
     return counts
 
 
-def table(head, cells):
-    """A one-row Markdown table: the heads, then the numbers in whole thousands, right-aligned."""
-    return "\n".join([
-        "| " + " | ".join(head) + " |",
-        "|" + "|".join("---:" for _ in head) + "|",
-        "| " + " | ".join(cells) + " |",
-    ])
-
-
-def tables(points):
-    """Three small tables: lines per day without tests, today's code by part, today's client by app."""
-    k = lambda n: f"{round(n / 1000)}k"
-    first = points[0][0]
-    code = lambda counts: sum(n for kind, n in counts.items() if kind != "Tests")
-    days = table([f"Day {(day - first).days + 1}" for day, _ in points], [k(code(c)) for _, c in points])
-    today = points[-1][1]
-    parts = table([*KINDS, "Total"], [k(today[kind]) for kind in KINDS] + [k(sum(today.values()))])
-    apps = app_counts()
-    client = table([*apps, "Total"], [k(n) for n in apps.values()] + [k(sum(apps.values()))])
-    return (f"Lines of code on `main`, without tests, day by day:\n\n{days}\n\n"
-            f"Today, by part:\n\n{parts}\n\nThe client today, by app (without tests):\n\n{client}")
-
-
 def main():
     import json
     import os
@@ -143,8 +120,10 @@ def main():
     points = history()
     code = lambda counts: sum(n for kind, n in counts.items() if kind != "Tests")
     today = points[-1][1]
-    data = {"days": [code(c) for _, c in points], "parts": [[k, today[k]] for k in KINDS],
-            "apps": [[k, v] for k, v in app_counts().items()]}
+    apps = app_counts()
+    data = {"days": [code(c) for _, c in points],
+            "parts": [["Core", today["Core"]], ["iOS", apps["iOS"]], ["Android", apps["Android"]],
+                      ["Server", today["Hub"] + today["Admin"]], ["YoGPT", apps["YoGPT"]], ["Tests", today["Tests"]]]}
     page = (ROOT / "dev" / "loc-chart.html").read_text().replace("DATA", json.dumps(data))
     browser = shutil.which("chromium") or shutil.which("google-chrome-stable") or shutil.which("google-chrome")
     if not browser:
@@ -154,7 +133,7 @@ def main():
         html.write_text(page)
         out = ROOT / "dev" / "loc-chart.png"
         subprocess.run([browser, "--headless=new", "--disable-gpu", "--hide-scrollbars",
-                        "--force-device-scale-factor=2", "--window-size=900,450", f"--screenshot={out}", str(html)],
+                        "--force-device-scale-factor=2", "--window-size=900,390", f"--screenshot={out}", str(html)],
                        check=True, capture_output=True, timeout=60)
     readme = ROOT / "README.md"
     text = readme.read_text()
