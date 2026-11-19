@@ -5,6 +5,8 @@ import UserNotifications
 import YoCore
 
 struct NotificationsBar: View {
+  /// Camera mode: no bar, the view itself stays (the list keeps its first child).
+  var hidden = false
   @Environment(\.scenePhase) private var scenePhase
   @State private var denied = false
   /// Asked in this launch: a "Don't Allow" just given is respected, the bar waits for the next launch (no nudging).
@@ -12,7 +14,7 @@ struct NotificationsBar: View {
 
   var body: some View {
     VStack(spacing: 0) {
-      if denied {
+      if denied && !hidden {
         Button {
           if let url = URL(string: UIApplication.openNotificationSettingsURLString) {
             UIApplication.shared.open(url)

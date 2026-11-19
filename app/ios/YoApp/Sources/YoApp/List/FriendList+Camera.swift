@@ -247,6 +247,11 @@ extension FriendList {
 
   func cameraSwitched(_ on: Bool) {
     cameraOn = on
+    // A list at its top stays there: the first bar never moves on the switch.
+    if !scrolled {
+      var instant = Transaction(); instant.disablesAnimations = true
+      withTransaction(instant) { position.scrollTo(edge: .top) }
+    }
     if on { hintNeeded = true }
     HitchScene.event("edge wipe", then: on ? "camera" : "list")
     publish(listModel.camera(now: listNow, on: on))

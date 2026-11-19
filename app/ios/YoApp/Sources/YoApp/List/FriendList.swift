@@ -377,7 +377,9 @@ struct FriendList: View {
     NavigationStack {
       ScrollView {
         LazyVStack(spacing: 0) {
-          if !cameraOn { NotificationsBar() }
+          // Always in the stack, empty in camera mode: taking the stack's first child out on the switch lost the
+          // scroll view's anchor, and the first bar slid up out of sight.
+          NotificationsBar(hidden: cameraOn)
           // The shade in the data: `Friend`'s == is its key alone, so after a reorder the ForEach kept old shades.
           ForEach(shadedFriends, id: \.friend.key) { shaded in
             let friend = shaded.friend

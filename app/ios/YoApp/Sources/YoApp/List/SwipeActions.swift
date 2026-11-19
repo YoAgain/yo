@@ -86,7 +86,8 @@ struct SwipeActions<Content: View>: View {
         }
       )
       .onChange(of: enabled) { _, on in
-        if !on { close() }
+        // Only an open bar closes: an animated close on every bar put the camera switch itself in an animation.
+        if !on && open { close() }
       }
       .accessibilityActions {
         if enabled && request == nil {
