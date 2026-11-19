@@ -1,7 +1,9 @@
 //! The list's presentation model (`yo_product::list`): synchronous, safe to call on the UI thread.
 
 use std::sync::Mutex;
-use yo_product::list::{self, Deletion, Friend, Input, Kind, Row, Sender, Snapshot};
+use yo_product::line::{self as flow, Flow, FlowWidths};
+use yo_product::list::{self, Deletion, Friend, Input, Kind, Line, Row, Sender, Snapshot};
+use yo_product::Language;
 
 #[uniffi::remote(Enum)]
 #[uniffi(name = "ListKind")]
@@ -39,6 +41,15 @@ pub struct Row {
     pub clock_running: bool,
     pub media_sign: String,
     pub mark_count: u32,
+    pub line: Line,
+}
+
+#[uniffi::remote(Enum)]
+#[uniffi(name = "ListLine")]
+pub enum Line {
+    Title,
+    Arrival { count: u32, name: String },
+    Senders { senders: Vec<Sender> },
 }
 
 #[uniffi::remote(Record)]
@@ -47,7 +58,39 @@ pub struct Sender {
     pub user: String,
     pub name: String,
     pub count: u32,
-    pub elapsed: u64,
+}
+
+#[uniffi::remote(Record)]
+#[uniffi(name = "ListFlow")]
+pub struct Flow {
+    pub prefix: String,
+    pub tokens: Vec<String>,
+    pub separator: String,
+    pub comma: String,
+    pub more: Vec<String>,
+}
+
+#[uniffi::remote(Record)]
+#[uniffi(name = "ListFlowWidths")]
+pub struct FlowWidths {
+    pub prefix: f32,
+    pub tokens: Vec<f32>,
+    pub separator: f32,
+    pub comma: f32,
+    pub more: Vec<f32>,
+}
+
+/// A group bar's senders (`ListLine.senders`, newest first) as the pieces to measure at the bar's small size.
+#[uniffi::export]
+pub fn list_sender_flow(senders: Vec<Sender>, lang: Language) -> Flow {
+    let senders: Vec<_> = senders.into_iter().map(|s| (s.name, s.count)).collect();
+    flow::sender_flow(&senders, lang)
+}
+
+/// The two small lines (the second may be empty) for the room the bar's words have.
+#[uniffi::export]
+pub fn list_flow_two_lines(flow: Flow, widths: FlowWidths, room: f32) -> Vec<String> {
+    flow::flow_two_lines(&flow, &widths, room).into()
 }
 
 #[uniffi::remote(Record)]

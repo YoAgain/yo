@@ -94,7 +94,7 @@ pub enum Input {
         id: String,
         kinds: Vec<Kind>,
     },
-    /// A group reply keeps its sender lines expanded for another solid period.
+    /// A group reply keeps its Yos on the bar for another solid period.
     KeepAlive(String),
     Delete(String),
     UndoDelete,
@@ -122,13 +122,27 @@ pub struct Row {
     pub clock_running: bool,
     pub media_sign: String,
     pub mark_count: u32,
+    /// What the bar's one line tells: the newest of a send and a Yo.
+    pub line: Line,
 }
+/// A bar is always one line high and tells the newest: what was sent (or the name) in `title`, or the Yos that
+/// came after it. When the Yos are over, it is the name again (never the older send).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Line {
+    /// `title` at the bar's size: the name, a send's words, a notice, "Recording", a request.
+    Title,
+    /// One sender: "3× Yo from MIA" (`arrival_lines`) at the bar's size.
+    Arrival { count: u32, name: String },
+    /// A group's two or more senders since it last showed its name, newest first, flowing over two lines at the
+    /// small size (`line::sender_flow`, `line::flow_two_lines`).
+    Senders { senders: Vec<Sender> },
+}
+/// Who sent a group's Yos since its bar last showed its name (or the user's own send), oldest first.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Sender {
     pub user: String,
     pub name: String,
     pub count: u32,
-    pub elapsed: u64,
 }
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Deletion {
@@ -171,6 +185,18 @@ struct State {
     media: Vec<Kind>,
     sent: Option<Sent>,
     outgoing: Option<(Kind, u32, u64)>,
+    /// Yos since the bar last showed its name or the user's own send (a friend's count).
+    heard: u32,
+    /// When a Yo last came and when the bar last told of a send or notice (`List::sequence`): the newer wins.
+    arrival_at: u64,
+    told_at: u64,
+}
+impl State {
+    /// The bar shows its name (or the user's send) again: who sent what starts over.
+    fn forget_senders(&mut self) {
+        self.senders.clear();
+        self.heard = 0;
+    }
 }
 
 #[derive(Default)]
@@ -253,7 +279,9 @@ impl List {
             }
             Input::Received { id, kind, token, sender } => {
                 if self.friends.contains_key(&id) {
+                    self.sequence = self.sequence.saturating_add(1);
                     let state = self.states.entry(id.clone()).or_default();
+                    state.arrival_at = self.sequence;
                     let total = state
                         .run
                         .as_ref()
@@ -262,16 +290,23 @@ impl List {
                     let first =
                         state.run.as_ref().filter(|r| total > 1 && r.count > 0).map_or(token, |r| r.token.clone());
                     if total == 1 {
-                        state.senders.clear();
+                        state.forget_senders();
                     }
+                    state.heard = state.heard.saturating_add(1);
                     if let Some(user) = sender {
-                        if let Some(s) = state.senders.iter_mut().find(|s| s.user == user) {
-                            s.count = s.count.saturating_add(1);
-                            s.elapsed = 0;
-                        } else {
-                            let name = self.names.get(&user).cloned().unwrap_or_else(|| "?".into());
-                            state.senders.push(Sender { user, name, count: 1, elapsed: 0 });
-                        }
+                        // The newest sender last.
+                        let sender = match state.senders.iter().position(|s| s.user == user) {
+                            Some(index) => {
+                                let mut s = state.senders.remove(index);
+                                s.count = s.count.saturating_add(1);
+                                s
+                            }
+                            None => {
+                                let name = self.names.get(&user).cloned().unwrap_or_else(|| "?".into());
+                                Sender { user, name, count: 1 }
+                            }
+                        };
+                        state.senders.push(sender);
                     }
                     state.run = Some(Run {
                         waiting_order: true,
@@ -290,9 +325,12 @@ impl List {
                 }
             }
             Input::SendStarted { id, kind, undo_ms } => {
+                self.sequence = self.sequence.saturating_add(1);
                 let state = self.states.entry(id.clone()).or_default();
                 let count = state.outgoing.map_or(1, |(_, n, _)| n.saturating_add(1));
                 state.outgoing = Some((kind, count, self.now.saturating_add(undo_ms)));
+                state.told_at = self.sequence;
+                state.forget_senders();
                 self.tap_lock = Some((id, self.now.saturating_add(SENT_MS)));
             }
             Input::SendFinished { id, kind } => {
@@ -345,10 +383,18 @@ impl List {
                 self.proposed.retain(|key| key != &id);
             }
             Input::MediaSeen(id) => {
-                self.states.entry(id).or_default().media.clear();
+                let state = self.states.entry(id).or_default();
+                state.media.clear();
+                if state.run.is_none() {
+                    state.forget_senders();
+                }
             }
             Input::MediaChanged { id, kinds } => {
-                self.states.entry(id).or_default().media = kinds.into_iter().filter(|kind| *kind != Kind::Yo).collect();
+                let state = self.states.entry(id).or_default();
+                state.media = kinds.into_iter().filter(|kind| *kind != Kind::Yo).collect();
+                if state.run.is_none() && state.media.is_empty() {
+                    state.forget_senders();
+                }
             }
             Input::KeepAlive(id) => {
                 if let Some(run) = self.states.entry(id).or_default().run.as_mut() {
@@ -393,6 +439,8 @@ impl List {
         let state = self.states.entry(id.clone()).or_default();
         let count = state.sent.as_ref().filter(|s| s.text == text).map_or(1, |s| s.count.saturating_add(1));
         state.sent = Some(Sent { text, count, until: self.now.saturating_add(SENT_MS), rise, sequence: self.sequence });
+        state.told_at = self.sequence;
+        state.forget_senders();
         self.tap_lock = Some((id, self.now.saturating_add(SENT_MS)));
     }
     fn rise(&mut self, id: String) {
@@ -446,9 +494,6 @@ impl List {
                 }
             }
             if watched || seen {
-                for sender in &mut state.senders {
-                    sender.elapsed = sender.elapsed.saturating_add(elapsed).min(YO_SOLID_MS + YO_FADE_MS);
-                }
                 if let Some(run) = &mut state.run {
                     run.elapsed = run.elapsed.saturating_add(elapsed);
                     run.seen |= run.elapsed >= YO_SEEN_MS;
@@ -459,7 +504,9 @@ impl List {
                         .saturating_sub(removed.min(u64::from(run.solid_count.saturating_sub(1))) as u32);
                     if run.elapsed >= Self::fade_start(run).saturating_add(YO_FADE_MS) {
                         state.run = None;
-                        state.senders.clear();
+                        if state.media.is_empty() {
+                            state.forget_senders();
+                        }
                     }
                 }
             }
@@ -545,8 +592,12 @@ impl List {
                 let s = self.states.get(id).unwrap_or(&empty);
                 let mut title = f.name.clone();
                 let mut count = 1;
+                // A Yo came after the last send or notice: that one is over for the bar, whatever its timer.
+                let arrival_newer = s.arrival_at >= s.told_at;
                 if let Some(sent) = &s.sent {
                     next.push(sent.until);
+                }
+                if let Some(sent) = s.sent.as_ref().filter(|_| !arrival_newer) {
                     title = sent.text.clone();
                     count = sent.count;
                     if title == Text::SentPhoto.get(Language::English)
@@ -555,7 +606,7 @@ impl List {
                         title = Text::SentYo.get(Language::English).into();
                     }
                 }
-                if let Some((_, n, _)) = s.outgoing {
+                if let Some((_, n, _)) = s.outgoing.filter(|_| !arrival_newer) {
                     title = Text::SentYo.get(Language::English).into();
                     count = n;
                 }
@@ -578,13 +629,6 @@ impl List {
                         && !f.request
                         && !run.is_some_and(|r| r.waiting_order));
                 if clock_running {
-                    for sender in &s.senders {
-                        let boundary =
-                            if sender.elapsed < YO_SOLID_MS { YO_SOLID_MS } else { YO_SOLID_MS + YO_FADE_MS };
-                        if sender.elapsed < boundary {
-                            next.push(self.now.saturating_add(boundary - sender.elapsed));
-                        }
-                    }
                     if let Some(r) = run {
                         let fade = Self::fade_start(r);
                         let boundary = if r.elapsed < YO_SOLID_MS {
@@ -597,7 +641,35 @@ impl List {
                         next.push(self.now.saturating_add(boundary.saturating_sub(r.elapsed)));
                     }
                 }
+                let mark_count = if f.request {
+                    0
+                } else {
+                    run.filter(|r| r.elapsed < Self::fade_start(r))
+                        .map_or(0, |r| r.count)
+                        .max(s.media.len().min(u32::MAX as usize) as u32)
+                };
+                let line = if f.request
+                    || self.recording.as_ref() == Some(id)
+                    || !arrival_newer
+                    || (run.is_none() && s.media.is_empty())
+                {
+                    Line::Title
+                } else if f.group && s.senders.len() > 1 {
+                    Line::Senders { senders: s.senders.iter().rev().cloned().collect() }
+                } else {
+                    let newest = s.senders.last().filter(|_| f.group);
+                    Line::Arrival {
+                        // Photos waiting count as Yos.
+                        count: if s.media.is_empty() {
+                            newest.map_or(s.heard, |sender| sender.count).max(1)
+                        } else {
+                            mark_count.max(1)
+                        },
+                        name: newest.map_or_else(|| f.name.clone(), |sender| sender.name.clone()),
+                    }
+                };
                 Some(Row {
+                    line,
                     clock_running,
                     id: id.clone(),
                     title,
@@ -620,13 +692,7 @@ impl List {
                     yo_token: run.map_or(String::new(), |r| r.token.clone()),
                     fade_elapsed: run
                         .and_then(|r| (r.elapsed >= Self::fade_start(r)).then(|| r.elapsed - Self::fade_start(r))),
-                    mark_count: if f.request {
-                        0
-                    } else {
-                        run.filter(|r| r.elapsed < Self::fade_start(r))
-                            .map_or(0, |r| r.count)
-                            .max(s.media.len().min(u32::MAX as usize) as u32)
-                    },
+                    mark_count,
                     media_sign: if f.request {
                         String::new()
                     } else {
@@ -1166,32 +1232,136 @@ mod tests {
         assert_eq!(before.senders[0].name, "?");
         l.apply(1000, Input::SenderNamed { user: "one".into(), name: "KNOWN".into() });
         let after = row(&l, "b");
-        assert_eq!(after.senders[0].name, "KNOWN");
-        assert_eq!(after.senders[0].count, 2);
-        assert_eq!(after.senders[0].elapsed, before.senders[0].elapsed);
-        assert_eq!(after.senders[1].name, "?");
+        // The newest sender last: "one" sent again after "two".
+        assert_eq!(after.senders[1].name, "KNOWN");
+        assert_eq!(after.senders[1].count, 2);
+        assert_eq!(after.senders[0].name, "?");
         assert_eq!(after.yo_count, before.yo_count);
         l.apply(1000, Input::SenderNamed { user: "two".into(), name: "KNOWN".into() });
         assert_eq!(row(&l, "b").senders.len(), 2, "same names retain separate identities");
     }
 
-    #[test]
-    fn group_senders_use_the_same_viewport_clock() {
-        let mut l = model();
-        l.apply(0, Input::Received { id: "b".into(), kind: Kind::Yo, token: "1".into(), sender: Some("ONE".into()) });
-        l.apply(300, Input::Tick);
+    fn group_model() -> List {
+        let mut list = List::new();
+        let mut rows = friends(&["a", "g"]);
+        rows[1].group = true;
+        rows[1].name = "BOTS".into();
+        list.apply(0, Input::Friends(rows));
+        list.apply(0, Input::RowsVisible(vec!["a".into(), "g".into()]));
+        for (user, name) in [("u1", "MIA"), ("u2", "TOM"), ("u3", "IDA")] {
+            list.apply(0, Input::SenderNamed { user: user.into(), name: name.into() });
+        }
+        list
+    }
+    fn group_yo(at: u64, l: &mut List, user: &str) {
         l.apply(
-            1000,
-            Input::Received { id: "b".into(), kind: Kind::Yo, token: "2".into(), sender: Some("TWO".into()) },
+            at,
+            Input::Received { id: "g".into(), kind: Kind::Yo, token: format!("{user}{at}"), sender: Some(user.into()) },
         );
-        l.apply(1300, Input::Tick);
-        l.apply(1500, Input::Camera(true));
-        l.apply(100_000, Input::Tick);
-        let senders = row(&l, "b").senders;
-        assert_eq!(senders[0].elapsed, 900);
-        assert_eq!(senders[1].elapsed, 200);
-        l.apply(100_000, Input::Camera(false));
-        l.apply(104_100, Input::Tick);
-        assert_eq!(row(&l, "b").senders[0].elapsed, 5000);
+    }
+    fn names(line: &Line) -> Vec<(String, u32)> {
+        match line {
+            Line::Senders { senders } => senders.iter().map(|s| (s.name.clone(), s.count)).collect(),
+            other => panic!("not senders: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_friend_bar_tells_the_newest_of_a_send_and_a_yo() {
+        let mut l = model();
+        assert_eq!(row(&l, "a").line, Line::Title);
+        l.apply(0, receive("a"));
+        l.apply(0, receive("a"));
+        assert_eq!(row(&l, "a").line, Line::Arrival { count: 2, name: "A".into() });
+        // The user's own send is newer: its words, and the Yos counted so far are forgotten.
+        l.apply(500, Input::SendStarted { id: "a".into(), kind: Kind::Yo, undo_ms: UNDO_MS });
+        assert_eq!(row(&l, "a").line, Line::Title);
+        assert_eq!(row(&l, "a").title, "Sent Yo");
+        // A Yo after it wins again, counted from one.
+        l.apply(1000, receive("a"));
+        assert_eq!(row(&l, "a").line, Line::Arrival { count: 1, name: "A".into() });
+        // Its undo window still running, the send's words would be older than the Yo: the name under it.
+        assert_eq!(row(&l, "a").title, "A");
+        // Over: the name, never the older send again.
+        l.apply(60_000, Input::Tick);
+        assert_eq!(row(&l, "a").line, Line::Title);
+        assert_eq!(row(&l, "a").title, "A");
+    }
+
+    #[test]
+    fn a_finished_send_after_a_yo_is_the_newest() {
+        let mut l = model();
+        l.apply(0, receive("a"));
+        l.apply(100, Input::SendFinished { id: "a".into(), kind: Kind::Yo });
+        assert_eq!(row(&l, "a").line, Line::Title);
+        assert_eq!(row(&l, "a").title, "Sent Yo");
+        l.apply(100 + SENT_MS, Input::Tick);
+        assert_eq!(row(&l, "a").title, "A", "after the send's words, the name; the older Yo does not come back");
+        assert_eq!(row(&l, "a").line, Line::Title);
+    }
+
+    #[test]
+    fn a_group_with_one_sender_is_one_line() {
+        let mut l = group_model();
+        group_yo(0, &mut l, "u1");
+        group_yo(0, &mut l, "u1");
+        assert_eq!(row(&l, "g").line, Line::Arrival { count: 2, name: "MIA".into() });
+    }
+
+    #[test]
+    fn a_group_collects_its_senders_newest_first_until_the_name_or_a_send() {
+        let mut l = group_model();
+        group_yo(0, &mut l, "u1");
+        group_yo(0, &mut l, "u2");
+        group_yo(0, &mut l, "u2");
+        assert_eq!(names(&row(&l, "g").line), [("TOM".into(), 2), ("MIA".into(), 1)]);
+        group_yo(0, &mut l, "u1");
+        assert_eq!(names(&row(&l, "g").line), [("MIA".into(), 2), ("TOM".into(), 2)]);
+        // An own send forgets them; the next Yo starts over with its sender alone.
+        l.apply(100, Input::SendStarted { id: "g".into(), kind: Kind::Yo, undo_ms: UNDO_MS });
+        assert_eq!(row(&l, "g").line, Line::Title);
+        assert!(row(&l, "g").senders.is_empty());
+        group_yo(200, &mut l, "u3");
+        assert_eq!(row(&l, "g").line, Line::Arrival { count: 1, name: "IDA".into() });
+        group_yo(300, &mut l, "u2");
+        assert_eq!(names(&row(&l, "g").line), [("TOM".into(), 1), ("IDA".into(), 1)]);
+        // Faded: the name, and the next Yo starts a new collection.
+        l.apply(600, Input::Tick);
+        l.apply(60_000, Input::Tick);
+        assert_eq!(row(&l, "g").line, Line::Title);
+        assert_eq!(row(&l, "g").title, "BOTS");
+        group_yo(61_000, &mut l, "u1");
+        assert_eq!(row(&l, "g").line, Line::Arrival { count: 1, name: "MIA".into() });
+    }
+
+    #[test]
+    fn waiting_photos_keep_the_senders_until_seen() {
+        let mut l = group_model();
+        l.apply(0, Input::Received { id: "g".into(), kind: Kind::Photo, token: "p".into(), sender: Some("u1".into()) });
+        group_yo(0, &mut l, "u2");
+        l.apply(300, Input::Tick);
+        l.apply(60_000, Input::Tick);
+        assert_eq!(names(&row(&l, "g").line), [("TOM".into(), 1), ("MIA".into(), 1)]);
+        l.apply(60_000, Input::MediaSeen("g".into()));
+        assert_eq!(row(&l, "g").line, Line::Title);
+        assert!(row(&l, "g").senders.is_empty());
+        let mut l = model();
+        l.apply(0, Input::Received { id: "a".into(), kind: Kind::Photo, token: "p".into(), sender: None });
+        l.apply(0, Input::Received { id: "a".into(), kind: Kind::Photo, token: "q".into(), sender: None });
+        l.apply(60_000, Input::Tick);
+        assert_eq!(row(&l, "a").line, Line::Arrival { count: 2, name: "A".into() }, "photos waiting count as Yos");
+    }
+
+    #[test]
+    fn recording_and_requests_keep_their_title() {
+        let mut l = model();
+        l.apply(0, receive("a"));
+        l.apply(0, Input::Recording(Some("a".into())));
+        assert_eq!(row(&l, "a").line, Line::Title);
+        l.apply(0, Input::Recording(None));
+        assert_ne!(row(&l, "a").line, Line::Title);
+        l.apply(0, Input::RequestArrived(Friend { id: "r".into(), name: "R".into(), request: true, group: false }));
+        l.apply(0, receive("r"));
+        assert_eq!(row(&l, "r").line, Line::Title);
     }
 }

@@ -2,6 +2,7 @@
 use std::collections::HashSet;
 use unicode_segmentation::UnicodeSegmentation;
 
+pub mod line;
 pub mod list;
 pub mod status;
 pub mod zoom;
