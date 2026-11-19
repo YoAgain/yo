@@ -129,6 +129,7 @@ class Repository(private val context: Context, ownerScope: CoroutineScope) {
                 .registerDefaultNetworkCallback(object : android.net.ConnectivityManager.NetworkCallback() {
                     override fun onAvailable(network: android.net.Network) {
                         online.trySend(Unit)
+                        if (client != null && state.value.pendingInvite != null) command { consumeInvite() }
                         if (foreground && client != null) media.wake()
                     }
                 })
@@ -556,13 +557,17 @@ class Repository(private val context: Context, ownerScope: CoroutineScope) {
         if (usernameSkeleton(name) == usernameSkeleton(state.value.username ?: "")) error(copy(ProductText.THATS_YOU))
         val found = try { c.whois(name) ?: error(copy(ProductText.NO_SUCH_USER)) } catch (e: YoException.Network) { null }
         if (c !== client) return
+        val known = known(found?.username ?: name, found?.user)
+        if (known != null) { showSent(known, copy(ProductText.ALREADY_ADDED)); return }
+        addFriend(c, found?.username ?: name, found?.user)
+    }
+    private fun known(spelled: String, user: String?) = state.value.friends.firstOrNull { it.group == null && !it.gone &&
+        ((user != null && it.user == user) || usernameSkeleton(it.name) == usernameSkeleton(spelled)) }
+    private suspend fun addFriend(c: YoClient, spelled: String, user: String?) {
         changes.withLock {
-            val spelled = found?.username ?: name
-            val known = state.value.friends.firstOrNull { it.group == null && !it.gone &&
-                ((found != null && it.user == found.user) || usernameSkeleton(it.name) == usernameSkeleton(spelled)) }
-            if (known != null) { showSent(known, copy(ProductText.ALREADY_ADDED)); return@withLock }
-            found?.user?.let { removedUsers.remove(it) }
-            val friend = Friend(name = spelled, color = nextColor(state.value.friends), user = found?.user)
+            if (known(spelled, user) != null) return@withLock
+            user?.let { removedUsers.remove(it) }
+            val friend = Friend(name = spelled, color = nextColor(state.value.friends), user = user)
             if (friend.user != null) c.setFriend(friend.user, friend.name, friend.color.toUByte())
             mutable.update { it.copy(friends = listOf(friend) + it.friends) }; listFriends(); persist()
         }
@@ -571,18 +576,35 @@ class Repository(private val context: Context, ownerScope: CoroutineScope) {
     suspend fun invite(name: String) {
         mutable.update { it.copy(pendingInvite = name) }; changes.withLock { persist() }; consumeInvite()
     }
+    /** An invite link's or scanned code's name: asked of the hub, then a dialog asks to add it and send a Yo (only a
+     *  Yo, for one already on the list). Never added unverified: while the hub does not answer it stays pending for the
+     *  next start or connection. A name not on Yo says so once and never comes back (where it failed the start:
+     *  "Can't Open Your Account"). */
     private suspend fun consumeInvite() {
-        if (client == null) return
+        val c = client ?: return
         val name = state.value.pendingInvite ?: return
-        // Taken once, whatever the answer: a name not on Yo says so and never comes back at the next start
-        // (where it failed the start: "Can't Open Your Account"), at sign-up or sign-in.
-        mutable.update { it.copy(pendingInvite = null) }; changes.withLock { persist() }
-        if (usernameSkeleton(name) == usernameSkeleton(state.value.username ?: "")) return
-        try { add(name) } catch (e: CancellationException) { throw e } catch (e: Exception) {
+        val taken = suspend { mutable.update { it.copy(pendingInvite = null) }; changes.withLock { persist() } }
+        if (usernameSkeleton(name) == usernameSkeleton(state.value.username ?: "")) return taken()
+        val found = try { c.whois(name) } catch (e: CancellationException) { throw e } catch (e: Exception) {
             if (e is YoException.Replaced) throw e
-            mutable.update { it.copy(error = friendlyError(context, e)) }
+            if (e is YoException.Network || e is YoException.Refused) return  // no answer: asked again later
+            taken(); mutable.update { it.copy(error = friendlyError(context, e)) }; return
         }
+        if (c !== client || state.value.pendingInvite != name) return
+        taken()
+        if (found == null) { mutable.update { it.copy(error = copy(ProductText.NO_SUCH_USER)) }; return }
+        val spelled = found.username ?: name
+        val known = known(spelled, found.user)
+        mutable.update { it.copy(invitation = Invitation(known?.name ?: spelled, found.user, known != null)) }
     }
+    /** "Add & Yo" (or "Yo"): the friend on top as `add` puts it, then one Yo as a tap on its bar sends. */
+    suspend fun acceptInvite(invitation: Invitation) {
+        mutable.update { it.copy(invitation = null) }
+        val c = client ?: return
+        if (!invitation.known) addFriend(c, invitation.name, invitation.user)
+        known(invitation.name, invitation.user)?.let { send(it) }
+    }
+    fun dismissInvite() { mutable.update { it.copy(invitation = null) } }
     suspend fun send(friend: Friend) {
         val c = client ?: return
         if (friend.gone) { showSent(friend, copy(ProductText.NOT_ON_YO)); return }

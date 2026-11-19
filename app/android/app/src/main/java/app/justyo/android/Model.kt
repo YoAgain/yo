@@ -59,9 +59,14 @@ data class AppState(
     val leftHanded: Boolean = false, val requestsOpen: Boolean = true,
     val sent: Long = 0, val received: Long = 0, val pendingInvite: String? = null,
     val lastSync: Long? = null, val firstYo: Boolean = false, val notice: String? = null, val appIcon: String? = null,
+    /** A scanned or tapped invite, verified by the hub, waiting for "Add & Yo" (not saved). */
+    val invitation: Invitation? = null,
 ) {
     /** Wanted in Google's cloud but not there (no screen lock, or Google's backup off): the red dot. Turned off by choice is no warning. */
     val backupMissing: Boolean get() = googleBackup && !backedUp
 }
+
+/** An invite's friend, as the hub spells it: `known` when already on the list. */
+data class Invitation(val name: String, val user: String, val known: Boolean)
 
 fun JSONObject.longMap(key: String): Map<String,Long> = optJSONObject(key)?.let { values -> values.keys().asSequence().associateWith { values.getLong(it) } }.orEmpty()

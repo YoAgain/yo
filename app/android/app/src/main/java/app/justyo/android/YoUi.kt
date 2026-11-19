@@ -115,6 +115,10 @@ import uniffi.yo.usernameValid
     }
     SnackbarHost(snackbar,Modifier.align(Alignment.BottomCenter).safeDrawingPadding().padding(16.dp))
     }
+    state.invitation?.let { invitation -> YoSystemTheme { AlertDialog(onDismissRequest=repo::dismissInvite,title={Text(invitation.name)},
+        text={Text(copy(if(invitation.known) ProductText.INVITE_YO else ProductText.INVITE_ADD_YO))},
+        confirmButton={TextButton(onClick={repo.command { acceptInvite(invitation) }}){Text(copy(if(invitation.known) ProductText.YO else ProductText.ADD_AND_YO))}},
+        dismissButton={TextButton(onClick=repo::dismissInvite){Text(copy(ProductText.CANCEL))}}) } }
     if(state.firstYo) YoSystemTheme { AlertDialog(onDismissRequest=repo::clearError,title={Text(stringResource(R.string.ui_first_yo_sent))},text={Text(uiResources.getString(R.string.first_sent_explanation ,state.username.orEmpty()))},confirmButton={TextButton(onClick=repo::clearError){Text(stringResource(R.string.ui_awesome))}}) }
 }
 @Composable fun BrandText(text: String, size: Int, modifier: Modifier = Modifier, maxLines: Int = Int.MAX_VALUE) {
