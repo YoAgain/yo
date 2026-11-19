@@ -21,6 +21,8 @@ struct BarTouchObserver: UIGestureRecognizerRepresentable {
   var held: (Bool) -> Void = { _ in }
   var observesHold = false
   var pressed: (Bool) -> Void = { _ in }
+  /// While held: how far the finger is below where it touched down, and the room under that touch (window points).
+  var dragged: (_ below: CGFloat, _ room: CGFloat) -> Void = { _, _ in }
   let cancelled: () -> Void
 
   func makeUIGestureRecognizer(context: Context) -> Observer {
@@ -29,6 +31,7 @@ struct BarTouchObserver: UIGestureRecognizerRepresentable {
     observer.cancelled = cancelled
     observer.pressed = pressed
     observer.held = held
+    observer.dragged = dragged
     observer.observesHold = observesHold
     observer.cancelsTouchesInView = false
     observer.delaysTouchesBegan = false
@@ -40,6 +43,7 @@ struct BarTouchObserver: UIGestureRecognizerRepresentable {
     observer.cancelled = cancelled
     observer.pressed = pressed
     observer.held = held
+    observer.dragged = dragged
     observer.observesHold = observesHold
   }
 
@@ -51,6 +55,7 @@ struct BarTouchObserver: UIGestureRecognizerRepresentable {
     var held: (Bool) -> Void = { _ in }
     var observesHold = false
     var pressed: (Bool) -> Void = { _ in }
+    var dragged: (CGFloat, CGFloat) -> Void = { _, _ in }
     private var holdTask: Task<Void, Never>?
     private var holding = false
 
@@ -92,7 +97,13 @@ struct BarTouchObserver: UIGestureRecognizerRepresentable {
       }
     }
 
-    override func touchesMoved(_ touches: Set<UITouch>, with event: UIEvent) { checkMovement() }
+    override func touchesMoved(_ touches: Set<UITouch>, with event: UIEvent) {
+      checkMovement()
+      // Filming, the same finger drawn down zooms the camera.
+      if holding, let gate, let touch = gate.touch, let window = touch.window {
+        dragged(touch.location(in: nil).y - gate.origin.y, window.bounds.height - gate.origin.y)
+      }
+    }
     override func touchesEnded(_ touches: Set<UITouch>, with event: UIEvent) {
       checkMovement()
       holdTask?.cancel()

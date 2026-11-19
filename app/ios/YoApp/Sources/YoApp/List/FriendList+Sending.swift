@@ -172,6 +172,13 @@ extension FriendList {
 
   func recordingChanged(_ friend: Friend?) {
     if let previous = recordingFor { bars.of(previous).recording = false }
+    // A new video zooms from where the camera is; the end of one goes back there.
+    if let start = recordZoomStart {
+      recordZoomStart = nil
+      if zoom != start { zoom = start }
+    }
+    recordZoomStart = friend == nil ? nil : zoom
+    recordZoomTicked = false
     if let friend {
       let bar = bars.of(friend)
       bar.recording = true
@@ -179,6 +186,18 @@ extension FriendList {
     }
     recordingFor = friend
     publish(listModel.recording(now: listNow, id: friend?.key.uuidString))
+  }
+
+  /// The filming finger drawn `below` points under its touch (`room` under that): the camera zooms in, as far as
+  /// `productRecordZoom` says; back up, out again. A light tick as it starts.
+  func recordZoom(_ friend: Friend, below: CGFloat, room: CGFloat) {
+    guard recordingFor == friend, let start = recordZoomStart else { return }
+    let next = productRecordZoom(below: Double(below), room: Double(room), start: start, cameraMost: zoomMost)
+    if next > start + 0.01, !recordZoomTicked {
+      recordZoomTicked = true
+      Haptic.tap(.light)
+    }
+    if abs(next - zoom) > 0.001 { zoom = next }
   }
 
   func hold(_ friend: Friend, _ holding: Bool, origin: CGPoint?) {

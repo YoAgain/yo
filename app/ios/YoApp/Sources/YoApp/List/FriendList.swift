@@ -111,6 +111,11 @@ struct FriendList: View {
   @State var zooms: [Double] = []
   @State var zoom = 1.0
   @State var pinchStart: Double?
+  /// The most the camera zooms, as the choices count.
+  @State var zoomMost = 1.0
+  /// While filming: the zoom it started at; the finger drawn down zooms from there (`recordZoom`).
+  @State var recordZoomStart: Double?
+  @State var recordZoomTicked = false
   @State var recordingFor: Friend?
   /// Each hold's own mark: the 10 s limit sends only the video it was started for.
   @State var recordingRound: UUID?
@@ -486,9 +491,11 @@ struct FriendList: View {
         // The zoom as its own glass circle (a text item in the bar's shared glass turns into a capsule).
         ToolbarItem(placement: .bottomBar) {
           if (cameraOn || cameraPrepared) && picked.isEmpty {
-            CameraZoom(choices: zooms, chosen: $zoom, pinching: pinchStart != nil)
+            CameraZoom(choices: zooms, chosen: $zoom, pinching: pinchStart != nil || recordZoomStart != nil)
               .opacity(cameraOn ? 1 : 0).allowsHitTesting(cameraOn).accessibilityHidden(!cameraOn)
-              .onChange(of: zoom) { camera.zoom(to: zoom, immediate: pinchStart != nil) }
+              .onChange(of: zoom) {
+                camera.zoom(to: zoom, immediate: pinchStart != nil || recordZoomStart != nil || reduceMotion)
+              }
           }
         }
         .sharedBackgroundVisibility(.hidden)
@@ -543,6 +550,7 @@ struct FriendList: View {
           if let file = await camera.stopVideo() { Task.detached(priority: .utility) { try? FileManager.default.removeItem(at: file) } }
         }
       },
+      holdDrag: { recordZoom(friend, below: $0, room: $1) },
       press: { pressed(friend.key, $0) },
       flyBegan: { id in
         HitchScene.event("photo stack fly", then: cameraOn ? "camera" : "list")

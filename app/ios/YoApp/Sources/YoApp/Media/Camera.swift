@@ -66,6 +66,8 @@ final class Camera: NSObject, @unchecked Sendable {
   /// The zooms as the Camera app names them (0.5, 1, 2, 3); `wide` is the device factor shown as "1".
   private var zooms: [Double] = [1]
   private var wide: CGFloat = 1
+  /// The most this camera zooms, counted as the choices are (1 = the wide lens).
+  private var most: Double = 1
 
   /// All back lenses as one virtual device where there are several (it switches as it zooms).
   private static func back() -> AVCaptureDevice? {
@@ -163,6 +165,10 @@ final class Camera: NSObject, @unchecked Sendable {
     await withCheckedContinuation { continuation in queue.async { [self] in continuation.resume(returning: zooms) } }
   }
 
+  func zoomMost() async -> Double {
+    await withCheckedContinuation { continuation in queue.async { [self] in continuation.resume(returning: most) } }
+  }
+
   /// Ramps as the Camera app does; `immediate` follows a pinch.
   func zoom(to choice: Double, immediate: Bool = false) {
     queue.async { [self] in
@@ -181,6 +187,7 @@ final class Camera: NSObject, @unchecked Sendable {
   private func readZooms() {
     guard let device = input?.device, device.position == .back else {
       (zooms, wide) = ([1], 1)
+      most = Double(input?.device.maxAvailableVideoZoomFactor ?? 1)
       return
     }
     let switches = device.virtualDeviceSwitchOverVideoZoomFactors.map { CGFloat(truncating: $0) }
@@ -190,6 +197,7 @@ final class Camera: NSObject, @unchecked Sendable {
     var factors = Set([1] + switches + [2 * wide])
     factors = factors.filter { $0 >= device.minAvailableVideoZoomFactor && $0 <= device.maxAvailableVideoZoomFactor }
     zooms = factors.sorted().map { (Double($0 / wide) * 10).rounded() / 10 }
+    most = Double(device.maxAvailableVideoZoomFactor / wide)
     if (Diagnostics.attempt({ try device.lockForConfiguration() })) != nil {
       device.videoZoomFactor = max(wide, device.minAvailableVideoZoomFactor)
       device.unlockForConfiguration()

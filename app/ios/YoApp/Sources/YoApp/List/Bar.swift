@@ -42,6 +42,7 @@ struct LiveBar: View, @MainActor Equatable {
   let hint: String?
   let hold: ((Bool, CGPoint?) -> Void)?
   let cancelHold: () -> Void
+  var holdDrag: (CGFloat, CGFloat) -> Void = { _, _ in }
   let press: (Bool) -> Void
   let flyBegan: (UUID) -> Void
   let view: (ThumbnailTouch) -> Void
@@ -55,7 +56,7 @@ struct LiveBar: View, @MainActor Equatable {
         : (bar.countdownStarted ?? .distantFuture),
       outgoingItems: bar.outgoing.isEmpty ? (bar.sendingBatch?.items ?? bar.sentStack) : bar.outgoing,
       undoAvailable: !bar.outgoing.isEmpty, sendSeconds: bar.seconds, stop: stop,
-      media: friend.request ? [] : media, mediaMarkCount: bar.modelMarkCount, mediaSign: bar.modelMediaSign, yo: friend.request ? nil : yo, hint: hint, hold: hold, cancelHold: cancelHold, press: press, flyBegan: flyBegan, view: view, faded: friend.gone && !bar.hasNotice,
+      media: friend.request ? [] : media, mediaMarkCount: bar.modelMarkCount, mediaSign: bar.modelMediaSign, yo: friend.request ? nil : yo, hint: hint, hold: hold, cancelHold: cancelHold, holdDrag: holdDrag, press: press, flyBegan: flyBegan, view: view, faded: friend.gone && !bar.hasNotice,
       icon: friend.group == nil ? nil : "person.3.fill", line: friend.request ? .title : bar.modelLine,
       action: action)
       // Gone: still their name (whose bar it is), faded; a tap says "Not on Yo".
@@ -161,6 +162,8 @@ struct RowButton: View {
   var hint: String?
   var hold: ((Bool, CGPoint?) -> Void)?
   var cancelHold: () -> Void = {}
+  /// Filming: the held finger drawn down (points below its touch, room under it) zooms the camera.
+  var holdDrag: (CGFloat, CGFloat) -> Void = { _, _ in }
   var press: (Bool) -> Void = { _ in }
   var flyBegan: (UUID) -> Void = { _ in }
   var view: (ThumbnailTouch) -> Void = { _ in }
@@ -188,7 +191,7 @@ struct RowButton: View {
     _ title: String, count: Int = 1, color: Color, cameraOn: Bool = false, recording: Bool = false, outgoing: Date? = nil,
     outgoingItems: [FriendList.Outgoing] = [], undoAvailable: Bool = true,
     sendSeconds: Double = FriendList.sendDelay, stop: @escaping () -> Void = {},
-    media: [Arrival] = [], mediaMarkCount: Int = 0, mediaSign: String = "", yo: FriendList.Landing? = nil, hint: String? = nil, hold: ((Bool, CGPoint?) -> Void)? = nil, cancelHold: @escaping () -> Void = {}, press: @escaping (Bool) -> Void = { _ in }, flyBegan: @escaping (UUID) -> Void = { _ in },
+    media: [Arrival] = [], mediaMarkCount: Int = 0, mediaSign: String = "", yo: FriendList.Landing? = nil, hint: String? = nil, hold: ((Bool, CGPoint?) -> Void)? = nil, cancelHold: @escaping () -> Void = {}, holdDrag: @escaping (CGFloat, CGFloat) -> Void = { _, _ in }, press: @escaping (Bool) -> Void = { _ in }, flyBegan: @escaping (UUID) -> Void = { _ in },
     view: @escaping (ThumbnailTouch) -> Void = { _ in }, faded: Bool = false, icon: String? = nil,
     line: ListLine = .title, action: @escaping (CGPoint?) -> Void
   ) {
@@ -211,6 +214,7 @@ struct RowButton: View {
     self.hint = hint
     self.hold = hold
     self.cancelHold = cancelHold
+    self.holdDrag = holdDrag
     self.press = press
     self.flyBegan = flyBegan
     self.view = view
@@ -254,6 +258,8 @@ struct RowButton: View {
         }
       }, observesHold: hold != nil, pressed: { down in
         if cameraOn { shutterDown = down }
+      }, dragged: { below, room in
+        if holding { holdDrag(below, room) }
       }) {
         touchOrigin = nil
         press(false)

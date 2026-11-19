@@ -198,6 +198,7 @@ extension FriendList {
 
   func readZooms() async {
     zooms = await camera.zoomChoices()
+    zoomMost = await camera.zoomMost()
     zoom = 1
   }
 
