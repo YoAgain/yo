@@ -61,6 +61,20 @@ class MarksTests(unittest.TestCase):
             admin.remember(out, 2000.0 + 60 * k)
         self.assertEqual(len(admin.HISTORY), 60)
 
+    def test_server_history_a_quarter_hour_point_the_last_day(self):
+        admin = self.admin
+        admin.HISTORY.clear()
+        admin.HISTORY_DAY.clear()
+        out = lambda cpu: {"cpu": {"percent": cpu}, "memory": {"total": 100, "available": 60}, "disk": {"total": 200, "used": 50},  # noqa: E731
+                           "network": {"rx_per_s": 5, "tx_per_s": 7}}
+        admin.remember(out(10.0), 900.0)
+        admin.remember(out(20.0), 960.0)  # the same quarter: averaged
+        self.assertEqual(admin.HISTORY_DAY, [[900_000, 15.0, 40.0, 25.0, 5, 7, 2]])
+        for k in range(30 * 60):
+            admin.remember(out(30.0), 2000.0 + 60 * k)
+        self.assertEqual(len(admin.HISTORY_DAY), 96)
+        self.assertEqual(admin.HISTORY_DAY[-1][1], 30.0)
+
 
 class UsersTabCollectorTests(unittest.TestCase):
     def test_signups_30_days_and_active_since_midnight(self):

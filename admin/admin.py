@@ -515,7 +515,26 @@ def hub_unit() -> dict:
 # The server's figures once a minute, the last hour, in memory only (gone on a restart): the Server rows' bars.
 # Each [ms, cpu %, memory %, disk %, rx B/s, tx B/s].
 HISTORY = []
+# And the last 24 hours, a point per quarter of an hour (the average of its minutes), in memory too: the Server detail.
+# Each [ms of the quarter's start, cpu %, memory %, disk %, rx B/s, tx B/s, minutes in it].
+HISTORY_DAY = []
+QUARTER_MS = 900_000
 _history_lock = threading.Lock()
+
+
+def remember_day(point: list) -> None:
+    start = point[0] // QUARTER_MS * QUARTER_MS
+    if HISTORY_DAY and HISTORY_DAY[-1][0] == start:
+        q = HISTORY_DAY[-1]
+        n = q[6] + 1
+        for i in range(1, 6):
+            v = point[i]
+            if v is not None:
+                q[i] = v if q[i] is None else round(q[i] + (v - q[i]) / n, 1)
+        q[6] = n
+    else:
+        HISTORY_DAY.append([start, *point[1:6], 1])
+        del HISTORY_DAY[:-96]
 
 
 def remember(out: dict, now: float) -> list:
@@ -527,12 +546,15 @@ def remember(out: dict, now: float) -> list:
             HISTORY.append([int(now * 1000), c.get("percent"), pct(m.get("total", 0) - m.get("available", 0) if m else None, m.get("total")),
                             pct(d.get("used"), d.get("total")), n.get("rx_per_s"), n.get("tx_per_s")])
             del HISTORY[:-60]
+            remember_day(HISTORY[-1])
         return list(HISTORY)
 
 
 def stats() -> dict:
     out = stats_now()
     out["history"] = remember(out, time.time())
+    with _history_lock:
+        out["history_day"] = [q[:6] for q in HISTORY_DAY]
     return out
 
 

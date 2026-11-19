@@ -484,6 +484,8 @@ class FakeServer:
             "reserved": reserved,
             # The last hour, a point a minute, as admin.remember keeps it.
             "history": self.history(),
+            # The last 24 hours, a point a quarter of an hour, as admin.remember_day keeps it.
+            "history_day": self.history_day(),
         }
 
     def history(self):
@@ -496,6 +498,19 @@ class FakeServer:
                 self.past.append([t0 - (59 - i) * 60_000, round(cpu, 1), round(33 + r.random() * 4, 1), 24.0,
                                   abs(r.gauss(180_000, 90_000)), abs(r.gauss(95_000, 50_000))])
         return self.past
+
+    def history_day(self):
+        if not hasattr(self, "day"):
+            r, q0 = random.Random(11), int(time.time() // 900) * 900_000
+            self.day = []
+            for i in range(96):
+                at = q0 - (95 - i) * 900_000
+                hour = time.gmtime(at / 1000).tm_hour + time.gmtime(at / 1000).tm_min / 60
+                busy = 0.5 + 0.5 * math.sin((hour - 9) / 24 * 2 * math.pi)  # quiet at night, busiest in the evening
+                self.day.append([at, round(max(2, 6 + 22 * busy + r.gauss(0, 4) + (35 if i in (62, 63) else 0)), 1),
+                                 round(31 + 5 * busy + r.random(), 1), round(23.6 + i * 0.008, 1),
+                                 abs(r.gauss(60_000 + 240_000 * busy, 40_000)), abs(r.gauss(30_000 + 120_000 * busy, 20_000))])
+        return self.day
 
     def updates(self):
         now = time.time()

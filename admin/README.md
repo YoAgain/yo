@@ -4,7 +4,9 @@ Python standard library dashboard, one page: Usage (sign-ups, Yos, media, groups
 reports) over one range next to the logo (7, 30 or 365 days: totals with a trend against the range before, bars per
 day or month; green where more is good, orange where more is bad), Users (secured, active, platforms), Server (CPU,
 memory, disk, network with the last hour's bars, kept in memory by admin.py; updates), Services (queue, the units, the
-STATUS bot with its frequency, [skills/status](../skills/status)) and an always-open Database widget. Its tables carry the tools: users is the sortable users table, support_messages opens as the support chat
+STATUS bot with its frequency, [skills/status](../skills/status)) and an always-open Database widget. No hovers: a click
+on a row, a service or a chart opens its detail (up to four cards, in the range; the server's last 24 hours, a point
+per quarter hour in admin.py's memory) between the widgets and the Database; again, × or Escape closes it. Its tables carry the tools: users is the sortable users table, support_messages opens as the support chat
 (List | Chat), diagnostics show open groups first with Done/Reopen, reserved has its switch and reasons; a footer eye
 blurs names and ids for screenshots. The collector (`users.py`) reads SQLite databases read-only and atomically writes
 a JSON snapshot. Yos, Media and Groups read the hub's `events` table (counts per kind and minute, no identifiers). Bots

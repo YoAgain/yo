@@ -569,7 +569,6 @@ table.list { width: 100%; border-collapse: collapse; font-size: 13px; font-varia
 .area .dot.on { opacity: 1; r: 4; }
 #t-yc .fill, #t-yc .dot { fill: var(--ok); } #t-yc .line { stroke: var(--ok); }
 #t-uc .fill, #t-uc .dot { fill: var(--amethyst-soft); } #t-uc .line { stroke: var(--amethyst-soft); }
-.area-tip { position: absolute; top: -26px; right: 6px; font-size: 11px; color: var(--muted); font-variant-numeric: tabular-nums; pointer-events: none; white-space: nowrap; }
 .area svg { height: 100%; min-height: 64px; position: absolute; inset: 0; }
 .area { min-height: 64px; }
 /* Packed by app.js: rows of a pixel, each card its own height in the shortest column */
@@ -643,7 +642,6 @@ body.dash { max-width: 1400px; }
 .minis .chart .big { font-size: 18px; line-height: 1.2; }
 .minis .area { margin: 4px -4px 0; min-height: 40px; }
 .minis .area svg { min-height: 40px; }
-.minis .area-tip { top: -40px; right: 4px; }
 .group #t-usage, .group #t-attention, .group #t-accounts, .group #t-system, .group #t-services, .group #t-yc, .group #t-uc { grid-area: auto; }
 /* Chat list: one quiet line per person, a dot while something is open */
 #person-list { padding: 4px 6px; }
@@ -667,7 +665,6 @@ body.dash { max-width: 1400px; }
 .chartw .gh { margin-bottom: 4px; }
 .chartw .gsum.big { font-size: 20px; font-weight: 800; color: var(--text); letter-spacing: -.01em; }
 .chartw .area { flex: 1 1 auto; margin: 6px 0 0; min-height: 0; }
-.chartw .area-tip { top: -30px; right: 0; }
 .ov .group .crow, #g-system .crow, #g-server .crow { grid-template-columns: 18px minmax(0, 1fr) auto 84px; }
 .ov .group .crow.kv, #g-system .crow.kv, #g-server .crow.kv { grid-template-columns: 18px max-content minmax(0, 1fr); }
 .group .crow.kv .cn { overflow: hidden; text-overflow: ellipsis; max-width: 100%; }
@@ -695,7 +692,6 @@ body.dash { max-width: 1400px; }
 .group .gcols { display: block; }
 .ov .chartw { min-height: 0; }
 .ov .chartw .area { height: 120px; }
-.ov .chartw .area-tip { position: static; display: block; min-height: 16px; margin-top: 6px; font-size: 12px; color: var(--muted); }
 .crow .gauge { grid-column: -2; justify-self: stretch; height: 8px; border-radius: 4px; background: var(--line); overflow: hidden; }
 .crow .gauge > span { display: block; height: 100%; border-radius: 4px; background: #4a90c8; transition: width .4s; }
 .crow .gauge.warm > span { background: var(--warn); } .crow .gauge.hot > span { background: var(--bad); }
@@ -757,18 +753,17 @@ body.dash { max-width: 1400px; }
 /* Services: one row of chips at the bottom of Server; the details in the hover card. */
 .group .crow.chips { display: flex; flex-wrap: wrap; gap: 6px; padding: 8px 6px 2px; min-height: 0; }
 .chip { display: inline-flex; align-items: center; gap: 6px; height: 26px; padding: 0 10px 0 8px; border: 1px solid var(--line); border-radius: 999px; background: var(--bg); color: var(--text); font-size: 12px; font-weight: 600; white-space: nowrap; cursor: pointer; }
-.chip:hover, .chip.carded { border-color: var(--amethyst-soft); }
+.chip:hover, .chip.picked { border-color: var(--amethyst-soft); }
 .chip .dot { width: 7px; height: 7px; border-radius: 50%; background: var(--muted); flex: none; }
 .chip.ok .dot { background: var(--ok); } .chip.bad .dot { background: var(--bad); }
 .chip.bad { border-color: rgba(231, 76, 60, .5); }
-/* Rows: the corner notes are gone (the card has them); a carded row is marked. */
+/* Rows: the corner notes are gone (the detail has them); a picked row is marked. */
 .crow .sv { display: none !important; }
 .crow[data-card] { cursor: default; }
 .crow.opens[data-card] { cursor: pointer; }
-.crow.carded { background: var(--hover); border-radius: 8px; }
+.crow.picked { background: var(--hover); border-radius: 8px; }
 .spark { cursor: default; }
 /* The hover card */
-.hcard { position: fixed; z-index: 50; width: 296px; max-width: calc(100vw - 16px); padding: 12px 14px; border: 1px solid var(--line); border-radius: 14px; background: #241d2e; box-shadow: 0 14px 40px rgba(0, 0, 0, .45); font-size: 12px; color: var(--text); }
 .hc-head { display: flex; align-items: center; gap: 8px; margin-bottom: 8px; font-size: 13px; }
 .hc-head .hc-val { margin-left: auto; font-weight: 700; font-variant-numeric: tabular-nums; }
 .hc-head .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--muted); }
@@ -848,11 +843,8 @@ body.dash { max-width: 1400px; }
 button.hc-hint { display: block; margin: 8px 0 0 auto; padding: 4px 10px; border: 1px solid var(--line); border-radius: 999px; background: var(--bg); color: var(--amethyst-soft); font-size: 11px; font-weight: 700; }
 button.hc-hint:hover { border-color: var(--amethyst-soft); }
 /* Chart hover: a small tooltip over the plot's top edge, never text over the lines. */
-.ov .chartw .area-tip { position: absolute; top: -26px; left: 0; right: auto; display: block; min-height: 0; margin: 0; padding: 2px 8px; border: 1px solid var(--line); border-radius: 6px; background: var(--bg); color: var(--text); font-size: 11px; z-index: 3; }
-.ov .chartw .area-tip:empty { display: none; }
 #c-pr.has-open .cn { color: #e67e22; }
 /* The hovered point's values take the title line's right side (over the total), never the plot. */
-.ov .chartw .area-tip { top: -34px; right: 0; left: auto; padding: 4px 0 4px 10px; border: 0; border-radius: 0; background: var(--card); font-size: 12px; font-weight: 600; }
 /* The Yos chart inside the header card, under the logo and range. */
 .ov > header.tile.hdr .hchart { display: flex; flex-direction: column; height: 128px; margin-top: 14px; padding: 0 6px; }
 .ov > header.tile.hdr { padding: 12px 12px 14px; }
@@ -876,7 +868,7 @@ button.hc-hint:hover { border-color: var(--amethyst-soft); }
 .svcbar .chip { justify-content: center; height: 28px; padding: 0 6px; gap: 6px; border: 0; border-radius: 8px; background: rgba(255, 255, 255, .03); font-size: 12px; font-weight: 600; min-width: 0; overflow: hidden; }
 .svcbar .chip.ok { background: rgba(46, 204, 113, .1); }
 .svcbar .chip.bad { background: rgba(231, 76, 60, .18); color: #ffb3aa; }
-.svcbar .chip:hover, .svcbar .chip.carded { background: var(--sel); border: 0; }
+.svcbar .chip:hover, .svcbar .chip.picked { background: var(--sel); border: 0; }
 .svcbar .chip .dot { width: 6px; height: 6px; }
 #g-server .svcbar + .counts { border-top: 1px solid rgba(255, 255, 255, .06); padding-top: 6px; }
 /* Charts: room between title, curve and bars; a guide line and a lit bar under the pointer. */
@@ -925,9 +917,9 @@ button.hc-hint:hover { border-color: var(--amethyst-soft); }
 .ov > header.tile.hdr .hchart { flex: none; }
 /* Services: plain dot and name, spread across the line; no container, fills or borders. */
 .svcbar { display: flex; justify-content: space-between; padding: 4px 2px; border: 0; background: none; border-radius: 0; }
-.svcbar .chip, .svcbar .chip.ok, .svcbar .chip.bad, .svcbar .chip:hover, .svcbar .chip.carded { height: 24px; padding: 0 2px; border: 0; background: none; color: var(--text); font-size: 12.5px; font-weight: 600; }
+.svcbar .chip, .svcbar .chip.ok, .svcbar .chip.bad, .svcbar .chip:hover, .svcbar .chip.picked { height: 24px; padding: 0 2px; border: 0; background: none; color: var(--text); font-size: 12.5px; font-weight: 600; }
 .svcbar .chip.bad { color: var(--bad); }
-.svcbar .chip:hover, .svcbar .chip.carded { color: var(--amethyst-soft); }
+.svcbar .chip:hover, .svcbar .chip.picked { color: var(--amethyst-soft); }
 .svcbar .chip .dot { width: 7px; height: 7px; }
 /* The full width of the screen, a normal gutter. */
 body.dash { max-width: none; padding-left: 24px; padding-right: 24px; }
@@ -951,8 +943,6 @@ body.dash { max-width: none; padding-left: 24px; padding-right: 24px; }
 .ov .group .crow.go { min-height: 28px; padding-top: 2px; padding-bottom: 2px; }
 @media (min-width: 1240px) { .ov > #g-usage, .ov > #g-server { height: auto; } }
 /* A chart's hover: the point's values, a small line under them (retention, DAU/MAU); the strip's max on the right. */
-.ov .chartw .area-tip { top: -38px; line-height: 1.25; text-align: right; }
-.ov .chartw .area-tip small { display: block; font-size: 10px; font-weight: 500; color: var(--muted); }
 .stripbox .smax { left: auto; right: 0; }
 .stripbox .smax b { color: var(--text); font-weight: 700; }
 .stripbox .smax .stoday { position: static; margin-right: 4px; font-size: 8.5px; letter-spacing: .06em; text-transform: uppercase; }
@@ -992,4 +982,36 @@ body.dash { max-width: none; padding-left: 24px; padding-right: 24px; }
 .hc-plat { grid-template-columns: max-content minmax(60px, 1fr) max-content; }
 .hc-pbar.plats .p-ios { background: var(--amethyst); } .hc-pbar.plats .p-android { background: var(--ok); }
 .hc-pbar.plats .p-bot { background: #8a8494; } .hc-pbar.plats .p-cli { background: var(--warn); }
-.hcard { max-width: min(420px, calc(100vw - 16px)); }
+/* The detail: closed by default; a click on a row, a service or a chart opens up to four cards about it here, between the
+   range rule and the Database (4 in a row, 2 on a tablet, 1 on a phone). */
+.ov > .detail { grid-column: 1 / -1; margin: -10px 0 22px; scroll-margin-top: 12px; }
+.detail[hidden] { display: none; }
+.dhead { display: flex; align-items: center; gap: 10px; margin: 0 2px 10px; }
+.dhead h2 { display: flex; align-items: baseline; gap: 10px; margin: 0; font-size: 11px; font-weight: 700; letter-spacing: .14em; text-transform: uppercase; color: var(--amethyst-soft); }
+.dhead h2 small { font-size: 11px; font-weight: 600; letter-spacing: 0; text-transform: none; color: var(--muted); }
+.dhead .close { margin-left: auto; display: grid; place-items: center; line-height: 1; }
+.dhead .close:hover { color: var(--text); border-color: var(--amethyst-soft); }
+.dgrid { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: var(--gap); align-items: stretch; }
+@media (max-width: 1200px) { .dgrid { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
+@media (max-width: 640px) { .dgrid { grid-template-columns: minmax(0, 1fr); } }
+.dcard { display: flex; flex-direction: column; gap: 8px; min-width: 0; padding: 16px 18px; border: 1px solid var(--line); border-radius: var(--radius); background: var(--card); font-size: 12.5px; }
+.dcard.picked { border-color: var(--amethyst-soft); }
+.dcard h3 { display: flex; align-items: center; gap: 8px; margin: 0 0 2px; font-size: 13px; font-weight: 700; }
+.dcard h3 .dval { margin-left: auto; font-weight: 700; font-variant-numeric: tabular-nums; white-space: nowrap; }
+.dcard h3 .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--muted); flex: none; }
+.dcard h3 .dot.ok { background: var(--ok); } .dcard h3 .dot.bad { background: var(--bad); }
+.dcard .hc-cap, .dcard .hc-lines { margin-top: 0; }
+.dcard .hc-kv dd { overflow-wrap: anywhere; white-space: pre-line; }
+.dcard .hc-hint { margin-top: auto; }
+.dcard .hc-chart.acc .b:not(.zero) { fill: var(--amethyst-soft); }
+.dbar { display: flex; height: 12px; }
+.hc-pbar .cool { background: #5dade2; }
+.dlog { margin: 0; max-height: 220px; overflow: auto; padding: 10px; border-radius: 10px; background: var(--bg); font-family: var(--mono); font-size: 11px; white-space: pre-wrap; color: var(--muted); }
+/* What opens a detail: a pointer, a light hover, the picked one marked. */
+.crow[data-card], .chartw[data-card] { cursor: pointer; }
+.group .crow[data-card]:hover { background: var(--hover); }
+.group .crow[data-card]:active, .group .crow.picked { background: var(--sel); }
+#t-uc.picked, #t-hdr:has(#t-yc.picked) { border-color: var(--amethyst-soft); }
+[data-card]:focus { outline: none; }
+[data-card]:focus-visible { outline: 2px solid var(--amethyst-soft); outline-offset: 2px; border-radius: 8px; }
+.svcbar .chip.picked { color: var(--amethyst-soft); background: var(--sel); border-radius: 6px; }

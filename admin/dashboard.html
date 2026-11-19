@@ -12,13 +12,13 @@
 <body class="dash">
 
 <!-- One page of widgets: the header (logo, range), the Yos and Accounts charts, one widget of counts (Media, Groups,
-     Secured, Platforms, Problems, Queue, Delivery, Push, Hub errors), Server with the services as chips, the Database widget
-     below, always open; rows that lead to a table open it there (the support chat, diagnostics, reports, users). -->
+     Secured, Platforms, Problems, Queue, Delivery, Push, Hub errors), Server with the services as chips, the detail of
+     what was clicked (closed by default), the Database widget below, always open. -->
 <main class="ov" id="overview">
 <header class="tile hdr group" id="t-hdr">
   <div class="chartw hchart" id="t-yc">
     <h2 class="gh"><button type="button" class="logo small" id="hub-word" title="live or dev hub: click or key 0 to switch">Yo</button><span class="sr">Yos</span><b class="gsum big" id="yc-n">–</b></h2>
-    <div class="area" id="yc-area"><svg id="yc-svg" aria-hidden="true"></svg><span class="area-tip" id="yc-tip"></span></div>
+    <div class="area" id="yc-area"><svg id="yc-svg" aria-hidden="true"></svg></div>
     <svg class="spark cstrip" id="yc-strip" viewBox="0 0 140 28" preserveAspectRatio="none" aria-hidden="true"></svg>
   </div>
   <div class="status"><span class="stale" id="stale" hidden>no answer from the server</span><span id="collection-status" role="status">Loading fresh data…</span></div>
@@ -26,7 +26,7 @@
   <div class="charts">
   <article class="tile group chartw" id="t-uc">
     <h2 class="gh"><svg class="ico" viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="8" r="3.5"/><path d="M5 20a7 7 0 0 1 14 0"/></svg><span>Accounts</span><b class="gsum big" id="uc-n">–</b></h2>
-    <div class="area" id="uc-area"><svg id="uc-svg" aria-hidden="true"></svg><span class="area-tip" id="uc-tip"></span></div>
+    <div class="area" id="uc-area"><svg id="uc-svg" aria-hidden="true"></svg></div>
     <svg class="spark cstrip" id="uc-strip" viewBox="0 0 140 28" preserveAspectRatio="none" aria-hidden="true"></svg>
   </article>
   </div>
@@ -37,7 +37,7 @@
         <div class="crow bars sep" id="c-sc"><svg class="ico" viewBox="0 0 24 24" aria-hidden="true"><rect x="5" y="10.5" width="14" height="10" rx="2"/><path d="M8 10.5V8a4 4 0 0 1 8 0v2.5"/></svg><span class="cl">Secured</span><b class="cn" id="sc-n">–</b><span class="sv" id="sc-sv"></span><svg class="spark" id="sc-spark" viewBox="0 0 140 28" preserveAspectRatio="none" hidden></svg><span class="stack share" id="sc-bar"><span></span></span></div>
         <div class="crow bars" id="c-pl"><svg class="ico" viewBox="0 0 24 24" aria-hidden="true"><rect x="6.5" y="2.5" width="11" height="19" rx="2.5"/><path d="M11 18.5h2"/></svg><span class="cl">Platforms</span><b class="cn" id="pl-n">–</b><span class="stack plats" id="pl-bar"></span></div>
         <div class="crow bars" id="c-vr"><svg class="ico" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 20V5"/><path d="m6.5 10.5 5.5-5.5 5.5 5.5"/><path d="M5 20h14"/></svg><span class="cl">Versions</span><span class="vr-spark" id="vr-bar"></span></div>
-        <div class="crow bars opens sep" id="c-pr" data-open="table:support_messages" role="button" tabindex="0"><svg class="ico" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3.5 2.5 20h19z"/><path d="M12 10v4.5"/><path d="M12 17.2v.3"/></svg><span class="cl">Problems</span><b class="cn" id="pr-n">–</b><span class="sv" id="pr-sv"></span><svg class="spark" id="pr-spark" viewBox="0 0 140 28" preserveAspectRatio="none"></svg></div>
+        <div class="crow bars sep" id="c-pr"><svg class="ico" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3.5 2.5 20h19z"/><path d="M12 10v4.5"/><path d="M12 17.2v.3"/></svg><span class="cl">Problems</span><b class="cn" id="pr-n">–</b><span class="sv" id="pr-sv"></span><svg class="spark" id="pr-spark" viewBox="0 0 140 28" preserveAspectRatio="none"></svg></div>
         <div class="crow kv" id="c-q" hidden data-card="q"><svg class="ico" viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="8.5"/><path d="M12 7.5V12l3 2"/></svg><span class="cl">Queue</span><b class="cn" id="q-n">–</b></div>
         <div class="crow bars go" id="c-dl"><svg class="ico" viewBox="0 0 24 24" aria-hidden="true"><path d="M3 12h11"/><path d="m10 7.5 4.5 4.5-4.5 4.5"/><path d="M18 5v14"/></svg><span class="cl">Speed</span><svg class="spark" id="dl-spark" viewBox="0 0 140 28" preserveAspectRatio="none"></svg></div>
         <div class="crow bars go" id="c-ps"><svg class="ico" viewBox="0 0 24 24" aria-hidden="true"><path d="M6 16.5V11a6 6 0 0 1 12 0v5.5l1.5 2h-15z"/><path d="M10 20.5a2 2 0 0 0 4 0"/></svg><span class="cl">Push</span><svg class="spark" id="ps-spark" viewBox="0 0 140 28" preserveAspectRatio="none"></svg></div>
@@ -59,6 +59,12 @@
       </section>
   </article>
   <div class="rangebar"><div class="range" id="range" role="group" aria-label="Range of Usage and Attention"><button type="button" data-r="1" title="last 24 hours">1</button><button type="button" data-r="7" class="on" title="last 7 days">7</button><button type="button" data-r="30" title="last 30 days">30</button><button type="button" data-r="0" title="since the start">Total</button></div></div>
+  <!-- The detail: closed by default; a click on a row, a service or a chart opens up to four cards about it here,
+       in the range above; the same click again, × or Escape closes it. -->
+  <section class="detail full" id="detail" hidden aria-labelledby="detail-title">
+    <div class="dhead"><h2 id="detail-title"></h2><button type="button" class="close" id="detail-close" aria-label="Close" title="Close (Esc)">×</button></div>
+    <div class="dgrid" id="detail-cards"></div>
+  </section>
   <article class="tile full" id="t-db" aria-label="Database">
     <div class="tables" id="tables"></div>
     <div class="dbfoot"><span id="tables-note">–</span><button type="button" class="eye" id="db-blur" title="blur names and ids (for a screenshot); again to show them" aria-pressed="false"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M2 12s3.5-6.5 10-6.5S22 12 22 12s-3.5 6.5-10 6.5S2 12 2 12z"/><circle cx="12" cy="12" r="3"/></svg></button></div>
@@ -93,7 +99,6 @@
       </section></div>
 </main>
 
-<dialog id="pop"><form method="dialog"><button class="close" aria-label="Close" title="Close">×</button></form><dl></dl><pre hidden></pre></dialog>
 <footer class="foot"><span id="host"></span><span id="foot-hub"></span> · <form method="post" action="/logout"><button type="submit" class="footlink">sign out</button></form></footer>
 <script src="/app.js"></script>
 </body>
