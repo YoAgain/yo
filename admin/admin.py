@@ -266,6 +266,46 @@ def marks_change(data) -> dict:
         return marks
 
 
+# The STATUS bot (skills/status): how often and to whom, written here, read by the bot before every slot; the
+# numbers of its last report, written by the bot (no names).
+STATUS_CONFIG = os.environ.get("STATUS_CONFIG", os.environ.get("STATE_DIRECTORY", "./state") + "/status-bot.json")
+STATUS_LAST = os.environ.get("STATUS_LAST", "/run/yo-status-live/last.json")
+STATUS_EVERY = (0, 15, 30, 60, 120, 1440)
+STATUS_NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,31}")
+_status_lock = threading.Lock()
+
+
+def status_read() -> dict:
+    def load(path):
+        try:
+            data = json.loads(read_bytes(path))
+            return data if isinstance(data, dict) else None
+        except (OSError, ValueError):
+            return None
+    config = load(STATUS_CONFIG) or {}
+    return {"config": {"every_minutes": config.get("every_minutes", 0), "to": config.get("to", ""),
+                       "baseline_users": config.get("baseline_users", 0)},
+            "last": load(STATUS_LAST), "every": list(STATUS_EVERY)}
+
+
+def status_save(data) -> dict:
+    """{"every_minutes": one of STATUS_EVERY, "to": a name ("" only when off)}; the baseline is kept. ValueError when
+    malformed."""
+    every, to = data.get("every_minutes"), data.get("to")
+    if type(every) is not int or every not in STATUS_EVERY or not isinstance(to, str):
+        raise ValueError()
+    to = to.strip().lstrip("@")
+    if (to or every) and not STATUS_NAME.fullmatch(to):
+        raise ValueError()
+    with _status_lock:
+        config = {**status_read()["config"], "every_minutes": every, "to": to}
+        tmp = STATUS_CONFIG + ".new"
+        with open(tmp, "w") as f:
+            json.dump(config, f)
+        os.replace(tmp, STATUS_CONFIG)
+    return status_read()
+
+
 # Active users per UTC day for the Users tab: the collector's count of today (users seen since UTC midnight; the hub
 # keeps one last-seen day per device), its highest value per day kept here, 60 days. Counts only, nobody's id.
 ACTIVE_FILE = os.environ.get("STATE_DIRECTORY", "./state") + "/active-days.json"
@@ -586,6 +626,10 @@ class Admin(BaseHTTPRequestHandler):
             except OSError:
                 return self.send(404, b"Not found", "text/plain")
             return self.send(200, body, "image/jpeg", {"Cache-Control": "private, max-age=3600"})
+        if path == "/status.json":
+            if not logged_in:
+                return self.send(401, b"{}", "application/json")
+            return self.send(200, json.dumps(status_read()).encode(), "application/json")
         if path == "/users.json":
             if not logged_in:
                 return self.send(401, b"{}", "application/json")
@@ -690,6 +734,19 @@ class Admin(BaseHTTPRequestHandler):
             except OSError:
                 return self.send(500, b"Could not save", "text/plain")
             return self.send(200, json.dumps(marks).encode(), "application/json")
+        if path == "/status":
+            if not session_valid(self.headers.get("Cookie"), who):
+                return self.send(401, b"", "text/plain")
+            length = int(self.headers.get("Content-Length") or 0)
+            if not 0 < length <= 512:
+                return self.send(413, b"", "text/plain")
+            try:
+                result = status_save(json.loads(self.rfile.read(length)))
+            except (ValueError, KeyError, TypeError, AttributeError):
+                return self.send(400, b"Bad request", "text/plain")
+            except OSError:
+                return self.send(500, b"Could not save", "text/plain")
+            return self.send(200, json.dumps(result).encode(), "application/json")
         if path == "/diagnostics/done":
             if not session_valid(self.headers.get("Cookie"), who):
                 return self.send(401, b"", "text/plain")

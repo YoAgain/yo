@@ -8,6 +8,10 @@ import unittest
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
 sys.path.insert(0, os.path.join(HERE, "yogpt"))
+sys.path.insert(0, os.path.join(HERE, "status"))
+import datetime  # noqa: E402
+import json  # noqa: E402
+import status  # noqa: E402
 import yocli  # noqa: E402
 import yogpt  # noqa: E402
 
@@ -151,6 +155,42 @@ class Yo(unittest.TestCase):
         self.assertEqual(failed("refused: 429"), "refused")
         self.assertEqual(failed("/var/lib/yo/outbox/NAME.x.jpg: No such file"), "failed")
         self.assertEqual(yocli.reason(OSError("/var/lib/yo/outbox/NAME.x.jpg")), "OSError")
+
+
+class StatusRules(unittest.TestCase):
+    def config(self, data):
+        with tempfile.TemporaryDirectory() as d:
+            path = os.path.join(d, "c.json")
+            if data is not None:
+                with open(path, "w") as f:
+                    f.write(data if isinstance(data, str) else json.dumps(data))
+            return status.config(path)
+
+    def test_config_is_off_unless_whole_and_valid(self):
+        off = {"every_minutes": 0, "to": None, "baseline_users": 0}
+        self.assertEqual(self.config({"every_minutes": 30, "to": "Lina", "baseline_users": 3}),
+                         {"every_minutes": 30, "to": "Lina", "baseline_users": 3})
+        self.assertEqual(self.config({"every_minutes": 0}), off | {"to": None})
+        for bad in [None, "{", "[]", {"every_minutes": 7, "to": "Lina"}, {"every_minutes": 30},
+                    {"every_minutes": 30, "to": "-rf"}, {"every_minutes": 30, "to": "a b"},
+                    {"every_minutes": True, "to": "Lina"}, {"every_minutes": 30, "to": "Lina", "baseline_users": -1}]:
+            with self.subTest(bad=bad):
+                self.assertEqual(self.config(bad), off)
+
+    def test_slots_are_whole_multiples_of_berlin_time(self):
+        at = lambda *a: datetime.datetime(2026, *a, tzinfo=status.BERLIN)  # noqa: E731
+        self.assertEqual(status.next_slot(at(11, 19, 16, 29, 59), 30), at(11, 19, 16, 30))
+        self.assertEqual(status.next_slot(at(11, 19, 16, 30), 30), at(11, 19, 17, 0))
+        self.assertEqual(status.next_slot(at(11, 19, 23, 50), 120), at(11, 20, 0, 0))
+        self.assertEqual(status.next_slot(at(11, 19, 8, 0), 1440), at(11, 19, 9, 0))
+        self.assertEqual(status.next_slot(at(11, 19, 9, 0), 1440), at(11, 20, 9, 0))
+        self.assertIsNone(status.next_slot(at(11, 19, 9, 0), 0))
+
+    def test_rows_show_what_is_missing(self):
+        n = {"users": 42, "crashes": None, "up": 6, "total": 6, "load": "0.12"}
+        self.assertEqual(status.rows(n, 30), [("USERS", "42"), ("SINCE THE POST", "+12"), ("SERVICES", "6/6 up"),
+                                              ("LOAD · CRASHES", "0.12 · ?")])
+        self.assertEqual(status.rows({**n, "users": None}, 30)[1], ("SINCE THE POST", "?"))
 
 
 if __name__ == "__main__":

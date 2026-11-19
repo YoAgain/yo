@@ -391,3 +391,17 @@ a.lg:hover { color: var(--text); }
 #all-users-table th { position: sticky; top: 0; background: var(--card); padding-top: 4px; }
 .app-current, .app-current b { color: var(--ok); }
 .app-update, .app-update b { color: var(--warn); }
+
+/* Tabs as symbols: the chosen one with its title; counts small beside the symbol */
+.tabs a { gap: 6px; padding: 0 12px; }
+.tabs a svg { width: 18px; height: 18px; flex: none; fill: none; stroke: currentColor; stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; }
+.tabs a .label { display: none; }
+.tabs a.on .label { display: inline; }
+.tabs a .quiet { font-size: 10px; font-weight: 700; opacity: .8; margin-left: -2px; }
+.tabs a .quiet:empty { display: none; }
+
+/* Status */
+.stform { display: flex; flex-wrap: wrap; align-items: center; gap: 12px; font-size: 13px; color: var(--muted); }
+.stform label { display: flex; align-items: center; gap: 8px; }
+.stform input[type=text] { background: var(--bg); border: 1px solid var(--line); border-radius: 10px; padding: 7px 10px; font-size: 13px; color: var(--text); width: 180px; color-scheme: dark; }
+#st-error.bad { color: var(--bad); }

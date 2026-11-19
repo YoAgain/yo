@@ -691,7 +691,7 @@ if (document.body.classList.contains("login")) {
       const lastLines = last?.[which]?.support_last || {};
       const unanswered = threads.filter((t) => !isTeam(t.user_id) && t.unread > 0 && !lastLines[up(t.user_id)]?.team).length;
       const openTodos = todos().filter((t) => t.done_at == null).length;
-      set("tab-support", unanswered + openTodos ? ` · ${unanswered + openTodos}` : "");
+      set("tab-support", unanswered + openTodos ? `${unanswered + openTodos}` : "");
       $("tab-support").title = `${unanswered} waiting for a reply · ${openTodos} open to-dos`;
       part(drawList);
       if (currentTab === "support") part(drawPerson);
@@ -885,7 +885,7 @@ if (document.body.classList.contains("login")) {
     set("diag-note", `${open.length} open · ${list.length} in all`);
     // The tab's quiet count: open ones without the expected, roughly (the snapshot is up to ten seconds old).
     const real = open.filter((d) => !diagInfo(d).expected).length;
-    set("tab-crashes", real ? ` · ~${real > 99 ? "99+" : real}` : "");
+    set("tab-crashes", real ? `~${real > 99 ? "99+" : real}` : "");
     const shown = list.filter((d) => diagMode === "all" || (diagMode === "done") === !!d.done)
       .filter((d) => diagLevel === "all" || !diagInfo(d).expected).sort((a, b) => b.last_seen - a.last_seen);
     const pages = Math.max(1, Math.ceil(shown.length / PAGE));
@@ -1088,8 +1088,43 @@ if (document.body.classList.contains("login")) {
     } finally { peopleBusy = false; }
   }
 
-  // ---- tabs: the hash keeps the tab across reloads and links; keys 1–5 switch, 0 the hub ----------------------------
-  const TABS = ["overview", "support", "users", "crashes", "db"];
+  // ---- status: the STATUS bot's last report and its rhythm (skills/status) -----------------------------------------
+  let statusEdited = false;
+  const drawStatus = (d) => {
+    const l = d.last, c = d.config || {};
+    const at = l && l.at ? new Date(l.at * 1000) : null;
+    set("st-when", at ? at.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }) : "–");
+    set("st-sent", !l ? "no report yet" : `${at.toLocaleDateString()} · ${l.sent ? "sent" : `not sent${l.error ? ` (${l.error})` : ""}`}`);
+    set("st-users", l?.users ?? "–");
+    set("st-since", l?.since == null ? "" : `${l.since >= 0 ? "+" : ""}${l.since} since ${c.baseline_users ?? 0}`);
+    set("st-up", l?.up == null ? "–" : `${l.up}/${l.total}`);
+    set("st-load", l ? `load ${l.load ?? "?"} · ${l.crashes ?? "?"} open crashes` : "");
+    if (!statusEdited) { $("st-every").value = String(c.every_minutes ?? 0); $("st-to").value = c.to || ""; }
+  };
+  async function statusRefresh() {
+    try {
+      const r = await fetch("/status.json", { cache: "no-store" });
+      if (r.ok) drawStatus(await r.json());
+    } catch {}
+  }
+  for (const id of ["st-every", "st-to"]) $(id).addEventListener("input", () => { statusEdited = true; });
+  $("st-form").addEventListener("submit", async (e) => {
+    e.preventDefault();
+    const err = $("st-error");
+    err.classList.remove("bad");
+    try {
+      const r = await postJSON("/status", { every_minutes: Number($("st-every").value), to: $("st-to").value.trim() });
+      statusEdited = false;
+      drawStatus(await r.json());
+      err.textContent = "Saved.";
+    } catch {
+      err.textContent = "Not saved: a name on Yo is needed unless off.";
+      err.classList.add("bad");
+    }
+  });
+
+  // ---- tabs: the hash keeps the tab across reloads and links; keys 1–6 switch, 0 the hub ----------------------------
+  const TABS = ["overview", "support", "users", "crashes", "db", "status"];
   const tab = () => {
     const h = location.hash.slice(1);
     const t = h === "diagnostics" ? "crashes" : h === "reserved" ? "db" : h === "feedback" ? "support" : TABS.includes(h) ? h : "overview";
@@ -1100,6 +1135,7 @@ if (document.body.classList.contains("login")) {
     for (const e of document.querySelectorAll("[data-tabs]")) e.hidden = !e.dataset.tabs.split(" ").includes(t);
     for (const a of document.querySelectorAll("#tabs a")) { const on = a.dataset.tab === t; a.classList.toggle("on", on); a.setAttribute("aria-selected", String(on)); }
     if (last) render();
+    if (t === "status") statusRefresh();
     if (changed) window.scrollTo(0, 0);
   };
   window.addEventListener("hashchange", tab);
@@ -1107,7 +1143,7 @@ if (document.body.classList.contains("login")) {
     || (t.closest("input") && !["checkbox", "radio", "button", "submit"].includes(t.closest("input").type)));
   document.addEventListener("keydown", (e) => {
     if (e.ctrlKey || e.metaKey || e.altKey || typing(e.target) || $("pop").open) return;
-    const n = /^Digit[0-5]$/.test(e.code) ? Number(e.code.slice(5)) : /^[0-5]$/.test(e.key) ? Number(e.key) : null;
+    const n = /^Digit[0-6]$/.test(e.code) ? Number(e.code.slice(5)) : /^[0-6]$/.test(e.key) ? Number(e.key) : null;
     if (n == null) return;
     e.preventDefault();
     if (n === 0) { switchHub(); return; }
@@ -1120,5 +1156,6 @@ if (document.body.classList.contains("login")) {
   setInterval(tick, 3000);
   refresh();
   setInterval(refresh, 10000);
+  setInterval(() => { if (currentTab === "status" && document.visibilityState === "visible") statusRefresh(); }, 30000);
   document.addEventListener("visibilitychange", () => { if (document.visibilityState === "visible") { tick(); refresh(); } });
 }
