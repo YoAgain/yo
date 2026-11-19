@@ -209,7 +209,6 @@ internal data class BarContent(
     val arrival = bar.line as? ListLine.Arrival
     val receivedCount = maxOf(arrival?.count?.toLong() ?: 1L, if (hasSign) bar.media.size.toLong() else 0L)
     val from = arrival?.name.orEmpty()
-    val receivedFull = remember(receivedCount, from) { productArrivalLines(receivedCount, from, Words) }
     val senders = (bar.line as? ListLine.Senders)?.senders
     val fadeElapsed = bar.row?.fadeElapsed
     val fadeDuration = remember { uniffi.yo.listTimings().yoFadeMs.toLong() }
@@ -292,13 +291,13 @@ internal data class BarContent(
             }
             val receivedModifier =
                 if (primaryReceived && !hasSign) Modifier.graphicsLayer { alpha = receivedOpacity.value } else Modifier
-            if (primaryReceived && senders != null) SenderFlow(
-                senders,
+            if (primaryReceived) ArrivalWords(
+                senders ?: listOf(ListSender("", from, receivedCount.coerceIn(0L, UInt.MAX_VALUE.toLong()).toUInt())),
                 startInset = if (left) primarySignInset else outgoingInset,
                 endInset = if (left) outgoingInset else primarySignInset,
                 modifier = receivedModifier,
             ) else BarWords(
-                if (primaryReceived) receivedFull else listOf(title),
+                listOf(title),
                 startInset = if (left) primarySignInset else outgoingInset,
                 endInset = if (left) outgoingInset else primarySignInset,
                 modifier = receivedModifier,
@@ -331,8 +330,28 @@ private fun BarWords(text: String, modifier: Modifier = Modifier, startInset: In
     BarWords(listOf(text), modifier, startInset, endInset)
 
 /**
- * A group's senders since its bar last showed its name, newest first, over two lines at the small size ("Yo from TOM,
- * IDA, BEN (3×)," / "SAM, KAI +4"). The core places the names (listFlowTwoLines); this measures the pieces and draws.
+ * One sender's Yos ("3× Yo from MIA") at the bar's size when the whole line fits, else at the small size over one or
+ * two lines (SenderFlow, "3× Yo from" / "MAXIMILIAN_MUELL"); two or more senders always at the small size. Never cut.
+ */
+@Composable
+private fun ArrivalWords(senders: List<ListSender>, modifier: Modifier = Modifier, startInset: Int = 20, endInset: Int = 20) {
+    val measurer = rememberTextMeasurer()
+    val density = LocalDensity.current
+    BoxWithConstraints(modifier.fillMaxWidth()) {
+        val one = senders.singleOrNull()
+        val line = one?.let { productArrivalLines(it.count.toLong(), it.name, Words).first() }
+        // The digits' steady blocks take a little more than the digits themselves.
+        val fits = line != null && with(density) {
+            measurer.measure(line, BarStyle, maxLines = 1, softWrap = false).size.width.toDp() + 16.dp
+        } <= maxWidth - startInset.dp - endInset.dp
+        if (fits) BarWords(listOf(line!!), startInset = startInset, endInset = endInset)
+        else SenderFlow(senders, startInset = startInset, endInset = endInset)
+    }
+}
+
+/**
+ * A bar's senders, newest first, over two lines at the small size ("2× Yo from TOM, 3× ANNA," / "4× PETER, LUKAS +2").
+ * The core places the names (listFlowTwoLines); this measures the pieces and draws.
  */
 @Composable
 private fun SenderFlow(senders: List<ListSender>, modifier: Modifier = Modifier, startInset: Int = 20, endInset: Int = 20) {
@@ -354,7 +373,13 @@ private fun SenderFlow(senders: List<ListSender>, modifier: Modifier = Modifier,
             horizontalAlignment = Alignment.CenterHorizontally,
             verticalArrangement = Arrangement.spacedBy(2.dp),
         ) {
-            lines.filter { it.isNotEmpty() }.forEach { Text(it, style = style, maxLines = 1, softWrap = false) }
+            lines.filter { it.isNotEmpty() }.forEach { line ->
+                // Only a name wider than the room even alone (the core places it whole): that line shrinks to fit.
+                val width = measurer.measure(line, style, maxLines = 1, softWrap = false).size.width
+                val scale = if (width > room) (room / width).coerceAtLeast(.5f) else 1f
+                Text(line, style = if (scale < 1f) style.copy(fontSize = BarSmallFont * scale) else style,
+                    maxLines = 1, softWrap = false)
+            }
         }
     }
 }

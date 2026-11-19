@@ -369,15 +369,7 @@ struct RowButton: View {
       if case .senders(let senders) = line {
         SenderFlow(senders: senders, lead: room.lead, trail: room.trail)
       } else {
-        let lines = productArrivalLines(count: Int64(receivedCount), name: from, lang: .english)
-        let cuts = Array(lines.dropFirst().dropLast().enumerated())
-        BarRow(lead: room.lead, trail: room.trail) {
-          SteadyText(lines[0]).padding(.horizontal, 3)
-          ForEach(cuts, id: \.offset) { _, line in
-            SteadyText(line).padding(.horizontal, 3)
-          }
-          SteadyText(lines[lines.count - 1]).padding(.horizontal, 3)
-        }
+        ArrivalWords(count: receivedCount, name: from, lead: room.lead, trail: room.trail)
         .accessibilityElement(children: .ignore)
         .accessibilityLabel(media.isEmpty
           ? "\(receivedCount == 1 ? "Yo" : "\(receivedCount) Yos") from \(from)"

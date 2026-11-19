@@ -2,9 +2,42 @@ import SwiftUI
 import UIKit
 import YoCore
 
-/// A group's senders since its bar last showed its name, newest first, over two lines at the small size
-/// ("Yo from TOM, IDA, BEN (3×)," / "SAM, KAI +4"). The core places the names (`listFlowTwoLines`); this only
-/// measures the pieces and draws the lines.
+/// The bar's font (Montserrat Bold, scaled as `.yo` scales it), for measuring what the core places.
+@MainActor func barFont(_ size: CGFloat, _ typeSize: DynamicTypeSize) -> UIFont {
+  let base = UIFont(name: "Montserrat-Bold", size: size) ?? .boldSystemFont(ofSize: size)
+  return UIFontMetrics(forTextStyle: .title1)
+    .scaledFont(for: base, compatibleWith: UITraitCollection(preferredContentSizeCategory: UIContentSizeCategory(typeSize)))
+}
+
+func textWidth(_ text: String, _ font: UIFont) -> CGFloat {
+  ceil((text as NSString).size(withAttributes: [.font: font]).width)
+}
+
+/// One sender's Yos ("3× Yo from MIA"): at the bar's size when the whole line fits, else at the small size over
+/// one or two lines ("3× Yo from" / "MAXIMILIAN_MUELL"). The name is never cut.
+struct ArrivalWords: View {
+  let count: Int
+  let name: String
+  var lead = BarRow.margin
+  var trail = BarRow.margin
+  @Environment(\.dynamicTypeSize) private var typeSize
+
+  var body: some View {
+    GeometryReader { geometry in
+      let line = productArrivalLines(count: Int64(count), name: name, lang: .english)[0]
+      // SteadyText's digits take a little more than their own width; its padding 3 on each side.
+      if textWidth(line, barFont(Metrics.rowFont, typeSize)) + 16 <= geometry.size.width - lead - trail {
+        BarRow(lead: lead, trail: trail) { SteadyText(line).padding(.horizontal, 3) }
+      } else {
+        SenderFlow(senders: [ListSender(user: "", name: name, count: UInt32(clamping: count))], lead: lead, trail: trail)
+      }
+    }
+    .frame(height: Metrics.rowHeight)
+  }
+}
+
+/// A bar's senders, newest first, over two lines at the small size ("2× Yo from TOM, 3× ANNA," / "4× PETER,
+/// LUKAS +2"). The core places the names (`listFlowTwoLines`); this only measures the pieces and draws the lines.
 struct SenderFlow: View {
   let senders: [ListSender]
   var lead = BarRow.margin
@@ -14,14 +47,16 @@ struct SenderFlow: View {
   var body: some View {
     GeometryReader { geometry in
       let lines = lines(room: max(0, geometry.size.width - lead - trail))
+      let room = max(0, geometry.size.width - lead - trail)
       VStack(spacing: 2) {
         Text(lines[0])
         if lines.count > 1, !lines[1].isEmpty { Text(lines[1]) }
       }
       .font(.yo(Metrics.rowSmallFont))
       .lineLimit(1)
-      .fixedSize()
-      .frame(width: geometry.size.width - lead - trail, height: geometry.size.height)
+      // Only a name wider than the room even alone (the core places it whole): that line shrinks to fit.
+      .minimumScaleFactor(0.5)
+      .frame(width: room, height: geometry.size.height)
       .offset(x: lead)
     }
     .frame(height: Metrics.rowHeight)
@@ -31,10 +66,8 @@ struct SenderFlow: View {
   }
 
   private func lines(room: CGFloat) -> [String] {
-    let base = UIFont(name: "Montserrat-Bold", size: Metrics.rowSmallFont) ?? .boldSystemFont(ofSize: Metrics.rowSmallFont)
-    let font = UIFontMetrics(forTextStyle: .title1)
-      .scaledFont(for: base, compatibleWith: UITraitCollection(preferredContentSizeCategory: UIContentSizeCategory(typeSize)))
-    func width(_ text: String) -> Float { Float(ceil((text as NSString).size(withAttributes: [.font: font]).width)) }
+    let font = barFont(Metrics.rowSmallFont, typeSize)
+    func width(_ text: String) -> Float { Float(textWidth(text, font)) }
     let flow = listSenderFlow(senders: senders, lang: .english)
     let widths = ListFlowWidths(prefix: width(flow.prefix), tokens: flow.tokens.map(width),
       separator: width(flow.separator), comma: width(flow.comma), more: flow.more.map(width))
