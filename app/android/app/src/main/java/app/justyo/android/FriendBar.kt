@@ -27,6 +27,8 @@ import androidx.compose.ui.graphics.lerp
 import androidx.compose.ui.input.pointer.PointerEventPass
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.layout.positionInWindow
+import androidx.compose.ui.platform.LocalView
 import androidx.compose.ui.platform.LocalResources
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.layout.LayoutCoordinates
@@ -119,6 +121,7 @@ internal data class BarContent(
     onPress: (Boolean) -> Unit, onTap: () -> Unit, onMenu: () -> Unit, onUndo: () -> Unit,
     onMedia: () -> Unit, onDecline: () -> Unit, onHold: ((Boolean) -> Unit)?,
     onMediaTouch: (MediaTouch) -> Unit = {},
+    onHoldDrag: (below: Float, room: Float) -> Unit = { _, _ -> },
 ) {
     val friend = bar.friend
     val resources = LocalResources.current
@@ -127,9 +130,13 @@ internal data class BarContent(
     val currentPress by rememberUpdatedState(onPress)
     val currentTap by rememberUpdatedState(onTap)
     val currentHold by rememberUpdatedState(onHold)
+    val currentHoldDrag by rememberUpdatedState(onHoldDrag)
+    // Where the bar is in the window, for the room under a filming finger.
+    var barTop by remember(friend.key) { mutableFloatStateOf(0f) }
+    val root = LocalView.current
     val currentMedia by rememberUpdatedState(onMedia)
     val currentMediaTouch by rememberUpdatedState(onMediaTouch)
-    val gesture = if (onHold != null) Modifier.pointerInput(friend.key) {
+    val gesture = if (onHold != null) Modifier.onGloballyPositioned { barTop = it.positionInWindow().y }.pointerInput(friend.key) {
         awaitEachGesture {
             val down = awaitFirstDown()
             var timedOut = false
@@ -144,6 +151,11 @@ internal data class BarContent(
                     do {
                         val change = awaitPointerEvent().changes.firstOrNull { it.id == down.id }
                         change?.consume()
+                        // Filming, the same finger drawn down zooms the camera (dp below its touch, room under it).
+                        if (change != null && change.pressed) currentHoldDrag(
+                            (change.position.y - down.position.y) / density,
+                            (root.rootView.height - barTop - down.position.y) / density,
+                        )
                     } while (change?.pressed == true)
                 } finally {
                     currentHold?.invoke(false)

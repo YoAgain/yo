@@ -804,7 +804,12 @@ private fun NotificationSettingsRow(onClick: () -> Unit) {
                             } else if(!held && recording==friend.key) {
                                 camera.stopVideo()
                             }
-                        } else null)
+                            if(!held) camera.recordZoomEnd()
+                        } else null,
+                        onHoldDrag={ below, room ->
+                            if(recording==friend.key && camera.recordZoom(below,room))
+                                view.performHapticFeedback(HapticFeedbackConstants.CLOCK_TICK)
+                        })
                 }
             }
             if(!cameraOn) {

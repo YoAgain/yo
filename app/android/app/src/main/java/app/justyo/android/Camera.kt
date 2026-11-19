@@ -31,6 +31,7 @@ import androidx.camera.view.PreviewView
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.setValue
+import uniffi.yo.productRecordZoom
 import androidx.core.content.ContextCompat
 import androidx.lifecycle.LifecycleOwner
 import kotlinx.coroutines.*
@@ -103,12 +104,37 @@ class YoCamera(private val context: Context) {
                 val movie = VideoCapture.Builder(recorder).setTargetRotation(rotation)
                     .setMirrorMode(MirrorMode.MIRROR_MODE_ON_FRONT_ONLY).build()
                 camera=p.bindToLifecycle(owner,selector,preview,photo,movie)
-                image=photo; video=movie; zoom=1f
+                image=photo; video=movie; zoom=1f; heldZoomStart=null
             } catch (error: Exception) {
                 Log.w("YoCamera", "Camera binding failed", error)
                 failed(context.getString(R.string.camera_open_failed))
             }
         },ContextCompat.getMainExecutor(context))
+    }
+    /** The zoom a filming hold started at; the finger drawn down zooms from there, lifted it goes back. */
+    private var heldZoomStart: Float? = null
+    private var heldZoomTicked = false
+    /** Filming, the finger [below] dp under its touch ([room] dp under that) zooms in as far as `productRecordZoom`
+     *  says, back up out again; true once per hold, as it starts (for the tick). */
+    fun recordZoom(below: Float, room: Float): Boolean {
+        val active = camera ?: return false
+        val start = heldZoomStart ?: zoom.also { heldZoomStart = it }
+        val most = active.cameraInfo.zoomState.value?.maxZoomRatio ?: 1f
+        val next = productRecordZoom(below.toDouble(), room.toDouble(), start.toDouble(), most.toDouble()).toFloat()
+        if (kotlin.math.abs(next - zoom) > 0.001f) {
+            zoom = next
+            active.cameraControl.setZoomRatio(next)
+        }
+        val began = !heldZoomTicked && next > start + 0.01f
+        if (began) heldZoomTicked = true
+        return began
+    }
+    fun recordZoomEnd() {
+        heldZoomStart?.let { start ->
+            if (zoom != start) { zoom = start; camera?.cameraControl?.setZoomRatio(start) }
+        }
+        heldZoomStart = null
+        heldZoomTicked = false
     }
     fun flip() { front=!front }
     fun zoom() {
