@@ -388,6 +388,9 @@ final class Inbox {
   func listen(accounts: AccountStore, friends: Friends) async {
     var respelled = false
     var storageTaken = false
+    // After a failure (also one in the background) or while the hub counts as unreachable: a short look first, so
+    // "Offline" goes as soon as the hub answers, not only at the end of a 25 s wait.
+    var failed = false
     while !Task.isCancelled && !HubTransport.unsupported {
       guard let client = accounts.client else {
         try? await Task.sleep(for: .seconds(1))
@@ -410,7 +413,9 @@ final class Inbox {
           await take(saved, contacts: known, client: client, friends: friends)
           fetchMedia(client: client)
         }
-        let (events, contacts) = try await Hub.run(reportErrors: false) { try Perf.timed("inbox.listen.sync.core") { (try client.sync(waitS: 25), client.contacts()) } }
+        let wait: UInt64 = failed || Availability.shared.remote ? 0 : 25
+        let (events, contacts) = try await Hub.run(reportErrors: false) { try Perf.timed("inbox.listen.sync.core") { (try client.sync(waitS: wait), client.contacts()) } }
+        failed = false
         lastSync = .now
         Perf.mark("listen.events \(events.count)")
         guard client === accounts.client else { continue }  // signed out meanwhile: not for this account
@@ -426,9 +431,18 @@ final class Inbox {
       } catch {
         // Signed out meanwhile: the old client's wait fails with `State`, as expected.
         if client === accounts.client { Diagnostics.recordUnreported(error) }
-        try? await Task.sleep(for: .seconds(5))
+        // The first failure (a wait cut off by the suspension) is tried again at once, before "Offline" shows.
+        try? await Task.sleep(for: .seconds(failed ? 5 : 1))
+        failed = true
       }
     }
+  }
+
+  /// Back in front while the hub counted as unreachable (a request failed in the background): one quick signed look,
+  /// as the inbox's wait from before may still be under way and answers only at its end.
+  func recheck(accounts: AccountStore) async {
+    guard Availability.shared.remote, let client = accounts.client, !HubTransport.unsupported else { return }
+    _ = try? await Hub.run(reportErrors: false) { try client.statusProbe() }
   }
 
   /// An extension wrote the shared state (`StateChanged`): its saved Yos and the stored friends, without the hub.

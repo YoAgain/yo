@@ -55,7 +55,11 @@ extension FriendList {
       .onChange(of: scenePhase, initial: true) { publish(listModel.foreground(now: listNow, active: scenePhase == .active)) }
       // A Yo sent from outside the list (Action button, Control Center, Siri, a notification's Yo Back): on top.
       .task { IntentSent.listen(); takeIntentSent() }
-      .onChange(of: scenePhase) { _, phase in if phase == .active { takeIntentSent() } }
+      .onChange(of: scenePhase) { _, phase in
+        guard phase == .active else { return }
+        takeIntentSent()
+        Task { await inbox.recheck(accounts: accounts) }
+      }
       .onReceive(NotificationCenter.default.publisher(for: IntentSent.changed)) { _ in takeIntentSent() }
       // An extension wrote the shared state: what it saved comes to the list at once.
       .task { StateChanged.listen() }
