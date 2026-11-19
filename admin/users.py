@@ -488,18 +488,13 @@ def updates(previous=None, now=None):
 
 # ---- App versions: current is the highest iOS build users report --------------------------------------------------
 # Every TestFlight build is "yyyymmddHHMM"; anything else iOS reports (xtool's "1") is a dev build. Current is the
-# highest build reported by any user outside YO_ADMIN_INTERNAL_USERS (the team's testers, on newer main builds:
-# comma-separated user ids, set on the server only); older has an update. No network.
+# highest build any user reports (the team's own included, no exceptions); older has an update. No network.
 IOS_BUILD = re.compile(r"\d{12}")
-
-
-def internal_users() -> list:
-    return sorted({u.strip().lower() for u in os.environ.get("YO_ADMIN_INTERNAL_USERS", "").split(",") if u.strip()})
 
 
 def classify(app, newest=None, bot_min=None) -> dict:
     """One reported app ("platform/build"): its platform word, state ("current", "update" or None: unknown) and the
-    details for the tooltip. newest: the highest iOS build reported outside the internal testers."""
+    details for the tooltip. newest: the highest iOS build any user reports."""
     platform, _, b = (app or "").partition("/")
     if not platform or not b:
         return {"label": "unknown", "state": None, "title": app or "no app reported"}
@@ -517,7 +512,7 @@ def classify(app, newest=None, bot_min=None) -> dict:
             "title": f"TestFlight build {b}" + (f"; newest reported {newest}" if newest and newest != b else "")}
 
 
-def app_builds(out, internal=()) -> dict:
+def app_builds(out) -> dict:
     """Every reported app of both hubs ("ios/202611191257") with its label, state and details."""
     seen, reported = set(), set()
     for name in HUBS:
@@ -526,8 +521,7 @@ def app_builds(out, internal=()) -> dict:
         for u in h.get("users") or []:
             apps = {u.get("app")} | {d.get("app") for d in u.get("device_list") or []}
             seen.update(apps)
-            if u.get("id") not in internal:
-                reported.update(apps)
+            reported.update(apps)
     seen = {a for a in seen if a and a != "unknown"}
     ios = [a.partition("/")[2] for a in reported if a and a.startswith("ios/") and IOS_BUILD.fullmatch(a[4:])]
     newest = max(ios) if ios else None
@@ -559,9 +553,8 @@ def version_day(apps, builds, minimum) -> dict:
 
 
 def finish(out):
-    """What needs both hubs: the internal testers, every build's state, and each hub's versions of today."""
-    out["internal_users"] = internal_users()
-    out["app_builds"] = app_builds(out, set(out["internal_users"]))
+    """What needs both hubs: every build's state, and each hub's versions of today."""
+    out["app_builds"] = app_builds(out)
     for name in HUBS:
         h = out.get(name)
         if isinstance(h, dict) and "apps_today" in h:

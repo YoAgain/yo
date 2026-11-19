@@ -275,7 +275,7 @@ if (document.body.classList.contains("login")) {
 
   // ---- app builds: the platform word ("iOS", "Android", "Bot"), green when current, yellow when an update is out,
   // plain when unknown; build and newest build only in the tooltip. Worked out by the collector: current is the highest
-  // iOS build reported outside the internal testers (YO_ADMIN_INTERNAL_USERS), who are never shown yellow.
+  // iOS build any user reports, the team's own included.
   const build = (app) => (app || "").split("/").pop();
   const parse = (app) => {
     const [p, b] = (app || "").split("/");
@@ -287,14 +287,10 @@ if (document.body.classList.contains("login")) {
   const appInfo = (app) => last?.app_builds?.[app] || (app ? { label: build(app), state: null, title: app } : null);
   const belowMin = (app) => { const v = parse(app); return !!v && minApp.some((m) => m[0] === v[0] && v[1] < m[1]); };
   // "current", "update" or null (unknown, or no app).
-  const internal = (uid) => !!uid && (last?.internal_users || []).includes(uid);
-  const appState = (app, uid) => {
-    const s = belowMin(app) ? "update" : appInfo(app)?.state || null;
-    return internal(uid) && s === "update" ? null : s;
-  };
+  const appState = (app) => (belowMin(app) ? "update" : appInfo(app)?.state || null);
   const appTitle = (app, uid) => {
     const i = appInfo(app);
-    return i ? `${internal(uid) ? "internal tester · " : ""}${i.title}${belowMin(app) ? " · below the hub's minimum: refused, must update" : ""}` : "";
+    return i ? `${i.title}${belowMin(app) ? " · below the hub's minimum: refused, must update" : ""}` : "";
   };
   const appTag = (app, uid) => {
     const i = appInfo(app), a = appState(app, uid);
