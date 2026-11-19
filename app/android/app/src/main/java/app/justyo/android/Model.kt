@@ -16,12 +16,12 @@ fun utf8Limit(text: String, bytes: Int): String {
     return out.toString()
 }
 fun inviteName(uri: Uri): String? {
-    val valid = when (uri.scheme?.lowercase()) {
-        "yo" -> uri.host.equals("add", true)
-        "https", "http" -> uri.host?.lowercase() in setOf("justyo.co", "www.justyo.co")
-        else -> false
+    val raw = when (uri.scheme?.lowercase()) {
+        "yo" -> uri.encodedAuthority?.let(Uri::decode)  // yo://NAME, the website's "Open in Yo"
+        "https", "http" -> uri.pathSegments.firstOrNull()?.takeIf { uri.host?.lowercase() in setOf("justyo.co", "www.justyo.co") }
+        else -> null
     }
-    return uri.pathSegments.firstOrNull()?.takeIf { valid && it.isNotBlank() && it.lowercase() !in setOf("privacy", "security") }
+    return raw?.takeIf { it.isNotBlank() && it.lowercase() !in setOf("privacy", "security") }
 }
 data class Friend(
     val key: String = UUID.randomUUID().toString(), val name: String, val color: Int,

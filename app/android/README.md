@@ -111,8 +111,8 @@ Keep captures synthetic and free of recovery keys.
 
 Push needs an FCM transport in the hub; only foreground polling runs. Android App Links and passkeys need
 `assetlinks.json` on the relevant domains with the package/signing certificate. `Passkeys.kt` contains a gated
-Credential Manager PRF assertion path and explicit TODO; it cannot secure or restore an account yet. `yo://add/NAME`
-works; HTTPS invites are registered but intentionally not verified. Shares use ACTION_SEND/ACTION_SEND_MULTIPLE
+Credential Manager PRF assertion path and explicit TODO; it cannot secure or restore an account yet. `yo://NAME`
+works; HTTPS invites are App Links (autoVerify) once justyo.co's assetlinks.json names the release certificate. Shares use ACTION_SEND/ACTION_SEND_MULTIPLE
 (up to ten images or one video) in this activity. A future FCM data-message service replaces iOS’s notification
 service extension; none is registered now. See PARITY for all remaining gaps and validation limits.
 

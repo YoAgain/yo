@@ -1,5 +1,6 @@
-// Invite links: https://justyo.co/NAME (universal link; justyo.co's association file sends every path but "/" and
-// "/privacy" to the app) and yo://add/NAME add NAME as a friend. The name is persisted until the list can add it, also
+// Invite links: https://justyo.co/NAME (universal link; justyo.co's association file sends one path part, not its own
+// pages, to the app) and yo://NAME (the website's "Open in Yo", where a universal link does not fire) add NAME as a
+// friend. The name is persisted until the list can add it, also
 // through onboarding; a link to one's own name is dropped.
 import Foundation
 import Observation
@@ -22,13 +23,13 @@ final class Invite {
     if let pending, Username.skeleton(pending) == Username.skeleton(username) { self.pending = nil }
   }
 
-  /// The first path component, cleaned as a username; nil for other sites and justyo.co's own pages.
+  /// The name in yo://NAME or justyo.co/NAME, cleaned as a username; nil for other sites and justyo.co's own pages.
   nonisolated static func name(in url: URL) -> String? {
     let parts = url.pathComponents.filter { $0 != "/" }  // percent-decoded
     let host = url.host()?.lowercased()
     let raw: String?
     switch url.scheme?.lowercased() {
-    case "yo": raw = host == "add" ? parts.first : nil
+    case "yo": raw = url.host(percentEncoded: false)
     case "https", "http": raw = host == "justyo.co" || host == "www.justyo.co" ? parts.first : nil
     default: raw = nil
     }

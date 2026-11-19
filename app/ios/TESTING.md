@@ -122,7 +122,7 @@ the Linux build does not run the Simulator UI driver.
 
 ## Invite links and the first Yo (2026-11-14)
 
-With `xcrun simctl openurl DEV yo://add/NAME` (the same handler as https://justyo.co/NAME; universal links need the
+With `xcrun simctl openurl DEV yo://NAME` (the same handler as https://justyo.co/NAME; universal links need the
 app's team in its id, which the Simulator build has not: the https link opens Safari there), against the dev hub.
 
 | Flow | Result |

@@ -28,7 +28,7 @@
             <intent-filter>
                 <action android:name="android.intent.action.VIEW" />
                 <category android:name="android.intent.category.DEFAULT" /><category android:name="android.intent.category.BROWSABLE" />
-                <data android:scheme="yo" android:host="add" />
+                <data android:scheme="yo" />
             </intent-filter>
             <!-- Invite links justyo.co/NAME as App Links: verified against justyo.co/.well-known/assetlinks.json (the
                  release signing certificate's SHA-256). One path part without a dot, as the iOS association file;

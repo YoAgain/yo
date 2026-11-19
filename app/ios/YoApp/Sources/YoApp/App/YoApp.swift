@@ -181,7 +181,7 @@ struct YoApp: App {
           if let me = accounts.account?.username { Invite.shared.signedIn(as: me) }
         }
       }
-      // Invite links (justyo.co/NAME, yo://add/NAME); yo://camera and yo://open come from Yo's own intents.
+      // Invite links (justyo.co/NAME, yo://NAME); yo://camera and yo://open come from Yo's own intents.
       .onOpenURL { url in
         if url.scheme?.lowercased() == "yo", url.host()?.lowercased() == "camera" { AppRoute.shared.camera = true }
         else if url.scheme?.lowercased() == "yo", url.host()?.lowercased() == "open" {}
