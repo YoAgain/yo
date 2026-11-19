@@ -8,15 +8,17 @@ import android.os.Bundle
 import android.service.quicksettings.TileService
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
-import androidx.compose.foundation.clickable
+import androidx.activity.enableEdgeToEdge
+import androidx.compose.foundation.selection.toggleable
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
-import androidx.compose.ui.Alignment
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.res.stringResource
+import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.core.content.edit
@@ -135,47 +137,64 @@ class WidgetSend : ActionCallback {
 }
 
 class YoWidgetConfiguration : ComponentActivity() {
+    @OptIn(ExperimentalMaterial3Api::class)
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         val id = intent.getIntExtra(AppWidgetManager.EXTRA_APPWIDGET_ID, AppWidgetManager.INVALID_APPWIDGET_ID)
         val result = Intent().putExtra(AppWidgetManager.EXTRA_APPWIDGET_ID, id)
         setResult(Activity.RESULT_CANCELED, result)
-        if (id == AppWidgetManager.INVALID_APPWIDGET_ID) {
+        val glanceId = if (id == AppWidgetManager.INVALID_APPWIDGET_ID) null else try {
+            GlanceAppWidgetManager(this).getGlanceIdBy(id)
+        } catch (_: IllegalArgumentException) {
+            null
+        }
+        if (glanceId == null) {
             finish()
             return
         }
+        enableEdgeToEdge()
         val repo = repository
         setContent {
-            YoTheme {
+            YoSystemTheme {
                 val snapshot by repo.state.collectAsStateWithLifecycle()
                 val account = repo.widgetAccount()
-                var selected by remember(account) { mutableStateOf(widgetSelection(id, account)) }
-                Surface {
-                    Column(Modifier.fillMaxSize().safeDrawingPadding().padding(16.dp)) {
-                        Text(stringResource(R.string.widget_choose), style = MaterialTheme.typography.titleLarge)
-                        LazyColumn(Modifier.weight(1f)) {
-                            items(snapshot.widgetFriends(), key = { it.key }) { friend ->
-                                val checked = friend.key in selected
-                                val canToggle = checked || selected.size < 16
-                                Row(Modifier.fillMaxWidth().clickable(enabled = canToggle) {
-                                    selected = if (checked) selected - friend.key else selected + friend.key
-                                }, verticalAlignment = Alignment.CenterVertically) {
-                                    Checkbox(checked, onCheckedChange = null, modifier = Modifier.padding(12.dp))
-                                    Text(friend.widgetName())
+                var selected by rememberSaveable(id, account) { mutableStateOf(widgetSelection(id, account)) }
+                var saving by remember { mutableStateOf(false) }
+                Scaffold(topBar = {
+                    TopAppBar(
+                        title = { Text(stringResource(R.string.widget_choose)) },
+                        actions = {
+                            TextButton(enabled = account != null && !saving, onClick = {
+                                saving = true
+                                widgetPreferences().edit {
+                                    putString("friends:$id", JSONArray(selected).toString())
+                                    putString("account:$id", account)
                                 }
-                            }
+                                lifecycleScope.launch {
+                                    YoWidget().update(this@YoWidgetConfiguration, glanceId)
+                                    setResult(Activity.RESULT_OK, result)
+                                    finish()
+                                }
+                            }) { Text(stringResource(R.string.ui_done)) }
+                        },
+                    )
+                }) { padding ->
+                    LazyColumn(Modifier.fillMaxSize().padding(padding)) {
+                        items(snapshot.widgetFriends(), key = { it.key }) { friend ->
+                            val checked = friend.key in selected
+                            ListItem(
+                                headlineContent = { Text(friend.widgetName()) },
+                                leadingContent = { Checkbox(checked, onCheckedChange = null) },
+                                modifier = Modifier.toggleable(
+                                    value = checked,
+                                    enabled = !saving && (checked || selected.size < 16),
+                                    role = Role.Checkbox,
+                                    onValueChange = { chosen ->
+                                        selected = if (chosen) selected + friend.key else selected - friend.key
+                                    },
+                                ),
+                            )
                         }
-                        Button(enabled = account != null, onClick = {
-                            widgetPreferences().edit {
-                                putString("friends:$id", JSONArray(selected).toString())
-                                putString("account:$id", account)
-                            }
-                            lifecycleScope.launch {
-                                YoWidget().update(this@YoWidgetConfiguration, GlanceAppWidgetManager(this@YoWidgetConfiguration).getGlanceIdBy(id))
-                                setResult(Activity.RESULT_OK, result)
-                                finish()
-                            }
-                        }) { Text(stringResource(R.string.ui_done)) }
                     }
                 }
             }

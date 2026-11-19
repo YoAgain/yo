@@ -26,7 +26,7 @@ internal class PendingShares(private val context: Context,private val vault: Vau
             check(rows.size<10)
             val id=UUID.randomUUID().toString()
             vault.write("share-$id",prepared.bytes)
-            try { save(rows+JSONObject().put("id",id).put("width",prepared.width).put("height",prepared.height).put("video",prepared.video).put("duration",prepared.duration)) }
+            try { save(rows+JSONObject().put("id",id).put("width",prepared.width).put("height",prepared.height).put("video",prepared.video).put("duration",prepared.duration).put("heic",prepared.heic)) }
             catch(e: Exception) { vault.delete("share-$id");throw e }
             uri(id)
         } }
@@ -34,7 +34,7 @@ internal class PendingShares(private val context: Context,private val vault: Vau
     suspend fun open(uri: Uri): PreparedMedia = gate.withLock {
         val id=uri.schemeSpecificPart
         val row=manifest().first { it.getString("id")==id }
-        PreparedMedia(checkNotNull(vault.read("share-$id")),row.getInt("width"),row.getInt("height"),row.getBoolean("video"),row.getInt("duration"))
+        PreparedMedia(checkNotNull(vault.read("share-$id")),row.getInt("width"),row.getInt("height"),row.getBoolean("video"),row.getInt("duration"),heic=row.optBoolean("heic"))
     }
     suspend fun remove(uri: Uri) = gate.withLock {
         val id=uri.schemeSpecificPart

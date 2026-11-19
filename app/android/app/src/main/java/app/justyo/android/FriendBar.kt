@@ -191,12 +191,12 @@ internal data class BarContent(
         }
     }
     val mediaSign: @Composable () -> Unit = {
-        Box(Modifier.padding(horizontal = 10.dp).width(60.dp).height(BarHeight).clickable(
+        Box(Modifier.padding(end = if (left) 0.dp else 20.dp, start = if (left) 20.dp else 0.dp).width(40.dp).height(BarHeight).clickable(
             interactionSource = null, indication = null, role = Role.Button, onClick = onMedia,
         ).semantics { contentDescription = resources.getQuantityString(R.plurals.media_items, bar.media.size, bar.media.size) },
             contentAlignment = Alignment.Center) {
             val sign = if (bar.media.any { it.video }) "🎥" else "📷"
-            Text(sign, fontSize = BarFont)
+            Text(sign, style = TextStyle(fontSize = 26.sp), maxLines = 1)
         }
     }
     Column(Modifier.fillMaxWidth().pointerInput(friend.key) {
@@ -298,7 +298,8 @@ private fun BarWords(
     BoxWithConstraints(modifier.fillMaxWidth()) {
         val start = startInset.dp
         val end = endInset.dp
-        val available = (maxWidth - start - end).coerceAtLeast(0.dp)
+        val edge = maxOf(start, end).coerceAtMost(maxWidth / 2)
+        val available = maxWidth - edge * 2
         fun width(value: String) = measurer.measure(value, style, maxLines = 1, softWrap = false).size.width
         val slot = ('0'..'9').maxOf { width(it.toString()) }
         fun parts(value: String): Triple<String, String, String> {
@@ -313,7 +314,7 @@ private fun BarWords(
         val selected = text
         val (prefix, digits, suffix) = parts(selected)
         val lineWidth = total(selected).coerceAtMost(available)
-        val lineStart = ((maxWidth - lineWidth) / 2).coerceIn(start, (maxWidth - end - lineWidth).coerceAtLeast(start))
+        val lineStart = (maxWidth - lineWidth) / 2
         Row(
             Modifier.offset(x = lineStart).width(lineWidth).clipToBounds()
                 .clearAndSetSemantics { this.contentDescription = selected },

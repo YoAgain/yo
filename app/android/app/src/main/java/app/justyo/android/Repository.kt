@@ -264,18 +264,27 @@ class Repository(private val context: Context, ownerScope: CoroutineScope) {
     }
     suspend fun keepRecovery() = saveRecovery(null)
 
-    private suspend fun saveRecovery(answer: Passkeys.Answer?) = accountTurn.withLock {
+    internal suspend fun hasRecoveryPasskey(): Boolean = accountTurn.withLock {
+        val code = vault.read("recovery")?.decodeToString() ?: return@withLock false
+        val record = openBackup(transport, null, YoDoor.RecoveryKey(code))?.record ?: return@withLock false
+        record.byPasskey.isNotEmpty() && record.authPasskey.isNotEmpty()
+    }
+
+    internal suspend fun removeRecoveryPasskey() = saveRecovery(null, removePasskey = true)
+
+    private suspend fun saveRecovery(answer: Passkeys.Answer?, removePasskey: Boolean = false) = accountTurn.withLock {
         val c = client ?: return@withLock
         if (answer != null) check(answer.user.contentEquals(c.userId().hexBytes()))
-        val code = state.value.recovery ?: if (answer != null) newRecoveryKey()
-            else error(context.getString(R.string.ui_recovery_key_missing))
         val old = vault.read("recovery")?.decodeToString()
+        val code = if (removePasskey) checkNotNull(old) else state.value.recovery ?: if (answer != null) newRecoveryKey()
+            else error(context.getString(R.string.ui_recovery_key_missing))
         val backup = old?.let { openBackup(transport, null, YoDoor.RecoveryKey(it)) }
-        val passkey = answer?.let { YoPasskeyDoor.New(it.prf) }
+        if (removePasskey) checkNotNull(backup)
+        val passkey = if (removePasskey) YoPasskeyDoor.None else answer?.let { YoPasskeyDoor.New(it.prf) }
             ?: backup?.let { YoPasskeyDoor.Keep(it.record) } ?: YoPasskeyDoor.None
         val account = JSONObject().put("username", c.username()).put("userID", encode(c.userId().hexBytes()))
-            .put("accountKey", encode(c.accountSecret())).put("byPasskey", answer != null || backup?.record?.byPasskey?.isNotEmpty() == true).put("byCode", true)
-            .put("codeAuth", true).put("passkeyAuth", answer != null || backup?.record?.authPasskey?.isNotEmpty() == true).put("backupVersion", 3)
+            .put("accountKey", encode(c.accountSecret())).put("byPasskey", !removePasskey && (answer != null || backup?.record?.byPasskey?.isNotEmpty() == true)).put("byCode", true)
+            .put("codeAuth", true).put("passkeyAuth", !removePasskey && (answer != null || backup?.record?.authPasskey?.isNotEmpty() == true)).put("backupVersion", 3)
         val sealed = JSONObject().put("account", account).put("code", code).toString().toByteArray()
         c.putBackup(backup?.k ?: randomBytes(32), sealed, code, passkey)
         check(c === client)

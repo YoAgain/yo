@@ -16,6 +16,10 @@ import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.selection.selectable
+import androidx.compose.foundation.text.BasicTextField
+import androidx.compose.foundation.text.BasicText
+import androidx.compose.foundation.text.TextAutoSize
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.*
@@ -23,12 +27,21 @@ import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.ui.Alignment
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.res.stringResource
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.SolidColor
+import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontFamily
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.core.content.FileProvider
@@ -46,8 +59,7 @@ import java.io.File
 import uniffi.yo.*
 
 @Composable fun ProfileSheet(model: YoViewModel,s: AppState,onClose: ()->Unit,onAddFriends: ()->Unit) {
-    val colors=if(isSystemInDarkTheme()) darkColorScheme(primary=Amethyst) else lightColorScheme(primary=Amethyst)
-    MaterialTheme(colorScheme=colors) { ProfileContent(model,s,onClose,onAddFriends) }
+    YoSystemTheme { ProfileContent(model, s, onClose, onAddFriends) }
 }
 
 @Composable private fun ProfileContent(model: YoViewModel,s: AppState,onClose: ()->Unit,onAddFriends: ()->Unit) {
@@ -60,9 +72,11 @@ import uniffi.yo.*
     var code by remember { mutableStateOf(false) }
     var logout by remember { mutableStateOf(false) }
     var renew by remember { mutableStateOf(false) }
+    var removePasskey by remember { mutableStateOf(false) }
+    var passkeyRevision by remember { mutableIntStateOf(0) }
     var deleting by rememberSaveable { mutableStateOf("") }
     var feedback by rememberSaveable { mutableStateOf("") }
-    var thanks by remember { mutableStateOf(false) }
+    var sendingFeedback by remember { mutableStateOf(false) }
     var supportOffline by remember { mutableStateOf(false) }
     var supportRetry by remember { mutableIntStateOf(0) }
     var support by remember { mutableStateOf<uniffi.yo.SupportThread?>(null) }
@@ -80,11 +94,13 @@ import uniffi.yo.*
         }
     }
     var recoveryHelp by remember { mutableStateOf(false) }
+    var encryptionFromStatus by rememberSaveable { mutableStateOf(false) }
     val goBack = {
         page = when (page) {
             "Contact Us", "Status", "Licenses" -> "Help"
             "Crash Reports" -> "Status"
-            "Delete Account" -> "Account Recovery"
+            "Delete Account", "Contacts", "Blocked", "Media", "Statistics", "Account Recovery" -> "Account"
+            "Encryption" -> if (encryptionFromStatus) "Status" else "Account"
             else -> "Profile"
         }
     }
@@ -117,68 +133,174 @@ import uniffi.yo.*
         val intent=guard.createConfirmDeviceCredentialIntent(if(page=="Delete Account") "Delete Account" else uiResources.getString(R.string.ui_recovery_key),uiResources.getString(R.string.ui_confirm_it_s_you))
         if(intent!=null) auth.launch(intent) else model.error(uiResources.getString(R.string.ui_set_a_screen_lock_in_android_settings_to_continue))
     }
-    ModalBottomSheet(onDismissRequest=onClose,sheetState=rememberModalBottomSheetState(skipPartiallyExpanded=true)) {
-    androidx.activity.compose.PredictiveBackHandler(enabled=page!="Profile") { events -> events.collect { };goBack() }
-        Column(Modifier.fillMaxWidth()) {
-            TopAppBar(title={Text(when(page){"Account Recovery" -> uiResources.getString(R.string.account_recovery);"Contacts" -> uiResources.getString(R.string.ui_contacts);"Appearance" -> uiResources.getString(R.string.ui_appearance);"Blocked" -> uiResources.getString(R.string.ui_blocked);"Contact Us" -> uiResources.getString(R.string.ui_contact_us);"Crash Reports" -> uiResources.getString(R.string.ui_crash_reports);"Delete Account" -> uiResources.getString(R.string.ui_delete_account);"Encryption" -> uiResources.getString(R.string.ui_encryption);"Help" -> uiResources.getString(R.string.help_and_about);"Licenses" -> uiResources.getString(R.string.about_and_licenses);"Media" -> uiResources.getString(R.string.ui_media);"Profile" -> uiResources.getString(R.string.ui_profile);"Statistics" -> uiResources.getString(R.string.ui_statistics);"Status" -> uiResources.getString(R.string.ui_status);else -> page})},navigationIcon={if(page!="Profile") IconButton(onClick=goBack){Icon(Icons.AutoMirrored.Filled.ArrowBack,uiResources.getString(R.string.ui_back))}},actions={IconButton(onClick=onClose){Icon(Icons.Default.Close,uiResources.getString(R.string.ui_close))}})
-            LazyColumn(Modifier.fillMaxWidth().weight(1f, fill = false).background(MaterialTheme.colorScheme.surfaceContainerLow),contentPadding=PaddingValues(start=16.dp,end=16.dp,top=8.dp,bottom=32.dp),verticalArrangement=Arrangement.spacedBy(20.dp)) {
+    val passkeyConfigured by produceState(false, s.secured, secure, passkeyRevision, page) {
+        if (!secure && s.secured && page in setOf("Account Recovery", "Delete Account")) {
+            value = withContext(Dispatchers.IO) { runCatching { repo.hasRecoveryPasskey() }.getOrDefault(false) }
+        }
+    }
+    val dark = isSystemInDarkTheme()
+    val grouped = settingsGrouped()
+    val foreground = if (dark) Color.White else Color.Black
+    ModalBottomSheet(
+        onDismissRequest = onClose,
+        properties = ModalBottomSheetProperties(shouldDismissOnBackPress = page == "Profile"),
+        sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true),
+        containerColor = grouped,
+        contentColor = foreground,
+        dragHandle = null,
+    ) {
+        androidx.activity.compose.PredictiveBackHandler(enabled = page != "Profile") { events ->
+            events.collect { }
+            goBack()
+        }
+        Column(Modifier.fillMaxWidth().imePadding()) {
+            if (page != "Profile") {
+                val title = when (page) {
+                    "Account" -> s.username.orEmpty()
+                    "Account Recovery" -> stringResource(R.string.account_recovery)
+                    "Contacts" -> stringResource(R.string.ui_contacts)
+                    "Appearance" -> stringResource(R.string.ui_appearance)
+                    "Blocked" -> stringResource(R.string.ui_blocked)
+                    "Contact Us" -> stringResource(R.string.ui_yo_team)
+                    "Crash Reports" -> stringResource(R.string.ui_crash_reports)
+                    "Delete Account" -> stringResource(R.string.ui_delete_account)
+                    "Encryption" -> stringResource(R.string.ui_encryption)
+                    "Help" -> stringResource(R.string.help_and_about)
+                    "Licenses" -> stringResource(R.string.about_and_licenses)
+                    "Media" -> stringResource(R.string.ui_media)
+                    "Statistics" -> stringResource(R.string.ui_statistics)
+                    "Status" -> stringResource(R.string.ui_status)
+                    else -> page
+                }
+                CenterAlignedTopAppBar(
+                    title = { Text(title, fontSize = 17.sp, fontWeight = FontWeight.SemiBold, maxLines = 1,
+                        overflow = TextOverflow.Ellipsis) },
+                    navigationIcon = {
+                        IconButton(onClick = goBack) {
+                            Icon(Icons.AutoMirrored.Filled.ArrowBack, stringResource(R.string.ui_back))
+                        }
+                    },
+                    expandedHeight = 48.dp,
+                    windowInsets = WindowInsets(0, 0, 0, 0),
+                    colors = TopAppBarDefaults.topAppBarColors(
+                        containerColor = grouped, titleContentColor = foreground, navigationIconContentColor = foreground,
+                    ),
+                )
+            }
+            key(page) {
+            LazyColumn(
+                Modifier.fillMaxWidth().weight(1f, fill = page == "Contact Us"),
+                contentPadding = PaddingValues(horizontal = 20.dp, vertical = 20.dp),
+                verticalArrangement = Arrangement.spacedBy(if (page == "Profile") 20.dp else 28.dp),
+            ) {
                 when(page) {
                     "Profile" -> {
                         item { SettingsSection {
-                            ListItem(colors=ListItemDefaults.colors(containerColor=Color.Transparent),headlineContent={Text(s.username.orEmpty(),fontFamily=YoFont,fontSize=26.sp)},leadingContent={Surface(shape=androidx.compose.foundation.shape.CircleShape,color=Amethyst,contentColor=Color.White){BrandText(s.username?.take(1).orEmpty(),26,Modifier.padding(14.dp))}},trailingContent={IconButton(onClick={code=true}){Icon(Icons.Default.QrCode,uiResources.getString(R.string.ui_show_your_code))}})
+                            Row(
+                                Modifier.fillMaxWidth().padding(horizontal = 16.dp),
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.spacedBy(12.dp),
+                            ) {
+                                Row(
+                                    Modifier.weight(1f).clickable { page = "Account" }.padding(vertical = 20.dp),
+                                    horizontalArrangement = Arrangement.spacedBy(14.dp),
+                                    verticalAlignment = Alignment.CenterVertically,
+                                ) {
+                                    SettingsAvatar(s.username.orEmpty(), 76)
+                                    BasicText(
+                                        s.username.orEmpty(),
+                                        modifier = Modifier.weight(1f),
+                                        style = TextStyle(fontFamily = YoFont, fontSize = 26.sp, color = LocalContentColor.current),
+                                        maxLines = 1,
+                                        softWrap = false,
+                                        overflow = TextOverflow.Ellipsis,
+                                        autoSize = TextAutoSize.StepBased(minFontSize = 13.sp, maxFontSize = 26.sp),
+                                    )
+                                    if (!s.secured) RecoveryBadge()
+                                }
+                                IconButton(onClick = { code = true }) {
+                                    Icon(Icons.Default.QrCode, stringResource(R.string.ui_show_your_code), Modifier.size(22.dp))
+                                }
+                                SettingsChevron()
+                            }
+                        } }
+                        item { SettingsSection(compact = true) {
+                            SettingsLine(
+                                title = stringResource(R.string.ui_app_icon), compact = true,
+                                leading = { AppIconPreview(s.appIcon, 29, 7) },
+                                onClick = { page = "Appearance" },
+                            )
+                            SettingsDivider()
+                            SettingToggle(stringResource(R.string.ui_left_handed), s.leftHanded,
+                                icon = Icons.Default.PanTool, tileColor = TileBlue, compact = true) {
+                                repo.command { settings(left = it) }
+                            }
+                        } }
+                        item { SettingsSection(compact = true) {
+                            SettingRow(stringResource(R.string.help_and_about), Icons.Default.Help, compact = true) { page = "Help" }
+                            SettingsDivider()
+                            SettingRow(stringResource(R.string.ui_add_friends), Icons.Default.PersonAdd, TileGreen,
+                                chevron = false, compact = true, onClick = onAddFriends)
+                        } }
+                    }
+                    "Account" -> {
+                        item { SettingsSection {
+                            SettingRow(stringResource(R.string.ui_contacts), Icons.Default.People, TileGreen,
+                                detail = contacts.size.toString()) { page = "Contacts" }
+                            SettingsDivider()
+                            SettingRow(stringResource(R.string.ui_blocked), Icons.Default.Block, TileRed,
+                                detail = s.friends.count { it.blocked }.toString()) { page = "Blocked" }
+                        } }
+                        item { SettingsSection(footerContent = {
+                            Row(Modifier.clickable { deleting = ""; page = "Delete Account" }
+                                .heightIn(min = 48.dp), verticalAlignment = Alignment.CenterVertically) {
+                                Text(stringResource(R.string.settings_leaving), fontSize = 13.sp, lineHeight = 18.sp, color = settingsSecondary())
+                                Text(stringResource(R.string.settings_delete_your_account), fontSize = 13.sp, color = Amethyst)
+                            }
+                        }) {
+                            SettingRow(stringResource(R.string.account_recovery), Icons.Default.Lock, TileOrange,
+                                badge = !s.secured) { page = "Account Recovery" }
+                            SettingsDivider()
+                            SettingRow(stringResource(R.string.ui_sign_out), Icons.Default.Logout, TileGray,
+                                chevron = false) { logout = true }
                         } }
                         item { SettingsSection {
-                            SettingRow(stringResource(R.string.ui_app_icon), Icons.Default.Palette, TileBlue) { page = "Appearance" }
-                            SettingToggle(stringResource(R.string.ui_left_handed), s.leftHanded) { repo.command { settings(left = it) } }
-                        } }
-                        item { SettingsSection {
-                            SettingRow(stringResource(R.string.help_and_about), Icons.Default.Help) { page = "Help" }
-                            SettingRow(stringResource(R.string.ui_add_friends_by_name), Icons.Default.PersonAdd, TileGreen, onClick = onAddFriends)
-                        } }
-                        item { SettingsSection { SettingRow(stringResource(R.string.ui_invite_friends),Icons.Default.Share,Amethyst){shareInvite(context,s.username.orEmpty())} } }
-                        if(!s.secured) item { SettingsSection(footer=uiResources.getString(R.string.secure_name)) {
-                            SettingRow(stringResource(R.string.ui_secure_your_account_1),Icons.Default.Lock,TileOrange){repo.command { prepareRecovery() };secure=true}
-                        } }
-                        item { SettingsSection {
-                            SettingRow(stringResource(R.string.account_recovery), Icons.Default.Key, if(s.secured) TileGreen else TileOrange) { page = "Account Recovery" }
-                            SettingRow(uiResources.getString(R.string.blocked_count ,s.friends.count { it.blocked }),Icons.Default.Block,TileRed){page="Blocked"}
-                        } }
-                        item { SettingsSection(title=uiResources.getString(R.string.ui_contacts),footer=uiResources.getString(R.string.ui_your_encrypted_friend_list_and_contact_checks)) {
-                            SettingRow(uiResources.getString(R.string.contacts_count ,s.friends.count { !it.blocked && it.group == null }),Icons.Default.People,TileGreen){page="Contacts"}
-                            SettingRow(stringResource(R.string.ui_save_contacts),Icons.Default.CloudUpload,TileGreen){repo.command { saveContacts() }}
-                        } }
-                        item { SettingsSection {
-                            SettingRow(stringResource(R.string.ui_media),Icons.Default.PhotoLibrary,TileGreen){page="Media"}
-                            SettingRow(stringResource(R.string.ui_encryption)+(encrypted?.let { "  ·  ${it.first}/${it.second}" } ?: ""),Icons.Default.Lock,TileGreen){page="Encryption"}
-                        } }
-                        item { SettingsSection {
-                            SettingRow(uiResources.getString(R.string.statistics_count ,s.sent+s.received),Icons.Default.BarChart,TileGray){page="Statistics"}
+                            SettingRow(stringResource(R.string.ui_media), Icons.Default.PhotoLibrary, TileGreen) { page = "Media" }
+                            SettingsDivider()
+                            SettingRow(stringResource(R.string.ui_encryption), Icons.Default.Lock, TileGreen,
+                                detail = encrypted?.let { "${it.first}/${it.second}" }) { encryptionFromStatus=false;page="Encryption" }
+                            SettingsDivider()
+                            SettingRow(stringResource(R.string.ui_statistics), Icons.Default.BarChart, TileGray,
+                                detail = (s.sent + s.received).toString()) { page = "Statistics" }
+                            SettingsDivider()
+                            SettingToggle(stringResource(R.string.ui_requests_from_strangers), s.requestsOpen,
+                                icon = Icons.Default.PersonAdd, tileColor = TileBlue) { repo.command { settings(requests = it) } }
                         } }
                     }
                     "Account Recovery" -> {
                         item { SettingsSection(footer = stringResource(R.string.account_backup_footer)) {
-                            SettingRow(stringResource(R.string.account_backup), Icons.Default.CloudUpload, TileGreen) {
+                            SettingRow(stringResource(R.string.account_backup), Icons.Default.CloudUpload, TileGreen, chevron = false) {
                                 repo.command { saveContacts() }
                             }
                         } }
-                        item { SettingsSection {
-                            SettingRow(stringResource(R.string.recovery_passkey), Icons.Default.Key, TileOrange,
-                                detail = stringResource(R.string.google_password_manager)) {
-                                repo.command { prepareRecovery() }
-                                secure = true
+                        item { SettingsSection(footerContent = {
+                            Text(
+                                stringResource(R.string.how_account_recovery_works),
+                                Modifier.clickable { recoveryHelp = true }.heightIn(min = 24.dp),
+                                fontSize = 13.sp, color = Amethyst,
+                            )
+                        }) {
+                            SettingToggle(stringResource(R.string.recovery_passkey), passkeyConfigured,
+                                icon = Icons.Default.Fingerprint, checkedAction = { secure = true }) { enabled ->
+                                if (enabled) { repo.command { prepareRecovery() }; secure = true }
+                                else removePasskey = true
                             }
-                            SettingRow(uiResources.getString(R.string.recovery_saved ,if(s.secured) uiResources.getString(R.string.saved) else uiResources.getString(R.string.not_saved)),Icons.Default.Key,if(s.secured) TileGreen else TileOrange){if(s.secured) authenticate() else {repo.command { prepareRecovery() };secure=true}}
-                            if(s.secured) SettingRow(stringResource(R.string.ui_create_new_recovery_key),Icons.Default.Refresh,TileGreen){renew=true}
-                        } }
-                        item { TextButton(onClick = { recoveryHelp = true }) {
-                            Text(stringResource(R.string.how_account_recovery_works))
-                        } }
-                        item { SettingsSection(footer=uiResources.getString(R.string.ui_off_only_your_friends_can_send_you_yos_anyone_else_is_turned_away)) {
-                            SettingToggle(uiResources.getString(R.string.ui_requests_from_strangers),s.requestsOpen){repo.command { settings(requests=it) }}
-                        } }
-                        item { Column(verticalArrangement=Arrangement.spacedBy(10.dp)) {
-                            OutlinedButton(onClick={logout=true},modifier=Modifier.fillMaxWidth()){Text(stringResource(R.string.ui_sign_out),color=MaterialTheme.colorScheme.error)}
-                            OutlinedButton(onClick={page="Delete Account"},modifier=Modifier.fillMaxWidth()){Text(stringResource(R.string.ui_delete_account),color=MaterialTheme.colorScheme.error)}
+                            SettingsDivider()
+                            SettingToggle(stringResource(R.string.ui_recovery_key), s.secured, icon = Icons.Default.Key,
+                                checkedAction = { authenticate() }) { enabled ->
+                                if (enabled) { repo.command { prepareRecovery() }; secure = true }
+                                else renew = true
+                            }
                         } }
                     }
                     "Blocked" -> {
@@ -192,18 +314,33 @@ import uniffi.yo.*
                         SettingToggle(uiResources.getString(R.string.ui_keep_sent_photos),s.saveSent){repo.command { settings(save=it) }}
                     } }
                     "Appearance" -> {
-                        item { SettingsSection(title=uiResources.getString(R.string.ui_app_icon)) {
-                        Row(Modifier.fillMaxWidth(),horizontalArrangement=Arrangement.SpaceEvenly) {
-                            listOf(null to R.drawable.icon_standard, "Negative" to R.drawable.icon_negative, "Original" to R.drawable.icon_original).forEach { (name,resource) ->
-                                Column(horizontalAlignment=Alignment.CenterHorizontally,modifier=Modifier.clickable { repo.command { icon(name) } }.padding(12.dp)) {
-                                    Image(androidx.compose.ui.res.painterResource(resource),stringResource(when(name){"Negative" -> R.string.icon_negative;"Original" -> R.string.icon_original;else -> R.string.icon_default}),Modifier.size(64.dp))
-                                    RadioButton(s.appIcon==name,{repo.command { icon(name) }})
+                        item {
+                            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                                listOf(null, "Negative", "Original").forEach { name ->
+                                    val label = stringResource(when (name) {
+                                        "Negative" -> R.string.icon_negative
+                                        "Original" -> R.string.icon_original
+                                        else -> R.string.icon_default
+                                    })
+                                    val selectedIcon = s.appIcon == name
+                                    val shape = RoundedCornerShape(20.dp)
+                                    Column(
+                                        Modifier.weight(1f).clip(shape)
+                                            .border(2.dp, if (selectedIcon) Amethyst else Color.Transparent, shape)
+                                            .selectable(selected = selectedIcon, onClick = { repo.command { icon(name) } })
+                                            .padding(vertical = 10.dp),
+                                        horizontalAlignment = Alignment.CenterHorizontally,
+                                        verticalArrangement = Arrangement.spacedBy(8.dp),
+                                    ) {
+                                        AppIconPreview(name, 64, 14)
+                                        Text(label, fontSize = 15.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                                    }
                                 }
                             }
                         }
-                        } }
                         item { SettingsSection(footer=uiResources.getString(R.string.ui_yo_and_photos_at_the_left_end_of_a_bar_undo_at_the_right_the_came)) {
-                            SettingToggle(uiResources.getString(R.string.ui_left_handed),s.leftHanded){repo.command { settings(left=it) }}
+                            SettingToggle(stringResource(R.string.ui_left_handed),s.leftHanded,
+                                icon = Icons.Default.PanTool, tileColor = TileBlue) { repo.command { settings(left=it) } }
                         } }
                     }
                     "Statistics" -> {
@@ -222,7 +359,10 @@ import uniffi.yo.*
                             SettingRow(stringResource(R.string.ui_contact_us), Icons.Default.Email, TileBlue) { page = "Contact Us" }
                         } }
                         item { SettingsSection {
-                            SettingRow(stringResource(R.string.ui_status), Icons.Default.CheckCircle, TileGreen) { page = "Status" }
+                            SettingRow(stringResource(R.string.ui_status), Icons.Default.CheckCircle, TileGreen,
+                                detail = stringResource(if (s.lastSync != null && System.currentTimeMillis() - s.lastSync < 60000)
+                                    R.string.ui_connected else R.string.ui_waiting)) { page = "Status" }
+                            SettingsDivider()
                             SettingRow(
                                 stringResource(R.string.about_and_licenses),
                                 Icons.Default.Info,
@@ -233,11 +373,25 @@ import uniffi.yo.*
                     }
                     "Status" -> {
                         item { SettingsSection(title=uiResources.getString(R.string.ui_connection)) {
-                            ValueRow(uiResources.getString(R.string.ui_hub),if(s.lastSync!=null && System.currentTimeMillis()-s.lastSync<60000) uiResources.getString(R.string.ui_connected) else uiResources.getString(R.string.ui_waiting))
-                            ValueRow(uiResources.getString(R.string.ui_round_trip),trip ?: uiResources.getString(R.string.ui_not_checked))
-                            TextButton(onClick={probing=true;repo.command {
-                                try { trip=roundTrip()?.let { "$it ms" } ?: uiResources.getString(R.string.ui_no_reply) } finally { probing=false }
-                            }},enabled=!probing) { Text(if(probing) uiResources.getString(R.string.ui_checking) else uiResources.getString(R.string.ui_check_round_trip)) }
+                            val connected = s.lastSync != null && System.currentTimeMillis() - s.lastSync < 60000
+                            ValueRow(stringResource(R.string.ui_hub),
+                                stringResource(if (connected) R.string.ui_connected else R.string.ui_waiting), connected)
+                            SettingsDivider()
+                            ValueRow(stringResource(R.string.ui_round_trip), trip ?: stringResource(R.string.ui_not_checked))
+                            SettingsDivider()
+                            SettingsLine(
+                                title = stringResource(if (probing) R.string.ui_checking else R.string.ui_check_round_trip),
+                                onClick = if (probing) null else {
+                                    {
+                                        probing = true
+                                        repo.command {
+                                            try { trip = roundTrip()?.let { "$it ms" } ?: uiResources.getString(R.string.ui_no_reply) }
+                                            finally { probing = false }
+                                        }
+                                    }
+                                },
+                                chevron = false,
+                            )
                         } }
                         item { SettingsSection(footer=uiResources.getString(R.string.ui_anonymous_crash_reports_include_android_version_os_exit_reason_an)) {
                             SettingRow(uiResources.getString(R.string.ui_crash_reports),Icons.Default.Description){page="Crash Reports"}
@@ -246,16 +400,25 @@ import uniffi.yo.*
                                     notificationPermission.launch(android.Manifest.permission.POST_NOTIFICATIONS)
                                 }
                             }
-                            SettingToggle(uiResources.getString(R.string.ui_send_crashes),crashOn){crashOn=it;repo.crashes.enabled=it;if(it) repo.command { crashes.flush() }}
+                            SettingsDivider()
+                            SettingToggle(stringResource(R.string.ui_send_crashes), crashOn, icon = Icons.Default.BugReport) {
+                                crashOn = it
+                                repo.crashes.enabled = it
+                                if (it) repo.command { crashes.flush() }
+                            }
                         } }
                         item { SettingsSection {
-                            SettingRow(stringResource(R.string.ui_encryption),Icons.Default.Lock){page="Encryption"}
-                            ValueRow(uiResources.getString(R.string.ui_version),BuildConfig.VERSION_NAME)
+                            SettingRow(stringResource(R.string.ui_encryption),Icons.Default.Lock){encryptionFromStatus=true;page="Encryption"}
+                            SettingsDivider()
+                            ValueRow(uiResources.getString(R.string.ui_version), BuildConfig.VERSION_NAME)
                         } }
                     }
                     "Crash Reports" -> item {
                         val reports=remember { repo.crashes.history() }
-                        reports.forEach { text -> SelectionContainerCompat(text) }
+                        if (reports.isEmpty()) Text(
+                            stringResource(R.string.settings_no_crash_reports),
+                            Modifier.fillMaxWidth().padding(32.dp), textAlign = TextAlign.Center,
+                        ) else SettingsSection { reports.forEach { text -> SelectionContainerCompat(text) } }
                     }
                     "Contact Us" -> {
                         item { LaunchedEffect(supportRetry) {
@@ -267,68 +430,137 @@ import uniffi.yo.*
                             }
                         } }
                         if(supportOffline) item { Text(stringResource(R.string.support_offline));TextButton(onClick={supportRetry++}){Text(stringResource(R.string.retry))} }
-                        item { Text(stringResource(R.string.ui_yo_team),style=MaterialTheme.typography.titleLarge,modifier=Modifier.padding(16.dp)) }
-                        items(support?.messages.orEmpty(),key={it.id.toString()}) { message ->
-                            SettingsSection(title=if(message.fromTeam) stringResource(R.string.ui_yo_team) else stringResource(R.string.you)) {
-                                Text(message.text,modifier=Modifier.padding(16.dp))
+                        if (support?.messages.isNullOrEmpty()) item {
+                            Column(
+                                Modifier.fillMaxWidth().padding(horizontal = 32.dp, vertical = 64.dp),
+                                horizontalAlignment = Alignment.CenterHorizontally,
+                                verticalArrangement = Arrangement.spacedBy(10.dp),
+                            ) {
+                                Icon(Icons.Default.Forum, null, Modifier.size(44.dp), tint = Amethyst)
+                                Text(stringResource(R.string.support_empty_title), fontSize = 20.sp, fontWeight = FontWeight.SemiBold)
+                                Text(stringResource(R.string.support_empty_subtitle), fontSize = 15.sp, lineHeight = 20.sp,
+                                    color = settingsSecondary(), textAlign = TextAlign.Center)
                             }
                         }
-
-                        item { SettingsSection(footer=uiResources.getString(R.string.ui_goes_to_the_yo_team_not_end_to_end_encrypted)) {
-                            OutlinedTextField(feedback,{feedback=utf8Limit(it,2000)},placeholder={Text(stringResource(R.string.ui_what_should_yo_do_better))},minLines=6,modifier=Modifier.fillMaxWidth().padding(16.dp))
-                        } }
-                        item { Button(onClick={val text=feedback;repo.command { feedback(text);feedback="";support=supportThread();thanks=false }},enabled=feedback.isNotBlank(),modifier=Modifier.fillMaxWidth()){Text(if(thanks) uiResources.getString(R.string.ui_thanks) else uiResources.getString(R.string.ui_send))} }
+                        items(support?.messages.orEmpty(), key = { it.id.toString() }) { message ->
+                            Box(
+                                Modifier.fillMaxWidth(),
+                                contentAlignment = if (message.fromTeam) Alignment.CenterStart else Alignment.CenterEnd,
+                            ) {
+                                Surface(
+                                    shape = RoundedCornerShape(20.dp),
+                                    color = if (message.fromTeam) settingsInputFill() else Amethyst,
+                                    contentColor = if (message.fromTeam) foreground else Color.White,
+                                ) { Text(message.text, Modifier.padding(horizontal = 16.dp, vertical = 9.dp)) }
+                            }
+                        }
                     }
                     "Delete Account" -> {
+                        item {
+                            Column(
+                                Modifier.fillMaxWidth().padding(vertical = 16.dp),
+                                horizontalAlignment = Alignment.CenterHorizontally,
+                                verticalArrangement = Arrangement.spacedBy(16.dp),
+                            ) {
+                                Icon(Icons.Default.Warning, null, Modifier.size(56.dp), tint = TileRed)
+                                Text(stringResource(R.string.settings_delete_your_account), fontSize = 34.sp,
+                                    lineHeight = 40.sp, fontWeight = FontWeight.Bold, textAlign = TextAlign.Center)
+                            }
+                        }
                         item { SettingsSection {
-                            ListItem(colors=ListItemDefaults.colors(containerColor=Color.Transparent),headlineContent={Text(uiResources.getString(R.string.name_freed ,s.username.orEmpty()))},leadingContent={Icon(Icons.Default.PersonOff,null)})
-                            ListItem(colors=ListItemDefaults.colors(containerColor=Color.Transparent),headlineContent={Text(stringResource(R.string.ui_your_friends_can_t_reach_you_anymore))},leadingContent={Icon(Icons.Default.GroupOff,null)})
-                            ListItem(colors=ListItemDefaults.colors(containerColor=Color.Transparent),headlineContent={Text(stringResource(R.string.ui_this_can_t_be_undone))},leadingContent={Icon(Icons.Default.Warning,null)})
+                            DeleteConsequence(uiResources.getString(R.string.name_freed, s.username.orEmpty()), Icons.Default.PersonOff)
+                            SettingsDivider()
+                            DeleteConsequence(stringResource(R.string.ui_your_friends_can_t_reach_you_anymore), Icons.Default.GroupOff)
+                            SettingsDivider()
+                            DeleteConsequence(stringResource(R.string.ui_this_can_t_be_undone), Icons.Default.WarningAmber)
+                            if (passkeyConfigured) {
+                                SettingsDivider()
+                                DeleteConsequence(stringResource(R.string.settings_delete_passkey_yourself), Icons.Default.Key)
+                            }
                         } }
-                        item { SettingsSection(footer=uiResources.getString(R.string.type_to_confirm ,s.username.orEmpty())) {
-                            OutlinedTextField(deleting,{deleting=it},label={Text(stringResource(R.string.ui_your_name))},modifier=Modifier.fillMaxWidth().padding(16.dp))
+                        item { SettingsSection {
+                            SettingsTextField(
+                                deleting, { deleting = it },
+                                placeholder = uiResources.getString(R.string.type_to_confirm, s.username.orEmpty()),
+                            )
                         } }
-                        item { Button(onClick=::authenticate,enabled=usernameSkeleton(deleting)==usernameSkeleton(s.username.orEmpty()),colors=ButtonDefaults.buttonColors(containerColor=MaterialTheme.colorScheme.error,contentColor=MaterialTheme.colorScheme.onError),modifier=Modifier.fillMaxWidth()){Text(stringResource(R.string.ui_delete_account))} }
+                        item {
+                            val confirmed = deleting.isNotEmpty() && usernameSkeleton(deleting) == usernameSkeleton(s.username.orEmpty())
+                            SettingsSection {
+                                TextButton(
+                                    onClick = ::authenticate, enabled = confirmed,
+                                    modifier = Modifier.fillMaxWidth().heightIn(min = 54.dp),
+                                    colors = ButtonDefaults.textButtonColors(contentColor = TileRed,
+                                        disabledContentColor = settingsSecondary().copy(alpha = 0.4f)),
+                                ) { Text(stringResource(R.string.ui_delete_account), fontSize = 17.sp) }
+                            }
+                        }
                     }
                     "Encryption" -> {
                         item { SettingsSection {
                             LaunchedEffect(Unit) { status=withContext(Dispatchers.IO){repo.security()} }
                             Text(stringResource(R.string.ui_every_yo_photo_and_video_is_end_to_end_encrypted_only_you_an),modifier=Modifier.padding(16.dp))
                             status?.let { st ->
-                                ValueRow(uiResources.getString(R.string.ui_hub_connected),if(s.lastSync!=null && System.currentTimeMillis()-s.lastSync<60000) "✓" else uiResources.getString(R.string.ui_waiting))
-                                ValueRow(uiResources.getString(R.string.ui_hub_signed),if(st.hubSigned) "✓" else uiResources.getString(R.string.ui_not_checked))
-                                ValueRow(uiResources.getString(R.string.ui_post_quantum),uiResources.getString(R.string.part_of_total ,st.pqSessions,st.devices))
+                                val connected = s.lastSync != null && System.currentTimeMillis() - s.lastSync < 60000
+                                ValueRow(stringResource(R.string.ui_hub_connected),
+                                    stringResource(if (connected) R.string.ui_connected else R.string.ui_waiting), connected)
+                                SettingsDivider()
+                                ValueRow(stringResource(R.string.ui_hub_signed),
+                                    stringResource(if (st.hubSigned) R.string.ui_yes else R.string.ui_not_checked), st.hubSigned)
+                                SettingsDivider()
+                                ValueRow(uiResources.getString(R.string.ui_post_quantum),uiResources.getString(R.string.part_of_total ,st.pqSessions.toLong(), st.devices.toLong()))
+                                SettingsDivider()
                                 ValueRow(uiResources.getString(R.string.ui_keys_at_hub),st.prekeysAtHub.toString())
+                                SettingsDivider()
                                 ValueRow(stringResource(R.string.key_age),st.signedPrekeyDays.toString())
+                                SettingsDivider()
                                 ValueRow(stringResource(R.string.refill_pending),if(st.refillPending) stringResource(R.string.ui_yes) else stringResource(R.string.ui_no))
-                                ValueRow(uiResources.getString(R.string.ui_verified_contacts),uiResources.getString(R.string.part_of_total,st.verified,st.contacts))
+                                SettingsDivider()
+                                ValueRow(uiResources.getString(R.string.ui_verified_contacts),uiResources.getString(R.string.part_of_total,st.verified.toLong(), st.contacts.toLong()))
                             }
                         }
                         }
                     }
                     "Contacts" -> {
                         item { SettingsSection {
-                            contacts.forEach { friend ->
+                            contacts.forEachIndexed { index, friend ->
+                                if (index > 0) SettingsDivider()
                                 val fact = facts[friend.key]
-                                ListItem(
-                                    modifier = Modifier.clickable { selected = friend },
-                                    colors = ListItemDefaults.colors(containerColor = Color.Transparent),
-                                    headlineContent = { Text(friend.name) },
-                                    trailingContent = {
+                                SettingsLine(
+                                    title = friend.name,
+                                    leading = { SettingsAvatar(friend.name, 36) },
+                                    accessory = {
                                         if (fact?.unconfirmed == true || friend.gone || fact?.outdated == true) {
-                                            Text("!", color = TileOrange, style = MaterialTheme.typography.titleLarge)
+                                            Icon(Icons.Default.ErrorOutline, null, Modifier.size(18.dp), tint = TileOrange)
                                         } else if (fact?.verified == true) {
-                                            Icon(Icons.Default.Verified, stringResource(R.string.ui_verified), tint = TileGreen)
+                                            Icon(Icons.Default.Verified, stringResource(R.string.ui_verified), Modifier.size(18.dp), tint = TileGreen)
                                         }
                                     },
+                                    onClick = { selected = friend },
                                 )
                             }
                         } }
                     }
                     "Licenses" -> {
-                        item { LicenseIntro() }
+                        item { SettingsSection { LicenseIntro() } }
                         itemsIndexed(licenseChunks,key={index,_ -> "license-$index"}) { _,text ->
-                            Text(text,fontFamily=FontFamily.Monospace,fontSize=11.sp)
+                            SettingsSection { Text(text, Modifier.padding(16.dp), fontFamily=FontFamily.Monospace,fontSize=11.sp,lineHeight=14.3.sp) }
+                        }
+                    }
+                }
+            }
+            }
+            if (page == "Contact Us") {
+                SupportComposer(feedback, { feedback = utf8Limit(it, 2000) }, sendingFeedback) {
+                    val text = feedback.trim()
+                    sendingFeedback = true
+                    repo.command {
+                        try {
+                            feedback(text)
+                            val updated = supportThread()
+                            withContext(Dispatchers.Main) { feedback = ""; support = updated }
+                        } finally {
+                            withContext(Dispatchers.Main) { sendingFeedback = false }
                         }
                     }
                 }
@@ -336,9 +568,18 @@ import uniffi.yo.*
         }
     }
     selected?.let { friend ->
-        ModalBottomSheet(onDismissRequest = { selected = null }, sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)) {
-            Column(Modifier.fillMaxWidth().verticalScroll(rememberScrollState()).padding(horizontal = 16.dp)) {
-                Text("${friend.name} 🔒", style = MaterialTheme.typography.headlineSmall, modifier = Modifier.padding(16.dp))
+        ModalBottomSheet(
+            onDismissRequest = { selected = null },
+            sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true),
+            containerColor = grouped,
+            contentColor = foreground,
+        ) {
+            Column(Modifier.fillMaxWidth().verticalScroll(rememberScrollState()).padding(horizontal = 20.dp)) {
+                Row(Modifier.fillMaxWidth().padding(top = 12.dp), horizontalArrangement = Arrangement.spacedBy(6.dp, Alignment.CenterHorizontally),
+                    verticalAlignment = Alignment.CenterVertically) {
+                    Text(friend.name, fontSize = 17.sp, fontWeight = FontWeight.SemiBold)
+                    Icon(Icons.Default.Lock, null, Modifier.size(13.dp), tint = settingsSecondary())
+                }
                 ContactPage(model, friend)
             }
         }
@@ -353,6 +594,15 @@ import uniffi.yo.*
     if(code) ModalBottomSheet(onDismissRequest={code=false}) { Column(Modifier.fillMaxWidth().padding(32.dp),horizontalAlignment=Alignment.CenterHorizontally) { Text(stringResource(R.string.ui_your_code),style=MaterialTheme.typography.titleLarge);Qr("https://justyo.co/${Uri.encode(s.username)}",Modifier.padding(24.dp).size(240.dp));BrandText(s.username.orEmpty(),30) } }
     if(logout) AlertDialog(onDismissRequest={logout=false},title={Text(stringResource(R.string.ui_sign_out_cd2476))},text={Text(if(s.secured) uiResources.getString(R.string.ui_sign_back_in_with_your_recovery_key_friends_on_this_phone_are_rem) else uiResources.getString(R.string.ui_your_account_isn_t_secured_without_a_recovery_key_you_won_t_be_ab))},
         confirmButton={TextButton(onClick={logout=false;repo.command { signOut();onClose() }}){Text(if(s.secured) uiResources.getString(R.string.ui_sign_out) else uiResources.getString(R.string.ui_sign_out_anyway))}},dismissButton={TextButton(onClick={logout=false}){Text(stringResource(R.string.ui_cancel))}})
+    if (removePasskey) AlertDialog(
+        onDismissRequest = { removePasskey = false },
+        title = { Text(stringResource(R.string.settings_turn_off_passkey)) },
+        confirmButton = { TextButton(onClick = {
+            removePasskey = false
+            repo.command { removeRecoveryPasskey(); withContext(Dispatchers.Main) { passkeyRevision++ } }
+        }) { Text(stringResource(R.string.settings_turn_off)) } },
+        dismissButton = { TextButton(onClick = { removePasskey = false }) { Text(stringResource(R.string.ui_cancel)) } },
+    )
     if(renew) AlertDialog(onDismissRequest={renew=false},title={Text(stringResource(R.string.ui_create_new_recovery_key_ccd8c2))},text={Text(stringResource(R.string.ui_your_current_recovery_key_will_stop_working_after_the_new_on))},confirmButton={TextButton(onClick={renew=false;repo.command { prepareRecovery(true) };secure=true}){Text(stringResource(R.string.ui_create_new_recovery_key))}},dismissButton={TextButton(onClick={renew=false}){Text(stringResource(R.string.ui_cancel))}})
 }
 private val TileOrange=Color(0xFFFF9500)
@@ -361,25 +611,288 @@ private val TileRed=Color(0xFFFF3B30)
 private val TileBlue=Color(0xFF007AFF)
 private val TileGray=Color(0xFF8E8E93)
 
-@Composable private fun SettingsSection(title: String?=null,footer: String?=null,content: @Composable ColumnScope.()->Unit) {
-    Column {
-        if(title!=null) Text(title,style=MaterialTheme.typography.labelLarge,color=MaterialTheme.colorScheme.onSurfaceVariant,modifier=Modifier.padding(start=16.dp,bottom=8.dp))
-        Card(shape=RoundedCornerShape(20.dp),colors=CardDefaults.cardColors(containerColor=MaterialTheme.colorScheme.surfaceContainerHigh)) {
-            CompositionLocalProvider(LocalContentColor provides MaterialTheme.colorScheme.onSurface) { Column(content=content) }
+@Composable
+internal fun settingsGrouped() = if (isSystemInDarkTheme()) Color.Black else Color(0xFFF2F2F7)
+
+@Composable
+internal fun settingsInputFill() = Color(0xFF767680).copy(alpha = if (isSystemInDarkTheme()) 0.24f else 0.12f)
+
+@Composable
+private fun RecoveryBadge() {
+    Surface(Modifier.sizeIn(minWidth = 20.dp, minHeight = 20.dp), shape = androidx.compose.foundation.shape.CircleShape,
+        color = TileRed, contentColor = Color.White) {
+        Box(contentAlignment = Alignment.Center) {
+            Text("1", fontSize = 13.sp, lineHeight = 16.sp, fontWeight = FontWeight.SemiBold)
         }
-        if(footer!=null) Text(footer,style=MaterialTheme.typography.bodySmall,color=MaterialTheme.colorScheme.onSurfaceVariant,modifier=Modifier.padding(start=16.dp,end=16.dp,top=8.dp))
     }
 }
-@Composable fun SettingRow(title: String,icon: androidx.compose.ui.graphics.vector.ImageVector,tileColor: Color=Amethyst,detail: String?=null,onClick: ()->Unit) {
-    ListItem(colors=ListItemDefaults.colors(containerColor=Color.Transparent),headlineContent={Text(title)},leadingContent={Surface(shape=RoundedCornerShape(7.dp),color=tileColor,contentColor=Color.White){Icon(icon,null,modifier=Modifier.padding(6.dp).size(18.dp))}},trailingContent={
-        Row(verticalAlignment = Alignment.CenterVertically) {
-            if (detail != null) Text(detail, style = MaterialTheme.typography.labelMedium)
-            Icon(Icons.Default.ChevronRight, null)
-        }
-    },modifier=Modifier.clickable(onClick=onClick))
+
+@Composable
+private fun AppIconPreview(name: String?, size: Int, radius: Int) {
+    val resource = if (name == "Negative") R.drawable.icon_negative else R.drawable.launcher_wordmark
+    val background = if (name == "Original") Color(0xFF9A44BE) else Amethyst
+    Image(
+        androidx.compose.ui.res.painterResource(resource), null,
+        Modifier.size(size.dp).clip(RoundedCornerShape(radius.dp)).background(background),
+    )
 }
-@Composable fun SettingToggle(title: String,on: Boolean,changed: (Boolean)->Unit) { ListItem(colors=ListItemDefaults.colors(containerColor=Color.Transparent),headlineContent={Text(title)},trailingContent={Switch(on,changed)}) }
-@Composable fun ValueRow(title: String,value: String) { ListItem(colors=ListItemDefaults.colors(containerColor=Color.Transparent),headlineContent={Text(title)},supportingContent={Text(value)}) }
+
+@Composable
+private fun DeleteConsequence(text: String, icon: ImageVector) {
+    Row(
+        Modifier.fillMaxWidth().heightIn(min = 54.dp).padding(horizontal = 16.dp, vertical = 5.dp),
+        horizontalArrangement = Arrangement.spacedBy(14.dp), verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Icon(icon, null, Modifier.size(21.dp))
+        Text(text, fontSize = 17.sp, lineHeight = 22.sp)
+    }
+}
+
+@Composable
+private fun SupportComposer(value: String, change: (String) -> Unit, sending: Boolean, send: () -> Unit) {
+    Column(
+        Modifier.fillMaxWidth().padding(start = 20.dp, end = 20.dp, bottom = 12.dp),
+        horizontalAlignment = Alignment.CenterHorizontally,
+        verticalArrangement = Arrangement.spacedBy(6.dp),
+    ) {
+        Text(stringResource(R.string.support_privacy), fontSize = 11.sp, lineHeight = 14.sp,
+            color = settingsSecondary(), textAlign = TextAlign.Center)
+        Row(
+            Modifier.fillMaxWidth().background(settingsInputFill(), RoundedCornerShape(20.dp))
+                .padding(start = 16.dp, end = 4.dp),
+            verticalAlignment = Alignment.Bottom,
+        ) {
+            val placeholder = stringResource(R.string.support_message)
+            BasicTextField(
+                value, change, Modifier.weight(1f).padding(vertical = 9.dp)
+                    .semantics { contentDescription = placeholder },
+                enabled = !sending, minLines = 1, maxLines = 6,
+                textStyle = TextStyle(color = LocalContentColor.current, fontSize = 17.sp, lineHeight = 22.sp),
+                cursorBrush = SolidColor(Amethyst),
+                decorationBox = { field ->
+                    Box(Modifier.fillMaxWidth()) {
+                        if (value.isEmpty()) Text(placeholder, fontSize = 17.sp, color = settingsSecondary())
+                        field()
+                    }
+                },
+            )
+            val canSend = value.isNotBlank() && !sending
+            IconButton(onClick = send, enabled = canSend, modifier = Modifier.size(40.dp)) {
+                Surface(Modifier.size(30.dp), shape = androidx.compose.foundation.shape.CircleShape,
+                    color = Amethyst.copy(alpha = if (canSend) 1f else 0.35f), contentColor = Color.White) {
+                    Box(contentAlignment = Alignment.Center) {
+                        if (sending) CircularProgressIndicator(Modifier.size(15.dp), color = Color.White, strokeWidth = 2.dp)
+                        else Icon(Icons.Default.ArrowUpward, stringResource(R.string.ui_send), Modifier.size(17.dp))
+                    }
+                }
+            }
+        }
+    }
+}
+
+@Composable
+internal fun SettingsTextField(
+    value: String, change: (String) -> Unit, placeholder: String,
+    modifier: Modifier = Modifier, height: Int = 54, enabled: Boolean = true,
+    keyboardOptions: androidx.compose.foundation.text.KeyboardOptions = androidx.compose.foundation.text.KeyboardOptions.Default,
+    keyboardActions: androidx.compose.foundation.text.KeyboardActions = androidx.compose.foundation.text.KeyboardActions.Default,
+    leading: (@Composable () -> Unit)? = null,
+) {
+    BasicTextField(
+        value, change, singleLine = true, enabled = enabled, keyboardOptions = keyboardOptions,
+        keyboardActions = keyboardActions,
+        modifier = modifier.fillMaxWidth().semantics { contentDescription = placeholder },
+        textStyle = TextStyle(fontSize = 17.sp, color = LocalContentColor.current),
+        cursorBrush = SolidColor(Amethyst),
+        decorationBox = { field ->
+            Row(Modifier.fillMaxWidth().heightIn(min = height.dp).padding(horizontal = 16.dp),
+                verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                leading?.invoke()
+                Box(Modifier.weight(1f)) {
+                    if (value.isEmpty()) Text(placeholder, fontSize = 17.sp, color = settingsSecondary(), maxLines = 1,
+                        overflow = TextOverflow.Ellipsis)
+                    field()
+                }
+            }
+        },
+    )
+}
+
+@Composable
+internal fun settingsSecondary() = LocalContentColor.current.copy(alpha = 0.6f)
+
+@Composable
+internal fun SettingsDivider() {
+    HorizontalDivider(Modifier.padding(horizontal = 16.dp), thickness = 0.5.dp,
+        color = LocalContentColor.current.copy(alpha = 0.18f))
+}
+
+@Composable
+private fun SettingsChevron() {
+    val shade = if (isSystemInDarkTheme()) Color(0xFFEBEBF5) else Color(0xFF3C3C43)
+    val tint = shade.copy(alpha = 0.30f)
+    val direction = androidx.compose.ui.platform.LocalLayoutDirection.current
+    Canvas(Modifier.size(width = 8.dp, height = 13.dp)) {
+        val right = direction == androidx.compose.ui.unit.LayoutDirection.Ltr
+        val start = if (right) 1.dp.toPx() else size.width - 1.dp.toPx()
+        val end = if (right) size.width - 1.dp.toPx() else 1.dp.toPx()
+        val path = androidx.compose.ui.graphics.Path().apply {
+            moveTo(start, 1.dp.toPx())
+            lineTo(end, size.height / 2)
+            lineTo(start, size.height - 1.dp.toPx())
+        }
+        drawPath(path, tint, style = androidx.compose.ui.graphics.drawscope.Stroke(
+            width = 1.6.dp.toPx(), cap = androidx.compose.ui.graphics.StrokeCap.Round,
+            join = androidx.compose.ui.graphics.StrokeJoin.Round,
+        ))
+    }
+}
+
+@Composable
+internal fun SettingsSection(
+    title: String? = null,
+    footer: String? = null,
+    compact: Boolean = false,
+    footerContent: (@Composable () -> Unit)? = null,
+    content: @Composable ColumnScope.() -> Unit,
+) {
+    val dark = isSystemInDarkTheme()
+    Column(Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+        if (title != null) Text(title, Modifier.padding(horizontal = 16.dp), fontSize = 13.sp, lineHeight = 18.sp, color = settingsSecondary())
+        Surface(
+            Modifier.fillMaxWidth(), shape = RoundedCornerShape(26.dp),
+            color = if (dark) Color(0xFF1C1C1E) else Color.White,
+            contentColor = if (dark) Color.White else Color.Black,
+        ) {
+            Column(Modifier.padding(vertical = if (compact) 12.dp else 0.dp), content = content)
+        }
+        if (footer != null) Text(footer, Modifier.padding(horizontal = 16.dp), fontSize = 13.sp, lineHeight = 18.sp, color = settingsSecondary())
+        if (footerContent != null) Box(Modifier.padding(horizontal = 16.dp)) { footerContent() }
+    }
+}
+
+@Composable
+internal fun SettingsAvatar(name: String, diameter: Int) {
+    val seed = remember(name) { usernameSkeleton(name).codePoints().sum() }
+    val initial = remember(name) {
+        if (name.isEmpty()) "?" else name.substring(0, name.offsetByCodePoints(0, 1)).uppercase()
+    }
+    Surface(Modifier.size(diameter.dp), shape = androidx.compose.foundation.shape.CircleShape,
+        color = RowColors[Math.floorMod(seed, RowColors.size)]) {
+        Box(contentAlignment = Alignment.Center) {
+            Text(initial, style = TextStyle(fontFamily = YoFont, fontSize = (diameter * 0.55f).sp, color = Color.White))
+        }
+    }
+}
+
+@Composable
+private fun SettingsTile(icon: ImageVector, color: Color) {
+    Surface(Modifier.size(29.dp), shape = RoundedCornerShape(7.dp), color = color, contentColor = Color.White) {
+        Box(contentAlignment = Alignment.Center) { Icon(icon, null, Modifier.size(17.dp)) }
+    }
+}
+
+@Composable
+private fun SettingsLine(
+    title: String,
+    detail: String? = null,
+    leading: (@Composable () -> Unit)? = null,
+    accessory: (@Composable () -> Unit)? = null,
+    chevron: Boolean = true,
+    compact: Boolean = false,
+    onClick: (() -> Unit)? = null,
+) {
+    Row(
+        Modifier.fillMaxWidth().then(if (onClick != null) Modifier.clickable(onClick = onClick) else Modifier)
+            .heightIn(min = if (compact) 48.dp else 54.dp).padding(horizontal = 16.dp, vertical = 5.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        if (leading != null) {
+            leading()
+            Spacer(Modifier.width(14.dp))
+        }
+        androidx.compose.ui.layout.Layout(
+            modifier = Modifier.weight(1f),
+            content = {
+                BasicText(
+                    title,
+                    style = TextStyle(fontSize = 17.sp, lineHeight = 22.sp, color = LocalContentColor.current),
+                    maxLines = 1, softWrap = false, overflow = TextOverflow.Ellipsis,
+                    autoSize = TextAutoSize.StepBased(minFontSize = 14.sp, maxFontSize = 17.sp),
+                )
+                if (detail != null) Text(
+                    detail, fontSize = 17.sp, color = settingsSecondary(), maxLines = 1,
+                    softWrap = false, overflow = TextOverflow.Ellipsis,
+                )
+            },
+        ) { items, constraints ->
+            val available = constraints.maxWidth
+            val textConstraints = constraints.copy(minWidth = 0, minHeight = 0)
+            val label = items.first().measure(textConstraints)
+            val detailWidth = (available - label.width - 8.dp.roundToPx()).coerceAtLeast(0)
+            val value = items.getOrNull(1)?.measure(textConstraints.copy(maxWidth = detailWidth))
+            val height = maxOf(label.height, value?.height ?: 0).coerceAtLeast(constraints.minHeight)
+            layout(available, height) {
+                label.placeRelative(0, (height - label.height) / 2)
+                value?.placeRelative(available - value.width, (height - value.height) / 2)
+            }
+        }
+        val showChevron = chevron && onClick != null
+        if (accessory != null || showChevron) {
+            Spacer(Modifier.width(8.dp))
+            Row(horizontalArrangement = Arrangement.spacedBy(6.dp), verticalAlignment = Alignment.CenterVertically) {
+                accessory?.invoke()
+                if (showChevron) SettingsChevron()
+            }
+        }
+    }
+}
+
+@Composable
+private fun SettingRow(
+    title: String, icon: ImageVector, tileColor: Color = Amethyst, detail: String? = null,
+    chevron: Boolean = true, compact: Boolean = false, badge: Boolean = false, onClick: () -> Unit,
+) {
+    SettingsLine(title, detail, leading = { SettingsTile(icon, tileColor) },
+        accessory = if (badge) { { RecoveryBadge() } } else null,
+        chevron = chevron, compact = compact, onClick = onClick)
+}
+
+@Composable
+private fun SettingToggle(
+    title: String, on: Boolean, icon: ImageVector? = null, tileColor: Color = Amethyst,
+    compact: Boolean = false, detail: String? = null, checkedAction: (() -> Unit)? = null,
+    changed: (Boolean) -> Unit,
+) {
+    SettingsLine(
+        title, detail,
+        leading = icon?.let { { SettingsTile(it, tileColor) } },
+        accessory = {
+            Switch(
+                checked = on,
+                modifier = Modifier.height(44.dp),
+                onCheckedChange = changed,
+                colors = SwitchDefaults.colors(
+                    checkedTrackColor = Amethyst, checkedThumbColor = Color.White,
+                    checkedBorderColor = Color.Transparent,
+                    uncheckedTrackColor = if (isSystemInDarkTheme()) Color(0xFF636366) else Color(0xFFAEAEB2),
+                    uncheckedThumbColor = Color.White, uncheckedBorderColor = Color.Transparent,
+                ),
+            )
+        },
+        chevron = false, compact = compact,
+        onClick = if (on && checkedAction != null) checkedAction else { { changed(!on) } },
+    )
+}
+
+@Composable
+internal fun ValueRow(title: String, value: String, good: Boolean? = null) {
+    SettingsLine(title, value, accessory = good?.let { ok ->
+        { Icon(if (ok) Icons.Default.CheckCircle else Icons.Default.ErrorOutline, null,
+            Modifier.size(17.dp), tint = if (ok) TileGreen else TileOrange) }
+    })
+}
+
 @Composable private fun ContactPage(model: YoViewModel,friend: Friend) {
     val uiResources=androidx.compose.ui.platform.LocalResources.current
 
@@ -394,7 +907,7 @@ private val TileGray=Color(0xFF8E8E93)
     val current=contactState.friends.firstOrNull { it.key==friend.key } ?: friend
     LaunchedEffect(friend.user,revision) { details=withContext(Dispatchers.IO){model.repository.contact(friend)}
         if(details?.safetyNumber!=null) safetyBytes=withContext(Dispatchers.IO){model.repository.safetyCode(friend)} }
-    Column(Modifier.padding(16.dp)) {
+    Column(Modifier.fillMaxWidth().padding(vertical = 20.dp), verticalArrangement = Arrangement.spacedBy(20.dp)) {
         details?.let { d ->
             SettingsSection {
                 val number = d.safetyNumber
@@ -414,21 +927,37 @@ private val TileGray=Color(0xFF8E8E93)
                     Text(stringResource(R.string.ui_confirm_new_key))
                 }
             }
-            TextButton(onClick = { technical = !technical }) { Text(stringResource(R.string.technical_details)) }
-            if (technical) {
-                ValueRow(stringResource(R.string.ui_account), stringResource(if (d.contact?.gone == true) R.string.ui_deleted else R.string.ui_on_yo))
-                ValueRow(stringResource(R.string.ui_identity_key), stringResource(if (d.contact?.unconfirmed == true) R.string.ui_changed_confirm_before_sending else R.string.ui_unchanged))
-                ValueRow(stringResource(R.string.ui_sessions), d.sessions.joinToString("\n") {
-                    (if (it.usable) "✓" else uiResources.getString(R.string.ui_waiting)) + "  " + it.device
-                }.ifEmpty { uiResources.getString(R.string.ui_no_chat_yet) })
-                d.accountKey?.let {
-                    Text(stringResource(R.string.ui_account_key), modifier = Modifier.padding(top = 16.dp))
-                    SelectionContainerCompat(it)
+            SettingsSection {
+                SettingsLine(stringResource(R.string.technical_details), onClick = { technical = !technical })
+                if (technical) {
+                    SettingsDivider()
+                    ValueRow(stringResource(R.string.ui_account), stringResource(if (d.contact?.gone == true) R.string.ui_deleted else R.string.ui_on_yo))
+                    SettingsDivider()
+                    ValueRow(stringResource(R.string.ui_identity_key), stringResource(if (d.contact?.unconfirmed == true) R.string.ui_changed_confirm_before_sending else R.string.ui_unchanged))
+                    SettingsDivider()
+                    Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                        Text(stringResource(R.string.ui_sessions), fontSize = 17.sp)
+                        SelectionContainerCompat(d.sessions.joinToString("\n") {
+                            (if (it.usable) "✓" else uiResources.getString(R.string.ui_waiting)) + "  " + it.device
+                        }.ifEmpty { uiResources.getString(R.string.ui_no_chat_yet) })
+                        d.accountKey?.let {
+                            Text(stringResource(R.string.ui_account_key), modifier = Modifier.padding(top = 10.dp))
+                            SelectionContainerCompat(it)
+                        }
+                    }
                 }
             }
         }
-        SettingToggle(uiResources.getString(R.string.ui_undo_before_sending),current.undo){model.repository.command { undoSettings(current,it,current.undoSeconds) }}
-        if(current.undo) { Text(uiResources.getQuantityString(R.plurals.undo_seconds,current.undoSeconds,current.undoSeconds));Slider(current.undoSeconds.toFloat(),{model.repository.command { undoSettings(current,true,it.toInt()) }},valueRange=2f..10f,steps=7) }
+        SettingsSection {
+            SettingToggle(stringResource(R.string.ui_undo_before_sending), current.undo) {
+                model.repository.command { undoSettings(current, it, current.undoSeconds) }
+            }
+            if (current.undo) Column(Modifier.padding(horizontal = 16.dp)) {
+                Text(uiResources.getQuantityString(R.plurals.undo_seconds, current.undoSeconds, current.undoSeconds))
+                Slider(current.undoSeconds.toFloat(), { model.repository.command { undoSettings(current, true, it.toInt()) } },
+                    valueRange = 2f..10f, steps = 7)
+            }
+        }
     }
     if(scanning) QrScanner(onClose={scanning=false},onCode={ qr ->
         scanning=false
@@ -656,8 +1185,11 @@ suspend fun readQr(context: Context,uri: Uri): String? = withContext(Dispatchers
     val context=LocalContext.current
     Column(Modifier.padding(16.dp)) {
         Text(stringResource(R.string.ui_yo_is_mit_licensed_this_app_includes_libsignal_licensed_unde))
-        TextButton(onClick={context.startActivity(Intent(Intent.ACTION_VIEW,"https://github.com/yoagain/yo".toUri()))}) { Text(stringResource(R.string.ui_source)) }
         Text(stringResource(R.string.ui_montserrat_sil_open_font_license_androidx_kotlin_jna_okhttp_),modifier=Modifier.padding(vertical=16.dp))
+    }
+    SettingsDivider()
+    SettingRow(stringResource(R.string.ui_source), Icons.Default.Code, TileGray) {
+        context.startActivity(Intent(Intent.ACTION_VIEW, "https://github.com/yoagain/yo".toUri()))
     }
 }
 

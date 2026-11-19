@@ -10,6 +10,7 @@ import androidx.activity.viewModels
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
+import androidx.core.content.IntentCompat
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import android.app.Application
@@ -48,17 +49,20 @@ class YoViewModel(application: Application) : AndroidViewModel(application) {
     }
     fun intent(intent: Intent) {
         intent.data?.let { uri -> inviteName(uri)?.let { name -> repository.command { invite(name) } } }
-        @Suppress("DEPRECATION")
-        val incoming = when(intent.action) {
-            Intent.ACTION_SEND -> listOfNotNull(intent.getParcelableExtra<Uri>(Intent.EXTRA_STREAM))
-            Intent.ACTION_SEND_MULTIPLE -> intent.getParcelableArrayListExtra<Uri>(Intent.EXTRA_STREAM).orEmpty()
-            else -> emptyList()
+        val streams = when (intent.action) {
+            Intent.ACTION_SEND -> listOfNotNull(IntentCompat.getParcelableExtra(intent, Intent.EXTRA_STREAM, Uri::class.java))
+            Intent.ACTION_SEND_MULTIPLE -> IntentCompat.getParcelableArrayListExtra(intent, Intent.EXTRA_STREAM, Uri::class.java).orEmpty()
+            else -> return
         }
-        val sources = incoming.filter { it.scheme == "content" }
+        val sources = buildList {
+            addAll(streams)
+            intent.clipData?.let { clip ->
+                repeat(clip.itemCount) { index -> clip.getItemAt(index).uri?.let(::add) }
+            }
+            intent.data?.let(::add)
+        }.filter { it.scheme == "content" }.distinct()
+        if (sources.isEmpty()) return
         val resolver = getApplication<Application>().contentResolver
-        val video = sources.firstOrNull { (resolver.getType(it) ?: intent.type)?.startsWith("video/") == true }
-        val items = if (video == null) sources.take(10) else listOf(video)
-        if(items.isEmpty()) return
         val version=++shareImportVersion
         importingShares.value=true
         shares.value=emptyList()
@@ -67,6 +71,8 @@ class YoViewModel(application: Application) : AndroidViewModel(application) {
         importShares=viewModelScope.launch(Dispatchers.IO) {
             try {
                 repository.state.first { !it.loading }
+                val video = sources.firstOrNull { (resolver.getType(it) ?: intent.type)?.startsWith("video/") == true }
+                val items = if (video == null) sources.take(10) else listOf(video)
                 repository.pendingShares.clear()
                 val staged=mutableListOf<Uri>()
                 for(source in items) {

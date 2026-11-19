@@ -1,5 +1,6 @@
 package app.justyo.android
 
+import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.material3.*
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.graphics.Color
@@ -14,4 +15,11 @@ val RowColors=listOf(0xFF1ABC9C,0xFF2ECC71,0xFF3498DB,0xFF34495E,0xFF16A085,0xFF
 @Composable fun YoTheme(content: @Composable () -> Unit) {
     MaterialTheme(motionScheme=MotionScheme.expressive(),colorScheme=darkColorScheme(primary=Color.White,onPrimary=Amethyst,secondary=Amethyst,
         background=Amethyst,onBackground=Color.White,surface=Color(0xFF27232B),onSurface=Color.White),content=content)
+}
+
+@OptIn(ExperimentalMaterial3ExpressiveApi::class)
+@Composable
+internal fun YoSystemTheme(content: @Composable () -> Unit) {
+    val colors = if (isSystemInDarkTheme()) darkColorScheme(primary = Amethyst) else lightColorScheme(primary = Amethyst)
+    MaterialTheme(colorScheme = colors, motionScheme = MotionScheme.expressive(), content = content)
 }

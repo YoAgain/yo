@@ -7,6 +7,7 @@ import android.content.Intent
 import android.content.pm.PackageManager
 import android.net.Uri
 import android.os.SystemClock
+import android.os.Build
 import android.view.HapticFeedbackConstants
 import androidx.activity.compose.PredictiveBackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
@@ -22,6 +23,9 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.pager.HorizontalPager
 import androidx.compose.foundation.pager.rememberPagerState
 import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.foundation.text.BasicTextField
+import androidx.compose.foundation.text.KeyboardActions
+import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.*
@@ -32,7 +36,22 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.alpha
+import androidx.compose.ui.draw.scale
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.window.DialogWindowProvider
+import androidx.compose.ui.graphics.SolidColor
+import androidx.compose.ui.text.style.TextDecoration
+import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.ui.semantics.clearAndSetSemantics
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.onClick
+import androidx.compose.ui.semantics.role
+import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.geometry.Rect
+import androidx.compose.ui.focus.FocusRequester
+import androidx.compose.ui.focus.focusRequester
+import androidx.compose.ui.text.rememberTextMeasurer
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.input.pointer.PointerEventPass
@@ -44,15 +63,21 @@ import androidx.compose.ui.platform.LocalView
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.style.TextAlign
+import androidx.compose.ui.text.input.ImeAction
+import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.platform.LocalFocusManager
+import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.core.content.ContextCompat
+import androidx.core.content.edit
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.compose.LocalLifecycleOwner
 import kotlinx.coroutines.*
 import uniffi.yo.usernameCanonical
 import uniffi.yo.usernameFree
+import uniffi.yo.usernameValid
 
 @Composable fun YoRoot(model: YoViewModel) {
     val uiResources=androidx.compose.ui.platform.LocalResources.current
@@ -60,8 +85,8 @@ import uniffi.yo.usernameFree
     val repo=model.repository
     val state by repo.state.collectAsStateWithLifecycle()
     val snackbar=remember { SnackbarHostState() }
-    LaunchedEffect(state.error,state.notice) {
-        val message=if(state.broken) null else state.error ?: state.notice
+    LaunchedEffect(state.error,state.notice,state.username,state.broken) {
+        val message=if(state.broken || state.username == null) null else state.error ?: state.notice
         if(message!=null) { snackbar.showSnackbar(message,withDismissAction=true);repo.clearMessage(message) }
     }
     Box(Modifier.fillMaxSize()) {
@@ -87,7 +112,7 @@ import uniffi.yo.usernameFree
     if(state.firstYo) AlertDialog(onDismissRequest=repo::clearError,title={Text(stringResource(R.string.ui_first_yo_sent))},text={Text(uiResources.getString(R.string.first_sent_explanation ,state.username.orEmpty()))},confirmButton={TextButton(onClick=repo::clearError){Text(stringResource(R.string.ui_awesome))}})
 }
 @Composable fun BrandText(text: String,size: Int,modifier: Modifier=Modifier) {
-    Text(text,modifier,fontFamily=YoFont,fontSize=size.sp,color=Color.White,textAlign=TextAlign.Center)
+    Text(text, modifier, style = TextStyle(fontFamily = YoFont, fontSize = size.sp, color = Color.White, textAlign = TextAlign.Center))
 }
 @Composable private fun RecoveryRequired(model: YoViewModel) {
     val uiResources=androidx.compose.ui.platform.LocalResources.current
@@ -105,70 +130,248 @@ import uniffi.yo.usernameFree
     var name by rememberSaveable { mutableStateOf("") }
     var scanning by remember { mutableStateOf(false) }
     var code by rememberSaveable { mutableStateOf("") }
-    var free by remember { mutableStateOf<Boolean?>(null) }
+    val availability = remember { mutableStateMapOf<String, Boolean>() }
+    val free = availability[name]
+    val valid = remember(name) { usernameValid(name) }
+    val shortName = remember(name) {
+        val characters = android.icu.text.BreakIterator.getCharacterInstance()
+        characters.setText(name)
+        name.isNotEmpty() && characters.next(3) == android.icu.text.BreakIterator.DONE
+    }
+    val hubShortNames = remember { mutableStateMapOf<String, Boolean>() }
+    val rejectedAsShort = hubShortNames[name] == true
+    var tooShort by remember { mutableStateOf(false) }
+    val nameFocus = remember { FocusRequester() }
+    val shake = remember { androidx.compose.animation.core.Animatable(0f) }
     var hint by remember { mutableStateOf<String?>(null) }
-    val availability=remember { mutableMapOf<String,Boolean>() }
     val context=LocalContext.current
     val scope=rememberCoroutineScope()
-    PredictiveBackHandler(step!=0) { events -> events.collect { };step=0 }
+    val focusManager = LocalFocusManager.current
+    val keyboardVisible = WindowInsets.ime.getBottom(LocalDensity.current) > 0
+    val repo = model.repository
+    val canRegister = !s.busy && free != false
+    val register: () -> Unit = {
+        if (canRegister && !valid) {
+            nameFocus.requestFocus()
+            tooShort = name.isNotEmpty()
+            scope.launch {
+                for (position in listOf(-12f, 10f, -7f, 4f, 0f)) {
+                    shake.animateTo(position, androidx.compose.animation.core.tween(70))
+                }
+            }
+        } else if (canRegister) {
+            focusManager.clearFocus()
+            val submitted = name
+            repo.clearError()
+            repo.command { register(submitted) }
+        }
+    }
+    LaunchedEffect(name, rejectedAsShort) {
+        tooShort = false
+        if (shortName || rejectedAsShort) {
+            delay(1500)
+            tooShort = true
+        }
+    }
     LaunchedEffect(name) {
-        free=availability[name]; hint=null
-        if(name.isBlank() || free!=null) return@LaunchedEffect
-        delay(350)
+        hint=null
+        if(!valid || free!=null) return@LaunchedEffect
+        delay(500)
         try {
             val result=withContext(Dispatchers.IO) { usernameFree(model.repository.transport,name) }
-            ensureActive(); availability[name]=result; free=result
+            ensureActive(); availability[name]=result
         }
         catch (e: CancellationException) { throw e }
-        catch (_: Exception) { hint=uiResources.getString(R.string.ui_choose_a_longer_name_or_try_again_when_connected) }
-    }
-    Column(Modifier.fillMaxSize().safeDrawingPadding().imePadding().padding(horizontal=24.dp),horizontalAlignment=Alignment.CenterHorizontally) {
-        run {
-            YoTutorial(Modifier.weight(1f))
-            s.pendingInvite?.let { Text(uiResources.getString(R.string.invited_you ,it),modifier=Modifier.padding(bottom=16.dp)) }
-            NameEntry(name,{name=usernameCanonical(it)},free)
-            hint?.let { Text(it) }
-            Button(onClick={model.repository.command { register(name) }},enabled=!s.busy && name.isNotBlank() && free!=false,modifier=Modifier.fillMaxWidth().heightIn(min=54.dp)){BrandButtonText(if(s.busy) uiResources.getString(R.string.ui_creating) else uiResources.getString(R.string.ui_sign_up))}
-            Row(Modifier.padding(bottom = 8.dp), verticalAlignment = Alignment.CenterVertically) {
-                Text(stringResource(R.string.got_yo), fontWeight = androidx.compose.ui.text.font.FontWeight.SemiBold)
-                TextButton(onClick = { step = 2 }) { Text(stringResource(R.string.ui_sign_in)) }
+        catch (failure: Exception) {
+            if (failure is uniffi.yo.YoException.Refused && failure.status.toInt() == 400) {
+                hubShortNames[name] = true
+            } else {
+                hint = uiResources.getString(R.string.ui_choose_a_longer_name_or_try_again_when_connected)
             }
         }
     }
-    if(step!=0) ModalBottomSheet(onDismissRequest={step=0},containerColor=Amethyst) {
-        Column(Modifier.fillMaxWidth().heightIn(max = 640.dp).verticalScroll(rememberScrollState()).imePadding().padding(horizontal=24.dp),horizontalAlignment=Alignment.CenterHorizontally) {
-            TopAppBar(title={},navigationIcon={IconButton(onClick={step=0}){Icon(Icons.AutoMirrored.Filled.ArrowBack,uiResources.getString(R.string.ui_back))}},colors=TopAppBarDefaults.topAppBarColors(containerColor=Amethyst))
-            BrandText(if(step==2) uiResources.getString(R.string.ui_sign_in) else uiResources.getString(R.string.ui_recovery_key),30,Modifier.padding(top=24.dp,bottom=32.dp))
-            when(step) {
-                2 -> Text(stringResource(R.string.ui_use_your_passkey_or_recovery_key),textAlign=TextAlign.Center)
-                3 -> {
-                    Text(stringResource(R.string.ui_paste_type_or_scan_your_recovery_key),modifier=Modifier.padding(bottom=24.dp))
-                    OutlinedTextField(code,{code=it},label={Text(stringResource(R.string.ui_label_64_characters))},minLines=3,textStyle=TextStyle(fontFamily=FontFamily.Monospace),modifier=Modifier.fillMaxWidth())
-                    val picker=rememberLauncherForActivityResult(ActivityResultContracts.PickVisualMedia()) { uri ->
-                        if(uri!=null) scope.launch { try { code=readQr(context,uri) ?: error(uiResources.getString(R.string.ui_we_couldn_t_read_a_recovery_key_from_this_photo)) } catch(e: Exception) { model.error(e.message ?: uiResources.getString(R.string.ui_couldn_t_read_photo)) } }
-                    }
-                    Row {
-                        TextButton(onClick={scanning=true}){Text(stringResource(R.string.scan_qr))}
-                        TextButton(onClick={picker.launch(PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly))}) { Text(stringResource(R.string.ui_scan_from_photos)) }
+    if (step != 3) Column(Modifier.fillMaxSize().safeDrawingPadding().imePadding().padding(start = 28.dp, end = 28.dp, bottom = 16.dp),horizontalAlignment=Alignment.CenterHorizontally, verticalArrangement = if (keyboardVisible) Arrangement.Center else Arrangement.Top) {
+        if (keyboardVisible) {
+            BoxWithConstraints(Modifier.fillMaxWidth().weight(1f), contentAlignment = Alignment.Center) {
+                val naturalHeight = 320.dp
+                val scale = (maxHeight / naturalHeight).coerceIn(0f, 1f)
+                if (scale > 0f) {
+                    Box(Modifier.fillMaxWidth().requiredHeight(naturalHeight).scale(scale)) {
+                        YoTutorial(Modifier.fillMaxSize(), condensed = true)
                     }
                 }
             }
-            Spacer(Modifier.height(24.dp))
-            if(s.busy) CircularProgressIndicator(Modifier.padding(16.dp))
-            when(step) {
-                2 -> {
-                    Button(onClick={scope.launch { try { val assertion = Passkeys.assert(context); model.repository.command { restorePasskey(assertion) } } catch(e: Exception) { model.error(e.message ?: uiResources.getString(R.string.ui_use_your_recovery_key)) } }},modifier=Modifier.fillMaxWidth().heightIn(min=54.dp)){BrandButtonText(stringResource(R.string.ui_use_passkey))}
-                    TextButton(onClick={step=3}){BrandText(stringResource(R.string.ui_use_recovery_key),17)}
+        } else {
+            YoTutorial(Modifier.weight(1f))
+        }
+        Column(
+            Modifier.fillMaxWidth().weight(if (keyboardVisible) 1f else 0.5f, fill = false)
+                .verticalScroll(rememberScrollState()),
+            horizontalAlignment = Alignment.CenterHorizontally,
+        ) {
+            s.pendingInvite?.let { Text(uiResources.getString(R.string.invited_you, it), Modifier.padding(bottom = 16.dp), style = TextStyle(fontFamily = YoFont, fontSize = 17.sp, color = Color.White.copy(alpha = 0.85f))) }
+            Box(Modifier.fillMaxWidth().height(22.dp), contentAlignment = Alignment.Center) {
+                if (free == false) {
+                    Row(
+                        Modifier.clickable { focusManager.clearFocus(); repo.clearError(); step = 2 },
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        Text(stringResource(R.string.signup_taken_yours), color = Color.White.copy(alpha = 0.8f),
+                            fontSize = 15.sp, fontWeight = FontWeight.SemiBold)
+                        Text(stringResource(R.string.ui_sign_in), color = Color.White,
+                            fontSize = 15.sp, fontWeight = FontWeight.SemiBold, textDecoration = TextDecoration.Underline)
+                    }
+                } else if (tooShort) {
+                    Text(stringResource(R.string.signup_longer_name), fontSize = 15.sp, fontWeight = FontWeight.SemiBold)
                 }
-                3 -> Button(onClick={model.repository.command { restore(code) }},enabled=!s.busy && code.isNotBlank(),modifier=Modifier.fillMaxWidth().heightIn(min=54.dp)){BrandButtonText(stringResource(R.string.ui_sign_in))}
             }
-            Spacer(Modifier.height(24.dp))
+            Spacer(Modifier.height(8.dp))
+            NameEntry(name, { name = usernameCanonical(it); repo.clearError() },
+                if (tooShort) false else free, Modifier.offset { IntOffset(shake.value.dp.roundToPx(), 0) }.focusRequester(nameFocus), register)
+            Spacer(Modifier.height(10.dp))
+            OnboardingButton(
+                if (s.busy) stringResource(R.string.ui_creating) else stringResource(R.string.ui_sign_up),
+                canRegister, register,
+            )
+            OnboardingNote(s.error.takeIf { step == 0 } ?: hint)
+            TextButton(
+                onClick = { focusManager.clearFocus(); repo.clearError(); step = 2 },
+                modifier = Modifier.padding(top = 14.dp),
+                contentPadding = PaddingValues(0.dp),
+            ) {
+                val question = stringResource(R.string.got_yo)
+                val questionStyle = TextStyle(
+                    fontSize = 15.sp,
+                    fontWeight = FontWeight.SemiBold,
+                    color = Color.White.copy(alpha = 0.85f),
+                )
+                Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                    Text(question, Modifier.alignByBaseline(), style = questionStyle, maxLines = 1)
+                    Text(
+                        stringResource(R.string.ui_sign_in),
+                        Modifier.alignByBaseline(),
+                        style = TextStyle(fontFamily = YoFont, fontSize = 18.sp, color = Color.White),
+                        maxLines = 1,
+                    )
+                    Text(
+                        question,
+                        Modifier.alignByBaseline().alpha(0f).clearAndSetSemantics {},
+                        style = questionStyle,
+                        maxLines = 1,
+                    )
+                }
+            }
+        }
+    }
+    if (step == 2) ModalBottomSheet(
+        onDismissRequest = { if (step == 2) { repo.clearError(); step = 0 } },
+        sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true),
+        containerColor = Amethyst,
+        contentColor = Color.White,
+        dragHandle = null,
+        contentWindowInsets = { WindowInsets(0, 0, 0, 0) },
+    ) {
+        val window = (LocalView.current.parent as? DialogWindowProvider)?.window
+        SideEffect {
+            if (Build.VERSION.SDK_INT >= 29) window?.isNavigationBarContrastEnforced = false
+        }
+        Column(
+            Modifier.fillMaxWidth().navigationBarsPadding().heightIn(min = 240.dp)
+                .padding(start = 24.dp, end = 24.dp, top = 28.dp, bottom = 12.dp),
+            horizontalAlignment = Alignment.CenterHorizontally,
+        ) {
+            BrandText(stringResource(R.string.ui_sign_in), 28)
+            Spacer(Modifier.height(18.dp))
+            OnboardingButton(stringResource(R.string.ui_use_passkey), !s.busy) {
+                scope.launch {
+                    try {
+                        val assertion = Passkeys.assert(context)
+                        repo.command { restorePasskey(assertion) }
+                    } catch (cancelled: CancellationException) {
+                        throw cancelled
+                    } catch (failure: Exception) {
+                        model.error(failure.message ?: uiResources.getString(R.string.ui_use_your_recovery_key))
+                    }
+                }
+            }
+            Spacer(Modifier.height(14.dp))
+            TextButton(onClick = { repo.clearError(); step = 3 }) {
+                BrandText(stringResource(R.string.ui_use_recovery_key), 17)
+            }
+            OnboardingNote(s.error)
+        }
+    }
+    if (step == 3) {
+        val back = { repo.clearError(); step = 2 }
+        androidx.activity.compose.BackHandler(onBack = back)
+        val picker = rememberLauncherForActivityResult(ActivityResultContracts.PickVisualMedia()) { uri ->
+            if (uri != null) scope.launch {
+                try {
+                    code = readQr(context, uri)
+                        ?: error(uiResources.getString(R.string.ui_we_couldn_t_read_a_recovery_key_from_this_photo))
+                    repo.clearError()
+                } catch (cancelled: CancellationException) {
+                    throw cancelled
+                } catch (failure: Exception) {
+                    model.error(failure.message ?: uiResources.getString(R.string.ui_couldn_t_read_photo))
+                }
+            }
+        }
+        Column(Modifier.fillMaxSize().safeDrawingPadding().imePadding().padding(horizontal = 24.dp)) {
+            IconButton(onClick = back, modifier = Modifier.size(48.dp)) {
+                Icon(Icons.AutoMirrored.Filled.ArrowBack, stringResource(R.string.ui_back))
+            }
+            Column(
+                Modifier.weight(1f).fillMaxWidth().verticalScroll(rememberScrollState()),
+                horizontalAlignment = Alignment.CenterHorizontally,
+            ) {
+                BrandText(stringResource(R.string.ui_recovery_key), 30, Modifier.padding(top = 24.dp))
+                Text(
+                    stringResource(R.string.ui_paste_type_or_scan_your_recovery_key),
+                    Modifier.padding(top = 10.dp, bottom = 14.dp),
+                    color = Color.White.copy(alpha = 0.85f), fontSize = 17.sp, textAlign = TextAlign.Center,
+                )
+                val placeholder = stringResource(R.string.ui_label_64_characters)
+                BasicTextField(
+                    value = code,
+                    onValueChange = { code = it; repo.clearError() },
+                    modifier = Modifier.fillMaxWidth().semantics { contentDescription = placeholder },
+                    minLines = 3, maxLines = 5,
+                    textStyle = TextStyle(fontFamily = FontFamily.Monospace, fontSize = 18.sp,
+                        fontWeight = FontWeight.SemiBold, color = Color.White),
+                    cursorBrush = SolidColor(Color.White),
+                    keyboardOptions = KeyboardOptions(autoCorrectEnabled = false),
+                    decorationBox = { field ->
+                        Box(Modifier.background(Color.White.copy(alpha = 0.14f), RoundedCornerShape(16.dp)).padding(14.dp)) {
+                            if (code.isEmpty()) Text(placeholder, fontSize = 18.sp, fontFamily = FontFamily.Monospace,
+                                color = Color.White.copy(alpha = 0.35f))
+                            field()
+                        }
+                    },
+                )
+                Row(Modifier.fillMaxWidth().padding(top = 12.dp), horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+                    RecoveryAction(stringResource(R.string.recovery_scan_short), Icons.Default.QrCodeScanner, Modifier.weight(1f)) {
+                        scanning = true
+                    }
+                    RecoveryAction(stringResource(R.string.recovery_photos_short), Icons.Default.PhotoLibrary, Modifier.weight(1f)) {
+                        picker.launch(PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly))
+                    }
+                }
+            }
+            Column(Modifier.fillMaxWidth().padding(top = 12.dp, bottom = 16.dp), horizontalAlignment = Alignment.CenterHorizontally) {
+                OnboardingButton(stringResource(R.string.ui_sign_in), !s.busy && code.isNotBlank()) {
+                    focusManager.clearFocus()
+                    repo.clearError()
+                    repo.command { restore(code) }
+                }
+                OnboardingNote(s.error)
+            }
         }
     }
     if(scanning) QrScanner(onClose={scanning=false},onCode={code=it.text;scanning=false})
 }
 /** The same Android tutorial is used on welcome and in Help. */
-@Composable internal fun YoTutorial(modifier: Modifier=Modifier, compact: Boolean = false) {
+@Composable internal fun YoTutorial(modifier: Modifier=Modifier, compact: Boolean = false, condensed: Boolean = false) {
     val uiResources=androidx.compose.ui.platform.LocalResources.current
 
     val scope=rememberCoroutineScope()
@@ -188,7 +391,10 @@ import uniffi.yo.usernameFree
                 }
             }
             HorizontalPager(pager,Modifier.weight(1f)) { page ->
-                Column(Modifier.fillMaxWidth(),horizontalAlignment=Alignment.CenterHorizontally) {
+                Column(
+                    Modifier.fillMaxWidth().then(if (condensed) Modifier else Modifier.verticalScroll(rememberScrollState())),
+                    horizontalAlignment = Alignment.CenterHorizontally,
+                ) {
                     if (compact) {
                         val slides = listOf(
                             R.string.tutorial_tap,
@@ -213,30 +419,74 @@ import uniffi.yo.usernameFree
                         }
                         BrandText(stringResource(slides[slide]), 20, Modifier.padding(top = 12.dp))
                     } else when(page%4) {
-                        0 -> { BrandText("Yo",140); BrandText(stringResource(R.string.ui_it_s_that_simple),20) }
+                        0 -> { BrandText("Yo",150); BrandText(stringResource(R.string.ui_it_s_that_simple),20,Modifier.alpha(0.85f)) }
                         else -> {
                             val titles=listOf(uiResources.getString(R.string.ui_tap_a_name),uiResources.getString(R.string.ui_yo_back),uiResources.getString(R.string.ui_add_friends_by_name))
                             val lines=listOf(uiResources.getString(R.string.ui_that_s_a_yo_nothing_to_type),uiResources.getString(R.string.ui_a_yo_comes_in_tap_their_name_to_yo_back),uiResources.getString(R.string.ui_yogpt_is_there_from_the_start_it_yos_back))
                             // Android's own row rendering, so the tutorial shows this app.
-                            Column(Modifier.width(240.dp).padding(bottom=32.dp)) { FlatRow("YoGPT",0,onClick={}); FlatRow(if(page%4==2) uiResources.getString(R.string.ui_yo) else "+",2,onClick={}) }
+                            Column(Modifier.width(240.dp).padding(bottom = if (condensed) 12.dp else 32.dp)) {
+                                val rowHeight = if (condensed) 62.dp else BarHeight
+                                FlatRow("YoGPT", 0, Modifier.height(rowHeight), onClick = {})
+                                FlatRow(if (page % 4 == 2) uiResources.getString(R.string.ui_yo) else "+", 2,
+                                    Modifier.height(rowHeight), onClick = {})
+                            }
                             BrandText(titles[page%4-1],28)
                             Text(lines[page%4-1],textAlign=TextAlign.Center,modifier=Modifier.padding(top=12.dp))
                         }
                     }
                 }
             }
-            Row(Modifier.padding(bottom=if (compact) 0.dp else 24.dp),horizontalArrangement=Arrangement.spacedBy(4.dp)) {
-                repeat(slideCount) { i -> Box(Modifier.size(if (compact) 24.dp else 48.dp).clickable { scope.launch { pager.animateScrollToPage(pager.currentPage-pager.currentPage%slideCount+i) } },contentAlignment=Alignment.Center) {
+            Row(Modifier.padding(bottom = if (compact || condensed) 0.dp else 24.dp), horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+                repeat(slideCount) { i -> Box(Modifier.size(if (compact || condensed) 24.dp else 48.dp).clip(CircleShape)
+                    .clickable(interactionSource = null, indication = null) {
+                        scope.launch { pager.animateScrollToPage(pager.currentPage - pager.currentPage % slideCount + i) }
+                    },contentAlignment=Alignment.Center) {
                     Box(Modifier.size(8.dp).background(Color.White.copy(alpha=if(pager.currentPage%slideCount==i) 1f else .4f),CircleShape))
                 } }
             }
     }
 }
 
-@Composable private fun BrandButtonText(text: String) { Text(text,fontFamily=YoFont,fontSize=20.sp) }
 @Composable fun FlatRow(title: String,color: Int,modifier: Modifier=Modifier,onClick: ()->Unit) {
     Box(modifier.fillMaxWidth().heightIn(min=BarHeight).background(RowColors[Math.floorMod(color,8)]).clickable(interactionSource=null,indication=null,onClick=onClick),contentAlignment=Alignment.Center) {
         BrandText(title,36,Modifier.padding(horizontal=20.dp))
+    }
+}
+
+@Composable
+private fun ListActionRow(
+    label: String,
+    icon: androidx.compose.ui.graphics.vector.ImageVector,
+    color: Color,
+    modifier: Modifier,
+    onClick: () -> Unit,
+) {
+    Surface(onClick = onClick, modifier = modifier.height(BarHeight), color = color, contentColor = Color.White) {
+        Row(
+            horizontalArrangement = Arrangement.spacedBy(6.dp, Alignment.CenterHorizontally),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Icon(icon, contentDescription = null, modifier = Modifier.size(22.dp))
+            Text(label, style = TextStyle(fontFamily = YoFont, fontSize = 22.sp, lineHeight = 26.sp))
+        }
+    }
+}
+
+@Composable
+private fun NotificationSettingsRow(onClick: () -> Unit) {
+    val label = stringResource(R.string.turn_on_notifications)
+    val measurer = rememberTextMeasurer()
+    val density = LocalDensity.current
+    BoxWithConstraints(
+        Modifier.fillMaxWidth().height(BarHeight).background(Color(0xFFE74C3C)).clickable(onClick = onClick)
+            .padding(horizontal = 16.dp),
+        contentAlignment = Alignment.Center,
+    ) {
+        val style = TextStyle(fontFamily = YoFont, fontSize = 36.sp, color = Color.White)
+        val naturalWidth = measurer.measure(label, style, softWrap = false, maxLines = 1).size.width
+        val room = with(density) { maxWidth.toPx() }
+        val scale = (room / naturalWidth.coerceAtLeast(1)).coerceIn(0.5f, 1f)
+        Text(label, style = style.copy(fontSize = 36.sp * scale), maxLines = 1)
     }
 }
 
@@ -246,8 +496,29 @@ import uniffi.yo.usernameFree
     val repo=model.repository
     val shares by model.shares.collectAsStateWithLifecycle()
     val notificationsEnabled by model.notificationsEnabled.collectAsStateWithLifecycle()
+    var notificationInFlight by rememberSaveable { mutableStateOf(false) }
+    val notificationPermission = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) {
+        notificationInFlight = false
+        model.notificationResult(it)
+    }
     val importingShares by model.importingShares.collectAsStateWithLifecycle()
+    val sharing = importingShares || shares.isNotEmpty()
+    androidx.activity.compose.BackHandler(enabled = sharing, onBack = model::cancelShares)
     val context=LocalContext.current
+    val notificationPreferences = remember(context) { context.getSharedPreferences("notification-permission", Context.MODE_PRIVATE) }
+    var notificationAsked by remember { mutableStateOf(notificationPreferences.getBoolean("asked", false)) }
+    LaunchedEffect(notificationsEnabled) {
+        if (Build.VERSION.SDK_INT >= 33 && !notificationsEnabled && !notificationAsked && !model.deniedThisLaunch) {
+            notificationInFlight = true
+            notificationAsked = true
+            notificationPreferences.edit { putBoolean("asked", true) }
+            notificationPermission.launch(Manifest.permission.POST_NOTIFICATIONS)
+        }
+    }
+    val showNotificationBar = !notificationsEnabled && !notificationInFlight && !model.deniedThisLaunch &&
+        (Build.VERSION.SDK_INT < 33 || notificationAsked)
+
+    val keyboardVisible = WindowInsets.ime.getBottom(LocalDensity.current) > 0
     val owner=LocalLifecycleOwner.current
     val view=LocalView.current
     val scope=rememberCoroutineScope()
@@ -255,6 +526,37 @@ import uniffi.yo.usernameFree
     var add by remember { mutableStateOf(false) }
     var group by remember { mutableStateOf(false) }
     var name by rememberSaveable { mutableStateOf("") }
+    var addingFriend by remember { mutableStateOf(false) }
+    var addError by remember { mutableStateOf<String?>(null) }
+    val friendFocus = remember { FocusRequester() }
+    val focusManager = LocalFocusManager.current
+    val canAdd = remember(name, addingFriend) { !addingFriend && usernameValid(name) }
+    val submitFriend = {
+        if (canAdd) {
+            val submitted = name
+            addingFriend = true
+            addError = null
+            focusManager.clearFocus()
+            repo.command {
+                val failure = try {
+                    add(submitted)
+                    null
+                } catch (exception: CancellationException) {
+                    throw exception
+                } catch (exception: Exception) {
+                    if (exception is uniffi.yo.YoException.Replaced) throw exception
+                    friendlyError(context, exception)
+                }
+                withContext(Dispatchers.Main.immediate) {
+                    addingFriend = false
+                    addError = failure
+                    name = ""
+                    if (failure == null) add = false
+                }
+            }
+        }
+    }
+
     var menu by remember { mutableStateOf<Friend?>(null) }
     var declined by remember { mutableStateOf<Friend?>(null) }
     var cameraOn by remember { mutableStateOf(false) }
@@ -264,7 +566,6 @@ import uniffi.yo.usernameFree
     var picked by remember { mutableStateOf<Uri?>(null) }
     var viewing by remember { mutableStateOf<List<Received>?>(null) }
     var recording by remember { mutableStateOf<String?>(null) }
-    var more by remember { mutableStateOf(false) }
     val camera=remember { YoCamera(context) }
     val permissions=rememberLauncherForActivityResult(ActivityResultContracts.RequestMultiplePermissions()) { result ->
         cameraOn=result[Manifest.permission.CAMERA]==true
@@ -325,6 +626,12 @@ import uniffi.yo.usernameFree
             lastTap = SystemClock.elapsedRealtime()
             repo.press(friend.key, false)
         }
+    }
+    PredictiveBackHandler(add && !addingFriend && !cameraOn) { events ->
+        events.collect { }
+        add = false
+        name = ""
+        addError = null
     }
     PredictiveBackHandler(recording!=null) { events -> events.collect { } }
     PredictiveBackHandler(recording==null && (cameraOn || picked!=null)) { events -> events.collect { };cameraOn=false;picked=null }
@@ -424,26 +731,45 @@ import uniffi.yo.usernameFree
             }
         }
     }
-    Box(Modifier.fillMaxSize().safeDrawingPadding().then(edgeGesture)) {
-        if(cameraOn) key(cameraVersion) {
-            AndroidView(factory={ctx -> PreviewView(ctx).apply { scaleType=PreviewView.ScaleType.FILL_CENTER; camera.bind(owner,this,model::error) }},modifier=Modifier.fillMaxSize())
+    Box(Modifier.fillMaxSize()) {
+        if (cameraOn) key(cameraVersion) {
+            AndroidView(
+                factory = { context ->
+                    PreviewView(context).apply {
+                        implementationMode = PreviewView.ImplementationMode.COMPATIBLE
+                        scaleType = PreviewView.ScaleType.FILL_CENTER
+                        camera.bind(owner, this) { message ->
+                            cameraOn = false
+                            model.error(message)
+                        }
+                    }
+                },
+                modifier = Modifier.fillMaxSize(),
+            )
         }
-        if(picked!=null) PhotoUri(picked!!,Modifier.fillMaxSize())
-        LazyColumn(Modifier.fillMaxSize(),state=listState,userScrollEnabled=recording==null,contentPadding=PaddingValues(bottom=84.dp)) {
-            if (!notificationsEnabled && !model.deniedThisLaunch) item(key = "notification-settings") {
-                FlatRow(stringResource(R.string.turn_on_notifications), 0) {
-                    openNotificationSettings(context)
-                }
+        picked?.let { PhotoUri(it, Modifier.fillMaxSize()) }
+        Box(Modifier.fillMaxSize().safeDrawingPadding().then(edgeGesture)) {
+        LazyColumn(Modifier.fillMaxSize(),state=listState,userScrollEnabled=recording==null,contentPadding=PaddingValues(bottom=if (keyboardVisible) 0.dp else 84.dp)) {
+            if (showNotificationBar) item(key = "notification-settings") {
+                NotificationSettingsRow { openNotificationSettings(context) }
             }
-            if(importingShares) item { LinearProgressIndicator(Modifier.fillMaxWidth());Text(stringResource(R.string.preparing_shared_media),modifier=Modifier.padding(20.dp));TextButton(onClick=model::cancelShares){Text(stringResource(R.string.ui_cancel_share))} }
-            if(shares.isNotEmpty()) item { Text(uiResources.getQuantityString(R.plurals.shared_items,shares.size,shares.size),modifier=Modifier.padding(20.dp)); TextButton(onClick=model::cancelShares){Text(stringResource(R.string.ui_cancel_share))} }
             items(visible.size,key={visible[it].key}) { index ->
                 val friend = visible[index]
                 val dismiss = rememberSwipeToDismissBoxState(confirmValueChange={ value ->
                     if(value==SwipeToDismissBoxValue.EndToStart) { repo.requestRemove(friend);false } else true
                 })
                 SwipeToDismissBox(state=dismiss,enableDismissFromStartToEnd=false,enableDismissFromEndToStart=!cameraOn && recording==null && !friend.request,
-                    backgroundContent={Box(Modifier.fillMaxSize().background(MaterialTheme.colorScheme.error).padding(horizontal=24.dp),contentAlignment=Alignment.CenterEnd) { Icon(Icons.Default.Delete,stringResource(R.string.ui_remove)) }}) {
+                    backgroundContent = {
+                        if (!cameraOn) {
+                            Box(
+                                Modifier.fillMaxSize().background(MaterialTheme.colorScheme.error).padding(horizontal = 24.dp),
+                                contentAlignment = Alignment.CenterEnd,
+                            ) {
+                                Icon(Icons.Default.Delete, stringResource(R.string.ui_remove))
+                            }
+                        }
+                    },
+                ) {
                     FriendBar(repo,bars.getValue(friend.key),heights.getValue(friend.key),
                         rowShade(visible,index),cameraOn,s.leftHanded,
                         onPress={press(friend,it)},onTap={currentTap(friend)},onMenu={if(!tapLock.locked(friend.key)) menu=friend},
@@ -483,51 +809,178 @@ import uniffi.yo.usernameFree
             }
             if(!cameraOn) {
                 item {
-                    if(add) Row(Modifier.fillMaxWidth().heightIn(min=BarHeight).background(RowColors[Repository.nextColor(s.friends)]),verticalAlignment=Alignment.CenterVertically) {
-                        OutlinedTextField(name,{ name=usernameCanonical(it) },label={Text(stringResource(R.string.ui_name))},singleLine=true,textStyle=TextStyle(fontFamily=YoFont,fontSize=24.sp),modifier=Modifier.weight(1f))
-                        IconButton(onClick={val typed=name; repo.command { add(typed) }; name=""; add=false}){Icon(Icons.Default.Check,uiResources.getString(R.string.ui_add_friend))}
-                    } else FlatRow("+",Repository.nextColor(s.friends),onClick={add=true})
+                    if (add) {
+                        val placeholder = addError ?: stringResource(R.string.ui_name)
+                        val style = TextStyle(fontFamily = YoFont, fontSize = 36.sp, color = Color.White, textAlign = TextAlign.Center)
+                        BasicTextField(
+                            value = name,
+                            onValueChange = { name = usernameCanonical(it); addError = null },
+                            singleLine = true,
+                            enabled = !addingFriend,
+                            textStyle = style,
+                            cursorBrush = SolidColor(Color.White),
+                            keyboardOptions = KeyboardOptions(autoCorrectEnabled = false, imeAction = ImeAction.Done),
+                            keyboardActions = KeyboardActions(onDone = { submitFriend() }),
+                            modifier = Modifier.fillMaxWidth().height(BarHeight).focusRequester(friendFocus)
+                                .semantics { contentDescription = placeholder },
+                            decorationBox = { field ->
+                                Box(
+                                    Modifier.fillMaxSize().background(RowColors[Repository.nextColor(s.friends)])
+                                        .padding(horizontal = 20.dp),
+                                    contentAlignment = Alignment.Center,
+                                ) {
+                                    if (name.isEmpty()) Text(
+                                        placeholder, style = style.copy(color = Color.White.copy(alpha = 0.45f)),
+                                        maxLines = 1, overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis,
+                                    )
+                                    field()
+                                }
+                            },
+                        )
+                        LaunchedEffect(Unit) { friendFocus.requestFocus() }
+                    } else {
+                        val addFriendLabel = stringResource(R.string.ui_add_friend)
+                        FlatRow("+", Repository.nextColor(s.friends), Modifier.semantics {
+                            contentDescription = addFriendLabel
+                        }, onClick = { add = true })
+                    }
                 }
                 val hasContacts = friends.any {
                     it.group == null && !it.request && uniffi.yo.usernameSkeleton(it.name) !in setOf("YOGPT", "PING", "PINGTEST")
                 }
                 if (!hasContacts || add) {
-                    item { FlatRow(uiResources.getString(R.string.group_row), Repository.nextColor(s.friends) + 1, onClick = { group = true }) }
-                    item { FlatRow(uiResources.getString(R.string.ui_invite), Repository.nextColor(s.friends) + 2, onClick = { shareInvite(context, s.username.orEmpty()) }) }
-                }
-            }
-        }
-        Column(Modifier.align(Alignment.BottomCenter).fillMaxWidth().padding(horizontal=16.dp),horizontalAlignment=Alignment.CenterHorizontally) {
-            AnimatedVisibility(hint && cameraOn) { Surface(shape=MaterialTheme.shapes.large,color=MaterialTheme.colorScheme.surface.copy(alpha=.9f)) {
-                Text(if(picked==null) uiResources.getString(R.string.ui_tap_a_name_hold_for_video) else uiResources.getString(R.string.ui_tap_a_name_to_send_this_photo),modifier=Modifier.padding(14.dp))
-            } }
-            Row(Modifier.fillMaxWidth().padding(vertical=8.dp),verticalAlignment=Alignment.CenterVertically,horizontalArrangement=Arrangement.SpaceBetween) {
-                val controls: @Composable ()->Unit = {
-                    Box {
-                        FloatingActionButton(onClick={if(recording!=null) return@FloatingActionButton; if(cameraOn) picker.launch(PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly)) else more=true},containerColor=MaterialTheme.colorScheme.surface.copy(alpha=.9f)) { Icon(if(cameraOn) Icons.Default.PhotoLibrary else Icons.Default.MoreHoriz,if(cameraOn) uiResources.getString(R.string.ui_photo_library) else uiResources.getString(R.string.ui_more)) }
-                        DropdownMenu(more,{more=false}) {
-                            DropdownMenuItem(text={Text(stringResource(R.string.ui_invite))},onClick={more=false;shareInvite(context,s.username.orEmpty())})
-                            DropdownMenuItem(text={Text(stringResource(R.string.ui_add_group))},onClick={more=false;group=true})
-                            DropdownMenuItem(text={Text(if(s.secured) uiResources.getString(R.string.ui_settings) else uiResources.getString(R.string.ui_settings_1))},onClick={more=false;profile=true})
+                    item {
+                        Row {
+                            ListActionRow(
+                                stringResource(R.string.group_row), Icons.Default.GroupAdd, Color(0xFF3498DB),
+                                Modifier.weight(1f),
+                            ) {
+                                focusManager.clearFocus()
+                                add = false
+                                name = ""
+                                addError = null
+                                group = true
+                            }
+                            ListActionRow(
+                                stringResource(R.string.ui_invite), Icons.Default.Share, Amethyst,
+                                Modifier.weight(1f),
+                            ) { shareInvite(context, s.username.orEmpty()) }
                         }
                     }
                 }
-                val cameraButton: @Composable ()->Unit = {
-                    FloatingActionButton(onClick=::toggleCamera,containerColor=MaterialTheme.colorScheme.surface.copy(alpha=.9f)) { Icon(if(cameraOn) Icons.Default.Close else Icons.Default.CameraAlt,if(cameraOn) uiResources.getString(R.string.ui_close_camera) else uiResources.getString(R.string.ui_camera)) }
-                }
-                if(s.leftHanded) cameraButton() else controls()
-                if(cameraOn) {
-                    TextButton(onClick={camera.zoom()},enabled=recording==null) { Text("${camera.zoom.toInt()}×") }
-                    IconButton(onClick={camera.flip();cameraVersion++},enabled=recording==null) { Icon(Icons.Default.Cameraswitch,uiResources.getString(R.string.ui_switch_camera)) }
-                } else Spacer(Modifier.weight(1f))
-                if(s.leftHanded) controls() else cameraButton()
             }
         }
+        if (!keyboardVisible) Column(
+            Modifier.align(Alignment.BottomCenter).fillMaxWidth().padding(horizontal = 16.dp),
+            horizontalAlignment = Alignment.CenterHorizontally,
+        ) {
+            val glassTint = Color.White.copy(alpha = 0.2f)
+            val prompt = when {
+                importingShares -> stringResource(R.string.preparing_shared_media)
+                sharing -> stringResource(R.string.share_selected_media)
+                hint && cameraOn && picked != null -> stringResource(R.string.ui_tap_a_name_to_send_this_photo)
+                hint && cameraOn -> stringResource(R.string.ui_tap_a_name_hold_for_video)
+                else -> null
+            }
+            if (prompt != null) {
+                Surface(shape = CircleShape, color = glassTint, contentColor = Color.White) {
+                    Box(Modifier.heightIn(min = 44.dp).padding(horizontal = 18.dp), contentAlignment = Alignment.Center) {
+                        Text(prompt, fontSize = 15.sp, fontWeight = FontWeight.SemiBold, textAlign = TextAlign.Center)
+                    }
+                }
+            }
+            Box(Modifier.fillMaxWidth().padding(vertical = 8.dp), contentAlignment = Alignment.Center) {
+                val controls: @Composable () -> Unit = {
+                    if (cameraOn) {
+                        FloatingActionButton(
+                            onClick = {
+                                if (recording == null) picker.launch(PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly))
+                            },
+                            shape = CircleShape,
+                            containerColor = glassTint,
+                            contentColor = Color.White,
+                            elevation = FloatingActionButtonDefaults.elevation(0.dp, 0.dp, 0.dp, 0.dp),
+                        ) {
+                            Icon(Icons.Default.PhotoLibrary, stringResource(R.string.ui_photo_library), Modifier.size(26.dp))
+                        }
+                    } else {
+                        FloatingActionButton(
+                            onClick = { profile = true },
+                            shape = CircleShape,
+                            containerColor = glassTint,
+                            contentColor = Color.White,
+                            elevation = FloatingActionButtonDefaults.elevation(0.dp, 0.dp, 0.dp, 0.dp),
+                            modifier = Modifier.clearAndSetSemantics {
+                                this.contentDescription = uiResources.getString(R.string.ui_settings)
+                                role = androidx.compose.ui.semantics.Role.Button
+                                onClick { profile = true; true }
+                            },
+                        ) {
+                            Row(horizontalArrangement = Arrangement.spacedBy((-5).dp)) {
+                                Text("Y", Modifier.alignByBaseline(), style = TextStyle(fontFamily = YoFont, fontSize = 29.sp))
+                                Text("o", Modifier.alignByBaseline(), style = TextStyle(fontFamily = YoFont, fontSize = 23.sp))
+                            }
+                        }
+                    }
+                }
+                val cameraButton: @Composable () -> Unit = {
+                    val clear = sharing || (cameraOn && picked != null)
+                    FloatingActionButton(
+                        onClick = {
+                            when {
+                                sharing -> model.cancelShares()
+                                clear -> picked = null
+                                else -> toggleCamera()
+                            }
+                        },
+                        shape = CircleShape,
+                        containerColor = glassTint,
+                        contentColor = Color.White,
+                        elevation = FloatingActionButtonDefaults.elevation(0.dp, 0.dp, 0.dp, 0.dp),
+                    ) {
+                        Icon(
+                            if (cameraOn || clear) Icons.Default.Close else Icons.Default.CameraAlt,
+                            stringResource(
+                                if (clear) R.string.clear_selection
+                                else if (cameraOn) R.string.ui_close_camera
+                                else R.string.ui_camera
+                            ),
+                            modifier = Modifier.size(26.dp),
+                        )
+                    }
+                }
+                val mirrored = s.leftHanded && !sharing
+                val gallerySide = if (mirrored) Alignment.CenterEnd else Alignment.CenterStart
+                val cameraSide = if (mirrored) Alignment.CenterStart else Alignment.CenterEnd
+                Box(Modifier.align(gallerySide)) { controls() }
+                if (cameraOn) {
+                    IconButton(
+                        onClick = { camera.zoom() }, enabled = recording == null,
+                        modifier = Modifier.size(44.dp),
+                        colors = IconButtonDefaults.iconButtonColors(containerColor = glassTint, contentColor = Color.White),
+                    ) { Text("${camera.zoom.toInt()}×", fontSize = 13.sp, fontWeight = FontWeight.Bold) }
+                }
+                Row(Modifier.align(cameraSide), horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    verticalAlignment = Alignment.CenterVertically) {
+                    if (mirrored) cameraButton()
+                    if (cameraOn) IconButton(
+                        onClick = { camera.flip(); cameraVersion++ }, enabled = recording == null,
+                        modifier = Modifier.size(56.dp),
+                        colors = IconButtonDefaults.iconButtonColors(containerColor = glassTint, contentColor = Color.White),
+                    ) {
+                        Icon(Icons.Default.Cameraswitch, stringResource(R.string.ui_switch_camera), Modifier.size(26.dp))
+                    }
+                    if (!mirrored) cameraButton()
+                }
+
+            }
+        }
+    }
     }
     if (profile) ProfileSheet(model, s, onClose = { profile = false }, onAddFriends = {
         profile = false
         add = true
-        scope.launch { listState.animateScrollToItem(visible.size) }
+        scope.launch { listState.animateScrollToItem(visible.size + if (showNotificationBar) 1 else 0) }
     })
     if(group) GroupSheet(model,s,onClose={group=false})
     menu?.let { friend -> FriendMenu(model,s,friend,onClose={menu=null}) }
@@ -549,18 +1002,82 @@ fun shareInvite(context: Context,name: String) {
     bitmap?.let { Image(it.asImageBitmap(),contentDescription=null,modifier=modifier,contentScale=ContentScale.Crop) }
 }
 
-@Composable private fun NameEntry(name: String,onChange: (String)->Unit,available: Boolean?) {
-    val uiResources=androidx.compose.ui.platform.LocalResources.current
+@Composable
+private fun OnboardingButton(label: String, enabled: Boolean, onClick: () -> Unit) {
+    Button(
+        onClick = onClick, enabled = enabled, shape = CircleShape,
+        modifier = Modifier.fillMaxWidth().heightIn(min = 52.dp),
+        colors = ButtonDefaults.buttonColors(
+            containerColor = Color.White, contentColor = Color.Black,
+            disabledContainerColor = Color.White.copy(alpha = 0.4f),
+            disabledContentColor = Color.Black.copy(alpha = 0.6f),
+        ),
+    ) {
+        Text(label, fontSize = 20.sp, fontWeight = FontWeight.SemiBold)
+    }
+}
 
-    val measure=androidx.compose.ui.text.rememberTextMeasurer()
-    val density=androidx.compose.ui.platform.LocalDensity.current
+@Composable
+private fun OnboardingNote(message: String?) {
+    if (message != null) Text(message, Modifier.padding(top = 8.dp), color = Color.White,
+        fontSize = 13.sp, lineHeight = 18.sp, fontWeight = FontWeight.SemiBold, textAlign = TextAlign.Center)
+}
+
+@Composable
+private fun RecoveryAction(
+    label: String,
+    icon: androidx.compose.ui.graphics.vector.ImageVector,
+    modifier: Modifier,
+    onClick: () -> Unit,
+) {
+    Button(onClick = onClick, modifier = modifier.heightIn(min = 48.dp), shape = CircleShape,
+        contentPadding = PaddingValues(horizontal = 10.dp, vertical = 8.dp),
+        colors = ButtonDefaults.buttonColors(containerColor = Color.White.copy(alpha = 0.2f), contentColor = Color.White)) {
+        Icon(icon, contentDescription = null, modifier = Modifier.size(18.dp))
+        Spacer(Modifier.width(6.dp))
+        Text(label, fontSize = 15.sp, fontWeight = FontWeight.SemiBold)
+    }
+}
+
+@Composable
+private fun NameEntry(name: String, onChange: (String) -> Unit, available: Boolean?, modifier: Modifier, onSubmit: () -> Unit) {
+    val placeholder = stringResource(R.string.signup_username)
+    val measure = rememberTextMeasurer()
+    val density = LocalDensity.current
     BoxWithConstraints(Modifier.fillMaxWidth()) {
-        val natural=measure.measure(androidx.compose.ui.text.AnnotatedString(name.ifEmpty { " " }),
-            style=TextStyle(fontFamily=YoFont,fontSize=34.sp),softWrap=false,maxLines=1).size.width
-        val room=with(density) { (maxWidth-80.dp).toPx() }.coerceAtLeast(1f)
-        val size=(34f*minOf(1f,room/natural.coerceAtLeast(1))).coerceAtLeast(8f).sp
-        OutlinedTextField(name,onChange,label={Text(stringResource(R.string.ui_name))},singleLine=true,
-            textStyle=TextStyle(fontFamily=YoFont,fontSize=size,textAlign=TextAlign.Center),
-            trailingIcon={available?.let { Icon(if(it) Icons.Default.CheckCircle else Icons.Default.Cancel,if(it) uiResources.getString(R.string.ui_available) else uiResources.getString(R.string.ui_taken),tint=if(it) Color.Green else Color.Red) }},modifier=Modifier.fillMaxWidth())
+        val style = TextStyle(fontFamily = YoFont, fontSize = 28.sp, color = Color.White, textAlign = TextAlign.Center)
+        val naturalWidth = measure.measure(name, style, maxLines = 1, softWrap = false).size.width.coerceAtLeast(1)
+        val room = with(density) { (maxWidth - 88.dp).coerceAtLeast(0.dp).toPx() }
+        val size = (28 * room / naturalWidth).coerceIn(8f, 28f).sp
+        BasicTextField(
+            value = name, onValueChange = onChange, singleLine = true,
+            modifier = modifier.fillMaxWidth().semantics { contentDescription = placeholder },
+            textStyle = style.copy(fontSize = size), cursorBrush = SolidColor(Color.White),
+            keyboardOptions = KeyboardOptions(autoCorrectEnabled = false, imeAction = ImeAction.Done),
+            keyboardActions = KeyboardActions(onDone = { onSubmit() }),
+            decorationBox = { field ->
+                Box(
+                    Modifier.fillMaxWidth().background(Color.White.copy(alpha = 0.16f), CircleShape)
+                        .padding(vertical = 14.dp),
+                    contentAlignment = Alignment.Center,
+                ) {
+                    Box(Modifier.fillMaxWidth().padding(horizontal = 44.dp).heightIn(min = 34.dp),
+                        contentAlignment = Alignment.Center) {
+                        if (name.isEmpty()) Text(placeholder, Modifier.fillMaxWidth(),
+                            style = style.copy(color = Color.White.copy(alpha = 0.45f)), maxLines = 1)
+                        field()
+                    }
+                    if (available != null) Box(
+                        Modifier.align(Alignment.CenterEnd).padding(end = 14.dp).size(24.dp)
+                            .background(if (available) Color(0xFF34C759) else Color(0xFFFF3B30), CircleShape),
+                        contentAlignment = Alignment.Center,
+                    ) {
+                        Icon(if (available) Icons.Default.Check else Icons.Default.Close,
+                            stringResource(if (available) R.string.ui_available else R.string.signup_name_unavailable),
+                            Modifier.size(17.dp), tint = Color.White)
+                    }
+                }
+            },
+        )
     }
 }

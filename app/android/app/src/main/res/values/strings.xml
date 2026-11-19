@@ -1,14 +1,13 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
     <string name="ui_account_key">Account Key</string>
-    <string name="ui_add_group">Add Group</string>
+    <string name="ui_add_group">New Group</string>
     <string name="ui_anyone_with_this_key_can_sign_in_as_you_keep_it_safe_and_don">Anyone with this key can sign in as you. Keep it safe and don’t share it.</string>
     <string name="ui_appearance">Appearance</string>
     <string name="ui_awesome">Awesome</string>
     <string name="ui_block">Block</string>
     <string name="ui_can_t_open_your_account">Can’t Open Your Account</string>
     <string name="ui_cancel">Cancel</string>
-    <string name="ui_cancel_share">Cancel Share</string>
     <string name="ui_confirm_new_key">Confirm New Key</string>
     <string name="ui_contact_us">Contact Us</string>
     <string name="ui_create_new_recovery_key">Create New Recovery Key</string>
@@ -25,7 +24,8 @@
     <string name="ui_label_64_characters">64 characters</string>
     <string name="ui_media">Media</string>
     <string name="ui_members">Members</string>
-    <string name="ui_members_up_to_19_friends">Members · Up to 19 friends</string>
+    <string name="group_member_limit">Members · %1$d of 20</string>
+    <string name="find_group_friends">Find Friends</string>
     <string name="ui_montserrat_sil_open_font_license_androidx_kotlin_jna_okhttp_">Montserrat: SIL Open Font License. AndroidX, Kotlin, JNA, OkHttp, ZXing: see bundled notices.</string>
     <string name="ui_name">Name</string>
     <string name="ui_no">No</string>
@@ -33,10 +33,7 @@
     <string name="ui_paste_type_or_scan_your_recovery_key">Paste, type, or scan your recovery key.</string>
     <string name="ui_remove">Remove</string>
     <string name="ui_rename">Rename</string>
-    <string name="ui_save_contacts">Save Contacts</string>
     <string name="ui_save_image">Save Image…</string>
-    <string name="ui_scan_from_photos">Scan from Photos</string>
-    <string name="ui_secure_your_account_1">Secure Your Account  •  1</string>
     <string name="ui_sign_in">Sign In</string>
     <string name="ui_sign_out">Sign Out</string>
     <string name="ui_sign_out_and_use_recovery_key">Sign Out and Use Recovery Key</string>
@@ -50,8 +47,6 @@
     <string name="ui_update_yo">Update Yo</string>
     <string name="ui_use_passkey">Use Passkey</string>
     <string name="ui_use_recovery_key">Use Recovery Key</string>
-    <string name="ui_use_your_passkey_or_recovery_key">Use your passkey or recovery key.</string>
-    <string name="ui_what_should_yo_do_better">What should Yo do better?</string>
     <string name="ui_yo_is_mit_licensed_this_app_includes_libsignal_licensed_unde">Yo is MIT licensed. This app includes libsignal, licensed under AGPL-3.0. Complete corresponding source: this repository, including the uncommitted Android changes for this development build.</string>
     <string name="ui_yo_team">Yo Team</string>
     <string name="ui_you_won_t_get_its_yos_any_more_a_member_can_add_you_again">You won’t get its Yos any more. A member can add you again.</string>
@@ -59,21 +54,17 @@
     <string name="ui_your_code">Your Code</string>
     <string name="ui_your_current_recovery_key_will_stop_working_after_the_new_on">Your current recovery key will stop working after the new one is saved.</string>
     <string name="ui_your_friends_can_t_reach_you_anymore">Your friends can’t reach you anymore.</string>
-    <string name="ui_your_name">Your Name</string>
     <string name="ui_available">Available</string>
-    <string name="ui_taken">Taken</string>
     <string name="ui_undo_send">Undo Send</string>
     <string name="ui_allow_camera_access_in_android_settings_to_send_photos">Allow camera access in Android Settings to send photos.</string>
     <string name="ui_couldn_t_take_photo">Couldn’t take photo</string>
     <string name="ui_canceled">Canceled</string>
     <string name="ui_couldn_t_record_video">Couldn’t record video</string>
     <string name="ui_add_friend">Add Friend</string>
-    <string name="ui_tap_a_name_hold_for_video">Tap a name · Hold for video</string>
+    <string name="ui_tap_a_name_hold_for_video">Tap or hold a name</string>
     <string name="ui_tap_a_name_to_send_this_photo">Tap a name to send this photo</string>
     <string name="ui_photo_library">Photo Library</string>
-    <string name="ui_more">More</string>
     <string name="ui_settings">Settings</string>
-    <string name="ui_settings_1">Settings (1)</string>
     <string name="ui_close_camera">Close Camera</string>
     <string name="ui_camera">Camera</string>
     <string name="ui_switch_camera">Switch Camera</string>
@@ -116,8 +107,6 @@
     <string name="ui_close">Close</string>
     <string name="ui_show_your_code">Show Your Code</string>
     <string name="ui_contacts">Contacts</string>
-    <string name="ui_your_encrypted_friend_list_and_contact_checks">Your encrypted friend list and contact checks.</string>
-    <string name="ui_off_only_your_friends_can_send_you_yos_anyone_else_is_turned_away">Off, only your friends can send you Yos. Anyone else is turned away.</string>
     <string name="ui_requests_from_strangers">Requests from Strangers</string>
     <string name="ui_blocked_friends_can_t_send_you_yos_tap_unblock_to_unblock">Blocked friends can’t send you Yos. Tap Unblock to unblock.</string>
     <string name="ui_saves_photos_and_videos_you_capture_to_your_photo_library_on_andr">Saves photos and videos you capture to your photo library. On Android 9, saving to the library is not available yet.</string>
@@ -141,8 +130,6 @@
     <string name="ui_anonymous_crash_reports_include_android_version_os_exit_reason_an">Anonymous crash reports include Android version, OS exit reason and sanitized code frames. No account, names, Yos or photos. Available on Android 11 and later.</string>
     <string name="ui_send_crashes">Send Crashes</string>
     <string name="ui_version">Version</string>
-    <string name="ui_goes_to_the_yo_team_not_end_to_end_encrypted">Goes to the Yo team, not end-to-end encrypted.</string>
-    <string name="ui_thanks">Thanks!</string>
     <string name="ui_send">Send</string>
     <string name="ui_hub_connected">Hub Connected</string>
     <string name="ui_hub_signed">Hub Signed</string>
@@ -155,7 +142,6 @@
     <string name="ui_account">Account</string>
     <string name="ui_blocked">Blocked</string>
     <string name="ui_crash_reports">Crash Reports</string>
-    <string name="ui_profile">Profile</string>
     <string name="ui_statistics">Statistics</string>
     <string name="ui_create">Create</string>
     <string name="ui_couldn_t_open_this_photo_or_video">Couldn’t open this photo or video.</string>
@@ -167,18 +153,11 @@
 <string name="saved_state_kept">%1$s\n\nYour saved state is kept until you choose to sign out.</string>
 <string name="invited_you">%1$s invited you</string>
 <string name="block_name">Block %1$s?</string>
-<string name="recovery_saved">Recovery Key · %1$s</string>
-<string name="secure_name">Set up recovery methods to access your account.</string>
 <string name="name_freed">“%1$s” becomes free for anyone.</string>
-<string name="type_to_confirm">Type “%1$s” to confirm.</string>
+<string name="type_to_confirm">Type %1$s to confirm.</string>
 <string name="compare_safety">Compare this safety number with %1$s in person or on a call.</string>
 <string name="part_of_total">%1$d of %2$d</string>
-<string name="blocked_count">Blocked · %1$d</string>
-<string name="contacts_count">Contacts · %1$d</string>
-<string name="statistics_count">Statistics · %1$d</string>
 <string name="saved">Saved</string>
-<string name="not_saved">Not Saved</string>
-<plurals name="shared_items"><item quantity="one">Tap a name to send %1$d shared item.</item><item quantity="other">Tap a name to send %1$d shared items.</item></plurals>
 <plurals name="media_items"><item quantity="one">%1$d photo or video</item><item quantity="other">%1$d photos or videos</item></plurals>
 <plurals name="undo_seconds"><item quantity="one">Wait %1$d Second</item><item quantity="other">Wait %1$d Seconds</item></plurals>
 <string name="sent_yo">Sent Yo!</string>
@@ -221,7 +200,6 @@
 <string name="leave_action">Leave</string>
 <string name="support_offline">Couldn’t refresh the conversation. Your messages are kept here.</string>
 <string name="retry">Retry</string>
-<string name="you">You</string>
 <string name="scan_qr">Scan QR Code</string>
 <string name="camera_unavailable">Camera unavailable. Try scanning from Photos.</string>
 <string name="camera_permission_needed">Allow camera access in Android Settings to scan a code.</string>
@@ -280,7 +258,6 @@
     <string name="account_recovery">Account Recovery</string>
     <string name="account_backup">Account Backup</string>
     <string name="account_backup_footer">Tap to back up your encrypted contacts and blocked list.</string>
-    <string name="google_password_manager">Google Password Manager</string>
     <string name="how_account_recovery_works">How Account Recovery Works</string>
     <string name="account_recovery_explanation">Save your Recovery Key somewhere safe. You can use it to sign in on a new phone. Account Backup saves your encrypted contacts and blocked list. Passkey recovery through Google Password Manager is currently unavailable.</string>
     <string name="compare_code">Compare Code</string>
@@ -300,4 +277,25 @@
     <string name="widget_choose">Choose friends and groups</string>
     <string name="yo_back_tile">Yo Back</string>
     <string name="passkey_prf_required">This passkey provider did not return a backup key. Use a provider that supports PRF or use your recovery key.</string>
+    <string name="ui_add_friends">Add Friends</string>
+    <string name="clear_selection">Clear Selection</string>
+    <string name="signup_username">Username</string>
+    <string name="signup_taken_yours">Name taken. Yours?&#160;</string>
+    <string name="signup_longer_name">Choose a longer name.</string>
+    <string name="signup_name_unavailable">Not available</string>
+    <string name="recovery_scan_short">Scan</string>
+    <string name="recovery_photos_short">Photos</string>
+    <string name="share_selected_media">Tap a name to send selected media</string>
+    <string name="settings_leaving">Leaving Yo for good?&#160;</string>
+    <string name="settings_delete_your_account">Delete Your Account</string>
+    <string name="settings_turn_off_passkey">Turn Off Passkey?</string>
+    <string name="settings_turn_off">Turn Off</string>
+    <string name="settings_no_crash_reports">No Crash Reports</string>
+    <string name="settings_delete_passkey_yourself">Delete the passkey yourself.</string>
+    <string name="support_empty_title">How can we help?</string>
+    <string name="support_empty_subtitle">Questions, ideas or problems: we read everything and answer here.</string>
+    <string name="support_privacy">Not end-to-end encrypted. Read by the Yo team.</string>
+    <string name="support_message">Message</string>
+    <string name="group_create_failure">The group could not be made. Try again in a moment.</string>
+    <string name="group_member_footer">You can add up to 19 friends, plus yourself.</string>
 </resources>

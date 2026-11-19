@@ -4,14 +4,16 @@ plugins {
 }
 // Firebase normally gets these resources from the Google Services plugin. Emit them only
 // when the local Firebase file is present, so CI and builds without Firebase use the same variant.
+val deviceSoak = providers.gradleProperty("yoDeviceSoak").map(String::toBoolean).getOrElse(false)
 val firebaseConfig = layout.projectDirectory.file("google-services.json")
-val firebaseJson = providers.fileContents(firebaseConfig).asText.orNull
+val firebaseJson = if (deviceSoak) null else providers.fileContents(firebaseConfig).asText.orNull
 android {
     namespace = "app.justyo.android"
     compileSdk = 37
     buildToolsVersion = "37.0.0"
     defaultConfig {
-        applicationId = "app.justyo.android.dev"
+        applicationId = if (deviceSoak) "app.justyo.android.dev.soak" else "app.justyo.android.dev"
+        manifestPlaceholders["yoAppLabel"] = if (deviceSoak) "Yo Device QA" else "Yo Dev"
         if (firebaseJson != null) {
             val data = groovy.json.JsonSlurper().parseText(firebaseJson) as Map<*, *>
             val project = data["project_info"] as Map<*, *>

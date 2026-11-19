@@ -15,6 +15,8 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.StrokeCap
+import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.res.stringResource
@@ -25,7 +27,8 @@ import kotlinx.coroutines.withContext
 
 @Composable internal fun OutgoingThumbnail(repo: Repository, previews: List<OutgoingPreview>, undo: UndoStack?, onUndo: () -> Unit) {
     val description = stringResource(if (undo != null) R.string.ui_undo_send else R.string.outgoing_photo)
-    Box(Modifier.size(48.dp).then(
+    val textUndo = undo != null && undo.kind == uniffi.yo.ListKind.YO
+    Box(Modifier.size(if (textUndo) 56.dp else 48.dp).then(
         if (undo != null) Modifier.clickable(interactionSource = null, indication = null, role = Role.Button,
             onClickLabel = description, onClick = onUndo) else Modifier
     ), contentAlignment = Alignment.Center) {
@@ -43,7 +46,7 @@ import kotlinx.coroutines.withContext
             }
         } }
         if (pictures.lastOrNull()?.video == true || undo?.video == true) Icon(Icons.Default.PlayArrow, description, tint = Color.White)
-        else if (pictures.isEmpty() && undo != null) Icon(Icons.AutoMirrored.Filled.Undo, description, tint = Color.White)
+        else if (pictures.isEmpty() && undo != null) Icon(Icons.AutoMirrored.Filled.Undo, description, Modifier.size(18.dp), tint = Color.White)
         if (undo != null) {
             val fraction = remember(undo) { mutableFloatStateOf(undo.fraction(SystemClock.elapsedRealtime())) }
             LaunchedEffect(undo) {
@@ -53,7 +56,15 @@ import kotlinx.coroutines.withContext
                     }
                 }
             }
-            Canvas(Modifier.align(Alignment.BottomCenter).width(44.dp).height(2.dp)) {
+            if (textUndo) Canvas(Modifier.matchParentSize()) {
+                val stroke = Stroke(3.dp.toPx(), cap = StrokeCap.Round)
+                val inset = stroke.width / 2
+                val diameter = size.width - stroke.width
+                drawCircle(Color.White.copy(alpha = 0.35f), radius = diameter / 2, style = stroke)
+                drawArc(Color.White, -90f, 360f * fraction.floatValue, useCenter = false,
+                    topLeft = androidx.compose.ui.geometry.Offset(inset, inset),
+                    size = Size(diameter, diameter), style = stroke)
+            } else Canvas(Modifier.align(Alignment.BottomCenter).width(44.dp).height(3.dp)) {
                 drawRect(Color.White, size = Size(size.width * fraction.floatValue, size.height))
             }
         }
