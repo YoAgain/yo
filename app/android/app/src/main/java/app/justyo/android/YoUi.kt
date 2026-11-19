@@ -569,6 +569,7 @@ private fun NotificationSettingsRow(onClick: () -> Unit) {
     var hint by remember { mutableStateOf(false) }
     var picked by remember { mutableStateOf<Uri?>(null) }
     var viewing by remember { mutableStateOf<List<Received>?>(null) }
+    val heldFinger = remember { HeldFinger() }
     var recording by remember { mutableStateOf<String?>(null) }
     val camera=remember { YoCamera(context) }
     val permissions=rememberLauncherForActivityResult(ActivityResultContracts.RequestMultiplePermissions()) { result ->
@@ -778,7 +779,12 @@ private fun NotificationSettingsRow(onClick: () -> Unit) {
                         rowShade(visible,index),cameraOn,s.leftHanded,
                         onPress={press(friend,it)},onTap={currentTap(friend)},onMenu={if(!tapLock.locked(friend.key)) menu=friend},
                         onUndo={if(touch(friend)) repo.command { cancelMedia(friend) }},
-                        onMedia={if(touch(friend)) viewing=repo.state.value.media.filter { it.target==friend.target }.takeIf { it.isNotEmpty() }},
+                        onMedia={heldFinger.point=null;if(touch(friend)) viewing=repo.state.value.media.filter { it.target==friend.target }.takeIf { it.isNotEmpty() }},
+                        onMediaTouch={ when(it) {
+                            is MediaTouch.Moved -> { heldFinger.barBottom=it.barBottom;heldFinger.point=it.point }
+                            MediaTouch.Tapped -> heldFinger.point=null
+                            MediaTouch.Released -> { heldFinger.point=null;viewing=null }
+                        } },
                         onDecline={if(touch(friend)) declined=friend},
                         onHold=if(cameraOn && picked==null && shares.isEmpty() && !friend.request) { held ->
                             if(held && touch(friend)) {
@@ -994,7 +1000,7 @@ private fun NotificationSettingsRow(onClick: () -> Unit) {
     declined?.let { friend -> YoSystemTheme { AlertDialog(onDismissRequest={declined=null;repo.command { answer(friend,false) }},title={Text(uiResources.getString(R.string.block_name ,friend.name))},
         confirmButton={TextButton(onClick={declined=null;repo.command { answer(friend,false,true) }}){Text(stringResource(R.string.ui_block))}},
         dismissButton={TextButton(onClick={declined=null;repo.command { answer(friend,false) }}){Text(stringResource(R.string.ui_no))}}) } }
-    viewing?.let { queue -> MediaViewer(repo,queue,onClose={viewing=null}) }
+    viewing?.let { queue -> MediaViewer(repo,queue,heldFinger,onClose={viewing=null}) }
 }
 
 fun shareInvite(context: Context,name: String) {

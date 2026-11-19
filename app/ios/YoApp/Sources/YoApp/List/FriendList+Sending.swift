@@ -416,10 +416,16 @@ extension FriendList {
 
   /// A finger on a bar's media sign plays them, oldest first: held, letting go closes them; a short tap lets them run.
   func see(_ friend: Friend, _ touch: ThumbnailTouch) {
+    if case let .moved(point, barBottom) = touch {  // the viewer alone follows it: not a tap on the list
+      heldFinger.barBottom = barBottom
+      heldFinger.point = point
+      return
+    }
     tapped(friend.key)
     switch touch {
     case .down:
       shown = []
+      heldFinger.point = nil
       // A group's as "LEO in FAMILY".
       viewing = inbox.media(for: friend)?.map {
         let user = Inbox.sender(of: $0)
@@ -428,13 +434,16 @@ extension FriendList {
         return Arrival(id: $0.id, from: from, photo: $0.photo, video: $0.video, file: $0.file, pending: $0.pending)
       }
     case .tapped:
-      break  // it runs on by itself
+      heldFinger.point = nil
     case .released:
       closeViewer()
+    case .moved:
+      break
     }
   }
 
   func closeViewer() {
+    heldFinger.point = nil
     viewing = nil
     inbox.seen(shown)
     shown = []

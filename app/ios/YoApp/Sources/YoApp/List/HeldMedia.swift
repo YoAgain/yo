@@ -4,12 +4,20 @@ import SwiftUI
 import UIKit
 import YoCore
 
+/// The finger holding a bar's media sign while its photos show, in screen points (nil once lifted).
+@MainActor @Observable final class HeldFinger {
+  var point: CGPoint?
+  var barBottom = 0.0
+}
+
 /// Photos and videos, as Stories: full screen, oldest first, a line for each at the top filling up; a photo
 /// `photoSeconds`, a video as long as it runs. A finger held pauses; a tap on the left third goes back, elsewhere on;
-/// swiped down it closes and the unseen rest goes as if viewed.
+/// swiped down it closes and the unseen rest goes as if viewed. The finger that opened them, drawn down out of its bar,
+/// zooms in around itself (`productHoldZoom`); moved, it pans; back at the bar or lifted, the picture springs back.
 struct HeldMedia: View {
   let queue: [Arrival]
   let photoSeconds: Double
+  let finger: HeldFinger
   let shows: (Arrival) -> Void
   let finished: () -> Void
   @State private var index = 0
@@ -27,6 +35,10 @@ struct HeldMedia: View {
   @State private var player: AVPlayer?
   /// The showing photo in full, read from its file (the list keeps only a small thumbnail).
   @State private var full: UIImage?
+  /// The screen's frame (the picture fills it) and the zoom the held finger asks for.
+  @State private var screen = CGRect.zero
+  @State private var zoom = ProductHoldZoom(scale: 1, x: 0, y: 0)
+  @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
   private struct Run: Equatable {
     let round: Int
@@ -35,10 +47,12 @@ struct HeldMedia: View {
   }
 
   init(
-    queue: [Arrival], photoSeconds: Double, shows: @escaping (Arrival) -> Void, finished: @escaping () -> Void
+    queue: [Arrival], photoSeconds: Double, finger: HeldFinger, shows: @escaping (Arrival) -> Void,
+    finished: @escaping () -> Void
   ) {
     self.queue = queue
     self.photoSeconds = photoSeconds
+    self.finger = finger
     self.shows = shows
     self.finished = finished
   }
@@ -68,9 +82,12 @@ struct HeldMedia: View {
                 }
                 .clipped()
             }
+            .scaleEffect(zoom.scale)
+            .offset(x: zoom.x, y: zoom.y)
           }
           .clipped()
           .ignoresSafeArea()
+          .onGeometryChange(for: CGRect.self) { $0.frame(in: .global) } action: { screen = $0 }
           .allowsHitTesting(false)
         if current.pending != nil {
           ProgressView().controlSize(.large).tint(.white)
@@ -145,6 +162,7 @@ struct HeldMedia: View {
     .onChange(of: held) { _, holding in
       if !holding && pulled != 0 { withAnimation(.snappy(duration: 0.25)) { pulled = 0 } }
     }
+    .onChange(of: finger.point) { _, point in follow(point) }
     .task(id: round) { await load() }
     // The one waited for is downloaded: shown from its start.
     .onChange(of: index < queue.count && queue[index].pending == nil) { _, ready in
@@ -177,6 +195,20 @@ struct HeldMedia: View {
         guard quick, abs(moved.width) < 20, abs(moved.height) < 20 else { return }
         go(to: drag.startLocation.x < width / 3 ? index - 1 : index + 1)
       }
+  }
+
+  /// The zoom follows the finger as it moves, a little softly; lifted or back at the bar, it springs back. A light
+  /// tick as it starts. Reduce Motion: no animation, the picture still zooms.
+  private func follow(_ point: CGPoint?) {
+    let next = point.map {
+      productHoldZoom(
+        fingerX: $0.x - screen.minX, fingerY: $0.y - screen.minY, barBottom: finger.barBottom - screen.minY,
+        width: screen.width, height: screen.height)
+    } ?? ProductHoldZoom(scale: 1, x: 0, y: 0)
+    if zoom.scale == 1 && next.scale > 1 { Haptic.tap(.light) }
+    let motion: Animation? = reduceMotion ? nil
+      : next.scale == 1 ? .spring(duration: 0.35, bounce: 0.3) : .interactiveSpring(duration: 0.18)
+    withAnimation(motion) { zoom = next }
   }
 
   /// Swiped away: the unseen rest goes too, as if viewed (view once). A light tap says they are gone.

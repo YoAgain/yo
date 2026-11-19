@@ -148,6 +148,8 @@ struct FriendList: View {
   }
 
   @State var viewing: [Arrival]?
+  /// The finger still holding the sign that opened `viewing`: read by the viewer alone, so the list is not redrawn.
+  @State var heldFinger = HeldFinger()
   @State var shown: [Arrival] = []
 
   /// Wakes the core at `listDeadline`; every deadline and lifetime belongs to the core.
@@ -346,7 +348,7 @@ struct FriendList: View {
         .overlay {
           ZStack {
           if let viewing {
-            HeldMedia(queue: viewing, photoSeconds: Self.photoSeconds) { arrival in
+            HeldMedia(queue: viewing, photoSeconds: Self.photoSeconds, finger: heldFinger) { arrival in
               guard !shown.contains(where: { $0.id == arrival.id }) else { return }  // stepped back to: once
               shown.append(arrival)
               inbox.viewed(arrival)
@@ -397,8 +399,8 @@ struct FriendList: View {
           }
           .onEnded { _ in pinchStart = nil },
         isEnabled: cameraOn)
-      // A finger recording a video may wander: the list stays put until it lifts.
-      .scrollDisabled(recordingFor != nil)
+      // A finger recording a video, or holding photos open, may wander: the list stays put until it lifts.
+      .scrollDisabled(recordingFor != nil || viewing != nil)
       .scrollIndicators(.hidden)
       .scrollBounceBehavior(.basedOnSize)
       .scrollDismissesKeyboard(.interactively)

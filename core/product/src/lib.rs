@@ -4,6 +4,7 @@ use unicode_segmentation::UnicodeSegmentation;
 
 pub mod list;
 pub mod status;
+pub mod zoom;
 
 pub const VIDEO_LIMIT_MS: u32 = 10_000;
 pub const VIDEO_LIMIT_BYTES: u32 = 9_000_000;

@@ -418,3 +418,17 @@ pub fn product_contact_mark(contact: Contact) -> Option<ContactMark> {
 pub fn product_contact_summary(contact: Contact, lang: Language) -> String {
     status::contact_summary(&contact, lang)
 }
+
+/// The held viewer's zoom (`yo_product::zoom`): scale around the center, then the offset.
+#[derive(uniffi::Record)]
+pub struct ProductHoldZoom {
+    pub scale: f64,
+    pub x: f64,
+    pub y: f64,
+}
+
+#[uniffi::export]
+pub fn product_hold_zoom(finger_x: f64, finger_y: f64, bar_bottom: f64, width: f64, height: f64) -> ProductHoldZoom {
+    let zoom = yo_product::zoom::hold_zoom(finger_x, finger_y, bar_bottom, width, height);
+    ProductHoldZoom { scale: zoom.scale, x: zoom.x, y: zoom.y }
+}

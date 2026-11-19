@@ -8,8 +8,10 @@ enum ListMotion {
 }
 
 /// A finger on a bar's photos: down (they show at once), then a short tap (they run on) or let go after holding.
+/// `moved`: where the held finger is (screen points) and the bar's lower edge; drawn below it, the picture zooms.
 enum ThumbnailTouch {
   case down, tapped, released
+  case moved(CGPoint, barBottom: Double)
 }
 
 /// A friend's bar, reading its own `Bars.Bar`, so a tap redraws this bar alone.
@@ -183,6 +185,8 @@ struct RowButton: View {
   @State private var holding = false
   @State private var viewing = false
   @State private var touchedAt = Date.distantPast
+  /// The sign's middle on the screen: the bar's lower edge is half a row below it.
+  @State private var signMiddle = 0.0
   @State private var recordingByAction = false
   @AppStorage(SettingKey.leftHanded) private var leftHanded = false
 
@@ -431,13 +435,16 @@ struct RowButton: View {
         .frame(width: Self.sign, height: Self.sign)
         .scaleEffect(viewing ? 0.88 : 1)
         .contentShape(.rect.inset(by: -10))  // easy to hit
+        .onGeometryChange(for: Double.self) { $0.frame(in: .global).midY } action: { signMiddle = $0 }
         .highPriorityGesture(
-          DragGesture(minimumDistance: 0)
-            .onChanged { _ in
+          DragGesture(minimumDistance: 0, coordinateSpace: .global)
+            .onChanged { drag in
               if !viewing {
                 viewing = true
                 touchedAt = .now
                 view(.down)
+              } else {
+                view(.moved(drag.location, barBottom: signMiddle + Metrics.rowHeight / 2))
               }
             }
             .onEnded { _ in

@@ -29,7 +29,10 @@ import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalResources
 import androidx.compose.ui.res.stringResource
+import androidx.compose.ui.layout.LayoutCoordinates
+import androidx.compose.ui.layout.onGloballyPositioned
 import androidx.compose.ui.semantics.Role
+import androidx.compose.ui.semantics.role
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.onClick
 import androidx.compose.ui.semantics.semantics
@@ -103,6 +106,7 @@ internal data class BarContent(
     repo: Repository, bar: BarContent, lines: Int, color: Color, camera: Boolean, left: Boolean,
     onPress: (Boolean) -> Unit, onTap: () -> Unit, onMenu: () -> Unit, onUndo: () -> Unit,
     onMedia: () -> Unit, onDecline: () -> Unit, onHold: ((Boolean) -> Unit)?,
+    onMediaTouch: (MediaTouch) -> Unit = {},
 ) {
     val friend = bar.friend
     val resources = LocalResources.current
@@ -111,6 +115,8 @@ internal data class BarContent(
     val currentPress by rememberUpdatedState(onPress)
     val currentTap by rememberUpdatedState(onTap)
     val currentHold by rememberUpdatedState(onHold)
+    val currentMedia by rememberUpdatedState(onMedia)
+    val currentMediaTouch by rememberUpdatedState(onMediaTouch)
     val gesture = if (onHold != null) Modifier.pointerInput(friend.key) {
         awaitEachGesture {
             val down = awaitFirstDown()
@@ -191,10 +197,43 @@ internal data class BarContent(
             receivedOpacity.animateTo(0f, tween((fadeDuration - elapsed).coerceAtLeast(0).toInt(), easing = LinearEasing))
         }
     }
+    // A finger on the sign shows the photos at once: a short tap lets them run, let go after holding closes them.
+    // Held and drawn down out of the bar, the picture zooms around the finger (MediaViewer).
     val mediaSign: @Composable () -> Unit = {
-        Box(Modifier.padding(end = if (left) 0.dp else 20.dp, start = if (left) 20.dp else 0.dp).width(40.dp).height(BarHeight).clickable(
-            interactionSource = null, indication = null, role = Role.Button, onClick = onMedia,
-        ).semantics { contentDescription = resources.getQuantityString(R.plurals.media_items, bar.media.size, bar.media.size) },
+        var signBox by remember { mutableStateOf<LayoutCoordinates?>(null) }
+        Box(Modifier.padding(end = if (left) 0.dp else 20.dp, start = if (left) 20.dp else 0.dp).width(40.dp).height(BarHeight)
+            .onGloballyPositioned { signBox = it }
+            .pointerInput(friend.key) {
+                awaitEachGesture {
+                    val down = awaitFirstDown()
+                    down.consume()
+                    currentMedia()
+                    var ended = false
+                    try {
+                        while (true) {
+                            val change = awaitPointerEvent().changes.firstOrNull { it.id == down.id } ?: break
+                            change.consume()  // the list does not scroll under a held finger
+                            if (!change.pressed) {
+                                ended = true
+                                currentMediaTouch(
+                                    if (change.uptimeMillis - down.uptimeMillis < 350) MediaTouch.Tapped else MediaTouch.Released)
+                                break
+                            }
+                            signBox?.takeIf { it.isAttached }?.let { box ->
+                                currentMediaTouch(MediaTouch.Moved(box.localToScreen(change.position),
+                                    box.localToScreen(Offset(0f, box.size.height.toFloat())).y))
+                            }
+                        }
+                    } finally {
+                        if (!ended) currentMediaTouch(MediaTouch.Tapped)  // taken away: they run on, unzoomed
+                    }
+                }
+            }
+            .semantics {
+                role = Role.Button
+                onClick { currentMedia(); true }
+                contentDescription = resources.getQuantityString(R.plurals.media_items, bar.media.size, bar.media.size)
+            },
             contentAlignment = Alignment.Center) {
             val sign = productMediaSign(if (bar.media.any { it.video }) ListKind.VIDEO else ListKind.PHOTO)
             Text(sign, style = TextStyle(fontSize = 26.sp), maxLines = 1)

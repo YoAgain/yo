@@ -1,6 +1,22 @@
 package app.justyo.android
 
+import android.animation.ValueAnimator
 import android.graphics.ImageDecoder
+import android.view.HapticFeedbackConstants
+import androidx.compose.animation.core.Animatable
+import androidx.compose.animation.core.Spring
+import androidx.compose.animation.core.spring
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.geometry.Rect
+import androidx.compose.ui.unit.toSize
+import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.layout.onGloballyPositioned
+import androidx.compose.ui.layout.positionOnScreen
+import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.unit.IntOffset
+import kotlinx.coroutines.flow.collectLatest
+import uniffi.yo.productHoldZoom
+import kotlin.math.roundToInt
 import android.media.MediaPlayer
 import java.nio.ByteBuffer
 import android.net.Uri
@@ -46,7 +62,22 @@ import kotlinx.coroutines.*
 import java.io.File
 import java.util.UUID
 
-@Composable fun MediaViewer(repo: Repository,queue: List<Received>,onClose: ()->Unit) {
+/** The finger holding a bar's media sign while its photos show, on the screen in px (null once lifted). */
+@Stable class HeldFinger {
+    var point by mutableStateOf<Offset?>(null)
+    var barBottom by mutableFloatStateOf(0f)
+}
+
+/** The finger on a bar's media sign after it went down (which opens them). */
+sealed interface MediaTouch {
+    data object Tapped : MediaTouch
+    data object Released : MediaTouch
+    data class Moved(val point: Offset, val barBottom: Float) : MediaTouch
+}
+
+/** Photos and videos, as Stories. The finger that opened them, drawn down out of its bar, zooms in around itself
+ *  (`productHoldZoom`); moved, it pans; back at the bar or lifted, the picture springs back. */
+@Composable fun MediaViewer(repo: Repository,queue: List<Received>,finger: HeldFinger = remember { HeldFinger() },onClose: ()->Unit) {
     val uiResources=androidx.compose.ui.platform.LocalResources.current
 
     val context=LocalContext.current
@@ -111,6 +142,37 @@ import java.util.UUID
         while(progress<1f) { delay(16);val now=android.os.SystemClock.elapsedRealtime();progress+=((now-last)/duration.toFloat());last=now }
         if (index == current) index++
     }
+    // The held finger's zoom: followed as it moves, sprung back once lifted or at the bar; a light tick as it starts.
+    // Animations off (Remove animations): no spring, the picture still zooms.
+    val hostView = LocalView.current
+    val density = LocalDensity.current.density
+    var screen by remember { mutableStateOf(Rect.Zero) }
+    val zoomScale = remember { Animatable(1f) }
+    val zoomX = remember { Animatable(0f) }
+    val zoomY = remember { Animatable(0f) }
+    LaunchedEffect(finger) {
+        snapshotFlow { finger.point }.collectLatest { point ->
+            val zoom = point?.takeIf { screen.width > 0f }?.let {
+                productHoldZoom(((it.x - screen.left) / density).toDouble(), ((it.y - screen.top) / density).toDouble(),
+                    ((finger.barBottom - screen.top) / density).toDouble(), (screen.width / density).toDouble(),
+                    (screen.height / density).toDouble())
+            }
+            val scale = zoom?.scale?.toFloat() ?: 1f
+            val x = (zoom?.x?.toFloat() ?: 0f) * density
+            val y = (zoom?.y?.toFloat() ?: 0f) * density
+            if (zoomScale.value == 1f && scale > 1f) hostView.performHapticFeedback(HapticFeedbackConstants.CLOCK_TICK)
+            if (scale == 1f && zoomScale.value != 1f && ValueAnimator.areAnimatorsEnabled()) coroutineScope {
+                val back = spring<Float>(dampingRatio = 0.6f, stiffness = Spring.StiffnessMediumLow)
+                launch { zoomX.animateTo(0f, back) }
+                launch { zoomY.animateTo(0f, back) }
+                zoomScale.animateTo(1f, back)
+            } else {
+                zoomScale.snapTo(scale)
+                zoomX.snapTo(x)
+                zoomY.snapTo(y)
+            }
+        }
+    }
     Dialog(onDismissRequest = { finish() }, properties = DialogProperties(
         usePlatformDefaultWidth = false, decorFitsSystemWindows = false, securePolicy = SecureFlagPolicy.SecureOn,
     )) {
@@ -126,7 +188,9 @@ import java.util.UUID
             onDispose { }
         }
         PredictiveBackHandler { events -> events.collect { }; finish() }
-        BoxWithConstraints(Modifier.fillMaxSize().clipToBounds().background(Color.Black).pointerInput(index) {
+        BoxWithConstraints(Modifier.fillMaxSize().clipToBounds().background(Color.Black)
+            .onGloballyPositioned { screen = Rect(it.positionOnScreen(), it.size.toSize()) }
+            .pointerInput(index) {
             awaitEachGesture {
                 val down = awaitFirstDown(requireUnconsumed = false)
                 held = true
@@ -141,8 +205,12 @@ import java.util.UUID
             }
         }, contentAlignment = Alignment.Center) {
             bitmap?.let {
-                Image(it.asImageBitmap(), uiResources.getString(R.string.ui_photo), Modifier.fillMaxSize(),
-                    contentScale = ContentScale.Crop)
+                Image(it.asImageBitmap(), uiResources.getString(R.string.ui_photo), Modifier.fillMaxSize().graphicsLayer {
+                    scaleX = zoomScale.value
+                    scaleY = zoomScale.value
+                    translationX = zoomX.value
+                    translationY = zoomY.value
+                }, contentScale = ContentScale.Crop)
             }
             video?.let { file -> key(file.path) {
                 val width = if (videoRatio > 0f) maxOf(maxWidth, maxHeight * videoRatio) else maxWidth
@@ -166,7 +234,9 @@ import java.util.UUID
                         true
                     }
                     setOnCompletionListener { if (index == current) index++ }
-                } }, modifier = Modifier.requiredSize(width, height))
+                } }, modifier = Modifier  // a SurfaceView: its surface ignores a layer's scale, so laid out bigger instead
+                    .offset { IntOffset(zoomX.value.roundToInt(), zoomY.value.roundToInt()) }
+                    .requiredSize(width * zoomScale.value, height * zoomScale.value))
             } }
             if (!ready) CircularProgressIndicator(color = Color.White)
             Column(Modifier.align(Alignment.TopCenter).fillMaxWidth()
