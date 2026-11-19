@@ -1,5 +1,5 @@
-// "Set Up Account Recovery" (spec 7): 1, save the recovery key through the share sheet (Copy on its card counts too);
-// 2, set up a passkey, then confirm it once for its PRF output. Done once either step is done.
+// "Account Recovery" (spec 7): two step cards, 1, save the recovery key through the share sheet (then Show reveals
+// it); 2, set up a passkey, then confirm it once for its PRF output. Done finishes once either step is done.
 import SwiftUI
 
 enum SecureStep { case passkey, recoveryKey }
@@ -19,6 +19,7 @@ struct SecureNameSheet: View {
   @State private var showingKey = false
   @State private var copiedKey = false
   @State private var problem: String?
+  @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
   private var secured: Bool { accounts.account?.secured == true }
   private var passkeyDone: Bool {
@@ -30,58 +31,83 @@ struct SecureNameSheet: View {
   var body: some View {
     ZStack {
       Color.amethyst.ignoresSafeArea()
-      GuidePage(symbol: "key.fill", title: "Set Up\nAccount Recovery") {
-        StepCaption(number: 1)
-        StepButton(
-          "Save Recovery Key", systemImage: "square.and.arrow.up", doneTitle: "Recovery Key Saved",
-          done: wordsDone, busy: busy == .recoveryKey
-        ) { Task { await share() } }
-        .disabled(busy != nil)
-        Button {
-          if showingKey { showingKey = false } else { Task { await showKey() } }
-        } label: {
-          Label(showingKey ? "Hide Recovery Key" : "Show Recovery Key", systemImage: showingKey ? "eye.slash" : "eye")
+      ScrollView {
+        VStack(spacing: 0) {
+          Image(systemName: "key.fill")
+            .font(.system(size: 64))
+            .accessibilityHidden(true)
+          Text("Account Recovery")
+            .font(.yo(30))
+            .lineLimit(1)
+            .minimumScaleFactor(0.6)
+            .accessibilityAddTraits(.isHeader)
+            .padding(.top, 14)
+          Text("Either one brings your account back on a new phone.")
             .font(.subheadline.weight(.semibold))
-            .contentTransition(.symbolEffect(.replace))
-            .frame(minHeight: 36)
-            .contentShape(.rect)
-        }
-        .buttonStyle(.plain)
-        .opacity(0.85)
-        .disabled(busy != nil)
-        if showingKey {
-          KeyCard(key: words, copied: copiedKey) {
-            UIPasteboard.general.string = RecoveryCode.shown(words)
-            copiedKey = true
-            Task { await markSaved() }
+            .multilineTextAlignment(.center)
+            .opacity(0.85)
+            .padding(.top, 6)
+          VStack(spacing: 10) {
+            StepCard(
+              number: 1, title: "Recovery Key", done: wordsDone, busy: busy == .recoveryKey,
+              actionTitle: wordsDone ? nil : "Save", doneTitle: "Saved",
+              action: { Task { await share() } }
+            ) {
+              if wordsDone {
+                HStack(spacing: 4) {
+                  Text("Saved ·")
+                  Button(showingKey ? "Hide" : "Show") {
+                    if showingKey { showingKey = false } else { Task { await showKey() } }
+                  }
+                  .buttonStyle(.plain)
+                  .underline()
+                  .accessibilityLabel(showingKey ? "Hide Recovery Key" : "Show Recovery Key")
+                }
+              } else {
+                Text("Save it somewhere safe")
+              }
+            }
+            if showingKey {
+              KeyCard(key: words, copied: copiedKey) {
+                UIPasteboard.general.string = RecoveryCode.shown(words)
+                copiedKey = true
+              }
+              .transition(.opacity.combined(with: .move(edge: .top)))
+            }
+            StepCard(
+              number: 2, title: "Passkey", done: passkeyDone, busy: busy == .passkey,
+              actionTitle: passkeyDone ? nil : created ? "Confirm" : "Set Up", doneTitle: "Done",
+              action: { Task { created ? await checkPasskey() : await createPasskey() } }
+            ) {
+              Text(created && !passkeyDone ? "Confirm it once with Face ID" : "Face ID, synced in iCloud")
+            }
           }
-          .transition(.opacity.combined(with: .move(edge: .top)))
+          .disabled(busy != nil)
+          .padding(.top, 28)
+          Note(problem)
+            .padding(.top, 8)
+          PrimaryButton("Done") { finish() }
+            .disabled(busy != nil)
+            .padding(.top, 28)
         }
-        StepCaption(number: 2)
-          .padding(.top, 12)
-        StepButton(
-          created ? "Confirm Passkey" : "Set Up Passkey", systemImage: "faceid", doneTitle: "Passkey Set Up",
-          done: passkeyDone, busy: busy == .passkey
-        ) { Task { created ? await checkPasskey() : await createPasskey() } }
-        .disabled(busy != nil)
-        Note(problem)
-          .padding(.top, 4)
-      } bottom: {
-        PrimaryButton("Done") { finish() }
-          .disabled(!canFinish || busy != nil)
+        .padding(.horizontal, 24)
+        .padding(.vertical, 56)
       }
+      .scrollBounceBehavior(.basedOnSize)
+      .scrollIndicators(.hidden)
+      .defaultScrollAnchor(.center, for: .alignment)
     }
     .overlay(alignment: .topTrailing) { SheetClose(action: close).disabled(busy != nil) }
-    .animation(.smooth(duration: 0.3), value: wordsDone)
-    .animation(.smooth(duration: 0.3), value: passkeyDone)
-    .animation(.smooth(duration: 0.3), value: created)
+    .animation(reduceMotion ? nil : .smooth(duration: 0.3), value: wordsDone)
+    .animation(reduceMotion ? nil : .smooth(duration: 0.3), value: passkeyDone)
+    .animation(reduceMotion ? nil : .smooth(duration: 0.3), value: created)
+    .animation(reduceMotion ? nil : .smooth(duration: 0.25), value: showingKey)
     .foregroundStyle(.white)
     // Its own full-height sheet over the settings, whatever height they keep.
     .presentationDetents([.large])
     .presentationDragIndicator(.hidden)
     .preferredColorScheme(.dark)
     .interactiveDismissDisabled(busy != nil)
-    .animation(.smooth(duration: 0.25), value: showingKey)
     .onAppear {
       guard !initialized else { return }
       initialized = true
@@ -97,8 +123,12 @@ struct SecureNameSheet: View {
     return " (\(e.domain) \(e.code): \(e.localizedDescription))"
   }
 
-  /// The passkey not set up is a choice, so it is not asked for again.
+  /// The passkey not set up is a choice, so it is not asked for again. Nothing done yet: Done only closes.
   private func finish() {
+    guard canFinish else {
+      if let close { close() } else { dismiss() }
+      return
+    }
     if !passkeyDone { accounts.declinePasskey() }
     done?()
     if let close { close() } else { dismiss() }
@@ -180,103 +210,75 @@ struct SecureNameSheet: View {
   }
 }
 
-/// A large symbol above the title, the steps scrolling when large text needs the room, the buttons at the bottom.
-private struct GuidePage<Content: View, Bottom: View>: View {
-  let symbol: String
-  let title: String
-  @ViewBuilder let content: Content
-  @ViewBuilder let bottom: Bottom
-
-  var body: some View {
-    VStack(spacing: 0) {
-      Color.clear.frame(height: 44)
-      ScrollView {
-        VStack(spacing: 20) {
-          Image(systemName: symbol)
-            .font(.system(size: 96))
-            .accessibilityHidden(true)
-          Text(title).font(.yo(30)).multilineTextAlignment(.center)
-        }
-        .padding(.top, 8)
-        VStack(spacing: 8) { content }
-          .padding(.top, 28)
-          .padding(.bottom, 16)
-      }
-      .scrollBounceBehavior(.basedOnSize)
-      .scrollIndicators(.hidden)
-      VStack(spacing: 18) { bottom }
-    }
-    .padding(.horizontal, 24)
-    .padding(.bottom, 16)
-  }
-}
-
-private struct StepCaption: View {
+/// One step: its number (a green check once done), name and a short line, its button on the right.
+private struct StepCard<Detail: View>: View {
   let number: Int
-
-  var body: some View {
-    Text("Step \(number)")
-      .textCase(.uppercase)
-      .font(.caption.weight(.semibold))
-      .opacity(0.75)
-      .frame(maxWidth: .infinity, alignment: .center)
-  }
-}
-
-private struct StepButton: View {
   let title: String
-  let systemImage: String
-  let doneTitle: String
   let done: Bool
   let busy: Bool
+  /// The button's title while the step is open, nil once done.
+  let actionTitle: String?
+  let doneTitle: String
   let action: () -> Void
+  @ViewBuilder let detail: Detail
 
-  init(
-    _ title: String, systemImage: String, doneTitle: String, done: Bool, busy: Bool,
-    action: @escaping () -> Void
-  ) {
-    self.title = title
-    self.systemImage = systemImage
-    self.doneTitle = doneTitle
-    self.done = done
-    self.busy = busy
-    self.action = action
-  }
+  @Environment(\.dynamicTypeSize) private var typeSize
+  @ScaledMetric(relativeTo: .headline) private var circle: CGFloat = 30
 
   var body: some View {
-    Group {
-      if done {
-        Label {
-          Text(doneTitle)
-        } icon: {
-          Image(systemName: "checkmark.circle.fill")
-            .symbolRenderingMode(.palette)
-            .foregroundStyle(.white, .green)
-        }
-        .font(.system(.title3, weight: .semibold))
-        .frame(maxWidth: .infinity, minHeight: 48)
-        .background(.white.opacity(0.14), in: .capsule)
-        .accessibilityElement(children: .combine)
-        .transition(.opacity)
-      } else {
-        Button(action: action) {
+    let layout = typeSize.isAccessibilitySize
+      ? AnyLayout(VStackLayout(alignment: .leading, spacing: 12))
+      : AnyLayout(HStackLayout(spacing: 12))
+    layout {
+      HStack(spacing: 12) {
+        ZStack {
+          Circle().fill(done ? Color.green : .white)
           Group {
-            if busy {
-              ProgressView().tint(.black)
+            if done {
+              Image(systemName: "checkmark").fontWeight(.heavy).foregroundStyle(.white)
             } else {
-              Label(title, systemImage: systemImage)
-                .contentTransition(.interpolate)
+              Text("\(number)").font(.yo(15, relativeTo: .headline)).foregroundStyle(Color.amethyst)
             }
           }
-          .font(.system(.title3, weight: .semibold))
-          .frame(maxWidth: .infinity, minHeight: 40)
+          .transition(.scale.combined(with: .opacity))
         }
-        .buttonStyle(.glassProminent)  // matches Done below
-        .tint(.white)
-        .foregroundStyle(.black)
-        .transition(.opacity)
+        .frame(width: circle, height: circle)
+        .accessibilityHidden(true)
+        VStack(alignment: .leading, spacing: 2) {
+          Text(title).font(.headline)
+            .accessibilityLabel("Step \(number), \(title)\(done ? ", done" : "")")
+          detail.font(.footnote.weight(.medium)).opacity(0.85)
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
       }
+      Group {
+        if let actionTitle {
+          Button(action: action) {
+            Group {
+              if busy { ProgressView().tint(.black) } else { Text(actionTitle) }
+            }
+            .font(.subheadline.weight(.bold))
+            .padding(.horizontal, 4)
+            .frame(minHeight: 28)
+          }
+          .buttonStyle(.glassProminent)
+          .tint(.white)
+          .foregroundStyle(.black)
+          .accessibilityLabel("\(actionTitle) \(title)")
+        } else {
+          Text(doneTitle)
+            .font(.subheadline.weight(.bold))
+            .padding(.horizontal, 16)
+            .frame(minHeight: 34)
+            .overlay { Capsule().strokeBorder(.white.opacity(0.6), lineWidth: 1.5) }
+            .accessibilityHidden(true)
+        }
+      }
+      .fixedSize()
+      .transition(.opacity)
     }
+    .padding(14)
+    .background(.white.opacity(0.14), in: .rect(cornerRadius: 20))
     .sensoryFeedback(.success, trigger: done) { _, now in now }
   }
 }
