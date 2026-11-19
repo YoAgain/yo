@@ -467,10 +467,10 @@ if (document.body.classList.contains("login")) {
     // Accounts' hover: DAU/MAU (users seen today of those seen in 30 days) and the accounts deleted in the range.
     const gone = sums(["account-gone"]).reduce((a, [n]) => a + n, 0);
     const dau = h.active_day ?? 0, mau = h.active_month ?? 0, stick = mau ? (100 * dau) / mau : null;
-    areaSub.uc = [["DAU / MAU", `${pctText(stick)} (${num(dau)} of ${num(mau)})`], [`Deleted in ${span}`, num(gone)]];
+    areaSub.uc = [["DAU / MAU", `${pctText(stick)}`, stick == null ? null : stick / 100], [`Deleted, ${span}`, num(gone), null]];
     // Yos' hover: retention, of the accounts made 1 (7, 30) to 90 days ago those seen that many days after signing up.
     const rt = h.retention || {};
-    areaSub.yc = ["d1", "d7", "d30"].map((k) => [`Retention ${k.toUpperCase()}`, rt[k]?.[1] ? pctText((100 * rt[k][0]) / rt[k][1]) : "–"]);
+    areaSub.yc = ["d1", "d7", "d30"].map((k) => [`Retention ${k.toUpperCase()}`, rt[k]?.[1] ? pctText((100 * rt[k][0]) / rt[k][1]) : "–", rt[k]?.[1] ? rt[k][0] / rt[k][1] : null]);
     // Problems' hover: crash-free users, the last 7 days' crash reports against the users seen in them (a crash one user).
     const crashes = (h.diagnostic_days || []).filter((r) => r.kind === "crash" && r.day > today0() - 7).reduce((n, r) => n + r.count, 0);
     const wau = h.active_users ?? 0, free = wau ? Math.max(0, 100 - (100 * crashes) / wau) : null;
@@ -544,9 +544,11 @@ if (document.body.classList.contains("login")) {
       // The same hover card as the rows (Platforms): the point's time, its values, and the chart's own line.
       const head = el("div", "hc-head");
       head.append(el("b", null, d.labels[i]), el("span", "hc-val", ""));
-      const rows = [[d.word ? d.word[0].toUpperCase() + d.word.slice(1) : "", num(d.values[i])]];
-      if (j >= 0) rows.push([o.word ? o.word[0].toUpperCase() + o.word.slice(1) : "", `${num(o.values[j])}${pct}`]);
-      hc.replaceChildren(head, kvRows([...rows, ...(areaSub[key] || [])]));
+      // Rows like Platforms: a label, a bar of its share (where it has one), its value.
+      const cap = (w) => (w ? w[0].toUpperCase() + w.slice(1) : "");
+      const rows = [[cap(d.word), num(d.values[i]), 1]];
+      if (j >= 0) rows.push([cap(o.word), `${num(o.values[j])}${pct}`, d.values[i] ? Math.min(1, o.values[j] / Math.max(...[d.values[i], o.values[j]])) : 0]);
+      hc.replaceChildren(head, barRows([...rows, ...(areaSub[key] || [])]));
       hc.hidden = false;
       const w = hc.offsetWidth, h = hc.offsetHeight;
       hc.style.left = `${Math.round(Math.min(Math.max(8, e.clientX + 14), innerWidth - w - 8))}px`;
@@ -1386,6 +1388,17 @@ if (document.body.classList.contains("login")) {
     s.onpointerleave = () => { bars.forEach((b) => b.classList.remove("on")); say(n - 1); };
     say(n - 1);
     return s;
+  };
+  // Hover rows with a bar: [label, value, share 0–1 or null for no bar].
+  const barRows = (rows) => {
+    const box = el("div", "hc-plats");
+    for (const [l, v, f] of rows) {
+      const row = el("div", "hc-plat"), bar = el("span", "hc-pbar");
+      if (f != null) { const x = el("span", "current"); x.style.width = `${Math.max(0, Math.min(1, f)) * 100}%`; bar.append(x); } else bar.classList.add("none");
+      row.append(el("b", null, l), bar, el("span", "hc-pn", v));
+      box.append(row);
+    }
+    return box;
   };
   const kvRows = (rows) => {
     const dl = el("dl", "hc-kv");
