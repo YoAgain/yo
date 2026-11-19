@@ -129,9 +129,28 @@ class YoCamera(private val context: Context) {
             })
         }
     }
+    private val main = Handler(Looper.getMainLooper())
+    private var waiting: Pair<Runnable, (Uri?) -> Unit>? = null
     fun startVideo(done: (Uri?) -> Unit) {
-        if(recording!=null) return
-        val capture=video ?: return done(null)
+        if(recording!=null || waiting!=null) return
+        val capture=video
+        if(capture==null) {
+            // Held right after the camera opened: the recorder is still being bound (over a second on a first open).
+            // Wait for it while the finger stays, instead of "Couldn't record video" at once.
+            val until=android.os.SystemClock.uptimeMillis()+3000
+            val retry=object : Runnable {
+                override fun run() {
+                    when {
+                        video!=null -> { waiting=null; startVideo(done) }
+                        android.os.SystemClock.uptimeMillis()<until -> main.postDelayed(this,50)
+                        else -> { waiting=null; done(null) }
+                    }
+                }
+            }
+            waiting=retry to done
+            main.post(retry)
+            return
+        }
         capture.targetRotation = physicalRotation ?: previewView?.display?.rotation ?: capture.targetRotation
         val file=File(context.cacheDir,"capture-${UUID.randomUUID()}.mp4")
         val options=FileOutputOptions.Builder(file).setDurationLimitMillis(VideoLimitMs).build()
@@ -146,9 +165,11 @@ class YoCamera(private val context: Context) {
             }
         }
     }
-    fun stopVideo() { recording?.stop() }
+    fun stopVideo() { cancelWaiting(); recording?.stop() }
+    private fun cancelWaiting() { waiting?.let { (retry, done) -> waiting=null; main.removeCallbacks(retry); done(null) } }
     fun close() {
         binding++
+        cancelWaiting()
         recording?.close()
         provider?.unbindAll()
         orientation.disable()

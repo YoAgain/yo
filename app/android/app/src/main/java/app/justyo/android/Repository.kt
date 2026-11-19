@@ -98,6 +98,8 @@ class Repository(private val context: Context, ownerScope: CoroutineScope) {
     @Volatile private var foreground = false
     private val syncing = Mutex()
     private var listening: Job? = null
+    /** A network came (back): the listener stops waiting out its backoff (up to 30 s) and the queues retry at once. */
+    private val online = kotlinx.coroutines.channels.Channel<Unit>(kotlinx.coroutines.channels.Channel.CONFLATED)
     private var retrying: Job? = null
     private var resuming: Job? = null
     val media = MediaQueue(context,vault, scope, { client }, { sessionId }, { source, events -> absorb(events, source) }, { refreshMedia() }).also { queue ->
@@ -107,6 +109,17 @@ class Repository(private val context: Context, ownerScope: CoroutineScope) {
                 if (last) showSent(it)
                 recordStat(it, true)
             }
+        }
+    }
+    init {
+        runCatching {
+            context.getSystemService(android.net.ConnectivityManager::class.java)
+                .registerDefaultNetworkCallback(object : android.net.ConnectivityManager.NetworkCallback() {
+                    override fun onAvailable(network: android.net.Network) {
+                        online.trySend(Unit)
+                        if (foreground && client != null) media.wake()
+                    }
+                })
         }
     }
     private val soundPlayers = mutableSetOf<MediaPlayer>()
@@ -466,7 +479,7 @@ class Repository(private val context: Context, ownerScope: CoroutineScope) {
                     refresh(); media.wake(); pause = 1000
                 } catch (e: CancellationException) { throw e }
                 catch (e: YoException.Replaced) { signOut(replaced = true); break }
-                catch (_: Exception) { delay(pause); pause = (pause * 2).coerceAtMost(30000) }
+                catch (_: Exception) { withTimeoutOrNull(pause) { online.receive() }; pause = (pause * 2).coerceAtMost(30000) }
             }
         }
     }
@@ -542,8 +555,14 @@ class Repository(private val context: Context, ownerScope: CoroutineScope) {
     private suspend fun consumeInvite() {
         if (client == null) return
         val name = state.value.pendingInvite ?: return
-        if (usernameSkeleton(name) != usernameSkeleton(state.value.username ?: "")) add(name)
+        // Taken once, whatever the answer: a name not on Yo says so and never comes back at the next start
+        // (where it failed the start: "Can't Open Your Account"), at sign-up or sign-in.
         mutable.update { it.copy(pendingInvite = null) }; changes.withLock { persist() }
+        if (usernameSkeleton(name) == usernameSkeleton(state.value.username ?: "")) return
+        try { add(name) } catch (e: CancellationException) { throw e } catch (e: Exception) {
+            if (e is YoException.Replaced) throw e
+            mutable.update { it.copy(error = friendlyError(context, e)) }
+        }
     }
     suspend fun send(friend: Friend) {
         val c = client ?: return

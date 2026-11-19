@@ -12,7 +12,9 @@ class HubTransport(private val unsupported: () -> Unit) : HttpTransport {
     // Separate pools: anonymous deliveries must carry no connection history from identified requests.
     private val signed = plain()
     private val anonymous = plain()
-    private fun plain() = OkHttpClient.Builder().callTimeout(70, TimeUnit.SECONDS)
+    // The hub holds a sync up to 25 s without a byte: OkHttp's default 10-s read timeout cut every one of them, so the
+    // listener only backed off (up to 30 s between tries) and Status said "Waiting". The call timeout bounds it instead.
+    private fun plain() = OkHttpClient.Builder().callTimeout(70, TimeUnit.SECONDS).readTimeout(60, TimeUnit.SECONDS)
         .connectTimeout(15, TimeUnit.SECONDS).followRedirects(false).followSslRedirects(false).build()
     override fun request(method: String, path: String, headers: List<Header>, body: ByteArray): HttpResult {
         if (stopped.get()) return HttpResult(426u, byteArrayOf(), null)

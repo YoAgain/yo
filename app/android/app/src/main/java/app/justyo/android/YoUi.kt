@@ -577,7 +577,9 @@ private fun NotificationSettingsRow(onClick: () -> Unit) {
         if(!cameraOn) model.error(uiResources.getString(R.string.ui_allow_camera_access_in_android_settings_to_send_photos))
     }
     val picker=rememberLauncherForActivityResult(ActivityResultContracts.PickVisualMedia()) { picked=it; hintEpoch++ }
-    DisposableEffect(cameraOn) { onDispose { if(cameraOn) camera.close() } }
+    // The value this effect ran with: read in onDispose, the state is already the new one, and opening the camera
+    // closed it again at once (the binding was dropped: a black preview, "Couldn't record video", until a flip).
+    DisposableEffect(cameraOn) { val wasOn = cameraOn; onDispose { if(wasOn) camera.close() } }
     LaunchedEffect(cameraOn,hintEpoch,picked) { hint=false; if(cameraOn) { delay(3000); hint=true } }
     LaunchedEffect(cameraOn) { repo.camera(cameraOn) }
     val stacks by repo.media.undo.collectAsStateWithLifecycle()
