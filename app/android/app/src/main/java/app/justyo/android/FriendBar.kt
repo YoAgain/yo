@@ -301,6 +301,8 @@ internal data class BarContent(
                 startInset = if (left) primarySignInset else outgoingInset,
                 endInset = if (left) outgoingInset else primarySignInset,
                 modifier = receivedModifier,
+                // A request's line ("Yo Request: #FAMILIE") is shown whole, at the small size where it must be.
+                whole = friend.request && !primaryReceived,
             )
             if (showUndo || thumbnails.isNotEmpty()) Box(Modifier.align(start).padding(horizontal = 20.dp)) {
                 OutgoingThumbnail(repo, thumbnails, bar.undo, onUndo)
@@ -396,10 +398,11 @@ private fun BarWords(
     modifier: Modifier = Modifier,
     startInset: Int = 20,
     endInset: Int = 20,
+    whole: Boolean = false,
 ) {
     val measurer = rememberTextMeasurer()
     val density = LocalDensity.current
-    val style = BarStyle
+    var style = BarStyle
     // The widest digit, measured once per density/font scale (ten measurements; the measurer's cache holds eight).
     val slot = remember(measurer, density) {
         ('0'..'9').maxOf { measurer.measure(it.toString(), style, maxLines = 1, softWrap = false).size.width }
@@ -410,6 +413,10 @@ private fun BarWords(
         // As iOS's BarRow: the room between both sides, the line in the middle or moved aside as little as it takes
         // (a thumbnail or sign on one side must not cut "Sending Yo!" to "Sending Y…").
         val available = (maxWidth - start - end).coerceAtLeast(0.dp)
+        // Never cut when whole: too wide at the bar's size, the small size instead (as iOS).
+        if (whole && candidates.none {
+                with(density) { measurer.measure(it, style, maxLines = 1, softWrap = false).size.width.toDp() } <= available
+            }) style = style.copy(fontSize = BarSmallFont)
         fun width(value: String) = measurer.measure(value, style, maxLines = 1, softWrap = false).size.width
         fun parts(value: String): Triple<String, String, String> {
             val count = CountDigits.find(value) ?: return Triple(value, "", "")
