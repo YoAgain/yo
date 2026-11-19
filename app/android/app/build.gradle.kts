@@ -34,7 +34,7 @@ android {
         minSdk = 28
         targetSdk = 37
         versionCode = 1
-        versionName = "0.1-dev"
+        versionName = providers.gradleProperty("yoVersionName").getOrElse("0.1-dev")  // the release tag, from CI
         ndk { abiFilters += listOf("arm64-v8a", "x86_64") }
         buildConfigField("String", "HUB", "\"https://dev.justyo.app\"")
         buildConfigField("String", "YO_APP", "\"android/202611160001\"")

@@ -132,6 +132,8 @@ DB: the local database, sealed per column.
 ![Lines of code: per day, by part and by app](dev/loc-chart.png)
 <!-- /loc -->
 
+Release: `gh release create v1.0.0-RC --prerelease --generate-notes` (or GitHub → Releases → Draft a new release); the tag sets the version.
+
 - [app](app)
   - [ios](app/ios): the iPhone app ([YoApp](app/ios/YoApp)), its extensions and [build tools](app/ios/dev)
   - [android](https://github.com/YoAgain/yo/tree/android/app/android): the Android app, on the `android` branch

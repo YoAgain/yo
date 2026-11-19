@@ -219,6 +219,19 @@ jobs:
       - name: Licenses
         run: app/ios/dev/licenses.sh
 
+      # The release tag is the version: v1.0.0-RC makes CFBundleShortVersionString 1.0.0 (App Store versions are
+      # numbers only, the suffix stays with the tag; ship.sh copies the app's version into the extensions). Builds of
+      # main keep Info.plist's. The build number stays ship.sh's (UTC yyyymmddHHMM).
+      - name: Version from the release tag
+        if: github.event_name == 'release'
+        env:
+          TAG: ${{ github.event.release.tag_name }}
+        run: |
+          [[ "$TAG" =~ ^v([0-9]+\.[0-9]+\.[0-9]+)(-[0-9A-Za-z.]+)?$ ]] \
+            || { echo "::error::release tag '$TAG' is not v<x.y.z> or v<x.y.z>-<suffix> (v1.0.0, v1.0.0-RC)"; exit 1; }
+          plutil -replace CFBundleShortVersionString -string "${BASH_REMATCH[1]}" app/ios/YoApp/Info.plist
+          echo "version ${BASH_REMATCH[1]} from $TAG"
+
       # Built, signed and validated here; uploaded after the checks below (ship.sh step 9, as a step of its own).
       - name: Build and sign
         working-directory: app/ios/YoApp
