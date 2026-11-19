@@ -137,13 +137,11 @@ struct Onboarding: View {
         }
 
         Note(problem)
-        // "Sign In" centred on screen: the question hangs to its left, its hidden twin on the right balances it.
+        // "Got Yo? Sign In" centred as one line.
         Button { go(.logIn) } label: {
-          let question = Text(ProductText.gotYo.english).font(.system(size: 15, weight: .semibold)).foregroundStyle(.white.opacity(0.85))
           HStack(alignment: .firstTextBaseline, spacing: 6) {
-            question
+            Text(ProductText.gotYo.english).font(.system(size: 15, weight: .semibold)).foregroundStyle(.white.opacity(0.85))
             Text(ProductText.signIn.english).font(.yo(18))
-            question.hidden()
           }
           .lineLimit(1)
           .fixedSize()
