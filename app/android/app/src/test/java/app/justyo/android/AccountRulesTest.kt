@@ -29,6 +29,23 @@ class AccountRulesTest {
         assertEquals("code", syncedItemDecode(syncedItemEncode(code))!!.recoveryKey)
     }
 
+    /**
+     * A converted (Ed25519) account's hub storage key outlives the vault's clearing in `migrate` with the kept sign-in,
+     * so `finishMigration` opens its storage (friends, groups) with it. A turned-off Google backup outlives it too.
+     */
+    @Test fun aConvertedAccountKeepsItsStorageKeyThroughTheUpdate() {
+        for (name in listOf("migration", "migration-storage", "migration-storage.bak", "state-key", "google-backup")) assertTrue(name, Vault.keeps(name))
+        for (name in listOf("ui", "recovery", "ui.bak")) assertFalse(name, Vault.keeps(name))
+    }
+
+    /** The one-time sign-in is dropped only when the hub refused for good, never for a busy or restarting hub. */
+    @Test fun aPendingSignInSurvivesATemporaryHubError() {
+        for (status in listOf(500, 502, 503, 429)) assertTrue("$status", Repository.keepsPendingSignIn(YoException.Refused(status.toUShort())))
+        assertTrue(Repository.keepsPendingSignIn(YoException.Network("offline")))
+        for (status in listOf(401, 404, 409, 410)) assertFalse("$status", Repository.keepsPendingSignIn(YoException.Refused(status.toUShort())))
+        assertFalse(Repository.keepsPendingSignIn(IllegalStateException("no recovery key")))
+    }
+
     @Test fun keyMaterialGoesToGooglesCloudOnlyEndToEndEncrypted() {
         assertTrue(SyncedAccount.toCloud(wanted = true, endToEnd = true))
         assertFalse(SyncedAccount.toCloud(wanted = true, endToEnd = false))

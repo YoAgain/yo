@@ -17,19 +17,22 @@ use std::io::{BufRead, BufReader, Read, Write};
 use std::os::unix::net::UnixStream;
 use std::time::{Duration, Instant};
 
-/// Exit codes: 0 done; 1 failed (`retryable` says whether later may work); 2 usage; 3 the hub no longer knows this
-/// device (replaced by another, the name released, or the hub reset): stop; 4 nothing registered in the directory.
+/// Exit codes: 0 done; 1 failed (`retryable` says whether later may work); 2 usage; 3 this device is gone for good
+/// (`410`: replaced by another, or the name released): stop; 4 nothing registered in the directory; 5 the hub did
+/// not accept this device's signature (`401`: a clock still off after a reboot, or a hub reset): try again later.
 pub const FAILED: i32 = 1;
 pub const USAGE: i32 = 2;
 pub const GONE: i32 = 3;
 pub const NOT_REGISTERED: i32 = 4;
+pub const UNAUTHORIZED: i32 = 5;
 
 /// How long a command waits for a directory another command has (a listener answers at once).
 const BUSY_WAIT: Duration = Duration::from_secs(30);
 
 pub const HELP: &str =
     "usage: yo [--state DIR] [--hub URL] [--hub-key KEY]... [--trust-root KEY]... [--zk-params P] COMMAND
-  register NAME                     register the account (once; again finishes an interrupted one)
+  register NAME [--force]           register the account (once; again finishes an interrupted one); --force
+                                    only to replace this directory's device when its state is lost
   whoami | status                   who this is; status adds counts and whether a listener runs
   friends | contacts                the friend list; everyone this account has a chat with
   whois NAME                        a username's user id
@@ -78,14 +81,26 @@ impl Failure {
 
 impl From<yo_core::Error> for Failure {
     fn from(error: yo_core::Error) -> Failure {
-        let code = if gone(&error) { GONE } else { FAILED };
-        Failure { code, error: reason(&error), retryable: yo_core::retryable(&error) }
+        let code = if gone(&error) {
+            GONE
+        } else if unauthorized(&error) {
+            UNAUTHORIZED
+        } else {
+            FAILED
+        };
+        Failure { code, error: reason(&error), retryable: yo_core::retryable(&error) || unauthorized(&error) }
     }
 }
 
-/// `410`: replaced, or the name released. `401`: unknown, as after a reset hub (or a clock far off).
+/// `410`: replaced, or the name released. The only answer that stops a bot for good.
 pub fn gone(error: &yo_core::Error) -> bool {
-    matches!(error, yo_core::Error::Replaced | yo_core::Error::Refused(401))
+    matches!(error, yo_core::Error::Replaced)
+}
+
+/// `401`: the hub did not take this device's signature. A clock far off (before NTP after a reboot) or a hub
+/// restarting gives it too, so it is never final: later, again.
+pub fn unauthorized(error: &yo_core::Error) -> bool {
+    matches!(error, yo_core::Error::Refused(401))
 }
 
 /// An error for the output, without text that came from outside (libsignal's reasons).
@@ -150,8 +165,9 @@ fn run(config: &Config, command: &[String]) -> i32 {
     loop {
         let opened = match name.as_str() {
             "register" => match command {
-                [_, username] => account::register(config, username),
-                _ => return print(Err(Failure::usage("register NAME"))),
+                [_, username] => account::register(config, username, false),
+                [_, username, force] if force == "--force" => account::register(config, username, true),
+                _ => return print(Err(Failure::usage("register NAME [--force]"))),
             },
             _ => account::open(config),
         };
@@ -194,4 +210,21 @@ fn forward(config: &Config, command: &[String]) -> Option<i32> {
         _ => eprintln!("{}", answer["out"]),
     }
     Some(code)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Only a device gone for good stops a bot (3); a `401` (a clock off after a reboot) is tried again (5).
+    #[test]
+    fn only_a_replaced_device_is_final() {
+        let gone = Failure::from(yo_core::Error::Replaced);
+        assert_eq!(gone.code, GONE);
+        let refused = Failure::from(yo_core::Error::Refused(401));
+        assert_eq!((refused.code, refused.retryable), (UNAUTHORIZED, true));
+        let busy = Failure::from(yo_core::Error::Refused(503));
+        assert_eq!((busy.code, busy.retryable), (FAILED, true));
+        assert!(!Failure::from(yo_core::Error::Refused(404)).retryable);
+    }
 }

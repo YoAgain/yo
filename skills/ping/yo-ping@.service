@@ -1,6 +1,7 @@
 [Unit]
 Description=Yo PING echo (%i)
-After=network.target
+# The clock set first: a device signature with a clock off after a reboot is refused (401).
+After=network.target time-sync.target
 
 [Service]
 Type=simple
@@ -14,11 +15,15 @@ StateDirectoryMode=0700
 UMask=0077
 Restart=on-failure
 RestartSec=3
-# 3: the hub no longer knows this device (replaced, name released, hub reset); 4: nothing registered in the directory
-# (a skill never registers: `yo register NAME` once, by hand). Both stay stopped.
+# 3: this device is gone for good (replaced by another, name released); 4: nothing registered in the directory
+# (a skill never registers: `yo register NAME` once, by hand). Both stay stopped. Every other code restarts, 5 (a
+# 401: a clock off, a hub restarting) too.
 RestartPreventExitStatus=3 4
 NoNewPrivileges=yes
 PrivateTmp=yes
+# Other users see no process of it: sender ids and probe tokens are in the arguments of `yo`.
+ProtectProc=invisible
+ProcSubset=pid
 ProtectSystem=strict
 ProtectHome=yes
 RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6

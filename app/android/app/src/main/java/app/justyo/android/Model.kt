@@ -57,6 +57,9 @@ data class AppState(
     val leftHanded: Boolean = false, val saveSent: Boolean = false, val requestsOpen: Boolean = true,
     val sent: Long = 0, val received: Long = 0, val pendingInvite: String? = null,
     val lastSync: Long? = null, val firstYo: Boolean = false, val notice: String? = null, val appIcon: String? = null,
-)
+) {
+    /** Wanted in Google's cloud but not there (no screen lock): the red dot. Turned off by choice is no warning. */
+    val backupMissing: Boolean get() = googleBackup && !backedUp
+}
 
 fun JSONObject.longMap(key: String): Map<String,Long> = optJSONObject(key)?.let { values -> values.keys().asSequence().associateWith { values.getLong(it) } }.orEmpty()

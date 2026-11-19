@@ -235,6 +235,7 @@
     <string name="google_backup">Back Up to Google</string>
     <string name="google_backup_footer">Your account key is in your Google account, end-to-end encrypted: a new phone signs in by itself.</string>
     <string name="google_backup_off">Your account isn’t backed up. Google encrypts it end to end only with a screen lock: set one in Android Settings, then turn this on.</string>
+    <string name="google_backup_turned_off">Your account isn’t backed up to Google. A new phone signs in only with your recovery key.</string>
     <string name="google_backup_needs_screen_lock">Set a screen lock in Android Settings first. Without it, Google can’t encrypt your account key end to end.</string>
     <string name="yo_is_updating">Yo is updating…</string>
     <string name="account_backup">Account Backup</string>

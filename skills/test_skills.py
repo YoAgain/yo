@@ -1,5 +1,6 @@
 """The skills' rules without a hub: `python3 -m unittest discover skills` (cargo test -p yo-cli runs it too)."""
 
+import collections
 import os
 import sys
 import tempfile
@@ -94,6 +95,17 @@ class Limits(unittest.TestCase):
         self.assertTrue(cooldown.allow("group:a", now + 30))
         self.assertFalse(cooldown.allow("group:a", now + 31))
         self.assertEqual(len(cooldown.at), 1, "only groups within the window are kept")
+
+    def test_a_failed_answer_never_blocks_its_sender(self):
+        bot = yogpt.YoGPT(None, 0)
+        bot.pending["u"] = collections.deque([(False, 0)])
+        bot.answer = lambda to, picture: 1 / 0
+        old, yogpt.THINK_MS = yogpt.THINK_MS, (0, 0)
+        try:
+            bot.answer_pending("u")
+        finally:
+            yogpt.THINK_MS = old
+        self.assertNotIn("u", bot.pending, "the next Yo of this sender is answered again")
 
     def test_sender_buckets_refill_expire_and_stay_bounded(self):
         limits, now = yocli.Buckets(), 1000.0

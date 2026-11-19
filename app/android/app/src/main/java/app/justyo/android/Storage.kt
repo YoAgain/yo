@@ -53,11 +53,16 @@ class Vault(private val context: Context) {
     @Synchronized fun secret(name: String): ByteArray = read(name) ?: randomBytes(32).also { write(name, it) }
     @Synchronized fun delete(name: String) = AtomicFile(File(directory, name)).delete()
     /** Signed out: everything but what outlives an account on this phone (`KEPT`). */
-    @Synchronized fun clear() { directory.listFiles().orEmpty().filter { it.name.removeSuffix(".bak") !in KEPT }.forEach { it.delete() } }
+    @Synchronized fun clear() { directory.listFiles().orEmpty().filterNot { keeps(it.name) }.forEach { it.delete() } }
 
     companion object {
-        /** The state key; the one-time sign-in still to finish; a replaced account; a Block Store change still to make. */
-        val KEPT = setOf("state-key", "migration", "left", "synced-pending")
+        /**
+         * The state key; the one-time sign-in still to finish and the hub storage key of a converted account it
+         * signs in with; a replaced account; a Block Store change still to make; "Back up to Google" turned off.
+         */
+        val KEPT = setOf("state-key", "migration", "migration-storage", "left", "synced-pending", "google-backup")
+        /** Whether `clear` leaves the entry (or its backup copy) in place. */
+        fun keeps(name: String) = name.removeSuffix(".bak") in KEPT
     }
 }
 

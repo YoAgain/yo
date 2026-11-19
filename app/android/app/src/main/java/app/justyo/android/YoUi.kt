@@ -925,7 +925,7 @@ private fun NotificationSettingsRow(onClick: () -> Unit) {
                             },
                         ) {
                             // The red dot: the account is not backed up (Settings › Account Recovery says why).
-                            BadgedBox(badge = { if (!s.backedUp) Badge() }) {
+                            BadgedBox(badge = { if (s.backupMissing) Badge() }) {
                                 Row(horizontalArrangement = Arrangement.spacedBy((-5).dp)) {
                                     Text("Y", Modifier.alignByBaseline(), style = TextStyle(fontFamily = YoFont, fontSize = 29.sp))
                                     Text("o", Modifier.alignByBaseline(), style = TextStyle(fontFamily = YoFont, fontSize = 23.sp))

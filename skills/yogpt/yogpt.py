@@ -129,7 +129,13 @@ class YoGPT:
             with self.lock:
                 picture, last = self.pending[to][0]
             began = time.monotonic()
-            self.answer(to, picture)
+            try:
+                self.answer(to, picture)
+            except Exception as error:  # never leaves `pending[to]` behind: this sender would get no answer again
+                with self.lock:
+                    self.pending.pop(to, None)
+                yocli.log(f"answer failed: {type(error).__name__}")
+                return
             with self.lock:
                 owed = self.pending[to]
                 owed.popleft()

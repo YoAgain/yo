@@ -183,9 +183,10 @@ fn receive(listener: &Listener) -> ! {
                 }
             }
             Err(error) if crate::gone(&error) => {
-                eprintln!("yo: the hub no longer knows this device (replaced by another, the name released, or the hub reset)");
+                eprintln!("yo: this device is gone for good (replaced by another, or the name released)");
                 std::process::exit(GONE);
             }
+            // A `401` (a clock off, a hub restarting) is waited out like the network: never final.
             Err(error) => {
                 // 1, 2, 4 … 60 seconds; back to 1 after a success.
                 let s = (1u64 << failures.min(6)).min(60);

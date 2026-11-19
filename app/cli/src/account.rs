@@ -245,18 +245,42 @@ pub fn open(config: &Config) -> Result<Open, Failure> {
 
 /// Registers `username` in the directory: with its account secret if it has one (the same account, a new device).
 /// Saved before it is sent (spec 6.4): a lost answer loses neither key nor prekeys, and `register` again finishes it.
-pub fn register(config: &Config, username: &str) -> Result<Open, Failure> {
+/// A directory with a state it cannot open (no `key`, a wrong one, damaged) is refused without `force`: registering
+/// there replaces the account's device and loses its sessions.
+pub fn register(config: &Config, username: &str, force: bool) -> Result<Open, Failure> {
+    let dir = &config.state;
+    let has_state = ["state.sqlite", "state", "state.v2"].iter().any(|file| dir.join(file).exists());
+    if has_state && !dir.join("key").exists() && !force {
+        return Err(Failure::new(
+            "the directory has a state but no key: put its key back (registering replaces the device; --force)",
+        ));
+    }
     let Some((lock, account, key)) = lock(config, true)? else { return Ok(Open::Busy) };
     let path = config.state.join("state.sqlite");
-    let db = database(config, key)?;
+    let refused = || {
+        Failure::new(
+            "the state cannot be opened (a wrong key?): registering replaces the device; --force sets it aside",
+        )
+    };
+    // With `--force`, a state it cannot open is set aside as `state.old`: the account secret registers anew.
+    let set_aside = || -> Result<Arc<StateDb>, Failure> {
+        std::fs::rename(&path, config.state.join("state.old")).map_err(|e| Failure::new(e.to_string()))?;
+        eprintln!("yo: the state could not be opened; set aside as state.old, registering again");
+        database(config, key)
+    };
     let transport = transport(config)?;
+    let db = match database(config, key) {
+        Err(_) if path.exists() && !force => return Err(refused()),
+        Err(_) if path.exists() => {
+            return register_new(config, lock, account, key, username, set_aside()?, transport);
+        }
+        db => db?,
+    };
     let loaded = match db.load(None, &key) {
-        // A state it cannot open (damaged) is set aside as `state.old`: the account secret registers anew.
+        Err(Error::State) if path.exists() && !force => return Err(refused()),
         Err(Error::State) if path.exists() => {
             drop(db);
-            std::fs::rename(&path, config.state.join("state.old")).map_err(|e| Failure::new(e.to_string()))?;
-            eprintln!("yo: the state could not be opened; set aside as state.old, registering again");
-            return register_new(config, lock, account, key, username, database(config, key)?, transport);
+            return register_new(config, lock, account, key, username, set_aside()?, transport);
         }
         loaded => loaded?,
     };

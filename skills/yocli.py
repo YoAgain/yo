@@ -13,7 +13,7 @@ import threading
 import time
 
 YO = os.environ.get("YO_BIN", "yo")
-# `yo`'s exit codes (app/cli/src/main.rs).
+# `yo`'s exit codes (app/cli/src/main.rs). 5 (`401`: a clock off, a hub restarting) is retryable, never a stop.
 GONE, NOT_REGISTERED = 3, 4
 
 
@@ -37,10 +37,10 @@ def reason(error):
 
 
 def stop(code):
-    """Ends the whole skill (any thread): systemd restarts it, unless the device is gone (3) or nothing is registered
-    (4)."""
+    """Ends the whole skill (any thread): systemd restarts it, unless the device is gone for good (3) or nothing is
+    registered (4)."""
     if code == GONE:
-        log("stopped: the hub no longer knows this device (replaced by another, the name released, or the hub reset)")
+        log("stopped: this device is gone for good (replaced by another, or the name released)")
     sys.stderr.flush()
     os._exit(code)
 

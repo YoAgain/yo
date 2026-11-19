@@ -260,7 +260,7 @@ private val Pages = mapOf(
                             Setting(stringResource(R.string.ui_blocked), Icons.Default.Block, s.friends.count { it.blocked }.toString(), onClick = { open("Blocked") }),
                         )
                         Section(null, null,
-                            Setting(stringResource(R.string.account_recovery), Icons.Default.Lock, badge = !s.secured || !s.backedUp, onClick = { open("Account Recovery") }),
+                            Setting(stringResource(R.string.account_recovery), Icons.Default.Lock, badge = !s.secured || s.backupMissing, onClick = { open("Account Recovery") }),
                             Setting(stringResource(R.string.ui_sign_out), Icons.AutoMirrored.Filled.Logout, onClick = { logout = true }),
                         )
                         Section(null, null,
@@ -289,8 +289,9 @@ private val Pages = mapOf(
                             }),
                         )
                         // Spec "Key material only in an end-to-end encrypted cloud": on only with a screen lock.
-                        Section(null, stringResource(if (s.backedUp) R.string.google_backup_footer else R.string.google_backup_off),
-                            Setting(stringResource(R.string.google_backup), Icons.Default.Cloud, checked = s.backedUp, badge = !s.backedUp,
+                        Section(null, stringResource(when { s.backedUp -> R.string.google_backup_footer; s.googleBackup -> R.string.google_backup_off
+                                else -> R.string.google_backup_turned_off }),
+                            Setting(stringResource(R.string.google_backup), Icons.Default.Cloud, checked = s.backedUp, badge = s.backupMissing,
                                 onChecked = { on -> repo.command { googleBackup(on) } }),
                         )
                         Section(null, stringResource(R.string.account_backup_footer),
@@ -431,7 +432,7 @@ private val Pages = mapOf(
                 maxLines = 1, softWrap = false,
                 autoSize = TextAutoSize.StepBased(minFontSize = 13.sp, maxFontSize = 26.sp),
             )
-            if (!s.secured || !s.backedUp) Badge { Text("1") }
+            if (!s.secured || s.backupMissing) Badge { Text("1") }
             FilledTonalIconButton(onClick = onCode) { Icon(Icons.Default.QrCode, stringResource(R.string.ui_show_your_code)) }
         }
     }

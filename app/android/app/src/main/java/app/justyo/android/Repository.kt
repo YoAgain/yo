@@ -99,6 +99,7 @@ class Repository(private val context: Context, ownerScope: CoroutineScope) {
     private val syncing = Mutex()
     private var listening: Job? = null
     private var retrying: Job? = null
+    private var resuming: Job? = null
     val media = MediaQueue(context,vault, scope, { client }, { sessionId }, { source, events -> absorb(events, source) }, { refreshMedia() }).also { queue ->
         queue.sendYo = { friend -> client?.let { sendNow(friend, it) } }
         queue.sent = { target, last ->
@@ -135,6 +136,7 @@ class Repository(private val context: Context, ownerScope: CoroutineScope) {
             // The one migration: an older install's sign-in is kept first (`migrate`), then its files go.
             try { migrate() } catch (e: YoException.Network) {
                 mutable.update { it.copy(loading = false, updating = true) }
+                if (foreground) keepResuming()
                 return@launch
             }
             val cached = vault.read("ui")?.let { JSONObject(String(it)) }
@@ -146,8 +148,11 @@ class Repository(private val context: Context, ownerScope: CoroutineScope) {
                 secured = cached.optBoolean("secured"), leftHanded = cached.optBoolean("leftHanded"),
                 saveSent = cached.optBoolean("saveSent"), sent = cached.optLong("sent"), received = cached.optLong("received"),
                 pendingInvite = cached.stringOrNull("invite"), appIcon = cached.stringOrNull("appIcon"),
-                googleBackup = cached.optBoolean("googleBackup", true),
+                googleBackup = cached.optBoolean("googleBackup", true) && backupWanted(),
             ) }
+            // An opt-out of before only in `ui`: kept where it outlives a sign-out.
+            if (cached?.optBoolean("googleBackup", true) == false) vault.write("google-backup", byteArrayOf(0))
+            if (cached == null) mutable.update { it.copy(googleBackup = backupWanted()) }
             val key = vault.read("state-key")
             val restored = if (file.exists()) {
                 key ?: error(context.getString(R.string.ui_state_key_missing_use_your_recovery_key))
@@ -178,6 +183,7 @@ class Repository(private val context: Context, ownerScope: CoroutineScope) {
             if (foreground) {
                 if (client != null) YoWork.registerIfConfigured(context)
                 listen()
+                if (state.value.updating) keepResuming()
             }
             consumeInvite()
         } catch (e: Exception) {
@@ -213,14 +219,33 @@ class Repository(private val context: Context, ownerScope: CoroutineScope) {
             if (kept.accountKey.isEmpty()) restore(checkNotNull(kept.recoveryKey))
             else signIn(checkNotNull(syncedItemUpgraded(kept)), vault.read("migration-storage"))
         } catch (e: CancellationException) { throw e } catch (e: Exception) {
-            // Not signed in: offline, kept for later; refused (account gone, name another's), signed out as an old
-            // install without a key. Signed in and a later step failed: done all the same.
-            if (client == null && e is YoException.Network) return true
+            // Not signed in: offline or the hub busy for now (`retryLater`, as iOS), kept for later; refused for good
+            // (account gone, name another's), signed out as an old install without a key. Signed in and a later
+            // step failed: done all the same.
+            if (client == null && keepsPendingSignIn(e)) return true
             if (client == null) mutable.update { it.copy(error = friendlyError(context, e)) }
         }
         vault.delete("migration"); vault.delete("migration-storage")
         mutable.update { it.copy(updating = false) }
         return true
+    }
+
+    /**
+     * "Yo is updating…" tried again by itself while the app is in the foreground, 2 s … 60 s apart, until it is done:
+     * offline or a busy hub at the first start never leaves the spinner standing.
+     */
+    private fun keepResuming() {
+        if (resuming?.isActive == true) return
+        resuming = scope.launch(Dispatchers.IO) {
+            var pause = 2_000L
+            while (isActive && foreground && state.value.updating) {
+                try { resumeUpdate() } catch (e: CancellationException) { throw e } catch (e: Exception) {
+                    mutable.update { it.copy(error = friendlyError(context, e)) }
+                }
+                if (!state.value.updating) break
+                delay(pause); pause = (pause * 2).coerceAtMost(60_000L)
+            }
+        }
     }
 
     /** The update tried again in the foreground: the old files, then the kept sign-in. */
@@ -239,7 +264,7 @@ class Repository(private val context: Context, ownerScope: CoroutineScope) {
         return runCatching {
             val item = synced.read()
             if (item != null && item.userId.hex().equals(user, ignoreCase = true)) {
-                if (change == "delete") synced.delete() else synced.write(item.copy(signedOut = true), true)
+                if (change == "delete") synced.delete() else synced.write(item.copy(signedOut = true), backupWanted())
             }
             vault.delete("synced-pending")
         }.isSuccess
@@ -351,9 +376,15 @@ class Repository(private val context: Context, ownerScope: CoroutineScope) {
         if (c === client) mutable.update { it.copy(backedUp = cloud) }
     }
 
+    /** The person's "Back up to Google" choice: kept beside the account (`google-backup`), so it outlives a sign-out. */
+    private fun backupWanted() = vault.read("google-backup") == null
+
     /** "Back up to Google": on only with end-to-end encryption (a screen lock); else it says why and stays off. */
     suspend fun googleBackup(on: Boolean) {
-        changes.withLock { mutable.update { it.copy(googleBackup = on) }; persist() }
+        changes.withLock {
+            mutable.update { it.copy(googleBackup = on) }; persist()
+            if (on) vault.delete("google-backup") else vault.write("google-backup", byteArrayOf(0))
+        }
         syncItem()
         if (on && !state.value.backedUp) error(context.getString(R.string.google_backup_needs_screen_lock))
     }
@@ -405,7 +436,7 @@ class Repository(private val context: Context, ownerScope: CoroutineScope) {
     fun active(on: Boolean) {
         foreground = on
         present { foreground(it, on) }
-        if (on && state.value.updating && !state.value.loading) command { resumeUpdate() }
+        if (on && state.value.updating && !state.value.loading) keepResuming()
         else if (on) command {
             notifications.clear()
             listen()
@@ -804,7 +835,7 @@ class Repository(private val context: Context, ownerScope: CoroutineScope) {
         changes.withLock {
             media.clear(); file.delete(vault.read("state-key")); vault.clear(); seen.clear(); removedUsers.clear(); clearTemporaryMedia()
             synchronized(listLock) {
-                listJob?.cancel();orderSave?.cancel();displayedOrder=emptyList();list=YoList();mutable.value=AppState(loading=false)
+                listJob?.cancel();orderSave?.cancel();displayedOrder=emptyList();list=YoList();mutable.value=AppState(loading=false, googleBackup=backupWanted())
             }
         }
         settleSynced()
@@ -827,6 +858,9 @@ class Repository(private val context: Context, ownerScope: CoroutineScope) {
         error=it.error.takeUnless { text -> text==message },notice=it.notice.takeUnless { text -> text==message }) } }
     fun clearError() { mutable.update { it.copy(error = null, notice = null, firstYo = false) } }
     companion object {
+        /** A failed one-time sign-in that is tried again later, not dropped: a network error, a busy hub, a save. */
+        fun keepsPendingSignIn(error: Exception) = error is YoException && retryLater(error)
+
         /** An old install's sign-in to keep (`migrate`): its name, and its account key or else its recovery key. */
         fun pendingSignIn(username: String?, identity: LegacyIdentity?, recovery: String?): SyncedItem? {
             if (username == null || (identity == null && recovery == null)) return null

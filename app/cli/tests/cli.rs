@@ -133,6 +133,32 @@ fn commands_run_in_the_listener_while_it_listens() {
     let _ = std::fs::remove_dir_all(&yo.state);
 }
 
+/// `register` never replaces the device of a directory whose state it cannot open (its `key` lost or wrong) unless
+/// `--force`.
+#[test]
+fn register_refuses_a_state_it_cannot_open() {
+    let hub = TestHub::start();
+    let yo = Yo::new(&hub);
+    let name = format!("Keep{}", random_u64() % 1_000_000);
+    let me = yo.ok(&["register", &name]);
+    let key = std::fs::read(yo.state.join("key")).unwrap();
+    std::fs::remove_file(yo.state.join("key")).unwrap();
+    let (code, error) = yo.run(&["register", &name]);
+    assert_eq!(code, 1, "{error}");
+    assert!(!yo.state.join("key").exists(), "no new key made");
+    std::fs::write(yo.state.join("key"), [1u8; 32]).unwrap();
+    assert_eq!(yo.run(&["register", &name]).0, 1, "a wrong key");
+    assert!(yo.state.join("state.sqlite").exists() && !yo.state.join("state.old").exists());
+    std::fs::write(yo.state.join("key"), &key).unwrap();
+    assert_eq!(yo.ok(&["whoami"])["device"], me["device"]);
+    std::fs::write(yo.state.join("key"), [1u8; 32]).unwrap();
+    let again = yo.ok(&["register", &name, "--force"]);
+    assert_eq!(again["user"], me["user"]);
+    assert_ne!(again["device"], me["device"]);
+    assert!(yo.state.join("state.old").exists());
+    let _ = std::fs::remove_dir_all(&yo.state);
+}
+
 /// The device taken over by a new phone of the account: `listen` and the commands end with 3.
 #[test]
 fn a_device_the_hub_no_longer_knows_exits_3() {
@@ -181,7 +207,26 @@ fn the_bots_state_file_of_before_goes_on_as_the_same_device() {
     let blob = yo_core::state::seal_legacy(&serde_json::to_vec(&json).unwrap(), &saved.records, &key);
     std::fs::write(yo.state.join("state"), blob).unwrap();
     let user = bot.user_id().to_owned();
+    let device = bot.device_id();
     drop(bot);
+
+    // The dry run (app/cli/dev/dry-run.sh) on a copy: the same user and device, offline; the directory untouched.
+    let script = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("dev/dry-run.sh");
+    let dry = std::process::Command::new(script)
+        .arg(&yo.state)
+        .arg(YO)
+        .env("TMPDIR", env!("CARGO_TARGET_TMPDIR"))
+        .output()
+        .unwrap();
+    assert!(dry.status.success(), "{}", String::from_utf8_lossy(&dry.stderr));
+    let seen: serde_json::Value = serde_json::from_slice(&dry.stdout).unwrap();
+    assert_eq!((seen["user"].as_str(), &seen["device"]), (Some(user.as_str()), &serde_json::json!(device)), "{seen}");
+    assert!(String::from_utf8_lossy(&dry.stderr).contains("taken in (state.v2)"));
+    assert!(
+        yo.state.join("state").exists()
+            && !yo.state.join("state.v2").exists()
+            && !yo.state.join("state.sqlite").exists()
+    );
 
     assert_eq!(yo.ok(&["whoami"])["user"], user.as_str());
     assert!(!yo.state.join("state").exists() && yo.state.join("state.v2").exists());
