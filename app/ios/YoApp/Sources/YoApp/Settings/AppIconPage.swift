@@ -17,7 +17,7 @@ struct AppIconPage: View {
 
   var body: some View {
     let iconSide: CGFloat = 64
-    // Scrolls only where it must: the sheet measures it as high as its icons (sheetFit).
+    // Scrolls only where it must.
     return ScrollView {
       VStack(spacing: 24) {
         ForEach(0..<2) { row in
@@ -68,7 +68,6 @@ struct AppIconPage: View {
     }
     .scrollBounceBehavior(.basedOnSize)
     .navigationTitle("App Icon")
-    .sheetFit()
     .navigationBarTitleDisplayMode(.inline)
     .toolbar(.visible, for: .navigationBar)
     .problemAlert("Icon Couldn’t Be Changed", $iconError)

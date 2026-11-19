@@ -239,7 +239,6 @@ struct StatusPage: View {
             if let status { IdentitySheet(status: status, tally: tally) }
           }
           .navigationTitle("Status")
-          .sheetFit()
           .navigationBarTitleDisplayMode(.inline)
       }
     }

@@ -76,6 +76,8 @@ struct SecureNameSheet: View {
     .animation(.smooth(duration: 0.3), value: passkeyDone)
     .animation(.smooth(duration: 0.3), value: created)
     .foregroundStyle(.white)
+    // Its own full-height sheet over the settings, whatever height they keep.
+    .presentationDetents([.large])
     .presentationDragIndicator(.hidden)
     .preferredColorScheme(.dark)
     .interactiveDismissDisabled(busy != nil)
@@ -344,6 +346,7 @@ struct RecoveryShowSheet: View {
     .overlay(alignment: .topTrailing) { SheetClose() }
     .foregroundStyle(.white)
     .preferredColorScheme(.dark)
+    .presentationDetents([.large])
     .presentationDragIndicator(.hidden)
   }
 }

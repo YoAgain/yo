@@ -95,7 +95,6 @@ struct AccountPage: View {
     }
     .accessibilityIdentifier(securityOnly ? "security.page" : "account.page")
     .navigationTitle(securityOnly ? "Account Recovery" : account.username)
-    .sheetFit()
     .navigationBarTitleDisplayMode(.inline)
     .toolbar {
       ToolbarItem(placement: .principal) {
@@ -298,7 +297,6 @@ struct AccountPage: View {
       }
     }
     .navigationTitle("Delete Account")
-    .sheetFit()
     .navigationBarTitleDisplayMode(.inline)
     .onDisappear { deleteTyped = "" }
     .problemAlert("Unable to Delete Account", $deleteProblem)

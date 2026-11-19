@@ -165,7 +165,6 @@ struct CrashListPage: View {
       }
     }
     .navigationTitle("Crash Reports")
-    .sheetFit()
     .navigationBarTitleDisplayMode(.inline)
   }
 }
@@ -183,7 +182,6 @@ struct CrashDetailPage: View {
     }
     .background(Color(.systemGroupedBackground))
     .navigationTitle(crash.date.formatted(date: .abbreviated, time: .shortened))
-    .sheetFit()
     .navigationBarTitleDisplayMode(.inline)
     .toolbar {
       ToolbarItem(placement: .primaryAction) {
