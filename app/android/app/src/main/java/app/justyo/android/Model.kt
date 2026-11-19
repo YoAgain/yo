@@ -56,7 +56,7 @@ data class AppState(
     /** Why it is not there: no screen lock, or Google's device backup is off (Block Store's cloud copy rides on it). */
     val backupMissingReason: CloudMissing? = null,
     val media: List<Received> = emptyList(),
-    val leftHanded: Boolean = false, val saveSent: Boolean = false, val requestsOpen: Boolean = true,
+    val leftHanded: Boolean = false, val requestsOpen: Boolean = true,
     val sent: Long = 0, val received: Long = 0, val pendingInvite: String? = null,
     val lastSync: Long? = null, val firstYo: Boolean = false, val notice: String? = null, val appIcon: String? = null,
 ) {

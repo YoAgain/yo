@@ -3,6 +3,8 @@ package app.justyo.android
 
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.ui.graphics.Color
 import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
@@ -51,33 +53,39 @@ fun GroupSheet(model: YoViewModel, state: AppState, onClose: () -> Unit) = YoSys
             }
         }
     }
-    ModalBottomSheet(onDismissRequest = { if (!busy) onClose() }, sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)) {
-        Column(Modifier.fillMaxWidth().imePadding()) {
-            Row(Modifier.fillMaxWidth().padding(horizontal = 8.dp), verticalAlignment = Alignment.CenterVertically) {
-                IconButton(onClick = onClose, enabled = !busy) { Icon(Icons.Default.Close, stringResource(R.string.ui_cancel)) }
-                Text(stringResource(R.string.ui_add_group), Modifier.weight(1f), style = MaterialTheme.typography.titleLarge)
-                Button(onClick = create, enabled = canCreate) { Text(stringResource(R.string.ui_create)) }
-            }
-            Column(Modifier.fillMaxWidth().verticalScroll(rememberScrollState()).padding(16.dp)) {
-                OutlinedTextField(name, { name = utf8Limit(it, 32) }, Modifier.fillMaxWidth(), enabled = !busy, singleLine = true,
-                    label = { Text(stringResource(R.string.ui_group_name)) },
-                    keyboardOptions = KeyboardOptions(imeAction = ImeAction.Done), keyboardActions = KeyboardActions(onDone = { focus.clearFocus() }))
-                OutlinedTextField(search, { search = it }, Modifier.fillMaxWidth().padding(vertical = 12.dp), enabled = !busy, singleLine = true,
-                    placeholder = { Text(stringResource(R.string.find_group_friends)) }, leadingIcon = { Icon(Icons.Default.Search, null) },
-                    shape = MaterialTheme.shapes.extraLarge,
-                    keyboardOptions = KeyboardOptions(imeAction = ImeAction.Search), keyboardActions = KeyboardActions(onSearch = { focus.clearFocus() }))
-                if (failed) Text(stringResource(R.string.group_create_failure), Modifier.padding(bottom = 12.dp), color = MaterialTheme.colorScheme.error)
-                Section(stringResource(R.string.group_member_limit, members.size + 1), stringResource(R.string.group_member_footer),
-                    Setting(state.username.orEmpty(), leading = { SettingsAvatar(state.username.orEmpty(), 40) }, checked = true, checkbox = true, enabled = false),
-                    *friends.map { friend ->
-                        val user = checkNotNull(friend.user)
-                        val selected = user in members
-                        Setting(friend.name, leading = { SettingsAvatar(friend.name, 40) }, checked = selected, checkbox = true,
-                            enabled = !busy && (selected || members.size < 19),
-                            onChecked = { on -> focus.clearFocus(); members = if (on) members + user else members - user })
-                    }.toTypedArray(),
-                )
-            }
+    // As iOS NewGroup: Cancel, the title, Create in the bar; the name, the search, then the members with a tick.
+    FittedSheet(onDismissRequest = { if (!busy) onClose() }, dragHandle = null) {
+        CenterAlignedTopAppBar(
+            title = { Text(stringResource(R.string.ui_add_group), maxLines = 1) },
+            navigationIcon = { IconButton(onClick = onClose, enabled = !busy) { Icon(Icons.Default.Close, stringResource(R.string.ui_cancel)) } },
+            actions = { TextButton(onClick = create, enabled = canCreate) { Text(stringResource(R.string.ui_create)) } },
+            colors = TopAppBarDefaults.topAppBarColors(containerColor = Color.Transparent),
+            windowInsets = WindowInsets(0),
+        )
+        Column(Modifier.fillMaxWidth().verticalScroll(rememberScrollState()).padding(horizontal = 16.dp).padding(bottom = 8.dp)) {
+            val field = TextFieldDefaults.colors(
+                focusedContainerColor = MaterialTheme.colorScheme.surfaceBright, unfocusedContainerColor = MaterialTheme.colorScheme.surfaceBright,
+                disabledContainerColor = MaterialTheme.colorScheme.surfaceBright,
+                focusedIndicatorColor = Color.Transparent, unfocusedIndicatorColor = Color.Transparent, disabledIndicatorColor = Color.Transparent,
+            )
+            TextField(name, { name = utf8Limit(it, 32) }, Modifier.fillMaxWidth(), enabled = !busy, singleLine = true,
+                placeholder = { Text(stringResource(R.string.ui_group_name)) }, shape = MaterialTheme.shapes.large, colors = field,
+                keyboardOptions = KeyboardOptions(imeAction = ImeAction.Done), keyboardActions = KeyboardActions(onDone = { focus.clearFocus() }))
+            TextField(search, { search = it }, Modifier.fillMaxWidth().padding(top = 12.dp, bottom = 20.dp), enabled = !busy, singleLine = true,
+                placeholder = { Text(stringResource(R.string.find_group_friends)) }, leadingIcon = { Icon(Icons.Default.Search, null) },
+                shape = CircleShape, colors = field,
+                keyboardOptions = KeyboardOptions(imeAction = ImeAction.Search), keyboardActions = KeyboardActions(onSearch = { focus.clearFocus() }))
+            if (failed) Text(stringResource(R.string.group_create_failure), Modifier.padding(start = 16.dp, bottom = 12.dp), color = MaterialTheme.colorScheme.error)
+            Section(stringResource(R.string.group_member_limit, members.size + 1), stringResource(R.string.group_member_footer),
+                Setting(state.username.orEmpty(), leading = { SettingsAvatar(state.username.orEmpty(), 40) }, checked = true, checkbox = true, enabled = false),
+                *friends.map { friend ->
+                    val user = checkNotNull(friend.user)
+                    val selected = user in members
+                    Setting(friend.name, leading = { SettingsAvatar(friend.name, 40) }, checked = selected, checkbox = true,
+                        enabled = !busy && (selected || members.size < 19),
+                        onChecked = { on -> focus.clearFocus(); members = if (on) members + user else members - user })
+                }.toTypedArray(),
+            )
         }
     }
 }
@@ -94,7 +102,7 @@ private enum class FriendAction { BLOCK, RENAME, LEAVE, REMOVE_MEMBER }
     var members by remember { mutableStateOf<List<String>?>(null) }
     var busy by remember { mutableStateOf(false) }
     LaunchedEffect(friend.group) { if (friend.group != null) members = withContext(Dispatchers.IO) { repo.groupMembers(friend) } }
-    ModalBottomSheet(onDismissRequest = onClose) {
+    FittedSheet(onDismissRequest = onClose) {
         Column(Modifier.fillMaxWidth().verticalScroll(rememberScrollState()).padding(horizontal = 16.dp)) {
             Text(if (friend.group == null) friend.name else "#" + friend.name.removePrefix("#"), Modifier.padding(start = 8.dp, bottom = 16.dp),
                 style = MaterialTheme.typography.headlineSmall)

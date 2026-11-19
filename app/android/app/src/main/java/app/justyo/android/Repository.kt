@@ -171,7 +171,7 @@ class Repository(private val context: Context, ownerScope: CoroutineScope) {
                 friends = cached.optJSONArray("friends")?.objects()?.map(Friend::from).orEmpty(),
                 byFriend=cached.longMap("byFriend"),lastSent=cached.longMap("lastSent"),lastReceived=cached.longMap("lastReceived"),
                 secured = cached.optBoolean("secured"), leftHanded = cached.optBoolean("leftHanded"),
-                saveSent = cached.optBoolean("saveSent"), sent = cached.optLong("sent"), received = cached.optLong("received"),
+                sent = cached.optLong("sent"), received = cached.optLong("received"),
                 pendingInvite = cached.stringOrNull("invite"), appIcon = cached.stringOrNull("appIcon"),
                 googleBackup = cached.optBoolean("googleBackup", true) && backupWanted(),
             ) }
@@ -304,7 +304,7 @@ class Repository(private val context: Context, ownerScope: CoroutineScope) {
         val s = state.value
         vault.write("ui", JSONObject().put("username", s.username).put("friends", JSONArray(s.friends.map { it.json() }))
             .put("byFriend",JSONObject(s.byFriend)).put("lastSent",JSONObject(s.lastSent)).put("lastReceived",JSONObject(s.lastReceived))
-            .put("appIcon", s.appIcon).put("secured", s.secured).put("leftHanded", s.leftHanded).put("saveSent", s.saveSent)
+            .put("appIcon", s.appIcon).put("secured", s.secured).put("leftHanded", s.leftHanded)
             .put("sent", s.sent).put("received", s.received).put("invite", s.pendingInvite).put("removed", JSONArray(removedUsers.toList()))
             .put("googleBackup", s.googleBackup).toString().toByteArray())
     }
@@ -431,6 +431,8 @@ class Repository(private val context: Context, ownerScope: CoroutineScope) {
         check(c === client)
     }
     suspend fun keepRecovery() = saveRecovery(null)
+    /** The recovery key this phone saved, to show it again. */
+    internal fun savedRecovery(): String? = vault.read("recovery")?.decodeToString()
 
     internal suspend fun hasRecoveryPasskey(): Boolean = accountTurn.withLock {
         val code = vault.read("recovery")?.decodeToString() ?: return@withLock false
@@ -811,9 +813,9 @@ class Repository(private val context: Context, ownerScope: CoroutineScope) {
     suspend fun roundTrip() = client?.roundTripProbe("PINGTEST", 10000u)
     val crashes = CrashReports(context, transport)
 
-    suspend fun settings(left: Boolean = state.value.leftHanded, save: Boolean = state.value.saveSent, requests: Boolean = state.value.requestsOpen) {
+    suspend fun settings(left: Boolean = state.value.leftHanded, requests: Boolean = state.value.requestsOpen) {
         if (requests != state.value.requestsOpen) client?.setRequestsOpen(requests)
-        changes.withLock { mutable.update { it.copy(leftHanded = left, saveSent = save, requestsOpen = requests) }; persist() }
+        changes.withLock { mutable.update { it.copy(leftHanded = left, requestsOpen = requests) }; persist() }
     }
     suspend fun undoSettings(friend: Friend, on: Boolean, seconds: Int) = changes.withLock {
         mutable.update { it.copy(friends = it.friends.map { f -> if (f.key == friend.key) f.copy(undo = on, undoSeconds = productUndoSeconds(seconds.toDouble()).toInt()) else f }) }; persist()

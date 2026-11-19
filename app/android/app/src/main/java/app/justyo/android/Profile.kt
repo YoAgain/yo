@@ -7,13 +7,14 @@ import android.content.Context
 import android.content.Intent
 import android.graphics.Bitmap
 import android.net.Uri
-import androidx.activity.compose.PredictiveBackHandler
+import androidx.compose.material.icons.outlined.Info
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.animation.AnimatedContent
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.rememberScrollState
@@ -77,6 +78,9 @@ internal data class Setting(
     val danger: Boolean = false,
     val enabled: Boolean = true,
     val leading: (@Composable () -> Unit)? = null,
+    /** A second action on the same line, before the switch: its icon and its label. */
+    val action: Pair<ImageVector, String>? = null,
+    val onAction: (() -> Unit)? = null,
     val onChecked: ((Boolean) -> Unit)? = null,
     val onClick: (() -> Unit)? = null,
 )
@@ -86,7 +90,7 @@ internal data class Setting(
     run {
         Column(Modifier.fillMaxWidth().padding(bottom = 20.dp), verticalArrangement = Arrangement.spacedBy(ListItemDefaults.SegmentedGap)) {
             if (title != null) Text(title, Modifier.padding(start = 16.dp, bottom = 6.dp),
-                style = MaterialTheme.typography.labelLarge, color = MaterialTheme.colorScheme.primary)
+                style = MaterialTheme.typography.labelLarge, color = MaterialTheme.colorScheme.onSurfaceVariant)
             shown.forEachIndexed { index, row -> SettingRow(row, ListItemDefaults.segmentedShapes(index, shown.size)) }
             if (footer != null) Text(footer, Modifier.padding(horizontal = 16.dp, vertical = 6.dp),
                 style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
@@ -97,7 +101,7 @@ internal data class Setting(
 @Composable
 private fun SettingRow(row: Setting, shapes: ListItemShapes) {
     val leading: (@Composable () -> Unit)? = row.leading ?: row.icon?.let { icon -> { Icon(icon, null) } }
-    val hasTrailing = row.checked != null || row.value != null || row.badge || row.good != null
+    val hasTrailing = row.checked != null || row.value != null || row.badge || row.good != null || row.action != null
     val trailing: (@Composable () -> Unit)? = if (!hasTrailing) null else { {
         Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
             row.value?.let { Text(it, color = MaterialTheme.colorScheme.onSurfaceVariant, maxLines = 1) }
@@ -106,6 +110,7 @@ private fun SettingRow(row: Setting, shapes: ListItemShapes) {
                     tint = if (ok) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.error)
             }
             if (row.badge) Badge { Text("1") }
+            row.action?.let { (icon, label) -> IconButton(onClick = { row.onAction?.invoke() }, enabled = row.enabled) { Icon(icon, label) } }
             if (row.checked != null) { if (row.checkbox) Checkbox(row.checked, onCheckedChange = null, enabled = row.enabled) else Switch(row.checked, onCheckedChange = null, enabled = row.enabled) }
         }
     } }
@@ -131,45 +136,77 @@ private fun SettingRow(row: Setting, shapes: ListItemShapes) {
         style = MaterialTheme.typography.bodyLarge, color = MaterialTheme.colorScheme.onSurfaceVariant)
 }
 
-private val Pages = mapOf(
-    "Account" to "Profile", "Appearance" to "Profile", "Help" to "Profile",
-    "Contacts" to "Account", "Blocked" to "Account", "Account Recovery" to "Account", "Media" to "Account",
-    "Statistics" to "Account", "Delete Account" to "Account",
-    "Contact Us" to "Help", "Status" to "Help", "Licenses" to "Help", "Crash Reports" to "Status",
-)
+/** A standard modal bottom sheet as high as its content (iOS's fitted detent): no half step, and the navigation bar
+ *  below it in the sheet's own colour, not the system's white scrim. A page taller than the screen scrolls. */
+@Composable internal fun FittedSheet(
+    onDismissRequest: () -> Unit,
+    state: SheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true),
+    containerColor: Color = BottomSheetDefaults.ContainerColor,
+    contentColor: Color = contentColorFor(containerColor),
+    dragHandle: @Composable (() -> Unit)? = { BottomSheetDefaults.DragHandle() },
+    content: @Composable ColumnScope.() -> Unit,
+) = ModalBottomSheet(
+    onDismissRequest = onDismissRequest, sheetState = state, containerColor = containerColor, contentColor = contentColor,
+    dragHandle = dragHandle, contentWindowInsets = { WindowInsets.safeDrawing.only(WindowInsetsSides.Bottom) },
+) {
+    val window = (androidx.compose.ui.platform.LocalView.current.parent as? androidx.compose.ui.window.DialogWindowProvider)?.window
+    SideEffect { if (android.os.Build.VERSION.SDK_INT >= 29) window?.isNavigationBarContrastEnforced = false }
+    // Never under the status bar: the tallest sheet stops below it (its handle included) and scrolls.
+    val density = androidx.compose.ui.platform.LocalDensity.current
+    val screen = with(density) { androidx.compose.ui.platform.LocalWindowInfo.current.containerSize.height.toDp() }
+    val insets = with(density) { (WindowInsets.statusBars.getTop(this) + WindowInsets.navigationBars.getBottom(this)).toDp() }
+    val handle = if (dragHandle != null) 48.dp else 0.dp
+    Column(Modifier.heightIn(max = (screen - insets - handle).coerceAtLeast(0.dp)), content = content)
+}
 
-@Composable fun ProfileSheet(model: YoViewModel, s: AppState, onClose: () -> Unit, onAddFriends: () -> Unit) =
-    YoSystemTheme { Settings(model, s, onClose, onAddFriends) }
+/** Settings (iOS SettingsView): a sheet as high as the page in view, its pages pushed in with a back arrow. */
+@Composable fun ProfileSheet(model: YoViewModel, s: AppState, onClose: () -> Unit, onAddFriends: () -> Unit) = YoSystemTheme {
+    val sheet = rememberModalBottomSheetState(skipPartiallyExpanded = true)
+    val scope = rememberCoroutineScope()
+    fun hideThen(then: () -> Unit) { scope.launch { sheet.hide() }.invokeOnCompletion { then() } }
+    FittedSheet(onDismissRequest = onClose, state = sheet, containerColor = MaterialTheme.colorScheme.surfaceContainer) {
+        Settings(model, s, onClose = { hideThen(onClose) }, onAddFriends = { hideThen(onAddFriends) })
+    }
+}
 
 @Composable private fun Settings(model: YoViewModel, s: AppState, onClose: () -> Unit, onAddFriends: () -> Unit) {
     val res = LocalResources.current
     val context = LocalContext.current
     val repo = model.repository
-    // The way here: the encryption and contact pages are reached from two places.
+    // The way here: a contact's page is reached from Contacts.
     var trail by rememberSaveable { mutableStateOf(listOf("Profile")) }
     val page = trail.last()
     fun open(next: String) { trail = trail + next }
     val back = { if (trail.size > 1) trail = trail.dropLast(1) else onClose() }
-    PredictiveBackHandler { events -> events.collect { }; back() }
+    // A pushed page goes back one; on the first page the sheet's own back closes it.
+    androidx.activity.compose.BackHandler(enabled = trail.size > 1) { trail = trail.dropLast(1) }
 
     var secure by remember { mutableStateOf(false) }
     var code by remember { mutableStateOf(false) }
     var logout by remember { mutableStateOf(false) }
     var renew by remember { mutableStateOf(false) }
     var removePasskey by remember { mutableStateOf(false) }
+    var showingKey by remember { mutableStateOf(false) }
+    var shownKey by remember { mutableStateOf<String?>(null) }
+    var showingInfo by remember { mutableStateOf(false) }
+    var unblocking by remember { mutableStateOf<Friend?>(null) }
     var passkeyRevision by remember { mutableIntStateOf(0) }
     val contacts = remember(s.friends) { s.friends.filter { it.group == null && !it.blocked }.sortedBy { it.name.lowercase() } }
     val auth = rememberLauncherForActivityResult(ActivityResultContracts.StartActivityForResult()) { result ->
         if (result.resultCode == Activity.RESULT_OK) {
-            if (page == "Delete Account") repo.command { deleteAccount(); onClose() } else { repo.command { prepareRecovery() }; secure = true }
-        }
+            when {
+                page == "Delete Account" -> repo.command { deleteAccount(); onClose() }
+                showingKey -> repo.command { val key = savedRecovery(); withContext(Dispatchers.Main) { showingKey = false; shownKey = key } }
+                else -> { repo.command { prepareRecovery() }; secure = true }
+            }
+        } else showingKey = false
     }
     fun authenticate() {
         @Suppress("DEPRECATION")
         val intent = context.getSystemService(KeyguardManager::class.java).createConfirmDeviceCredentialIntent(
             res.getString(if (page == "Delete Account") R.string.ui_delete_account else R.string.ui_recovery_key),
             res.getString(R.string.ui_confirm_it_s_you))
-        if (intent != null) auth.launch(intent) else model.error(res.getString(R.string.ui_set_a_screen_lock_in_android_settings_to_continue))
+        if (intent != null) auth.launch(intent) else { showingKey = false; model.error(res.getString(R.string.ui_set_a_screen_lock_in_android_settings_to_continue)) }
     }
     val passkeyConfigured by produceState(false, s.secured, secure, passkeyRevision, page) {
         if (!secure && s.secured && page in setOf("Account Recovery", "Delete Account")) {
@@ -188,13 +225,12 @@ private val Pages = mapOf(
     }
     val connected = s.lastSync != null && System.currentTimeMillis() - s.lastSync < 60_000
     val title = when {
-        page == "Profile" -> stringResource(R.string.ui_settings)
         page == "Account" -> s.username.orEmpty()
         page.startsWith("contact:") -> s.friends.firstOrNull { it.key == page.removePrefix("contact:") }?.name.orEmpty()
         else -> stringResource(when (page) {
             "Account Recovery" -> R.string.account_recovery
             "Contacts" -> R.string.ui_contacts
-            "Appearance" -> R.string.ui_appearance
+            "Appearance" -> R.string.ui_app_icon
             "Blocked" -> R.string.ui_blocked
             "Contact Us" -> R.string.ui_yo_team
             "Crash Reports" -> R.string.ui_crash_reports
@@ -202,46 +238,62 @@ private val Pages = mapOf(
             "Encryption" -> R.string.ui_encryption
             "Help" -> R.string.help_and_about
             "Licenses" -> R.string.about_and_licenses
-            "Media" -> R.string.ui_media
-            "Statistics" -> R.string.ui_statistics
+            "Profile" -> R.string.ui_settings
             else -> R.string.ui_status
         })
+    }
+    // What a page's rows mean, behind its (i) instead of under every row (iOS: "How Account Recovery Works").
+    val info: String? = when (page) {
+        "Account Recovery" -> listOf(
+            R.string.account_recovery_explanation,
+            when { s.backedUp -> R.string.google_backup_footer
+                s.googleBackup && s.backupMissingReason == CloudMissing.DEVICE_BACKUP -> R.string.google_backup_off_device_backup
+                s.googleBackup -> R.string.google_backup_off
+                else -> R.string.google_backup_turned_off },
+            R.string.account_backup_footer,
+        ).joinToString("\n\n") { res.getString(it) }
+        "Blocked" -> res.getString(R.string.ui_blocked_friends_can_t_send_you_yos_tap_unblock_to_unblock)
+        "Appearance" -> res.getString(R.string.ui_yo_and_photos_at_the_left_end_of_a_bar_undo_at_the_right_the_came)
+        "Status" -> res.getString(R.string.ui_anonymous_crash_reports_include_android_version_os_exit_reason_an)
+        "Encryption" -> res.getString(R.string.ui_every_yo_photo_and_video_is_end_to_end_encrypted_only_you_an)
+        else -> if (page.startsWith("contact:")) res.getString(R.string.compare_safety, title) else null
     }
     var feedback by rememberSaveable { mutableStateOf("") }
     var sendingFeedback by remember { mutableStateOf(false) }
     var support by remember { mutableStateOf<SupportThread?>(null) }
 
-    SystemBars()
-    Scaffold(
-        modifier = Modifier.fillMaxSize(),
-        containerColor = MaterialTheme.colorScheme.surfaceContainer,
-        topBar = {
-            TopAppBar(
-                colors = TopAppBarDefaults.topAppBarColors(containerColor = MaterialTheme.colorScheme.surfaceContainer),
-                title = { Text(title, maxLines = 1) },
-                navigationIcon = { IconButton(onClick = back) { Icon(Icons.AutoMirrored.Filled.ArrowBack, stringResource(R.string.ui_back)) } },
-            )
-        },
-        bottomBar = {
-            if (page == "Contact Us") SupportComposer(feedback, { feedback = utf8Limit(it, 2000) }, sendingFeedback) {
-                val text = feedback.trim()
-                sendingFeedback = true
-                repo.command {
-                    try {
-                        feedback(text)
-                        val updated = supportThread()
-                        withContext(Dispatchers.Main) { feedback = ""; support = updated }
-                    } finally { withContext(Dispatchers.Main) { sendingFeedback = false } }
+    Column(Modifier.fillMaxWidth()) {
+        // The first page has no bar (iOS): its rows start at the sheet's top.
+        if (page != "Profile") TopAppBar(
+            title = { Text(title, maxLines = 1) },
+            navigationIcon = { IconButton(onClick = back) { Icon(Icons.AutoMirrored.Filled.ArrowBack, stringResource(R.string.ui_back)) } },
+            actions = {
+                if (info != null) IconButton(onClick = { showingInfo = true }) {
+                    Icon(Icons.Outlined.Info, stringResource(R.string.settings_page_info))
                 }
-            }
-        },
-        contentWindowInsets = WindowInsets.safeDrawing,
-    ) { padding ->
-        AnimatedContent(page, Modifier.padding(padding).consumeWindowInsets(padding), label = "settings") { shown ->
+            },
+            colors = TopAppBarDefaults.topAppBarColors(containerColor = Color.Transparent),
+            windowInsets = WindowInsets(0),
+        )
+        AnimatedContent(page, label = "settings") { shown ->
             when {
-                shown == "Contact Us" -> SupportPage(model, support) { support = it }
+                // The chat and the licences take the whole height, as on iOS.
+                shown == "Contact Us" -> Column(Modifier.fillMaxSize()) {
+                    Box(Modifier.weight(1f)) { SupportPage(model, support) { support = it } }
+                    SupportComposer(feedback, { feedback = utf8Limit(it, 2000) }, sendingFeedback) {
+                        val text = feedback.trim()
+                        sendingFeedback = true
+                        repo.command {
+                            try {
+                                feedback(text)
+                                val updated = supportThread()
+                                withContext(Dispatchers.Main) { feedback = ""; support = updated }
+                            } finally { withContext(Dispatchers.Main) { sendingFeedback = false } }
+                        }
+                    }
+                }
                 shown == "Licenses" -> LicensesPage()
-                else -> Column(Modifier.fillMaxSize().imePadding().verticalScroll(rememberScrollState()).padding(horizontal = 16.dp, vertical = 8.dp)) { when {
+                else -> Column(Modifier.fillMaxWidth().verticalScroll(rememberScrollState()).padding(horizontal = 16.dp).padding(top = 8.dp)) { when {
                     shown == "Profile" -> {
                         ProfileCard(s, onOpen = { open("Account") }, onCode = { code = true })
                         Section(null, null,
@@ -254,98 +306,80 @@ private val Pages = mapOf(
                             Setting(stringResource(R.string.ui_add_friends), Icons.Default.PersonAdd, onClick = onAddFriends),
                         )
                     }
+                    // iOS AccountPage: who, then recovery and leaving; deleting is a link under them (App Review 5.1.1(v)).
                     shown == "Account" -> {
                         Section(null, null,
-                            Setting(stringResource(R.string.ui_contacts), Icons.Default.People, contacts.size.toString(), onClick = { open("Contacts") }),
+                            Setting(stringResource(R.string.ui_contacts), Icons.Default.People,
+                                encrypted?.let { res.getString(R.string.part_of_total, it.first, it.second) }, onClick = { open("Contacts") }),
                             Setting(stringResource(R.string.ui_blocked), Icons.Default.Block, s.friends.count { it.blocked }.toString(), onClick = { open("Blocked") }),
                         )
                         Section(null, null,
                             Setting(stringResource(R.string.account_recovery), Icons.Default.Lock, badge = !s.secured || s.backupMissing, onClick = { open("Account Recovery") }),
                             Setting(stringResource(R.string.ui_sign_out), Icons.AutoMirrored.Filled.Logout, onClick = { logout = true }),
                         )
-                        Section(null, null,
-                            Setting(stringResource(R.string.ui_media), Icons.Default.PhotoLibrary, onClick = { open("Media") }),
-                            Setting(stringResource(R.string.ui_encryption), Icons.Default.EnhancedEncryption,
-                                encrypted?.let { res.getString(R.string.part_of_total, it.first, it.second) }, onClick = { open("Encryption") }),
-                            Setting(stringResource(R.string.ui_statistics), Icons.Default.BarChart, (s.sent + s.received).toString(), onClick = { open("Statistics") }),
-                            Setting(stringResource(R.string.ui_requests_from_strangers), Icons.Default.PersonAddAlt, checked = s.requestsOpen,
-                                onChecked = { on -> repo.command { settings(requests = on) } }),
-                        )
-                        Section(null, null,
-                            Setting(stringResource(R.string.ui_delete_account), Icons.Default.DeleteForever, danger = true, onClick = { open("Delete Account") }),
-                        )
+                        TextButton(onClick = { open("Delete Account") }, Modifier.padding(start = 4.dp, bottom = 12.dp)) {
+                            Text(stringResource(R.string.settings_leaving_yo), color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                style = MaterialTheme.typography.bodyMedium)
+                            Text(" " + stringResource(R.string.settings_delete_your_account), style = MaterialTheme.typography.bodyMedium)
+                        }
                     }
                     shown == "Account Recovery" -> {
-                        Section(null, stringResource(R.string.account_recovery_explanation),
-                            Setting(stringResource(R.string.ui_recovery_key), Icons.Default.Key, checked = s.secured, onChecked = { on ->
-                                if (on) { repo.command { prepareRecovery() }; secure = true } else renew = true
-                            }),
-                            Setting(stringResource(R.string.ui_show_recovery_key), Icons.Default.Visibility, enabled = s.secured, onClick = ::authenticate),
+                        Section(null, null,
+                            Setting(stringResource(R.string.account_backup), Icons.Default.CloudUpload, onClick = { repo.command { saveContacts() } }),
+                        )
+                        Section(null, null,
                             // A valid recovery key shows only after the device confirmed it is you, also on the way to a passkey.
                             Setting(stringResource(R.string.recovery_passkey), Icons.Default.Fingerprint, checked = passkeyConfigured, onChecked = { on ->
                                 if (!on) removePasskey = true
                                 else if (s.secured) authenticate()
                                 else { repo.command { prepareRecovery() }; secure = true }
                             }),
+                            // The key's switch, and on the same line the eye that shows it.
+                            Setting(stringResource(R.string.ui_recovery_key), Icons.Default.Key, checked = s.secured,
+                                action = if (s.secured) Icons.Default.Visibility to stringResource(R.string.ui_show_recovery_key) else null,
+                                onAction = { showingKey = true; authenticate() },
+                                onChecked = { on -> if (on) { repo.command { prepareRecovery() }; secure = true } else renew = true }),
                         )
                         // Spec "Key material only in an end-to-end encrypted cloud": on only with a screen lock and Google's backup on.
-                        Section(null, stringResource(when { s.backedUp -> R.string.google_backup_footer
-                                s.googleBackup && s.backupMissingReason == CloudMissing.DEVICE_BACKUP -> R.string.google_backup_off_device_backup
-                                s.googleBackup -> R.string.google_backup_off
-                                else -> R.string.google_backup_turned_off }),
+                        Section(null, null,
                             Setting(stringResource(R.string.google_backup), Icons.Default.Cloud, checked = s.backedUp, badge = s.backupMissing,
                                 onChecked = { on -> repo.command { googleBackup(on) } }),
                         )
-                        Section(null, stringResource(R.string.account_backup_footer),
-                            Setting(stringResource(R.string.account_backup), Icons.Default.CloudUpload, onClick = { repo.command { saveContacts() } }),
-                        )
                     }
+                    // iOS BlockedPage: who may ask, then the blocked contacts.
                     shown == "Blocked" -> {
+                        Section(null, null,
+                            Setting(stringResource(R.string.allow_yo_requests), Icons.Default.PersonAddAlt, checked = s.requestsOpen,
+                                onChecked = { on -> repo.command { settings(requests = on) } }),
+                        )
                         val blocked = s.friends.filter { it.blocked }
                         if (blocked.isEmpty()) Note(res.getString(R.string.ui_no_blocked_friends))
-                        else Section(null, stringResource(R.string.ui_blocked_friends_can_t_send_you_yos_tap_unblock_to_unblock),
+                        else Section(stringResource(R.string.blocked_contacts), null,
                             *blocked.map { friend ->
                                 Setting(friend.name, leading = { SettingsAvatar(friend.name, 40) }, value = res.getString(R.string.ui_unblock),
-                                    onClick = { repo.command { block(friend, false) } })
+                                    onClick = { unblocking = friend })
                             }.toTypedArray())
                     }
-                    shown == "Media" -> Section(null, stringResource(R.string.ui_saves_photos_and_videos_you_capture_to_your_photo_library_on_andr),
-                        Setting(stringResource(R.string.ui_keep_sent_photos), Icons.Default.SaveAlt, checked = s.saveSent,
-                            onChecked = { on -> repo.command { settings(save = on) } }),
-                    )
                     shown == "Appearance" -> {
                         IconChoice(s.appIcon) { name -> repo.command { icon(name) } }
-                        Section(null, stringResource(R.string.ui_yo_and_photos_at_the_left_end_of_a_bar_undo_at_the_right_the_came),
+                        Section(null, null,
                             Setting(stringResource(R.string.ui_left_handed), Icons.Default.PanTool, checked = s.leftHanded,
                                 onChecked = { on -> repo.command { settings(left = on) } }),
                         )
                     }
-                    shown == "Statistics" -> {
-                        val top = s.byFriend.maxByOrNull { it.value }
-                        if (top != null) Section(null, null,
-                            Setting(stringResource(R.string.top_friend), Icons.Default.Favorite, s.friends.firstOrNull { it.key == top.key }?.name.orEmpty()),
-                            Setting(stringResource(R.string.yos_together), Icons.Default.Handshake, top.value.toString()),
-                        )
-                        Section(null, stringResource(R.string.ui_counted_on_this_phone),
-                            Setting(stringResource(R.string.ui_yos_sent), Icons.Default.NorthEast, s.sent.toString()),
-                            Setting(stringResource(R.string.ui_yos_received), Icons.Default.SouthWest, s.received.toString()),
-                            Setting(stringResource(R.string.ui_friends), Icons.Default.People, s.friends.count { !it.blocked }.toString()),
-                        )
-                    }
+                    // iOS HelpPage: the tutorial, then Contact Us, then Status and About & Licenses with the version.
                     shown == "Help" -> {
-                        // Yo's own look for content: the tutorial on Amethyst.
-                        Surface(Modifier.padding(bottom = 20.dp), shape = MaterialTheme.shapes.extraLarge, color = Amethyst, contentColor = Color.White) {
-                            YoTutorial(Modifier.fillMaxWidth().height(330.dp), compact = true)
-                        }
+                        HelpHero(Modifier.padding(bottom = 20.dp))
                         Section(null, null,
                             Setting(stringResource(R.string.ui_contact_us), Icons.Default.Forum, onClick = { open("Contact Us") }),
-                            Setting(stringResource(R.string.ui_status), Icons.Default.CheckCircle,
-                                stringResource(if (connected) R.string.ui_connected else R.string.ui_waiting), onClick = { open("Status") }),
-                            Setting(stringResource(R.string.about_and_licenses), Icons.Default.Info,
-                                stringResource(R.string.about_version, BuildConfig.VERSION_NAME), onClick = { open("Licenses") }),
+                        )
+                        Section(null, null,
+                            Setting(stringResource(R.string.ui_status), Icons.Default.MonitorHeart,
+                                stringResource(if (connected) R.string.ui_connected else R.string.ui_waiting), good = connected, onClick = { open("Status") }),
+                            Setting(stringResource(R.string.about_and_licenses), Icons.Default.Info, BuildConfig.VERSION_NAME, onClick = { open("Licenses") }),
                         )
                     }
-                    shown == "Status" -> StatusPage(model, connected) { open(it) }
+                    shown == "Status" -> StatusPage(model, s, connected) { open(it) }
                     shown == "Crash Reports" -> {
                         val reports = repo.crashes.history()
                         if (reports.isEmpty()) Note(res.getString(R.string.settings_no_crash_reports))
@@ -372,12 +406,28 @@ private val Pages = mapOf(
     }
 
     if (secure) RecoverySheet(model, s) { secure = false }
-    if (code) ModalBottomSheet(onDismissRequest = { code = false }, sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)) {
-        Column(Modifier.fillMaxWidth().padding(24.dp), horizontalAlignment = Alignment.CenterHorizontally) {
+    shownKey?.let { key -> RecoveryKeySheet(s.username.orEmpty(), key) { shownKey = null } }
+    if (code) FittedSheet(onDismissRequest = { code = false }) {
+        Column(Modifier.fillMaxWidth().padding(horizontal = 24.dp).padding(bottom = 24.dp), horizontalAlignment = Alignment.CenterHorizontally) {
             Text(stringResource(R.string.ui_your_code), style = MaterialTheme.typography.titleLarge)
             Qr("https://justyo.co/${Uri.encode(s.username)}", Modifier.padding(24.dp).size(240.dp))
             Text(s.username.orEmpty(), style = MaterialTheme.typography.headlineSmall.copy(fontFamily = YoFont))
         }
+    }
+    if (showingInfo && info != null) AlertDialog(
+        onDismissRequest = { showingInfo = false },
+        icon = { Icon(Icons.Outlined.Info, null) },
+        title = { Text(title) },
+        text = { Text(info) },
+        confirmButton = { TextButton(onClick = { showingInfo = false }) { Text(stringResource(R.string.ui_done)) } },
+    )
+    unblocking?.let { friend ->
+        AlertDialog(
+            onDismissRequest = { unblocking = null },
+            title = { Text(res.getString(R.string.unblock_name, friend.name)) },
+            confirmButton = { TextButton(onClick = { unblocking = null; repo.command { block(friend, false) } }) { Text(stringResource(R.string.ui_unblock)) } },
+            dismissButton = { TextButton(onClick = { unblocking = null }) { Text(stringResource(R.string.ui_cancel)) } },
+        )
     }
     if (logout) AlertDialog(
         onDismissRequest = { logout = false },
@@ -410,17 +460,39 @@ private val Pages = mapOf(
     )
 }
 
-/** Dark status bar icons over the light settings, given back to the list's white ones on leaving. */
-@Composable internal fun SystemBars() {
-    val view = androidx.compose.ui.platform.LocalView.current
-    val light = !androidx.compose.foundation.isSystemInDarkTheme()
-    DisposableEffect(light) {
-        val window = (view.context as? Activity)?.window
-        val bars = window?.let { androidx.core.view.WindowCompat.getInsetsController(it, view) }
-        bars?.isAppearanceLightStatusBars = light; bars?.isAppearanceLightNavigationBars = light
-        onDispose { bars?.isAppearanceLightStatusBars = false; bars?.isAppearanceLightNavigationBars = false }
+/** The saved recovery key, shown after the screen lock confirmed it is you: its QR code and its 64 characters. */
+@Composable private fun RecoveryKeySheet(name: String, key: String, onClose: () -> Unit) {
+    val lifecycle = androidx.lifecycle.compose.LocalLifecycleOwner.current
+    DisposableEffect(lifecycle) {
+        val observer = androidx.lifecycle.LifecycleEventObserver { _, event -> if (event == androidx.lifecycle.Lifecycle.Event.ON_PAUSE) onClose() }
+        lifecycle.lifecycle.addObserver(observer); onDispose { lifecycle.lifecycle.removeObserver(observer) }
+    }
+    FittedSheet(onDismissRequest = onClose) {
+        Column(Modifier.fillMaxWidth().padding(horizontal = 16.dp).padding(bottom = 16.dp), horizontalAlignment = Alignment.CenterHorizontally) {
+            Text(stringResource(R.string.ui_recovery_key), style = MaterialTheme.typography.titleLarge)
+            Text(name, Modifier.padding(bottom = 12.dp), style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            KeyCard(key)
+        }
     }
 }
+
+@Composable private fun KeyCard(key: String) {
+    OutlinedCard(Modifier.fillMaxWidth()) {
+        Column(Modifier.fillMaxWidth().padding(16.dp), horizontalAlignment = Alignment.CenterHorizontally) {
+            Qr(key, Modifier.size(140.dp))
+            SelectionContainer {
+                Column {
+                    key.chunked(4).chunked(4).forEach { blocks ->
+                        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceEvenly) {
+                            blocks.forEach { Text(it, fontFamily = FontFamily.Monospace, fontSize = 17.sp) }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
 
 /** The account's card: avatar, the name never cut (it shrinks to half, as on iOS), the red 1 while unsecured, the code. */
 @Composable private fun ProfileCard(s: AppState, onOpen: () -> Unit, onCode: () -> Unit) {
@@ -466,40 +538,44 @@ private val Pages = mapOf(
     Image(painterResource(resource), null, Modifier.size(size.dp).clip(RoundedCornerShape(radius.dp)).background(background))
 }
 
-@Composable private fun StatusPage(model: YoViewModel, connected: Boolean, open: (String) -> Unit) {
+/** Status (iOS StatusPage): usage, the server and this phone's part, crashes. Tapping the Yos row cycles its view. */
+@Composable private fun StatusPage(model: YoViewModel, s: AppState, connected: Boolean, open: (String) -> Unit) {
     val repo = model.repository
     val res = LocalResources.current
+    val context = LocalContext.current
     var trip by remember { mutableStateOf<String?>(null) }
     var probing by remember { mutableStateOf(false) }
     var crashOn by remember { mutableStateOf(repo.crashes.enabled) }
-    var granted by remember { mutableStateOf(false) }
-    val permission = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) { granted = it; model.notificationResult(it) }
-    val notifications = granted || contextNotificationsEnabled()
-    run {
-        Section(stringResource(R.string.ui_connection), null,
-            Setting(stringResource(R.string.ui_hub), Icons.Default.Cloud, stringResource(if (connected) R.string.ui_connected else R.string.ui_waiting), good = connected),
-            Setting(stringResource(R.string.ui_round_trip), Icons.Default.Speed, trip ?: stringResource(R.string.ui_not_checked)),
-            Setting(stringResource(if (probing) R.string.ui_checking else R.string.ui_check_round_trip), Icons.Default.Refresh, enabled = !probing, onClick = {
+    var yosView by rememberSaveable { mutableIntStateOf(0) }
+    val notifications by model.notificationsEnabled.collectAsStateWithLifecycle()
+    val top = s.byFriend.maxByOrNull { it.value }
+    val mostYos = top?.let { most -> s.friends.firstOrNull { it.key == most.key }?.name } ?: "—"
+    Section(stringResource(R.string.status_usage), null,
+        Setting(stringResource(listOf(R.string.status_total_yos, R.string.status_yos, R.string.top_friend)[yosView]), Icons.Default.BarChart,
+            listOf("${s.sent + s.received}", "↑${s.sent} · ↓${s.received}", mostYos)[yosView], onClick = { yosView = (yosView + 1) % 3 }),
+        Setting(stringResource(R.string.ui_friends), Icons.Default.People, s.friends.count { !it.blocked && it.group == null }.toString()),
+    )
+    Section(stringResource(R.string.status_server), null,
+        Setting(stringResource(R.string.ui_hub), Icons.Default.Cloud, stringResource(if (connected) R.string.ui_connected else R.string.ui_waiting), good = connected),
+        Setting(stringResource(R.string.ui_round_trip), Icons.Default.Speed,
+            if (probing) stringResource(R.string.ui_checking) else trip ?: stringResource(R.string.ui_not_checked), enabled = !probing, onClick = {
                 probing = true
                 repo.command {
                     try { trip = roundTrip()?.let { "$it ms" } ?: res.getString(R.string.ui_no_reply) } finally { probing = false }
                 }
             }),
-        )
-        Section(null, stringResource(R.string.ui_anonymous_crash_reports_include_android_version_os_exit_reason_an),
-            if (android.os.Build.VERSION.SDK_INT >= 33 && !notifications) Setting(stringResource(R.string.enable_yo_notifications), Icons.Default.Notifications,
-                onClick = { permission.launch(android.Manifest.permission.POST_NOTIFICATIONS) }) else null,
-            Setting(stringResource(R.string.ui_send_crashes), Icons.Default.BugReport, checked = crashOn, onChecked = {
-                crashOn = it; repo.crashes.enabled = it
-                if (it) repo.command { crashes.flush() }
-            }),
-            Setting(stringResource(R.string.ui_crash_reports), Icons.Default.Description, onClick = { open("Crash Reports") }),
-        )
-        Section(null, null,
-            Setting(stringResource(R.string.ui_encryption), Icons.Default.EnhancedEncryption, onClick = { open("Encryption") }),
-            Setting(stringResource(R.string.ui_version), Icons.Default.Info, BuildConfig.VERSION_NAME),
-        )
-    }
+        Setting(stringResource(R.string.status_notifications), Icons.Default.Notifications,
+            stringResource(if (notifications) R.string.status_ready else R.string.status_not_allowed), good = notifications,
+            onClick = if (notifications) null else { { openNotificationSettings(context) } }),
+        Setting(stringResource(R.string.ui_encryption), Icons.Default.EnhancedEncryption, onClick = { open("Encryption") }),
+    )
+    Section(stringResource(R.string.status_crashes), null,
+        Setting(stringResource(R.string.ui_send_crashes), Icons.Default.BugReport, checked = crashOn, onChecked = {
+            crashOn = it; repo.crashes.enabled = it
+            if (it) repo.command { crashes.flush() }
+        }),
+        Setting(stringResource(R.string.ui_crash_reports), Icons.Default.Description, onClick = { open("Crash Reports") }),
+    )
 }
 
 
@@ -563,7 +639,7 @@ private val Pages = mapOf(
 
 @Composable private fun SupportComposer(value: String, change: (String) -> Unit, sending: Boolean, send: () -> Unit) {
     Surface(color = MaterialTheme.colorScheme.surfaceContainer) {
-        Column(Modifier.fillMaxWidth().navigationBarsPadding().imePadding().padding(horizontal = 16.dp, vertical = 8.dp),
+        Column(Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 8.dp),
             verticalArrangement = Arrangement.spacedBy(4.dp)) {
             OutlinedTextField(
                 value, change, Modifier.fillMaxWidth(), enabled = !sending, maxLines = 6,
@@ -616,8 +692,6 @@ private val Pages = mapOf(
 @Composable private fun EncryptionPage(model: YoViewModel, connected: Boolean) {
     val res = LocalResources.current
     val status by produceState<SecurityStatus?>(null) { value = withContext(Dispatchers.IO) { model.repository.security() } }
-    Text(stringResource(R.string.ui_every_yo_photo_and_video_is_end_to_end_encrypted_only_you_an), Modifier.padding(16.dp, 8.dp, 16.dp, 20.dp),
-        style = MaterialTheme.typography.bodyLarge)
     status?.let { st ->
         Section(null, null,
             Setting(stringResource(R.string.ui_hub_connected), Icons.Default.Cloud, stringResource(if (connected) R.string.ui_connected else R.string.ui_waiting), good = connected),
@@ -650,20 +724,21 @@ private val Pages = mapOf(
     )
     details?.safetyNumber?.let { number ->
         val verified = contact?.verified == true
-        Card(Modifier.fillMaxWidth().padding(bottom = 20.dp), shape = MaterialTheme.shapes.extraLarge) {
+        Card(Modifier.fillMaxWidth().padding(bottom = 20.dp), shape = MaterialTheme.shapes.extraLarge,
+            colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceBright)) {
             Column(Modifier.fillMaxWidth().padding(16.dp), horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.spacedBy(8.dp)) {
                 Text(stringResource(R.string.compare_code), style = MaterialTheme.typography.labelLarge, color = MaterialTheme.colorScheme.onSurfaceVariant)
                 SelectionContainer {
                     Text(number.filter(Char::isDigit).chunked(5).chunked(3).joinToString("\n") { it.joinToString(" ") },
                         fontFamily = FontFamily.Monospace, textAlign = TextAlign.Center)
                 }
-                Text(res.getString(R.string.compare_safety, friend.name), style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant, textAlign = TextAlign.Center)
                 // Or scan each other's code: verified only when it matches (the QR code's own bytes, compared by the core).
-                details?.safetyCode?.let { Qr(it.toString(Charsets.ISO_8859_1), Modifier.size(200.dp)) }
-                TextButton(onClick = { scanning = true }) { Text(stringResource(R.string.scan_qr)) }
-                if (verified) OutlinedButton(onClick = { repo.command { verify(friend, false); revision++ } }) { Text(stringResource(R.string.ui_mark_as_not_verified)) }
-                else Button(onClick = { repo.command { verify(friend, true); revision++ } }) { Text(stringResource(R.string.ui_mark_as_verified)) }
+                details?.safetyCode?.let { Qr(it.toString(Charsets.ISO_8859_1), Modifier.size(150.dp)) }
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
+                    TextButton(onClick = { scanning = true }) { Text(stringResource(R.string.scan_qr)) }
+                    if (verified) OutlinedButton(onClick = { repo.command { verify(friend, false); revision++ } }) { Text(stringResource(R.string.ui_mark_as_not_verified)) }
+                    else Button(onClick = { repo.command { verify(friend, true); revision++ } }) { Text(stringResource(R.string.ui_mark_as_verified)) }
+                }
             }
         }
     }
@@ -720,13 +795,35 @@ private val Pages = mapOf(
     }
 }
 
-/** Setting up recovery: the key (shown, saved, shared) and a passkey. Standard sheet, list items and buttons. */
+/** A step of setting up recovery: its number (a tick once done), its name and line, its button on the right. */
+@Composable private fun RecoveryStep(number: Int, title: String, done: Boolean, action: String, enabled: Boolean, onAction: () -> Unit,
+    line: @Composable () -> Unit) {
+    Surface(Modifier.fillMaxWidth().padding(top = 8.dp), shape = RoundedCornerShape(16.dp), color = Color.White.copy(alpha = 0.14f), contentColor = Color.White) {
+        Row(Modifier.padding(horizontal = 14.dp, vertical = 10.dp), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+            Box(Modifier.size(28.dp).background(if (done) Color(0xFF2ECC71) else Color.White, CircleShape), contentAlignment = Alignment.Center) {
+                if (done) Icon(Icons.Default.Check, null, Modifier.size(18.dp), tint = Color.White)
+                else Text("$number", style = TextStyle(fontFamily = YoFont, fontSize = 14.sp, color = Color(0xFF8E44AD)))
+            }
+            Column(Modifier.weight(1f)) {
+                Text(title, style = MaterialTheme.typography.titleMedium)
+                line()
+            }
+            if (done) OutlinedButton(onClick = {}, enabled = false, border = androidx.compose.foundation.BorderStroke(1.5.dp, Color.White.copy(alpha = 0.6f)),
+                colors = ButtonDefaults.outlinedButtonColors(disabledContentColor = Color.White)) { Text(action) }
+            else Button(onClick = onAction, enabled = enabled, colors = ButtonDefaults.buttonColors(containerColor = Color.White, contentColor = Color.Black,
+                disabledContainerColor = Color.White.copy(alpha = 0.4f), disabledContentColor = Color.Black.copy(alpha = 0.6f))) { Text(action) }
+        }
+    }
+}
+
+/** Setting up recovery (iOS SecureNameSheet): save or show the key, or set up a passkey; either one is enough, then Done. */
 @Composable fun RecoverySheet(model: YoViewModel, s: AppState, onClose: () -> Unit) {
     val res = LocalResources.current
     val context = LocalContext.current
     var shown by remember { mutableStateOf(false) }
     var busy by remember { mutableStateOf(false) }
-    var saved by remember { mutableStateOf(false) }
+    var keySaved by remember { mutableStateOf(false) }
+    var passkeyDone by remember { mutableStateOf(false) }
     var sharing by remember { mutableStateOf(false) }
     val scope = rememberCoroutineScope()
     fun saveWith(write: suspend (java.io.OutputStream, String) -> Unit) = { uri: Uri? ->
@@ -735,7 +832,7 @@ private val Pages = mapOf(
             try {
                 val key = state.value.recovery ?: error(res.getString(R.string.ui_recovery_key_missing))
                 context.contentResolver.openOutputStream(uri)?.use { write(it, key) } ?: error(res.getString(R.string.ui_couldn_t_save_the_recovery_key))
-                keepRecovery(); saved = true
+                keepRecovery(); keySaved = true
             } finally { busy = false }
         }
         Unit
@@ -754,43 +851,50 @@ private val Pages = mapOf(
     }
     val key = s.recovery
     val ready = key?.length == 64
-    ModalBottomSheet(onDismissRequest = { if (!busy) onClose() }, sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)) {
-        Column(Modifier.fillMaxWidth().verticalScroll(rememberScrollState()).padding(horizontal = 16.dp), horizontalAlignment = Alignment.CenterHorizontally) {
-            Icon(Icons.Default.Key, null, Modifier.size(48.dp), tint = MaterialTheme.colorScheme.primary)
-            Text(stringResource(R.string.set_up_account_recovery).replace('\n', ' '), Modifier.padding(vertical = 12.dp),
-                style = MaterialTheme.typography.headlineSmall, textAlign = TextAlign.Center)
-            Section(null, stringResource(R.string.ui_anyone_with_this_key_can_sign_in_as_you_keep_it_safe_and_don),
-                Setting(stringResource(R.string.ui_recovery_key), Icons.Default.Key, enabled = ready && !busy,
-                    value = stringResource(if (shown) R.string.recovery_hide else R.string.recovery_show), onClick = { shown = !shown }),
-                Setting(stringResource(if (saved) R.string.saved else R.string.ui_save), Icons.Default.SaveAlt, enabled = ready && !busy,
-                    good = if (saved) true else null, onClick = { sharing = true }),
-                Setting(stringResource(R.string.recovery_passkey), Icons.Default.Fingerprint, enabled = !busy,
-                    value = stringResource(R.string.recovery_set_up), onClick = {
-                        scope.launch {
-                            busy = true
-                            try {
-                                val (name, user) = model.repository.passkeyAccount() ?: return@launch
-                                val answer = Passkeys.create(context, name, user)
-                                withContext(Dispatchers.IO) { model.repository.keepPasskey(answer) }
-                                saved = true
-                            } catch (e: CancellationException) { throw e } catch (e: Exception) {
-                                model.error(e.localizedMessage ?: res.getString(R.string.passkey_prf_required))
-                            } finally { busy = false }
-                        }
-                    }),
-            )
-            if (shown && key != null) OutlinedCard(Modifier.fillMaxWidth().padding(bottom = 20.dp)) {
-                Column(Modifier.fillMaxWidth().padding(16.dp), horizontalAlignment = Alignment.CenterHorizontally) {
-                    Qr(key, Modifier.size(140.dp))
-                    key.chunked(4).chunked(4).forEach { blocks ->
-                        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceEvenly) {
-                            blocks.forEach { Text(it, fontFamily = FontFamily.Monospace, fontSize = 17.sp) }
-                        }
-                    }
+    // The owner's design A (as iOS): Amethyst, the key, two step cards with their state, a white Done.
+    FittedSheet(onDismissRequest = { if (!busy) onClose() }, containerColor = Amethyst, contentColor = Color.White, dragHandle = null) {
+        Column(Modifier.fillMaxWidth().verticalScroll(rememberScrollState()).padding(horizontal = 20.dp).padding(top = 12.dp, bottom = 16.dp),
+            horizontalAlignment = Alignment.CenterHorizontally) {
+            Box(Modifier.fillMaxWidth()) {
+                FilledTonalIconButton(onClick = onClose, enabled = !busy, modifier = Modifier.align(Alignment.TopEnd),
+                    colors = IconButtonDefaults.filledTonalIconButtonColors(containerColor = Color.White.copy(alpha = 0.18f), contentColor = Color.White)) {
+                    Icon(Icons.Default.Close, stringResource(R.string.ui_close))
                 }
+                Icon(Icons.Default.Key, null, Modifier.align(Alignment.Center).padding(top = 24.dp).size(48.dp))
             }
-            Button(onClick = onClose, enabled = saved && !busy, modifier = Modifier.fillMaxWidth().padding(bottom = 16.dp)) {
-                Text(stringResource(R.string.ui_done))
+            Text(stringResource(R.string.account_recovery), Modifier.padding(top = 12.dp), style = TextStyle(fontFamily = YoFont, fontSize = 26.sp),
+                textAlign = TextAlign.Center)
+            Text(stringResource(R.string.recovery_intro), Modifier.padding(top = 6.dp, bottom = 18.dp), textAlign = TextAlign.Center,
+                style = MaterialTheme.typography.bodyMedium, color = Color.White.copy(alpha = 0.85f))
+            RecoveryStep(1, stringResource(R.string.ui_recovery_key), keySaved, stringResource(if (keySaved) R.string.saved else R.string.recovery_save),
+                enabled = ready && !busy, onAction = { sharing = true }) {
+                Text(stringResource(if (shown) R.string.recovery_hide else R.string.recovery_show),
+                    Modifier.clickable(enabled = ready && !busy, role = androidx.compose.ui.semantics.Role.Button) { shown = !shown }.padding(vertical = 2.dp),
+                    style = MaterialTheme.typography.labelLarge, color = Color.White.copy(alpha = if (ready && !busy) 0.9f else 0.5f),
+                    textDecoration = androidx.compose.ui.text.style.TextDecoration.Underline)
+            }
+            if (shown && key != null) Box(Modifier.padding(top = 8.dp)) { YoSystemTheme { KeyCard(key) } }
+            RecoveryStep(2, stringResource(R.string.recovery_passkey), passkeyDone, stringResource(if (passkeyDone) R.string.recovery_on else R.string.recovery_set_up),
+                enabled = !busy && !passkeyDone, onAction = {
+                    scope.launch {
+                        busy = true
+                        try {
+                            val (name, user) = model.repository.passkeyAccount() ?: return@launch
+                            val answer = Passkeys.create(context, name, user)
+                            withContext(Dispatchers.IO) { model.repository.keepPasskey(answer) }
+                            passkeyDone = true
+                        } catch (e: CancellationException) { throw e } catch (e: Exception) {
+                            model.error(e.localizedMessage ?: res.getString(R.string.passkey_prf_required))
+                        } finally { busy = false }
+                    }
+                }) {
+                Text(stringResource(R.string.recovery_passkey_where), style = MaterialTheme.typography.bodySmall, color = Color.White.copy(alpha = 0.85f))
+            }
+            // White with a black label: no purple on purple.
+            Button(onClick = onClose, enabled = (keySaved || passkeyDone) && !busy, modifier = Modifier.fillMaxWidth().padding(top = 24.dp).heightIn(min = 52.dp),
+                colors = ButtonDefaults.buttonColors(containerColor = Color.White, contentColor = Color.Black,
+                    disabledContainerColor = Color.White.copy(alpha = 0.4f), disabledContentColor = Color.Black.copy(alpha = 0.6f))) {
+                Text(stringResource(R.string.ui_done), fontSize = 18.sp, fontWeight = androidx.compose.ui.text.font.FontWeight.SemiBold)
             }
         }
     }
@@ -813,6 +917,7 @@ private val Pages = mapOf(
         },
     )
 }
+
 
 fun qrBitmap(text: String,side: Int=512): Bitmap {
     val matrix=QRCodeWriter().encode(text,BarcodeFormat.QR_CODE,side,side,mapOf(com.google.zxing.EncodeHintType.CHARACTER_SET to "ISO-8859-1"))

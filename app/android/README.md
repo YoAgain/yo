@@ -141,7 +141,7 @@ recording, press and held outgoing stack state feed the shared model. Core sende
 remain distinct even when profile names match. Rust owns send retries/key refresh/fallback;
 Android drives its pending delivery queue rather than recursively sending another Yo.
 
-Welcome contains name signup; sign-in is a native sheet. Help links to tutorial rows,
+Welcome contains the intro carousel (iOS's cards) and name signup; sign-in is a native sheet. Help shows the same cards,
 Yo Team support chat and Status. Status uses the actual core round-trip probe and exposes
 anonymous crash reporting (default on, managed frames on API 28+, OS native-crash/ANR collection on Android 11+, sanitized native frames on Android 12+). Media send
 feedback follows confirmed sending, and swipe-down discards the unseen viewer queue.
@@ -157,7 +157,7 @@ Yo's own words (bar titles, send and arrival lines, notifications, widget texts)
 encoding, widget selection, notification row) come from the core's `yo_product` via UniFFI, in English like iOS.
 Settings, dialogs and sheets are Material 3 Expressive standard components (segmented list items, switches, top
 app bars, sheets); the Yo look stays on the content (Flat UI bars, Montserrat Bold, Amethyst). Logical placement supports RTL. TalkBack, large fonts and RTL still need
-hardware acceptance. Nested settings, onboarding, camera and viewer use predictive back. Camera QR scanning reads recovery keys; safety numbers are compared as digits, as on iOS; native chooser targets support direct media shares. Presentation promotions persist and swipe removal has core-owned undo. Statistics include the top friend and last sent/received times.
+hardware acceptance. Nested settings, onboarding, camera and viewer use predictive back. Camera QR scanning reads recovery keys; safety numbers are compared as digits, as on iOS; native chooser targets support direct media shares. Presentation promotions persist and swipe removal has core-owned undo. Status counts the Yos (total, sent/received, the top friend); the long-press menu shows the last sent/received time.
 
 The release APK contains a manually maintained startup baseline profile, in addition to
 library profiles; no device performance measurements are claimed. An independent

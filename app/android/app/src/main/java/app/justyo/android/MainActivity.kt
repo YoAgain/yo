@@ -114,7 +114,6 @@ class YoViewModel(application: Application) : AndroidViewModel(application) {
                             uri.path?.endsWith(".mp4") == true)
                         val prepared = staged ?: if (isVideo) MediaFiles.video(context, uri, fromCamera = fromCamera) else MediaFiles.photo(context, uri)
                         if (sessionId != session) continue
-                        if (fromCamera && state.value.saveSent) MediaFiles.keep(context, prepared)
                         queued += media.stage(friend.target, prepared.bytes, prepared.width, prepared.height, prepared.video,
                             prepared.duration, held = !shared)
                         if (shared) {

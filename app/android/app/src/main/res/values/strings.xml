@@ -3,7 +3,6 @@
     <string name="ui_account_key">Account Key</string>
     <string name="ui_add_group">New Group</string>
     <string name="ui_anyone_with_this_key_can_sign_in_as_you_keep_it_safe_and_don">Anyone with this key can sign in as you. Keep it safe and don’t share it.</string>
-    <string name="ui_appearance">Appearance</string>
     <string name="ui_awesome">Awesome</string>
     <string name="ui_block">Block</string>
     <string name="ui_can_t_open_your_account">Can’t Open Your Account</string>
@@ -21,7 +20,6 @@
     <string name="ui_invite">Invite</string>
     <string name="ui_invite_friends">Invite Friends</string>
     <string name="ui_label_64_characters">64 characters</string>
-    <string name="ui_media">Media</string>
     <string name="ui_members">Members</string>
     <string name="group_member_limit">Members · %1$d of 20</string>
     <string name="find_group_friends">Find Friends</string>
@@ -65,13 +63,6 @@
     <string name="ui_close_camera">Close Camera</string>
     <string name="ui_camera">Camera</string>
     <string name="ui_switch_camera">Switch Camera</string>
-    <string name="ui_tap_a_name">Tap a Name</string>
-    <string name="ui_yo_back">Yo Back</string>
-    <string name="ui_add_friends_by_name">Add Friends by Name</string>
-    <string name="ui_that_s_a_yo_nothing_to_type">That’s a Yo. Nothing to type.</string>
-    <string name="ui_a_yo_comes_in_tap_their_name_to_yo_back">A Yo comes in. Tap their name to Yo back.</string>
-    <string name="ui_yogpt_is_there_from_the_start_it_yos_back">YoGPT is there from the start. It Yos back.</string>
-    <string name="ui_yo">Yo!</string>
     <string name="ui_creating">Creating…</string>
     <string name="ui_back">Back</string>
     <string name="ui_recovery_key">Recovery Key</string>
@@ -100,18 +91,11 @@
     <string name="ui_close">Close</string>
     <string name="ui_show_your_code">Show Your Code</string>
     <string name="ui_contacts">Contacts</string>
-    <string name="ui_requests_from_strangers">Requests from Strangers</string>
     <string name="ui_blocked_friends_can_t_send_you_yos_tap_unblock_to_unblock">Blocked friends can’t send you Yos. Tap Unblock to unblock.</string>
-    <string name="ui_saves_photos_and_videos_you_capture_to_your_photo_library_on_andr">Saves photos and videos you capture to your photo library. On Android 9, saving to the library is not available yet.</string>
-    <string name="ui_keep_sent_photos">Keep Sent Photos</string>
     <string name="ui_app_icon">App Icon</string>
     <string name="ui_yo_and_photos_at_the_left_end_of_a_bar_undo_at_the_right_the_came">Yo and photos at the left end of a bar, Undo at the right; the camera at the bottom left.</string>
     <string name="ui_left_handed">Left-Handed</string>
-    <string name="ui_counted_on_this_phone">Counted on this phone.</string>
-    <string name="ui_yos_sent">Yos Sent</string>
-    <string name="ui_yos_received">Yos Received</string>
     <string name="ui_friends">Friends</string>
-    <string name="ui_connection">Connection</string>
     <string name="ui_hub">Hub</string>
     <string name="ui_connected">Connected</string>
     <string name="ui_waiting">Waiting</string>
@@ -119,10 +103,8 @@
     <string name="ui_not_checked">Not checked</string>
     <string name="ui_no_reply">No reply</string>
     <string name="ui_checking">Checking…</string>
-    <string name="ui_check_round_trip">Check Round Trip</string>
     <string name="ui_anonymous_crash_reports_include_android_version_os_exit_reason_an">Anonymous crash and error reports: code details, build, Android version and model. No account, names, Yos or photos. While off, they stay on this phone.</string>
     <string name="ui_send_crashes">Send Crashes</string>
-    <string name="ui_version">Version</string>
     <string name="ui_send">Send</string>
     <string name="ui_hub_connected">Hub Connected</string>
     <string name="ui_hub_signed">Hub Signed</string>
@@ -135,7 +117,6 @@
     <string name="ui_account">Account</string>
     <string name="ui_blocked">Blocked</string>
     <string name="ui_crash_reports">Crash Reports</string>
-    <string name="ui_statistics">Statistics</string>
     <string name="ui_create">Create</string>
     <string name="ui_couldn_t_open_this_photo_or_video">Couldn’t open this photo or video.</string>
     <string name="ui_photo">Photo</string>
@@ -152,7 +133,6 @@
 <string name="saved">Saved</string>
 <plurals name="media_items"><item quantity="one">%1$d photo or video</item><item quantity="other">%1$d photos or videos</item></plurals>
 <plurals name="undo_seconds"><item quantity="one">Wait %1$d Second</item><item quantity="other">Wait %1$d Seconds</item></plurals>
-<string name="sent_yo">Sent Yo!</string>
 <string name="undo_remove">Undo</string>
 <string name="removed_name">Removed %1$s</string>
 <string name="ui_state_key_missing_use_your_recovery_key">State key missing. Use your recovery key.</string>
@@ -166,7 +146,6 @@
 <string name="ui_made">%1$s made %2$s</string>
 <string name="ui_left">%1$s left %2$s</string>
 <string name="ui_renamed_the_group_to">%1$s renamed the group to %2$s</string>
-<string name="ui_couldn_t_save_media">Couldn’t save media</string>
 <string name="ui_use_this_recovery_key_to_sign_in_to_yo_on_a_new_phone">Use this recovery key to sign in to Yo on a new phone.</string>
 <string name="ui_keep_it_safe_and_don_t_share_it">Keep it safe and don’t share it.</string>
 <string name="ui_yo_recovery_key_for">Yo recovery key for %1$s: %2$s</string>
@@ -189,7 +168,6 @@
 <string name="camera_unavailable">Camera unavailable. Try scanning from Photos.</string>
 <string name="camera_permission_needed">Allow camera access in Android Settings to scan a code.</string>
 <string name="top_friend">Most Yos With</string>
-<string name="yos_together">Yos Together</string>
 <string name="last_sent">Last Yo Sent</string>
 <string name="last_received">Last Yo Received</string>
 <string name="key_age">Signed Key Age (days)</string>
@@ -219,15 +197,12 @@
 <string name="contact_actions">Contact actions</string>
     <string name="help_and_about">Help &amp; About</string>
     <string name="about_and_licenses">About &amp; Licenses</string>
-    <string name="about_version">Yo %1$s</string>
-    <string name="set_up_account_recovery">Set Up\nAccount Recovery</string>
     <string name="recovery_show">Show</string>
     <string name="recovery_hide">Hide</string>
     <string name="recovery_share">Share</string>
     <string name="recovery_passkey">Passkey</string>
     <string name="recovery_set_up">Set Up</string>
     <string name="tutorial_tap">Tap to Send Yo</string>
-    <string name="tutorial_back">Tap to Yo Back</string>
     <string name="tutorial_camera">Swipe for Pictures</string>
     <string name="group_row">Group</string>
     <string name="account_recovery">Account Recovery</string>
@@ -244,7 +219,6 @@
     <string name="account_recovery_explanation">Save your Recovery Key somewhere safe. You can use it to sign in on a new phone. Account Backup saves your encrypted contacts and blocked list. Passkey recovery through Google Password Manager is currently unavailable.</string>
     <string name="compare_code">Compare Code</string>
     <string name="technical_details">Technical Details</string>
-    <string name="enable_yo_notifications">Enable Yo Notifications</string>
     <string name="yo_notification_channel">Yos</string>
     <string name="yo_followup_channel">Quiet Yo follow-ups</string>
     <string name="notification_settings_unavailable">Notification settings are unavailable on this device.</string>
@@ -272,4 +246,22 @@
     <string name="group_create_failure">The group could not be made. Try again in a moment.</string>
     <string name="group_member_footer">You can add up to 19 friends, plus yourself.</string>
     <string name="ui_show_recovery_key">Show Recovery Key</string>
+    <string name="settings_page_info">About This Page</string>
+    <string name="settings_leaving_yo">Leaving Yo for good?</string>
+    <string name="allow_yo_requests">Allow Yo Requests</string>
+    <string name="blocked_contacts">Blocked Contacts</string>
+    <string name="unblock_name">Unblock %1$s?</string>
+    <string name="status_usage">Usage</string>
+    <string name="status_server">Server</string>
+    <string name="status_crashes">Crashes</string>
+    <string name="status_total_yos">Total Yos</string>
+    <string name="status_yos">Yos</string>
+    <string name="status_notifications">Notifications</string>
+    <string name="status_ready">Ready</string>
+    <string name="status_not_allowed">Not Allowed</string>
+    <string name="recovery_intro">Save a recovery key or set up a passkey. Either one brings your account back on a new phone.</string>
+    <string name="intro_page_of">Page %1$d of %2$d</string>
+    <string name="recovery_save">Save</string>
+    <string name="recovery_on">On</string>
+    <string name="recovery_passkey_where">Synced by your password manager</string>
 </resources>

@@ -1,14 +1,12 @@
 package app.justyo.android
 
 import android.Manifest
-import android.content.ContentValues
 import android.content.Context
 import android.content.pm.PackageManager
 import android.graphics.Bitmap
 import android.graphics.ImageDecoder
 import android.net.Uri
 import android.os.Build
-import android.provider.MediaStore
 import android.util.Log
 import android.view.Surface
 import android.view.OrientationEventListener
@@ -313,21 +311,5 @@ object MediaFiles {
                 } finally { retriever.release() }
             }
         } finally { withContext(NonCancellable + Dispatchers.IO) { file.delete() } }
-    }
-    suspend fun keep(context: Context,media: PreparedMedia) = withContext(Dispatchers.IO) {
-        // Android 10+ adds our own media without asking for broad library access.
-        if(Build.VERSION.SDK_INT<29) return@withContext
-        val values=ContentValues().apply {
-            put(MediaStore.MediaColumns.DISPLAY_NAME,"Yo-${UUID.randomUUID()}.${if(media.video) "mp4" else if(media.heic) "heic" else "jpg"}")
-            put(MediaStore.MediaColumns.MIME_TYPE,if(media.video) "video/mp4" else if(media.heic) "image/heic" else "image/jpeg")
-            put(MediaStore.MediaColumns.RELATIVE_PATH,if(media.video) "Movies/Yo" else "Pictures/Yo")
-            put(MediaStore.MediaColumns.IS_PENDING,1)
-        }
-        val collection=if(media.video) MediaStore.Video.Media.EXTERNAL_CONTENT_URI else MediaStore.Images.Media.EXTERNAL_CONTENT_URI
-        val uri=context.contentResolver.insert(collection,values) ?: return@withContext
-        try {
-            context.contentResolver.openOutputStream(uri)?.use { it.write(media.bytes) } ?: error(context.getString(R.string.ui_couldn_t_save_media))
-            values.clear(); values.put(MediaStore.MediaColumns.IS_PENDING,0); context.contentResolver.update(uri,values,null,null)
-        } catch(e: Exception) { context.contentResolver.delete(uri,null,null); throw e }
     }
 }
