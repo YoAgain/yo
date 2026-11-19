@@ -36,9 +36,10 @@ struct SecureNameSheet: View {
           Image(systemName: "key.fill")
             .font(.system(size: 64))
             .accessibilityHidden(true)
-          Text("Account Recovery")
+          Text("Set Up\nAccount Recovery")
             .font(.yo(30))
-            .lineLimit(1)
+            .multilineTextAlignment(.center)
+            .lineLimit(2)
             .minimumScaleFactor(0.6)
             .accessibilityAddTraits(.isHeader)
             .padding(.top, 14)
@@ -63,8 +64,6 @@ struct SecureNameSheet: View {
                   .underline()
                   .accessibilityLabel(showingKey ? "Hide Recovery Key" : "Show Recovery Key")
                 }
-              } else {
-                Text("Save it somewhere safe")
               }
             }
             if showingKey {
@@ -79,7 +78,7 @@ struct SecureNameSheet: View {
               actionTitle: passkeyDone ? nil : created ? "Confirm" : "Set Up", doneTitle: "Done",
               action: { Task { created ? await checkPasskey() : await createPasskey() } }
             ) {
-              Text(created && !passkeyDone ? "Confirm it once with Face ID" : "Face ID, synced in iCloud")
+              if created && !passkeyDone { Text("Confirm it once with Face ID") }
             }
           }
           .disabled(busy != nil)
