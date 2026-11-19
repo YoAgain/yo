@@ -13,6 +13,45 @@ func textWidth(_ text: String, _ font: UIFont) -> CGFloat {
   ceil((text as NSString).size(withAttributes: [.font: font]).width)
 }
 
+/// A bar's title (a name, "Yo Request from …", a send's words): at the bar's size if it fits, else at the small
+/// size, else over two small lines in whole words. Never cut.
+struct TitleWords: View {
+  let text: String
+  var lead = BarRow.margin
+  var trail = BarRow.margin
+  @Environment(\.dynamicTypeSize) private var typeSize
+
+  var body: some View {
+    GeometryReader { geometry in
+      let room = max(0, geometry.size.width - lead - trail)
+      // SteadyText's digits take a little more than their own width.
+      if textWidth(text, barFont(Metrics.rowFont, typeSize)) + 16 <= room {
+        BarRow(lead: lead, trail: trail) { SteadyText(text) }
+      } else {
+        VStack(spacing: 2) {
+          ForEach(Array(smallLines(room: room).enumerated()), id: \.offset) { _, line in Text(line) }
+        }
+        .font(.yo(Metrics.rowSmallFont))
+        .lineLimit(1)
+        .minimumScaleFactor(0.5)  // a single word wider than the room: that line shrinks
+        .frame(width: room, height: geometry.size.height)
+        .offset(x: lead)
+      }
+    }
+    .frame(height: Metrics.rowHeight)
+    .accessibilityElement(children: .ignore)
+    .accessibilityLabel(text)
+  }
+
+  private func smallLines(room: CGFloat) -> [String] {
+    let font = barFont(Metrics.rowSmallFont, typeSize)
+    if textWidth(text, font) <= room { return [text] }
+    let words = listTitleWords(text: text)
+    return listWrapTwoLines(words: words, widths: words.map { Float(textWidth($0, font)) },
+      space: Float(textWidth(" ", font)), room: Float(room)).filter { !$0.isEmpty }
+  }
+}
+
 /// One sender's Yos ("3× Yo from MIA"): at the bar's size when the whole line fits, else at the small size over
 /// one or two lines ("3× Yo from" / "MAXIMILIAN_MUELL"). The name is never cut.
 struct ArrivalWords: View {

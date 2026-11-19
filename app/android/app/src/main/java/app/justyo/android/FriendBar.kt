@@ -50,6 +50,8 @@ import uniffi.yo.ListRow
 import uniffi.yo.ListSender
 import uniffi.yo.listFlowTwoLines
 import uniffi.yo.listSenderFlow
+import uniffi.yo.listTitleWords
+import uniffi.yo.listWrapTwoLines
 import uniffi.yo.productArrivalLines
 import uniffi.yo.productCounted
 import uniffi.yo.productMediaSign
@@ -301,8 +303,6 @@ internal data class BarContent(
                 startInset = if (left) primarySignInset else outgoingInset,
                 endInset = if (left) outgoingInset else primarySignInset,
                 modifier = receivedModifier,
-                // A request's line ("Yo Request: #FAMILIE") is shown whole, at the small size where it must be.
-                whole = friend.request && !primaryReceived,
             )
             if (showUndo || thumbnails.isNotEmpty()) Box(Modifier.align(start).padding(horizontal = 20.dp)) {
                 OutgoingThumbnail(repo, thumbnails, bar.undo, onUndo)
@@ -389,6 +389,33 @@ private fun SenderFlow(senders: List<ListSender>, modifier: Modifier = Modifier,
 private fun senderLabel(sender: ListSender) =
     productArrivalLines(sender.count.toLong(), sender.name, Words).first()
 
+/** A title at the small size: one line if it fits, else two in whole words (listWrapTwoLines); never cut. */
+@Composable
+private fun SmallTitle(text: String, room: Float, start: androidx.compose.ui.unit.Dp, end: androidx.compose.ui.unit.Dp) {
+    val measurer = rememberTextMeasurer()
+    val style = BarStyle.copy(fontSize = BarSmallFont)
+    fun width(value: String) = measurer.measure(value, style, maxLines = 1, softWrap = false).size.width.toFloat()
+    val lines = remember(text, room) {
+        if (width(text) <= room) listOf(text) else {
+            val words = listTitleWords(text)
+            listWrapTwoLines(words, words.map(::width), width(" "), room).filter { it.isNotEmpty() }
+        }
+    }
+    Column(
+        Modifier.fillMaxWidth().padding(start = start, end = end).clearAndSetSemantics { contentDescription = text },
+        horizontalAlignment = Alignment.CenterHorizontally,
+        verticalArrangement = Arrangement.spacedBy(2.dp),
+    ) {
+        lines.forEach { line ->
+            // A single word wider than the room: that line shrinks to fit.
+            val w = width(line)
+            val scale = if (w > room) (room / w).coerceAtLeast(.5f) else 1f
+            Text(line, style = if (scale < 1f) style.copy(fontSize = BarSmallFont * scale) else style,
+                maxLines = 1, softWrap = false)
+        }
+    }
+}
+
 /** The first of the core's candidates that fits ("2× Yo from Christopher", "… from Chr…", "2× Yo"). */
 private val BarStyle = TextStyle(fontFamily = YoFont, fontSize = BarFont, color = Color.White)
 
@@ -398,11 +425,10 @@ private fun BarWords(
     modifier: Modifier = Modifier,
     startInset: Int = 20,
     endInset: Int = 20,
-    whole: Boolean = false,
 ) {
     val measurer = rememberTextMeasurer()
     val density = LocalDensity.current
-    var style = BarStyle
+    val style = BarStyle
     // The widest digit, measured once per density/font scale (ten measurements; the measurer's cache holds eight).
     val slot = remember(measurer, density) {
         ('0'..'9').maxOf { measurer.measure(it.toString(), style, maxLines = 1, softWrap = false).size.width }
@@ -413,10 +439,6 @@ private fun BarWords(
         // As iOS's BarRow: the room between both sides, the line in the middle or moved aside as little as it takes
         // (a thumbnail or sign on one side must not cut "Sending Yo!" to "Sending Y…").
         val available = (maxWidth - start - end).coerceAtLeast(0.dp)
-        // Never cut when whole: too wide at the bar's size, the small size instead (as iOS).
-        if (whole && candidates.none {
-                with(density) { measurer.measure(it, style, maxLines = 1, softWrap = false).size.width.toDp() } <= available
-            }) style = style.copy(fontSize = BarSmallFont)
         fun width(value: String) = measurer.measure(value, style, maxLines = 1, softWrap = false).size.width
         fun parts(value: String): Triple<String, String, String> {
             val count = CountDigits.find(value) ?: return Triple(value, "", "")
@@ -426,6 +448,13 @@ private fun BarWords(
         fun total(value: String) = with(density) {
             val (prefix, digits, suffix) = parts(value)
             (width(prefix) + digitBlock(digits) + width(suffix)).toDp()
+        }
+        val single = candidates.singleOrNull()
+        // One title (a name, "Yo Request from …", a send's words) is never cut: too wide at the bar's size, the small
+        // size, over two lines in whole words where it must be (as iOS's TitleWords).
+        if (single != null && total(single) > available) {
+            SmallTitle(single, with(density) { available.toPx() }, start, end)
+            return@BoxWithConstraints
         }
         val selected = candidates.firstOrNull { total(it) <= available } ?: candidates.last()
         val (prefix, digits, suffix) = parts(selected)

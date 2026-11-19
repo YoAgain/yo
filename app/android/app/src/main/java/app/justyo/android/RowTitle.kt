@@ -3,6 +3,7 @@ package app.justyo.android
 import uniffi.yo.ListRow
 import uniffi.yo.ProductLanguage
 import uniffi.yo.ProductText
+import uniffi.yo.listBarTitle
 import uniffi.yo.productRequestRow
 import uniffi.yo.productText
 
@@ -14,5 +15,5 @@ internal fun copy(text: ProductText) = productText(text, Words)
 internal fun rowTitle(row: ListRow?, friend: Friend): String {
     if (friend.request) return productRequestRow(friend.name, friend.group != null, Words)
     val title = row?.title ?: friend.name
-    return if (title == friend.name && friend.group != null) "#" + title.removePrefix("#") else title
+    return if (title == friend.name) listBarTitle(title, friend.group != null) else title
 }
