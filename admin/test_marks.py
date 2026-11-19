@@ -89,21 +89,6 @@ class MarksTests(unittest.TestCase):
         self.assertEqual(admin.active_days({"at": later, "live": {"active_day": 4}}, later)["live"]["active_days"], {str(day + 61): 4})
         self.assertEqual(admin.active_days({"stale": True})["stale"], True)
 
-    def test_media_hours_put_growth_on_the_hour_and_leave_gaps_unknown(self):
-        admin, H = self.admin, 3600000
-        t = 20400 * 86400000 + 10 * H + 60000  # 10:01 UTC
-        out = admin.media_hours({"at": t, "live": {"media_day": 5}, "dev": {"error": "x"}})
-        self.assertEqual(out["live"]["media_hours"], [None] * 24)  # first sight: nothing known yet
-        self.assertEqual(out["dev"]["media_hours"], [None] * 24)
-        out = admin.media_hours({"at": t + 10 * 60000, "live": {"media_day": 8}})
-        self.assertEqual(out["live"]["media_hours"][-1], 3)
-        out = admin.media_hours({"at": t + 70 * 60000, "live": {"media_day": 9}})  # 11:11: one more, 10:00 kept
-        self.assertEqual(out["live"]["media_hours"][-2:], [3, 1])
-        out = admin.media_hours({"at": t + 5 * H, "live": {"media_day": 20}})  # hours apart: not put on an hour
-        self.assertEqual(out["live"]["media_hours"][-1], None)
-        self.assertEqual(out["live"]["media_hours"][-6:-4], [3, 1])
-        self.assertEqual(admin.media_hours({"stale": True}), {"stale": True})
-
 
 class UsersTabCollectorTests(unittest.TestCase):
     def test_signups_30_days_and_active_since_midnight(self):
@@ -124,11 +109,35 @@ class UsersTabCollectorTests(unittest.TestCase):
             self.assertEqual(sum(snapshot["signups"]), 2)
             self.assertEqual(snapshot["active_day"], 1)
             self.assertEqual(len(snapshot["signups_hours"]), 24)
-            self.assertIsNone(snapshot["media_day"])  # an older hub without the tables
+            self.assertIsNone(snapshot["events"])  # an older hub without the tables
             self.assertIsNone(snapshot["groups"])
             self.assertEqual(sum(snapshot["signups_hours"]), 1)
             if now // 3600000 == (midnight + 1) // 3600000:
                 self.assertEqual(snapshot["signups_hours"][-1], 1)
+
+    def test_events_per_hour_day_and_today_by_kind(self):
+        users = load("users")
+        now = int(users.time.time() * 1000)
+        minute, hour, day = now // 60000, now // 3600000, now // users.DAY_MS
+        with tempfile.TemporaryDirectory() as directory:
+            path = str(Path(directory) / "hub.sqlite")
+            with sqlite3.connect(path) as db:
+                db.execute("CREATE TABLE users(id BLOB, created_at INTEGER)")
+                db.execute("CREATE TABLE devices(id INTEGER, user_id BLOB, last_seen_at INTEGER)")
+                db.execute("CREATE TABLE events(kind TEXT, minute INTEGER, n INTEGER, PRIMARY KEY(kind, minute))")
+                db.executemany("INSERT INTO events VALUES(?,?,?)", [
+                    ("yo-in", minute, 3), ("yo-in", minute - 1, 2) if minute % 60 else ("yo-in", minute + 1, 2),
+                    ("yo-out", minute - 60, 4), ("group-create", minute - 2 * 24 * 60, 1),
+                    ("media-in", (day - 20) * 24 * 60, 9)])  # older than 14 days: not counted
+            e = users.hub("live", path)["events"]
+            self.assertEqual(e["yo-in"]["hours"][-1], 5)
+            self.assertEqual(e["yo-out"]["hours"][-2], 4)
+            self.assertEqual(len(e["yo-in"]["hours"]), 24)
+            self.assertEqual(e["group-create"]["days"], [0] * 11 + [1, 0, 0])
+            self.assertEqual(e["media-in"], {"hours": [0] * 24, "days": [0] * 14, "today": 0})
+            self.assertEqual(e["media-out"]["today"], 0)
+            self.assertEqual(e["yo-in"]["today"], 5)
+            self.assertEqual(e["yo-out"]["today"], 4 if (minute - 60) // 1440 == day else 0)
 
 
 if __name__ == "__main__":

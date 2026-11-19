@@ -185,12 +185,23 @@ a.lg:hover { color: var(--text); }
 .mini.flat .mini-plot { flex: 1; display: flex; min-height: 60px; }
 .mini.flat .chart { height: auto; flex: 1; }
 #t-media, #t-activity { flex: 1; }
+/* Event tiles (Media, Groups, Secured, Yos): icon and title, today's figures at the right of the head, one chart */
+.ev h2 .ico { width: 15px; height: 15px; }
+.h-today { margin-left: auto; display: inline-flex; align-items: baseline; gap: 4px; font-size: 12px; font-weight: 600; letter-spacing: 0; text-transform: none; color: var(--muted); white-space: nowrap; }
+.h-today b { color: var(--text); font-size: 14px; font-weight: 800; font-variant-numeric: tabular-nums; }
+.h-today .key { align-self: center; width: 8px; height: 8px; border-radius: 2px; background: var(--amethyst-soft); opacity: .85; }
+.h-today .key.second { opacity: .4; margin-left: 6px; }
+.ms .h-today .key { background: var(--ok); }
+.ev .mini.flat { margin-top: 2px; }
 /* Overview users: name, small icons, sign-up time on the right */
 .people-mini { list-style: none; margin: 0; padding: 0; }
 .people-mini li + li { border-top: 1px solid var(--line); }
 .pm-row { display: flex; align-items: center; gap: 8px; width: 100%; padding: 9px 4px; border: 0; background: transparent; text-align: left; border-radius: 8px; }
 .pm-row:hover { background: var(--hover); }
 .pm-name { font-weight: 700; font-size: 13px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
+/* Names on the Overview are frosted, readable only on the row under the pointer or in focus: safe to screenshot */
+.ov .pm-name { filter: blur(5px); transition: filter .15s; }
+.ov .pm-row:hover .pm-name, .ov .pm-row:focus-visible .pm-name, .ov .pm-row:focus .pm-name { filter: none; }
 .pm-icons { display: inline-flex; gap: 5px; flex: none; }
 .ov .pm-icons .ico { width: 14px; height: 14px; stroke: var(--muted); }
 .ov .pm-icons .ico.app-current { stroke: var(--ok); }
@@ -204,7 +215,8 @@ a.lg:hover { color: var(--text); }
 .mini-plot { position: relative; margin-top: 8px; padding-left: 28px; }
 .mini .chart { min-height: 0; height: 60px; margin: 0; flex: none; overflow: visible; }
 .mini .chart .bar { fill: var(--amethyst-soft); opacity: .85; }
-.mini.ms .chart .bar { fill: var(--ok); opacity: .75; }
+.ms .mini .chart .bar, .mini.ms .chart .bar { fill: var(--ok); opacity: .75; }
+.mini .chart .bar.second { opacity: .4; }
 .mini .chart .bar.zero { fill: var(--line); opacity: 1; }
 .mini .ymax { position: absolute; left: 0; top: -2px; width: 24px; text-align: right; font-size: 10px; color: var(--muted); font-variant-numeric: tabular-nums; }
 .mini .ymax::after { content: ""; position: absolute; left: 28px; top: 6px; width: 6px; border-top: 1px solid var(--line); }
@@ -345,7 +357,10 @@ a.lg:hover { color: var(--text); }
 .reserved-bar.off { background: rgba(231, 76, 60, .1); border-color: rgba(231, 76, 60, .35); }
 .reserved-bar .state { font-weight: 700; font-size: 13px; }
 .reserved-bar .add { margin-left: auto; display: flex; gap: 6px; }
-.reserved-bar .add input { width: 240px; }
+.reserved-bar .add input { width: 200px; }
+.data td input.note { width: 100%; min-width: 220px; background: transparent; border: 1px solid transparent; border-radius: 8px; padding: 4px 8px; font: inherit; font-size: 13px; color: var(--text); }
+.data td input.note:hover, .data td input.note:focus { outline: none; border-color: var(--line); background: var(--bg); }
+.data td input.note.failed { border-color: var(--bad); }
 .reserved-bar .error { flex-basis: 100%; color: var(--bad); }
 .reserved-bar .error:empty { display: none; }
 .switch { width: 42px; height: 24px; border-radius: 999px; border: 0; background: var(--line); position: relative; cursor: pointer; flex: none; }

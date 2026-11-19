@@ -25,7 +25,7 @@
   <div class="status"><span class="stale" id="stale" hidden>no answer from the server</span><span id="collection-status" role="status">Loading fresh data…</span></div>
 </header>
 
-<!-- Overview: the server and what is open on top; below, the newest users, usage (media, groups, waiting) and the activity. -->
+<!-- Overview: the server and what is open on top; below, the newest users, usage (media, groups, waiting), the activity and the Yos. -->
 <main class="ov" data-tabs="overview">
   <article class="tile" id="t-system">
     <h2 id="sys-head" role="button" tabindex="0"><i></i>System <small id="sys-updates"></small></h2>
@@ -66,17 +66,26 @@
   </article>
 
   <div class="col">
-    <article class="tile" id="t-media">
-      <h2>Media</h2>
-      <div class="stat"><svg class="ico" viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="5" width="18" height="14" rx="2"/><circle cx="9" cy="10" r="1.6"/><path d="M21 16l-5-5-8 8"/></svg><div><div class="n"><b id="md-today">–</b></div><div class="l">photos &amp; videos today</div></div></div>
+    <article class="tile ev" id="t-media">
+      <h2><svg class="ico" viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="5" width="18" height="14" rx="2"/><circle cx="9" cy="10" r="1.6"/><path d="M21 16l-5-5-8 8"/></svg>Media<span class="h-today" id="md-today"></span></h2>
       <div class="mini flat">
-        <div class="mini-plot"><svg class="chart" id="md-chart" viewBox="0 0 280 60" preserveAspectRatio="none" aria-label="Photos and videos per hour, last 24 hours"></svg><span class="ymax" id="md-max"></span><div class="tip" hidden></div></div>
+        <div class="mini-plot"><svg class="chart" id="md-chart" viewBox="0 0 280 60" preserveAspectRatio="none" aria-label="Photos and videos uploaded and fetched per hour, last 24 hours"></svg><span class="ymax" id="md-max"></span><div class="tip" hidden></div></div>
         <div class="axis"><span id="md-from"></span><span id="md-to"></span></div>
       </div>
     </article>
-    <article class="tile" id="t-groups">
-      <h2>Groups</h2>
-      <div class="stat"><svg class="ico" viewBox="0 0 24 24" aria-hidden="true"><circle cx="9" cy="8.5" r="3.5"/><path d="M2.5 20a6.5 6.5 0 0 1 13 0"/><path d="M15.5 5.2a3.5 3.5 0 0 1 0 6.6"/><path d="M18 14.3a6.5 6.5 0 0 1 3.5 5.7"/></svg><div><div class="n"><b id="gr-n">–</b><small id="gr-new"></small></div><div class="l">groups</div></div></div>
+    <article class="tile ev" id="t-groups">
+      <h2><svg class="ico" viewBox="0 0 24 24" aria-hidden="true"><circle cx="9" cy="8.5" r="3.5"/><path d="M2.5 20a6.5 6.5 0 0 1 13 0"/><path d="M15.5 5.2a3.5 3.5 0 0 1 0 6.6"/><path d="M18 14.3a6.5 6.5 0 0 1 3.5 5.7"/></svg>Groups<span class="h-today" id="gr-today"></span></h2>
+      <div class="mini flat">
+        <div class="mini-plot"><svg class="chart" id="gr-chart" viewBox="0 0 280 60" preserveAspectRatio="none" aria-label="Groups made per day, last 14 days"></svg><span class="ymax" id="gr-max"></span><div class="tip" hidden></div></div>
+        <div class="axis"><span id="gr-from"></span><span id="gr-to"></span></div>
+      </div>
+    </article>
+    <article class="tile ev" id="t-secured">
+      <h2><svg class="ico" viewBox="0 0 24 24" aria-hidden="true"><rect x="5" y="10.5" width="14" height="10" rx="2"/><path d="M8 10.5V8a4 4 0 0 1 8 0v2.5"/></svg>Secured<span class="h-today" id="sc-today"></span></h2>
+      <div class="mini flat">
+        <div class="mini-plot"><svg class="chart" id="sc-chart" viewBox="0 0 280 60" preserveAspectRatio="none" aria-label="Share of each day's sign-ups with a backup now, last 14 days"></svg><span class="ymax" id="sc-max"></span><div class="tip" hidden></div></div>
+        <div class="axis"><span id="sc-from"></span><span id="sc-to"></span></div>
+      </div>
     </article>
     <article class="tile" id="t-waiting">
       <h2>Waiting</h2>
@@ -89,17 +98,18 @@
       <h2>Activity</h2>
       <div class="stats">
         <div class="stat" id="st-active"><svg class="ico" viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="8" r="3.5"/><path d="M5 20a7 7 0 0 1 14 0"/></svg><div><div class="n"><b id="ug-today">–</b><small id="ug-total">/ – users</small></div><div class="l">Active today</div></div></div>
-        <div class="stat ms" id="st-yos"><svg class="ico" viewBox="0 0 24 24" aria-hidden="true"><path d="M5 5h14a1 1 0 0 1 1 1v9a1 1 0 0 1-1 1H10l-4 3.5V16H5a1 1 0 0 1-1-1V6a1 1 0 0 1 1-1z"/></svg><div><div class="n"><b id="st-msgs">–</b></div><div class="l">Yos (24 h)</div></div></div>
       </div>
       <div class="mini" id="mini-su">
         <div class="mini-head"><svg class="ico" viewBox="0 0 24 24" aria-hidden="true"><circle cx="10" cy="8" r="3.5"/><path d="M3 20a7 7 0 0 1 13 -3"/><path d="M19 14v6"/><path d="M16 17h6"/></svg><span>Sign-ups</span><span class="mini-last" id="su-last"></span></div>
         <div class="mini-plot"><svg class="chart" id="su-chart" viewBox="0 0 280 60" preserveAspectRatio="none" aria-label="Sign-ups per hour, last 24 hours"></svg><span class="ymax" id="su-max"></span><div class="tip" hidden></div></div>
         <div class="axis"><span id="su-from"></span><span id="su-to"></span></div>
       </div>
-      <div class="mini ms" id="mini-ms">
-        <div class="mini-head"><svg class="ico" viewBox="0 0 24 24" aria-hidden="true"><path d="M5 5h14a1 1 0 0 1 1 1v9a1 1 0 0 1-1 1H10l-4 3.5V16H5a1 1 0 0 1-1-1V6a1 1 0 0 1 1-1z"/></svg><span>Yos</span><span class="mini-last" id="ms-last"></span></div>
-        <div class="mini-plot"><svg class="chart" id="ms-chart" viewBox="0 0 280 60" preserveAspectRatio="none" aria-label="Yos delivered per hour, last 24 hours"></svg><span class="ymax" id="ms-max"></span><div class="tip" hidden></div></div>
-        <div class="axis"><span id="ms-from"></span><span id="ms-to"></span></div>
+    </article>
+    <article class="tile ev ms" id="t-yos">
+      <h2><svg class="ico" viewBox="0 0 24 24" aria-hidden="true"><path d="M5 5h14a1 1 0 0 1 1 1v9a1 1 0 0 1-1 1H10l-4 3.5V16H5a1 1 0 0 1-1-1V6a1 1 0 0 1 1-1z"/></svg>Yos<span class="h-today" id="yo-today"></span></h2>
+      <div class="mini flat">
+        <div class="mini-plot"><svg class="chart" id="yo-chart" viewBox="0 0 280 60" preserveAspectRatio="none" aria-label="Yos accepted and fetched per hour, last 24 hours"></svg><span class="ymax" id="yo-max"></span><div class="tip" hidden></div></div>
+        <div class="axis"><span id="yo-from"></span><span id="yo-to"></span></div>
       </div>
     </article>
     <article class="tile" id="t-apps">

@@ -289,22 +289,20 @@ if (document.body.classList.contains("login")) {
       ...titles.map((t, i) => { const r = svg("rect", { x: Math.max(0, i * step - step / 2), width: step, y: 0, height: hgt }); r.append(svg("title")); r.lastChild.textContent = t; return r; }));
   };
 
-  // One small bar chart of the last 24 hours (prefix "su" or "ms"): bars, the top value at the y axis, the first hour
-  // and "now" under it, the UTC day's total in its head, and a tooltip with the exact value of the hour under the pointer.
-  const hourBars = (key, values, label, today) => {
-    const node = $(`${key}-chart`), W = 280, H = 60, slot = W / values.length, kids = [];
-    const hour0 = Math.floor(Date.now() / 3600000) - values.length + 1;
-    const clock = (i) => new Date((hour0 + i) * 3600000).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", hourCycle: "h23" });
-    const top = Math.max(1, ...values.filter((v) => v != null));
-    const text = (i) => `${clock(i)}: ${values[i] == null ? "not recorded" : label(values[i])}`;
-    values.forEach((v, i) => {
+  // One small bar chart (prefix "su", "yo", "md", "gr"): one or two series side by side per slot (the second fainter),
+  // the top value at the y axis, the first slot and the last under it, and a tooltip with the slot's exact values.
+  const miniBars = (key, series, names, text, from, to, scale) => {
+    const node = $(`${key}-chart`), W = 280, H = 60, n = names.length, slot = W / n, kids = [];
+    const all = series.flat().filter((v) => v != null), top = scale || Math.max(1, ...all), width = (slot * 0.68) / series.length;
+    series.forEach((values, s) => values.forEach((v, i) => {
       const hh = v ? Math.max(1.5, (v / top) * (H - 4)) : 1.5;
-      kids.push(svg("rect", { x: (i * slot + slot * 0.16).toFixed(1), width: (slot * 0.68).toFixed(1), y: (H - hh).toFixed(1),
-        height: hh.toFixed(1), rx: 1.5, class: v ? "bar" : "bar zero" }));
-    });
-    values.forEach((_, i) => {
+      kids.push(svg("rect", { x: (i * slot + slot * 0.16 + s * width).toFixed(1), width: Math.max(1, width - (series.length > 1 ? 0.8 : 0)).toFixed(1),
+        y: (H - hh).toFixed(1), height: hh.toFixed(1), rx: 1.5, class: v ? `bar${s ? " second" : ""}` : "bar zero" }));
+    }));
+    const label = (i) => `${names[i]}: ${text(i)}`;
+    names.forEach((_, i) => {
       const r = svg("rect", { x: (i * slot).toFixed(1), width: slot.toFixed(1), y: 0, height: H, class: "hit", "data-i": i });
-      r.setAttribute("aria-label", text(i));
+      r.setAttribute("aria-label", label(i));
       kids.push(r);
     });
     node.replaceChildren(...kids);
@@ -312,16 +310,33 @@ if (document.body.classList.contains("login")) {
     node.onpointermove = (e) => {
       const i = e.target.dataset?.i;
       if (i == null) { tip.hidden = true; return; }
-      tip.textContent = text(+i);
+      tip.textContent = label(+i);
       tip.hidden = false;
-      const box = node.getBoundingClientRect(), x = ((+i + 0.5) / values.length) * box.width;
+      const box = node.getBoundingClientRect(), x = ((+i + 0.5) / n) * box.width;
       tip.style.left = `${Math.min(Math.max(x, tip.offsetWidth / 2), box.width - tip.offsetWidth / 2)}px`;
     };
     node.onpointerleave = () => { tip.hidden = true; };
-    set(`${key}-max`, num(Math.max(0, ...values.filter((v) => v != null))));
-    set(`${key}-from`, clock(0));
-    set(`${key}-to`, "now");
+    set(`${key}-max`, num(Math.max(0, ...all)));
+    set(`${key}-from`, from);
+    set(`${key}-to`, to);
+  };
+  // The last 24 hours, the current one last: their clock times.
+  const hourNames = () => {
+    const hour0 = Math.floor(Date.now() / 3600000) - 23;
+    return Array.from({ length: 24 }, (_, i) => new Date((hour0 + i) * 3600000).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", hourCycle: "h23" }));
+  };
+  const hourBars = (key, values, label, today) => {
+    const names = hourNames();
+    miniBars(key, [values], names, (i) => (values[i] == null ? "not recorded" : label(values[i])), names[0], "now");
     if ($(`${key}-last`)) $(`${key}-last`).replaceChildren(el("b", null, today == null ? "–" : num(today)), " today");
+  };
+  // Two kinds of the hub's events per hour (`in`, `out` of h.events), with today's totals in the tile's head.
+  const eventBars = (key, events, kinds, words) => {
+    const [a, b] = kinds.map((k) => events?.[k]), names = hourNames(), none = Array(24).fill(null);
+    const ha = a?.hours || none, hb = b?.hours || none;
+    miniBars(key, [ha, hb], names, (i) => (ha[i] == null ? "not recorded" : `${num(ha[i])} ${words[0]} · ${num(hb[i])} ${words[1]}`), names[0], "now");
+    const head = $(`${key}-today`);
+    head.replaceChildren(el("i", "key"), el("b", null, a ? num(a.today) : "–"), ` ${words[0]}  `, el("i", "key second"), el("b", null, b ? num(b.today) : "–"), ` ${words[1]} today`);
   };
 
   // ---- overview: the newest users, a name with small icons (platform coloured by its build, a lock when secured) --
@@ -383,24 +398,30 @@ if (document.body.classList.contains("login")) {
     // Users: ten, by the chosen column (last seen first); a click opens the user in the Users tab.
     drawOvUsers(h);
 
-    // Activity: two figures (active users, Yos in 24 h) and two small charts of the last 24 hours, each value on hover.
+    // Activity: active users and the sign-ups of the last 24 hours, each value on hover.
     if (ok) {
       const total = h.total || 0, today = h.active_today || 0, week = Math.max(today, h.active_users || 0);
       set("ug-today", num(today));
       set("ug-total", `/ ${num(total)} users`);
       $("st-active").title = `${num(today)} of ${num(total)} users seen in the last 24 h · ${num(week)} this week · ${h.secured ?? "?"} secured · ${h.devices ?? "?"} devices`;
-      set("st-msgs", num(h.deliveries?.day));
-      $("st-yos").title = "Yos delivered in the last 24 h, every delivery incl. bots and group members";
-      const su = h.signups || [], md = h.deliveries?.days || [], hours = (v) => (Array.isArray(v) ? v.slice(-24) : Array(24).fill(null));
+      const su = h.signups || [], hours = (v) => (Array.isArray(v) ? v.slice(-24) : Array(24).fill(null));
       hourBars("su", hours(h.signups_hours), (v) => `${num(v)} sign-up${v === 1 ? "" : "s"}`, su[su.length - 1]);
-      hourBars("ms", hours(h.deliveries?.hours), (v) => `${num(v)} Yo${v === 1 ? "" : "s"}`, md[md.length - 1]);
 
-      // Usage: photos and videos today (per hour where recorded), groups, Yos waiting at the hub. Counts only.
-      set("md-today", num(h.media_day));
-      hourBars("md", hours(h.media_hours), (v) => `${num(v)} upload${v === 1 ? "" : "s"}`);
-      set("gr-n", num(h.groups));
-      set("gr-new", h.groups_new ? `+${num(h.groups_new)} today` : "");
-      $("gr-new").title = "made today and not changed since";
+      // Yos, media and groups from the hub's event counts (per kind and minute, nothing of who), and Yos waiting.
+      const ev = h.events;
+      eventBars("yo", ev, ["yo-in", "yo-out"], ["in", "out"]);
+      $("t-yos").title = "Yos accepted into an inbox (in) and fetched by a device (out), every delivery incl. bots and group members";
+      eventBars("md", ev, ["media-in", "media-out"], ["up", "down"]);
+      $("t-media").title = "Photos and videos uploaded (up) and fetched (down)";
+      const gd = ev?.["group-create"]?.days || Array(14).fill(null), dn = days14().map(dayName);
+      miniBars("gr", [gd], dn, (i) => (gd[i] == null ? "not recorded" : `${num(gd[i])} made`), "14 days ago", "today");
+      $("gr-today").replaceChildren(el("b", null, ev ? num(gd[13]) : "–"), " today · ", el("b", null, num(h.groups)), " groups");
+      // Secured: of each sign-up day's accounts, the share with a backup now (counts only).
+      const sd = h.secured_days || Array(14).fill(null), pct = (d) => (d && d[0] ? Math.round((100 * d[1]) / d[0]) : null);
+      miniBars("sc", [sd.map(pct)], dn, (i) => (sd[i] == null ? "not recorded" : `${num(sd[i][1])} of ${num(sd[i][0])} secured${sd[i][0] ? ` (${pct(sd[i])} %)` : ""}`), "14 days ago", "today", 100);
+      set("sc-max", "100 %");
+      const scAll = h.total ? Math.round((100 * (h.secured || 0)) / h.total) : null, scToday = pct(sd[13]);
+      $("sc-today").replaceChildren(el("b", null, scToday == null ? "–" : `${scToday} %`), " today · ", el("b", null, scAll == null ? "–" : `${scAll} %`), " all");
       set("wt-n", num(h.messages));
       set("wt-old", h.messages && h.oldest_waiting ? `oldest ${rel(h.oldest_waiting)}` : "");
 
@@ -1011,13 +1032,15 @@ if (document.body.classList.contains("login")) {
     sw.addEventListener("click", async () => { sw.disabled = true; try { await changeReserved({ action: "switch", enabled: !data.enabled }); } catch (e) { err.textContent = e.message; sw.disabled = false; } });
     const form = el("form", "add");
     const input = el("input"); input.placeholder = "Add names (comma separated)"; input.setAttribute("aria-label", "Names to reserve");
+    const reason = el("input"); reason.placeholder = "Reason"; reason.maxLength = 200; reason.setAttribute("aria-label", "Reason for reserving them");
     const add = el("button", "pill", "Add"); add.type = "submit";
-    form.append(input, add);
+    form.append(input, reason, add);
     form.addEventListener("submit", async (e) => {
       e.preventDefault();
-      const names = input.value.split(/[,\n]/).map((n) => n.trim()).filter(Boolean);
+      const note = reason.value.trim();
+      const names = input.value.split(/[,\n]/).map((n) => n.trim()).filter(Boolean).map((name) => (note ? { name, note } : name));
       if (!names.length) return;
-      try { await changeReserved({ action: "add", names }); input.value = ""; } catch (x) { err.textContent = x.message; }
+      try { await changeReserved({ action: "add", names }); input.value = ""; reason.value = ""; } catch (x) { err.textContent = x.message; }
     });
     wrap.classList.toggle("off", !!data && !data.enabled);
     wrap.append(sw, label, form, err);
@@ -1026,7 +1049,7 @@ if (document.body.classList.contains("login")) {
   const drawTables = () => {
     const box = $("tables").querySelector(".tables"), list = last?.[which]?.tables || [];
     const drawn = JSON.stringify([which, tableOpen, list.map((t) => [t.name, t.count]), tableOpen === "reserved" ? reservedData?.[which]?.enabled : 0,
-      (list.find((t) => t.name === tableOpen) || {}).rows?.length]);
+      (list.find((t) => t.name === tableOpen) || {}).rows?.length, tableOpen === "reserved" ? list.find((t) => t.name === "reserved")?.rows : 0]);
     if (drawn === tablesDrawn && box.childElementCount) return;
     tablesDrawn = drawn;
     set("tables-note", `${list.length} tables`);
@@ -1059,6 +1082,17 @@ if (document.body.classList.contains("login")) {
       for (const row of t.rows) {
         const tr = body.insertRow();
         row.forEach((v, i) => {
+          // A reserved name's reason: edited in place, saved on Enter or leaving the field.
+          if (t.name === "reserved" && t.columns[i] === "note") {
+            const name = row[t.columns.indexOf("spelling")], note = el("input", "note");
+            note.value = v ?? ""; note.maxLength = 200; note.placeholder = "Add a reason"; note.setAttribute("aria-label", `Reason for ${name}`);
+            note.addEventListener("change", async () => {
+              note.disabled = true;
+              try { await changeReserved({ action: "add", names: [{ name, note: note.value.trim() }] }); } catch { note.disabled = false; note.classList.add("failed"); }
+            });
+            cell(tr, note);
+            return;
+          }
           if (isTime(t.columns[i], v)) cell(tr, date(v), "mono", String(v));
           else cell(tr, v == null ? "–" : String(v), "mono", v != null && String(v).length > 40 ? String(v) : "");
         });

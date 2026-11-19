@@ -178,6 +178,7 @@ class ReservedTests(unittest.TestCase):
         for method, data, name, suffix in [
                 ("GET", None, None, ""),
                 ("POST", ["Admin", "Support"], None, ""),
+                ("POST", ["Admin", {"name": "Open", "note": "App command: yo://open"}], None, ""),
                 ("PUT", {"enabled": False}, None, ""),
                 ("DELETE", None, "Ädm1n/a", "/%C3%84dm1n%2Fa")]:
             with self.subTest(method=method), patch.object(self.admin.urllib.request, "urlopen",

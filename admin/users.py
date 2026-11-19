@@ -127,6 +127,25 @@ def has_column(db, table: str, column: str) -> bool:
     return db.execute("SELECT count(*) FROM pragma_table_info(?) WHERE name = ?", (table, column)).fetchone()[0] > 0
 
 
+EVENT_KINDS = ("yo-in", "yo-out", "media-in", "media-out", "group-create")
+
+
+def events(db, now: int) -> dict:
+    """Per event kind: "hours" (the last 24, the current one last), "days" (the last 14 UTC days, today last) and
+    "today" (since UTC midnight), summed from the hub's `events` (counts per kind and minute, nothing else)."""
+    hour, day = now // 3600000, now // DAY_MS
+    by_hour = {}
+    for kind, h, n in db.execute("SELECT kind, minute / 60, sum(n) FROM events WHERE minute >= ? GROUP BY 1, 2",
+                                 ((day - 13) * 24 * 60,)):
+        by_hour.setdefault(kind, {})[h] = n
+    out = {}
+    for kind in EVENT_KINDS:
+        hours = by_hour.get(kind, {})
+        days = [sum(n for h, n in hours.items() if h // 24 == d) for d in range(day - 13, day + 1)]
+        out[kind] = {"hours": [hours.get(h, 0) for h in range(hour - 23, hour + 1)], "days": days, "today": days[-1]}
+    return out
+
+
 def hub(name: str, path: str) -> dict:
     """Each part on its own: one that fails (a table or column the hub's schema no longer has) comes out as None (or
     empty) with its error in "errors", the others still show."""
@@ -229,15 +248,16 @@ def hub(name: str, path: str) -> dict:
             "signups_hours": part("signups_hours", lambda: [one(
                 "SELECT count(*) FROM users WHERE created_at >= ? AND created_at < ?",
                 h * 3600000, (h + 1) * 3600000) for h in range(now // 3600000 - 23, now // 3600000 + 1)]),
-            # Photos and videos uploaded since UTC midnight (the hub's per-day upload quota, summed: a count only).
-            "media_day": part("media_day", lambda: one(
-                "SELECT coalesce(sum(count), 0) FROM blob_quota WHERE day = ?", now // DAY_MS)
-                if has_table(db, "blob_quota") else None),
-            # Groups on the hub, and those made since UTC midnight and not changed since (revision 0).
+            # Per sign-up UTC day, the last 14 (today last): [accounts made that day, those of them with a backup now].
+            "secured_days": part("secured_days", lambda: [list(db.execute(
+                "SELECT count(*), count(b.user_id) FROM users u LEFT JOIN backups b ON b.user_id = u.id"
+                " WHERE u.created_at >= ? AND u.created_at < ?", (midnight - i * DAY_MS, midnight - (i - 1) * DAY_MS)).fetchone())
+                for i in range(13, -1, -1)] if has_table(db, "backups") else None),
+            # Groups on the hub now.
             "groups": part("groups", lambda: one("SELECT count(*) FROM zk_groups") if has_table(db, "zk_groups") else None),
-            "groups_new": part("groups_new", lambda: one(
-                "SELECT count(*) FROM zk_groups WHERE revision = 0 AND updated_at >= ?", midnight)
-                if has_table(db, "zk_groups") else None),
+            # The hub's per-minute event counts (no identifiers): per kind, the last 24 hours, the last 14 UTC days
+            # and today; None on a hub without the table.
+            "events": part("events", lambda: events(db, now) if has_table(db, "events") else None),
             "oldest_waiting": part("oldest_waiting", lambda: one("SELECT min(received_at) FROM messages")),
             "blobs": part("blobs", lambda: db.execute(
                 "SELECT count(*), coalesce(sum(size), 0) FROM blobs").fetchone() if has_table(db, "blobs") else None),

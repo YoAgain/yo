@@ -3,7 +3,9 @@
 Python standard library dashboard for server health, systemd services, a Users tab (today's figures, sign-ups and
 active users per day, every user in a table sortable by each column), hub database tables,
 User Reports, feedback and To-Dos, anonymous crash/error diagnostics with counts and done ticks, reserved-name management, YoGPT reply pictures, and a Status tab for the STATUS bot ([skills/status](../skills/status): its last report and how often it sends; the recipient is fixed on the server). The collector (`users.py`)
-reads SQLite databases read-only and atomically writes a JSON snapshot. To-Dos go through the hub API;
+reads SQLite databases read-only and atomically writes a JSON snapshot. The Overview's Yos, Media and Groups tiles
+read the hub's `events` table (counts per kind and minute, no identifiers); Secured shows, per sign-up day, the share
+of accounts with a backup now. Usernames on the Overview are blurred until their row is hovered or focused. To-Dos go through the hub API;
 message completion lives in the hub; user-report done markers are stored locally. `migrate_todos.py` is the one-time legacy JSON migration.
 
 Protection requires Cloudflare Access in front. The server verifies its JWT signature, issuer, audience
@@ -88,7 +90,8 @@ python3 -m unittest discover -s admin -p 'test_*.py'
 
 Reserved names are read and changed through the selected hub's token-protected admin routes, using the same
 `YO_ADMIN_TOKEN` as To-Dos. Deploy the hubs before this admin version. The card shows the live/dev hub,
-count and enforcement switch (red when off), search, comma/newline-separated adds and individual removals.
+count and enforcement switch (red when off), search, comma/newline-separated adds with a reason, each name's
+reason edited in place (≤ 200 characters), and individual removals.
 Disabling keeps the names. The Users table keeps its page per hub during refresh, with ten users per page and space for ten rows on the final page.
 
 The **Updates** tile reads only the root collector's snapshot. APT is checked at most every
