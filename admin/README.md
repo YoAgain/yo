@@ -1,6 +1,7 @@
 # Yo admin
 
-Python standard library dashboard for server health, systemd services, hub users and database tables,
+Python standard library dashboard for server health, systemd services, a Users tab (today's figures, sign-ups and
+active users per day, every user in a table sortable by each column), hub database tables,
 User Reports, feedback and To-Dos, anonymous crash/error diagnostics with counts and done ticks, reserved-name management, and YoGPT reply pictures. The collector (`users.py`)
 reads SQLite databases read-only and atomically writes a JSON snapshot. To-Dos go through the hub API;
 message completion lives in the hub; user-report done markers are stored locally. `migrate_todos.py` is the one-time legacy JSON migration.
@@ -62,6 +63,10 @@ YO_HUB_DB="$sample/hub.sqlite" YO_HUB_DEV_DB="$sample/hub-dev.sqlite" \
   ADMIN_USERS_FILE="$sample/users.json" python3 admin/users.py
 mkdir "$sample/state"
 ```
+
+Active users per day are the collector's count of users seen since UTC midnight (the hub keeps one last-seen day
+per device); the admin keeps the highest count per day, counts only, for 60 days in `STATE_DIRECTORY/active-days.json`,
+so the chart fills from the first day this version runs. Sign-ups per day come from `users.created_at` (30 UTC days).
 
 Missing sample tables produce per-section errors without hiding feedback or tables. To serve this
 snapshot, export the five required authentication settings from a private local env file, set
@@ -143,6 +148,9 @@ Startup follows schema 3 → 4 → 5 → 6 (or 4/5 → 6), atomically migrating 
 Schema 6 moves `todos` into `support_messages` with `user_id=X''`, `from_team=1`,
 preserving text, creation and done times, and allocating fresh message IDs to avoid collisions.
 It drops `todos` and backfills user-message `done_at` from existing team read markers once.
-The pinned Team To-Dos thread uses `team` in admin URLs. Every bubble can be completed or reopened;
+The team's to-dos use `team` in admin URLs. In the Support tab they are no pinned row: each open to-do is its own
+row, and a to-do written in a user's conversation is listed with that user. Stars and which user a to-do is about are
+kept by the admin only, in `STATE_DIRECTORY/support-marks.json` (`/marks.json`, `POST /marks`); starred rows and rows
+with something open sort to the top. The Crashes tab shows a quiet count of open, non-expected entries. Every bubble can be completed or reopened;
 viewing a thread changes no completion state. Badges and the Overview red curve count open user
 messages only. App unread team replies still use `read_at`. Old JSON flags still serve user reports.

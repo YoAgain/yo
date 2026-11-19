@@ -366,12 +366,14 @@ if (document.body.classList.contains("login")) {
     }
   };
 
-  // ---- users: everyone on the left, the chosen one on the right (who, reports, support chat) -----------------------
-  // The list merges the collector's users with the hub's support threads: the team's To-Dos pinned on top, a red dot
-  // on users with open messages (first by default). A click always wins over a refresh still under way.
+  // ---- support: conversations and to-dos on the left, the chosen one on the right (who, to-dos, reports, chat) ------
+  // One list: every user (with their conversation, if any), and each open team to-do not about a user. Starred rows
+  // and rows with something open float to the top on their own; a quiet count says how much is open. Stars and which
+  // user a to-do is about are kept by this page (marks.json); the hub keeps messages, to-dos and their done state.
   let supportUser = null, supportHub = null, supportName = "", supportSeen = null, supportBusy = false, supportThreads = [];
-  let supportWant = null, listDrawn = "", supportMessages = [];
-  let userQuery = "", userFilter = "all", userSort = "open";
+  let supportWant = null, listDrawn = "", supportMessages = [], teamTodos = null, composeMode = "reply";
+  let marks = { stars: [], todo_user: {} };
+  let userQuery = "", userFilter = "all";
   const supportGet = async (user) => {
     const r = await fetch(`/support.json?${new URLSearchParams({ hub: which, ...(user ? { user } : {}) })}`, { cache: "no-store" });
     if (!r.ok) throw new Error("Could not load messages.");
@@ -383,58 +385,92 @@ if (document.body.classList.contains("login")) {
   const threadOf = (id) => supportThreads.find((t) => up(t.user_id) === up(id));
   const reportsAbout = (id) => (last?.[which]?.reports || []).filter((r) => up(r.reported) === up(id));
   const openReports = (id) => reportsAbout(id).filter((r) => !lastDone.has(reportKey(r))).length;
-  // One row per person: users of the collector, plus threads of accounts it no longer has (deleted ones).
-  const personRows = () => {
+  const starred = (key) => marks.stars.includes(`${which}:${key}`);
+  const todoAbout = (id) => marks.todo_user[`${which}:${id}`] || null;
+  // The team's to-dos: from the hub when loaded, else from the collector's snapshot.
+  const todos = () => teamTodos || (last?.[which]?.todos || []).map((t) => ({ id: t.id, text: t.text, created_at: t.at, done_at: t.done_at }));
+  const todosOf = (id) => todos().filter((t) => todoAbout(t.id) === up(id));
+  const setMark = async (data) => {
+    const r = await fetch("/marks", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ hub: which, ...data }) });
+    if (!r.ok) throw new Error("Could not save. Try again.");
+    marks = await r.json();
+    listDrawn = "";
+    part(drawList); part(drawPerson); part(drawStar);
+    if (isTeam(supportUser)) part(() => drawThread(supportMessages));
+  };
+  const starButton = (key, label) => {
+    const on = starred(key), b = el("button", `star${on ? " on" : ""}`, "★");
+    b.type = "button";
+    b.setAttribute("aria-pressed", String(on));
+    b.setAttribute("aria-label", `Star ${label}`);
+    b.title = on ? "starred (click to unstar)" : "star: keep on top";
+    b.addEventListener("click", (e) => { e.stopPropagation(); setMark({ star: key, on: !on }).catch((x) => set("support-error", x.message)); });
+    return b;
+  };
+  // Rows: people (users of the collector, plus threads of accounts it no longer has) and open to-dos about nobody.
+  const listRows = () => {
     const users = last?.[which]?.users || [], ids = new Set(users.map((u) => up(u.id)));
-    const rows = users.map((u) => ({ id: up(u.id), user: u, name: u.name || "(no name)", thread: threadOf(u.id) }));
-    for (const t of supportThreads) if (!isTeam(t.user_id) && !ids.has(up(t.user_id))) rows.push({ id: up(t.user_id), user: null, name: t.name || "Deleted account", thread: t });
+    const person = (id, user, name, thread) => {
+      const own = todosOf(id).filter((t) => t.done_at == null).length;
+      return { kind: "user", id, key: `u:${id}`, user, name, thread, todos: own, open: (thread?.unread || 0) + own,
+        at: Math.max(thread?.at || 0, ...todosOf(id).map((t) => t.created_at || 0)), seen: user?.last_seen || 0 };
+    };
+    const rows = users.map((u) => person(up(u.id), u, u.name || "(no name)", threadOf(u.id)));
+    for (const t of supportThreads) if (!isTeam(t.user_id) && !ids.has(up(t.user_id))) rows.push(person(up(t.user_id), null, t.name || "Deleted account", t));
+    const known = new Set(rows.map((r) => r.id));
+    for (const t of todos()) {
+      if (t.done_at != null || known.has(todoAbout(t.id))) continue;
+      rows.push({ kind: "todo", id: `T${t.id}`, todo: t, key: `t:${t.id}`, name: t.text, open: 1, at: t.created_at || 0, seen: 0 });
+    }
+    for (const r of rows) r.star = starred(r.key);
     return rows;
   };
-  const sortPeople = (rows) => {
-    const by = {
-      open: (a, b) => (b.thread?.unread || 0) - (a.thread?.unread || 0) || openReports(b.id) - openReports(a.id) || (b.thread?.at || 0) - (a.thread?.at || 0) || (b.user?.last_seen || 0) - (a.user?.last_seen || 0),
-      last_seen: (a, b) => (b.user?.last_seen || 0) - (a.user?.last_seen || 0),
-      created: (a, b) => (b.user?.created || 0) - (a.user?.created || 0),
-      name: (a, b) => a.name.localeCompare(b.name),
-    }[userSort];
-    return rows.sort((a, b) => by(a, b) || (b.user?.created || 0) - (a.user?.created || 0));
-  };
+  // Starred first, then anything open, then the rest; each by its newest activity.
+  const rank = (r) => (r.star ? 2 : 0) + (r.open ? 1 : 0);
+  const sortRows = (rows) => rows.sort((a, b) => rank(b) - rank(a) || b.at - a.at || b.seen - a.seen || (b.user?.created || 0) - (a.user?.created || 0));
   const drawList = () => {
     const box = $("person-list"), lastLines = last?.[which]?.support_last || {};
-    const team = supportThreads.find((t) => isTeam(t.user_id));
-    let rows = personRows().filter((p) => !userQuery || p.name.toLowerCase().includes(userQuery) || p.id.toLowerCase().includes(userQuery));
-    if (userFilter === "open") rows = rows.filter((p) => p.thread?.unread);
-    rows = sortPeople(rows);
-    const drawn = JSON.stringify([which, supportUser, userQuery, userFilter, userSort, team, rows.map((p) => [p.id, p.name, p.thread, p.user?.last_seen, p.user?.app, lastLines[p.id], openReports(p.id)])]);
+    let rows = listRows().filter((p) => !userQuery || p.name.toLowerCase().includes(userQuery) || p.id.toLowerCase().includes(userQuery));
+    if (userFilter === "open") rows = rows.filter((p) => p.open);
+    if (userFilter === "star") rows = rows.filter((p) => p.star);
+    rows = sortRows(rows);
+    const openTodos = todos().filter((t) => t.done_at == null).length;
+    set("new-todo-count", openTodos ? ` · ${openTodos}` : "");
+    const drawn = JSON.stringify([which, supportUser, userQuery, userFilter, marks, rows.map((p) => [p.id, p.name, p.thread, p.open, p.user?.last_seen, p.user?.app, lastLines[p.id], openReports(p.id)])]);
     if (drawn === listDrawn && box.childElementCount) return;
     listDrawn = drawn;
     box.replaceChildren();
-    const row = (id, name, isT, open, line, time, timeTitle, badge) => {
-      const b = el("button", `thread${open && !isT ? " unread" : ""}${isT ? " team" : ""}${up(supportUser) === id ? " on" : ""}`);
+    for (const p of rows) {
+      const wrap = el("div", "trow");
+      const b = el("button", `thread${p.open ? " unread" : ""}${p.kind === "todo" ? " todo-row" : ""}${(p.kind === "todo" ? isTeam(supportUser) : up(supportUser) === p.id) ? " on" : ""}`);
       b.type = "button";
       const body = el("span", "body"), top = el("span", "top"), bottom = el("span", "bottom");
-      top.append(el("b", "name", name));
-      if (badge) top.append(badge);
+      top.append(el("b", "name", p.name));
+      let line, time, title = "";
+      if (p.kind === "todo") {
+        line = `To-do · added ${rel(p.at)}`; time = clock(p.at); title = date(p.at);
+      } else {
+        const l = lastLines[p.id], u = p.user, rep = openReports(p.id);
+        if (rep) top.append(Object.assign(el("span", "flag", "⚑"), { title: `${rep} open report${rep === 1 ? "" : "s"} about this user` }));
+        line = p.todos ? `${p.todos} to-do${p.todos === 1 ? "" : "s"}${l ? ` · ${l.team ? "You: " : ""}${l.text}` : ""}`
+          : l ? `${l.team ? "You: " : ""}${l.text}` : u ? [u.app ? build(u.app) : "", `seen ${seenDay(u.last_seen)}`].filter(Boolean).join(" · ") : "";
+        time = p.thread ? clock(p.thread.at) : u ? clock(u.last_seen) : "";
+        title = p.thread ? `last message ${date(p.thread.at)}` : "";
+      }
       top.append(el("time", null, time));
       bottom.append(el("span", "line", line));
-      if (open) bottom.append(el("span", "count", String(open)));
+      if (p.open && p.kind === "user") bottom.append(Object.assign(el("span", "count", String(p.open)), { title: `${p.thread?.unread || 0} open message(s) · ${p.todos} open to-do(s)` }));
       body.append(top, bottom);
-      const av = avatar(el("span", "avatar"), name, isT);
-      if (name === "Deleted account") av.classList.add("gone");
+      const av = avatar(el("span", "avatar"), p.name, p.kind === "todo");
+      if (p.name === "Deleted account") av.classList.add("gone");
       b.append(av, body);
-      if (timeTitle) b.title = timeTitle;
-      b.addEventListener("click", () => select(isT ? "team" : id, name));
-      return b;
-    };
-    if (team && !userQuery && userFilter === "all") box.append(row("TEAM", "Team To-Dos", true, team.open || 0, team.open ? `${team.open} open` : "Nothing open", clock(team.at), team.at ? date(team.at) : ""));
-    for (const p of rows) {
-      const l = lastLines[p.id], u = p.user, rep = openReports(p.id);
-      const line = l ? `${l.team ? "You: " : ""}${l.text}` : u ? [u.app ? build(u.app) : "", `seen ${seenDay(u.last_seen)}`].filter(Boolean).join(" · ") : "";
-      const time = p.thread ? clock(p.thread.at) : u ? clock(u.last_seen) : "";
-      box.append(row(p.id, p.name, false, p.thread?.unread || 0, line, time, p.thread ? `last message ${date(p.thread.at)}` : "",
-        rep ? Object.assign(el("span", "flag", "⚑"), { title: `${rep} open report${rep === 1 ? "" : "s"} about this user` }) : null));
+      if (title) b.title = title;
+      b.addEventListener("click", () => select(p.kind === "todo" ? "team" : p.id, p.kind === "todo" ? "To-dos" : p.name));
+      wrap.append(b, starButton(p.key, p.kind === "todo" ? "to-do" : p.name));
+      if (p.star) wrap.classList.add("starred");
+      box.append(wrap);
     }
-    if (!box.childElementCount) box.append(el("p", "empty", userQuery ? "No user matches." : userFilter === "open" ? "No open conversations." : "No users yet."));
+    if (!box.childElementCount) box.append(el("p", "empty", userQuery ? "Nothing matches." : userFilter === "open" ? "Nothing open." : userFilter === "star" ? "Nothing starred yet. Star a conversation or to-do to keep it on top." : "No users yet."));
   };
   $("user-search").addEventListener("input", (e) => { userQuery = e.target.value.trim().toLowerCase(); part(drawList); });
   for (const b of document.querySelectorAll(".seg [data-filter]")) b.addEventListener("click", () => {
@@ -442,6 +478,7 @@ if (document.body.classList.contains("login")) {
     for (const x of document.querySelectorAll(".seg [data-filter]")) x.classList.toggle("on", x === b);
     part(drawList);
   });
+  $("new-todo").addEventListener("click", () => select("team", "To-dos"));
 
   const supportDone = async (ids, done) => {
     const hub = which, user = supportUser;
@@ -451,6 +488,23 @@ if (document.body.classList.contains("login")) {
       await supportRefresh();
     } catch (e) { set("support-error", e.message); }
   };
+  // A to-do line: tick, star, text, who it is about (in the team list), when.
+  const todoRow = (m, showWho) => {
+    const row = el("div", `todo${m.done_at != null ? " done" : ""}${starred(`t:${m.id}`) ? " starred" : ""}`);
+    row.append(tickButton(m.done_at != null, "To-do done", (d) => supportDone([m.id], d)), el("span", "text", m.text));
+    const about = todoAbout(m.id);
+    if (showWho && about) {
+      const name = userById(about)?.name || threadOf(about)?.name || about.slice(0, 8).toLowerCase();
+      const who = el("button", "link about", `about ${name}`);
+      who.type = "button"; who.title = "open this user";
+      who.addEventListener("click", () => select(about, name));
+      row.append(who);
+    }
+    const t = el("time", null, clock(m.created_at)); t.title = date(m.created_at) + (m.done_at ? ` · done ${date(m.done_at)}` : "");
+    row.append(t, starButton(`t:${m.id}`, "to-do"));
+    return row;
+  };
+  const todoOrder = (a, b) => (a.done_at != null) - (b.done_at != null) || starred(`t:${b.id}`) - starred(`t:${a.id}`) || a.created_at - b.created_at;
   const drawThread = (messages) => {
     const box = $("support-history"), atEnd = box.scrollHeight - box.scrollTop - box.clientHeight < 60;
     const team = isTeam(supportUser);
@@ -458,19 +512,12 @@ if (document.body.classList.contains("login")) {
     box.classList.toggle("todos", team);
     if (!messages.length) {
       const e = el("div", "empty-state");
-      e.append(el("b", null, team ? "No to-dos yet" : "No messages"), el("span", null, team ? "Add the first one below." : "This user has not written to the team. Replies are possible once they do."));
+      e.append(el("b", null, team ? "No to-dos yet" : "No messages"), el("span", null, team ? "Add the first one below." : "This user has not written to the team. Replies are possible once they do; a to-do about them works now."));
       box.append(e);
     }
     if (team) {
-      // The To-Dos as a list: open ones first (oldest first), done ones after, dimmed.
-      const sorted = [...messages].sort((a, b) => (a.done_at != null) - (b.done_at != null) || a.created_at - b.created_at);
-      for (const m of sorted) {
-        const row = el("div", `todo${m.done_at != null ? " done" : ""}`);
-        row.append(tickButton(m.done_at != null, "To-do done", (d) => supportDone([m.id], d)), el("span", "text", m.text));
-        const t = el("time", null, clock(m.created_at)); t.title = date(m.created_at) + (m.done_at ? ` · done ${date(m.done_at)}` : "");
-        row.append(t);
-        box.append(row);
-      }
+      // The to-dos as a list: open ones first (starred, then oldest first), done ones after, dimmed.
+      for (const m of [...messages].sort(todoOrder)) box.append(todoRow(m, true));
     } else {
       let lastDay = "", lastFrom = null;
       for (const m of messages) {
@@ -498,13 +545,30 @@ if (document.body.classList.contains("login")) {
     if (!t.offsetParent) { t.style.height = ""; return; }
     t.style.height = "auto"; t.style.height = `${Math.min(Math.max(t.scrollHeight, 22), 180)}px`;
   };
-  // Who the chosen person is: facts in a row, devices and reports folded below.
+  const drawStar = () => {
+    const s = $("convo-star"), team = isTeam(supportUser);
+    s.hidden = !supportUser || team;
+    if (s.hidden) return;
+    const on = starred(`u:${up(supportUser)}`);
+    s.classList.toggle("on", on); s.setAttribute("aria-pressed", String(on));
+    s.title = on ? "starred (click to unstar)" : "star: keep on top";
+  };
+  $("convo-star").addEventListener("click", () => {
+    if (!supportUser || isTeam(supportUser)) return;
+    const key = `u:${up(supportUser)}`;
+    setMark({ star: key, on: !starred(key) }).catch((x) => set("support-error", x.message));
+  });
+  // Who the chosen person is: facts in a row, their to-dos, devices and reports folded below.
   const drawPerson = () => {
     const team = isTeam(supportUser), u = team ? null : userById(supportUser);
     const facts = $("p-facts");
     facts.replaceChildren();
     $("p-id").hidden = team || !supportUser;
     if (!team && supportUser) { $("p-id").textContent = supportUser.toLowerCase(); $("p-id").dataset.id = supportUser.toLowerCase(); }
+    const own = team || !supportUser ? [] : todosOf(supportUser).sort(todoOrder);
+    const ut = $("user-todos");
+    ut.hidden = !own.length;
+    ut.replaceChildren(...own.map((m) => todoRow(m, false)));
     $("p-extra").hidden = team || !u;
     if (team || !u) return;
     const a = appState(u.app);
@@ -547,19 +611,31 @@ if (document.body.classList.contains("login")) {
   $("p-id").addEventListener("click", () => {
     navigator.clipboard?.writeText($("p-id").dataset.id).then(() => { $("p-id").dataset.copied = "1"; setTimeout(() => delete $("p-id").dataset.copied, 1200); }).catch(() => {});
   });
+  // The composer: in a user's conversation, a reply (once they wrote) or a to-do about them; in To-dos, a to-do.
+  const setMode = (mode) => {
+    composeMode = mode;
+    for (const b of document.querySelectorAll("#compose-mode [data-mode]")) b.classList.toggle("on", b.dataset.mode === mode);
+    convoHead(supportMessages);
+  };
+  for (const b of document.querySelectorAll("#compose-mode [data-mode]")) b.addEventListener("click", () => { if (!b.disabled) { setMode(b.dataset.mode); $("support-text").focus(); } });
   const convoHead = (messages) => {
     const team = isTeam(supportUser), open = messages.filter((m) => (team || !m.from_team) && m.done_at == null).length;
     $("convo-done").hidden = team || !open;
-    const canWrite = team || messages.length > 0;
-    $("support-reply").hidden = !canWrite;
-    $("support-reply").classList.toggle("team", team);
-    $("support-text").maxLength = team ? 4000 : 2000;
-    $("support-text").placeholder = team ? "Add a to-do (Enter)" : `Reply to ${supportName} (Enter sends, Shift+Enter new line)`;
+    const canReply = !team && messages.length > 0;
+    if (!team && !canReply) composeMode = "todo";
+    const todo = team || composeMode === "todo";
+    $("compose-mode").hidden = team || !supportUser;
+    $("compose-mode").querySelector('[data-mode="reply"]').disabled = !canReply;
+    for (const b of document.querySelectorAll("#compose-mode [data-mode]")) b.classList.toggle("on", b.dataset.mode === (todo ? "todo" : "reply"));
+    $("support-reply").hidden = !supportUser;
+    $("support-reply").classList.toggle("team", todo);
+    $("support-text").maxLength = todo ? 4000 : 2000;
+    $("support-text").placeholder = team ? "Add a to-do (Enter)" : todo ? `A to-do about ${supportName} (Enter)` : `Reply to ${supportName} (Enter sends, Shift+Enter new line)`;
     growComposer();
   };
   const select = (id, name) => {
-    if (location.hash !== "#users") history.replaceState(null, "", "#users");
-    if (currentTab !== "users") tab();
+    if (location.hash !== "#support") history.replaceState(null, "", "#support");
+    if (currentTab !== "support") tab();
     supportOpen(id, name, true);
   };
   const supportOpen = async (user, title, chosen) => {
@@ -568,19 +644,20 @@ if (document.body.classList.contains("login")) {
     if (chosen) {
       if (supportUser !== user || supportHub !== hub) {
         $("support-text").value = ""; growComposer(); supportSeen = null; $("support-history").replaceChildren();
-        $("support-reply").hidden = true; $("convo-done").hidden = true;
+        $("support-reply").hidden = true; $("convo-done").hidden = true; composeMode = "reply";
       }
       supportUser = user; supportHub = hub; supportName = title || user;
       avatar($("convo-avatar"), supportName, isTeam(user)); set("support-title", supportName);
-      part(drawPerson); part(drawList);
+      part(drawPerson); part(drawList); part(drawStar);
     }
     try {
       const data = await supportGet(user);
       if (which !== hub || supportWant !== user) return;
       supportUser = user; supportHub = hub; supportName = title || supportName || user;
       supportMessages = data.messages;
+      if (isTeam(user)) teamTodos = data.messages;
       convoHead(data.messages);
-      const seen = data.messages.map((m) => `${m.id}:${m.read_at ? 1 : 0}:${m.done_at}`).join(",");
+      const seen = data.messages.map((m) => `${m.id}:${m.read_at ? 1 : 0}:${m.done_at}`).join(",") + JSON.stringify(marks);
       if (seen !== supportSeen) { supportSeen = seen; drawThread(data.messages); }
       if (chosen && !$("support-reply").hidden) $("support-text").focus({ preventScroll: true });
       set("support-error", "");
@@ -591,25 +668,29 @@ if (document.body.classList.contains("login")) {
     supportBusy = true;
     const hub = which;
     if (supportHub !== hub) {
-      supportUser = null; supportWant = null; supportSeen = null; $("support-reply").hidden = true;
+      supportUser = null; supportWant = null; supportSeen = null; teamTodos = null; $("support-reply").hidden = true;
       $("support-history").replaceChildren(); set("support-title", "Loading…");
     }
     try {
-      const threads = await supportGet();
+      const [threads, team] = await Promise.all([supportGet(), supportGet("team").catch(() => null)]);
       if (hub !== which) return;
       supportThreads = threads;
+      if (team) teamTodos = team.messages;
       const open = threads.reduce((n, t) => n + (isTeam(t.user_id) ? 0 : t.unread), 0);
       set("feedback-unread", open);
-      // The Users tab's badge: conversations whose last word is the user's and still open.
+      // The Support tab's quiet count: conversations whose last word is the user's and still open, plus open to-dos.
       const lastLines = last?.[which]?.support_last || {};
       const unanswered = threads.filter((t) => !isTeam(t.user_id) && t.unread > 0 && !lastLines[up(t.user_id)]?.team).length;
-      $("badge-users").hidden = !unanswered; $("badge-users").textContent = unanswered > 99 ? "99+" : String(unanswered);
+      const openTodos = todos().filter((t) => t.done_at == null).length;
+      set("tab-support", unanswered + openTodos ? ` · ${unanswered + openTodos}` : "");
+      $("tab-support").title = `${unanswered} waiting for a reply · ${openTodos} open to-dos`;
       part(drawList);
-      // Nothing chosen yet: the first conversation with something open (else the newest, else the To-Dos).
-      if (supportWant === null && currentTab === "users") {
+      if (currentTab === "support") part(drawPerson);
+      // Nothing chosen yet: the first conversation with something open (else the newest, else the To-dos).
+      if (supportWant === null && currentTab === "support") {
         const user = threads.filter((t) => !isTeam(t.user_id)).sort((a, b) => (b.unread > 0) - (a.unread > 0) || b.at - a.at)[0];
-        if (user) supportOpen(user.user_id, userById(user.user_id)?.name || user.name || "Deleted account", true);
-        else if (threads.length) supportOpen("team", "Team To-Dos", true);
+        if (user) supportOpen(up(user.user_id), userById(user.user_id)?.name || user.name || "Deleted account", true);
+        else if (threads.length || teamTodos?.length) supportOpen("team", "To-dos", true);
       }
       set("support-error", "");
     } catch (e) { set("support-error", e.message); }
@@ -619,11 +700,14 @@ if (document.body.classList.contains("login")) {
     const text = $("support-text").value;
     if (!supportUser || supportHub !== which || !text.trim()) return;
     const button = $("support-reply").querySelector("button"), user = supportUser, hub = supportHub;
+    const todo = isTeam(user) || composeMode === "todo";
     button.disabled = true;
     try {
-      if (isTeam(user)) {
+      if (todo) {
         const r = await fetch("/todos", { method: "POST", body: new URLSearchParams({ hub, text }) });
         if (!r.ok) throw new Error("Could not add the to-do.");
+        const made = await r.json();
+        if (!isTeam(user) && made?.id) await setMark({ todo: made.id, user: up(user) });
       } else {
         await postJSON("/support", { hub, user, action: "reply", text });
         // The reply answers the user's open messages in this thread: they are marked handled.
@@ -632,8 +716,9 @@ if (document.body.classList.contains("login")) {
       }
       if (which !== hub || supportUser !== user) return;
       $("support-text").value = ""; growComposer();
-      await supportOpen(user);
       await supportRefresh();
+      await supportOpen(user);
+      part(drawPerson);
     } catch (e) { set("support-error", e.message); }
     finally { button.disabled = false; $("support-text").focus({ preventScroll: true }); }
   };
@@ -644,10 +729,92 @@ if (document.body.classList.contains("login")) {
   });
   $("convo-done").addEventListener("click", () => supportDone(supportMessages.filter((m) => !m.from_team && m.done_at == null).map((m) => m.id), true));
   setInterval(() => {
-    if (document.visibilityState !== "visible" || currentTab !== "users") return;
+    if (document.visibilityState !== "visible" || currentTab !== "support") return;
     supportRefresh();
     if (supportUser && supportHub === which) supportOpen(supportUser);
   }, 4000);
+
+  // ---- users tab: today's figures, sign-ups and active users per day (30 days), every user sortable ---------------
+  const days30 = () => Array.from({ length: 30 }, (_, i) => Math.floor(Date.now() / 86400000) - 29 + i);
+  // Bars on one scale, a hover title per day; a null value is a day without data (a short grey stub).
+  const bars = (node, values, titles) => {
+    const W = 300, H = 90, slot = W / values.length, top = Math.max(1, ...values.filter((v) => v != null)), kids = [];
+    values.forEach((v, i) => {
+      const h = v ? Math.max(1.5, (v / top) * (H - 12)) : 1.5;
+      kids.push(svg("rect", { x: (i * slot + slot * 0.16).toFixed(1), width: (slot * 0.68).toFixed(1), y: (H - h).toFixed(1), height: h.toFixed(1), rx: 1.5, class: v ? "su" : "su zero" }));
+    });
+    values.forEach((_, i) => {
+      const r = svg("rect", { x: (i * slot).toFixed(1), width: slot.toFixed(1), y: 0, height: H, class: "hit" });
+      const t = svg("title"); t.textContent = titles[i]; r.append(t); kids.push(r);
+    });
+    node.replaceChildren(...kids);
+  };
+  let allSort = { key: "created", dir: -1 }, allQuery = "";
+  const allValue = (u, key) => key === "name" ? (u.name || "").toLowerCase() : key === "app" ? (parse(u.app)?.[1] ?? -1)
+    : key === "secured" || key === "push" ? Number(!!u[key]) : u[key] ?? 0;
+  for (const th of document.querySelectorAll("#all-users-table th[data-sort]")) {
+    th.tabIndex = 0;
+    const go = () => {
+      const key = th.dataset.sort;
+      allSort = { key, dir: allSort.key === key ? -allSort.dir : key === "name" ? 1 : -1 };
+      part(() => drawAllUsers(last?.[which]));
+    };
+    th.addEventListener("click", go);
+    th.addEventListener("keydown", (e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); go(); } });
+  }
+  $("all-users-search").addEventListener("input", (e) => { allQuery = e.target.value.trim().toLowerCase(); part(() => drawAllUsers(last?.[which])); });
+  const drawAllUsers = (h) => {
+    for (const th of document.querySelectorAll("#all-users-table th[data-sort]")) {
+      th.classList.toggle("sorted", th.dataset.sort === allSort.key);
+      th.dataset.dir = th.dataset.sort === allSort.key ? (allSort.dir > 0 ? "▲" : "▼") : "";
+    }
+    const users = h?.users || [];
+    const list = users.filter((u) => !allQuery || (u.name || "").toLowerCase().includes(allQuery) || u.id.includes(allQuery)).sort((a, b) => {
+      const x = allValue(a, allSort.key), y = allValue(b, allSort.key);
+      return (x < y ? -1 : x > y ? 1 : 0) * allSort.dir || b.created - a.created;
+    });
+    set("all-users-note", `${num(list.length)}${list.length !== users.length ? ` of ${num(users.length)}` : ""}${h?.total > users.length ? ` · the ${num(users.length)} seen last of ${num(h.total)}` : ""}`);
+    const body = $("all-users-body");
+    body.replaceChildren();
+    for (const u of list) {
+      const tr = body.insertRow();
+      tr.className = "opens";
+      tr.title = "open the conversation";
+      cell(tr, u.name ?? "–", "name", u.id);
+      cell(tr, rel(u.created), null, date(u.created));
+      cell(tr, seenDay(u.last_seen), null, u.last_seen ? new Date(u.last_seen).toLocaleDateString() : "never seen");
+      const pf = { ios: "iOS", android: "Android", yogpt: "YoGPT" }[parse(u.app)?.[0]], ap = el("span");
+      if (pf) ap.append(`${pf} `);
+      ap.append(appTag(u.app));
+      cell(tr, ap);
+      cell(tr, u.push ? tag("on", "ok") : tag("off", "muted"));
+      cell(tr, u.secured ? tag("yes", "ok") : tag("no", "muted"), null, u.backup_at ? `backup ${date(u.backup_at)}` : "");
+      cell(tr, num(u.devices), "num");
+      cell(tr, u.queued ? num(u.queued) : "–", "num muted");
+      tr.addEventListener("click", () => select(up(u.id), u.name || u.id));
+    }
+    if (!list.length) cell(body.insertRow(), h && !h.error ? (allQuery ? "No user matches." : "No users yet.") : (h?.error || "No data"), "empty").colSpan = 8;
+  };
+  const drawUsersTab = (h) => {
+    const ok = h && !h.error, days = days30();
+    const su = h?.signups || [], s30 = days.map((_, i) => su[su.length - 30 + i] ?? null);
+    const today = s30[29] ?? null, week = s30.slice(-7).reduce((n, v) => n + (v || 0), 0);
+    set("us-new", ok ? num(today) : "–");
+    set("us-new-cap", ok ? `${num(week)} in 7 days · ${num(s30.reduce((n, v) => n + (v || 0), 0))} in 30` : "");
+    const act = h?.active_day ?? null;
+    set("us-active", ok ? num(act) : "–");
+    set("us-active-cap", ok ? `${num(h.active_today)} in 24 h · ${num(h.active_users)} in 7 days` : "");
+    set("us-total", ok ? num(h.total) : "–");
+    set("us-total-cap", ok ? `${num(h.secured)} secured · ${num(h.devices)} devices` : "");
+    bars($("us-signups"), s30.map((v) => v ?? 0), days.map((d, i) => `${dayName(d)}: ${s30[i] ?? 0} sign-ups`));
+    set("us-signups-sum", "UTC days");
+    const kept = h?.active_days || {}, a30 = days.map((d) => kept[d] ?? null);
+    if (act != null) a30[29] = Math.max(a30[29] ?? 0, act);
+    bars($("us-actives"), a30, days.map((d, i) => `${dayName(d)}: ${a30[i] == null ? "not recorded" : `${a30[i]} active`}`));
+    const first = days.find((d) => kept[d] != null);
+    set("us-active-sum", first != null && first > days[0] ? `recorded since ${dayName(first)}` : "UTC days");
+    drawAllUsers(h);
+  };
 
   // ---- users: the reports list (who reported whom); handled is kept by the admin page (done.json) ---------------------
   let reportsMode = "open";
@@ -710,6 +877,9 @@ if (document.body.classList.contains("login")) {
     $("diag-all").hidden = !open.length;
     $("diag-all").textContent = `Mark all ${open.length} done`;
     set("diag-note", `${open.length} open · ${list.length} in all`);
+    // The tab's quiet count: open ones without the expected, roughly (the snapshot is up to ten seconds old).
+    const real = open.filter((d) => !diagInfo(d).expected).length;
+    set("tab-crashes", real ? ` · ~${real > 99 ? "99+" : real}` : "");
     const shown = list.filter((d) => diagMode === "all" || (diagMode === "done") === !!d.done)
       .filter((d) => diagLevel === "all" || !diagInfo(d).expected).sort((a, b) => b.last_seen - a.last_seen);
     const pages = Math.max(1, Math.ceil(shown.length / PAGE));
@@ -886,7 +1056,8 @@ if (document.body.classList.contains("login")) {
     supportRefresh();
     part(drawReports);
     part(drawDiagnostics);
-    if (currentTab === "users") part(drawPerson);
+    if (currentTab === "support") part(drawPerson);
+    if (currentTab === "users") part(() => drawUsersTab(h));
     part(drawTables);
   };
   let peopleBusy = false;
@@ -902,6 +1073,8 @@ if (document.body.classList.contains("login")) {
       updates(last.updates);
       const doneResponse = await fetch("/done.json", { cache: "no-store" });
       lastDone = new Set(doneResponse.ok ? await doneResponse.json() : []);
+      const marksResponse = await fetch("/marks.json", { cache: "no-store" });
+      if (marksResponse.ok) marks = await marksResponse.json();
       render();
       status.textContent = last.stale ? "Stale data · waiting for the collector" : "";
     } catch {
@@ -909,12 +1082,12 @@ if (document.body.classList.contains("login")) {
     } finally { peopleBusy = false; }
   }
 
-  // ---- tabs: the hash keeps the tab across reloads and links; keys 1–4 switch, 0 the hub ----------------------------
-  const TABS = ["overview", "users", "crashes", "db"];
+  // ---- tabs: the hash keeps the tab across reloads and links; keys 1–5 switch, 0 the hub ----------------------------
+  const TABS = ["overview", "support", "users", "crashes", "db"];
   const tab = () => {
     const h = location.hash.slice(1);
-    const t = h === "diagnostics" ? "crashes" : h === "reserved" ? "db" : h === "feedback" ? "users" : TABS.includes(h) ? h : "overview";
-    if (h === "feedback") history.replaceState(null, "", "#users");
+    const t = h === "diagnostics" ? "crashes" : h === "reserved" ? "db" : h === "feedback" ? "support" : TABS.includes(h) ? h : "overview";
+    if (h === "feedback") history.replaceState(null, "", "#support");
     const changed = t !== currentTab;
     currentTab = t;
     document.body.dataset.tab = t;
@@ -928,7 +1101,7 @@ if (document.body.classList.contains("login")) {
     || (t.closest("input") && !["checkbox", "radio", "button", "submit"].includes(t.closest("input").type)));
   document.addEventListener("keydown", (e) => {
     if (e.ctrlKey || e.metaKey || e.altKey || typing(e.target) || $("pop").open) return;
-    const n = /^Digit[0-4]$/.test(e.code) ? Number(e.code.slice(5)) : /^[0-4]$/.test(e.key) ? Number(e.key) : null;
+    const n = /^Digit[0-5]$/.test(e.code) ? Number(e.code.slice(5)) : /^[0-5]$/.test(e.key) ? Number(e.key) : null;
     if (n == null) return;
     e.preventDefault();
     if (n === 0) { switchHub(); return; }

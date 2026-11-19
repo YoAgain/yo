@@ -204,14 +204,11 @@ a.lg:hover { color: var(--text); }
 .thread .name { flex: 1; min-width: 0; font-size: 13.5px; font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .thread.unread .name { font-weight: 800; }
 .thread time { flex: none; font-size: 11px; color: var(--muted); }
-.thread.unread time { color: var(--bad); font-weight: 700; }
+.thread.unread time { color: var(--amethyst-soft); font-weight: 700; }
 .thread .line { flex: 1; min-width: 0; font-size: 12px; color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .thread.unread .line { color: var(--text); }
-.thread .count { flex: none; min-width: 18px; height: 18px; padding: 0 5px; border-radius: 999px; background: var(--bad); color: #fff; font-size: 11px; font-weight: 800; display: grid; place-items: center; }
-.thread.team .count { background: var(--amethyst); }
+.thread .count { flex: none; min-width: 18px; height: 18px; padding: 0 5px; border-radius: 999px; background: var(--sel); color: var(--text); font-size: 11px; font-weight: 700; display: grid; place-items: center; }
 .thread .tag { padding: 1px 6px; font-size: 10px; }
-.thread.team { margin-bottom: 6px; background: rgba(155, 89, 182, .07); border: 1px dashed rgba(155, 89, 182, .35); }
-.thread.team.on { background: var(--sel); border-style: solid; }
 .avatar { --h: 270; width: 40px; height: 40px; border-radius: 50%; display: grid; place-items: center; font-size: 14px; font-weight: 800; color: #fff; flex: none;
   background: linear-gradient(135deg, hsl(var(--h) 55% 52%), hsl(calc(var(--h) + 30) 50% 40%)); position: relative; }
 .avatar.team { background: var(--amethyst); }
@@ -338,8 +335,8 @@ a.lg:hover { color: var(--text); }
 .foot form { display: inline; margin: 0; }
 .footlink { border: 0; background: none; padding: 0; color: inherit; text-decoration: underline; cursor: pointer; font-size: 11px; }
 
-/* Round 8: a quieter Users tab */
-.tabs a .badge { margin-left: 6px; min-width: 18px; height: 18px; padding: 0 5px; border-radius: 999px; background: var(--bad); color: #fff; font-size: 11px; font-weight: 800; line-height: 18px; text-align: center; }
+/* Round 8: a quieter Support tab */
+.tabs a .quiet { font-weight: 600; opacity: .75; white-space: pre; }
 .plist-head { grid-template-columns: minmax(0, 1fr) auto; align-items: center; }
 .seg { display: inline-flex; padding: 2px; border-radius: 999px; background: var(--bg); border: 1px solid var(--line); }
 .seg button { border: 0; background: transparent; color: var(--muted); border-radius: 999px; padding: 4px 10px; font-size: 12px; font-weight: 700; cursor: pointer; }
@@ -360,3 +357,35 @@ a.lg:hover { color: var(--text); }
 .composer { margin-bottom: 14px; }
 .sbar .dead { background: var(--bad); }
 .fact.bad b { color: var(--bad); }
+
+/* Round 9: stars instead of a pinned To-Dos row; the Users tab */
+.plist-head { grid-template-columns: minmax(0, 1fr) auto auto; }
+.plist-head input[type=search] { grid-column: 1 / -1; }
+.newtodo { border: 1px solid var(--line); background: var(--bg); color: var(--muted); border-radius: 999px; padding: 4px 10px; font-size: 12px; font-weight: 700; justify-self: end; }
+.newtodo:hover { color: var(--text); border-color: var(--amethyst); }
+.trow { position: relative; }
+.trow .thread { padding-right: 34px; }
+.star { border: 0; background: none; padding: 2px 4px; font-size: 14px; line-height: 1; color: var(--muted); opacity: .25; cursor: pointer; transition: opacity .15s, color .15s; }
+.star:hover { opacity: 1; color: var(--amethyst-soft); }
+.star.on { opacity: 1; color: var(--warn); }
+.trow .star { position: absolute; right: 8px; top: 50%; transform: translateY(-50%); }
+.trow:hover .star { opacity: .7; }
+.trow .star.on { opacity: 1; }
+.thread.todo-row .name { font-weight: 600; }
+.big-star { font-size: 18px; opacity: .5; }
+.todo .star { margin-left: -4px; }
+.todo .about { font-size: 12px; color: var(--muted); white-space: nowrap; }
+.user-todos { padding: 10px 18px 0; }
+.user-todos .todo { margin-bottom: 4px; padding: 8px 12px; }
+.compose-mode { display: flex; gap: 4px; margin: 0 18px 6px; }
+.compose-mode button { border: 0; background: transparent; color: var(--muted); border-radius: 999px; padding: 3px 10px; font-size: 12px; font-weight: 700; cursor: pointer; }
+.compose-mode button.on { background: var(--sel); color: var(--text); }
+.compose-mode button:disabled { opacity: .4; cursor: default; }
+.ustats { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: var(--gap); }
+.ustats .wide2 { grid-column: span 3; }
+@media (min-width: 1000px) { .ustats { grid-template-columns: repeat(6, minmax(0, 1fr)); } .ustats .figure { grid-column: span 2; } .ustats .wide2 { grid-column: span 3; } }
+@media (max-width: 640px) { .ustats { grid-template-columns: minmax(0, 1fr); } .ustats .wide2 { grid-column: auto; } }
+.ustats .big { font-size: 34px; }
+.ustats h2 small { margin-left: auto; font-size: 11px; letter-spacing: 0; text-transform: none; font-weight: 600; color: var(--muted); }
+.ugrid { max-height: calc(100vh - 160px); overflow: auto; }
+#all-users-table th { position: sticky; top: 0; background: var(--card); padding-top: 4px; }

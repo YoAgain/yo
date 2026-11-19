@@ -220,6 +220,92 @@ def done_set(key: str, done: bool) -> None:
         os.replace(tmp, DONE_FILE)
 
 
+# Stars and to-do owners for the Support tab, kept by this page only (the hub knows neither):
+# {"stars": ["live:u:<HEX>", "live:t:<id>"], "todo_user": {"live:<id>": "<HEX>"}}.
+MARKS_FILE = os.environ.get("STATE_DIRECTORY", "./state") + "/support-marks.json"
+_marks_lock = threading.Lock()
+STAR_KEY = re.compile(r"(?:u:[0-9A-F]{32}|t:[1-9][0-9]{0,17})")
+
+
+def marks_read() -> dict:
+    try:
+        data = json.loads(read_bytes(MARKS_FILE))
+        return {"stars": list(data.get("stars", [])), "todo_user": dict(data.get("todo_user", {}))}
+    except (OSError, ValueError, AttributeError, TypeError):
+        return {"stars": [], "todo_user": {}}
+
+
+def marks_change(data) -> dict:
+    """{"hub", "star": key, "on": bool} or {"hub", "todo": id, "user": HEX or None}; ValueError when malformed."""
+    hub = data.get("hub")
+    if hub not in ("live", "dev"):
+        raise ValueError()
+    with _marks_lock:
+        marks = marks_read()
+        if "star" in data:
+            key, on = data["star"], data.get("on")
+            if not isinstance(key, str) or not STAR_KEY.fullmatch(key) or type(on) is not bool:
+                raise ValueError()
+            stars = set(marks["stars"])
+            (stars.add if on else stars.discard)(f"{hub}:{key}")
+            marks["stars"] = sorted(stars)
+        elif "todo" in data:
+            todo, user = data["todo"], data.get("user")
+            if type(todo) is not int or todo <= 0 or not (user is None or (isinstance(user, str) and re.fullmatch(r"[0-9A-F]{32}", user))):
+                raise ValueError()
+            if user is None:
+                marks["todo_user"].pop(f"{hub}:{todo}", None)
+            else:
+                marks["todo_user"][f"{hub}:{todo}"] = user
+        else:
+            raise ValueError()
+        tmp = MARKS_FILE + ".new"
+        with open(tmp, "w") as f:
+            json.dump(marks, f)
+        os.replace(tmp, MARKS_FILE)
+        return marks
+
+
+# Active users per UTC day for the Users tab: the collector's count of today (users seen since UTC midnight; the hub
+# keeps one last-seen day per device), its highest value per day kept here, 60 days. Counts only, nobody's id.
+ACTIVE_FILE = os.environ.get("STATE_DIRECTORY", "./state") + "/active-days.json"
+_active_lock = threading.Lock()
+
+
+def active_days(snapshot: dict, now_ms=None) -> dict:
+    """The snapshot with "active_days": {day: count} per hub, after folding in its "active_day" counts."""
+    now_ms = int(time.time() * 1000) if now_ms is None else now_ms
+    today = now_ms // 86400000
+    with _active_lock:
+        try:
+            history = json.loads(read_bytes(ACTIVE_FILE))
+            if not isinstance(history, dict):
+                history = {}
+        except (OSError, ValueError):
+            history = {}
+        changed = False
+        for hub in ("live", "dev"):
+            days = {k: v for k, v in (history.get(hub) or {}).items() if k.isdigit() and today - int(k) < 60}
+            count = (snapshot.get(hub) or {}).get("active_day") if isinstance(snapshot.get(hub), dict) else None
+            if isinstance(count, int) and snapshot.get("at", 0) // 86400000 == today and count > days.get(str(today), -1):
+                days[str(today)] = count
+                changed = True
+            history[hub] = days
+        if changed:
+            try:
+                tmp = ACTIVE_FILE + ".new"
+                with open(tmp, "w") as f:
+                    json.dump(history, f)
+                os.replace(tmp, ACTIVE_FILE)
+            except OSError:
+                pass
+    out = dict(snapshot)
+    for hub in ("live", "dev"):
+        if isinstance(out.get(hub), dict):
+            out[hub] = {**out[hub], "active_days": history.get(hub, {})}
+    return out
+
+
 def support_request(hub, suffix="", body=None):
     if not ADMIN_TOKEN:
         raise ValueError("YO_ADMIN_TOKEN is not configured")
@@ -481,6 +567,10 @@ class Admin(BaseHTTPRequestHandler):
             if not logged_in:
                 return self.send(401, b"[]", "application/json")
             return self.send(200, json.dumps(done_read()).encode(), "application/json")
+        if path == "/marks.json":
+            if not logged_in:
+                return self.send(401, b"{}", "application/json")
+            return self.send(200, json.dumps(marks_read()).encode(), "application/json")
         if path == "/yogpt.json":
             if not logged_in:
                 return self.send(401, b"[]", "application/json")
@@ -499,7 +589,7 @@ class Admin(BaseHTTPRequestHandler):
         if path == "/users.json":
             if not logged_in:
                 return self.send(401, b"{}", "application/json")
-            return self.send(200, json.dumps(collector.snapshot()).encode(), "application/json")
+            return self.send(200, json.dumps(active_days(collector.snapshot())).encode(), "application/json")
         self.send(404, b"Not found", "text/plain")
 
     do_HEAD = do_GET
@@ -587,6 +677,19 @@ class Admin(BaseHTTPRequestHandler):
             except (OSError, ValueError):
                 return self.send(502, b"Hub unavailable or not configured", "text/plain")
             return self.send(201, json.dumps(todo).encode(), "application/json")
+        if path == "/marks":
+            if not session_valid(self.headers.get("Cookie"), who):
+                return self.send(401, b"", "text/plain")
+            length = int(self.headers.get("Content-Length") or 0)
+            if not 0 < length <= 512:
+                return self.send(413, b"", "text/plain")
+            try:
+                marks = marks_change(json.loads(self.rfile.read(length)))
+            except (ValueError, KeyError, TypeError, AttributeError):
+                return self.send(400, b"Bad request", "text/plain")
+            except OSError:
+                return self.send(500, b"Could not save", "text/plain")
+            return self.send(200, json.dumps(marks).encode(), "application/json")
         if path == "/diagnostics/done":
             if not session_valid(self.headers.get("Cookie"), who):
                 return self.send(401, b"", "text/plain")

@@ -15,9 +15,10 @@
   <nav class="menu">
     <span class="tabs" id="tabs" role="tablist">
       <a role="tab" href="#" data-tab="overview" title="key 1">Overview</a>
-      <a role="tab" href="#users" data-tab="users" title="key 2">Users<b class="badge" id="badge-users" hidden></b></a>
-      <a role="tab" href="#crashes" data-tab="crashes" title="key 3">Crashes</a>
-      <a role="tab" href="#db" data-tab="db" title="key 4">Database</a>
+      <a role="tab" href="#support" data-tab="support" title="key 2">Support<span class="quiet" id="tab-support"></span></a>
+      <a role="tab" href="#users" data-tab="users" title="key 3">Users</a>
+      <a role="tab" href="#crashes" data-tab="crashes" title="key 4">Crashes<span class="quiet" id="tab-crashes" title="open crashes and errors, without expected ones"></span></a>
+      <a role="tab" href="#db" data-tab="db" title="key 5">Database</a>
     </span>
   </nav>
   <div class="status"><span class="stale" id="stale" hidden>no answer from the server</span><span id="collection-status" role="status">Loading fresh data…</span></div>
@@ -50,9 +51,9 @@
   <article class="tile" id="t-issues">
     <h2>Open</h2>
     <div class="legend">
-      <a href="#users" class="lg fb"><i></i>Feedback <b id="feedback-unread">–</b></a>
+      <a href="#support" class="lg fb"><i></i>Feedback <b id="feedback-unread">–</b></a>
       <a href="#crashes" class="lg cr"><i></i>Crashes <b id="diagnostics-open">–</b></a>
-      <a href="#users" class="lg rp"><i></i>Reports <b id="reports-open">–</b></a>
+      <a href="#support" class="lg rp"><i></i>Reports <b id="reports-open">–</b></a>
     </div>
     <svg class="graph" id="issues-graph" viewBox="0 0 140 40" preserveAspectRatio="none" aria-label="Open feedback, crashes and user reports per day, 14 days"></svg>
     <div class="axis"><span>14 days ago</span><span>today</span></div>
@@ -98,28 +99,57 @@
   </section>
 </main>
 
-<!-- Users: everyone on the left (the team's To-Dos pinned, open conversations first), the chosen one on the right:
-     who they are, their reports, and the support chat. -->
+<!-- Users: today's numbers, sign-ups and active users per day, and every user in one sortable table. -->
 <main class="view" data-tabs="users">
+  <section class="ustats">
+    <article class="tile figure"><h2>Signed up today</h2><div class="big" id="us-new">–</div><p class="cap" id="us-new-cap"></p></article>
+    <article class="tile figure"><h2>Active today</h2><div class="big" id="us-active">–</div><p class="cap" id="us-active-cap"></p></article>
+    <article class="tile figure"><h2>Users</h2><div class="big" id="us-total">–</div><p class="cap" id="us-total-cap"></p></article>
+    <article class="tile wide2"><h2>Sign-ups per day <small class="muted" id="us-signups-sum"></small></h2>
+      <svg class="chart" id="us-signups" viewBox="0 0 300 90" preserveAspectRatio="none" aria-label="Sign-ups per UTC day, 30 days"></svg>
+      <div class="axis"><span>30 days ago</span><span>today</span></div></article>
+    <article class="tile wide2"><h2>Active users per day <small class="muted" id="us-active-sum"></small></h2>
+      <svg class="chart" id="us-actives" viewBox="0 0 300 90" preserveAspectRatio="none" aria-label="Active users per UTC day, 30 days"></svg>
+      <div class="axis"><span>30 days ago</span><span>today</span></div></article>
+  </section>
+  <section class="card" id="all-users">
+    <div class="card-head"><h2>All users</h2><small id="all-users-note"></small>
+      <input type="search" id="all-users-search" placeholder="Search name or id" aria-label="Search users" autocomplete="off"></div>
+    <div class="scroll ugrid">
+      <table class="list sortable" id="all-users-table">
+        <thead><tr><th data-sort="name">Name</th><th data-sort="created">Signed up</th><th data-sort="last_seen">Last seen</th><th data-sort="app">App</th><th data-sort="push">Push</th><th data-sort="secured">Secured</th><th data-sort="devices" class="num">Devices</th><th data-sort="queued" class="num" title="messages waiting for this user's devices">Waiting</th></tr></thead>
+        <tbody id="all-users-body"></tbody>
+      </table>
+    </div>
+  </section>
+</main>
+
+<!-- Support: conversations and to-dos on the left (starred and open ones on top), the chosen one on the right:
+     who they are, their to-dos and reports, and the support chat. -->
+<main class="view" data-tabs="support">
   <section class="people card" id="people">
     <aside class="plist">
       <div class="plist-head">
         <input type="search" id="user-search" placeholder="Search name or id" aria-label="Search users" autocomplete="off">
-        <div class="seg" role="group" aria-label="Show"><button type="button" data-filter="all" class="on">All</button><button type="button" data-filter="open">Open</button></div>
+        <div class="seg" role="group" aria-label="Show"><button type="button" data-filter="all" class="on">All</button><button type="button" data-filter="open">Open</button><button type="button" data-filter="star" title="starred">★</button></div>
+        <button type="button" class="newtodo" id="new-todo" title="the team's to-dos; add one">To-dos<span id="new-todo-count"></span></button>
       </div>
-      <nav id="person-list" aria-label="Users"></nav>
+      <nav id="person-list" aria-label="Conversations and to-dos"></nav>
     </aside>
     <section class="pane" id="pane">
       <div class="pane-head">
         <span class="avatar" id="convo-avatar"></span>
         <div class="who"><h3 id="support-title">Loading…</h3><button type="button" class="copy mono" id="p-id" title="click to copy" hidden></button></div>
+        <button type="button" class="star big-star" id="convo-star" hidden aria-pressed="false" title="star">★</button>
         <button type="button" class="pill" id="convo-done" hidden>Mark all handled</button>
       </div>
       <div class="facts" id="p-facts"></div>
       <details class="extra" id="p-extra"><summary id="p-extra-sum">Devices &amp; reports</summary>
         <div class="extra-grid"><div><h4>Devices</h4><div id="p-devices"></div></div><div><h4>Reports</h4><div id="p-reports"></div></div></div>
       </details>
+      <div id="user-todos" class="user-todos" hidden></div>
       <div id="support-history" class="bubbles" aria-live="polite"></div>
+      <div class="compose-mode" id="compose-mode" hidden><button type="button" data-mode="reply" class="on">Reply</button><button type="button" data-mode="todo">To-do about this user</button></div>
       <form id="support-reply" class="composer" hidden>
         <textarea id="support-text" rows="1" required maxlength="2000" aria-label="Reply" placeholder="Write a reply…"></textarea>
         <button type="submit" class="send" aria-label="Send" title="Send (Enter)"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3.4 20.4 21 12 3.4 3.6 3.4 10.2 15 12 3.4 13.8z"/></svg></button>

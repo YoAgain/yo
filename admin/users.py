@@ -218,10 +218,13 @@ def hub(name: str, path: str) -> dict:
                 "SELECT count(DISTINCT user_id) FROM devices WHERE last_seen_at > ?", week_ago)),
             "active_today": part("active_today", lambda: one(
                 "SELECT count(DISTINCT user_id) FROM devices WHERE last_seen_at > ?", now - DAY_MS)),
-            # Sign-ups per UTC day, the last 14 days, oldest first.
+            # Users seen since UTC midnight (the admin page keeps its highest value per day).
+            "active_day": part("active_day", lambda: one(
+                "SELECT count(DISTINCT user_id) FROM devices WHERE last_seen_at >= ?", midnight)),
+            # Sign-ups per UTC day, the last 30 days, oldest first.
             "signups": part("signups", lambda: [one(
                 "SELECT count(*) FROM users WHERE created_at >= ? AND created_at < ?",
-                midnight - i * DAY_MS, midnight - (i - 1) * DAY_MS) for i in range(13, -1, -1)]),
+                midnight - i * DAY_MS, midnight - (i - 1) * DAY_MS) for i in range(29, -1, -1)]),
             "oldest_waiting": part("oldest_waiting", lambda: one("SELECT min(received_at) FROM messages")),
             "blobs": part("blobs", lambda: db.execute(
                 "SELECT count(*), coalesce(sum(size), 0) FROM blobs").fetchone() if has_table(db, "blobs") else None),
