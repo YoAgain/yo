@@ -113,24 +113,85 @@ extension FriendList {
     }
   }
 
-  /// The name of an invite link: added the same way; what is wrong shows in Add Friend's field.
-  func invited(_ name: String) async {
-    guard let problem = await addFriend(name) else { return }
-    withAnimation(.snappy) { adding = true }
-    say(problem)
+  /// An invite link's or scanned code's name, once the hub said who it is: an alert asks to add it and send a Yo (only a
+  /// Yo, for one already on the list). Never added unverified: without an answer it stays pending (false) for the next
+  /// try; what is wrong ("No Such User", "That’s You") shows in Add Friend's field.
+  func invited(_ name: String) async -> Bool {
+    switch await lookUpFriend(name) {
+    case .signedOut: return true
+    case .problem(let problem):
+      withAnimation(.snappy) { adding = true }
+      say(problem)
+    case .known(let friend):
+      inviting = Invitation(name: friend.name, user: friend.user, known: true)
+    case .new(let spelled, let user):
+      guard let user else { return false }  // the hub did not answer: ask again later
+      inviting = Invitation(name: spelled, user: user, known: false)
+    }
+    return true
+  }
+
+  /// "Add & Yo" (or "Yo"): the friend on top as `add` puts it, then one Yo as a tap on its bar sends.
+  func acceptInvite(_ invitation: Invitation) {
+    if !invitation.known {
+      withAnimation(.snappy) {
+        friends.add(invitation.name, user: invitation.user)
+        if !scrolled { position.scrollTo(edge: .top) }
+      }
+    }
+    let skeleton = Username.skeleton(invitation.name)
+    guard
+      let friend = friends.shown.first(where: {
+        !$0.gone && $0.group == nil
+          && ((invitation.user != nil && $0.user == invitation.user) || Username.skeleton($0.name) == skeleton)
+      })
+    else { return }
+    if invitation.known {
+      withAnimation(.snappy) { position.scrollTo(id: friend.key.uuidString, anchor: .center) }
+    }
+    send(to: friend, origin: nil)
   }
 
   /// A name to add, once the hub said who it is: added as its owner spells it, on top; offline, as typed. One already
   /// on the list says so on its bar. Returns what to say instead ("That’s You", "No Such User"), or nil.
   func addFriend(_ name: String) async -> String? {
-    if let me = accounts.account?.username, Username.skeleton(name) == Username.skeleton(me) { return ProductText.thatsYou.english }
+    switch await lookUpFriend(name) {
+    case .signedOut: return nil
+    case .problem(let problem): return problem
+    case .known(let known):
+      withAnimation(.snappy) {
+        position.scrollTo(id: known.key.uuidString, anchor: .center)
+      }
+      showSent(to: known, productText(text: .alreadyAdded, lang: .english))
+    case .new(let spelled, let user):
+      withAnimation(.snappy) {
+        friends.add(spelled, user: user)
+        if !scrolled { position.scrollTo(edge: .top) }
+      }
+    }
+    return nil
+  }
+
+  enum Looked {
+    /// Signed out meanwhile: not this account's friend.
+    case signedOut
+    case problem(String)
+    case known(Friend)
+    /// Not on the list yet: as its owner spells it; without a user, the hub did not answer (spelled as typed).
+    case new(String, user: String?)
+  }
+
+  func lookUpFriend(_ name: String) async -> Looked {
+    if let me = accounts.account?.username, Username.skeleton(name) == Username.skeleton(me) {
+      return .problem(ProductText.thatsYou.english)
+    }
     let client = accounts.client
     let answer = await inbox.lookUp(name, accounts: accounts)
-    guard client === accounts.client else { return nil }  // signed out meanwhile: not this account's friend
+    guard client === accounts.client else { return .signedOut }
     var user: String?
     var spelled = name
     switch answer {
-    case .noSuchUser: return ProductText.noSuchUser.english
+    case .noSuchUser: return .problem(ProductText.noSuchUser.english)
     case .found(let found, let owners):
       user = found
       spelled = owners ?? spelled
@@ -140,17 +201,9 @@ extension FriendList {
     if let known = friends.shown.first(where: {
       !$0.gone && (Username.skeleton($0.name) == skeleton || (user != nil && $0.user == user))
     }) {
-      withAnimation(.snappy) {
-        position.scrollTo(id: known.key.uuidString, anchor: .center)
-      }
-      showSent(to: known, productText(text: .alreadyAdded, lang: .english))
-      return nil
+      return .known(known)
     }
-    withAnimation(.snappy) {
-      friends.add(spelled, user: user)
-      if !scrolled { position.scrollTo(edge: .top) }
-    }
-    return nil
+    return .new(spelled, user: user)
   }
 
   /// A hint in the empty field for a moment; then the bar closes unless something is typed.

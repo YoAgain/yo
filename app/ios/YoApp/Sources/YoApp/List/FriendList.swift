@@ -83,6 +83,8 @@ struct FriendList: View {
   @State var newGroupName = ""
   @State var membersOf: Friend?
   @State var problem: (title: String, message: String)?
+  /// A scanned or tapped invite, verified by the hub, waiting for "Add & Yo" (`invited`).
+  @State var inviting: Invitation?
   @State var firstYo: Notifications?
   enum Notifications { case allowed, notAsked, denied }
   static let firstYoKey = "firstYo.shown"
@@ -195,6 +197,15 @@ struct FriendList: View {
       Button("Cancel", role: .cancel) {}
     } message: { _ in
       Text("You won’t get its Yos any more. A member can add you again.")
+    }
+    .alert(
+      inviting?.name ?? "", isPresented: $inviting.isPresent, presenting: inviting
+    ) { invitation in
+      Button(productText(text: invitation.known ? .yo : .addAndYo, lang: .english)) { acceptInvite(invitation) }
+        .keyboardShortcut(.defaultAction)
+      Button(productText(text: .cancel, lang: .english), role: .cancel) {}
+    } message: { invitation in
+      Text(productText(text: invitation.known ? .inviteYo : .inviteAddYo, lang: .english))
     }
     .alert(
       productText(text: .groupEmpty, lang: .english),
@@ -760,4 +771,11 @@ struct FriendList: View {
   FriendList()
     .environment(Inbox())
     .environment(Friends())
+}
+
+/// An invite's friend, as the hub spells it: `known` when already on the list.
+struct Invitation {
+  let name: String
+  let user: String?
+  let known: Bool
 }

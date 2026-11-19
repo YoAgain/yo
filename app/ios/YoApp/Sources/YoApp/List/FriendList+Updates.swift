@@ -86,11 +86,13 @@ extension FriendList {
         publish(listModel.foreground(now: listNow, active: false))
         clocks.stop()
       }
-      // An invite link's name, once the hub can be asked (Invite.swift).
-      .task(id: "\(Invite.shared.pending ?? "")/\(accounts.client != nil)") {
-        guard let name = Invite.shared.pending, accounts.client != nil else { return }
-        Invite.shared.pending = nil
-        await invited(name)
+      // An invite link's name, once the hub can be asked (Invite.swift); kept while it does not answer, asked again
+      // when the connection is back or the app comes to the front.
+      .task(id: "\(Invite.shared.pending ?? "")/\(accounts.client != nil)/\(Availability.shared.offline)/\(scenePhase)") {
+        guard let name = Invite.shared.pending, accounts.client != nil, !Availability.shared.offline,
+          scenePhase == .active
+        else { return }
+        if await invited(name), Invite.shared.pending == name { Invite.shared.pending = nil }
       }
   }
 
