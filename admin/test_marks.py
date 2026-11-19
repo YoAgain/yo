@@ -49,6 +49,29 @@ class MarksTests(unittest.TestCase):
         out = admin.version_days({"at": now, "live": {"versions_day": v(7, 7, 7, 7)}}, later)
         self.assertNotIn(str(day), [k for k, r in out["live"]["version_days"].items() if r == [7, 7, 7, 7]])
 
+    def test_build_counts_per_day_for_good_and_per_hour_for_48(self):
+        admin, day = self.admin, 20400
+        now = day * 86400000 + 5000
+        apps = [["ios/202611191626", 4], ["ios/202611181859", 2], ["cli/7", 3], ["android/4", 1], ["bad", "x"]]
+        out = admin.version_days({"at": now, "live": {"apps_today": apps}, "dev": {"error": "x"}}, now)
+        counts = {"ios/202611191626": 4, "ios/202611181859": 2, "android/4": 1}  # the CLI left out, counts only
+        self.assertEqual(out["live"]["build_days"], {str(day): counts})
+        self.assertEqual(out["live"]["build_hours"], {str(now // 3600000): counts})
+        self.assertEqual(out["dev"]["build_days"], {})
+        # An hour later: a second hour, the day replaced; nothing seen (an empty list) keeps what was kept.
+        h2 = now + 3600000
+        out = admin.version_days({"at": h2, "live": {"apps_today": [["ios/202611191626", 6]]}}, h2)
+        self.assertEqual(out["live"]["build_days"], {str(day): {"ios/202611191626": 6}})
+        self.assertEqual(len(out["live"]["build_hours"]), 2)
+        out = admin.version_days({"at": h2, "live": {"apps_today": []}}, h2)
+        self.assertEqual(out["live"]["build_days"][str(day)], {"ios/202611191626": 6})
+        # 50 hours on, the hours before are gone; the days stay for good, an old snapshot never writes today's.
+        later = now + 50 * 3600000
+        out = admin.version_days({"at": now, "live": {"apps_today": [["ios/202611201000", 1]]}}, later)
+        self.assertEqual(out["live"]["build_hours"], {str(later // 3600000): {"ios/202611201000": 1}})
+        self.assertEqual(set(out["live"]["build_days"]), {str(day)})
+        self.assertEqual(out["live"]["version_days"], {})
+
     def test_server_history_a_point_a_minute_the_last_hour(self):
         admin = self.admin
         admin.HISTORY.clear()

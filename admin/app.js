@@ -1379,22 +1379,101 @@ if (document.body.classList.contains("login")) {
   const VNAME = { current: "Current", update: "Update out", must: "Must update", unknown: "Unknown" }, VCLS = { current: "ok", update: "warn", must: "bad", unknown: "" };
   // One bar of a platform's versions: current, update out, must update, unknown.
   const verBar = (p) => { const b = el("span", "hc-pbar dbar"); for (const k of VKEYS) if (p[k]) { const x = el("span", k); x.style.flexGrow = p[k]; b.append(x); } return b; };
-  // Versions: the range's stacked bars; a bar under the pointer names its day and shares.
-  const verCard = (cap) => {
-    const d = verData, W = 264, H = 104, top = 4, bottom = 18, n = d?.rows.length || 1, slot = W / n, B = H - bottom;
-    const s = svg("svg", { viewBox: `0 0 ${W} ${H}`, class: "hc-chart vchart" });
-    const groups = (d?.rows || []).map((row, i) => { const g = svg("g", { class: "vb" }); g.append(...vStack(row, i * slot + slot * 0.14, slot * 0.72, B, top)); return g; });
-    s.append(...groups);
-    const label = (x, y, text, anchor) => { const t = svg("text", { x, y, "text-anchor": anchor, class: "ax" }); t.textContent = text; return t; };
-    s.append(label(0, H - 4, d?.names[0] || "", "start"), label(W, H - 4, d?.names[n - 1] || "", "end"));
-    pointAt(s, n, groups, (i) => {
-      const row = d?.rows[i], all = row ? row.reduce((a, v) => a + v, 0) : 0;
-      cap.textContent = `${d?.names[i] || ""} · ${all ? VKEYS.slice(0, 3).map((k, j) => (row[j] ? `${vPct(row, j)} % ${k}` : "")).filter(Boolean).join(" · ") + ` (${num(all)})` : "not recorded"}`;
+  // Releases over time: of the devices seen per slot (an hour of the last 24 for 1, else a day), each build's share as
+  // its own band, 100 % stacked, the newest on top: the current build green, older ones greyer with age, builds below
+  // the hub's minimum reddish. The six newest builds get bands, the rest are "older". A click on the chart names that
+  // slot's shares in the line under it (the newest slot until then), the pick kept across redraws.
+  let relPick = null;
+  const RTOP = 6, REL_SHADES = ["#b98bd0", "#a48fb8", "#9690a0", "#86828e", "#77737d"], MUST_SHADES = ["#d0695e", "#b45d55", "#9a534c", "#844a45"];
+  // iOS TestFlight builds first (newest first), then other platforms' dated builds, then dev builds and unknown.
+  const buildKey = (app) => { const b = build(app); return /^\d{12}$/.test(b) ? `${String(app).startsWith("ios/") ? 2 : 1}${b}` : "0"; };
+  const buildLabel = (app) => {
+    const b = build(app), p = (app || "").split("/")[0], word = { ios: "", android: "Android ", yogpt: "Bot " }[p] ?? `${appInfo(app)?.label || p} `;
+    if (!/^\d{12}$/.test(b)) return app === "unknown" ? "unknown" : `${word || "iOS "}${b}`.trim();
+    const mon = new Date(Date.UTC(2000, +b.slice(4, 6) - 1, 1)).toLocaleDateString("en", { month: "short", timeZone: "UTC" });
+    return `${word}${mon} ${+b.slice(6, 8)} ${b.slice(8, 10)}:${b.slice(10, 12)}`;
+  };
+  const relData = (h) => {
+    const t = today0(), kept = { ...(h.build_days || {}) };
+    if (Array.isArray(h.apps_today) && h.apps_today.length) kept[t] = Object.fromEntries(h.apps_today.filter(([a]) => !String(a).startsWith("cli/")));
+    let slots;
+    if (range === 1) {
+      const hrs = h.build_hours || {}, h1 = Math.floor(Date.now() / 3600000);
+      const hourName = (x) => { const d = new Date(x * 3600000); return `${d.toDateString() === new Date().toDateString() ? "" : "yesterday "}${d.toLocaleTimeString(undefined, { timeStyle: "short" })}`; };
+      slots = Array.from({ length: 24 }, (_, i) => h1 - 23 + i).map((x) => [x, x === h1 ? "now" : hourName(x), hrs[x] || null]);
+    } else {
+      const first = Object.keys(kept).map(Number).filter((d) => d <= t).sort((a, b) => a - b)[0] ?? t;
+      const span = range || Math.max(7, t - first + 1), step = Math.max(1, Math.ceil(span / 60)), n = Math.ceil(span / step);
+      slots = Array.from({ length: n }, (_, i) => t - (n - 1 - i) * step).map((e) => {
+        let row = null;
+        for (let d = e; d > e - step && !row; d--) row = kept[d] || null;
+        return [e, e === t ? "today" : dayName(e), row];
+      });
+    }
+    // The bands: the newest builds seen in the range on their own, the rest together (below the minimum apart).
+    const seen = new Map();
+    for (const [, , row] of slots) for (const [a, c] of Object.entries(row || {})) if (c > 0) seen.set(a, (seen.get(a) || 0) + c);
+    const apps = [...seen.keys()].sort((a, b) => buildKey(b).localeCompare(buildKey(a)) || seen.get(b) - seen.get(a));
+    const own = apps.slice(0, RTOP), rest = apps.slice(RTOP);
+    let shade = 0, mshade = 0;
+    const bands = own.map((a) => ({ name: buildLabel(a), apps: [a],
+      cls: belowMin(a) ? "r-must" : a === apps[0] && appInfo(a)?.state === "current" ? "r-current" : null, color: null })).reverse();
+    // Older = greyer: the shades go from the newest of the older builds down.
+    for (let i = bands.length - 1; i >= 0; i--) {
+      if (!bands[i].cls) bands[i].color = REL_SHADES[Math.min(REL_SHADES.length - 1, shade++)];
+      else if (bands[i].cls === "r-must") bands[i].color = MUST_SHADES[Math.min(MUST_SHADES.length - 1, mshade++)];
+    }
+    const old = rest.filter((a) => !belowMin(a)), must = rest.filter((a) => belowMin(a));
+    if (must.length) bands.unshift({ name: "older, must update", apps: must, cls: "r-must r-old" });
+    if (old.length) bands.unshift({ name: "older", apps: old, cls: "r-older" });
+    const rows = slots.map(([, , row]) => (row ? bands.map((b) => b.apps.reduce((n, a) => n + (row[a] || 0), 0)) : null));
+    return { slots, bands, rows: rows.map((r) => (r && r.some((v) => v) ? r : null)) };
+  };
+  const relCard = (h) => {
+    const d = relData(h), n = d.slots.length, W = 264, H = 104, bottom = 18, B = H - bottom, cap = el("div", "hc-cap");
+    const s = svg("svg", { viewBox: `0 0 ${W} ${H}`, class: "hc-chart rchart" });
+    const xs = (i) => (n > 1 ? (i * W) / (n - 1) : W / 2), have = d.rows.map((r, i) => (r ? i : -1)).filter((i) => i >= 0);
+    const label = (x, text, anchor) => { const t = svg("text", { x, y: H - 4, "text-anchor": anchor, class: "ax" }); t.textContent = text; return t; };
+    s.append(svg("line", { x1: 0, x2: W, y1: B + 0.5, y2: B + 0.5, class: "base" }));
+    if (!have.length) return [dcard("Releases over time", null, note("No builds kept yet: counted per hour and day from now on."))];
+    // The bands' edges at each kept slot (a lone slot drawn as a thin column), bottom band first.
+    const pts = have.length > 1 ? have : [have[0], have[0]];
+    const x = (k, i) => (have.length > 1 ? xs(i) : xs(i) + (k ? 3 : -3));
+    const tops = pts.map((i) => { const r = d.rows[i], all = r.reduce((a, v) => a + v, 0); let y = 0; return r.map((v) => (y += v / all)); });
+    d.bands.forEach((b, j) => {
+      if (!tops.some((c) => c[j] - (j ? c[j - 1] : 0) > 0)) return;
+      const up = pts.map((i, k) => `${x(k, i).toFixed(1)},${(B - tops[k][j] * (B - 2)).toFixed(1)}`);
+      const down = pts.map((i, k) => `${x(k, i).toFixed(1)},${(B - (j ? tops[k][j - 1] : 0) * (B - 2)).toFixed(1)}`).reverse();
+      const p = svg("polygon", { points: [...up, ...down].join(" "), class: `rb ${b.cls || ""}`.trim() });
+      if (b.color) p.style.fill = b.color;
+      s.append(p);
     });
-    const out = [s, cap, vLegend()];
-    // History starts with the collector's first snapshot: say so while the range reaches before it.
-    if (d && d.rows.some((r) => !r)) out.push(el("div", "hc-lines", `Kept daily since ${dayName(d.first)}.`));
-    return out;
+    const mark = svg("line", { y1: 0, y2: B, class: "rmark" });
+    s.append(mark, label(0, d.slots[0][1], "start"), label(W, d.slots[n - 1][1], "end"));
+    const say = (i) => {
+      const r = d.rows[i], all = r ? r.reduce((a, v) => a + v, 0) : 0;
+      mark.setAttribute("x1", xs(i).toFixed(1)); mark.setAttribute("x2", xs(i).toFixed(1));
+      // The three newest builds on it, the rest as one share.
+      const on = r ? d.bands.map((b, j) => [b.name, r[j]]).filter(([, v]) => v).reverse() : [];
+      const rest = on.slice(3).reduce((a, [, v]) => a + v, 0), pc = (v) => `${Math.round((100 * v) / all)} %`;
+      const parts = [...on.slice(0, 3).map(([nm, v]) => `${nm} ${pc(v)}`), ...(rest ? [`others ${pc(rest)}`] : [])];
+      cap.textContent = `${d.slots[i][1]} · ${all ? `${parts.join(" · ")} · ${num(all)} devices` : "not recorded"}`;
+    };
+    const near = (i) => have.reduce((b, k) => (Math.abs(k - i) < Math.abs(b - i) ? k : b), have[have.length - 1]);
+    const at = d.slots.findIndex(([k]) => k === relPick);
+    say(at >= 0 && d.rows[at] ? at : have[have.length - 1]);
+    s.addEventListener("click", (e) => {
+      const rc = s.getBoundingClientRect(), i = near(Math.round(((e.clientX - rc.left) / rc.width) * (n - 1)));
+      relPick = d.slots[i][0]; say(i);
+    });
+    const legend = el("div", "hc-legend rlegend");
+    for (const b of [...d.bands].reverse().slice(0, 5)) { const x = el("span", b.cls || null, b.name); if (b.color) x.style.setProperty("--c", b.color); legend.append(x); }
+    if (d.bands.length > 5) legend.append(el("span", "r-older", "older"));
+    const pick = d.rows[have[have.length - 1]], top = d.bands.length - 1;
+    const share = pick && d.bands[top].cls === "r-current" ? `${Math.round((100 * pick[top]) / pick.reduce((a, v) => a + v, 0))} % newest` : "";
+    const out = [s, cap, legend];
+    if (d.rows.some((r) => !r)) out.push(el("div", "hc-lines", range === 1 ? "Kept hourly, the last 48 hours." : "Kept daily since this was added."));
+    return [dcard("Releases over time", share, out)];
   };
   // Speed: the range's split in one bar with its four shares named.
   const latPct = (b, i) => { const t = b.reduce((a, v) => a + v, 0); return t ? (100 * b[i]) / t : 0; };
@@ -1517,12 +1596,12 @@ if (document.body.classList.contains("login")) {
         kvRows(VKEYS.filter((k) => p[k]).map((k) => [VNAME[k], `${num(p[k])} · ${Math.round((100 * p[k]) / p.all)} %`, VCLS[k]])))),
     ],
     vr: () => {
-      const h = hubNow, t = verData?.today, p = vPct(t), tot = t ? t.reduce((a, v) => a + v, 0) : 0, cap = el("div", "hc-cap");
+      const h = hubNow, t = verData?.today, tot = t ? t.reduce((a, v) => a + v, 0) : 0;
       const per = el("div", "hc-plats");
       for (const [l, x] of platData?.plats || []) { const row = el("div", "hc-plat"); row.append(el("b", null, l), verBar(x), el("span", "hc-pn", `${Math.round((100 * x.current) / Math.max(1, x.all))} %`)); per.append(row); }
       const apps = [...(h.apps || [])].sort((a, b) => b[1] - a[1]).slice(0, 8);
       return [
-        dcard("Current over time", p == null ? "" : `${p} % today`, verCard(cap)),
+        ...relCard(h),
         dcard("Per platform", null, per, vLegend()),
         dcard("Today", num(tot), t ? verBar(Object.fromEntries(VKEYS.map((k, i) => [k, t[i]]))) : null, kvRows(VKEYS.map((k, i) => [VNAME[k], t ? `${num(t[i])} · ${vPct(t, i)} %` : "–", VCLS[k]]))),
         dcard("Builds", null, kvRows([["Hub's minimum", h.min_app || "none"], ...apps.map(([app, c]) => [`${appInfo(app)?.label || "?"} ${build(app)}`, num(c), belowMin(app) ? "bad" : VCLS[appState(app)] || ""])])),

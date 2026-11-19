@@ -301,7 +301,8 @@ VERSION_KEYS = ("current", "update", "must", "unknown")
 
 
 def version_days(snapshot: dict, now_ms=None) -> dict:
-    """The snapshot with "version_days": {day: [current, update, must, unknown]} per hub, today's from "versions_day"."""
+    """The snapshot with "version_days": {day: [current, update, must, unknown]} per hub, today's from "versions_day",
+    and "build_days"/"build_hours": {day or hour: {app: devices}} from "apps_today"."""
     now_ms = int(time.time() * 1000) if now_ms is None else now_ms
     today = str(now_ms // 86400000)
     with _active_lock:
@@ -332,6 +333,28 @@ def version_days(snapshot: dict, now_ms=None) -> dict:
                 for h in [h for h in hours if int(h) < now_ms // 3600000 - 48]:
                     del hours[h]
             history[hub + "_hours"] = hours
+            # Devices per build ("ios/202611191257": n, of those seen today; the CLI left out), per UTC day for good and
+            # per hour for the last 48: the Versions detail's releases over time. Counts only.
+            apps = (snapshot.get(hub) or {}).get("apps_today") if isinstance(snapshot.get(hub), dict) else None
+            counts = {}
+            for pair in apps if isinstance(apps, list) else []:
+                if isinstance(pair, list) and len(pair) == 2 and isinstance(pair[0], str) and isinstance(pair[1], int) \
+                        and pair[1] > 0 and not pair[0].startswith("cli/"):
+                    counts[pair[0]] = counts.get(pair[0], 0) + pair[1]
+            bdays = history.get(hub + "_build_days") if isinstance(history.get(hub + "_build_days"), dict) else {}
+            bhours = history.get(hub + "_build_hours") if isinstance(history.get(hub + "_build_hours"), dict) else {}
+            if counts:
+                if str(snapshot.get("at", 0) // 86400000) == today and bdays.get(today) != counts:
+                    bdays[today] = counts
+                    changed = True
+                hour = str(now_ms // 3600000)
+                if bhours.get(hour) != counts:
+                    bhours[hour] = counts
+                    changed = True
+            for h in [h for h in bhours if not h.isdigit() or int(h) < now_ms // 3600000 - 48]:
+                del bhours[h]
+                changed = True
+            history[hub + "_build_days"], history[hub + "_build_hours"] = bdays, bhours
         if changed:
             try:
                 tmp = VERSIONS_FILE + ".new"
@@ -343,7 +366,8 @@ def version_days(snapshot: dict, now_ms=None) -> dict:
     out = dict(snapshot)
     for hub in ("live", "dev"):
         if isinstance(out.get(hub), dict):
-            out[hub] = {**out[hub], "version_days": history.get(hub, {}), "version_hours": history.get(hub + "_hours", {})}
+            out[hub] = {**out[hub], "version_days": history.get(hub, {}), "version_hours": history.get(hub + "_hours", {}),
+                        "build_days": history.get(hub + "_build_days", {}), "build_hours": history.get(hub + "_build_hours", {})}
     return out
 
 

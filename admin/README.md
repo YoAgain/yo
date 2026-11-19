@@ -166,6 +166,10 @@ update; their tooltip says "internal tester". `ios/1` is a dev build; YoGPT is c
 the CLI are unknown. Tables show only the platform word ("iOS", "Android", "Bot"): green when current, yellow when an
 update is out, plain when unknown, with the builds in its tooltip. Builds below `YO_MIN_APP` count as update. The App
 versions card counts current, update and unknown per platform. App Store releases will be added the same way later.
+admin.py keeps, beside the state counts in `version-days.json`, the devices per build seen today (`apps_today`, the CLI
+left out; counts only): per UTC day for good and per hour for the last 48 hours. The Versions detail draws them as
+"Releases over time", each build's share 100 % stacked, the newest on top (green when current), older builds greyer,
+builds below `YO_MIN_APP` reddish; a click names that slot's shares.
 Tests: `python3 -m unittest discover -s admin -p 'test_versions.py'`.
 
 ## Support chat rollout

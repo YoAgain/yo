@@ -590,7 +590,27 @@ def main():
             c, m, u = round(seen * cur), round(seen * must), round(seen * unk)
             out[str(d)] = [c, max(0, seen - c - m - u), m, u]
         return out
-    write("version-days.json", {"live": version_history(21, args.users), "dev": version_history(10, 9)})
+    # Devices per build: the hub's builds and three older ones, each release taken up over a day or two (the share on
+    # a build or newer rises as 1 - e^(-age/1.2 days)), a few Android and dev builds beside them.
+    releases = [now - 21 * DAY, now - 17 * DAY - 5 * HOUR, now - 13 * DAY, now - 9 * DAY, now - 5 * DAY - 7 * HOUR,
+                now - 2 * DAY - 3 * HOUR, now - 4 * HOUR - 17 * 60_000]
+
+    def builds_at(ms, size):
+        up = [1.0] + [1 - math.exp(-max(0, ms - r) / (1.2 * DAY)) if ms > r else 0.0 for r in releases[1:]] + [0.0]
+        seen = max(4, int(size * rng.uniform(0.3, 0.4)))
+        row = {ios(r): round(seen * 0.92 * (up[i] - up[i + 1])) for i, r in enumerate(releases) if ms >= r}
+        row.update({"android/4": max(1, round(seen * 0.05)), "ios/1": 1})
+        return {a: n for a, n in row.items() if n > 0}
+
+    def build_history(size, n_days):
+        days = {str(d): builds_at(d * DAY + DAY - 1, size) for d in range(today - n_days, today)}
+        hours = {str(h): builds_at(h * HOUR + HOUR - 1, size) for h in range(now // HOUR - 47, now // HOUR)}
+        return days, hours
+
+    vh = {"live": version_history(21, args.users), "dev": version_history(10, 9)}
+    for hub_name, size, n_days in (("live", args.users, 21), ("dev", 9, 10)):
+        vh[hub_name + "_build_days"], vh[hub_name + "_build_hours"] = build_history(size, n_days)
+    write("version-days.json", vh)
     hours = {str(h): n for h, n in live["media_hours"].items()}
     for h in range(now // HOUR - 47, min(live["media_hours"])):
         hours[str(h)] = max(0, int(rng.gauss(5, 3)))

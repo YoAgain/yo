@@ -809,6 +809,17 @@ body.dash { max-width: 1400px; }
 .sp-bar .sp3, .sp-kv .sp3::before { background: var(--muted); } .hc-chart .sp3 { fill: var(--muted); }
 .hc-pn { font-weight: 700; font-variant-numeric: tabular-nums; }
 .hc-legend { display: flex; gap: 12px; color: var(--muted); font-size: 11px; }
+/* Releases over time: a band per build, the current green, older ones greyer (their shade set inline), below the
+   hub's minimum reddish; the picked slot a thin line. */
+.hc-chart.rchart { cursor: pointer; }
+.hc-chart .rb { fill: var(--muted); stroke: var(--card); stroke-width: .6; stroke-linejoin: round; }
+.hc-chart .rb.r-current { fill: var(--ok); } .hc-chart .rb.r-must { fill: #c0645a; } .hc-chart .rb.r-must.r-old { fill: #8e4f49; }
+.hc-chart .rb.r-older { fill: #5e5867; }
+.hc-chart .rmark { stroke: var(--text); stroke-width: 1; stroke-dasharray: 2 2; opacity: .7; }
+.hc-legend.rlegend { flex-wrap: wrap; gap: 3px 10px; white-space: nowrap; }
+.rlegend span::before { background: var(--c, var(--muted)); }
+.rlegend .r-current::before { background: var(--ok); } .rlegend .r-must::before { background: #c0645a; }
+.rlegend .r-must.r-old::before { background: #8e4f49; } .rlegend .r-older::before { background: #5e5867; }
 .hc-legend span { display: inline-flex; align-items: center; gap: 5px; }
 .hc-legend span::before { content: ""; width: 8px; height: 8px; border-radius: 2px; }
 .hc-note { color: var(--muted); font-size: 11px; }
