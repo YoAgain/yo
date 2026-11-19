@@ -225,6 +225,10 @@ def hub(name: str, path: str) -> dict:
             "signups": part("signups", lambda: [one(
                 "SELECT count(*) FROM users WHERE created_at >= ? AND created_at < ?",
                 midnight - i * DAY_MS, midnight - (i - 1) * DAY_MS) for i in range(29, -1, -1)]),
+            # Sign-ups per hour, the last 24 (the current hour last), for the overview's chart.
+            "signups_hours": part("signups_hours", lambda: [one(
+                "SELECT count(*) FROM users WHERE created_at >= ? AND created_at < ?",
+                h * 3600000, (h + 1) * 3600000) for h in range(now // 3600000 - 23, now // 3600000 + 1)]),
             "oldest_waiting": part("oldest_waiting", lambda: one("SELECT min(received_at) FROM messages")),
             "blobs": part("blobs", lambda: db.execute(
                 "SELECT count(*), coalesce(sum(size), 0) FROM blobs").fetchone() if has_table(db, "blobs") else None),

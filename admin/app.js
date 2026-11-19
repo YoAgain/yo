@@ -289,12 +289,14 @@ if (document.body.classList.contains("login")) {
       ...titles.map((t, i) => { const r = svg("rect", { x: Math.max(0, i * step - step / 2), width: step, y: 0, height: hgt }); r.append(svg("title")); r.lastChild.textContent = t; return r; }));
   };
 
-  // One small bar chart of days (prefix "su" or "ms"): bars, the top value at the y axis, first and last day under it,
-  // the latest day's value in its head, and a tooltip with the exact value of the day under the pointer.
-  const dayBars = (key, days, values, label) => {
+  // One small bar chart of the last 24 hours (prefix "su" or "ms"): bars, the top value at the y axis, the first hour
+  // and "now" under it, the UTC day's total in its head, and a tooltip with the exact value of the hour under the pointer.
+  const hourBars = (key, values, label, today) => {
     const node = $(`${key}-chart`), W = 280, H = 60, slot = W / values.length, kids = [];
+    const hour0 = Math.floor(Date.now() / 3600000) - values.length + 1;
+    const clock = (i) => new Date((hour0 + i) * 3600000).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", hourCycle: "h23" });
     const top = Math.max(1, ...values.filter((v) => v != null));
-    const text = (i) => `${dayName(days[i])}: ${values[i] == null ? "not kept" : label(values[i])}`;
+    const text = (i) => `${clock(i)}: ${values[i] == null ? "not kept" : label(values[i])}`;
     values.forEach((v, i) => {
       const hh = v ? Math.max(1.5, (v / top) * (H - 4)) : 1.5;
       kids.push(svg("rect", { x: (i * slot + slot * 0.16).toFixed(1), width: (slot * 0.68).toFixed(1), y: (H - hh).toFixed(1),
@@ -307,7 +309,7 @@ if (document.body.classList.contains("login")) {
     });
     node.replaceChildren(...kids);
     const tip = node.parentElement.querySelector(".tip");
-    const show = (e) => {
+    node.onpointermove = (e) => {
       const i = e.target.dataset?.i;
       if (i == null) { tip.hidden = true; return; }
       tip.textContent = text(+i);
@@ -315,13 +317,11 @@ if (document.body.classList.contains("login")) {
       const box = node.getBoundingClientRect(), x = ((+i + 0.5) / values.length) * box.width;
       tip.style.left = `${Math.min(Math.max(x, tip.offsetWidth / 2), box.width - tip.offsetWidth / 2)}px`;
     };
-    node.onpointermove = show;
     node.onpointerleave = () => { tip.hidden = true; };
     set(`${key}-max`, num(Math.max(0, ...values.filter((v) => v != null))));
-    set(`${key}-from`, dayName(days[0]));
-    set(`${key}-to`, dayName(days[days.length - 1]));
-    const lastV = values[values.length - 1];
-    $(`${key}-last`).replaceChildren(el("b", null, lastV == null ? "–" : num(lastV)), " today");
+    set(`${key}-from`, clock(0));
+    set(`${key}-to`, "now");
+    $(`${key}-last`).replaceChildren(el("b", null, today == null ? "–" : num(today)), " today");
   };
 
   // ---- overview: the users widget, sortable by every column ---------------------------------------------------------
@@ -389,7 +389,7 @@ if (document.body.classList.contains("login")) {
     // Users: ten, by the chosen column (last seen first); a click opens the user in the Users tab.
     drawOvUsers(h);
 
-    // Activity: two figures (active users, Yos in 24 h) and two small charts of 14 UTC days, each value on hover.
+    // Activity: two figures (active users, Yos in 24 h) and two small charts of the last 24 hours, each value on hover.
     if (ok) {
       const total = h.total || 0, today = h.active_today || 0, week = Math.max(today, h.active_users || 0);
       set("ug-today", num(today));
@@ -397,9 +397,9 @@ if (document.body.classList.contains("login")) {
       $("st-active").title = `${num(today)} of ${num(total)} users seen in the last 24 h · ${num(week)} this week · ${h.secured ?? "?"} secured · ${h.devices ?? "?"} devices`;
       set("st-msgs", num(h.deliveries?.day));
       $("st-yos").title = "Yos delivered in the last 24 h, every delivery incl. bots and group members";
-      const su = h.signups || [], md = h.deliveries?.days || [];
-      dayBars("su", days, days.map((_, i) => su[su.length - 14 + i] ?? 0), (v) => `${num(v)} sign-up${v === 1 ? "" : "s"}`);
-      dayBars("ms", days, days.map((_, i) => (md.length ? md[md.length - 14 + i] ?? null : null)), (v) => `${num(v)} Yo${v === 1 ? "" : "s"}`);
+      const su = h.signups || [], md = h.deliveries?.days || [], hours = (v) => (Array.isArray(v) ? v.slice(-24) : Array(24).fill(null));
+      hourBars("su", hours(h.signups_hours), (v) => `${num(v)} sign-up${v === 1 ? "" : "s"}`, su[su.length - 1]);
+      hourBars("ms", hours(h.deliveries?.hours), (v) => `${num(v)} Yo${v === 1 ? "" : "s"}`, md[md.length - 1]);
 
       // App versions: devices current, with an update out, unknown; per platform in the caption.
       let fresh = 0, old = 0, other = 0;

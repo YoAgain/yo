@@ -108,6 +108,10 @@ class UsersTabCollectorTests(unittest.TestCase):
             self.assertEqual(snapshot["signups"][-21], 1)
             self.assertEqual(sum(snapshot["signups"]), 2)
             self.assertEqual(snapshot["active_day"], 1)
+            self.assertEqual(len(snapshot["signups_hours"]), 24)
+            self.assertEqual(sum(snapshot["signups_hours"]), 1)
+            if now // 3600000 == (midnight + 1) // 3600000:
+                self.assertEqual(snapshot["signups_hours"][-1], 1)
 
 
 if __name__ == "__main__":
