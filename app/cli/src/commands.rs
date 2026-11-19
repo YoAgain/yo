@@ -164,17 +164,38 @@ fn add(context: &Context, name: &str) -> Outcome {
 }
 
 fn sync(context: &Context, args: &[&str]) -> Outcome {
-    let wait = match args {
-        [] => 0,
-        ["--wait", s] => s.parse().map_err(|_| Failure::usage("--wait: seconds"))?,
-        _ => return Err(Failure::usage("sync [--wait S]")),
-    };
+    let (mut wait, mut drain_media) = (0, false);
+    let mut args = args.iter();
+    while let Some(arg) = args.next() {
+        match *arg {
+            "--wait" => {
+                wait = args.next().and_then(|s| s.parse().ok()).ok_or_else(|| Failure::usage("--wait: seconds"))?
+            }
+            "--drain-media" => drain_media = true,
+            _ => return Err(Failure::usage("sync [--wait S] [--drain-media]")),
+        }
+    }
     let mut client = context.client();
+    // As `listen --drain-media`: no media key kept, every received blob fetched into nothing, never opened.
+    if drain_media {
+        client.forget_media_keys();
+    }
     let events = client.sync(wait)?;
-    let mut out: Vec<Value> = events.iter().map(|e| event(e, true)).collect();
+    let mut out: Vec<Value> = events.iter().map(|e| event(e, !drain_media)).collect();
     out.extend(client.take_probe_requests().into_iter().map(|(user, token)| probe(&user, &token)));
     let _ = client.after_sync();
     client.acknowledge_only(|e| events.contains(e));
+    if drain_media {
+        let transport = client.transport();
+        drop(client);
+        for event in &events {
+            if let Event::Message { content, .. } | Event::GroupMessage { content, .. } = event {
+                if let Content::Photo(blob) | Content::Video { media: blob, .. } = content {
+                    crate::listen::drain(transport.as_ref(), blob);
+                }
+            }
+        }
+    }
     Ok(json!(out))
 }
 

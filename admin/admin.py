@@ -266,12 +266,11 @@ def marks_change(data) -> dict:
         return marks
 
 
-# The STATUS bot (skills/status): how often and to whom, written here, read by the bot before every slot; the
-# numbers of its last report, written by the bot (no names).
+# The STATUS bot (skills/status): how often, written here, read by the bot every minute; the numbers of its last
+# report, written by the bot (no names). Whom it sends to is fixed on the server (STATUS_TO_USER), never set here.
 STATUS_CONFIG = os.environ.get("STATUS_CONFIG", os.environ.get("STATE_DIRECTORY", "./state") + "/status-bot.json")
 STATUS_LAST = os.environ.get("STATUS_LAST", "/run/yo-status-live/last.json")
 STATUS_EVERY = (0, 15, 30, 60, 120, 1440)
-STATUS_NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,31}")
 _status_lock = threading.Lock()
 
 
@@ -283,22 +282,17 @@ def status_read() -> dict:
         except (OSError, ValueError):
             return None
     config = load(STATUS_CONFIG) or {}
-    return {"config": {"every_minutes": config.get("every_minutes", 0), "to": config.get("to", ""),
-                       "baseline_users": config.get("baseline_users", 0)},
+    return {"config": {"every_minutes": config.get("every_minutes", 0), "baseline_users": config.get("baseline_users", 0)},
             "last": load(STATUS_LAST), "every": list(STATUS_EVERY)}
 
 
 def status_save(data) -> dict:
-    """{"every_minutes": one of STATUS_EVERY, "to": a name ("" only when off)}; the baseline is kept. ValueError when
-    malformed."""
-    every, to = data.get("every_minutes"), data.get("to")
-    if type(every) is not int or every not in STATUS_EVERY or not isinstance(to, str):
-        raise ValueError()
-    to = to.strip().lstrip("@")
-    if (to or every) and not STATUS_NAME.fullmatch(to):
+    """{"every_minutes": one of STATUS_EVERY}; the baseline is kept. ValueError when malformed."""
+    every = data.get("every_minutes")
+    if type(every) is not int or every not in STATUS_EVERY or set(data) != {"every_minutes"}:
         raise ValueError()
     with _status_lock:
-        config = {**status_read()["config"], "every_minutes": every, "to": to}
+        config = {**status_read()["config"], "every_minutes": every}
         tmp = STATUS_CONFIG + ".new"
         with open(tmp, "w") as f:
             json.dump(config, f)

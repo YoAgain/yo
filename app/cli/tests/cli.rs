@@ -47,6 +47,15 @@ fn register_add_send_and_receive_once() {
     assert_eq!(messages[1]["reply_to"], alice.user_id());
     let reference = messages[1]["media"]["ref"].as_str().unwrap().to_owned();
     assert!(yo.ok(&["sync"]).as_array().unwrap().iter().all(|e| e["type"] != "message"), "handed out once");
+    // `sync --drain-media`: the photo handed out without its key (fetched into nothing, never opened).
+    let fetches = alice.media_fetches(me_user).unwrap();
+    let drained = uploaded(&mut alice, &photo_bytes, fetches);
+    alice.send(me_user, Content::Photo(drained)).unwrap();
+    let events = yo.ok(&["sync", "--wait", "1", "--drain-media"]);
+    let photos: Vec<_> = events.as_array().unwrap().iter().filter(|e| e["content"] == "photo").collect();
+    assert_eq!(photos.len(), 1, "{events}");
+    assert!(photos[0]["media"]["ref"].is_null(), "{events}");
+    assert_eq!(yo.run(&["sync", "--drain-media", "--wait"]).0, 2);
     assert_eq!(yo.ok(&["status"])["contacts"], 1);
 
     // The photo back as it came, sealed anew, its reference on stdin only (never an argument); no video from a file.

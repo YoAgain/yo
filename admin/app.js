@@ -1099,7 +1099,7 @@ if (document.body.classList.contains("login")) {
     set("st-since", l?.since == null ? "" : `${l.since >= 0 ? "+" : ""}${l.since} since ${c.baseline_users ?? 0}`);
     set("st-up", l?.up == null ? "–" : `${l.up}/${l.total}`);
     set("st-load", l ? `load ${l.load ?? "?"} · ${l.crashes ?? "?"} open crashes` : "");
-    if (!statusEdited) { $("st-every").value = String(c.every_minutes ?? 0); $("st-to").value = c.to || ""; }
+    if (!statusEdited) $("st-every").value = String(c.every_minutes ?? 0);
   };
   async function statusRefresh() {
     try {
@@ -1107,18 +1107,18 @@ if (document.body.classList.contains("login")) {
       if (r.ok) drawStatus(await r.json());
     } catch {}
   }
-  for (const id of ["st-every", "st-to"]) $(id).addEventListener("input", () => { statusEdited = true; });
+  $("st-every").addEventListener("input", () => { statusEdited = true; });
   $("st-form").addEventListener("submit", async (e) => {
     e.preventDefault();
     const err = $("st-error");
     err.classList.remove("bad");
     try {
-      const r = await postJSON("/status", { every_minutes: Number($("st-every").value), to: $("st-to").value.trim() });
+      const r = await postJSON("/status", { every_minutes: Number($("st-every").value) });
       statusEdited = false;
       drawStatus(await r.json());
       err.textContent = "Saved.";
     } catch {
-      err.textContent = "Not saved: a name on Yo is needed unless off.";
+      err.textContent = "Not saved. Try again.";
       err.classList.add("bad");
     }
   });

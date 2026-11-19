@@ -179,15 +179,30 @@ class StatusRules(unittest.TestCase):
             return status.config(path)
 
     def test_config_is_off_unless_whole_and_valid(self):
-        off = {"every_minutes": 0, "to": None, "baseline_users": 0}
+        off = {"every_minutes": 0, "baseline_users": 0}
         self.assertEqual(self.config({"every_minutes": 30, "to": "Lina", "baseline_users": 3}),
-                         {"every_minutes": 30, "to": "Lina", "baseline_users": 3})
-        self.assertEqual(self.config({"every_minutes": 0}), off | {"to": None})
-        for bad in [None, "{", "[]", {"every_minutes": 7, "to": "Lina"}, {"every_minutes": 30},
-                    {"every_minutes": 30, "to": "-rf"}, {"every_minutes": 30, "to": "a b"},
-                    {"every_minutes": True, "to": "Lina"}, {"every_minutes": 30, "to": "Lina", "baseline_users": -1}]:
+                         {"every_minutes": 30, "baseline_users": 3})
+        self.assertEqual(self.config({"every_minutes": 0}), off)
+        for bad in [None, "{", "[]", {"every_minutes": 7}, {"every_minutes": "30"}, {"every_minutes": True},
+                    {"every_minutes": 30, "baseline_users": -1}]:
             with self.subTest(bad=bad):
                 self.assertEqual(self.config(bad), off)
+
+    def test_sends_only_to_the_fixed_user_id(self):
+        user = "ab" * 16
+        self.assertEqual(status.recipient(" " + user.upper() + "\n"), user)
+        for bad in ["", "Lina", "ab" * 15, "ab" * 17, "group:" + user, "zz" * 16]:
+            self.assertIsNone(status.recipient(bad), bad)
+        sent = []
+        real, yocli.yo = yocli.yo, lambda *a, **k: sent.append(a)
+        try:
+            for to, allowed in [("cd" * 16, user), ("Lina", user), (user, None), ("group:" + user, user)]:
+                with self.subTest(to=to), self.assertRaises(PermissionError):
+                    status.send_photo(to, allowed, "/x.jpg")
+            status.send_photo(user, user, "/x.jpg")
+        finally:
+            yocli.yo = real
+        self.assertEqual(sent, [("send", user, "--photo", "/x.jpg")])
 
     def test_slots_are_whole_multiples_of_berlin_time(self):
         at = lambda *a: datetime.datetime(2026, *a, tzinfo=status.BERLIN)  # noqa: E731

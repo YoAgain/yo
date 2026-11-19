@@ -9,7 +9,7 @@ After=network.target
 Type=simple
 Environment=YO_BIN=/opt/yo/yo YO_STATE=%S/yo-status-%i
 Environment=STATUS_CONFIG=/var/lib/yo-admin/status-bot.json STATUS_HUB_DB=/var/lib/private/yo/yo-hub.sqlite
-# YO_HUB, YO_HUB_KEYS, YO_TRUST_ROOTS (app/cli/README.md)
+# YO_HUB, YO_HUB_KEYS, YO_TRUST_ROOTS (app/cli/README.md); STATUS_TO_USER: the only user it sends to (a user id)
 EnvironmentFile=/etc/yo-status-%i.env
 ExecStart=/usr/bin/python3 -I -B /opt/yo/skills/status/status.py
 StateDirectory=yo-status-%i
@@ -21,8 +21,8 @@ RuntimeDirectoryPreserve=yes
 UMask=0077
 Restart=on-failure
 RestartSec=10
-# 3: the hub no longer knows this device; 4: nothing registered (yocli.py). Both stay stopped.
-RestartPreventExitStatus=3 4
+# 3: the hub no longer knows this device; 4: nothing registered (yocli.py); 5: no STATUS_TO_USER. All stay stopped.
+RestartPreventExitStatus=3 4 5
 CapabilityBoundingSet=CAP_DAC_READ_SEARCH
 NoNewPrivileges=yes
 ProtectSystem=strict

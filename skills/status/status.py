@@ -1,15 +1,18 @@
 #!/usr/bin/env python3
 """STATUS: the server's numbers as a picture, sent as a Yo to one user at a fixed rhythm. Runs on the server itself:
 users, sign-ups since a baseline and open crash reports from the live hub's database (read-only), services from
-systemd, the load from /proc. Rhythm and recipient come from the admin page's config, read again before every slot:
+systemd, the load from /proc. It sends to one user only, fixed by user id in the environment (STATUS_TO_USER), and
+to nobody else. It never answers: once per slot (hourly while off) it takes in what came (`yo sync --drain-media`:
+media fetched into nothing, never opened) so that other people's Yos do not pile up at the hub, and drops it. The
+rhythm comes from the admin page's config, read again every minute:
 
-  {"every_minutes": 30, "to": "NAME", "baseline_users": 30}     every_minutes: 0 (off), 15, 30, 60, 120, 1440 (daily)
+  {"every_minutes": 30, "baseline_users": 30}     every_minutes: 0 (off), 15, 30, 60, 120, 1440 (daily)
 
 Slots are whole multiples of every_minutes from Berlin midnight; daily at 09:00 Berlin. After each send it writes
 the numbers (no names) to STATUS_LAST for the admin page. Rendering needs Pillow (python3-pil) and the Montserrat
 Bold next to this file.
 
-  YO_STATE=… YO_HUB=… status.py [--once]     (once before: yo register NAME)
+  STATUS_TO_USER=<32 hex> YO_STATE=… YO_HUB=… status.py [--once]     (once before: yo register NAME)
 """
 
 import argparse
@@ -36,7 +39,10 @@ FONT = os.path.join(HERE, "Montserrat-Bold.ttf")
 BERLIN = ZoneInfo("Europe/Berlin")
 EVERY = (0, 15, 30, 60, 120, 1440)
 DAILY_AT = 9 * 60  # minutes after Berlin midnight
-NAME = re.compile(r"@?[A-Za-z0-9][A-Za-z0-9._-]{0,31}")
+USER_ID = re.compile(r"[0-9a-f]{32}")
+DRAIN_OFF = 3600  # seconds between drains while off
+# Exit codes systemd does not restart (yo-status@.service): no valid STATUS_TO_USER.
+NO_RECIPIENT = 5
 
 
 def config(path=CONFIG):
@@ -44,14 +50,36 @@ def config(path=CONFIG):
     try:
         with open(path) as f:
             data = json.load(f)
-        every, to, base = data.get("every_minutes"), data.get("to"), data.get("baseline_users", 0)
+        every, base = data.get("every_minutes"), data.get("baseline_users", 0)
         if every not in EVERY or type(every) is not int or type(base) is not int or base < 0:
             raise ValueError()
-        if every and not (isinstance(to, str) and NAME.fullmatch(to)):
-            raise ValueError()
-        return {"every_minutes": every, "to": to, "baseline_users": base}
+        return {"every_minutes": every, "baseline_users": base}
     except (OSError, ValueError, AttributeError, TypeError):
-        return {"every_minutes": 0, "to": None, "baseline_users": 0}
+        return {"every_minutes": 0, "baseline_users": 0}
+
+
+def recipient(value=None):
+    """The one user this bot ever sends to: STATUS_TO_USER, a user id (32 hex); None when missing or malformed."""
+    value = (os.environ.get("STATUS_TO_USER", "") if value is None else value).strip().lower()
+    return value if USER_ID.fullmatch(value) else None
+
+
+def send_photo(to, allowed, path):
+    """The card to `to`, which must be the one fixed recipient: anything else is refused."""
+    if not allowed or to != allowed:
+        raise PermissionError("not the fixed recipient")
+    yocli.yo("send", to, "--photo", path)
+
+
+def drain():
+    """What came in, taken and dropped: never opened, answered or accepted (`sync` accepts no chat; a receipt goes
+    only to a chat said yes to, here the recipient's)."""
+    try:
+        events = yocli.yo("sync", "--drain-media")
+        if events:
+            yocli.log(f"drained {len(events)}")
+    except yocli.Failed as failed:
+        yocli.log(f"drain: {yocli.reason(failed)}")
 
 
 def next_slot(now, every):
@@ -120,7 +148,7 @@ def render(path, n, base, when):
     image.save(path, "JPEG", quality=88)
 
 
-def report(cfg):
+def report(cfg, to):
     when = datetime.datetime.now(BERLIN)
     n = numbers()
     last = {**n, "at": int(time.time()), "since": None if n["users"] is None else n["users"] - cfg["baseline_users"],
@@ -129,12 +157,15 @@ def report(cfg):
         path = os.path.join(d, "status.jpg")
         try:
             render(path, n, cfg["baseline_users"], when)
-            yocli.yo("send", cfg["to"].lstrip("@"), "--photo", path)
+            send_photo(to, recipient(), path)
             last["sent"] = True
             yocli.log("sent")
         except yocli.Failed as failed:
             last["error"] = yocli.reason(failed)
             yocli.log(f"not sent: {last['error']}")
+        except PermissionError as error:
+            last["error"] = "refused"
+            yocli.log(f"not sent: {error}")
         except (OSError, ImportError) as error:
             last["error"] = type(error).__name__
             yocli.log(f"not rendered: {last['error']}")
@@ -150,30 +181,36 @@ def report(cfg):
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--once", action="store_true", help="one report now (to the configured user), then end")
+    parser.add_argument("--once", action="store_true", help="one report now, then end")
     args = parser.parse_args()
+    to = recipient()
+    if not to:
+        yocli.log("stopped: STATUS_TO_USER is not a user id (32 hex)")
+        sys.exit(NO_RECIPIENT)
     yocli.registered()
     if args.once:
-        cfg = config()
-        if not cfg["to"]:
-            sys.exit("status: no recipient configured")
-        return report(cfg)
-    shown = None
+        drain()
+        return report(config(), to)
+    shown, drained = None, time.monotonic()
     while True:
         cfg = config()
         slot = next_slot(datetime.datetime.now(BERLIN), cfg["every_minutes"])
-        if (cfg["every_minutes"], cfg["to"]) != shown:
-            shown = (cfg["every_minutes"], cfg["to"])
-            yocli.log(f"every {cfg['every_minutes']} min" if slot else "off")
+        if cfg["every_minutes"] != shown:
+            shown = cfg["every_minutes"]
+            yocli.log(f"every {shown} min" if slot else "off")
         # Asleep in steps of a minute at most: a changed config counts from the next step on.
         while True:
             wait = None if slot is None else slot.timestamp() - time.time()
             if wait is not None and wait <= 0:
-                report(cfg)
+                drain()
+                drained = time.monotonic()
+                report(cfg, to)
                 break
+            if slot is None and time.monotonic() - drained >= DRAIN_OFF:
+                drain()
+                drained = time.monotonic()
             time.sleep(60 if wait is None else min(wait, 60))
-            fresh = config()
-            if fresh != cfg:
+            if config() != cfg:
                 break
 
 

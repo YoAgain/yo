@@ -2,7 +2,7 @@
 
 Python standard library dashboard for server health, systemd services, a Users tab (today's figures, sign-ups and
 active users per day, every user in a table sortable by each column), hub database tables,
-User Reports, feedback and To-Dos, anonymous crash/error diagnostics with counts and done ticks, reserved-name management, YoGPT reply pictures, and a Status tab for the STATUS bot ([skills/status](../skills/status): its last report, how often and to whom it sends). The collector (`users.py`)
+User Reports, feedback and To-Dos, anonymous crash/error diagnostics with counts and done ticks, reserved-name management, YoGPT reply pictures, and a Status tab for the STATUS bot ([skills/status](../skills/status): its last report and how often it sends; the recipient is fixed on the server). The collector (`users.py`)
 reads SQLite databases read-only and atomically writes a JSON snapshot. To-Dos go through the hub API;
 message completion lives in the hub; user-report done markers are stored locally. `migrate_todos.py` is the one-time legacy JSON migration.
 
@@ -30,7 +30,7 @@ keep credentials and deployment settings outside this public repository.
 | `ADMIN_USERS_FILE` | Collector output and dashboard snapshot | `./users.json` |
 | `ADMIN_REQUEST_FILE` | Path-unit request file; parent writable by yo-admin | `/run/yo-admin-request/want` |
 | `STATE_DIRECTORY` | Writable done-state and migration directory; create beforehand | `./state` |
-| `STATUS_CONFIG` | The STATUS bot's rhythm and recipient, written here | `$STATE_DIRECTORY/status-bot.json` |
+| `STATUS_CONFIG` | The STATUS bot's rhythm, written here | `$STATE_DIRECTORY/status-bot.json` |
 | `STATUS_LAST` | The STATUS bot's last report (numbers only) | `/run/yo-status-live/last.json` |
 | `YOGPT_REPLIES` | Reply pictures and their README table | `./replies` |
 | `YO_HUB_DB` | Live SQLite database | `./hub.sqlite` |

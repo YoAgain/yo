@@ -33,7 +33,7 @@ events are acknowledged at once; with `--manual-ack` only by `yo ack`, and the u
 restart. A `media.ref` holds the blob's key: whoever has it can open the photo, so `send --media -` reads it from
 stdin, never from the arguments (which every local user sees). No video from a file: the CLI can neither check its
 length nor take out its metadata. `--drain-media` forgets media keys instead and fetches and acknowledges every
-received blob, never opened (the hub deletes it after its last fetch), for a bot that never looks.
+received blob, never opened (the hub deletes it after its last fetch), for a bot that never looks. `sync --drain-media` does the same once, for a bot that only sends (skills/status).
 
 **The state directory** is YoGPT's as before: `account` (the account secret), `key` (the state key) and `state.sqlite`,
 all 0600; keep `account` in the operator's secret backup. A `state` file of the build before the database is taken

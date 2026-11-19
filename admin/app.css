@@ -403,5 +403,4 @@ a.lg:hover { color: var(--text); }
 /* Status */
 .stform { display: flex; flex-wrap: wrap; align-items: center; gap: 12px; font-size: 13px; color: var(--muted); }
 .stform label { display: flex; align-items: center; gap: 8px; }
-.stform input[type=text] { background: var(--bg); border: 1px solid var(--line); border-radius: 10px; padding: 7px 10px; font-size: 13px; color: var(--text); width: 180px; color-scheme: dark; }
 #st-error.bad { color: var(--bad); }

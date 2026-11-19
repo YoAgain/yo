@@ -92,9 +92,14 @@ impl Listener<'_> {
 /// of them is kept, opened or printed.
 fn drainer(transport: &dyn Transport, blobs: &Receiver<Media>) {
     while let Ok(blob) = blobs.recv() {
-        if let Ok(Some(_)) = media::fetch(transport, &blob) {
-            let _ = media::ack(transport, &blob.id);
-        }
+        drain(transport, &blob);
+    }
+}
+
+/// One blob fetched into nothing and acknowledged if it came whole (`--drain-media`).
+pub(crate) fn drain(transport: &dyn Transport, blob: &Media) {
+    if let Ok(Some(_)) = media::fetch(transport, blob) {
+        let _ = media::ack(transport, &blob.id);
     }
 }
 
