@@ -34,6 +34,45 @@ struct StatusPage: View {
   @AppStorage("stats.received") private var received = 0
   @State private var crashesOn = CrashReports.on
 
+  /// The last answers shown at once (no "Checking" while one is known); the checks refresh them quietly.
+  init(summaryOnly: Bool = false, wordOnly: Bool = false) {
+    self.summaryOnly = summaryOnly
+    self.wordOnly = wordOnly
+    guard let last = StatusMemory.last else { return }
+    restoredFor = last.client
+    _reachable = State(initialValue: last.reachable)
+    _milliseconds = State(initialValue: last.milliseconds)
+    _lastAnswer = State(initialValue: last.lastAnswer)
+    _accepted = State(initialValue: last.accepted)
+    _allowed = State(initialValue: last.allowed)
+    _status = State(initialValue: last.status)
+    _tally = State(initialValue: last.tally)
+    _savedAt = State(initialValue: last.savedAt)
+    _backupAvailable = State(initialValue: last.backupAvailable)
+    _storage = State(initialValue: last.storage)
+    if let total = last.storageTotal { _storageTotal = State(initialValue: total) }
+    if let usage = last.usage { _usage = State(initialValue: usage) }
+    _syncMilliseconds = State(initialValue: last.syncMilliseconds)
+    _syncSucceeded = State(initialValue: last.syncSucceeded)
+    _syncChecking = State(initialValue: last.syncSucceeded == nil)
+  }
+
+  /// The client whose answers this page started from.
+  private var restoredFor: ObjectIdentifier?
+
+  /// The answers it started from are this client's: another account starts from nothing.
+  private var remembered: Bool {
+    restoredFor != nil && restoredFor == accounts.client.map(ObjectIdentifier.init)
+  }
+
+  private func remember() {
+    StatusMemory.last = StatusMemory.Snapshot(
+      client: accounts.client.map(ObjectIdentifier.init), reachable: reachable, milliseconds: milliseconds,
+      lastAnswer: lastAnswer, accepted: accepted, allowed: allowed, status: status, tally: tally, savedAt: savedAt,
+      backupAvailable: backupAvailable, storage: storage, storageTotal: storage == nil ? nil : storageTotal,
+      usage: usage, syncMilliseconds: syncMilliseconds, syncSucceeded: syncSucceeded)
+  }
+
   private var serverCheck: Check { productServerCheck(reachable: reachable, milliseconds: milliseconds.map(UInt32.init)) }
 
   /// The one word for the Status row and the Account title's dot (the core's rule).
@@ -214,6 +253,7 @@ struct StatusPage: View {
       let loaded = await LocalStorageUsage.load()
       storageTotal = await Task.detached(priority: .utility) { LocalStorageUsage.formatted(loaded.total) }.value
       storage = loaded
+      remember()
     }
     .task(id: "\(sent)/\(received)") {
       mostYos =
@@ -222,17 +262,25 @@ struct StatusPage: View {
     .task {
       while !Task.isCancelled {
         usage = DataUsage.total(month: true)
+        remember()
         do { try await Task.sleep(for: .seconds(2)) } catch { return }
       }
     }
     .task {
       let settings = await UNUserNotificationCenter.current().notificationSettings()
       allowed = [.authorized, .provisional, .ephemeral].contains(settings.authorizationStatus)
+      remember()
     }
     .task(id: accounts.client.map(ObjectIdentifier.init)) {
-      syncChecking = true
-      syncSucceeded = nil
-      defer { syncChecking = false }
+      if !remembered {
+        syncMilliseconds = nil
+        syncSucceeded = nil
+      }
+      syncChecking = syncSucceeded == nil
+      defer {
+        syncChecking = false
+        remember()
+      }
       guard let client = accounts.client else {
         syncSucceeded = false
         return
@@ -255,9 +303,11 @@ struct StatusPage: View {
       }
     }
     .task(id: accounts.client.map(ObjectIdentifier.init)) {
-      reachable = nil
-      milliseconds = nil
-      lastAnswer = nil
+      if !remembered {
+        reachable = nil
+        milliseconds = nil
+        lastAnswer = nil
+      }
       while !Task.isCancelled {
         let client = accounts.client
         let start = ContinuousClock.now
@@ -273,12 +323,15 @@ struct StatusPage: View {
         reachable = code.map { (200..<300).contains($0) } ?? false
         if reachable == true { lastAnswer = .now }
         if code == 426 { accepted = false } else if reachable == true { accepted = true }
+        remember()
         do { try await Task.sleep(for: .seconds(15)) } catch { return }
       }
     }
     .task(id: accounts.client.map(ObjectIdentifier.init)) {
-      savedAt = nil
-      backupAvailable = false
+      if !remembered {
+        savedAt = nil
+        backupAvailable = false
+      }
       while !Task.isCancelled {
         if let client = accounts.client {
           do {
@@ -287,6 +340,7 @@ struct StatusPage: View {
             savedAt = ms.map { Date(timeIntervalSince1970: Double($0) / 1000) }
             backupAvailable = true
           } catch { backupAvailable = false }
+          remember()
         }
         do { try await Task.sleep(for: .seconds(5)) } catch { return }
       }
@@ -299,10 +353,34 @@ struct StatusPage: View {
           guard client === accounts.client, !Task.isCancelled else { return }
           status = loaded
         }
+        remember()
         do { try await Task.sleep(for: .seconds(5)) } catch { return }
       }
     }
   }
+}
+
+/// The Status checks' last answers while the app runs, so a page opened again starts from them.
+@MainActor enum StatusMemory {
+  struct Snapshot {
+    var client: ObjectIdentifier?
+    var reachable: Bool?
+    var milliseconds: Int?
+    var lastAnswer: Date?
+    var accepted: Bool?
+    var allowed: Bool?
+    var status: SecurityStatus?
+    var tally: EncryptionTally?
+    var savedAt: Date?
+    var backupAvailable: Bool
+    var storage: LocalStorageUsage?
+    var storageTotal: String?
+    var usage: String?
+    var syncMilliseconds: UInt64?
+    var syncSucceeded: Bool?
+  }
+
+  static var last: Snapshot?
 }
 
 private struct IdentitySheet: View {
@@ -340,6 +418,7 @@ private struct IdentitySheet: View {
         ToolbarItem(placement: .confirmationAction) { Button("Done", systemImage: "checkmark") { dismiss() } }
       }
     }
-    .presentationDetents([.medium, .large])
+    .presentationDetents([.large])
+    .presentationDragIndicator(.hidden)
   }
 }

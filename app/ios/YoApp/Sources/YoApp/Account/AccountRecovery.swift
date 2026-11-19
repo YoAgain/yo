@@ -52,7 +52,8 @@ struct RecoveryHelpSheet: View {
         }
       }
     }
-    .presentationDetents([.medium, .large])
+    .presentationDetents([.large])
+    .presentationDragIndicator(.hidden)
   }
 
   private func item(_ symbol: String, _ title: String, _ text: String) -> some View {

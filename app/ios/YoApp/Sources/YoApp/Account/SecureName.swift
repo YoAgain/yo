@@ -1,5 +1,5 @@
-// "Set Up Account Recovery" (spec 7): 1, save the recovery key through the share sheet (Copy on its card counts too);
-// 2, set up a passkey, then confirm it once for its PRF output. Done once either step is done.
+// "Account Recovery" (spec 7): save the recovery key through the share sheet (Copy on its card counts too), or set up
+// a passkey and confirm it once for its PRF output. Done once either one is done.
 import SwiftUI
 
 enum SecureStep { case passkey, recoveryKey }
@@ -28,58 +28,62 @@ struct SecureNameSheet: View {
   private var canFinish: Bool { wordsDone || passkeyDone }
 
   var body: some View {
-    ZStack {
-      Color.amethyst.ignoresSafeArea()
-      GuidePage(symbol: "key.fill", title: "Set Up\nAccount Recovery") {
-        StepCaption(number: 1)
-        StepButton(
-          "Save Recovery Key", systemImage: "square.and.arrow.up", doneTitle: "Recovery Key Saved",
-          done: wordsDone, busy: busy == .recoveryKey
-        ) { Task { await share() } }
-        .disabled(busy != nil)
-        Button {
-          if showingKey { showingKey = false } else { Task { await showKey() } }
-        } label: {
-          Label(showingKey ? "Hide Recovery Key" : "Show Recovery Key", systemImage: showingKey ? "eye.slash" : "eye")
-            .font(.subheadline.weight(.semibold))
-            .contentTransition(.symbolEffect(.replace))
-            .frame(minHeight: 36)
-            .contentShape(.rect)
+    NavigationStack {
+      Form {
+        Section {
+          Text("Save a recovery key or set up a passkey. Either one brings your account back on a new iPhone.")
+            .foregroundStyle(.secondary)
         }
-        .buttonStyle(.plain)
-        .opacity(0.85)
-        .disabled(busy != nil)
-        if showingKey {
-          KeyCard(key: words, copied: copiedKey) {
-            UIPasteboard.general.string = RecoveryCode.shown(words)
-            copiedKey = true
-            Task { await markSaved() }
+        Section {
+          SecureRow(
+            "Save Recovery Key", systemImage: "square.and.arrow.up", doneTitle: "Recovery Key Saved",
+            done: wordsDone, busy: busy == .recoveryKey
+          ) { Task { await share() } }
+          Button {
+            if showingKey { showingKey = false } else { Task { await showKey() } }
+          } label: {
+            Label(showingKey ? "Hide Recovery Key" : "Show Recovery Key", systemImage: showingKey ? "eye.slash" : "eye")
+              .labelStyle(Tile(.gray))
           }
-          .transition(.opacity.combined(with: .move(edge: .top)))
+          .tint(Color(.label))
+          if showingKey {
+            KeyCard(key: words, copied: copiedKey) {
+              UIPasteboard.general.string = RecoveryCode.shown(words)
+              copiedKey = true
+              Task { await markSaved() }
+            }
+            .listRowBackground(Color.amethyst)
+          }
+        } footer: {
+          Text("Keep it somewhere safe, like your password manager.")
         }
-        StepCaption(number: 2)
-          .padding(.top, 12)
-        StepButton(
-          created ? "Confirm Passkey" : "Set Up Passkey", systemImage: "faceid", doneTitle: "Passkey Set Up",
-          done: passkeyDone, busy: busy == .passkey
-        ) { Task { created ? await checkPasskey() : await createPasskey() } }
-        .disabled(busy != nil)
-        Note(problem)
-          .padding(.top, 4)
-      } bottom: {
-        PrimaryButton("Done") { finish() }
-          .disabled(!canFinish || busy != nil)
+        Section {
+          SecureRow(
+            created ? "Confirm Passkey" : "Set Up Passkey", systemImage: "faceid", doneTitle: "Passkey Set Up",
+            done: passkeyDone, busy: busy == .passkey
+          ) { Task { created ? await checkPasskey() : await createPasskey() } }
+        } footer: {
+          if let problem { Text(problem).foregroundStyle(.red) }
+        }
+      }
+      .disabled(busy != nil)
+      .navigationTitle("Account Recovery")
+      .navigationBarTitleDisplayMode(.inline)
+      .toolbar {
+        ToolbarItem(placement: .cancellationAction) {
+          Button("Close", systemImage: "xmark") { if let close { close() } else { dismiss() } }
+            .disabled(busy != nil)
+        }
+        ToolbarItem(placement: .confirmationAction) {
+          Button("Done", systemImage: "checkmark") { finish() }
+            .disabled(!canFinish || busy != nil)
+        }
       }
     }
-    .overlay(alignment: .topTrailing) { SheetClose(action: close).disabled(busy != nil) }
-    .animation(.smooth(duration: 0.3), value: wordsDone)
-    .animation(.smooth(duration: 0.3), value: passkeyDone)
-    .animation(.smooth(duration: 0.3), value: created)
-    .foregroundStyle(.white)
-    .presentationDragIndicator(.visible)
-    .preferredColorScheme(.dark)
+    .sensoryFeedback(.success, trigger: wordsDone) { _, now in now }
+    .sensoryFeedback(.success, trigger: passkeyDone) { _, now in now }
+    .presentationDragIndicator(.hidden)
     .interactiveDismissDisabled(busy != nil)
-    .animation(.smooth(duration: 0.25), value: showingKey)
     .onAppear {
       guard !initialized else { return }
       initialized = true
@@ -178,50 +182,8 @@ struct SecureNameSheet: View {
   }
 }
 
-/// A large symbol above the title, the steps scrolling when large text needs the room, the buttons at the bottom.
-private struct GuidePage<Content: View, Bottom: View>: View {
-  let symbol: String
-  let title: String
-  @ViewBuilder let content: Content
-  @ViewBuilder let bottom: Bottom
-
-  var body: some View {
-    VStack(spacing: 0) {
-      Color.clear.frame(height: 44)
-      ScrollView {
-        VStack(spacing: 20) {
-          Image(systemName: symbol)
-            .font(.system(size: 96))
-            .accessibilityHidden(true)
-          Text(title).font(.yo(30)).multilineTextAlignment(.center)
-        }
-        .padding(.top, 8)
-        VStack(spacing: 8) { content }
-          .padding(.top, 28)
-          .padding(.bottom, 16)
-      }
-      .scrollBounceBehavior(.basedOnSize)
-      .scrollIndicators(.hidden)
-      VStack(spacing: 18) { bottom }
-    }
-    .padding(.horizontal, 24)
-    .padding(.bottom, 16)
-  }
-}
-
-private struct StepCaption: View {
-  let number: Int
-
-  var body: some View {
-    Text("Step \(number)")
-      .textCase(.uppercase)
-      .font(.caption.weight(.semibold))
-      .opacity(0.75)
-      .frame(maxWidth: .infinity, alignment: .center)
-  }
-}
-
-private struct StepButton: View {
+/// A step as a Form row: its button until done, then what was done with a green check.
+private struct SecureRow: View {
   let title: String
   let systemImage: String
   let doneTitle: String
@@ -242,43 +204,27 @@ private struct StepButton: View {
   }
 
   var body: some View {
-    Group {
-      if done {
-        Label {
-          Text(doneTitle)
-        } icon: {
-          Image(systemName: "checkmark.circle.fill")
-            .symbolRenderingMode(.palette)
-            .foregroundStyle(.white, .green)
-        }
-        .font(.system(.title3, weight: .semibold))
-        .frame(maxWidth: .infinity, minHeight: 48)
-        .background(.white.opacity(0.14), in: .capsule)
-        .accessibilityElement(children: .combine)
-        .transition(.opacity)
-      } else {
-        Button(action: action) {
-          Group {
-            if busy {
-              ProgressView().tint(.black)
-            } else {
-              Label(title, systemImage: systemImage)
-                .contentTransition(.interpolate)
-            }
-          }
-          .font(.system(.title3, weight: .semibold))
-          .frame(maxWidth: .infinity, minHeight: 40)
-        }
-        .buttonStyle(.glassProminent)  // matches Done below
-        .tint(.white)
-        .foregroundStyle(.black)
-        .transition(.opacity)
+    if done {
+      LabeledContent {
+        Image(systemName: "checkmark.circle.fill").foregroundStyle(.green)
+      } label: {
+        Label(doneTitle, systemImage: systemImage).labelStyle(Tile(.amethyst))
       }
+      .accessibilityElement(children: .combine)
+    } else {
+      Button(action: action) {
+        LabeledContent {
+          if busy { ProgressView() }
+        } label: {
+          Label(title, systemImage: systemImage).labelStyle(Tile(.amethyst))
+        }
+      }
+      .tint(Color(.label))
     }
-    .sensoryFeedback(.success, trigger: done) { _, now in now }
   }
 }
 
+/// The key itself, as the recovery card shows it: QR code and blocks, white on amethyst.
 private struct KeyCard: View {
   let key: String
   let copied: Bool
@@ -292,9 +238,9 @@ private struct KeyCard: View {
         .buttonStyle(.plain)
         .fontWeight(.semibold)
     }
+    .foregroundStyle(.white)
     .frame(maxWidth: .infinity)
-    .padding(16)
-    .background(.white.opacity(0.14), in: .rect(cornerRadius: 18))
+    .padding(.vertical, 8)
   }
 }
 
@@ -344,6 +290,6 @@ struct RecoveryShowSheet: View {
     .overlay(alignment: .topTrailing) { SheetClose() }
     .foregroundStyle(.white)
     .preferredColorScheme(.dark)
-    .presentationDragIndicator(.visible)
+    .presentationDragIndicator(.hidden)
   }
 }

@@ -42,6 +42,8 @@ struct HelpPage: View {
       }
     }
     .hitchScene("Help & About")
+    // About & Licenses opens whole, its text already read.
+    .task { await LicenseContent.prepare() }
     .navigationTitle("Help & About")
     .navigationBarTitleDisplayMode(.inline)
     .sheet(isPresented: $showingMessage) { MessagePage() }

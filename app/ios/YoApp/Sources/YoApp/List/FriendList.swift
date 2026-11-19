@@ -480,7 +480,8 @@ struct FriendList: View {
         ToolbarItemGroup(placement: .bottomBar) {
           if leftHanded {
             cameraButton
-            if cameraOn || cameraPrepared { flipButton.opacity(cameraOn ? 1 : 0).allowsHitTesting(cameraOn).accessibilityHidden(!cameraOn) }
+            // Only while the camera is open: the bar draws its glass even for a see-through item.
+            if cameraOn { flipButton }
           } else { leadingControl }
         }
         ToolbarSpacer(.flexible, placement: .bottomBar)
@@ -495,7 +496,7 @@ struct FriendList: View {
         .sharedBackgroundVisibility(.hidden)
         ToolbarSpacer(.flexible, placement: .bottomBar)
         ToolbarItemGroup(placement: .bottomBar) {
-          if !leftHanded && (cameraOn || cameraPrepared) { flipButton.opacity(cameraOn ? 1 : 0).allowsHitTesting(cameraOn).accessibilityHidden(!cameraOn) }
+          if !leftHanded && cameraOn { flipButton }
           if leftHanded { leadingControl } else { cameraButton }
         }
       }

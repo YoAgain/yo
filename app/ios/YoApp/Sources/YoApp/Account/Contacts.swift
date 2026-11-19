@@ -170,8 +170,8 @@ private struct ContactsList: View {
           }
         }
       }
-      .presentationDetents([.medium, .large])
-      .presentationBackground(Color(.systemGroupedBackground))
+      .presentationDetents([.large])
+      .presentationDragIndicator(.hidden)
     }
     .task(id: Reload(accounts.client, friends.contacts)) {
       while !Task.isCancelled {

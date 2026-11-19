@@ -32,7 +32,6 @@ struct SettingsView: View {
   }
   @State private var path: [Page] = []
   @State private var showingDeleteAccount = false
-  @State private var detent: PresentationDetent = .medium
 
   private var currentIconAsset: String {
     AppIconPage.icons.first { $0.name == currentIconName }?.image ?? "IconStandard"
@@ -123,19 +122,14 @@ struct SettingsView: View {
       #if YO_DEV
         HitchMonitor.shared.scene = path.last.map { String(describing: $0) } ?? "settings root"
       #endif
-      if let last = path.last, Self.expands(last) { detent = .large }
     }
-    .presentationDetents([.medium, .large], selection: $detent)
-    // Below full height an iOS 26 sheet is see-through glass: opaque instead.
-    .presentationBackground(Color(.systemGroupedBackground))
+    // One height, the whole first card in view and room for the pages pushed in: no grabber, nothing jumps.
+    .presentationDetents([.large])
+    .presentationDragIndicator(.hidden)
     .task(id: "\(accounts.account?.username ?? "")/\(accounts.account?.secured == true)/\(accounts.wordsSaved)") {
       let available = await Task.detached(priority: .utility) { RecoveryWords.load() != nil }.value
       guard !Task.isCancelled else { return }
       hasRecoveryKey = available
     }
-  }
-
-  private static func expands(_ page: Page) -> Bool {
-    [.help, .contacts, .status, .licenses, .signInSecurity].contains(page)
   }
 }

@@ -9,7 +9,7 @@ struct AccountPage: View {
   let hasRecoveryKey: Bool
   var securityOnly = false
   var dismissSettings: () -> Void
-  /// Pushes Account Recovery through the settings path, so the sheet can grow before the push.
+  /// Pushes Account Recovery through the settings path.
   var openSecurity: (() -> Void)? = nil
   @Environment(AccountStore.self) private var accounts
   @State private var signingOut: Account?
@@ -146,6 +146,7 @@ struct AccountPage: View {
           }
       }
       .presentationDetents([.large])
+      .presentationDragIndicator(.hidden)
     }
     .navigationDestination(isPresented: $showingSecurity) {
       AccountPage(
