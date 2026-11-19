@@ -37,7 +37,17 @@ enum Username {
     return nil
   }
 
-  static func clean(_ typed: String) -> String { usernameCanonical(typed: typed) }
+  /// What a field keeps of what is typed. Japanese keyboards hand the field kana and full-width letters while a word
+  /// is still being written ("i" arrives as "い"): read as Latin first, else every key press empties the field.
+  static func clean(_ typed: String) -> String { usernameCanonical(typed: latin(typed)) }
+
+  static func latin(_ typed: String) -> String {
+    let japanese = typed.unicodeScalars.contains { (0x3040...0x30FF).contains($0.value) || (0xFF01...0xFF9F).contains($0.value) }
+    guard japanese else { return typed }
+    var text = typed.applyingTransform(.latinToHiragana, reverse: true) ?? typed
+    text = text.applyingTransform(.latinToKatakana, reverse: true) ?? text
+    return text.applyingTransform(.fullwidthToHalfwidth, reverse: false) ?? text
+  }
 
   static func skeleton(_ name: String) -> String { usernameSkeleton(name: name) }
 }
