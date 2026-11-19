@@ -123,7 +123,7 @@ def main():
     apps = app_counts()
     data = {"days": [code(c) for _, c in points],
             "groups": [["Apps", [["Core", today["Core"]], ["iOS", apps["iOS"]], ["Android", apps["Android"]],
-                                 ["CLI", apps["YoGPT"]]]],
+                                 ["CLI", apps["CLI"]]]],
                        ["Server", [["Hub", today["Hub"]], ["Admin", today["Admin"]]]],
                        ["Tests", [["Tests", today["Tests"]]]]]}
     page = (ROOT / "dev" / "loc-chart.html").read_text().replace("DATA", json.dumps(data))
