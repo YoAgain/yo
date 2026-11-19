@@ -39,28 +39,37 @@ pub fn hold_zoom(finger_x: f64, finger_y: f64, bar_bottom: f64, width: f64, heig
     Zoom { scale, x: (x - width / 2.0) * (1.0 - scale), y: (y - height / 2.0) * (1.0 - scale) }
 }
 
-/// The recording's zoom: a finger holding a bar to film and drawn down zooms the camera in, approached softly up to
-/// `RECORD_MOST` (or the camera's own most, if less); back up it zooms out to where it started. Points (or dp).
+/// The recording's zoom: a finger holding a bar to film and drawn out of the bar, down or up, zooms the camera in,
+/// approached softly up to `RECORD_MOST` (or the camera's own most, if less); back on the bar it is where it started,
+/// on past it the other way it zooms again. Points (or dp) in screen coordinates.
 pub const RECORD_MOST: f64 = 5.0;
-/// Down by this much from the touch before it starts: the thumb settling on the bar does not zoom.
+/// Out of the bar by this much before it starts: a thumb resting on the bar's edge does not zoom.
 pub const RECORD_SLACK: f64 = 12.0;
 
-/// The camera's zoom (as its button names it, 1 = the wide lens) for a finger `below` points under where it touched
-/// down, with `room` points left under that touch to the screen's bottom, the zoom having been `start` and the camera
-/// going up to `camera_most`.
-pub fn record_zoom(below: f64, room: f64, start: f64, camera_most: f64) -> f64 {
+/// The camera's zoom (as its button names it, 1 = the wide lens) for a finger at `finger_y` holding the bar from
+/// `bar_top` to `bar_bottom` on a screen `height` high, the zoom having been `start` and the camera going up to
+/// `camera_most`. How far out of the bar counts, from its nearer edge; the room on that side sets the pace.
+pub fn record_zoom(finger_y: f64, bar_top: f64, bar_bottom: f64, height: f64, start: f64, camera_most: f64) -> f64 {
     if !start.is_finite() || start <= 0.0 {
         return 1.0;
     }
-    if !below.is_finite() || !room.is_finite() || !camera_most.is_finite() {
+    let values = [finger_y, bar_top, bar_bottom, height, camera_most];
+    if values.iter().any(|v| !v.is_finite()) || bar_bottom < bar_top {
         return start;
     }
+    let (out, room) = if finger_y > bar_bottom {
+        (finger_y - bar_bottom, height - bar_bottom)
+    } else if finger_y < bar_top {
+        (bar_top - finger_y, bar_top)
+    } else {
+        return start;
+    };
     let most = RECORD_MOST.min(camera_most);
-    let past = below - RECORD_SLACK;
+    let past = out - RECORD_SLACK;
     if past <= 0.0 || most <= start {
         return start;
     }
-    // A bar low on the screen zooms over a shorter way; the last of it reaches almost all the way.
+    // Little room on that side zooms over a shorter way; the last of it reaches almost all the way.
     let reach = ((room - RECORD_SLACK) * 0.4).clamp(50.0, 200.0);
     start + (most - start) * (1.0 - (-past / reach).exp())
 }
@@ -131,48 +140,74 @@ mod tests {
         assert_eq!(hold_zoom(200.0, 500.0, 300.0, 0.0, H), Zoom::NONE);
     }
 
-    #[test]
-    fn recording_starts_after_the_slack_and_grows_softly_to_the_most() {
-        assert_eq!(record_zoom(0.0, 500.0, 1.0, 10.0), 1.0);
-        assert_eq!(record_zoom(-80.0, 500.0, 1.0, 10.0), 1.0);
-        assert_eq!(record_zoom(RECORD_SLACK, 500.0, 1.0, 10.0), 1.0);
-        assert!(record_zoom(RECORD_SLACK + 1.0, 500.0, 1.0, 10.0) < 1.05);
-        let mut last = 1.0;
-        for step in 1..200 {
-            let zoom = record_zoom(RECORD_SLACK + step as f64 * 4.0, 500.0, 1.0, 10.0);
-            assert!(zoom > last && zoom < RECORD_MOST, "{step}: {zoom}");
-            last = zoom;
-        }
-        assert!(last > 4.9);
+    // A bar from 300 to 380 on an 850 high screen.
+    fn rec(y: f64, start: f64, most: f64) -> f64 {
+        record_zoom(y, 300.0, 380.0, 850.0, start, most)
     }
 
     #[test]
-    fn recording_back_up_is_where_it_started() {
-        let down = record_zoom(150.0, 500.0, 2.0, 10.0);
-        assert!(down > 2.0);
-        assert_eq!(record_zoom(5.0, 500.0, 2.0, 10.0), 2.0);
+    fn recording_on_the_bar_nothing() {
+        for y in [300.0, 340.0, 380.0, 380.0 + RECORD_SLACK, 300.0 - RECORD_SLACK] {
+            assert_eq!(rec(y, 1.0, 10.0), 1.0, "{y}");
+        }
+    }
+
+    #[test]
+    fn recording_down_grows_softly_to_the_most() {
+        assert!(rec(380.0 + RECORD_SLACK + 1.0, 1.0, 10.0) < 1.05);
+        let mut last = 1.0;
+        for step in 1..115 {
+            let zoom = rec(380.0 + RECORD_SLACK + step as f64 * 4.0, 1.0, 10.0);
+            assert!(zoom > last && zoom < RECORD_MOST, "{step}: {zoom}");
+            last = zoom;
+        }
+        assert!(last > 4.5);
+    }
+
+    #[test]
+    fn recording_up_zooms_too() {
+        let mut last = 1.0;
+        for step in 1..70 {
+            let zoom = rec(300.0 - RECORD_SLACK - step as f64 * 4.0, 1.0, 10.0);
+            assert!(zoom > last && zoom < RECORD_MOST, "{step}: {zoom}");
+            last = zoom;
+        }
+        assert!(last > 4.0);
+        // As far out either way, the same zoom where the room is the same.
+        let even = |y: f64| record_zoom(y, 400.0, 480.0, 880.0, 1.0, 10.0);
+        assert!((even(480.0 + 100.0) - even(400.0 - 100.0)).abs() < 1e-9);
+    }
+
+    #[test]
+    fn recording_back_over_the_bar_and_out_the_other_side() {
+        assert!(rec(500.0, 1.0, 10.0) > 2.0);
+        assert_eq!(rec(340.0, 1.0, 10.0), 1.0);
+        assert!(rec(200.0, 1.0, 10.0) > 2.0);
+        assert_eq!(rec(340.0, 2.0, 10.0), 2.0);
     }
 
     #[test]
     fn recording_keeps_to_the_camera() {
-        assert!(record_zoom(1000.0, 500.0, 1.0, 3.0) <= 3.0);
-        assert!(record_zoom(1000.0, 500.0, 1.0, 3.0) > 2.98);
-        // Already at or past the most: nothing more.
-        assert_eq!(record_zoom(300.0, 500.0, 6.0, 10.0), 6.0);
-        assert_eq!(record_zoom(300.0, 500.0, 1.0, 1.0), 1.0);
+        assert!(rec(850.0, 1.0, 3.0) <= 3.0);
+        assert!(rec(850.0, 1.0, 3.0) > 2.8);
+        assert_eq!(rec(600.0, 6.0, 10.0), 6.0);
+        assert_eq!(rec(600.0, 1.0, 1.0), 1.0);
     }
 
     #[test]
-    fn recording_low_on_the_screen_zooms_over_a_shorter_way() {
-        assert!(record_zoom(70.0, 90.0, 1.0, 10.0) > record_zoom(70.0, 700.0, 1.0, 10.0));
-        assert!(record_zoom(70.0, 90.0, 1.0, 10.0) > 3.5);
+    fn recording_little_room_zooms_over_a_shorter_way() {
+        // The same 70 below: a bar low on the screen zooms more.
+        let low = record_zoom(780.0 + 70.0, 700.0, 780.0, 870.0, 1.0, 10.0);
+        let high = record_zoom(180.0 + 70.0, 100.0, 180.0, 870.0, 1.0, 10.0);
+        assert!(low > high && low > 3.5);
     }
 
     #[test]
     fn recording_nonsense_is_no_zoom() {
-        assert_eq!(record_zoom(f64::NAN, 500.0, 1.0, 10.0), 1.0);
-        assert_eq!(record_zoom(100.0, f64::INFINITY, 2.0, 10.0), 2.0);
-        assert_eq!(record_zoom(100.0, 500.0, f64::NAN, 10.0), 1.0);
-        assert_eq!(record_zoom(100.0, 500.0, 1.0, f64::NAN), 1.0);
+        assert_eq!(rec(f64::NAN, 1.0, 10.0), 1.0);
+        assert_eq!(record_zoom(500.0, 300.0, 380.0, f64::INFINITY, 2.0, 10.0), 2.0);
+        assert_eq!(rec(500.0, f64::NAN, 10.0), 1.0);
+        assert_eq!(rec(500.0, 1.0, f64::NAN), 1.0);
+        assert_eq!(record_zoom(500.0, 380.0, 300.0, 850.0, 1.0, 10.0), 1.0);
     }
 }

@@ -550,7 +550,7 @@ struct FriendList: View {
           if let file = await camera.stopVideo() { Task.detached(priority: .utility) { try? FileManager.default.removeItem(at: file) } }
         }
       },
-      holdDrag: { recordZoom(friend, below: $0, room: $1) },
+      holdDrag: { recordZoom(friend, y: $0, bar: $1, height: $2) },
       press: { pressed(friend.key, $0) },
       flyBegan: { id in
         HitchScene.event("photo stack fly", then: cameraOn ? "camera" : "list")

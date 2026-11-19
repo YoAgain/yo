@@ -8,6 +8,8 @@ final class BarTouchGate {
   var blocked = false
   weak var touch: UITouch?
   var origin = CGPoint.zero
+  /// The bar in window points, kept as it moves (no redraw): a filming finger zooms by how far it is out of it.
+  var frame = CGRect.zero
 
   var isStationary: Bool {
     !blocked && !(touch?.gestureRecognizers ?? []).contains {
@@ -21,8 +23,8 @@ struct BarTouchObserver: UIGestureRecognizerRepresentable {
   var held: (Bool) -> Void = { _ in }
   var observesHold = false
   var pressed: (Bool) -> Void = { _ in }
-  /// While held: how far the finger is below where it touched down, and the room under that touch (window points).
-  var dragged: (_ below: CGFloat, _ room: CGFloat) -> Void = { _, _ in }
+  /// While held: where the finger is, the bar and the window's height (window points).
+  var dragged: (_ y: CGFloat, _ bar: CGRect, _ height: CGFloat) -> Void = { _, _, _ in }
   let cancelled: () -> Void
 
   func makeUIGestureRecognizer(context: Context) -> Observer {
@@ -55,7 +57,7 @@ struct BarTouchObserver: UIGestureRecognizerRepresentable {
     var held: (Bool) -> Void = { _ in }
     var observesHold = false
     var pressed: (Bool) -> Void = { _ in }
-    var dragged: (CGFloat, CGFloat) -> Void = { _, _ in }
+    var dragged: (CGFloat, CGRect, CGFloat) -> Void = { _, _, _ in }
     private var holdTask: Task<Void, Never>?
     private var holding = false
     /// While filming, each frame reads the held finger itself: the moves of a finger that rested through the hold did
@@ -121,7 +123,7 @@ struct BarTouchObserver: UIGestureRecognizerRepresentable {
       followedY = nil
     }
 
-    /// Filming, the same finger drawn down zooms the camera: how far below its touch, and the room under that.
+    /// Filming, the same finger drawn out of the bar, down or up, zooms the camera.
     @objc private func followed() {
       guard holding, let gate, let touch = gate.touch, let window = touch.window,
         touch.phase != .ended, touch.phase != .cancelled
@@ -129,7 +131,7 @@ struct BarTouchObserver: UIGestureRecognizerRepresentable {
       let y = touch.location(in: nil).y
       guard y != followedY else { return }
       followedY = y
-      dragged(y - gate.origin.y, window.bounds.height - gate.origin.y)
+      dragged(y, gate.frame, window.bounds.height)
     }
     override func touchesEnded(_ touches: Set<UITouch>, with event: UIEvent) {
       stopFollowing()

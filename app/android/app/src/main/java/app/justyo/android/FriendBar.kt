@@ -123,7 +123,7 @@ internal data class BarContent(
     onPress: (Boolean) -> Unit, onTap: () -> Unit, onMenu: () -> Unit, onUndo: () -> Unit,
     onMedia: () -> Unit, onDecline: () -> Unit, onHold: ((Boolean) -> Unit)?,
     onMediaTouch: (MediaTouch) -> Unit = {},
-    onHoldDrag: (below: Float, room: Float) -> Unit = { _, _ -> },
+    onHoldDrag: (y: Float, barTop: Float, barBottom: Float, height: Float) -> Unit = { _, _, _, _ -> },
 ) {
     val friend = bar.friend
     val resources = LocalResources.current
@@ -133,7 +133,7 @@ internal data class BarContent(
     val currentTap by rememberUpdatedState(onTap)
     val currentHold by rememberUpdatedState(onHold)
     val currentHoldDrag by rememberUpdatedState(onHoldDrag)
-    // Where the bar is in the window, for the room under a filming finger.
+    // Where the bar is in the window: a filming finger zooms by how far it is out of it.
     var barTop by remember(friend.key) { mutableFloatStateOf(0f) }
     val root = LocalView.current
     val currentMedia by rememberUpdatedState(onMedia)
@@ -153,10 +153,10 @@ internal data class BarContent(
                     do {
                         val change = awaitPointerEvent().changes.firstOrNull { it.id == down.id }
                         change?.consume()
-                        // Filming, the same finger drawn down zooms the camera (dp below its touch, room under it).
+                        // Filming, the same finger drawn out of the bar, down or up, zooms the camera (window dp).
                         if (change != null && change.pressed) currentHoldDrag(
-                            (change.position.y - down.position.y) / density,
-                            (root.rootView.height - barTop - down.position.y) / density,
+                            (barTop + change.position.y) / density, barTop / density,
+                            (barTop + size.height) / density, root.rootView.height / density,
                         )
                     } while (change?.pressed == true)
                 } finally {

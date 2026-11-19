@@ -42,7 +42,7 @@ struct LiveBar: View, @MainActor Equatable {
   let hint: String?
   let hold: ((Bool, CGPoint?) -> Void)?
   let cancelHold: () -> Void
-  var holdDrag: (CGFloat, CGFloat) -> Void = { _, _ in }
+  var holdDrag: (CGFloat, CGRect, CGFloat) -> Void = { _, _, _ in }
   let press: (Bool) -> Void
   let flyBegan: (UUID) -> Void
   let view: (ThumbnailTouch) -> Void
@@ -163,8 +163,8 @@ struct RowButton: View {
   var hint: String?
   var hold: ((Bool, CGPoint?) -> Void)?
   var cancelHold: () -> Void = {}
-  /// Filming: the held finger drawn down (points below its touch, room under it) zooms the camera.
-  var holdDrag: (CGFloat, CGFloat) -> Void = { _, _ in }
+  /// Filming: the held finger drawn out of the bar (where it is, the bar, the window's height) zooms the camera.
+  var holdDrag: (CGFloat, CGRect, CGFloat) -> Void = { _, _, _ in }
   var press: (Bool) -> Void = { _ in }
   var flyBegan: (UUID) -> Void = { _ in }
   var view: (ThumbnailTouch) -> Void = { _ in }
@@ -192,7 +192,7 @@ struct RowButton: View {
     _ title: String, count: Int = 1, color: Color, cameraOn: Bool = false, recording: Bool = false, outgoing: Date? = nil,
     outgoingItems: [FriendList.Outgoing] = [], undoAvailable: Bool = true,
     sendSeconds: Double = FriendList.sendDelay, stop: @escaping () -> Void = {},
-    media: [Arrival] = [], mediaMarkCount: Int = 0, mediaSign: String = "", yo: FriendList.Landing? = nil, hint: String? = nil, hold: ((Bool, CGPoint?) -> Void)? = nil, cancelHold: @escaping () -> Void = {}, holdDrag: @escaping (CGFloat, CGFloat) -> Void = { _, _ in }, press: @escaping (Bool) -> Void = { _ in }, flyBegan: @escaping (UUID) -> Void = { _ in },
+    media: [Arrival] = [], mediaMarkCount: Int = 0, mediaSign: String = "", yo: FriendList.Landing? = nil, hint: String? = nil, hold: ((Bool, CGPoint?) -> Void)? = nil, cancelHold: @escaping () -> Void = {}, holdDrag: @escaping (CGFloat, CGRect, CGFloat) -> Void = { _, _, _ in }, press: @escaping (Bool) -> Void = { _ in }, flyBegan: @escaping (UUID) -> Void = { _ in },
     view: @escaping (ThumbnailTouch) -> Void = { _ in }, faded: Bool = false, icon: String? = nil,
     line: ListLine = .title, action: @escaping (CGPoint?) -> Void
   ) {
@@ -231,6 +231,7 @@ struct RowButton: View {
         action(touchOrigin)
         touchOrigin = nil
       } label: { label }
+      .onGeometryChange(for: CGRect.self) { $0.frame(in: .global) } action: { stationaryTouch.frame = $0 }
       .buttonStyle(BarPress(cameraOn: cameraOn, touchDown: shutterDown, press: press))
       .disabled(!cameraOn && viewing)
       .accessibilityHint(hint ?? "")
@@ -259,8 +260,8 @@ struct RowButton: View {
         }
       }, observesHold: hold != nil, pressed: { down in
         if cameraOn { shutterDown = down }
-      }, dragged: { below, room in
-        if holding { holdDrag(below, room) }
+      }, dragged: { y, bar, height in
+        if holding { holdDrag(y, bar, height) }
       }) {
         touchOrigin = nil
         press(false)

@@ -806,8 +806,8 @@ private fun NotificationSettingsRow(onClick: () -> Unit) {
                             }
                             if(!held) camera.recordZoomEnd()
                         } else null,
-                        onHoldDrag={ below, room ->
-                            if(recording==friend.key && camera.recordZoom(below,room))
+                        onHoldDrag={ y, top, bottom, height ->
+                            if(recording==friend.key && camera.recordZoom(y,top,bottom,height))
                                 view.performHapticFeedback(HapticFeedbackConstants.CLOCK_TICK)
                         })
                 }

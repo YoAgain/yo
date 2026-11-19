@@ -188,11 +188,13 @@ extension FriendList {
     publish(listModel.recording(now: listNow, id: friend?.key.uuidString))
   }
 
-  /// The filming finger drawn `below` points under its touch (`room` under that): the camera zooms in, as far as
-  /// `productRecordZoom` says; back up, out again. A light tick as it starts.
-  func recordZoom(_ friend: Friend, below: CGFloat, room: CGFloat) {
+  /// The filming finger at `y`, drawn out of its `bar` (down or up): the camera zooms in, as far as `productRecordZoom`
+  /// says; back on the bar, out again. A light tick as it starts.
+  func recordZoom(_ friend: Friend, y: CGFloat, bar: CGRect, height: CGFloat) {
     guard recordingFor?.key == friend.key, let start = recordZoomStart else { return }
-    let next = productRecordZoom(below: Double(below), room: Double(room), start: start, cameraMost: zoomMost)
+    let next = productRecordZoom(
+      fingerY: Double(y), barTop: Double(bar.minY), barBottom: Double(bar.maxY), height: Double(height), start: start,
+      cameraMost: zoomMost)
     if next > start + 0.01, !recordZoomTicked {
       recordZoomTicked = true
       Haptic.tap(.light)

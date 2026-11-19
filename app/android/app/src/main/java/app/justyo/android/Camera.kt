@@ -111,16 +111,18 @@ class YoCamera(private val context: Context) {
             }
         },ContextCompat.getMainExecutor(context))
     }
-    /** The zoom a filming hold started at; the finger drawn down zooms from there, lifted it goes back. */
+    /** The zoom a filming hold started at; the finger drawn out of the bar zooms from there, lifted it goes back. */
     private var heldZoomStart: Float? = null
     private var heldZoomTicked = false
-    /** Filming, the finger [below] dp under its touch ([room] dp under that) zooms in as far as `productRecordZoom`
-     *  says, back up out again; true once per hold, as it starts (for the tick). */
-    fun recordZoom(below: Float, room: Float): Boolean {
+    /** Filming, the finger at [y] drawn out of its bar ([barTop] to [barBottom], down or up, on a screen [height]
+     *  high, all dp) zooms in as far as `productRecordZoom` says, back on the bar out again; true once per hold, as
+     *  it starts (for the tick). */
+    fun recordZoom(y: Float, barTop: Float, barBottom: Float, height: Float): Boolean {
         val active = camera ?: return false
         val start = heldZoomStart ?: zoom.also { heldZoomStart = it }
         val most = active.cameraInfo.zoomState.value?.maxZoomRatio ?: 1f
-        val next = productRecordZoom(below.toDouble(), room.toDouble(), start.toDouble(), most.toDouble()).toFloat()
+        val next = productRecordZoom(y.toDouble(), barTop.toDouble(), barBottom.toDouble(), height.toDouble(),
+            start.toDouble(), most.toDouble()).toFloat()
         if (kotlin.math.abs(next - zoom) > 0.001f) {
             zoom = next
             active.cameraControl.setZoomRatio(next)

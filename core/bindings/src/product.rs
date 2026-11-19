@@ -433,8 +433,15 @@ pub fn product_hold_zoom(finger_x: f64, finger_y: f64, bar_bottom: f64, width: f
     ProductHoldZoom { scale: zoom.scale, x: zoom.x, y: zoom.y }
 }
 
-/// The recording's zoom (`yo_product::zoom::record_zoom`): the camera's zoom for a filming finger drawn down.
+/// The recording's zoom (`yo_product::zoom::record_zoom`): the camera's zoom for a filming finger drawn out of its bar.
 #[uniffi::export]
-pub fn product_record_zoom(below: f64, room: f64, start: f64, camera_most: f64) -> f64 {
-    yo_product::zoom::record_zoom(below, room, start, camera_most)
+pub fn product_record_zoom(
+    finger_y: f64,
+    bar_top: f64,
+    bar_bottom: f64,
+    height: f64,
+    start: f64,
+    camera_most: f64,
+) -> f64 {
+    yo_product::zoom::record_zoom(finger_y, bar_top, bar_bottom, height, start, camera_most)
 }
