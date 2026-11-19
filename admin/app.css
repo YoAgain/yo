@@ -950,3 +950,6 @@ body.dash { max-width: none; padding-left: 24px; padding-right: 24px; }
 .ov .chartw .stripbox .cstrip { flex: 1 1 auto; height: auto !important; min-height: 20px; }
 .ov > .charts { display: contents; }
 .ov > .charts > .tile, .ov > header.tile.hdr { height: auto !important; align-self: stretch; }
+/* The sidebar: Users (put together) apart at the top, then the "Database" heading over the raw tables. */
+.tside .people { margin-bottom: 6px; flex: 0 0 auto !important; height: auto !important; min-height: 0 !important; }
+.tside .tside-h { margin: 10px 0 4px; padding: 8px 12px 2px; border-top: 1px solid var(--line); font-size: 10.5px; font-weight: 700; letter-spacing: .12em; text-transform: uppercase; color: var(--muted); }

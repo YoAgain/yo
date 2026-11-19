@@ -956,6 +956,7 @@ if (document.body.classList.contains("login")) {
   // ---- users: every user in one sortable table (the Database widget, users) -------------------------------------------
   let allSort = { key: "last_seen", dir: -1 };
   const allValue = (u, key) => key === "name" ? (u.name || "").toLowerCase() : key === "app" ? (parse(u.app)?.[1] ?? -1)
+    : key === "update" ? (u.app ? (belowMin(u.app) ? 3 : appState(u.app, u.id) === "update" ? 2 : appState(u.app, u.id) === "current" ? 0 : 1) : -1)
     : key === "secured" || key === "push" ? Number(!!u[key]) : u[key] ?? 0;
   for (const th of document.querySelectorAll("#all-users-table th[data-sort]")) {
     th.tabIndex = 0;
@@ -990,12 +991,15 @@ if (document.body.classList.contains("login")) {
       if (ICONS[platform] && platform !== "lock") app.append(icon(platform, st ? `app-${st}` : "", appTitle(u.app, u.id)));
       app.append(appTag(u.app, u.id));
       cell(tr, app);
+      // The device's software: current, an update out (or below the hub's minimum), or unknown.
+      const upd = u.app ? (belowMin(u.app) ? tag("must update", "bad") : st === "update" ? tag("update", "warn") : st === "current" ? tag("current", "ok") : tag("?", "muted")) : el("span", "muted", "–");
+      cell(tr, upd);
       cell(tr, u.push ? tag("on", "ok") : tag("off", "muted"));
       cell(tr, u.secured ? icon("lock", "secured", u.backup_at ? `backup ${date(u.backup_at)}` : "secured") : el("span", "muted", "–"));
       cell(tr, num(u.devices), "num");
       cell(tr, u.queued ? num(u.queued) : "–", "num muted");
     }
-    if (!list.length) cell(body.insertRow(), h && !h.error ? "No users yet." : (h?.error || "No data"), "empty").colSpan = 8;
+    if (!list.length) cell(body.insertRow(), h && !h.error ? "No users yet." : (h?.error || "No data"), "empty").colSpan = 9;
   };
 
   // ---- reports: handled is kept by the admin page (done.json); ticked in a user's details
@@ -1106,12 +1110,21 @@ if (document.body.classList.contains("login")) {
       (list.find((t) => t.name === tableOpen) || {}).rows?.length, tableOpen === "reserved" ? list.find((t) => t.name === "reserved")?.rows : 0]);
     if (drawn === tablesDrawn && box.childElementCount) return;
     tablesDrawn = drawn;
-    const sel = list.find((x) => x.name === tableOpen);
+    // "people": the users put together from several tables (the default); "users" alone is the raw table.
+    const real = (n) => (n === "people" ? "users" : n);
+    const sel = list.find((x) => x.name === real(tableOpen));
     set("tables-note", `${list.length} tables · ${num(list.reduce((n, t) => n + (t.count || 0), 0))} rows${sel ? ` · ${sel.name}: ${num(sel.count)} rows${sel.count > sel.rows.length ? `, first ${num(sel.rows.length)} shown` : ""}` : ""}`);
     const groups = tableGroups(list);
-    if (list.length && !list.some((t) => t.name === tableOpen)) tableOpen = groups.length ? groups[0][2][0].name : null;
+    if (list.length && tableOpen !== "people" && !list.some((t) => t.name === tableOpen)) tableOpen = "people";
     const side = el("nav", "tside"), pane = el("div", "tpane");
-    // Each group's heading is its main table (icon, name, count); the others indented below it.
+    // At the top, apart: Users, put together from several tables. Then "Database": every table as it is, each group's
+    // heading its main table (icon, name, count), the others indented below it.
+    const people = el("button", `main people${tableOpen === "people" ? " on" : ""}`), pname = el("span", null, "Users");
+    people.type = "button"; people.title = "Users: accounts with their devices, app, push and backup, put together";
+    pname.prepend(icon("user"));
+    people.append(pname, el("small", null, num(list.find((x) => x.name === "users")?.count || 0)));
+    people.addEventListener("click", () => { tableOpen = "people"; drawTables(); });
+    side.append(people, el("div", "tside-h", "Database"));
     for (const [title, ico, ts] of groups) {
       for (const [k, t] of ts.entries()) {
         const b = el("button", `${k ? "sub" : "main"}${t.name === tableOpen ? " on" : ""}`);
@@ -1125,11 +1138,11 @@ if (document.body.classList.contains("login")) {
     }
     // On a phone the list is a row of chips: the chosen one scrolled into view.
     requestAnimationFrame(() => { const on = side.querySelector(".on"); if (on && side.scrollWidth > side.clientWidth) side.scrollLeft = on.offsetLeft - side.offsetLeft - 12; });
-    const t = list.find((x) => x.name === tableOpen);
+    const t = list.find((x) => x.name === real(tableOpen));
     // support_messages: "Chat" (the default) shows the support chat (people on the left, the conversation and a reply
     // box on the right, the to-dos as one entry); "List" the plain rows. The chat is moved here, never rebuilt.
     // users: the enriched, sortable users table (name, app, push, secured, signed up, last seen, devices) instead.
-    const chatOk = t?.name === "support_messages", chat = chatOk && dbView === "chat", usersView = t?.name === "users";
+    const chatOk = t?.name === "support_messages", chat = chatOk && dbView === "chat", usersView = tableOpen === "people";
     const view = chat ? "chat" : usersView ? "users" : "list";
     if (view !== "list" && box.dataset.name === t.name && box.dataset.view === view && box.firstChild) { box.firstChild.replaceWith(side); return; }
     box.dataset.name = t?.name || ""; box.dataset.view = view;
@@ -1277,7 +1290,7 @@ if (document.body.classList.contains("login")) {
   // the support chat, Errors to diagnostics, Reports to reports, Sign-ups (and the Users card's title) to the users
   // table. Services is one row in Server, opened in place (on its own while something is down); the Status bot row
   // there shows its frequency select. Keys: 1 top, 2 chat, 3 diagnostics, 4 users, 5 database, 0 the hub.
-  const showTable = (name) => { tableOpen = name; if (name === "support_messages") dbView = "chat"; tablesDrawn = ""; part(drawTables); $("t-db").scrollIntoView({ behavior: "smooth", block: "start" }); };
+  const showTable = (name) => { tableOpen = name === "users" ? "people" : name; if (name === "support_messages") dbView = "chat"; tablesDrawn = ""; part(drawTables); $("t-db").scrollIntoView({ behavior: "smooth", block: "start" }); };
   // The support chat shown, scrolled to only when it is out of sight (a click inside it never moves the page).
   const toInbox = () => {
     if (tableOpen !== "support_messages" || dbView !== "chat") { tableOpen = "support_messages"; dbView = "chat"; tablesDrawn = ""; part(drawTables); }
