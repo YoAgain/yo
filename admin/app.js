@@ -1205,7 +1205,10 @@ if (document.body.classList.contains("login")) {
   try { dbBlur = localStorage.getItem("db-blur") === "1"; } catch {}
   const drawDbBlur = () => { $("t-db").classList.toggle("blur", dbBlur); $("db-blur").setAttribute("aria-pressed", String(dbBlur)); };
   drawDbBlur();
-  $("db-blur").addEventListener("click", () => { dbBlur = !dbBlur; drawDbBlur(); try { localStorage.setItem("db-blur", dbBlur ? "1" : "0"); } catch {} });
+  const toggleBlur = () => { dbBlur = !dbBlur; drawDbBlur(); try { localStorage.setItem("db-blur", dbBlur ? "1" : "0"); } catch {} };
+  $("db-blur").addEventListener("click", toggleBlur);
+  // A click on a name or id in the tables frosts them all (for a screenshot), a second click clears them.
+  $("t-db").addEventListener("click", (e) => { if (e.target.closest(".tpane .pii")) toggleBlur(); });
   // ---- the hover card: one small card for a row or chip under the pointer (or tapped): a chart of its bars with
   // values and axis labels, the platforms per build, a service's details; a click pins it, outside or Escape closes.
   const hc = el("div", "hcard");

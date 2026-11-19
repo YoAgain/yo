@@ -928,3 +928,4 @@ body.dash { max-width: none; padding-left: 24px; padding-right: 24px; }
 
 /* The Database widget scrolls with the page: no box of its own around the rows (up to 2500 per table). */
 #t-db .grid, #t-db .scroll, .tpane #all-users .scroll, .ugrid { max-height: none !important; overflow-y: visible !important; overflow-x: auto; }
+#t-db .tpane .pii { cursor: pointer; }
