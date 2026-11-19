@@ -596,45 +596,22 @@ private fun NotificationSettingsRow(onClick: () -> Unit) {
         friend.key to BarContent(friend, s.listRows[friend.key], stacks[friend.target],
             mediaByTarget[friend.target].orEmpty(), recording == friend.key, thumbnails[friend.target].orEmpty())
     }
-    var frozen by remember { mutableStateOf<Map<String, Int>?>(null) }
-    var tapped by remember { mutableStateOf(emptySet<String>()) }
-    var lastTap by remember { mutableLongStateOf(0L) }
     var fingersDown by remember { mutableStateOf(emptySet<String>()) }
-    val visible = frozen?.let { heights ->
-        heights.keys.mapNotNull(friendsByKey::get).filter { it.key in bars } +
-            friends.filter { it.key !in heights }
-    } ?: friends
-    val heights = visible.associate { friend ->
-        friend.key to (frozen?.get(friend.key)?.takeUnless { friend.key in tapped } ?: bars.getValue(friend.key).lines)
-    }
+    val visible = friends
+    val heights = visible.associate { friend -> friend.key to bars.getValue(friend.key).lines }
     val tapLock = remember { BarTapLock() }
     val listState=androidx.compose.foundation.lazy.rememberLazyListState()
     SideEffect {
         val atTop = listState.firstVisibleItemIndex == 0 && listState.firstVisibleItemScrollOffset == 0
         if (tapLock.update(heights) && atTop) listState.requestScrollToItem(0)
     }
-    LaunchedEffect(lastTap, recording, fingersDown) {
-        if (frozen != null && recording == null && fingersDown.isEmpty()) {
-            delay((lastTap + 1500 - SystemClock.elapsedRealtime()).coerceAtLeast(0))
-            frozen = null
-            tapped = emptySet()
-        }
-    }
-    fun touch(friend: Friend): Boolean {
-        if (tapLock.locked(friend.key) || recording != null) return false
-        if (frozen == null) frozen = heights
-        tapped = tapped + friend.key
-        lastTap = SystemClock.elapsedRealtime()
-        return true
-    }
+    fun touch(friend: Friend): Boolean = !tapLock.locked(friend.key) && recording == null
     fun press(friend: Friend, down: Boolean) {
         if (down && !tapLock.locked(friend.key)) {
-            if (frozen == null) frozen = heights
             fingersDown = fingersDown + friend.key
             repo.press(friend.key, true)
         } else if (!down && friend.key in fingersDown) {
             fingersDown = fingersDown - friend.key
-            lastTap = SystemClock.elapsedRealtime()
             repo.press(friend.key, false)
         }
     }
@@ -790,7 +767,7 @@ private fun NotificationSettingsRow(onClick: () -> Unit) {
                         }
                     },
                 ) {
-                    FriendBar(repo,bars.getValue(friend.key),heights.getValue(friend.key),
+                    FriendBar(repo,bars.getValue(friend.key),
                         rowShade(visible,index),cameraOn,s.leftHanded,
                         onPress={currentPress(friend,it)},onTap={currentTap(friend)},onMenu={if(!tapLock.locked(friend.key)) menu=friend},
                         onUndo={if(currentTouch(friend)) repo.command { cancelMedia(friend) }},
@@ -821,12 +798,10 @@ private fun NotificationSettingsRow(onClick: () -> Unit) {
                                             media.resume(friend.target,session)
                                         }
                                     }
-                                    lastTap=SystemClock.elapsedRealtime()
                                     recording=null
                                     repo.recording(null)
                                 }
                             } else if(!held && recording==friend.key) {
-                                lastTap=SystemClock.elapsedRealtime()
                                 camera.stopVideo()
                             }
                         } else null)

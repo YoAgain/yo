@@ -50,14 +50,14 @@ class Repository(private val context: Context, ownerScope: CoroutineScope) {
     private var displayedOrder=emptyList<String>()
     private fun now() = android.os.SystemClock.elapsedRealtime().toULong()
     /**
-     * A row's clock runs while the row is seen, and it shows only in a fade (a received Yo, a group's senders). For a
+     * A row's clock runs while the row is seen, and it shows only in a fade (a received Yo). For a
      * row without one, scrolling it in or out of view changes nothing on screen: it keeps its old value, so the state
      * stays equal and neither the list nor the widget recomposes on every scroll.
      */
     private fun steadyRows(old: Map<String, ListRow>, rows: List<ListRow>) = rows.associate { row ->
         val previous = old[row.id]
         row.id to (previous?.takeIf {
-            row.fadeElapsed == null && row.senders.isEmpty() && it.clockRunning != row.clockRunning &&
+            row.fadeElapsed == null && it.clockRunning != row.clockRunning &&
                 it.copy(clockRunning = row.clockRunning) == row
         } ?: row)
     }

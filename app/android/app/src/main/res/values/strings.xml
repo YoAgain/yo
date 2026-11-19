@@ -153,7 +153,6 @@
 <plurals name="media_items"><item quantity="one">%1$d photo or video</item><item quantity="other">%1$d photos or videos</item></plurals>
 <plurals name="undo_seconds"><item quantity="one">Wait %1$d Second</item><item quantity="other">Wait %1$d Seconds</item></plurals>
 <string name="sent_yo">Sent Yo!</string>
-<string name="group_sender_yo">%1$s: %2$s</string>
 <string name="undo_remove">Undo</string>
 <string name="removed_name">Removed %1$s</string>
 <string name="ui_state_key_missing_use_your_recovery_key">State key missing. Use your recovery key.</string>

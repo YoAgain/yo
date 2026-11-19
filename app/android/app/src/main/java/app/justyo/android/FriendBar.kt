@@ -41,8 +41,13 @@ import androidx.compose.ui.text.rememberTextMeasurer
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import uniffi.yo.ListFlowWidths
 import uniffi.yo.ListKind
+import uniffi.yo.ListLine
 import uniffi.yo.ListRow
+import uniffi.yo.ListSender
+import uniffi.yo.listFlowTwoLines
+import uniffi.yo.listSenderFlow
 import uniffi.yo.productArrivalLines
 import uniffi.yo.productCounted
 import uniffi.yo.productMediaSign
@@ -50,6 +55,8 @@ import uniffi.yo.productSendWords
 
 internal val BarHeight = 89.dp
 private val BarFont = 36.sp
+/** A group's senders, two lines in one bar: the second, fixed size (iOS's too: 24 of 36 in an 89 bar). */
+private val BarSmallFont = 24.sp
 private val DeclineRed = Color(0xFFE74C3C)
 
 internal class BarTapLock {
@@ -100,15 +107,15 @@ internal data class BarContent(
     val recording: Boolean,
     val thumbnails: List<OutgoingPreview>,
 ) {
-    val received = friend.group == null && !friend.request && ((row?.yoTotal ?: 0u) > 0u || media.isNotEmpty())
+    /** The core's one line: the title, or the Yos that came after the last send (never both, a bar never grows). */
+    val line: ListLine = if (friend.request) ListLine.Title else row?.line ?: ListLine.Title
+    val received = line !is ListLine.Title && !recording
     val sent = undo != null || row?.title == copy(uniffi.yo.ProductText.SENT_YO) || thumbnails.isNotEmpty()
-    val separate = received && (sent || recording || row?.title?.let { it != friend.name } == true)
-    val senders = if (friend.group != null && !friend.request) row?.senders.orEmpty() else emptyList()
-    val lines = if (friend.request) 2 else 1 + (if (separate) 1 else 0) + senders.size
+    val lines = if (friend.request) 2 else 1
 }
 
 @Composable internal fun FriendBar(
-    repo: Repository, bar: BarContent, lines: Int, color: Color, camera: Boolean, left: Boolean,
+    repo: Repository, bar: BarContent, color: Color, camera: Boolean, left: Boolean,
     onPress: (Boolean) -> Unit, onTap: () -> Unit, onMenu: () -> Unit, onUndo: () -> Unit,
     onMedia: () -> Unit, onDecline: () -> Unit, onHold: ((Boolean) -> Unit)?,
     onMediaTouch: (MediaTouch) -> Unit = {},
@@ -171,8 +178,7 @@ internal data class BarContent(
         bar.sent -> productSendWords(productCounted(count), false, Words)
         else -> rowTitle(bar.row, friend)
     }
-    val extraReceive = bar.separate && lines >= 2
-    val primaryReceived = bar.received && !extraReceive
+    val primaryReceived = bar.received
     var previousThumbnails by remember(friend.key) { mutableStateOf(emptyList<OutgoingPreview>()) }
     SideEffect {
         if (!bar.sent || bar.undo != null || bar.thumbnails.size >= previousThumbnails.size) {
@@ -183,15 +189,16 @@ internal data class BarContent(
         .takeIf { bar.sent && !primaryReceived && bar.undo?.kind != ListKind.YO }.orEmpty()
     val showUndo = bar.undo != null && !primaryReceived
     val hasSign = bar.media.isNotEmpty() && !friend.request
-    val showSignOnPrimary = hasSign && !extraReceive
+    val showSignOnPrimary = hasSign
     val outgoingInset = if (showUndo || thumbnails.isNotEmpty()) 88 else 20
     val primarySignInset = if (showSignOnPrimary) 68 else 20
-    val receivedSignInset = if (hasSign) 68 else 20
     val start = if (left) Alignment.CenterEnd else Alignment.CenterStart
     val end = if (left) Alignment.CenterStart else Alignment.CenterEnd
-    val receivedCount = if (hasSign) maxOf(bar.row?.markCount?.toLong() ?: 0L, bar.media.size.toLong())
-        else bar.row?.yoTotal?.toLong() ?: 1L
-    val receivedFull = remember(receivedCount, friend.name) { productArrivalLines(receivedCount, friend.name, Words) }
+    val arrival = bar.line as? ListLine.Arrival
+    val receivedCount = maxOf(arrival?.count?.toLong() ?: 1L, if (hasSign) bar.media.size.toLong() else 0L)
+    val from = arrival?.name.orEmpty()
+    val receivedFull = remember(receivedCount, from) { productArrivalLines(receivedCount, from, Words) }
+    val senders = (bar.line as? ListLine.Senders)?.senders
     val fadeElapsed = bar.row?.fadeElapsed
     val fadeDuration = remember { uniffi.yo.listTimings().yoFadeMs.toLong() }
     val receivedOpacity = remember(friend.key) { Animatable(1f) }
@@ -271,11 +278,18 @@ internal data class BarContent(
             if (primaryReceived && !hasSign && fadeElapsed != null) {
                 BarWords(title, modifier = Modifier.graphicsLayer { alpha = 1f - receivedOpacity.value })
             }
-            BarWords(
+            val receivedModifier =
+                if (primaryReceived && !hasSign) Modifier.graphicsLayer { alpha = receivedOpacity.value } else Modifier
+            if (primaryReceived && senders != null) SenderFlow(
+                senders,
+                startInset = if (left) primarySignInset else outgoingInset,
+                endInset = if (left) outgoingInset else primarySignInset,
+                modifier = receivedModifier,
+            ) else BarWords(
                 if (primaryReceived) receivedFull else listOf(title),
                 startInset = if (left) primarySignInset else outgoingInset,
                 endInset = if (left) outgoingInset else primarySignInset,
-                modifier = if (primaryReceived && !hasSign) Modifier.graphicsLayer { alpha = receivedOpacity.value } else Modifier,
+                modifier = receivedModifier,
             )
             if (showUndo || thumbnails.isNotEmpty()) Box(Modifier.align(start).padding(horizontal = 20.dp)) {
                 OutgoingThumbnail(repo, thumbnails, bar.undo, onUndo)
@@ -287,33 +301,6 @@ internal data class BarContent(
                 if (left) RequestChoice("Yo", color, Modifier.weight(2f), onTap)
                 RequestChoice(stringResource(R.string.ui_no), DeclineRed, Modifier.weight(1f), onDecline)
                 if (!left) RequestChoice("Yo", color, Modifier.weight(2f), onTap)
-            }
-        } else {
-            if (extraReceive) Box(Modifier.fillMaxWidth().height(BarHeight).then(gesture), contentAlignment = Alignment.Center) {
-                BarWords(
-                    receivedFull,
-                    modifier = if (!hasSign) Modifier.graphicsLayer { alpha = receivedOpacity.value } else Modifier,
-                    startInset = if (left) receivedSignInset else outgoingInset,
-                    endInset = if (left) outgoingInset else receivedSignInset,
-                )
-                if (hasSign) Box(Modifier.align(end)) { mediaSign() }
-            }
-            repeat(lines - 1 - if (extraReceive) 1 else 0) { index ->
-                Box(Modifier.fillMaxWidth().height(BarHeight).then(gesture), contentAlignment = Alignment.Center) {
-                    bar.senders.getOrNull(index)?.let { sender ->
-                        val solid = remember { uniffi.yo.listTimings().yoSolidMs.toLong() }
-                        val opacity = remember(sender.user) { Animatable(1f) }
-                        LaunchedEffect(sender.elapsed, bar.row?.clockRunning) {
-                            val elapsed = (sender.elapsed.toLong() - solid).coerceAtLeast(0)
-                            opacity.snapTo(1f - (elapsed.toFloat() / fadeDuration).coerceIn(0f, 1f))
-                            if (sender.elapsed.toLong() >= solid && bar.row?.clockRunning == true) {
-                                opacity.animateTo(0f, tween((fadeDuration - elapsed).coerceAtLeast(0).toInt(), easing = LinearEasing))
-                            }
-                        }
-                        BarWords(stringResource(R.string.group_sender_yo, sender.name, productCounted(sender.count.toLong())),
-                            modifier = Modifier.graphicsLayer { alpha = opacity.value })
-                    }
-                }
             }
         }
     }
@@ -330,6 +317,38 @@ private val CountDigits = Regex("[0-9]+(?=×)")
 @Composable
 private fun BarWords(text: String, modifier: Modifier = Modifier, startInset: Int = 20, endInset: Int = 20) =
     BarWords(listOf(text), modifier, startInset, endInset)
+
+/**
+ * A group's senders since its bar last showed its name, newest first, over two lines at the small size ("Yo from TOM,
+ * IDA, BEN (3×)," / "SAM, KAI +4"). The core places the names (listFlowTwoLines); this measures the pieces and draws.
+ */
+@Composable
+private fun SenderFlow(senders: List<ListSender>, modifier: Modifier = Modifier, startInset: Int = 20, endInset: Int = 20) {
+    val measurer = rememberTextMeasurer()
+    val density = LocalDensity.current
+    val style = BarStyle.copy(fontSize = BarSmallFont)
+    BoxWithConstraints(modifier.fillMaxWidth()) {
+        val room = with(density) { (maxWidth - startInset.dp - endInset.dp).coerceAtLeast(0.dp).toPx() }
+        val lines = remember(senders, room, style, density) {
+            fun width(value: String) = measurer.measure(value, style, maxLines = 1, softWrap = false).size.width.toFloat()
+            val flow = listSenderFlow(senders, Words)
+            listFlowTwoLines(flow, ListFlowWidths(width(flow.prefix), flow.tokens.map(::width), width(flow.separator),
+                width(flow.comma), flow.more.map(::width)), room)
+        }
+        val label = senders.joinToString { senderLabel(it) }
+        Column(
+            Modifier.fillMaxWidth().padding(start = startInset.dp, end = endInset.dp)
+                .clearAndSetSemantics { contentDescription = label },
+            horizontalAlignment = Alignment.CenterHorizontally,
+            verticalArrangement = Arrangement.spacedBy(2.dp),
+        ) {
+            lines.filter { it.isNotEmpty() }.forEach { Text(it, style = style, maxLines = 1, softWrap = false) }
+        }
+    }
+}
+
+private fun senderLabel(sender: ListSender) =
+    productArrivalLines(sender.count.toLong(), sender.name, Words).first()
 
 /** The first of the core's candidates that fits ("2× Yo from Christopher", "… from Chr…", "2× Yo"). */
 private val BarStyle = TextStyle(fontFamily = YoFont, fontSize = BarFont, color = Color.White)
