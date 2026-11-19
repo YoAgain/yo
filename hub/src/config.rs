@@ -208,14 +208,18 @@ pub fn parse_min_app(text: &str) -> Result<Vec<(String, u64)>, String> {
         .collect()
 }
 
-/// `PLATFORM/BUILD` (a `Yo-App` header): the platform in lower case letters (at most 16), the build a number.
+/// `PLATFORM/BUILD` (a `Yo-App` header): the platform in lower case letters (at most 16), the build a number,
+/// optionally followed by `.N` (the channel: `ios/202611191300.1` is a TestFlight public build). Compared by the
+/// number alone, so `N.1` is not older than `N`.
 pub fn app(text: &str) -> Option<(String, u64)> {
     let (platform, build) = text.split_once('/')?;
+    let (number, channel) = build.split_once('.').unwrap_or((build, "0"));
+    let digits = |s: &str| !s.is_empty() && s.bytes().all(|b| b.is_ascii_digit());
     let platform_ok = (1..=16).contains(&platform.len()) && platform.bytes().all(|b| b.is_ascii_lowercase());
-    if !platform_ok || build.is_empty() || !build.bytes().all(|b| b.is_ascii_digit()) {
+    if !platform_ok || !digits(number) || !digits(channel) || channel.len() > 4 {
         return None;
     }
-    Some((platform.to_owned(), build.parse().ok()?))
+    Some((platform.to_owned(), number.parse().ok()?))
 }
 
 /// The hub key of `Config::for_tests`: tests pin its public half.
@@ -287,10 +291,18 @@ mod tests {
     #[test]
     fn apps_are_platform_and_build() {
         assert_eq!(app("ios/202611140619"), Some(("ios".into(), 202611140619)));
+        assert_eq!(app("ios/202611140619.1"), Some(("ios".into(), 202611140619)));
+        assert_eq!(app("android/12.1"), Some(("android".into(), 12)));
+        let bad_channels = ["ios/1.", "ios/.1", "ios/1.1.1", "ios/1.x", "ios/1.12345"];
         for bad in ["", "ios", "ios/", "/1", "iOS/1", "ios/1a", "ios/-1", "a b/1", "ios/99999999999999999999"] {
+            assert_eq!(app(bad), None, "{bad:?}");
+        }
+        for bad in bad_channels {
             assert_eq!(app(bad), None, "{bad:?}");
         }
         assert_eq!(parse_min_app(" ios/5, android/7 ,").unwrap(), [("ios".into(), 5), ("android".into(), 7)]);
         assert!(parse_min_app("ios").is_err());
+        let min = parse_min_app("ios/202611140619").unwrap()[0].1;
+        assert!(app("ios/202611140619.1").unwrap().1 >= min && app("ios/202611140618.1").unwrap().1 < min);
     }
 }
