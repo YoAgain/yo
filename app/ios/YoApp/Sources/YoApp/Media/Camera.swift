@@ -121,7 +121,9 @@ final class Camera: NSObject, @unchecked Sendable {
           display?.value.flush()
           reveal?(false)
         }
+        allowHaptics()
         Perf.timed("camera.start") { session.startRunning() }
+        allowHaptics()  // running, the session has set the audio session up again
       }
     }
   }
@@ -232,8 +234,7 @@ final class Camera: NSObject, @unchecked Sendable {
       guard session.isRunning, movieOutput.connection(with: .video) != nil, !movieOutput.isRecording, !videoActive
       else { return }
       orient()  // the whole video keeps this rotation
-      // The session sets the audio session up again as it records: the zoom's tick stays allowed.
-      _ = Diagnostics.attempt { try AVAudioSession.sharedInstance().setAllowHapticsAndSystemSoundsDuringRecording(true) }
+      allowHaptics()
       finishedAlone = nil
       videoActive = true
       let file = FileManager.default.temporaryDirectory.appending(path: "\(UUID().uuidString).mov")
@@ -250,6 +251,14 @@ final class Camera: NSObject, @unchecked Sendable {
     else { return }
     device.setPrimaryConstituentDeviceSwitchingBehavior(keep ? .locked : .auto, restrictedSwitchingBehaviorConditions: [])
     device.unlockForConfiguration()
+  }
+
+  /// A running microphone mutes every haptic of the app (taps, holds, the zoom's tick) unless allowed; the capture
+  /// session sets the audio session up as it starts and records, so this is said again each time.
+  private func allowHaptics() {
+    let audio = AVAudioSession.sharedInstance()
+    guard !audio.allowHapticsAndSystemSoundsDuringRecording else { return }
+    _ = Diagnostics.attempt { try audio.setAllowHapticsAndSystemSoundsDuringRecording(true) }
   }
 
   /// Nil when none was recording or it failed.
@@ -283,8 +292,7 @@ final class Camera: NSObject, @unchecked Sendable {
     }
     // Music or a call keeps playing while the camera is open.
     session.configuresApplicationAudioSessionToMixWithOthers = true
-    // A recording mutes haptics unless allowed: the zoom's tick while filming.
-    _ = Diagnostics.attempt { try AVAudioSession.sharedInstance().setAllowHapticsAndSystemSoundsDuringRecording(true) }
+    allowHaptics()
     addMicrophone()
     if session.canAddOutput(photoOutput) { session.addOutput(photoOutput) }
     compensateNot()
