@@ -420,6 +420,8 @@ struct FriendList: View {
       // No bar behind the controls: Amethyst exactly at the top; the status bar keeps the system's soft edge.
       .toolbarBackgroundVisibility(.hidden, for: .navigationBar)
       .scrollEdgeEffectStyle(.soft, for: .top)
+      // The glass controls float over the bars: no dimmed band behind them at the bottom.
+      .scrollEdgeEffectHidden(true, for: .bottom)
       .onScrollGeometryChange(for: Bool.self) { $0.contentOffset.y + $0.contentInsets.top > 4 } action: { _, now in
         withAnimation(.smooth(duration: 0.3)) { scrolled = now }
       }
