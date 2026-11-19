@@ -1,0 +1,32 @@
+[Unit]
+Description=Yo IFTTT (%i)
+# The clock set first: a device signature with a clock off after a reboot is refused (401).
+After=network.target time-sync.target
+
+[Service]
+Type=simple
+DynamicUser=yes
+Environment=YO_BIN=/opt/yo/yo YO_STATE=%S/yo-ifttt-%i/yo IFTTT_LISTEN=127.0.0.1:8095
+# YO_HUB, YO_HUB_KEYS, YO_TRUST_ROOTS, YO_ZK_PARAMS (app/cli/README.md); IFTTT_SERVICE_KEY, IFTTT_CLIENT_ID,
+# IFTTT_CLIENT_SECRET, IFTTT_TEST_USER and the optional rest, IFTTT_LISTEN one port per hub (README.md here)
+EnvironmentFile=/etc/yo-ifttt-%i.env
+ExecStart=/usr/bin/python3 -I -B /opt/yo/skills/ifttt/ifttt.py --db %S/yo-ifttt-%i/ifttt.sqlite --listen ${IFTTT_LISTEN}
+StateDirectory=yo-ifttt-%i yo-ifttt-%i/yo
+StateDirectoryMode=0700
+UMask=0077
+Restart=on-failure
+RestartSec=3
+# 3: this device is gone for good; 4: nothing registered in the directory (`yo register IFTTT` once, by hand).
+RestartPreventExitStatus=3 4
+NoNewPrivileges=yes
+PrivateTmp=yes
+# Other users see no process of it: user ids are in the arguments of `yo`.
+ProtectProc=invisible
+ProcSubset=pid
+ProtectSystem=strict
+ProtectHome=yes
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+# Out: the hub, IFTTT's realtime API and the photo URLs an action names (https only); in: the tunnel, on localhost.
+
+[Install]
+WantedBy=multi-user.target
