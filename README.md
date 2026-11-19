@@ -114,14 +114,20 @@ DB: the local database, sealed per column.
 ![Lines of code: per day, by part and by app](dev/loc-chart.png)
 <!-- /loc -->
 
-- [app](app): iOS, Android and the CLI
-- [core](core): the Rust client
-- [hub](hub): the Rust server
+- [app](app)
+  - [ios](app/ios): the iPhone app ([YoApp](app/ios/YoApp)), its extensions and [build tools](app/ios/dev)
+  - [android](https://github.com/YoAgain/yo/tree/android/app/android): the Android app, on the `android` branch
+  - [yogpt](app/yogpt): the CLI and the YoGPT bot
+- [core](core)
+  - [client](core/client): state, sessions, groups, media, recovery, outbox
+  - [wire](core/wire): protocol formats
+  - [bindings](core/bindings): Swift and Kotlin through UniFFI
+- [hub](hub): the Rust server, with its [routes](hub/README.md) and [threat model](hub/SECURITY.md)
 - [admin](admin): the admin page
-- [spec](spec): the YoIP protocol
-- [tests](tests), [fuzz](fuzz): tests, load runs, fuzzing
-- [dev](dev): build and development scripts
-- [docs](docs): the README banner
+- [spec](spec): the YoIP protocol, [v1.md](spec/v1.md)
+- [tests](tests): integration, chaos and load tests, with [fixtures](tests/fixtures)
+- [fuzz](fuzz): fuzz targets
+- [dev](dev): Docker builds, dependency updates, this chart
 
 ```sh
 dev/cargo test --workspace     # tests, with Docker
