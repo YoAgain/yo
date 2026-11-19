@@ -1,5 +1,6 @@
 package app.justyo.android
 
+import android.app.KeyguardManager
 import android.content.Context
 import com.google.android.gms.auth.blockstore.Blockstore
 import com.google.android.gms.auth.blockstore.DeleteBytesRequest
@@ -13,14 +14,23 @@ import uniffi.yo.syncedItemDecode
 import uniffi.yo.syncedItemEncode
 import uniffi.yo.syncedItemUpgraded
 
+/** Why Google's cloud gets no copy of the account item: no screen lock, else Google's device backup is off. */
+enum class CloudMissing { SCREEN_LOCK, DEVICE_BACKUP }
+
 /**
  * The account item in Google Block Store, as iOS keeps it in the iCloud Keychain (format and parsing: the core's
  * `keychain` module): a new phone with the same Google account signs in by itself. Key material goes to Google's cloud
  * only end-to-end encrypted (spec/v1.md, "Key material only in an end-to-end encrypted cloud"): without that
- * assurance (no screen lock) the item stays on the phone for a device-to-device transfer only. Callers run on IO.
+ * assurance the item stays on the phone for a device-to-device transfer only. Callers run on IO.
+ *
+ * Block Store's cloud copy travels in Google's device backup: `isEndToEndEncryptionAvailable()` is false both without
+ * a screen lock and while "Backup by Google" is off (Block Store logs "no backup account found"), so the reason shown
+ * comes from the keyguard, not from that answer alone.
  */
 internal class SyncedAccount(context: Context) {
     private val client = Blockstore.getClient(context)
+    private val keyguard = context.getSystemService(KeyguardManager::class.java)
+
 
     private fun <T> Task<T>.result(): T = Tasks.await(this, 10, TimeUnit.SECONDS)
 
@@ -35,10 +45,19 @@ internal class SyncedAccount(context: Context) {
      * Throws when not stored.
      */
     fun write(item: SyncedItem, wanted: Boolean): Boolean {
-        val cloud = toCloud(wanted, runCatching { client.isEndToEndEncryptionAvailable().result() }.getOrDefault(false))
+        val cloud = toCloud(wanted, endToEnd())
         client.storeBytes(StoreBytesData.Builder().setKey(KEY).setBytes(syncedItemEncode(item))
             .setShouldBackupToCloud(cloud).build()).result()
         return cloud
+    }
+
+    private fun endToEnd() = runCatching { client.isEndToEndEncryptionAvailable().result() }.getOrDefault(false)
+
+    /** What keeps the cloud copy away right now; none when it can be made. */
+    fun missing(): CloudMissing? = when {
+        !keyguard.isDeviceSecure -> CloudMissing.SCREEN_LOCK
+        endToEnd() -> null
+        else -> CloudMissing.DEVICE_BACKUP
     }
 
     /** Throws when Block Store did not take it. */

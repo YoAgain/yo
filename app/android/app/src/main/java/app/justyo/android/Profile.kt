@@ -288,8 +288,10 @@ private val Pages = mapOf(
                                 else { repo.command { prepareRecovery() }; secure = true }
                             }),
                         )
-                        // Spec "Key material only in an end-to-end encrypted cloud": on only with a screen lock.
-                        Section(null, stringResource(when { s.backedUp -> R.string.google_backup_footer; s.googleBackup -> R.string.google_backup_off
+                        // Spec "Key material only in an end-to-end encrypted cloud": on only with a screen lock and Google's backup on.
+                        Section(null, stringResource(when { s.backedUp -> R.string.google_backup_footer
+                                s.googleBackup && s.backupMissingReason == CloudMissing.DEVICE_BACKUP -> R.string.google_backup_off_device_backup
+                                s.googleBackup -> R.string.google_backup_off
                                 else -> R.string.google_backup_turned_off }),
                             Setting(stringResource(R.string.google_backup), Icons.Default.Cloud, checked = s.backedUp, badge = s.backupMissing,
                                 onChecked = { on -> repo.command { googleBackup(on) } }),

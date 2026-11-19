@@ -77,9 +77,10 @@ system Create Document flow; the backup is marked secured only after writing the
 backup. New keys are staged before changing the hub record. Do not sign out of an unsecured account you need.
 As iOS keeps its account item in the iCloud Keychain, Android keeps the same item (the core's `keychain` format) in
 Google Block Store: a new phone with the same Google account signs in by itself before onboarding. The cloud copy is
-made only while `isEndToEndEncryptionAvailable()` (a screen lock; spec 7, "Key material only in an end-to-end encrypted
-cloud"); otherwise the item stays for a device-to-device transfer, the menu shows a red dot and Account Recovery's
-"Back Up to Google" is off. Signing out marks the item (`signedOut`), deleting the account deletes it; a mark or
+made only while `isEndToEndEncryptionAvailable()` (a screen lock and Google's device backup turned on; spec 7, "Key
+material only in an end-to-end encrypted cloud"); otherwise the item stays for a device-to-device transfer, the menu
+shows a red dot and Account Recovery's "Back Up to Google" is off, saying which of the two is missing (the keyguard
+tells them apart). Coming back to the app retries. Signing out marks the item (`signedOut`), deleting the account deletes it; a mark or
 deletion Block Store did not take is kept in the vault and blocks the automatic sign-in until it is made. A phone
 replaced by another one notes that account (`left`) and never signs it in again by itself. An old install's sign-in
 is kept in the vault before its old state goes and is removed only once the hub answered.

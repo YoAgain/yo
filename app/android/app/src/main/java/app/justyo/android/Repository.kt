@@ -386,7 +386,8 @@ class Repository(private val context: Context, ownerScope: CoroutineScope) {
         val item = SyncedItem(c.username() ?: state.value.username.orEmpty(), c.userId().hexBytes(), c.accountSecret(),
             passkeyBackup, code != null, code != null, passkeyBackup, code, null, syncedItemVersion(), null)
         val cloud = runCatching { synced.write(item, state.value.googleBackup) }.getOrDefault(false)
-        if (c === client) mutable.update { it.copy(backedUp = cloud) }
+        val missing = if (cloud || !state.value.googleBackup) null else synced.missing()
+        if (c === client) mutable.update { it.copy(backedUp = cloud, backupMissingReason = missing) }
     }
 
     /** The person's "Back up to Google" choice: kept beside the account (`google-backup`), so it outlives a sign-out. */
@@ -399,7 +400,9 @@ class Repository(private val context: Context, ownerScope: CoroutineScope) {
             if (on) vault.delete("google-backup") else vault.write("google-backup", byteArrayOf(0))
         }
         syncItem()
-        if (on && !state.value.backedUp) error(context.getString(R.string.google_backup_needs_screen_lock))
+        if (on && !state.value.backedUp) error(context.getString(
+            if (state.value.backupMissingReason == CloudMissing.DEVICE_BACKUP) R.string.google_backup_needs_device_backup
+            else R.string.google_backup_needs_screen_lock))
     }
 
     internal fun passkeyAccount(): Pair<String, ByteArray>? = client?.let { c ->
@@ -458,6 +461,8 @@ class Repository(private val context: Context, ownerScope: CoroutineScope) {
                 absorb(source.maintenance(), source)
             }
             media.wake()
+            // Back from Android Settings with a screen lock or Google's backup turned on: the cloud copy follows at once.
+            if (state.value.backupMissing) syncItem()
         } else {
             listening?.cancel()
             listening = null
