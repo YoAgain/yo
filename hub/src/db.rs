@@ -374,7 +374,7 @@ impl Db {
         Ok(Db { conn: Mutex::new(conn) })
     }
 
-    fn conn(&self) -> MutexGuard<'_, Connection> {
+    pub(crate) fn conn(&self) -> MutexGuard<'_, Connection> {
         self.conn.lock().unwrap_or_else(PoisonError::into_inner)
     }
 
@@ -411,9 +411,14 @@ impl Db {
         let conn = self.conn();
         let enabled: bool =
             conn.query_row("SELECT value FROM settings WHERE key='reserved_enabled'", [], |r| r.get(0))?;
-        let mut stmt = conn.prepare("SELECT spelling FROM reserved ORDER BY skeleton")?;
-        let names = stmt.query_map([], |r| r.get::<_, String>(0))?.collect::<rusqlite::Result<Vec<_>>>()?;
-        Ok(serde_json::json!({"enabled": enabled, "names": names}))
+        let mut stmt = conn.prepare("SELECT spelling, note FROM reserved ORDER BY skeleton")?;
+        let rows = stmt
+            .query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, Option<String>>(1)?)))?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        let notes: serde_json::Map<_, _> =
+            rows.iter().filter_map(|(name, note)| Some((name.clone(), note.clone()?.into()))).collect();
+        let names: Vec<_> = rows.into_iter().map(|(name, _)| name).collect();
+        Ok(serde_json::json!({"enabled": enabled, "names": names, "notes": notes}))
     }
 
     pub fn set_reserved_enabled(&self, enabled: bool) -> rusqlite::Result<()> {
@@ -426,14 +431,29 @@ impl Db {
 
     /// Add names by skeleton, preserving existing spellings and notes. Returns how many were new.
     pub fn add_reserved(&self, names: &[Reserved], now: u64) -> rusqlite::Result<usize> {
+        self.reserve(names, false, now)
+    }
+
+    /// Add names by skeleton or, for names already reserved, replace their note (`None` clears it); existing
+    /// spellings stay. Returns how many were new.
+    pub fn set_reserved_notes(&self, names: &[Reserved], now: u64) -> rusqlite::Result<usize> {
+        self.reserve(names, true, now)
+    }
+
+    fn reserve(&self, names: &[Reserved], notes: bool, now: u64) -> rusqlite::Result<usize> {
         self.write(|tx| {
             let mut insert = tx.prepare_cached(
                 "INSERT OR IGNORE INTO reserved (skeleton, spelling, note, created_at) VALUES (?1, ?2, ?3, ?4)",
             )?;
+            let mut note = tx.prepare_cached("UPDATE reserved SET note=?2 WHERE skeleton=?1")?;
             let mut added = 0;
             for name in names {
                 let skeleton = yo_wire::handle::skeleton(&name.spelling);
-                added += insert.execute(params![skeleton, name.spelling, name.note, now])?;
+                let new = insert.execute(params![skeleton, name.spelling, name.note, now])?;
+                if new == 0 && notes {
+                    note.execute(params![skeleton, name.note])?;
+                }
+                added += new;
             }
             Ok(added)
         })
@@ -733,7 +753,8 @@ impl Db {
     /// A new group at revision 1; false if its id is taken.
     pub fn create_group(&self, id: &[u8], params: &[u8], state: &[u8], now: u64) -> rusqlite::Result<bool> {
         self.one_changed(
-            "INSERT OR IGNORE INTO zk_groups (id, params, revision, state, updated_at) VALUES (?1, ?2, 1, ?3, ?4)",
+            "INSERT OR IGNORE INTO zk_groups (id, params, revision, state, updated_at, created_at)
+             VALUES (?1, ?2, 1, ?3, ?4, ?4)",
             params![id, params, state, now as i64],
         )
     }
@@ -859,6 +880,20 @@ impl Db {
         )?
         .execute(params![hour, n as i64])?;
         conn.prepare_cached("DELETE FROM deliveries_hourly WHERE hour < ?1")?.execute([hour - 8 * 24])?;
+        Ok(())
+    }
+
+    /// Events counted in the minute of `now`, `(kind, n)`: counts only, nothing of who or what (6.6).
+    pub fn count_events(&self, now: u64, counts: &[(&str, u64)]) -> rusqlite::Result<()> {
+        let minute = (now / 60_000) as i64;
+        let conn = self.conn();
+        let mut add = conn.prepare_cached(
+            "INSERT INTO events (kind, minute, n) VALUES (?1, ?2, ?3)
+             ON CONFLICT(kind, minute) DO UPDATE SET n = n + ?3",
+        )?;
+        for (kind, n) in counts {
+            add.execute(params![kind, minute, *n as i64])?;
+        }
         Ok(())
     }
 
@@ -1245,16 +1280,19 @@ impl Db {
     }
 
     /// Deletes a device's envelopes by id (WAL NORMAL: one undone by a power loss comes again, spec 4.7).
-    pub fn ack(&self, device: &DeviceId, ids: &[u64]) -> rusqlite::Result<()> {
+    /// Returns how many there were.
+    pub fn ack(&self, device: &DeviceId, ids: &[u64]) -> rusqlite::Result<usize> {
         let mut conn = self.conn();
         let tx = conn.transaction()?;
+        let mut acked = 0;
         {
             let mut delete = tx.prepare_cached("DELETE FROM messages WHERE device_id = ?1 AND id = ?2")?;
             for id in ids {
-                delete.execute(params![device, *id as i64])?;
+                acked += delete.execute(params![device, *id as i64])?;
             }
         }
-        tx.commit()
+        tx.commit()?;
+        Ok(acked)
     }
 
     // ---- upkeep and audit ----
@@ -1648,6 +1686,81 @@ mod tests {
         db.remove_reserved("Adm1n").unwrap();
         assert!(!db.username_taken(b"ADMIN").unwrap());
         assert_eq!(db.reserved_state().unwrap()["names"], serde_json::json!(["Support"]));
+    }
+
+    #[test]
+    fn events_are_counts_per_kind_and_minute_kept_for_good() {
+        let db = Db::open(":memory:").unwrap();
+        let minute = 60_000u64;
+        db.count_events(10 * minute + 5, &[("yo-in", 2), ("media-in", 1)]).unwrap();
+        db.count_events(10 * minute + 59_999, &[("yo-in", 3)]).unwrap();
+        db.count_events(11 * minute, &[("yo-out", 4)]).unwrap();
+        let rows = |db: &Db| -> Vec<(String, i64, i64)> {
+            db.conn()
+                .prepare("SELECT kind, minute, n FROM events ORDER BY minute, kind")
+                .unwrap()
+                .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))
+                .unwrap()
+                .collect::<Result<_, _>>()
+                .unwrap()
+        };
+        let row = |kind: &str, minute, n| (kind.to_owned(), minute, n);
+        assert_eq!(rows(&db), [row("media-in", 10, 1), row("yo-in", 10, 5), row("yo-out", 11, 4)]);
+        let columns: Vec<String> = db
+            .conn()
+            .prepare("SELECT name FROM pragma_table_info('events')")
+            .unwrap()
+            .query_map([], |r| r.get(0))
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap();
+        assert_eq!(columns, ["kind", "minute", "n"], "no identifier of anyone or anything");
+        db.prune(1000 * DAY_MS, DAY_MS).unwrap();
+        assert_eq!(rows(&db).len(), 3, "kept for good: counts of no one");
+    }
+
+    #[test]
+    fn groups_made_before_created_at_keep_null() {
+        let path = std::env::temp_dir().join(format!("yo-groups-created-{}.sqlite", std::process::id()));
+        let path = path.to_str().unwrap();
+        let _ = std::fs::remove_file(path);
+        {
+            let db = Db::open(path).unwrap();
+            db.conn().execute_batch("ALTER TABLE zk_groups DROP COLUMN created_at").unwrap();
+            db.conn()
+                .execute(
+                    "INSERT INTO zk_groups (id, params, revision, state, updated_at) VALUES (X'01', X'', 1, X'', 5)",
+                    [],
+                )
+                .unwrap();
+        }
+        let db = Db::open(path).unwrap();
+        assert!(db.create_group(&[2], &[], &[], 7).unwrap());
+        let made: Vec<Option<i64>> = db
+            .conn()
+            .prepare("SELECT created_at FROM zk_groups ORDER BY id")
+            .unwrap()
+            .query_map([], |r| r.get(0))
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap();
+        assert_eq!(made, [None, Some(7)]);
+        drop(db);
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn reserved_notes_are_set_replaced_and_cleared_without_touching_spelling() {
+        let db = Db::open(":memory:").unwrap();
+        let noted = |name: &str, note: Option<&str>| Reserved { spelling: name.into(), note: note.map(str::to_owned) };
+        reserve(&db, &["Admin"]);
+        assert_eq!(db.set_reserved_notes(&[noted("ADM1N", Some("role")), noted("Open", Some("app"))], 0).unwrap(), 1);
+        assert_eq!(db.reserved_state().unwrap()["notes"], serde_json::json!({"Admin": "role", "Open": "app"}));
+        assert_eq!(db.add_reserved(&[noted("admin", Some("ignored"))], 0).unwrap(), 0, "plain adds keep notes");
+        db.set_reserved_notes(&[noted("open", None)], 0).unwrap();
+        assert_eq!(db.reserved_state().unwrap()["names"], serde_json::json!(["Admin", "Open"]));
+        assert_eq!(db.reserved_state().unwrap()["notes"], serde_json::json!({"Admin": "role"}));
+        assert!(db.username_taken(yo_wire::handle::skeleton("open").as_bytes()).unwrap());
     }
 
     #[test]

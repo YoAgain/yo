@@ -25,6 +25,9 @@ pub(super) fn upgrade(conn: &mut Connection) -> rusqlite::Result<()> {
             )
         })?;
     }
+    if !has_column(conn, "zk_groups", "created_at")? {
+        conn.execute_batch("ALTER TABLE zk_groups ADD COLUMN created_at INTEGER")?;
+    }
     // Initialize once: fresh hubs enforce reservations; existing hubs retain their old effective state.
     conn.execute_batch(
         "CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value INTEGER NOT NULL) WITHOUT ROWID;",
@@ -145,6 +148,16 @@ CREATE TABLE IF NOT EXISTS deliveries_hourly (
     hour INTEGER PRIMARY KEY,
     n INTEGER NOT NULL
 );
+-- Events per minute (minutes since the epoch), a count of each kind and nothing else: no user, device, envelope,
+-- blob or group (6.6). `yo-in` a Yo accepted into an inbox, `yo-out` one a device fetched and acknowledged,
+-- `media-in` a blob uploaded, `media-out` a blob fetched, `group-create` a group made. Statistics of no one:
+-- kept for good, for the operator's page.
+CREATE TABLE IF NOT EXISTS events (
+    kind TEXT NOT NULL,
+    minute INTEGER NOT NULL,
+    n INTEGER NOT NULL,
+    PRIMARY KEY (kind, minute)
+) WITHOUT ROWID;
 CREATE TABLE IF NOT EXISTS feedback (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     user_id BLOB NOT NULL,
@@ -205,7 +218,9 @@ CREATE TABLE IF NOT EXISTS zk_groups (
     params BLOB NOT NULL,
     revision INTEGER NOT NULL,
     state BLOB NOT NULL,
-    updated_at INTEGER NOT NULL
+    updated_at INTEGER NOT NULL,
+    -- When it was made (ms); NULL for groups made before hubs kept it.
+    created_at INTEGER
 ) WITHOUT ROWID;
 -- How many blobs, and bytes, each user uploaded on a day (days since the epoch, UTC); kept two days.
 CREATE TABLE IF NOT EXISTS blob_quota (

@@ -9,7 +9,6 @@ use axum::extract::{ConnectInfo, Path, State};
 use axum::http::{HeaderMap, Method, StatusCode, Uri};
 use axum::response::Response;
 use bytes::Bytes;
-use std::sync::atomic::Ordering;
 use std::sync::{Arc, PoisonError, Weak};
 use std::time::Duration;
 use tokio::sync::Notify;
@@ -158,7 +157,8 @@ pub(crate) async fn post_ack(State(hub): Hubs, Auth(device, body): Auth) -> Res<
     if request.ids.len() > limits::MAX_ACK {
         return Err(refuse(StatusCode::PAYLOAD_TOO_LARGE));
     }
-    hub.db.ack(&device.device_id, &request.ids)?;
+    let acked = hub.db.ack(&device.device_id, &request.ids)?;
+    hub.count(crate::Event::YoOut, acked as u64);
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -220,7 +220,7 @@ pub(crate) async fn post_envelope(
     let outcome = outcome.await.ok().and_then(Result::ok).ok_or_else(|| refuse(StatusCode::INTERNAL_SERVER_ERROR))?;
     match outcome {
         Delivered::Stored(_) => {
-            hub.delivered.fetch_add(1, Ordering::Relaxed);
+            hub.count(crate::Event::YoIn, 1);
             if let Some(sender) = request {
                 hub.requests.take(&sender, &user, hub.clock_ms());
             }

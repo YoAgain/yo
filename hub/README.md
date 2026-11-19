@@ -87,8 +87,11 @@ Reserved names live only in SQLite. New databases enforce reservations by defaul
 once to ON when `reserved` has rows, otherwise OFF. Disabling enforcement preserves names and existing holders.
 `YO_RESERVED_FILE` is deprecated and ignored with a startup log message; remove it from environment files.
 The same `YO_ADMIN_TOKEN` and hidden-route 404 rules as To-Dos protect:
-`GET /v1/admin/reserved` → `{ "enabled": true, "names": ["Admin"] }`,
-`POST /v1/admin/reserved` with a JSON string list (up to 1000 names, 256 UTF-8 bytes each),
+`GET /v1/admin/reserved` → `{ "enabled": true, "names": ["Admin"], "notes": { "Admin": "role" } }` (`notes`: the
+reason kept with a name, by its spelling; names without one are left out),
+`POST /v1/admin/reserved` with a JSON list (up to 1000 entries, names 256 UTF-8 bytes each) of names (`"Admin"`:
+added if new, an existing note kept) or objects (`{ "name": "Admin", "note": "role" }`: added if new, else its note
+replaced; the note ≤ 200 characters, empty or absent clears it),
 `PUT /v1/admin/reserved` with `{ "enabled": false }`, and
 `DELETE /v1/admin/reserved/{name}`. Adds and removals compare skeletons; duplicate adds preserve spelling.
 POST and PUT return the current state; DELETE returns 204, including when the name was absent.

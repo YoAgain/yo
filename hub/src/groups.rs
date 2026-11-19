@@ -171,6 +171,7 @@ impl Hub {
         if !self.db.create_group(id, request.public_params.as_slice(), &encode(&state), now_ms())? {
             return Err(refuse(StatusCode::CONFLICT));
         }
+        self.count(crate::Event::GroupCreate, 1);
         self.answer(state, &maker)
     }
 
@@ -356,6 +357,21 @@ mod tests {
         assert!(!made.state.members[0].profile_key.as_slice().is_empty(), "with its key");
         assert!(made.state.members[1].profile_key.as_slice().is_empty(), "invited");
         assert_eq!(hub.create_group(&id, &new).unwrap_err().0, StatusCode::CONFLICT, "taken");
+        // Counted once, with nothing of which group; the group knows when it was made.
+        hub.flush_events(120_000).unwrap();
+        let counted: Vec<(String, i64, i64)> = hub
+            .db
+            .conn()
+            .prepare("SELECT kind, minute, n FROM events")
+            .unwrap()
+            .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap();
+        assert_eq!(counted, [("group-create".to_owned(), 2, 1)]);
+        let made_at: Option<i64> =
+            hub.db.conn().query_row("SELECT created_at FROM zk_groups", [], |r| r.get(0)).unwrap();
+        assert!(made_at.is_some_and(|at| at > 0));
         // A stranger's presentation is no member's.
         let fetch = |who: &UserId| api::GroupRequest { auth: auth(&hub, who, &secret), revision: 0, actions: vec![] };
         assert_eq!(hub.group_request(&id, &fetch(&cleo)).unwrap_err().0, StatusCode::FORBIDDEN);

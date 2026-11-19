@@ -51,6 +51,26 @@ use {
     std::time::Duration,
 };
 
+/// What the hub counts per minute, without any identifier (`events`, spec 6.6).
+#[derive(Clone, Copy)]
+pub(crate) enum Event {
+    /// A Yo accepted into an inbox.
+    YoIn,
+    /// A Yo a device fetched and acknowledged.
+    YoOut,
+    /// A blob uploaded.
+    MediaIn,
+    /// A blob fetched, each fetch handed on to its end.
+    MediaOut,
+    /// A group created.
+    GroupCreate,
+}
+
+impl Event {
+    /// The kinds as stored, in the order of the variants.
+    const KINDS: [&str; 5] = ["yo-in", "yo-out", "media-in", "media-out", "group-create"];
+}
+
 pub struct Hub {
     config: Config,
     db: Arc<Db>,
@@ -62,8 +82,9 @@ pub struct Hub {
     zk: groups::Zk,
     /// To the writer, which stores deliveries in group commits (`mail::writer`).
     deliveries: std::sync::mpsc::SyncSender<Delivery>,
-    /// Deliveries since the last flush, a count only (6.6): into `deliveries_hourly` once a minute.
-    delivered: AtomicU64,
+    /// Events since the last flush, a count per kind only (6.6): into `events` (and `yo-in` also into
+    /// `deliveries_hourly`) once a minute.
+    events: [AtomicU64; Event::KINDS.len()],
     /// Long polls waiting for mail, by device.
     waiting: Mutex<HashMap<DeviceId, Arc<Notify>>>,
     /// Inbox requests under way, by device (`INBOX_AT_ONCE`).
@@ -120,7 +141,7 @@ impl Hub {
             signer,
             zk,
             deliveries,
-            delivered: AtomicU64::new(0),
+            events: Default::default(),
             waiting: Mutex::default(),
             fetching: Arc::default(),
             limiter: Limiter::default(),
@@ -218,11 +239,8 @@ impl Hub {
         loop {
             every.tick().await;
             self.replay.forget_expired(now_ms());
-            // The minute's deliveries into their hour (a count, nothing of who): the operator's "messages · 24h".
-            let n = self.delivered.swap(0, Ordering::Relaxed);
-            if n > 0 {
-                let _ = self.blocking(move |hub| hub.db.count_deliveries(now_ms(), n)).await;
-            }
+            // The minute's events, a count per kind (nothing of who or what): the operator's page.
+            let _ = self.blocking(|hub| hub.flush_events(now_ms())).await;
             if minutes.is_multiple_of(60) {
                 self.limiter.forget_idle(DAY);
                 self.requests.forget_full(self.clock_ms());
@@ -236,6 +254,25 @@ impl Hub {
             }
             minutes += 1;
         }
+    }
+
+    /// One more event of a kind, counted in memory until the next minute's flush.
+    pub(crate) fn count(&self, event: Event, n: u64) {
+        self.events[event as usize].fetch_add(n, Ordering::Relaxed);
+    }
+
+    /// The events counted since the last flush into `events` at `now`'s minute; deliveries also into their hour.
+    pub fn flush_events(&self, now: u64) -> rusqlite::Result<()> {
+        let counts: Vec<_> = Event::KINDS
+            .iter()
+            .zip(&self.events)
+            .map(|(kind, n)| (*kind, n.swap(0, Ordering::Relaxed)))
+            .filter(|(_, n)| *n > 0)
+            .collect();
+        if let Some((_, n)) = counts.iter().find(|(kind, _)| *kind == Event::KINDS[Event::YoIn as usize]) {
+            self.db.count_deliveries(now, *n)?;
+        }
+        self.db.count_events(now, &counts)
     }
 
     /// The hourly cleanup at `now`: envelopes past their time (6.6), blobs past theirs and files no blob owns (6.8).
@@ -420,6 +457,11 @@ mod tests {
                 ("POST", "/v1/admin/reserved", "[\"Admin\",\"Adm1n\",\"Support\"]", StatusCode::OK),
                 ("POST", "/v1/admin/reserved", "{}", StatusCode::BAD_REQUEST),
                 ("POST", "/v1/admin/reserved", "[\" \"]", StatusCode::BAD_REQUEST),
+                ("POST", "/v1/admin/reserved", "[{\"name\":\"Support\",\"note\":\"role\"}]", StatusCode::OK),
+                ("POST", "/v1/admin/reserved", "[{\"name\":\"Support\",\"note\":1}]", StatusCode::BAD_REQUEST),
+                ("POST", "/v1/admin/reserved", "[{\"name\":\"Support\",\"x\":1}]", StatusCode::BAD_REQUEST),
+                ("POST", "/v1/admin/reserved", "[{\"note\":\"role\"}]", StatusCode::BAD_REQUEST),
+                ("POST", "/v1/admin/reserved", "[1]", StatusCode::BAD_REQUEST),
                 ("PUT", "/v1/admin/reserved", "{\"enabled\":false}", StatusCode::OK),
                 ("PUT", "/v1/admin/reserved", "{\"enabled\":1}", StatusCode::BAD_REQUEST),
                 ("PUT", "/v1/admin/reserved", "{\"enabled\":true,\"extra\":1}", StatusCode::BAD_REQUEST),
@@ -448,9 +490,15 @@ mod tests {
                         continue;
                     }
                     if enabled && token == "test-token" && method == "POST" && expected == StatusCode::OK {
-                        let body = to_bytes(response.into_body(), 65536).await.unwrap();
-                        let value: serde_json::Value = serde_json::from_slice(&body).unwrap();
+                        let bytes = to_bytes(response.into_body(), 65536).await.unwrap();
+                        let value: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
                         assert_eq!(value["names"], serde_json::json!(["Admin", "Support"]));
+                        let notes = if body.contains("note") {
+                            serde_json::json!({"Support": "role"})
+                        } else {
+                            serde_json::json!({})
+                        };
+                        assert_eq!(value["notes"], notes);
                     }
                     if enabled && token == "test-token" && method == "PUT" && body == "{\"enabled\":false}" {
                         assert!(!hub.db.username_taken(b"ADMIN").unwrap());
@@ -459,7 +507,10 @@ mod tests {
                 }
             }
             if enabled {
-                assert_eq!(hub.db.reserved_state().unwrap(), serde_json::json!({"enabled":true,"names":["Support"]}),);
+                assert_eq!(
+                    hub.db.reserved_state().unwrap(),
+                    serde_json::json!({"enabled":true,"names":["Support"],"notes":{"Support":"role"}}),
+                );
             }
         }
     }

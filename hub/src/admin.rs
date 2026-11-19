@@ -155,17 +155,43 @@ async fn get_reserved(State(hub): Hubs) -> Res<Json<Value>> {
     Ok(Json(state))
 }
 
-/// A list of names to reserve.
+/// A list of names to reserve: `"Name"` adds it, `{"name": "Name", "note": "why"}` adds it or, if reserved
+/// already, replaces its note (empty or absent clears it).
 async fn post_reserved(State(hub): Hubs, body: Bytes) -> Res<Json<Value>> {
-    let names: Vec<String> = serde_json::from_slice(&body).map_err(|_| bad())?;
-    if names.len() > 1000 || names.iter().any(|name| name.trim().is_empty() || name.len() > 256) {
+    let entries: Vec<Value> = serde_json::from_slice(&body).map_err(|_| bad())?;
+    if entries.len() > 1000 {
         return Err(bad());
     }
-    let names: Vec<_> =
-        names.into_iter().map(|name| db::Reserved { spelling: name.trim().into(), note: None }).collect();
-    hub.db.add_reserved(&names, now_ms())?;
+    let (mut plain, mut noted) = (Vec::new(), Vec::new());
+    for entry in entries {
+        let (name, note, list) = match entry {
+            Value::String(name) => (name, None, &mut plain),
+            Value::Object(mut fields) => {
+                let name = fields.remove("name").and_then(|v| v.as_str().map(str::to_owned)).ok_or_else(bad)?;
+                let note = match fields.remove("note") {
+                    None | Some(Value::Null) => None,
+                    Some(Value::String(note)) => Some(note.trim().to_owned()).filter(|note| !note.is_empty()),
+                    Some(_) => return Err(bad()),
+                };
+                if !fields.is_empty() || note.as_ref().is_some_and(|note| note.chars().count() > RESERVED_NOTE_MAX) {
+                    return Err(bad());
+                }
+                (name, note, &mut noted)
+            }
+            _ => return Err(bad()),
+        };
+        if name.trim().is_empty() || name.len() > 256 {
+            return Err(bad());
+        }
+        list.push(db::Reserved { spelling: name.trim().into(), note });
+    }
+    hub.db.add_reserved(&plain, now_ms())?;
+    hub.db.set_reserved_notes(&noted, now_ms())?;
     get_reserved(State(hub)).await
 }
+
+/// The longest reason kept with a reserved name, in characters.
+const RESERVED_NOTE_MAX: usize = 200;
 
 /// `{"enabled": bool}`: the switch.
 async fn put_reserved(State(hub): Hubs, body: Bytes) -> Res<Json<Value>> {

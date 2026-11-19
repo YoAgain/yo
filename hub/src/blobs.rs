@@ -388,7 +388,10 @@ pub(crate) async fn put_blob(
         }
         // Handed out from now on. Left not ready (a crash just before), it goes at the next start or within the hour.
         match hub.db.blob_ready(&id, stored_at) {
-            Ok(true) => Ok(StatusCode::CREATED),
+            Ok(true) => {
+                hub.count(crate::Event::MediaIn, 1);
+                Ok(StatusCode::CREATED)
+            }
             // Its row went meanwhile (the account deleted while it came): no file left behind, and no 201.
             Ok(false) => {
                 hub.blobs.remove(&(id, stored_at));
@@ -416,11 +419,10 @@ pub(crate) async fn get_blob(
     let ttl = hub.config.limits.blob_ttl_days * DAY_MS;
     let taking = hub.blocking(move |hub| hub.db.take_blob_get(&id, now_ms(), ttl)).await??;
     let (size, created_at) = taking.ok_or_else(|| refuse(StatusCode::NOT_FOUND))?;
-    let db = hub.db.clone();
-    let taken = Taken::new(move |complete| {
-        if !complete {
-            let _ = db.return_blob_get(&id, created_at);
-        }
+    let counter = hub.clone();
+    let taken = Taken::new(move |complete| match complete {
+        true => counter.count(crate::Event::MediaOut, 1),
+        false => drop(counter.db.return_blob_get(&id, created_at)),
     });
     let file = hub.blobs.read(&(id, created_at), size).await.ok_or_else(|| refuse(StatusCode::NOT_FOUND))?;
     let stream = Counted::new(tokio_util::io::ReaderStream::with_capacity(file, 64 * 1024), size, taken);
