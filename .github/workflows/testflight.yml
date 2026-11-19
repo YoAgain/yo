@@ -1,6 +1,7 @@
 # Builds the iPhone app on macOS and uploads it to TestFlight with omarchy-apple-dev's ship.sh, the same path as
-# on Linux. The App Store Connect key and the distribution identity are secrets of the environment `testflight`
-# (main only); never run this on pull requests.
+# on Linux. Every push to main goes to the internal testers; a published GitHub release (pre-release included) also
+# goes to the outside testers. The App Store Connect key and the distribution identity are secrets of the
+# environment `testflight` (main and tags v*); never run this on pull requests.
 name: TestFlight
 
 on:
@@ -12,6 +13,8 @@ on:
       - Cargo.lock
       - rust-toolchain.toml
       - .github/workflows/testflight.yml
+  release:
+    types: [published]
   workflow_dispatch:
 
 concurrency:
@@ -308,8 +311,10 @@ jobs:
               print("::warning::no CFBundleAlternateIcons in the app's Info.plist: the icon cannot be switched")
           EOF
 
-      # Outside testers (the public link) get every build too: into the group "Public", submitted to Beta App Review.
+      # Outside testers (the public link) get only released builds: into the group "Public", submitted to Beta App
+      # Review.
       - name: Public beta
+        if: github.event_name == 'release'
         timeout-minutes: 35
         env:
           ASC_KEY_ID: ${{ secrets.ASC_KEY_ID }}

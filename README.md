@@ -129,6 +129,9 @@ DB: the local database, sealed per column.
 - [fuzz](fuzz): fuzz targets
 - [dev](dev): Docker builds, dependency updates, this chart
 
+TestFlight: every push to `main` goes to the internal testers; a GitHub release or pre-release (tag `v…`) also goes
+to the public beta.
+
 ```sh
 dev/cargo test --workspace     # tests, with Docker
 dev/fuzz all 300               # fuzzing
