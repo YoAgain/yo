@@ -178,9 +178,13 @@ if (document.body.classList.contains("login")) {
   };
   // A service chip: its dot; state, uptime, memory, restarts and version in its card.
   const svcInfo = {};
+  // The tab's title counts only what does not run (a service down), never reports or crash groups.
+  const svcDown = {};
+  const drawTitle = () => { const n = Object.values(svcDown).filter(Boolean).length; document.title = n ? `(${n} down) Yo admin` : "Yo admin"; };
   const service = (id, u) => {
     u = u || {};
     const ok = u.state === "active";
+    svcDown[id] = !ok; drawTitle();
     if ($(`t-${id}`)) state(`t-${id}`, ok ? "ok" : "bad");
     svcInfo[id] = { ok, rows: [
       ["State", ok ? "running" : u.state || "not running", ok ? "ok" : "bad"],
@@ -956,7 +960,7 @@ if (document.body.classList.contains("login")) {
       // The page title's count: conversations still open, and open crash groups without the expected ones.
       const unanswered = threads.filter((t) => t.unread > 0).length;
       const crashes = (last?.[which]?.diagnostics || []).filter((d) => !d.done && !diagInfo(d).expected).length;
-      document.title = unanswered + crashes ? `(${unanswered + crashes}) Yo admin` : "Yo admin";
+      drawTitle();
       openTickets = unanswered + crashes; openSupport = unanswered;
       showOpen();
       part(drawList);
