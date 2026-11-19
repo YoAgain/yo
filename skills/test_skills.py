@@ -111,5 +111,47 @@ class Limits(unittest.TestCase):
         self.assertEqual(yocli.Quiet(yocli.names(["leo, @mia"])).unresolved, ["leo", "mia"])
 
 
+class Yo(unittest.TestCase):
+    def test_a_stuck_or_missing_yo_fails_without_its_arguments(self):
+        saved = yocli.YO
+        try:
+            yocli.YO = sys.executable
+            with self.assertRaises(yocli.Failed) as stuck:
+                yocli.yo("-c", "import time; time.sleep(5)", "SECRETREF", timeout=0.2)
+            yocli.YO = os.path.join(HERE, "no-such-yo")
+            with self.assertRaises(yocli.Failed) as missing:
+                yocli.yo("send", "SECRETREF")
+        finally:
+            yocli.YO = saved
+        self.assertTrue(stuck.exception.retryable)
+        for failed in (stuck.exception, missing.exception):
+            self.assertNotIn("SECRETREF", f"{failed} {failed.args} {failed.__cause__} {failed.__context__}")
+
+    def test_nothing_registered_stops_without_registering(self):
+        calls, saved = [], (yocli.yo, yocli.stop)
+
+        def yo(*args, **_):
+            calls.append(args)
+            raise yocli.Failed(yocli.NOT_REGISTERED, "not registered: yo register NAME", False)
+
+        def stop(code):
+            raise SystemExit(code)
+
+        yocli.yo, yocli.stop = yo, stop
+        try:
+            with self.assertRaises(SystemExit) as stopped:
+                yocli.registered()
+        finally:
+            yocli.yo, yocli.stop = saved
+        self.assertEqual((stopped.exception.code, calls), (yocli.NOT_REGISTERED, [("whoami",)]))
+
+    def test_only_the_class_of_an_error_is_logged(self):
+        failed = lambda text: yocli.reason(yocli.Failed(1, text, True))  # noqa: E731
+        self.assertEqual(failed("network: error sending request for url (http://hub/v1/blobs/SECRET)"), "network")
+        self.assertEqual(failed("refused: 429"), "refused")
+        self.assertEqual(failed("/var/lib/yo/outbox/NAME.x.jpg: No such file"), "failed")
+        self.assertEqual(yocli.reason(OSError("/var/lib/yo/outbox/NAME.x.jpg")), "OSError")
+
+
 if __name__ == "__main__":
     unittest.main()

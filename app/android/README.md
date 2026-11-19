@@ -76,9 +76,13 @@ backup version 3). The 64-character Signal recovery key restores the account on 
 system Create Document flow; the backup is marked secured only after writing the document and uploading the
 backup. New keys are staged before changing the hub record. Do not sign out of an unsecured account you need.
 As iOS keeps its account item in the iCloud Keychain, Android keeps the same item (the core's `keychain` format) in
-Google Block Store with cloud backup: a new phone with the same Google account signs in by itself before onboarding.
-Signing out marks the item (`signedOut`), deleting the account deletes it. Block Store needs Google Play services, and
-its cloud copy is end-to-end encrypted only while the phone has a screen lock.
+Google Block Store: a new phone with the same Google account signs in by itself before onboarding. The cloud copy is
+made only while `isEndToEndEncryptionAvailable()` (a screen lock; spec 7, "Key material only in an end-to-end encrypted
+cloud"); otherwise the item stays for a device-to-device transfer, the menu shows a red dot and Account Recovery's
+"Back Up to Google" is off. Signing out marks the item (`signedOut`), deleting the account deletes it; a mark or
+deletion Block Store did not take is kept in the vault and blocks the automatic sign-in until it is made. A phone
+replaced by another one notes that account (`left`) and never signs it in again by itself. An old install's sign-in
+is kept in the vault before its old state goes and is removed only once the hub answered.
 
 The media queue persists encrypted blobs and manifests before upload; a media Yo waits for its upload and the
 2-second undo window. A restart discards still-held items. Per-target order is maintained, and temporary failures

@@ -84,8 +84,12 @@ pub fn upload<L: Locked>(
         },
         Target::Group(id) => c.open_group(id),
     })??;
-    let upload = locked.step(|c| c.upload(media, fetches))??;
-    upload.send(ciphertext)?;
+    let uploaded = locked.step(|c| c.upload(media, fetches)).and_then(|upload| Ok(upload?.send(ciphertext)?));
+    if let Err(error) = uploaded {
+        // What opening received is not lost with the upload: the next call hands it out again.
+        _ = locked.step(|c| c.hand_back(&received));
+        return Err(error);
+    }
     Ok(received)
 }
 

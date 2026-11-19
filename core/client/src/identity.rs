@@ -77,6 +77,17 @@ pub fn safety_number(me: (&[u8], &Key), them: (&[u8], &Key)) -> Result<String> {
     Ok(fives.join(" "))
 }
 
+/// The safety number's scannable form (Signal's QR code payload) as this user shows it.
+pub fn safety_code(me: (&[u8], &Key), them: (&[u8], &Key)) -> Result<Vec<u8>> {
+    fingerprint(me, them)?.scannable.serialize().map_err(|_| Error::Internal("fingerprint"))
+}
+
+/// Whether a code scanned off the other's screen matches (it names both sides the other way round); one that does
+/// not parse, or of another version, does not.
+pub fn safety_code_matches(me: (&[u8], &Key), them: (&[u8], &Key), scanned: &[u8]) -> Result<bool> {
+    Ok(fingerprint(me, them)?.scannable.compare(scanned).unwrap_or(false))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -110,5 +121,10 @@ mod tests {
         assert!(ab.replace(' ', "").bytes().all(|b| b.is_ascii_digit()));
         assert_ne!(ab, safety_number((&ua, &ka), (&ub, &kc)).unwrap());
         assert_ne!(ab, safety_number((&[3u8; 16], &ka), (&ub, &kb)).unwrap());
+        // The scannable form: B's code matches on A's side, not against a third key, and garbage does not.
+        let code = safety_code((&ub, &kb), (&ua, &ka)).unwrap();
+        assert!(safety_code_matches((&ua, &ka), (&ub, &kb), &code).unwrap());
+        assert!(!safety_code_matches((&ua, &ka), (&ub, &kc), &code).unwrap());
+        assert!(!safety_code_matches((&ua, &ka), (&ub, &kb), b"no code").unwrap());
     }
 }

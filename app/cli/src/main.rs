@@ -13,7 +13,7 @@ mod listen;
 
 use account::{Config, Open};
 use serde_json::{json, Value};
-use std::io::{BufRead, BufReader, Write};
+use std::io::{BufRead, BufReader, Read, Write};
 use std::os::unix::net::UnixStream;
 use std::time::{Duration, Instant};
 
@@ -34,9 +34,9 @@ pub const HELP: &str =
   friends | contacts                the friend list; everyone this account has a chat with
   whois NAME                        a username's user id
   add NAME                          add a friend
-  send TO [--photo JPEG | --video FILE --duration-ms N [--width W --height H] | --media REF]
-                                    a Yo to a username, user id or group:ID, with a photo or video, or
-                                    the photo or video of a received event (REF) sealed anew
+  send TO [--photo JPEG | --media -]
+                                    a Yo to a username, user id or group:ID, with a photo, or the photo
+                                    or video of a received event sealed anew (its media.ref on stdin)
   groups [list]                     the groups
   groups create NAME MEMBER...      make a group (members by username or user id)
   groups leave|accept ID            leave or accept a group
@@ -102,11 +102,32 @@ fn main() {
         println!("{HELP}");
         std::process::exit(if args.is_empty() { USAGE } else { 0 });
     }
-    let code = match Config::parse(&args) {
-        Ok((config, command)) => run(&config, command),
+    let parsed = Config::parse(&args).and_then(|(config, command)| Ok((config, media_from_stdin(command)?)));
+    let code = match parsed {
+        Ok((config, command)) => run(&config, &command),
         Err(failure) => print(Err(failure)),
     };
     std::process::exit(code);
+}
+
+/// `send … --media -`: the reference read from stdin, never from the arguments, which every local user can read
+/// (it holds the blob's id and key). The command goes on with it, here or in the listener (its private socket).
+fn media_from_stdin(command: &[String]) -> Result<Vec<String>, Failure> {
+    let mut command = command.to_vec();
+    let at = command.iter().position(|a| a == "--media").filter(|_| command.first().is_some_and(|c| c == "send"));
+    if let Some(i) = at.map(|i| i + 1) {
+        if command.get(i).map(String::as_str) != Some("-") {
+            return Err(Failure::usage("--media -: the media.ref on stdin, never as an argument"));
+        }
+        let mut line = String::new();
+        std::io::stdin()
+            .lock()
+            .take(4096)
+            .read_line(&mut line)
+            .map_err(|_| Failure::usage("--media -: no reference on stdin"))?;
+        command[i] = line.trim().to_owned();
+    }
+    Ok(command)
 }
 
 /// Prints what a command gave (stdout) or why it failed (stderr), and its exit code.

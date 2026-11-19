@@ -9,7 +9,7 @@ It leaves groups it is alone in. Bounded: 200 answers owed to one sender, 32 sen
 The operator's mailbox: `NAME.anything.jpg` put into `$YO_STATE/outbox` goes to NAME as a photo, then the file is
 removed (renamed `.failed` when it could not go). `$YO_STATE/stats.json` says how many people it knows, once a minute.
 
-  YO_STATE=… YO_HUB=… [YO_USERNAME=YOGPT] yogpt.py [--replies DIR] [--picture-every N] [--quiet-for A,B]
+  YO_STATE=… YO_HUB=… yogpt.py [--replies DIR] [--picture-every N] [--quiet-for A,B]     (once: yo register YOGPT)
 """
 
 import argparse
@@ -151,7 +151,7 @@ class YoGPT:
                 else:
                     yocli.yo("send", to)
             except yocli.Failed as failed:
-                return yocli.log(f"Yo {i + 1} of {n}: {failed.error}")
+                return yocli.log(f"Yo {i + 1} of {n}: {yocli.reason(failed)}")
         self.answered.add()
 
     def send_picture(self, to):
@@ -165,7 +165,7 @@ class YoGPT:
         try:
             yocli.yo("send", to, "--photo", path)
         except yocli.Failed as failed:
-            yocli.log(f"picture: {failed.error}")
+            yocli.log(f"picture: {yocli.reason(failed)}")
             return yocli.yo("send", to)
         # Only a picture that went counts against a repeat.
         with self.lock:
@@ -180,7 +180,7 @@ def leave_empty(me):
                 yocli.yo("groups", "leave", group["id"])
                 yocli.log("left a group it was alone in")
     except yocli.Failed as failed:
-        yocli.log(f"leaving empty groups: {failed.error}")
+        yocli.log(f"leaving empty groups: {yocli.reason(failed)}")
 
 
 def mailbox(directory, stats):
@@ -213,7 +213,7 @@ def mailbox(directory, stats):
                 os.remove(entry.path)
                 yocli.log("mail sent")
             except (yocli.Failed, OSError) as failed:
-                yocli.log(f"mail: {failed}")
+                yocli.log(f"mail: {yocli.reason(failed)}")
                 try:
                     os.replace(entry.path, entry.path[: -len(".jpg")] + ".failed")
                 except OSError:
@@ -227,7 +227,7 @@ def main():
     parser.add_argument("--quiet-for", action="append", default=[])
     args = parser.parse_args()
     state = os.environ["YO_STATE"]
-    me = yocli.registered(os.environ.get("YO_USERNAME"))["user"]
+    me = yocli.registered()["user"]
     quiet = yocli.Quiet(yocli.names(args.quiet_for))
     bot, cooldown = YoGPT(args.replies, args.picture_every), yocli.Cooldown(GROUP_COOLDOWN)
     quieted, cooled = yocli.Tally("from --quiet-for users not answered"), yocli.Tally("group Yos dropped (cooldown)")

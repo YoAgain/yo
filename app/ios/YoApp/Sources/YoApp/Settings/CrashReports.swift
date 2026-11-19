@@ -35,7 +35,7 @@ final class CrashReports: NSObject, MXMetricManagerSubscriber {
   private var revision = 0
 
   static var on: Bool {
-    get { UserDefaults.standard.object(forKey: onKey) as? Bool ?? true }
+    get { Diagnostics.reportsOn }
     set {
       UserDefaults.standard.set(newValue, forKey: onKey)
       if newValue { shared.flush() }

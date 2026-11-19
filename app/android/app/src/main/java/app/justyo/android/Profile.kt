@@ -157,7 +157,6 @@ private val Pages = mapOf(
     var logout by remember { mutableStateOf(false) }
     var renew by remember { mutableStateOf(false) }
     var removePasskey by remember { mutableStateOf(false) }
-    var recoveryHelp by remember { mutableStateOf(false) }
     var passkeyRevision by remember { mutableIntStateOf(0) }
     val contacts = remember(s.friends) { s.friends.filter { it.group == null && !it.blocked }.sortedBy { it.name.lowercase() } }
     val auth = rememberLauncherForActivityResult(ActivityResultContracts.StartActivityForResult()) { result ->
@@ -261,7 +260,7 @@ private val Pages = mapOf(
                             Setting(stringResource(R.string.ui_blocked), Icons.Default.Block, s.friends.count { it.blocked }.toString(), onClick = { open("Blocked") }),
                         )
                         Section(null, null,
-                            Setting(stringResource(R.string.account_recovery), Icons.Default.Lock, badge = !s.secured, onClick = { open("Account Recovery") }),
+                            Setting(stringResource(R.string.account_recovery), Icons.Default.Lock, badge = !s.secured || !s.backedUp, onClick = { open("Account Recovery") }),
                             Setting(stringResource(R.string.ui_sign_out), Icons.AutoMirrored.Filled.Logout, onClick = { logout = true }),
                         )
                         Section(null, null,
@@ -282,9 +281,17 @@ private val Pages = mapOf(
                                 if (on) { repo.command { prepareRecovery() }; secure = true } else renew = true
                             }),
                             Setting(stringResource(R.string.ui_show_recovery_key), Icons.Default.Visibility, enabled = s.secured, onClick = ::authenticate),
+                            // A valid recovery key shows only after the device confirmed it is you, also on the way to a passkey.
                             Setting(stringResource(R.string.recovery_passkey), Icons.Default.Fingerprint, checked = passkeyConfigured, onChecked = { on ->
-                                if (on) { repo.command { prepareRecovery() }; secure = true } else removePasskey = true
+                                if (!on) removePasskey = true
+                                else if (s.secured) authenticate()
+                                else { repo.command { prepareRecovery() }; secure = true }
                             }),
+                        )
+                        // Spec "Key material only in an end-to-end encrypted cloud": on only with a screen lock.
+                        Section(null, stringResource(if (s.backedUp) R.string.google_backup_footer else R.string.google_backup_off),
+                            Setting(stringResource(R.string.google_backup), Icons.Default.Cloud, checked = s.backedUp, badge = !s.backedUp,
+                                onChecked = { on -> repo.command { googleBackup(on) } }),
                         )
                         Section(null, stringResource(R.string.account_backup_footer),
                             Setting(stringResource(R.string.account_backup), Icons.Default.CloudUpload, onClick = { repo.command { saveContacts() } }),
@@ -361,12 +368,6 @@ private val Pages = mapOf(
         }
     }
 
-    if (recoveryHelp) AlertDialog(
-        onDismissRequest = { recoveryHelp = false },
-        title = { Text(stringResource(R.string.how_account_recovery_works)) },
-        text = { Text(stringResource(R.string.account_recovery_explanation)) },
-        confirmButton = { TextButton(onClick = { recoveryHelp = false }) { Text(stringResource(R.string.ui_done)) } },
-    )
     if (secure) RecoverySheet(model, s) { secure = false }
     if (code) ModalBottomSheet(onDismissRequest = { code = false }, sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)) {
         Column(Modifier.fillMaxWidth().padding(24.dp), horizontalAlignment = Alignment.CenterHorizontally) {
@@ -430,7 +431,7 @@ private val Pages = mapOf(
                 maxLines = 1, softWrap = false,
                 autoSize = TextAutoSize.StepBased(minFontSize = 13.sp, maxFontSize = 26.sp),
             )
-            if (!s.secured) Badge { Text("1") }
+            if (!s.secured || !s.backedUp) Badge { Text("1") }
             FilledTonalIconButton(onClick = onCode) { Icon(Icons.Default.QrCode, stringResource(R.string.ui_show_your_code)) }
         }
     }
@@ -633,6 +634,7 @@ private val Pages = mapOf(
     val res = LocalResources.current
     var revision by remember { mutableIntStateOf(0) }
     var technical by rememberSaveable { mutableStateOf(false) }
+    var scanning by remember { mutableStateOf(false) }
     val details by produceState<ContactDetails?>(null, friend.user, revision) { value = withContext(Dispatchers.IO) { repo.contact(friend) } }
     val state by repo.state.collectAsStateWithLifecycle()
     val current = state.friends.firstOrNull { it.key == friend.key } ?: friend
@@ -654,6 +656,9 @@ private val Pages = mapOf(
                 }
                 Text(res.getString(R.string.compare_safety, friend.name), style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant, textAlign = TextAlign.Center)
+                // Or scan each other's code: verified only when it matches (the QR code's own bytes, compared by the core).
+                details?.safetyCode?.let { Qr(it.toString(Charsets.ISO_8859_1), Modifier.size(200.dp)) }
+                TextButton(onClick = { scanning = true }) { Text(stringResource(R.string.scan_qr)) }
                 if (verified) OutlinedButton(onClick = { repo.command { verify(friend, false); revision++ } }) { Text(stringResource(R.string.ui_mark_as_not_verified)) }
                 else Button(onClick = { repo.command { verify(friend, true); revision++ } }) { Text(stringResource(R.string.ui_mark_as_verified)) }
             }
@@ -683,6 +688,13 @@ private val Pages = mapOf(
             )
         }
     }
+    if (scanning) QrScanner(onClose = { scanning = false }, onCode = { qr ->
+        scanning = false
+        repo.command {
+            if (verifyScan(friend, qr.bytes)) withContext(Dispatchers.Main) { revision++ }
+            else error(res.getString(R.string.safety_mismatch))
+        }
+    })
 }
 
 @Composable private fun LicensesPage() {

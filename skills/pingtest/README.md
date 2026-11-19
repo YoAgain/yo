@@ -11,7 +11,8 @@ was active at that moment; the encrypted protocol and replay state persist as fo
 it is not answered; blobs of photos and videos are fetched into nothing, never opened.
 
 ```sh
-YO_STATE=/var/lib/yo-pingtest-live YO_HUB=http://127.0.0.1:8080 YO_USERNAME=PINGTEST python3 skills/pingtest/pingtest.py
+YO_STATE=/var/lib/yo-pingtest-live YO_HUB=http://127.0.0.1:8080 yo register PINGTEST   # once
+YO_STATE=/var/lib/yo-pingtest-live YO_HUB=http://127.0.0.1:8080 python3 skills/pingtest/pingtest.py
 ```
 
 Unit: [yo-pingtest@.service](yo-pingtest@.service), with `/etc/yo-pingtest-%i.env` (no `YO_ZK_PARAMS` needed).

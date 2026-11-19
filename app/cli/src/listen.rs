@@ -11,6 +11,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::mpsc::{sync_channel, Receiver, SyncSender};
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
+use yo_core::media::{self, Media};
 use yo_core::{Client, Content, Event, Transport};
 
 /// What waits is answered and sent (spec 4) as the app does when it comes to the foreground.
@@ -29,8 +30,8 @@ struct Listener<'a> {
     config: &'a Config,
     out: Mutex<std::io::Stdout>,
     manual_ack: bool,
-    /// `--drain-media`: the blob ids for the drainer.
-    drain: Option<SyncSender<[u8; 16]>>,
+    /// `--drain-media`: the blobs for the drainer (fetched and checked, never opened).
+    drain: Option<SyncSender<Media>>,
 }
 
 impl Listener<'_> {
@@ -55,7 +56,7 @@ impl Listener<'_> {
         for event in &events {
             if let Event::Message { content, .. } | Event::GroupMessage { content, .. } = event {
                 if let (Content::Photo(m) | Content::Video { media: m, .. }, Some(drain)) = (content, &self.drain) {
-                    let _ = drain.try_send(m.id);
+                    let _ = drain.try_send(m.clone());
                 }
             }
             self.line(&commands::event(event, self.drain.is_none()));
@@ -86,11 +87,14 @@ impl Listener<'_> {
     }
 }
 
-/// Fetches the blobs of photos and videos sent to the account into nothing, one at a time: each fetch counts at the
-/// hub, which deletes a blob after its last. Nothing of them is kept, opened or printed.
-fn drainer(transport: &dyn Transport, ids: &Receiver<[u8; 16]>) {
-    while let Ok(id) = ids.recv() {
-        let _ = transport.request("GET", &yo_core::media::blob_path(&id), &[], &[]);
+/// Fetches the blobs of photos and videos sent to the account into nothing, one at a time, and acknowledges each that
+/// came whole, once: only that counts as fetched at the hub, which deletes a blob after its last (spec 6.8). Nothing
+/// of them is kept, opened or printed.
+fn drainer(transport: &dyn Transport, blobs: &Receiver<Media>) {
+    while let Ok(blob) = blobs.recv() {
+        if let Ok(Some(_)) = media::fetch(transport, &blob) {
+            let _ = media::ack(transport, &blob.id);
+        }
     }
 }
 

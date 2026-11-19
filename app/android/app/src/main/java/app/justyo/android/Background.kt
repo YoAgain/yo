@@ -100,7 +100,7 @@ class YoWork(context: Context, parameters: WorkerParameters) : CoroutineWorker(c
         } catch (e: CancellationException) {
             throw e
         } catch (_: YoException.Replaced) {
-            repo.signOut()
+            repo.signOut(replaced = true)
             Result.failure()
         } catch (_: Exception) {
             if (runAttemptCount == 0 && inputData.getBoolean("urgent", false)) repo.pushFallback()

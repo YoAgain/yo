@@ -99,6 +99,10 @@ import uniffi.yo.usernameValid
                 Text(stringResource(R.string.ui_this_version_of_yo_no_longer_works_install_a_newer_build_to_),textAlign=TextAlign.Center,modifier=Modifier.padding(top=20.dp))
             }
             state.loading -> Box(Modifier.fillMaxSize(),contentAlignment=Alignment.Center) { LoadingIndicator() }
+            state.updating && state.username == null -> Column(Modifier.fillMaxSize().safeDrawingPadding().padding(32.dp),verticalArrangement=Arrangement.Center,horizontalAlignment=Alignment.CenterHorizontally) {
+                BrandText("Yo",96); Spacer(Modifier.height(24.dp)); LoadingIndicator()
+                Text(stringResource(R.string.yo_is_updating),textAlign=TextAlign.Center,modifier=Modifier.padding(top=20.dp))
+            }
             state.broken -> RecoveryRequired(model)
             state.username==null -> Onboarding(model,state)
             else -> FriendList(model,state)
@@ -370,7 +374,7 @@ import uniffi.yo.usernameValid
             }
         }
     }
-    if(scanning) QrScanner(onClose={scanning=false},onCode={code=it;scanning=false})
+    if(scanning) QrScanner(onClose={scanning=false},onCode={code=it.text;scanning=false})
 }
 /** The same Android tutorial is used on welcome and in Help. */
 @Composable internal fun YoTutorial(modifier: Modifier=Modifier, compact: Boolean = false, condensed: Boolean = false) {
@@ -920,9 +924,12 @@ private fun NotificationSettingsRow(onClick: () -> Unit) {
                                 onClick { profile = true; true }
                             },
                         ) {
-                            Row(horizontalArrangement = Arrangement.spacedBy((-5).dp)) {
-                                Text("Y", Modifier.alignByBaseline(), style = TextStyle(fontFamily = YoFont, fontSize = 29.sp))
-                                Text("o", Modifier.alignByBaseline(), style = TextStyle(fontFamily = YoFont, fontSize = 23.sp))
+                            // The red dot: the account is not backed up (Settings › Account Recovery says why).
+                            BadgedBox(badge = { if (!s.backedUp) Badge() }) {
+                                Row(horizontalArrangement = Arrangement.spacedBy((-5).dp)) {
+                                    Text("Y", Modifier.alignByBaseline(), style = TextStyle(fontFamily = YoFont, fontSize = 29.sp))
+                                    Text("o", Modifier.alignByBaseline(), style = TextStyle(fontFamily = YoFont, fontSize = 23.sp))
+                                }
                             }
                         }
                     }

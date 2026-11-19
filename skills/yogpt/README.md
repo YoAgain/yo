@@ -11,7 +11,8 @@ The operator's mailbox: `NAME.anything.jpg` put into `$YO_STATE/outbox` goes to 
 could not); `$YO_STATE/stats.json` (`{"contacts":N}`, once a minute) is for the admin page.
 
 ```sh
-YO_STATE=/var/lib/yo-yogpt-live YO_HUB=http://127.0.0.1:8080 YO_USERNAME=YOGPT \
+YO_STATE=/var/lib/yo-yogpt-live YO_HUB=http://127.0.0.1:8080 yo register YOGPT   # once
+YO_STATE=/var/lib/yo-yogpt-live YO_HUB=http://127.0.0.1:8080 \
   python3 skills/yogpt/yogpt.py --replies skills/yogpt/replies --quiet-for PING,PINGTEST
 ```
 

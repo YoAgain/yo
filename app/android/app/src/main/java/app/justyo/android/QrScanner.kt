@@ -27,7 +27,16 @@ import java.util.concurrent.Executors
 import java.util.concurrent.atomic.AtomicBoolean
 
 /** Camera analysis owns one bounded frame at a time; never logs or saves the scanned data. */
-@Composable internal fun QrScanner(onClose: ()->Unit,onCode: (String)->Unit) {
+/** A scanned code: its text, and the bytes it holds (a safety code is binary, read from the byte segments). */
+internal class ScannedQr(val text: String,val bytes: ByteArray)
+
+internal fun scanned(result: com.google.zxing.Result): ScannedQr {
+    @Suppress("UNCHECKED_CAST")
+    val segments=result.resultMetadata?.get(ResultMetadataType.BYTE_SEGMENTS) as? List<ByteArray>
+    return ScannedQr(result.text,segments?.fold(byteArrayOf()) { all,part -> all+part } ?: result.text.toByteArray(Charsets.ISO_8859_1))
+}
+
+@Composable internal fun QrScanner(onClose: ()->Unit,onCode: (ScannedQr)->Unit) {
     val context=LocalContext.current
     val owner=LocalLifecycleOwner.current
     var granted by remember { mutableStateOf(ContextCompat.checkSelfPermission(context,Manifest.permission.CAMERA)==PackageManager.PERMISSION_GRANTED) }
@@ -58,7 +67,7 @@ import java.util.concurrent.atomic.AtomicBoolean
                     for(row in 0 until height) for(col in 0 until width) data[row*width+col]=buffer.get(row*plane.rowStride+col*plane.pixelStride)
                     val source=PlanarYUVLuminanceSource(data,width,height,0,0,width,height,false)
                     val result=MultiFormatReader().decode(BinaryBitmap(HybridBinarizer(source)),mapOf(DecodeHintType.POSSIBLE_FORMATS to listOf(BarcodeFormat.QR_CODE)))
-                    val code=result.text
+                    val code=scanned(result)
                     if(completed.compareAndSet(false,true)) main.execute { if(!disposed.get()) deliver(code) }
 
                 } catch(_: NotFoundException) { /* Next frame. */ }

@@ -11,7 +11,10 @@ import javax.crypto.Cipher
 import javax.crypto.KeyGenerator
 import javax.crypto.SecretKey
 import javax.crypto.spec.GCMParameterSpec
+import uniffi.yo.LegacyIdentity
+import uniffi.yo.LegacySource
 import uniffi.yo.StateDb
+import uniffi.yo.legacyIdentity
 import uniffi.yo.StateDiagnostics
 
 /** Every caller runs on Dispatchers.IO. A failed read is never treated as an empty vault. */
@@ -49,7 +52,13 @@ class Vault(private val context: Context) {
     }
     @Synchronized fun secret(name: String): ByteArray = read(name) ?: randomBytes(32).also { write(name, it) }
     @Synchronized fun delete(name: String) = AtomicFile(File(directory, name)).delete()
-    @Synchronized fun clear() { directory.listFiles().orEmpty().filter { it.name != "state-key" }.forEach { it.delete() } }
+    /** Signed out: everything but what outlives an account on this phone (`KEPT`). */
+    @Synchronized fun clear() { directory.listFiles().orEmpty().filter { it.name.removeSuffix(".bak") !in KEPT }.forEach { it.delete() } }
+
+    companion object {
+        /** The state key; the one-time sign-in still to finish; a replaced account; a Block Store change still to make. */
+        val KEPT = setOf("state-key", "migration", "left", "synced-pending")
+    }
 }
 
 fun randomBytes(size: Int) = ByteArray(size).also { SecureRandom().nextBytes(it) }
@@ -61,8 +70,8 @@ fun atomicWrite(file: File, data: ByteArray) {
 }
 
 /**
- * The account's state: one SQLite database in the core's current schema. Files of older schemas are removed once at
- * launch (`migrate`): that install is signed out, and its saved recovery key signs it in again.
+ * The account's state: one SQLite database in the core's current schema. An older install's files are read once for
+ * its key material (`legacy`) and removed once its sign-in is kept in the vault (`Repository.migrate`).
  */
 class CoreState(context: Context, private val diagnostics: StateDiagnostics) {
     private val dir = context.noBackupFilesDir
@@ -71,12 +80,15 @@ class CoreState(context: Context, private val diagnostics: StateDiagnostics) {
 
     fun exists(): Boolean = path.exists()
 
-    /** Removes an older install's state files; true when that install had no current state (it is signed out). */
-    fun migrate(): Boolean {
-        val old = dir.listFiles().orEmpty().filter { it.name.startsWith("yo-state") && !it.name.startsWith("yo-state-v3") }
-        old.forEach { it.delete() }
-        return old.isNotEmpty() && !exists()
-    }
+    private fun old() = dir.listFiles().orEmpty().filter { it.name.startsWith("yo-state") && !it.name.startsWith("yo-state-v3") }
+
+    fun hasOld(): Boolean = old().isNotEmpty()
+
+    /** The old install's key material (its tables database, else its state file), under its state key. */
+    fun legacy(key: ByteArray?): LegacyIdentity? = legacyIdentity(listOf(File(dir, "yo-state.sqlite") to 3.toUByte(),
+        File(dir, "yo-state") to 0.toUByte()).map { (file, format) -> LegacySource(file.path, format, listOfNotNull(key), false) })
+
+    fun deleteOld() = old().forEach { it.delete() }
 
     @Synchronized fun database(key: ByteArray): StateDb =
         db ?: StateDb.openFresh(path.path, key, diagnostics).also { db = it }

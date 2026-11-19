@@ -153,6 +153,9 @@ enum Diagnostics {
     }
   }
 
+  /// Anonymous crash and error reports: on unless switched off (Status › Send Crashes); one setting for both senders.
+  static var reportsOn: Bool { UserDefaults.standard.object(forKey: "crashReports.on") as? Bool ?? true }
+
   static func flush() {
     let epoch = UserDefaults.standard.string(forKey: generation)
     queue.async { send(epoch: epoch) }
@@ -160,7 +163,7 @@ enum Diagnostics {
 
   private static func send(epoch: String?) {
     while let text = pending("error").first {
-      guard UserDefaults.standard.bool(forKey: "crashReports.on"),
+      guard reportsOn,
         UserDefaults.standard.string(forKey: generation) == epoch else { return }
       let answer = Hub.transport.request(method: "POST", path: "/v1/errors", headers: [], body: Data(text.utf8))
       guard answer.status == 204 else {

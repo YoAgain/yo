@@ -49,6 +49,43 @@ pub struct LegacySource {
     pub keys_unavailable: bool,
 }
 
+/// An old install's own key material (Android's one-time sign-in): the account secret (`ed25519`: a seed to convert)
+/// and the key the hub's storage is still sealed under.
+#[derive(uniffi::Record)]
+pub struct LegacyIdentity {
+    pub secret: Vec<u8>,
+    pub ed25519: bool,
+    pub storage_key: Option<Vec<u8>>,
+}
+
+fn sources_of(sources: Vec<LegacySource>) -> Vec<Source> {
+    sources
+        .into_iter()
+        .map(|source| Source {
+            path: source.path.into(),
+            format: source.format,
+            keys: source.keys.into_iter().filter_map(|key| key.try_into().ok()).collect(),
+            keys_unavailable: source.keys_unavailable,
+        })
+        .collect()
+}
+
+/// The identity of the first old state file that opens; none when there is none, `Network` when one is not readable
+/// now (asked again later, nothing is deleted meanwhile).
+#[uniffi::export]
+pub fn legacy_identity(sources: Vec<LegacySource>) -> Result<Option<LegacyIdentity>, crate::YoError> {
+    let local = legacy::local_identity(None, &sources_of(sources));
+    match local.identity {
+        Some(found) => Ok(Some(LegacyIdentity {
+            secret: found.secret.to_vec(),
+            ed25519: found.ed25519,
+            storage_key: found.storage_key.map(Vec::from),
+        })),
+        None if local.not_now => Err(crate::YoError::Network { message: "old state is unavailable now".into() }),
+        None => Ok(None),
+    }
+}
+
 #[derive(uniffi::Record)]
 pub struct LegacyShown {
     pub username: String,
@@ -81,16 +118,7 @@ pub fn legacy_sign_in(
     recovery_key: Option<String>,
     left: Option<Vec<u8>>,
 ) -> LegacyFound {
-    let sources: Vec<Source> = sources
-        .into_iter()
-        .map(|source| Source {
-            path: source.path.into(),
-            format: source.format,
-            keys: source.keys.into_iter().filter_map(|key| key.try_into().ok()).collect(),
-            keys_unavailable: source.keys_unavailable,
-        })
-        .collect();
-    let local = legacy::local_identity(saved.as_deref(), &sources);
+    let local = legacy::local_identity(saved.as_deref(), &sources_of(sources));
     let shown = Shown {
         username: shown.username,
         user_id: shown.user_id,

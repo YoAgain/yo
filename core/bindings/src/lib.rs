@@ -996,6 +996,16 @@ impl YoClient {
         Ok(self.look(|c| c.safety_number(&who))??)
     }
 
+    /// The safety number's QR code payload (spec 3.4), shown for the contact to scan.
+    pub fn safety_code(&self, who: String) -> Result<Vec<u8>, YoError> {
+        Ok(self.look(|c| c.safety_code(&who))??)
+    }
+
+    /// Whether a code scanned off the contact's screen (the QR code's own bytes) matches.
+    pub fn safety_code_matches(&self, who: String, scanned: Vec<u8>) -> Result<bool, YoError> {
+        Ok(self.look(|c| c.safety_code_matches(&who, &scanned))??)
+    }
+
     pub fn set_verified(&self, who: String, verified: bool) -> Result<(), YoError> {
         Ok(self.with(|c| c.set_verified(&who, verified))??)
     }

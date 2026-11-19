@@ -4,9 +4,16 @@ import Security
 import YoCore
 
 enum KeychainV1 {
+  /// Cheap: an account with old state (or the old preferences' seed) is a candidate, pending until `readSignedIn`
+  /// found today's state signed in. A current install reads nothing of its state here.
   @MainActor
   static func pending(account: Account?, saved: Data?) -> Bool {
-    legacyPending(hasAccount: account != nil, saved: saved, hasOldState: hasOldState, signedIn: signedIn)
+    legacyPending(hasAccount: account != nil, saved: saved, hasOldState: hasOldState, signedIn: nil)
+  }
+
+  /// `signedIn`, read off the main actor (it opens and decrypts the state); only for a candidate of `pending`.
+  static func readSignedIn() async -> Bool? {
+    await Task.detached { signedIn }.value
   }
 
   @MainActor

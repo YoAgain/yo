@@ -50,6 +50,9 @@ data class AppState(
     val loading: Boolean = true, val username: String? = null, val friends: List<Friend> = emptyList(),
     val busy: Boolean = false, val error: String? = null, val update: Boolean = false,
     val broken: Boolean = false, val secured: Boolean = false, val recovery: String? = null,
+    /** `updating`: an old install signs in again ("Yo is updating…"). `googleBackup`: wanted in Google's cloud;
+     *  `backedUp`: it is there, end-to-end encrypted (else the red dot on the menu). */
+    val updating: Boolean = false, val googleBackup: Boolean = true, val backedUp: Boolean = true,
     val media: List<Received> = emptyList(),
     val leftHanded: Boolean = false, val saveSent: Boolean = false, val requestsOpen: Boolean = true,
     val sent: Long = 0, val received: Long = 0, val pendingInvite: String? = null,

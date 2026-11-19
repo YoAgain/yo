@@ -170,9 +170,26 @@ fn clean_break_signs_in_each_old_state_and_keychain_item_with_the_same_account_k
     // Busy (another process holds it, or the file is locked until the phone is unlocked): not now, read again later.
     // Missing or damaged: never there.
     let read = |name: &str, format| yo_core::legacy::read_identity(&temporary.join(name), &KEY, format);
+    // Android's one-time sign-in (`legacy_identity`): an old `yo-state` or tables database gives its key material,
+    // one without a recovery key too; none is none; one not readable now is asked again, never taken as none.
+    let android = |name: &str, format, keys: Vec<Vec<u8>>| {
+        yo::legacy_identity(vec![yo::LegacySource {
+            path: temporary.join(name).to_string_lossy().into_owned(),
+            format,
+            keys,
+            keys_unavailable: false,
+        }])
+    };
+    for (name, format) in [("flat-v1", 0), ("tables.sqlite", 3)] {
+        let found = android(name, format, vec![vec![1; 32], KEY.to_vec()]).unwrap().expect("old identity");
+        assert_eq!(found.storage_key, Some(storage::key(SEED.try_into().unwrap()).to_vec()));
+    }
+    assert!(android("missing", 3, vec![KEY.to_vec()]).unwrap().is_none());
+    assert!(android("tables.sqlite", 3, vec![vec![1; 32]]).unwrap().is_none(), "another key opens nothing");
     let holder = rusqlite::Connection::open(temporary.join("single-row.sqlite")).unwrap();
     holder.execute_batch("BEGIN EXCLUSIVE").unwrap();
     assert!(matches!(read("single-row.sqlite", 2), Err(yo_core::Error::Network(_))));
+    assert!(matches!(android("single-row.sqlite", 2, vec![KEY.to_vec()]), Err(yo::YoError::Network { .. })));
     drop(holder);
     fs::write(temporary.join("flat-v1"), b"damaged").unwrap();
     assert!(matches!(read("flat-v1", 0), Err(yo_core::Error::State)));

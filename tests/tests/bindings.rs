@@ -911,6 +911,35 @@ fn a_photo_whose_state_did_not_save_is_tried_again_later() {
     a.upload_media_to(yo::send_target(pb), sealed.media, sealed.ciphertext).unwrap();
 }
 
+/// The app's transport with the blob store down: every upload fails.
+struct NoBlobs(App);
+
+impl HttpTransport for NoBlobs {
+    fn request(&self, method: String, path: String, headers: Vec<yo::Header>, body: Vec<u8>) -> HttpResult {
+        if method == "PUT" && path.starts_with("/v1/blobs/") {
+            return HttpResult { status: 0, body: Vec::new(), error: Some("offline".into()) };
+        }
+        self.0.request(method, path, headers, body)
+    }
+}
+
+/// A first photo opens the chat and receives the Yo waiting there; its upload fails. The Yo is not lost with it: the
+/// next call (`saved_events`) hands it out.
+#[test]
+fn a_yo_received_while_opening_a_chat_survives_a_failed_upload() {
+    let hub = TestHub::start();
+    let n = random_u64() % 1_000_000_000;
+    let (pa, pb) = (username(n), username(n + 1));
+    let app = Arc::new(NoBlobs(App(Http::new(hub.url()))));
+    let a = register_on(app, Disk::new(), vec![7; 32], pa.clone(), None, None, None, 0, String::new()).unwrap();
+    let b = client(&hub, &pb, "BOB", Disk::new());
+    b.send_yo(pa).unwrap();
+    let sealed = yo::seal_media(b"JPEG".repeat(1000), 800, 600).unwrap();
+    assert!(a.upload_media_to(yo::send_target(pb), sealed.media, sealed.ciphertext).is_err());
+    let saved = a.saved_events().unwrap();
+    assert_eq!(yos(&saved, &b.user_id()), 1, "the Yo that waited, handed out again");
+}
+
 /// Only a state that does not open (another key) is `State`; the app signs in again only then.
 #[test]
 fn a_state_that_does_not_open_is_state() {

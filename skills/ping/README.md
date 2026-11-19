@@ -8,7 +8,8 @@ other bots) are never answered. Per sender 1/s, burst 3 (volatile buckets, idle 
 photos, videos and group Yos wait for the one echo worker. Logs counts only (`echo answered=N`), never who.
 
 ```sh
-YO_STATE=/var/lib/yo-ping-live YO_HUB=http://127.0.0.1:8080 YO_USERNAME=PING python3 skills/ping/ping.py --quiet-for YOGPT,PINGTEST
+YO_STATE=/var/lib/yo-ping-live YO_HUB=http://127.0.0.1:8080 yo register PING   # once
+YO_STATE=/var/lib/yo-ping-live YO_HUB=http://127.0.0.1:8080 python3 skills/ping/ping.py --quiet-for YOGPT,PINGTEST
 ```
 
 Unit: [yo-ping@.service](yo-ping@.service), with `/etc/yo-ping-%i.env` (app/cli/README.md).

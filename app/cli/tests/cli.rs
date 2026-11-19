@@ -49,8 +49,10 @@ fn register_add_send_and_receive_once() {
     assert!(yo.ok(&["sync"]).as_array().unwrap().iter().all(|e| e["type"] != "message"), "handed out once");
     assert_eq!(yo.ok(&["status"])["contacts"], 1);
 
-    // The photo back as it came, sealed anew; a JPEG from a file without its metadata.
-    yo.ok(&["send", alice.user_id(), "--media", &reference]);
+    // The photo back as it came, sealed anew, its reference on stdin only (never an argument); no video from a file.
+    assert_eq!(yo.run(&["send", alice.user_id(), "--media", &reference]).0, 2);
+    assert_eq!(yo.run(&["send", alice.user_id(), "--video", "clip.mp4", "--duration-ms", "1000"]).0, 2);
+    assert_eq!(yo.run_with(&["send", alice.user_id(), "--media", "-"], &reference).0, 0);
     let (_, pictures) = answers_until_quiet(&mut alice, Duration::from_millis(800));
     assert_eq!(pictures, std::slice::from_ref(&photo_bytes));
     let mut with_exif = photo_bytes[..2].to_vec();

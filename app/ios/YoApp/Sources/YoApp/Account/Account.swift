@@ -247,6 +247,7 @@ final class AccountStore {
     opening = true
     defer { opening = false }
     updating = KeychainV1.pending(account: account, saved: UserDefaults.standard.data(forKey: Self.key))
+    if updating, await KeychainV1.readSignedIn() == true { updating = false }
     if updating {
       await migrate()
       if updating { return }
@@ -734,7 +735,8 @@ final class AccountStore {
   }
 
   /// One-time sign-in of an old install (KeychainV1), in the foreground once unlocked; retried with backoff while Yo is
-  /// in front. Nothing old goes before the new state is in.
+  /// in front. Nothing old goes before the new state is in. Never in a background launch (a silent push): that waits
+  /// for the next opening (owner's decision, PLAN).
   private func migrate() async {
     var pause = 1.0
     var tries = 0
@@ -744,7 +746,8 @@ final class AccountStore {
         return
       }
       tries += 1
-      let signedIn = KeychainV1.signedIn
+      let signedIn = await KeychainV1.readSignedIn()
+      guard updating, account == previous, Self.inFront else { return }
       if signedIn == true {
         updating = false
         updateStalled = false

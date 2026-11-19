@@ -93,6 +93,25 @@ fn yogpt_survives_a_hub_connection_refusal() {
     let _ = std::fs::remove_dir_all(&yo.state);
 }
 
+/// A directory with the account's secret but no state (a takeover cut short): the skill stays stopped (4) and never
+/// registers the account anew, so the device the hub knows keeps its place and its inbox.
+#[test]
+fn a_skill_without_a_registered_account_stays_stopped() {
+    let hub = TestHub::start();
+    let (mut bot, mut pal) = (someone(&hub), someone(&hub));
+    let yo = Yo::new(&hub);
+    std::fs::create_dir_all(&yo.state).unwrap();
+    std::fs::write(yo.state.join("account"), bot.account_secret()).unwrap();
+    std::fs::write(yo.state.join("key"), [9u8; 32]).unwrap();
+    pal.send_yo(bot.user_id()).unwrap();
+    for name in ["yogpt", "ping", "pingtest"] {
+        let mut skill = Process::spawn(yo.skill_command(name, &[], &[]));
+        assert_eq!(skill.exit_within(Duration::from_secs(20)), Some(4), "{name}");
+    }
+    assert_eq!(yos_until_quiet(&mut bot, Duration::from_millis(500)).len(), 1, "the device and its inbox stay");
+    let _ = std::fs::remove_dir_all(&yo.state);
+}
+
 /// Its device taken over by a new phone of the account: the skill ends with 3 (systemd leaves it stopped).
 #[test]
 fn yogpt_stops_when_the_hub_no_longer_knows_its_device() {
@@ -126,16 +145,18 @@ fn yogpt_answers_a_photo_with_a_picture_and_its_yos_carry_one() {
     assert!((0..=4).contains(&yos));
     assert!(files.contains(&pictures[0]));
 
-    // A photo to it: one picture back. Without an acknowledgement, its blob stays until expiry.
+    // A photo to it: one picture back. Its blob, fetched into nothing, is acknowledged once: of two fetches one is left.
     let (photo, sealed) = media::seal(b"a photo YoGPT never sees", 4, 3).unwrap();
-    let fetches = alice.media_fetches("YOGPT").unwrap();
-    assert_eq!(fetches, 1);
-    alice.upload(&photo, fetches).unwrap().send(&sealed).unwrap();
+    assert_eq!(alice.media_fetches("YOGPT").unwrap(), 1);
+    alice.upload(&photo, 2).unwrap().send(&sealed).unwrap();
     alice.send("YOGPT", Content::Photo(photo.clone())).unwrap();
     let (yos, pictures) = answers_until_quiet(&mut alice, Duration::from_secs(6));
     assert_eq!((yos, pictures.len()), (0, 1));
     assert!(files.contains(&pictures[0]));
-    assert!(media::fetch(alice.transport().as_ref(), &photo).unwrap().is_some(), "unacknowledged blob stays");
+    let transport = alice.transport();
+    assert!(media::fetch(transport.as_ref(), &photo).unwrap().is_some(), "one fetch left");
+    media::ack(transport.as_ref(), &photo.id).unwrap();
+    assert!(media::fetch(transport.as_ref(), &photo).unwrap().is_none(), "the last fetch taken: gone");
     let _ = std::fs::remove_dir_all(&yo.state);
     let _ = std::fs::remove_dir_all(&replies);
 }
@@ -306,10 +327,10 @@ fn echo_is_immediate_single_plain_bounded_and_logs_no_sender() {
     let yo = Yo::new(&hub);
     std::fs::create_dir_all(&yo.state).unwrap();
     let log_path = yo.state.join("test.log");
-    let mut command = yo.skill_command("ping", "ECHO", &[], &[]);
+    yo.registered_as("ECHO");
+    let mut command = yo.skill_command("ping", &[], &[]);
     command.stderr(std::fs::File::create(&log_path).unwrap()).stdout(Stdio::null());
     let bot = Process::spawn(command);
-    registered(&hub, "ECHO");
     let mut alice = someone(&hub);
     let began = Instant::now();
     alice.send_yo("ECHO").unwrap();
@@ -342,8 +363,6 @@ fn ping_answers_normal_yos_and_pingtest_answers_token_probes() {
     let (ping_dir, probe_dir) = (Yo::new(&hub), Yo::new(&hub));
     let _bot = ping(&ping_dir, &[], &[]);
     let _probe_bot = probe_dir.skill("pingtest", "PINGTEST", &[], &[]);
-    registered(&hub, "PING");
-    registered(&hub, "PINGTEST");
     let mut alice = someone(&hub);
     let (user, name) = alice.whois_begin("PING").unwrap().send().unwrap();
     alice.whois_end("PING", &user, name.clone()).unwrap();
@@ -379,7 +398,6 @@ fn ping_echoes_a_photo_and_a_video_as_they_came() {
     let hub = TestHub::start();
     let yo = Yo::new(&hub);
     let _bot = ping(&yo, &[], &[]);
-    registered(&hub, "PING");
     let mut alice = someone(&hub);
     alice.send_yo("PING").unwrap();
     let ping_id = first_yo(&mut alice);
@@ -420,7 +438,6 @@ fn ping_echoes_into_a_group_once_and_never_to_quiet_bots() {
     let (mut alice, mut leo) = (someone(&hub), someone(&hub));
     let quiet = leo.username().unwrap().to_lowercase();
     let _bot = ping(&yo, &["--quiet-for", &quiet], &[("PING_GROUP_COOLDOWN_MS", "2000")]);
-    registered(&hub, "PING");
     alice.send_yo("PING").unwrap();
     let ping_id = first_yo(&mut alice);
     let (group, _) = alice.create_group("Echo", &[ping_id.clone(), leo.user_id().to_string()]).unwrap();

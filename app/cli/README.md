@@ -11,7 +11,7 @@ export YO_STATE=~/.yo YO_HUB=https://dev.justyo.app
 yo register Chris                                   # once
 yo whoami | yo status | yo friends | yo contacts
 yo add lina                                         # a friend
-yo send lina                                        # a Yo; --photo F.jpg, --video F --duration-ms N, --media REF
+yo send lina                                        # a Yo; --photo F.jpg, or --media - (a media.ref on stdin)
 yo groups create "Trio" lina noah                   # groups [list|create|leave|accept|rename|add|remove]
 yo listen                                           # one JSON line per event, until stopped
 yo probe                                            # the round trip to PINGTEST, in ms
@@ -29,8 +29,10 @@ directory itself (and waits up to 30 s for another command that has it).
 answer, `content`: `yo`, `photo`, `video` or `other`, `media`: size, width, height, duration and `ref`), `new_chat`,
 `profile`, `identity_changed`, `group_changed`, and `probe` (`from`, `token`: answer with `yo echo-probe`). Printed
 events are acknowledged at once; with `--manual-ack` only by `yo ack`, and the unacknowledged come again after a
-restart. A `media.ref` holds the blob's key: whoever has it can open the photo. `--drain-media` forgets media keys
-instead and fetches every received blob into nothing (the hub then deletes it), for a bot that never looks.
+restart. A `media.ref` holds the blob's key: whoever has it can open the photo, so `send --media -` reads it from
+stdin, never from the arguments (which every local user sees). No video from a file: the CLI can neither check its
+length nor take out its metadata. `--drain-media` forgets media keys instead and fetches and acknowledges every
+received blob, never opened (the hub deletes it after its last fetch), for a bot that never looks.
 
 **The state directory** is YoGPT's as before: `account` (the account secret), `key` (the state key) and `state.sqlite`,
 all 0600; keep `account` in the operator's secret backup. A `state` file of the build before the database is taken
@@ -52,11 +54,14 @@ devices and sessions: nothing registers again.
 2. One environment file per bot and hub, root owned, 0600: `/etc/yo-yogpt-live.env`, `/etc/yo-ping-dev.env`, … with
    the values the old `$PINS` had, relabelled:
    ```sh
-   YO_HUB=http://127.0.0.1:8080               # dev: http://127.0.0.1:8090
+   # dev: http://127.0.0.1:8090
+   YO_HUB=http://127.0.0.1:8080
    YO_HUB_KEYS=PUBLIC_HUB_KEY,SPARE_PUBLIC_HUB_KEY
    YO_TRUST_ROOTS=PUBLIC_TRUST_ROOT,SPARE_PUBLIC_TRUST_ROOT
-   YO_ZK_PARAMS=PUBLIC_ZK_PARAMS                # PINGTEST needs none
+   YO_ZK_PARAMS=PUBLIC_ZK_PARAMS
    ```
+   systemd takes a `#` only at the start of a line: a comment behind a value becomes part of it. PINGTEST's file
+   leaves out `YO_ZK_PARAMS`.
 3. State directories: the units use `/var/lib/yo-<bot>-<hub>` (`StateDirectory=`). PING and PINGTEST had exactly
    these. For YoGPT read the old unit's `--account NAME=HUB,DIR` per hub; with `yo-yogpt.service` stopped, move each
    DIR whole (`account`, `key`, `state.sqlite`, `outbox/`, `stats.json`) to `/var/lib/yo-yogpt-<hub>` (with
@@ -81,4 +86,7 @@ devices and sessions: nothing registers again.
    `/opt/yo/yo-gpt.db`: it opens the `state.sqlite` that `yo` writes (same core, same database), so it rolls back at
    any time with the same devices. Never let both run on one directory.
 
-Exit 3 (the device gone) is final: the units do not restart then (`RestartPreventExitStatus=3`).
+Exit 3 (the device gone) and 4 (nothing registered) are final: the units do not restart then
+(`RestartPreventExitStatus=3 4`). A skill never registers, so a directory moved without its state cannot replace the
+account's device; a new bot is set up once by hand, with its environment file:
+`/opt/yo/yo --state /var/lib/private/yo-<bot>-<hub> register NAME`, before its unit first starts.

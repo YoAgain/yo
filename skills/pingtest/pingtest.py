@@ -5,7 +5,7 @@ silent: no contact, request, list event or notification at the app. Nothing per 
 no timing; the per-sender limits (1/s, burst 3) live in memory only and expire after 3 s. Logs counts only. Anything
 else sent to it is taken in and left unanswered; photos' and videos' blobs are fetched into nothing, never opened.
 
-  YO_STATE=… YO_HUB=… [YO_USERNAME=PINGTEST] pingtest.py
+  YO_STATE=… YO_HUB=… pingtest.py     (once before: yo register PINGTEST)
 """
 
 import os
@@ -17,7 +17,7 @@ import yocli  # noqa: E402
 
 
 def main():
-    yocli.registered(os.environ.get("YO_USERNAME"))
+    yocli.registered()
     limits, dropped, answered = yocli.Buckets(), yocli.Tally("dropped"), 0
     for event in yocli.listen("--drain-media"):
         if event.get("type") != "probe":

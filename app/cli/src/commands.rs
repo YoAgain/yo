@@ -270,37 +270,22 @@ fn read(path: &str, max: usize) -> Result<Vec<u8>, Failure> {
     Ok(bytes)
 }
 
+/// A Yo, with a photo from a file or a received photo or video sealed anew. No video from a file: the CLI could check
+/// neither its length nor take out its metadata (spec 5).
 fn send(context: &Context, to: &str, args: &[&str]) -> Outcome {
-    let flag = |name: &str| args.iter().position(|a| *a == name).and_then(|i| args.get(i + 1)).copied();
-    let number = |name: &str| -> Result<Option<u32>, Failure> {
-        flag(name).map(|v| v.parse().map_err(|_| Failure::usage(format!("{name}: a number")))).transpose()
-    };
-    let known = ["--photo", "--video", "--duration-ms", "--width", "--height", "--media"];
-    if !args.len().is_multiple_of(2) || args.chunks(2).any(|pair| !known.contains(&pair[0])) {
-        return Err(Failure::usage(
-            "send TO [--photo F | --video F --duration-ms N [--width W --height H] | --media REF]",
-        ));
-    }
-    let content = match (flag("--photo"), flag("--video"), flag("--media")) {
-        (None, None, None) => Content::Yo,
-        (Some(path), None, None) => {
+    let content = match args {
+        [] => Content::Yo,
+        ["--photo", path] => {
             let (bytes, width, height) = jpeg::clean(&read(path, MAX_PHOTO)?)
                 .ok_or_else(|| Failure::new(format!("{path}: not a JPEG of at most 1600 px a side")))?;
             Content::Photo(upload(context, to, &bytes, width, height)?)
         }
-        (None, Some(path), None) => {
-            let duration_ms = number("--duration-ms")?.ok_or_else(|| Failure::usage("--video needs --duration-ms"))?;
-            let (width, height) = (number("--width")?.unwrap_or(0), number("--height")?.unwrap_or(0));
-            let bytes = read(path, media::MAX_MEDIA_LEN)?;
-            let media = upload(context, to, &bytes, width as u16, height as u16)?;
-            Content::Video { media, duration_ms }
-        }
-        (None, None, Some(reference)) => {
+        ["--media", reference] => {
             let content =
                 content_of_ref(reference).ok_or_else(|| Failure::usage("--media: a media.ref of an event"))?;
             resend(context, to, content)?
         }
-        _ => return Err(Failure::usage("one of --photo, --video, --media")),
+        _ => return Err(Failure::usage("send TO [--photo JPEG | --media -]")),
     };
     let events = shared::send(context, &Target::parse(to), content)?;
     (context.emit)(events);

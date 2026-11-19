@@ -5,7 +5,7 @@ After=network.target
 [Service]
 Type=simple
 DynamicUser=yes
-Environment=YO_BIN=/opt/yo/yo YO_STATE=%S/yo-ping-%i YO_USERNAME=PING
+Environment=YO_BIN=/opt/yo/yo YO_STATE=%S/yo-ping-%i
 # YO_HUB, YO_HUB_KEYS, YO_TRUST_ROOTS, YO_ZK_PARAMS (app/cli/README.md)
 EnvironmentFile=/etc/yo-ping-%i.env
 ExecStart=/usr/bin/python3 -I -B /opt/yo/skills/ping/ping.py --quiet-for YOGPT,PINGTEST
@@ -14,8 +14,9 @@ StateDirectoryMode=0700
 UMask=0077
 Restart=on-failure
 RestartSec=3
-# 3: the hub no longer knows this device (replaced, name released, hub reset): stays stopped.
-RestartPreventExitStatus=3
+# 3: the hub no longer knows this device (replaced, name released, hub reset); 4: nothing registered in the directory
+# (a skill never registers: `yo register NAME` once, by hand). Both stay stopped.
+RestartPreventExitStatus=3 4
 NoNewPrivileges=yes
 PrivateTmp=yes
 ProtectSystem=strict

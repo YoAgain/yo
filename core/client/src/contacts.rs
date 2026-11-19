@@ -1,5 +1,8 @@
 use super::*;
 
+/// One side of a safety number: a user id and its account key.
+type Side = (Vec<u8>, Key);
+
 impl Client {
     /// Says yes to a request (spec 4.10): a contact from now on, sent the profile key, the name and a receipt.
     pub fn accept(&mut self, who: &str) -> Result<Vec<Event>> {
@@ -197,10 +200,28 @@ impl Client {
 
     /// The safety number with a contact (spec 3.4): this user's id and account key, and theirs as pinned here.
     pub fn safety_number(&self, who: &str) -> Result<String> {
+        let ((mine, my_key), (theirs, key)) = self.safety_sides(who)?;
+        identity::safety_number((&mine, &my_key), (&theirs, &key))
+    }
+
+    /// Both sides of the safety number with a contact: this user's id and key, and theirs as pinned here.
+    fn safety_sides(&self, who: &str) -> Result<(Side, Side)> {
         let user = self.contact_user(who)?;
         let key = self.state.contacts.get(&user).ok_or(Error::NotOnYo)?.account_key;
         let (mine, theirs) = (unhex(&self.state.user_id).unwrap_or_default(), unhex(&user).unwrap_or_default());
-        identity::safety_number((&mine, &self.my_account_key()), (&theirs, &key))
+        Ok(((mine, self.my_account_key()), (theirs, key)))
+    }
+
+    /// The safety number's QR code payload as this user shows it to a contact (spec 3.4).
+    pub fn safety_code(&self, who: &str) -> Result<Vec<u8>> {
+        let ((mine, my_key), (theirs, key)) = self.safety_sides(who)?;
+        identity::safety_code((&mine, &my_key), (&theirs, &key))
+    }
+
+    /// Whether the code scanned off the contact's screen matches (spec 3.4, `compare`).
+    pub fn safety_code_matches(&self, who: &str, scanned: &[u8]) -> Result<bool> {
+        let ((mine, my_key), (theirs, key)) = self.safety_sides(who)?;
+        identity::safety_code_matches((&mine, &my_key), (&theirs, &key), scanned)
     }
 
     /// Marks a contact verified (or not) after comparing safety numbers. Any contact can be verified (spec 3.4).

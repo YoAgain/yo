@@ -186,6 +186,7 @@
 <string name="support_offline">Couldn’t refresh the conversation. Your messages are kept here.</string>
 <string name="retry">Retry</string>
 <string name="scan_qr">Scan QR Code</string>
+    <string name="safety_mismatch">That code doesn’t match. Check you scanned this contact’s code.</string>
 <string name="camera_unavailable">Camera unavailable. Try scanning from Photos.</string>
 <string name="camera_permission_needed">Allow camera access in Android Settings to scan a code.</string>
 <string name="top_friend">Most Yos With</string>
@@ -231,9 +232,13 @@
     <string name="tutorial_camera">Swipe for Pictures</string>
     <string name="group_row">Group</string>
     <string name="account_recovery">Account Recovery</string>
+    <string name="google_backup">Back Up to Google</string>
+    <string name="google_backup_footer">Your account key is in your Google account, end-to-end encrypted: a new phone signs in by itself.</string>
+    <string name="google_backup_off">Your account isn’t backed up. Google encrypts it end to end only with a screen lock: set one in Android Settings, then turn this on.</string>
+    <string name="google_backup_needs_screen_lock">Set a screen lock in Android Settings first. Without it, Google can’t encrypt your account key end to end.</string>
+    <string name="yo_is_updating">Yo is updating…</string>
     <string name="account_backup">Account Backup</string>
     <string name="account_backup_footer">Tap to back up your encrypted contacts and blocked list.</string>
-    <string name="how_account_recovery_works">How Account Recovery Works</string>
     <string name="account_recovery_explanation">Save your Recovery Key somewhere safe. You can use it to sign in on a new phone. Account Backup saves your encrypted contacts and blocked list. Passkey recovery through Google Password Manager is currently unavailable.</string>
     <string name="compare_code">Compare Code</string>
     <string name="technical_details">Technical Details</string>

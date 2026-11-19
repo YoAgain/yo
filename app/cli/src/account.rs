@@ -109,10 +109,11 @@ impl Transport for Http {
         if signed {
             request = request.header(yo_wire::api::HEADER_APP, format!("yogpt/{BUILD}"));
         }
-        let response = request.send().map_err(|e| e.to_string())?;
+        // Without the URL: a blob's path is its capability (spec 6.8), never for an error or a log.
+        let response = request.send().map_err(|e| e.without_url().to_string())?;
         let status = response.status().as_u16();
         let mut body = Vec::new();
-        response.take(MAX_RESPONSE + 1).read_to_end(&mut body).map_err(|e| e.to_string())?;
+        response.take(MAX_RESPONSE + 1).read_to_end(&mut body).map_err(|_| "the answer broke off")?;
         if body.len() as u64 > MAX_RESPONSE {
             return Err("answer too large".into());
         }
@@ -289,4 +290,25 @@ fn register_new(
         Client::register_username_saved(transport, store, key, username, account, None, None, Push::none())?;
     configure(&mut client, config)?;
     Ok(Open::Opened(Box::new(Opened { client, _lock: lock })))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A transport error names neither the hub nor the path: a blob's id lets anyone fetch and acknowledge it.
+    #[test]
+    fn a_transport_error_carries_no_url() {
+        let config = Config {
+            state: PathBuf::new(),
+            hub: Some("http://127.0.0.1:1".into()),
+            hub_keys: Vec::new(),
+            trust_roots: Vec::new(),
+            zk_params: None,
+        };
+        let Err(error) = transport(&config).unwrap().request("GET", "/v1/blobs/SECRETID", &[], &[]) else {
+            panic!("port 1 answered")
+        };
+        assert!(!error.contains("SECRETID") && !error.contains("127.0.0.1"), "{error}");
+    }
 }

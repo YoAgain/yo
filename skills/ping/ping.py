@@ -4,7 +4,7 @@ same photo, a video as the same video (fetched and opened in memory by `yo send 
 In a group into the group, a group once per 30 s; never to `--quiet-for` users (the other bots). Per sender 1/s,
 burst 3; at most 64 photos, videos and group Yos wait for the one echo worker, more are dropped. Logs counts only.
 
-  YO_STATE=… YO_HUB=… [YO_USERNAME=PING] ping.py [--quiet-for YOGPT,PINGTEST]
+  YO_STATE=… YO_HUB=… ping.py [--quiet-for YOGPT,PINGTEST]     (once before: yo register PING)
 """
 
 import argparse
@@ -25,16 +25,17 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--quiet-for", action="append", default=[])
     args = parser.parse_args()
-    yocli.registered(os.environ.get("YO_USERNAME"))
+    yocli.registered()
     quiet = yocli.Quiet(yocli.names(args.quiet_for))
     limits, cooldown = yocli.Buckets(), yocli.Cooldown(GROUP_COOLDOWN)
     dropped, quieted, cooled = yocli.Tally("dropped"), yocli.Tally("from --quiet-for users"), yocli.Tally("cooled")
     answered = [0]
     lock = threading.Lock()
 
-    def echo(*send):
+    def echo(to, ref=None):
+        # A photo's or video's reference (its blob's id and key) on stdin, never among the arguments.
         try:
-            yocli.yo("send", *send)
+            yocli.yo("send", to, *(("--media", "-") if ref is not None else ()), stdin=ref)
         except yocli.Failed:
             return dropped.add()
         with lock:
@@ -65,9 +66,9 @@ def main():
         if event["content"] == "yo" and not event["group"]:
             echo(to)
             continue
-        send = (to,) if event["content"] == "yo" else (to, "--media", (event["media"] or {}).get("ref", ""))
+        ref = None if event["content"] == "yo" else (event["media"] or {}).get("ref", "")
         try:
-            jobs.put_nowait(send)
+            jobs.put_nowait((to, ref))
         except queue.Full:
             dropped.add()
 

@@ -2,7 +2,7 @@
 #![allow(dead_code)]
 
 use serde_json::Value;
-use std::io::{BufRead, BufReader};
+use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdout, Command, Stdio};
 use std::time::{Duration, Instant};
@@ -43,7 +43,21 @@ impl Yo {
 
     /// Runs a command: its exit code and its JSON (stdout, or stderr's on a failure).
     pub fn run(&self, args: &[&str]) -> (i32, Value) {
-        let out = self.command().args(args).output().unwrap();
+        self.run_with(args, "")
+    }
+
+    /// `run` with `input` on its stdin.
+    pub fn run_with(&self, args: &[&str], input: &str) -> (i32, Value) {
+        let mut child = self
+            .command()
+            .args(args)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap();
+        let _ = child.stdin.take().unwrap().write_all(input.as_bytes());
+        let out = child.wait_with_output().unwrap();
         let text = if out.status.success() { &out.stdout } else { &out.stderr };
         let text = String::from_utf8_lossy(text);
         let json = serde_json::from_str(text.lines().last().unwrap_or("null")).unwrap_or(Value::Null);
@@ -57,15 +71,24 @@ impl Yo {
         json
     }
 
-    /// A skill (`skills/NAME/NAME.py`) on this directory, registering `username` at its first start.
+    /// A skill (`skills/NAME/NAME.py`) on this directory, `username` registered by hand first if it has none (a skill
+    /// never registers).
     pub fn skill(&self, name: &str, username: &str, args: &[&str], env: &[(&str, &str)]) -> Process {
-        Process::spawn(self.skill_command(name, username, args, env))
+        self.registered_as(username);
+        Process::spawn(self.skill_command(name, args, env))
     }
 
-    pub fn skill_command(&self, name: &str, username: &str, args: &[&str], env: &[(&str, &str)]) -> Command {
+    /// `yo register username`, unless the directory has an account.
+    pub fn registered_as(&self, username: &str) {
+        if self.run(&["whoami"]).0 == 4 {
+            self.ok(&["register", username]);
+        }
+    }
+
+    pub fn skill_command(&self, name: &str, args: &[&str], env: &[(&str, &str)]) -> Command {
         let script = Path::new(env!("CARGO_MANIFEST_DIR")).join(format!("../../skills/{name}/{name}.py"));
         let mut python = Command::new("python3");
-        python.arg(script).args(args).envs(self.envs()).envs(env.iter().copied()).env("YO_USERNAME", username);
+        python.arg(script).args(args).envs(self.envs()).envs(env.iter().copied());
         python
     }
 }
@@ -125,15 +148,6 @@ pub fn state_dir() -> PathBuf {
 
 pub fn someone(hub: &TestHub) -> Client {
     register(Http::new(hub.url()), &username(random_u64() % 1_000_000_000), None)
-}
-
-/// Waits until `name` is registered on the hub (a skill's first start).
-pub fn registered(hub: &TestHub, name: &str) {
-    let ready = Instant::now();
-    while Client::username_free(Http::new(hub.url()).as_ref(), name).unwrap() {
-        assert!(ready.elapsed() < Duration::from_secs(20), "{name} never registered");
-        std::thread::sleep(Duration::from_millis(50));
-    }
 }
 
 /// Yos from anyone until `quiet` passes without one: who sent each.

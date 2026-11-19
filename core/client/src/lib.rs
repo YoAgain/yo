@@ -1197,6 +1197,25 @@ impl Client {
         }
     }
 
+    /// Events a step handed out whose caller failed after it (an upload that did not go): they wait for the next call
+    /// again (`saved_for_app`), as if never handed out.
+    pub fn hand_back(&mut self, events: &[Event]) {
+        if self.guest_events.is_some() {
+            return;
+        }
+        let back: Vec<Event> = events
+            .iter()
+            .filter_map(|event| {
+                self.state.handed.iter().position(|e| e == event).map(|at| self.state.handed.remove(at))
+            })
+            .collect();
+        if !back.is_empty() {
+            self.state.events.splice(0..0, back);
+            // Not saved: they are handed out again after a restart anyway.
+            let _ = self.persist();
+        }
+    }
+
     /// Ends a public operation: saves and hands out the events. After an error they wait for the next call.
     fn finish<T>(&mut self, result: Result<T>) -> Result<Vec<Event>> {
         if let Some(returned) = self.guest_events {

@@ -32,7 +32,7 @@ The same job on each platform, so both apps behave alike.
 
 | Job | iOS | Android |
 |---|---|---|
-| Account item synced to a new phone | iCloud Keychain | Google Block Store |
+| Account item synced to a new phone (only end-to-end encrypted, spec 7) | iCloud Keychain | Google Block Store, cloud copy only with `isEndToEndEncryptionAvailable()` |
 | Keys on this device | Keychain | Android Keystore |
 | Passkey for the backup (PRF) | Apple Passwords | Credential Manager (Google Password Manager) |
 | Push | APNs | Firebase Cloud Messaging |

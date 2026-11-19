@@ -6,6 +6,7 @@ else, never runs or logs what a message says, and logs counts only, never who.
 
 import json
 import os
+import re
 import subprocess
 import sys
 import threading
@@ -26,17 +27,36 @@ def log(what):
     print(f"{os.path.basename(sys.argv[0])}: {what}", file=sys.stderr, flush=True)
 
 
+def reason(error):
+    """What a failure may log: its class (`network`, `refused`, …), never its text, which can hold a URL, a path or a
+    name."""
+    if not isinstance(error, Failed):
+        return type(error).__name__
+    head = (error.error or "").split(":")[0]
+    return head if re.fullmatch(r"[A-Za-z][A-Za-z -]*", head) else "failed"
+
+
 def stop(code):
-    """Ends the whole skill (any thread): systemd restarts it, unless the device is gone (3)."""
+    """Ends the whole skill (any thread): systemd restarts it, unless the device is gone (3) or nothing is registered
+    (4)."""
     if code == GONE:
         log("stopped: the hub no longer knows this device (replaced by another, the name released, or the hub reset)")
     sys.stderr.flush()
     os._exit(code)
 
 
-def yo(*args, timeout=180):
-    """Runs one `yo` command: its JSON output, or `Failed`. A device the hub no longer knows ends the skill."""
-    done = subprocess.run([YO, *args], capture_output=True, text=True, timeout=timeout)
+def yo(*args, stdin=None, timeout=180):
+    """Runs one `yo` command, `stdin` its input: its JSON output, or `Failed` (never with the arguments in it). A device
+    the hub no longer knows ends the skill."""
+    failed = None
+    try:
+        done = subprocess.run([YO, *args], input=stdin, capture_output=True, text=True, timeout=timeout)
+    except subprocess.TimeoutExpired:
+        failed = Failed(1, "timeout", True)
+    except OSError as error:
+        failed = Failed(1, f"yo not started: {type(error).__name__}", False)
+    if failed:
+        raise failed  # outside the handler: the original, with the arguments, is not even its context
     if done.returncode == 0:
         return json.loads(done.stdout)
     if done.returncode == GONE:
@@ -48,24 +68,22 @@ def yo(*args, timeout=180):
     raise Failed(done.returncode, error.get("error"), error.get("retryable", False))
 
 
-def registered(username):
-    """The account (`whoami`): registered first as `username` (YO_USERNAME) when the directory has none yet."""
+def registered():
+    """The account (`whoami`). With nothing registered in the directory the skill stays stopped (4): it never
+    registers, so a takeover that lacks its state cannot replace the account's device. Setting up is
+    `yo register NAME`, once, by hand."""
     wait = 1
     while True:
         try:
             return yo("whoami")
         except Failed as failed:
-            if failed.code == NOT_REGISTERED and username:
-                try:
-                    yo("register", username)
-                    log(f"registered {username}")
-                    continue
-                except Failed as again:
-                    failed = again
+            if failed.code == NOT_REGISTERED:
+                log("stopped: nothing registered in the directory (yo register NAME, once, by hand)")
+                stop(NOT_REGISTERED)
             if not failed.retryable:
-                log(f"stopped: {failed.error}")
+                log(f"stopped: {reason(failed)}")
                 stop(1)
-            log(f"{failed.error}, again in {wait} s")
+            log(f"{reason(failed)}, again in {wait} s")
             time.sleep(wait)
             wait = min(wait * 2, 60)
 
@@ -151,7 +169,7 @@ class Quiet:
             except Failed as failed:
                 if failed.error == "protocol: oneself":
                     continue
-                log(f"--quiet-for {name}: {failed.error}" + (", again later" if failed.retryable or failed.error == "not on Yo" else ""))
+                log(f"--quiet-for {name}: {reason(failed)}" + (", again later" if failed.retryable or failed.error == "not on Yo" else ""))
                 if failed.retryable or failed.error == "not on Yo":
                     left.append(name)
         self.unresolved = left
