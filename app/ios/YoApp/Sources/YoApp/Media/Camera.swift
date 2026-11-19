@@ -237,8 +237,19 @@ final class Camera: NSObject, @unchecked Sendable {
       finishedAlone = nil
       videoActive = true
       let file = FileManager.default.temporaryDirectory.appending(path: "\(UUID().uuidString).mov")
+      keepLens(true)
       movieOutput.startRecording(to: file, recordingDelegate: self)
     }
+  }
+
+  /// While filming, the lens it started on stays and zooms on its own: a camera of several lenses switched between
+  /// them as the drawn finger zoomed back, and the picture jumped. Apple advises the same for recording.
+  private func keepLens(_ keep: Bool) {
+    guard let device = input?.device, device.isVirtualDevice,
+      (Diagnostics.attempt { try device.lockForConfiguration() }) != nil
+    else { return }
+    device.setPrimaryConstituentDeviceSwitchingBehavior(keep ? .locked : .auto, restrictedSwitchingBehaviorConditions: [])
+    device.unlockForConfiguration()
   }
 
   /// Nil when none was recording or it failed.
@@ -402,6 +413,7 @@ extension Camera: AVCaptureFileOutputRecordingDelegate {
     if !done, let error { Diagnostics.record(error) }
     if !done { try? FileManager.default.removeItem(at: file) }
     queue.async { [self] in
+      keepLens(false)
       if let movie {
         self.movie = nil
         videoActive = false
