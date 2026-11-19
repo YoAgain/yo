@@ -17,7 +17,8 @@ struct AppIconPage: View {
 
   var body: some View {
     let iconSide: CGFloat = 64
-    return Group {
+    // Scrolls only where it must: the sheet measures it as high as its icons (sheetFit).
+    return ScrollView {
       VStack(spacing: 24) {
         ForEach(0..<2) { row in
           HStack(alignment: .top, spacing: 12) {
@@ -65,7 +66,9 @@ struct AppIconPage: View {
     .onChange(of: scenePhase) { _, phase in
       if phase == .active { current = UIApplication.shared.alternateIconName }
     }
+    .scrollBounceBehavior(.basedOnSize)
     .navigationTitle("App Icon")
+    .sheetFit()
     .navigationBarTitleDisplayMode(.inline)
     .toolbar(.visible, for: .navigationBar)
     .problemAlert("Icon Couldn’t Be Changed", $iconError)

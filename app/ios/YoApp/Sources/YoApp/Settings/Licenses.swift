@@ -41,6 +41,7 @@ struct LicensesPage: View {
       }
     }
     .navigationTitle("About & Licenses")
+    .sheetFit()
     .navigationBarTitleDisplayMode(.inline)
   }
 }

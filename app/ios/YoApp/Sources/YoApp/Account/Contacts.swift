@@ -157,6 +157,7 @@ private struct ContactsList: View {
       }
     }
     .navigationTitle("Contacts")
+    .sheetFit()
     .navigationBarTitleDisplayMode(.inline)
     .sheet(item: $openGroup) { group in GroupMembersSheet(bar: group) }
     .sheet(item: $open) { friend in
@@ -328,6 +329,7 @@ private struct ContactDetail: View {
       }
     }
     .navigationTitle(friend.name)
+    .sheetFit()
     .navigationBarTitleDisplayMode(.inline)
     .toolbar {
       ToolbarItem(placement: .principal) {
@@ -499,6 +501,7 @@ private struct ContactTechnicalDetails: View {
       }
     }
     .navigationTitle("Technical Details")
+    .sheetFit()
     .navigationBarTitleDisplayMode(.inline)
   }
 

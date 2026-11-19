@@ -1,4 +1,5 @@
 import Foundation
+import OSLog
 import SwiftUI
 import UIKit
 import YoCore
@@ -32,11 +33,9 @@ struct SettingsView: View {
   }
   @State private var path: [Page] = []
   @State private var showingDeleteAccount = false
-  /// Where the first page's rows begin and end: the sheet opens as high as them, with the list's own margin above
-  /// them repeated below (`fit`).
-  @State private var rowsTop: CGFloat?
-  @State private var rowsBottom: CGFloat?
-  private var fit: CGFloat? { rowsBottom.flatMap { bottom in rowsTop.map { bottom + $0 } } }
+  /// The page in view and its height (`SheetFit`): the sheet's one detent. Half height until the first page is
+  /// measured; a page that does not tell its height takes the full one.
+  @State private var fit: (page: UUID, detent: PresentationDetent)?
 
   private var currentIconAsset: String {
     AppIconPage.icons.first { $0.name == currentIconName }?.image ?? "IconStandard"
@@ -63,7 +62,6 @@ struct SettingsView: View {
               }
               .padding(.vertical, 8)
             }
-            .onGeometryChange(for: CGFloat.self) { $0.frame(in: .scrollView).minY } action: { rowsTop = $0 }
           }
           Section {
             NavigationLink(value: Page.appIcon) {
@@ -92,15 +90,16 @@ struct SettingsView: View {
               Label("Add Friends", systemImage: "person.fill.badge.plus").labelStyle(Tile(.green))
             }
             .tint(Color(.label))
-            .onGeometryChange(for: CGFloat.self) { $0.frame(in: .scrollView).maxY } action: { rowsBottom = $0 }
           }
         }
       }
       .listSectionSpacing(.compact)
-      // It fits, so it holds still (the rows' places stay the sheet's height).
+      // It fits, so it holds still.
       .scrollBounceBehavior(.basedOnSize)
-      // No title on the first page: its rows start at the sheet's top. The pages pushed in keep their bar.
+      .sheetFit()
+      // No title on the first page: its rows start at the sheet's top. The pages pushed in keep their bar, inline.
       .toolbar(.hidden, for: .navigationBar)
+      .navigationBarTitleDisplayMode(.inline)
       .task { await accounts.refreshSupport() }
       .onAppear { currentIconName = UIApplication.shared.alternateIconName }
       .navigationDestination(for: Page.self) { page in
@@ -128,6 +127,7 @@ struct SettingsView: View {
           }
         }
         .toolbar(.visible, for: .navigationBar)
+        .navigationBarTitleDisplayMode(.inline)
       }
     }
     .hitchScene("settings root")
@@ -136,9 +136,12 @@ struct SettingsView: View {
         HitchMonitor.shared.scene = path.last.map { String(describing: $0) } ?? "settings root"
       #endif
     }
-    // One detent at a time, so no grabber: the first page as high as its rows, the pages pushed in the full
-    // height, back on the first page its own height again. Swiping down still closes it.
-    .presentationDetents(path.isEmpty ? fit.map { [.height($0)] } ?? [.large] : [.large])
+    // One detent at a time, so no grabber: each page as high as its rows, a long one the full height (a height
+    // detent stops there). Swiping down still closes it.
+    .presentationDetents([fit?.detent ?? .medium])
+    .environment(\.sheetFit) { page, detent in
+      if let detent { fit = (page, detent) } else if fit?.page == page { fit = (page, .large) }
+    }
     .presentationDragIndicator(.hidden)
     // Below full height an iOS 26 sheet is see-through glass: opaque instead.
     .presentationBackground(Color(.systemGroupedBackground))
@@ -147,5 +150,46 @@ struct SettingsView: View {
       guard !Task.isCancelled else { return }
       hasRecoveryKey = available
     }
+  }
+}
+
+extension EnvironmentValues {
+  /// A page of the Yodentity sheet telling its height (`SheetFit`); nil: it left.
+  @Entry var sheetFit: @MainActor (UUID, PresentationDetent?) -> Void = { _, _ in }
+}
+
+extension View {
+  /// The sheet as high as this scrolling page: its content with the list's own margins and the bar above it (a
+  /// height detent leaves out the home indicator's strip, so not the bottom inset).
+  func sheetFit() -> some View { modifier(SheetFit()) }
+}
+
+/// Tells the sheet this page's height while it is in view: when it shows, when its content changes.
+struct SheetFit: ViewModifier {
+  @Environment(\.sheetFit) private var report
+  @State private var page = UUID()
+  @State private var height: CGFloat?
+  @State private var shown = false
+
+  func body(content: Content) -> some View {
+    content
+      .onScrollGeometryChange(for: CGFloat.self) { geometry in
+        geometry.contentSize.height + geometry.contentInsets.top
+      } action: { _, height in
+        guard height > 0, abs(height - (self.height ?? 0)) > 1 else { return }
+        self.height = height
+        #if YO_DEV
+          Logger(subsystem: "app.justyo", category: "settings").notice("sheet page height \(height, privacy: .public)")
+        #endif
+        if shown { report(page, .height(height)) }
+      }
+      .onAppear {
+        shown = true
+        if let height { report(page, .height(height)) }
+      }
+      .onDisappear {
+        shown = false
+        report(page, nil)
+      }
   }
 }

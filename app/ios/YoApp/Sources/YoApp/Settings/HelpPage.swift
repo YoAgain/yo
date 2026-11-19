@@ -48,6 +48,7 @@ struct HelpPage: View {
     // About & Licenses opens whole, its text already read.
     .task { await LicenseContent.prepare() }
     .navigationTitle("Help & About")
+    .sheetFit()
     .navigationBarTitleDisplayMode(.inline)
     .sheet(isPresented: $showingMessage) { MessagePage() }
   }

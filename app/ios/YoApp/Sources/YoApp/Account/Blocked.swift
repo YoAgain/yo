@@ -18,6 +18,7 @@ struct BlockedPage: View {
   var body: some View {
     Form { sections }
       .navigationTitle("Blocked")
+      .sheetFit()
       .navigationBarTitleDisplayMode(.inline)
       .confirmDestructive(
         $unblocking, title: { "Unblock \($0.name)?" }, action: { _ in "Unblock" },
@@ -88,6 +89,7 @@ struct BlockedPage: View {
       }
     }
     .navigationTitle("Block Contact")
+    .sheetFit()
     .navigationBarTitleDisplayMode(.inline)
     .confirmDestructive(
       $blockingNew, title: { "Block \($0.name)?" }, message: { _ in "You won’t get their Yos." },
