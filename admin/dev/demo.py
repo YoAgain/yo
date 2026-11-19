@@ -247,6 +247,10 @@ def make_hub(path: str, rng: random.Random, now: int, n_users: int, live: bool) 
     for _ in range(rng.randint(30, 55) if live else 4):
         db.execute("INSERT INTO messages (device_id,envelope,received_at) VALUES (?,?,?)",
                    (rng.choice(devices), rid(rng, 180), now - int(rng.expovariate(1 / (6 * HOUR)))))
+    # A few for a phone that has been off for days.
+    for _ in range(3 if live else 0):
+        db.execute("INSERT INTO messages (device_id,envelope,received_at) VALUES (?,?,?)",
+                   (devices[-1], rid(rng, 180), now - 2 * DAY - rng.randint(0, 8 * HOUR)))
     for _ in range(rng.randint(6, 14) if live else 1):
         db.execute("INSERT INTO blobs VALUES (?,?,?,?,?,0,192,1)", (rid(rng), rng.choice(users), rng.randint(80_000, 9_000_000),
                    rng.randint(1, 4), now - rng.randint(0, 20 * HOUR)))
@@ -325,9 +329,11 @@ def make_hub(path: str, rng: random.Random, now: int, n_users: int, live: bool) 
                 if kind == "yo-in":  # the hub's own counts that follow the Yos: delivery latency, pushes
                     acked = n + rng.randint(0, 2)
                     lat = [0, 0, 0, 0]
+                    # Most land within a second; "later" is a friend's phone that was offline (more of them at night).
+                    off = 0.04 + 0.08 * (1 - busy)
                     for _ in range(acked):
                         r = rng.random()
-                        lat[0 if r < 0.82 else 1 if r < 0.95 else 2 if r < 0.985 else 3] += 1
+                        lat[3 if r < off else 0 if r < off + 0.8 else 1 if r < off + 0.92 else 2] += 1
                     for k, c in zip(("latency-1s", "latency-5s", "latency-60s", "latency-slow"), lat):
                         if c:
                             db.execute("INSERT INTO events VALUES (?,?,?)", (k, m, c))

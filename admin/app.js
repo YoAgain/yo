@@ -432,7 +432,11 @@ if (document.body.classList.contains("login")) {
   // Push (the share the services took), Hub errors (5xx answers), in the range; with nothing counted yet, no bars and
   // "no data yet" in the hover. The rest goes into hovers: Deleted (in the range) and DAU/MAU under Accounts,
   // retention D1/D7/D30 under Yos, crash-free users with Problems.
-  const LAT = ["latency-1s", "latency-5s", "latency-60s", "latency-slow"], LAT_NAME = ["< 1 s", "< 5 s", "< 1 min", "> 1 min"];
+  // Speed: how long from the hub taking a Yo to the friend's phone having it, in four buckets; the last one is mostly a
+  // phone that was offline (the Yo waited at the hub), not a slow hub.
+  const LAT = ["latency-1s", "latency-5s", "latency-60s", "latency-slow"];
+  const LAT_NAME = ["Within 1 s", "1–5 s", "5–60 s", "Later (phone offline)"];
+  let speedData = null;
   const areaSub = {};
   const healthRows = (h, ym, yh) => {
     const span = range === 1 ? "last 24 hours" : range ? `${range} days` : "since the start";
@@ -440,14 +444,13 @@ if (document.body.classList.contains("login")) {
     const sums = (keys) => slots.map((s) => keys.map((k) => slotSum(s, all(k), yh(k))));
     const whole = (rows) => rows.reduce((a, r) => a.map((v, i) => v + r[i]), rows[0].map(() => 0));
     const none = (key, what) => { sparkData[key].empty = `No data yet: the hub has counted no ${what} in this range`; $(`c-${key}`).dataset.tip = "no data yet"; };
-    // Delivery: the bucket the 95th percentile falls in, per bar (1 to 4: < 1 s … > 1 min); the median in the hover.
-    const at = (b, q) => { const n = b.reduce((a, v) => a + v, 0); let c = 0; return n ? b.findIndex((v) => (c += v) >= q * n) : -1; };
+    // Speed: per bar the share of Yos on the friend's phone within 1 s (higher is better); the hover splits them all.
     const lat = sums(LAT), latAll = whole(lat), latN = (b) => b.reduce((a, v) => a + v, 0);
-    spark("dl", null, lat.map((b) => at(b, 0.95) + 1), names,
-      (i) => (latN(lat[i]) ? `p95 ${LAT_NAME[at(lat[i], 0.95)]} · median ${LAT_NAME[at(lat[i], 0.5)]} · ${num(latN(lat[i]))} Yos` : "no Yos"),
-      `Speed: how long a Yo takes from the sender to the friend's phone · ${latN(latAll) ? `p95 ${LAT_NAME[at(latAll, 0.95)]}, median ${LAT_NAME[at(latAll, 0.5)]}` : "no Yos"} · ${span}`, 4);
+    const fast = (b) => (latN(b) ? (100 * b[0]) / latN(b) : 0);
+    spark("dl", null, lat.map(fast), names, (i) => (latN(lat[i]) ? `${num(latN(lat[i]))} Yos · ${pctText(fast(lat[i]))} within 1 s` : "no Yos"),
+      latN(latAll) ? `${pctText(fast(latAll))} within 1 s` : "", 100);
+    speedData = { lat, all: latAll, names, span };
     if (!latN(latAll)) none("dl", "delivered Yos");
-    $("c-dl").classList.add("bad-up");
     // Push: the share the services took.
     const ps = sums(["push-ok", "push-fail"]), psAll = whole(ps), share = ([ok, bad]) => (ok + bad ? (100 * ok) / (ok + bad) : null);
     spark("ps", null, ps.map((p) => share(p) ?? 0), names,
@@ -642,8 +645,14 @@ if (document.body.classList.contains("login")) {
     // A stretch of days (Total, long): its last kept day.
     const rows = ends.map((e) => { for (let d = e; d > e - step; d--) if (kept[d]) return kept[d]; return null; });
     verData = { rows, names: ends.map((e) => (e === t ? "today" : dayName(e))), first, today: kept[t] || null };
-    const node = $("vr-spark"), W = 140, H = 28, slot = W / n;
-    node.replaceChildren(...rows.flatMap((row, i) => vStack(row, i * slot + slot * 0.16, slot * 0.68, H, 0)));
+    // The row: one bar of today's shares (the last kept day while today has none), like Platforms.
+    const now = verData.today || [...rows].reverse().find(Boolean);
+    $("vr-bar").replaceChildren(...VKEYS.map((k, i) => {
+      if (!now?.[i]) return null;
+      const x = el("span", `v-${k}`);
+      x.style.flexGrow = now[i];
+      return x;
+    }).filter(Boolean));
     const p = vPct(verData.today);
     $("c-vr").dataset.tip = p == null ? "" : `today: ${p} % current`;
   };
@@ -699,7 +708,7 @@ if (document.body.classList.contains("login")) {
     const blobs = ok && h.blobs;
     set("q-n", ok ? num(h.messages) : "–");
     // The queue in the Speed row's hover: what still waits for its device.
-    $("c-dl").dataset.more = ok ? `Waiting: ${num(h.messages)} messages${h.messages && h.oldest_waiting ? `, oldest ${rel(h.oldest_waiting)}` : ""}${blobs ? ` · ${num(blobs[0])} images (${bytes(blobs[1])})` : ""}` : "";
+    $("c-dl").dataset.more = ok ? `Waiting for offline phones: ${num(h.messages)} Yos${h.messages && h.oldest_waiting ? ` (oldest ${rel(h.oldest_waiting)})` : ""}${blobs ? ` · ${num(blobs[0])} photos (${bytes(blobs[1])})` : ""}` : "";
     $("c-q").dataset.tip = ok ? `${num(h.messages)} messages waiting for their device${h.messages && h.oldest_waiting ? `, oldest ${rel(h.oldest_waiting)}` : ""} · ${blobs ? `${num(blobs[0])} images waiting: ${bytes(blobs[1])}` : "images unknown"}` : "";
 
     // Users: ten, by the chosen column (last seen first); a click opens the user in the Users tab.
@@ -1428,6 +1437,36 @@ if (document.body.classList.contains("login")) {
     if (d && d.rows.some((r) => !r)) out.push(el("div", "hc-lines", `Kept daily since ${dayName(d.first)}.`));
     return out;
   };
+  // Speed: the range's split in one bar with its four shares named, then per bar the same, smaller; a bar under the
+  // pointer names its time, its Yos and its share within 1 s.
+  const speedCard = (cap) => {
+    const d = speedData, n = d.lat.length, W = 264, H = 64, bottom = 16, B = H - bottom, slot = W / n;
+    const tot = d.all.reduce((a, v) => a + v, 0), pct = (b, i) => { const t = b.reduce((a, v) => a + v, 0); return t ? (100 * b[i]) / t : 0; };
+    const bar = el("div", "hc-pbar sp-bar");
+    d.all.forEach((v, i) => { if (v) { const x = el("span", `sp${i}`); x.style.flexGrow = v; bar.append(x); } });
+    const legend = el("dl", "hc-kv sp-kv");
+    LAT_NAME.forEach((name, i) => legend.append(el("dt", `sp${i}`, name), el("dd", null, pctText(pct(d.all, i)))));
+    const s = svg("svg", { viewBox: `0 0 ${W} ${H}`, class: "hc-chart vchart" });
+    const groups = d.lat.map((b, i) => {
+      const g = svg("g", { class: "vb" }), t = b.reduce((a, v) => a + v, 0), x = (i * slot + slot * 0.14).toFixed(1), w = (slot * 0.72).toFixed(1);
+      if (!t) g.append(svg("rect", { x, width: w, y: B - 1.5, height: 1.5, rx: 1, class: "b zero" }));
+      let y = B;
+      b.forEach((v, k) => { if (!v) return; const hh = (v / t) * (B - 2); y -= hh; g.append(svg("rect", { x, width: w, y: y.toFixed(1), height: hh.toFixed(1), class: `sp${k}` })); });
+      return g;
+    });
+    s.append(...groups);
+    const label = (x, text, anchor) => { const t = svg("text", { x, y: H - 3, "text-anchor": anchor, class: "ax" }); t.textContent = text; return t; };
+    s.append(label(0, d.names[0] || "", "start"), label(W, d.names[n - 1] || "", "end"));
+    const say = (i) => { const t = d.lat[i].reduce((a, v) => a + v, 0); cap.textContent = `${d.names[i]} · ${t ? `${num(t)} Yos · ${pctText(pct(d.lat[i], 0))} within 1 s` : "no Yos"}`; };
+    s.onpointermove = (e) => {
+      const r = s.getBoundingClientRect(), i = Math.min(n - 1, Math.max(0, Math.floor(((e.clientX - r.left) / r.width) * n)));
+      groups.forEach((g, k) => g.classList.toggle("on", k === i)); say(i);
+    };
+    s.onpointerleave = () => { groups.forEach((g) => g.classList.remove("on")); say(n - 1); };
+    say(n - 1);
+    return [el("div", "sp-big", `${pctText(pct(d.all, 0))} within 1 s`), el("div", "hc-note", `${num(tot)} Yos · ${d.span}`), bar, legend, s, cap,
+      el("div", "hc-lines", "Time from sending a Yo to the friend's phone having it. Later = the friend's phone was offline, so the Yo waited until it came back.")];
+  };
   const buildCard = (node) => {
     const key = node.dataset.card, head = el("div", "hc-head"), body = [];
     if (key.startsWith("svc:")) {
@@ -1448,6 +1487,7 @@ if (document.body.classList.contains("login")) {
       body.push(...verCard(cap));
     }
     else if (d?.empty) body.push(el("div", "hc-lines", d.empty));
+    else if (key === "dl" && speedData) body.push(...speedCard(cap));
     else if (d && d.values.length > 1) {
       const cls = row.classList.contains("bad-up") ? "bad" : d.cls || (row.closest("#t-system") ? "cool" : "");
       body.push(barChart(d, cls, cap), cap);

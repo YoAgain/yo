@@ -456,6 +456,7 @@ table.list { width: 100%; border-collapse: collapse; font-size: 13px; font-varia
 .crow .stack.plats { grid-column: 4; height: 10px; }
 .stack.plats span { background: var(--muted); opacity: .6; }
 .stack.plats .p-ios { background: var(--amethyst); opacity: 1; } .stack.plats .p-android { background: var(--ok); opacity: 1; }
+.stack.plats .v-current { background: var(--ok); opacity: 1; } .stack.plats .v-update { background: var(--warn); opacity: 1; } .stack.plats .v-must { background: var(--bad); opacity: 1; }
 .stack.plats .p-bot { background: #8a8494; opacity: 1; } .stack.plats .p-cli { background: var(--warn); opacity: 1; }
 /* A name or id in a table, frosted with the eye: inline-block so the filter is drawn in every browser */
 .pii { display: inline-block; max-width: 100%; overflow: hidden; text-overflow: ellipsis; vertical-align: bottom; }
@@ -801,6 +802,16 @@ body.dash { max-width: 1400px; }
 .spark .v-must, .hc-chart .v-must { fill: var(--bad); } .spark .v-unknown, .hc-chart .v-unknown { fill: var(--muted); opacity: .6; }
 .hc-chart.vchart .vb { opacity: .8; } .hc-chart.vchart .vb.on { opacity: 1; }
 .hc-chart.vchart + .hc-cap + .hc-legend { margin-top: 4px; }
+/* Speed: the share within 1 s big, the four buckets in one bar and per block; later (phone offline) grey, not red. */
+.sp-big { font-size: 22px; font-weight: 800; color: var(--ok); line-height: 1.1; }
+.sp-bar { margin: 8px 0 6px; height: 12px; }
+.sp-kv { margin-bottom: 8px; }
+.sp-kv dt { display: inline-flex; align-items: center; gap: 6px; }
+.sp-kv dt::before { content: ""; width: 8px; height: 8px; border-radius: 2px; }
+.sp-bar .sp0, .sp-kv .sp0::before { background: var(--ok); } .hc-chart .sp0 { fill: var(--ok); }
+.sp-bar .sp1, .sp-kv .sp1::before { background: #a3e4b8; } .hc-chart .sp1 { fill: #a3e4b8; }
+.sp-bar .sp2, .sp-kv .sp2::before { background: var(--warn); } .hc-chart .sp2 { fill: var(--warn); }
+.sp-bar .sp3, .sp-kv .sp3::before { background: var(--muted); } .hc-chart .sp3 { fill: var(--muted); }
 .hc-pn { font-weight: 700; font-variant-numeric: tabular-nums; }
 .hc-legend { display: flex; gap: 12px; color: var(--muted); font-size: 11px; }
 .hc-legend span { display: inline-flex; align-items: center; gap: 5px; }
