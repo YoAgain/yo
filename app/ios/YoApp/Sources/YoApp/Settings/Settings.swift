@@ -104,11 +104,12 @@ struct SettingsView: View {
       // It fits, so it holds still.
       .scrollBounceBehavior(.basedOnSize)
       .sheetFit()
-      // No title on the first page, only the system's close button in its inline bar (counted in its height). The
-      // pages pushed in keep the same bar, so a push never shows or hides it.
+      // "Yodentity" as the inline title, the system's close button on the right (counted in the height). The pages
+      // pushed in keep the same bar, so a push never shows or hides it.
+      .navigationTitle("Yodentity")
       .navigationBarTitleDisplayMode(.inline)
       .toolbar {
-        ToolbarItem(placement: .cancellationAction) {
+        ToolbarItem(placement: .topBarTrailing) {
           Button(role: .close) { dismiss() }
         }
       }
