@@ -1,0 +1,12 @@
+# JNA resolves the generated FFI methods and callback structures by their original names.
+-keep class uniffi.yo.** { *; }
+-keep class com.sun.jna.** { *; }
+# JNA also ships desktop-only AWT helpers; Android/UniFFI never calls these APIs.
+-dontwarn java.awt.Component
+-dontwarn java.awt.GraphicsEnvironment
+-dontwarn java.awt.HeadlessException
+-dontwarn java.awt.Window
+# WorkManager's Room 2.6 rule keeps the database class but not the constructor Room creates it with (R8 full mode).
+-keep class * extends androidx.room.RoomDatabase { <init>(); }
+# Glance creates a widget's ActionCallback by reflection (actionRunCallback<WidgetSend>): a tap did nothing in release.
+-keep class * implements androidx.glance.appwidget.action.ActionCallback { <init>(); }
