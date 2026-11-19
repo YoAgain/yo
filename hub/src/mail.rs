@@ -53,6 +53,9 @@ pub(crate) fn writer(db: Arc<Db>, queue: std::sync::mpsc::Receiver<Delivery>, mo
                 for (delivery, mut outcome) in batch.into_iter().zip(outcomes) {
                     // Here, not in the request: one cut off after its envelope was stored still wakes and pushes.
                     if let (Delivered::Stored(devices), Some(hub)) = (&mut outcome, &hub) {
+                        // Counted here too: a bot's inbox apart (every device a bot's), nothing of whose.
+                        let bot = !devices.is_empty() && devices.iter().all(|w| w.bot);
+                        hub.count(if bot { crate::Event::YoInBot } else { crate::Event::YoIn }, 1);
                         hub.woken(std::mem::take(devices), delivery.urgent, &delivery.runtime);
                     }
                     let _ = delivery.stored.send(Ok(outcome));
@@ -220,7 +223,6 @@ pub(crate) async fn post_envelope(
     let outcome = outcome.await.ok().and_then(Result::ok).ok_or_else(|| refuse(StatusCode::INTERNAL_SERVER_ERROR))?;
     match outcome {
         Delivered::Stored(_) => {
-            hub.count(crate::Event::YoIn, 1);
             if let Some(sender) = request {
                 hub.requests.take(&sender, &user, hub.clock_ms());
             }

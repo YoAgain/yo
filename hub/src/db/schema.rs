@@ -1,4 +1,4 @@
-//! The store's schema (`SCHEMA`, schema 6) and the way every older database a hub has written comes up to it.
+//! The store's schema (`SCHEMA`, schema 7) and the way every older database a hub has written comes up to it.
 //! A database of another schema is refused, never half migrated.
 
 use super::{diagnostic_write, immediate, legacy_crash};
@@ -43,11 +43,12 @@ pub(super) fn upgrade(conn: &mut Connection) -> rusqlite::Result<()> {
     migrate_diagnostics(conn)?;
     conn.execute_batch("CREATE TABLE IF NOT EXISTS diagnostic_seen (uuid TEXT PRIMARY KEY, diagnostic_id INTEGER NOT NULL REFERENCES diagnostics(id) ON DELETE CASCADE) WITHOUT ROWID;")?;
     with_support(conn, legacy_max)?;
-    with_support_done(conn)
+    with_support_done(conn)?;
+    with_todos(conn)
 }
 
 /// The schema this hub writes; another is refused, never half migrated (1 and 2 are brought up: `from_1`, `from_2`).
-const SCHEMA_VERSION: i64 = 6;
+const SCHEMA_VERSION: i64 = 7;
 
 pub(super) const SCHEMA: &str = "
 CREATE TABLE IF NOT EXISTS users (
@@ -150,8 +151,8 @@ CREATE TABLE IF NOT EXISTS deliveries_hourly (
 );
 -- Events per minute (minutes since the epoch), a count of each kind and nothing else: no user, device, envelope,
 -- blob or group (6.6). `yo-in` a Yo accepted into an inbox, `yo-out` one a device fetched and acknowledged,
--- `media-in` a blob uploaded, `media-out` a blob fetched, `group-create` a group made. Statistics of no one:
--- kept for good, for the operator's page.
+-- `media-in` a blob uploaded (`media-in-bytes` its bytes), `media-out` a blob fetched, `group-create` a group made.
+-- Statistics of no one: kept for good, for the operator's page.
 CREATE TABLE IF NOT EXISTS events (
     kind TEXT NOT NULL,
     minute INTEGER NOT NULL,
@@ -252,7 +253,7 @@ fn check_version(conn: &Connection) -> rusqlite::Result<()> {
     let tables: i64 =
         conn.query_row("SELECT count(*) FROM sqlite_master WHERE type = 'table'", [], |row| row.get(0))?;
     match version {
-        SCHEMA_VERSION | 1 | 2 | 3 | 4 | 5 => Ok(()),
+        SCHEMA_VERSION | 1 | 2 | 3 | 4 | 5 | 6 => Ok(()),
         0 if tables == 0 => conn.execute_batch(&format!("PRAGMA user_version = {SCHEMA_VERSION}")),
         _ => Err(rusqlite::Error::InvalidParameterName(format!(
             "database schema {version}, this hub writes {SCHEMA_VERSION}: start from an empty database"
@@ -411,6 +412,9 @@ pub(super) fn with_support_done(conn: &mut Connection) -> rusqlite::Result<()> {
             UPDATE support_messages SET done_at=read_at WHERE from_team=0 AND read_at IS NOT NULL;",
             )?;
         }
+        if user_version(tx)? >= 6 {
+            return Ok(());
+        }
         if has_table(tx, "todos")? {
             tx.execute_batch(
                 "INSERT INTO support_messages(user_id,from_team,text,created_at,done_at)
@@ -419,6 +423,25 @@ pub(super) fn with_support_done(conn: &mut Connection) -> rusqlite::Result<()> {
             )?;
         }
         tx.execute_batch("PRAGMA user_version=6;")
+    })
+}
+
+/// Schema 7: the team's to-dos in a table of their own again; the X'' thread's rows move there, text and times kept.
+pub(super) fn with_todos(conn: &mut Connection) -> rusqlite::Result<()> {
+    immediate(conn, |tx| {
+        tx.execute_batch(
+            "CREATE TABLE IF NOT EXISTS todos (id INTEGER PRIMARY KEY AUTOINCREMENT,
+            text TEXT NOT NULL, created_at INTEGER NOT NULL, done_at INTEGER);",
+        )?;
+        if user_version(tx)? >= 7 {
+            return Ok(());
+        }
+        tx.execute_batch(
+            "INSERT INTO todos(text,created_at,done_at)
+            SELECT text,created_at,done_at FROM support_messages WHERE user_id=X'' ORDER BY created_at,id;
+            DELETE FROM support_messages WHERE user_id=X'';
+            PRAGMA user_version=7;",
+        )
     })
 }
 

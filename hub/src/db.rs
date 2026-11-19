@@ -5,7 +5,7 @@ mod schema;
 use rusqlite::{params, Connection, OptionalExtension, Transaction, TransactionBehavior};
 // The in-file tests use these through `super::*`.
 #[cfg(test)]
-use schema::{migrate_diagnostics, with_feedback_type, with_support, with_support_done, DIAGNOSTIC_DAYS, SCHEMA};
+use schema::{migrate_diagnostics, with_feedback_type, with_support, with_support_done, with_todos, DIAGNOSTIC_DAYS, SCHEMA};
 use std::sync::{Mutex, MutexGuard, PoisonError};
 use yo_wire::api;
 use yo_wire::content::BlobId;
@@ -84,6 +84,14 @@ pub struct Wake {
     pub device_id: DeviceId,
     pub push_platform: u8,
     pub push_token: Vec<u8>,
+    /// A bot's device (`is_bot_app`): its Yos are counted apart (`yo-in-bot`, 6.6).
+    pub bot: bool,
+}
+
+/// A bot's app as its device names it (`Yo-App`): YoGPT, or the CLI the bots (STATUS, PING, …) run on. The operator's
+/// counts keep bots apart by it; a person on the CLI counts as a bot too.
+pub fn is_bot_app(app: Option<&str>) -> bool {
+    app.is_some_and(|app| app.starts_with("yogpt/") || app.starts_with("cli/"))
 }
 
 /// An envelope for the writer (`Db::deliver`): for a user, with the sender's device check.
@@ -858,9 +866,7 @@ impl Db {
             FROM support_messages s WHERE length(s.user_id)>0 GROUP BY s.user_id
             ORDER BY (sum(s.from_team=0 AND s.done_at IS NULL)>0) DESC,max(s.created_at) DESC LIMIT 999",
         )?;
-        let (at, open): (i64, i64) = conn.query_row("SELECT coalesce(max(created_at),0),coalesce(sum(done_at IS NULL),0) FROM support_messages WHERE user_id=X''", [], |r| Ok((r.get(0)?, r.get(1)?)))?;
-        let mut rows = vec![serde_json::json!({"user_id":"team","name":"Team To-Dos","unread":0,"open":open,"at":at})];
-        rows.extend(stmt.query_map([], |r| Ok(serde_json::json!({"user_id":r.get::<_,String>(0)?,"at":r.get::<_,i64>(1)?,"unread":r.get::<_,i64>(2)?,"name":r.get::<_,Option<String>>(3)?})))?.collect::<rusqlite::Result<Vec<_>>>()?);
+        let rows: Vec<_> = stmt.query_map([], |r| Ok(serde_json::json!({"user_id":r.get::<_,String>(0)?,"at":r.get::<_,i64>(1)?,"unread":r.get::<_,i64>(2)?,"name":r.get::<_,Option<String>>(3)?})))?.collect::<rusqlite::Result<_>>()?;
         Ok(serde_json::json!(rows))
     }
 
@@ -933,17 +939,36 @@ impl Db {
         self.run("UPDATE diagnostics SET done=?2 WHERE id=?1", params![id, done])
     }
 
-    pub fn todo_done(&self, id: i64, done: Option<u64>) -> rusqlite::Result<bool> {
+    /// A support message done (`Some(at)`) or open again.
+    pub fn message_done(&self, id: i64, done: Option<u64>) -> rusqlite::Result<bool> {
         self.one_changed("UPDATE support_messages SET done_at=?1 WHERE id=?2", params![done, id])
     }
 
-    /// An operator's To-Do, with no account attached.
+    /// The team's to-dos (`todos`, schema 7), oldest first.
+    pub fn todos(&self) -> rusqlite::Result<serde_json::Value> {
+        let conn = self.conn();
+        let mut stmt = conn.prepare("SELECT id,text,created_at,done_at FROM todos ORDER BY created_at,id")?;
+        let rows: Vec<_> = stmt
+            .query_map([], |r| {
+                Ok(serde_json::json!({"id":r.get::<_,i64>(0)?,"text":r.get::<_,String>(1)?,
+                    "created_at":r.get::<_,i64>(2)?,"done_at":r.get::<_,Option<i64>>(3)?}))
+            })?
+            .collect::<rusqlite::Result<_>>()?;
+        Ok(serde_json::json!(rows))
+    }
+
+    pub fn todo_done(&self, id: i64, done: Option<u64>) -> rusqlite::Result<bool> {
+        self.one_changed("UPDATE todos SET done_at=?1 WHERE id=?2", params![done, id])
+    }
+
+    pub fn todo_delete(&self, id: i64) -> rusqlite::Result<bool> {
+        self.one_changed("DELETE FROM todos WHERE id=?1", [id])
+    }
+
+    /// An operator's to-do, with no account attached.
     pub fn todo(&self, text: &str, now: u64) -> rusqlite::Result<i64> {
         let conn = self.conn();
-        conn.execute(
-            "INSERT INTO support_messages (user_id,from_team,text,created_at) VALUES (X'',1,?1,?2)",
-            params![text, now],
-        )?;
+        conn.execute("INSERT INTO todos (text,created_at) VALUES (?1,?2)", params![text, now])?;
         Ok(conn.last_insert_rowid())
     }
 
@@ -1235,9 +1260,14 @@ impl Db {
                 continue;
             }
             let devices: Vec<Wake> = tx
-                .prepare_cached("SELECT id, push_platform, push_token FROM devices WHERE user_id = ?1")?
+                .prepare_cached("SELECT id, push_platform, push_token, app FROM devices WHERE user_id = ?1")?
                 .query_map([user], |row| {
-                    Ok(Wake { device_id: array(row.get(0)?)?, push_platform: row.get(1)?, push_token: row.get(2)? })
+                    Ok(Wake {
+                        device_id: array(row.get(0)?)?,
+                        push_platform: row.get(1)?,
+                        push_token: row.get(2)?,
+                        bot: is_bot_app(row.get::<_, Option<String>>(3)?.as_deref()),
+                    })
                 })?
                 .collect::<Result<_, _>>()?;
             // Only the last allowed slot matters: an index probe, no count.
@@ -1410,7 +1440,7 @@ mod tests {
         let id = db.todo("fix", 8).unwrap();
         let row: (String, u64, Option<u64>) = db
             .conn()
-            .query_row("SELECT text,created_at,done_at FROM support_messages WHERE id=?1", [id], |r| {
+            .query_row("SELECT text,created_at,done_at FROM todos WHERE id=?1", [id], |r| {
                 Ok((r.get(0)?, r.get(1)?, r.get(2)?))
             })
             .unwrap();
@@ -1433,7 +1463,7 @@ mod tests {
     }
 
     #[test]
-    fn schemas_3_and_4_reach_6_without_losing_support_or_diagnostics() {
+    fn schemas_3_and_4_reach_7_without_losing_support_or_diagnostics() {
         for version in [3, 4] {
             let path = std::env::temp_dir().join(format!("yo-support-{version}-{}.sqlite", std::process::id()));
             let _ = std::fs::remove_file(&path);
@@ -1463,7 +1493,7 @@ mod tests {
             for _ in 0..2 {
                 let db = Db::open(path.to_str().unwrap()).unwrap();
                 let conn = db.conn();
-                assert_eq!(conn.query_row("PRAGMA user_version", [], |r| r.get::<_, i64>(0)).unwrap(), 6);
+                assert_eq!(conn.query_row("PRAGMA user_version", [], |r| r.get::<_, i64>(0)).unwrap(), 7);
                 let message: (String, String, i64) = conn
                     .query_row("SELECT text,app_version,created_at FROM support_messages WHERE id=10", [], |r| {
                         Ok((r.get(0)?, r.get(1)?, r.get(2)?))
@@ -1471,11 +1501,10 @@ mod tests {
                     .unwrap();
                 assert_eq!(message, ("Help with notifications 🎨".into(), "ios/123".into(), 1700000000000));
                 assert_eq!(
-                    conn.query_row("SELECT text FROM support_messages WHERE user_id=X''", [], |r| r
-                        .get::<_, String>(0))
-                        .unwrap(),
+                    conn.query_row("SELECT text FROM todos", [], |r| r.get::<_, String>(0)).unwrap(),
                     "Fix notifications"
                 );
+                assert!(!conn.prepare("SELECT 1 FROM support_messages WHERE user_id=X''").unwrap().exists([]).unwrap());
                 assert_eq!(conn.query_row("SELECT count(*) FROM feedback", [], |r| r.get::<_, i64>(0)).unwrap(), 0);
                 let diagnostic: (i64, i64, i64, bool) = conn
                     .query_row("SELECT count,first_seen,last_seen,done FROM diagnostics", [], |r| {
@@ -1556,8 +1585,36 @@ mod tests {
         assert_eq!(db.support_thread(&leo).unwrap().messages.len(), 1000);
         let id = db.todo("task", 7).unwrap();
         assert!(db.todo_done(id, Some(8)).unwrap());
+        assert_eq!(db.todos().unwrap()[0]["done_at"], 8);
         assert!(db.todo_done(id, None).unwrap());
         assert!(!db.todo_done(id + 1, None).unwrap());
+        assert!(db.support_threads().unwrap().as_array().unwrap().iter().all(|t| t["user_id"] != "team"));
+        assert!(db.todo_delete(id).unwrap() && !db.todo_delete(id).unwrap());
+        assert_eq!(db.todos().unwrap(), serde_json::json!([]));
+    }
+
+    #[test]
+    fn schema_7_moves_the_team_thread_into_todos_once() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch("CREATE TABLE support_messages(id INTEGER PRIMARY KEY AUTOINCREMENT,user_id BLOB,from_team INTEGER,
+                text TEXT,created_at INTEGER,read_at INTEGER,app_version TEXT NOT NULL DEFAULT '',done_at INTEGER);
+            INSERT INTO support_messages(user_id,from_team,text,created_at,done_at) VALUES
+                (zeroblob(16),0,'hi',100,NULL),(X'',1,'open task 🎨',90,NULL),(X'',1,'done task',95,205);
+            PRAGMA user_version=6;").unwrap();
+        for _ in 0..2 {
+            with_support_done(&mut conn).unwrap();
+            with_todos(&mut conn).unwrap();
+            let todos: Vec<(String, i64, Option<i64>)> = conn
+                .prepare("SELECT text,created_at,done_at FROM todos ORDER BY id")
+                .unwrap()
+                .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))
+                .unwrap()
+                .map(Result::unwrap)
+                .collect();
+            assert_eq!(todos, [("open task 🎨".into(), 90, None), ("done task".into(), 95, Some(205))]);
+            assert_eq!(conn.query_row("SELECT count(*) FROM support_messages", [], |r| r.get::<_, i64>(0)).unwrap(), 1);
+            assert_eq!(conn.query_row("PRAGMA user_version", [], |r| r.get::<_, i64>(0)).unwrap(), 7);
+        }
     }
 
     #[test]
@@ -2127,9 +2184,21 @@ mod tests {
         assert_eq!(synchronous(), 1);
         assert_eq!(db.conn().query_row("PRAGMA wal_autocheckpoint", [], |row| row.get::<_, i64>(0)).unwrap(), 16384);
         let (id, _, _) = db.fetch(&[1; 16], 10).unwrap().remove(0);
-        db.ack(&[1; 16], &[id]).unwrap();
+        assert_eq!(db.ack(&[1; 16], &[id]).unwrap(), 1);
         assert!(db.fetch(&[1; 16], 10).unwrap().is_empty());
         assert_eq!(synchronous(), 1);
+    }
+
+    #[test]
+    fn a_bots_devices_are_marked_for_the_counts() {
+        assert!(is_bot_app(Some("yogpt/202611190000")) && is_bot_app(Some("cli/7")));
+        assert!(!is_bot_app(Some("ios/202611191257")) && !is_bot_app(Some("android/3")) && !is_bot_app(None));
+        let db = Db::open(":memory:").unwrap();
+        let bot = user(register(&db, b"BOT", 1, 1, 0));
+        db.touch(&[1; 16], 0, Some("cli/7")).unwrap();
+        let devices_hash = yo_wire::devices::hash(&[1; 32], &[[1; 32]]);
+        let delivered = db.deliver(&[Incoming { user: bot, devices_hash, envelope: b"envelope" }], 0, 10).unwrap();
+        assert!(matches!(&delivered[..], [Delivered::Stored(devices)] if devices.iter().all(|w| w.bot)));
     }
 
     /// Exit without dropping SQLite (no close-time checkpoint): the committed WAL survives a process crash.

@@ -1,4 +1,4 @@
-//! The operator's routes behind `Yo-Admin-Token` (hub/README.md): support threads, to-dos, diagnostics, reserved
+//! The operator's routes behind `Yo-Admin-Token` (hub/README.md): support threads, the to-dos, diagnostics, reserved
 //! names, deleting a user. Missing, disabled and incorrect credentials all answer `404`.
 
 use crate::error::{refuse, Res};
@@ -21,9 +21,9 @@ pub(crate) fn routes(hub: &Arc<Hub>) -> Router<Arc<Hub>> {
         .route("/v1/admin/messages", get(get_threads))
         .route("/v1/admin/messages/{user}", get(get_thread).post(post_reply))
         .route("/v1/admin/messages/{user}/handled", post(post_handled))
-        .route("/v1/admin/messages/done/{id}", post(post_done))
-        .route("/v1/admin/todos", post(post_todo))
-        .route("/v1/admin/todos/{id}", post(post_done))
+        .route("/v1/admin/messages/done/{id}", post(post_message_done))
+        .route("/v1/admin/todos", get(get_todos).post(post_todo))
+        .route("/v1/admin/todos/{id}", post(post_todo_done).delete(delete_todo))
         .route("/v1/admin/diagnostics", get(get_diagnostics).put(put_diagnostics))
         .route("/v1/admin/reserved", get(get_reserved).post(post_reserved).put(put_reserved))
         .route("/v1/admin/reserved/{name}", delete(delete_reserved))
@@ -70,10 +70,9 @@ async fn get_threads(State(hub): Hubs) -> Res<Json<Value>> {
     Ok(Json(hub.db.support_threads()?))
 }
 
-/// One user's thread, or "team": the to-dos.
+/// One user's thread.
 async fn get_thread(State(hub): Hubs, Path(user): Path<String>) -> Res<Json<Value>> {
-    let user = if user == "team" { Vec::new() } else { user_id(&user)?.to_vec() };
-    Ok(Json(hub.db.admin_support_thread(&user)?))
+    Ok(Json(hub.db.admin_support_thread(&user_id(&user)?)?))
 }
 
 async fn post_reply(State(hub): Hubs, Path(user): Path<String>, body: Bytes) -> Res<StatusCode> {
@@ -99,17 +98,39 @@ async fn post_handled(State(hub): Hubs, Path(user): Path<String>, body: Bytes) -
     Ok(StatusCode::NO_CONTENT)
 }
 
-/// A message or to-do done ("1") or open again ("0").
-async fn post_done(State(hub): Hubs, Path(id): Path<i64>, body: Bytes) -> Res<StatusCode> {
-    let done = match body.as_ref() {
-        b"1" => Some(now_ms()),
-        b"0" => None,
-        _ => return Err(bad()),
-    };
-    if !hub.db.todo_done(id, done)? {
-        return Err(refuse(StatusCode::NOT_FOUND));
+/// "1" done (now), "0" open again.
+fn done_body(body: &[u8]) -> Res<Option<u64>> {
+    match body {
+        b"1" => Ok(Some(now_ms())),
+        b"0" => Ok(None),
+        _ => Err(bad()),
     }
-    Ok(StatusCode::NO_CONTENT)
+}
+
+fn found(changed: bool) -> Res<StatusCode> {
+    match changed {
+        true => Ok(StatusCode::NO_CONTENT),
+        false => Err(refuse(StatusCode::NOT_FOUND)),
+    }
+}
+
+/// A support message done ("1") or open again ("0").
+async fn post_message_done(State(hub): Hubs, Path(id): Path<i64>, body: Bytes) -> Res<StatusCode> {
+    found(hub.db.message_done(id, done_body(&body)?)?)
+}
+
+/// The team's to-dos (`todos`): `[{id, text, created_at, done_at}]`, oldest first.
+async fn get_todos(State(hub): Hubs) -> Res<Json<Value>> {
+    Ok(Json(hub.db.todos()?))
+}
+
+/// A to-do done ("1") or open again ("0").
+async fn post_todo_done(State(hub): Hubs, Path(id): Path<i64>, body: Bytes) -> Res<StatusCode> {
+    found(hub.db.todo_done(id, done_body(&body)?)?)
+}
+
+async fn delete_todo(State(hub): Hubs, Path(id): Path<i64>) -> Res<StatusCode> {
+    found(hub.db.todo_delete(id)?)
 }
 
 /// A to-do, plain UTF-8 text: `201 {"id"}`.

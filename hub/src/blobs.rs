@@ -389,7 +389,7 @@ pub(crate) async fn put_blob(
         // Handed out from now on. Left not ready (a crash just before), it goes at the next start or within the hour.
         match hub.db.blob_ready(&id, stored_at) {
             Ok(true) => {
-                hub.count(crate::Event::MediaIn, 1);
+                hub.count_upload(size);
                 Ok(StatusCode::CREATED)
             }
             // Its row went meanwhile (the account deleted while it came): no file left behind, and no 201.

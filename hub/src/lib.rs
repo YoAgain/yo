@@ -64,11 +64,17 @@ pub(crate) enum Event {
     MediaOut,
     /// A group created.
     GroupCreate,
+    /// A Yo accepted into a bot's inbox (every device of the recipient a bot's, `db::is_bot_app`). Who sent it the
+    /// hub does not know (sealed), so a bot's Yo to a person is a `yo-in`.
+    YoInBot,
+    /// The bytes of the blobs uploaded (counted with each `MediaIn`).
+    MediaInBytes,
 }
 
 impl Event {
     /// The kinds as stored, in the order of the variants.
-    const KINDS: [&str; 5] = ["yo-in", "yo-out", "media-in", "media-out", "group-create"];
+    const KINDS: [&str; 7] =
+        ["yo-in", "yo-out", "media-in", "media-out", "group-create", "yo-in-bot", "media-in-bytes"];
 }
 
 pub struct Hub {
@@ -82,7 +88,7 @@ pub struct Hub {
     zk: groups::Zk,
     /// To the writer, which stores deliveries in group commits (`mail::writer`).
     deliveries: std::sync::mpsc::SyncSender<Delivery>,
-    /// Events since the last flush, a count per kind only (6.6): into `events` (and `yo-in` also into
+    /// Events since the last flush, a count per kind only (6.6): into `events` (and `yo-in`, `yo-in-bot` also into
     /// `deliveries_hourly`) once a minute.
     events: [AtomicU64; Event::KINDS.len()],
     /// Long polls waiting for mail, by device.
@@ -261,6 +267,12 @@ impl Hub {
         self.events[event as usize].fetch_add(n, Ordering::Relaxed);
     }
 
+    /// A blob of `size` bytes uploaded: one more `media-in`, and its bytes into `media-in-bytes`.
+    pub(crate) fn count_upload(&self, size: u64) {
+        self.count(Event::MediaIn, 1);
+        self.count(Event::MediaInBytes, size);
+    }
+
     /// The events counted since the last flush into `events` at `now`'s minute; deliveries also into their hour.
     pub fn flush_events(&self, now: u64) -> rusqlite::Result<()> {
         let counts: Vec<_> = Event::KINDS
@@ -269,8 +281,14 @@ impl Hub {
             .map(|(kind, n)| (*kind, n.swap(0, Ordering::Relaxed)))
             .filter(|(_, n)| *n > 0)
             .collect();
-        if let Some((_, n)) = counts.iter().find(|(kind, _)| *kind == Event::KINDS[Event::YoIn as usize]) {
-            self.db.count_deliveries(now, *n)?;
+        // Deliveries per hour count every Yo, a bot's too.
+        let delivered: u64 = counts
+            .iter()
+            .filter(|(kind, _)| [Event::YoIn, Event::YoInBot].iter().any(|e| *kind == Event::KINDS[*e as usize]))
+            .map(|(_, n)| n)
+            .sum();
+        if delivered > 0 {
+            self.db.count_deliveries(now, delivered)?;
         }
         self.db.count_events(now, &counts)
     }
@@ -548,7 +566,7 @@ mod tests {
                     let id = serde_json::from_slice::<serde_json::Value>(&body).unwrap()["id"].as_i64().unwrap();
                     let conn = rusqlite::Connection::open(&path).unwrap();
                     let kind: String =
-                        conn.query_row("SELECT text FROM support_messages WHERE id = ?1", [id], |r| r.get(0)).unwrap();
+                        conn.query_row("SELECT text FROM todos WHERE id = ?1", [id], |r| r.get(0)).unwrap();
                     assert!(!kind.is_empty());
                 }
             }
@@ -565,6 +583,24 @@ mod tests {
         let mut off = good;
         off[31] |= 0x80;
         assert!(!Hub::device_keys_usable(1, &off), "not canonical");
+    }
+
+    #[test]
+    fn an_upload_counts_one_blob_and_its_bytes() {
+        let hub = Hub::new(Config::for_tests(), Arc::new(push::Recorder::default())).unwrap();
+        hub.count_upload(1000);
+        hub.count_upload(24);
+        hub.flush_events(120_000).unwrap();
+        let counted: Vec<(String, i64, i64)> = hub
+            .db
+            .conn()
+            .prepare("SELECT kind, minute, n FROM events ORDER BY kind")
+            .unwrap()
+            .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap();
+        assert_eq!(counted, [("media-in".to_owned(), 2, 2), ("media-in-bytes".to_owned(), 2, 1024)]);
     }
 
     #[test]
