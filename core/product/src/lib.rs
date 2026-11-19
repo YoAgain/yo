@@ -94,6 +94,7 @@ copy! {
     LongerName => ("Choose a longer name.", "Wähle einen längeren Namen."),
     LongerNameOffline => ("Choose a longer name, or try again when connected.", "Wähle einen längeren Namen oder versuche es mit Verbindung erneut."),
     NoSuchUser => ("No Such User", "Unbekannter Name"),
+    NoConnection => ("No Connection", "Keine Verbindung"),
     ThatsYou => ("That’s You", "Das bist du"),
     InviteAddYo => ("Add to your list and send a Yo?", "Zu deiner Liste hinzufügen und ein Yo senden?"),
     InviteYo => ("Send a Yo?", "Ein Yo senden?"),

@@ -65,6 +65,7 @@ pub enum Text {
     LongerName,
     LongerNameOffline,
     NoSuchUser,
+    NoConnection,
     ThatsYou,
     InviteAddYo,
     InviteYo,

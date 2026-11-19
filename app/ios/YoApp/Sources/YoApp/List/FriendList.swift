@@ -201,11 +201,15 @@ struct FriendList: View {
     .alert(
       inviting?.name ?? "", isPresented: $inviting.isPresent, presenting: inviting
     ) { invitation in
-      Button(productText(text: invitation.known ? .yo : .addAndYo, lang: .english)) { acceptInvite(invitation) }
-        .keyboardShortcut(.defaultAction)
-      Button(productText(text: .cancel, lang: .english), role: .cancel) {}
+      if invitation.problem != nil {
+        Button("OK", role: .cancel) {}
+      } else {
+        Button(productText(text: invitation.known ? .yo : .addAndYo, lang: .english)) { acceptInvite(invitation) }
+          .keyboardShortcut(.defaultAction)
+        Button(productText(text: .cancel, lang: .english), role: .cancel) {}
+      }
     } message: { invitation in
-      Text(productText(text: invitation.known ? .inviteYo : .inviteAddYo, lang: .english))
+      Text(invitation.problem ?? productText(text: invitation.known ? .inviteYo : .inviteAddYo, lang: .english))
     }
     .alert(
       productText(text: .groupEmpty, lang: .english),
@@ -780,4 +784,6 @@ struct Invitation {
   let name: String
   let user: String?
   let known: Bool
+  /// What is wrong instead ("No Such User", "That’s You"): the alert says so, with only OK.
+  var problem: String? = nil
 }

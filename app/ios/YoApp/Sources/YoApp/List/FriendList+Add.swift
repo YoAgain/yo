@@ -115,13 +115,12 @@ extension FriendList {
 
   /// An invite link's or scanned code's name, once the hub said who it is: an alert asks to add it and send a Yo (only a
   /// Yo, for one already on the list). Never added unverified: without an answer it stays pending (false) for the next
-  /// try; what is wrong ("No Such User", "That’s You") shows in Add Friend's field.
+  /// try; what is wrong ("No Such User", "That’s You") the alert says.
   func invited(_ name: String) async -> Bool {
     switch await lookUpFriend(name) {
     case .signedOut: return true
     case .problem(let problem):
-      withAnimation(.snappy) { adding = true }
-      say(problem)
+      inviting = Invitation(name: name.uppercased(), user: nil, known: false, problem: problem)
     case .known(let friend):
       inviting = Invitation(name: friend.name, user: friend.user, known: true)
     case .new(let spelled, let user):
@@ -152,7 +151,7 @@ extension FriendList {
     send(to: friend, origin: nil)
   }
 
-  /// A name to add, once the hub said who it is: added as its owner spells it, on top; offline, as typed. One already
+  /// A name to add, once the hub said who it is: added as its owner spells it, on top; without an answer, not at all. One already
   /// on the list says so on its bar. Returns what to say instead ("That’s You", "No Such User"), or nil.
   func addFriend(_ name: String) async -> String? {
     switch await lookUpFriend(name) {
@@ -164,6 +163,8 @@ extension FriendList {
       }
       showSent(to: known, productText(text: .alreadyAdded, lang: .english))
     case .new(let spelled, let user):
+      // Never added unchecked: without the hub's answer the name could be nobody's.
+      guard user != nil else { return productText(text: .noConnection, lang: .english) }
       withAnimation(.snappy) {
         friends.add(spelled, user: user)
         if !scrolled { position.scrollTo(edge: .top) }
