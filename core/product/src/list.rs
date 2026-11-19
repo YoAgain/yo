@@ -190,6 +190,9 @@ struct State {
     /// When a Yo last came and when the bar last told of a send or notice (`List::sequence`): the newer wins.
     arrival_at: u64,
     told_at: u64,
+    /// A group's newest sender ever (kept when the senders start over): a Yo whose sender the platform could not
+    /// tell is still told as from someone, never from the group itself.
+    last_sender: Option<String>,
 }
 impl State {
     /// The bar shows its name (or the user's send) again: who sent what starts over.
@@ -306,6 +309,7 @@ impl List {
                                 Sender { user, name, count: 1 }
                             }
                         };
+                        state.last_sender = Some(sender.user.clone());
                         state.senders.push(sender);
                     }
                     state.run = Some(Run {
@@ -665,7 +669,16 @@ impl List {
                         } else {
                             mark_count.max(1)
                         },
-                        name: newest.map_or_else(|| f.name.clone(), |sender| sender.name.clone()),
+                        name: match newest {
+                            Some(sender) => sender.name.clone(),
+                            None if f.group => s
+                                .last_sender
+                                .as_ref()
+                                .and_then(|user| self.names.get(user))
+                                .cloned()
+                                .unwrap_or_else(|| Text::Someone.get(Language::English).into()),
+                            None => f.name.clone(),
+                        },
                     }
                 };
                 Some(Row {
@@ -1350,6 +1363,18 @@ mod tests {
         l.apply(0, Input::Received { id: "a".into(), kind: Kind::Photo, token: "q".into(), sender: None });
         l.apply(60_000, Input::Tick);
         assert_eq!(row(&l, "a").line, Line::Arrival { count: 2, name: "A".into() }, "photos waiting count as Yos");
+    }
+
+    #[test]
+    fn a_group_yo_without_a_known_sender_never_names_the_group() {
+        let mut l = group_model();
+        l.apply(0, Input::Received { id: "g".into(), kind: Kind::Yo, token: "x".into(), sender: None });
+        assert_eq!(row(&l, "g").line, Line::Arrival { count: 1, name: "Someone".into() });
+        group_yo(100, &mut l, "u1");
+        l.apply(200, Input::SendStarted { id: "g".into(), kind: Kind::Yo, undo_ms: UNDO_MS });
+        l.apply(300, Input::Received { id: "g".into(), kind: Kind::Yo, token: "y".into(), sender: None });
+        l.apply(300, Input::Received { id: "g".into(), kind: Kind::Yo, token: "z".into(), sender: None });
+        assert_eq!(row(&l, "g").line, Line::Arrival { count: 2, name: "MIA".into() });
     }
 
     #[test]

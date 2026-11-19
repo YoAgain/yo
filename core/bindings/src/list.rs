@@ -80,7 +80,8 @@ pub struct FlowWidths {
     pub more: Vec<f32>,
 }
 
-/// A group bar's senders (`ListLine.senders`, newest first) as the pieces to measure at the bar's small size.
+/// A bar's senders (`ListLine.senders`, newest first, or the one of `ListLine.arrival` when its line does not fit at
+/// the bar's size) as the pieces to measure at the small size.
 #[uniffi::export]
 pub fn list_sender_flow(senders: Vec<Sender>, lang: Language) -> Flow {
     let senders: Vec<_> = senders.into_iter().map(|s| (s.name, s.count)).collect();
