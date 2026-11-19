@@ -75,6 +75,8 @@ import androidx.core.content.edit
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.compose.LocalLifecycleOwner
 import kotlinx.coroutines.*
+import uniffi.yo.ProductText
+import uniffi.yo.productInvitedYou
 import uniffi.yo.usernameCanonical
 import uniffi.yo.usernameFree
 import uniffi.yo.usernameValid
@@ -109,7 +111,7 @@ import uniffi.yo.usernameValid
     }
     SnackbarHost(snackbar,Modifier.align(Alignment.BottomCenter).safeDrawingPadding().padding(16.dp))
     }
-    if(state.firstYo) AlertDialog(onDismissRequest=repo::clearError,title={Text(stringResource(R.string.ui_first_yo_sent))},text={Text(uiResources.getString(R.string.first_sent_explanation ,state.username.orEmpty()))},confirmButton={TextButton(onClick=repo::clearError){Text(stringResource(R.string.ui_awesome))}})
+    if(state.firstYo) YoSystemTheme { AlertDialog(onDismissRequest=repo::clearError,title={Text(stringResource(R.string.ui_first_yo_sent))},text={Text(uiResources.getString(R.string.first_sent_explanation ,state.username.orEmpty()))},confirmButton={TextButton(onClick=repo::clearError){Text(stringResource(R.string.ui_awesome))}}) }
 }
 @Composable fun BrandText(text: String,size: Int,modifier: Modifier=Modifier) {
     Text(text, modifier, style = TextStyle(fontFamily = YoFont, fontSize = size.sp, color = Color.White, textAlign = TextAlign.Center))
@@ -186,7 +188,7 @@ import uniffi.yo.usernameValid
             if (failure is uniffi.yo.YoException.Refused && failure.status.toInt() == 400) {
                 hubShortNames[name] = true
             } else {
-                hint = uiResources.getString(R.string.ui_choose_a_longer_name_or_try_again_when_connected)
+                hint = copy(ProductText.LONGER_NAME_OFFLINE)
             }
         }
     }
@@ -209,20 +211,20 @@ import uniffi.yo.usernameValid
                 .verticalScroll(rememberScrollState()),
             horizontalAlignment = Alignment.CenterHorizontally,
         ) {
-            s.pendingInvite?.let { Text(uiResources.getString(R.string.invited_you, it), Modifier.padding(bottom = 16.dp), style = TextStyle(fontFamily = YoFont, fontSize = 17.sp, color = Color.White.copy(alpha = 0.85f))) }
+            s.pendingInvite?.let { Text(productInvitedYou(it, Words), Modifier.padding(bottom = 16.dp), style = TextStyle(fontFamily = YoFont, fontSize = 17.sp, color = Color.White.copy(alpha = 0.85f))) }
             Box(Modifier.fillMaxWidth().height(22.dp), contentAlignment = Alignment.Center) {
                 if (free == false) {
                     Row(
                         Modifier.clickable { focusManager.clearFocus(); repo.clearError(); step = 2 },
                         verticalAlignment = Alignment.CenterVertically,
                     ) {
-                        Text(stringResource(R.string.signup_taken_yours), color = Color.White.copy(alpha = 0.8f),
+                        Text(copy(ProductText.NAME_TAKEN) + "\u00A0", color = Color.White.copy(alpha = 0.8f),
                             fontSize = 15.sp, fontWeight = FontWeight.SemiBold)
-                        Text(stringResource(R.string.ui_sign_in), color = Color.White,
+                        Text(copy(ProductText.SIGN_IN), color = Color.White,
                             fontSize = 15.sp, fontWeight = FontWeight.SemiBold, textDecoration = TextDecoration.Underline)
                     }
                 } else if (tooShort) {
-                    Text(stringResource(R.string.signup_longer_name), fontSize = 15.sp, fontWeight = FontWeight.SemiBold)
+                    Text(copy(ProductText.LONGER_NAME), fontSize = 15.sp, fontWeight = FontWeight.SemiBold)
                 }
             }
             Spacer(Modifier.height(8.dp))
@@ -230,7 +232,7 @@ import uniffi.yo.usernameValid
                 if (tooShort) false else free, Modifier.offset { IntOffset(shake.value.dp.roundToPx(), 0) }.focusRequester(nameFocus), register)
             Spacer(Modifier.height(10.dp))
             OnboardingButton(
-                if (s.busy) stringResource(R.string.ui_creating) else stringResource(R.string.ui_sign_up),
+                if (s.busy) stringResource(R.string.ui_creating) else copy(ProductText.SIGN_UP),
                 canRegister, register,
             )
             OnboardingNote(s.error.takeIf { step == 0 } ?: hint)
@@ -239,7 +241,7 @@ import uniffi.yo.usernameValid
                 modifier = Modifier.padding(top = 14.dp),
                 contentPadding = PaddingValues(0.dp),
             ) {
-                val question = stringResource(R.string.got_yo)
+                val question = copy(ProductText.GOT_YO)
                 val questionStyle = TextStyle(
                     fontSize = 15.sp,
                     fontWeight = FontWeight.SemiBold,
@@ -248,7 +250,7 @@ import uniffi.yo.usernameValid
                 Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
                     Text(question, Modifier.alignByBaseline(), style = questionStyle, maxLines = 1)
                     Text(
-                        stringResource(R.string.ui_sign_in),
+                        copy(ProductText.SIGN_IN),
                         Modifier.alignByBaseline(),
                         style = TextStyle(fontFamily = YoFont, fontSize = 18.sp, color = Color.White),
                         maxLines = 1,
@@ -280,7 +282,7 @@ import uniffi.yo.usernameValid
                 .padding(start = 24.dp, end = 24.dp, top = 28.dp, bottom = 12.dp),
             horizontalAlignment = Alignment.CenterHorizontally,
         ) {
-            BrandText(stringResource(R.string.ui_sign_in), 28)
+            BrandText(copy(ProductText.SIGN_IN), 28)
             Spacer(Modifier.height(18.dp))
             OnboardingButton(stringResource(R.string.ui_use_passkey), !s.busy) {
                 scope.launch {
@@ -359,7 +361,7 @@ import uniffi.yo.usernameValid
                 }
             }
             Column(Modifier.fillMaxWidth().padding(top = 12.dp, bottom = 16.dp), horizontalAlignment = Alignment.CenterHorizontally) {
-                OnboardingButton(stringResource(R.string.ui_sign_in), !s.busy && code.isNotBlank()) {
+                OnboardingButton(copy(ProductText.SIGN_IN), !s.busy && code.isNotBlank()) {
                     focusManager.clearFocus()
                     repo.clearError()
                     repo.command { restore(code) }
@@ -368,7 +370,7 @@ import uniffi.yo.usernameValid
             }
         }
     }
-    if(scanning) QrScanner(onClose={scanning=false},onCode={code=it.text;scanning=false})
+    if(scanning) QrScanner(onClose={scanning=false},onCode={code=it;scanning=false})
 }
 /** The same Android tutorial is used on welcome and in Help. */
 @Composable internal fun YoTutorial(modifier: Modifier=Modifier, compact: Boolean = false, condensed: Boolean = false) {
@@ -419,7 +421,7 @@ import uniffi.yo.usernameValid
                         }
                         BrandText(stringResource(slides[slide]), 20, Modifier.padding(top = 12.dp))
                     } else when(page%4) {
-                        0 -> { BrandText("Yo",150); BrandText(stringResource(R.string.ui_it_s_that_simple),20,Modifier.alpha(0.85f)) }
+                        0 -> { BrandText("Yo",150); BrandText(copy(ProductText.THAT_SIMPLE),20,Modifier.alpha(0.85f)) }
                         else -> {
                             val titles=listOf(uiResources.getString(R.string.ui_tap_a_name),uiResources.getString(R.string.ui_yo_back),uiResources.getString(R.string.ui_add_friends_by_name))
                             val lines=listOf(uiResources.getString(R.string.ui_that_s_a_yo_nothing_to_type),uiResources.getString(R.string.ui_a_yo_comes_in_tap_their_name_to_yo_back),uiResources.getString(R.string.ui_yogpt_is_there_from_the_start_it_yos_back))
@@ -474,7 +476,7 @@ private fun ListActionRow(
 
 @Composable
 private fun NotificationSettingsRow(onClick: () -> Unit) {
-    val label = stringResource(R.string.turn_on_notifications)
+    val label = copy(uniffi.yo.ProductText.TURN_ON_NOTIFICATIONS)
     val measurer = rememberTextMeasurer()
     val density = LocalDensity.current
     BoxWithConstraints(
@@ -515,8 +517,10 @@ private fun NotificationSettingsRow(onClick: () -> Unit) {
             notificationPermission.launch(Manifest.permission.POST_NOTIFICATIONS)
         }
     }
-    val showNotificationBar = !notificationsEnabled && !notificationInFlight && !model.deniedThisLaunch &&
-        (Build.VERSION.SDK_INT < 33 || notificationAsked)
+    val showNotificationBar = uniffi.yo.productShowNotificationRow(
+        denied = !notificationsEnabled && (Build.VERSION.SDK_INT < 33 || notificationAsked),
+        askedThisLaunch = notificationInFlight || model.deniedThisLaunch,
+    )
 
     val keyboardVisible = WindowInsets.ime.getBottom(LocalDensity.current) > 0
     val owner=LocalLifecycleOwner.current
@@ -846,7 +850,7 @@ private fun NotificationSettingsRow(onClick: () -> Unit) {
                     }
                 }
                 val hasContacts = friends.any {
-                    it.group == null && !it.request && uniffi.yo.usernameSkeleton(it.name) !in setOf("YOGPT", "PING", "PINGTEST")
+                    uniffi.yo.productIsRealFriend(uniffi.yo.usernameSkeleton(it.name), it.group != null, it.request, it.blocked, it.gone)
                 }
                 if (!hasContacts || add) {
                     item {
@@ -984,9 +988,9 @@ private fun NotificationSettingsRow(onClick: () -> Unit) {
     })
     if(group) GroupSheet(model,s,onClose={group=false})
     menu?.let { friend -> FriendMenu(model,s,friend,onClose={menu=null}) }
-    declined?.let { friend -> AlertDialog(onDismissRequest={declined=null;repo.command { answer(friend,false) }},title={Text(uiResources.getString(R.string.block_name ,friend.name))},
-        confirmButton={TextButton(onClick={declined=null;repo.command { answer(friend,false,true) }}){Text("Yo")}},
-        dismissButton={TextButton(onClick={declined=null;repo.command { answer(friend,false) }}){Text(stringResource(R.string.ui_no))}}) }
+    declined?.let { friend -> YoSystemTheme { AlertDialog(onDismissRequest={declined=null;repo.command { answer(friend,false) }},title={Text(uiResources.getString(R.string.block_name ,friend.name))},
+        confirmButton={TextButton(onClick={declined=null;repo.command { answer(friend,false,true) }}){Text(stringResource(R.string.ui_block))}},
+        dismissButton={TextButton(onClick={declined=null;repo.command { answer(friend,false) }}){Text(stringResource(R.string.ui_no))}}) } }
     viewing?.let { queue -> MediaViewer(repo,queue,onClose={viewing=null}) }
 }
 
@@ -1041,7 +1045,7 @@ private fun RecoveryAction(
 
 @Composable
 private fun NameEntry(name: String, onChange: (String) -> Unit, available: Boolean?, modifier: Modifier, onSubmit: () -> Unit) {
-    val placeholder = stringResource(R.string.signup_username)
+    val placeholder = copy(ProductText.USERNAME)
     val measure = rememberTextMeasurer()
     val density = LocalDensity.current
     BoxWithConstraints(Modifier.fillMaxWidth()) {
@@ -1073,7 +1077,7 @@ private fun NameEntry(name: String, onChange: (String) -> Unit, available: Boole
                         contentAlignment = Alignment.Center,
                     ) {
                         Icon(if (available) Icons.Default.Check else Icons.Default.Close,
-                            stringResource(if (available) R.string.ui_available else R.string.signup_name_unavailable),
+                            if (available) stringResource(R.string.ui_available) else copy(ProductText.NAME_UNAVAILABLE),
                             Modifier.size(17.dp), tint = Color.White)
                     }
                 }

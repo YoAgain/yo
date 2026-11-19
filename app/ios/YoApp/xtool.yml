@@ -39,8 +39,8 @@ resources:
   # Each bundle's privacy manifest at its root (Resources/Privacy/<target>): no tracking, the data the hub gets, the
   # required-reason APIs that target's sources use.
   - Resources/Privacy/YoApp/PrivacyInfo.xcprivacy
-# "Yo" in the share sheet (Sources/YoShare, YoShare-Info.plist): photos and videos sent to a friend from there; and the
-# notification service (Sources/YoNotify, YoNotify-Info.plist): "Yo from YoGPT" on a push. Both use the app's state in
+# "Yo" in the share sheet (Sources/Extensions/YoShare, YoShare-Info.plist): photos and videos sent to a friend from there; and the
+# notification service (Sources/Extensions/YoNotify, YoNotify-Info.plist): "Yo from YoGPT" on a push. Both use the app's state in
 # the App Group group.app.justyo.ios (SharedState.swift). App Store and TestFlight only: dev/push.sh drops them from
 # Yo Dev.
 extensions:
@@ -55,7 +55,7 @@ extensions:
     infoPath: YoNotify-Info.plist
     resources:
       - Resources/Privacy/YoNotify/PrivacyInfo.xcprivacy
-  # The controls (Sources/YoControls, YoControls-Info.plist): Send Yo, Yo Back, Yo Camera and Open Yo in Control Center,
+  # The controls (Sources/Extensions/YoControls, YoControls-Info.plist): Send Yo, Yo Back, Yo Camera and Open Yo in Control Center,
   # on the Lock Screen and on the Action button; and the widgets (YoWidgets.swift): the friends' bars on the Home
   # Screen, Yo and Yo Back on the Lock Screen. They read the friends and the state in the App Group too.
   - product: YoControls

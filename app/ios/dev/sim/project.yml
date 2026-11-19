@@ -56,7 +56,7 @@ targets:
   YoNotify:
     type: app-extension
     platform: iOS
-    sources: [../../YoApp/Sources/YoNotify]
+    sources: [../../YoApp/Sources/Extensions/YoNotify]
     dependencies:
       - target: YoCore
       - {framework: ../../YoApp/build/core/yoFFI.xcframework, embed: false}
@@ -74,7 +74,7 @@ targets:
   YoNotifyProbe:
     type: application
     platform: iOS
-    sources: [YoNotifyProbe, ../../YoApp/Sources/YoNotify]
+    sources: [YoNotifyProbe, ../../YoApp/Sources/Extensions/YoNotify]
     dependencies:
       - target: YoCore
       - {framework: ../../YoApp/build/core/yoFFI.xcframework, embed: false}

@@ -198,11 +198,9 @@ fn the_app_layer_sends_a_photo_to_a_new_friend_and_yos_go_while_it_uploads() {
     // A photo to B, who has no chat with A yet: the upload opens it, and is held on its way.
     let photo = b"JPEG".repeat(10_000);
     let sealed = yo::seal_media(photo.clone(), 1600, 1200).unwrap();
-    let chat = a.media_chat(pb.clone()).unwrap();
-    assert_eq!(chat.fetches, 1);
     let uploading = {
-        let (a, media) = (a.clone(), sealed.media.clone());
-        std::thread::spawn(move || a.upload_media(media, sealed.ciphertext, chat.fetches))
+        let (a, media, to) = (a.clone(), sealed.media.clone(), yo::send_target(pb.clone()));
+        std::thread::spawn(move || a.upload_media_to(to, media, sealed.ciphertext))
     };
     waited.recv_timeout(Duration::from_secs(30)).expect("the upload starts");
     // Meanwhile Yos go: the upload does not hold the client.
@@ -270,8 +268,7 @@ fn the_app_layer_acknowledges_each_batch_itself_and_sends_a_photo_once() {
     assert!(b.sync(0).unwrap().is_empty(), "both acknowledged now");
     // A photo whose Yo the app sends again (its answer lost before it took it off its queue): it goes once.
     let sealed = yo::seal_media(b"JPEG".repeat(1000), 800, 600).unwrap();
-    let chat = a.media_chat(pb.clone()).unwrap();
-    a.upload_media(sealed.media.clone(), sealed.ciphertext, chat.fetches).unwrap();
+    a.upload_media_to(yo::send_target(pb.clone()), sealed.media.clone(), sealed.ciphertext).unwrap();
     a.send_photo(pb.clone(), sealed.media.clone()).unwrap();
     a.send_photo(pb.clone(), sealed.media).unwrap();
     a.send_yo(pb.clone()).unwrap();
@@ -615,9 +612,8 @@ fn the_app_layer_shares_its_state_with_an_extension_in_turns() {
     };
     let photo = yo::seal_media(b"JPEG".repeat(1000), 160, 120).unwrap();
     let returned = guest(&|g| {
-        let chat = g.media_chat(b.user_id()).unwrap();
-        g.upload_media(photo.media.clone(), photo.ciphertext.clone(), chat.fetches).unwrap();
-        let mut events = chat.events;
+        let to = yo::send_target(b.user_id());
+        let mut events = g.upload_media_to(to, photo.media.clone(), photo.ciphertext.clone()).unwrap();
         events.extend(g.send_photo(b.user_id(), photo.media.clone()).unwrap());
         events.extend(g.sync(0).unwrap());
         events
@@ -904,11 +900,15 @@ fn a_photo_whose_state_did_not_save_is_tried_again_later() {
     let a = register_on(app, disk.clone(), vec![7; 32], pa, None, None, None, 0, String::new()).unwrap();
     let _b = client(&hub, &pb, "BOB", Disk::new());
     disk.full.store(true, std::sync::atomic::Ordering::Relaxed);
-    let error = a.media_chat(pb.clone()).err().expect("not saved");
+    let sealed = yo::seal_media(b"JPEG".repeat(1000), 800, 600).unwrap();
+    let error = a
+        .upload_media_to(yo::send_target(pb.clone()), sealed.media.clone(), sealed.ciphertext.clone())
+        .err()
+        .expect("not saved");
     assert!(matches!(error, yo::YoError::Save { .. }), "{error:?}");
     assert!(yo::retry_later(&error), "kept for later");
     disk.full.store(false, std::sync::atomic::Ordering::Relaxed);
-    assert_eq!(a.media_chat(pb).unwrap().fetches, 1);
+    a.upload_media_to(yo::send_target(pb), sealed.media, sealed.ciphertext).unwrap();
 }
 
 /// Only a state that does not open (another key) is `State`; the app signs in again only then.

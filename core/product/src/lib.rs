@@ -3,6 +3,7 @@ use std::collections::HashSet;
 use unicode_segmentation::UnicodeSegmentation;
 
 pub mod list;
+pub mod status;
 
 pub const VIDEO_LIMIT_MS: u32 = 10_000;
 pub const VIDEO_LIMIT_BYTES: u32 = 9_000_000;
@@ -17,7 +18,7 @@ pub enum Language {
 }
 
 impl Language {
-    fn choose(self, en: &'static str, de: &'static str) -> &'static str {
+    pub(crate) fn choose(self, en: &'static str, de: &'static str) -> &'static str {
         match self {
             Self::English => en,
             Self::German => de,
@@ -78,6 +79,28 @@ copy! {
     Blocked => ("Blocked", "Blockiert"),
     NeedsUpdate => ("Needs Update", "Update erforderlich"),
     AlreadyAdded => ("Already Added", "Bereits hinzugefügt"),
+    Someone => ("Someone", "Jemand"),
+    YoUser => ("Yo User", "Yo-Nutzer"),
+    ThatSimple => ("It’s that simple.", "So einfach ist das."),
+    SignUp => ("Sign Up", "Registrieren"),
+    SignIn => ("Sign In", "Anmelden"),
+    GotYo => ("Got Yo?", "Schon bei Yo?"),
+    Username => ("Username", "Benutzername"),
+    NameTaken => ("Name taken. Yours?", "Name vergeben. Deiner?"),
+    NameTakenLabel => ("Name taken. Sign In if it’s yours", "Name vergeben. Melde dich an, wenn es deiner ist"),
+    NameUnavailable => ("Not available", "Nicht verfügbar"),
+    LongerName => ("Choose a longer name.", "Wähle einen längeren Namen."),
+    LongerNameOffline => ("Choose a longer name, or try again when connected.", "Wähle einen längeren Namen oder versuche es mit Verbindung erneut."),
+    NoSuchUser => ("No Such User", "Unbekannter Name"),
+    ThatsYou => ("That’s You", "Das bist du"),
+}
+
+/// The onboarding's line for an invite: "Mia invited you".
+pub fn invited_you(name: &str, lang: Language) -> String {
+    match lang {
+        Language::English => format!("{name} invited you"),
+        Language::German => format!("{name} hat dich eingeladen"),
+    }
 }
 
 pub fn counted(count: i64) -> String {
@@ -373,6 +396,18 @@ mod tests {
         assert_eq!(send_words(&counted(2), false, English), "Sent 2× Yo!");
         assert_eq!(send_words(&counted(1), true, English), "Sending Yo!");
         assert_eq!(send_words(&counted(2), false, German), "2× Yo gesendet!");
+    }
+
+    #[test]
+    fn onboarding_copy() {
+        assert_eq!(Text::NameTaken.get(English), "Name taken. Yours?");
+        assert_eq!(Text::NameTaken.get(German), "Name vergeben. Deiner?");
+        assert_eq!(Text::LongerName.get(English), "Choose a longer name.");
+        assert_eq!(Text::SignIn.get(German), "Anmelden");
+        assert_eq!(Text::ThatsYou.get(English), "That’s You");
+        assert_eq!(Text::NoSuchUser.get(English), "No Such User");
+        assert_eq!(invited_you("Mia", English), "Mia invited you");
+        assert_eq!(invited_you("Mia", German), "Mia hat dich eingeladen");
     }
 
     #[test]

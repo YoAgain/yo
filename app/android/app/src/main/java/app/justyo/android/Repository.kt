@@ -28,11 +28,11 @@ class Repository(private val context: Context, ownerScope: CoroutineScope) {
         } else if (error !is CancellationException) throw error
     })
     private val vault = Vault(context)
+    private val synced = SyncedAccount(context)
+    @Volatile private var passkeyBackup = false
     private val file by lazy {
         CoreState(context, object : StateDiagnostics {
-            override fun failure(step: UInt, before: UInt, after: UInt, kind: String) {
-                crashes.countStateFailure(step, before, after, kind)
-            }
+            override fun failure(kind: String) = crashes.countStateFailure(kind)
         })
     }
     val transport = HubTransport { mutable.update { it.copy(update = true) } }
@@ -103,7 +103,7 @@ class Repository(private val context: Context, ownerScope: CoroutineScope) {
         queue.sendYo = { friend -> client?.let { sendNow(friend, it) } }
         queue.sent = { target, last ->
             state.value.friends.firstOrNull { it.target == target }?.let {
-                if (last) showSent(it, "Sent Yo")
+                if (last) showSent(it)
                 recordStat(it, true)
             }
         }
@@ -132,6 +132,8 @@ class Repository(private val context: Context, ownerScope: CoroutineScope) {
             scope.launch(Dispatchers.IO) { runCatching { crashes.flush() } }
             // A process may have ended while viewing or normalizing media. Plain temporary files never survive a launch.
             clearTemporaryMedia()
+            // The one migration: an older install's state is gone (signed out); its saved recovery key signs it in again.
+            val oldRecovery = if (file.migrate()) vault.read("recovery")?.decodeToString().also { vault.clear() } else null
             val cached = vault.read("ui")?.let { JSONObject(String(it)) }
             cached?.optJSONArray("removed")?.let { array -> for (i in 0 until array.length()) removedUsers.add(array.getString(i)) }
             if (cached != null) mutable.update { it.copy(
@@ -146,15 +148,10 @@ class Repository(private val context: Context, ownerScope: CoroutineScope) {
             val restored = if (file.exists()) {
                 key ?: error(context.getString(R.string.ui_state_key_missing_use_your_recovery_key))
                 val db = file.database(key)
-                if (db != null) {
-                    if (db.hasState()) YoClient.openDb(transport, db, key, false, null) else null
-                } else {
-                    file.load()?.let { YoClient.restore(transport, file, key, it) }
-                }
+                if (db.hasState()) YoClient.openDb(transport, db, key, false, null) else null
             } else null
             if (restored != null) {
                 pin(restored)
-                restored.acknowledgeExplicitly()
                 client = restored; sessionId++
                 mutable.update { it.copy(username = restored.username(), recovery = vault.read("recovery")?.decodeToString()) }
                 media.load()
@@ -164,6 +161,12 @@ class Repository(private val context: Context, ownerScope: CoroutineScope) {
                 media.wake()
                 deliverLater(restored)
             } else if (state.value.username != null) error(context.getString(R.string.ui_account_state_missing_use_your_recovery_key))
+            // The automatic sign-in (iOS: from the iCloud Keychain): the synced item, else an old install's recovery key.
+            if (restored == null) {
+                val item = synced.read()?.takeIf { it.signedOut != true }
+                if (item != null) runCatching { signIn(item) }
+                else if (oldRecovery != null) runCatching { restore(oldRecovery) }
+            }
             mutable.update { it.copy(loading = false) }
             if (foreground) {
                 if (client != null) YoWork.registerIfConfigured(context)
@@ -200,9 +203,12 @@ class Repository(private val context: Context, ownerScope: CoroutineScope) {
             val pendingName = "registration-" + usernameSkeleton(name).toByteArray().sha256Hex()
             val secret = vault.secret(pendingName)
             val c = registerCore(name, secret)
-            pin(c); c.acknowledgeExplicitly(); client = c; sessionId++
-            mutable.update { it.copy(username = c.username() ?: name, friends = listOf(Friend(name = "YoGPT", color = 0)), broken = false) }
+            pin(c); client = c; sessionId++
+            mutable.update { it.copy(username = c.username() ?: name, friends = emptyList(), broken = false) }
             persist(); vault.delete(pendingName)
+            // YoGPT is there from the start, stored with the account so a restore knows its name.
+            runCatching { add("YoGPT") }
+            syncItem()
             refresh(); consumeInvite(); listen(); YoWork.registerIfConfigured(context)
         } finally { mutable.update { it.copy(busy = false) } }
     }
@@ -229,24 +235,43 @@ class Repository(private val context: Context, ownerScope: CoroutineScope) {
 
     private fun registerCore(name: String, account: ByteArray): YoClient {
         val key = vault.secret("state-key")
-        val db = file.database(key)
-        return if (db != null) {
-            YoClient.registerUsernameDb(transport, db, key, null, name, account, null, null, 0u, "")
-        } else {
-            YoClient.registerUsername(transport, file, key, name, account, null, null, 0u, "")
-        }
+        return YoClient.registerUsernameDb(transport, file.database(key), key, null, name, account, null, null, null, 0u, "")
     }
 
     private suspend fun restoreBackup(opened: YoOpenedBackup, typedCode: String?) {
         val sealed = JSONObject(opened.sealed.decodeToString())
         val account = sealed.getJSONObject("account")
         val c = registerCore(account.getString("username"), decode(account.getString("accountKey")))
-        pin(c); c.acknowledgeExplicitly(); client = c; sessionId++
+        pin(c); client = c; sessionId++
         val same = c.userId().hexBytes().contentEquals(decode(account.getString("userID")))
         val recovered = if (same) sealed.stringOrNull("code") ?: typedCode else null
         if (recovered != null) vault.write("recovery", recovered.toByteArray())
         mutable.update { it.copy(username = c.username(), secured = same, recovery = recovered, broken = false, friends = emptyList()) }
         persist(); refresh(); consumeInvite(); listen(); YoWork.registerIfConfigured(context)
+        syncItem()
+    }
+
+    /** Signs in with the synced item's account key, as iOS does with its iCloud Keychain item. */
+    private suspend fun signIn(item: SyncedItem) = accountTurn.withLock {
+        check(client == null)
+        val key = vault.secret("state-key")
+        val c = YoClient.registerUsernameDb(transport, file.database(key), key, null, item.username, item.accountKey,
+            item.legacySeed, null, null, 0u, "")
+        pin(c); client = c; sessionId++
+        passkeyBackup = item.byPasskey
+        item.recoveryKey?.let { vault.write("recovery", it.toByteArray()) }
+        mutable.update { it.copy(username = c.username() ?: item.username, secured = item.recoveryKey != null,
+            recovery = item.recoveryKey, broken = false, friends = emptyList()) }
+        persist(); refresh(); consumeInvite(); listen(); YoWork.registerIfConfigured(context)
+        syncItem()
+    }
+
+    /** The synced item for this account now: its key, the recovery key and how the backup opens. */
+    private fun syncItem(signedOut: Boolean = false) {
+        val c = client ?: return
+        val code = state.value.recovery.takeIf { state.value.secured }
+        synced.write(SyncedItem(c.username() ?: state.value.username.orEmpty(), c.userId().hexBytes(), c.accountSecret(),
+            passkeyBackup, code != null, code != null, passkeyBackup, code, signedOut.takeIf { it }, syncedItemVersion(), null))
     }
 
     internal fun passkeyAccount(): Pair<String, ByteArray>? = client?.let { c ->
@@ -290,6 +315,8 @@ class Repository(private val context: Context, ownerScope: CoroutineScope) {
         check(c === client)
         vault.write("recovery", code.toByteArray()); vault.delete("recovery-pending")
         mutable.update { it.copy(secured = true, recovery = code) }; changes.withLock { persist() }
+        passkeyBackup = !removePasskey && (answer != null || backup?.record?.byPasskey?.isNotEmpty() == true)
+        syncItem()
     }
     fun active(on: Boolean) {
         foreground = on
@@ -317,7 +344,7 @@ class Repository(private val context: Context, ownerScope: CoroutineScope) {
                     syncing.withLock {
                         absorb(c.savedEvents(), c)
                         val events = c.sync(25u)
-                        if (c === client) { absorb(events, c); c.afterSync() }
+                        if (c === client) absorb(events, c)
                     }
                     mutable.update { it.copy(lastSync = System.currentTimeMillis()) }
                     refresh(); media.wake(); pause = 1000
@@ -345,7 +372,6 @@ class Repository(private val context: Context, ownerScope: CoroutineScope) {
             absorb(c.savedEvents(), c)
             absorb(c.sync(0u), c)
             if (c === client) {
-                c.afterSync()
                 mutable.update { it.copy(lastSync = System.currentTimeMillis()) }
             }
         }
@@ -369,7 +395,7 @@ class Repository(private val context: Context, ownerScope: CoroutineScope) {
         if (!latest && account != c.userId()) return
         val snapshot = state.value
         val target = if (latest) snapshot.lastReceived.maxByOrNull { it.value }?.key else key
-        val friend = snapshot.friends.firstOrNull { it.key == target && !it.blocked && !it.request && !it.gone } ?: return
+        val friend = snapshot.friends.firstOrNull { it.key == target && productWidgetEligible(it.blocked, it.request, it.gone) } ?: return
         sendNow(friend, c)
     }
 
@@ -379,14 +405,14 @@ class Repository(private val context: Context, ownerScope: CoroutineScope) {
         val c = client ?: return
         val name = usernameCanonical(typed)
         require(name.isNotBlank()) { context.getString(R.string.type_name) }
-        if (usernameSkeleton(name) == usernameSkeleton(state.value.username ?: "")) error(context.getString(R.string.ui_that_s_you))
-        val found = try { c.whois(name) ?: error(context.getString(R.string.ui_no_such_user)) } catch (e: YoException.Network) { null }
+        if (usernameSkeleton(name) == usernameSkeleton(state.value.username ?: "")) error(copy(ProductText.THATS_YOU))
+        val found = try { c.whois(name) ?: error(copy(ProductText.NO_SUCH_USER)) } catch (e: YoException.Network) { null }
         if (c !== client) return
         changes.withLock {
             val spelled = found?.username ?: name
             val known = state.value.friends.firstOrNull { it.group == null && !it.gone &&
                 ((found != null && it.user == found.user) || usernameSkeleton(it.name) == usernameSkeleton(spelled)) }
-            if (known != null) { showSent(known, "Already Added"); return@withLock }
+            if (known != null) { showSent(known, copy(ProductText.ALREADY_ADDED)); return@withLock }
             found?.user?.let { removedUsers.remove(it) }
             val friend = Friend(name = spelled, color = nextColor(state.value.friends), user = found?.user)
             if (friend.user != null) c.setFriend(friend.user, friend.name, friend.color.toUByte())
@@ -405,7 +431,7 @@ class Repository(private val context: Context, ownerScope: CoroutineScope) {
     }
     suspend fun send(friend: Friend) {
         val c = client ?: return
-        if (friend.gone) { showSent(friend, "Not on Yo"); return }
+        if (friend.gone) { showSent(friend, copy(ProductText.NOT_ON_YO)); return }
         click()
         if (friend.undo) { media.holdYo(friend); return }
         sendNow(friend, c)
@@ -415,9 +441,9 @@ class Repository(private val context: Context, ownerScope: CoroutineScope) {
         lock.withLock {
             if (c !== client) return
             try {
-                val events = friend.group?.let { c.sendGroupYo(it) } ?: c.sendYo(friend.target)
+                val events = c.send(sendTarget(friend.target), MessageKind.Yo)
                 absorb(events, c)
-                showSent(friend,"Sent Yo")
+                showSent(friend)
                 recordStat(friend,true)
                 changes.withLock { persist() }
                 if (vault.read("first-yo") == null) {
@@ -426,12 +452,12 @@ class Repository(private val context: Context, ownerScope: CoroutineScope) {
                 deliverLater(c)
             } catch (e: Exception) {
                 showSent(friend, when (e) {
-                    is YoException.NotOnYo -> "Not on Yo"
-                    is YoException.GroupEmpty -> "Group Is Empty"
-                    is YoException.Unconfirmed -> "Confirm New Key"
-                    is YoException.Blocked -> "Blocked"
-                    is YoException.Outdated -> "Needs Update"
-                    else -> "Not Sent"
+                    is YoException.NotOnYo -> copy(ProductText.NOT_ON_YO)
+                    is YoException.GroupEmpty -> copy(ProductText.GROUP_EMPTY)
+                    is YoException.Unconfirmed -> copy(ProductText.CONFIRM_NEW_KEY)
+                    is YoException.Blocked -> copy(ProductText.BLOCKED)
+                    is YoException.Outdated -> copy(ProductText.NEEDS_UPDATE)
+                    else -> copy(ProductText.NOT_SENT)
                 })
                 if (e is YoException.Replaced) throw e
                 deliverLater(c)
@@ -449,15 +475,10 @@ class Repository(private val context: Context, ownerScope: CoroutineScope) {
             }
         }
     }
-    fun showSent(friend: Friend, text: String) {
+    /** A send's end on the bar: `sent` (Yo) or a failure's words from the core. */
+    fun showSent(friend: Friend, failure: String? = null) {
         listFriends()
-        present { time -> when (text) {
-            "Sent Yo" -> sendFinished(time, friend.key, ListKind.YO)
-            "Sent 📷" -> sendFinished(time, friend.key, ListKind.PHOTO)
-            "Sent 🎥" -> sendFinished(time, friend.key, ListKind.VIDEO)
-            "Canceled" -> sendUndone(time, friend.key)
-            else -> sendFailed(time, friend.key, text)
-        } }
+        present { time -> if (failure == null) sendFinished(time, friend.key, ListKind.YO) else sendFailed(time, friend.key, failure) }
     }
     private fun recordStat(friend: Friend,sent: Boolean) {
         val time=System.currentTimeMillis()
@@ -499,7 +520,7 @@ class Repository(private val context: Context, ownerScope: CoroutineScope) {
         for (group in groups.filter { !it.left }) {
             val old = friends.firstOrNull { it.group == group.id }
             val row = (old ?: Friend(name = group.name, color = nextColor(friends), group = group.id))
-                .copy(name = group.name.ifEmpty { "Group" }, request = !group.accepted)
+                .copy(name = group.name.ifEmpty { copy(ProductText.GROUP) }, request = !group.accepted)
             friends = if (old == null) listOf(row) + friends else friends.map { if (it.key == old.key) row else it }
         }
         mutable.update { it.copy(friends = friends, requestsOpen = c.requestsOpen()) }; listFriends(); persist()
@@ -570,7 +591,7 @@ class Repository(private val context: Context, ownerScope: CoroutineScope) {
         // MediaPlayer callbacks need a looper, even though the inbox runs on IO.
         scope.launch(Dispatchers.Main.immediate) {
             synchronized(soundPlayers) {
-                if (soundPlayers.size >= 3) return@synchronized
+                if (soundPlayers.size >= productSoundLimit().toInt()) return@synchronized
                 val attributes = AudioAttributes.Builder().setUsage(AudioAttributes.USAGE_ASSISTANCE_SONIFICATION).build()
                 val player = MediaPlayer.create(context, R.raw.yo, attributes, 0) ?: return@synchronized
                 fun release() = synchronized(soundPlayers) {
@@ -643,7 +664,7 @@ class Repository(private val context: Context, ownerScope: CoroutineScope) {
         changes.withLock { mutable.update { it.copy(leftHanded = left, saveSent = save, requestsOpen = requests) }; persist() }
     }
     suspend fun undoSettings(friend: Friend, on: Boolean, seconds: Int) = changes.withLock {
-        mutable.update { it.copy(friends = it.friends.map { f -> if (f.key == friend.key) f.copy(undo = on, undoSeconds = seconds.coerceIn(2,10)) else f }) }; persist()
+        mutable.update { it.copy(friends = it.friends.map { f -> if (f.key == friend.key) f.copy(undo = on, undoSeconds = productUndoSeconds(seconds.toDouble()).toInt()) else f }) }; persist()
     }
     suspend fun security() = client?.securityStatus()
     suspend fun contact(friend: Friend): ContactDetails? {
@@ -652,12 +673,6 @@ class Repository(private val context: Context, ownerScope: CoroutineScope) {
         return ContactDetails(contact,friend.user?.let { c.accountKeyOf(it) },
             friend.user?.takeIf { contact!=null }?.let { c.safetyNumber(it) },friend.user?.let { c.sessionsWith(it) }.orEmpty())
     }
-    suspend fun verifyScan(friend: Friend,bytes: ByteArray): Boolean {
-        val c=client ?: return false
-        if(!c.safetyCodeMatches(friend.target,bytes)) return false
-        c.setVerified(friend.target,true);refresh();return true
-    }
-    suspend fun safetyCode(friend: Friend) = client?.safetyCode(friend.target)
     suspend fun verify(friend: Friend, verified: Boolean) { client?.setVerified(friend.target, verified); refresh(); media.wake() }
     suspend fun confirm(friend: Friend) { client?.confirmIdentity(friend.target); refresh(); media.wake(); client?.let { deliverLater(it) } }
     suspend fun icon(name: String?) {
@@ -673,8 +688,10 @@ class Repository(private val context: Context, ownerScope: CoroutineScope) {
         client?.writeStorage()
     }
     suspend fun saveContacts() { client?.writeStorage(); mutable.update { it.copy(notice = context.getString(R.string.contacts_saved)) } }
-    suspend fun deleteAccount() { client?.deleteAccount(); signOut() }
-    suspend fun signOut() = accountTurn.withLock {
+    suspend fun deleteAccount() { client?.deleteAccount(); synced.delete(); signOut() }
+    /** `byPerson`: the person signed out, so the synced item is marked (no automatic sign-in until they sign in). */
+    suspend fun signOut(byPerson: Boolean = false) = accountTurn.withLock {
+        if (byPerson) syncItem(signedOut = true)
         notifications.clear()
         val old = client; client = null; sessionId++
         listening?.cancel(); listening = null; retrying?.cancel(); retrying = null

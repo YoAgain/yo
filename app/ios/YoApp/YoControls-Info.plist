@@ -1,6 +1,6 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-<!-- The controls (Sources/YoControls): Send Yo, Yo Back, Yo Camera and Open Yo in Control Center, on the Lock Screen
+<!-- The controls (Sources/Extensions/YoControls): Send Yo, Yo Back, Yo Camera and Open Yo in Control Center, on the Lock Screen
      and on the Action button; and the widgets, their names in the brand's font (UIAppFonts). -->
 <plist version="1.0">
 <dict>

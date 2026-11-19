@@ -22,7 +22,7 @@ The app talks to the live hub (TestFlight and App Store) or the dev hub (Yo Dev)
   `group.app.justyo.ios` and go when Yo opens (`ShareBridge.swift`, `Share.swift`). Shared, library and camera videos
   have a 10 s limit. Longer shared or library videos open Yo's trimmer full-screen (`VideoTrimmer.swift`).
 - Notifications (the same builds): "Yo from YoGPT", "📷 from …", "Yo!!!!! +4 from … · 📷 2" (one notification per run, as the bar says it), with the Yo sound and "Yo Back". The
-  push only says "Yo"; the notification service (`Sources/YoNotify`) receives once, names the sender and fetches a
+  push only says "Yo"; the notification service (`Sources/Extensions/YoNotify`) receives once, names the sender and fetches a
   photo or video of up to 6 MiB into the App Group first (`Prefetch.swift`; the app and the service claim a blob
   before either fetches it, so one fetch is under way at a time, spec 6.7; storage is acknowledged only after writing),
   so the app shows it at once. A push that brings no new Yo (a receipt, a
@@ -226,7 +226,7 @@ polls do not save full core state. Durable encrypted send state is still saved b
 PING can be added as a normal echo contact for Yos, photos and videos. PINGTEST probes and their replies
 create no visible Yo, notification, stats, contact, request or Account Sync entry. Probes have no copy to
 another device. See
-[operator deployment and privacy](../yogpt/README.md).
+[operator deployment and privacy](../../skills/pingtest/README.md).
 
 
 Help › Contact Us is a support conversation with the Yo team, not end-to-end encrypted (the chat says so).

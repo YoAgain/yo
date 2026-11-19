@@ -40,6 +40,10 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import uniffi.yo.ListKind
 import uniffi.yo.ListRow
+import uniffi.yo.productArrivalLines
+import uniffi.yo.productCounted
+import uniffi.yo.productMediaSign
+import uniffi.yo.productSendWords
 
 internal val BarHeight = 89.dp
 private val BarFont = 36.sp
@@ -89,7 +93,7 @@ internal data class BarContent(
     val thumbnails: List<OutgoingPreview>,
 ) {
     val received = friend.group == null && !friend.request && ((row?.yoTotal ?: 0u) > 0u || media.isNotEmpty())
-    val sent = undo != null || row?.title == "Sent Yo" || thumbnails.isNotEmpty()
+    val sent = undo != null || row?.title == copy(uniffi.yo.ProductText.SENT_YO) || thumbnails.isNotEmpty()
     val separate = received && (sent || recording || row?.title?.let { it != friend.name } == true)
     val senders = if (friend.group != null && !friend.request) row?.senders.orEmpty() else emptyList()
     val lines = if (friend.request) 2 else 1 + (if (separate) 1 else 0) + senders.size
@@ -152,11 +156,9 @@ internal data class BarContent(
         ?: maxOf(bar.row?.count?.toLong() ?: 1L, bar.thumbnails.size.toLong(), outgoingCount)
     val title = when {
         bar.recording -> stringResource(R.string.recording)
-        bar.undo != null || bar.thumbnails.isNotEmpty() -> if (count <= 1) stringResource(R.string.sending_yo)
-            else stringResource(R.string.sending_yos, count)
-        bar.sent -> if (count <= 1) stringResource(R.string.sent_yo)
-            else stringResource(R.string.sent_yos, count)
-        else -> rowTitle(resources, bar.row, friend)
+        bar.undo != null || bar.thumbnails.isNotEmpty() -> productSendWords(productCounted(count), true, Words)
+        bar.sent -> productSendWords(productCounted(count), false, Words)
+        else -> rowTitle(bar.row, friend)
     }
     val extraReceive = bar.separate && lines >= 2
     val primaryReceived = bar.received && !extraReceive
@@ -178,8 +180,7 @@ internal data class BarContent(
     val end = if (left) Alignment.CenterStart else Alignment.CenterEnd
     val receivedCount = if (hasSign) maxOf(bar.row?.markCount?.toLong() ?: 0L, bar.media.size.toLong())
         else bar.row?.yoTotal?.toLong() ?: 1L
-    val received = yoWords(receivedCount)
-    val receivedFull = stringResource(R.string.yo_from, received, friend.name)
+    val receivedFull = remember(receivedCount, friend.name) { productArrivalLines(receivedCount, friend.name, Words) }
     val fadeElapsed = bar.row?.fadeElapsed
     val fadeDuration = remember { uniffi.yo.listTimings().yoFadeMs.toLong() }
     val receivedOpacity = remember(friend.key) { Animatable(1f) }
@@ -195,7 +196,7 @@ internal data class BarContent(
             interactionSource = null, indication = null, role = Role.Button, onClick = onMedia,
         ).semantics { contentDescription = resources.getQuantityString(R.plurals.media_items, bar.media.size, bar.media.size) },
             contentAlignment = Alignment.Center) {
-            val sign = if (bar.media.any { it.video }) "🎥" else "📷"
+            val sign = productMediaSign(if (bar.media.any { it.video }) ListKind.VIDEO else ListKind.PHOTO)
             Text(sign, style = TextStyle(fontSize = 26.sp), maxLines = 1)
         }
     }
@@ -227,7 +228,7 @@ internal data class BarContent(
                 BarWords(title, modifier = Modifier.graphicsLayer { alpha = 1f - receivedOpacity.value })
             }
             BarWords(
-                if (primaryReceived) receivedFull else title,
+                if (primaryReceived) receivedFull else listOf(title),
                 startInset = if (left) primarySignInset else outgoingInset,
                 endInset = if (left) outgoingInset else primarySignInset,
                 modifier = if (primaryReceived && !hasSign) Modifier.graphicsLayer { alpha = receivedOpacity.value } else Modifier,
@@ -265,7 +266,7 @@ internal data class BarContent(
                                 opacity.animateTo(0f, tween((fadeDuration - elapsed).coerceAtLeast(0).toInt(), easing = LinearEasing))
                             }
                         }
-                        BarWords(stringResource(R.string.group_sender_yo, sender.name, yoWords(sender.count.toLong())),
+                        BarWords(stringResource(R.string.group_sender_yo, sender.name, productCounted(sender.count.toLong())),
                             modifier = Modifier.graphicsLayer { alpha = opacity.value })
                     }
                 }
@@ -280,14 +281,16 @@ internal data class BarContent(
     ), contentAlignment = Alignment.Center) { BarWords(text) }
 }
 
-@Composable private fun yoWords(count: Long) =
-    if (count <= 1) "Yo" else stringResource(R.string.counted_yo, count)
-
 private val CountDigits = Regex("[0-9]+(?=×)")
 
 @Composable
+private fun BarWords(text: String, modifier: Modifier = Modifier, startInset: Int = 20, endInset: Int = 20) =
+    BarWords(listOf(text), modifier, startInset, endInset)
+
+/** The first of the core's candidates that fits ("2× Yo from Christopher", "… from Chr…", "2× Yo"). */
+@Composable
 private fun BarWords(
-    text: String,
+    candidates: List<String>,
     modifier: Modifier = Modifier,
     startInset: Int = 20,
     endInset: Int = 20,
@@ -311,7 +314,7 @@ private fun BarWords(
             val (prefix, digits, suffix) = parts(value)
             (width(prefix) + digitBlock(digits) + width(suffix)).toDp()
         }
-        val selected = text
+        val selected = candidates.firstOrNull { total(it) <= available } ?: candidates.last()
         val (prefix, digits, suffix) = parts(selected)
         val lineWidth = total(selected).coerceAtMost(available)
         val lineStart = (maxWidth - lineWidth) / 2

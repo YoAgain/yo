@@ -11,11 +11,8 @@ import javax.crypto.Cipher
 import javax.crypto.KeyGenerator
 import javax.crypto.SecretKey
 import javax.crypto.spec.GCMParameterSpec
-import uniffi.yo.LegacyStateSource
 import uniffi.yo.StateDb
 import uniffi.yo.StateDiagnostics
-import uniffi.yo.StateStore
-import uniffi.yo.YoException
 
 /** Every caller runs on Dispatchers.IO. A failed read is never treated as an empty vault. */
 class Vault(private val context: Context) {
@@ -63,46 +60,30 @@ fun atomicWrite(file: File, data: ByteArray) {
     try { stream.write(data); atomic.finishWrite(stream) } catch (error: Exception) { atomic.failWrite(stream); throw error }
 }
 
-/** The AtomicFile is a source for V0001 and a writable fallback for this launch if V0001 rolls back. */
-class CoreState(context: Context, private val diagnostics: StateDiagnostics) : LegacyStateSource, StateStore {
-    private val legacy = File(context.noBackupFilesDir, "yo-state")
-    private val path = File(context.noBackupFilesDir, "yo-state.sqlite")
+/**
+ * The account's state: one SQLite database in the core's current schema. Files of older schemas are removed once at
+ * launch (`migrate`): that install is signed out, and its saved recovery key signs it in again.
+ */
+class CoreState(context: Context, private val diagnostics: StateDiagnostics) {
+    private val dir = context.noBackupFilesDir
+    private val path = File(dir, "yo-state-v3.sqlite")
     private var db: StateDb? = null
-    private var rolledBack = false
 
-    fun exists(): Boolean = path.exists() || legacy.exists() || File(legacy.path + ".bak").exists()
+    fun exists(): Boolean = path.exists()
 
-    @Synchronized fun database(key: ByteArray): StateDb? {
-        db?.let { return it }
-        if (rolledBack) return null
-        return try {
-            StateDb.openEncrypted(path.path, key, this, diagnostics).also {
-                db = it
-                AtomicFile(legacy).delete()
-            }
-        } catch (_: YoException.MigrationRolledBack) {
-            rolledBack = true
-            null
-        }
+    /** Removes an older install's state files; true when that install had no current state (it is signed out). */
+    fun migrate(): Boolean {
+        val old = dir.listFiles().orEmpty().filter { it.name.startsWith("yo-state") && !it.name.startsWith("yo-state-v3") }
+        old.forEach { it.delete() }
+        return old.isNotEmpty() && !exists()
     }
 
-    override fun save(blob: ByteArray) {
-        try { atomicWrite(legacy, blob) } catch (_: Exception) {
-            diagnostics.failure(0u, 0u, 0u, "Io")
-            throw YoException.Save("State write failed")
-        }
-    }
-    override fun load(): ByteArray? {
-        if (!legacy.exists() && !File(legacy.path + ".bak").exists()) return null
-        return try {
-            AtomicFile(legacy).readFully()
-        } catch (_: java.io.IOException) {
-            if (rolledBack) diagnostics.failure(0u, 0u, 0u, "Io")
-            throw YoException.Save("Legacy state read failed")
-        }
-    }
+    @Synchronized fun database(key: ByteArray): StateDb =
+        db ?: StateDb.openFresh(path.path, key, diagnostics).also { db = it }
+
     fun delete(key: ByteArray?) {
-        if (key != null && exists()) database(key)?.clear()
-        AtomicFile(legacy).delete()
+        if (key != null && exists()) runCatching { database(key).clear() }
+        synchronized(this) { db = null }
+        dir.listFiles().orEmpty().filter { it.name.startsWith("yo-state-v3") }.forEach { it.delete() }
     }
 }

@@ -52,6 +52,20 @@ pub enum Text {
     Blocked,
     NeedsUpdate,
     AlreadyAdded,
+    Someone,
+    YoUser,
+    ThatSimple,
+    SignUp,
+    SignIn,
+    GotYo,
+    Username,
+    NameTaken,
+    NameTakenLabel,
+    NameUnavailable,
+    LongerName,
+    LongerNameOffline,
+    NoSuchUser,
+    ThatsYou,
 }
 
 #[uniffi::remote(Enum)]
@@ -81,6 +95,11 @@ pub struct WidgetFriend {
 #[uniffi::export]
 pub fn product_text(text: Text, lang: Language) -> String {
     text.get(lang).into()
+}
+
+#[uniffi::export]
+pub fn product_invited_you(name: String, lang: Language) -> String {
+    product::invited_you(&name, lang)
 }
 
 #[uniffi::export]
@@ -268,4 +287,134 @@ pub fn product_share_limits() -> ProductShareLimits {
 #[uniffi::export]
 pub fn product_share_can_send(sending: bool, too_long: bool, has_media: bool, has_feedback: bool) -> bool {
     product::share_can_send(sending, too_long, has_media, has_feedback)
+}
+
+use yo_core::security::SecurityStatus;
+use yo_product::status::{self, Check, Contact, ContactMark, Health, Keys};
+
+#[uniffi::remote(Enum)]
+#[uniffi(name = "ProductCheck")]
+pub enum Check {
+    Ok,
+    Open,
+    Waiting,
+    Problem,
+}
+
+fn keys(status: Option<SecurityStatus>) -> Option<Keys> {
+    status.map(|s| Keys {
+        hub_signed: s.hub_signed,
+        prekeys_at_hub: s.prekeys_at_hub,
+        refill_pending: s.refill_pending,
+        signed_prekey_days: s.signed_prekey_days,
+        pq_sessions: s.pq_sessions,
+        devices: s.devices,
+    })
+}
+
+/// Signed by Yo, one-time keys, signed key, quantum-safe sessions.
+#[uniffi::export]
+pub fn product_key_checks(status: Option<SecurityStatus>) -> Vec<Check> {
+    status::key_checks(keys(status)).to_vec()
+}
+
+#[uniffi::export]
+pub fn product_identity_check(status: Option<SecurityStatus>, encrypted: Option<u32>, total: u32) -> Check {
+    status::identity_check(keys(status), encrypted, total)
+}
+
+#[uniffi::export]
+pub fn product_contacts_check(encrypted: Option<u32>, total: u32) -> Check {
+    status::contacts_check(encrypted, total)
+}
+
+#[uniffi::export]
+pub fn product_server_check(reachable: Option<bool>, milliseconds: Option<u32>) -> Check {
+    status::server_check(reachable, milliseconds)
+}
+
+/// What Status knows so far (None: still asking).
+#[derive(uniffi::Record)]
+pub struct ProductHealth {
+    pub reachable: Option<bool>,
+    pub milliseconds: Option<u32>,
+    pub accepted: Option<bool>,
+    pub notifications_allowed: Option<bool>,
+    pub push_registered: bool,
+    pub status: Option<SecurityStatus>,
+    pub encrypted_contacts: Option<u32>,
+    pub contacts: u32,
+    pub backup_available: bool,
+    pub backup_saved: bool,
+    pub storage_known: bool,
+    pub answered: bool,
+}
+
+#[derive(uniffi::Record)]
+pub struct ProductStatus {
+    pub check: Check,
+    pub word: String,
+}
+
+#[uniffi::export]
+pub fn product_status_summary(health: ProductHealth, lang: Language) -> ProductStatus {
+    let h = Health {
+        reachable: health.reachable,
+        milliseconds: health.milliseconds,
+        accepted: health.accepted,
+        notifications_allowed: health.notifications_allowed,
+        push_registered: health.push_registered,
+        keys: keys(health.status),
+        encrypted_contacts: health.encrypted_contacts,
+        contacts: health.contacts,
+        backup_available: health.backup_available,
+        backup_saved: health.backup_saved,
+        storage_known: health.storage_known,
+        answered: health.answered,
+    };
+    let (check, word) = status::summary(&h, lang);
+    ProductStatus { check, word }
+}
+
+#[uniffi::remote(Record)]
+#[uniffi(name = "ProductContact")]
+pub struct Contact {
+    pub blocked: bool,
+    pub friend_gone: bool,
+    pub contact_gone: bool,
+    pub unconfirmed: bool,
+    pub outdated: bool,
+    pub key_changed: bool,
+    pub verified: bool,
+    pub has_user: bool,
+    pub loaded: bool,
+    pub sessions: u32,
+    pub sessions_unready: bool,
+}
+
+#[uniffi::remote(Enum)]
+#[uniffi(name = "ProductContactMark")]
+pub enum ContactMark {
+    Verified,
+    Attention,
+}
+
+#[uniffi::export]
+pub fn product_sessions_check(sessions: u32, unready: bool) -> Check {
+    status::sessions_check(sessions, unready)
+}
+
+#[uniffi::export]
+pub fn product_contact_check(contact: Contact) -> Check {
+    status::contact_check(&contact)
+}
+
+#[uniffi::export]
+pub fn product_contact_mark(contact: Contact) -> Option<ContactMark> {
+    status::contact_mark(&contact)
+}
+
+#[uniffi::export]
+pub fn product_contact_summary(contact: Contact, lang: Language) -> String {
+    status::contact_summary(&contact, lang)
 }

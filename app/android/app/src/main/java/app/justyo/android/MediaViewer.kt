@@ -106,7 +106,7 @@ import java.util.UUID
         val current = index
         val item = queue.getOrNull(current) ?: return@LaunchedEffect
         player?.start()
-        val duration=if(item.video) item.duration.coerceIn(1,SharedVideoLimitMs.toInt()) else 3000
+        val duration=if(item.video) item.duration.coerceIn(1,VideoLimitMs.toInt()) else 3000
         var last=android.os.SystemClock.elapsedRealtime()
         while(progress<1f) { delay(16);val now=android.os.SystemClock.elapsedRealtime();progress+=((now-last)/duration.toFloat());last=now }
         if (index == current) index++

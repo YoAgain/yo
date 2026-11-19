@@ -1,1 +1,0 @@
-../YoApp/YoIntents.swift

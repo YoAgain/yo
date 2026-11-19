@@ -122,5 +122,5 @@ Diagnostics.clear()
 print("Diagnostics: consent, every occurrence, privacy, retry, retention and history migration passed")
 SWIFT
 swiftc -module-cache-path "$out/modules" -swift-version 6 -I "$out" -L "$out" -lYoCore \
-  "$here/../YoApp/Sources/YoApp/Diagnostics.swift" "$out/main.swift" -o "$out/check"
+  "$here/../YoApp/Sources/YoApp/Shared/Diagnostics.swift" "$out/main.swift" -o "$out/check"
 XDG_CONFIG_HOME="$out/config" LD_LIBRARY_PATH="$out${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}" "$out/check"

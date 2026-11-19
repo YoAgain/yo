@@ -27,17 +27,17 @@ let package = Package(
     // An xtool project's first library product is the app.
     .library(name: "YoApp", targets: ["YoApp"]),
     // The extensions (xtool.yml extensions): the share sheet, and the notification service. Both open the app's state
-    // with the core (SharedState.swift); the app's files they use are linked into Sources/YoShare and Sources/YoNotify.
+    // with the core (SharedState.swift); the app's files they use (Sources/YoApp/Shared) are linked into Sources/Extensions.
     .library(name: "YoShare", targets: ["YoShare"]),
     .library(name: "YoNotify", targets: ["YoNotify"]),
     // The controls (Control Center, Lock Screen, Action button): Send Yo, Yo Back, Yo Camera, Open Yo.
     .library(name: "YoControls", targets: ["YoControls"]),
   ],
   targets: [
-    .target(name: "YoApp", dependencies: ["YoCore"], swiftSettings: (env["YO_DEV_BUILD"] == "1" ? [.define("YO_DEV")] : []) + constValues("YoApp")),
-    .target(name: "YoShare", dependencies: ["YoCore"], swiftSettings: constValues("YoShare")),
-    .target(name: "YoNotify", dependencies: ["YoCore"], swiftSettings: constValues("YoNotify")),
-    .target(name: "YoControls", dependencies: ["YoCore"], swiftSettings: constValues("YoControls")),
+    .target(name: "YoApp", dependencies: ["YoCore"], path: "Sources/YoApp", swiftSettings: (env["YO_DEV_BUILD"] == "1" ? [.define("YO_DEV")] : []) + constValues("YoApp")),
+    .target(name: "YoShare", dependencies: ["YoCore"], path: "Sources/Extensions/YoShare", swiftSettings: constValues("YoShare")),
+    .target(name: "YoNotify", dependencies: ["YoCore"], path: "Sources/Extensions/YoNotify", swiftSettings: constValues("YoNotify")),
+    .target(name: "YoControls", dependencies: ["YoCore"], path: "Sources/Extensions/YoControls", swiftSettings: constValues("YoControls")),
     // The Rust core (core/bindings) through UniFFI: `import YoCore`. ../dev/core.sh makes both into build/core
     // (ignored); run it before the first build and after a change in core/ (dev/push.sh does).
     // The core keeps the state shared with the extensions in SQLite: the system's (libsqlite3 of the SDK).

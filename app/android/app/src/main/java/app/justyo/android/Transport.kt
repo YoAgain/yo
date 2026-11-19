@@ -22,7 +22,7 @@ class HubTransport(private val unsupported: () -> Unit) : HttpTransport {
             headers.forEach { request.header(it.name, it.value) }
             request.method(method, if (method == "GET" || method == "HEAD") null else body.toRequestBody())
             val identified = headers.any { it.name.equals("yo-device", true) }
-            val client = if (!identified && anonymousRoute(method, path)) anonymous else signed
+            val client = if (!identified && anonymousRequest(method, path)) anonymous else signed
             client.newCall(request.build()).execute().use { response ->
                 if (response.code == 426) { stopped.set(true); unsupported() }
                 val input = response.body
@@ -45,10 +45,5 @@ class HubTransport(private val unsupported: () -> Unit) : HttpTransport {
     fun close() { listOf(signed,anonymous).forEach { it.dispatcher.cancelAll();it.connectionPool.evictAll() } }
     companion object {
         const val MAX_ANSWER = 11 * 1024 * 1024
-        fun anonymousRoute(method: String, path: String): Boolean {
-            val route = path.substringBefore('?')
-            return (method == "POST" && route.startsWith("/v1/inbox/") && route != "/v1/inbox/ack") ||
-                route.startsWith("/v1/blobs/") || route == "/v1/crash" || route == "/v1/diagnostics/crash"
-        }
     }
 }

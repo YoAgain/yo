@@ -6,7 +6,7 @@
 Tap a name to send an encrypted Yo, photo or video.</p>
 
 <p align="center">
-<a href="app/ios/README.md"><b>iOS</b></a> SwiftUI · <b>Android</b> Compose · <a href="app/yogpt"><b>CLI</b></a> Rust
+<a href="app/ios/README.md"><b>iOS</b></a> SwiftUI · <b>Android</b> Compose · <a href="app/cli"><b>CLI</b></a> Rust
 </p>
 
 <p align="center"><a href="https://justyo.co"><b>justyo.co</b></a></p>
@@ -23,8 +23,26 @@ One Rust core runs the whole client. The apps only draw and pass HTTP and storag
 The apps on top:
 
 - [app/ios](app/ios): Swift, the iPhone app and its extensions
-- [app/android](https://github.com/YoAgain/yo/tree/android/app/android): Kotlin, on the `android` branch
-- [app/yogpt](app/yogpt): Rust, the CLI
+- [app/android](app/android): Kotlin, the Android app
+- [app/cli](app/cli): Rust, the CLI; the bots on it in [skills](skills)
+
+### iOS and Android
+
+The same job on each platform, so both apps behave alike.
+
+| Job | iOS | Android |
+|---|---|---|
+| Account item synced to a new phone | iCloud Keychain | Google Block Store |
+| Keys on this device | Keychain | Android Keystore |
+| Passkey for the backup (PRF) | Apple Passwords | Credential Manager (Google Password Manager) |
+| Push | APNs | Firebase Cloud Messaging |
+| Read the Yo before it shows | Notification Service Extension | `FirebaseMessagingService` |
+| Share photos into Yo | Share extension | `SEND` intent |
+| Home screen | WidgetKit widget | App widget |
+| One tap outside the app | Control Center control, Action button | Quick Settings tile |
+| Shortcuts | App Intents (Siri, Shortcuts) | App shortcuts |
+| Camera | AVFoundation | CameraX |
+| Settings and dialogs | SwiftUI Form, `.confirmationDialog` | Material 3 Expressive |
 
 ### Account Sync
 
@@ -117,7 +135,8 @@ DB: the local database, sealed per column.
 - [app](app)
   - [ios](app/ios): the iPhone app ([YoApp](app/ios/YoApp)), its extensions and [build tools](app/ios/dev)
   - [android](https://github.com/YoAgain/yo/tree/android/app/android): the Android app, on the `android` branch
-  - [yogpt](app/yogpt): the CLI and the YoGPT bot
+  - [cli](app/cli): the CLI, `yo`
+- [skills](skills): the bots (YoGPT, PING, PINGTEST) as scripts driving the CLI
 - [core](core)
   - [client](core/client): state, sessions, groups, media, recovery, outbox
   - [wire](core/wire): protocol formats

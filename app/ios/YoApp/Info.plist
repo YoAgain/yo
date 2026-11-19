@@ -83,6 +83,10 @@
 			</array>
 		</dict>
 	</array>
+	<!-- Export compliance, Apple's meaning: false = no encryption needing documentation. Yo encrypts with libsignal
+	     (standard algorithms only, mass market); for that Apple asks documentation only for the French store, and Yo
+	     is not sold in France. Should France come back: ANSSI declaration into App Store Connect, then true plus
+	     ITSEncryptionExportComplianceCode (true without a code fails every upload with ITMS-90592). -->
 	<key>ITSAppUsesNonExemptEncryption</key>
 	<false/>
 	<key>NSCameraUsageDescription</key>

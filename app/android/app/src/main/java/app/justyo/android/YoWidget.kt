@@ -4,26 +4,31 @@ import android.app.Activity
 import android.appwidget.AppWidgetManager
 import android.content.Context
 import android.content.Intent
+import android.graphics.Bitmap
+import android.graphics.Canvas
+import android.graphics.Paint
+import android.os.Build
 import android.os.Bundle
 import android.service.quicksettings.TileService
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
-import androidx.compose.foundation.selection.toggleable
 import androidx.compose.foundation.layout.*
-import androidx.compose.foundation.lazy.LazyColumn
-import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.res.stringResource
-import androidx.compose.ui.semantics.Role
+import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
-import androidx.compose.ui.unit.sp
 import androidx.core.content.edit
+import androidx.core.content.res.ResourcesCompat
 import androidx.glance.GlanceId
 import androidx.glance.GlanceModifier
+import androidx.glance.Image
+import androidx.glance.ImageProvider
 import androidx.glance.LocalSize
 import androidx.glance.action.ActionParameters
 import androidx.glance.action.actionParametersOf
@@ -34,6 +39,7 @@ import androidx.glance.appwidget.GlanceAppWidgetReceiver
 import androidx.glance.appwidget.SizeMode
 import androidx.glance.appwidget.action.ActionCallback
 import androidx.glance.appwidget.action.actionRunCallback
+import androidx.glance.appwidget.cornerRadius
 import androidx.glance.appwidget.provideContent
 import androidx.glance.background
 import androidx.glance.layout.Alignment as WidgetAlignment
@@ -42,27 +48,48 @@ import androidx.glance.layout.Column as WidgetColumn
 import androidx.glance.layout.fillMaxSize as widgetFillMaxSize
 import androidx.glance.layout.fillMaxWidth as widgetFillMaxWidth
 import androidx.glance.layout.height as widgetHeight
-import androidx.glance.text.FontWeight
-import androidx.glance.text.Text as WidgetText
-import androidx.glance.text.TextStyle
-import androidx.glance.unit.ColorProvider
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.lifecycleScope
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
 import org.json.JSONArray
+import uniffi.yo.ProductText
+import uniffi.yo.productWidgetEligible
+import uniffi.yo.productWidgetIdSelection
 
 private fun Context.widgetPreferences() = getSharedPreferences("yo-widget", Context.MODE_PRIVATE)
 private fun Friend.widgetName() = if (group == null) name else "#${name.removePrefix("#")}"
-private fun AppState.widgetFriends() = friends.filter { !it.blocked && !it.request && !it.gone }
+private fun AppState.widgetFriends() = friends.filter { productWidgetEligible(it.blocked, it.request, it.gone) }
+private const val WidgetSlots = 16
 
-private fun Context.widgetSelection(id: Int, account: String?): List<String> {
+private fun Context.widgetPicks(id: Int, account: String?): List<String> {
     val preferences = widgetPreferences()
     if (account == null || preferences.getString("account:$id", null) != account) return emptyList()
     val keys = JSONArray(preferences.getString("friends:$id", "[]"))
     return List(keys.length()) { keys.getString(it) }
 }
 
+/** Text as a bitmap in Montserrat Bold: RemoteViews cannot use the app's font. Scaled down to fit, never cut. */
+private fun Context.wordsBitmap(text: String, size: Float, width: Float, height: Float): Bitmap {
+    val density = resources.displayMetrics.density
+    val paint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+        color = android.graphics.Color.WHITE
+        typeface = ResourcesCompat.getFont(this@wordsBitmap, R.font.montserrat_bold)
+        textSize = size * density
+        textAlign = Paint.Align.CENTER
+    }
+    val room = (width - 32f) * density
+    val natural = paint.measureText(text)
+    if (natural > room) paint.textSize *= maxOf(0.5f, room / natural)
+    val w = (width * density).toInt().coerceAtLeast(1)
+    val h = (height * density).toInt().coerceAtLeast(1)
+    return androidx.core.graphics.createBitmap(w, h).also { bitmap ->
+        val metrics = paint.fontMetrics
+        Canvas(bitmap).drawText(text, w / 2f, h / 2f - (metrics.ascent + metrics.descent) / 2, paint)
+    }
+}
+
+/** The list widget (iOS YoWidgets): one friend on Amethyst, or rows in their colours sharing the height. A tap sends a Yo. */
 class YoWidget : GlanceAppWidget() {
     override val sizeMode = SizeMode.Exact
 
@@ -73,45 +100,46 @@ class YoWidget : GlanceAppWidget() {
         provideContent {
             val snapshot by repo.state.collectAsState()
             val account = repo.widgetAccount()
-            val friends = snapshot.widgetFriends().associateBy { it.key }
+            val friends = snapshot.widgetFriends()
             val size = LocalSize.current
-            val limit = when {
-                size.height >= 360.dp -> 16
-                size.height >= 230.dp -> 8
-                else -> 4
-            }
-            val small = size.width < 250.dp && size.height < 180.dp
-            val choices = context.widgetSelection(widgetId, account).mapNotNull(friends::get)
-            val selected = choices.ifEmpty {
-                if (account == null) emptyList() else friends.values.take(if (small) 1 else limit)
-            }.take(limit)
-            WidgetColumn(GlanceModifier.widgetFillMaxSize().background(Amethyst)) {
+            val slots = (size.height / 44.dp).toInt().coerceIn(1, WidgetSlots)
+            val selected = productWidgetIdSelection(friends.map { it.key }, context.widgetPicks(widgetId, account),
+                account != null, slots.toUInt(), slots.toUInt()).map { friends[it.toInt()] }
+            val shape = if (Build.VERSION.SDK_INT >= 31) GlanceModifier.cornerRadius(android.R.dimen.system_app_widget_background_radius) else GlanceModifier
+            WidgetColumn(GlanceModifier.widgetFillMaxSize().then(shape).background(Amethyst)) {
                 if (selected.isEmpty()) {
                     WidgetBox(GlanceModifier.widgetFillMaxSize(), contentAlignment = WidgetAlignment.Center) {
-                        WidgetText("Yo", style = TextStyle(color = ColorProvider(androidx.compose.ui.graphics.Color.White),
-                            fontWeight = FontWeight.Bold, fontSize = 28.sp))
+                        WidgetColumn(horizontalAlignment = WidgetAlignment.CenterHorizontally) {
+                            Words(context, "Yo", 34f, size.width, 48.dp)
+                            Words(context, copy(ProductText.WIDGET_EMPTY), 13f, size.width, 24.dp)
+                        }
                     }
                 }
-                // RemoteViews containers have a ten-child limit. Group rows without changing their height.
-                val sectionSize = if (selected.size > 8) (selected.size + 1) / 2 else 8
-                selected.chunked(sectionSize).forEach { section ->
-                    WidgetColumn(GlanceModifier.widgetFillMaxWidth().widgetHeight(size.height * section.size / selected.size)) {
+                val rowHeight = size.height / selected.size.coerceAtLeast(1)
+                val font = minOf(36f, rowHeight.value * 0.42f)
+                // RemoteViews containers have a ten-child limit: rows go in sections of at most eight.
+                selected.chunked(8).forEach { section ->
+                    WidgetColumn(GlanceModifier.widgetFillMaxWidth().widgetHeight(rowHeight * section.size)) {
                         section.forEach { friend ->
-                            val single = small && selected.size == 1
+                            val single = selected.size == 1
                             WidgetBox(GlanceModifier.widgetFillMaxWidth().defaultWeight()
-                                .background(if (single) Amethyst else RowColors[friend.color.mod(RowColors.size)])
+                                .background(if (single) Amethyst else RowColors[Math.floorMod(friend.color, RowColors.size)])
                                 .clickable(actionRunCallback<WidgetSend>(actionParametersOf(
-                                    WidgetSend.friend to friend.key, WidgetSend.account to account.orEmpty(),
-                                ))), contentAlignment = WidgetAlignment.Center) {
-                                val style = TextStyle(color = ColorProvider(androidx.compose.ui.graphics.Color.White),
-                                    fontWeight = FontWeight.Bold, fontSize = if (single) 22.sp else 14.sp)
-                                WidgetText(if (single) "Yo · ${friend.widgetName()}" else friend.widgetName(), style = style, maxLines = 1)
+                                    WidgetSend.friend to friend.key, WidgetSend.account to account.orEmpty()))),
+                                contentAlignment = WidgetAlignment.Center) {
+                                Words(context, friend.widgetName(), if (single) 28f else font, size.width, rowHeight)
                             }
                         }
                     }
                 }
             }
         }
+    }
+
+    @androidx.compose.runtime.Composable
+    private fun Words(context: Context, text: String, size: Float, width: Dp, height: Dp) {
+        Image(ImageProvider(context.wordsBitmap(text, size, width.value, height.value)), text,
+            GlanceModifier.widgetFillMaxWidth().widgetHeight(height))
     }
 
     override suspend fun onDelete(context: Context, glanceId: GlanceId) {
@@ -136,6 +164,7 @@ class WidgetSend : ActionCallback {
     }
 }
 
+/** Choosing the widget's friends, in order: standard top bar, Done, checkable list items. */
 class YoWidgetConfiguration : ComponentActivity() {
     @OptIn(ExperimentalMaterial3Api::class)
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -143,22 +172,16 @@ class YoWidgetConfiguration : ComponentActivity() {
         val id = intent.getIntExtra(AppWidgetManager.EXTRA_APPWIDGET_ID, AppWidgetManager.INVALID_APPWIDGET_ID)
         val result = Intent().putExtra(AppWidgetManager.EXTRA_APPWIDGET_ID, id)
         setResult(Activity.RESULT_CANCELED, result)
-        val glanceId = if (id == AppWidgetManager.INVALID_APPWIDGET_ID) null else try {
-            GlanceAppWidgetManager(this).getGlanceIdBy(id)
-        } catch (_: IllegalArgumentException) {
-            null
-        }
-        if (glanceId == null) {
-            finish()
-            return
-        }
+        val glanceId = if (id == AppWidgetManager.INVALID_APPWIDGET_ID) null
+            else runCatching { GlanceAppWidgetManager(this).getGlanceIdBy(id) }.getOrNull()
+        if (glanceId == null) { finish(); return }
         enableEdgeToEdge()
         val repo = repository
         setContent {
             YoSystemTheme {
                 val snapshot by repo.state.collectAsStateWithLifecycle()
                 val account = repo.widgetAccount()
-                var selected by rememberSaveable(id, account) { mutableStateOf(widgetSelection(id, account)) }
+                var selected by rememberSaveable(id, account) { mutableStateOf(widgetPicks(id, account)) }
                 var saving by remember { mutableStateOf(false) }
                 Scaffold(topBar = {
                     TopAppBar(
@@ -166,10 +189,7 @@ class YoWidgetConfiguration : ComponentActivity() {
                         actions = {
                             TextButton(enabled = account != null && !saving, onClick = {
                                 saving = true
-                                widgetPreferences().edit {
-                                    putString("friends:$id", JSONArray(selected).toString())
-                                    putString("account:$id", account)
-                                }
+                                widgetPreferences().edit { putString("friends:$id", JSONArray(selected).toString()); putString("account:$id", account) }
                                 lifecycleScope.launch {
                                     YoWidget().update(this@YoWidgetConfiguration, glanceId)
                                     setResult(Activity.RESULT_OK, result)
@@ -179,22 +199,13 @@ class YoWidgetConfiguration : ComponentActivity() {
                         },
                     )
                 }) { padding ->
-                    LazyColumn(Modifier.fillMaxSize().padding(padding)) {
-                        items(snapshot.widgetFriends(), key = { it.key }) { friend ->
+                    Column(Modifier.fillMaxSize().padding(padding).verticalScroll(rememberScrollState()).padding(16.dp)) {
+                        Section(null, copy(ProductText.WIDGET_LIST_INTENT), *snapshot.widgetFriends().map { friend ->
                             val checked = friend.key in selected
-                            ListItem(
-                                headlineContent = { Text(friend.widgetName()) },
-                                leadingContent = { Checkbox(checked, onCheckedChange = null) },
-                                modifier = Modifier.toggleable(
-                                    value = checked,
-                                    enabled = !saving && (checked || selected.size < 16),
-                                    role = Role.Checkbox,
-                                    onValueChange = { chosen ->
-                                        selected = if (chosen) selected + friend.key else selected - friend.key
-                                    },
-                                ),
-                            )
-                        }
+                            Setting(friend.widgetName(), leading = { SettingsAvatar(friend.name, 36) }, checked = checked, checkbox = true,
+                                enabled = !saving && (checked || selected.size < WidgetSlots),
+                                onChecked = { on -> selected = if (on) selected + friend.key else selected - friend.key })
+                        }.toTypedArray())
                     }
                 }
             }

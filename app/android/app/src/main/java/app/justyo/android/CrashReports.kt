@@ -50,6 +50,7 @@ internal object CrashFrames {
 class CrashReports(context: Context, private val transport: HttpTransport) {
     private val preferences = context.getSharedPreferences("crashes", Context.MODE_PRIVATE)
     private val manager = context.getSystemService(ActivityManager::class.java)
+    /** Sent automatically; Settings › Status › Send Crashes turns it off (reports then stay on this phone). */
     var enabled: Boolean
         get() = preferences.getBoolean("enabled", true)
         set(value) { preferences.edit { putBoolean("enabled", value) } }
@@ -68,9 +69,9 @@ class CrashReports(context: Context, private val transport: HttpTransport) {
         preferences.edit(commit = true) { putLong(key, count + 1) }
     }
 
-    @Synchronized internal fun countStateFailure(step: UInt, before: UInt, after: UInt, kind: String) {
+    @Synchronized internal fun countStateFailure(kind: String) {
         val day = System.currentTimeMillis() / 86_400_000L
-        val key = "state:$day:StateMigration V$step $kind (before=$before after=$after)"
+        val key = "state:$day:$kind"
         preferences.edit(commit = true) { putLong(key, preferences.getLong(key, 0) + 1) }
     }
 

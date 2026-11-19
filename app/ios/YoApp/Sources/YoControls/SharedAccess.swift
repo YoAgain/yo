@@ -1,1 +1,0 @@
-../YoApp/SharedAccess.swift

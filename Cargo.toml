@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["core/wire", "core/client", "core/bindings", "core/product", "hub", "tests", "app/yogpt"]
+members = ["core/wire", "core/client", "core/bindings", "core/product", "hub", "tests", "app/cli"]
 # Fuzz targets build with nightly and cargo-fuzz: dev/fuzz.
 exclude = ["fuzz"]
 

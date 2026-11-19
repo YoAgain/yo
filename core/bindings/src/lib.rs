@@ -5,14 +5,18 @@ use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use yo_core::backup::{Door, PasskeyDoor};
 use yo_core::groups::GroupView;
 use yo_core::security::SecurityStatus;
+use yo_core::shared;
 use yo_core::statedb::{DbStore, Loaded};
 use yo_core::storage::FriendInfo;
-use yo_core::{Client, ContactInfo, Content, Event, Sent, SessionInfo};
+use yo_core::{Client, ContactInfo, Content, Event, SessionInfo};
 
 uniffi::setup_scaffolding!();
 
+mod android;
+mod keychain;
 mod list;
 mod product;
+pub use keychain::*;
 pub use list::*;
 pub use product::*;
 
@@ -279,13 +283,6 @@ pub struct CreatedGroup {
     pub events: Vec<YoEvent>,
 }
 
-/// Where a photo or video goes: how many fetches its upload is for, and what getting there received.
-#[derive(uniffi::Record)]
-pub struct MediaChat {
-    pub fetches: u32,
-    pub events: Vec<YoEvent>,
-}
-
 /// Seals a photo or video (at most 10 MiB) under a key of its own, with a new id. No client: call it anywhere.
 #[uniffi::export]
 pub fn seal_media(plain: Vec<u8>, width: u16, height: u16) -> Result<SealedMedia, YoError> {
@@ -307,6 +304,24 @@ pub fn retry_later(error: &YoError) -> bool {
 pub enum SendTarget {
     Contact { id: String },
     Group { id: String },
+}
+
+impl From<SendTarget> for shared::Target {
+    fn from(target: SendTarget) -> Self {
+        match target {
+            SendTarget::Contact { id } => shared::Target::User(id),
+            SendTarget::Group { id } => shared::Target::Group(id),
+        }
+    }
+}
+
+/// A target as an app keeps it: a user id, a name, or "group:" and the group's id.
+#[uniffi::export]
+pub fn send_target(to: String) -> SendTarget {
+    match shared::Target::parse(&to) {
+        shared::Target::User(id) => SendTarget::Contact { id },
+        shared::Target::Group(id) => SendTarget::Group { id },
+    }
 }
 
 #[derive(uniffi::Enum, PartialEq)]
@@ -542,30 +557,6 @@ pub fn recovery_key_parse(typed: String) -> Option<String> {
     yo_core::backup::parse_recovery_key(&typed).map(|key| key.to_string())
 }
 
-/// The account secret from an old install's local state (Migrations/KeychainV1.swift); `ed25519`: a seed to
-/// convert with `legacy_account_secret`; `storage_key`: what the hub's storage is still sealed under.
-#[derive(uniffi::Record)]
-pub struct LegacyIdentity {
-    pub secret: Vec<u8>,
-    pub ed25519: bool,
-    pub storage_key: Option<Vec<u8>>,
-}
-
-#[uniffi::export]
-pub fn read_legacy_identity(path: String, state_key: Vec<u8>, format: u8) -> Result<LegacyIdentity, YoError> {
-    let found = yo_core::legacy::read_identity(std::path::Path::new(&path), &key_of(state_key)?, format)?;
-    Ok(LegacyIdentity {
-        secret: found.secret.to_vec(),
-        ed25519: found.ed25519,
-        storage_key: found.storage_key.map(|key| key.to_vec()),
-    })
-}
-
-#[uniffi::export]
-pub fn legacy_account_secret(seed: Vec<u8>) -> Result<Vec<u8>, YoError> {
-    Ok(yo_core::identity::legacy_account_secret(&key_of(seed)?).to_vec())
-}
-
 /// A backup opened by a door: K, what K sealed (the app's JSON), and the record as the hub has it.
 #[derive(uniffi::Record)]
 pub struct YoOpenedBackup {
@@ -719,32 +710,15 @@ impl YoClient {
     fn read<T>(&self, f: impl FnOnce(&Client) -> T) -> T {
         f(&self.client.lock().unwrap_or_else(PoisonError::into_inner))
     }
-
-    /// A typed name is discovery: its current owner, resolved without holding the client. A user id as it is.
-    fn user_for(&self, to: String) -> Result<String, YoError> {
-        if Client::is_user_id(&to) {
-            return Ok(to);
-        }
-        let whois = self.with(|c| c.whois_begin(&to))??;
-        let (user, username) = whois.send()?;
-        self.with(|c| c.whois_end(&to, &user, username))??;
-        Ok(user)
-    }
-
-    /// Posts deliveries without holding the client, and what may go after them, until done.
-    fn deliver_from(&self, mut deliveries: yo_core::Deliveries) -> Result<Vec<YoEvent>, YoError> {
-        loop {
-            let answers = deliveries.send();
-            match self.with(|c| c.send_end(&deliveries, answers))? {
-                Sent::More(more) => deliveries = more,
-                Sent::Done(result) => return events(result),
-            }
-        }
-    }
 }
 
-fn media_chat((fetches, received): (u32, Vec<Event>)) -> MediaChat {
-    MediaChat { fetches, events: received.into_iter().map(Into::into).collect() }
+/// The bindings' steps: the turn, then the client on the database's current state.
+impl yo_core::shared::Locked for YoClient {
+    type Error = YoError;
+
+    fn step<T>(&self, step: impl FnOnce(&mut Client) -> T) -> Result<T, YoError> {
+        self.with(step)
+    }
 }
 
 #[uniffi::export]
@@ -863,25 +837,25 @@ impl YoClient {
     /// Sends again what the hub did not take yet (`waiting`), without holding the client.
     pub fn deliver(&self) -> Result<Vec<YoEvent>, YoError> {
         let deliveries = self.with(|c| c.deliver_begin())??;
-        self.deliver_from(deliveries)
+        events(Ok(shared::deliver(self, deliveries)?))
     }
 
     /// A Yo, with a photo or video or not. Its way to the hub does not hold the client where a session is in place.
     pub fn send(&self, target: SendTarget, kind: MessageKind) -> Result<Vec<YoEvent>, YoError> {
         let content = Content::try_from(kind)?;
-        match target {
-            SendTarget::Contact { id } => {
-                let to = self.user_for(id)?;
-                match self.with(|c| c.send_begin(&to, content.clone()))? {
-                    Some(deliveries) => self.deliver_from(deliveries),
-                    None => events(self.with(|c| c.send(&to, content))?),
-                }
-            }
-            SendTarget::Group { id } => match self.with(|c| c.send_group_begin(&id, content.clone()))? {
-                Some(deliveries) => self.deliver_from(deliveries),
-                None => events(self.with(|c| c.send_group(&id, content))?),
-            },
-        }
+        events(Ok(shared::send(self, &target.into(), content)?))
+    }
+
+    /// Uploads a sealed photo or video for its Yo to `target`: the chat or the group's sessions opened first if
+    /// needed, the upload without the client. What opening received.
+    pub fn upload_media_to(
+        &self,
+        target: SendTarget,
+        media: YoMedia,
+        ciphertext: Vec<u8>,
+    ) -> Result<Vec<YoEvent>, YoError> {
+        let media = media.try_into()?;
+        events(Ok(shared::upload(self, &target.into(), &media, &ciphertext)?))
     }
 
     /// Envelopes the hub has not taken yet: `deliver` them again in a while.
@@ -1133,27 +1107,6 @@ impl YoClient {
     /// Deletes the account at the hub with everything it holds about it; then forget this client and its state.
     pub fn delete_account(&self) -> Result<(), YoError> {
         Ok(self.with(|c| c.delete_account())??)
-    }
-
-    /// How many fetches media to `to` is uploaded for, the chat opened first if needed, and what that received.
-    pub fn media_chat(&self, to: String) -> Result<MediaChat, YoError> {
-        let found = self.with(|c| match c.media_fetches(&to) {
-            Some(fetches) => Ok((fetches, Vec::new())),
-            None => c.open_chat(&to),
-        })??;
-        Ok(media_chat(found))
-    }
-
-    /// How many fetches a photo or video to the group is uploaded for, sessions with its members opened first.
-    pub fn group_media_chat(&self, group: String) -> Result<MediaChat, YoError> {
-        Ok(media_chat(self.with(|c| c.open_group(&group))??))
-    }
-
-    /// Uploads a sealed photo or video for `fetches` fetches (`media_chat`) before its Yo, without the client.
-    pub fn upload_media(&self, media: YoMedia, ciphertext: Vec<u8>, fetches: u32) -> Result<(), YoError> {
-        let media = media.try_into()?;
-        let upload = self.with(|c| c.upload(&media, fetches))??;
-        Ok(upload.send(&ciphertext)?)
     }
 
     /// Fetches, verifies and opens media without the client. The app stores it, then acknowledges it (`ack_media`).

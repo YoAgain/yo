@@ -44,8 +44,8 @@ adb shell am start -n app.justyo.android.dev/app.justyo.android.MainActivity
 AAR. First builds are much slower than subsequent ones. `CARGO_BUILD_JOBS` defaults to 4 to bound libsignal’s build
 memory. No native binaries or generated bindings are checked in. `dev/core.sh` may also be run by itself.
 
-The sixteen offline JVM tests load the actual host Rust library, built by the same task, and exercise Signal recovery keys,
-username rules, typed UniFFI callback errors, save-failure-before-network behavior, anonymous HTTP routing, UTF-8 limits, and the shared list model’s viewport/camera freezes, promotion, sent expiry and group sender identity.
+The offline JVM tests load the actual host Rust library, built by the same task: the binding's typed callback errors,
+bar titles from the core, UTF-8 limits and crash-frame sanitizing. The core's own rules are tested in Rust.
 There are no live-account mutations in unit tests. Lint treats warnings as errors; only dependency-update advisory
 checks are disabled because dependency versions are deliberately pinned. Runtime/API and accessibility checks run.
 
@@ -56,8 +56,8 @@ are unchanged. Generation enables UniFFI’s JNA cleaner for API 28; Java’s Cl
 
 ## State, identity, recovery
 
-`CoreState` opens the same Rust SQLite database as iOS in `noBackupFilesDir`. The first migration reads the
-legacy `AtomicFile`, authenticates it with the existing state key, and commits the rows together. A failed save
+`CoreState` opens the core's SQLite database (`yo-state-v3.sqlite`) in `noBackupFilesDir`. There is one migration:
+an older install's state files are deleted at launch (signed out), and a recovery key it had saved signs it in again. A failed save
 stops any send or acknowledgement that depended on it. All blocking core/network/disk calls run on `Dispatchers.IO`; a long poll is separate
 from sending. Requests have bounded answers (11 MiB), timeouts, no cookies/cache, no redirects, and independent
 OkHttp pools for identified and anonymous traffic. Hub keys, sender-certificate roots and group parameters are the
@@ -75,7 +75,10 @@ use the **iOS-compatible JSON** inside the core’s encrypted record (base64 Dat
 backup version 3). The 64-character Signal recovery key restores the account on either platform. Text/PNG-card export uses the
 system Create Document flow; the backup is marked secured only after writing the document and uploading the
 backup. New keys are staged before changing the hub record. Do not sign out of an unsecured account you need.
-Unlike iCloud Keychain, Android Keystore has no synced account recovery: uninstalling loses this device’s keys.
+As iOS keeps its account item in the iCloud Keychain, Android keeps the same item (the core's `keychain` format) in
+Google Block Store with cloud backup: a new phone with the same Google account signs in by itself before onboarding.
+Signing out marks the item (`signedOut`), deleting the account deletes it. Block Store needs Google Play services, and
+its cloud copy is end-to-end encrypted only while the phone has a screen lock.
 
 The media queue persists encrypted blobs and manifests before upload; a media Yo waits for its upload and the
 2-second undo window. A restart discards still-held items. Per-target order is maintained, and temporary failures
@@ -145,9 +148,11 @@ Incoming and outgoing photo/video thumbnails are encrypted at rest and decoded
 off the UI thread. Crash reports use the same structured anonymous diagnostics route as
 iOS and can be inspected in Status. See [PARITY.md](PARITY.md) for remaining code gaps.
 
-UI-owned labels, footers, errors, formatted sentences and count plurals use Android
-resources. English is the supplied language; core row labels are translated at rendering. Logical placement supports RTL. TalkBack, large fonts and RTL still need
-hardware acceptance. Nested settings, onboarding, camera and viewer use predictive back. Camera QR scanning supports recovery and core-validated safety codes; native chooser targets support direct media shares. Presentation promotions persist and swipe removal has core-owned undo. Statistics include the top friend and last sent/received times.
+Yo's own words (bar titles, send and arrival lines, notifications, widget texts) and product rules (limits,
+encoding, widget selection, notification row) come from the core's `yo_product` via UniFFI, in English like iOS.
+Settings, dialogs and sheets are Material 3 Expressive standard components (segmented list items, switches, top
+app bars, sheets); the Yo look stays on the content (Flat UI bars, Montserrat Bold, Amethyst). Logical placement supports RTL. TalkBack, large fonts and RTL still need
+hardware acceptance. Nested settings, onboarding, camera and viewer use predictive back. Camera QR scanning reads recovery keys; safety numbers are compared as digits, as on iOS; native chooser targets support direct media shares. Presentation promotions persist and swipe removal has core-owned undo. Statistics include the top friend and last sent/received times.
 
 The release APK contains a manually maintained startup baseline profile, in addition to
 library profiles; no device performance measurements are claimed. An independent
@@ -164,25 +169,3 @@ nice -n 10 ./gradlew --no-daemon --max-workers=4 -Pkotlin.incremental=false asse
 
 Release signing and distribution remain owner work. Generated bindings, native libraries,
 SDK paths, signing files and machine settings are not checked in.
-
-## Round-two validation
-
-On November 17, 2026, debug/release builds, all 16 offline JVM tests and lint pass
-(the live hub test stays skipped). `cargo test --workspace --locked` passes after
-removing the earlier Android-specific shared-test addition. No core behavior changed.
-Non-Android existing files are compared byte-for-byte, including symlink contents,
-with main `12a320c`; only the new Android CI workflow is intentionally added outside
-`app/android`. No commit or deployment was performed.
-
-## Round-three validation
-
-Android follows the owner’s reversal: plain white received labels, no physics/HDR or
-flights, five exclamation marks then rolling +N overflow. Received status owns the
-trailing edge while names stay centred. Sent feedback replaces the name at 30 sp,
-uses a bold ↑ Yo only when space requires it, then hides for received priority.
-Bangs yield before the overflow number; thumbnails show one photo with its number.
-Viewer swipe-down discard and send click remain.
-
-Maven runtime license declarations and embedded notices are bundled by the build.
-Share inputs stage encrypted before destination selection. See PARITY for current
-validation and remaining device acceptance.

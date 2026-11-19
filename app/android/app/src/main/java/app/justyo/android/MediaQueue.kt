@@ -217,10 +217,8 @@ class MediaQueue(
                             async(Dispatchers.IO) { slots.withPermit {
                                 if(c !== client() || version != generation) return@withPermit
                                 try {
-                                    val chat = if(item.target.startsWith("group:")) c.groupMediaChat(item.target.removePrefix("group:")) else c.mediaChat(item.target)
-                                    absorb(c,chat.events)
                                     val data=gate.withLock { if(version == generation) vault.read("out-${item.id}") else null } ?: return@withPermit
-                                    c.uploadMedia(item.media,data,chat.fetches)
+                                    absorb(c, c.uploadMediaTo(sendTarget(item.target), item.media, data))
                                     gate.withLock {
                                         if(c === client() && version == generation) {
                                             outgoing=outgoing.map { if(it.id==item.id) it.copy(uploaded=true) else it }; saveOut()
@@ -237,13 +235,8 @@ class MediaQueue(
                             if (item.owner != c.userId()) continue
                             val latest = gate.withLock { outgoing.firstOrNull { it.id == item.id } }
                             if (latest == null || latest.held || !latest.uploaded) { blockedTargets += item.target; continue }
-                            val group = item.target.takeIf { it.startsWith("group:") }?.removePrefix("group:")
-                            val events = when {
-                                item.video && group != null -> c.sendGroupVideo(group,item.media,item.duration.toUInt())
-                                item.video -> c.sendVideo(item.target,item.media,item.duration.toUInt())
-                                group != null -> c.sendGroupPhoto(group,item.media)
-                                else -> c.sendPhoto(item.target,item.media)
-                            }
+                            val events = c.send(sendTarget(item.target),
+                                if (item.video) MessageKind.Video(item.media, item.duration.toUInt()) else MessageKind.Photo(item.media))
                             absorb(c, events)
                             val last = gate.withLock {
                                 if (generation != version) return@withLock null

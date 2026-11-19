@@ -180,7 +180,7 @@ fn clean_break_signs_in_each_old_state_and_keychain_item_with_the_same_account_k
     fs::remove_dir_all(temporary).unwrap();
 }
 
-/// YoGPT's state file of the build before the database (`app/yogpt/README.md`): taken into the database offline, the
+/// YoGPT's state file of the build before the database (`app/cli/README.md`): taken into the database offline, the
 /// bot goes on as the same device, with its sessions and what waited in its outbox and at the hub.
 #[test]
 fn a_bot_state_file_goes_on_as_the_same_device() {

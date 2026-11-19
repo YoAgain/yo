@@ -5,7 +5,7 @@ here=$(cd "$(dirname "$0")" && pwd)
 root=$(cd "$here/../../.." && pwd)
 out="$root/target/blob-ack-swift"
 mkdir -p "$out"
-python3 - "$here/../YoApp/Sources/YoApp/Prefetch.swift" "$out/main.swift" <<'PY'
+python3 - "$here/../YoApp/Sources/YoApp/Shared/Prefetch.swift" "$out/main.swift" <<'PY'
 from pathlib import Path
 import sys
 source = Path(sys.argv[1]).read_text()

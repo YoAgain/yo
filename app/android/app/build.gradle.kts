@@ -72,6 +72,7 @@ dependencies {
     implementation("com.squareup.okhttp3:okhttp:5.3.2")
     implementation("androidx.credentials:credentials:1.6.0")
     implementation("androidx.credentials:credentials-play-services-auth:1.6.0")
+    implementation("com.google.android.gms:play-services-auth-blockstore:16.4.0")
     implementation("androidx.camera:camera-camera2:1.7.0-rc02")
     implementation("androidx.camera:camera-lifecycle:1.7.0-rc02")
     implementation("androidx.camera:camera-view:1.7.0-rc02")

@@ -220,10 +220,9 @@ fn a_photo_and_a_video_go_as_blobs_and_are_opened_once() {
     let video = b"MP4!".repeat(100_000);
     let (sealed_photo, sealed_video) =
         (yo::seal_media(photo.clone(), 640, 480).unwrap(), yo::seal_media(video.clone(), 1080, 1920).unwrap());
-    let chat = a.media_chat(b.user()).unwrap();
-    assert_eq!(chat.fetches, 1);
-    a.upload_media(sealed_photo.media.clone(), sealed_photo.ciphertext.clone(), chat.fetches).unwrap();
-    a.upload_media(sealed_video.media.clone(), sealed_video.ciphertext.clone(), chat.fetches).unwrap();
+    let to = || yo::send_target(b.user());
+    a.upload_media_to(to(), sealed_photo.media.clone(), sealed_photo.ciphertext.clone()).unwrap();
+    a.upload_media_to(to(), sealed_video.media.clone(), sealed_video.ciphertext.clone()).unwrap();
     a.send_photo(b.user(), sealed_photo.media.clone()).unwrap();
     a.send(
         yo::SendTarget::Contact { id: b.user() },

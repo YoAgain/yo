@@ -89,7 +89,7 @@ def history():
 
 
 # Today's client by app, tests not counted.
-APPS = (("Core", "core/"), ("iOS", "app/ios/"), ("Android", "app/android/"), ("YoGPT", "app/yogpt/"))
+APPS = (("Core", "core/"), ("iOS", "app/ios/"), ("Android", "app/android/"), ("CLI", "app/cli/"))
 
 
 def app_counts():

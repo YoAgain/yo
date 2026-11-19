@@ -14,7 +14,9 @@ import android.widget.Toast
 import androidx.core.net.toUri
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.platform.LocalContext
+import uniffi.yo.ListKind
 import uniffi.yo.MessageKind
+import uniffi.yo.productAndroidNotificationLine
 
 @Composable
 internal fun contextNotificationsEnabled(): Boolean =
@@ -56,15 +58,11 @@ internal class YoNotifications(private val context: Context) {
             it.notification.group == thread && it.notification.flags and Notification.FLAG_GROUP_SUMMARY == 0
         }
         if (children.any { it.tag == id }) return
-        val text = if (name == null) context.getString(R.string.yo_notification_fallback) else buildString {
-            append(context.getString(R.string.yo_from, "Yo", name))
-            if (group != null) append(context.getString(R.string.yo_notification_group_suffix, group.removePrefix("#")))
-            when (kind) {
-                is MessageKind.Photo -> append(" 📷")
-                is MessageKind.Video -> append(" 🎥")
-                else -> Unit
-            }
-        }
+        val text = productAndroidNotificationLine(name, group, when (kind) {
+            is MessageKind.Photo -> ListKind.PHOTO
+            is MessageKind.Video -> ListKind.VIDEO
+            else -> ListKind.YO
+        }, Words)
         val open = Intent(context, MainActivity::class.java).addFlags(Intent.FLAG_ACTIVITY_SINGLE_TOP)
         val pending = PendingIntent.getActivity(context, 0, open, PendingIntent.FLAG_IMMUTABLE)
         fun notification(channel: String) = Notification.Builder(context, channel)

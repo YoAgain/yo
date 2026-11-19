@@ -41,7 +41,7 @@ class YoViewModel(application: Application) : AndroidViewModel(application) {
     @Volatile private var shareImportVersion=0
     private var importShares: Job?=null
     init {
-        repository.crashes.install(); repository.start()
+        repository.crashes.install()
         viewModelScope.launch(Dispatchers.IO) {
             repository.state.first { !it.loading }
             if(importShares==null) runCatching { repository.pendingShares.items() }.getOrNull()?.let { shares.value=it }
@@ -72,7 +72,7 @@ class YoViewModel(application: Application) : AndroidViewModel(application) {
             try {
                 repository.state.first { !it.loading }
                 val video = sources.firstOrNull { (resolver.getType(it) ?: intent.type)?.startsWith("video/") == true }
-                val items = if (video == null) sources.take(10) else listOf(video)
+                val items = if (video == null) sources.take(uniffi.yo.productShareLimits().photos.toInt()) else listOf(video)
                 repository.pendingShares.clear()
                 val staged=mutableListOf<Uri>()
                 for(source in items) {

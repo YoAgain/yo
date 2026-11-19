@@ -1,6 +1,6 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-<!-- The share extension (Sources/YoShare): "Yo" in the share sheet for up to ten photos or one video. Its font sits at
+<!-- The share extension (Sources/Extensions/YoShare): "Yo" in the share sheet for up to ten photos or one video. Its font sits at
      its own root (xtool.yml extensions resources). -->
 <plist version="1.0">
 <dict>

@@ -159,19 +159,18 @@ class YoCamera(private val context: Context) {
         video = null
     }
 }
-internal const val VideoLimitMs = 10_000L
-/** A shared or picked video (spec 5): up to 10 s; Android has no system trimmer, so a longer one is refused. */
-internal const val SharedVideoLimitMs = VideoLimitMs
-/** What a video may be at most: under a blob's 10 MiB (MAX_BLOB_LEN, its tag included) with room to spare. */
-internal const val LargestVideo = 9_000_000L
-private const val VideoBitrate = 2_500_000
+/** Media limits and encoding, the core's (`yo_product`). A longer shared video is refused: Android has no trimmer. */
+internal val VideoLimitMs = uniffi.yo.productVideoLimitMs().toLong()
+internal val LargestVideo = uniffi.yo.productVideoLimitBytes().toLong()
+private val PhotoLongSide = uniffi.yo.productPhotoLongSide().toDouble()
+private val Encoding = uniffi.yo.productEncoding()
 
 data class PreparedMedia(val bytes: ByteArray,val width: Int,val height: Int,val video: Boolean=false,val duration: Int=0, val heic: Boolean=false)
 object MediaFiles {
     suspend fun photo(context: Context,uri: Uri): PreparedMedia = withContext(Dispatchers.IO) {
         val source=ImageDecoder.createSource(context.contentResolver,uri)
         val bitmap=ImageDecoder.decodeBitmap(source) { decoder,info,_ ->
-            val ratio=minOf(1.0,2048.0/maxOf(info.size.width,info.size.height))
+            val ratio=minOf(1.0,PhotoLongSide/maxOf(info.size.width,info.size.height))
             decoder.setTargetSize((info.size.width*ratio).toInt().coerceAtLeast(1),(info.size.height*ratio).toInt().coerceAtLeast(1))
             decoder.allocator=ImageDecoder.ALLOCATOR_SOFTWARE
         }
@@ -179,7 +178,7 @@ object MediaFiles {
         try {
             val heic = try {
                 HeifWriter.Builder(file.path, bitmap.width, bitmap.height, HeifWriter.INPUT_MODE_BITMAP)
-                    .setQuality(75).build().use { writer ->
+                    .setQuality((Encoding.photoQuality * 100).roundToInt()).build().use { writer ->
                         writer.start()
                         writer.addBitmap(bitmap)
                         writer.stop(5_000)
@@ -190,7 +189,7 @@ object MediaFiles {
                 null
             }
             val bytes = heic ?: ByteArrayOutputStream().also {
-                check(bitmap.compress(Bitmap.CompressFormat.JPEG, 75, it))
+                check(bitmap.compress(Bitmap.CompressFormat.JPEG, (Encoding.photoQuality * 100).roundToInt(), it))
             }.toByteArray()
             PreparedMedia(bytes, bitmap.width, bitmap.height, heic = heic != null)
         } finally {
@@ -207,19 +206,19 @@ object MediaFiles {
                 try {
                     retriever.setDataSource(context, uri)
                     val lengthMs = retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_DURATION)?.toLongOrNull() ?: 0L
-                    val maxInputMs = SharedVideoLimitMs + if (fromCamera) 500L else 0L
-                    require(lengthMs <= maxInputMs) { context.getString(R.string.video_too_long) }
+                    val maxInputMs = VideoLimitMs + if (fromCamera) 500L else 0L
+                    require(lengthMs <= maxInputMs) { copy(uniffi.yo.ProductText.VIDEO_TOO_LONG) + " · " + uniffi.yo.productVideoLimitLabel() }
                     val w = checkNotNull(retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_VIDEO_WIDTH)).toInt()
                     val h = checkNotNull(retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_VIDEO_HEIGHT)).toInt()
                     val rotation = retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_VIDEO_ROTATION)?.toInt()
-                    val scale = minOf(1.0, 1280.0 / maxOf(w, h), 720.0 / minOf(w, h))
+                    val scale = minOf(1.0, Encoding.videoLongSide.toDouble() / maxOf(w, h), Encoding.videoShortSide.toDouble() / minOf(w, h))
                     fun fit(side: Int) = ((side * scale / 2).roundToInt() * 2).coerceAtLeast(2)
                     if (rotation == 90 || rotation == 270) Triple(fit(h), fit(w), lengthMs) else Triple(fit(w), fit(h), lengthMs)
                 } finally { retriever.release() }
             }
             withContext(Dispatchers.Main) {
                 suspendCancellableCoroutine<Unit> { done ->
-                    val item=MediaItem.Builder().setUri(uri).setClippingConfiguration(MediaItem.ClippingConfiguration.Builder().setEndPositionMs(SharedVideoLimitMs).build()).build()
+                    val item=MediaItem.Builder().setUri(uri).setClippingConfiguration(MediaItem.ClippingConfiguration.Builder().setEndPositionMs(VideoLimitMs).build()).build()
                     val stereo = ChannelMixingAudioProcessor().apply {
                         for (channels in 1..6) {
                             putChannelMixingMatrix(ChannelMixingMatrix.createForConstantPower(channels, 2))
@@ -231,8 +230,8 @@ object MediaFiles {
                         listOf(Presentation.createForWidthAndHeight(width, height, Presentation.LAYOUT_SCALE_TO_FIT)),
                     )).build()
                     val encoder = DefaultEncoderFactory.Builder(context)
-                        .setRequestedVideoEncoderSettings(VideoEncoderSettings.Builder().setBitrate(VideoBitrate).setiFrameIntervalSeconds(2f).build())
-                        .setRequestedAudioEncoderSettings(AudioEncoderSettings.Builder().setBitrate(128_000).build())
+                        .setRequestedVideoEncoderSettings(VideoEncoderSettings.Builder().setBitrate(Encoding.videoBitRate.toInt()).setiFrameIntervalSeconds(2f).build())
+                        .setRequestedAudioEncoderSettings(AudioEncoderSettings.Builder().setBitrate(Encoding.audioBitRate.toInt()).build())
                         .setEnableFormatFallback(false)
                         .build()
                     val builder = Transformer.Builder(context).setVideoMimeType(MimeTypes.VIDEO_H265)
@@ -261,7 +260,7 @@ object MediaFiles {
                     retriever.setDataSource(file.path)
                     PreparedMedia(file.readBytes(),retriever.extractMetadata(android.media.MediaMetadataRetriever.METADATA_KEY_VIDEO_WIDTH)?.toInt() ?: width,
                         retriever.extractMetadata(android.media.MediaMetadataRetriever.METADATA_KEY_VIDEO_HEIGHT)?.toInt() ?: height,true,
-                        (retriever.extractMetadata(android.media.MediaMetadataRetriever.METADATA_KEY_DURATION)?.toInt() ?: lengthMs.toInt()).coerceAtMost(SharedVideoLimitMs.toInt()))
+                        (retriever.extractMetadata(android.media.MediaMetadataRetriever.METADATA_KEY_DURATION)?.toInt() ?: lengthMs.toInt()).coerceAtMost(VideoLimitMs.toInt()))
                 } finally { retriever.release() }
             }
         } finally { withContext(NonCancellable + Dispatchers.IO) { file.delete() } }

@@ -20,7 +20,6 @@
     <string name="ui_group_name">Group Name</string>
     <string name="ui_invite">Invite</string>
     <string name="ui_invite_friends">Invite Friends</string>
-    <string name="ui_it_s_that_simple">It’s that simple.</string>
     <string name="ui_label_64_characters">64 characters</string>
     <string name="ui_media">Media</string>
     <string name="ui_members">Members</string>
@@ -34,7 +33,6 @@
     <string name="ui_remove">Remove</string>
     <string name="ui_rename">Rename</string>
     <string name="ui_save_image">Save Image…</string>
-    <string name="ui_sign_in">Sign In</string>
     <string name="ui_sign_out">Sign Out</string>
     <string name="ui_sign_out_and_use_recovery_key">Sign Out and Use Recovery Key</string>
     <string name="ui_sign_out_cd2476">Sign Out?</string>
@@ -58,7 +56,6 @@
     <string name="ui_undo_send">Undo Send</string>
     <string name="ui_allow_camera_access_in_android_settings_to_send_photos">Allow camera access in Android Settings to send photos.</string>
     <string name="ui_couldn_t_take_photo">Couldn’t take photo</string>
-    <string name="ui_canceled">Canceled</string>
     <string name="ui_couldn_t_record_video">Couldn’t record video</string>
     <string name="ui_add_friend">Add Friend</string>
     <string name="ui_tap_a_name_hold_for_video">Tap or hold a name</string>
@@ -75,9 +72,7 @@
     <string name="ui_a_yo_comes_in_tap_their_name_to_yo_back">A Yo comes in. Tap their name to Yo back.</string>
     <string name="ui_yogpt_is_there_from_the_start_it_yos_back">YoGPT is there from the start. It Yos back.</string>
     <string name="ui_yo">Yo!</string>
-    <string name="ui_choose_a_longer_name_or_try_again_when_connected">Choose a longer name, or try again when connected.</string>
     <string name="ui_creating">Creating…</string>
-    <string name="ui_sign_up">Sign Up</string>
     <string name="ui_back">Back</string>
     <string name="ui_recovery_key">Recovery Key</string>
     <string name="ui_we_couldn_t_read_a_recovery_key_from_this_photo">We couldn’t read a recovery key from this photo.</string>
@@ -86,7 +81,6 @@
     <string name="ui_qr_code">QR code</string>
     <string name="ui_recovery_key_missing">Recovery key missing</string>
     <string name="ui_couldn_t_save_the_recovery_key">Couldn’t save the recovery key</string>
-    <string name="ui_couldn_t_save_recovery_card">Couldn’t save recovery card</string>
     <string name="ui_yo_recovery_key_txt">Yo Recovery Key.txt</string>
     <string name="ui_save">Save…</string>
     <string name="ui_yo_recovery_key_png">Yo Recovery Key.png</string>
@@ -95,7 +89,6 @@
     <string name="ui_identity_key">Identity Key</string>
     <string name="ui_changed_confirm_before_sending">Changed — confirm before sending</string>
     <string name="ui_unchanged">Unchanged</string>
-    <string name="ui_verified">Verified</string>
     <string name="ui_yes">Yes</string>
     <string name="ui_sessions">Sessions</string>
     <string name="ui_no_chat_yet">No Chat Yet</string>
@@ -127,7 +120,7 @@
     <string name="ui_no_reply">No reply</string>
     <string name="ui_checking">Checking…</string>
     <string name="ui_check_round_trip">Check Round Trip</string>
-    <string name="ui_anonymous_crash_reports_include_android_version_os_exit_reason_an">Anonymous crash reports include Android version, OS exit reason and sanitized code frames. No account, names, Yos or photos. Available on Android 11 and later.</string>
+    <string name="ui_anonymous_crash_reports_include_android_version_os_exit_reason_an">Anonymous crash and error reports: code details, build, Android version and model. No account, names, Yos or photos. While off, they stay on this phone.</string>
     <string name="ui_send_crashes">Send Crashes</string>
     <string name="ui_version">Version</string>
     <string name="ui_send">Send</string>
@@ -151,7 +144,6 @@
     <string name="outgoing_photo">Outgoing photo</string>
 <string name="first_sent_explanation">They’ll get “Yo from %1$s” with a sound that says Yo. On Android, Yos arrive while Yo is open. Background push isn’t available yet.</string>
 <string name="saved_state_kept">%1$s\n\nYour saved state is kept until you choose to sign out.</string>
-<string name="invited_you">%1$s invited you</string>
 <string name="block_name">Block %1$s?</string>
 <string name="name_freed">“%1$s” becomes free for anyone.</string>
 <string name="type_to_confirm">Type %1$s to confirm.</string>
@@ -161,11 +153,6 @@
 <plurals name="media_items"><item quantity="one">%1$d photo or video</item><item quantity="other">%1$d photos or videos</item></plurals>
 <plurals name="undo_seconds"><item quantity="one">Wait %1$d Second</item><item quantity="other">Wait %1$d Seconds</item></plurals>
 <string name="sent_yo">Sent Yo!</string>
-<string name="sent_yos">Sent %1$d× Yo!</string>
-<string name="sending_yo">Sending Yo!</string>
-<string name="sending_yos">Sending %1$d× Yo!</string>
-<string name="counted_yo">%1$d× Yo</string>
-<string name="yo_from">%1$s from %2$s</string>
 <string name="group_sender_yo">%1$s: %2$s</string>
 <string name="undo_remove">Undo</string>
 <string name="removed_name">Removed %1$s</string>
@@ -173,8 +160,6 @@
 <string name="ui_account_state_missing_use_your_recovery_key">Account state missing. Use your recovery key.</string>
 <string name="ui_that_doesn_t_match_a_recovery_key_check_it_and_try_again">That doesn’t match a recovery key. Check it and try again.</string>
 <string name="ui_we_couldn_t_find_your_account_check_your_recovery_key">We couldn’t find your account. Check your recovery key.</string>
-<string name="ui_that_s_you">That’s You</string>
-<string name="ui_no_such_user">No Such User</string>
 <string name="ui_yo_can_t_reach_its_server_check_your_connection_and_try_again">Yo can’t reach its server. Check your connection and try again.</string>
 <string name="ui_that_name_is_taken_try_another">That name is taken. Try another.</string>
 <string name="ui_too_many_tries_try_again_later">Too many tries. Try again later.</string>
@@ -194,7 +179,7 @@
 <string name="report_abuse">Report Abuse</string>
 <string name="report_other">Report Other</string>
 <string name="member_count">%1$d of 20</string>
-<string name="group_unknown_member">You / Yo User</string>
+<string name="group_unknown_member">Yo User</string>
 <string name="add_member">Add %1$s</string>
 <string name="leave_group">Leave %1$s</string>
 <string name="leave_action">Leave</string>
@@ -203,28 +188,19 @@
 <string name="scan_qr">Scan QR Code</string>
 <string name="camera_unavailable">Camera unavailable. Try scanning from Photos.</string>
 <string name="camera_permission_needed">Allow camera access in Android Settings to scan a code.</string>
-<string name="safety_mismatch">That code doesn’t match this contact. Compare your safety numbers before verifying.</string>
 <string name="top_friend">Most Yos With</string>
 <string name="yos_together">Yos Together</string>
 <string name="last_sent">Last Yo Sent</string>
 <string name="last_received">Last Yo Received</string>
 <string name="key_age">Signed Key Age (days)</string>
 <string name="refill_pending">Key Refill Pending</string>
-<string name="request_from">Yo Request from %1$s</string>
-<string name="group_request">Yo Request: %1$s</string>
 <string name="recording">● Recording</string>
-<string name="not_on_yo">Not on Yo</string>
-<string name="group_empty">Group Is Empty</string>
-<string name="needs_update">Needs Update</string>
-<string name="not_sent">Not Sent</string>
-<string name="already_added">Already Added</string>
 <string name="valid_name">Start with a letter or emoji. Use no more than 16 characters.</string>
 <string name="type_name">Type a name.</string>
 <string name="contacts_saved">Contacts saved</string>
 <string name="no_passkey">No Yo passkey found. Use your recovery key.</string>
 <string name="camera_open_failed">Couldn’t open the camera. Check its permission or try another camera.</string>
 <string name="camera_not_ready">Camera not ready</string>
-<string name="video_too_long">Video too long · max 10 s</string>
 <string name="video_too_large">Video is too large. Use a shorter video.</string>
 <string name="keystore_missing">Keystore key missing. Sign in with your recovery key.</string>
 <string name="vault_damaged">Damaged vault item</string>
@@ -253,7 +229,6 @@
     <string name="tutorial_tap">Tap to Send Yo</string>
     <string name="tutorial_back">Tap to Yo Back</string>
     <string name="tutorial_camera">Swipe for Pictures</string>
-    <string name="got_yo">Got Yo?</string>
     <string name="group_row">Group</string>
     <string name="account_recovery">Account Recovery</string>
     <string name="account_backup">Account Backup</string>
@@ -262,14 +237,10 @@
     <string name="account_recovery_explanation">Save your Recovery Key somewhere safe. You can use it to sign in on a new phone. Account Backup saves your encrypted contacts and blocked list. Passkey recovery through Google Password Manager is currently unavailable.</string>
     <string name="compare_code">Compare Code</string>
     <string name="technical_details">Technical Details</string>
-    <string name="recovery_step">STEP %1$d</string>
     <string name="enable_yo_notifications">Enable Yo Notifications</string>
     <string name="yo_notification_channel">Yos</string>
-    <string name="yo_notification_fallback">You may have received a Yo</string>
     <string name="yo_followup_channel">Quiet Yo follow-ups</string>
-    <string name="yo_notification_group_suffix">\u0020in #%1$s</string>
     <string name="notification_settings_unavailable">Notification settings are unavailable on this device.</string>
-    <string name="turn_on_notifications">Turn On Notifications</string>
     <string name="mute_video">Mute video</string>
     <string name="unmute_video">Unmute video</string>
     <string name="share_confirmation">Yo %1$s · %2$s</string>
@@ -279,14 +250,9 @@
     <string name="passkey_prf_required">This passkey provider did not return a backup key. Use a provider that supports PRF or use your recovery key.</string>
     <string name="ui_add_friends">Add Friends</string>
     <string name="clear_selection">Clear Selection</string>
-    <string name="signup_username">Username</string>
-    <string name="signup_taken_yours">Name taken. Yours?&#160;</string>
-    <string name="signup_longer_name">Choose a longer name.</string>
-    <string name="signup_name_unavailable">Not available</string>
     <string name="recovery_scan_short">Scan</string>
     <string name="recovery_photos_short">Photos</string>
     <string name="share_selected_media">Tap a name to send selected media</string>
-    <string name="settings_leaving">Leaving Yo for good?&#160;</string>
     <string name="settings_delete_your_account">Delete Your Account</string>
     <string name="settings_turn_off_passkey">Turn Off Passkey?</string>
     <string name="settings_turn_off">Turn Off</string>
@@ -298,4 +264,5 @@
     <string name="support_message">Message</string>
     <string name="group_create_failure">The group could not be made. Try again in a moment.</string>
     <string name="group_member_footer">You can add up to 19 friends, plus yourself.</string>
+    <string name="ui_show_recovery_key">Show Recovery Key</string>
 </resources>

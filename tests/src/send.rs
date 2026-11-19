@@ -72,7 +72,7 @@ fn main() {
         }
         _ => (Client::register_username(http, &name, None, None, Push::none()).expect("register"), None),
     };
-    // The dev hub's pins, as the app has them (app/ios/YoApp/Sources/YoApp/Hub.swift): hub keys, trust roots, zk params.
+    // The dev hub's pins, as the app has them (app/ios/YoApp/Sources/YoApp/Shared/Hub.swift): hub keys, trust roots, zk params.
     if dev {
         let key = |text: &str| -> [u8; 32] { yo_wire::unb64(text).ok().and_then(|k| k.try_into().ok()).expect("pin") };
         client.set_hub_keys(DEV_HUB_KEYS.iter().map(|k| key(k)).collect());

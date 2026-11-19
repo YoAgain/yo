@@ -8,7 +8,7 @@ here=$(cd "$(dirname "$0")" && pwd)
 root=$(cd "$here/../../.." && pwd)
 PATH="$HOME/.cargo/bin:$PATH"
 commit=$(git -C "$root" rev-parse HEAD)
-dirty=$(git -C "$root" status --porcelain --untracked-files=no | head -1)
+dirty=$(git -C "$root" status --porcelain --untracked-files=no | sed -n 1p)
 cd "$root"
 cargo metadata --format-version 1 --locked --filter-platform aarch64-apple-ios >"${TMPDIR:-/tmp}/yo-metadata.json"
 python3 -I - "${TMPDIR:-/tmp}/yo-metadata.json" "$commit" "${dirty:+ (with local changes)}" "$root" \
