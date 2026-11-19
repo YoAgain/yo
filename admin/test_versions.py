@@ -1,54 +1,52 @@
-"""App states from the build number's channel (no network)."""
+"""App states: current is the highest iOS build users report, internal testers left out (no network)."""
+import os
 import unittest
+from unittest.mock import patch
 
 import users
 
-NEWEST = {"public": "202611181859.1", "main": "202611191257"}
+NEWEST = "202611181859"
 
 
 class ClassifyTests(unittest.TestCase):
     def c(self, app, newest=NEWEST, bot=None):
         return users.classify(app, newest, bot)
 
-    def test_channels(self):
-        self.assertEqual(users.ios_channel("202611181859.1"), "public")
-        self.assertEqual(users.ios_channel("202611181859"), "main")
-        self.assertIsNone(users.ios_channel("1"))
-        self.assertIsNone(users.ios_channel("202611181859.2"))
-
-    def test_public(self):
-        self.assertEqual((self.c("ios/202611181859.1")["label"], self.c("ios/202611181859.1")["state"]), ("iOS", "current"))
-        r = self.c("ios/202611171622.1")
+    def test_ios(self):
+        self.assertEqual((self.c("ios/202611181859")["label"], self.c("ios/202611181859")["state"]), ("iOS", "current"))
+        self.assertEqual(self.c("ios/202611191257")["state"], "current")  # newer than any user's: an internal build
+        r = self.c("ios/202611171622")
         self.assertEqual(r["state"], "update")
-        self.assertIn("TestFlight public", r["title"])
-        self.assertIn("202611181859.1", r["title"])
-
-    def test_main_never_update_against_public(self):
-        self.assertEqual(self.c("ios/202611191257")["state"], "current")
-        self.assertEqual(self.c("ios/202611180000")["state"], "update")
-        self.assertEqual(self.c("ios/202611180000", {"public": "202611191300.1"})["state"], None)
+        self.assertIn(NEWEST, r["title"])
+        self.assertEqual(self.c("ios/202611171622", None)["state"], None)
 
     def test_dev_and_others(self):
         self.assertEqual((self.c("ios/1")["label"], self.c("ios/1")["state"]), ("iOS", None))
         self.assertEqual(self.c("yogpt/202611182101", bot="yogpt/202611182059")["state"], "current")
-        self.assertEqual((self.c("yogpt/202611181000", bot="yogpt/202611182059")["label"],
-                          self.c("yogpt/202611181000", bot="yogpt/202611182059")["state"]), ("Bot", "update"))
+        r = self.c("yogpt/202611181000", bot="yogpt/202611182059")
+        self.assertEqual((r["label"], r["state"]), ("Bot", "update"))
         self.assertEqual((self.c("android/202611160001")["label"], self.c("android/202611160001")["state"]), ("Android", None))
         self.assertEqual(self.c(None)["label"], "unknown")
 
-    def test_app_builds_newest_per_channel_from_both_hubs(self):
-        out = {"live": {"apps": [["ios/202611171622.1", 2], ["ios/202611191257", 1]],
-                        "users": [{"app": "ios/1", "device_list": [{"app": "ios/202611181859.1"}]}],
+    def test_internal_users_from_env(self):
+        with patch.dict(os.environ, {"YO_ADMIN_INTERNAL_USERS": " AB12, cd34,,"}):
+            self.assertEqual(users.internal_users(), ["ab12", "cd34"])
+        with patch.dict(os.environ, {"YO_ADMIN_INTERNAL_USERS": ""}):
+            self.assertEqual(users.internal_users(), [])
+
+    def test_internal_builds_do_not_set_current(self):
+        out = {"live": {"apps": [["ios/202611171622", 2], ["ios/202611191257", 1]],
+                        "users": [{"id": "aa", "app": "ios/202611171622", "device_list": [{"app": "ios/202611171622"}]},
+                                  {"id": "bb", "app": "ios/202611181859", "device_list": []},
+                                  {"id": "team", "app": "ios/202611191257", "device_list": [{"app": "ios/202611191257"}]}],
                         "yogpt_min": "yogpt/202611182059"},
-               "dev": {"apps": [["yogpt/202611182101", 1], ["unknown", 3], ["ios/202611180000", 1]], "users": []}}
-        b = users.app_builds(out)
-        self.assertEqual(set(b), {"ios/202611171622.1", "ios/202611191257", "ios/1", "ios/202611181859.1",
-                                  "yogpt/202611182101", "ios/202611180000"})
-        self.assertEqual(b["ios/202611171622.1"]["state"], "update")
-        self.assertEqual(b["ios/202611181859.1"]["state"], "current")
+               "dev": {"apps": [["yogpt/202611182101", 1], ["unknown", 3], ["ios/1", 1]], "users": []}}
+        b = users.app_builds(out, {"team"})
+        self.assertEqual(set(b), {"ios/202611171622", "ios/202611181859", "ios/202611191257", "yogpt/202611182101", "ios/1"})
+        self.assertEqual(b["ios/202611181859"]["state"], "current")
+        self.assertEqual(b["ios/202611171622"]["state"], "update")
         self.assertEqual(b["ios/202611191257"]["state"], "current")
-        self.assertEqual(b["ios/202611180000"]["state"], "update")
-        self.assertEqual(b["yogpt/202611182101"]["state"], "current")
+        self.assertEqual(users.app_builds(out)["ios/202611181859"]["state"], "update")  # without the list
 
 
 if __name__ == "__main__":

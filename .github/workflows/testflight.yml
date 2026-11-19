@@ -233,9 +233,6 @@ jobs:
           XCODE_NLTRAINING: 1
         run: |
           export ASC_KEY_PATH=$RUNNER_TEMP/asc/AuthKey.p8 ASC_IDENTITY_DIR=$RUNNER_TEMP/asc/distribution
-          # The channel is in the build number (the admin reads it): main is "yyyymmddHHMM" (TestFlight internal,
-          # ship.sh's default), a release "yyyymmddHHMM.1" (TestFlight public). Up to three integers, still increasing.
-          if [ "$GITHUB_EVENT_NAME" = release ]; then export BUILD_NUMBER=$(date -u +%Y%m%d%H%M).1; fi
           export SSU_RESOURCES=$(dirname "$DEVELOPER_DIR")/Frameworks/SiriSSUKitModel.framework/Versions/A/Resources
           ls -d "$SSU_RESOURCES"
           # Xcode in place of the Linux SDK and its stand-ins.

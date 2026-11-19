@@ -38,6 +38,7 @@ keep credentials and deployment settings outside this public repository.
 | `YOGPT_STATS_PATTERN` | Stats path with `{}` replaced by `live` or `dev` | `./yogpt/{}/stats.json` |
 | `YO_HUB_VERSION_FILE` | Hub deploy version | `./version` |
 | `YOGPT_VERSION_FILE` | YoGPT deploy version | `./version-yogpt` |
+| `YO_ADMIN_INTERNAL_USERS` | Internal testers' user ids (hex, comma separated), on the server only | empty |
 | `YO_HUB_UNIT` | Live systemd unit | `yo-hub.service` |
 | `YO_HUB_DEV_UNIT` | Development systemd unit | `yo-hub-dev.service` |
 | `ADMIN_TUNNEL_UNIT` | Tunnel systemd unit | `cloudflared.service` |
@@ -141,13 +142,12 @@ without a path unit, run the collector manually after each request to supply fre
 
 ## App versions
 
-The collector (no network) states each reported app (`ios/202611191257`) in `app_builds` of `users.json`. The channel
-is in the build number, stamped by the TestFlight workflow: a push to main is `yyyymmddHHMM` (TestFlight internal), a
-published GitHub release `yyyymmddHHMM.1` (TestFlight public); anything else iOS reports (`ios/1`) is a dev build.
-Current is the highest build reported by any device on the same channel, an older one there has an update; main
-builds are never compared with public ones. YoGPT is compared with its deploy; Android, the CLI and dev builds are
-unknown. Tables show only the platform word ("iOS", "Android", "Bot"): green when current, yellow when an update is
-out, plain when unknown; channel and builds are in its tooltip. Builds below `YO_MIN_APP` count as update. The App
+The collector (no network) states each reported app (`ios/202611191257`: every TestFlight build is its UTC minute) in
+`app_builds` of `users.json`. Current is the highest iOS build reported by any user outside `YO_ADMIN_INTERNAL_USERS`;
+an older one has an update. Internal testers (on newer main builds) do not move "current" and are never shown with an
+update; their tooltip says "internal tester". `ios/1` is a dev build; YoGPT is compared with its deploy; Android and
+the CLI are unknown. Tables show only the platform word ("iOS", "Android", "Bot"): green when current, yellow when an
+update is out, plain when unknown, with the builds in its tooltip. Builds below `YO_MIN_APP` count as update. The App
 versions card counts current, update and unknown per platform. App Store releases will be added the same way later.
 Tests: `python3 -m unittest discover -s admin -p 'test_versions.py'`.
 

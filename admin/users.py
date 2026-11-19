@@ -373,22 +373,20 @@ def updates(previous=None, now=None):
     return data
 
 
-# ---- App versions: the channel is in the build number --------------------------------------------------------------
-# The TestFlight workflow stamps a push to main "yyyymmddHHMM" (TestFlight internal) and a published GitHub release
-# "yyyymmddHHMM.1" (TestFlight public); anything else iOS reports (xtool's "1") is a dev build. Current is the highest
-# build any device reports on the same channel; older on that channel has an update. No network.
-IOS_BUILD = re.compile(r"(\d{12})(\.1)?")
-CHANNEL_NAME = {"public": "TestFlight public", "main": "TestFlight internal (main)"}
+# ---- App versions: current is the highest iOS build users report --------------------------------------------------
+# Every TestFlight build is "yyyymmddHHMM"; anything else iOS reports (xtool's "1") is a dev build. Current is the
+# highest build reported by any user outside YO_ADMIN_INTERNAL_USERS (the team's testers, on newer main builds:
+# comma-separated user ids, set on the server only); older has an update. No network.
+IOS_BUILD = re.compile(r"\d{12}")
 
 
-def ios_channel(b: str):
-    m = IOS_BUILD.fullmatch(b or "")
-    return None if not m else "public" if m.group(2) else "main"
+def internal_users() -> list:
+    return sorted({u.strip().lower() for u in os.environ.get("YO_ADMIN_INTERNAL_USERS", "").split(",") if u.strip()})
 
 
 def classify(app, newest=None, bot_min=None) -> dict:
     """One reported app ("platform/build"): its platform word, state ("current", "update" or None: unknown) and the
-    details for the tooltip. newest: the highest reported iOS build per channel ({"public": …, "main": …})."""
+    details for the tooltip. newest: the highest iOS build reported outside the internal testers."""
     platform, _, b = (app or "").partition("/")
     if not platform or not b:
         return {"label": "unknown", "state": None, "title": app or "no app reported"}
@@ -399,30 +397,27 @@ def classify(app, newest=None, bot_min=None) -> dict:
     if platform != "ios":
         name = {"android": "Android", "cli": "CLI"}.get(platform, platform)
         return {"label": name, "state": None, "title": f"{name} build {b}"}
-    channel = ios_channel(b)
-    if not channel:
+    if not IOS_BUILD.fullmatch(b):
         return {"label": "iOS", "state": None, "title": f"iOS dev build {b} (dev/push.sh)"}
-    top = (newest or {}).get(channel)
-    state = None if not top else "current" if b >= top else "update"
+    state = None if not newest else "current" if b >= newest else "update"
     return {"label": "iOS", "state": state,
-            "title": f"{CHANNEL_NAME[channel]} build {b}" + (f"; newest on it {top}" if top and top != b else "")}
+            "title": f"TestFlight build {b}" + (f"; newest reported {newest}" if newest and newest != b else "")}
 
 
-def app_builds(out) -> dict:
+def app_builds(out, internal=()) -> dict:
     """Every reported app of both hubs ("ios/202611191257") with its label, state and details."""
-    seen = set()
+    seen, reported = set(), set()
     for name in HUBS:
         h = out.get(name) or {}
         seen.update(a for a, _ in h.get("apps") or [])
-        seen.update(u.get("app") for u in h.get("users") or [])
-        seen.update(d.get("app") for u in h.get("users") or [] for d in u.get("device_list") or [])
+        for u in h.get("users") or []:
+            apps = {u.get("app")} | {d.get("app") for d in u.get("device_list") or []}
+            seen.update(apps)
+            if u.get("id") not in internal:
+                reported.update(apps)
     seen = {a for a in seen if a and a != "unknown"}
-    newest = {}
-    for a in seen:
-        platform, _, b = a.partition("/")
-        channel = ios_channel(b) if platform == "ios" else None
-        if channel and b > newest.get(channel, ""):
-            newest[channel] = b
+    ios = [a.partition("/")[2] for a in reported if a and a.startswith("ios/") and IOS_BUILD.fullmatch(a[4:])]
+    newest = max(ios) if ios else None
     bot = next((out[n].get("yogpt_min") for n in HUBS if isinstance(out.get(n), dict) and out[n].get("yogpt_min")), None)
     return {a: classify(a, newest, bot) for a in seen}
 
@@ -440,7 +435,8 @@ def main():
             out[name] = hub(name, path)
         except (sqlite3.Error, OSError) as e:
             out[name] = {"error": str(e)}
-    out["app_builds"] = app_builds(out)
+    out["internal_users"] = internal_users()
+    out["app_builds"] = app_builds(out, set(out["internal_users"]))
     tmp = OUT + ".new"
     with open(tmp, "w") as f:
         json.dump(out, f, separators=(",", ":"))

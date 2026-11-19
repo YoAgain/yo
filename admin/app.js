@@ -241,8 +241,8 @@ if (document.body.classList.contains("login")) {
   };
 
   // ---- app builds: the platform word ("iOS", "Android", "Bot"), green when current, yellow when an update is out,
-  // plain when unknown; channel, build and newest build only in the tooltip. Worked out by the collector: the channel
-  // is in the build ("….1" TestFlight public, 12 digits TestFlight internal), current is the highest on its channel.
+  // plain when unknown; build and newest build only in the tooltip. Worked out by the collector: current is the highest
+  // iOS build reported outside the internal testers (YO_ADMIN_INTERNAL_USERS), who are never shown yellow.
   const build = (app) => (app || "").split("/").pop();
   const parse = (app) => {
     const [p, b] = (app || "").split("/");
@@ -254,12 +254,19 @@ if (document.body.classList.contains("login")) {
   const appInfo = (app) => last?.app_builds?.[app] || (app ? { label: build(app), state: null, title: app } : null);
   const belowMin = (app) => { const v = parse(app); return !!(minApp && v && minApp[0] === v[0] && v[1] < minApp[1]); };
   // "current", "update" or null (unknown, or no app).
-  const appState = (app) => (belowMin(app) ? "update" : appInfo(app)?.state || null);
-  const appTitle = (app) => { const i = appInfo(app); return i ? `${i.title}${belowMin(app) ? " · below the hub's minimum: refused, must update" : ""}` : ""; };
-  const appTag = (app) => {
-    const i = appInfo(app), a = appState(app);
+  const internal = (uid) => !!uid && (last?.internal_users || []).includes(uid);
+  const appState = (app, uid) => {
+    const s = belowMin(app) ? "update" : appInfo(app)?.state || null;
+    return internal(uid) && s === "update" ? null : s;
+  };
+  const appTitle = (app, uid) => {
+    const i = appInfo(app);
+    return i ? `${internal(uid) ? "internal tester · " : ""}${i.title}${belowMin(app) ? " · below the hub's minimum: refused, must update" : ""}` : "";
+  };
+  const appTag = (app, uid) => {
+    const i = appInfo(app), a = appState(app, uid);
     const t = el("span", a ? `app-${a}` : i ? null : "muted", i ? i.label : "–");
-    t.title = appTitle(app);
+    t.title = appTitle(app, uid);
     return t;
   };
 
@@ -317,7 +324,7 @@ if (document.body.classList.contains("login")) {
       cell(tr, nm, "name", u.id);
       cell(tr, rel(u.created), null, date(u.created));
       cell(tr, u.secured ? tag("yes", "ok") : tag("no", "muted"));
-      cell(tr, appTag(u.app));
+      cell(tr, appTag(u.app, u.id));
       tr.addEventListener("click", () => select(up(u.id), u.name || u.id));
     }
     if (!list.length) cell(body.insertRow(), h && !h.error ? "No users yet." : (h?.error || "No data"), "empty").colSpan = 4;
@@ -384,7 +391,7 @@ if (document.body.classList.contains("login")) {
       set("ug-fresh", `${fresh}/${fresh + old + other}`);
       set("ug-apps-cap", [...Object.entries(per).map(([l, p]) => `${l}: ${["current", "update", "unknown"].filter((w) => p[w]).map((w) => `${p[w]} ${w}`).join(", ")}`),
         `min ${h.min_app ? build(h.min_app) : "not pinned"}`].join(" · "));
-      $("ug-apps-cap").title = "current: the highest build reported on its channel (TestFlight public, internal; bot: its deploy) · update: an older one · unknown: dev, Android, CLI";
+      $("ug-apps-cap").title = "current: the highest iOS build users report, internal testers left out (bot: its deploy) · update: an older one · unknown: dev, Android, CLI";
       $("ug-apps-bar").replaceChildren(...[[fresh, "new", "current"], [old, "old", "update available"], [other, "a0", "unknown (dev, Android, CLI)"]]
         .filter(([v]) => v > 0).map(([v, cls, t]) => { const s = el("span", cls); s.style.flexGrow = v; s.title = `${v} ${t}`; return s; }));
     }
@@ -572,12 +579,12 @@ if (document.body.classList.contains("login")) {
     ut.replaceChildren(...own.map((m) => todoRow(m, false)));
     $("p-extra").hidden = team || !u;
     if (team || !u) return;
-    const a = appState(u.app);
+    const a = appState(u.app, u.id);
     const fact = (k, v, cls, title) => { const f = el("span", `fact ${cls || ""}`); f.append(el("small", null, k), el("b", null, v)); if (title) f.title = title; facts.append(f); };
     fact("signed up", rel(u.created), "", date(u.created));
     fact("seen", seenDay(u.last_seen), "", u.last_seen ? new Date(u.last_seen).toLocaleDateString() : "");
     const ai = appInfo(u.app);
-    fact("app", ai ? ai.label : "–", a ? `app-${a}` : "", ai ? `${u.app} · ${appTitle(u.app)}` : "");
+    fact("app", ai ? ai.label : "–", a ? `app-${a}` : "", ai ? `${u.app} · ${appTitle(u.app, u.id)}` : "");
     fact("secured", u.secured ? "yes" : "no", u.secured ? "ok" : "", u.backup_at ? `backup ${date(u.backup_at)}` : "");
     fact("push", u.push ? "on" : "off", "", "");
     if (u.queued) fact("waiting", num(u.queued), "", "messages waiting for this user's devices");
@@ -590,7 +597,7 @@ if (document.body.classList.contains("login")) {
     dev.replaceChildren();
     for (const d of u.device_list || []) {
       const r = el("div", "drow");
-      r.append(Object.assign(el("b", null, d.app ? appInfo(d.app).label : "unknown app"), { title: appTitle(d.app) }), el("span", "muted", [d.push || "no push", `added ${rel(d.created)}`, `seen ${seenDay(d.last_seen)}`].join(" · ")));
+      r.append(Object.assign(el("b", null, d.app ? appInfo(d.app).label : "unknown app"), { title: appTitle(d.app, u.id) }), el("span", "muted", [d.push || "no push", `added ${rel(d.created)}`, `seen ${seenDay(d.last_seen)}`].join(" · ")));
       r.title = d.app || "";
       dev.append(r);
     }
@@ -785,7 +792,7 @@ if (document.body.classList.contains("login")) {
       cell(tr, u.name ?? "–", "name", u.id);
       cell(tr, rel(u.created), null, date(u.created));
       cell(tr, seenDay(u.last_seen), null, u.last_seen ? new Date(u.last_seen).toLocaleDateString() : "never seen");
-      cell(tr, appTag(u.app));
+      cell(tr, appTag(u.app, u.id));
       cell(tr, u.push ? tag("on", "ok") : tag("off", "muted"));
       cell(tr, u.secured ? tag("yes", "ok") : tag("no", "muted"), null, u.backup_at ? `backup ${date(u.backup_at)}` : "");
       cell(tr, num(u.devices), "num");
