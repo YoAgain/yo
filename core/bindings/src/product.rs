@@ -432,3 +432,9 @@ pub fn product_hold_zoom(finger_x: f64, finger_y: f64, bar_bottom: f64, width: f
     let zoom = yo_product::zoom::hold_zoom(finger_x, finger_y, bar_bottom, width, height);
     ProductHoldZoom { scale: zoom.scale, x: zoom.x, y: zoom.y }
 }
+
+/// The recording's zoom (`yo_product::zoom::record_zoom`): the camera's zoom for a filming finger drawn down.
+#[uniffi::export]
+pub fn product_record_zoom(below: f64, room: f64, start: f64, camera_most: f64) -> f64 {
+    yo_product::zoom::record_zoom(below, room, start, camera_most)
+}

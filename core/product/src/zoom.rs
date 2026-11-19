@@ -1,6 +1,7 @@
 //! The held viewer's zoom: a finger holding a bar's media sign and drawn down out of the bar magnifies the photo or
 //! video around itself, the further below the bar the more (up to `MOST`, approached softly); moving it then pans,
 //! as a magnifying glass would; back at the bar it is the picture as it was. Points (or dp) in screen coordinates.
+//! And the recording's zoom (`record_zoom`): a finger filming on a bar and drawn down zooms the camera.
 
 /// The scale approached, never passed.
 pub const MOST: f64 = 3.0;
@@ -36,6 +37,32 @@ pub fn hold_zoom(finger_x: f64, finger_y: f64, bar_bottom: f64, width: f64, heig
     let x = finger_x.clamp(0.0, width);
     let y = finger_y.clamp(0.0, height);
     Zoom { scale, x: (x - width / 2.0) * (1.0 - scale), y: (y - height / 2.0) * (1.0 - scale) }
+}
+
+/// The recording's zoom: a finger holding a bar to film and drawn down zooms the camera in, approached softly up to
+/// `RECORD_MOST` (or the camera's own most, if less); back up it zooms out to where it started. Points (or dp).
+pub const RECORD_MOST: f64 = 5.0;
+/// Down by this much from the touch before it starts: the thumb settling on the bar does not zoom.
+pub const RECORD_SLACK: f64 = 12.0;
+
+/// The camera's zoom (as its button names it, 1 = the wide lens) for a finger `below` points under where it touched
+/// down, with `room` points left under that touch to the screen's bottom, the zoom having been `start` and the camera
+/// going up to `camera_most`.
+pub fn record_zoom(below: f64, room: f64, start: f64, camera_most: f64) -> f64 {
+    if !start.is_finite() || start <= 0.0 {
+        return 1.0;
+    }
+    if !below.is_finite() || !room.is_finite() || !camera_most.is_finite() {
+        return start;
+    }
+    let most = RECORD_MOST.min(camera_most);
+    let past = below - RECORD_SLACK;
+    if past <= 0.0 || most <= start {
+        return start;
+    }
+    // A bar low on the screen zooms over a shorter way; the last of it reaches almost all the way.
+    let reach = ((room - RECORD_SLACK) * 0.4).clamp(50.0, 200.0);
+    start + (most - start) * (1.0 - (-past / reach).exp())
 }
 
 #[cfg(test)]
@@ -102,5 +129,50 @@ mod tests {
         assert_eq!(hold_zoom(f64::NAN, 500.0, 300.0, W, H), Zoom::NONE);
         assert_eq!(hold_zoom(200.0, f64::INFINITY, 300.0, W, H), Zoom::NONE);
         assert_eq!(hold_zoom(200.0, 500.0, 300.0, 0.0, H), Zoom::NONE);
+    }
+
+    #[test]
+    fn recording_starts_after_the_slack_and_grows_softly_to_the_most() {
+        assert_eq!(record_zoom(0.0, 500.0, 1.0, 10.0), 1.0);
+        assert_eq!(record_zoom(-80.0, 500.0, 1.0, 10.0), 1.0);
+        assert_eq!(record_zoom(RECORD_SLACK, 500.0, 1.0, 10.0), 1.0);
+        assert!(record_zoom(RECORD_SLACK + 1.0, 500.0, 1.0, 10.0) < 1.05);
+        let mut last = 1.0;
+        for step in 1..200 {
+            let zoom = record_zoom(RECORD_SLACK + step as f64 * 4.0, 500.0, 1.0, 10.0);
+            assert!(zoom > last && zoom < RECORD_MOST, "{step}: {zoom}");
+            last = zoom;
+        }
+        assert!(last > 4.9);
+    }
+
+    #[test]
+    fn recording_back_up_is_where_it_started() {
+        let down = record_zoom(150.0, 500.0, 2.0, 10.0);
+        assert!(down > 2.0);
+        assert_eq!(record_zoom(5.0, 500.0, 2.0, 10.0), 2.0);
+    }
+
+    #[test]
+    fn recording_keeps_to_the_camera() {
+        assert!(record_zoom(1000.0, 500.0, 1.0, 3.0) <= 3.0);
+        assert!(record_zoom(1000.0, 500.0, 1.0, 3.0) > 2.98);
+        // Already at or past the most: nothing more.
+        assert_eq!(record_zoom(300.0, 500.0, 6.0, 10.0), 6.0);
+        assert_eq!(record_zoom(300.0, 500.0, 1.0, 1.0), 1.0);
+    }
+
+    #[test]
+    fn recording_low_on_the_screen_zooms_over_a_shorter_way() {
+        assert!(record_zoom(70.0, 90.0, 1.0, 10.0) > record_zoom(70.0, 700.0, 1.0, 10.0));
+        assert!(record_zoom(70.0, 90.0, 1.0, 10.0) > 3.5);
+    }
+
+    #[test]
+    fn recording_nonsense_is_no_zoom() {
+        assert_eq!(record_zoom(f64::NAN, 500.0, 1.0, 10.0), 1.0);
+        assert_eq!(record_zoom(100.0, f64::INFINITY, 2.0, 10.0), 2.0);
+        assert_eq!(record_zoom(100.0, 500.0, f64::NAN, 10.0), 1.0);
+        assert_eq!(record_zoom(100.0, 500.0, 1.0, f64::NAN), 1.0);
     }
 }
