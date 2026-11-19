@@ -19,9 +19,12 @@ One Rust core runs the whole client. The apps only draw and pass HTTP and storag
 - [core/client](core/client): identities, sessions, groups, media, recovery, outbox
 - [core/wire](core/wire): protocol formats
 - [core/bindings](core/bindings): Swift and Kotlin through UniFFI
-- [app/ios](app/ios): Swift, the iPhone app and its extensions, on top of the core
-- [app/android](https://github.com/YoAgain/yo/tree/android/app/android): Kotlin, on the `android` branch, same core
-- [app/yogpt](app/yogpt): Rust, the CLI, uses the core directly
+
+The apps on top:
+
+- [app/ios](app/ios): Swift, the iPhone app and its extensions
+- [app/android](https://github.com/YoAgain/yo/tree/android/app/android): Kotlin, on the `android` branch
+- [app/yogpt](app/yogpt): Rust, the CLI
 
 ### Account Sync
 
