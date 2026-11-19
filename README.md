@@ -114,6 +114,15 @@ DB: the local database, sealed per column.
 ![Lines of code: per day, by part and by app](dev/loc-chart.png)
 <!-- /loc -->
 
+- [app](app): iOS, Android and the CLI
+- [core](core): the Rust client
+- [hub](hub): the Rust server
+- [admin](admin): the admin page
+- [spec](spec): the YoIP protocol
+- [tests](tests), [fuzz](fuzz): tests, load runs, fuzzing
+- [dev](dev): build and development scripts
+- [docs](docs): images and notes
+
 ```sh
 dev/cargo test --workspace     # tests, with Docker
 dev/fuzz all 300               # fuzzing
