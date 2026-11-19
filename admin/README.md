@@ -80,6 +80,12 @@ proxy origin, and run `python3 admin/admin.py`. Put a local HTTPS proxy with Clo
 front; plain local HTTP requests without a valid Access assertion return 403. Host metrics still
 come from the local Linux machine; unavailable systemd units appear unavailable.
 
+For design work there is a demo with a made-up world (about 120 users, support chats, to-dos, crashes, groups,
+reserved names): `python3 admin/dev/demo.py --demo`, then http://127.0.0.1:8099. It builds fake hub databases in a
+temporary directory, answers the hub's admin API from them, makes up the server's numbers, and serves this admin on
+the loopback address only, without Access or login (it refuses to start without `--demo` or on another address).
+The header shows "Demo". It never reaches a hub; nothing in production uses it.
+
 Checks from the repository root:
 
 ```sh
