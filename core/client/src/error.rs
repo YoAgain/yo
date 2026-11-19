@@ -14,8 +14,7 @@ pub enum Error {
     /// A Yo to a group with no other member left: nobody to send it to (leave it instead).
     #[error("the group is empty")]
     GroupEmpty,
-    /// The contact's app is too old for sessions (no prekeys at the hub): the message waits in the outbox until it is
-    /// updated (spec 4.2).
+    /// The contact's app is too old for sessions: the message waits until it is updated (spec 4.2).
     #[error("the contact must update Yo")]
     Outdated,
     /// The contact was verified and its account key changed: confirm the new key first (spec 3.4).

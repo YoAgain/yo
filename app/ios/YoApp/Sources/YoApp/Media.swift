@@ -505,8 +505,8 @@ final class MediaOutbox {
       guard try await Hub.run({ client.userId() }) == item.owner else { return .dropped }
       let (events, after) = try await Hub.run {
         switch item.kind {
-        case .photo: (try client.sendPhoto(toTarget: item.to, media: media), client.contacts())
-        case .video: (try client.sendVideo(toTarget: item.to, media: media, durationMs: item.durationMs), client.contacts())
+        case .photo: (try client.send(target: SendTarget(item.to), kind: .photo(media: media)), client.contacts())
+        case .video: (try client.send(target: SendTarget(item.to), kind: .video(media: media, durationMs: item.durationMs)), client.contacts())
         }
       }
       await received?(events, after, client)

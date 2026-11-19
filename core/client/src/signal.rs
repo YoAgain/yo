@@ -1,8 +1,6 @@
-//! The sessions (spec 4): libsignal's PQXDH and Double Ratchet with SPQR, over a store the client seals with its state.
-//!
-//! An account's devices share one identity key: the account key, as Signal's linked devices share
-//! theirs. So every contact checks a session against the account key it pinned, and the hub has nothing to swap. A
-//! peer device is a `ProtocolAddress`: the user id as an ACI and a number this device gives it (`Slot`), local only.
+//! The sessions (spec 4): libsignal's PQXDH and Double Ratchet with SPQR, over a store sealed with the state. The
+//! account key is the identity key, so a contact checks every session against the key it pinned. A peer device's
+//! `ProtocolAddress` is the user id as an ACI and the device's number.
 
 use crate::error::{Error, Result};
 use crate::identity::Key;
@@ -20,15 +18,13 @@ use zeroize::Zeroize;
 
 /// The Kyber prekeys' kind (libsignal's for PQXDH).
 pub const KYBER: kem::KeyType = kem::KeyType::Kyber1024;
-/// Base keys of messages made with a last resort Kyber prekey, remembered against a replay while that prekey is kept;
-/// at most this many (beyond, the oldest go: a bound on the state, far above a month's last-resort sessions).
+/// Base keys of last-resort Kyber prekey messages, remembered against replay while the prekey is kept (bounded).
 const LAST_RESORT_SEEN: usize = 20_000;
 
 pub type Entries = BTreeMap<String, Vec<u8>>;
 
-/// Entries that can undo what an operation changed (`Records::begin` … `rollback`, nested as the client's
-/// transactions are): each key's value before its first change in the operation is kept, not the whole map, so a
-/// transaction costs what it touches.
+/// Undo entries for the client's nested transactions (`Records::begin` … `rollback`): each key's value before its
+/// first change, so a transaction costs what it touches.
 #[derive(Default)]
 pub struct Journaled {
     entries: Entries,
@@ -74,27 +70,12 @@ impl Journaled {
     /// The operation stands: what it kept aside goes to the one around it (whose older value wins), or away.
     fn commit(&mut self) {
         let Some(undo) = self.undo.pop() else { return };
-        match self.undo.last_mut() {
-            Some(outer) => {
-                for (key, old) in undo {
-                    match outer.entry(key) {
-                        std::collections::btree_map::Entry::Vacant(entry) => {
-                            entry.insert(old);
-                        }
-                        std::collections::btree_map::Entry::Occupied(_) => {
-                            if let Some(mut old) = old {
-                                old.zeroize();
-                            }
-                        }
-                    }
+        for (key, old) in undo {
+            match self.undo.last_mut() {
+                Some(outer) if !outer.contains_key(&key) => {
+                    outer.insert(key, old);
                 }
-            }
-            None => {
-                for (_, old) in undo {
-                    if let Some(mut old) = old {
-                        old.zeroize();
-                    }
-                }
+                _ => old.into_iter().for_each(|mut old| old.zeroize()),
             }
         }
     }
@@ -123,7 +104,6 @@ impl Drop for Journaled {
 
 /// Runs one of libsignal's store operations: they are `async`, but the store is in memory and never waits.
 pub fn now<F: Future>(future: F) -> F::Output {
-    let _cost = crate::cost::Span::new(0);
     match pin!(future).as_mut().poll(&mut Context::from_waker(Waker::noop())) {
         Poll::Ready(value) => value,
         Poll::Pending => unreachable!("an in-memory store never waits"),
@@ -132,11 +112,6 @@ pub fn now<F: Future>(future: F) -> F::Output {
 
 pub fn signal(error: SignalProtocolError) -> Error {
     Error::Session(error.to_string())
-}
-
-/// The account's identity key pair, the account key itself (spec 4.1): the sessions' and the seal's (6.1).
-pub fn identity_pair(account_secret: &[u8; 32]) -> Result<IdentityKeyPair> {
-    crate::identity::account_pair(account_secret)
 }
 
 /// The identity key of the account with this key: what its sessions must show.
@@ -151,9 +126,8 @@ pub fn address(user: &[u8; 16], slot: u8) -> Result<ProtocolAddress> {
     Ok(ProtocolAddress::new(Aci::from_uuid_bytes(*user).service_id_string(), device))
 }
 
-/// libsignal's store, as entries the state seals (spec 2): sessions and the identities seen by address, this
-/// device's prekeys by id. Its identity key pair is the account's, never stored. One part per store trait, as
-/// libsignal borrows several at once.
+/// libsignal's store as entries the state seals (spec 2); the identity key pair is the account's, never stored.
+/// One part per store trait, as libsignal borrows several at once.
 pub struct Records {
     pub sessions: Sessions,
     pub identities: Identities,
@@ -229,7 +203,7 @@ impl Records {
             sessions: Sessions(part(entries, "s").into()),
             identities: Identities {
                 seen: part(entries, "i").into(),
-                pair: identity_pair(account_secret)?,
+                pair: crate::identity::account_pair(account_secret)?,
                 registration_id,
                 trusted: None,
             },
@@ -268,8 +242,7 @@ impl Records {
         out
     }
 
-    /// Starts an operation that `rollback` can undo (`commit` ends it; operations nest): only what it changes is
-    /// kept aside.
+    /// Starts an operation `rollback` can undo (`commit` ends it; they nest).
     pub fn begin(&mut self) {
         for journaled in self.journals() {
             journaled.begin();
@@ -312,8 +285,8 @@ impl Records {
         self.sessions.0.remove(&session_key(address));
     }
 
-    /// Signal's answer to a `DecryptionErrorMessage` (spec 4.6): the session with `address` archived if its current
-    /// state still sends with `ratchet_key`, so the next message starts a new one. Whether it was.
+    /// Signal's answer to a `DecryptionErrorMessage` (spec 4.6): archives the session if it still sends with
+    /// `ratchet_key`, so the next message starts a new one. Whether it did.
     pub fn archive_if_current(&mut self, address: &ProtocolAddress, ratchet_key: &PublicKey) -> bool {
         let key = session_key(address);
         let Some(mut record) = self.sessions.0.get(&key).and_then(|bytes| SessionRecord::deserialize(bytes).ok())
@@ -324,13 +297,7 @@ impl Records {
         {
             return false;
         }
-        match record.serialize() {
-            Ok(bytes) => {
-                self.sessions.0.insert(key, bytes);
-                true
-            }
-            Err(_) => false,
-        }
+        record.serialize().map(|bytes| self.sessions.0.insert(key, bytes)).is_ok()
     }
 
     /// Whether a message can go to `address` now: a session whose sending chain is good, made with PQXDH.
@@ -370,18 +337,13 @@ impl Records {
 
     /// Keeps the newest `most` one-time prekeys of each kind; the private keys of older ones go.
     pub fn keep_newest_one_time(&mut self, most: usize) {
-        let mut ids: Vec<u32> = self.prekeys.0.keys().filter_map(|k| k.parse().ok()).collect();
-        ids.sort_unstable();
-        for id in ids.iter().take(ids.len().saturating_sub(most)) {
-            if let Some(mut gone) = self.prekeys.0.remove(&id.to_string()) {
-                gone.zeroize();
-            }
-        }
-        let mut ids: Vec<u32> = self.kyber.keys.keys().filter_map(|k| k.strip_prefix("k/")?.parse().ok()).collect();
-        ids.sort_unstable();
-        for id in ids.iter().take(ids.len().saturating_sub(most)) {
-            if let Some(mut gone) = self.kyber.keys.remove(&format!("k/{id}")) {
-                gone.zeroize();
+        for (entries, prefix) in [(&mut self.prekeys.0, ""), (&mut self.kyber.keys, "k/")] {
+            let mut ids: Vec<u32> = entries.keys().filter_map(|k| k.strip_prefix(prefix)?.parse().ok()).collect();
+            ids.sort_unstable();
+            for id in ids.iter().take(ids.len().saturating_sub(most)) {
+                if let Some(mut gone) = entries.remove(&format!("{prefix}{id}")) {
+                    gone.zeroize();
+                }
             }
         }
     }
@@ -513,8 +475,7 @@ impl KyberPreKeyStore for Kyber {
         Ok(())
     }
 
-    /// A one-time Kyber prekey goes once used; a last resort stays, and a message made with it twice (the same base
-    /// key) is a replay.
+    /// A one-time Kyber prekey goes once used; a last resort stays, and its base key seen twice is a replay.
     async fn mark_kyber_pre_key_used(&mut self, id: KyberPreKeyId, _: SignedPreKeyId, base_key: &PublicKey) -> R<()> {
         if let Some(mut gone) = self.keys.remove(&format!("k/{}", u32::from(id))) {
             gone.zeroize();
@@ -529,8 +490,7 @@ impl KyberPreKeyStore for Kyber {
         }
         self.keep_seen();
         self.seen.push_back(seen);
-        // A marker goes with its prekey; only past the bound (20,000 sessions started on last resorts within a
-        // prekey's month) the oldest go before it.
+        // A marker goes with its prekey; past the bound the oldest go first.
         let keys = &self.keys;
         self.seen.retain(|(id, _)| keys.contains_key(&format!("kl/{id}")));
         while self.seen.len() > LAST_RESORT_SEEN {
@@ -585,14 +545,9 @@ mod tests {
     #[test]
     fn the_identity_key_is_the_account_key() {
         let secret = crate::identity::new_account_secret();
-        let account_key = crate::identity::account_key(&identity_pair(&secret).unwrap());
-        assert_eq!(*identity_pair(&secret).unwrap().identity_key(), identity_of(&account_key).unwrap());
+        let account_key = crate::identity::account_key(&crate::identity::account_pair(&secret).unwrap());
+        assert_eq!(*crate::identity::account_pair(&secret).unwrap().identity_key(), identity_of(&account_key).unwrap());
         let other = crate::identity::new_account_secret();
-        assert_ne!(*identity_pair(&other).unwrap().identity_key(), identity_of(&account_key).unwrap());
-    }
-
-    #[test]
-    fn store_operations_complete_at_once() {
-        assert_eq!(now(async { 5 }), 5);
+        assert_ne!(*crate::identity::account_pair(&other).unwrap().identity_key(), identity_of(&account_key).unwrap());
     }
 }

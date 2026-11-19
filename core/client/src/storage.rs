@@ -1,16 +1,15 @@
-//! The account's storage at the hub (spec 6.9): what the user keeps beside the chats (friends with the name and
-//! colour shown for them, blocks, the app's icon, left-handed mode, profile keys, the groups' master keys) in one blob sealed under a key derived from the account key, so a
-//! new phone restored from the backup (or the iCloud Keychain) gets it back, and the hub reads none of it.
-//!
-//! Every field carries the time it was set; two versions merge field by field, the later one winning, and friends are
-//! the union of both. The hub keeps a version number per user and takes a write only on top of the version it has,
-//! so two writers never overwrite each other unseen: the loser fetches, merges and writes again.
+//! The account's storage at the hub (spec 6.9): friends with their name and colour, blocks, the app's icon,
+//! left-handed mode, profile keys and groups' master keys, sealed under a key from the account key so a restored phone
+//! gets them back and the hub reads none of it.
+//! Every field carries the time it was set; versions merge field by field, the later winning, friends as the union.
+//! The hub takes a write only on top of its current version, so the loser fetches, merges and writes again.
 
 use crate::error::{Error, Result};
 use crate::Client;
+#[cfg(test)]
 use chacha20poly1305::aead::{Aead, KeyInit, Payload};
+#[cfg(test)]
 use chacha20poly1305::ChaCha20Poly1305;
-use hmac::{Hmac, Mac};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use yo_wire::api::{self, status};
@@ -18,14 +17,7 @@ use yo_wire::{decode, encode};
 
 /// HKDF-SHA256 without salt (RFC 5869), up to 32 bytes: the derivation spec 7 and 6.9 name.
 pub fn hkdf(ikm: &[u8], info: &[u8], out: &mut [u8]) {
-    let mut extract = <Hmac<sha2::Sha256> as Mac>::new_from_slice(&[0; 32]).expect("any key length");
-    extract.update(ikm);
-    let prk = extract.finalize().into_bytes();
-    let mut expand = <Hmac<sha2::Sha256> as Mac>::new_from_slice(&prk).expect("any key length");
-    expand.update(info);
-    expand.update(&[1]);
-    let okm = expand.finalize().into_bytes();
-    out.copy_from_slice(&okm[..out.len()]);
+    hkdf::Hkdf::<sha2_11::Sha256>::new(None, ikm).expand(info, out).expect("valid HKDF output length");
 }
 
 /// The key the storage is sealed under: HKDF(the account key's secret, "yo storage v1").
@@ -106,17 +98,11 @@ impl Friend {
     }
 }
 
-/// Fields of a later version: kept, merged as the known ones (spec 6.9) without knowing them: a field
-/// (`[value, at]`) by its time, then its value; an object field by field, on every level. Anything else, where both
-/// sides have it, the same choice on both (the larger value).
+/// Fields of a later version, merged without knowing them (spec 6.9): a `[value, at]` field by its time, then its
+/// value; an object field by field; anything else by the larger value.
 fn merge_extra(mine: &mut BTreeMap<String, serde_json::Value>, theirs: &BTreeMap<String, serde_json::Value>) {
     for (key, value) in theirs {
-        match mine.get_mut(key) {
-            Some(entry) => merge_value(entry, value),
-            None => {
-                mine.insert(key.clone(), value.clone());
-            }
-        }
+        mine.entry(key.clone()).and_modify(|entry| merge_value(entry, value)).or_insert_with(|| value.clone());
     }
 }
 
@@ -132,28 +118,17 @@ fn merge_value(mine: &mut serde_json::Value, theirs: &serde_json::Value) {
             other => (false, 0, bytes(other)),
         }
     };
-    match (&mut *mine, theirs) {
-        (Value::Object(ours), Value::Object(other)) => {
-            for (key, value) in other {
-                match ours.get_mut(key) {
-                    Some(entry) => merge_value(entry, value),
-                    None => {
-                        ours.insert(key.clone(), value.clone());
-                    }
-                }
-            }
+    if let (Value::Object(ours), Value::Object(other)) = (&mut *mine, theirs) {
+        for (key, value) in other {
+            ours.entry(key.clone()).and_modify(|entry| merge_value(entry, value)).or_insert_with(|| value.clone());
         }
-        _ => {
-            if key(theirs) > key(mine) {
-                *mine = theirs.clone();
-            }
-        }
+    } else if key(theirs) > key(mine) {
+        *mine = theirs.clone();
     }
 }
 
-/// A group this account is in, as Signal's storage service keeps one (its GroupV2Record): the master key, so a new
-/// phone fetches the group from the hub right away, not only once someone writes to it. Kept after leaving (`removed`),
-/// so the leaving reaches the other side of a merge.
+/// A group this account is in, as Signal's GroupV2Record: its master key, so a new phone fetches it at once. Kept
+/// after leaving (`removed`), so the leaving survives a merge.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct GroupEntry {
     /// The master key (base64url): the same for the group's every version, never changed.
@@ -187,8 +162,7 @@ pub const MAX_FRIEND_NAME: usize = 64;
 /// What is sealed: JSON, so a later version adds fields that an older one keeps (`extra`).
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Storage {
-    /// The hub's version this one was written as: a hub that hands out an older one than a device has seen is
-    /// noticed (and ignored).
+    /// The hub's version this was written as: an older one handed out later is noticed and ignored.
     #[serde(default)]
     pub version: u64,
     /// By user id (hex).
@@ -200,15 +174,13 @@ pub struct Storage {
     /// Left-handed mode: none until a device chooses it.
     #[serde(default)]
     pub left_handed: Field<Option<bool>>,
-    /// This account's profile key (base64url), as Signal keeps it in its storage: a new phone goes on with it, so
-    /// what its contacts hold stays good and nothing of theirs becomes a request (spec 4.10).
+    /// This account's profile key (base64url), so a restored phone keeps its contacts' deliveries good (spec 4.10).
     #[serde(default, rename = "pk", skip_serializing_if = "Field::unset")]
     pub profile_key: Field<Option<String>>,
     /// Its generation (spec 4.10), set with it.
     #[serde(default, rename = "pg", skip_serializing_if = "Field::unset")]
     pub profile_key_gen: Field<u32>,
-    /// The contacts' profile keys (base64url) by user id (hex), none once forgotten: a new phone delivers to them as
-    /// their contact at once. The first to go when the storage would not fit.
+    /// Contacts' profile keys (base64url) by user id (hex), none once forgotten. The first to go when it would not fit.
     #[serde(default, rename = "k", skip_serializing_if = "BTreeMap::is_empty")]
     pub keys: BTreeMap<String, Field<Option<String>>>,
     /// The groups this account is or was in, by group id (hex), as Signal's storage keeps them.
@@ -243,23 +215,17 @@ impl Storage {
 /// A nonce and a tag: what sealing adds.
 const SEAL_OVERHEAD: usize = 12 + 16;
 
-/// Pads `plain` like an envelope (spec 6.1) and seals it: nonce || ChaCha20-Poly1305 || tag, 1, 4, 16 or 60 KiB in
-/// all (`SEALED_SIZES`), so the hub sees a size class. How the storage and a backup's sealed part are made (spec 6.9,
-/// 7). `Error::Protocol("too large")` past the largest.
+/// Pads `plain` like an envelope (spec 6.1) and seals it (nonce || ChaCha20-Poly1305 || tag) to a size class of
+/// `SEALED_SIZES`: the storage and a backup's sealed part (spec 6.9, 7). `Protocol("too large")` past the largest.
 pub fn seal_padded(key: &[u8; 32], aad: &[u8], plain: &[u8]) -> Result<Vec<u8>> {
     let sizes = yo_wire::limits::SEALED_SIZES.map(|size| size - SEAL_OVERHEAD);
     let padded = yo_wire::envelope::pad(plain, &sizes).map_err(|_| Error::Protocol("too large"))?;
-    let nonce: [u8; 12] = crate::identity::random();
-    let sealed =
-        ChaCha20Poly1305::new(key.into()).encrypt(&nonce.into(), Payload { msg: &padded, aad }).expect("encryption");
-    Ok([nonce.to_vec(), sealed].concat())
+    Ok(crate::aead::seal(key, aad, &padded))
 }
 
-/// Opens what `seal_padded` sealed. Also what was sealed before the padding: JSON (spaces after it, or nothing),
-/// which starts with `{` where the padded starts with its version, 1.
+/// Opens what `seal_padded` sealed, and unpadded JSON sealed before the padding (it starts with `{`, not 1).
 pub fn open_padded(key: &[u8; 32], aad: &[u8], sealed: &[u8]) -> Option<Vec<u8>> {
-    let (nonce, sealed) = sealed.split_at_checked(12)?;
-    let plain = ChaCha20Poly1305::new(key.into()).decrypt(nonce.into(), Payload { msg: sealed, aad }).ok()?;
+    let plain = crate::aead::open(key, aad, sealed)?;
     if plain.first() != Some(&yo_wire::VERSION) {
         return Some(plain);
     }
@@ -320,8 +286,7 @@ impl Client {
             .collect()
     }
 
-    /// Adds a friend to the list, or changes the name or colour shown for one. Kept at once, written to the hub with
-    /// the next `sync` or `maintenance`.
+    /// Adds a friend, or changes its name or colour; written to the hub with the next `sync` or `maintenance`.
     pub fn set_friend(&mut self, user: &str, name: Option<String>, color: Option<u8>) -> Result<()> {
         crate::user_bytes(user)?;
         if name.as_ref().is_some_and(|n| n.len() > MAX_FRIEND_NAME) {
@@ -355,11 +320,10 @@ impl Client {
         self.state.storage.icon.value.clone()
     }
 
-    /// When the hub last held all of the storage (wall clock, ms); none while a change waits to go up, or before
-    /// the first sync.
+    /// When the hub last held all of the storage (wall clock, ms); none while a change waits to go up.
     pub fn storage_saved_at(&self) -> Option<u64> {
-        (self.state.storage_fetched && !self.state.storage_dirty && self.state.storage_saved_at > 0)
-            .then_some(self.state.storage_saved_at)
+        let held = !self.state.storage_dirty && !self.state.storage_locked;
+        (self.state.storage_fetched && held && self.state.storage_saved_at > 0).then_some(self.state.storage_saved_at)
     }
 
     pub fn set_app_icon(&mut self, icon: Option<String>) -> Result<()> {
@@ -392,8 +356,7 @@ impl Client {
         }
     }
 
-    /// This account's profile key as it is now, into the storage: a time after the one there, whatever this
-    /// device's clock says, so a key made later wins a merge.
+    /// The profile key into the storage, timed after the one there whatever the clock says, so a later key wins.
     pub(crate) fn store_own_key(&mut self) {
         let value = self.state.profile_key.map(|key| yo_wire::b64(&key));
         let generation = self.state.profile_key_gen;
@@ -430,8 +393,7 @@ impl Client {
         }
     }
 
-    /// The profile keys the storage holds, applied: this account's (a new phone's, or one made on another device of
-    /// it), and the contacts' this device does not know (a new phone).
+    /// Applies the profile keys the storage holds: this account's and the contacts' not known here (a new phone).
     fn apply_keys(&mut self) {
         let friends: Vec<_> =
             self.state.storage.friends.iter().filter(|(_, f)| !f.removed.value).map(|(user, _)| user.clone()).collect();
@@ -447,8 +409,8 @@ impl Client {
                 self.state.profile_key_gen = self.state.storage.profile_key_gen.value;
                 // The hub's check is told again; it may be this key's already.
                 self.state.access_key_told = false;
-                // Made on another device of this account while this one had its own: every contact gets it (they
-                // may hold this one's). A new phone's first key needs that not: they have it.
+                // A key made elsewhere while this device had its own: every contact gets it; a new phone's first key
+                // not.
                 if new {
                     self.key_due_to_all();
                 }
@@ -468,15 +430,15 @@ impl Client {
             if user == self.state.user_id {
                 continue;
             }
-            let contact = self.state.contacts.entry(user.clone()).or_insert_with(crate::state::Contact::unknown);
+            let contact = self.state.contacts.entry(user.clone()).or_default();
             if contact.profile_key.is_none() {
                 self.adopt_key(&user, key);
             }
         }
     }
 
-    /// A group as this device has it now (fetched), into the storage: its key while this account is in it, and when
-    /// it left. A group never kept there and left is not put in (a stranger's made-up key never goes up).
+    /// A fetched group into the storage: its key while in it, and when it left. A group never kept and left stays out
+    /// (a stranger's made-up key never goes up).
     pub(crate) fn store_group(&mut self, id: &str) {
         let Some(group) = self.state.groups.get(id).filter(|g| g.revision > 0) else { return };
         let Some(key) = crate::state::unhex(&group.key) else { return };
@@ -512,8 +474,7 @@ impl Client {
         }
     }
 
-    /// The groups the storage holds that this device does not know (a restored phone): known from now on, fetched
-    /// from the hub with the next `refresh_groups`, as Signal's restore fetches every group of its storage.
+    /// Groups the storage holds that this device does not know (a restored phone), fetched with `refresh_groups`.
     fn apply_groups(&mut self) {
         let entries: Vec<(String, String, bool)> = self
             .state
@@ -533,21 +494,7 @@ impl Client {
                 self.note("a group of the storage past the most kept".into());
                 break;
             }
-            self.state.groups.insert(
-                id,
-                crate::state::Group {
-                    key,
-                    name: String::new(),
-                    members: Vec::new(),
-                    revision: 0,
-                    left: false,
-                    accepted,
-                    keyed: false,
-                    named: 0,
-                    endorsed_until: 0,
-                    endorsements: Default::default(),
-                },
-            );
+            self.state.groups.insert(id, crate::state::Group { key, accepted, ..Default::default() });
         }
     }
 
@@ -556,38 +503,26 @@ impl Client {
         self.persist()
     }
 
-    /// The storage's blocks, applied to the contacts: what the merged storage says is what holds.
+    /// The storage applied to the contacts: its blocks hold, and friends this device does not know (a restored
+    /// phone) become accepted contacts due the profile key (4.10); a known one keeps its own say.
     fn apply_storage(&mut self) {
-        let blocks: Vec<(String, bool)> = self
+        let me = self.state.user_id.clone();
+        let friends: Vec<(String, Field<bool>, bool)> = self
             .state
             .storage
             .friends
             .iter()
-            .filter(|(_, f)| f.blocked.at > 0)
-            .map(|(user, f)| (user.clone(), f.blocked.value))
+            .filter(|(user, _)| **user != me)
+            .map(|(user, f)| (user.clone(), f.blocked.clone(), f.removed.value))
             .collect();
-        for (user, blocked) in blocks {
-            if user == self.state.user_id {
-                continue;
+        for (user, blocked, removed) in friends {
+            if blocked.at > 0 {
+                self.apply_block(&user, blocked.value);
             }
-            self.apply_block(&user, blocked);
-        }
-        // Friends kept there that this device does not know (a restored phone): contacts, accepted (spec 4.10), and
-        // due the profile key. One it knows keeps its own say: a request stays one.
-        let friends: Vec<String> = self
-            .state
-            .storage
-            .friends
-            .iter()
-            .filter(|(user, f)| !f.removed.value && !f.blocked.value && **user != self.state.user_id)
-            .map(|(user, _)| user.clone())
-            .collect();
-        for user in friends {
-            self.state.contacts.entry(user).or_insert_with(|| crate::state::Contact {
-                accepted: true,
-                key_due: true,
-                ..crate::state::Contact::unknown()
-            });
+            if !removed && !blocked.value {
+                let new = crate::state::Contact { accepted: true, key_due: true, ..Default::default() };
+                self.state.contacts.entry(user).or_insert(new);
+            }
         }
         self.apply_keys();
         self.apply_groups();
@@ -598,8 +533,7 @@ impl Client {
         let user = self.user_id_bytes();
         let theirs = match (open(&self.state.account_secret, &user, sealed), self.state.legacy_storage_key) {
             (Ok(theirs), _) => theirs,
-            // Sealed before the account key was libsignal's (under its Ed25519 seed's key): taken in, and written
-            // again under this key with the next write.
+            // Sealed under the migrated Ed25519 seed's key: taken in, and written under the current key next time.
             (Err(error), Some(legacy)) => {
                 let theirs = open_under(&legacy, &user, sealed).map_err(|_| error)?;
                 self.state.storage_dirty = true;
@@ -612,7 +546,8 @@ impl Client {
             return Err(Error::Protocol("storage version"));
         }
         self.state.storage.merge(&theirs);
-        self.state.storage_version = self.state.storage_version.max(version);
+        // The hub's version is the one to write over, also an older one (its database restored from a backup).
+        self.state.storage_version = version;
         // What this device had and the hub's did not (or had older) goes back up.
         if self.state.storage != (Storage { version: self.state.storage.version, ..theirs }) {
             self.state.storage_dirty = true;
@@ -621,32 +556,39 @@ impl Client {
         Ok(())
     }
 
-    /// Brings the storage in line with the hub's: fetched once on this device (before anything is received, so a
-    /// restored block holds from the first message on), then written when it changed. A hub without storage (an older
-    /// one) is left alone.
+    /// The hub's storage taken in. Replayed (an older one): written over. Not openable here (sealed under a key not
+    /// carried over): left standing, never written over by this device.
+    fn take_stored(&mut self, stored: api::Storage) {
+        // None at the hub (version 0, no data: its database restored to before this account's first write): all of
+        // this device's goes up.
+        if stored.version == 0 && stored.data.as_slice().is_empty() {
+            self.state.storage_version = 0;
+            self.state.storage_dirty = true;
+            return;
+        }
+        if let Err(error) = self.take_storage(stored.version, stored.data.as_slice()) {
+            self.drop_one(format!("storage: {error}"));
+            self.state.storage_version = stored.version;
+            match error {
+                Error::Protocol("storage version") => self.state.storage_dirty = true,
+                _ => self.state.storage_locked = true,
+            }
+        }
+    }
+
+    /// Brings the storage in line with the hub's: fetched once before anything is received, then written on change.
     pub(crate) fn sync_storage(&mut self) -> Result<()> {
         if !self.state.storage_fetched {
             let response = self.signed("GET", api::STORAGE, &[])?;
             match response.status {
                 status::OK => {
-                    let stored: api::Storage = decode(&response.body)?;
-                    // Not ours to open, or replayed (a hub that mixed it up, or damage): this device's stands and
-                    // takes its place with the next write. Only this account's devices could read it, so nothing
-                    // readable is lost; the hub could as well have answered that there is none.
-                    if let Err(error) = self.take_storage(stored.version, stored.data.as_slice()) {
-                        self.drop_one(format!("storage: {error}"));
-                        self.state.storage_version = stored.version;
-                        // Written over, also with nothing changed here: never left there as if it were saved.
-                        self.state.storage_dirty = true;
-                    }
+                    self.take_stored(decode(&response.body)?);
                 }
-                status::NOT_FOUND => {}
                 status::GONE => return Err(Error::Replaced),
                 other if crate::retryable(&Error::Refused(other)) => return Err(Error::Refused(other)),
-                // An older hub without storage: nothing to fetch.
                 _ => {}
             }
-            // Blocks this device had before the storage (an app from before it) go up with the first write.
+            // Blocks this device had and the storage has not go up with the first write.
             let blocked: Vec<String> =
                 self.state.contacts.iter().filter(|(_, c)| c.blocked).map(|(u, _)| u.clone()).collect();
             for user in blocked {
@@ -657,10 +599,13 @@ impl Client {
             self.state.storage_fetched = true;
             self.persist()?;
         }
-        // The groups this device knows, also those from before the storage kept groups, into it.
+        // The groups this device knows, also those the storage does not have yet.
         let groups: Vec<String> = self.state.groups.keys().cloned().collect();
         for id in groups {
             self.store_group(&id);
+        }
+        if self.state.storage_locked {
+            return Ok(());
         }
         for _ in 0..WRITE_TRIES {
             if !self.state.storage_dirty {
@@ -688,13 +633,13 @@ impl Client {
                 }
                 // Another writer was first: its version, merged, goes up again.
                 status::CONFLICT => {
-                    let stored: api::Storage = decode(&response.body)?;
-                    self.state.storage_version = stored.version;
-                    if let Err(error) = self.take_storage(stored.version, stored.data.as_slice()) {
-                        self.drop_one(format!("storage: {error}"));
-                    }
+                    self.take_stored(decode(&response.body)?);
+                    // Left unsaved when locked: never shown as held by the hub.
                     self.state.storage_dirty = true;
                     self.persist()?;
+                    if self.state.storage_locked {
+                        return Ok(());
+                    }
                 }
                 status::GONE => return Err(Error::Replaced),
                 other => return Err(Error::Refused(other)),
@@ -703,9 +648,8 @@ impl Client {
         Ok(())
     }
 
-    /// The storage sealed, within the hub's limit: the contacts' profile keys go first, the oldest first (they come
-    /// again with their next message), then groups left, the longest gone first, then friends taken off the list, the longest gone first, until it fits (a
-    /// removal older than the other writers' last read is no longer needed to merge).
+    /// The storage sealed within the hub's limit: the contacts' profile keys go first (oldest first; they come again),
+    /// then groups left, then removed friends, longest gone first.
     fn sealed_within_limit(&mut self, next: &mut Storage) -> Result<Vec<u8>> {
         loop {
             if let Ok(data) = seal(&self.state.account_secret, &self.user_id_bytes(), next) {
@@ -799,8 +743,7 @@ mod tests {
         }
     }
 
-    /// Fields of a later version merged by their value: `["z", 1]` beat `["a", 2]`, and an object of them was taken
-    /// whole from one side. Now they merge as the known fields do, by time, on every level.
+    /// Unknown fields merge as the known ones do, by time, on every level.
     #[test]
     fn unknown_fields_merge_by_time_on_every_level() {
         let parse = |json: &str| -> Storage { serde_json::from_str(json).unwrap() };
@@ -851,13 +794,5 @@ mod tests {
             .unwrap();
         let old = [nonce.to_vec(), old].concat();
         assert_eq!(open_padded(&key, b"ad", &old).unwrap(), b"{\"version\":3}   ");
-    }
-
-    #[test]
-    fn hkdf_is_rfc_5869() {
-        // RFC 5869, test case 3 (no salt, no info): the first 32 bytes of its OKM.
-        let mut out = [0; 32];
-        hkdf(&[0x0b; 22], b"", &mut out);
-        assert_eq!(crate::state::hex(&out), "8da4e775a563c18f715f802a063c5a31b8a11f5c5ee1879ec3454e5f3c738d2d");
     }
 }

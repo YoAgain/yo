@@ -33,7 +33,6 @@ struct Device {
     user: [u8; 16],
     state: State,
     records: Records,
-    state_key: [u8; 32],
 }
 
 impl Device {
@@ -52,7 +51,6 @@ impl Device {
             registration_id,
             name: None,
             contacts: Default::default(),
-            own: Vec::new(),
             outbox: VecDeque::new(),
             next_seq: 0,
             events: Vec::new(),
@@ -65,6 +63,7 @@ impl Device {
             storage_fetched: false,
             storage_dirty: false,
             legacy_storage_key: None,
+            storage_locked: false,
             storage_saved_at: 0,
             last_sent_ms: 0,
             received: VecDeque::new(),
@@ -82,7 +81,7 @@ impl Device {
             deferred: Default::default(),
         };
         let records = Records::new(&Default::default(), &state.account_secret, registration_id).unwrap();
-        Device { account: *account, user, state, records, state_key: identity::random() }
+        Device { account: *account, user, state, records }
     }
 
     /// A new account with `devices` devices, numbered from 1.
@@ -141,9 +140,9 @@ impl Device {
         }
     }
 
-    /// The whole state sealed, as the app's store gets it after every change.
+    /// The whole state as the app's store gets it after every change: its size.
     fn persist(&self) -> usize {
-        state::seal(&self.state, self.records.export(), &self.state_key).len()
+        yo_tests::saved_bytes(&self.state, self.records.export()).len()
     }
 
     /// A Yo for every device of `to` (one account), sealed to it: one envelope.
@@ -186,7 +185,7 @@ impl Device {
     }
 
     fn receive(&mut self, from: &Device, sealed: &[u8]) {
-        let own = signal::identity_pair(&self.state.account_secret).unwrap();
+        let own = yo_core::identity::account_pair(&self.state.account_secret).unwrap();
         let now = SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_millis() as u64;
         let roots = sealed::roots(&[yo_tests::trust_root()]);
         let payload: Payload = decode(&sealed::open(&own, sealed, &roots, now).unwrap().payload).unwrap();

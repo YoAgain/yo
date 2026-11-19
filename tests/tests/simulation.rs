@@ -30,7 +30,8 @@ fn device(hub: &TestHub, name: &str, old: Option<&Client>) -> Device {
 
 fn collect(events: Vec<Event>, received: &mut BTreeMap<String, Vec<(String, String)>>, to: &str) {
     for event in events {
-        if let Event::Message { user, content: Content::Text(text), .. } = event {
+        if let Event::Message { user, content, .. } = event {
+            let Some(text) = yo_tests::tag_of(&content) else { continue };
             received.entry(to.to_owned()).or_default().push((user, text));
         }
     }
@@ -61,7 +62,7 @@ fn run(seed: u64, clients: usize, steps: usize) {
             let from = devices[i].user.clone();
             let events = devices[i]
                 .client
-                .send(&names[j], Content::Text(text.clone()))
+                .send(&names[j], yo_tests::tagged(text.clone()))
                 .unwrap_or_else(|e| panic!("seed {seed} step {step}: {from} -> {to}: {e}"));
             collect(events, &mut received, &from);
             // Not asserted taken: one to a contact on a new phone waits for the next inbox read, where its new
@@ -136,7 +137,7 @@ fn run(seed: u64, clients: usize, steps: usize) {
             d.client.drop_reasons()
         );
         assert_eq!(d.client.deferred(), 0, "seed {seed}: {} still waits for a roster", d.user);
-        assert_eq!(d.client.pending(), 0, "seed {seed}: {} has an outbox", d.user);
+        assert_eq!(d.client.waiting(), 0, "seed {seed}: {} has an outbox", d.user);
     }
     for (to, want) in &expected {
         let got = received.get(to).cloned().unwrap_or_default();
@@ -233,7 +234,7 @@ fn many_clients_at_once() {
 /// Replay the UI inputs alongside each network seed. Two clocks with different tick
 /// cadence must produce identical rows, and pauses must never spend visible time.
 fn simulate_list(seed: u64, steps: usize) {
-    use yo_core::list::{Friend, Input, Kind, List};
+    use yo_product::list::{Friend, Input, Kind, List};
     let mut rng = Rng(seed.max(1));
     let mut a = List::new();
     let mut b = List::new();

@@ -334,15 +334,10 @@ extension YoClient {
   func mediaChat(toTarget to: String) throws -> MediaChat {
     to.hasPrefix("group:") ? try groupMediaChat(group: String(to.dropFirst(6))) : try mediaChat(to: to)
   }
+}
 
-  func sendPhoto(toTarget to: String, media: YoMedia) throws -> [YoEvent] {
-    to.hasPrefix("group:")
-      ? try sendGroupPhoto(group: String(to.dropFirst(6)), media: media) : try sendPhoto(to: to, media: media)
-  }
-
-  func sendVideo(toTarget to: String, media: YoMedia, durationMs: UInt32) throws -> [YoEvent] {
-    to.hasPrefix("group:")
-      ? try sendGroupVideo(group: String(to.dropFirst(6)), media: media, durationMs: durationMs)
-      : try sendVideo(to: to, media: media, durationMs: durationMs)
+extension SendTarget {
+  init(_ target: String) {
+    self = target.hasPrefix("group:") ? .group(id: String(target.dropFirst(6))) : .contact(id: target)
   }
 }

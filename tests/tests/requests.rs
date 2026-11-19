@@ -533,7 +533,7 @@ fn a_recoverable_access_refusal_keeps_the_outbox_in_order() {
     let path = api::deliver_path(&user_id(&to));
     for text in ["first", "second"] {
         ha.fault(&path, Fault::Answer(503));
-        a.send(&to, Content::Text(text.into())).unwrap();
+        a.send(&to, yo_tests::tagged(text.into())).unwrap();
     }
     assert_eq!(a.waiting(), 2);
 
@@ -547,9 +547,41 @@ fn a_recoverable_access_refusal_keeps_the_outbox_in_order() {
         .unwrap()
         .into_iter()
         .filter_map(|event| match event {
-            Event::Message { content: Content::Text(text), .. } => Some(text),
+            Event::Message { content, .. } => yo_tests::tag_of(&content),
             _ => None,
         })
         .collect();
     assert_eq!(received, ["first", "second"]);
+}
+
+/// Spec 4.9, 6.9: a group accepted before the hub has this account's commitment is joined in the account's storage
+/// at once, and its own entry gets the profile key once the commitment is there: on this phone, and on the next one
+/// (the group from the storage) when this one never got to it.
+#[test]
+fn a_group_accepted_before_the_commitment_is_stored_and_keyed_later() {
+    let hub = TestHub::start();
+    let (mut b, hb, handle) = account(&hub, "BOB");
+    let (mut c, _, _) = account(&hub, "CAROL");
+    for _ in 0..10 {
+        hb.fault(api::ACCESS_KEY, Fault::Answer(503));
+    }
+    let (id, _) = c.create_group("Strangers", &[b.user_id().to_owned()]).unwrap();
+    settle(&mut [&mut b]);
+    b.accept_group(&id).unwrap();
+    let group = |b: &Client| b.saved().state.groups[&id].clone();
+    assert!(!b.saved().state.access_key_told);
+    assert!(!group(&b).keyed);
+    b.write_storage().unwrap();
+    let response = b.signed_for_tests("GET", api::STORAGE, &[]).unwrap();
+    let stored: api::Storage = yo_wire::decode(&response.body).unwrap();
+    let user = yo_core::state::unhex(b.user_id()).unwrap();
+    let storage = yo_core::storage::open(&b.account_secret(), &user, stored.data.as_slice()).unwrap();
+    assert!(storage.groups[&id].accepted.value, "joined in the storage");
+    hb.faults.lock().unwrap().clear();
+    let mut next =
+        Client::register_username(Http::new(hub.url()), &handle, Some(b.account_secret()), None, yo_core::Push::none())
+            .unwrap();
+    next.maintenance().unwrap();
+    next.maintenance().unwrap();
+    assert!(group(&next).keyed, "keyed by the next phone");
 }

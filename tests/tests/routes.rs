@@ -671,18 +671,17 @@ fn the_inbox_answers_and_takes_acks() {
     let (code, _) = signed(&mut a, "GET", "/v1/inbox?wait=nonsense", &[]);
     assert_eq!(code, status::OK, "no number: no wait");
     // Four at once from one device, the fifth refused.
-    let key = [5; 32];
-    let state = a.export(&key);
+    let state = a.saved();
     let polls: Vec<_> = (0..4)
         .map(|_| {
-            let mut copy = Client::restore(Http::new(hub.url()), &state, &key).unwrap();
+            let mut copy = Client::restore(Http::new(hub.url()), &state).unwrap();
             std::thread::spawn(move || signed(&mut copy, "GET", &api::inbox_path(3), &[]).0)
         })
         .collect();
     // Each waits three seconds; one is enough to see them all under way.
     std::thread::sleep(std::time::Duration::from_secs(1));
     assert_eq!(hub.hub.under_way(), (1, 1));
-    let mut fifth = Client::restore(Http::new(hub.url()), &state, &key).unwrap();
+    let mut fifth = Client::restore(Http::new(hub.url()), &state).unwrap();
     assert_eq!(signed(&mut fifth, "GET", &api::inbox_path(0), &[]).0, status::RATE_LIMITED);
     for poll in polls {
         assert_eq!(poll.join().unwrap(), status::OK);
@@ -850,19 +849,19 @@ fn a_yo_to_an_account_without_prekeys_is_outdated_and_waits() {
     let found = bundles(&mut a, b.user_id(), Vec::new());
     assert_eq!((found.devices.len(), found.bundles.len()), (1, 0), "a device, no bundle");
     assert_eq!(a.send_yo(&b_name), Err(Error::Outdated));
-    assert_eq!(a.pending(), 1);
+    assert_eq!(a.waiting(), 1);
     assert!(a.contacts().iter().any(|c| c.outdated));
     let lookups = || http.sent.lock().unwrap().iter().filter(|(_, p, _)| p == api::LOOKUP).count();
     let before = lookups();
     a.maintenance().unwrap();
     assert_eq!(lookups(), before, "not asked again within the hour");
-    assert_eq!(a.pending(), 2, "the Yo, and now the profile key behind it");
+    assert_eq!(a.waiting(), 2, "the Yo, and now the profile key behind it");
     // The app updated: the account registers again with its key, a new device with prekeys.
     let mut phone = new_phone(Http::new(hub.url()), &b_name, &b);
     let later = yo_hub::now_ms() + 3600 * 1000 + 1;
     a.set_clock(Arc::new(move || later));
     a.maintenance().unwrap();
-    assert_eq!(a.pending(), 0);
+    assert_eq!(a.waiting(), 0);
     let me = a.user_id().to_owned();
     let events = phone.sync(0).unwrap();
     assert!(events.iter().any(|e| matches!(e, Event::Message { user, .. } if *user == me)), "{events:?}");
@@ -1001,8 +1000,8 @@ fn support_threads_are_private_and_read_markers_are_bounded() {
     let hub = TestHub::start_with(config, "127.0.0.1:0");
     let (mut a, _, _) = account(&hub);
     let (mut b, _, _) = account(&hub);
-    a.send_feedback("hello 🎨", "1").unwrap();
-    assert!(b.support_thread().unwrap().messages.is_empty());
+    a.feedback_begin("hello 🎨", "1").and_then(|r| r.send()).unwrap();
+    assert!(b.support_begin(None).and_then(|r| r.thread()).unwrap().messages.is_empty());
     let headers = [("yo-admin-token", "test-token".into())];
     assert_eq!(raw(&hub, "GET", "/v1/admin/messages", &[], vec![]).0, 404);
     let (_, body) = raw(&hub, "GET", "/v1/admin/messages", &headers, vec![]);
@@ -1013,15 +1012,23 @@ fn support_threads_are_private_and_read_markers_are_bounded() {
     assert_eq!(serde_json::from_slice::<serde_json::Value>(&empty).unwrap()["messages"], serde_json::json!([]));
     let path = format!("/v1/admin/messages/{}", threads[1]["user_id"].as_str().unwrap());
     assert_eq!(raw(&hub, "POST", &path, &headers, b"team reply".to_vec()).0, 204);
-    let first = a.support_thread().unwrap();
+    let first = a.support_begin(None).and_then(|r| r.thread()).unwrap();
     assert_eq!(first.unread, 1);
     assert_eq!(first.messages.len(), 2);
     assert_eq!(first.messages[1].text.as_slice(), b"team reply");
     assert_eq!(raw(&hub, "POST", &path, &headers, b"later reply".to_vec()).0, 204);
-    a.support_read(first.messages[1].id).unwrap();
-    assert_eq!(a.support_thread().unwrap().unread, 1, "reply arriving after fetch stays unread");
-    b.support_read(u64::MAX >> 1).unwrap();
-    assert_eq!(a.support_thread().unwrap().unread, 1, "another account cannot mark this thread read");
+    a.support_begin(Some(first.messages[1].id)).and_then(|r| r.send()).unwrap();
+    assert_eq!(
+        a.support_begin(None).and_then(|r| r.thread()).unwrap().unread,
+        1,
+        "reply arriving after fetch stays unread"
+    );
+    b.support_begin(Some(u64::MAX >> 1)).and_then(|r| r.send()).unwrap();
+    assert_eq!(
+        a.support_begin(None).and_then(|r| r.thread()).unwrap().unread,
+        1,
+        "another account cannot mark this thread read"
+    );
     let handled = format!("{path}/handled");
     assert_eq!(raw(&hub, "POST", &handled, &headers, first.messages[0].id.to_string().into_bytes()).0, 204);
     let (_, body) = raw(&hub, "GET", "/v1/admin/messages", &headers, vec![]);
@@ -1039,7 +1046,7 @@ fn support_threads_are_private_and_read_markers_are_bounded() {
             assert_eq!(row["done_at"].is_null(), value == b"0");
         }
     }
-    assert_eq!(a.support_thread().unwrap().unread, 1);
+    assert_eq!(a.support_begin(None).and_then(|r| r.thread()).unwrap().unread, 1);
     assert_eq!(raw(&hub, "POST", "/v1/admin/todos", &headers, b"team task".to_vec()).0, 201);
     let (_, body) = raw(&hub, "GET", "/v1/admin/messages/team", &headers, vec![]);
     let team: serde_json::Value = serde_json::from_slice(&body).unwrap();
@@ -1055,10 +1062,10 @@ fn support_and_legacy_feedback_share_the_user_rate_limit() {
     let (mut a, _, _) = account(&hub);
     let (mut b, _, _) = account(&hub);
     a.send_support_begin("new route", "1").unwrap().send().unwrap();
-    a.send_feedback("legacy route", "1").unwrap();
+    a.feedback_begin("legacy route", "1").and_then(|r| r.send()).unwrap();
     assert_eq!(a.send_support_begin("limited", "1").unwrap().send(), Err(Error::Refused(status::RATE_LIMITED)));
     b.send_support_begin("separate user", "1").unwrap().send().unwrap();
-    assert_eq!(a.support_thread().unwrap().messages.len(), 2);
+    assert_eq!(a.support_begin(None).and_then(|r| r.thread()).unwrap().messages.len(), 2);
     assert_eq!(
         signed(&mut a, "POST", api::SUPPORT_READ, &encode(&api::SupportRead { through: u64::MAX })).0,
         status::BAD_REQUEST

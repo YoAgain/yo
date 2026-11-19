@@ -512,7 +512,8 @@ impl Proc {
 }
 
 impl Store for Proc {
-    fn save(&self, blob: Vec<u8>) -> Result<(), String> {
+    fn save_state(&self, state: &yo_core::state::State, records: yo_core::signal::Entries) -> Result<(), String> {
+        let blob = yo_tests::saved_bytes(state, records);
         if self.crashed.load(Relaxed) {
             return Ok(());
         }
@@ -1065,7 +1066,7 @@ fn activate(w: &World, a: &mut Acct, rng: &mut Rng) -> bool {
         }
     };
     let proc_ = new_proc(w, a, rng.next_u64(), blob.clone());
-    match Client::restore(proc_.clone(), &blob, &STATE_KEY) {
+    match yo_tests::restore_bytes(proc_.clone(), &blob) {
         Ok(mut client) => {
             client.set_clock_skew(a.skew);
             if let Err(error) = client.persist_to(proc_.clone(), STATE_KEY) {
@@ -1075,7 +1076,7 @@ fn activate(w: &World, a: &mut Acct, rng: &mut Rng) -> bool {
             a.proc_ = proc_;
             w.hot[a.idx].store(true, Relaxed);
             w.stats.count("activated");
-            w.trace(a.uid, format!("activated, pending {}", a.client.as_ref().map_or(0, |c| c.pending())));
+            w.trace(a.uid, format!("activated, pending {}", a.client.as_ref().map_or(0, |c| c.waiting())));
             true
         }
         Err(error) => {
@@ -1115,7 +1116,7 @@ fn restart(w: &World, a: &mut Acct, rng: &mut Rng) {
     harvest_drops(w, a.client.as_ref());
     let saved = a.proc_.saved();
     let proc_ = new_proc(w, a, rng.next_u64(), saved.clone());
-    match Client::restore(proc_.clone(), &saved, &STATE_KEY) {
+    match yo_tests::restore_bytes(proc_.clone(), &saved) {
         Ok(mut client) => {
             client.set_clock_skew(a.skew);
             let _ = client.persist_to(proc_.clone(), STATE_KEY);
@@ -1129,7 +1130,7 @@ fn restart(w: &World, a: &mut Acct, rng: &mut Rng) {
             w.stats.violation(format!("{}: the saved state does not open: {error}", a.name));
         }
     }
-    w.trace(a.uid, format!("restarted, pending {}", a.client.as_ref().map_or(0, |c| c.pending())));
+    w.trace(a.uid, format!("restarted, pending {}", a.client.as_ref().map_or(0, |c| c.waiting())));
 }
 
 // ---- receiving ----
@@ -1238,7 +1239,9 @@ fn take_events(w: &World, a: &mut Acct, events: Vec<Event>, rng: &mut Rng) {
     }
     for event in events {
         let (from, tag, photo) = match event {
-            Event::Message { user, content: Content::Text(tag), .. } => (user, Some(tag), None),
+            Event::Message { user, content, .. } if yo_tests::tag_of(&content).is_some() => {
+                (user, yo_tests::tag_of(&content), None)
+            }
             Event::Message { user, content: Content::Photo(m) | Content::Video { media: m, .. }, .. } => {
                 (user, None, Some(m))
             }
@@ -1439,7 +1442,7 @@ fn send_text(w: &World, a: &mut Acct, to: &str, by_name: Option<&str>, rng: &mut
     let (key, tag, alive) = new_msg(w, a, to, by_name);
     let target = by_name.unwrap_or(to).to_owned();
     let t = Instant::now();
-    let result = a.client.as_mut().unwrap().send(&target, Content::Text(tag.clone()));
+    let result = a.client.as_mut().unwrap().send(&target, yo_tests::tagged(tag.clone()));
     w.send_latency.add(t.elapsed().as_micros() as u64);
     w.trace(a.uid, format!("send {tag} to {to}: {:?}", result.as_ref().map(|e| e.len())));
     after_send(w, a, key, to, result, alive, rng);
@@ -1555,7 +1558,7 @@ fn op_sync(w: &World, a: &mut Acct, rng: &mut Rng) {
     let Some(client) = a.client.as_mut() else { return };
     let result = client.sync(if rng.below(100) == 0 { 1 } else { 0 });
     w.trace(a.uid, format!("sync: {:?}", result.as_ref().map(|e| e.len())));
-    if client.pending() > 0 && w.trace_file.is_some() {
+    if client.waiting() > 0 && w.trace_file.is_some() {
         let view = client.outbox_view();
         w.trace(a.uid, format!("outbox: {view:?}"));
     }
@@ -1736,7 +1739,7 @@ fn op_block(w: &World, a: &mut Acct, rng: &mut Rng) {
         }
     }
     let Some(client) = a.client.as_mut().filter(|_| block) else { return };
-    match client.send(&who, Content::Text("never".into())) {
+    match client.send(&who, yo_tests::tagged("never".into())) {
         Err(Error::Blocked) => w.stats.count("send to blocked refused"),
         Err(Error::NotOnYo) => {}
         Err(error) if a.disk_full > 0 || a.wrong_clock > 0 || a.proc_.crashed.load(Relaxed) => {
@@ -2164,7 +2167,8 @@ fn probe(w: &Arc<World>, all: Vec<Vec<Acct>>) -> Vec<Vec<Acct>> {
                             continue;
                         }
                         let (key, tag, alive) = new_msg(&w, a, &c.user, None);
-                        let result = definite(|| a.client.as_mut().unwrap().send(&c.user, Content::Text(tag.clone())));
+                        let result =
+                            definite(|| a.client.as_mut().unwrap().send(&c.user, yo_tests::tagged(tag.clone())));
                         // The probe must arrive whatever the first try said: it waits in the outbox otherwise.
                         if let Some(m) = w.ledger().msgs.get_mut(&key) {
                             m.must = alive;
@@ -2214,7 +2218,7 @@ fn check_ledger(w: &World, all: &[Vec<Acct>]) -> serde_json::Value {
             continue;
         };
         let proc_ = Proc::new(&w.net, &w.stats, &a.ip, 0, rng.next_u64(), Vec::new());
-        match Client::restore(proc_, &blob, &STATE_KEY) {
+        match yo_tests::restore_bytes(proc_, &blob) {
             Ok(c) => {
                 opened += 1;
                 if c.deferred() > 0 {

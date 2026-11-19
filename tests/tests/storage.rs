@@ -14,7 +14,7 @@ fn texts(events: &[Event]) -> Vec<String> {
     events
         .iter()
         .filter_map(|e| match e {
-            Event::Message { content: Content::Text(t), .. } => Some(t.clone()),
+            Event::Message { content, .. } => yo_tests::tag_of(content),
             _ => None,
         })
         .collect()
@@ -33,8 +33,8 @@ fn a_new_phone_gets_friends_blocks_and_icon_back_before_the_first_message() {
     let mut me = by_name(&hub, &format!("Me{n}"), None);
     let mut pest = by_name(&hub, &format!("Pest{n}"), None);
     let mut pal = by_name(&hub, &format!("Pal{n}"), None);
-    pest.send(me.user_id(), Content::Text("hi".into())).unwrap();
-    pal.send(me.user_id(), Content::Text("hey".into())).unwrap();
+    pest.send(me.user_id(), yo_tests::tagged("hi".into())).unwrap();
+    pal.send(me.user_id(), yo_tests::tagged("hey".into())).unwrap();
     me.sync(0).unwrap();
     me.set_friend(pal.user_id(), Some("Best Pal".into()), Some(3)).unwrap();
     me.set_friend(pest.user_id(), None, Some(1)).unwrap();
@@ -48,8 +48,8 @@ fn a_new_phone_gets_friends_blocks_and_icon_back_before_the_first_message() {
     assert!(!sealed.data.as_slice().windows(8).any(|w| w == &pal.user_id().as_bytes()[..8]));
 
     // The pest writes while the phone is lost; a new phone restores the account from its key.
-    pest.send(me.user_id(), Content::Text("let me in".into())).unwrap();
-    pal.send(me.user_id(), Content::Text("still here".into())).unwrap();
+    pest.send(me.user_id(), yo_tests::tagged("let me in".into())).unwrap();
+    pal.send(me.user_id(), yo_tests::tagged("still here".into())).unwrap();
     let mut new = by_name(&hub, &format!("Me{n}"), Some(me.account_secret()));
     assert_eq!(new.user_id(), me.user_id());
     let mut friends = new.friends();
@@ -60,8 +60,8 @@ fn a_new_phone_gets_friends_blocks_and_icon_back_before_the_first_message() {
     assert_eq!(new.app_icon().as_deref(), Some("Negative"));
     assert!(new.contacts().iter().any(|c| c.user == pest.user_id() && c.blocked));
     // From the first message on: the pest's (in a chat the new phone joins now) is not shown, the pal's is.
-    pest.send(me.user_id(), Content::Text("again".into())).unwrap();
-    pal.send(me.user_id(), Content::Text("hello new phone".into())).unwrap();
+    pest.send(me.user_id(), yo_tests::tagged("again".into())).unwrap();
+    pal.send(me.user_id(), yo_tests::tagged("hello new phone".into())).unwrap();
     let mut seen = Vec::new();
     for _ in 0..3 {
         seen.extend(texts(&new.sync(0).unwrap()));
@@ -158,10 +158,10 @@ fn a_replayed_storage_is_not_taken() {
     assert!(a.set_friend(&"11".repeat(16), Some("x".repeat(65)), None).is_err(), "a name too long");
 }
 
-/// A blob that did not open (or was replayed) was left at the hub when this device had nothing to change: "saved",
-/// though no device could read what the hub held. Now the device's own takes its place with the next write.
+/// A blob that does not open here may be sealed under a key this device did not get (an old install's, spec 6.9):
+/// left standing at the hub, never written over, and never taken as saved.
 #[test]
-fn a_storage_that_does_not_open_is_written_over() {
+fn a_storage_that_does_not_open_is_left_standing() {
     let hub = TestHub::start();
     let name = format!("Junk{}", random_u64() % 100_000);
     let mut a = by_name(&hub, &name, None);
@@ -169,13 +169,71 @@ fn a_storage_that_does_not_open_is_written_over() {
     a.maintenance().unwrap();
     let body = yo_wire::encode(&api::Storage { version: 1, data: vec![7; 1024].into() });
     assert_eq!(a.signed_for_tests("PUT", api::STORAGE, &body).unwrap().status, status::NO_CONTENT);
+    // As the answer to a write (a 409 to the phone that wrote before it): left standing too.
+    a.set_app_icon(Some("Other".into())).unwrap();
+    a.maintenance().unwrap();
+    a.maintenance().unwrap();
+    assert!(stored(&mut a).data.as_slice() == [7; 1024].as_slice(), "left standing after a 409");
+    assert!(a.storage_saved_at().is_none(), "the change is not at the hub: never shown as saved");
     let mut new = by_name(&hub, &name, Some(a.account_secret()));
     assert!(new.drop_reasons().iter().any(|r| r.contains("storage")));
+    new.set_app_icon(Some("Original".into())).unwrap();
     new.maintenance().unwrap();
-    assert!(new.storage_saved_at().is_some());
-    assert!(stored(&mut new).version >= 3, "written over");
-    let third = by_name(&hub, &name, Some(a.account_secret()));
-    assert!(third.drop_reasons().is_empty(), "{:?}", third.drop_reasons());
+    assert!(new.storage_saved_at().is_none());
+    assert!(stored(&mut new).data.as_slice() == [7; 1024].as_slice(), "left standing");
+}
+
+/// The hub's database restored from a backup: to an older version, and to before this device's first write (none
+/// there). Account sync goes on from the hub's version each time, and a new phone gets all of it.
+#[test]
+fn a_hub_restored_from_a_backup_takes_the_storage_again() {
+    let dir = std::env::temp_dir().join(format!("yo-storage-restore-{}", random_u64()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let mut config = yo_hub::config::Config::for_tests();
+    config.db_path = dir.join("hub.sqlite").to_string_lossy().into_owned();
+    let hub = TestHub::start_with(config.clone(), "127.0.0.1:0");
+    let db = rusqlite::Connection::open(&config.db_path).unwrap();
+    db.busy_timeout(std::time::Duration::from_secs(10)).unwrap();
+    let name = format!("Restored{}", random_u64() % 100_000);
+    let mut a = by_name(&hub, &name, None);
+    let user = yo_tests::user_id(a.user_id()).to_vec();
+    let friend = |n: u8| format!("{n:02x}").repeat(16);
+    a.set_app_icon(Some("Negative".into())).unwrap();
+    a.maintenance().unwrap();
+    let older = stored(&mut a);
+    a.set_friend(&friend(1), Some("Leo".into()), None).unwrap();
+    a.maintenance().unwrap();
+    a.set_app_icon(Some("Other".into())).unwrap();
+    a.maintenance().unwrap();
+    assert_eq!(stored(&mut a).version, 3);
+
+    let restore = |version: Option<u64>| match version {
+        Some(version) => db.execute(
+            "UPDATE storage SET version = ?1, data = ?2 WHERE user_id = ?3",
+            rusqlite::params![version as i64, older.data.as_slice(), &user],
+        ),
+        None => db.execute("DELETE FROM storage WHERE user_id = ?1", [&user]),
+    };
+    restore(Some(1)).unwrap();
+    a.set_friend(&friend(2), Some("Mo".into()), None).unwrap();
+    a.maintenance().unwrap();
+    assert_eq!(stored(&mut a).version, 2, "written over the hub's version");
+    assert!(a.storage_saved_at().is_some());
+
+    restore(None).unwrap();
+    a.set_friend(&friend(3), Some("Kim".into()), None).unwrap();
+    a.maintenance().unwrap();
+    assert_eq!(stored(&mut a).version, 1, "none at the hub: written anew");
+    assert!(a.storage_saved_at().is_some());
+
+    let new = by_name(&hub, &name, Some(a.account_secret()));
+    assert_eq!(new.app_icon().as_deref(), Some("Other"));
+    let names: Vec<_> = new.friends().into_iter().filter_map(|f| f.name).collect();
+    for name in ["Leo", "Mo", "Kim"] {
+        assert!(names.iter().any(|n| n == name), "{name} in {names:?}");
+    }
+    drop(hub);
+    let _ = std::fs::remove_dir_all(&dir);
 }
 
 #[test]

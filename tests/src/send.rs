@@ -9,22 +9,16 @@
 //!
 //! `--group`: `--to` names a group this account is in (after a sync); the Yos and the photo or video go there.
 //!
-//! The account is registered as NAME the first time and kept in FILE (sealed under a fixed key: a test account).
+//! The account is registered as NAME the first time and kept in FILE (a state database under a fixed key: a test
+//! account).
 //! `--sync` first receives (Yos sent to it). Each Yo is a line: when it was sent (wall clock,
 //! ms, to compare with the app's YO_PERF marks) and how long `send_yo` took.
 
 use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
-use yo_core::{Client, Push, Store};
+use yo_core::statedb::{DbStore, Loaded, StateDb};
+use yo_core::{Client, Push};
 use yo_tests::Http;
-
-struct File(String);
-
-impl Store for File {
-    fn save(&self, blob: Vec<u8>) -> Result<(), String> {
-        std::fs::write(&self.0, blob).map_err(|e| e.to_string())
-    }
-}
 
 const KEY: [u8; 32] = [9; 32];
 
@@ -71,9 +65,12 @@ fn main() {
     }
     let dev = url.contains("dev.justyo.app");
     let http = Http::new(url);
-    let mut client = match std::fs::read(&state) {
-        Ok(blob) => Client::restore(http, &blob, &KEY).expect("restore"),
-        Err(_) => Client::register_username(http, &name, None, None, Push::none()).expect("register"),
+    let db = Arc::new(StateDb::open_fresh(&state, KEY, Arc::new(|_| {})).expect("state file"));
+    let (mut client, word) = match db.load(None, &KEY).expect("state file") {
+        Loaded::Newer { word, state, records } => {
+            (Client::from_snapshot(http, *state, records, false).expect("restore").0, Some(word))
+        }
+        _ => (Client::register_username(http, &name, None, None, Push::none()).expect("register"), None),
     };
     // The dev hub's pins, as the app has them (app/ios/YoApp/Sources/YoApp/Hub.swift): hub keys, trust roots, zk params.
     if dev {
@@ -88,7 +85,7 @@ fn main() {
     if !trust_roots.is_empty() {
         client.set_trust_roots(trust_roots);
     }
-    client.persist_to(Arc::new(File(state)), KEY).expect("state file");
+    client.persist_to(Arc::new(DbStore::new(db, word, None)), KEY).expect("state file");
     if sync {
         let events = client.sync(0).expect("sync");
         println!("synced: {} events", events.len());

@@ -304,6 +304,62 @@ pub fn media_kind(label: &str) -> list::Kind {
         .unwrap_or(list::Kind::Yo)
 }
 
+pub const ACTIVITY_SHOWN_SECS: u32 = 3;
+pub const ACTIVITY_STALE_SECS: u32 = 30;
+pub const WIDGET_SENT_SECS: u32 = 3;
+pub const SHARE_PHOTOS: u32 = 10;
+pub const SHARE_VIDEOS: u32 = 1;
+
+pub fn share_can_send(sending: bool, too_long: bool, has_media: bool, has_feedback: bool) -> bool {
+    !sending && !too_long && has_media && !has_feedback
+}
+
+pub fn widget_eligible(blocked: bool, request: bool, gone: bool) -> bool {
+    !(blocked || request || gone)
+}
+
+/// Android stores a list of IDs, allows duplicate choices, and falls back only for a signed-in account.
+pub fn widget_id_selection(
+    friends: &[String],
+    picks: &[String],
+    signed_in: bool,
+    slots: usize,
+    fallback: usize,
+) -> Vec<u32> {
+    if !signed_in {
+        return Vec::new();
+    }
+    let choices: Vec<_> = picks
+        .iter()
+        .filter_map(|id| friends.iter().position(|friend| friend == id))
+        .take(slots)
+        .map(|index| index as u32)
+        .collect();
+    if choices.is_empty() {
+        (0..friends.len().min(slots).min(fallback) as u32).collect()
+    } else {
+        choices
+    }
+}
+
+pub fn android_notification_line(name: Option<&str>, group: Option<&str>, kind: list::Kind, lang: Language) -> String {
+    let Some(name) = name else {
+        return Text::NotificationFallback.get(lang).into();
+    };
+    let from =
+        group.map_or_else(|| name.into(), |group| format!("{name} in #{}", group.strip_prefix('#').unwrap_or(group)));
+    notification_line(&from, kind, false, lang)
+}
+
+pub fn request_row(name: &str, group: bool, lang: Language) -> String {
+    if group {
+        let prefix = lang.choose("Yo Request", "Yo-Anfrage");
+        format!("{prefix}: {name}")
+    } else {
+        notification_line(name, list::Kind::Yo, true, lang)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::{list::Kind::*, ActivityPlace::*, Language::*, Outcome::*, *};
@@ -464,61 +520,5 @@ mod tests {
         }
         assert_eq!((SHARE_PHOTOS, SHARE_VIDEOS), (10, 1));
         assert_eq!((ACTIVITY_SHOWN_SECS, ACTIVITY_STALE_SECS, WIDGET_SENT_SECS), (3, 30, 3));
-    }
-}
-
-pub const ACTIVITY_SHOWN_SECS: u32 = 3;
-pub const ACTIVITY_STALE_SECS: u32 = 30;
-pub const WIDGET_SENT_SECS: u32 = 3;
-pub const SHARE_PHOTOS: u32 = 10;
-pub const SHARE_VIDEOS: u32 = 1;
-
-pub fn share_can_send(sending: bool, too_long: bool, has_media: bool, has_feedback: bool) -> bool {
-    !sending && !too_long && has_media && !has_feedback
-}
-
-pub fn widget_eligible(blocked: bool, request: bool, gone: bool) -> bool {
-    !(blocked || request || gone)
-}
-
-/// Android stores a list of IDs, allows duplicate choices, and falls back only for a signed-in account.
-pub fn widget_id_selection(
-    friends: &[String],
-    picks: &[String],
-    signed_in: bool,
-    slots: usize,
-    fallback: usize,
-) -> Vec<u32> {
-    if !signed_in {
-        return Vec::new();
-    }
-    let choices: Vec<_> = picks
-        .iter()
-        .filter_map(|id| friends.iter().position(|friend| friend == id))
-        .take(slots)
-        .map(|index| index as u32)
-        .collect();
-    if choices.is_empty() {
-        (0..friends.len().min(slots).min(fallback) as u32).collect()
-    } else {
-        choices
-    }
-}
-
-pub fn android_notification_line(name: Option<&str>, group: Option<&str>, kind: list::Kind, lang: Language) -> String {
-    let Some(name) = name else {
-        return Text::NotificationFallback.get(lang).into();
-    };
-    let from =
-        group.map_or_else(|| name.into(), |group| format!("{name} in #{}", group.strip_prefix('#').unwrap_or(group)));
-    notification_line(&from, kind, false, lang)
-}
-
-pub fn request_row(name: &str, group: bool, lang: Language) -> String {
-    if group {
-        let prefix = lang.choose("Yo Request", "Yo-Anfrage");
-        format!("{prefix}: {name}")
-    } else {
-        notification_line(name, list::Kind::Yo, true, lang)
     }
 }

@@ -27,11 +27,7 @@ final class SharedStateFile: StateLock, @unchecked Sendable {
   /// The group's folder; nil without an App Group (Yo Dev from dev/push.sh).
   static var container: URL? { ShareBridge.container }
 
-  /// The state file of before the database (its 36-character word, then the sealed state): moved in at the first
-  /// opening of the database (`database`), by whichever process opens it first.
-  static var stateURL: URL? { container?.appending(path: "yo-state") }
-  /// The database's folder: the database with its -wal and -shm.
-  static var folder: URL? { container?.appending(path: "yo-state-db", directoryHint: .isDirectory) }
+  static var folder: URL? { container?.appending(path: "yo-state-v3", directoryHint: .isDirectory) }
   static let generationKey = "yo-state.lock-generation"
   static var generation: String {
     let defaults = UserDefaults(suiteName: ShareBridge.group)
@@ -71,10 +67,9 @@ final class SharedStateFile: StateLock, @unchecked Sendable {
   /// opening); opened again when it went (signed out, a local reset). Throws while it cannot be opened (the phone
   /// not unlocked since its start) or without a group.
   static func database() throws -> StateDb {
-    guard let folder, let stateURL else { throw YoError.State }
+    guard let folder else { throw YoError.State }
     guard let key = try StateKey.shared() else { throw YoError.State }
-    return try StateStorage.open(folder, gate: opening, cached: &opened, before: stateURL,
-      wordLength: 36, key: key, lock: SharedStateFile())
+    return try StateStorage.open(folder, gate: opening, cached: &opened, key: key)
   }
 
   // MARK: The turn
@@ -137,98 +132,30 @@ final class SharedStateFile: StateLock, @unchecked Sendable {
     Diagnostics.attempt({ try url.setResourceValues(values) })
   }
 
-  // MARK: Moving in (the app, once)
-
-  /// Whether the app keeps its state in the group: decided once per launch. Yes once the state is there; else the
-  /// key and the state move in now (the key first: the state is never where its key is not), and a new account
-  /// starts there. No (and the app's own database and keychain item as before) without a group or a keychain that
-  /// takes the key.
-  static let app: Bool = {
-    guard available, let folder, let stateURL else { return false }
-    let shared: StateDb
-    do {
-      if try StateKey.shared() == nil && !StateStorage.exists(folder, before: stateURL) {
-        guard StateKey.moveIn() else { return false }
-      }
-      shared = try database()
-    } catch {
-      // Not readable now (before the first unlock): the group's, unless the app's own is still there (not moved yet).
-      return !StateFile.exists
-    }
-    do {
-      if try shared.hasState() {
-        if shared.encrypted() {
-          StateFile.discardMigrated()
-          StateKey.finishMoveIn()
-        }
-        return true
-      }
-      // The app's own state (its database, or its file of before) into the group's in one write, then gone there:
-      // never no state, never half of one.
-      if StateFile.exists {
-        let own = try StateFile.database()
-        guard shared.encrypted(), try shared.adoptLocked(other: own, lock: SharedStateFile()) else { return false }
-        StateFile.discardMigrated()
-      }
-      StateKey.finishMoveIn()  // only now: until here the state that stayed opens with it
-      return true
-    } catch {
-      Diagnostics.recordUnreported(error)
-      return !StateFile.exists
-    }
-  }()
+  static var app: Bool { available }
 }
 
 /// Opening a state database (the group's or the app's own): its folder made in the state's protection class and
 /// kept out of backups, the file of before moved in.
 final class StateFailureCounts: StateDiagnostics, Sendable {
-  func failure(step: UInt32, before: UInt32, after: UInt32, kind: String) {
-    CountedErrors.record(domain: "StateMigration", place: "StateDb", code: "StateMigration V\(step) \(kind)",
-      details: "before=\(before) after=\(after)")
+  func failure(kind: String) {
+    CountedErrors.record(domain: "StateMigration", place: "StateDb", code: "StateMigration V1 \(kind)")
   }
 }
 
 enum StateStorage {
-  static func exists(_ folder: URL, before file: URL) -> Bool {
-    [file, folder.appending(path: "state.sqlite"), folder.appending(path: "tables.sqlite")].contains {
-      FileManager.default.fileExists(atPath: $0.path)
-    }
+  static func exists(_ folder: URL) -> Bool {
+    FileManager.default.fileExists(atPath: folder.appending(path: "tables.sqlite").path)
   }
 
-  static func open(_ folder: URL, gate: NSLock, cached: inout StateDb?, before file: URL,
-    wordLength: UInt32, key: Data, lock: StateLock? = nil) throws -> StateDb {
+  static func open(_ folder: URL, gate: NSLock, cached: inout StateDb?, key: Data) throws -> StateDb {
     try gate.withLock {
       let path = folder.appending(path: "tables.sqlite")
-      let legacy = folder.appending(path: "state.sqlite")
-      let files = FileManager.default
-      if let cached, files.fileExists(atPath: path.path) || files.fileExists(atPath: legacy.path) { return cached }
-      let diagnostics = StateFailureCounts()
-      if !files.fileExists(atPath: folder.path) {
-        do {
-          try files.createDirectory(at: folder, withIntermediateDirectories: true,
-            attributes: [.protectionKey: FileProtectionType.completeUntilFirstUserAuthentication])
-        } catch {
-          diagnostics.failure(step: 0, before: 0, after: 0, kind: "Io")
-          throw error
-        }
-        SharedStateFile.excludeFromBackup(folder)
-      }
-      let db = try Perf.timed("state.db.open") {
-        try StateDb.openMigrating(path: path.path, stateKey: key, legacyDb: legacy.path,
-          legacyFile: file.path, wordLength: wordLength, lock: lock, diagnostics: diagnostics)
-      }
-      if db.encrypted() {
-        for old in [legacy, URL(fileURLWithPath: legacy.path + "-wal"),
-          URL(fileURLWithPath: legacy.path + "-shm"), file] {
-          do {
-            try files.removeItem(at: old)
-          } catch let error as CocoaError where error.code == .fileNoSuchFile {
-            continue
-          } catch {
-            diagnostics.failure(step: 1, before: 1, after: 1, kind: "Io")
-          }
-        }
-      }
+      if let cached, exists(folder) { return cached }
+      try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true,
+        attributes: [.protectionKey: FileProtectionType.completeUntilFirstUserAuthentication])
+      SharedStateFile.excludeFromBackup(folder)
+      let db = try StateDb.openFresh(path: path.path, stateKey: key, diagnostics: StateFailureCounts())
       cached = db
       return db
     }
@@ -290,7 +217,8 @@ enum Guest {
   /// Opened without the turn (a read of the last committed state); `seconds`: how long each of its steps that may
   /// write waits for the turn.
   static func opened(within seconds: Double, timeout: TimeInterval = 70) -> Result<YoClient, Failure> {
-    guard SharedStateFile.available else { return .failure(.noGroup) }
+    guard let folder = SharedStateFile.folder else { return .failure(.noGroup) }
+    guard StateStorage.exists(folder) else { return .failure(.noAccount) }
     let key: Data
     do {
       guard let found = try StateKey.shared() else { return .failure(.noAccount) }

@@ -7,6 +7,7 @@ license.workspace = true
 description = "The contract between the apps and the hub (spec/v1.md): formats, limits, error codes, the device certificate and the signed request. Verifies, never signs: no secret key, no I/O."
 
 [dependencies]
+serde = { workspace = true }
 tls_codec = { workspace = true }
 sha2 = { workspace = true }
 libsignal-core = { workspace = true }

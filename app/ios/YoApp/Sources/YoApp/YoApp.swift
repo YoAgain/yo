@@ -22,7 +22,7 @@ struct YoApp: App {
   @State private var friends: Friends
   @State private var accounts: AccountStore
   /// Photos and videos on their way out (Media.swift).
-  @State private var outbox = MediaOutbox()
+  @State private var outbox: MediaOutbox
   @Environment(\.scenePhase) private var phase
   private let notifications: NotificationDelegate
 
@@ -31,7 +31,6 @@ struct YoApp: App {
     PerfProbe.watchLaunchLag()
     PerfProbe.profileLaunch()
     Launch.start()
-    Perf.timed("launch.reset") { OneTimeReset.runIfDue() }  // before anything opens the state
     // For the screen only: once Yo is in front, after its first frame (never in a launch in the background, for the
     // Action button's Yo or a silent push). The list prepares the arrival haptic itself as it shows.
     Launch.whenActive { MediaSignWarmup.start() }
@@ -61,7 +60,17 @@ struct YoApp: App {
     let accounts = Perf.timed("launch.accounts") { AccountStore() }
     _inbox = State(initialValue: inbox)
     _friends = State(initialValue: friends)
+    let outbox = MediaOutbox()
     _accounts = State(initialValue: accounts)
+    _outbox = State(initialValue: outbox)
+    // Another user in than the one shown (a sign-in again with a new user id): the list and what waited go.
+    accounts.leaving = {
+      friends.reset()
+      inbox.forgetMedia()
+      outbox.clear()
+      ShareInbox.clear()
+      friends.add("YoGPT")
+    }
     notifications = NotificationDelegate(inbox: inbox, friends: friends, accounts: accounts)
     // Friends known by user id are kept for the account too (its storage, spec 6.9).
     friends.stored = { [weak accounts] changed, removed in accounts?.store(changed, removed: removed) }
@@ -90,6 +99,9 @@ struct YoApp: App {
           UpdateScreen().transition(.opacity)
         } else if accounts.account == nil {
           Onboarding().transition(.opacity)
+        } else if accounts.updating {
+          // An old install signing in again (KeychainV1), once, before the list.
+          ProgressView("Yo is updating…").transition(.opacity)
         } else {
           FriendList().transition(.opacity)
         }
@@ -150,6 +162,12 @@ struct YoApp: App {
       }
       .animation(.smooth(duration: 0.5), value: accounts.account == nil)
       .animation(.smooth(duration: 0.5), value: AppUpdate.shared.needed)
+      // An old install's update that did not finish (AccountStore.migrate): nothing is lost, it tries again.
+      .alert("Update Not Finished", isPresented: Binding(get: { accounts.updateStalled && !accounts.broken }, set: { _ in })) {
+        Button("Try Again") { accounts.retryUpdate() }
+      } message: {
+        Text("Yo couldn’t finish updating your account on this iPhone. Nothing is lost. Check your connection and try again.")
+      }
       // The saved state is gone or does not open: the account on this phone is signed in again (AccountStore.recover).
       .alert(accounts.hubDown ? "Server Not Reachable" : "Can’t Open Your Account", isPresented: Binding(get: { accounts.broken }, set: { _ in })) {
         Button(accounts.hubDown ? "Try Again" : "Sign In Again") { Task { await accounts.recover() } }
@@ -240,6 +258,7 @@ struct YoApp: App {
         .onChange(of: phase, initial: true) { _, phase in
           guard phase == .active else { return }
           Perf.mark("app.active")
+          accounts.openNow()  // an old install's update not done yet goes on (also after the phone was unlocked)
           Task { await inbox.collectDelivered() }
           // Not for the list (support's unread count; receipts, retries and prekeys due, spec 4.1, 4.5): a few
           // seconds later; on the first opening the core has opened by then (above).

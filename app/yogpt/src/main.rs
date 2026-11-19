@@ -60,7 +60,8 @@ use std::sync::mpsc::{sync_channel, RecvTimeoutError, SyncSender, TrySendError};
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::{Duration, Instant};
 use yo_core::media::{self, Media};
-use yo_core::{retryable, Client, Content, Error, Event, Push, Response, Store, Transport};
+use yo_core::statedb::{DbStore, Loaded, StateDb};
+use yo_core::{retryable, Client, Content, Error, Event, Push, Response, Transport};
 
 /// How many Yos an answer has, in percent: one mostly, more ever rarer (a half-normal tail), five at most.
 const YOS: [u32; 5] = [70, 17, 8, 4, 1];
@@ -134,15 +135,6 @@ impl Transport for Http {
             return Err("answer too large".into());
         }
         Ok(Response { status, body })
-    }
-}
-
-/// The sealed state, replaced whole after every operation.
-struct File(PathBuf);
-
-impl Store for File {
-    fn save(&self, blob: Vec<u8>) -> Result<(), String> {
-        write_private(&self.0, &blob).map_err(|error| format!("saving {}: {error}", self.0.display()))
     }
 }
 
@@ -720,22 +712,39 @@ fn open(account: &Account) -> Option<(Client, std::fs::File)> {
         Ok::<_, std::io::Error>((secret(&account.state.join("account"))?, secret(&account.state.join("key"))?, lock))
     })();
     let (secret, key, lock) = prepared.map_err(|e| log(format!("stopped: {}: {e}", account.state.display()))).ok()?;
-    let path = account.state.join("state");
+    let path = account.state.join("state.sqlite");
     let client = || reqwest::blocking::Client::builder().timeout(Duration::from_secs(60)).build().ok();
     let transport = Arc::new(Http { client: client()?, anonymous: client()?, base: account.hub.clone() });
     let mut backoff = Backoff::default();
     loop {
-        let opened = match std::fs::read(&path) {
+        let opened = StateDb::open_fresh(&path, key, Arc::new(|_| {})).and_then(|db| {
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).map_err(|_| Error::State)?;
+            Ok(db)
+        });
+        let db = match opened {
+            Ok(db) => Arc::new(db),
+            Err(error) => {
+                log(format!("stopped: {}: {error}", path.display()));
+                return None;
+            }
+        };
+        if let Err(error) = take_old_state(&db, &account.state.join("state"), key) {
+            log(format!("stopped: the state file of before: {error}"));
+            return None;
+        }
+        let opened = match db.load(None, &key) {
             // A registration under way when it stopped is finished first (sent again only if it did not arrive).
-            Ok(blob) => Client::restore(transport.clone(), &blob, &key).and_then(|mut client| {
-                client.persist_to(Arc::new(File(path.clone())), key)?;
-                client.finish_registration()?;
-                Ok(client)
-            }),
+            Ok(Loaded::Newer { word, state, records }) => {
+                Client::from_snapshot(transport.clone(), *state, records, false).and_then(|(mut client, _)| {
+                    client.persist_to(Arc::new(DbStore::new(db.clone(), Some(word), None)), key)?;
+                    client.finish_registration()?;
+                    Ok(client)
+                })
+            }
             // Saved before it is sent (spec 6.4): a lost answer or a stop halfway loses neither key nor prekeys.
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Client::register_username_saved(
+            Ok(_) => Client::register_username_saved(
                 transport.clone(),
-                Arc::new(File(path.clone())),
+                Arc::new(DbStore::new(db.clone(), None, None)),
                 key,
                 username,
                 Some(secret),
@@ -744,10 +753,7 @@ fn open(account: &Account) -> Option<(Client, std::fs::File)> {
                 Push::none(),
             )
             .inspect(|c| log(format!("registered {} on {}", c.username().unwrap_or("?"), account.hub))),
-            Err(error) => {
-                log(format!("stopped: {}: {error}", path.display()));
-                return None;
-            }
+            Err(error) => Err(error),
         };
         match opened {
             Ok(mut client) => {
@@ -764,10 +770,6 @@ fn open(account: &Account) -> Option<(Client, std::fs::File)> {
                 // opens them only to send them back as they came (`echo_worker`), never keeping or logging them.
                 if !account.echo {
                     client.forget_media_keys();
-                }
-                if let Err(error) = client.persist_to(Arc::new(File(path)), key) {
-                    log(format!("stopped: {username}: {error}"));
-                    return None;
                 }
                 return Some((client, lock));
             }
@@ -788,6 +790,20 @@ fn open(account: &Account) -> Option<(Client, std::fs::File)> {
             }
         }
     }
+}
+
+/// The state file of the build before the database, taken in offline as it is (same device, sessions, outbox) and
+/// kept beside as `state.v2`, never read again (rollback: README).
+fn take_old_state(db: &Arc<StateDb>, old: &Path, key: [u8; 32]) -> Result<(), String> {
+    if !old.exists() {
+        return Ok(());
+    }
+    if db.word().map_err(|e| e.to_string())?.is_none() {
+        let blob = std::fs::read(old).map_err(|e| e.to_string())?;
+        let (state, records) = yo_core::legacy::read_state(&blob, &key).map_err(|e| e.to_string())?;
+        yo_core::Store::save_state(&DbStore::new(db.clone(), None, None), &state, records)?;
+    }
+    std::fs::rename(old, old.with_extension("v2")).map_err(|e| e.to_string())
 }
 
 const GONE: &str = "the hub no longer knows this device (replaced by another, the name released, or the hub reset)";
@@ -1228,7 +1244,7 @@ fn receive(bot: &Bot, events: &SyncSender<Event>) {
                 } else {
                     received.into_iter().for_each(|event| bot.queue(events, event));
                 }
-                bot.client().acknowledge_events();
+                bot.client().acknowledge_only(|_| true);
                 if changed && !bot.echo {
                     leave_empty(bot, events);
                 }

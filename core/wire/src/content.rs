@@ -1,12 +1,10 @@
 //! The plaintext of an application message (spec 5): a typed content, never free-form bytes.
 
 use crate::Error;
+use serde::{Deserialize, Serialize};
 use tls_codec::{TlsDeserializeBytes, TlsSerialize, TlsSize, VLBytes};
 
-/// What a Yo carries (spec 5, `With`): kinds, sorted, each once.
-pub const WITH_TEXT: u16 = 1;
-pub const WITH_LINK: u16 = 2;
-pub const WITH_LOCATION: u16 = 3;
+/// What a Yo carries (spec 5, `With`): kinds, sorted, each once. 1-3 (text, link, location) are reserved.
 pub const WITH_PHOTO: u16 = 4;
 pub const WITH_VIDEO: u16 = 5;
 /// The group a Yo goes to (spec 4.9): its master key and the revision the sender has.
@@ -24,9 +22,6 @@ pub type BlobId = [u8; BLOB_ID_LEN];
 
 pub const TYPE_YO: u16 = 1;
 pub const TYPE_PROFILE: u16 = 2;
-pub const TYPE_TEXT: u16 = 3;
-pub const TYPE_LINK: u16 = 4;
-pub const TYPE_LOCATION: u16 = 5;
 /// Silent: a delivery receipt, the answer that moves the sender's ratchet on (spec 4.5).
 pub const TYPE_RECEIPT: u16 = 6;
 /// Silent: a group was made or changed at the hub (spec 4.9): its master key and the revision now.
@@ -46,13 +41,11 @@ pub type GroupKey = [u8; GROUP_KEY_LEN];
 pub const MAX_GROUP: usize = 20;
 
 pub const MAX_NAME_LEN: usize = 32;
-pub const MAX_TEXT_LEN: usize = 4096;
-pub const MAX_URL_LEN: usize = 2048;
 const CONTENT_VERSION: u16 = 1;
 
 /// A photo or video a Yo carries: a blob at the hub (spec 6.8), encrypted under `key` (ChaCha20-Poly1305, nonce
 /// zero: the key is used once); `sha256` and `size` are the ciphertext's. Only the receiver's devices learn the key.
-#[derive(Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Media {
     pub id: BlobId,
     pub key: [u8; 32],
@@ -75,7 +68,7 @@ impl std::fmt::Debug for Media {
 
 /// What a group Yo or a group's change names (spec 4.9): the group's master key, and its revision as the sender has
 /// it. A receiver at an older revision fetches the group from the hub.
-#[derive(Clone, Copy, PartialEq, Eq, TlsSerialize, TlsDeserializeBytes, TlsSize)]
+#[derive(Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TlsSerialize, TlsDeserializeBytes, TlsSize)]
 pub struct GroupTag {
     pub key: GroupKey,
     pub revision: u32,
@@ -88,7 +81,7 @@ impl std::fmt::Debug for GroupTag {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Content {
     /// A Yo with nothing.
     Yo,
@@ -101,12 +94,6 @@ pub enum Content {
     },
     Profile {
         name: String,
-    },
-    Text(String),
-    Link(String),
-    Location {
-        lat_e7: i32,
-        lon_e7: i32,
     },
     /// Something from the receiver arrived (spec 4.5). Never shown.
     Receipt,
@@ -222,28 +209,6 @@ struct Text {
     text: VLBytes,
 }
 
-#[derive(TlsSerialize, TlsDeserializeBytes, TlsSize)]
-struct Location {
-    lat_e7: u32,
-    lon_e7: u32,
-}
-
-/// A body and what follows it: a `With` list, if anything (spec 5); none if the body does not parse.
-fn split<T: tls_codec::DeserializeBytes>(body: &[u8]) -> Option<(&[u8], Option<&[u8]>)> {
-    let (_, rest) = T::tls_deserialize_bytes(body).ok()?;
-    let own = &body[..body.len() - rest.len()];
-    Some((own, (!rest.is_empty()).then_some(rest)))
-}
-
-/// The body without what follows it, which must be a `With` list.
-fn own_part<T: tls_codec::DeserializeBytes>(body: &[u8]) -> Result<&[u8], Error> {
-    let (own, rest) = split::<T>(body).ok_or(Error::Format)?;
-    if let Some(rest) = rest {
-        crate::decode::<WithList>(rest)?;
-    }
-    Ok(own)
-}
-
 fn text(value: &str, max: usize) -> Result<Vec<u8>, Error> {
     if value.is_empty() || value.len() > max || value.chars().any(char::is_control) {
         return Err(Error::Format);
@@ -266,15 +231,10 @@ impl Message {
     }
 
     /// As `encode`, a content message carrying the sender's profile key too (`WITH_PROFILE_KEY`): a Yo in its `With`
-    /// list, a text, link or location in a `With` list after its body (spec 5). Others (receipts, names, groups' and
-    /// keys' messages) carry none.
+    /// list (spec 5). Receipts, names, and group and key messages carry none.
     pub fn encode_with_key(&self, profile_key: Option<KeyedBy>) -> Result<Vec<u8>, Error> {
         let key =
             profile_key.map(|(key, generation)| (WITH_PROFILE_KEY, [&key[..], &generation.to_be_bytes()].concat()));
-        let trailer = |body: Vec<u8>| match &key {
-            Some(key) => [body, yo_body(vec![key.clone()])].concat(),
-            None => body,
-        };
         let group = self.group.map(|tag| (WITH_GROUP, crate::encode(&tag)));
         if group.is_some() && !matches!(self.content, Content::Yo | Content::Photo(_) | Content::Video { .. }) {
             return Err(Error::Format);
@@ -290,12 +250,6 @@ impl Message {
                 (TYPE_YO, yo_body([Some(video), group, key].into_iter().flatten().collect()))
             }
             Content::Profile { name } => (TYPE_PROFILE, text(name, MAX_NAME_LEN)?),
-            Content::Text(value) => (TYPE_TEXT, trailer(text(value, MAX_TEXT_LEN)?)),
-            Content::Link(url) => (TYPE_LINK, trailer(text(url, MAX_URL_LEN)?)),
-            Content::Location { lat_e7, lon_e7 } => {
-                let location = crate::encode(&Location { lat_e7: *lat_e7 as u32, lon_e7: *lon_e7 as u32 });
-                (TYPE_LOCATION, trailer(location))
-            }
             Content::Probe(token) => (TYPE_PROBE, token.to_vec()),
             Content::ProbeReply(token) => (TYPE_PROBE_REPLY, token.to_vec()),
             Content::Receipt => (TYPE_RECEIPT, Vec::new()),
@@ -315,8 +269,6 @@ impl Message {
         }
         let list = match wire.kind {
             TYPE_YO if !body.is_empty() => body,
-            TYPE_TEXT | TYPE_LINK => split::<Text>(body)?.1?,
-            TYPE_LOCATION => split::<Location>(body)?.1?,
             _ => return None,
         };
         let WithList { with } = crate::decode(list).ok()?;
@@ -340,13 +292,6 @@ impl Message {
                 content
             }
             TYPE_PROFILE => Content::Profile { name: read_text(body, MAX_NAME_LEN)? },
-            // What follows the body, if anything, is a `With` list (spec 5): read beside it (`profile_key_of`).
-            TYPE_TEXT => Content::Text(read_text(own_part::<Text>(body)?, MAX_TEXT_LEN)?),
-            TYPE_LINK => Content::Link(read_text(own_part::<Text>(body)?, MAX_URL_LEN)?),
-            TYPE_LOCATION => {
-                let Location { lat_e7, lon_e7 } = crate::decode(own_part::<Location>(body)?)?;
-                Content::Location { lat_e7: lat_e7 as i32, lon_e7: lon_e7 as i32 }
-            }
             TYPE_RECEIPT if !body.is_empty() => return Err(Error::Format),
             TYPE_RECEIPT => Content::Receipt,
             TYPE_PROBE => Content::Probe(body.try_into().map_err(|_| Error::Format)?),
@@ -376,23 +321,6 @@ mod tests {
         assert!(matches!(content, Content::Photo(_)));
     }
     use proptest::prelude::*;
-
-    #[test]
-    fn round_trips() {
-        for content in [
-            Content::Yo,
-            Content::Profile { name: "CHRIS".into() },
-            Content::Text("hi there".into()),
-            Content::Link("https://justyo.co".into()),
-            Content::Location { lat_e7: -338_688_000, lon_e7: 1_512_093_000 },
-            Content::Receipt,
-            Content::Probe([1; 32]),
-            Content::ProbeReply([2; 32]),
-        ] {
-            let message = Message { sent_at_ms: 1_762_000_000_000, group: None, content };
-            assert_eq!(Message::decode(&message.encode().unwrap()).unwrap(), message);
-        }
-    }
 
     fn media(n: u8) -> Media {
         Media { id: [n; 16], key: [n + 1; 32], sha256: [n + 2; 32], size: 300_000, width: 1200, height: 1600 }
@@ -437,18 +365,6 @@ mod tests {
         assert_eq!(Message::decode(&bytes).unwrap(), plain, "a plain Yo with only the key is a plain Yo");
         assert_eq!(Message::profile_key_of(&bytes), Some(([8; 32], 1)));
         assert_eq!(bytes.len(), 53, "spec 5: 13 bytes, 53 with the key");
-        // A text, a link, a location: after the body.
-        for content in [
-            Content::Text("hi".into()),
-            Content::Link("https://justyo.co".into()),
-            Content::Location { lat_e7: 1, lon_e7: -2 },
-        ] {
-            let m = Message { sent_at_ms: 5, group: None, content };
-            let bytes = m.encode_with_key(Some(([9; 32], 2))).unwrap();
-            assert_eq!(Message::decode(&bytes).unwrap(), m);
-            assert_eq!(Message::profile_key_of(&bytes), Some(([9; 32], 2)));
-            assert_eq!(Message::profile_key_of(&m.encode().unwrap()), None);
-        }
         let receipt = Message { sent_at_ms: 5, group: None, content: Content::Receipt };
         assert_eq!(
             receipt.encode_with_key(Some(([8; 32], 1))).unwrap(),

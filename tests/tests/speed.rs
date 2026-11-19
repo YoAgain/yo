@@ -6,9 +6,9 @@
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
-use yo::{HttpResult, HttpTransport, StateStore, YoClient, YoError};
+use yo::{HttpResult, HttpTransport, YoClient, YoError};
 use yo_hub::config::{ApnsConfig, Config};
-use yo_tests::{random_u64, username, Disk, Http, TestHub};
+use yo_tests::{random_u64, username, AppClient, Disk, Http, TestHub};
 use yo_wire::api::PUSH_APNS;
 
 /// The app's HTTP: counts the requests and remembers their routes; with `rtt`, each takes that much longer (half
@@ -48,17 +48,29 @@ impl HttpTransport for App {
     }
 }
 
-#[derive(Default)]
+/// The app's turn on its database, counting the steps that saved.
 struct File {
-    blob: Mutex<Vec<u8>>,
+    disk: Arc<Disk>,
     saves: AtomicUsize,
 }
 
-impl StateStore for File {
-    fn save(&self, blob: Vec<u8>) -> Result<(), YoError> {
-        self.saves.fetch_add(1, Ordering::Relaxed);
-        *self.blob.lock().unwrap() = blob;
+impl File {
+    fn new() -> Arc<File> {
+        Arc::new(File { disk: Disk::new(), saves: AtomicUsize::new(0) })
+    }
+}
+
+impl yo::StateLock for File {
+    fn lock(&self) -> Result<(), YoError> {
         Ok(())
+    }
+
+    fn held(&self) -> bool {
+        true
+    }
+
+    fn unlock(&self, saved: bool) {
+        self.saves.fetch_add(saved as usize, Ordering::Relaxed);
     }
 }
 
@@ -75,7 +87,21 @@ fn hub() -> TestHub {
 
 fn client(app: Arc<App>, file: Arc<File>, name: &str, token: &str) -> Arc<YoClient> {
     let platform = if token.is_empty() { 0 } else { PUSH_APNS };
-    YoClient::register_username(app, file, vec![7; 32], name.into(), None, None, None, platform, token.into()).unwrap()
+    let db = file.disk.db();
+    YoClient::register_username_db(
+        app,
+        db,
+        vec![7; 32],
+        Some(file),
+        name.into(),
+        None,
+        None,
+        None,
+        None,
+        platform,
+        token.into(),
+    )
+    .unwrap()
 }
 
 /// A client on a shared state database (no other process: no turn), as the iPhone's app keeps it.
@@ -87,6 +113,7 @@ fn db_client(app: Arc<App>, disk: &Disk, name: &str, token: &str) -> Arc<YoClien
         vec![7; 32],
         None,
         name.into(),
+        None,
         None,
         None,
         None,
@@ -113,9 +140,9 @@ fn a_yo_is_pushed_within_milliseconds_of_its_send() {
     let hub = hub();
     let n = random_u64() % 1_000_000_000;
     let (name_a, name_b) = (username(n), username(n + 1));
-    let file_a = Arc::new(File::default());
+    let file_a = File::new();
     let a = client(App::new(&hub), file_a.clone(), &name_a, "");
-    let b = client(App::new(&hub), Arc::new(File::default()), &name_b, "a1b2c3");
+    let b = client(App::new(&hub), File::new(), &name_b, "a1b2c3");
     a.send_yo(name_b.clone()).unwrap();
     b.sync(0).unwrap();
     // The list's long wait, as in the app (Inbox.listen): sends need not receive first meanwhile.
@@ -165,8 +192,7 @@ fn the_notification_service_reads_a_push_in_few_requests() {
     let app = App::new(&hub);
     let b = db_client(app.clone(), &disk, &names[0], "a1b2c3");
     // Twenty friends with chats in use, as a phone has after a while.
-    let friends: Vec<_> =
-        names[1..].iter().map(|name| client(App::new(&hub), Arc::new(File::default()), name, "")).collect();
+    let friends: Vec<_> = names[1..].iter().map(|name| client(App::new(&hub), File::new(), name, "")).collect();
     for friend in &friends {
         friend.send_yo(names[0].clone()).unwrap();
     }
@@ -177,8 +203,8 @@ fn the_notification_service_reads_a_push_in_few_requests() {
     }
     b.sync(0).unwrap();
     b.acknowledge_events();
-    let blob = disk.db().blob().unwrap().unwrap();
-    println!("state: {} KiB", blob.len() / 1024);
+    let size: usize = disk.snapshot().iter().map(|(_, bytes)| bytes.len()).sum();
+    println!("state: {} KiB", size / 1024);
     let start = Instant::now();
     let word = disk.word();
     for _ in 0..20 {
@@ -219,10 +245,9 @@ fn a_yo_reaches_the_receiver_within_one_way_of_the_hub() {
         let rtt = Duration::from_millis(rtt);
         let n = random_u64() % 1_000_000_000;
         let (name_a, name_b) = (username(n), username(n + 1));
-        let a = client(App::new(&hub), Arc::new(File::default()), &name_a, "");
+        let a = client(App::new(&hub), File::new(), &name_a, "");
         let disk = Disk::new();
         let b = db_client(App::with_rtt(&hub, rtt), &disk, &name_b, "a1b2c3");
-        b.acknowledge_explicitly();
         a.send_yo(name_b.clone()).unwrap();
         b.acknowledge(b.sync(0).unwrap());
         // The app: its long wait, each batch taken in and acknowledged, then the next wait.

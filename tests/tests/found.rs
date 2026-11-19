@@ -11,7 +11,7 @@ fn texts(events: &[Event]) -> Vec<String> {
     events
         .iter()
         .filter_map(|e| match e {
-            Event::Message { content: Content::Text(t), .. } => Some(t.clone()),
+            Event::Message { content, .. } => yo_tests::tag_of(content),
             _ => None,
         })
         .collect()
@@ -27,7 +27,7 @@ fn a_registration_whose_answer_was_lost_keeps_the_name() {
     http.fault("/v1/register", Fault::LoseAnswer);
     let mut me = by_name(http, &name, None).unwrap();
     let mut other = by_name(Http::new(hub.url()), &format!("Other{}", random_u64() % 100_000), None).unwrap();
-    other.send(&name, Content::Text("found you".into())).unwrap();
+    other.send(&name, yo_tests::tagged("found you".into())).unwrap();
     assert_eq!(texts(&me.sync(0).unwrap()), ["found you"], "the name is this device's");
 }
 
@@ -44,7 +44,7 @@ fn the_apps_own_try_again_with_its_secret_keeps_the_name() {
     assert!(matches!(by_name(http.clone(), &name, Some(secret)), Err(Error::Network(_))), "every try lost");
     let mut me = by_name(http, &name, Some(secret)).expect("the name is this secret's");
     let mut other = by_name(Http::new(hub.url()), &format!("Tpek{}", random_u64() % 100_000), None).unwrap();
-    other.send(&name, Content::Text("still you".into())).unwrap();
+    other.send(&name, yo_tests::tagged("still you".into())).unwrap();
     assert_eq!(texts(&me.sync(0).unwrap()), ["still you"]);
 }
 
@@ -58,7 +58,7 @@ fn a_signature_the_hub_saw_already_is_made_anew() {
     let http = Http::new(hub.url());
     let mut a = by_name(http.clone(), &format!("Sig{n}"), None).unwrap();
     let mut b = by_name(Http::new(hub.url()), &format!("Gis{n}"), None).unwrap();
-    b.send(a.user_id(), Content::Text("one".into())).unwrap();
+    b.send(a.user_id(), yo_tests::tagged("one".into())).unwrap();
     http.fault("/v1/inbox", Fault::Answer(401));
     assert_eq!(texts(&a.sync(0).unwrap()), ["one"]);
     http.fault("/v1/storage", Fault::Answer(401));
@@ -74,11 +74,11 @@ fn a_send_goes_into_the_outbox_when_receiving_first_is_refused_for_now() {
     let http = Http::new(hub.url());
     let mut a = by_name(http.clone(), &format!("Busy{n}"), None).unwrap();
     let mut b = by_name(Http::new(hub.url()), &format!("Ybus{n}"), None).unwrap();
-    a.send(b.user_id(), Content::Text("first".into())).unwrap();
+    a.send(b.user_id(), yo_tests::tagged("first".into())).unwrap();
     http.fault("/v1/inbox?wait=", Fault::Answer(429));
-    a.send(b.user_id(), Content::Text("second".into())).unwrap();
+    a.send(b.user_id(), yo_tests::tagged("second".into())).unwrap();
     http.fault("/v1/inbox?wait=", Fault::Answer(503));
-    a.send(b.user_id(), Content::Text("third".into())).unwrap();
+    a.send(b.user_id(), yo_tests::tagged("third".into())).unwrap();
     assert_eq!(texts(&b.sync(0).unwrap()), ["first", "second", "third"]);
 }
 
@@ -92,20 +92,20 @@ fn a_friend_who_deleted_the_account_is_gone_and_the_name_free() {
     let name = format!("Leaving{n}");
     let mut a = by_name(Http::new(hub.url()), &format!("Stay{n}"), None).unwrap();
     let mut b = by_name(Http::new(hub.url()), &name, None).unwrap();
-    a.send(&name, Content::Text("hi".into())).unwrap();
+    a.send(&name, yo_tests::tagged("hi".into())).unwrap();
     b.sync(0).unwrap();
     let old = b.user_id().to_owned();
     b.delete_account().unwrap();
-    assert_eq!(a.send(&old, Content::Text("are you there".into())), Err(Error::NotOnYo));
+    assert_eq!(a.send(&old, yo_tests::tagged("are you there".into())), Err(Error::NotOnYo));
     assert!(a.contacts().iter().any(|c| c.user == old && c.gone && c.handles.is_empty()));
     assert_eq!(a.send(&old, Content::Yo), Err(Error::NotOnYo), "known gone: no try");
     assert!(a.sessions_with(&old).is_empty(), "its sessions went with it");
     // A stranger takes the name: by the name, it is the stranger now, in a chat of its own.
     let mut c = by_name(Http::new(hub.url()), &name, None).unwrap();
     assert_ne!(c.user_id(), old);
-    a.send(&name, Content::Text("who are you".into())).unwrap();
+    a.send(&name, yo_tests::tagged("who are you".into())).unwrap();
     assert_eq!(texts(&c.sync(0).unwrap()), ["who are you"]);
-    assert_eq!(a.pending(), 0);
+    assert_eq!(a.waiting(), 0);
     assert_eq!(a.dropped(), 0, "nothing dropped as an error: a gone user is a state");
 }
 
@@ -118,11 +118,11 @@ fn a_block_also_drops_what_waits_to_be_shown() {
     let http = Http::new(hub.url());
     let mut a = by_name(http.clone(), &format!("Calm{n}"), None).unwrap();
     let mut b = by_name(Http::new(hub.url()), &format!("Loud{n}"), None).unwrap();
-    b.send(a.user_id(), Content::Text("shout".into())).unwrap();
+    b.send(a.user_id(), yo_tests::tagged("shout".into())).unwrap();
     assert_eq!(texts(&a.sync(0).unwrap()), ["shout"]);
     // The app dies before it showed it: after the restart it comes again, unless blocked meanwhile.
-    let saved = a.export(&[1; 32]);
-    let mut a = Client::restore(http, &saved, &[1; 32]).unwrap();
+    let saved = a.saved();
+    let mut a = Client::restore(http, &saved).unwrap();
     a.set_blocked(b.user_id(), true).unwrap();
     assert!(texts(&a.sync(0).unwrap()).is_empty());
 }
@@ -136,14 +136,14 @@ fn a_chat_started_while_blocked_works_after_the_unblock() {
     let mut r = by_name(Http::new(hub.url()), &format!("Picky{n}"), None).unwrap();
     let mut s = by_name(Http::new(hub.url()), &format!("Eager{n}"), None).unwrap();
     r.set_blocked(s.user_id(), true).unwrap();
-    s.send(r.user_id(), Content::Text("let me in".into())).unwrap();
+    s.send(r.user_id(), yo_tests::tagged("let me in".into())).unwrap();
     assert!(texts(&r.sync(0).unwrap()).is_empty(), "blocked: not shown");
     r.set_blocked(s.user_id(), false).unwrap();
-    s.send(r.user_id(), Content::Text("now?".into())).unwrap();
+    s.send(r.user_id(), yo_tests::tagged("now?".into())).unwrap();
     let mut got = texts(&r.sync(0).unwrap());
     got.extend(texts(&r.sync(0).unwrap()));
     assert_eq!(got, ["now?"], "dropped: {:?}", r.drop_reasons());
-    r.send(s.user_id(), Content::Text("hi".into())).unwrap();
+    r.send(s.user_id(), yo_tests::tagged("hi".into())).unwrap();
     assert_eq!(texts(&s.sync(0).unwrap()), ["hi"]);
 }
 
@@ -161,17 +161,17 @@ fn a_clock_set_right_again_reaches_the_hub_at_once() {
     a.set_clock_skew(2 * 3600 * 1000);
     assert!(a.sync(0).is_err(), "two hours off: the hub refuses");
     a.set_clock_skew(0);
-    b.send(a.user_id(), Content::Text("on time".into())).unwrap();
+    b.send(a.user_id(), yo_tests::tagged("on time".into())).unwrap();
     assert_eq!(texts(&a.sync(0).unwrap()), ["on time"]);
     a.acknowledge_events();
     // Also after a restart from what it saved while its clock was wrong.
     a.set_clock_skew(2 * 3600 * 1000);
     assert!(a.sync(0).is_err());
-    let saved = a.export(&[1; 32]);
-    let mut a = Client::restore(http, &saved, &[1; 32]).unwrap();
-    b.send(a.user_id(), Content::Text("still?".into())).unwrap();
+    let saved = a.saved();
+    let mut a = Client::restore(http, &saved).unwrap();
+    b.send(a.user_id(), yo_tests::tagged("still?".into())).unwrap();
     assert_eq!(texts(&a.sync(0).unwrap()), ["still?"]);
-    a.send(b.user_id(), Content::Text("yes".into())).unwrap();
+    a.send(b.user_id(), yo_tests::tagged("yes".into())).unwrap();
     assert_eq!(texts(&b.sync(0).unwrap()), ["yes"]);
     a.acknowledge_events();
     // A clock 4 minutes fast is within the window; 8 minutes is not, and once back at 4 the floor it left (4 minutes
@@ -181,7 +181,7 @@ fn a_clock_set_right_again_reaches_the_hub_at_once() {
     a.set_clock_skew(8 * 60 * 1000);
     assert!(a.sync(0).is_err(), "8 minutes off: refused");
     a.set_clock_skew(4 * 60 * 1000);
-    b.send(a.user_id(), Content::Text("back".into())).unwrap();
+    b.send(a.user_id(), yo_tests::tagged("back".into())).unwrap();
     assert_eq!(texts(&a.sync(0).unwrap()), ["back"]);
 }
 
@@ -190,7 +190,7 @@ fn a_clock_set_right_again_reaches_the_hub_at_once() {
 struct Disk(std::sync::atomic::AtomicBool);
 
 impl yo_core::Store for Disk {
-    fn save(&self, _blob: Vec<u8>) -> Result<(), String> {
+    fn save_state(&self, _: &yo_core::state::State, _: yo_core::signal::Entries) -> Result<(), String> {
         if self.0.load(std::sync::atomic::Ordering::Relaxed) {
             Err("no space left on device".into())
         } else {
@@ -208,7 +208,7 @@ fn a_block_that_could_not_be_saved_is_not_made() {
     let n = random_u64() % 100_000;
     let mut a = by_name(Http::new(hub.url()), &format!("Full{n}"), None).unwrap();
     let mut b = by_name(Http::new(hub.url()), &format!("Pest{n}"), None).unwrap();
-    b.send(a.user_id(), Content::Text("hi".into())).unwrap();
+    b.send(a.user_id(), yo_tests::tagged("hi".into())).unwrap();
     assert_eq!(texts(&a.sync(0).unwrap()), ["hi"]);
     let disk = std::sync::Arc::new(Disk::default());
     a.persist_to(disk.clone(), [1; 32]).unwrap();
@@ -218,10 +218,10 @@ fn a_block_that_could_not_be_saved_is_not_made() {
     let contact = a.contacts().into_iter().find(|c| c.user == b.user_id()).unwrap();
     assert!(!contact.blocked && !contact.verified, "not saved, not made: {contact:?}");
     disk.0.store(false, std::sync::atomic::Ordering::Relaxed);
-    b.send(a.user_id(), Content::Text("still here".into())).unwrap();
+    b.send(a.user_id(), yo_tests::tagged("still here".into())).unwrap();
     assert_eq!(texts(&a.sync(0).unwrap()), ["still here"], "not blocked, as on the disk");
     a.set_blocked(b.user_id(), true).unwrap();
-    b.send(a.user_id(), Content::Text("hidden".into())).unwrap();
+    b.send(a.user_id(), yo_tests::tagged("hidden".into())).unwrap();
     assert!(texts(&a.sync(0).unwrap()).is_empty());
 }
 

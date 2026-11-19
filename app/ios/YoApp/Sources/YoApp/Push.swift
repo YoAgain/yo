@@ -31,6 +31,12 @@ final class Push {
     token = deviceToken.map { String(format: "%02x", $0) }.joined()
   }
 
+  /// What a registration carries: the platform and the token (none yet: 0 and empty, sent once there, `send`).
+  var registration: (platform: UInt8, token: String) {
+    guard let token else { return (0, "") }
+    return (Hub.isDevApp ? Self.sandbox : Self.production, token)
+  }
+
   /// Tells the hub this device's token, when there is an account and the hub does not have it yet.
   func send(_ accounts: AccountStore) async {
     guard let token, let client = accounts.client, accounts.account != nil,
@@ -54,6 +60,8 @@ final class AppDelegate: NSObject, UIApplicationDelegate {
     _ application: UIApplication, didFinishLaunchingWithOptions options: [UIApplication.LaunchOptionsKey: Any]? = nil
   ) -> Bool {
     Perf.mark("launch.didFinish")
+    // The token at every launch (no prompt): a registration then carries it.
+    application.registerForRemoteNotifications()
     return true
   }
   func application(_ application: UIApplication, didRegisterForRemoteNotificationsWithDeviceToken deviceToken: Data) {

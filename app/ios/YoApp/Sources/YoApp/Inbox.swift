@@ -301,7 +301,7 @@ final class Inbox {
   private func sendNow(to friend: Friend, client: YoClient, accounts: AccountStore, friends: Friends) async -> String? {
     if let group = friend.group {
       do {
-        let (events, contacts) = try await Hub.run { (try client.sendGroupYo(group: group), client.contacts()) }
+        let (events, contacts) = try await Hub.run { (try client.send(target: .group(id: group), kind: .yo), client.contacts()) }
         guard client === accounts.client else { return nil }
         await take(events, contacts: contacts, client: client, friends: friends)
         Stats.sentYo(to: friend.name)
@@ -318,7 +318,7 @@ final class Inbox {
     let target = friend.user ?? friend.name
     do {
       let (events, contacts, waiting) = try await Hub.run {
-        try Perf.timed("send.core") { (try client.sendYo(to: target), client.contacts(), client.waiting()) }
+        try Perf.timed("send.core") { (try client.send(target: .contact(id: target), kind: .yo), client.contacts(), client.waiting()) }
       }
       guard client === accounts.client else { return nil }  // signed out meanwhile: nothing of it stays
       if waiting > 0 { deliverLater(accounts: accounts, friends: friends) }
@@ -497,9 +497,13 @@ final class Inbox {
   /// A silent push (content-available, a delivery that is not urgent) woke the app in the background: one short look
   /// at the hub, as the long wait's, without waiting there. Whether it brought something; nil when it could not ask.
   func syncOnce(accounts: AccountStore, friends: Friends) async -> Bool? {
-    // Started by the push itself: the core may still be opening (or, launched for it, not yet asked to).
+    // Started by the push itself: the core may still be opening (or, launched for it, not yet asked to). An old
+    // install signs in again only in the foreground (`AccountStore.updating`): nothing to ask until then.
+    guard !accounts.updating else { return nil }
     accounts.openNow()
-    for _ in 0..<100 where accounts.client == nil && accounts.account != nil { try? await Task.sleep(for: .milliseconds(100)) }
+    for _ in 0..<100 where accounts.client == nil && accounts.account != nil {
+      try? await Task.sleep(for: .milliseconds(100))
+    }
     guard let client = accounts.client, !HubTransport.unsupported else { return nil }
     do {
       let (events, contacts) = try await Hub.run(reportErrors: false) { (try client.sync(waitS: 0), client.contacts()) }
@@ -639,13 +643,11 @@ final class Inbox {
           }
         case .groupChanged:
           break
-        case .groupSentElsewhere:
-          break
         case .newChat(let user):
           _ = friend(user)  // a friend writing first again (a new phone) is the same friend, by user id
         case .identityChanged:
           break  // reconciled with the batch before publication
-        case .profile, .sentElsewhere:
+        case .profile:
           break
         }
         kept.append(event)

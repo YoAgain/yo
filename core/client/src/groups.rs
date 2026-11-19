@@ -1,13 +1,10 @@
-//! Groups (spec 4.9): Signal's Groups v2 with zkgroup, a small part of it. The hub keeps each group encrypted under
-//! its master key (members, their profile keys, the title) with its revision, and checks every request by
-//! zero-knowledge proof: an auth credential presentation shows a member asks, a profile key credential presentation
-//! that a member added holds its key (else it is invited). Members hold the key; a change is one revision on at the
-//! hub (of two at once one wins, the other is made again on the winner). A Yo goes to each member over the sessions,
-//! sealed with a group send endorsement where the sender lacks the recipient's profile key; it and every change name
-//! the key and the revision, so a member behind fetches the group.
+//! Groups (spec 4.9): a small part of Signal's Groups v2 with zkgroup. The hub keeps each group encrypted under its
+//! master key with its revision and checks every request by zero-knowledge proof; members hold the key. A change is
+//! one revision on (of two at once, the loser is made again on the winner). A Yo goes to each member over the
+//! sessions, endorsed where the sender lacks a member's profile key, and names the revision so a member behind fetches.
 
-use crate::state::{hex, unhex, Group, StoredEvent};
-use crate::{refused, retryable, shown, user_bytes, Client, Content, Error, Event, Result};
+use crate::state::{hex, unhex, Group};
+use crate::{expect, refused, retryable, shown, user_bytes, Client, Content, Error, Event, Result};
 use libsignal_protocol::{Aci, Pni, ServiceId};
 use yo_wire::api::{self, status, GroupAction, GroupAnswer, NewMember};
 use yo_wire::content::{GroupKey, GroupTag, MAX_GROUP, MAX_NAME_LEN};
@@ -36,8 +33,7 @@ pub struct GroupView {
     pub accepted: bool,
 }
 
-/// A refusal that holds for now only: `retryable`, a signature refused (`401`: the clock off, or a replay), a save that
-/// failed, this device replaced.
+/// A refusal for now only: `retryable`, a refused signature (`401`: clock off, a replay), a failed save, replaced.
 fn not_now(error: &Error) -> bool {
     retryable(error) || matches!(error, Error::Refused(401) | Error::Save(_) | Error::Replaced)
 }
@@ -68,19 +64,13 @@ fn aci(user: &str) -> Result<Aci> {
     Ok(Aci::from_uuid_bytes(user_bytes(user)?))
 }
 
-fn random() -> [u8; 32] {
-    let mut bytes = [0u8; 32];
-    rand::fill(&mut bytes);
-    bytes
-}
-
 fn bad_answer() -> Error {
     Error::Protocol("a group answer")
 }
 
 /// The test hubs' public params (`api::TEST_ZK_SEED`), which test clients start with.
 pub(crate) fn test_zk() -> Option<ServerPublicParams> {
-    #[cfg(feature = "testing")]
+    #[cfg(feature = "test-support")]
     {
         static PARAMS: std::sync::OnceLock<Vec<u8>> = std::sync::OnceLock::new();
         let bytes = PARAMS.get_or_init(|| {
@@ -88,7 +78,7 @@ pub(crate) fn test_zk() -> Option<ServerPublicParams> {
         });
         zkgroup::deserialize(bytes).ok()
     }
-    #[cfg(not(feature = "testing"))]
+    #[cfg(not(feature = "test-support"))]
     None
 }
 
@@ -102,8 +92,7 @@ enum Intent {
 }
 
 impl Client {
-    /// Pins the hub's zkgroup `ServerPublicParams` (spec 4.9), as `yo-hub zk new` printed them: without them no group
-    /// is made, changed or fetched.
+    /// Pins the hub's zkgroup `ServerPublicParams` (spec 4.9); without them no group is made, changed or fetched.
     pub fn set_zk_params(&mut self, bytes: &[u8]) -> Result<()> {
         self.zk = Some(zkgroup::deserialize(bytes).map_err(|_| Error::Protocol("not ServerPublicParams"))?);
         Ok(())
@@ -130,12 +119,10 @@ impl Client {
             .collect()
     }
 
-    /// Makes a group of this account and `members` (user ids), named `name`, at the hub, and tells them; returns its
-    /// id.
+    /// Makes a group of this account and `members` (user ids) at the hub and tells them; returns its id.
     pub fn create_group(&mut self, name: &str, members: &[String]) -> Result<(String, Vec<Event>)> {
         let result = self.create_group_inner(name, members);
-        let id = result.as_ref().ok().cloned();
-        self.finish(result).map(|events| (id.unwrap_or_default(), events))
+        self.finish_with(result)
     }
 
     fn create_group_inner(&mut self, name: &str, members: &[String]) -> Result<String> {
@@ -158,7 +145,7 @@ impl Client {
             Err(error) if !retryable(&error) => return Err(error),
             _ => {}
         }
-        let key: GroupKey = random();
+        let key: GroupKey = crate::identity::random();
         let secret = secret(&key);
         let id = secret.get_group_identifier();
         let auth = self.auth_presentation(&zk, &secret)?;
@@ -172,27 +159,10 @@ impl Client {
             title: title(&secret, name)?.into(),
             members: new,
         });
-        let response = self.signed("PUT", &api::group_path(&id), &body)?;
-        if response.status != status::OK {
-            return Err(refused(&response));
-        }
+        let response = expect(self.signed("PUT", &api::group_path(&id), &body)?, status::OK)?;
         let answer: GroupAnswer = decode(&response.body).map_err(|_| bad_answer())?;
         let id = hex(&id);
-        self.state.groups.insert(
-            id.clone(),
-            Group {
-                key: hex(&key),
-                name: String::new(),
-                members: Vec::new(),
-                revision: 0,
-                left: false,
-                accepted: true,
-                keyed: false,
-                named: 0,
-                endorsed_until: 0,
-                endorsements: Default::default(),
-            },
-        );
+        self.state.groups.insert(id.clone(), Group { key: hex(&key), accepted: true, ..Default::default() });
         self.take_answer(&id, answer)?;
         let members = self.state.groups[&id].members.clone();
         self.tell(&id, &members)?;
@@ -223,21 +193,19 @@ impl Client {
         self.finish(result)
     }
 
-    /// Says yes to a group someone else added this account to: joined, its profile key into its entry at the hub, and
-    /// its members get the key.
+    /// Says yes to a group a stranger added this account to: its profile key goes to the hub entry and the members.
     pub fn accept_group(&mut self, id: &str) -> Result<Vec<Event>> {
         let result = (|| {
             let group = self.state.groups.get_mut(id).ok_or(Error::Protocol("no such group"))?;
             group.accepted = true;
             let members = group.members.clone();
             self.profile_key_due(&members);
+            // Joined in the account's storage too, saved with it.
+            self.store_group(id);
             self.persist()?;
-            match self.change(id, Intent::Key) {
-                Err(error) if not_now(&error) => return Err(error),
-                Err(error) => self.note(format!("group key: {error}")),
-                Ok(()) => {}
-            }
+            // The hub has the commitment first, so the own entry's key can go in.
             self.profile_keys()?;
+            self.key_groups()?;
             self.deliver()
         })();
         self.finish(result)
@@ -249,11 +217,9 @@ impl Client {
         self.finish_sent(result)
     }
 
-    /// `send_group` split around its network step, as `send_begin` for one friend: while the inbox is up to date (no
-    /// receiving first), the group's endorsements fresh and a session with every device of every member there, the Yo
-    /// is queued and saved, and what of the outbox can go now is handed out to be posted without the client
-    /// (`Deliveries::send`) and ended with `send_end`. So a burst into a group costs its deliveries alone, as a
-    /// burst to one friend does. `None`, with nothing changed: `send_group` it instead.
+    /// `send_group` split around its network step, as `send_begin`: with the group's endorsements fresh and a session
+    /// with every member, the Yo is queued and saved and the deliveries are handed out. `None`, with nothing changed:
+    /// `send_group` instead.
     pub fn send_group_begin(&mut self, id: &str, content: Content) -> Option<crate::Deliveries> {
         if self.replaced.get() {
             return None;
@@ -270,7 +236,7 @@ impl Client {
         for member in group.members.iter().filter(|m| **m != me) {
             match self.state.contacts.get(member) {
                 Some(contact) if contact.gone => continue,
-                Some(contact) if !contact.devices.is_empty() && self.without_session(member).is_empty() => {}
+                Some(contact) if contact.device.is_some() && !self.no_session(member) => {}
                 // A session to start first (`reach_all`, which asks the hub): `send_group`.
                 _ => return None,
             }
@@ -280,7 +246,7 @@ impl Client {
         self.atomic(|c| {
             c.send_profiles();
             c.queue(&others, Some(tag), content)?;
-            for user in others.iter().chain([&me]) {
+            for user in &others {
                 c.encrypt_waiting(user); // its envelope in the same save
             }
             c.persist()
@@ -289,31 +255,21 @@ impl Client {
         Some(self.deliveries().unwrap_or_else(|_| self.no_deliveries()))
     }
 
-    /// How many fetches a photo or video to the group is uploaded for: every device of its other members, and this
-    /// account's other devices (`MAX_BLOB_FETCHES` at most).
+    /// Fetches a group photo or video is uploaded for: one per other member (`MAX_BLOB_FETCHES` at most).
     pub fn group_media_fetches(&self, id: &str) -> Option<u32> {
         let group = self.state.groups.get(id).filter(|g| !g.left && g.revision > 0)?;
-        let devices: usize = group
-            .members
-            .iter()
-            .filter(|m| **m != self.state.user_id)
-            // A member not known here yet has one device at least (its session is made as the Yo goes).
-            .map(|m| self.state.contacts.get(m).map_or(1, |c| c.devices.len().max(1)))
-            .sum();
-        Some(((devices + self.state.own.len()) as u32).clamp(1, MAX_BLOB_FETCHES))
+        let members = group.members.iter().filter(|m| **m != self.state.user_id).count();
+        Some((members as u32).clamp(1, MAX_BLOB_FETCHES))
     }
 
-    /// Opens what a group's photo or video needs (a session with each member), as a send would, and says for how many
-    /// fetches to upload it.
+    /// Opens the sessions a group's photo or video needs and says for how many fetches to upload it.
     pub fn open_group(&mut self, id: &str) -> Result<(u32, Vec<Event>)> {
         let result = self.group(id).and_then(|g| {
             self.not_empty(&g)?;
             self.reach_all(&g.members)?;
             Ok(self.group_media_fetches(id).unwrap_or(1))
         });
-        let fetches = result.as_ref().ok().copied();
-        let events = self.finish(result)?;
-        Ok((fetches.unwrap_or(1), events))
+        self.finish_with(result)
     }
 
     /// For tests: how many deliveries the hub took on a group send endorsement alone (no profile key).
@@ -377,10 +333,7 @@ impl Client {
         let now = self.now_s();
         let fresh = self.group_auth.as_ref().is_some_and(|(day, _)| now >= *day && now < day + SECONDS_PER_DAY);
         if !fresh {
-            let response = self.signed("GET", api::GROUP_AUTH, &[])?;
-            if response.status != status::OK {
-                return Err(refused(&response));
-            }
+            let response = expect(self.signed("GET", api::GROUP_AUTH, &[])?, status::OK)?;
             let answer: api::GroupAuthCredential = decode(&response.body).map_err(|_| bad_answer())?;
             let issued: AuthCredentialWithPniZkcResponse =
                 zkgroup::deserialize(answer.credential.as_slice()).map_err(|_| bad_answer())?;
@@ -396,11 +349,10 @@ impl Client {
             self.group_auth = Some((answer.redemption_s, credential));
         }
         let (_, credential) = self.group_auth.clone().expect("fetched above");
-        Ok(zkgroup::serialize(&AuthCredentialWithPni::Zkc(credential).present(zk, secret, random())))
+        Ok(zkgroup::serialize(&AuthCredentialWithPni::Zkc(credential).present(zk, secret, crate::identity::random())))
     }
 
-    /// A member to add: with a profile key credential presentation if this device holds their key and the hub issues
-    /// a credential for it (it is the one they told); else invited by their user id alone.
+    /// A member to add: with a profile key credential presentation if their key is held here, else invited by id.
     fn new_member(&mut self, zk: &ServerPublicParams, secret: &GroupSecretParams, user: &str) -> Result<NewMember> {
         let user_aci = aci(user)?;
         let key = match user == self.state.user_id {
@@ -412,7 +364,11 @@ impl Client {
             presentation: Vec::new().into(),
         };
         let Some(key) = key else { return Ok(invited()) };
-        let context = zk.create_profile_key_credential_request_context(random(), user_aci, ProfileKey::create(key));
+        let context = zk.create_profile_key_credential_request_context(
+            crate::identity::random(),
+            user_aci,
+            ProfileKey::create(key),
+        );
         let body = encode(&api::ProfileCredentialRequest {
             user_id: user_bytes(user)?,
             request: zkgroup::serialize(&context.get_request()).into(),
@@ -431,7 +387,8 @@ impl Client {
             self.note("a profile key credential that does not verify".into());
             return Ok(invited());
         };
-        let presentation = zk.create_expiring_profile_key_credential_presentation(random(), *secret, credential);
+        let presentation =
+            zk.create_expiring_profile_key_credential_presentation(crate::identity::random(), *secret, credential);
         Ok(NewMember { user: Vec::new().into(), presentation: zkgroup::serialize(&presentation).into() })
     }
 
@@ -522,8 +479,7 @@ impl Client {
         self.persist()
     }
 
-    /// Yos held for this group: shown if the group as fetched has their sender in it (and this account), else dropped;
-    /// never one of a sender blocked meanwhile.
+    /// Yos held for this group: shown if the fetched group has their sender in it, else dropped; never a blocked one's.
     fn release_held(&mut self, id: &str) {
         let (theirs, rest): (Vec<_>, Vec<_>) =
             std::mem::take(&mut self.state.group_held).into_iter().partition(|(g, _)| g == id);
@@ -532,10 +488,7 @@ impl Client {
         for (_, event) in theirs {
             let shown = !group.left
                 && match &event {
-                    StoredEvent::GroupMessage { user, own: false, .. } => {
-                        group.members.contains(user) && !self.blocked(user)
-                    }
-                    StoredEvent::GroupMessage { own: true, .. } => true,
+                    Event::GroupMessage { user, .. } => group.members.contains(user) && !self.blocked(user),
                     _ => false,
                 };
             if shown {
@@ -544,8 +497,7 @@ impl Client {
         }
     }
 
-    /// Fetches a group from the hub. Not (or no longer) a member, or the group gone: left (one never fetched is
-    /// forgotten, a stranger's made-up key).
+    /// Fetches a group from the hub. No longer a member, or gone: left (one never fetched is forgotten).
     fn fetch_group(&mut self, id: &str) -> Result<()> {
         let zk = self.zk()?;
         let group = self.state.groups.get(id).cloned().ok_or(Error::Internal("a group"))?;
@@ -600,6 +552,26 @@ impl Client {
                 }
             }
         }
+        self.key_groups()
+    }
+
+    /// The own entry's profile key into each group joined and not keyed yet, once the hub has the commitment: tried
+    /// again after each read until the hub's answer has it keyed (also on a new phone, the group from the storage).
+    fn key_groups(&mut self) -> Result<()> {
+        if !self.state.access_key_told {
+            return Ok(());
+        }
+        let due: Vec<String> = (self.state.groups.iter())
+            .filter(|(_, g)| g.accepted && !g.keyed && !g.left && g.revision > 0)
+            .map(|(id, _)| id.clone())
+            .collect();
+        for id in &due {
+            match self.change(id, Intent::Key) {
+                Err(error) if not_now(&error) => return Err(error),
+                Err(error) => self.note(format!("group key: {error}")),
+                Ok(()) => {}
+            }
+        }
         Ok(())
     }
 
@@ -611,7 +583,7 @@ impl Client {
     }
 
     /// A group a message names: known from now on, its revision noted (fetched after the inbox, `refresh_groups`).
-    fn group_named(&mut self, tag: GroupTag) -> Option<String> {
+    pub(crate) fn group_named(&mut self, tag: GroupTag) -> Option<String> {
         let id = group_id_of(&tag.key);
         let full = self.state.groups.len() >= MAX_GROUPS;
         match self.state.groups.get_mut(&id) {
@@ -622,33 +594,14 @@ impl Client {
                 return None;
             }
             None => {
-                self.state.groups.insert(
-                    id.clone(),
-                    Group {
-                        key: hex(&tag.key),
-                        name: String::new(),
-                        members: Vec::new(),
-                        revision: 0,
-                        left: false,
-                        accepted: false,
-                        keyed: false,
-                        named: tag.revision,
-                        endorsed_until: 0,
-                        endorsements: Default::default(),
-                    },
-                );
+                let group = Group { key: hex(&tag.key), named: tag.revision, ..Default::default() };
+                self.state.groups.insert(id.clone(), group);
             }
         }
         Some(id)
     }
 
-    /// A group was made or changed (type 8, also from this account's other devices): fetched after the inbox.
-    pub(crate) fn group_changed(&mut self, tag: GroupTag) {
-        self.group_named(tag);
-    }
-
-    /// A Yo from `from` to a group: shown if they are in it as fetched; held while the group is fetched (a group not
-    /// known yet, or a newer revision than here).
+    /// A Yo from `from` to a group: shown if they are a member; held while the group is fetched.
     pub(crate) fn group_yo(&mut self, from: &str, tag: GroupTag, sent_at_ms: u64, content: Content) {
         let Some(id) = self.group_named(tag) else { return };
         let group = self.state.groups[&id].clone();
@@ -666,28 +619,18 @@ impl Client {
         self.show_or_hold(&id, current, event);
     }
 
-    /// One's own other device sent this to the group.
-    pub(crate) fn group_sent_elsewhere(&mut self, tag: GroupTag, sent_at_ms: u64, content: Content) {
-        let Some(id) = self.group_named(tag) else { return };
-        let group = &self.state.groups[&id];
-        let current = group.revision > 0 && group.revision >= tag.revision;
-        let content = self.forget_keys(content);
-        let event = Event::GroupSentElsewhere { group: id.clone(), sent_at_ms, content };
-        self.show_or_hold(&id, current, event);
-    }
-
     fn show_or_hold(&mut self, id: &str, current: bool, event: Event) {
         if current {
             self.push_event(event);
         } else if self.state.group_held.len() < MAX_HELD {
-            self.state.group_held.push((id.to_owned(), crate::stored(event)));
+            self.state.group_held.push((id.to_owned(), event));
         } else {
             self.note("a group's Yo while its group is fetched, too many held".into());
         }
     }
 
-    /// A change at the hub, as one revision on; on a `409` (another change came first) made again on the group as the
-    /// hub has it. Everyone in it before and after is told (type 8).
+    /// A change at the hub as one revision on; on a `409`, made again on the hub's group. Everyone in it before and
+    /// after is told (type 8).
     fn change(&mut self, id: &str, intent: Intent) -> Result<()> {
         let zk = self.zk()?;
         let me = self.state.user_id.clone();
@@ -761,7 +704,7 @@ impl Client {
         Err(Error::Protocol("the group changed too often meanwhile"))
     }
 
-    /// Tells `users` (all but this account) and this account's other devices that the group is at its revision now.
+    /// Tells `users` (all but this account) that the group is at its revision now.
     fn tell(&mut self, id: &str, users: &[String]) -> Result<()> {
         let group = self.state.groups.get(id).cloned().ok_or(Error::Internal("a group"))?;
         let tag = GroupTag { key: key_of(&group)?, revision: group.revision };
@@ -769,7 +712,6 @@ impl Client {
         if !group.left {
             self.send_profiles();
         }
-        // `queue` makes the copy for this account's other devices.
         self.atomic(|c| {
             c.queue(&reached, None, Content::Group(tag))?;
             c.persist()
@@ -781,8 +723,7 @@ impl Client {
         }
     }
 
-    /// A group send token for `user` from a group both are in (spec 4.9), base64url: their delivery goes sealed
-    /// without their profile key.
+    /// A group send token for `user` from a shared group (spec 4.9), base64url: sealed without their profile key.
     pub(crate) fn group_send_token(&self, user: &str) -> Option<String> {
         let now = self.now_s();
         let group = self
@@ -804,9 +745,8 @@ impl Client {
         }
     }
 
-    /// A session with each other member this device can write to (spec 4.2), without making them a chat of their own:
-    /// the members it can reach. One gone, blocked by the hub, or without devices is left out (noted); one that cannot
-    /// be reached now fails the call.
+    /// A session with each other member this device can reach (spec 4.2), without a chat of their own. One gone or
+    /// without a device is left out (noted); one unreachable now fails the call.
     fn reach_all(&mut self, members: &[String]) -> Result<Vec<String>> {
         let mut reached = Vec::new();
         let me = self.state.user_id.clone();
@@ -836,12 +776,9 @@ impl Client {
         Ok(reached)
     }
 
-    /// One message for each of `users` and a copy for this account's other devices: the same plaintext, one time.
-    /// The one path of every message (1:1 through `send_message`, a group's, a group's changes): a 1:1 copy names the
-    /// user it went to (spec 4.4), a group's names its group inside.
+    /// Queues the same content for each recipient.
     pub(crate) fn queue(&mut self, users: &[String], group: Option<GroupTag>, content: Content) -> Result<()> {
-        // A photo or video already sent to a member (an app that lost its answer and sends it again) goes only to the
-        // members it did not reach yet; to none, if it reached them all (spec 4.7, 5).
+        // Media already sent to some members (a lost answer, sent again) goes only to the rest (spec 4.7, 5).
         let users: Vec<String> = match &content {
             Content::Photo(media) | Content::Video { media, .. } => {
                 let in_group = group.as_ref().map(|g| &g.key);
@@ -855,8 +792,7 @@ impl Client {
         let sent_at_ms = self.wall().max(self.state.last_sent_ms + 1);
         self.state.last_sent_ms = sent_at_ms;
         let keep = shown(&content);
-        // A Yo to accepted contacts (or a joined group's members) carries this account's profile key (spec 4.10), as
-        // Signal's every message: a key they missed comes with the next one. Never to a request not said yes to.
+        // A Yo to accepted contacts or joined members carries the profile key (spec 4.10); never to a request.
         let accepted = users.iter().all(|user| {
             self.in_joined_group(user) || self.state.contacts.get(user).is_some_and(|c| c.accepted && !c.blocked)
         });
@@ -872,15 +808,6 @@ impl Client {
                     }
                 }
             }
-        }
-        let probe = group.is_none() && users.iter().any(|u| self.probe_service(u));
-        if keep && !probe && !self.state.own.is_empty() {
-            let me = self.state.user_id.clone();
-            let to = match (&group, users.as_slice()) {
-                (None, [user]) => Some(user_bytes(user)?),
-                _ => None,
-            };
-            self.enqueue(&me, encode(&yo_wire::envelope::Plain { to, content: message.into() }));
         }
         Ok(())
     }
@@ -901,14 +828,14 @@ fn title(secret: &GroupSecretParams, name: &str) -> Result<Vec<u8>> {
     if name.is_empty() || name.len() > MAX_NAME_LEN || name.chars().any(char::is_control) {
         return Err(Error::Protocol("a group's name: 1 to 32 bytes"));
     }
-    Ok(secret.encrypt_blob_with_padding(random(), name.as_bytes(), (MAX_NAME_LEN - name.len()) as u32))
+    Ok(secret.encrypt_blob_with_padding(crate::identity::random(), name.as_bytes(), (MAX_NAME_LEN - name.len()) as u32))
 }
 
 impl Client {
     /// This account's profile key is to go to these users (all but itself), as members of a group it is in.
     pub(crate) fn profile_key_due(&mut self, users: &[String]) {
         for user in users.iter().filter(|u| **u != self.state.user_id) {
-            let contact = self.state.contacts.entry(user.clone()).or_insert_with(crate::state::Contact::unknown);
+            let contact = self.state.contacts.entry(user.clone()).or_default();
             // Once per key: a group's every change need not send it again.
             if !contact.key_given {
                 contact.key_due = true;

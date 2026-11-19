@@ -1,6 +1,6 @@
 //! The client core's receive path, deep: a device's real state before anyone wrote to it, then a sequence of sealed
 //! envelopes' payloads (each a u32 length and the bytes), seeded with real ones (a session's first message, a profile,
-//! Yos, a text). Never a panic; whatever arrives, the device can still export its state.
+//! Yos). Never a panic; whatever arrives, the device can still save its state.
 #![no_main]
 use libfuzzer_sys::fuzz_target;
 use std::sync::Arc;
@@ -8,7 +8,6 @@ use yo_core::{Client, Response, Transport};
 
 const STATE: &[u8] = include_bytes!("../seeds/core_state.bin");
 const LOOKUP: &[u8] = include_bytes!("../seeds/core_lookup.bin");
-const KEY: [u8; 32] = [0x42; 32];
 
 /// The hub, as far as receiving asks it: the lookup that attests a first message's sender.
 struct Hub;
@@ -24,7 +23,8 @@ impl Transport for Hub {
 }
 
 fuzz_target!(|data: &[u8]| {
-    let mut client = Client::restore(Arc::new(Hub), STATE, &KEY).unwrap();
+    let saved: yo_core::Saved = serde_json::from_slice(STATE).unwrap();
+    let mut client = Client::restore(Arc::new(Hub), &saved).unwrap();
     let mut rest = data;
     for _ in 0..16 {
         let Some((len, tail)) = rest.split_first_chunk::<4>() else { break };
@@ -33,5 +33,5 @@ fuzz_target!(|data: &[u8]| {
         let _ = client.receive_for_fuzzing(payload);
         rest = tail;
     }
-    let _ = client.export(&KEY);
+    let _ = client.saved();
 });

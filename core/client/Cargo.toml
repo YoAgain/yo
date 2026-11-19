@@ -7,25 +7,20 @@ license.workspace = true
 description = "The Yo client core: identities, sessions, delivery. One implementation for iOS and Android."
 
 [features]
-# Exposes the receive path to the fuzz targets in fuzz/.
-fuzz = []
-# Test hooks: a device under an existing account key (as a passkey's backup will make one).
-testing = []
+# Hooks for tests and fuzz targets only (`testing.rs`): the test hubs' keys, saved states in memory, clock skew.
+test-support = []
 
 [dependencies]
-yo-product = { path = "../product" }
 yo-wire = { path = "../wire" }
 tls_codec = { workspace = true }
-curve25519-dalek = { workspace = true }
 sha2 = { workspace = true }
-hmac = { workspace = true }
+hkdf = "=0.13.0"
+sha2_11 = { package = "sha2", version = "=0.11.1" }
 chacha20poly1305 = { workspace = true }
 zeroize = { workspace = true }
-getrandom = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
-rand_core = { workspace = true }
 libsignal-protocol = { workspace = true }
 libsignal-account-keys = { workspace = true }
 zkgroup = { workspace = true }
@@ -34,6 +29,9 @@ rand = { workspace = true }
 
 # The state shared by an app and its extensions (statedb.rs). The iPhone links its own SQLite (libsqlite3 of the
 # SDK: Apple's file protection, no C compiler for the core); elsewhere SQLite is built in.
+[dev-dependencies]
+curve25519-dalek = { workspace = true }
+
 [target.'cfg(target_os = "ios")'.dependencies]
 rusqlite = { version = "=0.32.1" }
 

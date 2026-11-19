@@ -1,14 +1,11 @@
-//! The backup record (spec 7) as the apps make and open it: K wrapped by the passkey's PRF output and by the recovery
-//! key, what the app keeps sealed under K, the recovery key's locator, and each door's auth key, which signs the
-//! record's fetch. The recovery key is Signal's: libsignal's account entropy pool (64 characters, a–z and 0–9), and
-//! its backup key what Yo's keys come from. The formats are CryptoKit's too: HKDF-SHA256 without salt,
-//! ChaCha20-Poly1305 as nonce || ciphertext || tag.
+//! The backup record (spec 7): K wrapped by the passkey's PRF output and by the recovery key (libsignal's account
+//! entropy pool), the app's data sealed under K, the recovery key's locator, and each door's auth key, which signs
+//! the fetch. CryptoKit-compatible: HKDF-SHA256 without salt, ChaCha20-Poly1305 as nonce || ciphertext || tag.
 
+use crate::aead;
 use crate::error::{Error, Result};
 use crate::storage::{hkdf, open_padded, seal_padded};
 use crate::{Client, Transport};
-use chacha20poly1305::aead::{Aead, KeyInit};
-use chacha20poly1305::ChaCha20Poly1305;
 pub use libsignal_account_keys::AccountEntropyPool;
 use libsignal_account_keys::BackupKey;
 use libsignal_protocol::PrivateKey;
@@ -21,8 +18,7 @@ pub fn new_recovery_key() -> AccountEntropyPool {
     AccountEntropyPool::generate(&mut rand::rng())
 }
 
-/// The recovery key in what was pasted, typed or scanned: case, spaces, dashes and line breaks between the
-/// characters do not matter. `None` when it is no recovery key.
+/// The recovery key in what was pasted, typed or scanned (case, spaces, dashes and line breaks ignored).
 pub fn parse_recovery_key(typed: &str) -> Option<AccountEntropyPool> {
     let plain: String =
         typed.chars().filter(|c| !c.is_whitespace() && *c != '-').map(|c| c.to_ascii_lowercase()).collect();
@@ -37,8 +33,7 @@ pub enum Door<'a> {
 }
 
 impl Door<'_> {
-    /// HKDF of the door's secret: the PRF output, or the recovery key's backup key (libsignal's
-    /// `BackupKey::derive_from_account_entropy_pool`).
+    /// HKDF of the door's secret: the PRF output, or the recovery key's backup key.
     fn derive<const N: usize>(&self, info: &str) -> [u8; N] {
         let mut out = [0; N];
         match self {
@@ -60,8 +55,7 @@ impl Door<'_> {
         self.derive(&format!("yo backup v3 {}", self.name()))
     }
 
-    /// The key that signs the record's fetch (XEdDSA): HKDF(secret, "yo backup v3 auth passkey" or "... auth code") as
-    /// a Curve25519 private key.
+    /// The key that signs the record's fetch (XEdDSA), from HKDF(secret, "yo backup v3 auth ...").
     pub fn auth_key(&self) -> PrivateKey {
         let bytes: [u8; 32] = self.derive(&format!("yo backup v3 auth {}", self.name()));
         PrivateKey::deserialize(&bytes).expect("32 bytes are a Curve25519 private key")
@@ -97,30 +91,25 @@ pub enum PasskeyDoor<'a> {
     Keep(&'a Backup),
 }
 
-fn seal(key: &[u8; 32], plain: &[u8]) -> Vec<u8> {
-    let nonce: [u8; 12] = crate::identity::random();
-    let sealed = ChaCha20Poly1305::new(key.into()).encrypt(&nonce.into(), plain).expect("encryption");
-    [nonce.to_vec(), sealed].concat()
-}
-
 /// K from its wrap under a door.
 fn unwrap_k(wrapped: &[u8], door: &Door) -> Option<[u8; 32]> {
-    let (nonce, sealed) = wrapped.split_at_checked(12)?;
-    ChaCha20Poly1305::new(&door.wrap_key().into()).decrypt(nonce.into(), sealed).ok()?.try_into().ok()
+    aead::open(&door.wrap_key(), &[], wrapped)?.try_into().ok()
 }
 
-/// A record for the hub: K under the recovery key always, under the passkey as `passkey` says; `plain` (the app's
-/// account and recovery key) padded and sealed under K; the recovery key's locator; the doors' auth keys.
+/// A record for the hub: K under the recovery key and, as `passkey` says, the passkey; `plain` padded and sealed
+/// under K; the locator; the doors' auth keys.
 pub fn make(k: &[u8; 32], plain: &[u8], code: &AccountEntropyPool, passkey: PasskeyDoor) -> Result<Backup> {
     let (by_passkey, auth_passkey) = match passkey {
         PasskeyDoor::None => (Vec::new(), None),
-        PasskeyDoor::New(prf) => (seal(&Door::Passkey(prf).wrap_key(), k), Some(Door::Passkey(prf).auth_public())),
+        PasskeyDoor::New(prf) => {
+            (aead::seal(&Door::Passkey(prf).wrap_key(), &[], k), Some(Door::Passkey(prf).auth_public()))
+        }
         PasskeyDoor::Keep(record) => (record.by_passkey.as_slice().to_vec(), record.auth_keys().0),
     };
     let door = Door::Code(code);
     let backup = Backup::new(
         by_passkey,
-        seal(&door.wrap_key(), k),
+        aead::seal(&door.wrap_key(), &[], k),
         seal_padded(k, &[], plain)?,
         locator(code).to_vec(),
         auth_passkey,
@@ -147,14 +136,12 @@ pub fn open(record: Backup, door: &Door) -> Option<Opened> {
     Some(Opened { k, plain, record })
 }
 
-/// The last time a fetch was signed at, here: each signature once (the hub's replay cache), also two in one
-/// millisecond.
+/// The last signing time of a fetch: each signature once (the hub's replay cache), also within one millisecond.
 static SIGNED_AT: AtomicU64 = AtomicU64::new(0);
 
 impl Client {
-    /// Fetches a backup record by the user id (a passkey's user handle) or by the recovery key's locator (spec 7),
-    /// before there is an account on this phone, signed with the door's auth key; `None` when there is none, or none
-    /// this door may fetch (the hub says the same for both).
+    /// Fetches a backup record by user id or locator (spec 7) before there is an account, signed with the door's auth
+    /// key; `None` when there is none this door may fetch.
     pub fn fetch_backup(transport: &dyn Transport, id: &[u8], door: &Door) -> Result<Option<Backup>> {
         if id.len() != LOCATOR_LEN {
             return Err(Error::Protocol("backup id"));
@@ -182,8 +169,7 @@ impl Client {
         }
     }
 
-    /// Fetches and opens the record a door opens: by the user id when given (a passkey's user handle), else by the
-    /// recovery key's locator. `None` when there is none it opens.
+    /// Fetches and opens the record a door opens, by user id when given, else by the recovery key's locator.
     pub fn open_backup(transport: &dyn Transport, user_id: Option<&[u8]>, door: &Door) -> Result<Option<Opened>> {
         let id = match (user_id, door) {
             (Some(id), _) => id.to_vec(),

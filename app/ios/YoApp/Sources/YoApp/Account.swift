@@ -228,47 +228,38 @@ final class AccountStore {
   /// friends may only not have them yet (the add row keeps Group and Invite closed).
   private(set) var storageRead = false
 
+  /// An old install not signed in again yet (KeychainV1): "Yo is updating…" instead of the list until it is.
+  private(set) var updating = false
+  /// The update did not finish after several tries (the keychain or the hub not answering): an alert offers "Try
+  /// Again"; nothing is deleted, and each time Yo comes to the front it tries again too.
+  private(set) var updateStalled = false
+
+  /// "Try Again" on the update's alert.
+  func retryUpdate() {
+    updateStalled = false
+    openNow()
+  }
+  /// What the app keeps of the account beyond the store (the list, unseen photos, what waits to go): emptied when
+  /// another user than the one shown comes in (`leave`).
+  @ObservationIgnored var leaving: @MainActor () -> Void = {}
+
   init() {
     let saved = UserDefaults.standard.data(forKey: Self.key)
     account = saved.flatMap { try? JSONDecoder().decode(Account.self, from: $0) }
-    if var old = account, old.backupVersion != Account.backupVersion {
-      // A backup of the 12 words no longer opens (spec 7): not secured, as a new account, its words and backup
-      // secrets forgotten; the passkey's door goes with it. Its iCloud Keychain item is written anew at the opening.
-      old.byPasskey = false
-      old.byCode = false
-      old.codeAuth = nil
-      old.passkeyAuth = nil
-      old.backupVersion = Account.backupVersion
-      RecoveryWords.delete()
-      SyncedAccount.mustSave(old.userID)
-      account = old
-      // Observers do not run in `init`: written here.
-      UserDefaults.standard.set(try? JSONEncoder().encode(old), forKey: Self.key)
-      wordsSaved = false
-      UserDefaults.standard.set(false, forKey: "recovery.saved")
-      passkeyTurnedOff = false
-      UserDefaults.standard.set(false, forKey: "passkey.turnedOff")
-    }
-    if let account, let saved {
-      // Builds before kept the account key's secret here too, in the preferences (and so in the phone's backups):
-      // into the iCloud Keychain if the account has no item there yet, then written again without it.
-      if let old = try? JSONDecoder().decode(LegacySecret.self, from: saved).accountKey,
-        let secret = try? legacyAccountSecret(seed: old)
-      {
-        SyncedAccount.save(account, secret: secret, onlyIfMissing: true)
-        UserDefaults.standard.set(try? JSONEncoder().encode(account), forKey: Self.key)
-      }
+    updating = KeychainV1.pending(account: account, saved: saved)
+    if account != nil {
       // The core opens as the first scene connects (or once Yo is in front), and in a launch in the background only
       // when something asks for it (`openNow`: a silent push's sync, a notification's Yo Back): the Action button's
       // Yo opens the state itself (YoSend), and would wait for ours.
       Launch.whenScene { [weak self] in self?.openNow() }
-      Launch.whenActive { [weak self] in self?.openNow() }
     }
+    // An old install's update too: it runs only in the foreground (`migrate`), so nothing opens here.
+    Launch.whenActive { [weak self] in self?.openNow() }
   }
 
   /// The core, opening now if it has not (a launch in the background opens it only when something needs it).
   func openNow() {
-    guard client == nil, account != nil, !opening else { return }
+    guard client == nil, !opening else { return }
     Task { await open() }
   }
 
@@ -309,9 +300,6 @@ final class AccountStore {
     }
   }
 
-  /// The secret as builds before kept it in the account's JSON.
-  private struct LegacySecret: Decodable { var accountKey: Data? }
-
   /// The core from the state it saved last, tried again while it cannot be read yet (the keychain or the file before
   /// the first unlock, a passing error, a save that failed, a registration to finish without the hub), a little later
   /// each time. A state that is gone or does not open: `broken`, and the person signs in again (`recover`). A device
@@ -320,6 +308,12 @@ final class AccountStore {
     guard !opening else { return }
     opening = true
     defer { opening = false }
+    // An old install (looked at again: a state not readable at launch may be one of before).
+    updating = KeychainV1.pending(account: account, saved: UserDefaults.standard.data(forKey: Self.key))
+    if updating {
+      await migrate()
+      if updating { return }  // not now, or not at all (`broken`); else in, or opened below
+    }
     var pause = 1.0
     var tries = 0
     var unavailableSince: ContinuousClock.Instant?
@@ -327,6 +321,18 @@ final class AccountStore {
     while client == nil, account != nil, !broken {
       do {
         try await openOnce()
+        if KeychainV1.hasOldState {
+          if var current = account, let item = SyncedAccount.load(current.userID) {
+            current.backupVersion = Account.backupVersion
+            current.byPasskey = item.byPasskey
+            current.byCode = item.byCode
+            current.codeAuth = item.codeAuth
+            current.passkeyAuth = item.passkeyAuth
+            if let key = item.recoveryKey { Diagnostics.attempt({ try RecoveryWords.save(key) }) }
+            account = current
+          }
+          await KeychainV1.discardOldState()
+        }
         Availability.shared.local = false
         accountLog.notice("opened")
         return
@@ -428,39 +434,26 @@ final class AccountStore {
           let client = try YoClient.openDb(
             transport: transport, db: db, stateKey: key, guest: false, lock: SharedStateFile())
           Hub.pin(client)
-          client.acknowledgeExplicitly()  // each batch as the app has stored it (Inbox.take)
           return (client, client.accountSecret())
         }
-        guard StateStorage.exists(StateFile.folder, before: StateFile.url) else { throw Unopened.gone }
-        let own = try StateKey.load()
-        let client: YoClient
-        do {
-          guard let own else { throw Unopened.gone }
-          let db = try StateFile.database(key: own)
-          guard try db.hasState() else { throw Unopened.gone }
-          client = try YoClient.openDb(transport: transport, db: db, stateKey: own, guest: false, lock: nil)
-        } catch let error where error is Unopened || (error as? YoError).map({ if case .State = $0 { true } else { false } }) == true {
-          // Yo Dev: sealed under the key a build before took from Yo of TestFlight (`StateKey.others`)? Taken over then.
-          guard let (key, opened) = StateKey.others().lazy.compactMap({ key in
-            Diagnostics.attempt {
-              let db = try StateFile.database(key: key)
-              return (key, try YoClient.openDb(transport: transport, db: db, stateKey: key, guest: false, lock: nil))
-            }
-          }).first else { throw error }
-          try StateKey.adopt(key)
-          accountLog.notice("open: the state opened with a key of another group, now this app's own")
-          client = opened
-        }
+        guard StateFile.exists, let key = try StateKey.load() else { throw Unopened.gone }
+        let db = try StateFile.database()
+        guard try db.hasState() else { throw Unopened.gone }
+        let client = try YoClient.openDb(transport: transport, db: db, stateKey: key, guest: false, lock: nil)
         Hub.pin(client)
-        client.acknowledgeExplicitly()  // each batch as the app has stored it (Inbox.take)
         return (client, client.accountSecret())
       }
     }
     guard self.client == nil, account != nil, account?.userID == userID else { return }  // account changed meanwhile
+    // Another user than the one shown (an update's sign-in that got a new user id, stopped before it was taken in):
+    // what this phone kept of the one before goes first, then the account is the state's, without its backup.
+    if let id = Hub.bytes(client.userId()), let current = account, current.userID != id {
+      await leave()
+      guard self.client == nil, account == current else { return }
+      account = Account(username: client.username() ?? current.username, userID: id, byPasskey: false)
+    }
     use(client, secret: secret)
     Perf.mark("launch.client")
-    // The user id as the core has it (an earlier build read it wrongly): the passkey's handle and the backup's id.
-    if let id = Hub.bytes(client.userId()), account?.userID != id { account?.userID = id }
     // Into the iCloud Keychain if not there (accounts from before it, one signed out on another phone of the
     // person's). Only then: opening asks nothing of the hub, so this phone may have been replaced meanwhile, and the
     // item of the phone that has the account now must not be overwritten by an older one.
@@ -476,55 +469,59 @@ final class AccountStore {
   /// "Sign In Again" for a state that does not open (`broken`): this phone forgets it, and registers again with the
   /// account's key from the iCloud Keychain if it is there; else the way in (passkey, recovery key) brings it back.
   func recover() async {
-    let item = account.flatMap { SyncedAccount.load($0.userID) }
     // With the hub unreachable a new sign-in cannot finish: nothing is forgotten, the alert says why.
     guard await Self.hubAnswers() else {
       hubDown = true
       return
     }
     hubDown = false
+    // In meanwhile (the update's sign-in went through on a later try): nothing to recover.
+    guard client == nil else {
+      broken = false
+      return
+    }
+    // An old install without a key anywhere (the migration found none): every place is asked again, and only a key
+    // surely missing everywhere lets its old state go with the account. Else the update goes on.
+    if updating, let previous = account {
+      let found = await KeychainV1.signIn(for: previous, saved: UserDefaults.standard.data(forKey: Self.key))
+      guard client == nil, updating, account == previous else { return }
+      guard case .missing = found else {
+        broken = false
+        return openNow()
+      }
+      updating = false
+      await KeychainV1.discardOldState()
+    }
+    let item = account.flatMap { SyncedAccount.load($0.userID) }
     accountLog.error("recover: \(item == nil ? "no iCloud Keychain item" : "registering again", privacy: .public)")
-    Self.keepUnopened()
     reset()
     if let item { _ = try? await restore(synced: item) }
-  }
-
-  /// The state that did not open, kept aside beside it (never in the phone's backup) before signing in again deletes
-  /// it: the only copy of what this device had, for finding out why, or opening it later.
-  private static func keepUnopened() {
-    let stamp = Int(Date.now.timeIntervalSince1970)
-    let places: [(URL?, () throws -> StateDb)] = [(StateFile.folder, StateFile.database), (SharedStateFile.folder, SharedStateFile.database)]
-    for case let (folder?, database) in places where FileManager.default.fileExists(atPath: folder.path) {
-      guard let blob = try? database().blob() else { continue }
-      let aside = folder.appending(path: "yo-state.unopened-\(stamp)")
-      do {
-        try blob.write(to: aside, options: [.atomic, .completeFileProtectionUntilFirstUserAuthentication])
-        accountLog.notice("recover: the state kept as \(aside.lastPathComponent, privacy: .public)")
-      } catch {
-        accountLog.error("recover: the state not kept: \(String(describing: error), privacy: .public)")
-      }
-    }
   }
 
   /// Registers `username` at the hub (spec 6.4), or, with `secret`, takes the key's account back (a new phone), with
   /// the name it has now: `username` then only counts if the key's account is gone. One at a time, whichever way in (a
   /// second registration would replace the first).
-  private func register(_ username: String, secret: Data?, legacySeed: Data? = nil) async throws -> (
-    client: YoClient, secret: Data
-  ) {
+  /// `replacing`: the account shown while an old install signs in again (the migration): it stays until this is in.
+  private func register(
+    _ username: String, secret: Data?, legacySeed: Data? = nil, legacyStorageKey: Data? = nil,
+    replacing: Account? = nil
+  ) async throws -> (client: YoClient, secret: Data) {
     // One at a time, and never over an account signed in meanwhile (another way in finished first).
-    guard !registering, account == nil else { throw Diagnostics.failure(AccountError.busy) }
+    guard !registering, account == replacing else { throw Diagnostics.failure(AccountError.busy) }
     registering = true
     defer { registering = false }
     await deleting?.value  // the state signed out of goes first, never this one
     let transport = Hub.transport
+    // The push token goes with it when APNs gave it already (else `Push.send`, once it has).
+    let push = Push.shared.registration
     do {
       return try await Hub.run {
         // The state there now (none, or a signed-out one's) is replaced, under the turn in the group.
         let make = { (db: StateDb, key: Data, lock: StateLock?) in
           let client = try YoClient.registerUsernameDb(
             transport: transport, db: db, stateKey: key, lock: lock, username: username, accountSecret: secret,
-            legacySeed: legacySeed, name: nil, pushPlatform: 0, pushToken: "")
+            legacySeed: legacySeed, legacyStorageKey: legacyStorageKey, name: nil, pushPlatform: push.platform,
+            pushToken: push.token)
           Hub.pin(client)
           return client
         }
@@ -536,7 +533,6 @@ final class AccountStore {
           let key = try StateKey.make()
           client = try make(StateFile.database(), key, nil)
         }
-        client.acknowledgeExplicitly()  // each batch as the app has stored it (Inbox.take)
         return (client, client.accountSecret())
       }
     } catch YoError.Refused(let status) where status == 409 {
@@ -879,6 +875,85 @@ final class AccountStore {
     passkeyTurnedOff = account.secured && !account.byPasskey
   }
 
+  /// The one-time sign-in of an old install (KeychainV1): in the foreground once the phone is unlocked, one step
+  /// before the list, the account shown until the new one is in. Not readable or not reachable now: again a little
+  /// later while Yo is in front, and at its next opening. Nothing old goes before the new state is in.
+  /// A registration saved and not answered yet is this step's too: `register` finishes it, with the same device.
+  private func migrate() async {
+    var pause = 1.0
+    var tries = 0
+    while updating, let previous = account, Self.inFront {
+      if tries >= 6 {  // a minute or more: the alert, and again at the next opening or "Try Again"
+        updateStalled = true
+        return
+      }
+      tries += 1
+      // Signed in already (stopped before the old state went): `open` opens it and lets the old state go.
+      let signedIn = KeychainV1.signedIn
+      if signedIn == true {
+        updating = false
+        updateStalled = false
+        return
+      }
+      // Today's state not readable now: asked again (never registered over).
+      var found = KeychainV1.Found.notNow
+      if signedIn == false {
+        found = await KeychainV1.signIn(for: previous, saved: UserDefaults.standard.data(forKey: Self.key))
+      }
+      // The keychain answered: still in front, still this update's, before anything that cannot be undone.
+      guard updating, account == previous, Self.inFront else { return }
+      switch found {
+      case .missing:
+        updateStalled = false
+        brokenWhy = "no account key"
+        broken = true
+        return
+      case .item(let item, _) where item.signedOut == true || item.userID == SyncedAccount.left:
+        // Signed out, or taken to another phone, since this one last ran: never signed in again silently (it would
+        // replace the phone it is on now). Signed out here as well; Sign In lists it, the old state stays.
+        accountLog.notice("migrate: signed out or left, not signing in again")
+        updating = false
+        updateStalled = false
+        return reset()
+      case .item(let item, let storageKey) where SyncedAccount.write(item, previous: nil):
+        do {
+          if try await restore(synced: item, legacyStorageKey: storageKey, replacing: previous) {
+            await KeychainV1.discardOldState()
+            updating = false
+            updateStalled = false
+            broken = false
+            return
+          }
+        } catch AccountError.noBackup {
+          // Deleted, its name another key's: nothing of before to sign in with; "Sign In Again" signs out.
+          await KeychainV1.discardOldState()
+          updating = false
+          updateStalled = false
+          brokenWhy = "account gone"
+          broken = true
+          return
+        } catch {}  // not reachable now
+      case .item, .notNow: break
+      }
+      try? await Task.sleep(for: .seconds(pause))
+      pause = min(pause * 2, 30)
+    }
+  }
+
+  /// In front and unlocked: the update's one step may run.
+  private static var inFront: Bool {
+    UIApplication.shared.applicationState != .background && UIApplication.shared.isProtectedDataAvailable
+  }
+
+  /// Another user than the one shown comes in (a sign-in again that got a new user id): everything this phone kept of
+  /// the one before goes (its received and unsent photos, its recovery key, the list), before the new one is used.
+  /// The account shown is the old one until then, so a stop between does it again at the next opening (`openOnce`).
+  private func leave() async {
+    RecoveryWords.delete()
+    await MediaStorage.clearAll()
+    leaving()
+  }
+
   /// Back without a word, from the iCloud Keychain (`SyncedAccount`): the app deleted and installed again, or a new
   /// iPhone. Registers this phone with the account's key (spec 6.4), so the phone it was on before is signed out, as
   /// with a backup. Only when exactly one account is there not signed out, and not one this phone left (taken to
@@ -893,18 +968,27 @@ final class AccountStore {
   }
 
   /// An account tapped on Sign In, from the iCloud Keychain: signed in with its key, also one signed out before.
+  /// `replacing`: the account an old install shows, kept until this one is in (`migrate`).
   @discardableResult
-  func restore(synced item: SyncedAccount.Item) async throws -> Bool {
-    guard account == nil else { return false }
+  func restore(
+    synced item: SyncedAccount.Item, legacyStorageKey: Data? = nil, replacing previous: Account? = nil
+  ) async throws -> Bool {
+    guard account == previous else { return false }
     let client: YoClient
     let secret: Data
     do {
-      (client, secret) = try await register(item.username, secret: item.accountKey, legacySeed: item.legacySeed)
+      (client, secret) = try await register(
+        item.username, secret: item.accountKey, legacySeed: item.legacySeed, legacyStorageKey: legacyStorageKey,
+        replacing: previous)
     } catch AccountError.taken {
       SyncedAccount.delete(item.userID)  // its account is gone, the name another key's: nothing to bring back
       throw Diagnostics.failure(AccountError.noBackup)
     }
-    guard account == nil, let id = Hub.bytes(client.userId()) else { return false }
+    guard account == previous, let id = Hub.bytes(client.userId()) else { return false }
+    if let previous, previous.userID != id {
+      await leave()
+      guard account == previous else { return false }
+    }
     SyncedAccount.left = nil
     use(client, secret: secret)
     // The same user, or (the account deleted meanwhile, spec 6.4) a new one with the same key and no backup.
@@ -1041,6 +1125,7 @@ final class AccountStore {
   /// "Sign Out" (and after deleting the account): marked signed out in the iCloud Keychain, so no start brings the
   /// account back by itself, here or on the person's other devices (Sign In lists it); then forgotten here (`reset`).
   func signOut() {
+    guard !updating else { return }  // the update's sign-in first (its screen has no Sign Out)
     if let id = account?.userID { SyncedAccount.markSignedOut(id) }
     reset(fullLocalReset: true)
   }
@@ -1064,6 +1149,7 @@ final class AccountStore {
     secret = nil
     broken = false
     hubDown = false
+    updateStalled = false
     restored = false
     storing = nil
     storageRead = false
@@ -1080,18 +1166,15 @@ final class AccountStore {
       await MediaStorage.clearAll()
       // Closing a client may wait for a network step; generation retirement fences its later shared writes.
       Task.detached(priority: .userInitiated) { old?.close() }
-      let shared = !fullLocalReset && SharedStateFile.available ? (try? SharedStateFile.database()) : nil
+      let shared = SharedStateFile.available ? (try? SharedStateFile.database()) : nil
       let held = SharedStateFile.take(within: 3)
       defer { if held { SharedStateFile.give() } }
-      if fullLocalReset {
-        LocalReset.wipe()
-      } else {
-        // Retire the lock even if an extension never releases its old turn.
-        SharedStateFile.rotateLock()
-        StateFile.forget()
-        if let shared { Diagnostics.attempt({ try shared.clear() }) }
-        if let url = SharedStateFile.stateURL { try? FileManager.default.removeItem(at: url) }
-      }
+      // Retire the lock even if an extension never releases its old turn. Cleared, also before a full wipe: the
+      // database held open here forgets the rows it kept in the clear.
+      SharedStateFile.rotateLock()
+      StateFile.forget()
+      if let shared { Diagnostics.attempt({ try shared.clear() }) }
+      if fullLocalReset { LocalReset.wipe() }
     }
     RecoveryWords.delete()
     Stats.reset()
@@ -1229,20 +1312,12 @@ enum SyncedAccount {
 
     var id: Data { userID }
 
-    /// An item of before as it is now: its secret the libsignal key it was (`legacyAccountSecret`), not secured (its
-    /// backup of the 12 words no longer opens).
-    func upgraded() -> Item? {
-      guard version != Account.backupVersion else { return self }
-      guard let secret = try? legacyAccountSecret(seed: accountKey) else { return nil }
-      return Item(
-        username: username, userID: userID, accountKey: secret, byPasskey: false, byCode: false, recoveryKey: nil,
-        signedOut: signedOut, version: Account.backupVersion, legacySeed: accountKey)
-    }
+
   }
 
-  private static var host: String { Hub.home.host() ?? Hub.home.absoluteString }
+  static var host: String { Hub.home.host() ?? Hub.home.absoluteString }
 
-  private static var base: [String: Any] {
+  static var base: [String: Any] {
     [
       kSecClass as String: kSecClassGenericPassword,
       kSecAttrService as String: "app.justyo.account",
@@ -1256,9 +1331,9 @@ enum SyncedAccount {
 
   /// The account in use here, written as it changes (signed in, so not signed out).
   static func save(_ account: Account, secret: Data, onlyIfMissing: Bool = false) {
-    migrate()
+    try? KeychainV1.moveHostItem()
     pendingSignOut.remove(account.userID)  // in use here again: not signed out
-    let stored = raw(account.userID)
+    let stored = try? raw(account.userID)
     let previous = stored?.upgraded()
     // An item of before (Ed25519, the 12 words) counts as missing: written anew.
     if onlyIfMissing && previous != nil && stored?.version == Account.backupVersion { return }
@@ -1282,11 +1357,8 @@ enum SyncedAccount {
   /// Whether this account's item was not written the last time it changed: write it again, whole.
   static func needsSave(_ userID: Data) -> Bool { pendingSave.contains(userID) }
 
-  /// This account's item to be written again, whole, at the next opening.
-  static func mustSave(_ userID: Data) { pendingSave.insert(userID) }
-
   @discardableResult
-  private static func write(_ item: Item, previous: Item?) -> Bool {
+  static func write(_ item: Item, previous: Item?) -> Bool {
     guard item != previous else { return true }
     guard let data = try? JSONEncoder().encode(item) else { return false }
     let attributes: [String: Any] = [
@@ -1301,24 +1373,20 @@ enum SyncedAccount {
   }
 
   /// The item as it is now (`Item.upgraded`).
-  static func load(_ userID: Data) -> Item? { raw(userID)?.upgraded() }
+  static func load(_ userID: Data) -> Item? { try? read(userID) }
+
+  /// The item as it is now; nil only when there is none (or none that reads), throws when the keychain does not answer.
+  static func read(_ userID: Data) throws -> Item? { try raw(userID)?.upgraded() }
 
   /// The item as stored.
-  private static func raw(_ userID: Data) -> Item? {
-    guard var find = Keychain.own(query(userID)) else { return nil }
-    find[kSecReturnData as String] = true
-    find[kSecMatchLimit as String] = kSecMatchLimitOne
-    var result: CFTypeRef?
-    guard SecItemCopyMatching(find as CFDictionary, &result) == errSecSuccess, let data = result as? Data else {
-      return nil
-    }
-    return try? JSONDecoder().decode(Item.self, from: data)
+  private static func raw(_ userID: Data) throws -> Item? {
+    try Keychain.read(query(userID)).flatMap { try? JSONDecoder().decode(Item.self, from: $0) }
   }
 
   /// Every account of this hub in the keychain, by name; one whose sign-out or deletion the keychain has not taken yet
   /// counts as signed out, or gone.
   static func all() -> [Item] {
-    migrate()
+    try? KeychainV1.moveHostItem()
     retryPending()
     let (signedOut, deleted) = (pendingSignOut, pendingDelete)
     return stored().filter { !deleted.contains($0.userID) }.map { item in
@@ -1393,22 +1461,6 @@ enum SyncedAccount {
   private static var pendingDelete: Set<Data> {
     get { Set(UserDefaults.standard.array(forKey: "account.pendingDelete") as? [Data] ?? []) }
     set { UserDefaults.standard.set(Array(newValue), forKey: "account.pendingDelete") }
-  }
-
-  /// Builds before one item per account kept one per hub (its host as the item's account): moved to the account's own.
-  private static func migrate() {
-    guard let old = Keychain.own(base.merging([kSecAttrAccount as String: host]) { $1 }) else { return }
-    var find = old
-    find[kSecReturnData as String] = true
-    find[kSecMatchLimit as String] = kSecMatchLimitOne
-    var result: CFTypeRef?
-    guard SecItemCopyMatching(find as CFDictionary, &result) == errSecSuccess else { return }
-    if let data = result as? Data, let item = try? JSONDecoder().decode(Item.self, from: data),
-      load(item.userID) == nil, !write(item, previous: nil)
-    {
-      return  // not moved (the keychain would not): the old item stays, to be moved next time
-    }
-    SecItemDelete(old as CFDictionary)
   }
 
   /// The account this phone left, or that was taken to another phone: never brought back here silently (on this

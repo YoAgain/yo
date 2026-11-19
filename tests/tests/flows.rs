@@ -1,16 +1,18 @@
 //! Every 1:1 flow end to end through the layer the apps call (`yo::YoClient`, UniFFI), against a hub in-process:
 //! the app's HTTP and its file as callbacks, faults and crashes where the app meets them.
 
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::Ordering;
 use std::sync::{Arc, Mutex};
-use yo::{HttpResult, HttpTransport, MessageKind, StateStore, YoClient, YoError, YoEvent};
-use yo_tests::{access_shown, deliver_raw_with, random_u64, username, Disk, Fault, Http, Process, TestHub};
+use yo::{HttpResult, HttpTransport, MessageKind, YoClient, YoError, YoEvent};
+use yo_tests::{
+    access_shown, deliver_raw_with, random_u64, username, Alone, AppClient, Disk, Fault, Http, Process, TestHub,
+};
 
 const KEY: [u8; 32] = [7; 32];
 
 /// The app's HTTP: the harness's, with its faults; and a crash, once told: the process dies right after the
 /// request to a path reached the hub (its file keeps what was saved until then).
-struct App(Arc<Http>, Mutex<Option<(String, Arc<File>)>>);
+struct App(Arc<Http>, Mutex<Option<(String, Arc<Disk>)>>);
 
 impl App {
     fn new(http: Arc<Http>) -> Arc<App> {
@@ -25,7 +27,7 @@ impl HttpTransport for App {
         let mut crash = self.1.lock().unwrap();
         if crash.as_ref().is_some_and(|(pattern, _)| path.contains(pattern.as_str())) {
             let (_, file) = crash.take().unwrap();
-            file.frozen.store(true, Ordering::Relaxed);
+            file.freeze();
             return HttpResult { status: 0, body: Vec::new(), error: Some("crashed".into()) };
         }
         match result {
@@ -35,39 +37,12 @@ impl HttpTransport for App {
     }
 }
 
-/// The app's file: the sealed state as saved last; frozen, it keeps what it had (the process died then), full, it
-/// throws.
-#[derive(Default)]
-struct File {
-    blob: Mutex<Vec<u8>>,
-    frozen: AtomicBool,
-    full: AtomicBool,
-}
-
-impl StateStore for File {
-    fn save(&self, blob: Vec<u8>) -> Result<(), YoError> {
-        if self.full.load(Ordering::Relaxed) {
-            return Err(YoError::Save { message: "disk full".into() });
-        }
-        if !self.frozen.load(Ordering::Relaxed) {
-            *self.blob.lock().unwrap() = blob;
-        }
-        Ok(())
-    }
-}
-
-impl File {
-    fn saved(&self) -> Vec<u8> {
-        self.blob.lock().unwrap().clone()
-    }
-}
-
 /// A phone: the client, its HTTP and its file.
 struct Phone {
     client: Arc<YoClient>,
     app: Arc<App>,
     http: Arc<Http>,
-    file: Arc<File>,
+    file: Arc<Disk>,
     name: String,
 }
 
@@ -86,13 +61,15 @@ impl Phone {
     fn register(hub: &TestHub, name: &str, shown: Option<&str>, secret: Option<Vec<u8>>) -> Phone {
         let http = Http::new(hub.url());
         let app = App::new(http.clone());
-        let file = Arc::new(File::default());
-        let client = YoClient::register_username(
+        let file = Disk::new();
+        let client = YoClient::register_username_db(
             app.clone(),
-            file.clone(),
+            file.db(),
             KEY.to_vec(),
+            Some(Arc::new(Alone(file.clone()))),
             name.into(),
             secret,
+            None,
             None,
             shown.map(str::to_owned),
             0,
@@ -109,11 +86,13 @@ impl Phone {
 
     /// The app killed and started again from what its file holds.
     fn restart(&self, hub: &TestHub) -> Phone {
-        self.file.frozen.store(false, Ordering::Relaxed);
+        self.file.thaw();
         let http = Http::new(hub.url());
         let app = App::new(http.clone());
-        let file = Arc::new(File::default());
-        let client = YoClient::restore(app.clone(), file.clone(), KEY.to_vec(), self.file.saved()).unwrap();
+        let file = self.file.clone();
+        let client =
+            YoClient::open_db(app.clone(), file.db(), KEY.to_vec(), false, Some(Arc::new(Alone(file.clone()))))
+                .unwrap();
         Phone { client, app, http, file, name: self.name.clone() }
     }
 
@@ -161,13 +140,11 @@ fn describe(events: &[YoEvent]) -> String {
     let one = |e: &YoEvent| match e {
         YoEvent::NewChat { user } => format!("new chat {}", &user[..8]),
         YoEvent::Message { user, kind, .. } => format!("message {} {}", &user[..8], kind_name(kind)),
-        YoEvent::SentElsewhere { user, .. } => format!("sent elsewhere {}", &user[..8]),
         YoEvent::Profile { user, name } => format!("profile {} {name}", &user[..8]),
         YoEvent::IdentityChanged { user } => format!("identity {}", &user[..8]),
         YoEvent::GroupMessage { group, user, kind, .. } => {
             format!("group {} message {} {}", &group[..8], &user[..8], kind_name(kind))
         }
-        YoEvent::GroupSentElsewhere { group, .. } => format!("group {} sent elsewhere", &group[..8]),
         YoEvent::GroupChanged { group } => format!("group {} changed", &group[..8]),
     };
     events.iter().map(one).collect::<Vec<_>>().join(", ")
@@ -248,7 +225,11 @@ fn a_photo_and_a_video_go_as_blobs_and_are_opened_once() {
     a.upload_media(sealed_photo.media.clone(), sealed_photo.ciphertext.clone(), chat.fetches).unwrap();
     a.upload_media(sealed_video.media.clone(), sealed_video.ciphertext.clone(), chat.fetches).unwrap();
     a.send_photo(b.user(), sealed_photo.media.clone()).unwrap();
-    a.send_video(b.user(), sealed_video.media.clone(), 4_500).unwrap();
+    a.send(
+        yo::SendTarget::Contact { id: b.user() },
+        MessageKind::Video { media: sealed_video.media.clone(), duration_ms: 4_500 },
+    )
+    .unwrap();
     let events = b.drain();
     let (mut photos, mut videos) = (Vec::new(), Vec::new());
     for event in events {
@@ -430,7 +411,7 @@ fn a_crash_before_or_after_a_save_loses_nothing_and_shows_nothing_twice() {
     assert_eq!(yos(&b.drain(), &a.user()), 0, "acknowledged: never again");
     // A frozen B (it died right after the hub handed out its inbox, nothing saved): the hub sends it again.
     a.send_yo(b.user()).unwrap();
-    b.file.frozen.store(true, Ordering::Relaxed);
+    b.file.freeze();
     assert_eq!(yos(&b.sync(0).unwrap(), &a.user()), 1);
     let b = b.restart(&hub);
     assert_eq!(yos(&b.drain(), &a.user()), 1, "not acknowledged unsaved: again");
@@ -526,12 +507,12 @@ fn a_replaced_device_still_sending_is_not_heard() {
 fn a_wedged_session_heals_by_a_decryption_error() {
     let hub = TestHub::start();
     let (a, b) = pair(&hub);
-    let early = b.file.saved();
+    let early = b.file.snapshot();
     a.send_yo(b.user()).unwrap();
     assert_eq!(yos(&b.drain(), &a.user()), 1);
     b.send_yo(a.user()).unwrap();
     assert_eq!(yos(&a.drain(), &b.user()), 1);
-    *b.file.blob.lock().unwrap() = early;
+    b.file.put_back(early);
     let b = b.restart(&hub);
     a.send_yo(b.user()).unwrap();
     let events = b.sync(0).unwrap();
@@ -730,9 +711,9 @@ fn sealed_bytes_reveal_nothing() {
             assert_eq!(same, 0, "two envelopes share bytes");
         }
     }
-    // The state's file too: sealed under the app's key, nothing in the clear.
-    let saved = a.file.saved();
-    for (what, bytes) in &secrets {
+    // The state's files too: its keys sealed under the app's key (names and ids are columns of their own).
+    let saved: Vec<u8> = a.file.snapshot().into_iter().flat_map(|(_, bytes)| bytes).collect();
+    for (what, bytes) in secrets.iter().filter(|(what, _)| what.contains("key")) {
         assert!(!saved.windows(bytes.len()).any(|w| w == bytes.as_slice()), "{what} in the saved state");
     }
 }
@@ -851,6 +832,7 @@ fn the_notification_service_decrypts_while_the_app_holds_the_state() {
         KEY.to_vec(),
         Some(Process::new(&disk)),
         username(n),
+        None,
         None,
         None,
         Some("ALICE".into()),

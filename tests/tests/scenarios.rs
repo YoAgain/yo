@@ -49,7 +49,7 @@ fn a_yo_goes_there_and_back() {
     assert_eq!(a.account_key_of(&digits(&pb)).map(|k| k.len()), Some(64));
     assert!(a.sessions_with(&digits(&pa)).is_empty(), "none with oneself");
     assert_eq!(a.dropped() + b.dropped(), 0);
-    assert_eq!(a.pending() + b.pending(), 0);
+    assert_eq!(a.waiting() + b.waiting(), 0);
 }
 
 #[test]
@@ -188,7 +188,7 @@ fn another_key_for_a_friend_is_told_and_written_to() {
     // A's Yo meets the new device at the hub (409): A drops B's old session and starts one with the new device.
     let events = a.send_yo(&pb).unwrap();
     assert!(events.contains(&Event::IdentityChanged { user: b.clone() }), "{events:?}");
-    assert_eq!(a.pending(), 0, "taken for the new device");
+    assert_eq!(a.waiting(), 0, "taken for the new device");
     assert_eq!(a.contacts().len(), 1, "the same contact goes on");
     assert_eq!(a.sessions_with(&b).len(), 1, "a session with the new device only");
     assert_eq!(unread_by(&mut b2), 1, "written to B, not to the account the hub put in its place");
@@ -221,11 +221,11 @@ fn a_verified_contact_with_a_new_key_waits_for_confirmation() {
     assert_eq!(a.send_yo(&pb), Err(Error::Unconfirmed));
     let contact = &a.contacts()[0];
     assert!(contact.unconfirmed && !contact.verified);
-    assert_eq!(a.pending(), 1, "held");
+    assert_eq!(a.waiting(), 1, "held");
     assert_eq!(unread_by(&mut b2), 0);
     a.confirm_identity(&pb).unwrap();
     a.send_yo(&pb).unwrap();
-    assert_eq!(a.pending(), 0);
+    assert_eq!(a.waiting(), 0);
     assert_eq!(unread_by(&mut b2), 2, "the held Yo and the new one");
 }
 
@@ -238,10 +238,10 @@ fn a_name_set_while_a_new_key_waits_is_told_after_the_confirmation() {
     a.set_verified(&pb, true).unwrap();
     assert_eq!(a.send_yo(&pb), Err(Error::Unconfirmed));
     a.set_name("ALICIA").unwrap();
-    assert_eq!(a.pending(), 1, "the name waits too");
+    assert_eq!(a.waiting(), 1, "the name waits too");
     a.confirm_identity(&pb).unwrap();
     a.send_yo(&pb).unwrap();
-    assert_eq!(a.pending(), 0);
+    assert_eq!(a.waiting(), 0);
     assert_eq!(unread_by(&mut b2), 3, "the held Yo, the name, the new Yo");
 }
 
@@ -324,11 +324,9 @@ fn the_state_survives_a_restart_of_the_app() {
     let (mut a, mut b, pa, pb) = pair(&hub);
     a.send_yo(&pb).unwrap();
     b.sync(0).unwrap();
-    let key = [42u8; 32];
-    let blob = b.export(&key);
-    assert!(Client::restore(Http::new(hub.url()), &blob, &[0; 32]).is_err());
+    let blob = b.saved();
     drop(b);
-    let mut b = Client::restore(Http::new(hub.url()), &blob, &key).unwrap();
+    let mut b = Client::restore(Http::new(hub.url()), &blob).unwrap();
     b.send_yo(&pa).unwrap();
     assert_eq!(yos_from(&a.sync(0).unwrap(), &pb), 1);
     a.send_yo(&pb).unwrap();
@@ -354,11 +352,11 @@ fn the_outbox_survives_an_outage_of_the_hub() {
     // The hub is down: the message waits in the outbox, nothing is lost. By user id: a name needs the hub (4.2).
     assert!(matches!(a.send_yo(&pb), Err(Error::Network(_))));
     a.send_yo(b.user_id()).unwrap();
-    assert_eq!(a.pending(), 1);
+    assert_eq!(a.waiting(), 1);
     assert!(matches!(b.sync(0), Err(Error::Network(_))));
     let hub = TestHub::start_with(config, &addr);
     a.sync(0).unwrap();
-    assert_eq!(a.pending(), 0);
+    assert_eq!(a.waiting(), 0);
     assert_eq!(yos_from(&b.sync(0).unwrap(), &pa), 1);
     drop(hub);
     let _ = std::fs::remove_dir_all(dir);
@@ -698,7 +696,7 @@ fn feedback_reaches_the_operator_within_its_limit() {
     config.limits.feedback_per_user_day = 3;
     let hub = TestHub::start_with(config, "127.0.0.1:0");
     let (mut a, mut b, _, _) = pair(&hub);
-    a.send_feedback("More colors, please", "1.0 (1)").unwrap();
+    a.feedback_begin("More colors, please", "1.0 (1)").and_then(|r| r.send()).unwrap();
     // Without the client: signed under it, sent after.
     a.feedback_begin(&"ä".repeat(1000), "1.0 (1)").unwrap().send().unwrap();
     // Too long, empty or not UTF-8: the core does not sign it, and the hub refuses it anyway.
@@ -717,13 +715,16 @@ fn feedback_reaches_the_operator_within_its_limit() {
         assert_eq!(a.signed_for_tests("POST", api::FEEDBACK, &body).unwrap().status, api::status::BAD_REQUEST);
     }
     // The third today is the last.
-    a.send_feedback(&"x".repeat(limit), "1.0 (1)").unwrap();
-    assert_eq!(a.send_feedback("one more", "1.0 (1)"), Err(Error::Refused(api::status::RATE_LIMITED)));
+    a.feedback_begin(&"x".repeat(limit), "1.0 (1)").and_then(|r| r.send()).unwrap();
+    assert_eq!(
+        a.feedback_begin("one more", "1.0 (1)").and_then(|r| r.send()),
+        Err(Error::Refused(api::status::RATE_LIMITED))
+    );
     // Per user: another one's is still taken.
-    b.send_feedback("hi", "1.0 (1)").unwrap();
+    b.feedback_begin("hi", "1.0 (1)").and_then(|r| r.send()).unwrap();
     // A deleted account sends none.
     b.delete_account().unwrap();
-    assert_eq!(b.send_feedback("hi again", "1.0 (1)"), Err(Error::Replaced));
+    assert_eq!(b.feedback_begin("hi again", "1.0 (1)").and_then(|r| r.send()), Err(Error::Replaced));
 }
 
 #[test]
@@ -818,10 +819,10 @@ fn a_group_change_for_an_unconfirmed_member_waits_for_the_confirmation() {
     // The new key is met first (a held Yo), then the group is made.
     assert_eq!(a.send_yo(&pb), Err(Error::Unconfirmed));
     let _ = a.create_group("PAIR", std::slice::from_ref(&b));
-    assert_eq!(a.pending(), 2, "the Yo and the group's change held for the confirmation");
+    assert_eq!(a.waiting(), 2, "the Yo and the group's change held for the confirmation");
     assert_eq!(unread_by(&mut b2), 0);
     a.confirm_identity(&pb).unwrap();
     a.send_yo(&pb).unwrap();
-    assert_eq!(a.pending(), 0);
+    assert_eq!(a.waiting(), 0);
     assert_eq!(unread_by(&mut b2), 3, "the held Yo, the group's change and the new Yo");
 }

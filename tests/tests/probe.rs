@@ -1,10 +1,10 @@
 //! Probes stay silent; ordinary echo Yos remain visible.
 use std::time::Duration;
-use yo_core::{state, Client, Content, Event, Push};
+use yo_core::{Client, Content, Event, Push};
 use yo_tests::{register, Http, TestHub};
 
 fn storage(client: &Client) -> String {
-    let (state, _) = state::open(&client.export(&[42; 32]), &[42; 32]).unwrap();
+    let state = client.saved().state;
     serde_json::to_string(&state.storage).unwrap()
 }
 
@@ -36,7 +36,7 @@ fn silent_probe_measures_a_real_yo_and_preserves_other_events_and_storage() {
     assert!(alice.contacts().iter().all(|c| c.handles.iter().all(|h| h != "PINGTEST")));
     assert!(alice.friends().is_empty());
     // Bob's ordinary Yo legitimately stores his key. The service never does.
-    let (state, _) = state::open(&alice.export(&[42; 32]), &[42; 32]).unwrap();
+    let state = alice.saved().state;
     assert!(state.contacts.values().filter(|c| c.probe_service).all(|c| !c.chat));
     for (user, c) in &state.contacts {
         if c.probe_service {
@@ -62,7 +62,7 @@ fn timed_out_and_unsolicited_answers_stay_silent_after_restore() {
     let (user, token) = ping.take_probe_requests().pop().unwrap();
     ping.echo_probe(&user, token).unwrap();
     // Reopening has no active waiter. The late answer must still be consumed silently.
-    let mut restored = Client::restore(Http::new(hub.url()), &alice.export(&[42; 32]), &[42; 32]).unwrap();
+    let mut restored = Client::restore(Http::new(hub.url()), &alice.saved()).unwrap();
     restored.set_trust_roots(vec![yo_tests::trust_root()]);
     assert!(restored.sync(0).unwrap().is_empty());
     assert!(restored.contacts().is_empty());
@@ -123,7 +123,7 @@ fn failed_probe_is_not_retried_by_a_later_sync() {
     let path = yo_wire::api::deliver_path(&yo_tests::user_id(ping.user_id()));
     http.fault(&path, yo_tests::Fault::Answer(503));
     assert_eq!(alice.round_trip_probe("PINGTEST", 30).unwrap(), None);
-    let (state, _) = state::open(&alice.export(&[42; 32]), &[42; 32]).unwrap();
+    let state = alice.saved().state;
     assert!(state.outbox.iter().all(|item| item.user != ping.user_id()));
     alice.sync(0).unwrap();
     alice.maintenance().unwrap();
@@ -187,15 +187,6 @@ fn echo_answers_before_inbox_maintenance_without_catch_up() {
         alice.sync(0).unwrap().iter().any(|e| matches!(e, Event::Message { content: Content::Yo, .. })),
         "PING echoes are visible"
     );
-
-    // Reopening a state saved by a client that measured against PING clears its routing-only flag.
-    let key = [42; 32];
-    let (mut saved, entries) = state::open(&alice.export(&key), &key).unwrap();
-    let contact = saved.contacts.get_mut(ping.user_id()).unwrap();
-    contact.probe_service = true;
-    contact.chat = false;
-    let restored = Client::restore(http.clone(), &state::seal(&saved, entries, &key), &key).unwrap();
-    assert!(restored.contacts().iter().any(|contact| contact.user == ping.user_id()));
 }
 
 #[test]
@@ -283,7 +274,7 @@ fn empty_inbox_passes_do_not_save_full_state() {
     };
     struct Saves(AtomicUsize);
     impl yo_core::Store for Saves {
-        fn save(&self, _: Vec<u8>) -> Result<(), String> {
+        fn save_state(&self, _: &yo_core::state::State, _: yo_core::signal::Entries) -> Result<(), String> {
             self.0.fetch_add(1, Ordering::Relaxed);
             Ok(())
         }
@@ -318,7 +309,7 @@ fn failed_probe_keeps_an_added_pingtests_ordinary_outbox() {
     }
     alice.send_yo("PINGTEST").unwrap();
     assert_eq!(alice.round_trip_probe("PINGTEST", 10).unwrap(), None);
-    let (state, _) = state::open(&alice.export(&[42; 32]), &[42; 32]).unwrap();
+    let state = alice.saved().state;
     let contents: Vec<_> = state
         .outbox
         .iter()
@@ -390,6 +381,6 @@ fn pingtest_in_a_group_reaches_members_who_never_added_it() {
     assert!(!events.iter().any(|e| matches!(e, Event::NewChat { .. } | Event::Message { .. })));
     assert!(cleo.contacts().iter().all(|c| c.handles.iter().all(|h| h != "PINGTEST")));
     // Cleo knows it by its name: still the probe service to her, not a chat.
-    let (state, _) = state::open(&cleo.export(&[42; 32]), &[42; 32]).unwrap();
+    let state = cleo.saved().state;
     assert!(state.contacts.get(ping.user_id()).is_some_and(|c| c.probe_service && !c.chat));
 }

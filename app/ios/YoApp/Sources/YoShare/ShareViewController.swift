@@ -282,8 +282,8 @@ final class ShareModel {
           try client.uploadMedia(media: sealed.media, ciphertext: sealed.ciphertext, fetches: chat.fetches)
           // Once the hub has the blob the Yo goes: offline it waits in the core's own outbox, sent by the app later.
           switch file.kind {
-          case .photo: received += try client.sendPhoto(toTarget: friend.to, media: sealed.media)
-          case .video: received += try client.sendVideo(toTarget: friend.to, media: sealed.media, durationMs: file.durationMs)
+          case .photo: received += try client.send(target: SendTarget(friend.to), kind: .photo(media: sealed.media))
+          case .video: received += try client.send(target: SendTarget(friend.to), kind: .video(media: sealed.media, durationMs: file.durationMs))
           }
           outcome.sent += 1
         } catch let error as YoError where retryLater(error: error) {

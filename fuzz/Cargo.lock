@@ -971,16 +971,7 @@ version = "0.13.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "4aaa26c720c68b866f2c96ef5c1264b3e6f473fe5d4ce61cd44bbe913e553018"
 dependencies = [
- "hmac 0.13.0",
-]
-
-[[package]]
-name = "hmac"
-version = "0.12.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "6c49c37c09c17a53d937dfbb742eb3a961d65a994e6bcdcf37e7399d0cc8ab5e"
-dependencies = [
- "digest 0.10.7",
+ "hmac",
 ]
 
 [[package]]
@@ -1484,7 +1475,7 @@ dependencies = [
  "derive_more",
  "displaydoc",
  "hkdf",
- "hmac 0.13.0",
+ "hmac",
  "libsignal-core",
  "libsignal-protocol",
  "partial-default",
@@ -1546,7 +1537,7 @@ dependencies = [
  "displaydoc",
  "hex",
  "hkdf",
- "hmac 0.13.0",
+ "hmac",
  "indexmap",
  "itertools 0.15.0",
  "libcrux-ml-kem",
@@ -1809,7 +1800,7 @@ version = "0.7.0"
 source = "git+https://github.com/signalapp/libsignal?tag=v0.108.0#8be00c282001caa3585d18de0f044c6d500348ab"
 dependencies = [
  "curve25519-dalek",
- "hmac 0.13.0",
+ "hmac",
  "sha2 0.11.1",
 ]
 
@@ -2496,7 +2487,7 @@ dependencies = [
  "displaydoc",
  "ghash",
  "hkdf",
- "hmac 0.13.0",
+ "hmac",
  "hpke-rs",
  "hpke-rs-crypto",
  "libsignal-core",
@@ -3269,16 +3260,15 @@ version = "0.1.0"
 dependencies = [
  "async-trait",
  "chacha20poly1305",
- "curve25519-dalek",
- "getrandom 0.2.17",
- "hmac 0.12.1",
+ "hkdf",
  "libsignal-account-keys",
  "libsignal-protocol",
  "rand 0.9.5",
- "rand_core 0.6.4",
+ "rusqlite",
  "serde",
  "serde_json",
  "sha2 0.10.9",
+ "sha2 0.11.1",
  "thiserror 2.0.21",
  "tls_codec",
  "yo-wire",
@@ -3292,6 +3282,7 @@ version = "0.0.0"
 dependencies = [
  "axum",
  "libfuzzer-sys",
+ "serde_json",
  "tls_codec",
  "tokio",
  "tower",
@@ -3332,6 +3323,7 @@ version = "0.1.0"
 dependencies = [
  "base64 0.22.1",
  "libsignal-core",
+ "serde",
  "sha2 0.10.9",
  "thiserror 2.0.21",
  "tls_codec",

@@ -13,14 +13,14 @@ fn texts(events: &[Event]) -> Vec<String> {
     events
         .iter()
         .filter_map(|e| match e {
-            Event::Message { content: Content::Text(t), .. } => Some(t.clone()),
+            Event::Message { content, .. } => yo_tests::tag_of(content),
             _ => None,
         })
         .collect()
 }
 
 fn text(t: &str) -> Content {
-    Content::Text(t.into())
+    yo_tests::tagged(t.into())
 }
 
 /// The envelopes A posted to B's inbox, in order, whether the hub got them or not.
@@ -93,7 +93,8 @@ fn lost_late_and_doubled_messages() {
 struct Saved(Mutex<Vec<u8>>);
 
 impl Store for Saved {
-    fn save(&self, blob: Vec<u8>) -> Result<(), String> {
+    fn save_state(&self, state: &yo_core::state::State, records: yo_core::signal::Entries) -> Result<(), String> {
+        let blob = yo_tests::saved_bytes(state, records);
         *self.0.lock().unwrap() = blob;
         Ok(())
     }
@@ -109,7 +110,7 @@ fn a_session_out_of_step_heals_by_a_decryption_error() {
     let ha = Http::new(hub.url());
     let mut a = by_name(ha.clone(), &format!("Ret{n}"));
     let mut b = by_name(Http::new(hub.url()), &format!("Ter{n}"));
-    let early = b.export(&[3; 32]);
+    let early = b.saved();
     // The kind of each copy in the last envelope one posted to the other.
     let kinds = |http: &Http, to: &Client| -> Vec<u8> {
         let last = posted(http, to.user_id()).pop().unwrap();
@@ -130,7 +131,7 @@ fn a_session_out_of_step_heals_by_a_decryption_error() {
     }
     // B's state from before A wrote: it has no session with A.
     let hb = Http::new(hub.url());
-    let mut b = Client::restore(hb.clone(), &early, &[3; 32]).unwrap();
+    let mut b = Client::restore(hb.clone(), &early).unwrap();
     b.persist_to(Arc::new(Saved::default()), [3; 32]).unwrap();
     a.send(b.user_id(), text("2")).unwrap();
     assert!(texts(&b.sync(0).unwrap()).is_empty(), "it does not open");
@@ -166,14 +167,14 @@ fn access_refresh_fetches_a_session_archived_while_reading_the_inbox() {
     let ha = Http::new(hub.url());
     let mut a = by_name(ha.clone(), &format!("Ar{n}"));
     let mut b = by_name(Http::new(hub.url()), &format!("Br{n}"));
-    let early = b.export(&[3; 32]);
+    let early = b.saved();
     a.send(b.user_id(), text("first contact")).unwrap();
     assert_eq!(texts(&b.sync(0).unwrap()), ["first contact"]);
     b.send(a.user_id(), text("reply")).unwrap();
     assert_eq!(texts(&a.sync(0).unwrap()), ["reply"]);
     keys_both_ways(&mut a, &mut b);
 
-    let mut b = Client::restore(Http::new(hub.url()), &early, &[3; 32]).unwrap();
+    let mut b = Client::restore(Http::new(hub.url()), &early).unwrap();
     a.send(b.user_id(), text("needs resend")).unwrap();
     assert!(texts(&b.sync(0).unwrap()).is_empty());
     assert_eq!(b.dropped(), 1);
@@ -261,7 +262,7 @@ fn a_sender_whose_state_went_back_is_asked_again() {
     let before = disk.0.lock().unwrap().clone();
     a.send(b.user_id(), text("1")).unwrap();
     assert_eq!(texts(&b.sync(0).unwrap()), ["1"]);
-    let mut a = Client::restore(Http::new(hub.url()), &before, &[3; 32]).unwrap();
+    let mut a = yo_tests::restore_bytes(Http::new(hub.url()), &before).unwrap();
     a.persist_to(disk, [3; 32]).unwrap();
     a.send(b.user_id(), text("2")).unwrap();
     assert!(texts(&b.sync(0).unwrap()).is_empty(), "made with keys used before: it does not open");
@@ -395,7 +396,7 @@ fn a_new_phones_message_right_after_a_forgery_is_kept_not_lost() {
     // the hub's roster (which names the old phone: the forgery is dropped).
     let real = {
         let ha = Http::new(hub.url());
-        let mut a3 = Client::restore(ha.clone(), &a.export(&[1; 32]), &[1; 32]).unwrap();
+        let mut a3 = Client::restore(ha.clone(), &a.saved()).unwrap();
         // The model of the forgery is not delivered itself (its bytes would be seen, the forgery skipped unasked).
         ha.fault(&yo_wire::api::deliver_path(&yo_tests::user_id(b.user_id())), Fault::Answer(202));
         let _ = a3.send(b.user_id(), text("forged"));

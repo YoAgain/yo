@@ -32,9 +32,10 @@ path = "src/scale.rs"
 
 [dependencies]
 yo-wire = { path = "../core/wire" }
-yo-core = { path = "../core/client", features = ["testing"] }
+yo-core = { path = "../core/client", features = ["test-support"] }
+yo-product = { path = "../core/product" }
 yo-hub = { path = "../hub" }
-yo-bindings = { path = "../core/bindings", features = ["testing"] }
+yo-bindings = { path = "../core/bindings", features = ["test-support"] }
 tokio = { workspace = true }
 reqwest = { workspace = true, features = ["blocking"] }
 serde_json = { workspace = true }

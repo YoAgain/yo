@@ -13,12 +13,13 @@ const KEY: [u8; 32] = [3; 32];
 /// A disk that can be full.
 #[derive(Default)]
 struct Disk {
-    saved: Mutex<Vec<u8>>,
+    saved: Mutex<Option<yo_core::Saved>>,
     full: AtomicBool,
 }
 
 impl Store for Disk {
-    fn save(&self, blob: Vec<u8>) -> Result<(), String> {
+    fn save_state(&self, state: &yo_core::state::State, records: yo_core::signal::Entries) -> Result<(), String> {
+        let blob = Some(yo_core::Saved::of(state, &records));
         if self.full.load(Ordering::Relaxed) {
             return Err("disk full".into());
         }
@@ -28,8 +29,8 @@ impl Store for Disk {
 }
 
 impl Disk {
-    fn blob(&self) -> Vec<u8> {
-        self.saved.lock().unwrap().clone()
+    fn blob(&self) -> yo_core::Saved {
+        self.saved.lock().unwrap().clone().expect("saved")
     }
 }
 
@@ -37,14 +38,14 @@ fn texts(events: &[Event]) -> Vec<String> {
     events
         .iter()
         .filter_map(|e| match e {
-            Event::Message { content: Content::Text(t), .. } => Some(t.clone()),
+            Event::Message { content, .. } => yo_tests::tag_of(content),
             _ => None,
         })
         .collect()
 }
 
 fn text(t: &str) -> Content {
-    Content::Text(t.into())
+    yo_tests::tagged(t.into())
 }
 
 /// The requests sent since the last look, as "METHOD /path" without the query.
@@ -71,15 +72,13 @@ fn chat(hub: &TestHub) -> (Client, Client, Arc<Http>, Arc<Disk>) {
     b.after_sync().unwrap();
     let disk = Arc::new(Disk::default());
     b.persist_to(disk.clone(), KEY).unwrap();
-    b.acknowledge_explicitly();
     (a, b, hb, disk)
 }
 
 fn restore(hub: &TestHub, disk: &Arc<Disk>) -> (Client, Arc<Http>) {
     let http = Http::new(hub.url());
-    let mut client = Client::restore(http.clone(), &disk.blob(), &KEY).unwrap();
+    let mut client = Client::restore(http.clone(), &disk.blob()).unwrap();
     client.persist_to(disk.clone(), KEY).unwrap();
-    client.acknowledge_explicitly();
     (client, http)
 }
 
@@ -133,12 +132,12 @@ fn the_next_sync_acknowledges_what_the_last_one_handed_over() {
     let ack = sent.iter().position(|r| r == "POST /v1/inbox/ack").expect("acknowledged");
     assert!(sent[..ack].iter().all(|r| r != "GET /v1/inbox"), "before the inbox is read again: {sent:?}");
     // Both batches still handed: a crash brings both, in order.
-    let blob = b.export(&KEY);
-    let mut again = Client::restore(Http::new(hub.url()), &blob, &KEY).unwrap();
+    let blob = b.saved();
+    let mut again = Client::restore(Http::new(hub.url()), &blob).unwrap();
     assert_eq!(texts(&again.sync(0).unwrap()), ["one", "two"]);
     b.acknowledge_only(|e| first.contains(e));
-    let blob = b.export(&KEY);
-    let mut again = Client::restore(Http::new(hub.url()), &blob, &KEY).unwrap();
+    let blob = b.saved();
+    let mut again = Client::restore(Http::new(hub.url()), &blob).unwrap();
     assert_eq!(texts(&again.sync(0).unwrap()), ["two"]);
 }
 
@@ -169,11 +168,11 @@ fn the_work_after_a_sync_waits_until_its_events_are_out() {
     b.set_friend(a.user_id(), Some("Al".into()), None).unwrap();
     hb.fault(&deliver_path(&user_id(a.user_id())), Fault::Answer(503));
     b.send(a.user_id(), text("waited")).unwrap();
-    assert_eq!(b.pending(), 1);
+    assert_eq!(b.waiting(), 1);
     a.send(b.user_id(), text("one")).unwrap();
     // The first sync's wait goes out after the outbox, as ever; its answer comes back at once with the event.
     b.sync_begin(0).unwrap();
-    assert_eq!(b.pending(), 0);
+    assert_eq!(b.waiting(), 0);
     requests(&hb);
     a.send(b.user_id(), text("two")).unwrap();
     b.set_friend(a.user_id(), Some("Alex".into()), None).unwrap();
@@ -200,22 +199,22 @@ fn a_guest_only_reads_and_acknowledges() {
     b.set_friend(a.user_id(), Some("Al".into()), None).unwrap();
     hb.fault(&deliver_path(&user_id(a.user_id())), Fault::Answer(503));
     b.send(a.user_id(), text("waited")).unwrap();
-    assert_eq!(b.pending(), 1);
+    assert_eq!(b.waiting(), 1);
     a.send(b.user_id(), text("for the guest")).unwrap();
     let guest_http = Http::new(hub.url());
-    let mut guest = Client::restore_guest(guest_http.clone(), &disk.blob(), &KEY).unwrap();
+    let mut guest = Client::restore_guest(guest_http.clone(), &disk.blob()).unwrap();
     guest.persist_to(disk.clone(), KEY).unwrap();
     assert_eq!(texts(&guest.sync(0).unwrap()), ["for the guest"]);
     assert_eq!(requests(&guest_http), ["GET /v1/inbox"]);
     guest.after_sync().unwrap();
     assert_eq!(requests(&guest_http), ["POST /v1/inbox/ack"]);
-    assert_eq!(guest.pending(), 1, "the outbox is the app's");
+    assert_eq!(guest.waiting(), 1, "the outbox is the app's");
     drop(guest);
     // The app takes the event in as ever, and does its work.
     b.reload(&disk.blob()).unwrap();
     assert_eq!(texts(&b.sync(0).unwrap()), ["for the guest"]);
     b.after_sync().unwrap();
-    assert_eq!(b.pending(), 0);
+    assert_eq!(b.waiting(), 0);
     assert!(b.storage_saved_at().is_some());
     assert_eq!(texts(&a.sync(0).unwrap()), ["waited"]);
 }
@@ -228,7 +227,7 @@ fn a_guest_acknowledges_nothing_it_could_not_save() {
     let (mut a, mut b, _, disk) = chat(&hub);
     a.send(b.user_id(), text("keep me")).unwrap();
     let guest_http = Http::new(hub.url());
-    let mut guest = Client::restore_guest(guest_http.clone(), &disk.blob(), &KEY).unwrap();
+    let mut guest = Client::restore_guest(guest_http.clone(), &disk.blob()).unwrap();
     guest.persist_to(disk.clone(), KEY).unwrap();
     disk.full.store(true, Ordering::Relaxed);
     // The send takes the inbox in first, then its lookup is refused: the call fails, and its save too.
@@ -253,7 +252,7 @@ fn a_guest_keeps_a_bounded_backlog_for_the_app() {
     for i in 0..n {
         a.send(b.user_id(), text(&format!("{i}"))).unwrap();
     }
-    let mut guest = Client::restore_guest(Http::new(hub.url()), &disk.blob(), &KEY).unwrap();
+    let mut guest = Client::restore_guest(Http::new(hub.url()), &disk.blob()).unwrap();
     guest.persist_to(disk.clone(), KEY).unwrap();
     let mut kept = 0;
     for _ in 0..10 {

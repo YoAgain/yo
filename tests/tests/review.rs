@@ -18,14 +18,14 @@ fn texts(events: &[Event]) -> Vec<String> {
     events
         .iter()
         .filter_map(|e| match e {
-            Event::Message { content: Content::Text(t), .. } => Some(t.clone()),
+            Event::Message { content, .. } => yo_tests::tag_of(content),
             _ => None,
         })
         .collect()
 }
 
 fn text(t: &str) -> Content {
-    Content::Text(t.into())
+    yo_tests::tagged(t.into())
 }
 
 /// A disk that can be full.
@@ -36,7 +36,8 @@ struct Disk {
 }
 
 impl Store for Disk {
-    fn save(&self, blob: Vec<u8>) -> Result<(), String> {
+    fn save_state(&self, state: &yo_core::state::State, records: yo_core::signal::Entries) -> Result<(), String> {
+        let blob = yo_tests::saved_bytes(state, records);
         if self.full.load(Ordering::Relaxed) {
             return Err("disk full".into());
         }
@@ -59,7 +60,7 @@ fn a_save_that_fails_stops_the_send_and_the_ack() {
     assert_eq!(texts(&b.sync(0).unwrap()), ["one"]);
     disk.full.store(true, Ordering::Relaxed);
     assert!(matches!(a.send(b.user_id(), text("not saved")), Err(Error::Save(_))));
-    assert_eq!(a.pending(), 0, "not made");
+    assert_eq!(a.waiting(), 0, "not made");
     assert!(texts(&b.sync(0).unwrap()).is_empty(), "nothing left");
     disk.full.store(false, Ordering::Relaxed);
     a.send(b.user_id(), text("two")).unwrap();
@@ -71,7 +72,7 @@ fn a_save_that_fails_stops_the_send_and_the_ack() {
     assert!(matches!(a.maintenance(), Err(Error::Save(_))));
     disk.full.store(false, Ordering::Relaxed);
     let blob = disk.saved.lock().unwrap().clone();
-    let mut again = Client::restore(Http::new(hub.url()), &blob, &KEY).unwrap();
+    let mut again = yo_tests::restore_bytes(Http::new(hub.url()), &blob).unwrap();
     assert_eq!(texts(&again.sync(0).unwrap()), ["for a"], "still at the hub");
 }
 
@@ -89,9 +90,9 @@ fn nothing_waiting_goes_to_someone_blocked_meanwhile() {
     let to_b = yo_wire::api::deliver_path(&yo_tests::user_id(b.user_id()));
     http.fault(&to_b, Fault::Answer(503));
     a.send(b.user_id(), text("made offline")).unwrap();
-    assert_eq!(a.pending(), 1);
+    assert_eq!(a.waiting(), 1);
     a.set_blocked(b.user_id(), true).unwrap();
-    assert_eq!(a.pending(), 0, "held, not waiting");
+    assert_eq!(a.waiting(), 0, "held, not waiting");
     a.sync(0).unwrap();
     a.maintenance().unwrap();
     assert!(texts(&b.sync(0).unwrap()).is_empty(), "nothing went to b");
@@ -140,7 +141,7 @@ fn an_unreadable_409_keeps_the_message() {
     assert_eq!(texts(&b.sync(0).unwrap()), ["hi"]);
     http.fault(&to(b.user_id()), Fault::Answer(409));
     a.send(b.user_id(), text("kept")).unwrap();
-    assert_eq!((a.pending(), a.dropped()), (1, 0));
+    assert_eq!((a.waiting(), a.dropped()), (1, 0));
     a.sync(0).unwrap();
     assert_eq!(texts(&b.sync(0).unwrap()), ["kept"]);
 }
@@ -171,7 +172,7 @@ fn a_registration_is_saved_before_it_leaves_and_finished_after_a_restart() {
     let mut sender = by_name(Http::new(hub.url()), &format!("Hello{n}"));
     for (disk, name) in [(disk, &taken), (other_disk, &lost)] {
         let blob = disk.saved.lock().unwrap().clone();
-        let mut me = Client::restore(Http::new(hub.url()), &blob, &KEY).unwrap();
+        let mut me = yo_tests::restore_bytes(Http::new(hub.url()), &blob).unwrap();
         assert!(me.is_registering());
         me.persist_to(disk.clone(), KEY).unwrap();
         me.finish_registration().unwrap();
@@ -180,7 +181,7 @@ fn a_registration_is_saved_before_it_leaves_and_finished_after_a_restart() {
         sender.send(name, text("found you")).unwrap();
         assert_eq!(texts(&me.sync(0).unwrap()), ["found you"], "{name}");
         let blob = disk.saved.lock().unwrap().clone();
-        assert!(!Client::restore(Http::new(hub.url()), &blob, &KEY).unwrap().is_registering(), "saved");
+        assert!(!yo_tests::restore_bytes(Http::new(hub.url()), &blob).unwrap().is_registering(), "saved");
     }
     // A save that fails: nothing leaves, the name stays free.
     let full = Arc::new(Disk::default());

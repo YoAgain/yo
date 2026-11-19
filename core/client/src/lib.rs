@@ -1,26 +1,34 @@
-//! The Yo client core (spec/v1.md): one implementation of YoIP for iOS and Android.
-//!
-//! The platform supplies HTTP (`Transport`) and a place to keep one sealed blob (`Store`); everything else, from the
-//! sessions to the outbox, is here. Every operation either completes or leaves the state as it was, except what the
-//! hub has already accepted, which is kept.
+//! The Yo client core (spec/v1.md): sessions, delivery and the outbox for iOS and Android; the platform supplies
+//! HTTP and opens the local database.
 
+mod aead;
 pub mod backup;
-pub mod cost;
+mod contacts;
 pub mod error;
 pub mod groups;
+mod hub;
 pub mod identity;
-pub mod list;
+pub mod legacy;
 pub mod media;
 pub mod net;
+mod outbox;
+mod prekeys;
+mod probe;
+mod receive;
 pub mod sealed;
 pub mod security;
 pub mod signal;
 pub mod state;
 pub mod statedb;
 pub mod storage;
+#[cfg(any(test, feature = "test-support"))]
+mod testing;
+#[cfg(any(test, feature = "test-support"))]
+pub use testing::{Memory, Saved};
 
 pub use error::{Error, Result};
 pub use net::{Response, Transport};
+pub use yo_wire::api::anonymous as anonymous_request;
 pub use yo_wire::api::{Backup, Push, SupportThread, BACKUP_VERSION, REPORT_ABUSE, REPORT_OTHER, REPORT_SPAM};
 pub use yo_wire::content::{Content, Media};
 /// Usernames as the hub takes and compares them (spec 3.3), for the apps.
@@ -33,14 +41,14 @@ use libsignal_protocol::{
     PreKeyBundle, PreKeySignalMessage, ProtocolAddress, SignalMessage, SignalProtocolError, Timestamp,
 };
 use signal::Records;
-use state::{hex, unhex, Contact, DecryptionError, Outgoing, Registering, Slot, State, StoredContent, StoredEvent};
-use std::collections::{BTreeMap, BTreeSet, VecDeque};
+use state::{hex, unhex, Contact, DecryptionError, Outgoing, Registering, Slot, State};
+use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 use yo_wire::api::{self, status};
 use yo_wire::content::Message;
 use yo_wire::envelope::{ForDevice, Payload, Plain, KIND_MESSAGE, KIND_PLAINTEXT, KIND_PREKEY};
-use yo_wire::handle::{Handle, KIND_USER, KIND_USERNAME};
+use yo_wire::handle::{same_name, Handle, KIND_USER, KIND_USERNAME};
 use yo_wire::hubsig;
 use yo_wire::limits::{MAX_INBOX_FETCH, PREKEY_REFILL_BELOW, PREKEY_TARGET};
 use yo_wire::request::{HEADER_DEVICE, HEADER_SIGNATURE, HEADER_TIME};
@@ -52,25 +60,20 @@ const OUTBOX_PER_RECIPIENT: usize = 1_000;
 const ROTATE_EVERY_MS: u64 = 7 * 24 * 3600 * 1000;
 /// ... and the ones replaced kept this long (wall clock): a session started with one may still wait at the hub.
 const RETIRED_KEPT_MS: u64 = 31 * 24 * 3600 * 1000;
-/// One-time prekeys of each kind whose private keys are kept: lookups that never lead to a message use them up at
-/// the hub, and the oldest beyond this go (a message made with one later is answered by a decryption error, spec 4.6).
+/// One-time prekeys of each kind kept: lookups that never lead to a message use them up at the hub (spec 4.6).
 const ONE_TIME_KEPT: usize = 4 * PREKEY_TARGET as usize;
 /// A saved signing time at most this far ahead of the clock is kept as the floor of the next (spec 6.2).
 const SIGN_AHEAD_MS: u64 = 60 * 1000;
 /// Session message hashes remembered against redelivery.
 const SEEN: usize = 2000;
-/// Messages sent to a contact kept to send again when a decryption error names one (spec 4.6); also the decryption
-/// errors due to a contact at most.
+/// Messages kept per contact to resend when a decryption error names one, and decryption errors due at most (4.6).
 const KEPT_FOR_RESEND: usize = 64;
-/// A sender certificate holds a day at the hub (spec 6.1); this device uses one for an hour less by its own clock
-/// from when it came (whatever time the clock shows), and fetches the next `sealed::REFRESH_MS` before.
+/// A sender certificate holds a day at the hub (spec 6.1); used for an hour less by this device's own clock.
 const CERTIFICATE_USED_MS: u64 = 23 * 3600 * 1000;
 
 /// A new profile key (Signal's, zkgroup): 32 bytes, sent to contacts (spec 4.10).
 fn new_profile_key() -> [u8; 32] {
-    let mut randomness = [0u8; 32];
-    rand::fill(&mut randomness);
-    zkgroup::profiles::ProfileKey::generate(randomness).get_bytes()
+    zkgroup::profiles::ProfileKey::generate(identity::random()).get_bytes()
 }
 
 /// The access key a profile key gives (Signal's unidentified access key): what a delivery shows in `Yo-Access`.
@@ -80,37 +83,33 @@ fn access_key(profile_key: &[u8; 32]) -> [u8; api::ACCESS_KEY_LEN] {
 
 /// The trust roots a client starts with: none (an app pins its hub's, `set_trust_roots`); under tests, the test hubs'.
 fn test_trust_roots() -> Vec<Key> {
-    #[cfg(feature = "testing")]
+    #[cfg(feature = "test-support")]
     {
         let private = libsignal_protocol::PrivateKey::deserialize(&yo_wire::envelope::TEST_TRUST_ROOT).expect("a key");
         let public = private.public_key().expect("a key").public_key_bytes().try_into().expect("32 bytes");
         vec![public]
     }
-    #[cfg(not(feature = "testing"))]
+    #[cfg(not(feature = "test-support"))]
     Vec::new()
 }
-/// How often a payload may make this device ask the hub for a user's devices (spec 4.4).
+/// How often a payload may make this device ask the hub for a user's device (spec 4.4).
 const ROSTER_ASK_EVERY_MS: u64 = 60 * 1000;
-/// Lookups a day that payloads which did not open may make (roster checks): what is left
-/// of the hub's allowance (6.6) stays for sessions the app starts, however many forgeries come.
+/// Lookups a day that unopened payloads may cause: the rest of the hub's allowance (6.6) stays for the app.
 const RECOVERY_LOOKUPS_PER_DAY: u32 = 10;
 /// Payloads kept for a roster that could not be asked yet (`State::deferred`).
 const DEFERRED: usize = 64;
 /// Names a contact is remembered by at most: the newest.
 const HANDLES_KEPT: usize = 4;
-/// Events a guest (the notification service) keeps for the app at most: past them it takes nothing more from the
-/// hub, which keeps it for the app. Bounds a guest's state while the app stays unopened.
+/// Events a guest (the notification service) keeps for the app at most: bounds its state while the app is closed.
 pub const GUEST_EVENTS: usize = 256;
 /// How often a registration whose answer did not come is tried again, with the same account key.
 const REGISTER_TRIES: usize = 2;
-/// How often a send updates its view of a user's devices and tries again before it leaves the rest to the next call.
+/// How often a send updates its view of a user's device and tries again before it leaves the rest to the next call.
 const DEVICE_ROUNDS: usize = 3;
 /// A contact whose app is too old for sessions is asked about again at most this often (spec 4.2).
 const OUTDATED_RETRY_MS: u64 = 3600 * 1000;
 
-/// Errors that say "not now", not "never" (spec 6.6), the one rule of the core and the apps: the envelope or
-/// operation is tried again later. No network, `429`, `507` (no room now), `5xx`; a `426` (this app too old, spec
-/// 6.3) too: nothing goes until the app is updated, and the update sends what waits.
+/// Errors that say "not now", not "never" (spec 6.6): no network, `429`, `426`, `507`, `5xx`.
 pub fn retryable(error: &Error) -> bool {
     match error {
         Error::Network(_) => true,
@@ -121,31 +120,24 @@ pub fn retryable(error: &Error) -> bool {
     }
 }
 
-/// For the apps: whether to keep what they were doing (a photo or video to upload and send, an account to open) and
-/// try again later: what `retryable` says, and a state that did not save (a full disk).
+/// For the apps: keep what they were doing and try again later (`retryable`, or a state that did not save).
 pub fn retry_later(error: &Error) -> bool {
     retryable(error) || matches!(error, Error::Save(_))
 }
 
-/// What happened, for the app to show. `user` is the contact's user id (hex): what `contacts()` describes and what
-/// `send` takes to answer.
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// What happened, for the app to show. `user` is the contact's user id (hex).
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum Event {
     /// Someone wrote to this device for the first time.
     NewChat { user: String },
-    /// A message: a Yo, or later text, a link, a location.
+    /// A message: a Yo, with optional media.
     Message { user: String, sent_at_ms: u64, content: Content },
-    /// One's own other device sent this to `user`.
-    SentElsewhere { user: String, sent_at_ms: u64, content: Content },
     /// A contact's name.
     Profile { user: String, name: String },
-    /// A contact's account key changed (a new phone without passkey, or something worse). A verification is reset; a
-    /// verified contact must be confirmed before anything more is sent to it.
+    /// A contact's account key changed: a verification is reset and must be confirmed before sending (spec 3.4).
     IdentityChanged { user: String },
     /// A Yo (with a photo or video or not) from `user` to a group (id, hex): `groups()` describes it.
     GroupMessage { group: String, user: String, sent_at_ms: u64, content: Content },
-    /// One's own other device sent this to the group.
-    GroupSentElsewhere { group: String, sent_at_ms: u64, content: Content },
     /// A group came, changed (name, members) or was left: `groups()` has it as it is now.
     GroupChanged { group: String },
 }
@@ -153,7 +145,7 @@ pub enum Event {
 /// What waits in the outbox for one recipient in one conversation (`Client::outbox_view`).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct OutboxEntry {
-    /// The user id (hex); this account's own for the copies to its other devices.
+    /// The recipient's user id (hex).
     pub user: String,
     /// The group (id, hex) its messages are of; none: 1:1 (and keys, receipts, names).
     pub group: Option<String>,
@@ -178,7 +170,7 @@ pub enum OutboxReason {
     RateLimited,
     /// Refused with their old key (`403`): after the next inbox read, with the new one.
     TheirKey,
-    /// Their devices are being asked of the hub (a new phone).
+    /// Their device is being asked of the hub (a new phone).
     Roster,
     /// Their inbox is full (`507`).
     InboxFull,
@@ -222,14 +214,9 @@ pub struct SessionInfo {
     pub retrying: bool,
 }
 
-/// Where the sealed state goes after every operation. A save that fails stops the operation before anything that
-/// needed it leaves (spec 4.7): `Error::Save`.
+/// Where the state goes after every operation. A failed save stops the operation before anything leaves (4.7).
 pub trait Store: Send + Sync {
-    fn save(&self, blob: Vec<u8>) -> std::result::Result<(), String>;
-
-    fn save_state(&self, state: &State, records: signal::Entries, key: &[u8; 32]) -> std::result::Result<(), String> {
-        self.save(state::seal(state, records, key))
-    }
+    fn save_state(&self, state: &State, records: signal::Entries) -> std::result::Result<(), String>;
 }
 
 pub type Clock = Arc<dyn Fn() -> u64 + Send + Sync>;
@@ -286,8 +273,7 @@ pub struct Whois {
 }
 
 impl Whois {
-    /// The user id and the username as its owner writes it. `NotOnYo`: nobody by that name. Blocks for the round
-    /// trip.
+    /// The user id and the username as its owner writes it; `NotOnYo`: nobody by that name.
     pub fn send(&self) -> Result<(String, Option<String>)> {
         let response =
             self.transport.request("POST", api::LOOKUP, &self.headers, &self.body).map_err(Error::Network)?;
@@ -311,71 +297,32 @@ fn spelled(username: Option<yo_wire::VLBytes>) -> Option<String> {
     username.and_then(|n| String::from_utf8(n.into()).ok()).filter(|n| yo_wire::handle::check_username_form(n).is_ok())
 }
 
-/// A light signed certificate GET, sent without holding the client.
-pub struct StatusProbe {
+/// A request signed under the client and sent without it, so the client's lock is not held for the round trip.
+pub struct Request {
     transport: Arc<dyn Transport>,
-    headers: Vec<(String, String)>,
-}
-
-impl StatusProbe {
-    pub fn send(&self) -> Result<u16> {
-        self.transport
-            .request("GET", api::CERTIFICATE, &self.headers, &[])
-            .map(|answer| answer.status)
-            .map_err(Error::Network)
-    }
-}
-
-/// The signed feedback of `Client::feedback_begin`, sent without the client.
-pub struct FeedbackRequest {
+    method: &'static str,
     path: &'static str,
-    transport: Arc<dyn Transport>,
     headers: Vec<(String, String)>,
     body: Vec<u8>,
 }
 
-impl FeedbackRequest {
-    /// Blocks for the round trip. `Refused(429)`: the day's feedback is used up.
+impl Request {
+    /// The hub's status, whatever it is.
+    pub fn status(&self) -> Result<u16> {
+        Ok(self.response()?.status)
+    }
+
+    /// Expects `204`; feedback's `Refused(429)`: the day's is used up.
     pub fn send(&self) -> Result<()> {
-        let response = self.transport.request("POST", self.path, &self.headers, &self.body).map_err(Error::Network)?;
-        match response.status {
-            status::NO_CONTENT => Ok(()),
-            _ => Err(refused(&response)),
-        }
+        expect(self.response()?, status::NO_CONTENT).map(drop)
     }
-}
 
-/// A support read signed and persisted under the client, sent after releasing its state lock.
-pub struct SupportRequest {
-    transport: Arc<dyn Transport>,
-    headers: Vec<(String, String)>,
-    body: Vec<u8>,
-    mark: bool,
-}
-impl SupportRequest {
-    fn response(&self) -> Result<Response> {
-        self.transport
-            .request(
-                if self.mark { "POST" } else { "GET" },
-                if self.mark { api::SUPPORT_READ } else { api::SUPPORT },
-                &self.headers,
-                &self.body,
-            )
-            .map_err(Error::Network)
-    }
     pub fn thread(&self) -> Result<api::SupportThread> {
-        let response = self.response()?;
-        if response.status != status::OK {
-            return Err(refused(&response));
-        }
-        Ok(decode(&response.body)?)
+        Ok(decode(&expect(self.response()?, status::OK)?.body)?)
     }
-    pub fn read(&self) -> Result<()> {
-        let response = self.response()?;
-        if response.status != status::NO_CONTENT {
-            return Err(refused(&response));
-        }
-        Ok(())
+
+    fn response(&self) -> Result<Response> {
+        self.transport.request(self.method, self.path, &self.headers, &self.body).map_err(Error::Network)
     }
 }
 
@@ -395,16 +342,14 @@ fn gone_for_good(status: u16) -> bool {
     matches!(status, status::NOT_FOUND | status::BAD_REQUEST | status::TOO_LARGE)
 }
 
-/// A delivery's answer that ends it: taken, refused for good, or a request the recipient takes none of (spec 4.10).
-/// What comes after it to the same user may go.
+/// A delivery's answer that ends it: taken, refused for good, or a request the recipient refuses (spec 4.10).
 fn settled(status: u16, item: &Delivery) -> bool {
     status == status::ACCEPTED
         || (status == status::FORBIDDEN && item.access.is_none() && !item.endorsed)
         || gone_for_good(status)
 }
 
-/// Envelopes of the outbox on their way to the hub, sent without the client: see `Client::send_begin`. Each must
-/// be ended with `Client::send_end`, even unsent: until then its users' next envelopes wait.
+/// Envelopes on their way to the hub without the client: each must be ended with `Client::send_end`, even unsent.
 pub struct Deliveries {
     transport: Arc<dyn Transport>,
     items: Vec<Delivery>,
@@ -413,8 +358,7 @@ pub struct Deliveries {
 }
 
 struct Delivery {
-    /// The recipient's profile key whose access key it shows: a contact's; none, a request signed by this device
-    /// (spec 4.10).
+    /// The recipient's profile key whose access key it shows; none: a request (spec 4.10).
     access: Option<[u8; 32]>,
     /// Without the profile key, a group send token for the recipient instead (spec 4.9): a contact's as well.
     endorsed: bool,
@@ -429,9 +373,7 @@ struct Delivery {
     nonce: Option<[u8; hubsig::NONCE_LEN]>,
 }
 
-/// Whether a key a content message carried, of `generation`, replaces the one held (spec 4.10): the same key tells
-/// its generation; another one only if later than the generation known (one that came as type 10 since keeps the
-/// one before as its bound).
+/// Whether a carried key of `generation` replaces the one held: only a later generation does (spec 4.10).
 fn carried_key_taken(contact: &Contact, key: &[u8; 32], generation: u32) -> bool {
     match contact.profile_key {
         Some(held) if held == *key => true,
@@ -486,37 +428,35 @@ fn limit_of(response: &Response) -> Option<Limit> {
     })
 }
 
-/// The limits a `429` of a round named so far, shared by its users' chains (`Deliveries::send`).
+/// The limits a `429` of a round named so far, shared by its users' chains (`Deliveries::send`): a bit per limit.
 #[derive(Default)]
-struct Limits {
-    all: std::sync::atomic::AtomicBool,
-    address: std::sync::atomic::AtomicBool,
-    device: std::sync::atomic::AtomicBool,
-}
+struct Limits(std::sync::atomic::AtomicU8);
 
 impl Limits {
+    const ALL: u8 = 1;
+    const ADDRESS: u8 = 2;
+    const DEVICE: u8 = 4;
+
     fn hit(&self, limit: Limit) {
-        let flag = match limit {
-            Limit::All => &self.all,
-            Limit::Address => &self.address,
-            Limit::Device => &self.device,
+        let bit = match limit {
+            Limit::All => Self::ALL,
+            Limit::Address => Self::ADDRESS,
+            Limit::Device => Self::DEVICE,
             Limit::Recipient(_) => return,
         };
-        flag.store(true, std::sync::atomic::Ordering::Relaxed);
+        self.0.fetch_or(bit, std::sync::atomic::Ordering::Relaxed);
     }
 
     /// Whether a delivery (`signed` or sealed) waits for the next round.
     fn holds(&self, signed: bool) -> bool {
-        let set = |flag: &std::sync::atomic::AtomicBool| flag.load(std::sync::atomic::Ordering::Relaxed);
-        set(&self.all) || set(&self.address) || (signed && set(&self.device))
+        let held = Self::ALL | Self::ADDRESS | if signed { Self::DEVICE } else { 0 };
+        self.0.load(std::sync::atomic::Ordering::Relaxed) & held != 0
     }
 }
 
 impl Deliveries {
-    /// Posts each envelope, each user's in order, the users side by side (a group's Yo to every member at once, as
-    /// Signal's sends to several). After one to a user that the hub did not take, that user's next ones are held
-    /// (`None`), so they keep their order; after a `429` what is still to go that shares its limit is (6.6). Blocks
-    /// for the round trips.
+    /// Posts each user's envelopes in order, users in parallel. After one the hub did not take, that user's next are
+    /// held (`None`) to keep their order; after a `429`, what shares its limit is held (6.6).
     pub fn send(&self) -> Vec<Option<Answer>> {
         let mut users: Vec<&str> = Vec::new();
         for item in &self.items {
@@ -559,7 +499,6 @@ impl Deliveries {
         answers
     }
 
-    /// Nothing to send.
     pub fn is_empty(&self) -> bool {
         self.items.is_empty()
     }
@@ -572,57 +511,43 @@ pub struct Client {
     state: State,
     clock: Clock,
     last_request_ms: u64,
-    /// The signing time of the request whose answer set `prekeys.left` last: an older answer, waited for outside the
-    /// app's lock while another call refilled, does not overwrite it.
+    /// The signing time of the answer that set `prekeys.left` last: an older answer does not overwrite it.
     prekeys_known_ms: u64,
     dropped: u64,
     drop_reasons: Vec<String>,
     /// Users whose envelopes are on their way to the hub (`deliveries`): nothing else to them goes meanwhile.
     delivering: BTreeSet<String>,
-    /// Users a delivery to was refused as a request though it showed their key (spec 4.10): nothing more to them
-    /// until the inbox was read, where their new key may wait.
+    /// Users refused as a request though their key was shown (4.10): held until the inbox, where a new key may wait.
     refused_until_read: BTreeSet<String>,
     /// The hub's last answer to a delivery to each user (0: none came, no network): why theirs wait (`outbox_view`).
     last_answer: BTreeMap<String, u16>,
-    /// Users whose requests the hub limits now (`429`, spec 4.10), until when (clock): theirs wait till then, or
-    /// until their profile key comes (then they go as a contact's at once). Not saved: after a restart, tried again.
-    /// With it, whether their key went ahead meanwhile and was refused too: then it waits as well.
+    /// Users whose requests the hub limits (`429`, 4.10), until when, and whether their key was refused too. Not saved.
     request_wait: BTreeMap<String, (u64, bool)>,
     /// An envelope was made (and its ratchet moved) since the state was last saved: saved before anything leaves.
     envelopes_unsaved: std::cell::Cell<bool>,
     /// Keys of photos and videos received are forgotten before anything is kept (a bot that never opens them).
     media_keys_forgotten: bool,
-    /// A guest (`restore_guest`): the events it receives stay in the state for the app; how many of them this one
-    /// has returned already.
+    /// A guest: the events it receives stay for the app; how many it has returned already.
     guest_events: Option<usize>,
-    /// The app acknowledges each batch it was handed itself (`acknowledge_only`): a call no longer acknowledges what
-    /// the one before handed out, which another call running beside it may not have consumed yet.
-    explicit_ack: bool,
-    /// Inbox ids received and saved, not yet acknowledged at the hub: `sync_end` hands its events out first, and
-    /// `after_sync` (or the next call that receives) acknowledges them. Lost with the process, they come again and are
-    /// skipped as seen.
+    /// Inbox ids saved and handed out, not yet acknowledged at the hub. Lost with the process, they come again.
     unacked: Vec<u64>,
     /// Users this process asked the hub the name of (a contact known without one: a group's member), once each.
     names_asked: BTreeSet<String>,
-    /// Inbox ids a call received (its last batch, not full) and has not handed out yet: `finish` moves them to
-    /// `unacked` once their events are saved and handed over, so no call acknowledges before the app has its events.
+    /// Inbox ids received and not yet handed out: acknowledged only once their events are saved and handed over.
     received_ids: Vec<u64>,
-    /// `sync_end` received: the work after it (receipts, decryption errors, prekeys, the outbox, the storage) waits
-    /// for `after_sync`, or the next `sync_begin`.
+    /// `sync_end` received: the work after it waits for `after_sync` or the next `sync_begin`.
     after_due: bool,
     /// Once a signed inbox response says this device is revoked, no further sends leave.
     replaced: std::cell::Cell<bool>,
     probe_requests: Vec<(String, [u8; 32])>,
-    /// The hub's public keys the app ships (spec 6.10: the current one and a spare kept offline): with them, every
-    /// answer that hands out keys must carry a signature by one of them over this very question; with none (an app
-    /// from before), answers are taken as they come.
+    /// The hub's public keys the app ships (spec 6.10): answers that hand out keys must be signed by one of them.
     hub_keys: Vec<Key>,
-    /// The sender-certificate trust roots the app ships for its hub (spec 6.1: the current one and a spare): sealed
-    /// envelopes open only with a certificate from one of them. None: no sealed envelope opens, and none is sent.
+    /// Sender-certificate trust roots (spec 6.1): none, nothing sealed opens or is sent.
     trust_roots: Vec<Key>,
     /// When (this clock) a sender certificate was last asked for: at most once a minute.
     certificate_asked_at: u64,
-    /// How far this device's clock is off (tests: a phone set to the wrong time); the signing time is wall time plus it.
+    /// How far this device's clock is off (tests: a phone set to the wrong time); the signing time is wall time plus
+    /// it.
     skew_ms: i64,
     /// The hub's zkgroup public params the app pins (spec 4.9, `set_zk_params`): none, no groups.
     zk: Option<zkgroup::ServerPublicParams>,
@@ -640,8 +565,15 @@ fn with_nonce(mut headers: Vec<(String, String)>, nonce: Option<[u8; hubsig::NON
     headers
 }
 
-/// An answer that hands out keys, as the hub signed it for this request (spec 6.10): checked against the pinned keys
-/// (any of them) and its signature cut off. With none pinned (an app from before), the answer as it came.
+/// An answer that hands out keys, checked against the pinned hub keys and its signature cut off (spec 6.10).
+/// One device per account (spec 4.4): a roster naming more is refused before anything is pinned or changed.
+fn one_device(devices: &[api::Device]) -> Result<()> {
+    match devices.len() {
+        0 | 1 => Ok(()),
+        _ => Err(Error::Protocol("more than one device")),
+    }
+}
+
 fn hub_signed<'a>(
     keys: &[Key],
     nonce: Option<&[u8; hubsig::NONCE_LEN]>,
@@ -661,8 +593,7 @@ fn wall_ms() -> u64 {
     SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_millis() as u64
 }
 
-/// The time and signature headers of a signed request (spec 6.2), by `sign`: a device's auth key, or a backup
-/// door's (XEdDSA both).
+/// The time and signature headers of a signed request (spec 6.2), signed by `sign` (XEdDSA).
 fn signature_headers(
     sign: impl FnOnce(&[u8]) -> [u8; yo_wire::SIGNATURE_LEN],
     method: &str,
@@ -680,15 +611,9 @@ fn user_bytes(user: &str) -> Result<UserId> {
 
 const PROBE_HANDLE: &str = "PINGTEST";
 
-/// Whether two handles as shown name the same: a username by its skeleton (spec 3.3), so "yogpt" is "YoGPT".
-fn same_handle(a: &str, b: &str) -> bool {
-    yo_wire::handle::same_name(a, b)
-}
-
-/// Remembers how a contact is known. A username in another spelling takes the place of the one before: the newest
-/// is the hub's word for how its owner writes it.
+/// Remembers how a contact is known: a username in another spelling replaces the one before.
 fn note_handle(contact: &mut Contact, shown: String) {
-    match contact.handles.iter().position(|h| same_handle(h, &shown)) {
+    match contact.handles.iter().position(|h| same_name(h, &shown)) {
         Some(index) => contact.handles[index] = shown,
         None => contact.handles.push(shown),
     }
@@ -699,72 +624,12 @@ fn note_handle(contact: &mut Contact, shown: String) {
     }
 }
 
-/// An event as the state keeps it, and back: the app-facing types carry no serde.
-pub(crate) fn stored(event: Event) -> StoredEvent {
-    let content = |content: Content| match content {
-        Content::Yo => StoredContent::Yo,
-        Content::Photo(media) => StoredContent::Photo(media.into()),
-        Content::Video { media, duration_ms } => StoredContent::Video { media: media.into(), duration_ms },
-        Content::Text(text) => StoredContent::Text(text),
-        Content::Link(url) => StoredContent::Link(url),
-        Content::Location { lat_e7, lon_e7 } => StoredContent::Location { lat_e7, lon_e7 },
-        Content::Profile { name } => StoredContent::Profile(name),
-        Content::Unknown(kind) => StoredContent::Unknown(kind),
-        Content::Probe(_) => StoredContent::Unknown(yo_wire::content::TYPE_PROBE),
-        Content::ProbeReply(_) => StoredContent::Unknown(yo_wire::content::TYPE_PROBE_REPLY),
-        Content::Receipt => StoredContent::Unknown(yo_wire::content::TYPE_RECEIPT),
-        Content::Group(_) => StoredContent::Unknown(yo_wire::content::TYPE_GROUP),
-        Content::ProfileKey(_) => StoredContent::Unknown(yo_wire::content::TYPE_PROFILE_KEY),
-    };
-    match event {
-        Event::NewChat { user } => StoredEvent::NewChat { user },
-        Event::Message { user, sent_at_ms, content: c } => {
-            StoredEvent::Message { user, sent_at_ms, content: content(c), own: false }
-        }
-        Event::SentElsewhere { user, sent_at_ms, content: c } => {
-            StoredEvent::Message { user, sent_at_ms, content: content(c), own: true }
-        }
-        Event::Profile { user, name } => StoredEvent::Profile { user, name },
-        Event::IdentityChanged { user } => StoredEvent::IdentityChanged { user },
-        Event::GroupMessage { group, user, sent_at_ms, content: c } => {
-            StoredEvent::GroupMessage { group, user, sent_at_ms, content: content(c), own: false }
-        }
-        Event::GroupSentElsewhere { group, sent_at_ms, content: c } => {
-            StoredEvent::GroupMessage { group, user: String::new(), sent_at_ms, content: content(c), own: true }
-        }
-        Event::GroupChanged { group } => StoredEvent::GroupChanged { group },
+/// The answer if the hub said `ok`; else why not (`410`: this device was replaced).
+fn expect(response: Response, ok: u16) -> Result<Response> {
+    if response.status == ok {
+        return Ok(response);
     }
-}
-
-fn unstored(event: StoredEvent) -> Event {
-    let content = |content: StoredContent| match content {
-        StoredContent::Yo => Content::Yo,
-        StoredContent::Photo(media) => Content::Photo(media.into()),
-        StoredContent::Video { media, duration_ms } => Content::Video { media: media.into(), duration_ms },
-        StoredContent::Text(text) => Content::Text(text),
-        StoredContent::Link(url) => Content::Link(url),
-        StoredContent::Location { lat_e7, lon_e7 } => Content::Location { lat_e7, lon_e7 },
-        StoredContent::Profile(name) => Content::Profile { name },
-        StoredContent::Unknown(kind) => Content::Unknown(kind),
-    };
-    match event {
-        StoredEvent::NewChat { user } => Event::NewChat { user },
-        StoredEvent::Message { user, sent_at_ms, content: c, own: false } => {
-            Event::Message { user, sent_at_ms, content: content(c) }
-        }
-        StoredEvent::Message { user, sent_at_ms, content: c, own: true } => {
-            Event::SentElsewhere { user, sent_at_ms, content: content(c) }
-        }
-        StoredEvent::Profile { user, name } => Event::Profile { user, name },
-        StoredEvent::IdentityChanged { user } => Event::IdentityChanged { user },
-        StoredEvent::GroupMessage { group, user, sent_at_ms, content: c, own: false } => {
-            Event::GroupMessage { group, user, sent_at_ms, content: content(c) }
-        }
-        StoredEvent::GroupMessage { group, sent_at_ms, content: c, own: true, .. } => {
-            Event::GroupSentElsewhere { group, sent_at_ms, content: content(c) }
-        }
-        StoredEvent::GroupChanged { group } => Event::GroupChanged { group },
-    }
+    Err(refused(&response))
 }
 
 fn refused(response: &Response) -> Error {
@@ -796,10 +661,8 @@ fn shown(content: &Content) -> bool {
 impl Client {
     // ---- registration and state ----
 
-    /// Registers this device with a username (spec 6.4). Without `account_secret`, a new account with a new account
-    /// key: the name must be free. With the account key from the backup (spec 7), its user again, whatever the name:
-    /// the user id is the same, the name the one it has now (`username`), its other devices are replaced. `409` when
-    /// the name is taken by another key.
+    /// Registers this device with a username (spec 6.4): a new account, or with `account_secret` from the backup
+    /// (spec 7) the same user again, replacing its old device. `409`: the name is taken by another key.
     pub fn register_username(
         transport: Arc<dyn Transport>,
         username: &str,
@@ -812,11 +675,8 @@ impl Client {
         Ok(client)
     }
 
-    /// `register_username`, saved to `store` from the start: the account and device secrets and the request are saved
-    /// before the request leaves, so a crash after the hub took it loses neither the account nor its device. A state
-    /// saved so is finished by `finish_registration` after `restore` (`registering`). `legacy_seed`: the Ed25519 seed
-    /// `account_secret` was converted from (`identity::legacy_account_secret`, an iCloud Keychain item of before), so
-    /// the storage sealed under its key opens (and is written again under the new one).
+    /// `register_username`, saved to `store` before the request leaves, so a crash loses neither account nor device.
+    /// `legacy_storage_key`: the key an old install's storage is sealed under (`legacy::Identity`), so it opens.
     #[allow(clippy::too_many_arguments)]
     pub fn register_username_saved(
         transport: Arc<dyn Transport>,
@@ -824,11 +684,11 @@ impl Client {
         key: [u8; 32],
         username: &str,
         account_secret: Option<[u8; 32]>,
-        legacy_seed: Option<[u8; 32]>,
+        legacy_storage_key: Option<[u8; 32]>,
         name: Option<String>,
         push: Push,
     ) -> Result<Client> {
-        let mut client = Client::registering(transport, username, account_secret, legacy_seed, name, push)?;
+        let mut client = Client::registering(transport, username, account_secret, legacy_storage_key, name, push)?;
         client.persist_to(store, key)?;
         client.finish_registration()?;
         Ok(client)
@@ -839,7 +699,7 @@ impl Client {
         transport: Arc<dyn Transport>,
         username: &str,
         account_secret: Option<[u8; 32]>,
-        legacy_seed: Option<[u8; 32]>,
+        legacy_storage_key: Option<[u8; 32]>,
         name: Option<String>,
         push: Push,
     ) -> Result<Client> {
@@ -852,22 +712,19 @@ impl Client {
         let request = api::Register { username: handle.value.clone(), device };
         client.state.registering = Some(Registering { request: encode(&request), sent: false });
         client.state.username = Some(String::from_utf8_lossy(handle.value.as_slice()).into_owned());
-        // A new account has nothing stored. A restored one takes its storage in once registered, so its blocks hold
-        // before the first message; without network, before the first receive (`receive_all`).
+        // A restored account fetches its storage once registered, so its blocks hold before the first message.
         client.state.storage_fetched = account_secret.is_none();
-        client.state.legacy_storage_key = legacy_seed.map(|seed| storage::key(&seed));
+        client.state.legacy_storage_key = legacy_storage_key;
         Ok(client)
     }
 
-    /// Whether this device's registration has not been answered yet (a state saved before it, then restored):
-    /// `finish_registration` before anything else.
+    /// Whether the registration is unanswered: `finish_registration` before anything else.
     pub fn is_registering(&self) -> bool {
         self.state.registering.is_some()
     }
 
-    /// Sends the registration (spec 6.4), again after a lost answer or a restart. A try sent before may have arrived:
-    /// then this device is registered, and the hub says so to a lookup it signs (else `401`), so the same request
-    /// is sent again only if it did not. Never a new key: that would find the name taken by itself.
+    /// Sends the registration again after a lost answer or a restart; a try that arrived is found by a signed lookup
+    /// first. Never a new key: that would find the name taken by itself.
     pub fn finish_registration(&mut self) -> Result<()> {
         if !self.is_registering() {
             return Ok(());
@@ -880,9 +737,8 @@ impl Client {
                 match self.lookup(&mine, 0, Vec::new()) {
                     Ok((found, _)) if found.devices.iter().any(|d| d.key == self.state.device_key) => {
                         self.state.user_id = hex(&found.user_id);
-                        if let Some(me) = found.devices.iter().find(|d| d.key == self.state.device_key) {
-                            self.state.device_number = me.id;
-                        }
+                        self.state.device_number =
+                            found.devices.iter().find(|d| d.key == self.state.device_key).map_or(0, |me| me.id);
                         self.state.registering = None;
                         answered = false;
                         break;
@@ -919,60 +775,21 @@ impl Client {
         self.persist()
     }
 
-    /// For tests: this device's sender certificate as the hub gave it, if any.
-    #[cfg(feature = "testing")]
-    pub fn sender_certificate_for_tests(&self) -> Option<Vec<u8>> {
-        self.state.sender_certificate.as_ref().map(|(bytes, _)| bytes.clone())
-    }
-
-    /// For tests: this device's sender certificate replaced (one from another root, an old one), as if fetched now.
-    #[cfg(feature = "testing")]
-    pub fn set_sender_certificate_for_tests(&mut self, bytes: Option<Vec<u8>>) {
-        self.state.sender_certificate = bytes.map(|b| (b, (self.clock)()));
-        self.state.certificate_clock = (self.clock)();
-        self.certificate_asked_at = 0;
-    }
-
-    /// For tests: the phone's clock is `ms` off (spec 6.2: signed requests are within 5 minutes of the hub's).
-    #[cfg(feature = "testing")]
-    pub fn set_clock_skew(&mut self, ms: i64) {
-        self.skew_ms = ms;
-    }
-
-    /// For tests: any request, signed by this device, as only a broken client would send it.
-    #[cfg(feature = "testing")]
-    pub fn signed_for_tests(&mut self, method: &str, path: &str, body: &[u8]) -> Result<Response> {
-        self.signed(method, path, body)
-    }
-
-    /// For tests: this account's access key as a delivery shows it (`Yo-Access`), once its profile key is made.
-    #[cfg(feature = "testing")]
-    pub fn access_key_for_tests(&self) -> Option<String> {
-        self.state.profile_key.map(|key| yo_wire::b64(&access_key(&key)))
-    }
-
-    /// The account key's secret (its Curve25519 private key): what the backup seals (spec 7), so a new phone registers
-    /// with it.
+    /// The account key's secret: what the backup seals (spec 7), so a new phone registers with it.
     pub fn account_secret(&self) -> [u8; 32] {
         self.state.account_secret
     }
 
-    /// Stores the account's backup record at the hub (spec 7), replacing the one before: its old locator finds
-    /// nothing from then on. `409` when another account's record has this locator.
+    /// Stores the backup record at the hub, replacing the one before (spec 7). `409`: another account's locator.
     pub fn put_backup(&mut self, backup: &api::Backup) -> Result<()> {
         backup.check()?;
         let response = self.signed("PUT", api::BACKUP, &encode(backup))?;
         self.persist()?; // its signing time kept, as every signed request's
-        match response.status {
-            status::NO_CONTENT => Ok(()),
-            _ => Err(refused(&response)),
-        }
+        expect(response, status::NO_CONTENT).map(drop)
     }
 
-    /// Whether a username is free (spec 6.3), asked while it is typed, before there is an account. `username` as it
-    /// is written (NFC; `handle::canonical` keeps a field to that). False when it is taken, also in another spelling
-    /// or as a name that looks like it, or reserved; `Refused(400)` when it is no username, `Refused(429)` when asked
-    /// too often.
+    /// Whether a username (NFC) is free, also in other spellings and look-alikes (spec 6.3). `Refused(400)`: no
+    /// username; `Refused(429)`: asked too often.
     pub fn username_free(transport: &dyn Transport, username: &str) -> Result<bool> {
         let response = transport.request("GET", &api::username_path(username), &[], &[]).map_err(Error::Network)?;
         match response.status {
@@ -986,14 +803,10 @@ impl Client {
     pub fn send_crash(transport: &dyn Transport, text: &str, app_version: &str) -> Result<()> {
         let body = encode(&api::Feedback { text: text.as_bytes().into(), app_version: app_version.as_bytes().into() });
         let response = transport.request("POST", api::CRASH, &[], &body).map_err(Error::Network)?;
-        match response.status {
-            status::NO_CONTENT => Ok(()),
-            _ => Err(refused(&response)),
-        }
+        expect(response, status::NO_CONTENT).map(drop)
     }
 
-    /// A device's keys, certificate and first prekeys, and the proof of possession over the handle it registers
-    /// with (spec 6.4).
+    /// A device's keys, certificate, first prekeys, and the proof of possession over its handle (spec 6.4).
     fn new_device(
         transport: Arc<dyn Transport>,
         handle: &Handle,
@@ -1003,50 +816,16 @@ impl Client {
     ) -> Result<(Client, api::NewDevice)> {
         let device_key: Key = identity::random();
         let device_id: HubDeviceId = identity::random();
-        let auth_secret = identity::new_account_secret(); // a Curve25519 private key, as the account's
-                                                          // A registration id as Signal's: 14 bits, never 0.
+        let auth_secret = identity::new_account_secret();
+        // A registration id as Signal's: 14 bits, never 0.
         let registration_id = u32::from(u16::from_be_bytes(identity::random()) & 0x3fff).max(1);
-        let state = State {
-            user_id: String::new(),
-            username: None,
-            account_secret: account.private_key().serialize().try_into().map_err(|_| Error::Internal("account key"))?,
-            auth_secret,
-            device_id,
-            device_key,
-            device_number: 0,
-            certificate: identity::certify(&account, &device_key).to_bytes(),
-            registration_id,
-            name,
-            contacts: Default::default(),
-            own: Vec::new(),
-            outbox: VecDeque::new(),
-            next_seq: 0,
-            events: Vec::new(),
-            handed: Vec::new(),
-            seen: VecDeque::new(),
-            prekeys: Default::default(),
-            signed_until: 0,
-            storage: Default::default(),
-            storage_version: 0,
-            storage_fetched: false,
-            storage_dirty: false,
-            legacy_storage_key: None,
-            storage_saved_at: 0,
-            last_sent_ms: 0,
-            received: VecDeque::new(),
-            profile_key: None,
-            profile_key_gen: 0,
-            requests_open: true,
-            access_key_told: false,
-            sender_certificate: None,
-            certificate_clock: 0,
-            registering: None,
-            groups: Default::default(),
-            roster_asked: Default::default(),
-            recovery_lookups: (0, 0),
-            group_held: Vec::new(),
-            deferred: Default::default(),
-        };
+        // Field by field: `State` zeroizes on drop, so it takes no `..Default::default()`.
+        let mut state = State::default();
+        state.account_secret =
+            account.private_key().serialize().try_into().map_err(|_| Error::Internal("account key"))?;
+        (state.auth_secret, state.device_id, state.device_key) = (auth_secret, device_id, device_key);
+        state.certificate = identity::certify(&account, &device_key).to_bytes();
+        (state.registration_id, state.name, state.requests_open) = (registration_id, name, true);
         let records = Records::new(&Default::default(), &state.account_secret, registration_id)?;
         let mut client = Client::with(transport, records, state);
         let prekeys = client.make_prekeys(PREKEY_TARGET, true)?;
@@ -1068,36 +847,13 @@ impl Client {
     }
 
     fn registered(&mut self, path: &str, body: &[u8]) -> Result<()> {
-        let response = self.transport.request("POST", path, &[], body).map_err(Error::Network)?;
-        if response.status != status::OK {
-            return Err(refused(&response));
-        }
+        let response = expect(self.transport.request("POST", path, &[], body).map_err(Error::Network)?, status::OK)?;
         let registered: api::Registered = decode(&response.body)?;
         self.state.user_id = hex(&registered.user_id);
         self.state.device_number = registered.device_id;
         // A restored account keeps the name it has at the hub now, whatever the backup had (spec 6.4).
         self.state.username = registered.username.map(|name| String::from_utf8_lossy(name.as_slice()).into_owned());
         Ok(())
-    }
-
-    /// For fuzzing: processes one sealed envelope's payload as if it came from the inbox (one transaction, like
-    /// `sync`).
-    #[cfg(feature = "fuzz")]
-    pub fn receive_for_fuzzing(&mut self, payload: &[u8]) -> Result<()> {
-        let opened = [&[0u8; 16][..], payload].concat();
-        self.receive(&opened, &mut BTreeSet::new())
-    }
-
-    /// Opens a sealed state.
-    pub fn restore(transport: Arc<dyn Transport>, blob: &[u8], key: &[u8; 32]) -> Result<Client> {
-        Ok(Client::restore_changed(transport, blob, key)?.0)
-    }
-
-    /// `restore`, and whether opening changed the state (what the last call handed out comes again): then it is to be
-    /// saved before another process reads it, else it may be kept as it is (`keep_in`).
-    pub fn restore_changed(transport: Arc<dyn Transport>, blob: &[u8], key: &[u8; 32]) -> Result<(Client, bool)> {
-        let (state, entries) = state::open(blob, key)?;
-        Self::from_snapshot(transport, state, entries, false)
     }
 
     /// Opens a decoded database snapshot. A guest leaves events handed to the app where they are.
@@ -1139,7 +895,6 @@ impl Client {
             envelopes_unsaved: std::cell::Cell::new(false),
             media_keys_forgotten: false,
             guest_events: None,
-            explicit_ack: false,
             unacked: Vec::new(),
             names_asked: BTreeSet::new(),
             received_ids: Vec::new(),
@@ -1161,8 +916,7 @@ impl Client {
         self.trust_roots = keys;
     }
 
-    /// This device's sender certificate, while it is in date by this clock (a day less `sealed::REFRESH_MS` since it
-    /// came, whatever time the clock shows) and the trust roots are pinned.
+    /// This device's sender certificate while in date by this clock and the trust roots are pinned.
     fn certificate(&mut self) -> Option<libsignal_protocol::SenderCertificate> {
         let now = (self.clock)();
         self.state.certificate_clock = self.state.certificate_clock.max(now);
@@ -1173,16 +927,15 @@ impl Client {
             .flatten()
     }
 
-    /// How long this device's sender certificate is still used, by this clock: none if there is none, or the clock
-    /// went back since it came (or since it last looked).
+    /// How long the sender certificate is still used by this clock: none if absent or the clock went back.
     fn certificate_left(&self, now: u64) -> Option<u64> {
         let (_, at) = self.state.sender_certificate.as_ref()?;
         let back = now < *at || now + 60_000 < self.state.certificate_clock;
         (!back).then(|| CERTIFICATE_USED_MS.saturating_sub(now - at))
     }
 
-    /// Fetches a sender certificate when there is none in date, or it is due (at most once a minute): after a sync, in
-    /// maintenance, after an identified send. Quietly: without one, deliveries go identified meanwhile.
+    /// Fetches a sender certificate when none is in date or it is due, at most once a minute. Quietly: without one,
+    /// deliveries go identified.
     fn refresh_certificate(&mut self) -> Result<()> {
         let now = (self.clock)();
         self.state.certificate_clock = self.state.certificate_clock.max(now);
@@ -1210,7 +963,7 @@ impl Client {
             return Ok(());
         }
         let roots = sealed::roots(&self.trust_roots);
-        let own = signal::identity_pair(&self.state.account_secret)?;
+        let own = identity::account_pair(&self.state.account_secret)?;
         let user = user_bytes(&self.state.user_id)?;
         match sealed::check_own(&response.body, &roots, &user, self.state.device_number, own.identity_key()) {
             Ok(_) => {
@@ -1225,13 +978,11 @@ impl Client {
         }
     }
 
-    /// Pins the hub's public keys (spec 6.10): answers handing out keys are taken only signed by one of them from now
-    /// on. None: not checked.
+    /// Pins the hub's public keys (spec 6.10); none: answers are not checked.
     pub fn set_hub_keys(&mut self, keys: Vec<Key>) {
         self.hub_keys = keys;
     }
 
-    /// Whether answers handing out keys are checked against pinned hub keys.
     pub fn hub_key_pinned(&self) -> bool {
         !self.hub_keys.is_empty()
     }
@@ -1239,26 +990,6 @@ impl Client {
     /// A fresh nonce for an answer that hands out keys, when keys are pinned (spec 6.10).
     fn hub_nonce(&self) -> Option<[u8; hubsig::NONCE_LEN]> {
         self.hub_key_pinned().then(identity::random::<{ hubsig::NONCE_LEN }>)
-    }
-
-    /// Opens a sealed state as a guest: another process (a share or notification extension) using the state of the
-    /// app that owns it, in turns (the platform's lock around each use). Unlike `restore`, what the app was handed
-    /// stays handed, and the events this one receives are returned but stay in the state, so the app gets them too;
-    /// a guest never acknowledges.
-    pub fn restore_guest(transport: Arc<dyn Transport>, blob: &[u8], key: &[u8; 32]) -> Result<Client> {
-        let (state, entries) = state::open(blob, key)?;
-        Ok(Self::from_snapshot(transport, state, entries, true)?.0)
-    }
-
-    /// Takes in the state another process saved meanwhile (sharing it in turns, see `restore_guest`), in place of
-    /// this one's: as if this process had stopped and started again from it, which the state is made to survive at
-    /// any point (what leaves is saved first). What lives only in memory stays: the envelopes on their way
-    /// (`delivering`; one the other process sent too goes twice, and is skipped as seen), the inbox's freshness, the
-    /// signing clock. Unlike `restore`, what was handed out stays handed: this process may still be showing it.
-    pub fn reload(&mut self, blob: &[u8]) -> Result<()> {
-        let Some((_, key)) = &self.store else { return Err(Error::State) };
-        let (state, entries) = state::open(blob, key)?;
-        self.reload_snapshot(state, entries)
     }
 
     /// Reloads rows read in a single database snapshot.
@@ -1284,7 +1015,7 @@ impl Client {
         store.load(key)
     }
 
-    /// Stops saving: the state is gone or someone else's now (see `reload`).
+    /// Stops saving: the state is gone or someone else's now.
     pub fn stop_persisting(&mut self) {
         self.store = None;
     }
@@ -1295,27 +1026,9 @@ impl Client {
         self.persist()
     }
 
-    /// Saves the sealed state to `store` after every operation from now on; not now: it is there as it is (opened
-    /// from it, unchanged), and a reader writes nothing.
+    /// Saves to `store` after every operation from now on, not now (opened from it, unchanged).
     pub fn keep_in(&mut self, store: Arc<dyn Store>, key: [u8; 32]) {
         self.store = Some((store, key));
-    }
-
-    /// The state sealed under `key`.
-    pub fn export(&self, key: &[u8; 32]) -> Vec<u8> {
-        state::seal(&self.state, self.records.export(), key)
-    }
-
-    /// For tests: the clock that decides when prekeys rotate and receipts are due.
-    pub fn set_clock(&mut self, clock: Clock) {
-        self.clock = clock;
-    }
-
-    /// Allows the next round of roster recovery in a test without aging messages or certificates.
-    #[cfg(feature = "testing")]
-    pub fn reset_recovery_limits_for_tests(&mut self) {
-        self.state.roster_asked.clear();
-        self.state.recovery_lookups = (0, 0);
     }
 
     /// The own user id (hex): stable across new phones.
@@ -1353,8 +1066,7 @@ impl Client {
         }
     }
 
-    /// What waits in the outbox, per recipient and conversation (a group's or 1:1), and why: for the curious
-    /// (Settings › Encryption). Reads only.
+    /// What waits in the outbox, per recipient and conversation, and why (Settings › Encryption).
     pub fn outbox_view(&self) -> Vec<OutboxEntry> {
         let now = (self.clock)();
         let mut entries: Vec<OutboxEntry> = Vec::new();
@@ -1368,8 +1080,7 @@ impl Client {
                 Some(entry) => entry.count += 1,
                 None => {
                     let (reason, retry_at_ms) = self.waits_for(&item.user, now);
-                    let sealed = item.user == self.state.user_id
-                        || self.state.contacts.get(&item.user).is_some_and(|c| c.profile_key.is_some());
+                    let sealed = self.state.contacts.get(&item.user).is_some_and(|c| c.profile_key.is_some());
                     entries.push(OutboxEntry {
                         user: item.user.clone(),
                         group,
@@ -1387,35 +1098,22 @@ impl Client {
 
     /// Why what waits for `user` waits now (`outbox_view`), and until when if the hub said.
     fn waits_for(&self, user: &str, now: u64) -> (OutboxReason, Option<u64>) {
-        let contact = self.state.contacts.get(user);
-        if self.delivering.contains(user) {
-            return (OutboxReason::Sending, None);
-        }
-        if let Some((until, _)) = self.request_wait.get(user).filter(|(until, _)| *until > now) {
-            return (OutboxReason::RateLimited, Some(*until));
-        }
-        if contact.is_some_and(|c| c.blocked) {
-            return (OutboxReason::Blocked, None);
-        }
-        if contact.is_some_and(|c| c.unconfirmed) {
-            return (OutboxReason::Unconfirmed, None);
-        }
-        if contact.is_some_and(|c| c.outdated_at > 0) {
-            return (OutboxReason::Outdated, None);
-        }
-        if self.refused_until_read.contains(user) {
-            return (OutboxReason::TheirKey, None);
-        }
-        if self.roster_unknown(user) || !self.without_session(user).is_empty() {
-            return (OutboxReason::Roster, None);
-        }
-        match self.last_answer.get(user) {
-            Some(&status::INSUFFICIENT_STORAGE) => (OutboxReason::InboxFull, None),
-            Some(&status::RATE_LIMITED) => (OutboxReason::RateLimited, None),
-            Some(0) => (OutboxReason::Offline, None),
-            Some(status) if *status >= 500 => (OutboxReason::Offline, None),
-            _ => (OutboxReason::Next, None),
-        }
+        let wait = self.request_wait.get(user).map(|(until, _)| *until).filter(|until| *until > now);
+        let contact = |flag: fn(&Contact) -> bool| self.state.contacts.get(user).is_some_and(flag);
+        let reason = match self.last_answer.get(user).copied() {
+            _ if self.delivering.contains(user) => OutboxReason::Sending,
+            _ if wait.is_some() => return (OutboxReason::RateLimited, wait),
+            _ if contact(|c| c.blocked) => OutboxReason::Blocked,
+            _ if contact(|c| c.unconfirmed) => OutboxReason::Unconfirmed,
+            _ if contact(|c| c.outdated_at > 0) => OutboxReason::Outdated,
+            _ if self.refused_until_read.contains(user) => OutboxReason::TheirKey,
+            _ if self.roster_unknown(user) || self.no_session(user) => OutboxReason::Roster,
+            Some(status::INSUFFICIENT_STORAGE) => OutboxReason::InboxFull,
+            Some(status::RATE_LIMITED) => OutboxReason::RateLimited,
+            Some(status) if status == 0 || status >= 500 => OutboxReason::Offline,
+            _ => OutboxReason::Next,
+        };
+        (reason, None)
     }
 
     /// One-time prekeys this device still holds the private keys of: of the scarcer kind.
@@ -1423,14 +1121,13 @@ impl Client {
         self.records.prekeys.count().min(self.records.kyber.one_time())
     }
 
-    /// Envelopes waiting to be taken by the hub; not those held for a blocked user (spec 4.8), which go only after
-    /// an unblock.
     /// Payloads kept for a roster that could not be asked yet (`State::deferred`): received again by a later sync.
     pub fn deferred(&self) -> usize {
         self.state.deferred.len()
     }
 
-    pub fn pending(&self) -> usize {
+    /// Envelopes waiting to be taken by the hub; not those held for a blocked user (spec 4.8).
+    pub fn waiting(&self) -> usize {
         self.state.outbox.iter().filter(|item| !self.blocked(&item.user)).count()
     }
 
@@ -1444,8 +1141,8 @@ impl Client {
     }
 
     fn persist(&self) -> Result<()> {
-        if let Some((store, key)) = &self.store {
-            store.save_state(&self.state, self.records.export(), key).map_err(Error::Save)?;
+        if let Some((store, _)) = &self.store {
+            store.save_state(&self.state, self.records.export()).map_err(Error::Save)?;
         }
         self.envelopes_unsaved.set(false);
         Ok(())
@@ -1456,18 +1153,17 @@ impl Client {
             Event::Message { user, .. }
             | Event::NewChat { user }
             | Event::Profile { user, .. }
-            | Event::IdentityChanged { user }
-            | Event::SentElsewhere { user, .. } => Some(user),
+            | Event::IdentityChanged { user } => Some(user),
             _ => None,
         };
         if user.is_some_and(|u| self.probe_service(u)) {
             return;
         }
-        self.state.events.push(stored(event));
+        self.state.events.push(event);
     }
 
-    /// Runs `f` as one transaction: on an error, state (events included) and sessions are as before. Nothing that
-    /// talks to the hub in a way the hub remembers may run inside: what it accepted cannot be rolled back.
+    /// Runs `f` as one transaction: on an error, state and sessions are as before. Nothing the hub remembers may run
+    /// inside: what it accepted cannot be rolled back.
     fn atomic<T>(&mut self, f: impl FnOnce(&mut Self) -> Result<T>) -> Result<T> {
         let state = self.state.clone();
         // The records keep aside only what the operation changes (they nest as these transactions do).
@@ -1477,8 +1173,7 @@ impl Client {
             self.records.commit();
         } else {
             self.records.rollback();
-            // What the hub was asked stays asked: the limits on recovery lookups (spec 4.6) hold though the payload
-            // that made them failed after.
+            // The recovery lookup limits hold though the payload that used them failed (spec 4.6).
             let (asked, lookups) = (std::mem::take(&mut self.state.roster_asked), self.state.recovery_lookups);
             self.state = state;
             self.state.roster_asked = asked;
@@ -1487,44 +1182,25 @@ impl Client {
         result
     }
 
-    /// The app has shown or stored the events the last call handed out: they will not come again after a crash. Without
-    /// it, the next call that succeeds acknowledges them.
-    pub fn acknowledge_events(&mut self) {
-        if self.guest_events.is_none() && !self.state.handed.is_empty() {
-            self.state.handed.clear();
-            // Not saved: they come again after a crash, as without the acknowledgement.
-            let _ = self.persist();
-        }
-    }
-
-    /// From now on each call's events stay handed until the app acknowledges them (`acknowledge_only`), not only until
-    /// the next call: for an app that makes calls side by side and consumes their events in its own time.
-    pub fn acknowledge_explicitly(&mut self) {
-        self.explicit_ack = true;
-    }
-
-    /// The app has shown or stored the events handed out that `acked` names (each named once, as handed): they will not
-    /// come again after a crash. The others stay handed.
+    /// The app has shown or stored the handed-out events `acked` names: they will not come again after a crash.
     pub fn acknowledge_only(&mut self, mut acked: impl FnMut(&Event) -> bool) {
         if self.guest_events.is_some() {
             return;
         }
         let before = self.state.handed.len();
-        self.state.handed.retain(|event| !acked(&unstored(event.clone())));
+        self.state.handed.retain(|event| !acked(event));
         if self.state.handed.len() != before {
             // Not saved: they come again after a crash, as without the acknowledgement.
             let _ = self.persist();
         }
     }
 
-    /// Ends a public operation: saves, hands out the events. Events are never lost: after an error they wait for the
-    /// next call that succeeds.
+    /// Ends a public operation: saves and hands out the events. After an error they wait for the next call.
     fn finish<T>(&mut self, result: Result<T>) -> Result<Vec<Event>> {
         if let Some(returned) = self.guest_events {
             // A guest: the events stay for the app; only those new since the last call are returned.
             let total = self.state.events.len();
-            let result =
-                result.map(|_| self.state.events[returned.min(total)..].iter().cloned().map(unstored).collect());
+            let result = result.map(|_| self.state.events[returned.min(total)..].to_vec());
             let saved = self.persist();
             if saved.is_err() {
                 // Not saved, whether the call went or not: the hub sends them again, nothing of it is acknowledged.
@@ -1536,22 +1212,17 @@ impl Client {
             self.unacked.extend(received);
             return result;
         }
-        // This call acknowledges what the last one handed out. What it hands out stays saved until the next call, so
-        // a crash before the app has it brings it again.
+        let previously_handed = self.state.handed.len();
         let result = result.map(|_| {
             let new = std::mem::take(&mut self.state.events);
-            let returned = new.iter().cloned().map(unstored).collect();
-            if self.explicit_ack {
-                self.state.handed.extend(new);
-            } else {
-                self.state.handed = new;
-            }
+            let returned = new.to_vec();
+            self.state.handed.extend(new);
             returned
         });
         match self.persist() {
             // Not saved: nothing is handed out, it waits for the next call.
             Err(error) if result.is_ok() => {
-                let handed = std::mem::take(&mut self.state.handed);
+                let handed = self.state.handed.split_off(previously_handed);
                 self.state.events.splice(0..0, handed);
                 self.received_ids.clear(); // not saved: the hub sends them again
                 Err(error)
@@ -1565,6 +1236,12 @@ impl Client {
         }
     }
 
+    /// `finish` with what the operation made.
+    fn finish_with<T: Clone + Default>(&mut self, result: Result<T>) -> Result<(T, Vec<Event>)> {
+        let made = result.as_ref().ok().cloned().unwrap_or_default();
+        Ok((made, self.finish(result)?))
+    }
+
     /// Like `finish`, for receiving: what arrived before a passing trouble ("not now") is handed out now.
     fn finish_receiving<T>(&mut self, result: Result<T>) -> Result<Vec<Event>> {
         match result {
@@ -1573,108 +1250,21 @@ impl Client {
         }
     }
 
-    // ---- the hub ----
-
-    /// The headers that sign a request, and its time.
-    fn sign(&mut self, method: &str, path: &str, body: &[u8]) -> (Vec<(String, String)>, u64) {
-        self.sign_hash(method, path, &sha256(body))
-    }
-
-    /// `sign` by the body's hash.
-    fn sign_hash(&mut self, method: &str, path: &str, body_hash: &[u8; 32]) -> (Vec<(String, String)>, u64) {
-        // Each signature once (the hub's replay cache): strictly increasing times, also across the processes that
-        // share this state (the app and its extensions) and across a restart (`signed_until` is saved with it).
-        // A floor well ahead of this clock was signed while the clock ran ahead (or before it was set back): kept, it
-        // could hold every request outside the hub's window until the real time caught up. Signing starts from the
-        // clock again; a time the hub saw already is answered `401`, and `signed` signs once more.
-        let wall = self.wall();
-        let floor = self.last_request_ms.max(self.state.signed_until);
-        let time = if floor >= wall + SIGN_AHEAD_MS { wall } else { wall.max(floor + 1) };
-        self.last_request_ms = time;
-        self.state.signed_until = time;
-        let secret = self.state.auth_secret;
-        let mut headers = vec![(HEADER_DEVICE.to_owned(), yo_wire::b64(&self.state.device_id))];
-        headers.extend(signature_headers(|m| identity::sign_with(&secret, m), method, path, time, body_hash));
-        (headers, time)
-    }
-
-    /// A signed request. A `401` is answered once more, signed anew: the same request at the same millisecond from
-    /// another process of this device (or one that crashed before saving the time it signed) is the same signature,
-    /// which the hub takes once. A request refused so was not processed.
-    fn signed(&mut self, method: &str, path: &str, body: &[u8]) -> Result<Response> {
-        let (headers, _) = self.sign(method, path, body);
-        let response = self.unsigned(method, path, &headers, body)?;
-        if response.status != status::UNAUTHORIZED {
-            return Ok(response);
-        }
-        let (headers, _) = self.sign(method, path, body);
-        self.unsigned(method, path, &headers, body)
-    }
-
-    fn unsigned(&self, method: &str, path: &str, headers: &[(String, String)], body: &[u8]) -> Result<Response> {
-        let response = self.transport.request(method, path, headers, body).map_err(Error::Network)?;
-        if response.status == status::GONE && headers.iter().any(|(name, _)| name.eq_ignore_ascii_case(HEADER_DEVICE)) {
-            self.replaced.set(true);
-        }
-        Ok(response)
-    }
-
-    pub fn set_push(&mut self, push: Push) -> Result<()> {
-        let response = self.signed("PUT", api::PUSH, &encode(&push))?;
-        // Its signing time kept (spec 6.3: one clock for every process of the device).
-        self.persist()?;
-        match response.status {
-            status::NO_CONTENT => Ok(()),
-            _ => Err(refused(&response)),
-        }
-    }
-
-    /// A lookup (spec 6.3): who a handle is, with its username as its owner writes it ("YoGPT"); with
-    /// `LOOKUP_PREKEYS`, a bundle per device but those in `except`.
-    fn lookup(&mut self, handle: &Handle, flags: u8, except: Vec<Key>) -> Result<(api::LookupResult, Option<String>)> {
-        let body = encode(&api::Lookup { handle: handle.clone(), flags: flags | api::LOOKUP_USERNAME, except });
-        let nonce = self.hub_nonce();
-        let (headers, _) = self.sign("POST", api::LOOKUP, &body);
-        let response = self.unsigned("POST", api::LOOKUP, &with_nonce(headers, nonce), &body)?;
-        let response = match response.status {
-            status::UNAUTHORIZED => {
-                let (headers, _) = self.sign("POST", api::LOOKUP, &body);
-                self.unsigned("POST", api::LOOKUP, &with_nonce(headers, nonce), &body)?
-            }
-            _ => response,
-        };
-        match response.status {
-            status::OK => {}
-            status::NOT_FOUND => return Err(Error::NotOnYo),
-            _ => return Err(refused(&response)),
-        }
-        let answer = hub_signed(&self.hub_keys, nonce.as_ref(), api::LOOKUP, &body, &response.body)?;
-        let named: api::LookupNamed = decode(answer)?;
-        Ok((named.found, spelled(named.username)))
-    }
-
     // ---- sessions ----
 
     fn my_account_key(&self) -> Key {
         identity::account_pair(&self.state.account_secret).map(|pair| identity::account_key(&pair)).unwrap_or_default()
     }
 
-    /// A user's account key and devices as this device knows them: a contact's, or this account's other devices.
-    fn roster(&self, user: &str) -> Option<(Key, &[Slot])> {
-        if user == self.state.user_id {
-            return Some((self.my_account_key(), &self.state.own));
-        }
-        self.state.contacts.get(user).map(|c| (c.account_key, c.devices.as_slice()))
+    fn device_of(&self, user: &str) -> Option<Slot> {
+        self.state.contacts.get(user).and_then(|c| c.device)
     }
 
-    fn roster_mut(&mut self, user: &str) -> Option<&mut Vec<Slot>> {
-        if user == self.state.user_id {
-            return Some(&mut self.state.own);
-        }
-        self.state.contacts.get_mut(user).map(|c| &mut c.devices)
+    /// Whether this device knows `key` as the user's device at number `slot`.
+    fn knows_device(&self, user: &str, key: &Key, slot: u8) -> bool {
+        self.device_of(user).is_some_and(|d| d.key == *key && d.slot == slot)
     }
 
-    /// The local address of a user's device.
     fn address(&self, user: &str, slot: u8) -> Result<ProtocolAddress> {
         signal::address(&user_bytes(user)?, slot)
     }
@@ -1684,35 +1274,28 @@ impl Client {
         self.address(&self.state.user_id, self.state.device_number)
     }
 
-    /// Notes a device of a user with the number the hub gave it (a roster, or a payload from it that opened). A known
-    /// device under another number moves: its session at the old address goes. One that took another's number keeps
-    /// the address's session, which its message just made its own; a roster change deletes a gone device's session
-    /// (`take_devices`).
+    fn forget_device(&mut self, user: &str) {
+        let Some(device) = self.state.contacts.get_mut(user).and_then(|c| c.device.take()) else { return };
+        if let Ok(address) = self.address(user, device.slot) {
+            self.records.delete_session(&address);
+        }
+    }
+
+    /// Notes a user's device with the number the hub gave it. A device under another number moves: its session at the
+    /// old address goes.
     fn note_device(&mut self, user: &str, key: Key, slot: u8) -> Result<()> {
         DeviceId::new(slot).map_err(|_| Error::Protocol("device number"))?;
-        let devices = self.roster_mut(user).ok_or(Error::Protocol("unknown user"))?;
-        let old = devices.iter().find(|d| d.key == key).map(|d| d.slot);
-        if old == Some(slot) {
-            return Ok(());
-        }
-        devices.retain(|d| d.key != key && d.slot != slot);
-        devices.push(Slot { key, slot });
-        if let Some(old) = old {
-            let address = self.address(user, old)?;
+        let contact = self.state.contacts.get_mut(user).ok_or(Error::Protocol("unknown user"))?;
+        let old = contact.device.replace(Slot { key, slot });
+        if let Some(old) = old.filter(|old| old.slot != slot) {
+            let address = self.address(user, old.slot)?;
             self.records.delete_session(&address);
         }
         Ok(())
     }
 
-    /// The number of a user's device as this device knows it.
-    fn slot_of(&self, user: &str, key: &Key) -> Option<u8> {
-        self.roster(user)?.1.iter().find(|d| d.key == *key).map(|d| d.slot)
-    }
-
-    /// Takes in a user's devices as the hub names them (a lookup, or a delivery's `409`, spec 4.4): sessions with
-    /// devices it no longer has go, new ones get a slot (and a session with the next delivery). A new account key is
-    /// an identity change for a contact (3.2), for this account a replacement of this device.
-    /// `username`: as the lookup named it (a group's member known by its id alone gets its name so).
+    /// Takes in a user's device as the hub names it (a lookup, or a `409`, spec 4.4; `one_device` checked it); another
+    /// than known replaces it and its session. A new account key is an identity change (3.2).
     fn take_devices(
         &mut self,
         user: &str,
@@ -1720,57 +1303,37 @@ impl Client {
         roster: &[api::Device],
         username: Option<String>,
     ) -> Result<()> {
-        let keys: Vec<Key> = roster.iter().map(|d| d.key).collect();
-        if user == self.state.user_id {
-            if account_key != self.my_account_key() || !keys.contains(&self.state.device_key) {
-                return Err(Error::Replaced);
-            }
-        } else {
-            self.pin(user, account_key, username);
+        self.pin(user, account_key, username);
+        let device = roster.first();
+        if self.device_of(user).is_some_and(|known| device.is_none_or(|d| d.key != known.key)) {
+            self.forget_device(user);
         }
-        let mine = self.state.device_key;
-        let gone: Vec<Slot> = self
-            .roster(user)
-            .map(|(_, devices)| devices.iter().filter(|d| !keys.contains(&d.key)).copied().collect())
-            .unwrap_or_default();
-        for device in gone {
-            let address = self.address(user, device.slot)?;
-            self.records.delete_session(&address);
-        }
-        if let Some(devices) = self.roster_mut(user) {
-            devices.retain(|d| keys.contains(&d.key));
-        }
-        for device in roster.iter().filter(|d| d.key != mine) {
+        if let Some(device) = device {
             self.note_device(user, device.key, device.id)?;
         }
-        // What waits for the user is encrypted for its devices as they are now.
+        // What waits for the user is encrypted for its device as it is now.
         for item in self.state.outbox.iter_mut().filter(|item| item.user == user) {
             item.payload = None;
         }
         Ok(())
     }
 
-    /// Whether a roster the hub names for a user leaves out a device this one knows (a new phone in its place): what
-    /// that device sent before is read first (`read_before_roster`), while its session is still here.
-    fn drops_a_device(&self, user: &str, roster: &[api::Device]) -> bool {
-        self.roster(user).is_some_and(|(_, devices)| devices.iter().any(|d| !roster.iter().any(|r| r.key == d.key)))
-    }
-
-    /// Reads the inbox before a roster that drops a device is taken in: an envelope its device sent before it was
-    /// replaced, waiting there, opens only in its session, which the roster deletes. "Not now": the roster waits too.
+    /// Reads the inbox before a new phone's device replaces the known one: what the old one sent opens only in its
+    /// session, which the replacement deletes. "Not now": the device waits too.
     fn read_before_roster(&mut self, user: &str, roster: &[api::Device]) -> Result<()> {
-        if !self.drops_a_device(user, roster) {
-            return Ok(());
+        match self.device_of(user) {
+            Some(known) if !roster.iter().any(|r| r.key == known.key) => self.receive_all(0),
+            _ => Ok(()),
         }
-        self.receive_all(0)
     }
 
-    /// Starts a session with each device of a bundle (spec 4.1): PQXDH, against the identity of the account key.
+    /// Starts a session with the user's device from its bundle: PQXDH, against the account key's identity (spec 4.1).
     fn take_bundles(&mut self, user: &str, account_key: Key, bundles: &[api::Bundle]) -> Result<()> {
         let identity = signal::identity_of(&account_key)?;
-        for bundle in bundles {
-            // Only for a device of the roster taken in with it.
-            let Some(slot) = self.slot_of(user, &bundle.device_key) else { continue };
+        let Some(device) = self.device_of(user) else { return Ok(()) };
+        // Only for the device taken in with it.
+        for bundle in bundles.iter().filter(|b| b.device_key == device.key) {
+            let slot = device.slot;
             let address = self.address(user, slot)?;
             let key = |bytes: &[u8]| libsignal_protocol::PublicKey::deserialize(bytes);
             let parsed = (|| {
@@ -1805,114 +1368,78 @@ impl Client {
                 ))
             });
             if let Err(error) = started {
-                // A device that made a bad bundle gets nothing; the others go on.
                 self.drop_one(format!("bundle: {error}"));
             }
         }
         Ok(())
     }
 
-    /// The devices of a user a message cannot go to now: no session yet, or one gone stale.
-    fn without_session(&self, user: &str) -> Vec<Key> {
-        let Some((_, devices)) = self.roster(user) else { return Vec::new() };
-        devices
-            .iter()
-            .filter(|d| self.address(user, d.slot).map_or(true, |a| !self.records.usable(&a)))
-            .map(|d| d.key)
-            .collect()
+    /// Whether the user's known device has no session a message can go on now: none yet, or one gone stale.
+    fn no_session(&self, user: &str) -> bool {
+        self.device_of(user).is_some_and(|d| self.address(user, d.slot).map_or(true, |a| !self.records.usable(&a)))
     }
 
-    /// Gets the sessions a user's waiting messages need (spec 4.1): bundles for its devices without one, from the
-    /// hub. "Not now" leaves it for the next delivery.
+    /// Gets the session a user's waiting messages need (spec 4.1). "Not now" leaves it for the next delivery.
     fn ensure_sessions(&mut self, user: &str) -> Result<()> {
-        // Someone this device never wrote to (a group's member it asks for the group): its devices first.
-        if self.roster(user).is_none() {
-            return self.fetch_bundles(user, &[]);
+        if self.roster_unknown(user) || self.no_session(user) {
+            return self.fetch_bundles(user);
         }
-        let missing = self.without_session(user);
-        if missing.is_empty() && !self.roster_unknown(user) {
-            return Ok(());
-        }
-        self.fetch_bundles(user, &missing)
+        Ok(())
     }
 
-    /// A user something waits for whose devices this device does not know (a group's member it never wrote to, asked
-    /// for the group): looked up as for a new chat before anything is encrypted for them.
+    /// A recipient whose device is unknown (a group member never written to): looked up before encrypting.
     fn roster_unknown(&self, user: &str) -> bool {
-        user != self.state.user_id && self.roster(user).is_none_or(|(_, devices)| devices.is_empty())
+        user != self.state.user_id && self.device_of(user).is_none()
     }
 
-    /// New sessions with these devices of a user, from bundles the hub hands out; the user's devices as it names them
-    /// taken in on the way.
-    fn fetch_bundles(&mut self, user: &str, missing: &[Key]) -> Result<()> {
-        let have: Vec<Key> = self
-            .roster(user)
-            .map(|(_, devices)| devices.iter().map(|d| d.key).filter(|k| !missing.contains(k)).collect())
-            .unwrap_or_default();
-        let mut except = have;
-        if user == self.state.user_id {
-            except.push(self.state.device_key);
-        }
-        let (found, username) = self.lookup(&Handle::user(&user_bytes(user)?), api::LOOKUP_PREKEYS, except)?;
+    /// A new session with the user's device from a bundle the hub hands out (a usable session is named as had, so no
+    /// prekey is spent), its device taken in on the way.
+    fn fetch_bundles(&mut self, user: &str) -> Result<()> {
+        let have: Vec<Key> =
+            self.device_of(user).filter(|_| !self.no_session(user)).map(|d| d.key).into_iter().collect();
+        let (found, username) = self.lookup(&Handle::user(&user_bytes(user)?), api::LOOKUP_PREKEYS, have)?;
         if hex(&found.user_id) != user {
             return Err(Error::Protocol("the hub answered for another user"));
         }
         self.read_before_roster(user, &found.devices)?;
         self.take_devices(user, found.account_key, &found.devices, username)?;
-        if let Some(contact) = self.state.contacts.get(user) {
-            if contact.unconfirmed {
-                return Err(Error::Unconfirmed);
-            }
+        if self.state.contacts.get(user).is_some_and(|c| c.unconfirmed) {
+            return Err(Error::Unconfirmed);
         }
         self.take_bundles(user, found.account_key, &found.bundles)?;
         self.note_outdated(user);
         Ok(())
     }
 
-    /// Notes whether the hub named devices of a contact it has no prekeys for: an app too old for sessions.
+    /// Notes whether the hub named a device of a contact it has no prekeys for: an app too old for sessions.
     fn note_outdated(&mut self, user: &str) {
-        let outdated = !self.without_session(user).is_empty();
+        let outdated = self.no_session(user);
         let now = (self.clock)();
         if let Some(contact) = self.state.contacts.get_mut(user) {
             contact.outdated_at = if outdated { now.max(1) } else { 0 };
         }
     }
 
-    /// A contact noted as too old whose devices all have a session now (made by its own first message, after its
-    /// update): it is not any more, without waiting for the hourly lookup.
+    /// A contact noted as too old whose device has a session now (after its update) is not any more.
     fn note_updated(&mut self, user: &str) {
-        if self.state.contacts.get(user).is_some_and(|c| c.outdated_at > 0) && self.without_session(user).is_empty() {
-            if let Some(contact) = self.state.contacts.get_mut(user) {
+        if !self.no_session(user) {
+            if let Some(contact) = self.state.contacts.get_mut(user).filter(|c| c.outdated_at > 0) {
                 contact.outdated_at = 0;
             }
         }
     }
 
-    /// Encrypts a message for every device of a user (spec 4.4): one payload, a copy per device, sealed to the user's
-    /// account as it goes (6.1).
-    /// With `device`: `plain` is a `PlaintextContent`, the one copy for that device as it is (4.6).
-    fn encrypt_for(&mut self, user: &str, plain: &[u8], device: Option<Key>) -> Result<(Vec<u8>, Vec<Key>)> {
-        let (account_key, devices) = self.roster(user).map(|(k, d)| (k, d.to_vec())).ok_or(Error::Protocol("user"))?;
-        if devices.is_empty() {
-            return Err(Error::Protocol("no devices"));
-        }
-        let identity = signal::identity_of(&account_key)?;
-        let local = self.local_address()?;
-        let mut copies = Vec::new();
-        // The content's time, as Signal's envelope shows it: what a decryption error names (4.6).
-        let sent_at = match device {
-            Some(_) => self.wall(),
-            None => decode::<Plain>(plain)
-                .ok()
-                .and_then(|plain| Message::decode(plain.content.as_slice()).ok())
-                .map_or(0, |m| m.sent_at_ms),
-        };
-        if let Some(key) = device {
-            copies.push(ForDevice { device_key: key, kind: KIND_PLAINTEXT, message: plain.to_vec().into() });
-        }
-        for device in devices.iter().filter(|_| device.is_none()) {
+    /// Encrypts a message for the user's device (spec 4.4): one payload with one copy. With `plaintext`, `plain` is a
+    /// `PlaintextContent` that goes as it is (4.6). Returns the payload and the device it was made for.
+    fn encrypt_for(&mut self, user: &str, plain: &[u8], plaintext: bool) -> Result<(Vec<u8>, Key)> {
+        let contact = self.state.contacts.get(user).ok_or(Error::Protocol("user"))?;
+        let (account_key, device) = (contact.account_key, contact.device.ok_or(Error::Protocol("no devices"))?);
+        let copy = if plaintext {
+            ForDevice { device_key: device.key, kind: KIND_PLAINTEXT, message: plain.to_vec().into() }
+        } else {
             let address = self.address(user, device.slot)?;
-            self.records.trust(&address, identity);
+            self.records.trust(&address, signal::identity_of(&account_key)?);
+            let local = self.local_address()?;
             let records = &mut self.records;
             let message = signal::now(message_encrypt(
                 plain,
@@ -1924,39 +1451,41 @@ impl Client {
                 &mut rand::rng(),
             ))
             .map_err(signal::signal)?;
-            copies.push(ForDevice {
+            ForDevice {
                 device_key: device.key,
                 kind: if message.message_type() == CiphertextMessageType::PreKey { KIND_PREKEY } else { KIND_MESSAGE },
                 message: message.serialize().to_vec().into(),
-            });
-        }
+            }
+        };
+        // The content's time, as Signal's envelope shows it: what a decryption error names (4.6).
+        let sent_at = match plaintext {
+            true => self.wall(),
+            false => decode::<Plain>(plain)
+                .ok()
+                .and_then(|plain| Message::decode(plain.content.as_slice()).ok())
+                .map_or(0, |m| m.sent_at_ms),
+        };
         let payload = Payload {
             account_key: self.my_account_key(),
             device_key: self.state.device_key,
             device_id: self.state.device_number,
             sent_at,
-            copies,
+            copies: vec![copy],
         };
-        Ok((encode(&payload), devices.iter().map(|d| d.key).collect()))
+        Ok((encode(&payload), device.key))
     }
 
-    /// Pins a contact's account key; another key than pinned for the same user is an identity change: its sessions
-    /// and devices go with the old key.
+    /// Pins a contact's account key; another key is an identity change: its device and session go.
     fn pin(&mut self, user: &str, account_key: Key, handle: Option<String>) {
         let contact =
-            self.state.contacts.entry(user.to_owned()).or_insert_with(|| Contact { account_key, ..Contact::unknown() });
+            self.state.contacts.entry(user.to_owned()).or_insert_with(|| Contact { account_key, ..Contact::default() });
         if contact.account_key != account_key {
             let known = contact.account_key != [0; 32];
             contact.account_key = account_key;
             // A verified contact's new key is held until confirmed: the warning before the message (spec 3.4).
             contact.unconfirmed |= contact.verified;
             contact.verified = false;
-            let devices = std::mem::take(&mut contact.devices);
-            for device in devices {
-                if let Ok(address) = self.address(user, device.slot) {
-                    self.records.delete_session(&address);
-                }
-            }
+            self.forget_device(user);
             if known {
                 self.push_event(Event::IdentityChanged { user: user.to_owned() });
             }
@@ -1972,7 +1501,7 @@ impl Client {
 
     /// A handle the hub says is this user's now: no other contact is known by it any more (it was theirs once).
     fn take_handle(&mut self, user: &str, shown: String) {
-        if same_handle(&shown, PROBE_HANDLE) {
+        if same_name(&shown, PROBE_HANDLE) {
             let added = self.state.storage.friends.get(user).is_some_and(|f| !f.removed.value);
             if let Some(contact) = self.state.contacts.get_mut(user) {
                 contact.probe_service = true;
@@ -1985,7 +1514,7 @@ impl Client {
         }
         for (other, contact) in self.state.contacts.iter_mut() {
             if other != user {
-                contact.handles.retain(|h| !same_handle(h, &shown));
+                contact.handles.retain(|h| !same_name(h, &shown));
             }
         }
         if let Some(contact) = self.state.contacts.get_mut(user) {
@@ -1993,8 +1522,7 @@ impl Client {
         }
     }
 
-    /// The user a handle names, if this device knows: by its id, or by a handle it found the contact with (a
-    /// username in any spelling: "yogpt" finds the contact known as "YoGPT").
+    /// The user a handle names, if known: by id, or by a handle in any spelling ("yogpt" finds "YoGPT").
     fn known_user(&self, handle: &Handle) -> Option<String> {
         if handle.kind == KIND_USER {
             return Some(hex(handle.value.as_slice()));
@@ -2003,7 +1531,7 @@ impl Client {
         self.state
             .contacts
             .iter()
-            .find(|(_, c)| c.handles.iter().any(|h| same_handle(h, &shown)))
+            .find(|(_, c)| c.handles.iter().any(|h| same_name(h, &shown)))
             .map(|(user, _)| user.clone())
     }
 
@@ -2011,18 +1539,16 @@ impl Client {
     fn is_me(&self, handle: &Handle) -> bool {
         match handle.kind {
             KIND_USER => hex(handle.value.as_slice()) == self.state.user_id,
-            KIND_USERNAME => self.state.username.as_deref().is_some_and(|mine| same_handle(mine, &handle.display())),
+            KIND_USERNAME => self.state.username.as_deref().is_some_and(|mine| same_name(mine, &handle.display())),
             _ => false,
         }
     }
 
-    /// Whether this device can write to a user: it knows the user's devices.
     fn has_chat(&self, user: &str) -> bool {
-        self.state.contacts.get(user).is_some_and(|c| !c.devices.is_empty())
+        self.device_of(user).is_some()
     }
 
-    /// Starts writing to whoever `handle` names (spec 4.2): the hub's word for who it is, with a bundle per device;
-    /// returns the user id.
+    /// Starts writing to whoever `handle` names (spec 4.2), with a bundle; returns the user id.
     fn start_chat(&mut self, handle: &Handle) -> Result<String> {
         let (found, username) = self.lookup(handle, api::LOOKUP_PREKEYS, Vec::new())?;
         let peer = hex(&found.user_id);
@@ -2058,8 +1584,7 @@ impl Client {
         Ok(peer)
     }
 
-    /// Queues a message for a user, and for this account's other devices a copy that names the user (spec 4.4): one
-    /// path with a group's messages (`queue`).
+    /// Queues a message for a user: one path with a group's messages (`queue`).
     fn send_message(&mut self, user: &str, content: Content) -> Result<()> {
         if self.state.contacts.get(user).is_some_and(|c| c.unconfirmed) {
             return Err(Error::Unconfirmed);
@@ -2086,1362 +1611,8 @@ impl Client {
         }
     }
 
-    /// Sends the outbox now, the message just queued and saved in it. What the hub cannot take now (no network, its
-    /// limit, a full inbox, "not now") waits there: the send succeeded (spec 4.7), so an app never sends it again
-    /// itself, a second time.
-    pub(crate) fn deliver_now(&mut self) -> Result<()> {
-        match self.deliver() {
-            // A save that fails after it: the outbox as saved still has it, and a second copy is known by its
-            // plaintext at the receiver.
-            Err(error) if !retryable(&error) && !matches!(error, Error::Save(_)) => Err(error),
-            _ => Ok(()),
-        }
-    }
-
-    /// Makes the envelopes of what waits for `user` now, where its sessions are there and nothing of it waits on
-    /// another flush (local work; what cannot be made now is made when it is sent, `deliveries`).
-    fn encrypt_waiting(&mut self, user: &str) {
-        if self.delivering.contains(user) || !self.without_session(user).is_empty() || self.blocked(user) {
-            return;
-        }
-        let current: Vec<Key> = self.roster(user).map(|(_, d)| d.iter().map(|d| d.key).collect()).unwrap_or_default();
-        if current.is_empty() {
-            return;
-        }
-        for i in 0..self.state.outbox.len() {
-            let item = &self.state.outbox[i];
-            if item.user != user || item.payload.is_some() || item.device.is_some() || !self.still_in_group(item) {
-                continue;
-            }
-            let plain = item.plain.clone();
-            if let Ok((payload, made_for)) = self.atomic(|c| c.encrypt_for(user, &plain, None)) {
-                let item = &mut self.state.outbox[i];
-                item.payload = Some(payload);
-                item.made_for = made_for;
-                self.envelopes_unsaved.set(true);
-            }
-        }
-    }
-
-    fn enqueue(&mut self, user: &str, plain: Vec<u8>) {
-        self.enqueue_with_urgency(user, plain, false);
-    }
-
-    fn enqueue_with_urgency(&mut self, user: &str, plain: Vec<u8>, non_urgent: bool) {
-        self.state.next_seq += 1;
-        self.state.outbox.push_back(Outgoing {
-            queued_at: (self.clock)(),
-            seq: self.state.next_seq,
-            user: user.to_owned(),
-            plain,
-            payload: None,
-            made_for: Vec::new(),
-            refused: false,
-            device: None,
-            non_urgent,
-        });
-        self.prune_outbox();
-    }
-
-    /// Keep recent envelopes, newest first for the cap, without changing their delivery order.
-    fn prune_outbox(&mut self) -> bool {
-        let now = (self.clock)();
-        let mut counts = BTreeMap::new();
-        let mut stamped = false;
-        let mut dropped = Vec::new();
-        for item in self.state.outbox.iter_mut().rev() {
-            // There was no enqueue time in older states. Give those a bounded lifetime from this upgrade.
-            if item.queued_at == 0 {
-                item.queued_at = now;
-                stamped = true;
-            }
-            let count = counts.entry(item.user.clone()).or_insert(0usize);
-            if now.saturating_sub(item.queued_at) > OUTBOX_KEPT_MS || *count >= OUTBOX_PER_RECIPIENT {
-                dropped.push((item.seq, item.user.clone()));
-            } else {
-                *count += 1;
-            }
-        }
-        for (seq, user) in &dropped {
-            self.key_lost(*seq, user);
-            self.drop_one("outbox retention limit".into());
-        }
-        let seqs: BTreeSet<_> = dropped.iter().map(|(seq, _)| *seq).collect();
-        self.state.outbox.retain(|item| !seqs.contains(&item.seq));
-        stamped || !dropped.is_empty()
-    }
-
-    /// Queues a `PlaintextContent` for one device of a user (a decryption error, spec 4.6): no session needed.
-    fn enqueue_plaintext(&mut self, user: &str, device: Key, content: Vec<u8>) {
-        self.enqueue(user, content);
-        if let Some(item) = self.state.outbox.back_mut() {
-            item.device = Some(device);
-        }
-    }
-
-    /// Whether a message with this photo's or video's blob went to the user already in the same conversation (1:1:
-    /// `group` none; else that group), among the last kept: the same blob sent to another group, or 1:1, is another
-    /// message.
-    pub(crate) fn sent_media(&self, user: &str, id: &[u8; 16], group: Option<&yo_wire::content::GroupKey>) -> bool {
-        self.state.contacts.get(user).is_some_and(|c| {
-            c.sent.iter().any(|plaintext| {
-                Message::decode(plaintext).is_ok_and(|m| {
-                    m.group.as_ref().map(|g| &g.key) == group
-                        && matches!(m.content, Content::Photo(media) | Content::Video { media, .. } if &media.id == id)
-                })
-            })
-        })
-    }
-
-    // ---- delivery ----
-
-    /// Sends the outbox in order, per user, and takes in the devices the hub names for any user whose devices this
-    /// device saw otherwise (4.4), until the outbox moves.
-    fn deliver(&mut self) -> Result<()> {
-        let mut identified = false;
-        let mut result = Ok(());
-        for _ in 0..DEVICE_ROUNDS {
-            self.prepare()?;
-            let deliveries = self.deliveries()?;
-            identified |= deliveries.items.iter().any(|d| !d.sealed && d.access.is_some());
-            let answers = deliveries.send();
-            match self.delivered(&deliveries, answers) {
-                Ok(true) => {}
-                other => {
-                    result = other.map(|_| ());
-                    break;
-                }
-            }
-        }
-        // Sent identified for want of a certificate: one now, for the next to go sealed.
-        if identified {
-            self.refresh_certificate()?;
-        }
-        result
-    }
-
-    /// Whether a queued message may still go: one of a group only while this account and its user are in the group
-    /// (a copy for this account's other devices: while this account is).
-    fn still_in_group(&self, item: &Outgoing) -> bool {
-        let tag = decode::<yo_wire::envelope::Plain>(&item.plain)
-            .ok()
-            .and_then(|plain| Message::decode(plain.content.as_slice()).ok())
-            .and_then(|m| m.group);
-        self.both_in(tag.as_ref(), &item.user)
-    }
-
-    /// The sessions the outbox needs, from the hub. A user it cannot get them for now waits.
-    fn prepare(&mut self) -> Result<()> {
-        if self.prune_outbox() {
-            self.persist()?;
-        }
-        let now = (self.clock)();
-        let outdated: Vec<String> =
-            self.state.contacts.iter().filter(|(_, c)| c.outdated_at > 0).map(|(user, _)| user.clone()).collect();
-        for user in outdated {
-            self.note_updated(&user);
-        }
-        let users: BTreeSet<String> = self
-            .state
-            .outbox
-            .iter()
-            .filter(|item| item.device.is_none() && !self.blocked(&item.user) && !self.delivering.contains(&item.user))
-            .filter(|item| self.state.contacts.get(&item.user).is_none_or(|c| now >= c.outdated_at + OUTDATED_RETRY_MS))
-            .map(|item| item.user.clone())
-            .collect();
-        for user in users {
-            match self.ensure_sessions(&user) {
-                Ok(()) => {}
-                Err(error) if retryable(&error) || error == Error::Unconfirmed => {}
-                Err(error @ (Error::Save(_) | Error::Replaced)) => return Err(error),
-                Err(Error::NotOnYo) => self.user_gone(&user),
-                Err(error) => self.drop_one(format!("sessions: {error}")),
-            }
-        }
-        Ok(())
-    }
-
-    /// What of the outbox can go now, in order per user, each envelope encrypted for the user's devices as they are
-    /// and with its device check (4.4); its users are marked as on their way, so no other flush sends after them
-    /// meanwhile. Local work only: `Deliveries::send` talks to the hub, `delivered` takes the answers.
-    fn deliveries(&mut self) -> Result<Deliveries> {
-        if self.replaced.get() {
-            return Err(Error::Replaced);
-        }
-        if self.prune_outbox() {
-            self.persist()?;
-        }
-        // Users whose envelopes another flush is sending, or that cannot be written to now: theirs wait, in order.
-        let mut waiting = self.delivering.clone();
-        let now = (self.clock)();
-        self.request_wait.retain(|_, (until, _)| *until > now);
-        let mut encrypted = false;
-        let mut i = 0;
-        while i < self.state.outbox.len() {
-            let user = self.state.outbox[i].user.clone();
-            // Nothing goes to a blocked user (4.8), nor to one whose new key waits for confirmation (3.4).
-            let held = self.blocked(&user) || self.state.contacts.get(&user).is_some_and(|c| c.unconfirmed);
-            if waiting.contains(&user) || held {
-                waiting.insert(user);
-                i += 1;
-                continue;
-            }
-            // A group's Yo or media only while both are still in it: left since, or the user removed since, it does
-            // not go (a change goes to everyone before and after; it carries no tag).
-            if !self.still_in_group(&self.state.outbox[i]) {
-                self.state.outbox.remove(i);
-                self.note("a group's message after its member left".into());
-                continue;
-            }
-            let current: Vec<Key> =
-                self.roster(&user).map(|(_, d)| d.iter().map(|d| d.key).collect()).unwrap_or_default();
-            if user == self.state.user_id && current.is_empty() {
-                // No other devices of this account (any more): a copy for them is of use to nobody.
-                self.state.outbox.remove(i);
-                continue;
-            }
-            // A decryption error for a device gone since: of use to nobody either.
-            if self.state.outbox[i].device.is_some_and(|device| !current.contains(&device)) {
-                self.state.outbox.remove(i);
-                continue;
-            }
-            let item = &self.state.outbox[i];
-            let fresh = item.payload.is_some() && {
-                let mut made = item.made_for.clone();
-                let mut now = current.clone();
-                made.sort_unstable();
-                now.sort_unstable();
-                made == now
-            };
-            if !fresh {
-                // A plaintext (a decryption error) needs no session, only the roster.
-                if (item.device.is_none() && !self.without_session(&user).is_empty()) || self.roster_unknown(&user) {
-                    waiting.insert(user);
-                    i += 1;
-                    continue;
-                }
-                let (plain, device) = (item.plain.clone(), item.device);
-                match self.atomic(|c| c.encrypt_for(&user, &plain, device)) {
-                    Ok((payload, made_for)) => {
-                        let item = &mut self.state.outbox[i];
-                        item.payload = Some(payload);
-                        item.made_for = made_for;
-                        encrypted = true;
-                        self.envelopes_unsaved.set(true);
-                    }
-                    Err(error) => {
-                        self.note(format!("encrypt: {error}"));
-                        waiting.insert(user);
-                    }
-                }
-            }
-            i += 1;
-        }
-        // Saved before anything leaves: a crash after the hub took an envelope must not bring back the ratchet state
-        // that made it. A repeat after a crash is harmless, the receiver skips what it has seen.
-        if encrypted || self.envelopes_unsaved.get() {
-            self.persist()?;
-        }
-        let mut items = Vec::new();
-        // Sealed with this device's certificate while it has one in date; else identified at once, signed (as Signal
-        // sends without one), and a fresh one fetched after (`refresh_certificate`).
-        let certificate = self.certificate();
-        let own = signal::identity_pair(&self.state.account_secret)?;
-        let mut too_large = Vec::new();
-        let mut first = BTreeSet::new();
-        for item in &self.state.outbox {
-            let Some(payload) = &item.payload else { continue };
-            if waiting.contains(&item.user) || self.refused_until_read.contains(&item.user) {
-                continue;
-            }
-            // A request held back by the hub's limit (`429`) waits, all but the key ahead of it: keys first (4.10).
-            let leading = first.insert(item.user.clone());
-            let key_may = leading && is_key(item);
-            if self.request_wait.get(&item.user).is_some_and(|(_, key_refused)| *key_refused || !key_may) {
-                continue;
-            }
-            let Some((account_key, _)) = self.roster(&item.user) else { continue };
-            let Ok(user) = user_bytes(&item.user) else { continue };
-            // The hub's roster of this account holds this device too, which needs no copy.
-            let mut named = item.made_for.clone();
-            if item.user == self.state.user_id {
-                named.push(self.state.device_key);
-            }
-            let hash = yo_wire::devices::hash(&account_key, &named);
-            let nonce = self.hub_nonce();
-            // The recipient's profile key, if they gave it (own copies: this account's): a contact's delivery, sealed
-            // sender. Without it a request, signed by this device (spec 4.10).
-            let access = match item.user == self.state.user_id {
-                true => self.state.profile_key,
-                false => self.state.contacts.get(&item.user).and_then(|c| c.profile_key),
-            };
-            let mut headers = vec![
-                (api::HEADER_DEVICES.to_owned(), yo_wire::b64(&hash)),
-                (
-                    api::HEADER_URGENT.to_owned(),
-                    urgent(&item.plain, item.non_urgent || item.device.is_some() || item.user == self.state.user_id)
-                        .to_string(),
-                ),
-            ];
-            if let Some(key) = access {
-                headers.push((api::HEADER_ACCESS.to_owned(), yo_wire::b64(&access_key(&key))));
-            }
-            // Without their key, a fellow member's group send token (spec 4.9): sealed all the same.
-            let endorsement = match (access, &certificate) {
-                (None, Some(_)) if item.user != self.state.user_id => self.group_send_token(&item.user),
-                _ => None,
-            };
-            let endorsed = endorsement.is_some();
-            if let Some(token) = endorsement {
-                headers.push((api::HEADER_GROUP_SEND.to_owned(), token));
-            }
-            // Identified for want of a certificate, or as a request (no access key: the hub knows the sender anyway,
-            // and the recipient sees that its key is missing, spec 4.10). A payload too large to seal is dropped,
-            // never sent so.
-            let envelope = match (&certificate, access.is_some() || endorsed) {
-                (Some(certificate), true) => {
-                    sealed::seal(certificate, &own, &signal::identity_of(&account_key)?, payload)
-                }
-                _ => yo_wire::envelope::pad(payload, &yo_wire::envelope::BUCKETS).map_err(Error::from),
-            };
-            let envelope = match envelope {
-                Ok(envelope) => envelope,
-                Err(_) => {
-                    too_large.push(item.seq);
-                    continue;
-                }
-            };
-            items.push(Delivery {
-                access,
-                endorsed,
-                sealed: envelope[0] == yo_wire::envelope::SEALED,
-                seq: item.seq,
-                user: item.user.clone(),
-                path: api::deliver_path(&user),
-                headers: with_nonce(headers, nonce),
-                envelope,
-                nonce,
-            });
-        }
-        if items.iter().any(|d| !d.sealed && d.access.is_some()) {
-            self.note("sent identified: no sender certificate in date".into());
-        }
-        if !too_large.is_empty() {
-            self.state.outbox.retain(|item| !too_large.contains(&item.seq));
-            for _ in &too_large {
-                self.drop_one("too large for an envelope".into());
-            }
-        }
-        for delivery in items.iter_mut().filter(|d| !d.sealed) {
-            let (signed, _) = self.sign("POST", &delivery.path, &delivery.envelope);
-            delivery.headers.extend(signed);
-        }
-        self.delivering.extend(items.iter().map(|d| d.user.clone()));
-        Ok(Deliveries { transport: self.transport.clone(), items, to: None })
-    }
-
-    /// Takes the hub's answers to `Deliveries::send`: what it took leaves the outbox, what it refused for good is
-    /// dropped, the rest waits for the next flush. A `409` names the user's devices as they are: taken in, and true,
-    /// so the outbox goes again for them.
-    fn delivered(&mut self, deliveries: &Deliveries, answers: Vec<Option<Answer>>) -> Result<bool> {
-        let mut done = BTreeSet::new();
-        let mut gone = BTreeSet::new();
-        let mut recover = BTreeSet::new();
-        let mut changed = false;
-        let mut result = Ok(());
-        for (item, answer) in deliveries.items.iter().zip(answers) {
-            self.delivering.remove(&item.user);
-            if let Some(answer) = &answer {
-                self.last_answer.insert(item.user.clone(), answer.as_ref().map_or(0, |r| r.status));
-            }
-            match answer {
-                Some(Ok(response)) if response.status == status::ACCEPTED => {
-                    done.insert(item.seq);
-                    if item.endorsed {
-                        self.endorsed_sent += 1;
-                    }
-                }
-                Some(Ok(response)) if response.status == status::CONFLICT => {
-                    let answer =
-                        hub_signed(&self.hub_keys, item.nonce.as_ref(), &item.path, &item.envelope, &response.body);
-                    match answer.and_then(|answer| Ok(decode::<api::Devices>(answer)?)) {
-                        Ok(devices) => match self
-                            .read_before_roster(&item.user, &devices.devices)
-                            .and_then(|()| self.take_devices(&item.user, devices.account_key, &devices.devices, None))
-                        {
-                            Ok(()) => changed = true,
-                            // The inbox could not be read first: the envelope waits like any "not now".
-                            Err(error) if retryable(&error) => self.note(format!("roster later: {error}")),
-                            Err(error) => result = Err(error),
-                        },
-                        // The hub did not take it: kept, and tried again like any "not now".
-                        Err(_) => self.note("hub answered 409 without devices".into()),
-                    }
-                }
-                Some(Ok(response)) if response.status == status::NOT_FOUND && item.user != self.state.user_id => {
-                    done.insert(item.seq);
-                    gone.insert(item.user.clone());
-                }
-                // The key it showed is not the recipient's (any more), or the recipient takes no requests and this
-                // account is no contact of theirs (spec 4.10).
-                Some(Ok(response))
-                    if response.status == status::FORBIDDEN
-                        || (response.status == status::UNAUTHORIZED && item.access.is_some()) =>
-                {
-                    // A contact's key that changed (a block of someone else): forgotten, the new one may be in the
-                    // inbox. Again after the next receive, with the new key or as a request; only a request's `403`
-                    // (the recipient takes none) drops it. A key forgotten is never a message lost.
-                    if let Some(contact) =
-                        self.state.contacts.get_mut(&item.user).filter(|c| c.profile_key == item.access)
-                    {
-                        contact.profile_key = None;
-                        self.forget_key_stored(&item.user);
-                    }
-                    // A group send token refused (expired meanwhile): the endorsements are fetched anew, the envelope
-                    // goes again after the next read.
-                    if item.endorsed {
-                        self.endorsement_refused(&item.user);
-                    }
-                    match self.state.outbox.iter_mut().find(|o| o.seq == item.seq) {
-                        Some(kept) if item.access.is_some() || item.endorsed => {
-                            // One refresh for this envelope; a second refusal goes identified.
-                            if !kept.refused {
-                                recover.insert(item.user.clone());
-                            }
-                            kept.refused = true;
-                            changed = true;
-                        }
-                        _ => {
-                            done.insert(item.seq);
-                            self.key_lost(item.seq, &item.user);
-                            self.drop_one("the recipient takes no requests".into());
-                        }
-                    }
-                }
-                Some(Ok(response)) if matches!(limit_of(&response), Some(Limit::Recipient(_))) => {
-                    if let Some(Limit::Recipient(wait)) = limit_of(&response) {
-                        let key_refused = self.request_wait.contains_key(&item.user);
-                        self.request_wait.insert(item.user.clone(), ((self.clock)() + wait, key_refused));
-                    }
-                }
-                Some(Ok(response)) if gone_for_good(response.status) => {
-                    done.insert(item.seq);
-                    self.key_lost(item.seq, &item.user);
-                    self.drop_one(format!("hub refused delivery: {}", response.status));
-                }
-                // Rate limit, hub trouble, no network, or held behind such an answer: later, in the same order.
-                _ => {}
-            }
-        }
-        self.state.outbox.retain(|item| !done.contains(&item.seq));
-        for user in gone {
-            self.user_gone(&user);
-        }
-        for user in recover {
-            // The hub never has the plaintext profile key. Read its encrypted update first,
-            // then refresh the roster and request bundles for any sessions the read archived.
-            self.receive_all(0)?;
-            let missing = self.without_session(&user);
-            self.fetch_bundles(&user, &missing)?;
-        }
-        result.map(|()| changed)
-    }
-
-    /// A key's envelope the hub would not take (dropped): not given after all, so it goes again with the next
-    /// occasion (a new message, their identified one, spec 4.10).
-    fn key_lost(&mut self, seq: u64, user: &str) {
-        if self.state.outbox.iter().any(|o| o.seq == seq && is_key(o)) {
-            if let Some(contact) = self.state.contacts.get_mut(user) {
-                (contact.key_given, contact.key_resent_at) = (false, 0);
-            }
-        }
-    }
-
-    /// The hub knows no such user any more (a delivery's `404`): the account was deleted or its name released. Its
-    /// sessions and what waits for it go; its handles are forgotten (the name may be someone else's now, a stranger to
-    /// this device); sending to it is `NotOnYo` from now on.
-    fn user_gone(&mut self, user: &str) {
-        let Some(contact) = self.state.contacts.get_mut(user) else { return };
-        contact.gone = true;
-        contact.handles.clear();
-        let devices = std::mem::take(&mut contact.devices);
-        for device in devices {
-            if let Ok(address) = self.address(user, device.slot) {
-                self.records.delete_session(&address);
-            }
-        }
-        self.state.outbox.retain(|item| item.user != user);
-    }
-
-    // ---- receiving ----
-
-    /// Fetches and processes the inbox until it is empty. Transport failures stop it with nothing lost.
-    fn receive_all(&mut self, wait_s: u64) -> Result<()> {
-        self.storage_fetched()?;
-        // What the hub would send again otherwise.
-        self.acknowledge_inbox()?;
-        let mut wait = wait_s;
-        loop {
-            let path = api::inbox_path(wait);
-            let (headers, mut time) = self.sign("GET", &path, &[]);
-            let mut response = self.unsigned("GET", &path, &headers, &[])?;
-            if response.status == status::UNAUTHORIZED {
-                // As `signed`: once more, signed anew.
-                let (headers, again) = self.sign("GET", &path, &[]);
-                (response, time) = (self.unsigned("GET", &path, &headers, &[])?, again);
-            }
-            // The last batch is acknowledged only after `finish` has saved and handed out its events.
-            let (more, ids) = self.inbox(response, time, true)?;
-            self.received_ids.extend(ids);
-            if !more {
-                // Groups the inbox named a newer revision of: from the hub now, so their held Yos show.
-                self.refresh_groups_quietly();
-                return Ok(());
-            }
-            wait = 0;
-        }
-    }
-
-    /// The storage fetched once on this device before anything is received: its blocks hold from the first message
-    /// on. "Not now" leaves the inbox for later.
-    fn storage_fetched(&mut self) -> Result<()> {
-        if self.state.storage_fetched {
-            return Ok(());
-        }
-        match self.sync_storage() {
-            Err(error) if retryable(&error) || error == Error::Replaced => Err(error),
-            Err(error) => {
-                self.drop_one(format!("storage: {error}"));
-                self.state.storage_fetched = true;
-                Ok(())
-            }
-            Ok(()) => Ok(()),
-        }
-    }
-
-    /// Processes one inbox answer to a request signed at `requested_at` and acknowledges it; `true` when the hub has
-    /// more. The answer may be older than the state (`sync` waits for it outside the app's lock while other calls
-    /// run): envelopes already seen are skipped, an older prekey count is ignored. With `later`, an answer that is
-    /// all there is and was all taken in is neither saved nor acknowledged here: its ids are returned, for the caller
-    /// to acknowledge once it saved (`sync_end`).
-    fn inbox(&mut self, response: Response, requested_at: u64, later: bool) -> Result<(bool, Vec<u64>)> {
-        if response.status != status::OK {
-            return Err(refused(&response));
-        }
-        let inbox: api::Inbox = decode(&response.body)?;
-        self.refused_until_read.clear();
-        if requested_at > self.prekeys_known_ms {
-            self.state.prekeys.left = inbox.prekeys_left;
-            self.prekeys_known_ms = requested_at;
-        }
-        let full = inbox.items.len() >= MAX_INBOX_FETCH;
-        let mut done = Vec::new();
-        let mut stopped = None;
-        // Payloads kept for later (a roster that could not be asked, a lookup the hub limited): received again first,
-        // each may be kept again; after one kept, its sender's next ones too, so they keep their order.
-        let sender_of = |opened: &[u8]| opened.get(16..).and_then(|p| decode::<Payload>(p).ok()).map(|p| p.account_key);
-        let mut kept: BTreeSet<Key> = BTreeSet::new();
-        let mut refreshed = BTreeSet::new();
-        for payload in std::mem::take(&mut self.state.deferred) {
-            let sender = sender_of(&payload);
-            if sender.is_some_and(|s| kept.contains(&s)) {
-                self.state.deferred.push_back(payload);
-                continue;
-            }
-            match self.receive(&payload, &mut refreshed) {
-                Ok(()) => {}
-                Err(error) if retryable(&error) => {
-                    kept.extend(sender);
-                    self.state.deferred.push_back(payload)
-                }
-                Err(error) => self.drop_one(error.to_string()),
-            }
-        }
-        let mut backlogged = false;
-        for item in inbox.items {
-            // A guest stops where the app's events reach their bound: the rest stays at the hub, unacknowledged.
-            if self.guest_events.is_some() && self.state.events.len() >= GUEST_EVENTS {
-                backlogged = true;
-                break;
-            }
-            // Not sealed to this account, or its sender certificate not good when the hub took it (spec 6.1): of use
-            // to nobody here.
-            let payload = match self.open(item.envelope.as_slice(), item.received_ms) {
-                Ok(payload) => payload,
-                Err(error) => {
-                    self.drop_one(error.to_string());
-                    done.push(item.id);
-                    continue;
-                }
-            };
-            let sender = sender_of(&payload);
-            let room = self.state.deferred.len() < DEFERRED;
-            if sender.is_some_and(|s| kept.contains(&s)) {
-                if !room {
-                    stopped = Some(Error::Refused(status::RATE_LIMITED));
-                    continue;
-                }
-                self.state.deferred.push_back(payload);
-                done.push(item.id);
-                continue;
-            }
-            match self.receive(&payload, &mut refreshed) {
-                Ok(()) => {}
-                // A roster limit for this sender. Keep its envelopes locally if there is room,
-                // otherwise leave them unacknowledged. Other senders in this batch can go on.
-                Err(error @ Error::Refused(status::RATE_LIMITED)) => {
-                    kept.extend(sender);
-                    if !room {
-                        stopped = Some(error);
-                        continue;
-                    }
-                    self.state.deferred.push_back(payload);
-                }
-                // Not this envelope's fault: it stays at the hub and is read again next time.
-                Err(error) if retryable(&error) => {
-                    stopped = Some(error);
-                    break;
-                }
-                Err(error) => self.drop_one(error.to_string()),
-            }
-            done.push(item.id);
-        }
-        let full = full && !backlogged;
-        if later && !full && stopped.is_none() {
-            return Ok((false, done));
-        }
-        if !done.is_empty() {
-            // Saved before the hub may forget: what was processed must survive a crash right after the ack.
-            self.persist()?;
-            if !self.ack(done)? {
-                return Ok((false, Vec::new()));
-            }
-        }
-        match stopped {
-            Some(error) => Err(error),
-            None => Ok((full, Vec::new())),
-        }
-    }
-
-    /// Acknowledges inbox ids whose envelopes are saved as processed; `false` when the ack did not arrive. That costs
-    /// only a repeat: the hub sends those envelopes again, and they are skipped as seen.
-    fn ack(&mut self, ids: Vec<u64>) -> Result<bool> {
-        match self.signed("POST", api::INBOX_ACK, &encode(&api::Ack { ids })) {
-            Ok(response) if response.status == status::NO_CONTENT => Ok(true),
-            Ok(response) if response.status == status::GONE => Err(Error::Replaced),
-            _ => Ok(false),
-        }
-    }
-
-    /// Acknowledges what `sync_end` received and saved (`unacked`).
-    fn acknowledge_inbox(&mut self) -> Result<()> {
-        if !self.unacked.is_empty() {
-            let ids = std::mem::take(&mut self.unacked);
-            self.ack(ids)?;
-        }
-        Ok(())
-    }
-
-    /// Marks a session message as processed: its hash, whatever envelope it came in.
-    fn remember(&mut self, message: &[u8]) {
-        self.state.seen.push_back(sha256(message));
-        if self.state.seen.len() > SEEN {
-            self.state.seen.pop_front();
-        }
-    }
-
-    /// Whether the hub names this device of `user` at this number now (a lookup); its roster is taken in when it
-    /// does.
-    fn hub_names(&mut self, user: &str, account_key: &Key, device_key: &Key, id: u8) -> Result<bool> {
-        match self.lookup(&Handle::user(&user_bytes(user)?), 0, Vec::new()) {
-            Ok((found, username)) if found.account_key == *account_key => {
-                let named = found.devices.iter().any(|d| d.key == *device_key && d.id == id);
-                if named {
-                    self.take_devices(user, found.account_key, &found.devices, username)?;
-                }
-                Ok(named)
-            }
-            Ok(_) | Err(Error::NotOnYo) => Ok(false),
-            Err(error) => Err(error),
-        }
-    }
-
-    /// A sender not pinned here, whose message did not open: pinned, with its devices, only when the hub (one lookup)
-    /// lists the payload's device at its number for that account; else nothing is kept.
-    fn pin_if_listed(
-        &mut self,
-        user: &str,
-        account_key: Key,
-        username: Option<String>,
-        device_key: Key,
-        id: u8,
-    ) -> Result<bool> {
-        match self.lookup(&Handle::user(&user_bytes(user)?), 0, Vec::new()) {
-            Ok((found, _))
-                if found.account_key == account_key
-                    && found.devices.iter().any(|d| d.key == device_key && d.id == id) =>
-            {
-                self.pin(user, account_key, username);
-                self.take_devices(user, found.account_key, &found.devices, None)?;
-                Ok(true)
-            }
-            Ok(_) | Err(Error::NotOnYo) => Ok(false),
-            Err(error) => Err(error),
-        }
-    }
-
-    /// Whether a payload may make this device ask the hub for `user`'s devices now (once a minute a user, and within
-    /// the day's lookups for recovery).
-    fn may_ask_roster(&mut self, user: &str) -> bool {
-        let now = (self.clock)();
-        let last = self.state.roster_asked.get(user).copied().unwrap_or(0);
-        if last != 0 && now < last + ROSTER_ASK_EVERY_MS {
-            return false;
-        }
-        if !self.recovery_lookup() {
-            return false;
-        }
-        // Only the last minute's asks matter: older ones go, so the markers stay a handful.
-        self.state.roster_asked.retain(|_, at| now < *at + ROSTER_ASK_EVERY_MS);
-        self.state.roster_asked.insert(user.to_owned(), now);
-        true
-    }
-
-    /// A contact known without a name (a group's member, whose keys came by its id): the hub asked once in this process
-    /// who it is, as Signal fetches a member's profile, so its Yos say who they are from. Not answered now: asked again
-    /// on the next Yo if the lookup failed.
-    fn learn_name(&mut self, user: &str, account_key: Key) {
-        if !self.names_asked.insert(user.to_owned()) {
-            return;
-        }
-        let Ok(id) = user_bytes(user) else { return };
-        match self.lookup(&Handle::user(&id), 0, Vec::new()) {
-            Ok((found, Some(username))) if found.account_key == account_key => self.take_handle(user, username),
-            Ok(_) => {}
-            Err(error) => {
-                self.names_asked.remove(user);
-                self.note(format!("name of a member: {error}"));
-            }
-        }
-    }
-
-    /// Takes one of the day's lookups for recovery, if one is left.
-    fn recovery_lookup(&mut self) -> bool {
-        let day = (self.clock)() / (24 * 3600 * 1000);
-        if self.state.recovery_lookups.0 != day {
-            self.state.recovery_lookups = (day, 0);
-        }
-        if self.state.recovery_lookups.1 >= RECOVERY_LOOKUPS_PER_DAY {
-            return false;
-        }
-        self.state.recovery_lookups.1 += 1;
-        true
-    }
-
-    /// Who sent a payload: this account (another of its devices), a contact pinned to its key, or whom the hub says
-    /// the key is (someone writing first). `None`: a key that is no user's now (a replaced device, or a forger).
-    /// Who a payload's account key is: a contact, this account, or (asked of the hub) someone writing first, whose
-    /// pin (`Unpinned`) is kept only once the message opened: anyone can seal a payload naming any account.
-    fn sender(&mut self, account_key: Key) -> Result<Option<(String, Option<Unpinned>)>> {
-        if account_key == self.my_account_key() {
-            return Ok(Some((self.state.user_id.clone(), None)));
-        }
-        if let Some((user, c)) = self.state.contacts.iter().find(|(_, c)| c.account_key == account_key && !c.gone) {
-            let (user, unnamed) = (user.clone(), c.handles.is_empty());
-            if unnamed {
-                self.learn_name(&user, account_key);
-            }
-            return Ok(Some((user, None)));
-        }
-        // Someone writing first, or a contact this state forgot (a state rolled back). A forger's payloads cost it a
-        // delivery each (the hub's limits, 6.6); the lookup is the hub's (counted there too).
-        match self.lookup(&Handle::account_key(&account_key), 0, Vec::new()) {
-            Ok((found, username)) if found.account_key == account_key => {
-                let user = hex(&found.user_id);
-                Ok(Some((user, Some(Unpinned { account_key, username }))))
-            }
-            Ok(_) | Err(Error::NotOnYo) => Ok(None),
-            Err(error) => Err(error),
-        }
-    }
-
-    /// Opens an envelope (spec 6.1): what `receive` takes, the user its certificate names (16 zero bytes: none, an
-    /// identified envelope) and the payload. The certificate must name the payload's device and account key.
-    fn open(&self, envelope: &[u8], received_ms: u64) -> Result<Vec<u8>> {
-        let own = signal::identity_pair(&self.state.account_secret)?;
-        let opened = sealed::open(&own, envelope, &sealed::roots(&self.trust_roots), received_ms)?;
-        let payload: Payload = decode(&opened.payload)?;
-        let user = match opened.sender {
-            Some((user, device, identity)) => {
-                if device != payload.device_id || identity != signal::identity_of(&payload.account_key)? {
-                    return Err(Error::Protocol("a sender certificate for another"));
-                }
-                user
-            }
-            None => [0; 16],
-        };
-        Ok([&user[..], &opened.payload].concat())
-    }
-
-    /// Processes one opened envelope (`open`): the copy for this device, decrypted in the session with its sender's
-    /// device.
-    fn receive(&mut self, opened: &[u8], refreshed: &mut BTreeSet<Key>) -> Result<()> {
-        let mut checked = None;
-        self.atomic(|c| c.receive_opened(opened, refreshed, &mut checked))?;
-        // Share a roster only after the envelope committed the state updates that came with it.
-        refreshed.extend(checked);
-        Ok(())
-    }
-
-    fn receive_opened(&mut self, opened: &[u8], refreshed: &BTreeSet<Key>, checked: &mut Option<Key>) -> Result<()> {
-        let (certified, payload) = opened.split_at_checked(16).ok_or(Error::Protocol("opened"))?;
-        let certified = (certified != [0; 16]).then(|| hex(certified));
-        let payload: Payload = decode(payload)?;
-        let mine = self.state.device_key;
-        // Made before the sender knew this device (it was added since): not for it.
-        let Some(copy) = payload.copies.into_iter().find(|c| c.device_key == mine) else { return Ok(()) };
-        if payload.device_key == mine || self.state.seen.contains(&sha256(copy.message.as_slice())) {
-            return Ok(());
-        }
-        let Some((user, unpinned)) = self.sender(payload.account_key)? else {
-            self.drop_one("a sender that is no user now".into());
-            return Ok(());
-        };
-        if certified.as_ref().is_some_and(|c| *c != user) {
-            self.drop_one("a sender certificate for another user".into());
-            return Ok(());
-        }
-        let own = user == self.state.user_id;
-        // Another device of the user under this number here: one of the two was replaced, and only the hub knows
-        // which (a replaced device can still deliver: deliveries are unsigned). Its roster decides before anything
-        // opens: the session of a gone device goes, and a message from one is not opened (opening would make its
-        // session the current one at an address now another device's). Nothing the payload claims is taken in
-        // before its message opens: anyone can seal one.
-        let other = self.roster(&user).is_some_and(|(_, devices)| {
-            devices.iter().any(|d| d.slot == payload.device_id && d.key != payload.device_key)
-        });
-        if other {
-            // All envelopes in this batch arrived before the lookup. An unlisted device cannot
-            // need another lookup until a new batch arrives.
-            if refreshed.contains(&payload.account_key) {
-                self.note("a message from a replaced device".into());
-                return Ok(());
-            }
-            // Asked at most once a minute a user: a forger claiming numbers costs a lookup a minute, no more.
-            if !self.may_ask_roster(&user) {
-                // Like a hub lookup limit, defer this envelope and the sender's successors.
-                // Once local storage is full, the inbox leaves them at the hub.
-                self.note("a device under another's number: later".into());
-                return Err(Error::Refused(status::RATE_LIMITED));
-            }
-            let (found, username) = self.lookup(&Handle::user(&user_bytes(&user)?), 0, Vec::new())?;
-            if found.account_key == payload.account_key {
-                self.take_devices(&user, found.account_key, &found.devices, username)?;
-            }
-            *checked = Some(payload.account_key);
-            let current = found.devices.iter().any(|d| d.key == payload.device_key && d.id == payload.device_id);
-            if found.account_key != payload.account_key || !current {
-                self.note("a message from a replaced device".into());
-                return Ok(());
-            }
-        }
-        let address = self.address(&user, payload.device_id)?;
-        let bytes = copy.message.as_slice();
-        if copy.kind == KIND_PLAINTEXT {
-            // A contact's device at its number, as this device knows it: nothing else is answered (4.6).
-            let known =
-                !own && unpinned.is_none() && self.slot_of(&user, &payload.device_key) == Some(payload.device_id);
-            if !known {
-                self.drop_one("a decryption error from a device not known here".into());
-                return Ok(());
-            }
-            self.remember(bytes);
-            return self.decryption_error(&user, &address, bytes);
-        }
-        let message = match copy.kind {
-            KIND_PREKEY => PreKeySignalMessage::try_from(bytes).map(CiphertextMessage::PreKeySignalMessage),
-            KIND_MESSAGE => SignalMessage::try_from(bytes).map(CiphertextMessage::SignalMessage),
-            _ => return Err(Error::Protocol("message type")),
-        }
-        .map_err(signal::signal)?;
-        self.records.trust(&address, signal::identity_of(&payload.account_key)?);
-        let local = self.local_address()?;
-        let records = &mut self.records;
-        let decrypted = signal::now(message_decrypt(
-            &message,
-            &address,
-            &local,
-            &mut records.sessions,
-            &mut records.identities,
-            &mut records.prekeys,
-            &records.signed,
-            &mut records.kyber,
-            &mut rand::rng(),
-        ));
-        let plaintext = match decrypted {
-            Ok(plaintext) => plaintext,
-            Err(error) => {
-                // A session out of step (spec 4.6): Signal's `DecryptionErrorMessage` goes to that device (the ratchet
-                // key, the time, its number), so it starts a new session and sends that message again. Not for a
-                // device known here under another number (made up): taken in is nothing either way. Also a
-                // "duplicate" whose bytes were not seen (above): made with message keys used before, by a sender whose
-                // state went back; it never opens, and the sender's next ones would not either until its chain passed.
-                // Only a device of the user's roster, at its number (the hub asked at most once a minute a user when
-                // this device does not know it), and at most `KEPT_FOR_RESEND` due a contact.
-                // Someone not pinned here (a state that went back and forgot them, or a forger naming a real
-                // account): pinned for it only when the hub, asked at most once a minute a user, names that device;
-                // else nothing of the payload is kept.
-                let rostered = !own
-                    && match unpinned {
-                        None => {
-                            self.slot_of(&user, &payload.device_key) == Some(payload.device_id)
-                                || (self.may_ask_roster(&user)
-                                    && self.hub_names(
-                                        &user,
-                                        &payload.account_key,
-                                        &payload.device_key,
-                                        payload.device_id,
-                                    )?)
-                        }
-                        Some(Unpinned { account_key, ref username }) => {
-                            self.may_ask_roster(&user)
-                                && self.pin_if_listed(
-                                    &user,
-                                    account_key,
-                                    username.clone(),
-                                    payload.device_key,
-                                    payload.device_id,
-                                )?
-                        }
-                    };
-                let kind = if copy.kind == KIND_PREKEY {
-                    CiphertextMessageType::PreKey
-                } else {
-                    CiphertextMessageType::Whisper
-                };
-                let made = DecryptionErrorMessage::for_original(
-                    bytes,
-                    kind,
-                    Timestamp::from_epoch_millis(payload.sent_at),
-                    payload.device_id.into(),
-                );
-                if let (true, Ok(made), Some(contact)) = (rostered, made, self.state.contacts.get_mut(&user)) {
-                    if contact.decryption_errors.len() < KEPT_FOR_RESEND {
-                        let content = PlaintextContent::from(made).serialized().to_vec();
-                        contact.decryption_errors.push(DecryptionError { device: payload.device_key, content });
-                    }
-                }
-                self.drop_one(format!("session: {error}"));
-                return Ok(());
-            }
-        };
-        // It opened: from the account (its identity key), at that number. Which device key is there is the hub's to
-        // say: one this device does not know is taken in only once the hub names it (asked without a bound: only the
-        // account can make a message that opens); else it is a replaced device's, and dropped (4.6).
-        self.remember(copy.message.as_slice());
-        if let Some(Unpinned { account_key, username }) = unpinned {
-            self.pin(&user, account_key, username);
-        }
-        if self.slot_of(&user, &payload.device_key) != Some(payload.device_id)
-            && !self.hub_names(&user, &payload.account_key, &payload.device_key, payload.device_id)?
-        {
-            self.drop_one("a message from a replaced device".into());
-            return Ok(());
-        }
-        self.note_device(&user, payload.device_key, payload.device_id)?;
-        self.note_updated(&user);
-        let plain: Plain = decode(&plaintext)?;
-        let message = Message::decode(plain.content.as_slice())?;
-        if own {
-            return self.received_from_own(plain.to, plain.content.as_slice(), message);
-        }
-        if plain.to.is_some() {
-            return Err(Error::Protocol("a copy for another"));
-        }
-        if certified.is_none() && !self.probe_service(&user) {
-            self.identified_from(&user)?;
-        }
-        self.received(&user, plain.content.as_slice(), message)
-    }
-
-    /// Whether this plaintext from `user` comes for the first time (the last `SEEN` kept), noting it.
-    fn first_time(&mut self, user: &str, plaintext: &[u8]) -> bool {
-        let id = sha256(&[user.as_bytes(), plaintext].concat());
-        if self.state.received.contains(&id) {
-            return false;
-        }
-        self.state.received.push_back(id);
-        if self.state.received.len() > SEEN {
-            self.state.received.pop_front();
-        }
-        true
-    }
-
-    /// A message from one of this account's other devices: what it sent to `to`.
-    fn received_from_own(&mut self, to: Option<UserId>, plaintext: &[u8], message: Message) -> Result<()> {
-        // A copy encrypted again (a session or roster change) is still one: shown once, as from a contact.
-        let me = self.state.user_id.clone();
-        if !self.first_time(&me, plaintext) {
-            return Ok(());
-        }
-        // Groups: one copy for this account's other devices, naming no one (spec 4.7).
-        if to.is_none() {
-            let me = self.state.user_id.clone();
-            let _ = me;
-            match (message.group, message.content) {
-                (_, Content::Group(tag)) => self.group_changed(tag),
-                (Some(tag), content) if shown(&content) => self.group_sent_elsewhere(tag, message.sent_at_ms, content),
-                _ => {}
-            }
-            return Ok(());
-        }
-        let Some(to) = to else { return Ok(()) };
-        if !shown(&message.content) {
-            return Ok(());
-        }
-        let user = hex(&to);
-        if user == self.state.user_id {
-            return Err(Error::Protocol("a copy to oneself"));
-        }
-        let contact = self.state.contacts.entry(user.clone()).or_insert_with(Contact::unknown);
-        contact.chat = true;
-        let content = self.forget_keys(message.content);
-        self.push_event(Event::SentElsewhere { user, sent_at_ms: message.sent_at_ms, content });
-        Ok(())
-    }
-
-    /// The keys of photos and videos are dropped as they arrive, for a client that never opens them.
-    fn forget_keys(&self, content: Content) -> Content {
-        match content {
-            Content::Photo(media) if self.media_keys_forgotten => Content::Photo(media::without_key(media)),
-            Content::Video { media, duration_ms } if self.media_keys_forgotten => {
-                Content::Video { media: media::without_key(media), duration_ms }
-            }
-            content => content,
-        }
-    }
-
-    /// A contact's profile key as type 10 brought it (spec 4.10): taken. Its generation is not told; the one held
-    /// stays as the bound below it (a type 10 is never sent again (4.6): its key is the newest), until a content
-    /// message with it tells it.
-    fn take_key_message(&mut self, user: &str, key: [u8; 32]) {
-        self.adopt_key(user, key);
-    }
-
-    /// A contact's profile key a content message carried, with its generation: taken unless it is older than the one
-    /// held (a message sent again (4.6), one held back on the way), or one held came as type 10 since.
-    fn take_key_carried(&mut self, user: &str, key: [u8; 32], generation: u32) {
-        let Some(contact) = self.state.contacts.get_mut(user) else { return };
-        if carried_key_taken(contact, &key, generation) {
-            contact.key_gen = contact.key_gen.max(generation);
-            self.adopt_key(user, key);
-        }
-    }
-
-    /// The one way a contact's key is taken (a message, the storage): kept, in the storage too (a new phone of this
-    /// account has it, spec 6.9), and what waits for them goes now as a contact's, not after a request's wait or a
-    /// `403`.
-    pub(crate) fn adopt_key(&mut self, user: &str, key: [u8; 32]) {
-        let Some(contact) = self.state.contacts.get_mut(user) else { return };
-        if contact.profile_key != Some(key) {
-            contact.profile_key = Some(key);
-            self.store_key(user, Some(key));
-        }
-        self.request_wait.remove(user);
-        self.refused_until_read.remove(user);
-    }
-
-    /// A message from `user` came identified (spec 4.10): without this account's access key, or without a sender
-    /// certificate. From an accepted contact (or a member of a joined group) the current key goes back to them at once,
-    /// ahead of what waits for them, at most once an hour per key: then a contact that missed a new key heals with its first
-    /// identified message, and the request limits bind strangers only.
-    fn identified_from(&mut self, user: &str) -> Result<()> {
-        let now = (self.clock)();
-        let in_group = self.in_joined_group(user);
-        let Some(contact) = self.state.contacts.get_mut(user) else { return Ok(()) };
-        if !(contact.accepted || in_group) || contact.blocked || contact.gone || now < contact.key_resent_at + HOUR_MS {
-            return Ok(());
-        }
-        contact.key_resent_at = now;
-        contact.key_due = true;
-        if self.guest_events.is_some() {
-            return Ok(());
-        }
-        self.queue_key(user)
-    }
-
-    /// A message from a contact.
-    fn received(&mut self, user: &str, plaintext: &[u8], message: Message) -> Result<()> {
-        if let Content::Probe(token) | Content::ProbeReply(token) = message.content {
-            if self.first_time(user, plaintext) && message.group.is_none() {
-                if matches!(message.content, Content::Probe(_)) {
-                    if self.probe_requests.len() < 256 {
-                        self.probe_requests.push((user.to_owned(), token));
-                    }
-                } else if let Some(contact) = self.state.contacts.get_mut(user) {
-                    if contact.probe_pending == Some(token) {
-                        contact.probe_reply_tag = token;
-                        contact.probe_pending = None;
-                    }
-                }
-            }
-            return Ok(());
-        }
-        // Group messages and changes are checked against group membership. The probe service stays routing
-        // state only in one-to-one exchanges until added.
-        let in_group = message.group.is_some() || matches!(message.content, Content::Group(_));
-        if self.probe_service(user) && !in_group {
-            // Access keys are protocol routing state. Keep them locally so repeated
-            // probes are not stranger requests; store_key excludes them from sync.
-            if let Some((key, generation)) = Message::profile_key_of(plaintext) {
-                self.take_key_carried(user, key, generation);
-            }
-            if let Content::ProfileKey(key) = &message.content {
-                self.take_key_message(user, *key);
-            }
-            self.first_time(user, plaintext);
-            // Legacy plain answers from an older responder stay silent.
-            return Ok(());
-        }
-        // The key a Yo carries (spec 4.10, `WITH_PROFILE_KEY`), also a blocked user's: theirs is a contact's again
-        // after an unblock.
-        if let Some((key, generation)) = Message::profile_key_of(plaintext) {
-            self.take_key_carried(user, key, generation);
-        }
-        // A blocked user's messages are opened (their sessions go on) and dropped unseen (4.8); what they change of a
-        // group still counts, so the group stays one, and their profile key is kept: after an unblock what goes to
-        // them is a contact's again, not a request.
-        if self.blocked(user) && !matches!(message.content, Content::Group(_) | Content::ProfileKey(_)) {
-            return Ok(());
-        }
-        // "Requests from Strangers" off (spec 4.10): what a stranger shows is dropped here, unseen and unanswered; the
-        // hub takes every signed delivery, so contacts without each other's key still reach each other.
-        let stranger = !self.in_joined_group(user) && self.state.contacts.get(user).is_none_or(|c| !c.accepted);
-        if !self.state.requests_open && stranger && message.group.is_none() && shown(&message.content) {
-            return Ok(());
-        }
-        // Sent again for a decryption error (4.6) and seen already: once is enough. A sender's messages differ in their time at
-        // least, so only a copy is the same.
-        if !self.first_time(user, plaintext) {
-            return Ok(());
-        }
-        // Everything but a receipt and an ask is answered by a receipt: the ratchet moves on also for a stream of
-        // changes or names one way (spec 4.5).
-        // Not to a request yet (spec 4.10): nothing goes back until it is said yes to.
-        if !matches!(message.content, Content::Receipt) {
-            if let Some(contact) = self.state.contacts.get_mut(user).filter(|c| c.accepted && !c.blocked) {
-                contact.receipt_due = true;
-            }
-        }
-        match message.content {
-            Content::Receipt => Ok(()),
-            Content::ProfileKey(key) => {
-                self.take_key_message(user, key);
-                Ok(())
-            }
-            Content::Group(tag) => {
-                self.group_changed(tag);
-                Ok(())
-            }
-            content if message.group.is_some() => {
-                let tag = message.group.expect("a group");
-                self.group_yo(user, tag, message.sent_at_ms, content);
-                Ok(())
-            }
-            Content::Profile { name } => {
-                if let Some(contact) = self.state.contacts.get_mut(user) {
-                    contact.name = Some(name.clone());
-                }
-                self.push_event(Event::Profile { user: user.to_owned(), name });
-                Ok(())
-            }
-            content => {
-                let contact = self.state.contacts.get_mut(user).ok_or(Error::Internal("contact"))?;
-                let accepted = contact.accepted;
-                contact.receipt_due = accepted;
-                if !std::mem::replace(&mut contact.chat, true) {
-                    // A request (spec 4.10): no name goes to them until it is said yes to (`accept`).
-                    contact.profile_due = accepted && self.state.name.is_some();
-                    self.push_event(Event::NewChat { user: user.to_owned() });
-                }
-                let content = self.forget_keys(content);
-                self.push_event(Event::Message { user: user.to_owned(), sent_at_ms: message.sent_at_ms, content });
-                Ok(())
-            }
-        }
-    }
-
-    /// A `DecryptionErrorMessage` from a contact's device (spec 4.6), taken as Signal takes one: the session with
-    /// that device is archived if its current state still sends with the ratchet key named (the next message starts
-    /// a new one from a fresh bundle), and the message sent at the time named goes again, if it is among those kept;
-    /// else, the session archived, an empty message (a receipt) starts the new one. From a device not this one's
-    /// peer (a forgery: an identified envelope proves no sender), at most a message the contact has already goes
-    /// to it again, encrypted for it: only the session's peer knows the ratchet key.
-    fn decryption_error(&mut self, user: &str, address: &ProtocolAddress, bytes: &[u8]) -> Result<()> {
-        let Some(error) = PlaintextContent::try_from(bytes)
-            .ok()
-            .and_then(|content| extract_decryption_error_message_from_serialized_content(content.body()).ok())
-        else {
-            self.drop_one("a plaintext that is no decryption error".into());
-            return Ok(());
-        };
-        if error.device_id() != u32::from(self.state.device_number) {
-            self.drop_one("a decryption error for another device".into());
-            return Ok(());
-        }
-        let archived = error.ratchet_key().is_some_and(|key| self.records.archive_if_current(address, key));
-        let sent_at = error.timestamp().epoch_millis();
-        let Some(contact) = self.state.contacts.get(user) else { return Ok(()) };
-        let kept = contact.sent.iter().find(|m| Message::decode(m).is_ok_and(|m| m.sent_at_ms == sent_at)).cloned();
-        match kept {
-            Some(message) => {
-                // A group's message only while both are still in it (left, or the user removed: not again).
-                let tag = Message::decode(&message).ok().and_then(|m| m.group);
-                let in_group = self.both_in(tag.as_ref(), user);
-                if in_group {
-                    self.enqueue_with_urgency(user, encode(&Plain { to: None, content: message.into() }), true);
-                }
-            }
-            None if archived => {
-                if let Some(contact) = self.state.contacts.get_mut(user).filter(|c| c.accepted && !c.blocked) {
-                    contact.receipt_due = true;
-                }
-            }
-            None => {}
-        }
-        Ok(())
-    }
-
-    /// The receipts and decryption errors due (spec 4.5, 4.6): a receipt to each contact that wrote since the last,
-    /// so its ratchet moves on; a `DecryptionErrorMessage` to each device whose message did not open here.
-    fn answer_due(&mut self) -> Result<()> {
-        let due: Vec<(String, bool, Vec<DecryptionError>)> = self
-            .state
-            .contacts
-            .iter()
-            .filter(|(_, c)| !c.blocked && !c.gone && !c.unconfirmed)
-            .map(|(user, c)| {
-                // A decryption error answers too: not to a request seen and not said yes to (spec 4.10). One whose
-                // first message never opened (a state rolled back past it) is none yet: its session heals.
-                let answers = c.accepted || !c.chat || self.in_joined_group(user);
-                let errors = if answers { c.decryption_errors.clone() } else { Vec::new() };
-                (user.clone(), c.receipt_due && !c.devices.is_empty(), errors)
-            })
-            .filter(|(_, receipt, errors)| *receipt || !errors.is_empty())
-            .collect();
-        for (user, receipt, errors) in due {
-            self.atomic(|c| {
-                for error in &errors {
-                    c.enqueue_plaintext(&user, error.device, error.content.clone());
-                }
-                if receipt {
-                    c.send_message(&user, Content::Receipt)?;
-                }
-                let contact = c.state.contacts.get_mut(&user).ok_or(Error::Internal("contact"))?;
-                contact.receipt_due &= !receipt;
-                contact.decryption_errors.retain(|e| !errors.contains(e));
-                Ok(())
-            })?;
-        }
-        Ok(())
-    }
-
-    // ---- prekeys ----
-
-    /// Makes `fresh` one-time prekeys of each kind and, with `rotate`, a new signed prekey and last resort (spec 4.1).
-    fn make_prekeys(&mut self, fresh: u32, rotate: bool) -> Result<api::Prekeys> {
-        let now = (self.clock)();
-        let mut next = || {
-            self.state.prekeys.next_id += 1;
-            self.state.prekeys.next_id
-        };
-        let ids: Vec<u32> = (0..fresh * 2 + 2).map(|_| next()).collect();
-        let mut prekeys = api::Prekeys { signed: None, last_resort: None, one_time: Vec::new(), kyber: Vec::new() };
-        if rotate {
-            prekeys.signed = Some(self.records.new_signed(ids[0], now)?);
-            prekeys.last_resort = Some(self.records.new_kyber(ids[1], true)?);
-            self.state.prekeys.signed_at = now;
-        }
-        for pair in ids[2..].chunks(2) {
-            prekeys.one_time.push(self.records.new_prekey(pair[0])?);
-            prekeys.kyber.push(self.records.new_kyber(pair[1], false)?);
-        }
-        Ok(prekeys)
-    }
-
-    /// Keeps the hub's prekeys (spec 4.1): one-time ones refilled below `PREKEY_REFILL_BELOW`, the signed prekey and
-    /// the last resort replaced every week. Made and saved before they leave, sent again as they are until the hub
-    /// answers: a lost answer must not cost the private keys of what it took.
-    fn refill(&mut self) -> Result<()> {
-        let (body, fresh) = match self.state.prekeys.upload.clone() {
-            Some(upload) => upload,
-            None => {
-                let left = self.state.prekeys.left;
-                let rotate = (self.clock)().saturating_sub(self.state.prekeys.signed_at) >= ROTATE_EVERY_MS;
-                if left >= PREKEY_REFILL_BELOW && !rotate {
-                    // Nothing to upload; retired keys still go when their month is over (spec 4.1).
-                    if self.forget_retired() {
-                        self.persist()?;
-                    }
-                    return Ok(());
-                }
-                let fresh = if left < PREKEY_REFILL_BELOW { PREKEY_TARGET - left } else { 0 };
-                // Saved in the same transaction: a save that fails leaves no upload to send unsaved.
-                self.atomic(|c| {
-                    let prekeys = c.make_prekeys(fresh, rotate)?;
-                    let upload = (encode(&prekeys), fresh);
-                    c.state.prekeys.upload = Some(upload.clone());
-                    c.persist()?;
-                    Ok(upload)
-                })?
-            }
-        };
-        let response = self.signed("PUT", api::PREKEYS, &body)?;
-        // `409` to the same upload again: the hub took it before and its answer was lost. Either way it is done.
-        if response.status != status::NO_CONTENT && response.status != status::CONFLICT {
-            if !retryable(&refused(&response)) {
-                // Made anew next time, with a new signed prekey and last resort too: a rotation it carried is still due.
-                self.state.prekeys.upload = None;
-                self.state.prekeys.signed_at = 0;
-            }
-            return Err(refused(&response));
-        }
-        self.state.prekeys.upload = None;
-        self.state.prekeys.left = self.state.prekeys.left.saturating_add(fresh);
-        self.prekeys_known_ms = self.last_request_ms;
-        // The hub hands out the newest signed prekey and last resort from now on: the ones before are retired.
-        let now = self.wall();
-        for kind in ["sp", "kl"] {
-            let ids = self.records.ids(kind);
-            for id in ids.iter().take(ids.len().saturating_sub(1)) {
-                if !self.state.prekeys.retired.iter().any(|(k, i, _)| k == kind && i == id) {
-                    self.state.prekeys.retired.push((kind.to_owned(), *id, now));
-                }
-            }
-        }
-        let _ = self.forget_retired();
-        self.records.keep_newest_one_time(ONE_TIME_KEPT);
-        Ok(())
-    }
-
-    /// The private keys of signed prekeys and last resorts retired a month ago go (`RETIRED_KEPT_MS`).
-    /// Whether any went.
-    fn forget_retired(&mut self) -> bool {
-        let now = self.wall();
-        let (old, kept): (Vec<_>, Vec<_>) = std::mem::take(&mut self.state.prekeys.retired)
-            .into_iter()
-            .partition(|(_, _, at)| now.saturating_sub(*at) > RETIRED_KEPT_MS);
-        let any = !old.is_empty();
-        for (kind, id, _) in old {
-            self.records.forget(&kind, id);
-        }
-        self.state.prekeys.retired = kept;
-        any
-    }
-
     // ---- what the app calls ----
 
-    /// Sends a Yo to "chris", or a user id from an event.
     pub fn send_yo(&mut self, to: &str) -> Result<Vec<Event>> {
         self.send(to, Content::Yo)
     }
@@ -3460,129 +1631,14 @@ impl Client {
         }
     }
 
-    /// Silent probe requests for an echo service; never app events or synced content.
-    pub fn take_probe_requests(&mut self) -> Vec<(String, [u8; 32])> {
-        std::mem::take(&mut self.probe_requests)
-    }
-
-    /// Echoes a probe token without app events or copies to own devices.
-    /// Accept protocol replies so subsequent probes can use sealed delivery in both directions.
-    pub fn echo_probe(&mut self, user: &str, token: [u8; 32]) -> Result<Vec<Event>> {
-        let result = self
-            .atomic(|c| {
-                c.accept_writing(user);
-                c.queue_key(user)?;
-                c.send_message(user, Content::ProbeReply(token))?;
-                c.encrypt_waiting(user);
-                c.persist()
-            })
-            .and_then(|()| self.deliver_now());
-        self.finish_sent(result)
-    }
-
-    /// Starts a user-triggered probe to the reserved service. Returns a local ticket;
-    /// app events received along the way remain queued for the ordinary inbox consumer.
-    pub fn round_trip_probe_begin(&mut self, target: &str, timeout_ms: u64) -> Result<Probe> {
-        if !same_handle(target, PROBE_HANDLE) {
-            return Err(Error::Protocol("probe target must be PINGTEST"));
-        }
-        let handle = Handle::parse(PROBE_HANDLE)?;
-        let user = match self.known_user(&handle).filter(|u| self.has_chat(u)) {
-            Some(user) => user,
-            None => self.start_chat(&handle)?,
-        };
-        self.storage_fetched()?;
-        self.acknowledge_inbox()?;
-        let mut ticket = [0; 32];
-        getrandom::getrandom(&mut ticket).map_err(|_| Error::Internal("random"))?;
-        let wait = self.probe_wait(timeout_ms);
-        self.atomic(|c| {
-            c.queue_key(&user)?;
-            c.state.contacts.get_mut(&user).expect("service").probe_pending = Some(ticket);
-            c.send_message(&user, Content::Probe(ticket))?;
-            c.encrypt_waiting(&user);
-            c.persist()
-        })?;
-        // The save above also reserves the signed request for other processes.
-        let sending = wait.clone();
-        let began = std::time::Instant::now();
-        let (received, response) = std::sync::mpsc::channel();
-        std::thread::spawn(move || {
-            let _ = received.send(sending.send());
-        });
-        let delivered = self.deliver_now();
-        // A probe never becomes a deferred send on reconnection, even when its
-        // immediate delivery was refused or failed. Ratchet state remains durable.
-        self.state.outbox.retain(|item| {
-            item.user != user
-                || !decode::<Plain>(&item.plain)
-                    .ok()
-                    .and_then(|plain| Message::decode(plain.content.as_slice()).ok())
-                    .is_some_and(|message| message.content == Content::Probe(ticket))
-        });
-        self.persist()?;
-        delivered?;
-        self.unacked.extend(std::mem::take(&mut self.received_ids));
-        Ok(Probe { user, ticket, began, wait, response })
-    }
-
-    fn probe_wait(&mut self, timeout_ms: u64) -> InboxWait {
-        let path = api::inbox_path(timeout_ms.div_ceil(1000).clamp(1, 10));
-        let (headers, time) = self.sign("GET", &path, &[]);
-        InboxWait { transport: self.transport.clone(), path, headers, time }
-    }
-
-    /// Processes a completed long poll, preserving ordinary events for the app.
-    pub fn round_trip_probe_poll(&mut self, reply: &mut ProbeReply) -> Result<bool> {
-        let (_, ids) = self.inbox(
-            std::mem::replace(&mut reply.response, Err("taken".into())).map_err(Error::Network)?,
-            reply.wait.time,
-            true,
-        )?;
-        if !ids.is_empty() {
-            self.persist()?;
-            self.unacked.extend(ids);
-        }
-        Ok(self.state.contacts.get(&reply.user).is_some_and(|c| c.probe_reply_tag == reply.ticket))
-    }
-
-    /// Continues waiting when unrelated mail woke the first long poll.
-    pub fn round_trip_probe_wait(&mut self, user: &ProbeReply, timeout_ms: u64) -> Result<Probe> {
-        self.acknowledge_inbox()?;
-        let wait = self.probe_wait(timeout_ms);
-        self.persist()?; // Reserve the signed request before another process can sign.
-        let sending = wait.clone();
-        let (received, response) = std::sync::mpsc::channel();
-        std::thread::spawn(move || {
-            let _ = received.send(sending.send());
-        });
-        Ok(Probe { began: user.began, user: user.user.clone(), ticket: user.ticket, wait, response })
-    }
-
-    /// Locally timed convenience API. No app events are taken from the inbox.
-    pub fn round_trip_probe(&mut self, target: &str, timeout_ms: u64) -> Result<Option<u64>> {
-        let mut probe = self.round_trip_probe_begin(target, timeout_ms)?;
-        let began = probe.began;
-        loop {
-            let Some(mut reply) = probe.receive(timeout_ms) else { return Ok(None) };
-            let done = self.round_trip_probe_poll(&mut reply)?;
-            let elapsed = began.elapsed().as_millis() as u64;
-            if done || elapsed >= timeout_ms {
-                return Ok((done && elapsed < timeout_ms).then_some(elapsed));
-            }
-            probe = self.round_trip_probe_wait(&reply, timeout_ms - elapsed)?;
-        }
-    }
-
     /// Sends a message: starts writing to the user if this device has not yet (spec 4.2).
     pub fn send(&mut self, to: &str, content: Content) -> Result<Vec<Event>> {
         let result = self.send_inner(to, content);
         self.finish_sent(result)
     }
 
-    /// `finish` for a send: the message was queued and saved before it went (spec 4.7), so a later save that fails
-    /// does not make it unsent. Its events wait for the next call; `Save` here would have the app send it again, a
-    /// second message.
+    /// `finish` for a send: queued and saved before it went (4.7), so a later failed save does not make it unsent
+    /// (`Save` would make the app send a second message).
     pub(crate) fn finish_sent(&mut self, result: Result<()>) -> Result<Vec<Event>> {
         let queued = result.is_ok();
         match self.finish(result) {
@@ -3596,15 +1652,11 @@ impl Client {
         if Handle::parse(user)?.kind != KIND_USER {
             return Err(Error::Protocol("echo requires a user id"));
         }
-        let result = self.send_inner_ready(user, Content::Yo);
+        let result = self.send_inner(user, Content::Yo);
         self.finish_sent(result)
     }
 
     fn send_inner(&mut self, to: &str, content: Content) -> Result<()> {
-        self.send_inner_ready(to, content)
-    }
-
-    fn send_inner_ready(&mut self, to: &str, content: Content) -> Result<()> {
         if self.replaced.get() {
             return Err(Error::Replaced);
         }
@@ -3625,8 +1677,8 @@ impl Client {
         self.promote_contact(&peer);
         self.accept_writing(&peer);
         self.send_profiles();
-        // Saved with the message in it, or not made at all (spec 4.7); the profile key ahead of it, if due.
-        // Its envelope made in the same step when the sessions are there: one save before it leaves, not two.
+        // Saved with the message and the due profile key ahead of it, or not made at all (spec 4.7); its envelope is
+        // made in the same step, so one save precedes its leaving.
         self.atomic(|c| {
             c.queue_key(&peer)?;
             c.send_message(&peer, content)?;
@@ -3642,10 +1694,8 @@ impl Client {
         }
     }
 
-    /// The user a send to `handle` goes to: a user id as it is; a username as the hub says now (who it is only,
-    /// without spending a prekey), never as this device knew it, since a name may have changed hands since (3.3).
-    /// So someone who wrote first, known by user id only, is found by name too. `None`: no contacts yet, the first
-    /// lookup asks.
+    /// The user a send goes to: a username is asked of the hub now (without spending a prekey), since a name may have
+    /// changed hands (3.3). `None`: no contacts yet, the first lookup asks.
     pub(crate) fn send_target(&mut self, handle: &Handle) -> Result<Option<String>> {
         if handle.kind == KIND_USER {
             return Ok(Some(hex(handle.value.as_slice())));
@@ -3674,13 +1724,9 @@ impl Client {
         }
     }
 
-    /// `send` in three steps, so that a caller sharing the client behind a lock need not hold it while the message
-    /// travels (sends to several friends and the inbox's wait then share the network): `send_begin` (locked) encrypts
-    /// the message and takes what of the outbox can go, `Deliveries::send` (unlocked) posts it, `send_end` (locked)
-    /// takes the answers. Only to a contact this device writes to already, with a session with each of its devices,
-    /// neither blocked nor waiting for confirmation. The sealed POST goes first; a failed device check refreshes
-    /// sessions as needed. What the hub refuses for
-    /// other devices is taken in by `send_end`. `None`, with nothing changed: `send` it instead.
+    /// `send` in three steps, so a caller sharing the client behind a lock need not hold it while the message travels:
+    /// `send_begin` (locked) encrypts and takes what can go, `Deliveries::send` (unlocked) posts, `send_end` (locked)
+    /// takes the answers. Only to a sendable contact with a session; `None`, with nothing changed: `send` instead.
     pub fn send_begin(&mut self, to: &str, content: Content) -> Option<Deliveries> {
         if self.replaced.get() {
             return None;
@@ -3692,14 +1738,11 @@ impl Client {
         }
         let user = self.known_user(&handle)?;
         let contact = self.state.contacts.get(&user)?;
-        if contact.blocked || contact.unconfirmed || contact.gone || contact.devices.is_empty() {
+        if contact.blocked || contact.unconfirmed || contact.gone || contact.device.is_none() || self.no_session(&user)
+        {
             return None;
         }
-        if !self.without_session(&user).is_empty() {
-            return None;
-        }
-        // A name not yet told goes first, as in `send`. Saved with the message in it, or not made at all: `send` then
-        // fails on the save the same way.
+        // As in `send`: the name first, saved with the message or not made at all.
         self.atomic(|c| {
             c.promote_contact(&user);
             c.accept_writing(&user);
@@ -3719,8 +1762,7 @@ impl Client {
         Deliveries { transport: self.transport.clone(), items: Vec::new(), to: None }
     }
 
-    /// The outbox, without the client, like `send_begin` without a message: for sending again what the hub did not take
-    /// yet (its limit per sender, or no network). Ended with `send_end`.
+    /// The outbox without the client, like `send_begin` without a message. Ended with `send_end`.
     pub fn deliver_begin(&mut self) -> Result<Deliveries> {
         if self.replaced.get() {
             return Err(Error::Replaced);
@@ -3729,14 +1771,8 @@ impl Client {
         self.deliveries()
     }
 
-    /// Envelopes not yet taken by the hub (`pending`).
-    pub fn waiting(&self) -> usize {
-        self.pending()
-    }
-
-    /// Takes the answers to `send_begin`'s deliveries (or to the ones before): `More` when the hub took them all and
-    /// more of the outbox can go now (a message queued meanwhile behind them), to send and end the same way; else
-    /// what `send` returns. What the hub did not take waits in the outbox for the next call that delivers.
+    /// Takes the answers to deliveries: `More` when the hub took them all and more can go now; else what `send`
+    /// returns. What the hub did not take waits in the outbox.
     pub fn send_end(&mut self, deliveries: &Deliveries, answers: Vec<Option<Answer>>) -> Sent {
         let all_taken = answers.len() == deliveries.items.len()
             && answers
@@ -3758,9 +1794,7 @@ impl Client {
             Ok(false) => Ok(()),
             Err(error) => Err(error),
         };
-        // As `send`: offline, the message waits in the outbox; to a user the hub no longer knows, it went nowhere. It
-        // was saved when `send_begin` queued it: a save failing after is no reason to call it unsent (the app would
-        // send a second one).
+        // As `send`: offline, it waits; a failed save after queuing is no reason to call it unsent.
         let result = match result {
             Ok(()) | Err(Error::Network(_) | Error::Save(_)) => self.check_sendable(deliveries.to.as_deref()),
             Err(error) => Err(error),
@@ -3768,8 +1802,7 @@ impl Client {
         Sent::Done(self.finish_sent(result))
     }
 
-    /// What another process of this device received and saved for the app (the notification service, as its push
-    /// came): handed out now, from the state, without asking the hub. Nothing waiting: nothing changes.
+    /// What another process (the notification service) received and saved for the app, handed out now.
     pub fn saved_for_app(&mut self) -> Result<Vec<Event>> {
         if self.state.events.is_empty() {
             return Ok(Vec::new());
@@ -3777,19 +1810,17 @@ impl Client {
         self.finish(Ok(()))
     }
 
-    /// Receives: waits up to `wait_s` seconds for mail, processes all of it, delivers what is waiting. Returns as soon
-    /// as what arrived is saved; the hub's ack and the work after it wait for `after_sync` or the next call.
+    /// Waits up to `wait_s` seconds for mail and processes it. Returns once it is saved; the hub's ack and the work
+    /// after it wait for `after_sync` or the next call.
     pub fn sync(&mut self, wait_s: u64) -> Result<Vec<Event>> {
         let wait = self.sync_begin(wait_s)?;
         let response = wait.send();
         self.sync_end(&wait, response)
     }
 
-    /// `sync` in three steps, so that a caller sharing the client behind a lock need not hold it through the long
-    /// poll: `sync_begin` (locked) delivers what is waiting and signs the inbox request, `InboxWait::send` (unlocked)
-    /// waits for the hub, `sync_end` (locked) processes the answer. Other calls may run in between; the answer is
-    /// processed against the state as it is then. The signature's time is checked when the hub gets the request,
-    /// before the wait, so signing early is fine.
+    /// `sync` in three steps, so the client's lock is not held through the long poll: `sync_begin` (locked) delivers
+    /// and signs, `InboxWait::send` (unlocked) waits, `sync_end` (locked) processes the answer against the state as it
+    /// is then. The hub checks the signature's time before the wait, so signing early is fine.
     pub fn sync_begin(&mut self, wait_s: u64) -> Result<InboxWait> {
         // What the last sync left (`after_sync`), then the outbox; a guest leaves the outbox to the app.
         let before = self.after_sync_inner().and_then(|()| match self.guest_events {
@@ -3810,9 +1841,8 @@ impl Client {
         Ok(InboxWait { transport: self.transport.clone(), path, headers, time })
     }
 
-    /// Processes what `InboxWait::send` brought and fetches the rest; saves and hands out the events. Acknowledging
-    /// them at the hub, receipts, prekeys, delivering and writing the storage come after, off the way of the events:
-    /// `after_sync`, else the next `sync_begin`. The hub is acknowledged only what was saved first.
+    /// Processes what `InboxWait::send` brought and fetches the rest; saves and hands out the events. The hub is
+    /// acknowledged only what was saved, and the rest of the work waits for `after_sync` or the next `sync_begin`.
     pub fn sync_end(
         &mut self,
         wait: &InboxWait,
@@ -3845,10 +1875,8 @@ impl Client {
             && self.received_ids.is_empty()
             && self.state.events.is_empty()
             && self.state.deferred.is_empty()
-            && (self.explicit_ack || self.state.handed.is_empty())
         {
-            // Only idempotent GET signing / maintenance hints changed. There is nothing
-            // received to make durable, nor an implicit app acknowledgement to save.
+            // Only GET signing and maintenance hints changed.
             return Ok(Vec::new());
         }
         let events = self.finish_receiving(received);
@@ -3859,9 +1887,8 @@ impl Client {
         events
     }
 
-    /// The rest of a `sync`, once its events are handed over: acknowledges at the hub what it received (saved
-    /// before), and for the app (not a guest) sends the receipts and decryption errors due, refills prekeys, delivers the
-    /// outbox, writes the storage. Without it the next `sync_begin` does it first.
+    /// The rest of a `sync`: acknowledges at the hub what was saved and, for the app, sends receipts and decryption
+    /// errors, refills prekeys, delivers, writes the storage.
     pub fn after_sync(&mut self) -> Result<()> {
         let result = self.after_sync_inner();
         let saved = self.persist();
@@ -3886,9 +1913,7 @@ impl Client {
         Ok(())
     }
 
-    /// Writes a change of the storage (friends, blocks, the icon) to the hub now, rather than with the next
-    /// `sync_begin` or `maintenance`: for the app right after the change, beside the inbox's long wait. Quietly, as
-    /// there ("not now" leaves it for later).
+    /// Writes a storage change (friends, blocks, the icon) to the hub now. Quietly: "not now" leaves it for later.
     pub fn write_storage(&mut self) -> Result<()> {
         let result = self.sync_storage_quietly();
         let saved = self.persist();
@@ -3897,29 +1922,26 @@ impl Client {
 
     /// What the app runs when it comes to the foreground: receive, answer, refill prekeys, deliver.
     pub fn maintenance(&mut self) -> Result<Vec<Event>> {
-        let result = self.maintenance_inner();
-        self.finish_receiving(result)
-    }
-
-    fn maintenance_inner(&mut self) -> Result<()> {
         // All of the work after a sync is done here.
         self.after_due = false;
-        self.deliver()?;
-        self.receive_all(0)?;
-        self.answer_due()?;
-        self.refresh_groups_quietly();
-        self.refresh_certificate()?;
-        self.refill()?;
-        self.send_profiles();
-        self.profile_keys()?;
-        self.deliver()?;
-        self.sync_storage_quietly()
+        let result = (|| {
+            self.deliver()?;
+            self.receive_all(0)?;
+            self.answer_due()?;
+            self.refresh_groups_quietly();
+            self.refresh_certificate()?;
+            self.refill()?;
+            self.send_profiles();
+            self.profile_keys()?;
+            self.deliver()?;
+            self.sync_storage_quietly()
+        })();
+        self.finish_receiving(result)
     }
 
     // ---- contacts and requests (spec 4.10) ----
 
-    /// This account's profile key: made once, its check told to the hub, and sent to every contact due it. A hub
-    /// that cannot be reached now leaves the telling for later.
+    /// This account's profile key: made once, its check told to the hub, sent to every contact due it.
     fn profile_keys(&mut self) -> Result<()> {
         if self.state.profile_key.is_none() {
             // A new phone goes on with the key in the storage (spec 6.9): fetched first. Not now: later.
@@ -3932,12 +1954,8 @@ impl Client {
             self.state.profile_key = Some(new_profile_key());
             self.state.profile_key_gen += 1;
             self.store_own_key();
-            // Contacts from before profile keys: each gets it, else theirs come as requests.
             self.key_due_to_all();
             self.persist()?;
-        } else if self.state.storage.profile_key.unset() && self.state.storage_fetched {
-            // A key from before the storage kept it.
-            self.store_own_key();
         }
         let me = self.state.user_id.clone();
         let due: Vec<String> = self
@@ -3951,8 +1969,7 @@ impl Client {
             self.queue_key(user)?;
         }
         if !self.state.access_key_told {
-            // A new key goes to the contacts before the hub takes it (the old one counts no more from then on): the
-            // contacts online have it in their inbox when their next delivery with the old one is refused.
+            // The new key reaches contacts before the hub takes it, so their next refused delivery finds it waiting.
             if !due.is_empty() {
                 match self.deliver() {
                     Err(error) if retryable(&error) => return Ok(()),
@@ -3980,9 +1997,8 @@ impl Client {
         Ok(())
     }
 
-    /// This account's profile key to `user` now, if it is due them: queued, in the outbox ahead of what is queued
-    /// after it. So a first message to someone carries the key before it, and their answer can come as a contact's,
-    /// not as a request (spec 4.10). Without a key yet (the storage not fetched), `profile_keys` sends it later.
+    /// Queues the profile key for `user` if due, ahead of what waits for them, so their answer comes as a contact's,
+    /// not a request (spec 4.10). Without a key yet, `profile_keys` sends it later.
     fn queue_key(&mut self, user: &str) -> Result<()> {
         let Some(key) = self.state.profile_key else { return Ok(()) };
         if user == self.state.user_id
@@ -4031,398 +2047,6 @@ impl Client {
             }
         }
     }
-
-    /// Says yes to a request (spec 4.10): from now on a contact; what waits for it goes, and it gets this account's
-    /// profile key, its name and a receipt.
-    pub fn accept(&mut self, who: &str) -> Result<Vec<Event>> {
-        let result = (|| {
-            let user = self.user_named(&Handle::parse(who)?)?.0;
-            let name = self.state.name.is_some();
-            let contact = self.state.contacts.entry(user).or_insert_with(Contact::unknown);
-            contact.accepted = true;
-            contact.key_due = true;
-            contact.receipt_due = contact.chat;
-            contact.profile_due = name;
-            self.persist()?;
-            self.profile_keys()?;
-            self.send_profiles();
-            self.deliver()
-        })();
-        self.finish(result)
-    }
-
-    /// Says no to a request: it is gone from the list (`chat` off); what comes from them later is a request again.
-    pub fn decline(&mut self, who: &str) -> Result<()> {
-        let user = self.user_named(&Handle::parse(who)?)?.0;
-        self.atomic(|c| {
-            if let Some(contact) = c.state.contacts.get_mut(&user).filter(|c| !c.accepted) {
-                contact.chat = false;
-            }
-            let theirs =
-                |e: &StoredEvent| matches!(e, StoredEvent::Message { user: from, own: false, .. } if *from == user);
-            c.state.events.retain(|e| !theirs(e));
-            c.persist()
-        })
-    }
-
-    /// Whether strangers may send requests (spec 4.10); off, the hub refuses them, and only contacts reach this account.
-    pub fn set_requests_open(&mut self, open: bool) -> Result<()> {
-        self.state.requests_open = open;
-        self.state.access_key_told = false;
-        self.persist()?;
-        self.profile_keys()
-    }
-
-    pub fn requests_open(&self) -> bool {
-        self.state.requests_open
-    }
-
-    /// A new profile key after a block: the blocked one's deliveries are requests from then on (refused while the
-    /// account takes none), every other contact gets the new key; the old one counts no more once the hub has it.
-    fn rotate_profile_key(&mut self) {
-        self.state.profile_key = Some(new_profile_key());
-        self.state.profile_key_gen = self.state.profile_key_gen.max(1) + 1;
-        self.store_own_key();
-        self.state.access_key_told = false;
-        self.key_due_to_all();
-    }
-
-    /// Sets the name contacts see, and tells every contact this device writes to.
-    pub fn set_name(&mut self, name: &str) -> Result<Vec<Event>> {
-        let result = (|| {
-            Message { sent_at_ms: 0, group: None, content: Content::Profile { name: name.to_owned() } }.encode()?;
-            self.state.name = Some(name.to_owned());
-            // Not to a request (spec 4.10): it gets the name with a yes.
-            for contact in self.state.contacts.values_mut().filter(|c| c.chat && c.accepted) {
-                contact.profile_due = true;
-            }
-            self.send_profiles();
-            self.deliver()
-        })();
-        self.finish(result)
-    }
-
-    /// Tells the name to every contact it is due to that can take a message now: not to a blocked one (4.8), nor one
-    /// whose new key waits for confirmation (3.4), nor one gone. The others keep it due, for the next send or
-    /// `maintenance`.
-    fn send_profiles(&mut self) {
-        let Some(name) = self.state.name.clone() else { return };
-        let due: Vec<String> = self
-            .state
-            .contacts
-            .iter()
-            .filter(|(_, c)| {
-                c.profile_due && c.accepted && !c.blocked && !c.unconfirmed && !c.gone && !c.devices.is_empty()
-            })
-            .map(|(user, _)| user.clone())
-            .collect();
-        for user in due {
-            let sent = self.atomic(|c| {
-                c.send_message(&user, Content::Profile { name: name.clone() })?;
-                c.state.contacts.get_mut(&user).ok_or(Error::Internal("contact"))?.profile_due = false;
-                Ok(())
-            });
-            if let Err(error) = sent {
-                self.note(format!("name: {error}"));
-            }
-        }
-    }
-
-    pub fn contacts(&self) -> Vec<ContactInfo> {
-        self.state
-            .contacts
-            .iter()
-            .filter(|(_, c)| !c.probe_service || c.chat)
-            .map(|(user, c)| ContactInfo {
-                user: user.clone(),
-                handles: c.handles.clone(),
-                name: c.name.clone(),
-                verified: c.verified,
-                unconfirmed: c.unconfirmed,
-                blocked: c.blocked,
-                gone: c.gone,
-                outdated: c.outdated_at > 0,
-                accepted: c.accepted,
-            })
-            .collect()
-    }
-
-    /// The sessions with a contact's devices (user id), with what each is like.
-    pub fn sessions_with(&self, user: &str) -> Vec<SessionInfo> {
-        let Some(contact) = self.state.contacts.get(user) else { return Vec::new() };
-        contact
-            .devices
-            .iter()
-            .map(|device| SessionInfo {
-                device: hex(&device.key),
-                usable: self.address(user, device.slot).is_ok_and(|a| self.records.usable(&a)),
-                retrying: contact.decryption_errors.iter().any(|e| e.device == device.key)
-                    || self.state.outbox.iter().any(|item| item.user == user && item.device == Some(device.key)),
-            })
-            .collect()
-    }
-
-    /// The account key a contact is pinned to (hex): what the safety number is made of (3.4).
-    pub fn account_key_of(&self, user: &str) -> Option<String> {
-        self.state.contacts.get(user).map(|c| hex(&c.account_key))
-    }
-
-    /// The contact a handle names, as this device knows it.
-    fn contact_user(&self, who: &str) -> Result<String> {
-        self.known_user(&Handle::parse(who)?).ok_or(Error::NotOnYo)
-    }
-
-    /// Who a name is, asked of the hub without the client, so a friend added by a typed name shows as its owner writes
-    /// it before the first Yo: `whois_begin` (locked) signs the lookup (who it is only, no prekey), `Whois::send`
-    /// (unlocked) asks. Nothing is kept: the name is not a contact until a message.
-    pub fn whois_begin(&mut self, who: &str) -> Result<Whois> {
-        let handle = Handle::parse(who)?;
-        if self.is_me(&handle) {
-            return Err(Error::Protocol("oneself"));
-        }
-        let body = encode(&api::Lookup { handle, flags: api::LOOKUP_USERNAME, except: Vec::new() });
-        let (headers, _) = self.sign("POST", api::LOOKUP, &body);
-        let nonce = self.hub_nonce();
-        // The time signed saved before the request leaves: another process of this device signs later.
-        self.persist()?;
-        Ok(Whois {
-            transport: self.transport.clone(),
-            headers: with_nonce(headers, nonce),
-            body,
-            me: self.state.user_id.clone(),
-            hub_keys: self.hub_keys.clone(),
-            nonce,
-        })
-    }
-
-    /// Takes in what `Whois::send` said a name is before a send to it by user id (the app's way to send to a name
-    /// without holding the client, spec 4.2): a contact is known by the name from now on, and no other contact any
-    /// more.
-    pub fn whois_end(&mut self, name: &str, user: &str, username: Option<String>) -> Result<()> {
-        let Ok(handle) = Handle::parse(name) else { return Ok(()) };
-        if !self.state.contacts.contains_key(user) {
-            return Ok(());
-        }
-        self.take_handle(user, username.unwrap_or_else(|| handle.display()));
-        self.persist()
-    }
-
-    /// Whether `to` names a user by its id (hex), not by a name.
-    pub fn is_user_id(to: &str) -> bool {
-        Handle::parse(to).is_ok_and(|handle| handle.kind == KIND_USER)
-    }
-
-    /// The user a handle names: known to this device, else asked of the hub (who it is only, no prekey); with the
-    /// handle to remember for it then, the username as its owner writes it if the hub tells.
-    fn user_named(&mut self, handle: &Handle) -> Result<(String, Option<String>)> {
-        if self.is_me(handle) {
-            return Err(Error::Protocol("oneself"));
-        }
-        let (user, shown) = match self.known_user(handle) {
-            Some(user) => (user, None),
-            None => {
-                let (found, username) = self.lookup(handle, 0, Vec::new())?;
-                let shown = username.or_else(|| (handle.kind != KIND_USER).then(|| handle.display()));
-                (hex(&found.user_id), shown)
-            }
-        };
-        if user == self.state.user_id {
-            return Err(Error::Protocol("oneself"));
-        }
-        Ok((user, shown))
-    }
-
-    /// The safety number with a contact (spec 3.4).
-    pub fn safety_number(&self, who: &str) -> Result<String> {
-        let (mine, theirs, key) = self.safety_sides(who)?;
-        identity::safety_number((&mine, &self.my_account_key()), (&theirs, &key))
-    }
-
-    /// The safety number's scannable form with a contact, to show as a QR code (spec 3.4).
-    pub fn safety_code(&self, who: &str) -> Result<Vec<u8>> {
-        let (mine, theirs, key) = self.safety_sides(who)?;
-        identity::safety_code((&mine, &self.my_account_key()), (&theirs, &key))
-    }
-
-    /// Whether a code scanned off a contact's screen matches the safety number with it (spec 3.4).
-    pub fn safety_code_matches(&self, who: &str, scanned: &[u8]) -> Result<bool> {
-        let (mine, theirs, key) = self.safety_sides(who)?;
-        identity::safety_code_matches((&mine, &self.my_account_key()), (&theirs, &key), scanned)
-    }
-
-    /// This user's id, a contact's, and the account key it is pinned to: the sides of a safety number.
-    fn safety_sides(&self, who: &str) -> Result<(Vec<u8>, Vec<u8>, Key)> {
-        let user = self.contact_user(who)?;
-        let contact = self.state.contacts.get(&user).ok_or(Error::NotOnYo)?;
-        Ok((unhex(&self.state.user_id).unwrap_or_default(), unhex(&user).unwrap_or_default(), contact.account_key))
-    }
-
-    /// Marks a contact verified (or not) after comparing safety numbers. Any contact can be verified (spec 3.4).
-    pub fn set_verified(&mut self, who: &str, verified: bool) -> Result<()> {
-        let user = self.contact_user(who)?;
-        // Saved, or not made at all: a change kept only in memory would hold until a restart undid it.
-        self.atomic(|c| {
-            let contact = c.state.contacts.get_mut(&user).ok_or(Error::NotOnYo)?;
-            contact.verified = verified;
-            if verified {
-                contact.unconfirmed = false;
-            }
-            c.persist()
-        })
-    }
-
-    /// Accepts a verified contact's new account key: sending to it goes on (unverified until compared again).
-    pub fn confirm_identity(&mut self, who: &str) -> Result<()> {
-        let user = self.contact_user(who)?;
-        self.atomic(|c| {
-            c.state.contacts.get_mut(&user).ok_or(Error::NotOnYo)?.unconfirmed = false;
-            c.persist()
-        })
-    }
-
-    /// Blocks a user (by user id or any handle; one this device does not know is asked of the hub), or unblocks:
-    /// nothing from them is shown, nothing is sent to them (spec 4.8).
-    pub fn set_blocked(&mut self, who: &str, blocked: bool) -> Result<()> {
-        let (user, shown) = self.user_named(&Handle::parse(who)?)?;
-        // Saved, or not made at all: a block kept only in memory (the disk full) would hide them until a restart
-        // brought back the state without it, and with it what they sent meanwhile.
-        self.atomic(|c| {
-            c.apply_block(&user, blocked);
-            if blocked && c.state.profile_key.is_some() {
-                c.rotate_profile_key();
-            }
-            if let Some(shown) = shown {
-                note_handle(c.state.contacts.get_mut(&user).expect("blocked"), shown);
-            }
-            // Kept in the storage too, so a new phone has it (spec 6.9).
-            c.storage_block(&user, blocked);
-            c.persist()
-        })?;
-        // The new key out and told now: the blocked one's next delivery is a request (spec 4.10); unblocked, the key
-        // goes to them. "Not now": later.
-        match self.profile_keys() {
-            Err(error) if retryable(&error) => {}
-            other => other?,
-        }
-        self.persist()?;
-        Ok(())
-    }
-
-    /// Blocks or unblocks a user on this device. What came from them before and waits to be handed out (after a
-    /// restart of the app) is not shown either.
-    pub(crate) fn apply_block(&mut self, user: &str, blocked: bool) {
-        let in_group = self.in_joined_group(user);
-        let contact = self.state.contacts.entry(user.to_owned()).or_insert_with(Contact::unknown);
-        // Unblocked: the key made at the block (or since) goes to them, as to every contact; else what they send
-        // comes as a request, held past the hub's limits (spec 4.10).
-        if contact.blocked && !blocked && !contact.key_given && (contact.accepted || in_group) {
-            contact.key_due = true;
-        }
-        contact.blocked = blocked;
-        if blocked {
-            // From the events not handed out yet and from those handed out and not acknowledged, which a restart
-            // hands out again: nothing of theirs comes after the block.
-            let theirs = |e: &StoredEvent| {
-                matches!(e, StoredEvent::Message { user: from, own: false, .. }
-                    | StoredEvent::GroupMessage { user: from, own: false, .. } if from == user)
-            };
-            self.state.events.retain(|e| !theirs(e));
-            self.state.handed.retain(|e| !theirs(e));
-        }
-    }
-
-    /// Reports a user to the operator (by user id or any handle): `reason` is `api::REPORT_SPAM`, `REPORT_ABUSE` or
-    /// `REPORT_OTHER` (spec 6.3). Nothing of what they sent goes with it.
-    pub fn report(&mut self, who: &str, reason: u8) -> Result<()> {
-        let (user, _) = self.user_named(&Handle::parse(who)?)?;
-        let body = encode(&api::Report { user_id: user_bytes(&user)?, reason });
-        let response = self.signed("POST", api::REPORT, &body)?;
-        match response.status {
-            status::NO_CONTENT => Ok(()),
-            status::NOT_FOUND => Err(Error::NotOnYo),
-            _ => Err(refused(&response)),
-        }
-    }
-
-    /// Signs a read-only connectivity check; preserves the device signing clock.
-    pub fn status_probe_begin(&mut self) -> Result<StatusProbe> {
-        let (headers, _) = self.sign("GET", api::CERTIFICATE, &[]);
-        self.persist()?;
-        Ok(StatusProbe { transport: self.transport.clone(), headers })
-    }
-
-    /// Signs feedback on the app for the operator (spec 6.3), to send without the client (`FeedbackRequest::send`).
-    /// The text goes as written, readable by the hub: not end-to-end encrypted. Empty text, or text or version too
-    /// long, is refused here.
-    pub fn feedback_begin(&mut self, text: &str, app_version: &str) -> Result<FeedbackRequest> {
-        self.support_message_begin(text, app_version, api::FEEDBACK)
-    }
-    pub fn send_support_begin(&mut self, text: &str, app_version: &str) -> Result<FeedbackRequest> {
-        self.support_message_begin(text, app_version, api::SUPPORT)
-    }
-    fn support_message_begin(&mut self, text: &str, app_version: &str, path: &'static str) -> Result<FeedbackRequest> {
-        let feedback = api::Feedback { text: text.as_bytes().into(), app_version: app_version.as_bytes().into() };
-        feedback.check().map_err(|_| Error::Protocol("feedback empty or too long"))?;
-        let body = encode(&feedback);
-        let (headers, _) = self.sign("POST", path, &body);
-        self.persist()?;
-        Ok(FeedbackRequest { path, transport: self.transport.clone(), headers, body })
-    }
-
-    /// Signs a thread fetch or a bounded read marker; transport runs outside the shared state lock.
-    pub fn support_begin(&mut self, through: Option<u64>) -> Result<SupportRequest> {
-        let body = through.map(|through| encode(&api::SupportRead { through })).unwrap_or_default();
-        let (headers, _) = self.sign(
-            if through.is_some() { "POST" } else { "GET" },
-            if through.is_some() { api::SUPPORT_READ } else { api::SUPPORT },
-            &body,
-        );
-        self.persist()?;
-        Ok(SupportRequest { transport: self.transport.clone(), headers, body, mark: through.is_some() })
-    }
-    pub fn support_thread(&mut self) -> Result<api::SupportThread> {
-        self.support_begin(None)?.thread()
-    }
-    pub fn support_read(&mut self, through: u64) -> Result<()> {
-        self.support_begin(Some(through))?.read()
-    }
-
-    /// `feedback_begin` and its send, holding the client throughout.
-    pub fn send_feedback(&mut self, text: &str, app_version: &str) -> Result<()> {
-        self.feedback_begin(text, app_version)?.send()
-    }
-
-    /// Deletes the account at the hub with everything it holds about it (spec 6.3): the name is free again, the other
-    /// devices are out. This client is of no more use: the app forgets its state. `Replaced` when this device was out
-    /// already (replaced, or its account deleted).
-    pub fn delete_account(&mut self) -> Result<()> {
-        let response = self.signed("DELETE", api::ACCOUNT, &[])?;
-        match response.status {
-            status::NO_CONTENT => Ok(()),
-            _ => Err(refused(&response)),
-        }
-    }
-
-    /// Claims a username, kept as written ("Chris": found as "chris" and "CHRIS" too), or gives it up with `None`.
-    pub fn set_username(&mut self, name: Option<&str>) -> Result<()> {
-        let canonical = match name {
-            Some(name) => {
-                let handle = Handle::parse(name)?;
-                if handle.kind != KIND_USERNAME {
-                    return Err(Error::Protocol("not a username"));
-                }
-                Some(String::from_utf8_lossy(handle.value.as_slice()).into_owned())
-            }
-            None => None,
-        };
-        let body = encode(&api::SetUsername { username: canonical.as_ref().map(|n| n.as_bytes().to_vec().into()) });
-        let response = self.signed("PUT", api::USERNAME, &body)?;
-        if response.status != status::NO_CONTENT {
-            return Err(refused(&response));
-        }
-        self.state.username = canonical;
-        self.persist()
-    }
 }
 
 #[cfg(test)]
@@ -4438,9 +2062,6 @@ mod handle_tests {
             (Content::Yo, true),
             (Content::Photo(media.clone()), true),
             (Content::Video { media, duration_ms: 100 }, true),
-            (Content::Text("test".into()), true),
-            (Content::Link("https://example.com".into()), true),
-            (Content::Location { lat_e7: 0, lon_e7: 0 }, true),
             (Content::Receipt, false),
             (Content::ProfileKey([4; 32]), false),
             (Content::Profile { name: "TEST".into() }, false),
@@ -4509,7 +2130,7 @@ mod handle_tests {
         let mut client = Client::registering(transport.clone(), "RETRY", None, None, None, Push::none()).unwrap();
         let user = hex(&[7; 16]);
         let key = [8; 32];
-        client.state.contacts.insert(user.clone(), Contact { account_key: key, ..Contact::unknown() });
+        client.state.contacts.insert(user.clone(), Contact { account_key: key, ..Contact::default() });
         // Each incoming Yo resolves its sender through this path; a failed name lookup must not suppress the next.
         for expected in 1..=2 {
             assert_eq!(client.sender(key).unwrap().unwrap().0, user);
@@ -4535,8 +2156,7 @@ mod handle_tests {
         assert_eq!(client.state.outbox.len(), OUTBOX_PER_RECIPIENT + 1);
         assert_eq!(client.state.outbox[1].plain, 3usize.to_be_bytes());
         assert_eq!(client.dropped(), 3);
-        let key = [7; 32];
-        let mut client = Client::restore(Arc::new(Offline), &client.export(&key), &key).unwrap();
+        let mut client = Client::restore(Arc::new(Offline), &client.saved()).unwrap();
         client.set_clock(Arc::new(|| 100 + OUTBOX_KEPT_MS));
         assert!(!client.prune_outbox(), "exactly 30 days is kept");
         client.enqueue("fresh", vec![3]);
@@ -4544,16 +2164,6 @@ mod handle_tests {
         client.prune_outbox();
         assert_eq!(client.state.outbox.len(), 1);
         assert_eq!(client.state.outbox[0].user, "fresh");
-
-        // A pre-upgrade state has no enqueue timestamps. Start its clock once and persist it.
-        client.state.outbox[0].queued_at = 0;
-        client.prune_outbox();
-        assert_eq!(client.state.outbox[0].queued_at, 101 + OUTBOX_KEPT_MS);
-        let blob = client.export(&key);
-        let mut restored = Client::restore(Arc::new(Offline), &blob, &key).unwrap();
-        restored.set_clock(Arc::new(|| 102 + 2 * OUTBOX_KEPT_MS));
-        restored.prune_outbox();
-        assert!(restored.state.outbox.is_empty());
     }
 
     #[test]
@@ -4585,7 +2195,7 @@ mod handle_tests {
     /// A contact renamed again and again is remembered by its newest few names, the latest last, not by every one.
     #[test]
     fn a_contact_keeps_only_its_newest_names() {
-        let mut contact = Contact::unknown();
+        let mut contact = Contact::default();
         for i in 0..20 {
             note_handle(&mut contact, format!("NAME{i}"));
         }
@@ -4597,7 +2207,7 @@ mod handle_tests {
     /// Keys are ordered by their generation, never by a message's time (spec 4.10).
     #[test]
     fn a_carried_key_replaces_only_an_older_one() {
-        let mut contact = Contact { profile_key: Some([2; 32]), key_gen: 2, ..Contact::unknown() };
+        let mut contact = Contact { profile_key: Some([2; 32]), key_gen: 2, ..Contact::default() };
         assert!(!carried_key_taken(&contact, &[1; 32], 1), "a Yo sent again (4.6), with the key before");
         assert!(carried_key_taken(&contact, &[3; 32], 3), "the next key");
         assert!(carried_key_taken(&contact, &[2; 32], 2), "the same");
@@ -4606,7 +2216,7 @@ mod handle_tests {
         contact.profile_key = None;
         assert!(!carried_key_taken(&contact, &[1; 32], 1), "forgotten (a 403): still not an older one");
         assert!(carried_key_taken(&contact, &[4; 32], 2), "a key of its generation or later");
-        let unknown = Contact { profile_key: None, ..Contact::unknown() };
+        let unknown = Contact { profile_key: None, ..Contact::default() };
         assert!(carried_key_taken(&unknown, &[5; 32], 1));
     }
 }

@@ -1,11 +1,7 @@
-//! Sealed sender (spec 6.1), libsignal's: every envelope is a sealed sender v1 message to the recipient account's
-//! identity key (the account key, which all its devices hold), carrying the sender's certificate from
-//! the hub and the payload (who sends, a session message per device), padded inside so the whole message is exactly
-//! one bucket. The hub sees a bucket and an inbox; the recipient checks the certificate against the trust roots it
-//! pins, at the time the hub took the envelope.
-//!
-//! Without a certificate the hub would give (it answered, but none: spec 4.10) an envelope goes identified: the padded
-//! payload as it is, signed by the sending device, as Signal falls back to an identified send.
+//! Sealed sender (spec 6.1), libsignal's: every envelope is a sealed sender v1 message to the recipient's account
+//! key, with the sender's certificate from the hub and the payload, padded to exactly one bucket. The recipient checks
+//! the certificate against its pinned trust roots at the time the hub took the envelope.
+//! Without a certificate an envelope goes identified: the padded payload, signed by the sending device, as Signal's.
 
 use crate::error::{Error, Result};
 use crate::identity::Key;
@@ -57,8 +53,7 @@ pub fn roots(keys: &[Key]) -> Vec<PublicKey> {
     keys.iter().filter_map(|k| PublicKey::from_djb_public_key_bytes(k).ok()).collect()
 }
 
-/// Seals `payload` from the holder of `own` (whose certificate `certificate` is) to the account whose identity is
-/// `recipient`: an envelope of exactly one bucket, fresh each time.
+/// Seals `payload` from the holder of `own` to the account `recipient`: an envelope of exactly one bucket.
 pub fn seal(
     certificate: &SenderCertificate,
     own: &IdentityKeyPair,
@@ -101,16 +96,15 @@ pub fn seal(
     Err(Error::Protocol("too large"))
 }
 
-/// An envelope as its recipient opened it: the payload, and who the certificate says sent it (`None`: identified,
-/// no certificate, the session alone says who).
+/// An opened envelope: the payload and who the certificate names (`None`: identified, the session says who).
 #[derive(Debug)]
 pub struct Opened {
     pub sender: Option<(UserId, u8, IdentityKey)>,
     pub payload: Vec<u8>,
 }
 
-/// Opens an envelope sealed to the identity `own`, its certificate checked against `roots` at `received_ms` (when the
-/// hub took it, as Signal checks at the server's timestamp: a message that waited is still good).
+/// Opens an envelope sealed to `own`, the certificate checked against `roots` at `received_ms`, when the hub took
+/// it, as Signal checks at the server's timestamp.
 pub fn open(own: &IdentityKeyPair, sealed: &[u8], roots: &[PublicKey], received_ms: u64) -> Result<Opened> {
     if !BUCKETS.contains(&sealed.len()) {
         return Err(Error::Protocol("not a bucket"));
@@ -151,8 +145,7 @@ fn check(certificate: &SenderCertificate, roots: &[PublicKey], at_ms: u64) -> Re
     Ok((user, u8::try_from(device).map_err(|_| Error::Protocol("device"))?))
 }
 
-/// A certificate the hub gave this device: from one of `roots`, naming this user, device and identity. Its time the
-/// hub's (a phone's clock may be off): its expiry, returned.
+/// Checks a certificate the hub gave this device: from `roots`, naming this user, device and identity; its expiry.
 pub fn check_own(bytes: &[u8], roots: &[PublicKey], user: &UserId, device: u8, identity: &IdentityKey) -> Result<u64> {
     let certificate = SenderCertificate::deserialize(bytes).map_err(|_| Error::Protocol("sender certificate"))?;
     let expires = certificate.expiration().map_err(signal::signal)?.epoch_millis();
@@ -164,9 +157,8 @@ pub fn check_own(bytes: &[u8], roots: &[PublicKey], user: &UserId, device: u8, i
     Ok(expires)
 }
 
-/// For tests: an envelope opened, and sealed again by the holder of `account_secret` with `certificate` (a forgery
-/// as only the sender itself could make it).
-#[cfg(feature = "testing")]
+/// For tests: an envelope opened and sealed again by `account_secret` with `certificate` (an insider's forgery).
+#[cfg(feature = "test-support")]
 pub mod testing {
     use super::*;
 
@@ -176,7 +168,7 @@ pub mod testing {
         if sealed.first() == Some(&yo_wire::VERSION) {
             return Ok((envelope::unpad(sealed, &BUCKETS)?.to_vec(), Vec::new()));
         }
-        let own = signal::identity_pair(account_secret)?;
+        let own = crate::identity::account_pair(account_secret)?;
         let store = Between { own, them: *own.identity_key() };
         let usmc = signal::now(sealed_sender_decrypt_to_usmc(sealed, &store)).map_err(signal::signal)?;
         let contents = usmc.contents().map_err(signal::signal)?;
@@ -187,7 +179,12 @@ pub mod testing {
     /// `payload` sealed by the account with `account_secret` with `certificate`, to the account `recipient`.
     pub fn seal(account_secret: &[u8; 32], certificate: &[u8], recipient: &Key, payload: &[u8]) -> Result<Vec<u8>> {
         let certificate = SenderCertificate::deserialize(certificate).map_err(signal::signal)?;
-        super::seal(&certificate, &signal::identity_pair(account_secret)?, &signal::identity_of(recipient)?, payload)
+        super::seal(
+            &certificate,
+            &crate::identity::account_pair(account_secret)?,
+            &signal::identity_of(recipient)?,
+            payload,
+        )
     }
 }
 
@@ -201,7 +198,8 @@ mod tests {
         let root = KeyPair::generate(&mut rand::rng());
         let server = KeyPair::generate(&mut rand::rng());
         let signer = ServerCertificate::new(1, server.public_key, &root.private_key, &mut rand::rng()).unwrap();
-        let (me, them) = (signal::identity_pair(&[1; 32]).unwrap(), signal::identity_pair(&[2; 32]).unwrap());
+        let (me, them) =
+            (crate::identity::account_pair(&[1; 32]).unwrap(), crate::identity::account_pair(&[2; 32]).unwrap());
         let user = Aci::from_uuid_bytes([7; 16]).service_id_string();
         let device = DeviceId::new(3).unwrap();
         let expires = Timestamp::from_epoch_millis(10_000);

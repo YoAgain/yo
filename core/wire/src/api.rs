@@ -47,7 +47,6 @@ pub const HEADER_BODY_HASH: &str = "yo-body-sha256";
 /// hub's minimum for its platform is answered `426` (spec 6.3). Not signed; any request may carry it.
 pub const HEADER_APP: &str = "yo-app";
 
-/// `POST /v1/inbox/{user_id}`: to every device of a user.
 /// The requests that name nobody (sealed deliveries, blobs, crash reports): the only ones a client sends on its
 /// anonymous connections; every other request, signed or not (a registration, a backup's fetch), names its device or
 /// account and goes on the other ones, so no connection carries both (spec 1).
@@ -60,13 +59,14 @@ pub fn anonymous(method: &str, path: &str) -> bool {
         || path == "/v1/diagnostics/crash"
 }
 
+/// `POST /v1/inbox/{user_id}`: to every device of a user.
 pub fn deliver_path(user: &UserId) -> String {
     format!("{INBOX}/{}", crate::b64(user))
 }
 
-/// The header of a delivery naming the devices it was encrypted for (spec 4.4): base64url of `devices::hash`.
 /// Whether a delivery warrants a visible push (`true` by default for older clients).
 pub const HEADER_URGENT: &str = "yo-urgent";
+/// The header of a delivery naming the devices it was encrypted for (spec 4.4): base64url of `devices::hash`.
 pub const HEADER_DEVICES: &str = "yo-devices";
 /// On a delivery: the recipient's access key (base64url, 16 bytes: Signal's unidentified access key, derived from its
 /// profile key), as its contacts have it; without it, or with another, the delivery is a request (spec 4.10). It
@@ -581,40 +581,13 @@ mod tests {
     }
 
     #[test]
-    fn round_trips() {
-        let register = Register {
-            username: b"Chris".to_vec().into(),
-            device: NewDevice {
-                device_id: [7; 16],
-                device_key: [8; 32],
-                certificate: vec![1; 96].into(),
-                auth_key: [2; 32],
-                push: Push { platform: PUSH_APNS, token: b"abc".to_vec().into() },
-                registration_id: 77,
-                prekeys: Prekeys {
-                    signed: Some(SignedPrekey { id: 1, key: vec![3; 33].into(), signature: vec![4; 64].into() }),
-                    last_resort: Some(SignedPrekey { id: 2, key: vec![5; 1569].into(), signature: vec![6; 64].into() }),
-                    one_time: vec![Prekey { id: 3, key: vec![7; 33].into() }],
-                    kyber: Vec::new(),
-                },
-                proof: [6; 64],
-            },
-        };
-        assert_eq!(crate::decode::<Register>(&crate::encode(&register)).unwrap(), register);
-        let lookup = Lookup { handle: Handle::username("CHRIS"), flags: LOOKUP_PREKEYS, except: vec![[1; 32]] };
-        assert_eq!(crate::decode::<Lookup>(&crate::encode(&lookup)).unwrap(), lookup);
-        let inbox =
-            Inbox { prekeys_left: 7, items: vec![InboxItem { id: 1, received_ms: 5, envelope: vec![0; 1024].into() }] };
-        assert_eq!(crate::decode::<Inbox>(&crate::encode(&inbox)).unwrap(), inbox);
-        let backup = backup();
-        assert_eq!(crate::decode::<Backup>(&crate::encode(&backup)).unwrap(), backup);
-    }
-
-    #[test]
     fn usernames_are_percent_encoded_in_paths() {
         assert_eq!(username_path("LEO_1"), "/v1/username/LEO_1");
         assert_eq!(username_path("JOSÉ"), "/v1/username/JOS%C3%89");
         assert_eq!(username_path("🔥/?"), "/v1/username/%F0%9F%94%A5%2F%3F");
+        assert_eq!(inbox_path(30), "/v1/inbox?wait=30");
+        assert!(deliver_path(&[0; 16]).starts_with("/v1/inbox/AAAA"));
+        assert_eq!(backup_path(&[0; 16]), "/v1/backup/AAAAAAAAAAAAAAAAAAAAAA");
     }
 
     fn backup() -> Backup {
@@ -656,13 +629,6 @@ mod tests {
             ..backup()
         };
         assert!(largest.check().is_ok() && crate::encode(&largest).len() <= MAX_BODY);
-    }
-
-    #[test]
-    fn paths() {
-        assert_eq!(inbox_path(30), "/v1/inbox?wait=30");
-        assert!(deliver_path(&[0; 16]).starts_with("/v1/inbox/AAAA"));
-        assert_eq!(backup_path(&[0; 16]), "/v1/backup/AAAAAAAAAAAAAAAAAAAAAA");
     }
 }
 

@@ -1,13 +1,13 @@
 //! Sealed sender (spec 6.1): what the hub sees of a chat is envelopes to inboxes, nothing that ties them together.
 
-use yo_core::{Client, Content, Event, Push};
+use yo_core::{Client, Event, Push};
 use yo_tests::{random_u64, Http, TestHub};
 
 fn texts(c: &mut Client) -> Vec<String> {
     (0..3)
         .flat_map(|_| c.sync(0).unwrap())
         .filter_map(|e| match e {
-            Event::Message { content: Content::Text(t), .. } => Some(t),
+            Event::Message { content, .. } => yo_tests::tag_of(&content),
             _ => None,
         })
         .collect()
@@ -24,9 +24,9 @@ fn delivered(http: &Http, to: &str) -> Vec<Vec<u8>> {
 /// and sender certificate (the work after a sync): from here on every delivery is sealed. How many envelopes each
 /// inbox got by then, to look only at what came after.
 fn contacts(a: &mut Client, ha: &Http, b: &mut Client, hb: &Http) -> (usize, usize) {
-    a.send(b.user_id(), Content::Text("hi".into())).unwrap();
+    a.send(b.user_id(), yo_tests::tagged("hi".into())).unwrap();
     assert_eq!(texts(b), ["hi"]);
-    b.send(a.user_id(), Content::Text("hi".into())).unwrap();
+    b.send(a.user_id(), yo_tests::tagged("hi".into())).unwrap();
     assert_eq!(texts(a), ["hi"]);
     for _ in 0..2 {
         a.after_sync().unwrap();
@@ -48,9 +48,9 @@ fn the_hub_cannot_tell_which_envelopes_belong_to_one_chat() {
     let mut b = Client::register_username(hb.clone(), &format!("Ben{n}"), None, None, Push::none()).unwrap();
     let (skip_b, skip_a) = contacts(&mut a, &ha, &mut b, &hb);
     for i in 0..3 {
-        a.send(b.user_id(), Content::Text(format!("a{i}"))).unwrap();
+        a.send(b.user_id(), yo_tests::tagged(format!("a{i}"))).unwrap();
         assert_eq!(texts(&mut b), [format!("a{i}")]);
-        b.send(a.user_id(), Content::Text(format!("b{i}"))).unwrap();
+        b.send(a.user_id(), yo_tests::tagged(format!("b{i}"))).unwrap();
         assert_eq!(texts(&mut a), [format!("b{i}")]);
     }
     let (to_b, to_a) = (delivered(&ha, b.user_id()).split_off(skip_b), delivered(&hb, a.user_id()).split_off(skip_a));
@@ -86,9 +86,9 @@ fn an_envelope_not_sealed_to_the_account_is_dropped() {
     let mut a = Client::register_username(ha.clone(), &format!("Amy{n}"), None, None, Push::none()).unwrap();
     let mut b = Client::register_username(hb.clone(), &format!("Bob{n}"), None, None, Push::none()).unwrap();
     contacts(&mut a, &ha, &mut b, &hb);
-    b.send(a.user_id(), Content::Text("1".into())).unwrap();
+    b.send(a.user_id(), yo_tests::tagged("1".into())).unwrap();
     assert_eq!(texts(&mut a), ["1"]);
-    b.send(a.user_id(), Content::Text("2".into())).unwrap();
+    b.send(a.user_id(), yo_tests::tagged("2".into())).unwrap();
     let last = delivered(&hb, a.user_id()).pop().unwrap();
     let (payload, certificate) = yo_core::sealed::testing::open(&a.account_secret(), &last).unwrap();
     let stranger = yo_tests::account_key(&[9; 32]);
@@ -108,7 +108,7 @@ fn an_envelope_not_sealed_to_the_account_is_dropped() {
     );
     assert_eq!(texts(&mut a), ["2"], "the real one still comes");
     assert_eq!(a.dropped(), dropped + 1, "{:?}", a.drop_reasons());
-    b.send(a.user_id(), Content::Text("3".into())).unwrap();
+    b.send(a.user_id(), yo_tests::tagged("3".into())).unwrap();
     assert_eq!(texts(&mut a), ["3"]);
 }
 
@@ -129,9 +129,9 @@ fn pair(hub: &TestHub, tag: &str) -> (Client, Client, std::sync::Arc<Http>, std:
     let (ha, hb) = (Http::new(hub.url()), Http::new(hub.url()));
     let mut a = Client::register_username(ha.clone(), &format!("A{tag}{n}"), None, None, Push::none()).unwrap();
     let mut b = Client::register_username(hb.clone(), &format!("B{tag}{n}"), None, None, Push::none()).unwrap();
-    a.send(b.user_id(), Content::Text("hi".into())).unwrap();
+    a.send(b.user_id(), yo_tests::tagged("hi".into())).unwrap();
     assert_eq!(texts(&mut b), ["hi"]);
-    b.send(a.user_id(), Content::Text("hello".into())).unwrap();
+    b.send(a.user_id(), yo_tests::tagged("hello".into())).unwrap();
     assert_eq!(texts(&mut a), ["hello"]);
     (a, b, ha, hb)
 }
@@ -145,12 +145,12 @@ fn account_key(c: &Client) -> [u8; 32] {
 fn refused_with(a: &mut Client, b: &mut Client, certificate: Vec<u8>) {
     let dropped = b.dropped();
     a.set_sender_certificate_for_tests(Some(certificate));
-    a.send(b.user_id(), Content::Text("forged".into())).unwrap();
+    a.send(b.user_id(), yo_tests::tagged("forged".into())).unwrap();
     assert!(texts(b).is_empty());
     assert_eq!(b.dropped(), dropped + 1, "{:?}", b.drop_reasons());
     a.set_sender_certificate_for_tests(None);
     a.maintenance().unwrap();
-    a.send(b.user_id(), Content::Text("real".into())).unwrap();
+    a.send(b.user_id(), yo_tests::tagged("real".into())).unwrap();
     let got = texts(b);
     assert!(got.contains(&"real".to_owned()), "{got:?}");
 }
@@ -207,7 +207,7 @@ fn the_certificate_is_refreshed_before_it_expires() {
     a.set_clock(clock((22 * HOUR) as i64));
     a.maintenance().unwrap();
     assert_ne!(a.sender_certificate_for_tests().unwrap(), first, "22 h: a new one");
-    a.send(b.user_id(), Content::Text("sealed".into())).unwrap();
+    a.send(b.user_id(), yo_tests::tagged("sealed".into())).unwrap();
     assert_eq!(texts(&mut b), ["sealed"]);
     assert_eq!(delivered(&ha, b.user_id()).last().unwrap()[0], yo_wire::envelope::SEALED, "the Yo after the refresh");
 }
@@ -229,8 +229,8 @@ fn back_after_a_month_offline() {
     hub.hub.shift_clock(-20 * DAY as i64);
     shift(&mut a, -20 * DAY as i64);
     let before = delivered(&ha, b.user_id()).len();
-    a.send(b.user_id(), Content::Text("one".into())).unwrap();
-    a.send(b.user_id(), Content::Text("two".into())).unwrap();
+    a.send(b.user_id(), yo_tests::tagged("one".into())).unwrap();
+    a.send(b.user_id(), yo_tests::tagged("two".into())).unwrap();
     let firsts = |sent: &[Vec<u8>]| sent.iter().map(|e| e[0]).collect::<Vec<_>>();
     let to_b = firsts(&delivered(&ha, b.user_id())[before..]);
     assert_eq!((to_b[0], *to_b.last().unwrap()), (yo_wire::VERSION, yo_wire::envelope::SEALED), "{to_b:?}");
@@ -239,8 +239,8 @@ fn back_after_a_month_offline() {
     shift(&mut b, 0);
     let before = delivered(&hb, a.user_id()).len();
     assert_eq!(texts(&mut b), ["one", "two"]);
-    b.send(a.user_id(), Content::Text("back".into())).unwrap();
-    b.send(a.user_id(), Content::Text("again".into())).unwrap();
+    b.send(a.user_id(), yo_tests::tagged("back".into())).unwrap();
+    b.send(a.user_id(), yo_tests::tagged("again".into())).unwrap();
     shift(&mut a, 0);
     assert_eq!(texts(&mut a), ["back", "again"]);
     let to_a = firsts(&delivered(&hb, a.user_id())[before..]);
@@ -259,9 +259,9 @@ fn clocks_hours_off_still_seal() {
     a.maintenance().unwrap();
     b.maintenance().unwrap();
     let (sent_a, sent_b) = (delivered(&ha, b.user_id()).len(), delivered(&hb, a.user_id()).len());
-    a.send(b.user_id(), Content::Text("ahead".into())).unwrap();
+    a.send(b.user_id(), yo_tests::tagged("ahead".into())).unwrap();
     assert_eq!(texts(&mut b), ["ahead"]);
-    b.send(a.user_id(), Content::Text("behind".into())).unwrap();
+    b.send(a.user_id(), yo_tests::tagged("behind".into())).unwrap();
     assert_eq!(texts(&mut a), ["behind"]);
     assert!(delivered(&ha, b.user_id())[sent_a..].iter().all(|e| e[0] == yo_wire::envelope::SEALED));
     assert!(delivered(&hb, a.user_id())[sent_b..].iter().all(|e| e[0] == yo_wire::envelope::SEALED));
@@ -275,9 +275,11 @@ fn without_a_certificate_a_yo_goes_identified() {
     let (mut a, mut b, ha, _) = pair(&hub, "Idf");
     a.set_sender_certificate_for_tests(None);
     ha.fault(yo_wire::api::CERTIFICATE, yo_tests::Fault::Answer(500));
-    a.send(b.user_id(), Content::Text("identified".into())).unwrap();
+    a.send(b.user_id(), yo_tests::tagged("identified".into())).unwrap();
     let events: Vec<Event> = (0..3).flat_map(|_| b.sync(0).unwrap()).collect();
-    assert!(events.iter().any(|e| matches!(e, Event::Message { content: Content::Text(t), .. } if t == "identified")));
+    assert!(events.iter().any(
+        |e| matches!(e, Event::Message { content, .. } if yo_tests::tag_of(content).as_deref() == Some("identified"))
+    ));
     assert!(!events.iter().any(|e| matches!(e, Event::NewChat { .. })), "a contact's, no request");
     assert!(b.contacts().iter().any(|c| c.user == a.user_id() && c.accepted));
     let to_b = delivered(&ha, b.user_id());
@@ -286,7 +288,7 @@ fn without_a_certificate_a_yo_goes_identified() {
     // A minute on, the hub gives one: the next Yo after it goes sealed.
     a.set_clock(clock(61_000));
     a.maintenance().unwrap();
-    a.send(b.user_id(), Content::Text("sealed".into())).unwrap();
+    a.send(b.user_id(), yo_tests::tagged("sealed".into())).unwrap();
     assert_eq!(texts(&mut b), ["sealed"]);
     assert_eq!(delivered(&ha, b.user_id()).last().unwrap()[0], yo_wire::envelope::SEALED);
 }
@@ -298,11 +300,11 @@ fn a_clock_set_back_is_noticed() {
     let hub = TestHub::start();
     let (mut a, mut b, ha, _) = pair(&hub, "Back");
     a.set_clock(clock((12 * HOUR) as i64));
-    a.send(b.user_id(), Content::Text("noon".into())).unwrap();
+    a.send(b.user_id(), yo_tests::tagged("noon".into())).unwrap();
     a.set_clock(clock((6 * HOUR) as i64));
     let before = delivered(&ha, b.user_id()).len();
-    a.send(b.user_id(), Content::Text("morning".into())).unwrap();
-    a.send(b.user_id(), Content::Text("later".into())).unwrap();
+    a.send(b.user_id(), yo_tests::tagged("morning".into())).unwrap();
+    a.send(b.user_id(), yo_tests::tagged("later".into())).unwrap();
     assert_eq!(texts(&mut b), ["noon", "morning", "later"]);
     let firsts: Vec<u8> = delivered(&ha, b.user_id())[before..].iter().map(|e| e[0]).collect();
     assert_eq!(firsts, [yo_wire::VERSION, yo_wire::envelope::SEALED]);

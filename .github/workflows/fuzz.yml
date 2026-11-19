@@ -27,13 +27,14 @@ jobs:
           path: |
             ~/.cargo/registry
             fuzz/target
-          key: fuzz-${{ matrix.target }}-${{ hashFiles('Cargo.lock', 'fuzz/Cargo.toml') }}
+          key: fuzz-${{ matrix.target }}-${{ hashFiles('Cargo.lock', 'fuzz/Cargo.toml', 'fuzz/Cargo.lock') }}
       - name: Fuzz (1 minute on push, 15 nightly)
         working-directory: fuzz
         run: |
           mkdir -p corpus/${{ matrix.target }}
           cp seeds/${{ matrix.target }}/* corpus/${{ matrix.target }}/ 2>/dev/null || true
           seconds=60; [ "${{ github.event_name }}" = schedule ] && seconds=900
+          cargo +nightly-2026-10-20 metadata --locked --format-version 1 >/dev/null  # fuzz/Cargo.lock is current
           cargo +nightly-2026-10-20 fuzz run ${{ matrix.target }} -- -max_total_time=$seconds
       - if: failure()
         uses: actions/upload-artifact@v4

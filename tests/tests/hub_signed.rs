@@ -95,3 +95,59 @@ fn an_old_answer_played_back_is_not_taken() {
     assert!(matches!(a.send_yo(c.user_id()), Err(Error::Protocol(_))));
     assert_eq!(a.contacts().len(), 1);
 }
+
+/// A hub that names a second device first: in each lookup, and once as a delivery's `409`.
+struct TwoDevices {
+    http: Arc<Http>,
+    account_key: Mutex<Option<[u8; 32]>>,
+    conflict: std::sync::atomic::AtomicBool,
+}
+
+impl Transport for TwoDevices {
+    fn request(&self, method: &str, path: &str, headers: &[(String, String)], body: &[u8]) -> Result<Response, String> {
+        use yo_wire::api;
+        let Some(account_key) = *self.account_key.lock().unwrap() else {
+            return self.http.request(method, path, headers, body);
+        };
+        let other = api::Device { key: [9; 32], id: 2 };
+        let delivery = method != "GET" && path.starts_with(api::INBOX) && path != api::INBOX_ACK;
+        if delivery && !self.conflict.swap(true, std::sync::atomic::Ordering::Relaxed) {
+            // The first delivery is not taken: a `409` naming two devices.
+            let devices = api::Devices { account_key, devices: vec![other, api::Device { key: [8; 32], id: 1 }] };
+            return Ok(Response { status: 409, body: yo_wire::encode(&devices) });
+        }
+        let mut response = self.http.request(method, path, headers, body)?;
+        if path == api::LOOKUP && response.status == 200 {
+            let mut named: api::LookupNamed = yo_wire::decode(&response.body).map_err(|e| e.to_string())?;
+            named.found.devices.insert(0, other);
+            response.body = yo_wire::encode(&named);
+        }
+        Ok(response)
+    }
+}
+
+/// Spec 4.4: one device per account. A roster naming more (a hub's mistake, or its own device put first) is refused
+/// before anything is pinned or changed: the session with the known device goes on.
+#[test]
+fn a_roster_of_two_devices_changes_nothing() {
+    let hub = TestHub::start();
+    let transport = Arc::new(TwoDevices {
+        http: Http::new(hub.url()),
+        account_key: Mutex::new(None),
+        conflict: Default::default(),
+    });
+    let name = format!("Two{}", random_u64() % 1_000_000);
+    let mut a = Client::register_username(transport.clone(), &name, None, None, Push::none()).unwrap();
+    let mut b = client(&hub, "SigB", Tamper::None, None);
+    a.send_yo(b.user_id()).unwrap();
+    assert_eq!(yos(&b.sync(0).unwrap()), 1);
+    let key = yo_core::state::unhex(&a.account_key_of(b.user_id()).unwrap()).unwrap();
+    *transport.account_key.lock().unwrap() = Some(key.try_into().unwrap());
+    // The lookup by name is refused; the `409` leaves the Yo waiting.
+    assert!(matches!(a.send_yo(b.username().unwrap()), Err(Error::Protocol(_))));
+    let _ = a.send_yo(b.user_id());
+    assert_eq!(a.waiting(), 1);
+    a.maintenance().unwrap();
+    assert_eq!(a.waiting(), 0);
+    assert_eq!(yos(&b.sync(0).unwrap()), 1, "{:?}", a.drop_reasons());
+}

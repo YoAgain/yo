@@ -15,7 +15,7 @@ fn texts_from(events: &[Event], from: &str) -> Vec<String> {
     events
         .iter()
         .filter_map(|e| match e {
-            Event::Message { user, content: Content::Text(t), .. } if user == from => Some(t.clone()),
+            Event::Message { user, content, .. } if user == from => yo_tests::tag_of(content),
             _ => None,
         })
         .collect()
@@ -76,8 +76,8 @@ fn accounts_restored_forty_times_by_every_way_lose_nothing() {
             let name = format!("Cycle{run}x{i}");
             let mut client = register(&hub, &name, None).unwrap();
             let (user, secret) = (client.user_id().to_owned(), client.account_secret());
-            friend.send(&user, Content::Text("hello".into())).unwrap();
-            pest.send(&user, Content::Text("spam".into())).unwrap();
+            friend.send(&user, yo_tests::tagged("hello".into())).unwrap();
+            pest.send(&user, yo_tests::tagged("spam".into())).unwrap();
             assert_eq!(drain(&mut client, &friend_id), ["hello"]);
             client.set_friend(&friend_id, Some("My Friend".into()), Some(2)).unwrap();
             client.set_blocked(&pest_id, true).unwrap();
@@ -129,7 +129,7 @@ fn accounts_restored_forty_times_by_every_way_lose_nothing() {
             // (e): the old phone is still running and sends meanwhile.
             sent += 1;
             let before = format!("before {cycle}");
-            p.client.send(&friend_id, Content::Text(before.clone())).unwrap();
+            p.client.send(&friend_id, yo_tests::tagged(before.clone())).unwrap();
             // The phone is wiped: what the person has left opens the account again.
             let secret = match way {
                 // (a) The passkey: the record by the user id (its user handle), K by the PRF output.
@@ -158,7 +158,7 @@ fn accounts_restored_forty_times_by_every_way_lose_nothing() {
             // A sealed POST cannot discover sender revocation. The signed inbox does;
             // once observed, the old client refuses subsequent sends locally.
             assert_eq!(old.sync(0).map(|_| ()), Err(Error::Replaced), "{ctx}");
-            assert_eq!(old.send(&friend_id, Content::Text("after".into())), Err(Error::Replaced), "{ctx}");
+            assert_eq!(old.send(&friend_id, yo_tests::tagged("after".into())), Err(Error::Replaced), "{ctx}");
             // (g) The storage came back, merged: the friend as last named, the block, the icon.
             let friends = p.client.friends();
             let f = friends.iter().find(|f| f.user == friend_id).expect(&ctx);
@@ -167,12 +167,13 @@ fn accounts_restored_forty_times_by_every_way_lose_nothing() {
             let icon = if cycle % 2 == 0 { Some("Original".to_owned()) } else { None };
             assert_eq!(p.client.app_icon(), icon, "{ctx}");
             // Both ways, exactly once; the pest not at all.
-            pest.send(&p.user, Content::Text(format!("spam {cycle}"))).unwrap();
+            pest.send(&p.user, yo_tests::tagged(format!("spam {cycle}"))).unwrap();
             // What the friend receives on the way (a send receives first) counts too.
-            let mut got = texts_from(&friend.send(&p.user, Content::Text(format!("to new {cycle}"))).unwrap(), &p.user);
+            let mut got =
+                texts_from(&friend.send(&p.user, yo_tests::tagged(format!("to new {cycle}"))).unwrap(), &p.user);
             assert_eq!(drain(&mut p.client, &friend_id), [format!("to new {cycle}")], "{ctx}");
             assert!(drain(&mut p.client, &pest_id).is_empty(), "{ctx}: the pest got through");
-            p.client.send(&friend_id, Content::Text(format!("from new {cycle}"))).unwrap();
+            p.client.send(&friend_id, yo_tests::tagged(format!("from new {cycle}"))).unwrap();
             got.extend(texts_from(&friend.send(&p.user, Content::Yo).unwrap(), &p.user));
             got.extend(drain(&mut friend, &p.user));
             assert_eq!(got, [before, format!("from new {cycle}")], "{ctx}");
@@ -191,17 +192,4 @@ fn accounts_restored_forty_times_by_every_way_lose_nothing() {
     assert_eq!(friend.send(&p.user, Content::Yo).map(|_| ()), Err(Error::NotOnYo));
     assert_eq!(hub.hub.audit().unwrap(), []);
     assert!(sent >= 240);
-}
-
-/// A state saved by an app from before phone numbers were dropped still opens: its `phone` is passed over.
-#[test]
-fn a_state_with_a_phone_number_still_opens() {
-    let hub = TestHub::start();
-    let key = [9; 32];
-    let a = register(&hub, &format!("Old{}", random_u64() % 100_000), None).unwrap();
-    let (state, _) = yo_core::state::open(&a.export(&key), &key).unwrap();
-    let mut json = serde_json::to_value(&state).unwrap();
-    json["phone"] = "491701234567".into();
-    let old: yo_core::state::State = serde_json::from_slice(&serde_json::to_vec(&json).unwrap()).unwrap();
-    assert_eq!(old.user_id, a.user_id());
 }

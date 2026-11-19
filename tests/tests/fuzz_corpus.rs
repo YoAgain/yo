@@ -1,5 +1,5 @@
 //! Writes the fuzzers' seeds: a device's state before anyone wrote to it, and the payloads of what arrives (a
-//! session's first message, a profile, Yos, a text), framed as the core_receive target reads them. Run when the
+//! session's first message, a profile, Yos), framed as the core_receive target reads them. Run when the
 //! formats change:
 //!   dev/cargo test -p yo-tests --test fuzz_corpus -- --ignored
 
@@ -12,13 +12,14 @@ use yo_wire::api;
 struct Saved(Mutex<Vec<u8>>);
 
 impl Store for Saved {
-    fn save(&self, blob: Vec<u8>) -> Result<(), String> {
+    fn save_state(&self, state: &yo_core::state::State, records: yo_core::signal::Entries) -> Result<(), String> {
+        let blob = yo_tests::saved_bytes(state, records);
         *self.0.lock().unwrap() = blob;
         Ok(())
     }
 }
 
-/// The key the fuzz target opens the state with.
+/// The state key (the store here keeps the state as it is).
 const KEY: [u8; 32] = [0x42; 32];
 
 fn write(dir: &str, name: &str, bytes: &[u8]) {
@@ -69,7 +70,7 @@ fn write_fuzz_corpus() {
     // A's first message (with its profile), then more.
     a.send_yo(&pb).unwrap();
     a.send_yo(&pb).unwrap();
-    a.send(&pb, yo_core::Content::Text("hello".into())).unwrap();
+    a.send(&pb, yo_tests::tagged("hello".into())).unwrap();
     // Exercise authenticated group changes and group/direct media through the same receive entry point.
     let media = yo_core::media::seal(b"fuzz media", 1, 1).unwrap().0;
     a.send(&pb, yo_core::Content::Photo(media.clone())).unwrap();
@@ -110,7 +111,7 @@ fn write_fuzz_corpus() {
         write("corpus/wire_api", &format!("request-{i}"), body);
         write("corpus/hub_routes", &format!("request-{i}"), &route_input(path, body));
     }
-    for content in [yo_core::Content::Yo, yo_core::Content::Text("hi".into())] {
+    for content in [yo_core::Content::Yo, yo_tests::tagged("hi".into())] {
         let bytes = yo_wire::content::Message { sent_at_ms: 1, group: None, content }.encode().unwrap();
         write("corpus/wire_content", &format!("content-{}", bytes.len()), &bytes);
     }

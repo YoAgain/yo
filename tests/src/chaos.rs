@@ -215,7 +215,8 @@ impl Transport for Proc {
 }
 
 impl Store for Proc {
-    fn save(&self, blob: Vec<u8>) -> Result<(), String> {
+    fn save_state(&self, state: &yo_core::state::State, records: yo_core::signal::Entries) -> Result<(), String> {
+        let blob = yo_tests::saved_bytes(state, records);
         if !self.crashed.load(Relaxed) {
             *self.saved.lock().unwrap_or_else(PoisonError::into_inner) = blob;
         }
@@ -431,7 +432,9 @@ fn take_events(w: &World, a: &mut Acct, events: Vec<Event>, rng: &mut Rng) {
     let mut answer = Vec::new();
     for event in events {
         let (from, tag, photo) = match event {
-            Event::Message { user, content: Content::Text(tag), .. } => (user, tag, None),
+            Event::Message { user, content, .. } if yo_tests::tag_of(&content).is_some() => {
+                (user, yo_tests::tag_of(&content).unwrap_or_default(), None)
+            }
             Event::Message { user, content: Content::Photo(m), .. } => {
                 let tag = w.ledger().media.get(&m.id).map(|(t, _)| t.clone()).unwrap_or_default();
                 (user, tag, Some(m))
@@ -573,13 +576,13 @@ fn send_text(w: &World, a: &mut Acct, to: &str, by_name: Option<&str>, _rng: &mu
         );
     }
     let target = by_name.unwrap_or(to).to_owned();
-    let result = a.client.as_mut().unwrap().send(&target, Content::Text(tag.clone()));
+    let result = a.client.as_mut().unwrap().send(&target, yo_tests::tagged(tag.clone()));
     w.trace(
         &a.user,
         format!(
             "send {tag} to {to} via {target}: {:?} pending {}",
             result.as_ref().map(|e| e.len()),
-            a.client.as_ref().map_or(0, |c| c.pending())
+            a.client.as_ref().map_or(0, |c| c.waiting())
         ),
     );
     w.trace(to, format!("({tag} sent to me by {})", a.user));
@@ -849,7 +852,7 @@ fn op_block(w: &World, a: &mut Acct, rng: &mut Rng) {
     }
     // Sending to someone one blocked is refused.
     if block {
-        match a.client.as_mut().unwrap().send(&who, Content::Text("never".into())) {
+        match a.client.as_mut().unwrap().send(&who, yo_tests::tagged("never".into())) {
             Err(Error::Blocked) => w.stats.count("send to blocked refused"),
             Err(Error::NotOnYo) => w.stats.count("send to a blocked contact: gone"),
             other => w.stats.violation(format!("send to a blocked contact: {:?}", other.map(|_| ()))),
@@ -863,7 +866,7 @@ fn op_misc(w: &World, a: &mut Acct, rng: &mut Rng) {
         0 => {
             // To oneself, by name and by id.
             let me = if rng.below(2) == 0 { a.name.clone() } else { a.user.clone() };
-            match client.send(&me, Content::Text("me".into())) {
+            match client.send(&me, yo_tests::tagged("me".into())) {
                 Err(Error::Protocol(_)) => w.stats.count("send to oneself refused"),
                 other => w.stats.violation(format!("send to oneself: {:?}", other.map(|_| ()))),
             }
@@ -878,7 +881,10 @@ fn op_misc(w: &World, a: &mut Acct, rng: &mut Rng) {
         }
         2 => {
             a.feedback += 1;
-            match client.send_feedback(&format!("chaos feedback {} from {}", a.feedback, a.idx), "chaos") {
+            match client
+                .feedback_begin(&format!("chaos feedback {} from {}", a.feedback, a.idx), "chaos")
+                .and_then(|r| r.send())
+            {
                 Ok(()) => w.stats.count("feedback"),
                 Err(Error::Refused(429)) => w.stats.count("feedback: 429"),
                 Err(error) => note_error(w, a, "feedback", &error),
@@ -933,7 +939,7 @@ fn restart(w: &World, a: &mut Acct, rng: &mut Rng) {
     harvest_drops(w, a.client.as_ref());
     let saved = a.proc_.saved();
     let proc_ = Proc::new(&w.net, &w.stats, w.args.faults, rng.next_u64());
-    match Client::restore(proc_.clone(), &saved, &STATE_KEY) {
+    match yo_tests::restore_bytes(proc_.clone(), &saved) {
         Ok(mut client) => {
             client.persist_to(proc_.clone(), STATE_KEY).unwrap();
             a.client = Some(client);
@@ -942,7 +948,7 @@ fn restart(w: &World, a: &mut Acct, rng: &mut Rng) {
         }
         Err(error) => w.stats.violation(format!("{}: the saved state does not open: {error}", a.name)),
     }
-    w.trace(&a.user, format!("restarted, pending {}", a.client.as_ref().map_or(0, |c| c.pending())));
+    w.trace(&a.user, format!("restarted, pending {}", a.client.as_ref().map_or(0, |c| c.waiting())));
 }
 
 /// A new phone with the same account key (restored from the backup): the old device answers 410 from then on.
@@ -1187,7 +1193,7 @@ fn quiesce(w: &World, all: &mut [Vec<Acct>]) {
                     a.client = None;
                     restart(w, a, &mut rng);
                 }
-                waiting += a.client.as_ref().map_or(0, |c| c.pending()) + a.uploads.len();
+                waiting += a.client.as_ref().map_or(0, |c| c.waiting()) + a.uploads.len();
                 deferred += a.client.as_ref().map_or(0, |c| c.deferred());
             }
         }
@@ -1416,15 +1422,15 @@ fn main() {
 fn check_ledger(w: &World, all: &[Vec<Acct>]) {
     for a in all.iter().flatten() {
         if let Some(c) = &a.client {
-            if c.pending() > 0 {
-                w.stats.violation(format!("{} still has {} envelopes in its outbox", a.name, c.pending()));
+            if c.waiting() > 0 {
+                w.stats.violation(format!("{} still has {} envelopes in its outbox", a.name, c.waiting()));
             }
             if c.deferred() > 0 {
                 w.stats.violation(format!("{} still has {} deferred inbox envelopes", a.name, c.deferred()));
             }
             harvest_drops(w, Some(c));
             // The saved state opens.
-            if Client::restore(a.proc_.clone(), &a.proc_.saved(), &STATE_KEY).is_err() {
+            if yo_tests::restore_bytes(a.proc_.clone(), &a.proc_.saved()).is_err() {
                 w.stats.violation(format!("{}: the saved state does not open", a.name));
             }
         }

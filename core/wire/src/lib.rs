@@ -10,6 +10,7 @@ pub mod devices;
 pub mod envelope;
 pub mod handle;
 pub mod hubsig;
+pub mod legacy;
 pub mod limits;
 pub mod request;
 

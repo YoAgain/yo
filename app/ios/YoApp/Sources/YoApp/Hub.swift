@@ -170,14 +170,6 @@ final class HubTransport: HttpTransport {
     return config
   }
 
-  /// Sealed deliveries, blobs and crash reports: the requests that name nobody (as yo_wire::api::anonymous).
-  static func namesNobody(method: String, path: String) -> Bool {
-    let path = path.split(separator: "?", maxSplits: 1).first.map(String.init) ?? path
-    return (method == "POST" && path.hasPrefix("/v1/inbox/") && path != "/v1/inbox/ack")
-      || path.hasPrefix("/v1/blobs/")
-      || path == "/v1/crash" || path == "/v1/errors" || path == "/v1/diagnostics/crash"
-  }
-
   func request(method: String, path: String, headers: [Header], body: Data) -> HttpResult {
     guard !Self.unsupported else { return HttpResult(status: 426, body: Data(), error: nil) }
     guard let url = URL(string: path, relativeTo: base) else {
@@ -195,7 +187,7 @@ final class HubTransport: HttpTransport {
     let signed = headers.contains(where: { $0.name.lowercased() == "yo-device" })
     // Only what names nobody goes on the anonymous connections (yo_wire::api::anonymous): a registration or a backup's
     // fetch names the account, so never on a connection that also carries sealed deliveries (spec 1).
-    let anonymous = !signed && Self.namesNobody(method: method, path: path)
+    let anonymous = !signed && anonymousRequest(method: method, path: path)
     let task = (anonymous ? Self.anonymousSession : Self.signedSession).dataTask(with: request)
     // Read as it comes, and cut off past the largest answer the hub may give (`Limited`): a faulty or hostile hub
     // never fills the memory of the app or of an extension (which has 24 MB).
@@ -317,43 +309,21 @@ final class HubTransport: HttpTransport {
 }
 
 /// The core's state in a database of the app's own, as the group's (SharedState.swift) but used by the app alone:
-/// Yo Dev's, and Yo's until it moves into the App Group. Excluded from backups (the account comes back by its backup
-/// record, spec 7, not by an old copy of the state). The file of before (`url`, the sealed state alone) moves in at
-/// the first opening.
+/// The database used by builds without an App Group.
 enum StateFile {
-  static let url = URL.applicationSupportDirectory.appending(path: "yo-state")
-  static let folder = URL.applicationSupportDirectory.appending(path: "yo-state-db", directoryHint: .isDirectory)
+  static let folder = URL.applicationSupportDirectory.appending(path: "yo-state-v3", directoryHint: .isDirectory)
   private static let opening = NSLock()
   nonisolated(unsafe) private static var opened: StateDb?
 
-  /// Throws while it cannot be opened (the phone not unlocked since its start).
   static func database() throws -> StateDb {
-    try database(key: StateKey.load())
+    guard let key = try StateKey.load() else { throw YoError.State }
+    return try StateStorage.open(folder, gate: opening, cached: &opened, key: key)
   }
 
-  static func database(key: Data?) throws -> StateDb {
-    guard let key else { throw YoError.State }
-    return try StateStorage.open(folder, gate: opening, cached: &opened, before: url, wordLength: 0, key: key)
-  }
-
-  /// Whether there is a state of the app's own. One that cannot be read yet counts as present.
-  static var exists: Bool {
-    guard StateStorage.exists(folder, before: url) else { return false }
-    return (try? database().hasState()) ?? true
-  }
+  static var exists: Bool { StateStorage.exists(folder) }
 
   static func forget() {
-    if StateStorage.exists(folder, before: url) { Diagnostics.attempt({ try database().clear() }) }
-    try? FileManager.default.removeItem(at: url)
-  }
-
-  /// Called after the group has a durable copy and before deleting the app's own key.
-  static func discardMigrated() {
-    opening.withLock {
-      opened = nil
-      try? FileManager.default.removeItem(at: folder)
-      try? FileManager.default.removeItem(at: url)
-    }
+    if exists { Diagnostics.attempt({ try database().clear() }) }
   }
 }
 
@@ -409,21 +379,6 @@ enum StateKey {
     return key
   }
 
-  /// The app, once: the key into the group, the same key (its state opens with no other); a new key in the group when
-  /// there was none. The app's own item stays until the state is in the group too (`finishMoveIn`): a state that
-  /// does not move keeps the key it opens with. A group key there already, with no state of the group's, gives way to
-  /// the app's own, which opens the state that moves. False when the keychain will not (locked, no group in the
-  /// signature): then the state stays where it is too.
-  static func moveIn() -> Bool {
-    // The keychain does not answer now (locked): not now.
-    guard case .success(let there) = Result(catching: { try shared() }),
-      case .success(let own) = Result(catching: { try load() })
-    else { return false }
-    let key = own ?? there ?? random()
-    guard key != there else { return true }
-    return (Diagnostics.attempt({ try Keychain.write(inGroup, key, accessible: kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly) })) != nil
-  }
-
   /// Yo Dev (`Keychain.scoped`): the keys of this name in the team's other groups, which its profile lets it read (Yo
   /// from TestFlight on the same phone). Builds before took the first one found for their own, so a state Yo Dev made
   /// meanwhile may be sealed under one of them: tried only when its own key does not open its state, and never
@@ -440,14 +395,6 @@ enum StateKey {
     return found.filter { $0[kSecAttrAccessGroup as String] as? String != own }
       .compactMap { $0[kSecValueData as String] as? Data }.filter { $0.count == 32 }
   }
-
-  /// The key that opened the state, as the app's own from here on (`others`).
-  static func adopt(_ key: Data) throws {
-    try Keychain.write(query, key, accessible: kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly)
-  }
-
-  /// The state is in the group: the app's own key goes.
-  static func finishMoveIn() { deleteOwn() }
 
   /// The app's own item (in its default access group), the group's kept: found with its access group, deleted by it.
   private static func deleteOwn() {

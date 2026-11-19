@@ -16,7 +16,7 @@ path = "bindgen.rs"
 
 [features]
 # Test hooks: the core client under the binding (its clock, its counters).
-testing = ["yo-core/testing"]
+test-support = ["yo-core/test-support"]
 
 [dependencies]
 yo-product = { path = "../product" }

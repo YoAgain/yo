@@ -13,5 +13,6 @@ reqwest = { workspace = true, features = ["blocking"] }
 getrandom = { workspace = true }
 
 [dev-dependencies]
+yo-core = { path = "../../core/client", features = ["test-support"] }
 yo-tests = { path = "../../tests" }
 yo-hub = { path = "../../hub" }

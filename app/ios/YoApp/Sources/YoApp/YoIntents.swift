@@ -366,9 +366,7 @@ enum YoSend {
       return .signedOut
     }
     do {
-      let events =
-        target.hasPrefix("group:")
-        ? try client.sendGroupYo(group: String(target.dropFirst(6))) : try client.sendYo(to: target)
+      let events = try client.send(target: SendTarget(target), kind: .yo)
       notify(events, client: client)
       return nil
     } catch YoError.NotOnYo {

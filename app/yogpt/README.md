@@ -13,6 +13,17 @@ Hostile content never becomes instructions. The bounded, volatile per-sender tok
 idle buckets expire after three seconds; at most 64 photos, videos and group Yos wait for the one echo worker,
 more are dropped and counted. The normal encrypted protocol sessions and delivery/replay state still persist.
 
+## Upgrading from the state file (`state` → `state.sqlite`)
+
+Builds before the database kept each account in one sealed file, `state`. The first start of this build takes it
+into `state.sqlite` offline, before talking to the hub: the same device, its sessions, its outbox and what was
+received but not yet answered. Nothing registers again, so what waits in the hub inbox still arrives. The file is
+then renamed `state.v2`; a start finding both takes nothing again.
+
+Rollback to the old binary works only before the new one has started for the first time (the file still `state`):
+once it has run, the file's sessions are behind the ones in use, and the old build would send under keys already
+spent. After that the old binary goes back only as a new device (an empty state directory, registered again).
+
 ## Bot accounts together (`--quiet-for`, group cooldown)
 
 `--quiet-for USERNAME[,USERNAME…]` (repeatable, any case) never answers Yos, photos or videos from these users,

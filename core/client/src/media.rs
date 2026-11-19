@@ -1,8 +1,5 @@
-//! Photos and videos (spec 5, 6.8): each sealed under a key of its own, uploaded as a blob for the receiving
-//! devices to fetch, the key, hash and size carried in the Yo. The hub never sees the key, the picture, or who fetches.
-//!
-//! Nothing here holds the client while it talks to the hub: `Client::upload` only signs; the upload itself
-//! (`Upload::send`) and fetches (`fetch`) need no client at all.
+//! Photos and videos (spec 5, 6.8): each sealed under its own key and uploaded as a blob; key, hash and size go in
+//! the Yo. The hub never sees the key, the picture, or who fetches. Uploads and fetches never hold the client.
 
 use crate::{Client, Error, Response, Result, Transport};
 use chacha20poly1305::aead::{Aead, KeyInit};
@@ -22,21 +19,22 @@ pub const MAX_MEDIA_LEN: usize = MAX_BLOB_LEN - TAG;
 /// Every key is used once: the nonce is zero.
 const NONCE: [u8; 12] = [0; 12];
 
-fn random<const N: usize>() -> Result<[u8; N]> {
-    let mut bytes = [0u8; N];
-    getrandom::getrandom(&mut bytes).map_err(|_| Error::Internal("random"))?;
-    Ok(bytes)
-}
-
 /// Seals a photo or video under a new key, with a new id: what the Yo carries, and the ciphertext to upload.
 pub fn seal(plain: &[u8], width: u16, height: u16) -> Result<(Media, Vec<u8>)> {
     if plain.is_empty() || plain.len() > MAX_MEDIA_LEN {
         return Err(Error::Protocol("media size"));
     }
-    let key: [u8; 32] = random()?;
+    let key: [u8; 32] = crate::identity::random();
     let ciphertext =
         ChaCha20Poly1305::new(&key.into()).encrypt(&NONCE.into(), plain).map_err(|_| Error::Internal("seal"))?;
-    let media = Media { id: random()?, key, sha256: sha256(&ciphertext), size: ciphertext.len() as u32, width, height };
+    let media = Media {
+        id: crate::identity::random(),
+        key,
+        sha256: sha256(&ciphertext),
+        size: ciphertext.len() as u32,
+        width,
+        height,
+    };
     Ok((media, ciphertext))
 }
 
@@ -48,8 +46,8 @@ pub fn open(media: &Media, ciphertext: &[u8]) -> Result<Vec<u8>> {
     ChaCha20Poly1305::new(&media.key.into()).decrypt(&NONCE.into(), ciphertext).map_err(|_| Error::Protocol("media"))
 }
 
-/// Fetches a blob by its id, without the client and without identity (spec 6.8), and checks it against the Yo.
-/// `None`: unavailable (acknowledged by all, GET budget exhausted, or expired). Call `ack` only after the opened file is durably stored.
+/// Fetches a blob without the client or identity (spec 6.8) and checks it against the Yo. `None`: unavailable.
+/// Call `ack` only after the opened file is durably stored.
 pub fn fetch(transport: &dyn Transport, media: &Media) -> Result<Option<Vec<u8>>> {
     let response = transport.request("GET", &api::blob_path(&media.id), &[], &[]).map_err(Error::Network)?;
     match response.status {
@@ -94,8 +92,7 @@ pub struct Upload {
 }
 
 impl Upload {
-    /// Sends the blob. `Ok` when the hub has it; `Refused(429)` (the account's quota or a rate) and
-    /// `Refused(507)` (no room at the hub) are "later": sign anew with `Client::upload` and send again.
+    /// Sends the blob. `Refused(429)` and `Refused(507)` are "later": sign anew with `Client::upload` and send again.
     pub fn send(&self, ciphertext: &[u8]) -> Result<()> {
         let response: Response =
             self.transport.request("PUT", &self.path, &self.headers, ciphertext).map_err(Error::Network)?;
@@ -113,8 +110,7 @@ impl Upload {
 pub use crate::retry_later;
 
 impl Client {
-    /// Signs the upload of a sealed blob for `fetches` fetches: the number of devices it goes to
-    /// (`media_fetches`). Each try needs its own signature (the hub takes each once).
+    /// Signs the upload of a sealed blob for `fetches` fetches; each try needs its own signature.
     pub fn upload(&mut self, media: &Media, fetches: u32) -> Result<Upload> {
         let path = api::blob_put_path(&media.id, fetches.clamp(1, MAX_BLOB_FETCHES));
         let (mut headers, _) = self.sign_hash("PUT", &path, &media.sha256);
@@ -123,8 +119,7 @@ impl Client {
         Ok(Upload { transport: self.transport.clone(), path, headers })
     }
 
-    /// From now on, the keys of photos and videos received are dropped as they are decrypted, before any event is
-    /// kept: for a client that never opens them (YoGPT). The blob's id stays, to fetch it into nothing.
+    /// Drops the keys of received media before any event is kept, for a client that never opens them (YoGPT).
     pub fn forget_media_keys(&mut self) {
         self.media_keys_forgotten = true;
     }
@@ -134,14 +129,11 @@ impl Client {
         self.transport.clone()
     }
 
-    /// Starts writing to `to` if this device has not yet, as the first send would (a lookup, a session with each of
-    /// their devices), and answers how many fetches a photo or video to them is for (`media_fetches`). For the
-    /// first photo to a new friend: the upload needs their devices before the Yo can go.
+    /// Starts writing to `to` as the first send would and answers how many fetches media to them is for: the upload
+    /// needs their device before the Yo can go.
     pub fn open_chat(&mut self, to: &str) -> Result<(u32, Vec<crate::Event>)> {
         let result = self.open_chat_inner(to);
-        let fetches = result.as_ref().ok().copied();
-        let events = self.finish(result)?;
-        Ok((fetches.unwrap_or(1), events))
+        self.finish_with(result)
     }
 
     fn open_chat_inner(&mut self, to: &str) -> Result<u32> {
@@ -166,16 +158,14 @@ impl Client {
         self.fetches_for(&user).ok_or(Error::Internal("devices"))
     }
 
-    /// How many fetches a photo or video to `to` is for: their devices and this account's other ones. `None` while
-    /// this device does not write to them yet.
+    /// The fetch count once this device can send media to the recipient.
     pub fn media_fetches(&self, to: &str) -> Option<u32> {
         let handle = yo_wire::handle::Handle::parse(to).ok()?;
         self.fetches_for(&self.known_user(&handle)?)
     }
 
     fn fetches_for(&self, user: &str) -> Option<u32> {
-        let devices = self.state.contacts.get(user)?.devices.len();
-        (devices > 0).then(|| ((devices + self.state.own.len()) as u32).clamp(1, MAX_BLOB_FETCHES))
+        self.state.contacts.get(user)?.device.map(|_| 1)
     }
 }
 

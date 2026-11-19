@@ -1,5 +1,4 @@
-//! What the app shows under Settings › Encryption as live checks: the keys this device keeps at the hub, and how
-//! its sessions and contacts stand. Facts only, read from the state; the app decides the colours.
+//! Settings › Encryption's live checks: facts from the state about keys at the hub, sessions and contacts.
 
 use crate::Client;
 
@@ -53,7 +52,7 @@ impl Client {
         for (user, contact) in self.state.contacts.iter().filter(|(_, c)| !c.blocked && !c.gone && c.chat) {
             status.contacts += 1;
             status.verified += contact.verified as u32;
-            for device in &contact.devices {
+            if let Some(device) = &contact.device {
                 status.devices += 1;
                 let usable = self.address(user, device.slot).is_ok_and(|a| self.records.usable(&a));
                 status.pq_sessions += usable as u32;

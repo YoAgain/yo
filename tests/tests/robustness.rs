@@ -28,7 +28,8 @@ fn chat(hub: &TestHub) -> (Client, Client, Arc<Http>, Arc<Http>, String, String)
 struct Saved(Mutex<Vec<u8>>);
 
 impl Store for Saved {
-    fn save(&self, blob: Vec<u8>) -> Result<(), String> {
+    fn save_state(&self, state: &yo_core::state::State, records: yo_core::signal::Entries) -> Result<(), String> {
+        let blob = yo_tests::saved_bytes(state, records);
         *self.0.lock().unwrap() = blob;
         Ok(())
     }
@@ -40,6 +41,7 @@ fn a_crash_after_processing_loses_nothing_and_repeats_nothing() {
     let (mut a, mut b, _, hb, pa, pb) = chat(&hub);
     let saved = Arc::new(Saved::default());
     let key = [5u8; 32];
+    b.acknowledge_only(|_| true);
     b.persist_to(saved.clone(), key).unwrap();
     for _ in 0..3 {
         a.send_yo(&pb).unwrap();
@@ -50,7 +52,7 @@ fn a_crash_after_processing_loses_nothing_and_repeats_nothing() {
     assert_eq!(yos(&first), 3);
     // Killed right after the call: the app may not have the events yet, so they come once more after the restart.
     let blob = saved.0.lock().unwrap().clone();
-    let mut again = Client::restore(Http::new(hub.url()), &blob, &key).unwrap();
+    let mut again = yo_tests::restore_bytes(Http::new(hub.url()), &blob).unwrap();
     assert_eq!(yos(&again.sync(0).unwrap()), 3, "not acknowledged: at least once");
     // The app acknowledged them before it was killed: the hub delivers the envelopes again (the ack never came),
     // they are recognised, and nothing is shown twice.
@@ -58,7 +60,7 @@ fn a_crash_after_processing_loses_nothing_and_repeats_nothing() {
     drop(again);
     drop(b);
     let blob = saved.0.lock().unwrap().clone();
-    let mut b = Client::restore(Http::new(hub.url()), &blob, &key).unwrap();
+    let mut b = yo_tests::restore_bytes(Http::new(hub.url()), &blob).unwrap();
     assert_eq!(yos(&b.sync(0).unwrap()), 0);
     a.send_yo(&pb).unwrap();
     assert_eq!(yos(&b.sync(0).unwrap()), 1);
@@ -104,13 +106,13 @@ fn a_full_mailbox_refuses_until_it_is_read_and_strangers_cannot_rate_limit_it() 
     assert_eq!(statuses, vec![202, 202, 202, 202, 202, 507]);
     // ... which holds A's Yo back only until B reads its mailbox.
     a.send_yo(&pb).unwrap();
-    assert_eq!(a.pending(), 1);
+    assert_eq!(a.waiting(), 1);
     assert_eq!(yos(&b.sync(0).unwrap()), 0);
     b.after_sync().unwrap();
     // A's sync takes B's identified answer in; its key goes back to B with the work after it (spec 4.10).
     a.sync(0).unwrap();
     a.after_sync().unwrap();
-    assert_eq!(a.pending(), 0);
+    assert_eq!(a.waiting(), 0);
     assert_eq!(yos(&b.sync(0).unwrap()), 1);
     b.send_yo(&pa).unwrap();
     assert_eq!(yos(&a.sync(0).unwrap()), 1);
@@ -267,9 +269,9 @@ fn a_new_phone_gets_what_waits_once_its_device_is_named() {
     // The lookup for the new device's bundle fails once: the Yo waits for the next delivery.
     ha.fault(api::LOOKUP, Fault::Answer(503));
     a.send_yo(&user_of(&pb)).unwrap();
-    assert_eq!(a.pending(), 1, "waits for the new device's session");
+    assert_eq!(a.waiting(), 1, "waits for the new device's session");
     a.sync(0).unwrap();
-    assert_eq!(a.pending(), 0);
+    assert_eq!(a.waiting(), 0);
     assert_eq!(yos(&b2.sync(0).unwrap()), 1);
     b2.send_yo(&pa).unwrap();
     assert_eq!(yos(&a.sync(0).unwrap()), 1);
@@ -335,13 +337,13 @@ fn a_send_the_hub_cannot_take_now_succeeds_and_waits() {
     let path = api::deliver_path(&yo_tests::user_id(b.user_id()));
     ha.fault(&path, Fault::Answer(429));
     a.send_yo(&pb).expect("queued and saved: sent");
-    assert_eq!(a.pending(), 1, "it waits in the outbox");
+    assert_eq!(a.waiting(), 1, "it waits in the outbox");
     // Two faults: the first Yo's next try (before the second goes) and the second's own delivery.
     ha.fault(&path, Fault::Answer(503));
     ha.fault(&path, Fault::Answer(507));
     a.send_yo(&pb).expect("also on a passing 503 or a full inbox");
     a.sync(0).unwrap();
-    assert_eq!(a.pending(), 0);
+    assert_eq!(a.waiting(), 0);
     assert_eq!(yos(&b.sync(0).unwrap()), 2, "each once");
 }
 
@@ -356,12 +358,12 @@ fn an_unacknowledged_send_is_retried_after_restart() {
     let path = api::deliver_path(&yo_tests::user_id(b.user_id()));
     ha.fault(&path, Fault::LoseAnswer);
     a.send_yo(&pb).unwrap();
-    assert_eq!(a.pending(), 1, "no 202 received: retained for retry");
+    assert_eq!(a.waiting(), 1, "no 202 received: retained for retry");
     drop(a);
     let blob = saved.0.lock().unwrap().clone();
-    let mut a = Client::restore(Http::new(hub.url()), &blob, &key).unwrap();
+    let mut a = yo_tests::restore_bytes(Http::new(hub.url()), &blob).unwrap();
     a.sync(0).unwrap();
-    assert_eq!(a.pending(), 0, "retry acknowledged");
+    assert_eq!(a.waiting(), 0, "retry acknowledged");
     assert_eq!(yos(&b.sync(0).unwrap()), 1, "original and retry shown once");
     assert_eq!(b.dropped(), 0);
 }
@@ -372,7 +374,8 @@ fn an_unacknowledged_send_is_retried_after_restart() {
 fn a_save_failing_after_the_message_was_saved_does_not_make_it_unsent() {
     struct Filling(Mutex<Vec<u8>>, std::sync::atomic::AtomicU32);
     impl Store for Filling {
-        fn save(&self, blob: Vec<u8>) -> Result<(), String> {
+        fn save_state(&self, state: &yo_core::state::State, records: yo_core::signal::Entries) -> Result<(), String> {
+            let blob = yo_tests::saved_bytes(state, records);
             if self.1.load(std::sync::atomic::Ordering::SeqCst) == 0 {
                 return Err("disk full".into());
             }
@@ -399,7 +402,8 @@ fn a_save_failing_after_the_message_was_saved_does_not_make_it_unsent() {
 fn a_split_send_whose_later_saves_fail_is_still_sent() {
     struct Filling(Mutex<Vec<u8>>, std::sync::atomic::AtomicU32);
     impl Store for Filling {
-        fn save(&self, blob: Vec<u8>) -> Result<(), String> {
+        fn save_state(&self, state: &yo_core::state::State, records: yo_core::signal::Entries) -> Result<(), String> {
+            let blob = yo_tests::saved_bytes(state, records);
             if self.1.load(std::sync::atomic::Ordering::SeqCst) == 0 {
                 return Err("disk full".into());
             }

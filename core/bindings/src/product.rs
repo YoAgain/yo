@@ -1,22 +1,18 @@
-use crate::ListKind;
-use yo_product as product;
+//! The product rules (`yo_product`) for Swift, under the names the app has always used.
 
-#[derive(Clone, Copy, uniffi::Enum)]
-pub enum ProductLanguage {
+use yo_product::list::Kind;
+use yo_product::{self as product, ActivityPlace, Language, Outcome, Text, WidgetFriend};
+
+#[uniffi::remote(Enum)]
+#[uniffi(name = "ProductLanguage")]
+pub enum Language {
     English,
     German,
 }
-impl From<ProductLanguage> for product::Language {
-    fn from(value: ProductLanguage) -> Self {
-        match value {
-            ProductLanguage::English => Self::English,
-            ProductLanguage::German => Self::German,
-        }
-    }
-}
 
-#[derive(Clone, Copy, uniffi::Enum)]
-pub enum ProductText {
+#[uniffi::remote(Enum)]
+#[uniffi(name = "ProductText")]
+pub enum Text {
     Yo,
     YoBang,
     Sent,
@@ -57,100 +53,34 @@ pub enum ProductText {
     NeedsUpdate,
     AlreadyAdded,
 }
-impl From<ProductText> for product::Text {
-    fn from(value: ProductText) -> Self {
-        match value {
-            ProductText::Yo => Self::Yo,
-            ProductText::YoBang => Self::YoBang,
-            ProductText::Sent => Self::Sent,
-            ProductText::SentYo => Self::SentYo,
-            ProductText::SentPhoto => Self::SentPhoto,
-            ProductText::SentVideo => Self::SentVideo,
-            ProductText::Sending => Self::Sending,
-            ProductText::NotSent => Self::NotSent,
-            ProductText::Canceled => Self::Canceled,
-            ProductText::NoAnswer => Self::NoAnswer,
-            ProductText::NoAnswerYet => Self::NoAnswerYet,
-            ProductText::NoYo => Self::NoYo,
-            ProductText::NoYoBack => Self::NoYoBack,
-            ProductText::YoBack => Self::YoBack,
-            ProductText::YoBackActivity => Self::YoBackActivity,
-            ProductText::StaleYo => Self::StaleYo,
-            ProductText::TurnOnNotifications => Self::TurnOnNotifications,
-            ProductText::NotificationsOff => Self::NotificationsOff,
-            ProductText::NotificationsHint => Self::NotificationsHint,
-            ProductText::NotificationFallback => Self::NotificationFallback,
-            ProductText::Group => Self::Group,
-            ProductText::FailedToSend => Self::FailedToSend,
-            ProductText::WidgetEmpty => Self::WidgetEmpty,
-            ProductText::WidgetFriend => Self::WidgetFriend,
-            ProductText::WidgetFriendIntent => Self::WidgetFriendIntent,
-            ProductText::WidgetFriendDescription => Self::WidgetFriendDescription,
-            ProductText::WidgetListIntent => Self::WidgetListIntent,
-            ProductText::WidgetListDescription => Self::WidgetListDescription,
-            ProductText::WidgetBackDescription => Self::WidgetBackDescription,
-            ProductText::ShareQueued => Self::ShareQueued,
-            ProductText::ShareUnavailable => Self::ShareUnavailable,
-            ProductText::ShareAddFriend => Self::ShareAddFriend,
-            ProductText::VideoTooLong => Self::VideoTooLong,
-            ProductText::NotOnYo => Self::NotOnYo,
-            ProductText::GroupEmpty => Self::GroupEmpty,
-            ProductText::ConfirmNewKey => Self::ConfirmNewKey,
-            ProductText::Blocked => Self::Blocked,
-            ProductText::NeedsUpdate => Self::NeedsUpdate,
-            ProductText::AlreadyAdded => Self::AlreadyAdded,
-        }
-    }
-}
 
-#[derive(Clone, Copy, uniffi::Enum)]
-pub enum ProductOutcome {
+#[uniffi::remote(Enum)]
+#[uniffi(name = "ProductOutcome")]
+pub enum Outcome {
     Sending,
     Sent,
     Failed,
     Nobody,
 }
-impl From<ProductOutcome> for product::Outcome {
-    fn from(value: ProductOutcome) -> Self {
-        match value {
-            ProductOutcome::Sending => Self::Sending,
-            ProductOutcome::Sent => Self::Sent,
-            ProductOutcome::Failed => Self::Failed,
-            ProductOutcome::Nobody => Self::Nobody,
-        }
-    }
-}
 
-#[derive(Clone, Copy, uniffi::Enum)]
-pub enum ProductActivityPlace {
+#[uniffi::remote(Enum)]
+#[uniffi(name = "ProductActivityPlace")]
+pub enum ActivityPlace {
     Expanded,
     Compact,
     LockScreen,
 }
-impl From<ProductActivityPlace> for product::ActivityPlace {
-    fn from(value: ProductActivityPlace) -> Self {
-        match value {
-            ProductActivityPlace::Expanded => Self::Expanded,
-            ProductActivityPlace::Compact => Self::Compact,
-            ProductActivityPlace::LockScreen => Self::LockScreen,
-        }
-    }
-}
 
-#[derive(uniffi::Record)]
-pub struct ProductWidgetFriend {
+#[uniffi::remote(Record)]
+#[uniffi(name = "ProductWidgetFriend")]
+pub struct WidgetFriend {
     pub id: String,
     pub name: String,
 }
-impl From<ProductWidgetFriend> for product::WidgetFriend {
-    fn from(friend: ProductWidgetFriend) -> Self {
-        Self { id: friend.id, name: friend.name }
-    }
-}
 
 #[uniffi::export]
-pub fn product_text(text: ProductText, lang: ProductLanguage) -> String {
-    product::Text::from(text).get(lang.into()).into()
+pub fn product_text(text: Text, lang: Language) -> String {
+    text.get(lang).into()
 }
 
 #[uniffi::export]
@@ -159,18 +89,18 @@ pub fn product_counted(count: i64) -> String {
 }
 
 #[uniffi::export]
-pub fn product_send_words(mark: String, sending: bool, lang: ProductLanguage) -> String {
-    product::send_words(&mark, sending, lang.into())
+pub fn product_send_words(mark: String, sending: bool, lang: Language) -> String {
+    product::send_words(&mark, sending, lang)
 }
 
 #[uniffi::export]
-pub fn product_arrival_lines(count: i64, name: String, lang: ProductLanguage) -> Vec<String> {
-    product::arrival_lines(count, &name, lang.into())
+pub fn product_arrival_lines(count: i64, name: String, lang: Language) -> Vec<String> {
+    product::arrival_lines(count, &name, lang)
 }
 
 #[uniffi::export]
-pub fn product_failed_to_send(name: Option<String>, lang: ProductLanguage) -> String {
-    product::failed_to_send(name.as_deref(), lang.into())
+pub fn product_failed_to_send(name: Option<String>, lang: Language) -> String {
+    product::failed_to_send(name.as_deref(), lang)
 }
 
 #[uniffi::export]
@@ -194,13 +124,13 @@ pub fn product_sound_limit() -> u32 {
 }
 
 #[uniffi::export]
-pub fn product_notification_line(name: String, kind: ListKind, request: bool, lang: ProductLanguage) -> String {
-    product::notification_line(&name, kind.into(), request, lang.into())
+pub fn product_notification_line(name: String, kind: Kind, request: bool, lang: Language) -> String {
+    product::notification_line(&name, kind, request, lang)
 }
 
 #[uniffi::export]
-pub fn product_notification_group_name(name: String, group: String, lang: ProductLanguage) -> String {
-    product::notification_group_name(&name, &group, lang.into())
+pub fn product_notification_group_name(name: String, group: String, lang: Language) -> String {
+    product::notification_group_name(&name, &group, lang)
 }
 
 #[uniffi::export]
@@ -221,16 +151,16 @@ pub fn product_notification_sounds(delivered: Vec<String>, new: Vec<String>) -> 
 #[allow(clippy::too_many_arguments)]
 #[uniffi::export]
 pub fn product_activity_words(
-    outcome: ProductOutcome,
-    place: ProductActivityPlace,
+    outcome: Outcome,
+    place: ActivityPlace,
     stale: bool,
     count: i64,
     total: i64,
     has_others: bool,
     back: bool,
-    lang: ProductLanguage,
+    lang: Language,
 ) -> String {
-    product::activity_words(outcome.into(), place.into(), stale, count, total, has_others, back, lang.into())
+    product::activity_words(outcome, place, stale, count, total, has_others, back, lang)
 }
 
 #[uniffi::export]
@@ -240,19 +170,17 @@ pub fn product_activity_names(name: String, others: Vec<String>, all: bool, nobo
 
 #[uniffi::export]
 pub fn product_widget_selection(
-    friends: Vec<ProductWidgetFriend>,
-    picks: Vec<Option<ProductWidgetFriend>>,
+    friends: Vec<WidgetFriend>,
+    picks: Vec<Option<WidgetFriend>>,
     slots: u32,
     fallback: u32,
 ) -> Vec<u32> {
-    let friends: Vec<_> = friends.into_iter().map(Into::into).collect();
-    let picks: Vec<_> = picks.into_iter().map(|pick| pick.map(Into::into)).collect();
     product::widget_selection(&friends, &picks, slots as usize, fallback as usize)
 }
 
 #[uniffi::export]
-pub fn product_share_subtitle(photos: u32, videos: u32, lang: ProductLanguage) -> String {
-    product::share_subtitle(photos, videos, lang.into())
+pub fn product_share_subtitle(photos: u32, videos: u32, lang: Language) -> String {
+    product::share_subtitle(photos, videos, lang)
 }
 
 #[uniffi::export]
@@ -281,17 +209,13 @@ pub fn product_undo_seconds(seconds: f64) -> f64 {
 }
 
 #[uniffi::export]
-pub fn product_media_sign(kind: ListKind) -> String {
-    product::media_sign(kind.into()).into()
+pub fn product_media_sign(kind: Kind) -> String {
+    product::media_sign(kind).into()
 }
 
 #[uniffi::export]
-pub fn product_media_kind(label: String) -> ListKind {
-    match product::media_kind(&label) {
-        product::list::Kind::Yo => ListKind::Yo,
-        product::list::Kind::Photo => ListKind::Photo,
-        product::list::Kind::Video => ListKind::Video,
-    }
+pub fn product_media_kind(label: String) -> Kind {
+    product::media_kind(&label)
 }
 
 #[derive(uniffi::Record)]
@@ -344,35 +268,4 @@ pub fn product_share_limits() -> ProductShareLimits {
 #[uniffi::export]
 pub fn product_share_can_send(sending: bool, too_long: bool, has_media: bool, has_feedback: bool) -> bool {
     product::share_can_send(sending, too_long, has_media, has_feedback)
-}
-
-#[uniffi::export]
-pub fn product_widget_eligible(blocked: bool, request: bool, gone: bool) -> bool {
-    product::widget_eligible(blocked, request, gone)
-}
-
-#[uniffi::export]
-pub fn product_widget_id_selection(
-    friends: Vec<String>,
-    picks: Vec<String>,
-    signed_in: bool,
-    slots: u32,
-    fallback: u32,
-) -> Vec<u32> {
-    product::widget_id_selection(&friends, &picks, signed_in, slots as usize, fallback as usize)
-}
-
-#[uniffi::export]
-pub fn product_android_notification_line(
-    name: Option<String>,
-    group: Option<String>,
-    kind: ListKind,
-    lang: ProductLanguage,
-) -> String {
-    product::android_notification_line(name.as_deref(), group.as_deref(), kind.into(), lang.into())
-}
-
-#[uniffi::export]
-pub fn product_request_row(name: String, group: bool, lang: ProductLanguage) -> String {
-    product::request_row(&name, group, lang.into())
 }

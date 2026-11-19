@@ -1,34 +1,21 @@
-//! WAL snapshots and compare-and-swap persistence for the client. The legacy backend remains available for import
-//! and for a launch whose first migration rolled back.
+//! WAL snapshots and compare-and-swap persistence for the client.
 
-mod cipher;
+pub(crate) mod cipher;
 mod tables;
 
 use crate::error::{Error, Result};
 use crate::Store;
 pub use cipher::Report;
-use rusqlite::{params, Connection, OpenFlags, OptionalExtension, TransactionBehavior};
-use std::path::{Path, PathBuf};
+use rusqlite::{Connection, OpenFlags, TransactionBehavior};
+use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
 
 /// How long an access waits for another process's (a write, the last connection's checkpoint).
 const BUSY: Duration = Duration::from_secs(3);
-/// How long the checkpoint after a write waits for other connections before it leaves the WAL as it is (Signal's
-/// `maxBusyTimeoutMs`).
+/// How long the checkpoint after a write waits for other connections (Signal's `maxBusyTimeoutMs`).
 const CHECKPOINT_BUSY: Duration = Duration::from_millis(50);
-
-/// What a reader finds against the write it knows.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum Snapshot {
-    /// The state as this process read or wrote it last.
-    Same,
-    /// Written since (by another process): its word and the sealed state.
-    Newer { word: String, blob: Vec<u8> },
-    /// No state (signed out, or never made).
-    Gone,
-}
 
 /// A database snapshot for a live client. Encrypted tables can be loaded without sealing them again.
 pub enum Loaded {
@@ -40,22 +27,26 @@ pub enum Loaded {
 /// The database file (`-wal` and `-shm` beside it).
 pub struct StateDb {
     path: PathBuf,
-    cipher: Option<cipher::Cipher>,
-    legacy_fence: Option<(PathBuf, zeroize::Zeroizing<[u8; 32]>, Report)>,
+    cipher: cipher::Cipher,
+    /// The rows of the state last read or written here, under its word: a write that replaces that state compares
+    /// with them instead of reading every row back (each word is one state's). With the number of clears: a read or
+    /// write begun before a clear never puts its rows back.
+    snapshot: Mutex<(Option<Snapshot>, u64)>,
 }
 
-/// Not readable now (the phone not unlocked since its start, another process's checkpoint): retryable, as no
-/// network is. The apps take it as their "not now" (iOS: `SharedAccess.unavailable`).
-fn unavailable(error: impl std::fmt::Display) -> Error {
-    Error::Network(format!("shared storage is not available now: {error}"))
+struct Snapshot {
+    word: String,
+    rows: tables::Rows,
 }
 
-fn not_saved(error: impl std::fmt::Display) -> Error {
-    Error::Save(error.to_string())
+impl Drop for Snapshot {
+    fn drop(&mut self) {
+        use zeroize::Zeroize;
+        self.rows.values_mut().for_each(Zeroize::zeroize);
+    }
 }
 
-/// The WAL into the database and truncated, as Signal does after its writes; with other connections busy for more than
-/// `CHECKPOINT_BUSY` it stays for the next one (written already, nothing lost).
+/// Checkpoints and truncates the WAL, as Signal does after writes; busy connections leave it for the next one.
 fn checkpoint(conn: &Connection) {
     if conn.busy_timeout(CHECKPOINT_BUSY).is_ok() {
         let _ = conn.query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |_| Ok(()));
@@ -75,251 +66,70 @@ fn new_word() -> String {
 }
 
 impl StateDb {
-    /// Opens the database at `path` (made if there is none; its folder must be there), in WAL mode.
-    pub fn open(path: impl Into<PathBuf>) -> Result<StateDb> {
-        let db = StateDb { path: path.into(), cipher: None, legacy_fence: None };
-        let conn = db.connect()?;
-        // WAL is kept in the file: set once, read from there by every later connection.
-        let mode: String = conn.query_row("PRAGMA journal_mode = WAL", [], |row| row.get(0)).map_err(unavailable)?;
-        if !mode.eq_ignore_ascii_case("wal") {
-            return Err(unavailable(format!("journal mode {mode}")));
-        }
-        conn.execute_batch(
-            "CREATE TABLE IF NOT EXISTS state (
-                id INTEGER PRIMARY KEY CHECK (id = 1),
-                word TEXT NOT NULL,
-                blob BLOB NOT NULL
-            )",
-        )
-        .map_err(unavailable)?;
-        Ok(db)
-    }
-
-    /// Opens an already-current database without taking the platform's write turn.
-    pub fn open_current(path: impl Into<PathBuf>, key: [u8; 32], report: Report) -> Result<Option<Self>> {
+    pub fn open_fresh(path: impl Into<PathBuf>, key: [u8; 32], report: Report) -> Result<Self> {
         let path = path.into();
-        Ok(cipher::Cipher::open_current(&path, key, report)?.map(|cipher| Self {
-            path,
-            cipher: Some(cipher),
-            legacy_fence: None,
-        }))
-    }
-
-    /// Opens the encrypted database and runs pending migrations. The legacy source is read only by V0001.
-    /// `rolled_back` allows a caller to keep using a legacy store when V0001 did not publish anything.
-    pub fn open_encrypted(
-        path: impl Into<PathBuf>,
-        key: [u8; 32],
-        report: Option<Report>,
-        source: impl FnMut() -> Result<Option<(String, Vec<u8>)>>,
-        held: Option<&dyn Fn() -> bool>,
-        rolled_back: &mut bool,
-    ) -> Result<Self> {
-        let path = path.into();
-        let cipher = cipher::Cipher::open(&path, key, report, source, held, rolled_back)?;
-        Ok(Self { path, cipher: Some(cipher), legacy_fence: None })
-    }
-
-    /// The old iOS database for a launch whose import rolled back. Other processes may retry the migration;
-    /// recheck the destination under the caller's write turn before changing the legacy source.
-    pub fn open_fallback(
-        path: impl Into<PathBuf>,
-        file: &Path,
-        word_len: usize,
-        destination: impl Into<PathBuf>,
-        key: [u8; 32],
-        report: Report,
-    ) -> Result<Self> {
-        let result = (|| {
-            let mut db = Self::open(path)?;
-            if db.word()?.is_none() {
-                db.move_in(file, word_len)?;
-            }
-            db.legacy_fence = Some((destination.into(), zeroize::Zeroizing::new(key), report.clone()));
-            Ok(db)
-        })();
-        if let Err(error) = &result {
-            cipher::report_failure(Some(&report), 0, 0, 0, error);
-        }
-        result
-    }
-
-    fn on_legacy<T>(&self, operation: impl FnOnce() -> Result<T>) -> Result<T> {
-        let Some((destination, key, report)) = &self.legacy_fence else { return operation() };
-        let result = cipher::verify_unmigrated(destination, key).and_then(|()| operation());
-        if let Err(error) = &result {
-            cipher::report_failure(Some(report), 0, 0, 0, error);
-        }
-        result
-    }
-
-    pub fn encrypted(&self) -> bool {
-        self.cipher.is_some()
-    }
-
-    /// Reads the old iOS WAL database as a snapshot and the older flat file, without changing either source.
-    pub fn legacy_source(db: &Path, file: &Path, word_len: usize) -> Result<Option<(String, Vec<u8>)>> {
-        let saved: Option<(String, Vec<u8>)> = if db.try_exists().map_err(unavailable)? {
-            let conn = Connection::open_with_flags(db, OpenFlags::SQLITE_OPEN_READ_ONLY).map_err(unavailable)?;
-            conn.busy_timeout(BUSY).map_err(unavailable)?;
-            conn.query_row("SELECT word, blob FROM state WHERE id = 1", [], |row| Ok((row.get(0)?, row.get(1)?)))
-                .optional()
-                .map_err(unavailable)?
-        } else {
-            None
-        };
-        let from_file = match std::fs::read(file) {
-            Ok(bytes) if bytes.len() > word_len => {
-                let word = if word_len == 0 {
-                    new_word()
-                } else {
-                    std::str::from_utf8(&bytes[..word_len]).map_err(|_| Error::State)?.to_owned()
-                };
-                Some((word, bytes[word_len..].to_vec()))
-            }
-            Ok(_) => return Err(Error::State),
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
-            Err(error) => return Err(unavailable(error)),
-        };
-        if let (Some((_, saved)), Some((_, flat))) = (&saved, &from_file) {
-            if saved != flat {
-                return Err(Error::Save("LegacyConflict".into()));
-            }
-        }
-        Ok(saved.or(from_file))
+        let cipher = cipher::Cipher::open_fresh(&path, key, report)?;
+        Ok(Self { path, cipher, snapshot: Mutex::new((None, 0)) })
     }
 
     fn on_cipher<T>(&self, operation: impl FnOnce(&cipher::Cipher) -> Result<T>) -> Result<T> {
-        let cipher = self.cipher.as_ref().expect("encrypted backend");
+        let cipher = &self.cipher;
         let result = operation(cipher);
         if let Err(error) = &result {
-            let version = cipher::latest();
-            cipher::report_failure(cipher.report.as_ref(), version, version, version, error);
+            cipher::report_failure(&cipher.report, error);
         }
         result
     }
 
-    pub fn path(&self) -> &Path {
-        &self.path
-    }
-
-    fn connect(&self) -> Result<Connection> {
-        let flags = OpenFlags::SQLITE_OPEN_READ_WRITE | OpenFlags::SQLITE_OPEN_CREATE | OpenFlags::SQLITE_OPEN_NO_MUTEX;
-        let conn = Connection::open_with_flags(&self.path, protected(flags)).map_err(unavailable)?;
-        conn.busy_timeout(BUSY).map_err(unavailable)?;
-        // WAL with NORMAL: a commit is durable at the next checkpoint; a crash of the app never loses one.
-        conn.pragma_update(None, "synchronous", "NORMAL").map_err(unavailable)?;
-        conn.pragma_update(None, "fullfsync", "ON").map_err(unavailable)?;
-        conn.pragma_update(None, "checkpoint_fullfsync", "ON").map_err(unavailable)?;
-        Ok(conn)
-    }
-
-    /// The state now against `known` (the word this process read or wrote last), in one read transaction.
-    pub fn snapshot(&self, known: Option<&str>) -> Result<Snapshot> {
-        if let Some(cipher) = &self.cipher {
-            return Ok(match self.load(known, &cipher.key)? {
-                Loaded::Same => Snapshot::Same,
-                Loaded::Gone => Snapshot::Gone,
-                Loaded::Newer { word, state, records } => {
-                    Snapshot::Newer { word, blob: crate::state::seal(&state, records, &cipher.key) }
-                }
-            });
-        }
-        self.on_legacy(|| self.snapshot_legacy(known))
-    }
-
-    fn snapshot_legacy(&self, known: Option<&str>) -> Result<Snapshot> {
-        let mut conn = self.connect()?;
-        let tx = conn.transaction_with_behavior(TransactionBehavior::Deferred).map_err(unavailable)?;
-        let word: Option<String> = tx
-            .query_row("SELECT word FROM state WHERE id = 1", [], |row| row.get(0))
-            .optional()
-            .map_err(unavailable)?;
-        Ok(match word {
-            None => Snapshot::Gone,
-            Some(word) if Some(word.as_str()) == known => Snapshot::Same,
-            Some(word) => {
-                let blob =
-                    tx.query_row("SELECT blob FROM state WHERE id = 1", [], |row| row.get(0)).map_err(unavailable)?;
-                Snapshot::Newer { word, blob }
-            }
-        })
-    }
-
     pub fn load(&self, known: Option<&str>, key: &[u8; 32]) -> Result<Loaded> {
-        if self.cipher.is_some() {
-            return self.on_cipher(|cipher| {
-                if key != &*cipher.key {
-                    return Err(Error::State);
-                }
-                let mut conn = cipher.connect(&self.path, false)?;
-                let tx = conn.transaction().map_err(cipher::sqlite_error)?;
-                Ok(match cipher::Cipher::word(&tx)? {
-                    None => Loaded::Gone,
-                    Some(word) if Some(word.as_str()) == known => Loaded::Same,
-                    Some(word) => {
-                        let (state, records) = tables::read(&tx, &cipher.key)?;
-                        Loaded::Newer { word, state: Box::new(state), records }
-                    }
-                })
-            });
-        }
-        self.on_legacy(|| {
-            Ok(match self.snapshot_legacy(known)? {
-                Snapshot::Same => Loaded::Same,
-                Snapshot::Gone => Loaded::Gone,
-                Snapshot::Newer { word, blob } => {
-                    let (state, records) = crate::state::open(&blob, key)?;
+        self.on_cipher(|cipher| {
+            if key != &*cipher.key {
+                return Err(Error::State);
+            }
+            let clears = self.snapshot().1;
+            let mut conn = cipher.connect(&self.path, false)?;
+            let tx = conn.transaction().map_err(cipher::sqlite_error)?;
+            Ok(match cipher::Cipher::word(&tx)? {
+                None => Loaded::Gone,
+                Some(word) if Some(word.as_str()) == known => Loaded::Same,
+                Some(word) => {
+                    let (state, records, rows) = tables::read(&tx, &cipher.key)?;
+                    self.keep(clears, Snapshot { word: word.clone(), rows });
                     Loaded::Newer { word, state: Box::new(state), records }
                 }
             })
         })
     }
 
-    /// The state and its word; none when there is none.
-    pub fn read(&self) -> Result<Option<(String, Vec<u8>)>> {
-        Ok(match self.snapshot(None)? {
-            Snapshot::Newer { word, blob } => Some((word, blob)),
-            _ => None,
+    /// Whether the state here finished its registration: false for none, or one still waiting for the hub's answer.
+    pub fn registered(&self) -> Result<bool> {
+        Ok(match self.load(None, &self.cipher.key)? {
+            Loaded::Newer { state, .. } => state.registering.is_none(),
+            Loaded::Same | Loaded::Gone => false,
         })
     }
 
-    /// The word of the last write; none when there is no state.
     pub fn word(&self) -> Result<Option<String>> {
-        if self.cipher.is_some() {
-            return self.on_cipher(|cipher| cipher::Cipher::word(&cipher.connect(&self.path, false)?));
-        }
-        self.on_legacy(|| {
-            let conn = self.connect()?;
-            conn.query_row("SELECT word FROM state WHERE id = 1", [], |row| row.get(0)).optional().map_err(unavailable)
-        })
+        self.on_cipher(|cipher| cipher::Cipher::word(&cipher.connect(&self.path, false)?))
     }
 
-    /// Puts `blob` in place of the state `known` names (none: there is none yet, a new account), atomically; its new
-    /// word. Refused (`Save`) when another write came since, or the state went (signed out) though `known` names one:
-    /// the step that wanted it fails, and nothing that needed it leaves.
-    pub fn write(&self, known: Option<&str>, blob: &[u8]) -> Result<String> {
-        if let Some(cipher) = &self.cipher {
-            let (state, records) = self.on_cipher(|_| crate::state::open(blob, &cipher.key))?;
-            return self.write_tables(known, &state, &records, None, None, false);
-        }
-        self.on_legacy(|| self.write_legacy(known, blob))
+    fn snapshot(&self) -> std::sync::MutexGuard<'_, (Option<Snapshot>, u64)> {
+        self.snapshot.lock().unwrap_or_else(PoisonError::into_inner)
     }
 
-    fn write_legacy(&self, known: Option<&str>, blob: &[u8]) -> Result<String> {
-        let mut conn = self.connect().map_err(not_saved)?;
-        let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate).map_err(not_saved)?;
-        let word: Option<String> =
-            tx.query_row("SELECT word FROM state WHERE id = 1", [], |row| row.get(0)).optional().map_err(not_saved)?;
-        if word.as_deref() != known {
-            return Err(Error::Save("an older state".into()));
+    /// The rows read or written by a step begun after `clears` clears: kept unless the state was cleared since.
+    fn keep(&self, clears: u64, snapshot: Snapshot) {
+        let mut kept = self.snapshot();
+        if kept.1 == clears {
+            kept.0 = Some(snapshot);
         }
-        let new = new_word();
-        tx.execute("INSERT OR REPLACE INTO state (id, word, blob) VALUES (1, ?1, ?2)", params![new, blob])
-            .map_err(not_saved)?;
-        tx.commit().map_err(not_saved)?;
-        checkpoint(&conn);
-        Ok(new)
+    }
+
+    /// No rows of the state held here in the clear any more, nor put back by a step under way.
+    fn forget(&self) {
+        let mut kept = self.snapshot();
+        kept.0 = None;
+        kept.1 += 1;
     }
 
     fn write_tables(
@@ -327,188 +137,85 @@ impl StateDb {
         known: Option<&str>,
         state: &crate::state::State,
         records: &crate::signal::Entries,
-        baseline: Option<&crate::signal::Entries>,
         held: Option<&dyn Fn() -> bool>,
-        durable: bool,
     ) -> Result<String> {
         self.on_cipher(|cipher| {
+            let clears = self.snapshot().1;
             let mut conn = cipher.connect(&self.path, false)?;
-            if durable {
-                conn.pragma_update(None, "synchronous", "FULL").map_err(cipher::sqlite_error)?;
-            }
             let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate).map_err(cipher::sqlite_error)?;
             if cipher::Cipher::word(&tx)?.as_deref() != known {
                 return Err(Error::Save("an older state".into()));
             }
-            tables::write_with_baseline(&tx, &cipher.key, state, records, baseline)?;
+            // The rows of the state replaced, if they are the ones known here (checked against the word above).
+            let baseline = self.snapshot().0.take().filter(|s| Some(s.word.as_str()) == known);
+            let rows = tables::write(&tx, &cipher.key, state, records, baseline.as_ref().map(|s| &s.rows))?;
             let word = new_word();
             cipher::Cipher::set_word(&tx, Some(&word))?;
             if held.is_some_and(|held| !held()) {
                 return Err(Error::Save("the turn on the state ended".into()));
             }
             tx.commit().map_err(cipher::sqlite_error)?;
+            self.keep(clears, Snapshot { word: word.clone(), rows });
             checkpoint(&conn);
             Ok(word)
         })
     }
 
-    /// Signed out: the state goes, whatever was written last.
+    /// Signed out: the state goes, whatever was written last, and its rows held here in the clear with it.
     pub fn clear(&self) -> Result<()> {
-        if self.cipher.is_some() {
-            return self.on_cipher(|cipher| {
-                let mut conn = cipher.connect(&self.path, false)?;
-                let tx =
-                    conn.transaction_with_behavior(TransactionBehavior::Immediate).map_err(cipher::sqlite_error)?;
-                tables::clear(&tx).map_err(cipher::sqlite_error)?;
-                cipher::Cipher::set_word(&tx, None)?;
-                tx.commit().map_err(cipher::sqlite_error)?;
-                checkpoint(&conn);
-                Ok(())
-            });
-        }
-        self.on_legacy(|| {
-            let conn = self.connect().map_err(not_saved)?;
-            conn.execute("DELETE FROM state", []).map_err(not_saved)?;
+        // Forgotten first, also when the clear fails, and again after it.
+        self.forget();
+        self.on_cipher(|cipher| {
+            let mut conn = cipher.connect(&self.path, false)?;
+            let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate).map_err(cipher::sqlite_error)?;
+            tables::clear(&tx).map_err(cipher::sqlite_error)?;
+            cipher::Cipher::set_word(&tx, None)?;
+            tx.commit().map_err(cipher::sqlite_error)?;
+            self.forget();
+            checkpoint(&conn);
             Ok(())
         })
     }
-
-    /// The state file of before moved in (iOS: `yo-state`; `word_len`: the 36-character word a shared one starts
-    /// with, 0 for the app's own): taken as the state when the database has none, then the file goes. A file left
-    /// beside a state (stopped after the move, before the delete) goes too when it is that state; one that differs
-    /// stays aside as `<file>.unmoved` (an older build wrote it after the move), never over the database's. True when
-    /// it came in.
-    pub fn move_in(&self, file: &Path, word_len: usize) -> Result<bool> {
-        let data = match std::fs::read(file) {
-            Ok(data) => data,
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
-            Err(error) => return Err(unavailable(error)),
-        };
-        if data.len() <= word_len {
-            return Ok(false); // no state in it: left as it is
-        }
-        let blob = &data[word_len..];
-        let mut conn = self.connect().map_err(not_saved)?;
-        let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate).map_err(not_saved)?;
-        let there: Option<Vec<u8>> =
-            tx.query_row("SELECT blob FROM state WHERE id = 1", [], |row| row.get(0)).optional().map_err(not_saved)?;
-        let moved = match &there {
-            None => {
-                tx.execute("INSERT INTO state (id, word, blob) VALUES (1, ?1, ?2)", params![new_word(), blob])
-                    .map_err(not_saved)?;
-                true
-            }
-            Some(_) => false,
-        };
-        tx.commit().map_err(not_saved)?;
-        // Only now, the state in the database: never no state. Another process may have moved it at once.
-        let gone = if moved || there.as_deref() == Some(blob) {
-            std::fs::remove_file(file)
-        } else {
-            let mut aside = file.as_os_str().to_owned();
-            aside.push(".unmoved");
-            std::fs::rename(file, aside)
-        };
-        match gone {
-            Err(error) if error.kind() != std::io::ErrorKind::NotFound => Err(unavailable(error)),
-            _ => Ok(moved),
-        }
-    }
-
-    /// The state of `other` (a database of the app's own, before the state moved into the shared one) moved in when
-    /// this one has none; `other` is emptied once it is here (also when this one has that very state). True when it
-    /// came in.
-    pub fn adopt(&self, other: &StateDb) -> Result<bool> {
-        self.adopt_with_turn(other, None)
-    }
-
-    pub fn adopt_with_turn(&self, other: &StateDb, held: Option<&dyn Fn() -> bool>) -> Result<bool> {
-        if let Some(cipher) = &self.cipher {
-            let Some((_, blob)) = other.read()? else { return Ok(false) };
-            if self.word()?.is_some() {
-                return Ok(false);
-            }
-            let (state, records) = self.on_cipher(|_| {
-                crate::state::open(&blob, other.cipher.as_ref().map_or(&cipher.key, |other| &other.key))
-            })?;
-            self.write_tables(None, &state, &records, None, held, true)?;
-            other.clear()?;
-            return Ok(true);
-        }
-        let Some((_, blob)) = other.read()? else { return Ok(false) };
-        let mut conn = self.connect().map_err(not_saved)?;
-        let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate).map_err(not_saved)?;
-        let there: Option<Vec<u8>> =
-            tx.query_row("SELECT blob FROM state WHERE id = 1", [], |row| row.get(0)).optional().map_err(not_saved)?;
-        let moved = there.is_none();
-        if moved {
-            tx.execute("INSERT INTO state (id, word, blob) VALUES (1, ?1, ?2)", params![new_word(), blob])
-                .map_err(not_saved)?;
-        }
-        tx.commit().map_err(not_saved)?;
-        if moved || there == Some(blob) {
-            other.clear()?;
-        }
-        Ok(moved)
-    }
 }
 
-/// The `Store` of a client on a `StateDb`: a save replaces the state this client read or wrote last
-/// (`StateDb::write`), never one another process wrote since. `held` says whether the process still has its turn
-/// between processes (the platform's lock; iOS takes it back when background time ends): asked before each write, so a
-/// turn taken back writes nothing more.
+/// A state written to the tables of a database in memory and read back: what a restart would read (tests).
+#[cfg(any(test, feature = "test-support"))]
+pub(crate) fn round_trip(
+    state: &crate::state::State,
+    records: &crate::signal::Entries,
+) -> Result<(crate::state::State, crate::signal::Entries)> {
+    let mut conn = Connection::open_in_memory().map_err(cipher::sqlite_error)?;
+    conn.execute_batch(include_str!("../migrations/V0001__initial_state.sql")).map_err(cipher::sqlite_error)?;
+    let tx = conn.transaction().map_err(cipher::sqlite_error)?;
+    tables::write(&tx, &[0; 32], state, records, None)?;
+    tables::read(&tx, &[0; 32]).map(|(state, records, _)| (state, records))
+}
+
+/// A client's `Store` on a `StateDb`: a save replaces the state this client read or wrote last in one transaction,
+/// never another process's newer one. `held`: whether the process still has its turn, asked before each write.
 pub struct DbStore {
     db: Arc<StateDb>,
     known: Mutex<Option<String>>,
-    baseline: Mutex<Option<(String, ProtocolBaseline)>>,
     held: Option<Box<dyn Fn() -> bool + Send + Sync>>,
     saved: AtomicBool,
-}
-
-/// Keeps the last committed libsignal records for row-level change detection.
-struct ProtocolBaseline(crate::signal::Entries);
-
-impl Drop for ProtocolBaseline {
-    fn drop(&mut self) {
-        use zeroize::Zeroize;
-        for value in self.0.values_mut() {
-            value.zeroize();
-        }
-    }
 }
 
 impl DbStore {
     /// `known`: the word of the state the client opened (none: a new one, made by the first save).
     pub fn new(db: Arc<StateDb>, known: Option<String>, held: Option<Box<dyn Fn() -> bool + Send + Sync>>) -> Self {
-        DbStore { db, known: Mutex::new(known), baseline: Mutex::new(None), held, saved: AtomicBool::new(false) }
+        DbStore { db, known: Mutex::new(known), held, saved: AtomicBool::new(false) }
     }
 
     pub fn db(&self) -> &Arc<StateDb> {
         &self.db
     }
 
-    pub fn known(&self) -> Option<String> {
-        self.known.lock().unwrap_or_else(PoisonError::into_inner).clone()
-    }
-
-    /// The state now, if another process wrote it since this client read or wrote it last.
-    pub fn snapshot(&self) -> Result<Snapshot> {
-        self.db.snapshot(self.known().as_deref())
-    }
-
     pub fn load(&self, key: &[u8; 32]) -> Result<Loaded> {
         let known = self.known.lock().unwrap_or_else(PoisonError::into_inner);
-        let loaded = self.db.load(known.as_deref(), key)?;
-        if let Loaded::Newer { word, records, .. } = &loaded {
-            if self.db.encrypted() {
-                *self.baseline.lock().unwrap_or_else(PoisonError::into_inner) =
-                    Some((word.clone(), ProtocolBaseline(records.clone())));
-            }
-        }
-        Ok(loaded)
+        self.db.load(known.as_deref(), key)
     }
 
-    /// The client took in the state of `word` (`Snapshot::Newer`), or none is its own any more (`Gone`).
+    /// The client took in the state of `word` (`Loaded::Newer`), or none is its own any more (`Gone`).
     pub fn took(&self, word: Option<String>) {
         *self.known.lock().unwrap_or_else(PoisonError::into_inner) = word;
     }
@@ -536,34 +243,15 @@ impl DbStore {
 }
 
 impl Store for DbStore {
-    fn save(&self, blob: Vec<u8>) -> std::result::Result<(), String> {
-        self.save_with(|known| self.db.write(known, &blob))
-    }
-
     fn save_state(
         &self,
         state: &crate::state::State,
         records: crate::signal::Entries,
-        key: &[u8; 32],
     ) -> std::result::Result<(), String> {
-        if self.db.cipher.is_some() {
-            self.save_with(|known| {
-                let mut baseline = self.baseline.lock().unwrap_or_else(PoisonError::into_inner);
-                let previous = baseline.as_ref().filter(|(word, _)| Some(word.as_str()) == known);
-                let word = self.db.write_tables(
-                    known,
-                    state,
-                    &records,
-                    previous.map(|(_, records)| &records.0),
-                    self.held.as_deref().map(|held| held as &dyn Fn() -> bool),
-                    false,
-                )?;
-                *baseline = Some((word.clone(), ProtocolBaseline(records)));
-                Ok(word)
-            })
-        } else {
-            self.save(crate::state::seal(state, records, key))
-        }
+        self.save_with(|known| {
+            let held = self.held.as_deref().map(|held| held as &dyn Fn() -> bool);
+            self.db.write_tables(known, state, &records, held)
+        })
     }
 }
 
@@ -585,57 +273,94 @@ mod tests {
         }
     }
 
+    const KEY: [u8; 32] = [7; 32];
+
+    fn open(path: &std::path::Path) -> StateDb {
+        StateDb::open_fresh(path, KEY, Arc::new(|_| {})).unwrap()
+    }
+
+    struct Offline;
+    impl crate::Transport for Offline {
+        fn request(
+            &self,
+            _: &str,
+            _: &str,
+            _: &[(String, String)],
+            _: &[u8],
+        ) -> std::result::Result<crate::Response, String> {
+            Err("offline".into())
+        }
+    }
+
+    fn initial() -> crate::state::State {
+        let push = yo_wire::api::Push::none();
+        crate::Client::registering(Arc::new(Offline), "JO", None, None, None, push).unwrap().saved().state
+    }
+
+    fn write(db: &StateDb, known: Option<&str>, state: &crate::state::State) -> Result<String> {
+        db.write_tables(known, state, &Default::default(), None)
+    }
+
+    fn read(db: &StateDb) -> (String, crate::state::State) {
+        let Loaded::Newer { word, state, .. } = db.load(None, &KEY).unwrap() else {
+            panic!("expected a stored state");
+        };
+        (word, *state)
+    }
+
     #[test]
     fn wal_and_compare_and_swap() {
         let dir = Dir::new("cas");
-        let db = StateDb::open(dir.0.join("state.sqlite")).unwrap();
-        let mode: String = db.connect().unwrap().query_row("PRAGMA journal_mode", [], |r| r.get(0)).unwrap();
+        let db = open(&dir.0.join("state.sqlite"));
+        let conn = db.cipher.connect(&db.path, false).unwrap();
+        let mode: String = conn.query_row("PRAGMA journal_mode", [], |r| r.get(0)).unwrap();
         assert_eq!(mode, "wal");
-        assert_eq!(db.snapshot(None).unwrap(), Snapshot::Gone);
-        let one = db.write(None, b"one").unwrap();
-        assert!(matches!(db.write(None, b"again"), Err(Error::Save(_))), "a new state never over one there");
-        assert_eq!(db.snapshot(Some(&one)).unwrap(), Snapshot::Same);
-        let two = db.write(Some(&one), b"two").unwrap();
-        assert!(matches!(db.write(Some(&one), b"old"), Err(Error::Save(_))), "never over a newer state");
-        assert_eq!(db.snapshot(Some(&one)).unwrap(), Snapshot::Newer { word: two.clone(), blob: b"two".to_vec() });
+        assert!(matches!(db.load(None, &KEY).unwrap(), Loaded::Gone));
+        let mut state = initial();
+        let first = write(&db, None, &state).unwrap();
+        assert!(write(&db, None, &state).is_err());
+        assert!(matches!(db.load(Some(&first), &KEY).unwrap(), Loaded::Same));
+        state.next_seq += 1;
+        let second = write(&db, Some(&first), &state).unwrap();
+        assert!(write(&db, Some(&first), &state).is_err());
+        assert_eq!(read(&db).1.next_seq, state.next_seq);
         db.clear().unwrap();
-        assert!(matches!(db.write(Some(&two), b"late"), Err(Error::Save(_))), "a state signed out of stays gone");
-        assert_eq!(db.read().unwrap(), None);
+        assert!(write(&db, Some(&second), &state).is_err());
+        assert!(matches!(db.load(None, &KEY).unwrap(), Loaded::Gone));
     }
 
-    /// A reader in its transaction keeps its snapshot while another connection (another process) writes, and is
-    /// never blocked by the write.
     #[test]
     fn readers_see_a_snapshot_while_a_write_is_under_way() {
         let dir = Dir::new("snapshot");
-        let db = StateDb::open(dir.0.join("state.sqlite")).unwrap();
-        let first = db.write(None, b"first").unwrap();
-        // A writer holding its write transaction open (in the app: only for the write itself).
-        let mut writer = db.connect().unwrap();
+        let db = open(&dir.0.join("state.sqlite"));
+        let first = write(&db, None, &initial()).unwrap();
+        let mut writer = db.cipher.connect(&db.path, false).unwrap();
         let tx = writer.transaction_with_behavior(TransactionBehavior::Immediate).unwrap();
-        tx.execute("UPDATE state SET word = 'w2', blob = x'7365636f6e64' WHERE id = 1", []).unwrap();
+        cipher::Cipher::set_word(&tx, Some("second")).unwrap();
         let started = std::time::Instant::now();
-        assert_eq!(db.read().unwrap(), Some((first.clone(), b"first".to_vec())), "the committed state, at once");
-        assert!(started.elapsed() < Duration::from_millis(500), "a reader does not wait for the writer");
+        assert_eq!(read(&db).0, first);
+        assert!(started.elapsed() < Duration::from_millis(500));
         tx.commit().unwrap();
-        assert_eq!(db.read().unwrap(), Some(("w2".into(), b"second".to_vec())));
+        assert_eq!(read(&db).0, "second");
     }
 
     #[test]
-    fn processes_writing_in_turns_lose_nothing() {
+    fn concurrent_writers_preserve_every_increment() {
         let dir = Dir::new("turns");
-        let db = Arc::new(StateDb::open(dir.0.join("state.sqlite")).unwrap());
-        db.write(None, &0u64.to_le_bytes()).unwrap();
+        let db = open(&dir.0.join("state.sqlite"));
+        let state = initial();
+        write(&db, None, &state).unwrap();
         let threads: Vec<_> = (0..4)
             .map(|_| {
-                let db = Arc::new(StateDb::open(db.path()).unwrap());
+                let db = open(&db.path);
                 std::thread::spawn(move || {
-                    let mut done = 0;
-                    while done < 50 {
-                        let (word, blob) = db.read().unwrap().unwrap();
-                        let n = u64::from_le_bytes(blob.try_into().unwrap()) + 1;
-                        if db.write(Some(&word), &n.to_le_bytes()).is_ok() {
-                            done += 1;
+                    for _ in 0..10 {
+                        loop {
+                            let (word, mut state) = read(&db);
+                            state.next_seq += 1;
+                            if write(&db, Some(&word), &state).is_ok() {
+                                break;
+                            }
                         }
                     }
                 })
@@ -644,229 +369,98 @@ mod tests {
         for thread in threads {
             thread.join().unwrap();
         }
-        let (_, blob) = db.read().unwrap().unwrap();
-        assert_eq!(u64::from_le_bytes(blob.try_into().unwrap()), 200, "every increment once");
-    }
-
-    #[test]
-    fn a_state_file_of_before_moves_in_once() {
-        let dir = Dir::new("move");
-        let db = StateDb::open(dir.0.join("state.sqlite")).unwrap();
-        let file = dir.0.join("yo-state");
-        assert!(!db.move_in(&file, 36).unwrap(), "no file: nothing");
-        // The shared file: its word, then the sealed state.
-        let word = "0123456789abcdef0123456789abcdef0123";
-        std::fs::write(&file, [word.as_bytes(), b"sealed"].concat()).unwrap();
-        assert!(db.move_in(&file, 36).unwrap());
-        assert!(!file.exists(), "the file goes once the state is in");
-        assert_eq!(db.read().unwrap().unwrap().1, b"sealed");
-        // Left beside it (stopped before the delete): goes, the database's state stays.
-        std::fs::write(&file, b"sealed").unwrap();
-        assert!(!db.move_in(&file, 0).unwrap());
-        assert!(!file.exists());
-        // One that differs (an older build's): never over the database's, kept aside.
-        std::fs::write(&file, b"other").unwrap();
-        assert!(!db.move_in(&file, 0).unwrap());
-        assert_eq!(db.read().unwrap().unwrap().1, b"sealed");
-        assert_eq!(std::fs::read(dir.0.join("yo-state.unmoved")).unwrap(), b"other");
-    }
-
-    #[test]
-    fn the_apps_own_database_moves_into_the_shared_one() {
-        let dir = Dir::new("adopt");
-        let own = StateDb::open(dir.0.join("own.sqlite")).unwrap();
-        let shared = StateDb::open(dir.0.join("shared.sqlite")).unwrap();
-        assert!(!shared.adopt(&own).unwrap(), "nothing to move");
-        own.write(None, b"mine").unwrap();
-        assert!(shared.adopt(&own).unwrap());
-        assert_eq!(shared.read().unwrap().unwrap().1, b"mine");
-        assert_eq!(own.read().unwrap(), None, "emptied once moved");
-        own.write(None, b"other").unwrap();
-        assert!(!shared.adopt(&own).unwrap(), "never over the shared state");
-        assert_eq!(shared.read().unwrap().unwrap().1, b"mine");
+        assert_eq!(read(&db).1.next_seq, state.next_seq + 40);
     }
 
     #[test]
     fn a_save_after_the_turn_ended_writes_nothing() {
         let dir = Dir::new("held");
-        let db = Arc::new(StateDb::open(dir.0.join("state.sqlite")).unwrap());
+        let db = Arc::new(open(&dir.0.join("state.sqlite")));
         let held = Arc::new(AtomicBool::new(true));
         let flag = held.clone();
         let store = DbStore::new(db.clone(), None, Some(Box::new(move || flag.load(Ordering::Relaxed))));
-        store.save(b"one".to_vec()).unwrap();
+        let mut state = initial();
+        store.save_state(&state, Default::default()).unwrap();
         assert!(store.take_saved());
         assert!(!store.take_saved());
+        let word = read(&db).0;
         held.store(false, Ordering::Relaxed);
-        assert!(store.save(b"two".to_vec()).is_err());
-        assert_eq!(db.read().unwrap().unwrap().1, b"one");
-        assert_eq!(store.snapshot().unwrap(), Snapshot::Same);
-    }
-}
-
-#[cfg(test)]
-mod migration_tests {
-    use super::*;
-    use crate::{Client, Push, Response, Transport};
-
-    const KEY: [u8; 32] = [7; 32];
-
-    struct Offline;
-    impl Transport for Offline {
-        fn request(&self, _: &str, _: &str, _: &[(String, String)], _: &[u8]) -> std::result::Result<Response, String> {
-            panic!("no network needed to migrate");
-        }
+        state.next_seq += 1;
+        assert!(store.save_state(&state, Default::default()).is_err());
+        assert!(matches!(db.load(Some(&word), &KEY).unwrap(), Loaded::Same));
     }
 
+    /// The snapshot read or written last is the baseline: a small save after opening (with full dedup lists) reads
+    /// no row back, and one after another process wrote compares with the database again.
     #[test]
-    fn v0_legacy_wal_import_is_atomic_and_runs_once() {
-        let dir = super::tests::Dir::new("migration");
-        let legacy_path = dir.0.join("state.sqlite");
-        let flat_path = dir.0.join("yo-state");
-        let destination = dir.0.join("tables.sqlite");
-        let legacy = StateDb::open(&legacy_path).unwrap();
-        let mut client = Client::registering(Arc::new(Offline), "Example", None, None, None, Push::none()).unwrap();
-        for seq in [3, 1, 2] {
-            client.state.outbox.push_back(crate::state::Outgoing {
-                queued_at: 12,
-                seq,
-                user: "recipient".into(),
-                plain: vec![1, 2, 3],
-                device: None,
-                non_urgent: false,
-                payload: Some(vec![4, 5, 6]),
-                made_for: vec![[7; 32]],
-                refused: true,
-            });
+    fn a_small_save_reads_nothing_back() {
+        let dir = Dir::new("baseline");
+        let path = dir.0.join("state.sqlite");
+        let mut state = initial();
+        state.seen = (0..crate::SEEN as u32).map(|i| crate::sha256(&i.to_be_bytes())).collect();
+        state.received = state.seen.clone();
+        let other = open(&path);
+        write(&other, None, &state).unwrap();
+        let db = open(&path);
+        let loads = || tables::LOADS.with(|loads| loads.get());
+        let (mut word, _) = read(&db);
+        let before = loads();
+        let started = std::time::Instant::now();
+        for _ in 0..20 {
+            state.signed_until += 1;
+            word = write(&db, Some(&word), &state).unwrap();
         }
-        client.state.contacts.insert(
-            "one".into(),
-            crate::state::Contact {
-                name: Some("First".into()),
-                profile_key: Some([19; 32]),
-                ..crate::state::Contact::unknown()
-            },
-        );
-        client.state.contacts.insert(
-            "two".into(),
-            crate::state::Contact {
-                name: Some("Second".into()),
-                profile_key: Some([21; 32]),
-                ..crate::state::Contact::unknown()
-            },
-        );
-        client.state.seen.extend([[3; 32], [2; 32]]);
-        client.state.received.push_back([9; 32]);
-        client.state.storage.extra.insert("future".into(), serde_json::json!({"when": 4, "v": [true, null]}));
-        let blob = client.export(&KEY);
-        let expected = crate::state::open(&blob, &KEY).unwrap();
-        let word = legacy.write(None, &blob).unwrap();
+        eprintln!("20 small saves, {} dedup hashes: {:?}", 2 * crate::SEEN, started.elapsed());
+        assert_eq!(loads(), before, "compared with the snapshot, nothing read back");
+        assert_eq!(read(&db).1.signed_until, state.signed_until);
+        // Another process wrote: the next save here compares with the database, whose word it checked.
+        state.next_seq += 1;
+        word = write(&other, Some(&word), &state).unwrap();
+        let before = loads();
+        state.next_seq += 1;
+        write(&db, Some(&word), &state).unwrap();
+        assert_eq!(loads(), before + 1);
+        assert_eq!(read(&other).1.next_seq, state.next_seq);
+    }
 
-        let reports = Arc::new(Mutex::new(Vec::new()));
-        let captured = reports.clone();
-        let report: Report = Arc::new(move |step, before, after, kind| {
-            captured.lock().unwrap().push((step, before, after, kind));
-        });
-        let mut rolled_back = false;
-        let source = || StateDb::legacy_source(&legacy_path, &flat_path, 0);
-        let interrupted =
-            StateDb::open_encrypted(&destination, KEY, Some(report), source, Some(&|| false), &mut rolled_back);
-        assert!(interrupted.is_err());
-        assert!(rolled_back);
-        assert_eq!(*reports.lock().unwrap(), [(1, 0, 0, "TurnEnded".to_owned())]);
-        assert_eq!(legacy.read().unwrap(), Some((word.clone(), blob)));
-        let incomplete = Connection::open(&destination).unwrap();
-        assert_eq!(incomplete.pragma_query_value::<u32, _>(None, "user_version", |row| row.get(0)).unwrap(), 0);
-        assert_eq!(
-            incomplete
-                .query_row("SELECT count(*) FROM sqlite_master WHERE type = 'table'", [], |row| row.get::<_, u32>(0))
-                .unwrap(),
-            0
-        );
-        drop(incomplete);
-
-        let db = StateDb::open_encrypted(&destination, KEY, None, source, None, &mut rolled_back).unwrap();
-        let conn = db.cipher.as_ref().unwrap().connect(&destination, false).unwrap();
-        assert_eq!(conn.pragma_query_value::<u32, _>(None, "user_version", |row| row.get(0)).unwrap(), 1);
-        let (state, records) = tables::read(&conn, &KEY).unwrap();
-        assert_eq!(serde_json::to_value(&expected.0).unwrap(), serde_json::to_value(state).unwrap());
-        assert_eq!(expected.1, records);
-        assert_eq!(db.word().unwrap().as_deref(), Some(word.as_str()));
-
-        let unkeyed = Connection::open(&destination).unwrap();
-        assert_eq!(
-            unkeyed
-                .query_row("SELECT user FROM outbox ORDER BY owner LIMIT 1", [], |row| row.get::<_, String>(0))
-                .unwrap(),
-            "recipient"
-        );
-        assert!(StateDb::open_encrypted(
-            &destination,
-            [8; 32],
-            None,
-            || panic!("wrong key must fail"),
-            None,
-            &mut false
-        )
-        .is_err());
-
-        let stored_key: Vec<u8> =
-            unkeyed.query_row("SELECT profile_key FROM contacts WHERE entry = 'one'", [], |row| row.get(0)).unwrap();
-        let expected_key = serde_json::to_vec(&[19; 32]).unwrap();
-        assert_ne!(stored_key, expected_key);
-        assert_eq!(cipher::unseal(&KEY, ["contacts", "", "one", "profile_key"], &stored_key).unwrap(), expected_key);
-        assert!(cipher::unseal(&KEY, ["profile_keys", "", "one", "profile_key"], &stored_key).is_err());
-        unkeyed.execute("UPDATE contacts SET profile_key = ?1 WHERE entry = 'two'", [&stored_key]).unwrap();
-        assert!(matches!(db.load(None, &KEY), Err(Error::State)));
-
-        let reopen = || {
-            StateDb::open_encrypted(&destination, KEY, None, || panic!("V0001 ran again"), None, &mut false).unwrap()
-        };
-        assert_eq!(reopen().word().unwrap(), Some(word));
+    /// A read begun before a sign-out's clear, ending after it, does not put the old account's rows back in the
+    /// handle held open; a clear that fails forgets them too.
+    #[test]
+    fn a_reader_over_a_clear_keeps_nothing_in_the_clear() {
+        let dir = Dir::new("clear");
+        let db = open(&dir.0.join("state.sqlite"));
+        write(&db, None, &initial()).unwrap();
+        let held = |db: &StateDb| db.snapshot().0.is_some();
+        assert!(held(&db));
+        // The reader's view: begun before the clear (its count), its rows read.
+        let clears = db.snapshot().1;
+        let mut reader = db.cipher.connect(&db.path, false).unwrap();
+        let tx = reader.transaction().unwrap();
+        let word = cipher::Cipher::word(&tx).unwrap().unwrap();
+        let (_, _, rows) = tables::read(&tx, &db.cipher.key).unwrap();
         db.clear().unwrap();
-        assert_eq!(reopen().word().unwrap(), None, "a source left behind cannot undo sign-out");
-    }
-
-    #[test]
-    fn v0_flat_sources_migrate_with_or_without_a_cas_prefix() {
-        let dir = super::tests::Dir::new("flat-migration");
-        let client = Client::registering(Arc::new(Offline), "Example", None, None, None, Push::none()).unwrap();
-        let legacy_db = dir.0.join("state.sqlite");
-        let blob = client.export(&KEY);
-        for prefix in ["", "0123456789abcdef0123456789abcdef0123"] {
-            let file = dir.0.join(format!("old-{}", prefix.len()));
-            let destination = dir.0.join(format!("new-{}.sqlite", prefix.len()));
-            std::fs::write(&file, prefix.as_bytes()).unwrap();
-            let source = || StateDb::legacy_source(&legacy_db, &file, prefix.len());
-            let mut rolled_back = false;
-            assert!(StateDb::open_encrypted(&destination, KEY, None, source, None, &mut rolled_back).is_err());
-            assert!(rolled_back);
-            assert_eq!(std::fs::read(&file).unwrap(), prefix.as_bytes());
-
-            let old = [prefix.as_bytes(), blob.as_slice()].concat();
-            std::fs::write(&file, &old).unwrap();
-            let db = StateDb::open_encrypted(&destination, KEY, None, source, None, &mut rolled_back).unwrap();
-            let Loaded::Newer { word, state, .. } = db.load(None, &KEY).unwrap() else {
-                panic!("the flat file must be imported");
-            };
-            assert!(!word.is_empty());
-            if !prefix.is_empty() {
-                assert_eq!(word, prefix);
-            }
-            assert_eq!(state.account_secret, client.state.account_secret);
-            assert_eq!(std::fs::read(&file).unwrap(), old);
-        }
+        db.keep(clears, Snapshot { word, rows });
+        drop(tx);
+        assert!(!held(&db), "the reader's rows are not kept");
+        // A failed clear (another process writing) forgets them as well.
+        write(&db, None, &initial()).unwrap();
+        assert!(held(&db));
+        let mut writer = db.cipher.connect(&db.path, false).unwrap();
+        let busy = writer.transaction_with_behavior(TransactionBehavior::Immediate).unwrap();
+        assert!(db.clear().is_err());
+        assert!(!held(&db));
+        drop(busy);
     }
 
     #[test]
     fn fresh_database_rejects_a_future_schema() {
-        let dir = super::tests::Dir::new("fresh");
-        let path = dir.0.join("tables.sqlite");
-        let db = StateDb::open_encrypted(&path, KEY, None, || Ok(None), None, &mut false).unwrap();
-        assert_eq!(db.word().unwrap(), None);
-        let conn = db.cipher.as_ref().unwrap().connect(&path, false).unwrap();
-        conn.pragma_update(None, "user_version", cipher::latest() + 1).unwrap();
+        let dir = Dir::new("fresh");
+        let path = dir.0.join("state.sqlite");
+        let db = open(&path);
+        let conn = db.cipher.connect(&path, false).unwrap();
+        conn.pragma_update(None, "user_version", 2).unwrap();
         assert!(matches!(
-            StateDb::open_encrypted(&path, KEY, None, || panic!("future schema"), None, &mut false),
+            StateDb::open_fresh(&path, KEY, Arc::new(|_| {})),
             Err(Error::Save(kind)) if kind == "UnsupportedVersion"
         ));
     }

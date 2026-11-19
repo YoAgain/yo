@@ -491,19 +491,20 @@ pub struct Disk {
     dir: std::path::PathBuf,
     held: Mutex<bool>,
     free: std::sync::Condvar,
+    /// Full: every write fails (`Alone` gives the turn back before it).
+    pub full: std::sync::atomic::AtomicBool,
+    /// What the files held when the process died (`freeze`): a restart opens that.
+    frozen: Mutex<Option<Files>>,
 }
 
-struct EmptyStateSource;
+/// The database's files as they were at one moment.
+pub type Files = Vec<(std::path::PathBuf, Vec<u8>)>;
 
-impl yo::LegacyStateSource for EmptyStateSource {
-    fn load(&self) -> Result<Option<Vec<u8>>, yo::YoError> {
-        Ok(None)
-    }
-}
+struct StateDiagnostics;
 
-impl yo::StateDiagnostics for EmptyStateSource {
-    fn failure(&self, step: u32, before: u32, after: u32, kind: String) {
-        eprintln!("StateMigration V{step} {kind} (before={before} after={after})");
+impl yo::StateDiagnostics for StateDiagnostics {
+    fn failure(&self, kind: String) {
+        eprintln!("StateDb {kind}");
     }
 }
 
@@ -511,7 +512,13 @@ impl Disk {
     pub fn new() -> Arc<Disk> {
         let dir = std::env::temp_dir().join(format!("yo-shared-{}", random_u64()));
         std::fs::create_dir_all(&dir).unwrap();
-        Arc::new(Disk { dir, held: Mutex::new(false), free: std::sync::Condvar::new() })
+        Arc::new(Disk {
+            dir,
+            held: Mutex::new(false),
+            free: std::sync::Condvar::new(),
+            full: Default::default(),
+            frozen: Mutex::default(),
+        })
     }
 
     pub fn dir(&self) -> &std::path::Path {
@@ -524,16 +531,46 @@ impl Disk {
 
     /// A process's own opening of the database.
     pub fn db(&self) -> Arc<yo::StateDb> {
-        yo::StateDb::open_encrypted(self.path(), vec![7; 32], Arc::new(EmptyStateSource), Arc::new(EmptyStateSource))
-            .unwrap()
+        yo::StateDb::open_fresh(self.path(), vec![7; 32], Arc::new(StateDiagnostics)).unwrap()
     }
 
     /// The word of the last write (none: no state).
     pub fn word(&self) -> Option<String> {
-        yo_core::statedb::StateDb::open_encrypted(self.path(), [7; 32], None, || Ok(None), None, &mut false)
-            .unwrap()
-            .word()
-            .unwrap()
+        yo_core::statedb::StateDb::open_fresh(self.path(), [7; 32], Arc::new(|_| {})).unwrap().word().unwrap()
+    }
+
+    /// The files as they are now.
+    pub fn snapshot(&self) -> Files {
+        ["", "-wal"]
+            .iter()
+            .map(|end| std::path::PathBuf::from(format!("{}{end}", self.path())))
+            .filter_map(|path| std::fs::read(&path).ok().map(|bytes| (path, bytes)))
+            .collect()
+    }
+
+    /// The files as they were at `snapshot`.
+    pub fn put_back(&self, files: Files) {
+        for end in ["-wal", "-shm"] {
+            let _ = std::fs::remove_file(format!("{}{end}", self.path()));
+        }
+        for (path, bytes) in files {
+            std::fs::write(path, bytes).unwrap();
+        }
+    }
+
+    /// The process dies now: what it writes from here on is lost at its restart (`thaw`).
+    pub fn freeze(&self) {
+        let mut frozen = self.frozen.lock().unwrap();
+        if frozen.is_none() {
+            *frozen = Some(self.snapshot());
+        }
+    }
+
+    /// Before a restart: the files as the process left them when it died.
+    pub fn thaw(&self) {
+        if let Some(files) = self.frozen.lock().unwrap().take() {
+            self.put_back(files);
+        }
     }
 
     /// Whether a process has the turn.
@@ -585,5 +622,138 @@ impl yo::StateLock for Process {
 
     fn unlock(&self, _saved: bool) {
         self.release();
+    }
+}
+
+/// The turn of the one process on a `Disk`: always its own, given back before each write while the disk is full.
+pub struct Alone(pub Arc<Disk>);
+
+impl yo::StateLock for Alone {
+    fn lock(&self) -> std::result::Result<(), yo::YoError> {
+        Ok(())
+    }
+
+    fn held(&self) -> bool {
+        !self.0.full.load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    fn unlock(&self, _saved: bool) {}
+}
+
+/// A Yo told apart from others by a short tag: a photo whose key and hash carry it (no blob is ever fetched). The id
+/// is new each time, so the same tag twice is two messages.
+pub fn tagged(tag: String) -> yo_core::Content {
+    assert!(tag.len() <= 64, "a tag of at most 64 bytes");
+    let mut bytes = [0u8; 64];
+    bytes[..tag.len()].copy_from_slice(tag.as_bytes());
+    let mut id = [0u8; 16];
+    id[..8].copy_from_slice(&random_u64().to_be_bytes());
+    id[8..].copy_from_slice(TAG_MARK);
+    let (key, sha256) = (bytes[..32].try_into().unwrap(), bytes[32..].try_into().unwrap());
+    yo_core::Content::Photo(yo_core::Media { id, key, sha256, size: 1, width: 1, height: 1 })
+}
+
+const TAG_MARK: &[u8; 8] = b"yo-tag\0\0";
+
+/// The tag of a `tagged` Yo.
+pub fn tag_of(content: &yo_core::Content) -> Option<String> {
+    let yo_core::Content::Photo(media) = content.clone() else { return None };
+    if &media.id[8..] != TAG_MARK {
+        return None;
+    }
+    let bytes = [&media.key[..], &media.sha256[..]].concat();
+    let end = bytes.iter().position(|b| *b == 0).unwrap_or(bytes.len());
+    String::from_utf8(bytes[..end].to_vec()).ok()
+}
+
+/// A saved state as bytes: what a crashed process left, or a parked account keeps on disk.
+pub fn saved_bytes(state: &yo_core::state::State, records: yo_core::signal::Entries) -> Vec<u8> {
+    serde_json::to_vec(&yo_core::Saved::of(state, &records)).expect("a state encodes")
+}
+
+/// The client a restart opens from `saved_bytes`.
+pub fn restore_bytes(transport: Arc<dyn Transport>, bytes: &[u8]) -> yo_core::Result<Client> {
+    let saved: yo_core::Saved = serde_json::from_slice(bytes).map_err(|_| yo_core::Error::State)?;
+    Client::restore(transport, &saved)
+}
+
+/// `YoClient::register_username_db` on `disk`, the one process on it (`Alone`).
+#[allow(clippy::too_many_arguments)]
+pub fn register_on(
+    transport: Arc<dyn yo::HttpTransport>,
+    disk: Arc<Disk>,
+    key: Vec<u8>,
+    username: String,
+    secret: Option<Vec<u8>>,
+    legacy: Option<Vec<u8>>,
+    name: Option<String>,
+    platform: u8,
+    token: String,
+) -> std::result::Result<Arc<yo::YoClient>, yo::YoError> {
+    let lock: Arc<dyn yo::StateLock> = Arc::new(Alone(disk.clone()));
+    yo::YoClient::register_username_db(
+        transport,
+        disk.db(),
+        key,
+        Some(lock),
+        username,
+        secret,
+        legacy,
+        None,
+        name,
+        platform,
+        token,
+    )
+}
+
+/// The app started again on `disk`: from what the files held when it died (`freeze`), if it did.
+pub fn reopen(
+    transport: Arc<dyn yo::HttpTransport>,
+    disk: Arc<Disk>,
+    key: Vec<u8>,
+) -> std::result::Result<Arc<yo::YoClient>, yo::YoError> {
+    disk.thaw();
+    let lock: Arc<dyn yo::StateLock> = Arc::new(Alone(disk.clone()));
+    yo::YoClient::open_db(transport, disk.db(), key, false, Some(lock))
+}
+
+/// The app layer's sends and acknowledgement under the short names the tests use.
+pub trait AppClient {
+    fn send_yo(&self, to: impl Into<String>) -> std::result::Result<Vec<yo::YoEvent>, yo::YoError>;
+    fn send_photo(
+        &self,
+        to: impl Into<String>,
+        media: yo::YoMedia,
+    ) -> std::result::Result<Vec<yo::YoEvent>, yo::YoError>;
+    fn send_group_yo(&self, group: impl Into<String>) -> std::result::Result<Vec<yo::YoEvent>, yo::YoError>;
+    /// Every event handed out so far is shown: none comes again after a crash.
+    fn acknowledge_events(&self);
+    /// The rest of the last `sync` now rather than with the next one (`Client::after_sync`).
+    fn after_sync(&self) -> std::result::Result<(), yo::YoError>;
+}
+
+impl AppClient for yo::YoClient {
+    fn send_yo(&self, to: impl Into<String>) -> std::result::Result<Vec<yo::YoEvent>, yo::YoError> {
+        self.send(yo::SendTarget::Contact { id: to.into() }, yo::MessageKind::Yo)
+    }
+
+    fn send_photo(
+        &self,
+        to: impl Into<String>,
+        media: yo::YoMedia,
+    ) -> std::result::Result<Vec<yo::YoEvent>, yo::YoError> {
+        self.send(yo::SendTarget::Contact { id: to.into() }, yo::MessageKind::Photo { media })
+    }
+
+    fn send_group_yo(&self, group: impl Into<String>) -> std::result::Result<Vec<yo::YoEvent>, yo::YoError> {
+        self.send(yo::SendTarget::Group { id: group.into() }, yo::MessageKind::Yo)
+    }
+
+    fn acknowledge_events(&self) {
+        self.core_for_tests(|c| c.acknowledge_events());
+    }
+
+    fn after_sync(&self) -> std::result::Result<(), yo::YoError> {
+        Ok(self.core_for_tests(|c| c.after_sync())?)
     }
 }

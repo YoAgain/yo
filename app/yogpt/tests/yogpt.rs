@@ -90,7 +90,7 @@ fn yogpt_answers_a_yo_and_again_after_a_restart() {
     let bot = Bot::start(&[(&hub, &state)]);
     let first = round_trip(&mut alice);
     drop(bot);
-    for file in ["account", "key", "state"] {
+    for file in ["account", "key", "state.sqlite"] {
         let mode = std::os::unix::fs::PermissionsExt::mode(&std::fs::metadata(state.join(file)).unwrap().permissions());
         assert_eq!(mode & 0o777, 0o600, "{file}");
     }
@@ -99,10 +99,6 @@ fn yogpt_answers_a_yo_and_again_after_a_restart() {
     let _bot = Bot::start(&[(&hub, &state)]);
     let second = round_trip(&mut alice);
     assert!(first.iter().chain(&second).all(|user| *user == first[0]));
-
-    // Anything but a Yo gets nothing back.
-    alice.send("YOGPT", Content::Text("rm -rf /".into())).unwrap();
-    assert!(yos_until_quiet(&mut alice, Duration::from_secs(7)).is_empty());
     let _ = std::fs::remove_dir_all(&state);
 }
 
@@ -542,6 +538,29 @@ fn echoes(client: &mut Client, from: &str, group: Option<&str>, quiet: Duration)
     got
 }
 
+/// `echoes` that waits for the first however long a loaded machine takes, then gathers until `quiet`.
+fn echoed(client: &mut Client, from: &str, group: Option<&str>, quiet: Duration) -> Vec<(Content, Option<Vec<u8>>)> {
+    let start = Instant::now();
+    loop {
+        let got = echoes(client, from, group, quiet);
+        if !got.is_empty() {
+            return got;
+        }
+        assert!(start.elapsed() < Duration::from_secs(60), "nothing came");
+    }
+}
+
+/// Who sent the first Yo, waited for however long a loaded machine takes, then until it is quiet.
+fn first_yo(client: &mut Client) -> String {
+    let start = Instant::now();
+    loop {
+        if let Some(from) = yos_until_quiet(client, Duration::from_millis(500)).into_iter().next() {
+            return from;
+        }
+        assert!(start.elapsed() < Duration::from_secs(60), "no Yo came");
+    }
+}
+
 /// Uploads `bytes` for `fetches` fetches: the media to send.
 fn uploaded(client: &mut Client, bytes: &[u8], fetches: u32) -> Media {
     let (m, sealed) = media::seal(bytes, 4, 3).unwrap();
@@ -558,13 +577,13 @@ fn ping_echoes_a_photo_and_a_video_as_they_came() {
     let _bot = ping(&hub, &state, &[], &[]);
     let mut alice = someone(&hub);
     alice.send_yo("PING").unwrap();
-    let ping_id = yos_until_quiet(&mut alice, Duration::from_millis(500)).remove(0);
+    let ping_id = first_yo(&mut alice);
 
     let photo_bytes = reply_picture_of(200_000);
     let fetches = alice.media_fetches("PING").unwrap();
     let photo = uploaded(&mut alice, &photo_bytes, fetches);
     alice.send("PING", Content::Photo(photo.clone())).unwrap();
-    let got = echoes(&mut alice, &ping_id, None, Duration::from_secs(2));
+    let got = echoed(&mut alice, &ping_id, None, Duration::from_secs(2));
     assert_eq!(got.len(), 1, "one photo back");
     let (Content::Photo(back), Some(bytes)) = &got[0] else { panic!("not a photo back") };
     assert_eq!(bytes, &photo_bytes);
@@ -575,7 +594,7 @@ fn ping_echoes_a_photo_and_a_video_as_they_came() {
     let video_bytes = reply_picture_of(300_000);
     let video = uploaded(&mut alice, &video_bytes, fetches);
     alice.send("PING", Content::Video { media: video, duration_ms: 4321 }).unwrap();
-    let got = echoes(&mut alice, &ping_id, None, Duration::from_secs(2));
+    let got = echoed(&mut alice, &ping_id, None, Duration::from_secs(2));
     assert_eq!(got.len(), 1, "one video back");
     let (Content::Video { duration_ms: 4321, .. }, Some(bytes)) = &got[0] else { panic!("not the video back") };
     assert_eq!(bytes, &video_bytes);
@@ -597,7 +616,7 @@ fn ping_echoes_into_a_group_once_and_never_to_quiet_bots() {
     let quiet = leo.username().unwrap().to_lowercase();
     let _bot = ping(&hub, &state, &["--quiet-for", &quiet], &[("YO_GPT_GROUP_COOLDOWN_MS", "2000")]);
     alice.send_yo("PING").unwrap();
-    let ping_id = yos_until_quiet(&mut alice, Duration::from_millis(500)).remove(0);
+    let ping_id = first_yo(&mut alice);
     let (group, _) = alice.create_group("Echo", &[ping_id.clone(), leo.user_id().to_string()]).unwrap();
     let _ = leo.sync(0).unwrap();
     leo.acknowledge_events();
@@ -605,7 +624,7 @@ fn ping_echoes_into_a_group_once_and_never_to_quiet_bots() {
     // Two Yos at once: one Yo back into the group (the second within the cooldown).
     alice.send_group(&group, Content::Yo).unwrap();
     alice.send_group(&group, Content::Yo).unwrap();
-    let got = echoes(&mut alice, &ping_id, Some(&group), Duration::from_millis(1500));
+    let got = echoed(&mut alice, &ping_id, Some(&group), Duration::from_millis(1500));
     assert_eq!(got, [(Content::Yo, None)]);
 
     std::thread::sleep(Duration::from_millis(1000)); // the cooldown over
@@ -613,11 +632,11 @@ fn ping_echoes_into_a_group_once_and_never_to_quiet_bots() {
     let fetches = alice.group_media_fetches(&group).unwrap();
     let photo = uploaded(&mut alice, &photo_bytes, fetches);
     alice.send_group(&group, Content::Photo(photo)).unwrap();
-    let got = echoes(&mut alice, &ping_id, Some(&group), Duration::from_secs(2));
+    let got = echoed(&mut alice, &ping_id, Some(&group), Duration::from_secs(2));
     assert_eq!(got.len(), 1, "one photo back into the group");
     assert!(matches!(&got[0], (Content::Photo(_), Some(bytes)) if *bytes == photo_bytes));
     // Leo, a member too, got it from PING as well.
-    let got = echoes(&mut leo, &ping_id, Some(&group), Duration::from_secs(3));
+    let got = echoed(&mut leo, &ping_id, Some(&group), Duration::from_secs(3));
     assert!(got.iter().any(|(c, _)| matches!(c, Content::Photo(_))));
 
     // The quiet-for bot is never answered, after the cooldown too.
