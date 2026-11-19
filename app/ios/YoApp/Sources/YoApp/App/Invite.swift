@@ -33,7 +33,7 @@ final class Invite {
     case "https", "http": raw = host == "justyo.co" || host == "www.justyo.co" ? parts.first : nil
     default: raw = nil
     }
-    guard let raw, raw.lowercased() != "privacy" else { return nil }
+    guard let raw, !["privacy", "connect"].contains(raw.lowercased()) else { return nil }
     let name = Username.clean(raw)
     return name.isEmpty ? nil : name
   }

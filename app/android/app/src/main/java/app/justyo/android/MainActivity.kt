@@ -27,6 +27,8 @@ class YoViewModel(application: Application) : AndroidViewModel(application) {
     val shares = MutableStateFlow<List<Uri>>(emptyList())
     private val shareSending = kotlinx.coroutines.sync.Mutex()
     val importingShares=MutableStateFlow(false)
+    /** A service asking to connect (Connect.kt), shown once signed in. */
+    val connect=MutableStateFlow<ConnectRequest?>(null)
     val notificationsEnabled=MutableStateFlow(false)
     var deniedThisLaunch by mutableStateOf(false)
         private set
@@ -48,6 +50,7 @@ class YoViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
     fun intent(intent: Intent) {
+        intent.data?.takeIf(Connect::isConnect)?.let { uri -> Connect.request(uri)?.let { connect.value = it }; return }
         intent.data?.let { uri -> inviteName(uri)?.let { name -> repository.command { invite(name) } } }
         val streams = when (intent.action) {
             Intent.ACTION_SEND -> listOfNotNull(IntentCompat.getParcelableExtra(intent, Intent.EXTRA_STREAM, Uri::class.java))

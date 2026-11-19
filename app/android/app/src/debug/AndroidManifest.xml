@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Debug builds only: plain http to this machine's own hub and service page (-PyoHub, -PyoConnectOrigin over
+     `adb reverse`); every other host stays https only. -->
+<manifest xmlns:android="http://schemas.android.com/apk/res/android" xmlns:tools="http://schemas.android.com/tools">
+    <application android:networkSecurityConfig="@xml/local_cleartext" />
+</manifest>

@@ -271,6 +271,8 @@ class Repository(private val context: Context, ownerScope: CoroutineScope) {
     }
 
     private fun pin(c: YoClient) {
+        // The dev hub's keys; a local hub (-PyoHub, a debug build) has none to check, as on iOS.
+        if (BuildConfig.HUB != "https://dev.justyo.app") return
         c.setHubKeys(listOf("LPiW1TOvv_ricbn7bXmS_fNdVbgtEw_3o7OdelvEdVo", "nFQuDMd-2Ueoec6oYG-Ty7lHQELq1OHs4TVODmPmryg").map(::decodeUrl))
         c.setTrustRoots(listOf("kKVskVCuVwESdvLeYWAEVAQmT9mdwvkQ2uhOlnxXO3Q", "Fj-t9EAOsTDPSHPT1Y39FdbcIvl2I7aEEdqlcRAQc0c").map(::decodeUrl))
         c.setZkParams(decodeUrl(DEV_GROUP_PARAMS))
@@ -535,6 +537,13 @@ class Repository(private val context: Context, ownerScope: CoroutineScope) {
             mutable.update { it.copy(friends = listOf(friend) + it.friends) }; listFriends(); persist()
         }
         c.writeStorage()
+    }
+    /** A service's link request answered (Connect.kt); on yes its bot is a friend from now on. Blocking. */
+    fun answerConnect(request: ConnectRequest, allow: Boolean): ConnectOutcome {
+        val c = client ?: return ConnectOutcome.FAILED
+        val outcome = Connect.answer(request, allow, c)
+        if (outcome == ConnectOutcome.CONNECTED) command { runCatching { add(request.service) } }
+        return outcome
     }
     suspend fun invite(name: String) {
         mutable.update { it.copy(pendingInvite = name) }; changes.withLock { persist() }; consumeInvite()

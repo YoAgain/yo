@@ -37,6 +37,7 @@ pub const HELP: &str =
   friends | contacts                the friend list; everyone this account has a chat with
   whois NAME                        a username's user id
   add NAME                          add a friend
+  verify USER ORIGIN TICKET SIG     whether USER's account key signed a service's link request
   send TO [--photo JPEG | --media -]
                                     a Yo to a username, user id or group:ID, with a photo, or the photo
                                     or video of a received event sealed anew (its media.ref on stdin)
