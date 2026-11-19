@@ -1,13 +1,18 @@
 #!/usr/bin/env bash
-# Echo test bots on the DEV hub (https://dev.justyo.app), never the live one: each answers one test account's Yos
-# after a fixed delay, so the app's receive path, notifications and bursts can be tried from a phone.
+# Test bots on the DEV hub (https://dev.justyo.app), never the live one, for one test account (OWNER): the app's
+# receive path, notifications, bursts, groups and long names can be tried from a phone.
 #
+# Echo bots answer OWNER's Yos after a fixed delay:
 #   ECHO1S   a Yo back after 1 s          ECHOBURST  3 Yos, 0.5 s apart
 #   ECHO3S   a Yo back after 3 s          ECHOPIC    a photo (skills/yogpt/replies/001.jpg)
 #   ECHO10S  a Yo back after 10 s
+# People bots (first names, some 15-16 characters long) answer OWNER's direct Yos after 1-5 s and OWNER's Yos in
+# their groups after 0.5-8 s, sometimes 2 or 3 times. Every 3-6 minutes a random member Yos into a random group on
+# its own, and every 3-7 minutes a long-name bot Yos OWNER directly, 1-3 times in a row. Groups (see GROUP_SPECS):
+#   #FAMILIE, #FUSSBALL (7 members), #WG, #LANGENAMEN (long names only); #BOTS has the echo bots.
 #
 #   app/cli/dev/echo-bots.sh setup OWNER      register the bots (once) and send OWNER friend requests
-#   app/cli/dev/echo-bots.sh group OWNER      a group "#BOTS" with all bots and OWNER (after OWNER accepted)
+#   app/cli/dev/echo-bots.sh group OWNER      create the groups with OWNER in them (once), the bots accept
 #   app/cli/dev/echo-bots.sh start OWNER      the supervisor in the background (one `yo listen` per bot)
 #   app/cli/dev/echo-bots.sh stop             stop it (also $DIR/stop.sh)
 #
@@ -18,7 +23,18 @@ set -euo pipefail
 
 REPO=$(cd "$(dirname "$0")/../../.." && pwd)
 DIR=${YO_DEVBOTS:-$HOME/.local/share/yo-devbots}
-BOTS=(ECHO1S ECHO3S ECHO10S ECHOBURST ECHOPIC)
+ECHOS=(ECHO1S ECHO3S ECHO10S ECHOBURST ECHOPIC)
+LONG=(MAXIMILIAN_MUELL ALEXANDRAWINTERS KONSTANTIN_BERG CHRISTOPHERJONES)
+PEOPLE=(PETER TOM ANNA LUKAS SOPHIE MAX LENA_S JONAS BEN_W "${LONG[@]}")
+BOTS=("${ECHOS[@]}" "${PEOPLE[@]}")
+# NAME:MEMBER,MEMBER,... (OWNER is added to each; the first member creates it)
+GROUP_SPECS=(
+  "#BOTS:ECHO1S,ECHO3S,ECHO10S,ECHOBURST,ECHOPIC"
+  "#FAMILIE:PETER,ANNA,TOM"
+  "#FUSSBALL:TOM,LUKAS,MAX,JONAS,BEN_W,MAXIMILIAN_MUELL,KONSTANTIN_BERG"
+  "#WG:SOPHIE,LENA_S"
+  "#LANGENAMEN:MAXIMILIAN_MUELL,ALEXANDRAWINTERS,KONSTANTIN_BERG,CHRISTOPHERJONES"
+)
 HUB=https://dev.justyo.app
 PHOTO=$REPO/skills/yogpt/replies/001.jpg
 
@@ -49,21 +65,29 @@ yo_as() { local bot=$1; shift; (env_for "$bot"; "$YO_BIN" "$@"); }
 
 install_bin() { install -m 755 "$REPO/target/release/yo" "$DIR/bin/yo"; }
 
+json() { python3 -I -c "import json, sys; v = json.load(sys.stdin); print($1)"; }
+
 read -r -d '' BOT_PY <<'EOF' || true
-import os, sys, threading, time
+import os, random, sys, threading, time
 sys.path.insert(0, os.environ["SKILLS"])
 import yocli
 bot, owner, photo = sys.argv[1], sys.argv[2], sys.argv[3]
 sys.argv[0] = bot  # the name yocli.log prints
-# (delays of each answer, with a photo)
-plan = {"ECHO1S": ([1], False), "ECHO3S": ([3], False), "ECHO10S": ([10], False),
-        "ECHOBURST": ([0.5, 1.0, 1.5], False), "ECHOPIC": ([1], True)}[bot]
+echo = {"ECHO1S": ([1], False), "ECHO3S": ([3], False), "ECHO10S": ([10], False),
+        "ECHOBURST": ([0.5, 1.0, 1.5], False), "ECHOPIC": ([1], True)}.get(bot)
+def delays(group):
+    if echo:
+        return echo[0]
+    if not group:
+        return [random.uniform(1, 5)]
+    first = random.uniform(0.5, 8)
+    return [first + i * random.uniform(0.7, 2) for i in range(random.choice([1, 1, 1, 2, 3]))]
 yocli.registered()
 owner_id = None
 limits = yocli.Buckets(rate=1.0, burst=5.0)
 def answer(to):
     try:
-        yocli.yo("send", to, *(("--photo", photo) if plan[1] else ()))
+        yocli.yo("send", to, *(("--photo", photo) if echo and echo[1] else ()))
         yocli.log("answered")
     except yocli.Failed as f:
         yocli.log(f"send failed: {yocli.reason(f)}")
@@ -80,7 +104,7 @@ for event in yocli.listen("--drain-media"):
         continue
     if not limits.allow(owner_id, time.monotonic()):
         continue
-    for delay in plan[0]:
+    for delay in delays(event.get("group")):
         threading.Timer(delay, answer, (event["reply_to"],)).start()
 EOF
 
@@ -91,20 +115,30 @@ setup)
   for bot in "${BOTS[@]}"; do
     if [[ ! -e $DIR/$bot/state.sqlite ]]; then
       mkdir -p -m 700 "$DIR/$bot"
-      yo_as "$bot" register "$bot"
+      if ! yo_as "$bot" register "$bot"; then # a taken name (409): pick another in PEOPLE
+        rm -rf "${DIR:?}/$bot"
+        exit 1
+      fi
     fi
     yo_as "$bot" add "$owner"
   done
   ;;
 group)
   owner=${2:?owner username}
-  yo_as "${BOTS[0]}" groups create "#BOTS" "$owner" "${BOTS[@]:1}"
-  for bot in "${BOTS[@]:1}"; do # the invitation fetched, then accepted (a running listener fetches it itself)
-    yo_as "$bot" sync --wait 5 --drain-media >/dev/null 2>&1 || true
-    for id in $(yo_as "$bot" groups list | python3 -I -c 'import json, sys
-print(" ".join(g["id"] for g in json.load(sys.stdin) if not g["accepted"] and not g["left"]))'); do
-      yo_as "$bot" groups accept "$id"
+  touch "$DIR/groups"
+  for spec in "${GROUP_SPECS[@]}"; do
+    name=${spec%%:*}
+    IFS=, read -r -a members <<<"${spec#*:}"
+    grep -q "^$name " "$DIR/groups" && continue
+    ids=()
+    for m in "${members[@]:1}"; do ids+=("$(yo_as "$m" whoami | json 'v["user"]')"); done
+    id=$(yo_as "${members[0]}" groups create "$name" "$owner" "${ids[@]}" | json 'v["group"]')
+    echo "$name $id ${members[*]}" >>"$DIR/groups"
+    for m in "${members[@]:1}"; do # the invitation fetched, then accepted
+      yo_as "$m" sync --wait 5 --drain-media >/dev/null 2>&1 || true
+      yo_as "$m" groups accept "$id" >/dev/null
     done
+    echo "$name: ${members[*]}"
   done
   ;;
 start)
@@ -124,6 +158,7 @@ supervise)
   echo $$ >"$DIR/supervisor.pid"
   trap 'kill 0' TERM INT
   for bot in "${BOTS[@]}"; do
+    [[ -e $DIR/$bot/state.sqlite ]] || continue
     (
       env_for "$bot"
       export SKILLS=$REPO/skills
@@ -137,6 +172,29 @@ supervise)
       done
     ) >>"$DIR/$bot.log" 2>&1 &
   done
+  ( # every 3-6 minutes a random member of a random people group Yos into it (sent through its listener)
+    sleep 60
+    while :; do
+      line=$(grep -v '^#BOTS ' "$DIR/groups" 2>/dev/null | shuf -n1) || true
+      if [[ -n $line ]]; then
+        read -r name id members <<<"$line"
+        bot=$(tr ' ' '\n' <<<"$members" | shuf -n1)
+        yo_as "$bot" send "group:$id" >/dev/null && echo "$(date -Is) $bot -> $name" || echo "$(date -Is) $bot -> $name failed"
+      fi
+      sleep $((180 + RANDOM % 181))
+    done
+  ) >>"$DIR/ticker.log" 2>&1 &
+  ( # every 3-7 minutes a long-name bot Yos OWNER directly, 1-3 times in a row
+    sleep 120
+    while :; do
+      bot=$(printf '%s\n' "${LONG[@]}" | shuf -n1)
+      for _ in $(seq $((1 + RANDOM % 3))); do
+        yo_as "$bot" send "$owner" >/dev/null && echo "$(date -Is) $bot -> $owner" || echo "$(date -Is) $bot failed"
+        sleep 1
+      done
+      sleep $((180 + RANDOM % 241))
+    done
+  ) >>"$DIR/ticker.log" 2>&1 &
   wait
   ;;
 stop)
@@ -148,7 +206,7 @@ stop)
   rm -f "$DIR/supervisor.pid"
   ;;
 *)
-  sed -n '2,17p' "$0"
+  sed -n '2,21p' "$0"
   exit 2
   ;;
 esac
