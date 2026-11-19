@@ -5,7 +5,9 @@ mod schema;
 use rusqlite::{params, Connection, OptionalExtension, Transaction, TransactionBehavior};
 // The in-file tests use these through `super::*`.
 #[cfg(test)]
-use schema::{migrate_diagnostics, with_feedback_type, with_support, with_support_done, with_todos, DIAGNOSTIC_DAYS, SCHEMA};
+use schema::{
+    migrate_diagnostics, with_feedback_type, with_support, with_support_done, with_todos, DIAGNOSTIC_DAYS, SCHEMA,
+};
 use std::sync::{Mutex, MutexGuard, PoisonError};
 use yo_wire::api;
 use yo_wire::content::BlobId;
@@ -1311,14 +1313,18 @@ impl Db {
 
     /// Deletes a device's envelopes by id (WAL NORMAL: one undone by a power loss comes again, spec 4.7).
     /// Returns how many there were.
-    pub fn ack(&self, device: &DeviceId, ids: &[u64]) -> rusqlite::Result<usize> {
+    /// Deletes the device's envelopes of `ids`; when each one deleted was accepted (ms), for the latency counts.
+    pub fn ack(&self, device: &DeviceId, ids: &[u64]) -> rusqlite::Result<Vec<u64>> {
         let mut conn = self.conn();
         let tx = conn.transaction()?;
-        let mut acked = 0;
+        let mut acked = Vec::new();
         {
-            let mut delete = tx.prepare_cached("DELETE FROM messages WHERE device_id = ?1 AND id = ?2")?;
+            let mut delete =
+                tx.prepare_cached("DELETE FROM messages WHERE device_id = ?1 AND id = ?2 RETURNING received_at")?;
             for id in ids {
-                acked += delete.execute(params![device, *id as i64])?;
+                if let Some(at) = delete.query_row(params![device, *id as i64], |r| r.get::<_, i64>(0)).optional()? {
+                    acked.push(at as u64);
+                }
             }
         }
         tx.commit()?;
@@ -1596,11 +1602,14 @@ mod tests {
     #[test]
     fn schema_7_moves_the_team_thread_into_todos_once() {
         let mut conn = Connection::open_in_memory().unwrap();
-        conn.execute_batch("CREATE TABLE support_messages(id INTEGER PRIMARY KEY AUTOINCREMENT,user_id BLOB,from_team INTEGER,
+        conn.execute_batch(
+            "CREATE TABLE support_messages(id INTEGER PRIMARY KEY AUTOINCREMENT,user_id BLOB,from_team INTEGER,
                 text TEXT,created_at INTEGER,read_at INTEGER,app_version TEXT NOT NULL DEFAULT '',done_at INTEGER);
             INSERT INTO support_messages(user_id,from_team,text,created_at,done_at) VALUES
                 (zeroblob(16),0,'hi',100,NULL),(X'',1,'open task 🎨',90,NULL),(X'',1,'done task',95,205);
-            PRAGMA user_version=6;").unwrap();
+            PRAGMA user_version=6;",
+        )
+        .unwrap();
         for _ in 0..2 {
             with_support_done(&mut conn).unwrap();
             with_todos(&mut conn).unwrap();
@@ -2184,7 +2193,7 @@ mod tests {
         assert_eq!(synchronous(), 1);
         assert_eq!(db.conn().query_row("PRAGMA wal_autocheckpoint", [], |row| row.get::<_, i64>(0)).unwrap(), 16384);
         let (id, _, _) = db.fetch(&[1; 16], 10).unwrap().remove(0);
-        assert_eq!(db.ack(&[1; 16], &[id]).unwrap(), 1);
+        assert_eq!(db.ack(&[1; 16], &[id]).unwrap(), [0], "when it was accepted");
         assert!(db.fetch(&[1; 16], 10).unwrap().is_empty());
         assert_eq!(synchronous(), 1);
     }

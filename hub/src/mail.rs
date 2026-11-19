@@ -112,7 +112,7 @@ impl Hub {
         }
     }
 
-    async fn push(self: Arc<Self>, wake: db::Wake, urgent: bool) {
+    pub(crate) async fn push(self: Arc<Self>, wake: db::Wake, urgent: bool) {
         match self.pusher.wake(wake.push_platform, &wake.push_token, urgent).await {
             push::Outcome::TokenInvalid => {
                 let cleared = self.blocking(move |hub| hub.db.clear_push(&wake.device_id, &wake.push_token));
@@ -120,8 +120,23 @@ impl Hub {
                     eprintln!("yo-hub: clear push: {error}");
                 }
             }
-            push::Outcome::Failed(error) => eprintln!("yo-hub: push: {error}"),
-            push::Outcome::Sent | push::Outcome::Skipped => {}
+            push::Outcome::Failed(failure) => {
+                eprintln!("yo-hub: push: {}", failure.detail);
+                self.count(crate::Event::PushFail, 1);
+                // An error as the apps report theirs (domain "push", the reason as its code, the service as its
+                // place, app "hub"): grouped by those, nothing of the device; the operator's Errors.
+                let payload = serde_json::json!({
+                    "domain": "push", "code": failure.reason, "place": failure.service, "app": "hub",
+                    "details": failure.detail,
+                });
+                let now = self.clock_ms();
+                let noted = self.blocking(move |hub| hub.db.diagnostic("error", &payload, now));
+                if let Ok(Err(error)) = noted.await {
+                    eprintln!("yo-hub: push diagnostic: {error}");
+                }
+            }
+            push::Outcome::Sent => self.count(crate::Event::PushOk, 1),
+            push::Outcome::Skipped => {}
         }
     }
 }
@@ -161,7 +176,7 @@ pub(crate) async fn post_ack(State(hub): Hubs, Auth(device, body): Auth) -> Res<
         return Err(refuse(StatusCode::PAYLOAD_TOO_LARGE));
     }
     let acked = hub.db.ack(&device.device_id, &request.ids)?;
-    hub.count(crate::Event::YoOut, acked as u64);
+    hub.count_acked(&acked, hub.clock_ms());
     Ok(StatusCode::NO_CONTENT)
 }
 

@@ -69,12 +69,69 @@ pub(crate) enum Event {
     YoInBot,
     /// The bytes of the blobs uploaded (counted with each `MediaIn`).
     MediaInBytes,
+    /// A Yo acknowledged by a device within a second of its being accepted (`latency`).
+    Latency1s,
+    /// Within five seconds.
+    Latency5s,
+    /// Within a minute.
+    Latency60s,
+    /// Later.
+    LatencySlow,
+    /// A push the service took (APNs or FCM answered 200).
+    PushOk,
+    /// A push that failed (an error answer, or none); a dead token is not counted, it is forgotten.
+    PushFail,
+    /// Every answer to a request, and those of a class: 4xx but 429, 429 apart, 5xx.
+    Http,
+    Http4xx,
+    Http429,
+    Http5xx,
+    /// An account deleted (by its device, or by the operator).
+    AccountGone,
 }
 
 impl Event {
     /// The kinds as stored, in the order of the variants.
-    const KINDS: [&str; 7] =
-        ["yo-in", "yo-out", "media-in", "media-out", "group-create", "yo-in-bot", "media-in-bytes"];
+    const KINDS: [&str; 18] = [
+        "yo-in",
+        "yo-out",
+        "media-in",
+        "media-out",
+        "group-create",
+        "yo-in-bot",
+        "media-in-bytes",
+        "latency-1s",
+        "latency-5s",
+        "latency-60s",
+        "latency-slow",
+        "push-ok",
+        "push-fail",
+        "http",
+        "http-4xx",
+        "http-429",
+        "http-5xx",
+        "account-gone",
+    ];
+
+    /// The latency bucket of a Yo acknowledged `ms` after it was accepted.
+    pub(crate) fn latency(ms: u64) -> Event {
+        match ms {
+            0..1_000 => Event::Latency1s,
+            1_000..5_000 => Event::Latency5s,
+            5_000..60_000 => Event::Latency60s,
+            _ => Event::LatencySlow,
+        }
+    }
+
+    /// The class of an answer's status, beside `Http` (which counts them all).
+    pub(crate) fn http(status: u16) -> Option<Event> {
+        match status {
+            429 => Some(Event::Http429),
+            400..=428 | 430..=499 => Some(Event::Http4xx),
+            500..=599 => Some(Event::Http5xx),
+            _ => None,
+        }
+    }
 }
 
 pub struct Hub {
@@ -222,6 +279,7 @@ impl Hub {
         }
         router
             .layer(from_fn_with_state(self.clone(), too_old))
+            .layer(from_fn_with_state(self.clone(), request::counted))
             .layer(DefaultBodyLimit::max(limits::MAX_BODY))
             .with_state(self.clone())
     }
@@ -265,6 +323,14 @@ impl Hub {
     /// One more event of a kind, counted in memory until the next minute's flush.
     pub(crate) fn count(&self, event: Event, n: u64) {
         self.events[event as usize].fetch_add(n, Ordering::Relaxed);
+    }
+
+    /// Yos acknowledged at `now`, accepted at `accepted` (ms): `yo-out`, and how long each took in latency buckets.
+    pub(crate) fn count_acked(&self, accepted: &[u64], now: u64) {
+        self.count(Event::YoOut, accepted.len() as u64);
+        for at in accepted {
+            self.count(Event::latency(now.saturating_sub(*at)), 1);
+        }
     }
 
     /// A blob of `size` bytes uploaded: one more `media-in`, and its bytes into `media-in-bytes`.
@@ -446,6 +512,10 @@ mod tests {
         }
         assert!(hub.db.account_key(&user).unwrap().is_none());
         assert!(!hub.db.username_taken(b"deletable").unwrap());
+        hub.flush_events(120_000).unwrap();
+        let gone: i64 =
+            hub.db.conn().query_row("SELECT sum(n) FROM events WHERE kind = 'account-gone'", [], |r| r.get(0)).unwrap();
+        assert_eq!(gone, 1, "counted once, not for the refused ones");
         assert!(matches!(hub.db.delete_account(&device.device_id, 2).unwrap(), Write::Refused(_)));
         let mut config = Config::for_tests();
         config.admin_token = None;
@@ -583,6 +653,82 @@ mod tests {
         let mut off = good;
         off[31] |= 0x80;
         assert!(!Hub::device_keys_usable(1, &off), "not canonical");
+    }
+
+    /// The events table's rows, `(kind, n)` summed over the minutes, by kind.
+    fn counted(hub: &Hub) -> Vec<(String, i64)> {
+        hub.flush_events(120_000).unwrap();
+        hub.db
+            .conn()
+            .prepare("SELECT kind, sum(n) FROM events GROUP BY kind ORDER BY kind")
+            .unwrap()
+            .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap()
+    }
+
+    fn kinds(rows: &[(&str, i64)]) -> Vec<(String, i64)> {
+        rows.iter().map(|(k, n)| (k.to_string(), *n)).collect()
+    }
+
+    #[test]
+    fn acknowledged_yos_count_in_latency_buckets() {
+        let hub = Hub::new(Config::for_tests(), Arc::new(push::Recorder::default())).unwrap();
+        let now = 1_000_000;
+        hub.count_acked(&[now - 10, now - 999, now - 1_000, now - 4_999, now - 59_999, now - 60_000, now + 5], now);
+        let rows = [("latency-1s", 3), ("latency-5s", 2), ("latency-60s", 1), ("latency-slow", 1), ("yo-out", 7)];
+        assert_eq!(counted(&hub), kinds(&rows), "a clock behind counts as at once");
+    }
+
+    #[tokio::test]
+    async fn answers_are_counted_by_class() {
+        use axum::{body::Body, http::Request};
+        use tower::ServiceExt;
+        let hub = Hub::new(Config::for_tests(), Arc::new(push::Recorder::default())).unwrap();
+        for path in ["/", "/nowhere", "/v1/inbox/ack"] {
+            hub.router().oneshot(Request::get(path).body(Body::empty()).unwrap()).await.unwrap();
+        }
+        assert_eq!(counted(&hub), kinds(&[("http", 3), ("http-4xx", 2)]));
+        assert_eq!(Event::http(429).map(|e| Event::KINDS[e as usize]), Some("http-429"));
+        assert_eq!(Event::http(503).map(|e| Event::KINDS[e as usize]), Some("http-5xx"));
+        assert!(Event::http(204).is_none() && Event::http(304).is_none());
+    }
+
+    /// A push the service refuses: counted, and an error of the hub's own in diagnostics (domain "push", by reason and service,
+    /// nothing of the device); one it takes is counted as such; a dead token is neither.
+    #[tokio::test]
+    async fn pushes_are_counted_and_a_failed_one_is_a_diagnostic() {
+        let apns = config::ApnsConfig {
+            key_pem: include_str!("../../tests/fixtures/test-apns.p8").into(),
+            key_id: "KEYID12345".into(),
+            team_id: "TEAMID1234".into(),
+            topic: "co.justyo.app".into(),
+        };
+        let recorder = Arc::new(push::Recorder::default());
+        let hub = Hub::new(Config { apns: Some(apns), ..Config::for_tests() }, recorder.clone()).unwrap();
+        let wake = || db::Wake {
+            device_id: [1; 16],
+            push_platform: api::PUSH_APNS,
+            push_token: b"a1b2c3".to_vec(),
+            bot: false,
+        };
+        hub.clone().push(wake(), true).await;
+        *recorder.device_status.lock().unwrap() = Some(500);
+        hub.clone().push(wake(), true).await;
+        hub.clone().push(wake(), false).await;
+        *recorder.device_status.lock().unwrap() = Some(410);
+        hub.clone().push(wake(), true).await;
+        assert_eq!(counted(&hub), kinds(&[("push-fail", 2), ("push-ok", 1)]));
+        let diagnostics = hub.db.diagnostics().unwrap();
+        let rows = diagnostics.as_array().unwrap();
+        assert_eq!(rows.len(), 1, "one entry for the same service and reason");
+        assert_eq!((rows[0]["kind"].as_str(), rows[0]["count"].as_i64()), (Some("error"), Some(2)));
+        assert_eq!(rows[0]["app"].as_str(), Some("hub"));
+        let payload: serde_json::Value = serde_json::from_str(rows[0]["payload"].as_str().unwrap()).unwrap();
+        assert_eq!((payload["domain"].as_str(), payload["code"].as_str()), (Some("push"), Some("500")));
+        assert_eq!(payload["place"].as_str(), Some("APNs"));
+        assert!(!rows[0]["payload"].as_str().unwrap().contains("a1b2c3"), "no token");
     }
 
     #[test]

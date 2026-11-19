@@ -87,9 +87,24 @@ pub enum Outcome {
     Sent,
     /// The service says the token is dead: forget it.
     TokenInvalid,
-    Failed(String),
+    Failed(Failure),
     /// No service configured for the platform, or no token.
     Skipped,
+}
+
+/// Why a push failed: the service, a short reason to group by (the status and the service's word for it, nothing of
+/// the device), and the whole answer for the log (the token taken out).
+#[derive(Debug, PartialEq, Eq)]
+pub struct Failure {
+    pub service: &'static str,
+    pub reason: String,
+    pub detail: String,
+}
+
+impl Failure {
+    fn new(service: &'static str, reason: impl Into<String>, detail: impl Into<String>) -> Self {
+        Failure { service, reason: reason.into(), detail: detail.into() }
+    }
 }
 
 pub struct Pusher {
@@ -119,15 +134,31 @@ struct Fcm {
 }
 
 /// A push service's answer: `dead` names a dead token; logged without the token, should it name it.
-fn outcome(service: &str, sent: Result<(u16, Vec<u8>), String>, token: &str, dead: fn(u16, &str) -> bool) -> Outcome {
+fn outcome(
+    service: &'static str,
+    sent: Result<(u16, Vec<u8>), String>,
+    token: &str,
+    dead: fn(u16, &str) -> bool,
+) -> Outcome {
     let (status, body) = match sent {
         Ok(answer) => answer,
-        Err(error) => return Outcome::Failed(error),
+        Err(error) => return Outcome::Failed(Failure::new(service, "no answer", error)),
     };
     match status {
         200 => Outcome::Sent,
         _ if dead(status, &String::from_utf8_lossy(&body)) => Outcome::TokenInvalid,
-        _ => Outcome::Failed(format!("{service} {status} {}", told(&body, token))),
+        _ => {
+            // APNs says why in "reason", FCM in "error.status".
+            let said: serde_json::Value = serde_json::from_slice(&body).unwrap_or_default();
+            let word = said["reason"].as_str().or(said["error"]["status"].as_str()).unwrap_or("");
+            let reason =
+                format!("{status} {}", word.chars().filter(char::is_ascii_alphanumeric).take(40).collect::<String>());
+            Outcome::Failed(Failure::new(
+                service,
+                reason.trim_end(),
+                format!("{service} {status} {}", told(&body, token)),
+            ))
+        }
     }
 }
 
@@ -198,7 +229,7 @@ impl Pusher {
                     header.kid = Some(apns.config.key_id.clone());
                     let claims = json!({ "iss": apns.config.team_id, "iat": crate::now_ms() / 1000 });
                     let Ok(value) = jsonwebtoken::encode(&header, &claims, &apns.key) else {
-                        return Outcome::Failed("APNs token".into());
+                        return Outcome::Failed(Failure::new("APNs", "token", "APNs token"));
                     };
                     // Apple accepts a token for an hour and refuses one renewed more than every 20 minutes.
                     *cached =
@@ -260,7 +291,7 @@ impl Pusher {
     async fn fcm(&self, fcm: &Fcm, token: &str, urgent: bool) -> Outcome {
         let access = match self.fcm_access(fcm).await {
             Ok(access) => access,
-            Err(error) => return Outcome::Failed(error),
+            Err(error) => return Outcome::Failed(Failure::new("FCM", "OAuth", error)),
         };
         let body = json!({ "message": { "token": token, "data": { "yo": "1", "urgent": urgent.to_string() }, "android": { "priority": if urgent { "HIGH" } else { "NORMAL" } } } });
         let request = Request {

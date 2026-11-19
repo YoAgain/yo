@@ -230,6 +230,7 @@ pub(crate) async fn put_access_key(State(hub): Hubs, Auth(device, body): Auth) -
 pub(crate) async fn delete_account(State(hub): Hubs, Auth(device, _): Auth) -> Res<StatusCode> {
     let blobs = hub.db.blobs_of(&device.device_id)?;
     hub.db.delete_account(&device.device_id, now_ms())?.done()?;
+    hub.count(crate::Event::AccountGone, 1);
     // Its photos and videos with it; one uploaded meanwhile goes with the sweep.
     for blob in &blobs {
         hub.blobs.remove(blob);

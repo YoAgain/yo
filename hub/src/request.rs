@@ -32,6 +32,16 @@ const BODY_DEADLINE: Duration = Duration::from_secs(20);
 // ---- middleware ----
 
 /// An app older than `YO_MIN_APP` for its platform gets `426` on every request (spec 6.3).
+/// Every answer counted, and its class (4xx, 429, 5xx): counts only, nothing of the request (6.6).
+pub(crate) async fn counted(State(hub): Hubs, request: Request, next: Next) -> Response {
+    let response = next.run(request).await;
+    hub.count(crate::Event::Http, 1);
+    if let Some(class) = crate::Event::http(response.status().as_u16()) {
+        hub.count(class, 1);
+    }
+    response
+}
+
 pub(crate) async fn too_old(State(hub): Hubs, request: Request, next: Next) -> Response {
     if let Some((platform, build)) = header(request.headers(), api::HEADER_APP).and_then(config::app) {
         if hub.config.min_app.iter().any(|(p, min)| *p == platform && build < *min) {

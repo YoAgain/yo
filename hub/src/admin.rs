@@ -58,6 +58,7 @@ fn json_body(body: &[u8]) -> Res<Value> {
 
 async fn delete_user(State(hub): Hubs, Path(user): Path<String>) -> Res<StatusCode> {
     let blobs = hub.db.admin_delete_user(&user_id(&user)?, now_ms())?.ok_or_else(|| refuse(StatusCode::NOT_FOUND))?;
+    hub.count(crate::Event::AccountGone, 1);
     for blob in &blobs {
         hub.blobs.remove(blob);
     }
