@@ -767,6 +767,7 @@ final class AccountStore {
       if signedIn == false {
         found = await KeychainV1.signIn(for: previous, saved: UserDefaults.standard.data(forKey: Self.key))
       }
+      accountLog.notice("migrate: try \(tries, privacy: .public) signedIn \(String(describing: signedIn), privacy: .public) found \(Self.describe(found), privacy: .public)")
       // Re-checked after the keychain answered, before anything irreversible.
       guard updating, account == previous, Self.inFront else { return }
       switch found {
@@ -790,6 +791,7 @@ final class AccountStore {
             broken = false
             return
           }
+          accountLog.error("migrate: restore returned false")
         } catch AccountError.noBackup {
           await KeychainV1.discardOldState()
           updating = false
@@ -797,11 +799,23 @@ final class AccountStore {
           brokenWhy = "account gone"
           broken = true
           return
-        } catch {}
-      case .signIn, .notNow: break
+        } catch {
+          accountLog.error("migrate: restore failed: \(String(describing: error), privacy: .public)")
+        }
+      case .signIn: accountLog.error("migrate: keychain write refused")
+      case .notNow: break
       }
       try? await Task.sleep(for: .seconds(pause))
       pause = min(pause * 2, 30)
+    }
+  }
+
+  private static func describe(_ found: LegacyFound) -> String {
+    switch found {
+    case .signIn(_, let key): "signIn(storageKey: \(key != nil))"
+    case .signedOut: "signedOut"
+    case .missing: "missing"
+    case .notNow: "notNow"
     }
   }
 

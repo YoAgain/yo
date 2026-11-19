@@ -2,6 +2,7 @@
 import SwiftUI
 import UserNotifications
 import YoCore
+import os
 
 @MainActor @Observable final class DeleteNotice {
   static let shared = DeleteNotice()
@@ -277,7 +278,16 @@ private final class StateAccessTime: StateAccess, @unchecked Sendable {
       _ = under.done.wait(timeout: .now() + 2)
       under.task.end()
     }
-    guard under.task.start(id) else { return false }
+    guard under.task.start(id) else {
+      // iOS may refuse background time even in front (seen on a first open: every refusal stalled the update). In
+      // front the app is not suspended, so the access goes on without it; leaving the front revokes the shared turns.
+      guard SharedAccess.foreground?() == true else {
+        Logger(subsystem: "app.justyo", category: "state-access").error("background time refused")
+        return false
+      }
+      stack.append(under)
+      return true
+    }
     stack.append(under)
     return true
   }
