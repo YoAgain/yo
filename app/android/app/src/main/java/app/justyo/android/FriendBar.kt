@@ -340,8 +340,9 @@ private fun BarWords(
     BoxWithConstraints(modifier.fillMaxWidth()) {
         val start = startInset.dp
         val end = endInset.dp
-        val edge = maxOf(start, end).coerceAtMost(maxWidth / 2)
-        val available = maxWidth - edge * 2
+        // As iOS's BarRow: the room between both sides, the line in the middle or moved aside as little as it takes
+        // (a thumbnail or sign on one side must not cut "Sending Yo!" to "Sending Y…").
+        val available = (maxWidth - start - end).coerceAtLeast(0.dp)
         fun width(value: String) = measurer.measure(value, style, maxLines = 1, softWrap = false).size.width
         val slot = ('0'..'9').maxOf { width(it.toString()) }
         fun parts(value: String): Triple<String, String, String> {
@@ -356,7 +357,7 @@ private fun BarWords(
         val selected = candidates.firstOrNull { total(it) <= available } ?: candidates.last()
         val (prefix, digits, suffix) = parts(selected)
         val lineWidth = total(selected).coerceAtMost(available)
-        val lineStart = (maxWidth - lineWidth) / 2
+        val lineStart = ((maxWidth - lineWidth) / 2).coerceAtLeast(start).coerceAtMost(maxWidth - end - lineWidth)
         Row(
             Modifier.offset(x = lineStart).width(lineWidth).clipToBounds()
                 .clearAndSetSemantics { this.contentDescription = selected },

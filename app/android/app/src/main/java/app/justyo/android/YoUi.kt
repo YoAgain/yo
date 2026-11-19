@@ -64,6 +64,8 @@ import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.input.ImeAction
+import androidx.compose.ui.text.input.TextFieldValue
+import androidx.compose.ui.text.TextRange
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalFocusManager
 import androidx.compose.ui.unit.IntOffset
@@ -228,7 +230,8 @@ import uniffi.yo.usernameValid
                 }
             }
             Spacer(Modifier.height(8.dp))
-            NameEntry(name, { name = usernameCanonical(it); repo.clearError() },
+            val (nameValue, onName) = nameField(name) { name = it; repo.clearError() }
+            NameEntry(nameValue, onName,
                 if (tooShort) false else free, Modifier.offset { IntOffset(shake.value.dp.roundToPx(), 0) }.focusRequester(nameFocus), register)
             Spacer(Modifier.height(10.dp))
             OnboardingButton(
@@ -526,9 +529,10 @@ private fun NotificationSettingsRow(onClick: () -> Unit) {
     val owner=LocalLifecycleOwner.current
     val view=LocalView.current
     val scope=rememberCoroutineScope()
-    var profile by remember { mutableStateOf(false) }
-    var add by remember { mutableStateOf(false) }
-    var group by remember { mutableStateOf(false) }
+    // Saveable: a rotation or a process restored by Android keeps Settings, Add Friend and New Group open.
+    var profile by rememberSaveable { mutableStateOf(false) }
+    var add by rememberSaveable { mutableStateOf(false) }
+    var group by rememberSaveable { mutableStateOf(false) }
     var name by rememberSaveable { mutableStateOf("") }
     var addingFriend by remember { mutableStateOf(false) }
     var addError by remember { mutableStateOf<String?>(null) }
@@ -824,9 +828,10 @@ private fun NotificationSettingsRow(onClick: () -> Unit) {
                     if (add) {
                         val placeholder = addError ?: stringResource(R.string.ui_name)
                         val style = TextStyle(fontFamily = YoFont, fontSize = 36.sp, color = Color.White, textAlign = TextAlign.Center)
+                        val (nameValue, onName) = nameField(name) { name = it; addError = null }
                         BasicTextField(
-                            value = name,
-                            onValueChange = { name = usernameCanonical(it); addError = null },
+                            value = nameValue,
+                            onValueChange = onName,
                             singleLine = true,
                             enabled = !addingFriend,
                             textStyle = style,
@@ -841,7 +846,7 @@ private fun NotificationSettingsRow(onClick: () -> Unit) {
                                         .padding(horizontal = 20.dp),
                                     contentAlignment = Alignment.Center,
                                 ) {
-                                    if (name.isEmpty()) Text(
+                                    if (nameValue.text.isEmpty()) Text(
                                         placeholder, style = style.copy(color = Color.White.copy(alpha = 0.45f)),
                                         maxLines = 1, overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis,
                                     )
@@ -849,7 +854,8 @@ private fun NotificationSettingsRow(onClick: () -> Unit) {
                                 }
                             },
                         )
-                        LaunchedEffect(Unit) { friendFocus.requestFocus() }
+                        // Open, and again after "No Such User": the keyboard stays for the next name, as on iOS.
+                        LaunchedEffect(addError) { friendFocus.requestFocus() }
                     } else {
                         val addFriendLabel = stringResource(R.string.ui_add_friend)
                         FlatRow("+", Repository.nextColor(s.friends), Modifier.semantics {
@@ -1054,8 +1060,34 @@ private fun RecoveryAction(
     }
 }
 
+/** A name field's text. A Japanese keyboard hands the field kana and full-width letters while a word is written ("i"
+ *  arrives as "い"): cleaning every change emptied the field. Left alone while composing; once committed, read as Latin
+ *  and cleaned (as iOS's Username.clean). */
 @Composable
-private fun NameEntry(name: String, onChange: (String) -> Unit, available: Boolean?, modifier: Modifier, onSubmit: () -> Unit) {
+private fun nameField(name: String, onChange: (String) -> Unit): Pair<TextFieldValue, (TextFieldValue) -> Unit> {
+    var field by remember { mutableStateOf(TextFieldValue(name, TextRange(name.length))) }
+    val shown = if (field.composition == null && field.text != name) TextFieldValue(name, TextRange(name.length)) else field
+    return shown to { value ->
+        if (value.composition != null) field = value
+        else {
+            val clean = usernameCanonical(latinName(value.text))
+            field = TextFieldValue(clean, TextRange(clean.length))
+            if (clean != name) onChange(clean)
+        }
+    }
+}
+
+/** Kana and full-width letters as the Latin a romaji keyboard typed; anything else unchanged. */
+internal fun latinName(typed: String): String {
+    if (typed.none { it in '\u3040'..'\u30FF' || it in '\uFF01'..'\uFF9F' }) return typed
+    val narrow = java.text.Normalizer.normalize(typed, java.text.Normalizer.Form.NFKC)
+    return if (Build.VERSION.SDK_INT >= 29) android.icu.text.Transliterator.getInstance("Hiragana-Latin; Katakana-Latin")
+        .transliterate(narrow) else narrow
+}
+
+@Composable
+private fun NameEntry(value: TextFieldValue, onChange: (TextFieldValue) -> Unit, available: Boolean?, modifier: Modifier, onSubmit: () -> Unit) {
+    val name = value.text
     val placeholder = copy(ProductText.USERNAME)
     val measure = rememberTextMeasurer()
     val density = LocalDensity.current
@@ -1065,7 +1097,7 @@ private fun NameEntry(name: String, onChange: (String) -> Unit, available: Boole
         val room = with(density) { (maxWidth - 88.dp).coerceAtLeast(0.dp).toPx() }
         val size = (28 * room / naturalWidth).coerceIn(8f, 28f).sp
         BasicTextField(
-            value = name, onValueChange = onChange, singleLine = true,
+            value = value, onValueChange = onChange, singleLine = true,
             modifier = modifier.fillMaxWidth().semantics { contentDescription = placeholder },
             textStyle = style.copy(fontSize = size), cursorBrush = SolidColor(Color.White),
             keyboardOptions = KeyboardOptions(autoCorrectEnabled = false, imeAction = ImeAction.Done),
