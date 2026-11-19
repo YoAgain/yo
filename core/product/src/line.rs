@@ -101,6 +101,38 @@ pub fn flow_two_lines(flow: &Flow, widths: &FlowWidths, room: f32) -> [String; 2
     [first, second]
 }
 
+/// A bar's name as shown: a group's with one "#" ("#WG"), whether the name brings its own or not.
+pub fn bar_title(name: &str, group: bool) -> String {
+    if group {
+        format!("#{}", name.strip_prefix('#').unwrap_or(name))
+    } else {
+        name.to_string()
+    }
+}
+
+/// A bar's title in words, for two small lines when it does not fit in one ("Yo Request from" /
+/// "MAXIMILIAN_MUELL"). Every bar title: the bar's size if it fits, else the small size, else two small lines.
+pub fn title_words(text: &str) -> Vec<String> {
+    text.split(' ').filter(|word| !word.is_empty()).map(str::to_string).collect()
+}
+
+/// The title's words over two lines: as many whole words on the first as fit (at least one), the rest on the
+/// second, never cut (a line wider than the room is shrunk by the platform).
+pub fn wrap_two_lines(words: &[String], widths: &[f32], space: f32, room: f32) -> [String; 2] {
+    let width = |i: usize| widths.get(i).copied().unwrap_or(0.0);
+    let mut used = 0.0;
+    let mut split = 0;
+    while split < words.len() {
+        let add = if split == 0 { 0.0 } else { space } + width(split);
+        if split > 0 && used + add > room {
+            break;
+        }
+        used += add;
+        split += 1;
+    }
+    [words[..split].join(" "), words[split..].join(" ")]
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -201,6 +233,28 @@ mod tests {
     fn one_sender_at_the_small_size() {
         assert_eq!(lines(&[("MAXIMILIAN_MUELL", 3)], 30.0), ["3× Yo from MAXIMILIAN_MUELL", ""]);
         assert_eq!(lines(&[("MAXIMILIAN_MUELL", 3)], 20.0), ["3× Yo from", "MAXIMILIAN_MUELL"]);
+    }
+
+    #[test]
+    fn a_group_title_has_one_hash() {
+        assert_eq!(bar_title("WG", true), "#WG");
+        assert_eq!(bar_title("#BOTS", true), "#BOTS");
+        assert_eq!(bar_title("MIA", false), "MIA");
+    }
+
+    #[test]
+    fn titles_wrap_whole_words_over_two_lines() {
+        let wrap = |text: &str, room: f32| {
+            let words = title_words(text);
+            let widths: Vec<f32> = words.iter().map(|w| w.chars().count() as f32).collect();
+            wrap_two_lines(&words, &widths, 1.0, room)
+        };
+        assert_eq!(wrap("Yo Request from MAXIMILIAN_MUELL", 20.0), ["Yo Request from", "MAXIMILIAN_MUELL"]);
+        assert_eq!(wrap("Yo Request from CHRISTOPHERJONES", 32.0), ["Yo Request from CHRISTOPHERJONES", ""]);
+        assert_eq!(wrap("Yo Request: #LANGENAMENGRUPPE", 16.0), ["Yo Request:", "#LANGENAMENGRUPPE"]);
+        // A 16-character name alone is one word: never cut, at worst shrunk by the platform.
+        assert_eq!(wrap("ALEXANDRAWINTERS", 10.0), ["ALEXANDRAWINTERS", ""]);
+        assert_eq!(title_words("  Sent  3× Yo! "), ["Sent", "3×", "Yo!"]);
     }
 
     #[test]

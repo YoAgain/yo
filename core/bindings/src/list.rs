@@ -88,6 +88,24 @@ pub fn list_sender_flow(senders: Vec<Sender>, lang: Language) -> Flow {
     flow::sender_flow(&senders, lang)
 }
 
+/// A bar's name as shown: a group's with one "#".
+#[uniffi::export]
+pub fn list_bar_title(name: String, group: bool) -> String {
+    flow::bar_title(&name, group)
+}
+
+/// A bar title's words, to measure at the small size when it does not fit in one line.
+#[uniffi::export]
+pub fn list_title_words(text: String) -> Vec<String> {
+    flow::title_words(&text)
+}
+
+/// The title's whole words over two small lines (the second may be empty).
+#[uniffi::export]
+pub fn list_wrap_two_lines(words: Vec<String>, widths: Vec<f32>, space: f32, room: f32) -> Vec<String> {
+    flow::wrap_two_lines(&words, &widths, space, room).into()
+}
+
 /// The two small lines (the second may be empty) for the room the bar's words have.
 #[uniffi::export]
 pub fn list_flow_two_lines(flow: Flow, widths: FlowWidths, room: f32) -> Vec<String> {
