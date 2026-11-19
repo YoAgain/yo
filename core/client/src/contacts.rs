@@ -9,11 +9,12 @@ impl Client {
         let result = (|| {
             let user = self.user_named(&Handle::parse(who)?)?.0;
             let name = self.state.name.is_some();
-            let contact = self.state.contacts.entry(user).or_default();
+            let contact = self.state.contacts.entry(user.clone()).or_default();
             contact.accepted = true;
             contact.key_due = true;
             contact.receipt_due = contact.chat;
             contact.profile_due = name;
+            self.keep_friend(&user);
             self.persist()?;
             self.profile_keys()?;
             self.send_profiles();

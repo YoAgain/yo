@@ -307,6 +307,19 @@ impl Client {
         self.storage_changed()
     }
 
+    /// A contact said yes to (accepted, or written to) kept as a friend, so a restored phone has it as one and not as a
+    /// request (spec 4.10, 6.9): the app's own name and colour stay as they are, a removal is taken back.
+    pub(crate) fn keep_friend(&mut self, user: &str) {
+        if user == self.state.user_id || self.probe_service(user) {
+            return;
+        }
+        let friend = self.state.storage.friends.entry(user.to_owned()).or_default();
+        if friend.removed.value || friend.removed.unset() {
+            friend.removed.set(false, crate::wall_ms().max(friend.removed.at + 1));
+            self.state.storage_dirty = true;
+        }
+    }
+
     /// Takes a friend off the list (a block stays as it is).
     pub fn remove_friend(&mut self, user: &str) -> Result<()> {
         let now = crate::wall_ms();

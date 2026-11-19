@@ -1617,6 +1617,7 @@ impl Client {
             if let Some(contact) = self.state.contacts.get_mut(user) {
                 contact.chat = true;
             }
+            self.keep_friend(user);
         }
         Ok(())
     }

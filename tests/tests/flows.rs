@@ -467,6 +467,31 @@ fn a_new_phone_from_the_words_gets_its_friends_back_and_sessions_form_again() {
     assert_eq!(yos(&a2.drain(), &b.user()), 1);
 }
 
+/// Friends made by writing and by saying yes to a request, never named or coloured by the app (no `set_friend`):
+/// a phone restored from the storage has them as friends, not as requests.
+#[test]
+fn a_restored_phone_keeps_friends_made_by_writing_and_by_saying_yes() {
+    let hub = TestHub::start();
+    let (a, b) = friends(&hub);
+    // C writes first: a request to A, which A says yes to.
+    let c = Phone::new(&hub, &username(random_u64() % 1_000_000_000 + 2_000_000_000), Some("CAROL"));
+    c.send_yo(a.name.clone()).unwrap();
+    assert_eq!(yos(&a.drain(), &c.user()), 1);
+    a.accept(c.user()).unwrap();
+    c.drain();
+    a.write_storage().unwrap();
+    let a2 = Phone::register(&hub, &a.name, None, Some(a.account_secret()));
+    let mut kept: Vec<_> = a2.friends().into_iter().map(|f| f.user).collect();
+    kept.sort();
+    let mut want = vec![b.user(), c.user()];
+    want.sort();
+    assert_eq!(kept, want, "both kept as friends");
+    for user in [b.user(), c.user()] {
+        let contact = a2.contacts().into_iter().find(|x| x.user == user).expect("a contact");
+        assert!(contact.accepted, "a friend, not a request");
+    }
+}
+
 /// The account on a new phone, the old one still sending: what it had waiting goes out unsigned (deliveries are),
 /// and the friend shows nothing of it once it knows the new device. Its own calls are refused (`Replaced`).
 #[test]
