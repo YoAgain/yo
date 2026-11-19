@@ -35,7 +35,10 @@ struct HelpPage: View {
       Section {
         StatusPage(summaryOnly: true)
         NavigationLink(value: SettingsView.Page.licenses) {
-          LabeledContent("Yo \(Self.marketingVersion)") {
+          // A settings row: the label leading, the version as its value.
+          LabeledContent {
+            Text(Self.marketingVersion)
+          } label: {
             Label("About & Licenses", systemImage: "info.circle.fill").labelStyle(Tile(.gray))
           }
         }

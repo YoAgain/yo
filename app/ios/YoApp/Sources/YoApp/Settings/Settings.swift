@@ -32,6 +32,9 @@ struct SettingsView: View {
   }
   @State private var path: [Page] = []
   @State private var showingDeleteAccount = false
+  /// The first page's own height (its rows and the bar above them): the sheet opens that high, no empty bottom.
+  @State private var fit: CGFloat?
+  @State private var detent: PresentationDetent = .large
 
   private var currentIconAsset: String {
     AppIconPage.icons.first { $0.name == currentIconName }?.image ?? "IconStandard"
@@ -89,6 +92,14 @@ struct SettingsView: View {
           }
         }
       }
+      .onScrollGeometryChange(for: CGFloat.self) { geometry in
+        geometry.contentSize.height + geometry.contentInsets.top + geometry.contentInsets.bottom
+      } action: { _, height in
+        guard path.isEmpty, height > 0, abs(height - (fit ?? 0)) > 1 else { return }
+        let fitted = detent != .large || fit == nil
+        fit = height
+        if fitted { detent = .height(height) }
+      }
       .task { await accounts.refreshSupport() }
       .onAppear { currentIconName = UIApplication.shared.alternateIconName }
       .navigationDestination(for: Page.self) { page in
@@ -122,10 +133,14 @@ struct SettingsView: View {
       #if YO_DEV
         HitchMonitor.shared.scene = path.last.map { String(describing: $0) } ?? "settings root"
       #endif
+      // A page with more to read takes the full height; back on the first page, its own height again.
+      if !path.isEmpty { detent = .large } else if let fit { detent = .height(fit) }
     }
-    // One height, the whole first card in view and room for the pages pushed in: no grabber, nothing jumps.
-    .presentationDetents([.large])
-    .presentationDragIndicator(.hidden)
+    // As high as the first page, with the grabber to pull it up; the pages pushed in take the full height.
+    .presentationDetents(fit.map { [.height($0), .large] } ?? [.large], selection: $detent)
+    .presentationDragIndicator(.visible)
+    // Below full height an iOS 26 sheet is see-through glass: opaque instead.
+    .presentationBackground(Color(.systemGroupedBackground))
     .task(id: "\(accounts.account?.username ?? "")/\(accounts.account?.secured == true)/\(accounts.wordsSaved)") {
       let available = await Task.detached(priority: .utility) { RecoveryWords.load() != nil }.value
       guard !Task.isCancelled else { return }
