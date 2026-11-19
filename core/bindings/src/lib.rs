@@ -1006,6 +1006,12 @@ impl YoClient {
         Ok(self.look(|c| c.safety_code_matches(&who, &scanned))??)
     }
 
+    /// The account key's signature for a service's link request (`yo_wire::connect`): `origin` the page that asks,
+    /// `ticket` its request. Shown to the user, and said yes to, before.
+    pub fn sign_connect(&self, origin: String, ticket: String) -> Result<Vec<u8>, YoError> {
+        Ok(self.look(|c| c.sign_connect(&origin, &ticket))??.to_vec())
+    }
+
     pub fn set_verified(&self, who: String, verified: bool) -> Result<(), YoError> {
         Ok(self.with(|c| c.set_verified(&who, verified))??)
     }

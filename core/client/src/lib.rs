@@ -277,6 +277,11 @@ pub struct Whois {
 impl Whois {
     /// The user id and the username as its owner writes it; `NotOnYo`: nobody by that name.
     pub fn send(&self) -> Result<(String, Option<String>)> {
+        self.send_keyed().map(|(user, username, _)| (user, username))
+    }
+
+    /// As `send`, with the account key the hub attests for the user.
+    pub fn send_keyed(&self) -> Result<(String, Option<String>, Key)> {
         let response =
             self.transport.request("POST", api::LOOKUP, &self.headers, &self.body).map_err(Error::Network)?;
         match response.status {
@@ -290,7 +295,7 @@ impl Whois {
         if user == self.me {
             return Err(Error::Protocol("oneself"));
         }
-        Ok((user, spelled(named.username)))
+        Ok((user, spelled(named.username), named.found.account_key))
     }
 }
 
@@ -780,6 +785,13 @@ impl Client {
     /// The account key's secret: what the backup seals (spec 7), so a new phone registers with it.
     pub fn account_secret(&self) -> [u8; 32] {
         self.state.account_secret
+    }
+
+    /// The account key's signature for a service's link request (`yo_wire::connect`): `origin` is the page that asks,
+    /// `ticket` its request. The app shows whom it connects before it signs.
+    pub fn sign_connect(&self, origin: &str, ticket: &str) -> Result<[u8; yo_wire::SIGNATURE_LEN]> {
+        let message = yo_wire::connect::to_be_signed(origin, ticket).ok_or(Error::Protocol("connect"))?;
+        Ok(identity::sign(&identity::account_pair(&self.state.account_secret)?, &message))
     }
 
     /// Stores the backup record at the hub, replacing the one before (spec 7). `409`: another account's locator.

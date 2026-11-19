@@ -44,6 +44,7 @@ pub fn run(context: &Context, command: &[String]) -> Outcome {
         ["contacts"] => Ok(contacts(&context.client())),
         ["whois", name] => whois(context, name).map(|(user, username)| json!({ "user": user, "username": username })),
         ["add", name] => add(context, name),
+        ["verify", user, origin, ticket, signature] => verify(context, user, origin, ticket, signature),
         ["send", to, rest @ ..] => send(context, to, rest),
         ["groups"] | ["groups", "list"] => Ok(groups(&context.client())),
         ["groups", "create", name, members @ ..] if !members.is_empty() => {
@@ -161,6 +162,19 @@ fn add(context: &Context, name: &str) -> Outcome {
     client.set_friend(&user, username.clone(), None)?;
     client.write_storage()?;
     Ok(json!({ "user": user, "username": username }))
+}
+
+/// Whether a user's account key signed a service's link request (`yo_wire::connect`), the key as the hub attests it.
+/// Not one: `{"ok": false}`, exit 0; nobody by that id: a failure.
+fn verify(context: &Context, user: &str, origin: &str, ticket: &str, signature: &str) -> Outcome {
+    if !yo_core::Client::is_user_id(user) {
+        return Err(Failure::usage("verify USER ORIGIN TICKET SIGNATURE: USER a user id"));
+    }
+    let signature = yo_wire::unb64(signature).map_err(|_| Failure::usage("verify: SIGNATURE in base64url"))?;
+    let lookup = context.client().whois_begin(user)?;
+    let (found, username, account_key) = lookup.send_keyed()?;
+    let ok = found == user && yo_wire::connect::verify(&account_key, origin, ticket, &signature);
+    Ok(json!({ "ok": ok, "user": found, "username": username }))
 }
 
 fn sync(context: &Context, args: &[&str]) -> Outcome {

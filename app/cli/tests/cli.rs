@@ -284,3 +284,23 @@ fn unacknowledged_events_come_again_until_acked() {
     assert_ne!(message(&mut out), first, "acknowledged: not again");
     let _ = std::fs::remove_dir_all(&yo.state);
 }
+
+#[test]
+fn verify_checks_a_connect_signature_against_the_hub() {
+    let hub = TestHub::start();
+    let yo = Yo::new(&hub);
+    yo.ok(&["register", &format!("Svc{}", random_u64() % 1_000_000)]);
+    let alice = someone(&hub);
+    let (origin, ticket) = ("https://justyo.co", "ticket-1");
+    let signature = yo_wire::b64(&alice.sign_connect(origin, ticket).unwrap());
+    let ok = yo.ok(&["verify", alice.user_id(), origin, ticket, &signature]);
+    assert_eq!(ok["ok"], true, "{ok}");
+    assert_eq!(ok["user"], alice.user_id());
+    assert_eq!(ok["username"], alice.username().unwrap());
+    for (origin, ticket) in [("https://evil.example", ticket), (origin, "ticket-2")] {
+        assert_eq!(yo.ok(&["verify", alice.user_id(), origin, ticket, &signature])["ok"], false);
+    }
+    let bob = someone(&hub);
+    assert_eq!(yo.ok(&["verify", bob.user_id(), origin, ticket, &signature])["ok"], false, "another account");
+    assert_eq!(yo.run(&["verify", "nobody", origin, ticket, &signature]).0, 2);
+}

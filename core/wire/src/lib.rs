@@ -5,6 +5,7 @@
 
 pub mod api;
 pub mod cert;
+pub mod connect;
 pub mod content;
 pub mod devices;
 pub mod envelope;
