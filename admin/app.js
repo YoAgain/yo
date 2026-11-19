@@ -240,33 +240,26 @@ if (document.body.classList.contains("login")) {
     $("sys-head").onkeydown = (e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); open(); } };
   };
 
-  // ---- app builds: label and state per reported app, worked out by the collector (GitHub releases) -------------
-  // iOS: "TestFlight · newest" (the newest release's build), "TestFlight · update" (older: the only yellow badge),
-  // "TestFlight (main)" (newer than the release), or the plain build when no release is known.
+  // ---- app builds: the platform word ("iOS", "Android", "Bot"), green when current, yellow when an update is out,
+  // plain when unknown; channel, build and newest build only in the tooltip. Worked out by the collector: the channel
+  // is in the build ("….1" TestFlight public, 12 digits TestFlight internal), current is the highest on its channel.
   const build = (app) => (app || "").split("/").pop();
   const parse = (app) => {
     const [p, b] = (app || "").split("/");
     return p && /^\d+$/.test(b || "") ? [p, Number(b)] : null;
   };
-  // The hub's minimum (YO_MIN_APP, "ios/…"): a build below it is refused by the hub ("dead": the user must update).
+  // The hub's minimum (YO_MIN_APP, "ios/…"): a build below it is refused by the hub and must update.
   let minApp = null;
   const findNewest = (h) => { minApp = parse(h?.min_app); };
-  const appInfo = (app) => last?.app_builds?.[app] || (app ? { channel: "unknown", label: build(app), state: null, title: app } : null);
-  // "new", "old" (an update is out), "dead" (below the minimum) or null (nothing to compare with, or no app).
-  const appState = (app) => {
-    const i = appInfo(app), v = parse(app);
-    if (!i) return null;
-    if (minApp && v && minApp[0] === v[0] && v[1] < minApp[1]) return "dead";
-    return { newest: "new", older: "old" }[i.state] || null;
-  };
-  const STATE_CLASS = { old: "warn", dead: "bad" };
-  const appText = (i, a) => a === "dead" ? `${i.label} · too old` : i.label;
+  const appInfo = (app) => last?.app_builds?.[app] || (app ? { label: build(app), state: null, title: app } : null);
+  const belowMin = (app) => { const v = parse(app); return !!(minApp && v && minApp[0] === v[0] && v[1] < minApp[1]); };
+  // "current", "update" or null (unknown, or no app).
+  const appState = (app) => (belowMin(app) ? "update" : appInfo(app)?.state || null);
+  const appTitle = (app) => { const i = appInfo(app); return i ? `${i.title}${belowMin(app) ? " · below the hub's minimum: refused, must update" : ""}` : ""; };
   const appTag = (app) => {
     const i = appInfo(app), a = appState(app);
-    const t = el("span");
-    if (!i) { t.append(tag("–", "muted")); return t; }
-    t.append(STATE_CLASS[a] ? tag(appText(i, a), STATE_CLASS[a]) : i.label);
-    t.title = `${i.title}${a === "dead" ? " · below the hub's minimum: refused, must update" : ""}`;
+    const t = el("span", a ? `app-${a}` : i ? null : "muted", i ? i.label : "–");
+    t.title = appTitle(app);
     return t;
   };
 
@@ -379,22 +372,20 @@ if (document.body.classList.contains("login")) {
       });
       chart.replaceChildren(...kids);
 
-      // App versions: devices per state, and per label in the caption.
-      let fresh = 0, old = 0, dead = 0, other = 0;
+      // App versions: devices current, with an update out, unknown; per platform in the caption.
+      let fresh = 0, old = 0, other = 0;
       const per = {};
       for (const [app, c] of h.apps || []) {
-        const a = appState(app), i = appInfo(app), l = i ? appText(i, a) : "unknown";
-        if (a === "new") fresh += c; else if (a === "old") old += c; else if (a === "dead") dead += c; else other += c;
-        per[l] = (per[l] || 0) + c;
+        const a = appState(app), l = appInfo(app)?.label || "unknown";
+        if (a === "current") fresh += c; else if (a === "update") old += c; else other += c;
+        const p = per[l] ||= {};
+        p[a || "unknown"] = (p[a || "unknown"] || 0) + c;
       }
-      set("ug-fresh", `${fresh}/${fresh + old + dead + other}`);
-      set("ug-apps-cap", [...Object.entries(per).sort((x, y) => y[1] - x[1]).map(([l, n]) => `${n} ${l}`),
+      set("ug-fresh", `${fresh}/${fresh + old + other}`);
+      set("ug-apps-cap", [...Object.entries(per).map(([l, p]) => `${l}: ${["current", "update", "unknown"].filter((w) => p[w]).map((w) => `${p[w]} ${w}`).join(", ")}`),
         `min ${h.min_app ? build(h.min_app) : "not pinned"}`].join(" · "));
-      const gh = last?.releases;
-      $("ug-apps-cap").title = !gh ? "GitHub releases not read yet"
-        : `${gh.build ? `newest release ${gh.tag || ""} build ${gh.build}${gh.prerelease ? " (pre-release)" : ""}` : "no release names a build"}`
-          + ` · checked ${new Date(gh.checked * 1000).toLocaleTimeString()}${gh.error ? ` · GitHub: ${gh.error}` : ""}`;
-      $("ug-apps-bar").replaceChildren(...[[fresh, "new", "on the newest release build"], [old, "old", "on an older build: an update is out"], [dead, "dead", "below the minimum: must update"], [other, "a0", "nothing to compare with (main, dev, Android, no release)"]]
+      $("ug-apps-cap").title = "current: the highest build reported on its channel (TestFlight public, internal; bot: its deploy) · update: an older one · unknown: dev, Android, CLI";
+      $("ug-apps-bar").replaceChildren(...[[fresh, "new", "current"], [old, "old", "update available"], [other, "a0", "unknown (dev, Android, CLI)"]]
         .filter(([v]) => v > 0).map(([v, cls, t]) => { const s = el("span", cls); s.style.flexGrow = v; s.title = `${v} ${t}`; return s; }));
     }
   };
@@ -586,7 +577,7 @@ if (document.body.classList.contains("login")) {
     fact("signed up", rel(u.created), "", date(u.created));
     fact("seen", seenDay(u.last_seen), "", u.last_seen ? new Date(u.last_seen).toLocaleDateString() : "");
     const ai = appInfo(u.app);
-    fact("app", ai ? appText(ai, a) : "–", STATE_CLASS[a] || "", ai ? `${u.app} · ${ai.title}${a === "dead" ? " · below the minimum: must update" : ""}` : "");
+    fact("app", ai ? ai.label : "–", a ? `app-${a}` : "", ai ? `${u.app} · ${appTitle(u.app)}` : "");
     fact("secured", u.secured ? "yes" : "no", u.secured ? "ok" : "", u.backup_at ? `backup ${date(u.backup_at)}` : "");
     fact("push", u.push ? "on" : "off", "", "");
     if (u.queued) fact("waiting", num(u.queued), "", "messages waiting for this user's devices");
@@ -599,7 +590,7 @@ if (document.body.classList.contains("login")) {
     dev.replaceChildren();
     for (const d of u.device_list || []) {
       const r = el("div", "drow");
-      r.append(el("b", null, d.app ? appInfo(d.app).label : "unknown app"), el("span", "muted", [d.push || "no push", `added ${rel(d.created)}`, `seen ${seenDay(d.last_seen)}`].join(" · ")));
+      r.append(Object.assign(el("b", null, d.app ? appInfo(d.app).label : "unknown app"), { title: appTitle(d.app) }), el("span", "muted", [d.push || "no push", `added ${rel(d.created)}`, `seen ${seenDay(d.last_seen)}`].join(" · ")));
       r.title = d.app || "";
       dev.append(r);
     }

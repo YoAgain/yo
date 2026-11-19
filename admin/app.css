@@ -389,3 +389,5 @@ a.lg:hover { color: var(--text); }
 .ustats h2 small { margin-left: auto; font-size: 11px; letter-spacing: 0; text-transform: none; font-weight: 600; color: var(--muted); }
 .ugrid { max-height: calc(100vh - 160px); overflow: auto; }
 #all-users-table th { position: sticky; top: 0; background: var(--card); padding-top: 4px; }
+.app-current, .app-current b { color: var(--ok); }
+.app-update, .app-update b { color: var(--warn); }

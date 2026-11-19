@@ -253,79 +253,6 @@ def hub(name: str, path: str) -> dict:
 
 
 
-# ---- GitHub releases (public, no key): the newest public beta build ------------------------------------------------
-# Every push to main is an internal TestFlight build; a published release also goes to the public beta and the
-# TestFlight workflow writes its build into the release notes ("Build: 202611191257"). Fetched at most every
-# RELEASES_EVERY_S, kept in OUT between runs; a failed fetch keeps the last value.
-RELEASES_URL = "https://api.github.com/repos/YoAgain/yo/releases"
-RELEASES_EVERY_S = 600
-BUILD_LINE = re.compile(r"^Build:\s*(\d+)\s*$", re.M)
-
-
-def newest_release(items) -> dict:
-    """The newest non-draft release that names its build: {"build", "tag", "prerelease"}, or {} when none does."""
-    found = []
-    for r in items or []:
-        m = BUILD_LINE.search(r.get("body") or "")
-        if m and not r.get("draft"):
-            found.append((r.get("published_at") or r.get("created_at") or "", m.group(1), r))
-    if not found:
-        return {}
-    _, build, r = max(found, key=lambda x: x[0])
-    return {"build": build, "tag": r.get("tag_name"), "prerelease": bool(r.get("prerelease"))}
-
-
-def releases_fetch() -> list:
-    import urllib.request
-    req = urllib.request.Request(RELEASES_URL + "?per_page=30", headers={
-        "Accept": "application/vnd.github+json", "User-Agent": "yo-admin"})
-    with urllib.request.urlopen(req, timeout=8) as r:
-        return json.load(r)
-
-
-def releases(previous=None, now=None) -> dict:
-    """The cached newest release, fetched again after RELEASES_EVERY_S; a failed fetch keeps the last value."""
-    now = now or time.time()
-    previous = previous or {}
-    if previous.get("checked") and now - previous["checked"] < RELEASES_EVERY_S:
-        return previous
-    try:
-        return {**newest_release(releases_fetch()), "checked": now}
-    except Exception as e:  # noqa: BLE001  network or API: shown in the admin, the last value stays
-        return {**{k: v for k, v in previous.items() if k != "error"}, "checked": now, "error": f"{type(e).__name__}: {e}"[:300]}
-
-
-def short(b: str) -> str:
-    """A timestamp build (yyyymmddHHMM) by its time of day, as the team calls them ("1257"); others as they are."""
-    return b[-4:] if re.fullmatch(r"\d{12}", b) else b
-
-
-def classify(app, release=None, bot_min=None) -> dict:
-    """Label and state of one reported app ("platform/build"). An iOS build is compared with the newest public
-    release: the same is "newest", older is "older" (an update is out), newer is a main build; no release known
-    leaves the plain build. state is newest, older or None."""
-    platform, _, b = (app or "").partition("/")
-    if not platform or not b:
-        return {"channel": "unknown", "label": "unknown", "state": None, "title": app or "no app reported"}
-    if platform == "yogpt":
-        state = None if not bot_min else "newest" if b >= bot_min.split("/")[-1] else "older"
-        return {"channel": "bot", "label": f"YoGPT {short(b)}", "state": state, "title": f"YoGPT (bot) build {b}"}
-    if platform != "ios":
-        name = {"android": "Android", "cli": "CLI"}.get(platform, platform)
-        return {"channel": platform, "label": f"{name} {short(b)}", "state": None, "title": f"{name} build {b}"}
-    if not re.fullmatch(r"\d{12}", b):  # xtool dev builds report "1"
-        return {"channel": "dev", "label": f"dev {b}", "state": None, "title": f"iOS dev build {b} (dev/push.sh)"}
-    newest = (release or {}).get("build")
-    if not newest:
-        return {"channel": "ios", "label": f"iOS {short(b)}", "state": None, "title": f"iOS build {b}; no release known"}
-    of = f"; newest release {release.get('tag') or ''} build {newest}" + (" (pre-release)" if release.get("prerelease") else "")
-    if b == newest:
-        return {"channel": "testflight", "label": "TestFlight · newest", "state": "newest", "title": f"iOS build {b}{of}"}
-    if b < newest:
-        return {"channel": "testflight", "label": "TestFlight · update", "state": "older", "title": f"iOS build {b}{of}"}
-    return {"channel": "main", "label": "TestFlight (main)", "state": None, "title": f"iOS build {b}, from main{of}"}
-
-
 # Update checks belong to this root collector, never the HTTP process. Only OUT is written.
 def update_path(key, default):
     return os.environ.get("ADMIN_UPDATES_" + key, default)
@@ -446,16 +373,58 @@ def updates(previous=None, now=None):
     return data
 
 
+# ---- App versions: the channel is in the build number --------------------------------------------------------------
+# The TestFlight workflow stamps a push to main "yyyymmddHHMM" (TestFlight internal) and a published GitHub release
+# "yyyymmddHHMM.1" (TestFlight public); anything else iOS reports (xtool's "1") is a dev build. Current is the highest
+# build any device reports on the same channel; older on that channel has an update. No network.
+IOS_BUILD = re.compile(r"(\d{12})(\.1)?")
+CHANNEL_NAME = {"public": "TestFlight public", "main": "TestFlight internal (main)"}
+
+
+def ios_channel(b: str):
+    m = IOS_BUILD.fullmatch(b or "")
+    return None if not m else "public" if m.group(2) else "main"
+
+
+def classify(app, newest=None, bot_min=None) -> dict:
+    """One reported app ("platform/build"): its platform word, state ("current", "update" or None: unknown) and the
+    details for the tooltip. newest: the highest reported iOS build per channel ({"public": …, "main": …})."""
+    platform, _, b = (app or "").partition("/")
+    if not platform or not b:
+        return {"label": "unknown", "state": None, "title": app or "no app reported"}
+    if platform == "yogpt":
+        top = bot_min.split("/")[-1] if bot_min else None
+        state = None if not top else "current" if b >= top else "update"
+        return {"label": "Bot", "state": state, "title": f"YoGPT build {b}" + (f"; newest {top}" if top else "")}
+    if platform != "ios":
+        name = {"android": "Android", "cli": "CLI"}.get(platform, platform)
+        return {"label": name, "state": None, "title": f"{name} build {b}"}
+    channel = ios_channel(b)
+    if not channel:
+        return {"label": "iOS", "state": None, "title": f"iOS dev build {b} (dev/push.sh)"}
+    top = (newest or {}).get(channel)
+    state = None if not top else "current" if b >= top else "update"
+    return {"label": "iOS", "state": state,
+            "title": f"{CHANNEL_NAME[channel]} build {b}" + (f"; newest on it {top}" if top and top != b else "")}
+
+
 def app_builds(out) -> dict:
-    """Every reported app of both hubs ("ios/202611191257") with its label and state."""
+    """Every reported app of both hubs ("ios/202611191257") with its label, state and details."""
     seen = set()
     for name in HUBS:
         h = out.get(name) or {}
         seen.update(a for a, _ in h.get("apps") or [])
         seen.update(u.get("app") for u in h.get("users") or [])
         seen.update(d.get("app") for u in h.get("users") or [] for d in u.get("device_list") or [])
+    seen = {a for a in seen if a and a != "unknown"}
+    newest = {}
+    for a in seen:
+        platform, _, b = a.partition("/")
+        channel = ios_channel(b) if platform == "ios" else None
+        if channel and b > newest.get(channel, ""):
+            newest[channel] = b
     bot = next((out[n].get("yogpt_min") for n in HUBS if isinstance(out.get(n), dict) and out[n].get("yogpt_min")), None)
-    return {a: classify(a, out.get("releases"), bot) for a in seen if a and a != "unknown"}
+    return {a: classify(a, newest, bot) for a in seen}
 
 
 def main():
@@ -466,7 +435,6 @@ def main():
     except (OSError, ValueError):
         previous = {}
     out = {"at": int(time.time() * 1000), "updates": updates(previous.get("updates", {}))}
-    out["releases"] = releases(previous.get("releases"))
     for name, path in HUBS.items():
         try:
             out[name] = hub(name, path)

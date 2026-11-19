@@ -141,16 +141,15 @@ without a path unit, run the collector manually after each request to supply fre
 
 ## App versions
 
-The collector labels each reported app (`ios/202611191257`: the build is its UTC minute) in `app_builds` of
-`users.json`. Every push to main is an internal TestFlight build; a published GitHub release (tag `v…`) also goes to
-the public beta, and the TestFlight workflow appends `Build: <number>` to that release's notes. At most every 10
-minutes the collector reads the public releases (`api.github.com/repos/YoAgain/yo/releases`, no key); the newest
-non-draft release with a `Build:` line is the newest public build (a pre-release is noted). An iOS build equal to it
-is "TestFlight · newest", older is "TestFlight · update" (the only yellow badge), newer is "TestFlight (main)"; with
-no release known an iOS build shows plainly, `ios/1` is a dev build. YoGPT is compared with its deploy, Android and
-the CLI show their build. Builds below `YO_MIN_APP` show red. A failed fetch keeps the last value and shows its error
-on the App versions card, which counts devices per label. App Store releases will be added the same way later.
-Tests use fixtures only: `python3 -m unittest discover -s admin -p 'test_versions.py'`.
+The collector (no network) states each reported app (`ios/202611191257`) in `app_builds` of `users.json`. The channel
+is in the build number, stamped by the TestFlight workflow: a push to main is `yyyymmddHHMM` (TestFlight internal), a
+published GitHub release `yyyymmddHHMM.1` (TestFlight public); anything else iOS reports (`ios/1`) is a dev build.
+Current is the highest build reported by any device on the same channel, an older one there has an update; main
+builds are never compared with public ones. YoGPT is compared with its deploy; Android, the CLI and dev builds are
+unknown. Tables show only the platform word ("iOS", "Android", "Bot"): green when current, yellow when an update is
+out, plain when unknown; channel and builds are in its tooltip. Builds below `YO_MIN_APP` count as update. The App
+versions card counts current, update and unknown per platform. App Store releases will be added the same way later.
+Tests: `python3 -m unittest discover -s admin -p 'test_versions.py'`.
 
 ## Support chat rollout
 

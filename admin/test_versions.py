@@ -1,80 +1,54 @@
-"""App labels from GitHub release fixtures (no network)."""
+"""App states from the build number's channel (no network)."""
 import unittest
-from unittest.mock import patch
 
 import users
 
-RELEASES = [
-    {"tag_name": "v1.2", "draft": True, "prerelease": False, "published_at": None, "body": "Build: 202611201200"},
-    {"tag_name": "v1.1", "draft": False, "prerelease": True, "published_at": "2026-11-18T19:30:00Z",
-     "body": "Fixes.\r\n\r\nBuild: 202611181859\r\n"},
-    {"tag_name": "v1.0", "draft": False, "prerelease": False, "published_at": "2026-11-17T17:00:00Z",
-     "body": "First.\n\nBuild: 202611171622\n"},
-    {"tag_name": "v0.9", "draft": False, "prerelease": False, "published_at": "2026-11-19T08:00:00Z",
-     "body": "No build line."},
-]
-NEWEST = {"build": "202611181859", "tag": "v1.1", "prerelease": True}
-
-
-class ReleaseTests(unittest.TestCase):
-    def test_newest_non_draft_with_build(self):
-        self.assertEqual(users.newest_release(RELEASES), NEWEST)
-
-    def test_none(self):
-        self.assertEqual(users.newest_release([]), {})
-        self.assertEqual(users.newest_release([RELEASES[0], RELEASES[3]]), {})
-
-    def test_cache_and_failure_keep_value(self):
-        with patch.object(users, "releases_fetch", side_effect=OSError("down")) as fetch:
-            fresh = {**NEWEST, "checked": 1000}
-            self.assertIs(users.releases(fresh, now=1000 + 60), fresh)
-            fetch.assert_not_called()
-            failed = users.releases(fresh, now=1000 + users.RELEASES_EVERY_S)
-            self.assertEqual(failed["build"], NEWEST["build"])
-            self.assertIn("down", failed["error"])
-        with patch.object(users, "releases_fetch", return_value=RELEASES):
-            ok = users.releases(failed, now=5000)
-            self.assertNotIn("error", ok)
-            self.assertEqual((ok["build"], ok["checked"]), (NEWEST["build"], 5000))
+NEWEST = {"public": "202611181859.1", "main": "202611191257"}
 
 
 class ClassifyTests(unittest.TestCase):
-    def c(self, app, release=NEWEST, bot=None):
-        return users.classify(app, release, bot)
+    def c(self, app, newest=NEWEST, bot=None):
+        return users.classify(app, newest, bot)
 
-    def test_ios_against_newest_release(self):
-        self.assertEqual((self.c("ios/202611181859")["label"], self.c("ios/202611181859")["state"]),
-                         ("TestFlight · newest", "newest"))
-        self.assertEqual((self.c("ios/202611171622")["label"], self.c("ios/202611171622")["state"]),
-                         ("TestFlight · update", "older"))
-        self.assertEqual((self.c("ios/202611191257")["label"], self.c("ios/202611191257")["state"]),
-                         ("TestFlight (main)", None))
+    def test_channels(self):
+        self.assertEqual(users.ios_channel("202611181859.1"), "public")
+        self.assertEqual(users.ios_channel("202611181859"), "main")
+        self.assertIsNone(users.ios_channel("1"))
+        self.assertIsNone(users.ios_channel("202611181859.2"))
 
-    def test_no_release_known(self):
-        for release in (None, {}, {"error": "URLError", "checked": 1}):
-            r = self.c("ios/202611171622", release)
-            self.assertEqual((r["label"], r["state"]), ("iOS 1622", None))
+    def test_public(self):
+        self.assertEqual((self.c("ios/202611181859.1")["label"], self.c("ios/202611181859.1")["state"]), ("iOS", "current"))
+        r = self.c("ios/202611171622.1")
+        self.assertEqual(r["state"], "update")
+        self.assertIn("TestFlight public", r["title"])
+        self.assertIn("202611181859.1", r["title"])
 
-    def test_dev_builds(self):
-        self.assertEqual(self.c("ios/1")["channel"], "dev")
-        self.assertIsNone(self.c("ios/1")["state"])
+    def test_main_never_update_against_public(self):
+        self.assertEqual(self.c("ios/202611191257")["state"], "current")
+        self.assertEqual(self.c("ios/202611180000")["state"], "update")
+        self.assertEqual(self.c("ios/202611180000", {"public": "202611191300.1"})["state"], None)
 
-    def test_other_platforms(self):
-        self.assertEqual(self.c("yogpt/202611182101", bot="yogpt/202611182059")["state"], "newest")
-        self.assertEqual(self.c("yogpt/202611181000", bot="yogpt/202611182059")["state"], "older")
-        self.assertEqual(self.c("yogpt/202611181000")["state"], None)
-        self.assertEqual(self.c("android/202611160001")["state"], None)
-        self.assertEqual(self.c(None)["channel"], "unknown")
+    def test_dev_and_others(self):
+        self.assertEqual((self.c("ios/1")["label"], self.c("ios/1")["state"]), ("iOS", None))
+        self.assertEqual(self.c("yogpt/202611182101", bot="yogpt/202611182059")["state"], "current")
+        self.assertEqual((self.c("yogpt/202611181000", bot="yogpt/202611182059")["label"],
+                          self.c("yogpt/202611181000", bot="yogpt/202611182059")["state"]), ("Bot", "update"))
+        self.assertEqual((self.c("android/202611160001")["label"], self.c("android/202611160001")["state"]), ("Android", None))
+        self.assertEqual(self.c(None)["label"], "unknown")
 
-    def test_app_builds_from_both_hubs(self):
-        out = {"releases": NEWEST,
-               "live": {"apps": [["ios/202611171622", 2]], "users": [{"app": "ios/1", "device_list": []}],
+    def test_app_builds_newest_per_channel_from_both_hubs(self):
+        out = {"live": {"apps": [["ios/202611171622.1", 2], ["ios/202611191257", 1]],
+                        "users": [{"app": "ios/1", "device_list": [{"app": "ios/202611181859.1"}]}],
                         "yogpt_min": "yogpt/202611182059"},
-               "dev": {"apps": [["yogpt/202611182101", 1], ["unknown", 3]], "users": []}}
+               "dev": {"apps": [["yogpt/202611182101", 1], ["unknown", 3], ["ios/202611180000", 1]], "users": []}}
         b = users.app_builds(out)
-        self.assertEqual(set(b), {"ios/202611171622", "ios/1", "yogpt/202611182101"})
-        self.assertEqual(b["ios/202611171622"]["label"], "TestFlight · update")
-        self.assertEqual(b["yogpt/202611182101"]["state"], "newest")
+        self.assertEqual(set(b), {"ios/202611171622.1", "ios/202611191257", "ios/1", "ios/202611181859.1",
+                                  "yogpt/202611182101", "ios/202611180000"})
+        self.assertEqual(b["ios/202611171622.1"]["state"], "update")
+        self.assertEqual(b["ios/202611181859.1"]["state"], "current")
+        self.assertEqual(b["ios/202611191257"]["state"], "current")
+        self.assertEqual(b["ios/202611180000"]["state"], "update")
+        self.assertEqual(b["yogpt/202611182101"]["state"], "current")
 
 
 if __name__ == "__main__":
