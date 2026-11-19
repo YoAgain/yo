@@ -971,7 +971,11 @@ impl YoClient {
 
     /// Who a name is, as the hub says, without holding the client; `None`: nobody by that name.
     pub fn whois(&self, name: String) -> Result<Option<YoWhois>, YoError> {
-        let whois = self.with(|c| c.whois_begin(&name))??;
+        // A name no one can own (an invite link's malformed name) is nobody, not a failed lookup to retry.
+        let whois = match self.with(|c| c.whois_begin(&name))? {
+            Err(yo_core::Error::Protocol("format")) => return Ok(None),
+            begun => begun?,
+        };
         match whois.send() {
             Ok((user, username)) => Ok(Some(YoWhois { user, username })),
             Err(yo_core::Error::NotOnYo) => Ok(None),

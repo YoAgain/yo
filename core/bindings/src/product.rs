@@ -66,6 +66,10 @@ pub enum Text {
     LongerNameOffline,
     NoSuchUser,
     ThatsYou,
+    InviteAddYo,
+    InviteYo,
+    AddAndYo,
+    Cancel,
 }
 
 #[uniffi::remote(Enum)]

@@ -95,6 +95,10 @@ copy! {
     LongerNameOffline => ("Choose a longer name, or try again when connected.", "Wähle einen längeren Namen oder versuche es mit Verbindung erneut."),
     NoSuchUser => ("No Such User", "Unbekannter Name"),
     ThatsYou => ("That’s You", "Das bist du"),
+    InviteAddYo => ("Add to your list and send a Yo?", "Zu deiner Liste hinzufügen und ein Yo senden?"),
+    InviteYo => ("Send a Yo?", "Ein Yo senden?"),
+    AddAndYo => ("Add & Yo", "Hinzufügen & Yo"),
+    Cancel => ("Cancel", "Abbrechen"),
 }
 
 /// The onboarding's line for an invite: "Mia invited you".
@@ -412,6 +416,11 @@ mod tests {
         assert_eq!(Text::NoSuchUser.get(English), "No Such User");
         assert_eq!(invited_you("Mia", English), "Mia invited you");
         assert_eq!(invited_you("Mia", German), "Mia hat dich eingeladen");
+        // A scanned invite asks before it adds and sends (both apps' alert).
+        assert_eq!(Text::InviteAddYo.get(English), "Add to your list and send a Yo?");
+        assert_eq!(Text::InviteYo.get(English), "Send a Yo?");
+        assert_eq!(Text::AddAndYo.get(English), "Add & Yo");
+        assert_eq!(Text::Cancel.get(German), "Abbrechen");
     }
 
     #[test]

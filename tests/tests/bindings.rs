@@ -520,6 +520,7 @@ fn the_app_layer_asks_who_a_typed_name_is_before_the_first_yo() {
     let found = me.whois(format!("yobot{n}")).unwrap().expect("on Yo");
     assert_eq!((found.user, found.username), (bot.user_id(), Some(format!("YoBot{n}"))));
     assert!(me.whois(format!("nobody{n}")).unwrap().is_none());
+    assert!(me.whois("not a name!".into()).unwrap().is_none(), "a malformed invite name is nobody");
     assert!(me.whois(format!("ann{n}")).is_err(), "oneself");
     assert!(me.contacts().is_empty(), "asking makes no contact");
     // The first Yo by the user id it gave: the contact has the owner's spelling.
