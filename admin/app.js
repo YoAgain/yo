@@ -559,6 +559,16 @@ if (document.body.classList.contains("login")) {
   };
   // A second series drawn over a chart: Active over Accounts, Media over Yos (on the Yos' scale).
   const OVERLAY = { uc: "ac", yc: "ym" }, SAME = { yc: true }, WORD = { yc: "Yos", uc: "accounts" };
+  // A small legend over each chart: what its two lines are.
+  const LEGEND = { yc: [["Yos", "l-main"], ["Media", "l-over"]], uc: [["Accounts", "l-main"], ["Active", "l-over"]] };
+  for (const [k, items] of Object.entries(LEGEND)) {
+    const area = $(`${k}-area`);
+    if (area && !area.previousElementSibling?.classList.contains("clegend")) {
+      const lg = el("div", "clegend");
+      for (const [t, c] of items) lg.append(el("span", c, t));
+      area.before(lg);
+    }
+  }
   const areaChart = (key, total, perDay, hours, today) => {
     set(`${key}-n`, num(total));
     areaData[key] = { ...runningTotal(perDay, hours, total || 0), overlay: OVERLAY[key] || null, word: WORD[key] };
@@ -1413,19 +1423,16 @@ if (document.body.classList.contains("login")) {
     for (const [k, v, c] of rows) dl.append(el("dt", null, k), el("dd", c || null, v));
     return dl;
   };
+  // Platforms: a share per platform in the row's colours (iOS amethyst, Android green, Bot grey, CLI yellow); the
+  // versions of each are in the Versions row.
   const platCard = () => {
-    const box = el("div", "hc-plats"), most = Math.max(1, ...(platData?.plats || []).map(([, p]) => p.all));
-    for (const [l, p] of platData?.plats || []) {
-      const row = el("div", "hc-plat"), bar = el("span", "hc-pbar");
-      for (const k of VKEYS) if (p[k]) { const x = el("span", k); x.style.width = `${(100 * p[k]) / most}%`; bar.append(x); }
-      // One line: the platform, its bar, its devices and the versions in their colours (zeros left out).
-      const counts = el("span", "hc-pn", num(p.all));
-      for (const k of ["current", "update", "must"]) if (p[k] && p[k] !== p.all) counts.append(" · ", el("span", `v-${k}`, num(p[k])));
-      row.append(el("b", null, l), bar, counts);
-      row.title = platLine(l, p);
+    const box = el("div", "hc-plats"), plats = platData?.plats || [], all = Math.max(1, plats.reduce((n, [, p]) => n + p.all, 0));
+    for (const [l, p] of plats) {
+      const row = el("div", "hc-plat"), bar = el("span", "hc-pbar plats");
+      const x = el("span", `p-${l.toLowerCase()}`); x.style.width = `${(100 * p.all) / all}%`; bar.append(x);
+      row.append(el("b", null, l), bar, el("span", "hc-pn", `${num(p.all)} · ${Math.round((100 * p.all) / all)} %`));
       box.append(row);
     }
-    box.append(vLegend());
     return box;
   };
   const vLegend = () => {

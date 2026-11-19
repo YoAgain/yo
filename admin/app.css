@@ -982,3 +982,14 @@ body.dash { max-width: none; padding-left: 24px; padding-right: 24px; }
 #c-vr .vr-spark svg { width: 100%; height: 100%; display: block; }
 .hc-pbar.none { visibility: hidden; }
 .hc-plat > b { white-space: nowrap; }
+/* Chart legends: the main line in the card's colour, the second line blue. */
+.clegend { display: flex; gap: 12px; font-size: 11px; color: var(--muted); margin: 2px 0 -4px; }
+.clegend span { display: inline-flex; align-items: center; gap: 5px; }
+.clegend span::before { content: ""; width: 10px; height: 3px; border-radius: 2px; background: currentColor; }
+#t-yc .clegend .l-main::before { background: var(--ok); } #t-uc .clegend .l-main::before { background: var(--amethyst-soft); }
+.clegend .l-over::before { background: #5dade2; }
+/* Hover rows: the bar takes what is left, the value always visible. */
+.hc-plat { grid-template-columns: max-content minmax(60px, 1fr) max-content; }
+.hc-pbar.plats .p-ios { background: var(--amethyst); } .hc-pbar.plats .p-android { background: var(--ok); }
+.hc-pbar.plats .p-bot { background: #8a8494; } .hc-pbar.plats .p-cli { background: var(--warn); }
+.hcard { max-width: min(420px, calc(100vw - 16px)); }
