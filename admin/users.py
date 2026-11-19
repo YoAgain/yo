@@ -65,7 +65,7 @@ def text(v):
     return v.decode(errors="replace") if isinstance(v, bytes) else v
 
 
-TABLE_ROWS = 200  # per table in the "all tables" view
+TABLE_ROWS = 2500  # per table in the Database widget: shown whole, the page scrolls (no box of its own)
 
 
 def cell_value(v):
