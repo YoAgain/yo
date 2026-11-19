@@ -20,8 +20,6 @@ import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.gestures.awaitEachGesture
 import androidx.compose.foundation.gestures.awaitFirstDown
 import androidx.compose.foundation.lazy.LazyColumn
-import androidx.compose.foundation.pager.HorizontalPager
-import androidx.compose.foundation.pager.rememberPagerState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.foundation.text.KeyboardActions
@@ -36,7 +34,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.alpha
-import androidx.compose.ui.draw.scale
+import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.window.DialogWindowProvider
 import androidx.compose.ui.graphics.SolidColor
@@ -119,8 +117,9 @@ import uniffi.yo.usernameValid
     }
     if(state.firstYo) YoSystemTheme { AlertDialog(onDismissRequest=repo::clearError,title={Text(stringResource(R.string.ui_first_yo_sent))},text={Text(uiResources.getString(R.string.first_sent_explanation ,state.username.orEmpty()))},confirmButton={TextButton(onClick=repo::clearError){Text(stringResource(R.string.ui_awesome))}}) }
 }
-@Composable fun BrandText(text: String,size: Int,modifier: Modifier=Modifier) {
-    Text(text, modifier, style = TextStyle(fontFamily = YoFont, fontSize = size.sp, color = Color.White, textAlign = TextAlign.Center))
+@Composable fun BrandText(text: String, size: Int, modifier: Modifier = Modifier, maxLines: Int = Int.MAX_VALUE) {
+    Text(text, modifier, maxLines = maxLines, softWrap = maxLines > 1,
+        style = TextStyle(fontFamily = YoFont, fontSize = size.sp, color = Color.White, textAlign = TextAlign.Center))
 }
 @Composable private fun RecoveryRequired(model: YoViewModel) {
     val uiResources=androidx.compose.ui.platform.LocalResources.current
@@ -194,25 +193,21 @@ import uniffi.yo.usernameValid
             }
         }
     }
-    if (step != 3) Column(Modifier.fillMaxSize().safeDrawingPadding().imePadding().padding(start = 28.dp, end = 28.dp, bottom = 16.dp),horizontalAlignment=Alignment.CenterHorizontally, verticalArrangement = if (keyboardVisible) Arrangement.Center else Arrangement.Top) {
-        if (keyboardVisible) {
-            BoxWithConstraints(Modifier.fillMaxWidth().weight(1f), contentAlignment = Alignment.Center) {
-                val naturalHeight = 320.dp
-                val scale = (maxHeight / naturalHeight).coerceIn(0f, 1f)
-                if (scale > 0f) {
-                    Box(Modifier.fillMaxWidth().requiredHeight(naturalHeight).scale(scale)) {
-                        YoTutorial(Modifier.fillMaxSize(), condensed = true)
-                    }
+    if (step != 3) Column(Modifier.fillMaxSize().safeDrawingPadding().imePadding().padding(bottom = 16.dp), horizontalAlignment = Alignment.CenterHorizontally) {
+        // The carousel in the room above the form, shrunk into it with the keyboard up and held still meanwhile (iOS
+        // Onboarding): the form below keeps its own height, never cut.
+        BoxWithConstraints(Modifier.fillMaxWidth().weight(1f), contentAlignment = Alignment.Center) {
+            val scale = (maxHeight / IntroHeight).coerceAtMost(1f)
+            Intro(Modifier.requiredHeight(IntroHeight).graphicsLayer {
+                scaleX = scale; scaleY = scale; alpha = if (scale < 0.3f) 0f else 1f
+            }, paused = keyboardVisible) {
+                Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                    BrandText("Yo", 150, maxLines = 1)
+                    BrandText(copy(ProductText.THAT_SIMPLE), 20, Modifier.alpha(0.85f), maxLines = 1)
                 }
             }
-        } else {
-            YoTutorial(Modifier.weight(1f))
         }
-        Column(
-            Modifier.fillMaxWidth().weight(if (keyboardVisible) 1f else 0.5f, fill = false)
-                .verticalScroll(rememberScrollState()),
-            horizontalAlignment = Alignment.CenterHorizontally,
-        ) {
+        Column(Modifier.fillMaxWidth().padding(horizontal = 28.dp), horizontalAlignment = Alignment.CenterHorizontally) {
             s.pendingInvite?.let { Text(productInvitedYou(it, Words), Modifier.padding(bottom = 16.dp), style = TextStyle(fontFamily = YoFont, fontSize = 17.sp, color = Color.White.copy(alpha = 0.85f))) }
             Box(Modifier.fillMaxWidth().height(22.dp), contentAlignment = Alignment.Center) {
                 if (free == false) {
@@ -281,8 +276,7 @@ import uniffi.yo.usernameValid
             if (Build.VERSION.SDK_INT >= 29) window?.isNavigationBarContrastEnforced = false
         }
         Column(
-            Modifier.fillMaxWidth().navigationBarsPadding().heightIn(min = 240.dp)
-                .padding(start = 24.dp, end = 24.dp, top = 28.dp, bottom = 12.dp),
+            Modifier.fillMaxWidth().navigationBarsPadding().padding(start = 24.dp, end = 24.dp, top = 28.dp, bottom = 4.dp),
             horizontalAlignment = Alignment.CenterHorizontally,
         ) {
             BrandText(copy(ProductText.SIGN_IN), 28)
@@ -299,7 +293,7 @@ import uniffi.yo.usernameValid
                     }
                 }
             }
-            Spacer(Modifier.height(14.dp))
+            Spacer(Modifier.height(6.dp))
             TextButton(onClick = { repo.clearError(); step = 3 }) {
                 BrandText(stringResource(R.string.ui_use_recovery_key), 17)
             }
@@ -375,83 +369,6 @@ import uniffi.yo.usernameValid
     }
     if(scanning) QrScanner(onClose={scanning=false},onCode={code=it.text;scanning=false})
 }
-/** The same Android tutorial is used on welcome and in Help. */
-@Composable internal fun YoTutorial(modifier: Modifier=Modifier, compact: Boolean = false, condensed: Boolean = false) {
-    val uiResources=androidx.compose.ui.platform.LocalResources.current
-
-    val scope=rememberCoroutineScope()
-    Column(modifier,horizontalAlignment=Alignment.CenterHorizontally) {
-            val slideCount = if (compact) 3 else 4
-            val pager=rememberPagerState(initialPage=slideCount * 1000,pageCount={slideCount * 2000})
-            val accessibility=LocalContext.current.getSystemService(Context.ACCESSIBILITY_SERVICE) as android.view.accessibility.AccessibilityManager
-            var settledAt by remember { mutableLongStateOf(android.os.SystemClock.uptimeMillis()) }
-            LaunchedEffect(pager.settledPage) { settledAt=android.os.SystemClock.uptimeMillis() }
-            LaunchedEffect(pager) {
-                while(true) {
-                    delay((4000-(android.os.SystemClock.uptimeMillis()-settledAt)).coerceAtLeast(200))
-                    if(!accessibility.isTouchExplorationEnabled && !pager.isScrollInProgress && android.os.SystemClock.uptimeMillis()-settledAt>=4000) {
-                        pager.animateScrollToPage(pager.settledPage+1)
-                        settledAt=android.os.SystemClock.uptimeMillis()
-                    }
-                }
-            }
-            HorizontalPager(pager,Modifier.weight(1f)) { page ->
-                Column(
-                    Modifier.fillMaxWidth().then(if (condensed) Modifier else Modifier.verticalScroll(rememberScrollState())),
-                    horizontalAlignment = Alignment.CenterHorizontally,
-                ) {
-                    if (compact) {
-                        val slides = listOf(
-                            R.string.tutorial_tap,
-                            R.string.tutorial_back,
-                            R.string.tutorial_camera,
-                        )
-                        val slide = page % slideCount
-                        Surface(
-                            modifier = Modifier.padding(top = 24.dp).width(140.dp),
-                            shape = androidx.compose.foundation.shape.RoundedCornerShape(20.dp),
-                            color = Color(0xFF202022),
-                        ) {
-                            Column(Modifier.padding(6.dp)) {
-                                val names = listOf("Leo", "Sam", "Noah", "Mia", "YoGPT", "+")
-                                names.forEachIndexed { index, name ->
-                                    Box(
-                                        Modifier.fillMaxWidth().height(28.dp).background(RowColors[index]),
-                                        contentAlignment = Alignment.Center,
-                                    ) { BrandText(if (index == 2 && slide < 2) stringResource(if (slide == 0) R.string.sent_yo else R.string.ui_yo) else name, 12) }
-                                }
-                            }
-                        }
-                        BrandText(stringResource(slides[slide]), 20, Modifier.padding(top = 12.dp))
-                    } else when(page%4) {
-                        0 -> { BrandText("Yo",150); BrandText(copy(ProductText.THAT_SIMPLE),20,Modifier.alpha(0.85f)) }
-                        else -> {
-                            val titles=listOf(uiResources.getString(R.string.ui_tap_a_name),uiResources.getString(R.string.ui_yo_back),uiResources.getString(R.string.ui_add_friends_by_name))
-                            val lines=listOf(uiResources.getString(R.string.ui_that_s_a_yo_nothing_to_type),uiResources.getString(R.string.ui_a_yo_comes_in_tap_their_name_to_yo_back),uiResources.getString(R.string.ui_yogpt_is_there_from_the_start_it_yos_back))
-                            // Android's own row rendering, so the tutorial shows this app.
-                            Column(Modifier.width(240.dp).padding(bottom = if (condensed) 12.dp else 32.dp)) {
-                                val rowHeight = if (condensed) 62.dp else BarHeight
-                                FlatRow("YoGPT", 0, Modifier.height(rowHeight), onClick = {})
-                                FlatRow(if (page % 4 == 2) uiResources.getString(R.string.ui_yo) else "+", 2,
-                                    Modifier.height(rowHeight), onClick = {})
-                            }
-                            BrandText(titles[page%4-1],28)
-                            Text(lines[page%4-1],textAlign=TextAlign.Center,modifier=Modifier.padding(top=12.dp))
-                        }
-                    }
-                }
-            }
-            Row(Modifier.padding(bottom = if (compact || condensed) 0.dp else 24.dp), horizontalArrangement = Arrangement.spacedBy(4.dp)) {
-                repeat(slideCount) { i -> Box(Modifier.size(if (compact || condensed) 24.dp else 48.dp).clip(CircleShape)
-                    .clickable(interactionSource = null, indication = null) {
-                        scope.launch { pager.animateScrollToPage(pager.currentPage - pager.currentPage % slideCount + i) }
-                    },contentAlignment=Alignment.Center) {
-                    Box(Modifier.size(8.dp).background(Color.White.copy(alpha=if(pager.currentPage%slideCount==i) 1f else .4f),CircleShape))
-                } }
-            }
-    }
-}
-
 @Composable fun FlatRow(title: String,color: Int,modifier: Modifier=Modifier,onClick: ()->Unit) {
     Box(modifier.fillMaxWidth().heightIn(min=BarHeight).background(RowColors[Math.floorMod(color,8)]).clickable(interactionSource=null,indication=null,onClick=onClick),contentAlignment=Alignment.Center) {
         BrandText(title,36,Modifier.padding(horizontal=20.dp))
@@ -743,6 +660,24 @@ private fun NotificationSettingsRow(onClick: () -> Unit) {
             )
         }
         picked?.let { PhotoUri(it, Modifier.fillMaxSize()) }
+        // The picture shows through Amethyst where no bar is, as it shows through each bar's colour (iOS FriendList).
+        if (cameraOn) {
+            val listTop = WindowInsets.safeDrawing.getTop(LocalDensity.current).toFloat()
+            Canvas(Modifier.fillMaxSize()) {
+                val tint = Amethyst.copy(alpha = 0.45f)
+                val info = listState.layoutInfo
+                val last = info.visibleItemsInfo.lastOrNull()
+                val rowsEnd = when {
+                    last == null -> 0
+                    last.index == info.totalItemsCount - 1 -> last.offset + last.size
+                    else -> info.viewportEndOffset
+                }
+                val rowsBottom = listTop + rowsEnd
+                drawRect(tint, size = androidx.compose.ui.geometry.Size(size.width, listTop))
+                if (rowsBottom < size.height) drawRect(tint, androidx.compose.ui.geometry.Offset(0f, rowsBottom),
+                    androidx.compose.ui.geometry.Size(size.width, size.height - rowsBottom))
+            }
+        }
         Box(Modifier.fillMaxSize().safeDrawingPadding().then(edgeGesture)) {
         LazyColumn(Modifier.fillMaxSize(),state=listState,userScrollEnabled=recording==null,contentPadding=PaddingValues(bottom=if (keyboardVisible) 0.dp else 84.dp)) {
             if (showNotificationBar) item(key = "notification-settings") {
