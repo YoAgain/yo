@@ -38,6 +38,12 @@
                 <category android:name="android.intent.category.DEFAULT" /><category android:name="android.intent.category.BROWSABLE" />
                 <data android:scheme="https" android:host="justyo.co" android:pathAdvancedPattern="/[^/.]+" />
             </intent-filter>
+            <!-- A service's QR code (Connect.kt): justyo.co/connect/approve. -->
+            <intent-filter android:autoVerify="true">
+                <action android:name="android.intent.action.VIEW" />
+                <category android:name="android.intent.category.DEFAULT" /><category android:name="android.intent.category.BROWSABLE" />
+                <data android:scheme="https" android:host="justyo.co" android:path="/connect/approve" />
+            </intent-filter>
             <intent-filter>
                 <action android:name="android.intent.action.SEND" /><category android:name="android.intent.category.DEFAULT" />
                 <data android:mimeType="image/*" /><data android:mimeType="video/*" />

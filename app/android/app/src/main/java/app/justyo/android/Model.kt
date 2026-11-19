@@ -21,7 +21,7 @@ fun inviteName(uri: Uri): String? {
         "https", "http" -> uri.pathSegments.firstOrNull()?.takeIf { uri.host?.lowercase() in setOf("justyo.co", "www.justyo.co") }
         else -> null
     }
-    return raw?.takeIf { it.isNotBlank() && it.lowercase() !in setOf("privacy", "security") }
+    return raw?.takeIf { it.isNotBlank() && it.lowercase() !in setOf("privacy", "security", "connect") }
 }
 data class Friend(
     val key: String = UUID.randomUUID().toString(), val name: String, val color: Int,

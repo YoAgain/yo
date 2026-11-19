@@ -108,6 +108,8 @@ import uniffi.yo.usernameValid
             else -> FriendList(model,state)
         }
     }
+    val connecting by model.connect.collectAsStateWithLifecycle()
+    connecting?.takeIf { state.username != null && !state.loading && !state.broken }?.let { ConnectSheet(model, it) }
     state.deletion?.let { deletion ->
         Snackbar(Modifier.align(Alignment.BottomCenter).safeDrawingPadding().padding(16.dp),action={TextButton(onClick=repo::undoRemove){Text(stringResource(R.string.undo_remove))}}) {
             Text(stringResource(R.string.removed_name,deletion.name))

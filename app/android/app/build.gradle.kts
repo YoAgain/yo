@@ -36,7 +36,9 @@ android {
         versionCode = 1
         versionName = providers.gradleProperty("yoVersionName").getOrElse("0.1-dev")  // the release tag, from CI
         ndk { abiFilters += listOf("arm64-v8a", "x86_64") }
-        buildConfigField("String", "HUB", "\"https://dev.justyo.app\"")
+        // -PyoHub / -PyoConnectOrigin: a local hub and a local service page, for a debug build on one's own machine.
+        buildConfigField("String", "HUB", "\"${providers.gradleProperty("yoHub").getOrElse("https://dev.justyo.app")}\"")
+        buildConfigField("String", "CONNECT_ORIGIN", "\"${providers.gradleProperty("yoConnectOrigin").getOrElse("")}\"")
         buildConfigField("String", "YO_APP", "\"android/202611160001\"")
     }
     buildFeatures { compose = true; buildConfig = true; resValues = true }

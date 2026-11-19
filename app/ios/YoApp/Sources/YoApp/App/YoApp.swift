@@ -185,10 +185,19 @@ struct YoApp: App {
       .onOpenURL { url in
         if url.scheme?.lowercased() == "yo", url.host()?.lowercased() == "camera" { AppRoute.shared.camera = true }
         else if url.scheme?.lowercased() == "yo", url.host()?.lowercased() == "open" {}
+        else if Connect.shared.open(url) {}
         else { Invite.shared.open(url) }
       }
       .onContinueUserActivity(NSUserActivityTypeBrowsingWeb) { activity in
-        if let url = activity.webpageURL { Invite.shared.open(url) }
+        if let url = activity.webpageURL, !Connect.shared.open(url) { Invite.shared.open(url) }
+      }
+      // A service asks to connect (App/Connect.swift): asked once signed in.
+      .sheet(item: Binding(get: { accounts.client == nil ? nil : Connect.shared.pending },
+                           set: { Connect.shared.pending = $0 })) { request in
+        ConnectSheet(request: request)
+          .environment(accounts)
+          .environment(friends)
+          .preferredColorScheme(SystemAppearance.scheme)
       }
       // The extensions, widgets and Siri see the list as it is (ShareBridge); at launch a few seconds after the first frame.
       .onChange(of: accounts.shareList(friends)) { _, list in

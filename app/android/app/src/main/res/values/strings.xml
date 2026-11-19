@@ -271,4 +271,19 @@
     <string name="group_create_failure">The group could not be made. Try again in a moment.</string>
     <string name="group_member_footer">You can add up to 19 friends, plus yourself.</string>
     <string name="ui_show_recovery_key">Show Recovery Key</string>
+    <string name="connect_title">Connect %1$s?</string>
+    <string name="connect_message">%1$s will be able to Yo you and see the Yos you send it.</string>
+    <string name="connect_code_label">Pairing code</string>
+    <string name="connect_code_check">Allow only if %1$s shows this code on the page you just opened.</string>
+    <string name="connect_allow">Allow</string>
+    <string name="connect_cancel">Cancel</string>
+    <string name="connect_done">Done</string>
+    <string name="connect_connected">Yo! Connected</string>
+    <string name="connect_connected_message">%1$s is on your list. Go back to %1$s to finish, then Yo it to run your Applets.</string>
+    <string name="connect_refused">Not Connected</string>
+    <string name="connect_refused_message">%1$s was not connected.</string>
+    <string name="connect_expired">Link Expired</string>
+    <string name="connect_expired_message">Start again from %1$s.</string>
+    <string name="connect_failed">Couldn’t Connect</string>
+    <string name="connect_failed_message">Check your connection and try again.</string>
 </resources>
