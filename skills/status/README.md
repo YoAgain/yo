@@ -5,8 +5,9 @@ The server's numbers as a picture, sent as a Yo to one user, fixed by user id in
 recipient: users, sign-ups since a baseline, services up, load and
 open crash reports, on a 1080×1080 card (amethyst top, four Flat UI rows, Montserrat Bold). It runs on the server and
 reads everything there: the live hub's database read-only, `systemctl is-active`, `/proc/loadavg`. It never answers
-anyone and accepts no chat: once per slot (hourly while off) it takes in what came with `yo sync --drain-media`
-(photos and videos fetched into nothing, never opened) and drops it, so other people's Yos do not pile up at the hub.
+anyone else and accepts no chat: it runs `yo listen --drain-media` (photos and videos fetched into nothing, never
+opened), so other people's Yos are taken in, dropped and do not pile up at the hub. A Yo from the recipient (not in a
+group) gets the card back at once, at most one per 30 s; the timed reports go over the listener's control socket.
 
 How often is set on the admin page (tab Status), which writes `/var/lib/yo-admin/status-bot.json`:
 `{"every_minutes": 30, "baseline_users": 30}`, every 0 (off), 15, 30, 60, 120 or 1440 (daily, 09:00

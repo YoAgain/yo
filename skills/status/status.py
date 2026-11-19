@@ -2,9 +2,10 @@
 """STATUS: the server's numbers as a picture, sent as a Yo to one user at a fixed rhythm. Runs on the server itself:
 users, sign-ups since a baseline and open crash reports from the live hub's database (read-only), services from
 systemd, the load from /proc. It sends to one user only, fixed by user id in the environment (STATUS_TO_USER), and
-to nobody else. It never answers: once per slot (hourly while off) it takes in what came (`yo sync --drain-media`:
-media fetched into nothing, never opened) so that other people's Yos do not pile up at the hub, and drops it. The
-rhythm comes from the admin page's config, read again every minute:
+to nobody else. It runs `yo listen --drain-media` (media fetched into nothing, never opened; no chat accepted), so
+what comes is taken in and dropped and nothing piles up at the hub. A Yo from that user (only from that user, not in
+a group) gets the card back at once, at most one per 30 s; everyone else is never answered. The timed reports go
+over the listener's control socket. The rhythm comes from the admin page's config, read again every minute:
 
   {"every_minutes": 30, "baseline_users": 30}     every_minutes: 0 (off), 15, 30, 60, 120, 1440 (daily)
 
@@ -24,6 +25,7 @@ import sqlite3
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 from zoneinfo import ZoneInfo
 
@@ -40,7 +42,7 @@ BERLIN = ZoneInfo("Europe/Berlin")
 EVERY = (0, 15, 30, 60, 120, 1440)
 DAILY_AT = 9 * 60  # minutes after Berlin midnight
 USER_ID = re.compile(r"[0-9a-f]{32}")
-DRAIN_OFF = 3600  # seconds between drains while off
+ON_DEMAND = 30  # seconds between reports asked for with a Yo
 # Exit codes systemd does not restart (yo-status@.service): no valid STATUS_TO_USER.
 NO_RECIPIENT = 5
 
@@ -69,17 +71,6 @@ def send_photo(to, allowed, path):
     if not allowed or to != allowed:
         raise PermissionError("not the fixed recipient")
     yocli.yo("send", to, "--photo", path)
-
-
-def drain():
-    """What came in, taken and dropped: never opened, answered or accepted (`sync` accepts no chat; a receipt goes
-    only to a chat said yes to, here the recipient's)."""
-    try:
-        events = yocli.yo("sync", "--drain-media")
-        if events:
-            yocli.log(f"drained {len(events)}")
-    except yocli.Failed as failed:
-        yocli.log(f"drain: {yocli.reason(failed)}")
 
 
 def next_slot(now, every):
@@ -179,19 +170,16 @@ def report(cfg, to):
         yocli.log(f"last report not kept: {type(error).__name__}")
 
 
-def main():
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--once", action="store_true", help="one report now, then end")
-    args = parser.parse_args()
-    to = recipient()
-    if not to:
-        yocli.log("stopped: STATUS_TO_USER is not a user id (32 hex)")
-        sys.exit(NO_RECIPIENT)
-    yocli.registered()
-    if args.once:
-        drain()
-        return report(config(), to)
-    shown, drained = None, time.monotonic()
+def asked(event, to, cooldown, now):
+    """Whether an event is the recipient asking for a report: a Yo from that user alone, not in a group, at most one
+    per ON_DEMAND seconds. Anything else, from anyone, is dropped."""
+    return (event.get("type") == "message" and event.get("content") == "yo" and not event.get("group")
+            and event.get("from") == to and cooldown.allow(to, now))
+
+
+def timed(to, lock):
+    """The reports at the slots of the admin's rhythm."""
+    shown = None
     while True:
         cfg = config()
         slot = next_slot(datetime.datetime.now(BERLIN), cfg["every_minutes"])
@@ -202,16 +190,42 @@ def main():
         while True:
             wait = None if slot is None else slot.timestamp() - time.time()
             if wait is not None and wait <= 0:
-                drain()
-                drained = time.monotonic()
-                report(cfg, to)
+                with lock:
+                    report(cfg, to)
                 break
-            if slot is None and time.monotonic() - drained >= DRAIN_OFF:
-                drain()
-                drained = time.monotonic()
             time.sleep(60 if wait is None else min(wait, 60))
             if config() != cfg:
                 break
+
+
+def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--once", action="store_true", help="one report now, then end")
+    args = parser.parse_args()
+    to = recipient()
+    if not to:
+        yocli.log("stopped: STATUS_TO_USER is not a user id (32 hex)")
+        sys.exit(NO_RECIPIENT)
+    yocli.registered()
+    if args.once:
+        return report(config(), to)
+    lock, wanted = threading.Lock(), threading.Event()
+
+    def on_demand():
+        while True:
+            wanted.wait()
+            wanted.clear()
+            with lock:
+                report(config(), to)
+
+    cooldown = yocli.Cooldown(ON_DEMAND)
+    for event in yocli.listen("--drain-media"):
+        if event.get("type") == "ready":
+            yocli.log("listening")
+            threading.Thread(target=timed, args=(to, lock), daemon=True).start()
+            threading.Thread(target=on_demand, daemon=True).start()
+        elif asked(event, to, cooldown, time.monotonic()):
+            wanted.set()
 
 
 if __name__ == "__main__":

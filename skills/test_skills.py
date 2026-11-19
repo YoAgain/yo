@@ -204,6 +204,19 @@ class StatusRules(unittest.TestCase):
             yocli.yo = real
         self.assertEqual(sent, [("send", user, "--photo", "/x.jpg")])
 
+    def test_only_a_yo_from_the_recipient_asks_for_a_report(self):
+        user, other = "ab" * 16, "cd" * 16
+        yo = {"type": "message", "from": user, "group": None, "reply_to": user, "content": "yo", "media": None}
+        cooldown = yocli.Cooldown(status.ON_DEMAND)
+        for event in [{**yo, "from": other, "reply_to": other}, {**yo, "content": "photo"}, {**yo, "content": "other"},
+                      {**yo, "group": "g1", "reply_to": "group:g1"}, {"type": "new_chat", "user": user},
+                      {"type": "probe", "from": user}]:
+            with self.subTest(event=event):
+                self.assertFalse(status.asked(event, user, cooldown, 0.0))
+        self.assertTrue(status.asked(yo, user, cooldown, 0.0))
+        self.assertFalse(status.asked(yo, user, cooldown, 10.0), "once per 30 s")
+        self.assertTrue(status.asked(yo, user, cooldown, 31.0))
+
     def test_slots_are_whole_multiples_of_berlin_time(self):
         at = lambda *a: datetime.datetime(2026, *a, tzinfo=status.BERLIN)  # noqa: E731
         self.assertEqual(status.next_slot(at(11, 19, 16, 29, 59), 30), at(11, 19, 16, 30))
