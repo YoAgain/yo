@@ -2,6 +2,7 @@
 // notification settings; back in the app it is gone once they are on. No dismiss: without them Yo is mute.
 import SwiftUI
 import UserNotifications
+import YoCore
 
 struct NotificationsBar: View {
   @Environment(\.scenePhase) private var scenePhase
@@ -17,7 +18,7 @@ struct NotificationsBar: View {
             UIApplication.shared.open(url)
           }
         } label: {
-          Text("Turn On Notifications")
+          Text(productText(text: .turnOnNotifications, lang: .english))
             .font(.yo(Metrics.rowFont))
             .foregroundStyle(.white)
             .lineLimit(1)
@@ -29,8 +30,8 @@ struct NotificationsBar: View {
             .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
-        .accessibilityLabel("Notifications Are Off")
-        .accessibilityHint("Yos can't reach you. Opens Settings to turn on notifications for Yo.")
+        .accessibilityLabel(productText(text: .notificationsOff, lang: .english))
+        .accessibilityHint(productText(text: .notificationsHint, lang: .english))
       }
     }
     // The answer is asked for when the list first shows (YoApp); the prompt and Settings both leave the app inactive,
@@ -39,7 +40,7 @@ struct NotificationsBar: View {
       guard scenePhase == .active else { return }
       let status = await UNUserNotificationCenter.current().notificationSettings().authorizationStatus
       if status == .notDetermined { Self.askedThisLaunch = true }
-      denied = status == .denied && !Self.askedThisLaunch
+      denied = productShowNotificationRow(denied: status == .denied, askedThisLaunch: Self.askedThisLaunch)
     }
   }
 }

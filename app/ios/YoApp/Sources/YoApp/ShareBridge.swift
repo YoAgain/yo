@@ -127,20 +127,6 @@ enum ShareBridge {
     ])
   }
 
-  /// How a run of Yos reads, on the app's bar and in a notification alike: "Yo", one "!" for each Yo after the
-  /// first, at most `mostBangs`, then " +n" for the rest ("Yo!!!!! +4" for ten).
-  static let mostBangs = 5
-
-  /// The "!"s of `count` Yos and how many more there are than "!"s.
-  static func bangs(_ count: Int) -> (bangs: Int, more: Int) {
-    let wanted = max(0, count - 1)
-    let bangs = min(wanted, mostBangs)
-    return (bangs, wanted - bangs)
-  }
-
-  /// "Yo", "3× Yo", as on the bars.
-  static func yo(_ count: Int) -> String { count <= 1 ? "Yo" : "\(count)× Yo" }
-
   /// One Yo, for a notification of its own (as Signal: every message its own, iOS stacks them by sender).
   struct Yos: Sendable {
     /// Who sent it: "Mia"; a group's "Mia in #Hey".
@@ -157,12 +143,13 @@ enum ShareBridge {
     var request = false
 
     /// "Yo from Mia", "Yo from Mia 📷", "Yo from Mia in #Hey 🎥", "Yo Request from Mia".
-    var line: String { request ? "Yo Request from \(name)" : "Yo from \(name)\(media)" }
-
-    private var media: String { kind == .video ? " 🎥" : kind == .photo ? " 📷" : "" }
+    var line: String {
+      productNotificationLine(name: name, kind: kind == .video ? .video : kind == .photo ? .photo : .yo,
+        request: request, lang: .english)
+    }
 
     /// One per Yo: none takes another's place.
-    var notificationIdentifier: String { "yo:" + id }
+    var notificationIdentifier: String { productNotificationId(eventId: id) }
 
     /// When it was sent, from its id ("user/sent at").
     var sentAtMs: UInt64 { UInt64(id.split(separator: "/").last ?? "") ?? 0 }
@@ -186,14 +173,15 @@ enum ShareBridge {
       var yos: Yos
       switch event {
       case .message(let user, let at, let kind):
-        yos = Yos(name: name(user), user: user, kind: kind.media?.kind, id: "\(user)/\(at)")
+        yos = Yos(name: name(user), user: productNotificationThread(user: user, group: nil), kind: kind.media?.kind, id: "\(user)/\(at)")
       case .groupMessage(let id, let user, let at, let kind):
         let groupName = group(id)
         let from = name(user)
         yos = Yos(
-          name: groupName.isEmpty ? from : "\(from) in #\(groupName)", user: "group:" + id, kind: kind.media?.kind,
+          name: productNotificationGroupName(name: from, group: groupName, lang: .english),
+          user: productNotificationThread(user: user, group: id), kind: kind.media?.kind,
           id: "\(id)/\(user)/\(at)")
-        yos.bar = groupName.isEmpty ? "Group" : groupName  // as the list names the group's bar (Friends.takeGroups)
+        yos.bar = groupName.isEmpty ? productText(text: .group, lang: .english) : groupName  // as the list names the group's bar (Friends.takeGroups)
       default: continue
       }
       yos.request = requests.contains(yos.user)
@@ -247,17 +235,17 @@ enum ShareBridge {
     let badge = NSNumber(value: shown.count + new.count)
     // The sound for the first unread of a sender (or group) only: while one of its thread is on the screen, the next
     // come quietly (no sound, no banner); once read or cleared, the next one sounds again.
-    var unread = Set(shown.map(\.request.content.threadIdentifier))
-    func sounds(_ yo: Yos) -> Bool { unread.insert(yo.user).inserted }
+    let sounds = productNotificationSounds(delivered: shown.map(\.request.content.threadIdentifier),
+      new: new.reversed().map(\.user))
     // The oldest first, the newest last (this push's own, on top).
-    for other in new.dropFirst().reversed() {
+    for (other, sound) in zip(new.dropFirst().reversed(), sounds) {
       let own = UNMutableNotificationContent()
-      yo(own, other, sounds: sounds(other))
+      yo(own, other, sounds: sound)
       own.badge = badge
       UNUserNotificationCenter.current().add(
         UNNotificationRequest(identifier: other.notificationIdentifier, content: own, trigger: nil))
     }
-    yo(content, newest, sounds: sounds(newest))
+    yo(content, newest, sounds: sounds.last ?? false)
     content.badge = badge
     return []
   }
@@ -271,7 +259,7 @@ enum ShareBridge {
       $0.request.content.categoryIdentifier == yoCategory && $0.request.content.userInfo["id"] != nil
     }
     guard let newest = yos.max(by: { $0.date < $1.date }) else {
-      (content.title, content.subtitle, content.body) = ("", "", "Yo")
+      (content.title, content.subtitle, content.body) = ("", "", productText(text: .yo, lang: .english))
       return []
     }
     let shown = newest.request.content

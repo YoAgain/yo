@@ -1,3 +1,4 @@
+import YoCore
 // What a photo or video is as it goes (spec 5, 6.8): a HEIC of at most 2048 pixels, an HEVC video of at most 720p and
 // 10 seconds with stereo AAC sound, neither with a place or a device in it. Without the core: the share extension (YoShare) makes them the same
 // way, from this very file.
@@ -18,16 +19,17 @@ struct MediaFile: Sendable {
   let height: Int
   let durationMs: UInt32
 
-  static let longestSide = 2048
-  static let quality = 0.75
+  static let longestSide = Int(productPhotoLongSide())
+  private static let encoding = productEncoding()
+  static let quality = encoding.photoQuality
   /// The longest video that goes (spec 5): a shared or picked one; the camera records `Camera.longestVideo`.
-  static let longestVideo = 10.0
+  static let longestVideo = Double(productVideoLimitMs()) / 1000
   /// The most a video's bytes may be: under a blob's 10 MiB (MAX_BLOB_LEN, its tag included) with room to spare.
-  static let largestVideo = 9_000_000
+  static let largestVideo = Int(productVideoLimitBytes())
   /// 1280 by 720 at most, either way round.
-  static let videoSides = (long: 1280.0, short: 720.0)
-  static let videoBitRate = 2_500_000
-  static let audioBitRate = 128_000
+  static let videoSides = (long: Double(encoding.videoLongSide), short: Double(encoding.videoShortSide))
+  static let videoBitRate = Int(encoding.videoBitRate)
+  static let audioBitRate = Int(encoding.audioBitRate)
 
   /// A photo as it goes: a HEIC (no older reader needs a JPEG: both decode HEIC) at most `longestSide` pixels on its longest side, upright, and nothing but its
   /// pixels (no place, no camera, no date).

@@ -111,18 +111,19 @@ final class ShareModel {
   var friends: [ShareBridge.Friend]? { list?.friends }
 
   /// "📷" or "🎥", as the island and the bars say it.
-  var mark: String { counts.videos > 0 ? "🎥" : "📷" }
+  var mark: String { productMediaSign(kind: counts.videos > 0 ? .video : .photo) }
 
   /// Makes them as they go (a HEIC of at most 2048 pixels, an HEVC video of at most 10 seconds) while a name is chosen,
   /// one after the other: an extension has little memory. One there is no room for (`room`) is kept as it was shared
   /// and goes to the app, which makes it; a video that would not make here goes to the app as well.
   func prepare(_ providers: [NSItemProvider]) {
     var picked: [(NSItemProvider, MediaFile.Kind)] = []
+    let limits = productShareLimits()
     for provider in providers {
-      if provider.hasItemConformingToTypeIdentifier(UTType.movie.identifier), counts.videos == 0 {
+      if provider.hasItemConformingToTypeIdentifier(UTType.movie.identifier), counts.videos < Int(limits.videos) {
         counts.videos += 1
         picked.append((provider, .video))
-      } else if provider.hasItemConformingToTypeIdentifier(UTType.image.identifier), counts.photos < 10 {
+      } else if provider.hasItemConformingToTypeIdentifier(UTType.image.identifier), counts.photos < Int(limits.photos) {
         counts.photos += 1
         picked.append((provider, .photo))
       }
@@ -202,26 +203,22 @@ final class ShareModel {
   }
 
   var subtitle: String {
-    switch (counts.photos, counts.videos) {
-    case (0, 1): return "Tap a name to send this video."
-    case (1, 0): return "Tap a name to send this photo."
-    case (0, 0): return "Nothing to send."
-    default: return "Tap a name to send these \(counts.photos + counts.videos)."
-    }
+    productShareSubtitle(photos: UInt32(counts.photos), videos: UInt32(counts.videos), lang: .english)
   }
 
   func title(_ friend: ShareBridge.Friend) -> String {
     switch feedback[friend.to] {
-    case .sending: return "Sending \(mark)!"
-    case .sent: return "Sent \(mark)!"
-    case .queued: return "Sends when you open Yo"
-    case .failed: return "Not Sent"
+    case .sending: return productSendWords(mark: mark, sending: true, lang: .english)
+    case .sent: return productSendWords(mark: mark, sending: false, lang: .english)
+    case .queued: return productText(text: .shareQueued, lang: .english)
+    case .failed: return productText(text: .notSent, lang: .english)
     case nil: return friend.name
     }
   }
 
   func canGive(to friend: ShareBridge.Friend) -> Bool {
-    !sending && !tooLong && counts.photos + counts.videos > 0 && feedback[friend.to] == nil
+    productShareCanSend(sending: sending, tooLong: tooLong, hasMedia: counts.photos + counts.videos > 0,
+      hasFeedback: feedback[friend.to] != nil)
   }
 
   func give(to friend: ShareBridge.Friend) {
@@ -407,13 +404,13 @@ struct ShareView: View {
     NavigationStack {
       Group {
         if !model.ready {
-          note("Sharing to Yo isn’t set up on this iPhone yet.")
+          note(productText(text: .shareUnavailable, lang: .english))
         } else if model.tooLong {
           TooLongCard()
             .transition(.scale(scale: 0.9).combined(with: .opacity))
         } else if let friends = model.friends {
           if friends.isEmpty {
-            note("Add a friend in Yo first.")
+            note(productText(text: .shareAddFriend, lang: .english))
           } else {
             ScrollView {
               LazyVStack(spacing: 0) {
@@ -486,9 +483,9 @@ struct ShareView: View {
 struct TooLongCard: View {
   var body: some View {
     HStack(spacing: 10) {
-      Text(verbatim: "Video too long").foregroundStyle(Color.alizarin).fixedSize()
+      Text(verbatim: productText(text: .videoTooLong, lang: .english)).foregroundStyle(Color.alizarin).fixedSize()
       Text(verbatim: "·").foregroundStyle(.white.opacity(0.5)).fixedSize()
-      Text(verbatim: "max \(Int(MediaFile.longestVideo)) s").foregroundStyle(.white).fixedSize()
+      Text(verbatim: productVideoLimitLabel()).foregroundStyle(.white).fixedSize()
     }
     .font(.yo(22, relativeTo: .title2))
     .padding(.horizontal, 24)

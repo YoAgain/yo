@@ -1,3 +1,4 @@
+import YoCore
 // "Yo" beside the camera and the friend's name on its other side, in the Dynamic Island (and on the Lock Screen),
 // for a moment after a Yo from outside the app: the Action button, Control Center, a widget, Shortcuts or Siri
 // (YoIntents.swift). Inside the app the bar says it, so nothing starts there. It starts as the intent starts, before
@@ -26,6 +27,15 @@ struct YoSentAttributes: ActivityAttributes {
       case failed
       /// Yo Back with no Yo to answer: "No Yo", "nobody yet".
       case nobody
+
+      var product: ProductOutcome {
+        switch self {
+        case .sending: .sending
+        case .sent: .sent
+        case .failed: .failed
+        case .nobody: .nobody
+        }
+      }
     }
 
     var outcome: Outcome
@@ -48,10 +58,10 @@ struct YoSentAttributes: ActivityAttributes {
 
 enum YoSentActivity {
   /// How long it stays once the Yo went or did not.
-  static let shown: Duration = .seconds(3)
+  static let shown: Duration = .seconds(Int64(productDisplayTiming().activityShownSecs))
   /// How long "sending" may stand: if no outcome came by then (the process was suspended mid-send), the island
   /// says "Yo?" instead of a faded "Yo" for good.
-  static let sendingFor: TimeInterval = 30
+  static let sendingFor: TimeInterval = Double(productDisplayTiming().activityStaleSecs)
 
   /// How long the steps of an intent took (from its start): seen in the device's log under "YoIntentTiming".
   struct Timing: Sendable {

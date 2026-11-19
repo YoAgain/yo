@@ -13,6 +13,7 @@ fuzz = []
 testing = []
 
 [dependencies]
+yo-product = { path = "../product" }
 yo-wire = { path = "../wire" }
 tls_codec = { workspace = true }
 curve25519-dalek = { workspace = true }

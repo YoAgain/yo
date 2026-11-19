@@ -35,7 +35,7 @@ struct Friend: Codable, Hashable, Identifiable {
   /// under the undo ring, as a photo does, so one sent by mistake can be taken back. Kept on this phone.
   var undoFirst = false
   /// How long that Yo waits: 2 to 10 seconds, set beside the switch.
-  var undoSeconds: Double = 2  // FriendList.sendDelay
+  var undoSeconds: Double = Double(listTimings().undoMs) / 1000
   /// Who they are on this phone, for good: a new spelling or a user id learned later keeps the bar in its place (a
   /// name as identity made the bar leave and come in again on top).
   var key = UUID()
@@ -76,7 +76,7 @@ struct Friend: Codable, Hashable, Identifiable {
     keyChanged = try c.decodeIfPresent(Bool.self, forKey: .keyChanged) ?? false
     request = try c.decodeIfPresent(Bool.self, forKey: .request) ?? false
     undoFirst = try c.decodeIfPresent(Bool.self, forKey: .undoFirst) ?? false
-    undoSeconds = try c.decodeIfPresent(Double.self, forKey: .undoSeconds) ?? 2
+    undoSeconds = try c.decodeIfPresent(Double.self, forKey: .undoSeconds) ?? Double(listTimings().undoMs) / 1000
     group = try c.decodeIfPresent(String.self, forKey: .group)
     key = try c.decodeIfPresent(UUID.self, forKey: .key) ?? UUID()
   }
@@ -197,7 +197,7 @@ final class Friends {
     Perf.timed("friends.groups") {
       var list = all
       for group in groups {
-        let name = group.name.isEmpty ? "Group" : group.name
+        let name = group.name.isEmpty ? productText(text: .group, lang: .english) : group.name
         if let index = list.firstIndex(where: { $0.group == group.id }) {
           if group.left {
             list.remove(at: index)
@@ -229,7 +229,8 @@ final class Friends {
   /// A friend on the list who counts as one (bots, groups, requests, blocked and gone accounts don't).
   var hasFriend: Bool {
     all.contains {
-      $0.group == nil && !$0.request && !$0.blocked && !$0.gone && !AddFriendHint.bots.contains(Username.skeleton($0.name))
+      productIsRealFriend(skeleton: Username.skeleton($0.name), group: $0.group != nil,
+        request: $0.request, blocked: $0.blocked, gone: $0.gone)
     }
   }
   var blocked: [Friend] { all.filter(\.blocked) }
@@ -421,7 +422,7 @@ final class Friends {
 
   /// How long a friend's Yo waits under "Undo Before Sending" (2 to 10 s).
   func setUndoSeconds(_ friend: Friend, _ seconds: Double) {
-    let seconds = min(max(seconds, FriendList.sendDelay), 10)
+    let seconds = productUndoSeconds(seconds: seconds)
     guard let index = all.firstIndex(where: { $0.key == friend.key }), all[index].undoSeconds != seconds else { return }
     all[index].undoSeconds = seconds
   }

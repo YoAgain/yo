@@ -6,6 +6,7 @@
 import ActivityKit
 import SwiftUI
 import WidgetKit
+import YoCore
 
 struct YoSentLiveActivity: Widget {
   var body: some WidgetConfiguration {
@@ -39,7 +40,7 @@ struct YoSentLiveActivity: Widget {
           .frame(maxWidth: 62, alignment: .leading)
       } minimal: {
         // "Yo" in the friend's colour (red when it did not go).
-        Text(verbatim: "Yo")
+        Text(verbatim: productText(text: .yo, lang: .english))
           .font(.yo(14, relativeTo: .headline))
           .foregroundStyle(context.state.outcome == .failed ? .alizarin : Color.friend(context.state))
           .opacity(context.state.outcome == .sending && !context.isStale ? 0.45 : 1)
@@ -69,27 +70,21 @@ private struct Bar: View {
   static let inset: CGFloat = 22
   static let height: CGFloat = 44
 
-  /// The list's words (YoWords in the app, which this extension cannot import).
   private var words: String {
-    let count = state.others.isEmpty ? state.count : state.total
-    return switch state.outcome {
-    case .sending where stale: "Yo?"
-    case .sending: count <= 1 ? "Sending Yo!" : "Sending \(count)× Yo!"
-    case .sent: count <= 1 ? "Sent Yo!" : "Sent \(count)× Yo!"
-    case .failed: "Not Sent"
-    case .nobody: "No Yo to answer"
-    }
+    productActivityWords(outcome: state.outcome.product, place: .expanded, stale: stale,
+      count: Int64(state.count), total: Int64(state.total), hasOthers: !state.others.isEmpty,
+      back: state.back, lang: .english)
   }
 
   /// "Sent Yo!" with "Yo!" in Yo's purple, the rest white (owner's pick: white text on the island's black, the
   /// brand only in "Yo"); "Not Sent" / "No Yo to answer" red; faded while it goes.
   private var line: Text {
     let plain = state.outcome == .failed || state.outcome == .nobody
-    if plain || !words.hasSuffix("Yo!") {
+    if plain || !words.hasSuffix(productText(text: .yoBang, lang: .english)) {
       return Text(verbatim: words).foregroundColor(plain ? .alizarin : .white)
     }
     let head = String(words.dropLast(3))
-    return Text(verbatim: head).foregroundColor(.white) + Text(verbatim: "Yo!").foregroundColor(.amethyst)
+    return Text(verbatim: head).foregroundColor(.white) + Text(verbatim: productText(text: .yoBang, lang: .english)).foregroundColor(.amethyst)
   }
 
   var body: some View {
@@ -123,16 +118,9 @@ private struct Word: View {
   var long = false
 
   private var text: String {
-    switch state.outcome {
-    case .failed: "No Yo"
-    case .nobody: long ? "No Yo back" : "No Yo"
-    case .sending where stale: "Yo?"
-    case .sending, .sent:
-      if long && !state.others.isEmpty { "\(state.total) Yo" }
-      else if state.count > 1 { "\(state.count)× Yo" }
-      else if long && state.back { "Yo back" }
-      else { "Yo" }
-    }
+    productActivityWords(outcome: state.outcome.product, place: long ? .lockScreen : .compact, stale: stale,
+      count: Int64(state.count), total: Int64(state.total), hasOthers: !state.others.isEmpty,
+      back: state.back, lang: .english)
   }
 
   private var color: Color {
@@ -148,7 +136,7 @@ private struct Word: View {
       .foregroundStyle(color)
       .opacity(state.outcome == .sending && !stale ? 0.45 : 1)
       .lineLimit(1)
-      .fixedSize()  // "Yo" never shrinks
+      .fixedSize()  // productText(text: .yo, lang: .english) never shrinks
       .contentTransition(.numericText(value: Double(long && !state.others.isEmpty ? state.total : state.count)))
       .animation(.default, value: text)
   }
@@ -164,9 +152,7 @@ private struct Name: View {
   var all = false
 
   private var text: String {
-    if all && state.outcome == .nobody { return "" }
-    if all && !state.others.isEmpty { return (state.others.reversed() + [state.name]).joined(separator: " · ") }
-    return state.name
+    productActivityNames(name: state.name, others: state.others, all: all, nobody: state.outcome == .nobody)
   }
 
   private var color: Color {

@@ -234,7 +234,7 @@ final class Inbox {
         }
         if accounts.account?.userID == account { client = accounts.client }
       }
-      guard let client, client === accounts.client else { return "Not Sent" }
+      guard let client, client === accounts.client else { return productText(text: .notSent, lang: .english) }
       return await sendNow(to: friend, client: client, accounts: accounts, friends: friends)
     }
     lastSend[key] = this
@@ -296,7 +296,7 @@ final class Inbox {
   }
 
   /// What a send to a group of this account alone says (`YoError.GroupEmpty`).
-  static let groupEmpty = "Group Is Empty"
+  static let groupEmpty = productText(text: .groupEmpty, lang: .english)
 
   private func sendNow(to friend: Friend, client: YoClient, accounts: AccountStore, friends: Friends) async -> String? {
     if let group = friend.group {
@@ -308,11 +308,11 @@ final class Inbox {
         return nil
       } catch YoError.Replaced {
         accounts.replaced(client)
-        return "Not Sent"
+        return productText(text: .notSent, lang: .english)
       } catch YoError.GroupEmpty {
         return Self.groupEmpty  // nobody left in it: the list offers to delete it
       } catch {
-        return "Not Sent"
+        return productText(text: .notSent, lang: .english)
       }
     }
     let target = friend.user ?? friend.name
@@ -335,25 +335,25 @@ final class Inbox {
       if let contacts = try? await Hub.run({ client.contacts() }), client === accounts.client {
         friends.markGone(contacts)
       }
-      return "Not on Yo"
+      return productText(text: .notOnYo, lang: .english)
     } catch YoError.Blocked {
-      return "Blocked"
+      return productText(text: .blocked, lang: .english)
     } catch YoError.Outdated {
       // Their app is too old: the Yo waits in the outbox and goes once they update.
       deliverLater(accounts: accounts, friends: friends)
-      return "Needs Update"
+      return productText(text: .needsUpdate, lang: .english)
     } catch YoError.Replaced {
       accounts.replaced(client)
-      return "Not Sent"
+      return productText(text: .notSent, lang: .english)
     } catch let error as YoError where retryLater(error: error) {
       // Not now (no network, the hub's limits; a first Yo the core cannot keep yet, its friend not looked up): kept
       // here and tried again by itself, a little later each time, until it goes or is refused for good.
       keepAndRetry(friend, accounts: accounts, friends: friends)
-      return "Not Sent"
+      return productText(text: .notSent, lang: .english)
     } catch {
       // Refused for good: why, for the diagnostics (a first Yo that said "Not Sent" in the Simulator once).
       Perf.mark("send.refused \(error)")
-      return "Not Sent"
+      return productText(text: .notSent, lang: .english)
     }
   }
 
@@ -825,7 +825,7 @@ private final class InboxSounds: @unchecked Sendable {
   // Accessed exclusively on queue.
   private var players: [AVAudioPlayer] = []
   /// How many Yo sounds may play at the same time.
-  static let atOnce = 3
+  static let atOnce = Int(productSoundLimit())
 
   /// Accessed exclusively on queue.
   private var prepared = false
@@ -854,10 +854,8 @@ private final class InboxSounds: @unchecked Sendable {
     queue.async { [self] in
       prepareNow()
       Perf.timed("inbox.sound.play") {
-        guard !players.isEmpty else { return }
-        // Each Yo sounds at once, up to `atOnce` together; one more while they play is left out.
-        guard let player = players.first(where: { !$0.isPlaying }) else { return }
-        player.play()
+        guard let slot = productSoundSlot(playing: players.map(\.isPlaying)) else { return }
+        players[Int(slot)].play()
       }
     }
   }

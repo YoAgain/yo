@@ -1,5 +1,6 @@
 import SwiftUI
 import UIKit
+import YoCore
 
 @MainActor @Observable final class SendFailure {
   static let shared = SendFailure()
@@ -14,7 +15,7 @@ import UIKit
     expiry = Task {
       try? await Task.sleep(for: .seconds(1))
       guard !Task.isCancelled, !Availability.shared.offline else { return }
-      let message = name.map { $0.count <= 18 ? "Failed to Send to \($0)" : "Failed to Send" } ?? "Failed to Send"
+      let message = productFailedToSend(name: name, lang: .english)
       text = message
       UIAccessibility.post(notification: .announcement, argument: message)
       try? await Task.sleep(for: .seconds(5))

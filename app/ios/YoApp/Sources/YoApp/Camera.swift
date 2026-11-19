@@ -4,6 +4,7 @@
 import AVFoundation
 import CoreImage
 import SwiftUI
+import YoCore
 import os
 
 /// TEMP, until the turn is seen right on the phone: what each capture was told ("YoMediaDiag" in the device log).
@@ -13,7 +14,7 @@ let mediaDiag = Logger(subsystem: "app.justyo", category: "media-diag")
 /// outputs are only touched there, which is what makes the class safe to share.
 final class Camera: NSObject, @unchecked Sendable {
   /// The longest video a held name records.
-  static let longestVideo = 10.0
+  static let longestVideo = Double(productVideoLimitMs()) / 1000
 
   private lazy var session = AVCaptureSession()
   // Display buffers have no connection to the capture session or its configuration lock.

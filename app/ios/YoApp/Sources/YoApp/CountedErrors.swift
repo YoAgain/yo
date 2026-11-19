@@ -18,7 +18,7 @@ import Glibc
 #endif
 
 enum NotifyFallback {
-  static let text = "You may have received a Yo"
+  static let text = productText(text: .notificationFallback, lang: .english)
 
   enum Reason: Error, Equatable, Sendable {
     /// `busy`: the app held the state longer than the extension may wait (its own send, an Action button's Yo).

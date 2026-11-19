@@ -64,7 +64,7 @@ enum YoIntentError: Error, CustomLocalizedStringResourceConvertible {
   var localizedStringResource: LocalizedStringResource {
     switch self {
     case .signedOut: "Open Yo once to sign in."
-    case .noYoYet: "No Yo to answer yet."
+    case .noYoYet: LocalizedStringResource(String.LocalizationValue(productText(text: .noAnswerYet, lang: .english)))
     case .notNow: "Not sent. Yo could not reach the internet."
     case .refused(let why): "Not sent: \(why)."
     }
@@ -195,7 +195,7 @@ struct WidgetSent: Codable, Sendable {
   let until: Date
 
   /// How long a bar says "Sent Yo!".
-  static let shown: TimeInterval = 3
+  static let shown: TimeInterval = Double(productDisplayTiming().widgetSentSecs)
 
   private static var file: URL? { ShareBridge.container?.appending(path: "widget-sent.json") }
 

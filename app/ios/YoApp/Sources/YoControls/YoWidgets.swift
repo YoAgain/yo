@@ -1,3 +1,4 @@
+import YoCore
 // Yo's widgets: the friends' bars on the Home Screen as in the app, each a Yo on a tap without opening it, and on the
 // Lock Screen "Yo" to one friend and "Yo Back". On the Home Screen one widget for every size, so the size can change
 // in place: whom it shows is picked in Edit Widget (Friend 1 to 16, in that order), each size shows as many of them
@@ -6,6 +7,7 @@
 // The list is the one the app writes for its extensions (ShareBridge.List, in its order), which reloads the widgets
 // when it changes (ShareInbox); a sent Yo reads "Sent Yo!" on its bar for a moment (WidgetSent), then the name again.
 import AppIntents
+import Foundation
 import SwiftUI
 import WidgetKit
 
@@ -25,11 +27,12 @@ struct YoEntry: TimelineEntry {
   /// At most `count` bars: the picks in their slots' order (by whom the Yo goes to, else by name: the target turns from
   /// a name into a user id after the first Yo), each once; none picked (or none still on the list): the top `top`.
   func shown(_ count: Int, else top: Int) -> [ShareBridge.Friend] {
-    var seen = Set<String>()
-    let picks = picked.prefix(count).compactMap { $0 }
-      .compactMap { pick in friends.first { $0.to == pick.id } ?? friends.first { $0.name == pick.name } }
-      .filter { seen.insert($0.to).inserted }
-    return picks.isEmpty ? Array(friends.prefix(top)) : picks
+    let friends = self.friends
+    return productWidgetSelection(
+      friends: friends.map { ProductWidgetFriend(id: $0.to.precomposedStringWithCanonicalMapping, name: $0.name.precomposedStringWithCanonicalMapping) },
+      picks: picked.map { $0.map { ProductWidgetFriend(id: $0.id.precomposedStringWithCanonicalMapping, name: $0.name.precomposedStringWithCanonicalMapping) } },
+      slots: UInt32(count), fallback: UInt32(top)
+    ).map { friends[Int($0)] }
   }
 
   func justSent(_ friend: ShareBridge.Friend) -> Bool { sent?.to == friend.to }
@@ -58,6 +61,7 @@ struct YoEntry: TimelineEntry {
 
 /// The friend or group a Lock Screen circle sends to, picked in Edit Widget; none: the top one.
 struct YoFriendConfiguration: WidgetConfigurationIntent {
+  // The App Intents metadata extractor reads these compile-time values.
   static let title: LocalizedStringResource = "Yo a Friend"
   static let description = IntentDescription("Sends a Yo to a friend or group.")
   static let isDiscoverable = false
@@ -74,8 +78,8 @@ struct YoFriendWidget: Widget {
     AppIntentConfiguration(kind: "app.justyo.ios.widget.friend", intent: YoFriendConfiguration.self, provider: Provider()) {
       YoFriendView(entry: $0)
     }
-    .configurationDisplayName("Yo a Friend")
-    .description("A tap sends a Yo. Your top friend, or the one you pick.")
+    .configurationDisplayName(LocalizedStringResource(String.LocalizationValue(productText(text: .widgetFriend, lang: .english))))
+    .description(LocalizedStringResource(String.LocalizationValue(productText(text: .widgetFriendDescription, lang: .english))))
     .supportedFamilies([.accessoryCircular])
   }
 
@@ -100,12 +104,12 @@ struct YoFriendView: View {
   var body: some View {
     if let friend = entry.friend {
       Button(intent: SendYoNowIntent(friend: FriendEntity(friend))) {
-        CircleLines(top: entry.justSent(friend) ? "Sent" : "Yo", bottom: entry.justSent(friend) ? "Yo!" : friend.title)
+        CircleLines(top: entry.justSent(friend) ? productText(text: .sent, lang: .english) : productText(text: .yo, lang: .english), bottom: entry.justSent(friend) ? productText(text: .yoBang, lang: .english) : friend.title)
       }
       .buttonStyle(.plain)
       .containerBackground(for: .widget) { AccessoryWidgetBackground() }
     } else {
-      CircleLines(top: "Yo", bottom: "")
+      CircleLines(top: productText(text: .yo, lang: .english), bottom: "")
         .containerBackground(for: .widget) { AccessoryWidgetBackground() }
     }
   }
@@ -152,8 +156,8 @@ struct YoListWidget: Widget {
     AppIntentConfiguration(kind: "app.justyo.ios.widget.list", intent: YoListConfiguration.self, provider: Provider()) {
       YoListView(entry: $0)
     }
-    .configurationDisplayName("Yo")
-    .description("Your friends and groups, as in Yo, in the order you pick. A tap on a bar sends a Yo.")
+    .configurationDisplayName(LocalizedStringResource(String.LocalizationValue(productText(text: .yo, lang: .english))))
+    .description(LocalizedStringResource(String.LocalizationValue(productText(text: .widgetListDescription, lang: .english))))
     .supportedFamilies(Self.families)
     .contentMarginsDisabled()
   }
@@ -201,7 +205,7 @@ struct YoListView: View {
     } else if family == .systemSmall, friends.count == 1, let friend = friends.first {
       // One friend on a small widget: Yo's own purple, whatever their bar colour on the list.
       Button(intent: SendYoNowIntent(friend: FriendEntity(friend))) {
-        BarLabel(text: entry.justSent(friend) ? "Sent Yo!" : friend.title, size: 28)
+        BarLabel(text: entry.justSent(friend) ? productSendWords(mark: productCounted(count: 1), sending: false, lang: .english) : friend.title, size: 28)
       }
       .buttonStyle(.plain)
       .containerBackground(.amethyst, for: .widget)
@@ -213,7 +217,7 @@ struct YoListView: View {
         VStack(spacing: 0) {
           ForEach(friends, id: \.to) { friend in
             Button(intent: SendYoNowIntent(friend: FriendEntity(friend))) {
-              BarLabel(text: entry.justSent(friend) ? "Sent Yo!" : friend.title, size: size)
+              BarLabel(text: entry.justSent(friend) ? productSendWords(mark: productCounted(count: 1), sending: false, lang: .english) : friend.title, size: size)
                 .background(Color.row(friend.color))
             }
             .buttonStyle(.plain)
@@ -230,8 +234,8 @@ struct YoListView: View {
 struct YoBackWidget: Widget {
   var body: some WidgetConfiguration {
     StaticConfiguration(kind: "app.justyo.ios.widget.back", provider: Provider()) { YoBackView(entry: $0) }
-      .configurationDisplayName("Yo Back")
-      .description("Sends a Yo back to whoever sent you the last one.")
+      .configurationDisplayName(LocalizedStringResource(String.LocalizationValue(productText(text: .yoBack, lang: .english))))
+      .description(LocalizedStringResource(String.LocalizationValue(productText(text: .widgetBackDescription, lang: .english))))
       .supportedFamilies([.accessoryCircular])
   }
 
@@ -254,11 +258,11 @@ struct YoBackView: View {
   var body: some View {
     Button(intent: YoBackNowIntent()) {
       if entry.sent?.back == true {
-        CircleLines(top: "Sent", bottom: "Yo!")
+        CircleLines(top: productText(text: .sent, lang: .english), bottom: productText(text: .yoBang, lang: .english))
       } else {
         VStack(spacing: 1) {
           Image(systemName: "arrowshape.turn.up.left.fill").font(.system(size: 13, weight: .bold))
-          Text("Yo Back").font(.yo(11, relativeTo: .caption)).lineLimit(1).minimumScaleFactor(0.6)
+          Text(productText(text: .yoBack, lang: .english)).font(.yo(11, relativeTo: .caption)).lineLimit(1).minimumScaleFactor(0.6)
         }
         .padding(4)
       }
@@ -310,8 +314,8 @@ private struct CircleLines: View {
 private struct SignedOut: View {
   var body: some View {
     VStack(spacing: 4) {
-      Text(verbatim: "Yo").font(.yo(34))
-      Text("Open Yo to see your friends here.").font(.caption.weight(.semibold)).multilineTextAlignment(.center)
+      Text(verbatim: productText(text: .yo, lang: .english)).font(.yo(34))
+      Text(productText(text: .widgetEmpty, lang: .english)).font(.caption.weight(.semibold)).multilineTextAlignment(.center)
     }
     .foregroundStyle(.white)
     .padding()

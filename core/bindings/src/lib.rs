@@ -11,6 +11,8 @@ use yo_core::{Client, Content, Event, Sent};
 uniffi::setup_scaffolding!();
 
 mod list;
+mod product;
+pub use product::*;
 pub use list::*;
 
 #[derive(Debug, thiserror::Error, uniffi::Error)]

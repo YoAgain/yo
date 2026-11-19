@@ -348,7 +348,7 @@ struct FriendList: View {
       Text("You won’t get its Yos any more. A member can add you again.")
     }
     .alert(
-      "Group Is Empty",
+      productText(text: .groupEmpty, lang: .english),
       isPresented: Binding(get: { emptyGroup != nil }, set: { if !$0 { emptyGroup = nil } }), presenting: emptyGroup
     ) { bar in
       Button("Delete Group", role: .destructive) { deleteEmpty(bar) }
@@ -384,7 +384,7 @@ struct FriendList: View {
         if let contacts = try? await Hub.run({ client.contacts() }) { friends.markRequests(contacts) }
         if let groups = try? await Hub.run({ try client.groups() }) { friends.takeGroups(groups) }
         guard client === accounts.client else { return }
-        showSent(to: bar, "Sent Yo", thenOnTop: true)
+        showSent(to: bar, BarSendText.sentYo, thenOnTop: true)
         if let problem = await inbox.send(to: bar, accounts: accounts, friends: friends) {
           if problem == Inbox.groupEmpty { emptyGroup = bar }
           showSent(to: bar, problem)
@@ -466,7 +466,7 @@ struct FriendList: View {
           if notifications == .allowed {
             Button("Awesome", role: .cancel) {}
           } else {
-            Button("Turn On Notifications") { Task { await turnOnNotifications(notifications) } }
+            Button(productText(text: .turnOnNotifications, lang: .english)) { Task { await turnOnNotifications(notifications) } }
             Button("Not Now", role: .cancel) {}
           }
         } message: { notifications in
@@ -891,7 +891,7 @@ struct FriendList: View {
     let run = bars.of(friend)
     // The photo stack's exact number (its thumbnail shows only a stack).
     let stacked = (run.outgoing.isEmpty ? run.sendingBatch?.items ?? [] : run.outgoing)
-      .filter { $0.text.hasSuffix("📷") || $0.text.hasSuffix("🎥") }.count
+      .filter { productMediaKind(label: $0.text) != .yo }.count
     if stacked > 0 {
       Button(stacked == 1 ? "1 photo waiting to send" : "\(stacked) photos waiting to send", systemImage: "photo.stack") {}
         .disabled(true)
@@ -1171,7 +1171,7 @@ struct FriendList: View {
       withAnimation(.snappy) {
         position.scrollTo(id: known.key.uuidString, anchor: .center)
       }
-      showSent(to: known, "Already Added")
+      showSent(to: known, productText(text: .alreadyAdded, lang: .english))
       return nil
     }
     withAnimation(.snappy) {
@@ -1317,7 +1317,7 @@ struct FriendList: View {
     // "Undo Before Sending" (Per Contact): the Yo waits under the ring as a photo does; a tap on it keeps it here.
     if !cameraOn && library.isEmpty, let own = friends.all.first(where: { $0.key == friend.key }), own.undoFirst {
       let (inbox, accounts, friends) = (inbox, accounts, friends)
-      run(friend, "Sent Yo", seconds: own.undoSeconds) { _ in
+      run(friend, BarSendText.sentYo, seconds: own.undoSeconds) { _ in
         Prepared(
           send: {
             if let problem = await inbox.send(to: friend, accounts: accounts, friends: friends) {
@@ -1332,7 +1332,7 @@ struct FriendList: View {
       return
     }
     guard cameraOn || !library.isEmpty else {
-      showSent(to: friend, "Sent Yo", thenOnTop: true)
+      showSent(to: friend, BarSendText.sentYo, thenOnTop: true)
       Task {
         if let problem = await inbox.send(to: friend, accounts: accounts, friends: friends) {
           if problem == Inbox.groupEmpty { emptyGroup = friend }
@@ -1347,7 +1347,7 @@ struct FriendList: View {
     let at = Date.now
     if !library.isEmpty {
       for item in library {
-        run(friend, item.video == nil ? "Sent 📷" : "Sent 🎥", origin: origin) { thumbnail in
+        run(friend, item.video == nil ? BarSendText.sentPhoto : BarSendText.sentVideo, origin: origin) { thumbnail in
           if let image = item.thumbnail { thumbnail(image) }
           let file: MediaFile?
           if let video = item.video {
@@ -1361,7 +1361,7 @@ struct FriendList: View {
         }
       }
     } else {
-      run(friend, "Sent 📷", origin: origin, placeholder: camera.previewThumbnail()) { thumbnail in
+      run(friend, BarSendText.sentPhoto, origin: origin, placeholder: camera.previewThumbnail()) { thumbnail in
         guard let taken = await camera.photo(), !Task.isCancelled else { return nil }
         Perf.mark("thumb.capture.done")
         if let image = await Self.outgoingThumbnail(taken) { thumbnail(image) }
@@ -1446,7 +1446,7 @@ struct FriendList: View {
       Haptic.tap()
       let client = accounts.client
       let at = Date.now
-      run(friend, "Sent 🎥", origin: origin, placeholder: camera.previewThumbnail()) { thumbnail in
+      run(friend, BarSendText.sentVideo, origin: origin, placeholder: camera.previewThumbnail()) { thumbnail in
         guard let recording = await camera.stopVideo() else { return nil }
         Perf.mark("thumb.capture.done")
         defer { Task.detached(priority: .utility) { try? FileManager.default.removeItem(at: recording) } }
@@ -1478,7 +1478,7 @@ struct FriendList: View {
     bar.countdownStarted = nil
     bar.sendingBatch = (bar.outgoing.first!.id, bar.outgoing.count, bar.outgoing)
     let snapshot = listModel.sendStarted(now: listNow, id: friend.key.uuidString,
-      kind: text.hasSuffix("🎥") ? .video : (text.hasSuffix("📷") ? .photo : .yo),
+      kind: productMediaKind(label: text),
       undoMs: UInt64(seconds * 1000))
     publish(snapshot)
     bars.awaitingThumbnail.insert(one.id)
@@ -1558,7 +1558,7 @@ struct FriendList: View {
           bar.sentStack = failed ? [] : bar.sendingBatch?.items ?? []
           bar.sendingBatch = nil
         }
-        showSent(to: friend, failed ? "Not Sent" : (stack.last?.text ?? "Not Sent"), thenOnTop: !failed)
+        showSent(to: friend, failed ? BarSendText.notSent : (stack.last?.text ?? BarSendText.notSent), thenOnTop: !failed)
       }
       bars.releasing[key] = releasing
       await releasing.value
@@ -1640,7 +1640,7 @@ struct FriendList: View {
     bar.sendingBatch = nil
     bar.outgoing = []
     bar.countdownStarted = nil
-    showSent(to: friend, "Canceled")
+    showSent(to: friend, BarSendText.canceled)
   }
 
   /// Network/capture handlers report their result; text, counts and lifetime are core-owned.
@@ -1652,20 +1652,20 @@ struct FriendList: View {
       let bar = friends.all.first { $0.target == sent.to }
         ?? friends.all.first { $0.group == nil && $0.user == nil && Username.skeleton($0.name) == skeleton }
       guard let bar, !bar.blocked else { continue }
-      showSent(to: bar, "Sent Yo", thenOnTop: true)
+      showSent(to: bar, BarSendText.sentYo, thenOnTop: true)
     }
   }
 
   private func showSent(to friend: Friend, _ text: String, thenOnTop: Bool = false) {
-    if text == "Not Sent", cameraOn { SendFailure.shared.show(name: friend.name, retry: { outbox.retryNow() }) }
+    if text == BarSendText.notSent, cameraOn { SendFailure.shared.show(name: friend.name, retry: { outbox.retryNow() }) }
     let id = friend.key.uuidString
     let snapshot: ListSnapshot
     switch text {
-    case "Canceled": snapshot = listModel.sendUndone(now: listNow, id: id)
-    case "Not Sent": snapshot = listModel.sendFailed(now: listNow, id: id, text: text)
-    case "Sent Yo" where thenOnTop: snapshot = listModel.sendFinished(now: listNow, id: id, kind: .yo)
-    case "Sent 📷" where thenOnTop: snapshot = listModel.sendFinished(now: listNow, id: id, kind: .photo)
-    case "Sent 🎥" where thenOnTop: snapshot = listModel.sendFinished(now: listNow, id: id, kind: .video)
+    case BarSendText.canceled: snapshot = listModel.sendUndone(now: listNow, id: id)
+    case BarSendText.notSent: snapshot = listModel.sendFailed(now: listNow, id: id, text: text)
+    case BarSendText.sentYo where thenOnTop: snapshot = listModel.sendFinished(now: listNow, id: id, kind: .yo)
+    case BarSendText.sentPhoto where thenOnTop: snapshot = listModel.sendFinished(now: listNow, id: id, kind: .photo)
+    case BarSendText.sentVideo where thenOnTop: snapshot = listModel.sendFinished(now: listNow, id: id, kind: .video)
     default: snapshot = listModel.notice(now: listNow, id: id, text: text, rise: thenOnTop)
     }
     withAnimation(.snappy(duration: 0.2)) { publish(snapshot) }
@@ -1906,9 +1906,9 @@ extension FriendList {
       guard let friend = friendsByID[row.id] else { continue }
       let bar = bars.of(friend)
       let sending = !bar.outgoing.isEmpty || !row.sending ? bar.sendingBatch : nil
-      let title = sending == nil ? row.title : "Sent Yo"
+      let title = sending == nil ? row.title : BarSendText.sentYo
       // The sent photos go with their "Sent Yo", in the same update.
-      if !bar.sentStack.isEmpty, title != "Sent Yo" || !bar.outgoing.isEmpty || bar.sendingBatch != nil {
+      if !bar.sentStack.isEmpty, title != BarSendText.sentYo || !bar.outgoing.isEmpty || bar.sendingBatch != nil {
         bar.sentStack = []
       }
       let count = sending?.count ?? Int(row.count)
@@ -2071,7 +2071,7 @@ extension FriendList {
               case .cut(let cut): source = cut
               case .cancelled: continue
               case .failed:
-                problem = ("Video too long · max \(Int(MediaFile.longestVideo)) s", "")
+                problem = (productText(text: .videoTooLong, lang: .english) + " · " + productVideoLimitLabel(), "")
                 continue
               }
             }
@@ -2169,7 +2169,7 @@ struct LiveBar: View, @MainActor Equatable {
       icon: friend.group == nil ? nil : "person.3.fill", senders: bar.modelSenders, keepHeight: keepHeight, flies: true,
       action: action)
       // Gone: still their name (whose bar it is), faded; a tap says "Not on Yo".
-      .accessibilityValue(friend.gone ? "Not on Yo" : "")
+      .accessibilityValue(friend.gone ? productText(text: .notOnYo, lang: .english) : "")
   }
 
   /// The bar's words: what is happening, else the name.
@@ -2256,7 +2256,7 @@ private struct OutgoingThumbnailSlot: View {
         .position(top)
         .opacity(item == nil || restingImage == nil ? 0 : 1)
       if let item, let image = item.thumbnail {
-        OutgoingThumbnail(image: image, video: item.text.contains("🎥"), destination: top,
+        OutgoingThumbnail(image: image, video: item.text.contains(productMediaSign(kind: .video)), destination: top,
           origin: item.origin.map { CGPoint(x: $0.x - coordinateOrigin.x, y: $0.y - coordinateOrigin.y) } ?? fallbackOrigin, side: side, began: {
             Perf.mark("thumb.fly.start")
             began(item.id)
@@ -2269,7 +2269,7 @@ private struct OutgoingThumbnailSlot: View {
     .onChange(of: item, initial: true) { old, new in
       if old?.id != new?.id {
         if new == nil { restingImage = nil }
-        else if let thumbnail = old?.thumbnail { restingImage = thumbnail; restingVideo = old?.text.contains("🎥") == true }
+        else if let thumbnail = old?.thumbnail { restingImage = thumbnail; restingVideo = old?.text.contains(productMediaSign(kind: .video)) == true }
       }
     }
   }
@@ -2530,7 +2530,7 @@ struct RowButton: View {
   private var rows: Rows { keepHeight ? (frozen ?? natural) : natural }
   /// Photos still in their countdown (undo possible): "Sending", not yet "Sent".
   private var sendingMedia: Bool {
-    undoAvailable && outgoingItems.contains { $0.text.hasSuffix("📷") || $0.text.hasSuffix("🎥") }
+    undoAvailable && outgoingItems.contains { productMediaKind(label: $0.text) != .yo }
   }
   /// All of the run: photos waiting count as Yos.
   private var receivedCount: Int { !media.isEmpty ? max(1, mediaMarkCount, media.count) : (yo?.total ?? 1) }
@@ -2549,10 +2549,10 @@ struct RowButton: View {
       } else {
         let room = room(sign: hasSign && !twoRows)
         // A group's sign only beside its name: "Sent 5× Yo!" has the room to itself.
-        let groupSign = title == "Sent Yo" ? nil : icon
+        let groupSign = title == BarSendText.sentYo ? nil : icon
         BarRow(lead: room.lead, trail: room.trail) {
           // A group: "#" as part of its name ("#Hey"), in the name's own font (usernames can't hold "#" or "@").
-          SteadyText(title == "Sent Yo" ? (sendingMedia ? YoWords.sending(count) : YoWords.sent(count))
+          SteadyText(title == BarSendText.sentYo ? productSendWords(mark: productCounted(count: Int64(count)), sending: sendingMedia, lang: .english)
             : groupSign != nil ? "#" + title : title)
         }
         if twoRows {
@@ -2575,24 +2575,16 @@ struct RowButton: View {
     .opacity(faded ? 0.55 : 1)
   }
 
-  /// "3× Yo from Mia", or "3× Yo" when that does not fit; in the middle, the photo sign kept clear at the end.
-  /// A name cut ever shorter at its end, each with "…": "Christophe…" down to "Chr…".
-  static func cuts(_ name: String) -> [String] {
-    let letters = Array(name)
-    guard letters.count > 4 else { return [] }
-    return (3..<letters.count - 1).reversed().map { String(letters[..<$0]) + "…" }
-  }
-
   private var receivedRow: some View {
     let room = room(sign: hasSign)
-    let yos = YoWords.yo(receivedCount)
+    let lines = productArrivalLines(count: Int64(receivedCount), name: name ?? "", lang: .english)
+    let cuts = Array(lines.dropFirst().dropLast().enumerated())
     return BarRow(lead: room.lead, trail: room.trail) {
-      SteadyText("\(yos) from \(name ?? "")").padding(.horizontal, 3)
-      // Too wide: the name is cut at its end ("Yo from Christo…"), never dropped while 3 letters fit; "Yo" whole.
-      ForEach(Self.cuts(name ?? ""), id: \.self) { cut in
-        SteadyText("\(yos) from \(cut)").padding(.horizontal, 3)
+      SteadyText(lines[0]).padding(.horizontal, 3)
+      ForEach(cuts, id: \.offset) { _, line in
+        SteadyText(line).padding(.horizontal, 3)
       }
-      SteadyText(yos).padding(.horizontal, 3)
+      SteadyText(lines[lines.count - 1]).padding(.horizontal, 3)
     }
     // A plain Yo fades out; photos and videos stay until seen.
     .modifier(ClockFade(since: media.isEmpty ? yo?.fading : nil, seconds: yoSeconds - Self.solid,
@@ -2662,7 +2654,7 @@ struct RowButton: View {
       TimelineView(.animation(minimumInterval: 1.0 / 120)) { timeline in
         let done = min(1, max(0, timeline.date.timeIntervalSince(start) / max(0.001, sendSeconds)))
         ZStack {
-          if outgoingItems.contains(where: { $0.text.hasSuffix("📷") || $0.text.hasSuffix("🎥") }) {
+          if outgoingItems.contains(where: { productMediaKind(label: $0.text) != .yo }) {
             GeometryReader { geometry in
               OutgoingThumbnailSlot(
                 item: outgoingItems.last(where: { $0.thumbnail != nil }),
@@ -2694,7 +2686,7 @@ struct RowButton: View {
     .buttonStyle(.plain)
     .contentShape(.rect.inset(by: -12))
     .disabled(!undoAvailable)
-    .accessibilityLabel(undoAvailable ? "Undo Send" : "Sending")
+    .accessibilityLabel(undoAvailable ? "Undo Send" : productText(text: .sending, lang: .english))
     .transition(.scale.combined(with: .opacity))
   }
 }
@@ -2779,7 +2771,7 @@ struct SenderBlocks: View {
           // Only the name is ever cut, never its Yos.
           HStack(spacing: 0) {
             Text(sender.name).lineLimit(1).truncationMode(.tail)
-            SteadyText(": " + YoWords.yo(sender.count)).fixedSize()
+            SteadyText(": " + productCounted(count: Int64(sender.count))).fixedSize()
           }
           .padding(.horizontal, 3)
         }
@@ -2810,11 +2802,12 @@ private struct ClockFade: ViewModifier {
   }
 }
 
-/// How Yos are counted on a bar: "Yo", "3× Yo"; sent: "Sent Yo!", "Sent 3× Yo!".
-enum YoWords {
-  static func yo(_ count: Int) -> String { count <= 1 ? "Yo" : "\(count)× Yo" }
-  static func sent(_ count: Int) -> String { count <= 1 ? "Sent Yo!" : "Sent \(count)× Yo!" }
-  static func sending(_ count: Int) -> String { count <= 1 ? "Sending Yo!" : "Sending \(count)× Yo!" }
+private enum BarSendText {
+  static let sentYo = productText(text: .sentYo, lang: .english)
+  static let sentPhoto = productText(text: .sentPhoto, lang: .english)
+  static let sentVideo = productText(text: .sentVideo, lang: .english)
+  static let notSent = productText(text: .notSent, lang: .english)
+  static let canceled = productText(text: .canceled, lang: .english)
 }
 
 /// Words with a count that hold still as it changes ("23× Yo" to "24× Yo"): the number in a block as wide as its
@@ -3441,7 +3434,7 @@ struct HeldMedia: View {
           .shadow(color: .black.opacity(0.3), radius: 2)
           .padding(.horizontal, 4)
           .accessibilityElement(children: .combine)
-          .accessibilityLabel("Yo from \(current.from)")
+          .accessibilityLabel(productNotificationLine(name: current.from, kind: .yo, request: false, lang: .english))
         }
         .padding(.horizontal, 8)
         .padding(.top, 4)

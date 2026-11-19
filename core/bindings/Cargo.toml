@@ -19,6 +19,7 @@ path = "bindgen.rs"
 testing = ["yo-core/testing"]
 
 [dependencies]
+yo-product = { path = "../product" }
 yo-core = { path = "../client" }
 uniffi = { workspace = true, features = ["cli"] }
 thiserror = { workspace = true }
