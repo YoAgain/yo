@@ -997,7 +997,7 @@ if (document.body.classList.contains("login")) {
   };
 
   // ---- users: every user in one sortable table (the Database widget, users) -------------------------------------------
-  let allSort = { key: "last_seen", dir: -1 };
+  let allSort = { key: "created", dir: -1 };  // newest sign-ups first
   const allValue = (u, key) => key === "name" ? (u.name || "").toLowerCase() : key === "app" ? (parse(u.app)?.[1] ?? -1)
     : key === "update" ? (u.app ? (belowMin(u.app) ? 3 : appState(u.app, u.id) === "update" ? 2 : appState(u.app, u.id) === "current" ? 0 : 1) : -1)
     : key === "secured" || key === "push" ? Number(!!u[key]) : u[key] ?? 0;
