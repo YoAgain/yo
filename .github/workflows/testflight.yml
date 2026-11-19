@@ -275,6 +275,31 @@ jobs:
           sys.exit(1 if missing else 0)
           EOF
 
+      # Invite links (justyo.co/NAME, a scanned Yo QR code) open the app only if its signature carries
+      # applinks:justyo.co, which the profile grants only with Associated Domains on the app id. Fatal, before the
+      # upload, as the App Group.
+      - name: Associated Domains
+        working-directory: app/ios/YoApp
+        run: |
+          codesign -d --entitlements :- xtool/YoApp.app > "$RUNNER_TEMP/signed.plist"
+          ~/pymobile3-venv/bin/python -I - xtool/YoApp.app "$RUNNER_TEMP/signed.plist" Entitlements.plist <<'EOF'
+          import pathlib, plistlib, sys
+          app, signed_path, own_path = map(pathlib.Path, sys.argv[1:])
+          key = "com.apple.developer.associated-domains"
+          raw = (app / "embedded.mobileprovision").read_bytes()
+          granted = plistlib.loads(raw[raw.index(b"<?xml"):raw.rindex(b"</plist>") + 8])["Entitlements"].get(key, [])
+          signed = plistlib.loads(signed_path.read_bytes()).get(key, [])
+          wanted = plistlib.loads(own_path.read_bytes())[key]
+          print(f"profile grants: {granted}\nsigned: {signed}\nwanted: {wanted}")
+          if not granted:
+              print("::error::YoApp.app: its profile grants no Associated Domains (not enabled on the app id)")
+              sys.exit(1)
+          missing = [d for d in wanted if d not in signed]
+          if missing:
+              print(f"::error::YoApp.app: signed without {missing}: invite links and passkeys do not reach the app")
+              sys.exit(1)
+          EOF
+
       - name: Upload
         working-directory: app/ios/YoApp
         timeout-minutes: 20

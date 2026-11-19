@@ -30,10 +30,13 @@
                 <category android:name="android.intent.category.DEFAULT" /><category android:name="android.intent.category.BROWSABLE" />
                 <data android:scheme="yo" android:host="add" />
             </intent-filter>
-            <intent-filter android:autoVerify="false">
+            <!-- Invite links justyo.co/NAME as App Links: verified against justyo.co/.well-known/assetlinks.json (the
+                 release signing certificate's SHA-256). One path part without a dot, as the iOS association file;
+                 before Android 12 the pattern is ignored and inviteName drops the site's own pages. -->
+            <intent-filter android:autoVerify="true">
                 <action android:name="android.intent.action.VIEW" />
                 <category android:name="android.intent.category.DEFAULT" /><category android:name="android.intent.category.BROWSABLE" />
-                <data android:scheme="https" android:host="justyo.co" />
+                <data android:scheme="https" android:host="justyo.co" android:pathAdvancedPattern="/[^/.]+" />
             </intent-filter>
             <intent-filter>
                 <action android:name="android.intent.action.SEND" /><category android:name="android.intent.category.DEFAULT" />
