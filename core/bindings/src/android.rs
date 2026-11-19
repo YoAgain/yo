@@ -32,7 +32,7 @@ pub fn product_android_notification_line(
     product::android_notification_line(name.as_deref(), group.as_deref(), kind, lang)
 }
 
-/// A request row's title: "Yo Request from Mia", or "Yo Request: Hey" for a group.
+/// A request row's title: "Yo Request from Mia", or "Yo Request: #Hey" for a group.
 #[uniffi::export]
 pub fn product_request_row(name: String, group: bool, lang: Language) -> String {
     product::request_row(&name, group, lang)

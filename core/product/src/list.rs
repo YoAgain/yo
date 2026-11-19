@@ -1065,7 +1065,7 @@ mod tests {
         l.apply(0, Input::RowsVisible(vec!["d".into()]));
         l.apply(50_000, Input::Tick);
         let r = row(&l, "d");
-        assert_eq!(r.title, "Yo Request: D");
+        assert_eq!(r.title, "Yo Request: #D");
         assert_eq!(r.count, 0);
         assert_eq!(r.yo_count, 0);
         assert_eq!(r.media_sign, "");

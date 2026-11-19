@@ -376,10 +376,12 @@ pub fn android_notification_line(name: Option<&str>, group: Option<&str>, kind: 
     notification_line(&from, kind, false, lang)
 }
 
+/// A request row's title: "Yo Request from Mia", or "Yo Request: #Hey" for a group (one "#", whether the name
+/// brings its own or not). Shown whole: where it does not fit, the apps take the bar's small size, never a cut.
 pub fn request_row(name: &str, group: bool, lang: Language) -> String {
     if group {
         let prefix = lang.choose("Yo Request", "Yo-Anfrage");
-        format!("{prefix}: {name}")
+        format!("{prefix}: #{}", name.strip_prefix('#').unwrap_or(name))
     } else {
         notification_line(name, list::Kind::Yo, true, lang)
     }
@@ -547,7 +549,8 @@ mod tests {
         }
         assert_eq!(android_notification_line(None, None, Yo, English), "You may have received a Yo");
         assert_eq!(android_notification_line(Some("Mia"), Some("#Hey"), Video, English), "Yo from Mia in #Hey 🎥");
-        assert_eq!(request_row("Hey", true, English), "Yo Request: Hey");
+        assert_eq!(request_row("Hey", true, English), "Yo Request: #Hey");
+        assert_eq!(request_row("#FAMILIE", true, English), "Yo Request: #FAMILIE");
     }
 
     #[test]
