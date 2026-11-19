@@ -41,6 +41,8 @@ extension Font {
 enum Metrics {
   static let rowHeight: CGFloat = 89  // the original's (YoContextView.m)
   static let rowFont: CGFloat = 36  // the original's (YOCell.m)
+  /// A group's senders, two lines in one bar: the second, fixed size (Android's too: 24 of 36 in an 89 bar).
+  static let rowSmallFont: CGFloat = 24
   /// The title: as tall as the glass buttons beside it, its "Yo" as large as fits.
   static let titleHeight: CGFloat = 44
   static let titleFont: CGFloat = 30

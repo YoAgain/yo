@@ -202,15 +202,7 @@ extension FriendList {
       let paused = !row.clockRunning
       let pauseChanged = bar.modelPaused != paused
       if pauseChanged { bar.modelPaused = paused }
-      let hadSenders = !bar.modelSenders.isEmpty
-      let senders = row.senders.map { sender in
-        RenderedSender(user: sender.user, name: sender.name, count: Int(sender.count),
-          elapsed: sender.elapsed, at: now.addingTimeInterval(-Double(sender.elapsed) / 1000))
-      }
-      if pauseChanged || bar.modelSenders.map(\.elapsed) != senders.map(\.elapsed)
-        || bar.modelSenders.map(\.user) != senders.map(\.user)
-        || bar.modelSenders.map(\.name) != senders.map(\.name)
-        || bar.modelSenders.map(\.count) != senders.map(\.count) { bar.modelSenders = senders }
+      if bar.modelLine != row.line { bar.modelLine = row.line }
       let previous = landings[friend.name]
       if row.yoCount > 0 {
         var landing = Landing(first: row.yoToken, count: Int(row.yoCount), total: Int(row.yoTotal))
@@ -223,7 +215,6 @@ extension FriendList {
         if landing != previous { landings[friend.name] = landing }
       } else if previous != nil {
         landings[friend.name] = nil
-        if friend.group != nil, hadSenders { tapLock = (friend.key, now + 0.5) }
       }
     }
     listDeadline = snapshot.nextTick
@@ -249,26 +240,15 @@ extension FriendList {
     }
   }
 
-  /// Any touch on a bar: the order and the other bars' heights stay until the taps have been quiet a moment.
+  /// Any touch on a bar: the order stays until the taps have been quiet a moment.
   func tapped(_ key: UUID) {
     tapQuiet = Date.now + Self.tapQuietSeconds
-    if !heightsHeld {
-      heightsHeld = true
-      heightsSince = .now
-      tappedBars = []
-    }
-    tappedBars.insert(key)
-    scheduleHeldFlush()
   }
 
-  /// A tap ignored: the list just reordered (any bar), or a group's bar shrank back (the bars under it).
+  /// A tap ignored: the bar just changed place.
   func tapLocked(_ friend: Friend) -> Bool {
-    if let moved = movedLock, Date.now < moved.until, moved.ids.contains(friend.key.uuidString) { return true }
-    guard let lock = tapLock, Date.now < lock.until else { return false }
-    guard let bar = lock.bar else { return true }
-    guard let group = friends.shown.firstIndex(where: { $0.key == bar }),
-      let tapped = friends.shown.firstIndex(where: { $0.key == friend.key }) else { return false }
-    return tapped > group
+    guard let moved = movedLock, Date.now < moved.until else { return false }
+    return moved.ids.contains(friend.key.uuidString)
   }
 
   func orderHeld(_ now: Date) -> Bool {
@@ -278,34 +258,25 @@ extension FriendList {
     return !fingersDown.isEmpty
   }
 
-  /// The held order and heights always go in the end: once the taps are quiet (or the cap is reached).
+  /// The held order always goes in the end: once the taps are quiet (or the cap is reached).
   func scheduleHeldFlush() {
     guard heldFlush == nil else { return }
     heldFlush = Task { @MainActor in
       defer { heldFlush = nil }
-      while heldOrder != nil || heightsHeld, !Task.isCancelled {
+      while heldOrder != nil, !Task.isCancelled {
         let wait = max(0.05, min(tapQuiet.timeIntervalSinceNow, Self.heldOrderCap))
         try? await Task.sleep(for: .seconds(wait))
-        if holdGoesOn(.now) { continue }
+        if orderHeld(.now) { continue }
         releaseHold()
       }
     }
   }
 
-  func holdGoesOn(_ now: Date) -> Bool {
-    // A finger seemingly stuck frees the heights after the cap as it frees the order.
-    if now >= tapQuiet, let since = heightsSince, now.timeIntervalSince(since) >= Self.heldOrderCap { return false }
-    return orderHeld(now)
-  }
-
-  /// The taps are over: the bars take their heights and the held order in one move.
+  /// The taps are over: the bars take the held order in one move.
   func releaseHold() {
     let order = heldOrder
     var instant = Transaction(); instant.disablesAnimations = true
     withTransaction(instant) {
-      heightsHeld = false
-      heightsSince = nil
-      tappedBars = []
       if let order, Set(order) == Set(listOrder) { applyOrder(order, anchor: lockedRow, promote: true) }
     }
     heldOrder = nil

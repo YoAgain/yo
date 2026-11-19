@@ -95,8 +95,6 @@ struct FriendList: View {
   @State var leftAt: Date?
   @State var cameraPrepared = false
   @State var listScrolling = false
-  /// Until when bars take no taps: with a bar, those under a group's bar that shrank back; without one, all.
-  @State var tapLock: (bar: UUID?, until: Date)?
   /// The bars that just changed place: a tap on them waits a moment.
   @State var movedLock: (ids: Set<String>, until: Date)?
   /// While bars are tapped the order stays: the newest waits here until `tapQuiet` passed and no finger is down.
@@ -105,10 +103,6 @@ struct FriendList: View {
   @State var heldOrder: [String]?
   @State var heldSince: Date?
   @State var heldFlush: Task<Void, Never>?
-  /// While taps go on, the other bars keep their height, so no bar above the finger moves under it.
-  @State var heightsHeld = false
-  @State var heightsSince: Date?
-  @State var tappedBars: Set<UUID> = []
   static let tapQuietSeconds = 1.5
   static let reorderTapLock = 0.5
   static let heldOrderCap = 8.0
@@ -540,7 +534,6 @@ struct FriendList: View {
       stop: { cancelSending(friend) },
       media: waiting,
       landing: landings.slot(friend.name),
-      keepHeight: heightsHeld && !tappedBars.contains(friend.key),
       hint: cameraOn ? "Takes and sends a photo. Use Record Video to record a video." : nil,
       hold: cameraOn && picked.isEmpty && !friend.request ? { hold(friend, $0, origin: $1) } : nil,
       cancelHold: {

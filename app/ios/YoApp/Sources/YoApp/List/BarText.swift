@@ -2,43 +2,43 @@ import SwiftUI
 import UIKit
 import YoCore
 
-/// A group's Yos by sender, a line each ("Kai: 2× Yo") under the bar's name.
-struct RenderedSender {
-  let user: String
-  let name: String
-  let count: Int
-  let elapsed: UInt64
-  let at: Date
-}
-
-struct SenderBlocks: View {
-  let senders: [RenderedSender]
+/// A group's senders since its bar last showed its name, newest first, over two lines at the small size
+/// ("Yo from TOM, IDA, BEN (3×)," / "SAM, KAI +4"). The core places the names (`listFlowTwoLines`); this only
+/// measures the pieces and draws the lines.
+struct SenderFlow: View {
+  let senders: [ListSender]
   var lead = BarRow.margin
   var trail = BarRow.margin
-  var paused = false
+  @Environment(\.dynamicTypeSize) private var typeSize
 
   var body: some View {
-    // Each line fades on its own as a bar's Yo; its place stays until the whole bar's Yos are over.
-    VStack(spacing: 0) {
-      ForEach(senders, id: \.user) { sender in
-        BarRow(lead: lead, trail: trail) {
-          // Only the name is ever cut, never its Yos.
-          HStack(spacing: 0) {
-            Text(sender.name).lineLimit(1).truncationMode(.tail)
-            SteadyText(": " + productCounted(count: Int64(sender.count))).fixedSize()
-          }
-          .padding(.horizontal, 3)
-        }
-        .modifier(ClockFade(since: sender.at.addingTimeInterval(FriendList.yoSolidSeconds),
-          seconds: FriendList.yoSeconds - FriendList.yoSolidSeconds, paused: paused,
-          elapsed: Double(sender.elapsed) / 1000 - FriendList.yoSolidSeconds))
-        .transition(.opacity)
+    GeometryReader { geometry in
+      let lines = lines(room: max(0, geometry.size.width - lead - trail))
+      VStack(spacing: 2) {
+        Text(lines[0])
+        if lines.count > 1, !lines[1].isEmpty { Text(lines[1]) }
       }
+      .font(.yo(Metrics.rowSmallFont))
+      .lineLimit(1)
+      .fixedSize()
+      .frame(width: geometry.size.width - lead - trail, height: geometry.size.height)
+      .offset(x: lead)
     }
-    .font(.yo(Metrics.rowFont))  // as a bar's name
-    .allowsHitTesting(false)  // a tap there sends a Yo
+    .frame(height: Metrics.rowHeight)
     .accessibilityElement(children: .ignore)
-    .accessibilityLabel(senders.map { "\($0.count == 1 ? "Yo" : "\($0.count) Yos") from \($0.name)" }.joined(separator: ", "))
+    .accessibilityLabel(senders.map { "\($0.count == 1 ? "Yo" : "\($0.count) Yos") from \($0.name)" }
+      .joined(separator: ", "))
+  }
+
+  private func lines(room: CGFloat) -> [String] {
+    let base = UIFont(name: "Montserrat-Bold", size: Metrics.rowSmallFont) ?? .boldSystemFont(ofSize: Metrics.rowSmallFont)
+    let font = UIFontMetrics(forTextStyle: .title1)
+      .scaledFont(for: base, compatibleWith: UITraitCollection(preferredContentSizeCategory: UIContentSizeCategory(typeSize)))
+    func width(_ text: String) -> Float { Float(ceil((text as NSString).size(withAttributes: [.font: font]).width)) }
+    let flow = listSenderFlow(senders: senders, lang: .english)
+    let widths = ListFlowWidths(prefix: width(flow.prefix), tokens: flow.tokens.map(width),
+      separator: width(flow.separator), comma: width(flow.comma), more: flow.more.map(width))
+    return listFlowTwoLines(flow: flow, widths: widths, room: Float(room))
   }
 }
 

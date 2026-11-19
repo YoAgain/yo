@@ -16,7 +16,8 @@ extension FriendList {
       var modelMarkCount = 0
       var modelMediaSign = ""
       var modelPaused = false
-      var modelSenders: [RenderedSender] = []
+      /// What the bar's one line tells (the core's): the title, or the Yos that came after it.
+      var modelLine: ListLine = .title
       /// Photos and videos on their way out; the ring at the bar's left undoes them.
       var outgoing: [Outgoing] = []
       /// Nil while captures join; the full undo interval starts after their flights settle.
