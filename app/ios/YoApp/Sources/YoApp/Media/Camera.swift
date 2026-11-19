@@ -165,8 +165,14 @@ final class Camera: NSObject, @unchecked Sendable {
     await withCheckedContinuation { continuation in queue.async { [self] in continuation.resume(returning: zooms) } }
   }
 
+  /// Read from the device as it is now (its most may change once it runs).
   func zoomMost() async -> Double {
-    await withCheckedContinuation { continuation in queue.async { [self] in continuation.resume(returning: most) } }
+    await withCheckedContinuation { continuation in
+      queue.async { [self] in
+        if let device = input?.device { most = Double(device.maxAvailableVideoZoomFactor / wide) }
+        continuation.resume(returning: most)
+      }
+    }
   }
 
   /// Ramps as the Camera app does; `immediate` follows a pinch.

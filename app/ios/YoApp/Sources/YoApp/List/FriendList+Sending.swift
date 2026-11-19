@@ -191,7 +191,7 @@ extension FriendList {
   /// The filming finger drawn `below` points under its touch (`room` under that): the camera zooms in, as far as
   /// `productRecordZoom` says; back up, out again. A light tick as it starts.
   func recordZoom(_ friend: Friend, below: CGFloat, room: CGFloat) {
-    guard recordingFor == friend, let start = recordZoomStart else { return }
+    guard recordingFor?.key == friend.key, let start = recordZoomStart else { return }
     let next = productRecordZoom(below: Double(below), room: Double(room), start: start, cameraMost: zoomMost)
     if next > start + 0.01, !recordZoomTicked {
       recordZoomTicked = true
@@ -209,6 +209,7 @@ extension FriendList {
       guard recordingFor == nil else { return }  // one video at a time: a second finger records nothing
       recordingChanged(friend)
       camera.startVideo()
+      Task { zoomMost = await camera.zoomMost() }  // the camera's own, as it is now
       // At the longest length the video goes as if the finger had lifted; the later lift finds no recording.
       let round = UUID()
       recordingRound = round
