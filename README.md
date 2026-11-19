@@ -121,7 +121,7 @@ DB: the local database, sealed per column.
 - [spec](spec): the YoIP protocol
 - [tests](tests), [fuzz](fuzz): tests, load runs, fuzzing
 - [dev](dev): build and development scripts
-- [docs](docs): images and notes
+- [docs](docs): the README banner
 
 ```sh
 dev/cargo test --workspace     # tests, with Docker
