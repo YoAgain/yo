@@ -183,6 +183,12 @@ final class HubTransport: HttpTransport {
       ? [NSURLErrorCancelled, NSURLErrorTimedOut, NSURLErrorNetworkConnectionLost] : [NSURLErrorCancelled]
     let quietStatus: Set<UInt16> =
       method != "GET" ? [] : route.hasPrefix("/v1/username/") ? [400, 409] : route == "/v1/storage" ? [404] : []
+    // Answers the core takes as answers, counted as expected (not a problem): a 401 it signs again for (a time the
+    // hub saw already, a device still registering), a limit, the hub restarting behind its proxy, no such name or no
+    // commitment told (invited instead), a name too short at sign-up (the hub's 400, shown as such).
+    var expectedStatus: Set<UInt16> = [401, 429, 502, 503, 504]
+    if method == "POST", route == "/v1/lookup" || route == "/v1/group-credential" { expectedStatus.insert(404) }
+    if method == "POST", route == "/v1/register" { expectedStatus.insert(400) }
     // Cut off past the largest answer: a hostile hub never fills an extension's 24 MB.
     task.delegate = Limited(diagnosticPlace: diagnosticUpload ? nil : codePlace, quiet: quietErrors) { data, response, error in
       answer.result =
@@ -213,7 +219,11 @@ final class HubTransport: HttpTransport {
       return HttpResult(status: 0, body: Data(), error: "shared storage time ended")
     }
     if !diagnosticUpload, answer.result.status >= 400, !quietStatus.contains(answer.result.status) {
-      Diagnostics.record(NSError(domain: "HTTP", code: Int(answer.result.status)), place: codePlace)
+      if expectedStatus.contains(answer.result.status) {
+        CountedErrors.record(domain: "HTTP", place: codePlace, code: String(answer.result.status), expected: true)
+      } else {
+        Diagnostics.record(NSError(domain: "HTTP", code: Int(answer.result.status)), place: codePlace)
+      }
     }
     Availability.network(answer.result.status == 0 || answer.result.status >= 500)
     if Perf.on {
@@ -240,6 +250,14 @@ final class HubTransport: HttpTransport {
     private let diagnosticPlace: String?
     private let quiet: Set<Int>
     private let done: (Data, URLResponse?, String?) -> Void
+    /// No way through the phone's network: timed out, no host, no connection, lost, offline, roaming or cellular
+    /// data off, a TLS handshake broken on the way (a captive portal), a "bad URL" said of the fixed hub address (a
+    /// proxy or VPN on the way; a path that is no URL is caught before the request as HubTransport -1000).
+    static let offline: Set<Int> = [
+      NSURLErrorBadURL, NSURLErrorTimedOut, NSURLErrorCannotFindHost, NSURLErrorCannotConnectToHost, NSURLErrorNetworkConnectionLost,
+      NSURLErrorDNSLookupFailed, NSURLErrorNotConnectedToInternet, NSURLErrorInternationalRoamingOff,
+      NSURLErrorDataNotAllowed, NSURLErrorSecureConnectionFailed,
+    ]
 
     init(diagnosticPlace: String?, quiet: Set<Int>, done: @escaping (Data, URLResponse?, String?) -> Void) {
       self.done = done
@@ -270,9 +288,16 @@ final class HubTransport: HttpTransport {
     }
 
     func urlSession(_ session: URLSession, task: URLSessionTask, didCompleteWithError error: Error?) {
-      if let error, let diagnosticPlace,
-        !((error as NSError).domain == NSURLErrorDomain && quiet.contains((error as NSError).code)) {
-        Diagnostics.record(error, place: diagnosticPlace)
+      if let error, let diagnosticPlace {
+        let error = error as NSError
+        if error.domain == NSURLErrorDomain, quiet.contains(error.code) {
+          // Not counted.
+        } else if error.domain == NSURLErrorDomain, Self.offline.contains(error.code) {
+          // The phone's network, not Yo: counted as expected; the core tries again.
+          CountedErrors.record(domain: error.domain, place: diagnosticPlace, code: String(error.code), expected: true)
+        } else {
+          Diagnostics.record(error, place: diagnosticPlace)
+        }
       }
       if tooLarge {
         if let diagnosticPlace { Diagnostics.record(NSError(domain: "HubTransport", code: 413), place: diagnosticPlace) }

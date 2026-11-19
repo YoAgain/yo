@@ -124,7 +124,9 @@ final class SharedStateFile: StateLock, @unchecked Sendable {
 
 final class StateFailureCounts: StateDiagnostics, Sendable {
   func failure(kind: String) {
-    CountedErrors.record(domain: "StateMigration", place: "StateDb", code: "StateMigration V1 \(kind)")
+    // "Write": the state changed by another process meanwhile, or the turn on it ended; the step runs again.
+    CountedErrors.record(domain: "StateMigration", place: "StateDb", code: "StateMigration V1 \(kind)",
+      expected: kind == "Write")
   }
 }
 

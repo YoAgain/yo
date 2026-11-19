@@ -21,7 +21,16 @@ enum Diagnostics {
   static func recordUnreported(_ error: Error, file: String = #fileID, line: Int = #line, place: String = #function) {
     if error is Keychain.Failure { return }
     if let yo = error as? YoError {
-      switch yo { case .Network, .Refused: return; default: break }
+      switch yo {
+      case .Network, .Refused: return
+      case .Save:
+        // The state's turn not had or ended (another process, background time over): the step runs again. A failure
+        // of the database itself is counted by the state (StateFailureCounts).
+        CountedErrors.record(domain: String(reflecting: YoError.self), place: "\(file):\(line) \(place)", code: "Save",
+          expected: true)
+        return
+      default: break
+      }
     }
     record(error, place: place, file: file, line: line)
   }

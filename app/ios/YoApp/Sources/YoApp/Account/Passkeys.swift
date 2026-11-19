@@ -79,7 +79,12 @@ extension Passkeys: ASAuthorizationControllerDelegate, ASAuthorizationController
   }
 
   func authorizationController(controller: ASAuthorizationController, didCompleteWithError error: Error) {
-    Diagnostics.record(error)
+    if Self.isCancellation(error) {
+      // The sheet closed by the person (or no passkey to offer): counted, not a problem.
+      CountedErrors.record(domain: ASAuthorizationError.errorDomain, place: "Passkeys", code: "canceled", expected: true)
+    } else {
+      Diagnostics.record(error)
+    }
     finish(controller) { $0.resume(throwing: error) }
   }
 
