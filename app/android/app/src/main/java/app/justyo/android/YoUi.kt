@@ -674,6 +674,10 @@ private fun NotificationSettingsRow(onClick: () -> Unit) {
         }
     }
     val currentTap by rememberUpdatedState<(Friend)->Unit>(::tap)
+    // The bars' callbacks reach press/touch through these, so they stay the same lambdas from one composition to the
+    // next (press and touch read this composition's heights) and an unchanged bar skips its recomposition.
+    val currentPress by rememberUpdatedState<(Friend, Boolean)->Unit>(::press)
+    val currentTouch by rememberUpdatedState<(Friend)->Boolean>(::touch)
     val listObscured = profile || group || menu != null || declined != null || viewing != null
     LaunchedEffect(listState, listObscured) {
         if (listObscured) {
@@ -684,7 +688,10 @@ private fun NotificationSettingsRow(onClick: () -> Unit) {
             val info=listState.layoutInfo
             val visible=minOf(item.offset+item.size,info.viewportEndOffset)-maxOf(item.offset,info.viewportStartOffset)
             visible>=item.size*.6f
-        }.map { it.key.toString() } }.collect(repo::viewport)
+        }.map { it.key.toString() } }.collect { keys ->
+            // The core's list call runs off the main thread: it changes as rows scroll in and out of view.
+            withContext(Dispatchers.Default) { repo.viewport(keys) }
+        }
     }
     fun toggleCamera() {
         if (recording != null) return
@@ -771,7 +778,9 @@ private fun NotificationSettingsRow(onClick: () -> Unit) {
                 })
                 SwipeToDismissBox(state=dismiss,enableDismissFromStartToEnd=false,enableDismissFromEndToStart=!cameraOn && recording==null && !friend.request,
                     backgroundContent = {
-                        if (!cameraOn) {
+                        // Drawn only while the bar is swiped: otherwise every frame painted it under each bar.
+                        val swiping by remember(dismiss) { derivedStateOf { dismiss.dismissDirection != SwipeToDismissBoxValue.Settled } }
+                        if (!cameraOn && swiping) {
                             Box(
                                 Modifier.fillMaxSize().background(MaterialTheme.colorScheme.error).padding(horizontal = 24.dp),
                                 contentAlignment = Alignment.CenterEnd,
@@ -783,15 +792,15 @@ private fun NotificationSettingsRow(onClick: () -> Unit) {
                 ) {
                     FriendBar(repo,bars.getValue(friend.key),heights.getValue(friend.key),
                         rowShade(visible,index),cameraOn,s.leftHanded,
-                        onPress={press(friend,it)},onTap={currentTap(friend)},onMenu={if(!tapLock.locked(friend.key)) menu=friend},
-                        onUndo={if(touch(friend)) repo.command { cancelMedia(friend) }},
-                        onMedia={heldFinger.point=null;if(touch(friend)) viewing=repo.state.value.media.filter { it.target==friend.target }.takeIf { it.isNotEmpty() }},
+                        onPress={currentPress(friend,it)},onTap={currentTap(friend)},onMenu={if(!tapLock.locked(friend.key)) menu=friend},
+                        onUndo={if(currentTouch(friend)) repo.command { cancelMedia(friend) }},
+                        onMedia={heldFinger.point=null;if(currentTouch(friend)) viewing=repo.state.value.media.filter { it.target==friend.target }.takeIf { it.isNotEmpty() }},
                         onMediaTouch={ when(it) {
                             is MediaTouch.Moved -> { heldFinger.barBottom=it.barBottom;heldFinger.point=it.point }
                             MediaTouch.Tapped -> heldFinger.point=null
                             MediaTouch.Released -> { heldFinger.point=null;viewing=null }
                         } },
-                        onDecline={if(touch(friend)) declined=friend},
+                        onDecline={if(currentTouch(friend)) declined=friend},
                         onHold=if(cameraOn && picked==null && shares.isEmpty() && !friend.request) { held ->
                             if(held && touch(friend)) {
                                 hintEpoch++

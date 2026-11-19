@@ -2,3 +2,11 @@
 HSPLapp/justyo/android/MainActivity;->onCreate(Landroid/os/Bundle;)V
 HSPLapp/justyo/android/YoViewModel;-><init>(Landroid/app/Application;)V
 HSPLapp/justyo/android/Repository;->start()Lkotlinx/coroutines/Job;
+# The app's own code, its core bindings and JNA under them, compiled ahead of time: without them the friend list (bars,
+# their words, the list's composition, each core call) ran interpreted while it scrolled. AGP expands these wildcards.
+Lapp/justyo/android/**;
+HSPLapp/justyo/android/**->**(**)**
+Luniffi/yo/**;
+HSPLuniffi/yo/**->**(**)**
+Lcom/sun/jna/**;
+HSPLcom/sun/jna/**->**(**)**

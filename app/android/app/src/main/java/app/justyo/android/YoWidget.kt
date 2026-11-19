@@ -50,7 +50,9 @@ import androidx.glance.layout.fillMaxWidth as widgetFillMaxWidth
 import androidx.glance.layout.height as widgetHeight
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.lifecycleScope
+import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.launch
 import org.json.JSONArray
 import uniffi.yo.ProductText
@@ -97,10 +99,13 @@ class YoWidget : GlanceAppWidget() {
         val repo = context.repository
         repo.state.first { !it.loading }
         val widgetId = GlanceAppWidgetManager(context).getAppWidgetId(id)
+        val shownAtStart = repo.state.value.widgetFriends()
         provideContent {
-            val snapshot by repo.state.collectAsState()
+            // Only what the widget shows: the app's list changing its state as it scrolls (rows seen, a finger down)
+            // redrew every row's bitmap and sent the launcher new RemoteViews, on the main thread, while scrolling.
+            val friends by remember { repo.state.map { it.widgetFriends() to it.username }.distinctUntilChanged().map { it.first } }
+                .collectAsState(shownAtStart)
             val account = repo.widgetAccount()
-            val friends = snapshot.widgetFriends()
             val size = LocalSize.current
             val slots = (size.height / 44.dp).toInt().coerceIn(1, WidgetSlots)
             val selected = productWidgetIdSelection(friends.map { it.key }, context.widgetPicks(widgetId, account),
@@ -138,7 +143,8 @@ class YoWidget : GlanceAppWidget() {
 
     @androidx.compose.runtime.Composable
     private fun Words(context: Context, text: String, size: Float, width: Dp, height: Dp) {
-        Image(ImageProvider(context.wordsBitmap(text, size, width.value, height.value)), text,
+        val bitmap = remember(text, size, width, height) { context.wordsBitmap(text, size, width.value, height.value) }
+        Image(ImageProvider(bitmap), text,
             GlanceModifier.widgetFillMaxWidth().widgetHeight(height))
     }
 

@@ -87,6 +87,11 @@ internal fun rowShade(friends: List<Friend>, index: Int): Color {
     return lerp(RowColors[color], Color.Black, shade)
 }
 
+/**
+ * Everything a bar shows. Immutable (read-only lists, never changed after it is made): Compose compares it by value, so
+ * a bar whose content is the same skips its recomposition when the list recomposes (a press, a viewport change).
+ */
+@Immutable
 internal data class BarContent(
     val friend: Friend,
     val row: ListRow?,
@@ -327,6 +332,8 @@ private fun BarWords(text: String, modifier: Modifier = Modifier, startInset: In
     BarWords(listOf(text), modifier, startInset, endInset)
 
 /** The first of the core's candidates that fits ("2× Yo from Christopher", "… from Chr…", "2× Yo"). */
+private val BarStyle = TextStyle(fontFamily = YoFont, fontSize = BarFont, color = Color.White)
+
 @Composable
 private fun BarWords(
     candidates: List<String>,
@@ -336,7 +343,11 @@ private fun BarWords(
 ) {
     val measurer = rememberTextMeasurer()
     val density = LocalDensity.current
-    val style = TextStyle(fontFamily = YoFont, fontSize = BarFont, color = Color.White)
+    val style = BarStyle
+    // The widest digit, measured once per density/font scale (ten measurements; the measurer's cache holds eight).
+    val slot = remember(measurer, density) {
+        ('0'..'9').maxOf { measurer.measure(it.toString(), style, maxLines = 1, softWrap = false).size.width }
+    }
     BoxWithConstraints(modifier.fillMaxWidth()) {
         val start = startInset.dp
         val end = endInset.dp
@@ -344,7 +355,6 @@ private fun BarWords(
         // (a thumbnail or sign on one side must not cut "Sending Yo!" to "Sending Y…").
         val available = (maxWidth - start - end).coerceAtLeast(0.dp)
         fun width(value: String) = measurer.measure(value, style, maxLines = 1, softWrap = false).size.width
-        val slot = ('0'..'9').maxOf { width(it.toString()) }
         fun parts(value: String): Triple<String, String, String> {
             val count = CountDigits.find(value) ?: return Triple(value, "", "")
             return Triple(value.substring(0, count.range.first), count.value, value.substring(count.range.last + 1))
