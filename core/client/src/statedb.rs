@@ -24,10 +24,19 @@ pub enum Loaded {
     Gone,
 }
 
+/// Around each access to the database (a connection's whole life, its transaction and checkpoint in it): the app keeps
+/// itself from being suspended until `end`, as iOS ends a process suspended with a lock on a file in a shared container
+/// (0xdead10cc). `begin` false refuses the access (no time left to finish it): nothing is read or written.
+pub trait Access: Send + Sync {
+    fn begin(&self) -> bool;
+    fn end(&self);
+}
+
 /// The database file (`-wal` and `-shm` beside it).
 pub struct StateDb {
     path: PathBuf,
     cipher: cipher::Cipher,
+    access: Mutex<Option<Arc<dyn Access>>>,
     /// The rows of the state last read or written here, under its word: a write that replaces that state compares
     /// with them instead of reading every row back (each word is one state's). With the number of clears: a read or
     /// write begun before a clear never puts its rows back.
@@ -69,12 +78,34 @@ impl StateDb {
     pub fn open_fresh(path: impl Into<PathBuf>, key: [u8; 32], report: Report) -> Result<Self> {
         let path = path.into();
         let cipher = cipher::Cipher::open_fresh(&path, key, report)?;
-        Ok(Self { path, cipher, snapshot: Mutex::new((None, 0)) })
+        Ok(Self { path, cipher, access: Mutex::new(None), snapshot: Mutex::new((None, 0)) })
     }
 
+    /// Every later access runs within `access` (none: unguarded, a process that is never suspended).
+    pub fn set_access(&self, access: Option<Arc<dyn Access>>) {
+        *self.access.lock().unwrap_or_else(PoisonError::into_inner) = access;
+    }
+
+    /// Every access goes through here, its connection opened and closed within: no SQLite lock outlives a call.
     fn on_cipher<T>(&self, operation: impl FnOnce(&cipher::Cipher) -> Result<T>) -> Result<T> {
         let cipher = &self.cipher;
+        let access = self.access.lock().unwrap_or_else(PoisonError::into_inner).clone();
+        if access.as_ref().is_some_and(|access| !access.begin()) {
+            // Expected in the background: not counted as a failure.
+            return Err(Error::Save("Busy".into()));
+        }
+        // Ended when dropped, also when the access panics.
+        struct Ends(Option<Arc<dyn Access>>);
+        impl Drop for Ends {
+            fn drop(&mut self) {
+                if let Some(access) = &self.0 {
+                    access.end();
+                }
+            }
+        }
+        let ends = Ends(access);
         let result = operation(cipher);
+        drop(ends);
         if let Err(error) = &result {
             cipher::report_failure(&cipher.report, error);
         }
@@ -450,6 +481,67 @@ mod tests {
         assert!(db.clear().is_err());
         assert!(!held(&db));
         drop(busy);
+    }
+
+    /// Each access begins and ends within its call, its connection closed: afterwards another process can take the
+    /// database exclusively and truncate the WAL at once (no transaction, read mark or lock left behind). A refused
+    /// access touches nothing.
+    #[test]
+    fn no_lock_outlives_an_access() {
+        #[derive(Default)]
+        struct Counted {
+            open: std::sync::atomic::AtomicI32,
+            begun: std::sync::atomic::AtomicI32,
+            refuse: AtomicBool,
+        }
+        impl Access for Counted {
+            fn begin(&self) -> bool {
+                if self.refuse.load(Ordering::SeqCst) {
+                    return false;
+                }
+                self.begun.fetch_add(1, Ordering::SeqCst);
+                assert_eq!(self.open.fetch_add(1, Ordering::SeqCst), 0, "accesses do not nest");
+                true
+            }
+            fn end(&self) {
+                self.open.fetch_sub(1, Ordering::SeqCst);
+            }
+        }
+        let dir = Dir::new("access");
+        let db = open(&dir.0.join("state.sqlite"));
+        let counted = Arc::new(Counted::default());
+        db.set_access(Some(counted.clone()));
+        let other = Connection::open(&db.path).unwrap();
+        let free = || {
+            assert_eq!(counted.open.load(Ordering::SeqCst), 0);
+            other.execute_batch("BEGIN EXCLUSIVE; COMMIT").expect("no lock left on the database");
+            let busy: i64 = other.query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |r| r.get(0)).unwrap();
+            assert_eq!(busy, 0, "no reader left on the WAL");
+        };
+        let mut state = initial();
+        let word = write(&db, None, &state).unwrap();
+        free();
+        assert!(matches!(db.load(Some(&word), &KEY).unwrap(), Loaded::Same));
+        free();
+        let (word, _) = read(&db);
+        free();
+        assert!(db.registered().is_ok());
+        free();
+        state.next_seq += 1;
+        assert!(write(&db, Some("an older one"), &state).is_err());
+        free();
+        let word = write(&db, Some(&word), &state).unwrap();
+        free();
+        assert_eq!(counted.begun.load(Ordering::SeqCst), 6);
+        counted.refuse.store(true, Ordering::SeqCst);
+        state.next_seq += 1;
+        assert!(matches!(write(&db, Some(&word), &state), Err(Error::Save(kind)) if kind == "Busy"));
+        assert!(db.clear().is_err());
+        assert_eq!(counted.begun.load(Ordering::SeqCst), 6);
+        counted.refuse.store(false, Ordering::SeqCst);
+        assert_eq!(db.word().unwrap().as_deref(), Some(word.as_str()));
+        db.clear().unwrap();
+        free();
     }
 
     #[test]

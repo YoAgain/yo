@@ -94,14 +94,13 @@ enum Prefetch {
     return files.contains { $0.pathExtension == "json" && FileManager.default.fileExists(atPath: $0.path) }
   }
 
-  /// Short journal writes and per-blob ack requests use locks independent of account-state turns.
+  /// Short journal writes and per-blob ack requests use locks independent of account-state turns. Revocable
+  /// (SharedAccess): an ack request may outlast the process's time, and expiry gives the lock back rather than keeping
+  /// it into suspension (0xdead10cc); at worst both processes then ack the same blob.
   @discardableResult
   private static func ackLocked<T>(_ directory: URL, name: String = ".acks.lock", _ work: () -> T) -> T? {
-    let fd = open(directory.appending(path: name).path, O_CREAT | O_RDWR | O_CLOEXEC, 0o600)
-    guard fd >= 0 else { return nil }
-    defer { close(fd) }
-    guard flock(fd, LOCK_EX | LOCK_NB) == 0 else { return nil }
-    defer { flock(fd, LOCK_UN) }
+    guard let access = SharedAccess.take(directory.appending(path: name), within: 0) else { return nil }
+    defer { access.finish() }
     return work()
   }
 

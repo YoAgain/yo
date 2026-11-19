@@ -151,6 +151,26 @@ impl Drop for Turn<'_> {
     }
 }
 
+/// Around each access to a `StateDb` (iOS: background time, so the app is never suspended inside SQLite with a lock on
+/// the shared database, 0xdead10cc). `begin` false refuses the access; `end` follows every accepted one, its
+/// connection closed.
+#[uniffi::export(with_foreign)]
+pub trait StateAccess: Send + Sync {
+    fn begin(&self) -> bool;
+    fn end(&self);
+}
+
+struct Access(Arc<dyn StateAccess>);
+
+impl yo_core::statedb::Access for Access {
+    fn begin(&self) -> bool {
+        self.0.begin()
+    }
+    fn end(&self) {
+        self.0.end()
+    }
+}
+
 /// Receives a fixed error kind, suitable for counted diagnostics.
 #[uniffi::export(with_foreign)]
 pub trait StateDiagnostics: Send + Sync {
@@ -173,6 +193,11 @@ impl StateDb {
         let report: yo_core::statedb::Report = Arc::new(move |kind| diagnostics.failure(kind));
         let db = yo_core::statedb::StateDb::open_fresh(path, key_of(state_key)?, report)?;
         Ok(Arc::new(Self(Arc::new(db))))
+    }
+
+    /// Every later access to this database runs within `access`.
+    pub fn set_access(&self, access: Arc<dyn StateAccess>) {
+        self.0.set_access(Some(Arc::new(Access(access))));
     }
 
     /// Whether there is a state (an account on this phone).

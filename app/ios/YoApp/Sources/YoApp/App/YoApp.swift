@@ -28,6 +28,7 @@ struct YoApp: App {
     Perf.mark("launch.init state \(UIApplication.shared.applicationState.rawValue)")
     PerfProbe.watchLaunchLag()
     PerfProbe.profileLaunch()
+    StateStorage.access = StateAccessTime(UIApplication.shared)
     Launch.start()
     // Only once Yo is in front, never in a background launch (Action button, silent push).
     Launch.whenActive { MediaSignWarmup.start() }
@@ -245,6 +246,46 @@ struct YoApp: App {
           UNUserNotificationCenter.current().removePendingNotificationRequests(withIdentifiers: ["yo.secure"])
         }
     }
+  }
+}
+
+/// Background time of its own around each access to the state database: the app is never suspended inside SQLite with
+/// a lock on the group's database (0xdead10cc). Without time left the access is refused (tried again later); when time
+/// runs out, the access under way (milliseconds, at most SQLite's busy wait) finishes before the time is given back.
+private final class StateAccessTime: StateAccess, @unchecked Sendable {
+  private let application: UIApplication
+  private static let key = "yo.stateAccess"
+
+  init(_ application: UIApplication) { self.application = application }
+
+  /// An access's background task, and its end for the expiry handler to wait on.
+  private final class Under: @unchecked Sendable {
+    let task: Ended
+    let done = DispatchSemaphore(value: 0)
+    init(_ task: Ended) { self.task = task }
+  }
+
+  /// Accesses begin and end on one thread (the core calls are synchronous).
+  private var stack: [Under] {
+    get { Thread.current.threadDictionary[Self.key] as? [Under] ?? [] }
+    set { Thread.current.threadDictionary[Self.key] = newValue.isEmpty ? nil : newValue }
+  }
+
+  func begin() -> Bool {
+    let under = Under(Ended(application))
+    let id = application.beginBackgroundTask(withName: "yo.state") {
+      _ = under.done.wait(timeout: .now() + 2)
+      under.task.end()
+    }
+    guard under.task.start(id) else { return false }
+    stack.append(under)
+    return true
+  }
+
+  func end() {
+    guard let under = stack.popLast() else { return }
+    under.done.signal()
+    under.task.end()
   }
 }
 

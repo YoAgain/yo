@@ -130,6 +130,11 @@ final class StateFailureCounts: StateDiagnostics, Sendable {
 
 /// Opening a state database (the group's or the app's own).
 enum StateStorage {
+  /// Installed by the app before its first access: background time around each access (`StateAccessTime`), so iOS
+  /// never suspends it inside SQLite with a lock on the group's database (0xdead10cc). Extensions access only within
+  /// a request, which keeps them up until its end.
+  nonisolated(unsafe) static var access: StateAccess?
+
   static func exists(_ folder: URL) -> Bool {
     FileManager.default.fileExists(atPath: folder.appending(path: "tables.sqlite").path)
   }
@@ -141,7 +146,12 @@ enum StateStorage {
       try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true,
         attributes: [.protectionKey: FileProtectionType.completeUntilFirstUserAuthentication])
       SharedStateFile.excludeFromBackup(folder)
+      if let access {
+        guard access.begin() else { throw SharedAccess.unavailable }
+      }
+      defer { access?.end() }
       let db = try StateDb.openFresh(path: path.path, stateKey: key, diagnostics: StateFailureCounts())
+      if let access { db.setAccess(access: access) }
       cached = db
       return db
     }
