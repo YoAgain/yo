@@ -161,7 +161,10 @@ if (document.body.classList.contains("login")) {
     };
     // CPU, memory, disk: the live value as one gauge (no history), orange above 70 %, red above 90 %.
     const gauge = (key, i) => {
-      const v = Math.max(0, Math.min(100, all.length ? all[all.length - 1][i] ?? 0 : 0)), row = $(`c-${key}`);
+      // The last minute's average, not the newest sample alone (a single sample jumps).
+      const t1 = all.length ? all[all.length - 1][0] : 0, win = all.filter((p) => p[0] >= t1 - 60000 && p[i] != null);
+      const avg = win.length ? win.reduce((n, p) => n + p[i], 0) / win.length : 0;
+      const v = Math.max(0, Math.min(100, avg)), row = $(`c-${key}`);
       $(`${key}-spark`).hidden = true;
       let g = row.querySelector(".gauge");
       if (!g) { g = el("span", "gauge"); g.append(el("span")); row.append(g); }
@@ -590,10 +593,15 @@ if (document.body.classList.contains("login")) {
     for (const [k, d] of Object.entries(areaData)) if (d?.overlay === key) drawArea(k);
   };
   // Problems row: marked while tickets are open (unanswered support, open crash groups); its count is the graph's.
-  let openTickets = 0, platData = null;
+  let openTickets = 0, openSupport = 0, platData = null;
+  // Problems: a red count of the support conversations still waiting for an answer, before its graph.
   const showOpen = () => {
     const row = $("c-pr");
     row.classList.toggle("has-open", openTickets > 0);
+    let badge = row.querySelector(".pr-open");
+    if (!badge) { badge = el("span", "pr-open"); row.querySelector(".cl")?.append(badge); }
+    badge.textContent = openSupport ? String(openSupport) : "";
+    badge.hidden = !openSupport;
   };
   const charts = ["yc", "uc"];
   if (window.ResizeObserver) { const ro = new ResizeObserver(() => charts.forEach(drawArea)); charts.forEach((k) => ro.observe($(`${k}-area`))); }
@@ -887,7 +895,7 @@ if (document.body.classList.contains("login")) {
       const unanswered = threads.filter((t) => t.unread > 0).length;
       const crashes = (last?.[which]?.diagnostics || []).filter((d) => !d.done && !diagInfo(d).expected).length;
       document.title = unanswered + crashes ? `(${unanswered + crashes}) Yo admin` : "Yo admin";
-      openTickets = unanswered + crashes;
+      openTickets = unanswered + crashes; openSupport = unanswered;
       showOpen();
       part(drawList);
       part(drawPerson);
