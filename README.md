@@ -152,13 +152,9 @@ DB: the local database, sealed per column.
 
 Workflows ([.github/workflows](.github/workflows)):
 
-- **Test**: every push and pull request: Rust tests, lint, format.
-- **Android**: pushes touching the app or the core: build and unit tests; a release builds it with the tag's version.
-- **TestFlight**: every push to `main` touching iOS or the core: an iPhone build for the internal testers.
-- **Release**: `gh release create v1.0.0-RC --prerelease --generate-notes` (or GitHub → Releases): the same build
-  goes to the public beta; the tag sets the version.
-- **Fuzz**: every push to `main` for a minute, nightly for 15.
-- **Update dependencies**: monthly: every dependency to its newest release; a pull request when all checks pass.
+- **iOS**: push → internal TestFlight · RC release (`v1.0.0-RC`) → public TestFlight · stable release → App Store (by hand for now)
+- **Android**: push → build · RC release → test build · stable release → Play Store (by hand for now)
+- **Test**: every push → Rust tests, lint · **Fuzz**: push → 1 min, nightly → 15 min · **Dependencies**: monthly → pull request
 
 ```sh
 dev/cargo test --workspace     # tests, with Docker
