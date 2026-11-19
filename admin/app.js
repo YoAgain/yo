@@ -406,6 +406,69 @@ if (document.body.classList.contains("login")) {
     const row = $(`c-${key}`);
     row.classList.toggle("bad-up", !!bad);
   };
+  // The range's bars as rangeRow draws them: [name, days] each, or for 1 day [name, null, its 4 of the last 24 hours].
+  const rangeSlots = (perDay) => {
+    if (range === 1) {
+      const h0 = Math.floor(Date.now() / 3600000) - 23;
+      return Array.from({ length: 6 }, (_, b) => [`${clock((h0 + b * 4) * 3600000)} – ${clock((h0 + b * 4 + 4) * 3600000)}`, null, [0, 1, 2, 3].map((i) => b * 4 + i)]);
+    }
+    if (range === 0) {
+      const first = Math.min(today0() - 6, ...[...(perDay?.keys() || [])].filter((d) => perDay.get(d) > 0));
+      const span = today0() - first + 1, size = Math.max(7, Math.ceil(span / Math.min(12, Math.ceil(span / 7)))), n = Math.ceil(span / size);
+      return Array.from({ length: n }, (_, i) => {
+        const end = today0() - (n - 1 - i) * size, ds = Array.from({ length: size }, (_, j) => end - size + 1 + j);
+        return [`${dayName(ds[0])} – ${dayName(end)}`, ds];
+      });
+    }
+    return Array.from({ length: range }, (_, i) => today0() - range + 1 + i).map((d) => [dayName(d), [d]]);
+  };
+  const slotSum = ([, ds, hs], perDay, hours) => (hs ? hs.reduce((n, i) => n + ((hours || []).slice(-24)[i] || 0), 0)
+    : ds.reduce((n, d) => n + (perDay?.get(d) || 0), 0));
+  const pctText = (x) => (x == null ? "–" : x > 0 && x < 0.1 ? "< 0.1 %" : `${x >= 99.95 || x < 10 ? x.toFixed(x >= 99.95 || x === 0 ? 0 : 1) : Math.round(x)} %`);
+  const shareBar = (key, x, tip) => { $(`${key}-bar`).firstChild.style.width = `${x ?? 0}%`; $(`c-${key}`).dataset.tip = tip; };
+  // Health rows, graph only (the value on hover). In Server: Delivery (p95 of how long a Yo took to its device), Push
+  // (the share the services took), Hub errors (the share of answers that were 5xx), in the range. In the counts card:
+  // Deleted (accounts) in the range, then Retention D1/D7/D30, DAU/MAU and crash-free users, now.
+  const LAT = ["latency-1s", "latency-5s", "latency-60s", "latency-slow"], LAT_NAME = ["< 1 s", "< 5 s", "< 1 min", "> 1 min"];
+  const healthRows = (h, ym, yh) => {
+    const span = range === 1 ? "last 24 hours" : range ? `${range} days` : "since the start";
+    const all = (key) => ym(key), yo = ym("yo-out"), slots = rangeSlots(yo);
+    const sums = (keys) => slots.map((s) => keys.map((k) => slotSum(s, all(k), yh(k))));
+    const whole = (rows) => rows.reduce((a, r) => a.map((v, i) => v + r[i]), rows[0].map(() => 0));
+    // Delivery: the bucket the 95th percentile falls in, per bar (1 to 4: < 1 s … > 1 min); the median in the hover.
+    const at = (b, q) => { const n = b.reduce((a, v) => a + v, 0); let c = 0; return n ? b.findIndex((v) => (c += v) >= q * n) : -1; };
+    const lat = sums(LAT), latAll = whole(lat), latN = (b) => b.reduce((a, v) => a + v, 0);
+    spark("dl", null, lat.map((b) => at(b, 0.95) + 1), slots.map(([n]) => n),
+      (i) => (latN(lat[i]) ? `p95 ${LAT_NAME[at(lat[i], 0.95)]} · median ${LAT_NAME[at(lat[i], 0.5)]} · ${num(latN(lat[i]))} Yos` : "no Yos"),
+      `Delivery: from accepted to acknowledged · ${latN(latAll) ? `p95 ${LAT_NAME[at(latAll, 0.95)]}, median ${LAT_NAME[at(latAll, 0.5)]}` : "no Yos"} · ${span}`, 4);
+    $("c-dl").classList.add("bad-up");
+    // Push: the share the services took.
+    const ps = sums(["push-ok", "push-fail"]), psAll = whole(ps), share = ([ok, bad]) => (ok + bad ? (100 * ok) / (ok + bad) : null);
+    spark("ps", null, ps.map((p) => share(p) ?? 0), slots.map(([n]) => n),
+      (i) => (ps[i][0] + ps[i][1] ? `${pctText(share(ps[i]))} taken · ${num(ps[i][1])} failed of ${num(ps[i][0] + ps[i][1])}` : "no pushes"),
+      `Push: taken by APNs and FCM · ${pctText(share(psAll))} · ${num(psAll[1])} failed (in Errors) · ${span}`, 100);
+    // Hub errors: 5xx of all answers; 4xx and 429 in the hover.
+    const he = sums(["http-5xx", "http", "http-4xx", "http-429"]), heAll = whole(he), rate = ([e, n]) => (n ? (100 * e) / n : 0);
+    spark("he", null, he.map(rate), slots.map(([n]) => n),
+      (i) => (he[i][1] ? `${pctText(rate(he[i]))} 5xx · ${num(he[i][0])} 5xx, ${num(he[i][2])} 4xx, ${num(he[i][3])} 429 of ${num(he[i][1])}` : "no answers"),
+      `Hub errors: answers that were 5xx · ${pctText(rate(heAll))} of ${num(heAll[1])} · ${span}`);
+    $("c-he").classList.add("bad-up");
+    const ag = sums(["account-gone"]).map(([n]) => n);
+    spark("ag", null, ag, slots.map(([n]) => n), (i, v) => `${num(v)} deleted`, `Deleted: accounts deleted · ${num(ag.reduce((a, v) => a + v, 0))} · ${span}`);
+    $("c-ag").classList.add("bad-up");
+    // Retention: of the accounts made 1 (7, 30) to 90 days ago, those seen that many days after signing up.
+    const rt = h.retention || {}, rk = ["d1", "d7", "d30"], rp = rk.map((k) => (rt[k]?.[1] ? (100 * rt[k][0]) / rt[k][1] : null));
+    spark("rt", null, rp.map((x) => x ?? 0), ["D1", "D7", "D30"],
+      (i) => (rt[rk[i]]?.[1] ? `${rk[i].toUpperCase()}: ${pctText(rp[i])} (${num(rt[rk[i]][0])} of ${num(rt[rk[i]][1])})` : `${rk[i].toUpperCase()}: nobody yet`),
+      `Retention: seen again 1, 7 and 30 days after signing up · ${rk.map((k, i) => `${k.toUpperCase()} ${pctText(rp[i])}`).join(" · ")}`, 100);
+    // DAU/MAU: users seen today of those seen in 30 days.
+    const dau = h.active_day ?? 0, mau = h.active_month ?? 0, stick = mau ? (100 * dau) / mau : null;
+    shareBar("au", stick, `DAU / MAU ${pctText(stick)} · ${num(dau)} today of ${num(mau)} in 30 days`);
+    // Crash-free users: the last 7 days' crash reports against the users seen in them (a crash counted as one user).
+    const crashes = (h.diagnostic_days || []).filter((r) => r.kind === "crash" && r.day > today0() - 7).reduce((n, r) => n + r.count, 0);
+    const wau = h.active_users ?? 0, free = wau ? Math.max(0, 100 - (100 * crashes) / wau) : null;
+    shareBar("cf", free, `Crash-free users ${pctText(free)} · ${num(crashes)} crashes, ${num(wau)} users in 7 days`);
+  };
   // The two chart widgets: a running total over the range (a point an hour, a day, or for Total up to 60 points),
   // ending at the total since the start; the hover shows the point's time and value.
   const areaData = {};
@@ -593,6 +656,7 @@ if (document.body.classList.contains("login")) {
       seriesChart("ym", { values: md.values, labels: md.labels, word: "media", share: true },
         null);
       rangeRow("gr", ym("group-create"), "made", "Groups: made", null, false, yh("group-create"), null, yt("group-create"));
+      part(() => healthRows(h, ym, yh));
       // Running totals: Yos into users' inboxes (a bot's inbox apart), accounts without bots.
       areaChart("yc", yt("yo-in") ?? 0, ym("yo-in"), yh("yo-in"));
       const sud = new Map(h.signup_days || []);

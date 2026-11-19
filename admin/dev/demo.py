@@ -177,6 +177,9 @@ CRASHES = [
     ("error", {"domain": "YoCore", "code": 3, "place": "Backup.upload", "message": "backup record too large (412 KB)"}),
     ("error", {"domain": "AVFoundation", "code": -11800, "place": "VideoExport.run", "message": "The operation could not be completed (-16364)"}),
     ("error", {"domain": "YoCore", "code": 29, "place": "Groups.apply", "message": "group revision behind: 14 < 15"}),
+    # The hub's own: a push APNs refused (push-fail), grouped by reason and service.
+    ("error", {"domain": "push", "code": "500 InternalServerError", "place": "APNs", "app": "hub",
+               "details": "APNs 500 {\"reason\":\"InternalServerError\"}"}),
     ("crash", {"exception": "EXC_BAD_ACCESS (SIGBUS)", "frames": "0  libswiftCore  swift_retain + 12\n1  Yo  ImageCache.thumbnail(for:) + 210"}),
 ]
 RESERVED = [("Yo", "the app"), ("YoGPT", "our bot"), ("STATUS", "our status bot"), ("admin", "staff"), ("support", "staff"),
@@ -319,10 +322,32 @@ def make_hub(path: str, rng: random.Random, now: int, n_users: int, live: bool) 
                 out = kind.replace("-in", "-out", 1)
                 if out != kind and not kind.endswith("-bot"):
                     db.execute("INSERT INTO events VALUES (?,?,?)", (out, m, n + rng.randint(0, 2)))
+                if kind == "yo-in":  # the hub's own counts that follow the Yos: delivery latency, pushes
+                    acked = n + rng.randint(0, 2)
+                    lat = [0, 0, 0, 0]
+                    for _ in range(acked):
+                        r = rng.random()
+                        lat[0 if r < 0.82 else 1 if r < 0.95 else 2 if r < 0.985 else 3] += 1
+                    for k, c in zip(("latency-1s", "latency-5s", "latency-60s", "latency-slow"), lat):
+                        if c:
+                            db.execute("INSERT INTO events VALUES (?,?,?)", (k, m, c))
+                    fail = sum(rng.random() < 0.015 for _ in range(n))
+                    db.execute("INSERT INTO events VALUES (?,?,?)", ("push-ok", m, n - fail + rng.randint(0, 1)))
+                    if fail:
+                        db.execute("INSERT INTO events VALUES (?,?,?)", ("push-fail", m, fail))
                 if kind == "media-in":  # each upload's bytes: photos of a few hundred KB, now and then a video
                     size = sum(int(rng.lognormvariate(12.6, 0.6)) if rng.random() < 0.9 else rng.randint(5, 40) * 1_000_000
                                for _ in range(n))
                     db.execute("INSERT INTO events VALUES (?,?,?)", ("media-in-bytes", m, size))
+    # Every answer of the hub (a few dozen a minute in the day), its 4xx, 429 and 5xx; accounts deleted now and then.
+    for m in range((now // 60_000) - 20 * 1440, now // 60_000 + 1, 7):
+        busy = 0.15 + 0.85 * max(0.0, 1 - abs((m // 60) % 24 - 15) / 9)
+        answers = int((60 if live else 6) * busy * 7 * rng.uniform(0.7, 1.3))
+        for kind, n in (("http", answers), ("http-4xx", int(answers * rng.uniform(0.01, 0.04))),
+                        ("http-429", int(rng.random() < 0.05)), ("http-5xx", int(rng.random() < (0.04 if live else 0.01))),
+                        ("account-gone", int(rng.random() < (0.004 if live else 0.001)))):
+            if n:
+                db.execute("INSERT INTO events VALUES (?,?,?)", (kind, m, n))
     # Crashes and errors.
     n_open = 0
     for k, (kind, payload) in enumerate(CRASHES if live else CRASHES[:3]):
@@ -333,8 +358,10 @@ def make_hub(path: str, rng: random.Random, now: int, n_users: int, live: bool) 
         db.execute("INSERT INTO diagnostics (kind,signature,count,first_seen,last_seen,app,os,model,payload,done) VALUES (?,?,?,?,?,?,?,?,?,?)",
                    (kind, hashlib.sha256(json.dumps(payload).encode()).hexdigest()[:24],
                     rng.choice([1, 1, 2, 3, 5, 8, 14, 41, 230]) if payload.get("severity") != "expected" else rng.randint(80, 900),
-                    first, last, rng.choice(builds[:3]), rng.choice(["iOS 26.0.1", "iOS 26.1", "iOS 26.2"]),
-                    rng.choice(["iPhone15,2", "iPhone14,4", "iPhone16,1", "iPhone17,3", "iPhone13,2"]), json.dumps(payload), done))
+                    first, last, payload.get("app") or rng.choice(builds[:3]),
+                    "" if payload.get("app") else rng.choice(["iOS 26.0.1", "iOS 26.1", "iOS 26.2"]),
+                    "" if payload.get("app") else rng.choice(["iPhone15,2", "iPhone14,4", "iPhone16,1", "iPhone17,3", "iPhone13,2"]),
+                    json.dumps(payload), done))
     for d in range(now // DAY - 13, now // DAY + 1):
         db.execute("INSERT INTO diagnostic_days VALUES (?,?,?)", (d, "crash", rng.randint(0, 4 if live else 1)))
         db.execute("INSERT INTO diagnostic_days VALUES (?,?,?)", (d, "error", rng.randint(2, 30 if live else 3)))

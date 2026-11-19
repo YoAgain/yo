@@ -72,6 +72,26 @@ class UsersTabCollectorTests(unittest.TestCase):
             if now // 3600000 == (midnight + 1) // 3600000:
                 self.assertEqual(snapshot["signups_hours"][-1], 1)
 
+    def test_retention_and_active_month(self):
+        users = load("users")
+        now, day = int(users.time.time() * 1000), users.DAY_MS
+        with tempfile.TemporaryDirectory() as directory:
+            path = str(Path(directory) / "hub.sqlite")
+            with sqlite3.connect(path) as db:
+                db.execute("CREATE TABLE users(id BLOB, created_at INTEGER)")
+                db.execute("CREATE TABLE devices(id INTEGER, user_id BLOB, last_seen_at INTEGER, app TEXT)")
+                # Signed up 40 days ago: one seen 35 days later, one the day after, one never again; a bot left out;
+                # one 3 days ago, seen 2 days later; one 100 days ago (out of the cohorts, but seen this month).
+                rows = [(1, now - 40 * day, now - 5 * day, "ios/1"), (2, now - 40 * day, now - 39 * day + 1, "ios/1"),
+                        (3, now - 40 * day, now - 40 * day, "android/1"), (4, now - 40 * day, now, "yogpt/1"),
+                        (5, now - 3 * day, now - day, "ios/1"), (6, now - 100 * day, now - 2 * day, "ios/1")]
+                for i, created, seen, app in rows:
+                    db.execute("INSERT INTO users VALUES(?,?)", (bytes([i]), created))
+                    db.execute("INSERT INTO devices VALUES(?,?,?,?)", (i, bytes([i]), seen, app))
+            snapshot = users.hub("live", path)
+            self.assertEqual(snapshot["retention"], {"d1": [3, 4], "d7": [1, 3], "d30": [1, 3]})
+            self.assertEqual(snapshot["active_month"], 4)  # 1, the bot, 5 and 6
+
     def test_events_per_hour_day_and_today_by_kind(self):
         users = load("users")
         now = int(users.time.time() * 1000)

@@ -127,7 +127,9 @@ def has_column(db, table: str, column: str) -> bool:
     return db.execute("SELECT count(*) FROM pragma_table_info(?) WHERE name = ?", (table, column)).fetchone()[0] > 0
 
 
-EVENT_KINDS = ("yo-in", "yo-out", "media-in", "media-out", "group-create", "yo-in-bot", "media-in-bytes")
+EVENT_KINDS = ("yo-in", "yo-out", "media-in", "media-out", "group-create", "yo-in-bot", "media-in-bytes",
+               "latency-1s", "latency-5s", "latency-60s", "latency-slow", "push-ok", "push-fail",
+               "http", "http-4xx", "http-429", "http-5xx", "account-gone")
 # A bot's account (alias u): it has devices and every one names a bot's app (YoGPT or the CLI), as the hub's is_bot_app.
 BOT_USER = ("EXISTS (SELECT 1 FROM devices d WHERE d.user_id = u.id) AND NOT EXISTS (SELECT 1 FROM devices d"
             " WHERE d.user_id = u.id AND NOT (coalesce(d.app, '') LIKE 'yogpt/%' OR coalesce(d.app, '') LIKE 'cli/%'))")
@@ -162,6 +164,19 @@ def events(db, now: int) -> dict:
         days = [sum(n for h, n in hours.items() if h // 24 == d) for d in range(day - 13, day + 1)]
         out[kind] = {"hours": [hours.get(h, 0) for h in range(hour - 23, hour + 1)], "days": days, "today": days[-1],
                      "total": totals.get(kind, 0), "year": [by_day.get(kind, {}).get(d, 0) for d in range(day - 364, day + 1)]}
+    return out
+
+
+def retention(db, now: int) -> dict:
+    """D1, D7, D30 as [came back, of]: of the accounts made 1, 7 or 30 to 90 days ago (bots left out), those seen
+    (a device's last_seen_at) at least that many days after they signed up. Counts only."""
+    out = {}
+    for n in (1, 7, 30):
+        out[f"d{n}"] = list(db.execute(
+            "SELECT coalesce(sum(seen >= created_at + ?), 0), count(*) FROM (SELECT u.created_at,"
+            " (SELECT max(d.last_seen_at) FROM devices d WHERE d.user_id = u.id) AS seen FROM users u"
+            f" WHERE u.created_at >= ? AND u.created_at < ? AND NOT ({BOT_USER}))",
+            (n * DAY_MS, now - 90 * DAY_MS, now - n * DAY_MS)).fetchone())
     return out
 
 
@@ -297,6 +312,10 @@ def hub(name: str, path: str) -> dict:
             # Users seen since UTC midnight (the admin page keeps its highest value per day).
             "active_day": part("active_day", lambda: one(
                 "SELECT count(DISTINCT user_id) FROM devices WHERE last_seen_at >= ?", midnight)),
+            # Users seen in the last 30 days (DAU/MAU with active_day), and retention D1/D7/D30.
+            "active_month": part("active_month", lambda: one(
+                "SELECT count(DISTINCT user_id) FROM devices WHERE last_seen_at > ?", now - 30 * DAY_MS)),
+            "retention": part("retention", lambda: retention(db, now)),
             # Sign-ups per UTC day, the last 30 days, oldest first.
             "signups": part("signups", lambda: [one(
                 "SELECT count(*) FROM users WHERE created_at >= ? AND created_at < ?",
