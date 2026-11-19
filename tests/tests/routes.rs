@@ -1048,11 +1048,10 @@ fn support_threads_are_private_and_read_markers_are_bounded() {
     assert_eq!(raw(&hub, "GET", "/v1/admin/messages", &[], vec![]).0, 404);
     let (_, body) = raw(&hub, "GET", "/v1/admin/messages", &headers, vec![]);
     let threads: serde_json::Value = serde_json::from_slice(&body).unwrap();
-    assert_eq!(threads[1]["unread"], 1);
-    assert_eq!(threads[0]["name"], "Team To-Dos");
-    let (_, empty) = raw(&hub, "GET", "/v1/admin/messages/team", &headers, vec![]);
-    assert_eq!(serde_json::from_slice::<serde_json::Value>(&empty).unwrap()["messages"], serde_json::json!([]));
-    let path = format!("/v1/admin/messages/{}", threads[1]["user_id"].as_str().unwrap());
+    // Only users' threads: the team's to-dos are a table of their own (/v1/admin/todos).
+    assert_eq!(threads.as_array().unwrap().len(), 1);
+    assert_eq!(threads[0]["unread"], 1);
+    let path = format!("/v1/admin/messages/{}", threads[0]["user_id"].as_str().unwrap());
     assert_eq!(raw(&hub, "POST", &path, &headers, b"team reply".to_vec()).0, 204);
     let first = a.support_begin(None).and_then(|r| r.thread()).unwrap();
     assert_eq!(first.unread, 1);
@@ -1075,7 +1074,7 @@ fn support_threads_are_private_and_read_markers_are_bounded() {
     assert_eq!(raw(&hub, "POST", &handled, &headers, first.messages[0].id.to_string().into_bytes()).0, 204);
     let (_, body) = raw(&hub, "GET", "/v1/admin/messages", &headers, vec![]);
     let threads: serde_json::Value = serde_json::from_slice(&body).unwrap();
-    assert_eq!(threads[1]["unread"], 0);
+    assert_eq!(threads[0]["unread"], 0);
     for message in &first.messages {
         let done = format!("/v1/admin/messages/done/{}", message.id);
         assert_eq!(raw(&hub, "POST", &done, &[], b"1".to_vec()).0, 404);
@@ -1090,9 +1089,9 @@ fn support_threads_are_private_and_read_markers_are_bounded() {
     }
     assert_eq!(a.support_begin(None).and_then(|r| r.thread()).unwrap().unread, 1);
     assert_eq!(raw(&hub, "POST", "/v1/admin/todos", &headers, b"team task".to_vec()).0, 201);
-    let (_, body) = raw(&hub, "GET", "/v1/admin/messages/team", &headers, vec![]);
-    let team: serde_json::Value = serde_json::from_slice(&body).unwrap();
-    let done = format!("/v1/admin/messages/done/{}", team["messages"][0]["id"]);
+    let (_, body) = raw(&hub, "GET", "/v1/admin/todos", &headers, vec![]);
+    let todos: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    let done = format!("/v1/admin/todos/{}", todos[0]["id"]);
     assert_eq!(raw(&hub, "POST", &done, &headers, b"1".to_vec()).0, 204);
     assert_eq!(raw(&hub, "POST", &path, &headers, vec![b'x'; 2001]).0, 400);
     assert_eq!(raw(&hub, "GET", "/v1/admin/messages/invalid", &headers, vec![]).0, 400);
