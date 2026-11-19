@@ -240,8 +240,9 @@ if (document.body.classList.contains("login")) {
     $("sys-head").onkeydown = (e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); open(); } };
   };
 
-  // ---- app builds: channel and state per reported app, worked out by the collector (App Store Connect) -----------
-  // "update" (yellow) only for an older build on the same channel; without App Store Connect data a "?" instead.
+  // ---- app builds: label and state per reported app, worked out by the collector (GitHub releases) -------------
+  // iOS: "TestFlight · newest" (the newest release's build), "TestFlight · update" (older: the only yellow badge),
+  // "TestFlight (main)" (newer than the release), or the plain build when no release is known.
   const build = (app) => (app || "").split("/").pop();
   const parse = (app) => {
     const [p, b] = (app || "").split("/");
@@ -251,24 +252,23 @@ if (document.body.classList.contains("login")) {
   let minApp = null;
   const findNewest = (h) => { minApp = parse(h?.min_app); };
   const appInfo = (app) => last?.app_builds?.[app] || (app ? { channel: "unknown", label: build(app), state: null, title: app } : null);
-  // "new", "old", "dead" (below the minimum), "expired", "?" (channel or newest unknown) or null (no app).
+  // "new", "old" (an update is out), "dead" (below the minimum) or null (nothing to compare with, or no app).
   const appState = (app) => {
     const i = appInfo(app), v = parse(app);
     if (!i) return null;
     if (minApp && v && minApp[0] === v[0] && v[1] < minApp[1]) return "dead";
-    return { newest: "new", older: "old", expired: "expired" }[i.state] || "?";
+    return { newest: "new", older: "old" }[i.state] || null;
   };
-  const STATE_WORD = { new: "newest", old: "update", dead: "too old", expired: "expired" };
-  const STATE_CLASS = { new: "ok", old: "warn", dead: "bad", expired: "bad" };
+  const STATE_CLASS = { old: "warn", dead: "bad" };
+  const appText = (i, a) => a === "dead" ? `${i.label} · too old` : i.label;
   const appTag = (app) => {
     const i = appInfo(app), a = appState(app);
     const t = el("span");
     if (!i) { t.append(tag("–", "muted")); return t; }
-    t.append(`${i.label} `, tag(STATE_WORD[a] || "?", STATE_CLASS[a] || "muted"));
-    t.title = `${i.title}${a === "dead" ? " · below the hub's minimum: refused, must update" : a === "?" ? " · newest on its channel unknown" : ""}`;
+    t.append(STATE_CLASS[a] ? tag(appText(i, a), STATE_CLASS[a]) : i.label);
+    t.title = `${i.title}${a === "dead" ? " · below the hub's minimum: refused, must update" : ""}`;
     return t;
   };
-  const CHANNEL = { appstore: "App Store", testflight: "TestFlight", internal: "TestFlight (internal)", dev: "dev", bot: "bot", ios: "iOS", android: "Android", cli: "CLI", unknown: "unknown" };
 
   // ---- small charts (SVG, drawn to the size of their viewBox) ---------------------------------------------------
   const SVG = "http://www.w3.org/2000/svg";
@@ -379,22 +379,22 @@ if (document.body.classList.contains("login")) {
       });
       chart.replaceChildren(...kids);
 
-      // App versions: devices per state, and per channel in the caption.
+      // App versions: devices per state, and per label in the caption.
       let fresh = 0, old = 0, dead = 0, other = 0;
       const per = {};
       for (const [app, c] of h.apps || []) {
-        const a = appState(app), ch = CHANNEL[appInfo(app)?.channel] || "unknown";
-        if (a === "new") fresh += c; else if (a === "old") old += c; else if (a === "dead" || a === "expired") dead += c; else other += c;
-        const p = per[ch] ||= {};
-        const w = STATE_WORD[a] || "?";
-        p[w] = (p[w] || 0) + c;
+        const a = appState(app), i = appInfo(app), l = i ? appText(i, a) : "unknown";
+        if (a === "new") fresh += c; else if (a === "old") old += c; else if (a === "dead") dead += c; else other += c;
+        per[l] = (per[l] || 0) + c;
       }
       set("ug-fresh", `${fresh}/${fresh + old + dead + other}`);
-      set("ug-apps-cap", [...Object.entries(per).map(([ch, p]) => `${ch}: ${Object.entries(p).map(([w, n]) => `${n} ${w}`).join(", ")}`),
+      set("ug-apps-cap", [...Object.entries(per).sort((x, y) => y[1] - x[1]).map(([l, n]) => `${n} ${l}`),
         `min ${h.min_app ? build(h.min_app) : "not pinned"}`].join(" · "));
-      $("ug-apps-cap").title = last?.asc ? (last.asc.error ? `App Store Connect: ${last.asc.error}` : `App Store Connect checked ${new Date(last.asc.checked * 1000).toLocaleTimeString()}`)
-        : "App Store Connect not configured: channels and newest builds unknown (YO_ASC_* in the collector's env)";
-      $("ug-apps-bar").replaceChildren(...[[fresh, "new", "on the newest build of their channel"], [old, "old", "on an older build: an update is out"], [dead, "dead", "below the minimum or expired: must update"], [other, "a0", "newest unknown (dev, bot, no App Store Connect data)"]]
+      const gh = last?.releases;
+      $("ug-apps-cap").title = !gh ? "GitHub releases not read yet"
+        : `${gh.build ? `newest release ${gh.tag || ""} build ${gh.build}${gh.prerelease ? " (pre-release)" : ""}` : "no release names a build"}`
+          + ` · checked ${new Date(gh.checked * 1000).toLocaleTimeString()}${gh.error ? ` · GitHub: ${gh.error}` : ""}`;
+      $("ug-apps-bar").replaceChildren(...[[fresh, "new", "on the newest release build"], [old, "old", "on an older build: an update is out"], [dead, "dead", "below the minimum: must update"], [other, "a0", "nothing to compare with (main, dev, Android, no release)"]]
         .filter(([v]) => v > 0).map(([v, cls, t]) => { const s = el("span", cls); s.style.flexGrow = v; s.title = `${v} ${t}`; return s; }));
     }
   };
@@ -586,7 +586,7 @@ if (document.body.classList.contains("login")) {
     fact("signed up", rel(u.created), "", date(u.created));
     fact("seen", seenDay(u.last_seen), "", u.last_seen ? new Date(u.last_seen).toLocaleDateString() : "");
     const ai = appInfo(u.app);
-    fact("app", ai ? `${ai.label} · ${STATE_WORD[a] || "?"}` : "–", STATE_CLASS[a] || "", ai ? `${u.app} · ${ai.title}${a === "dead" ? " · below the minimum: must update" : ""}` : "");
+    fact("app", ai ? appText(ai, a) : "–", STATE_CLASS[a] || "", ai ? `${u.app} · ${ai.title}${a === "dead" ? " · below the minimum: must update" : ""}` : "");
     fact("secured", u.secured ? "yes" : "no", u.secured ? "ok" : "", u.backup_at ? `backup ${date(u.backup_at)}` : "");
     fact("push", u.push ? "on" : "off", "", "");
     if (u.queued) fact("waiting", num(u.queued), "", "messages waiting for this user's devices");

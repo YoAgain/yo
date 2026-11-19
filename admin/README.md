@@ -38,10 +38,6 @@ keep credentials and deployment settings outside this public repository.
 | `YOGPT_STATS_PATTERN` | Stats path with `{}` replaced by `live` or `dev` | `./yogpt/{}/stats.json` |
 | `YO_HUB_VERSION_FILE` | Hub deploy version | `./version` |
 | `YOGPT_VERSION_FILE` | YoGPT deploy version | `./version-yogpt` |
-| `YO_ASC_KEY_PATH` | App Store Connect API key (`.p8`), read by the collector (root) only | empty (no channels) |
-| `YO_ASC_KEY_ID` | Its key id | empty |
-| `YO_ASC_ISSUER_ID` | Its issuer id | empty |
-| `YO_ASC_APP_ID` | App Store Connect app id | `6834493649` |
 | `YO_HUB_UNIT` | Live systemd unit | `yo-hub.service` |
 | `YO_HUB_DEV_UNIT` | Development systemd unit | `yo-hub-dev.service` |
 | `ADMIN_TUNNEL_UNIT` | Tunnel systemd unit | `cloudflared.service` |
@@ -145,20 +141,15 @@ without a path unit, run the collector manually after each request to supply fre
 
 ## App versions
 
-The collector names each reported app (`ios/202611191257`: the build is its UTC minute) by channel and state, in
-`app_builds` of `users.json`. With an App Store Connect key it reads, at most every 10 minutes and with GET only:
-the newest 200 builds (version, upload, expired), the builds in the TestFlight groups "Public" (GitHub releases) and
-"Team" (every push to main), and the App Store versions with their build. A build in an App Store version is
-"App Store 1.0.1 (1859)", newest when it is the live one; in "Public" it is "TestFlight 1859", newest against the
-newest unexpired Public build; otherwise "TestFlight (internal) 1257", against the newest Team build. A build App
-Store Connect does not know (and `ios/1`) is a dev build, YoGPT is compared with its deploy, Android and the CLI show
-their build only. Only an older build on the same channel shows the yellow "update"; expired builds and builds below
-`YO_MIN_APP` show red. Without the key, or before the first fetch, every iOS build shows "?", never "update"; a failed
-fetch keeps the last good data and shows its error on the App versions card.
-
-The key: an App Store Connect API key with the Developer role (read-only use), its `.p8` file on the server outside
-this repository (for example `/etc/yo/asc.p8`, root:root 0600), and the three `YO_ASC_*` lines in the collector's
-environment (`/etc/yo/admin.env`). JWTs are signed ES256 with `cryptography` when installed, else with `openssl`.
+The collector labels each reported app (`ios/202611191257`: the build is its UTC minute) in `app_builds` of
+`users.json`. Every push to main is an internal TestFlight build; a published GitHub release (tag `v…`) also goes to
+the public beta, and the TestFlight workflow appends `Build: <number>` to that release's notes. At most every 10
+minutes the collector reads the public releases (`api.github.com/repos/YoAgain/yo/releases`, no key); the newest
+non-draft release with a `Build:` line is the newest public build (a pre-release is noted). An iOS build equal to it
+is "TestFlight · newest", older is "TestFlight · update" (the only yellow badge), newer is "TestFlight (main)"; with
+no release known an iOS build shows plainly, `ios/1` is a dev build. YoGPT is compared with its deploy, Android and
+the CLI show their build. Builds below `YO_MIN_APP` show red. A failed fetch keeps the last value and shows its error
+on the App versions card, which counts devices per label. App Store releases will be added the same way later.
 Tests use fixtures only: `python3 -m unittest discover -s admin -p 'test_versions.py'`.
 
 ## Support chat rollout

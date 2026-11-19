@@ -25,6 +25,8 @@ jobs:
     runs-on: macos-26
     environment: testflight
     timeout-minutes: 95
+    permissions:
+      contents: write   # a release's build number goes into its notes (step "Release build")
     env:
       DEVELOPER_DIR: /Applications/Xcode_26.6.app/Contents/Developer
       OAD_COMMIT: 9af7bca43931552fe94db32f353a5f4e77866cc5
@@ -269,6 +271,20 @@ jobs:
           ASC_KEY_ID: ${{ secrets.ASC_KEY_ID }}
           ASC_ISSUER_ID: ${{ secrets.ASC_ISSUER_ID }}
         run: ASC_KEY_PATH=$RUNNER_TEMP/asc/AuthKey.p8 ~/pymobile3-venv/bin/python "$GITHUB_WORKSPACE/.oad/tools/asc.py" upload "$PWD/xtool/YoApp.ipa"
+
+      # A release names its build ("Build: 202611191257", the app's CFBundleVersion set by ship.sh): the admin reads
+      # it from the public releases to tell users on the newest public beta from those who should update.
+      - name: Release build
+        if: github.event_name == 'release'
+        working-directory: app/ios/YoApp
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.event.release.tag_name }}
+        run: |
+          build=$(/usr/libexec/PlistBuddy -c 'Print :CFBundleVersion' xtool/YoApp.app/Info.plist)
+          gh release view "$TAG" --repo "$GITHUB_REPOSITORY" --json body -q .body > "$RUNNER_TEMP/notes.md"
+          grep -q '^Build: ' "$RUNNER_TEMP/notes.md" || printf '\n\nBuild: %s\n' "$build" >> "$RUNNER_TEMP/notes.md"
+          gh release edit "$TAG" --repo "$GITHUB_REPOSITORY" --notes-file "$RUNNER_TEMP/notes.md"
 
       # Debug symbols of the app and its extensions, kept with the run: crash reports (MetricKit, TestFlight) name
       # "YoApp +0x1ed29c"; with these (and the UUIDs, to match the build) they can be symbolicated later.
