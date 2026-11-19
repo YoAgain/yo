@@ -642,11 +642,19 @@ if (document.body.classList.contains("login")) {
     const kept = { ...(h.version_days || {}) }, t = today0();
     if (h.versions_day) kept[t] = VKEYS.map((k) => h.versions_day[k] || 0);
     const days = Object.keys(kept).map(Number).filter((d) => d <= t).sort((a, b) => a - b), first = days[0] ?? t;
+    if (range === 1) {
+      // The last 24 hours, an hour each (kept hourly by admin.py), empty slots where none was kept yet.
+      const hrs = h.version_hours || {}, h1 = Math.floor(Date.now() / 3600000);
+      const hk = Array.from({ length: 24 }, (_, i) => h1 - 23 + i);
+      verData = { rows: hk.map((x) => hrs[x] || null), names: hk.map((x) => clock(x * 3600000)), first, today: kept[t] || null };
+    } else {
     const span = range === 1 ? 1 : range || Math.max(7, t - first + 1), step = Math.max(1, Math.ceil(span / 60)), n = Math.ceil(span / step);
     const ends = Array.from({ length: n }, (_, i) => t - (n - 1 - i) * step);
     // A stretch of days (Total, long): its last kept day.
     const rows = ends.map((e) => { for (let d = e; d > e - step; d--) if (kept[d]) return kept[d]; return null; });
     verData = { rows, names: ends.map((e) => (e === t ? "today" : dayName(e))), first, today: kept[t] || null };
+    }
+    const rows = verData.rows;
     // The row: a bar per slot like Problems, each full height: current (green) from the bottom, the rest above it, so
     // the green is seen growing after a release.
     const host = $("vr-bar"), W = 140, H = 28, sl = W / rows.length, top = 0;

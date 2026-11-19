@@ -279,6 +279,17 @@ def active_days(snapshot: dict, now_ms=None) -> dict:
                 days[str(today)] = count
                 changed = True
             history[hub] = days
+            # The same snapshot per hour, for the last 48 hours (the "1" range): the green share seen growing within a day.
+            hours = history.get(hub + "_hours") if isinstance(history.get(hub + "_hours"), dict) else {}
+            if isinstance(day, dict):
+                hour = str(now_ms // 3600000)
+                row = [int(day.get(k) or 0) for k in VERSION_KEYS]
+                if hours.get(hour) != row:
+                    hours[hour] = row
+                    changed = True
+                for h in [h for h in hours if int(h) < now_ms // 3600000 - 48]:
+                    del hours[h]
+            history[hub + "_hours"] = hours
         if changed:
             try:
                 tmp = ACTIVE_FILE + ".new"
@@ -321,6 +332,17 @@ def version_days(snapshot: dict, now_ms=None) -> dict:
                     days[today] = row
                     changed = True
             history[hub] = days
+            # The same snapshot per hour, for the last 48 hours (the "1" range): the green share seen growing within a day.
+            hours = history.get(hub + "_hours") if isinstance(history.get(hub + "_hours"), dict) else {}
+            if isinstance(day, dict):
+                hour = str(now_ms // 3600000)
+                row = [int(day.get(k) or 0) for k in VERSION_KEYS]
+                if hours.get(hour) != row:
+                    hours[hour] = row
+                    changed = True
+                for h in [h for h in hours if int(h) < now_ms // 3600000 - 48]:
+                    del hours[h]
+            history[hub + "_hours"] = hours
         if changed:
             try:
                 tmp = VERSIONS_FILE + ".new"
@@ -332,7 +354,7 @@ def version_days(snapshot: dict, now_ms=None) -> dict:
     out = dict(snapshot)
     for hub in ("live", "dev"):
         if isinstance(out.get(hub), dict):
-            out[hub] = {**out[hub], "version_days": history.get(hub, {})}
+            out[hub] = {**out[hub], "version_days": history.get(hub, {}), "version_hours": history.get(hub + "_hours", {})}
     return out
 
 
