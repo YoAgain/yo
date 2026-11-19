@@ -929,12 +929,10 @@ body.dash { max-width: none; padding-left: 24px; padding-right: 24px; }
 /* The Database widget scrolls with the page: no box of its own around the rows (up to 2500 per table). */
 #t-db .grid, #t-db .scroll, .tpane #all-users .scroll, .ugrid { max-height: none !important; overflow-y: visible !important; overflow-x: auto; }
 #t-db .tpane .pii { cursor: pointer; }
-/* Health rows (Delivery … Crash-free): graph only, the value on hover. */
-.ov .group .crow.go { grid-template-columns: 16px minmax(0, 1fr) auto; }
-.ov .group .crow.go .spark, .ov .group .crow.go .stack { grid-column: 3; }
-#c-au .stack.share > span, #c-cf .stack.share > span { background: var(--ok); }
+/* Health rows (Delivery, Push, Hub errors): graph only, the value on hover. */
 .ov .group .crow.go { min-height: 28px; padding-top: 2px; padding-bottom: 2px; }
-.ov .group .crow.go.sep { padding-top: 6px; }
-/* Delivery, Push and Hub errors in Server, the others in the counts card: both grow (no shared height in columns). */
-#t-system .crow.go { grid-template-columns: 16px minmax(0, 1fr) auto; }
 @media (min-width: 1240px) { .ov > #g-usage, .ov > #g-server { height: auto; } }
+/* A chart's hover: the point's values, a small line under them (retention, DAU/MAU); the strip's max on the right. */
+.ov .chartw .area-tip { top: -38px; line-height: 1.25; text-align: right; }
+.ov .chartw .area-tip small { display: block; font-size: 10px; font-weight: 500; color: var(--muted); }
+.stripbox .smax { left: auto; right: 0; }

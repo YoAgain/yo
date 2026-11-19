@@ -425,53 +425,60 @@ if (document.body.classList.contains("login")) {
   const slotSum = ([, ds, hs], perDay, hours) => (hs ? hs.reduce((n, i) => n + ((hours || []).slice(-24)[i] || 0), 0)
     : ds.reduce((n, d) => n + (perDay?.get(d) || 0), 0));
   const pctText = (x) => (x == null ? "–" : x > 0 && x < 0.1 ? "< 0.1 %" : `${x >= 99.95 || x < 10 ? x.toFixed(x >= 99.95 || x === 0 ? 0 : 1) : Math.round(x)} %`);
-  const shareBar = (key, x, tip) => { $(`${key}-bar`).firstChild.style.width = `${x ?? 0}%`; $(`c-${key}`).dataset.tip = tip; };
-  // Health rows, graph only (the value on hover). In Server: Delivery (p95 of how long a Yo took to its device), Push
-  // (the share the services took), Hub errors (the share of answers that were 5xx), in the range. In the counts card:
-  // Deleted (accounts) in the range, then Retention D1/D7/D30, DAU/MAU and crash-free users, now.
+  // Health rows in the counts card, graph only (the value on hover): Delivery (p95 of how long a Yo took to its device),
+  // Push (the share the services took), Hub errors (5xx answers), in the range; with nothing counted yet, no bars and
+  // "no data yet" in the hover. The rest goes into hovers: Deleted (in the range) and DAU/MAU under Accounts,
+  // retention D1/D7/D30 under Yos, crash-free users with Problems.
   const LAT = ["latency-1s", "latency-5s", "latency-60s", "latency-slow"], LAT_NAME = ["< 1 s", "< 5 s", "< 1 min", "> 1 min"];
+  const areaSub = {};
   const healthRows = (h, ym, yh) => {
     const span = range === 1 ? "last 24 hours" : range ? `${range} days` : "since the start";
-    const all = (key) => ym(key), yo = ym("yo-out"), slots = rangeSlots(yo);
+    const all = (key) => ym(key), yo = ym("yo-out"), slots = rangeSlots(yo), names = slots.map(([n]) => n);
     const sums = (keys) => slots.map((s) => keys.map((k) => slotSum(s, all(k), yh(k))));
     const whole = (rows) => rows.reduce((a, r) => a.map((v, i) => v + r[i]), rows[0].map(() => 0));
+    const none = (key, what) => { sparkData[key].empty = `No data yet: the hub has counted no ${what} in this range`; $(`c-${key}`).dataset.tip = "no data yet"; };
     // Delivery: the bucket the 95th percentile falls in, per bar (1 to 4: < 1 s … > 1 min); the median in the hover.
     const at = (b, q) => { const n = b.reduce((a, v) => a + v, 0); let c = 0; return n ? b.findIndex((v) => (c += v) >= q * n) : -1; };
     const lat = sums(LAT), latAll = whole(lat), latN = (b) => b.reduce((a, v) => a + v, 0);
-    spark("dl", null, lat.map((b) => at(b, 0.95) + 1), slots.map(([n]) => n),
+    spark("dl", null, lat.map((b) => at(b, 0.95) + 1), names,
       (i) => (latN(lat[i]) ? `p95 ${LAT_NAME[at(lat[i], 0.95)]} · median ${LAT_NAME[at(lat[i], 0.5)]} · ${num(latN(lat[i]))} Yos` : "no Yos"),
       `Delivery: from accepted to acknowledged · ${latN(latAll) ? `p95 ${LAT_NAME[at(latAll, 0.95)]}, median ${LAT_NAME[at(latAll, 0.5)]}` : "no Yos"} · ${span}`, 4);
+    if (!latN(latAll)) none("dl", "delivered Yos");
     $("c-dl").classList.add("bad-up");
     // Push: the share the services took.
     const ps = sums(["push-ok", "push-fail"]), psAll = whole(ps), share = ([ok, bad]) => (ok + bad ? (100 * ok) / (ok + bad) : null);
-    spark("ps", null, ps.map((p) => share(p) ?? 0), slots.map(([n]) => n),
+    spark("ps", null, ps.map((p) => share(p) ?? 0), names,
       (i) => (ps[i][0] + ps[i][1] ? `${pctText(share(ps[i]))} taken · ${num(ps[i][1])} failed of ${num(ps[i][0] + ps[i][1])}` : "no pushes"),
       `Push: taken by APNs and FCM · ${pctText(share(psAll))} · ${num(psAll[1])} failed (in Errors) · ${span}`, 100);
-    // Hub errors: 5xx of all answers; 4xx and 429 in the hover.
+    if (!(psAll[0] + psAll[1])) none("ps", "pushes");
+    // Hub errors: 5xx answers per bar (a bar's height its count); their share, 4xx and 429 in the hover.
     const he = sums(["http-5xx", "http", "http-4xx", "http-429"]), heAll = whole(he), rate = ([e, n]) => (n ? (100 * e) / n : 0);
-    spark("he", null, he.map(rate), slots.map(([n]) => n),
-      (i) => (he[i][1] ? `${pctText(rate(he[i]))} 5xx · ${num(he[i][0])} 5xx, ${num(he[i][2])} 4xx, ${num(he[i][3])} 429 of ${num(he[i][1])}` : "no answers"),
-      `Hub errors: answers that were 5xx · ${pctText(rate(heAll))} of ${num(heAll[1])} · ${span}`);
+    spark("he", null, he.map(([e]) => e), names,
+      (i) => (he[i][1] ? `${num(he[i][0])} 5xx (${pctText(rate(he[i]))}) · ${num(he[i][2])} 4xx · ${num(he[i][3])} 429 of ${num(he[i][1])}` : "no answers"),
+      `Hub errors: answers that were 5xx · ${num(heAll[0])} (${pctText(rate(heAll))}) of ${num(heAll[1])} · ${span}`);
+    if (!heAll[1]) none("he", "answers");
     $("c-he").classList.add("bad-up");
-    const ag = sums(["account-gone"]).map(([n]) => n);
-    spark("ag", null, ag, slots.map(([n]) => n), (i, v) => `${num(v)} deleted`, `Deleted: accounts deleted · ${num(ag.reduce((a, v) => a + v, 0))} · ${span}`);
-    $("c-ag").classList.add("bad-up");
-    // Retention: of the accounts made 1 (7, 30) to 90 days ago, those seen that many days after signing up.
-    const rt = h.retention || {}, rk = ["d1", "d7", "d30"], rp = rk.map((k) => (rt[k]?.[1] ? (100 * rt[k][0]) / rt[k][1] : null));
-    spark("rt", null, rp.map((x) => x ?? 0), ["D1", "D7", "D30"],
-      (i) => (rt[rk[i]]?.[1] ? `${rk[i].toUpperCase()}: ${pctText(rp[i])} (${num(rt[rk[i]][0])} of ${num(rt[rk[i]][1])})` : `${rk[i].toUpperCase()}: nobody yet`),
-      `Retention: seen again 1, 7 and 30 days after signing up · ${rk.map((k, i) => `${k.toUpperCase()} ${pctText(rp[i])}`).join(" · ")}`, 100);
-    // DAU/MAU: users seen today of those seen in 30 days.
+    // Accounts' hover: DAU/MAU (users seen today of those seen in 30 days) and the accounts deleted in the range.
+    const gone = sums(["account-gone"]).reduce((a, [n]) => a + n, 0);
     const dau = h.active_day ?? 0, mau = h.active_month ?? 0, stick = mau ? (100 * dau) / mau : null;
-    shareBar("au", stick, `DAU / MAU ${pctText(stick)} · ${num(dau)} today of ${num(mau)} in 30 days`);
-    // Crash-free users: the last 7 days' crash reports against the users seen in them (a crash counted as one user).
+    areaSub.uc = `DAU / MAU ${pctText(stick)} (${num(dau)} of ${num(mau)}) · ${num(gone)} deleted in ${span}`;
+    // Yos' hover: retention, of the accounts made 1 (7, 30) to 90 days ago those seen that many days after signing up.
+    const rt = h.retention || {};
+    areaSub.yc = `Retention ${["d1", "d7", "d30"].map((k) => `${k.toUpperCase()} ${rt[k]?.[1] ? pctText((100 * rt[k][0]) / rt[k][1]) : "–"}`).join(" · ")}`;
+    // Problems' hover: crash-free users, the last 7 days' crash reports against the users seen in them (a crash one user).
     const crashes = (h.diagnostic_days || []).filter((r) => r.kind === "crash" && r.day > today0() - 7).reduce((n, r) => n + r.count, 0);
     const wau = h.active_users ?? 0, free = wau ? Math.max(0, 100 - (100 * crashes) / wau) : null;
-    shareBar("cf", free, `Crash-free users ${pctText(free)} · ${num(crashes)} crashes, ${num(wau)} users in 7 days`);
+    $("c-pr").dataset.more = `Crash-free users ${pctText(free)} · ${num(crashes)} crashes, ${num(wau)} users in 7 days`;
   };
   // The two chart widgets: a running total over the range (a point an hour, a day, or for Total up to 60 points),
   // ending at the total since the start; the hover shows the point's time and value.
   const areaData = {};
+  // A chart's hover line: the point's values, and under them a small line of its own (areaSub: retention, DAU/MAU).
+  const say = (key, text) => {
+    const tip = $(`${key}-tip`);
+    if (!text) { tip.replaceChildren(); return; }
+    tip.replaceChildren(el("span", null, text), ...(areaSub[key] ? [el("small", null, areaSub[key])] : []));
+  };
   const runningTotal = (perDay, hours, total) => {
     let names, incs;
     if (range === 1) {
@@ -494,10 +501,10 @@ if (document.body.classList.contains("login")) {
     if (!d || !node) return;
     const W = node.clientWidth, H = node.clientHeight;
     if (!W || !H) return;
-    // A second series on its own scale (Active over Accounts, Media over Yos).
-    const o = d.overlay && areaData[d.overlay];
+    // A second series: on its own scale (Active over Accounts) or on the same one (Media under Yos, their ratio).
+    const o = d.overlay && areaData[d.overlay], same = o && SAME[key];
     // Room above the curve's top (14 px, its max there).
-    const lo = Math.min(...d.values), hi = Math.max(...d.values), pad = 6, padTop = 14, foot = 0, n = d.values.length, B = H - foot;
+    const both = same ? [...d.values, ...o.values] : d.values, lo = Math.min(...both), hi = Math.max(...both), pad = 6, padTop = 14, foot = 0, n = d.values.length, B = H - foot;
     const x = (i) => pad + (i * (W - 2 * pad)) / Math.max(1, n - 1), y = (v) => padTop + (B - padTop - 3) * (hi === lo ? 0.5 : 1 - (v - lo) / (hi - lo));
     const pts = d.values.map((v, i) => `${x(i).toFixed(1)},${y(v).toFixed(1)}`);
     const fill = svg("path", { class: "fill", d: `M${x(0)},${B} L${pts.join(" L")} L${x(n - 1)},${B} Z` });
@@ -508,18 +515,18 @@ if (document.body.classList.contains("login")) {
     const extra = [];
     if (o) {
       // Per slot (one value per point after "before") it starts one point in; else across the width.
-      const olo = Math.min(...o.values), ohi = Math.max(...o.values), on = o.values.length, shift = on === n - 1 ? 1 : 0;
+      const olo = same ? lo : Math.min(...o.values), ohi = same ? hi : Math.max(...o.values), on = o.values.length, shift = on === n - 1 ? 1 : 0;
       const op = o.values.map((v, i) => `${(shift ? x(i + 1) : pad + (i * (W - 2 * pad)) / Math.max(1, on - 1)).toFixed(1)},${(padTop + (B - padTop - 3) * (ohi === olo ? 0.5 : 1 - (v - olo) / (ohi - olo))).toFixed(1)}`);
       extra.push(svg("path", { class: "line overlay", d: `M${op.join(" L")}` }));
     }
     node.setAttribute("viewBox", `0 0 ${W} ${H}`);
     // A vertical guide at the hovered point.
     const guide = svg("line", { class: "guide", y1: 0, y2: B, x1: -10, x2: -10 });
-    // Tiny labels: the lowest value over the curve's start, the highest at the top right (the dates are under the bars).
+    // Two tiny labels, the scale's ends: its lowest value at the bottom left (where the curves start), its highest at the
+    // top right (the dates are under the bars).
     const lab = (tx, ty, text, anchor) => { const t = svg("text", { x: tx, y: ty, "text-anchor": anchor, class: "lab" }); t.textContent = text; return t; };
-    const labels = [lab(pad + 5, Math.max(9, y(d.values[0]) - 9), num(lo), "start"), lab(W - pad, 9, num(hi), "end")];
+    const labels = hi === lo ? [lab(W - pad, 9, num(hi), "end")] : [lab(pad, B - 9, num(lo), "start"), lab(W - pad, 9, num(hi), "end")];
     node.replaceChildren(fill, guide, line, ...extra, ...dots, ...labels);
-    const tip = $(`${key}-tip`);
     node.onpointermove = (e) => {
       const r = node.getBoundingClientRect(), i = Math.min(n - 1, Math.max(0, Math.round(((e.clientX - r.left - pad) / (r.width - 2 * pad)) * (n - 1))));
       dots.forEach((c, k) => c.classList.toggle("on", k === i));
@@ -528,12 +535,12 @@ if (document.body.classList.contains("login")) {
       const j = !o ? -1 : o.values.length === n ? i : o.values.length === n - 1 ? i - 1 : (o.labels || []).indexOf(d.labels[i]);
       const pct = o?.share && j >= 0 && d.values[i] ? ` (${Math.round((100 * o.values[j]) / d.values[i])} %)` : "";
       const ov = j >= 0 ? ` · ${num(o.values[j])} ${o.word || ""}`.trimEnd() + pct : "";
-      tip.textContent = `${d.labels[i]} · ${num(d.values[i])}${d.word ? ` ${d.word}` : ""}${ov}`;
+      say(key, `${d.labels[i]} · ${num(d.values[i])}${d.word ? ` ${d.word}` : ""}${ov}`);
     };
-    node.onpointerleave = () => { dots.forEach((c) => c.classList.remove("on")); guide.classList.remove("on"); tip.textContent = ""; };
+    node.onpointerleave = () => { dots.forEach((c) => c.classList.remove("on")); guide.classList.remove("on"); say(key, ""); };
   };
-  // A second series drawn over a chart: Active over Accounts, Media over Yos.
-  const OVERLAY = { uc: "ac", yc: "ym" }, WORD = { yc: "Yos", uc: "accounts" };
+  // A second series drawn over a chart: Active over Accounts, Media over Yos (on the Yos' scale).
+  const OVERLAY = { uc: "ac", yc: "ym" }, SAME = { yc: true }, WORD = { yc: "Yos", uc: "accounts" };
   const areaChart = (key, total, perDay, hours) => {
     set(`${key}-n`, num(total));
     areaData[key] = { ...runningTotal(perDay, hours, total || 0), overlay: OVERLAY[key] || null, word: WORD[key] };
@@ -546,7 +553,7 @@ if (document.body.classList.contains("login")) {
       return svg("rect", { x: (i * sl + sl * 0.16).toFixed(2), width: (sl * 0.68).toFixed(2), y: (28 - h).toFixed(1), height: h.toFixed(1), rx: 1, class: v ? "b" : "b zero" });
     });
     st.replaceChildren(...bars);
-    const tip = $(`${key}-tip`), names = areaData[key].names, what = { yc: "Yos", uc: "sign-ups" }[key] || "";
+    const names = areaData[key].names, what = { yc: "Yos", uc: "sign-ups" }[key] || "";
     // Its tiny labels: the highest bar's value top left, the first and last slot under it.
     let box = st.parentElement;
     if (!box.classList.contains("stripbox")) {
@@ -559,9 +566,9 @@ if (document.body.classList.contains("login")) {
     st.onpointermove = (e) => {
       const r = st.getBoundingClientRect(), i = Math.min(inc.length - 1, Math.max(0, Math.floor(((e.clientX - r.left) / r.width) * inc.length)));
       bars.forEach((b, k) => b.classList.toggle("on", k === i));
-      tip.textContent = `${range === 1 ? `${clock((Math.floor(Date.now() / 3600000) - 23 + i) * 3600000)} – ${names[i]}` : names[i]} · ${num(inc[i])} ${what}`;
+      say(key, `${range === 1 ? `${clock((Math.floor(Date.now() / 3600000) - 23 + i) * 3600000)} – ${names[i]}` : names[i]} · ${num(inc[i])} ${what}`);
     };
-    st.onpointerleave = () => { bars.forEach((b) => b.classList.remove("on")); tip.textContent = ""; };
+    st.onpointerleave = () => { bars.forEach((b) => b.classList.remove("on")); say(key, ""); };
     for (const [k, d] of Object.entries(areaData)) if (d?.overlay === key) drawArea(k);
   };
   // Active: one value per day, drawn over Accounts.
@@ -1336,6 +1343,7 @@ if (document.body.classList.contains("login")) {
     head.append(el("b", null, label), el("span", "hc-val", value && value !== "–" ? value : ""));
     const d = sparkData[key], cap = el("div", "hc-cap");
     if (key === "pl") body.push(platCard());
+    else if (d?.empty) body.push(el("div", "hc-lines", d.empty));
     else if (d && d.values.length > 1) {
       const cls = row.classList.contains("bad-up") ? "bad" : d.cls || (row.closest("#t-system") ? "cool" : "");
       body.push(barChart(d, cls, cap), cap);
@@ -1343,6 +1351,8 @@ if (document.body.classList.contains("login")) {
     // Few words: a row's note only where there is no chart to read (Queue, Updates).
     const lines = key === "pl" || body.length ? [] : (row.dataset.tip || "").split(" · ").filter(Boolean).filter((x) => x !== value);
     if (lines.length) body.push(el("div", "hc-lines", lines.join(" · ")));
+    // A line more under the chart (Problems: crash-free users).
+    if (row.dataset.more) body.push(el("div", "hc-lines", row.dataset.more));
     if (row.dataset.open) {
       const go = el("button", "hc-hint", row.dataset.open.startsWith("table:") ? "Open the table →" : "Details →");
       go.type = "button";

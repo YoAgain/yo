@@ -12,7 +12,7 @@
 <body class="dash">
 
 <!-- One page of widgets: the header (logo, range), the Yos and Accounts charts, one widget of counts (Media, Groups,
-     Problems, Queue, Secured, Platforms), Server with the services as chips, the Database widget
+     Secured, Platforms, Problems, Queue, Delivery, Push, Hub errors), Server with the services as chips, the Database widget
      below, always open; rows that lead to a table open it there (the support chat, diagnostics, reports, users). -->
 <main class="ov" id="overview">
 <header class="tile hdr group" id="t-hdr">
@@ -38,10 +38,9 @@
         <div class="crow bars" id="c-pl"><svg class="ico" viewBox="0 0 24 24" aria-hidden="true"><rect x="6.5" y="2.5" width="11" height="19" rx="2.5"/><path d="M11 18.5h2"/></svg><span class="cl">Platforms</span><b class="cn" id="pl-n">–</b><span class="stack plats" id="pl-bar"></span></div>
         <div class="crow bars opens sep" id="c-pr" data-open="table:support_messages" role="button" tabindex="0"><svg class="ico" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3.5 2.5 20h19z"/><path d="M12 10v4.5"/><path d="M12 17.2v.3"/></svg><span class="cl">Problems</span><b class="cn" id="pr-n">–</b><span class="sv" id="pr-sv"></span><svg class="spark" id="pr-spark" viewBox="0 0 140 28" preserveAspectRatio="none"></svg></div>
         <div class="crow kv" id="c-q" data-card="q"><svg class="ico" viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="8.5"/><path d="M12 7.5V12l3 2"/></svg><span class="cl">Queue</span><b class="cn" id="q-n">–</b></div>
-        <div class="crow bars sep go" id="c-ag"><svg class="ico" viewBox="0 0 24 24" aria-hidden="true"><circle cx="10" cy="8" r="3.5"/><path d="M3.5 20a6.5 6.5 0 0 1 13 0"/><path d="m17 9 4 4m0-4-4 4"/></svg><span class="cl">Deleted</span><svg class="spark" id="ag-spark" viewBox="0 0 140 28" preserveAspectRatio="none"></svg></div>
-        <div class="crow bars go" id="c-rt"><svg class="ico" viewBox="0 0 24 24" aria-hidden="true"><path d="M4 12a8 8 0 0 1 14-5.3L20 9"/><path d="M20 4v5h-5"/><path d="M20 12a8 8 0 0 1-14 5.3L4 15"/><path d="M4 20v-5h5"/></svg><span class="cl">Retention</span><svg class="spark" id="rt-spark" viewBox="0 0 140 28" preserveAspectRatio="none"></svg></div>
-        <div class="crow bars go" id="c-au"><svg class="ico" viewBox="0 0 24 24" aria-hidden="true"><path d="M3 12h4l3-7 4 14 3-7h4"/></svg><span class="cl">DAU / MAU</span><span class="stack share" id="au-bar"><span></span></span></div>
-        <div class="crow bars go" id="c-cf"><svg class="ico" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3 5 6v5.5c0 4.2 3 7.8 7 9.5 4-1.7 7-5.3 7-9.5V6z"/><path d="m9 12 2 2 4-4"/></svg><span class="cl">Crash-free</span><span class="stack share" id="cf-bar"><span></span></span></div>
+        <div class="crow bars go" id="c-dl"><svg class="ico" viewBox="0 0 24 24" aria-hidden="true"><path d="M3 12h11"/><path d="m10 7.5 4.5 4.5-4.5 4.5"/><path d="M18 5v14"/></svg><span class="cl">Delivery</span><svg class="spark" id="dl-spark" viewBox="0 0 140 28" preserveAspectRatio="none"></svg></div>
+        <div class="crow bars go" id="c-ps"><svg class="ico" viewBox="0 0 24 24" aria-hidden="true"><path d="M6 16.5V11a6 6 0 0 1 12 0v5.5l1.5 2h-15z"/><path d="M10 20.5a2 2 0 0 0 4 0"/></svg><span class="cl">Push</span><svg class="spark" id="ps-spark" viewBox="0 0 140 28" preserveAspectRatio="none"></svg></div>
+        <div class="crow bars go" id="c-he"><svg class="ico" viewBox="0 0 24 24" aria-hidden="true"><rect x="3.5" y="4" width="17" height="7" rx="1.5"/><rect x="3.5" y="13" width="17" height="7" rx="1.5"/><path d="M7 7.5h.01M7 16.5h.01"/></svg><span class="cl">Hub errors</span><svg class="spark" id="he-spark" viewBox="0 0 140 28" preserveAspectRatio="none"></svg></div>
       </section>
   </article>
   <article class="tile group" id="g-server">
@@ -52,9 +51,6 @@
         <div class="crow bars" id="c-disk"><svg class="ico" viewBox="0 0 24 24" aria-hidden="true"><ellipse cx="12" cy="6" rx="7.5" ry="2.8"/><path d="M4.5 6v12c0 1.5 3.4 2.8 7.5 2.8s7.5-1.3 7.5-2.8V6"/></svg><span class="cl">Disk</span><b class="cn" id="disk-n">–</b><span class="sv" id="disk-sv"></span><svg class="spark" id="disk-spark" viewBox="0 0 140 28" preserveAspectRatio="none"></svg></div>
         <div class="crow bars sep" id="c-net"><svg class="ico" viewBox="0 0 24 24" aria-hidden="true"><path d="M8 4v15M4.5 15.5 8 19l3.5-3.5"/><path d="M16 20V5M12.5 8.5 16 5l3.5 3.5"/></svg><span class="cl">LAN</span><b class="cn" id="net-n">–</b><span class="sv" id="net-sv"></span><svg class="spark" id="net-spark" viewBox="0 0 140 28" preserveAspectRatio="none"></svg></div>
         <div class="crow kv" id="c-upd"><svg class="ico" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 4v11M7.5 10.5 12 15l4.5-4.5"/><path d="M4 19h16"/></svg><span class="cl">Updates</span><b class="cn" id="upd-n">–</b></div>
-        <div class="crow bars sep go" id="c-dl"><svg class="ico" viewBox="0 0 24 24" aria-hidden="true"><path d="M3 12h11"/><path d="m10 7.5 4.5 4.5-4.5 4.5"/><path d="M18 5v14"/></svg><span class="cl">Delivery</span><svg class="spark" id="dl-spark" viewBox="0 0 140 28" preserveAspectRatio="none"></svg></div>
-        <div class="crow bars go" id="c-ps"><svg class="ico" viewBox="0 0 24 24" aria-hidden="true"><path d="M6 16.5V11a6 6 0 0 1 12 0v5.5l1.5 2h-15z"/><path d="M10 20.5a2 2 0 0 0 4 0"/></svg><span class="cl">Push</span><svg class="spark" id="ps-spark" viewBox="0 0 140 28" preserveAspectRatio="none"></svg></div>
-        <div class="crow bars go" id="c-he"><svg class="ico" viewBox="0 0 24 24" aria-hidden="true"><rect x="3.5" y="4" width="17" height="7" rx="1.5"/><rect x="3.5" y="13" width="17" height="7" rx="1.5"/><path d="M7 7.5h.01M7 16.5h.01"/></svg><span class="cl">Hub errors</span><svg class="spark" id="he-spark" viewBox="0 0 140 28" preserveAspectRatio="none"></svg></div>
         <select id="st-every" aria-label="How often the status bot reports" hidden>
           <option value="0">Off</option><option value="15">15 min</option><option value="30">30 min</option>
           <option value="60">60 min</option><option value="120">120 min</option><option value="1440">Daily (09:00 Berlin)</option></select>
