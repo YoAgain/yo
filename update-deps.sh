@@ -2,14 +2,14 @@
 # Every third-party dependency to its newest release, pinned exactly, then everything built and tested; one commit
 # "Dependencies: ..." on success, the tree as it was on failure. Run by hand: there is no waiting period.
 #
-#   dev/update-deps.sh            # update, test, build the iOS app, commit
-#   dev/update-deps.sh --dry-run  # only list what would change, with links to the release notes
+#   ./update-deps.sh            # update, test, build the iOS app, commit
+#   ./update-deps.sh --dry-run  # only list what would change, with links to the release notes
 #
 # crates.io dependencies in every Cargo.toml (workspace, members, fuzz) become `=newest`; a git dependency with a
 # tag (libsignal) gets its newest release tag and that commit as `rev`, its [patch] entries too (dev/update-deps.py).
 # The iOS app has no Swift packages but the core; it is rebuilt with it.
 set -eu
-root=$(cd "$(dirname "$0")/.." && pwd)
+root=$(cd "$(dirname "$0")" && pwd)
 cd "$root"
 
 if [ "${1:-}" = "--dry-run" ]; then

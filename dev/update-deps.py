@@ -1,6 +1,6 @@
 """Finds the newest version of every third-party dependency and, unless --dry-run, pins it in place.
 
-Used by dev/update-deps.sh. crates.io dependencies (every Cargo.toml: the workspace, its members, fuzz) are pinned
+Used by ./update-deps.sh. crates.io dependencies (every Cargo.toml: the workspace, its members, fuzz) are pinned
 exactly (`=x.y.z`); git dependencies with a tag (libsignal, if the core takes it again) get the newest release tag and
 its commit as `rev`, and so do their [patch] entries. Prints one line per change with where its release notes are.
 Standard library only.

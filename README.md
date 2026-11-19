@@ -127,7 +127,8 @@ DB: the local database, sealed per column.
 - [spec](spec): the YoIP protocol, [v1.md](spec/v1.md)
 - [tests](tests): integration, chaos and load tests, with [fixtures](tests/fixtures)
 - [fuzz](fuzz): fuzz targets
-- [dev](dev): Docker builds, dependency updates, this chart
+- [dev](dev): Docker builds, this chart
+- [update-deps.sh](update-deps.sh): every dependency to its newest release, tested, one commit
 
 TestFlight: every push to `main` goes to the internal testers; a GitHub release or pre-release (tag `v…`) also goes
 to the public beta.

@@ -1,7 +1,7 @@
 name: Update dependencies
 
 # Once a month (and by hand): every third-party dependency to its newest release, pinned exactly, as
-# dev/update-deps.sh does (dev/update-deps.py), then built, linted and tested here; a pull request only when something
+# ./update-deps.sh does (dev/update-deps.py), then built, linted and tested here; a pull request only when something
 # changed and everything passed. The iOS app is not built here (no Mac); TestFlight builds it once merged.
 on:
   schedule:
