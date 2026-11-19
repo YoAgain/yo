@@ -169,6 +169,10 @@ pub struct FcmConfig {
     pub service_account_json: String,
 }
 
+/// The fewest characters (grapheme clusters) of a new username when `YO_NAME_MIN` sets none (spec 3.3). Only the hub
+/// has a least: the apps show its `400`.
+pub const NAME_MIN: usize = 3;
+
 #[derive(Debug, Clone)]
 pub struct Config {
     /// Shared admin credential; absent disables the admin route.
@@ -189,7 +193,7 @@ pub struct Config {
     pub blobs: BlobConfig,
     /// The oldest build per platform (`YO_MIN_APP` "ios/202611140619,android/12"): older gets `426` (spec 6.3).
     pub min_app: Vec<(String, u64)>,
-    /// The fewest grapheme clusters of a username (`YO_NAME_MIN`, default 2, spec 3.3).
+    /// The fewest grapheme clusters of a username (`YO_NAME_MIN`, default `NAME_MIN`, spec 3.3): new names only.
     pub name_min: usize,
     /// The hub's Curve25519 private key (`YO_HUB_KEY_FILE`): it signs answers handing out keys (spec 6.10).
     pub hub_key: [u8; 32],
@@ -255,7 +259,7 @@ impl Config {
             fcm: None,
             blobs: BlobConfig::for_tests(),
             min_app: Vec::new(),
-            name_min: 2,
+            name_min: NAME_MIN,
             hub_key: TEST_HUB_KEY,
             server_certificate: crate::certificate::test_file(),
             zk_params: {

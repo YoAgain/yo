@@ -139,11 +139,7 @@ import uniffi.yo.usernameValid
     val availability = remember { mutableStateMapOf<String, Boolean>() }
     val free = availability[name]
     val valid = remember(name) { usernameValid(name) }
-    val shortName = remember(name) {
-        val characters = android.icu.text.BreakIterator.getCharacterInstance()
-        characters.setText(name)
-        name.isNotEmpty() && characters.next(3) == android.icu.text.BreakIterator.DONE
-    }
+    // How short a name may be only the hub knows (spec 3.3): its 400 marks a name too short.
     val hubShortNames = remember { mutableStateMapOf<String, Boolean>() }
     val rejectedAsShort = hubShortNames[name] == true
     var tooShort by remember { mutableStateOf(false) }
@@ -174,7 +170,7 @@ import uniffi.yo.usernameValid
     }
     LaunchedEffect(name, rejectedAsShort) {
         tooShort = false
-        if (shortName || rejectedAsShort) {
+        if (rejectedAsShort) {
             delay(1500)
             tooShort = true
         }

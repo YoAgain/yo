@@ -14,7 +14,8 @@ use yo_wire::limits::{self, MAX_DEVICES, MAX_PREKEYS_PER_UPLOAD, PREKEY_TARGET};
 use yo_wire::{api, decode, encode, sha256, UserId};
 
 impl Hub {
-    /// A username at least `YO_NAME_MIN` long (spec 3.3); shorter is `400`.
+    /// A username at least `YO_NAME_MIN` long (spec 3.3); shorter is `400`. Only new names are measured: a name
+    /// someone has from before a higher least stays theirs.
     fn long_enough(&self, name: &[u8]) -> Res<()> {
         let name = std::str::from_utf8(name).map_err(|_| bad())?;
         match yo_wire::handle::username_len(name) >= self.config.name_min {
@@ -71,7 +72,6 @@ pub(crate) async fn post_register(
     let request: api::Register = decode(&body)?;
     let handle = Handle { kind: KIND_USERNAME, value: request.username.clone() };
     handle.check()?;
-    hub.long_enough(request.username.as_slice())?;
     let device = &request.device;
     if device.push.token.as_slice().len() > limits::MAX_PUSH_TOKEN_LEN
         || !Hub::device_keys_usable(device.registration_id, &device.auth_key)
@@ -83,6 +83,10 @@ pub(crate) async fn post_register(
     let signed = api::registration_to_be_signed(&handle, &device.device_id, &device.device_key, &device.auth_key);
     if !yo_wire::xeddsa_verify(&account_key, &signed, &device.proof) {
         return Err(bad());
+    }
+    // A known account key restores its user and keeps its name; only a new user's name is measured.
+    if hub.db.user_of_account_key(&account_key)?.is_none() {
+        hub.long_enough(request.username.as_slice())?;
     }
     Hub::check_prekeys(&device.prekeys, true)?;
 
@@ -115,10 +119,11 @@ pub(crate) async fn get_username(
 ) -> Res<StatusCode> {
     hub.limit_ip("name", peer, &headers, hub.config.limits.name_check_per_ip_minute, MINUTE)?;
     yo_wire::handle::check_username_form(&name)?;
-    hub.long_enough(name.as_bytes())?;
+    // Taken before too short: a name someone has from before a higher least is found, not refused.
     if hub.db.username_taken(yo_wire::handle::skeleton(&name).as_bytes())? {
         return Err(refuse(StatusCode::CONFLICT));
     }
+    hub.long_enough(name.as_bytes())?;
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -128,8 +133,13 @@ pub(crate) async fn put_username(State(hub): Hubs, Auth(device, body): Auth) -> 
     let spelling = match &request.username {
         Some(name) => {
             Handle { kind: KIND_USERNAME, value: name.clone() }.check()?;
-            hub.long_enough(name.as_slice())?;
-            Some(std::str::from_utf8(name.as_slice()).map_err(|_| bad())?)
+            let spelling = std::str::from_utf8(name.as_slice()).map_err(|_| bad())?;
+            // The account's own name in another spelling is no new name.
+            let owner = hub.db.username_owner(yo_wire::handle::skeleton(spelling).as_bytes())?;
+            if owner != Some(device.user_id) {
+                hub.long_enough(name.as_slice())?;
+            }
+            Some(spelling)
         }
         None => None,
     };

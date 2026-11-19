@@ -117,7 +117,7 @@ struct Onboarding: View {
         .task(id: name) {
           // Too short shows only once typing paused, never on the first letter.
           guard (try? await Task.sleep(for: .seconds(1.5))) != nil else { return }
-          if (1...2).contains(name.count) || short.contains(Username.skeleton(name)) { tooShort = true }
+          if short.contains(Username.skeleton(name)) { tooShort = true }
         }
         VStack(spacing: 10) {
           NameField(name: $name, mark: name.isEmpty ? nil : Username.problem(name) == nil && free == true ? .available

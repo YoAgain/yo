@@ -116,7 +116,7 @@ fn config() -> Result<(Config, String), String> {
         fcm,
         blobs,
         min_app: var("YO_MIN_APP").map(|text| parse_min_app(&text)).transpose()?.unwrap_or_default(),
-        name_min: parsed("YO_NAME_MIN", 2, |n| (1..=16).contains(n), "1 to 16")?,
+        name_min: parsed("YO_NAME_MIN", yo_hub::config::NAME_MIN, |n| (1..=16).contains(n), "1 to 16")?,
         hub_key: read_hub_key(&required("YO_HUB_KEY_FILE")?)?,
         server_certificate: bytes("YO_SERVER_CERT_FILE")?,
         zk_params: bytes("YO_ZK_PARAMS_FILE")?,

@@ -365,18 +365,60 @@ fn registration_answers_as_the_spec_says() {
     assert_eq!(old.sync(0), Err(Error::Replaced));
 }
 
-/// Spec 3.3: how short a name may be is the hub's switch (`YO_NAME_MIN`): "Or" with the default of 2, one letter
-/// only once it is lowered to 1.
+/// Spec 3.3: how short a name may be is the hub's switch (`YO_NAME_MIN`): "Mia" with the default of 3, "Or" not;
+/// one letter only once it is lowered to 1.
 #[test]
 fn the_least_name_length_is_the_hubs_switch() {
-    for (least, one, two) in [(2, status::BAD_REQUEST, status::NO_CONTENT), (1, status::NO_CONTENT, status::NO_CONTENT)]
-    {
+    let (bad, free) = (status::BAD_REQUEST, status::NO_CONTENT);
+    for (least, expected) in [(None, (bad, bad, free)), (Some(1), (free, free, free))] {
         let mut config = Config::for_tests();
-        config.name_min = least;
+        if let Some(least) = least {
+            config.name_min = least;
+        }
         let hub = TestHub::start_with(config, "127.0.0.1:0");
         let check = |name: &str| raw(&hub, "GET", &api::username_path(name), &[], Vec::new()).0;
-        assert_eq!((check("O"), check("Or")), (one, two), "least {least}");
+        assert_eq!((check("O"), check("Or"), check("🦄Mi")), expected, "least {least:?}");
     }
+    let mut config = Config::for_tests();
+    config.name_min = 3;
+    let hub = TestHub::start_with(config, "127.0.0.1:0");
+    let new = Client::register_username(Http::new(hub.url()), "Xy", None, None, yo_core::Push::none());
+    assert_eq!(new.err(), Some(Error::Refused(status::BAD_REQUEST)), "a new two-letter name");
+}
+
+/// Spec 3.3: a name from before a higher least stays its owner's: found (`409`), sent to, restored and respelled;
+/// only new names, at registration and on a rename, are measured.
+#[test]
+fn a_short_name_from_before_stays() {
+    let dir = std::env::temp_dir().join(format!("yo-short-{}", random_u64()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let mut config = Config::for_tests();
+    config.db_path = dir.join("hub.sqlite").to_string_lossy().into_owned();
+    config.name_min = 2;
+    let hub = TestHub::start_with(config.clone(), "127.0.0.1:0");
+    let ya = register(Http::new(hub.url()), "Ya", None);
+    hub.stop();
+
+    config.name_min = 3;
+    let hub = TestHub::start_with(config, "127.0.0.1:0");
+    let check = |name: &str| raw(&hub, "GET", &api::username_path(name), &[], Vec::new()).0;
+    assert_eq!(check("YA"), status::CONFLICT, "taken, not too short");
+    assert_eq!(check("Ab"), status::BAD_REQUEST);
+    assert_eq!(check("Abc"), status::NO_CONTENT);
+
+    let (mut bob, _, _) = account(&hub);
+    let mut ya = new_phone(Http::new(hub.url()), "Ya", &ya);
+    bob.send_yo("Ya").unwrap();
+    let events = ya.sync(0).unwrap();
+    assert!(events.iter().any(|e| matches!(e, Event::Message { user, .. } if *user == bob.user_id())), "{events:?}");
+
+    let set = |a: &mut Client, name: &str| {
+        let body = encode(&api::SetUsername { username: Some(name.as_bytes().to_vec().into()) });
+        signed(a, "PUT", api::USERNAME, &body).0
+    };
+    assert_eq!(set(&mut ya, "YA"), status::NO_CONTENT, "its own name respelled");
+    assert_eq!(set(&mut bob, "Bo"), status::BAD_REQUEST, "a new short name");
+    let _ = std::fs::remove_dir_all(dir);
 }
 
 /// Spec 6.3: `204` free, `409` taken (in any spelling) or reserved, `400` no username; the rate per address.

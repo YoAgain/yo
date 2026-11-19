@@ -464,6 +464,21 @@ impl Db {
         )
     }
 
+    /// The user an account key belongs to now: a registration with it restores that user (spec 6.4).
+    pub fn user_of_account_key(&self, account_key: &Key) -> rusqlite::Result<Option<UserId>> {
+        row(&self.conn(), "SELECT id FROM users WHERE account_key = ?1", [account_key], |row| array(row.get(0)?))
+    }
+
+    /// Who has a username (by its skeleton), if anyone.
+    pub fn username_owner(&self, skeleton: &[u8]) -> rusqlite::Result<Option<UserId>> {
+        row(
+            &self.conn(),
+            "SELECT user_id FROM handles WHERE kind = ?1 AND value = ?2",
+            params![KIND_USERNAME, skeleton],
+            |row| array(row.get(0)?),
+        )
+    }
+
     pub fn account_key(&self, user: &UserId) -> rusqlite::Result<Option<Key>> {
         row(&self.conn(), "SELECT account_key FROM users WHERE id = ?1", [user], |row| array(row.get(0)?))
     }
