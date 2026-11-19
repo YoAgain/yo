@@ -165,16 +165,14 @@ a.lg:hover { color: var(--text); }
 .axis { display: flex; justify-content: space-between; font-size: 10px; color: var(--muted); margin-top: 4px; }
 #t-newusers h2 .more { text-decoration: none; display: inline-flex; gap: 6px; }
 #t-newusers h2 .more:hover { color: var(--text); }
-#t-newusers td { padding: 8px 10px 8px 0; }
 .chart { display: block; width: 100%; flex: 1; min-height: 110px; margin-top: 12px; }
 .chart .su { fill: var(--amethyst-soft); opacity: .85; }
 .chart .su.zero { fill: var(--line); opacity: 1; }
-#t-activity { flex: 1; }
 /* Activity: two figures on top, then one small chart each for sign-ups and Yos; icons drawn like the tab bar's */
 #t-activity { gap: 14px; }
 #t-activity h2 { margin-bottom: 0; }
-#t-activity .ico { width: 18px; height: 18px; flex: none; fill: none; stroke: var(--amethyst-soft); stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; }
-#t-activity .ms .ico { stroke: var(--ok); }
+.ov .ico { width: 18px; height: 18px; flex: none; fill: none; stroke: var(--amethyst-soft); stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; }
+.ov .ms .ico { stroke: var(--ok); }
 .stats { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; }
 .stat { display: flex; align-items: flex-start; gap: 10px; min-width: 0; }
 .stat .ico { width: 22px; height: 22px; margin-top: 4px; }
@@ -183,6 +181,22 @@ a.lg:hover { color: var(--text); }
 .stat .n small { font-size: 13px; font-weight: 600; color: var(--muted); }
 .stat .l { margin-top: 2px; font-size: 12px; color: var(--muted); }
 .mini { padding-top: 12px; border-top: 1px solid var(--line); }
+.mini.flat { padding-top: 0; border-top: 0; margin-top: 14px; flex: 1; display: flex; flex-direction: column; }
+.mini.flat .mini-plot { flex: 1; display: flex; min-height: 60px; }
+.mini.flat .chart { height: auto; flex: 1; }
+#t-media, #t-activity { flex: 1; }
+/* Overview users: name, small icons, sign-up time on the right */
+.people-mini { list-style: none; margin: 0; padding: 0; }
+.people-mini li + li { border-top: 1px solid var(--line); }
+.pm-row { display: flex; align-items: center; gap: 8px; width: 100%; padding: 9px 4px; border: 0; background: transparent; text-align: left; border-radius: 8px; }
+.pm-row:hover { background: var(--hover); }
+.pm-name { font-weight: 700; font-size: 13px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
+.pm-icons { display: inline-flex; gap: 5px; flex: none; }
+.ov .pm-icons .ico { width: 14px; height: 14px; stroke: var(--muted); }
+.ov .pm-icons .ico.app-current { stroke: var(--ok); }
+.ov .pm-icons .ico.app-update { stroke: var(--warn); }
+.ov .pm-icons .ico.secured { stroke: var(--ok); }
+.pm-when { margin-left: auto; flex: none; font-size: 12px; color: var(--muted); font-variant-numeric: tabular-nums; }
 .mini-head { display: flex; align-items: center; gap: 8px; font-size: 12px; font-weight: 700; color: var(--text); }
 .mini-head .ico { width: 15px; height: 15px; }
 .mini-last { margin-left: auto; font-weight: 600; color: var(--muted); font-variant-numeric: tabular-nums; }

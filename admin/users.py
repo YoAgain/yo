@@ -229,6 +229,15 @@ def hub(name: str, path: str) -> dict:
             "signups_hours": part("signups_hours", lambda: [one(
                 "SELECT count(*) FROM users WHERE created_at >= ? AND created_at < ?",
                 h * 3600000, (h + 1) * 3600000) for h in range(now // 3600000 - 23, now // 3600000 + 1)]),
+            # Photos and videos uploaded since UTC midnight (the hub's per-day upload quota, summed: a count only).
+            "media_day": part("media_day", lambda: one(
+                "SELECT coalesce(sum(count), 0) FROM blob_quota WHERE day = ?", now // DAY_MS)
+                if has_table(db, "blob_quota") else None),
+            # Groups on the hub, and those made since UTC midnight and not changed since (revision 0).
+            "groups": part("groups", lambda: one("SELECT count(*) FROM zk_groups") if has_table(db, "zk_groups") else None),
+            "groups_new": part("groups_new", lambda: one(
+                "SELECT count(*) FROM zk_groups WHERE revision = 0 AND updated_at >= ?", midnight)
+                if has_table(db, "zk_groups") else None),
             "oldest_waiting": part("oldest_waiting", lambda: one("SELECT min(received_at) FROM messages")),
             "blobs": part("blobs", lambda: db.execute(
                 "SELECT count(*), coalesce(sum(size), 0) FROM blobs").fetchone() if has_table(db, "blobs") else None),

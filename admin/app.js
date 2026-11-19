@@ -296,7 +296,7 @@ if (document.body.classList.contains("login")) {
     const hour0 = Math.floor(Date.now() / 3600000) - values.length + 1;
     const clock = (i) => new Date((hour0 + i) * 3600000).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", hourCycle: "h23" });
     const top = Math.max(1, ...values.filter((v) => v != null));
-    const text = (i) => `${clock(i)}: ${values[i] == null ? "not kept" : label(values[i])}`;
+    const text = (i) => `${clock(i)}: ${values[i] == null ? "not recorded" : label(values[i])}`;
     values.forEach((v, i) => {
       const hh = v ? Math.max(1.5, (v / top) * (H - 4)) : 1.5;
       kids.push(svg("rect", { x: (i * slot + slot * 0.16).toFixed(1), width: (slot * 0.68).toFixed(1), y: (H - hh).toFixed(1),
@@ -321,49 +321,43 @@ if (document.body.classList.contains("login")) {
     set(`${key}-max`, num(Math.max(0, ...values.filter((v) => v != null))));
     set(`${key}-from`, clock(0));
     set(`${key}-to`, "now");
-    $(`${key}-last`).replaceChildren(el("b", null, today == null ? "–" : num(today)), " today");
+    if ($(`${key}-last`)) $(`${key}-last`).replaceChildren(el("b", null, today == null ? "–" : num(today)), " today");
   };
 
-  // ---- overview: the users widget, sortable by every column ---------------------------------------------------------
-  let ovSort = { key: "created", dir: -1 };
-  const ovValue = (u, key) => key === "name" ? (u.name || "").toLowerCase() : key === "app" ? (parse(u.app)?.[1] ?? -1)
-    : key === "secured" ? Number(!!u.secured) : u[key] ?? 0;
-  for (const th of document.querySelectorAll("#ov-users th[data-sort]")) {
-    th.tabIndex = 0;
-    const go = () => {
-      const key = th.dataset.sort;
-      ovSort = { key, dir: ovSort.key === key ? -ovSort.dir : key === "name" ? 1 : -1 };
-      part(() => drawOvUsers(last?.[which]));
-    };
-    th.addEventListener("click", go);
-    th.addEventListener("keydown", (e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); go(); } });
-  }
-  const drawOvUsers = (h) => {
-    for (const th of document.querySelectorAll("#ov-users th[data-sort]")) {
-      th.classList.toggle("sorted", th.dataset.sort === ovSort.key);
-      th.dataset.dir = th.dataset.sort === ovSort.key ? (ovSort.dir > 0 ? "▲" : "▼") : "";
-    }
-    const body = $("newusers-body");
-    body.replaceChildren();
-    const list = [...(h?.users || [])].sort((a, b) => {
-      const x = ovValue(a, ovSort.key), y = ovValue(b, ovSort.key);
-      return (x < y ? -1 : x > y ? 1 : 0) * ovSort.dir || b.created - a.created;
-    }).slice(0, 10);
-    for (const u of list) {
-      const tr = body.insertRow();
-      tr.className = "opens";
-      const nm = el("span", null, u.name ?? "–");
-      const seen = el("small", "muted", ` · ${seenDay(u.last_seen)}`);
-      seen.title = u.last_seen ? `last seen ${new Date(u.last_seen).toLocaleDateString()}` : "never seen";
-      nm.append(seen);
-      cell(tr, nm, "name", u.id);
-      cell(tr, rel(u.created), null, date(u.created));
-      cell(tr, u.secured ? tag("yes", "ok") : tag("no", "muted"));
-      cell(tr, appTag(u.app, u.id));
-      tr.addEventListener("click", () => select(up(u.id), u.name || u.id));
-    }
-    if (!list.length) cell(body.insertRow(), h && !h.error ? "No users yet." : (h?.error || "No data"), "empty").colSpan = 4;
+  // ---- overview: the newest users, a name with small icons (platform coloured by its build, a lock when secured) --
+  const ICONS = {
+    ios: '<rect x="6.5" y="2.5" width="11" height="19" rx="2.5"/><path d="M11 18.5h2"/>',
+    android: '<path d="M5 17V11a7 7 0 0 1 14 0v6z"/><path d="M8 5 6.5 3M16 5l1.5-2"/><path d="M9.5 10v.5M14.5 10v.5"/>',
+    yogpt: '<rect x="4" y="7" width="16" height="12" rx="3"/><path d="M12 7V4"/><path d="M9 12.5v1M15 12.5v1"/>',
+    cli: '<rect x="3" y="4.5" width="18" height="15" rx="2"/><path d="m7 10 3 2.5L7 15"/><path d="M12.5 15h4"/>',
+    lock: '<rect x="5" y="10.5" width="14" height="10" rx="2"/><path d="M8 10.5V8a4 4 0 0 1 8 0v2.5"/>',
   };
+  const icon = (name, cls, title) => {
+    const s = svg("svg", { viewBox: "0 0 24 24", class: `ico ${cls || ""}`.trim() });
+    s.innerHTML = ICONS[name];
+    if (title) { const t = svg("title"); t.textContent = title; s.prepend(t); }
+    return s;
+  };
+  const drawOvUsers = (h) => {
+    const body = $("newusers-body");
+    const list = [...(h?.users || [])].sort((a, b) => b.created - a.created).slice(0, 10);
+    body.replaceChildren(...list.map((u) => {
+      const li = el("li"), row = el("button", "pm-row"), nm = el("span", "pm-name", u.name ?? "–");
+      row.type = "button";
+      const platform = (u.app || "").split("/")[0], state = appState(u.app, u.id);
+      const icons = el("span", "pm-icons");
+      if (ICONS[platform] && platform !== "lock") icons.append(icon(platform, state ? `app-${state}` : "", appTitle(u.app, u.id)));
+      if (u.secured) icons.append(icon("lock", "secured", "secured (backup)"));
+      const when = el("span", "pm-when", rel(u.created));
+      when.title = `signed up ${date(u.created)}`;
+      row.append(nm, icons, when);
+      row.addEventListener("click", () => select(up(u.id), u.name || u.id));
+      li.append(row);
+      return li;
+    }));
+    if (!list.length) body.append(el("li", "empty", h && !h.error ? "No users yet." : (h?.error || "No data")));
+  };
+
 
   // ---- overview ---------------------------------------------------------------------------------------------------
   const reportKey = (r) => `${which}:r${r.id}`;
@@ -400,6 +394,15 @@ if (document.body.classList.contains("login")) {
       const su = h.signups || [], md = h.deliveries?.days || [], hours = (v) => (Array.isArray(v) ? v.slice(-24) : Array(24).fill(null));
       hourBars("su", hours(h.signups_hours), (v) => `${num(v)} sign-up${v === 1 ? "" : "s"}`, su[su.length - 1]);
       hourBars("ms", hours(h.deliveries?.hours), (v) => `${num(v)} Yo${v === 1 ? "" : "s"}`, md[md.length - 1]);
+
+      // Usage: photos and videos today (per hour where recorded), groups, Yos waiting at the hub. Counts only.
+      set("md-today", num(h.media_day));
+      hourBars("md", hours(h.media_hours), (v) => `${num(v)} upload${v === 1 ? "" : "s"}`);
+      set("gr-n", num(h.groups));
+      set("gr-new", h.groups_new ? `+${num(h.groups_new)} today` : "");
+      $("gr-new").title = "made today and not changed since";
+      set("wt-n", num(h.messages));
+      set("wt-old", h.messages && h.oldest_waiting ? `oldest ${rel(h.oldest_waiting)}` : "");
 
       // App versions: devices current, with an update out, unknown; per platform in the caption.
       let fresh = 0, old = 0, other = 0;

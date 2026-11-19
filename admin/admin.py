@@ -340,6 +340,58 @@ def active_days(snapshot: dict, now_ms=None) -> dict:
     return out
 
 
+# Photos and videos per hour for the overview: the collector's count since UTC midnight ("media_day"), its growth
+# between two snapshots at most an hour apart put on the later one's hour. Hours without such a pair stay unknown
+# (null). Counts only, kept two days.
+MEDIA_FILE = os.environ.get("STATE_DIRECTORY", "./state") + "/media-hours.json"
+_media_lock = threading.Lock()
+
+
+def media_hours(snapshot: dict) -> dict:
+    """The snapshot with "media_hours": 24 counts per hub (the current hour last, None where not recorded)."""
+    at = snapshot.get("at")
+    if not isinstance(at, int):
+        return snapshot
+    hour, day = at // 3600000, at // 86400000
+    with _media_lock:
+        try:
+            state = json.loads(read_bytes(MEDIA_FILE))
+            if not isinstance(state, dict):
+                state = {}
+        except (OSError, ValueError):
+            state = {}
+        changed = False
+        for hub in ("live", "dev"):
+            h = snapshot.get(hub)
+            count = h.get("media_day") if isinstance(h, dict) else None
+            mine = state.get(hub) if isinstance(state.get(hub), dict) else {}
+            hours = {k: v for k, v in (mine.get("hours") or {}).items() if k.isdigit() and hour - int(k) < 48}
+            if not isinstance(count, int) or at <= mine.get("at", 0):
+                state[hub] = {**mine, "hours": hours}
+                continue
+            if 0 < at - mine.get("at", 0) <= 3600000:
+                base = mine.get("count", 0) if mine.get("day") == day else 0
+                for k in range(mine["at"] // 3600000, hour + 1):
+                    hours.setdefault(str(k), 0)
+                hours[str(hour)] += max(0, count - base)
+            state[hub] = {"day": day, "count": count, "at": at, "hours": hours}
+            changed = True
+        if changed:
+            try:
+                tmp = MEDIA_FILE + ".new"
+                with open(tmp, "w") as f:
+                    json.dump(state, f)
+                os.replace(tmp, MEDIA_FILE)
+            except OSError:
+                pass
+    out = dict(snapshot)
+    for hub in ("live", "dev"):
+        if isinstance(out.get(hub), dict):
+            hours = (state.get(hub) or {}).get("hours") or {}
+            out[hub] = {**out[hub], "media_hours": [hours.get(str(k)) for k in range(hour - 23, hour + 1)]}
+    return out
+
+
 def support_request(hub, suffix="", body=None):
     if not ADMIN_TOKEN:
         raise ValueError("YO_ADMIN_TOKEN is not configured")
@@ -627,7 +679,7 @@ class Admin(BaseHTTPRequestHandler):
         if path == "/users.json":
             if not logged_in:
                 return self.send(401, b"{}", "application/json")
-            return self.send(200, json.dumps(active_days(collector.snapshot())).encode(), "application/json")
+            return self.send(200, json.dumps(media_hours(active_days(collector.snapshot()))).encode(), "application/json")
         self.send(404, b"Not found", "text/plain")
 
     do_HEAD = do_GET

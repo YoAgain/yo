@@ -89,6 +89,21 @@ class MarksTests(unittest.TestCase):
         self.assertEqual(admin.active_days({"at": later, "live": {"active_day": 4}}, later)["live"]["active_days"], {str(day + 61): 4})
         self.assertEqual(admin.active_days({"stale": True})["stale"], True)
 
+    def test_media_hours_put_growth_on_the_hour_and_leave_gaps_unknown(self):
+        admin, H = self.admin, 3600000
+        t = 20400 * 86400000 + 10 * H + 60000  # 10:01 UTC
+        out = admin.media_hours({"at": t, "live": {"media_day": 5}, "dev": {"error": "x"}})
+        self.assertEqual(out["live"]["media_hours"], [None] * 24)  # first sight: nothing known yet
+        self.assertEqual(out["dev"]["media_hours"], [None] * 24)
+        out = admin.media_hours({"at": t + 10 * 60000, "live": {"media_day": 8}})
+        self.assertEqual(out["live"]["media_hours"][-1], 3)
+        out = admin.media_hours({"at": t + 70 * 60000, "live": {"media_day": 9}})  # 11:11: one more, 10:00 kept
+        self.assertEqual(out["live"]["media_hours"][-2:], [3, 1])
+        out = admin.media_hours({"at": t + 5 * H, "live": {"media_day": 20}})  # hours apart: not put on an hour
+        self.assertEqual(out["live"]["media_hours"][-1], None)
+        self.assertEqual(out["live"]["media_hours"][-6:-4], [3, 1])
+        self.assertEqual(admin.media_hours({"stale": True}), {"stale": True})
+
 
 class UsersTabCollectorTests(unittest.TestCase):
     def test_signups_30_days_and_active_since_midnight(self):
@@ -109,6 +124,8 @@ class UsersTabCollectorTests(unittest.TestCase):
             self.assertEqual(sum(snapshot["signups"]), 2)
             self.assertEqual(snapshot["active_day"], 1)
             self.assertEqual(len(snapshot["signups_hours"]), 24)
+            self.assertIsNone(snapshot["media_day"])  # an older hub without the tables
+            self.assertIsNone(snapshot["groups"])
             self.assertEqual(sum(snapshot["signups_hours"]), 1)
             if now // 3600000 == (midnight + 1) // 3600000:
                 self.assertEqual(snapshot["signups_hours"][-1], 1)
