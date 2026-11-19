@@ -1,6 +1,34 @@
 // Login: a word on why the last try did not work. Dashboard: the server every three seconds, the hubs every ten.
 const $ = (id) => document.getElementById(id);
 
+// <support-list> The Support tab's list, pure (admin/test_support.py runs it in node). One "To-dos" row holds every
+// to-do; then the people who wrote to the team ("chats", the default), the ones with something open ("open"), the
+// starred ("star") or every user ("all"). Starred on top, then newest first.
+const supportList = ({ users, threads, todos, todoAbout, starred, query = "", filter = "chats" }) => {
+  const up = (id) => String(id || "").toUpperCase();
+  const ids = new Set(users.map((u) => up(u.id)));
+  const threadOf = new Map(threads.filter((t) => t.user_id !== "team").map((t) => [up(t.user_id), t]));
+  const person = (id, user, name) => {
+    const thread = threadOf.get(id), mine = todos.filter((t) => todoAbout(t.id) === id);
+    const own = mine.filter((t) => t.done_at == null).length;
+    return { kind: "user", id, key: `u:${id}`, user, name, thread, todos: own, open: (thread?.unread || 0) + own,
+      at: Math.max(thread?.at || 0, ...mine.map((t) => t.created_at || 0)), seen: user?.last_seen || 0 };
+  };
+  let rows = users.map((u) => person(up(u.id), u, u.name || "(no name)"));
+  for (const [id, t] of threadOf) if (!ids.has(id)) rows.push(person(id, null, t.name || "Deleted account"));
+  if (filter === "chats") rows = rows.filter((r) => r.thread);
+  const open = todos.filter((t) => t.done_at == null);
+  rows.push({ kind: "todo", id: "team", key: "t:all", name: open.length ? `To-dos · ${open.length}` : "To-dos",
+    todos: open.length, open: open.length, last: open.sort((a, b) => b.created_at - a.created_at)[0] || null,
+    at: Math.max(0, ...todos.map((t) => t.created_at || 0)), seen: 0 });
+  for (const r of rows) r.star = starred(r.key);
+  if (query) rows = rows.filter((r) => r.name.toLowerCase().includes(query) || r.id.toLowerCase().includes(query));
+  if (filter === "open") rows = rows.filter((r) => r.open);
+  if (filter === "star") rows = rows.filter((r) => r.star);
+  return rows.sort((a, b) => b.star - a.star || b.at - a.at || b.seen - a.seen || (b.user?.created || 0) - (a.user?.created || 0));
+};
+// </support-list>
+
 if (document.body.classList.contains("login")) {
   const q = location.search, note = $("note");
   if (q.includes("wrong")) { note.textContent = "Wrong user or password."; note.hidden = false; }
@@ -212,34 +240,35 @@ if (document.body.classList.contains("login")) {
     $("sys-head").onkeydown = (e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); open(); } };
   };
 
-  // ---- app builds: "new" on the highest build of its platform this hub has seen (ios, android, yogpt apart) -------
+  // ---- app builds: channel and state per reported app, worked out by the collector (App Store Connect) -----------
+  // "update" (yellow) only for an older build on the same channel; without App Store Connect data a "?" instead.
   const build = (app) => (app || "").split("/").pop();
   const parse = (app) => {
     const [p, b] = (app || "").split("/");
     return p && /^\d+$/.test(b || "") ? [p, Number(b)] : null;
   };
   // The hub's minimum (YO_MIN_APP, "ios/…"): a build below it is refused by the hub ("dead": the user must update).
-  let newest = {}, minApp = null;
-  const findNewest = (h) => {
-    newest = {};
-    minApp = parse(h?.min_app);
-    for (const a of [...(h?.apps || []).map(([x]) => x), ...(h?.users || []).map((u) => u.app)]) {
-      const v = parse(a);
-      if (v && !(newest[v[0]] >= v[1])) newest[v[0]] = v[1];
-    }
-  };
+  let minApp = null;
+  const findNewest = (h) => { minApp = parse(h?.min_app); };
+  const appInfo = (app) => last?.app_builds?.[app] || (app ? { channel: "unknown", label: build(app), state: null, title: app } : null);
+  // "new", "old", "dead" (below the minimum), "expired", "?" (channel or newest unknown) or null (no app).
   const appState = (app) => {
-    const v = parse(app);
-    if (!v || newest[v[0]] == null) return null;
-    if (minApp && minApp[0] === v[0] && v[1] < minApp[1]) return "dead";
-    return v[1] >= newest[v[0]] ? "new" : "old";
+    const i = appInfo(app), v = parse(app);
+    if (!i) return null;
+    if (minApp && v && minApp[0] === v[0] && v[1] < minApp[1]) return "dead";
+    return { newest: "new", older: "old", expired: "expired" }[i.state] || "?";
   };
+  const STATE_WORD = { new: "newest", old: "update", dead: "too old", expired: "expired" };
+  const STATE_CLASS = { new: "ok", old: "warn", dead: "bad", expired: "bad" };
   const appTag = (app) => {
-    const a = appState(app);
-    const t = tag(a === "new" ? "newest" : a === "old" ? "update" : a === "dead" ? "too old" : app ? build(app) : "–", a === "new" ? "ok" : a === "old" ? "warn" : a === "dead" ? "bad" : "muted");
-    t.title = app || "";
+    const i = appInfo(app), a = appState(app);
+    const t = el("span");
+    if (!i) { t.append(tag("–", "muted")); return t; }
+    t.append(`${i.label} `, tag(STATE_WORD[a] || "?", STATE_CLASS[a] || "muted"));
+    t.title = `${i.title}${a === "dead" ? " · below the hub's minimum: refused, must update" : a === "?" ? " · newest on its channel unknown" : ""}`;
     return t;
   };
+  const CHANNEL = { appstore: "App Store", testflight: "TestFlight", internal: "TestFlight (internal)", dev: "dev", bot: "bot", ios: "iOS", android: "Android", cli: "CLI", unknown: "unknown" };
 
   // ---- small charts (SVG, drawn to the size of their viewBox) ---------------------------------------------------
   const SVG = "http://www.w3.org/2000/svg";
@@ -295,11 +324,7 @@ if (document.body.classList.contains("login")) {
       cell(tr, nm, "name", u.id);
       cell(tr, rel(u.created), null, date(u.created));
       cell(tr, u.secured ? tag("yes", "ok") : tag("no", "muted"));
-      const pf = { ios: "iOS", android: "Android", yogpt: "YoGPT" }[parse(u.app)?.[0]];
-      const ap = el("span");
-      if (pf) ap.append(`${pf} `);
-      ap.append(appTag(u.app));
-      cell(tr, ap);
+      cell(tr, appTag(u.app));
       tr.addEventListener("click", () => select(up(u.id), u.name || u.id));
     }
     if (!list.length) cell(body.insertRow(), h && !h.error ? "No users yet." : (h?.error || "No data"), "empty").colSpan = 4;
@@ -354,14 +379,22 @@ if (document.body.classList.contains("login")) {
       });
       chart.replaceChildren(...kids);
 
-      // App versions.
-      let fresh = 0, old = 0, other = 0;
-      let dead = 0;
-      for (const [app, c] of h.apps || []) { const a = appState(app); if (a === "new") fresh += c; else if (a === "old") old += c; else if (a === "dead") dead += c; else other += c; }
+      // App versions: devices per state, and per channel in the caption.
+      let fresh = 0, old = 0, dead = 0, other = 0;
+      const per = {};
+      for (const [app, c] of h.apps || []) {
+        const a = appState(app), ch = CHANNEL[appInfo(app)?.channel] || "unknown";
+        if (a === "new") fresh += c; else if (a === "old") old += c; else if (a === "dead" || a === "expired") dead += c; else other += c;
+        const p = per[ch] ||= {};
+        const w = STATE_WORD[a] || "?";
+        p[w] = (p[w] || 0) + c;
+      }
       set("ug-fresh", `${fresh}/${fresh + old + dead + other}`);
-      set("ug-apps-cap", [`${fresh} newest`, old ? `${old} update` : "", dead ? `${dead} too old` : "", other ? `${other} unknown` : "", `min ${h.min_app ? build(h.min_app) : "not pinned"}`].filter(Boolean).join(" · "));
-      $("ug-apps-cap").title = `newest: ${Object.entries(newest).map(([p, b]) => `${p} ${b}`).join(" · ") || "–"}`;
-      $("ug-apps-bar").replaceChildren(...[[fresh, "new", "on the newest build"], [old, "old", "on an older build, still allowed"], [dead, "dead", "below the minimum: refused, must update"], [other, "a0", "unknown"]]
+      set("ug-apps-cap", [...Object.entries(per).map(([ch, p]) => `${ch}: ${Object.entries(p).map(([w, n]) => `${n} ${w}`).join(", ")}`),
+        `min ${h.min_app ? build(h.min_app) : "not pinned"}`].join(" · "));
+      $("ug-apps-cap").title = last?.asc ? (last.asc.error ? `App Store Connect: ${last.asc.error}` : `App Store Connect checked ${new Date(last.asc.checked * 1000).toLocaleTimeString()}`)
+        : "App Store Connect not configured: channels and newest builds unknown (YO_ASC_* in the collector's env)";
+      $("ug-apps-bar").replaceChildren(...[[fresh, "new", "on the newest build of their channel"], [old, "old", "on an older build: an update is out"], [dead, "dead", "below the minimum or expired: must update"], [other, "a0", "newest unknown (dev, bot, no App Store Connect data)"]]
         .filter(([v]) => v > 0).map(([v, cls, t]) => { const s = el("span", cls); s.style.flexGrow = v; s.title = `${v} ${t}`; return s; }));
     }
   };
@@ -373,7 +406,7 @@ if (document.body.classList.contains("login")) {
   let supportUser = null, supportHub = null, supportName = "", supportSeen = null, supportBusy = false, supportThreads = [];
   let supportWant = null, listDrawn = "", supportMessages = [], teamTodos = null, composeMode = "reply";
   let marks = { stars: [], todo_user: {} };
-  let userQuery = "", userFilter = "all";
+  let userQuery = "", userFilter = "chats";
   const supportGet = async (user) => {
     const r = await fetch(`/support.json?${new URLSearchParams({ hub: which, ...(user ? { user } : {}) })}`, { cache: "no-store" });
     if (!r.ok) throw new Error("Could not load messages.");
@@ -407,36 +440,13 @@ if (document.body.classList.contains("login")) {
     b.addEventListener("click", (e) => { e.stopPropagation(); setMark({ star: key, on: !on }).catch((x) => set("support-error", x.message)); });
     return b;
   };
-  // Rows: people (users of the collector, plus threads of accounts it no longer has) and open to-dos about nobody.
-  const listRows = () => {
-    const users = last?.[which]?.users || [], ids = new Set(users.map((u) => up(u.id)));
-    const person = (id, user, name, thread) => {
-      const own = todosOf(id).filter((t) => t.done_at == null).length;
-      return { kind: "user", id, key: `u:${id}`, user, name, thread, todos: own, open: (thread?.unread || 0) + own,
-        at: Math.max(thread?.at || 0, ...todosOf(id).map((t) => t.created_at || 0)), seen: user?.last_seen || 0 };
-    };
-    const rows = users.map((u) => person(up(u.id), u, u.name || "(no name)", threadOf(u.id)));
-    for (const t of supportThreads) if (!isTeam(t.user_id) && !ids.has(up(t.user_id))) rows.push(person(up(t.user_id), null, t.name || "Deleted account", t));
-    const known = new Set(rows.map((r) => r.id));
-    for (const t of todos()) {
-      if (t.done_at != null || known.has(todoAbout(t.id))) continue;
-      rows.push({ kind: "todo", id: `T${t.id}`, todo: t, key: `t:${t.id}`, name: t.text, open: 1, at: t.created_at || 0, seen: 0 });
-    }
-    for (const r of rows) r.star = starred(r.key);
-    return rows;
-  };
-  // Starred first, then anything open, then the rest; each by its newest activity.
-  const rank = (r) => (r.star ? 2 : 0) + (r.open ? 1 : 0);
-  const sortRows = (rows) => rows.sort((a, b) => rank(b) - rank(a) || b.at - a.at || b.seen - a.seen || (b.user?.created || 0) - (a.user?.created || 0));
   const drawList = () => {
     const box = $("person-list"), lastLines = last?.[which]?.support_last || {};
-    let rows = listRows().filter((p) => !userQuery || p.name.toLowerCase().includes(userQuery) || p.id.toLowerCase().includes(userQuery));
-    if (userFilter === "open") rows = rows.filter((p) => p.open);
-    if (userFilter === "star") rows = rows.filter((p) => p.star);
-    rows = sortRows(rows);
+    const rows = supportList({ users: last?.[which]?.users || [], threads: supportThreads, todos: todos(), todoAbout,
+      starred, query: userQuery, filter: userFilter });
     const openTodos = todos().filter((t) => t.done_at == null).length;
     set("new-todo-count", openTodos ? ` · ${openTodos}` : "");
-    const drawn = JSON.stringify([which, supportUser, userQuery, userFilter, marks, rows.map((p) => [p.id, p.name, p.thread, p.open, p.user?.last_seen, p.user?.app, lastLines[p.id], openReports(p.id)])]);
+    const drawn = JSON.stringify([which, supportUser, userQuery, userFilter, marks, rows.map((p) => [p.id, p.name, p.thread, p.open, p.at, p.last?.text, p.user?.last_seen, p.user?.app, lastLines[p.id], openReports(p.id)])]);
     if (drawn === listDrawn && box.childElementCount) return;
     listDrawn = drawn;
     box.replaceChildren();
@@ -448,7 +458,7 @@ if (document.body.classList.contains("login")) {
       top.append(el("b", "name", p.name));
       let line, time, title = "";
       if (p.kind === "todo") {
-        line = `To-do · added ${rel(p.at)}`; time = clock(p.at); title = date(p.at);
+        line = p.last ? p.last.text : "Nothing open"; time = p.at ? clock(p.at) : ""; title = p.at ? `newest to-do ${date(p.at)}` : "";
       } else {
         const l = lastLines[p.id], u = p.user, rep = openReports(p.id);
         if (rep) top.append(Object.assign(el("span", "flag", "⚑"), { title: `${rep} open report${rep === 1 ? "" : "s"} about this user` }));
@@ -466,11 +476,11 @@ if (document.body.classList.contains("login")) {
       b.append(av, body);
       if (title) b.title = title;
       b.addEventListener("click", () => select(p.kind === "todo" ? "team" : p.id, p.kind === "todo" ? "To-dos" : p.name));
-      wrap.append(b, starButton(p.key, p.kind === "todo" ? "to-do" : p.name));
+      wrap.append(b, starButton(p.key, p.kind === "todo" ? "the to-dos" : p.name));
       if (p.star) wrap.classList.add("starred");
       box.append(wrap);
     }
-    if (!box.childElementCount) box.append(el("p", "empty", userQuery ? "Nothing matches." : userFilter === "open" ? "Nothing open." : userFilter === "star" ? "Nothing starred yet. Star a conversation or to-do to keep it on top." : "No users yet."));
+    if (!box.childElementCount) box.append(el("p", "empty", userQuery ? "Nothing matches." : userFilter === "open" ? "Nothing open." : userFilter === "star" ? "Nothing starred yet. Star a conversation to keep it on top." : "No users yet."));
   };
   $("user-search").addEventListener("input", (e) => { userQuery = e.target.value.trim().toLowerCase(); part(drawList); });
   for (const b of document.querySelectorAll(".seg [data-filter]")) b.addEventListener("click", () => {
@@ -575,7 +585,8 @@ if (document.body.classList.contains("login")) {
     const fact = (k, v, cls, title) => { const f = el("span", `fact ${cls || ""}`); f.append(el("small", null, k), el("b", null, v)); if (title) f.title = title; facts.append(f); };
     fact("signed up", rel(u.created), "", date(u.created));
     fact("seen", seenDay(u.last_seen), "", u.last_seen ? new Date(u.last_seen).toLocaleDateString() : "");
-    fact("app", u.app ? build(u.app) : "–", a === "new" ? "ok" : a === "old" ? "warn" : a === "dead" ? "bad" : "", u.app ? `${u.app}${a === "new" ? " · newest" : a === "old" ? " · an older build" : a === "dead" ? " · below the minimum: must update" : ""}` : "");
+    const ai = appInfo(u.app);
+    fact("app", ai ? `${ai.label} · ${STATE_WORD[a] || "?"}` : "–", STATE_CLASS[a] || "", ai ? `${u.app} · ${ai.title}${a === "dead" ? " · below the minimum: must update" : ""}` : "");
     fact("secured", u.secured ? "yes" : "no", u.secured ? "ok" : "", u.backup_at ? `backup ${date(u.backup_at)}` : "");
     fact("push", u.push ? "on" : "off", "", "");
     if (u.queued) fact("waiting", num(u.queued), "", "messages waiting for this user's devices");
@@ -588,7 +599,7 @@ if (document.body.classList.contains("login")) {
     dev.replaceChildren();
     for (const d of u.device_list || []) {
       const r = el("div", "drow");
-      r.append(el("b", null, d.app ? build(d.app) : "unknown app"), el("span", "muted", [d.push || "no push", `added ${rel(d.created)}`, `seen ${seenDay(d.last_seen)}`].join(" · ")));
+      r.append(el("b", null, d.app ? appInfo(d.app).label : "unknown app"), el("span", "muted", [d.push || "no push", `added ${rel(d.created)}`, `seen ${seenDay(d.last_seen)}`].join(" · ")));
       r.title = d.app || "";
       dev.append(r);
     }
@@ -783,10 +794,7 @@ if (document.body.classList.contains("login")) {
       cell(tr, u.name ?? "–", "name", u.id);
       cell(tr, rel(u.created), null, date(u.created));
       cell(tr, seenDay(u.last_seen), null, u.last_seen ? new Date(u.last_seen).toLocaleDateString() : "never seen");
-      const pf = { ios: "iOS", android: "Android", yogpt: "YoGPT" }[parse(u.app)?.[0]], ap = el("span");
-      if (pf) ap.append(`${pf} `);
-      ap.append(appTag(u.app));
-      cell(tr, ap);
+      cell(tr, appTag(u.app));
       cell(tr, u.push ? tag("on", "ok") : tag("off", "muted"));
       cell(tr, u.secured ? tag("yes", "ok") : tag("no", "muted"), null, u.backup_at ? `backup ${date(u.backup_at)}` : "");
       cell(tr, num(u.devices), "num");

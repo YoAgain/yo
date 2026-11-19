@@ -253,6 +253,176 @@ def hub(name: str, path: str) -> dict:
 
 
 
+# ---- App Store Connect (read-only): which builds exist, which group has them, what the App Store sells -------------
+# Configured by YO_ASC_KEY_PATH (the .p8 key), YO_ASC_KEY_ID and YO_ASC_ISSUER_ID; without them the admin shows each
+# build with "?" and never a false "update". Fetched at most every ASC_EVERY_S, kept in OUT between runs.
+ASC_APP = os.environ.get("YO_ASC_APP_ID", "6834493649")
+ASC_API = "https://api.appstoreconnect.apple.com"
+ASC_EVERY_S = 600
+ASC_BUILDS = 200  # newest builds fetched; an iOS build older than all of them counts as an expired TestFlight build
+APPSTORE_STATES = {"READY_FOR_SALE", "READY_FOR_DISTRIBUTION", "REPLACED_WITH_NEW_VERSION",
+                   "DEVELOPER_REMOVED_FROM_SALE", "REMOVED_FROM_SALE"}
+APPSTORE_LIVE = {"READY_FOR_SALE", "READY_FOR_DISTRIBUTION"}
+
+
+def b64url(data: bytes) -> str:
+    import base64
+    return base64.urlsafe_b64encode(data).rstrip(b"=").decode()
+
+
+def der_to_raw(der: bytes) -> bytes:
+    """An ECDSA signature in DER (SEQUENCE of two INTEGERs) as JWT wants it: r and s, 32 bytes each."""
+    def length(i):
+        n = der[i]
+        if n < 0x80:
+            return n, i + 1
+        k = n & 0x7F
+        return int.from_bytes(der[i + 1:i + 1 + k], "big"), i + 1 + k
+    if der[0] != 0x30:
+        raise ValueError("not a DER signature")
+    _, i = length(1)
+    out = b""
+    for _ in range(2):
+        if der[i] != 0x02:
+            raise ValueError("not a DER integer")
+        n, i = length(i + 1)
+        out += int.from_bytes(der[i:i + n], "big").to_bytes(32, "big")
+        i += n
+    return out
+
+
+def es256(key_path: str, message: bytes) -> bytes:
+    """ES256 with the cryptography package when installed, else with the openssl command."""
+    with open(key_path, "rb") as f:
+        pem = f.read()
+    try:
+        from cryptography.hazmat.primitives import hashes, serialization
+        from cryptography.hazmat.primitives.asymmetric import ec
+    except ImportError:
+        der = subprocess.run(["openssl", "dgst", "-sha256", "-sign", key_path], input=message,
+                             capture_output=True, check=True, timeout=20).stdout
+    else:
+        der = serialization.load_pem_private_key(pem, None).sign(message, ec.ECDSA(hashes.SHA256()))
+    return der_to_raw(der)
+
+
+def asc_config():
+    c = {k: os.environ.get("YO_ASC_" + k, "").strip() for k in ("KEY_PATH", "KEY_ID", "ISSUER_ID")}
+    return c if all(c.values()) else None
+
+
+def asc_token(c, now=None):
+    now = int(now or time.time())
+    head = b64url(json.dumps({"alg": "ES256", "kid": c["KEY_ID"], "typ": "JWT"}).encode())
+    body = b64url(json.dumps({"iss": c["ISSUER_ID"], "iat": now, "exp": now + 1200, "aud": "appstoreconnect-v1"}).encode())
+    return f"{head}.{body}." + b64url(es256(c["KEY_PATH"], f"{head}.{body}".encode()))
+
+
+def asc_fetch(c) -> dict:
+    """Builds (number, marketing version, upload time, expired), the builds of the groups "Public" and "Team", and
+    the App Store versions with their build. GET only."""
+    import urllib.request
+    token = asc_token(c)
+
+    def get(path):
+        req = urllib.request.Request(ASC_API + path, headers={"Authorization": "Bearer " + token})
+        with urllib.request.urlopen(req, timeout=20) as r:
+            return json.load(r)
+
+    data = get(f"/v1/builds?filter[app]={ASC_APP}&sort=-uploadedDate&limit={ASC_BUILDS}"
+               "&fields[builds]=version,uploadedDate,expired,preReleaseVersion&include=preReleaseVersion"
+               "&fields[preReleaseVersions]=version")
+    pre = {i["id"]: i["attributes"].get("version") for i in data.get("included", []) if i["type"] == "preReleaseVersions"}
+    builds = [{"build": b["attributes"]["version"], "uploaded": b["attributes"].get("uploadedDate"),
+               "expired": bool(b["attributes"].get("expired")),
+               "version": pre.get(((b.get("relationships", {}).get("preReleaseVersion") or {}).get("data") or {}).get("id"))}
+              for b in data["data"]]
+    groups = {}
+    for g in get(f"/v1/apps/{ASC_APP}/betaGroups?limit=50&fields[betaGroups]=name")["data"]:
+        name = g["attributes"]["name"]
+        if name in ("Public", "Team"):
+            groups[name.lower()] = [b["attributes"]["version"] for b in get(
+                f"/v1/betaGroups/{g['id']}/builds?limit=200&fields[builds]=version")["data"]]
+    versions = get(f"/v1/apps/{ASC_APP}/appStoreVersions?limit=50&include=build"
+                   "&fields[builds]=version")
+    nums = {i["id"]: i["attributes"]["version"] for i in versions.get("included", []) if i["type"] == "builds"}
+    appstore = []
+    for v in versions["data"]:
+        a = v["attributes"]
+        states = {a.get("appStoreState"), a.get("appVersionState")}
+        bid = ((v.get("relationships", {}).get("build") or {}).get("data") or {}).get("id")
+        if states & APPSTORE_STATES and bid in nums:
+            appstore.append({"version": a.get("versionString"), "build": nums[bid], "live": bool(states & APPSTORE_LIVE)})
+    return {"builds": builds, "full": len(builds) >= ASC_BUILDS, "public": groups.get("public", []),
+            "team": groups.get("team", []), "appstore": appstore}
+
+
+def asc(previous=None, now=None):
+    """The cached App Store Connect data, fetched again after ASC_EVERY_S. A failed fetch keeps the last good data
+    with its error; None when not configured."""
+    now = now or time.time()
+    c = asc_config()
+    if not c:
+        return None
+    previous = previous or {}
+    if previous.get("checked") and now - previous["checked"] < ASC_EVERY_S:
+        return previous
+    try:
+        return {**asc_fetch(c), "at": now, "checked": now}
+    except Exception as e:  # noqa: BLE001  network, key, API: shown in the admin, the last good data stays
+        return {**{k: v for k, v in previous.items() if k != "error"}, "checked": now, "error": f"{type(e).__name__}: {e}"[:300]}
+
+
+def short(b: str) -> str:
+    """A timestamp build (yyyymmddHHMM) by its time of day, as the team calls them ("1257"); others as they are."""
+    return b[-4:] if re.fullmatch(r"\d{12}", b) else b
+
+
+def classify(app, store=None, bot_min=None) -> dict:
+    """Channel and state of one reported app ("platform/build"). state: newest, older (an "update" is out on the
+    same channel), expired, or None when nothing is known (no App Store Connect data: never a false "update")."""
+    platform, _, b = (app or "").partition("/")
+    if not platform or not b:
+        return {"channel": "unknown", "label": "unknown", "state": None, "title": app or "no app reported"}
+    if platform == "yogpt":
+        state = None if not bot_min else "newest" if b >= bot_min.split("/")[-1] else "older"
+        return {"channel": "bot", "label": f"YoGPT {short(b)}", "state": state, "title": f"YoGPT (bot) build {b}"}
+    if platform != "ios":
+        name = {"android": "Android", "cli": "CLI"}.get(platform, platform)
+        return {"channel": platform, "label": f"{name} {short(b)}", "state": None, "title": f"{name} build {b}"}
+    if not re.fullmatch(r"\d{12}", b):  # xtool dev builds report "1"
+        return {"channel": "dev", "label": f"dev {b}", "state": None, "title": f"iOS dev build {b} (dev/push.sh)"}
+    if not store or not store.get("builds"):
+        return {"channel": "ios", "label": f"iOS {short(b)}", "state": None,
+                "title": f"iOS build {b}; channel unknown (no App Store Connect data)"}
+    live = {x["build"]: x for x in store["builds"]}
+    fresh = [x["build"] for x in store["builds"] if not x["expired"]]
+    shop = {x["build"]: x for x in store.get("appstore", [])}
+    if b in shop:
+        on = [x["build"] for x in store["appstore"] if x["live"]]
+        newest = max(on) if on else None
+        state = "newest" if newest and b >= newest else "older" if newest else None
+        return {"channel": "appstore", "label": f"App Store {shop[b]['version']} ({short(b)})", "state": state,
+                "title": f"App Store {shop[b]['version']}, build {b}" + (f"; live: {newest}" if newest else "")}
+    if b not in live:
+        if store.get("full") and b < min(live):
+            return {"channel": "testflight", "label": f"TestFlight {short(b)}", "state": "expired",
+                    "title": f"TestFlight build {b}: older than every listed build, expired"}
+        return {"channel": "dev", "label": f"dev {short(b)}", "state": None,
+                "title": f"iOS build {b}: not in App Store Connect, a dev build"}
+    public = [x for x in store.get("public", []) if x in fresh]
+    team = [x for x in store.get("team", []) if x in fresh]
+    if b in store.get("public", []):
+        channel, label, pool, name = "testflight", f"TestFlight {short(b)}", public, "TestFlight (Public)"
+    else:
+        channel, label, pool, name = "internal", f"TestFlight (internal) {short(b)}", team or fresh, "TestFlight (internal, Team)"
+    newest = max(pool) if pool else None
+    state = "expired" if live[b]["expired"] else "newest" if newest and b >= newest else "older" if newest else None
+    version = live[b].get("version")
+    return {"channel": channel, "label": label, "state": state,
+            "title": f"{name} {version + ', ' if version else ''}build {b}" + (f"; newest {newest}" if newest else "")}
+
+
 # Update checks belong to this root collector, never the HTTP process. Only OUT is written.
 def update_path(key, default):
     return os.environ.get("ADMIN_UPDATES_" + key, default)
@@ -373,18 +543,33 @@ def updates(previous=None, now=None):
     return data
 
 
+def app_builds(out) -> dict:
+    """Every reported app of both hubs ("ios/202611191257") with its channel, label and state."""
+    seen = set()
+    for name in HUBS:
+        h = out.get(name) or {}
+        seen.update(a for a, _ in h.get("apps") or [])
+        seen.update(u.get("app") for u in h.get("users") or [])
+        seen.update(d.get("app") for u in h.get("users") or [] for d in u.get("device_list") or [])
+    bot = next((out[n].get("yogpt_min") for n in HUBS if isinstance(out.get(n), dict) and out[n].get("yogpt_min")), None)
+    return {a: classify(a, out.get("asc"), bot) for a in seen if a and a != "unknown"}
+
+
 def main():
     try:
         with open(OUT) as f:
-            previous = json.load(f).get("updates", {})
-    except (OSError, ValueError, AttributeError):
+            previous = json.load(f)
+        previous = previous if isinstance(previous, dict) else {}
+    except (OSError, ValueError):
         previous = {}
-    out = {"at": int(time.time() * 1000), "updates": updates(previous)}
+    out = {"at": int(time.time() * 1000), "updates": updates(previous.get("updates", {}))}
+    out["asc"] = asc(previous.get("asc"))
     for name, path in HUBS.items():
         try:
             out[name] = hub(name, path)
         except (sqlite3.Error, OSError) as e:
             out[name] = {"error": str(e)}
+    out["app_builds"] = app_builds(out)
     tmp = OUT + ".new"
     with open(tmp, "w") as f:
         json.dump(out, f, separators=(",", ":"))

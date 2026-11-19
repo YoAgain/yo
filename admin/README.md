@@ -38,6 +38,10 @@ keep credentials and deployment settings outside this public repository.
 | `YOGPT_STATS_PATTERN` | Stats path with `{}` replaced by `live` or `dev` | `./yogpt/{}/stats.json` |
 | `YO_HUB_VERSION_FILE` | Hub deploy version | `./version` |
 | `YOGPT_VERSION_FILE` | YoGPT deploy version | `./version-yogpt` |
+| `YO_ASC_KEY_PATH` | App Store Connect API key (`.p8`), read by the collector (root) only | empty (no channels) |
+| `YO_ASC_KEY_ID` | Its key id | empty |
+| `YO_ASC_ISSUER_ID` | Its issuer id | empty |
+| `YO_ASC_APP_ID` | App Store Connect app id | `6834493649` |
 | `YO_HUB_UNIT` | Live systemd unit | `yo-hub.service` |
 | `YO_HUB_DEV_UNIT` | Development systemd unit | `yo-hub-dev.service` |
 | `ADMIN_TUNNEL_UNIT` | Tunnel systemd unit | `cloudflared.service` |
@@ -139,6 +143,24 @@ path-unit, tmpfiles and sandbox settings. For a local sample, set it to `$sample
 without a path unit, run the collector manually after each request to supply fresh data.
 
 
+## App versions
+
+The collector names each reported app (`ios/202611191257`: the build is its UTC minute) by channel and state, in
+`app_builds` of `users.json`. With an App Store Connect key it reads, at most every 10 minutes and with GET only:
+the newest 200 builds (version, upload, expired), the builds in the TestFlight groups "Public" (GitHub releases) and
+"Team" (every push to main), and the App Store versions with their build. A build in an App Store version is
+"App Store 1.0.1 (1859)", newest when it is the live one; in "Public" it is "TestFlight 1859", newest against the
+newest unexpired Public build; otherwise "TestFlight (internal) 1257", against the newest Team build. A build App
+Store Connect does not know (and `ios/1`) is a dev build, YoGPT is compared with its deploy, Android and the CLI show
+their build only. Only an older build on the same channel shows the yellow "update"; expired builds and builds below
+`YO_MIN_APP` show red. Without the key, or before the first fetch, every iOS build shows "?", never "update"; a failed
+fetch keeps the last good data and shows its error on the App versions card.
+
+The key: an App Store Connect API key with the Developer role (read-only use), its `.p8` file on the server outside
+this repository (for example `/etc/yo/asc.p8`, root:root 0600), and the three `YO_ASC_*` lines in the collector's
+environment (`/etc/yo/admin.env`). JWTs are signed ES256 with `cryptography` when installed, else with `openssl`.
+Tests use fixtures only: `python3 -m unittest discover -s admin -p 'test_versions.py'`.
+
 ## Support chat rollout
 
 Back up the hub DB and admin state before rollout. If old dashboard JSON done flags still need
@@ -148,9 +170,11 @@ Startup follows schema 3 → 4 → 5 → 6 (or 4/5 → 6), atomically migrating 
 Schema 6 moves `todos` into `support_messages` with `user_id=X''`, `from_team=1`,
 preserving text, creation and done times, and allocating fresh message IDs to avoid collisions.
 It drops `todos` and backfills user-message `done_at` from existing team read markers once.
-The team's to-dos use `team` in admin URLs. In the Support tab they are no pinned row: each open to-do is its own
-row, and a to-do written in a user's conversation is listed with that user. Stars and which user a to-do is about are
-kept by the admin only, in `STATE_DIRECTORY/support-marks.json` (`/marks.json`, `POST /marks`); starred rows and rows
-with something open sort to the top. The Crashes tab shows a quiet count of open, non-expected entries. Every bubble can be completed or reopened;
+The team's to-dos use `team` in admin URLs. In the Support tab all of them are one row, "To-dos · N" (open ones),
+which opens the checklist; a to-do written in a user's conversation also shows at the top of that user's chat. The
+list shows by default only users who have written to the team ("Chats"), starred first, then newest; "Open", "★" and
+"All" (every user) switch it. Stars and which user a to-do is about are kept by the admin only, in
+`STATE_DIRECTORY/support-marks.json` (`/marks.json`, `POST /marks`). The list's logic is `supportList` in `app.js`,
+tested in node by `test_support.py` (skipped without node). The Crashes tab shows a quiet count of open, non-expected entries. Every bubble can be completed or reopened;
 viewing a thread changes no completion state. Badges and the Overview red curve count open user
 messages only. App unread team replies still use `read_at`. Old JSON flags still serve user reports.
