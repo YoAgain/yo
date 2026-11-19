@@ -2,7 +2,7 @@
 """Draw the lines-of-code chart for README.md: python3 -I dev/loc-chart.py (stdlib and Chromium).
 
 Writes the numbers into dev/loc-chart.html and renders it with headless Chromium to dev/loc-chart.png, which the README
-shows: a line of lines per day without tests, and one bar of today's code by part, each label under its part.
+shows: a line of lines per day without tests, and one bar of today's code by part, grouped under brackets (apps with their core, server), each label under its part.
 
 Each day counts the tree of main's last commit that day (first parents, UTC, clock regressions clamped): lines of
 source per part (Hub, Admin, Core, Apps), blanks and comments included, binary files skipped. Test code counts apart
@@ -122,8 +122,10 @@ def main():
     today = points[-1][1]
     apps = app_counts()
     data = {"days": [code(c) for _, c in points],
-            "parts": [["Core", today["Core"]], ["iOS", apps["iOS"]], ["Android", apps["Android"]],
-                      ["Server", today["Hub"] + today["Admin"]], ["CLI", apps["YoGPT"]], ["Tests", today["Tests"]]]}
+            "groups": [["Apps", [["Core", today["Core"]], ["iOS", apps["iOS"]], ["Android", apps["Android"]],
+                                 ["CLI", apps["YoGPT"]]]],
+                       ["Server", [["Hub", today["Hub"]], ["Admin", today["Admin"]]]],
+                       ["Tests", [["Tests", today["Tests"]]]]]}
     page = (ROOT / "dev" / "loc-chart.html").read_text().replace("DATA", json.dumps(data))
     browser = shutil.which("chromium") or shutil.which("google-chrome-stable") or shutil.which("google-chrome")
     if not browser:
@@ -133,7 +135,7 @@ def main():
         html.write_text(page)
         out = ROOT / "dev" / "loc-chart.png"
         subprocess.run([browser, "--headless=new", "--disable-gpu", "--hide-scrollbars",
-                        "--force-device-scale-factor=2", "--window-size=900,370", f"--screenshot={out}", str(html)],
+                        "--force-device-scale-factor=2", "--window-size=900,410", f"--screenshot={out}", str(html)],
                        check=True, capture_output=True, timeout=60)
     readme = ROOT / "README.md"
     text = readme.read_text()

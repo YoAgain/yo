@@ -6,10 +6,11 @@ section{margin-bottom:30px}
 svg text{fill:#8b949e;font:12px -apple-system,system-ui,sans-serif}
 .bar{display:flex;height:30px;border-radius:6px;overflow:hidden;gap:2px;margin-bottom:12px}
 .leg{position:relative;height:22px;font-size:14px;color:#8b949e}.leg span{position:absolute;white-space:nowrap;transform:translateX(-50%)}.leg b{color:#e6edf3;font-weight:600;margin-left:4px}
+.br{position:relative;height:30px;margin-bottom:4px}.br span{position:absolute;bottom:0;height:8px;border:2px solid #484f58;border-bottom:0;border-radius:4px 4px 0 0}.br b{position:absolute;bottom:10px;left:50%;transform:translateX(-50%);white-space:nowrap;font-size:13px;font-weight:600;color:#8b949e}
 .dot{display:inline-block;width:10px;height:10px;border-radius:3px;margin-right:7px;vertical-align:-1px}
 </style></head><body>
 <section><h3>Lines of code per day, without tests</h3><svg id="line" width="836" height="180"></svg></section>
-<section style="margin-bottom:0"><h3 id="h"></h3><div class="bar" id="bar"></div><div class="leg" id="leg"></div></section>
+<section style="margin-bottom:0"><h3 id="h"></h3><div class="br" id="br"></div><div class="bar" id="bar"></div><div class="leg" id="leg"></div></section>
 <script>
 const D=DATA,k=n=>Math.round(n/1000)+'k';
 const W=836,H=180,L=26,R=44,T=28,B=26,peak=Math.max(...D.days);
@@ -20,8 +21,12 @@ const last=D.days.length-1;
 D.days.forEach((v,i)=>{s+=`<circle cx="${x(i)}" cy="${y(v)}" r="3.5" fill="#9b59b6"/><text x="${x(i)}" y="${H-8}" text-anchor="middle">Day ${i+1}</text>`;
  if(i==0||i==last)s+=`<text x="${x(i)}" y="${y(v)-10}" text-anchor="middle" style="fill:#e6edf3;font-weight:600;font-size:14px">${k(v)}</text>`});
 document.getElementById('line').innerHTML=s;
-const C={Core:'#9b59b6',iOS:'#e67e22',Android:'#2ecc71',Server:'#3498db',CLI:'#f1c40f',Tests:'#59636e'};
+const C={Core:'#9b59b6',iOS:'#e67e22',Android:'#2ecc71',CLI:'#f1c40f',Hub:'#3498db',Admin:'#7fb3e0',Tests:'#59636e'};
+D.parts=D.groups.flatMap(([,p])=>p);
 const t=D.parts.reduce((a,[,v])=>a+v,0);
+// A bracket above each group of more than one part (the apps with their core, the server), its total on top.
+let g0=0;document.getElementById('br').innerHTML=D.groups.map(([n,p])=>{const v=p.reduce((a,[,x])=>a+x,0),l=g0/t*836;g0+=v;
+ return p.length>1?`<span style="left:${l+1}px;width:${v/t*836-4}px"><b>${n} · ${k(v)}</b></span>`:''}).join('');
 document.getElementById('h').textContent=`Today · ${k(t)}`;
 document.getElementById('bar').innerHTML=D.parts.map(([n,v])=>`<i style="flex:${v};background:${C[n]}"></i>`).join('');
 const leg=document.getElementById('leg'),BW=836,G=14;let at=0;
