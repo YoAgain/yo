@@ -303,10 +303,10 @@ if (document.body.classList.contains("login")) {
     return p && /^\d+$/.test(b || "") ? [p, Number(b)] : null;
   };
   // The hub's minimum (YO_MIN_APP, "ios/…"): a build below it is refused by the hub and must update.
-  let minApp = null;
-  const findNewest = (h) => { minApp = parse(h?.min_app); };
+  let minApp = [];
+  const findNewest = (h) => { minApp = String(h?.min_app || "").split(",").map((m) => parse(m.trim())).filter(Boolean); };
   const appInfo = (app) => last?.app_builds?.[app] || (app ? { label: build(app), state: null, title: app } : null);
-  const belowMin = (app) => { const v = parse(app); return !!(minApp && v && minApp[0] === v[0] && v[1] < minApp[1]); };
+  const belowMin = (app) => { const v = parse(app); return !!v && minApp.some((m) => m[0] === v[0] && v[1] < m[1]); };
   // "current", "update" or null (unknown, or no app).
   const internal = (uid) => !!uid && (last?.internal_users || []).includes(uid);
   const appState = (app, uid) => {
@@ -526,10 +526,9 @@ if (document.body.classList.contains("login")) {
     node.setAttribute("viewBox", `0 0 ${W} ${H}`);
     // A vertical guide at the hovered point.
     const guide = svg("line", { class: "guide", y1: 0, y2: B, x1: -10, x2: -10 });
-    // Two tiny labels, the scale's ends: its lowest value at the bottom left (where the curves start), its highest at the
-    // top right (the dates are under the bars).
+    // One tiny label: the scale's lowest value at the bottom left, where the curve starts (the total is the card's number).
     const lab = (tx, ty, text, anchor) => { const t = svg("text", { x: tx, y: ty, "text-anchor": anchor, class: "lab" }); t.textContent = text; return t; };
-    const labels = hi === lo ? [lab(W - pad, 9, num(hi), "end")] : [lab(pad, B - 9, num(lo), "start"), lab(W - pad, 9, num(hi), "end")];
+    const labels = [lab(pad, B - 9, num(lo), "start")];
     node.replaceChildren(fill, guide, line, ...extra, ...dots, ...labels);
     node.onpointermove = (e) => {
       const r = node.getBoundingClientRect(), i = Math.min(n - 1, Math.max(0, Math.round(((e.clientX - r.left - pad) / (r.width - 2 * pad)) * (n - 1))));
@@ -555,7 +554,7 @@ if (document.body.classList.contains("login")) {
   };
   // A second series drawn over a chart: Active over Accounts, Media over Yos (on the Yos' scale).
   const OVERLAY = { uc: "ac", yc: "ym" }, SAME = { yc: true }, WORD = { yc: "Yos", uc: "accounts" };
-  const areaChart = (key, total, perDay, hours) => {
+  const areaChart = (key, total, perDay, hours, today) => {
     set(`${key}-n`, num(total));
     areaData[key] = { ...runningTotal(perDay, hours, total || 0), overlay: OVERLAY[key] || null, word: WORD[key] };
     drawArea(key);
@@ -568,12 +567,14 @@ if (document.body.classList.contains("login")) {
     });
     st.replaceChildren(...bars);
     const names = areaData[key].names, what = { yc: "Yos", uc: "sign-ups" }[key] || "";
-    // Its tiny labels: the highest bar's value top left, the first and last slot under it.
+    // Its tiny labels: today's count top right (Yos, sign-ups since UTC midnight), the first and last slot under it.
     let box = st.parentElement;
     if (!box.classList.contains("stripbox")) {
       box = el("div", "stripbox"); st.replaceWith(box); box.append(st, el("span", "smax"), el("span", "sfrom"), el("span", "sto"));
     }
-    box.querySelector(".smax").textContent = num(Math.max(0, ...inc));
+    const tb = el("b", null, num(today ?? 0));
+    box.querySelector(".smax").replaceChildren(el("span", "stoday", "today"), tb);
+    box.querySelector(".smax").title = `${num(today ?? 0)} ${what} today (UTC)`;
     box.querySelector(".sfrom").textContent = range === 1 ? clock((Math.floor(Date.now() / 3600000) - 23) * 3600000) : names[0] || "";
     box.querySelector(".sto").textContent = range === 1 ? "now" : names[names.length - 1] || "";
     // A bar under the pointer: its hour or day and count in the chart's value line.
@@ -624,6 +625,38 @@ if (document.body.classList.contains("login")) {
     s.innerHTML = ICONS[name];
     if (title) { const t = svg("title"); t.textContent = title; s.prepend(t); }
     return s;
+  };
+  // ---- versions: current (green), update out (yellow), must update (red: below the hub's minimum), unknown (grey) --
+  const VSTATES = { current: "current", update: "update", must: "must", unknown: "unknown" }, VKEYS = Object.keys(VSTATES);
+  const platLine = (l, p) => `${l} ${num(p.all)}${VKEYS.filter((k) => p[k] && k !== "unknown").map((k) => ` · ${num(p[k])} ${k}`).join("")}`;
+  // Per slot of the range: [current, update, must, unknown] of the devices seen that day (the collector's daily
+  // snapshot, kept since it began), null where none was kept. 1: today; 7, 30: per day; Total: since the first.
+  let verData = null;
+  const vPct = (row, i = 0) => { const all = row ? row.reduce((a, v) => a + v, 0) : 0; return all ? Math.round((100 * row[i]) / all) : null; };
+  const versionsRow = (h) => {
+    const kept = { ...(h.version_days || {}) }, t = today0();
+    if (h.versions_day) kept[t] = VKEYS.map((k) => h.versions_day[k] || 0);
+    const days = Object.keys(kept).map(Number).filter((d) => d <= t).sort((a, b) => a - b), first = days[0] ?? t;
+    const span = range === 1 ? 1 : range || Math.max(7, t - first + 1), step = Math.max(1, Math.ceil(span / 60)), n = Math.ceil(span / step);
+    const ends = Array.from({ length: n }, (_, i) => t - (n - 1 - i) * step);
+    // A stretch of days (Total, long): its last kept day.
+    const rows = ends.map((e) => { for (let d = e; d > e - step; d--) if (kept[d]) return kept[d]; return null; });
+    verData = { rows, names: ends.map((e) => (e === t ? "today" : dayName(e))), first, today: kept[t] || null };
+    const node = $("vr-spark"), W = 140, H = 28, slot = W / n;
+    node.replaceChildren(...rows.flatMap((row, i) => vStack(row, i * slot + slot * 0.16, slot * 0.68, H, 0)));
+    const p = vPct(verData.today);
+    $("c-vr").dataset.tip = p == null ? "" : `today: ${p} % current`;
+  };
+  // One stacked bar of shares, current at the bottom; an empty slot a faint dash.
+  const vStack = (row, x, w, H, top) => {
+    const all = row ? row.reduce((a, v) => a + v, 0) : 0;
+    if (!all) return [svg("rect", { x: x.toFixed(1), width: w.toFixed(1), y: (H - 1.5).toFixed(1), height: 1.5, rx: 1, class: "b zero" })];
+    let y = H;
+    return VKEYS.map((k, i) => {
+      const hh = (row[i] / all) * (H - top);
+      y -= hh;
+      return row[i] ? svg("rect", { x: x.toFixed(1), width: w.toFixed(1), y: y.toFixed(1), height: hh.toFixed(1), class: `v-${k}` }) : null;
+    }).filter(Boolean);
   };
   // ---- overview ---------------------------------------------------------------------------------------------------
   const reportKey = (r) => `${which}:r${r.id}`;
@@ -686,9 +719,9 @@ if (document.body.classList.contains("login")) {
       rangeRow("gr", ym("group-create"), "made", "Groups: made", null, false, yh("group-create"), null, yt("group-create"));
       part(() => healthRows(h, ym, yh));
       // Running totals: Yos into users' inboxes (a bot's inbox apart), accounts without bots.
-      areaChart("yc", yt("yo-in") ?? 0, ym("yo-in"), yh("yo-in"));
+      areaChart("yc", yt("yo-in") ?? 0, ym("yo-in"), yh("yo-in"), ev?.["yo-in"]?.today ?? 0);
       const sud = new Map(h.signup_days || []);
-      areaChart("uc", [...sud.values()].reduce((a, v) => a + v, 0), sud, h.signups_hours);
+      areaChart("uc", [...sud.values()].reduce((a, v) => a + v, 0), sud, h.signups_hours, sud.get(today0()) ?? 0);
       const dn14 = days14().map(dayName);
       // Health: secured (of each sign-up day's accounts, the share with a backup now), active (per UTC day), and the
       // app versions per platform as one stacked bar (current, update out, unknown).
@@ -704,11 +737,12 @@ if (document.body.classList.contains("login")) {
       const kept = h.active_days || {}, a14 = days14().map((d) => kept[d] ?? null);
       if (h.active_day != null) a14[13] = Math.max(a14[13] ?? 0, h.active_day);
       seriesChart("ac", { values: a14.map((v) => v || 0), labels: dn14, word: "active" }, null);
-      // Platforms: one stacked bar, a share per platform; how many run the current build in each segment's hover.
+      // Platforms: one stacked bar, a share per platform; its versions (current, update out, must update: below the
+      // hub's minimum, unknown) in the hover.
       const per = {};
       for (const [app, c] of h.apps || []) {
-        const st = appState(app) || "unknown", l = appInfo(app)?.label || "unknown";
-        (per[l] ||= { current: 0, update: 0, unknown: 0, all: 0 })[st] += c;
+        const st = belowMin(app) ? "must" : appInfo(app)?.state || "unknown", l = appInfo(app)?.label || "unknown";
+        (per[l] ||= { current: 0, update: 0, must: 0, unknown: 0, all: 0 })[st in VSTATES ? st : "unknown"] += c;
         per[l].all += c;
       }
       const devices = Object.values(per).reduce((n, p) => n + p.all, 0), order = ["iOS", "Android", "Bot", "CLI"];
@@ -717,11 +751,12 @@ if (document.body.classList.contains("login")) {
       $("pl-bar").replaceChildren(...plats.map(([l, p]) => {
         const x = el("span", `p-${l.toLowerCase()}`);
         x.style.flexGrow = p.all;
-        x.dataset.tip = `${l} ${num(p.all)}${p.current + p.update ? ` · ${Math.round((100 * p.current) / p.all)} % current${p.update ? ` · ${num(p.update)} with an update out` : ""}` : ""}${l === "iOS" ? ` · min ${h.min_app ? build(h.min_app) : "not pinned"}` : ""}`;
+        x.dataset.tip = platLine(l, p);
         return x;
       }));
       $("c-pl").dataset.tip = plats.map(([l, p]) => `${l} ${num(p.all)}`).join(" · ");
-      platData = { plats };
+      platData = { plats, min: h.min_app };
+      versionsRow(h);
     }
   };
 
@@ -1354,14 +1389,44 @@ if (document.body.classList.contains("login")) {
     const box = el("div", "hc-plats"), most = Math.max(1, ...(platData?.plats || []).map(([, p]) => p.all));
     for (const [l, p] of platData?.plats || []) {
       const row = el("div", "hc-plat"), bar = el("span", "hc-pbar");
-      for (const k of ["current", "update", "unknown"]) if (p[k]) { const x = el("span", k); x.style.width = `${(100 * p[k]) / most}%`; bar.append(x); }
-      row.append(el("b", null, l), bar, el("span", "hc-pn", num(p.all)));
+      for (const k of VKEYS) if (p[k]) { const x = el("span", k); x.style.width = `${(100 * p[k]) / most}%`; bar.append(x); }
+      // One line: the platform, its bar, its devices and the versions in their colours (zeros left out).
+      const counts = el("span", "hc-pn", num(p.all));
+      for (const k of ["current", "update", "must"]) if (p[k] && p[k] !== p.all) counts.append(" · ", el("span", `v-${k}`, num(p[k])));
+      row.append(el("b", null, l), bar, counts);
+      row.title = platLine(l, p);
       box.append(row);
     }
-    const legend = el("div", "hc-legend");
-    legend.append(el("span", "current", "current"), el("span", "update", "update out"), el("span", "unknown", "unknown"));
-    box.append(legend);
+    box.append(vLegend());
     return box;
+  };
+  const vLegend = () => {
+    const legend = el("div", "hc-legend");
+    legend.append(el("span", "current", "current"), el("span", "update", "update"), el("span", "must", "must"), el("span", "unknown", "unknown"));
+    return legend;
+  };
+  // Versions: the range's stacked bars, bigger; a bar under the pointer names its day and shares.
+  const verCard = (cap) => {
+    const d = verData, W = 264, H = 104, top = 4, bottom = 18, n = d?.rows.length || 1, slot = W / n, B = H - bottom;
+    const s = svg("svg", { viewBox: `0 0 ${W} ${H}`, class: "hc-chart vchart" });
+    const groups = (d?.rows || []).map((row, i) => { const g = svg("g", { class: "vb" }); g.append(...vStack(row, i * slot + slot * 0.14, slot * 0.72, B, top)); return g; });
+    s.append(...groups);
+    const label = (x, y, text, anchor) => { const t = svg("text", { x, y, "text-anchor": anchor, class: "ax" }); t.textContent = text; return t; };
+    s.append(label(0, H - 4, d?.names[0] || "", "start"), label(W, H - 4, d?.names[n - 1] || "", "end"));
+    const say = (i) => {
+      const row = d?.rows[i], all = row ? row.reduce((a, v) => a + v, 0) : 0;
+      cap.textContent = `${d?.names[i] || ""} · ${all ? VKEYS.slice(0, 3).map((k, j) => (row[j] ? `${vPct(row, j)} % ${k}` : "")).filter(Boolean).join(" · ") + ` (${num(all)})` : "not recorded"}`;
+    };
+    s.onpointermove = (e) => {
+      const r = s.getBoundingClientRect(), i = Math.min(n - 1, Math.max(0, Math.floor(((e.clientX - r.left) / r.width) * n)));
+      groups.forEach((g, k) => g.classList.toggle("on", k === i)); say(i);
+    };
+    s.onpointerleave = () => { groups.forEach((g) => g.classList.remove("on")); say(n - 1); };
+    say(n - 1);
+    const out = [s, cap, vLegend()];
+    // History starts with the collector's first snapshot: say so while the range reaches before it.
+    if (d && d.rows.some((r) => !r)) out.push(el("div", "hc-lines", `Kept daily since ${dayName(d.first)}.`));
+    return out;
   };
   const buildCard = (node) => {
     const key = node.dataset.card, head = el("div", "hc-head"), body = [];
@@ -1377,13 +1442,18 @@ if (document.body.classList.contains("login")) {
     head.append(el("b", null, label), el("span", "hc-val", value && value !== "–" ? value : ""));
     const d = sparkData[key], cap = el("div", "hc-cap");
     if (key === "pl") body.push(platCard());
+    else if (key === "vr") {
+      const p = vPct(verData?.today);
+      head.querySelector(".hc-val").textContent = p == null ? "" : `today: ${p} % current`;
+      body.push(...verCard(cap));
+    }
     else if (d?.empty) body.push(el("div", "hc-lines", d.empty));
     else if (d && d.values.length > 1) {
       const cls = row.classList.contains("bad-up") ? "bad" : d.cls || (row.closest("#t-system") ? "cool" : "");
       body.push(barChart(d, cls, cap), cap);
     }
     // Few words: a row's note only where there is no chart to read (Queue, Updates).
-    const lines = key === "pl" || body.length ? [] : (row.dataset.tip || "").split(" · ").filter(Boolean).filter((x) => x !== value);
+    const lines = key === "pl" || key === "vr" || body.length ? [] : (row.dataset.tip || "").split(" · ").filter(Boolean).filter((x) => x !== value);
     if (lines.length) body.push(el("div", "hc-lines", lines.join(" · ")));
     // A line more under the chart (Problems: crash-free users).
     if (row.dataset.more) body.push(el("div", "hc-lines", row.dataset.more));

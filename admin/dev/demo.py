@@ -554,6 +554,22 @@ def main():
     write("active-days.json", {"live": {str(d): max(3, int(args.users * (0.18 + 0.32 * (1 - (today - d) / 30)) * rng.uniform(0.8, 1.15)) - (today - d))
                                         for d in range(today - 29, today)},
                                "dev": {str(d): rng.randint(1, 4) for d in range(today - 20, today)}})
+    # Versions per day (current, update out, must update, unknown): three weeks of history, a release every few days
+    # (current falls, then climbs back as people update), the minimum raised once.
+    def version_history(n_days, size):
+        out, release = {}, today - n_days
+        for d in range(today - n_days, today):
+            if (d - release) >= rng.choice([4, 5, 6]):
+                release = d
+            k = d - release
+            seen = max(4, int(size * rng.uniform(0.25, 0.45)))
+            cur = min(0.92, 0.18 + 0.2 * k + rng.uniform(-0.04, 0.04)) if k else rng.uniform(0.08, 0.2)
+            must = rng.uniform(0.02, 0.08) if d > today - 9 else 0
+            unk = rng.uniform(0.03, 0.07)
+            c, m, u = round(seen * cur), round(seen * must), round(seen * unk)
+            out[str(d)] = [c, max(0, seen - c - m - u), m, u]
+        return out
+    write("version-days.json", {"live": version_history(21, args.users), "dev": version_history(10, 9)})
     hours = {str(h): n for h, n in live["media_hours"].items()}
     for h in range(now // HOUR - 47, min(live["media_hours"])):
         hours[str(h)] = max(0, int(rng.gauss(5, 3)))
@@ -599,8 +615,7 @@ def main():
             out = {"at": t, "updates": server.updates()}
             for name, path in paths.items():
                 out[name] = collector_module.hub(name, path)
-            out["internal_users"] = collector_module.internal_users()
-            out["app_builds"] = collector_module.app_builds(out, set(out["internal_users"]))
+            collector_module.finish(out)
             tmp = env["ADMIN_USERS_FILE"] + ".new"
             with open(tmp, "w") as f:
                 json.dump(out, f, separators=(",", ":"))

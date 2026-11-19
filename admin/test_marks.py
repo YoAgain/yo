@@ -34,6 +34,21 @@ class MarksTests(unittest.TestCase):
         self.assertEqual(admin.active_days({"at": later, "live": {"active_day": 4}}, later)["live"]["active_days"], {str(day + 61): 4})
         self.assertEqual(admin.active_days({"stale": True})["stale"], True)
 
+    def test_version_days_keep_the_latest_per_day_for_good(self):
+        admin, day = self.admin, 20400
+        now = day * 86400000 + 5000
+        v = lambda c, u, m, n: {"current": c, "update": u, "must": m, "unknown": n}  # noqa: E731
+        out = admin.version_days({"at": now, "live": {"versions_day": v(5, 2, 1, 0)}, "dev": {"error": "x"}}, now)
+        self.assertEqual(out["live"]["version_days"], {str(day): [5, 2, 1, 0]})
+        self.assertEqual(out["dev"]["version_days"], {})
+        admin.version_days({"at": now, "live": {"versions_day": v(9, 2, 1, 1)}}, now)  # later the same day: replaced
+        later = now + 400 * 86400000
+        out = admin.version_days({"at": later, "live": {"versions_day": v(1, 0, 0, 0)}}, later)
+        self.assertEqual(out["live"]["version_days"], {str(day): [9, 2, 1, 1], str(day + 400): [1, 0, 0, 0]})
+        # An old snapshot (from yesterday) never writes today's.
+        out = admin.version_days({"at": now, "live": {"versions_day": v(7, 7, 7, 7)}}, later)
+        self.assertNotIn(str(day), [k for k, r in out["live"]["version_days"].items() if r == [7, 7, 7, 7]])
+
     def test_server_history_a_point_a_minute_the_last_hour(self):
         admin = self.admin
         admin.HISTORY.clear()

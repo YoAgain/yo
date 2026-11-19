@@ -794,6 +794,13 @@ body.dash { max-width: 1400px; }
 .hc-pbar .current, .hc-legend .current::before { background: var(--ok); }
 .hc-pbar .update, .hc-legend .update::before { background: var(--warn); }
 .hc-pbar .unknown, .hc-legend .unknown::before { background: var(--muted); opacity: .6; }
+.hc-pbar .must, .hc-legend .must::before { background: var(--bad); }
+.hc-pn .v-current { color: var(--ok); } .hc-pn .v-update { color: var(--warn); } .hc-pn .v-must { color: var(--bad); }
+/* Versions: stacked shares per day, current at the bottom. */
+.spark .v-current, .hc-chart .v-current { fill: var(--ok); } .spark .v-update, .hc-chart .v-update { fill: var(--warn); }
+.spark .v-must, .hc-chart .v-must { fill: var(--bad); } .spark .v-unknown, .hc-chart .v-unknown { fill: var(--muted); opacity: .6; }
+.hc-chart.vchart .vb { opacity: .8; } .hc-chart.vchart .vb.on { opacity: 1; }
+.hc-chart.vchart + .hc-cap + .hc-legend { margin-top: 4px; }
 .hc-pn { font-weight: 700; font-variant-numeric: tabular-nums; }
 .hc-legend { display: flex; gap: 12px; color: var(--muted); font-size: 11px; }
 .hc-legend span { display: inline-flex; align-items: center; gap: 5px; }
@@ -936,6 +943,8 @@ body.dash { max-width: none; padding-left: 24px; padding-right: 24px; }
 .ov .chartw .area-tip { top: -38px; line-height: 1.25; text-align: right; }
 .ov .chartw .area-tip small { display: block; font-size: 10px; font-weight: 500; color: var(--muted); }
 .stripbox .smax { left: auto; right: 0; }
+.stripbox .smax b { color: var(--text); font-weight: 700; }
+.stripbox .smax .stoday { position: static; margin-right: 4px; font-size: 8.5px; letter-spacing: .06em; text-transform: uppercase; }
 
 /* All widgets equally high: a plain grid row (4 wide, fewer when narrow), each card stretched to the tallest. */
 .ov, .ov.packed { display: grid !important; columns: auto; grid-template-columns: repeat(auto-fit, minmax(min(300px, 100%), 1fr)); align-items: stretch; gap: var(--gap); }

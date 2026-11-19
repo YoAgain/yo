@@ -294,6 +294,48 @@ def active_days(snapshot: dict, now_ms=None) -> dict:
     return out
 
 
+# App versions per UTC day for the Versions row: the collector's "versions_day" (of the devices seen today: current,
+# update out, must update, unknown), the day's latest kept here for good (history starts with this file). Counts only.
+VERSIONS_FILE = os.environ.get("STATE_DIRECTORY", "./state") + "/version-days.json"
+VERSION_KEYS = ("current", "update", "must", "unknown")
+
+
+def version_days(snapshot: dict, now_ms=None) -> dict:
+    """The snapshot with "version_days": {day: [current, update, must, unknown]} per hub, today's from "versions_day"."""
+    now_ms = int(time.time() * 1000) if now_ms is None else now_ms
+    today = str(now_ms // 86400000)
+    with _active_lock:
+        try:
+            history = json.loads(read_bytes(VERSIONS_FILE))
+            if not isinstance(history, dict):
+                history = {}
+        except (OSError, ValueError):
+            history = {}
+        changed = False
+        for hub in ("live", "dev"):
+            days = history.get(hub) if isinstance(history.get(hub), dict) else {}
+            day = (snapshot.get(hub) or {}).get("versions_day") if isinstance(snapshot.get(hub), dict) else None
+            if isinstance(day, dict) and str(snapshot.get("at", 0) // 86400000) == today:
+                row = [int(day.get(k) or 0) for k in VERSION_KEYS]
+                if days.get(today) != row:
+                    days[today] = row
+                    changed = True
+            history[hub] = days
+        if changed:
+            try:
+                tmp = VERSIONS_FILE + ".new"
+                with open(tmp, "w") as f:
+                    json.dump(history, f)
+                os.replace(tmp, VERSIONS_FILE)
+            except OSError:
+                pass
+    out = dict(snapshot)
+    for hub in ("live", "dev"):
+        if isinstance(out.get(hub), dict):
+            out[hub] = {**out[hub], "version_days": history.get(hub, {})}
+    return out
+
+
 def support_request(hub, suffix="", body=None, method=None):
     if not ADMIN_TOKEN:
         raise ValueError("YO_ADMIN_TOKEN is not configured")
@@ -601,7 +643,7 @@ class Admin(BaseHTTPRequestHandler):
         if path == "/users.json":
             if not logged_in:
                 return self.send(401, b"{}", "application/json")
-            return self.send(200, json.dumps(active_days(collector.snapshot())).encode(), "application/json")
+            return self.send(200, json.dumps(version_days(active_days(collector.snapshot()))).encode(), "application/json")
         self.send(404, b"Not found", "text/plain")
 
     do_HEAD = do_GET

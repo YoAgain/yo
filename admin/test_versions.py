@@ -48,6 +48,15 @@ class ClassifyTests(unittest.TestCase):
         self.assertEqual(b["ios/202611191257"]["state"], "current")
         self.assertEqual(users.app_builds(out)["ios/202611181859"]["state"], "update")  # without the list
 
+    def test_version_day_counts_todays_devices(self):
+        builds = {"ios/202611181859": {"state": "current"}, "ios/202611171622": {"state": "update"},
+                  "ios/202611100000": {"state": "update"}, "yogpt/202611182101": {"state": "current"}}
+        apps = [["ios/202611181859", 5], ["ios/202611171622", 3], ["ios/202611100000", 2], ["ios/1", 1],
+                ["android/4", 1], ["yogpt/202611182101", 1], ["cli/7", 1], ["unknown", 2]]
+        self.assertEqual(users.version_day(apps, builds, "ios/202611150000"), {"current": 5, "update": 3, "must": 3, "unknown": 3})
+        self.assertEqual(users.version_day(apps, builds, "android/5, ios/202611150000")["must"], 4)  # the hub refuses ios/1 too
+        self.assertEqual(users.version_day(apps, builds, None)["must"], 0)
+
 
 if __name__ == "__main__":
     unittest.main()

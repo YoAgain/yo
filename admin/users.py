@@ -354,6 +354,10 @@ def hub(name: str, path: str) -> dict:
             "apps": part("apps", lambda: db.execute(
                 "SELECT coalesce(app, 'unknown'), count(*) FROM devices GROUP BY 1 ORDER BY 2 DESC").fetchall()
                 if has_app else [], []),
+            # The same for the devices seen since UTC midnight: the Versions row's day (see version_day).
+            "apps_today": part("apps_today", lambda: db.execute(
+                "SELECT coalesce(app, 'unknown'), count(*) FROM devices WHERE last_seen_at >= ? GROUP BY 1 ORDER BY 2 DESC",
+                (midnight,)).fetchall() if has_app else [], []),
             "size": part("size", lambda: os.path.getsize(path)),
             "errors": errors,
         }
@@ -531,6 +535,40 @@ def app_builds(out, internal=()) -> dict:
     return {a: classify(a, newest, bot) for a in seen}
 
 
+def below_min(app, minimum) -> bool:
+    """A build below the hub's YO_MIN_APP ("ios/…,android/…", per platform): refused by the hub (as its request.rs:
+    any numeric build, a dev build's "1" too), it must update."""
+    p, _, b = (app or "").partition("/")
+    for m in (minimum or "").split(","):
+        mp, _, mb = m.strip().partition("/")
+        if mp and p == mp and b.isdigit() and mb.isdigit() and int(b) < int(mb):
+            return True
+    return False
+
+
+def version_day(apps, builds, minimum) -> dict:
+    """Of the user devices seen today (bots and the CLI left out): how many run the current build, have an update
+    out, must update (below the hub's minimum) or are unknown (dev builds, Android until it has builds)."""
+    out = {"current": 0, "update": 0, "must": 0, "unknown": 0}
+    for app, n in apps or []:
+        if (app or "").startswith(("yogpt/", "cli/")):
+            continue
+        state = "must" if below_min(app, minimum) else (builds.get(app) or {}).get("state") or "unknown"
+        out[state if state in out else "unknown"] += n
+    return out
+
+
+def finish(out):
+    """What needs both hubs: the internal testers, every build's state, and each hub's versions of today."""
+    out["internal_users"] = internal_users()
+    out["app_builds"] = app_builds(out, set(out["internal_users"]))
+    for name in HUBS:
+        h = out.get(name)
+        if isinstance(h, dict) and "apps_today" in h:
+            h["versions_day"] = version_day(h["apps_today"], out["app_builds"], h.get("min_app"))
+    return out
+
+
 def main():
     try:
         with open(OUT) as f:
@@ -544,8 +582,7 @@ def main():
             out[name] = hub(name, path)
         except (sqlite3.Error, OSError) as e:
             out[name] = {"error": str(e)}
-    out["internal_users"] = internal_users()
-    out["app_builds"] = app_builds(out, set(out["internal_users"]))
+    finish(out)
     tmp = OUT + ".new"
     with open(tmp, "w") as f:
         json.dump(out, f, separators=(",", ":"))
