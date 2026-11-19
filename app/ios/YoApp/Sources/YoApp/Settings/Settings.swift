@@ -35,7 +35,14 @@ struct SettingsView: View {
   @State private var showingDeleteAccount = false
   /// The page in view and its height (`SheetFit`): the sheet's one detent. Half height until the first page is
   /// measured; a page that does not tell its height takes the full one.
-  @State private var fit: (page: UUID, detent: PresentationDetent)?
+  @State private var fit: Fit?
+  /// What the pages last asked for: taken over once a push or pop has finished, so the sheet never changes height
+  /// under the moving bar (its back button clipped by the sheet's edge), then grows or shrinks on its own.
+  @State private var wantedFit: Fit?
+  struct Fit: Equatable {
+    var page: UUID
+    var detent: PresentationDetent
+  }
 
   private var currentIconAsset: String {
     AppIconPage.icons.first { $0.name == currentIconName }?.image ?? "IconStandard"
@@ -97,9 +104,14 @@ struct SettingsView: View {
       // It fits, so it holds still.
       .scrollBounceBehavior(.basedOnSize)
       .sheetFit()
-      // No title on the first page: its rows start at the sheet's top. The pages pushed in keep their bar, inline.
-      .toolbar(.hidden, for: .navigationBar)
+      // No title on the first page, only the system's close button in its inline bar (counted in its height). The
+      // pages pushed in keep the same bar, so a push never shows or hides it.
       .navigationBarTitleDisplayMode(.inline)
+      .toolbar {
+        ToolbarItem(placement: .cancellationAction) {
+          Button(role: .close) { dismiss() }
+        }
+      }
       .task { await accounts.refreshSupport() }
       .onAppear { currentIconName = UIApplication.shared.alternateIconName }
       .navigationDestination(for: Page.self) { page in
@@ -128,6 +140,8 @@ struct SettingsView: View {
         }
         .toolbar(.visible, for: .navigationBar)
         .navigationBarTitleDisplayMode(.inline)
+        // The list's compact top under the inline title, as on the first page.
+        .listSectionSpacing(.compact)
       }
     }
     .hitchScene("settings root")
@@ -140,7 +154,21 @@ struct SettingsView: View {
     // detent stops there). Swiping down still closes it.
     .presentationDetents([fit?.detent ?? .medium])
     .environment(\.sheetFit) { page, detent in
-      if let detent { fit = (page, detent) } else if fit?.page == page { fit = (page, .large) }
+      if let detent {
+        wantedFit = Fit(page: page, detent: detent)
+      } else if wantedFit?.page == page {
+        wantedFit = Fit(page: page, detent: .large)
+      }
+    }
+    // The first height at once; later ones after the navigation transition (a push or pop takes about 0.35 s),
+    // which also lets a page's measurements settle into one change.
+    .task(id: wantedFit) {
+      guard let wantedFit, wantedFit != fit else { return }
+      if fit != nil {
+        try? await Task.sleep(for: .milliseconds(400))
+        guard !Task.isCancelled else { return }
+      }
+      withAnimation(.smooth) { fit = wantedFit }
     }
     .presentationDragIndicator(.hidden)
     // Below full height an iOS 26 sheet is see-through glass: opaque instead.
