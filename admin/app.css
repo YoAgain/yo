@@ -936,3 +936,8 @@ body.dash { max-width: none; padding-left: 24px; padding-right: 24px; }
 .ov .chartw .area-tip { top: -38px; line-height: 1.25; text-align: right; }
 .ov .chartw .area-tip small { display: block; font-size: 10px; font-weight: 500; color: var(--muted); }
 .stripbox .smax { left: auto; right: 0; }
+
+/* All widgets equally high: a plain grid row (4 wide, fewer when narrow), each card stretched to the tallest. */
+.ov, .ov.packed { display: grid !important; columns: auto; grid-template-columns: repeat(auto-fit, minmax(min(300px, 100%), 1fr)); align-items: stretch; gap: var(--gap); }
+.ov > .tile, .ov > header.tile { margin: 0 !important; height: auto; }
+.ov > .full, .ov > .rangebar, .ov > #t-db { grid-column: 1 / -1; }

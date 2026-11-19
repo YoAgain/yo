@@ -442,7 +442,7 @@ if (document.body.classList.contains("login")) {
     const lat = sums(LAT), latAll = whole(lat), latN = (b) => b.reduce((a, v) => a + v, 0);
     spark("dl", null, lat.map((b) => at(b, 0.95) + 1), names,
       (i) => (latN(lat[i]) ? `p95 ${LAT_NAME[at(lat[i], 0.95)]} · median ${LAT_NAME[at(lat[i], 0.5)]} · ${num(latN(lat[i]))} Yos` : "no Yos"),
-      `Delivery: from accepted to acknowledged · ${latN(latAll) ? `p95 ${LAT_NAME[at(latAll, 0.95)]}, median ${LAT_NAME[at(latAll, 0.5)]}` : "no Yos"} · ${span}`, 4);
+      `Speed: how long a Yo takes from the sender to the friend's phone · ${latN(latAll) ? `p95 ${LAT_NAME[at(latAll, 0.95)]}, median ${LAT_NAME[at(latAll, 0.5)]}` : "no Yos"} · ${span}`, 4);
     if (!latN(latAll)) none("dl", "delivered Yos");
     $("c-dl").classList.add("bad-up");
     // Push: the share the services took.
@@ -461,14 +461,15 @@ if (document.body.classList.contains("login")) {
     // Accounts' hover: DAU/MAU (users seen today of those seen in 30 days) and the accounts deleted in the range.
     const gone = sums(["account-gone"]).reduce((a, [n]) => a + n, 0);
     const dau = h.active_day ?? 0, mau = h.active_month ?? 0, stick = mau ? (100 * dau) / mau : null;
-    areaSub.uc = `DAU / MAU ${pctText(stick)} (${num(dau)} of ${num(mau)}) · ${num(gone)} deleted in ${span}`;
+    areaSub.uc = [["DAU / MAU", `${pctText(stick)} (${num(dau)} of ${num(mau)})`], [`Deleted in ${span}`, num(gone)]];
     // Yos' hover: retention, of the accounts made 1 (7, 30) to 90 days ago those seen that many days after signing up.
     const rt = h.retention || {};
-    areaSub.yc = `Retention ${["d1", "d7", "d30"].map((k) => `${k.toUpperCase()} ${rt[k]?.[1] ? pctText((100 * rt[k][0]) / rt[k][1]) : "–"}`).join(" · ")}`;
+    areaSub.yc = ["d1", "d7", "d30"].map((k) => [`Retention ${k.toUpperCase()}`, rt[k]?.[1] ? pctText((100 * rt[k][0]) / rt[k][1]) : "–"]);
     // Problems' hover: crash-free users, the last 7 days' crash reports against the users seen in them (a crash one user).
     const crashes = (h.diagnostic_days || []).filter((r) => r.kind === "crash" && r.day > today0() - 7).reduce((n, r) => n + r.count, 0);
     const wau = h.active_users ?? 0, free = wau ? Math.max(0, 100 - (100 * crashes) / wau) : null;
-    $("c-pr").dataset.more = `Crash-free users ${pctText(free)} · ${num(crashes)} crashes, ${num(wau)} users in 7 days`;
+    // Hub errors belong to Problems: the 5xx answers in its hover, next to crash-free users.
+    $("c-pr").dataset.more = `Crash-free users ${pctText(free)} · ${num(crashes)} crashes, ${num(wau)} users in 7 days · hub errors ${heAll[1] ? `${num(heAll[0])} 5xx (${pctText(rate(heAll))})` : "none counted yet"}`;
   };
   // The two chart widgets: a running total over the range (a point an hour, a day, or for Total up to 60 points),
   // ending at the total since the start; the hover shows the point's time and value.
@@ -477,7 +478,7 @@ if (document.body.classList.contains("login")) {
   const say = (key, text) => {
     const tip = $(`${key}-tip`);
     if (!text) { tip.replaceChildren(); return; }
-    tip.replaceChildren(el("span", null, text), ...(areaSub[key] ? [el("small", null, areaSub[key])] : []));
+    tip.replaceChildren(el("span", null, text));
   };
   const runningTotal = (perDay, hours, total) => {
     let names, incs;
@@ -535,9 +536,19 @@ if (document.body.classList.contains("login")) {
       const j = !o ? -1 : o.values.length === n ? i : o.values.length === n - 1 ? i - 1 : (o.labels || []).indexOf(d.labels[i]);
       const pct = o?.share && j >= 0 && d.values[i] ? ` (${Math.round((100 * o.values[j]) / d.values[i])} %)` : "";
       const ov = j >= 0 ? ` · ${num(o.values[j])} ${o.word || ""}`.trimEnd() + pct : "";
-      say(key, `${d.labels[i]} · ${num(d.values[i])}${d.word ? ` ${d.word}` : ""}${ov}`);
+      // The same hover card as the rows (Platforms): the point's time, its values, and the chart's own line.
+      const head = el("div", "hc-head");
+      head.append(el("b", null, d.labels[i]), el("span", "hc-val", ""));
+      const rows = [[d.word ? d.word[0].toUpperCase() + d.word.slice(1) : "", num(d.values[i])]];
+      if (j >= 0) rows.push([o.word ? o.word[0].toUpperCase() + o.word.slice(1) : "", `${num(o.values[j])}${pct}`]);
+      hc.replaceChildren(head, kvRows([...rows, ...(areaSub[key] || [])]));
+      hc.hidden = false;
+      const w = hc.offsetWidth, h = hc.offsetHeight;
+      hc.style.left = `${Math.round(Math.min(Math.max(8, e.clientX + 14), innerWidth - w - 8))}px`;
+      hc.style.top = `${Math.round(e.clientY + h + 20 > innerHeight ? e.clientY - h - 12 : e.clientY + 16)}px`;
+      say(key, "");
     };
-    node.onpointerleave = () => { dots.forEach((c) => c.classList.remove("on")); guide.classList.remove("on"); say(key, ""); };
+    node.onpointerleave = () => { dots.forEach((c) => c.classList.remove("on")); guide.classList.remove("on"); say(key, ""); if (!hcFor) hc.hidden = true; };
   };
   // A second series drawn over a chart: Active over Accounts, Media over Yos (on the Yos' scale).
   const OVERLAY = { uc: "ac", yc: "ym" }, SAME = { yc: true }, WORD = { yc: "Yos", uc: "accounts" };
@@ -646,6 +657,8 @@ if (document.body.classList.contains("login")) {
     // Services: the queue at the bottom.
     const blobs = ok && h.blobs;
     set("q-n", ok ? num(h.messages) : "–");
+    // The queue in the Speed row's hover: what still waits for its device.
+    $("c-dl").dataset.more = ok ? `Waiting: ${num(h.messages)} messages${h.messages && h.oldest_waiting ? `, oldest ${rel(h.oldest_waiting)}` : ""}${blobs ? ` · ${num(blobs[0])} images (${bytes(blobs[1])})` : ""}` : "";
     $("c-q").dataset.tip = ok ? `${num(h.messages)} messages waiting for their device${h.messages && h.oldest_waiting ? `, oldest ${rel(h.oldest_waiting)}` : ""} · ${blobs ? `${num(blobs[0])} images waiting: ${bytes(blobs[1])}` : "images unknown"}` : "";
 
     // Users: ten, by the chosen column (last seen first); a click opens the user in the Users tab.
