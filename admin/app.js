@@ -289,6 +289,41 @@ if (document.body.classList.contains("login")) {
       ...titles.map((t, i) => { const r = svg("rect", { x: Math.max(0, i * step - step / 2), width: step, y: 0, height: hgt }); r.append(svg("title")); r.lastChild.textContent = t; return r; }));
   };
 
+  // One small bar chart of days (prefix "su" or "ms"): bars, the top value at the y axis, first and last day under it,
+  // the latest day's value in its head, and a tooltip with the exact value of the day under the pointer.
+  const dayBars = (key, days, values, label) => {
+    const node = $(`${key}-chart`), W = 280, H = 60, slot = W / values.length, kids = [];
+    const top = Math.max(1, ...values.filter((v) => v != null));
+    const text = (i) => `${dayName(days[i])}: ${values[i] == null ? "not kept" : label(values[i])}`;
+    values.forEach((v, i) => {
+      const hh = v ? Math.max(1.5, (v / top) * (H - 4)) : 1.5;
+      kids.push(svg("rect", { x: (i * slot + slot * 0.16).toFixed(1), width: (slot * 0.68).toFixed(1), y: (H - hh).toFixed(1),
+        height: hh.toFixed(1), rx: 1.5, class: v ? "bar" : "bar zero" }));
+    });
+    values.forEach((_, i) => {
+      const r = svg("rect", { x: (i * slot).toFixed(1), width: slot.toFixed(1), y: 0, height: H, class: "hit", "data-i": i });
+      r.setAttribute("aria-label", text(i));
+      kids.push(r);
+    });
+    node.replaceChildren(...kids);
+    const tip = node.parentElement.querySelector(".tip");
+    const show = (e) => {
+      const i = e.target.dataset?.i;
+      if (i == null) { tip.hidden = true; return; }
+      tip.textContent = text(+i);
+      tip.hidden = false;
+      const box = node.getBoundingClientRect(), x = ((+i + 0.5) / values.length) * box.width;
+      tip.style.left = `${Math.min(Math.max(x, tip.offsetWidth / 2), box.width - tip.offsetWidth / 2)}px`;
+    };
+    node.onpointermove = show;
+    node.onpointerleave = () => { tip.hidden = true; };
+    set(`${key}-max`, num(Math.max(0, ...values.filter((v) => v != null))));
+    set(`${key}-from`, dayName(days[0]));
+    set(`${key}-to`, dayName(days[days.length - 1]));
+    const lastV = values[values.length - 1];
+    $(`${key}-last`).replaceChildren(el("b", null, lastV == null ? "–" : num(lastV)), " today");
+  };
+
   // ---- overview: the users widget, sortable by every column ---------------------------------------------------------
   let ovSort = { key: "created", dir: -1 };
   const ovValue = (u, key) => key === "name" ? (u.name || "").toLowerCase() : key === "app" ? (parse(u.app)?.[1] ?? -1)
@@ -354,30 +389,17 @@ if (document.body.classList.contains("login")) {
     // Users: ten, by the chosen column (last seen first); a click opens the user in the Users tab.
     drawOvUsers(h);
 
-    // Activity: sign-ups per day as bars, messages per day as a line (own scale), 14 days.
+    // Activity: two figures (active users, Yos in 24 h) and two small charts of 14 UTC days, each value on hover.
     if (ok) {
       const total = h.total || 0, today = h.active_today || 0, week = Math.max(today, h.active_users || 0);
       set("ug-today", num(today));
-      set("ug-total", `of ${num(total)} today`);
-      $("ug-today").parentElement.title = `${week} active this week · ${h.secured ?? "?"} secured · ${h.devices ?? "?"} devices`;
+      set("ug-total", `/ ${num(total)} users`);
+      $("st-active").title = `${num(today)} of ${num(total)} users seen in the last 24 h · ${num(week)} this week · ${h.secured ?? "?"} secured · ${h.devices ?? "?"} devices`;
       set("st-msgs", num(h.deliveries?.day));
-      const su = (h.signups || []).slice(-14), md = h.deliveries?.days || [];
-      const ms = days.map((_, i) => md[md.length - 14 + i] ?? null);
-      const W = 280, H = 90, slot = W / 14, sTop = Math.max(1, ...su), mTop = Math.max(1, ...ms.filter((v) => v != null));
-      const chart = $("activity-chart"), kids = [];
-      su.forEach((v, i) => kids.push(svg("rect", { x: (i * slot + slot * 0.18).toFixed(1), width: (slot * 0.64).toFixed(1),
-        y: (H - Math.max(1.5, (v / sTop) * (H - 14))).toFixed(1), height: Math.max(1.5, (v / sTop) * (H - 14)).toFixed(1), rx: 2, class: v ? "su" : "su zero" })));
-      const pts = ms.map((v, i) => (v == null ? null : [i * slot + slot / 2, H - 4 - (v / mTop) * (H - 14)]));
-      let d = "", pen = false;
-      for (const p of pts) { if (!p) { pen = false; continue; } d += `${pen ? "L" : "M"}${p[0].toFixed(1)},${p[1].toFixed(1)} `; pen = true; }
-      kids.push(svg("path", { d: d.trim(), class: "ms" }));
-      pts.forEach((p) => { if (p) kids.push(svg("circle", { cx: p[0].toFixed(1), cy: p[1].toFixed(1), r: 2.2, class: "ms" })); });
-      days.forEach((day, i) => {
-        const r = svg("rect", { x: (i * slot).toFixed(1), width: slot.toFixed(1), y: 0, height: H, class: "hit" });
-        const t = svg("title"); t.textContent = `${dayName(day)}: ${su[i] ?? 0} sign-ups · ${ms[i] == null ? "messages not kept" : `${num(ms[i])} messages`}`;
-        r.append(t); kids.push(r);
-      });
-      chart.replaceChildren(...kids);
+      $("st-yos").title = "Yos delivered in the last 24 h, every delivery incl. bots and group members";
+      const su = h.signups || [], md = h.deliveries?.days || [];
+      dayBars("su", days, days.map((_, i) => su[su.length - 14 + i] ?? 0), (v) => `${num(v)} sign-up${v === 1 ? "" : "s"}`);
+      dayBars("ms", days, days.map((_, i) => (md.length ? md[md.length - 14 + i] ?? null : null)), (v) => `${num(v)} Yo${v === 1 ? "" : "s"}`);
 
       // App versions: devices current, with an update out, unknown; per platform in the caption.
       let fresh = 0, old = 0, other = 0;

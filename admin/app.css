@@ -154,8 +154,6 @@ a.lg:hover { color: var(--text); }
 .lg.fb i { background: var(--bad); } .lg.fb b { color: var(--bad); }
 .lg.cr i { background: var(--warn); } .lg.cr b { color: var(--warn); }
 .lg.rp i { background: #5dade2; } .lg.rp b { color: #5dade2; }
-.lg.su i { background: var(--amethyst-soft); height: 8px; width: 8px; border-radius: 2px; }
-.lg.ms i { background: var(--ok); }
 .legend.small { margin-top: 8px; }
 .legend.small .lg { font-size: 11px; }
 .graph { display: block; width: 100%; flex: 1; min-height: 80px; margin-top: 10px; overflow: visible; }
@@ -168,15 +166,38 @@ a.lg:hover { color: var(--text); }
 #t-newusers h2 .more { text-decoration: none; display: inline-flex; gap: 6px; }
 #t-newusers h2 .more:hover { color: var(--text); }
 #t-newusers td { padding: 8px 10px 8px 0; }
-#t-activity .headline { display: flex; flex-wrap: wrap; align-items: baseline; gap: 4px 6px; font-size: 13px; color: var(--muted); }
-#t-activity .headline b { font-size: 22px; font-weight: 800; color: var(--text); letter-spacing: -.02em; }
-#t-activity .headline .sep { margin: 0 4px; }
 .chart { display: block; width: 100%; flex: 1; min-height: 110px; margin-top: 12px; }
 .chart .su { fill: var(--amethyst-soft); opacity: .85; }
 .chart .su.zero { fill: var(--line); opacity: 1; }
-.chart path.ms { fill: none; stroke: var(--ok); stroke-width: 2; vector-effect: non-scaling-stroke; stroke-linejoin: round; }
-.chart circle.ms { fill: var(--card); stroke: var(--ok); stroke-width: 1.5; vector-effect: non-scaling-stroke; }
 #t-activity { flex: 1; }
+/* Activity: two figures on top, then one small chart each for sign-ups and Yos; icons drawn like the tab bar's */
+#t-activity { gap: 14px; }
+#t-activity h2 { margin-bottom: 0; }
+#t-activity .ico { width: 18px; height: 18px; flex: none; fill: none; stroke: var(--amethyst-soft); stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; }
+#t-activity .ms .ico { stroke: var(--ok); }
+.stats { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; }
+.stat { display: flex; align-items: flex-start; gap: 10px; min-width: 0; }
+.stat .ico { width: 22px; height: 22px; margin-top: 4px; }
+.stat .n { display: flex; align-items: baseline; gap: 5px; font-variant-numeric: tabular-nums; white-space: nowrap; }
+.stat .n b { font-size: 26px; font-weight: 800; letter-spacing: -.02em; line-height: 1.1; }
+.stat .n small { font-size: 13px; font-weight: 600; color: var(--muted); }
+.stat .l { margin-top: 2px; font-size: 12px; color: var(--muted); }
+.mini { padding-top: 12px; border-top: 1px solid var(--line); }
+.mini-head { display: flex; align-items: center; gap: 8px; font-size: 12px; font-weight: 700; color: var(--text); }
+.mini-head .ico { width: 15px; height: 15px; }
+.mini-last { margin-left: auto; font-weight: 600; color: var(--muted); font-variant-numeric: tabular-nums; }
+.mini-last b { color: var(--text); font-size: 14px; font-weight: 800; }
+.mini-plot { position: relative; margin-top: 8px; padding-left: 28px; }
+.mini .chart { min-height: 0; height: 60px; margin: 0; flex: none; overflow: visible; }
+.mini .chart .bar { fill: var(--amethyst-soft); opacity: .85; }
+.mini.ms .chart .bar { fill: var(--ok); opacity: .75; }
+.mini .chart .bar.zero { fill: var(--line); opacity: 1; }
+.mini .ymax { position: absolute; left: 0; top: -2px; width: 24px; text-align: right; font-size: 10px; color: var(--muted); font-variant-numeric: tabular-nums; }
+.mini .ymax::after { content: ""; position: absolute; left: 28px; top: 6px; width: 6px; border-top: 1px solid var(--line); }
+.mini .axis { padding-left: 28px; }
+.mini .tip { position: absolute; bottom: calc(100% + 4px); transform: translateX(-50%); margin-left: 28px; padding: 4px 8px; border-radius: 8px;
+  background: var(--bg); border: 1px solid var(--line); font-size: 12px; font-weight: 700; white-space: nowrap; pointer-events: none; box-shadow: 0 6px 18px rgba(0, 0, 0, .35); }
+.mini .note { margin: 6px 0 0; font-size: 11px; color: var(--muted); }
 .sbar { display: flex; gap: 2px; height: 8px; margin-top: 12px; border-radius: 4px; overflow: hidden; background: var(--line); }
 .sbar span { min-width: 3px; }
 .sbar .new { background: var(--ok); } .sbar .old { background: var(--warn); } .sbar .a0 { background: var(--line); }
