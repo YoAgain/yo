@@ -513,7 +513,10 @@ private final class ForegroundTurns: @unchecked Sendable {
   private var observers: [NSObjectProtocol] = []
 
   init(state: UIApplication.State) {
-    active = state == .active
+    // Active only from the first `didBecomeActive`: at `App.init` UIKit says `.active` in any launch, a background one
+    // (a silent push) too, where no `willResignActive` ever comes to take a turn back. Such a turn (the push token's
+    // request at launch) held its flock into the suspension: 0xdead10cc. Until then each turn has background time.
+    active = false
     front = state != .background
     observers = [
       NotificationCenter.default.addObserver(
