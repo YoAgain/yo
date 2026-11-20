@@ -878,6 +878,19 @@ private fun shareCode(context: Context, name: String) {
     val context = LocalContext.current
     val chunks = rememberLicenseChunks(true)
     LazyColumn(Modifier.fillMaxSize(), contentPadding = PaddingValues(16.dp)) {
+        // iOS LicensesPage: who makes Yo, its version, who operates it, the website.
+        item {
+            Section(null, null,
+                Setting(stringResource(R.string.about_yo_by), onClick = {
+                    context.startActivity(Intent(Intent.ACTION_VIEW, "https://justyo.co/p/imprint".toUri()))
+                }),
+                Setting(stringResource(R.string.about_version), value = BuildConfig.VERSION_NAME),
+                Setting(stringResource(R.string.about_operated_by)),
+                Setting(stringResource(R.string.about_website), value = "justyo.co", onClick = {
+                    context.startActivity(Intent(Intent.ACTION_VIEW, "https://justyo.co".toUri()))
+                }),
+            )
+        }
         item {
             Text(stringResource(R.string.ui_yo_is_mit_licensed_this_app_includes_libsignal_licensed_unde), style = MaterialTheme.typography.bodyLarge)
             Text(stringResource(R.string.ui_montserrat_sil_open_font_license_androidx_kotlin_jna_okhttp_), Modifier.padding(vertical = 16.dp),

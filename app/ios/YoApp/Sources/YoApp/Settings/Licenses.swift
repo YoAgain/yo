@@ -7,7 +7,8 @@ struct LicensesPage: View {
   var body: some View {
     Form {
       Section {
-        Link("Yo \(HelpPage.appVersion) by Or Arbel", destination: URL(string: "https://justyo.co/p/imprint")!)
+        Link("Yo by Or Arbel", destination: URL(string: "https://justyo.co/p/imprint")!)
+        LabeledContent("Version", value: HelpPage.shownVersion)
         Text("Operated by Christopher Eller").foregroundStyle(.secondary)
         Link(destination: URL(string: "https://justyo.co")!) { LabeledContent("Website", value: "justyo.co") }
       }

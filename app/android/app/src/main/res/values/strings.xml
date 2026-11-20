@@ -176,6 +176,10 @@
 <string name="send_yo_action">Send Yo</string>
 <string name="contact_actions">Contact actions</string>
     <string name="help_and_about">Help &amp; About</string>
+    <string name="about_yo_by">Yo by Or Arbel</string>
+    <string name="about_version">Version</string>
+    <string name="about_operated_by">Operated by Christopher Eller</string>
+    <string name="about_website">Website</string>
     <string name="about_and_licenses">About &amp; Licenses</string>
     <string name="recovery_share">Share</string>
     <string name="tutorial_tap">Tap to Send Yo</string>

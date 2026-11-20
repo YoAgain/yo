@@ -16,6 +16,12 @@ struct HelpPage: View {
     return String(bytes: "\(marketingVersion) (\(build))".utf8.prefix(64), encoding: .utf8) ?? "?"
   }
 
+  /// "1.2" as people read it; a TestFlight build adds its number, "1.2 (34)" (a local build is always 1).
+  static var shownVersion: String {
+    let build = Bundle.main.infoDictionary?["CFBundleVersion"] as? String ?? "1"
+    return build == "1" ? marketingVersion : "\(marketingVersion) (\(build))"
+  }
+
   var body: some View {
     Form {
       Section {
