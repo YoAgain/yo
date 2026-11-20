@@ -635,7 +635,7 @@ def app_builds(out) -> dict:
             seen.update(apps)
             for a in apps:
                 p, _, b = (a or "").partition("/")
-                if p in BUILD and BUILD[p].fullmatch(b):
+                if name == "live" and p in BUILD and BUILD[p].fullmatch(b):  # the baseline: store builds on the live hub
                     users_of.setdefault(p, {}).setdefault(b, set()).add(u.get("id") or f"{name}#{i}")
     seen = {a for a in seen if a and a != "unknown"}
     newest = {}

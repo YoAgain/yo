@@ -48,7 +48,8 @@ android {
         versionName = providers.gradleProperty("yoVersionName").getOrElse("0.1-dev")  // the release tag, from CI
         ndk { abiFilters += listOf("arm64-v8a", "x86_64") }
         buildConfigField("String", "HUB", "\"https://dev.justyo.app\"")  // debug and the device QA build: the dev hub
-        buildConfigField("String", "YO_APP", "\"android/$yoBuild\"")
+        // Debug and QA builds say "android/dev<build>": not a Play build, so the admin never takes one as the newest.
+        buildConfigField("String", "YO_APP", "\"android/dev$yoBuild\"")
     }
     buildFeatures { compose = true; buildConfig = true; resValues = true }
     signingConfigs {
@@ -71,6 +72,7 @@ android {
             signingConfig = signingConfigs.findByName("upload")
             // The store app talks to the live hub, as the iOS App Store and TestFlight build; Hub.kt has its pins.
             if (!deviceSoak) buildConfigField("String", "HUB", "\"https://hub.justyo.app\"")
+            if (!deviceSoak) buildConfigField("String", "YO_APP", "\"android/$yoBuild\"")
         }
     }
     compileOptions { sourceCompatibility = JavaVersion.VERSION_21; targetCompatibility = JavaVersion.VERSION_21 }
