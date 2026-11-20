@@ -1,16 +1,15 @@
 import SwiftUI
 import YoCore
 
+/// The red dot of an unread reply from the Yo team: on the Yo button, Help & About and Contact Us, until the chat
+/// is opened (a dot, not a count: one reply or three, the way there is the same).
 @MainActor
 struct SupportBadge: View {
   @Environment(AccountStore.self) private var accounts
   var body: some View {
     if accounts.supportUnread > 0 {
-      Text("\(accounts.supportUnread)")
-        .font(.caption2.bold()).foregroundStyle(.white)
-        .padding(.horizontal, 5).padding(.vertical, 2)
-        .background(.red, in: Capsule())
-        .accessibilityLabel("\(accounts.supportUnread) unread replies")
+      Circle().fill(.red).frame(width: 10, height: 10)
+        .accessibilityLabel("Unread reply from the Yo team")
     }
   }
 }

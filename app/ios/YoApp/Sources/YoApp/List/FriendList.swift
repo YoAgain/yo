@@ -785,7 +785,7 @@ struct FriendList: View {
       .fixedSize()
       .frame(width: 32, height: 32)
     }
-      .overlay(alignment: .topTrailing) { SupportBadge().offset(x: 10, y: -8) }
+      .overlay(alignment: .topTrailing) { SupportBadge().offset(x: 4, y: -2) }
       .accessibilityLabel("Settings")
   }
 }

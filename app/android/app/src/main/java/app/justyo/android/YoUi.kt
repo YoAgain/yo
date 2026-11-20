@@ -1053,7 +1053,7 @@ private fun NotificationSettingsRow(onClick: () -> Unit) {
                         ) {
                             Icon(Icons.Default.PhotoLibrary, stringResource(R.string.ui_photo_library), Modifier.size(26.dp))
                         }
-                    } else {
+                    } else Box {
                         FloatingActionButton(
                             onClick = { profile = true },
                             shape = CircleShape,
@@ -1066,14 +1066,14 @@ private fun NotificationSettingsRow(onClick: () -> Unit) {
                                 onClick { profile = true; true }
                             },
                         ) {
-                            // The red dot: the account is not backed up (Settings › Account Recovery says why).
-                            BadgedBox(badge = { if (s.backupMissing) Badge() }) {
-                                Row(horizontalArrangement = Arrangement.spacedBy((-5).dp)) {
-                                    Text("Y", Modifier.alignByBaseline(), style = TextStyle(fontFamily = YoFont, fontSize = 29.sp))
-                                    Text("o", Modifier.alignByBaseline(), style = TextStyle(fontFamily = YoFont, fontSize = 23.sp))
-                                }
+                            Row(horizontalArrangement = Arrangement.spacedBy((-5).dp)) {
+                                Text("Y", Modifier.alignByBaseline(), style = TextStyle(fontFamily = YoFont, fontSize = 29.sp))
+                                Text("o", Modifier.alignByBaseline(), style = TextStyle(fontFamily = YoFont, fontSize = 23.sp))
                             }
                         }
+                        // The red dot, over the glass and not through it: the account is not backed up (Settings ›
+                        // Account Recovery says why), or the Yo team answered in the support chat (Help & About › Contact Us).
+                        if (s.backupMissing || s.supportUnread) RedDot(Modifier.align(Alignment.TopEnd).offset((-2).dp, 2.dp))
                     }
                 }
                 val cameraButton: @Composable () -> Unit = {

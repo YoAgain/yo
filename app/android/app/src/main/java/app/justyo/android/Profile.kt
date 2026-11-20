@@ -79,6 +79,8 @@ internal data class Setting(
     /** A checkbox instead of a switch: a choice among many. */
     val checkbox: Boolean = false,
     val badge: Boolean = false,
+    /** The red dot without a number (an unread support reply). */
+    val dot: Boolean = false,
     val good: Boolean? = null,
     val danger: Boolean = false,
     val enabled: Boolean = true,
@@ -115,7 +117,7 @@ private fun SettingRow(row: Setting, shapes: ListItemShapes) {
     val leading: (@Composable () -> Unit)? = row.leading ?: row.icon?.let { icon -> {
         Box(Modifier.size(LeadingSide), contentAlignment = Alignment.Center) { Icon(icon, null) }
     } }
-    val hasTrailing = row.checked != null || row.value != null || row.badge || row.good != null || row.action != null
+    val hasTrailing = row.checked != null || row.value != null || row.badge || row.dot || row.good != null || row.action != null
     val trailing: (@Composable () -> Unit)? = if (!hasTrailing) null else { {
         Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
             row.value?.let { Text(it, color = MaterialTheme.colorScheme.onSurfaceVariant,
@@ -125,6 +127,7 @@ private fun SettingRow(row: Setting, shapes: ListItemShapes) {
                     tint = if (ok) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.error)
             }
             if (row.badge) Badge { Text("1") }
+            if (row.dot) RedDot()
             row.action?.let { (icon, label) -> IconButton(onClick = { row.onAction?.invoke() }, enabled = row.enabled,
                 colors = IconButtonDefaults.iconButtonColors(contentColor = MaterialTheme.colorScheme.primary)) { Icon(icon, label) } }
             if (row.checked != null) { if (row.checkbox) Checkbox(row.checked, onCheckedChange = null, enabled = row.enabled) else Switch(row.checked, onCheckedChange = null, enabled = row.enabled) }
@@ -145,6 +148,12 @@ private fun SettingRow(row: Setting, shapes: ListItemShapes) {
         else -> SegmentedListItem(shapes = shapes, leadingContent = leading, trailingContent = trailing,
             supportingContent = supporting, colors = colors, content = content)
     }
+}
+
+/** The red dot of an unread support reply (and, on the Yo button, a missing backup): iOS's system red, opaque,
+ *  with a thin white ring so it stands apart from the coloured rows behind the button. */
+@Composable internal fun RedDot(modifier: Modifier = Modifier) {
+    Box(modifier.size(12.dp).background(Color.White, CircleShape).padding(1.5.dp).background(Color(0xFFFF3B30), CircleShape))
 }
 
 @Composable private fun Note(text: String) {
@@ -294,6 +303,8 @@ private val HalfPages = setOf("Profile", "Account", "Blocked", "Account Security
     var feedback by rememberSaveable { mutableStateOf("") }
     var sendingFeedback by remember { mutableStateOf(false) }
     var support by remember { mutableStateOf<SupportThread?>(null) }
+    // Settings opened: whether the Yo team answered since (iOS: the settings root's `refreshSupport`).
+    LaunchedEffect(Unit) { repo.refreshSupport() }
 
     Column(Modifier.fillMaxWidth()) {
         // The first page: its title alone, centred (iOS "Yodentity"), no way back; the sheet's handle or back closes it.
@@ -439,7 +450,7 @@ private val HalfPages = setOf("Profile", "Account", "Blocked", "Account Security
                     shown == "Help" -> {
                         HelpHero(Modifier.padding(bottom = 20.dp))
                         Section(null, null,
-                            Setting(stringResource(R.string.ui_contact_us), Icons.Default.Forum, onClick = { open("Contact Us") }),
+                            Setting(stringResource(R.string.ui_contact_us), Icons.Default.Forum, dot = s.supportUnread, onClick = { open("Contact Us") }),
                         )
                         Section(null, null,
                             Setting(stringResource(R.string.ui_status), Icons.Default.MonitorHeart,
@@ -696,7 +707,7 @@ private fun shareCode(context: Context, name: String) {
             onChecked = { on -> repo.command { settings(left = on) } })),
     )
     Section(null, null,
-        gap = 12.dp, rows = arrayOf(Setting(stringResource(R.string.help_and_about), Icons.AutoMirrored.Filled.Help, onClick = { open("Help") }),
+        gap = 12.dp, rows = arrayOf(Setting(stringResource(R.string.help_and_about), Icons.AutoMirrored.Filled.Help, dot = s.supportUnread, onClick = { open("Help") }),
         Setting(stringResource(R.string.ui_add_friends), Icons.Default.PersonAdd, onClick = onAddFriends)),
     )
 }
@@ -849,8 +860,10 @@ private val AppIcons = listOf<Pair<String?, Int>>(null to R.string.icon_default,
     LaunchedEffect(retry) {
         while (true) {
             try {
-                loaded(withContext(Dispatchers.IO) { repo.supportThread() }); offline = false
-                support?.messages?.lastOrNull()?.let { withContext(Dispatchers.IO) { repo.supportRead(it.id) } }
+                val thread = withContext(Dispatchers.IO) { repo.supportThread() }
+                loaded(thread); offline = false
+                // Shown, so read: the red dot goes at once, not one round later.
+                thread?.messages?.maxOfOrNull { it.id }?.let { withContext(Dispatchers.IO) { repo.supportRead(it) } }
             } catch (e: CancellationException) { throw e } catch (_: Exception) { offline = true }
             delay(5000)
         }

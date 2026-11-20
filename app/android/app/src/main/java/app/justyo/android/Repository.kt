@@ -566,7 +566,7 @@ class Repository(private val context: Context, ownerScope: CoroutineScope) {
             if (backgroundSince != 0L && android.os.SystemClock.elapsedRealtime() - backgroundSince > 20_000) transport.forgetConnections()
             connection.foreground()
         } else backgroundSince = android.os.SystemClock.elapsedRealtime()
-        if (on) preloadSound()
+        if (on) { preloadSound(); refreshSupport() }
         present { foreground(it, on) }
         if (on && state.value.updating && !state.value.loading) keepResuming()
         else if (on) command {
@@ -1019,7 +1019,18 @@ class Repository(private val context: Context, ownerScope: CoroutineScope) {
     fun feedback(text: String) = helpSend(transport, InstallId.current(context), utf8Limit(text.trim(), 2000), BuildConfig.VERSION_NAME)
     /** Null until this install has an id: no thread to read yet. */
     fun supportThread() = InstallId.existing(context)?.let { helpThread(transport, it) }
-    fun supportRead(through: ULong) { InstallId.existing(context)?.let { helpRead(transport, it, through) } }
+    fun supportRead(through: ULong) {
+        InstallId.existing(context)?.let { helpRead(transport, it, through) }
+        supportRevision.incrementAndGet()
+        mutable.update { it.copy(supportUnread = false) }
+    }
+    private val supportRevision = java.util.concurrent.atomic.AtomicLong()
+    /** Whether the Yo team answered since the chat was last read (iOS `refreshSupport`); offline keeps the last answer. */
+    fun refreshSupport() = scope.launch(Dispatchers.IO) {
+        val revision = supportRevision.get()
+        val unread = try { (supportThread()?.unread ?: 0u) > 0u } catch (e: CancellationException) { throw e } catch (_: Exception) { return@launch }
+        if (revision == supportRevision.get()) mutable.update { it.copy(supportUnread = unread) }
+    }
     suspend fun roundTrip() = client?.roundTripProbe("PINGTEST", 10000u)
     val crashes = CrashReports(context, transport)
 
