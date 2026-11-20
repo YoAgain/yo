@@ -21,26 +21,22 @@ One Rust core runs the whole client. The apps only draw and pass HTTP and storag
 - [core/bindings](core/bindings): Swift and Kotlin through UniFFI
 - [Telemetry](core/README.md#telemetry): every crash, error and support field the apps send, and what the hub counts
 
-What each group of hub endpoints knows about the caller:
-
-| Endpoints | The caller is | It carries |
-|---|---|---|
-| `POST /v1/inbox/{user}` | nobody (sealed sender, an access key) | a sealed envelope: Yo, photo, video, group message |
-| `PUT/GET/DELETE /v1/blobs/{id}` | nobody (the blob id is the capability) | encrypted media |
-| `PUT/POST /v1/groups/{id}` | a group member, proven without naming them (zkgroup) | encrypted group state |
-| `GET /v1/username/{name}`, `GET /v1/backup/{id}`, hub key, trust root, zk params | nobody | name free or taken; an encrypted backup by its id; public keys |
-| register, username, prekeys, lookup, certificate, push, access key, account, storage, backup, inbox, inbox ack, group auth and credential | the account's device (signed with its auth key) | keys, push token, encrypted storage and backup, who looks up whom |
-| `/v1/report`, `/v1/feedback`, `/v1/support`, `/v1/support/read` | the account's device (signed) | reports, support text (not end-to-end encrypted) |
-| `/v1/crash`, `/v1/errors`, `/v1/diagnostics/crash` | nobody (no account, no device id) | crash and error reports: build, OS, model, stack |
-
-Planned (agreed, not built): support and crash/error reports move to one endpoint that carries a random installation id
-instead of the account; the id is new on reinstall or when crash reports are turned off and on.
-
 The apps on top:
 
 - [app/ios](app/ios): Swift, the iPhone app and its extensions
 - [app/android](app/android): Kotlin, the Android app
 - [app/cli](app/cli): Rust, the CLI; the bots on it in [skills](skills)
+
+What the hub knows per endpoint group ([details](spec/v1.md#1-goals)):
+
+| Group | Who | Endpoints |
+|---|---|---|
+| Messages | anonymous | `inbox`, `blobs` |
+| Groups | anonymous member | `groups` |
+| Public | anonymous | `username`, `backup/{id}`, keys |
+| Account | your device | `register`, `lookup`, `push`, `storage`, `backup` … |
+| Support | your device | `support`, `feedback`, `report` |
+| Crashes | anonymous | `crash`, `errors` |
 
 ### iOS and Android
 
