@@ -130,7 +130,7 @@ def push_backlog() -> int:
 
 EVENT_KINDS = ("yo-in", "yo-out", "media-in", "media-out", "group-create", "yo-in-bot", "media-in-bytes",
                "latency-1s", "latency-5s", "latency-60s", "latency-slow", "push-ok", "push-fail",
-               "http", "http-4xx", "http-429", "http-5xx", "account-gone", "push-folded", "push-paced", "crash")
+               "http", "http-4xx", "http-429", "http-5xx", "account-gone", "push-folded", "push-paced", "crash", "error")
 # A bot's account (alias u): it has devices and every one names a bot's app (YoGPT or the CLI), as the hub's is_bot_app.
 BOT_USER = ("EXISTS (SELECT 1 FROM devices d WHERE d.user_id = u.id) AND NOT EXISTS (SELECT 1 FROM devices d"
             " WHERE d.user_id = u.id AND NOT (coalesce(d.app, '') LIKE 'yogpt/%' OR coalesce(d.app, '') LIKE 'cli/%'))")

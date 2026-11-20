@@ -123,9 +123,10 @@ fn diagnostic(hub: &Hub, kind: &str, peer: Peer, headers: &HeaderMap, body: &[u8
         return Err(bad());
     }
     hub.db.diagnostic(kind, &payload, Some(&install), now_ms())?;
-    if kind == "crash" {
-        hub.count(crate::Event::Crash, text("count").and_then(|n| n.parse().ok()).unwrap_or(1));
-    }
+    hub.count(
+        if kind == "crash" { crate::Event::Crash } else { crate::Event::Error },
+        text("count").and_then(|n| n.parse().ok()).unwrap_or(1),
+    );
     Ok(StatusCode::NO_CONTENT)
 }
 

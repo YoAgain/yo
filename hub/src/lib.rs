@@ -101,11 +101,13 @@ pub(crate) enum Event {
     /// An app's crash report (each report's `count`), per minute as the other events: the operator's crashes per hour
     /// (`diagnostic_days` keeps days only).
     Crash,
+    /// An app's error report (each report's `count`), counted like `Crash`.
+    Error,
 }
 
 impl Event {
     /// The kinds as stored, in the order of the variants.
-    const KINDS: [&str; 23] = [
+    const KINDS: [&str; 24] = [
         "yo-in",
         "yo-out",
         "media-in",
@@ -129,6 +131,7 @@ impl Event {
         "push-folded",
         "push-paced",
         "crash",
+        "error",
     ];
 
     /// The latency bucket of a Yo acknowledged `ms` after it was accepted.
@@ -753,8 +756,8 @@ mod tests {
         assert!(Event::http(204).is_none() && Event::http(304).is_none());
     }
 
-    /// An app's crash report counts as `crash` by its `count` (per minute, so per hour on the operator's page); an
-    /// error report or a refused one does not.
+    /// An app's crash report counts as `crash` and its error report as `error`, each by its `count` (per minute, so per
+    /// hour on the operator's page); a refused one does not.
     #[tokio::test]
     async fn crash_reports_are_counted() {
         use axum::{body::Body, extract::ConnectInfo, http::Request};
@@ -776,6 +779,8 @@ mod tests {
         }
         let crashes = counted(&hub).into_iter().find(|(kind, _)| kind == "crash");
         assert_eq!(crashes, Some(("crash".to_owned(), 4)));
+        let errors = counted(&hub).into_iter().find(|(kind, _)| kind == "error");
+        assert_eq!(errors, Some(("error".to_owned(), 1)));
     }
 
     /// A push the service refuses: counted, and an error of the hub's own in diagnostics (domain "push", by reason and service,
