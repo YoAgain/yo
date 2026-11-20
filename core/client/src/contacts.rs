@@ -293,16 +293,11 @@ impl Client {
         }
     }
 
-    /// Reports a user to the operator (spec 6.3): `api::REPORT_*`. Nothing they sent goes with it.
-    pub fn report(&mut self, who: &str, reason: u8) -> Result<()> {
+    /// Reports a user to the operator (spec 6.4): `api::REPORT_*`, by the install id, not by this account. Nothing
+    /// they sent goes with it.
+    pub fn report(&mut self, who: &str, reason: u8, install: &str) -> Result<()> {
         let (user, _) = self.user_named(&Handle::parse(who)?)?;
-        let body = encode(&api::Report { user_id: user_bytes(&user)?, reason });
-        let response = self.signed("POST", api::REPORT, &body)?;
-        match response.status {
-            status::NO_CONTENT => Ok(()),
-            status::NOT_FOUND => Err(Error::NotOnYo),
-            _ => Err(refused(&response)),
-        }
+        crate::help::report(&*self.transport, install, user_bytes(&user)?, reason)
     }
 
     /// Signs a request to send without the client; the signing clock is saved first (spec 6.2).
@@ -315,29 +310,6 @@ impl Client {
     /// A read-only connectivity check (`Request::status`).
     pub fn status_probe_begin(&mut self) -> Result<Request> {
         self.request("GET", api::CERTIFICATE, Vec::new())
-    }
-
-    /// Feedback for the operator (spec 6.3), readable by the hub. Empty or too long text is refused here.
-    pub fn feedback_begin(&mut self, text: &str, app_version: &str) -> Result<Request> {
-        self.support_message_begin(text, app_version, api::FEEDBACK)
-    }
-
-    pub fn send_support_begin(&mut self, text: &str, app_version: &str) -> Result<Request> {
-        self.support_message_begin(text, app_version, api::SUPPORT)
-    }
-
-    fn support_message_begin(&mut self, text: &str, app_version: &str, path: &'static str) -> Result<Request> {
-        let feedback = api::Feedback { text: text.as_bytes().into(), app_version: app_version.as_bytes().into() };
-        feedback.check().map_err(|_| Error::Protocol("feedback empty or too long"))?;
-        self.request("POST", path, encode(&feedback))
-    }
-
-    /// The support thread (`Request::thread`), or with `through` its messages up to there marked read.
-    pub fn support_begin(&mut self, through: Option<u64>) -> Result<Request> {
-        match through {
-            Some(through) => self.request("POST", api::SUPPORT_READ, encode(&api::SupportRead { through })),
-            None => self.request("GET", api::SUPPORT, Vec::new()),
-        }
     }
 
     /// Deletes the account at the hub with everything it holds (spec 6.3); the app then forgets its state. `Replaced`:

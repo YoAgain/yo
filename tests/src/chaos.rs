@@ -323,6 +323,8 @@ struct Acct {
     friends: Vec<usize>,
     bot: bool,
     feedback: u32,
+    /// Its install id for help (spec 6.4), never sent with the account.
+    install: String,
     /// Whether the hub has a backup record of the account: `None` when that is not known (a lost answer).
     backed_up: Option<bool>,
     /// Photos sealed and waiting for their upload: (to, media, ciphertext, tag).
@@ -418,6 +420,7 @@ fn new_acct(w: &World, idx: usize, rng: &mut Rng) -> Option<Acct> {
         friends: Vec::new(),
         bot: idx % 50 == 7,
         feedback: 0,
+        install: yo_core::help::new_install_id(),
         backed_up: Some(false),
         uploads: Vec::new(),
     })
@@ -873,7 +876,8 @@ fn op_misc(w: &World, a: &mut Acct, rng: &mut Rng) {
         }
         1 => {
             let Some((_, peer)) = pick_peer(w, a, rng) else { return };
-            match a.client.as_mut().unwrap().report(&peer.user, 1 + rng.below(3) as u8) {
+            let install = a.install.clone();
+            match a.client.as_mut().unwrap().report(&peer.user, 1 + rng.below(3) as u8, &install) {
                 Ok(()) => w.stats.count("reported"),
                 Err(Error::NotOnYo) if !peer.alive => w.stats.count("report: not on Yo"),
                 Err(error) => note_error(w, a, "report", &error),
@@ -881,10 +885,8 @@ fn op_misc(w: &World, a: &mut Acct, rng: &mut Rng) {
         }
         2 => {
             a.feedback += 1;
-            match client
-                .feedback_begin(&format!("chaos feedback {} from {}", a.feedback, a.idx), "chaos")
-                .and_then(|r| r.send())
-            {
+            let text = format!("chaos feedback {} from {}", a.feedback, a.idx);
+            match yo_core::help::send_message(a.proc_.as_ref(), &a.install, &text, "chaos") {
                 Ok(()) => w.stats.count("feedback"),
                 Err(Error::Refused(429)) => w.stats.count("feedback: 429"),
                 Err(error) => note_error(w, a, "feedback", &error),
@@ -1134,7 +1136,7 @@ fn hub_config(args: &Args, db: &str) -> Config {
     if args.limits {
         config.limits = Limits { register_per_ip_hour: u32::MAX, backup_per_ip_hour: u32::MAX, ..Limits::default() };
     } else {
-        config.limits.feedback_per_user_day = 10;
+        config.limits.support_per_install_day = 10;
     }
     config.reserved = yo_hub::config::parse_reserved(&RESERVED.join("\n"));
     config

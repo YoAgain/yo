@@ -12,11 +12,11 @@ pub mod config;
 pub mod db;
 pub mod error;
 pub mod groups;
+mod help;
 pub mod limiter;
 mod mail;
 pub mod push;
 mod request;
-mod support;
 
 use axum::extract::{DefaultBodyLimit, State};
 use axum::http::header::CONTENT_TYPE;
@@ -256,13 +256,11 @@ impl Hub {
             .route(api::GROUP_AUTH, get(groups::get_group_auth))
             .route(api::GROUP_CREDENTIAL, post(groups::post_group_credential))
             .route("/v1/groups/{id}", put(groups::put_group).post(groups::post_group))
-            .route(api::REPORT, post(support::post_report))
-            .route(api::FEEDBACK, post(support::post_feedback))
-            .route(api::SUPPORT, get(support::get_support).post(support::post_feedback))
-            .route(api::SUPPORT_READ, post(support::post_support_read))
-            .route(api::CRASH, post(support::post_crash))
-            .route("/v1/errors", post(support::post_error))
-            .route("/v1/diagnostics/crash", post(support::post_crash_report))
+            .route(api::HELP_MESSAGES, get(help::get_messages).post(help::post_message))
+            .route(api::HELP_READ, post(help::post_read))
+            .route(api::HELP_REPORT, post(help::post_report))
+            .route(api::HELP_CRASH, post(help::post_crash))
+            .route(api::HELP_ERROR, post(help::post_error))
             .route(hubsig::KEY_PATH, get(hub_key))
             .route(api::TRUST_ROOT_PATH, get(trust_root))
             .route(api::ZK_PARAMS_PATH, get(zk_params))
@@ -633,7 +631,7 @@ mod tests {
         use tower::ServiceExt;
         let path = std::env::temp_dir().join(format!("yo-todo-{}-{}.sqlite", std::process::id(), now_ms()));
         let mut config = Config { db_path: path.to_string_lossy().into(), ..Config::for_tests() };
-        config.limits.crash_per_ip_day = 5;
+        config.limits.todo_per_ip_day = 5;
         for enabled in [false, true] {
             config.admin_token = enabled.then(|| "test-token".into());
             let hub = Hub::new(config.clone(), Arc::new(push::Recorder::default())).unwrap();

@@ -2,7 +2,7 @@
 //! a malformed or oversized body, to a repeat, past its limit; and the prekeys (4.1, 6.5) as the hub hands them out.
 
 use std::sync::Arc;
-use yo_core::{Client, Error, Event};
+use yo_core::{help, Client, Error, Event};
 use yo_hub::config::Config;
 use yo_tests::{junk, new_phone, random_u64, register, user_id, username, Http, TestHub};
 use yo_wire::api::{self, status};
@@ -30,6 +30,11 @@ fn account(hub: &TestHub) -> (Client, Arc<Http>, String) {
     let http = Http::new(hub.url());
     let name = username(random_u64() % 1_000_000_000);
     (register(http.clone(), &name, None), http, name)
+}
+
+/// The help header of an install id made of one byte.
+fn install(n: u8) -> [(&'static str, String); 1] {
+    [(api::HEADER_INSTALL, format!("{n:02x}").repeat(16))]
 }
 
 fn hub_with(limits: impl FnOnce(&mut yo_hub::config::Limits)) -> TestHub {
@@ -87,19 +92,6 @@ fn signed_routes(me: &str) -> Vec<(&'static str, String, Vec<u8>)> {
         ("PUT", api::BACKUP.into(), encode(&backup_record(Vec::new()))),
         ("GET", api::STORAGE.into(), Vec::new()),
         ("PUT", api::STORAGE.into(), encode(&api::Storage { version: 0, data: vec![1; 1024].into() })),
-        ("POST", api::REPORT.into(), encode(&api::Report { user_id: [1; 16], reason: api::REPORT_SPAM })),
-        (
-            "POST",
-            api::FEEDBACK.into(),
-            encode(&api::Feedback { text: b"hi".to_vec().into(), app_version: b"1".to_vec().into() }),
-        ),
-        ("GET", api::SUPPORT.into(), Vec::new()),
-        ("POST", api::SUPPORT_READ.into(), encode(&api::SupportRead { through: 0 })),
-        (
-            "POST",
-            api::SUPPORT.into(),
-            encode(&api::Feedback { text: b"hi".to_vec().into(), app_version: Vec::new().into() }),
-        ),
         ("DELETE", api::ACCOUNT.into(), Vec::new()),
     ]
 }
@@ -287,23 +279,28 @@ fn bodies_are_held_to_their_limits() {
     ] {
         assert_eq!(signed(&mut a, "POST", api::LOOKUP, &lookup_body(handle, 0, Vec::new())).0, status::BAD_REQUEST);
     }
-    // Report: a reason there is, not oneself.
+    // Help (6.4): an install id of 32 lowercase hex digits, never a signature; a report's reason there is.
+    let phone = install(1);
     let report = |user: [u8; 16], reason| encode(&api::Report { user_id: user, reason });
     for reason in [0, 4, 255] {
-        assert_eq!(signed(&mut a, "POST", api::REPORT, &report([1; 16], reason)).0, status::BAD_REQUEST);
+        assert_eq!(raw(&hub, "POST", api::HELP_REPORT, &phone, report([1; 16], reason)).0, status::BAD_REQUEST);
     }
-    assert_eq!(signed(&mut a, "POST", api::REPORT, &report(user_id(&me), 1)).0, status::BAD_REQUEST);
-    // Feedback: text 1–2000 bytes of UTF-8, the version up to 64.
+    for bad in [vec![], vec![(api::HEADER_INSTALL, "0A".repeat(16))], vec![(api::HEADER_INSTALL, "0".repeat(30))]] {
+        assert_eq!(raw(&hub, "POST", api::HELP_REPORT, &bad, report(user_id(&me), 1)).0, status::BAD_REQUEST);
+        assert_eq!(raw(&hub, "GET", api::HELP_MESSAGES, &bad, Vec::new()).0, status::BAD_REQUEST);
+    }
+    // A message: text 1–2000 bytes of UTF-8, the version up to 64.
     let feedback = |text: Vec<u8>, version: usize| {
         encode(&api::Feedback { text: text.into(), app_version: vec![b'1'; version].into() })
     };
-    assert_eq!(signed(&mut a, "POST", api::FEEDBACK, &feedback(vec![b'x'; 2000], 64)).0, status::NO_CONTENT);
+    assert_eq!(raw(&hub, "POST", api::HELP_MESSAGES, &phone, feedback(vec![b'x'; 2000], 64)).0, status::NO_CONTENT);
     for body in [feedback(vec![b'x'; 2001], 1), feedback(Vec::new(), 1), feedback(b"x".to_vec(), 65)] {
-        assert_eq!(signed(&mut a, "POST", api::FEEDBACK, &body).0, status::BAD_REQUEST);
+        assert_eq!(raw(&hub, "POST", api::HELP_MESSAGES, &phone, body).0, status::BAD_REQUEST);
     }
-    // A crash report: the same body, no account, no signature (6.4).
-    assert_eq!(raw(&hub, "POST", api::CRASH, &[], feedback(b"[crash] x".to_vec(), 9)).0, status::NO_CONTENT);
-    assert_eq!(raw(&hub, "POST", api::CRASH, &[], feedback(vec![b'x'; 2001], 1)).0, status::BAD_REQUEST);
+    // The old routes are gone.
+    for path in ["/v1/crash", "/v1/errors", "/v1/diagnostics/crash", "/v1/support", "/v1/feedback", "/v1/report"] {
+        assert_eq!(raw(&hub, "POST", path, &phone, feedback(b"x".to_vec(), 1)).0, status::NOT_FOUND, "{path}");
+    }
     // Backup (7): wraps 256 bytes, sealed 60 KiB, a locator of 16 bytes or none, auth keys that are keys.
     let mut record = backup_record(Vec::new());
     record.sealed = vec![1; 60 * 1024].into();
@@ -810,11 +807,10 @@ fn reports_feedback_and_deletion() {
     let (mut b, _, _) = account(&hub);
     let report = |user: [u8; 16], reason| encode(&api::Report { user_id: user, reason });
     for reason in [api::REPORT_SPAM, api::REPORT_ABUSE, api::REPORT_OTHER] {
-        assert_eq!(signed(&mut a, "POST", api::REPORT, &report(user_id(b.user_id()), reason)).0, status::NO_CONTENT);
+        let body = report(user_id(b.user_id()), reason);
+        assert_eq!(raw(&hub, "POST", api::HELP_REPORT, &install(2), body).0, status::NO_CONTENT);
     }
-    assert_eq!(signed(&mut a, "POST", api::REPORT, &report([0; 16], 1)).0, status::NOT_FOUND);
-    let feedback = encode(&api::Feedback { text: "Yo".as_bytes().to_vec().into(), app_version: Vec::new().into() });
-    assert_eq!(signed(&mut a, "POST", api::FEEDBACK, &feedback).0, status::NO_CONTENT);
+    assert_eq!(raw(&hub, "POST", api::HELP_REPORT, &install(2), report([0; 16], 1)).0, status::NOT_FOUND);
     assert_eq!(signed(&mut a, "DELETE", api::ACCOUNT, &[]).0, status::NO_CONTENT);
     assert_eq!(signed(&mut a, "DELETE", api::ACCOUNT, &[]).0, status::GONE);
     // Gone with it (3.2, 6.4): the user, its name, its key, which registers a new user now.
@@ -1040,36 +1036,28 @@ fn delivery_urgency_selects_alert_or_background_and_defaults_to_alert() {
 fn support_threads_are_private_and_read_markers_are_bounded() {
     let config = Config { admin_token: Some("test-token".into()), ..Config::for_tests() };
     let hub = TestHub::start_with(config, "127.0.0.1:0");
-    let (mut a, _, _) = account(&hub);
-    let (mut b, _, _) = account(&hub);
-    a.feedback_begin("hello 🎨", "1").and_then(|r| r.send()).unwrap();
-    assert!(b.support_begin(None).and_then(|r| r.thread()).unwrap().messages.is_empty());
+    let http = Http::new(hub.url());
+    let (a, b) = ("0a".repeat(16), "0b".repeat(16));
+    help::send_message(&*http, &a, "hello 🎨", "1").unwrap();
+    assert!(help::thread(&*http, &b).unwrap().messages.is_empty());
     let headers = [("yo-admin-token", "test-token".into())];
     assert_eq!(raw(&hub, "GET", "/v1/admin/messages", &[], vec![]).0, 404);
     let (_, body) = raw(&hub, "GET", "/v1/admin/messages", &headers, vec![]);
     let threads: serde_json::Value = serde_json::from_slice(&body).unwrap();
-    // Only users' threads: the team's to-dos are a table of their own (/v1/admin/todos).
+    // Only installs' threads, by their id: the team's to-dos are a table of their own (/v1/admin/todos).
     assert_eq!(threads.as_array().unwrap().len(), 1);
-    assert_eq!(threads[0]["unread"], 1);
-    let path = format!("/v1/admin/messages/{}", threads[0]["user_id"].as_str().unwrap());
+    assert_eq!((threads[0]["unread"].as_i64(), threads[0]["install"].as_str()), (Some(1), Some(&a[..])));
+    let path = format!("/v1/admin/messages/{}", threads[0]["install"].as_str().unwrap());
     assert_eq!(raw(&hub, "POST", &path, &headers, b"team reply".to_vec()).0, 204);
-    let first = a.support_begin(None).and_then(|r| r.thread()).unwrap();
+    let first = help::thread(&*http, &a).unwrap();
     assert_eq!(first.unread, 1);
     assert_eq!(first.messages.len(), 2);
     assert_eq!(first.messages[1].text.as_slice(), b"team reply");
     assert_eq!(raw(&hub, "POST", &path, &headers, b"later reply".to_vec()).0, 204);
-    a.support_begin(Some(first.messages[1].id)).and_then(|r| r.send()).unwrap();
-    assert_eq!(
-        a.support_begin(None).and_then(|r| r.thread()).unwrap().unread,
-        1,
-        "reply arriving after fetch stays unread"
-    );
-    b.support_begin(Some(u64::MAX >> 1)).and_then(|r| r.send()).unwrap();
-    assert_eq!(
-        a.support_begin(None).and_then(|r| r.thread()).unwrap().unread,
-        1,
-        "another account cannot mark this thread read"
-    );
+    help::read(&*http, &a, first.messages[1].id).unwrap();
+    assert_eq!(help::thread(&*http, &a).unwrap().unread, 1, "reply arriving after fetch stays unread");
+    help::read(&*http, &b, u64::MAX >> 1).unwrap();
+    assert_eq!(help::thread(&*http, &a).unwrap().unread, 1, "another install cannot mark this thread read");
     let handled = format!("{path}/handled");
     assert_eq!(raw(&hub, "POST", &handled, &headers, first.messages[0].id.to_string().into_bytes()).0, 204);
     let (_, body) = raw(&hub, "GET", "/v1/admin/messages", &headers, vec![]);
@@ -1087,7 +1075,7 @@ fn support_threads_are_private_and_read_markers_are_bounded() {
             assert_eq!(row["done_at"].is_null(), value == b"0");
         }
     }
-    assert_eq!(a.support_begin(None).and_then(|r| r.thread()).unwrap().unread, 1);
+    assert_eq!(help::thread(&*http, &a).unwrap().unread, 1);
     assert_eq!(raw(&hub, "POST", "/v1/admin/todos", &headers, b"team task".to_vec()).0, 201);
     let (_, body) = raw(&hub, "GET", "/v1/admin/todos", &headers, vec![]);
     let todos: serde_json::Value = serde_json::from_slice(&body).unwrap();
@@ -1098,35 +1086,38 @@ fn support_threads_are_private_and_read_markers_are_bounded() {
 }
 
 #[test]
-fn support_and_legacy_feedback_share_the_user_rate_limit() {
-    let hub = hub_with(|limits| limits.feedback_per_user_day = 2);
-    let (mut a, _, _) = account(&hub);
-    let (mut b, _, _) = account(&hub);
-    a.send_support_begin("new route", "1").unwrap().send().unwrap();
-    a.feedback_begin("legacy route", "1").and_then(|r| r.send()).unwrap();
-    assert_eq!(a.send_support_begin("limited", "1").unwrap().send(), Err(Error::Refused(status::RATE_LIMITED)));
-    b.send_support_begin("separate user", "1").unwrap().send().unwrap();
-    assert_eq!(a.support_begin(None).and_then(|r| r.thread()).unwrap().messages.len(), 2);
-    assert_eq!(
-        signed(&mut a, "POST", api::SUPPORT_READ, &encode(&api::SupportRead { through: u64::MAX })).0,
-        status::BAD_REQUEST
-    );
+fn help_is_limited_by_install_and_by_address() {
+    let hub = hub_with(|limits| {
+        limits.support_per_install_day = 2;
+        limits.help_per_ip_day = 4;
+    });
+    let http = Http::new(hub.url());
+    let (a, b, c) = ("0a".repeat(16), "0b".repeat(16), "0c".repeat(16));
+    help::send_message(&*http, &a, "one", "1").unwrap();
+    help::send_message(&*http, &a, "two", "1").unwrap();
+    assert_eq!(help::send_message(&*http, &a, "limited", "1"), Err(Error::Refused(status::RATE_LIMITED)));
+    help::send_message(&*http, &b, "another install", "1").unwrap();
+    assert_eq!(help::thread(&*http, &a).unwrap().messages.len(), 2);
+    // A new id does not pass the address limit (4 a day here, the refused message counted).
+    assert_eq!(help::send_message(&*http, &c, "one too many", "1"), Err(Error::Refused(status::RATE_LIMITED)));
+    let through = encode(&api::SupportRead { through: u64::MAX });
+    assert_eq!(raw(&hub, "POST", api::HELP_READ, &install(10), through).0, status::BAD_REQUEST);
 }
 
 #[test]
 fn diagnostics_are_anonymous_count_all_and_admin_ticks_require_a_token() {
     let mut config = Config::for_tests();
     config.admin_token = Some("test-token".into());
-    config.limits.crash_per_ip_day = 1;
+    config.limits.diagnostics_per_install_hour = 23;
     let hub = TestHub::start_with(config, "127.0.0.1:0");
     let error = serde_json::json!({"domain":"network", "code":"timeout", "place":"sync", "app":"ios/1", "os":"26", "model":"iPhone"}).to_string().into_bytes();
     for _ in 0..12 {
-        assert_eq!(raw(&hub, "POST", "/v1/errors", &[], error.clone()).0, status::NO_CONTENT);
+        assert_eq!(raw(&hub, "POST", api::HELP_ERROR, &install(1), error.clone()).0, status::NO_CONTENT);
     }
     for body in [b"{}".to_vec(), b"null".to_vec(), b"{bad".to_vec(), serde_json::json!({"app":"ios/1","os":"26","model":"iPhone","domain":"test","code":"1","place":"sync","user":"forbidden"}).to_string().into_bytes()] {
-        assert_eq!(raw(&hub, "POST", "/v1/errors", &[], body).0, status::BAD_REQUEST);
+        assert_eq!(raw(&hub, "POST", api::HELP_ERROR, &install(1), body).0, status::BAD_REQUEST);
     }
-    assert_eq!(raw(&hub, "POST", "/v1/errors", &[], vec![b'x'; 60 * 1024 + 1]).0, 413);
+    assert_eq!(raw(&hub, "POST", api::HELP_ERROR, &install(1), vec![b'x'; 60 * 1024 + 1]).0, 413);
     // A day's unread notifications, counted on the phone: one report, the count it carries.
     let fallback = |count: &str, severity: Option<&str>| {
         let mut body = serde_json::json!({"domain":"NotificationFallback", "code":"lockedBeforeFirstUnlock",
@@ -1137,10 +1128,13 @@ fn diagnostics_are_anonymous_count_all_and_admin_ticks_require_a_token() {
         body.to_string().into_bytes()
     };
     for (count, severity) in [("0", Some("expected")), ("x", Some("expected")), ("100001", None), ("3", Some("loud"))] {
-        assert_eq!(raw(&hub, "POST", "/v1/errors", &[], fallback(count, severity)).0, status::BAD_REQUEST);
+        assert_eq!(raw(&hub, "POST", api::HELP_ERROR, &install(1), fallback(count, severity)).0, status::BAD_REQUEST);
     }
     for _ in 0..2 {
-        assert_eq!(raw(&hub, "POST", "/v1/errors", &[], fallback("5", Some("expected"))).0, status::NO_CONTENT);
+        assert_eq!(
+            raw(&hub, "POST", api::HELP_ERROR, &install(1), fallback("5", Some("expected"))).0,
+            status::NO_CONTENT
+        );
     }
     let path = "/v1/admin/diagnostics";
     assert_eq!(raw(&hub, "GET", path, &[], vec![]).0, 404);
@@ -1151,7 +1145,7 @@ fn diagnostics_are_anonymous_count_all_and_admin_ticks_require_a_token() {
     let rows: serde_json::Value = serde_json::from_slice(&body).unwrap();
     let rows = rows.as_array().unwrap();
     let with = |code: &str| rows.iter().find(|r| r["payload"].as_str().unwrap().contains(code)).unwrap().clone();
-    assert_eq!(with("timeout")["count"], 12);
+    assert_eq!((with("timeout")["count"].as_i64(), with("timeout")["installs"].as_i64()), (Some(12), Some(1)));
     let locked = with("lockedBeforeFirstUnlock");
     assert_eq!(locked["count"], 10);
     assert!(locked["payload"].as_str().unwrap().contains(r#""severity":"expected""#));
@@ -1161,6 +1155,9 @@ fn diagnostics_are_anonymous_count_all_and_admin_ticks_require_a_token() {
     assert_eq!(status, 200);
     let rows: serde_json::Value = serde_json::from_slice(&body).unwrap();
     assert_eq!(rows.as_array().unwrap().iter().find(|r| r["id"] == id).unwrap()["done"], true);
+    // 23 an hour by one install here; another install goes on.
+    assert_eq!(raw(&hub, "POST", api::HELP_ERROR, &install(1), error.clone()).0, status::RATE_LIMITED);
+    assert_eq!(raw(&hub, "POST", api::HELP_ERROR, &install(2), error).0, status::NO_CONTENT);
 }
 
 #[test]

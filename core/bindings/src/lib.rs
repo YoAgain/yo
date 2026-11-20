@@ -633,10 +633,55 @@ pub fn username_free(transport: Arc<dyn HttpTransport>, username: String) -> Res
     Ok(Client::username_free(&Http(transport), &username)?)
 }
 
-/// A crash report to the Yo team, sent without an account (not linked to anyone): a few lines and the app version.
+/// A new install id (128 random bits, 32 hex digits) for help: the support thread, reports, crash and error reports
+/// (spec 6.4). The app keeps it on the phone alone and sends it with nothing else; Send Crashes off deletes it.
 #[uniffi::export]
-pub fn send_crash_report(transport: Arc<dyn HttpTransport>, text: String, app_version: String) -> Result<(), YoError> {
-    Ok(Client::send_crash(&Http(transport), &text, &app_version)?)
+pub fn new_install_id() -> String {
+    yo_core::help::new_install_id()
+}
+
+/// A message to the Yo team by the install id. `Refused` 429: the day's are used up, or the thread is full.
+#[uniffi::export]
+pub fn help_send(
+    transport: Arc<dyn HttpTransport>,
+    install: String,
+    text: String,
+    app_version: String,
+) -> Result<(), YoError> {
+    Ok(yo_core::help::send_message(&Http(transport), &install, &text, &app_version)?)
+}
+
+/// The install's thread with the Yo team (empty before its first message).
+#[uniffi::export]
+pub fn help_thread(transport: Arc<dyn HttpTransport>, install: String) -> Result<SupportThread, YoError> {
+    let thread = yo_core::help::thread(&Http(transport), &install)?;
+    let messages = thread.messages.into_iter().map(|m| SupportMessage {
+        id: m.id,
+        from_team: m.from_team == 1,
+        text: String::from_utf8_lossy(m.text.as_slice()).into_owned(),
+        created_at: m.created_at,
+        read_at: m.read_at,
+    });
+    Ok(SupportThread { unread: thread.unread, messages: messages.collect() })
+}
+
+/// The team's answers read, through the id shown last.
+#[uniffi::export]
+pub fn help_read(transport: Arc<dyn HttpTransport>, install: String, through: u64) -> Result<(), YoError> {
+    Ok(yo_core::help::read(&Http(transport), &install, through)?)
+}
+
+/// A crash (`crash` true) or error report, the JSON the app made, by the install id: the hub's status (204 taken,
+/// 4xx never taken, 429 and 5xx later again). Err: no answer.
+#[uniffi::export]
+pub fn help_diagnostic(
+    transport: Arc<dyn HttpTransport>,
+    install: String,
+    crash: bool,
+    report: String,
+) -> Result<u16, YoError> {
+    let kind = if crash { yo_core::help::Diagnostic::Crash } else { yo_core::help::Diagnostic::Error };
+    Ok(yo_core::help::send_diagnostic(&Http(transport), &install, kind, report.as_bytes())?)
 }
 
 /// What may be typed as a username (spec 3.3), so the app's field can never disagree with the hub.
@@ -1112,35 +1157,15 @@ impl YoClient {
         _ = self.with(|c| c.set_left_handed(left_handed));
     }
 
-    /// Reports a user to the operator. `NotOnYo`: no such user.
-    pub fn report(&self, who: String, reason: ReportReason) -> Result<(), YoError> {
+    /// Reports a user to the operator by the install id (`new_install_id`), not by this account. `NotOnYo`: no such
+    /// user.
+    pub fn report(&self, who: String, reason: ReportReason, install: String) -> Result<(), YoError> {
         let reason = match reason {
             ReportReason::Spam => yo_core::REPORT_SPAM,
             ReportReason::Abuse => yo_core::REPORT_ABUSE,
             ReportReason::Other => yo_core::REPORT_OTHER,
         };
-        Ok(self.with(|c| c.report(&who, reason))??)
-    }
-
-    pub fn send_support(&self, text: String, app_version: String) -> Result<(), YoError> {
-        let request = self.with(|c| c.send_support_begin(&text, &app_version))??;
-        Ok(request.send()?)
-    }
-
-    pub fn support_thread(&self) -> Result<SupportThread, YoError> {
-        let thread = self.with(|c| c.support_begin(None))??.thread()?;
-        let messages = thread.messages.into_iter().map(|m| SupportMessage {
-            id: m.id,
-            from_team: m.from_team == 1,
-            text: String::from_utf8_lossy(m.text.as_slice()).into_owned(),
-            created_at: m.created_at,
-            read_at: m.read_at,
-        });
-        Ok(SupportThread { unread: thread.unread, messages: messages.collect() })
-    }
-
-    pub fn support_read(&self, through: u64) -> Result<(), YoError> {
-        Ok(self.with(|c| c.support_begin(Some(through)))??.send()?)
+        Ok(self.with(|c| c.report(&who, reason, &install))??)
     }
 
     /// Deletes the account at the hub with everything it holds about it; then forget this client and its state.

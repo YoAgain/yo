@@ -47,7 +47,7 @@ What the hub knows per endpoint group ([details](spec/v1.md#1-goals)):
 | Public | `username`, keys | anonymous |
 | Backup | `backup/{id}` | anonymous, with its long secret id |
 | Account | `register`, `lookup`, `push`, `storage`, `backup` … | account (signed by its device key) |
-| Support and crashes | `support`, `feedback`, `report`, `crash`, `errors` | random install id |
+| Support and crashes | `help/messages`, `help/read`, `help/report`, `help/crash`, `help/error` | random install id |
 
 ### Account Sync (end-to-end encrypted)
 

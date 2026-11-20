@@ -130,7 +130,7 @@ impl Hub {
                     "details": failure.detail,
                 });
                 let now = self.clock_ms();
-                let noted = self.blocking(move |hub| hub.db.diagnostic("error", &payload, now));
+                let noted = self.blocking(move |hub| hub.db.diagnostic("error", &payload, None, now));
                 if let Ok(Err(error)) = noted.await {
                     eprintln!("yo-hub: push diagnostic: {error}");
                 }

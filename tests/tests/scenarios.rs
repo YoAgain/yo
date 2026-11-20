@@ -381,8 +381,9 @@ fn the_hub_survives_garbage_on_every_route() {
         ("GET", api::username_path("LEO")),
         ("GET", "/v1/username/%FF%00".to_owned()),
         ("DELETE", api::ACCOUNT.to_owned()),
-        ("POST", api::REPORT.to_owned()),
-        ("POST", api::FEEDBACK.to_owned()),
+        ("POST", api::HELP_REPORT.to_owned()),
+        ("POST", api::HELP_MESSAGES.to_owned()),
+        ("POST", api::HELP_CRASH.to_owned()),
     ];
     let mut seed = 0x9E37_79B9_7F4A_7C15u64;
     for (method, path) in routes {
@@ -675,56 +676,66 @@ fn a_blocked_friend_is_not_heard_until_unblocked() {
 #[test]
 fn a_report_reaches_the_operator_within_its_limit() {
     let mut config = yo_hub::config::Config::for_tests();
-    config.limits.report_per_user_day = 3;
+    config.limits.report_per_install_day = 3;
     let hub = TestHub::start_with(config, "127.0.0.1:0");
     let (mut a, b, _, pb) = pair(&hub);
-    a.report(&pb, api::REPORT_SPAM).unwrap();
-    a.report(b.user_id(), api::REPORT_ABUSE).unwrap();
-    assert_eq!(a.report(&format!("NOBODY{}", random_u64() % 100_000), api::REPORT_OTHER), Err(Error::NotOnYo));
+    // By the install id, not by the account: the hub cannot tell who reports.
+    let phone = yo_core::help::new_install_id();
+    a.report(&pb, api::REPORT_SPAM, &phone).unwrap();
+    a.report(b.user_id(), api::REPORT_ABUSE, &phone).unwrap();
+    assert_eq!(a.report(&format!("NOBODY{}", random_u64() % 100_000), api::REPORT_OTHER, &phone), Err(Error::NotOnYo));
     let me = a.user_id().to_owned();
-    assert!(a.report(&me, api::REPORT_SPAM).is_err(), "not oneself");
-    // Only the reasons there are, nobody's own id; the third report today is the last.
-    let report = |reason| yo_wire::encode(&api::Report { user_id: yo_tests::user_id(b.user_id()), reason });
-    assert_eq!(a.signed_for_tests("POST", api::REPORT, &report(9)).unwrap().status, api::status::BAD_REQUEST);
-    a.report(&pb, api::REPORT_OTHER).unwrap();
-    assert_eq!(a.report(&pb, api::REPORT_OTHER), Err(Error::Refused(api::status::RATE_LIMITED)));
+    assert!(a.report(&me, api::REPORT_SPAM, &phone).is_err(), "not oneself");
+    assert!(a.report(&pb, api::REPORT_SPAM, "not an install id").is_err());
+    // Only the reasons there are; the third report today is the last.
+    let http = yo_tests::Http::new(hub.url());
+    let user = yo_tests::user_id(b.user_id());
+    assert_eq!(yo_core::help::report(&*http, &phone, user, 9), Err(Error::Refused(api::status::BAD_REQUEST)));
+    a.report(&pb, api::REPORT_OTHER, &phone).unwrap();
+    assert_eq!(a.report(&pb, api::REPORT_OTHER, &phone), Err(Error::Refused(api::status::RATE_LIMITED)));
+    // Per install: a new id (Send Crashes off and on) reports again.
+    a.report(&pb, api::REPORT_OTHER, &yo_core::help::new_install_id()).unwrap();
 }
 
 #[test]
 fn feedback_reaches_the_operator_within_its_limit() {
+    use yo_core::help;
     let mut config = yo_hub::config::Config::for_tests();
-    config.limits.feedback_per_user_day = 3;
+    config.limits.support_per_install_day = 3;
     let hub = TestHub::start_with(config, "127.0.0.1:0");
-    let (mut a, mut b, _, _) = pair(&hub);
-    a.feedback_begin("More colors, please", "1.0 (1)").and_then(|r| r.send()).unwrap();
-    // Without the client: signed under it, sent after.
-    a.feedback_begin(&"ä".repeat(1000), "1.0 (1)").unwrap().send().unwrap();
-    // Too long, empty or not UTF-8: the core does not sign it, and the hub refuses it anyway.
+    let http = yo_tests::Http::new(hub.url());
+    let (phone, other) = (help::new_install_id(), help::new_install_id());
+    assert_ne!(phone, other);
+    help::send_message(&*http, &phone, "More colors, please", "1.0 (1)").unwrap();
+    help::send_message(&*http, &phone, &"ä".repeat(1000), "1.0 (1)").unwrap();
+    // Too long or empty: the core does not send it, and the hub refuses it anyway.
     let limit = yo_wire::limits::MAX_FEEDBACK_LEN;
-    assert!(a.feedback_begin(&"x".repeat(limit + 1), "1.0 (1)").is_err());
-    assert!(a.feedback_begin("", "1.0 (1)").is_err());
+    assert!(help::send_message(&*http, &phone, &"x".repeat(limit + 1), "1.0 (1)").is_err());
+    assert!(help::send_message(&*http, &phone, "", "1.0 (1)").is_err());
     let raw = |text: Vec<u8>, version: &str| {
         yo_wire::encode(&api::Feedback { text: text.into(), app_version: version.as_bytes().to_vec().into() })
     };
+    let headers = [(api::HEADER_INSTALL.to_owned(), phone.clone())];
     for body in [
         raw(vec![b'x'; limit + 1], "1"),
         raw(Vec::new(), "1"),
         raw(vec![0xFF, 0xFE], "1"),
         raw(b"fine".to_vec(), &"9".repeat(65)),
     ] {
-        assert_eq!(a.signed_for_tests("POST", api::FEEDBACK, &body).unwrap().status, api::status::BAD_REQUEST);
+        use yo_core::Transport;
+        let answer = http.request("POST", api::HELP_MESSAGES, &headers, &body).unwrap();
+        assert_eq!(answer.status, api::status::BAD_REQUEST);
     }
     // The third today is the last.
-    a.feedback_begin(&"x".repeat(limit), "1.0 (1)").and_then(|r| r.send()).unwrap();
+    help::send_message(&*http, &phone, &"x".repeat(limit), "1.0 (1)").unwrap();
     assert_eq!(
-        a.feedback_begin("one more", "1.0 (1)").and_then(|r| r.send()),
+        help::send_message(&*http, &phone, "one more", "1.0 (1)"),
         Err(Error::Refused(api::status::RATE_LIMITED))
     );
-    // Per user: another one's is still taken.
-    b.feedback_begin("hi", "1.0 (1)").and_then(|r| r.send()).unwrap();
-    // A deleted account sends none.
-    b.delete_account().unwrap();
-    assert_eq!(b.feedback_begin("hi again", "1.0 (1)").and_then(|r| r.send()), Err(Error::Replaced));
+    // Per install: another one's is still taken, in a thread of its own.
+    help::send_message(&*http, &other, "hi", "1.0 (1)").unwrap();
+    assert_eq!(help::thread(&*http, &phone).unwrap().messages.len(), 3);
+    assert_eq!(help::thread(&*http, &other).unwrap().messages.len(), 1);
 }
 
 #[test]

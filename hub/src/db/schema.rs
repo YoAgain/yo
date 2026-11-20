@@ -1,4 +1,4 @@
-//! The store's schema (`SCHEMA`, schema 8) and the way every older database a hub has written comes up to it.
+//! The store's schema (`SCHEMA`, schema 9) and the way every older database a hub has written comes up to it.
 //! A database of another schema is refused, never half migrated.
 
 use super::{diagnostic_write, immediate, legacy_crash};
@@ -48,14 +48,16 @@ pub(super) fn upgrade(conn: &mut Connection) -> rusqlite::Result<()> {
     conn.execute_batch(DIAGNOSTIC_DAYS)?;
     migrate_diagnostics(conn)?;
     conn.execute_batch("CREATE TABLE IF NOT EXISTS diagnostic_seen (uuid TEXT PRIMARY KEY, diagnostic_id INTEGER NOT NULL REFERENCES diagnostics(id) ON DELETE CASCADE) WITHOUT ROWID;")?;
+    conn.execute_batch(DIAGNOSTIC_INSTALLS)?;
     with_support(conn, legacy_max)?;
     with_support_done(conn)?;
     with_todos(conn)?;
-    without_feedback(conn)
+    without_feedback(conn)?;
+    with_installs(conn)
 }
 
 /// The schema this hub writes; another is refused, never half migrated (1 and 2 are brought up: `from_1`, `from_2`).
-const SCHEMA_VERSION: i64 = 8;
+const SCHEMA_VERSION: i64 = 9;
 
 pub(super) const SCHEMA: &str = "
 CREATE TABLE IF NOT EXISTS users (
@@ -139,14 +141,15 @@ CREATE TABLE IF NOT EXISTS backups (
     auth_passkey BLOB,
     auth_code BLOB
 ) WITHOUT ROWID;
--- Users reported by users (spec 6.3), for the operator to review: who reported whom, why (1 spam, 2 abuse, 3 other),
--- when. One row per pair, the latest report. No content: the hub has none.
+-- Users reported (spec 6.4), for the operator to review: the reporting install id (`with_installs`; never an
+-- account), the reported user, why (1 spam, 2 abuse, 3 other), when. One row per pair, the latest report. No
+-- content: the hub has none. Gone with the reported account.
 CREATE TABLE IF NOT EXISTS reports (
-    reporter_id BLOB NOT NULL,
+    reporter BLOB NOT NULL,
     reported_id BLOB NOT NULL,
     reason INTEGER NOT NULL,
     created_at INTEGER NOT NULL,
-    PRIMARY KEY (reporter_id, reported_id)
+    PRIMARY KEY (reporter, reported_id)
 ) WITHOUT ROWID;
 CREATE INDEX IF NOT EXISTS reports_by_reported ON reports(reported_id);
 -- Deliveries the hub took, per hour: a count, nothing of who or to whom (6.6); kept 8 days, for the operator's page.
@@ -252,6 +255,13 @@ CREATE TABLE IF NOT EXISTS diagnostics (
 );
 CREATE INDEX IF NOT EXISTS diagnostics_recent ON diagnostics(last_seen DESC);";
 
+// Which install sent a crash or error group on which day (days since the epoch, UTC), so the operator counts
+// installs, not reports; none for the hub's own. Kept 90 days, and gone with its group (spec 6.4).
+pub(super) const DIAGNOSTIC_INSTALLS: &str = "CREATE TABLE IF NOT EXISTS diagnostic_installs (
+    diagnostic_id INTEGER NOT NULL REFERENCES diagnostics(id) ON DELETE CASCADE, install BLOB NOT NULL,
+    day INTEGER NOT NULL, PRIMARY KEY(diagnostic_id, install, day)) WITHOUT ROWID;
+CREATE INDEX IF NOT EXISTS diagnostic_installs_by_day ON diagnostic_installs(day);";
+
 // Daily counts start with schema 5: none are made up from schema 4's first/last aggregates.
 pub(super) const DIAGNOSTIC_DAYS: &str = "CREATE TABLE IF NOT EXISTS diagnostic_days (
     day INTEGER NOT NULL, kind TEXT NOT NULL, count INTEGER NOT NULL,
@@ -262,7 +272,7 @@ fn check_version(conn: &Connection) -> rusqlite::Result<()> {
     let tables: i64 =
         conn.query_row("SELECT count(*) FROM sqlite_master WHERE type = 'table'", [], |row| row.get(0))?;
     match version {
-        SCHEMA_VERSION | 1 | 2 | 3 | 4 | 5 | 6 | 7 => Ok(()),
+        SCHEMA_VERSION | 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 => Ok(()),
         // A new database is made by the same steps as one of schema 3.
         0 if tables == 0 => conn.execute_batch("PRAGMA user_version = 3"),
         _ => Err(rusqlite::Error::InvalidParameterName(format!(
@@ -481,6 +491,37 @@ pub(super) fn without_feedback(conn: &mut Connection) -> rusqlite::Result<()> {
             )?;
         }
         tx.execute_batch("PRAGMA user_version=8;")
+    })
+}
+
+/// Schema 9: help goes by install id, not by account (spec 6.4). Support threads and the reporters of reports
+/// before keep their rows under one random placeholder install id per old account: the account link is gone, and
+/// no phone holds such an id, so those threads are the operator's to read only.
+pub(super) fn with_installs(conn: &mut Connection) -> rusqlite::Result<()> {
+    immediate(conn, |tx| {
+        for (table, column, index) in
+            [("support_messages", "user_id", "support_by_user"), ("reports", "reporter_id", "")]
+        {
+            if !has_column(tx, table, column)? {
+                continue;
+            }
+            let to = if table == "reports" { "reporter" } else { "install" };
+            tx.execute_batch(&format!(
+                "CREATE TEMP TABLE install_of AS SELECT old, randomblob(16) AS new FROM (SELECT DISTINCT {column} AS old FROM {table});
+                ALTER TABLE {table} RENAME COLUMN {column} TO {to};
+                UPDATE {table} SET {to} = (SELECT m.new FROM temp.install_of m WHERE m.old = {table}.{to});
+                DROP TABLE temp.install_of;"
+            ))?;
+            if !index.is_empty() {
+                tx.execute_batch(&format!("DROP INDEX IF EXISTS {index};"))?;
+            }
+        }
+        if has_table(tx, "support_messages")? {
+            tx.execute_batch(
+                "CREATE INDEX IF NOT EXISTS support_by_install ON support_messages(install, created_at, id);",
+            )?;
+        }
+        tx.execute_batch("PRAGMA user_version=9;")
     })
 }
 

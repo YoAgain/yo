@@ -23,8 +23,8 @@ pub(crate) fn routes(hub: &Arc<Hub>) -> Router<Arc<Hub>> {
     Router::new()
         .route("/v1/admin/users/{user}", delete(delete_user))
         .route("/v1/admin/messages", get(get_threads))
-        .route("/v1/admin/messages/{user}", get(get_thread).post(post_reply))
-        .route("/v1/admin/messages/{user}/handled", post(post_handled))
+        .route("/v1/admin/messages/{install}", get(get_thread).post(post_reply))
+        .route("/v1/admin/messages/{install}/handled", post(post_handled))
         .route("/v1/admin/messages/done/{id}", post(post_message_done))
         .route("/v1/admin/todos", get(get_todos).post(post_todo))
         .route("/v1/admin/todos/{id}", post(post_todo_done).delete(delete_todo))
@@ -59,6 +59,11 @@ fn user_id(text: &str) -> Res<UserId> {
     blobs::unhex(text).ok_or_else(bad)
 }
 
+/// An install id in a path (spec 6.4): 32 hex digits.
+fn install(text: &str) -> Res<db::Install> {
+    blobs::unhex(text).ok_or_else(bad)
+}
+
 /// A body that is a number, as text.
 fn parsed<T: std::str::FromStr>(body: &[u8]) -> Res<T> {
     std::str::from_utf8(body).map_err(|_| bad())?.parse().map_err(|_| bad())
@@ -83,31 +88,31 @@ async fn get_threads(State(hub): Hubs) -> Res<Json<Value>> {
     Ok(Json(hub.db.support_threads()?))
 }
 
-/// One user's thread.
-async fn get_thread(State(hub): Hubs, Path(user): Path<String>) -> Res<Json<Value>> {
-    Ok(Json(hub.db.admin_support_thread(&user_id(&user)?)?))
+/// One install's thread.
+async fn get_thread(State(hub): Hubs, Path(id): Path<String>) -> Res<Json<Value>> {
+    Ok(Json(hub.db.admin_support_thread(&install(&id)?)?))
 }
 
-async fn post_reply(State(hub): Hubs, Path(user): Path<String>, body: Bytes) -> Res<StatusCode> {
-    let user = user_id(&user)?;
+async fn post_reply(State(hub): Hubs, Path(id): Path<String>, body: Bytes) -> Res<StatusCode> {
+    let id = install(&id)?;
     let text = std::str::from_utf8(&body).map_err(|_| bad())?;
     if text.trim().is_empty() || body.len() > limits::MAX_FEEDBACK_LEN {
         return Err(bad());
     }
-    hub.limit_by("support-reply", &user, 100, DAY)?;
-    if !hub.db.support_reply(&user, text, now_ms())? {
+    hub.limit_by("support-reply", &id, 100, DAY)?;
+    if !hub.db.support_reply(&id, text, now_ms())? {
         return Err(refuse(StatusCode::CONFLICT));
     }
     Ok(StatusCode::NO_CONTENT)
 }
 
-/// The user's messages handled, up to an id.
-async fn post_handled(State(hub): Hubs, Path(user): Path<String>, body: Bytes) -> Res<StatusCode> {
+/// The install's messages handled, up to an id.
+async fn post_handled(State(hub): Hubs, Path(id): Path<String>, body: Bytes) -> Res<StatusCode> {
     let through: u64 = parsed(&body)?;
     if through > i64::MAX as u64 {
         return Err(bad());
     }
-    hub.db.support_read(&user_id(&user)?, false, through, now_ms())?;
+    hub.db.support_read(&install(&id)?, false, through, now_ms())?;
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -153,7 +158,7 @@ async fn post_todo(
     headers: HeaderMap,
     body: Bytes,
 ) -> Res<(StatusCode, Json<Value>)> {
-    hub.limit_ip("admin-todo", peer, &headers, hub.config.limits.crash_per_ip_day, DAY)?;
+    hub.limit_ip("admin-todo", peer, &headers, hub.config.limits.todo_per_ip_day, DAY)?;
     if body.is_empty() || body.len() > 4000 {
         return Err(bad());
     }

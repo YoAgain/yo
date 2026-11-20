@@ -30,8 +30,8 @@ const ROUTES: [(&str, &str); 45] = [
     ("PUT", "/v1/blobs/AAAAAAAAAAAAAAAAAAAAAA?fetches=1"),
     ("GET", "/v1/blobs/AAAAAAAAAAAAAAAAAAAAAA"),
     // Appended, so the seeds' route indexes stay theirs.
-    ("POST", "/v1/report"),
-    ("POST", "/v1/feedback"),
+    ("POST", "/v1/help/report"),
+    ("POST", "/v1/help/messages"),
     ("DELETE", "/v1/account"),
     ("GET", "/v1/inbox?wait=99999999999999999999&wait=1"),
     ("PUT", "/v1/prekeys"),
@@ -41,7 +41,7 @@ const ROUTES: [(&str, &str); 45] = [
     // Odd: signed, a fetch only a backup door's key may make.
     ("GET", "/v1/backup/AAAAAAAAAAAAAAAAAAAAAA"),
     ("PUT", "/v1/access-key"),
-    ("POST", "/v1/crash"),
+    ("POST", "/v1/help/crash"),
     ("GET", "/.well-known/yo-hub-key"),
     ("GET", "/.well-known/yo-trust-root"),
     ("GET", "/v1/certificate"),

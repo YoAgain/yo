@@ -14,27 +14,35 @@ Summary:
 - Crash and error reports go out **on by default**: Settings › Status › **Send Crashes** (iOS `crashReports.on`,
   Android prefs `crashes/enabled`). One switch covers both. Switched off, reports wait on the phone and nothing is
   sent; switched on again, the backlog goes out.
-- Reports are unsigned and go over the app's anonymous connection pool (`yo_wire::api::anonymous`): no device id,
-  user id or push token. The hub stores no IP for them.
-- Support messages are plain text to the hub, not end-to-end encrypted, and belong to the account.
+- Support messages, reports of users, crash and error reports all go to one endpoint group, `/v1/help/…`
+  (`core/client/src/help.rs`), by a **random install id** (`Yo-Install`): 128 random bits as 32 hex digits, made on
+  first use and kept only on the phone (iOS App Group defaults `help.install`; Android's no-backup vault
+  `install-id`). It is unsigned, goes over the anonymous connection pool (`yo_wire::api::anonymous`) and never
+  with the account, a device id, a push token or a username. The hub stores no IP for it.
+- Send Crashes off deletes the install id; the next use makes a new one (support and reports work with crashes
+  off). Losing the id loses the support thread.
+- Support messages are plain text to the hub, not end-to-end encrypted, and belong to the install id, not the
+  account.
 - Hub counters are counts per minute, hour or day. They hold no ids.
 - Only the operator sees any of it, on the admin page (Cloudflare Access plus its own login, read-only on the hub
   database).
 
 ### 1. Crash reports
 
-`POST /v1/diagnostics/crash`, unsigned, a JSON object of strings, at most 60 KiB. The hub accepts only the keys listed
-below (`hub/src/support.rs`).
+`POST /v1/help/crash` with the install id, unsigned, a JSON object of strings, at most 60 KiB. The hub accepts only
+the keys listed below (`hub/src/help.rs`).
 
 - **iOS**: MetricKit `MXCrashDiagnostic`, delivered by iOS (usually the next day). Each crash is queued once, deduped by
   payload hash, and sent when the app comes to the foreground.
 - **Android**: uncaught JVM exceptions (own handler, then Android's), plus native crashes and ANRs from
   `ApplicationExitInfo` (API 30+). Sent at app start.
-- **Old apps**: `POST /v1/crash` (`api::Feedback`: text and app version). The hub maps it into the same table.
+- **Queued before the update**: reports an older build kept on the phone (upload failed, or Send Crashes off) stay in
+  the same store and go out through `/v1/help/…` with the install id.
 
 | Field | Example | Purpose | Retention | Linked to account? |
 |---|---|---|---|---|
 | `uuid` | `3F2A…-…` (random per report) | hub drops a re-sent duplicate | `diagnostic_seen`, kept with its group | no |
+| `Yo-Install` header | `3fa91c…` (32 hex, per phone) | count installs, not reports; crash-free rate | `diagnostic_installs` (group, install, day), 90 days | no; the same id as the install's support thread |
 | `app` | `ios/202611191257`, `android/202611160001` | build | latest value per group | no |
 | `os` | `iPhone OS 26.1 (23B85)`, `Android 35` | OS version | latest value per group | no |
 | `model` | `iPhone17,1`; Android always `Android` | hardware model (iOS only) | latest value per group | no |
@@ -57,8 +65,12 @@ below (`hub/src/support.rs`).
   app).
 - Each row has `count`, `first_seen`, `last_seen` (ms), the latest `app`/`os`/`model`/`payload`, and `done` (operator
   marked it handled).
-- Rows are **kept until deleted by hand**; there is no automatic expiry. `diagnostic_days` (count per day and kind)
-  is kept 14 days.
+- `diagnostic_installs`: which install id sent the group on which day, so admin › Errors shows distinct installs
+  per group and Problems an estimated crash-free rate: 1 − installs with a crash in 7 days / active users in 7
+  days (an install is not a user: an estimate), next to the plain crash count.
+- A group not seen for **90 days** is deleted in the hourly cleanup, with its uuids and installs; install rows older
+  than 90 days go too. `diagnostic_days` (count per day and kind) is kept 14 days.
+- Limits: 300 reports an hour per install id, 3000 per address.
 - Seen by the operator only: admin › Errors.
 
 **On the phone**: iOS keeps up to 500 report rows in UserDefaults (`diagnostics.reports`), sent ones too, shown under
@@ -66,7 +78,7 @@ Status › Crash Reports. Android keeps the last 16 (`crashes/history`).
 
 ### 2. Error reports (not crashes)
 
-`POST /v1/errors`, unsigned, same 60 KiB JSON object and the same table (`kind = 'error'`). A group's `signature` is
+`POST /v1/help/error` with the install id, unsigned, same 60 KiB JSON object and the same table (`kind = 'error'`). A group's `signature` is
 the hash of (kind, domain, code, place, app). Sent with the same switch.
 
 | Field | Example | Purpose | Retention | Linked to account? |
@@ -95,24 +107,28 @@ the hash of (kind, domain, code, place, app). Sent with the same switch.
 
 ### 3. Support messages and user reports
 
-Signed requests from the account, so **linked to the account**.
+By the install id, unsigned, on the anonymous pool: **not linked to the account**.
 
-`POST /v1/support` (and the older `/v1/feedback`), `api::Feedback`. Plain text to the hub, **not end-to-end
-encrypted** (spec 1). Limit `feedback_per_user_day`; at most 1000 messages per thread.
+`POST /v1/help/messages` (`api::Feedback`), read with `GET /v1/help/messages`, answers marked read with
+`POST /v1/help/read`. Plain text to the hub, **not end-to-end encrypted** (spec 1). Limits: 10 messages a day per
+install id (`support_per_install_day`), messages and reports together 200 a day per address; at most 1000
+messages per thread.
 
 | Field | Example | Purpose | Retention | Linked to account? |
 |---|---|---|---|---|
-| `text` | `the widget shows ?` (1–2000 bytes UTF-8) | the message | kept for good | yes (`support_messages.user_id`) |
-| `app_version` | iOS `1.2 (34)`; Android `VERSION_NAME` (≤64 bytes) | which build | with the message | yes |
-| `created_at` | ms, set by the hub | order | with the message | yes |
-| `read_at`, `done_at` | ms | operator's answers read by the user; user's message handled by the operator | with the message | yes |
+| `text` | `the widget shows ?` (1–2000 bytes UTF-8) | the message | kept for good | no (`support_messages.install`) |
+| `app_version` | iOS `1.2 (34)`; Android `VERSION_NAME` (≤64 bytes) | which build | with the message | no |
+| `created_at` | ms, set by the hub | order | with the message | no |
+| `read_at`, `done_at` | ms | operator's answers read by the user; user's message handled by the operator | with the message | no |
 
-- The operator's answers are in the same table (`from_team = 1`), read by the app with `GET /v1/support`.
-- When the account is deleted, its messages stay but `user_id` becomes all zeros (`NOBODY`): no longer linked.
-- Admin › Support shows each thread with the user's name.
+- The operator's answers are in the same table (`from_team = 1`).
+- Admin › Support lists each thread by the install id's first 6 hex digits, no name.
+- Threads from before (schema 8, by account) were kept under one random placeholder install id each: no phone
+  holds one, so the operator can read them, and their old apps no longer can.
 
-`POST /v1/report` (report a user) stores reporter id, reported id, reason (1 spam, 2 abuse, 3 other) and `created_at`.
-It holds no content, keeps one row per pair, and is deleted with either account. Linked: yes, to both.
+`POST /v1/help/report` (report a user) stores the reporting install id, the reported user id, reason (1 spam,
+2 abuse, 3 other) and `created_at`. It holds no content and keeps one row per pair; 20 a day per install id. It is
+deleted with the reported account. Linked: the reported user yes, the reporter no.
 
 ### 4. Per-request metadata
 
@@ -130,8 +146,8 @@ What the hub sees on every request, and what it keeps.
 | User-Agent | the system default (CFNetwork/Darwin, okhttp) | none | not read | no |
 | request body hash, path | | signature | no | |
 
-- Sealed Yos (`POST /v1/inbox/{user}`), blobs and reports run on a separate anonymous connection pool, so no
-  connection carries both kinds of request.
+- Sealed Yos (`POST /v1/inbox/{user}`), blobs and help (`/v1/help/…`) run on a separate anonymous connection pool,
+  so no connection carries both kinds of request.
 - A stored envelope keeps its `received_at` until fetched or until `envelope_ttl_days`.
 - Cloudflare, in front of the hub, sees IPs under its own terms; that is outside this repository.
 
@@ -196,7 +212,7 @@ not a copy.
 ### Proposed (not built): daily crash summary
 
 To get crash rates rather than crash counts, the apps would send, only while Send Crashes is on, once a day:
-`POST /v1/diagnostics/summary`, unsigned, on the anonymous pool, with no identifier (no uuid, no device id).
+`POST /v1/help/summary`, on the anonymous pool, with the install id.
 
 | Field | Example | Purpose |
 |---|---|---|

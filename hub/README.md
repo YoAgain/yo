@@ -45,8 +45,10 @@ registration on, written when it changes) and answers `426` to every request of 
 | GET | `/v1/certificate` | a sender certificate for the signing device, a day (spec 6.1) | signed | signed | that the device asked |
 | PUT | `/v1/username` | change or give up the account's username | signed | signed | the name |
 | DELETE | `/v1/account` | delete the account and everything about it (spec 6.4) | signed | signed | – |
-| POST | `/v1/report` | report a user (reason 1–3); `404` no such user | signed | 20/day (user) | who reports whom, why |
-| POST | `/v1/feedback` | feedback text (1–2000 bytes) and app version for the operator | signed | 10/day (user) | the text, plain |
+| POST | `/v1/help/report` | report a user (reason 1–3); `404` no such user | install id (`Yo-Install`), unsigned | 20/day (install); 200/day (IP, with messages) | which install reports whom, why |
+| GET, POST | `/v1/help/messages` | the install's support thread; a message (1–2000 bytes) and app version for the operator | install id, unsigned | 10 messages/day (install), 200/day (IP, with reports); reads 120/h (install) | the text, plain, by install id |
+| POST | `/v1/help/read` | the operator's answers read, through a displayed id | install id, unsigned | 120/h (install) | – |
+| POST | `/v1/help/crash`, `/v1/help/error` | a crash or error report, JSON strings (core/README.md, Telemetry), ≤ 60 KiB | install id, unsigned | 300/h (install), 3000/h (IP) | the report, which install sent it on which day (90 days) |
 | GET | `/v1/storage` | the account's storage, sealed by its devices (spec 6.9); `404` none yet | signed | 120/h (user, shared with the next row) | when it is read |
 | PUT | `/v1/storage` | replace it if the request names the version stored now, else `409` with the current one; ≤ 60 KiB, not empty | signed | 120/h (user, shared) | its size (opaque, padded to 1 KiB), when it changes |
 | GET | `/v1/inbox?wait=s` | up to 100 waiting envelopes, oldest first; waits up to 60 s if none | signed | signed; 4 under way at once (device) | when a device reads |
@@ -72,7 +74,7 @@ Spec 6.3 lists the same routes, without `/` and the apple-app-site-association f
   can be made to send requests to the hub (a proxy, a fetcher of user-given URLs) inherits that exemption.
 - **Disk.** Blobs have a budget (`YO_BLOB_BUDGET_MB`) and a floor of free space (`YO_BLOB_MIN_FREE_MB`); deliveries
   are refused (`507`) while the database's disk has less than 1 GiB free.
-- **Cleanup**, hourly: envelopes after 30 days, blobs after their last acknowledgement or 30 days, replaced devices' `410` memory after a year. Rate-limit buckets idle for a day and
+- **Cleanup**, hourly: envelopes after 30 days, blobs after their last acknowledgement or 30 days, replaced devices' `410` memory after a year, crash and error groups 90 days after last seen. Rate-limit buckets idle for a day and
   expired replay-cache entries are dropped from memory.
 - **Schema.** A database of schema 1 (the hubs of MLS chats) is brought to schema 2 at start: accounts stay, the
   MLS tables and the envelopes waiting go (spec 6.4).
@@ -81,7 +83,7 @@ Operator To-Dos: `POST /v1/admin/todos`, plain UTF-8 body (1–4000 bytes),
 `Yo-Admin-Token` header matching `YO_ADMIN_TOKEN`; returns `201 {"id": integer}`.
 Unset/empty token or missing/wrong credential returns `404`; comparison is constant time.
 The route uses the crash-report rate (5/address/day) in its own bucket; no peer address grants access.
-To-dos live in `todos` (schema 7; `GET`, done/reopen and `DELETE` on `/v1/admin/todos/{id}`); user feedback lives in `support_messages`; anonymous crashes/errors live in `diagnostics`.
+To-dos live in `todos` (schema 7; `GET`, done/reopen and `DELETE` on `/v1/admin/todos/{id}`); support threads live in `support_messages` by install id; crashes/errors live in `diagnostics`, their installs per day in `diagnostic_installs`.
 
 Reserved names live only in SQLite. New databases enforce reservations by default; existing databases migrate
 once to ON when `reserved` has rows, otherwise OFF. Disabling enforcement preserves names and existing holders.

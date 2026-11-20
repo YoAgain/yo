@@ -6,6 +6,7 @@ pub mod backup;
 mod contacts;
 pub mod error;
 pub mod groups;
+pub mod help;
 mod hub;
 pub mod identity;
 pub mod keychain;
@@ -312,15 +313,6 @@ impl Request {
     /// The hub's status, whatever it is.
     pub fn status(&self) -> Result<u16> {
         Ok(self.response()?.status)
-    }
-
-    /// Expects `204`; feedback's `Refused(429)`: the day's is used up.
-    pub fn send(&self) -> Result<()> {
-        expect(self.response()?, status::NO_CONTENT).map(drop)
-    }
-
-    pub fn thread(&self) -> Result<api::SupportThread> {
-        Ok(decode(&expect(self.response()?, status::OK)?.body)?)
     }
 
     fn response(&self) -> Result<Response> {
@@ -799,13 +791,6 @@ impl Client {
             status::CONFLICT => Ok(false),
             _ => Err(refused(&response)),
         }
-    }
-
-    /// A crash report to the operator, without an account (spec 6.4): text and app version as feedback, unsigned.
-    pub fn send_crash(transport: &dyn Transport, text: &str, app_version: &str) -> Result<()> {
-        let body = encode(&api::Feedback { text: text.as_bytes().into(), app_version: app_version.as_bytes().into() });
-        let response = transport.request("POST", api::CRASH, &[], &body).map_err(Error::Network)?;
-        expect(response, status::NO_CONTENT).map(drop)
     }
 
     /// A device's keys, certificate, first prekeys, and the proof of possession over its handle (spec 6.4).

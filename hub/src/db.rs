@@ -16,10 +16,15 @@ use yo_wire::handle::{KIND_ACCOUNT_KEY, KIND_USER, KIND_USERNAME};
 use yo_wire::{DeviceId, UserId, KEY_LEN};
 
 const DAY_MS: u64 = 24 * 3600 * 1000;
+/// How long a crash or error group is kept after it was last seen, and an install's occurrence of one (spec 6.4).
+const DIAGNOSTICS_KEPT_DAYS: u64 = 90;
 /// A blob not ready this long after it was stored belongs to no upload under way: its file never came into place.
 const NOT_READY_KEPT_MS: u64 = 3600 * 1000;
 
 pub type Key = [u8; KEY_LEN];
+
+/// An install id (spec 6.4): 16 random bytes a phone makes for help, never tied to an account.
+pub type Install = [u8; 16];
 
 /// A user's storage (spec 6.9): its version and its sealed bytes.
 pub type Sealed = (u64, Vec<u8>);
@@ -273,10 +278,8 @@ fn user_of_device(tx: &Transaction<'_>, device: &DeviceId) -> rusqlite::Result<O
     row(tx, "SELECT user_id FROM devices WHERE id = ?1", [device], |row| array(row.get(0)?))
 }
 
-/// The user id a support message keeps once its sender's account is gone: no user has it.
-pub const NOBODY: UserId = [0; 16];
-
-/// Removes a user and everything about it; its devices answer 410, its support messages stay as `NOBODY`'s.
+/// Removes a user and everything about it; its devices answer 410. Reports about it go; help by install ids (spec
+/// 6.4) names no account and stays.
 fn remove_user(tx: &Transaction<'_>, user: &UserId, now: u64) -> rusqlite::Result<()> {
     retire_devices(tx, user, now)?;
     // Its blobs' files go with the next sweep, or at once where the route knows them (`blobs_of`).
@@ -285,8 +288,7 @@ fn remove_user(tx: &Transaction<'_>, user: &UserId, now: u64) -> rusqlite::Resul
     {
         tx.execute(&format!("DELETE FROM {table} WHERE user_id = ?1"), [user])?;
     }
-    tx.execute("DELETE FROM reports WHERE reporter_id = ?1 OR reported_id = ?1", [user])?;
-    tx.execute("UPDATE support_messages SET user_id = ?2 WHERE user_id = ?1", params![user, NOBODY])?;
+    tx.execute("DELETE FROM reports WHERE reported_id = ?1", [user])?;
     tx.execute("DELETE FROM users WHERE id = ?1", [user])?;
     Ok(())
 }
@@ -790,43 +792,48 @@ impl Db {
 
     // ---- reports, support and diagnostics ----
 
-    /// Stores the report of `reported` by a device's user, the pair's latest; false when there is no such user.
-    pub fn report(&self, device: &DeviceId, reported: &UserId, reason: u8, now: u64) -> rusqlite::Result<Write<bool>> {
-        self.as_device(device, |tx, reporter| {
-            let stored = tx
-                .prepare_cached(
-                    "INSERT INTO reports (reporter_id, reported_id, reason, created_at)
-                     SELECT ?1, ?2, ?3, ?4 WHERE EXISTS (SELECT 1 FROM users WHERE id = ?2)
-                     ON CONFLICT (reporter_id, reported_id) DO UPDATE SET
-                         reason = excluded.reason, created_at = excluded.created_at",
-                )?
-                .execute(params![reporter, reported, reason, now])?;
-            Ok(Write::Done(stored == 1))
-        })
+    /// Stores the report of `reported` by an install, the pair's latest; false when there is no such user.
+    pub fn report(&self, install: &Install, reported: &UserId, reason: u8, now: u64) -> rusqlite::Result<bool> {
+        let stored = self
+            .conn()
+            .prepare_cached(
+                "INSERT INTO reports (reporter, reported_id, reason, created_at)
+                 SELECT ?1, ?2, ?3, ?4 WHERE EXISTS (SELECT 1 FROM users WHERE id = ?2)
+                 ON CONFLICT (reporter, reported_id) DO UPDATE SET
+                     reason = excluded.reason, created_at = excluded.created_at",
+            )?
+            .execute(params![install, reported, reason, now])?;
+        Ok(stored == 1)
     }
 
-    /// Stores feedback from a device's user, up to 1000 messages a thread.
-    pub fn feedback(&self, device: &DeviceId, text: &str, app_version: &str, now: u64) -> rusqlite::Result<Write<()>> {
-        self.as_device(device, |tx, user| {
-            // An atomic cap shared by old and new app routes. A full thread is retained, never silently trimmed.
+    /// Stores an install's message to the operator, up to 1000 messages a thread.
+    pub fn support_message(
+        &self,
+        install: &Install,
+        text: &str,
+        app_version: &str,
+        now: u64,
+    ) -> rusqlite::Result<Write<()>> {
+        self.write(|tx| {
+            // A full thread is retained, never silently trimmed.
             let count: i64 =
-                tx.query_row("SELECT count(*) FROM support_messages WHERE user_id = ?1", [user], |r| r.get(0))?;
+                tx.query_row("SELECT count(*) FROM support_messages WHERE install = ?1", [install], |r| r.get(0))?;
             if count >= 1000 {
                 return Ok(Write::Refused(Conflict::SupportFull));
             }
             tx.execute(
-                "INSERT INTO support_messages(user_id,from_team,text,created_at,app_version) VALUES (?1,0,?2,?3,?4)",
-                params![user, text, now, app_version],
+                "INSERT INTO support_messages(install,from_team,text,created_at,app_version) VALUES (?1,0,?2,?3,?4)",
+                params![install, text, now, app_version],
             )?;
             Ok(Write::Done(()))
         })
     }
 
-    pub fn support_thread(&self, user: &UserId) -> rusqlite::Result<yo_wire::api::SupportThread> {
+    pub fn support_thread(&self, install: &Install) -> rusqlite::Result<yo_wire::api::SupportThread> {
         let conn = self.conn();
-        let mut stmt = conn.prepare("SELECT id,from_team,text,created_at,coalesce(read_at,0) FROM support_messages WHERE user_id=?1 ORDER BY created_at,id")?;
+        let mut stmt = conn.prepare("SELECT id,from_team,text,created_at,coalesce(read_at,0) FROM support_messages WHERE install=?1 ORDER BY created_at,id")?;
         let messages = stmt
-            .query_map([user], |r| {
+            .query_map([install], |r| {
                 Ok(yo_wire::api::SupportMessage {
                     id: r.get(0)?,
                     from_team: r.get(1)?,
@@ -840,41 +847,43 @@ impl Db {
         Ok(yo_wire::api::SupportThread { messages, unread })
     }
 
-    pub fn support_read(&self, user: &UserId, from_team: bool, through: u64, now: u64) -> rusqlite::Result<()> {
+    /// The team's answers read by the install (`from_team`), or the install's messages handled by the operator.
+    pub fn support_read(&self, install: &Install, from_team: bool, through: u64, now: u64) -> rusqlite::Result<()> {
         self.conn().execute(
-            "UPDATE support_messages SET read_at=CASE WHEN ?3 THEN coalesce(read_at,?1) ELSE read_at END, done_at=CASE WHEN ?3 THEN done_at ELSE ?1 END WHERE user_id=?2 AND from_team=?3 AND id<=?4",
-            params![now, user, from_team, through],
+            "UPDATE support_messages SET read_at=CASE WHEN ?3 THEN coalesce(read_at,?1) ELSE read_at END, done_at=CASE WHEN ?3 THEN done_at ELSE ?1 END WHERE install=?2 AND from_team=?3 AND id<=?4
+            ",
+            params![now, install, from_team, through],
         )?;
         Ok(())
     }
 
-    pub fn support_reply(&self, user: &UserId, text: &str, now: u64) -> rusqlite::Result<bool> {
+    /// The operator's answer, to a thread the install began; false for none, or a full one.
+    pub fn support_reply(&self, install: &Install, text: &str, now: u64) -> rusqlite::Result<bool> {
         let conn = self.conn();
         Ok(conn.execute(
-            "INSERT INTO support_messages(user_id,from_team,text,created_at)
-            SELECT ?1,1,?2,?3 WHERE EXISTS (SELECT 1 FROM users WHERE id=?1)
-            AND EXISTS (SELECT 1 FROM support_messages WHERE user_id=?1)
-            AND (SELECT count(*) FROM support_messages WHERE user_id=?1)<1000",
-            params![user, text, now],
+            "INSERT INTO support_messages(install,from_team,text,created_at)
+            SELECT ?1,1,?2,?3 WHERE EXISTS (SELECT 1 FROM support_messages WHERE install=?1)
+            AND (SELECT count(*) FROM support_messages WHERE install=?1)<1000",
+            params![install, text, now],
         )? == 1)
     }
 
+    /// Every thread, by install id (lowercase hex), open ones first.
     pub fn support_threads(&self) -> rusqlite::Result<serde_json::Value> {
         let conn = self.conn();
         let mut stmt = conn.prepare(
-            "SELECT hex(s.user_id),max(s.created_at),sum(s.from_team=0 AND s.done_at IS NULL),
-            (SELECT coalesce(spelling,value) FROM handles WHERE user_id=s.user_id AND kind=2 LIMIT 1)
-            FROM support_messages s WHERE length(s.user_id)>0 GROUP BY s.user_id
+            "SELECT lower(hex(s.install)),max(s.created_at),sum(s.from_team=0 AND s.done_at IS NULL)
+            FROM support_messages s GROUP BY s.install
             ORDER BY (sum(s.from_team=0 AND s.done_at IS NULL)>0) DESC,max(s.created_at) DESC LIMIT 999",
         )?;
-        let rows: Vec<_> = stmt.query_map([], |r| Ok(serde_json::json!({"user_id":r.get::<_,String>(0)?,"at":r.get::<_,i64>(1)?,"unread":r.get::<_,i64>(2)?,"name":r.get::<_,Option<String>>(3)?})))?.collect::<rusqlite::Result<_>>()?;
+        let rows: Vec<_> = stmt.query_map([], |r| Ok(serde_json::json!({"install":r.get::<_,String>(0)?,"at":r.get::<_,i64>(1)?,"unread":r.get::<_,i64>(2)?})))?.collect::<rusqlite::Result<_>>()?;
         Ok(serde_json::json!(rows))
     }
 
-    pub fn admin_support_thread(&self, user: &[u8]) -> rusqlite::Result<serde_json::Value> {
+    pub fn admin_support_thread(&self, install: &Install) -> rusqlite::Result<serde_json::Value> {
         let conn = self.conn();
-        let mut stmt = conn.prepare("SELECT id,from_team,text,created_at,read_at,done_at FROM support_messages WHERE user_id=?1 ORDER BY created_at,id")?;
-        let rows = stmt.query_map([user], |r| Ok(serde_json::json!({"id":r.get::<_,i64>(0)?,"from_team":r.get::<_,bool>(1)?,"text":r.get::<_,String>(2)?,"created_at":r.get::<_,i64>(3)?,"read_at":r.get::<_,Option<i64>>(4)?,"done_at":r.get::<_,Option<i64>>(5)?})))?.collect::<rusqlite::Result<Vec<_>>>()?;
+        let mut stmt = conn.prepare("SELECT id,from_team,text,created_at,read_at,done_at FROM support_messages WHERE install=?1 ORDER BY created_at,id")?;
+        let rows = stmt.query_map([install], |r| Ok(serde_json::json!({"id":r.get::<_,i64>(0)?,"from_team":r.get::<_,bool>(1)?,"text":r.get::<_,String>(2)?,"created_at":r.get::<_,i64>(3)?,"read_at":r.get::<_,Option<i64>>(4)?,"done_at":r.get::<_,Option<i64>>(5)?})))?.collect::<rusqlite::Result<Vec<_>>>()?;
         Ok(serde_json::json!({"messages": rows}))
     }
 
@@ -904,12 +913,14 @@ impl Db {
         Ok(())
     }
 
-    /// Old apps' crash encoding, mapped into anonymous diagnostics.
-    pub fn crash(&self, text: &str, app_version: &str, now: u64) -> rusqlite::Result<()> {
-        self.diagnostic("crash", &legacy_crash(text, app_version), now)
-    }
-
-    pub fn diagnostic(&self, kind: &str, payload: &serde_json::Value, now: u64) -> rusqlite::Result<()> {
+    /// A crash or error report, with the install that sent it (none: the hub's own), by the day.
+    pub fn diagnostic(
+        &self,
+        kind: &str,
+        payload: &serde_json::Value,
+        install: Option<&Install>,
+        now: u64,
+    ) -> rusqlite::Result<()> {
         self.write(|tx| {
             let uuid = payload["uuid"].as_str().map(str::to_ascii_lowercase);
             if let Some(uuid) = &uuid {
@@ -921,17 +932,28 @@ impl Db {
             if let Some(uuid) = uuid {
                 tx.execute("INSERT INTO diagnostic_seen(uuid, diagnostic_id) VALUES (?1, ?2)", params![uuid, id])?;
             }
+            if let Some(install) = install {
+                tx.execute(
+                    "INSERT OR IGNORE INTO diagnostic_installs(diagnostic_id, install, day) VALUES (?1, ?2, ?3)",
+                    params![id, install, now / DAY_MS],
+                )?;
+            }
             Ok(())
         })
     }
 
     pub fn diagnostics(&self) -> rusqlite::Result<serde_json::Value> {
         let conn = self.conn();
-        let mut stmt = conn.prepare("SELECT id,kind,count,first_seen,last_seen,app,os,model,payload,done FROM diagnostics ORDER BY last_seen DESC")?;
+        let mut stmt = conn.prepare(
+            "SELECT id,kind,count,first_seen,last_seen,app,os,model,payload,done,
+            (SELECT count(DISTINCT install) FROM diagnostic_installs WHERE diagnostic_id=d.id)
+            FROM diagnostics d ORDER BY last_seen DESC",
+        )?;
         let rows = stmt.query_map([], |r| Ok(serde_json::json!({
             "id":r.get::<_,i64>(0)?, "kind":r.get::<_,String>(1)?, "count":r.get::<_,i64>(2)?,
             "first_seen":r.get::<_,i64>(3)?, "last_seen":r.get::<_,i64>(4)?, "app":r.get::<_,String>(5)?,
-            "os":r.get::<_,String>(6)?, "model":r.get::<_,String>(7)?, "payload":r.get::<_,String>(8)?, "done":r.get::<_,bool>(9)?
+            "os":r.get::<_,String>(6)?, "model":r.get::<_,String>(7)?, "payload":r.get::<_,String>(8)?, "done":r.get::<_,bool>(9)?,
+            "installs":r.get::<_,i64>(10)?
         })))?.collect::<rusqlite::Result<Vec<_>>>()?;
         Ok(serde_json::json!(rows))
     }
@@ -1340,6 +1362,10 @@ impl Db {
         let before = now.saturating_sub(ttl_ms) as i64;
         let messages = conn.execute("DELETE FROM messages WHERE received_at < ?1", [before])?;
         conn.execute("DELETE FROM gone WHERE gone_at < ?1", [now.saturating_sub(365 * 24 * 3600 * 1000) as i64])?;
+        // Crash and error groups not seen for 90 days go, with their uuids and installs (spec 6.4).
+        let kept = now.saturating_sub(DIAGNOSTICS_KEPT_DAYS * DAY_MS);
+        conn.execute("DELETE FROM diagnostics WHERE last_seen < ?1", [kept as i64])?;
+        conn.execute("DELETE FROM diagnostic_installs WHERE day < ?1", [(kept / DAY_MS) as i64])?;
         Ok(messages)
     }
 
@@ -1361,8 +1387,7 @@ impl Db {
             ("account keys without their user", "account_keys WHERE user_id NOT IN (SELECT id FROM users)"),
             ("handles without their user", "handles WHERE user_id NOT IN (SELECT id FROM users)"),
             ("backups without their user", "backups WHERE user_id NOT IN (SELECT id FROM users)"),
-            ("reports by or about nobody", "reports WHERE reporter_id NOT IN (SELECT id FROM users) OR reported_id NOT IN (SELECT id FROM users)"),
-            ("support of a user gone, not anonymised", "support_messages WHERE user_id != zeroblob(16) AND user_id NOT IN (SELECT id FROM users)"),
+            ("reports about nobody", "reports WHERE reported_id NOT IN (SELECT id FROM users)"),
             ("storage without its user", "storage WHERE user_id NOT IN (SELECT id FROM users)"),
             ("blobs without their user", "blobs WHERE user_id NOT IN (SELECT id FROM users)"),
             ("blob quotas without their user", "blob_quota WHERE user_id NOT IN (SELECT id FROM users)"),
@@ -1442,7 +1467,7 @@ mod tests {
             .collect();
         assert_eq!(kinds, ["feedback", "crash", "todo"]);
         let db = Db::open(":memory:").unwrap();
-        db.crash("trace", "1", 7).unwrap();
+        db.diagnostic("crash", &legacy_crash("trace", "1"), None, 7).unwrap();
         let id = db.todo("fix", 8).unwrap();
         let row: (String, u64, Option<u64>) = db
             .conn()
@@ -1469,7 +1494,7 @@ mod tests {
     }
 
     #[test]
-    fn schemas_3_and_4_reach_8_without_losing_support_or_diagnostics() {
+    fn schemas_3_and_4_reach_9_without_losing_support_or_diagnostics() {
         for version in [3, 4] {
             let path = std::env::temp_dir().join(format!("yo-support-{version}-{}.sqlite", std::process::id()));
             let _ = std::fs::remove_file(&path);
@@ -1500,7 +1525,7 @@ mod tests {
             for _ in 0..2 {
                 let db = Db::open(path.to_str().unwrap()).unwrap();
                 let conn = db.conn();
-                assert_eq!(conn.query_row("PRAGMA user_version", [], |r| r.get::<_, i64>(0)).unwrap(), 8);
+                assert_eq!(conn.query_row("PRAGMA user_version", [], |r| r.get::<_, i64>(0)).unwrap(), 9);
                 let message: (String, String, i64) = conn
                     .query_row("SELECT text,app_version,created_at FROM support_messages WHERE id=10", [], |r| {
                         Ok((r.get(0)?, r.get(1)?, r.get(2)?))
@@ -1511,7 +1536,7 @@ mod tests {
                     conn.query_row("SELECT text FROM todos", [], |r| r.get::<_, String>(0)).unwrap(),
                     "Fix notifications"
                 );
-                assert!(!conn.prepare("SELECT 1 FROM support_messages WHERE user_id=X''").unwrap().exists([]).unwrap());
+                assert!(!conn.prepare("SELECT 1 FROM support_messages WHERE install=X''").unwrap().exists([]).unwrap());
                 assert!(!conn
                     .prepare("SELECT 1 FROM sqlite_master WHERE name='feedback'")
                     .unwrap()
@@ -1581,25 +1606,28 @@ mod tests {
     #[test]
     fn support_cap_and_read_direction() {
         let db = Db::open(":memory:").unwrap();
-        let leo = user(register(&db, b"LEO", 1, 1, 0));
-        db.feedback(&[1; 16], "hi", "1", 1).unwrap();
-        assert!(db.support_reply(&leo, "reply", 2).unwrap());
-        db.support_read(&leo, false, 100, 3).unwrap();
-        assert_eq!(db.support_thread(&leo).unwrap().unread, 1);
-        db.support_read(&leo, true, 2, 4).unwrap();
-        assert_eq!(db.support_thread(&leo).unwrap().unread, 0);
+        let phone = [7; 16];
+        assert!(!db.support_reply(&phone, "nobody wrote", 1).unwrap(), "no thread, no answer");
+        db.support_message(&phone, "hi", "1", 1).unwrap();
+        assert!(db.support_reply(&phone, "reply", 2).unwrap());
+        db.support_read(&phone, false, 100, 3).unwrap();
+        assert_eq!(db.support_thread(&phone).unwrap().unread, 1);
+        assert!(db.support_thread(&[8; 16]).unwrap().messages.is_empty(), "another install sees nothing of it");
+        db.support_read(&phone, true, 2, 4).unwrap();
+        assert_eq!(db.support_thread(&phone).unwrap().unread, 0);
         for _ in 2..1000 {
-            db.feedback(&[1; 16], "hi", "1", 5).unwrap();
+            db.support_message(&phone, "hi", "1", 5).unwrap();
         }
-        assert!(matches!(db.feedback(&[1; 16], "full", "1", 6).unwrap(), Write::Refused(Conflict::SupportFull)));
-        assert!(!db.support_reply(&leo, "full", 6).unwrap());
-        assert_eq!(db.support_thread(&leo).unwrap().messages.len(), 1000);
+        assert!(matches!(db.support_message(&phone, "full", "1", 6).unwrap(), Write::Refused(Conflict::SupportFull)));
+        assert!(!db.support_reply(&phone, "full", 6).unwrap());
+        assert_eq!(db.support_thread(&phone).unwrap().messages.len(), 1000);
+        let threads = db.support_threads().unwrap();
+        assert_eq!(threads[0]["install"], "07".repeat(16));
         let id = db.todo("task", 7).unwrap();
         assert!(db.todo_done(id, Some(8)).unwrap());
         assert_eq!(db.todos().unwrap()[0]["done_at"], 8);
         assert!(db.todo_done(id, None).unwrap());
         assert!(!db.todo_done(id + 1, None).unwrap());
-        assert!(db.support_threads().unwrap().as_array().unwrap().iter().all(|t| t["user_id"] != "team"));
         assert!(db.todo_delete(id).unwrap() && !db.todo_delete(id).unwrap());
         assert_eq!(db.todos().unwrap(), serde_json::json!([]));
     }
@@ -1636,15 +1664,15 @@ mod tests {
         let db = Db::open(":memory:").unwrap();
         let mut payload = serde_json::json!({"uuid": "550e8400-e29b-41d4-a716-446655440000",
             "app": "ios/test", "domain": "test", "code": "1", "place": "test"});
-        db.diagnostic("error", &payload, 1).unwrap();
-        db.diagnostic("error", &payload, 2).unwrap();
+        db.diagnostic("error", &payload, None, 1).unwrap();
+        db.diagnostic("error", &payload, None, 2).unwrap();
         assert_eq!(db.diagnostics().unwrap()[0]["count"], 1);
         payload["uuid"] = "550e8400-e29b-41d4-a716-446655440001".into();
-        db.diagnostic("error", &payload, 3).unwrap();
+        db.diagnostic("error", &payload, None, 3).unwrap();
         assert_eq!(db.diagnostics().unwrap()[0]["count"], 2);
         payload.as_object_mut().unwrap().remove("uuid");
-        db.diagnostic("error", &payload, 4).unwrap();
-        db.diagnostic("error", &payload, 5).unwrap();
+        db.diagnostic("error", &payload, None, 4).unwrap();
+        db.diagnostic("error", &payload, None, 5).unwrap();
         assert_eq!(db.diagnostics().unwrap()[0]["count"], 4);
     }
 
@@ -1665,21 +1693,94 @@ mod tests {
         assert_eq!(rows[0]["first_seen"], 2);
         assert_eq!(rows[0]["last_seen"], 3);
         db.diagnostic_done(rows[0]["id"].as_i64().unwrap(), true).unwrap();
-        db.crash("trace", "1", 4).unwrap();
+        db.diagnostic("crash", &legacy_crash("trace", "1"), None, 4).unwrap();
         assert_eq!(db.diagnostics().unwrap()[0]["done"], true);
         let mut error = serde_json::json!({"domain":"test", "code":"1", "place":"sync", "app":"ios/2", "os":"26", "model":"iPhone"});
         for at in 10..110 {
-            db.diagnostic("error", &error, at).unwrap();
+            db.diagnostic("error", &error, None, at).unwrap();
         }
         error["os"] = serde_json::json!("27");
-        db.diagnostic("error", &error, 110).unwrap();
+        db.diagnostic("error", &error, None, 110).unwrap();
         let rows = db.diagnostics().unwrap();
         assert_eq!(rows[0]["count"], 101);
         assert_eq!(rows[0]["os"], "27");
         assert_eq!(rows[0]["first_seen"], 10);
         error["app"] = serde_json::json!("ios/3");
-        db.diagnostic("error", &error, 111).unwrap();
+        db.diagnostic("error", &error, None, 111).unwrap();
         assert_eq!(db.diagnostics().unwrap().as_array().unwrap().len(), 3);
+    }
+
+    #[test]
+    fn diagnostics_count_installs_and_go_after_90_days_unseen() {
+        let db = Db::open(":memory:").unwrap();
+        let crash = serde_json::json!({"exception":"1/0/11", "frames":"Yo +0x1", "termination":"", "app":"ios/1", "os":"26", "model":"iPhone"});
+        let day = 20_000 * DAY_MS;
+        // The hub's own: no install.
+        db.diagnostic("crash", &crash, None, day).unwrap();
+        for (install, at) in [([1; 16], day), ([1; 16], day + 1), ([2; 16], day + 2), ([1; 16], day + DAY_MS)] {
+            db.diagnostic("crash", &crash, Some(&install), at).unwrap();
+        }
+        let rows = db.diagnostics().unwrap();
+        assert_eq!((rows[0]["count"].as_i64(), rows[0]["installs"].as_i64()), (Some(5), Some(2)));
+        let left = |table: &str| -> i64 {
+            db.conn().query_row(&format!("SELECT count(*) FROM {table}"), [], |row| row.get(0)).unwrap()
+        };
+        assert_eq!(left("diagnostic_installs"), 3, "one row per install and day");
+        db.prune(day + 90 * DAY_MS, DAY_MS).unwrap();
+        assert_eq!((left("diagnostics"), left("diagnostic_installs")), (1, 3), "seen 90 days ago: kept");
+        db.prune(day + 91 * DAY_MS, DAY_MS).unwrap();
+        assert_eq!((left("diagnostics"), left("diagnostic_installs")), (1, 1), "an install's day 90 days ago goes");
+        db.prune(day + 92 * DAY_MS, DAY_MS).unwrap();
+        assert_eq!((left("diagnostics"), left("diagnostic_installs")), (0, 0));
+    }
+
+    #[test]
+    fn schema_8_keeps_threads_and_reports_under_placeholder_installs() {
+        let path = std::env::temp_dir().join(format!("yo-hub-installs-{}.db", std::process::id()));
+        let path = path.to_str().unwrap();
+        {
+            let db = Db::open(path).unwrap();
+            let conn = db.conn();
+            conn.execute_batch(
+                "DROP TABLE support_messages; DROP TABLE reports;
+                CREATE TABLE support_messages (id INTEGER PRIMARY KEY AUTOINCREMENT, user_id BLOB NOT NULL,
+                    from_team INTEGER NOT NULL, text TEXT NOT NULL, created_at INTEGER NOT NULL, read_at INTEGER,
+                    app_version TEXT NOT NULL DEFAULT '', done_at INTEGER);
+                CREATE INDEX support_by_user ON support_messages(user_id, created_at, id);
+                INSERT INTO support_messages(user_id,from_team,text,created_at) VALUES
+                    (X'01010101010101010101010101010101',0,'hi',1),(X'01010101010101010101010101010101',1,'yo',2),
+                    (X'02020202020202020202020202020202',0,'other',3);
+                CREATE TABLE reports (reporter_id BLOB NOT NULL, reported_id BLOB NOT NULL, reason INTEGER NOT NULL,
+                    created_at INTEGER NOT NULL, PRIMARY KEY (reporter_id, reported_id)) WITHOUT ROWID;
+                INSERT INTO reports VALUES (X'01010101010101010101010101010101', X'03', 1, 5);
+                PRAGMA user_version=8;",
+            )
+            .unwrap();
+        }
+        for _ in 0..2 {
+            let db = Db::open(path).unwrap();
+            let conn = db.conn();
+            assert_eq!(conn.query_row("PRAGMA user_version", [], |r| r.get::<_, i64>(0)).unwrap(), 9);
+            let threads: Vec<(Vec<u8>, i64)> = conn
+                .prepare("SELECT install, count(*) FROM support_messages GROUP BY install ORDER BY min(id)")
+                .unwrap()
+                .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))
+                .unwrap()
+                .collect::<Result<_, _>>()
+                .unwrap();
+            assert_eq!(threads.iter().map(|t| t.1).collect::<Vec<_>>(), [2, 1], "each thread stays one thread");
+            assert!(threads.iter().all(|t| t.0.len() == 16 && t.0 != [1; 16] && t.0 != [2; 16]), "no account left");
+            let reporter: Vec<u8> = conn.query_row("SELECT reporter FROM reports", [], |r| r.get(0)).unwrap();
+            assert!(reporter.len() == 16 && reporter != [1; 16]);
+            assert!(conn
+                .prepare("SELECT 1 FROM sqlite_master WHERE name='support_by_install'")
+                .unwrap()
+                .exists([])
+                .unwrap());
+        }
+        for suffix in ["", "-wal", "-shm"] {
+            let _ = std::fs::remove_file(format!("{path}{suffix}"));
+        }
     }
 
     #[test]
@@ -2290,14 +2391,9 @@ mod tests {
                 envelope: b"envelope",
             };
             db.deliver(&[incoming], 0, 10).unwrap();
-            // The test's users have the ids of their devices.
-            let reported = |device: &DeviceId, whom: &UserId| match db.report(device, whom, 1, 0).unwrap() {
-                Write::Done(stored) => Some(stored),
-                Write::Refused(_) => None,
-            };
-            assert_eq!((reported(&leo, &mia), reported(&mia, &leo)), (Some(true), Some(true)));
-            assert!(matches!(db.feedback(&[1; 16], "more colors", "1.0 (1)", 0).unwrap(), Write::Done(())));
-            assert!(matches!(db.feedback(&[2; 16], "fine", "1.0 (1)", 0).unwrap(), Write::Done(())));
+            let reported = |install: &Install, whom: &UserId| db.report(install, whom, 1, 0).unwrap();
+            assert_eq!((reported(&[5; 16], &mia), reported(&[6; 16], &leo)), (true, true));
+            assert!(matches!(db.support_message(&[5; 16], "more colors", "1.0 (1)", 0).unwrap(), Write::Done(())));
             if admin {
                 assert_eq!(db.admin_delete_user(&leo, 1).unwrap(), Some(Vec::new()));
                 assert_eq!(db.admin_delete_user(&leo, 1).unwrap(), None);
@@ -2311,44 +2407,25 @@ mod tests {
             let left = |table: &str| -> i64 {
                 db.conn().query_row(&format!("SELECT count(*) FROM {table}"), [], |row| row.get(0)).unwrap()
             };
-            assert_eq!((left("reports"), left("prekeys"), left("account_keys")), (0, 2, 1), "only MIA's are left");
-            let feedback: Vec<Vec<u8>> = db
-                .conn()
-                .prepare("SELECT user_id FROM support_messages ORDER BY id")
-                .unwrap()
-                .query_map([], |row| row.get(0))
-                .unwrap()
-                .collect::<Result<_, _>>()
-                .unwrap();
-            assert_eq!(feedback, [NOBODY.to_vec(), mia.to_vec()], "LEO's feedback stays without LEO, MIA's as it was");
+            assert_eq!((left("reports"), left("prekeys"), left("account_keys")), (1, 2, 1), "only MIA's are left");
+            assert_eq!(left("support_messages"), 1, "help by install id names no account and stays");
             assert_eq!(db.audit().unwrap(), [], "nothing of LEO's is left behind");
-            assert!(matches!(
-                db.feedback(&[1; 16], "late", "1.0 (1)", 1).unwrap(),
-                Write::Refused(Conflict::DeviceGone)
-            ));
             assert!(matches!(db.delete_account(&[1; 16], 1).unwrap(), Write::Refused(Conflict::DeviceGone)));
             // The name and the key are free again.
             user(register(&db, b"LEO", 1, 3, 2));
-            assert_eq!(reported(&mia, &leo), Some(false), "no such user any more");
-            assert_eq!(reported(&leo, &mia), None, "a deleted account reports nobody");
+            assert!(!reported(&[6; 16], &leo), "no such user any more");
         }
     }
 
     #[test]
-    fn feedback_is_kept_as_written_with_who_and_when() {
+    fn support_is_kept_as_written_with_install_and_when() {
         let db = Db::open(":memory:").unwrap();
-        let leo = user(register(&db, b"LEO", 1, 1, 0));
-        assert!(matches!(db.feedback(&[1; 16], "Mehr Farben, bitte 🎨", "1.2 (34)", 5).unwrap(), Write::Done(())));
-        assert!(matches!(db.feedback(&[1; 16], "again", "1.2 (35)", 6).unwrap(), Write::Done(())));
-        assert_eq!(
-            db.conn()
-                .query_row("SELECT count(*) FROM support_messages WHERE from_team = 0", [], |r| r.get::<_, i64>(0))
-                .unwrap(),
-            2
-        );
+        let phone = [3; 16];
+        assert!(matches!(db.support_message(&phone, "Mehr Farben, bitte 🎨", "1.2 (34)", 5).unwrap(), Write::Done(())));
+        assert!(matches!(db.support_message(&phone, "again", "1.2 (35)", 6).unwrap(), Write::Done(())));
         let rows: Vec<(i64, Vec<u8>, String, String, i64)> = db
             .conn()
-            .prepare("SELECT id, user_id, text, app_version, created_at FROM support_messages ORDER BY id")
+            .prepare("SELECT id, install, text, app_version, created_at FROM support_messages ORDER BY id")
             .unwrap()
             .query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?)))
             .unwrap()
@@ -2357,15 +2434,14 @@ mod tests {
         assert_eq!(
             rows,
             [
-                (1, leo.to_vec(), "Mehr Farben, bitte 🎨".to_owned(), "1.2 (34)".to_owned(), 5),
-                (2, leo.to_vec(), "again".to_owned(), "1.2 (35)".to_owned(), 6),
+                (1, phone.to_vec(), "Mehr Farben, bitte 🎨".to_owned(), "1.2 (34)".to_owned(), 5),
+                (2, phone.to_vec(), "again".to_owned(), "1.2 (35)".to_owned(), 6),
             ]
         );
-        assert!(matches!(db.feedback(&[9; 16], "nobody", "1", 7).unwrap(), Write::Refused(Conflict::DeviceGone)));
     }
 
     #[test]
-    fn schema_7_with_feedback_reaches_8_with_its_rows_moved_and_the_table_gone() {
+    fn schema_7_with_feedback_reaches_9_with_its_rows_moved_and_the_table_gone() {
         let path = std::env::temp_dir().join(format!("yo-hub-feedback-{}.db", std::process::id()));
         let path = path.to_str().unwrap();
         let leo = {
@@ -2380,24 +2456,34 @@ mod tests {
                 [leo],
             )
             .unwrap();
-            conn.execute_batch("PRAGMA user_version=7").unwrap();
+            // Schema 7 had help by account.
+            conn.execute_batch(
+                "ALTER TABLE support_messages RENAME COLUMN install TO user_id;
+                ALTER TABLE reports RENAME COLUMN reporter TO reporter_id; PRAGMA user_version=7",
+            )
+            .unwrap();
             leo
         };
         for _ in 0..2 {
             let db = Db::open(path).unwrap();
             let conn = db.conn();
-            assert_eq!(conn.query_row("PRAGMA user_version", [], |r| r.get::<_, i64>(0)).unwrap(), 8);
+            assert_eq!(conn.query_row("PRAGMA user_version", [], |r| r.get::<_, i64>(0)).unwrap(), 9);
             assert!(!conn
                 .prepare("SELECT 1 FROM sqlite_master WHERE name LIKE 'feedback%'")
                 .unwrap()
                 .exists([])
                 .unwrap());
             let message: (Vec<u8>, String, String, i64) = conn
-                .query_row("SELECT user_id,text,app_version,created_at FROM support_messages", [], |r| {
+                .query_row("SELECT install,text,app_version,created_at FROM support_messages", [], |r| {
                     Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?))
                 })
                 .unwrap();
-            assert_eq!(message, (leo.to_vec(), "Mehr Farben 🎨".into(), "ios/7".into(), 100));
+            // Schema 9: kept under a random placeholder install id, no longer the account's.
+            assert_eq!(
+                (message.0.len(), &message.1[..], &message.2[..], message.3),
+                (16, "Mehr Farben 🎨", "ios/7", 100)
+            );
+            assert_ne!(message.0, leo.to_vec());
             assert_eq!(conn.query_row("SELECT text FROM todos", [], |r| r.get::<_, String>(0)).unwrap(), "a task");
             assert_eq!(conn.query_row("SELECT first_seen FROM diagnostics", [], |r| r.get::<_, i64>(0)).unwrap(), 101);
         }

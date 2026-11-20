@@ -1140,8 +1140,11 @@ fn the_app_layer_reads_and_marks_support_replies() {
     let config =
         yo_hub::config::Config { admin_token: Some("test-token".into()), ..yo_hub::config::Config::for_tests() };
     let hub = TestHub::start_with(config, "127.0.0.1:0");
-    let a = client(&hub, &username(random_u64() % 1_000_000_000), "Test", Disk::new());
-    a.send_support("hello 🎨".into(), "1".into()).unwrap();
+    // Help goes by the install id, without an account (spec 6.4).
+    let app = Arc::new(App(Http::new(hub.url())));
+    let install = yo::new_install_id();
+    assert!(yo::help_thread(app.clone(), install.clone()).unwrap().messages.is_empty());
+    yo::help_send(app.clone(), install.clone(), "hello 🎨".into(), "1".into()).unwrap();
     let http = reqwest::blocking::Client::new();
     let threads: serde_json::Value = http
         .get(format!("{}/v1/admin/messages", hub.url()))
@@ -1150,10 +1153,9 @@ fn the_app_layer_reads_and_marks_support_replies() {
         .unwrap()
         .json()
         .unwrap();
-    let user =
-        threads.as_array().unwrap().iter().find(|t| t["user_id"] != "team").unwrap()["user_id"].as_str().unwrap();
+    assert_eq!(threads[0]["install"], install.as_str());
     assert_eq!(
-        http.post(format!("{}/v1/admin/messages/{user}", hub.url()))
+        http.post(format!("{}/v1/admin/messages/{install}", hub.url()))
             .header("yo-admin-token", "test-token")
             .body("Hello from the team")
             .send()
@@ -1161,14 +1163,14 @@ fn the_app_layer_reads_and_marks_support_replies() {
             .status(),
         204
     );
-    let thread = a.support_thread().unwrap();
+    let thread = yo::help_thread(app.clone(), install.clone()).unwrap();
     assert_eq!(thread.unread, 1);
     assert_eq!(thread.messages.len(), 2);
     assert!(!thread.messages[0].from_team);
     assert!(thread.messages[1].from_team);
     assert_eq!(thread.messages[0].text, "hello 🎨");
-    a.support_read(thread.messages[1].id).unwrap();
-    assert_eq!(a.support_thread().unwrap().unread, 0);
+    yo::help_read(app.clone(), install.clone(), thread.messages[1].id).unwrap();
+    assert_eq!(yo::help_thread(app, install).unwrap().unread, 0);
 }
 
 #[test]

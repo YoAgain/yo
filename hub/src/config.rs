@@ -34,12 +34,17 @@ pub struct Limits {
     pub request_hour_ms: u64,
     /// Failed backup fetches by address: unknown records or invalid door signatures (spec 7).
     pub backup_per_ip_hour: u32,
-    /// Reports of users, by one user (spec 6.3).
-    pub report_per_user_day: u32,
-    /// Feedback on the app, by one user (spec 6.3).
-    pub feedback_per_user_day: u32,
-    /// Crash reports from one address a day (spec 6.4): no account to count them by.
-    pub crash_per_ip_day: u32,
+    /// Reports of users, by one install id (spec 6.4).
+    pub report_per_install_day: u32,
+    /// Messages to the operator, by one install id (spec 6.4).
+    pub support_per_install_day: u32,
+    /// Messages and reports from one address a day, whatever install ids it names (spec 6.4).
+    pub help_per_ip_day: u32,
+    /// Crash and error reports by one install id, and from one address, an hour (spec 6.4).
+    pub diagnostics_per_install_hour: u32,
+    pub diagnostics_per_ip_hour: u32,
+    /// The operator's to-dos from one address a day.
+    pub todo_per_ip_day: u32,
     pub storage_per_user_hour: u32,
     pub envelope_ttl_days: u64,
     /// A blob not fetched by all its devices is deleted after this long (spec 6.8).
@@ -84,9 +89,12 @@ impl Default for Limits {
             requests_per_recipient: 1000,
             request_hour_ms: 3_600_000,
             backup_per_ip_hour: 30,
-            report_per_user_day: 20,
-            feedback_per_user_day: 10,
-            crash_per_ip_day: 5,
+            report_per_install_day: 20,
+            support_per_install_day: 10,
+            help_per_ip_day: 200,
+            diagnostics_per_install_hour: 300,
+            diagnostics_per_ip_hour: 3000,
+            todo_per_ip_day: 5,
             storage_per_user_hour: 120,
             envelope_ttl_days: 30,
             blob_ttl_days: 30,
@@ -115,9 +123,12 @@ impl Limits {
             request_recipients_per_sender: u64::MAX,
             requests_per_recipient: u64::MAX,
             backup_per_ip_hour: u32::MAX,
-            report_per_user_day: u32::MAX,
-            feedback_per_user_day: u32::MAX,
-            crash_per_ip_day: u32::MAX,
+            report_per_install_day: u32::MAX,
+            support_per_install_day: u32::MAX,
+            help_per_ip_day: u32::MAX,
+            diagnostics_per_install_hour: u32::MAX,
+            diagnostics_per_ip_hour: u32::MAX,
+            todo_per_ip_day: u32::MAX,
             storage_per_user_hour: u32::MAX,
             blob_put_per_ip_minute: u32::MAX,
             blob_get_per_ip_minute: u32::MAX,

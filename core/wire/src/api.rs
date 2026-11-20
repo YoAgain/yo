@@ -14,11 +14,25 @@ pub const INBOX_ACK: &str = "/v1/inbox/ack";
 pub const BACKUP: &str = "/v1/backup";
 /// `DELETE`: the signing device's account, with everything the hub holds about it.
 pub const ACCOUNT: &str = "/v1/account";
-pub const REPORT: &str = "/v1/report";
-/// `POST`: feedback on the app, for the operator (spec 6.3).
-pub const FEEDBACK: &str = "/v1/feedback";
-/// A crash report: no account, no signature (spec 6.4); the body is a `Feedback`.
-pub const CRASH: &str = "/v1/crash";
+/// Help (spec 6.4): everything a phone tells the operator about the app, by a random install id
+/// (`HEADER_INSTALL`), never by the account, never signed. `GET`: the support thread; `POST`: a message to it.
+pub const HELP_MESSAGES: &str = "/v1/help/messages";
+/// `POST`, `SupportRead`: the operator's answers read, up to an id.
+pub const HELP_READ: &str = "/v1/help/read";
+/// `POST`, `Report`: a user reported to the operator.
+pub const HELP_REPORT: &str = "/v1/help/report";
+/// `POST`, a JSON object of strings: a crash report.
+pub const HELP_CRASH: &str = "/v1/help/crash";
+/// `POST`, a JSON object of strings: an error report.
+pub const HELP_ERROR: &str = "/v1/help/error";
+/// The header of every help request: the install id, 32 lowercase hex digits (128 random bits) made on the phone
+/// and kept only there; sent on no other request, never with the account (spec 1, 6.4).
+pub const HEADER_INSTALL: &str = "yo-install";
+
+/// Whether a text is an install id: 32 lowercase hex digits.
+pub fn install_valid(text: &str) -> bool {
+    text.len() == 32 && text.bytes().all(|c| matches!(c, b'0'..=b'9' | b'a'..=b'f'))
+}
 /// The account's storage, sealed (spec 6.9).
 pub const STORAGE: &str = "/v1/storage";
 /// Photos and videos, encrypted (spec 6.8).
@@ -47,16 +61,14 @@ pub const HEADER_BODY_HASH: &str = "yo-body-sha256";
 /// hub's minimum for its platform is answered `426` (spec 6.3). Not signed; any request may carry it.
 pub const HEADER_APP: &str = "yo-app";
 
-/// The requests that name nobody (sealed deliveries, blobs, crash reports): the only ones a client sends on its
-/// anonymous connections; every other request, signed or not (a registration, a backup's fetch), names its device or
-/// account and goes on the other ones, so no connection carries both (spec 1).
+/// The requests that name no account (sealed deliveries, blobs, help by install id): the only ones a client sends on
+/// its anonymous connections; every other request, signed or not (a registration, a backup's fetch), names its device
+/// or account and goes on the other ones, so no connection carries both, and no install id meets an account (spec 1).
 pub fn anonymous(method: &str, path: &str) -> bool {
     let path = path.split('?').next().unwrap_or(path);
     (method == "POST" && path.starts_with(&format!("{INBOX}/")) && path != INBOX_ACK)
         || path.starts_with(&format!("{BLOBS}/"))
-        || path == CRASH
-        || path == "/v1/errors"
-        || path == "/v1/diagnostics/crash"
+        || path.starts_with("/v1/help/")
 }
 
 /// `POST /v1/inbox/{user_id}`: to every device of a user.
@@ -385,7 +397,7 @@ pub const REPORT_SPAM: u8 = 1;
 pub const REPORT_ABUSE: u8 = 2;
 pub const REPORT_OTHER: u8 = 3;
 
-/// `POST /v1/report`: a user reported to the operator. No content: the hub has none (spec 1).
+/// `POST /v1/help/report`: a user reported to the operator. No content: the hub has none (spec 1).
 #[derive(Debug, Clone, PartialEq, Eq, TlsSerialize, TlsDeserializeBytes, TlsSize)]
 pub struct Report {
     pub user_id: UserId,
@@ -393,7 +405,7 @@ pub struct Report {
     pub reason: u8,
 }
 
-/// `POST /v1/feedback`: what a user writes to the operator about the app, and the app's version. Plain text: the
+/// `POST /v1/help/messages`: what a user writes to the operator about the app, and the app's version. Plain text: the
 /// hub reads it (spec 1).
 #[derive(Debug, Clone, PartialEq, Eq, TlsSerialize, TlsDeserializeBytes, TlsSize)]
 pub struct Feedback {
@@ -578,6 +590,16 @@ mod tests {
         assert!(anonymous("GET", "/v1/blobs/abc") && anonymous("PUT", "/v1/blobs/abc?fetches=2"));
         assert!(!anonymous("POST", INBOX_ACK) && !anonymous("GET", &inbox_path(25)));
         assert!(!anonymous("POST", REGISTER) && !anonymous("GET", "/v1/backup/abc"));
+        for path in [HELP_MESSAGES, HELP_READ, HELP_REPORT, HELP_CRASH, HELP_ERROR] {
+            assert!(anonymous("POST", path), "{path}");
+        }
+        assert!(anonymous("GET", HELP_MESSAGES));
+    }
+
+    #[test]
+    fn install_ids_are_32_lowercase_hex_digits() {
+        assert!(install_valid(&"0a".repeat(16)));
+        assert!(!install_valid(&"0A".repeat(16)) && !install_valid(&"0".repeat(31)) && !install_valid(&"g".repeat(32)));
     }
 
     #[test]
@@ -633,8 +655,6 @@ mod tests {
 }
 
 /// Support messages are plaintext for the Yo team. Zero read_at means unread.
-pub const SUPPORT: &str = "/v1/support";
-pub const SUPPORT_READ: &str = "/v1/support/read";
 #[derive(Debug, Clone, TlsSerialize, TlsDeserializeBytes, TlsSize)]
 pub struct SupportMessage {
     pub id: u64,

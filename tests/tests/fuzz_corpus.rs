@@ -130,8 +130,8 @@ fn route_input(path: &str, body: &[u8]) -> Vec<u8> {
         (api::REGISTER, 10),
         (api::BACKUP, 13),
         ("/v1/blobs/", 17),
-        (api::REPORT, 19),
-        (api::FEEDBACK, 20),
+        (api::HELP_REPORT, 19),
+        (api::HELP_MESSAGES, 20),
         (api::STORAGE, 26),
     ]
     .iter()
