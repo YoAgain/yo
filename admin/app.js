@@ -791,12 +791,6 @@ if (document.body.classList.contains("login")) {
       part(() => healthRows(h, ym, yh));
       // Running totals: Yos into users' inboxes (a bot's inbox apart), accounts without bots.
       areaChart("yc", yt("yo-in") ?? 0, ym("yo-in"), yh("yo-in"), ev?.["yo-in"]?.today ?? 0);
-      // The operator's bots, counted apart by the hub (YO_BOT_ACCOUNTS, a stopgap): photos per bot, Yos from all.
-      const bots = Object.keys(ev || {}).filter((k) => k.startsWith("bot-media:")).sort()
-        .map((k) => `${k.slice(10)} ${num(ev[k].today ?? 0)}`);
-      if (ev?.["bot-yo"]?.today) bots.push(`Yos ${num(ev["bot-yo"].today)}`);
-      set("bots-t", bots.length ? `Bots: ${bots.join(" · ")} today` : "");
-      $("bots-t").hidden = !bots.length;
       const sud = new Map(h.signup_days || []);
       areaChart("uc", [...sud.values()].reduce((a, v) => a + v, 0), sud, h.signups_hours, sud.get(today0()) ?? 0);
       const dn14 = days14().map(dayName);
@@ -2142,6 +2136,16 @@ if (document.body.classList.contains("login")) {
   // rows belong to Speed and Problems.
   const TOPIC = (k) => (["cpu", "mem", "disk", "net"].includes(k) ? "server" : k.startsWith("svc:") ? "svc" : { q: "dl", he: "pr" }[k] || k);
   // What each tile opens, put together from the single topics above (old links to a topic still open it alone).
+  // The operator's bots (YO_BOT_ACCOUNTS), counted apart by the hub and out of every number above: photos each sent
+  // today, the Yos of the server's own services as a series of their own. Only in this detail, never on the card.
+  const botCards = (h) => {
+    const ev = h.events || {}, today = (k) => ev[k]?.today ?? 0;
+    const media = Object.keys(ev).filter((k) => k.startsWith("bot-media:")).sort();
+    if (!media.length && !ev["bot-yo"]?.total && !today("bot-yo")) return [];
+    const rows = [...media.map((k) => [`${k.slice(10)} photos`, num(today(k))]), ["Bot Yos", num(today("bot-yo"))]];
+    return [dcard("Bots", dnums(`${num(rows.reduce((a, r) => a + Number(String(r[1]).replace(/\D/g, "")), 0))}`, "today"), kvRows(rows), note("Not in the counts of Sent, Media or Accounts.")),
+      comboCard("Bot Yos", evSlots("bot-yo"), { cls: "cool", total: ev["bot-yo"]?.total, unit: "Yos" })];
+  };
   { const one = { ...DETAIL }, title = (c) => c?.querySelector("h3 span")?.textContent, tot = (b) => b.reduce((a, v) => a + v, 0);
     // Yo: beside the tile's Yos: delivered, delivery performance (speed, the queues), media sent, groups.
     DETAIL.yc = () => {
@@ -2156,6 +2160,7 @@ if (document.body.classList.contains("login")) {
             more: (i) => [{ ico: "disk", label: "Size", value: bytes(by.values[i] || 0) },
               { ico: "send", label: "Share of Yos", value: yo.values[i] ? pctText((100 * (evSlots("media-in").values[i] || 0)) / yo.values[i]) : "–" }] }); })(),
         comboCard("Groups", evSlots("group-create"), { total: h.groups, unit: "made" }),
+        ...botCards(h),
       ];
     };
     // Accounts: activity (who is active, how many stay, how much they send) and the accounts' properties (secured,

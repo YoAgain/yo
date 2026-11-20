@@ -158,7 +158,8 @@ class UsersTabCollectorTests(unittest.TestCase):
                     ("yo-in", minute, 3), ("yo-in", minute - 1, 2) if minute % 60 else ("yo-in", minute + 1, 2),
                     ("yo-out", minute - 60, 4), ("group-create", minute - 2 * 24 * 60, 1),
                     ("media-in", (day - 20) * 24 * 60, 9),  # older than 14 days: only in the total
-                    ("media-in-bytes", minute, 3_000_000), ("media-in-bytes", (day - 20) * 24 * 60, 9_000_000)])
+                    ("media-in-bytes", minute, 3_000_000), ("media-in-bytes", (day - 20) * 24 * 60, 9_000_000),
+                    ("bot-yo", minute, 7), ("bot-media:YoGPT", minute, 2)])
             e = users.hub("live", path)["events"]
             self.assertEqual(e["yo-in"]["hours"][-1], 5)
             self.assertEqual(e["yo-out"]["hours"][-2], 4)
@@ -172,7 +173,9 @@ class UsersTabCollectorTests(unittest.TestCase):
             self.assertEqual(e["media-in-bytes"]["hours"][-1], 3_000_000)
             self.assertEqual(e["media-in-bytes"]["today"], 3_000_000)
             self.assertEqual(e["media-in-bytes"]["total"], 12_000_000)
-            self.assertEqual(e["yo-in"]["total"], 5)
+            self.assertEqual(e["yo-in"]["total"], 5)  # a bot's sends are apart: not in the human counts
+            self.assertEqual(e["bot-yo"]["hours"][-1], 7)
+            self.assertEqual(e["bot-media:YoGPT"]["total"], 2)
             self.assertEqual(e["media-out"]["total"], 0)
             self.assertEqual(e["media-out"]["today"], 0)
             self.assertEqual(e["yo-in"]["today"], 5)

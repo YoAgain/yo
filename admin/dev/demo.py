@@ -316,6 +316,7 @@ def make_hub(path: str, rng: random.Random, now: int, n_users: int, live: bool) 
         kinds = [("yo-in", 6 if live else 1), ("media-in", 1.2 if live else 0.2), ("group-create", 0.05 if live else 0.01)]
         if apart:
             kinds.append(("yo-in-bot", 1.5 if live else 0.3))
+            kinds += [("bot-yo", 0.8 if live else 0.1), ("bot-media", 0.4), ("bot-media:YoGPT", 0.3), ("bot-media:PING", 0.1)]
         for kind, rate in kinds:
             n = sum(rng.random() < rate * busy / 3 for _ in range(3))
             if n:
