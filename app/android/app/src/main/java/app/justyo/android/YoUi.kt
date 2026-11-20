@@ -719,6 +719,11 @@ private fun NotificationSettingsRow(onClick: () -> Unit) {
             repo.press(friend.key, false)
         }
     }
+    // The name field opened: once the keyboard is up, the whole add block (the field, Group and Invite) shows above it,
+    // as iOS scrolls to the block's bottom.
+    LaunchedEffect(add, keyboardVisible) {
+        if (add && keyboardVisible) listState.layoutInfo.totalItemsCount.takeIf { it > 0 }?.let { listState.animateScrollToItem(it - 1) }
+    }
     PredictiveBackHandler(add && !addingFriend && !cameraOn) { events ->
         events.collect { }
         add = false

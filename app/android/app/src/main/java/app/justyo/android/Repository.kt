@@ -1046,7 +1046,11 @@ class Repository(private val context: Context, ownerScope: CoroutineScope) {
         changes.withLock { persist() }
         client?.let(::store)
     }
-    suspend fun saveContacts() { client?.writeStorage(); mutable.update { it.copy(notice = context.getString(R.string.contacts_saved)) } }
+    /** Account Backup (iOS AccountSyncRow): when Yo's server last held all of it (ms), null while a change waits to go
+     *  up; throws while there is no account or it can't be read. */
+    fun backupSavedAt(): Long? = (client ?: error("signed out")).storageSavedAt()?.toLong()
+    /** Backs the account up now; false if that failed. */
+    fun backUpNow(): Boolean = runCatching { (client ?: error("signed out")).writeStorage() }.isSuccess
     suspend fun deleteAccount() {
         val c = client ?: return
         c.deleteAccount()

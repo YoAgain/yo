@@ -81,7 +81,6 @@
     <string name="ui_contacts">Contacts</string>
     <string name="ui_blocked_friends_can_t_send_you_yos_tap_unblock_to_unblock">Blocked friends can’t send you Yos. Tap Unblock to unblock.</string>
     <string name="ui_app_icon">App Icon</string>
-    <string name="ui_yo_and_photos_at_the_left_end_of_a_bar_undo_at_the_right_the_came">Yo and photos at the left end of a bar, Undo at the right; the camera at the bottom left.</string>
     <string name="ui_left_handed">Left-Handed</string>
     <string name="ui_friends">Friends</string>
     <string name="ui_hub">Hub</string>
@@ -155,7 +154,6 @@
 <string name="recording">● Recording</string>
 <string name="valid_name">Use at least one letter or emoji and no more than 16 characters.</string>
 <string name="type_name">Type a name.</string>
-<string name="contacts_saved">Contacts saved</string>
 <string name="no_passkey">No Yo passkey found. Use your recovery key.</string>
 <string name="camera_open_failed">Couldn’t open the camera. Check its permission or try another camera.</string>
 <string name="camera_not_ready">Camera not ready</string>
@@ -164,9 +162,9 @@
 <string name="vault_damaged">Damaged vault item</string>
 <string name="sign_in_first">Sign in first</string>
 <string name="photo_unavailable">Photo no longer available</string>
-<string name="icon_negative">Negative</string>
-<string name="icon_original">Original</string>
-<string name="icon_default">Default</string>
+<string name="icon_negative">Negative Yo</string>
+<string name="icon_original">Full Color</string>
+<string name="icon_default">Yo</string>
 <string name="with_members">%1$s with %2$s</string>
 <string name="member_added">%1$s added %2$s to %3$s</string>
 <string name="member_removed">%1$s removed %2$s from %3$s</string>
@@ -202,8 +200,6 @@
     <string name="yo_is_updating">Yo is updating…</string>
     <string name="account_security">Account Security</string>
     <string name="account_backup">Account Backup</string>
-    <string name="account_backup_footer">Tap to back up your encrypted contacts and blocked list.</string>
-    <string name="account_recovery_explanation">Save your Recovery Key somewhere safe. You can use it to sign in on a new phone. Account Backup saves your encrypted contacts and blocked list. Passkey recovery through Google Password Manager is currently unavailable.</string>
     <string name="compare_code">Compare Code</string>
     <string name="technical_details">Technical Details</string>
     <string name="yo_notification_channel">Yos</string>
@@ -295,4 +291,16 @@
     <string name="signin_use_a_key">Not listed? Use a key: passkey or recovery key</string>
     <string name="signin_scan">Scan recovery key</string>
     <string name="signin_photo">Choose recovery key photo</string>
+    <string name="settings_title">Yodentity</string>
+    <string name="how_recovery_works">How Account Recovery Works</string>
+    <string name="recovery_help_intro">Your account is protected by an account key that only your devices hold.</string>
+    <string name="recovery_help_passkey">Optionally, back up your account key with a passkey. Your screen lock or your password manager unlocks it on a new phone.</string>
+    <string name="recovery_help_key">Optionally, keep a recovery key. Enter it on any phone to get your account back.</string>
+    <string name="recovery_help_backup">Your contacts, groups and settings are kept on Yo’s server, encrypted with a key made from your account key, so a new phone finds them again. Yos, photos and videos aren’t backed up.</string>
+    <string name="recovery_help_footer">Account Backup is end-to-end encrypted. Yo’s server stores it but can’t read it.</string>
+    <string name="backup_failed">Failed</string>
+    <string name="backup_unavailable">Unavailable</string>
+    <string name="backup_just_now">Just now</string>
+    <string name="backup_yesterday">Yesterday</string>
+    <string name="backup_pending">Pending</string>
 </resources>

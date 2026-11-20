@@ -50,6 +50,8 @@ import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.semantics.clearAndSetSemantics
 import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.semantics.heading
+import android.view.HapticFeedbackConstants
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.style.TextAlign
@@ -87,12 +89,16 @@ internal data class Setting(
     val onClick: (() -> Unit)? = null,
 )
 
-@Composable internal fun Section(title: String? = null, footer: String? = null, vararg rows: Setting?) {
+@Composable internal fun Section(title: String? = null, footer: String? = null, vararg rows: Setting?,
+    titleAction: (@Composable () -> Unit)? = null, gap: androidx.compose.ui.unit.Dp = 20.dp) {
     val shown = rows.filterNotNull()
     run {
-        Column(Modifier.fillMaxWidth().padding(bottom = 20.dp), verticalArrangement = Arrangement.spacedBy(ListItemDefaults.SegmentedGap)) {
-            if (title != null) Text(title, Modifier.padding(start = 16.dp, bottom = 6.dp),
-                style = MaterialTheme.typography.labelLarge, color = MaterialTheme.colorScheme.onSurfaceVariant)
+        Column(Modifier.fillMaxWidth().padding(bottom = gap), verticalArrangement = Arrangement.spacedBy(ListItemDefaults.SegmentedGap)) {
+            if (title != null) Row(Modifier.fillMaxWidth().padding(start = 16.dp).heightIn(min = 24.dp), verticalAlignment = Alignment.CenterVertically) {
+                Text(title, Modifier.weight(1f).padding(bottom = if (titleAction == null) 6.dp else 0.dp),
+                    style = MaterialTheme.typography.labelLarge, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                titleAction?.invoke()
+            }
             shown.forEachIndexed { index, row -> SettingRow(row, ListItemDefaults.segmentedShapes(index, shown.size)) }
             if (footer != null) Text(footer, Modifier.padding(horizontal = 16.dp, vertical = 6.dp),
                 style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
@@ -100,19 +106,26 @@ internal data class Setting(
     }
 }
 
+/** A row's leading symbol takes the App Icon picture's width, so the titles line up. */
+private val LeadingSide = 32.dp
+
 @Composable
 private fun SettingRow(row: Setting, shapes: ListItemShapes) {
-    val leading: (@Composable () -> Unit)? = row.leading ?: row.icon?.let { icon -> { Icon(icon, null) } }
+    val leading: (@Composable () -> Unit)? = row.leading ?: row.icon?.let { icon -> {
+        Box(Modifier.size(LeadingSide), contentAlignment = Alignment.Center) { Icon(icon, null) }
+    } }
     val hasTrailing = row.checked != null || row.value != null || row.badge || row.good != null || row.action != null
     val trailing: (@Composable () -> Unit)? = if (!hasTrailing) null else { {
         Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
-            row.value?.let { Text(it, color = MaterialTheme.colorScheme.onSurfaceVariant, maxLines = 1) }
+            row.value?.let { Text(it, color = MaterialTheme.colorScheme.onSurfaceVariant,
+                style = MaterialTheme.typography.bodyMedium, maxLines = 1) }
             row.good?.let { ok ->
                 Icon(if (ok) Icons.Default.CheckCircle else Icons.Default.ErrorOutline, null, Modifier.size(18.dp),
                     tint = if (ok) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.error)
             }
             if (row.badge) Badge { Text("1") }
-            row.action?.let { (icon, label) -> IconButton(onClick = { row.onAction?.invoke() }, enabled = row.enabled) { Icon(icon, label) } }
+            row.action?.let { (icon, label) -> IconButton(onClick = { row.onAction?.invoke() }, enabled = row.enabled,
+                colors = IconButtonDefaults.iconButtonColors(contentColor = MaterialTheme.colorScheme.primary)) { Icon(icon, label) } }
             if (row.checked != null) { if (row.checkbox) Checkbox(row.checked, onCheckedChange = null, enabled = row.enabled) else Switch(row.checked, onCheckedChange = null, enabled = row.enabled) }
         }
     } }
@@ -205,6 +218,7 @@ private val HalfPages = setOf("Profile", "Account", "Blocked", "Account Security
     var code by remember { mutableStateOf(false) }
     var logout by remember { mutableStateOf(false) }
     var showingInfo by remember { mutableStateOf(false) }
+    var showingRecoveryHelp by remember { mutableStateOf(false) }
     var unblocking by remember { mutableStateOf<Friend?>(null) }
     var blockingNew by remember { mutableStateOf<Friend?>(null) }
     var passkeyRevision by remember { mutableIntStateOf(0) }
@@ -265,16 +279,7 @@ private val HalfPages = setOf("Profile", "Account", "Blocked", "Account Security
     }
     // What a page's rows mean, behind its (i) instead of under every row (iOS: "How Account Recovery Works").
     val info: String? = when (page) {
-        "Account Security" -> listOf(
-            R.string.account_recovery_explanation,
-            when { s.backedUp -> R.string.google_backup_footer
-                s.googleBackup && s.backupMissingReason == CloudMissing.DEVICE_BACKUP -> R.string.google_backup_off_device_backup
-                s.googleBackup -> R.string.google_backup_off
-                else -> R.string.google_backup_turned_off },
-            R.string.account_backup_footer,
-        ).joinToString("\n\n") { res.getString(it) }
         "Blocked" -> res.getString(R.string.ui_blocked_friends_can_t_send_you_yos_tap_unblock_to_unblock)
-        "Appearance" -> res.getString(R.string.ui_yo_and_photos_at_the_left_end_of_a_bar_undo_at_the_right_the_came)
         "Status" -> res.getString(R.string.ui_anonymous_crash_reports_include_android_version_os_exit_reason_an)
         "Encryption" -> res.getString(R.string.ui_every_yo_photo_and_video_is_end_to_end_encrypted_only_you_an)
         else -> if (page.startsWith("contact:")) res.getString(R.string.compare_safety, title) else null
@@ -284,10 +289,20 @@ private val HalfPages = setOf("Profile", "Account", "Blocked", "Account Security
     var support by remember { mutableStateOf<SupportThread?>(null) }
 
     Column(Modifier.fillMaxWidth()) {
-        // The first page has no bar (iOS): its rows start at the sheet's top.
-        if (page != "Profile") TopAppBar(
+        // The first page: its title alone, centred (iOS "Yodentity"), no way back; the sheet's handle or back closes it.
+        // A bottom sheet's title line, not a whole app bar: the page fits at half height.
+        if (page == "Profile") Box(Modifier.fillMaxWidth().height(40.dp), contentAlignment = Alignment.TopCenter) {
+            Text(stringResource(R.string.settings_title), Modifier.semantics { heading() }, style = MaterialTheme.typography.titleMedium, maxLines = 1)
+        } else TopAppBar(
             title = { Text(title, maxLines = 1) },
-            navigationIcon = { IconButton(onClick = back) { Icon(Icons.AutoMirrored.Filled.ArrowBack, stringResource(R.string.ui_back)) } },
+            navigationIcon = {
+                // A full page over a half one is iOS's own sheet on top: it closes (✕) back to where it was opened.
+                val closes = page !in HalfPages && trail.dropLast(1).lastOrNull() in HalfPages
+                IconButton(onClick = back) {
+                    if (closes) Icon(Icons.Default.Close, stringResource(R.string.ui_close))
+                    else Icon(Icons.AutoMirrored.Filled.ArrowBack, stringResource(R.string.ui_back))
+                }
+            },
             actions = {
                 if (info != null) IconButton(onClick = { showingInfo = true }) {
                     Icon(Icons.Outlined.Info, stringResource(R.string.settings_page_info))
@@ -316,7 +331,7 @@ private val HalfPages = setOf("Profile", "Account", "Blocked", "Account Security
                 shown == "Licenses" -> LicensesPage()
                 // At half height the first page never scrolls: the profile card takes the room the rows leave, so the
                 // gap under the last section is the one at the top. Accessibility font sizes keep the compact card and scroll.
-                shown == "Profile" && androidx.compose.ui.platform.LocalDensity.current.fontScale < 1.5f -> Column(Modifier.fillMaxSize().padding(horizontal = 16.dp).padding(top = 20.dp)) {
+                shown == "Profile" && androidx.compose.ui.platform.LocalDensity.current.fontScale < 1.5f -> Column(Modifier.fillMaxSize().padding(horizontal = 16.dp)) {
                     ProfileCard(s, onOpen = { open("Account") }, onCode = { code = true }, Modifier.weight(1f), grow = true)
                     ProfileRows(s, repo, ::open, onAddFriends)
                 }
@@ -330,7 +345,7 @@ private val HalfPages = setOf("Profile", "Account", "Blocked", "Account Security
                         Section(null, null,
                             Setting(stringResource(R.string.ui_contacts), Icons.Default.People,
                                 encrypted?.let { res.getString(R.string.part_of_total, it.first, it.second) }, onClick = { open("Contacts") }),
-                            Setting(stringResource(R.string.ui_blocked), Icons.Default.Block, s.friends.count { it.blocked }.toString(), onClick = { open("Blocked") }),
+                            Setting(stringResource(R.string.ui_blocked), Icons.Default.Block, onClick = { open("Blocked") }),
                         )
                         // Backup and the ways back on a new phone on a page of their own; the row says whether they are in place.
                         Section(null, null,
@@ -351,9 +366,7 @@ private val HalfPages = setOf("Profile", "Account", "Blocked", "Account Security
                     // iOS AccountSecurityPage: Yo's own backup, then the three ways back on a new phone.
                     shown == "Account Security" -> {
                         // Yo's own end-to-end encrypted copy of the contacts, groups and settings, on its own.
-                        Section(null, null,
-                            Setting(stringResource(R.string.account_backup), Icons.Default.CloudUpload, onClick = { repo.command { saveContacts() } }),
-                        )
+                        Section(null, null, accountBackupRow(repo))
                         // iOS AccountSecurityPage: the three ways back on a new phone, each with its switch; the (i) above
                         // explains them. A passkey here rides on a saved recovery key, so without one its switch opens the key's screen.
                         val keyOn = s.secured && s.recoverySaved
@@ -387,6 +400,11 @@ private val HalfPages = setOf("Profile", "Account", "Blocked", "Account Security
                                             else android.provider.Settings.ACTION_SECURITY_SETTINGS)
                                     }
                                 }),
+                            titleAction = {
+                                IconButton(onClick = { showingRecoveryHelp = true }, Modifier.size(36.dp)) {
+                                    Icon(Icons.Outlined.Info, stringResource(R.string.how_recovery_works))
+                                }
+                            },
                         )
                     }
                     // iOS BlockedPage: who may ask and blocking one more, then the blocked contacts.
@@ -409,13 +427,7 @@ private val HalfPages = setOf("Profile", "Account", "Blocked", "Account Security
                         else contacts.map { friend ->
                             Setting(friend.name, leading = { SettingsAvatar(friend.name, 40) }, onClick = { blockingNew = friend })
                         }).toTypedArray())
-                    shown == "Appearance" -> {
-                        IconChoice(s.appIcon) { name -> repo.command { icon(name) } }
-                        Section(null, null,
-                            Setting(stringResource(R.string.ui_left_handed), Icons.Default.PanTool, checked = s.leftHanded,
-                                onChecked = { on -> repo.command { settings(left = on) } }),
-                        )
-                    }
+                    shown == "Appearance" -> IconChoice(s.appIcon) { name -> repo.command { icon(name) } }
                     // iOS HelpPage: the tutorial, then Contact Us, then Status and About & Licenses with the version.
                     shown == "Help" -> {
                         HelpHero(Modifier.padding(bottom = 20.dp))
@@ -498,6 +510,7 @@ private val HalfPages = setOf("Profile", "Account", "Blocked", "Account Security
         dismissButton = { TextButton(onClick = { googleOff = false }) { Text(stringResource(R.string.ui_cancel)) } },
     )
     if (code) YourCodeSheet(s.username.orEmpty()) { code = false }
+    if (showingRecoveryHelp) RecoveryHelpSheet(s) { showingRecoveryHelp = false }
     if (showingInfo && info != null) AlertDialog(
         onDismissRequest = { showingInfo = false },
         icon = { Icon(Icons.Outlined.Info, null) },
@@ -568,9 +581,9 @@ private fun shareCode(context: Context, name: String) {
 }
 
 @Composable private fun KeyCard(key: String, copied: Boolean? = null, onCopy: () -> Unit = {}) {
-    OutlinedCard(Modifier.fillMaxWidth()) {
-        Column(Modifier.fillMaxWidth().padding(16.dp), horizontalAlignment = Alignment.CenterHorizontally) {
-            Qr(key, Modifier.size(140.dp))
+    Surface(Modifier.fillMaxWidth(), shape = RoundedCornerShape(18.dp), color = Color.White.copy(alpha = 0.14f), contentColor = Color.White) {
+        Column(Modifier.fillMaxWidth().padding(16.dp), horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.spacedBy(12.dp)) {
+            Qr(key, Modifier.size(120.dp).clip(RoundedCornerShape(8.dp)))
             SelectionContainer {
                 Column {
                     key.chunked(4).chunked(4).forEach { blocks ->
@@ -580,23 +593,101 @@ private fun shareCode(context: Context, name: String) {
                     }
                 }
             }
-            if (copied != null) TextButton(onClick = onCopy) { Text(stringResource(if (copied) R.string.recovery_copied else R.string.recovery_copy)) }
+            if (copied != null) TextButton(onClick = onCopy, colors = ButtonDefaults.textButtonColors(contentColor = Color.White)) {
+                Text(stringResource(if (copied) R.string.recovery_copied else R.string.recovery_copy), fontWeight = androidx.compose.ui.text.font.FontWeight.SemiBold)
+            }
         }
     }
 }
 
 
-/** The account's card: avatar, the name never cut (it shrinks to half, as on iOS), the red 1 while unsecured, the code. */
+/** Account Backup (iOS AccountSyncRow): when Yo's server last held it, a check once it does; a tap backs up now. */
+@Composable private fun accountBackupRow(repo: Repository): Setting {
+    val res = LocalResources.current
+    val view = androidx.compose.ui.platform.LocalView.current
+    var savedAt by remember { mutableStateOf<Long?>(null) }
+    var unavailable by remember { mutableStateOf(true) }
+    var saving by remember { mutableStateOf(false) }
+    var failed by remember { mutableStateOf(false) }
+    var justSaved by remember { mutableStateOf(false) }
+    val scope = rememberCoroutineScope()
+    suspend fun load() = withContext(Dispatchers.IO) {
+        runCatching { repo.backupSavedAt() }.onSuccess { savedAt = it; unavailable = false }.onFailure { unavailable = true }
+    }
+    // A backup from elsewhere (the inbox's sync) shows up.
+    LaunchedEffect(Unit) { while (true) { load(); delay(5000) } }
+    LaunchedEffect(justSaved) { if (justSaved) { delay(60_000); justSaved = false } }
+    val value = when {
+        failed -> res.getString(R.string.backup_failed)
+        unavailable -> res.getString(R.string.backup_unavailable)
+        justSaved -> res.getString(R.string.backup_just_now)
+        else -> savedAt?.let { at ->
+            val then = java.time.Instant.ofEpochMilli(at).atZone(java.time.ZoneId.systemDefault())
+            val today = java.time.LocalDate.now()
+            when (then.toLocalDate()) {
+                today -> android.text.format.DateFormat.getTimeFormat(view.context).format(java.util.Date(at))
+                today.minusDays(1) -> res.getString(R.string.backup_yesterday)
+                else -> java.time.format.DateTimeFormatter.ofPattern("d MMM").format(then)
+            }
+        } ?: res.getString(R.string.backup_pending)
+    }
+    return Setting(stringResource(R.string.account_backup), Icons.Default.Cloud, value,
+        good = when { failed -> false; unavailable || savedAt == null -> null; else -> true },
+        enabled = !saving, onClick = {
+            saving = true; failed = false
+            val before = savedAt
+            scope.launch {
+                val ok = withContext(Dispatchers.IO) { repo.backUpNow() }
+                load()
+                failed = !ok || unavailable || savedAt == null
+                justSaved = !failed && savedAt != before
+                if (android.os.Build.VERSION.SDK_INT >= 30) view.performHapticFeedback(if (failed) HapticFeedbackConstants.REJECT else HapticFeedbackConstants.CONFIRM)
+                saving = false
+            }
+        })
+}
+
+/** How Account Recovery Works (iOS RecoveryHelpSheet): the account key and the ways it comes back, one by one. */
+@Composable private fun RecoveryHelpSheet(s: AppState, onClose: () -> Unit) {
+    FittedSheet(onDismissRequest = onClose, containerColor = MaterialTheme.colorScheme.surfaceContainer) {
+        Column(Modifier.fillMaxWidth().verticalScroll(rememberScrollState()).padding(horizontal = 24.dp).padding(bottom = 24.dp),
+            verticalArrangement = Arrangement.spacedBy(20.dp)) {
+            Text(stringResource(R.string.how_recovery_works), style = MaterialTheme.typography.titleLarge)
+            Text(stringResource(R.string.recovery_help_intro), color = MaterialTheme.colorScheme.onSurfaceVariant)
+            @Composable fun item(icon: ImageVector, title: String, text: String) {
+                Row(Modifier.semantics(mergeDescendants = true) {}, horizontalArrangement = Arrangement.spacedBy(16.dp)) {
+                    Icon(icon, null, Modifier.size(28.dp), tint = MaterialTheme.colorScheme.primary)
+                    Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                        Text(title, style = MaterialTheme.typography.titleMedium)
+                        Text(text, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    }
+                }
+            }
+            item(Icons.Default.Cloud, stringResource(R.string.google_backup_row), stringResource(when {
+                s.backedUp -> R.string.google_backup_footer
+                s.googleBackup && s.backupMissingReason == CloudMissing.DEVICE_BACKUP -> R.string.google_backup_off_device_backup
+                s.googleBackup -> R.string.google_backup_off
+                else -> R.string.google_backup_turned_off
+            }))
+            item(Icons.Default.Fingerprint, copy(ProductText.PASSKEY), stringResource(R.string.recovery_help_passkey))
+            item(Icons.Default.Key, copy(ProductText.RECOVERY_KEY), stringResource(R.string.recovery_help_key))
+            item(Icons.Default.CloudSync, stringResource(R.string.account_backup), stringResource(R.string.recovery_help_backup))
+            Text(stringResource(R.string.recovery_help_footer), style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant)
+        }
+    }
+}
+
 /** The first page's rows under the profile card. */
 @Composable private fun ProfileRows(s: AppState, repo: Repository, open: (String) -> Unit, onAddFriends: () -> Unit) {
     Section(null, null,
-        Setting(stringResource(R.string.ui_app_icon), leading = { AppIconPreview(s.appIcon, 32, 8) }, onClick = { open("Appearance") }),
+        gap = 12.dp, rows = arrayOf(Setting(stringResource(R.string.ui_app_icon), leading = { AppIconPreview(s.appIcon, 32, 8) }, onClick = { open("Appearance") }),
         Setting(stringResource(R.string.ui_left_handed), Icons.Default.PanTool, checked = s.leftHanded,
-            onChecked = { on -> repo.command { settings(left = on) } }),
+            onChecked = { on -> repo.command { settings(left = on) } })),
     )
     Section(null, null,
-        Setting(stringResource(R.string.help_and_about), Icons.AutoMirrored.Filled.Help, onClick = { open("Help") }),
-        Setting(stringResource(R.string.ui_add_friends), Icons.Default.PersonAdd, onClick = onAddFriends),
+        gap = 12.dp, rows = arrayOf(Setting(stringResource(R.string.help_and_about), Icons.AutoMirrored.Filled.Help, onClick = { open("Help") }),
+        Setting(stringResource(R.string.ui_add_friends), Icons.Default.PersonAdd, onClick = onAddFriends)),
     )
 }
 
@@ -607,20 +698,22 @@ private fun shareCode(context: Context, name: String) {
         val name = (26 * avatar.value / 64).coerceAtMost(36f).sp
         Row(Modifier.padding(16.dp), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(14.dp)) {
             SettingsAvatar(s.username.orEmpty(), avatar.value.toInt())
-            BasicText(
-                s.username.orEmpty(), Modifier.weight(1f),
-                style = TextStyle(fontFamily = YoFont, fontSize = name, color = MaterialTheme.colorScheme.onSurface),
-                maxLines = 1, softWrap = false,
-                autoSize = TextAutoSize.StepBased(minFontSize = 13.sp, maxFontSize = name),
-            )
-            if (s.recoveryNeedsAttention) Badge { Text("1") }
+            Row(Modifier.weight(1f), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                BasicText(
+                    s.username.orEmpty(), Modifier.weight(1f, fill = false),
+                    style = TextStyle(fontFamily = YoFont, fontSize = name, color = MaterialTheme.colorScheme.onSurface),
+                    maxLines = 1, softWrap = false,
+                    autoSize = TextAutoSize.StepBased(minFontSize = 13.sp, maxFontSize = name),
+                )
+                if (s.recoveryNeedsAttention) Badge { Text("1") }
+            }
             FilledTonalIconButton(onClick = onCode) { Icon(Icons.Default.QrCode, stringResource(R.string.ui_show_your_code)) }
         }
     }
-    Card(onClick = onOpen, modifier = modifier.fillMaxWidth().padding(bottom = 20.dp), shape = MaterialTheme.shapes.extraLarge,
+    Card(onClick = onOpen, modifier = modifier.fillMaxWidth().padding(bottom = 12.dp), shape = MaterialTheme.shapes.extraLarge,
         colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceBright)) {
         if (grow) BoxWithConstraints(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
-            content((maxHeight - 32.dp).coerceIn(64.dp, 96.dp))
+            content((maxHeight - 32.dp).coerceIn(48.dp, 96.dp))
         } else content(64.dp)
     }
 }
@@ -638,6 +731,7 @@ private fun shareCode(context: Context, name: String) {
                     verticalArrangement = Arrangement.spacedBy(8.dp)) {
                     AppIconPreview(name, 64, 16)
                     Text(stringResource(when (name) { "Negative" -> R.string.icon_negative; "Original" -> R.string.icon_original; else -> R.string.icon_default }),
+                        maxLines = 1,
                         style = MaterialTheme.typography.labelLarge)
                 }
             }
@@ -1072,15 +1166,11 @@ private fun shareCode(context: Context, name: String) {
             RecoveryLink(copy(if (shown) ProductText.HIDE_KEY else ProductText.SHOW_KEY),
                 if (shown) Icons.Default.VisibilityOff else Icons.Default.Visibility, ready && idle, ::show)
         }) {
-        if (shown && key != null) Box(Modifier.padding(top = 8.dp)) {
-            YoSystemTheme {
-                KeyCard(key, copied) {
-                    val clip = android.content.ClipData.newPlainText(res.getString(R.string.ui_recovery_key), key.chunked(4).joinToString(" "))
-                    clip.description.extras = android.os.PersistableBundle().apply { putBoolean("android.content.extra.IS_SENSITIVE", true) }
-                    context.getSystemService(android.content.ClipboardManager::class.java).setPrimaryClip(clip)
-                    copied = true
-                }
-            }
+        if (shown && key != null) KeyCard(key, copied) {
+            val clip = android.content.ClipData.newPlainText(res.getString(R.string.ui_recovery_key), key.chunked(4).joinToString(" "))
+            clip.description.extras = android.os.PersistableBundle().apply { putBoolean("android.content.extra.IS_SENSITIVE", true) }
+            context.getSystemService(android.content.ClipboardManager::class.java).setPrimaryClip(clip)
+            copied = true
         }
     }
     if (sharing) AlertDialog(
