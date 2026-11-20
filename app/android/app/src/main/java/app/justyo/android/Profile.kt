@@ -683,12 +683,11 @@ private fun shareCode(context: Context, name: String) {
     }
     val messages = support?.messages.orEmpty()
     if (messages.isEmpty() && !offline) {
-        Column(Modifier.fillMaxSize().padding(32.dp), horizontalAlignment = Alignment.CenterHorizontally,
-            verticalArrangement = Arrangement.spacedBy(12.dp, Alignment.CenterVertically)) {
-            Icon(Icons.Default.Forum, null, Modifier.size(48.dp), tint = MaterialTheme.colorScheme.primary)
-            Text(stringResource(R.string.support_empty_title), style = MaterialTheme.typography.titleLarge)
-            Text(stringResource(R.string.support_empty_subtitle), textAlign = TextAlign.Center,
-                style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
+        // The empty chat: one incoming message from the team, centred, and a quiet word on privacy under it.
+        Column(Modifier.fillMaxSize().padding(16.dp), verticalArrangement = Arrangement.spacedBy(6.dp, Alignment.CenterVertically)) {
+            SupportBubble(stringResource(R.string.support_empty_title), fromTeam = true)
+            Text(stringResource(R.string.support_privacy), Modifier.padding(start = 16.dp),
+                style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
         }
         return
     }
@@ -703,14 +702,20 @@ private fun shareCode(context: Context, name: String) {
             }
         }
         items(messages.asReversed(), key = { it.id.toString() }) { message ->
-            Box(Modifier.fillMaxWidth(), contentAlignment = if (message.fromTeam) Alignment.CenterStart else Alignment.CenterEnd) {
-                Surface(
-                    shape = MaterialTheme.shapes.large,
-                    color = if (message.fromTeam) MaterialTheme.colorScheme.surfaceContainerHighest else MaterialTheme.colorScheme.primary,
-                    contentColor = if (message.fromTeam) MaterialTheme.colorScheme.onSurface else MaterialTheme.colorScheme.onPrimary,
-                ) { Text(message.text, Modifier.padding(horizontal = 16.dp, vertical = 10.dp)) }
-            }
+            SupportBubble(message.text, message.fromTeam)
         }
+    }
+}
+
+/** A chat bubble: the team's at the start in a neutral container, yours at the end in the primary colour. */
+@Composable private fun SupportBubble(text: String, fromTeam: Boolean) {
+    Box(Modifier.fillMaxWidth().padding(start = if (fromTeam) 0.dp else 48.dp, end = if (fromTeam) 48.dp else 0.dp),
+        contentAlignment = if (fromTeam) Alignment.CenterStart else Alignment.CenterEnd) {
+        Surface(
+            shape = MaterialTheme.shapes.large,
+            color = if (fromTeam) MaterialTheme.colorScheme.surfaceContainerHighest else MaterialTheme.colorScheme.primary,
+            contentColor = if (fromTeam) MaterialTheme.colorScheme.onSurface else MaterialTheme.colorScheme.onPrimary,
+        ) { Text(text, Modifier.padding(horizontal = 16.dp, vertical = 10.dp)) }
     }
 }
 
@@ -729,8 +734,6 @@ private fun shareCode(context: Context, name: String) {
                     }
                 },
             )
-            Text(stringResource(R.string.support_privacy), Modifier.fillMaxWidth(), textAlign = TextAlign.Center,
-                style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
         }
     }
 }

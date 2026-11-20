@@ -225,9 +225,8 @@
     <string name="settings_no_crash_reports">No Crash Reports</string>
     <string name="settings_delete_passkey_yourself">Delete the passkey yourself.</string>
     <string name="support_empty_title">How can we help?</string>
-    <string name="support_empty_subtitle">Questions, ideas or problems: we read everything and answer here.</string>
-    <string name="support_privacy">Not end-to-end encrypted. Read by the Yo team.</string>
-    <string name="support_message">Message</string>
+    <string name="support_privacy">Not end-to-end encrypted</string>
+    <string name="support_message">Message the Yo team</string>
     <string name="group_create_failure">The group could not be made. Try again in a moment.</string>
     <string name="group_member_footer">You can add up to 19 friends, plus yourself.</string>
     <string name="settings_page_info">About This Page</string>
