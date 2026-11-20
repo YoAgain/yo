@@ -1,0 +1,93 @@
+# Builds the signed Android App Bundle and uploads it to Google Play, as testflight.yml does for the iPhone. Every
+# push to main goes to internal testing; a published GitHub release (pre-release included) also goes to closed
+# testing (track alpha). The upload key (Play App Signing holds the app signing key) and the Play service account are
+# secrets of the environment `play` (main and tags v*); never run this on pull requests.
+name: Google Play
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - app/android/**
+      - core/**
+      - Cargo.lock
+      - rust-toolchain.toml
+      - .github/workflows/play.yml
+  release:
+    types: [published]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: play
+
+jobs:
+  play:
+    runs-on: ubuntu-latest
+    environment: play
+    timeout-minutes: 90
+    env:
+      CARGO_BUILD_JOBS: 4
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      - name: Host dependencies
+        run: sudo apt-get update && sudo apt-get install -y protobuf-compiler clang cmake ninja-build
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: '1.99.1'
+          targets: aarch64-linux-android,x86_64-linux-android
+      - name: Install pinned Android toolchain
+        run: |
+          unset JAVA_HOME ANDROID_HOME ANDROID_SDK_ROOT
+          export PATH="$HOME/.cargo/bin:$PATH"
+          nice -n 10 app/android/dev/bootstrap.sh
+
+      - name: Credentials
+        env:
+          UPLOAD_KEYSTORE_B64: ${{ secrets.UPLOAD_KEYSTORE_B64 }}
+          PLAY_SERVICE_ACCOUNT_JSON: ${{ secrets.PLAY_SERVICE_ACCOUNT_JSON }}
+        run: |
+          umask 077
+          d=$RUNNER_TEMP/play
+          mkdir -p "$d"
+          printf '%s' "$UPLOAD_KEYSTORE_B64" | base64 -d > "$d/upload.jks"
+          printf '%s' "$PLAY_SERVICE_ACCOUNT_JSON" > "$d/service-account.json"
+          python3 -m venv "$d/venv"
+          "$d/venv/bin/pip" install -q google-auth requests
+
+      # The release tag is the version: v1.0.0-RC makes versionName 1.0.0-RC; builds of main keep build.gradle.kts's.
+      # The version code only rises: minutes since 1970 (29 million in 2026; Play takes up to 2100000000).
+      - name: Build and sign
+        env:
+          TAG: ${{ github.event.release.tag_name }}
+          YO_UPLOAD_STOREPASSWORD: ${{ secrets.UPLOAD_STORE_PASSWORD }}
+          YO_UPLOAD_KEYALIAS: ${{ secrets.UPLOAD_KEY_ALIAS }}
+          YO_UPLOAD_KEYPASSWORD: ${{ secrets.UPLOAD_KEY_PASSWORD }}
+        run: |
+          version=()
+          if [ "${{ github.event_name }}" = release ]; then
+            [[ "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.]+)?$ ]] \
+              || { echo "::error::release tag '$TAG' is not v<x.y.z> or v<x.y.z>-<suffix> (v1.0.0, v1.0.0-RC)"; exit 1; }
+            version=("-PyoVersionName=${TAG#v}")
+          fi
+          export YO_UPLOAD_STOREFILE=$RUNNER_TEMP/play/upload.jks
+          export PATH="$HOME/.cargo/bin:$PATH"
+          export JAVA_HOME="$HOME/Android/jdk" ANDROID_HOME="$HOME/Android/sdk" ANDROID_SDK_ROOT="$HOME/Android/sdk"
+          . app/android/dev/env.sh
+          cd app/android
+          nice -n 10 ./gradlew --max-workers=4 :app:bundleRelease "-PyoVersionCode=$(( $(date +%s) / 60 ))" "${version[@]}"
+          aab=app/build/outputs/bundle/release/app-release.aab
+          # Unsigned or signed with anything but the upload key: Play would refuse it, fail here.
+          "$JAVA_HOME/bin/jarsigner" -verify "$aab" | grep -q "jar verified" || { echo "::error::$aab is not signed"; exit 1; }
+
+      # Closed testing (alpha) gets only released builds, as TestFlight's outside testers; one upload for both tracks.
+      - name: Upload
+        run: |
+          tracks=internal
+          [ "${{ github.event_name }}" = release ] && tracks=internal,alpha
+          "$RUNNER_TEMP/play/venv/bin/python" -I app/android/dev/play.py "$RUNNER_TEMP/play/service-account.json" \
+            app/android/app/build/outputs/bundle/release/app-release.aab "$tracks"
