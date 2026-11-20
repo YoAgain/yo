@@ -1237,11 +1237,18 @@ if (document.body.classList.contains("login")) {
     if (!tableOpen || (list.length && !list.some((t) => t.name === real(tableOpen)))) tableOpen = "people";
     const side = el("nav", "tside"), pane = el("div", "tpane");
     const count = (name) => list.find((x) => x.name === name)?.count || 0;
+    // The views count what is open, not their table's rows: unanswered conversations, open error groups, to-dos left.
+    const rowsOf = (name) => list.find((x) => x.name === name);
+    const open = (name, column) => { const t = rowsOf(name); if (!t) return 0; const i = t.columns.indexOf(column);
+      return i < 0 ? t.count : t.rows.filter((r) => !r[i]).length; };
+    const viewCount = (key) => key === "v-support" ? openSupport
+      : key === "v-errors" ? (last?.[which]?.diagnostics || []).filter((d) => !d.done).length || open("diagnostics", "done")
+      : key === "v-todos" ? open("todos", "done_at") : count(VIEW_TABLE[key]);
     for (const [key, label, ico, tip] of VIEWS) {
       const b = el("button", `main view${tableOpen === key ? " on" : ""}`), name = el("span", null, label);
       b.type = "button"; b.title = tip;
       name.prepend(icon(ico));
-      b.append(name, el("small", null, num(count(VIEW_TABLE[key]))));
+      b.append(name, el("small", null, num(viewCount(key))));
       b.addEventListener("click", () => { tableOpen = key; drawTables(); });
       side.append(b);
     }
@@ -1276,7 +1283,7 @@ if (document.body.classList.contains("login")) {
       const wrap = el("div", "scroll grid"), table = el("table", "list data");
       table.dataset.name = t.name;
       const hr = table.createTHead().insertRow();
-      if (todo) hr.append(el("th", "tick-col"));
+      if (tableOpen === "v-todos") hr.append(el("th", "tick-col"));
       for (const c of t.columns) hr.append(el("th", null, c));
       if (t.name === "reserved") hr.append(el("th"));
       const body = table.createTBody();
