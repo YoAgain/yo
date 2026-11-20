@@ -535,8 +535,10 @@ if (document.body.classList.contains("login")) {
   const SERIES = { "": "var(--ok)", cool: "#5dade2", bad: "#e67e22", acc: "var(--amethyst-soft)" };
   const slotWord = () => (range === 1 ? "This hour" : range ? "This day" : "This stretch");
   const showTip = (t, x, y) => {
+    const held = tipBox.querySelector("#st-every");  // the status bot's select goes home before the card changes
+    if (held) { held.hidden = true; $("t-system").append(held); }
     if (typeof t === "string") { const [head, ...rest] = t.split(" · "); tipBox.replaceChildren(el("b", "th", head), ...rest.map((x) => el("span", null, x))); }
-    else tipBox.replaceChildren(el("b", t.cap ? "th cap" : "th", t.head), ...(t.note ? [el("span", "tn", t.note)] : []), ...t.rows.filter(Boolean).map(tipRow));
+    else tipBox.replaceChildren(el("b", t.cap ? "th cap" : "th", t.head), ...(t.note ? [el("span", "tn", t.note)] : []), ...(t.nodes || []), ...(t.rows || []).filter(Boolean).map(tipRow));
     tipBox.hidden = false;
     const w = tipBox.offsetWidth, h = tipBox.offsetHeight;
     tipBox.style.left = `${Math.min(innerWidth - w - 8, Math.max(8, x - w / 2))}px`;
@@ -544,19 +546,69 @@ if (document.body.classList.contains("login")) {
   };
   // An element that explains itself: the chart popup instead of a native title; on hover, keyboard focus and tap.
   // t: a text ("head · line · line") or { head, note, rows }.
-  const hint = (node, t) => {
+  // The card a click or tap pins open (a row with something to operate in it); it closes on a click outside or Escape.
+  let pinned = null;
+  const unpin = () => { pinned = null; tipBox.classList.remove("pin"); tipBox.hidden = true; };
+  const hint = (node, t, pin) => {
     if (!t) return node;
     const tv = () => (typeof t === "function" ? t() : t);
     const at = () => { const r = node.getBoundingClientRect(); showTip(tv(), r.left + r.width / 2, r.top); };
     node.tabIndex = node.tabIndex < 0 ? 0 : node.tabIndex;
-    node.addEventListener("pointermove", (e) => e.pointerType === "mouse" && showTip(tv(), e.clientX, e.clientY));
-    node.addEventListener("pointerleave", () => { tipBox.hidden = true; });
-    node.addEventListener("pointerdown", (e) => e.pointerType !== "mouse" && at());
-    node.addEventListener("focus", at);
-    node.addEventListener("blur", () => { tipBox.hidden = true; });
+    const mine = () => !pinned || pinned === node;
+    node.addEventListener("pointermove", (e) => { if (e.pointerType === "mouse" && !pinned) showTip(tv(), e.clientX, e.clientY); });
+    node.addEventListener("pointerleave", () => { if (!pinned) tipBox.hidden = true; });
+    node.addEventListener("pointerdown", (e) => { if (e.pointerType !== "mouse" && mine()) at(); });
+    node.addEventListener("focus", () => { if (!pinned) at(); });
+    node.addEventListener("blur", () => { if (!pinned) tipBox.hidden = true; });
+    node.addEventListener("click", () => { if (pin && !pinned) { at(); pinned = node; tipBox.classList.add("pin"); } });
     return node;
   };
-  document.addEventListener("pointerdown", (e) => { if (e.pointerType !== "mouse") tipBox.hidden = true; }, true);
+  document.addEventListener("pointerdown", (e) => { if (pinned && !tipBox.contains(e.target) && !pinned.contains(e.target)) unpin(); }, true);
+  document.addEventListener("keydown", (e) => { if (e.key === "Escape" && pinned) unpin(); });
+  // The server card's rows explain themselves in the hover card: CPU, memory and LAN with their history over the range
+  // (the bars the detail cards drew), disk with its sizes, updates and services with what they hold.
+  const serverSeries = (col) => {
+    const s = srvNow || {}, now = Date.now();
+    // One point a day for 7 and 30 days (and Total): its day number stands for its UTC midnight.
+    const [pts, size, count] = hourView ? [s.history || [], 300000, 12] : range === 1 ? [s.history_day || [], 3600000, 24]
+      : [(s.history_days || []).map((p) => [p[0] * 86400000, ...p.slice(1)]), 86400000, range === 7 ? 7 : 30];
+    const first = Math.floor(now / size) - count + 1, sums = Array.from({ length: count }, () => [0, 0]);
+    for (const p of pts) { const k = Math.floor(p[0] / size) - first; if (k >= 0 && k < count) { sums[k][0] += col(p); sums[k][1]++; } }
+    return { values: sums.map(([t, n]) => (n ? t / n : 0)), names: sums.map((_, k) => (size === 86400000 ? dayName(first + k) : clock((first + k + 1) * size))) };
+  };
+  const histNode = (col, fmt) => {
+    const { values, names } = serverSeries(col), g = sparkBars(values, "cool", null);
+    return [g, tipRow({ label: `${names[0]} – ${names[names.length - 1]}`, value: fmt(values[values.length - 1]) })];
+  };
+  const serverHints = () => {
+    const pct = (v) => `${Math.round(v)} %`;
+    hint($("c-cpu"), () => { const s = srvNow || {}, c = s.cpu || {};
+      return { cap: 1, head: "CPU", nodes: histNode((p) => p[1] ?? 0, pct), rows: [c.cores ? { label: "Cores", value: String(c.cores) } : null, c.load?.length ? { label: "Load", value: c.load.map((x) => x.toFixed(2)).join(" · ") } : null, s.uptime == null ? null : { label: "Up", value: span(s.uptime) }] }; });
+    hint($("c-mem"), () => { const m = (srvNow || {}).memory, used = m ? m.total - m.available : 0;
+      return { cap: 1, head: "Memory", nodes: histNode((p) => p[2] ?? 0, pct), rows: m ? [{ label: "Used", value: `${bytes(used)} of ${bytes(m.total)}` }, m.swap_total ? { label: "Swap", value: bytes(m.swap_total - m.swap_free) } : null] : [] }; });
+    hint($("c-disk"), () => { const d = (srvNow || {}).disk, du = d ? d.used / d.total : 0;
+      return { cap: 1, head: "Disk", nodes: d ? [shareBar(du, du > 0.9 ? "must" : du > 0.7 ? "update" : "cool")] : [], rows: d ? [{ label: "Used", value: bytes(d.used) }, { label: "Free", value: bytes(d.free) }, { label: "Size", value: bytes(d.total) }] : [{ label: "Disk", value: "unknown" }] }; });
+    hint($("c-net"), () => { const n = (srvNow || {}).network || {};
+      return { cap: 1, head: "LAN", nodes: histNode((p) => (p[4] || 0) + (p[5] || 0), (v) => `${bytes(v)}/s`), rows: [{ label: "Down", value: rate(n.rx_per_s) }, { label: "Up", value: rate(n.tx_per_s) }] }; });
+    hint($("c-upd"), () => { const u = updData;
+      if (!u) return { cap: 1, head: "Updates", rows: [{ label: "Collector", value: "unavailable" }] };
+      const kernel = !!(u.installed_kernel && u.running_kernel && u.installed_kernel !== u.running_kernel), lts = !!(u.release?.result && !/no new release/i.test(u.release.result));
+      const yn = (b) => (b ? "yes" : "no");
+      return { cap: 1, head: "Updates", rows: [{ label: "Updates", value: u.apt.packages ? `${num(u.apt.packages)}${u.apt.security ? ` (${num(u.apt.security)} security)` : ""}` : "none" },
+        { label: "Reboot needed", value: yn(u.reboot) }, { label: "Kernel update", value: yn(kernel) }, { label: "New Ubuntu LTS", value: yn(lts) }] }; });
+    hint($("c-svc"), () => {
+      const rows = [["hub", "Hub"], ["dev", "Dev"], ["tunnel", "Tunnel"], ["yogpt", "YoGPT"], ["stbot", "Status bot"]].map(([id, name]) => {
+        const i = svcInfo[id], r = (k) => i?.rows?.find(([n]) => n === k)?.[1], up = r("Up"), row = el("div", "tr"), mark = el("span", "tm");
+        mark.append(el("span", `dot ${!i ? "" : i.ok ? "ok" : "bad"}`));
+        row.append(mark, el("span", "tl", name), el("b", "tv", !i ? "unknown" : i.ok ? (up && up !== "–" ? up : "running") : r("State") || "off"));
+        return row;
+      });
+      const sel = $("st-every"), every = el("label", "hc-sel", "Status bot every");
+      sel.hidden = false; every.append(sel);
+      return { cap: 1, head: "Services", nodes: [...rows, every] };
+    }, true);
+  };
+  document.addEventListener("pointerdown", (e) => { if (e.pointerType !== "mouse" && !pinned) tipBox.hidden = true; }, true);
   const hoverTip = (node, count, text, mark) => {
     node.addEventListener("pointermove", (e) => {
       const n = typeof count === "function" ? count() : count, r = node.getBoundingClientRect();
@@ -2226,20 +2278,6 @@ if (document.body.classList.contains("login")) {
         comboCard("Pushes", { names: hd.names, values: hd.ps.map(([a, b]) => a + b) }, { cls: "cool" }),
       ];
     },
-    server: () => {
-      const s = srvNow || {}, day = s.history_day?.length > 1 ? s.history_day : s.history || [], names = day.map(([t]) => clock(t));
-      const pctD = (i) => ({ names, values: day.map((p) => p[i] ?? 0), scale: 100, tip: (k, v) => `${Math.round(v)} %` });
-      const c = s.cpu || {}, m = s.memory, d = s.disk, n = s.network || {}, used = m ? m.total - m.available : 0, du = d ? d.used / d.total : 0;
-      return [
-        chartCard("CPU", c.percent == null ? "–" : `${Math.round(c.percent)} %`, pctD(1), "cool",
-          note([c.cores ? `${c.cores} cores` : "", c.load?.length ? `load ${c.load.map((x) => x.toFixed(2)).join(" · ")}` : "", s.uptime == null ? "" : `up ${span(s.uptime)}`].filter(Boolean).join(" · "))),
-        chartCard("Memory", m ? `${Math.round((100 * used) / m.total)} %` : "–", pctD(2), "cool",
-          note(m ? `${bytes(used)} of ${bytes(m.total)}${m.swap_total ? ` · swap ${bytes(m.swap_total - m.swap_free)}` : ""}` : null)),
-        dcard("Disk", d ? `${Math.round(100 * du)} %` : "–", d ? shareBar(du, du > 0.9 ? "must" : du > 0.7 ? "update" : "cool") : null,
-          d ? kvRows([["Used", bytes(d.used)], ["Free", bytes(d.free)], ["Size", bytes(d.total)]]) : note("Unknown.")),
-        chartCard("LAN", `↓ ${rate(n.rx_per_s)} ↑ ${rate(n.tx_per_s)}`, { names, values: day.map((p) => (p[4] || 0) + (p[5] || 0)), fmt: bytes, tip: (k) => `↓ ${rate(day[k][4])} ↑ ${rate(day[k][5])}` }, "cool"),
-      ];
-    },
     upd: () => {
       const u = updData, at = (x) => (x ? new Date(x * 1000).toLocaleString() : null);
       if (!u) return [dcard("Updates", null, note("Collector data unavailable."))];
@@ -2409,39 +2447,15 @@ if (document.body.classList.contains("login")) {
       const how = dcard("Problems", null, stats, phones, flow, note("Ticked stays closed · same bug in a new build reopens as a new group"));
       return [how, users, one.dl().find((c) => title(c) === "Delivery"), fast];
     };
-    // Server: its four charts, then updates and the services, one card each.
-    DETAIL.server = () => {
-      // Updates: is the server current? Only yes and no: pending updates, a reboot, a newer kernel, a new Ubuntu LTS.
-      const u = updData, yes = (b, cls = "warn") => [b ? "yes" : "no", b ? cls : "ok"];
-      const errs = u ? [...(u.errors || []), u.apt.error].filter(Boolean) : [];
-      const kernel = !!(u?.installed_kernel && u?.running_kernel && u.installed_kernel !== u.running_kernel);
-      const lts = !!(u?.release?.result && !/no new release/i.test(u.release.result));
-      const current = u && !u.apt.packages && !u.reboot && !kernel && !lts && !errs.length;
-      const upd = u ? dcard("Updates", current ? "up to date" : "updates pending", kvRows([
-        ["Updates", u.apt.packages ? `${num(u.apt.packages)}${u.apt.security ? ` (${num(u.apt.security)} security)` : ""}` : "none", u.apt.security ? "bad" : u.apt.packages ? "warn" : "ok"],
-        ["Reboot needed", ...yes(u.reboot)], ["Kernel update", ...yes(kernel)], ["New Ubuntu LTS", ...yes(lts)],
-        ...(errs.length ? [["Errors", errs.join("\n"), "bad"]] : []),
-      ])) : dcard("Updates", null, note("Collector data unavailable."));
-      // Services: a dot each (green running, red not, with what it is then), how long it has been up.
-      const list = el("dl", "hc-kv svc-kv");
-      for (const [id, name] of [["hub", "Hub"], ["dev", "Dev"], ["tunnel", "Tunnel"], ["yogpt", "YoGPT"], ["stbot", "Status bot"]]) {
-        const i = svcInfo[id], r = (k) => i?.rows?.find(([n]) => n === k)?.[1], up = r("Up"), dd = el("dd");
-        dd.append(el("span", `dot ${!i ? "" : i.ok ? "ok" : "bad"}`), el("span", null, !i ? "unknown" : i.ok ? (up && up !== "–" ? up : "") : r("State") || "off"));
-        list.append(el("dt", null, name), dd);
-      }
-      const sel = $("st-every"), every = el("label", "hc-sel", "Status bot every");
-      sel.hidden = false; every.append(sel);
-      const sv = dcard("Services", $("svc-n")?.textContent || null, list, every);
-      return [...one.server(), upd, sv];
-    };
+
   }
   const TITLE = { yc: "Yos", uc: "Accounts", md: "Media", gr: "Groups", sc: "Secured", pl: "Platforms", vr: "App", pr: "Problems", dl: "Speed", ps: "Push", server: "Server", upd: "Updates", svc: "Services" };
   const SLUG = { yc: "yos", uc: "accounts", md: "media", gr: "groups", sc: "secured", pl: "platforms", vr: "app", pr: "problems", dl: "speed", ps: "push",
-    server: "server", cpu: "cpu", mem: "memory", disk: "disk", net: "lan", upd: "updates", "svc:hub": "hub", "svc:dev": "dev", "svc:tunnel": "tunnel", "svc:cli": "cli" };
+    cpu: "cpu", mem: "memory", disk: "disk", net: "lan", upd: "updates", "svc:hub": "hub", "svc:dev": "dev", "svc:tunnel": "tunnel", "svc:cli": "cli" };
   const detailBox = $("detail");
   let detailKey = null, detailPending = false;
   // The status bot's select lives in the CLI card while it shows, else hidden at home.
-  const parkSelect = () => { const sel = $("st-every"); if (sel && !$("t-system").contains(sel)) { sel.hidden = true; $("t-system").append(sel); } };
+  const parkSelect = () => { const sel = $("st-every"); if (sel && !$("t-system").contains(sel) && !tipBox.contains(sel)) { sel.hidden = true; $("t-system").append(sel); } };
   const drawDetail = () => {
     if (!detailKey) return;
     parkSelect();
@@ -2484,10 +2498,11 @@ if (document.body.classList.contains("login")) {
   for (const r of document.querySelectorAll(".crow[id^='c-']:not(.chips)")) if (!r.dataset.card) r.dataset.card = r.id.slice(2);
   $("t-yc").dataset.card = "yc"; $("t-uc").dataset.card = "uc";
   // Server, App and Problems: the whole tile opens its one detail, not each row its own.
-  for (const [tile, card] of [["g-server", "server"], ["g-app", "vr"], ["g-usage", "pr"]]) {
+  for (const [tile, card] of [["g-server", null], ["g-app", "vr"], ["g-usage", "pr"]]) {
     for (const r of $(tile).querySelectorAll("[data-card]")) { delete r.dataset.card; }
-    $(tile).dataset.card = card;
+    if (card) $(tile).dataset.card = card;
   }
+  serverHints();
   for (const n of document.querySelectorAll("[data-card]")) {
     if (n.tagName !== "BUTTON") { n.setAttribute("role", "button"); n.tabIndex = 0; }
     n.setAttribute("aria-controls", "detail"); n.setAttribute("aria-expanded", "false");

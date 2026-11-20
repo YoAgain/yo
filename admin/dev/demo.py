@@ -493,6 +493,7 @@ class FakeServer:
             "history": self.history(),
             # The last 24 hours, a point a quarter of an hour, as admin.remember_day keeps it.
             "history_day": self.history_day(),
+            "history_days": [[int(time.time() // 86400) - 29 + i, 20 + (i * 7) % 25, 33 + (i * 3) % 9, 23.0 + i * 0.05, 90_000 + (i * 37_000) % 200_000, 40_000 + (i * 11_000) % 90_000] for i in range(30)],
         }
 
     def history(self):

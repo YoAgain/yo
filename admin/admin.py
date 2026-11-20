@@ -640,14 +640,58 @@ def hub_unit() -> dict:
     return {**unit(os.environ.get("YO_HUB_UNIT", "yo-hub.service")), "version": version}
 
 
-# The server's figures once a minute, the last hour, in memory only (gone on a restart): the Server rows' bars.
+# The server's figures once a minute, the last hour: the Server rows' bars. All three series are kept in a small file
+# (HISTORY_FILE) so a restart does not empty them.
 # Each [ms, cpu %, memory %, disk %, rx B/s, tx B/s].
 HISTORY = []
-# And the last 24 hours, a point per quarter of an hour (the average of its minutes), in memory too: the Server detail.
+# And the last 24 hours, a point per quarter of an hour (the average of its minutes): the Server rows' hover card.
 # Each [ms of the quarter's start, cpu %, memory %, disk %, rx B/s, tx B/s, minutes in it].
 HISTORY_DAY = []
 QUARTER_MS = 900_000
+# And the last 30 UTC days, a point a day (the average of its minutes): [day, cpu %, memory %, disk %, rx B/s, tx B/s, minutes].
+HISTORY_DAYS = []
+HISTORY_FILE = os.environ.get("STATE_DIRECTORY", "./state") + "/server-history.json"
 _history_lock = threading.Lock()
+_history_loaded = False
+
+
+def load_history() -> None:
+    """Once: what the file kept (a point older than its series' span is dropped)."""
+    global _history_loaded
+    _history_loaded = True
+    try:
+        saved = json.loads(read_bytes(HISTORY_FILE))
+        now = time.time() * 1000
+        HISTORY[:] = [p for p in saved.get("minutes", []) if now - p[0] < 3_600_000][-60:]
+        HISTORY_DAY[:] = [p for p in saved.get("quarters", []) if now - p[0] < 86_400_000][-96:]
+        HISTORY_DAYS[:] = [p for p in saved.get("days", []) if now / 86_400_000 - p[0] < 30][-30:]
+    except (OSError, ValueError, AttributeError, TypeError, IndexError):
+        pass
+
+
+def save_history() -> None:
+    try:
+        tmp = HISTORY_FILE + ".new"
+        with open(tmp, "w") as f:
+            json.dump({"minutes": HISTORY, "quarters": HISTORY_DAY, "days": HISTORY_DAYS}, f)
+        os.replace(tmp, HISTORY_FILE)
+    except OSError:
+        pass
+
+
+def remember_daily(point: list) -> None:
+    day = point[0] // 86_400_000
+    if HISTORY_DAYS and HISTORY_DAYS[-1][0] == day:
+        q = HISTORY_DAYS[-1]
+        n = q[6] + 1
+        for i in range(1, 6):
+            v = point[i]
+            if v is not None:
+                q[i] = v if q[i] is None else round(q[i] + (v - q[i]) / n, 1)
+        q[6] = n
+    else:
+        HISTORY_DAYS.append([day, *point[1:6], 1])
+        del HISTORY_DAYS[:-30]
 
 
 def remember_day(point: list) -> None:
@@ -670,11 +714,15 @@ def remember(out: dict, now: float) -> list:
         return round(100 * part / whole, 1) if part is not None and whole else None
     m, d, c, n = out.get("memory") or {}, out.get("disk") or {}, out.get("cpu") or {}, out.get("network") or {}
     with _history_lock:
+        if not _history_loaded:
+            load_history()
         if not HISTORY or now * 1000 - HISTORY[-1][0] >= 60_000:
             HISTORY.append([int(now * 1000), c.get("percent"), pct(m.get("total", 0) - m.get("available", 0) if m else None, m.get("total")),
                             pct(d.get("used"), d.get("total")), n.get("rx_per_s"), n.get("tx_per_s")])
             del HISTORY[:-60]
             remember_day(HISTORY[-1])
+            remember_daily(HISTORY[-1])
+            save_history()
         return list(HISTORY)
 
 
@@ -683,6 +731,7 @@ def stats() -> dict:
     out["history"] = remember(out, time.time())
     with _history_lock:
         out["history_day"] = [q[:6] for q in HISTORY_DAY]
+        out["history_days"] = [q[:6] for q in HISTORY_DAYS]
     return out
 
 
