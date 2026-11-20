@@ -590,6 +590,7 @@ if (document.body.classList.contains("login")) {
       return { cap: 1, head: "Disk", nodes: d ? [shareBar(du, du > 0.9 ? "must" : du > 0.7 ? "update" : "cool")] : [], rows: d ? [{ label: "Used", value: bytes(d.used) }, { label: "Free", value: bytes(d.free) }, { label: "Size", value: bytes(d.total) }] : [{ label: "Disk", value: "unknown" }] }; });
     hint($("c-net"), () => { const n = (srvNow || {}).network || {};
       return { cap: 1, head: "LAN", nodes: histNode((p) => (p[4] || 0) + (p[5] || 0), (v) => `${bytes(v)}/s`), rows: [{ label: "Down", value: rate(n.rx_per_s) }, { label: "Up", value: rate(n.tx_per_s) }] }; });
+    hint($("c-vr"), () => ({ cap: 1, head: "On the newest build", rows: vrShares.length ? vrShares.map((x) => ({ label: x.replace(/ \d+ %$/, ""), value: `${x.match(/\d+ %$/)[0]} current` })) : [{ label: "Builds", value: "none kept yet" }] }));
     hint($("c-upd"), () => { const u = updData;
       if (!u) return { cap: 1, head: "Updates", rows: [{ label: "Collector", value: "unavailable" }] };
       const kernel = !!(u.installed_kernel && u.running_kernel && u.installed_kernel !== u.running_kernel), lts = !!(u.release?.result && !/no new release/i.test(u.release.result));
@@ -786,7 +787,7 @@ if (document.body.classList.contains("login")) {
   const platLine = (l, p) => `${l} ${num(p.all)}${VKEYS.filter((k) => p[k] && k !== "unknown").map((k) => ` · ${num(p[k])} ${k}`).join("")}`;
   // Per slot of the range: [current, update, must, unknown] of the devices seen that day (the collector's daily
   // snapshot, kept since it began), null where none was kept. 1: today; 7, 30: per day; Total: since the first.
-  let verData = null;
+  let verData = null, vrShares = [];
   const vPct = (row, i = 0) => { const all = row ? row.reduce((a, v) => a + v, 0) : 0; return all ? Math.round((100 * row[i]) / all) : null; };
   const versionsRow = (h) => {
     const kept = { ...(h.version_days || {}) }, t = today0();
@@ -804,13 +805,28 @@ if (document.body.classList.contains("login")) {
     const rows = ends.map((e) => { for (let d = e; d > e - step; d--) if (kept[d]) return kept[d]; return null; });
     verData = { rows, names: ends.map((e) => (e === t ? "today" : dayName(e))), first, today: kept[t] || null };
     }
-    const rows = verData.rows;
-    // The row: a bar per slot like Problems, each full height: current (green) from the bottom, the rest above it, so
-    // the green is seen growing after a release.
-    const host = $("vr-bar"), W = 140, H = 28, sl = W / rows.length, top = 0;
-    const s = svg("svg", { class: "spark", viewBox: `0 0 ${W} ${H}`, preserveAspectRatio: "none" });
-    rows.forEach((r, i) => vStack(r, i * sl + sl * 0.16, sl * 0.68, H, top).forEach((x) => s.append(x)));
+    // The row: the releases as two thin stacked areas, iOS above Android, in the states' colours; the title value is
+    // each platform's share on the newest build (current and fresh).
+    const host = $("vr-bar"), W = 140, H = 28, s = svg("svg", { class: "spark", viewBox: `0 0 ${W} ${H}`, preserveAspectRatio: "none" }), shares = [];
+    [["ios", "iOS", 0], ["android", "Android", 15]].forEach(([plat, name, y0]) => {
+      const d = relData(h, plat), n = d.slots.length, have = d.rows.map((r, k) => (r ? k : -1)).filter((k) => k >= 0), bh = 12;
+      if (have.length) {
+        const pts = have.length > 1 ? have : [have[0], have[0]], xs = (k, q) => (have.length > 1 ? (n > 1 ? (k * W) / (n - 1) : 0) : q ? W : 0);
+        const tops = pts.map((k) => { const r = d.rows[k], all = r.reduce((x, v) => x + v, 0); let y = 0; return r.map((v) => (y += v / all)); });
+        d.bands.forEach((b, j) => {
+          if (!tops.some((c) => c[j] - (j ? c[j - 1] : 0) > 0)) return;
+          const up = pts.map((k, q) => `${xs(k, q).toFixed(1)},${(y0 + bh - tops[q][j] * bh).toFixed(1)}`), down = pts.map((k, q) => `${xs(k, q).toFixed(1)},${(y0 + bh - (j ? tops[q][j - 1] : 0) * bh).toFixed(1)}`).reverse();
+          const p = svg("polygon", { points: [...up, ...down].join(" ") });
+          p.style.fill = b.color;
+          s.append(p);
+        });
+        const last = d.rows[have[have.length - 1]], all = last.reduce((x, v) => x + v, 0);
+        shares.push(`${name} ${Math.round((100 * (last[0] + last[1])) / all)} %`);
+      } else s.append(svg("rect", { x: 0, width: W, y: y0 + bh - 1, height: 1.5, class: "b zero" }));
+    });
     host.replaceChildren(s);
+    set("vr-n", shares.length ? shares.join(" · ") : "–");
+    vrShares = shares;
     const p = vPct(verData.today);
     $("c-vr").dataset.tip = p == null ? "" : `today: ${p} % current`;
   };
@@ -826,6 +842,24 @@ if (document.body.classList.contains("login")) {
     }).filter(Boolean);
   };
   // ---- overview ---------------------------------------------------------------------------------------------------
+  // Active, a tile of the top grid like Sent and Accounts: who was here per day (bars) and the share of them who came
+  // back (line); the number and its share of the month in the header, retention and the rest in the hover.
+  let activeSpec = null;
+  const drawActive = (h) => {
+    const slot = $("ac-area");
+    if (!slot || !h || h.error) return;
+    const t = today0(), mau = h.active_month || 0, ds = Array.from({ length: 14 }, (_, i) => t - 13 + i), kept = h.active_days || {};
+    const active = ds.map((d) => (d === t ? Math.max(kept[d] || 0, h.active_day || 0) : kept[d] || 0)), su = new Map(h.signup_days || []);
+    const back = ds.map((d, i) => (active[i] ? (100 * Math.max(0, active[i] - (su.get(d) || 0))) / active[i] : null));
+    const ret = Object.fromEntries((areaSub.yc || []).map(([l, v]) => [String(l).replace(/^Retention /, ""), v]));
+    const stick = mau ? (100 * (h.active_day || 0)) / mau : null;
+    set("ac-n", num(h.active_day));
+    set("ac-s", `${pctText(stick)} of the month`);
+    activeSpec = { ds, active, back, su, ret };
+    slot.replaceChildren(liveChart({ bars: active, line: back, from: dayName(ds[0]), to: "today" }, "", null, (i) => { const s = activeSpec;
+      return { head: dayName(s.ds[i]), rows: [{ section: "This day" }, { color: "var(--ok)", label: "Active", value: num(s.active[i]) }, { ico: "user", label: "New", value: num(s.su.get(s.ds[i]) || 0) },
+        { color: "var(--ok)", line: true, label: "Came back", value: pctText(s.back[i]) }, { section: "Retention" }, ...["D1", "D7", "D30"].map((k) => ({ label: k, value: s.ret[k] ?? "–" }))] }; }));
+  };
   const reportKey = (r) => `${which}:r${r.id}`;
   let hubNow = null;
   const overview = (h) => {
@@ -874,6 +908,7 @@ if (document.body.classList.contains("login")) {
           (k) => [...node.children].forEach((r, j) => r.classList.toggle("on", j === k)));
       }
     }
+    drawActive(h);
     showOpen();
 
     // Services: the queue at the bottom.
@@ -1809,13 +1844,15 @@ if (document.body.classList.contains("login")) {
   };
   // Platforms: a share per platform in the row's colours (iOS amethyst, Android green, Bot grey, CLI yellow).
   const platCard = () => {
-    const box = el("div", "hc-plats"), plats = platData?.plats || [], all = Math.max(1, plats.reduce((n, [, p]) => n + p.all, 0));
+    // One bar of the split as parts of 100 %: iOS amethyst, Android green, Bot grey; each platform's count and share in its hover.
+    const plats = platData?.plats || [], all = Math.max(1, plats.reduce((n, [, p]) => n + p.all, 0)), bar = el("span", "hc-pbar plats");
     for (const [l, p] of plats) {
-      const row = el("div", "hc-plat"), bar = el("span", "hc-pbar plats");
-      const x = el("span", `p-${l.toLowerCase()}`); x.style.width = `${(100 * p.all) / all}%`; bar.append(x);
-      row.append(el("b", null, l), bar, el("span", "hc-pn", `${num(p.all)} · ${Math.round((100 * p.all) / all)} %`));
-      box.append(row);
+      const x = el("span", `p-${l.toLowerCase()}`); x.style.width = `${(100 * p.all) / all}%`;
+      hint(x, { cap: 1, head: l, rows: [{ label: "Devices", value: num(p.all) }, { label: "Share", value: `${Math.round((100 * p.all) / all)} %` }] });
+      bar.append(x);
     }
+    const box = el("div", "hc-plats");
+    box.append(bar);
     return box;
   };
   const vLegend = () => {
@@ -1838,7 +1875,8 @@ if (document.body.classList.contains("login")) {
     const mon = new Date(Date.UTC(2000, +b.slice(4, 6) - 1, 1)).toLocaleDateString("en", { month: "short", timeZone: "UTC" });
     return `${word}${mon} ${+b.slice(6, 8)} ${b.slice(8, 10)}:${b.slice(10, 12)}`;
   };
-  const relData = (h) => {
+  const REL_STATES = [["current", "Current", "var(--ok)"], ["fresh", "Fresh", "#a3e4b8"], ["update", "Update", "var(--warn)"], ["must", "Must update", "var(--bad)"], ["unknown", "Unknown", "var(--muted)"]];
+  const relData = (h, plat) => {
     const t = today0(), kept = { ...(h.build_days || {}) };
     if (Array.isArray(h.apps_today) && h.apps_today.length) kept[t] = Object.fromEntries(h.apps_today.filter(([a]) => !String(a).startsWith("cli/")));
     let slots;
@@ -1855,33 +1893,27 @@ if (document.body.classList.contains("login")) {
         return [e, e === t ? "today" : dayName(e), row];
       });
     }
-    // The bands: the newest builds seen in the range on their own, the rest together (below the minimum apart).
-    const seen = new Map();
-    for (const [, , row] of slots) for (const [a, c] of Object.entries(row || {})) if (c > 0) seen.set(a, (seen.get(a) || 0) + c);
-    const apps = [...seen.keys()].sort((a, b) => buildKey(b).localeCompare(buildKey(a)) || seen.get(b) - seen.get(a));
-    const own = apps.slice(0, RTOP), rest = apps.slice(RTOP);
-    let shade = 0, mshade = 0;
-    const bands = own.map((a) => ({ name: buildLabel(a), apps: [a],
-      cls: belowMin(a) ? "r-must" : a === apps[0] && ["current", "fresh"].includes(appInfo(a)?.state) ? "r-current" : null, color: null })).reverse();
-    // Older = greyer: the shades go from the newest of the older builds down.
-    for (let i = bands.length - 1; i >= 0; i--) {
-      if (!bands[i].cls) bands[i].color = REL_SHADES[Math.min(REL_SHADES.length - 1, shade++)];
-      else if (bands[i].cls === "r-must") bands[i].color = MUST_SHADES[Math.min(MUST_SHADES.length - 1, mshade++)];
-    }
-    const old = rest.filter((a) => !belowMin(a)), must = rest.filter((a) => belowMin(a));
-    if (must.length) bands.unshift({ name: "older, must update", apps: must, cls: "r-must r-old" });
-    if (old.length) bands.unshift({ name: "older", apps: old, cls: "r-older" });
-    const rows = slots.map(([, , row]) => (row ? bands.map((b) => b.apps.reduce((n, a) => n + (row[a] || 0), 0)) : null));
-    return { slots, bands, rows: rows.map((r) => (r && r.some((v) => v) ? r : null)) };
+    // The bands are the app tile's states, bottom to top: current, fresh, update, must update, unknown (dev builds and
+    // the like). The builds stay in each slot's `raw` row, for the hover.
+    const stateOf = (a) => (belowMin(a) ? "must" : appInfo(a)?.state === "current" ? "current" : appInfo(a)?.state === "fresh" ? "fresh" : appInfo(a)?.state === "update" ? "update" : "unknown");
+    const mine = (a) => String(a).startsWith(`${plat}/`);
+    const bands = REL_STATES.map(([k, name, color]) => ({ k, name, color }));
+    const rows = slots.map(([, , row]) => {
+      if (!row) return null;
+      const r = bands.map(() => 0);
+      for (const [a, c] of Object.entries(row)) if (mine(a)) r[bands.findIndex((b) => b.k === stateOf(a))] += c;
+      return r.some((v) => v) ? r : null;
+    });
+    return { slots, bands, rows, raw: slots.map(([, , row]) => (row ? Object.entries(row).filter(([a, c]) => mine(a) && c > 0) : [])) };
   };
-  const relCard = (h) => {
-    const d = relData(h), n = d.slots.length, W = 264, H = 96, bottom = 18, B = H - bottom;
+  const relChart = (h, plat, titleText) => {
+    const d = relData(h, plat), n = d.slots.length, W = 264, H = 96, bottom = 18, B = H - bottom;
     const s = svg("svg", { viewBox: `0 0 ${W} ${H}`, class: "hc-chart rchart" });
     const have = d.rows.map((r, i) => (r ? i : -1)).filter((i) => i >= 0), f0 = have[0] ?? 0, span = Math.max(1, n - 1 - f0);
     const xs = (i) => (n - 1 > f0 ? ((i - f0) * W) / span : W / 2);
     const label = (x, text, anchor) => { const t = svg("text", { x, y: H - 4, "text-anchor": anchor, class: "ax" }); t.textContent = text; return t; };
     s.append(svg("line", { x1: 0, x2: W, y1: B + 0.5, y2: B + 0.5, class: "base" }));
-    if (!have.length) return [dcard("Releases over time", null, note("No builds kept yet: counted per hour and day from now on."))];
+    if (!have.length) return dcard(titleText, null, note("No builds kept yet: counted per hour and day from now on."));
     // The bands' edges at each kept slot (a lone slot drawn as a thin column), bottom band first.
     const pts = have.length > 1 ? have : [have[0], have[0]];
     const x = (k, i) => (have.length > 1 ? xs(i) : xs(i) + (k ? 3 : -3));
@@ -1890,16 +1922,15 @@ if (document.body.classList.contains("login")) {
       if (!tops.some((c) => c[j] - (j ? c[j - 1] : 0) > 0)) return;
       const up = pts.map((i, k) => `${x(k, i).toFixed(1)},${(B - tops[k][j] * (B - 2)).toFixed(1)}`);
       const down = pts.map((i, k) => `${x(k, i).toFixed(1)},${(B - (j ? tops[k][j - 1] : 0) * (B - 2)).toFixed(1)}`).reverse();
-      const p = svg("polygon", { points: [...up, ...down].join(" "), class: `rb ${b.cls || ""}`.trim() });
-      if (b.color) p.style.fill = b.color;
+      const p = svg("polygon", { points: [...up, ...down].join(" "), class: "rb" });
+      p.style.fill = b.color;
       s.append(p);
     });
     const mark = svg("line", { y1: 0, y2: B, class: "rmark" });
     s.append(mark, label(0, d.slots[f0][1], "start"), label(W, d.slots[n - 1][1], "end"));
     // Under the chart the legend (the five newest builds); a click on the chart names that slot's shares instead, a
     // second click on the same slot gives the legend back.
-    const legend = [...d.bands].reverse().slice(0, 5).map((b) => key(b.name, b.cls, b.color));
-    if (d.bands.length > 5) legend.push(key("older", "r-older"));
+    const legend = d.bands.filter((b, j) => d.rows.some((r) => r && r[j])).map((b) => key(b.name, "", b.color));
     const foot = cfoot(legend);
     foot.classList.add("rlegend");
     const say = (i) => {
@@ -1907,8 +1938,8 @@ if (document.body.classList.contains("login")) {
       if (i < 0) return foot.home();
       const r = d.rows[i], all = r ? r.reduce((a, v) => a + v, 0) : 0;
       mark.setAttribute("x1", xs(i).toFixed(1)); mark.setAttribute("x2", xs(i).toFixed(1));
-      // The three newest builds on it, the rest as one share.
-      const on = r ? d.bands.map((b, j) => [b.name, r[j]]).filter(([, v]) => v).reverse() : [];
+      // The three newest builds on it, the rest as one share (the bands are the states; the builds are in the hover).
+      const on = (d.raw[i] || []).sort(([x], [y]) => buildKey(y).localeCompare(buildKey(x))).map(([ap, v]) => [buildLabel(ap), v]);
       const rest = on.slice(3).reduce((a, [, v]) => a + v, 0), pc = (v) => `${Math.round((100 * v) / all)} %`;
       const parts = [...on.slice(0, 3).map(([nm, v]) => `${nm} ${pc(v)}`), ...(rest ? [`others ${pc(rest)}`] : [])];
       foot.replaceChildren(el("span", "pick", `${d.slots[i][1]} · ${all ? `${parts.join(" · ")} · ${num(all)} devices` : "not recorded"}`));
@@ -1920,14 +1951,14 @@ if (document.body.classList.contains("login")) {
       const rc = s.getBoundingClientRect(), i = near(f0 + Math.round(((e.clientX - rc.left) / rc.width) * span));
       relPick = relPick === d.slots[i][0] ? null : d.slots[i][0]; say(relPick == null ? -1 : i);
     });
-    const pick = d.rows[have[have.length - 1]], top = d.bands.length - 1;
-    const share = pick && d.bands[top].cls === "r-current" ? `${Math.round((100 * pick[top]) / pick.reduce((a, v) => a + v, 0))} % newest` : "";
-    const card = dcard("Releases over time", share, s, foot);
+    const pick = d.rows[have[have.length - 1]], pickAll = pick ? pick.reduce((a, v) => a + v, 0) : 0;
+    const share = pickAll ? `${Math.round((100 * (pick[0] + pick[1])) / pickAll)} % current` : "";
+    const card = dcard(titleText, share, s, foot);
     // Hovering the chart shows it large (with its legend) beside the pointer.
     s.addEventListener("pointerenter", () => {
       const big = s.cloneNode(true);
       big.classList.add("big");
-      bigBox.replaceChildren(el("b", "th", "Releases over time"), big, foot.cloneNode(true));
+      bigBox.replaceChildren(el("b", "th", titleText), big, foot.cloneNode(true));
       bigBox.hidden = false;
       const r = card.getBoundingClientRect(), w = Math.min(640, innerWidth - 32);
       bigBox.style.width = `${w}px`;
@@ -1935,8 +1966,9 @@ if (document.body.classList.contains("login")) {
       bigBox.style.top = `${Math.max(16, r.top - 20)}px`;
     });
     s.addEventListener("pointerleave", () => { bigBox.hidden = true; });
-    return [card];
+    return card;
   };
+  const relCard = (h) => [relChart(h, "ios", "iOS releases"), relChart(h, "android", "Android releases")];
   // Speed: the range's split in one bar with its four shares named.
   const latPct = (b, i) => { const t = b.reduce((a, v) => a + v, 0); return t ? (100 * b[i]) / t : 0; };
   const speedSplit = () => {
@@ -2057,11 +2089,12 @@ if (document.body.classList.contains("login")) {
   const sparkCard = (title, rows) => {
     const box = el("div", "srows");
     for (const r of rows) {
-      const row = el("div", `srow${r.values ? "" : " wide"}${r.go ? " go" : ""}`);
+      const row = el("div", `srow${r.values || r.bar != null ? "" : " wide"}${r.go ? " go" : ""}`);
       if (r.go) row.addEventListener("click", r.go);
       hint(row, r.title || r.goTitle);
       row.append(icon(r.ico || "chart"), el("span", "sl", r.label), el("b", `sv ${r.cls || ""}`.trim(), r.value ?? "–"));
       if (r.values) row.append(sparkBars(r.values, r.scls, r.tip, r.top));
+      else if (r.bar != null) { const b = shareBar(r.bar, "current"); b.classList.add("srow-bar"); row.append(b); }
       box.append(row);
     }
     return dcard(title, null, box);
@@ -2228,14 +2261,10 @@ if (document.body.classList.contains("login")) {
     },
     pl: () => [dcard("Devices", num(platData?.devices), platCard())],
     vr: () => {
-      const h = hubNow, t = verData?.today, tot = t ? t.reduce((a, v) => a + v, 0) : 0;
-      const per = el("div", "hc-plats");
-      if (t) { const row = el("div", "hc-plat"); row.append(el("b", null, "All"), verBar(Object.fromEntries(VKEYS.map((k, i) => [k, t[i]]))), el("span", "hc-pn", `${vPct(t, 0)} %`)); per.append(row); }
-      for (const [l, x] of platData?.plats || []) { const row = el("div", "hc-plat"); row.append(el("b", null, l), verBar(x), el("span", "hc-pn", `${Math.round((100 * x.current) / Math.max(1, x.all))} %`)); per.append(row); }
+      const h = hubNow;
       const apps = [...(h.apps || [])].sort((a, b) => b[1] - a[1]).slice(0, 8);
       return [
         ...relCard(h),
-        dcard("Versions", t ? `${vPct(t, 0)} % current` : null, per, vLegend()),
         dcard("Builds", null, kvRows([["Hub's minimum", h.min_app || "none"], ...apps.map(([app, c]) => [`${appInfo(app)?.label || "?"} ${build(app)}`, num(c), belowMin(app) ? "bad" : VCLS[appState(app)] || ""])])),
       ];
     },
@@ -2345,26 +2374,19 @@ if (document.body.classList.contains("login")) {
       const sc = sparkData.sc, gone = evSlots("account-gone");
       const wk = (h.secured_days || []).slice(-7).filter(Boolean), made = wk.reduce((n, d) => n + d[0], 0), withKey = wk.reduce((n, d) => n + d[1], 0);
       return [
-        // Active: who was here today (large), how that compares with the month, a bar per day.
-        // Active: who was here per day (bars) and, as the line, the share of them who came back (not that day's
-        // sign-ups); the month's share and the retention after a day, week and month in the title.
-        (() => {
-          const su = new Map(h.signup_days || []), back = ds.map((d, i) => (active[i] ? (100 * Math.max(0, active[i] - (su.get(d) || 0))) / active[i] : null));
-          const value = dnums(num(h.active_day), `${pctText(hd.stick)} of the month`, "muted");
-          value.append(el("small", "muted", `Retention ${["D1", "D7", "D30"].map((k) => `${k} ${ret[k] ?? "–"}`).join(" · ")}`));
-          return dcard("Active", value, liveChart({ bars: active, line: back, from: dayName(ds[0]), to: "today" }, "", null,
-            (i) => ({ head: dayName(ds[i]), rows: [{ section: "This day" }, { color: "var(--ok)", label: "Active", value: num(active[i]) },
-              { ico: "user", label: "New", value: num(su.get(ds[i]) || 0) }, { color: "var(--ok)", line: true, label: "Came back", value: pctText(back[i]) }] })));
-        })(),
-        (() => {
-          const us = h.users || [], dd = Array.from({ length: 30 }, (_, i) => t - 29 + i), end = (d) => (d + 1) * 86400000;
-          const share = dd.map((d) => { const made = us.filter((u) => u.created < end(d)); return made.length ? (100 * made.filter((u) => u.backup_at != null && u.backup_at < end(d)).length) / made.length : null; });
-          return dcard("Secured", dnums(pctText(h.total ? (100 * (h.secured || 0)) / h.total : null), "of all accounts", "muted"),
-            liveChart({ line: share, from: dayName(dd[0]), to: "today" }, "", null,
-              (i) => ({ head: dayName(dd[i]), rows: [{ color: "var(--ok)", label: "Secured, all accounts", value: pctText(share[i]) }] })));
-        })(),
         // Stats: the rest as the overview's rows: new accounts secured, deleted, Yos per user, retention.
         sparkCard("Stats", [
+          (() => {
+            // Secured: accounts with a backup as a share of all accounts (the bar); its line over the last 30 days in the hover.
+            const us = h.users || [], dd = Array.from({ length: 30 }, (_, i) => t - 29 + i), end = (d) => (d + 1) * 86400000;
+            const share = dd.map((d) => { const made = us.filter((u) => u.created < end(d)); return made.length ? (100 * made.filter((u) => u.backup_at != null && u.backup_at < end(d)).length) / made.length : null; });
+            const now = h.total ? (100 * (h.secured || 0)) / h.total : null, have = share.filter((v) => v != null), lo = Math.min(...have), hi = Math.max(...have);
+            const g = svg("svg", { class: "spark", viewBox: "0 0 240 56", preserveAspectRatio: "none", "aria-hidden": "true" });
+            if (have.length > 1) g.append(svg("polyline", { fill: "none", stroke: "var(--ok)", "stroke-width": 2, "vector-effect": "non-scaling-stroke", "stroke-linejoin": "round",
+              points: share.map((v, k) => (v == null ? null : `${((k * 240) / (share.length - 1)).toFixed(1)},${(50 - (hi === lo ? 0.5 : (v - lo) / (hi - lo)) * 44).toFixed(1)}`)).filter(Boolean).join(" ") }));
+            return { ico: "lock", label: "Secured", value: pctText(now), bar: (now || 0) / 100,
+              title: { cap: 1, head: "Secured, all accounts", nodes: [g], rows: [{ label: `${dayName(dd[0])} – today`, value: pctText(now) }] } };
+          })(),
           { ico: "lock", label: "Secured, new", value: made ? pctText((100 * withKey) / made) : "–", values: sc?.values?.map((v) => v || 0),
             tip: sc ? (i) => ({ head: sc.names[i], rows: [{ color: "var(--ok)", label: "Secured of that day's sign-ups", value: pctText(sc.values[i]) }] }) : null },
           { ico: "trash", label: "Deleted", value: num(sumOf(gone)), cls: sumOf(gone) ? "warn" : "", values: gone.values.map((v) => v || 0), scls: "warm",
@@ -2372,6 +2394,7 @@ if (document.body.classList.contains("login")) {
           { ico: "send", label: "Yos per user", value: act ? (yoN / act).toFixed(1) : "–", values: per,
             tip: (i) => ({ head: dayName(ds[i]), rows: [{ color: "var(--ok)", label: "Yos per active user", value: per[i] ? per[i].toFixed(1) : "–" }, { ico: "user", label: "Active", value: num(active[i]) }] }) },
         ]),
+        pushCard(hd),
       ];
     };
     // Secured: accounts with a backup, this week's new ones, and the share per sign-up day.
@@ -2382,12 +2405,13 @@ if (document.body.classList.contains("login")) {
         sc?.values?.length ? [liveChart({ bars: sc.values.map((v) => v || 0), max: sc.scale, ...axisOf(sc.names) }, "", sf, sayOf(sc)), sf] : null);
     };
     // App: releases (wide), versions, devices, push (taken over sent).
-    DETAIL.vr = () => {
-      const hd = healthData, [ok, bad] = hd?.psAll || [0, 0];
-      const push = ok + bad ? comboCard("Push", { names: hd.names, values: hd.ps.map(([a, b]) => a + b) },
+    // Push: the pushes per slot (taken or failed) with the share taken, on the same slots and labels as the other cards.
+    const pushCard = (hd) => {
+      const [ok, bad] = hd?.psAll || [0, 0], a = evSlots("push-ok"), b = evSlots("push-fail");
+      return ok + bad ? comboCard("Push", { names: a.names, values: a.values.map((v, i) => (v || 0) + (b.values[i] || 0)) },
         { cls: "cool", sub: bad ? `${num(bad)} failed` : `${pctText((100 * ok) / (ok + bad))} taken`, subCls: bad ? "bad" : "" }) : dcard("Push", null, note("No data yet."));
-      return [...one.vr().filter((c) => title(c) !== "Builds"), ...one.pl(), push];
     };
+    DETAIL.vr = () => [...one.vr().filter((c) => title(c) !== "Builds"), ...one.pl()];
     // Problems: what users sent and what crashed (feedback, reports, crashes, crash-free installs (est.); the way to
     // the chat), delivery and speed. The app's errors are in the Errors view.
     DETAIL.pr = () => {

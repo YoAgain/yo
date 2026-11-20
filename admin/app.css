@@ -867,13 +867,13 @@ button.hc-hint:hover { border-color: var(--amethyst-soft); }
 .chartw .cstrip { display: block; flex: none; width: 100%; max-width: none; height: 28px; margin-top: 8px; grid-column: auto; }
 .chartw .cstrip .b { fill: var(--ok); opacity: .55; } .chartw .cstrip .b:last-of-type { opacity: 1; }
 #t-uc .cstrip .b { fill: var(--amethyst-soft); }
-.ov > .charts > #t-uc { height: auto; }
+.ov > .charts > #t-uc, .ov > .charts > #t-ac { height: auto; }
 #t-uc .area, .hchart .area { flex: 1 1 auto; min-height: 60px; }
 .ov > header.tile.hdr .hchart { height: auto; flex: 1 1 auto; }
 .ov > header.tile.hdr { height: 300px; }
-.ov > .charts > #t-uc { height: 200px; }
+.ov > .charts > #t-uc, .ov > .charts > #t-ac { height: 200px; }
 @media (min-width: 1240px) {
-  .ov > header.tile.hdr, .ov > .charts > #t-uc, .ov > #g-usage, .ov > #g-server { height: 280px; }
+  .ov > header.tile.hdr, .ov > .charts > #t-uc, .ov > .charts > #t-ac, .ov > #g-usage, .ov > #g-server { height: 280px; }
 }
 /* Server: the services as one segmented row on top (equal parts, tinted by state), then CPU · Memory · Disk, then LAN · Updates. */
 .svcbar { display: grid; grid-auto-flow: column; grid-auto-columns: minmax(0, 1fr); gap: 3px; padding: 3px; margin: 0 0 10px; border-radius: 11px; background: var(--bg); border: 1px solid var(--line); }
@@ -893,12 +893,12 @@ button.hc-hint:hover { border-color: var(--amethyst-soft); }
 .chartw .area { flex: 2 1 0; min-height: 40px; }
 .chartw .cstrip { flex: 1 1 0; height: auto; min-height: 22px; }
 .ov > header.tile.hdr { height: 260px; }
-.ov > .charts > #t-uc { height: 210px; }
+.ov > .charts > #t-uc, .ov > .charts > #t-ac { height: 210px; }
 @media (min-width: 1240px) {
-  .ov > header.tile.hdr, .ov > .charts > #t-uc, .ov > #g-usage, .ov > #g-server { height: auto; }
+  .ov > header.tile.hdr, .ov > .charts > #t-uc, .ov > .charts > #t-ac, .ov > #g-usage, .ov > #g-server { height: auto; }
 }
 @media (min-width: 1240px) {
-  .ov > header.tile.hdr, .ov > .charts > #t-uc, .ov > #g-usage, .ov > #g-server { height: 262px; }
+  .ov > header.tile.hdr, .ov > .charts > #t-uc, .ov > .charts > #t-ac, .ov > #g-usage, .ov > #g-server { height: 262px; }
 }
 #t-yc .area .line.overlay { stroke: #5dade2; stroke-width: 2; }
 /* The Yos card leads: the small Yo logo (the live/dev switch) in its title line, the total on the right. */
@@ -919,7 +919,7 @@ button.hc-hint:hover { border-color: var(--amethyst-soft); }
 :is(.rangebar, .topbar) .range button + button::before { color: var(--muted); opacity: .5; font-weight: 400; }
 .area .lab { font-family: var(--font); font-size: 9.5px; fill: var(--muted); font-variant-numeric: tabular-nums; pointer-events: none; }
 /* Both chart cards alike: a 28 px title line, the curve 2/3 and the bars 1/3 of the same fixed heights. */
-.ov > header.tile.hdr, .ov > .charts > #t-uc { padding: 16px 18px; }
+.ov > header.tile.hdr, .ov > .charts > #t-uc, .ov > .charts > #t-ac { padding: 16px 18px; }
 .chartw .gh { height: 28px; margin: 0; }
 .chartw .area, .ov .chartw .area { flex: none; height: 124px; min-height: 0; margin-top: 10px; }
 .stripbox { position: relative; flex: none; height: 54px; margin-top: 8px; padding: 4px 0 14px; }
@@ -942,11 +942,11 @@ body.dash { max-width: none; padding-left: 24px; padding-right: 24px; }
   .ov .chartw .area { height: var(--ch); }
   .ov .stripbox { height: calc(var(--ch) / 2); }
   .ov .stripbox .cstrip { height: calc(var(--ch) / 2 - 26px); }
-  .ov > header.tile.hdr, .ov > .charts > #t-uc, .ov > #g-usage, .ov > #g-server { height: calc(var(--ch) * 1.5 + 78px); }
+  .ov > header.tile.hdr, .ov > .charts > #t-uc, .ov > .charts > #t-ac, .ov > #g-usage, .ov > #g-server { height: calc(var(--ch) * 1.5 + 78px); }
   .ov > #g-usage .counts, .ov > #g-server .counts { flex: 1; display: flex; flex-direction: column; justify-content: space-between; }
   .ov > #g-server { display: flex; flex-direction: column; }
 }
-@media (max-width: 1239px) { .ov > header.tile.hdr, .ov > .charts > #t-uc { height: auto; } }
+@media (max-width: 1239px) { .ov > header.tile.hdr, .ov > .charts > #t-uc, .ov > .charts > #t-ac { height: auto; } }
 
 /* The Database widget scrolls with the page: no box of its own around the rows (up to 2500 per table). */
 #t-db .grid, #t-db .scroll, .tpane #all-users .scroll, .ugrid { max-height: none !important; overflow-y: visible !important; overflow-x: auto; }
@@ -1224,3 +1224,6 @@ body.dash { max-width: none; padding-left: 24px; padding-right: 24px; }
 .ctip.pin { pointer-events: auto; }
 .ctip svg.spark { width: 240px; height: 56px; display: block; margin-bottom: 2px; }
 .ctip .tm .dot { display: block; width: 8px; height: 8px; border-radius: 50%; background: var(--muted); } .ctip .tm .dot.ok { background: var(--ok); } .ctip .tm .dot.bad { background: var(--bad); }
+.hc-plats > .hc-pbar.plats { height: 18px; } .hc-pbar.plats > span { cursor: default; outline-offset: -2px; }
+.srow .srow-bar { width: 96px; height: 14px; align-self: center; }
+.srow:has(.srow-bar) { }
