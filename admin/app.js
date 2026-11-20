@@ -433,7 +433,7 @@ if (document.body.classList.contains("login")) {
   // phone that was offline (the Yo waited at the hub), not a slow hub.
   const LAT = ["latency-1s", "latency-5s", "latency-60s", "latency-slow"];
   const LAT_NAME = ["Within 1 s", "1–5 s", "5–60 s", "Later (phone offline)"];
-  let speedData = null, healthData = null;
+  let speedData = null, healthData = null, pushData = null;
   const areaSub = {};
   const healthRows = (h, ym, yh) => {
     const span = range === 1 ? "last 24 hours" : range ? `${range} days` : "since the start";
@@ -454,12 +454,8 @@ if (document.body.classList.contains("login")) {
       (i) => (ps[i][0] + ps[i][1] ? `${pctText(share(ps[i]))} taken · ${num(ps[i][1])} failed of ${num(ps[i][0] + ps[i][1])}` : "no pushes"),
       `Push: taken by APNs and FCM · ${pctText(share(psAll))} · ${num(psAll[1])} failed (in Errors) · ${span}`, 100);
     if (!(psAll[0] + psAll[1])) none("ps", "pushes");
-    // Push pacing (spec 6.7): the pushes sent per bar; the folded ones in the hover and in two rows of their own.
-    const pf = sums(["push-folded"]), pb = sums(["push-paced"]), pfAll = whole(pf), pbAll = whole(pb), sentAll = psAll[0] + psAll[1];
-    spark("pp", sentAll, ps.map(([a, b]) => a + b), names, (i) => `${num(ps[i][0] + ps[i][1])} pushes sent · ${num(pf[i][0])} folded by the window · ${num(pb[i][0])} by backlog pacing`, `Pushes sent · ${span}`);
-    spark("pf", pfAll[0], pf.map(([n]) => n), names, (i) => `${num(pf[i][0])} pushes folded into a later one by the 1 s window`, `Folded by the window · ${span}`);
-    spark("pb", pbAll[0], pb.map(([n]) => n), names, (i) => `${num(pb[i][0])} pushes folded by the backlog pacing`, `Folded by the backlog pacing · ${span}`);
-    set("pd-n", h.push_backlog_devices == null ? "–" : num(h.push_backlog_devices));
+    // Push pacing (spec 6.7): kept for the card inside Sent's detail.
+    pushData = { sent: ps.map(([a, b]) => a + b), folded: sums(["push-folded"]).map(([n]) => n), paced: sums(["push-paced"]).map(([n]) => n), names, span };
     // Hub errors: 5xx answers per bar (a bar's height its count); their share, 4xx and 429 in the hover.
     const he = sums(["http-5xx", "http", "http-4xx", "http-429"]), heAll = whole(he), rate = ([e, n]) => (n ? (100 * e) / n : 0);
     spark("he", null, he.map(([e]) => e), names,
@@ -1957,6 +1953,18 @@ if (document.body.classList.contains("login")) {
         tip: (i) => ({ head: names[i], rows: [{ ico: "disk", label: "Media waiting", value: rows[i] ? bytes(rows[i][1]) : "not kept" }] }) },
     ]);
   };
+  // Push pacing (spec 6.7): pushes sent, folded by the 1 s window, folded by the backlog pacing, devices paced now.
+  const pacingCard = (h) => {
+    const d = pushData, tot = (v) => v.reduce((a, x) => a + x, 0);
+    if (!d) return null;
+    const bars = (label, values, text) => ({ ico: "send", label, value: num(tot(values)), values, scls: "cool", tip: (i) => ({ head: d.names[i], rows: [{ ico: "send", label: text, value: num(values[i]) }] }) });
+    return sparkCard("Push pacing", [
+      bars("Pushes", d.sent, "Pushes sent"),
+      bars("Folded, 1 s window", d.folded, "Folded by the window"),
+      bars("Folded, backlog", d.paced, "Folded by the backlog pacing"),
+      { ico: "clock", label: "In backlog pacing now", value: h.push_backlog_devices == null ? "–" : num(h.push_backlog_devices) },
+    ]);
+  };
   const queueCard = (h) => {
     const { names, rows } = queueSlots(h);
     const value = dnums(`${num(h.messages)} Yos`, h.blobs ? `${bytes(h.blobs[1])} · ${num(h.blobs[0])} photos and videos` : null, "muted");
@@ -2169,6 +2177,7 @@ if (document.body.classList.contains("login")) {
             more: (i) => [{ ico: "disk", label: "Size", value: bytes(by.values[i] || 0) },
               { ico: "send", label: "Share of Yos", value: yo.values[i] ? pctText((100 * (evSlots("media-in").values[i] || 0)) / yo.values[i]) : "–" }] }); })(),
         comboCard("Groups", evSlots("group-create"), { total: h.groups, unit: "made" }),
+        ...[pacingCard(h)].filter(Boolean),
         ...botCards(h),
       ];
     };
