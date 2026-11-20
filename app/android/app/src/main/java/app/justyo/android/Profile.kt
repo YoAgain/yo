@@ -561,8 +561,11 @@ private val HalfPages = setOf("Profile", "Account", "Blocked", "Account Security
 @Composable private fun YourCodeSheet(name: String, onClose: () -> Unit) {
     val context = LocalContext.current
     val link = "https://justyo.co/${Uri.encode(name)}"
-    FittedSheet(onDismissRequest = onClose, containerColor = Amethyst, contentColor = Color.White) {
-        Column(Modifier.fillMaxWidth().padding(horizontal = 20.dp).padding(bottom = 24.dp), horizontalAlignment = Alignment.CenterHorizontally) {
+    FittedSheet(onDismissRequest = onClose, containerColor = Amethyst, contentColor = Color.White,
+        // The tall card, like iOS's large detent: people screenshot it, so no friend names show behind it.
+        height = 1f) {
+        Column(Modifier.fillMaxSize().padding(horizontal = 20.dp).padding(bottom = 24.dp), horizontalAlignment = Alignment.CenterHorizontally,
+            verticalArrangement = Arrangement.SpaceBetween) {
             Box(Modifier.fillMaxWidth()) {
                 Text(stringResource(R.string.ui_your_code), Modifier.align(Alignment.Center), style = MaterialTheme.typography.titleMedium)
                 IconButton(onClick = { shareCode(context, name) }, Modifier.align(Alignment.CenterEnd)) {
