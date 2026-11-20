@@ -1142,7 +1142,7 @@ private fun NotificationSettingsRow(onClick: () -> Unit) {
 }
 
 fun shareInvite(context: Context,name: String) {
-    context.startActivity(Intent.createChooser(Intent(Intent.ACTION_SEND).setType("text/plain").putExtra(Intent.EXTRA_TEXT,context.getString(R.string.ui_yo_add_me_on_yo,"https://justyo.co/${Uri.encode(name)}")),context.getString(R.string.ui_invite_friends)))
+    context.startActivity(Intent.createChooser(Intent(Intent.ACTION_SEND).setType("text/plain").putExtra(Intent.EXTRA_TEXT,context.getString(R.string.code_share_text,"https://justyo.co/${Uri.encode(name)}")),context.getString(R.string.ui_invite_friends)))
 }
 @Composable fun PhotoUri(uri: Uri,modifier: Modifier=Modifier) {
     val context=LocalContext.current

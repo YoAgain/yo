@@ -130,7 +130,6 @@
 <string name="ui_use_this_recovery_key_to_sign_in_to_yo_on_a_new_phone">Use this recovery key to sign in to Yo on a new phone.</string>
 <string name="ui_keep_it_safe_and_don_t_share_it">Keep it safe and don’t share it.</string>
 <string name="ui_yo_recovery_key_for">Yo recovery key for %1$s: %2$s</string>
-<string name="ui_yo_add_me_on_yo">Yo! Add me on Yo: %1$s</string>
 <string name="hub_refused">The hub refused this request (%1$d).</string>
 <string name="account_unavailable">Can’t open your account. Sign in again with your recovery key.</string>
 <string name="generic_failure">Something went wrong. Try again.</string>
