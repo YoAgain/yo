@@ -95,7 +95,7 @@ if (document.body.classList.contains("login")) {
     const td = tr.insertCell();
     if (text instanceof Node) td.append(text); else td.textContent = text ?? "–";
     if (cls) td.className = cls;
-    if (title) td.title = title;
+    if (title) hint(td, title);
     return td;
   };
   const tag = (text, cls) => el("span", `tag ${cls || ""}`, text);
@@ -314,7 +314,7 @@ if (document.body.classList.contains("login")) {
   const appTag = (app, uid) => {
     const i = appInfo(app), a = appState(app, uid);
     const t = el("span", a ? `app-${a}` : i ? null : "muted", i ? i.label : "–");
-    t.title = appTitle(app, uid);
+    hint(t, appTitle(app, uid));
     return t;
   };
 
@@ -510,18 +510,36 @@ if (document.body.classList.contains("login")) {
   };
   const SERIES = { "": "var(--ok)", cool: "#5dade2", bad: "#e67e22", acc: "var(--amethyst-soft)" };
   const slotWord = () => (range === 1 ? "This hour" : range ? "This day" : "This stretch");
+  const showTip = (t, x, y) => {
+    if (typeof t === "string") { const [head, ...rest] = t.split(" · "); tipBox.replaceChildren(el("b", "th", head), ...rest.map((x) => el("span", null, x))); }
+    else tipBox.replaceChildren(el("b", t.cap ? "th cap" : "th", t.head), ...(t.note ? [el("span", "tn", t.note)] : []), ...t.rows.filter(Boolean).map(tipRow));
+    tipBox.hidden = false;
+    const w = tipBox.offsetWidth, h = tipBox.offsetHeight;
+    tipBox.style.left = `${Math.min(innerWidth - w - 8, Math.max(8, x - w / 2))}px`;
+    tipBox.style.top = `${y - h - 14 < 8 ? y + 18 : y - h - 14}px`;
+  };
+  // An element that explains itself: the chart popup instead of a native title; on hover, keyboard focus and tap.
+  // t: a text ("head · line · line") or { head, note, rows }.
+  const hint = (node, t) => {
+    if (!t) return node;
+    const tv = () => (typeof t === "function" ? t() : t);
+    const at = () => { const r = node.getBoundingClientRect(); showTip(tv(), r.left + r.width / 2, r.top); };
+    node.tabIndex = node.tabIndex < 0 ? 0 : node.tabIndex;
+    node.addEventListener("pointermove", (e) => e.pointerType === "mouse" && showTip(tv(), e.clientX, e.clientY));
+    node.addEventListener("pointerleave", () => { tipBox.hidden = true; });
+    node.addEventListener("pointerdown", (e) => e.pointerType !== "mouse" && at());
+    node.addEventListener("focus", at);
+    node.addEventListener("blur", () => { tipBox.hidden = true; });
+    return node;
+  };
+  document.addEventListener("pointerdown", (e) => { if (e.pointerType !== "mouse") tipBox.hidden = true; }, true);
   const hoverTip = (node, count, text, mark) => {
     node.addEventListener("pointermove", (e) => {
       const n = typeof count === "function" ? count() : count, r = node.getBoundingClientRect();
       if (!n || !r.width) return;
       const i = Math.min(n - 1, Math.max(0, Math.floor(((e.clientX - r.left) / r.width) * n))), t = text(i);
       if (!t) { tipBox.hidden = true; return; }
-      if (typeof t === "string") { const [head, ...rest] = t.split(" · "); tipBox.replaceChildren(el("b", "th", head), ...rest.map((x) => el("span", null, x))); }
-      else tipBox.replaceChildren(el("b", "th", t.head), ...t.rows.filter(Boolean).map(tipRow));
-      tipBox.hidden = false;
-      const w = tipBox.offsetWidth, h = tipBox.offsetHeight;
-      tipBox.style.left = `${Math.min(innerWidth - w - 8, Math.max(8, e.clientX - w / 2))}px`;
-      tipBox.style.top = `${e.clientY - h - 14 < 8 ? e.clientY + 18 : e.clientY - h - 14}px`;
+      showTip(t, e.clientX, e.clientY);
       mark?.(i);
     });
     node.addEventListener("pointerleave", () => { tipBox.hidden = true; mark?.(-1); });
@@ -913,7 +931,7 @@ if (document.body.classList.contains("login")) {
     facts.replaceChildren();
     $("p-extra").hidden = !id;
     if (!id) return;
-    const fact = (k, v, cls, title) => { const f = el("span", `fact ${cls || ""}`); f.append(el("small", null, k), el("b", null, v)); if (title) f.title = title; facts.append(f); };
+    const fact = (k, v, cls, title) => { const f = el("span", `fact ${cls || ""}`); f.append(el("small", null, k), el("b", null, v)); if (title) hint(f, title); facts.append(f); };
     const mine = supportHub === which ? supportMessages : [], theirs = mine.filter((m) => !m.from_team);
     fact("install", installShort(id), "mono", `Install ${id} (random, no account)`);
     fact("messages", num(theirs.length), "", "");
@@ -1437,7 +1455,8 @@ if (document.body.classList.contains("login")) {
     const rate = full.reduce((a, b) => a + b, 0) / Math.max(1, full.length);
     set("live-n", rate >= 10 ? Math.round(rate).toLocaleString() : rate.toFixed(1).replace(/\.0$/, ""));
     const hour = m.reduce((a, b) => a + b, 0);
-    box.title = `${num(hour)} Yos in the last hour · ${num(m[n - 1])} this minute (bots left out)${box.dataset.state ? ` · ${box.dataset.state}` : ""}`;
+    if (!box._h) { box._h = 1; hint(box, () => box._tip); }
+    box._tip = `${num(hour)} Yos in the last hour · ${num(m[n - 1])} this minute (bots left out)${box.dataset.state ? ` · ${box.dataset.state}` : ""}`;
     box.setAttribute("aria-label", `${rate.toFixed(1)} Yos per minute, ${hour} in the last hour`);
     // The last ten minutes as bars like Problems', the running minute (bright) at the right.
     $("live-spark").replaceChildren(...bars(m.slice(-LIVE_BARS), LIVE_BARS * 10, 24));
@@ -1933,8 +1952,8 @@ if (document.body.classList.contains("login")) {
     const box = el("div", "srows");
     for (const r of rows) {
       const row = el("div", `srow${r.values ? "" : " wide"}${r.go ? " go" : ""}`);
-      if (r.go) { row.title = r.goTitle || ""; row.addEventListener("click", r.go); }
-      if (r.title) row.title = r.title;
+      if (r.go) row.addEventListener("click", r.go);
+      hint(row, r.title || r.goTitle);
       row.append(icon(r.ico || "chart"), el("span", "sl", r.label), el("b", `sv ${r.cls || ""}`.trim(), r.value ?? "–"));
       if (r.values) row.append(sparkBars(r.values, r.scls, r.tip));
       box.append(row);
@@ -2272,7 +2291,8 @@ if (document.body.classList.contains("login")) {
           return { ico: "warn", label: "Crashes", value: num(c.total), cls: c.total ? "warn" : "", values: c.values, scls: "hot",
             tip: (i) => ({ head: c.names[i], rows: [{ color: "var(--bad)", label: "Crash reports", value: num(c.values[i]) }] }) }; })(),
         { ico: "ratio", label: "Crash-free", value: hd.free == null ? "–" : `${pctText(hd.free)} of installs (est.)`, cls: hd.free != null && hd.free < 99 ? "warn" : "",
-          title: `${CRASH_FREE_NOTE}\n${hd.crashInstalls == null ? "The hub keeps no installs per crash yet." : `${num(hd.crashInstalls)} installs with a crash ÷ ${num(hd.seen)} phones seen.`}` },
+          title: { cap: 1, head: "Crash-free (est.)", note: "1 − installs with a crash ÷ phones seen (iOS, Android), since the range's first UTC day",
+            rows: [{ label: "Installs with a crash", value: hd.crashInstalls == null ? "–" : num(hd.crashInstalls) }, { label: "Phones seen", value: num(hd.seen) }] } },
       ]);
       // Yo to Yo speed: from the hub taking a Yo to the friend's phone having it, the share within 1 s per slot as the
       // line over the Yos delivered as bars; within 1 s and within 5 s in the title, every bucket in the popup.
