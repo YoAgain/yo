@@ -23,6 +23,7 @@ struct SettingsView: View {
 
   @AppStorage(SettingKey.leftHanded) private var leftHanded = false
   @Environment(\.dismiss) private var dismiss
+  @Environment(\.dynamicTypeSize) private var typeSize
   @Environment(AccountStore.self) private var accounts
 
   @State private var hasRecoveryKey = true
@@ -93,7 +94,9 @@ struct SettingsView: View {
         }
       }
       .listSectionSpacing(.compact)
-      // It fits, so it holds still.
+      // It fits at half height, so it never scrolls: always shown from its top (with Dynamic Type's largest sizes,
+      // where it cannot fit, it scrolls again).
+      .scrollDisabled(!typeSize.isAccessibilitySize)
       .scrollBounceBehavior(.basedOnSize)
       // "Yodentity" as the inline title, the system’s close button on the right. The pages
       // pushed in keep the same bar, so a push never shows or hides it.
