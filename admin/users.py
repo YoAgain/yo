@@ -635,7 +635,9 @@ def app_builds(out) -> dict:
             seen.update(apps)
             for a in apps:
                 p, _, b = (a or "").partition("/")
-                if name == "live" and p in BUILD and BUILD[p].fullmatch(b):  # the baseline: store builds on the live hub
+                # The baseline: store builds; the dev hub's count for iOS (TestFlight builds pointed at it), not for
+                # Android, whose builds there are debug builds (older ones still said a store-like build).
+                if p in BUILD and BUILD[p].fullmatch(b) and (name == "live" or p == "ios"):
                     users_of.setdefault(p, {}).setdefault(b, set()).add(u.get("id") or f"{name}#{i}")
     seen = {a for a in seen if a and a != "unknown"}
     newest = {}
