@@ -41,3 +41,21 @@ sentences, onboarding copy ("Name taken. Yours?", "Choose a longer name.", "No S
 error copy for hub statuses, name-availability debounce/cache policy and crash report records. Animation geometry,
 Android sound/haptics, permissions and OS exit collection belong to the platform.
 Bar titles, send and arrival lines, notification lines, widget selection and texts, media limits and encoding already come from `yo_product`.
+
+## Remaining differences (20 Nov 2026)
+
+Done since: the long-press menu, report follow-up, group members sheet, confirmation titles, Group Is Empty, direct
+decline, key-change dialog, first-Yo notifications offer, Offline / Failed to Send line, Add Friend's lookup hint and
+"No Connection", invite problems in the dialog, multi-pick of photos and videos, camera zoom choices (core), haptics,
+Yo Back on notifications, yo://camera, the widget's "Sent Yo!", the settings pages' copy (recovery, sign out, delete,
+blocked, contacts, verification, Your Code, Status order).
+
+Still different, by decision or not yet done:
+- Swipe actions: Android keeps the platform's swipe-to-remove (with undo); iOS reveals Block and Trash and shows the
+  last activity on a right swipe, and lets requests be swiped.
+- App Icon: three icons (iOS five: OG 2014 and 2015 need their launcher assets).
+- Long videos from the library are cut to ten seconds; iOS opens a trimmer.
+- Accessibility custom actions on bars (Record Video, Block, Trash) are missing.
+- One "Can't Open Your Account" screen; iOS tells "Server Not Reachable" (Try Again) apart.
+- Unread support replies have no badge yet.
+- Group notice sentences and group limits are written in both apps, not in the core.
