@@ -94,6 +94,8 @@ pub struct Wake {
     pub push_token: Vec<u8>,
     /// A bot's device (`is_bot_app`): its Yos are counted apart (`yo-in-bot`, 6.6).
     pub bot: bool,
+    /// Envelopes waiting for the device (unfetched) after this delivery: past `push_backlog` its pushes slow down.
+    pub waiting: u32,
 }
 
 /// A bot's app as its device names it (`Yo-App`): YoGPT, or the CLI the bots (STATUS, PING, …) run on. The operator's
@@ -1306,7 +1308,7 @@ impl Db {
                 outcomes.push(Delivered::Mismatch(current));
                 continue;
             }
-            let devices: Vec<Wake> = tx
+            let mut devices: Vec<Wake> = tx
                 .prepare_cached("SELECT id, push_platform, push_token, app FROM devices WHERE user_id = ?1")?
                 .query_map([user], |row| {
                     Ok(Wake {
@@ -1314,6 +1316,7 @@ impl Db {
                         push_platform: row.get(1)?,
                         push_token: row.get(2)?,
                         bot: is_bot_app(row.get::<_, Option<String>>(3)?.as_deref()),
+                        waiting: 0,
                     })
                 })?
                 .collect::<Result<_, _>>()?;
@@ -1332,8 +1335,10 @@ impl Db {
             }
             let mut insert =
                 tx.prepare_cached("INSERT INTO messages (device_id, envelope, received_at) VALUES (?1, ?2, ?3)")?;
-            for device in &devices {
+            let mut waiting = tx.prepare_cached("SELECT COUNT(*) FROM messages WHERE device_id = ?1")?;
+            for device in &mut devices {
                 insert.execute(params![device.device_id, envelope, now])?;
+                device.waiting = waiting.query_row([device.device_id], |row| row.get(0))?;
             }
             outcomes.push(Delivered::Stored(devices));
         }

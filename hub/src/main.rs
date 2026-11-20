@@ -110,7 +110,7 @@ fn config() -> Result<(Config, String), String> {
                 "a number",
             )?,
             backup_per_ip_hour: parsed("YO_BACKUP_PER_IP_HOUR", defaults.backup_per_ip_hour, |_| true, "a number")?,
-            // The brakes on a flood (spec 6.6, 6.7): the operator may set them without a new build.
+            // Limits on a flood (spec 6.6, 6.7): the operator may set them without a new build.
             recipient_bytes_burst: megabytes("YO_RECIPIENT_BYTES_BURST_MB", defaults.recipient_bytes_burst)?,
             recipient_bytes_per_hour: megabytes("YO_RECIPIENT_BYTES_PER_HOUR_MB", defaults.recipient_bytes_per_hour)?,
             push_window_contact_ms: parsed(
@@ -124,6 +124,13 @@ fn config() -> Result<(Config, String), String> {
                 defaults.push_window_request_ms,
                 |_| true,
                 "a number of ms",
+            )?,
+            push_backlog: parsed("YO_PUSH_BACKLOG", defaults.push_backlog, |_| true, "a number")?,
+            push_backlog_interval_s: parsed(
+                "YO_PUSH_BACKLOG_INTERVAL_S",
+                defaults.push_backlog_interval_s,
+                |_| true,
+                "a number of seconds",
             )?,
             ..defaults
         },

@@ -123,10 +123,8 @@ impl Hub {
 
     /// What follows a stored delivery: its devices' long polls answer, and each is pushed (spec 6.7), paced.
     fn woken(self: &Arc<Self>, devices: Vec<db::Wake>, urgent: bool, request: bool, runtime: &tokio::runtime::Handle) {
-        let limits = &self.config.limits;
-        let window =
-            Duration::from_millis(if request { limits.push_window_request_ms } else { limits.push_window_contact_ms });
         for wake in devices {
+            let window = self.push_window(request, wake.waiting);
             if let Some(notify) = self.waiting.lock().unwrap_or_else(PoisonError::into_inner).get(&wake.device_id) {
                 notify.notify_waiters();
             }
@@ -134,6 +132,16 @@ impl Hub {
                 self.push_paced(wake, urgent, window, runtime);
             }
         }
+    }
+
+    /// The window between a device's pushes: a contact's or a request's; past `push_backlog` waiting envelopes the
+    /// device is evidently offline or flooded, and it gets one push per `push_backlog_interval_s` instead.
+    pub(crate) fn push_window(&self, request: bool, waiting: u32) -> Duration {
+        let limits = &self.config.limits;
+        if waiting > limits.push_backlog {
+            return Duration::from_secs(limits.push_backlog_interval_s);
+        }
+        Duration::from_millis(if request { limits.push_window_request_ms } else { limits.push_window_contact_ms })
     }
 
     /// One push per device per `window` at most (spec 6.7): a quiet device's goes at once; what comes within the

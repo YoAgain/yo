@@ -760,6 +760,7 @@ mod tests {
             push_platform: api::PUSH_APNS,
             push_token: b"a1b2c3".to_vec(),
             bot: false,
+            waiting: 0,
         };
         hub.clone().push(wake(), true).await;
         *recorder.device_status.lock().unwrap() = Some(500);
@@ -995,6 +996,7 @@ mod tests {
             push_platform: api::PUSH_APNS,
             push_token: b"a1b2c3".to_vec(),
             bot: false,
+            waiting: 0,
         };
         let runtime = tokio::runtime::Handle::current();
         let window = Duration::from_millis(400);
@@ -1027,6 +1029,25 @@ mod tests {
         tokio::time::sleep(Duration::from_millis(300)).await;
         assert_eq!(pushes(&recorder), 5, "the contact's window ends it");
         hub.forget_pushes();
+    }
+
+    /// Spec 6.7: a device with more than `push_backlog` envelopes waiting gets one push per
+    /// `push_backlog_interval_s`; its backlog is counted by the delivery that stores each envelope.
+    #[test]
+    fn a_device_with_a_backlog_is_pushed_slowly() {
+        let limits = config::Limits { push_backlog: 50, push_backlog_interval_s: 600, ..config::Limits::default() };
+        let (hub, _) = apns_hub(limits);
+        assert_eq!(hub.push_window(false, 50), Duration::from_millis(1000));
+        assert_eq!(hub.push_window(true, 50), Duration::from_millis(10_000));
+        assert_eq!(hub.push_window(false, 51), Duration::from_secs(600));
+        assert_eq!(hub.push_window(true, 51), Duration::from_secs(600));
+        let hash = leo(&hub, None);
+        let item = |hash: &[u8; 32]| db::Incoming { user: [1; 16], devices_hash: *hash, envelope: &[7; 40] };
+        for waiting in 1..=3u32 {
+            let out = hub.db.deliver(&[item(&hash)], 10, 5000).unwrap();
+            let db::Delivered::Stored(devices) = &out[0] else { panic!("stored") };
+            assert_eq!(devices[0].waiting, waiting);
+        }
     }
 
     /// Spec 6.6: the envelope bytes sealed deliveries bring one inbox, from every address together (Signal's

@@ -27,6 +27,10 @@ pub struct Limits {
     /// 4.10) each have their own window.
     pub push_window_contact_ms: u64,
     pub push_window_request_ms: u64,
+    /// A device with more than this many envelopes waiting (unfetched) gets at most one push per
+    /// `push_backlog_interval_s` until its backlog is down again (spec 6.7): it is offline or flooded.
+    pub push_backlog: u32,
+    pub push_backlog_interval_s: u64,
     /// Bytes stored without identity, by address: envelopes stay up to `envelope_ttl_days`.
     pub anonymous_bytes_per_ip_hour: u64,
     /// Deliveries are refused (`507`) while the database's disk has less than this free.
@@ -95,6 +99,8 @@ impl Default for Limits {
             recipient_bytes_per_hour: 50 * MIB,
             push_window_contact_ms: 1000,
             push_window_request_ms: 10_000,
+            push_backlog: 50,
+            push_backlog_interval_s: 600,
             anonymous_bytes_per_ip_hour: 64 * MIB,
             db_min_free_bytes: GIB,
             register_per_ip_hour: 10,
@@ -134,6 +140,7 @@ impl Limits {
             // Every push at once: tests count them one by one (pacing has its own tests).
             push_window_contact_ms: 0,
             push_window_request_ms: 0,
+            push_backlog: u32::MAX,
             anonymous_bytes_per_ip_hour: u64::MAX,
             db_min_free_bytes: 0,
             register_per_ip_hour: u32::MAX,
