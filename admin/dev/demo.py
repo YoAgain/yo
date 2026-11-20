@@ -653,6 +653,11 @@ def main():
                                (t // HOUR, rng.randint(0, 6), rng.randint(0, 6)))
                     db.execute("UPDATE devices SET last_seen_at=? WHERE id IN (SELECT id FROM devices ORDER BY random() LIMIT ?)",
                                (t, rng.randint(0, 2)))
+                    # Yos arriving now, for the header's live strip.
+                    for kind, n in (("yo-in", rng.randint(0, 9)), ("media-in", rng.randint(0, 2)), ("yo-in-bot", rng.randint(0, 3))):
+                        if n:
+                            db.execute("INSERT INTO events VALUES (?,?,?) ON CONFLICT(kind, minute) DO UPDATE SET n=n+?",
+                                       (kind, t // 60_000, n, n))
             out = {"at": t, "updates": server.updates()}
             for name, path in paths.items():
                 out[name] = collector_module.hub(name, path)

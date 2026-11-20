@@ -1348,9 +1348,63 @@ if (document.body.classList.contains("login")) {
     if (scroll && t && scroll[2] === t.name) { const g = pane.querySelector(".grid"); g.scrollLeft = scroll[0]; g.scrollTop = scroll[1]; }
   };
 
+  // ---- live Yos in the title bar: per minute for the last hour (bots left out, counts only); every Yo new since the
+  // last refresh pops as a spark at the strip's "now" end, spread over the refresh interval. Reduced motion: no sparks.
+  const LIVE_SPREAD = 10000, LIVE_CAP = 30;
+  const calm = matchMedia("(prefers-reduced-motion: reduce)");
+  let liveSeen = null, liveTimers = [];
+  const liveStop = () => { liveTimers.forEach(clearTimeout); liveTimers = []; $("live-lane").replaceChildren(); };
+  const liveSpark = () => {
+    const lane = $("live-lane");
+    if (document.visibilityState !== "visible" || lane.childElementCount > LIVE_CAP) return;
+    const s = el("i", "yo-spark");
+    s.style.setProperty("--y", `${Math.round(15 + Math.random() * 70)}%`);
+    s.style.setProperty("--dx", `${-Math.round(26 + Math.random() * 60)}px`);
+    s.style.setProperty("--dy", `${Math.round(-8 + Math.random() * 16)}px`);
+    if (Math.random() < 0.22) { s.textContent = "Yo"; s.classList.add("word"); }
+    s.addEventListener("animationend", () => s.remove());
+    lane.append(s);
+    const dot = document.querySelector(".live-dot");
+    dot.classList.remove("ping"); void dot.offsetWidth; dot.classList.add("ping");
+  };
+  const drawLive = (h) => {
+    const box = $("live"), d = h?.live;
+    box.hidden = !d || !Array.isArray(d.minutes);
+    if (box.hidden) { liveSeen = null; liveStop(); return; }
+    const m = d.minutes, n = m.length, full = m.slice(-6, -1);
+    // The rate: the last five whole minutes, one decimal below ten.
+    const rate = full.reduce((a, b) => a + b, 0) / Math.max(1, full.length);
+    set("live-n", rate >= 10 ? Math.round(rate).toLocaleString() : rate.toFixed(1).replace(/\.0$/, ""));
+    const hour = m.reduce((a, b) => a + b, 0);
+    box.title = `${num(hour)} Yos in the last hour · ${num(m[n - 1])} this minute (bots left out)`;
+    box.setAttribute("aria-label", `${rate.toFixed(1)} Yos per minute, ${hour} in the last hour`);
+    // The sparkline: an area and its line, the running minute at the right edge.
+    const g = $("live-spark"), W = 120, H = 24, top = Math.max(1, ...m);
+    const pts = m.map((v, i) => [(i / (n - 1)) * W, H - 1.5 - (v / top) * (H - 4)]);
+    const line = pts.map(([x, y], i) => `${i ? "L" : "M"}${x.toFixed(1)},${y.toFixed(1)}`).join("");
+    g.replaceChildren(svg("defs"), svg("path", { class: "la", d: `${line}L${W},${H}L0,${H}Z` }), svg("path", { class: "ll", d: line }));
+    g.firstChild.innerHTML = '<linearGradient id="live-g" x1="0" x2="0" y1="0" y2="1"><stop offset="0" stop-color="currentColor" stop-opacity=".45"/><stop offset="1" stop-color="currentColor" stop-opacity="0"/></linearGradient>';
+    // New Yos: per minute, what this refresh counts above the last one (the running minute only on the first look).
+    const key = `${which}`, byMinute = new Map(m.map((v, i) => [d.minute - (n - 1) + i, v]));
+    let fresh = 0;
+    if (liveSeen?.key === key) for (const [k, v] of byMinute) fresh += Math.max(0, v - (liveSeen.m.get(k) ?? (k > liveSeen.minute ? 0 : v)));
+    else { liveStop(); fresh = m[n - 1]; }
+    liveSeen = { key, minute: d.minute, m: byMinute };
+    if (calm.matches || document.visibilityState !== "visible") return;
+    fresh = Math.min(LIVE_CAP, fresh);
+    for (let i = 0; i < fresh; i++) {
+      const t = setTimeout(() => { liveTimers = liveTimers.filter((x) => x !== t); liveSpark(); },
+        Math.round(((i + Math.random()) / fresh) * LIVE_SPREAD));
+      liveTimers.push(t);
+    }
+  };
+  document.addEventListener("visibilitychange", () => { if (document.visibilityState !== "visible") liveStop(); });
+  calm.addEventListener?.("change", () => { if (calm.matches) liveStop(); });
+
   // ---- everything from the collector -------------------------------------------------------------------------------
   const render = () => {
     const h = last?.[which];
+    part(() => drawLive(h));
     findNewest(h);
     part(() => overview(h));
     supportRefresh();

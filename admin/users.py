@@ -156,6 +156,20 @@ def events(db, now: int) -> dict:
     return out
 
 
+LIVE_KINDS = ("yo-in", "media-in")  # people's Yos and media; a bot's inbox (yo-in-bot) left out
+LIVE_MINUTES = 60
+
+
+def live(db, now: int) -> dict:
+    """The header's live strip: Yos (yo-in and media-in, bots left out) per minute for the last 60, the running
+    minute last, and its UTC minute ("minute"), so the page can tell new Yos from ones it already showed. Counts only."""
+    minute = now // 60000
+    rows = dict(db.execute(f"SELECT minute, sum(n) FROM events WHERE kind IN ({','.join('?' * len(LIVE_KINDS))})"
+                           " AND minute > ? AND minute <= ? GROUP BY 1",
+                           (*LIVE_KINDS, minute - LIVE_MINUTES, minute)).fetchall())
+    return {"minute": minute, "minutes": [rows.get(m, 0) for m in range(minute - LIVE_MINUTES + 1, minute + 1)]}
+
+
 def retention(db, now: int) -> dict:
     """D1, D7, D30 as [came back, of]: of the accounts made 1, 7 or 30 to 90 days ago (bots left out), those seen
     (a device's last_seen_at) at least that many days after they signed up. Counts only."""
@@ -312,6 +326,8 @@ def hub(name: str, path: str) -> dict:
             # The hub's per-minute event counts (no identifiers): per kind, the last 24 hours, the last 14 UTC days
             # and today; None on a hub without the table.
             "events": part("events", lambda: events(db, now) if has_table(db, "events") else None),
+            # Yos per minute, the last hour, for the header's live strip (see live).
+            "live": part("live", lambda: live(db, now) if has_table(db, "events") else None),
             "oldest_waiting": part("oldest_waiting", lambda: one("SELECT min(received_at) FROM messages")),
             "blobs": part("blobs", lambda: db.execute(
                 "SELECT count(*), coalesce(sum(size), 0) FROM blobs").fetchone() if has_table(db, "blobs") else None),
