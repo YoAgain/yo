@@ -151,6 +151,8 @@ and `/users.json` requests touch `ADMIN_REQUEST_FILE` at most once per five seco
 three seconds for a snapshot whose mtime is newer than that request. JSON responses include `stale`;
 timeouts retain the available snapshot (or return only `stale: true` if none exists). The page shows
 loading/updating status and refreshes every ten seconds while visible, immediately on becoming visible.
+`/users.json` is sent gzip-compressed when accepted, with an ETag over the data without the collector's clock
+(`at`, `updates.at`); the page asks with `If-None-Match` and keeps its list on a 304 (time from `Yo-At`).
 The root oneshot collector keeps its existing 15-minute/daily update caches. No collection runs on a timer.
 
 `setup/install-admin.sh` in yo-hub creates `/run/yo-admin-request` via tmpfiles, owned by yo-admin,

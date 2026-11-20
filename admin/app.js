@@ -1266,7 +1266,10 @@ if (document.body.classList.contains("login")) {
     // never rebuilt), Users the enriched sortable users table; Errors and To-dos their tables with their tools.
     const chat = tableOpen === "v-support", usersView = tableOpen === "people";
     const view = chat ? "chat" : usersView ? "users" : "list";
-    if (view !== "list" && box.dataset.name === tableOpen && box.dataset.view === view && box.firstChild) { box.firstChild.replaceWith(side); return; }
+    // Support and Users keep their pane (only the side list is new) while it holds them; a pane drawn before the data
+    // came (a #db or #users link opens the Database before the first /users.json) is empty and drawn again.
+    if (view !== "list" && box.dataset.name === tableOpen && box.dataset.view === view && box.firstChild
+      && box.querySelector(view === "chat" ? ".tpane #people" : ".tpane #all-users")) { box.firstChild.replaceWith(side); return; }
     box.dataset.name = tableOpen; box.dataset.view = view;
     if (view !== "chat" && box.querySelector("#people")) $("chat-home").append($("people"));
     if (view !== "users" && box.querySelector("#all-users")) $("chat-home").append($("all-users"));
@@ -1457,20 +1460,31 @@ if (document.body.classList.contains("login")) {
     part(drawTables);
     redrawDetail();
   };
-  let peopleBusy = false;
+  // The list (MBs on the live hub) comes again only when it changed: asked with its ETag, a 304 keeps the one shown
+  // and only moves the collector's time on (Yo-At).
+  let peopleBusy = false, usersTag = null;
   async function refresh() {
     if (document.visibilityState !== "visible" || peopleBusy) return;
     peopleBusy = true;
     const status = $("collection-status");
     if (!last) status.textContent = "Loading fresh data…";
     try {
-      const r = await fetch("/users.json", { cache: "no-store" });
-      if (!r.ok) throw new Error("collector unavailable");
-      last = await r.json();
+      const r = await fetch("/users.json", { cache: "no-store", headers: last && usersTag ? { "If-None-Match": usersTag } : {} });
+      let changed = r.status !== 304;
+      if (!changed) {
+        const at = Number(r.headers.get("Yo-At"));
+        if (at && !last.stale) { last.at = at; if (last.updates) last.updates.at = at / 1000; }
+      } else {
+        if (!r.ok) throw new Error("collector unavailable");
+        last = await r.json();
+        usersTag = r.headers.get("ETag");
+      }
       updates(last.updates);
       const doneResponse = await fetch("/done.json", { cache: "no-store" });
-      lastDone = new Set(doneResponse.ok ? await doneResponse.json() : []);
-      render();
+      const done = new Set(doneResponse.ok ? await doneResponse.json() : []);
+      if (done.size !== lastDone.size || [...done].some((k) => !lastDone.has(k))) changed = true;
+      lastDone = done;
+      if (changed) render();
       status.textContent = last.stale ? "Stale data · waiting for the collector" : "";
     } catch {
       status.textContent = last ? "Stale data · refresh failed" : "Waiting for fresh data…";

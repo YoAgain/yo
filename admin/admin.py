@@ -4,6 +4,7 @@ Python standard library only. See README.md for configuration.
 """
 
 import base64
+import gzip
 import hashlib
 import hmac
 import json
@@ -197,6 +198,38 @@ class CollectorRequest:
 
 
 collector = CollectorRequest(REQUEST_FILE, USERS_FILE)
+
+
+def users_body(snapshot: dict) -> tuple[bytes, str, int]:
+    """/users.json: its bytes, its ETag and its time. The ETag leaves out the collector's clock ("at", "updates.at",
+    new on every run) so it changes only with the data; the page takes the time from the Yo-At header on a 304."""
+    at = snapshot.get("at", 0) if isinstance(snapshot.get("at"), int) else 0
+    body = json.dumps(snapshot, separators=(",", ":")).encode()
+    upd = snapshot.get("updates")
+    same = {**snapshot, "at": 0, "updates": {**upd, "at": 0} if isinstance(upd, dict) else upd}
+    tag = '"' + hashlib.sha256(json.dumps(same, separators=(",", ":"), sort_keys=True).encode()).hexdigest()[:32] + '"'
+    return body, tag, at
+
+
+def gzip_ok(accept: str) -> bool:
+    for part in accept.split(","):
+        name, _, q = part.strip().partition(";")
+        if name.strip().lower() == "gzip":
+            return q.strip().replace(" ", "") not in ("q=0", "q=0.0", "q=0.00", "q=0.000")
+    return False
+
+
+_gzip = {"key": None, "body": b""}
+_gzip_lock = threading.Lock()
+
+
+def users_gzip(body: bytes) -> bytes:
+    """The body gzipped, the last one kept: the 2.8 MB list is compressed once per collector run, not per request."""
+    key = hashlib.sha256(body).digest()
+    with _gzip_lock:
+        if _gzip["key"] != key:
+            _gzip.update(key=key, body=gzip.compress(body, 6, mtime=0))
+        return _gzip["body"]
 
 # Which feedback is done; To-Dos use the hubs' real feedback ids.
 DONE_FILE = os.environ.get("STATE_DIRECTORY", "./state") + "/feedback-done.json"
@@ -700,7 +733,8 @@ class Admin(BaseHTTPRequestHandler):
         for k, v in {**HEADERS, **(extra or {})}.items():
             self.send_header(k, v)
         self.send_header("Content-Type", ctype)
-        self.send_header("Content-Length", str(len(body)))
+        if status != 304:
+            self.send_header("Content-Length", str(len(body)))
         try:
             self.end_headers()
             if self.command != "HEAD":
@@ -799,7 +833,14 @@ class Admin(BaseHTTPRequestHandler):
         if path == "/users.json":
             if not logged_in:
                 return self.send(401, b"{}", "application/json")
-            return self.send(200, json.dumps(queue_history(version_days(active_days(collector.snapshot())))).encode(), "application/json")
+            body, tag, at = users_body(queue_history(version_days(active_days(collector.snapshot()))))
+            # Revalidated every 10 s by the page: 304 while nothing changed (its If-None-Match, weak or strong).
+            extra = {"Cache-Control": "no-cache, private", "ETag": tag, "Vary": "Accept-Encoding", "Yo-At": str(at)}
+            if tag in [t.strip().removeprefix("W/") for t in self.headers.get("If-None-Match", "").split(",")]:
+                return self.send(304, b"", "application/json", extra)
+            if gzip_ok(self.headers.get("Accept-Encoding", "")):
+                return self.send(200, users_gzip(body), "application/json", {**extra, "Content-Encoding": "gzip"})
+            return self.send(200, body, "application/json", extra)
         self.send(404, b"Not found", "text/plain")
 
     do_HEAD = do_GET
