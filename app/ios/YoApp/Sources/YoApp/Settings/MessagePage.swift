@@ -33,9 +33,6 @@ struct MessagePage: View {
       ScrollViewReader { scroll in
         ScrollView {
           LazyVStack(spacing: 4) {
-            if messages.isEmpty {
-              empty
-            }
             ForEach(Array(messages.enumerated()), id: \.element.id) { index, message in
               let previous = index > 0 ? messages[index - 1] : nil
               if previous == nil || gap(previous!, message) > 300_000 {
@@ -53,6 +50,7 @@ struct MessagePage: View {
           .padding(.horizontal, 12)
           .padding(.top, 8)
         }
+        .overlay { if messages.isEmpty { empty } }
         .defaultScrollAnchor(.bottom)
         .scrollDismissesKeyboard(.interactively)
         .onChange(of: messages.last?.id) { _, _ in
@@ -84,20 +82,20 @@ struct MessagePage: View {
     }
   }
 
-  private var empty: some View {
-    VStack(spacing: 10) {
-      Image(systemName: "bubble.left.and.text.bubble.right.fill")
-        .font(.system(size: 44))
-        .foregroundStyle(Color.amethyst)
-      Text("How can we help?").font(.title3.weight(.semibold))
-      Text("Questions, ideas or problems: we read everything and answer here.")
-        .font(.subheadline).foregroundStyle(.secondary)
-        .multilineTextAlignment(.center)
-      if loading { ProgressView().padding(.top, 6) }
+  /// The empty chat: one incoming message from the team, centred, and a quiet word on privacy under it.
+  @ViewBuilder private var empty: some View {
+    if loading {
+      ProgressView()
+    } else {
+      VStack(alignment: .leading, spacing: 6) {
+        bubble(SupportMessage(id: 0, fromTeam: true, text: "How can we help?", createdAt: 0, readAt: 0), grouped: true)
+        Text("Not end-to-end encrypted")
+          .font(.caption2)
+          .foregroundStyle(.tertiary)
+          .padding(.leading, 14)
+      }
+      .padding(.horizontal, 12)
     }
-    .padding(.horizontal, 32)
-    .padding(.top, 120)
-    .frame(maxWidth: .infinity)
   }
 
   /// A bubble like Messages: yours right in Yo purple, the team's left in gray; consecutive ones close together.
@@ -130,13 +128,9 @@ struct MessagePage: View {
             .foregroundStyle(.secondary)
         }
         .buttonStyle(.plain)
-      } else {
-        Text("Not end-to-end encrypted. Read by the Yo team.")
-          .font(.caption2)
-          .foregroundStyle(.tertiary)
       }
       HStack(alignment: .bottom, spacing: 6) {
-        TextField("Message", text: $text, axis: .vertical)
+        TextField("Message the Yo team", text: $text, axis: .vertical)
           .lineLimit(1...6)
           .focused($focused)
           .disabled(sending)
