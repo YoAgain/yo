@@ -51,7 +51,8 @@ pub const HELP: &str =
   ack                               acknowledge what `listen --manual-ack` handed out
   echo-probe USER TOKEN             answer a round-trip probe (the PINGTEST service)
   probe [--timeout-ms N]            measure the round trip to PINGTEST
-environment: YO_STATE, YO_HUB, YO_HUB_KEYS, YO_TRUST_ROOTS, YO_ZK_PARAMS (lists comma separated)";
+environment: YO_STATE, YO_HUB, YO_HUB_KEYS, YO_TRUST_ROOTS, YO_ZK_PARAMS (lists comma separated),
+  YO_RECOVERY_LOOKUPS (roster lookups a day for messages from replaced phones; default 10, a bot raises it)";
 
 /// A command that did not work: its exit code and why, for stderr as JSON.
 #[derive(Debug)]

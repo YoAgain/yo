@@ -1,4 +1,5 @@
 use super::*;
+use std::collections::VecDeque;
 
 impl Client {
     /// Fetches and processes the inbox until it is empty. Transport failures stop it with nothing lost.
@@ -58,21 +59,23 @@ impl Client {
         let full = inbox.items.len() >= MAX_INBOX_FETCH;
         let mut done = Vec::new();
         let mut stopped = None;
-        // Deferred payloads go first; after one is kept again, its sender's next ones are too, keeping their order.
+        // Parked payloads go first; after one is parked again, its sender's next ones are too, keeping their order.
+        // They stay out of the state while the batch is received: each envelope's transaction copies the state.
         let sender_of = |opened: &[u8]| opened.get(16..).and_then(|p| decode::<Payload>(p).ok()).map(|p| p.account_key);
         let mut kept: BTreeSet<Key> = BTreeSet::new();
         let mut refreshed = BTreeSet::new();
+        let mut parked = VecDeque::new();
         for payload in std::mem::take(&mut self.state.deferred) {
             let sender = sender_of(&payload);
             if sender.is_some_and(|s| kept.contains(&s)) {
-                self.state.deferred.push_back(payload);
+                parked.push_back(payload);
                 continue;
             }
             match self.receive(&payload, &mut refreshed) {
                 Ok(()) => {}
                 Err(error) if retryable(&error) => {
                     kept.extend(sender);
-                    self.state.deferred.push_back(payload)
+                    parked.push_back(payload)
                 }
                 Err(error) => self.drop_one(error.to_string()),
             }
@@ -94,27 +97,18 @@ impl Client {
                 }
             };
             let sender = sender_of(&payload);
-            let room = self.state.deferred.len() < DEFERRED;
             if sender.is_some_and(|s| kept.contains(&s)) {
-                if !room {
-                    stopped = Some(Error::Refused(status::RATE_LIMITED));
-                    continue;
-                }
-                self.state.deferred.push_back(payload);
+                self.park(&mut parked, payload);
                 done.push(item.id);
                 continue;
             }
             match self.receive(&payload, &mut refreshed) {
                 Ok(()) => {}
-                // A lookup limit for this sender: its envelopes are kept locally if there is room, else left
-                // unacknowledged.
-                Err(error @ Error::Refused(status::RATE_LIMITED)) => {
+                // A lookup limit for this sender: its envelopes are parked here and acknowledged, so what comes after
+                // them is read and received (no envelope holds up the inbox).
+                Err(Error::Refused(status::RATE_LIMITED)) => {
                     kept.extend(sender);
-                    if !room {
-                        stopped = Some(error);
-                        continue;
-                    }
-                    self.state.deferred.push_back(payload);
+                    self.park(&mut parked, payload);
                 }
                 // Not this envelope's fault: it stays at the hub and is read again next time.
                 Err(error) if retryable(&error) => {
@@ -125,6 +119,7 @@ impl Client {
             }
             done.push(item.id);
         }
+        self.state.deferred = parked;
         let full = full && !backlogged;
         if later && !full && stopped.is_none() {
             return Ok((false, done));
@@ -140,6 +135,16 @@ impl Client {
             Some(error) => Err(error),
             None => Ok((full, Vec::new())),
         }
+    }
+
+    /// Parks a payload for a later sync (`State::deferred`); past `DEFERRED` the oldest parked one is dropped, so
+    /// the inbox never stops behind them.
+    fn park(&mut self, parked: &mut VecDeque<Vec<u8>>, payload: Vec<u8>) {
+        if parked.len() >= DEFERRED {
+            parked.pop_front();
+            self.drop_one("a parked message, too many waiting for a roster".into());
+        }
+        parked.push_back(payload);
     }
 
     /// Acknowledges inbox ids saved as processed; `false` when the ack did not arrive (the hub repeats, they are seen).
@@ -231,7 +236,7 @@ impl Client {
         if self.state.recovery_lookups.0 != day {
             self.state.recovery_lookups = (day, 0);
         }
-        if self.state.recovery_lookups.1 >= RECOVERY_LOOKUPS_PER_DAY {
+        if self.state.recovery_lookups.1 >= self.recovery_lookups_per_day {
             return false;
         }
         self.state.recovery_lookups.1 += 1;

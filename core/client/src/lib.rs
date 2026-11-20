@@ -97,10 +97,11 @@ fn test_trust_roots() -> Vec<Key> {
 }
 /// How often a payload may make this device ask the hub for a user's device (spec 4.4).
 const ROSTER_ASK_EVERY_MS: u64 = 60 * 1000;
-/// Lookups a day that unopened payloads may cause: the rest of the hub's allowance (6.6) stays for the app.
-const RECOVERY_LOOKUPS_PER_DAY: u32 = 10;
-/// Payloads kept for a roster that could not be asked yet (`State::deferred`).
-const DEFERRED: usize = 64;
+/// Lookups a day that unopened payloads may cause, by default: the rest of the hub's allowance (6.6) stays for the
+/// app. A bot the hub does not limit raises it (`set_recovery_lookups_per_day`).
+pub const RECOVERY_LOOKUPS_PER_DAY: u32 = 10;
+/// Payloads parked for a roster that could not be asked yet (`State::deferred`); past it the oldest is dropped.
+const DEFERRED: usize = 256;
 /// Names a contact is remembered by at most: the newest.
 const HANDLES_KEPT: usize = 4;
 /// Events a guest (the notification service) keeps for the app at most: bounds its state while the app is closed.
@@ -538,6 +539,8 @@ pub struct Client {
     hub_keys: Vec<Key>,
     /// Sender-certificate trust roots (spec 6.1): none, nothing sealed opens or is sent.
     trust_roots: Vec<Key>,
+    /// Lookups a day that unopened payloads may cause (`RECOVERY_LOOKUPS_PER_DAY`).
+    recovery_lookups_per_day: u32,
     /// When (this clock) a sender certificate was last asked for: at most once a minute.
     certificate_asked_at: u64,
     /// How far this device's clock is off (tests: a phone set to the wrong time); the signing time is wall time plus
@@ -890,12 +893,19 @@ impl Client {
             probe_requests: Vec::new(),
             hub_keys: Vec::new(),
             trust_roots: test_trust_roots(),
+            recovery_lookups_per_day: RECOVERY_LOOKUPS_PER_DAY,
             certificate_asked_at: 0,
             skew_ms: 0,
             zk: groups::test_zk(),
             group_auth: None,
             endorsed_sent: 0,
         }
+    }
+
+    /// Lookups a day that unopened payloads may cause (default `RECOVERY_LOOKUPS_PER_DAY`): a bot the hub does not
+    /// limit, with many users replacing phones, raises it. Not saved.
+    pub fn set_recovery_lookups_per_day(&mut self, lookups: u32) {
+        self.recovery_lookups_per_day = lookups;
     }
 
     /// Pins the hub's sender-certificate trust roots (spec 6.1), 32 bytes each (Curve25519).

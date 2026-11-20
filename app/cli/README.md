@@ -20,6 +20,9 @@ yo probe                                            # the round trip to PINGTEST
 
 The hub's pins come from flags or the environment: `YO_HUB_KEYS` (`--hub-key`), `YO_TRUST_ROOTS` (`--trust-root`,
 without one no sealed Yo opens) and `YO_ZK_PARAMS` (`--zk-params`, without them no group); lists comma separated.
+`YO_RECOVERY_LOOKUPS` (environment only) sets the roster lookups a day for messages from a device under another's
+number (a user's new phone; the core's default is 10). A bot the hub does not limit (`YO_BOT_ACCOUNTS`) raises it,
+e.g. `YO_RECOVERY_LOOKUPS=2000` in its environment file: with many users, ten a day leave their messages parked.
 
 **One process per directory.** While `yo listen` runs it holds the directory, and every other `yo` command on it goes
 over the directory's control socket (`control.sock`, in the 0700 directory) and runs inside the listener, on its client.

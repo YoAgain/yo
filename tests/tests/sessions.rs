@@ -403,6 +403,37 @@ fn a_new_phones_message_right_after_a_forgery_is_kept_not_lost() {
     assert_eq!(b.deferred(), 0, "decided once the roster could be asked");
 }
 
+/// Messages from a contact's new phone, several fetches of them, while the day's roster lookups are used up: they are
+/// parked (the oldest dropped past the bound), and a later message from someone else is received at once (no
+/// head-of-line block). Once lookups are left (a client setting), the parked ones come, in order.
+#[test]
+fn parked_messages_do_not_hold_up_the_inbox() {
+    let hub = TestHub::start();
+    let n = random_u64() % 100_000;
+    let name = format!("Pk{n}");
+    let mut a = by_name(Http::new(hub.url()), &name);
+    let mut b = by_name(Http::new(hub.url()), &format!("Pl{n}"));
+    let mut c = by_name(Http::new(hub.url()), &format!("Pm{n}"));
+    a.send(b.user_id(), text("hi")).unwrap();
+    assert_eq!(texts(&b.sync(0).unwrap()), ["hi"]);
+    b.accept(a.user_id()).unwrap();
+    keys_both_ways(&mut a, &mut b);
+    b.set_recovery_lookups_per_day(0);
+    let mut a2 = yo_tests::new_phone(Http::new(hub.url()), &name, &a);
+    let expected: Vec<String> = (0..280).map(|i| format!("new {i}")).collect();
+    for content in &expected {
+        a2.send(b.user_id(), text(content)).unwrap();
+    }
+    c.send(b.user_id(), text("behind")).unwrap();
+    assert_eq!(texts(&b.sync(0).unwrap()), ["behind"], "the new phone's parked, the one behind them received");
+    assert_eq!(b.deferred(), 256, "parked up to the bound");
+    assert!(b.dropped() >= 24, "the oldest parked dropped past it: {}", b.dropped());
+    b.set_recovery_lookups_per_day(10);
+    let later = texts(&b.sync(0).unwrap());
+    assert!(later.len() >= 255 && expected.ends_with(&later), "the newest, in order: {later:?}");
+    assert_eq!(b.deferred(), 0);
+}
+
 #[test]
 fn one_roster_lookup_decides_an_inbox_batch_after_two_phone_replacements() {
     let hub = TestHub::start();
@@ -427,7 +458,7 @@ fn one_roster_lookup_decides_an_inbox_batch_after_two_phone_replacements() {
 }
 
 #[test]
-fn a_full_deferred_queue_leaves_the_rest_at_the_hub() {
+fn messages_parked_for_a_roster_come_in_order_none_dropped() {
     use std::sync::atomic::{AtomicU64, Ordering};
 
     let hub = TestHub::start();

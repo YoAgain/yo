@@ -20,7 +20,8 @@ const BUILD: &str = match option_env!("YO_BUILD") {
 };
 
 /// Where the account lives and how its hub is reached: flags, else the environment (`YO_STATE`, `YO_HUB`,
-/// `YO_HUB_KEYS`, `YO_TRUST_ROOTS`, `YO_ZK_PARAMS`; lists comma separated).
+/// `YO_HUB_KEYS`, `YO_TRUST_ROOTS`, `YO_ZK_PARAMS`; lists comma separated). `YO_RECOVERY_LOOKUPS` only from the
+/// environment.
 pub struct Config {
     pub state: PathBuf,
     pub hub: Option<String>,
@@ -30,6 +31,9 @@ pub struct Config {
     pub trust_roots: Vec<[u8; 32]>,
     /// The hub's zkgroup public params (spec 4.9): without them no group.
     pub zk_params: Option<Vec<u8>>,
+    /// Roster lookups a day for messages from a replaced phone (`YO_RECOVERY_LOOKUPS`; else the core's 10): a bot the
+    /// hub does not limit raises it, or messages from users with new phones wait for days.
+    pub recovery_lookups: Option<u32>,
 }
 
 fn key32(what: &str, text: &str) -> Result<[u8; 32], Failure> {
@@ -37,6 +41,11 @@ fn key32(what: &str, text: &str) -> Result<[u8; 32], Failure> {
         .ok()
         .and_then(|k| k.try_into().ok())
         .ok_or_else(|| Failure::usage(format!("{what}: 32 bytes, base64url")))
+}
+
+/// `YO_RECOVERY_LOOKUPS`: a number of lookups a day.
+fn lookups(text: &str) -> Result<u32, Failure> {
+    text.trim().parse().map_err(|_| Failure::usage("YO_RECOVERY_LOOKUPS: a number"))
 }
 
 impl Config {
@@ -76,9 +85,10 @@ impl Config {
             Some(p) => Some(yo_wire::unb64(p.trim()).map_err(|_| Failure::usage("--zk-params: base64url"))?),
             None => None,
         };
+        let recovery_lookups = env("YO_RECOVERY_LOOKUPS").as_deref().map(lookups).transpose()?;
         let state = state.ok_or_else(|| Failure::usage("no state directory: --state DIR or YO_STATE"))?;
         let hub = hub.map(|h| h.trim_end_matches('/').to_owned());
-        Ok((Config { state: state.into(), hub, hub_keys, trust_roots, zk_params }, &args[i..]))
+        Ok((Config { state: state.into(), hub, hub_keys, trust_roots, zk_params, recovery_lookups }, &args[i..]))
     }
 
     pub fn control(&self) -> PathBuf {
@@ -220,6 +230,9 @@ fn configure(client: &mut Client, config: &Config) -> Result<(), Failure> {
         client.set_hub_keys(config.hub_keys.clone());
     }
     client.set_trust_roots(config.trust_roots.clone());
+    if let Some(lookups) = config.recovery_lookups {
+        client.set_recovery_lookups_per_day(lookups);
+    }
     if let Some(params) = &config.zk_params {
         client.set_zk_params(params).map_err(|e| Failure::new(format!("--zk-params: {e}")))?;
     }
@@ -320,6 +333,12 @@ fn register_new(
 mod tests {
     use super::*;
 
+    #[test]
+    fn recovery_lookups_are_a_number() {
+        assert_eq!(lookups(" 2000 ").unwrap(), 2000);
+        assert_eq!(lookups("many").unwrap_err().code, 2);
+    }
+
     /// A transport error names neither the hub nor the path: a blob's id lets anyone fetch and acknowledge it.
     #[test]
     fn a_transport_error_carries_no_url() {
@@ -329,6 +348,7 @@ mod tests {
             hub_keys: Vec::new(),
             trust_roots: Vec::new(),
             zk_params: None,
+            recovery_lookups: None,
         };
         let Err(error) = transport(&config).unwrap().request("GET", "/v1/blobs/SECRETID", &[], &[]) else {
             panic!("port 1 answered")
