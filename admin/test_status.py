@@ -73,5 +73,28 @@ class StatusTests(unittest.TestCase):
                 thread.join()
 
 
+class GoneClientTests(unittest.TestCase):
+    """A page that went before its answer (reloaded, a poll replaced) costs no traceback in the journal."""
+
+    def test_a_closed_connection_is_no_error(self):
+        with patch.dict(os.environ, {"ADMIN_USER": "test", "ADMIN_PASSWORD_HASH": "unused", "ADMIN_SESSION_KEY": "00",
+                                     "ACCESS_TEAM": "invalid", "ACCESS_AUD": "test",
+                                     "STATE_DIRECTORY": tempfile.gettempdir()}):
+            admin = load("admin")
+
+        for error in (BrokenPipeError, ConnectionResetError):
+            class Gone:
+                def write(self, _, error=error):
+                    raise error("the page went")
+
+            handler = admin.Admin.__new__(admin.Admin)
+            handler.command, handler.path, handler.request_version = "GET", "/api/stats", "HTTP/1.1"
+            handler.requestline = "GET /api/stats HTTP/1.1"
+            handler.wfile = Gone()
+            with patch("builtins.print"):
+                handler.send(200, b"{}", "application/json")
+            self.assertTrue(handler.close_connection)
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -680,9 +680,13 @@ class Admin(BaseHTTPRequestHandler):
             self.send_header(k, v)
         self.send_header("Content-Type", ctype)
         self.send_header("Content-Length", str(len(body)))
-        self.end_headers()
-        if self.command != "HEAD":
-            self.wfile.write(body)
+        try:
+            self.end_headers()
+            if self.command != "HEAD":
+                self.wfile.write(body)
+        except (BrokenPipeError, ConnectionResetError):
+            # The page went before its answer (reloaded, closed, a poll replaced): nothing to tell, no traceback.
+            self.close_connection = True
 
     def who(self) -> str | None:
         return access_user(self.headers.get("Cf-Access-Jwt-Assertion"))
