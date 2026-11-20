@@ -492,11 +492,9 @@ fn the_app_layer_asks_who_a_typed_name_is_before_the_first_yo() {
 #[test]
 fn the_app_layer_sends_a_burst_over_the_hubs_limit_later_in_order() {
     use std::time::{Duration, Instant};
-    // 60 over the limit: over it also on a slow machine, whose burst takes a while; at 4 a second back in about 15 s
-    // (twice the limit of 30 made it wait a minute).
-    const BURST: usize = 300;
+    // Yos until the hub refuses one (at any machine's pace), then a few more: they wait, and go at a Yo a second.
     let mut config = yo_hub::config::Config::for_tests();
-    config.limits.deliver_per_ip_minute = 240;
+    config.limits.deliver_per_ip_minute = 60;
     let hub = TestHub::start_with(config, "127.0.0.1:0");
     let n = random_u64() % 1_000_000_000;
     let (pa, pb) = (username(n), username(n + 1));
@@ -505,10 +503,16 @@ fn the_app_layer_sends_a_burst_over_the_hubs_limit_later_in_order() {
     a.send_yo(pb.clone()).unwrap();
     assert_eq!(yos(&drain(&b), &a.user_id()), 1);
     a.sync(0).unwrap();
-    for _ in 0..BURST {
+    let mut burst = 0;
+    while a.waiting() == 0 {
+        assert!(burst < 1000, "never over the limit");
         a.send_yo(pb.clone()).unwrap(); // each one fine: what the hub refuses waits
+        burst += 1;
     }
-    assert!(a.waiting() > 0, "over the limit");
+    for _ in 0..4 {
+        a.send_yo(pb.clone()).unwrap();
+        burst += 1;
+    }
     let started = Instant::now();
     while a.waiting() > 0 {
         assert!(started.elapsed() < Duration::from_secs(180), "the outbox empties at the hub's pace");
@@ -523,7 +527,7 @@ fn the_app_layer_sends_a_burst_over_the_hubs_limit_later_in_order() {
             _ => None,
         })
         .collect();
-    assert_eq!(sent.len(), BURST, "each once");
+    assert_eq!(sent.len(), burst, "each once");
     assert!(sent.windows(2).all(|w| w[0] <= w[1]), "in order");
 }
 
