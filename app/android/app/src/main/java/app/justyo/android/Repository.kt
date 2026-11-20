@@ -390,6 +390,15 @@ class Repository(private val context: Context, ownerScope: CoroutineScope) {
         } finally { mutable.update { it.copy(busy = false) } }
     }
 
+    /** The account item Block Store holds, for the Sign In card; none when there is none or Block Store did not answer. */
+    suspend fun savedAccount(): SyncedItem? = withContext(Dispatchers.IO) { runCatching { synced.read() }.getOrNull() }
+
+    /** The Sign In card's account tapped: also one signed out here (iOS: `restore(synced:)` clears `left`). */
+    suspend fun signInSaved(item: SyncedItem) {
+        signIn(item)
+        vault.delete("left")
+    }
+
     private fun registerCore(name: String, account: ByteArray): YoClient {
         val key = vault.secret("state-key")
         return YoClient.registerUsernameDb(transport, file.database(key), key, null, name, account, null, null, null, 0u, "")

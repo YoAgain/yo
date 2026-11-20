@@ -25,7 +25,7 @@ import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.automirrored.filled.ArrowBack
+import androidx.compose.material.icons.automirrored.filled.ArrowForward
 import androidx.compose.material.icons.filled.*
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
@@ -63,6 +63,8 @@ import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.input.ImeAction
+import androidx.compose.ui.text.input.KeyboardCapitalization
+import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.input.TextFieldValue
 import androidx.compose.ui.text.TextRange
 import androidx.compose.ui.platform.LocalDensity
@@ -171,7 +173,6 @@ import uniffi.yo.usernameValid
 
     var step by rememberSaveable { mutableIntStateOf(0) }
     var name by rememberSaveable { mutableStateOf("") }
-    var scanning by remember { mutableStateOf(false) }
     var code by rememberSaveable { mutableStateOf("") }
     val availability = remember { mutableStateMapOf<String, Boolean>() }
     val free = availability[name]
@@ -229,7 +230,7 @@ import uniffi.yo.usernameValid
             }
         }
     }
-    if (step != 3) Column(Modifier.fillMaxSize().safeDrawingPadding().imePadding().padding(bottom = 16.dp), horizontalAlignment = Alignment.CenterHorizontally) {
+    Column(Modifier.fillMaxSize().safeDrawingPadding().imePadding().padding(bottom = 16.dp), horizontalAlignment = Alignment.CenterHorizontally) {
         // The carousel in the room above the form, shrunk into it with the keyboard up and held still meanwhile (iOS
         // Onboarding): the form below keeps its own height, never cut.
         BoxWithConstraints(Modifier.fillMaxWidth().weight(1f), contentAlignment = Alignment.Center) {
@@ -311,99 +312,210 @@ import uniffi.yo.usernameValid
         SideEffect {
             if (Build.VERSION.SDK_INT >= 29) window?.isNavigationBarContrastEnforced = false
         }
-        Column(
-            Modifier.fillMaxWidth().navigationBarsPadding().padding(start = 24.dp, end = 24.dp, top = 28.dp, bottom = 4.dp),
-            horizontalAlignment = Alignment.CenterHorizontally,
-        ) {
-            BrandText(copy(ProductText.SIGN_IN), 28)
-            Spacer(Modifier.height(18.dp))
-            OnboardingButton(stringResource(R.string.ui_use_passkey), !s.busy) {
-                scope.launch {
-                    try {
-                        val assertion = Passkeys.assert(context)
-                        repo.command { restorePasskey(assertion) }
-                    } catch (cancelled: CancellationException) {
-                        throw cancelled
-                    } catch (failure: Exception) {
-                        model.error(failure.message ?: uiResources.getString(R.string.ui_use_your_recovery_key))
-                    }
-                }
-            }
-            Spacer(Modifier.height(6.dp))
-            TextButton(onClick = { repo.clearError(); step = 3 }) {
-                BrandText(stringResource(R.string.ui_use_recovery_key), 17)
-            }
-            OnboardingNote(s.error)
+        SignInCard(model, s, code) { code = it }
+    }
+}
+
+/** A complete recovery key in what was typed, pasted or read (as `Repository.restore` reads it); none otherwise. */
+private fun parsedRecoveryKey(text: String): String? =
+    uniffi.yo.recoveryKeyParse(text)
+        ?: text.lowercase().filter { it in 'a'..'z' || it in '0'..'9' }.takeIf { it.length >= 64 }
+            ?.let { uniffi.yo.recoveryKeyParse(it.takeLast(64)) }
+
+private enum class SignInWay { SAVED, PASSKEY, KEY }
+
+/**
+ * The Sign In card (iOS SignInCard, design J): the saved Block Store account as a white capsule, or a notice that there
+ * is none; under "Use a Key" the passkey and one recovery key field, which signs in once it holds a whole key.
+ */
+@Composable
+private fun SignInCard(model: YoViewModel, s: AppState, code: String, onCode: (String) -> Unit) {
+    val repo = model.repository
+    val context = LocalContext.current
+    val uiResources = androidx.compose.ui.platform.LocalResources.current
+    val scope = rememberCoroutineScope()
+    val focusManager = LocalFocusManager.current
+    var saved by remember { mutableStateOf<uniffi.yo.SyncedItem?>(null) }
+    var looked by remember { mutableStateOf(false) }
+    LaunchedEffect(Unit) { saved = repo.savedAccount(); looked = true }
+    var opened by rememberSaveable { mutableStateOf<Boolean?>(null) }
+    val open = opened ?: (looked && saved == null)
+    var by by remember { mutableStateOf<SignInWay?>(null) }
+    var tried by remember { mutableStateOf<String?>(null) }
+    var keyProblem by remember { mutableStateOf<String?>(null) }
+    val busy = s.busy || by != null
+    val mismatch = stringResource(R.string.ui_that_doesn_t_match_a_recovery_key_check_it_and_try_again)
+    // "Remove animations" in the system settings: the options open without motion (iOS: Reduce Motion).
+    val still = remember(context) {
+        android.provider.Settings.Global.getFloat(context.contentResolver, android.provider.Settings.Global.ANIMATOR_DURATION_SCALE, 1f) == 0f
+    }
+    var scanning by remember { mutableStateOf(false) }
+    fun start(way: SignInWay, work: suspend () -> Unit) {
+        if (busy) return
+        by = way; keyProblem = null; repo.clearError()
+        scope.launch { try { work() } finally { by = null } }
+    }
+    fun submit(key: String) {
+        tried = key
+        focusManager.clearFocus()
+        start(SignInWay.KEY) { repo.command { restore(key) }.join() }
+    }
+    fun submitTyped(text: String) {
+        val key = parsedRecoveryKey(text)
+        if (key == null) keyProblem = mismatch else submit(key)
+    }
+    // In the sheet's window, so it opens over the card; a scanned key signs in at once.
+    if (scanning) QrScanner(onClose = { scanning = false }, onCode = { onCode(it.text); scanning = false; submitTyped(it.text) })
+    val picker = rememberLauncherForActivityResult(ActivityResultContracts.PickVisualMedia()) { uri ->
+        if (uri != null) scope.launch {
+            val text = runCatching { readQr(context, uri) }.getOrNull()
+            if (text == null) keyProblem = uiResources.getString(R.string.ui_we_couldn_t_read_a_recovery_key_from_this_photo)
+            else { onCode(text); submitTyped(text) }
         }
     }
-    if (step == 3) {
-        val back = { repo.clearError(); step = 2 }
-        androidx.activity.compose.BackHandler(onBack = back)
-        val picker = rememberLauncherForActivityResult(ActivityResultContracts.PickVisualMedia()) { uri ->
-            if (uri != null) scope.launch {
-                try {
-                    code = readQr(context, uri)
-                        ?: error(uiResources.getString(R.string.ui_we_couldn_t_read_a_recovery_key_from_this_photo))
-                    repo.clearError()
-                } catch (cancelled: CancellationException) {
-                    throw cancelled
-                } catch (failure: Exception) {
-                    model.error(failure.message ?: uiResources.getString(R.string.ui_couldn_t_read_photo))
+    Column(
+        Modifier.fillMaxWidth().navigationBarsPadding().imePadding().then(if (still) Modifier else Modifier.animateContentSize())
+            .padding(start = 24.dp, end = 24.dp, top = 28.dp, bottom = 12.dp),
+        horizontalAlignment = Alignment.CenterHorizontally,
+        verticalArrangement = Arrangement.spacedBy(12.dp),
+    ) {
+        BrandText(copy(ProductText.SIGN_IN), 28)
+        val item = saved
+        if (item != null) {
+            val label = stringResource(R.string.signin_as, item.username)
+            Surface(
+                onClick = { start(SignInWay.SAVED) { repo.command { signInSaved(item) }.join() } }, enabled = !busy,
+                modifier = Modifier.fillMaxWidth().heightIn(min = 56.dp).semantics { contentDescription = label },
+                shape = CircleShape, color = Color.White, contentColor = Color.Black,
+            ) {
+                Row(Modifier.padding(horizontal = 12.dp, vertical = 10.dp), verticalAlignment = Alignment.CenterVertically) {
+                    SettingsAvatar(item.username, 36)
+                    Spacer(Modifier.width(12.dp))
+                    Text(item.username, Modifier.weight(1f), maxLines = 1,
+                        style = TextStyle(fontFamily = YoFont, fontSize = 22.sp, color = Color.Black))
+                    if (by == SignInWay.SAVED) CircularProgressIndicator(Modifier.size(22.dp), color = Color.Black, strokeWidth = 2.5.dp)
                 }
             }
-        }
-        Column(Modifier.fillMaxSize().safeDrawingPadding().imePadding().padding(horizontal = 24.dp)) {
-            IconButton(onClick = back, modifier = Modifier.size(48.dp)) {
-                Icon(Icons.AutoMirrored.Filled.ArrowBack, stringResource(R.string.ui_back))
+        } else if (looked) {
+            Box(Modifier.fillMaxWidth().heightIn(min = 44.dp).background(Color.White.copy(alpha = 0.16f), CircleShape)
+                .padding(horizontal = 16.dp, vertical = 10.dp), contentAlignment = Alignment.Center) {
+                Text(copy(ProductText.NO_SAVED_ACCOUNT), color = Color.White.copy(alpha = 0.85f), fontSize = 15.sp,
+                    fontWeight = FontWeight.SemiBold, textAlign = TextAlign.Center)
             }
-            Column(
-                Modifier.weight(1f).fillMaxWidth().verticalScroll(rememberScrollState()),
-                horizontalAlignment = Alignment.CenterHorizontally,
-            ) {
-                BrandText(stringResource(R.string.ui_recovery_key), 30, Modifier.padding(top = 24.dp))
-                Text(
-                    stringResource(R.string.ui_paste_type_or_scan_your_recovery_key),
-                    Modifier.padding(top = 10.dp, bottom = 14.dp),
-                    color = Color.White.copy(alpha = 0.85f), fontSize = 17.sp, textAlign = TextAlign.Center,
-                )
-                val placeholder = stringResource(R.string.ui_label_64_characters)
+        }
+        // As the welcome's "Got Yo? Sign In": the quiet question, then the action.
+        val keyLabel = stringResource(R.string.signin_use_a_key)
+        TextButton(
+            onClick = { opened = !open },
+            modifier = Modifier.clearAndSetSemantics {
+                contentDescription = keyLabel
+                role = androidx.compose.ui.semantics.Role.Button
+                onClick { opened = !open; true }
+            },
+            contentPadding = PaddingValues(0.dp),
+        ) {
+            val question = copy(ProductText.NOT_LISTED)
+            val questionStyle = TextStyle(fontSize = 15.sp, fontWeight = FontWeight.SemiBold, color = Color.White.copy(alpha = 0.85f))
+            Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                Text(question, Modifier.alignByBaseline(), style = questionStyle, maxLines = 1)
+                Text(copy(ProductText.USE_A_KEY), Modifier.alignByBaseline(),
+                    style = TextStyle(fontFamily = YoFont, fontSize = 18.sp, color = Color.White), maxLines = 1)
+                Text(question, Modifier.alignByBaseline().alpha(0f), style = questionStyle, maxLines = 1)
+            }
+        }
+        AnimatedVisibility(
+            open,
+            enter = if (still) EnterTransition.None else fadeIn() + expandVertically(),
+            exit = if (still) ExitTransition.None else fadeOut() + shrinkVertically(),
+        ) {
+            Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                Button(
+                    onClick = {
+                        start(SignInWay.PASSKEY) {
+                            try {
+                                val assertion = Passkeys.assert(context)
+                                repo.command { restorePasskey(assertion) }.join()
+                            } catch (cancelled: CancellationException) {
+                                throw cancelled
+                            } catch (failure: Exception) {
+                                model.error(failure.message ?: uiResources.getString(R.string.ui_use_your_recovery_key))
+                            }
+                        }
+                    },
+                    enabled = !busy, shape = CircleShape,
+                    modifier = Modifier.fillMaxWidth().heightIn(min = 52.dp),
+                    colors = ButtonDefaults.buttonColors(containerColor = Color.White, contentColor = Color.Black,
+                        disabledContainerColor = Color.White.copy(alpha = 0.4f), disabledContentColor = Color.Black.copy(alpha = 0.6f)),
+                ) {
+                    if (by == SignInWay.PASSKEY) CircularProgressIndicator(Modifier.size(22.dp), color = Color.Black, strokeWidth = 2.5.dp)
+                    else {
+                        Icon(Icons.Default.Key, contentDescription = null, modifier = Modifier.size(22.dp))
+                        Spacer(Modifier.width(8.dp))
+                        Text(copy(ProductText.PASSKEY), fontSize = 20.sp, fontWeight = FontWeight.SemiBold)
+                    }
+                }
+                Row(Modifier.clearAndSetSemantics {}, verticalAlignment = Alignment.CenterVertically) {
+                    HorizontalDivider(Modifier.weight(1f), color = Color.White.copy(alpha = 0.4f))
+                    Text(copy(ProductText.OR), Modifier.padding(horizontal = 10.dp), color = Color.White.copy(alpha = 0.7f),
+                        fontSize = 15.sp, fontWeight = FontWeight.SemiBold)
+                    HorizontalDivider(Modifier.weight(1f), color = Color.White.copy(alpha = 0.4f))
+                }
+                val placeholder = copy(ProductText.RECOVERY_KEY)
                 BasicTextField(
                     value = code,
-                    onValueChange = { code = it; repo.clearError() },
+                    onValueChange = { typed ->
+                        onCode(typed); keyProblem = null
+                        val key = parsedRecoveryKey(typed)
+                        if (key != null && key != tried) submit(key)
+                        else if (key == null && typed.count { it.isLetterOrDigit() } >= 64) keyProblem = mismatch
+                    },
                     modifier = Modifier.fillMaxWidth().semantics { contentDescription = placeholder },
-                    minLines = 3, maxLines = 5,
-                    textStyle = TextStyle(fontFamily = FontFamily.Monospace, fontSize = 18.sp,
+                    enabled = !busy,
+                    singleLine = true,
+                    textStyle = TextStyle(fontFamily = FontFamily.Monospace, fontSize = 17.sp,
                         fontWeight = FontWeight.SemiBold, color = Color.White),
                     cursorBrush = SolidColor(Color.White),
-                    keyboardOptions = KeyboardOptions(autoCorrectEnabled = false),
+                    keyboardOptions = KeyboardOptions(autoCorrectEnabled = false, capitalization = KeyboardCapitalization.None,
+                        keyboardType = KeyboardType.Ascii, imeAction = ImeAction.Go),
+                    keyboardActions = KeyboardActions(onGo = { submitTyped(code) }),
                     decorationBox = { field ->
-                        Box(Modifier.background(Color.White.copy(alpha = 0.14f), RoundedCornerShape(16.dp)).padding(14.dp)) {
-                            if (code.isEmpty()) Text(placeholder, fontSize = 18.sp, fontFamily = FontFamily.Monospace,
-                                color = Color.White.copy(alpha = 0.35f))
-                            field()
+                        Row(Modifier.heightIn(min = 52.dp).background(Color.White.copy(alpha = 0.14f), CircleShape)
+                            .padding(start = 18.dp, end = 6.dp), verticalAlignment = Alignment.CenterVertically) {
+                            Box(Modifier.weight(1f)) {
+                                if (code.isEmpty()) Text(placeholder, fontSize = 17.sp, fontWeight = FontWeight.SemiBold,
+                                    color = Color.White.copy(alpha = 0.45f), maxLines = 1)
+                                field()
+                            }
+                            when {
+                                by == SignInWay.KEY -> Box(Modifier.size(40.dp), contentAlignment = Alignment.Center) {
+                                    CircularProgressIndicator(Modifier.size(22.dp), color = Color.White, strokeWidth = 2.5.dp)
+                                }
+                                code.isNotEmpty() -> FilledIconButton(
+                                    onClick = { submitTyped(code) }, enabled = !busy, modifier = Modifier.size(40.dp),
+                                    colors = IconButtonDefaults.filledIconButtonColors(containerColor = Color.White, contentColor = Color.Black),
+                                ) { Icon(Icons.AutoMirrored.Filled.ArrowForward, copy(ProductText.SIGN_IN)) }
+                                else -> Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                                    KeyFieldButton(Icons.Default.PhotoCamera, stringResource(R.string.signin_scan)) { scanning = true }
+                                    KeyFieldButton(Icons.Default.Image, stringResource(R.string.signin_photo)) {
+                                        picker.launch(PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly))
+                                    }
+                                }
+                            }
                         }
                     },
                 )
-                Row(Modifier.fillMaxWidth().padding(top = 12.dp), horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-                    RecoveryAction(stringResource(R.string.recovery_scan_short), Icons.Default.QrCodeScanner, Modifier.weight(1f)) {
-                        scanning = true
-                    }
-                    RecoveryAction(stringResource(R.string.recovery_photos_short), Icons.Default.PhotoLibrary, Modifier.weight(1f)) {
-                        picker.launch(PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly))
-                    }
-                }
-            }
-            Column(Modifier.fillMaxWidth().padding(top = 12.dp, bottom = 16.dp), horizontalAlignment = Alignment.CenterHorizontally) {
-                OnboardingButton(copy(ProductText.SIGN_IN), !s.busy && code.isNotBlank()) {
-                    focusManager.clearFocus()
-                    repo.clearError()
-                    repo.command { restore(code) }
-                }
-                OnboardingNote(s.error)
             }
         }
+        OnboardingNote(keyProblem ?: s.error)
     }
-    if(scanning) QrScanner(onClose={scanning=false},onCode={code=it.text;scanning=false})
+}
+
+@Composable
+private fun KeyFieldButton(icon: androidx.compose.ui.graphics.vector.ImageVector, label: String, onClick: () -> Unit) {
+    FilledTonalIconButton(
+        onClick = onClick, modifier = Modifier.size(40.dp),
+        colors = IconButtonDefaults.filledTonalIconButtonColors(containerColor = Color.White.copy(alpha = 0.18f), contentColor = Color.White),
+    ) { Icon(icon, label, Modifier.size(20.dp)) }
 }
 @Composable fun FlatRow(title: String,color: Int,modifier: Modifier=Modifier,onClick: ()->Unit) {
     Box(modifier.fillMaxWidth().heightIn(min=BarHeight).background(RowColors[Math.floorMod(color,8)]).clickable(interactionSource=null,indication=null,onClick=onClick),contentAlignment=Alignment.Center) {
@@ -1031,22 +1143,6 @@ private fun OnboardingButton(label: String, enabled: Boolean, onClick: () -> Uni
 private fun OnboardingNote(message: String?) {
     if (message != null) Text(message, Modifier.padding(top = 8.dp), color = Color.White,
         fontSize = 13.sp, lineHeight = 18.sp, fontWeight = FontWeight.SemiBold, textAlign = TextAlign.Center)
-}
-
-@Composable
-private fun RecoveryAction(
-    label: String,
-    icon: androidx.compose.ui.graphics.vector.ImageVector,
-    modifier: Modifier,
-    onClick: () -> Unit,
-) {
-    Button(onClick = onClick, modifier = modifier.heightIn(min = 48.dp), shape = CircleShape,
-        contentPadding = PaddingValues(horizontal = 10.dp, vertical = 8.dp),
-        colors = ButtonDefaults.buttonColors(containerColor = Color.White.copy(alpha = 0.2f), contentColor = Color.White)) {
-        Icon(icon, contentDescription = null, modifier = Modifier.size(18.dp))
-        Spacer(Modifier.width(6.dp))
-        Text(label, fontSize = 15.sp, fontWeight = FontWeight.SemiBold)
-    }
 }
 
 /** A name field's text. A Japanese keyboard hands the field kana and full-width letters while a word is written ("i"

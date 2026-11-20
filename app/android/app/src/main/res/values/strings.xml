@@ -17,14 +17,12 @@
     <string name="ui_group_name">Group Name</string>
     <string name="ui_invite">Invite</string>
     <string name="ui_invite_friends">Invite Friends</string>
-    <string name="ui_label_64_characters">64 characters</string>
     <string name="ui_members">Members</string>
     <string name="group_member_limit">Members · %1$d of 20</string>
     <string name="find_group_friends">Find Friends</string>
     <string name="ui_montserrat_sil_open_font_license_androidx_kotlin_jna_okhttp_">Montserrat: SIL Open Font License. AndroidX, Kotlin, JNA, OkHttp, ZXing: see bundled notices.</string>
     <string name="ui_name">Name</string>
     <string name="ui_no">No</string>
-    <string name="ui_paste_type_or_scan_your_recovery_key">Paste, type, or scan your recovery key.</string>
     <string name="ui_remove">Remove</string>
     <string name="ui_rename">Rename</string>
     <string name="ui_save_image">Save Image…</string>
@@ -37,8 +35,6 @@
     <string name="ui_this_version_of_yo_no_longer_works_install_a_newer_build_to_">This version of Yo no longer works. Install a newer build to keep sending Yos.</string>
     <string name="ui_unblock">Unblock</string>
     <string name="ui_update_yo">Update Yo</string>
-    <string name="ui_use_passkey">Use Passkey</string>
-    <string name="ui_use_recovery_key">Use Recovery Key</string>
     <string name="ui_yo_is_mit_licensed_this_app_includes_libsignal_licensed_unde">Yo is MIT licensed. This app includes libsignal, licensed under AGPL-3.0. Complete corresponding source: this repository, including the uncommitted Android changes for this development build.</string>
     <string name="ui_yo_team">Yo Team</string>
     <string name="ui_you_won_t_get_its_yos_any_more_a_member_can_add_you_again">You won’t get its Yos any more. A member can add you again.</string>
@@ -61,7 +57,6 @@
     <string name="ui_back">Back</string>
     <string name="ui_recovery_key">Recovery Key</string>
     <string name="ui_we_couldn_t_read_a_recovery_key_from_this_photo">We couldn’t read a recovery key from this photo.</string>
-    <string name="ui_couldn_t_read_photo">Couldn’t read photo</string>
     <string name="ui_use_your_recovery_key">Use your recovery key.</string>
     <string name="ui_qr_code">QR code</string>
     <string name="ui_recovery_key_missing">Recovery key missing</string>
@@ -217,8 +212,6 @@
     <string name="passkey_prf_required">This passkey provider did not return a backup key. Use a provider that supports PRF or use your recovery key.</string>
     <string name="ui_add_friends">Add Friends</string>
     <string name="clear_selection">Clear Selection</string>
-    <string name="recovery_scan_short">Scan</string>
-    <string name="recovery_photos_short">Photos</string>
     <string name="share_selected_media">Tap a name to send selected media</string>
     <string name="settings_delete_your_account">Delete Your Account</string>
     <string name="settings_turn_off_passkey">Turn Off Passkey?</string>
@@ -298,4 +291,8 @@
     <string name="code_share_text">Yo me on Yo: %1$s</string>
     <string name="record_video">Record Video</string>
     <string name="stop_and_send_video">Stop and Send Video</string>
+    <string name="signin_as">Sign in as %1$s</string>
+    <string name="signin_use_a_key">Not listed? Use a key: passkey or recovery key</string>
+    <string name="signin_scan">Scan recovery key</string>
+    <string name="signin_photo">Choose recovery key photo</string>
 </resources>

@@ -157,12 +157,16 @@ class Run:
 
     def recovery(self):
         self.screen("welcome", "Sign Up")
-        self.visit("sign-in", "Got Yo?", "Use Passkey")
-        self.visit("recovery-key", "Use Recovery Key", "Recovery Key")
-        self.phone.tap("64 characters")
+        self.visit("sign-in", "Got Yo?", "Not listed?")
+        # Closed while a saved account is listed: "Not listed? Use a Key" opens the passkey and the key field.
+        if not any(node.get("text") == "Passkey" for node in self.phone.nodes()):
+            self.phone.tap("Not listed?")
+        self.screen("recovery-key", "Passkey")
+        self.phone.tap("Recovery Key")
         self.phone.input("text", "invalidkey")
         self.screen("recovery-typing", "invalidkey")
-        self.phone.tap("Sign In")
+        # The field's own submit button (the card's title says Sign In too, as text).
+        self.phone.tap_node(next(node for node in self.phone.nodes() if node.get("content-desc") == "Sign In"))
         self.screen("recovery-error", "That doesn’t match a recovery key")
 
     def onboarding(self, account):

@@ -87,6 +87,13 @@ copy! {
     SignUp => ("Sign Up", "Registrieren"),
     SignIn => ("Sign In", "Anmelden"),
     GotYo => ("Got Yo?", "Schon bei Yo?"),
+    NotListed => ("Not listed?", "Nicht dabei?"),
+    UseAKey => ("Use a Key", "Schlüssel verwenden"),
+    NoAccountInICloud => ("No account found in iCloud", "Kein Konto in iCloud gefunden"),
+    NoSavedAccount => ("No saved account found", "Kein gespeichertes Konto gefunden"),
+    Passkey => ("Passkey", "Passkey"),
+    RecoveryKey => ("Recovery Key", "Wiederherstellungsschlüssel"),
+    Or => ("or", "oder"),
     Username => ("Username", "Benutzername"),
     NameTaken => ("Name taken. Yours?", "Name vergeben. Deiner?"),
     NameTakenLabel => ("Name taken. Sign In if it’s yours", "Name vergeben. Melde dich an, wenn es deiner ist"),
@@ -476,6 +483,10 @@ mod tests {
         assert_eq!(Text::NameTaken.get(German), "Name vergeben. Deiner?");
         assert_eq!(Text::LongerName.get(English), "Choose a longer name.");
         assert_eq!(Text::SignIn.get(German), "Anmelden");
+        assert_eq!(Text::UseAKey.get(English), "Use a Key");
+        assert_eq!(Text::NotListed.get(English), "Not listed?");
+        assert_eq!(Text::NoAccountInICloud.get(English), "No account found in iCloud");
+        assert_eq!(Text::Or.get(German), "oder");
         assert_eq!(Text::ThatsYou.get(English), "That’s You");
         assert_eq!(Text::NoSuchUser.get(English), "No Such User");
         assert_eq!(invited_you("Mia", English), "Mia invited you");

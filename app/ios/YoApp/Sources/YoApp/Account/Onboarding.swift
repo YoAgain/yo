@@ -10,7 +10,7 @@ struct Onboarding: View {
   @Environment(Inbox.self) private var inbox
 
   private enum Step: Equatable {
-    case welcome, logIn, logInWithWords
+    case welcome, logIn
   }
 
   /// Set by Sign Out for this run only: the welcome then shows the Sign In card instead of signing in again.
@@ -32,6 +32,8 @@ struct Onboarding: View {
   @State private var checked: [String: Bool] = [:]
   @State private var signingIn: Data?
   @State private var signingInCard = false
+  /// Which of the card's other ways is signing in now: its spinner.
+  @State private var signingInBy: SignInCard.Way?
   /// The carousel's height, and the room it gets above the form (less with the keyboard up).
   @State private var introHeight = 0.0
   @State private var introRoom = 0.0
@@ -39,14 +41,7 @@ struct Onboarding: View {
   var body: some View {
     ZStack {
       Color.amethyst.ignoresSafeArea()
-      Group {
-        switch step {
-        case .welcome, .logIn: welcome
-        case .logInWithWords: LogIn { go(.logIn) }
-        }
-      }
-      .transition(.asymmetric(insertion: .move(edge: .trailing).combined(with: .opacity),
-        removal: .move(edge: .leading).combined(with: .opacity)))
+      welcome
     }
     .foregroundStyle(.white)
     .animation(.smooth(duration: 0.35), value: step)
@@ -173,16 +168,14 @@ struct Onboarding: View {
     }
   }
 
-  /// Sign In as a small card over the welcome: iCloud Keychain accounts to tap, then passkey and recovery key.
+  /// Sign In as a small card over the welcome: iCloud Keychain accounts to tap; under "Use a Key" the passkey and
+  /// the recovery key.
   private var signInCard: some View {
     SignInCard(
-      busy: busy, signingIn: signingIn, problem: problem,
+      busy: busy, signingIn: signingIn, signingInBy: signingInBy, problem: problem,
       logIn: { item in Task { await logIn(item) } },
       passkey: { Task { await logInWithPasskey() } },
-      recoveryKey: {
-        signingInCard = false
-        go(.logInWithWords)
-      })
+      recoveryKey: { code in Task { await logIn(code: code) } })
   }
 
   // MARK: Doing
@@ -263,9 +256,31 @@ struct Onboarding: View {
     }
   }
 
-  private func logInWithPasskey() async {
+  /// The recovery key, already parsed by the card (`RecoveryCode.parse`).
+  private func logIn(code: String) async {
+    guard !busy else { return }
     busy = true
-    defer { busy = false }
+    signingInBy = .recoveryKey
+    defer {
+      busy = false
+      signingInBy = nil
+    }
+    problem = nil
+    do {
+      try await accounts.restore(code: code)
+    } catch {
+      problem = error.localizedDescription
+    }
+  }
+
+  private func logInWithPasskey() async {
+    guard !busy else { return }
+    busy = true
+    signingInBy = .passkey
+    defer {
+      busy = false
+      signingInBy = nil
+    }
     problem = nil
     do {
       try await accounts.restoreWithPasskey()
@@ -472,86 +487,6 @@ struct KeyGrid: View {
   }
 }
 
-/// Sign In by recovery key: pasted, typed, or read from the card's QR code by camera or from Photos.
-private struct LogIn: View {
-  let back: () -> Void
-  @Environment(AccountStore.self) private var accounts
-  @State private var words = ""
-  @State private var problem: String?
-  @State private var scanning = false
-  @State private var picked: _PhotosUI_SwiftUI.PhotosPickerItem?
-  @State private var busy = false
-  @FocusState private var focused: Bool
-
-  var body: some View {
-    Page(title: "Recovery Key", message: "Paste, type, or scan your recovery key.", back: back) {
-      TextField("", text: $words, prompt: Text("64 characters").foregroundStyle(.white.opacity(0.35)), axis: .vertical)
-        .font(.system(size: 18, weight: .semibold, design: .monospaced))
-        .lineLimit(3...5)
-        .tint(.white)
-        .textInputAutocapitalization(.never)
-        .autocorrectionDisabled()
-        .padding(14)
-        .background(.white.opacity(0.14), in: .rect(cornerRadius: 16))
-        .focused($focused)
-        .onAppear { focused = true }
-      HStack(spacing: 12) {
-        if QRScanner.isAvailable {
-          Button { scanning = true } label: {
-            Label("Scan", systemImage: "qrcode.viewfinder").font(.subheadline.weight(.semibold))
-              .frame(maxWidth: .infinity, minHeight: 30)
-          }
-          .buttonStyle(.glass)
-        }
-        PhotosPicker(selection: $picked, matching: .images) {
-          Label("Photos", systemImage: "photo").font(.subheadline.weight(.semibold))
-            .frame(maxWidth: .infinity, minHeight: 30)
-        }
-        .buttonStyle(.glass)
-      }
-    } bottom: {
-      PrimaryButton(ProductText.signIn.english, busy: busy, action: logIn)
-        .disabled(words.isEmpty || busy)
-      Note(problem)
-    }
-    .sheet(isPresented: $scanning) {
-      QRScanner { text in
-        scanning = false
-        words = text
-        logIn()
-      }
-      .ignoresSafeArea()
-    }
-    .onChange(of: picked) { _, item in
-      guard let item else { return }
-      Task {
-        guard let data = try? await item.loadTransferable(type: Data.self), let image = UIImage(data: data),
-          let text = RecoveryQR.read(image)
-        else { return problem = "We couldn’t read a recovery key from this photo. Try another photo or enter the key." }
-        words = text
-        logIn()
-      }
-    }
-  }
-
-  private func logIn() {
-    guard let code = RecoveryCode.parse(words) else {
-      return problem = "That doesn’t match a recovery key. Check it and try again."
-    }
-    guard !busy else { return }
-    busy = true
-    problem = nil
-    Task {
-      defer { busy = false }
-      do {
-        try await accounts.restore(code: code)
-      } catch {
-        problem = error.localizedDescription
-      }
-    }
-  }
-}
-
 struct RecoveryCard: View {
   let name: String
   let key: String
@@ -591,58 +526,87 @@ struct RecoveryCard: View {
   }
 }
 
-/// Its own view with its own list: a sheet does not reliably redraw from its presenter's state.
+/// One card (design J): the iCloud Keychain accounts as white capsules, or a notice that there is none; under "Not
+/// listed? Use a Key" the passkey and a recovery key field, which signs in once it holds a whole key. Its own view with
+/// its own list: a sheet does not reliably redraw from its presenter's state.
 private struct SignInCard: View {
+  enum Way { case passkey, recoveryKey }
+
   let busy: Bool
   let signingIn: Data?
+  let signingInBy: Way?
   let problem: String?
   let logIn: (SyncedAccount.Item) -> Void
   let passkey: () -> Void
-  let recoveryKey: () -> Void
+  /// A parsed recovery key (`RecoveryCode.parse`).
+  let recoveryKey: (String) -> Void
+  @Environment(\.accessibilityReduceMotion) private var reduceMotion
   @State private var synced: [SyncedAccount.Item] = SyncedAccount.all()
   @State private var removing: SyncedAccount.Item?
   @State private var height: CGFloat = 300
+  /// Opened or closed by hand; until then open only without an account.
+  @State private var opened: Bool?
+  @State private var words = ""
+  /// The last key tried, so a refused one is not tried again on each change.
+  @State private var tried: String?
+  @State private var keyProblem: String?
+  @State private var scanning = false
+  @State private var picked: _PhotosUI_SwiftUI.PhotosPickerItem?
+
+  private var open: Bool { opened ?? synced.isEmpty }
+  private var motion: Animation? { reduceMotion ? nil : .smooth(duration: 0.35) }
 
   var body: some View {
-    VStack(spacing: 14) {
+    VStack(spacing: 12) {
       Text(ProductText.signIn.english)
         .font(.yo(28))
         .padding(.top, 28)
-      if !synced.isEmpty {
-        VStack(spacing: 10) {
-          ForEach(synced) { item in
-            Button { logIn(item) } label: {
-              HStack(spacing: 12) {
-                Avatar(name: item.username, size: 36)
-                Text(item.username).font(.yo(20)).lineLimit(1).foregroundStyle(.white)
-                Spacer(minLength: 0)
-                if signingIn == item.userId {
-                  ProgressView().tint(.white)
-                }
-              }
-              .padding(.horizontal, 14)
-              .frame(maxWidth: .infinity, minHeight: 56)
-              .background(.white.opacity(0.16), in: .capsule)
-              .contentShape(.capsule)
-            }
-            .buttonStyle(.plain)
-            .disabled(busy)
-            .accessibilityLabel("Sign In as \(item.username)")
-            .contextMenu {
-              Button("Remove from iCloud Keychain", systemImage: "trash", role: .destructive) { removing = item }
-            }
-            .accessibilityAction(named: "Remove from iCloud Keychain") { removing = item }
-          }
-        }
-        Text("or").font(.yo(17)).opacity(0.75)
+        .padding(.bottom, 2)
+      if synced.isEmpty {
+        Text(ProductText.noAccountInICloud.english)
+          .font(.subheadline.weight(.semibold))
+          .multilineTextAlignment(.center)
+          .opacity(0.85)
+          .padding(.horizontal, 16)
+          .frame(maxWidth: .infinity, minHeight: 44)
+          .background(.white.opacity(0.16), in: .capsule)
       } else {
-        Color.clear.frame(height: 18)
+        ForEach(synced) { account($0) }
       }
-      PrimaryButton("Use Passkey", busy: busy) { passkey() }
-        .disabled(busy)
-      Button("Use Recovery Key") { recoveryKey() }
-        .font(.yo(17))
-      Note(problem)
+      Button {
+        withAnimation(motion) { opened = !open }
+      } label: {
+        // As the welcome's "Got Yo? Sign In": the quiet question, then the action.
+        HStack(alignment: .firstTextBaseline, spacing: 6) {
+          Text(ProductText.notListed.english).font(.system(size: 15, weight: .semibold))
+            .foregroundStyle(.white.opacity(0.85))
+          Text(ProductText.useAKey.english).font(.yo(18))
+        }
+        .lineLimit(1)
+        .fixedSize()
+        .frame(minHeight: 36)
+        .contentShape(.rect)
+      }
+      .buttonStyle(.plain)
+      .accessibilityElement(children: .ignore)
+      .accessibilityLabel("Not listed? Use a key: passkey or recovery key")
+      .accessibilityAddTraits(.isButton)
+      .accessibilityValue(open ? "Expanded" : "Collapsed")
+      .accessibilityHint(open ? "Collapses" : "Expands")
+      if open {
+        VStack(spacing: 12) {
+          passkeyButton
+          HStack(spacing: 10) {
+            line
+            Text(ProductText.or.english).font(.subheadline.weight(.semibold)).opacity(0.7)
+            line
+          }
+          .accessibilityHidden(true)
+          keyField
+        }
+        .transition(reduceMotion ? .opacity : .opacity.combined(with: .move(edge: .top)))
+      }
+      Note(keyProblem ?? problem)
     }
     .padding(.horizontal, 24)
     .padding(.bottom, 12)
@@ -655,7 +619,36 @@ private struct SignInCard: View {
     .task {
       for _ in 0..<5 where synced.isEmpty {
         try? await Task.sleep(for: .milliseconds(300))
-        synced = SyncedAccount.all()
+        let found = SyncedAccount.all()
+        if !found.isEmpty { withAnimation(motion) { synced = found } }
+      }
+    }
+    .onChange(of: words) { _, typed in
+      keyProblem = nil
+      // A whole key signs in by itself; one that only looks whole says so.
+      if let code = RecoveryCode.parse(typed) {
+        if code != tried { submit(code) }
+      } else if typed.filter({ $0.isASCII && ($0.isLetter || $0.isNumber) }).count >= 64 {
+        keyProblem = Self.mismatch
+      }
+    }
+    .sheet(isPresented: $scanning) {
+      QRScanner { text in
+        scanning = false
+        words = text
+        submitTyped()
+      }
+      .ignoresSafeArea()
+    }
+    .onChange(of: picked) { _, item in
+      guard let item else { return }
+      picked = nil
+      Task {
+        guard let data = try? await item.loadTransferable(type: Data.self), let image = UIImage(data: data),
+          let text = RecoveryQR.read(image)
+        else { return keyProblem = "We couldn’t read a recovery key from this photo. Try another photo or enter the key." }
+        words = text
+        submitTyped()
       }
     }
     .alert(
@@ -665,7 +658,7 @@ private struct SignInCard: View {
       Button("Remove", role: .destructive) {
         if let item = removing {
           SyncedAccount.delete(item.userId)
-          withAnimation(.smooth) { synced = SyncedAccount.all() }
+          withAnimation(motion) { synced = SyncedAccount.all() }
         }
         removing = nil
       }
@@ -677,5 +670,123 @@ private struct SignInCard: View {
     .presentationBackground(Color.amethyst)
     .presentationDragIndicator(.hidden)
     .preferredColorScheme(.dark)
+  }
+
+  private static let mismatch = "That doesn’t match a recovery key. Check it and try again."
+
+  private func account(_ item: SyncedAccount.Item) -> some View {
+    Button { logIn(item) } label: {
+      HStack(spacing: 12) {
+        Avatar(name: item.username, size: 36)
+        Text(item.username).font(.yo(22)).lineLimit(1).foregroundStyle(.black)
+        Spacer(minLength: 0)
+        if signingIn == item.userId {
+          ProgressView().tint(.black)
+        }
+      }
+      .padding(.horizontal, 12)
+      .frame(maxWidth: .infinity, minHeight: 56)
+      .background(.white, in: .capsule)
+      .contentShape(.capsule)
+    }
+    .buttonStyle(.plain)
+    .disabled(busy)
+    .accessibilityLabel("Sign in as \(item.username)")
+    .contextMenu {
+      Button("Remove from iCloud Keychain", systemImage: "trash", role: .destructive) { removing = item }
+    }
+    .accessibilityAction(named: "Remove from iCloud Keychain") { removing = item }
+  }
+
+  private var passkeyButton: some View {
+    Button {
+      keyProblem = nil
+      passkey()
+    } label: {
+      Group {
+        if signingInBy == .passkey {
+          ProgressView()
+        } else {
+          Label(ProductText.passkey.english, systemImage: "person.badge.key")
+            .font(.system(.title3, weight: .semibold))
+        }
+      }
+      .frame(maxWidth: .infinity, minHeight: 40)
+    }
+    .buttonStyle(.glassProminent)
+    .tint(.white)
+    .foregroundStyle(.black)
+    .disabled(busy)
+  }
+
+  private var line: some View {
+    Rectangle().fill(.white.opacity(0.4)).frame(height: 1)
+  }
+
+  /// One line: paste or type, scan, or a photo of the card; with text in it, a button to sign in.
+  private var keyField: some View {
+    HStack(spacing: 6) {
+      TextField(
+        "", text: $words,
+        prompt: Text(ProductText.recoveryKey.english).font(.body.weight(.semibold))
+          .foregroundStyle(.white.opacity(0.45)))
+        .font(.system(.body, design: .monospaced, weight: .semibold))
+        .lineLimit(1)
+        .tint(.white)
+        .textInputAutocapitalization(.never)
+        .autocorrectionDisabled()
+        .keyboardType(.asciiCapable)
+        .submitLabel(.go)
+        .onSubmit(submitTyped)
+        .accessibilityLabel(ProductText.recoveryKey.english)
+        .padding(.leading, 18)
+      if signingInBy == .recoveryKey {
+        ProgressView().tint(.white).frame(width: 36, height: 36)
+      } else if !words.isEmpty {
+        Button(action: submitTyped) {
+          Image(systemName: "arrow.right")
+            .font(.body.weight(.bold))
+            .foregroundStyle(.black)
+            .frame(width: 36, height: 36)
+            .background(.white, in: .circle)
+            .contentShape(.circle)
+        }
+        .buttonStyle(.plain)
+        .disabled(busy)
+        .accessibilityLabel(ProductText.signIn.english)
+      } else {
+        if QRScanner.isAvailable {
+          Button { scanning = true } label: {
+            Image(systemName: "camera").font(.body.weight(.semibold)).frame(width: 36, height: 36)
+          }
+          .buttonStyle(.plain)
+          .glassEffect(.regular.interactive(), in: .circle)
+          .accessibilityLabel("Scan recovery key")
+        }
+        PhotosPicker(selection: $picked, matching: .images) {
+          Image(systemName: "photo").font(.body.weight(.semibold)).frame(width: 36, height: 36)
+        }
+        .buttonStyle(.plain)
+        .glassEffect(.regular.interactive(), in: .circle)
+        .accessibilityLabel("Choose recovery key photo")
+      }
+    }
+    .padding(.trailing, 6)
+    .frame(minHeight: 48)
+    .background(.white.opacity(0.14), in: .capsule)
+    .disabled(busy)
+  }
+
+  /// The field's text as it is: a key signs in, anything else says it does not match.
+  private func submitTyped() {
+    guard let code = RecoveryCode.parse(words) else { return keyProblem = Self.mismatch }
+    submit(code)
+  }
+
+  private func submit(_ code: String) {
+    guard !busy else { return }
+    tried = code
+    keyProblem = nil
+    recoveryKey(code)
   }
 }
