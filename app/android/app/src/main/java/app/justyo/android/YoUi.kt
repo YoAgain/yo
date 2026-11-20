@@ -42,6 +42,7 @@ import androidx.compose.ui.text.style.TextDecoration
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.ui.semantics.clearAndSetSemantics
 import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.customActions
 import androidx.compose.ui.semantics.onClick
 import androidx.compose.ui.semantics.role
 import androidx.compose.ui.semantics.semantics
@@ -1137,7 +1138,20 @@ internal class RowActions {
     val dismiss = rememberSwipeToDismissBoxState(confirmValueChange={ value ->
         if(value==SwipeToDismissBoxValue.EndToStart) { actions.remove(friend);false } else true
     })
-    SwipeToDismissBox(state=dismiss,enableDismissFromStartToEnd=false,enableDismissFromEndToStart=!cameraOn && recording==null && !friend.request,
+    val res = androidx.compose.ui.platform.LocalResources.current
+    // As iOS's bar actions: filming without holding, and the menu's and swipe's actions for screen readers.
+    val a11y = Modifier.semantics {
+        customActions = buildList {
+            if (holdable) add(androidx.compose.ui.semantics.CustomAccessibilityAction(
+                res.getString(if (recording == friend.key) R.string.stop_and_send_video else R.string.record_video)) {
+                actions.hold(friend, recording != friend.key); true })
+            if (!cameraOn && !friend.request) {
+                add(androidx.compose.ui.semantics.CustomAccessibilityAction(res.getString(R.string.contact_actions)) { actions.menu(friend); true })
+                add(androidx.compose.ui.semantics.CustomAccessibilityAction(res.getString(R.string.ui_remove)) { actions.remove(friend); true })
+            }
+        }
+    }
+    SwipeToDismissBox(modifier=a11y,state=dismiss,enableDismissFromStartToEnd=false,enableDismissFromEndToStart=!cameraOn && recording==null && !friend.request,
         backgroundContent = {
             // Drawn only while the bar is swiped: otherwise every frame painted it under each bar.
             val swiping by remember(dismiss) { derivedStateOf { dismiss.dismissDirection != SwipeToDismissBoxValue.Settled } }

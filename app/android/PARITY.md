@@ -55,7 +55,7 @@ Still different, by decision or not yet done:
   last activity on a right swipe, and lets requests be swiped.
 - App Icon: three icons (iOS five: OG 2014 and 2015 need their launcher assets).
 - Long videos from the library are cut to ten seconds; iOS opens a trimmer.
-- Accessibility custom actions on bars (Record Video, Block, Trash) are missing.
+
 - One "Can't Open Your Account" screen; iOS tells "Server Not Reachable" (Try Again) apart.
 - Unread support replies have no badge yet.
 - Group notice sentences and group limits are written in both apps, not in the core.

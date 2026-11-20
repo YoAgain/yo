@@ -296,4 +296,6 @@
     <string name="code_wants_to_yo">%1$s wants to Yo</string>
     <string name="share_your_code">Share Your Code</string>
     <string name="code_share_text">Yo me on Yo: %1$s</string>
+    <string name="record_video">Record Video</string>
+    <string name="stop_and_send_video">Stop and Send Video</string>
 </resources>
