@@ -35,7 +35,7 @@ use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::{SystemTime, UNIX_EPOCH};
 use tokio::sync::{Notify, Semaphore};
-use yo_wire::{api, hubsig, limits, DeviceId};
+use yo_wire::{api, hubsig, limits, DeviceId, UserId};
 
 pub use mail::INBOX_AT_ONCE;
 pub use request::READING_AT_ONCE;
@@ -46,8 +46,9 @@ use {
     axum::extract::ConnectInfo,
     axum::http::StatusCode,
     bytes::Bytes,
+    db::Delivered,
     db::{NewDevice, Write},
-    request::held,
+    request::{held, Signed},
     std::time::Duration,
 };
 
@@ -88,11 +89,16 @@ pub(crate) enum Event {
     Http5xx,
     /// An account deleted (by its device, or by the operator).
     AccountGone,
+    /// A Yo from the server's own services (loopback, `Hub::own_service`) or a bot account (`Config::bots`): the
+    /// operator's bots, out of `yo-in` and the live strip (a stopgap).
+    BotYo,
+    /// A blob a bot account uploaded, out of `media-in` (also counted per bot, `bot-media:LABEL`).
+    BotMedia,
 }
 
 impl Event {
     /// The kinds as stored, in the order of the variants.
-    const KINDS: [&str; 18] = [
+    const KINDS: [&str; 20] = [
         "yo-in",
         "yo-out",
         "media-in",
@@ -111,6 +117,8 @@ impl Event {
         "http-429",
         "http-5xx",
         "account-gone",
+        "bot-yo",
+        "bot-media",
     ];
 
     /// The latency bucket of a Yo acknowledged `ms` after it was accepted.
@@ -148,6 +156,8 @@ pub struct Hub {
     /// Events since the last flush, a count per kind only (6.6): into `events` (and `yo-in`, `yo-in-bot` also into
     /// `deliveries_hourly`) once a minute.
     events: [AtomicU64; Event::KINDS.len()],
+    /// The blobs each bot account (`Config::bots`, in its order) uploaded since the last flush: `bot-media:LABEL`.
+    bot_media: Vec<AtomicU64>,
     /// Each Yo (`yo-in`, `media-in`; bots left out) the moment it is counted, for the operator's live strip
     /// (`/v1/admin/live`): its kind only, nothing of who. Bounded: a stream that falls behind skips what it missed.
     live: tokio::sync::broadcast::Sender<Event>,
@@ -213,6 +223,7 @@ impl Hub {
             zk,
             deliveries,
             events: Default::default(),
+            bot_media: config.bots.iter().map(|_| AtomicU64::new(0)).collect(),
             live: tokio::sync::broadcast::channel(LIVE_QUEUE).0,
             closing: tokio::sync::watch::channel(false).0,
             waiting: Mutex::default(),
@@ -352,18 +363,32 @@ impl Hub {
         }
     }
 
-    /// A blob of `size` bytes uploaded: one more `media-in`, and its bytes into `media-in-bytes`.
-    pub(crate) fn count_upload(&self, size: u64) {
+    /// A blob of `size` bytes uploaded by `user`: one more `media-in`, and its bytes into `media-in-bytes`; a bot
+    /// account's into `bot-media` and its own `bot-media:LABEL` instead.
+    pub(crate) fn count_upload(&self, user: &UserId, size: u64) {
+        if let Some(bot) = self.bot(user) {
+            self.count(Event::BotMedia, 1);
+            self.bot_media[bot].fetch_add(1, Ordering::Relaxed);
+            return;
+        }
         self.count(Event::MediaIn, 1);
         self.count(Event::MediaInBytes, size);
     }
 
+    /// Which of the operator's bot accounts `user` is (`Config::bots`): no limits per device or user, counted apart.
+    pub(crate) fn bot(&self, user: &UserId) -> Option<usize> {
+        self.config.bots.iter().position(|(_, id)| id == user)
+    }
+
     /// The events counted since the last flush into `events` at `now`'s minute; deliveries also into their hour.
     pub fn flush_events(&self, now: u64) -> rusqlite::Result<()> {
-        let counts: Vec<_> = Event::KINDS
+        let bots: Vec<_> = self.config.bots.iter().map(|(label, _)| format!("bot-media:{label}")).collect();
+        let counts: Vec<(&str, u64)> = Event::KINDS
             .iter()
+            .copied()
             .zip(&self.events)
-            .map(|(kind, n)| (*kind, n.swap(0, Ordering::Relaxed)))
+            .chain(bots.iter().map(String::as_str).zip(&self.bot_media))
+            .map(|(kind, n)| (kind, n.swap(0, Ordering::Relaxed)))
             .filter(|(_, n)| *n > 0)
             .collect();
         // Deliveries per hour count every Yo, a bot's too.
@@ -753,8 +778,8 @@ mod tests {
     #[test]
     fn an_upload_counts_one_blob_and_its_bytes() {
         let hub = Hub::new(Config::for_tests(), Arc::new(push::Recorder::default())).unwrap();
-        hub.count_upload(1000);
-        hub.count_upload(24);
+        hub.count_upload(&[1; 16], 1000);
+        hub.count_upload(&[1; 16], 24);
         hub.flush_events(120_000).unwrap();
         let counted: Vec<(String, i64, i64)> = hub
             .db
@@ -849,7 +874,9 @@ mod tests {
         let envelope = Bytes::from(sealed);
         let devices_hash = yo_wire::devices::hash(&[1; 32], &[[1; 32]]);
         let runtime = tokio::runtime::Handle::current();
-        hub.deliveries.send(Delivery { user: [1; 16], devices_hash, envelope, urgent: true, stored, runtime }).unwrap();
+        hub.deliveries
+            .send(Delivery { user: [1; 16], devices_hash, envelope, urgent: true, from_bot: false, stored, runtime })
+            .unwrap();
         tokio::time::timeout(Duration::from_secs(5), notified).await.expect("its long poll answers");
         assert_eq!(hub.db.fetch(&[1; 16], 10).unwrap().len(), 1);
         let until = std::time::Instant::now() + Duration::from_secs(5);
@@ -858,6 +885,40 @@ mod tests {
             tokio::time::sleep(Duration::from_millis(10)).await;
         }
         assert!(recorder.sent.lock().unwrap()[0].url.ends_with("/3/device/a1b2c3"));
+
+        // One from the operator's bots: stored the same, counted as `bot-yo`, not `yo-in`.
+        let (stored, outcome) = tokio::sync::oneshot::channel();
+        let mut sealed = vec![1; 1024];
+        sealed[0] = yo_wire::envelope::SEALED;
+        let (envelope, runtime) = (Bytes::from(sealed), tokio::runtime::Handle::current());
+        hub.deliveries
+            .send(Delivery { user: [1; 16], devices_hash, envelope, urgent: true, from_bot: true, stored, runtime })
+            .unwrap();
+        assert!(matches!(outcome.await.unwrap(), Ok(Delivered::Stored(_))));
+        let yos: Vec<_> = counted(&hub).into_iter().filter(|(kind, _)| kind.contains("yo")).collect();
+        assert_eq!(yos, kinds(&[("bot-yo", 1), ("yo-in", 1)]));
+    }
+
+    /// The operator's bot accounts (`YO_BOT_ACCOUNTS`): no limit per device or user, their uploads counted apart.
+    #[test]
+    fn bot_accounts_are_not_limited_and_counted_apart() {
+        let config = Config { bots: vec![("YoGPT".into(), [5; 16]), ("PING".into(), [6; 16])], ..Config::for_tests() };
+        let hub = Hub::new(config, Arc::new(push::Recorder::default())).unwrap();
+        let (bot, person) =
+            (Signed { device_id: [1; 16], user_id: [5; 16] }, Signed { device_id: [2; 16], user_id: [7; 16] });
+        for _ in 0..3 {
+            assert!(hub.limit_signed(&bot, "lookup", &bot.device_id, 1, DAY).is_ok());
+        }
+        assert!(hub.limit_signed(&person, "lookup", &person.device_id, 1, DAY).is_ok());
+        assert!(hub.limit_signed(&person, "lookup", &person.device_id, 1, DAY).is_err(), "a person's limit holds");
+        assert_eq!((hub.bot(&[5; 16]), hub.bot(&[6; 16]), hub.bot(&[7; 16])), (Some(0), Some(1), None));
+        hub.count_upload(&[5; 16], 1000);
+        hub.count_upload(&[5; 16], 1000);
+        hub.count_upload(&[6; 16], 1000);
+        hub.count_upload(&[7; 16], 24);
+        let rows =
+            [("bot-media", 3), ("bot-media:PING", 1), ("bot-media:YoGPT", 2), ("media-in", 1), ("media-in-bytes", 24)];
+        assert_eq!(counted(&hub), kinds(&rows));
     }
 
     #[tokio::test]

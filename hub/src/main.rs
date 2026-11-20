@@ -120,6 +120,7 @@ fn config() -> Result<(Config, String), String> {
         hub_key: read_hub_key(&required("YO_HUB_KEY_FILE")?)?,
         server_certificate: bytes("YO_SERVER_CERT_FILE")?,
         zk_params: bytes("YO_ZK_PARAMS_FILE")?,
+        bots: var("YO_BOT_ACCOUNTS").map(|text| yo_hub::config::parse_bots(&text)).transpose()?.unwrap_or_default(),
     };
     Ok((config, var("YO_LISTEN").unwrap_or_else(|| "127.0.0.1:8080".into())))
 }

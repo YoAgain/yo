@@ -99,6 +99,12 @@ Spec 6.3 lists the same routes, without `/` and the apple-app-site-association f
   `CF-Connecting-IP` is the server itself (YoGPT, speaking for many users from one address) and is exempt from the
   per-address limits (not from the per-device and per-user ones, nor the disk floor). Anything on the server that
   can be made to send requests to the hub (a proxy, a fetcher of user-given URLs) inherits that exemption.
+- **The operator's bot accounts** (a stopgap until bots are an account kind of their own):
+  `YO_BOT_ACCOUNTS=YoGPT:USERHEX,PING:USERHEX` (a label, letters and digits, and the user id as 32 hex; set in
+  `/etc/yo/hub.env`, never in the repository). Their signed requests pass every per-device and per-user limit
+  (signed requests, lookups, storage, credentials, request buckets, the blob quota); the disk floor still holds.
+  What they send is counted apart, out of `yo-in`, `media-in` and the live strip: `bot-media` and `bot-media:LABEL`
+  per upload, and `bot-yo` per Yo from the server's own services (sealed, so by address: not per bot).
 - **Disk.** Blobs have a budget (`YO_BLOB_BUDGET_MB`) and a floor of free space (`YO_BLOB_MIN_FREE_MB`); deliveries
   are refused (`507`) while the database's disk has less than 1 GiB free.
 - **Cleanup**, hourly: envelopes after 30 days, blobs after their last acknowledgement or 30 days, replaced devices' `410` memory after a year, crash and error groups 90 days after last seen. Rate-limit buckets idle for a day and

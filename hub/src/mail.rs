@@ -32,6 +32,8 @@ pub(crate) struct Delivery {
     pub devices_hash: [u8; 32],
     pub envelope: Bytes,
     pub urgent: bool,
+    /// From the operator's bots (the server's own services, or a bot account's request): `bot-yo`, not `yo-in`.
+    pub from_bot: bool,
     pub stored: tokio::sync::oneshot::Sender<Result<Delivered, ()>>,
     /// Where its pushes are sent from.
     pub runtime: tokio::runtime::Handle,
@@ -55,7 +57,14 @@ pub(crate) fn writer(db: Arc<Db>, queue: std::sync::mpsc::Receiver<Delivery>, mo
                     if let (Delivered::Stored(devices), Some(hub)) = (&mut outcome, &hub) {
                         // Counted here too: a bot's inbox apart (every device a bot's), nothing of whose.
                         let bot = !devices.is_empty() && devices.iter().all(|w| w.bot);
-                        hub.count(if bot { crate::Event::YoInBot } else { crate::Event::YoIn }, 1);
+                        hub.count(
+                            match (delivery.from_bot, bot) {
+                                (true, _) => crate::Event::BotYo,
+                                (false, true) => crate::Event::YoInBot,
+                                (false, false) => crate::Event::YoIn,
+                            },
+                            1,
+                        );
                         hub.woken(std::mem::take(devices), delivery.urgent, &delivery.runtime);
                     }
                     let _ = delivery.stored.send(Ok(outcome));
@@ -223,7 +232,9 @@ pub(crate) async fn post_envelope(
             db::Admission::Closed => return Err(refuse(StatusCode::FORBIDDEN)),
         }
     };
-    // A request past its buckets waits, for this recipient only (`429` with `Retry-After`).
+    // A request past its buckets waits, for this recipient only (`429` with `Retry-After`); a bot account's never.
+    let request = request.filter(|sender| hub.bot(sender).is_none());
+    let from_bot = hub.own_service(peer, &headers) || sender.is_some_and(|sender| hub.bot(&sender).is_some());
     if let Some(sender) = &request {
         hub.requests.check(sender, &user, hub.clock_ms()).map_err(|(scope, ms)| error::limited(scope, Some(ms)))?;
     }
@@ -233,7 +244,7 @@ pub(crate) async fn post_envelope(
     let (stored, outcome) = tokio::sync::oneshot::channel();
     let runtime = tokio::runtime::Handle::current();
     hub.deliveries
-        .try_send(Delivery { user, devices_hash, envelope: body.clone(), urgent, stored, runtime })
+        .try_send(Delivery { user, devices_hash, envelope: body.clone(), urgent, from_bot, stored, runtime })
         .map_err(|_| refuse(StatusCode::SERVICE_UNAVAILABLE))?;
     let outcome = outcome.await.ok().and_then(Result::ok).ok_or_else(|| refuse(StatusCode::INTERNAL_SERVER_ERROR))?;
     match outcome {

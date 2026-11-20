@@ -151,7 +151,9 @@ def events(db, now: int) -> dict:
                                  ((day - 364) * 24 * 60,)):
         by_day.setdefault(kind, {})[d] = n
     out = {}
-    for kind in EVENT_KINDS:
+    # The operator's bots, counted apart (bot-yo, bot-media, bot-media:LABEL): out of the kinds above.
+    bots = sorted(k for k in totals if k.startswith("bot-"))
+    for kind in EVENT_KINDS + tuple(bots):
         hours = by_hour.get(kind, {})
         days = [sum(n for h, n in hours.items() if h // 24 == d) for d in range(day - 13, day + 1)]
         out[kind] = {"hours": [hours.get(h, 0) for h in range(hour - 23, hour + 1)], "days": days, "today": days[-1],

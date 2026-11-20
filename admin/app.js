@@ -784,6 +784,12 @@ if (document.body.classList.contains("login")) {
       part(() => healthRows(h, ym, yh));
       // Running totals: Yos into users' inboxes (a bot's inbox apart), accounts without bots.
       areaChart("yc", yt("yo-in") ?? 0, ym("yo-in"), yh("yo-in"), ev?.["yo-in"]?.today ?? 0);
+      // The operator's bots, counted apart by the hub (YO_BOT_ACCOUNTS, a stopgap): photos per bot, Yos from all.
+      const bots = Object.keys(ev || {}).filter((k) => k.startsWith("bot-media:")).sort()
+        .map((k) => `${k.slice(10)} ${num(ev[k].today ?? 0)}`);
+      if (ev?.["bot-yo"]?.today) bots.push(`Yos ${num(ev["bot-yo"].today)}`);
+      set("bots-t", bots.length ? `Bots: ${bots.join(" · ")} today` : "");
+      $("bots-t").hidden = !bots.length;
       const sud = new Map(h.signup_days || []);
       areaChart("uc", [...sud.values()].reduce((a, v) => a + v, 0), sud, h.signups_hours, sud.get(today0()) ?? 0);
       const dn14 = days14().map(dayName);

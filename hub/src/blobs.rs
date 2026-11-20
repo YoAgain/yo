@@ -320,8 +320,7 @@ pub(crate) async fn put_blob(
     let body_hash: [u8; 32] = header(&headers, HEADER_BODY_HASH).and_then(b64_array).ok_or_else(bad)?;
     let limits = &hub.config.limits;
     hub.limit_ip("blob:put", peer, &headers, limits.blob_put_per_ip_minute, MINUTE)?;
-    let quota = limits.blob_quota();
-    let (device, _claim) = hub
+    let (device, _claim, quota) = hub
         .blocking(move |hub| {
             let device = hub.authenticate_hash(&method, &uri, &headers, &body_hash)?;
             // Held before the body comes, so a second upload of the same id is "later" at once (spec 6.8).
@@ -332,10 +331,15 @@ pub(crate) async fn put_blob(
                 Some(false) => return Err(refuse(StatusCode::SERVICE_UNAVAILABLE)),
                 None => {}
             }
+            // The operator's bot accounts upload without a quota of their own (only the disk's room holds them).
+            let quota = match hub.bot(&device.user_id) {
+                Some(_) => crate::config::Limits::unlimited().blob_quota(),
+                None => hub.config.limits.blob_quota(),
+            };
             if !hub.db.blob_quota_left(&device.user_id, size, now_ms(), &quota)? {
                 return Err(refuse(StatusCode::TOO_MANY_REQUESTS));
             }
-            Ok((device, claim))
+            Ok((device, claim, quota))
         })
         .await??;
     // A few uploads of one user at once, no more: none can hold the room of everyone's.
@@ -389,7 +393,7 @@ pub(crate) async fn put_blob(
         // Handed out from now on. Left not ready (a crash just before), it goes at the next start or within the hour.
         match hub.db.blob_ready(&id, stored_at) {
             Ok(true) => {
-                hub.count_upload(size);
+                hub.count_upload(&device.user_id, size);
                 Ok(StatusCode::CREATED)
             }
             // Its row went meanwhile (the account deleted while it came): no file left behind, and no 201.

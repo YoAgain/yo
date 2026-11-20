@@ -270,7 +270,7 @@ pub(crate) async fn get_group_auth(State(hub): Hubs, Auth(device, _): Auth) -> R
 
 /// `POST /v1/group-credential`: a profile key credential for a user whose key the asker holds.
 pub(crate) async fn post_group_credential(State(hub): Hubs, Auth(device, body): Auth) -> Res<Vec<u8>> {
-    hub.limit_by("credential", &device.device_id, CREDENTIALS_PER_DAY, DAY)?;
+    hub.limit_signed(&device, "credential", &device.device_id, CREDENTIALS_PER_DAY, DAY)?;
     hub.profile_credential(&decode(&body)?)
 }
 

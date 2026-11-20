@@ -212,6 +212,31 @@ pub struct Config {
     pub server_certificate: Vec<u8>,
     /// The hub's zkgroup `ServerSecretParams` (`YO_ZK_PARAMS_FILE`, spec 4.9).
     pub zk_params: Vec<u8>,
+    /// The operator's bot accounts (`YO_BOT_ACCOUNTS` "YoGPT:USERHEX,PING:USERHEX"), a stopgap: no rate limits per
+    /// device or user, and what they send counted apart (`bot-yo`, `bot-media`, `bot-media:LABEL`), out of the Yo counts.
+    pub bots: Vec<(String, yo_wire::UserId)>,
+}
+
+/// `YO_BOT_ACCOUNTS`: comma separated `LABEL:USER`, the label letters and digits (at most 16), the user id 32 hex.
+pub fn parse_bots(text: &str) -> Result<Vec<(String, yo_wire::UserId)>, String> {
+    text.split(',')
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(|s| {
+            let bad = || format!("YO_BOT_ACCOUNTS: {s:?} is not LABEL:USER (32 hex)");
+            let (label, user) = s.split_once(':').ok_or_else(bad)?;
+            let label_ok = (1..=16).contains(&label.len()) && label.bytes().all(|b| b.is_ascii_alphanumeric());
+            let hex_ok = user.len() == 32 && user.bytes().all(|b| b.is_ascii_hexdigit());
+            if !label_ok || !hex_ok {
+                return Err(bad());
+            }
+            let mut id = [0u8; 16];
+            for (i, byte) in id.iter_mut().enumerate() {
+                *byte = u8::from_str_radix(&user[2 * i..2 * i + 2], 16).map_err(|_| bad())?;
+            }
+            Ok((label.to_owned(), id))
+        })
+        .collect()
 }
 
 /// `YO_MIN_APP`: comma separated `PLATFORM/BUILD`.
@@ -277,6 +302,7 @@ impl Config {
                 static PARAMS: std::sync::OnceLock<Vec<u8>> = std::sync::OnceLock::new();
                 PARAMS.get_or_init(crate::groups::test_params).clone()
             },
+            bots: Vec::new(),
         }
     }
 }
@@ -307,5 +333,18 @@ mod tests {
         }
         assert_eq!(parse_min_app(" ios/5, android/7 ,").unwrap(), [("ios".into(), 5), ("android".into(), 7)]);
         assert!(parse_min_app("ios").is_err());
+    }
+
+    #[test]
+    fn bot_accounts_are_labels_and_user_ids() {
+        let bots =
+            parse_bots(" YoGPT:000102030405060708090a0b0c0d0e0f, PING:FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF ,").unwrap();
+        assert_eq!(bots, [("YoGPT".into(), std::array::from_fn(|i| i as u8)), ("PING".into(), [255; 16])]);
+        for bad in
+            ["YoGPT", "YoGPT:0001", ":000102030405060708090a0b0c0d0e0f", "Yo GPT:000102030405060708090a0b0c0d0e0f"]
+        {
+            assert!(parse_bots(bad).is_err(), "{bad:?}");
+        }
+        assert!(parse_bots("").unwrap().is_empty());
     }
 }

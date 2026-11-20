@@ -135,7 +135,8 @@ impl Hub {
         yo_wire::request::verify_hash(&device.auth_key, method.as_str(), path, time, body_hash, &signature)
             .map_err(|_| unauthorized())?;
         // Counted only once the signature holds: a stranger who knows a device id must not spend its requests.
-        self.limit_by("signed", &device_id, self.config.limits.signed_per_device_minute, MINUTE)
+        let signed = Signed { device_id, user_id: device.user_id };
+        self.limit_signed(&signed, "signed", &device_id, self.config.limits.signed_per_device_minute, MINUTE)
             .map_err(|_| error::limited("device", None))?;
         if !self.first_time(&signature, time, now) {
             return Err(unauthorized());
@@ -146,7 +147,7 @@ impl Hub {
         if new_app || now.saturating_sub(device.last_seen_at) >= DAY_MS {
             self.db.touch(&device_id, now, app)?;
         }
-        Ok(Signed { device_id, user_id: device.user_id })
+        Ok(signed)
     }
 
     /// Each signature once (the replay cache), for as long as its time is within the window.
@@ -178,6 +179,14 @@ impl Hub {
             true => Ok(()),
             false => Err(refuse(StatusCode::TOO_MANY_REQUESTS)),
         }
+    }
+
+    /// A limit per device or user of a signed request, `id` one of `signed`'s; none for the operator's bot accounts.
+    pub(crate) fn limit_signed(&self, signed: &Signed, kind: &str, id: &[u8], per: u32, window: Duration) -> Res<()> {
+        if self.bot(&signed.user_id).is_some() {
+            return Ok(());
+        }
+        self.limit_by(kind, id, per, window)
     }
 
     /// A limit per device or user: `kind` and the id name its bucket.
@@ -213,7 +222,7 @@ impl Hub {
     }
 
     /// Behind Cloudflare every request carries `CF-Connecting-IP`: one from 127.0.0.1 without it is the server itself.
-    fn own_service(&self, peer: SocketAddr, headers: &HeaderMap) -> bool {
+    pub(crate) fn own_service(&self, peer: SocketAddr, headers: &HeaderMap) -> bool {
         self.config.trust_cloudflare && peer.ip().is_loopback() && !headers.contains_key("cf-connecting-ip")
     }
 

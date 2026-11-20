@@ -172,8 +172,10 @@ pub(crate) async fn post_lookup(
     let take = request.flags & api::LOOKUP_PREKEYS != 0;
     let limits = &hub.config.limits;
     match take {
-        true => hub.limit_by("lookup", &device.device_id, limits.lookup_per_device_day, DAY)?,
-        false => hub.limit_by("identity", &device.device_id, limits.identity_lookup_per_device_day, DAY)?,
+        true => hub.limit_signed(&device, "lookup", &device.device_id, limits.lookup_per_device_day, DAY)?,
+        false => {
+            hub.limit_signed(&device, "identity", &device.device_id, limits.identity_lookup_per_device_day, DAY)?
+        }
     }
     let found = hub
         .db
@@ -242,7 +244,7 @@ pub(crate) async fn delete_account(State(hub): Hubs, Auth(device, _): Auth) -> R
 
 /// `GET /v1/storage`: `404` while there is none.
 pub(crate) async fn get_storage(State(hub): Hubs, Auth(device, _): Auth) -> Res<Vec<u8>> {
-    hub.limit_by("storage", &device.user_id, hub.config.limits.storage_per_user_hour, HOUR)?;
+    hub.limit_signed(&device, "storage", &device.user_id, hub.config.limits.storage_per_user_hour, HOUR)?;
     let (version, data) = hub.db.storage(&device.user_id)?.ok_or_else(|| refuse(StatusCode::NOT_FOUND))?;
     Ok(encode(&api::Storage { version, data: data.into() }))
 }
@@ -256,7 +258,7 @@ pub(crate) async fn put_storage(State(hub): Hubs, Auth(device, body): Auth) -> R
     if request.data.as_slice().is_empty() {
         return Err(bad());
     }
-    hub.limit_by("storage", &device.user_id, hub.config.limits.storage_per_user_hour, HOUR)?;
+    hub.limit_signed(&device, "storage", &device.user_id, hub.config.limits.storage_per_user_hour, HOUR)?;
     let stored = hub.db.put_storage(&device.device_id, request.version, request.data.as_slice(), now_ms())?.done()?;
     if let Err((version, data)) = stored {
         return Err(Refusal(StatusCode::CONFLICT, encode(&api::Storage { version, data: data.into() })));
