@@ -92,13 +92,13 @@ pub enum Text {
     Created,
     TryItOnce,
     TryItOnceLine,
-    TurnOffPasskey,
     On,
     Off,
     AccountRecovery,
     AccountBackup,
     RecoveryFooter,
     Done,
+    ShowOrSaveKey,
 }
 
 #[uniffi::remote(Enum)]

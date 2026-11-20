@@ -198,6 +198,8 @@ private val HalfPages = setOf("Profile", "Account", "Blocked", "Account Security
     // What the screen lock opens once it confirmed it is you: the recovery key's or the passkey's screen.
     var afterAuth by remember { mutableStateOf<String?>(null) }
     var googleOff by remember { mutableStateOf(false) }
+    var turningOffKey by remember { mutableStateOf(false) }
+    var turningOffPasskey by remember { mutableStateOf(false) }
     var code by remember { mutableStateOf(false) }
     var logout by remember { mutableStateOf(false) }
     var showingInfo by remember { mutableStateOf(false) }
@@ -347,32 +349,38 @@ private val HalfPages = setOf("Profile", "Account", "Blocked", "Account Security
                         Section(null, null,
                             Setting(stringResource(R.string.account_backup), Icons.Default.CloudUpload, onClick = { repo.command { saveContacts() } }),
                         )
-                        // iOS AccountPage: the three ways back on a new phone, each with its state; the (i) above explains them.
-                        // A passkey here rides on a saved recovery key, so without one its row opens the key's screen.
+                        // iOS AccountSecurityPage: the three ways back on a new phone, each with its switch; the (i) above
+                        // explains them. A passkey here rides on a saved recovery key, so without one its switch opens the key's screen.
+                        val keyOn = s.secured && s.recoverySaved
+                        fun openKey() { if (s.secured) { afterAuth = "key"; authenticate() } else { repo.command { prepareRecovery() }; secure = true } }
                         Section(copy(ProductText.ACCOUNT_RECOVERY), copy(ProductText.RECOVERY_FOOTER),
-                            Setting(copy(ProductText.RECOVERY_KEY), Icons.Default.Key,
-                                copy(if (s.secured && s.recoverySaved) ProductText.SAVED else ProductText.NOT_SAVED), badge = s.recoveryNeedsAttention, onClick = {
-                                    if (s.secured) { afterAuth = "key"; authenticate() } else { repo.command { prepareRecovery() }; secure = true }
-                                }),
-                            Setting(copy(ProductText.PASSKEY), Icons.Default.Fingerprint,
-                                copy(if (passkeyConfigured) ProductText.ON else ProductText.OFF), onClick = {
-                                    if (s.secured) { afterAuth = "passkey"; authenticate() } else { repo.command { prepareRecovery() }; secure = true }
-                                }),
-                            // Spec "Key material only in an end-to-end encrypted cloud": on only with a screen lock and Google's backup on.
-                            Setting(stringResource(R.string.google_backup_row), Icons.Default.Cloud, when {
-                                s.backedUp -> copy(ProductText.ON)
-                                !s.googleBackup -> copy(ProductText.OFF)
-                                s.backupMissingReason == CloudMissing.DEVICE_BACKUP -> stringResource(R.string.google_backup_turn_on_device_backup)
-                                else -> stringResource(R.string.google_backup_needs_screen_lock_short)
-                            }, badge = s.backupMissing, onClick = {
+                            // On opens the key's screen, saved there; off makes the saved key stop working.
+                            Setting(copy(ProductText.RECOVERY_KEY), Icons.Default.Key, badge = s.recoveryNeedsAttention, checked = keyOn,
+                                onChecked = { on -> if (on) openKey() else turningOffKey = true }),
+                            if (keyOn) Setting(copy(ProductText.SHOW_OR_SAVE_KEY), Icons.Default.Visibility, onClick = ::openKey) else null,
+                            // On opens the passkey's screen; it shows on once tried there.
+                            Setting(copy(ProductText.PASSKEY), Icons.Default.Fingerprint, checked = passkeyConfigured, onChecked = { on ->
                                 when {
-                                    s.backedUp -> googleOff = true
-                                    !s.googleBackup -> repo.command { googleBackup(true) }
-                                    else -> openSystemSettings(context,
-                                        if (s.backupMissingReason == CloudMissing.DEVICE_BACKUP) "android.settings.BACKUP_AND_RESET_SETTINGS"
-                                        else android.provider.Settings.ACTION_SECURITY_SETTINGS)
+                                    !on -> turningOffPasskey = true
+                                    s.secured -> { afterAuth = "passkey"; authenticate() }
+                                    else -> { repo.command { prepareRecovery() }; secure = true }
                                 }
                             }),
+                            // Spec "Key material only in an end-to-end encrypted cloud": on only with a screen lock and Google's backup on.
+                            Setting(stringResource(R.string.google_backup_row), Icons.Default.Cloud, checked = s.backedUp, badge = s.backupMissing,
+                                supporting = when {
+                                    s.backedUp || !s.googleBackup -> null
+                                    s.backupMissingReason == CloudMissing.DEVICE_BACKUP -> stringResource(R.string.google_backup_turn_on_device_backup)
+                                    else -> stringResource(R.string.google_backup_needs_screen_lock_short)
+                                }, onChecked = { on ->
+                                    when {
+                                        !on -> googleOff = true
+                                        !s.googleBackup -> repo.command { googleBackup(true) }
+                                        else -> openSystemSettings(context,
+                                            if (s.backupMissingReason == CloudMissing.DEVICE_BACKUP) "android.settings.BACKUP_AND_RESET_SETTINGS"
+                                            else android.provider.Settings.ACTION_SECURITY_SETTINGS)
+                                    }
+                                }),
                         )
                     }
                     // iOS BlockedPage: who may ask and blocking one more, then the blocked contacts.
@@ -449,8 +457,28 @@ private val HalfPages = setOf("Profile", "Account", "Blocked", "Account Security
         }
     }
 
-    if (secure) RecoverySheet(model, s, passkeyConfigured) { secure = false }
-    if (passkeyPage) PasskeySheet(model, passkeyConfigured, onTurnedOff = { passkeyRevision++ }) { passkeyPage = false; passkeyRevision++ }
+    if (secure) RecoverySheet(model, s) { secure = false }
+    if (passkeyPage) PasskeySheet(model, passkeyConfigured) { passkeyPage = false; passkeyRevision++ }
+    // Off: the backup moves to a new key at once, so the saved one stops working now; the new one is not saved yet.
+    if (turningOffKey) AlertDialog(
+        onDismissRequest = { turningOffKey = false },
+        title = { Text(stringResource(R.string.turn_off_recovery_key)) },
+        text = { Text(stringResource(if (passkeyConfigured || !s.backedUp) R.string.turn_off_recovery_key_message else R.string.turn_off_recovery_key_google)) },
+        confirmButton = { TextButton(onClick = { turningOffKey = false; repo.command { turnOffRecovery() } },
+            colors = ButtonDefaults.textButtonColors(contentColor = MaterialTheme.colorScheme.error)) { Text(stringResource(R.string.settings_turn_off)) } },
+        dismissButton = { TextButton(onClick = { turningOffKey = false }) { Text(stringResource(R.string.ui_cancel)) } },
+    )
+    // A passkey here always rides on a saved recovery key, so only the password manager is left to clean up.
+    if (turningOffPasskey) AlertDialog(
+        onDismissRequest = { turningOffPasskey = false },
+        title = { Text(stringResource(R.string.settings_turn_off_passkey)) },
+        text = { Text(stringResource(R.string.turn_off_passkey_message)) },
+        confirmButton = { TextButton(onClick = {
+            turningOffPasskey = false
+            repo.command { try { removeRecoveryPasskey() } finally { withContext(Dispatchers.Main) { passkeyRevision++ } } }
+        }, colors = ButtonDefaults.textButtonColors(contentColor = MaterialTheme.colorScheme.error)) { Text(stringResource(R.string.settings_turn_off)) } },
+        dismissButton = { TextButton(onClick = { turningOffPasskey = false }) { Text(stringResource(R.string.ui_cancel)) } },
+    )
     if (googleOff) AlertDialog(
         onDismissRequest = { googleOff = false },
         title = { Text(stringResource(R.string.google_backup_turn_off)) },
@@ -977,7 +1005,7 @@ private fun shareCode(context: Context, name: String) {
     }
 
 /** The recovery key (iOS RecoveryKeySheet), from the red badge and the account page: save it, show it. */
-@Composable fun RecoverySheet(model: YoViewModel, s: AppState, passkey: Boolean = false, onClose: () -> Unit) {
+@Composable fun RecoverySheet(model: YoViewModel, s: AppState, onClose: () -> Unit) {
     val res = LocalResources.current
     val context = LocalContext.current
     var shown by remember { mutableStateOf(false) }
@@ -985,7 +1013,6 @@ private fun shareCode(context: Context, name: String) {
     var busy by remember { mutableStateOf(false) }
     var keySaved by remember { mutableStateOf(false) }
     var sharing by remember { mutableStateOf(false) }
-    var turningOff by remember { mutableStateOf(false) }
     // Opened on a secured account: the key shown is the one already saved.
     LaunchedEffect(s.recovery, s.recoverySaved) {
         if (s.secured && s.recoverySaved && s.recovery != null && withContext(Dispatchers.IO) { model.repository.savedRecovery() } == s.recovery) keySaved = true
@@ -1035,23 +1062,7 @@ private fun shareCode(context: Context, name: String) {
             }
         }
         RecoveryDone(idle, onClose)
-        // Off: the backup moves to a new key at once, so the saved one stops working now; the new one is not saved yet.
-        if (keySaved) TextButton(onClick = { turningOff = true }, enabled = idle, modifier = Modifier.padding(top = 4.dp),
-            colors = ButtonDefaults.textButtonColors(contentColor = Color.White.copy(alpha = 0.85f))) { Text(stringResource(R.string.turn_off_recovery_key_action)) }
     }
-    if (turningOff) AlertDialog(
-        onDismissRequest = { turningOff = false },
-        title = { Text(stringResource(R.string.turn_off_recovery_key)) },
-        text = { Text(stringResource(if (passkey || !s.backedUp) R.string.turn_off_recovery_key_message else R.string.turn_off_recovery_key_google)) },
-        confirmButton = { TextButton(onClick = {
-            turningOff = false
-            model.repository.command {
-                busy = true
-                try { turnOffRecovery(); keySaved = false; shown = false; copied = false } finally { busy = false }
-            }
-        }, colors = ButtonDefaults.textButtonColors(contentColor = MaterialTheme.colorScheme.error)) { Text(stringResource(R.string.settings_turn_off)) } },
-        dismissButton = { TextButton(onClick = { turningOff = false }) { Text(stringResource(R.string.ui_cancel)) } },
-    )
     if (sharing) AlertDialog(
         onDismissRequest = { sharing = false },
         icon = { Icon(Icons.Default.Key, null) },
@@ -1074,8 +1085,8 @@ private fun shareCode(context: Context, name: String) {
 
 
 /** The passkey (iOS PasskeySheet), from the account page: create it, then try it once, as not every password manager
- *  gives the PRF output Yo needs and asking for it up front isn't reliable; on, it can be turned off again. */
-@Composable private fun PasskeySheet(model: YoViewModel, configured: Boolean, onTurnedOff: () -> Unit, onClose: () -> Unit) {
+ *  gives the PRF output Yo needs and asking for it up front isn't reliable; its switch on the page turns it off. */
+@Composable private fun PasskeySheet(model: YoViewModel, configured: Boolean, onClose: () -> Unit) {
     val res = LocalResources.current
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
@@ -1084,7 +1095,6 @@ private fun shareCode(context: Context, name: String) {
     var created by remember { mutableStateOf<String?>(null) }
     var busy by remember { mutableStateOf(false) }
     var problem by remember { mutableStateOf<String?>(null) }
-    var turningOff by remember { mutableStateOf(false) }
     val idle = !busy
     fun step(work: suspend () -> Unit) = scope.launch {
         busy = true; problem = null
@@ -1118,20 +1128,7 @@ private fun shareCode(context: Context, name: String) {
         problem?.let { Text(it, Modifier.padding(top = 8.dp), textAlign = TextAlign.Center, style = MaterialTheme.typography.bodySmall.copy(
             fontWeight = androidx.compose.ui.text.font.FontWeight.SemiBold)) }
         RecoveryDone(idle, onClose)
-        if (on) TextButton(onClick = { turningOff = true }, enabled = idle, modifier = Modifier.padding(top = 4.dp),
-            colors = ButtonDefaults.textButtonColors(contentColor = Color.White.copy(alpha = 0.85f))) { Text(copy(ProductText.TURN_OFF_PASSKEY)) }
     }
-    // A passkey here always rides on a saved recovery key, so only the password manager is left to clean up.
-    if (turningOff) AlertDialog(
-        onDismissRequest = { turningOff = false },
-        title = { Text(stringResource(R.string.settings_turn_off_passkey)) },
-        text = { Text(stringResource(R.string.turn_off_passkey_message)) },
-        confirmButton = { TextButton(onClick = {
-            turningOff = false
-            step { withContext(Dispatchers.IO) { model.repository.removeRecoveryPasskey() }; on = false; onTurnedOff() }
-        }, colors = ButtonDefaults.textButtonColors(contentColor = MaterialTheme.colorScheme.error)) { Text(stringResource(R.string.settings_turn_off)) } },
-        dismissButton = { TextButton(onClick = { turningOff = false }) { Text(stringResource(R.string.ui_cancel)) } },
-    )
 }
 
 /** A page of Android's own settings, or its first page where this phone has no such page. */

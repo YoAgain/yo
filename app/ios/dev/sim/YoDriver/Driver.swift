@@ -64,8 +64,12 @@ import XCTest
       let account = try rowsInOrder(accountIds)
       account[1].tap()
       let security = try rowsInOrder(securityIds)
+      // A switch that is off opens its screen; the saved key's own row opens it while the key is on.
+      let showKey = app.buttons["security.showKey"]
       for (row, title) in [(security[1], "Your Recovery Key"), (security[2], "Passkey")] {
-        row.tap()
+        let on = (row.value as? String) == "1"
+        if on && title == "Passkey" { continue }
+        if on { showKey.tap() } else { row.switches.firstMatch.exists ? row.switches.firstMatch.tap() : row.tap() }
         guard app.staticTexts[title].waitForExistence(timeout: 5) else {
           throw Failure(description: "\(title) screen did not open")
         }

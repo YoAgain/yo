@@ -268,7 +268,6 @@
     <string name="recovery_copy">Copy</string>
     <string name="recovery_copied">Copied</string>
     <string name="sign_out_unsecured">Your account isn’t secured. Set up recovery methods to access your account.</string>
-    <string name="turn_off_recovery_key_action">Turn Off Recovery Key</string>
     <string name="turn_off_recovery_key">Turn Off Recovery Key?</string>
     <string name="turn_off_recovery_key_message">Your saved recovery key will stop working.</string>
     <string name="turn_off_recovery_key_google">Your saved recovery key will stop working. Only your Google backup will remain. If you lose access to it, you may lose your account.</string>

@@ -57,9 +57,11 @@ the Linux build does not run the Simulator UI driver.
   Contact…], then Blocked Contacts (tap asks to unblock). Account Security shows a green check when recovery is in
   place, the red 1 before the chevron while it needs attention; it pushes the Account Security page.
 - Account Security: [Account Backup], then "Account Recovery" (its (i) opens "How Account Recovery Works") with
-  Recovery Key, Passkey and iCloud Keychain and their states, footer "Any one brings your account back on a new
-  phone." Recovery Key and Passkey open their own half-height screens. Showing the recovery key still requires
-  device authentication.
+  switches for Recovery Key (while on, "Show or Save Key" beneath it), Passkey and iCloud Keychain (follows iOS
+  Settings, not changeable here), footer "Any one brings your account back on a new phone." Turning Recovery Key or
+  Passkey on opens its half-height screen and the switch shows On only once saved / tried; turning one off asks
+  first ("Turn Off Recovery Key?" / "Turn Off Passkey?"). The screens themselves have no Turn Off button. Showing the
+  recovery key still requires device authentication.
 - The Account Contacts row shows no count; only a red mark when a contact has a real problem.
 - Contacts lists the contacts only (blocking lives in its own Blocked page). A contact opens as a card (no chevron in the list; the sheet is as tall as its
   rows): Verified (toggle, asks first), problem rows only when needed, Sealed Yos, Encryption (On + check;
@@ -69,7 +71,7 @@ the Linux build does not run the Simulator UI driver.
   its Recovery Key and Passkey screens (half height, Done closes) and Contacts. Account identifiers are
   account.contacts, account.security, account.signOut and account.delete. Info buttons use info.<title>. Account
   Security (security.page) rows use security.accountSync, security.recoveryKey, security.passkey,
-  security.keychainRecovery and security.howRecoveryWorks.
+  security.showKey, security.keychainRecovery and security.howRecoveryWorks.
 - In camera mode, scroll to Add Friend and run `drive.py DIR camera-add`. The + stays in its original
   position, uses the same translucency as friend rows, and opens the name field without taking a photo.
   Check Group and Invite after opening the field. Receive Yos while adding: camera mode must keep row

@@ -66,7 +66,6 @@ struct RecoveryKeySheet: View {
   @State private var showingKey = false
   @State private var copiedKey = false
   @State private var problem: String?
-  @State private var turningOff = false
 
   private var secured: Bool { accounts.account?.secured == true }
   private var saved: Bool { secured && accounts.wordsSaved }
@@ -108,25 +107,6 @@ struct RecoveryKeySheet: View {
       PrimaryButton(ProductText.done.english) { if let close { close() } else { dismiss() } }
         .disabled(busy)
         .padding(.top, 18)
-      // Off makes the saved key stop working; Save then brings a new one.
-      if saved {
-        Button("Turn Off Recovery Key") { turningOff = true }
-          .font(.footnote.weight(.semibold))
-          .buttonStyle(.plain)
-          .opacity(0.85)
-          .disabled(busy)
-          .padding(.top, 12)
-      }
-    }
-    .alert("Turn Off Recovery Key?", isPresented: $turningOff) {
-      Button("Turn Off", role: .destructive) { Task { await turnOff() } }
-      Button("Cancel", role: .cancel) {}
-    } message: {
-      Text(
-        accounts.account?.byPasskey == true && accounts.account?.passkeyAuth == true
-          ? "Your saved recovery key will stop working."
-          : "Your saved recovery key will stop working. Only iCloud Keychain will remain. If you lose access to it, you may lose your account."
-      )
     }
     .animation(reduceMotion ? nil : .smooth(duration: 0.3), value: saved)
     .animation(reduceMotion ? nil : .smooth(duration: 0.25), value: showingKey)
@@ -179,18 +159,6 @@ struct RecoveryKeySheet: View {
     }
   }
 
-  /// The saved key stops working: the backup opens with new words, not saved yet.
-  private func turnOff() async {
-    problem = nil
-    busy = true
-    defer { busy = false }
-    do {
-      words = try await accounts.newRecoveryKey()
-      showingKey = false
-      copiedKey = false
-    } catch { problem = error.localizedDescription }
-  }
-
   /// Saved (shared or copied): the backup opens with the words.
   private func markSaved() async {
     guard !saved, words.count == 64 else { return }
@@ -212,7 +180,6 @@ struct PasskeySheet: View {
   /// Saved in the password manager; trying it once is left.
   @State private var created = false
   @State private var busy = false
-  @State private var turningOff = false
   @State private var problem: String?
 
   private var on: Bool { accounts.account?.byPasskey == true && accounts.account?.passkeyAuth == true }
@@ -251,27 +218,9 @@ struct PasskeySheet: View {
       PrimaryButton(ProductText.done.english) { if let close { close() } else { dismiss() } }
         .disabled(busy)
         .padding(.top, 18)
-      if on {
-        Button(ProductText.turnOffPasskey.english) { turningOff = true }
-          .font(.footnote.weight(.semibold))
-          .buttonStyle(.plain)
-          .opacity(0.85)
-          .disabled(busy)
-          .padding(.top, 12)
-      }
     }
     .animation(reduceMotion ? nil : .smooth(duration: 0.3), value: on)
     .animation(reduceMotion ? nil : .smooth(duration: 0.3), value: created)
-    .alert("Turn Off Passkey?", isPresented: $turningOff) {
-      Button("Turn Off", role: .destructive) { Task { await removePasskey() } }
-      Button("Cancel", role: .cancel) {}
-    } message: {
-      Text(
-        accounts.wordsSaved
-          ? "Delete the passkey in your password manager too."
-          : "Only iCloud Keychain will remain. If you lose access to it, you may lose your account. Delete the passkey in your password manager too."
-      )
-    }
   }
 
   private static func detail(_ error: Error) -> String {
@@ -310,15 +259,6 @@ struct PasskeySheet: View {
       if !Passkeys.isCancellation(error) {
         problem = "That didn’t work. Try again." + Self.detail(error)
       }
-    }
-  }
-
-  private func removePasskey() async {
-    busy = true
-    defer { busy = false }
-    problem = nil
-    do { try await accounts.removePasskey() } catch {
-      if !Passkeys.isCancellation(error) { problem = error.localizedDescription }
     }
   }
 }

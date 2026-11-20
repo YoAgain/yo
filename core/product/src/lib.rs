@@ -121,13 +121,13 @@ copy! {
     Created => ("Created", "Erstellt"),
     TryItOnce => ("Try It Once", "Einmal ausprobieren"),
     TryItOnceLine => ("So Yo knows it works", "Damit Yo weiß, dass er funktioniert"),
-    TurnOffPasskey => ("Turn Off Passkey", "Passkey deaktivieren"),
     On => ("On", "Ein"),
     Off => ("Off", "Aus"),
     AccountRecovery => ("Account Recovery", "Kontowiederherstellung"),
     AccountBackup => ("Account Backup", "Kontobackup"),
     RecoveryFooter => ("Any one brings your account back on a new phone.", "Jede davon bringt dein Konto auf einem neuen Telefon zurück."),
     Done => ("Done", "Fertig"),
+    ShowOrSaveKey => ("Show or Save Key", "Schlüssel anzeigen oder sichern"),
 }
 
 /// The onboarding's line for an invite: "Mia invited you".

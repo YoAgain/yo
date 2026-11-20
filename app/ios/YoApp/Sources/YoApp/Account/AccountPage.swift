@@ -178,7 +178,7 @@ struct AccountPage: View {
   }
 }
 
-/// Account Security: Yo's own backup, then the ways back on a new phone, each with its state.
+/// Account Security: Yo's own backup, then the ways back on a new phone, each with its switch.
 @MainActor
 struct AccountSecurityPage: View {
   let account: Account
@@ -188,6 +188,10 @@ struct AccountSecurityPage: View {
   @State private var showingRecoveryKey = false
   @State private var showingPasskey = false
   @State private var showingRecoveryHelp = false
+  @State private var turningOffKey = false
+  @State private var turningOffPasskey = false
+  @State private var busy = false
+  @State private var problem: String?
 
   var body: some View {
     let keySaved = account.secured && accounts.wordsSaved && hasRecoveryKey
@@ -198,21 +202,47 @@ struct AccountSecurityPage: View {
           .accessibilityIdentifier("security.accountSync")
       }
       Section {
-        RecoveryRow(
-          icon: "key.fill", title: ProductText.recoveryKey.english,
-          value: (keySaved ? ProductText.saved : .notSaved).english,
-          badge: accounts.recoveryNeedsAttention(hasRecoveryKey: hasRecoveryKey)
-        ) { showingRecoveryKey = true }
+        // On opens the key's screen (saved there through the share sheet); off makes the saved key stop working.
+        Toggle(
+          isOn: Binding(
+            get: { keySaved },
+            set: { if $0 { showingRecoveryKey = true } else { turningOffKey = true } })
+        ) {
+          HStack(spacing: 8) {
+            Label(ProductText.recoveryKey.english, systemImage: "key.fill").labelStyle(Tile(.amethyst))
+            if accounts.recoveryNeedsAttention(hasRecoveryKey: hasRecoveryKey) { RecoveryBadge() }
+          }
+        }
         .accessibilityIdentifier("security.recoveryKey")
-        RecoveryRow(
-          icon: "faceid", title: ProductText.passkey.english, value: (passkeyOn ? ProductText.on : .off).english
-        ) { showingPasskey = true }
+        if keySaved {
+          Button { showingRecoveryKey = true } label: {
+            LabeledContent {
+              Image(systemName: "chevron.forward")
+                .font(.footnote.weight(.semibold))
+                .foregroundStyle(.tertiary)
+                .accessibilityHidden(true)
+            } label: {
+              Label(ProductText.showOrSaveKey.english, systemImage: "eye.fill").labelStyle(Tile(.amethyst))
+            }
+          }
+          .tint(Color(.label))
+          .accessibilityIdentifier("security.showKey")
+        }
+        // On opens the passkey's screen; it is on once tried there.
+        Toggle(
+          isOn: Binding(
+            get: { passkeyOn },
+            set: { if $0 { showingPasskey = true } else { turningOffPasskey = true } })
+        ) {
+          Label(ProductText.passkey.english, systemImage: "faceid").labelStyle(Tile(.amethyst))
+        }
         .accessibilityIdentifier("security.passkey")
-        SecurityRow(
-          icon: "icloud.fill", color: .amethyst, title: "iCloud Keychain",
-          value: (accounts.keychainRecoveryActive ? ProductText.on : .off).english,
-          done: accounts.keychainRecoveryActive)
-          .accessibilityIdentifier("security.keychainRecovery")
+        // Follows the iCloud Keychain in iOS Settings; Yo has no switch of its own for it.
+        Toggle(isOn: .constant(accounts.keychainRecoveryActive)) {
+          Label("iCloud Keychain", systemImage: "icloud.fill").labelStyle(Tile(.amethyst))
+        }
+        .disabled(true)
+        .accessibilityIdentifier("security.keychainRecovery")
       } header: {
         HStack {
           Text(ProductText.accountRecovery.english)
@@ -224,12 +254,46 @@ struct AccountSecurityPage: View {
       } footer: {
         Text(ProductText.recoveryFooter.english)
       }
+      .disabled(busy)
     }
     .accessibilityIdentifier("security.page")
     .navigationTitle("Account Security")
     .sheet(isPresented: $showingRecoveryHelp) { RecoveryHelpSheet() }
     .sheet(isPresented: $showingRecoveryKey) { RecoveryKeySheet(close: { showingRecoveryKey = false }) }
     .sheet(isPresented: $showingPasskey) { PasskeySheet(close: { showingPasskey = false }) }
+    .alert("Turn Off Recovery Key?", isPresented: $turningOffKey) {
+      Button("Turn Off", role: .destructive) { change { _ = try await accounts.newRecoveryKey() } }
+      Button("Cancel", role: .cancel) {}
+    } message: {
+      Text(
+        passkeyOn
+          ? "Your saved recovery key will stop working."
+          : "Your saved recovery key will stop working. Only iCloud Keychain will remain. If you lose access to it, you may lose your account."
+      )
+    }
+    .alert("Turn Off Passkey?", isPresented: $turningOffPasskey) {
+      Button("Turn Off", role: .destructive) { change { try await accounts.removePasskey() } }
+      Button("Cancel", role: .cancel) {}
+    } message: {
+      Text(
+        accounts.wordsSaved
+          ? "Delete the passkey in your password manager too."
+          : "Only iCloud Keychain will remain. If you lose access to it, you may lose your account. Delete the passkey in your password manager too."
+      )
+    }
+    .problemAlert($problem)
+  }
+
+  /// One change at a time; the switches wait meanwhile.
+  private func change(_ work: @escaping @MainActor () async throws -> Void) {
+    guard !busy else { return }
+    busy = true
+    Task {
+      defer { busy = false }
+      do { try await work() } catch {
+        if !Passkeys.isCancellation(error) { problem = error.localizedDescription }
+      }
+    }
   }
 }
 
@@ -240,32 +304,5 @@ extension AccountStore {
     let passkeyOn = account?.byPasskey == true && account?.passkeyAuth == true
     let keyOn = account?.secured == true && wordsSaved && hasRecoveryKey
     return !passkeyOn && !keyOn
-  }
-}
-
-/// A recovery method and its state; a tap opens its screen.
-private struct RecoveryRow: View {
-  let icon: String
-  let title: String
-  let value: String
-  var badge = false
-  let action: () -> Void
-
-  var body: some View {
-    Button(action: action) {
-      LabeledContent {
-        HStack(spacing: 8) {
-          if badge { RecoveryBadge() }
-          Text(value).foregroundStyle(.secondary).lineLimit(1)
-          Image(systemName: "chevron.forward")
-            .font(.footnote.weight(.semibold))
-            .foregroundStyle(.tertiary)
-            .accessibilityHidden(true)
-        }
-      } label: {
-        Label(title, systemImage: icon).labelStyle(Tile(.amethyst))
-      }
-    }
-    .tint(Color(.label))
   }
 }
