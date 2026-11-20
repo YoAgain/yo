@@ -42,8 +42,8 @@ What the hub knows per endpoint group ([details](spec/v1.md#1-goals)):
 
 | Endpoint group | Endpoints | Authentication |
 |---|---|---|
-| Messages | `inbox`, `blobs` | anonymous |
-| Groups | `groups` | anonymous member |
+| Messages | `inbox`, `blobs` | anonymous (blob upload: account) |
+| Groups | `groups` | account + member proof (names no member) |
 | Public | `username`, keys | anonymous |
 | Backup | `backup/{id}` | anonymous, with its long secret id |
 | Account | `register`, `lookup`, `push`, `storage`, `backup` … | account (signed by its device key) |
