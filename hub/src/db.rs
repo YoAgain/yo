@@ -1243,9 +1243,11 @@ impl Db {
     // ---- delivery ----
 
     /// Delivers envelopes in one transaction (group commit): each to every device of its user, or to none (spec 4.4).
+    /// Immediate, as every write here: a deferred one that read first and then wrote failed at once ("database is
+    /// locked", a 500) when another connection (litestream's) committed meanwhile, busy timeout or not.
     pub fn deliver(&self, items: &[Incoming<'_>], now: u64, most: u32) -> rusqlite::Result<Vec<Delivered>> {
         let mut conn = self.conn();
-        let tx = conn.transaction()?;
+        let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
         let mut outcomes = Vec::with_capacity(items.len());
         for Incoming { user, devices_hash, envelope } in items {
             let Some(current) = roster(&tx, user)? else {
@@ -1315,7 +1317,7 @@ impl Db {
     /// Deletes the device's envelopes of `ids`; when each one deleted was accepted (ms), for the latency counts.
     pub fn ack(&self, device: &DeviceId, ids: &[u64]) -> rusqlite::Result<Vec<u64>> {
         let mut conn = self.conn();
-        let tx = conn.transaction()?;
+        let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
         let mut acked = Vec::new();
         {
             let mut delete =
@@ -2200,6 +2202,38 @@ mod tests {
         assert_eq!(db.ack(&[1; 16], &[id]).unwrap(), [0], "when it was accepted");
         assert!(db.fetch(&[1; 16], 10).unwrap().is_empty());
         assert_eq!(synchronous(), 1);
+    }
+
+    /// Another connection (litestream's) commits while a delivery or an ack waits for the lock: it waits and goes
+    /// through, never "database is locked" for a snapshot read before that commit.
+    #[test]
+    fn deliveries_and_acks_wait_out_another_connections_commit() {
+        let path = std::env::temp_dir().join(format!("yo-db-busy-{}.sqlite", std::process::id()));
+        let path = path.to_str().unwrap().to_owned();
+        let db = Db::open(&path).unwrap();
+        let leo = user(register(&db, b"LEO", 1, 1, 0));
+        let devices_hash = yo_wire::devices::hash(&[1; 32], &[[1; 32]]);
+        let other = Connection::open(&path).unwrap();
+        other.execute_batch("CREATE TABLE other (n INTEGER)").unwrap();
+        let commit_later = |other: Connection| {
+            other.execute_batch("BEGIN IMMEDIATE; INSERT INTO other VALUES (1);").unwrap();
+            std::thread::spawn(move || {
+                std::thread::sleep(std::time::Duration::from_millis(300));
+                other.execute_batch("COMMIT").unwrap();
+                other
+            })
+        };
+        let committer = commit_later(other);
+        let delivered = db.deliver(&[Incoming { user: leo, devices_hash, envelope: b"envelope" }], 0, 10).unwrap();
+        assert!(matches!(&delivered[..], [Delivered::Stored(_)]));
+        let ids: Vec<u64> = db.fetch(&[1; 16], 10).unwrap().into_iter().map(|(id, _, _)| id).collect();
+        let committer = commit_later(committer.join().unwrap());
+        assert_eq!(db.ack(&[1; 16], &ids).unwrap().len(), 1);
+        drop(committer.join().unwrap());
+        drop(db);
+        for suffix in ["", "-wal", "-shm"] {
+            let _ = std::fs::remove_file(format!("{path}{suffix}"));
+        }
     }
 
     #[test]
