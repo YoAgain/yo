@@ -32,13 +32,9 @@ struct SettingsView: View {
   }
   @State private var path: [Page] = []
   @State private var showingDeleteAccount = false
-  /// The sheet's height: half the screen, about the first page's rows, and kept while one moves between the pages
-  /// (a longer page scrolls inside it). Only the user drags it to full height, where a long page offers that.
-  @State private var detent: PresentationDetent = .medium
-
-  private var detents: Set<PresentationDetent> {
-    path.last == .licenses || detent == .large ? [.medium, .large] : [.medium]
-  }
+  /// Two heights, nothing in between and nothing measured: the first page is half the screen (it fits there without
+  /// scrolling), every page pushed in is full height.
+  private var detent: PresentationDetent { path.isEmpty ? .medium : .large }
 
   private var currentIconAsset: String {
     AppIconPage.icons.first { $0.name == currentIconName }?.image ?? "IconStandard"
@@ -51,7 +47,7 @@ struct SettingsView: View {
           Section {
             NavigationLink(value: Page.account) {
               HStack(spacing: 14) {
-                Avatar(name: account.username, size: 76)
+                Avatar(name: account.username, size: 56)
                 Text(account.username)
                   .font(.yo(26, relativeTo: .title2))
                   .lineLimit(1)
@@ -63,7 +59,7 @@ struct SettingsView: View {
                   path.append(.code)
                 }
               }
-              .padding(.vertical, 8)
+              .padding(.vertical, 2)
             }
           }
           Section {
@@ -146,9 +142,7 @@ struct SettingsView: View {
         HitchMonitor.shared.scene = path.last.map { String(describing: $0) } ?? "settings root"
       #endif
     }
-    // One height for the whole sheet, never changed by a push or pop. A long page (Licenses) adds the full height
-    // as a second detent for the user to drag to, and with it the system's grabber; it stays until dragged back.
-    .presentationDetents(detents, selection: $detent)
+    .presentationDetents([detent])
     .presentationDragIndicator(.automatic)
     // Below full height an iOS 26 sheet is see-through glass: opaque instead.
     .presentationBackground(Color(.systemGroupedBackground))
