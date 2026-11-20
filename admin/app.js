@@ -343,6 +343,7 @@ if (document.body.classList.contains("login")) {
       return svg("rect", { x: (i * slot + slot * 0.16).toFixed(1), width: (slot * 0.68).toFixed(1), y: (H - h).toFixed(1), height: h.toFixed(1), rx: 1.2, class: v ? "b" : "b zero" });
     });
   };
+  let problemTotals = null;
   const sparkData = {}, FMT = { md: bytes }, CUM = { md: true };
   const spark = (key, big, values, names, tip, title, scale) => {
     if (CUM[key]) { let t = 0; values = values.map((v) => (v == null ? v : (t += v))); }
@@ -473,6 +474,9 @@ if (document.body.classList.contains("login")) {
     areaSub.yc = ["d1", "d7", "d30"].map((k) => [`Retention ${k.toUpperCase()}`, rt[k]?.[1] ? pctText((100 * rt[k][0]) / rt[k][1]) : "–", rt[k]?.[1] ? rt[k][0] / rt[k][1] : null]);
     // Problems' detail: crash-free installs (est.) in the range, the installs with a crash against the phones seen in it.
     const cf = h.crash_free?.[String(range)] || null, crashInstalls = cf ? cf[0] : null, seen = cf ? cf[1] : 0;
+    const pi = h.problem_installs?.[String(range)] || null, days = { 1: 2, 7: 7, 30: 30, 0: 90 }[range], from = today0() - days + 1;
+    const reports = (kind) => (h.diagnostic_days || []).filter((r) => r.day >= from && (!kind || r.kind === kind)).reduce((n, r) => n + r.count, 0);
+    problemTotals = { reports: reports(), installs: pi ? pi[1] : null, seen };
     healthData = { span, ps, psAll, he, heAll, names, crashInstalls, seen, free: crashFree(crashInstalls, seen), gone, dau, mau, stick, heRate: rate(heAll) };
   };
   // The two chart widgets: a running total over the range (a point an hour, a day, or for Total up to 60 points),
@@ -789,11 +793,14 @@ if (document.body.classList.contains("login")) {
     if (h) {
       const node = $("pr-spark"), p = problemSplit(h), sb = sparkBars(p.er, "warm", null, p.cr);
       node.replaceChildren(...sb.childNodes);
+      // The reports per slot as a line over the bars (its own scale).
+      const top = Math.max(1, ...p.rp), pts = p.rp.map((v, i) => `${(((i + 0.5) * 140) / p.rp.length).toFixed(1)},${(26 - (v / top) * 24).toFixed(1)}`).join(" ");
+      node.append(svg("polyline", { points: pts, fill: "none", stroke: "var(--text)", "stroke-width": 1.5, "stroke-linejoin": "round", "vector-effect": "non-scaling-stroke", opacity: ".85", "pointer-events": "none" }));
       node.hidden = false;
       node._split = p;
       if (!node._h) {
         node._h = 1;
-        hoverTip(node, () => node._split.cr.length, (i) => { const q = node._split; return { head: q.names[i], rows: [{ color: "#e67e22", label: "Errors open", value: num(q.er[i]) }, { color: "var(--bad)", label: "Crashes open", value: num(q.cr[i]) }] }; },
+        hoverTip(node, () => node._split.cr.length, (i) => { const q = node._split; return { head: q.names[i], rows: [{ color: "#e67e22", label: "Errors open (causes)", value: num(q.er[i]) }, { color: "var(--bad)", label: "Crashes open", value: num(q.cr[i]) }, ...problemRows(q, i)] }; },
           (k) => [...node.children].forEach((r, j) => r.classList.toggle("on", j === k)));
       }
     }
@@ -1283,7 +1290,12 @@ if (document.body.classList.contains("login")) {
       : key === "v-todos" ? open("todos", "done_at") : count(VIEW_TABLE[key]);
     for (const [key, label, ico, tip] of VIEWS) {
       const b = el("button", `main view${tableOpen === key ? " on" : ""}`), name = el("span", null, label);
-      b.type = "button"; b.title = tip;
+      b.type = "button";
+      if (key === "v-errors") {
+        // Groups (a row per build and line), causes (what they are about) and reports (the sum of counts), open ones.
+        const g = (last?.[which]?.diagnostics || []).filter((d) => !d.done);
+        hint(b, { cap: 1, head: "Open errors and crashes", rows: [{ label: "Groups", value: num(g.length) }, { label: "Causes", value: num(new Set(g.map(diagCause)).size) }, { label: "Reports", value: num(g.reduce((n, d) => n + (d.count || 0), 0)) }] });
+      } else b.title = tip;
       name.prepend(icon(ico));
       b.append(name, el("small", null, num(viewCount(key))));
       b.addEventListener("click", () => { tableOpen = key; drawTables(); });
@@ -1334,6 +1346,11 @@ if (document.body.classList.contains("login")) {
       for (const row of rows) {
         const tr = body.insertRow();
         if (diag && row[col("done")]) tr.className = "done";
+        // A group's cause (all its builds and lines): reports, installs, and their share of the phones seen in 90 days.
+        if (diag) {
+          const g = (last?.[which]?.diagnostics || []).find((d) => d.id === row[col("id")]), seen90 = last?.[which]?.crash_free?.["0"]?.[1];
+          if (g && g.cause_installs != null) hint(tr, { cap: 1, head: "This cause", rows: [{ label: "Reports", value: num(g.cause_reports) }, { label: "Installs", value: num(g.cause_installs) }, { label: "Of phones seen (90 days)", value: seen90 ? pctText((100 * g.cause_installs) / seen90) : "–" }] });
+        }
         // A to-do: its tick first (done or open again), a delete at the end.
         if (todo) {
           const id = row[col("id")], done = row[col("done_at")] != null;
@@ -1353,7 +1370,8 @@ if (document.body.classList.contains("login")) {
             cell(tr, note);
             return;
           }
-          if (isTime(t.columns[i], v)) cell(tr, date(v), "mono", String(v));
+          if (diag && t.columns[i] === "signature") cell(tr, v == null ? "–" : String(v), "mono");
+          else if (isTime(t.columns[i], v)) cell(tr, date(v), "mono", String(v));
           // A random install id (support, reports, diagnostic_installs): its first 6 hex, the full one on hover.
           else if (INSTALL_COL.test(t.columns[i]) && typeof v === "string" && /^[0-9a-f]{32}$/i.test(v)) cell(tr, installShort(v), "mono", v);
           else if (v != null && PII_COL.test(t.columns[i])) cell(tr, pii(String(v)), "mono", String(v).length > 40 ? String(v) : "");
@@ -2063,6 +2081,12 @@ if (document.body.classList.contains("login")) {
       : Math.max((h.diagnostic_days || []).filter((r) => r.kind === "crash").reduce((a, r) => a + r.count, 0), ev?.total || 0);
     return { values, names: ds.map(dayName), total, what: range === 1 ? "today (UTC), per day: the hub counts hours after its next deploy" : range ? `${range} days` : "since the start" };
   };
+  // The counts of the range's problems: all reports (sum of counts), the installs behind them, their share of the phones seen.
+  const problemRows = (q, i) => {
+    const t = problemTotals;
+    return [{ label: "Groups", value: num(q.gr[i]) }, { label: "Reports", value: num(q.rp[i]) },
+      ...(t ? [{ label: "Installs affected (range)", value: t.installs == null ? "–" : num(t.installs) }, { label: "Of phones seen", value: t.installs == null || !t.seen ? "–" : pctText((100 * t.installs) / t.seen) }] : [])];
+  };
   // Open problems per slot, for the Problems tile and its detail row: the error groups (orange) and crash groups (red)
   // not done yet, a done one counts nowhere. The hub keeps no time of when a group arrived in the past, so the open
   // groups of a kind arrive evenly between the oldest one's first report and now: a rise to today's open count.
@@ -2072,10 +2096,17 @@ if (document.body.classList.contains("login")) {
     const all = [...causes("error"), ...causes("crash")], t0 = all.length ? Math.min(...all) : now;
     const arrive = (kind) => { const l = causes(kind); return l.map((_, i) => t0 + ((i + 1) / l.length) * (now - t0)); };
     const er = arrive("error"), cr = arrive("crash"), upTo = (l, t) => l.filter((x) => x <= t).length;
+    // Groups (a row per build and line) arrive the same way; reports per slot: the hub's events by the hour, the kept
+    // daily counts otherwise (older days from the events).
+    const gl = open.map((d) => d.first_seen).sort((x, y) => x - y), gs = gl.map((_, i) => t0 + ((i + 1) / gl.length) * (now - t0));
+    const ev = h.events || {}, kept = new Set((h.diagnostic_days || []).map((r) => r.day));
+    const perDay = (d) => (kept.has(d) ? (h.diagnostic_days || []).filter((r) => r.day === d).reduce((n, r) => n + r.count, 0) : (year(ev.error?.year).get(d) || 0) + (year(ev.crash?.year).get(d) || 0));
     const ends = range === 1 ? Array.from({ length: 24 }, (_, i) => Math.min(now, (Math.floor(now / 3600000) - 22 + i) * 3600000))
       : Array.from({ length: range || 30 }, (_, i) => Math.min(now, (today0() - (range || 30) + 2 + i) * 86400000));
     const names = range === 1 ? ends.map((t, i) => clock((Math.floor(now / 3600000) - 23 + i) * 3600000)) : ends.map((t, i) => dayName(today0() - (range || 30) + 1 + i));
-    return { names, er: ends.map((t) => upTo(er, t)), cr: ends.map((t) => upTo(cr, t)) };
+    const hours = (k) => last24(ev[k]?.hours);
+    const rp = range === 1 ? hours("error").map((v, i) => (v || 0) + (hours("crash")[i] || 0)) : Array.from({ length: range || 30 }, (_, i) => perDay(today0() - (range || 30) + 1 + i));
+    return { names, er: ends.map((t) => upTo(er, t)), cr: ends.map((t) => upTo(cr, t)), gr: ends.map((t) => upTo(gs, t)), rp };
   };
   // Problems that came in over the range, by kind (errors per day only: today for the last 24 hours).
   const problemKinds = (h) => {
@@ -2320,8 +2351,8 @@ if (document.body.classList.contains("login")) {
           tip: (i) => ({ head: slotName(slots[i]), rows: [{ color: "#e67e22", label: "Reports", value: num(rp[i]) }] }) },
         (() => { const p = problemSplit(h), sum = (v) => v.reduce((x, y) => x + y, 0);
           // Errors (orange) and crash reports (red) per slot, stacked.
-          return { ico: "warn", label: "Errors · Crashes", value: `${num(p.er.at(-1))} · ${num(p.cr.at(-1))} open`, cls: p.er.at(-1) + p.cr.at(-1) ? "warn" : "", values: p.er, top: p.cr, scls: "warm",
-            tip: (i) => ({ head: p.names[i], rows: [{ color: "#e67e22", label: "Errors open", value: num(p.er[i]) }, { color: "var(--bad)", label: "Crashes open", value: num(p.cr[i]) }] }) }; })(),
+          return { ico: "warn", label: "Problems", value: `${num(p.er.at(-1) + p.cr.at(-1))} causes · ${num(problemTotals?.reports || 0)} reports · ${problemTotals?.installs != null && problemTotals.seen ? pctText((100 * problemTotals.installs) / problemTotals.seen) : "–"} of phones`, cls: p.er.at(-1) + p.cr.at(-1) ? "warn" : "", values: p.er, top: p.cr, scls: "warm",
+            tip: (i) => ({ head: p.names[i], rows: [{ color: "#e67e22", label: "Errors open (causes)", value: num(p.er[i]) }, { color: "var(--bad)", label: "Crashes open", value: num(p.cr[i]) }, ...problemRows(p, i)] }) }; })(),
         { ico: "ratio", label: "Crash-free", value: hd.free == null ? "–" : `${pctText(hd.free)} of installs (est.)`, cls: hd.free != null && hd.free < 99 ? "warn" : "",
           title: { cap: 1, head: "Crash-free (est.)", note: "1 − installs with a crash ÷ phones seen (iOS, Android), since the range's first UTC day",
             rows: [{ label: "Installs with a crash", value: hd.crashInstalls == null ? "–" : num(hd.crashInstalls) }, { label: "Phones seen", value: num(hd.seen) }] } },

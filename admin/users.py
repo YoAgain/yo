@@ -222,6 +222,46 @@ def crash_free(db, now: int):
     return out
 
 
+def problem_installs(db, now: int):
+    """Per range (as crash_free): the distinct phone installs that sent an error, and any error or crash, since the
+    range's first UTC day: counts only. None on an older hub without diagnostic_installs."""
+    if not has_table(db, "diagnostic_installs"):
+        return None
+    out = {}
+    for key, days in CRASH_FREE_DAYS.items():
+        first = now // DAY_MS - days + 1
+        row = db.execute("SELECT count(DISTINCT CASE WHEN d.kind = 'error' THEN i.install END), count(DISTINCT i.install)"
+                         " FROM diagnostic_installs i JOIN diagnostics d ON d.id = i.diagnostic_id"
+                         f" WHERE i.day >= ? AND {PHONE_APP.format('d.app')} AND d.os NOT LIKE 'mac%'", (first,)).fetchone()
+        out[key] = [row[0], row[1]]
+    return out
+
+
+def with_causes(db, rows):
+    """Each diagnostics row with its cause's totals over every group of it (builds, lines): reports (sum of counts) and
+    the distinct installs. Counts only."""
+    if not rows or not has_table(db, "diagnostic_installs"):
+        return rows
+    ids = {}
+    for diagnostic_id, install in db.execute("SELECT diagnostic_id, install FROM diagnostic_installs"):
+        ids.setdefault(diagnostic_id, set()).add(install)
+    total = {}
+    for r in rows:
+        try:
+            p = json.loads(r["payload"] or "{}") or {}
+            p = p if isinstance(p, dict) else {}
+        except ValueError:
+            p = {}
+        r["_cause"] = problem_cause(r["kind"], p)
+        t = total.setdefault(r["_cause"], [0, set()])
+        t[0] += r["count"] or 0
+        t[1] |= ids.get(r["id"], set())
+    for r in rows:
+        t = total[r.pop("_cause")]
+        r["cause_reports"], r["cause_installs"] = t[0], len(t[1])
+    return rows
+
+
 def problem_cause(kind: str, payload: dict):
     """What a crash or error group is about, without the build it came from or the line it was raised on: the hub keeps
     a group per build ("app") and per line, so every new build would open the same problem again."""
@@ -319,13 +359,14 @@ def hub(name: str, path: str) -> dict:
             "diagnostic_days": part("diagnostic_days", lambda: [{"day": day, "kind": kind, "count": count}
                 for day,kind,count in db.execute("SELECT day,kind,count FROM diagnostic_days ORDER BY day")]
                 if has_table(db,"diagnostic_days") else [], []),
-            "diagnostics": part("diagnostics", lambda: [dict(zip(
+            "diagnostics": part("diagnostics", lambda: with_causes(db, [dict(zip(
                 ("id", "kind", "count", "first_seen", "last_seen", "app", "os", "model", "payload", "done", "installs"), row))
                 for row in db.execute("SELECT id,kind,count,first_seen,last_seen,app,os,model,payload,done,"
                     + ("(SELECT count(DISTINCT install) FROM diagnostic_installs i WHERE i.diagnostic_id = diagnostics.id)"
                        if has_table(db, "diagnostic_installs") else "NULL")
-                    + " FROM diagnostics ORDER BY last_seen DESC LIMIT ?", (LIMIT,))]
+                    + " FROM diagnostics ORDER BY last_seen DESC LIMIT ?", (LIMIT,))])
                 if has_table(db, "diagnostics") else [], []),
+            "problem_installs": part("problem_installs", lambda: problem_installs(db, now)),
             # Crash-free installs (estimated) per range: installs with a crash against the phones seen.
             "crash_free": part("crash_free", lambda: crash_free(db, now)),
             # Support chat: unread user messages at the end of each of the last 14 UTC days (today: now), oldest
