@@ -2164,7 +2164,8 @@ mod handle_tests {
     fn a_long_poll_cut_off_is_asked_again_at_once_signed_anew() {
         // Back in front the app cuts off the wait from before the suspension and asks again with no wait: the core
         // keeps no retry state of its own, so the next sync goes out at once, with a signature the hub has not seen.
-        struct CutOff(std::sync::Mutex<Vec<(String, Vec<(String, String)>)>>);
+        type Seen = Vec<(String, Vec<(String, String)>)>;
+        struct CutOff(std::sync::Mutex<Seen>);
         impl Transport for CutOff {
             fn request(
                 &self,
