@@ -19,30 +19,6 @@ def load(name):
 
 
 class FeedbackTests(unittest.TestCase):
-    def test_types_for_old_and_new_schemas(self):
-        users = load("users")
-        for columns in ["", ", auto INTEGER DEFAULT 0", ", auto INTEGER DEFAULT 0, type TEXT"]:
-            with self.subTest(columns=columns), tempfile.TemporaryDirectory() as directory:
-                path = str(Path(directory) / "hub.sqlite")
-                with sqlite3.connect(path) as db:
-                    db.execute("CREATE TABLE handles (user_id BLOB, spelling TEXT, value TEXT, kind INTEGER)")
-                    db.execute("CREATE TABLE feedback (id INTEGER PRIMARY KEY, user_id BLOB, text TEXT, app_version TEXT, created_at INTEGER" + columns + ")")
-                    db.execute("INSERT INTO feedback (id, user_id, text, app_version, created_at) VALUES (1, X'', 'plain', '1', 1), (2, X'', 'task', 'admin', 2)")
-                    if 'auto' in columns:
-                        db.execute("INSERT INTO feedback (id, text, app_version, created_at, auto) VALUES (3, 'trace', 'admin', 3, 1)")
-                    if 'type' in columns:
-                        # Explicit type wins even when legacy fields disagree.
-                        db.execute("UPDATE feedback SET type = 'feedback'")
-                rows = users.hub("live", path)["feedback"]
-                kinds = {r["id"]: r["type"] for r in rows}
-                self.assertEqual(kinds[1], "feedback")
-                self.assertEqual(kinds[2], "feedback" if 'type' in columns else "todo")
-                if 'auto' in columns:
-                    if 'type' in columns:
-                        self.assertEqual(kinds[3], "feedback")
-                    else:
-                        self.assertNotIn(3, kinds)
-
     def test_diagnostics_collector_and_done_proxy(self):
         users = load("users")
         with tempfile.TemporaryDirectory() as directory:

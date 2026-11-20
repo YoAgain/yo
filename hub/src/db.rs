@@ -6,7 +6,8 @@ use rusqlite::{params, Connection, OptionalExtension, Transaction, TransactionBe
 // The in-file tests use these through `super::*`.
 #[cfg(test)]
 use schema::{
-    migrate_diagnostics, with_feedback_type, with_support, with_support_done, with_todos, DIAGNOSTIC_DAYS, SCHEMA,
+    migrate_diagnostics, with_feedback_type, with_support, with_support_done, with_todos, DIAGNOSTIC_DAYS,
+    LEGACY_FEEDBACK, SCHEMA,
 };
 use std::sync::{Mutex, MutexGuard, PoisonError};
 use yo_wire::api;
@@ -272,10 +273,10 @@ fn user_of_device(tx: &Transaction<'_>, device: &DeviceId) -> rusqlite::Result<O
     row(tx, "SELECT user_id FROM devices WHERE id = ?1", [device], |row| array(row.get(0)?))
 }
 
-/// The user id feedback keeps once its sender's account is gone: no user has it.
+/// The user id a support message keeps once its sender's account is gone: no user has it.
 pub const NOBODY: UserId = [0; 16];
 
-/// Removes a user and everything about it; its devices answer 410, its feedback stays as `NOBODY`'s.
+/// Removes a user and everything about it; its devices answer 410, its support messages stay as `NOBODY`'s.
 fn remove_user(tx: &Transaction<'_>, user: &UserId, now: u64) -> rusqlite::Result<()> {
     retire_devices(tx, user, now)?;
     // Its blobs' files go with the next sweep, or at once where the route knows them (`blobs_of`).
@@ -285,9 +286,7 @@ fn remove_user(tx: &Transaction<'_>, user: &UserId, now: u64) -> rusqlite::Resul
         tx.execute(&format!("DELETE FROM {table} WHERE user_id = ?1"), [user])?;
     }
     tx.execute("DELETE FROM reports WHERE reporter_id = ?1 OR reported_id = ?1", [user])?;
-    for table in ["support_messages", "feedback"] {
-        tx.execute(&format!("UPDATE {table} SET user_id = ?2 WHERE user_id = ?1"), params![user, NOBODY])?;
-    }
+    tx.execute("UPDATE support_messages SET user_id = ?2 WHERE user_id = ?1", params![user, NOBODY])?;
     tx.execute("DELETE FROM users WHERE id = ?1", [user])?;
     Ok(())
 }
@@ -1362,7 +1361,6 @@ impl Db {
             ("backups without their user", "backups WHERE user_id NOT IN (SELECT id FROM users)"),
             ("reports by or about nobody", "reports WHERE reporter_id NOT IN (SELECT id FROM users) OR reported_id NOT IN (SELECT id FROM users)"),
             ("support of a user gone, not anonymised", "support_messages WHERE user_id != zeroblob(16) AND user_id NOT IN (SELECT id FROM users)"),
-            ("feedback of a user gone, not anonymised", "feedback WHERE user_id != zeroblob(16) AND user_id NOT IN (SELECT id FROM users)"),
             ("storage without its user", "storage WHERE user_id NOT IN (SELECT id FROM users)"),
             ("blobs without their user", "blobs WHERE user_id NOT IN (SELECT id FROM users)"),
             ("blob quotas without their user", "blob_quota WHERE user_id NOT IN (SELECT id FROM users)"),
@@ -1469,13 +1467,14 @@ mod tests {
     }
 
     #[test]
-    fn schemas_3_and_4_reach_7_without_losing_support_or_diagnostics() {
+    fn schemas_3_and_4_reach_8_without_losing_support_or_diagnostics() {
         for version in [3, 4] {
             let path = std::env::temp_dir().join(format!("yo-support-{version}-{}.sqlite", std::process::id()));
             let _ = std::fs::remove_file(&path);
             {
                 let db = Db::open(path.to_str().unwrap()).unwrap();
                 let mut conn = db.conn();
+                conn.execute_batch(LEGACY_FEEDBACK).unwrap();
                 conn.execute_batch(
                     "DROP TABLE support_messages;
                     DROP TABLE diagnostic_seen; DROP TABLE diagnostics; DROP TABLE diagnostic_days;
@@ -1499,7 +1498,7 @@ mod tests {
             for _ in 0..2 {
                 let db = Db::open(path.to_str().unwrap()).unwrap();
                 let conn = db.conn();
-                assert_eq!(conn.query_row("PRAGMA user_version", [], |r| r.get::<_, i64>(0)).unwrap(), 7);
+                assert_eq!(conn.query_row("PRAGMA user_version", [], |r| r.get::<_, i64>(0)).unwrap(), 8);
                 let message: (String, String, i64) = conn
                     .query_row("SELECT text,app_version,created_at FROM support_messages WHERE id=10", [], |r| {
                         Ok((r.get(0)?, r.get(1)?, r.get(2)?))
@@ -1511,7 +1510,11 @@ mod tests {
                     "Fix notifications"
                 );
                 assert!(!conn.prepare("SELECT 1 FROM support_messages WHERE user_id=X''").unwrap().exists([]).unwrap());
-                assert_eq!(conn.query_row("SELECT count(*) FROM feedback", [], |r| r.get::<_, i64>(0)).unwrap(), 0);
+                assert!(!conn
+                    .prepare("SELECT 1 FROM sqlite_master WHERE name='feedback'")
+                    .unwrap()
+                    .exists([])
+                    .unwrap());
                 let diagnostic: (i64, i64, i64, bool) = conn
                     .query_row("SELECT count,first_seen,last_seen,done FROM diagnostics", [], |r| {
                         Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?))
@@ -1649,6 +1652,7 @@ mod tests {
         {
             let mut conn = db.conn();
             conn.execute_batch("DROP TABLE diagnostics; PRAGMA user_version = 3").unwrap();
+            conn.execute_batch(LEGACY_FEEDBACK).unwrap();
             conn.execute("INSERT INTO feedback(user_id,text,app_version,created_at,auto,type) VALUES(X'', 'trace','1',2,1,'crash'), (X'', 'trace','1',3,1,'crash')", []).unwrap();
             migrate_diagnostics(&mut conn).unwrap();
             migrate_diagnostics(&mut conn).unwrap();
@@ -2327,17 +2331,42 @@ mod tests {
     }
 
     #[test]
-    fn a_database_from_before_feedback_gains_its_table() {
+    fn schema_7_with_feedback_reaches_8_with_its_rows_moved_and_the_table_gone() {
         let path = std::env::temp_dir().join(format!("yo-hub-feedback-{}.db", std::process::id()));
         let path = path.to_str().unwrap();
-        {
+        let leo = {
             let db = Db::open(path).unwrap();
-            user(register(&db, b"LEO", 1, 1, 0));
-            db.conn().execute_batch("DROP INDEX feedback_by_user; DROP TABLE feedback").unwrap();
+            let leo = user(register(&db, b"LEO", 1, 1, 0));
+            let conn = db.conn();
+            conn.execute_batch(LEGACY_FEEDBACK).unwrap();
+            conn.execute(
+                "INSERT INTO feedback(user_id,text,app_version,created_at,auto,type) VALUES
+                (?1,'Mehr Farben 🎨','ios/7',100,0,'feedback'),(X'','trace','ios/7',101,1,'crash'),
+                (X'','a task','admin',102,0,'todo')",
+                [leo],
+            )
+            .unwrap();
+            conn.execute_batch("PRAGMA user_version=7").unwrap();
+            leo
+        };
+        for _ in 0..2 {
+            let db = Db::open(path).unwrap();
+            let conn = db.conn();
+            assert_eq!(conn.query_row("PRAGMA user_version", [], |r| r.get::<_, i64>(0)).unwrap(), 8);
+            assert!(!conn
+                .prepare("SELECT 1 FROM sqlite_master WHERE name LIKE 'feedback%'")
+                .unwrap()
+                .exists([])
+                .unwrap());
+            let message: (Vec<u8>, String, String, i64) = conn
+                .query_row("SELECT user_id,text,app_version,created_at FROM support_messages", [], |r| {
+                    Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?))
+                })
+                .unwrap();
+            assert_eq!(message, (leo.to_vec(), "Mehr Farben 🎨".into(), "ios/7".into(), 100));
+            assert_eq!(conn.query_row("SELECT text FROM todos", [], |r| r.get::<_, String>(0)).unwrap(), "a task");
+            assert_eq!(conn.query_row("SELECT first_seen FROM diagnostics", [], |r| r.get::<_, i64>(0)).unwrap(), 101);
         }
-        let db = Db::open(path).unwrap();
-        assert!(matches!(db.feedback(&[1; 16], "hi", "1", 0).unwrap(), Write::Done(())));
-        drop(db);
         for suffix in ["", "-wal", "-shm"] {
             let _ = std::fs::remove_file(format!("{path}{suffix}"));
         }

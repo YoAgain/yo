@@ -1,4 +1,4 @@
-//! The store's schema (`SCHEMA`, schema 7) and the way every older database a hub has written comes up to it.
+//! The store's schema (`SCHEMA`, schema 8) and the way every older database a hub has written comes up to it.
 //! A database of another schema is refused, never half migrated.
 
 use super::{diagnostic_write, immediate, legacy_crash};
@@ -36,19 +36,26 @@ pub(super) fn upgrade(conn: &mut Connection) -> rusqlite::Result<()> {
         "INSERT OR IGNORE INTO settings(key,value) VALUES ('reserved_enabled', ?1)",
         [!existing || conn.prepare("SELECT 1 FROM reserved")?.exists([])?],
     )?;
-    with_auto_feedback(conn)?;
-    with_feedback_type(conn)?;
-    let legacy_max: i64 = conn.query_row("SELECT coalesce(max(id),0) FROM feedback", [], |r| r.get(0))?;
+    // The feedback table of schemas 3 to 7 is there until schema 8 (`without_feedback`) moves its rows and drops it.
+    let legacy_max: i64 = if user_version(conn)? < SCHEMA_VERSION {
+        conn.execute_batch(LEGACY_FEEDBACK)?;
+        with_auto_feedback(conn)?;
+        with_feedback_type(conn)?;
+        conn.query_row("SELECT coalesce(max(id),0) FROM feedback", [], |r| r.get(0))?
+    } else {
+        0
+    };
     conn.execute_batch(DIAGNOSTIC_DAYS)?;
     migrate_diagnostics(conn)?;
     conn.execute_batch("CREATE TABLE IF NOT EXISTS diagnostic_seen (uuid TEXT PRIMARY KEY, diagnostic_id INTEGER NOT NULL REFERENCES diagnostics(id) ON DELETE CASCADE) WITHOUT ROWID;")?;
     with_support(conn, legacy_max)?;
     with_support_done(conn)?;
-    with_todos(conn)
+    with_todos(conn)?;
+    without_feedback(conn)
 }
 
 /// The schema this hub writes; another is refused, never half migrated (1 and 2 are brought up: `from_1`, `from_2`).
-const SCHEMA_VERSION: i64 = 7;
+const SCHEMA_VERSION: i64 = 8;
 
 pub(super) const SCHEMA: &str = "
 CREATE TABLE IF NOT EXISTS users (
@@ -142,8 +149,6 @@ CREATE TABLE IF NOT EXISTS reports (
     PRIMARY KEY (reporter_id, reported_id)
 ) WITHOUT ROWID;
 CREATE INDEX IF NOT EXISTS reports_by_reported ON reports(reported_id);
--- Feedback on the app (spec 6.3), for the operator to read: who wrote it, the text as written (plain to the hub),
--- the app's version, when (ms). Kept when the account goes, with an all-zero user id (`NOBODY`).
 -- Deliveries the hub took, per hour: a count, nothing of who or to whom (6.6); kept 8 days, for the operator's page.
 CREATE TABLE IF NOT EXISTS deliveries_hourly (
     hour INTEGER PRIMARY KEY,
@@ -160,17 +165,6 @@ CREATE TABLE IF NOT EXISTS events (
     n INTEGER NOT NULL,
     PRIMARY KEY (kind, minute)
 ) WITHOUT ROWID;
-CREATE TABLE IF NOT EXISTS feedback (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    user_id BLOB NOT NULL,
-    text TEXT NOT NULL,
-    app_version TEXT NOT NULL,
-    created_at INTEGER NOT NULL,
-    -- 1: a crash report the app sent on its own, without an account (user_id empty)
-    auto INTEGER NOT NULL DEFAULT 0,
-    type TEXT NOT NULL DEFAULT 'feedback'
-);
-CREATE INDEX IF NOT EXISTS feedback_by_user ON feedback(user_id);
 -- Each user's access key as a check, never the key (spec 4.10): a delivery that shows it is a contact's; else it
 -- is a request, signed by its sender (`requests_open` is kept, unused: the switch is the device's). Gone with the
 -- account. (The table keeps its
@@ -234,6 +228,20 @@ CREATE TABLE IF NOT EXISTS blob_quota (
 ) WITHOUT ROWID;
 ";
 
+/// The feedback table of schemas 3 to 7: what users wrote (`type` 'feedback'), the team's to-dos ('todo') and crash
+/// reports ('crash', `auto` 1); gone with schema 8.
+pub(super) const LEGACY_FEEDBACK: &str = "
+CREATE TABLE IF NOT EXISTS feedback (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id BLOB NOT NULL,
+    text TEXT NOT NULL,
+    app_version TEXT NOT NULL,
+    created_at INTEGER NOT NULL,
+    auto INTEGER NOT NULL DEFAULT 0,
+    type TEXT NOT NULL DEFAULT 'feedback'
+);
+CREATE INDEX IF NOT EXISTS feedback_by_user ON feedback(user_id);";
+
 const DIAGNOSTICS: &str = "
 CREATE TABLE IF NOT EXISTS diagnostics (
  id INTEGER PRIMARY KEY, kind TEXT NOT NULL CHECK(kind IN ('crash','error')),
@@ -254,8 +262,9 @@ fn check_version(conn: &Connection) -> rusqlite::Result<()> {
     let tables: i64 =
         conn.query_row("SELECT count(*) FROM sqlite_master WHERE type = 'table'", [], |row| row.get(0))?;
     match version {
-        SCHEMA_VERSION | 1 | 2 | 3 | 4 | 5 | 6 => Ok(()),
-        0 if tables == 0 => conn.execute_batch(&format!("PRAGMA user_version = {SCHEMA_VERSION}")),
+        SCHEMA_VERSION | 1 | 2 | 3 | 4 | 5 | 6 | 7 => Ok(()),
+        // A new database is made by the same steps as one of schema 3.
+        0 if tables == 0 => conn.execute_batch("PRAGMA user_version = 3"),
         _ => Err(rusqlite::Error::InvalidParameterName(format!(
             "database schema {version}, this hub writes {SCHEMA_VERSION}: start from an empty database"
         ))),
@@ -293,7 +302,7 @@ fn from_1(conn: &mut Connection) -> rusqlite::Result<()> {
     })
 }
 
-/// Schema 2 to this one: Ed25519 account and auth keys to their Curve25519 form (spec 4.1); word backups go (spec 7).
+/// Schema 2 to 3 (the later steps follow): Ed25519 account and auth keys to their Curve25519 form (spec 4.1); word backups go (spec 7).
 fn from_2(conn: &mut Connection) -> rusqlite::Result<()> {
     immediate(conn, |tx| {
         let curve = |key: &[u8]| -> Option<Vec<u8>> {
@@ -315,7 +324,7 @@ fn from_2(conn: &mut Connection) -> rusqlite::Result<()> {
         if has_table(tx, "backups")? {
             tx.execute_batch("DELETE FROM backups")?;
         }
-        tx.execute_batch(&format!("PRAGMA user_version = {SCHEMA_VERSION}"))
+        tx.execute_batch("PRAGMA user_version = 3")
     })
 }
 
@@ -443,6 +452,35 @@ pub(super) fn with_todos(conn: &mut Connection) -> rusqlite::Result<()> {
             DELETE FROM support_messages WHERE user_id=X'';
             PRAGMA user_version=7;",
         )
+    })
+}
+
+/// Schema 8: the feedback table goes; a row still in it moves where its kind lives now (a user's message to
+/// support_messages, a crash to diagnostics, a to-do to todos), text and times kept.
+pub(super) fn without_feedback(conn: &mut Connection) -> rusqlite::Result<()> {
+    immediate(conn, |tx| {
+        if user_version(tx)? >= 8 {
+            return Ok(());
+        }
+        if has_table(tx, "feedback")? {
+            let crashes = tx
+                .prepare("SELECT text, app_version, created_at FROM feedback WHERE type='crash' OR auto=1 ORDER BY created_at, id")?
+                .query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?, r.get::<_, u64>(2)?)))?
+                .collect::<rusqlite::Result<Vec<_>>>()?;
+            for (text, app, at) in crashes {
+                diagnostic_write(tx, "crash", &legacy_crash(&text, &app), at)?;
+            }
+            tx.execute_batch(
+                "INSERT INTO todos(text,created_at) SELECT text,created_at FROM feedback
+                    WHERE type='todo' AND auto=0 ORDER BY created_at,id;
+                INSERT INTO support_messages(user_id,from_team,text,created_at,app_version)
+                    SELECT user_id,0,text,created_at,app_version FROM feedback
+                    WHERE type NOT IN ('crash','todo') AND auto=0 ORDER BY created_at,id;
+                DROP INDEX IF EXISTS feedback_by_user;
+                DROP TABLE feedback;",
+            )?;
+        }
+        tx.execute_batch("PRAGMA user_version=8;")
     })
 }
 

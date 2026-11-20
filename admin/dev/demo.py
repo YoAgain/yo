@@ -53,9 +53,6 @@ CREATE TABLE backups (user_id BLOB PRIMARY KEY, locator BLOB UNIQUE, record BLOB
 CREATE TABLE reports (reporter_id BLOB NOT NULL, reported_id BLOB NOT NULL, reason INTEGER NOT NULL,
     created_at INTEGER NOT NULL, PRIMARY KEY (reporter_id, reported_id)) WITHOUT ROWID;
 CREATE TABLE deliveries_hourly (hour INTEGER PRIMARY KEY, n INTEGER NOT NULL);
-CREATE TABLE feedback (id INTEGER PRIMARY KEY AUTOINCREMENT, user_id BLOB NOT NULL, text TEXT NOT NULL,
-    app_version TEXT NOT NULL, created_at INTEGER NOT NULL, auto INTEGER NOT NULL DEFAULT 0,
-    type TEXT NOT NULL DEFAULT 'feedback');
 CREATE TABLE contact_keys (user_id BLOB PRIMARY KEY, current BLOB NOT NULL, requests_open INTEGER NOT NULL DEFAULT 1) WITHOUT ROWID;
 CREATE TABLE storage (user_id BLOB PRIMARY KEY, version INTEGER NOT NULL, data BLOB NOT NULL, updated_at INTEGER NOT NULL) WITHOUT ROWID;
 CREATE TABLE blobs (id BLOB PRIMARY KEY, user_id BLOB NOT NULL, size INTEGER NOT NULL, fetches_left INTEGER NOT NULL,
@@ -289,9 +286,6 @@ def make_hub(path: str, rng: random.Random, now: int, n_users: int, live: bool) 
     for reason, age in [(1, 2 * HOUR), (2, 9 * HOUR), (1, DAY + 3 * HOUR), (3, 3 * DAY), (2, 6 * DAY), (1, 10 * DAY)][: 6 if live else 1]:
         a, b = rng.sample(users, 2)
         db.execute("INSERT OR IGNORE INTO reports VALUES (?,?,?,?)", (a, b, reason, now - age))
-    # Old feedback (before the support chat).
-    db.execute("INSERT INTO feedback (user_id,text,app_version,created_at,type) VALUES (?,?,?,?,'feedback')",
-               (users[1], "Love it, but the icon should be bigger", builds[3], now - 20 * DAY))
     # Support threads: (u)ser and (t)eam lines, the newest open ones unread.
     threads = rng.sample(users[8:] if live else users, k=len(SUPPORT) if live else 2)
     photo_user = None

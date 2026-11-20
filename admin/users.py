@@ -53,13 +53,6 @@ FROM reports r ORDER BY r.created_at DESC LIMIT ?
 REASONS = {1: "spam", 2: "abuse", 3: "other"}
 PUSH = {0: None, 1: "APNs", 2: "APNs (sandbox)", 3: "FCM"}
 
-# Feedback sent from the apps (not end-to-end encrypted: meant for us), newest first.
-FEEDBACK = """
-SELECT f.id, (SELECT coalesce(spelling, value) FROM handles WHERE user_id = f.user_id AND kind = 2),
-       f.text, f.app_version, f.created_at, {auto}, {kind}
-FROM feedback f ORDER BY f.created_at DESC LIMIT ?
-"""
-
 
 def text(v):
     return v.decode(errors="replace") if isinstance(v, bytes) else v
@@ -121,10 +114,6 @@ def yogpt_min():
 
 def has_table(db, table: str) -> bool:
     return db.execute("SELECT count(*) FROM sqlite_master WHERE type = 'table' AND name = ?", (table,)).fetchone()[0] > 0
-
-
-def has_column(db, table: str, column: str) -> bool:
-    return db.execute("SELECT count(*) FROM pragma_table_info(?) WHERE name = ?", (table, column)).fetchone()[0] > 0
 
 
 EVENT_KINDS = ("yo-in", "yo-out", "media-in", "media-out", "group-create", "yo-in-bot", "media-in-bytes",
@@ -242,20 +231,9 @@ def hub(name: str, path: str) -> dict:
              "reason": REASONS.get(reason, str(reason)), "at": at}
             for a, an, b, bn, reason, at in (db.execute(REPORTS, (LIMIT,)) if has_table(db, "reports") else [])
         ], [])
-        feedback = part("feedback", lambda: [
-            {"id": fid, "name": text(name), "text": text(body), "version": text(version), "at": at, "auto": bool(auto), "type": text(kind)}
-            for fid, name, body, version, at, auto, kind in (db.execute(
-                # Crash reports (the column of hubs from 2026-11-15 on): marked "auto", with no user.
-                FEEDBACK.format(auto="f.auto" if has_column(db, "feedback", "auto") else "0",
-                    kind="f.type" if has_column(db, "feedback", "type") else
-                        "CASE WHEN " + ("f.auto" if has_column(db, "feedback", "auto") else "0") +
-                        " = 1 THEN 'crash' WHEN f.app_version = 'admin' THEN 'todo' ELSE 'feedback' END"), (LIMIT,))
-                if has_table(db, "feedback") else [])
-        ], [])
         return {
             "users": users,
             "reports": reports,
-            "feedback": [f for f in feedback if f["type"] in ("feedback", "todo")],
             # The team's to-dos: their own table from the hub's schema 7, the X'' thread before it.
             "todos": part("todos", lambda: [{"id": i, "text": text(t), "at": at, "done_at": done}
                 for i,t,at,done in db.execute(TODOS_SQL(db) + " ORDER BY done_at IS NOT NULL,created_at DESC LIMIT ?", (LIMIT,))] if TODOS_SQL(db) else [], []),

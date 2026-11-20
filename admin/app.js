@@ -1021,7 +1021,7 @@ if (document.body.classList.contains("login")) {
   const TABLE_GROUPS = [
     ["Accounts", "user", ["users", "handles", "reserved", "gone", "devices"]],
     ["Messages", "mail", ["messages", "blobs", "blob_quota"]],
-    ["Support", "chat", ["support_messages", "todos", "reports", "feedback"]],
+    ["Support", "chat", ["support_messages", "todos", "reports"]],
     ["Errors", "warn", ["diagnostics", "diagnostic_days", "diagnostic_seen"]],
     ["Keys", "key", ["account_keys", "contact_keys", "prekeys", "profile_commitments"]],
     ["Groups", "group", ["zk_groups"]],
@@ -1062,7 +1062,6 @@ if (document.body.classList.contains("login")) {
     diagnostic_seen: "Report ids already counted, never counted twice",
     diagnostic_days: "Crashes and errors per day, last 14 days",
     reports: "Users reported by users, latest per pair",
-    feedback: "Old app feedback, before the support chat",
     settings: "Hub switches, such as name reservation on/off",
     deliveries_hourly: "Deliveries per hour, a count only, 8 days",
     _litestream_lock: "Litestream replication bookkeeping (?)",
