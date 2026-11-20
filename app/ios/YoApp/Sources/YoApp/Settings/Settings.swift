@@ -28,67 +28,25 @@ struct SettingsView: View {
 
   @State private var hasRecoveryKey = true
   @State private var currentIconName = UIApplication.shared.alternateIconName
-  enum Page: Hashable {
+  enum Page: Hashable, Identifiable {
     case account, security, help, status, contacts, code, licenses, appIcon
 
-    /// Each page's height, fixed here and never measured: half for the pages that fit there (the first page,
-    /// Account, its Account Security and App Icon's five icons), full for every other.
-    var fitsHalf: Bool { self == .account || self == .security || self == .appIcon }
+    var id: Self { self }
+
+    /// The pages that fit at half height (Account, its Account Security and App Icon's five icons) are pushed inside
+    /// the half sheet; every other opens as a sheet of its own at full height, so the half sheet never changes height.
+    var opensOwnSheet: Bool { !(self == .account || self == .security || self == .appIcon) }
   }
   @State private var path: [Page] = []
+  /// The full-height page open as its own sheet on top, with its own stack (About & Licenses and Status push in it).
+  @State private var sheet: Page?
   @State private var showingDeleteAccount = false
-  /// Both heights stay in the sheet's detents all the time; only the selection changes, so the sheet moves with the
-  /// system's own detent animation, as when it is dragged.
-  @State private var detent: PresentationDetent = Self.half
-  /// Exactly half of full height (`.medium` is only about half), so full height is known from the first page.
-  private static let half = PresentationDetent.fraction(0.5)
-  /// The first page's room left over at half height, given to the profile card so the gap below the last section is
-  /// the list's own bottom margin, as at its top. More rows later take it back by themselves.
-  @State private var spare: CGFloat = 0
-  /// The pages are always laid out at the sheet's full height, from its top; at half height the sheet shows their
-  /// upper half. Growing or shrinking the sheet then never lays a page out again, so a page pushed in while the
-  /// sheet grows arrives whole instead of cut at the old height.
-  @State private var fullHeight: CGFloat?
-  @State private var heights = SheetHeights()
 
-  private static func detent(for path: [Page]) -> PresentationDetent {
-    path.last.map { $0.fitsHalf ? half : .large } ?? half
-  }
-
-  /// The sheet's visible height, settled or on its way: at half height on the first page it gives full height (twice
-  /// it; the smallest seen, as presenting may pass a taller moment), at full height on a full page the exact value.
-  private func measured(_ visible: CGFloat) {
-    heights.visible = visible
-    guard visible > 100 else { return }
-    if path.isEmpty, detent == Self.half {
-      heights.half = min(heights.half ?? visible, visible)
-    } else if !path.isEmpty, detent == .large {
-      heights.full = max(heights.full ?? 0, visible)
-    }
-    let full = max(((heights.half ?? 0) * 2).rounded(.down), heights.full ?? 0)
-    if full > 0, fullHeight.map({ abs($0 - full) > 0.5 }) ?? true { fullHeight = full }
-    settleSpare()
-  }
-
-  /// The profile card's spare room, taken only while the first page shows at half height.
-  private func settleSpare() {
-    guard path.isEmpty, detent == Self.half, let half = heights.half, abs(heights.visible - half) < 1,
-      let target = heights.spare
-    else { return }
-    let settled = typeSize.isAccessibilitySize ? 0 : target
-    if abs(settled - spare) > 0.5 { spare = settled }
-  }
-
-  /// Every push and pop goes through here: the page changes and the sheet takes that page's height together, in
-  /// one transaction, without waiting for either.
+  /// Every push goes through here: a half page joins the path, a full page opens its own sheet instead.
   private func navigate(to new: [Page]) {
-    let target = Self.detent(for: new)
-    guard target != detent else {
-      path = new
-      return
-    }
-    withAnimation(.smooth) {
-      detent = target
+    if new.count > path.count, let page = new.last, page.opensOwnSheet {
+      sheet = page
+    } else {
       path = new
     }
   }
@@ -103,22 +61,20 @@ struct SettingsView: View {
         if let account = accounts.account {
           Section {
             NavigationLink(value: Page.account) {
-              // The avatar takes the spare room up to 96 pt, the rest pads the row above and below it.
-              let grow = min(spare, 40)
               HStack(spacing: 14) {
-                Avatar(name: account.username, size: 56 + grow)
+                Avatar(name: account.username, size: 56)
                 Text(account.username)
-                  .font(.yo(26 + grow * 0.3, relativeTo: .title2))
+                  .font(.yo(26, relativeTo: .title2))
                   .lineLimit(1)
                   .minimumScaleFactor(0.5)
                 if accounts.recoveryNeedsAttention(hasRecoveryKey: hasRecoveryKey) { RecoveryBadge() }
                 Spacer(minLength: 0)
                 YourCodeButton {
                   YourCodePage.prepare(name: account.username)
-                  navigate(to: path + [.code])
+                  sheet = .code
                 }
               }
-              .padding(.vertical, 2 + (spare - grow) / 2)
+              .padding(.vertical, 2)
             }
           }
           Section {
@@ -155,49 +111,27 @@ struct SettingsView: View {
       // It fits at half height, so it never scrolls: always shown from its top (with Dynamic Type's largest sizes,
       // where it cannot fit, it scrolls again).
       .scrollDisabled(!typeSize.isAccessibilitySize)
-      // The room the list leaves empty at half height goes to the profile card (what it already has counted in, so
-      // it settles in one step); at Dynamic Type's accessibility sizes the compact row, and the list scrolls.
-      // The part below the sheet's edge is in the list's bottom inset, so this is the room the sheet shows.
-      .onScrollGeometryChange(for: CGFloat.self) {
-        $0.containerSize.height - $0.contentInsets.top - $0.contentInsets.bottom - $0.contentSize.height
-      } action: { _, room in
-        heights.spare = max(0, spare + room)
-        settleSpare()
-      }
       // No title and no close button: only the system's grabber, to pull the sheet down and away. The pages pushed
       // in show their bar with the back button.
       .toolbar(.hidden, for: .navigationBar)
       .task { await accounts.refreshSupport() }
       .onAppear { currentIconName = UIApplication.shared.alternateIconName }
-      .navigationDestination(for: Page.self) { page in
-        Group {
-          switch page {
-          case .account:
-            if let account = accounts.account {
-              AccountPage(
-                account: account, hasRecoveryKey: hasRecoveryKey, dismissSettings: { dismiss() },
-                showingDelete: $showingDeleteAccount)
-            }
-          case .security:
-            if let account = accounts.account { AccountSecurityPage(account: account, hasRecoveryKey: hasRecoveryKey) }
-          case .appIcon: AppIconPage()
-          case .help: HelpPage()
-          case .status: StatusPage()
-          case .contacts: ContactSecurityPage()
-          case .licenses: LicensesPage()
-          case .code:
-            if let account = accounts.account { YourCodePage(name: account.username) }
-          }
-        }
-        .toolbar(.visible, for: .navigationBar)
-        .navigationBarTitleDisplayMode(.inline)
-        // The list's compact top under the inline title, as on the first page.
-        .listSectionSpacing(.compact)
-      }
+      .navigationDestination(for: Page.self) { destination($0) }
     }
-    .frame(height: fullHeight, alignment: .top)
-    .frame(maxHeight: .infinity, alignment: .top)
-    .onGeometryChange(for: CGFloat.self) { $0.size.height } action: { measured($0) }
+    .sheet(item: $sheet) { page in
+      NavigationStack {
+        destination(page)
+          .toolbar {
+            ToolbarItem(placement: .topBarLeading) {
+              Button(role: .close) { sheet = nil }
+            }
+          }
+          .navigationDestination(for: Page.self) { destination($0) }
+      }
+      .scrollBounceBehavior(.basedOnSize)
+      .presentationDetents([.large])
+      .presentationBackground(Color(.systemGroupedBackground))
+    }
     .hitchScene("settings root")
     .onChange(of: path) { _, path in
       #if YO_DEV
@@ -206,13 +140,8 @@ struct SettingsView: View {
     }
     // Every page scrolls only when it does not fit.
     .scrollBounceBehavior(.basedOnSize)
-    .presentationDetents([Self.half, .large], selection: $detent)
-    // Dragged to the other height by hand, the sheet goes back to the page's own once let go (the selection
-    // changes only when the drag ends).
-    .onChange(of: detent) { _, now in
-      let own = Self.detent(for: path)
-      if now != own { withAnimation(.smooth) { detent = own } }
-    }
+    // Always half height: a full page opens as a sheet of its own on top.
+    .presentationDetents([.medium])
     // The grabber on the first page; a page pushed in has its bar instead.
     .presentationDragIndicator(path.isEmpty ? .visible : .hidden)
     // Below full height an iOS 26 sheet is see-through glass: opaque instead.
@@ -223,13 +152,30 @@ struct SettingsView: View {
       hasRecoveryKey = available
     }
   }
-}
 
-/// The sheet's heights as measured, kept out of the view's state so a sheet on the move redraws nothing.
-@MainActor private final class SheetHeights {
-  var visible: CGFloat = 0
-  var half: CGFloat?
-  var full: CGFloat?
-  /// The profile card's spare room as last measured.
-  var spare: CGFloat?
+  private func destination(_ page: Page) -> some View {
+    Group {
+      switch page {
+      case .account:
+        if let account = accounts.account {
+          AccountPage(
+            account: account, hasRecoveryKey: hasRecoveryKey, dismissSettings: { dismiss() },
+            showingDelete: $showingDeleteAccount)
+        }
+      case .security:
+        if let account = accounts.account { AccountSecurityPage(account: account, hasRecoveryKey: hasRecoveryKey) }
+      case .appIcon: AppIconPage()
+      case .help: HelpPage()
+      case .status: StatusPage()
+      case .contacts: ContactSecurityPage()
+      case .licenses: LicensesPage()
+      case .code:
+        if let account = accounts.account { YourCodePage(name: account.username) }
+      }
+    }
+    .toolbar(.visible, for: .navigationBar)
+    .navigationBarTitleDisplayMode(.inline)
+    // The list's compact top under the inline title, as on the first page.
+    .listSectionSpacing(.compact)
+  }
 }
