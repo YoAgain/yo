@@ -61,20 +61,13 @@ What the hub knows per endpoint group ([details](spec/v1.md#1-goals)):
 What a new phone gets back besides the account, sealed and padded ([spec 6.9](spec/v1.md#69-storage)).
 Not synced: sessions, messages, media, list order.
 
-| Field | Example | Purpose |
+| Group | Fields | Example |
 |---|---|---|
-| Friend name | `"n": "lina"` | shown in the list |
-| Friend colour | `"c": 3` | the row's colour |
-| Friend blocked | `"b": false` | a block survives a restore |
-| Friend removed | `"r": false` | removed friends stay gone |
-| Friends' profile keys | `"k": {"9e4b…": "HoILvR…LSo6gA"}` (43 chars) | sealed sender to them |
-| Own profile key | `"pk": "Hm4L0R…LSo6gA"` (43 chars) | contacts write to you sealed |
-| Group master key | `"k": "XmvfEe…Q0kJzg"` (43 chars) | read the group at the hub |
-| Group joined | `"a": true` | member or request |
-| Group left | `"r": false` | left groups stay gone |
-| App icon | `"icon": "amethyst"` | the same icon |
-| Left-handed | `"left_handed": true` | the same side |
-| Version | `"version": 42` | old copies are ignored |
+| Friend | name, colour, blocked, removed, profile key | `"n": "lina"`, `"c": 3`, `"b": false` |
+| Group | master key, joined, left | `"k": "Xmvf…"`, `"a": true` |
+| You | own profile key | `"pk": "Hm4L…"` |
+| App settings | app icon, left-handed | `"icon": "amethyst"`, `"left_handed": true` |
+| Copy | version (older copies are ignored) | `"version": 42` |
 
 </details>
 
