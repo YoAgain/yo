@@ -793,7 +793,7 @@ if (document.body.classList.contains("login")) {
       node._split = p;
       if (!node._h) {
         node._h = 1;
-        hoverTip(node, () => node._split.cr.length, (i) => { const q = node._split; return { head: q.names[i], rows: [{ color: "#e67e22", label: "Errors", value: num(q.er[i]) }, { color: "var(--bad)", label: "Crashes", value: num(q.cr[i]) }] }; },
+        hoverTip(node, () => node._split.cr.length, (i) => { const q = node._split; return { head: q.names[i], rows: [{ color: "#e67e22", label: "Errors open", value: num(q.er[i]) }, { color: "var(--bad)", label: "Crashes open", value: num(q.cr[i]) }] }; },
           (k) => [...node.children].forEach((r, j) => r.classList.toggle("on", j === k)));
       }
     }
@@ -2063,18 +2063,19 @@ if (document.body.classList.contains("login")) {
       : Math.max((h.diagnostic_days || []).filter((r) => r.kind === "crash").reduce((a, r) => a + r.count, 0), ev?.total || 0);
     return { values, names: ds.map(dayName), total, what: range === 1 ? "today (UTC), per day: the hub counts hours after its next deploy" : range ? `${range} days` : "since the start" };
   };
-  // Errors and crash reports per slot, for the Problems tile and its detail row: per hour for the last 24 hours (the
-  // hub's `error` and `crash` events; hours before it counted them are empty), else per UTC day (the hub's kept
-  // counts, older days from the events).
+  // Open problems per slot, for the Problems tile and its detail row: the error groups (orange) and crash groups (red)
+  // not done yet, a done one counts nowhere. The hub keeps no time of when a group arrived in the past, so the open
+  // groups of a kind arrive evenly between the oldest one's first report and now: a rise to today's open count.
   const problemSplit = (h) => {
-    const ev = h.events || {}, kept = new Set((h.diagnostic_days || []).map((r) => r.day));
-    if (range === 1) {
-      const h1 = Math.floor(Date.now() / 3600000), pick = (k) => last24(ev[k]?.hours).map((v) => v || 0);
-      return { names: Array.from({ length: 24 }, (_, i) => clock((h1 - 23 + i) * 3600000)), er: pick("error"), cr: pick("crash") };
-    }
-    const len = range || 30, ds = Array.from({ length: len }, (_, i) => today0() - len + 1 + i);
-    const per = (k, d) => (kept.has(d) ? (h.diagnostic_days || []).filter((r) => r.kind === k && r.day === d).reduce((a, r) => a + r.count, 0) : year(ev[k]?.year).get(d) || 0);
-    return { names: ds.map(dayName), er: ds.map((d) => per("error", d)), cr: ds.map((d) => per("crash", d)) };
+    const now = Date.now(), open = (h.diagnostics || []).filter((d) => !d.done && !diagInfo(d).expected);
+    const causes = (kind) => { const m = new Map(); for (const d of open.filter((x) => x.kind === kind)) { const c = diagCause(d); m.set(c, Math.min(m.get(c) ?? Infinity, d.first_seen)); } return [...m.values()].sort((x, y) => x - y); };
+    const all = [...causes("error"), ...causes("crash")], t0 = all.length ? Math.min(...all) : now;
+    const arrive = (kind) => { const l = causes(kind); return l.map((_, i) => t0 + ((i + 1) / l.length) * (now - t0)); };
+    const er = arrive("error"), cr = arrive("crash"), upTo = (l, t) => l.filter((x) => x <= t).length;
+    const ends = range === 1 ? Array.from({ length: 24 }, (_, i) => Math.min(now, (Math.floor(now / 3600000) - 22 + i) * 3600000))
+      : Array.from({ length: range || 30 }, (_, i) => Math.min(now, (today0() - (range || 30) + 2 + i) * 86400000));
+    const names = range === 1 ? ends.map((t, i) => clock((Math.floor(now / 3600000) - 23 + i) * 3600000)) : ends.map((t, i) => dayName(today0() - (range || 30) + 1 + i));
+    return { names, er: ends.map((t) => upTo(er, t)), cr: ends.map((t) => upTo(cr, t)) };
   };
   // Problems that came in over the range, by kind (errors per day only: today for the last 24 hours).
   const problemKinds = (h) => {
@@ -2319,8 +2320,8 @@ if (document.body.classList.contains("login")) {
           tip: (i) => ({ head: slotName(slots[i]), rows: [{ color: "#e67e22", label: "Reports", value: num(rp[i]) }] }) },
         (() => { const p = problemSplit(h), sum = (v) => v.reduce((x, y) => x + y, 0);
           // Errors (orange) and crash reports (red) per slot, stacked.
-          return { ico: "warn", label: "Errors · Crashes", value: `${num(sum(p.er))} · ${num(sum(p.cr))}`, cls: sum(p.er) + sum(p.cr) ? "warn" : "", values: p.er, top: p.cr, scls: "warm",
-            tip: (i) => ({ head: p.names[i], rows: [{ color: "#e67e22", label: "Errors", value: num(p.er[i]) }, { color: "var(--bad)", label: "Crashes", value: num(p.cr[i]) }] }) }; })(),
+          return { ico: "warn", label: "Errors · Crashes", value: `${num(p.er.at(-1))} · ${num(p.cr.at(-1))} open`, cls: p.er.at(-1) + p.cr.at(-1) ? "warn" : "", values: p.er, top: p.cr, scls: "warm",
+            tip: (i) => ({ head: p.names[i], rows: [{ color: "#e67e22", label: "Errors open", value: num(p.er[i]) }, { color: "var(--bad)", label: "Crashes open", value: num(p.cr[i]) }] }) }; })(),
         { ico: "ratio", label: "Crash-free", value: hd.free == null ? "–" : `${pctText(hd.free)} of installs (est.)`, cls: hd.free != null && hd.free < 99 ? "warn" : "",
           title: { cap: 1, head: "Crash-free (est.)", note: "1 − installs with a crash ÷ phones seen (iOS, Android), since the range's first UTC day",
             rows: [{ label: "Installs with a crash", value: hd.crashInstalls == null ? "–" : num(hd.crashInstalls) }, { label: "Phones seen", value: num(hd.seen) }] } },
