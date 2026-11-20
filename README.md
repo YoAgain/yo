@@ -19,6 +19,7 @@ One Rust core runs the whole client. The apps only draw and pass HTTP and storag
 - [core/client](core/client): identities, sessions, groups, media, recovery, outbox
 - [core/wire](core/wire): protocol formats
 - [core/bindings](core/bindings): Swift and Kotlin through UniFFI
+- [Telemetry](core/README.md#telemetry): every crash, error and support field the apps send, and what the hub counts
 
 The apps on top:
 
