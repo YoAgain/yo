@@ -22,24 +22,37 @@ def main(key, aab, tracks, status="completed"):
         key, scopes=["https://www.googleapis.com/auth/androidpublisher"])
     session = AuthorizedSession(credentials)
 
+    class Refused(Exception):
+        pass
+
     def check(response):
         if not response.ok:
-            sys.exit(f"{response.request.method} {response.url.split('?')[0]}: {response.status_code} {response.text}")
+            raise Refused(f"{response.request.method} {response.url.split('?')[0]}: {response.status_code} {response.text}")
         return response.json()
 
-    edit = check(session.post(f"{API}/edits"))["id"]
-    with open(aab, "rb") as f:
-        bundle = check(session.post(f"{UPLOAD}/edits/{edit}/bundles", params={"uploadType": "media"}, data=f,
-                                    headers={"Content-Type": "application/octet-stream"}, timeout=900))
-    code = bundle["versionCode"]
-    release = {"versionCodes": [str(code)], "status": status}
-    for track in tracks.split(","):
-        response = session.put(f"{API}/edits/{edit}/tracks/{track}", json={"track": track, "releases": [release]})
-        if not response.ok and status == "completed" and "draft" in response.text.lower():
-            status = release["status"] = "draft"  # the app is still a draft in Play: draft releases only
-            response = session.put(f"{API}/edits/{edit}/tracks/{track}", json={"track": track, "releases": [release]})
-        check(response)
-    check(session.post(f"{API}/edits/{edit}:commit"))
+    def attempt(status):
+        edit = check(session.post(f"{API}/edits"))["id"]
+        with open(aab, "rb") as f:
+            bundle = check(session.post(f"{UPLOAD}/edits/{edit}/bundles", params={"uploadType": "media"}, data=f,
+                                        headers={"Content-Type": "application/octet-stream"}, timeout=900))
+        code = bundle["versionCode"]
+        release = {"versionCodes": [str(code)], "status": status}
+        for track in tracks.split(","):
+            check(session.put(f"{API}/edits/{edit}/tracks/{track}", json={"track": track, "releases": [release]}))
+        check(session.post(f"{API}/edits/{edit}:commit"))  # Play checks the draft rule here, not at the track
+        return code
+
+    try:
+        code = attempt(status)
+    except Refused as error:
+        if status != "completed" or "draft" not in str(error).lower():
+            sys.exit(str(error))
+        # The app is still a draft in Play: every track takes draft releases only. Start over with a fresh edit.
+        status = "draft"
+        try:
+            code = attempt(status)
+        except Refused as again:
+            sys.exit(str(again))
     print(f"{PACKAGE} {code} on {tracks} ({status})")
 
 
