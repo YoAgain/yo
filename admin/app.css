@@ -1003,6 +1003,7 @@ body.dash { max-width: none; padding-left: 24px; padding-right: 24px; }
 .dcard h3 .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--muted); flex: none; }
 .dcard h3 .dot.ok { background: var(--ok); } .dcard h3 .dot.bad { background: var(--bad); }
 .dcard .hc-lines { margin-top: 0; }
+.dcard .pbig { font-size: 18px; font-weight: 700; font-variant-numeric: tabular-nums; }
 .dcard .hc-kv dd { overflow-wrap: anywhere; white-space: pre-line; }
 .dcard .hc-hint { margin-top: auto; }
 .dcard .hc-chart.acc .b:not(.zero) { fill: var(--amethyst-soft); }

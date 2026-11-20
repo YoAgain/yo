@@ -476,7 +476,7 @@ if (document.body.classList.contains("login")) {
     const cf = h.crash_free?.[String(range)] || null, crashInstalls = cf ? cf[0] : null, seen = cf ? cf[1] : 0;
     const pi = h.problem_installs?.[String(range)] || null, days = { 1: 2, 7: 7, 30: 30, 0: 90 }[range], from = today0() - days + 1;
     const reports = (kind) => (h.diagnostic_days || []).filter((r) => r.day >= from && (!kind || r.kind === kind)).reduce((n, r) => n + r.count, 0);
-    problemTotals = { reports: reports(), installs: pi ? pi[1] : null, seen };
+    problemTotals = { reports: reports(), installs: pi ? pi[1] : null, seen, errInstalls: pi ? pi[0] : null, crashInstalls, platforms: pi ? [["iOS", pi[2], pi[3]], ["Android", pi[4], pi[5]]] : [] };
     healthData = { span, ps, psAll, he, heAll, names, crashInstalls, seen, free: crashFree(crashInstalls, seen), gone, dau, mau, stick, heRate: rate(heAll) };
   };
   // The two chart widgets: a running total over the range (a point an hour, a day, or for Total up to 60 points),
@@ -2364,7 +2364,18 @@ if (document.body.classList.contains("login")) {
       })() : dcard("Yo to Yo speed", null, note("No Yos delivered in this range."));
       // Speed two columns wide: the four columns filled without the Errors card (errors are in the Errors view).
       fast.classList.add("wide");
-      return [users, one.dl().find((c) => title(c) === "Delivery"), fast];
+      // How problems are counted: open causes, the installs behind them, the occurrences (sum of counts), in three steps.
+      const ps = problemSplit(h), last = ps.names.length - 1, pt = problemTotals;
+      const big = el("div", "pbig", `${num(ps.ec[last] + ps.cc[last])} problems · ${pt?.installs == null ? "–" : num(pt.installs)} installs · ${num(ps.er[last] + ps.cr[last])} occurrences`);
+      const pc = (n, d) => (n == null || !d ? "–" : pctText((100 * n) / d));
+      const shares = pt?.installs == null || !pt.seen ? [] : [
+        ["Phones with an error", pc(pt.errInstalls, pt.seen)], ["Phones with a crash", pc(pt.crashInstalls, pt.seen)], ["Phones with neither", pc(pt.seen - pt.installs, pt.seen)],
+        ...pt.platforms.filter(([, , n]) => n).map(([l, hit, n]) => [`${l} phones with a problem`, pc(hit, n)])];
+      const how = dcard("How problems are counted", null, big, shares.length ? kvRows(shares) : null,
+        note("1  Each report is fingerprinted: kind, domain, code, code line and build make one group."),
+        note("2  The same fingerprint is the same group: its count goes up. Installs are random ids, never accounts."),
+        note("3  A ticked group stays closed; the same bug in a new build opens a new group, so a fix that did not work shows up again. A problem is one cause: its groups put together."));
+      return [how, users, one.dl().find((c) => title(c) === "Delivery"), fast];
     };
     // Server: its four charts, then updates and the services, one card each.
     DETAIL.server = () => {

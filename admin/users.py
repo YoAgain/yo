@@ -234,6 +234,12 @@ def problem_installs(db, now: int):
                          " FROM diagnostic_installs i JOIN diagnostics d ON d.id = i.diagnostic_id"
                          f" WHERE i.day >= ? AND {PHONE_APP.format('d.app')} AND d.os NOT LIKE 'mac%'", (first,)).fetchone()
         out[key] = [row[0], row[1]]
+        # Per platform: installs with an error or crash, phones seen (the same days, apps as in crash_free).
+        for prefix in ("ios", "android"):
+            hit = db.execute("SELECT count(DISTINCT i.install) FROM diagnostic_installs i JOIN diagnostics d ON d.id = i.diagnostic_id"
+                             " WHERE i.day >= ? AND d.app LIKE ? AND d.os NOT LIKE 'mac%'", (first, prefix + "/%")).fetchone()[0]
+            seen = db.execute("SELECT count(*) FROM devices WHERE last_seen_at >= ? AND app LIKE ?", (first * DAY_MS, prefix + "/%")).fetchone()[0]
+            out[key] += [hit, seen]
     return out
 
 
