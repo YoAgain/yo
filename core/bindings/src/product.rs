@@ -1,7 +1,9 @@
 //! The product rules (`yo_product`) for Swift, under the names the app has always used.
 
 use yo_product::list::Kind;
-use yo_product::{self as product, ActivityPlace, Direction, Language, LastActivity, Outcome, Problem, Text, WidgetFriend};
+use yo_product::{
+    self as product, ActivityPlace, Direction, Language, LastActivity, Outcome, Problem, Text, WidgetFriend,
+};
 
 #[uniffi::remote(Enum)]
 #[uniffi(name = "ProductLanguage")]
