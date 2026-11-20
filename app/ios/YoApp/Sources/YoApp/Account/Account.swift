@@ -33,7 +33,7 @@ enum Username {
   static func problem(_ name: String) -> String? {
     if name.isEmpty { return "Type a name." }
     if name.count > 16 { return "Use no more than 16 characters." }
-    if !usernameValid(name: name) { return "Start with a letter or emoji." }
+    if !usernameValid(name: name) { return "Use at least one letter or emoji." }
     return nil
   }
 

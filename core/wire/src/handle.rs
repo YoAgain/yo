@@ -77,14 +77,16 @@ impl Handle {
 pub const USERNAME_MAX: usize = 16;
 
 /// A username as it may be written (spec 3.3): 1 to 16 characters (grapheme clusters, NFC) of Latin letters with their
-/// accents, 0–9, `_` and emoji, starting with a letter or an emoji, in any case ("YoGPT"). What the hub refuses with
-/// `400` (spec 6.3). Which names are reserved only the hub knows.
+/// accents, 0–9, `_` and emoji, starting with a letter, an emoji or a digit, with at least one letter or emoji ("1abc",
+/// not "1234"), in any case ("YoGPT"). What the hub refuses with `400` (spec 6.3). Which names are reserved only the
+/// hub knows.
 pub fn check_username_form(name: &str) -> Result<(), Error> {
     let graphemes: Vec<&str> = name.graphemes(true).collect();
     let ok = (1..=USERNAME_MAX).contains(&graphemes.len())
         && name.nfc().eq(name.chars())
         && graphemes.iter().all(|g| allowed(g))
-        && graphemes.first().is_some_and(|g| is_latin_letter(g) || is_emoji(g));
+        && graphemes.first().is_some_and(|g| *g != "_")
+        && graphemes.iter().any(|g| is_latin_letter(g) || is_emoji(g));
     ok.then_some(()).ok_or(Error::Format)
 }
 
@@ -98,15 +100,12 @@ pub fn same_name(a: &str, b: &str) -> bool {
     skeleton(a) == skeleton(b)
 }
 
-/// What a person typed, as a username can be written: NFC, only the allowed characters, a letter or an emoji first,
-/// at most 16, the case as typed. The apps keep their field to this; the hub accepts only names already so.
+/// What a person typed, as a username can be written: NFC, only the allowed characters, no `_` first, at most 16, the
+/// case as typed (digits alone stay: the letter may come next). The apps keep their field to this; the hub accepts only
+/// names already so.
 pub fn canonical(typed: &str) -> String {
     let nfc: String = typed.nfc().collect();
-    nfc.graphemes(true)
-        .filter(|g| allowed(g))
-        .skip_while(|g| !is_latin_letter(g) && !is_emoji(g))
-        .take(USERNAME_MAX)
-        .collect()
+    nfc.graphemes(true).filter(|g| allowed(g)).skip_while(|g| *g == "_").take(USERNAME_MAX).collect()
 }
 
 /// What a username is compared by (spec 3.3): upper case, NFKD, without nonspacing marks, emoji variation selectors
@@ -202,7 +201,8 @@ mod tests {
         assert_eq!(Handle::parse("admin").unwrap(), Handle::username("admin"));
         assert_eq!(Handle::parse("Or").unwrap(), Handle::username("Or"), "two letters are a name");
         assert_eq!(Handle::parse("Y").unwrap(), Handle::username("Y"), "one is a name by form; the hub sets the least");
-        for bad in ["", "this_is_far_too_long_x", "+49 170 1234567", "1abc"] {
+        assert_eq!(Handle::parse("1abc").unwrap(), Handle::username("1abc"), "a digit first");
+        for bad in ["", "this_is_far_too_long_x", "+49 170 1234567", "1234"] {
             assert!(Handle::parse(bad).is_err(), "{bad}");
         }
     }
@@ -226,8 +226,15 @@ mod tests {
             assert_eq!(canonical(typed), name, "{typed}");
             assert_eq!(skeleton(name), skel, "{typed}");
         }
-        for (typed, name) in [("1abc", "abc"), ("_x🔥", "x🔥"), ("abcабв", "abc"), ("x×y", "xy"), ("🧙‍♂️🔥yo", "🧙‍♂️🔥yo")]
-        {
+        for (typed, name) in [
+            ("1abc", "1abc"),
+            ("_1abc", "1abc"),
+            ("1234", "1234"),
+            ("_x🔥", "x🔥"),
+            ("abcабв", "abc"),
+            ("x×y", "xy"),
+            ("🧙‍♂️🔥yo", "🧙‍♂️🔥yo"),
+        ] {
             assert_eq!(canonical(typed), name, "{typed}");
         }
         assert!(check_username_form("🔥🔥🔥").is_ok());
@@ -237,7 +244,12 @@ mod tests {
         assert!(check_username_form("YoGPT").is_ok());
         assert!(check_username_form("le\u{301}o").is_err(), "not NFC");
         assert!(check_username_form("ABCабв").is_err(), "another script");
-        assert!(check_username_form("1ABC").is_err(), "starts with a digit");
+        assert!(check_username_form("1abc").is_ok(), "starts with a digit");
+        assert!(check_username_form("007bond").is_ok());
+        assert!(check_username_form("1🔥").is_ok(), "a digit, then an emoji");
+        assert!(check_username_form("1234").is_err(), "no letter or emoji");
+        assert!(check_username_form("12_3").is_err(), "no letter or emoji");
+        assert!(check_username_form("_abc").is_err(), "starts with _");
         for (a, b) in [("YoGPT", "yogpt"), ("YoGPT", "YOGPT"), ("YoGPT", "Y0GPT"), ("Christopher", "CHRISTOPHER")] {
             assert!(same_name(a, b), "{a} {b}");
         }

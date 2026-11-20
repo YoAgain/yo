@@ -153,7 +153,7 @@
 <string name="key_age">Signed Key Age (days)</string>
 <string name="refill_pending">Key Refill Pending</string>
 <string name="recording">● Recording</string>
-<string name="valid_name">Start with a letter or emoji. Use no more than 16 characters.</string>
+<string name="valid_name">Use at least one letter or emoji and no more than 16 characters.</string>
 <string name="type_name">Type a name.</string>
 <string name="contacts_saved">Contacts saved</string>
 <string name="no_passkey">No Yo passkey found. Use your recovery key.</string>

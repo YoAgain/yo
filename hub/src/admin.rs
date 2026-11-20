@@ -216,7 +216,8 @@ async fn get_reserved(State(hub): Hubs) -> Res<Json<Value>> {
     state["name_min"] = json!(hub.config.name_min);
     state["name_max"] = json!(yo_wire::handle::USERNAME_MAX);
     state["name_comparison"] = json!("skeleton");
-    state["name_form"] = json!("NFC Latin letters, digits, underscore or emoji; starts with a letter or emoji");
+    state["name_form"] =
+        json!("NFC Latin letters, digits, underscore or emoji; no _ first, at least one letter or emoji");
     Ok(Json(state))
 }
 

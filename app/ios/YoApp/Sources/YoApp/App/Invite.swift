@@ -4,6 +4,7 @@
 // through onboarding; a link to one's own name is dropped.
 import Foundation
 import Observation
+import YoCore
 
 @MainActor @Observable
 final class Invite {
@@ -35,7 +36,7 @@ final class Invite {
     }
     guard let raw, raw.lowercased() != "privacy" else { return nil }
     let name = Username.clean(raw)
-    return name.isEmpty ? nil : name
+    return usernameValid(name: name) ? name : nil  // "1abc" is a name, "404" none
   }
 
   nonisolated static func link(for username: String) -> URL {

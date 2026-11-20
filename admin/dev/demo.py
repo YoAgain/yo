@@ -438,7 +438,7 @@ class FakeHubs:
             out = {"enabled": bool(db.execute("SELECT value FROM settings WHERE key='reserved_enabled'").fetchone()[0]),
                    "names": [r[0] for r in db.execute("SELECT spelling FROM reserved ORDER BY skeleton")],
                    "name_min": 3, "name_max": 32, "name_comparison": "skeleton",
-                   "name_form": "NFC Latin letters, digits, underscore or emoji; starts with a letter or emoji"}
+                   "name_form": "NFC Latin letters, digits, underscore or emoji; no _ first, at least one letter or emoji"}
         if method != "GET":
             self.on_change()
         return out if method != "DELETE" else {}
