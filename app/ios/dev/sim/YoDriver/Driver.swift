@@ -63,25 +63,37 @@ import XCTest
       let securityIds = ["security.accountSync", "security.recoveryKey", "security.passkey"]
       let account = try rowsInOrder(accountIds)
       account[1].tap()
-      let security = try rowsInOrder(securityIds)
-      // A switch that is off opens its screen; the saved key's own row opens it while the key is on.
-      let showKey = app.buttons["security.showKey"]
-      for (row, title) in [(security[1], "Your Recovery Key"), (security[2], "Passkey")] {
-        let on = (row.value as? String) == "1"
-        if on && title == "Passkey" { continue }
-        if on { showKey.tap() } else { row.switches.firstMatch.exists ? row.switches.firstMatch.tap() : row.tap() }
-        guard app.staticTexts[title].waitForExistence(timeout: 5) else {
-          throw Failure(description: "\(title) screen did not open")
+      // With the red badge the row opens the recovery key's screen itself, and the page waits until it is saved.
+      var checked = accountIds
+      if app.buttons["Done"].waitForExistence(timeout: 2) {
+        guard app.staticTexts["Keep it safe. It brings your account back."].exists else {
+          throw Failure(description: "Recovery Key screen did not open")
         }
         app.buttons["Done"].tap()
+      } else {
+        let security = try rowsInOrder(securityIds)
+        checked += securityIds
+        // A switch that is off opens its screen; the saved key's own row opens it while the key is on.
+        let showKey = app.buttons["security.showKey"]
+        for (row, line) in [
+          (security[1], "Keep it safe. It brings your account back."), (security[2], "Sign in with Face ID on a new phone."),
+        ] {
+          let on = (row.value as? String) == "1"
+          if on && row == security[2] { continue }
+          if on { showKey.tap() } else { row.switches.firstMatch.exists ? row.switches.firstMatch.tap() : row.tap() }
+          guard app.staticTexts[line].waitForExistence(timeout: 5) else {
+            throw Failure(description: "\(line) screen did not open")
+          }
+          app.buttons["Done"].tap()
+        }
+        app.navigationBars.buttons.element(boundBy: 0).tap()
       }
-      app.navigationBars.buttons.element(boundBy: 0).tap()
       account[0].tap()
       guard app.navigationBars["Contacts"].waitForExistence(timeout: 5),
         app.staticTexts["Blocked"].exists
       else { throw Failure(description: "missing Contacts title or Blocked section") }
       app.navigationBars.buttons.element(boundBy: 0).tap()
-      return ["rows": accountIds + securityIds]
+      return ["rows": checked]
     case "camera-add":
       // Begin with camera mode open and the final row visible.
       let add = app.buttons["Add Friend"]

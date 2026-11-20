@@ -224,6 +224,8 @@ private val HalfPages = setOf("Profile", "Account", "Blocked", "Account Security
             res.getString(R.string.ui_confirm_it_s_you))
         if (intent != null) auth.launch(intent) else { afterAuth = null; model.error(res.getString(R.string.ui_set_a_screen_lock_in_android_settings_to_continue)) }
     }
+    /** The recovery key's screen; a secured account's key only after the screen lock. */
+    fun openKey() { if (s.secured) { afterAuth = "key"; authenticate() } else { repo.command { prepareRecovery() }; secure = true } }
     val passkeyConfigured by produceState(false, s.secured, passkeyPage, passkeyRevision, page) {
         if (!passkeyPage && s.secured && page in setOf("Account Security", "Delete Account")) {
             value = withContext(Dispatchers.IO) { runCatching { repo.hasRecoveryPasskey() }.getOrDefault(false) }
@@ -332,7 +334,8 @@ private val HalfPages = setOf("Profile", "Account", "Blocked", "Account Security
                         Section(null, null,
                             Setting(stringResource(R.string.account_security), Icons.Default.Shield,
                                 badge = s.recoveryNeedsAttention, good = if (s.recoveryNeedsAttention) null else true,
-                                onClick = { open("Account Security") }),
+                                // The red badge goes straight to the recovery key's screen, as before.
+                                onClick = { if (s.recoveryNeedsAttention) openKey() else open("Account Security") }),
                         )
                         Section(null, null,
                             Setting(stringResource(R.string.ui_sign_out), Icons.AutoMirrored.Filled.Logout, onClick = { logout = true }),
@@ -352,7 +355,6 @@ private val HalfPages = setOf("Profile", "Account", "Blocked", "Account Security
                         // iOS AccountSecurityPage: the three ways back on a new phone, each with its switch; the (i) above
                         // explains them. A passkey here rides on a saved recovery key, so without one its switch opens the key's screen.
                         val keyOn = s.secured && s.recoverySaved
-                        fun openKey() { if (s.secured) { afterAuth = "key"; authenticate() } else { repo.command { prepareRecovery() }; secure = true } }
                         Section(copy(ProductText.ACCOUNT_RECOVERY), copy(ProductText.RECOVERY_FOOTER),
                             // On opens the key's screen, saved there; off makes the saved key stop working.
                             Setting(copy(ProductText.RECOVERY_KEY), Icons.Default.Key, badge = s.recoveryNeedsAttention, checked = keyOn,
@@ -940,16 +942,16 @@ private fun shareCode(context: Context, name: String) {
 
 /** A step of recovery: its number (a tick once done), its name and state; beneath, its buttons side by side. */
 @Composable private fun RecoveryStep(number: Int, title: String, status: String?, done: Boolean, buttons: @Composable RowScope.() -> Unit = {}) {
-    Surface(Modifier.fillMaxWidth().padding(top = 8.dp), shape = RoundedCornerShape(16.dp), color = Color.White.copy(alpha = 0.14f), contentColor = Color.White) {
-        Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
+    Surface(Modifier.fillMaxWidth().padding(top = 12.dp), shape = RoundedCornerShape(22.dp), color = Color.White.copy(alpha = 0.14f), contentColor = Color.White) {
+        Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(14.dp)) {
             Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(12.dp)) {
                 Box(Modifier.size(26.dp).background(if (done) Color(0xFF2ECC71) else Color.White, CircleShape), contentAlignment = Alignment.Center) {
                     if (done) Icon(Icons.Default.Check, null, Modifier.size(16.dp), tint = Color.White)
                     else Text("$number", style = TextStyle(fontFamily = YoFont, fontSize = 13.sp, color = Color(0xFF8E44AD)))
                 }
                 Column(Modifier.weight(1f)) {
-                    Text(title, style = MaterialTheme.typography.titleMedium)
-                    if (status != null) Text(status, style = MaterialTheme.typography.bodySmall, color = Color.White.copy(alpha = 0.85f))
+                    Text(title, style = TextStyle(fontSize = 17.sp, fontWeight = androidx.compose.ui.text.font.FontWeight.SemiBold))
+                    if (status != null) Text(status, style = TextStyle(fontSize = 13.sp), color = Color.White.copy(alpha = 0.85f))
                 }
             }
             Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp), content = buttons)
@@ -975,34 +977,43 @@ private fun shareCode(context: Context, name: String) {
         colors = ButtonDefaults.outlinedButtonColors(contentColor = Color.White, disabledContentColor = Color.White.copy(alpha = 0.5f)))
 }
 
-/** The recovery screens (iOS RecoveryScreen): Amethyst at half height, its symbol, title and line, then the cards. */
+/** The recovery screens (iOS RecoveryScreen): a full-screen Amethyst assistant, its symbol, title and line, then the
+ *  cards, centred; the close button top right, Done at the bottom. */
 @Composable private fun RecoveryScreen(icon: ImageVector, title: String, line: String, idle: Boolean, onClose: () -> Unit,
     content: @Composable ColumnScope.() -> Unit) {
-    FittedSheet(onDismissRequest = { if (idle) onClose() }, containerColor = Amethyst, contentColor = Color.White, dragHandle = null, height = 0.5f) {
-        Column(Modifier.fillMaxWidth().verticalScroll(rememberScrollState()).padding(horizontal = 20.dp).padding(top = 12.dp, bottom = 16.dp),
-            horizontalAlignment = Alignment.CenterHorizontally) {
-            Box(Modifier.fillMaxWidth()) {
-                FilledTonalIconButton(onClick = onClose, enabled = idle, modifier = Modifier.align(Alignment.TopEnd),
+    androidx.compose.ui.window.Dialog(onDismissRequest = { if (idle) onClose() }, properties = androidx.compose.ui.window.DialogProperties(
+        usePlatformDefaultWidth = false, decorFitsSystemWindows = false, dismissOnClickOutside = false)) {
+        val window = (androidx.compose.ui.platform.LocalView.current.parent as? androidx.compose.ui.window.DialogWindowProvider)?.window
+        SideEffect { if (android.os.Build.VERSION.SDK_INT >= 29) window?.isNavigationBarContrastEnforced = false }
+        Surface(Modifier.fillMaxSize(), color = Amethyst, contentColor = Color.White) {
+            Box(Modifier.fillMaxSize().windowInsetsPadding(WindowInsets.safeDrawing)) {
+                Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(horizontal = 24.dp).padding(top = 56.dp, bottom = 24.dp),
+                    horizontalAlignment = Alignment.CenterHorizontally) {
+                    Spacer(Modifier.weight(1f))
+                    Icon(icon, null, Modifier.size(56.dp))
+                    Text(title, Modifier.padding(top = 20.dp), style = TextStyle(fontFamily = YoFont, fontSize = 24.sp), textAlign = TextAlign.Center, maxLines = 2)
+                    Text(line, Modifier.padding(top = 8.dp, bottom = 24.dp), textAlign = TextAlign.Center,
+                        style = TextStyle(fontSize = 15.sp, lineHeight = 20.sp, fontWeight = androidx.compose.ui.text.font.FontWeight.Medium), color = Color.White.copy(alpha = 0.85f))
+                    content()
+                }
+                FilledTonalIconButton(onClick = onClose, enabled = idle, modifier = Modifier.align(Alignment.TopEnd).padding(top = 8.dp, end = 12.dp),
                     colors = IconButtonDefaults.filledTonalIconButtonColors(containerColor = Color.White.copy(alpha = 0.18f), contentColor = Color.White)) {
                     Icon(Icons.Default.Close, stringResource(R.string.ui_close))
                 }
-                Icon(icon, null, Modifier.align(Alignment.Center).padding(top = 16.dp).size(40.dp))
             }
-            Text(title, Modifier.padding(top = 8.dp), style = TextStyle(fontFamily = YoFont, fontSize = 24.sp), textAlign = TextAlign.Center, maxLines = 2)
-            Text(line, Modifier.padding(top = 4.dp, bottom = 10.dp), textAlign = TextAlign.Center,
-                style = MaterialTheme.typography.bodySmall.copy(fontWeight = androidx.compose.ui.text.font.FontWeight.SemiBold), color = Color.White.copy(alpha = 0.85f))
-            content()
         }
     }
 }
 
 /** The white Done at the bottom of a recovery screen: it closes at any time, not while a step works. */
-@Composable private fun RecoveryDone(idle: Boolean, onClose: () -> Unit) =
-    Button(onClick = onClose, enabled = idle, modifier = Modifier.fillMaxWidth().padding(top = 16.dp).heightIn(min = 48.dp),
+@Composable private fun ColumnScope.RecoveryDone(idle: Boolean, onClose: () -> Unit) {
+    Spacer(Modifier.weight(1f))
+    Button(onClick = onClose, enabled = idle, modifier = Modifier.fillMaxWidth().padding(top = 24.dp).heightIn(min = 48.dp),
         colors = ButtonDefaults.buttonColors(containerColor = Color.White, contentColor = Color.Black,
             disabledContainerColor = Color.White.copy(alpha = 0.4f), disabledContentColor = Color.Black.copy(alpha = 0.6f))) {
-        Text(copy(ProductText.DONE), fontSize = 18.sp, fontWeight = androidx.compose.ui.text.font.FontWeight.SemiBold)
+        Text(copy(ProductText.DONE), fontSize = 17.sp, fontWeight = androidx.compose.ui.text.font.FontWeight.SemiBold)
     }
+}
 
 /** The recovery key (iOS RecoveryKeySheet), from the red badge and the account page: save it, show it. */
 @Composable fun RecoverySheet(model: YoViewModel, s: AppState, onClose: () -> Unit) {
@@ -1113,7 +1124,7 @@ private fun shareCode(context: Context, name: String) {
                 }
             }
         }
-        RecoveryStep(2, copy(ProductText.TRY_IT_ONCE), copy(ProductText.TRY_IT_ONCE_LINE), on) {
+        RecoveryStep(2, copy(ProductText.TRY_IT_ONCE), null, on) {
             if (!on) StepButton(stringResource(R.string.passkey_try), Icons.Default.Fingerprint, busy = busy && created != null,
                 enabled = idle && created != null) {
                 step {

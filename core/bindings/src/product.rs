@@ -91,7 +91,6 @@ pub enum Text {
     Create,
     Created,
     TryItOnce,
-    TryItOnceLine,
     On,
     Off,
     AccountRecovery,

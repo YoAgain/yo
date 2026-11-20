@@ -189,7 +189,7 @@
     <string name="google_backup_turn_off">Turn Off Google Backup?</string>
     <string name="google_backup_needs_screen_lock_short">Needs screen lock</string>
     <string name="google_backup_turn_on_device_backup">Turn on Backup by Google</string>
-    <string name="passkey_line">Sign in with your screen lock on a new phone. Works with Google Password Manager and some password managers.</string>
+    <string name="passkey_line">Sign in with your screen lock on a new phone.</string>
     <string name="passkey_try">Try with Screen Lock</string>
     <string name="passkey_no_prf">Your password manager can’t do this. Try Google Password Manager.</string>
     <string name="passkey_try_again">That didn’t work. Try again.</string>

@@ -12,6 +12,7 @@ struct AccountPage: View {
   var openSheet: (SettingsView.Page) -> Void
   @Environment(AccountStore.self) private var accounts
   @State private var signingOut: Account?
+  @State private var showingRecoveryKey = false
   @State private var deleteTyped = ""
   @State private var deletingAccount = false
   @Binding var showingDelete: Bool
@@ -42,18 +43,27 @@ struct AccountPage: View {
       }
       Section {
         // Backup and the ways back on a new phone, on a page of their own; the row says whether they are in place.
-        NavigationLink(value: SettingsView.Page.security) {
-          LabeledContent {
-            if accounts.recoveryNeedsAttention(hasRecoveryKey: hasRecoveryKey) {
+        // With the red badge it opens the recovery key's screen itself.
+        if accounts.recoveryNeedsAttention(hasRecoveryKey: hasRecoveryKey) {
+          Button { showingRecoveryKey = true } label: {
+            LabeledContent {
               RecoveryBadge()
-            } else {
-              Image(systemName: Check.ok.symbol).foregroundStyle(Check.ok.color).accessibilityLabel("Set Up")
+            } label: {
+              Label("Account Security", systemImage: "shield.fill").labelStyle(Tile(.amethyst))
             }
-          } label: {
-            Label("Account Security", systemImage: "shield.fill").labelStyle(Tile(.amethyst))
           }
+          .tint(Color(.label))
+          .accessibilityIdentifier("account.security")
+        } else {
+          NavigationLink(value: SettingsView.Page.security) {
+            LabeledContent {
+              Image(systemName: Check.ok.symbol).foregroundStyle(Check.ok.color).accessibilityLabel("Set Up")
+            } label: {
+              Label("Account Security", systemImage: "shield.fill").labelStyle(Tile(.amethyst))
+            }
+          }
+          .accessibilityIdentifier("account.security")
         }
-        .accessibilityIdentifier("account.security")
       }
       Section {
         // App Review 5.1.1(v): deleting is easy to find, no page between.
@@ -101,6 +111,7 @@ struct AccountPage: View {
       .presentationDetents([.large])
       .presentationDragIndicator(.hidden)
     }
+    .sheet(isPresented: $showingRecoveryKey) { RecoveryKeySheet(close: { showingRecoveryKey = false }) }
     .confirmDestructive(
       $signingOut, title: { _ in "Sign Out?" },
       message: { $0.secured ? "" : "Your account isn’t secured. Set up recovery methods to access your account." },

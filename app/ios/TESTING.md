@@ -68,7 +68,8 @@ the Linux build does not run the Simulator UI driver.
   folds open: Devices, Identity — Unchanged/Changed — which folds open once more to the keys, one line each, tap
   shows a whole key), Wait 5 s Before Sending (no time setting, no footer).
 - UI driver: from Account run `drive.py DIR account-layout`, which checks the row order, opens Account Security,
-  its Recovery Key and Passkey screens (half height, Done closes) and Contacts. Account identifiers are
+  its Recovery Key and Passkey screens (full height, Done closes; with the red badge the row opens the Recovery
+  Key screen itself) and Contacts. Account identifiers are
   account.contacts, account.security, account.signOut and account.delete. Info buttons use info.<title>. Account
   Security (security.page) rows use security.accountSync, security.recoveryKey, security.passkey,
   security.showKey, security.keychainRecovery and security.howRecoveryWorks.

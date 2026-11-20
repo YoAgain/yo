@@ -1,4 +1,4 @@
-// "Account Recovery" (spec 7), one screen each, built from the same step cards; only the cards change state.
+// "Account Recovery" (spec 7), one full-height screen each, built from the same step cards; only the cards change state.
 // The recovery key (from the red badge and the account page's Recovery Key row): save it through the share sheet,
 // show it. The passkey (from its row): create it, then try it once for its PRF output, as not every password manager
 // gives one and asking up front isn't reliable.
@@ -6,47 +6,59 @@ import LocalAuthentication
 import SwiftUI
 import YoCore
 
-/// The two recovery screens open at half height, one detent, never growing.
+/// The two recovery screens: full-height Amethyst assistants, the symbol, title and line with the cards centred in
+/// the screen, Done at the bottom; the content scrolls only when it does not fit.
 private struct RecoveryScreen<Content: View>: View {
   let symbol: String
   let title: String
   let line: String
   let busy: Bool
   var close: (() -> Void)?
+  let done: () -> Void
   @ViewBuilder let content: Content
+
+  @ScaledMetric(relativeTo: .largeTitle) private var symbolSize: CGFloat = 56
 
   var body: some View {
     ZStack {
       Color.amethyst.ignoresSafeArea()
-      ScrollView {
-        VStack(spacing: 0) {
-          Image(systemName: symbol)
-            .font(.system(size: 36))
-            .accessibilityHidden(true)
-          Text(title)
-            .font(.yo(24))
-            .multilineTextAlignment(.center)
-            .lineLimit(2)
-            .minimumScaleFactor(0.6)
-            .accessibilityAddTraits(.isHeader)
-            .padding(.top, 8)
-          Text(line)
-            .font(.footnote.weight(.semibold))
-            .multilineTextAlignment(.center)
-            .opacity(0.85)
-            .padding(.top, 4)
-          content
+      GeometryReader { geometry in
+        ScrollView {
+          VStack(spacing: 0) {
+            Spacer(minLength: 56)
+            Image(systemName: symbol)
+              .font(.system(size: symbolSize))
+              .accessibilityHidden(true)
+            Text(title)
+              .font(.yo(24))
+              .multilineTextAlignment(.center)
+              .lineLimit(2)
+              .minimumScaleFactor(0.7)
+              .accessibilityAddTraits(.isHeader)
+              .padding(.top, 20)
+            Text(line)
+              .font(.system(size: 15, weight: .medium))
+              .multilineTextAlignment(.center)
+              .opacity(0.85)
+              .padding(.top, 8)
+            content
+              .padding(.top, 32)
+            Spacer(minLength: 32)
+            PrimaryButton(ProductText.done.english, action: done)
+              .disabled(busy)
+          }
+          .padding(.horizontal, 24)
+          .padding(.bottom, 16)
+          .frame(maxWidth: .infinity, minHeight: geometry.size.height)
         }
-        .padding(.horizontal, 24)
-        .padding(.top, 28)
-        .padding(.bottom, 16)
+        .scrollBounceBehavior(.basedOnSize)
+        .scrollIndicators(.hidden)
       }
-      .scrollBounceBehavior(.basedOnSize)
-      .scrollIndicators(.hidden)
     }
-    .overlay(alignment: .topTrailing) { SheetClose(action: close).disabled(busy).padding(.top, 12) }
+    .overlay(alignment: .topTrailing) { SheetClose(action: close).disabled(busy) }
     .foregroundStyle(.white)
-    .presentationDetents([.medium])
+    // Its own full-height sheet over the settings, as the first assistant was.
+    .presentationDetents([.large])
     .presentationDragIndicator(.hidden)
     .preferredColorScheme(.dark)
     .interactiveDismissDisabled(busy)
@@ -73,9 +85,9 @@ struct RecoveryKeySheet: View {
   var body: some View {
     RecoveryScreen(
       symbol: "key.fill", title: ProductText.recoveryKeyTitle.english, line: ProductText.recoveryKeyLine.english,
-      busy: busy, close: close
+      busy: busy, close: close, done: finish
     ) {
-      VStack(spacing: 10) {
+      VStack(spacing: 12) {
         StepCard(
           number: 1, title: ProductText.recoveryKey.english,
           status: (saved ? ProductText.saved : .notSavedYet).english, done: saved
@@ -101,12 +113,8 @@ struct RecoveryKeySheet: View {
         }
       }
       .disabled(busy)
-      .padding(.top, 18)
       Note(problem)
-        .padding(.top, 8)
-      PrimaryButton(ProductText.done.english) { if let close { close() } else { dismiss() } }
-        .disabled(busy)
-        .padding(.top, 18)
+        .padding(.top, 12)
     }
     .animation(reduceMotion ? nil : .smooth(duration: 0.3), value: saved)
     .animation(reduceMotion ? nil : .smooth(duration: 0.25), value: showingKey)
@@ -120,6 +128,8 @@ struct RecoveryKeySheet: View {
       words = secured ? RecoveryWords.load() ?? "" : accounts.secureWords()
     }
   }
+
+  private func finish() { if let close { close() } else { dismiss() } }
 
   /// A key already saved shows or goes out again only after Face ID.
   private func allowed(_ reason: String) async -> Bool {
@@ -187,10 +197,9 @@ struct PasskeySheet: View {
   var body: some View {
     RecoveryScreen(
       symbol: "person.badge.key.fill", title: ProductText.passkey.english,
-      line: "Sign in with Face ID on a new phone. Works with iCloud Keychain and some password managers.",
-      busy: busy, close: close
+      line: "Sign in with Face ID on a new phone.", busy: busy, close: close, done: finish
     ) {
-      VStack(spacing: 10) {
+      VStack(spacing: 12) {
         StepCard(
           number: 1, title: ProductText.createPasskey.english,
           status: on || created ? ProductText.created.english : nil, done: on || created
@@ -201,7 +210,7 @@ struct PasskeySheet: View {
           }
         }
         StepCard(
-          number: 2, title: ProductText.tryItOnce.english, status: ProductText.tryItOnceLine.english, done: on
+          number: 2, title: ProductText.tryItOnce.english, status: nil, done: on
         ) {
           if !on {
             StepButton(title: "Try with Face ID", symbol: "faceid", busy: busy && created) {
@@ -212,16 +221,14 @@ struct PasskeySheet: View {
         }
       }
       .disabled(busy)
-      .padding(.top, 18)
       Note(problem)
-        .padding(.top, 8)
-      PrimaryButton(ProductText.done.english) { if let close { close() } else { dismiss() } }
-        .disabled(busy)
-        .padding(.top, 18)
+        .padding(.top, 12)
     }
     .animation(reduceMotion ? nil : .smooth(duration: 0.3), value: on)
     .animation(reduceMotion ? nil : .smooth(duration: 0.3), value: created)
   }
+
+  private func finish() { if let close { close() } else { dismiss() } }
 
   private static func detail(_ error: Error) -> String {
     guard Hub.isDevApp else { return "" }
@@ -274,7 +281,7 @@ private struct StepCard<Buttons: View>: View {
   @ScaledMetric(relativeTo: .headline) private var circle: CGFloat = 28
 
   var body: some View {
-    VStack(alignment: .leading, spacing: 10) {
+    VStack(alignment: .leading, spacing: 14) {
       HStack(spacing: 12) {
         ZStack {
           Circle().fill(done ? Color.green : .white)
@@ -290,8 +297,8 @@ private struct StepCard<Buttons: View>: View {
         .frame(width: circle, height: circle)
         .accessibilityHidden(true)
         VStack(alignment: .leading, spacing: 1) {
-          Text(title).font(.headline)
-          if let status { Text(status).font(.footnote.weight(.medium)).opacity(0.85) }
+          Text(title).font(.system(size: 17, weight: .semibold))
+          if let status { Text(status).font(.system(size: 13, weight: .medium)).opacity(0.85) }
         }
         .accessibilityElement(children: .combine)
         .accessibilityLabel("Step \(number), \(title)\(done ? ", done" : "")\(status.map { ", \($0)" } ?? "")")
@@ -299,8 +306,8 @@ private struct StepCard<Buttons: View>: View {
       }
       HStack(spacing: 8) { buttons }
     }
-    .padding(12)
-    .background(.white.opacity(0.14), in: .rect(cornerRadius: 20))
+    .padding(16)
+    .background(.white.opacity(0.14), in: .rect(cornerRadius: 22))
     .sensoryFeedback(.success, trigger: done) { _, now in now }
   }
 }
@@ -326,7 +333,7 @@ private struct StepButton: View {
     .font(.subheadline.weight(.bold))
     .lineLimit(1)
     .minimumScaleFactor(0.7)
-    .frame(maxWidth: .infinity, minHeight: 30)
+    .frame(maxWidth: .infinity, minHeight: 34)
     if prominent {
       Button(action: action) { label }
         .buttonStyle(.glassProminent)
