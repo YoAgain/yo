@@ -9,15 +9,11 @@ import users
 
 
 class UpdatesTests(unittest.TestCase):
-    def test_apt_samples(self):
+    def test_apt_kernel_and_log_samples(self):
         self.assertEqual(users.apt_counts('warning\n12;3\n'), {"packages": 12, "security": 3})
         with self.assertRaises(ValueError):
             users.apt_counts('Could not open cache')
-
-    def test_kernel_versions(self):
         self.assertGreater(users.kernel_key('6.8.0-100-generic'), users.kernel_key('6.8.0-99-generic'))
-
-    def test_log_result(self):
         sample = ('2026-11-13 06:20:00 INFO Starting unattended upgrades script\n'
                   '2026-11-13 06:21:00 INFO All upgrades installed\nnoise\n')
         self.assertIn('06:21:00 INFO All upgrades installed', users.unattended_result(sample))

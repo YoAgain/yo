@@ -24,8 +24,6 @@ class LiveTests(unittest.TestCase):
         self.assertEqual(out["minutes"][-2], 4)
         self.assertEqual(out["minutes"][0], 7)  # 59 minutes ago is the first; 60 ago and the future are out
         self.assertEqual(sum(out["minutes"]), 16)
-
-    def test_empty(self):
         self.db.execute("DELETE FROM events")
         self.assertEqual(users.live(self.db, NOW)["minutes"], [0] * 60)
 

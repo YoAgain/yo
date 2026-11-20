@@ -10,20 +10,21 @@ class ClassifyTests(unittest.TestCase):
     def c(self, app, newest=NEWEST, bot=None):
         return users.classify(app, newest, bot)
 
-    def test_ios(self):
-        self.assertEqual((self.c("ios/202611181859")["label"], self.c("ios/202611181859")["state"]), ("iOS", "current"))
-        self.assertEqual(self.c("ios/202611191257")["state"], "current")  # newer than any user's: an internal build
-        r = self.c("ios/202611171622")
-        self.assertEqual(r["state"], "update")
-        self.assertIn(NEWEST, r["title"])
-        self.assertEqual(self.c("ios/202611171622", None)["state"], None)
-
-    def test_dev_and_others(self):
-        self.assertEqual((self.c("ios/1")["label"], self.c("ios/1")["state"]), ("iOS", None))
-        self.assertEqual(self.c("yogpt/202611182101", bot="yogpt/202611182059")["state"], "current")
-        r = self.c("yogpt/202611181000", bot="yogpt/202611182059")
-        self.assertEqual((r["label"], r["state"]), ("Bot", "update"))
-        self.assertEqual((self.c("android/202611160001")["label"], self.c("android/202611160001")["state"]), ("Android", None))
+    def test_classify(self):
+        bot = "yogpt/202611182059"
+        for app, newest, bot_min, label, state in [
+            ("ios/202611181859", NEWEST, None, "iOS", "current"),
+            ("ios/202611191257", NEWEST, None, "iOS", "current"),  # newer than any user's: an internal build
+            ("ios/202611171622", NEWEST, None, "iOS", "update"),
+            ("ios/202611171622", None, None, "iOS", None),
+            ("ios/1", NEWEST, None, "iOS", None),
+            ("yogpt/202611182101", NEWEST, bot, "Bot", "current"),
+            ("yogpt/202611181000", NEWEST, bot, "Bot", "update"),
+            ("android/202611160001", NEWEST, None, "Android", None),
+        ]:
+            r = self.c(app, newest, bot_min)
+            self.assertEqual((r["label"], r["state"]), (label, state), app)
+        self.assertIn(NEWEST, self.c("ios/202611171622")["title"])
         self.assertEqual(self.c(None)["label"], "unknown")
 
     def test_the_highest_reported_build_is_current_for_everyone(self):

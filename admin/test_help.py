@@ -1,4 +1,4 @@
-"""Run: python3 -m unittest discover -s admin -p 'test_*.py'."""
+"""Run: python3 -m unittest discover -s admin -p 'test_*.py'. Attention: diagnostics, reports, support and to-dos."""
 import importlib.util
 import io
 import os
@@ -18,7 +18,7 @@ def load(name):
     return module
 
 
-class FeedbackTests(unittest.TestCase):
+class HelpTests(unittest.TestCase):
     def test_diagnostics_collector_and_done_proxy(self):
         users = load("users")
         with tempfile.TemporaryDirectory() as directory:

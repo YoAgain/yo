@@ -28,10 +28,8 @@ class SupportListTests(unittest.TestCase):
                         {"install": B, "at": 200, "unread": 2}, {"install": "team", "at": 400, "unread": 1},
                         {"user_id": "c" * 32, "at": 500, "unread": 1}]}
 
-    def test_open_by_default_newest_first_by_short_install_id(self):
+    def test_open_newest_first_answered_lower_case_and_only_installs(self):
         self.assertEqual(run({**self.CASE, "filter": "open"}), [[D, "d4e5f6"], [B, "bbbbbb"]])
-
-    def test_answered_lower_case_and_never_anything_but_an_install(self):
         self.assertEqual(run({**self.CASE, "filter": "answered"}), [[A.lower(), "a3f09c"]])
 
     def test_install_short_form(self):
@@ -43,11 +41,9 @@ class CrashFreeTests(unittest.TestCase):
     def free(self, installs, users):
         return node("crashFree(c[0], c[1])", [installs, users])
 
-    def test_installs_with_a_crash_against_active_users(self):
+    def test_installs_with_a_crash_against_active_users_clamped_none_without_data(self):
         self.assertEqual(self.free(5, 200), 97.5)
         self.assertEqual(self.free(0, 10), 100)
-
-    def test_never_below_zero_and_none_without_data(self):
         self.assertEqual(self.free(30, 10), 0)  # installs are not users: more installs than users clamps at 0
         self.assertIsNone(self.free(None, 10))  # an older hub without diagnostic_installs
         self.assertIsNone(self.free(3, 0))
