@@ -47,14 +47,13 @@ The same job on each platform, so both apps behave alike.
 
 What the hub knows per endpoint group ([details](spec/v1.md#1-goals)):
 
-| Endpoint group | Endpoints | Type |
+| Endpoint group | Endpoints | Authentication |
 |---|---|---|
 | Messages | `inbox`, `blobs` | anonymous |
 | Groups | `groups` | anonymous member |
 | Public | `username`, `backup/{id}`, keys | anonymous |
 | Account | `register`, `lookup`, `push`, `storage`, `backup` … | your device |
-| Support | `support`, `feedback`, `report` | your device |
-| Crashes | `crash`, `errors` | anonymous |
+| Support and crashes | `support`, `feedback`, `report`, `crash`, `errors` | random install id |
 
 ### Account Sync
 
