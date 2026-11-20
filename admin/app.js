@@ -785,6 +785,23 @@ if (document.body.classList.contains("login")) {
       spark("pr", values[values.length - 1], values, names, (i, v) => `${num(v)} open`, "Problems open: feedback, errors and reports");
       $("c-pr").classList.add("bad-up");
     } else rangeRow("pr", problems, "problems", "Problems: feedback, errors and reports", null, true, probHours);
+    // The tile's bars: what came in per slot, errors (orange) with the crashes on top (red). The hub keeps errors per
+    // day only, so the 24-hour range has crashes per hour and no hours for errors.
+    {
+      const c = h ? crashSlots(h) : null, hourly = !!c && !c.days, node = $("pr-spark");
+      if (c) {
+        const er = c.days ? c.days.map((d) => (h.diagnostic_days || []).filter((r) => r.kind === "error" && r.day === d).reduce((n, r) => n + r.count, 0)) : c.values.map(() => 0);
+        const sb = sparkBars(er, "warm", null, c.values);
+        node.replaceChildren(...sb.childNodes);
+        node.hidden = false;
+        node._split = { er, cr: c.values, names: c.names, hourly };
+        if (!node._h) {
+          node._h = 1;
+          hoverTip(node, () => node._split.cr.length, (i) => { const p = node._split; return { head: p.names[i], rows: [{ color: "#e67e22", label: "Errors", value: p.hourly ? "per day only" : num(p.er[i]) }, { color: "var(--bad)", label: "Crashes", value: num(p.cr[i]) }] }; },
+            (k) => [...node.children].forEach((r, j) => r.classList.toggle("on", j === k)));
+        }
+      }
+    }
     showOpen();
 
     // Services: the queue at the bottom.
