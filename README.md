@@ -35,14 +35,7 @@ The same job on each platform, so both apps behave alike.
 |---|---|---|
 | Account key | iCloud Keychain | Google Backup |
 | Device keys | Keychain | Keystore |
-| Passkey | Apple Passwords | Google Password Manager |
 | Push | APNs | FCM |
-| Notifications | Service extension | Messaging service |
-| Share | Share extension | Share intent |
-| Widget | WidgetKit | App widget |
-| One tap | Control, Action button | Quick Settings tile |
-| Shortcuts | App Intents | App shortcuts |
-| Camera | AVFoundation | CameraX |
 | UI | SwiftUI | Material 3 |
 
 What the hub knows per endpoint group ([details](spec/v1.md#1-goals)):
@@ -51,11 +44,12 @@ What the hub knows per endpoint group ([details](spec/v1.md#1-goals)):
 |---|---|---|
 | Messages | `inbox`, `blobs` | anonymous |
 | Groups | `groups` | anonymous member |
-| Public | `username`, `backup/{id}`, keys | anonymous |
-| Account | `register`, `lookup`, `push`, `storage`, `backup` … | your device |
+| Public | `username`, keys | anonymous |
+| Backup | `backup/{id}` | anonymous, with its long secret id |
+| Account | `register`, `lookup`, `push`, `storage`, `backup` … | account (signed by its device key) |
 | Support and crashes | `support`, `feedback`, `report`, `crash`, `errors` | random install id |
 
-### Account Sync
+### Account Sync (end-to-end encrypted)
 
 What a new phone gets back besides the account, sealed and padded ([spec 6.9](spec/v1.md#69-storage)).
 Not synced: sessions, messages, media, list order.
