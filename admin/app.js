@@ -1350,25 +1350,62 @@ if (document.body.classList.contains("login")) {
   };
 
   // ---- live Yos in the title bar: per minute for the last hour from the collector (bots left out, counts only), the
-  // last ten minutes as bars. Each
-  // new Yo comes on the hub's stream (/live, Server-Sent Events, its kind only) and pops as a spark at once; it tops up
-  // the running minute until a refresh has it. Without the stream, new Yos come from the minutes' counts, spread over
-  // the refresh. Reduced motion: no sparks.
-  const LIVE_SPREAD = 10000, LIVE_CAP = 30, LIVE_RETRY = 10000, LIVE_BARS = 10;
+  // last ten minutes as bars. Each new Yo comes on the hub's stream (/live, Server-Sent Events, its kind only): a dot
+  // leaves the "Yo" logo, arcs over the rate and rains down into the running minute's bar, which then takes it with a
+  // tiny bump. Several at once leave one after another. Without the stream, new Yos come from the minutes' counts,
+  // spread over the refresh. Reduced motion or a hidden page: no dots, the bar at once.
+  const LIVE_SPREAD = 10000, LIVE_CAP = 30, LIVE_RETRY = 10000, LIVE_BARS = 10, LIVE_GAP = 170, LIVE_FLY = 1500;
   const calm = matchMedia("(prefers-reduced-motion: reduce)");
-  let liveSeen = null, liveTimers = [], liveData = null, liveAdd = 0, liveShown = null;
+  let liveSeen = null, liveTimers = [], liveData = null, liveAdd = 0, liveShown = null, liveNext = 0, liveFlying = 0;
   let liveSource = null, liveOpen = false, liveRetry = null;
-  const liveStop = () => { liveTimers.forEach(clearTimeout); liveTimers = []; $("live-lane").replaceChildren(); };
-  const liveSpark = () => {
-    const lane = $("live-lane");
-    if (document.visibilityState !== "visible" || lane.childElementCount > LIVE_CAP) return;
+  const liveStop = () => {
+    liveTimers.forEach(clearTimeout);
+    liveTimers = [];
+    liveNext = 0;
+    liveFlying = 0;
+    $("live-lane").replaceChildren();
+    if (liveData) paintLive();
+  };
+  const liveLater = (ms, f) => {
+    const t = setTimeout(() => { liveTimers = liveTimers.filter((x) => x !== t); f(); }, ms);
+    liveTimers.push(t);
+  };
+  // One dot from the logo's right edge into the last bar (rects read once, then transform and opacity only).
+  const liveFly = (land) => {
+    const lane = $("live-lane"), bar = $("live-spark").lastElementChild, logo = $("hub-word");
+    if (!bar || document.visibilityState !== "visible") return land();
+    const o = lane.getBoundingClientRect(), l = logo.getBoundingClientRect(), b = bar.getBoundingClientRect();
+    const sx = l.right - o.left - 7, sy = l.top + l.height / 2 - o.top;
+    const ex = b.left + b.width / 2 - o.left + (Math.random() - 0.5) * Math.min(3, b.width * 0.5), ey = b.top - o.top;
+    // The arc: up from the logo over the rate, a little above the bars, to just over the bar; then the fall.
+    const hy = -9 - Math.random() * 5, hx = ex - 2 + Math.random() * 4, cx = (sx + hx) / 2, cy = hy - 10;
+    const frames = [], ARC = 0.62;
+    for (let i = 0; i <= 8; i++) {
+      const t = i / 8, u = 1 - t;
+      frames.push({ offset: ARC * t, transform: `translate(${(u * u * sx + 2 * u * t * cx + t * t * hx).toFixed(1)}px, ${(u * u * sy + 2 * u * t * cy + t * t * hy).toFixed(1)}px) scale(${(0.5 + 0.5 * Math.min(1, t * 4)).toFixed(2)})`,
+        opacity: Math.min(1, t * 5), easing: "linear" });
+    }
+    frames[frames.length - 1].easing = "cubic-bezier(.5, 0, .9, .6)";
+    frames.push({ offset: 0.96, transform: `translate(${ex.toFixed(1)}px, ${(ey - 1).toFixed(1)}px) scale(.8, 1.15)`, opacity: 1, easing: "ease-out" });
+    frames.push({ offset: 1, transform: `translate(${ex.toFixed(1)}px, ${(ey + 1).toFixed(1)}px) scale(.4)`, opacity: 0 });
     const s = el("i", "yo-spark");
-    s.style.setProperty("--y", `${Math.round(15 + Math.random() * 70)}%`);
-    s.style.setProperty("--dx", `${-Math.round(26 + Math.random() * 60)}px`);
-    s.style.setProperty("--dy", `${Math.round(-8 + Math.random() * 16)}px`);
-    if (Math.random() < 0.22) { s.textContent = "Yo"; s.classList.add("word"); }
-    s.addEventListener("animationend", () => s.remove());
     lane.append(s);
+    s.animate(frames, { duration: LIVE_FLY * (0.92 + Math.random() * 0.16), easing: "cubic-bezier(.3, .1, .6, 1)", fill: "forwards" })
+      .finished.then(() => { if (!s.isConnected) return; s.remove(); land(); }, () => {});
+    if (!logo.getAnimations().length) logo.animate([{ transform: "scale(1)" }, { transform: "scale(1.045)" }, { transform: "scale(1)" }], { duration: 320, easing: "ease-out" });
+  };
+  // The running minute's bar takes a Yo: a tiny bump from its foot.
+  const liveBump = () => {
+    const bar = $("live-spark").lastElementChild;
+    if (bar && !calm.matches) bar.animate([{ transform: "scaleY(1)" }, { transform: "scaleY(1.22)" }, { transform: "scaleY(1)" }], { duration: 260, easing: "ease-out" });
+  };
+  // A Yo to show: its dot leaves at the next free slot after the last, so a burst reads as rain; land paints it.
+  const liveSpark = (land = () => {}) => {
+    const lane = $("live-lane");
+    if (calm.matches || document.visibilityState !== "visible" || lane.childElementCount + liveTimers.length > LIVE_CAP) return land();
+    const now = performance.now(), at = Math.max(now, liveNext);
+    liveNext = at + LIVE_GAP * (0.8 + Math.random() * 0.4);
+    liveLater(Math.round(at - now), () => liveFly(() => { land(); liveBump(); }));
   };
   // The strip from the last minutes and the Yos streamed since; the running minute never goes down within itself.
   const paintLive = () => {
@@ -1376,7 +1413,7 @@ if (document.body.classList.contains("login")) {
     box.hidden = !d || !Array.isArray(d.minutes);
     if (box.hidden) return;
     const m = d.minutes.slice(), n = m.length, full = m.slice(-6, -1);
-    m[n - 1] += liveAdd;
+    m[n - 1] += liveAdd - liveFlying;
     const shown = `${which} ${d.minute}`;
     if (liveShown?.key === shown) m[n - 1] = Math.max(m[n - 1], liveShown.v);
     liveShown = { key: shown, v: m[n - 1] };
@@ -1405,11 +1442,7 @@ if (document.body.classList.contains("login")) {
     liveSeen = { key, minute: d.minute, m: byMinute };
     if (liveOpen || calm.matches || document.visibilityState !== "visible") return;
     fresh = Math.min(LIVE_CAP, fresh);
-    for (let i = 0; i < fresh; i++) {
-      const t = setTimeout(() => { liveTimers = liveTimers.filter((x) => x !== t); liveSpark(); },
-        Math.round(((i + Math.random()) / fresh) * LIVE_SPREAD));
-      liveTimers.push(t);
-    }
+    for (let i = 0; i < fresh; i++) liveLater(Math.round(((i + Math.random()) / fresh) * LIVE_SPREAD), () => liveSpark());
   };
   const liveClose = () => {
     clearTimeout(liveRetry);
@@ -1429,10 +1462,10 @@ if (document.body.classList.contains("login")) {
     source.onmessage = () => {
       if (hub !== which || source !== liveSource) return;
       liveAdd++;
-      if (liveData) {
-        paintLive();
-        if (!calm.matches) liveSpark();
-      }
+      if (!liveData) return;
+      // Counted on landing: the bar grows by one as each dot comes down.
+      liveFlying++;
+      liveSpark(() => { liveFlying = Math.max(0, liveFlying - 1); paintLive(); });
     };
     source.onerror = () => {
       liveOpen = false;

@@ -1185,7 +1185,8 @@ body.dash { max-width: none; padding-left: 24px; padding-right: 24px; }
 .dcard > .cfoot:empty { display: none; }
 
 /* Live Yos next to the logo: the rate per minute, the last ten minutes as bars like Problems' (the running minute
-   bright); every new Yo pops as a spark at its "now" end and drifts back over the bars. Transform and opacity only. */
+   bright); every new Yo is a dot that leaves the logo, arcs over the rate and rains into that bar (Web Animations in
+   app.js, transform and opacity only). */
 .ov > .topbar { gap: 14px; }
 .ov > .topbar .range { margin-left: auto; }
 .live { flex: 0 0 auto; display: flex; align-items: center; gap: 9px; height: 28px; color: var(--amethyst); }
@@ -1193,18 +1194,11 @@ body.dash { max-width: none; padding-left: 24px; padding-right: 24px; }
 .live-n span { font-size: 10.5px; font-weight: 700; color: var(--muted); }
 .live-strip { position: relative; width: 100px; height: 24px; }
 .live-strip svg { display: block; width: 100%; height: 100%; overflow: visible; }
-.live-strip .b { fill: var(--amethyst-soft); opacity: .45; }
+.live-strip .b { fill: var(--amethyst-soft); opacity: .45; transform-box: fill-box; transform-origin: 50% 100%; }
 .live-strip .b:last-of-type { fill: var(--amethyst-soft); opacity: 1; filter: drop-shadow(0 0 3px var(--amethyst)); }
 .live-strip .b.zero { fill: var(--line); opacity: 1; filter: none; }
 .live-lane { position: absolute; inset: 0; pointer-events: none; }
-.yo-spark { position: absolute; right: 0; top: var(--y); width: 6px; height: 6px; margin: -3px -3px 0 0; border-radius: 50%; background: #fff;
-  box-shadow: 0 0 0 1.5px var(--amethyst-soft), 0 0 10px 2px var(--amethyst); opacity: 0; will-change: transform, opacity; animation: yo-spark 2.6s cubic-bezier(.2, .7, .3, 1) forwards; }
-.yo-spark.word { width: auto; height: auto; margin: -8px -6px 0 0; padding: 1px 5px; border-radius: 6px; background: var(--amethyst); color: #fff; font-size: 9.5px; font-style: normal; font-weight: 800; line-height: 14px; box-shadow: 0 0 10px var(--amethyst); }
-@keyframes yo-spark {
-  0% { transform: translate(0, 0) scale(.2); opacity: 0; }
-  12% { transform: translate(0, 0) scale(1.25); opacity: 1; }
-  30% { transform: translate(calc(var(--dx) * .25), calc(var(--dy) * .3)) scale(1); opacity: 1; }
-  100% { transform: translate(var(--dx), var(--dy)) scale(.55); opacity: 0; }
-}
+.yo-spark { position: absolute; left: 0; top: 0; width: 5px; height: 5px; margin: -2.5px 0 0 -2.5px; border-radius: 50%; background: #fff;
+  box-shadow: 0 0 0 1px var(--amethyst-soft), 0 0 7px 1.5px var(--amethyst); opacity: 0; will-change: transform, opacity; }
 @media (max-width: 420px) { .ov > .topbar { gap: 10px; } .live { gap: 7px; } .live-strip { width: 90px; } }
 @media (prefers-reduced-motion: reduce) { .live-lane { display: none; } }
