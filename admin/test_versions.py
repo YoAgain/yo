@@ -20,7 +20,11 @@ class ClassifyTests(unittest.TestCase):
             ("ios/1", NEWEST, None, "iOS", None),
             ("yogpt/202611182101", NEWEST, bot, "Bot", "current"),
             ("yogpt/202611181000", NEWEST, bot, "Bot", "update"),
-            ("android/202611160001", NEWEST, None, "Android", None),
+            ("android/202611160001", NEWEST, None, "Android", None),  # the dev app's 12 digits
+            ("android/29919800", "29919800", None, "Android", "current"),
+            ("android/29919900", "29919800", None, "Android", "fresh"),
+            ("android/29900000", "29919800", None, "Android", "update"),
+            ("android/29900000", None, None, "Android", None),
         ]:
             r = self.c(app, newest, bot_min)
             self.assertEqual((r["label"], r["state"]), (label, state), app)
@@ -47,6 +51,16 @@ class ClassifyTests(unittest.TestCase):
         b = users.app_builds(out)
         self.assertEqual(b["ios/202611191257"]["state"], "current")
         self.assertEqual(b["ios/202611181859"]["state"], "update")
+
+    def test_android_builds_are_compared_only_with_android(self):
+        us = lambda *p: [{"id": i, "app": a, "device_list": []} for i, a in p]
+        out = {"live": {"users": us(("a", "android/29900000"), ("b", "android/29919800"), ("c", "android/29919800"),
+                                    ("d", "android/29930000"), ("e", "android/202611160001"), ("f", "ios/202611181859"))}}
+        b = users.app_builds(out)
+        self.assertEqual([b[f"android/{n}"]["state"] for n in (29900000, 29919800, 29930000)], ["update", "current", "fresh"])
+        self.assertIsNone(b["android/202611160001"]["state"])
+        self.assertEqual(b["android/202611160001"]["title"], "Android dev build")
+        self.assertEqual(b["ios/202611181859"]["state"], "current")  # alone on iOS, not judged against Android
 
     def test_without_any_build_of_two_users_the_highest_is_current(self):
         out = {"live": {"users": [{"id": "aa", "app": "ios/202611171622"}, {"id": "bb", "app": "ios/202611181859"}]}}

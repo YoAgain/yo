@@ -521,6 +521,10 @@ def updates(previous=None, now=None):
 # baseline and older builds are "update". If no build has two users, the highest build is the baseline (single-user
 # builds are then simply current). The team's own users count like any other. No network.
 IOS_BUILD = re.compile(r"\d{12}")
+# Android Play builds report the CI versionCode (minutes since the epoch, "android/29919800"); the dev app sends a
+# fixed 12-digit "android/2026…" and stays unknown. The same rule as iOS, computed per platform on its own builds.
+ANDROID_BUILD = re.compile(r"\d{1,10}")
+BUILD = {"ios": IOS_BUILD, "android": ANDROID_BUILD}
 
 
 def classify(app, newest=None, bot_min=None) -> dict:
@@ -534,14 +538,17 @@ def classify(app, newest=None, bot_min=None) -> dict:
         top = bot_min.split("/")[-1] if bot_min else None
         state = None if not top else "current" if b >= top else "update"
         return {"label": "Bot", "state": state, "title": f"YoGPT build {b}" + (f"; newest {top}" if top else "")}
-    if platform != "ios":
-        name = {"android": "Android", "cli": "CLI"}.get(platform, platform)
+    if platform not in BUILD:
+        name = {"cli": "CLI"}.get(platform, platform)
         return {"label": name, "state": None, "title": f"{name} build {b}"}
-    if not IOS_BUILD.fullmatch(b):
-        return {"label": "iOS", "state": None, "title": f"iOS dev build {b} (dev/push.sh)"}
-    state = None if not newest else "fresh" if b > newest else "current" if b == newest else "update"
+    name, store = ("iOS", "TestFlight") if platform == "ios" else ("Android", "Play")
+    if not BUILD[platform].fullmatch(b):
+        return {"label": name, "state": None, "title": "Android dev build" if platform == "android" else f"iOS dev build {b} (dev/push.sh)"}
+    n = int(b) if platform == "android" else b
+    top = (int(newest) if platform == "android" else newest) if newest else None
+    state = None if not newest else "fresh" if n > top else "current" if n == top else "update"
     note = "; fresh: only 1 user so far" if state == "fresh" else f"; current {newest}" if newest and newest != b else ""
-    return {"label": "iOS", "state": state, "title": f"TestFlight build {b}" + note}
+    return {"label": name, "state": state, "title": f"{store} build {b}" + note}
 
 
 def app_builds(out) -> dict:
@@ -554,13 +561,16 @@ def app_builds(out) -> dict:
             apps = {u.get("app")} | {d.get("app") for d in u.get("device_list") or []}
             seen.update(apps)
             for a in apps:
-                if a and a.startswith("ios/") and IOS_BUILD.fullmatch(a[4:]):
-                    users_of.setdefault(a[4:], set()).add(u.get("id") or f"{name}#{i}")
+                p, _, b = (a or "").partition("/")
+                if p in BUILD and BUILD[p].fullmatch(b):
+                    users_of.setdefault(p, {}).setdefault(b, set()).add(u.get("id") or f"{name}#{i}")
     seen = {a for a in seen if a and a != "unknown"}
-    two = [b for b, ids in users_of.items() if len(ids) >= 2]
-    newest = max(two or users_of, default=None)
+    newest = {}
+    for p, builds in users_of.items():
+        two = [b for b, ids in builds.items() if len(ids) >= 2]
+        newest[p] = max(two or builds, key=int if p == "android" else str)
     bot = next((out[n].get("yogpt_min") for n in HUBS if isinstance(out.get(n), dict) and out[n].get("yogpt_min")), None)
-    return {a: classify(a, newest, bot) for a in seen}
+    return {a: classify(a, newest.get(a.partition("/")[0]), bot) for a in seen}
 
 
 def below_min(app, minimum) -> bool:
@@ -576,7 +586,7 @@ def below_min(app, minimum) -> bool:
 
 def version_day(apps, builds, minimum) -> dict:
     """Of the user devices seen today (bots and the CLI left out): how many run the current build (a fresh one counts as current), have an update
-    out, must update (below the hub's minimum) or are unknown (dev builds, Android until it has builds)."""
+    out, must update (below the hub's minimum) or are unknown (dev builds)."""
     out = {"current": 0, "update": 0, "must": 0, "unknown": 0}
     for app, n in apps or []:
         if (app or "").startswith(("yogpt/", "cli/")):
