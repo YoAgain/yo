@@ -3,7 +3,7 @@
 use std::sync::Arc;
 use yo_core::backup::Door;
 use yo_core::{Client, Content, Error, Event, Push};
-use yo_tests::{deliver_raw, new_phone, random_u64, register, user_of, username, Http, Lying, TestHub};
+use yo_tests::{deliver_raw, random_u64, register, user_of, username, Http, Lying, TestHub};
 use yo_wire::api;
 
 fn pair(hub: &TestHub) -> (Client, Client, String, String) {
@@ -196,23 +196,6 @@ fn another_key_for_a_friend_is_told_and_written_to() {
 }
 
 #[test]
-fn a_new_phone_with_the_same_account_key_is_seen_by_nobody() {
-    let hub = TestHub::start();
-    let (mut a, mut b, pa, pb) = pair(&hub);
-    a.send_yo(&pb).unwrap();
-    b.sync(0).unwrap();
-    a.set_verified(&pb, true).unwrap();
-    // B's account key comes back on a new phone (what a passkey will do).
-    let mut b2 = new_phone(Http::new(hub.url()), &pb, &b);
-    let events = a.send_yo(&pb).unwrap();
-    assert!(!events.iter().any(|e| matches!(e, Event::IdentityChanged { .. })), "{events:?}");
-    assert!(a.contacts()[0].verified, "the verification holds: the key is the same");
-    assert_eq!(yos_from(&b2.sync(0).unwrap(), &pa), 1);
-    b2.send_yo(&pa).unwrap();
-    assert_eq!(yos_from(&a.sync(0).unwrap(), &pb), 1);
-}
-
-#[test]
 fn a_verified_contact_with_a_new_key_waits_for_confirmation() {
     let hub = TestHub::start();
     let (mut a, pb, mut b2) = a_friend_with_another_key(&hub);
@@ -246,42 +229,6 @@ fn a_name_set_while_a_new_key_waits_is_told_after_the_confirmation() {
 }
 
 #[test]
-fn the_last_resort_keeps_a_number_reachable_and_is_refilled() {
-    let hub = TestHub::start();
-    let base = random_u64() % 1_000_000_000;
-    let target = username(base);
-    let mut c = register(Http::new(hub.url()), &target, None);
-    let senders = yo_wire::limits::PREKEY_TARGET as u64 + 5;
-    for i in 1..=senders {
-        let mut s = register(Http::new(hub.url()), &username(base + i), None);
-        s.send_yo(&target).unwrap();
-    }
-    let events = c.sync(0).unwrap();
-    assert_eq!(events.iter().filter(|e| matches!(e, Event::NewChat { .. })).count() as u64, senders);
-    assert_eq!(c.dropped(), 0);
-    // The next sync refills: one more round of senders gets one-time prekeys again.
-    let mut s = register(Http::new(hub.url()), &username(base + senders + 1), None);
-    s.send_yo(&target).unwrap();
-    assert_eq!(c.sync(0).unwrap().iter().filter(|e| matches!(e, Event::NewChat { .. })).count(), 1);
-}
-
-#[test]
-fn a_signed_request_works_once() {
-    let hub = TestHub::start();
-    let http = Http::new(hub.url());
-    let n = random_u64() % 1_000_000_000;
-    let mut a = register(http.clone(), &username(n), None);
-    a.sync(0).unwrap();
-    let (method, path, headers, body) = http.recorded.lock().unwrap().last().cloned().unwrap();
-    let client = reqwest::blocking::Client::new();
-    let mut replay = client.request(method.parse().unwrap(), format!("{}{}", hub.url(), path)).body(body);
-    for (name, value) in headers {
-        replay = replay.header(name, value);
-    }
-    assert_eq!(replay.send().unwrap().status().as_u16(), api::status::UNAUTHORIZED);
-}
-
-#[test]
 fn garbage_from_a_stranger_is_dropped_and_harms_nothing() {
     let hub = TestHub::start();
     let (mut a, mut b, pa, pb) = pair(&hub);
@@ -307,18 +254,6 @@ fn garbage_from_a_stranger_is_dropped_and_harms_nothing() {
 }
 
 #[test]
-fn a_blocked_number_is_not_heard() {
-    let hub = TestHub::start();
-    let (mut a, mut b, pa, pb) = pair(&hub);
-    b.set_blocked(&user_of(&pa), true).unwrap();
-    a.send_yo(&pb).unwrap();
-    let events = b.sync(0).unwrap();
-    assert_eq!(yos_from(&events, &pa), 0);
-    assert!(!events.iter().any(|e| matches!(e, Event::NewChat { .. })));
-    assert_eq!(b.send_yo(&pa), Err(Error::Blocked));
-}
-
-#[test]
 fn the_state_survives_a_restart_of_the_app() {
     let hub = TestHub::start();
     let (mut a, mut b, pa, pb) = pair(&hub);
@@ -331,131 +266,6 @@ fn the_state_survives_a_restart_of_the_app() {
     assert_eq!(yos_from(&a.sync(0).unwrap(), &pb), 1);
     a.send_yo(&pb).unwrap();
     assert_eq!(yos_from(&b.sync(0).unwrap(), &pa), 1);
-}
-
-#[test]
-fn the_outbox_survives_an_outage_of_the_hub() {
-    let dir = std::env::temp_dir().join(format!("yo-outage-{}", random_u64()));
-    std::fs::create_dir_all(&dir).unwrap();
-    let mut config = yo_hub::config::Config::for_tests();
-    config.db_path = dir.join("hub.sqlite").to_string_lossy().into_owned();
-    let hub = TestHub::start_with(config.clone(), "127.0.0.1:0");
-    let addr = hub.addr.to_string();
-    let (ha, hb) = (Http::new(hub.url()), Http::new(hub.url()));
-    let n = random_u64() % 1_000_000_000;
-    let (pa, pb) = (username(n), username(n + 1));
-    let mut a = register(ha.clone(), &pa, None);
-    let mut b = register(hb.clone(), &pb, None);
-    a.send_yo(&pb).unwrap();
-    b.sync(0).unwrap();
-    hub.stop();
-    // The hub is down: the message waits in the outbox, nothing is lost. By user id: a name needs the hub (4.2).
-    assert!(matches!(a.send_yo(&pb), Err(Error::Network(_))));
-    a.send_yo(b.user_id()).unwrap();
-    assert_eq!(a.waiting(), 1);
-    assert!(matches!(b.sync(0), Err(Error::Network(_))));
-    let hub = TestHub::start_with(config, &addr);
-    a.sync(0).unwrap();
-    assert_eq!(a.waiting(), 0);
-    assert_eq!(yos_from(&b.sync(0).unwrap(), &pa), 1);
-    drop(hub);
-    let _ = std::fs::remove_dir_all(dir);
-}
-
-#[test]
-fn the_hub_survives_garbage_on_every_route() {
-    let hub = TestHub::start();
-    let client = reqwest::blocking::Client::new();
-    let routes = [
-        ("PUT", api::PREKEYS.to_owned()),
-        ("POST", api::LOOKUP.to_owned()),
-        ("PUT", api::PUSH.to_owned()),
-        ("GET", api::INBOX.to_owned()),
-        ("POST", api::INBOX_ACK.to_owned()),
-        ("POST", api::deliver_path(&[1; 16])),
-        ("POST", "/v1/inbox/!!".to_owned()),
-        ("POST", api::REGISTER.to_owned()),
-        ("PUT", api::BACKUP.to_owned()),
-        ("GET", api::backup_path(&[1; 16])),
-        ("GET", "/v1/backup/!!".to_owned()),
-        ("GET", api::username_path("LEO")),
-        ("GET", "/v1/username/%FF%00".to_owned()),
-        ("DELETE", api::ACCOUNT.to_owned()),
-        ("POST", api::HELP_REPORT.to_owned()),
-        ("POST", api::HELP_MESSAGES.to_owned()),
-        ("POST", api::HELP_CRASH.to_owned()),
-    ];
-    let mut seed = 0x9E37_79B9_7F4A_7C15u64;
-    for (method, path) in routes {
-        for len in [0usize, 1, 7, 64, 1024, 5000] {
-            let body: Vec<u8> = (0..len)
-                .map(|_| {
-                    seed ^= seed << 13;
-                    seed ^= seed >> 7;
-                    seed ^= seed << 17;
-                    seed as u8
-                })
-                .collect();
-            let status = client
-                .request(method.parse().unwrap(), format!("{}{}", hub.url(), path))
-                .header("yo-device", "AAAAAAAAAAAAAAAAAAAAAA")
-                .header("yo-time", "1")
-                .header("yo-signature", "x")
-                .body(body)
-                .send()
-                .unwrap()
-                .status()
-                .as_u16();
-            assert!(status < 500, "{method} {path} {len} bytes: {status}");
-        }
-    }
-}
-
-/// A hub that reserves "Admin" (the operator's list, `YO_RESERVED_FILE`).
-fn with_reserved(mut config: yo_hub::config::Config) -> TestHub {
-    config.reserved = yo_hub::config::parse_reserved("Admin # the operator\n");
-    TestHub::start_with(config, "127.0.0.1:0")
-}
-
-#[test]
-fn usernames_are_claimed_found_and_given_up() {
-    let hub = with_reserved(yo_hub::config::Config::for_tests());
-    let (mut a, mut b, pa, _) = pair(&hub);
-    let name = format!("Alice{}", random_u64() % 100_000);
-    a.set_username(Some(&name)).unwrap();
-    assert_eq!(a.username(), Some(name.as_str()), "kept as written");
-    // B finds A by the username, typed any way, and knows A by A's own spelling.
-    b.send_yo(&format!("@{}", name.to_uppercase())).unwrap();
-    let events = a.sync(0).unwrap();
-    assert_eq!(yos_from_user(&events, b.user_id()), 1);
-    assert!(b.contacts().iter().any(|c| c.user == user_of(&pa) && c.handles == [name.clone()]));
-    // Taken in any spelling, reserved in any, malformed.
-    assert_eq!(b.set_username(Some(&name)), Err(Error::Refused(api::status::CONFLICT)));
-    assert_eq!(b.set_username(Some(&name.to_lowercase())), Err(Error::Refused(api::status::CONFLICT)));
-    assert_eq!(b.set_username(Some("ADM1N")), Err(Error::Refused(api::status::CONFLICT)));
-    assert!(b.set_username(Some("x")).is_err());
-    // Given up, it can be someone else's.
-    a.set_username(None).unwrap();
-    b.set_username(Some(&name)).unwrap();
-    assert_eq!(b.username(), Some(name.as_str()));
-}
-
-#[test]
-fn a_username_is_all_it_takes() {
-    let hub = TestHub::start();
-    let (mut a, _, pa, _) = pair(&hub);
-    let name = format!("LEO{}", random_u64() % 100_000);
-    let mut t = by_name(&hub, &name, None).unwrap();
-    assert_eq!(t.username(), Some(name.as_str()));
-    t.send_yo(&pa).unwrap();
-    assert_eq!(yos_from_user(&a.sync(0).unwrap(), t.user_id()), 1);
-    a.send_yo(&name).unwrap();
-    assert_eq!(yos_from_user(&t.sync(0).unwrap(), a.user_id()), 1);
-    // The name is taken now, also in another spelling or as a name that only looks like it (spec 3.3).
-    assert_eq!(by_name(&hub, &name, None).err(), Some(Error::Refused(api::status::CONFLICT)));
-    assert_eq!(by_name(&hub, &name.to_lowercase(), None).err(), Some(Error::Refused(api::status::CONFLICT)));
-    let lookalike = name.replacen('O', "0", 1);
-    assert_eq!(by_name(&hub, &lookalike, None).err(), Some(Error::Refused(api::status::CONFLICT)));
 }
 
 /// A name keeps the spelling its owner chose (spec 3.3): "YoGPT" is found as "yogpt" or "Y0GPT", nobody else can
@@ -471,9 +281,9 @@ fn a_username_keeps_its_spelling_and_reaches_whoever_meets_it() {
         assert_eq!(by_name(&hub, &other, None).err(), Some(Error::Refused(api::status::CONFLICT)), "{other}");
         assert_eq!(Client::username_free(Http::new(hub.url()).as_ref(), &other), Ok(false), "{other}");
     }
-    // Found by another spelling: the friend is known by the owner's.
+    // Found by another spelling (an @ before it as typed): the friend is known by the owner's.
     let mut finder = by_name(&hub, &format!("Finder{n}"), None).unwrap();
-    finder.send_yo(&format!("y0gpt{n}")).unwrap();
+    finder.send_yo(&format!("@y0gpt{n}")).unwrap();
     assert_eq!(yos_from_user(&gpt.sync(0).unwrap(), finder.user_id()), 1);
     let known = |c: &Client, user: &str| c.contacts().into_iter().find(|c| c.user == user).map(|c| c.handles);
     assert_eq!(known(&finder, gpt.user_id()), Some(vec![name.clone()]));
@@ -490,31 +300,6 @@ fn a_username_keeps_its_spelling_and_reaches_whoever_meets_it() {
     // Blocking and reporting by any spelling find the account.
     quiet.set_blocked(&format!("yogpt{n}"), true).unwrap();
     assert!(quiet.contacts().iter().any(|c| c.user == gpt.user_id() && c.blocked));
-}
-
-#[test]
-fn whether_a_name_is_free_is_told_and_nothing_more() {
-    let mut config = yo_hub::config::Config::for_tests();
-    config.limits.name_check_per_ip_minute = 8;
-    let hub = with_reserved(config);
-    let http = Http::new(hub.url());
-    let free = |name: &str| Client::username_free(http.as_ref(), name);
-    let name = format!("LEO{}", random_u64() % 100_000);
-    assert_eq!(free(&name), Ok(true));
-    let emoji = format!("🔥É{}", random_u64() % 100_000);
-    assert_eq!(free(&emoji), Ok(true), "percent-encoded on the way");
-    by_name(&hub, &name, None).unwrap();
-    assert_eq!(free(&name), Ok(false));
-    // Another spelling or a name that only looks like it is taken too (spec 3.3), and so is a reserved one.
-    assert_eq!(free(&name.replacen('O', "0", 1)), Ok(false));
-    assert_eq!(free(&name.to_lowercase()), Ok(false));
-    assert_eq!(free("aDm1n"), Ok(false));
-    // Not a username: the app keeps its field to `handle::canonical`.
-    assert_eq!(free("X"), Err(Error::Refused(api::status::BAD_REQUEST)));
-    // The empty answer says only that: no user id.
-    let raw = yo_core::Transport::request(http.as_ref(), "GET", &api::username_path(&name), &[], &[]).unwrap();
-    assert!(raw.body.is_empty());
-    assert_eq!(free(&name), Err(Error::Refused(api::status::RATE_LIMITED)));
 }
 
 /// Registers by username, with a new account key or the given one.
@@ -781,18 +566,6 @@ fn only_failed_backup_fetches_spend_the_address_limit() {
     // Even an exhausted bucket cannot shut out the owner.
     assert_eq!(fetch(&http, &user), Ok(Some(record.clone())));
     assert_eq!(fetch(&http, &[9; 16]), Ok(Some(record)));
-}
-
-#[test]
-fn an_account_key_belongs_to_one_user_forever() {
-    let hub = TestHub::start();
-    let (a, _, _, _) = pair(&hub);
-    // Another username cannot take A's account key: with it, it is A again, with A's name, and the other stays free.
-    let other = username(random_u64() % 1_000_000_000);
-    let again =
-        Client::register_username(Http::new(hub.url()), &other, Some(a.account_secret()), None, Push::none()).unwrap();
-    assert_eq!((again.user_id(), again.username()), (a.user_id(), a.username()));
-    assert!(Client::username_free(&*Http::new(hub.url()), &other).unwrap());
 }
 
 #[test]

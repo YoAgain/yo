@@ -174,21 +174,35 @@ mod tests {
         assert_eq!(sender_flow(&senders(&[("MIA", 4)]), Language::German).prefix, "4× Yo von ");
     }
 
+    /// Whole lines for a list and a room: the owner's example, the last name instead of "+1", a long first name
+    /// leaving the prefix alone on the first line (it ran over both edges once), one sender at the small size.
     #[test]
-    fn all_fit_on_the_first_line() {
-        assert_eq!(lines(&[("TOM", 1), ("IDA", 2)], 40.0), ["Yo from TOM, 2× IDA", ""]);
-    }
-
-    #[test]
-    fn the_owners_example() {
-        let list = [("TOM", 2), ("ANNA", 3), ("PETER", 4), ("LUKAS", 1), ("SAM", 1), ("KAI", 1)];
-        assert_eq!(lines(&list, 24.0), ["2× Yo from TOM, 3× ANNA,", "4× PETER, LUKAS, SAM +1"]);
-    }
-
-    #[test]
-    fn the_last_name_needs_no_more() {
-        let out = lines(&[("TOM", 1), ("IDA", 1), ("BEN", 1), ("SAM", 1), ("KAI", 1)], 22.0);
-        assert_eq!(out, ["Yo from TOM, IDA, BEN,", "SAM, KAI"]);
+    fn senders_flow_over_two_lines() {
+        type Case<'a> = (&'a [(&'a str, u32)], f32, [&'a str; 2]);
+        let cases: [Case; 7] = [
+            (&[("TOM", 1), ("IDA", 2)], 40.0, ["Yo from TOM, 2× IDA", ""]),
+            (
+                &[("TOM", 2), ("ANNA", 3), ("PETER", 4), ("LUKAS", 1), ("SAM", 1), ("KAI", 1)],
+                24.0,
+                ["2× Yo from TOM, 3× ANNA,", "4× PETER, LUKAS, SAM +1"],
+            ),
+            (
+                &[("TOM", 1), ("IDA", 1), ("BEN", 1), ("SAM", 1), ("KAI", 1)],
+                22.0,
+                ["Yo from TOM, IDA, BEN,", "SAM, KAI"],
+            ),
+            (&[("ALEXANDRAWINTERS", 2), ("IDA", 1)], 27.0, ["2× Yo from", "ALEXANDRAWINTERS, IDA"]),
+            (
+                &[("ALEXANDRAWINTERS", 2), ("KONSTANTIN_BERG_", 2), ("IDA", 1)],
+                22.0,
+                ["2× Yo from", "ALEXANDRAWINTERS +2"],
+            ),
+            (&[("MAXIMILIAN_MUELL", 3)], 30.0, ["3× Yo from MAXIMILIAN_MUELL", ""]),
+            (&[("MAXIMILIAN_MUELL", 3)], 20.0, ["3× Yo from", "MAXIMILIAN_MUELL"]),
+        ];
+        for (list, room, want) in cases {
+            assert_eq!(lines(list, room), want, "{list:?} in {room}");
+        }
     }
 
     #[test]
@@ -197,14 +211,6 @@ mod tests {
         let mut widths = widths(&flow);
         widths.tokens[1] = 100.0;
         assert_eq!(flow_two_lines(&flow, &widths, 12.0), ["Yo from A,", "+2"]);
-    }
-
-    #[test]
-    fn a_long_first_name_leaves_the_prefix_alone_on_the_first_line() {
-        // The owner's screenshot: "Yo from ALEXANDRAWINTERS (2×)," ran over both edges.
-        assert_eq!(lines(&[("ALEXANDRAWINTERS", 2), ("IDA", 1)], 27.0), ["2× Yo from", "ALEXANDRAWINTERS, IDA"]);
-        let out = lines(&[("ALEXANDRAWINTERS", 2), ("KONSTANTIN_BERG_", 2), ("IDA", 1)], 22.0);
-        assert_eq!(out, ["2× Yo from", "ALEXANDRAWINTERS +2"]);
     }
 
     #[test]
@@ -227,12 +233,6 @@ mod tests {
     fn a_name_too_wide_alone_is_placed_whole_never_cut() {
         assert_eq!(flow(&[("MAXIMILIAN_MUELL", 1), ("IDA", 1)], 10.0), ["Yo from", "MAXIMILIAN_MUELL +1"]);
         assert_eq!(flow(&[("MAXIMILIAN_MUELL", 3)], 10.0), ["3× Yo from", "MAXIMILIAN_MUELL"]);
-    }
-
-    #[test]
-    fn one_sender_at_the_small_size() {
-        assert_eq!(lines(&[("MAXIMILIAN_MUELL", 3)], 30.0), ["3× Yo from MAXIMILIAN_MUELL", ""]);
-        assert_eq!(lines(&[("MAXIMILIAN_MUELL", 3)], 20.0), ["3× Yo from", "MAXIMILIAN_MUELL"]);
     }
 
     #[test]

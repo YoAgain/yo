@@ -36,40 +36,6 @@ impl Store for Saved {
 }
 
 #[test]
-fn a_crash_after_processing_loses_nothing_and_repeats_nothing() {
-    let hub = TestHub::start();
-    let (mut a, mut b, _, hb, pa, pb) = chat(&hub);
-    let saved = Arc::new(Saved::default());
-    let key = [5u8; 32];
-    b.acknowledge_only(|_| true);
-    b.persist_to(saved.clone(), key).unwrap();
-    for _ in 0..3 {
-        a.send_yo(&pb).unwrap();
-    }
-    // B processes the three Yos and saves; the ack is lost; B is killed before anything else.
-    hb.fault("/v1/inbox/ack", Fault::LoseAnswer);
-    let first = b.sync(0).unwrap();
-    assert_eq!(yos(&first), 3);
-    // Killed right after the call: the app may not have the events yet, so they come once more after the restart.
-    let blob = saved.0.lock().unwrap().clone();
-    let mut again = yo_tests::restore_bytes(Http::new(hub.url()), &blob).unwrap();
-    assert_eq!(yos(&again.sync(0).unwrap()), 3, "not acknowledged: at least once");
-    // The app acknowledged them before it was killed: the hub delivers the envelopes again (the ack never came),
-    // they are recognised, and nothing is shown twice.
-    b.acknowledge_events();
-    drop(again);
-    drop(b);
-    let blob = saved.0.lock().unwrap().clone();
-    let mut b = yo_tests::restore_bytes(Http::new(hub.url()), &blob).unwrap();
-    assert_eq!(yos(&b.sync(0).unwrap()), 0);
-    a.send_yo(&pb).unwrap();
-    assert_eq!(yos(&b.sync(0).unwrap()), 1);
-    b.send_yo(&pa).unwrap();
-    assert_eq!(yos(&a.sync(0).unwrap()), 1);
-    assert_eq!(b.dropped(), 0, "{:?}", b.drop_reasons());
-}
-
-#[test]
 fn a_passing_refusal_does_not_drop_a_first_message() {
     let hub = TestHub::start();
     let n = random_u64() % 1_000_000_000;

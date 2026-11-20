@@ -5,6 +5,9 @@ edition.workspace = true
 publish.workspace = true
 license.workspace = true
 description = "Scenario, chaos and load tests: a real hub and real clients over HTTP."
+# One test binary for the end-to-end tests (each file a module of tests/e2e.rs): one link instead of one per file.
+# speed.rs alone, so its timings never share the process with the rest.
+autotests = false
 
 [[bin]]
 name = "yo-load"
@@ -29,6 +32,14 @@ path = "src/chaos.rs"
 [[bin]]
 name = "yo-scale"
 path = "src/scale.rs"
+
+[[test]]
+name = "e2e"
+path = "tests/e2e.rs"
+
+[[test]]
+name = "speed"
+path = "tests/speed.rs"
 
 [dependencies]
 yo-wire = { path = "../core/wire" }

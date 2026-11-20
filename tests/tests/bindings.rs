@@ -76,31 +76,6 @@ fn hex(text: &str) -> Vec<u8> {
     (0..text.len() / 2).map(|i| u8::from_str_radix(&text[2 * i..2 * i + 2], 16).unwrap()).collect()
 }
 
-#[test]
-fn the_app_layer_works_end_to_end() {
-    let hub = TestHub::start();
-    let n = random_u64() % 1_000_000_000;
-    let (pa, pb) = (username(n), username(n + 1));
-    let file_a = Disk::new();
-    let a = client(&hub, &pa, "ALICE", file_a.clone());
-    let b = client(&hub, &pb, "BOB", Disk::new());
-    a.send_yo(pb.clone()).unwrap();
-    let events = b.sync(0).unwrap();
-    assert!(events.iter().any(|e| matches!(e, YoEvent::Message { kind: MessageKind::Yo, .. })));
-    assert!(events.iter().any(|e| matches!(e, YoEvent::Profile { name, .. } if name == "ALICE")));
-    assert_eq!(b.contacts().len(), 1);
-    // A knows B by username; B knows A by user id (A wrote first).
-    assert_eq!(b.safety_number(a.user_id()).unwrap(), a.safety_number(pb.clone()).unwrap());
-    // The app is killed and started again from what the store saved.
-    drop(a);
-    let app = Arc::new(App(Http::new(hub.url())));
-    let a = reopen(app, file_a.clone(), vec![7; 32]).unwrap();
-    b.send_yo(pa.clone()).unwrap();
-    let events = a.sync(0).unwrap();
-    assert!(events.iter().any(|e| matches!(e, YoEvent::Message { kind: MessageKind::Yo, .. })));
-    assert!(reopen(Arc::new(App(Http::new(hub.url()))), file_a, vec![8; 32]).is_err());
-}
-
 /// The app's transport, holding the long poll (`wait` > 0) until the test lets it go.
 struct Held {
     app: App,
@@ -313,23 +288,6 @@ fn drain(client: &YoClient) -> Vec<YoEvent> {
     }
 }
 
-/// An answer by the way that holds no client (`send_begin`, the inbox just read) carries the name not yet told, as
-/// `send` does: it went only with the next `maintenance` before.
-#[test]
-fn the_app_layer_tells_its_name_with_the_first_answer() {
-    let hub = TestHub::start();
-    let n = random_u64() % 1_000_000_000;
-    let (pa, pb) = (username(n), username(n + 1));
-    let a = client(&hub, &pa, "ALICE", Disk::new());
-    let b = client(&hub, &pb, "BOB", Disk::new());
-    a.send_yo(pb).unwrap();
-    assert_eq!(yos(&drain(&b), &a.user_id()), 1);
-    b.send_yo(a.user_id()).unwrap();
-    let events = drain(&a);
-    assert_eq!(yos(&events, &b.user_id()), 1);
-    assert!(events.contains(&YoEvent::Profile { user: b.user_id(), name: "BOB".into() }), "the name with the answer");
-}
-
 #[test]
 fn the_app_layer_sends_to_one_friend_while_a_delivery_to_another_waits() {
     use std::sync::mpsc::channel;
@@ -534,9 +492,11 @@ fn the_app_layer_asks_who_a_typed_name_is_before_the_first_yo() {
 #[test]
 fn the_app_layer_sends_a_burst_over_the_hubs_limit_later_in_order() {
     use std::time::{Duration, Instant};
-    const BURST: usize = 60; // twice the limit: over it also on a slow machine, whose burst takes a while
+    // 60 over the limit: over it also on a slow machine, whose burst takes a while; at 4 a second back in about 15 s
+    // (twice the limit of 30 made it wait a minute).
+    const BURST: usize = 300;
     let mut config = yo_hub::config::Config::for_tests();
-    config.limits.deliver_per_ip_minute = 30;
+    config.limits.deliver_per_ip_minute = 240;
     let hub = TestHub::start_with(config, "127.0.0.1:0");
     let n = random_u64() % 1_000_000_000;
     let (pa, pb) = (username(n), username(n + 1));

@@ -1,0 +1,27 @@
+//! The end-to-end tests, one module per file: a real hub and real clients over HTTP (README.md).
+
+mod app_version;
+mod backup_auth;
+mod bindings;
+mod blobs;
+mod flows;
+mod found;
+mod fuzz_corpus;
+mod groups;
+mod handover;
+mod hub_signed;
+mod media;
+mod migration;
+mod probe;
+mod push;
+mod requests;
+mod restore;
+mod review;
+mod robustness;
+mod routes;
+mod scenarios;
+mod sealed;
+mod security;
+mod sessions;
+mod simulation;
+mod storage;

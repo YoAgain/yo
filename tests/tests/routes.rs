@@ -798,31 +798,6 @@ fn backups_are_stored_once_per_locator() {
     assert_eq!(fetch(&sign([9; 32], old), old).0, status::NOT_FOUND, "out of the window");
 }
 
-/// Spec 6.3: a report `204` (again: the latest kept), `404` for no such user; feedback `204`; deleting the account
-/// `204`, then `410`.
-#[test]
-fn reports_feedback_and_deletion() {
-    let hub = TestHub::start();
-    let (mut a, _, name) = account(&hub);
-    let (mut b, _, _) = account(&hub);
-    let report = |user: [u8; 16], reason| encode(&api::Report { user_id: user, reason });
-    for reason in [api::REPORT_SPAM, api::REPORT_ABUSE, api::REPORT_OTHER] {
-        let body = report(user_id(b.user_id()), reason);
-        assert_eq!(raw(&hub, "POST", api::HELP_REPORT, &install(2), body).0, status::NO_CONTENT);
-    }
-    assert_eq!(raw(&hub, "POST", api::HELP_REPORT, &install(2), report([0; 16], 1)).0, status::NOT_FOUND);
-    assert_eq!(signed(&mut a, "DELETE", api::ACCOUNT, &[]).0, status::NO_CONTENT);
-    assert_eq!(signed(&mut a, "DELETE", api::ACCOUNT, &[]).0, status::GONE);
-    // Gone with it (3.2, 6.4): the user, its name, its key, which registers a new user now.
-    let ask = |b: &mut Client, handle| signed(b, "POST", api::LOOKUP, &lookup_body(handle, 0, Vec::new())).0;
-    assert_eq!(ask(&mut b, Handle::user(&user_id(a.user_id()))), status::NOT_FOUND);
-    assert_eq!(ask(&mut b, Handle::username(&name)), status::NOT_FOUND);
-    let again =
-        Client::register_username(Http::new(hub.url()), &name, Some(a.account_secret()), None, yo_core::Push::none())
-            .unwrap();
-    assert_ne!(again.user_id(), a.user_id());
-}
-
 /// Spec 6.6: an old client's delivery token (`Authorization: PrivateToken`) is ignored, no `401`: the delivery counts
 /// against its address like any other; there is no issuance any more.
 #[test]

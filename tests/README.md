@@ -3,14 +3,17 @@
 Everything runs against a real hub on a real socket, with clients over real HTTP. `dev/cargo` runs cargo in the
 pinned toolchain (Docker); `cargo` works the same where Rust 1.99.1 is installed.
 
+All files under `tests/` but `speed.rs` are modules of one test binary, `e2e` (`--test e2e scenarios::` runs one
+file); `speed` is its own, so its timings never share the process.
+
 | File | What it shows |
 |---|---|
 | `core/wire` unit tests | Formats round-trip; parsers refuse every changed byte and never panic (proptest) |
-| `tests/scenarios.rs` | The protocol end to end: Yo there and back with a session per device, a friend with another key told and written to, a new phone with the same key seen by nobody, a verified contact held until confirmed, accounts by username (lookalike names taken), restoring a username with its account key (also renamed since), backups by user id and by locator, names not secured released, registration and backup fetches limited per address, account keys bound to their user, a copied registration refused, long poll, two sessions started at once, one-time prekeys running out and the last resort, a replayed signed request, garbage in a mailbox, blocking, app restart from the sealed state, the outbox through a hub outage, garbage on every route (never a 5xx) |
+| `tests/scenarios.rs` | The protocol end to end: Yo there and back with a session per device, a friend with another key told and written to, a verified contact held until confirmed, a username's spelling (lookalike names taken), restoring a username with its account key (also renamed since; the key bound to its user), backups by user id and by locator, registration and backup fetches limited per address, a copied registration refused, long poll, two sessions started at once, garbage in a mailbox, blocking, app restart from the sealed state |
 | `tests/simulation.rs` | Seeded random runs (sends, syncs, clock jumps, re-registrations): every message arrives exactly once, nothing is dropped. And 200 clients at once |
 | `tests/robustness.rs` | A crash after processing (lost ack) loses and repeats nothing; a passing 429 does not drop a first message; a stranger can fill a mailbox only until it is read and cannot rate-limit it; a long poll cut off leaves nothing; prekeys whose upload answer was lost still open sessions; a refill not taken is sent again, one refused made anew; signed prekeys rotate weekly and sessions still start; a new phone gets what waits once its device is named |
 | `tests/routes.rs` | Every route of spec 6.3 as the spec says: its answer to a good request, `401` without a signature, with another's, changed or replayed, `410` to a replaced or deleted device (for a year, then `401`), `400` to a malformed body (strict decoding), `413` beyond 65 KiB, each route's own limits and rates, repeats; one-time prekeys handed out once (also to lookups at once), the last resort after them, refills above every id before, a repeated upload bringing none back, at most 64, rotated signed prekeys handed out as uploaded; a delivery's `409` with the roster; a Yo to an account without prekeys `Outdated` until it registers again |
-| `tests/sessions.rs` | Sessions (spec 4): a lost message costs only itself, a late one opens with its skipped key, a copy is skipped; a session out of step heals by a decryption error (the peer archives its session and sends that message again); a first message opens after four weeks away with the prekeys replaced weekly |
+| `tests/sessions.rs` | Sessions (spec 4): a session out of step heals by a decryption error (the peer archives its session and sends that message again); a first message opens after four weeks away with the prekeys replaced weekly |
 | `tests/blobs.rs` | Photos and videos at the hub: a blob fetched by each device and gone, file and all, after the last fetch; the largest one there and back, a larger one refused by its length; an upload signed whole and once (unsigned, tampered, replayed, the id taken); quotas per user and day and of bytes waiting; the budget and the disk's free space hold uploads (`507`) until fetches make room; 30 days at most; a deleted account takes its blobs, stray files are swept; limits per address |
 | `tests/media.rs` | A photo and a video with their Yos end to end: uploaded for the receiving devices before the Yo, fetched and opened once by the receiver, then gone at the hub; a blocked sender's dropped unseen; a hub that says "later" (the uploader's room or day used up) holds the upload and its Yo until a fetch makes room |
 | `tests/push.rs` | APNs and FCM requests exactly as sent, with nothing in them but "there is mail"; dead tokens are forgotten |
@@ -18,21 +21,21 @@ pinned toolchain (Docker); `cargo` works the same where Rust 1.99.1 is installed
 | `tests/restore.rs` | Six accounts wiped and restored forty times each, by every way in turn: the passkey (PRF output, record by user id), the 12 words (record by locator), the iCloud Keychain (name and secret on a fresh device), the passkey replaced and the words renewed first (the old ones open nothing), while the old phone still sends (it gets `410`, its last message arrives once). After every cycle: the same user id, messages both ways exactly once, the block holding, the storage back and merged, no orphan rows; a deleted account's backup gone and its name anyone's. The app's backup record in Rust: `tests/src/backup.rs` |
 | `tests/found.rs` | What the chaos runs found (`tests/CHAOS.md`), each as its smallest case |
 | `tests/bindings.rs` | The UniFFI layer the apps call, with HTTP and the store as callbacks: calls run while the inbox waits and while a Yo is on its way to one friend (a Yo to another goes past it, one to the same friend queues behind it); bursts to and from 20 friends at once arrive exactly once, in bounded time; a typed name is looked up (who it is, the owner's spelling) before the first Yo; six accounts whose app long-polls while an extension opens the state as a guest again and again (sends, syncs) and the friend writes: every Yo once both ways, every lock given back |
-| `tests/flows.rs` | Every 1:1 flow through the app layer (`YoClient`) against the hub: register, add a friend, Yo both ways; a photo and a video as blobs, opened once; 150 Yos each way at once, each once in order; lost, doubled and late envelopes; the hub restarted in the middle of a send; the app killed before its save (the disk full), after it, after the hub took a Yo, before the app had its events; a new phone from the words (friends back, the friend's sessions formed anew both ways); the replaced phone still delivering, not heard; a wedged session healed by a decryption error; one-time prekeys used up, sessions on the last resort; 30 days away; a friend blocked, one deleted (its name someone new's); a friend whose app must be updated, the outbox delivered once its prekeys are there; silent receipts turning a one-way stream into fresh ratchet keys; the notification service decrypting as a guest while the app holds the state; what sealed envelopes and the saved state show (nothing) |
+| `tests/flows.rs` | Every 1:1 flow through the app layer (`YoClient`) against the hub: register, add a friend, Yo both ways; a photo and a video as blobs, opened once; 150 Yos each way at once, each once in order; lost, doubled and late envelopes; the hub restarted in the middle of a send; the app killed before its save (the disk full), after it, after the hub took a Yo, before the app had its events; a new phone from the words (friends back, the friend's sessions formed anew both ways); the replaced phone still delivering, not heard; one-time prekeys used up, sessions on the last resort, then refilled; 30 days away; a friend blocked; a friend whose app must be updated, the outbox delivered once its prekeys are there; silent receipts turning a one-way stream into fresh ratchet keys; the notification service decrypting as a guest while the app holds the state; what sealed envelopes and the saved state show (nothing) |
 | `tests/speed.rs` | How fast a Yo goes, through the app layer with the inbox's long wait running as in the app: `send_yo` to the hub's push request (60 Yos, alone and ten a second), the notification service's work for one push (the state opened as a guest, the inbox read without waiting: one request before its events, the ack after), and the hub's store to the receiver's events, with 0 and 40 ms of round trip (the app's long wait; the guest). Prints its numbers: on a 16-core x86 machine, release, send_yo to push request p50 1.8 ms, p90 2.1 ms; the service 2.8 ms;  stored to the app's events at 40 ms round trip p50 20.6 ms (62.0 ms while the ack came first), to the guest's 42.5 ms (83.7 ms) |
 
 ```sh
 dev/cargo test --workspace                                  # everything
-YO_ENV="YO_SEEDS=27,41" dev/cargo test -p yo-tests --test simulation seeded   # replay seeds
+YO_ENV="YO_SEEDS=27,41" dev/cargo test -p yo-tests --test e2e simulation::seeded   # replay seeds
 dev/cargo run --release -p yo-tests --bin yo-yops           # Yos per second of one core, no hub (send, receive, fan-out, first Yo with PQXDH; state saved or not; MLS 930e34e beside)
-YO_ENV="YO_SEEDS=1,2 YO_CLIENTS=12 YO_STEPS=4000" dev/cargo test -p yo-tests --test simulation seeded   # longer
+YO_ENV="YO_SEEDS=1,2 YO_CLIENTS=12 YO_STEPS=4000" dev/cargo test -p yo-tests --test e2e simulation::seeded   # longer
 ```
 
 A failing simulation names its seed; the run is deterministic in what it does, so the seed reproduces it.
 
 ## Account migration
 
-`cargo test -p yo-tests --test migration` takes identity material from fixtures of each old state and Keychain
+`cargo test -p yo-tests --test e2e migration` takes identity material from fixtures of each old state and Keychain
 format, then registers it into the new database against a local hub. It checks that reopening the database
 keeps the same user ID and account public key.
 
@@ -54,7 +57,7 @@ dev/fuzz core_receive 600
 | `hub_routes` | Every route of the hub in-process: never a panic, never a 5xx |
 | `core_receive` | A real device state, then sequences of sealed payloads seeded with real ones (a first message, a profile, Yos, a text): never a panic, the state can always be saved |
 
-Seeds are in `fuzz/seeds/` (`dev/cargo test -p yo-tests --test fuzz_corpus -- --ignored` writes them anew when a
+Seeds are in `fuzz/seeds/` (`dev/cargo test -p yo-tests --test e2e fuzz_corpus -- --ignored` writes them anew when a
 format changes); CI fuzzes each target a minute on every push and fifteen minutes nightly, and keeps any crash as an
 artifact. A crash found becomes a regular test.
 
@@ -151,7 +154,7 @@ phone `410`); malformed bodies `400`, an oversized one `413`. A failed check mak
 
 ### Warm send / receive request regression
 
-`cargo test -j 4 -p yo-tests --test probe normal_warm_request_counts -- --test-threads=4 --nocapture`
+`cargo test -j 4 -p yo-tests --test e2e probe::normal_warm_request_counts -- --test-threads=4 --nocapture`
 uses the local test hub and a pair with established sessions and exchanged profile keys. Counts stop when
 send returns / receive events are handed out, before deferred housekeeping; first-contact discovery,
 recovery, additional devices and pending messages can require additional requests.

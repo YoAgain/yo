@@ -111,10 +111,17 @@ mod tests {
     const H: f64 = 800.0;
 
     #[test]
-    fn at_or_above_the_bar_nothing() {
-        assert_eq!(hold_zoom(200.0, 300.0, 300.0, W, H), Zoom::NONE);
-        assert_eq!(hold_zoom(200.0, 300.0 + SLACK, 300.0, W, H), Zoom::NONE);
-        assert_eq!(hold_zoom(50.0, 100.0, 300.0, W, H), Zoom::NONE);
+    fn at_or_above_the_bar_or_for_nonsense_nothing() {
+        for (fx, fy, bar, w) in [
+            (200.0, 300.0, 300.0, W),
+            (200.0, 300.0 + SLACK, 300.0, W),
+            (50.0, 100.0, 300.0, W),
+            (f64::NAN, 500.0, 300.0, W),
+            (200.0, f64::INFINITY, 300.0, W),
+            (200.0, 500.0, 300.0, 0.0),
+        ] {
+            assert_eq!(hold_zoom(fx, fy, bar, w, H), Zoom::NONE, "{fx},{fy} bar {bar} width {w}");
+        }
     }
 
     #[test]
@@ -162,23 +169,22 @@ mod tests {
         assert!(low > high);
     }
 
-    #[test]
-    fn nonsense_is_no_zoom() {
-        assert_eq!(hold_zoom(f64::NAN, 500.0, 300.0, W, H), Zoom::NONE);
-        assert_eq!(hold_zoom(200.0, f64::INFINITY, 300.0, W, H), Zoom::NONE);
-        assert_eq!(hold_zoom(200.0, 500.0, 300.0, 0.0, H), Zoom::NONE);
-    }
-
     // A bar from 300 to 380 on an 800 high screen: half of it is 400.
     fn rec(y: f64, start: f64, most: f64) -> f64 {
         record_zoom(y, 300.0, 380.0, 800.0, start, most)
     }
 
     #[test]
-    fn recording_on_the_bar_nothing() {
+    fn recording_on_the_bar_or_for_nonsense_nothing() {
         for y in [300.0, 340.0, 380.0, 380.0 + RECORD_SLACK, 300.0 - RECORD_SLACK] {
             assert_eq!(rec(y, 1.0, 20.0), 1.0, "{y}");
         }
+        assert_eq!(rec(f64::NAN, 1.0, 10.0), 1.0);
+        assert_eq!(record_zoom(500.0, 300.0, 380.0, f64::INFINITY, 2.0, 10.0), 2.0);
+        assert_eq!(record_zoom(500.0, 300.0, 380.0, 0.0, 2.0, 10.0), 2.0);
+        assert_eq!(rec(500.0, f64::NAN, 10.0), 1.0);
+        assert_eq!(rec(500.0, 1.0, f64::NAN), 1.0);
+        assert_eq!(record_zoom(500.0, 380.0, 300.0, 800.0, 1.0, 10.0), 1.0);
     }
 
     #[test]
@@ -239,16 +245,6 @@ mod tests {
         assert_eq!(rec(600.0, 1.0, 1.0), 1.0);
         // From 2x it still reaches the most at half the screen.
         assert!((rec(780.0, 2.0, 20.0) - RECORD_MOST).abs() < 1e-9);
-    }
-
-    #[test]
-    fn recording_nonsense_is_no_zoom() {
-        assert_eq!(rec(f64::NAN, 1.0, 10.0), 1.0);
-        assert_eq!(record_zoom(500.0, 300.0, 380.0, f64::INFINITY, 2.0, 10.0), 2.0);
-        assert_eq!(record_zoom(500.0, 300.0, 380.0, 0.0, 2.0, 10.0), 2.0);
-        assert_eq!(rec(500.0, f64::NAN, 10.0), 1.0);
-        assert_eq!(rec(500.0, 1.0, f64::NAN), 1.0);
-        assert_eq!(record_zoom(500.0, 380.0, 300.0, 800.0, 1.0, 10.0), 1.0);
     }
 
     #[test]

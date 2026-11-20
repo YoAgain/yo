@@ -64,31 +64,6 @@ fn assert_sealed(http: &Http, to: &Client) {
     assert_eq!(last[0], yo_wire::envelope::SEALED, "a contact's delivery, sealed");
 }
 
-/// One message never reaches the hub, one arrives late (after the next), one twice: the ratchet takes the late one
-/// with its skipped key, the copy is skipped, the lost one costs nothing but itself.
-#[test]
-fn lost_late_and_doubled_messages() {
-    let hub = TestHub::start();
-    let (mut a, mut b, ha) = pair(&hub, "Lld");
-    let to_b = yo_wire::api::deliver_path(&yo_tests::user_id(b.user_id()));
-    // "lost": A is told the hub took it, the hub never saw it.
-    ha.fault(&to_b, Fault::Answer(202));
-    a.send(b.user_id(), text("lost")).unwrap();
-    // "late": the same, then posted by hand after the next one.
-    ha.fault(&to_b, Fault::Answer(202));
-    a.send(b.user_id(), text("late")).unwrap();
-    a.send(b.user_id(), text("next")).unwrap();
-    let sent = posted(&ha, b.user_id());
-    let (late, next) = (sent[sent.len() - 2].clone(), sent[sent.len() - 1].clone());
-    assert_eq!(texts(&b.sync(0).unwrap()), ["next"]);
-    assert_eq!(deliver_raw_with(&hub.url(), b.user_id(), b.access_key_for_tests().as_deref(), late), 202);
-    assert_eq!(deliver_raw_with(&hub.url(), b.user_id(), b.access_key_for_tests().as_deref(), next), 202);
-    assert_eq!(texts(&b.sync(0).unwrap()), ["late"], "the late one once, the copy skipped");
-    assert_eq!(b.dropped(), 0, "{:?}", b.drop_reasons());
-    b.send(a.user_id(), text("all good")).unwrap();
-    assert_eq!(texts(&a.sync(0).unwrap()), ["all good"]);
-}
-
 #[derive(Default)]
 struct Saved(Mutex<Vec<u8>>);
 

@@ -69,6 +69,25 @@ fn status(request: reqwest::blocking::RequestBuilder) -> u16 {
     request.send().unwrap().status().as_u16()
 }
 
+/// The answer to a PUT the hub refuses by its head alone. Only the head is sent: a body the hub never reads would make
+/// it close the connection under a client still sending, which failed now and then as a transport error.
+fn refused_by_head(hub: &TestHub, path: &str, headers: &[(String, String)], length: Option<usize>) -> u16 {
+    use std::io::{Read, Write};
+    let mut head = format!("PUT {path} HTTP/1.1\r\nHost: hub\r\n");
+    for (name, value) in headers.iter().filter(|(name, _)| !name.eq_ignore_ascii_case("content-length")) {
+        head += &format!("{name}: {value}\r\n");
+    }
+    head += &match length {
+        Some(length) => format!("Content-Length: {length}\r\n\r\n"),
+        None => "Transfer-Encoding: chunked\r\n\r\n".into(),
+    };
+    let mut socket = std::net::TcpStream::connect(hub.addr).unwrap();
+    socket.write_all(head.as_bytes()).unwrap();
+    let mut answer = [0u8; 12];
+    socket.read_exact(&mut answer).unwrap();
+    std::str::from_utf8(&answer[9..]).unwrap().parse().unwrap()
+}
+
 #[test]
 fn a_blob_is_fetched_by_each_device_and_gone_after_the_last() {
     let (hub, dir) = hub_with(|_| {});
@@ -145,17 +164,16 @@ fn concurrent_gets_reserve_the_budget_and_cutoff_returns_a_slot() {
 fn an_upload_must_be_signed_whole_and_once() {
     let (hub, dir) = hub_with(|_| {});
     let (mut alice, http) = someone(&hub);
-    let url = hub.url();
-    let client = reqwest::blocking::Client::new();
     let (media, sealed) = media::seal(&noise(5000), 10, 10).unwrap();
     let path = api::blob_put_path(&media.id, 1);
-    let hash = (api::HEADER_BODY_HASH, yo_wire::b64(&media.sha256));
-    // Checked before anything else: a length (`411` without, sent chunked) of a tag at least (`400`).
-    let chunked = reqwest::blocking::Body::new(std::io::Cursor::new(sealed.clone()));
-    assert_eq!(status(client.put(format!("{url}{path}")).header(hash.0, &hash.1).body(chunked)), 411);
-    assert_eq!(status(client.put(format!("{url}{path}")).header(hash.0, &hash.1).body(vec![0; 15])), 400);
-    // Unsigned.
-    assert_eq!(status(client.put(format!("{url}{path}")).header(hash.0, &hash.1).body(sealed.clone())), 401);
+    let hash = vec![(api::HEADER_BODY_HASH.to_string(), yo_wire::b64(&media.sha256))];
+    // Checked before anything else: a length (`411` without, sent chunked), a tag at least (`400`), fetches 1 to 64
+    // (a group's members), then the signature (`401` unsigned).
+    assert_eq!(refused_by_head(&hub, &path, &hash, None), 411);
+    assert_eq!(refused_by_head(&hub, &path, &hash, Some(15)), 400);
+    for (n, refused) in [(0, 400), (65, 400), (64, 401)] {
+        assert_eq!(refused_by_head(&hub, &api::blob_put_path(&media.id, n), &hash, Some(sealed.len())), refused);
+    }
     // A body that is not the signed one: refused, nothing kept.
     let tampered = {
         let mut bytes = sealed.clone();
@@ -164,26 +182,18 @@ fn an_upload_must_be_signed_whole_and_once() {
     };
     assert_eq!(alice.upload(&media, 1).unwrap().send(&tampered), Err(Error::Refused(400)));
     assert_eq!(files(&dir), (0, 0));
-    // Fetches 1 to 64 (a group's members), checked first.
-    for (n, refused) in [(0, 400), (65, 400), (64, 401)] {
-        let path = api::blob_put_path(&media.id, n);
-        assert_eq!(status(client.put(format!("{url}{path}")).header(hash.0, &hash.1).body(sealed.clone())), refused);
-    }
     // Stored once; the same signed request again is a replay.
     alice.upload(&media, 1).unwrap().send(&sealed).unwrap();
     let (method, path, headers, body) = http.recorded.lock().unwrap().last().cloned().unwrap();
-    let mut replay = client.request(method.parse().unwrap(), format!("{url}{path}")).body(body);
-    for (name, value) in headers {
-        replay = replay.header(name, value);
-    }
-    assert_eq!(status(replay), 401);
+    assert_eq!(method, "PUT");
+    assert_eq!(refused_by_head(&hub, &path, &headers, Some(body.len())), 401);
     // The same id again, signed anew: taken (the core takes that for its own lost answer).
     let again = media::seal(&noise(10), 1, 1).unwrap();
     let same_id = Media { id: media.id, ..again.0 };
     assert_eq!(alice.upload(&same_id, 1).unwrap().send(&again.1), Ok(()));
     assert_eq!(files(&dir), (1, 0));
     // Not a blob id: no such route.
-    assert_eq!(status(client.get(format!("{url}/v1/blobs/AAAA"))), 404);
+    assert_eq!(status(reqwest::blocking::Client::new().get(format!("{}/v1/blobs/AAAA", hub.url()))), 404);
 }
 
 #[test]

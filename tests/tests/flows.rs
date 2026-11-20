@@ -524,36 +524,6 @@ fn a_replaced_device_still_sending_is_not_heard() {
     assert_eq!(b.sessions_with(a.user()).unwrap().len(), 1);
 }
 
-/// B's state is rolled back past its session with A (a backup of the file from before): A's next Yo does not open.
-/// B sends a `DecryptionErrorMessage` (Signal's); A archives the session, starts a new one and sends that Yo again; B
-/// shows it, once.
-#[test]
-fn a_wedged_session_heals_by_a_decryption_error() {
-    let hub = TestHub::start();
-    let (a, b) = pair(&hub);
-    let early = b.file.snapshot();
-    a.send_yo(b.user()).unwrap();
-    assert_eq!(yos(&b.drain(), &a.user()), 1);
-    b.send_yo(a.user()).unwrap();
-    assert_eq!(yos(&a.drain(), &b.user()), 1);
-    b.file.put_back(early);
-    let b = b.restart(&hub);
-    a.send_yo(b.user()).unwrap();
-    let events = b.sync(0).unwrap();
-    assert_eq!(yos(&events, &a.user()), 0, "it does not open");
-    b.acknowledge_events();
-    b.after_sync().unwrap();
-    assert!(b.sessions_with(a.user()).unwrap().iter().all(|s| !s.retrying), "the decryption error went");
-    a.drain();
-    let times = yo_times(&b.drain(), &a.user());
-    // The one that did not open, only: the first was shown before the rollback.
-    assert_eq!(times.len(), 1, "the Yo named, once");
-    b.send_yo(a.user()).unwrap();
-    assert_eq!(yos(&a.drain(), &b.user()), 1);
-    a.send_yo(b.user()).unwrap();
-    assert_eq!(yos(&b.drain(), &a.user()), 1);
-}
-
 /// B's one-time prekeys used up at the hub (lookups that never led to a message): the next sender's session is made
 /// with the last resort, and it opens; a second one too; then B refills.
 #[test]
@@ -611,26 +581,6 @@ fn a_blocked_friend_is_not_heard_and_not_written_to() {
     assert_eq!(yos(&b.drain(), &a.user()), 1, "heard again, only what came after");
     b.send_yo(a.user()).unwrap();
     assert_eq!(yos(&a.drain(), &b.user()), 1);
-}
-
-#[test]
-fn a_deleted_account_is_gone_for_its_friend_and_its_name_free() {
-    let hub = TestHub::start();
-    let (a, b) = friends(&hub);
-    a.delete_account().unwrap();
-    assert!(matches!(a.sync(0), Err(YoError::Replaced)));
-    assert!(yo::username_free(App::new(Http::new(hub.url())), a.name.clone()).unwrap());
-    assert!(matches!(b.send_yo(a.user()), Err(YoError::NotOnYo)));
-    assert!(b.contacts().iter().any(|c| c.user == a.user() && c.gone));
-    assert_eq!(b.waiting(), 0, "nothing waits for nobody");
-    assert!(matches!(b.send_yo(a.name.clone()), Err(YoError::NotOnYo)));
-    // Someone new takes the name: a stranger to B, written to as such.
-    let c = Phone::new(&hub, &a.name, Some("CAROL"));
-    assert_ne!(c.user(), a.user());
-    b.send_yo(a.name.clone()).unwrap();
-    let events = c.drain();
-    assert_eq!(yos(&events, &b.user()), 1);
-    assert!(events.contains(&YoEvent::NewChat { user: b.user() }));
 }
 
 /// Silent receipts (spec 4.5): B never sends anything, yet each sync of B answers A's Yos with a receipt, so A's

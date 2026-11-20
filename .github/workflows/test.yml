@@ -24,7 +24,7 @@ jobs:
       - run: cargo clippy --workspace --all-targets --locked -- -D warnings
       - run: cargo test --workspace --locked
       - name: More seeds
-        run: YO_SEEDS=$(seq -s, 100 130) cargo test --locked -p yo-tests --test simulation seeded
+        run: YO_SEEDS=$(seq -s, 100 130) cargo test --locked -p yo-tests --test e2e simulation::seeded
 
   load:
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
