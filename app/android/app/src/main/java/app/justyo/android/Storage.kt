@@ -58,12 +58,27 @@ class Vault(private val context: Context) {
     companion object {
         /**
          * The state key; the one-time sign-in still to finish and the hub storage key of a converted account it
-         * signs in with; a replaced account; a Block Store change still to make; "Back up to Google" turned off.
+         * signs in with; a replaced account; a Block Store change still to make; "Back up to Google" turned off; the
+         * install id (`InstallId`), which belongs to this phone, not to an account.
          */
-        val KEPT = setOf("state-key", "migration", "migration-storage", "left", "synced-pending", "google-backup")
+        val KEPT = setOf("state-key", "migration", "migration-storage", "left", "synced-pending", "google-backup", InstallId.NAME)
         /** Whether `clear` leaves the entry (or its backup copy) in place. */
         fun keeps(name: String) = name.removeSuffix(".bak") in KEPT
     }
+}
+
+/**
+ * The random install id that help (support thread, reports, crash and error reports) is sent by, never by the account.
+ * It stays on this phone alone (the vault: no backup, no transfer) and never goes with an account request. Send Crashes
+ * off forgets it; the next use makes a new one. Callers run on Dispatchers.IO.
+ */
+object InstallId {
+    const val NAME = "install-id"
+    @Synchronized fun current(context: Context): String =
+        existing(context) ?: uniffi.yo.newInstallId().also { Vault(context).write(NAME, it.toByteArray()) }
+    /** The id if one was made, without making one (reading a thread that cannot exist yet). */
+    @Synchronized fun existing(context: Context): String? = Vault(context).read(NAME)?.toString(Charsets.UTF_8)
+    @Synchronized fun forget(context: Context) { Vault(context).delete(NAME) }
 }
 
 fun randomBytes(size: Int) = ByteArray(size).also { SecureRandom().nextBytes(it) }

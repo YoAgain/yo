@@ -8,6 +8,7 @@ import androidx.core.content.edit
 import org.json.JSONArray
 import org.json.JSONObject
 import uniffi.yo.HttpTransport
+import uniffi.yo.helpDiagnostic
 import java.util.UUID
 
 /** Whitelist code locations only. Never retain exception messages, thread names, paths or memory. */
@@ -48,12 +49,17 @@ internal object CrashFrames {
     }.getOrDefault("")
 }
 class CrashReports(context: Context, private val transport: HttpTransport) {
+    private val context = context.applicationContext
     private val preferences = context.getSharedPreferences("crashes", Context.MODE_PRIVATE)
     private val manager = context.getSystemService(ActivityManager::class.java)
-    /** Sent automatically; Settings › Status › Send Crashes turns it off (reports then stay on this phone). */
+    /**
+     * Sent automatically; Settings › Status › Send Crashes turns it off (reports then stay on this phone) and forgets the
+     * install id; turned on again, the next report makes a new one. Reports kept by an older build (`history` rows hold
+     * only the report JSON, counted errors only their counts) are sent the same way, by the install id.
+     */
     var enabled: Boolean
         get() = preferences.getBoolean("enabled", true)
-        set(value) { preferences.edit { putBoolean("enabled", value) } }
+        set(value) { preferences.edit { putBoolean("enabled", value) }; if (!value) InstallId.forget(context) }
     @Synchronized fun history(): List<String> = rows().map { it.getString("text") }.reversed()
     private fun rows(): List<JSONObject> = runCatching { val array=JSONArray(preferences.getString("history","[]"));(0 until array.length()).map { array.getJSONObject(it) } }.getOrDefault(emptyList())
     private fun payload(exception: String,termination: String,frames: String) = JSONObject()
@@ -86,7 +92,7 @@ class CrashReports(context: Context, private val transport: HttpTransport) {
                 .put("place", if (category == "state") "StateDb" else "ForegroundInbox").put("code", reason)
                 .put("details", "day=$day count=$value")
                 .put("count", value.coerceAtMost(100_000).toString())
-            fun upload() = transport.request("POST", "/v1/errors", emptyList(), body.toString().toByteArray()).status.toInt()
+            fun upload() = helpDiagnostic(transport, InstallId.current(context), false, body.toString()).toInt()
             var status = upload()
             if (status == 400) {
                 // Hubs predating counted diagnostics accept the count in details.
@@ -133,10 +139,12 @@ class CrashReports(context: Context, private val transport: HttpTransport) {
         for(row in rows) {
             if(!enabled) break
             if(row.optBoolean("sent")) continue
-            val response=transport.request("POST","/v1/diagnostics/crash",emptyList(),row.getString("text").toByteArray())
-            if(response.status.toInt() !in 200..299) break
+            val status=helpDiagnostic(transport,InstallId.current(context),true,row.getString("text")).toInt()
+            if(status !in 200..299) break
             row.put("sent",true)
             preferences.edit { putString("history",JSONArray(rows).toString()) }
         }
+        // Turned off while a report went out: no id may outlive the switch.
+        if(!enabled) InstallId.forget(context)
     }
 }

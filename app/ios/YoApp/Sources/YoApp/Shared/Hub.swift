@@ -184,7 +184,7 @@ final class HubTransport: HttpTransport {
     // Only what names nobody goes anonymous (yo_wire::api::anonymous, spec 1).
     let anonymous = !signed && anonymousRequest(method: method, path: path)
     let task = (anonymous ? Self.anonymousSession : Self.signedSession).dataTask(with: request)
-    let diagnosticUpload = path == "/v1/errors" || path == "/v1/crash" || path == "/v1/diagnostics/crash"
+    let diagnosticUpload = path == "/v1/help/error" || path == "/v1/help/crash"
     // Only static route components: never account, blob, group or username path values.
     let codePlace = "HubTransport.request \(method) " + path.split(separator: "/").prefix(2).joined(separator: "/")
     // Expected, never reported: our own cancels (too large is reported as 413), the long poll cut off, a username

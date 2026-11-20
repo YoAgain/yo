@@ -113,12 +113,14 @@ extension BackupRecord.Sealed {
 final class AccountStore {
   var supportUnread: UInt32 = 0 { didSet { supportRevision &+= 1 } }
   private var supportRevision: UInt64 = 0
+  /// The thread goes by the install id, not the account: none yet (nothing written, or Send Crashes switched off) is
+  /// no thread.
   func refreshSupport() async {
-    guard let client else { supportUnread = 0; return }
+    guard let install = InstallID.existing else { supportUnread = 0; return }
     let revision = supportRevision
     do {
-      let thread = try await Hub.run { try client.supportThread() }
-      guard self.client === client, revision == supportRevision else { return }
+      let thread = try await Hub.run { try helpThread(transport: Hub.transport, install: install) }
+      guard revision == supportRevision else { return }
       supportUnread = thread.unread
     } catch {}  // keep the last known count while offline
   }
@@ -958,8 +960,10 @@ final class AccountStore {
     toStorage()  // for the account's next phone
   }
 
+  /// By the install id, not this account.
   func report(_ who: String, reason: ReportReason) async throws {
-    try await hub { try $0.report(who: who, reason: reason) }
+    let install = InstallID.current
+    try await hub { try $0.report(who: who, reason: reason, install: install) }
   }
 
   /// Spec 6.4. Also tells the password manager the passkeys are no longer valid; the caller then resets.

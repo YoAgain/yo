@@ -163,7 +163,34 @@ enum Diagnostics {
   }
 
   /// Anonymous crash and error reports: on unless switched off (Status › Send Crashes); one setting for both senders.
-  static var reportsOn: Bool { UserDefaults.standard.object(forKey: "crashReports.on") as? Bool ?? true }
+  /// The app's own choice first; the extensions read the copy in the App Group.
+  static var reportsOn: Bool {
+    UserDefaults.standard.object(forKey: onKey) as? Bool ?? InstallID.defaults.object(forKey: onKey) as? Bool ?? true
+  }
+  private static let onKey = "crashReports.on"
+
+  /// Off forgets the install id (the next help or report on makes a new one) and keeps reports on the phone.
+  static func setReportsOn(_ on: Bool) {
+    UserDefaults.standard.set(on, forKey: onKey)
+    InstallID.defaults.set(on, forKey: onKey)
+    if !on { InstallID.forget() }
+  }
+
+  /// The extensions learn a choice made before they read the App Group's copy.
+  static func shareReportsChoice() {
+    guard let on = UserDefaults.standard.object(forKey: onKey) as? Bool,
+      InstallID.defaults.object(forKey: onKey) as? Bool != on else { return }
+    InstallID.defaults.set(on, forKey: onKey)
+  }
+
+  /// One queued report (its JSON, as any earlier build queued it) to the hub by the install id: true when done with it
+  /// (taken, or refused for good: a 4xx but 426 and 429), false to keep it for later (no answer, 426, 429, 5xx).
+  static func upload(_ text: String, crash: Bool) -> Bool {
+    // Plain text from the first builds the core sends as the same report in JSON.
+    guard let status = try? helpDiagnostic(transport: Hub.transport, install: InstallID.current, crash: crash, report: text)
+    else { return false }
+    return status == 204 || (400..<500).contains(status) && status != 426 && status != 429
+  }
 
   static func flush() {
     let epoch = UserDefaults.standard.string(forKey: generation)
@@ -174,12 +201,36 @@ enum Diagnostics {
     while let text = pending("error").first {
       guard reportsOn,
         UserDefaults.standard.string(forKey: generation) == epoch else { return }
-      let answer = Hub.transport.request(method: "POST", path: "/v1/errors", headers: [], body: Data(text.utf8))
-      guard answer.status == 204 else {
+      guard upload(text, crash: false) else {
         queue.asyncAfter(deadline: .now() + 30) { send(epoch: epoch) }
         return
       }
       markSent(text, epoch: epoch)
     }
   }
+}
+
+/// The random install id help goes by (support thread, reports, crash and error reports; spec 6.4): made on first use,
+/// kept on this phone alone in the App Group (the app and its extensions), never sent with the account or put in its
+/// storage. Send Crashes off forgets it.
+enum InstallID {
+  private static let key = "help.install"
+  private static let lock = NSLock()
+  /// The App Group's defaults; Yo Dev without the group keeps its own.
+  static var defaults: UserDefaults { UserDefaults(suiteName: ShareBridge.group) ?? .standard }
+
+  /// The id, made now if there is none.
+  static var current: String {
+    lock.withLock {
+      if let id = defaults.string(forKey: key) { return id }
+      let id = newInstallId()
+      defaults.set(id, forKey: key)
+      return id
+    }
+  }
+
+  /// The id if there is one: reading a thread never makes one.
+  static var existing: String? { lock.withLock { defaults.string(forKey: key) } }
+
+  static func forget() { lock.withLock { defaults.removeObject(forKey: key) } }
 }

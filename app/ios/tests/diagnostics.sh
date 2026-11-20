@@ -15,22 +15,27 @@ import Synchronization
 import YoCore
 
 enum Keychain { struct Failure: Error {} }
+enum CountedErrors { static func record(domain: String, place: String, code: String, expected: Bool) {} }
 enum AppUpdate { static let header = "ios/test" }
-struct HttpResult { let status: UInt16 }
 enum Hub {
   static let transport = Transport()
 }
+enum ShareBridge { static let group = "app.justyo.diagnostics-test" }
 struct Transport {
-  struct State { var online = true; var bodies: [Data] = []; var calls = 0 }
+  struct State { var online = true; var refuse = false; var bodies: [Data] = []; var installs: Set<String> = []; var calls = 0 }
   static let state = Mutex(State())
-  func request(method: String, path: String, headers: [String], body: Data) -> HttpResult {
-    precondition(method == "POST" && path == "/v1/errors" && headers.isEmpty)
-    return Self.state.withLock {
-      $0.calls += 1
-      if !$0.online { return HttpResult(status: 503) }
-      $0.bodies.append(body)
-      return HttpResult(status: 204)
-    }
+}
+func newInstallId() -> String { UUID().uuidString.replacingOccurrences(of: "-", with: "").lowercased() }
+// The core's help call: the install id in its header, the queued JSON as the body.
+func helpDiagnostic(transport: Transport, install: String, crash: Bool, report: String) throws -> UInt16 {
+  precondition(!crash && install.count == 32)
+  return Transport.state.withLock {
+    $0.calls += 1
+    if !$0.online { return 503 }
+    if $0.refuse { return 400 }
+    $0.bodies.append(Data(report.utf8))
+    $0.installs.insert(install)
+    return 204
   }
 }
 func eventually(_ check: () -> Bool) {
@@ -107,6 +112,30 @@ precondition(Diagnostics.pending("error") == ["legacy"])
 precondition(Diagnostics.pending("error") == ["legacy"])
 Diagnostics.clear()
 precondition(Transport.state.withLock { $0.bodies.count } == 17)
+// One install id for all of them; Send Crashes off forgets it, on again makes a new one on the next upload.
+let install = Transport.state.withLock { $0.installs }
+precondition(install.count == 1 && InstallID.existing == install.first)
+Diagnostics.setReportsOn(false)
+precondition(InstallID.existing == nil && !Diagnostics.reportsOn)
+// What an earlier build queued (the same store; plain text from the first builds) goes out by the new id.
+defaults.set(["legacy"], forKey: "diagnostics.pending")
+Diagnostics.flush()
+usleep(50_000)
+precondition(Diagnostics.pending("error") == ["legacy"] && InstallID.existing == nil)
+Diagnostics.setReportsOn(true)
+Diagnostics.flush()
+eventually { Diagnostics.pending("error").isEmpty }
+// As queued: the core turns a first build's plain-text crash into JSON itself.
+precondition(String(decoding: Transport.state.withLock { $0.bodies.last! }, as: UTF8.self) == "legacy")
+precondition(Transport.state.withLock { $0.installs.count } == 2 && !install.contains(InstallID.existing!))
+// A report the hub will never take (4xx) is done with, not kept forever at the queue's head.
+Transport.state.withLock { $0.refuse = true }
+let before = Transport.state.withLock { $0.calls }
+Diagnostics.record(NSError(domain: "refused", code: 4))
+eventually { Transport.state.withLock { $0.calls } > before && Diagnostics.pending("error").isEmpty }
+Transport.state.withLock { $0.refuse = false }
+Diagnostics.clear()
+precondition(Transport.state.withLock { $0.bodies.count } == 18)
 struct OldCrash: Codable { let id: UUID; let date: Date; let text: String }
 let old = OldCrash(id: UUID(), date: Date(timeIntervalSince1970: 1), text: "already sent")
 defaults.set(try! JSONEncoder().encode([old]), forKey: "crashReports.history")
@@ -119,7 +148,9 @@ precondition(defaults.stringArray(forKey: "crashReports.pending") == nil)
 Diagnostics.markSent("waiting", epoch: defaults.string(forKey: "diagnostics.generation"))
 precondition(Diagnostics.pending("crash").isEmpty && Diagnostics.retainedCrashes().count == 2)
 Diagnostics.clear()
-print("Diagnostics: consent, every occurrence, privacy, retry, retention and history migration passed")
+Diagnostics.setReportsOn(true)
+InstallID.forget()
+print("Diagnostics: consent, install id, every occurrence, privacy, retry, drop, retention and migration passed")
 SWIFT
 swiftc -module-cache-path "$out/modules" -swift-version 6 -I "$out" -L "$out" -lYoCore \
   "$here/../YoApp/Sources/YoApp/Shared/Diagnostics.swift" "$out/main.swift" -o "$out/check"

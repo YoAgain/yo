@@ -152,7 +152,7 @@ struct MessagePage: View {
         }
         .buttonStyle(.plain)
         .accessibilityLabel("Send")
-        .disabled(trimmed.isEmpty || sending || accounts.client == nil)
+        .disabled(trimmed.isEmpty || sending)
         .padding(.trailing, 4)
         .padding(.bottom, 4)
       }
@@ -174,17 +174,19 @@ struct MessagePage: View {
   }
 
   private func refresh(quiet: Bool = false) async {
-    guard let client = accounts.client, !loading else { return }
+    guard !loading else { return }
+    // By the install id: none yet, nothing written yet.
+    guard let install = InstallID.existing else { messages = []; accounts.supportUnread = 0; return }
     if !quiet { loading = true }
     defer { loading = false }
     do {
-      let thread = try await Hub.run { try client.supportThread() }
+      let thread = try await Hub.run { try helpThread(transport: Hub.transport, install: install) }
       if thread.messages.map(\.id) != messages.map(\.id) {
         withAnimation(.smooth) { messages = thread.messages }
       }
       accounts.supportUnread = thread.unread
       if let through = messages.map(\.id).max() {
-        try await Hub.run { try client.supportRead(through: through) }
+        try await Hub.run { try helpRead(transport: Hub.transport, install: install, through: through) }
         accounts.supportUnread = 0
       }
       problem = nil
@@ -194,14 +196,14 @@ struct MessagePage: View {
   }
 
   private func send() async {
-    guard let client = accounts.client, !trimmed.isEmpty, !sending else { return }
-    let words = trimmed, version = HelpPage.appVersion
+    guard !trimmed.isEmpty, !sending else { return }
+    let words = trimmed, version = HelpPage.appVersion, install = InstallID.current
     sending = true
     failedSend = false
     problem = nil
     defer { sending = false }
     do {
-      try await Hub.run { try client.sendSupport(text: words, appVersion: version) }
+      try await Hub.run { try helpSend(transport: Hub.transport, install: install, text: words, appVersion: version) }
       text = ""
       await refresh()
     } catch YoError.Refused(let status) where status == 429 {

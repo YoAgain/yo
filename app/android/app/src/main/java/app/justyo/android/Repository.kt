@@ -917,7 +917,7 @@ class Repository(private val context: Context, ownerScope: CoroutineScope) {
         client?.writeStorage()
     }
     suspend fun block(friend: Friend, blocked: Boolean) { client?.setBlocked(friend.target, blocked); refresh(); client?.writeStorage(); media.wake() }
-    suspend fun report(friend: Friend, reason: ReportReason) { client?.report(friend.target, reason) }
+    suspend fun report(friend: Friend, reason: ReportReason) { client?.report(friend.target, reason, InstallId.current(context)) }
     suspend fun createGroup(name: String, members: List<String>) {
         val c = client ?: return
         val made = c.createGroup(utf8Limit(name.trim(), 32), members.take(19))
@@ -952,9 +952,11 @@ class Repository(private val context: Context, ownerScope: CoroutineScope) {
     }
     private suspend fun groupNotice(group: String,text: String,users: List<String>,groups: List<String>): String =
         media.stageCard(context,"group:$group",text,users+state.value.username.orEmpty(),groups)
-    suspend fun feedback(text: String) { client?.sendSupport(utf8Limit(text.trim(), 2000), BuildConfig.VERSION_NAME) }
-    suspend fun supportThread() = client?.supportThread()
-    suspend fun supportRead(through: ULong) { client?.supportRead(through) }
+    // Help goes by the install id alone, signed in or not.
+    fun feedback(text: String) = helpSend(transport, InstallId.current(context), utf8Limit(text.trim(), 2000), BuildConfig.VERSION_NAME)
+    /** Null until this install has an id: no thread to read yet. */
+    fun supportThread() = InstallId.existing(context)?.let { helpThread(transport, it) }
+    fun supportRead(through: ULong) { InstallId.existing(context)?.let { helpRead(transport, it, through) } }
     suspend fun roundTrip() = client?.roundTripProbe("PINGTEST", 10000u)
     val crashes = CrashReports(context, transport)
 

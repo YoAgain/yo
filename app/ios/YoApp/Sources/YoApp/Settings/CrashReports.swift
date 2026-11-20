@@ -1,5 +1,6 @@
-// Crash reports from MetricKit, sent anonymously by default (off under Status › Send Crashes) and without the account
-// (POST /v1/diagnostics/crash): build, iOS, crash kind and sanitized frames (binary offsets), nothing of Yos, names or photos.
+// Crash reports from MetricKit, sent anonymously by default (off under Status › Send Crashes) by the random install id,
+// without the account (POST /v1/help/crash): build, iOS, crash kind and sanitized frames (binary offsets), nothing of
+// Yos, names or photos.
 import Foundation
 import MetricKit
 import SwiftUI
@@ -10,7 +11,6 @@ import YoCore
 final class CrashReports: NSObject, MXMetricManagerSubscriber {
   static let shared = CrashReports()
 
-  private static let onKey = "crashReports.on"
   struct Record: Codable, Identifiable, Hashable {
     var id: UUID
     let date: Date
@@ -37,7 +37,7 @@ final class CrashReports: NSObject, MXMetricManagerSubscriber {
   static var on: Bool {
     get { Diagnostics.reportsOn }
     set {
-      UserDefaults.standard.set(newValue, forKey: onKey)
+      Diagnostics.setReportsOn(newValue)
       if newValue { shared.flush() }
     }
   }
@@ -48,6 +48,7 @@ final class CrashReports: NSObject, MXMetricManagerSubscriber {
   private var started = false
   func start() {
     guard !started else { return }; started = true
+    Diagnostics.shareReportsChoice()
     MXMetricManager.shared.add(self)
   }
 
@@ -73,27 +74,19 @@ final class CrashReports: NSObject, MXMetricManagerSubscriber {
     }
   }
 
-  /// Sends what waits, without the account; kept for the next time if the hub does not take it now.
+  /// Sends what waits (also what an earlier build kept), by the install id; kept for the next time if the hub does not
+  /// take it now.
   func flush() {
     CountedErrors.collect()  // the app's and extensions' counters, as errors
     Diagnostics.flush()
     guard Self.on, !pending.isEmpty, !sending else { return }
     sending = true
-    let transport = Hub.transport
     let epoch = UserDefaults.standard.string(forKey: "diagnostics.generation")
-    let version = HelpPage.appVersion
     Task {
       defer { sending = false }
       while Self.on, UserDefaults.standard.string(forKey: "diagnostics.generation") == epoch, let report = pending.first {
         do {
-          try await Hub.run(reportErrors: false) {
-            if report.hasPrefix("{") {
-              let answer = transport.request(method: "POST", path: "/v1/diagnostics/crash", headers: [], body: Data(report.utf8))
-              guard answer.status == 204 else { throw YoError.Refused(status: answer.status) }
-            } else {
-              try sendCrashReport(transport: transport, text: report, appVersion: version)
-            }
-          }
+          guard try await Hub.run(reportErrors: false, { Diagnostics.upload(report, crash: true) }) else { return }
           if Self.on, UserDefaults.standard.string(forKey: "diagnostics.generation") == epoch, pending.first == report { Diagnostics.markSent(report, epoch: epoch) }
         } catch { return }
       }
