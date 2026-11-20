@@ -40,6 +40,14 @@ enum Diagnostics {
     return error
   }
 
+  /// Counted as expected, not a problem: an answer the person is shown that no change of the app makes go away (their
+  /// password manager without PRF, no backup behind the passkey or key they chose).
+  static func expected<E: Error>(_ error: E, file: String = #fileID, line: Int = #line, place: String = #function) -> E {
+    CountedErrors.record(domain: String(reflecting: type(of: error)), place: "\(file):\(line) \(place)",
+      code: String((error as NSError).code), expected: true)
+    return error
+  }
+
   // Use at optional local I/O boundaries, so a swallowed failure is still observable.
   @discardableResult
   static func attempt<T>(file: String = #fileID, line: Int = #line, place: String = #function, _ work: () throws -> T) -> T? {

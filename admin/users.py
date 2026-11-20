@@ -197,19 +197,35 @@ def crash_installs(db, now: int):
                       " WHERE d.kind = 'crash' AND i.day >= ?", (now // DAY_MS - 6,)).fetchone()[0]
 
 
+def problem_cause(kind: str, payload: dict):
+    """What a crash or error group is about, without the build it came from or the line it was raised on: the hub keeps
+    a group per build ("app") and per line, so every new build would open the same problem again."""
+    if kind == "crash":
+        return (kind, payload.get("exception", ""), payload.get("termination", ""))
+    place = re.sub(r":\d+", "", re.sub(r"^\w+/", "", str(payload.get("place", ""))))  # YoNotify/Hub.swift:240 -> Hub.swift
+    return (kind, payload.get("domain", ""), payload.get("code", ""), place)
+
+
 def open_problems(db, now: int) -> dict:
+    """Problems open at each point: each support message not handled, and each cause (problem_cause) with a crash or
+    error group not done, "expected" ones left out."""
     spans = []
     if has_table(db, "support_messages"):
-        spans += db.execute("SELECT created_at, done_at FROM support_messages WHERE from_team = 0").fetchall()
+        spans += [(a, b, None) for a, b in
+                  db.execute("SELECT created_at, done_at FROM support_messages WHERE from_team = 0").fetchall()]
     if has_table(db, "diagnostics"):
-        for first, last, done, payload in db.execute("SELECT first_seen, last_seen, done, payload FROM diagnostics"):
+        for kind, first, last, done, payload in db.execute("SELECT kind, first_seen, last_seen, done, payload FROM diagnostics"):
             try:
-                expected = (json.loads(payload or "{}") or {}).get("severity") == "expected"
-            except (ValueError, AttributeError):
-                expected = False
-            if not expected:
-                spans.append((first, last if done else None))
-    at = lambda t: sum(1 for a, b in spans if a <= t and (b is None or b > t))  # noqa: E731
+                p = json.loads(payload or "{}") or {}
+                p = p if isinstance(p, dict) else {}
+            except ValueError:
+                p = {}
+            if p.get("severity") != "expected":
+                spans.append((first, last if done else None, problem_cause(kind, p)))
+
+    def at(t):
+        open_ = [(a, b, c) for a, b, c in spans if a <= t and (b is None or b > t)]
+        return sum(1 for *_, c in open_ if c is None) + len({c for *_, c in open_ if c is not None})
     hour, midnight = now // 3600000, now - now % DAY_MS
     return {"hours": [at(min(now, (h + 1) * 3600000)) for h in range(hour - 23, hour + 1)],
             "days": [at(min(now, midnight + (1 - i) * DAY_MS)) for i in range(364, -1, -1)]}
@@ -285,7 +301,7 @@ def hub(name: str, path: str) -> dict:
                 "SELECT count(*) FROM support_messages WHERE from_team = 0 AND created_at < ? AND (done_at IS NULL OR done_at >= ?)",
                 end, end) for end in (min(now, midnight - (i - 1) * DAY_MS) for i in range(13, -1, -1))]
                 if has_table(db, "support_messages") else [], []),
-            # Problems open at each point: user messages not yet handled, crash and error groups not done (from
+            # Problems open at each point: user messages not yet handled, causes with a crash or error group not done (from
             # their first report; a done one counted until its last, the hub keeps no time of the tick), "expected"
             # ones left out. "hours": at the end of each of the last 24 (the current one: now), "days": at the end of
             # each of the last 365 UTC days (today: now). Reports are added by the page (their ticks live there).

@@ -526,7 +526,7 @@ final class AccountStore {
   func checkPasskey() async throws {
     guard let credential = newPasskey, let client else { throw Diagnostics.failure(AccountError.noBackup) }
     guard let prf = try await passkeys.ask(salt: BackupRecord.prfSalt, only: credential).prf else {
-      throw Diagnostics.failure(AccountError.noPRF)
+      throw Diagnostics.expected(AccountError.noPRF)
     }
     try await retryingBusy {
       try await backupTurn {
@@ -714,7 +714,7 @@ final class AccountStore {
 
   func restoreWithPasskey() async throws {
     let answer = try await passkeys.ask(salt: BackupRecord.prfSalt)
-    guard let prf = answer.prf else { throw Diagnostics.failure(AccountError.noPRF) }
+    guard let prf = answer.prf else { throw Diagnostics.expected(AccountError.noPRF) }
     try await restore(fetchBackup(by: .passkey(prf: prf), userID: answer.userID))
   }
 
@@ -727,7 +727,7 @@ final class AccountStore {
     let transport = Hub.transport
     do {
       guard let opened = try await Hub.run({ try openBackup(transport: transport, userId: userID, door: door) }) else {
-        throw Diagnostics.failure(AccountError.noBackup)
+        throw Diagnostics.expected(AccountError.noBackup)
       }
       return opened
     } catch YoError.Refused(let status) where status == 429 {

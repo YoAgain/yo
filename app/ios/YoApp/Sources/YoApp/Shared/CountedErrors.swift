@@ -31,10 +31,11 @@ enum NotifyFallback {
     }
   }
 
-  /// Locked since a restart is expected: still counted, marked so the admin page can leave it out.
+  /// Locked since a restart and the phone's network are expected: still counted, marked so the admin page can leave
+  /// them out.
   static func record(_ reason: Reason) {
     CountedErrors.record(domain: "NotificationFallback", place: "NotificationService", code: reason.code,
-      expected: reason == .lockedBeforeFirstUnlock)
+      expected: reason == .lockedBeforeFirstUnlock || reason == .network)
   }
 }
 

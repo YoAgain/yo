@@ -22,6 +22,13 @@ const diagInfo = (d) => {
   const text = [p.details, p.frames, p.message].filter(Boolean).join("\n\n") || d.payload || "";
   return { title, text, expected: p.severity === "expected" };
 };
+// What a group is about without its build or line (as users.problem_cause): a new build opens no new problem.
+const diagCause = (d) => {
+  let p = {};
+  try { p = JSON.parse(d.payload || "{}") || {}; } catch {}
+  const place = String(p.place ?? "").replace(/^\w+\//, "").replace(/:\d+/g, "");
+  return JSON.stringify(d.kind === "crash" ? [d.kind, p.exception ?? "", p.termination ?? ""] : [d.kind, p.domain ?? "", p.code ?? "", place]);
+};
 
 if (document.body.classList.contains("login")) {
   const q = location.search, note = $("note");
@@ -985,7 +992,7 @@ if (document.body.classList.contains("login")) {
       supportThreads = threads;
       // The page title's count: conversations still open, and open crash groups without the expected ones.
       const unanswered = threads.filter((t) => t.unread > 0).length;
-      const crashes = (last?.[which]?.diagnostics || []).filter((d) => !d.done && !diagInfo(d).expected).length;
+      const crashes = new Set((last?.[which]?.diagnostics || []).filter((d) => !d.done && !diagInfo(d).expected).map(diagCause)).size;
       drawTitle();
       openTickets = unanswered + crashes; openSupport = unanswered;
       showOpen();

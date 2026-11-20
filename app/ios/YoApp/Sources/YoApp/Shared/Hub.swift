@@ -201,13 +201,21 @@ final class HubTransport: HttpTransport {
     // Answers the core takes as answers, counted as expected (not a problem): a 401 it signs again for (a time the
     // hub saw already, a device still registering), a limit, the hub restarting behind its proxy, no such name or no
     // commitment told (invited instead), a name too short at sign-up (the hub's 400, shown as such).
-    var expectedStatus: Set<UInt16> = [401, 429, 502, 503, 504]
+    // A 410 on any route: this device was replaced (the account signed in on another phone), the core says so
+    // (Replaced) and the app shows it; every request until then answers the same.
+    var expectedStatus: Set<UInt16> = [401, 410, 429, 502, 503, 504]
     if method == "POST", route == "/v1/lookup" || route == "/v1/group-credential" { expectedStatus.insert(404) }
-    if method == "POST", route == "/v1/register" { expectedStatus.insert(400) }
+    // No backup behind the passkey or key chosen: shown as such (AccountError.noBackup).
+    if method == "GET", route.hasPrefix("/v1/backup/") { expectedStatus.insert(404) }
+    // A name too short (400) or taken (409) at sign-up: the person is told and picks another.
+    if method == "POST", route == "/v1/register" { expectedStatus.formUnion([400, 409]) }
     // A conflict the core takes in and goes on from: the storage another write moved on (merged, written again), a
     // contact's device changed (the delivery goes again to the one named).
     if method == "PUT", route == "/v1/storage" { expectedStatus.insert(409) }
     if method == "POST", route.hasPrefix("/v1/inbox/"), route != "/v1/inbox/ack" { expectedStatus.insert(409) }
+    // A group another member changed meanwhile: the hub answers with the group as it is and the core applies the
+    // change to that revision.
+    if method == "POST", route.hasPrefix("/v1/groups/") { expectedStatus.insert(409) }
     // Cut off past the largest answer: a hostile hub never fills an extension's 24 MB.
     task.delegate = Limited(diagnosticPlace: diagnosticUpload ? nil : codePlace, quiet: quietErrors) { data, response, error in
       answer.result =

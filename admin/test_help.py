@@ -110,6 +110,26 @@ class HelpTests(unittest.TestCase):
             self.assertEqual(snapshot["problems_open"]["days"][-1], 1)
             self.assertFalse({k for k in snapshot["errors"] if k.startswith(("support", "problems"))})
 
+    def test_problems_open_counts_causes_not_builds(self):
+        import json
+        users = load("users")
+        now = int(users.time.time() * 1000)
+        with tempfile.TemporaryDirectory() as directory:
+            path = str(Path(directory) / "hub.sqlite")
+            with sqlite3.connect(path) as db:
+                db.execute("CREATE TABLE diagnostics(id INTEGER PRIMARY KEY, kind TEXT, signature TEXT, count INTEGER, first_seen INTEGER, last_seen INTEGER, app TEXT, os TEXT, model TEXT, payload TEXT, done INTEGER)")
+                error = lambda app, place, **more: json.dumps({"app": app, "domain": "SharedAccess", "code": "35", "place": place, **more})
+                db.executemany("INSERT INTO diagnostics(kind, signature, count, first_seen, last_seen, app, os, model, payload, done) VALUES(?,?,1,?,?,?,'','',?,?)", [
+                    # One cause on three builds, from the app and the notification service, on other lines: one problem.
+                    ("error", "a", now - 3000, now - 3000, "ios/1", error("ios/1", "YoNotify/SharedAccess.swift:140 take(_:)"), 0),
+                    ("error", "b", now - 2000, now - 2000, "ios/2", error("ios/2", "YoApp/SharedAccess.swift:142 take(_:)"), 0),
+                    ("error", "c", now - 1000, now - 1000, "ios/3", error("ios/3", "YoNotify/SharedAccess.swift:140 take(_:)"), 0),
+                    # Another code: another problem; an expected one and a done one: none.
+                    ("error", "d", now - 1000, now - 1000, "ios/3", error("ios/3", "YoApp/SharedAccess.swift:140 take(_:)", code="89"), 0),
+                    ("error", "e", now - 1000, now - 1000, "ios/3", error("ios/3", "YoApp/Hub.swift:1 x", severity="expected"), 0),
+                    ("crash", "f", now - 9000, now - 8000, "ios/1", json.dumps({"exception": "x", "termination": "y"}), 1)])
+            self.assertEqual(users.hub("live", path)["problems_open"]["hours"][-1], 2)
+
     def test_migration_resumes_and_remaps_done(self):
         import json
         migration = load("migrate_todos")

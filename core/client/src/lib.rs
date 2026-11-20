@@ -1976,18 +1976,33 @@ impl Client {
 
     /// What the app runs when it comes to the foreground: receive, answer, refill prekeys, deliver.
     pub fn maintenance(&mut self) -> Result<Vec<Event>> {
+        self.maintenance_with(true)
+    }
+
+    /// `maintenance` for a client shared behind a lock (the bindings' turn): the outbox is left to the caller
+    /// (`deliver_begin`, sent without the lock, before and after), as `sync_begin_shared` leaves it; a key queued for
+    /// contacts goes with it and the hub is told in a later round.
+    pub fn maintenance_shared(&mut self) -> Result<Vec<Event>> {
+        self.maintenance_with(false)
+    }
+
+    fn maintenance_with(&mut self, deliver: bool) -> Result<Vec<Event>> {
         // All of the work after a sync is done here.
         self.after_due = false;
         let result = (|| {
-            self.deliver()?;
+            if deliver {
+                self.deliver()?;
+            }
             self.receive_all(0)?;
             self.answer_due()?;
             self.refresh_groups_quietly();
             self.refresh_certificate()?;
             self.refill()?;
             self.send_profiles();
-            self.profile_keys()?;
-            self.deliver()?;
+            self.profile_keys_with(deliver)?;
+            if deliver {
+                self.deliver()?;
+            }
             self.sync_storage_quietly()
         })();
         self.finish_receiving(result)

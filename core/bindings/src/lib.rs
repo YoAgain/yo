@@ -766,6 +766,14 @@ impl YoClient {
         Ok(f(&mut *self.client(true)?))
     }
 
+    /// The outbox sent without the turn; what does not go now waits for the next round.
+    fn deliver_waiting(&self) -> Vec<Event> {
+        match self.with(|c| c.deliver_begin()) {
+            Ok(Ok(deliveries)) if !deliveries.is_empty() => shared::deliver(self, deliveries).unwrap_or_default(),
+            _ => Vec::new(),
+        }
+    }
+
     /// A step that only reads the last committed state, without the turn.
     fn look<T>(&self, f: impl FnOnce(&Client) -> T) -> Result<T, YoError> {
         Ok(f(&*self.client(true)?))
@@ -1023,9 +1031,24 @@ impl YoClient {
         Ok(self.with(|c| c.write_storage())??)
     }
 
-    /// When the app comes to the foreground.
+    /// When the app comes to the foreground. The outbox goes before and after as `deliver` does, without the turn: under
+    /// it, a slow network kept the notification service waiting past its 10 s (SharedAccess 35, the push shown
+    /// unread) and the app's own steps with it.
     pub fn maintenance(&self) -> Result<Vec<YoEvent>, YoError> {
-        events(self.with(|c| c.maintenance())?)
+        let mut received = self.deliver_waiting();
+        match self.with(|c| c.maintenance_shared()).and_then(|events| Ok(events?)) {
+            Ok(events) => received.extend(events),
+            Err(error) => {
+                // What the delivery handed out is not lost with the rest: the next call hands it out again.
+                if !received.is_empty() {
+                    _ = self.with(|c| c.hand_back(&received));
+                }
+                return Err(error);
+            }
+        }
+        // What the maintenance queued (receipts, a profile key for contacts).
+        received.extend(self.deliver_waiting());
+        events(Ok(received))
     }
 
     pub fn set_push(&self, platform: u8, token: String) -> Result<(), YoError> {
