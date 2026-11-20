@@ -204,6 +204,10 @@ final class HubTransport: HttpTransport {
     var expectedStatus: Set<UInt16> = [401, 429, 502, 503, 504]
     if method == "POST", route == "/v1/lookup" || route == "/v1/group-credential" { expectedStatus.insert(404) }
     if method == "POST", route == "/v1/register" { expectedStatus.insert(400) }
+    // A conflict the core takes in and goes on from: the storage another write moved on (merged, written again), a
+    // contact's device changed (the delivery goes again to the one named).
+    if method == "PUT", route == "/v1/storage" { expectedStatus.insert(409) }
+    if method == "POST", route.hasPrefix("/v1/inbox/"), route != "/v1/inbox/ack" { expectedStatus.insert(409) }
     // Cut off past the largest answer: a hostile hub never fills an extension's 24 MB.
     task.delegate = Limited(diagnosticPlace: diagnosticUpload ? nil : codePlace, quiet: quietErrors) { data, response, error in
       answer.result =

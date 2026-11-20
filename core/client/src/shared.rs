@@ -28,6 +28,10 @@ impl Target {
 pub trait Locked {
     type Error: From<Error>;
     fn step<T>(&self, step: impl FnOnce(&mut Client) -> T) -> Result<T, Self::Error>;
+
+    /// Deliveries whose answers no step took (the lock refused): their users may go again, else nothing more to them
+    /// would leave in this process. Without the lock: what is on its way is the process's own, not the state's.
+    fn forget(&self, _deliveries: &crate::Deliveries) {}
 }
 
 /// The user a name is now, asked without the client (no prekey spent); a user id as it is.
@@ -45,9 +49,14 @@ pub fn user_for<L: Locked>(locked: &L, to: &str) -> Result<String, L::Error> {
 pub fn deliver<L: Locked>(locked: &L, mut deliveries: crate::Deliveries) -> Result<Vec<Event>, L::Error> {
     loop {
         let answers = deliveries.send();
-        match locked.step(|c| c.send_end(&deliveries, answers))? {
-            Sent::More(more) => deliveries = more,
-            Sent::Done(result) => return Ok(result?),
+        match locked.step(|c| c.send_end(&deliveries, answers)) {
+            Ok(Sent::More(more)) => deliveries = more,
+            Ok(Sent::Done(result)) => return Ok(result?),
+            Err(error) => {
+                // They wait in the saved outbox and go again; a copy the hub took already is known by its plaintext.
+                locked.forget(&deliveries);
+                return Err(error);
+            }
         }
     }
 }

@@ -1788,6 +1788,13 @@ impl Client {
         self.deliveries()
     }
 
+    /// Deliveries whose answers were never taken (`shared::Locked::forget`): their users are no longer on their way.
+    pub fn forget_deliveries(&mut self, deliveries: &Deliveries) {
+        for item in &deliveries.items {
+            self.delivering.remove(&item.user);
+        }
+    }
+
     /// Takes the answers to deliveries: `More` when the hub took them all and more can go now; else what `send`
     /// returns. What the hub did not take waits in the outbox.
     pub fn send_end(&mut self, deliveries: &Deliveries, answers: Vec<Option<Answer>>) -> Sent {
@@ -1839,10 +1846,23 @@ impl Client {
     /// and signs, `InboxWait::send` (unlocked) waits, `sync_end` (locked) processes the answer against the state as it
     /// is then. The hub checks the signature's time before the wait, so signing early is fine.
     pub fn sync_begin(&mut self, wait_s: u64) -> Result<InboxWait> {
+        Ok(self.sync_begin_with(wait_s, true)?.0)
+    }
+
+    /// `sync_begin` for a client shared behind a lock (the bindings' turn): the outbox is only taken, as
+    /// `deliver_begin`; its way to the hub is the caller's, without the lock (`Deliveries::send`, then `send_end`). The
+    /// turn is then not held while envelopes travel, so the other processes on the state (the notification service) do
+    /// not wait for them. `None`: nothing to take (a guest leaves the outbox to the app).
+    pub fn sync_begin_shared(&mut self, wait_s: u64) -> Result<(InboxWait, Option<Deliveries>)> {
+        self.sync_begin_with(wait_s, false)
+    }
+
+    fn sync_begin_with(&mut self, wait_s: u64, deliver: bool) -> Result<(InboxWait, Option<Deliveries>)> {
         // What the last sync left (`after_sync`), then the outbox; a guest leaves the outbox to the app.
-        let before = self.after_sync_inner().and_then(|()| match self.guest_events {
+        let before = self.after_sync_inner(deliver).and_then(|()| match self.guest_events {
             Some(_) => Ok(()),
-            None => self.deliver(),
+            None if deliver => self.deliver(),
+            None => Ok(()),
         });
         if let Err(error) = before {
             if !retryable(&error) {
@@ -1855,7 +1875,21 @@ impl Client {
         let path = api::inbox_path(wait_s);
         let (headers, time) = self.sign("GET", &path, &[]);
         // Idempotent GET: a signature collision after a crash is retried by sync_end.
-        Ok(InboxWait { transport: self.transport.clone(), path, headers, time })
+        let wait = InboxWait { transport: self.transport.clone(), path, headers, time };
+        // Taken last: nothing after it may fail and leave its users marked as on their way.
+        let deliveries = match self.guest_events {
+            Some(_) => None,
+            None if deliver => None,
+            None => match self.deliver_begin() {
+                Ok(deliveries) => Some(deliveries).filter(|d| !d.is_empty()),
+                Err(error) if retryable(&error) => None,
+                Err(error) => {
+                    self.persist()?;
+                    return Err(error);
+                }
+            },
+        };
+        Ok((wait, deliveries))
     }
 
     /// Processes what `InboxWait::send` brought and fetches the rest; saves and hands out the events. The hub is
@@ -1907,12 +1941,13 @@ impl Client {
     /// The rest of a `sync`: acknowledges at the hub what was saved and, for the app, sends receipts and decryption
     /// errors, refills prekeys, delivers, writes the storage.
     pub fn after_sync(&mut self) -> Result<()> {
-        let result = self.after_sync_inner();
+        let result = self.after_sync_inner(true);
         let saved = self.persist();
         result.and(saved)
     }
 
-    fn after_sync_inner(&mut self) -> Result<()> {
+    /// `deliver` false: the outbox is left to the caller (`sync_begin_shared`).
+    fn after_sync_inner(&mut self, deliver: bool) -> Result<()> {
         self.acknowledge_inbox()?;
         if !self.after_due {
             return Ok(());
@@ -1921,8 +1956,10 @@ impl Client {
         self.answer_due()?;
         self.refresh_groups_quietly();
         self.refill()?;
-        self.profile_keys()?;
-        self.deliver()?;
+        self.profile_keys_with(deliver)?;
+        if deliver {
+            self.deliver()?;
+        }
         // After what waits went (identified, if the certificate is out of date): never a send held for it.
         self.refresh_certificate()?;
         self.sync_storage_quietly()?;
@@ -1960,6 +1997,11 @@ impl Client {
 
     /// This account's profile key: made once, its check told to the hub, sent to every contact due it.
     fn profile_keys(&mut self) -> Result<()> {
+        self.profile_keys_with(true)
+    }
+
+    /// `deliver` false: the keys queued go with the caller's outbox, and the hub is told in a later round, after them.
+    fn profile_keys_with(&mut self, deliver: bool) -> Result<()> {
         if self.state.profile_key.is_none() {
             // A new phone goes on with the key in the storage (spec 6.9): fetched first. Not now: later.
             match self.storage_fetched() {
@@ -1988,6 +2030,9 @@ impl Client {
         if !self.state.access_key_told {
             // The new key reaches contacts before the hub takes it, so their next refused delivery finds it waiting.
             if !due.is_empty() {
+                if !deliver {
+                    return Ok(());
+                }
                 match self.deliver() {
                     Err(error) if retryable(&error) => return Ok(()),
                     other => other?,

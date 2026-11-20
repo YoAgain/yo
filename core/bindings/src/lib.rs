@@ -789,6 +789,10 @@ impl yo_core::shared::Locked for YoClient {
     fn step<T>(&self, step: impl FnOnce(&mut Client) -> T) -> Result<T, YoError> {
         self.with(step)
     }
+
+    fn forget(&self, deliveries: &yo_core::Deliveries) {
+        _ = self.configure(|c| c.forget_deliveries(deliveries));
+    }
 }
 
 #[uniffi::export]
@@ -990,9 +994,28 @@ impl YoClient {
     /// Waits up to `wait_s` seconds for mail without holding the client and processes it; the hub's ack and the work
     /// after it go first in the next `sync`.
     pub fn sync(&self, wait_s: u64) -> Result<Vec<YoEvent>, YoError> {
-        let wait = self.with(|c| c.sync_begin(wait_s))??;
+        let (wait, deliveries) = self.with(|c| c.sync_begin_shared(wait_s))??;
+        // The outbox goes as `deliver` does, without the turn: under it, a slow network kept the notification service
+        // and every other step waiting as long as the envelopes took (past their 10 s, the push showed unread), and a
+        // long turn is one iOS may suspend the app in (0xdead10cc). What does not go now waits for the next sync.
+        let mut delivered = match deliveries {
+            Some(deliveries) => shared::deliver(self, deliveries).unwrap_or_default(),
+            None => Vec::new(),
+        };
         let response = wait.send();
-        events(self.with(|c| c.sync_end(&wait, response))?)
+        match self.with(|c| c.sync_end(&wait, response)).and_then(|received| Ok(received?)) {
+            Ok(received) => {
+                delivered.extend(received);
+                events(Ok(delivered))
+            }
+            Err(error) => {
+                // What the delivery handed out is not lost with the inbox: the next call hands it out again.
+                if !delivered.is_empty() {
+                    _ = self.with(|c| c.hand_back(&delivered));
+                }
+                Err(error)
+            }
+        }
     }
 
     /// Writes a change of the friends, blocks or settings to the hub now, not with the inbox's next answer.

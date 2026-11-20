@@ -2,6 +2,7 @@ package app.justyo.android
 
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
+import kotlin.concurrent.thread
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import okhttp3.RequestBody.Companion.toRequestBody
@@ -51,9 +52,11 @@ class HubTransport(private val reached: (Boolean) -> Unit = {}, private val unsu
         } catch (_: Exception) { reached(false); HttpResult(0u, byteArrayOf(), "Could not reach the hub") }
     }
     /** Connections from before a suspension or on another network: dropped, so the next request opens a fresh one at
-     *  once instead of waiting on a dead socket. */
-    fun forgetConnections() { listOf(signed, anonymous).forEach { it.connectionPool.evictAll() } }
-    fun close() { listOf(signed,anonymous).forEach { it.dispatcher.cancelAll();it.connectionPool.evictAll() } }
+     *  once instead of waiting on a dead socket. Off the main thread (it calls from `onStart`): closing a TLS socket
+     *  writes to it, which Android refuses there (NetworkOnMainThreadException, rethrown by OkHttp: a crash). */
+    fun forgetConnections() = offMain { listOf(signed, anonymous).forEach { it.connectionPool.evictAll() } }
+    fun close() = offMain { listOf(signed, anonymous).forEach { it.dispatcher.cancelAll(); it.connectionPool.evictAll() } }
+    private fun offMain(work: () -> Unit) { thread(name = "yo-connections") { runCatching(work) } }
     companion object {
         const val MAX_ANSWER = 11 * 1024 * 1024
     }

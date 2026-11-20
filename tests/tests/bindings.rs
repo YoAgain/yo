@@ -611,6 +611,74 @@ fn the_app_layer_shares_its_state_with_an_extension_in_turns() {
     assert!(!disk.is_held(), "every turn given back");
 }
 
+/// The deliveries a transport sees, and whether the turn was held while each went; while `offline`, none goes.
+struct Watch {
+    app: App,
+    disk: Arc<Disk>,
+    offline: std::sync::atomic::AtomicBool,
+    held: Mutex<Vec<bool>>,
+}
+
+impl HttpTransport for Watch {
+    fn request(&self, method: String, path: String, headers: Vec<yo::Header>, body: Vec<u8>) -> HttpResult {
+        if method == "POST" && path.starts_with("/v1/inbox/") && path != yo_wire::api::INBOX_ACK {
+            if self.offline.load(std::sync::atomic::Ordering::Relaxed) {
+                return HttpResult { status: 0, body: Vec::new(), error: Some("offline".into()) };
+            }
+            self.held.lock().unwrap().push(self.disk.is_held());
+        }
+        self.app.request(method, path, headers, body)
+    }
+}
+
+/// What waited in the outbox goes with the app's next sync without the turn held, so the notification service is not
+/// kept waiting by envelopes on a slow network; the Yo arrives once.
+#[test]
+fn the_app_layer_syncs_its_outbox_without_holding_the_turn() {
+    use std::sync::atomic::Ordering;
+    let hub = TestHub::start();
+    let n = random_u64() % 1_000_000_000;
+    let (pa, pb) = (username(n), username(n + 1));
+    let disk = Disk::new();
+    let watch = Arc::new(Watch {
+        app: App(Http::new(hub.url())),
+        disk: disk.clone(),
+        offline: false.into(),
+        held: Mutex::new(Vec::new()),
+    });
+    let a = YoClient::register_username_db(
+        watch.clone(),
+        disk.db(),
+        vec![7; 32],
+        Some(Process::new(&disk)),
+        pa.clone(),
+        None,
+        None,
+        None,
+        Some("ALICE".into()),
+        0,
+        String::new(),
+    )
+    .unwrap();
+    let b = client(&hub, &pb, "BOB", Disk::new());
+    a.send_yo(pb.clone()).unwrap();
+    assert_eq!(yos(&drain(&b), &a.user_id()), 1);
+    drain(&a);
+    // Offline: the next Yo waits in the outbox.
+    watch.offline.store(true, Ordering::Relaxed);
+    _ = a.send_yo(b.user_id());
+    assert_eq!(a.waiting(), 1);
+    watch.offline.store(false, Ordering::Relaxed);
+    watch.held.lock().unwrap().clear();
+    a.sync(0).unwrap();
+    let held = std::mem::take(&mut *watch.held.lock().unwrap());
+    assert!(!held.is_empty(), "the sync sent what waited");
+    assert!(held.iter().all(|held| !held), "never under the turn: {held:?}");
+    assert_eq!(a.waiting(), 0);
+    assert_eq!(yos(&drain(&b), &a.user_id()), 1);
+    assert!(!disk.is_held(), "every turn given back");
+}
+
 /// Reads never wait for the turn: while an extension holds it (a long step), the app reads its friends, contacts and
 /// groups at once, from the last committed state, and sees what the extension wrote as soon as it is written.
 #[test]
