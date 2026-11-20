@@ -9,7 +9,7 @@ Tap a name to send an encrypted Yo, photo or video.</p>
 <a href="app/ios/README.md"><b>iOS</b></a> SwiftUI · <b>Android</b> Compose · <a href="app/cli"><b>CLI</b></a> Rust
 </p>
 
-<p align="center"><a href="https://justyo.co"><b>justyo.co</b></a></p>
+<p align="center"><a href="https://justyo.co"><b>justyo.co</b></a> · <a href="https://testflight.apple.com/join/V3wa1DeX"><b>iPhone beta</b></a> · <a href="https://groups.google.com/g/yo-android-testers"><b>Android beta</b></a></p>
 
 <details>
 <summary><h2>Core</h2></summary>
