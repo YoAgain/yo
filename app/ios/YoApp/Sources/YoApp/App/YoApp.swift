@@ -1,5 +1,6 @@
 // The app: one scene, the list of friends; a UIKit app delegate only for the push token and silent pushes.
 import SwiftUI
+import Network
 import UserNotifications
 import YoCore
 import os
@@ -70,6 +71,8 @@ struct YoApp: App {
     notifications = NotificationDelegate(inbox: inbox, friends: friends, accounts: accounts)
     friends.stored = { [weak accounts] changed, removed in accounts?.store(changed, removed: removed) }
     AppDelegate.silentSync = { await inbox.syncOnce(accounts: accounts, friends: friends) }
+    Reconnect.inbox = { inbox.reconnect() }
+    Reconnect.watchPath()
     UNUserNotificationCenter.current().delegate = notifications
     // Not in a launch for an intent, nor before the list.
     Launch.later { CrashReports.shared.start() }
@@ -232,6 +235,8 @@ struct YoApp: App {
           Launch.later { await accounts.refreshSupport() }
         }
         .onChange(of: phase, initial: true) { _, phase in
+          // First, so what goes out on the return goes on fresh connections.
+          Reconnect.phase(active: phase == .active, background: phase == .background)
           guard phase == .active else { return }
           Perf.mark("app.active")
           accounts.openNow()  // also resumes an unfinished old-install update
@@ -531,5 +536,51 @@ private final class ForegroundTurns: @unchecked Sendable {
     }
     if !active { SharedAccess.resetContention() }
     for expire in expired { expire() }
+  }
+}
+
+/// Back in front after being away, or on another network: fresh connections, the inbox asked at once.
+@MainActor
+enum Reconnect {
+  /// The inbox's retry waits end (`Inbox.reconnect`).
+  static var inbox: (() -> Void)?
+  private static var away = false
+  private static var monitor: NWPathMonitor?
+  private static var path: (NWPath.Status, [NWInterface.InterfaceType])?
+
+  static func phase(active: Bool, background: Bool) {
+    if background {
+      away = true
+      Availability.shared.background()
+    } else if active, away {  // not after Control Center or a notification pulled over Yo: the wait goes on
+      away = false
+      Availability.shared.foreground()
+      now()
+    }
+  }
+
+  static func now() {
+    HubTransport.reconnect()
+    inbox?()
+  }
+
+  /// A network that comes or changes (Wi-Fi to cellular, out of a dead spot) while in front: asked again at once.
+  static func watchPath() {
+    guard monitor == nil else { return }
+    let monitor = NWPathMonitor()
+    monitor.pathUpdateHandler = { update in
+      let types: [NWInterface.InterfaceType] = [.wifi, .cellular, .wiredEthernet, .other].filter(update.usesInterfaceType)
+      let status = update.status
+      Task { @MainActor in
+        defer { path = (status, types) }
+        guard let old = path, old.0 != status || old.1 != types, status == .satisfied,
+          UIApplication.shared.applicationState != .background
+        else { return }
+        Availability.shared.foreground()
+        now()
+      }
+    }
+    monitor.start(queue: DispatchQueue(label: "app.justyo.path"))
+    self.monitor = monitor
   }
 }

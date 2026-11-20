@@ -58,9 +58,17 @@ extension FriendList {
       .onChange(of: scenePhase) { _, phase in
         guard phase == .active else { return }
         takeIntentSent()
-        Task { await inbox.recheck(accounts: accounts) }
       }
       .onReceive(NotificationCenter.default.publisher(for: IntentSent.changed)) { _ in takeIntentSent() }
+      // The top bar ("Offline", a deletion's undo) comes or goes as an inset over the list (YoApp): a list at its top
+      // stays at its top, so the first bar moves down under it whole instead of keeping its place half covered.
+      .onChange(of: DeleteNotice.shared.banner != nil || DeleteNotice.shared.deletion != nil) {
+        guard !scrolled else { return }
+        var instant = Transaction(); instant.disablesAnimations = true
+        withTransaction(instant) { position.scrollTo(edge: .top) }
+        // Again once the new inset is laid out (the first may still see the old one).
+        DispatchQueue.main.async { withTransaction(instant) { position.scrollTo(edge: .top) } }
+      }
       // An extension wrote the shared state: what it saved comes to the list at once.
       .task { StateChanged.listen() }
       .onReceive(NotificationCenter.default.publisher(for: StateChanged.changed)) { _ in

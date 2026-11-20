@@ -2160,6 +2160,39 @@ mod handle_tests {
         }
     }
 
+    #[test]
+    fn a_long_poll_cut_off_is_asked_again_at_once_signed_anew() {
+        // Back in front the app cuts off the wait from before the suspension and asks again with no wait: the core
+        // keeps no retry state of its own, so the next sync goes out at once, with a signature the hub has not seen.
+        struct CutOff(std::sync::Mutex<Vec<(String, Vec<(String, String)>)>>);
+        impl Transport for CutOff {
+            fn request(
+                &self,
+                _: &str,
+                path: &str,
+                headers: &[(String, String)],
+                _: &[u8],
+            ) -> std::result::Result<Response, String> {
+                self.0.lock().unwrap().push((path.to_owned(), headers.to_vec()));
+                Err("cancelled".into())
+            }
+        }
+        let transport = Arc::new(CutOff(std::sync::Mutex::new(Vec::new())));
+        let mut client = Client::registering(transport.clone(), "CUTOFF", None, None, None, Push::none()).unwrap();
+        client.state.storage_fetched = true;
+        client.set_clock(Arc::new(|| 1_000));
+        let error = client.sync(25).unwrap_err();
+        assert!(matches!(error, Error::Network(_)) && retryable(&error), "{error:?}");
+        assert!(client.sync(0).is_err());
+        let polls: Vec<_> =
+            transport.0.lock().unwrap().iter().filter(|(path, _)| path.starts_with(api::INBOX)).cloned().collect();
+        assert_eq!(
+            polls.iter().map(|(path, _)| path.as_str()).collect::<Vec<_>>(),
+            [api::inbox_path(25), api::inbox_path(0)]
+        );
+        assert_ne!(polls[0].1, polls[1].1, "signed anew, never the cut-off request's signature again");
+    }
+
     struct Offline;
     impl Transport for Offline {
         fn request(&self, _: &str, _: &str, _: &[(String, String)], _: &[u8]) -> std::result::Result<Response, String> {

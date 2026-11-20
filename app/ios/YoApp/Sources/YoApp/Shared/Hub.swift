@@ -137,6 +137,17 @@ final class HubTransport: HttpTransport {
   private static let signedSession = URLSession(configuration: plain())
   private static let anonymousSession = URLSession(configuration: plain())
 
+  /// The inbox's waits under way; cut off by `reconnect`.
+  private static let polls = Mutex<[URLSessionTask]>([])
+
+  /// Back in front or on another network: the connections from before (often dead after a suspension, where a request
+  /// would hang until its timeout) are not used again, and the inbox's wait from before is cut off to be asked anew.
+  static func reconnect() {
+    signedSession.flush {}
+    anonymousSession.flush {}
+    for task in polls.withLock({ polls in defer { polls.removeAll() }; return polls }) { task.cancel() }
+  }
+
   /// A public, account-free request primes the same pool used by sealed deliveries.
   static func warmAnonymous() async {
     var request = URLRequest(url: Hub.url, timeoutInterval: 10)
@@ -168,6 +179,7 @@ final class HubTransport: HttpTransport {
     let done = DispatchSemaphore(value: 0)
     let answer = Answer()
     let start = Perf.on ? CACurrentMediaTime() : 0
+    let started = ContinuousClock.now
     let signed = headers.contains(where: { $0.name.lowercased() == "yo-device" })
     // Only what names nobody goes anonymous (yo_wire::api::anonymous, spec 1).
     let anonymous = !signed && anonymousRequest(method: method, path: path)
@@ -206,14 +218,17 @@ final class HubTransport: HttpTransport {
     }
     let access = anonymous && path.hasPrefix("/v1/blobs/") && (method == "GET" || method == "DELETE")
       ? nil : SharedAccess.current
+    if longPoll { Self.polls.withLock { $0.append(task) } }
     do {
       if let access { try access.start(task) }
       else { task.resume() }
     } catch {
       task.cancel()
+      if longPoll { Self.polls.withLock { $0.removeAll { $0 === task } } }
       return HttpResult(status: 0, body: Data(), error: "shared storage time ended")
     }
     done.wait()
+    if longPoll { Self.polls.withLock { $0.removeAll { $0 === task } } }
     if access?.expired == true {
       // Not reported: the caller tries again in its next turn.
       return HttpResult(status: 0, body: Data(), error: "shared storage time ended")
@@ -225,7 +240,7 @@ final class HubTransport: HttpTransport {
         Diagnostics.record(NSError(domain: "HTTP", code: Int(answer.result.status)), place: codePlace)
       }
     }
-    Availability.network(answer.result.status == 0 || answer.result.status >= 500)
+    Availability.network(answer.result.status == 0 || answer.result.status >= 500, started: started)
     if Perf.on {
       let ms = (CACurrentMediaTime() - start) * 1000
       let route = path.split(separator: "/").prefix(2).joined(separator: "/")  // not the ids after it
@@ -503,10 +518,26 @@ extension Data {
 final class Availability {
   static let shared = Availability()
   var local = false { didSet { settle() } }
+  /// A request asked since Yo came to the front failed. One from before (cut off or hung by the suspension) is no sign.
   var remote = false { didSet { settle() } }
-  /// Only after a few seconds unreachable (a launch's first second is not "offline").
+  /// Only after a moment unreachable (a launch's or a return's first try is not "offline").
   private(set) var offline = false
   private var pending: Task<Void, Never>?
+  @ObservationIgnored private var front = true
+  @ObservationIgnored private var since = ContinuousClock.now
+
+  /// In front again, or on another network: what failed before counts no more; only a new try can say "Offline".
+  func foreground() {
+    front = true
+    since = .now
+    remote = false
+  }
+
+  /// Out of front: nothing on screen to warn, and a failure there (the suspension) says nothing about the return.
+  func background() {
+    front = false
+    remote = false
+  }
 
   private func settle() {
     guard local || remote else {
@@ -517,14 +548,17 @@ final class Availability {
     }
     guard !offline, pending == nil else { return }
     pending = Task { @MainActor [weak self] in
-      try? await Task.sleep(for: .seconds(4))
+      try? await Task.sleep(for: .seconds(2))
       guard let self, !Task.isCancelled else { return }
       self.pending = nil
       self.offline = self.local || self.remote
     }
   }
-  nonisolated static func network(_ failed: Bool) {
-    Task { @MainActor in shared.remote = failed }
+  nonisolated static func network(_ failed: Bool, started: ContinuousClock.Instant) {
+    Task { @MainActor in
+      if failed && (!shared.front || started < shared.since) { return }
+      shared.remote = failed
+    }
   }
 }
 

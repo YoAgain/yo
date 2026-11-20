@@ -399,13 +399,14 @@ final class Inbox {
       // In the background iOS gives no turn on the shared state once its time is up (SharedAccess): wait for the
       // front rather than ask in vain. Pushes bring Yos meanwhile.
       if UIApplication.shared.applicationState == .background {
-        try? await Task.sleep(for: .seconds(1))
+        await nap(1)
         continue
       }
       if !respelled {
         respelled = true
         Task { await respell(client: client, accounts: accounts, friends: friends) }
       }
+      retryNow = false
       do {
         // What the notification service saved: on the bars before the hub is asked.
         let (saved, known) = try await Hub.run { try Perf.timed("inbox.listen.saved.core") { (try client.savedEvents(), client.contacts()) } }
@@ -429,20 +430,38 @@ final class Inbox {
         accounts.replaced(client)
         return
       } catch {
+        let again = failed
+        failed = true
+        // Back in front or on another network (`reconnect`): the wait from before was cut off on purpose, asked
+        // again at once, without the retry wait it had grown to.
+        if retryNow {
+          retryNow = false
+          continue
+        }
         // Signed out meanwhile: the old client's wait fails with `State`, as expected.
         if client === accounts.client { Diagnostics.recordUnreported(error) }
-        // The first failure (a wait cut off by the suspension) is tried again at once, before "Offline" shows.
-        try? await Task.sleep(for: .seconds(failed ? 5 : 1))
-        failed = true
+        // The first failure is tried again soon, before "Offline" shows; later ones every 5 s.
+        await nap(again ? 5 : 1)
       }
     }
   }
 
-  /// Back in front while the hub counted as unreachable (a request failed in the background): one quick signed look,
-  /// as the inbox's wait from before may still be under way and answers only at its end.
-  func recheck(accounts: AccountStore) async {
-    guard Availability.shared.remote, let client = accounts.client, !HubTransport.unsupported else { return }
-    _ = try? await Hub.run(reportErrors: false) { try client.statusProbe() }
+  @ObservationIgnored private var retryNow = false
+  @ObservationIgnored private var napping: Task<Void, Never>?
+
+  /// Back in front after being away, or on another network (`Reconnect`): the inbox's wait from before is cut off
+  /// (HubTransport.reconnect) and asked anew at once; a retry wait under way ends now.
+  func reconnect() {
+    retryNow = true
+    napping?.cancel()
+  }
+
+  /// A wait `reconnect` can end early.
+  private func nap(_ seconds: Double) async {
+    let nap = Task<Void, Never> { try? await Task.sleep(for: .seconds(seconds)) }
+    napping = nap
+    await withTaskCancellationHandler { await nap.value } onCancel: { nap.cancel() }
+    napping = nil
   }
 
   /// An extension wrote the shared state (`StateChanged`): its saved Yos and the stored friends, without the hub.
